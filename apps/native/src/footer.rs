@@ -83,7 +83,9 @@ impl StatusCounts {
 
 /// Counts `sessions` by the glyph each shows, `is_unseen` telling whether a
 /// session's finished turn is in the client's unseen set. A plain shell
-/// shows the idle dot whatever the set says, so it is never waiting.
+/// shows the idle dot whatever the set says, so it is never waiting. A
+/// session marked "Don't count as busy" is never working, but still needs
+/// you when it asks.
 #[must_use]
 pub fn status_counts(
     sessions: &[SessionSnapshot],
@@ -93,6 +95,7 @@ pub fn status_counts(
     for session in sessions {
         match glyph(session.status, session.mode, is_unseen(&session.id)).shape {
             Shape::Asking => counts.need_you += 1,
+            Shape::Working if session.busy_excluded => {}
             Shape::Working => counts.working += 1,
             Shape::Waiting => counts.waiting += 1,
             Shape::Idle | Shape::Spawning | Shape::Stopped | Shape::Error => {}
@@ -326,6 +329,34 @@ mod tests {
             counts(&sessions, &["w"]),
             StatusCounts {
                 working: 1,
+                ..StatusCounts::default()
+            }
+        );
+    }
+
+    #[test]
+    fn an_excluded_working_session_is_not_counted_working() {
+        let mut server = agent("server", SessionStatus::Working);
+        server.busy_excluded = true;
+        let sessions = [server, agent("work", SessionStatus::Working)];
+        assert_eq!(
+            counts(&sessions, &["server"]),
+            StatusCounts {
+                working: 1,
+                ..StatusCounts::default()
+            },
+            "only the counted working session is working"
+        );
+    }
+
+    #[test]
+    fn an_excluded_asking_session_still_counts_as_need_you() {
+        let mut ask = agent("ask", SessionStatus::AwaitingInput);
+        ask.busy_excluded = true;
+        assert_eq!(
+            counts(&[ask], &[]),
+            StatusCounts {
+                need_you: 1,
                 ..StatusCounts::default()
             }
         );

@@ -616,7 +616,8 @@ fn is_busy(session: &SessionSnapshot) -> bool {
 
 /// The busy and total live terminals of `tab`, as `(busy, total)`: every
 /// pane holding a session the daemon lists and has not marked inactive
-/// counts, so a session shown in two panes counts twice. `None` for a tab
+/// counts, so a session shown in two panes counts twice. A session marked
+/// "Don't count as busy" counts in total but never in busy. `None` for a tab
 /// that is not a pane grid (a diff tab).
 #[must_use]
 pub fn tab_session_counts(tab: &TabEntry, sessions: &[SessionSnapshot]) -> Option<(usize, usize)> {
@@ -634,7 +635,7 @@ pub fn tab_session_counts(tab: &TabEntry, sessions: &[SessionSnapshot]) -> Optio
             continue;
         }
         total += 1;
-        if is_busy(session) {
+        if is_busy(session) && !session.busy_excluded {
             busy += 1;
         }
     }
@@ -1933,6 +1934,33 @@ pub(crate) mod tests {
         assert_eq!(
             tab_session_counts(&tab("t", &grid), &sessions),
             Some((2, 2))
+        );
+    }
+
+    #[test]
+    fn tab_counts_leave_an_excluded_busy_session_out_of_busy() {
+        let grid = split(H, 0.5, pane("a", Some("server")), pane("b", Some("work")));
+        let mut server = with_status("server", SessionStatus::Working);
+        server.busy_excluded = true;
+        let sessions = [server, with_status("work", SessionStatus::Working)];
+        assert_eq!(
+            tab_session_counts(&tab("t", &grid), &sessions),
+            Some((1, 2)),
+            "the excluded working session leaves busy"
+        );
+    }
+
+    #[test]
+    fn tab_counts_still_count_an_excluded_session_in_total() {
+        let grid = split(H, 0.5, pane("a", Some("ask")), pane("b", Some("idle")));
+        let mut ask = with_status("ask", SessionStatus::AwaitingInput);
+        ask.busy_excluded = true;
+        let mut idle = with_status("idle", SessionStatus::Idle);
+        idle.busy_excluded = true;
+        assert_eq!(
+            tab_session_counts(&tab("t", &grid), &[ask, idle]),
+            Some((0, 2)),
+            "excluded sessions stay in total whatever their status"
         );
     }
 

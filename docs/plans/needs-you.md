@@ -16,7 +16,7 @@ With many sessions open, the only signs that one is waiting are the leaf's amber
 
 ### What counts as needing you
 
-A session is listed when any of these holds, checked in this order (the first match names the row's reason). Parked (`is_inactive`) and abandoned (`is_abandoned`) sessions are never listed: Resume and the Recover dialog own them. Sessions excluded from busy tracking (P4.16) are listed like any other: the exclusion is about busy counts, and its ruling keeps their OS notifications (Q4).
+A session is listed when any of these holds, checked in this order (the first match names the row's reason). Parked (`is_inactive`) and abandoned (`is_abandoned`) sessions are never listed: Resume and the Recover dialog own them. Sessions excluded from busy tracking ("Don't count as busy", `docs/native-client.md`) are listed like any other: the exclusion is about busy counts, and its ruling keeps their OS notifications (Q4).
 
 | Reason | Condition | Source | Leaves the list when |
 | - | - | - | - |

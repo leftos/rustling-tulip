@@ -145,7 +145,7 @@ fn open_accent_menu(h: &mut Harness<'_>, session: &str) {
     h.click_on("session-menu-accent");
     assert!(h.in_model("accent-inherit"), "the submenu is open");
     assert_eq!(
-        h.root(|root, _| root.accent_menu_rows())
+        h.root(|root, _| root.appearance_group_rows())
             .first()
             .map(String::as_str),
         Some("accent-back"),

@@ -144,8 +144,12 @@ fn session_menu_opens_the_editor_with_resolved_hints(cx: &mut TestAppContext) {
 
     h.right_click_on("leaf-s1");
     assert_eq!(
-        h.root(|root, _| root.accent_menu_rows()),
-        ["session-menu-appearance", "session-menu-accent"],
+        h.root(|root, _| root.appearance_group_rows()),
+        [
+            "session-menu-appearance",
+            "session-menu-accent",
+            "session-menu-busy-excluded"
+        ],
         "Appearance… sits right before Accent"
     );
     h.click_on("session-menu-appearance");

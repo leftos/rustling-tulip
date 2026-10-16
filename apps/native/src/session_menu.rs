@@ -23,9 +23,10 @@ use crate::palette::{CHIP, LINE_STRONG, SCRIM};
 use crate::session_actions::{
     ABANDONED_ACTIONS, ActionState, DuplicateTarget, MenuEntry, MenuMode, MoveTarget, OfferedRow,
     PendingPrefill, PlacedFocus, SessionAction, SessionRow, Step, Submenu, SubmenuLine,
-    abandoned_lines, action_state, duplicate_lines, exit_code_label, exited_message,
-    header_shows_exit_code, menu_entries, move_lines, move_source, orphan_banner_text,
-    overlay_actions, pane_shows_exit, plan, rename_message, session_rows, worktree_to_reveal,
+    abandoned_lines, action_state, busy_exclusion_message, busy_row, duplicate_lines,
+    exit_code_label, exited_message, header_shows_exit_code, menu_entries, move_lines, move_source,
+    orphan_banner_text, overlay_actions, pane_shows_exit, plan, rename_message, session_rows,
+    worktree_to_reveal,
 };
 use crate::sidebar::can_attach;
 use crate::spawn_form::{Lock, Prefill, Target};
@@ -309,7 +310,7 @@ impl RootView {
             .into_iter()
             .map(|offered| offered.row.selector().to_owned())
             .collect();
-        [self.menu_rows(), offered, self.accent_menu_rows()]
+        [self.menu_rows(), offered, self.appearance_group_rows()]
             .into_iter()
             .filter(|group| !group.is_empty())
             .collect()
@@ -325,25 +326,39 @@ impl RootView {
     }
 
     /// The label of the row tagged `selector` in the group under the state
-    /// actions.
+    /// actions, or of the busy-exclusion row among the appearance rows.
     #[must_use]
     pub fn menu_row_label(&self, selector: &str) -> Option<&'static str> {
         self.offered_rows()
             .into_iter()
-            .find(|offered| offered.row.selector() == selector)
-            .map(|offered| offered.row.label())
+            .map(|offered| offered.row)
+            .chain(self.busy_menu_row())
+            .find(|row| row.selector() == selector)
+            .map(SessionRow::label)
     }
 
-    /// The selectors of the menu's appearance rows as shown now: the rows
-    /// that open the appearance editor and the Accent submenu under the
-    /// actions, or the submenu's Back, presets, recent colours and Inherit.
+    /// The busy-exclusion row while the appearance rows show under the
+    /// actions (no submenu open).
+    fn busy_menu_row(&self) -> Option<SessionRow> {
+        self.accent_menu()
+            .filter(|menu| menu.submenu == Submenu::None)
+            .and_then(|menu| self.sidebar.session(&menu.session_id))
+            .map(busy_row)
+    }
+
+    /// The selectors of the menu's last group as shown now: under the
+    /// actions, the rows that open the appearance editor and the Accent
+    /// submenu, then the checkable "Don't count as busy"; with the Accent
+    /// submenu open, its Back, presets, recent colours and Inherit.
     #[must_use]
-    pub fn accent_menu_rows(&self) -> Vec<String> {
+    pub fn appearance_group_rows(&self) -> Vec<String> {
         let Some(menu) = self.accent_menu() else {
             return Vec::new();
         };
         if menu.submenu != Submenu::Accent {
-            return vec![APPEARANCE_ROW.to_owned(), ACCENT_ROW.to_owned()];
+            let mut rows = vec![APPEARANCE_ROW.to_owned(), ACCENT_ROW.to_owned()];
+            rows.extend(self.busy_menu_row().map(|row| row.selector().to_owned()));
+            return rows;
         }
         let presets = ACCENT_PRESETS.iter().map(|p| preset_selector(p.name));
         let recent = self
@@ -687,6 +702,10 @@ impl RootView {
                     self.dispatch_open(job, Then::Nothing, window, cx);
                 }
             }
+            SessionRow::BusyExcluded { excluded } => {
+                self.send(busy_exclusion_message(session_id, excluded));
+                self.close_session_menu(window, cx);
+            }
         }
     }
 
@@ -949,6 +968,18 @@ impl RootView {
         .into_any_element()
     }
 
+    /// The checkable "Don't count as busy" row for `session_id`: its ✓
+    /// shows the flag, and a click sends the opposite and closes the menu.
+    fn busy_exclusion_row(session_id: &str, row: SessionRow, cx: &mut Context<Self>) -> AnyElement {
+        let checked = matches!(row, SessionRow::BusyExcluded { excluded: true });
+        let session_id = session_id.to_owned();
+        check_row(row.selector(), row.label(), checked)
+            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                this.choose_row(&session_id, row, window, cx);
+            }))
+            .into_any_element()
+    }
+
     /// A line of a submenu of tabs for `session_id`; a choice runs `pick`,
     /// told whether Shift was held.
     fn submenu_line<T: Clone + 'static>(
@@ -998,11 +1029,16 @@ impl RootView {
             let row = swatch_row(ACCENT_ROW, "Accent ▸", Some(current)).on_click(cx.listener(
                 |this, _: &ClickEvent, window, cx| this.show_submenu(Submenu::Accent, window, cx),
             ));
-            return vec![
+            let mut rows = vec![
                 menu_separator().into_any_element(),
                 editor.into_any_element(),
                 row.into_any_element(),
             ];
+            rows.extend(
+                self.busy_menu_row()
+                    .map(|busy| Self::busy_exclusion_row(session_id, busy, cx)),
+            );
+            return rows;
         }
         let back = swatch_row(BACK_ROW, SUBMENU_BACK, None).on_click(cx.listener(
             |this, _: &ClickEvent, window, cx| this.show_submenu(Submenu::None, window, cx),
@@ -1873,8 +1909,37 @@ pub(crate) fn menu_item(
 /// A clickable menu row with a colour swatch before its label; no swatch
 /// leaves the space empty so the labels line up.
 fn swatch_row(selector: &str, label: &'static str, color: Option<u32>) -> Stateful<Div> {
-    let name = selector.to_owned();
     let swatch = div().flex_none().size(px(12.0)).rounded(px(3.0));
+    slot_row(
+        selector,
+        swatch.when_some(color, |swatch, color| swatch.bg(gpui::rgb(color))),
+        label,
+    )
+}
+
+/// A clickable menu row with a ✓ in the swatch's slot while `checked`,
+/// tagged `<selector>-check`; unchecked leaves the slot empty.
+fn check_row(selector: &str, label: &'static str, checked: bool) -> Stateful<Div> {
+    let check = format!("{selector}-check");
+    let slot = div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .size(px(12.0))
+        .text_size(px(12.0))
+        .line_height(px(12.0));
+    let slot = if checked {
+        slot.debug_selector(|| check).child("✓")
+    } else {
+        slot
+    };
+    slot_row(selector, slot, label)
+}
+
+/// A clickable menu row with `slot` before its label, tagged `selector`.
+fn slot_row(selector: &str, slot: Div, label: &'static str) -> Stateful<Div> {
+    let name = selector.to_owned();
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))
         .debug_selector(|| name)
@@ -1886,7 +1951,7 @@ fn swatch_row(selector: &str, label: &'static str, color: Option<u32>) -> Statef
         .rounded(px(4.0))
         .cursor_pointer()
         .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
-        .child(swatch.when_some(color, |swatch, color| swatch.bg(gpui::rgb(color))))
+        .child(slot)
         .child(label)
 }
 

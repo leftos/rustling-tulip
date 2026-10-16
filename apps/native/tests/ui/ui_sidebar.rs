@@ -23,6 +23,13 @@ fn tree_keys(h: &mut Harness<'_>) -> Vec<String> {
     })
 }
 
+/// Whether the element tagged `selector` has been painted on screen. gpui
+/// keeps the bounds of an element that left the tree, so a `false` only
+/// holds for an element the spec never showed.
+fn painted(h: &mut Harness<'_>, selector: &str) -> bool {
+    h.bounds(selector).origin.x >= px(0.0)
+}
+
 fn saved_ui(dir: &TestDir) -> serde_json::Value {
     let text = std::fs::read_to_string(dir.path().join("native-ui.json")).expect("a saved layout");
     serde_json::from_str(&text).expect("native-ui.json is JSON")
@@ -67,6 +74,46 @@ fn containers_render_workspace_repo_shell_dir_detached_in_order(cx: &mut TestApp
     for id in ["ws", "repo", "sh", "dir", "gone"] {
         assert!(h.in_model(&format!("leaf-{id}")), "leaf {id} is listed");
     }
+}
+
+#[gpui::test]
+fn excluded_leaf_shows_the_marker_and_no_badge(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut excluded = session("s1").in_repo("r1").status("awaiting_input").build();
+    excluded.busy_excluded = true;
+    let fixture = Fixture {
+        repos: vec![repo("r1", "D:/src/r1")],
+        sessions: vec![
+            excluded,
+            session("s2").in_repo("r1").status("awaiting_input").build(),
+        ],
+        tabs: vec![tab("t1", &pane("p1", None))],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    for id in ["s1", "s2"] {
+        h.send(DaemonMessage::Attention {
+            session_id: id.to_owned(),
+            reason: AttentionReason::AwaitingInput,
+        });
+    }
+
+    assert!(
+        painted(&mut h, "leaf-busy-excluded-s1"),
+        "the excluded leaf's marker"
+    );
+    assert!(
+        !painted(&mut h, "leaf-badge-s1"),
+        "no `!` on the excluded leaf"
+    );
+    assert!(
+        painted(&mut h, "leaf-badge-s2"),
+        "the counted leaf keeps its `!`"
+    );
+    assert!(
+        !painted(&mut h, "leaf-busy-excluded-s2"),
+        "and has no marker"
+    );
 }
 
 #[gpui::test]

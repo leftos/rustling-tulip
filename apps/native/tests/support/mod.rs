@@ -89,7 +89,7 @@ fn sc_picker_shown(root: &RootView) -> bool {
 fn session_menu_part_shown(root: &RootView, selector: &str) -> Option<bool> {
     let selector = selector.to_owned();
     let shown = if selector == "session-menu-accent" || selector.starts_with("accent-") {
-        root.accent_menu_rows().contains(&selector)
+        root.appearance_group_rows().contains(&selector)
     } else if selector == "session-menu" {
         root.session_menu().is_some()
     } else if selector.starts_with("menu-") {

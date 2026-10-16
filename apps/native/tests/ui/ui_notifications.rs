@@ -50,6 +50,22 @@ fn awaiting_input_attention_notifies_with_label(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn an_excluded_session_still_notifies(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut excluded = session("s1").user_label("dev server").build();
+    excluded.busy_excluded = true;
+    let mut h = Harness::with(cx, &dir, &Fixture::single(excluded));
+    h.answer_scrollback("s1", b"");
+    h.sent();
+    h.send(attention("s1", AttentionReason::AwaitingInput));
+    assert_eq!(
+        h.notified(),
+        [shown("Claude is awaiting input", "dev server")],
+        "\"Don't count as busy\" leaves OS notifications alone"
+    );
+}
+
+#[gpui::test]
 fn stopped_attention_respects_toggle(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     std::fs::write(

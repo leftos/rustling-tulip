@@ -77,7 +77,7 @@ Speech runs in the **native client**: it has the audio device and knows whether 
 - **Queue**: alerts wait 1.5 s after the first arrives, then speak in order. A newer alert for the same session replaces its unspoken one. Three or more waiting at speak time become one line: "Three sessions are waiting: tulip, acorn and docs." An alert is dropped unspoken if its session has run again or been removed since.
 - **Presence**: nothing is spoken for a session whose pane is focused in the foreground window with a keystroke in the last 30 s.
 - **Toasts (P4.3)**: an `Attention` carrying `alert_id` holds its toast until the matching `WaitingAlert` (up to 10 s), then shows it titled with the prefix and the kind ("tulip needs your answer") and the alert's `notification` as body, filtered by `awaiting_input` and the kind's `toast` toggle. Without `alert_id`, or on the timeout, the toast is as today.
-- **P4.16 (Don't count as busy)**: no effect. Its ruling keeps OS notifications for excluded sessions, and alerts follow the same line; an always-busy session is usually a plain shell with no hook events anyway.
+- **Busy exclusion (Don't count as busy, `docs/native-client.md`)**: no effect. Its ruling keeps OS notifications for excluded sessions, and alerts follow the same line; an always-busy session is usually a plain shell with no hook events anyway.
 
 ### Settings UI
 

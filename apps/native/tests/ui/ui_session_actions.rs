@@ -156,6 +156,96 @@ fn rename_from_menu_sends_rename_and_blank_restores_default(cx: &mut TestAppCont
 }
 
 #[gpui::test]
+fn menu_busy_exclusion_row_sends_the_toggle(cx: &mut TestAppContext) {
+    const ROW: &str = "session-menu-busy-excluded";
+    const CHECK: &str = "session-menu-busy-excluded-check";
+    let dir = TestDir::new();
+    let mut h = single(cx, &dir, session("s1").build());
+
+    h.right_click_on("leaf-s1");
+    let shown = groups(&mut h);
+    assert_eq!(
+        shown.last().map(Vec::as_slice),
+        Some(&["session-menu-appearance", "session-menu-accent", ROW].map(str::to_owned)[..]),
+        "the row closes the Appearance/Accent group"
+    );
+    assert_eq!(
+        h.root(|root, _| root.menu_row_label(ROW)),
+        Some("Don't count as busy")
+    );
+    assert!(!painted(&mut h, CHECK), "no check while the session counts");
+    h.click_on(ROW);
+    let sent = h.sent();
+    assert!(
+        matches!(sent.as_slice(), [ClientMessage::SetSessionBusyExcluded { session_id, excluded: true }]
+            if session_id == "s1"),
+        "sent {sent:?}"
+    );
+    assert_eq!(menu_of(&mut h), None, "the choice closes the menu");
+
+    let mut excluded = session("s1").build();
+    excluded.busy_excluded = true;
+    h.send(updated(excluded, None));
+    h.right_click_on("leaf-s1");
+    assert!(painted(&mut h, CHECK), "checked once the daemon says so");
+    h.click_on(ROW);
+    let sent = h.sent();
+    assert!(
+        matches!(sent.as_slice(), [ClientMessage::SetSessionBusyExcluded { session_id, excluded: false }]
+            if session_id == "s1"),
+        "a checked row clears the flag: sent {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn menu_offers_the_busy_row_in_every_state(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = unplaced(
+        cx,
+        &dir,
+        vec![
+            session("live").build(),
+            session("stopped").status("stopped").build(),
+            session("parked").worktree("r1").inactive().build(),
+            session("gone").abandoned().build(),
+            session("kick").headless().build(),
+        ],
+    );
+
+    for id in ["live", "stopped", "parked", "gone", "kick"] {
+        h.right_click_on(&format!("leaf-{id}"));
+        assert_eq!(menu_of(&mut h).as_deref(), Some(id), "the menu is open");
+        let shown = groups(&mut h);
+        assert_eq!(
+            shown
+                .last()
+                .and_then(|group| group.last())
+                .map(String::as_str),
+            Some("session-menu-busy-excluded"),
+            "{id}: the row closes the appearance group: {shown:?}"
+        );
+        h.keys("escape");
+    }
+}
+
+#[gpui::test]
+fn resume_carries_the_busy_exclusion(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut parked = session("s1").worktree("r1").inactive().build();
+    parked.busy_excluded = true;
+    let mut h = unplaced(cx, &dir, vec![parked]);
+
+    h.right_click_on("leaf-s1");
+    h.click_on("menu-resume");
+    let sent = h.sent();
+    assert!(
+        matches!(sent.as_slice(), [ClientMessage::DuplicateSession { session_id, carry_busy_excluded: true, .. }]
+            if session_id == "s1"),
+        "Resume keeps \"Don't count as busy\": sent {sent:?}"
+    );
+}
+
+#[gpui::test]
 fn menu_stop_keep_worktree_sends_stop_session(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = single(cx, &dir, session("s1").worktree("r1").build());
@@ -774,7 +864,11 @@ fn open_duplicate(h: &mut Harness<'_>, leaf: &str) {
     h.click_on("session-menu-duplicate");
 }
 
-const APPEARANCE_GROUP: [&str; 2] = ["session-menu-appearance", "session-menu-accent"];
+const APPEARANCE_GROUP: [&str; 3] = [
+    "session-menu-appearance",
+    "session-menu-accent",
+    "session-menu-busy-excluded",
+];
 
 #[gpui::test]
 fn duplicate_new_tab_sends_duplicate_then_create_tab(cx: &mut TestAppContext) {
@@ -1047,7 +1141,7 @@ fn duplicate_lists_new_tab_then_grid_tabs_only(cx: &mut TestAppContext) {
         "the submenu replaces the state actions"
     );
     assert!(
-        h.root(|root, _| root.accent_menu_rows()).is_empty(),
+        h.root(|root, _| root.appearance_group_rows()).is_empty(),
         "and the appearance rows"
     );
     assert!(h.sent().is_empty(), "opening the submenu sends nothing");

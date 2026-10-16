@@ -95,8 +95,9 @@ pub(crate) enum Submenu {
     MoveTo,
 }
 
-/// A row of the menu's group between the state actions and the appearance
-/// rows.
+/// A per-session row of the menu below the state actions: one of the group
+/// between them and the appearance rows, or the busy-exclusion row among
+/// the appearance rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SessionRow {
     /// "Duplicate ▸", which opens the Duplicate submenu.
@@ -112,6 +113,10 @@ pub(crate) enum SessionRow {
     AddToNewTab,
     /// Opens the folder of the session's own worktree.
     RevealWorktree,
+    /// The checkable "Don't count as busy", among the appearance rows and
+    /// offered in every state; `excluded` is the session's flag, which its
+    /// check shows.
+    BusyExcluded { excluded: bool },
 }
 
 /// Where Move to ▸ moves a pane showing the session.
@@ -603,6 +608,7 @@ impl SessionRow {
             Self::AddToCurrentTab { .. } => "session-menu-add-current",
             Self::AddToNewTab => "session-menu-add-new",
             Self::RevealWorktree => "session-menu-reveal",
+            Self::BusyExcluded { .. } => "session-menu-busy-excluded",
         }
     }
 
@@ -613,7 +619,25 @@ impl SessionRow {
             Self::AddToCurrentTab { new_tab: false } => "Add to current tab",
             Self::AddToCurrentTab { new_tab: true } | Self::AddToNewTab => "Add to new tab",
             Self::RevealWorktree => "Reveal worktree",
+            Self::BusyExcluded { .. } => "Don't count as busy",
         }
+    }
+}
+
+/// The busy-exclusion row `session` offers, in every state, checked while
+/// the session does not count as busy.
+pub(crate) fn busy_row(session: &SessionSnapshot) -> SessionRow {
+    SessionRow::BusyExcluded {
+        excluded: session.busy_excluded,
+    }
+}
+
+/// What choosing the busy-exclusion row of `session_id` sends: the flag's
+/// opposite of `excluded`, its value now.
+pub(crate) fn busy_exclusion_message(session_id: &str, excluded: bool) -> ClientMessage {
+    ClientMessage::SetSessionBusyExcluded {
+        session_id: session_id.to_owned(),
+        excluded: !excluded,
     }
 }
 
@@ -761,14 +785,16 @@ impl HeaderStopConfirm {
 impl Duplicates {
     /// Records a duplicate of `session_id` to `target` under `request_id`
     /// and returns the request to send; `None` for a restart while one of
-    /// the session is on the way.
+    /// the session is on the way. A restart or resume keeps the session's
+    /// "Don't count as busy"; a copy starts counted.
     pub(crate) fn request(
         &mut self,
         session_id: &str,
         request_id: String,
         target: DuplicateTarget,
     ) -> Option<ClientMessage> {
-        if target == DuplicateTarget::Restart && self.is_pending(session_id) {
+        let restart = target == DuplicateTarget::Restart;
+        if restart && self.is_pending(session_id) {
             return None;
         }
         self.pending.insert(
@@ -781,7 +807,7 @@ impl Duplicates {
         Some(ClientMessage::DuplicateSession {
             session_id: session_id.to_owned(),
             request_id: Some(request_id),
-            carry_busy_excluded: false,
+            carry_busy_excluded: restart,
         })
     }
 
@@ -894,10 +920,10 @@ mod tests {
     use super::{
         ActionState, DuplicateTarget, Duplicates, HEADLESS_DUPLICATE_TIP, HeaderStopConfirm,
         MenuEntry, MenuMode, MoveTarget, OfferedRow, PendingPrefill, PlacedFocus, Prefills,
-        SessionAction, SessionRow, Step, SubmenuLine, action_state, exit_code_label,
-        exited_message, header_shows_exit_code, menu_actions, menu_entries, move_lines,
-        move_source, overlay_actions, pane_shows_exit, plan, rename_message, self_exited,
-        session_rows, worktree_to_reveal,
+        SessionAction, SessionRow, Step, SubmenuLine, action_state, busy_exclusion_message,
+        busy_row, exit_code_label, exited_message, header_shows_exit_code, menu_actions,
+        menu_entries, move_lines, move_source, overlay_actions, pane_shows_exit, plan,
+        rename_message, self_exited, session_rows, worktree_to_reveal,
     };
     use crate::spawn_form::{OpenChoice, Target};
     use crate::tabs::TabsModel;
@@ -950,6 +976,72 @@ mod tests {
         let mut s = session("stopped");
         s.exit_code = Some(0);
         s
+    }
+
+    /// Whether a duplicate of `s1` to `target` carries the busy exclusion.
+    fn carries_busy_exclusion(target: DuplicateTarget) -> bool {
+        let mut dups = Duplicates::default();
+        match dups.request("s1", "req-1".to_owned(), target) {
+            Some(ClientMessage::DuplicateSession {
+                carry_busy_excluded,
+                ..
+            }) => carry_busy_excluded,
+            other => panic!("expected a DuplicateSession, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn restart_and_resume_carry_the_busy_exclusion() {
+        for action in [A::Restart, A::Resume] {
+            assert!(
+                matches!(plan(action, &session("stopped"), true), Step::Duplicate),
+                "{action:?} duplicates in the original's place"
+            );
+        }
+        assert!(carries_busy_exclusion(DuplicateTarget::Restart));
+    }
+
+    #[test]
+    fn duplicate_does_not_carry_the_busy_exclusion() {
+        assert!(!carries_busy_exclusion(DuplicateTarget::NewTab));
+        assert!(!carries_busy_exclusion(DuplicateTarget::Tab(
+            "t2".to_owned()
+        )));
+    }
+
+    #[test]
+    fn busy_row_carries_the_session_flag_in_every_state() {
+        let mut headless = session("idle");
+        headless.mode = SessionMode::Headless;
+        let states = [
+            session("working"),
+            session("awaiting_input"),
+            session("stopped"),
+            inactive(with_worktree(session("stopped"))),
+            abandoned(),
+            headless,
+        ];
+        for mut s in states {
+            for excluded in [false, true] {
+                s.busy_excluded = excluded;
+                let row = busy_row(&s);
+                assert_eq!(row, SessionRow::BusyExcluded { excluded }, "{s:?}");
+                assert_eq!(row.label(), "Don't count as busy");
+                assert_eq!(row.selector(), "session-menu-busy-excluded");
+            }
+        }
+    }
+
+    #[test]
+    fn choosing_the_busy_row_sends_the_opposite_value() {
+        for excluded in [false, true] {
+            let msg = busy_exclusion_message("s1", excluded);
+            assert!(
+                matches!(&msg, ClientMessage::SetSessionBusyExcluded { session_id, excluded: sent }
+                    if session_id == "s1" && *sent != excluded),
+                "from {excluded}: {msg:?}"
+            );
+        }
     }
 
     #[test]

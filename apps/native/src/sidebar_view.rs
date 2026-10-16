@@ -31,9 +31,9 @@ use crate::status_glyph::{GlyphSize, glyph, glyph_view};
 use crate::tabs::{TabPill, tab_pills};
 use crate::{Drag, HOVER_BG, MUTED, PANEL_BG, RootView, TEXT, UI_TEXT_SIZE, drag_handle, tooltip};
 use gpui::{
-    AnyElement, ClickEvent, Context, Corner, Div, FontWeight, MouseButton, MouseDownEvent,
-    SharedString, Stateful, StyledText, Svg, TextRun, Window, anchored, deferred, div, font, point,
-    prelude::*, px, svg,
+    AnyElement, Bounds, ClickEvent, Context, Corner, Corners, Div, FontWeight, MouseButton,
+    MouseDownEvent, PathBuilder, Pixels, SharedString, Stateful, StyledText, Svg, TextRun, Window,
+    anchored, canvas, deferred, div, font, point, prelude::*, px, svg,
 };
 use protocol::{Agent, SessionMode, SessionStatus};
 
@@ -1004,7 +1004,8 @@ fn leaf_frame(
 }
 
 /// The label line's start: the status glyph, the label (dimmed once an
-/// idle session's turn has been seen), the `!` badge and the runtime tag.
+/// idle session's turn has been seen), the `!` badge or, on a session that
+/// does not count as busy, its marker, and the runtime tag.
 fn label_head(leaf: &Leaf) -> Vec<AnyElement> {
     let seen_idle = leaf.status == SessionStatus::Idle && !leaf.unseen;
     let mut parts = vec![
@@ -1023,8 +1024,11 @@ fn label_head(leaf: &Leaf) -> Vec<AnyElement> {
         .text_color(gpui::rgb(if seen_idle { TEXT_2 } else { TEXT }))
         .into_any_element(),
     ];
-    if leaf.attention {
+    if leaf.shows_attention() {
         parts.push(container_badge(format!("leaf-badge-{}", leaf.id)).into_any_element());
+    }
+    if leaf.busy_excluded {
+        parts.push(busy_excluded_marker(&leaf.id));
     }
     if let Some((text, tip)) = leaf.runtime_tag() {
         parts.push(
@@ -1040,6 +1044,69 @@ fn label_head(leaf: &Leaf) -> Vec<AnyElement> {
         );
     }
     parts
+}
+
+/// The hover text of an excluded leaf's marker.
+const BUSY_EXCLUDED_TIP: &str = "Not counted as busy";
+/// The marker's box and stroke, in px.
+const BUSY_EXCLUDED_SIZE: f32 = 12.0;
+const BUSY_EXCLUDED_STROKE: f32 = 1.2;
+/// The marker's strokes in its 12 px box: a pulse line, cut where the slash
+/// crosses it so the slash reads on top, then the slash.
+const BUSY_EXCLUDED_STROKES: [&[(f32, f32)]; 3] = [
+    &[(0.8, 6.5), (3.0, 6.5), (4.5, 3.2), (5.04, 4.79)],
+    &[(6.2, 8.21), (6.6, 9.4), (8.0, 6.5), (11.2, 6.5)],
+    &[(2.2, 11.0), (9.8, 1.0)],
+];
+
+/// The muted crossed-out pulse an excluded leaf wears in the `!` badge's
+/// slot.
+fn busy_excluded_marker(id: &str) -> AnyElement {
+    let selector = format!("leaf-busy-excluded-{id}");
+    div()
+        .id(SharedString::from(selector.clone()))
+        .debug_selector(|| selector)
+        .flex_none()
+        .size(px(BUSY_EXCLUDED_SIZE))
+        .child(
+            canvas(
+                |_, _, _| {},
+                |bounds, (), window, _| paint_busy_excluded(bounds, window),
+            )
+            .size_full(),
+        )
+        .tooltip(tooltip(BUSY_EXCLUDED_TIP))
+        .into_any_element()
+}
+
+fn paint_busy_excluded(bounds: Bounds<Pixels>, window: &mut Window) {
+    for stroke in BUSY_EXCLUDED_STROKES {
+        let mut path = PathBuilder::stroke(px(BUSY_EXCLUDED_STROKE));
+        for (i, &(x, y)) in stroke.iter().enumerate() {
+            let at = bounds.origin + point(px(x), px(y));
+            if i == 0 {
+                path.move_to(at);
+            } else {
+                path.line_to(at);
+            }
+        }
+        match path.build() {
+            Ok(path) => window.paint_path(path, gpui::rgb(SUBTLE)),
+            Err(err) => tracing::warn!("the busy-excluded marker's stroke did not build: {err:?}"),
+        }
+        // gpui does not expose lyon's line caps and joins; a dot of the
+        // stroke's width on every point draws them round.
+        for &(x, y) in stroke {
+            let dot = Bounds::centered_at(
+                bounds.origin + point(px(x), px(y)),
+                gpui::size(px(BUSY_EXCLUDED_STROKE), px(BUSY_EXCLUDED_STROKE)),
+            );
+            window.paint_quad(
+                gpui::fill(dot, gpui::rgb(SUBTLE))
+                    .corner_radii(Corners::all(px(BUSY_EXCLUDED_STROKE / 2.0))),
+            );
+        }
+    }
 }
 
 /// The runtime tag's colour: the agent's, or [`SUBTLE`] for a shell's

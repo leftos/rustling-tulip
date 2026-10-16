@@ -89,6 +89,10 @@ pub enum LeafDensity {
 
 /// One session row.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent per-session marks the row draws, not a state machine"
+)]
 pub struct Leaf {
     pub id: String,
     pub status: SessionStatus,
@@ -99,7 +103,11 @@ pub struct Leaf {
     /// branches, or a shell's folder.
     pub subline: Option<String>,
     pub runtime: Option<String>,
+    /// The session is in the attention set; Needs You reads this raw value,
+    /// the `!` badge reads [`Leaf::shows_attention`].
     pub attention: bool,
+    /// The session is marked "Don't count as busy".
+    pub busy_excluded: bool,
     /// The agent's last turn ended while this client looked elsewhere.
     pub unseen: bool,
     pub state: LeafState,
@@ -176,6 +184,13 @@ impl LeafState {
 }
 
 impl Leaf {
+    /// Whether the leaf wears the `!` badge and rolls it up to its
+    /// container: it needs attention and counts as busy.
+    #[must_use]
+    pub fn shows_attention(&self) -> bool {
+        self.attention && !self.busy_excluded
+    }
+
     /// The row's tags as text and hover text: the runtime, then the
     /// orphan, abandoned or parked state.
     #[must_use]
@@ -223,7 +238,7 @@ pub struct Container {
     /// The row's hover text, when it has one.
     pub hover: Option<String>,
     pub leaves: Vec<Leaf>,
-    /// Any leaf has attention.
+    /// Any leaf shows attention ([`Leaf::shows_attention`]).
     pub attention: bool,
     pub collapsed: bool,
 }
@@ -1156,7 +1171,7 @@ fn container(
     let key = container_key(kind, id);
     Container {
         collapsed: inputs.collapsed.contains(&key),
-        attention: leaves.iter().any(|l| l.attention),
+        attention: leaves.iter().any(Leaf::shows_attention),
         key,
         id: id.to_owned(),
         kind,
@@ -1187,6 +1202,7 @@ fn leaf(
         subline: subline(s, HOME.as_deref(), tabs_view),
         runtime: runtime_label(s),
         attention: attention.contains(&s.id),
+        busy_excluded: s.busy_excluded,
         unseen: unseen.contains(&s.id),
         state: LeafState::of(s),
         trusted: s.elevated_authority,
@@ -1280,7 +1296,7 @@ fn tab_view_container(
     };
     Container {
         collapsed: collapsed.contains(&key),
-        attention: leaves.iter().any(|l| l.attention),
+        attention: leaves.iter().any(Leaf::shows_attention),
         key,
         id: id.to_owned(),
         kind,
@@ -2154,6 +2170,53 @@ mod tests {
             });
             assert_eq!(attention_of(&model, "a"), !cleared, "status {status:?}");
         }
+    }
+
+    fn excluded_in_repo(id: &str) -> SessionSnapshot {
+        let mut s = in_repo(id, "r1");
+        s.busy_excluded = true;
+        s
+    }
+
+    #[test]
+    fn an_excluded_session_leaf_has_no_attention_highlight() {
+        let mut model = model_with(vec![excluded_in_repo("a")]);
+        flag(&mut model, "a");
+        let leaf = model
+            .containers()
+            .into_iter()
+            .flat_map(|c| c.leaves)
+            .find(|l| l.id == "a")
+            .expect("a is listed");
+        assert!(leaf.busy_excluded, "the leaf carries the flag");
+        assert!(leaf.attention, "the raw attention stays for Needs You");
+        assert!(!leaf.shows_attention(), "no `!` on an excluded leaf");
+    }
+
+    #[test]
+    fn an_excluded_leaf_does_not_roll_attention_up_to_its_container() {
+        let mut model = model_with(vec![excluded_in_repo("a"), in_repo("b", "r1")]);
+        flag(&mut model, "a");
+        let rolled = |m: &SidebarModel| m.containers().first().is_some_and(|c| c.attention);
+        assert!(!rolled(&model), "the excluded leaf's attention stays put");
+        flag(&mut model, "b");
+        assert!(rolled(&model), "a counted leaf still rolls up");
+
+        let mut excluded = session("s1");
+        excluded.busy_excluded = true;
+        let tabs = [tab("t1", &pane("p1", Some("s1")))];
+        let attention: HashSet<String> = ["s1".to_owned()].into();
+        let tree = build_tab_containers(
+            &tabs,
+            &[excluded],
+            &attention,
+            &HashSet::new(),
+            &BTreeSet::new(),
+        );
+        assert!(
+            tree.iter().all(|c| !c.attention),
+            "the tab container skips it too"
+        );
     }
 
     #[test]

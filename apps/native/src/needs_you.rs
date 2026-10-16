@@ -259,6 +259,26 @@ mod tests {
     }
 
     #[test]
+    fn an_excluded_ended_session_is_still_listed() {
+        let mut excluded = ended("s1", SessionStatus::Error, None);
+        excluded.busy_excluded = true;
+        let mut model = list(vec![excluded]);
+        attend(&mut model, "s1");
+        let listed = rows(&model);
+        assert_eq!(ids(&listed), ["s1"]);
+        assert_eq!(listed[0].reason, Reason::Ended);
+    }
+
+    #[test]
+    fn an_excluded_asking_session_is_still_listed() {
+        let mut excluded = asking("s1");
+        excluded.busy_excluded = true;
+        let listed = rows(&list(vec![excluded]));
+        assert_eq!(ids(&listed), ["s1"]);
+        assert_eq!(listed[0].reason, Reason::Asking);
+    }
+
+    #[test]
     fn stopped_without_attention_is_not_listed() {
         let model = list(vec![ended("s1", SessionStatus::Stopped, Some(0))]);
         assert_eq!(rows(&model), [] as [crate::needs_you::NeedsYouRow; 0]);

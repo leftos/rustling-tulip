@@ -6,8 +6,7 @@ The rulings the native client's open items need before they are briefed. Each it
 
 - **Landing:** each item is committed to `main` as soon as it is green, and pushed at checkpoints (a finished wave), not after every item.
 - **Autonomy:** drive the native client to done without stopping between items or waves. Technical decisions are settled in the session and recorded here as rulings; only questions about behaviour the user will see go to the user. Phases 5 and 6 are split into brief-sized items from their parity sections when their wave comes up, and the split goes to the user before anything is dispatched.
-- **Phase 4 scope:** its named features plus every parity line not claimed by Phase 5 (drag-and-drop, pop-outs) or Phase 6 (remote). Every item mounts into `RootView` (`lib.rs`), so concurrent items rebase onto `main` before landing. Concurrency ceiling 3. Dependencies: P4.11c → P4.15b (the launch path). P4.12c builds on the spawn form's target lock (`spawn_form.rs` `Lock`: a locked target plus an optional pinned worktree and `share_confirmed`), which P4.4b added for "Launch session here". P4.16 changes the counts P4.2, P4.3 and P4.13a built, all landed.
-
+- **Phase 4 scope:** its named features plus every parity line not claimed by Phase 5 (drag-and-drop, pop-outs) or Phase 6 (remote). Every item mounts into `RootView` (`lib.rs`), so concurrent items rebase onto `main` before landing. Concurrency ceiling 3. Dependencies: P4.11c → P4.15b (the launch path). P4.12c builds on the spawn form's target lock (`spawn_form.rs` `Lock`: a locked target plus an optional pinned worktree and `share_confirmed`), which P4.4b added for "Launch session here".
 ## P4.10 and P4.11: repos, workspaces and containers
 
 Split (user) into seven items, landing on `main` in this order: P4.10a (landed; its rulings are in [docs/native-client.md](../native-client.md)) → P4.10b ∥ P4.11a → P4.10c → P4.10d ∥ P4.11b → P4.11c. Every daemon message they use exists (`AddRepo`, `RemoveRepo`, `UpsertWorkspace`, `RemoveWorkspace`, `ResumeAllAbandoned`, `ScanVscodeWorkspaces`, `ParseVscodeWorkspace`, `AcceptVscodeWorkspaceSuggestion`, `VscodeWorkspaceSuggestion`, `VscodeWorkspaceParsed`, `SuggestBranchName`, `StopSession`), so none touches `crates/protocol/src/lib.rs`. `sidebar_view.rs` and `session_menu.rs` are shared, so two run at once at most. The Tauri app on the `tauri-last` tag (`apps/tauri-app/src/components/Sidebar.tsx`, `RepoRemoveDialog.tsx`, `VscodeSuggestionToast.tsx`, `App.tsx` 1312–1375) settles any behaviour not ruled here.
@@ -33,10 +32,6 @@ Items:
 ## P4.15 Preset wizard
 
 Split in two. **P4.15a** sources (file, folder, inline, GitHub issue ranges) and variables (toggle, file, folder, text, required). **P4.15b** preview (grouped by tab, max panes per tab, script commands) and launching (progress, counts, Cancel, Select launched, Stop all), sticky progress and failure toasts one per job, the first tab created made active, preset-launched sessions highlighted; needs P4.11c. Parity: "Preset wizard", "Sticky preset progress…", "Preset-launched sessions highlighted".
-
-## P4.16 Exclude a session from busy tracking
-
-New, not a parity line. A per-session setting so a session that is always busy (a dev server, a watcher) stops counting as busy. Rulings (user): an excluded session leaves the window title's M, the tab's busy badge and the leaf's attention highlight; it still sends OS notifications. The flag lives on the daemon's session, like the appearance overrides, as an additive `#[serde(default)]` protocol field, so every client sees it. Resume and session recovery keep it; Duplicate does not. It is toggled by a checkable "Don't count as busy" item in the session menu, and an excluded leaf carries a small muted marker.
 
 ## P4.17 Keep an untouched layout when panes come and go
 
