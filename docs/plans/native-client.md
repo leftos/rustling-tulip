@@ -41,9 +41,9 @@ Rulings (user): the "untouched since picked" flag is per client, since two clien
 
 A picked grid keeps its column count as panes come and go (3 columns plus a 4th pane is 3 + 1); a pick of the automatic count (the Rearrange shortcut, the chooser's best fit) re-picks it for the new pane count (mock: [canvases/rt-13-grid-cols](./canvases/rt-13-grid-cols/index.html)).
 
-Orchestrator decisions (not owner rulings), from the code map: the flag is `TabEntry.picked_layout: Option<RearrangeLayout>` (`#[serde(default)]`, additive, also read by `TabEntry`'s hand-written deserializer), held and applied in the daemon, which owns the layouts (`crates/daemon/src/tabs.rs`, the `server.rs` tab handlers); the client changes nothing. Only `RearrangeTab` sets it, which covers both pickers; `SetPaneRatio` (a divider drag) and any same-tab `MovePane` clear it.
+Orchestrator decisions (not owner rulings), from the code map: the flag is `TabEntry.picked_layout: Option<RearrangeLayout>` (`#[serde(default)]`, additive, also read by `TabEntry`'s hand-written deserializer), held and applied in the daemon, which owns the layouts (`crates/daemon/src/tabs.rs`, the `server.rs` tab handlers); the client changes nothing. `RearrangeTab` and `ExtractToNewTab` with a layout set it (Rearrange ▸, the chooser's first tab and its overflow tabs, and Move panes to a new tab, whose dialog picks a layout); `SetPaneRatio` (a divider drag) and any same-tab `MovePane` clear it.
 
-Every pane add or removal on a flagged tab rebuilds it: `SplitPane`, `ClosePane`, `close_session_panes` (each client's tabs separately), the source of `ExtractToNewTab` and of a cross-tab `MovePane`, and the destination of a cross-tab `MovePane`. `MergeTabs`, preset-launched tabs and Move panes to a new tab leave it unset.
+Every pane add or removal on a flagged tab rebuilds it: `SplitPane`, `ClosePane`, `close_session_panes` (each client's tabs separately), the source of `ExtractToNewTab` and of a cross-tab `MovePane`, and the destination of a cross-tab `MovePane`. `MergeTabs`, `CreateTab` and preset-launched tabs leave it unset.
 
 Undo snapshots and cloned layouts carry it as is. A rebuild keeps unbound (empty) panes and the panes' current order, so a spawned pane lands where the split put it. Nothing in the UI shows the flag.
 
