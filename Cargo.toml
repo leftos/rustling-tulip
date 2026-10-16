@@ -36,6 +36,7 @@ mdns-sd = "0.20"
 protocol = { path = "crates/protocol" }
 tracer-protocol = { path = "crates/tracer-protocol" }
 daemon-client = { path = "crates/daemon-client" }
+tailnet = { path = "crates/tailnet" }
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }

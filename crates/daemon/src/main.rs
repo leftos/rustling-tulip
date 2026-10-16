@@ -43,6 +43,8 @@ mod spawn_plan;
 mod state;
 mod sync;
 mod tabs;
+#[expect(dead_code, reason = "wired by TS.3 (RT-161)")]
+mod tailnet_listener;
 mod termstate;
 mod tracer_client;
 mod tracer_log;

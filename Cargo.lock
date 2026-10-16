@@ -1588,6 +1588,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "sysinfo 0.32.1",
+ "tailnet",
  "thiserror 2.0.18",
  "tokio",
  "tokio-rustls",

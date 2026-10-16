@@ -2,6 +2,7 @@
 
 use anyhow::{Context as _, anyhow};
 use directories::ProjectDirs;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
@@ -158,6 +159,28 @@ mod dir_tests {
             out.display()
         );
     }
+
+    #[test]
+    fn tailnet_dir_is_data_local_and_honours_the_override() {
+        let data_local = std::env::temp_dir().join("rt-data-local");
+        let override_dir = std::env::temp_dir().join("rt-e2e-tailnet");
+        let from_data_local = || Ok(data_local.clone());
+        assert_eq!(
+            tailnet_dir_from(None, from_data_local).expect("resolve without override"),
+            data_local.join("tailnet")
+        );
+        assert_eq!(
+            tailnet_dir_from(Some(OsStr::new("")), from_data_local)
+                .expect("resolve empty override"),
+            data_local.join("tailnet"),
+            "an empty override falls back to the data-local dir"
+        );
+        assert_eq!(
+            tailnet_dir_from(Some(override_dir.as_os_str()), from_data_local)
+                .expect("resolve override"),
+            override_dir
+        );
+    }
 }
 
 #[cfg(all(test, windows))]
@@ -237,6 +260,43 @@ impl Dirs {
     #[must_use]
     pub fn history_dir(&self) -> PathBuf {
         self.config.join("history")
+    }
+
+    /// The tailnet listener's certificate dir (see [`resolve_tailnet_dir`]),
+    /// created if missing.
+    #[expect(dead_code, reason = "wired by TS.3 (RT-161)")]
+    pub fn ensure_tailnet_dir() -> anyhow::Result<PathBuf> {
+        let dir = resolve_tailnet_dir()?;
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("creating tailnet dir {}", dir.display()))?;
+        Ok(dir)
+    }
+}
+
+/// Resolve the tailnet listener's certificate dir, honoring
+/// `RUSTLING_TULIP_TAILNET_DIR` when set (used by e2e isolation). Falls back
+/// to `<data_local>/leftos/rustling-tulip/data/tailnet/`: the private key
+/// `tailscale cert` writes stays machine-local and never roams.
+#[expect(dead_code, reason = "wired by TS.3 (RT-161)")]
+pub fn resolve_tailnet_dir() -> anyhow::Result<PathBuf> {
+    let override_dir = std::env::var_os("RUSTLING_TULIP_TAILNET_DIR");
+    tailnet_dir_from(override_dir.as_deref(), || {
+        let pd = ProjectDirs::from("dev", "leftos", "rustling-tulip")
+            .ok_or_else(|| anyhow!("could not resolve tailnet directory"))?;
+        Ok(pd.data_local_dir().to_path_buf())
+    })
+}
+
+/// The tailnet dir an override value names, else `tailnet` under the
+/// data-local dir. An empty override counts as unset.
+#[cfg_attr(not(test), expect(dead_code, reason = "wired by TS.3 (RT-161)"))]
+fn tailnet_dir_from(
+    override_dir: Option<&OsStr>,
+    data_local: impl FnOnce() -> anyhow::Result<PathBuf>,
+) -> anyhow::Result<PathBuf> {
+    match override_dir {
+        Some(dir) if !dir.is_empty() => Ok(PathBuf::from(dir)),
+        _ => Ok(data_local()?.join("tailnet")),
     }
 }
 
