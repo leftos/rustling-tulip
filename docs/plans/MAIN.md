@@ -6,8 +6,9 @@
 
 - [ ] RT-3 Run Claude sessions on DeepSeek as a per-session Claude provider
   - [/] RT-5 DK.3b, DK.5–DK.13: provider capability, spawn environment, dialog and chip
-  - [ ] RT-175 Don't seal an env row the DeepSeek provider removes from the child
+  - [!] RT-175 Don't seal an env row the DeepSeek provider removes from the child
 - [ ] RT-6 Merge feat/deepseek-sessions (#8)
+- [ ] RT-176 Import a DeepSeek session started with a model alias as DeepSeek
 
 ## Wave 1c — Session labels, menus and busy tracking
 
@@ -17,7 +18,7 @@
 
 - [ ] RT-12 Clear a tab's stale closing mark when the daemon keeps the tab
 - [ ] RT-14 Disarm the pending create when CreateTab or MergeTabs is rejected
-- [ ] RT-24 Keyboard stops and focus ring through the Appearance body and editor
+- [/] RT-24 Keyboard stops and focus ring through the Appearance body and editor
 - [ ] RT-25 Report agent status from Claude Code hooks, with the PTY heuristic as fallback
   - [ ] RT-84 Show a background state when a turn ends with subagents, shells or wakeups still running
   - [ ] RT-85 Flag a session hand-off ready when its orchestrator says to /clear and /nextup
@@ -35,11 +36,11 @@
 - [ ] RT-170 Prove and tick the keyboard and focus parity lines: commit, rename, Esc, combobox, menus, modal focus
 - [ ] RT-171 Phase 5a: pane drag-and-drop (P5.1–P5.5)
 - [ ] RT-174 Refuse a plain-shell request's agent options before git work
+- [ ] RT-179 Keep keyboard focus when pressing Worktrees Save disables it
 
 ## Wave 3 — Cutover: remote mode, installer and v0.1.0-alpha
 
 - [ ] RT-33 Tailnet access on the host: identity, certificate and listener
-  - [/] RT-160 TS.2: daemon tailnet listener module: cert, bind with rebind, whois acceptor
   - [ ] RT-161 TS.3: wire the tailnet listener into the daemon: auth kind, device token, router, idle exit
   - [ ] RT-162 TS.4: ConfigureRemote and RemoteStatus messages
   - [ ] RT-163 TS.5: retire the LAN listener, /pair and mDNS
@@ -59,6 +60,7 @@
 - [ ] RT-36 FT.3: fetch a file by clicking a terminal path link in remote mode
 - [ ] RT-37 FT.4: "Fetch file…" popup
 - [ ] RT-129 Write the release procedure for v0.1.0-alpha
+- [ ] RT-177 Await the tailnet certificate task when the listener's supervisor panics
 
 ## Wave 4 — Mobile app (iPhone PWA over Tailscale)
 
@@ -177,6 +179,8 @@
 - [ ] RT-44 Find what holds tracer_protocol's incremental session directory
 - [ ] RT-45 Stop the live tier's tracer kill racing a young session
 - [ ] RT-130 Cut cold builds across worktrees: measure, then sccache or a safe shared target
+- [ ] RT-178 Make the cursor create-chat tests load-proof
+- [ ] RT-180 Answer the cursor query once in the live tier's scrollback wait
 
 ## macOS
 
