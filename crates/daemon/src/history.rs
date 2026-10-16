@@ -1442,6 +1442,7 @@ pub(crate) mod test_support {
             spawn_origin: None,
             claude_session_id: None,
             agent_conversation_id: None,
+            pending_input: None,
             busy_excluded: false,
         }
     }
