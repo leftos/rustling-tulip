@@ -10,7 +10,8 @@
 
 ## Wave 1c — Session labels, menus and busy tracking
 
-- [ ] RT-11 P4.16: Exclude a session from busy tracking
+- [/] RT-11 P4.16: Exclude a session from busy tracking
+- [ ] RT-165 Carry the busy exclusion in the new session's first record on Restart, Resume and Recover
 
 ## Wave 2 — Hook status, background work and hand-offs
 
@@ -37,24 +38,20 @@
 
 ## Wave 5 — Remote desktop, relay and files across machines
 
-- [ ] RT-33 MA1: shared client core for pinned TLS, host profiles and pairing
-  - [ ] RT-146 MA1.a: Crate skeleton, connection code and host profiles
-  - [ ] RT-147 MA1.b: Pinned-TLS connector and probe
-  - [ ] RT-148 MA1.c: Pairing client
-  - [ ] RT-149 MA1.d: LAN discovery
-- [ ] RT-96 MA3: Per-device credentials, revocable from Settings
+- [ ] RT-33 Tailnet access on the host: identity, certificate and listener
+  - [ ] RT-160 TS.2: daemon tailnet listener module: cert, bind with rebind, whois acceptor
+  - [ ] RT-161 TS.3: wire the tailnet listener into the daemon: auth kind, device token, router, idle exit
+  - [ ] RT-162 TS.4: ConfigureRemote and RemoteStatus messages
+  - [ ] RT-163 TS.5: retire the LAN listener, /pair and mDNS
+- [ ] RT-96 Remote devices: list connected tailnet devices, block one and drop its connections
 - [ ] RT-34 Phase 6: remote mode and cutover
-  - [ ] RT-150 P6.1: Transport seam: `Target::{Local, Remote(profile)}` in `net.rs`
+  - [ ] RT-150 P6.1: Transport seam: Target::{Local, Tailnet(host)} in net.rs over public-CA TLS
   - [ ] RT-151 P6.2: Remote-mode rules: what is disabled, hidden or retargeted
-  - [ ] RT-152 P6.3: Connection picker (saved hosts) and boot reconnect
-  - [ ] RT-153 P6.4: Add host by connection code
-  - [ ] RT-154 P6.5: Host Settings: Remote access panel
-  - [ ] RT-155 P6.6: Pair with a discovered host
-  - [ ] RT-156 P6.7: Autostart recovered: Start daemon on login
-  - [ ] RT-157 P6.8: Cutover: installer
-  - [ ] RT-158 P6.9: Live remote e2e and the docs pass
-- [ ] RT-95 Connect to a daemon over Tailscale by its MagicDNS name
-- [ ] RT-94 MA2: Relay that reaches the daemon from outside the LAN with end-to-end TLS
+  - [ ] RT-152 P6.3: Host picker from the tailnet's machines, typed-name fallback, boot reconnect
+  - [ ] RT-154 P6.4: Host Settings: Remote access (Tailscale) panel
+  - [ ] RT-156 P6.5: Autostart: start the daemon on login
+  - [ ] RT-157 P6.7: Cutover: installer (and the firewall rule, once ruled)
+  - [ ] RT-158 P6.6: Remote tests over a fake Tailscale, hand checklist, and the docs pass
 - [ ] RT-35 FT.2: native download sink for fetched files
 - [ ] RT-36 FT.3: fetch a file by clicking a terminal path link in remote mode
 - [ ] RT-97 Resolve clicked terminal paths on the daemon, using the lines above the click
@@ -178,7 +175,7 @@
 - [ ] RT-45 Stop the live tier's tracer kill racing a young session
 - [ ] RT-129 Write the release procedure for v0.1.0-alpha
 - [ ] RT-130 Cut cold builds across worktrees: measure, then sccache or a safe shared target
-- [/] RT-144 Make recovery_under_test_hub_cannot_spawn independent of the installed tracer
+- [ ] RT-164 Bump rustls past RUSTSEC-2026-0346 to 0349 so cargo deny passes
 
 ## macOS
 
