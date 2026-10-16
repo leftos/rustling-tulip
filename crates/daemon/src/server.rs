@@ -6937,7 +6937,13 @@ mod tests {
 
     /// A hub over a scratch config dir with no repos registered.
     fn test_hub(tag: &str) -> (Hub, ScratchDir) {
-        let scratch = ScratchDir::new(tag);
+        test_hub_in(ScratchDir::new(tag), None)
+    }
+
+    /// A hub over an already-made scratch dir, its `dirs.bin_templates` set to
+    /// `bin_templates`, so a spawn resolves the tracer template from that
+    /// directory first (see [`spawnless_test_hub`]).
+    fn test_hub_in(scratch: ScratchDir, bin_templates: Option<PathBuf>) -> (Hub, ScratchDir) {
         let config = scratch.path().join("config");
         let dirs = Dirs {
             config: config.clone(),
@@ -6949,6 +6955,7 @@ mod tests {
             sessions_dir: config.join("sessions"),
             worktrees_dir: scratch.path().join("worktrees"),
             binaries_dir: scratch.path().join("binaries"),
+            bin_templates,
         };
         std::fs::create_dir_all(&dirs.sessions_dir).expect("create sessions dir");
         std::fs::create_dir_all(&dirs.worktrees_dir).expect("create worktrees dir");
@@ -7425,6 +7432,7 @@ mod tests {
             sessions_dir: root.join("sessions"),
             worktrees_dir: root.join("worktrees"),
             binaries_dir: root.join("binaries"),
+            bin_templates: None,
         };
         let sessions = SessionRegistry::new(dirs.clone());
         sessions.insert(idle_record("s1"));
@@ -7913,11 +7921,20 @@ mod tests {
         assert!(hub.sessions.get("lost").is_some(), "nothing was spawned");
     }
 
-    /// A test hub whose spawns fail before any process starts: its binaries
-    /// dir is a plain file, so staging the `rt-tracer` into the binary cache
-    /// fails and no tracer (and so no child) is ever launched.
+    /// A test hub whose spawns fail before any process starts. Its scratch dir
+    /// holds a dummy `rt-tracer` template, which the spawn does find; its
+    /// binaries dir is a plain file instead, so staging that template into the
+    /// binary cache fails and no tracer (and so no child) is ever launched.
     fn spawnless_test_hub(tag: &str) -> (Hub, ScratchDir) {
-        let (hub, scratch) = test_hub(tag);
+        let scratch = ScratchDir::new(tag);
+        let templates = scratch.path().join("templates");
+        std::fs::create_dir_all(&templates).expect("create templates dir");
+        std::fs::write(
+            templates.join(crate::tracer_client::tracer_exe_name()),
+            b"stub rt-tracer template",
+        )
+        .expect("write stub tracer template");
+        let (hub, scratch) = test_hub_in(scratch, Some(templates));
         std::fs::remove_dir_all(&hub.dirs.binaries_dir).expect("remove binaries dir");
         std::fs::write(&hub.dirs.binaries_dir, b"not a directory").expect("block binaries dir");
         (hub, scratch)

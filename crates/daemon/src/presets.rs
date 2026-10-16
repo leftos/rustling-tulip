@@ -2417,6 +2417,7 @@ mod tests {
             sessions_dir,
             worktrees_dir,
             binaries_dir,
+            bin_templates: None,
         };
         let state = Arc::new(AppState::load_or_default(&dirs).expect("load test state"));
         let sessions = SessionRegistry::new(dirs.clone());

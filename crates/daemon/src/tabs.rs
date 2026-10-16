@@ -1190,6 +1190,7 @@ mod tests {
             sessions_dir: root.join("sessions"),
             worktrees_dir: root.join("worktrees"),
             binaries_dir: root.join("binaries"),
+            bin_templates: None,
         };
         let state = crate::state::AppState::load_or_default(&dirs).expect("load state");
         (state, dirs)

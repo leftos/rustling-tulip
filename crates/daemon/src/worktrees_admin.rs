@@ -1014,6 +1014,7 @@ mod tests {
             sessions_dir: tmp.join("sessions"),
             worktrees_dir: tmp.join("worktrees"),
             binaries_dir: tmp.join("binaries"),
+            bin_templates: None,
         }
     }
 

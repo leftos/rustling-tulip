@@ -38,6 +38,11 @@ pub struct Dirs {
     /// overwrite a running `.exe`). Each cached file is named
     /// `<template-stem>-<sha256-prefix>.exe`. See [`crate::binary_cache`].
     pub binaries_dir: PathBuf,
+    /// Directory holding the shipped `rt-tracer` template, from
+    /// `RUSTLING_TULIP_BIN_TEMPLATES` as `daemon-client` sets it for the daemon
+    /// it supervises. `None` falls back to the sibling-of-exe and
+    /// installed-app lookups (see `tracer_client::locate_tracer_template`).
+    pub bin_templates: Option<PathBuf>,
 }
 
 /// Strip the Windows verbatim (`\\?\`) prefix from a canonicalized path when
@@ -222,6 +227,7 @@ impl Dirs {
             sessions_dir,
             worktrees_dir,
             binaries_dir,
+            bin_templates: resolve_bin_templates_dir(),
             config,
         })
     }
@@ -293,4 +299,14 @@ pub fn resolve_binaries_dir() -> anyhow::Result<PathBuf> {
     let pd = ProjectDirs::from("dev", "leftos", "rustling-tulip")
         .ok_or_else(|| anyhow!("could not resolve binaries directory"))?;
     Ok(pd.data_local_dir().join("binaries"))
+}
+
+/// The template directory `RUSTLING_TULIP_BIN_TEMPLATES` names, as
+/// `daemon-client` sets it when it spawns the daemon it supervises. `None`
+/// when the variable is unset or empty — the tracer lookup then falls back to
+/// the sibling-of-exe and installed-app locations.
+fn resolve_bin_templates_dir() -> Option<PathBuf> {
+    std::env::var_os("RUSTLING_TULIP_BIN_TEMPLATES")
+        .filter(|value| !value.as_os_str().is_empty())
+        .map(PathBuf::from)
 }

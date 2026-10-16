@@ -136,7 +136,7 @@ pub async fn reattach(
 /// be spawned from. Each rebuild of the template lands at a new hash, so
 /// existing tracer processes keep running their own private copies.
 fn locate_tracer_exe(dirs: &Dirs) -> anyhow::Result<PathBuf> {
-    let template = locate_tracer_template()?;
+    let template = locate_tracer_template(dirs.bin_templates.as_deref())?;
     let stem = template
         .file_stem()
         .and_then(|s| s.to_str())
@@ -176,29 +176,31 @@ fn sanitize_pipe_prefix(raw: &str) -> Option<String> {
     }
 }
 
-fn locate_tracer_template() -> anyhow::Result<PathBuf> {
+/// Resolve the shipped `rt-tracer` template to copy into the binary cache from:
+/// `template_dir` ([`Dirs::bin_templates`], the value `daemon-client` passed
+/// down), else a sibling of the current exe, else the installed app dir.
+fn locate_tracer_template(template_dir: Option<&Path>) -> anyhow::Result<PathBuf> {
     let current = std::env::current_exe().context("locating daemon exe")?;
-    let template_dir = std::env::var(TRACER_TEMPLATE_DIR_ENV).ok();
     locate_tracer_template_candidate(
-        template_dir.as_deref(),
+        template_dir,
         &current,
         installed_tracer_template_candidate(),
     )
 }
 
 fn locate_tracer_template_candidate(
-    template_dir: Option<&str>,
+    template_dir: Option<&Path>,
     current_exe: &Path,
     installed_candidate: Option<PathBuf>,
 ) -> anyhow::Result<PathBuf> {
-    // Preferred: the directory the client's supervisor (`daemon-client`)
-    // told us holds the original
+    // Preferred: the directory the client's supervisor (`daemon-client`) passed
+    // down in `RUSTLING_TULIP_BIN_TEMPLATES`, which holds the original
     // templates. Required when the daemon is running from
     // `<binaries_dir>/rustling-tulipd-<hash>.exe` (the post-cache layout),
     // because the tracer template lives in the install dir / target dir, not
     // next to the cached daemon.
-    if let Some(value) = template_dir.filter(|value| !value.is_empty()) {
-        let candidate = PathBuf::from(value).join(tracer_exe_name());
+    if let Some(value) = template_dir.filter(|value| !value.as_os_str().is_empty()) {
+        let candidate = value.join(tracer_exe_name());
         if candidate.is_file() {
             return Ok(candidate);
         }
@@ -262,12 +264,12 @@ fn installed_tracer_template_candidate() -> Option<PathBuf> {
 }
 
 #[cfg(windows)]
-const fn tracer_exe_name() -> &'static str {
+pub(crate) const fn tracer_exe_name() -> &'static str {
     "rt-tracer.exe"
 }
 
 #[cfg(not(windows))]
-const fn tracer_exe_name() -> &'static str {
+pub(crate) const fn tracer_exe_name() -> &'static str {
     "rt-tracer"
 }
 

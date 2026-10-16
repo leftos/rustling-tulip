@@ -580,6 +580,7 @@ mod hysteresis_tests {
             sessions_dir: root.join("sessions"),
             worktrees_dir: root.join("worktrees"),
             binaries_dir: root.join("binaries"),
+            bin_templates: None,
         }
     }
 
