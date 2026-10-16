@@ -16,6 +16,7 @@ use std::sync::LazyLock;
 use crate::appearance::{self, AppColors, AppLevel, Resolved};
 use crate::fonts::{self, FontSettings};
 use crate::source_control::{Part, ScKey, ScUiState};
+use crate::spawn_form::provider_hover_name;
 use crate::tabs::collect_panes;
 use crate::window_state::WindowState;
 
@@ -103,6 +104,10 @@ pub struct Leaf {
     /// branches, or a shell's folder.
     pub subline: Option<String>,
     pub runtime: Option<String>,
+    /// A Claude session's non-Anthropic endpoint, or `None` when there is
+    /// nothing to say: an Anthropic session, or one that is not Claude at
+    /// all.
+    pub provider: Option<ClaudeProvider>,
     /// The session is in the attention set; Needs You reads this raw value,
     /// the `!` badge reads [`Leaf::shows_attention`].
     pub attention: bool,
@@ -1226,12 +1231,13 @@ fn leaf(
         label: display_label(s),
         subline: subline(s, HOME.as_deref(), tabs_view),
         runtime: runtime_label(s),
+        provider: chip_provider(s),
         attention: attention.contains(&s.id),
         busy_excluded: s.busy_excluded,
         unseen: unseen.contains(&s.id),
         state: LeafState::of(s),
         trusted: s.elevated_authority,
-        tooltip: label_tooltip(s),
+        tooltip: leaf_tooltip(s),
     }
 }
 
@@ -1473,6 +1479,7 @@ pub fn display_label(s: &SessionSnapshot) -> String {
 
 /// A session name's hover text: the name, then the daemon's label and the
 /// terminal title where they say something else, then the working directory.
+/// It is the pane header's title tip as well as part of a leaf's hover.
 pub fn label_tooltip(s: &SessionSnapshot) -> String {
     let display = display_label(s);
     let mut lines = vec![display.clone()];
@@ -1486,6 +1493,18 @@ pub fn label_tooltip(s: &SessionSnapshot) -> String {
         lines.push(format!("Cwd: {cwd}"));
     }
     lines.join("\n")
+}
+
+/// A leaf's hover text: [`label_tooltip`], then the endpoint line when the
+/// session is routed somewhere other than Anthropic. Only the leaf carries
+/// it, since its pane header already shows a provider chip saying the same.
+pub fn leaf_tooltip(s: &SessionSnapshot) -> String {
+    let mut text = label_tooltip(s);
+    if let Some(provider) = chip_provider(s) {
+        text.push_str("\nProvider: ");
+        text.push_str(provider_hover_name(provider));
+    }
+    text
 }
 
 /// The line under a leaf's label: a plain shell's folder with `home` shown
@@ -1543,6 +1562,19 @@ pub fn runtime_label(s: &SessionSnapshot) -> Option<String> {
         return Some(s.agent.as_label().to_owned());
     }
     s.program_name.clone().filter(|p| !p.is_empty())
+}
+
+/// The endpoint a session is routed to when a chip should say so: its
+/// Claude provider on any non-Anthropic endpoint, and `None` for an
+/// Anthropic session or one that is not Claude at all (a Codex or Cursor
+/// session, or a plain shell), whatever its provider field reads. Both the
+/// pane header and the leaf go through this, so the two cannot disagree.
+#[must_use]
+pub fn chip_provider(s: &SessionSnapshot) -> Option<ClaudeProvider> {
+    if s.agent != Agent::Claude || s.mode == SessionMode::PlainShell {
+        return None;
+    }
+    (!s.claude_provider.is_anthropic()).then_some(s.claude_provider)
 }
 
 /// Whether a leaf click may attach the terminal to the session: only
@@ -2116,6 +2148,59 @@ mod tests {
             label_tooltip(&s),
             "app\nSession: id\nTerminal title: vim\nCwd: D:/src/app"
         );
+    }
+
+    #[test]
+    fn a_deepseek_claude_leaf_carries_its_provider() {
+        let mut s = session("id");
+        s.claude_provider = ClaudeProvider::Deepseek;
+        let listed = leaf(&s, &HashSet::new(), &HashSet::new(), false);
+        assert_eq!(listed.provider, Some(ClaudeProvider::Deepseek));
+        assert_eq!(listed.tooltip, "id\nProvider: DeepSeek");
+        assert_eq!(
+            label_tooltip(&s),
+            "id",
+            "the pane header says it in its chip, not in the title tip"
+        );
+    }
+
+    #[test]
+    fn an_anthropic_claude_leaf_has_no_provider() {
+        let s = session("id");
+        assert_eq!(s.claude_provider, ClaudeProvider::Anthropic);
+        let listed = leaf(&s, &HashSet::new(), &HashSet::new(), false);
+        assert_eq!(listed.provider, None);
+        assert_eq!(listed.tooltip, "id", "no line is added");
+        assert_eq!(leaf_tooltip(&s), label_tooltip(&s));
+    }
+
+    #[test]
+    fn an_unknown_provider_is_named_unknown() {
+        let mut s = session("id");
+        s.claude_provider = ClaudeProvider::Unknown;
+        let listed = leaf(&s, &HashSet::new(), &HashSet::new(), false);
+        assert_eq!(listed.provider, Some(ClaudeProvider::Unknown));
+        assert_eq!(listed.tooltip, "id\nProvider: unknown");
+    }
+
+    #[test]
+    fn only_a_claude_session_carries_a_provider() {
+        for agent in [Agent::Codex, Agent::Cursor] {
+            let mut s = session("id");
+            s.agent = agent;
+            s.claude_provider = ClaudeProvider::Deepseek;
+            let listed = leaf(&s, &HashSet::new(), &HashSet::new(), false);
+            assert_eq!(
+                listed.provider, None,
+                "a {agent:?} session says no provider"
+            );
+            assert_eq!(listed.tooltip, "id");
+        }
+        let mut sh = shell("sh", Some("D:/src/app"), SessionKind::Standalone);
+        sh.claude_provider = ClaudeProvider::Deepseek;
+        let listed = leaf(&sh, &HashSet::new(), &HashSet::new(), false);
+        assert_eq!(listed.provider, None, "a plain shell says no provider");
+        assert!(!listed.tooltip.contains("Provider:"));
     }
 
     #[test]

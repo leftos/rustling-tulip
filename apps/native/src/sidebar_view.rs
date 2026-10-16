@@ -18,7 +18,7 @@ use crate::fonts::{DEFAULT_FAMILY, UI_FAMILY};
 use crate::grid_view::{ADD_REPO_TIP, NO_REPOS_TIP, SPAWN_TIP};
 use crate::palette::{
     ACCENT, ASKING, CHIP, HOVER, LILAC, LINE, LINE_STRONG, ON_ACCENT, ON_ASKING, RAISED, SUBTLE,
-    TEXT_2,
+    TEXT_2, TRANSPARENT,
 };
 use crate::repo_add::RepoAdd;
 use crate::session_actions::inline_actions;
@@ -26,6 +26,7 @@ use crate::session_menu::{BorderedButton, bordered_button, menu_frame, menu_item
 use crate::sidebar::{
     Activity, Container, ContainerKind, Leaf, LeafDensity, SidebarView, can_attach,
 };
+use crate::spawn_form::{provider_chip_text, provider_chip_tip};
 use crate::spawn_view::SpawnEntry;
 use crate::status_glyph::{GlyphSize, glyph, glyph_view};
 use crate::tabs::{TabPill, tab_pills};
@@ -698,8 +699,8 @@ fn leaf_pill(
     }
 }
 
-/// The leaf's chips: its tab pill, when the tab list is in, then its
-/// orphan, abandoned or parked tag.
+/// The leaf's chips: its tab pill, when the tab list is in, then the
+/// session's provider, then its orphan, abandoned or parked tag.
 fn leaf_chips(
     leaf: &Leaf,
     pill: Option<TabPill>,
@@ -711,6 +712,24 @@ fn leaf_chips(
         .map(|pill| leaf_pill(&pill, &leaf.id, attachable, size, cx))
         .into_iter()
         .collect();
+    if let Some(provider) = leaf.provider {
+        let name = format!("leaf-provider-{}", leaf.id);
+        let selector = name.clone();
+        chips.push(
+            chip(
+                div()
+                    .id(SharedString::from(name.clone()))
+                    .debug_selector(move || selector),
+                size,
+            )
+            .bg(gpui::rgb(CHIP))
+            .border_color(gpui::rgba(TRANSPARENT))
+            .text_color(gpui::rgb(TEXT_2))
+            .tooltip(tooltip(provider_chip_tip(provider)))
+            .child(chip_text(&name, provider_chip_text(provider).to_owned()))
+            .into_any_element(),
+        );
+    }
     if let Some((text, tip)) = leaf.state.tag() {
         let name = format!("leaf-state-{}", leaf.id);
         chips.push(
@@ -721,6 +740,21 @@ fn leaf_chips(
         );
     }
     chips
+}
+
+/// The lettering of the chips [`leaf_chips`] draws for `leaf`: its tab pill
+/// when the tab list is in, then the session's provider, then its orphan,
+/// abandoned or parked tag. It is what the subline measures its fit
+/// against.
+fn chip_texts(leaf: &Leaf, pill: Option<&TabPill>) -> Vec<String> {
+    pill.map(pill_text)
+        .into_iter()
+        .chain(
+            leaf.provider
+                .map(|provider| provider_chip_text(provider).to_owned()),
+        )
+        .chain(leaf.state.tag().map(|(text, _)| text))
+        .collect()
 }
 
 /// The width `text` takes in `family` at `size` px, in px.
@@ -1133,11 +1167,7 @@ fn comfortable_lower(
 ) -> Vec<AnyElement> {
     let pill = ctx.pill(&leaf.id);
     let attachable = ctx.attachable(&leaf.id);
-    let texts: Vec<String> = pill
-        .iter()
-        .map(pill_text)
-        .chain(leaf.state.tag().map(|(text, _)| text))
-        .collect();
+    let texts = chip_texts(leaf, pill.as_ref());
     let fits = chips_fit(window, leaf.subline.as_deref(), &texts, ctx.subline_room);
     let (inline, below) = if fits {
         (
@@ -1273,5 +1303,49 @@ impl RootView {
                 .map(|inline| (format!("leaf-{}-{id}", inline.key), inline.tip.to_owned()))
                 .collect()
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::chip_texts;
+    use crate::sidebar::{Leaf, LeafState};
+    use crate::tabs::TabPill;
+    use protocol::{Agent, ClaudeProvider, SessionMode, SessionStatus};
+
+    /// A Claude leaf in `main`, tagged `orphan`, on `provider`.
+    fn leaf(provider: Option<ClaudeProvider>) -> Leaf {
+        Leaf {
+            id: "s1".to_owned(),
+            status: SessionStatus::Idle,
+            mode: SessionMode::Interactive,
+            agent: Agent::Claude,
+            label: "s1".to_owned(),
+            subline: Some("main".to_owned()),
+            runtime: Some("claude".to_owned()),
+            provider,
+            attention: false,
+            busy_excluded: false,
+            unseen: false,
+            state: LeafState::Orphan,
+            trusted: false,
+            tooltip: "s1".to_owned(),
+        }
+    }
+
+    #[test]
+    fn the_subline_measures_the_provider_chip_among_the_others() {
+        assert_eq!(
+            chip_texts(
+                &leaf(Some(ClaudeProvider::Deepseek)),
+                Some(&TabPill::Unbound)
+            ),
+            ["unbound", "DeepSeek", "orphan"]
+        );
+        assert_eq!(
+            chip_texts(&leaf(None), Some(&TabPill::Unbound)),
+            ["unbound", "orphan"],
+            "an Anthropic leaf has one chip less to fit"
+        );
     }
 }

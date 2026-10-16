@@ -19,8 +19,8 @@ use gpui::{
     px,
 };
 use protocol::{
-    ClientMessage, DaemonMessage, GridNode, RepoEntry, SessionSnapshot, SplitDirection, TabEntry,
-    WorkspaceEntry,
+    ClaudeProvider, ClientMessage, DaemonMessage, GridNode, RepoEntry, SessionSnapshot,
+    SplitDirection, TabEntry, WorkspaceEntry,
 };
 use rustling_tulip_native::{
     Activity, Clock, Connection, ContainerKind, FolderPicker, HandshakeInfo, NetCommand, NetDeps,
@@ -448,6 +448,12 @@ impl SessionBuilder {
     /// Launched with approval prompts bypassed.
     pub fn trusted(self) -> Self {
         self.set("elevated_authority", json!(true))
+    }
+
+    /// Routed to `provider`'s endpoint, as the daemon derives it from the
+    /// session's spawn config.
+    pub fn claude_provider(self, provider: ClaudeProvider) -> Self {
+        self.set("claude_provider", json!(provider))
     }
 
     pub fn terminal_title(self, title: &str) -> Self {

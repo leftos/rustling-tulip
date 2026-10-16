@@ -10,8 +10,8 @@ use crate::support;
 
 use gpui::{Modifiers, TestAppContext, px};
 use protocol::{
-    ClientMessage, DaemonMessage, GridNode, PaneDropEdge, RearrangeLayout, SessionSnapshot,
-    SplitDirection, TabEntry,
+    ClaudeProvider, ClientMessage, DaemonMessage, GridNode, PaneDropEdge, RearrangeLayout,
+    SessionSnapshot, SplitDirection, TabEntry,
 };
 use rustling_tulip_native::appearance::{BUILTIN_ACCENT, PaneFrame};
 use rustling_tulip_native::palette::{LINE, RAISED, SURFACE};
@@ -227,6 +227,8 @@ fn pane_close_esc_cancels(cx: &mut TestAppContext) {
 
 const TRUSTED_TIP: &str = "Trusted launch: permission prompts were bypassed";
 const HEADLESS_TIP: &str = "Headless session: it runs without a terminal";
+const DEEPSEEK_TIP: &str = "Claude Code routed to DeepSeek";
+const UNKNOWN_PROVIDER_TIP: &str = "Claude Code routed to a provider this client does not know";
 /// A pane header's height, in logical pixels.
 const HEADER_HEIGHT: f32 = 36.0;
 /// A header chip's height, in logical pixels.
@@ -337,6 +339,81 @@ fn pane_header_shows_runtime_trusted_and_headless_chips(cx: &mut TestAppContext)
     }
     assert!(never_painted(&mut h, "pane-chip-p1-headless"));
     assert!(never_painted(&mut h, "pane-chip-p2-trusted"));
+}
+
+#[gpui::test]
+fn deepseek_chip_follows_the_runtime_chip(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        sessions: vec![
+            session("s1")
+                .claude_provider(ClaudeProvider::Deepseek)
+                .build(),
+            session("s2").build(),
+            session("s3")
+                .agent("codex")
+                .claude_provider(ClaudeProvider::Deepseek)
+                .build(),
+        ],
+        tabs: vec![tab("t1", &grid_of(&["s1", "s2", "s3"]))],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+
+    assert_eq!(
+        header_of(&mut h, "p1").chips,
+        [
+            runtime("claude"),
+            chip(HeaderChipKind::Provider, "DeepSeek", DEEPSEEK_TIP),
+        ]
+    );
+    assert_eq!(
+        header_of(&mut h, "p1").title_tip,
+        "s1",
+        "the chip names the provider; the title tip does not repeat it"
+    );
+    assert_eq!(header_of(&mut h, "p2").chips, [runtime("claude")]);
+    assert_eq!(
+        header_of(&mut h, "p3").chips,
+        [runtime("codex")],
+        "a Codex session says no provider, whatever the snapshot reports"
+    );
+
+    assert!(
+        h.bounds("pane-chip-p1-provider").left() >= h.bounds("pane-chip-p1-runtime").right(),
+        "the provider chip follows the runtime chip"
+    );
+    for selector in ["pane-chip-p2-provider", "pane-chip-p3-provider"] {
+        assert!(never_painted(&mut h, selector), "{selector}");
+    }
+    assert!(
+        (height_of(&mut h, "pane-chip-p1-provider") - CHIP_HEIGHT).abs() < 0.5,
+        "it is a {CHIP_HEIGHT} px chip"
+    );
+}
+
+#[gpui::test]
+fn unknown_provider_shows_a_question_chip(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        sessions: vec![
+            session("s1")
+                .claude_provider(ClaudeProvider::Unknown)
+                .build(),
+        ],
+        tabs: vec![tab("t1", &grid_of(&["s1"]))],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+
+    assert_eq!(
+        header_of(&mut h, "p1").chips,
+        [
+            runtime("claude"),
+            chip(HeaderChipKind::Provider, "provider?", UNKNOWN_PROVIDER_TIP),
+        ]
+    );
+    assert!(!never_painted(&mut h, "pane-chip-p1-provider"));
 }
 
 #[gpui::test]

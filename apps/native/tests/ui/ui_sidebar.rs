@@ -9,7 +9,9 @@
 use crate::support;
 
 use gpui::{Modifiers, TestAppContext, point, px};
-use protocol::{AttentionReason, ClientMessage, DaemonMessage, SessionSnapshot, SplitDirection};
+use protocol::{
+    AttentionReason, ClaudeProvider, ClientMessage, DaemonMessage, SessionSnapshot, SplitDirection,
+};
 use rustling_tulip_native::{SidebarView, TabPill};
 use support::{Fixture, Harness, TestDir, pane, repo, session, split, tab, workspace};
 
@@ -950,6 +952,59 @@ fn compact_leaf_is_one_line_and_its_hover_holds_the_subline(cx: &mut TestAppCont
         hover(&mut h, "sh").as_deref(),
         Some("app\nSession: sh\nCwd: D:/src/app"),
         "a shell's hover already names its folder"
+    );
+}
+
+/// Add a repo session routed to `DeepSeek` to the density fixture.
+fn with_deepseek(fixture: &mut Fixture) {
+    fixture.sessions.push(
+        session("deep")
+            .in_repo("r1")
+            .claude_provider(ClaudeProvider::Deepseek)
+            .build(),
+    );
+}
+
+#[gpui::test]
+fn leaf_shows_the_deepseek_chip_in_both_densities(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = density_fixture();
+    with_deepseek(&mut fixture);
+
+    {
+        let mut h = Harness::with(cx, &dir, &fixture);
+        assert!(drawn(&mut h, "leaf-provider-deep"), "Comfortable");
+        assert!(
+            !drawn(&mut h, "leaf-provider-short"),
+            "an Anthropic leaf carries no provider chip"
+        );
+    }
+
+    std::fs::write(
+        dir.path().join("native-ui.json"),
+        r#"{ "general": { "leaf_density": "compact" } }"#,
+    )
+    .expect("write the layout");
+    let mut h = Harness::with(cx, &dir, &fixture);
+    assert!(drawn(&mut h, "leaf-provider-deep"), "Compact");
+    assert!(!drawn(&mut h, "leaf-provider-short"));
+}
+
+#[gpui::test]
+fn a_leaf_hover_names_its_provider(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = density_fixture();
+    with_deepseek(&mut fixture);
+    let mut h = Harness::with(cx, &dir, &fixture);
+
+    assert_eq!(
+        h.root(|root, _| root.leaf_hover("deep")).as_deref(),
+        Some("deep\nProvider: DeepSeek")
+    );
+    assert_eq!(
+        h.root(|root, _| root.leaf_hover("short")).as_deref(),
+        Some("short"),
+        "an Anthropic leaf gains no line"
     );
 }
 
