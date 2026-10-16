@@ -10,8 +10,8 @@ use gpui::{
     StyledText, Subscription, Window, canvas, div, prelude::*, px, relative,
 };
 use protocol::{
-    ClientMessage, GridNode, SessionMember, SessionMode, SessionSnapshot, SessionStatus,
-    SplitDirection, SplitPlace, TabContent, TabEntry,
+    ClaudeProvider, ClientMessage, GridNode, SessionMember, SessionMode, SessionSnapshot,
+    SessionStatus, SplitDirection, SplitPlace, TabContent, TabEntry,
 };
 
 use crate::appearance::{self, PaneFrame, Resolved};
@@ -24,7 +24,8 @@ use crate::palette::{
 };
 use crate::session_menu::{BorderedButton, bordered_button};
 use crate::shell_dialog::standalone_shell_request;
-use crate::sidebar::{can_attach, display_label, label_tooltip, runtime_label};
+use crate::sidebar::{can_attach, chip_provider, display_label, label_tooltip, runtime_label};
+use crate::spawn_form::{provider_chip_text, provider_chip_tip};
 use crate::spawn_view::SpawnEntry;
 use crate::spawns::{OpenIn, PaneAim};
 use crate::status_glyph::{GlyphSize, glyph, glyph_view};
@@ -1159,6 +1160,8 @@ pub enum HeaderChipKind {
     More,
     Headless,
     Trusted,
+    /// The non-Anthropic endpoint a Claude session is routed to.
+    Provider,
 }
 
 impl HeaderChipKind {
@@ -1170,6 +1173,7 @@ impl HeaderChipKind {
             Self::More => "more",
             Self::Headless => "headless",
             Self::Trusted => "trusted",
+            Self::Provider => "provider",
         }
     }
 }
@@ -1200,6 +1204,9 @@ fn header_parts(session: &SessionSnapshot, unseen: bool) -> PaneHeaderParts {
         })
         .into_iter()
         .collect();
+    if let Some(provider) = chip_provider(session) {
+        chips.push(provider_chip(provider));
+    }
     chips.extend(member_chips(&session.members));
     if headless::is_headless(session) {
         chips.push(HeaderChip::new(
@@ -1224,6 +1231,16 @@ fn header_parts(session: &SessionSnapshot, unseen: bool) -> PaneHeaderParts {
         title_tip: label_tooltip(session),
         chips,
     }
+}
+
+/// A `DeepSeek` chip, or a `provider?` one for a provider this client does
+/// not know.
+fn provider_chip(provider: ClaudeProvider) -> HeaderChip {
+    HeaderChip::new(
+        HeaderChipKind::Provider,
+        provider_chip_text(provider),
+        provider_chip_tip(provider),
+    )
 }
 
 /// The first member's `repo:branch` chip, hovering as its worktree path,
@@ -1355,7 +1372,9 @@ fn header_chip(pane_id: &str, chip: &HeaderChip) -> AnyElement {
             .bg(gpui::rgba(TRANSPARENT))
             .border_color(gpui::rgb(LINE_STRONG))
             .child(text),
-        HeaderChipKind::More | HeaderChipKind::Headless => base.child(text),
+        HeaderChipKind::More | HeaderChipKind::Headless | HeaderChipKind::Provider => {
+            base.child(text)
+        }
     }
     .into_any_element()
 }
@@ -1495,7 +1514,32 @@ fn bounds_probe(cx: &mut Context<RootView>) -> impl IntoElement {
     reason = "tests assert preconditions with expect; failure messages aid debugging"
 )]
 mod tests {
-    use super::RetryGate;
+    use super::{HeaderChip, HeaderChipKind, RetryGate, header_parts};
+    use crate::spawn_form::provider_chip_tip;
+    use protocol::{ClaudeProvider, SessionMode, SessionSnapshot};
+    use serde_json::json;
+
+    const DEEPSEEK_PROVIDER_TIP: &str = "Claude Code routed to DeepSeek";
+    const UNKNOWN_PROVIDER_TIP: &str = "Claude Code routed to a provider this client does not know";
+
+    /// The tip table names every endpoint, so the `Anthropic` arm exists even
+    /// though no chip is drawn for it.
+    #[test]
+    fn a_provider_chip_names_its_own_endpoint() {
+        assert_eq!(
+            provider_chip_tip(ClaudeProvider::Deepseek),
+            DEEPSEEK_PROVIDER_TIP
+        );
+        assert_eq!(
+            provider_chip_tip(ClaudeProvider::Unknown),
+            UNKNOWN_PROVIDER_TIP
+        );
+        assert_eq!(
+            provider_chip_tip(ClaudeProvider::Anthropic),
+            "Claude Code routed to Anthropic",
+            "a provider added later cannot silently read as DeepSeek's"
+        );
+    }
 
     #[test]
     fn grid_retry_goes_out_once_per_session_and_attempt() {
@@ -1542,6 +1586,89 @@ mod tests {
         assert!(
             gate.claim("s1", Some(&current), 2).is_some(),
             "the ignored retry left the expected id alone"
+        );
+    }
+
+    /// An interactive session run by `agent`, routed to `provider`.
+    fn session_with(agent: &str, provider: &str) -> SessionSnapshot {
+        serde_json::from_value(json!({
+            "id": "s1",
+            "label": "s1",
+            "kind": "single",
+            "members": [],
+            "status": "idle",
+            "mode": "interactive",
+            "started_at": "2026-01-01T00:00:00Z",
+            "exit_code": null,
+            "metrics": {
+                "input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0,
+                "last_activity_at": null,
+            },
+            "recent_actions": [],
+            "agent": agent,
+            "claude_provider": provider,
+        }))
+        .expect("session fixture")
+    }
+
+    fn chip(kind: HeaderChipKind, text: &str, tip: &str) -> HeaderChip {
+        HeaderChip::new(kind, text, tip)
+    }
+
+    #[test]
+    fn a_deepseek_claude_session_shows_a_chip_after_the_runtime_one() {
+        let parts = header_parts(&session_with("claude", "deepseek"), false);
+        assert_eq!(
+            parts.chips,
+            [
+                chip(HeaderChipKind::Runtime, "claude", "Running claude"),
+                chip(HeaderChipKind::Provider, "DeepSeek", DEEPSEEK_PROVIDER_TIP),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_anthropic_claude_session_shows_no_provider_chip() {
+        let parts = header_parts(&session_with("claude", "anthropic"), false);
+        assert_eq!(
+            parts.chips,
+            [chip(HeaderChipKind::Runtime, "claude", "Running claude")]
+        );
+    }
+
+    #[test]
+    fn an_unknown_provider_shows_a_question_chip() {
+        let parts = header_parts(&session_with("claude", "mistral"), false);
+        assert_eq!(
+            parts.chips,
+            [
+                chip(HeaderChipKind::Runtime, "claude", "Running claude"),
+                chip(HeaderChipKind::Provider, "provider?", UNKNOWN_PROVIDER_TIP),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_session_that_is_not_claude_shows_no_provider_chip() {
+        for agent in ["codex", "cursor"] {
+            let parts = header_parts(&session_with(agent, "deepseek"), false);
+            assert_eq!(
+                parts.chips,
+                [chip(
+                    HeaderChipKind::Runtime,
+                    agent,
+                    &format!("Running {agent}")
+                )],
+                "{agent} says no provider, whatever the snapshot reports"
+            );
+        }
+        let mut shell = session_with("claude", "deepseek");
+        shell.mode = SessionMode::PlainShell;
+        shell.program_name = Some("pwsh".to_owned());
+        assert_eq!(
+            header_parts(&shell, false).chips,
+            [chip(HeaderChipKind::Runtime, "pwsh", "Running pwsh")],
+            "a plain shell says no provider"
         );
     }
 }

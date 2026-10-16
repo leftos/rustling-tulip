@@ -167,7 +167,9 @@ pub(crate) const PROVIDER_CHOICES: [ClaudeProvider; 2] =
 pub(crate) const PROVIDER_UNSUPPORTED_TIP: &str =
     "Restart the daemon to use DeepSeek: .\\rt.ps1 restart";
 
-/// A provider's label in the dialog and in Settings.
+/// A provider's label in the dialog, in Settings and in every other place
+/// the client names one. The client's one `ClaudeProvider` -> name table: a
+/// provider added later is named here and nowhere else.
 pub(crate) fn provider_label(provider: ClaudeProvider) -> &'static str {
     match provider {
         ClaudeProvider::Anthropic => "Anthropic",
@@ -176,12 +178,41 @@ pub(crate) fn provider_label(provider: ClaudeProvider) -> &'static str {
     }
 }
 
-fn provider_part(provider: ClaudeProvider) -> &'static str {
+/// The text a provider chip carries: the label, or `provider?` when this
+/// client does not know the provider.
+pub(crate) fn provider_chip_text(provider: ClaudeProvider) -> &'static str {
     match provider {
-        ClaudeProvider::Anthropic => "anthropic",
-        ClaudeProvider::Deepseek => "deepseek",
+        ClaudeProvider::Anthropic | ClaudeProvider::Deepseek => provider_label(provider),
+        ClaudeProvider::Unknown => "provider?",
+    }
+}
+
+/// A provider chip's hover text. The label names the endpoint, so a
+/// provider added later gains its own line instead of reading as
+/// `DeepSeek`'s.
+pub(crate) fn provider_chip_tip(provider: ClaudeProvider) -> String {
+    match provider {
+        ClaudeProvider::Anthropic | ClaudeProvider::Deepseek => {
+            format!("Claude Code routed to {}", provider_label(provider))
+        }
+        ClaudeProvider::Unknown => {
+            "Claude Code routed to a provider this client does not know".to_owned()
+        }
+    }
+}
+
+/// The word a leaf's hover uses for a provider: the label, or `unknown` for
+/// one this client does not know.
+pub(crate) fn provider_hover_name(provider: ClaudeProvider) -> &'static str {
+    match provider {
+        ClaudeProvider::Anthropic | ClaudeProvider::Deepseek => provider_label(provider),
         ClaudeProvider::Unknown => "unknown",
     }
+}
+
+/// The provider's part of a selector's element id.
+fn provider_part(provider: ClaudeProvider) -> String {
+    provider_label(provider).to_lowercase()
 }
 
 /// The provider a stored spawn ran Claude on, when it was a Claude
