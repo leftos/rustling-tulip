@@ -181,17 +181,22 @@ impl RootView {
     }
 
     /// Moves `pane_id` of `tab_id` into a new tab, which shows once it
-    /// arrives.
+    /// arrives. A tab left with no pane counts as closing until the daemon
+    /// answers.
     pub(crate) fn move_pane_to_new_tab(&mut self, tab_id: &str, pane_id: &str) {
         let request_id = crate::new_request_id();
         self.tabs.arm_create(&request_id);
-        self.send(ClientMessage::ExtractToNewTab {
+        self.tabs
+            .mark_closing_if_last_pane(tab_id, Some(&request_id));
+        let msg = ClientMessage::ExtractToNewTab {
             source_tab_id: tab_id.to_owned(),
             pane_ids: vec![pane_id.to_owned()],
             name: None,
             layout: None,
             request_id: Some(request_id),
-        });
+        };
+        self.tabs.note_layout_request(&msg);
+        self.send(msg);
     }
 
     /// Moves `pane_id` of `tab_id` into grid tab `dst_tab_id` at its
@@ -217,15 +222,19 @@ impl RootView {
             .filter_map(|id| self.tab_snapshot(id, Some(pane_id)))
             .collect();
         self.record_undo(undo::MOVED_PANE.to_owned(), snapshots, cx);
-        self.tabs.mark_closing_if_last_pane(tab_id);
-        self.send(ClientMessage::MovePane {
+        let request_id = crate::new_request_id();
+        self.tabs
+            .mark_closing_if_last_pane(tab_id, Some(&request_id));
+        let msg = ClientMessage::MovePane {
             src_tab_id: tab_id.to_owned(),
             src_pane_id: pane_id.to_owned(),
             dst_tab_id: dst_tab_id.to_owned(),
             dst_pane_id,
             edge,
-            request_id: Some(crate::new_request_id()),
-        });
+            request_id: Some(request_id),
+        };
+        self.tabs.note_layout_request(&msg);
+        self.send(msg);
     }
 
     /// Runs a press on a row of the open empty-pane menu.
@@ -252,7 +261,7 @@ impl RootView {
             }
             MenuAction::Close => {
                 self.record_pane_close(&tab_id, &pane_id, None, cx);
-                self.tabs.mark_closing_if_last_pane(&tab_id);
+                self.tabs.mark_closing_if_last_pane(&tab_id, None);
                 self.send(ClientMessage::ClosePane { tab_id, pane_id });
             }
         }

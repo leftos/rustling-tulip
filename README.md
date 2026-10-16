@@ -64,7 +64,7 @@ Start with [docs/architecture.md](docs/architecture.md) for how the pieces fit a
 - **Claude provider**: the service a Claude session's `claude` CLI talks to, Anthropic (the default) or DeepSeek, chosen per spawn and kept by every respawn; not an agent.
 - **claude-swap / cswap**: the user's multi-account switcher for Claude Code (`github.com/leftos/claude-swap`), whose store and rules the daemon's accounts module shares; see `docs/plans/accounts.md`.
 - **Clear and continue**: the planned one-click session action that types `/clear`, waits for the clear to finish, then types `/nextup`; refused while background work runs (RT-91).
-- **Closing mark**: the native client's flag on a tab it expects the daemon to remove (closing it, closing its last pane, moving its only pane out), read by placement and Undo until the removal arrives.
+- **Closing mark**: the native client's flag on a tab it expects the daemon to remove (closing it, closing its last pane, moving its only pane out), read by placement and Undo until the removal arrives; a refused move clears it, and closing a last pane while a split or move for that tab is in flight does not set it.
 - **Connection origin**: whether a client connected on the local port (`Local`) or through the LAN listener or relay (`Remote`); account administration is local only.
 - **Dictation box**: the planned overlay that collects speech recognized on the client (desktop or phone) for one session, for review before it is inserted as a paste or sent; see `docs/plans/dictation.md`.
 - **DK.1**: step ids in `deepseek-sessions.md` (DeepSeek Claude sessions), distinct from dispatch-follow's `DF` steps and `DS` leaf tag.

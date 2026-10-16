@@ -1197,7 +1197,9 @@ impl RootView {
             }
             Placement::Pane { .. } => None,
         };
-        self.send(placement.message(&session.id, request_id));
+        let msg = placement.message(&session.id, request_id);
+        self.tabs.note_layout_request(&msg);
+        self.send(msg);
     }
 
     /// Focuses the command line's session once, when the layout and the
@@ -1648,6 +1650,7 @@ impl RootView {
         self.reset_undo(cx);
         self.tabs.clear_pending_restore();
         self.tabs.clear_armed_creates();
+        self.tabs.clear_layout_requests();
         self.pending_arrangement = None;
         self.close_layout_chooser(window, cx);
         self.reset_cleanup_failed(window, cx);

@@ -152,9 +152,15 @@ impl RootView {
             }
             let create_request = crate::new_request_id();
             self.tabs.arm_create(&create_request);
+            self.tabs.mark_closing_if_emptied(
+                dialog.model.tab_id(),
+                pane_ids,
+                Some(&create_request),
+            );
             *request_id = Some(create_request);
         }
         tracing::info!(tab = %dialog.model.tab_id(), "moving panes to a new tab");
+        self.tabs.note_layout_request(&msg);
         self.send(msg);
         self.close_move_panes(window, cx);
     }

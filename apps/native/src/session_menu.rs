@@ -849,6 +849,7 @@ impl RootView {
             PlacedFocus::Tab(tab_id) => self.tabs.activate(tab_id),
         }
         for msg in placed.messages {
+            self.tabs.note_layout_request(&msg);
             self.send(msg);
         }
         if placed.focus != PlacedFocus::NewTab {

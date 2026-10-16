@@ -118,6 +118,7 @@ impl RootView {
             }
         }
         for msg in messages {
+            self.tabs.note_layout_request(&msg);
             self.send(msg);
         }
         self.after_tabs_change(window, cx);

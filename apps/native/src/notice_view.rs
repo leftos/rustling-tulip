@@ -154,7 +154,8 @@ impl RootView {
 
     /// A spawn or duplicate the daemon refused is no longer on the way, nor
     /// is any checkout prompt for it, and a new tab it refused activates
-    /// nothing when another tab arrives.
+    /// nothing when another tab arrives. A refused split, move or extract
+    /// is no longer in flight, and a tab its send marked closing is not.
     fn fail_request(
         &mut self,
         request_id: Option<&str>,
@@ -164,6 +165,7 @@ impl RootView {
         self.fail_duplicate(request_id);
         if let Some(id) = request_id {
             self.tabs.disarm_create(id);
+            self.tabs.fail_layout_request(id);
             self.spawns.fail(id);
             self.quick_shell_saves.fail(id);
             self.settle_checkout(id, window, cx);
@@ -300,6 +302,7 @@ impl RootView {
         self.remember_quick_shell(request_id);
         self.confirm.disarm();
         for msg in placed.messages {
+            self.tabs.note_layout_request(&msg);
             self.send(msg);
         }
         self.settle_checkout(request_id, window, cx);

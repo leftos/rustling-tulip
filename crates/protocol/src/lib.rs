@@ -2539,13 +2539,18 @@ pub enum ClientMessage {
         ordered_ids: Vec<String>,
     },
     /// Split an existing pane in two along `direction`. The newly allocated
-    /// pane occupies `place`; the existing pane occupies the other side.
+    /// pane occupies `place`; the existing pane occupies the other side. A
+    /// refused split is answered with [`DaemonMessage::Error`] carrying
+    /// `request_id`.
     SplitPane {
         tab_id: String,
         pane_id: String,
         direction: SplitDirection,
         place: SplitPlace,
         new_session_id: Option<String>,
+        /// Echoed on the [`DaemonMessage::Error`] that refuses it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
     /// Close a pane. If it was the only pane in the tab, the tab is removed.
     /// Otherwise the parent split collapses to the remaining sibling.
@@ -3923,9 +3928,17 @@ mod tests {
     }
 
     /// The four tab-layout requests, each carrying `request_id`.
-    fn tab_layout_requests(request_id: Option<&str>) -> [ClientMessage; 4] {
+    fn tab_layout_requests(request_id: Option<&str>) -> [ClientMessage; 5] {
         let request_id = request_id.map(str::to_owned);
         [
+            ClientMessage::SplitPane {
+                tab_id: "t1".to_owned(),
+                pane_id: "p1".to_owned(),
+                direction: SplitDirection::Vertical,
+                place: SplitPlace::Second,
+                new_session_id: None,
+                request_id: request_id.clone(),
+            },
             ClientMessage::CreateTab {
                 name: None,
                 initial_session_id: Some("s1".to_owned()),
@@ -3957,7 +3970,8 @@ mod tests {
 
     fn tab_layout_request_id(msg: &ClientMessage) -> Option<&str> {
         match msg {
-            ClientMessage::CreateTab { request_id, .. }
+            ClientMessage::SplitPane { request_id, .. }
+            | ClientMessage::CreateTab { request_id, .. }
             | ClientMessage::MergeTabs { request_id, .. }
             | ClientMessage::MovePane { request_id, .. }
             | ClientMessage::ExtractToNewTab { request_id, .. } => request_id.as_deref(),
@@ -4137,6 +4151,7 @@ mod tests {
             direction: SplitDirection::Horizontal,
             place: SplitPlace::Second,
             new_session_id: None,
+            request_id: None,
         };
         let json = serde_json::to_string(&msg).expect("serialize");
         assert!(json.contains(r#""type":"split_pane""#));

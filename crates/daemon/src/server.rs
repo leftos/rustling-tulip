@@ -2453,14 +2453,18 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
             direction,
             place,
             new_session_id,
+            request_id,
         } => {
             let updated = hub.state.try_mutate_client_layout(client_id, |tabs| {
                 let tab = tabs::find_tab_mut(tabs, &tab_id)?;
                 let grid = tabs::grid_or_err_mut(tab)?;
                 tabs::split_pane(grid, &pane_id, direction, place, new_session_id)?;
                 Ok::<_, anyhow::Error>(tab.clone())
-            })?;
-            hub.emit_tab(client_id, TabEvent::Updated(updated));
+            });
+            match updated {
+                Ok(updated) => hub.emit_tab(client_id, TabEvent::Updated(updated)),
+                Err(err) => send_tab_failure(out_tx, &err, request_id),
+            }
         }
         ClientMessage::ClosePane { tab_id, pane_id } => {
             let outcome = hub.state.try_mutate_client_layout(client_id, |tabs| {
@@ -2999,8 +3003,8 @@ fn send_preview_failure(
     });
 }
 
-/// Answers a failed tab-layout request (`CreateTab`, `MergeTabs`, `MovePane`,
-/// `ExtractToNewTab`) with an `Error` to this requester only, carrying the
+/// Answers a failed tab-layout request (`CreateTab`, `SplitPane`, `MergeTabs`,
+/// `MovePane`, `ExtractToNewTab`) with an `Error` to this requester only, carrying the
 /// `request_id` it asked with so the client can drop what it armed for it.
 fn send_tab_failure(
     out_tx: &mpsc::UnboundedSender<DaemonMessage>,
@@ -7364,6 +7368,32 @@ mod tests {
             hub.state.client_layout("c1"),
             before,
             "the move rolled back"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rejected_split_echoes_its_request_id() {
+        let (hub, _scratch) = test_hub("split-rid");
+        seed_two_pane_layout(&hub, "c1");
+        let msg = dispatch_one(
+            &hub,
+            ClientMessage::SplitPane {
+                tab_id: "ghost-tab".to_string(),
+                pane_id: "p1".to_string(),
+                direction: protocol::SplitDirection::Horizontal,
+                place: protocol::SplitPlace::Second,
+                new_session_id: None,
+                request_id: Some("s1".to_string()),
+            },
+        )
+        .await;
+        assert!(
+            matches!(
+                &msg,
+                DaemonMessage::Error { message, request_id: Some(id) }
+                    if id == "s1" && message.contains("ghost-tab")
+            ),
+            "{msg:?}"
         );
     }
 

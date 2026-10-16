@@ -1187,6 +1187,43 @@ fn duplicate_back_returns_to_actions(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_refused_spawn_split_ends_its_request_in_flight(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = single(cx, &dir, session("s1").build());
+    h.right_click_on("pane-header-p1");
+    h.click_on("session-menu-duplicate");
+    h.click_on("duplicate-tab-t1");
+    let id = duplicate_request(&h.sent(), "s1");
+    h.send(updated(session("s2").build(), Some(&id)));
+    let split_request = h
+        .sent()
+        .iter()
+        .find_map(|m| match m {
+            ClientMessage::SplitPane { request_id, .. } => request_id.clone(),
+            _ => None,
+        })
+        .expect("the copy's split carries a request id");
+    h.send(DaemonMessage::Error {
+        message: "unknown pane: p1".to_owned(),
+        request_id: Some(split_request),
+    });
+    h.sent();
+
+    h.click_on("close-pane-p1");
+    h.click_on("pane-close-only");
+    h.sent();
+    let undo = h
+        .root(|root, _| root.undo_entries().first().map(|entry| entry.id))
+        .expect("an undo entry");
+    h.click_on(&format!("undo-action-{undo}"));
+    let sent = h.sent();
+    assert!(
+        matches!(sent.as_slice(), [ClientMessage::RestoreTab { tab, index }] if tab.id == "t1" && *index == 0),
+        "nothing waits on t1, so closing its last pane marked it: {sent:?}"
+    );
+}
+
+#[gpui::test]
 fn duplicate_does_not_discard_the_original(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = single(cx, &dir, session("s1").exited(0).build());

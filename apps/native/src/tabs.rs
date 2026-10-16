@@ -164,6 +164,15 @@ pub struct TabsModel {
     /// still in the list, but gone as far as a restore is concerned, since
     /// the daemon handles the removal before anything sent after it.
     closing: HashSet<String>,
+    /// The request whose send marked a tab in [`TabsModel::closing`], by tab
+    /// id: the `Error` refusing that request clears the mark. A mark set
+    /// without a request has no entry, and no refusal clears it.
+    closing_requests: HashMap<String, String>,
+    /// The splits, moves and extracts this client sent that no reply has
+    /// answered yet: one entry per tab each names, with the request's id
+    /// when it carries one. A tab one names is not marked closing, since
+    /// the request may keep it.
+    layout_in_flight: Vec<(String, Option<String>)>,
 }
 
 /// `ratio` inside the daemon's range; a ratio that is not a number becomes
@@ -690,8 +699,9 @@ pub fn size_drivers(
 
 impl Placement {
     /// The request that puts `session_id` there. A new tab's `CreateTab`
-    /// carries `request_id`, the id its arrival was armed with; a pane
-    /// placement arms nothing and sends none.
+    /// carries `request_id`, the id its arrival was armed with; a split
+    /// carries a fresh id of its own, which the `Error` refusing it echoes;
+    /// a pane replacement carries none.
     pub fn message(&self, session_id: &str, request_id: Option<String>) -> ClientMessage {
         let session_id = Some(session_id.to_owned());
         match self {
@@ -717,6 +727,7 @@ impl Placement {
                 direction: split.direction,
                 place: split.place,
                 new_session_id: session_id,
+                request_id: Some(crate::new_request_id()),
             },
         }
     }
@@ -878,6 +889,10 @@ impl TabsModel {
             .retain(|tab_id, _| live.contains(tab_id.as_str()));
         self.selection.prune(&live);
         self.closing.retain(|id| live.contains(id.as_str()));
+        self.closing_requests
+            .retain(|tab_id, _| live.contains(tab_id.as_str()));
+        self.layout_in_flight
+            .retain(|(tab_id, _)| live.contains(tab_id.as_str()));
         let active = self
             .active
             .take()
@@ -888,8 +903,16 @@ impl TabsModel {
     }
 
     /// A tab created or changed. A new tab this client asked for, the first
-    /// tab of all, or one a pending restore named, becomes active.
+    /// tab of all, or one a pending restore named, becomes active. It
+    /// answers the oldest layout request in flight for the tab.
     fn upsert(&mut self, tab: &TabEntry) {
+        if let Some(index) = self
+            .layout_in_flight
+            .iter()
+            .position(|(tab_id, _)| *tab_id == tab.id)
+        {
+            self.layout_in_flight.remove(index);
+        }
         if let Some(slot) = self.tabs.iter_mut().find(|t| t.id == tab.id) {
             let old = std::mem::replace(slot, tab.clone());
             self.focus_after_update(&old, tab);
@@ -941,11 +964,14 @@ impl TabsModel {
         }
     }
 
-    /// A closed tab; when it was active, the first tab takes over.
+    /// A closed tab; when it was active, the first tab takes over. It
+    /// answers every layout request in flight for the tab.
     fn remove(&mut self, tab_id: &str) {
         self.tabs.retain(|t| t.id != tab_id);
         self.focused.remove(tab_id);
         self.closing.remove(tab_id);
+        self.closing_requests.remove(tab_id);
+        self.layout_in_flight.retain(|(id, _)| id != tab_id);
         self.prune_selection();
         if self.close_confirm.armed() == Some(tab_id) {
             self.close_confirm.disarm();
@@ -1065,6 +1091,7 @@ impl TabsModel {
     pub fn clear_pending_restore(&mut self) {
         self.pending_restore.clear();
         self.closing.clear();
+        self.closing_requests.clear();
     }
 
     /// The tabs whose close is on its way: still listed, but gone for a
@@ -1073,21 +1100,124 @@ impl TabsModel {
         &self.closing
     }
 
-    /// Records that this client asked to close `tab_id`.
+    /// Records that this client asked to close `tab_id`. No refusal clears
+    /// this mark, even one for a request that marked the tab before.
     pub fn mark_closing(&mut self, tab_id: &str) {
         self.closing.insert(tab_id.to_owned());
+        self.closing_requests.remove(tab_id);
     }
 
     /// Marks `tab_id` closing when it holds a single pane: closing or moving
-    /// that pane takes the whole tab with it.
-    pub fn mark_closing_if_last_pane(&mut self, tab_id: &str) {
+    /// that pane takes the whole tab with it. `request_id` is the id the
+    /// request taking the pane carries, if any; its refusal clears the mark.
+    pub fn mark_closing_if_last_pane(&mut self, tab_id: &str, request_id: Option<&str>) {
         let last_pane = self
             .tab(tab_id)
             .and_then(TabEntry::grid)
             .is_some_and(|grid| collect_panes(grid).len() == 1);
         if last_pane {
-            self.mark_closing(tab_id);
+            self.mark_closing_for(tab_id, request_id);
         }
+    }
+
+    /// Marks `tab_id` closing when `pane_ids` holds every pane it has:
+    /// moving them all out takes the whole tab with them. The refusal of
+    /// `request_id` clears the mark.
+    pub fn mark_closing_if_emptied(
+        &mut self,
+        tab_id: &str,
+        pane_ids: &[String],
+        request_id: Option<&str>,
+    ) {
+        let emptied = self
+            .tab(tab_id)
+            .and_then(TabEntry::grid)
+            .is_some_and(|grid| {
+                collect_panes(grid)
+                    .iter()
+                    .all(|pane| pane_ids.iter().any(|id| id == pane.id))
+            });
+        if emptied {
+            self.mark_closing_for(tab_id, request_id);
+        }
+    }
+
+    /// Marks `tab_id` closing for `request_id`, unless a layout request in
+    /// flight may still keep the tab. A tab already marked keeps its mark
+    /// as it was.
+    fn mark_closing_for(&mut self, tab_id: &str, request_id: Option<&str>) {
+        if self.layout_in_flight.iter().any(|(id, _)| id == tab_id) {
+            return;
+        }
+        if self.closing.insert(tab_id.to_owned())
+            && let Some(request_id) = request_id
+        {
+            self.closing_requests
+                .insert(tab_id.to_owned(), request_id.to_owned());
+        }
+    }
+
+    /// Records a split, move, extract or snapshot restore this client is
+    /// sending as in flight for each tab it names, until a reply about that
+    /// tab answers it. A move of a pane onto itself gets no reply, so it is
+    /// not recorded; every other message is ignored. A snapshot restore
+    /// carries no id: its tab's update answers a success, and a refusal
+    /// means the tab is gone, which its `TabRemoved` reports.
+    pub fn note_layout_request(&mut self, msg: &ClientMessage) {
+        let (tab_ids, request_id) = match msg {
+            ClientMessage::SplitPane {
+                tab_id, request_id, ..
+            } => (vec![tab_id], request_id.as_ref()),
+            ClientMessage::RestoreTabSnapshot { tab } => (vec![&tab.id], None),
+            ClientMessage::MovePane {
+                src_tab_id,
+                src_pane_id,
+                dst_tab_id,
+                dst_pane_id,
+                request_id,
+                ..
+            } => {
+                if src_pane_id == dst_pane_id {
+                    return;
+                }
+                let mut tab_ids = vec![src_tab_id];
+                if dst_tab_id != src_tab_id {
+                    tab_ids.push(dst_tab_id);
+                }
+                (tab_ids, request_id.as_ref())
+            }
+            ClientMessage::ExtractToNewTab {
+                source_tab_id,
+                request_id,
+                ..
+            } => (vec![source_tab_id], request_id.as_ref()),
+            _ => return,
+        };
+        for tab_id in tab_ids {
+            self.layout_in_flight
+                .push((tab_id.clone(), request_id.cloned()));
+        }
+    }
+
+    /// The daemon refused the request `request_id`: it is no longer in
+    /// flight, and a tab its send marked closing is not closing after all.
+    pub fn fail_layout_request(&mut self, request_id: &str) {
+        self.layout_in_flight
+            .retain(|(_, id)| id.as_deref() != Some(request_id));
+        let closing = &mut self.closing;
+        self.closing_requests.retain(|tab_id, id| {
+            let refused = id == request_id;
+            if refused {
+                closing.remove(tab_id);
+            }
+            !refused
+        });
+    }
+
+    /// Forgets every layout request in flight: a fresh connection answers
+    /// none of the old one's requests.
+    pub fn clear_layout_requests(&mut self) {
+        self.layout_in_flight.clear();
     }
 
     /// Where `session` goes: into the active tab by
@@ -1610,14 +1740,22 @@ pub(crate) mod tests {
             tab_id: "t1".to_owned(),
             target: split_target("e", V),
         };
+        let mut split_msg = split.message("new", None);
+        if let ClientMessage::SplitPane { request_id, .. } = &mut split_msg {
+            assert!(
+                request_id.take().is_some(),
+                "a split carries an id of its own"
+            );
+        }
         assert_eq!(
-            wire(&split.message("new", None)),
+            wire(&split_msg),
             wire(&ClientMessage::SplitPane {
                 tab_id: "t1".to_owned(),
                 pane_id: "e".to_owned(),
                 direction: V,
                 place: SplitPlace::Second,
                 new_session_id: Some("new".to_owned()),
+                request_id: None,
             })
         );
 
@@ -1790,6 +1928,140 @@ pub(crate) mod tests {
         assert!(
             model.closing().is_empty(),
             "a fresh connection starts clean"
+        );
+    }
+
+    fn split_request(tab_id: &str, request_id: Option<&str>) -> ClientMessage {
+        ClientMessage::SplitPane {
+            tab_id: tab_id.to_owned(),
+            pane_id: "a".to_owned(),
+            direction: V,
+            place: SplitPlace::Second,
+            new_session_id: None,
+            request_id: request_id.map(str::to_owned),
+        }
+    }
+
+    fn move_request(src: (&str, &str), dst: (&str, &str), request_id: &str) -> ClientMessage {
+        ClientMessage::MovePane {
+            src_tab_id: src.0.to_owned(),
+            src_pane_id: src.1.to_owned(),
+            dst_tab_id: dst.0.to_owned(),
+            dst_pane_id: dst.1.to_owned(),
+            edge: PaneDropEdge::Right,
+            request_id: Some(request_id.to_owned()),
+        }
+    }
+
+    /// Whether `tab_id` can be marked closing now; marks it if so.
+    fn marks(model: &mut TabsModel, tab_id: &str) -> bool {
+        model.mark_closing_if_last_pane(tab_id, None);
+        model.closing().contains(tab_id)
+    }
+
+    #[test]
+    fn a_failed_move_clears_the_closing_mark() {
+        let mut model = model_with(&[
+            tab("t1", &pane("a", None)),
+            tab("t2", &pane("b", None)),
+            tab("t3", &split(H, 0.5, pane("c", None), pane("d", None))),
+        ]);
+        model.mark_closing_if_last_pane("t1", Some("m1"));
+        model.note_layout_request(&move_request(("t1", "a"), ("t2", "b"), "m1"));
+        assert!(model.closing().contains("t1"));
+        model.fail_layout_request("m2");
+        assert!(model.closing().contains("t1"), "another request's refusal");
+        model.fail_layout_request("m1");
+        assert!(!model.closing().contains("t1"), "the move was refused");
+
+        model.mark_closing("t2");
+        model.mark_closing_if_last_pane("t2", Some("m3"));
+        model.fail_layout_request("m3");
+        assert!(model.closing().contains("t2"), "a close's mark stays");
+
+        let some_panes = ["c".to_owned()];
+        model.mark_closing_if_emptied("t3", &some_panes, Some("x1"));
+        assert!(!model.closing().contains("t3"), "a pane stays behind");
+        let every_pane = ["c".to_owned(), "d".to_owned()];
+        model.mark_closing_if_emptied("t3", &every_pane, Some("x1"));
+        assert!(model.closing().contains("t3"), "every pane leaves");
+        model.fail_layout_request("x1");
+        assert!(!model.closing().contains("t3"), "the extract was refused");
+    }
+
+    #[test]
+    fn a_mark_is_not_set_while_a_split_is_in_flight() {
+        let mut model = model_with(&[tab("t1", &pane("a", None))]);
+        model.note_layout_request(&split_request("t1", Some("s1")));
+        assert!(!marks(&mut model, "t1"), "the split may keep the tab");
+    }
+
+    #[test]
+    fn a_move_in_flight_suppresses_the_mark_on_both_tabs() {
+        let mut model = model_with(&[
+            tab("t1", &pane("a", None)),
+            tab("t2", &pane("b", None)),
+            tab("t3", &pane("c", None)),
+        ]);
+        model.note_layout_request(&move_request(("t1", "a"), ("t2", "b"), "m1"));
+        assert!(!marks(&mut model, "t1"), "the source");
+        assert!(!marks(&mut model, "t2"), "the destination");
+        model.note_layout_request(&move_request(("t3", "c"), ("t3", "c"), "m2"));
+        assert!(marks(&mut model, "t3"), "a move onto itself is no request");
+    }
+
+    #[test]
+    fn a_tab_update_ends_a_layout_request_in_flight() {
+        let mut model = model_with(&[tab("t1", &pane("a", None))]);
+        model.note_layout_request(&split_request("t1", Some("s1")));
+        model.note_layout_request(&split_request("t1", None));
+        model.apply(&updated(&tab("t1", &pane("a", None))));
+        assert!(!marks(&mut model, "t1"), "one request is still on its way");
+        model.apply(&updated(&tab("t1", &pane("a", None))));
+        assert!(marks(&mut model, "t1"), "both are answered");
+    }
+
+    #[test]
+    fn a_tab_removed_ends_all_requests_for_the_tab() {
+        let mut model = model_with(&[tab("t1", &pane("a", None)), tab("t2", &pane("b", None))]);
+        model.note_layout_request(&split_request("t1", Some("s1")));
+        model.note_layout_request(&split_request("t1", Some("s2")));
+        model.note_layout_request(&move_request(("t1", "a"), ("t2", "b"), "m1"));
+        model.apply(&DaemonMessage::TabRemoved {
+            tab_id: "t1".to_owned(),
+        });
+        model.apply(&updated(&tab("t1", &pane("a", None))));
+        assert!(marks(&mut model, "t1"), "nothing waits on the tab");
+        assert!(!marks(&mut model, "t2"), "the move's other tab still waits");
+    }
+
+    #[test]
+    fn a_failed_split_ends_its_request_in_flight() {
+        let mut model = model_with(&[tab("t1", &pane("a", None))]);
+        model.note_layout_request(&split_request("t1", Some("s1")));
+        model.fail_layout_request("s1");
+        assert!(marks(&mut model, "t1"), "the refused split changes nothing");
+    }
+
+    #[test]
+    fn a_restore_snapshot_in_flight_suppresses_the_mark() {
+        let mut model = model_with(&[tab("t1", &pane("a", None))]);
+        model.note_layout_request(&ClientMessage::RestoreTabSnapshot {
+            tab: tab("t1", &split(H, 0.5, pane("a", None), pane("b", None))),
+        });
+        assert!(!marks(&mut model, "t1"), "the restore may bring panes back");
+        model.apply(&updated(&tab("t1", &pane("a", None))));
+        assert!(marks(&mut model, "t1"), "the restore is answered");
+    }
+
+    #[test]
+    fn a_reconnect_clears_in_flight_layout_requests() {
+        let mut model = model_with(&[tab("t1", &pane("a", None))]);
+        model.note_layout_request(&split_request("t1", Some("s1")));
+        model.clear_layout_requests();
+        assert!(
+            marks(&mut model, "t1"),
+            "a fresh connection answers none of the old one's requests"
         );
     }
 

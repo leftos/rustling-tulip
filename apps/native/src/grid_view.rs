@@ -615,8 +615,8 @@ impl RootView {
             .map(str::to_owned)
     }
 
-    fn split_pane(&self, tab_id: &str, pane_id: &str, direction: SplitDirection, before: bool) {
-        self.send(ClientMessage::SplitPane {
+    fn split_pane(&mut self, tab_id: &str, pane_id: &str, direction: SplitDirection, before: bool) {
+        let msg = ClientMessage::SplitPane {
             tab_id: tab_id.to_owned(),
             pane_id: pane_id.to_owned(),
             direction,
@@ -626,7 +626,10 @@ impl RootView {
                 SplitPlace::Second
             },
             new_session_id: None,
-        });
+            request_id: Some(crate::new_request_id()),
+        };
+        self.tabs.note_layout_request(&msg);
+        self.send(msg);
     }
 
     /// Whether any repo is registered, which a repo-tied spawn needs.

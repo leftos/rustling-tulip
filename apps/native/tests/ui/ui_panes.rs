@@ -1189,3 +1189,191 @@ fn move_to_new_tab_offers_no_undo(cx: &mut TestAppContext) {
         "a move into a new tab cannot be taken back"
     );
 }
+
+/// The id a split, move or extract carries.
+fn layout_request_id(msg: &ClientMessage) -> Option<String> {
+    match msg {
+        ClientMessage::SplitPane { request_id, .. }
+        | ClientMessage::MovePane { request_id, .. }
+        | ClientMessage::ExtractToNewTab { request_id, .. } => request_id.clone(),
+        _ => None,
+    }
+}
+
+/// The daemon refuses the request `request_id`.
+fn refuse(h: &mut Harness, request_id: String) {
+    h.send(DaemonMessage::Error {
+        message: "refused".to_owned(),
+        request_id: Some(request_id),
+    });
+}
+
+/// The id of the newest undo entry.
+fn newest_undo(h: &mut Harness) -> u64 {
+    undo_entries(h).first().expect("an undo entry").0
+}
+
+#[gpui::test]
+fn a_rejected_move_unmarks_the_source_tab(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        sessions: vec![session("s2").build()],
+        tabs: vec![
+            tab("t1", &pane("p1", None)),
+            tab(
+                "t2",
+                &split(
+                    SplitDirection::Vertical,
+                    pane("p3", Some("s2")),
+                    pane("p4", None),
+                ),
+            ),
+        ],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.sent();
+    h.right_click_on("pane-header-p1");
+    h.click_on("empty-pane-menu-move");
+    h.click_on("empty-pane-move-t2");
+    let sent = h.sent();
+    let request_id = sent
+        .first()
+        .and_then(layout_request_id)
+        .expect("the move carries a request id");
+    let undo = newest_undo(&mut h);
+
+    refuse(&mut h, request_id);
+    h.sent();
+    h.click_on(&format!("undo-action-{undo}"));
+    let sent = h.sent();
+    assert_eq!(restored(&sent), ["t1", "t2"], "both go back: {sent:?}");
+    assert!(
+        matches!(&sent[0], ClientMessage::RestoreTabSnapshot { tab } if tab.id == "t1"),
+        "the refused move left t1 in place, so it is replaced in place: {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn a_split_then_close_of_the_last_pane_leaves_no_mark(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
+    h.sent();
+    h.click_on("split-right-p1");
+    h.click_on("close-pane-p1");
+    h.click_on("pane-close-only");
+    let sent = h.sent();
+    assert!(
+        matches!(sent.as_slice(), [
+            ClientMessage::SplitPane { tab_id, request_id: Some(_), .. },
+            ClientMessage::ClosePane { pane_id, .. },
+        ] if tab_id == "t1" && pane_id == "p1"),
+        "the close goes out before the split's answer: {sent:?}"
+    );
+
+    // The daemon splits, then closes p1: t1 stays, holding the new pane.
+    h.send(DaemonMessage::TabUpdated {
+        tab: tab(
+            "t1",
+            &split(
+                SplitDirection::Horizontal,
+                pane("p1", Some("s1")),
+                pane("p2", None),
+            ),
+        ),
+    });
+    h.send(DaemonMessage::TabUpdated {
+        tab: tab("t1", &pane("p2", None)),
+    });
+    h.sent();
+    let undo = newest_undo(&mut h);
+    h.click_on(&format!("undo-action-{undo}"));
+    let sent = h.sent();
+    assert!(
+        matches!(sent.as_slice(), [ClientMessage::RestoreTabSnapshot { tab }] if tab.id == "t1"),
+        "t1 was never closing, so it is replaced in place: {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn moving_every_pane_out_marks_the_source(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &grid_fixture(&["s1", "s2", "s3", "s4"]));
+    h.sent();
+    h.click_on("close-pane-p4");
+    h.click_on("pane-close-only");
+    h.send(DaemonMessage::TabUpdated {
+        tab: tab("t1", &grid_of(&["s1", "s2", "s3"])),
+    });
+    let undo = newest_undo(&mut h);
+
+    h.right_click_on("tab-t1");
+    h.click_on("tab-menu-move-panes");
+    h.keys("space");
+    h.click_on("move-panes-pane-p2");
+    h.click_on("move-panes-pane-p3");
+    h.click_on("move-panes-confirm");
+    let sent = h.sent();
+    assert!(
+        sent.iter().any(
+            |m| matches!(m, ClientMessage::ExtractToNewTab { pane_ids, .. }
+            if pane_ids == &["p1", "p2", "p3"])
+        ),
+        "every pane of t1 goes: {sent:?}"
+    );
+
+    h.click_on(&format!("undo-action-{undo}"));
+    let sent = h.sent();
+    assert!(
+        matches!(sent.as_slice(), [ClientMessage::RestoreTab { tab, index }] if tab.id == "t1" && *index == 0),
+        "t1 goes with its last panes, so it comes back: {sent:?}"
+    );
+}
+
+/// Closes the empty pane `p2` of `t1` (leaving an undo entry naming `t1`),
+/// lets the daemon answer, then moves `t1`'s only pane left to a new tab.
+/// Returns the undo entry's id and the extract's request id.
+fn extract_the_only_pane(h: &mut Harness) -> (u64, String) {
+    h.sent();
+    h.click_on("close-pane-p2");
+    h.send(DaemonMessage::TabUpdated {
+        tab: tab("t1", &pane("p1", Some("s1"))),
+    });
+    let undo = newest_undo(h);
+    h.click_on("pane-move-new-tab-p1");
+    let sent = h.sent();
+    let request_id = sent
+        .iter()
+        .find(|msg| matches!(msg, ClientMessage::ExtractToNewTab { source_tab_id, .. } if source_tab_id == "t1"))
+        .and_then(layout_request_id)
+        .expect("the extract carries a request id");
+    (undo, request_id)
+}
+
+#[gpui::test]
+fn moving_the_only_pane_to_a_new_tab_marks_the_source(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &with_empty(session("s1").build()));
+    let (undo, _) = extract_the_only_pane(&mut h);
+    h.click_on(&format!("undo-action-{undo}"));
+    let sent = h.sent();
+    assert!(
+        matches!(sent.as_slice(), [ClientMessage::RestoreTab { tab, index }] if tab.id == "t1" && *index == 0),
+        "t1 goes with its only pane, so it comes back: {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn a_rejected_extract_unmarks_the_source_tab(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &with_empty(session("s1").build()));
+    let (undo, request_id) = extract_the_only_pane(&mut h);
+    refuse(&mut h, request_id);
+    h.sent();
+    h.click_on(&format!("undo-action-{undo}"));
+    let sent = h.sent();
+    assert!(
+        matches!(sent.as_slice(), [ClientMessage::RestoreTabSnapshot { tab }] if tab.id == "t1"),
+        "the refused extract left t1 in place, so it is replaced in place: {sent:?}"
+    );
+}
