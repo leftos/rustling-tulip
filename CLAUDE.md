@@ -102,6 +102,7 @@ The `tools/e2e/fake-claude/` shim (`fake-claude.cmd` + `index.mjs`) replaces the
 | `RUSTLING_TULIP_CODEX` | Path to `codex` binary | `codex` (PATH lookup) |
 | `CODEX_HOME` | Codex's home; the daemon reads it (a spawn's own `CODEX_HOME` row first) to find a Codex session's rollout file and so its conversation id | `%USERPROFILE%\.codex` |
 | `RUSTLING_TULIP_TAILSCALE` | Path to the `tailscale` CLI that `crates/tailnet` runs | `%ProgramFiles%\Tailscale\tailscale.exe`, else `tailscale` (PATH lookup) |
+| `DEEPSEEK_API_KEY` | DeepSeek key; the daemon reads it at each DeepSeek-provider Claude spawn (process environment, then the Windows user scope, `crates/daemon/src/user_env.rs`) and passes it to the child only as `ANTHROPIC_AUTH_TOKEN`; never stored | unset (the spawn is refused) |
 | `RUSTLING_TULIP_SHELL` | Shell used for plain-shell sessions | auto-detect |
 | `RUSTLING_TULIP_CONFIG_DIR` | Config dir override (useful for e2e test isolation) | `%APPDATA%\leftos\rustling-tulip\config\` |
 | `RUSTLING_TULIP_WORKTREES_DIR` | Worktrees root override | `%LOCALAPPDATA%\leftos\rustling-tulip\data\worktrees\` |
