@@ -622,11 +622,109 @@ fn spawn_defaults_trusted_disables_choices_and_leaves_ring(cx: &mut TestAppConte
     h.keys("tab");
     assert_eq!(
         settings_focus(&mut h),
-        Some("list"),
-        "the locked choices left the ring"
+        Some("settings-spawn-provider-anthropic"),
+        "the locked choices left the ring; the provider, which trusted launch does not lock, stays"
     );
-    h.keys("shift-tab");
+    h.keys("tab tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("list"),
+        "the locked Codex choices left the ring too"
+    );
+    h.keys("shift-tab shift-tab shift-tab");
     assert_eq!(settings_focus(&mut h), Some("settings-spawn-trusted"));
+}
+
+#[gpui::test]
+fn claude_provider_default_is_disabled_without_the_feature(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    std::fs::write(
+        dir.path().join("native-ui.json"),
+        serde_json::json!({ "spawn": { "claude_provider": "deepseek" } }).to_string(),
+    )
+    .expect("seed native-ui.json");
+    let mut h = opened(cx, &dir);
+    h.welcome_without_features();
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-spawn-defaults");
+    assert_eq!(
+        h.root(|root, _| root.settings_provider_tip()),
+        Some("Restart the daemon to use DeepSeek: .\\rt.ps1 restart")
+    );
+    assert_eq!(
+        h.root(|root, _| root.settings_provider_choice()),
+        "Anthropic",
+        "the disabled row shows Anthropic over a saved DeepSeek default"
+    );
+    for selector in [
+        "settings-spawn-provider-anthropic",
+        "settings-spawn-provider-deepseek",
+    ] {
+        assert!(
+            h.bounds(selector).origin.x >= px(0.0),
+            "{selector} is still painted, dimmed"
+        );
+    }
+    h.click_on("settings-spawn-provider-anthropic");
+    assert_eq!(
+        saved_ui(&dir)["spawn"]["claude_provider"],
+        "deepseek",
+        "a click on the disabled choice saves nothing"
+    );
+    h.click_on("settings-spawn-approval-plan");
+    assert_eq!(settings_focus(&mut h), Some("settings-spawn-approval-plan"));
+    h.keys("tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("settings-spawn-codex-sandbox-cli-default"),
+        "Tab skips the disabled provider row"
+    );
+    assert_eq!(
+        saved_ui(&dir)["spawn"]["claude_provider"],
+        "deepseek",
+        "the saved default is kept"
+    );
+
+    h.welcome_with_features();
+    assert_eq!(h.root(|root, _| root.settings_provider_tip()), None);
+    assert_eq!(
+        h.root(|root, _| root.settings_provider_choice()),
+        "DeepSeek",
+        "the saved default shows again once a capable daemon connects"
+    );
+}
+
+#[gpui::test]
+fn claude_provider_default_saves_and_seeds_the_dialog(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-spawn-defaults");
+    tab_to(&mut h, "settings-spawn-provider-deepseek");
+    h.keys("enter");
+    assert_eq!(saved_ui(&dir)["spawn"]["claude_provider"], "deepseek");
+    h.click_on("settings-spawn-provider-anthropic");
+    assert_eq!(saved_ui(&dir)["spawn"]["claude_provider"], "anthropic");
+    h.click_on("settings-spawn-provider-deepseek");
+    assert_eq!(saved_ui(&dir)["spawn"]["claude_provider"], "deepseek");
+    h.keys("escape");
+    assert!(!h.root(|root, _| root.settings_open()));
+
+    h.send(DaemonMessage::Repos {
+        repos: vec![support::repo("r1", "C:/r1")],
+    });
+    h.click_on("sidebar-add-session");
+    assert!(h.root(|root, _| root.spawn_dialog_open()));
+    let chosen = h.root(|root, _| root.spawn_dialog_selected());
+    assert!(
+        chosen.contains(&"spawn-provider-deepseek".to_owned()),
+        "a new dialog starts on the saved provider: {chosen:?}"
+    );
+    assert_eq!(
+        h.root(|root, _| root.spawn_dialog_provider_tip()),
+        None,
+        "the fake daemon routes providers"
+    );
 }
 
 #[gpui::test]
@@ -661,6 +759,16 @@ fn tab_walks_spawn_default_choices(cx: &mut TestAppContext) {
     );
     h.keys("tab");
     assert_eq!(settings_focus(&mut h), Some("settings-spawn-approval-plan"));
+    h.keys("tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("settings-spawn-provider-anthropic")
+    );
+    h.keys("tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("settings-spawn-provider-deepseek")
+    );
     h.keys("tab tab");
     assert_eq!(
         settings_focus(&mut h),

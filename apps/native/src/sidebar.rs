@@ -3,10 +3,11 @@
 //! layout. Plain Rust, so every rule is unit-tested; `sidebar_view` renders it.
 
 use protocol::{
-    Agent, AppearanceOverrides, CodexSandbox, ContainerRef, DaemonMessage, PermissionMode,
-    RepoEntry, SessionKind, SessionMode, SessionSnapshot, SessionStatus, TabEntry, WorkspaceEntry,
+    Agent, AppearanceOverrides, AttentionReason, ClaudeProvider, CodexSandbox, ContainerRef,
+    DaemonMessage, PermissionMode, RepoEntry, SessionKind, SessionMode, SessionSnapshot,
+    SessionStatus, TabEntry, WorkspaceEntry,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
@@ -355,6 +356,26 @@ pub struct SpawnDefaults {
     pub permission_mode: Option<PermissionMode>,
     /// Codex's `--sandbox` pre-fill.
     pub codex_sandbox: Option<CodexSandbox>,
+    /// The endpoint a Claude spawn pre-selects; a provider this client does
+    /// not know loads as Anthropic.
+    #[serde(deserialize_with = "deserialize_known_provider")]
+    pub claude_provider: ClaudeProvider,
+}
+
+/// `provider`, with one this client does not know read as Anthropic, so
+/// nothing pre-selects a provider the dialog cannot show.
+pub(crate) fn known_provider(provider: ClaudeProvider) -> ClaudeProvider {
+    match provider {
+        ClaudeProvider::Unknown => ClaudeProvider::Anthropic,
+        known => known,
+    }
+}
+
+/// A stored provider, read through [`known_provider`].
+fn deserialize_known_provider<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<ClaudeProvider, D::Error> {
+    ClaudeProvider::deserialize(deserializer).map(known_provider)
 }
 
 /// Which OS notifications fire. Keys this build does not know, such as
@@ -841,6 +862,11 @@ impl SidebarModel {
     /// The approval mode a spawn dialog opens with for Claude.
     pub fn set_spawn_permission_mode(&mut self, mode: Option<PermissionMode>) {
         self.ui.spawn.permission_mode = mode;
+    }
+
+    /// The provider a spawn dialog opens with for Claude.
+    pub fn set_spawn_claude_provider(&mut self, provider: ClaudeProvider) {
+        self.ui.spawn.claude_provider = provider;
     }
 
     /// The sandbox mode a spawn dialog opens with for Codex.
@@ -2515,6 +2541,7 @@ mod tests {
                 trusted: true,
                 permission_mode: Some(PermissionMode::Plan),
                 codex_sandbox: Some(CodexSandbox::DangerFullAccess),
+                claude_provider: ClaudeProvider::Deepseek,
             },
         };
         save_ui_state(&dir.0, &state).expect("first save");
@@ -2530,6 +2557,7 @@ mod tests {
             trusted: true,
             permission_mode: Some(PermissionMode::AcceptEdits),
             codex_sandbox: Some(CodexSandbox::WorkspaceWrite),
+            claude_provider: ClaudeProvider::Anthropic,
         };
         let state = UiState {
             spawn: defaults,
@@ -2557,13 +2585,51 @@ mod tests {
         model.set_spawn_trusted(true);
         model.set_spawn_permission_mode(Some(PermissionMode::Plan));
         model.set_spawn_codex_sandbox(Some(CodexSandbox::ReadOnly));
+        model.set_spawn_claude_provider(ClaudeProvider::Deepseek);
         assert_eq!(
             model.ui_state().spawn,
             SpawnDefaults {
                 trusted: true,
                 permission_mode: Some(PermissionMode::Plan),
                 codex_sandbox: Some(CodexSandbox::ReadOnly),
+                claude_provider: ClaudeProvider::Deepseek,
             }
+        );
+    }
+
+    #[test]
+    fn an_unknown_provider_loads_as_anthropic() {
+        let dir = TestDir::new("spawn-provider");
+        let deepseek = UiState {
+            spawn: SpawnDefaults {
+                claude_provider: ClaudeProvider::Deepseek,
+                ..SpawnDefaults::default()
+            },
+            ..UiState::default()
+        };
+        save_ui_state(&dir.0, &deepseek).expect("save");
+        assert_eq!(
+            load_ui_state(&dir.0).spawn.claude_provider,
+            ClaudeProvider::Deepseek,
+            "round trips"
+        );
+
+        std::fs::write(
+            dir.0.join(UI_FILE),
+            r#"{ "spawn": { "claude_provider": "bedrock" } }"#,
+        )
+        .expect("write");
+        assert_eq!(
+            load_ui_state(&dir.0).spawn.claude_provider,
+            ClaudeProvider::Anthropic,
+            "a provider this client does not know loads as Anthropic"
+        );
+
+        std::fs::write(dir.0.join(UI_FILE), r#"{ "spawn": { "trusted": true } }"#).expect("write");
+        assert_eq!(
+            load_ui_state(&dir.0).spawn.claude_provider,
+            ClaudeProvider::Anthropic,
+            "a file saved before the provider existed loads Anthropic"
         );
     }
 

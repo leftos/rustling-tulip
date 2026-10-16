@@ -10,15 +10,15 @@ use std::time::{Duration, Instant};
 
 use protocol::env_rows::{self, Reference, is_secret_key};
 use protocol::{
-    Agent, AgentOptions, ClientMessage, CodexSandbox, CursorSandbox, DaemonMessage, EnvName,
-    EnvScope, MemberSpawnPreview, PermissionMode, PinnedMemberWorktree, RepoEntry,
+    Agent, AgentOptions, ClaudeProvider, ClientMessage, CodexSandbox, CursorSandbox, DaemonMessage,
+    EnvName, EnvScope, MemberSpawnPreview, PermissionMode, PinnedMemberWorktree, RepoEntry,
     RootWorktreeEntry, RootWorktreeStatus, SessionMode, SessionSnapshot, SpawnConfig, SpawnRequest,
     SpawnTarget, SuggestTarget, TabEntry, WorkspaceEntry, WorktreeInfo, WorktreeLaunchTarget,
     WorktreeReusePolicy,
 };
 
 use crate::combobox::{ComboRow, Combobox};
-use crate::sidebar::SpawnDefaults;
+use crate::sidebar::{SpawnDefaults, known_provider};
 use crate::spawn_preview::{Preview, PreviewKey, ReuseChoice};
 use crate::spawns::OpenIn;
 
@@ -152,6 +152,48 @@ impl RunMode {
 
 /// The model aliases offered as chips while the runtime is claude.
 pub(crate) const MODEL_ALIASES: [&str; 3] = ["opus", "sonnet", "haiku"];
+
+/// The model field's placeholder: the CLI picks its own model.
+const MODEL_PLACEHOLDER: &str = "CLI default";
+/// The model field's placeholder while Claude is routed to `DeepSeek`.
+const DEEPSEEK_MODEL_PLACEHOLDER: &str = "deepseek-flash";
+
+/// The providers a Claude spawn can pick, Anthropic first.
+pub(crate) const PROVIDER_CHOICES: [ClaudeProvider; 2] =
+    [ClaudeProvider::Anthropic, ClaudeProvider::Deepseek];
+
+/// Why the Provider choice is disabled: the connected daemon does not
+/// route Claude to another provider.
+pub(crate) const PROVIDER_UNSUPPORTED_TIP: &str =
+    "Restart the daemon to use DeepSeek: .\\rt.ps1 restart";
+
+/// A provider's label in the dialog and in Settings.
+pub(crate) fn provider_label(provider: ClaudeProvider) -> &'static str {
+    match provider {
+        ClaudeProvider::Anthropic => "Anthropic",
+        ClaudeProvider::Deepseek => "DeepSeek",
+        ClaudeProvider::Unknown => "Unknown",
+    }
+}
+
+fn provider_part(provider: ClaudeProvider) -> &'static str {
+    match provider {
+        ClaudeProvider::Anthropic => "anthropic",
+        ClaudeProvider::Deepseek => "deepseek",
+        ClaudeProvider::Unknown => "unknown",
+    }
+}
+
+/// The provider a stored spawn ran Claude on, when it was a Claude
+/// interactive or headless spawn: one with no provider field ran on
+/// Anthropic, and one this client does not know reads as Anthropic.
+/// `None` for a plain shell, Codex, Cursor or no stored spawn.
+fn stored_claude_provider(config: Option<&SpawnConfig>) -> Option<ClaudeProvider> {
+    config
+        .filter(|c| c.mode != SessionMode::PlainShell)
+        .and_then(|c| c.agent_options.claude_provider())
+        .map(known_provider)
+}
 
 /// Claude's approval modes, the CLI default first.
 pub(crate) const APPROVAL_CHOICES: [Option<PermissionMode>; 5] = [
@@ -456,6 +498,7 @@ pub(crate) enum Control {
     Close,
     Target(Target),
     Runtime(Runtime),
+    Provider(ClaudeProvider),
     OpenIn(OpenChoice),
     Trusted,
     UseWorktree,
@@ -498,6 +541,7 @@ impl Control {
             Self::Close => "spawn-close".to_owned(),
             Self::Target(target) => format!("spawn-target-{}", target.selector_part()),
             Self::Runtime(runtime) => format!("spawn-agent-{}", runtime.selector_part()),
+            Self::Provider(provider) => format!("spawn-provider-{}", provider_part(*provider)),
             Self::OpenIn(OpenChoice::CurrentTab) => "spawn-placement-current-tab".to_owned(),
             Self::OpenIn(OpenChoice::NewTab) => "spawn-placement-new-tab".to_owned(),
             Self::OpenIn(OpenChoice::Tab(id)) => format!("spawn-placement-tab-{id}"),
@@ -818,6 +862,17 @@ struct Touched {
     run_mode: bool,
 }
 
+/// The Claude provider: the one picked, the saved default it falls back to,
+/// whether the connected daemon can route to another, and whether the user
+/// (or a duplicate's source) chose it.
+#[derive(Debug, Clone, Copy)]
+struct ProviderChoice {
+    chosen: ClaudeProvider,
+    default: ClaudeProvider,
+    supported: bool,
+    touched: bool,
+}
+
 /// The branch name field.
 #[derive(Debug, Default)]
 struct BranchField {
@@ -870,6 +925,7 @@ pub(crate) struct SpawnForm {
     /// The target cannot be changed.
     locked: bool,
     runtime: RuntimeChoice,
+    provider: ProviderChoice,
     tabs: TabChoices,
     open_in: OpenChoice,
     trusted: bool,
@@ -926,6 +982,9 @@ pub(crate) struct FormInputs<'a> {
     pub spawn_defaults: SpawnDefaults,
     /// The target the dialog is held on, and the worktree it is pinned to.
     pub lock: Option<Lock>,
+    /// The connected daemon routes Claude to a chosen provider; without it
+    /// every Claude spawn goes to Anthropic.
+    pub claude_provider_supported: bool,
 }
 
 impl SpawnForm {
@@ -971,6 +1030,12 @@ impl SpawnForm {
                 plain_shell: false,
                 headless: false,
                 touched: Touched::default(),
+            },
+            provider: ProviderChoice {
+                chosen: known_provider(defaults.claude_provider),
+                default: known_provider(defaults.claude_provider),
+                supported: inputs.claude_provider_supported,
+                touched: false,
             },
             tabs: inputs.tabs,
             open_in,
@@ -1082,6 +1147,7 @@ impl SpawnForm {
         self.snap_headless();
         self.trusted = config.dangerously_skip_permissions;
         let options_set = self.apply_agent_options(&config.agent_options);
+        self.apply_source_provider(config);
         self.advanced.model = config.model.clone().unwrap_or_default();
         self.advanced.env = config
             .extra_env
@@ -1094,6 +1160,17 @@ impl SpawnForm {
             self.apply_branch_fields(&config.target, cache, now)
         } else {
             Vec::new()
+        }
+    }
+
+    /// The provider a Claude interactive or headless source ran on, chosen
+    /// over the last spawn and the default. A plain shell carries Anthropic
+    /// options without having picked a provider, so it leaves the choice
+    /// to them.
+    fn apply_source_provider(&mut self, config: &SpawnConfig) {
+        if let Some(provider) = stored_claude_provider(Some(config)) {
+            self.provider.chosen = provider;
+            self.provider.touched = true;
         }
     }
 
@@ -1274,6 +1351,7 @@ impl SpawnForm {
             .or(fallback)
             .unwrap_or(Agent::Claude);
         let plain_shell = is_plain_shell(config);
+        let last_provider = stored_claude_provider(config);
         let touched = self.runtime.touched;
         if !touched.agent {
             self.runtime.agent = agent;
@@ -1281,6 +1359,9 @@ impl SpawnForm {
         if !touched.run_mode {
             self.runtime.plain_shell = plain_shell;
             self.runtime.headless = false;
+        }
+        if !self.provider.touched {
+            self.provider.chosen = last_provider.unwrap_or(self.provider.default);
         }
         self.snap_headless();
     }
@@ -1993,9 +2074,54 @@ impl SpawnForm {
         !self.runtime.plain_shell
     }
 
-    /// Whether the alias chips show (claude only).
+    /// Whether the alias chips show: Claude on Anthropic only, since an
+    /// alias names an Anthropic model.
     pub(crate) fn model_chips_shown(&self) -> bool {
-        self.model_shown() && self.runtime.agent == Agent::Claude
+        self.model_shown()
+            && self.runtime.agent == Agent::Claude
+            && self.provider() != ClaudeProvider::Deepseek
+    }
+
+    /// The model field's placeholder: `DeepSeek`'s model while Claude is
+    /// routed there, else the CLI default.
+    pub(crate) fn model_placeholder(&self) -> &'static str {
+        if self.provider_shown() && self.provider() == ClaudeProvider::Deepseek {
+            DEEPSEEK_MODEL_PLACEHOLDER
+        } else {
+            MODEL_PLACEHOLDER
+        }
+    }
+
+    /// Whether the Provider row shows: Claude, interactive or headless.
+    pub(crate) fn provider_shown(&self) -> bool {
+        self.runtime.agent == Agent::Claude && !self.runtime.plain_shell
+    }
+
+    /// Whether the Provider row can be changed: the daemon routes Claude
+    /// to a chosen provider.
+    pub(crate) fn provider_enabled(&self) -> bool {
+        self.provider.supported
+    }
+
+    /// Whether the daemon now connected routes Claude to a chosen
+    /// provider. The pick is kept, so it applies again once one does.
+    pub(crate) fn set_provider_supported(&mut self, supported: bool) {
+        self.provider.supported = supported;
+    }
+
+    /// Why the Provider row is disabled, while it is.
+    pub(crate) fn provider_tip(&self) -> Option<&'static str> {
+        (!self.provider.supported).then_some(PROVIDER_UNSUPPORTED_TIP)
+    }
+
+    /// The provider a Claude spawn goes to: Anthropic whatever was picked
+    /// when the daemon cannot route elsewhere.
+    pub(crate) fn provider(&self) -> ClaudeProvider {
+        if self.provider.supported {
+            self.provider.chosen
+        } else {
+            ClaudeProvider::Anthropic
+        }
     }
 
     pub(crate) fn permission_mode(&self) -> Option<PermissionMode> {
@@ -2365,6 +2491,9 @@ impl SpawnForm {
             ring.extend(self.targets().into_iter().map(Control::Target));
         }
         ring.extend(Runtime::ALL.into_iter().map(Control::Runtime));
+        if self.provider_shown() && self.provider_enabled() {
+            ring.extend(PROVIDER_CHOICES.map(Control::Provider));
+        }
         if self.tabs.current.is_some() {
             ring.push(Control::OpenIn(OpenChoice::CurrentTab));
         }
@@ -2586,7 +2715,8 @@ impl SpawnForm {
             | Control::Model
             | Control::EnvKey(_)
             | Control::EnvValue(_) => Vec::new(),
-            Control::RunMode(_)
+            Control::Provider(_)
+            | Control::RunMode(_)
             | Control::AdvancedToggle
             | Control::ModelChip(_)
             | Control::Approval(_)
@@ -2605,11 +2735,16 @@ impl SpawnForm {
         Outcome::Stay(messages)
     }
 
-    /// A press on a run-mode or Advanced control. The options trusted
-    /// launch overrides do not change while it is on.
+    /// A press on a provider, run-mode or Advanced control. The options
+    /// trusted launch overrides do not change while it is on, nor the
+    /// provider while the daemon cannot route to it.
     fn press_option(&mut self, control: &Control) {
         let locked = self.trusted();
         match control {
+            Control::Provider(provider) if self.provider_enabled() => {
+                self.provider.chosen = *provider;
+                self.provider.touched = true;
+            }
             Control::RunMode(mode) => self.set_run_mode(*mode),
             Control::AdvancedToggle => self.advanced.open = !self.advanced.open,
             Control::ModelChip(alias) => (*alias).clone_into(&mut self.advanced.model),
@@ -2744,13 +2879,20 @@ impl SpawnForm {
 
     /// The agent's options. A plain shell or a trusted launch sends no
     /// approval mode or sandbox; cursor's plan mode goes whenever an agent
-    /// runs.
+    /// runs; a provider goes only where the Provider row shows.
     fn agent_options(&self) -> AgentOptions {
         let plain = self.runtime.plain_shell;
         let suppress = plain || self.trusted();
         let advanced = &self.advanced;
         match self.runtime.agent {
-            Agent::Claude => AgentOptions::claude(advanced.permission_mode.filter(|_| !suppress)),
+            Agent::Claude => AgentOptions::Claude {
+                permission_mode: advanced.permission_mode.filter(|_| !suppress),
+                provider: if self.provider_shown() {
+                    self.provider()
+                } else {
+                    ClaudeProvider::Anthropic
+                },
+            },
             Agent::Codex => AgentOptions::Codex {
                 sandbox: advanced.codex_sandbox.filter(|_| !suppress),
             },
@@ -3058,6 +3200,7 @@ mod tests {
         tabs: TabChoices,
         spawn_defaults: SpawnDefaults,
         lock: Option<Lock>,
+        provider_supported: bool,
     }
 
     impl Setup {
@@ -3069,6 +3212,7 @@ mod tests {
                 tabs: tabs(Some("t1"), &[]),
                 spawn_defaults: SpawnDefaults::default(),
                 lock: None,
+                provider_supported: true,
             }
         }
 
@@ -3087,6 +3231,7 @@ mod tests {
                     tabs: self.tabs.clone(),
                     spawn_defaults: self.spawn_defaults,
                     lock: self.lock.clone(),
+                    claude_provider_supported: self.provider_supported,
                 },
                 cache,
                 Instant::now(),
@@ -3105,6 +3250,7 @@ mod tests {
             trusted: true,
             permission_mode: Some(PermissionMode::Plan),
             codex_sandbox: Some(CodexSandbox::WorkspaceWrite),
+            claude_provider: ClaudeProvider::Anthropic,
         }
     }
 
@@ -3481,6 +3627,7 @@ mod tests {
                 tabs: TabChoices::default(),
                 spawn_defaults: SpawnDefaults::default(),
                 lock: None,
+                claude_provider_supported: true,
             },
             &mut BranchCache::default(),
             start,
@@ -3607,6 +3754,7 @@ mod tests {
             tabs: tabs(Some("t1"), &[]),
             spawn_defaults: SpawnDefaults::default(),
             lock: None,
+            provider_supported: true,
         };
         let (mut form, sent) = setup.open(&mut BranchCache::default());
         assert_eq!(form.target(), &Target::Workspace("w1".to_owned()));
@@ -3647,6 +3795,7 @@ mod tests {
             tabs: tabs(None, &[]),
             spawn_defaults: SpawnDefaults::default(),
             lock: None,
+            provider_supported: true,
         };
         let mut form = setup.open(&mut BranchCache::default()).0;
         let Outcome::Stay(sent) = press(&mut form, &Control::Mode(WorktreeMode::Existing)) else {
@@ -3794,6 +3943,8 @@ mod tests {
                 Control::Runtime(Runtime::Agent(Agent::Codex)),
                 Control::Runtime(Runtime::Agent(Agent::Cursor)),
                 Control::Runtime(Runtime::PlainShell),
+                Control::Provider(ClaudeProvider::Anthropic),
+                Control::Provider(ClaudeProvider::Deepseek),
                 Control::OpenIn(OpenChoice::CurrentTab),
                 Control::OpenIn(OpenChoice::NewTab),
                 Control::UseWorktree,
@@ -4675,6 +4826,7 @@ mod tests {
             tabs: TabChoices::default(),
             spawn_defaults: SpawnDefaults::default(),
             lock: None,
+            provider_supported: true,
         }
         .open(&mut BranchCache::default())
         .0;
@@ -4742,6 +4894,7 @@ mod tests {
                     tabs: TabChoices::default(),
                     spawn_defaults: SpawnDefaults::default(),
                     lock: unknown.lock.clone(),
+                    claude_provider_supported: true,
                 },
                 &mut BranchCache::default(),
                 Instant::now(),
@@ -5043,5 +5196,276 @@ mod tests {
         let mut unknown = entry;
         unknown.launch = Some(WorktreeLaunchTarget::Unknown);
         assert!(Lock::from_group(&unknown).is_none());
+    }
+
+    /// A stored Claude spawn of `mode` routed to `DeepSeek`.
+    fn deepseek_config(mode: &str) -> SpawnConfig {
+        serde_json::from_value(json!({
+            "target": { "kind": "standalone" },
+            "mode": mode,
+            "dangerously_skip_permissions": false,
+            "agent_options": { "kind": "claude", "provider": "deepseek" },
+            "model": null,
+        }))
+        .expect("spawn config fixture")
+    }
+
+    fn provider_defaults(provider: ClaudeProvider) -> SpawnDefaults {
+        SpawnDefaults {
+            claude_provider: provider,
+            ..SpawnDefaults::default()
+        }
+    }
+
+    /// The provider the form's spawn request carries; `None` for Codex and
+    /// Cursor.
+    fn sent_provider(form: &SpawnForm) -> Option<ClaudeProvider> {
+        form.build_request().0.agent_options.claude_provider()
+    }
+
+    fn provider_stops(form: &SpawnForm) -> Vec<Control> {
+        form.controls()
+            .into_iter()
+            .filter(|control| matches!(control, Control::Provider(_)))
+            .collect()
+    }
+
+    #[test]
+    fn a_deepseek_duplicate_prefill_keeps_the_provider() {
+        let form = duplicated(stored_config(&json!({
+            "agent_options": { "kind": "claude", "permission_mode": null, "provider": "deepseek" },
+        })));
+        assert_eq!(form.provider(), ClaudeProvider::Deepseek);
+        assert_eq!(sent_provider(&form), Some(ClaudeProvider::Deepseek));
+
+        let mut r1 = repo("r1");
+        r1.last_spawn_config = Some(deepseek_config("interactive"));
+        let mut setup = duplicate_setup(r1);
+        setup.spawn_defaults = provider_defaults(ClaudeProvider::Deepseek);
+        let anthropic = duplicate_on(&setup, stored_config(&json!({}))).0;
+        assert_eq!(
+            anthropic.provider(),
+            ClaudeProvider::Anthropic,
+            "an Anthropic source beats the last spawn and the default"
+        );
+    }
+
+    #[test]
+    fn the_default_seeds_the_form() {
+        let form = Setup::repos(vec![repo("r1")])
+            .defaults(provider_defaults(ClaudeProvider::Deepseek))
+            .open(&mut BranchCache::default())
+            .0;
+        assert_eq!(form.provider(), ClaudeProvider::Deepseek);
+        assert_eq!(sent_provider(&form), Some(ClaudeProvider::Deepseek));
+        assert!(form.provider_shown() && form.provider_enabled());
+        assert_eq!(form.provider_tip(), None);
+        let ring = form.controls();
+        let after_runtime = ring
+            .iter()
+            .position(|c| *c == Control::Runtime(Runtime::PlainShell))
+            .map(|at| at + 1);
+        assert_eq!(
+            ring.iter()
+                .position(|c| *c == Control::Provider(ClaudeProvider::Anthropic)),
+            after_runtime,
+            "the row's stops follow the runtime line"
+        );
+        assert_eq!(
+            provider_stops(&form),
+            PROVIDER_CHOICES.map(Control::Provider)
+        );
+
+        let unset = open_repo(repo("r1"));
+        assert_eq!(unset.provider(), ClaudeProvider::Anthropic);
+        let unknown = Setup::repos(vec![repo("r1")])
+            .defaults(provider_defaults(ClaudeProvider::Unknown))
+            .open(&mut BranchCache::default())
+            .0;
+        assert_eq!(
+            unknown.provider(),
+            ClaudeProvider::Anthropic,
+            "an unknown default seeds Anthropic"
+        );
+    }
+
+    #[test]
+    fn the_last_spawn_provider_beats_the_default() {
+        let mut r1 = repo("r1");
+        r1.last_spawn_config = Some(deepseek_config("headless"));
+        assert_eq!(open_repo(r1.clone()).provider(), ClaudeProvider::Deepseek);
+
+        let mut form = Setup::repos(vec![repo("r0"), r1])
+            .open(&mut BranchCache::default())
+            .0;
+        assert_eq!(form.provider(), ClaudeProvider::Anthropic);
+        press(&mut form, &Control::Target(Target::Repo("r1".to_owned())));
+        assert_eq!(
+            form.provider(),
+            ClaudeProvider::Deepseek,
+            "a target switch follows the new target's last spawn"
+        );
+        press(&mut form, &Control::Provider(ClaudeProvider::Anthropic));
+        press(&mut form, &Control::Target(Target::Repo("r0".to_owned())));
+        press(&mut form, &Control::Target(Target::Repo("r1".to_owned())));
+        assert_eq!(
+            form.provider(),
+            ClaudeProvider::Anthropic,
+            "a chosen provider holds across target switches"
+        );
+    }
+
+    /// The provider a dialog over `last` opens on, with a `DeepSeek` default.
+    fn seeded_over_deepseek_default(last: SpawnConfig) -> ClaudeProvider {
+        let mut r1 = repo("r1");
+        r1.last_spawn_config = Some(last);
+        Setup::repos(vec![r1])
+            .defaults(provider_defaults(ClaudeProvider::Deepseek))
+            .open(&mut BranchCache::default())
+            .0
+            .provider()
+    }
+
+    #[test]
+    fn a_plain_shell_duplicate_does_not_pin_the_provider() {
+        let mut setup = duplicate_setup(repo("r1"));
+        setup.spawn_defaults = provider_defaults(ClaudeProvider::Deepseek);
+        let mut form = duplicate_on(
+            &setup,
+            stored_config(&json!({ "mode": "plain_shell", "agent_options": { "kind": "claude" } })),
+        )
+        .0;
+        assert_eq!(form.runtime(), Runtime::PlainShell);
+        press(&mut form, &Control::Runtime(Runtime::Agent(Agent::Claude)));
+        assert_eq!(
+            form.provider(),
+            ClaudeProvider::Deepseek,
+            "a plain shell's Anthropic options do not pin the provider"
+        );
+    }
+
+    #[test]
+    fn a_last_anthropic_spawn_beats_a_deepseek_default() {
+        assert_eq!(
+            seeded_over_deepseek_default(config("claude", "interactive")),
+            ClaudeProvider::Anthropic,
+            "a Claude last spawn with no provider field went to Anthropic"
+        );
+        assert_eq!(
+            seeded_over_deepseek_default(config("claude", "headless")),
+            ClaudeProvider::Anthropic
+        );
+        let mut unknown = config("claude", "interactive");
+        unknown.agent_options = AgentOptions::Claude {
+            permission_mode: None,
+            provider: ClaudeProvider::Unknown,
+        };
+        assert_eq!(
+            seeded_over_deepseek_default(unknown),
+            ClaudeProvider::Anthropic,
+            "an unknown last provider counts as Anthropic"
+        );
+        for (kind, mode) in [
+            ("claude", "plain_shell"),
+            ("codex", "interactive"),
+            ("cursor", "interactive"),
+        ] {
+            assert_eq!(
+                seeded_over_deepseek_default(config(kind, mode)),
+                ClaudeProvider::Deepseek,
+                "a {kind} {mode} last spawn leaves the default"
+            );
+        }
+    }
+
+    #[test]
+    fn codex_cursor_and_plain_shell_send_no_provider() {
+        let mut form = Setup::repos(vec![repo("r1")])
+            .defaults(provider_defaults(ClaudeProvider::Deepseek))
+            .open(&mut BranchCache::default())
+            .0;
+        for agent in [Agent::Codex, Agent::Cursor] {
+            press(&mut form, &Control::Runtime(Runtime::Agent(agent)));
+            assert!(!form.provider_shown(), "{agent:?} hides the row");
+            assert_eq!(provider_stops(&form), Vec::<Control>::new());
+            assert_eq!(sent_provider(&form), None, "{agent:?} has no provider");
+        }
+        press(&mut form, &Control::Runtime(Runtime::Agent(Agent::Claude)));
+        press(&mut form, &Control::Runtime(Runtime::PlainShell));
+        assert!(!form.provider_shown(), "a plain shell hides the row");
+        assert_eq!(provider_stops(&form), Vec::<Control>::new());
+        assert_eq!(
+            sent_provider(&form),
+            Some(ClaudeProvider::Anthropic),
+            "a plain shell never carries DeepSeek"
+        );
+        press(&mut form, &Control::Runtime(Runtime::Agent(Agent::Claude)));
+        press(&mut form, &Control::RunMode(RunMode::Headless));
+        assert!(form.provider_shown(), "headless Claude shows the row");
+        assert_eq!(sent_provider(&form), Some(ClaudeProvider::Deepseek));
+    }
+
+    #[test]
+    fn switching_claude_codex_claude_keeps_the_choice() {
+        let mut form = open_repo(repo("r1"));
+        press(&mut form, &Control::Provider(ClaudeProvider::Deepseek));
+        press(&mut form, &Control::Runtime(Runtime::Agent(Agent::Codex)));
+        press(&mut form, &Control::Runtime(Runtime::Agent(Agent::Claude)));
+        assert_eq!(form.provider(), ClaudeProvider::Deepseek);
+        assert_eq!(sent_provider(&form), Some(ClaudeProvider::Deepseek));
+    }
+
+    #[test]
+    fn an_unsupported_daemon_sends_anthropic() {
+        let mut r1 = repo("r1");
+        r1.last_spawn_config = Some(deepseek_config("interactive"));
+        let mut setup =
+            Setup::repos(vec![r1]).defaults(provider_defaults(ClaudeProvider::Deepseek));
+        setup.provider_supported = false;
+        let mut form = setup.open(&mut BranchCache::default()).0;
+        assert!(form.provider_shown(), "the row still shows");
+        assert!(!form.provider_enabled(), "but disabled");
+        assert_eq!(
+            form.provider_tip(),
+            Some("Restart the daemon to use DeepSeek: .\\rt.ps1 restart")
+        );
+        assert_eq!(form.provider(), ClaudeProvider::Anthropic);
+        assert!(
+            provider_stops(&form).is_empty(),
+            "the disabled row is out of the ring"
+        );
+        press(&mut form, &Control::Provider(ClaudeProvider::Deepseek));
+        assert_eq!(sent_provider(&form), Some(ClaudeProvider::Anthropic));
+
+        let prefill = Prefill {
+            config: Some(stored_config(&json!({
+                "agent_options": { "kind": "claude", "provider": "deepseek" },
+            }))),
+            open_in: None,
+        };
+        form.apply_prefill(&prefill, &BranchCache::default(), Instant::now());
+        assert_eq!(
+            sent_provider(&form),
+            Some(ClaudeProvider::Anthropic),
+            "a DeepSeek source duplicates as Anthropic"
+        );
+    }
+
+    #[test]
+    fn deepseek_hides_the_alias_chips_and_sets_the_placeholder() {
+        let mut form = open_repo(repo("r1"));
+        press(&mut form, &Control::AdvancedToggle);
+        assert!(form.model_chips_shown());
+        assert_eq!(form.model_placeholder(), "CLI default");
+        press(&mut form, &Control::Provider(ClaudeProvider::Deepseek));
+        assert!(!form.model_chips_shown());
+        assert!(!form.controls().contains(&Control::ModelChip("opus")));
+        assert_eq!(form.model_placeholder(), "deepseek-flash");
+        press(&mut form, &Control::Runtime(Runtime::Agent(Agent::Codex)));
+        assert_eq!(
+            form.model_placeholder(),
+            "CLI default",
+            "Codex's model is not DeepSeek's"
+        );
     }
 }

@@ -14,7 +14,9 @@ use gpui::{
     FontWeight, Keystroke, MouseButton, MouseDownEvent, Stateful, Subscription, Window, div,
     prelude::*, px,
 };
-use protocol::{ClientMessage, CodexSandbox, PermissionMode};
+use protocol::{
+    ClaudeProvider, ClientMessage, CodexSandbox, FEATURE_CLAUDE_PROVIDER, PermissionMode,
+};
 
 use crate::appearance;
 use crate::appearance_stops::{AppearanceStop, after_lost};
@@ -26,7 +28,8 @@ use crate::palette::{CHIP, HOVER, LINE, RAISED, SUBTLE, TEXT_2, TRANSPARENT};
 use crate::session_menu::{backdrop, dialog_button};
 use crate::sidebar::{LeafDensity, NotifySkip, SidebarView};
 use crate::spawn_form::{
-    APPROVAL_CHOICES, CODEX_SANDBOX_CHOICES, approval_label, codex_sandbox_label,
+    APPROVAL_CHOICES, CODEX_SANDBOX_CHOICES, PROVIDER_CHOICES, PROVIDER_UNSUPPORTED_TIP,
+    approval_label, codex_sandbox_label, provider_label,
 };
 use crate::spawn_view::{
     CLAUDE_LOCKED, CODEX_LOCKED, Look, checkbox_row, choice_button, close_button, dialog_card,
@@ -35,7 +38,7 @@ use crate::spawn_view::{
 use crate::tabs::tab_session_counts;
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
 use crate::window_title::compute_title;
-use crate::{RootView, TEXT};
+use crate::{RootView, TEXT, tooltip};
 
 /// The tab list's width, its padding and edge included.
 const TAB_LIST_WIDTH: f32 = 150.0;
@@ -143,6 +146,7 @@ pub(crate) enum SettingsControl {
     NotifySkip(NotifySkip),
     SpawnTrusted,
     SpawnApproval(Option<PermissionMode>),
+    SpawnProvider(ClaudeProvider),
     SpawnCodexSandbox(Option<CodexSandbox>),
     WorktreesPath,
     WorktreesBrowse,
@@ -177,6 +181,11 @@ impl SettingsControl {
                     "settings-spawn-approval-bypass-permissions"
                 }
                 Some(PermissionMode::Plan) => "settings-spawn-approval-plan",
+            },
+            Self::SpawnProvider(provider) => match provider {
+                ClaudeProvider::Anthropic => "settings-spawn-provider-anthropic",
+                ClaudeProvider::Deepseek => "settings-spawn-provider-deepseek",
+                ClaudeProvider::Unknown => "settings-spawn-provider-unknown",
             },
             Self::SpawnCodexSandbox(sandbox) => match sandbox {
                 None => "settings-spawn-codex-sandbox-cli-default",
@@ -259,6 +268,31 @@ impl RootView {
         self.appearance_editor
             .as_ref()
             .is_some_and(|editor| editor.level == Level::App)
+    }
+
+    /// Why the Spawn defaults "Claude provider" row is disabled, while
+    /// Settings is open and it is.
+    #[must_use]
+    pub fn settings_provider_tip(&self) -> Option<&'static str> {
+        (self.settings_open() && !self.claude_provider_supported())
+            .then_some(PROVIDER_UNSUPPORTED_TIP)
+    }
+
+    /// The label of the "Claude provider" choice shown selected.
+    #[must_use]
+    pub fn settings_provider_choice(&self) -> &'static str {
+        provider_label(self.shown_default_provider())
+    }
+
+    /// The "Claude provider" choice shown selected: the saved default, or
+    /// Anthropic while the daemon cannot route elsewhere, as the spawn
+    /// dialog shows. The saved default is kept for a capable daemon.
+    fn shown_default_provider(&self) -> ClaudeProvider {
+        if self.claude_provider_supported() {
+            self.sidebar.ui_state().spawn.claude_provider
+        } else {
+            ClaudeProvider::Anthropic
+        }
     }
 
     /// The Settings tabs' labels, in the list's order.
@@ -366,15 +400,28 @@ impl RootView {
         }
     }
 
-    /// The Spawn defaults tab's controls: the toggle, then the two choice
-    /// rows while trusted launch has not locked them.
+    /// The Spawn defaults tab's controls in drawing order: the toggle, the
+    /// approval choices while trusted launch has not locked them, the
+    /// provider choices while the daemon can route to another provider, and
+    /// the sandbox choices while trusted launch has not locked them.
     fn spawn_default_controls(&self) -> Vec<SettingsControl> {
+        let unlocked = !self.sidebar.ui_state().spawn.trusted;
         let mut controls = vec![SettingsControl::SpawnTrusted];
-        if !self.sidebar.ui_state().spawn.trusted {
+        if unlocked {
             controls.extend(APPROVAL_CHOICES.map(SettingsControl::SpawnApproval));
+        }
+        if self.claude_provider_supported() {
+            controls.extend(PROVIDER_CHOICES.map(SettingsControl::SpawnProvider));
+        }
+        if unlocked {
             controls.extend(CODEX_SANDBOX_CHOICES.map(SettingsControl::SpawnCodexSandbox));
         }
         controls
+    }
+
+    /// Whether the connected daemon routes Claude to a chosen provider.
+    fn claude_provider_supported(&self) -> bool {
+        self.conn.supports(FEATURE_CLAUDE_PROVIDER)
     }
 
     /// The control holding the keyboard, if one does; none while Settings
@@ -502,6 +549,9 @@ impl RootView {
             SettingsControl::NotifySkip(skip) => self.set_notify_skip(skip, cx),
             SettingsControl::SpawnTrusted => self.toggle_spawn_trusted(cx),
             SettingsControl::SpawnApproval(mode) => self.set_spawn_permission_mode(mode, cx),
+            SettingsControl::SpawnProvider(provider) => {
+                self.set_spawn_claude_provider(provider, cx);
+            }
             SettingsControl::SpawnCodexSandbox(sandbox) => {
                 self.set_spawn_codex_sandbox(sandbox, cx);
             }
@@ -831,6 +881,17 @@ impl RootView {
 
     fn set_spawn_permission_mode(&mut self, mode: Option<PermissionMode>, cx: &mut Context<Self>) {
         self.sidebar.set_spawn_permission_mode(mode);
+        self.save_ui();
+        cx.notify();
+    }
+
+    /// Saves the provider a Claude spawn pre-selects; nothing while the
+    /// daemon cannot route to another provider.
+    fn set_spawn_claude_provider(&mut self, provider: ClaudeProvider, cx: &mut Context<Self>) {
+        if !self.claude_provider_supported() {
+            return;
+        }
+        self.sidebar.set_spawn_claude_provider(provider);
         self.save_ui();
         cx.notify();
     }
@@ -1207,6 +1268,12 @@ impl RootView {
             focused,
             cx,
         );
+        let provider = provider_row(
+            self.shown_default_provider(),
+            self.claude_provider_supported(),
+            focused,
+            cx,
+        );
         let sandbox = choice_row(
             "Codex sandbox mode",
             &CODEX_SANDBOX_CHOICES.map(|sandbox| {
@@ -1230,6 +1297,7 @@ impl RootView {
                  Codex and Cursor also bypass sandboxing.",
             ))
             .child(approval)
+            .child(provider)
             .child(sandbox);
         vec![section.into_any_element()]
     }
@@ -1480,6 +1548,44 @@ fn toggle(
     let row = checkbox_row(control.selector(), checked, focused == Some(control), label)
         .on_click(press(control, cx));
     div().flex().child(row)
+}
+
+/// The "Claude provider" row; without daemon support its choices are dimmed,
+/// inert and out of the ring, and a tooltip says how to get it.
+fn provider_row(
+    chosen: ClaudeProvider,
+    supported: bool,
+    focused: Option<SettingsControl>,
+    cx: &mut Context<RootView>,
+) -> AnyElement {
+    let buttons = PROVIDER_CHOICES
+        .into_iter()
+        .map(|provider| {
+            let control = SettingsControl::SpawnProvider(provider);
+            let look = Look {
+                selected: provider == chosen,
+                focused: focused == Some(control),
+                enabled: supported,
+            };
+            choice_button(
+                control.selector().to_owned(),
+                provider_label(provider),
+                look,
+                press(control, cx),
+            )
+            .into_any_element()
+        })
+        .collect();
+    let row = div()
+        .id("settings-spawn-provider")
+        .flex()
+        .child(segmented(buttons));
+    let row = if supported {
+        row
+    } else {
+        row.tooltip(tooltip(PROVIDER_UNSUPPORTED_TIP))
+    };
+    field("Claude provider").child(row).into_any_element()
 }
 
 /// A labelled row of segmented choices, laid out as the spawn dialog's;
