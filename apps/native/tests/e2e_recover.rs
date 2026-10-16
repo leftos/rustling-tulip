@@ -13,6 +13,7 @@
 #[expect(dead_code, reason = "each spec file uses its own share of the helper")]
 mod support;
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -62,6 +63,8 @@ const SECRET_SERVICE: &str = "rustling-tulip";
 /// How many hex characters of the config dir's hash an isolated service
 /// carries, as `crates/daemon/src/env_secrets.rs` cuts it.
 const SERVICE_HASH_LEN: usize = 8;
+/// The endpoint the daemon's provider table routes a `DeepSeek` session to.
+const DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com/anthropic";
 
 /// Asserts the shim's runtime is on `PATH`: `fake-claude` runs under `node`.
 fn require_node() {
@@ -982,6 +985,135 @@ fn live_a_sealed_secret_reaches_the_child_and_no_file(cx: &mut TestAppContext) {
     let sentinel = format!("rt-sentinel-{}", uuid::Uuid::new_v4().simple());
     let history_id = recover_sealed_session(&mut h, &client, &daemon, &repo_id, &sentinel);
     assert_sealed_on_disk(&daemon, &history_id, &sentinel);
+}
+
+/// Types `/env <name>` into `session_id` and waits, for [`ECHO`], for
+/// fake-claude's `RT_ENV <name> <report>` answer. Unlike
+/// [`wait_scrollback_contains`] it never answers the pseudo console's cursor
+/// query: the session has printed its banner, so that query was answered, and
+/// a second answer would reach fake-claude as input ahead of the next line.
+fn wait_env_report(
+    h: &mut Harness<'_>,
+    client: &LiveClient,
+    session_id: &str,
+    name: &str,
+    report: &str,
+) {
+    type_line(client, session_id, &format!("/env {name}"));
+    let want = format!("RT_ENV {name} {report}");
+    let deadline = Instant::now() + ECHO;
+    for attempt in 0.. {
+        let request_id = format!("env-{session_id}-{name}-{attempt}");
+        let text = scrollback(h, client, session_id, &request_id);
+        if text.contains(&want) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out after {ECHO:?} waiting for {want:?} in the scrollback; it holds {text:?}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// A `DeepSeek` session sees the provider table's routing, the key only as
+/// `ANTHROPIC_AUTH_TOKEN` (compared by hash) and no `ANTHROPIC_API_KEY`; it
+/// loses its tracer and, recovered as Claude, sees the same routing again.
+/// Returns the ended session's id, which names its history entry.
+fn recover_deepseek_session(
+    h: &mut Harness<'_>,
+    client: &LiveClient,
+    daemon: &LiveDaemon,
+    repo_id: &str,
+    key: &str,
+) -> String {
+    client.send(spawn_agent_in_place(
+        repo_id,
+        &json!({ "kind": "claude", "provider": "deepseek" }),
+        &[],
+    ));
+    let session = wait_snapshot(h, client, "the deepseek session's snapshot", |s| {
+        s.mode == SessionMode::Interactive
+    });
+    let conversation = session
+        .claude_session_id
+        .clone()
+        .expect("a spawned claude session carries its conversation id");
+    let cwd = &session
+        .members
+        .first()
+        .expect("an in-place session has a member")
+        .worktree_path;
+    write_transcript(daemon, cwd, &conversation);
+    assert_deepseek_routing(h, client, &session.id, key);
+
+    kill_session_tracer(h, daemon, &session.id);
+    wait_tracer_lost(h, daemon, &session.id);
+    let results = recover(
+        h,
+        client,
+        "recover-deepseek",
+        RecoverItem {
+            history_id: session.id.clone(),
+            conversation_id: Some(conversation),
+            how: RecoverAs::Claude,
+        },
+    );
+    let new_id = recovered_session(&results, &session.id);
+    wait_snapshot(
+        h,
+        client,
+        "the recovered deepseek session's snapshot",
+        |s| s.id == new_id,
+    );
+    assert_deepseek_routing(h, client, &new_id, key);
+    session.id
+}
+
+/// Waits for `session_id`'s banner, then asserts it sees the provider table's
+/// routing: `key` only as `ANTHROPIC_AUTH_TOKEN` (compared by hash), no
+/// `ANTHROPIC_API_KEY`, and the table's endpoint and session marker.
+fn assert_deepseek_routing(h: &mut Harness<'_>, client: &LiveClient, session_id: &str, key: &str) {
+    wait_scrollback_contains(h, client, session_id, "[fake-claude] ready");
+    let token = format!("sha256={}", sha256_hex(key.as_bytes()));
+    wait_env_report(h, client, session_id, "ANTHROPIC_AUTH_TOKEN", &token);
+    wait_env_report(h, client, session_id, "ANTHROPIC_API_KEY", "unset");
+    wait_env_report(
+        h,
+        client,
+        session_id,
+        "ANTHROPIC_BASE_URL",
+        DEEPSEEK_BASE_URL,
+    );
+    wait_env_report(h, client, session_id, "CLAUDE_DEEPSEEK_SESSION", "1");
+}
+
+#[gpui::test]
+#[ignore = "e2e: run via .\\rt.ps1 native-e2e"]
+fn deepseek_routing_reaches_the_child_and_the_key_reaches_no_file(cx: &mut TestAppContext) {
+    require_node();
+    let key = format!("rt-deepseek-key-{}", uuid::Uuid::new_v4().simple());
+    let anthropic_key = format!("rt-anthropic-key-{}", uuid::Uuid::new_v4().simple());
+    let daemon = LiveDaemon::start_with_env(
+        "deepseek",
+        &[
+            ("DEEPSEEK_API_KEY", OsString::from(&key)),
+            ("ANTHROPIC_API_KEY", OsString::from(&anthropic_key)),
+        ],
+    );
+    let repo = daemon.git_fixture();
+    let (mut h, client) = Harness::open_live(cx, &daemon);
+    wait_connected(&mut h, &client, &daemon);
+
+    let repo_id = register_repo(&mut h, &client, &daemon, &repo);
+    let history_id = recover_deepseek_session(&mut h, &client, &daemon, &repo_id, &key);
+    let config = daemon.config_dir();
+    assert!(
+        history_entry(&daemon, &history_id).is_some(),
+        "the ended session's history entry is on disk to search"
+    );
+    assert_no_file_holds(&config, key.as_bytes());
+    assert_no_file_holds(&config, anthropic_key.as_bytes());
 }
 
 #[gpui::test]
