@@ -90,6 +90,7 @@ Start with [docs/architecture.md](docs/architecture.md) for how the pieces fit a
 - **Own-agent recovery**: recovering a Codex or Cursor history entry as a session of the same CLI in the same folder, resuming its recorded conversation when that CLI can, else a fresh run.
 - **P1.1, P4.4b, …**: native client item ids, as phase number and item number (a letter for a split item); the open ones' rulings are in `docs/plans/native-client.md`.
 - **Parity checklist**: `docs/plans/native-client-parity.md`, every user-visible Tauri feature with its source file (paths on the `tauri-last` tag); the native client reaches parity when it is all ticked.
+- **Peer identity**: the tailnet peer's whois identity (node, user and stable id) attached to a connection that arrives on the tailnet listener.
 - **Petal**: the approved refreshed look for the native client (graphite ground, tulip-coral accent, status shapes), its settled design in `docs/native-client.md` ("Petal chrome", "Theme and fonts").
 - **PF, AT, SV, RD, AR, OT**: idea ids in `docs/plans/off-orca.md` (files across machines, attention streams, session views, remote desktop, artifacts by account, absorbing ops-tower).
 - **Plan snapshot**: `docs/plans/MAIN.md`, generated from the Linear team's issues, one line an item, by wave in working order; never edited by hand.
@@ -113,6 +114,7 @@ Start with [docs/architecture.md](docs/architecture.md) for how the pieces fit a
 - **`status_since`**: the daemon's stamp of a session's last status change, on its snapshot and kept across a reattach; Needs You measures waits from it.
 - **Subplan**: a `docs/plans/*.md` design file holding the design and rulings for open items, linked from their issues and deleted once nothing open links it and its durable text is promoted into `docs/`.
 - **Summary view**: the planned third view of a session beside terminal and chat, one summarizer line per stretch of work (RT-111).
+- **Tailnet**: the user's Tailscale network; the daemon's tailnet listener serves TLS on the host's tailnet addresses (port 8787) with a `tailscale cert` certificate, and `crates/tailnet` wraps the `tailscale` CLI; see `docs/plans/remote-access.md`.
 - **tauri branch**: the branch holding the earlier, retired Tauri desktop app, cut from the `tauri-last` tag and kept as history. Nothing is fixed or built there, and daemon fixes are not cherry-picked to it.
 - **Test map**: `tools/test-map.json`, which maps source paths to the nextest filterset that tests them (`rows`), and lists the `central` files that run the full suite and the paths to `ignore`; `.\rt.ps1 test -Validate` checks it.
 - **Test mode**: whether each landed change runs the full suite (`stable`) or only the fast checks and its reached tests (`unstable`, this repo's mode until the stable milestone, Wave 3's cutover); the full suite still runs before a push and before the release step.

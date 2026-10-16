@@ -17,8 +17,10 @@ use tokio::io::{AsyncRead, AsyncReadExt as _};
 /// The timeout for `whois`, `whoami` and `status`.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// The timeout for `cert`, which may wait on the certificate authority.
-pub const CERT_TIMEOUT: Duration = Duration::from_secs(60);
+/// The timeout for `cert`, which may wait on the certificate authority: a
+/// first issuance waits on an ACME DNS-01 round (the TXT record published and
+/// seen by the CA) before the certificate is written.
+pub const CERT_TIMEOUT: Duration = Duration::from_mins(5);
 
 /// The most stdout or stderr a call may print; more is [`TailnetError::BadOutput`].
 const OUTPUT_CAP: usize = 4 * 1024 * 1024;
@@ -37,6 +39,8 @@ pub enum TailnetError {
     AccessDenied,
     #[error("Tailscale is not connected (logged out or stopped)")]
     NotConnected,
+    #[error("HTTPS certificates are disabled for this tailnet (admin console, DNS page)")]
+    HttpsDisabled,
     #[error("the tailscale CLI did not finish in time")]
     Timeout,
     #[error("the tailscale CLI printed output that does not parse: {0}")]
@@ -107,8 +111,8 @@ impl Cli {
     ///
     /// # Errors
     ///
-    /// Any [`TailnetError`]; HTTPS disabled in the admin console is a
-    /// [`TailnetError::Failed`] carrying the CLI's message.
+    /// Any [`TailnetError`]; HTTPS disabled in the admin console is
+    /// [`TailnetError::HttpsDisabled`].
     pub async fn cert(
         &self,
         name: &str,
@@ -278,8 +282,14 @@ fn classify_failure(stderr: &str) -> TailnetError {
         "not logged in",
         "no current Tailscale IP address",
     ];
+    // `tailscale cert -- <name>` when the netmap lists no certificate domain:
+    // tailscale feature/acme/cert.go, `resolveCertDomain`, returned as the
+    // error text by the LocalAPI cert handler (ipn/localapi/cert.go).
+    const HTTPS_DISABLED: [&str; 1] = ["does not support getting TLS certs"];
     let has = |needles: &[&str]| needles.iter().any(|needle| stderr.contains(needle));
-    if has(&ACCESS_DENIED) {
+    if has(&HTTPS_DISABLED) {
+        TailnetError::HttpsDisabled
+    } else if has(&ACCESS_DENIED) {
         TailnetError::AccessDenied
     } else if has(&NOT_RUNNING) {
         TailnetError::NotRunning
@@ -371,6 +381,20 @@ mod tests {
         assert_eq!(
             classify_failure("no current Tailscale IP address; state: Stopped"),
             TailnetError::NotConnected
+        );
+    }
+
+    #[test]
+    fn https_disabled_maps_to_its_variant() {
+        assert_eq!(
+            classify_failure(
+                "500 Internal Server Error: your Tailscale account does not support getting TLS certs"
+            ),
+            TailnetError::HttpsDisabled
+        );
+        assert_eq!(
+            classify_failure("your Tailscale account does not support getting TLS certs"),
+            TailnetError::HttpsDisabled
         );
     }
 

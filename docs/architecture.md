@@ -64,6 +64,7 @@ Where to start for common changes, in the order a change usually flows through t
 | Change PTY or tracer behaviour | `crates/daemon/src/tracer_client.rs`, `crates/daemon/src/pty.rs`, `crates/tracer/src/supervisor.rs`, `crates/tracer-protocol/src/lib.rs`, [tracer-abi.md](./tracer-abi.md) |
 | Change status detection | `crates/daemon/src/pty_state.rs`, `crates/daemon/src/osc_title.rs` |
 | Change worktree or git behaviour | `crates/daemon/src/git.rs`, `workspace.rs`, `worktrees_admin.rs`, `worktree_cleanup.rs`, `branch_fate.rs`, `branch_names.rs`, `git_write.rs`, `git_watch.rs` |
+| Change the remote (Tailscale) listener or tailnet access | [plans/remote-access.md](./plans/remote-access.md) → `crates/tailnet/src/{cli,rule,model}.rs` → `crates/daemon/src/tailnet_listener.rs` → `crates/daemon/src/server.rs` (`build_router`, `handshake`, `ws_handler`, `start_lan_listener` until TS.5) → `crates/daemon/src/paths.rs` → `crates/daemon/Cargo.toml` → `apps/native/src/net.rs` |
 | Change persisted host state | `crates/daemon/src/state.rs`, `crates/daemon/src/paths.rs` |
 | Change session history or recovery | `crates/daemon/src/history.rs`, `transcripts.rs`, `tracer_log.rs`, `codex_rollout.rs` (a Codex session's conversation id); the dialog: `apps/native/src/recover.rs`, `recover_view.rs`, `spawns.rs` (`place_several`) |
 | Change daemon startup or supervision | `crates/daemon/src/main.rs`, `instance_lock.rs`, `binary_cache.rs`, `orphan.rs`, `crates/daemon-client/src/supervisor.rs` |

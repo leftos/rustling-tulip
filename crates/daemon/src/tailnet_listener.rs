@@ -4,38 +4,63 @@
 //! The addresses come from `tailscale whoami`, never the unspecified address.
 //! All Tailscale work runs on a supervisor task, so loopback serving never
 //! waits on it: Tailscale being down is a status and a retry, not an error.
+//!
+//! Every server serves TLS only, with the certificate `tailscale cert` writes
+//! for the host's `MagicDNS` name. It is checked at start and every
+//! `cert_interval`, and swapped into every server at once when its PEM
+//! changes. Until one has loaded, nothing binds: there is no plaintext path
+//! and no self-signed fallback.
 
+use anyhow::Context as _;
 use axum_server::Handle;
+use axum_server::tls_rustls::{RustlsAcceptor, RustlsConfig};
+use rustls::pki_types::pem::PemObject as _;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use sha2::{Digest as _, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::io::ErrorKind;
 use std::net::{IpAddr, SocketAddr};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 use tailnet::{TailnetError, WhoIs};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
+use tokio::time::Instant;
 
 /// Consecutive transient `whoami` failures after which Tailscale counts as
 /// down.
 const TRANSIENT_LIMIT: u32 = 3;
+
+/// The longest pause between retries of a failing certificate check while a
+/// certificate is in service.
+const CERT_BACKOFF_CAP: Duration = Duration::from_hours(1);
+
+/// The longest pause between retries of a failing certificate check while
+/// none is in service, so HTTPS being enabled (or Tailscale finishing its
+/// connect) is picked up soon.
+const CERT_BACKOFF_CAP_DOWN: Duration = Duration::from_mins(5);
 
 /// What the listener is doing, published on a watch for the status surface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ListenerStatus {
     /// Started; Tailscale not asked yet.
     Starting,
-    /// Serving on `addrs` (one server per address), as `name`, the host's
-    /// `MagicDNS` name without its trailing dot (`None` when `whoami` gave
-    /// none).
+    /// Serving on `addrs` (one server per address), as `name`: the
+    /// `MagicDNS` name (no trailing dot) of the certificate in service, which
+    /// lags a rename until the new name's certificate has loaded.
     Serving {
-        name: Option<String>,
+        name: String,
         addrs: Vec<SocketAddr>,
     },
-    /// HTTPS certificates are disabled in the tailnet's admin console.
+    /// HTTPS certificates are disabled in the tailnet's admin console; no
+    /// server runs, even when a certificate had loaded before.
     HttpsDisabled,
-    /// `tailscale cert` failed for another reason.
+    /// No certificate is in service: `tailscale cert` failed for another
+    /// reason, its files were unusable, or `whoami` gave no name to ask for.
     CertFailed,
     /// Every address failed to bind because `port` stayed in use past the
     /// retry budget.
@@ -66,6 +91,10 @@ pub struct ListenerOptions {
     pub down_backoff: Duration,
     /// How long a server being shut down may drain its connections.
     pub shutdown_grace: Duration,
+    /// How often `tailscale cert` is asked again once a certificate loaded.
+    pub cert_interval: Duration,
+    /// The validity left below which `tailscale cert` renews the certificate.
+    pub cert_min_validity: Duration,
 }
 
 impl ListenerOptions {
@@ -77,40 +106,122 @@ impl ListenerOptions {
         bind_backoff: Duration::from_millis(100),
         down_backoff: Duration::from_secs(1),
         shutdown_grace: Duration::from_secs(3),
+        cert_interval: Duration::from_hours(24),
+        cert_min_validity: Duration::from_hours(14 * 24),
     };
 }
 
-/// Serves the connections of one bound listener until its handle is shut
-/// down. The production implementation serves TLS only.
+/// Serves the connections of one bound listener with `tls` until its handle
+/// is shut down. Every server is handed the same `tls`, so a reload reaches
+/// all of them at once.
 pub trait Serve: Send + Sync + 'static {
     fn serve(
         &self,
         listener: std::net::TcpListener,
         handle: Handle<SocketAddr>,
+        tls: RustlsConfig,
     ) -> impl Future<Output = std::io::Result<()>> + Send;
 }
 
+/// The production [`Serve`]: `router` over TLS.
+struct TlsServe {
+    router: axum::Router,
+}
+
+impl Serve for TlsServe {
+    async fn serve(
+        &self,
+        listener: std::net::TcpListener,
+        handle: Handle<SocketAddr>,
+        tls: RustlsConfig,
+    ) -> std::io::Result<()> {
+        axum_server::from_tcp(listener)?
+            .handle(handle)
+            .acceptor(RustlsAcceptor::new(tls))
+            .serve(self.router.clone().into_make_service())
+            .await
+    }
+}
+
 /// The running listener: a supervisor task that owns the servers, and the
-/// watches it publishes.
+/// watches it publishes. Dropping it stops the supervisor and every server.
 pub struct TailnetListener {
     status: watch::Receiver<ListenerStatus>,
     name: watch::Receiver<Option<String>>,
-    supervisor: JoinHandle<()>,
+    /// `None` once [`TailnetListener::stopped`] took it.
+    supervisor: Option<JoinHandle<()>>,
+    /// How many times a changed certificate was swapped in.
+    #[cfg(test)]
+    reloads: Arc<AtomicUsize>,
+    /// Ends the cert task, as a panic in it would.
+    #[cfg(test)]
+    cert_task: tokio::task::AbortHandle,
+    /// What the cert task publishes to the supervisor.
+    #[cfg(test)]
+    cert_state: watch::Receiver<CertState>,
+    /// Whether the cert task had finished when the supervisor returned.
+    #[cfg(test)]
+    cert_done_at_exit: Arc<AtomicBool>,
 }
 
 impl TailnetListener {
+    /// Start the listener and return at once: it serves `router` over TLS on
+    /// port 8787 of each of the host's tailnet addresses, with the
+    /// certificate `tailscale cert` writes into `tailnet_dir` as
+    /// `<name>.crt` and `<name>.key`, until `shutdown` turns true (or its
+    /// sender is dropped) or the listener is dropped.
+    pub fn start(
+        router: axum::Router,
+        tailnet_dir: PathBuf,
+        shutdown: watch::Receiver<bool>,
+    ) -> Self {
+        Self::start_with(
+            Arc::new(tailnet::Cli::locate()),
+            Arc::new(TlsServe { router }),
+            ListenerOptions::PRODUCTION,
+            tailnet_dir,
+            shutdown,
+        )
+    }
+
     /// Start the supervisor and return at once; it asks `whoami` for the
-    /// addresses, binds one server per address on `options.port`, and polls
-    /// for changes until `shutdown` turns true (or its sender is dropped),
-    /// then shuts every server down.
-    pub fn start_with<A: TailnetApi, S: Serve>(
+    /// addresses, `tailscale cert` for the certificate, binds one server per
+    /// address on `options.port`, and polls for changes until `shutdown`
+    /// turns true (or its sender is dropped), then shuts every server down.
+    fn start_with<A: TailnetApi, S: Serve>(
         api: Arc<A>,
         serve: Arc<S>,
         options: ListenerOptions,
+        tailnet_dir: PathBuf,
         shutdown: watch::Receiver<bool>,
     ) -> Self {
         let (status_tx, status) = watch::channel(ListenerStatus::Starting);
         let (name_tx, name) = watch::channel(None);
+        #[cfg(test)]
+        let reloads = Arc::new(AtomicUsize::new(0));
+        let (cert_state, cert) = watch::channel(CertState::Pending);
+        let (cert_name, wanted) = watch::channel(None);
+        let worker = CertWorker {
+            api: Arc::clone(&api),
+            options,
+            tailnet_dir,
+            state: cert_state,
+            tls: None,
+            loaded: None,
+            checked_name: None,
+            next_check: Instant::now(),
+            backoff: options.poll_interval,
+            last_failure: None,
+            #[cfg(test)]
+            reloads: Arc::clone(&reloads),
+        };
+        let cert_task = AbortOnDrop(tokio::spawn(worker.run(wanted)));
+        #[cfg(test)]
+        let cert_abort = cert_task.0.abort_handle();
+        #[cfg(test)]
+        let cert_state = cert.clone();
+        #[cfg(test)]
+        let cert_done_at_exit = Arc::new(AtomicBool::new(false));
         let supervisor = Supervisor {
             api,
             serve,
@@ -118,16 +229,42 @@ impl TailnetListener {
             status: status_tx,
             name: name_tx,
             servers: BTreeMap::new(),
+            cert,
+            cert_name,
+            cert_task,
+            cert_ended: false,
+            last_who: None,
+            no_name_reported: false,
             bind_failures: BTreeMap::new(),
             transient_failures: 0,
             last_down_error: None,
+            #[cfg(test)]
+            cert_done_at_exit: Arc::clone(&cert_done_at_exit),
         };
         let supervisor = tokio::spawn(supervisor.run(shutdown));
         Self {
             status,
             name,
-            supervisor,
+            supervisor: Some(supervisor),
+            #[cfg(test)]
+            reloads,
+            #[cfg(test)]
+            cert_task: cert_abort,
+            #[cfg(test)]
+            cert_state,
+            #[cfg(test)]
+            cert_done_at_exit,
         }
+    }
+
+    #[cfg(test)]
+    fn reloads(&self) -> usize {
+        self.reloads.load(Ordering::SeqCst)
+    }
+
+    #[cfg(test)]
+    fn abort_cert_task(&self) {
+        self.cert_task.abort();
     }
 
     /// A receiver of the listener's status.
@@ -143,12 +280,326 @@ impl TailnetListener {
         self.name.borrow().clone()
     }
 
-    /// Wait until the supervisor has ended, after shutdown was asked for, and
-    /// every server has released its address.
-    pub async fn stopped(self) {
-        if let Err(err) = self.supervisor.await {
+    /// Wait until the supervisor has ended, after shutdown was asked for,
+    /// every server has released its address, and the cert task has ended
+    /// (so no `tailscale cert` call outlives the listener).
+    pub async fn stopped(mut self) {
+        let Some(supervisor) = self.supervisor.take() else {
+            return;
+        };
+        if let Err(err) = supervisor.await {
             tracing::warn!(%err, "tailnet listener supervisor failed");
         }
+    }
+}
+
+impl Drop for TailnetListener {
+    /// Stop the supervisor; dropping it drops every [`Server`], which shuts
+    /// each one down.
+    fn drop(&mut self) {
+        if let Some(supervisor) = &self.supervisor {
+            supervisor.abort();
+        }
+    }
+}
+
+/// Aborts its task when dropped, so the task never outlives its owner.
+struct AbortOnDrop(JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// The certificate in service: the SHA-256 digests of the files it was built
+/// from (never the key itself), and the name it was asked for.
+struct LoadedCert {
+    name: String,
+    cert_digest: [u8; 32],
+    key_digest: [u8; 32],
+}
+
+/// The certificate as the cert task last left it, for the supervisor.
+#[derive(Clone)]
+enum CertState {
+    /// None is in service and the first check for the wanted name is still
+    /// running (or has not begun).
+    Pending,
+    /// No certificate is in service; the last check, for `name`, failed and
+    /// `status` says why.
+    Down {
+        name: String,
+        status: ListenerStatus,
+    },
+    /// The certificate for `name` is in service in `tls`.
+    Ready { name: String, tls: RustlsConfig },
+}
+
+impl CertState {
+    /// Whether `other` tells the supervisor nothing new. Every `Ready`
+    /// carries the one config the worker keeps, so its name is all that
+    /// can change.
+    fn same_as(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Pending, Self::Pending) => true,
+            (
+                Self::Down { name, status },
+                Self::Down {
+                    name: other_name,
+                    status: other_status,
+                },
+            ) => name == other_name && status == other_status,
+            (
+                Self::Ready { name, .. },
+                Self::Ready {
+                    name: other_name, ..
+                },
+            ) => name == other_name,
+            _ => false,
+        }
+    }
+}
+
+/// Why a certificate check failed.
+enum CertFailure {
+    /// `tailscale cert` failed.
+    Cli(TailnetError),
+    /// The files it wrote could not be read.
+    Read(std::io::Error),
+    /// The files do not make a usable certificate and key.
+    Unusable(anyhow::Error),
+}
+
+impl CertFailure {
+    /// The status while no certificate is in service.
+    fn status(&self) -> ListenerStatus {
+        match self {
+            Self::Cli(TailnetError::HttpsDisabled) => ListenerStatus::HttpsDisabled,
+            _ => ListenerStatus::CertFailed,
+        }
+    }
+}
+
+impl std::fmt::Display for CertFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Cli(err) => write!(f, "tailscale cert failed: {err}"),
+            Self::Read(err) => write!(f, "could not read the certificate files: {err}"),
+            Self::Unusable(err) => write!(f, "the certificate files are unusable: {err:#}"),
+        }
+    }
+}
+
+/// The cert task: runs `tailscale cert` for the name the supervisor wants,
+/// at once (and at once again for a new name), then every `cert_interval`,
+/// and loads what it writes. A failed check is retried after a pause that
+/// starts at `poll_interval` (again on a new name) and doubles up to
+/// [`CERT_BACKOFF_CAP`] while the wanted name's certificate is in service,
+/// up to [`CERT_BACKOFF_CAP_DOWN`] while it is not. HTTPS being disabled
+/// takes the certificate out of service. It runs beside the supervisor, so
+/// `whoami` and rebinding never wait on it, and publishes a state only when
+/// it changes.
+struct CertWorker<A> {
+    api: Arc<A>,
+    options: ListenerOptions,
+    /// Where `tailscale cert` writes the certificate and key.
+    tailnet_dir: PathBuf,
+    state: watch::Sender<CertState>,
+    /// The TLS config every server shares, one for the worker's lifetime so
+    /// every server gets every reload; `None` until a certificate first
+    /// loaded.
+    tls: Option<RustlsConfig>,
+    /// The certificate in service in `tls`; `None` while none is (before
+    /// the first load, and after HTTPS was found disabled).
+    loaded: Option<LoadedCert>,
+    /// The name the last check asked for, so a rename is checked at once.
+    checked_name: Option<String>,
+    next_check: Instant,
+    /// The pause after the next failed check.
+    backoff: Duration,
+    /// The name and text of the last failure, so a repeat logs at debug.
+    last_failure: Option<(String, String)>,
+    #[cfg(test)]
+    reloads: Arc<AtomicUsize>,
+}
+
+impl<A: TailnetApi> CertWorker<A> {
+    /// Check whenever one is due for the wanted name, until the supervisor
+    /// drops its sender.
+    async fn run(mut self, mut wanted: watch::Receiver<Option<String>>) {
+        loop {
+            let name = wanted.borrow_and_update().clone();
+            if let Some(name) = name.as_deref() {
+                let renamed = self.checked_name.as_deref() != Some(name);
+                if renamed {
+                    self.renamed();
+                }
+                if renamed || Instant::now() >= self.next_check {
+                    self.check(name).await;
+                }
+            }
+            let changed = if name.is_some() {
+                tokio::select! {
+                    changed = wanted.changed() => changed,
+                    () = tokio::time::sleep_until(self.next_check) => Ok(()),
+                }
+            } else {
+                wanted.changed().await
+            };
+            if changed.is_err() {
+                return;
+            }
+        }
+    }
+
+    /// A new name starts its backoff afresh; while no certificate is in
+    /// service, its first check is pending.
+    fn renamed(&mut self) {
+        self.backoff = self.options.poll_interval;
+        if self.loaded.is_none() {
+            self.set_state(CertState::Pending);
+        }
+    }
+
+    /// Publish `state` to the supervisor, waking it only when it changed.
+    fn set_state(&self, state: CertState) {
+        self.state.send_if_modified(|current| {
+            let changed = !current.same_as(&state);
+            if changed {
+                *current = state;
+            }
+            changed
+        });
+    }
+
+    /// Ask `tailscale cert` for `name`'s certificate and load what it wrote;
+    /// schedule the next check after `cert_interval` only once that loaded.
+    async fn check(&mut self, name: &str) {
+        self.checked_name = Some(name.to_owned());
+        let cert_file = self.tailnet_dir.join(format!("{name}.crt"));
+        let key_file = self.tailnet_dir.join(format!("{name}.key"));
+        let asked = self
+            .api
+            .cert(name, &cert_file, &key_file, self.options.cert_min_validity)
+            .await;
+        let outcome = match asked {
+            Ok(()) => self.load(name, &cert_file, &key_file),
+            Err(err) => Err(CertFailure::Cli(err)),
+        };
+        match outcome {
+            Ok(()) => {
+                self.last_failure = None;
+                self.backoff = self.options.poll_interval;
+                self.next_check = Instant::now() + self.options.cert_interval;
+            }
+            Err(failure) => self.failed(name, &failure),
+        }
+    }
+
+    /// Log a failed check and schedule its retry. HTTPS being disabled takes
+    /// the certificate in service out of it, so every server stops.
+    fn failed(&mut self, name: &str, failure: &CertFailure) {
+        let disabled = matches!(failure, CertFailure::Cli(TailnetError::HttpsDisabled));
+        self.report(name, failure, disabled && self.loaded.is_some());
+        if disabled {
+            self.loaded = None;
+        }
+        if self.loaded.is_none() {
+            self.set_state(CertState::Down {
+                name: name.to_owned(),
+                status: failure.status(),
+            });
+        }
+        let in_service = self
+            .loaded
+            .as_ref()
+            .is_some_and(|loaded| loaded.name == name);
+        let cap = if in_service {
+            CERT_BACKOFF_CAP
+        } else {
+            CERT_BACKOFF_CAP_DOWN
+        };
+        let pause = self.backoff.min(cap);
+        self.next_check = Instant::now() + pause;
+        self.backoff = (pause * 2).min(cap);
+    }
+
+    /// Load the pair `tailscale cert` wrote. Changed files swap every
+    /// server's certificate at once; unchanged ones only take the new name.
+    /// On any failure the certificate in service stays.
+    fn load(&mut self, name: &str, cert_file: &Path, key_file: &Path) -> Result<(), CertFailure> {
+        let cert_pem = std::fs::read(cert_file).map_err(CertFailure::Read)?;
+        let key_pem = std::fs::read(key_file).map_err(CertFailure::Read)?;
+        let cert_digest: [u8; 32] = Sha256::digest(&cert_pem).into();
+        let key_digest: [u8; 32] = Sha256::digest(&key_pem).into();
+        let unchanged = self.loaded.as_ref().is_some_and(|loaded| {
+            loaded.cert_digest == cert_digest && loaded.key_digest == key_digest
+        });
+        if !unchanged {
+            let config = server_config(&cert_pem, &key_pem).map_err(CertFailure::Unusable)?;
+            if let Some(tls) = &self.tls {
+                tls.reload_from_config(config);
+                #[cfg(test)]
+                self.reloads.fetch_add(1, Ordering::SeqCst);
+                tracing::info!(%name, "tailnet listener: certificate reloaded");
+            } else {
+                self.tls = Some(RustlsConfig::from_config(config));
+                tracing::info!(%name, "tailnet listener: certificate loaded");
+            }
+        }
+        let renamed = self
+            .loaded
+            .as_ref()
+            .is_none_or(|loaded| loaded.name != name);
+        self.loaded = Some(LoadedCert {
+            name: name.to_owned(),
+            cert_digest,
+            key_digest,
+        });
+        if renamed && let Some(tls) = &self.tls {
+            self.set_state(CertState::Ready {
+                name: name.to_owned(),
+                tls: tls.clone(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Log a failed check at warn the first time `name` fails this way (and
+    /// whenever it stops the servers), at debug while it keeps failing the
+    /// same way.
+    fn report(&mut self, name: &str, failure: &CertFailure, stopping: bool) {
+        let key = (name.to_owned(), failure.to_string());
+        let text = key.1.as_str();
+        if !stopping && self.last_failure.as_ref() == Some(&key) {
+            tracing::debug!(%name, failure = %text, "tailnet listener: certificate check still failing");
+        } else {
+            match &self.loaded {
+                _ if stopping => tracing::warn!(
+                    %name,
+                    failure = %text,
+                    "tailnet listener: HTTPS certificates are disabled for the tailnet; servers stopped, retrying"
+                ),
+                None => tracing::warn!(
+                    %name,
+                    failure = %text,
+                    "tailnet listener: no certificate; staying down, retrying"
+                ),
+                Some(loaded) if loaded.name != name => tracing::warn!(
+                    %name,
+                    serving = %loaded.name,
+                    failure = %text,
+                    "tailnet listener: no certificate for the new name yet; serving the old name's, retrying"
+                ),
+                Some(_) => tracing::warn!(
+                    %name,
+                    failure = %text,
+                    "tailnet listener: certificate check failed; keeping the certificate in service, retrying"
+                ),
+            }
+        }
+        self.last_failure = Some(key);
     }
 }
 
@@ -193,6 +644,19 @@ struct Supervisor<A, S> {
     status: watch::Sender<ListenerStatus>,
     name: watch::Sender<Option<String>>,
     servers: BTreeMap<IpAddr, Server>,
+    /// What the cert task has in service.
+    cert: watch::Receiver<CertState>,
+    /// The name the cert task asks certificates for.
+    cert_name: watch::Sender<Option<String>>,
+    cert_task: AbortOnDrop,
+    /// Whether the cert task has ended while the supervisor runs: no
+    /// certificate will load again, and `cert` is no longer waited on.
+    cert_ended: bool,
+    /// The last `whoami` answer while Tailscale is up, applied again when the
+    /// certificate changes.
+    last_who: Option<WhoIs>,
+    /// Whether a missing `MagicDNS` name was logged at warn already.
+    no_name_reported: bool,
     /// The last bind failure per address, so a repeat logs at debug.
     bind_failures: BTreeMap<IpAddr, ErrorKind>,
     /// Consecutive transient `whoami` failures.
@@ -200,6 +664,8 @@ struct Supervisor<A, S> {
     /// The last `whoami` failure that took Tailscale down, so a repeat with
     /// no server to stop logs at debug.
     last_down_error: Option<TailnetError>,
+    #[cfg(test)]
+    cert_done_at_exit: Arc<AtomicBool>,
 }
 
 impl<A: TailnetApi, S: Serve> Supervisor<A, S> {
@@ -214,7 +680,9 @@ impl<A: TailnetApi, S: Serve> Supervisor<A, S> {
                     down_backoff = self.options.down_backoff;
                     self.transient_failures = 0;
                     self.last_down_error = None;
-                    if self.apply(&who, &mut shutdown).await == Flow::Shutdown {
+                    let flow = self.apply(&who, &mut shutdown).await;
+                    self.last_who = Some(who);
+                    if flow == Flow::Shutdown {
                         break;
                     }
                     self.options.poll_interval
@@ -226,14 +694,55 @@ impl<A: TailnetApi, S: Serve> Supervisor<A, S> {
                     pause
                 }
             };
-            if until_shutdown(tokio::time::sleep(pause), &mut shutdown)
-                .await
-                .is_none()
-            {
+            if self.pause(pause, &mut shutdown).await == Flow::Shutdown {
                 break;
             }
         }
+        // No `tailscale cert` call may outlive the listener, nor wait out the
+        // servers' drain.
+        self.cert_task.0.abort();
+        if let Err(err) = (&mut self.cert_task.0).await
+            && !err.is_cancelled()
+            && !self.cert_ended
+        {
+            tracing::warn!(%err, "tailnet listener: the certificate task failed");
+        }
         self.stop_all().await;
+        #[cfg(test)]
+        self.cert_done_at_exit
+            .store(self.cert_task.0.is_finished(), Ordering::SeqCst);
+    }
+
+    /// Wait `pause` before the next `whoami`, applying the last answer again
+    /// whenever the certificate changes, so a newly loaded certificate starts
+    /// the servers at once.
+    async fn pause(&mut self, pause: Duration, shutdown: &mut watch::Receiver<bool>) -> Flow {
+        let deadline = Instant::now() + pause;
+        loop {
+            if self.cert_ended {
+                let slept = until_shutdown(tokio::time::sleep_until(deadline), shutdown).await;
+                return if slept.is_some() {
+                    Flow::Continue
+                } else {
+                    Flow::Shutdown
+                };
+            }
+            let cert_alive = tokio::select! {
+                biased;
+                _ = shutdown.wait_for(|stop| *stop) => return Flow::Shutdown,
+                () = tokio::time::sleep_until(deadline) => return Flow::Continue,
+                changed = self.cert.changed() => changed.is_ok(),
+            };
+            if !cert_alive {
+                self.cert_task_ended().await;
+                continue;
+            }
+            if let Some(who) = self.last_who.clone()
+                && self.apply(&who, shutdown).await == Flow::Shutdown
+            {
+                return Flow::Shutdown;
+            }
+        }
     }
 
     /// A definitive failure (Tailscale not installed, not running, refusing
@@ -259,12 +768,14 @@ impl<A: TailnetApi, S: Serve> Supervisor<A, S> {
             tracing::debug!(%err, "tailnet listener: Tailscale still down; retrying");
         }
         self.last_down_error = Some(err.clone());
+        self.last_who = None;
         self.stop_all().await;
         self.publish(ListenerStatus::TailscaleDown(err));
     }
 
-    /// Bring the servers in line with `who`'s addresses: stop the ones whose
-    /// address vanished (or whose task ended), start the missing ones.
+    /// Make sure a certificate is in service for `who`'s name, then bring the
+    /// servers in line with `who`'s addresses: stop the ones whose address
+    /// vanished (or whose task ended), start the missing ones.
     async fn apply(&mut self, who: &WhoIs, shutdown: &mut watch::Receiver<bool>) -> Flow {
         let trimmed = who.node.name.trim_end_matches('.');
         let name = (!trimmed.is_empty()).then(|| trimmed.to_owned());
@@ -275,6 +786,58 @@ impl<A: TailnetApi, S: Serve> Supervisor<A, S> {
             }
             changed
         });
+        self.report_no_name(name.is_none());
+        self.cert_name.send_if_modified(|current| {
+            let changed = *current != name;
+            if changed {
+                current.clone_from(&name);
+            }
+            changed
+        });
+        if self.cert_ended || self.cert.has_changed().is_err() {
+            self.cert_task_ended().await;
+            return Flow::Continue;
+        }
+        let state = self.cert.borrow_and_update().clone();
+        let down = match state {
+            CertState::Ready { name, tls } => {
+                return self.serve_addresses(who, name, &tls, shutdown).await;
+            }
+            _ if name.is_none() => ListenerStatus::CertFailed,
+            CertState::Down {
+                name: failed_for,
+                status,
+            } if name.as_deref() == Some(failed_for.as_str()) => status,
+            // The wanted name's first check is still to finish.
+            CertState::Pending | CertState::Down { .. } => ListenerStatus::Starting,
+        };
+        self.stop_all().await;
+        self.publish(down);
+        Flow::Continue
+    }
+
+    /// The cert task ended while the supervisor runs: log it once, stop every
+    /// server, and say no certificate is in service.
+    async fn cert_task_ended(&mut self) {
+        if !self.cert_ended {
+            self.cert_ended = true;
+            tracing::error!(
+                "tailnet listener: the certificate task ended; servers stopped until the daemon restarts"
+            );
+        }
+        self.stop_all().await;
+        self.publish(ListenerStatus::CertFailed);
+    }
+
+    /// Bring the servers in line with `who`'s addresses, serving `tls` as
+    /// `cert_name`.
+    async fn serve_addresses(
+        &mut self,
+        who: &WhoIs,
+        cert_name: String,
+        tls: &RustlsConfig,
+        shutdown: &mut watch::Receiver<bool>,
+    ) -> Flow {
         let wanted = bind_addresses(&who.node.addresses);
         self.bind_failures.retain(|ip, _| wanted.contains(ip));
         let stale: Vec<IpAddr> = self
@@ -291,18 +854,34 @@ impl<A: TailnetApi, S: Serve> Supervisor<A, S> {
         let mut outcome = BindOutcome::default();
         for ip in wanted {
             if !self.servers.contains_key(&ip)
-                && self.start_server(ip, &mut outcome, shutdown).await == Flow::Shutdown
+                && self.start_server(ip, tls, &mut outcome, shutdown).await == Flow::Shutdown
             {
                 return Flow::Shutdown;
             }
         }
-        self.publish(self.status_after(name, outcome));
+        self.publish(self.status_after(cert_name, outcome));
         Flow::Continue
+    }
+
+    /// Log a `whoami` answer without a `MagicDNS` name (so no certificate to
+    /// ask for) at warn the first time, at debug while it repeats.
+    fn report_no_name(&mut self, missing: bool) {
+        if !missing {
+            self.no_name_reported = false;
+        } else if self.no_name_reported {
+            tracing::debug!("tailnet listener: whoami still gives no MagicDNS name");
+        } else {
+            tracing::warn!(
+                "tailnet listener: whoami gave no MagicDNS name, so there is no certificate to ask for"
+            );
+            self.no_name_reported = true;
+        }
     }
 
     async fn start_server(
         &mut self,
         ip: IpAddr,
+        tls: &RustlsConfig,
         outcome: &mut BindOutcome,
         shutdown: &mut watch::Receiver<bool>,
     ) -> Flow {
@@ -312,7 +891,7 @@ impl<A: TailnetApi, S: Serve> Supervisor<A, S> {
             return Flow::Shutdown;
         };
         let spawned = match bound {
-            Ok(listener) => self.spawn_server(listener).map_err(BindError::Other),
+            Ok(listener) => self.spawn_server(listener, tls).map_err(BindError::Other),
             Err(err) => Err(err),
         };
         match spawned {
@@ -347,13 +926,18 @@ impl<A: TailnetApi, S: Serve> Supervisor<A, S> {
         }
     }
 
-    fn spawn_server(&self, listener: std::net::TcpListener) -> std::io::Result<Server> {
+    fn spawn_server(
+        &self,
+        listener: std::net::TcpListener,
+        tls: &RustlsConfig,
+    ) -> std::io::Result<Server> {
         let local = listener.local_addr()?;
         let handle = Handle::new();
         let serve = Arc::clone(&self.serve);
         let task_handle = handle.clone();
+        let tls = tls.clone();
         let task = tokio::spawn(async move {
-            if let Err(err) = serve.serve(listener, task_handle).await {
+            if let Err(err) = serve.serve(listener, task_handle, tls).await {
                 tracing::warn!(addr = %local, %err, "tailnet server stopped with an error");
             }
         });
@@ -383,7 +967,7 @@ impl<A: TailnetApi, S: Serve> Supervisor<A, S> {
         }
     }
 
-    fn status_after(&self, name: Option<String>, outcome: BindOutcome) -> ListenerStatus {
+    fn status_after(&self, name: String, outcome: BindOutcome) -> ListenerStatus {
         if !self.servers.is_empty() {
             let addrs = self.servers.values().map(|server| server.local).collect();
             return ListenerStatus::Serving { name, addrs };
@@ -411,6 +995,29 @@ impl<A: TailnetApi, S: Serve> Supervisor<A, S> {
             changed
         });
     }
+}
+
+/// The rustls config for a PEM certificate chain and key, on ring, with ALPN
+/// `http/1.1` only: axum serves WebSocket over HTTP/1.1, not h2. Fails when
+/// either does not parse or the key does not match the certificate.
+fn server_config(cert_pem: &[u8], key_pem: &[u8]) -> anyhow::Result<Arc<rustls::ServerConfig>> {
+    let chain = CertificateDer::pem_slice_iter(cert_pem)
+        .collect::<Result<Vec<_>, _>>()
+        .context("parsing the certificate PEM")?;
+    anyhow::ensure!(
+        !chain.is_empty(),
+        "the certificate PEM holds no certificate"
+    );
+    let key = PrivateKeyDer::from_pem_slice(key_pem).context("parsing the key PEM")?;
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let mut config = rustls::ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .context("configuring rustls protocol versions")?
+        .with_no_client_auth()
+        .with_single_cert(chain, key)
+        .context("pairing the certificate with its key")?;
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    Ok(Arc::new(config))
 }
 
 /// Whether a `whoami` failure may clear up by itself on the next call.
@@ -526,11 +1133,19 @@ impl TailnetApi for tailnet::Cli {
 #[expect(clippy::expect_used, reason = "tests assert preconditions with expect")]
 mod tests {
     use super::*;
+    use rcgen::{
+        BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer,
+        KeyPair, KeyUsagePurpose,
+    };
+    use rustls::pki_types::ServerName;
     use std::net::{Ipv4Addr, Ipv6Addr};
+    use std::path::PathBuf;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tailnet::{Hostinfo, Node, UserProfile};
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::time::Instant;
+    use tokio_rustls::TlsConnector;
 
     const HOST_NAME: &str = "desktop.tail1234.ts.net.";
     const V4_LOOPBACK: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
@@ -555,27 +1170,202 @@ mod tests {
         whoami_named(HOST_NAME, addresses)
     }
 
+    /// The name a certificate is asked for: `HOST_NAME` without its trailing
+    /// dot.
+    fn host() -> &'static str {
+        HOST_NAME.trim_end_matches('.')
+    }
+
+    /// A scratch tailnet dir, removed on drop.
+    struct ScratchDir(PathBuf);
+
+    impl ScratchDir {
+        fn new() -> Self {
+            static NEXT: AtomicUsize = AtomicUsize::new(0);
+            let tag = NEXT.fetch_add(1, Ordering::SeqCst);
+            let path =
+                std::env::temp_dir().join(format!("rt-tailnet-{}-{tag}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).expect("create the scratch tailnet dir");
+            Self(path)
+        }
+    }
+
+    impl Drop for ScratchDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A test certificate authority, the only root the test client trusts.
+    struct TestCa {
+        der: rustls::pki_types::CertificateDer<'static>,
+        issuer: Issuer<'static, KeyPair>,
+    }
+
+    impl TestCa {
+        fn new() -> Self {
+            let mut params = CertificateParams::new(Vec::<String>::new()).expect("CA params");
+            params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+            params
+                .distinguished_name
+                .push(DnType::CommonName, "rustling-tulip test CA");
+            params.key_usages = vec![
+                KeyUsagePurpose::KeyCertSign,
+                KeyUsagePurpose::DigitalSignature,
+            ];
+            let key = KeyPair::generate().expect("CA key");
+            let cert = params.self_signed(&key).expect("self-signed CA");
+            Self {
+                der: cert.der().clone(),
+                issuer: Issuer::new(params, key),
+            }
+        }
+
+        /// A leaf for [`host`] with a fresh key, signed by this CA.
+        fn leaf(&self) -> TestLeaf {
+            let mut params = CertificateParams::new(vec![host().to_owned()]).expect("leaf params");
+            params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+            let key = KeyPair::generate().expect("leaf key");
+            let cert = params
+                .signed_by(&key, &self.issuer)
+                .expect("leaf signed by the CA");
+            TestLeaf {
+                cert_pem: cert.pem(),
+                key_pem: key.serialize_pem(),
+                der: cert.der().to_vec(),
+            }
+        }
+    }
+
+    /// A certificate and its key as PEM, and the certificate's DER bytes.
+    #[derive(Clone)]
+    struct TestLeaf {
+        cert_pem: String,
+        key_pem: String,
+        der: Vec<u8>,
+    }
+
+    /// What the fake `tailscale cert` does.
+    #[derive(Clone)]
+    enum CertScript {
+        /// Write these bytes to the certificate and key files.
+        Write {
+            cert: Vec<u8>,
+            key: Vec<u8>,
+        },
+        Fail(TailnetError),
+        /// Panic inside the call, ending the cert task.
+        Panic,
+    }
+
+    impl CertScript {
+        fn leaf(leaf: &TestLeaf) -> Self {
+            Self::Write {
+                cert: leaf.cert_pem.clone().into_bytes(),
+                key: leaf.key_pem.clone().into_bytes(),
+            }
+        }
+    }
+
+    /// One `tailscale cert` call's arguments, and when it was made.
+    #[derive(Clone)]
+    struct CertCall {
+        name: String,
+        cert_file: PathBuf,
+        key_file: PathBuf,
+        min_validity: Duration,
+        at: Instant,
+    }
+
     /// A scripted `tailscale`: each call returns the response set for it and
-    /// is counted (`whoami` with the time of each call).
+    /// is counted (`whoami` with the time of each call, `cert` with its
+    /// arguments). `cert` writes `leaf`, minted by its own `ca`, into the
+    /// files it is given unless scripted otherwise.
     struct FakeTailnet {
         whoami: Mutex<Result<WhoIs, TailnetError>>,
         whois: Mutex<Result<WhoIs, TailnetError>>,
-        cert: Mutex<Result<(), TailnetError>>,
+        cert: Mutex<CertScript>,
         whoami_times: Mutex<Vec<Instant>>,
         whois_calls: AtomicUsize,
-        cert_calls: AtomicUsize,
+        cert_calls: Mutex<Vec<CertCall>>,
+        /// `cert` calls that ran to their end.
+        cert_finished: AtomicUsize,
+        /// `cert` calls whose future was dropped before it ended.
+        cert_dropped: AtomicUsize,
+        /// While true, a `cert` call waits before it acts.
+        cert_held: watch::Sender<bool>,
+        /// While true, a `whoami` call waits before it answers.
+        whoami_held: watch::Sender<bool>,
+        /// Ordered events shared with a [`PlainServe`], to observe ordering.
+        events: Arc<Mutex<Vec<&'static str>>>,
+        ca: TestCa,
+        leaf: TestLeaf,
+        dir: ScratchDir,
+    }
+
+    /// Counts a `cert` call as finished, or as dropped when its future is
+    /// dropped before it ends.
+    struct CertCallEnd<'a> {
+        fake: &'a FakeTailnet,
+        finished: bool,
+    }
+
+    impl Drop for CertCallEnd<'_> {
+        fn drop(&mut self) {
+            if self.finished {
+                self.fake.cert_finished.fetch_add(1, Ordering::SeqCst);
+            } else {
+                self.fake.cert_dropped.fetch_add(1, Ordering::SeqCst);
+                self.fake
+                    .events
+                    .lock()
+                    .expect("events lock")
+                    .push("cert call dropped");
+            }
+        }
     }
 
     impl FakeTailnet {
         fn with_whoami(whoami: Result<WhoIs, TailnetError>) -> Self {
+            let ca = TestCa::new();
+            let leaf = ca.leaf();
             Self {
                 whoami: Mutex::new(whoami),
                 whois: Mutex::new(Err(TailnetError::NotConnected)),
-                cert: Mutex::new(Ok(())),
+                cert: Mutex::new(CertScript::leaf(&leaf)),
                 whoami_times: Mutex::new(Vec::new()),
                 whois_calls: AtomicUsize::new(0),
-                cert_calls: AtomicUsize::new(0),
+                cert_calls: Mutex::new(Vec::new()),
+                cert_finished: AtomicUsize::new(0),
+                cert_dropped: AtomicUsize::new(0),
+                cert_held: watch::Sender::new(false),
+                whoami_held: watch::Sender::new(false),
+                events: Arc::new(Mutex::new(Vec::new())),
+                ca,
+                leaf,
+                dir: ScratchDir::new(),
             }
+        }
+
+        fn set_cert(&self, script: CertScript) {
+            *self.cert.lock().expect("cert lock") = script;
+        }
+
+        fn cert_calls(&self) -> Vec<CertCall> {
+            self.cert_calls.lock().expect("cert calls lock").clone()
+        }
+
+        fn cert_finished(&self) -> usize {
+            self.cert_finished.load(Ordering::SeqCst)
+        }
+
+        fn cert_dropped(&self) -> usize {
+            self.cert_dropped.load(Ordering::SeqCst)
+        }
+
+        fn dir(&self) -> PathBuf {
+            self.dir.0.clone()
         }
 
         fn with_addresses(addresses: &[&str]) -> Self {
@@ -613,18 +1403,59 @@ mod tests {
                 .lock()
                 .expect("whoami times lock")
                 .push(Instant::now());
-            std::future::ready(self.whoami.lock().expect("whoami lock").clone())
+            let answer = self.whoami.lock().expect("whoami lock").clone();
+            let mut held = self.whoami_held.subscribe();
+            async move {
+                held.wait_for(|held| !*held)
+                    .await
+                    .expect("the fake outlives its whoami calls");
+                answer
+            }
         }
 
         fn cert(
             &self,
-            _name: &str,
-            _cert_file: &Path,
-            _key_file: &Path,
-            _min_validity: Duration,
+            name: &str,
+            cert_file: &Path,
+            key_file: &Path,
+            min_validity: Duration,
         ) -> impl Future<Output = Result<(), TailnetError>> + Send {
-            self.cert_calls.fetch_add(1, Ordering::SeqCst);
-            std::future::ready(self.cert.lock().expect("cert lock").clone())
+            self.cert_calls
+                .lock()
+                .expect("cert calls lock")
+                .push(CertCall {
+                    name: name.to_owned(),
+                    cert_file: cert_file.to_owned(),
+                    key_file: key_file.to_owned(),
+                    min_validity,
+                    at: Instant::now(),
+                });
+            let script = self.cert.lock().expect("cert lock").clone();
+            let mut held = self.cert_held.subscribe();
+            let (cert_file, key_file) = (cert_file.to_owned(), key_file.to_owned());
+            let end = CertCallEnd {
+                fake: self,
+                finished: false,
+            };
+            async move {
+                // Bound whole, so the guard lives (and drops) with the call.
+                let mut end = end;
+                held.wait_for(|held| !*held)
+                    .await
+                    .expect("the fake outlives its cert calls");
+                let result = match script {
+                    CertScript::Write { cert, key } => {
+                        std::fs::write(cert_file, cert).expect("write the scripted certificate");
+                        std::fs::write(key_file, key).expect("write the scripted key");
+                        Ok(())
+                    }
+                    CertScript::Fail(err) => Err(err),
+                    #[expect(clippy::panic, reason = "the script ends the cert task with a panic")]
+                    CertScript::Panic => std::panic::panic_any("scripted tailscale cert panic"),
+                };
+                end.finished = true;
+                result
+            }
         }
     }
 
@@ -636,6 +1467,8 @@ mod tests {
         fail_first: AtomicBool,
         started: AtomicUsize,
         finished: AtomicUsize,
+        /// Where "server stopped" is logged when a server ends.
+        events: Option<Arc<Mutex<Vec<&'static str>>>>,
     }
 
     impl Serve for PlainServe {
@@ -643,6 +1476,7 @@ mod tests {
             &self,
             listener: std::net::TcpListener,
             handle: Handle<SocketAddr>,
+            _tls: RustlsConfig,
         ) -> std::io::Result<()> {
             self.started.fetch_add(1, Ordering::SeqCst);
             if self.fail_first.swap(false, Ordering::SeqCst) {
@@ -653,6 +1487,9 @@ mod tests {
                 .serve(axum::Router::new().into_make_service())
                 .await;
             self.finished.fetch_add(1, Ordering::SeqCst);
+            if let Some(events) = &self.events {
+                events.lock().expect("events lock").push("server stopped");
+            }
             result
         }
     }
@@ -664,18 +1501,24 @@ mod tests {
         }
     }
 
-    fn start_with_shutdown(
+    fn start_with_shutdown<S: Serve>(
         fake: &Arc<FakeTailnet>,
-        serve: &Arc<PlainServe>,
+        serve: &Arc<S>,
         options: ListenerOptions,
         shutdown: watch::Receiver<bool>,
     ) -> TailnetListener {
-        TailnetListener::start_with(Arc::clone(fake), Arc::clone(serve), options, shutdown)
+        TailnetListener::start_with(
+            Arc::clone(fake),
+            Arc::clone(serve),
+            options,
+            fake.dir(),
+            shutdown,
+        )
     }
 
-    fn start(
+    fn start<S: Serve>(
         fake: &Arc<FakeTailnet>,
-        serve: &Arc<PlainServe>,
+        serve: &Arc<S>,
         options: ListenerOptions,
     ) -> (TailnetListener, watch::Sender<bool>) {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -780,12 +1623,14 @@ mod tests {
         ))));
         let serve = Arc::new(PlainServe::default());
         let (listener, shutdown) = start(&fake, &serve, options(0));
-        let status = wait_for_status(&listener, is_serving).await;
-        assert!(
-            matches!(status, ListenerStatus::Serving { name: None, .. }),
-            "{status:?}"
-        );
+        let status = wait_for_status(&listener, |s| *s != ListenerStatus::Starting).await;
+        assert_eq!(status, ListenerStatus::CertFailed);
         assert_eq!(listener.name(), None);
+        assert!(
+            fake.cert_calls().is_empty(),
+            "no name, no certificate to ask for"
+        );
+        assert_eq!(serve.started.load(Ordering::SeqCst), 0, "nothing bound");
         shutdown.send_replace(true);
     }
 
@@ -1028,5 +1873,886 @@ mod tests {
         assert_eq!(*status.borrow(), ListenerStatus::Starting);
         assert_eq!(serve.started.load(Ordering::SeqCst), 0, "nothing bound");
         drop(held);
+    }
+
+    fn tls_serve() -> Arc<TlsServe> {
+        let router =
+            axum::Router::new().route("/probe", axum::routing::get(|| async { "probe ok" }));
+        Arc::new(TlsServe { router })
+    }
+
+    /// Real-clock options that check the certificate every 50 ms, so a test
+    /// sees several checks.
+    fn quick_options() -> ListenerOptions {
+        ListenerOptions {
+            port: 0,
+            poll_interval: Duration::from_millis(50),
+            cert_interval: Duration::from_millis(50),
+            ..ListenerOptions::PRODUCTION
+        }
+    }
+
+    /// Poll `done` until it holds; the deadline is far past any legitimate
+    /// wait on either clock.
+    async fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(120);
+        while !done() {
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    async fn wait_for_cert_calls(fake: &FakeTailnet, count: usize) -> Vec<CertCall> {
+        wait_until("the cert calls", || fake.cert_calls().len() >= count).await;
+        fake.cert_calls()
+    }
+
+    /// A finished TLS handshake: the negotiated ALPN, the leaf certificate the
+    /// server presented, and the stream.
+    struct Handshake {
+        alpn: Option<Vec<u8>>,
+        leaf: Vec<u8>,
+        stream: tokio_rustls::client::TlsStream<tokio::net::TcpStream>,
+    }
+
+    /// Connect over TLS trusting only `ca`, offering ALPN `h2` and `http/1.1`.
+    async fn tls_connect(addr: SocketAddr, ca: &TestCa) -> Handshake {
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(ca.der.clone()).expect("trust the test CA");
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let mut config = rustls::ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .expect("client protocol versions")
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+        let tcp = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("connect to the listener");
+        let server_name = ServerName::try_from(host().to_owned()).expect("a valid server name");
+        let stream = TlsConnector::from(Arc::new(config))
+            .connect(server_name, tcp)
+            .await
+            .expect("the TLS handshake completes against the test CA");
+        let (_, connection) = stream.get_ref();
+        let alpn = connection.alpn_protocol().map(<[u8]>::to_vec);
+        let leaf = connection
+            .peer_certificates()
+            .and_then(|chain| chain.first())
+            .expect("the server presented a certificate")
+            .to_vec();
+        Handshake { alpn, leaf, stream }
+    }
+
+    /// Send an HTTP/1.1 `GET` of `path`; the response up to its status line.
+    async fn http_get(
+        stream: &mut tokio_rustls::client::TlsStream<tokio::net::TcpStream>,
+        path: &str,
+    ) -> String {
+        let request = format!(
+            "GET {path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+            host()
+        );
+        stream
+            .write_all(request.as_bytes())
+            .await
+            .expect("send the request");
+        let mut response = Vec::new();
+        let mut chunk = [0u8; 1024];
+        while !response.windows(2).any(|pair| pair == b"\r\n") {
+            let read = stream.read(&mut chunk).await.expect("read the response");
+            if read == 0 {
+                break;
+            }
+            response.extend_from_slice(&chunk[..read]);
+        }
+        String::from_utf8_lossy(&response).into_owned()
+    }
+
+    #[tokio::test]
+    async fn serves_tls_with_the_tailscale_cert() {
+        let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
+        let (listener, shutdown) = start(&fake, &tls_serve(), options(0));
+        let addr = serving_addrs(&wait_for_status(&listener, is_serving).await)[0];
+        let mut handshake = tls_connect(addr, &fake.ca).await;
+        assert_eq!(
+            handshake.alpn.as_deref(),
+            Some(&b"http/1.1"[..]),
+            "HTTP/1.1 only, though the client offered h2 first"
+        );
+        assert_eq!(
+            handshake.leaf, fake.leaf.der,
+            "the certificate tailscale cert wrote"
+        );
+        let response = http_get(&mut handshake.stream, "/probe").await;
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        shutdown.send_replace(true);
+    }
+
+    #[tokio::test]
+    async fn plain_http_gets_no_http_response() {
+        let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
+        let (listener, shutdown) = start(&fake, &tls_serve(), options(0));
+        let addr = serving_addrs(&wait_for_status(&listener, is_serving).await)[0];
+        let mut tcp = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("connect to the listener");
+        tcp.write_all(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+            .await
+            .expect("send plain HTTP");
+        let mut seen = Vec::new();
+        let mut chunk = [0u8; 64];
+        // The server ends the exchange once the handshake fails, at the latest
+        // at its 10 s handshake timeout; a reset ends the read as well.
+        let read_some = async {
+            while seen.len() < 5 {
+                match tcp.read(&mut chunk).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => seen.extend_from_slice(&chunk[..read]),
+                }
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(60), read_some)
+            .await
+            .expect("the server ends the exchange");
+        assert!(
+            !seen.starts_with(b"HTTP/"),
+            "plain HTTP got an HTTP response: {:?}",
+            String::from_utf8_lossy(&seen)
+        );
+        shutdown.send_replace(true);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn checks_the_cert_at_start_and_every_interval() {
+        let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
+        let serve = Arc::new(PlainServe::default());
+        let options = ListenerOptions {
+            port: 0,
+            cert_interval: Duration::from_secs(60),
+            cert_min_validity: Duration::from_secs(1234),
+            ..ListenerOptions::PRODUCTION
+        };
+        let (listener, shutdown) = start(&fake, &serve, options);
+        wait_for_status(&listener, is_serving).await;
+        let calls = wait_for_cert_calls(&fake, 2).await;
+        for call in &calls[..2] {
+            assert_eq!(call.name, host(), "the name without its trailing dot");
+            assert_eq!(call.cert_file, fake.dir().join(format!("{}.crt", host())));
+            assert_eq!(call.key_file, fake.dir().join(format!("{}.key", host())));
+            assert_eq!(call.min_validity, options.cert_min_validity);
+        }
+        let gap = calls[1].at - calls[0].at;
+        assert_eq!(
+            gap, options.cert_interval,
+            "checked again cert_interval after the check that loaded"
+        );
+        assert_eq!(
+            ListenerOptions::PRODUCTION.cert_interval,
+            Duration::from_hours(24)
+        );
+        assert_eq!(
+            ListenerOptions::PRODUCTION.cert_min_validity,
+            Duration::from_hours(14 * 24)
+        );
+        shutdown.send_replace(true);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn https_disabled_keeps_the_listener_down() {
+        let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
+        fake.set_cert(CertScript::Fail(TailnetError::HttpsDisabled));
+        let serve = Arc::new(PlainServe::default());
+        let options = options(0);
+        let (listener, shutdown) = start(&fake, &serve, options);
+        let seen = record_statuses(&listener);
+        let status = wait_for_status(&listener, |s| *s != ListenerStatus::Starting).await;
+        assert_eq!(status, ListenerStatus::HttpsDisabled);
+        let calls = wait_for_cert_calls(&fake, 2).await;
+        assert_eq!(
+            calls[1].at - calls[0].at,
+            options.poll_interval,
+            "retried after the first backoff step, poll_interval"
+        );
+        assert_eq!(*listener.status().borrow(), ListenerStatus::HttpsDisabled);
+        assert_eq!(
+            serve.started.load(Ordering::SeqCst),
+            0,
+            "no server, no self-signed fallback"
+        );
+        assert!(
+            !seen.lock().expect("status log lock").iter().any(is_serving),
+            "never Serving: nothing was bound"
+        );
+        shutdown.send_replace(true);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn other_cert_failure_is_cert_failed() {
+        let errors = [
+            TailnetError::Timeout,
+            TailnetError::NotRunning,
+            TailnetError::Failed("invalid domain \"x\"; must be one of [\"y\"]".to_owned()),
+        ];
+        for err in errors {
+            let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
+            fake.set_cert(CertScript::Fail(err.clone()));
+            let serve = Arc::new(PlainServe::default());
+            let (listener, shutdown) = start(&fake, &serve, options(0));
+            let status = wait_for_status(&listener, |s| *s != ListenerStatus::Starting).await;
+            assert_eq!(status, ListenerStatus::CertFailed, "{err:?}");
+            assert_eq!(serve.started.load(Ordering::SeqCst), 0, "{err:?}");
+            shutdown.send_replace(true);
+            listener.stopped().await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_recheck_keeps_serving() {
+        let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
+        let serve = Arc::new(PlainServe::default());
+        let options = ListenerOptions {
+            port: 0,
+            cert_interval: Duration::from_secs(60),
+            ..ListenerOptions::PRODUCTION
+        };
+        let (listener, shutdown) = start(&fake, &serve, options);
+        let serving = wait_for_status(&listener, is_serving).await;
+        let seen = record_statuses(&listener);
+        fake.set_cert(CertScript::Fail(TailnetError::Timeout));
+        let calls = wait_for_cert_calls(&fake, 3).await;
+        assert_eq!(
+            calls[2].at - calls[1].at,
+            options.poll_interval,
+            "a failed recheck is retried after the first backoff step, poll_interval"
+        );
+        assert!(
+            seen.lock().expect("status log lock").is_empty(),
+            "the status stayed Serving"
+        );
+        assert_eq!(*listener.status().borrow(), serving);
+        assert_eq!(
+            serve.finished.load(Ordering::SeqCst),
+            0,
+            "the server ran on"
+        );
+        std::net::TcpStream::connect(serving_addrs(&serving)[0])
+            .expect("the server still accepts connections");
+        shutdown.send_replace(true);
+    }
+
+    #[tokio::test]
+    async fn reloads_when_the_pem_changes() {
+        let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
+        let (listener, shutdown) = start(&fake, &tls_serve(), quick_options());
+        let addr = serving_addrs(&wait_for_status(&listener, is_serving).await)[0];
+        assert_eq!(tls_connect(addr, &fake.ca).await.leaf, fake.leaf.der);
+
+        let second = fake.ca.leaf();
+        fake.set_cert(CertScript::leaf(&second));
+        wait_until("the reload", || listener.reloads() >= 1).await;
+        let mut after = tls_connect(addr, &fake.ca).await;
+        assert_eq!(
+            after.leaf, second.der,
+            "a new connection sees the new certificate"
+        );
+        assert_eq!(
+            serving_addrs(&listener.status().borrow()),
+            [addr],
+            "the same server, not restarted"
+        );
+        let response = http_get(&mut after.stream, "/probe").await;
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        shutdown.send_replace(true);
+    }
+
+    #[tokio::test]
+    async fn unchanged_pem_is_not_reloaded() {
+        let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
+        let (listener, shutdown) = start(&fake, &tls_serve(), quick_options());
+        let addr = serving_addrs(&wait_for_status(&listener, is_serving).await)[0];
+        let before = fake.cert_calls().len();
+        wait_for_cert_calls(&fake, before + 3).await;
+        assert_eq!(listener.reloads(), 0, "the same bytes reload nothing");
+        assert_eq!(tls_connect(addr, &fake.ca).await.leaf, fake.leaf.der);
+        shutdown.send_replace(true);
+    }
+
+    #[tokio::test]
+    async fn corrupt_pem_keeps_the_old_certificate() {
+        let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
+        let (listener, shutdown) = start(&fake, &tls_serve(), quick_options());
+        let addr = serving_addrs(&wait_for_status(&listener, is_serving).await)[0];
+        let second = fake.ca.leaf();
+        let scripts = [
+            CertScript::Write {
+                cert: b"not a usable pem".to_vec(),
+                key: b"not a usable pem".to_vec(),
+            },
+            // A new certificate beside the old key: the pair does not match.
+            CertScript::Write {
+                cert: second.cert_pem.clone().into_bytes(),
+                key: fake.leaf.key_pem.clone().into_bytes(),
+            },
+        ];
+        for script in scripts {
+            fake.set_cert(script);
+            let before = fake.cert_calls().len();
+            wait_for_cert_calls(&fake, before + 2).await;
+            assert_eq!(listener.reloads(), 0, "nothing usable to reload");
+            assert!(is_serving(&listener.status().borrow()));
+            assert_eq!(
+                tls_connect(addr, &fake.ca).await.leaf,
+                fake.leaf.der,
+                "the old certificate stays in service"
+            );
+        }
+        shutdown.send_replace(true);
+    }
+
+    #[tokio::test]
+    async fn dropping_the_listener_stops_its_servers() {
+        let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
+        let serve = Arc::new(PlainServe::default());
+        let (listener, shutdown) = start(&fake, &serve, options(0));
+        let addr = serving_addrs(&wait_for_status(&listener, is_serving).await)[0];
+        drop(listener);
+        wait_until("the address to bind again", || {
+            std::net::TcpListener::bind(addr).is_ok()
+        })
+        .await;
+        assert!(!*shutdown.borrow(), "stopped by the drop, not by shutdown");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rebinds_while_a_cert_check_is_pending() {
+        let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
+        let serve = Arc::new(PlainServe::default());
+        let options = ListenerOptions {
+            port: 0,
+            cert_interval: Duration::from_secs(60),
+            ..ListenerOptions::PRODUCTION
+        };
+        let (listener, shutdown) = start(&fake, &serve, options);
+        wait_for_status(&listener, is_serving).await;
+        fake.cert_held.send_replace(true);
+        wait_for_cert_calls(&fake, 2).await;
+
+        fake.set_addresses(&["127.0.0.2/32"]);
+        wait_for_status(&listener, |s| {
+            serving_ips(s) == [IpAddr::from([127, 0, 0, 2])]
+        })
+        .await;
+        assert_eq!(fake.cert_calls().len(), 2, "no further check began");
+        assert_eq!(
+            fake.cert_finished(),
+            1,
+            "rebound while the recheck was still pending: only the first check had finished"
+        );
+        fake.cert_held.send_replace(false);
+        shutdown.send_replace(true);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failing_recheck_backs_off() {
+        let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
+        let serve = Arc::new(PlainServe::default());
+        let options = ListenerOptions {
+            port: 0,
+            cert_interval: Duration::from_secs(60),
+            ..ListenerOptions::PRODUCTION
+        };
+        let (listener, shutdown) = start(&fake, &serve, options);
+        wait_for_status(&listener, is_serving).await;
+
+        // Checks at 0 s and 60 s (failing from then on), then after 30 s,
+        // 60 s, 120 s … up to an hour.
+        fake.set_cert(CertScript::Fail(TailnetError::Timeout));
+        tokio::time::sleep(Duration::from_secs(14_000)).await;
+        assert_eq!(
+            cert_gaps(&fake.cert_calls()),
+            [60, 30, 60, 120, 240, 480, 960, 1920, 3600, 3600]
+        );
+        assert!(is_serving(&listener.status().borrow()));
+
+        // A successful check at 14 670 s resets the backoff.
+        fake.set_cert(CertScript::leaf(&fake.leaf));
+        tokio::time::sleep(Duration::from_secs(680)).await;
+        fake.set_cert(CertScript::Fail(TailnetError::Timeout));
+        tokio::time::sleep(Duration::from_secs(100)).await;
+        let calls = fake.cert_calls();
+        assert_eq!(
+            cert_gaps(&calls[calls.len() - 4..]),
+            [3600, 60, 30],
+            "after a success, a failure is retried after poll_interval again"
+        );
+        shutdown.send_replace(true);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_unusable_pair_after_a_successful_cert_is_retried() {
+        let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
+        let serve = Arc::new(PlainServe::default());
+        let options = ListenerOptions {
+            port: 0,
+            cert_interval: Duration::from_secs(3600),
+            ..ListenerOptions::PRODUCTION
+        };
+        let (listener, shutdown) = start(&fake, &serve, options);
+        wait_for_status(&listener, is_serving).await;
+        fake.set_cert(CertScript::Write {
+            cert: b"not a usable pem".to_vec(),
+            key: b"not a usable pem".to_vec(),
+        });
+        tokio::time::sleep(Duration::from_secs(3700)).await;
+        let calls = fake.cert_calls();
+        assert!(calls.len() >= 3, "{} cert calls", calls.len());
+        assert_eq!(
+            calls[2].at - calls[1].at,
+            options.poll_interval,
+            "tailscale cert succeeded but left an unusable pair: a failed check, retried after the backoff"
+        );
+        assert!(is_serving(&listener.status().borrow()));
+        assert_eq!(listener.reloads(), 0);
+        shutdown.send_replace(true);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_rename_keeps_the_old_name_until_its_cert_loads() {
+        const RENAMED: &str = "laptop.tail1234.ts.net";
+        let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
+        let serve = Arc::new(PlainServe::default());
+        let (listener, shutdown) = start(&fake, &serve, options(0));
+        let first = wait_for_status(&listener, is_serving).await;
+        assert!(
+            matches!(&first, ListenerStatus::Serving { name, .. } if name == host()),
+            "{first:?}"
+        );
+
+        fake.set_cert(CertScript::Fail(TailnetError::Timeout));
+        fake.set_whoami(Ok(whoami_named(&format!("{RENAMED}."), &["127.0.0.1/32"])));
+        let seen = record_statuses(&listener);
+        tokio::time::sleep(Duration::from_secs(150)).await;
+        let renamed_checks = fake
+            .cert_calls()
+            .iter()
+            .filter(|call| call.name == RENAMED)
+            .count();
+        assert!(
+            renamed_checks >= 2,
+            "the new name's check is retried: {renamed_checks}"
+        );
+        assert_eq!(listener.name().as_deref(), Some(RENAMED), "whoami's name");
+        assert!(
+            seen.lock().expect("status log lock").is_empty(),
+            "the status kept the name of the certificate in service"
+        );
+
+        fake.set_cert(CertScript::leaf(&fake.leaf));
+        let renamed = wait_for_status(
+            &listener,
+            |s| matches!(s, ListenerStatus::Serving { name, .. } if name == RENAMED),
+        )
+        .await;
+        assert_eq!(
+            serving_addrs(&renamed),
+            serving_addrs(&first),
+            "the same server"
+        );
+        shutdown.send_replace(true);
+    }
+
+    /// The seconds between consecutive `cert` calls.
+    fn cert_gaps(calls: &[CertCall]) -> Vec<u64> {
+        calls
+            .windows(2)
+            .map(|pair| (pair[1].at - pair[0].at).as_secs())
+            .collect()
+    }
+
+    /// Everything the listener logs while installed, as text, from the
+    /// test's thread (the current-thread runtime runs every task there).
+    #[derive(Clone, Default)]
+    struct LogCapture(Arc<Mutex<Vec<u8>>>);
+
+    impl LogCapture {
+        fn install(&self) -> tracing::subscriber::DefaultGuard {
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(self.clone())
+                .with_ansi(false)
+                .with_max_level(tracing::Level::DEBUG)
+                .finish();
+            tracing::subscriber::set_default(subscriber)
+        }
+
+        /// The lines logged at `level` that contain `text`.
+        fn count(&self, level: &str, text: &str) -> usize {
+            let bytes = self.0.lock().expect("log buffer lock").clone();
+            String::from_utf8_lossy(&bytes)
+                .lines()
+                .filter(|line| line.contains(level) && line.contains(text))
+                .count()
+        }
+    }
+
+    impl std::io::Write for LogCapture {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("log buffer lock")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl tracing_subscriber::fmt::MakeWriter<'_> for LogCapture {
+        type Writer = Self;
+
+        fn make_writer(&self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failing_first_check_backs_off_to_five_minutes() {
+        const RENAMED: &str = "laptop.tail1234.ts.net";
+        let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
+        fake.set_cert(CertScript::Fail(TailnetError::Timeout));
+        let serve = Arc::new(PlainServe::default());
+        let options = options(0);
+        let (_listener, shutdown) = start(&fake, &serve, options);
+
+        // Checks at 0, 30, 90, 210, 450, 750 and 1050 s: with nothing in
+        // service the backoff stops at 5 minutes, not an hour.
+        tokio::time::sleep(Duration::from_secs(1100)).await;
+        assert_eq!(cert_gaps(&fake.cert_calls()), [30, 60, 120, 240, 300, 300]);
+
+        fake.set_whoami(Ok(whoami_named(&format!("{RENAMED}."), &["127.0.0.1/32"])));
+        let renamed = || -> Vec<CertCall> {
+            fake.cert_calls()
+                .into_iter()
+                .filter(|call| call.name == RENAMED)
+                .collect()
+        };
+        wait_until("two checks for the new name", || renamed().len() >= 2).await;
+        let renamed = renamed();
+        assert_eq!(
+            renamed[1].at - renamed[0].at,
+            options.poll_interval,
+            "a name change resets the backoff"
+        );
+        shutdown.send_replace(true);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn https_disabled_while_serving_stops_the_servers() {
+        let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
+        let serve = Arc::new(PlainServe::default());
+        let options = ListenerOptions {
+            port: 0,
+            cert_interval: Duration::from_secs(60),
+            ..ListenerOptions::PRODUCTION
+        };
+        let (listener, shutdown) = start(&fake, &serve, options);
+        let addr = serving_addrs(&wait_for_status(&listener, is_serving).await)[0];
+
+        fake.set_cert(CertScript::Fail(TailnetError::HttpsDisabled));
+        let down = wait_for_status(&listener, |s| !is_serving(s)).await;
+        assert_eq!(down, ListenerStatus::HttpsDisabled);
+        assert_eq!(serve.finished.load(Ordering::SeqCst), 1, "server stopped");
+        std::net::TcpListener::bind(addr).expect("nothing bound: the address was released");
+
+        fake.set_cert(CertScript::leaf(&fake.leaf));
+        let again = wait_for_status(&listener, is_serving).await;
+        assert_eq!(serving_ips(&again), [V4_LOOPBACK]);
+        assert_eq!(serve.started.load(Ordering::SeqCst), 2, "served again");
+        shutdown.send_replace(true);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn status_is_starting_while_the_first_cert_check_runs() {
+        let fake = Arc::new(FakeTailnet::with_whoami(Err(TailnetError::NotRunning)));
+        fake.cert_held.send_replace(true);
+        let serve = Arc::new(PlainServe::default());
+        let (listener, shutdown) = start(&fake, &serve, options(0));
+        wait_for_status(&listener, |s| matches!(s, ListenerStatus::TailscaleDown(_))).await;
+
+        fake.set_addresses(&["127.0.0.1/32"]);
+        wait_for_status(&listener, |s| *s == ListenerStatus::Starting).await;
+        wait_for_cert_calls(&fake, 1).await;
+        assert_eq!(fake.cert_finished(), 0, "the first check is still running");
+        assert_eq!(*listener.status().borrow(), ListenerStatus::Starting);
+
+        fake.cert_held.send_replace(false);
+        wait_for_status(&listener, is_serving).await;
+        shutdown.send_replace(true);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_cert_task_ending_stops_the_servers() {
+        let logs = LogCapture::default();
+        let _logs = logs.install();
+        let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
+        let serve = Arc::new(PlainServe::default());
+        let options = options(0);
+        let (listener, shutdown) = start(&fake, &serve, options);
+        let addr = serving_addrs(&wait_for_status(&listener, is_serving).await)[0];
+
+        listener.abort_cert_task();
+        let down = wait_for_status(&listener, |s| !is_serving(s)).await;
+        assert_eq!(down, ListenerStatus::CertFailed);
+        assert_eq!(serve.finished.load(Ordering::SeqCst), 1, "server stopped");
+        std::net::TcpListener::bind(addr).expect("nothing bound: the address was released");
+
+        let before = fake.whoami_calls();
+        tokio::time::sleep(Duration::from_secs(95)).await;
+        assert_eq!(
+            fake.whoami_calls(),
+            before + 3,
+            "whoami is still polled, every poll interval"
+        );
+        assert_eq!(*listener.status().borrow(), ListenerStatus::CertFailed);
+        assert_eq!(
+            serve.started.load(Ordering::SeqCst),
+            1,
+            "nothing bound again"
+        );
+        assert_eq!(
+            logs.count("ERROR", "the certificate task ended"),
+            1,
+            "logged once, at error"
+        );
+        shutdown.send_replace(true);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_rename_warns_on_its_first_failure() {
+        const RENAMED: &str = "laptop.tail1234.ts.net";
+        let logs = LogCapture::default();
+        let _logs = logs.install();
+        let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
+        let serve = Arc::new(PlainServe::default());
+        let options = ListenerOptions {
+            port: 0,
+            cert_interval: Duration::from_secs(60),
+            ..ListenerOptions::PRODUCTION
+        };
+        let (listener, shutdown) = start(&fake, &serve, options);
+        wait_for_status(&listener, is_serving).await;
+
+        // Rechecks at 60 s (warn) and 90 s (debug) fail the same way.
+        fake.set_cert(CertScript::Fail(TailnetError::Timeout));
+        wait_for_cert_calls(&fake, 3).await;
+        assert_eq!(logs.count("WARN", "certificate check failed"), 1);
+        assert_eq!(logs.count("DEBUG", "certificate check still failing"), 1);
+
+        fake.set_whoami(Ok(whoami_named(&format!("{RENAMED}."), &["127.0.0.1/32"])));
+        wait_until("the new name's check", || {
+            fake.cert_calls().iter().any(|call| call.name == RENAMED)
+        })
+        .await;
+        assert_eq!(
+            logs.count("WARN", "no certificate for the new name yet"),
+            1,
+            "the new name's first failure warns, though its text matches the old name's"
+        );
+        shutdown.send_replace(true);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stopped_waits_for_the_cert_task() {
+        let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
+        fake.cert_held.send_replace(true);
+        let serve = Arc::new(PlainServe::default());
+        let (listener, shutdown) = start(&fake, &serve, options(0));
+        wait_for_cert_calls(&fake, 1).await;
+
+        shutdown.send_replace(true);
+        let cert_done_at_exit = Arc::clone(&listener.cert_done_at_exit);
+        listener.stopped().await;
+        assert!(
+            cert_done_at_exit.load(Ordering::SeqCst),
+            "the cert task had ended before the supervisor returned"
+        );
+        assert_eq!(
+            fake.cert_dropped(),
+            1,
+            "the held tailscale cert call was dropped before stopped returned"
+        );
+    }
+
+    /// Set the fake's `cert` script and wait until a call made with it has
+    /// finished.
+    async fn finish_a_check_with(fake: &FakeTailnet, script: CertScript) {
+        fake.set_cert(script);
+        let before = fake.cert_calls().len();
+        wait_until("a check with the new script", || {
+            fake.cert_finished() > before
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_missed_down_state_still_gets_later_reloads() {
+        let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
+        let (listener, shutdown) = start(&fake, &tls_serve(), quick_options());
+        let addr = serving_addrs(&wait_for_status(&listener, is_serving).await)[0];
+
+        // Hold the supervisor inside whoami, so it sees neither the Down
+        // state nor the Ready that follows it.
+        fake.whoami_held.send_replace(true);
+        let polls = fake.whoami_calls();
+        wait_until("the supervisor to wait on whoami", || {
+            fake.whoami_calls() > polls
+        })
+        .await;
+        finish_a_check_with(&fake, CertScript::Fail(TailnetError::HttpsDisabled)).await;
+        finish_a_check_with(&fake, CertScript::leaf(&fake.leaf)).await;
+        fake.whoami_held.send_replace(false);
+        let polls = fake.whoami_calls();
+        wait_until("the supervisor to poll again", || {
+            fake.whoami_calls() > polls + 1
+        })
+        .await;
+        assert_eq!(
+            serving_addrs(&listener.status().borrow()),
+            [addr],
+            "the server survived the missed Down state"
+        );
+
+        let reloads = listener.reloads();
+        let second = fake.ca.leaf();
+        fake.set_cert(CertScript::leaf(&second));
+        wait_until("the reload", || listener.reloads() > reloads).await;
+        assert!(
+            tls_connect(addr, &fake.ca).await.leaf == second.der,
+            "the running server gets the reload"
+        );
+        shutdown.send_replace(true);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_down_state_for_the_old_name_reads_starting() {
+        const RENAMED: &str = "laptop.tail1234.ts.net";
+        let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
+        fake.set_cert(CertScript::Fail(TailnetError::HttpsDisabled));
+        let serve = Arc::new(PlainServe::default());
+        let (listener, shutdown) = start(&fake, &serve, options(0));
+        wait_for_status(&listener, |s| *s == ListenerStatus::HttpsDisabled).await;
+
+        // The old name's retry is held, so the worker has not seen the rename.
+        fake.cert_held.send_replace(true);
+        let before = fake.cert_calls().len();
+        wait_for_cert_calls(&fake, before + 1).await;
+        fake.set_whoami(Ok(whoami_named(&format!("{RENAMED}."), &["127.0.0.1/32"])));
+        let status = wait_for_status(&listener, |s| *s != ListenerStatus::HttpsDisabled).await;
+        assert_eq!(
+            status,
+            ListenerStatus::Starting,
+            "the old name's HttpsDisabled says nothing about the new name"
+        );
+        assert!(
+            fake.cert_calls().iter().all(|call| call.name != RENAMED),
+            "the new name's check has not begun"
+        );
+        fake.cert_held.send_replace(false);
+        shutdown.send_replace(true);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_panicked_cert_task_is_logged_once() {
+        let logs = LogCapture::default();
+        let _logs = logs.install();
+        let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
+        fake.set_cert(CertScript::Panic);
+        let serve = Arc::new(PlainServe::default());
+        let (listener, shutdown) = start(&fake, &serve, options(0));
+        wait_for_status(&listener, |s| *s == ListenerStatus::CertFailed).await;
+        shutdown.send_replace(true);
+        listener.stopped().await;
+        assert_eq!(
+            logs.count("", "the certificate task"),
+            1,
+            "the panic is logged when it ends the task, not again at shutdown"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_aborts_the_cert_task_before_draining() {
+        let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
+        let serve = Arc::new(PlainServe {
+            events: Some(Arc::clone(&fake.events)),
+            ..PlainServe::default()
+        });
+        let options = ListenerOptions {
+            port: 0,
+            cert_interval: Duration::from_secs(60),
+            ..ListenerOptions::PRODUCTION
+        };
+        let (listener, shutdown) = start(&fake, &serve, options);
+        wait_for_status(&listener, is_serving).await;
+        fake.cert_held.send_replace(true);
+        wait_for_cert_calls(&fake, 2).await;
+
+        shutdown.send_replace(true);
+        listener.stopped().await;
+        assert_eq!(
+            *fake.events.lock().expect("events lock"),
+            ["cert call dropped", "server stopped"],
+            "the cert call is dropped before the servers drain"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_renamed_name_without_a_cert_backs_off_to_five_minutes() {
+        const RENAMED: &str = "laptop.tail1234.ts.net";
+        let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
+        let serve = Arc::new(PlainServe::default());
+        let (listener, shutdown) = start(&fake, &serve, options(0));
+        wait_for_status(&listener, is_serving).await;
+
+        // The new name is seen on the poll at 30 s; its checks fail at 30,
+        // 60, 120, 240, 480, 780 and 1080 s.
+        fake.set_cert(CertScript::Fail(TailnetError::Timeout));
+        fake.set_whoami(Ok(whoami_named(&format!("{RENAMED}."), &["127.0.0.1/32"])));
+        tokio::time::sleep(Duration::from_secs(1100)).await;
+        let renamed: Vec<CertCall> = fake
+            .cert_calls()
+            .into_iter()
+            .filter(|call| call.name == RENAMED)
+            .collect();
+        assert_eq!(
+            cert_gaps(&renamed),
+            [30, 60, 120, 240, 300, 300],
+            "the new name has no certificate in service: the 5-minute cap"
+        );
+        assert!(
+            is_serving(&listener.status().borrow()),
+            "the old name's certificate stays in service"
+        );
+        shutdown.send_replace(true);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_repeated_failure_does_not_wake_the_supervisor() {
+        let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
+        fake.set_cert(CertScript::Fail(TailnetError::Timeout));
+        let serve = Arc::new(PlainServe::default());
+        let (listener, shutdown) = start(&fake, &serve, options(0));
+        wait_for_status(&listener, |s| *s == ListenerStatus::CertFailed).await;
+
+        let mut state = listener.cert_state.clone();
+        state.borrow_and_update();
+        let before = fake.cert_calls().len();
+        wait_for_cert_calls(&fake, before + 2).await;
+        assert!(
+            !state.has_changed().expect("the cert task runs"),
+            "the same failure again publishes no new state"
+        );
+        shutdown.send_replace(true);
     }
 }
