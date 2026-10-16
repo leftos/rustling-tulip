@@ -5,8 +5,9 @@
 //! updates while a headless session is running.
 
 use super::{AgentBackend, CommonSpawnFields, workspace_prelude};
+use crate::agents::providers;
 use crate::session::{SessionRegistry, push_recent_action};
-use protocol::{AgentOptions, PermissionMode, SessionMember, SessionStatus};
+use protocol::{AgentOptions, ClaudeProvider, PermissionMode, SessionMember, SessionStatus};
 use serde::Deserialize;
 use tracing::debug;
 
@@ -32,15 +33,7 @@ impl AgentBackend for ClaudeBackend {
         members: &[SessionMember],
         initial_prompt: Option<&str>,
     ) -> Vec<String> {
-        let permission_mode = match opts {
-            AgentOptions::Claude {
-                permission_mode, ..
-            } => *permission_mode,
-            AgentOptions::Codex { .. } | AgentOptions::Cursor { .. } => {
-                debug_assert!(false, "claude backend invoked with non-claude options");
-                None
-            }
-        };
+        let (permission_mode, provider) = claude_options(opts);
         let mut args: Vec<String> = Vec::new();
         for extra in members.iter().skip(1) {
             args.push("--add-dir".to_string());
@@ -58,7 +51,7 @@ impl AgentBackend for ClaudeBackend {
             args.push("--append-system-prompt".to_string());
             args.push(prelude);
         }
-        extend_common(&mut args, common, permission_mode);
+        extend_common(&mut args, common, permission_mode, provider);
         // A resumed conversation keeps its own id and history, so it takes
         // neither a fresh `--session-id` nor a kickoff prompt.
         if let Some(id) = common.resume_conversation {
@@ -89,15 +82,7 @@ impl AgentBackend for ClaudeBackend {
         members: &[SessionMember],
         initial_prompt: &str,
     ) -> Vec<String> {
-        let permission_mode = match opts {
-            AgentOptions::Claude {
-                permission_mode, ..
-            } => *permission_mode,
-            AgentOptions::Codex { .. } | AgentOptions::Cursor { .. } => {
-                debug_assert!(false, "claude backend invoked with non-claude options");
-                None
-            }
-        };
+        let (permission_mode, provider) = claude_options(opts);
         let mut args: Vec<String> = vec![
             "--print".to_string(),
             "--output-format".to_string(),
@@ -112,7 +97,7 @@ impl AgentBackend for ClaudeBackend {
             args.push("--append-system-prompt".to_string());
             args.push(prelude);
         }
-        extend_common(&mut args, common, permission_mode);
+        extend_common(&mut args, common, permission_mode, provider);
         args.push("-p".to_string());
         args.push(initial_prompt.to_string());
         args
@@ -171,16 +156,33 @@ impl AgentBackend for ClaudeBackend {
     }
 }
 
+/// The permission mode and provider in `opts`, which the Claude backend is
+/// only ever given for a Claude spawn.
+fn claude_options(opts: &AgentOptions) -> (Option<PermissionMode>, ClaudeProvider) {
+    match opts {
+        AgentOptions::Claude {
+            permission_mode,
+            provider,
+        } => (*permission_mode, *provider),
+        AgentOptions::Codex { .. } | AgentOptions::Cursor { .. } => {
+            debug_assert!(false, "claude backend invoked with non-claude options");
+            (None, ClaudeProvider::Anthropic)
+        }
+    }
+}
+
 /// Append claude's `--model`, `--permission-mode`, and
-/// `--dangerously-skip-permissions` args. The claude CLI rejects
-/// `--permission-mode` together with `--dangerously-skip-permissions`, so
-/// the latter wins when both are set.
+/// `--dangerously-skip-permissions` args. A spawn that names no model on a
+/// provider with a default model (see [`providers::default_model`]) passes
+/// that one. The claude CLI rejects `--permission-mode` together with
+/// `--dangerously-skip-permissions`, so the latter wins when both are set.
 fn extend_common(
     args: &mut Vec<String>,
     common: &CommonSpawnFields<'_>,
     permission_mode: Option<PermissionMode>,
+    provider: ClaudeProvider,
 ) {
-    if let Some(model) = common.model {
+    if let Some(model) = common.model.or_else(|| providers::default_model(provider)) {
         args.push("--model".to_string());
         args.push(model.to_string());
     }
@@ -386,6 +388,45 @@ mod tests {
         );
         assert!(!args.contains(&"--session-id".to_string()), "{args:?}");
         assert!(!args.contains(&SESSION_ID.to_string()), "{args:?}");
+    }
+
+    #[test]
+    fn deepseek_spawn_passes_model_deepseek_flash() {
+        let m = members(&["X:/dev/a"]);
+        let opts = AgentOptions::Claude {
+            permission_mode: None,
+            provider: protocol::ClaudeProvider::Deepseek,
+        };
+        let interactive =
+            ClaudeBackend.build_interactive_args(&opts, &common(false, None, false), &m, None);
+        assert!(
+            interactive
+                .windows(2)
+                .any(|w| *w == ["--model", "deepseek-flash"]),
+            "{interactive:?}"
+        );
+        let headless =
+            ClaudeBackend.build_headless_args(&opts, &common(false, None, false), &m, "hi");
+        assert!(
+            headless
+                .windows(2)
+                .any(|w| *w == ["--model", "deepseek-flash"]),
+            "{headless:?}"
+        );
+        let chosen = ClaudeBackend.build_interactive_args(
+            &opts,
+            &common(false, Some("deepseek-pro"), false),
+            &m,
+            None,
+        );
+        assert_eq!(chosen, vec!["--model", "deepseek-pro"]);
+        let anthropic = ClaudeBackend.build_interactive_args(
+            &AgentOptions::claude(None),
+            &common(false, None, false),
+            &m,
+            None,
+        );
+        assert!(!anthropic.contains(&"--model".to_string()), "{anthropic:?}");
     }
 
     #[test]

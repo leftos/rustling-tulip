@@ -12,6 +12,7 @@
 mod claude;
 mod codex;
 mod cursor;
+pub(crate) mod providers;
 
 use crate::session::SessionRegistry;
 use futures::future::BoxFuture;

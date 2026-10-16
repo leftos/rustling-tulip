@@ -1374,7 +1374,7 @@ async fn handshake(
 /// The capabilities this daemon lists in `Welcome.features` (`protocol::FEATURE_*`).
 /// A feature joins only once the daemon fully honours it, since a client that
 /// sees it listed offers the capability to the user.
-const DAEMON_FEATURES: &[&str] = &[];
+const DAEMON_FEATURES: &[&str] = &[protocol::FEATURE_CLAUDE_PROVIDER];
 
 /// The `Welcome` answering an accepted `Hello`: the negotiated version, every
 /// version this daemon speaks, and [`DAEMON_FEATURES`].
@@ -1648,7 +1648,10 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
             // could not be sealed refuses the spawn before the user is asked to
             // confirm a checkout it would never make. This writes nothing;
             // `spawn_session` seals and resolves again for the child.
-            if let Err(failure) = check_env_rows(&req.extra_env, &req.secret_env_keys) {
+            let provider = req.agent_options.claude_provider().unwrap_or_default();
+            if let Err(failure) =
+                check_env_rows(&req.extra_env, &req.secret_env_keys, req.mode, provider)
+            {
                 send_spawn_failure(out_tx, &failure.into(), req.request_id.as_deref());
             } else if let Some(confirm) = in_place_checkout_confirm(hub, &req).await {
                 let _ = out_tx.send(confirm);
@@ -3219,22 +3222,43 @@ fn checkout_confirm_reply(
     }
 }
 
+pub(crate) async fn spawn_session(
+    hub: &Hub,
+    req: SpawnRequest,
+    origin: Option<UpdateOrigin>,
+) -> anyhow::Result<protocol::SessionSnapshot> {
+    spawn_session_with(hub, req, origin, user_env::resolve).await
+}
+
+/// [`spawn_session`] with the variable lookup `resolve` in place of
+/// [`user_env::resolve`]: it resolves the rows' env references and the
+/// provider's key.
 #[expect(
     clippy::too_many_lines,
     reason = "Spawn is naturally a flat pipeline (resolve → config → mode switch → \
               timing). Extracting helpers would require threading the timing values \
               and adding a result wrapper for diminishing returns"
 )]
-pub(crate) async fn spawn_session(
+async fn spawn_session_with<R>(
     hub: &Hub,
     mut req: SpawnRequest,
     origin: Option<UpdateOrigin>,
-) -> anyhow::Result<protocol::SessionSnapshot> {
+    resolve: R,
+) -> anyhow::Result<protocol::SessionSnapshot>
+where
+    R: Fn(&str) -> Option<(user_env::Secret, user_env::Origin)>,
+{
     // Phase-level timing for the spawn pipeline so we can tell at a glance
     // whether a slow spawn was the git worktree setup, the PTY/child boot,
     // or something on the registry side. Logged at info so users debugging
     // perceived slowness can read them without flipping log filters.
     let t_total = std::time::Instant::now();
+    // A plain shell asking for a provider, a provider this daemon doesn't
+    // know, or a row setting one of the provider's locked variables refuses
+    // before the rows are sealed and before any git work, so a refused spawn
+    // writes nothing to the credential store and checks nothing out.
+    let provider = req.agent_options.claude_provider().unwrap_or_default();
+    crate::agents::providers::check_request(req.mode, provider, &req.extra_env)?;
     // A secret row's literal moves into the credential store and becomes a
     // `${secret:<id>}` reference before anything captures the request, so the
     // session record, the sidecar, `state.json`, the `Repos`/`Workspaces`
@@ -3285,7 +3309,11 @@ pub(crate) async fn spawn_session(
     // Env references resolve before any git work, so a refusal leaves no
     // worktree behind. `stored_config` keeps the references as sent; only the
     // child's environment gets their values.
-    let extra_env = resolve_env_refs(&extra_env, user_env::resolve)?;
+    let extra_env = resolve_env_refs(&extra_env, &resolve)?;
+    // The provider's routing variables and key join the child's environment
+    // here, after `stored_config` was captured, so they are never stored; a
+    // missing key refuses before any git work.
+    let env = crate::agents::providers::spawn_env(provider, &extra_env, &resolve)?;
 
     let t_resolve = std::time::Instant::now();
     let mut standalone_add_dirs = Vec::new();
@@ -3356,7 +3384,7 @@ pub(crate) async fn spawn_session(
         dangerously_skip_permissions,
         agent_options,
         model,
-        extra_env,
+        env,
         prompt_injector,
         origin,
         resume_conversation,
@@ -3649,7 +3677,9 @@ struct SpawnArgs {
     /// Per-agent options. The variant tag doubles as the agent selector.
     agent_options: AgentOptions,
     model: Option<String>,
-    extra_env: Vec<(String, String)>,
+    /// The child's environment: the keep-list, the resolved rows and the
+    /// provider's routing variables. Never stored.
+    env: crate::agents::providers::SpawnEnv,
     /// Scripted PTY input driven post-spawn for interactive sessions. When
     /// `Some`, the interactive spawn path omits the prompt CLI flag — the
     /// injector is responsible for delivering the prompt. Ignored by the
@@ -3806,7 +3836,6 @@ async fn spawn_interactive_session(
     let backend = crate::agents::backend_for(agent);
     let raw_program = backend.resolve_program();
     let (program, prepend_args) = resolve_agent_program(&raw_program);
-    let env = merged_env(&cfg.extra_env);
     let conversation = crate::agents::spawn_conversation(
         agent,
         cfg.resume_conversation.as_deref(),
@@ -3814,7 +3843,7 @@ async fn spawn_interactive_session(
             program: &program,
             prepend: &prepend_args,
             cwd: &primary_cwd,
-            env: &env,
+            env: &cfg.env.set,
         },
     )
     .await;
@@ -3854,10 +3883,13 @@ async fn spawn_interactive_session(
         program,
         args: final_args,
         cwd: primary_cwd,
-        env,
+        env: cfg.env.set.clone(),
+        env_remove: cfg.env.remove.clone(),
         cols: 120,
         rows: 32,
     };
+    #[cfg(test)]
+    child_env_probe::record(&spec.env, &spec.env_remove);
     let tracer_spawn = match tracer_client::spawn(
         &hub.dirs,
         spec,
@@ -4015,7 +4047,7 @@ async fn spawn_plain_shell_session(
 
     let shell = resolve_shell_program(&hub.dirs)?;
     let initial_cwd = primary_cwd.to_string_lossy().into_owned();
-    let mut env = merged_env(&cfg.extra_env);
+    let mut env = cfg.env.set.clone();
     for (k, v) in shell.extra_env {
         if let Some(slot) = env.iter_mut().find(|(existing, _)| existing == &k) {
             slot.1 = v;
@@ -4029,9 +4061,12 @@ async fn spawn_plain_shell_session(
         args: shell.args,
         cwd: primary_cwd,
         env,
+        env_remove: cfg.env.remove.clone(),
         cols: 120,
         rows: 32,
     };
+    #[cfg(test)]
+    child_env_probe::record(&spec.env, &spec.env_remove);
     let tracer_spawn = tracer_client::spawn(
         &hub.dirs,
         spec,
@@ -4188,9 +4223,11 @@ fn spawn_headless_session(
         program: backend.resolve_program(),
         args,
         cwd: primary_cwd,
-        env: merged_env(&cfg.extra_env),
+        env: cfg.env.set.clone(),
         agent: cfg.agent(),
     };
+    #[cfg(test)]
+    child_env_probe::record(&spec.env, &[]);
 
     let started_at = Utc::now();
     let mut record = SessionRecord {
@@ -5611,7 +5648,19 @@ async fn recover_one(
     // registering a repo writes `state.json` and broadcasts `Repos`, and a
     // recovery that then failed would leave a repo the user never asked for
     // behind a spawn that never happened.
-    if let Err(failure) = check_env_rows(history::recorded_env(&entry), &[]) {
+    let provider = entry
+        .spawn_config
+        .as_ref()
+        .and_then(|config| config.agent_options.claude_provider())
+        .unwrap_or_default();
+    // A Claude entry recovers as an interactive session; a shell recovery
+    // carries no provider, so the mode only matters for a provider's entry.
+    if let Err(failure) = check_env_rows(
+        history::recorded_env(&entry),
+        &[],
+        SessionMode::Interactive,
+        provider,
+    ) {
         return Err(format!("{failure}"));
     }
     let busy_excluded = {
@@ -6868,31 +6917,6 @@ async fn accept_vscode_suggestion(
     Ok(())
 }
 
-fn passthrough_env() -> Vec<(String, String)> {
-    let keep = [
-        "PATH",
-        "HOME",
-        "USERPROFILE",
-        "APPDATA",
-        "LOCALAPPDATA",
-        "TEMP",
-        "TMP",
-        "TERM",
-        "LANG",
-        "LC_ALL",
-        "ANTHROPIC_API_KEY",
-        "CLAUDE_CONFIG_DIR",
-    ];
-    let mut out = Vec::new();
-    for k in keep {
-        if let Ok(v) = std::env::var(k) {
-            out.push((k.to_string(), v));
-        }
-    }
-    out.push(("TERM".to_string(), "xterm-256color".to_string()));
-    out
-}
-
 /// The spawn's `extra_env` with each reference (see
 /// [`protocol::env_rows::reference`]) replaced by the value it stands for: an
 /// env reference by the value `lookup` finds for it, a secret reference by the
@@ -6943,55 +6967,62 @@ pub(crate) fn resolve_env_refs(
         .collect()
 }
 
-/// Everything the daemon can check about a spawn's env rows before it does
-/// work it can't undo: every secret row must be sealable (see
-/// [`env_secrets::check_sealable`]) and every reference resolvable. The
-/// dispatcher runs it before a checkout confirm, and recovery before it
-/// registers a repo; `spawn_session` seals and resolves again for the child.
+/// Everything the daemon can check about a spawn's request and env rows
+/// before it does work it can't undo: the request must pass
+/// [`crate::agents::providers::check_request`], every secret row must be
+/// sealable (see [`env_secrets::check_sealable`]), every reference
+/// resolvable, and the provider's key set. The dispatcher runs it before a
+/// checkout confirm, and recovery before it registers a repo;
+/// `spawn_session` seals and resolves again for the child.
 pub(crate) fn check_env_rows(
     rows: &[(String, String)],
     secret_keys: &[String],
+    mode: SessionMode,
+    provider: protocol::ClaudeProvider,
 ) -> Result<(), spawn_plan::SpawnFailure> {
+    check_env_rows_with(rows, secret_keys, mode, provider, user_env::resolve)
+}
+
+/// [`check_env_rows`] with the variable lookup `resolve` in place of
+/// [`user_env::resolve`].
+fn check_env_rows_with(
+    rows: &[(String, String)],
+    secret_keys: &[String],
+    mode: SessionMode,
+    provider: protocol::ClaudeProvider,
+    resolve: impl Fn(&str) -> Option<(user_env::Secret, user_env::Origin)>,
+) -> Result<(), spawn_plan::SpawnFailure> {
+    crate::agents::providers::check_request(mode, provider, rows)?;
     env_secrets::check_sealable(rows, secret_keys)?;
-    resolve_env_refs(rows, user_env::resolve)?;
+    resolve_env_refs(rows, &resolve)?;
+    crate::agents::providers::check_key(provider, &resolve)?;
     Ok(())
 }
 
-/// Build the env list for a spawn: the daemon's keep-list plus the spawn's
-/// `extra_env` keys, with `extra_env` overriding the keep-list on key
-/// collision. `extra` holds values already resolved by [`resolve_env_refs`],
-/// so env references never reach here. Deduplicated to avoid passing the same
-/// key twice to the child process.
-fn merged_env(extra: &[(String, String)]) -> Vec<(String, String)> {
-    let mut out = passthrough_env();
-    for (k, v) in extra {
-        if let Some(slot) = out.iter_mut().find(|(existing, _)| existing == k) {
-            slot.1.clone_from(v);
-        } else {
-            out.push((k.clone(), v.clone()));
-        }
-    }
-    #[cfg(test)]
-    child_env_probe::record(&out);
-    out
-}
-
-/// Test-only record of the last env [`merged_env`] built on this thread: the
-/// env every spawn spec (`PtySpawnSpec` / `HeadlessSpec`) is handed, so a test
-/// can see what a child would get without starting one.
+/// Test-only record of the last spawn spec's environment built on this
+/// thread: the `env` and `env_remove` every `PtySpawnSpec` / `HeadlessSpec`
+/// is handed, so a test can see what a child would get without starting one.
 #[cfg(test)]
 mod child_env_probe {
     use std::cell::RefCell;
 
+    type Recorded = (Vec<(String, String)>, Vec<String>);
+
     thread_local! {
-        static LAST: RefCell<Option<Vec<(String, String)>>> = const { RefCell::new(None) };
+        static LAST: RefCell<Option<Recorded>> = const { RefCell::new(None) };
     }
 
-    pub fn record(env: &[(String, String)]) {
-        LAST.with(|last| *last.borrow_mut() = Some(env.to_vec()));
+    pub fn record(env: &[(String, String)], remove: &[String]) {
+        LAST.with(|last| *last.borrow_mut() = Some((env.to_vec(), remove.to_vec())));
     }
 
+    /// The last spec's `env`, clearing the record.
     pub fn take() -> Option<Vec<(String, String)>> {
+        take_both().map(|(env, _)| env)
+    }
+
+    /// The last spec's `env` and `env_remove`, clearing the record.
+    pub fn take_both() -> Option<Recorded> {
         LAST.with(|last| last.borrow_mut().take())
     }
 }
@@ -7014,6 +7045,19 @@ mod tests {
                 DaemonMessage::Welcome { protocol_version: 22, supported_versions, features }
                     if supported_versions == SUPPORTED_PROTOCOL_VERSIONS
                         && features == DAEMON_FEATURES
+            ),
+            "{welcome:?}"
+        );
+    }
+
+    #[test]
+    fn welcome_lists_claude_provider() {
+        let welcome = welcome_message(22);
+        assert!(
+            matches!(
+                &welcome,
+                DaemonMessage::Welcome { features, .. }
+                    if features.iter().any(|f| f == "claude_provider")
             ),
             "{welcome:?}"
         );
@@ -8469,7 +8513,7 @@ mod tests {
             dangerously_skip_permissions: false,
             agent_options: AgentOptions::Codex { sandbox: None },
             model: None,
-            extra_env: Vec::new(),
+            env: crate::agents::providers::SpawnEnv::default(),
             prompt_injector: None,
             origin: None,
             resume_conversation: None,
@@ -8714,6 +8758,331 @@ mod tests {
         );
     }
 
+    /// A `DEEPSEEK_API_KEY` value no stored file or reply may hold.
+    const DEEPSEEK_KEY_SENTINEL: &str = "sk-deepseek-sentinel-a41c9e";
+
+    /// Claude options on the `DeepSeek` provider.
+    fn deepseek_options() -> AgentOptions {
+        AgentOptions::Claude {
+            permission_mode: None,
+            provider: protocol::ClaudeProvider::Deepseek,
+        }
+    }
+
+    /// A lookup that knows `DEEPSEEK_API_KEY` only.
+    fn deepseek_key(name: &str) -> Option<(user_env::Secret, user_env::Origin)> {
+        (name == "DEEPSEEK_API_KEY").then(|| {
+            (
+                user_env::Secret::new(DEEPSEEK_KEY_SENTINEL.to_owned()),
+                user_env::Origin::Process,
+            )
+        })
+    }
+
+    fn deepseek_spawn(
+        target: SpawnTarget,
+        mode: SessionMode,
+        extra_env: Vec<(String, String)>,
+        request_id: Option<&str>,
+    ) -> SpawnRequest {
+        SpawnRequest {
+            agent_options: deepseek_options(),
+            ..env_spawn(target, mode, extra_env, request_id)
+        }
+    }
+
+    /// Repo `r1`'s `main`, in place: no worktree.
+    fn in_place_main() -> SpawnTarget {
+        let mut target = single_target(false, None);
+        if let SpawnTarget::Single { branch_name, .. } = &mut target {
+            "main".clone_into(branch_name);
+        }
+        target
+    }
+
+    #[tokio::test]
+    #[expect(clippy::panic, reason = "a wrong reply fails the test loudly")]
+    async fn a_deepseek_spawn_without_a_key_is_refused_before_git_work() {
+        let (hub, _scratch, repo) = env_ref_repo_hub("deepseek-no-key");
+        let req = deepseek_spawn(
+            single_target(true, None),
+            SessionMode::Interactive,
+            Vec::new(),
+            Some("rq-ds"),
+        );
+        let err = spawn_session_with(&hub, req, None, |_| None)
+            .await
+            .expect_err("a missing key refuses");
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        send_spawn_failure(&out_tx, &err, Some("rq-ds"));
+        let reply = out_rx.try_recv().expect("a reply");
+        let DaemonMessage::ActionFailed {
+            title,
+            detail,
+            hint,
+            request_id,
+        } = reply
+        else {
+            panic!("expected action_failed, got {reply:?}");
+        };
+        assert_eq!(title, "Couldn't start the DeepSeek session");
+        assert!(detail.contains("`DEEPSEEK_API_KEY`"), "{detail}");
+        assert!(
+            hint.as_deref()
+                .is_some_and(|h| h.contains("setx DEEPSEEK_API_KEY")),
+            "{hint:?}"
+        );
+        assert_eq!(request_id.as_deref(), Some("rq-ds"));
+        let worktrees = git_ok(&repo, &["worktree", "list", "--porcelain"]);
+        assert_eq!(
+            worktrees
+                .lines()
+                .filter(|l| l.starts_with("worktree "))
+                .count(),
+            1,
+            "only the main worktree: {worktrees}"
+        );
+        assert_eq!(git_ok(&repo, &["branch", "--list", "wt/x"]).trim(), "");
+        let made = std::fs::read_dir(hub.state.worktrees_dir()).map_or(0, Iterator::count);
+        assert_eq!(made, 0, "nothing under the worktrees root");
+        assert!(hub.sessions.snapshots().is_empty(), "nothing was spawned");
+    }
+
+    #[tokio::test]
+    async fn the_stored_config_of_a_deepseek_spawn_holds_only_the_users_rows() {
+        let (hub, _scratch, _repo) = env_ref_repo_hub("deepseek-stored");
+        let extra = env(&[("RT_USER_ROW", "x")]);
+        let req = deepseek_spawn(
+            in_place_main(),
+            SessionMode::Interactive,
+            extra.clone(),
+            None,
+        );
+        let _ = child_env_probe::take();
+        // The spawnless hub fails at the tracer, after the spec is built.
+        spawn_session_with(&hub, req, None, deepseek_key)
+            .await
+            .expect_err("no tracer can start");
+        let child = child_env_probe::take().expect("a spawn spec's env was built");
+        assert_eq!(
+            child_value(&child, "ANTHROPIC_AUTH_TOKEN").as_deref(),
+            Some(DEEPSEEK_KEY_SENTINEL),
+            "the child gets the key"
+        );
+        assert_eq!(child_value(&child, "RT_USER_ROW").as_deref(), Some("x"));
+
+        let stored = hub
+            .state
+            .with_persisted(|s| s.repos[0].last_spawn_config.clone())
+            .expect("last spawn config stored");
+        assert_eq!(stored.extra_env, extra, "only the user's rows are stored");
+        assert_eq!(
+            stored.agent_options.claude_provider(),
+            Some(protocol::ClaudeProvider::Deepseek)
+        );
+        let state = std::fs::read_to_string(&hub.dirs.state_file).expect("state.json written");
+        assert!(!state.contains(DEEPSEEK_KEY_SENTINEL), "{state}");
+        assert!(!state.contains("ANTHROPIC_BASE_URL"), "{state}");
+    }
+
+    #[tokio::test]
+    async fn a_deepseek_interactive_spec_carries_the_routing_set_and_removals() {
+        let (hub, _scratch, _repo) = env_ref_repo_hub("deepseek-spec");
+        let req = deepseek_spawn(in_place_main(), SessionMode::Interactive, Vec::new(), None);
+        let _ = child_env_probe::take_both();
+        // The spawnless hub fails at the tracer, after the spec is built.
+        spawn_session_with(&hub, req, None, deepseek_key)
+            .await
+            .expect_err("no tracer can start");
+        let (child, removed) = child_env_probe::take_both().expect("a spawn spec was built");
+        assert_eq!(
+            child_value(&child, "ANTHROPIC_BASE_URL").as_deref(),
+            Some("https://api.deepseek.com/anthropic")
+        );
+        assert_eq!(
+            child_value(&child, "CLAUDE_DEEPSEEK_SESSION").as_deref(),
+            Some("1")
+        );
+        assert_eq!(
+            child_value(&child, "ANTHROPIC_AUTH_TOKEN").as_deref(),
+            Some(DEEPSEEK_KEY_SENTINEL)
+        );
+        assert_eq!(child_value(&child, "ANTHROPIC_API_KEY"), None);
+        for name in ["ANTHROPIC_API_KEY", "CLAUDE_CODE_USE_FOUNDRY"] {
+            assert!(removed.iter().any(|r| r == name), "{name} in {removed:?}");
+        }
+    }
+
+    #[tokio::test]
+    #[expect(clippy::panic, reason = "a wrong reply fails the test loudly")]
+    async fn a_plain_shell_deepseek_request_is_refused() {
+        let (hub, _scratch, repo) = env_ref_repo_hub("deepseek-shell");
+        let req = deepseek_spawn(
+            single_target(true, None),
+            SessionMode::PlainShell,
+            Vec::new(),
+            None,
+        );
+        // No key anywhere: the shell refusal comes first, not the key's.
+        let err = spawn_session_with(&hub, req, None, |_| None)
+            .await
+            .expect_err("a plain shell refuses a provider");
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("Plain shell sessions do not accept a Claude provider"),
+            "{text}"
+        );
+        assert!(!text.contains("DEEPSEEK_API_KEY"), "{text}");
+        let worktrees = git_ok(&repo, &["worktree", "list", "--porcelain"]);
+        assert_eq!(
+            worktrees
+                .lines()
+                .filter(|l| l.starts_with("worktree "))
+                .count(),
+            1,
+            "only the main worktree: {worktrees}"
+        );
+        assert_eq!(git_ok(&repo, &["branch", "--list", "wt/x"]).trim(), "");
+        assert!(
+            hub.state
+                .with_persisted(|s| s.repos[0].last_spawn_config.clone())
+                .is_none(),
+            "no last spawn config was stored"
+        );
+
+        let req = deepseek_spawn(
+            single_target(true, None),
+            SessionMode::PlainShell,
+            Vec::new(),
+            Some("rq-sh"),
+        );
+        let reply = dispatch_one(&hub, ClientMessage::SpawnSession(req)).await;
+        let DaemonMessage::ActionFailed {
+            detail, request_id, ..
+        } = reply
+        else {
+            panic!("the pre-check refuses, got {reply:?}");
+        };
+        assert!(
+            detail.contains("do not accept a Claude provider"),
+            "{detail}"
+        );
+        assert_eq!(request_id.as_deref(), Some("rq-sh"));
+        assert!(hub.sessions.snapshots().is_empty(), "nothing was spawned");
+    }
+
+    #[test]
+    fn the_env_row_pre_check_refuses_a_deepseek_spawn_without_its_key() {
+        let failure = check_env_rows_with(
+            &[],
+            &[],
+            SessionMode::Interactive,
+            protocol::ClaudeProvider::Deepseek,
+            |_| None,
+        )
+        .expect_err("a missing key refuses");
+        assert!(
+            failure.detail.contains("`DEEPSEEK_API_KEY`"),
+            "{}",
+            failure.detail
+        );
+        assert!(
+            check_env_rows_with(
+                &[],
+                &[],
+                SessionMode::Interactive,
+                protocol::ClaudeProvider::Deepseek,
+                deepseek_key,
+            )
+            .is_ok()
+        );
+        assert!(
+            check_env_rows_with(
+                &[],
+                &[],
+                SessionMode::Interactive,
+                protocol::ClaudeProvider::Anthropic,
+                |_| None,
+            )
+            .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    #[expect(clippy::panic, reason = "a wrong reply fails the test loudly")]
+    async fn a_locked_key_row_is_refused_before_it_is_sealed() {
+        let (_lock, _secrets_dir) =
+            env_secrets::test_support::scratch_async("deepseek-locked").await;
+        let (hub, _scratch, repo) = env_ref_repo_hub("deepseek-locked");
+        let rows = env(&[("ANTHROPIC_AUTH_TOKEN", SECRET_SENTINEL)]);
+        assert!(
+            protocol::env_rows::is_secret_key("ANTHROPIC_AUTH_TOKEN"),
+            "the row is one sealing would take"
+        );
+        let req = deepseek_spawn(
+            in_place_main(),
+            SessionMode::Interactive,
+            rows.clone(),
+            None,
+        );
+        let err = spawn_session_with(&hub, req, None, deepseek_key)
+            .await
+            .expect_err("a locked row refuses");
+        let failure = err
+            .downcast_ref::<spawn_plan::SpawnFailure>()
+            .expect("a spawn failure");
+        assert!(
+            failure
+                .detail
+                .contains("`ANTHROPIC_AUTH_TOKEN` is set by the DeepSeek provider"),
+            "{}",
+            failure.detail
+        );
+        assert!(!format!("{err:#}").contains(SECRET_SENTINEL));
+        let config = std::env::var_os("RUSTLING_TULIP_CONFIG_DIR").expect("a scratch config dir");
+        assert!(
+            !Path::new(&config).join("env-secrets.json").exists(),
+            "nothing was sealed"
+        );
+
+        // A dirty tree makes this target need a checkout confirm, so the
+        // refusal below can only come from the dispatcher's pre-check.
+        std::fs::write(repo.join("dirty.txt"), "x\n").expect("dirty the tree");
+        let control = env_spawn(
+            single_target(false, None),
+            SessionMode::Interactive,
+            env(&[("K", "v")]),
+            Some("rq-ctl"),
+        );
+        let reply = dispatch_one(&hub, ClientMessage::SpawnSession(control)).await;
+        let DaemonMessage::CheckoutConfirmRequired { .. } = reply else {
+            panic!("the target needs a checkout confirm, got {reply:?}");
+        };
+        let req = deepseek_spawn(
+            single_target(false, None),
+            SessionMode::Interactive,
+            rows,
+            Some("rq-lk"),
+        );
+        let reply = dispatch_one(&hub, ClientMessage::SpawnSession(req)).await;
+        let DaemonMessage::ActionFailed {
+            detail, request_id, ..
+        } = reply
+        else {
+            panic!("the pre-check refuses before the confirm, got {reply:?}");
+        };
+        assert!(
+            detail.contains("`ANTHROPIC_AUTH_TOKEN` is set by the DeepSeek provider"),
+            "{detail}"
+        );
+        assert_eq!(request_id.as_deref(), Some("rq-lk"));
+        assert!(
+            !Path::new(&config).join("env-secrets.json").exists(),
+            "the pre-check sealed nothing"
+        );
+        assert!(hub.sessions.snapshots().is_empty(), "nothing was spawned");
+    }
+
     /// A value no stored copy of a sealed row may ever hold.
     const SECRET_SENTINEL: &str = "rt-secret-sentinel-3d8f1a";
 
@@ -8726,7 +9095,7 @@ mod tests {
         format!("${{secret:{id}}}")
     }
 
-    /// `key`'s value in a child env built by [`merged_env`].
+    /// `key`'s value in a child env built by `providers::spawn_env`.
     fn child_value(child: &[(String, String)], key: &str) -> Option<String> {
         child.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone())
     }
