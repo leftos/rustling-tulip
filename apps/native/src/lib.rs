@@ -862,8 +862,9 @@ impl RootView {
         if !self.sidebar.session(id).is_some_and(can_attach) {
             return;
         }
-        self.tabs.arm_create();
-        self.send(Placement::NewTab.message(id));
+        let request_id = new_request_id();
+        self.tabs.arm_create(&request_id);
+        self.send(Placement::NewTab.message(id, Some(request_id)));
     }
 
     /// Whether the sidebar is hidden.
@@ -1180,18 +1181,23 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         let placement = self.tabs.place(session, self.sidebar.sessions());
-        match &placement {
-            Placement::NewTab => self.tabs.arm_create(),
+        let request_id = match &placement {
+            Placement::NewTab => {
+                let request_id = new_request_id();
+                self.tabs.arm_create(&request_id);
+                Some(request_id)
+            }
             Placement::Pane {
                 tab_id,
                 target: PaneTarget::Replace { pane_id },
             } => {
                 self.tabs.focus_pane(tab_id, pane_id);
                 self.after_tabs_change(window, cx);
+                None
             }
-            Placement::Pane { .. } => {}
-        }
-        self.send(placement.message(&session.id));
+            Placement::Pane { .. } => None,
+        };
+        self.send(placement.message(&session.id, request_id));
     }
 
     /// Focuses the command line's session once, when the layout and the
@@ -1641,6 +1647,7 @@ impl RootView {
         self.reset_notices(window, cx);
         self.reset_undo(cx);
         self.tabs.clear_pending_restore();
+        self.tabs.clear_armed_creates();
         self.pending_arrangement = None;
         self.close_layout_chooser(window, cx);
         self.reset_cleanup_failed(window, cx);

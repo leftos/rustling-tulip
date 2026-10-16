@@ -423,6 +423,7 @@ fn unbound_pill_click_creates_a_tab_with_the_session(cx: &mut TestAppContext) {
             [ClientMessage::CreateTab {
                 name: None,
                 initial_session_id: Some(id),
+                ..
             }] if id == "s2"
         ),
         "sent {sent:?}"

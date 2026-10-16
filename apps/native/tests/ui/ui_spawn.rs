@@ -347,7 +347,7 @@ fn spawn_into_new_tab_creates_and_focuses_it(cx: &mut TestAppContext) {
     h.send(updated(session("s2").build(), Some(&id)));
     let placed = placements(h.sent());
     assert!(
-        matches!(placed.as_slice(), [ClientMessage::CreateTab { name: None, initial_session_id: Some(s) }] if s == "s2"),
+        matches!(placed.as_slice(), [ClientMessage::CreateTab { name: None, initial_session_id: Some(s), .. }] if s == "s2"),
         "sent {placed:?}"
     );
 

@@ -278,6 +278,7 @@ impl MovePanes {
             pane_ids,
             name: (!name.is_empty()).then(|| name.to_owned()),
             layout: Some(layout),
+            request_id: None,
         })
     }
 }
@@ -371,6 +372,7 @@ mod tests {
             pane_ids,
             name,
             layout,
+            request_id: None,
         }) = d.message("  ", WIDE)
         else {
             unreachable!("no extract");

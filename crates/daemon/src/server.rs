@@ -2351,15 +2351,19 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         ClientMessage::CreateTab {
             name,
             initial_session_id,
+            request_id,
         } => {
             // Resolve the default name against the current tab list so
             // sequential opens produce `Tab`, `Tab 2`, `Tab 3`, ...
-            let new_tab = hub.state.mutate_client_layout(client_id, |tabs| {
+            let created = hub.state.mutate_client_layout(client_id, |tabs| {
                 let tab = tabs::make_tab(name, initial_session_id, tabs);
                 tabs.push(tab.clone());
                 tab
-            })?;
-            hub.emit_tab(client_id, TabEvent::Updated(new_tab));
+            });
+            match created {
+                Ok(new_tab) => hub.emit_tab(client_id, TabEvent::Updated(new_tab)),
+                Err(err) => send_tab_failure(out_tx, &err, request_id),
+            }
         }
         ClientMessage::CloseTab { tab_id } => {
             let removed = hub.state.mutate_client_layout(client_id, |tabs| {
@@ -2511,11 +2515,12 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
             dst_tab_id,
             dst_pane_id,
             edge,
+            request_id,
         } => {
             if src_pane_id == dst_pane_id {
                 // Self-move is a no-op; don't mutate or broadcast.
             } else {
-                let events = move_pane(
+                let moved = move_pane(
                     hub,
                     client_id,
                     &src_tab_id,
@@ -2523,9 +2528,14 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
                     &dst_tab_id,
                     &dst_pane_id,
                     edge,
-                )?;
-                for event in events {
-                    hub.emit_tab(client_id, event);
+                );
+                match moved {
+                    Ok(events) => {
+                        for event in events {
+                            hub.emit_tab(client_id, event);
+                        }
+                    }
+                    Err(err) => send_tab_failure(out_tx, &err, request_id),
                 }
             }
         }
@@ -2543,10 +2553,18 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
             tab_ids,
             name,
             layout,
+            request_id,
         } => {
-            let new_tab = hub.state.try_mutate_client_layout(client_id, |tabs| {
+            let merged = hub.state.try_mutate_client_layout(client_id, |tabs| {
                 tabs::merge_tabs(tabs, &tab_ids, name, layout)
-            })?;
+            });
+            let new_tab = match merged {
+                Ok(new_tab) => new_tab,
+                Err(err) => {
+                    send_tab_failure(out_tx, &err, request_id);
+                    return Ok(());
+                }
+            };
             for id in &tab_ids {
                 hub.emit_tab(client_id, TabEvent::Removed(id.clone()));
             }
@@ -2557,18 +2575,25 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
             pane_ids,
             name,
             layout,
+            request_id,
         } => {
-            let (new_tab, source_empty, source_survivor) =
-                hub.state.try_mutate_client_layout(client_id, |tabs| {
-                    let (new_tab, source_empty) =
-                        tabs::extract_to_new_tab(tabs, &source_tab_id, &pane_ids, name, layout)?;
-                    let source_survivor = if source_empty {
-                        None
-                    } else {
-                        tabs.iter().find(|t| t.id == source_tab_id).cloned()
-                    };
-                    Ok::<_, anyhow::Error>((new_tab, source_empty, source_survivor))
-                })?;
+            let extracted = hub.state.try_mutate_client_layout(client_id, |tabs| {
+                let (new_tab, source_empty) =
+                    tabs::extract_to_new_tab(tabs, &source_tab_id, &pane_ids, name, layout)?;
+                let source_survivor = if source_empty {
+                    None
+                } else {
+                    tabs.iter().find(|t| t.id == source_tab_id).cloned()
+                };
+                Ok::<_, anyhow::Error>((new_tab, source_empty, source_survivor))
+            });
+            let (new_tab, source_empty, source_survivor) = match extracted {
+                Ok(extracted) => extracted,
+                Err(err) => {
+                    send_tab_failure(out_tx, &err, request_id);
+                    return Ok(());
+                }
+            };
             if source_empty {
                 hub.emit_tab(client_id, TabEvent::Removed(source_tab_id));
             } else if let Some(survivor) = source_survivor {
@@ -2968,6 +2993,21 @@ fn send_preview_failure(
     request_id: Option<String>,
 ) {
     warn!(?err, "spawn preview failed");
+    let _ = out_tx.send(DaemonMessage::Error {
+        message: err.to_string(),
+        request_id,
+    });
+}
+
+/// Answers a failed tab-layout request (`CreateTab`, `MergeTabs`, `MovePane`,
+/// `ExtractToNewTab`) with an `Error` to this requester only, carrying the
+/// `request_id` it asked with so the client can drop what it armed for it.
+fn send_tab_failure(
+    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
+    err: &anyhow::Error,
+    request_id: Option<String>,
+) {
+    warn!(?err, "tab layout request failed");
     let _ = out_tx.send(DaemonMessage::Error {
         message: err.to_string(),
         request_id,
@@ -7251,6 +7291,102 @@ mod tests {
                 &msg,
                 DaemonMessage::Error { message, request_id: Some(id) }
                     if id == "p2" && message.contains("no-such-repo")
+            ),
+            "{msg:?}"
+        );
+    }
+
+    fn merge_of_one(request_id: Option<&str>) -> ClientMessage {
+        ClientMessage::MergeTabs {
+            tab_ids: vec!["t1".to_string()],
+            name: None,
+            layout: protocol::MergeLayout::TileVertical,
+            request_id: request_id.map(str::to_owned),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_rejected_merge_echoes_its_request_id() {
+        let (hub, _scratch) = test_hub("merge-rid");
+        seed_two_pane_layout(&hub, "c1");
+        let msg = dispatch_one(&hub, merge_of_one(Some("m1"))).await;
+        assert!(
+            matches!(
+                &msg,
+                DaemonMessage::Error { message, request_id: Some(id) }
+                    if id == "m1" && message.contains("at least two tabs")
+            ),
+            "{msg:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_id_less_merge_failure_still_answers_without_one() {
+        let (hub, _scratch) = test_hub("merge-no-rid");
+        seed_two_pane_layout(&hub, "c1");
+        let msg = dispatch_one(&hub, merge_of_one(None)).await;
+        assert!(
+            matches!(
+                &msg,
+                DaemonMessage::Error { message, request_id: None }
+                    if message.contains("at least two tabs")
+            ),
+            "{msg:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rolled_back_move_pane_echoes_its_request_id() {
+        let (hub, _scratch) = test_hub("move-rid");
+        seed_two_pane_layout(&hub, "c1");
+        let before = hub.state.client_layout("c1");
+        let msg = dispatch_one(
+            &hub,
+            ClientMessage::MovePane {
+                src_tab_id: "t1".to_string(),
+                src_pane_id: "p1".to_string(),
+                dst_tab_id: "ghost-tab".to_string(),
+                dst_pane_id: "p2".to_string(),
+                edge: PaneDropEdge::Right,
+                request_id: Some("v1".to_string()),
+            },
+        )
+        .await;
+        assert!(
+            matches!(
+                &msg,
+                DaemonMessage::Error { message, request_id: Some(id) }
+                    if id == "v1" && message.contains("ghost-tab")
+            ),
+            "{msg:?}"
+        );
+        assert_eq!(
+            hub.state.client_layout("c1"),
+            before,
+            "the move rolled back"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rejected_extract_echoes_its_request_id() {
+        let (hub, _scratch) = test_hub("extract-rid");
+        seed_two_pane_layout(&hub, "c1");
+        let msg = dispatch_one(
+            &hub,
+            ClientMessage::ExtractToNewTab {
+                source_tab_id: "ghost-tab".to_string(),
+                pane_ids: vec!["p1".to_string()],
+                name: None,
+                layout: None,
+                request_id: Some("x1".to_string()),
+            },
+        )
+        .await;
+        assert!(
+            matches!(
+                &msg,
+                DaemonMessage::Error { message, request_id: Some(id) }
+                    if id == "x1" && message.contains("ghost-tab")
             ),
             "{msg:?}"
         );

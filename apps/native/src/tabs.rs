@@ -2,7 +2,7 @@
 //! for this client, the active tab, each tab's focused pane, where a session
 //! is placed, and where a tab's panes and dividers sit.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use protocol::{
     ClientMessage, DaemonMessage, GridNode, PaneDropEdge, SessionSnapshot, SessionStatus,
@@ -148,11 +148,13 @@ pub struct TabsModel {
     /// The active tab saved by the last run, used once on the first list.
     restored_active: Option<String>,
     focused: HashMap<String, String>,
-    /// New tabs this client asked for that become active when they arrive.
-    pending_create: u32,
+    /// The requests for new tabs this client sent, oldest first; each new
+    /// tab to arrive consumes the oldest and becomes active. A request the
+    /// daemon refuses is taken out, so it activates nothing.
+    pending_create: VecDeque<String>,
     /// Tabs a restore named, by id, with the pane each focuses when it
-    /// arrives. Unlike [`TabsModel::pending_create`], only the named id
-    /// consumes one, so a restore the daemon refuses activates nothing.
+    /// arrives. Unlike [`TabsModel::pending_create`], which any new tab's
+    /// arrival consumes, only the tab with the named id consumes one.
     pending_restore: HashMap<String, Option<String>>,
     /// A pane the view should give the keyboard to.
     focus_request: Option<String>,
@@ -687,13 +689,16 @@ pub fn size_drivers(
 }
 
 impl Placement {
-    /// The request that puts `session_id` there.
-    pub fn message(&self, session_id: &str) -> ClientMessage {
+    /// The request that puts `session_id` there. A new tab's `CreateTab`
+    /// carries `request_id`, the id its arrival was armed with; a pane
+    /// placement arms nothing and sends none.
+    pub fn message(&self, session_id: &str, request_id: Option<String>) -> ClientMessage {
         let session_id = Some(session_id.to_owned());
         match self {
             Self::NewTab => ClientMessage::CreateTab {
                 name: None,
                 initial_session_id: session_id,
+                request_id,
             },
             Self::Pane {
                 tab_id,
@@ -892,8 +897,8 @@ impl TabsModel {
             return;
         }
         self.tabs.push(tab.clone());
-        if self.pending_create > 0 || self.active.is_none() {
-            self.pending_create = self.pending_create.saturating_sub(1);
+        let requested = self.pending_create.pop_front().is_some();
+        if requested || self.active.is_none() {
             self.activate_id(Some(tab.id.clone()));
         }
         self.settle_restore(tab);
@@ -1029,9 +1034,22 @@ impl TabsModel {
         self.focus_request.take()
     }
 
-    /// The next new tab to arrive is one this client asked for.
-    pub fn arm_create(&mut self) {
-        self.pending_create = self.pending_create.saturating_add(1);
+    /// The request `request_id` asks for a new tab: the next new tab to
+    /// arrive is one this client asked for.
+    pub fn arm_create(&mut self, request_id: &str) {
+        self.pending_create.push_back(request_id.to_owned());
+    }
+
+    /// The daemon refused the request `request_id`: if it asked for a new
+    /// tab whose arrival has not consumed it, no arrival activates for it.
+    pub fn disarm_create(&mut self, request_id: &str) {
+        self.pending_create.retain(|armed| armed != request_id);
+    }
+
+    /// Forgets every requested new tab: a fresh connection answers none of
+    /// the old one's requests.
+    pub fn clear_armed_creates(&mut self) {
+        self.pending_create.clear();
     }
 
     /// The next arrival of `tab_id` shows it and gives `pane_id` the
@@ -1563,10 +1581,11 @@ pub(crate) mod tests {
         let empty = TabsModel::new(None);
         assert_eq!(empty.place(&new, &[]), Placement::NewTab);
         assert_eq!(
-            wire(&Placement::NewTab.message("new")),
+            wire(&Placement::NewTab.message("new", Some("r1".to_owned()))),
             wire(&ClientMessage::CreateTab {
                 name: None,
                 initial_session_id: Some("new".to_owned()),
+                request_id: Some("r1".to_owned()),
             })
         );
 
@@ -1580,7 +1599,7 @@ pub(crate) mod tests {
             }
         );
         assert_eq!(
-            wire(&placement.message("new")),
+            wire(&placement.message("new", None)),
             wire(&ClientMessage::ReplacePaneSession {
                 tab_id: "t1".to_owned(),
                 pane_id: "e".to_owned(),
@@ -1592,7 +1611,7 @@ pub(crate) mod tests {
             target: split_target("e", V),
         };
         assert_eq!(
-            wire(&split.message("new")),
+            wire(&split.message("new", None)),
             wire(&ClientMessage::SplitPane {
                 tab_id: "t1".to_owned(),
                 pane_id: "e".to_owned(),
@@ -1789,7 +1808,7 @@ pub(crate) mod tests {
         let mut model = model_with(&[tab("t1", &pane("a", None))]);
         model.apply(&updated(&tab("t2", &pane("b", None))));
         assert_eq!(model.active_id(), Some("t1"), "another client's tab");
-        model.arm_create();
+        model.arm_create("r1");
         model.apply(&updated(&tab("t3", &pane("c", None))));
         assert_eq!(model.active_id(), Some("t3"));
         assert_eq!(model.take_focus_request().as_deref(), Some("c"));
@@ -1799,6 +1818,54 @@ pub(crate) mod tests {
         let mut none_active = TabsModel::new(None);
         none_active.apply(&updated(&tab("t1", &pane("a", None))));
         assert_eq!(none_active.active_id(), Some("t1"));
+    }
+
+    #[test]
+    fn a_rejected_create_is_disarmed() {
+        let mut model = model_with(&[tab("t1", &pane("a", None))]);
+        model.arm_create("r1");
+        model.disarm_create("r1");
+        model.apply(&updated(&tab("t2", &pane("b", None))));
+        assert_eq!(model.active_id(), Some("t1"), "another client's tab");
+    }
+
+    #[test]
+    fn disarming_one_create_keeps_the_others_armed() {
+        let mut model = model_with(&[tab("t1", &pane("a", None))]);
+        model.arm_create("r1");
+        model.arm_create("r2");
+        model.disarm_create("r1");
+        model.apply(&updated(&tab("t2", &pane("b", None))));
+        assert_eq!(model.active_id(), Some("t2"), "r2 is still armed");
+        model.apply(&updated(&tab("t3", &pane("c", None))));
+        assert_eq!(model.active_id(), Some("t2"), "and now spent");
+    }
+
+    #[test]
+    fn disarming_an_id_already_consumed_changes_nothing() {
+        let mut model = model_with(&[tab("t1", &pane("a", None))]);
+        model.arm_create("r1");
+        model.arm_create("r2");
+        model.apply(&updated(&tab("t2", &pane("b", None))));
+        assert_eq!(model.active_id(), Some("t2"), "the oldest arm is spent");
+        model.disarm_create("r1");
+        model.apply(&updated(&tab("t3", &pane("c", None))));
+        assert_eq!(model.active_id(), Some("t3"), "r2 is still armed");
+        model.apply(&updated(&tab("t4", &pane("d", None))));
+        assert_eq!(model.active_id(), Some("t3"), "nothing is left armed");
+    }
+
+    #[test]
+    fn a_reconnect_clears_armed_creates() {
+        let mut model = model_with(&[tab("t1", &pane("a", None))]);
+        model.arm_create("r1");
+        model.clear_armed_creates();
+        model.apply(&updated(&tab("t2", &pane("b", None))));
+        assert_eq!(
+            model.active_id(),
+            Some("t1"),
+            "the old connection's arm is gone"
+        );
     }
 
     #[test]

@@ -566,7 +566,7 @@ fn merge_selected_sends_merge_tabs_in_strip_order_and_activates_new_tab(cx: &mut
     h.click_on("tab-menu-merge-vertical");
     let sent = h.sent();
     assert!(
-        matches!(sent.as_slice(), [ClientMessage::MergeTabs { tab_ids, name: None, layout: MergeLayout::TileVertical }]
+        matches!(sent.as_slice(), [ClientMessage::MergeTabs { tab_ids, name: None, layout: MergeLayout::TileVertical, .. }]
             if tab_ids == &["t1".to_owned(), "t3".to_owned()]),
         "sent {sent:?}"
     );
@@ -584,6 +584,128 @@ fn merge_selected_sends_merge_tabs_in_strip_order_and_activates_new_tab(cx: &mut
     assert_eq!(
         h.root(|root, _| root.active_tab_id().map(str::to_owned)),
         Some("t4".to_owned())
+    );
+}
+
+/// The `request_id` of the tab-layout request among `sent` that asks for a
+/// new tab.
+fn create_request_id(sent: &[ClientMessage]) -> String {
+    sent.iter()
+        .find_map(|m| match m {
+            ClientMessage::CreateTab {
+                request_id: Some(id),
+                ..
+            }
+            | ClientMessage::MergeTabs {
+                request_id: Some(id),
+                ..
+            }
+            | ClientMessage::ExtractToNewTab {
+                request_id: Some(id),
+                ..
+            } => Some(id.clone()),
+            _ => None,
+        })
+        .expect("a new-tab request carrying a request_id was sent")
+}
+
+/// The daemon refuses request `id`.
+fn refuse(h: &mut Harness, id: String) {
+    h.send(DaemonMessage::Error {
+        message: "refused".to_owned(),
+        request_id: Some(id),
+    });
+}
+
+fn active_tab(h: &mut Harness) -> Option<String> {
+    h.root(|root, _| root.active_tab_id().map(str::to_owned))
+}
+
+/// Another client's tab arrives.
+fn foreign_tab_arrives(h: &mut Harness) {
+    h.send(DaemonMessage::TabUpdated {
+        tab: tab("t9", &pane("p9", None)),
+    });
+}
+
+#[gpui::test]
+fn a_rejected_new_tab_leaves_the_next_arrival_inactive(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
+    h.sent();
+    let before = active_tab(&mut h);
+    h.click_on("new-tab");
+    let id = create_request_id(&h.sent());
+    refuse(&mut h, id);
+    foreign_tab_arrives(&mut h);
+    assert_eq!(active_tab(&mut h), before, "the refused create is disarmed");
+}
+
+#[gpui::test]
+fn a_rejected_merge_leaves_the_next_arrival_inactive(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &three_tabs());
+    h.sent();
+    ctrl_click(&mut h, "tab-t3");
+    ctrl_click(&mut h, "tab-t1");
+    h.right_click_on("tab-t3");
+    h.click_on("tab-menu-merge-vertical");
+    let id = create_request_id(&h.sent());
+    let before = active_tab(&mut h);
+    refuse(&mut h, id);
+    foreign_tab_arrives(&mut h);
+    assert_eq!(active_tab(&mut h), before, "the refused merge is disarmed");
+}
+
+#[gpui::test]
+fn an_accepted_create_still_activates(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
+    h.sent();
+    h.click_on("new-tab");
+    let refused = create_request_id(&h.sent());
+    h.click_on("new-tab");
+    let accepted = create_request_id(&h.sent());
+    assert_ne!(refused, accepted, "each create has its own id");
+    refuse(&mut h, refused);
+    h.send(DaemonMessage::TabUpdated {
+        tab: tab("t2", &pane("p2", None)),
+    });
+    assert_eq!(
+        active_tab(&mut h).as_deref(),
+        Some("t2"),
+        "the accepted create still shows its tab"
+    );
+}
+
+#[gpui::test]
+fn a_rejected_pane_menu_new_tab_disarms(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        sessions: vec![session("s1").build()],
+        tabs: vec![tab(
+            "t1",
+            &split(
+                SplitDirection::Horizontal,
+                pane("p1", Some("s1")),
+                pane("p2", None),
+            ),
+        )],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.sent();
+    let before = active_tab(&mut h);
+    h.right_click_on("empty-pane-shell-p2");
+    h.click_on("empty-pane-menu-move");
+    h.click_on("empty-pane-move-new");
+    let id = create_request_id(&h.sent());
+    refuse(&mut h, id);
+    foreign_tab_arrives(&mut h);
+    assert_eq!(
+        active_tab(&mut h),
+        before,
+        "the refused extract is disarmed"
     );
 }
 

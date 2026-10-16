@@ -596,7 +596,7 @@ fn header_move_sends_extract_and_activates_new_tab(cx: &mut TestAppContext) {
     h.click_on("pane-move-new-tab-p1");
     let sent = h.sent();
     assert!(
-        matches!(sent.as_slice(), [ClientMessage::ExtractToNewTab { source_tab_id, pane_ids, name: None, layout: None }]
+        matches!(sent.as_slice(), [ClientMessage::ExtractToNewTab { source_tab_id, pane_ids, name: None, layout: None, .. }]
             if source_tab_id == "t1" && pane_ids == &["p1"]),
         "sent {sent:?}"
     );
@@ -637,7 +637,7 @@ fn empty_pane_menu_move_to_tab_sends_move_pane_to_drop_target(cx: &mut TestAppCo
     h.click_on("empty-pane-move-t2");
     let sent = h.sent();
     assert!(
-        matches!(sent.as_slice(), [ClientMessage::MovePane { src_tab_id, src_pane_id, dst_tab_id, dst_pane_id, edge: PaneDropEdge::Replace }]
+        matches!(sent.as_slice(), [ClientMessage::MovePane { src_tab_id, src_pane_id, dst_tab_id, dst_pane_id, edge: PaneDropEdge::Replace, .. }]
             if src_tab_id == "t1" && src_pane_id == "p2" && dst_tab_id == "t2" && dst_pane_id == "p4"),
         "sent {sent:?}"
     );
@@ -662,7 +662,7 @@ fn empty_pane_menu_new_tab_sends_extract(cx: &mut TestAppContext) {
     h.click_on("empty-pane-move-new");
     let sent = h.sent();
     assert!(
-        matches!(sent.as_slice(), [ClientMessage::ExtractToNewTab { source_tab_id, pane_ids, name: None, layout: None }]
+        matches!(sent.as_slice(), [ClientMessage::ExtractToNewTab { source_tab_id, pane_ids, name: None, layout: None, .. }]
             if source_tab_id == "t1" && pane_ids == &["p2"]),
         "sent {sent:?}"
     );
@@ -724,7 +724,7 @@ fn move_panes_dialog_sends_extract_with_layout_and_name(cx: &mut TestAppContext)
     h.keys("enter");
     let sent = h.sent();
     assert!(
-        matches!(sent.as_slice(), [ClientMessage::ExtractToNewTab { source_tab_id, pane_ids, name: Some(name), layout: Some(RearrangeLayout::Vertical) }]
+        matches!(sent.as_slice(), [ClientMessage::ExtractToNewTab { source_tab_id, pane_ids, name: Some(name), layout: Some(RearrangeLayout::Vertical), .. }]
             if source_tab_id == "t1" && pane_ids == &["p1", "p3"] && name == "Work"),
         "sent {sent:?}"
     );

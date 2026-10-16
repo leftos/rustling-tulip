@@ -108,6 +108,7 @@ fn open_all_grid_with_max_extracts_then_rearranges_on_tabs(cx: &mut TestAppConte
                 pane_ids,
                 name: None,
                 layout: Some(l),
+                request_id: None,
             } if source_tab_id == "t1" && *l == layout => Some(pane_ids.clone()),
             _ => None,
         })

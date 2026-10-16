@@ -868,7 +868,7 @@ impl Duplicates {
             Placement::Pane { tab_id, .. } => PlacedFocus::Tab(tab_id.clone()),
         };
         Some(Placed {
-            messages: vec![placement.message(&copy.id)],
+            messages: vec![placement.message(&copy.id, None)],
             focus,
         })
     }
@@ -895,6 +895,7 @@ fn restart_placement(original: String, new_id: &str, bindings: &[PaneBinding]) -
         messages.push(ClientMessage::CreateTab {
             name: None,
             initial_session_id: Some(new_id.to_owned()),
+            request_id: None,
         });
     }
     messages.push(ClientMessage::DiscardSession {
@@ -1661,7 +1662,7 @@ mod tests {
         assert_eq!(placed.focus, PlacedFocus::NewTab);
         assert!(
             matches!(placed.messages.as_slice(), [
-                ClientMessage::CreateTab { name: None, initial_session_id: Some(id) },
+                ClientMessage::CreateTab { name: None, initial_session_id: Some(id), request_id: None },
             ] if id == "s2"),
             "the copy opens a tab and nothing is discarded: {:?}",
             placed.messages
@@ -1839,7 +1840,7 @@ mod tests {
         assert_eq!(placed.focus, PlacedFocus::NewTab);
         assert!(
             matches!(placed.messages.as_slice(), [
-                ClientMessage::CreateTab { name: None, initial_session_id: Some(id) },
+                ClientMessage::CreateTab { name: None, initial_session_id: Some(id), request_id: None },
                 discard,
             ] if id == "s2" && is_discard(discard, &[])),
             "{:?}",

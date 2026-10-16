@@ -2479,10 +2479,14 @@ pub enum ClientMessage {
     /// [`DaemonMessage::Welcome`].
     ListTabs,
     /// Create a new tab containing a single pane, optionally seeded with a
-    /// session. Daemon replies with [`DaemonMessage::TabUpdated`].
+    /// session. Daemon replies with [`DaemonMessage::TabUpdated`], or with
+    /// [`DaemonMessage::Error`] carrying `request_id` when it refuses.
     CreateTab {
         name: Option<String>,
         initial_session_id: Option<String>,
+        /// Echoed on the [`DaemonMessage::Error`] that refuses it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
     /// Close a tab. The underlying sessions are NOT stopped — only the tab's
     /// layout entry is removed.
@@ -2562,13 +2566,18 @@ pub enum ClientMessage {
     /// from its current position (with the parent split collapsing if needed)
     /// and inserted at `edge` of the destination pane. For same-tab
     /// `replace`, the two pane session bindings are swapped so both grid
-    /// positions remain intact.
+    /// positions remain intact. A refused move is rolled back and answered
+    /// with [`DaemonMessage::Error`] carrying `request_id`; a move of a pane
+    /// onto itself is a silent no-op.
     MovePane {
         src_tab_id: String,
         src_pane_id: String,
         dst_tab_id: String,
         dst_pane_id: String,
         edge: PaneDropEdge,
+        /// Echoed on the [`DaemonMessage::Error`] that refuses it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
     /// Set the session a pane references without changing topology. `None`
     /// turns the pane into an empty placeholder.
@@ -2587,23 +2596,33 @@ pub enum ClientMessage {
         layout: RearrangeLayout,
     },
     /// Combine multiple existing tabs into a single new tab, removing the
-    /// originals. Panes are collected in the order `tab_ids` is given.
+    /// originals. Panes are collected in the order `tab_ids` is given. A
+    /// refused merge is answered with [`DaemonMessage::Error`] carrying
+    /// `request_id`.
     MergeTabs {
         tab_ids: Vec<String>,
         name: Option<String>,
         layout: MergeLayout,
+        /// Echoed on the [`DaemonMessage::Error`] that refuses it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
     /// Move a set of panes out of `source_tab_id` into a new tab. Panes are
     /// collected in the order `pane_ids` is given. `layout` controls how the
     /// new tab arranges them; `None` (older clients) keeps the historical
     /// horizontal tiling. `Some(_)` builds the grid via the same path as
     /// [`ClientMessage::RearrangeTab`], so the new tab can be a true grid.
+    /// A refused extract is answered with [`DaemonMessage::Error`] carrying
+    /// `request_id`.
     ExtractToNewTab {
         source_tab_id: String,
         pane_ids: Vec<String>,
         name: Option<String>,
         #[serde(default)]
         layout: Option<RearrangeLayout>,
+        /// Echoed on the [`DaemonMessage::Error`] that refuses it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
     /// Request the list of presets available for a repo or workspace. The
     /// daemon reads `.rustling-tulip/presets.json` from the target repo (or
@@ -3901,6 +3920,70 @@ mod tests {
             back,
             ClientMessage::SetSessionAppearance { request_id: Some(id), .. } if id == "req-7"
         ));
+    }
+
+    /// The four tab-layout requests, each carrying `request_id`.
+    fn tab_layout_requests(request_id: Option<&str>) -> [ClientMessage; 4] {
+        let request_id = request_id.map(str::to_owned);
+        [
+            ClientMessage::CreateTab {
+                name: None,
+                initial_session_id: Some("s1".to_owned()),
+                request_id: request_id.clone(),
+            },
+            ClientMessage::MergeTabs {
+                tab_ids: vec!["t1".to_owned(), "t2".to_owned()],
+                name: None,
+                layout: MergeLayout::TileVertical,
+                request_id: request_id.clone(),
+            },
+            ClientMessage::MovePane {
+                src_tab_id: "t1".to_owned(),
+                src_pane_id: "p1".to_owned(),
+                dst_tab_id: "t2".to_owned(),
+                dst_pane_id: "p2".to_owned(),
+                edge: PaneDropEdge::Replace,
+                request_id: request_id.clone(),
+            },
+            ClientMessage::ExtractToNewTab {
+                source_tab_id: "t1".to_owned(),
+                pane_ids: vec!["p1".to_owned()],
+                name: None,
+                layout: None,
+                request_id,
+            },
+        ]
+    }
+
+    fn tab_layout_request_id(msg: &ClientMessage) -> Option<&str> {
+        match msg {
+            ClientMessage::CreateTab { request_id, .. }
+            | ClientMessage::MergeTabs { request_id, .. }
+            | ClientMessage::MovePane { request_id, .. }
+            | ClientMessage::ExtractToNewTab { request_id, .. } => request_id.as_deref(),
+            other => panic!("not a tab-layout request: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tab_layout_request_id_is_optional_and_round_trips() {
+        for msg in tab_layout_requests(None) {
+            let json = serde_json::to_string(&msg).expect("serializes");
+            assert!(!json.contains("request_id"), "None is omitted: {json}");
+            let back: ClientMessage =
+                serde_json::from_str(&json).expect("a request without request_id decodes");
+            assert_eq!(tab_layout_request_id(&back), None, "{json}");
+        }
+        for msg in tab_layout_requests(Some("req-9")) {
+            let json = serde_json::to_string(&msg).expect("serializes");
+            assert!(json.contains(r#""request_id":"req-9""#), "{json}");
+            let back: ClientMessage = serde_json::from_str(&json).expect("round-trips");
+            assert_eq!(tab_layout_request_id(&back), Some("req-9"), "{json}");
+        }
+        let old: ClientMessage =
+            serde_json::from_str(r#"{"type":"create_tab","name":null,"initial_session_id":null}"#)
+                .expect("an older client's create_tab decodes");
+        assert_eq!(tab_layout_request_id(&old), None);
     }
 
     #[test]

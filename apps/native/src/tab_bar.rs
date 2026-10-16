@@ -431,11 +431,13 @@ impl RootView {
     /// once it arrives, and clears the selection.
     fn merge_selected(&mut self, layout: MergeLayout, window: &mut Window, cx: &mut Context<Self>) {
         let tab_ids = self.selected_tabs();
-        self.tabs.arm_create();
+        let request_id = crate::new_request_id();
+        self.tabs.arm_create(&request_id);
         self.send(ClientMessage::MergeTabs {
             tab_ids,
             name: None,
             layout,
+            request_id: Some(request_id),
         });
         self.tabs.selection.clear();
         self.close_tab_menu(window, cx);
@@ -751,10 +753,12 @@ impl RootView {
     }
 
     fn new_tab(&mut self) {
-        self.tabs.arm_create();
+        let request_id = crate::new_request_id();
+        self.tabs.arm_create(&request_id);
         self.send(ClientMessage::CreateTab {
             name: None,
             initial_session_id: None,
+            request_id: Some(request_id),
         });
     }
 

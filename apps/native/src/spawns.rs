@@ -158,16 +158,23 @@ impl PendingSpawns {
             }
             OpenIn::Pane(_) => tabs.place(session, sessions),
         };
-        match &placement {
-            Placement::NewTab => tabs.arm_create(),
+        let create_request = match &placement {
+            Placement::NewTab => {
+                let create_request = crate::new_request_id();
+                tabs.arm_create(&create_request);
+                Some(create_request)
+            }
             Placement::Pane {
                 tab_id,
                 target: PaneTarget::Replace { pane_id },
-            } => tabs.focus_pane(tab_id, pane_id),
-            Placement::Pane { .. } => {}
-        }
+            } => {
+                tabs.focus_pane(tab_id, pane_id);
+                None
+            }
+            Placement::Pane { .. } => None,
+        };
         Some(SpawnPlaced {
-            messages: vec![placement.message(&session.id)],
+            messages: vec![placement.message(&session.id, create_request)],
             relayout: open_in != OpenIn::NewTab,
         })
     }
@@ -300,7 +307,7 @@ pub(crate) fn place_several(
                 })
             })
             .unwrap_or(Placement::NewTab);
-        messages.push(placement.message(&session.id));
+        messages.push(placement.message(&session.id, None));
     }
     messages
 }
@@ -426,7 +433,7 @@ fn into_pane(aim: &PaneAim, session: &SessionSnapshot, tabs: &mut TabsModel) -> 
                 tab_id,
                 target: PaneTarget::Replace { pane_id },
             }
-            .message(&session.id)
+            .message(&session.id, None)
         })
         .collect();
     messages.extend(
@@ -816,12 +823,14 @@ mod tests {
         spawns.start(request(true), "q1".to_owned(), OpenIn::NewTab);
         let new = session("new", None, None);
         let placed = spawns.place("q1", &new, &mut tabs, &[]).expect("placed");
-        assert_eq!(
-            wire(only(&placed)),
-            wire(&ClientMessage::CreateTab {
-                name: None,
-                initial_session_id: Some("new".to_owned()),
-            })
+        assert!(
+            matches!(
+                only(&placed),
+                ClientMessage::CreateTab { name: None, initial_session_id: Some(id), request_id: Some(_) }
+                    if id == "new"
+            ),
+            "{:?}",
+            placed.messages
         );
         assert!(!placed.relayout);
         assert!(tabs.apply(&updated(&tab("t9", &pane("n", Some("new"))))));

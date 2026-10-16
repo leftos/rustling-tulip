@@ -183,12 +183,14 @@ impl RootView {
     /// Moves `pane_id` of `tab_id` into a new tab, which shows once it
     /// arrives.
     pub(crate) fn move_pane_to_new_tab(&mut self, tab_id: &str, pane_id: &str) {
-        self.tabs.arm_create();
+        let request_id = crate::new_request_id();
+        self.tabs.arm_create(&request_id);
         self.send(ClientMessage::ExtractToNewTab {
             source_tab_id: tab_id.to_owned(),
             pane_ids: vec![pane_id.to_owned()],
             name: None,
             layout: None,
+            request_id: Some(request_id),
         });
     }
 
@@ -222,6 +224,7 @@ impl RootView {
             dst_tab_id: dst_tab_id.to_owned(),
             dst_pane_id,
             edge,
+            request_id: Some(crate::new_request_id()),
         });
     }
 

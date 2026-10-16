@@ -389,6 +389,7 @@ pub(crate) fn arrangement_messages(
             pane_ids: batch.to_vec(),
             name: None,
             layout: Some(arrangement.layout),
+            request_id: None,
         })
         .collect();
     out.push(ClientMessage::RearrangeTab {
@@ -622,6 +623,7 @@ mod tests {
                     pane_ids,
                     name: None,
                     layout: Some(l),
+                    request_id: None,
                 } if source_tab_id == "t1" && *l == layout => Some(pane_ids.clone()),
                 _ => None,
             })

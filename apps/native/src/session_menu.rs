@@ -828,7 +828,7 @@ impl RootView {
         let Some(request_id) = request_id.filter(|id| self.duplicates.has_request(id)) else {
             return;
         };
-        let Some(placed) =
+        let Some(mut placed) =
             self.duplicates
                 .place(request_id, copy, &self.tabs, self.sidebar.sessions())
         else {
@@ -836,7 +836,15 @@ impl RootView {
         };
         self.confirm.disarm();
         match &placed.focus {
-            PlacedFocus::NewTab => self.tabs.arm_create(),
+            PlacedFocus::NewTab => {
+                let create_request = crate::new_request_id();
+                self.tabs.arm_create(&create_request);
+                for msg in &mut placed.messages {
+                    if let protocol::ClientMessage::CreateTab { request_id, .. } = msg {
+                        *request_id = Some(create_request.clone());
+                    }
+                }
+            }
             PlacedFocus::Pane { tab_id, pane_id } => self.tabs.focus_pane(tab_id, pane_id),
             PlacedFocus::Tab(tab_id) => self.tabs.activate(tab_id),
         }

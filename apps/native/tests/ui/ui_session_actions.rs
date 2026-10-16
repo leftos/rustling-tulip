@@ -397,7 +397,7 @@ fn inactive_session_menu_offers_resume_and_remove(cx: &mut TestAppContext) {
     let placed = placements(h.sent());
     assert!(
         matches!(placed.as_slice(), [
-            ClientMessage::CreateTab { name: None, initial_session_id: Some(new) },
+            ClientMessage::CreateTab { name: None, initial_session_id: Some(new), .. },
             discard,
         ] if new == "s2" && is_discard(discard, "s1", &[])),
         "no pane showed it, so the resumed session opens a tab: sent {placed:?}"
@@ -882,11 +882,27 @@ fn duplicate_new_tab_sends_duplicate_then_create_tab(cx: &mut TestAppContext) {
 
     h.send(updated(session("s2").build(), Some(&id)));
     let placed = placements(h.sent());
-    assert!(
-        matches!(placed.as_slice(), [
-            ClientMessage::CreateTab { name: None, initial_session_id: Some(new) },
-        ] if new == "s2"),
-        "sent {placed:?}"
+    let create_id = match placed.as_slice() {
+        [
+            ClientMessage::CreateTab {
+                name: None,
+                initial_session_id: Some(new),
+                request_id: Some(create_id),
+            },
+        ] if new == "s2" => create_id.clone(),
+        other => panic!("expected one CreateTab of s2 carrying an id, sent {other:?}"),
+    };
+
+    let before = active_tab(&mut h);
+    h.send(DaemonMessage::Error {
+        message: "refused".to_owned(),
+        request_id: Some(create_id),
+    });
+    new_tab_arrives(&mut h, "s3");
+    assert_eq!(
+        active_tab(&mut h),
+        before,
+        "the refused copy's tab is disarmed, so another arrival stays in the background"
     );
 }
 
@@ -1313,7 +1329,7 @@ fn move_to_new_tab_sends_extract_and_activates_it(cx: &mut TestAppContext) {
     h.click_on("move-new-tab");
     let sent = h.sent();
     assert!(
-        matches!(sent.as_slice(), [ClientMessage::ExtractToNewTab { source_tab_id, pane_ids, name: None, layout: None }]
+        matches!(sent.as_slice(), [ClientMessage::ExtractToNewTab { source_tab_id, pane_ids, name: None, layout: None, .. }]
             if source_tab_id == "t1" && pane_ids == &["p1"]),
         "sent {sent:?}"
     );
@@ -1364,7 +1380,7 @@ fn move_to_tab_sends_move_pane_to_drop_target_with_undo(cx: &mut TestAppContext)
     h.click_on("move-tab-t3");
     let sent = h.sent();
     assert!(
-        matches!(sent.as_slice(), [ClientMessage::MovePane { src_tab_id, src_pane_id, dst_tab_id, dst_pane_id, edge: PaneDropEdge::Replace }]
+        matches!(sent.as_slice(), [ClientMessage::MovePane { src_tab_id, src_pane_id, dst_tab_id, dst_pane_id, edge: PaneDropEdge::Replace, .. }]
             if src_tab_id == "t1" && src_pane_id == "p1" && dst_tab_id == "t3" && dst_pane_id == "p4"),
         "the first binding goes to t3's empty pane: sent {sent:?}"
     );
@@ -1459,7 +1475,7 @@ fn add_to_current_with_diff_tab_active_reads_add_to_new_tab_and_opens_one(cx: &m
     h.click_on("session-menu-add-current");
     let sent = h.sent();
     assert!(
-        matches!(sent.as_slice(), [ClientMessage::CreateTab { name: None, initial_session_id: Some(id) }]
+        matches!(sent.as_slice(), [ClientMessage::CreateTab { name: None, initial_session_id: Some(id), .. }]
             if id == "s1"),
         "sent {sent:?}"
     );
@@ -1480,7 +1496,7 @@ fn add_to_new_tab_sends_create_tab(cx: &mut TestAppContext) {
     h.click_on("session-menu-add-new");
     let sent = h.sent();
     assert!(
-        matches!(sent.as_slice(), [ClientMessage::CreateTab { name: None, initial_session_id: Some(id) }]
+        matches!(sent.as_slice(), [ClientMessage::CreateTab { name: None, initial_session_id: Some(id), .. }]
             if id == "s1"),
         "the empty pane is left alone: sent {sent:?}"
     );

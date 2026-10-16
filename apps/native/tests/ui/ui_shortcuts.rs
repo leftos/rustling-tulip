@@ -68,6 +68,7 @@ fn creates_tab(sent: &[ClientMessage]) -> bool {
         [ClientMessage::CreateTab {
             name: None,
             initial_session_id: None,
+            ..
         }]
     )
 }

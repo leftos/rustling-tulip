@@ -139,15 +139,22 @@ impl RootView {
         };
         // Only panes the tab still holds go; a move of none is no move.
         let live = self.tab_pane_sessions(dialog.model.tab_id());
-        if let ClientMessage::ExtractToNewTab { pane_ids, .. } = &mut msg {
+        if let ClientMessage::ExtractToNewTab {
+            pane_ids,
+            request_id,
+            ..
+        } = &mut msg
+        {
             pane_ids.retain(|pane| live.iter().any(|(id, _)| id == pane));
             if pane_ids.is_empty() {
                 self.close_move_panes(window, cx);
                 return;
             }
+            let create_request = crate::new_request_id();
+            self.tabs.arm_create(&create_request);
+            *request_id = Some(create_request);
         }
         tracing::info!(tab = %dialog.model.tab_id(), "moving panes to a new tab");
-        self.tabs.arm_create();
         self.send(msg);
         self.close_move_panes(window, cx);
     }
