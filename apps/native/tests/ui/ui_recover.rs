@@ -15,8 +15,8 @@ use std::collections::HashSet;
 
 use gpui::TestAppContext;
 use protocol::{
-    ClientMessage, DaemonMessage, RecoverAs, RecoverItem, RecoverItemResult, SessionHistoryItem,
-    SplitDirection,
+    ClaudeProvider, ClientMessage, DaemonMessage, RecoverAs, RecoverItem, RecoverItemResult,
+    SessionHistoryItem, SplitDirection,
 };
 use rustling_tulip_native::RecoverRow;
 use serde_json::{Value, json};
@@ -346,6 +346,61 @@ fn recover_as_choices_match_folder_flags(cx: &mut TestAppContext) {
         Some("Shell running claude --resume"),
         "the only choice stays"
     );
+}
+
+#[gpui::test]
+fn a_deepseek_entry_offers_recover_as_claude_only(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.load(&Fixture {
+        repos: vec![repo("r1", "D:\\r1")],
+        ..Fixture::default()
+    });
+    let on_deepseek = |mut item: SessionHistoryItem| {
+        item.entry.provider = ClaudeProvider::Deepseek;
+        item
+    };
+    open_with(
+        &mut h,
+        vec![
+            on_deepseek(
+                history_item("git")
+                    .folder_only("D:\\proj", true, None)
+                    .ended_minutes_ago(10)
+                    .build(),
+            ),
+            on_deepseek(
+                history_item("reg")
+                    .folder_only("D:\\r1", true, Some("r1"))
+                    .ended_minutes_ago(12)
+                    .build(),
+            ),
+            on_deepseek(
+                history_item("plain")
+                    .folder_only("D:\\notes", false, None)
+                    .ended_minutes_ago(14)
+                    .build(),
+            ),
+        ],
+    );
+    for (id, only) in [
+        ("git", "Register D:\\proj as a repo, then Claude session"),
+        ("reg", "Claude session in r1"),
+        ("plain", "Claude session"),
+    ] {
+        assert_eq!(
+            row(&mut h, id).recover_as.as_deref(),
+            Some(only),
+            "{id} starts on Claude"
+        );
+        h.click_on(&format!("recover-as-{id}"));
+        assert_eq!(
+            row(&mut h, id).recover_as.as_deref(),
+            Some(only),
+            "{id} offers no shell"
+        );
+        assert_eq!(row(&mut h, id).disabled, None, "{id}");
+    }
 }
 
 #[gpui::test]

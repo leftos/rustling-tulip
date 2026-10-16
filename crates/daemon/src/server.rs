@@ -1643,15 +1643,9 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
             });
         }
         ClientMessage::SpawnSession(req) => {
-            // An unresolvable reference — an unset env variable, or a saved
-            // secret that is no longer in the store — or a secret row that
-            // could not be sealed refuses the spawn before the user is asked to
-            // confirm a checkout it would never make. This writes nothing;
-            // `spawn_session` seals and resolves again for the child.
-            let provider = req.agent_options.claude_provider().unwrap_or_default();
-            if let Err(failure) =
-                check_env_rows(&req.extra_env, &req.secret_env_keys, req.mode, provider)
-            {
+            // A request `check_spawn_request` refuses is refused before the
+            // user is asked to confirm a checkout it would never make.
+            if let Err(failure) = check_spawn_request(&req) {
                 send_spawn_failure(out_tx, &failure.into(), req.request_id.as_deref());
             } else if let Some(confirm) = in_place_checkout_confirm(hub, &req).await {
                 let _ = out_tx.send(confirm);
@@ -3254,10 +3248,11 @@ where
     // perceived slowness can read them without flipping log filters.
     let t_total = std::time::Instant::now();
     // A plain shell asking for a provider, a provider this daemon doesn't
-    // know, or a row setting one of the provider's locked variables refuses
+    // know, or a row setting one of the provider's locked variables or a
+    // variable it removes from the child refuses
     // before the rows are sealed and before any git work, so a refused spawn
     // writes nothing to the credential store and checks nothing out.
-    let provider = req.agent_options.claude_provider().unwrap_or_default();
+    let provider = request_provider(&req);
     crate::agents::providers::check_request(req.mode, provider, &req.extra_env)?;
     // A secret row's literal moves into the credential store and becomes a
     // `${secret:<id>}` reference before anything captures the request, so the
@@ -5642,27 +5637,6 @@ async fn recover_one(
         .ok_or_else(|| ALREADY_RECOVERING.to_owned())?;
     let entry = history::read_one(&hub.dirs, &item.history_id)
         .ok_or_else(|| format!("no history entry {}", item.history_id))?;
-    // A row the recovery would spawn with that can't be resolved — an unset env
-    // variable, or a saved secret no longer in the store — or that couldn't be
-    // sealed refuses it here, before the registration and branch lookup below:
-    // registering a repo writes `state.json` and broadcasts `Repos`, and a
-    // recovery that then failed would leave a repo the user never asked for
-    // behind a spawn that never happened.
-    let provider = entry
-        .spawn_config
-        .as_ref()
-        .and_then(|config| config.agent_options.claude_provider())
-        .unwrap_or_default();
-    // A Claude entry recovers as an interactive session; a shell recovery
-    // carries no provider, so the mode only matters for a provider's entry.
-    if let Err(failure) = check_env_rows(
-        history::recorded_env(&entry),
-        &[],
-        SessionMode::Interactive,
-        provider,
-    ) {
-        return Err(format!("{failure}"));
-    }
     let busy_excluded = {
         let live = hub.sessions.get(&item.history_id);
         let guard = live.as_ref().map(|rec| crate::sync::lock(rec));
@@ -5685,6 +5659,14 @@ async fn recover_one(
     })
     .await
     .map_err(|err| format!("planning the recovery failed: {err}"))??;
+    // A row the recovery would spawn with that can't be resolved — an unset env
+    // variable, or a saved secret no longer in the store — or that couldn't be
+    // sealed, or a provider key that isn't set, refuses it here, on the request
+    // the plan will spawn and before the registration and branch lookup below:
+    // registering a repo writes `state.json` and broadcasts `Repos`, and a
+    // recovery that then failed would leave a repo the user never asked for
+    // behind a spawn that never happened. Planning only reads.
+    check_spawn_request(&plan.request).map_err(|failure| format!("{failure}"))?;
     if let Some(path) = plan.register_repo.clone() {
         let repo = register_repo(hub, &path, None, out_tx)
             .await
@@ -6967,24 +6949,40 @@ pub(crate) fn resolve_env_refs(
         .collect()
 }
 
-/// Everything the daemon can check about a spawn's request and env rows
-/// before it does work it can't undo: the request must pass
-/// [`crate::agents::providers::check_request`], every secret row must be
-/// sealable (see [`env_secrets::check_sealable`]), every reference
-/// resolvable, and the provider's key set. The dispatcher runs it before a
-/// checkout confirm, and recovery before it registers a repo;
+/// Everything the daemon can check about a spawn request before it does work
+/// it can't undo, on the mode, the provider (`Anthropic` when its options
+/// name none) and the env rows the request will spawn with: see
+/// [`check_env_rows_with`]. The dispatcher runs it before a checkout
+/// confirm, and recovery on the planned request before it registers a repo;
 /// `spawn_session` seals and resolves again for the child.
-pub(crate) fn check_env_rows(
-    rows: &[(String, String)],
-    secret_keys: &[String],
-    mode: SessionMode,
-    provider: protocol::ClaudeProvider,
-) -> Result<(), spawn_plan::SpawnFailure> {
-    check_env_rows_with(rows, secret_keys, mode, provider, user_env::resolve)
+fn check_spawn_request(request: &SpawnRequest) -> Result<(), spawn_plan::SpawnFailure> {
+    check_spawn_request_with(request, user_env::resolve)
 }
 
-/// [`check_env_rows`] with the variable lookup `resolve` in place of
+/// [`check_spawn_request`] with the variable lookup `resolve` in place of
 /// [`user_env::resolve`].
+fn check_spawn_request_with(
+    request: &SpawnRequest,
+    resolve: impl Fn(&str) -> Option<(user_env::Secret, user_env::Origin)>,
+) -> Result<(), spawn_plan::SpawnFailure> {
+    check_env_rows_with(
+        &request.extra_env,
+        &request.secret_env_keys,
+        request.mode,
+        request_provider(request),
+        resolve,
+    )
+}
+
+/// The Claude provider `request` spawns on: its options', else Anthropic.
+fn request_provider(request: &SpawnRequest) -> protocol::ClaudeProvider {
+    request.agent_options.claude_provider().unwrap_or_default()
+}
+
+/// The checks behind [`check_spawn_request`]: the request must pass
+/// [`crate::agents::providers::check_request`], every secret row must be
+/// sealable (see [`env_secrets::check_sealable`]), every reference
+/// resolvable through `resolve`, and the provider's key set.
 fn check_env_rows_with(
     rows: &[(String, String)],
     secret_keys: &[String],
@@ -8141,6 +8139,123 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resume_abandoned_keeps_a_deepseek_provider() {
+        let (hub, scratch) = spawnless_test_hub("resume-deepseek");
+        insert_abandoned_with_history(&hub, "lost");
+        let target = SpawnTarget::Standalone {
+            cwd: Some(scratch.path().to_string_lossy().into_owned()),
+            add_dirs: Vec::new(),
+        };
+        let stored = protocol::SpawnConfig::from_request(&deepseek_spawn(
+            target,
+            SessionMode::Interactive,
+            Vec::new(),
+            None,
+        ));
+        hub.sessions
+            .update("lost", |rec| rec.spawn_config = Some(stored));
+        let rec = hub.sessions.get("lost").expect("lost is registered");
+        let (request, _) =
+            abandoned_resume_request(&crate::sync::lock(&rec)).expect("lost can resume");
+        assert_eq!(request.agent_options, deepseek_options());
+    }
+
+    #[tokio::test]
+    async fn duplicate_keeps_a_deepseek_provider() {
+        let (hub, scratch) = spawnless_test_hub("duplicate-deepseek");
+        let target = SpawnTarget::Standalone {
+            cwd: Some(scratch.path().to_string_lossy().into_owned()),
+            add_dirs: Vec::new(),
+        };
+        let mut source = idle_record("source");
+        source.spawn_config = Some(protocol::SpawnConfig::from_request(&deepseek_spawn(
+            target,
+            SessionMode::Interactive,
+            Vec::new(),
+            None,
+        )));
+        hub.sessions.insert(source);
+        let request = duplicate_request(&hub, "source")
+            .await
+            .expect("source can be duplicated");
+        assert_eq!(request.agent_options, deepseek_options());
+    }
+
+    /// The request `how` recovers `entry` with, resuming `conversation`,
+    /// planned against an empty registry with every conversation present.
+    fn planned_recovery(
+        entry: &protocol::HistoryEntry,
+        how: protocol::RecoverAs,
+        conversation: Option<&str>,
+    ) -> SpawnRequest {
+        let item = protocol::RecoverItem {
+            history_id: entry.session_id.clone(),
+            conversation_id: conversation.map(str::to_owned),
+            how,
+        };
+        let registered = history::Registered {
+            repos: &[],
+            workspaces: &[],
+        };
+        history::plan_recovery(entry, &item, &registered, |_, _, _| true)
+            .expect("the recovery plans")
+            .request
+    }
+
+    #[test]
+    fn the_recovery_pre_check_sees_the_provider_that_will_spawn() {
+        let folder = r"D:\deepseek-proj";
+        let mut rec = history::test_support::record("ds", SessionMode::Interactive);
+        rec.members = vec![SessionMember {
+            repo_id: String::new(),
+            repo_name: String::new(),
+            branch: "main".to_owned(),
+            worktree_path: folder.to_owned(),
+        }];
+        let anthropic = history::entry_from_record(&rec, SessionEnd::TracerLost, Utc::now());
+        let mut recorded = anthropic.clone();
+        recorded.spawn_config = Some(protocol::SpawnConfig::from_request(&deepseek_spawn(
+            SpawnTarget::Standalone {
+                cwd: Some(folder.to_owned()),
+                add_dirs: Vec::new(),
+            },
+            SessionMode::Interactive,
+            Vec::new(),
+            None,
+        )));
+        let mut imported = anthropic.clone();
+        imported.provider = protocol::ClaudeProvider::Deepseek;
+        let register = protocol::RecoverAs::RegisterRepoThenClaude {
+            path: folder.to_owned(),
+        };
+        for entry in [&recorded, &imported] {
+            for how in [protocol::RecoverAs::Claude, register.clone()] {
+                let request = planned_recovery(entry, how.clone(), Some(RECOVERY_CONVERSATION));
+                let failure = check_spawn_request_with(&request, |_| None)
+                    .expect_err("a DeepSeek recovery needs the key");
+                assert_eq!(
+                    failure.title, "Couldn't start the DeepSeek session",
+                    "{how:?}"
+                );
+                assert!(
+                    check_spawn_request_with(&request, deepseek_key).is_ok(),
+                    "{how:?}"
+                );
+            }
+        }
+        // A shell recovery spawns a plain shell with no provider, so it needs
+        // no key.
+        for conversation in [Some(RECOVERY_CONVERSATION), None] {
+            let shell = planned_recovery(&anthropic, protocol::RecoverAs::Shell, conversation);
+            assert_eq!(shell.mode, SessionMode::PlainShell);
+            assert!(
+                check_spawn_request_with(&shell, |_| None).is_ok(),
+                "{conversation:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn the_end_path_writes_the_busy_flag_into_the_history_entry() {
         let (hub, _scratch) = spawnless_test_hub("recover-busy-excluded");
         let mut rec = history::test_support::record("s1", SessionMode::Interactive);
@@ -9009,14 +9124,35 @@ mod tests {
     }
 
     #[tokio::test]
-    #[expect(clippy::panic, reason = "a wrong reply fails the test loudly")]
     async fn a_locked_key_row_is_refused_before_it_is_sealed() {
-        let (_lock, _secrets_dir) =
-            env_secrets::test_support::scratch_async("deepseek-locked").await;
-        let (hub, _scratch, repo) = env_ref_repo_hub("deepseek-locked");
-        let rows = env(&[("ANTHROPIC_AUTH_TOKEN", SECRET_SENTINEL)]);
+        assert_deepseek_row_refused_before_sealing(
+            "deepseek-locked",
+            "ANTHROPIC_AUTH_TOKEN",
+            "`ANTHROPIC_AUTH_TOKEN` is set by the DeepSeek provider",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_removed_key_row_is_refused_before_it_is_sealed() {
+        assert_deepseek_row_refused_before_sealing(
+            "deepseek-removed",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "`CLAUDE_CODE_OAUTH_TOKEN` is removed from DeepSeek sessions",
+        )
+        .await;
+    }
+
+    /// A `DeepSeek` spawn with a secret-shaped `key` row is refused with a detail
+    /// holding `expected`, by `spawn_session` and by the dispatcher's pre-check
+    /// before a checkout confirm, and neither seals the row.
+    #[expect(clippy::panic, reason = "a wrong reply fails the test loudly")]
+    async fn assert_deepseek_row_refused_before_sealing(tag: &str, key: &str, expected: &str) {
+        let (_lock, _secrets_dir) = env_secrets::test_support::scratch_async(tag).await;
+        let (hub, _scratch, repo) = env_ref_repo_hub(tag);
+        let rows = env(&[(key, SECRET_SENTINEL)]);
         assert!(
-            protocol::env_rows::is_secret_key("ANTHROPIC_AUTH_TOKEN"),
+            protocol::env_rows::is_secret_key(key),
             "the row is one sealing would take"
         );
         let req = deepseek_spawn(
@@ -9027,17 +9163,11 @@ mod tests {
         );
         let err = spawn_session_with(&hub, req, None, deepseek_key)
             .await
-            .expect_err("a locked row refuses");
+            .expect_err("the row refuses");
         let failure = err
             .downcast_ref::<spawn_plan::SpawnFailure>()
             .expect("a spawn failure");
-        assert!(
-            failure
-                .detail
-                .contains("`ANTHROPIC_AUTH_TOKEN` is set by the DeepSeek provider"),
-            "{}",
-            failure.detail
-        );
+        assert!(failure.detail.contains(expected), "{}", failure.detail);
         assert!(!format!("{err:#}").contains(SECRET_SENTINEL));
         let config = std::env::var_os("RUSTLING_TULIP_CONFIG_DIR").expect("a scratch config dir");
         assert!(
@@ -9071,10 +9201,8 @@ mod tests {
         else {
             panic!("the pre-check refuses before the confirm, got {reply:?}");
         };
-        assert!(
-            detail.contains("`ANTHROPIC_AUTH_TOKEN` is set by the DeepSeek provider"),
-            "{detail}"
-        );
+        assert!(detail.contains(expected), "{detail}");
+        assert!(!detail.contains(SECRET_SENTINEL), "{detail}");
         assert_eq!(request_id.as_deref(), Some("rq-lk"));
         assert!(
             !Path::new(&config).join("env-secrets.json").exists(),

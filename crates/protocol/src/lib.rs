@@ -695,6 +695,24 @@ pub struct HistoryEntry {
     /// recovered session keeps it. Absent means false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub busy_excluded: bool,
+    /// The Claude provider an imported session ran on, inferred from the
+    /// `--model` its tracer log recorded. A recorded entry leaves it
+    /// Anthropic: its provider is its `spawn_config`'s (see
+    /// [`HistoryEntry::claude_provider`]). Skipped when Anthropic.
+    #[serde(default, skip_serializing_if = "ClaudeProvider::is_anthropic")]
+    pub provider: ClaudeProvider,
+}
+
+impl HistoryEntry {
+    /// The Claude provider the session ran on: its spawn config's when that
+    /// holds Claude's options, else [`HistoryEntry::provider`].
+    #[must_use]
+    pub fn claude_provider(&self) -> ClaudeProvider {
+        self.spawn_config
+            .as_ref()
+            .and_then(|config| config.agent_options.claude_provider())
+            .unwrap_or(self.provider)
+    }
 }
 
 /// One workspace member bound to a specific worktree directory that already
@@ -6428,6 +6446,23 @@ mod tests {
             ),
             "{carried:?}"
         );
+    }
+
+    #[test]
+    fn history_entry_provider_defaults_to_anthropic_and_round_trips_deepseek() {
+        let old = format!("{IMPORTED_ENTRY_PREFIX}}}");
+        let entry: HistoryEntry = serde_json::from_str(&old).expect("decode an older entry");
+        assert_eq!(entry.provider, ClaudeProvider::Anthropic);
+        assert_eq!(entry.claude_provider(), ClaudeProvider::Anthropic);
+        let encoded = serde_json::to_value(&entry).expect("encode");
+        assert!(encoded.get("provider").is_none(), "{encoded}");
+
+        let json = format!(
+            r#"{IMPORTED_ENTRY_PREFIX},"end_time_known":true,"import_rev":2,"provider":"deepseek"}}"#
+        );
+        let entry: HistoryEntry = assert_round_trip(&json);
+        assert_eq!(entry.provider, ClaudeProvider::Deepseek);
+        assert_eq!(entry.claude_provider(), ClaudeProvider::Deepseek);
     }
 
     #[test]
