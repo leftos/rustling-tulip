@@ -1008,6 +1008,35 @@ fn shift_duplicate_reply_opens_the_locked_prefilled_dialog(cx: &mut TestAppConte
 }
 
 #[gpui::test]
+fn shift_duplicate_of_a_deepseek_source_prefills_deepseek(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_repos(cx, &dir, "r1");
+    shift_duplicate(&mut h, "duplicate-new-tab");
+    h.sent();
+    h.send(config_reply(
+        "s1",
+        Some(serde_json::json!({
+            "target": { "kind": "single", "repo_id": "r1", "branch_name": "feat/dup",
+                "base_branch": "origin/dev", "use_worktree": true },
+            "mode": "interactive",
+            "dangerously_skip_permissions": false,
+            "agent_options": { "kind": "claude", "provider": "deepseek" },
+            "model": "deepseek-flash",
+        })),
+    ));
+    assert!(h.root(|root, _| root.spawn_dialog_open()));
+    let selected = dialog_selected(&mut h);
+    assert!(
+        selected.contains(&"spawn-provider-deepseek".to_owned()),
+        "the source's provider is picked: {selected:?}"
+    );
+    assert_eq!(
+        h.root(RootView::spawn_dialog_model).as_deref(),
+        Some("deepseek-flash")
+    );
+}
+
+#[gpui::test]
 fn shift_duplicate_with_no_stored_config_opens_defaults_on_the_source_repo(
     cx: &mut TestAppContext,
 ) {

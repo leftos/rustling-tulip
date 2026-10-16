@@ -1411,6 +1411,7 @@ impl RootView {
                     self.set_keep_awake(None);
                 }
                 self.conn = conn;
+                self.sync_spawn_provider_support(cx);
             }
             NetEvent::Handshake(info) => self.handshake = Some(info),
             NetEvent::Message(msg) => {

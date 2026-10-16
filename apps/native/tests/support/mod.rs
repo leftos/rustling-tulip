@@ -49,6 +49,15 @@ pub fn welcome(protocol_version: u32) -> DaemonMessage {
     }
 }
 
+/// A connection open on the fake daemon's port, welcomed with `features`.
+fn connected(features: Vec<String>) -> Connection {
+    let mut conn = Connection::new();
+    conn.on_connecting();
+    conn.on_socket_open(4242);
+    conn.on_welcome(PROTOCOL, features);
+    conn
+}
+
 /// Whether the rail's side of the window shows what `selector` tags: the
 /// panels, the divider, the badge and the source-control panel's parts.
 /// Selectors it does not know count as present.
@@ -972,12 +981,20 @@ impl<'a> Harness<'a> {
         harness
     }
 
+    /// Reports the connection as an older daemon's, whose `Welcome` lists
+    /// none of [`daemon_features`].
+    pub fn welcome_without_features(&mut self) {
+        self.event(NetEvent::State(connected(Vec::new())));
+    }
+
+    /// Reports the connection as a current daemon's, whose `Welcome` lists
+    /// [`daemon_features`], as after a restart onto a newer daemon.
+    pub fn welcome_with_features(&mut self) {
+        self.event(NetEvent::State(connected(daemon_features())));
+    }
+
     fn connect(&mut self) {
-        let mut conn = Connection::new();
-        conn.on_connecting();
-        conn.on_socket_open(4242);
-        conn.on_welcome(PROTOCOL, daemon_features());
-        self.event(NetEvent::State(conn));
+        self.event(NetEvent::State(connected(daemon_features())));
         self.event(NetEvent::Handshake(HandshakeInfo {
             port: 4242,
             pid: 1,
