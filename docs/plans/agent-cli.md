@@ -31,7 +31,7 @@ Each CLI call is one request and one reply, so the CLI uses `/agent/v1/<verb>` r
 
 ### Session environment
 
-Every tracer-backed and headless spawn (interactive, plain shell, headless; fresh, resumed, duplicated, recovered) gets `RT_SESSION_ID`, `RT_AGENT_TOKEN` (a fresh `lan::generate_auth_token`), `RT_CONFIG_DIR` and `RT_CLI` (the absolute path of the session's cached tracer). The record and `meta.json` keep only `agent_token_sha256` (`#[serde(default)]`), so a reattached session keeps a valid token after a daemon restart; the daemon verifies by hashing the presented token and comparing with `constant_time_eq`. The token is valid while the session is live and revoked when it ends, parks or is discarded. `PtySpawnSpec` and `HeadlessSpec` print variable names only in `Debug` (DK.6 adds this; AC.2 does if DK has not landed).
+Every tracer-backed and headless spawn (interactive, plain shell, headless; fresh, resumed, duplicated, recovered) gets `RT_SESSION_ID`, `RT_AGENT_TOKEN` (a fresh `lan::generate_auth_token`), `RT_CONFIG_DIR` and `RT_CLI` (the absolute path of the session's cached tracer). The record and `meta.json` keep only `agent_token_sha256` (`#[serde(default)]`), so a reattached session keeps a valid token after a daemon restart; the daemon verifies by hashing the presented token and comparing with `constant_time_eq`. The token is valid while the session is live and revoked when it ends, parks or is discarded. `PtySpawnSpec` and `HeadlessSpec` print variable names only in `Debug`.
 
 ### Verbs
 
