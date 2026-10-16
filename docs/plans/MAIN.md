@@ -5,21 +5,71 @@
 ## Wave 1a — Claude sessions on DeepSeek
 
 - [ ] RT-3 Run Claude sessions on DeepSeek as a per-session Claude provider
-  - [ ] RT-5 DK.3b, DK.5–DK.13: provider capability, spawn environment, dialog and chip
+  - [/] RT-5 DK.3b, DK.5–DK.13: provider capability, spawn environment, dialog and chip
+  - [ ] RT-175 Don't seal an env row the DeepSeek provider removes from the child
 - [ ] RT-6 Merge feat/deepseek-sessions (#8)
 
 ## Wave 1c — Session labels, menus and busy tracking
 
-- [/] RT-11 P4.16: Exclude a session from busy tracking
 - [ ] RT-165 Carry the busy exclusion in the new session's first record on Restart, Resume and Recover
 
-## Wave 2 — Hook status, background work and hand-offs
+## Wave 2 — Daily driver: close the port's gaps
 
+- [ ] RT-12 Clear a tab's stale closing mark when the daemon keeps the tab
+- [ ] RT-14 Disarm the pending create when CreateTab or MergeTabs is rejected
+- [ ] RT-24 Keyboard stops and focus ring through the Appearance body and editor
 - [ ] RT-25 Report agent status from Claude Code hooks, with the PTY heuristic as fallback
   - [ ] RT-84 Show a background state when a turn ends with subagents, shells or wakeups still running
   - [ ] RT-85 Flag a session hand-off ready when its orchestrator says to /clear and /nextup
+- [ ] RT-13 P4.17: Keep an untouched layout when panes come and go
+- [ ] RT-23 Give the Shell dialog the shared checkbox row and make one section helper
+- [ ] RT-15 P4.10b: Remove a repo or workspace
+- [ ] RT-16 P4.11a: Container row keyboard fold, last-launch summary, Detached banner
+- [ ] RT-17 P4.10c: Workspace creator, + Workspace and the VS Code workspace prompt
+- [ ] RT-18 P4.10d: Add repo and Add workspace on DIR and SH containers
+- [ ] RT-19 P4.11b: Launch last again, and stop all in Detached
+- [ ] RT-20 P4.11c: Full container menu and spawn entry points
+- [ ] RT-21 P4.15a: Preset wizard sources and variables
+- [ ] RT-22 P4.15b: Preset wizard preview and launching
+- [ ] RT-169 Audit the native terminal's rendering against xterm: fit, fonts, clipboard, GPU-loss fallback
+- [ ] RT-170 Prove and tick the keyboard and focus parity lines: commit, rename, Esc, combobox, menus, modal focus
+- [ ] RT-171 Phase 5a: pane drag-and-drop (P5.1–P5.5)
+- [ ] RT-174 Refuse a plain-shell request's agent options before git work
 
-## Wave 3 — Attention feed on the desktop
+## Wave 3 — Cutover: remote mode, installer and v0.1.0-alpha
+
+- [ ] RT-33 Tailnet access on the host: identity, certificate and listener
+  - [/] RT-160 TS.2: daemon tailnet listener module: cert, bind with rebind, whois acceptor
+  - [ ] RT-161 TS.3: wire the tailnet listener into the daemon: auth kind, device token, router, idle exit
+  - [ ] RT-162 TS.4: ConfigureRemote and RemoteStatus messages
+  - [ ] RT-163 TS.5: retire the LAN listener, /pair and mDNS
+  - [ ] RT-166 TS.3b: device tokens issued only after the owner approves the device on the host PC
+- [ ] RT-34 Phase 6: remote mode and cutover
+  - [ ] RT-150 P6.1: Transport seam: Target::{Local, Tailnet(host)} in net.rs over public-CA TLS
+  - [ ] RT-151 P6.2: Remote-mode rules: what is disabled, hidden or retargeted
+  - [ ] RT-152 P6.3: Host picker from the tailnet's machines, typed-name fallback, boot reconnect
+  - [ ] RT-154 P6.4: Host Settings: Remote access (Tailscale) panel
+  - [ ] RT-156 P6.5: Autostart: start the daemon on login
+  - [ ] RT-157 P6.7: Cutover: installer (and the firewall rule, once ruled)
+  - [ ] RT-158 P6.6: Remote tests over a fake Tailscale, hand checklist, and the docs pass
+  - [ ] RT-172 Remote mode: Reconnect in place of Restart, and the no-repos note on a remote host
+  - [ ] RT-173 Import remote sessions: offer to arrange a remote host's sessions when their count changed
+- [ ] RT-96 Remote devices: list connected tailnet devices, block one and drop its connections
+- [ ] RT-35 FT.2: native download sink for fetched files
+- [ ] RT-36 FT.3: fetch a file by clicking a terminal path link in remote mode
+- [ ] RT-37 FT.4: "Fetch file…" popup
+- [ ] RT-129 Write the release procedure for v0.1.0-alpha
+
+## Wave 4 — Mobile app (iPhone PWA over Tailscale)
+
+- [ ] RT-143 Re-plan the mobile app as an iPhone PWA over Tailscale
+- [ ] RT-38 Android app MVP: pairing, attention feed, reply and push
+  - [ ] RT-103 MA4: Flutter shell, Rust core bridge and QR pairing on Android
+  - [ ] RT-104 MA6: Phone home with the attention feed and sessions; reply, answer prompts, stop and resume
+  - [ ] RT-105 MA7: Phone push through FCM with action buttons, sent only when away
+  - [ ] RT-106 Phone files: open a tapped path in a viewer, browse a worktree, share into a session
+
+## Wave 5 — Attention feed on the desktop
 
 - [ ] RT-87 Daemon attention feed: one event stream for needs-you, hand-offs, progress, done and fleet items
 - [ ] RT-88 Turn Needs You into an attention inbox with streams, unread state and mark unread
@@ -30,70 +80,21 @@
 - [ ] RT-93 Fleet items: stuck agents and per-repo inbox requests
 - [ ] RT-90 Sounds per attention stream and a taskbar badge
 
-## Wave 4 — Tabs, panes and tab state
+## Wave 6 — Remote enhancements
 
-- [ ] RT-12 Clear a tab's stale closing mark when the daemon keeps the tab
-- [ ] RT-13 P4.17: Keep an untouched layout when panes come and go
-- [ ] RT-14 Disarm the pending create when CreateTab or MergeTabs is rejected
-
-## Wave 5 — Remote desktop, relay and files across machines
-
-- [ ] RT-33 Tailnet access on the host: identity, certificate and listener
-  - [ ] RT-160 TS.2: daemon tailnet listener module: cert, bind with rebind, whois acceptor
-  - [ ] RT-161 TS.3: wire the tailnet listener into the daemon: auth kind, device token, router, idle exit
-  - [ ] RT-162 TS.4: ConfigureRemote and RemoteStatus messages
-  - [ ] RT-163 TS.5: retire the LAN listener, /pair and mDNS
-  - [ ] RT-166 TS.3b: device tokens issued only after the owner approves the device on the host PC
-- [ ] RT-96 Remote devices: list connected tailnet devices, block one and drop its connections
-- [ ] RT-34 Phase 6: remote mode and cutover
-  - [ ] RT-150 P6.1: Transport seam: Target::{Local, Tailnet(host)} in net.rs over public-CA TLS
-  - [ ] RT-151 P6.2: Remote-mode rules: what is disabled, hidden or retargeted
-  - [ ] RT-152 P6.3: Host picker from the tailnet's machines, typed-name fallback, boot reconnect
-  - [ ] RT-154 P6.4: Host Settings: Remote access (Tailscale) panel
-  - [ ] RT-156 P6.5: Autostart: start the daemon on login
-  - [ ] RT-157 P6.7: Cutover: installer (and the firewall rule, once ruled)
-  - [ ] RT-158 P6.6: Remote tests over a fake Tailscale, hand checklist, and the docs pass
-- [ ] RT-35 FT.2: native download sink for fetched files
-- [ ] RT-36 FT.3: fetch a file by clicking a terminal path link in remote mode
+- [ ] RT-58 Underline every terminal link and open it with a plain click
 - [ ] RT-97 Resolve clicked terminal paths on the daemon, using the lines above the click
 - [ ] RT-98 Index each session's transcript file paths and cwds for exact link resolution
 - [ ] RT-99 Pick between candidates when a clicked path matches several files
-- [ ] RT-58 Underline every terminal link and open it with a plain click
-- [ ] RT-37 FT.4: "Fetch file…" popup
 - [ ] RT-100 Open an unchanged fetched file from the local cache
 - [ ] RT-101 Paste an image or drop a file into a remote session
 - [ ] RT-102 Resume a remote connection without replaying scrollback
 
-## Wave 6 — Repos, containers and presets
+## Wave 7 — Pop-out windows
 
-- [ ] RT-15 P4.10b: Remove a repo or workspace
-- [ ] RT-16 P4.11a: Container row keyboard fold, last-launch summary, Detached banner
-- [ ] RT-17 P4.10c: Workspace creator, + Workspace and the VS Code workspace prompt
-- [ ] RT-18 P4.10d: Add repo and Add workspace on DIR and SH containers
-- [ ] RT-19 P4.11b: Launch last again, and stop all in Detached
-- [ ] RT-20 P4.11c: Full container menu and spawn entry points
-- [ ] RT-21 P4.15a: Preset wizard sources and variables
-- [ ] RT-22 P4.15b: Preset wizard preview and launching
+- [ ] RT-32 Phase 5b: pop-out windows (P5.6–P5.12)
 
-## Wave 7 — Android app MVP
-
-- [ ] RT-38 Android app MVP: pairing, attention feed, reply and push
-  - [ ] RT-103 MA4: Flutter shell, Rust core bridge and QR pairing on Android
-  - [ ] RT-104 MA6: Phone home with the attention feed and sessions; reply, answer prompts, stop and resume
-  - [ ] RT-105 MA7: Phone push through FCM with action buttons, sent only when away
-  - [ ] RT-106 Phone files: open a tapped path in a viewer, browse a worktree, share into a session
-- [ ] RT-143 Re-plan the mobile app as an iPhone PWA over Tailscale
-
-## Wave 8 — Shared form controls
-
-- [ ] RT-23 Give the Shell dialog the shared checkbox row and make one section helper
-- [ ] RT-24 Keyboard stops and focus ring through the Appearance body and editor
-
-## Wave 9 — Native client Phase 5: windows and drag-and-drop
-
-- [ ] RT-32 Phase 5: windows and drag-and-drop
-
-## Wave 10 — Chat mirror and phone session views
+## Wave 8 — Chat mirror and phone session views
 
 - [ ] RT-51 Chat mirror: a Claude session as a chat over its live terminal, with interactive cards
 - [ ] RT-107 Running-work strip: subagents, background shells and wakeups over the chat
@@ -102,7 +103,7 @@
 - [ ] RT-109 MA9: Phone chat view over the chat mirror
 - [ ] RT-142 Phone: tap a Linear identifier to see its card
 
-## Wave 11 — Summaries, spoken alerts and the Dashboard
+## Wave 9 — Summaries, spoken alerts and the Dashboard
 
 - [ ] RT-67 Record ops-tower's Agents tab rulings against RT-28 and reconcile DB.1's summarizer
 - [ ] RT-27 Measure a local small model as the alerts' summarizer provider
@@ -110,15 +111,16 @@
 - [ ] RT-28 Dashboard view: cards for every live session, fed by the summarizer
 - [ ] RT-111 Summary view: one line per stretch of work, expandable into the chat
 
-## Wave 12 — Subagent streams
+## Wave 10 — Subagent streams
 
 - [ ] RT-30 View a session's running subagents as read-only sessions
 
-## Wave 13 — Follow dispatch runs
+## Wave 11 — Follow dispatch runs
 
 - [ ] RT-31 Follow DeepSeek dispatch runs as read-only sessions
+- [ ] RT-167 Queue a message for a running subagent or dispatch run from its transcript view
 
-## Wave 14 — Claude accounts and artifacts by account
+## Wave 12 — Claude accounts and artifacts by account
 
 - [ ] RT-66 Amend the accounts plan to take ops-tower's claude-accounts crate instead of porting cswap
 - [ ] RT-39 Built-in claude-swap: several Claude logins, usage polling and switching
@@ -127,14 +129,14 @@
 - [ ] RT-115 Host-approved extra roots for file fetch
 - [ ] RT-114 Artifacts list, with read-only local copies served by the daemon
 
-## Wave 15 — ops-tower views: gates, board and dock
+## Wave 13 — ops-tower views: gates, board and dock
 
 - [ ] RT-64 Re-cut RT-55 and gate-dashboard.md around ops-tower's gate-state and proc-table crates
 - [ ] RT-55 Gate dashboard in the client
 - [ ] RT-56 Plan board and daily briefing in the Dashboard
 - [ ] RT-159 Corner status window: Needs you, Just finished and a Working ticker
 
-## Wave 16 — Dictation
+## Wave 14 — Dictation
 
 - [ ] RT-75 Dictate a prompt into any session from the native client
   - [ ] RT-76 DI.1: Spike WinRT dictation and the Right Alt key in the unpackaged client
@@ -145,7 +147,7 @@
 - [ ] RT-81 DI.5: Check that dictation in remote mode reaches the remote session
 - [ ] RT-83 MA11: Dictation in the mobile app
 
-## Wave 17 — Linear issue links
+## Wave 15 — Linear issue links
 
 - [ ] RT-133 Linear issue links: detect IDs in terminal text and session titles, hover card, open in the app
   - [ ] RT-134 LL.1: Linear protocol messages
@@ -174,9 +176,7 @@
 - [ ] RT-43 Bump gpui past 0.2.2 to drop the proc-macro-error2 warning
 - [ ] RT-44 Find what holds tracer_protocol's incremental session directory
 - [ ] RT-45 Stop the live tier's tracer kill racing a young session
-- [ ] RT-129 Write the release procedure for v0.1.0-alpha
 - [ ] RT-130 Cut cold builds across worktrees: measure, then sccache or a safe shared target
-- [ ] RT-164 Bump rustls past RUSTSEC-2026-0346 to 0349 so cargo deny passes
 
 ## macOS
 
