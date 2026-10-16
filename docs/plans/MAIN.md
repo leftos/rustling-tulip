@@ -16,10 +16,7 @@
 
 ## Wave 2 — Daily driver: close the port's gaps
 
-- [ ] RT-12 Clear a tab's stale closing mark when the daemon keeps the tab
-- [ ] RT-14 Disarm the pending create when CreateTab or MergeTabs is rejected
-- [/] RT-24 Keyboard stops and focus ring through the Appearance body and editor
-- [ ] RT-25 Report agent status from Claude Code hooks, with the PTY heuristic as fallback
+- [/] RT-25 Report agent status from Claude Code hooks, with the PTY heuristic as fallback
   - [ ] RT-84 Show a background state when a turn ends with subagents, shells or wakeups still running
   - [ ] RT-85 Flag a session hand-off ready when its orchestrator says to /clear and /nextup
 - [ ] RT-13 P4.17: Keep an untouched layout when panes come and go
@@ -37,6 +34,10 @@
 - [ ] RT-171 Phase 5a: pane drag-and-drop (P5.1–P5.5)
 - [ ] RT-174 Refuse a plain-shell request's agent options before git work
 - [ ] RT-179 Keep keyboard focus when pressing Worktrees Save disables it
+- [ ] RT-181 Clear a tab's closing mark when the daemon rejects its ClosePane
+- [ ] RT-182 Replace the Tauri-era toasts with two notifications: Needs you and Finished
+- [ ] RT-183 Remove headless runs from the native client
+- [ ] RT-186 Resync the tab list when a connection's tab-event broadcast lags
 
 ## Wave 3 — Cutover: remote mode, installer and v0.1.0-alpha
 
@@ -60,7 +61,8 @@
 - [ ] RT-36 FT.3: fetch a file by clicking a terminal path link in remote mode
 - [ ] RT-37 FT.4: "Fetch file…" popup
 - [ ] RT-129 Write the release procedure for v0.1.0-alpha
-- [ ] RT-177 Await the tailnet certificate task when the listener's supervisor panics
+- [/] RT-177 Await the tailnet certificate task when the listener's supervisor panics
+- [ ] RT-184 Let only the client with recent input own a session's terminal size
 
 ## Wave 4 — Mobile app (iPhone PWA over Tailscale)
 
@@ -104,6 +106,7 @@
 - [ ] RT-108 MA8: Phone terminal with a key bar
 - [ ] RT-109 MA9: Phone chat view over the chat mirror
 - [ ] RT-142 Phone: tap a Linear identifier to see its card
+- [ ] RT-185 Render stretchtext replies as expandable text in the chat mirror
 
 ## Wave 9 — Summaries, spoken alerts and the Dashboard
 
