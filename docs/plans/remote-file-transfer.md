@@ -4,6 +4,8 @@ When the native client is connected to a daemon on another machine over Remote L
 
 In this doc, the **host** is the machine running the daemon and the **remote client** is the machine running the native client connected to it.
 
+Prior art: herdr-gpui's SSH remote file links, which fetch, watch and upload saves back with hash-guarded conflict handling, are written up in [herdr-gpui-remote-files.md](../research/herdr-gpui-remote-files.md).
+
 ## Status
 
 Blocked on native-client Phase 6 (connection picker, pinned-TLS tunnel; see [native-client.md](./native-client.md)): the native client can't connect remotely until then.
