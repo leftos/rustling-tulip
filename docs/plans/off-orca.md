@@ -4,6 +4,8 @@ The owner runs Orca today and will leave it once rustling-tulip covers three thi
 
 ## Rulings
 
+> **Superseded:** RT-143 re-plans the phone as an iPhone PWA over Tailscale HTTPS ([remote-access.md](./remote-access.md)): Android-first and Flutter are out, the relay and pinned TLS are dropped with pairing codes and mDNS, and Wave 4 is renamed.
+
 - **The bar for leaving Orca:** phone status and reply, the desktop terminals and worktrees, and remote access from another PC. The chat view is wanted but is not on that bar.
 - **Order:** interleaved. Hook status, then the desktop attention feed, then the remote desktop, then the Android MVP, with the small desktop parity waves between them; Phase 5 (drag-and-drop, pop-outs) after the Android MVP.
 - **Chat view:** a mirror over the live terminal session (SV.1), not the stream-peer view switch.
@@ -37,10 +39,10 @@ Build tooling's RT-116 (affected-crate tests per item, the full suite at checkpo
 
 ## Where things stand
 
-- **Desktop:** 107 of 150 parity lines done (`native-client-parity.md`). Open: repos/containers/presets and drag-and-drop (Phase 5a), both in Wave 2; remote (Phase 6, Wave 3); pop-outs (Phase 5b, Wave 7); a few keyboard and toast lines.
-- **Remote:** the daemon half is done (`lan.rs` pinned-TLS listener, `pairing.rs`, mDNS, FT.1 `FetchFile` streaming). The native client dials only `ws://127.0.0.1` (`apps/native/src/net.rs:285`); no TLS pinning, host profiles, pairing UI or remote mode yet (RT-33, RT-34). No upload direction exists at all.
+- **Desktop:** 109 of 150 parity lines done (`native-client-parity.md`). Open: repos/containers/presets and drag-and-drop (Phase 5a), both in Wave 2; remote (Phase 6, Wave 3); pop-outs (Phase 5b, Wave 7); a few keyboard and toast lines.
+- **Remote:** TS.1 and TS.2 landed (`crates/tailnet`, `crates/daemon/src/tailnet_listener.rs`; commits 4d18a51, 6e1c847, dffb25d, 08ab90b), with FT.1 `FetchFile` streaming. The listener is only `mod`-declared in `main.rs` and never started (RT-161), and TS.5 retires the LAN listener, `/pair` and mDNS. The native client dials only `ws://127.0.0.1` (`apps/native/src/net.rs:285`); no host profiles or remote mode yet (RT-33, RT-34). No upload direction exists at all.
 - **Links:** Ctrl+click only; regex over grid rows with soft-wrap and box-border stitching up to 64 rows (`links.rs:105`, `term.rs:931`); resolved client-side against the session cwd, then member worktrees (`open.rs:238-346`), first existing candidate wins.
-- **Attention:** one `Attention { reason }` message (`AwaitingInput | Stopped | Error`, heuristic-driven), a Windows toast with no content and no click action (`notify.rs:223`), the Needs You rail (NY.1–NY.3). No sound, no phone, no hook status yet (RT-25 is design only).
+- **Attention:** one `Attention { reason }` message (`AwaitingInput | Stopped | Error`, heuristic-driven), one Windows toast — `Needs you`, with the session's label as its body, one toggle and the skip-when setting (TN.1/TN.2, `apps/native/src/notify.rs:142`) — and the Needs You rail (NY.1–NY.3). No click action, no sound, no phone, no hook status yet (RT-25 is design only).
 - **Transcript JSONL:** read only for resume candidates (`transcripts.rs`); nothing extracts tool calls, cost or tokens for interactive sessions.
 - **Orca, for the bar to clear:** phone app (status, scrollback, reply, chat UI, push "agent finished", file tree, source control, account switch, quick commands, attach photo, dictate); desktop Chat UI as a view over the same PTY (`orca/docs/site/content/docs/agents/native-chat.mdx`); a notification bell with unread state.
 
@@ -144,7 +146,7 @@ Every Claude session can be shown three ways, on every client: **Terminal**, **C
 
 ## 4. Remote desktop client (`RD`)
 
-- **RD.1 Tailscale and the relay.** The daemon's LAN listener already does pinned TLS; over a tailnet it is reachable from anywhere, so the connection picker takes a MagicDNS name. The relay (MA2, `mobile-app.md`) is built in the same wave for devices without Tailscale; both paths run the same end-to-end TLS.
+- **RD.1 Tailscale only.** The daemon's tailnet listener serves its `tailscale cert` TLS over the tailnet (`crates/daemon/src/tailnet_listener.rs`), reachable from anywhere once TS.3 starts it, so the connection picker takes a MagicDNS name. The relay (MA2, `mobile-app.md`) is dropped with the Tailscale-first ruling (`remote-access.md`).
 - **RD.2 Phase 6 as planned** (RT-33, RT-34): shared client core, connection picker, pairing, host profiles, remote mode.
 - **RD.3 Same notifications remotely.** The remote native client is a full attention client (AT.3–AT.8), with presence per machine.
 - **RD.4 Resume without replay.** Reconnect sends each pane's last sequence number; the daemon sends only the missing bytes, so a flaky link does not reload 2 MB of scrollback per pane.
@@ -153,6 +155,8 @@ Every Claude session can be shown three ways, on every client: **Terminal**, **C
 - **RD.7 Bandwidth.** `permessage-deflate` on remote connections; coalesce output frames per pane at ~16 ms.
 
 ## 5. Mobile app (`MA`, extends `mobile-app.md`)
+
+> **Superseded:** the phone is an iPhone PWA over Tailscale HTTPS, not an Android/Flutter app (RT-143, [remote-access.md](./remote-access.md)); MA.a's Android-first order and Flutter stack, MA.d's FCM push and MA.h's relay are re-cut with that issue.
 
 - **MA.a Android first.** Android builds and sideloads from Windows, with `adb` over Wi-Fi, FCM push, no Apple fee and no macOS CI. Flutter stays so iOS remains possible; MA5 (iOS pipeline) moves to the backlog.
 - **MA.b Home is the attention feed** (AT.3), Needs you first, then hand-offs, then sessions by repo with status and the AT.1 background glyph.

@@ -52,7 +52,7 @@ This feature leaves `/voice` alone. Locally it still works as before; this gives
 ### Interplay with other features
 
 - **Spoken alerts** (`spoken-alerts.md`, RT-26): alert speech is held while the box is listening, so the recognizer does not transcribe the alert, and plays when listening stops. An open box on a session counts as presence for that session under the alerts' presence rule.
-- **Remote mode**: nothing extra. The box sends through the pane's normal input path, which in remote mode goes over the pinned-TLS connection (or the relay) like any keystroke.
+- **Remote mode**: nothing extra. The box sends through the pane's normal input path, which in remote mode goes over the tailnet listener's `tailscale cert` TLS (`crates/tailnet`, `crates/daemon/src/tailnet_listener.rs`) like any keystroke. The relay is dropped (`remote-access.md`).
 - **Claude Code `/voice`**: untouched. Pressing Right Alt in a Claude session never reaches the PTY.
 
 ## Design (mobile app)

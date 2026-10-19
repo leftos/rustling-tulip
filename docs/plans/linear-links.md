@@ -17,7 +17,7 @@ Research: [linear-links.md](../research/linear-links.md). Code map at the time o
 - **Branch (owner):** the work lands on `feat/linear-links` behind a draft PR, merged through `/ship` once the feature works.
 
 - **Click (owner):** Ctrl+click on a terminal identifier opens it, as paths and URLs open today; a plain click keeps selecting text. RT-58 (plain-click links) later moves every link kind together. A click on a title chip opens the issue.
-- **Phone (owner):** in the Android app, a tap on an identifier shows the same card from the daemon's cache, with an Open button. This lands in a phone wave, not in this one.
+- **Phone (owner):** in the iPhone PWA (Wave 4, RT-143), a tap on an identifier shows the same card from the daemon's cache, with an Open button. This lands in a phone wave, not in this one.
 - **Placement (owner):** Wave 15, after Wave 14 (Dictation).
 
 ## Orchestrator decisions (not owner rulings; open to the owner)

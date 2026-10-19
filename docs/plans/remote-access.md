@@ -14,6 +14,7 @@ Design for Wave 3's remote desktop (Linear RT-33, RT-34 and their sub-issues). R
 - Placement: the daemon side (TS.1 to TS.5) lands on `main`, behind a `remote.json` switch that is off by default; the native client's remote mode (P6.1 to P6.4 and the tests) is built on `feat/remote-mode` and merged by `/ship` after a green full suite. The installer and the docs pass land on `main` after the merge.
 - The native client dials TLS itself inside `net.rs`; there is no loopback bridge.
 - The relay (RT-94), pinned TLS, mDNS discovery, pairing by code and add-by-pasted-code are dropped. RT-95 (Tailscale by MagicDNS name) folds into the host picker.
+- **No Windows Firewall rule** (RT-157): the owner runs Fort Firewall, whose rule must cover the content-addressed binaries-cache folder (`%LOCALAPPDATA%\leftos\rustling-tulip\data\binaries\`), not one exe path, since each build's daemon and tracer are new files; P6.7's installer needs no elevated port rule.
 
 ## Orchestrator decisions (not owner rulings; open to the owner)
 
@@ -22,8 +23,6 @@ Design for Wave 3's remote desktop (Linear RT-33, RT-34 and their sub-issues). R
 - Certificates: checked at start and every 24 h with `tailscale cert --min-validity` of about 14 days, reloaded only when the files' SHA-256 changed, by building the daemon's own rustls `ServerConfig` (ALPN `http/1.1` only, since `RustlsConfig::reload_from_pem_file` forces h2) and swapping it with `RustlsConfig::reload_from_config`; the key lives under the machine-local data dir.
 - The host picker reads `tailscale status --json` and also accepts a typed MagicDNS name, since the JSON is documented as subject to change.
 - Remote tests: in-process tests with a fake whois and a test CA, a fake-TLS daemon for the client, and a hand checklist on real Tailscale (two machines and the iPhone). No production setting widens the allowed address ranges.
-
-Still open, asked when its item comes up: the Windows Firewall rule (an installer-made port rule scoped to the Tailscale ranges needs an elevated installer; P6.7).
 
 ## Invariants and the sites that obey them
 
@@ -46,8 +45,8 @@ Hotspot items (touching `crates/protocol/src/lib.rs` or `crates/daemon/src/serve
 
 | Id | Title | Hotspot | Depends on |
 |---|---|---|---|
-| TS.1 | `crates/tailnet`: the Tailscale CLI wrapper (typed errors for every failure) and the owner rule, table-tested | no | none |
-| TS.2 | Daemon tailnet listener module: cert, bind with rebind, whois acceptor attaching a peer identity | no | TS.1 |
+| TS.1 | `crates/tailnet`: the Tailscale CLI wrapper (typed errors for every failure) and the owner rule, table-tested. Landed, 4d18a51 | no | none |
+| TS.2 | Daemon tailnet listener module: cert, bind with rebind, whois acceptor attaching a peer identity. Landed, 6e1c847, dffb25d, 08ab90b; only `mod`-declared in `main.rs`, never started yet (RT-161) | no | TS.1 |
 | TS.3 | Wire the listener into the daemon: boot, the auth kind per listener, a separate router, the `Origin`/`Host` check, idle exit held, `remote.json` | yes | TS.2 |
 | TS.3b | Device tokens: a whois-authorized device without a token waits as a pending request; the token is issued once it presents the one-time approval the host PC shows (a QR code to scan, or the pairing code beside it for a device with no camera), started from a local (loopback) client; tokens are stored hashed and checked in `Hello` | yes | TS.3, TS.4 |
 | TS.4 | `ConfigureRemote` / `RemoteStatus` messages: every state (not installed, not running, other Windows user, not connected, HTTPS disabled, host tagged, serving with name, port and cert expiry) | yes | TS.3 |
@@ -59,7 +58,7 @@ Hotspot items (touching `crates/protocol/src/lib.rs` or `crates/daemon/src/serve
 | P6.4 | Host Settings: Remote access (Tailscale) panel | no | TS.4 |
 | P6.5 | Autostart: start the daemon on login | no | none |
 | P6.6 | Remote tests over a fake Tailscale, the hand checklist, and the docs pass | no | all of the above |
-| P6.7 | Cutover: installer (plus the firewall rule, once ruled) | no | P6.5 |
+| P6.7 | Cutover: installer (no firewall rule, per RT-157) | no | P6.5 |
 
 File fetch (RT-35 to RT-37) follows P6.1 to P6.3; a host's download folder is keyed by its Tailscale StableNodeID.
 

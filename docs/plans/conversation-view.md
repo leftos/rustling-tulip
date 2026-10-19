@@ -11,6 +11,8 @@ Show a Claude session as a chat instead of the terminal UI: the user's messages,
 
 ## Terms
 
+> **Superseded:** only **Entry** is still built on. The stream peer, the control request/response pair and the view switch are the dropped design — the chat mirrors the live terminal session (RT-51, [off-orca.md](./off-orca.md) SV.1–SV.3), reading the transcript and typing prompts and answers into the same PTY.
+
 - **Terminal view**: today's interactive session, `claude` in a ConPTY under `rt-tracer.exe`.
 - **Conversation view**: the same session driven by a **stream peer**, a `claude --print --input-format stream-json --output-format stream-json` child the daemon writes JSON lines to and reads JSON lines from.
 - **Control request / response**: the out-of-band JSON lines on the stream peer's stdio that carry permission prompts, interrupts and setting changes, matched by `request_id`.
@@ -40,6 +42,8 @@ Not documented, so CV.0 verifies them: the exact JSON of `control_request` / `co
 - Hook-reported status ([hook-status.md](./hook-status.md), HS.2) adds `SessionSnapshot.pending_input: Option<PendingInput>` (`Question`, `Permission`, `PlanApproval`, `Other`, `Unknown`). Subagent streams ([subagent-streams.md](./subagent-streams.md), SS.3) adds a `TranscriptEntry` enum and a transcript-shaped reply/append pair.
 
 ## Design
+
+> **Superseded:** the stream driver, the peer's argv and tracer pipe mode, prompt handling over the stdio control protocol, settings over control requests, the view switch and its persistence are the dropped design (RT-51). The mirror keeps the entry model, transcript seeding ("Chat history") and the native client's pure model and chat view; the CV steps are re-cut around it.
 
 ### One session, two kinds of child
 

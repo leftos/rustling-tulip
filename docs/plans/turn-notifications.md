@@ -1,6 +1,6 @@
 # Needs you and Finished: the only two notifications
 
-The native client still fires the three OS toasts ported from the Tauri app: "Claude is awaiting input", "Claude session stopped" (the process exited) and "Claude session errored", each with its own toggle in Settings → Notifications (`apps/native/src/notify.rs`, `settings_view.rs`). This item replaces all three with two notifications, **Needs you** and **Finished**, on the desktop and on the mobile client.
+The native client used to fire the three OS toasts ported from the Tauri app: "Claude is awaiting input", "Claude session stopped" (the process exited) and "Claude session errored", each with its own toggle in Settings → Notifications. TN.1 and TN.2 removed them: `notify.rs` now raises only `Needs you`, titled so, with the session's label as its body, one toggle and the skip-when setting (`apps/native/src/notify.rs:142`, `settings_view.rs`). This item adds the second notification, **Finished**, and carries both to the mobile client.
 
 ## Rulings (owner)
 
@@ -22,7 +22,7 @@ The native client still fires the three OS toasts ported from the Tauri app: "Cl
 - RT-74 (steadier screen-based status): the per-agent detection the notifications rely on until hooks, and for agents without hooks.
 - RT-105 (MA7, phone push) and RT-143 (the iPhone PWA re-plan): carry the mobile half and its suppression setting.
 - RT-87 and RT-90 (the Wave 5 attention feed, streams and per-stream sounds): the later generalisation; their Needs you and Done streams start from these two kinds.
-- `docs/plans/spoken-alerts.md` says the Notifications tab keeps its three toggles; that line changes with this item.
+- `docs/plans/spoken-alerts.md:82` already reads the shipped tab: one `Needs you` toggle plus the `Skip notifications when` row.
 
 ## Decisions (orchestrator, from the code)
 
@@ -38,6 +38,6 @@ The native client still fires the three OS toasts ported from the Tauri app: "Cl
 - [x] **TN.1 Needs you only.** Remove the stopped and errored toasts, their toggles, `notify.rs`'s own-stop bookkeeping and their specs; retitle the awaiting-input toast `Needs you`; one Needs you toggle remains in Settings → Notifications.
 - [x] **TN.2 Desktop suppression setting.** The window-focused flag and the active tab's panes decide; the setting's three choices, default "skip when focused and the pane is on screen".
 - [ ] **TN.3 Finished**, after RT-84: the live Working → Idle transition with no background work, its toggle, and the same suppression.
-- [ ] **TN.4 Docs.** `docs/native-client.md` Notifications, `docs/architecture.md` (the "attention raises an OS notification" line), `docs/plans/spoken-alerts.md` (the Notifications tab no longer keeps three toggles), and the parity line in `docs/plans/native-client-parity.md`.
+- [ ] **TN.4 Docs.** `docs/native-client.md` Notifications, `docs/architecture.md` (the "attention raises an OS notification" line), `docs/plans/spoken-alerts.md` (already reads the shipped tab; refresh it when Finished lands), and the parity line in `docs/plans/native-client-parity.md`.
 
 The code map with file lines and named tests: `.tmp/map-rt182.md` at the time of planning; re-explore before the first brief if the code has moved.

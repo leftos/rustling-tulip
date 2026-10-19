@@ -1,17 +1,19 @@
 # Mobile app (iOS and Android)
 
+> **Superseded in part:** RT-143 re-plans the phone as an iPhone PWA over Tailscale HTTPS (`remote-access.md`); the Android-first order, Flutter and `flutter_rust_bridge`, the pinned TLS and the relay, and APNs/FCM are superseded, and the MA steps are re-cut with that issue. This repo has no `crates/relay`, and `apps/` holds only the native client.
+
 A phone client for the daemon, for the user's own use: check on sessions, answer them, and eventually work in them from anywhere. It is one more client of the same daemon, like the native client; the daemon, tracer and protocol stay the source of truth.
 
 ## Rulings
 
 - **Scope, in phases:** monitor and respond first, then a full terminal, then the conversation view.
-- **Reach: anywhere, over Tailscale or through the relay, both built from the start** (and LAN direct at home). This reverses the "attach beyond the LAN" and "mobile companion app" non-goals in [architecture.md](../architecture.md#non-goals). The relay (MA2, RT-94) and per-device credentials (MA3, RT-96) are built in Wave 3 with the remote desktop, which uses them too.
-- **Android first.** The MVP is Android (RT-38 and its sub-issues), built and sideloaded from Windows; the iOS pipeline (MA5, RT-117) is in the backlog. What the app shows and how it alerts is in [off-orca.md](./off-orca.md) (sections 2, 3 and 5).
-- **Relay:** a Rust binary in this workspace (`crates/relay`) on a small VPS (Fly.io or Hetzner). It pairs a daemon with a phone and forwards bytes it cannot read.
-- **Encryption:** the pinned TLS of the LAN listener, run end to end through the relay. The phone does the same TLS handshake it would do on the LAN, pinned to the daemon's certificate fingerprint, inside the relay's WebSocket. The relay never holds a key, and one crypto path serves both the LAN and the relay.
-- **Stack:** Flutter UI over a shared Rust core (protocol types, pinned-TLS connect, pairing profiles) through `flutter_rust_bridge`. No hand-kept protocol mirror.
+- **Reach: anywhere, over Tailscale or through the relay, both built from the start** (and LAN direct at home). This reverses the "attach beyond the LAN" and "mobile companion app" non-goals in [architecture.md](../architecture.md#non-goals). The relay (MA2, RT-94) and per-device credentials (MA3, RT-96) are built in Wave 3 with the remote desktop, which uses them too. (Superseded: no relay and no pinned TLS; Tailscale is the only remote path, RT-143 and `remote-access.md`.)
+- **Android first.** The MVP is Android (RT-38 and its sub-issues), built and sideloaded from Windows; the iOS pipeline (MA5, RT-117) is in the backlog. What the app shows and how it alerts is in [off-orca.md](./off-orca.md) (sections 2, 3 and 5). (Superseded: the phone is an iPhone PWA over Tailscale, RT-143.)
+- **Relay:** a Rust binary in this workspace (`crates/relay`) on a small VPS (Fly.io or Hetzner). It pairs a daemon with a phone and forwards bytes it cannot read. (Superseded: this repo has no `crates/relay`; RT-143.)
+- **Encryption:** the pinned TLS of the LAN listener, run end to end through the relay. The phone does the same TLS handshake it would do on the LAN, pinned to the daemon's certificate fingerprint, inside the relay's WebSocket. The relay never holds a key, and one crypto path serves both the LAN and the relay. (Superseded: the listener serves `tailscale cert` TLS, nothing is pinned, `remote-access.md`.)
+- **Stack:** Flutter UI over a shared Rust core (protocol types, pinned-TLS connect, pairing profiles) through `flutter_rust_bridge`. No hand-kept protocol mirror. (Superseded: no Flutter; the phone is a PWA, RT-143.)
 - **Audience: the user only.** Android by sideload; iOS, when it comes, through TestFlight on a personal Apple Developer account. No store listing. This also keeps within Anthropic's personal-use terms (see [gui-mode-billing.md](../spikes/gui-mode-billing.md)).
-- **Push notifications:** the daemon sends them itself (APNs and FCM) with the user's own keys. The relay plays no part in push.
+- **Push notifications:** the daemon sends them itself (APNs and FCM) with the user's own keys. The relay plays no part in push. (Superseded: APNs/FCM are re-planned with the PWA, RT-143.)
 - **iOS builds:** cloud macOS CI (GitHub Actions macOS runners or Codemagic) builds, signs and uploads to TestFlight. There is no Mac.
 - **Priority:** after native client Phase 6, which brings back the pinned-TLS client and the pairing flow this app reuses.
 

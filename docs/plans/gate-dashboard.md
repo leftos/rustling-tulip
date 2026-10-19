@@ -1,6 +1,6 @@
 # Gate dashboard in the client
 
-Design for the "Gate dashboard in the client" line in [MAIN.md](./MAIN.md) (Backlog and singles). The source it reads is the user-level gate, `~/.claude/tools/gate/gate.ps1` (this repo's `tools/gate.ps1` is a launcher for it), and the localhost page it replaces for this purpose is `~/.claude/tools/gate/gate-dashboard.ps1`. Step ids are `GD.n`.
+Design for the "Gate dashboard in the client" line in [MAIN.md](./MAIN.md) (Backlog and singles). The source it reads is the user-level gate, `gate.exe` on PATH (the Rust rewrite; its `gate-state` crate owns the slot state and `slot-counts.json`), and the localhost page it replaces no longer exists — the old `~/.claude/tools/gate/gate-dashboard.ps1` went with the PowerShell gate, so the client shows the gate's own state rather than standing in for a page. This repo has no `tools/gate.ps1` — gates run through `gate run`, and `tools/` holds only `e2e/` and `test-map.json`. Step ids are `GD.n`.
 
 ## Problem
 
@@ -30,6 +30,8 @@ Quoted from `gate.ps1` (its help text and `Enter-Slot`, `Get-ClaimPath`, `Write-
 ## Design
 
 ### Daemon: the reader (`crates/daemon/src/gate_slots.rs`)
+
+> **Superseded:** RT-64 makes `gate-state` — the crate leftos/gate publishes and ops-tower takes as a git dependency, with `proc-table` for the process table — the one reader. The daemon wraps it rather than growing `crates/daemon/src/gate_slots.rs`; the slot states, waiting-gate rules and fields below are what the view still needs.
 
 Plain Rust with the OS behind a trait, so the whole state machine is tested against a temp folder and a fake probe.
 
@@ -140,7 +142,7 @@ Plain Rust, no GPUI:
 
 Order: GD.1 → GD.2 → GD.3 → GD.4; GD.5 needs GD.1; GD.6 needs GD.4 and GD.5; GD.7 needs GD.6; GD.8 last. `protocol/src/lib.rs` is touched by GD.1 and GD.7 (`StopGate`), `server.rs` by GD.4 and GD.7 (its handler).
 
-- [ ] **Re-decide Q8 against the gate's counts file, before GD.2.** The gate no longer reads `GATE_HEAVY_SLOTS` / `GATE_LIGHT_SLOTS`: every gate re-reads `%LOCALAPPDATA%\gate\slot-counts.json` (optional `heavy` and `light`, whole numbers 1 to 64; a missing key means the formula, a bad value is ignored for its kind with a `gate: ignored …` line) on each try for a slot, and `gate-dashboard.ps1` sets it through `POST /api/slot-counts` and reports `count`, `default`, `set` and `problem` per pool (its `Get-SlotCount` holds the reading rules). Q8's answer (a), the `slot_count` spec (the variable, then `HKCU\Environment`) and GD.6's hand-test (`GATE_LIGHT_SLOTS=1` in two shells) all rest on the removed variables; settle what the daemon reads and update those three places.
+- [ ] **Read the slot counts from the gate's counts file, before GD.2.** The gate no longer reads `GATE_HEAVY_SLOTS` / `GATE_LIGHT_SLOTS`: every gate re-reads `%LOCALAPPDATA%\gate\slot-counts.json` (optional `heavy` and `light`, whole numbers 1 to 64; a missing key means the formula, a bad value is ignored for its kind with a `gate: ignored …` line) on each try for a slot, and `gate-dashboard.ps1` sets it through `POST /api/slot-counts` and reports `count`, `default`, `set` and `problem` per pool (its `Get-SlotCount` holds the reading rules). Q8's answer (a) is the counts file; the `slot_count` spec (the variable, then `HKCU\Environment`) and GD.6's hand-test (`GATE_LIGHT_SLOTS=1` in two shells) still rest on the removed variables; update those two places.
 - [ ] **GD.1 Protocol.** `DaemonMessage::GateSlots`, `GateState`, `GatePool`, `GateSlot`, `GateClaim`, `WaitingGate`, `GateSlotKind`, `GateSlotState`. File: `crates/protocol/src/lib.rs`.
 
   Proof, red first: `gate_slots_round_trips`, `gate_slots_none_round_trips`, `gate_slot_state_unknown_decodes_in_place`, `gate_slot_kind_unknown_decodes_in_place`, `gate_slot_missing_optional_fields_default`, `inbound_daemon_message_without_gate_slots_reads_it_as_unknown` (an `InboundDaemonMessage` built without the variant, or the raw JSON through the wrapper); `cargo test -p protocol`.
@@ -170,7 +172,7 @@ Order: GD.1 → GD.2 → GD.3 → GD.4; GD.5 needs GD.1; GD.6 needs GD.4 and GD.
 
 ## Open questions
 
-Answered (user): Q1 (a) two-line rows; Q2 (c) open the log, copy values, and a confirmed Stop gate (GD.7); Q3 (a) a 2 s poll, sent on change; Q4 (a) waiting gates listed under their pool; Q5 (a) only the daemon host's gates, headed with its machine name; Q6 (a) the badge counts busy plus held slots; Q7 (a) hidden only until a gate has ever run on the machine; Q8 (a) slot counts from the daemon's environment, then `HKCUnvironment`, then the gate's formula.
+Answered (user): Q1 (a) two-line rows; Q2 (c) open the log, copy values, and a confirmed Stop gate (GD.7); Q3 (a) a 2 s poll, sent on change; Q4 (a) waiting gates listed under their pool; Q5 (a) only the daemon host's gates, headed with its machine name; Q6 (a) the badge counts busy plus held slots; Q7 (a) hidden only until a gate has ever run on the machine; Q8 (a) slot counts from the gate's counts file, `%LOCALAPPDATA%\gate\slot-counts.json`, then the gate's formula.
 
 1. **What a slot row shows.**
    - (a) *Recommended.* A busy row has two lines: `heavy 0` in muted text, the short command, and right-aligned the time held; line 2, muted and ellipsized, the folder label and the last log line. The tooltip carries the full command, the full folder, the resolved log path, the ceiling (`timeoutSeconds`) and the process count. Worst case: a long test filter pushes the useful part of the command past the ellipsis, and the user hovers to read it.
@@ -201,6 +203,6 @@ Answered (user): Q1 (a) two-line rows; Q2 (c) open the log, copy values, and a c
    - (b) Whenever no slot is busy or held and no gate waits. Worst case: the rail item appears and disappears with every build, and the icons below it shift under the pointer.
    - (c) (a), plus a Settings → General toggle to hide it. Worst case: a setting for one rail item that no other item has.
 8. **Where the slot counts come from.**
-   - (a) *Recommended.* The daemon's `GATE_HEAVY_SLOTS` / `GATE_LIGHT_SLOTS`, then the same names under `HKCU\Environment`, then the gate's formula; claims past the count still show as extra slots. Worst case: a session that sets its own count for one run shows its slots as extra until it ends.
+   - (a) *Recommended.* The gate's counts file, `%LOCALAPPDATA%\gate\slot-counts.json` (optional `heavy` and `light`, whole numbers 1 to 64; a missing key means the formula, a bad value is ignored for its kind), then the gate's formula; claims past the count still show as extra slots. Worst case: the daemon's 2 s poll shows a new count a tick late.
    - (b) The daemon's environment only, as the dashboard does. Worst case: a daemon started before the user set the variable shows the default count for its whole life.
    - (c) The formula only. Worst case: a user who raised the heavy count sees slots they configured shown as extra.

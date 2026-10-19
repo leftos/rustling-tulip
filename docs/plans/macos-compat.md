@@ -4,14 +4,15 @@
 
 **Greenlit 2026-05-30 — macOS is now a committed target.**
 
-**M1–M3 implemented 2026-05-30 (code-complete, Windows build/clippy/test/deny
+**M1 and M2 implemented 2026-05-30 (code-complete, Windows build/clippy/test/deny
 green; pending verification on a real Mac).** Scope this round: M1 (IPC over
-`interprocess` local sockets), M2 (Unix process-tree cleanup via `killpg`), M3
-(macOS autostart LaunchAgent). Distribution scope was set to **local dev builds
-only** — packaging/signing (M4) stays deferred. Both open decisions are now
-settled (see "Decisions"). What's left is runtime verification on macOS (and a
-Windows runtime reattach smoke test, since M1 replaced the named-pipe transport
-on the primary platform).
+`interprocess` local sockets) and M2 (Unix process-tree cleanup via `killpg`),
+both on `main`. M3 (macOS autostart LaunchAgent) is **not** on `main`: it exists
+only on the retired `tauri` branch (RT-156). Distribution scope was set to
+**local dev builds only** — packaging/signing (M4) stays deferred. Both open
+decisions are now settled (see "Decisions"). What's left is runtime verification
+on macOS (and a Windows runtime reattach smoke test, since M1 replaced the
+named-pipe transport on the primary platform).
 
 Note discovered during execution: `mod job_object;` was **already**
 `#[cfg(windows)]`-gated (`crates/tracer/src/main.rs`), so the doc's "compile
@@ -28,11 +29,14 @@ macOS), and most OS-touching code already carries `#[cfg(not(windows))]` /
 `#[cfg(target_os = "macos")]` arms (process kill/spawn, shell resolution, reveal
 in Finder, open URL, VS Code launch, path normalization).
 
-There is **one architectural blocker**: the tracer ↔ daemon IPC is Windows named
-pipes with no Unix path. Everything else is either already done, a one-line
+There **was** one architectural blocker: the tracer ↔ daemon IPC was Windows
+named pipes with no Unix path, and M1 replaced them with `interprocess` local
+sockets on both platforms. Everything else is either already done, a one-line
 `#[cfg]` gate, a contained feature (autostart), or build/packaging config.
 
 ### The blockers, ranked
+
+> **Superseded:** items 1 and 2 landed on `main` (M1 and M2); item 3, the LaunchAgent arm, is not on `main` and lives only on the retired `tauri` branch (RT-156); item 4 stays deferred with local dev builds only.
 
 1. **Tracer IPC transport (HARD).** Named pipes (`tokio::net::windows::named_pipe`)
    in both the tracer server and the daemon client, plus the `\\.\pipe\…` name
@@ -120,9 +124,10 @@ Note: the Tauri app, with `autostart.rs` and its macOS arm, is no longer on `mai
   `[target.'cfg(windows)'.dependencies]`.
 - Frontend already gates the toggle when unsupported
   (`SettingsModal.tsx` ~931–944, hides when the value is `null`).
-- [x] macOS arm implemented in `autostart.rs`: write/remove
-      `~/Library/LaunchAgents/dev.leftos.rustling-tulip.daemon.plist` (hand-emitted
-      XML — no `plist` dep), `ProgramArguments` from
+- [ ] macOS arm **not on `main`**: it exists only on the retired `tauri` branch
+      (RT-156), recovered by the native client's Phase 6. Where it lands:
+      write/remove `~/Library/LaunchAgents/dev.leftos.rustling-tulip.daemon.plist`
+      (hand-emitted XML — no `plist` dep), `ProgramArguments` from
       `daemon_client::locate_daemon_binary`, `RunAtLoad`. **File-only** (no
       `launchctl load` on toggle: that would start a second daemon while the
       app's supervisor runs one; the file gives next-login parity with the
@@ -196,7 +201,7 @@ Confirmed dual-arm or platform-neutral during the sweep:
 - [x] **Phase M2 — process-tree cleanup.** `#[cfg(unix)]` `killpg` (SIGTERM →
       SIGKILL) on tracer shutdown, mirroring the Windows job object. Relies on
       `portable-pty` making the child a session leader — *verify on macOS.*
-- [x] **Phase M3 — autostart (LaunchAgent).** Writes/removes
+- [ ] **Phase M3 — autostart (LaunchAgent).** Not on `main` (retired `tauri` branch; RT-156). Writes/removes
       `~/Library/LaunchAgents/dev.leftos.rustling-tulip.daemon.plist` (file-only;
       no `launchctl load` on toggle, to avoid a double daemon). *Verify on macOS.*
 - [ ] **Phase M4 — packaging + signing/notarization** for distribution.

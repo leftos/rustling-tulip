@@ -1,6 +1,6 @@
 # Link a session to a GitHub issue or PR
 
-Design for the MAIN.md line "Link a worktree to a GitHub issue or PR at spawn, through `gh` only". Origin: [borrowed-ideas.md](./borrowed-ideas.md), "Link a worktree to an issue or PR". Chip style: [petal.md](./petal.md) (PT.6b leaves, PT.7 pane-header chips, PT.8b spawn dialog); petal.md already routes its `#412` / `#1187 draft` chips to this item. Step ids are `GL.n`.
+Design for the MAIN.md line "Link a worktree to a GitHub issue or PR at spawn, through `gh` only". Origin: [borrowed-ideas.md](./borrowed-ideas.md), "Link a worktree to an issue or PR". Chip style: the Petal chrome's leaves, pane-header chips and spawn dialog, settled in `docs/native-client.md:55-57`; Petal's `#412` / `#1187 draft` chips were already routed to this item. Step ids are `GL.n`.
 
 ## Problem
 
