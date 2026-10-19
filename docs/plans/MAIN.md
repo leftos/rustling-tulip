@@ -13,7 +13,6 @@
 
 ## Wave 2 — Daily driver: close the port's gaps
 
-- [ ] RT-17 P4.10c: Workspace creator, + Workspace and the VS Code workspace prompt
 - [ ] RT-18 P4.10d: Add repo and Add workspace on DIR and SH containers
 - [ ] RT-19 P4.11b: Launch last again, and stop all in Detached
 - [ ] RT-20 P4.11c: Full container menu and spawn entry points
@@ -34,6 +33,7 @@
 - [ ] RT-201 Send ^V when Ctrl+V meets a clipboard with no text
 - [ ] RT-202 Accept the 1015 and 1016 mouse-report encodings
 - [ ] RT-204 Clear the container row focus when the sidebar stops showing the container list
+- [ ] RT-205 Re-sync a watched .code-workspace once at daemon start
 
 ## Wave 2b — Hook status
 
@@ -44,6 +44,7 @@
   - [ ] RT-189 Merge feat/hook-status to main (#198)
 - [ ] RT-193 Make SpawnArgs' hook settings a constructor argument, not a comment-enforced None
 - [ ] RT-203 Clear pending_input whenever a session leaves AwaitingInput
+- [ ] RT-206 Reject a leading hyphen in a hook-reported conversation id
 
 ## Wave 3 — Cutover: remote mode, installer and v0.1.0-alpha
 
