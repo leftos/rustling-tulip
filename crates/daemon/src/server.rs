@@ -9016,6 +9016,54 @@ mod tests {
         hub.dirs.sessions_dir.join(id).join("hook-settings.json")
     }
 
+    /// Run a real interactive Claude spawn for `session_id` in `folder` on
+    /// `hub`, which gets as far as the stub tracer and fails there, and answer
+    /// the error's whole chain.
+    async fn failing_interactive_claude_spawn(
+        hub: &Hub,
+        folder: &Path,
+        session_id: &str,
+    ) -> String {
+        let request = env_spawn(
+            SpawnTarget::Standalone {
+                cwd: Some(folder.to_string_lossy().into_owned()),
+                add_dirs: Vec::new(),
+            },
+            SessionMode::Interactive,
+            Vec::new(),
+            None,
+        );
+        let stored_config = protocol::SpawnConfig::from_request(&request);
+        let cfg = SpawnArgs {
+            dangerously_skip_permissions: false,
+            agent_options: AgentOptions::claude(None),
+            model: None,
+            env: crate::agents::providers::SpawnEnv::default(),
+            prompt_injector: None,
+            origin: None,
+            resume_conversation: None,
+            add_dirs: Vec::new(),
+            cwd: folder.to_string_lossy().into_owned(),
+        };
+        format!(
+            "{:#}",
+            spawn_interactive_session(
+                hub,
+                session_id.to_owned(),
+                "cleanup".to_owned(),
+                SessionKind::Standalone,
+                Vec::new(),
+                None,
+                folder.to_path_buf(),
+                None,
+                &cfg,
+                stored_config,
+            )
+            .await
+            .expect_err("the stub tracer is not a runnable executable")
+        )
+    }
+
     #[test]
     fn hook_settings_are_off_without_a_cached_tracer() {
         let (hub, _scratch) = spawnless_test_hub("hook-settings-no-tracer");
@@ -9125,30 +9173,47 @@ mod tests {
         let (hub, scratch) = hook_test_hub("hook-settings-cleanup");
         let folder = scratch.path().join("folder");
         std::fs::create_dir_all(&folder).expect("create folder");
-        let mut request = env_spawn(
-            SpawnTarget::Standalone {
-                cwd: Some(folder.to_string_lossy().into_owned()),
-                add_dirs: Vec::new(),
-            },
-            SessionMode::Interactive,
-            Vec::new(),
-            None,
-        );
-        request.agent_options = AgentOptions::claude(None);
-        let error = format!(
-            "{:#}",
-            spawn_session(&hub, request, None)
-                .await
-                .expect_err("the stub tracer is not a runnable executable")
-        );
+        let session_id = "cleanup-session";
+        let file = hook_settings_file(&hub, session_id);
+
+        // The writer itself works on this hub: it answers `Some` and leaves the
+        // file on disk. Discarding the probe first keeps the assertions after
+        // the spawn about what the spawn wrote, not about the probe.
+        let probe = write_hook_settings(&hub, session_id, Agent::Claude)
+            .expect("this hub resolves a cached tracer");
+        assert!(file.exists(), "the writer wrote the settings file");
+        probe.discard(session_id);
+        assert!(!file.exists(), "the probe is removed");
+
+        // A real interactive Claude spawn at that same id goes through the
+        // writer and then fails at the stub tracer, which is not runnable.
+        let error = failing_interactive_claude_spawn(&hub, &folder, session_id).await;
         assert!(error.contains("spawning claude via tracer"), "{error}");
-        let leftovers: Vec<PathBuf> = std::fs::read_dir(&hub.dirs.sessions_dir)
-            .expect("read the sessions dir")
-            .map(|entry| entry.expect("a readable entry").path())
-            .collect();
         assert!(
-            leftovers.is_empty(),
-            "a failed spawn leaves neither the settings file nor the dir it made: {leftovers:?}"
+            !file.exists(),
+            "the failed spawn removed the settings file it wrote"
+        );
+        assert!(
+            !hub.dirs.sessions_dir.join(session_id).exists(),
+            "and the session dir it created"
+        );
+
+        // A file already at the id is gone afterwards only if the spawn itself
+        // rewrote and then removed it — a spawn that skipped the writer would
+        // leave the marker behind. The dir pre-existed, so this spawn keeps it.
+        let marker =
+            write_hook_settings(&hub, session_id, Agent::Claude).expect("writes the marker file");
+        assert!(file.exists(), "the marker is there before the second spawn");
+        let error = failing_interactive_claude_spawn(&hub, &folder, session_id).await;
+        assert!(error.contains("spawning claude via tracer"), "{error}");
+        drop(marker);
+        assert!(
+            !file.exists(),
+            "the failed spawn rewrote and removed the marked file"
+        );
+        assert!(
+            hub.dirs.sessions_dir.join(session_id).exists(),
+            "a directory this spawn did not create is kept"
         );
     }
 
