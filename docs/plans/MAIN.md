@@ -13,14 +13,12 @@
 
 ## Wave 2 — Daily driver: close the port's gaps
 
-- [ ] RT-16 P4.11a: Container row keyboard fold, last-launch summary, Detached banner
 - [ ] RT-17 P4.10c: Workspace creator, + Workspace and the VS Code workspace prompt
 - [ ] RT-18 P4.10d: Add repo and Add workspace on DIR and SH containers
 - [ ] RT-19 P4.11b: Launch last again, and stop all in Detached
 - [ ] RT-20 P4.11c: Full container menu and spawn entry points
 - [ ] RT-21 P4.15a: Preset wizard sources and variables
 - [ ] RT-22 P4.15b: Preset wizard preview and launching
-- [ ] RT-169 Audit the native terminal's rendering against xterm: fit, fonts, clipboard, GPU-loss fallback
 - [ ] RT-171 Phase 5a: pane drag-and-drop (P5.1–P5.5)
 - [ ] RT-174 Refuse a plain-shell request's agent options before git work
 - [ ] RT-179 Keep keyboard focus when pressing Worktrees Save disables it
@@ -29,6 +27,13 @@
 - [ ] RT-183 Remove headless runs from the native client
 - [ ] RT-186 Resync the tab list when a connection's tab-event broadcast lags
 - [ ] RT-195 Give the container menu a keyboard route
+- [ ] RT-197 Draw zero-width and combining characters instead of dropping them
+- [ ] RT-198 Turn off font ligatures in terminal shaping so later glyphs keep their columns
+- [ ] RT-199 Draw the SGR text attributes the terminal parses but never renders
+- [ ] RT-200 Follow OSC 8 hyperlinks in the link layer
+- [ ] RT-201 Send ^V when Ctrl+V meets a clipboard with no text
+- [ ] RT-202 Accept the 1015 and 1016 mouse-report encodings
+- [ ] RT-204 Clear the container row focus when the sidebar stops showing the container list
 
 ## Wave 2b — Hook status
 
@@ -38,6 +43,7 @@
   - [ ] RT-188 Keep subagent events, idle_prompt and a restart from clearing a pending hook prompt
   - [ ] RT-189 Merge feat/hook-status to main (#198)
 - [ ] RT-193 Make SpawnArgs' hook settings a constructor argument, not a comment-enforced None
+- [ ] RT-203 Clear pending_input whenever a session leaves AwaitingInput
 
 ## Wave 3 — Cutover: remote mode, installer and v0.1.0-alpha
 
@@ -170,6 +176,7 @@
 ## Build tooling
 
 - [ ] RT-128 Run fmt, clippy and the full suite in a Windows CI workflow
+- [ ] RT-196 Gate the profile's push recipe through the provenance check
 - [ ] RT-60 Add the agent-mail-guard prek hook
 - [ ] RT-70 Speed up the daemon's git-fixture tests with shared fixture templates
 - [ ] RT-41 Find the timing two daemon tests depend on under load
@@ -223,7 +230,3 @@
 ## Backlog
 
 - [ ] RT-59 Split the oversized daemon, protocol and native UI source files
-
-## No project
-
-- [ ] RT-196 Gate the profile's push recipe through the provenance check
