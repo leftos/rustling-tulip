@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>RT-16 P4.11a — container row options</title>
+<style>
+  :root {
+    --ground: #0C0B0E;
+    --surface: #141317;
+    --raised: #1B1A20;
+    --chip: #232128;
+    --line: #2C2A33;
+    --text: #E8E5EC;
+    --text2: #B4AFBD;
+    --muted: #8E8996;
+    --subtle: #6E6979;
+    --accent: #F07A62;
+    --lilac: #B79CF0;
+    --amber: #E8B24A;
+    --green: #7FBF8E;
+    --ui: "Schibsted Grotesk", "Segoe UI", system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--ground); color: var(--text); font-family: var(--ui); }
+  body { padding: 28px 32px 48px; }
+  h1 { font-size: 19px; font-weight: 700; margin: 0 0 4px; letter-spacing: .2px; }
+  .sub { color: var(--muted); font-size: 12.5px; margin: 0 0 26px; }
+  h2 { font-size: 13px; font-weight: 700; letter-spacing: .6px; text-transform: uppercase; color: var(--text2); margin: 30px 0 4px; }
+  .q { color: var(--muted); font-size: 12px; margin: 0 0 14px; }
+  .lanes { display: flex; gap: 18px; flex-wrap: wrap; align-items: flex-start; }
+  .lane { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 12px 12px 10px; width: 340px; }
+  .lane h3 { font-size: 11.5px; font-weight: 700; margin: 0 0 2px; color: var(--text); }
+  .lane .worst { font-size: 11px; color: var(--muted); margin: 0 0 10px; line-height: 1.45; }
+  .badge { display: inline-block; font-size: 10px; font-weight: 700; letter-spacing: .5px; padding: 1px 6px; border-radius: 4px; background: var(--accent); color: #1A0F0C; margin-left: 6px; vertical-align: 1px; }
+  /* sidebar shell */
+  .side { background: var(--ground); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .head { display: flex; align-items: center; gap: 8px; height: 34px; padding: 0 10px; background: var(--surface); border-bottom: 1px solid var(--line); }
+  .brand { font-weight: 700; font-size: 12px; letter-spacing: .3px; }
+  .seg { margin-left: auto; display: flex; gap: 2px; }
+  .seg span { font-size: 10.5px; padding: 2px 7px; border-radius: 4px; color: var(--muted); }
+  .seg .on { background: var(--raised); color: var(--text); }
+  .toolbar { display: flex; align-items: center; gap: 6px; height: 30px; padding: 0 8px; border-bottom: 1px solid var(--line); background: var(--surface); }
+  .tb { font-size: 11px; color: var(--text2); background: var(--raised); border: 1px solid var(--line); border-radius: 5px; padding: 2px 7px; white-space: nowrap; }
+  .tb.primary { flex: 1; text-align: center; color: var(--text); border-color: #3A3742; }
+  .tb.hot { border-color: var(--accent); color: var(--accent); }
+  .body { padding: 5px 0 8px; }
+  /* container row */
+  .row { display: flex; align-items: center; gap: 7px; height: 30px; padding: 0 8px 0 4px; position: relative; }
+  .row.focus { box-shadow: inset 0 0 0 2px var(--accent); border-radius: 4px; }
+  .row.hover { background: var(--raised); }
+  .chev { width: 10px; color: var(--subtle); font-size: 9px; text-align: center; }
+  .ic { width: 14px; text-align: center; font-size: 11px; }
+  .name { font-size: 12.5px; font-weight: 600; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tag { font-size: 10px; color: var(--subtle); }
+  .cnt { font-size: 11px; color: var(--subtle); min-width: 12px; text-align: right; }
+  .sum { font-size: 10.5px; color: var(--muted); font-weight: 400; margin-left: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 178px; }
+  .row.two-line { height: 46px; align-items: flex-start; padding-top: 5px; }
+  .row.two-line .lines { flex: 1; min-width: 0; }
+  .row.two-line .lines .l1 { display: flex; align-items: center; gap: 6px; }
+  .row.two-line .lines .l2 { font-size: 10.5px; color: var(--muted); margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* leaves */
+  .leaf { display: flex; align-items: center; gap: 7px; height: 26px; margin: 0 6px 1px 14px; padding: 0 6px 0 8px; border-left: 2px solid var(--accent); background: var(--surface); border-radius: 0 4px 4px 0; }
+  .leaf .dot { font-size: 9px; color: var(--subtle); }
+  .leaf .lab { font-size: 11.5px; color: var(--text); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .leaf .sub { font-size: 10px; color: var(--muted); white-space: nowrap; }
+  .leaf .pill { font-size: 9.5px; color: var(--accent); border: 1px solid var(--accent); border-radius: 4px; padding: 0 5px; }
+  /* detached banner */
+  .banner { margin: 3px 8px 5px 14px; padding: 6px 8px; border: 1px dashed var(--line); border-radius: 6px; color: var(--muted); font-size: 10.5px; line-height: 1.45; }
+  .banner .actions { margin-top: 6px; display: flex; gap: 6px; }
+  /* menu popover */
+  .menu { position: relative; }
+  .pop { position: absolute; right: 6px; top: 30px; width: 210px; background: var(--chip); border: 1px solid var(--line); border-radius: 8px; padding: 4px; box-shadow: 0 8px 22px #0009; z-index: 2; }
+  .pop div { font-size: 11px; color: var(--text2); padding: 5px 7px; border-radius: 5px; }
+  .pop div.hot { color: var(--accent); }
+  .pop .sep { height: 1px; background: var(--line); margin: 4px 2px; padding: 0; }
+  /* tooltip */
+  .tip { position: relative; display: inline-block; }
+  .tipb { position: absolute; left: 44px; top: 32px; background: var(--chip); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; font-size: 10.5px; color: var(--text2); white-space: nowrap; box-shadow: 0 8px 22px #0009; z-index: 2; }
+  .cap { font-size: 10.5px; color: var(--muted); margin: 8px 0 0; line-height: 1.45; }
+  .note { font-size: 11px; color: var(--muted); margin-top: 26px; line-height: 1.55; border-top: 1px solid var(--line); padding-top: 14px; }
+  .note b { color: var(--text2); }
+  .focus-demo { margin-top: 4px; }
+</style>
+</head>
+<body>
+
+<h1>RT-16 · P4.11a — container row</h1>
+<p class="sub">Keyboard fold, last-launch summary, Detached banner, Resume all (N). Approved rulings shown where they already exist; the marked choices are the open ones.</p>
+
+<!-- ============ 1. RESUME ALL PLACEMENT ============ -->
+<h2>1 · Where “Resume all (N)” sits</h2>
+<p class="q">N is the number of abandoned sessions; the control is hidden below 2. The parity line puts it in the toolbar; the native design reserves the 30 px toolbar row for + Session, + Shell and ⋯.</p>
+<div class="lanes">
+
+  <div class="lane">
+    <h3>A · Appended to the toolbar<span class="badge">A</span></h3>
+    <p class="worst">Worst case: with + Session and + Shell on the same 30 px row, a narrow sidebar squeezes + Session below a readable width.</p>
+    <div class="side">
+      <div class="head"><span class="brand">rustling-tulip</span><span class="seg"><span class="on">Repos</span><span>Tabs</span></span></div>
+      <div class="toolbar"><span class="tb primary">+ Session</span><span class="tb">+ Shell</span><span class="tb hot">Resume all (2)</span><span class="tb">⋯</span></div>
+      <div class="body">
+        <div class="row"><span class="chev">▾</span><span class="ic" style="color:var(--lilac)">▦</span><span class="name">Acme Workspace</span><span class="tag">ws</span><span class="cnt">3</span></div>
+        <div class="row"><span class="chev">▾</span><span class="ic">⑂</span><span class="name">acme-api</span><span class="tag">repo</span><span class="cnt">2</span></div>
+        <div class="row"><span class="chev">▾</span><span class="ic">🗀</span><span class="name">Detached</span><span class="tag">detached</span><span class="cnt">2</span></div>
+        <div class="leaf"><span class="dot">●</span><span class="lab">parse-cache</span><span class="sub">main</span><span class="pill">Resume</span></div>
+        <div class="leaf"><span class="dot">●</span><span class="lab">api-tests</span><span class="sub">feat/x</span><span class="pill">Resume</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="lane">
+    <h3>B · A second toolbar row<span class="badge">B</span></h3>
+    <p class="worst">Worst case: the sidebar loses 30 px of room for sessions whether or not any session is detached… unless the row only appears at N ≥ 2, which is shown here.</p>
+    <div class="side">
+      <div class="head"><span class="brand">rustling-tulip</span><span class="seg"><span class="on">Repos</span><span>Tabs</span></span></div>
+      <div class="toolbar"><span class="tb primary">+ Session</span><span class="tb">+ Shell</span><span class="tb">⋯</span></div>
+      <div class="toolbar" style="justify-content:flex-end; border-top:0"><span class="tb hot">Resume all (2)</span></div>
+      <div class="body">
+        <div class="row"><span class="chev">▾</span><span class="ic" style="color:var(--lilac)">▦</span><span class="name">Acme Workspace</span><span class="tag">ws</span><span class="cnt">3</span></div>
+        <div class="row"><span class="chev">▾</span><span class="ic">⑂</span><span class="name">acme-api</span><span class="tag">repo</span><span class="cnt">2</span></div>
+        <div class="row"><span class="chev">▾</span><span class="ic">🗀</span><span class="name">Detached</span><span class="tag">detached</span><span class="cnt">2</span></div>
+        <div class="leaf"><span class="dot">●</span><span class="lab">parse-cache</span><span class="sub">main</span><span class="pill">Resume</span></div>
+        <div class="leaf"><span class="dot">●</span><span class="lab">api-tests</span><span class="sub">feat/x</span><span class="pill">Resume</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="lane">
+    <h3>C · In the Detached banner<span class="badge">C</span></h3>
+    <p class="worst">Worst case: it sits below the fold, so a long repo list pushes the one bulk action out of view.</p>
+    <div class="side">
+      <div class="head"><span class="brand">rustling-tulip</span><span class="seg"><span class="on">Repos</span><span>Tabs</span></span></div>
+      <div class="toolbar"><span class="tb primary">+ Session</span><span class="tb">+ Shell</span><span class="tb">⋯</span></div>
+      <div class="body">
+        <div class="row"><span class="chev">▾</span><span class="ic" style="color:var(--lilac)">▦</span><span class="name">Acme Workspace</span><span class="tag">ws</span><span class="cnt">3</span></div>
+        <div class="row"><span class="chev">▾</span><span class="ic">⑂</span><span class="name">acme-api</span><span class="tag">repo</span><span class="cnt">2</span></div>
+        <div class="row"><span class="chev">▾</span><span class="ic">🗀</span><span class="name">Detached</span><span class="tag">detached</span><span class="cnt">2</span></div>
+        <div class="banner">These sessions are still running. Their repo or workspace is no longer registered.
+          <div class="actions"><span class="tb hot">Resume all (2)</span></div>
+        </div>
+        <div class="leaf"><span class="dot">●</span><span class="lab">parse-cache</span><span class="sub">main</span><span class="pill">Resume</span></div>
+        <div class="leaf"><span class="dot">●</span><span class="lab">api-tests</span><span class="sub">feat/x</span><span class="pill">Resume</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="lane">
+    <h3>D · In the ⋯ menu<span class="badge">D</span></h3>
+    <p class="worst">Worst case: two clicks for a bulk recovery, and the count is invisible until the menu opens.</p>
+    <div class="side">
+      <div class="head"><span class="brand">rustling-tulip</span><span class="seg"><span class="on">Repos</span><span>Tabs</span></span></div>
+      <div class="menu">
+        <div class="toolbar"><span class="tb primary">+ Session</span><span class="tb">+ Shell</span><span class="tb">⋯</span></div>
+        <div class="pop">
+          <div>Add repo…</div><div>Add workspace…</div><div>Shell…</div>
+          <div class="sep"></div>
+          <div class="hot">Resume all abandoned (2)</div>
+        </div>
+      </div>
+      <div class="body">
+        <div class="row"><span class="chev">▾</span><span class="ic" style="color:var(--lilac)">▦</span><span class="name">Acme Workspace</span><span class="tag">ws</span><span class="cnt">3</span></div>
+        <div class="row"><span class="chev">▾</span><span class="ic">⑂</span><span class="name">acme-api</span><span class="tag">repo</span><span class="cnt">2</span></div>
+        <div class="row"><span class="chev">▾</span><span class="ic">🗀</span><span class="name">Detached</span><span class="tag">detached</span><span class="cnt">2</span></div>
+        <div class="leaf"><span class="dot">●</span><span class="lab">parse-cache</span><span class="sub">main</span><span class="pill">Resume</span></div>
+        <div class="leaf"><span class="dot">●</span><span class="lab">api-tests</span><span class="sub">feat/x</span><span class="pill">Resume</span></div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- ============ 2. SUMMARY LAYOUT ============ -->
+<h2>2 · How the last-launch summary is drawn</h2>
+<p class="q">One line for a repo or workspace that has launched before: <span style="color:var(--text2)">Claude · Interactive · main · opus</span>. The sample adds the worktree target, approval and env count; never launched means no summary at all.</p>
+<div class="lanes">
+
+  <div class="lane">
+    <h3>A · Inline in the 30 px row<span class="badge">A</span></h3>
+    <p class="worst">Worst case: in a narrow sidebar the name truncates early, because the summary competes with it on one line.</p>
+    <div class="side"><div class="body" style="padding-top:8px">
+      <div class="row"><span class="chev">▾</span><span class="ic">⑂</span><span class="name">acme-api</span><span class="sum">Claude · Interactive · main · opus</span><span class="tag">repo</span><span class="cnt">2</span></div>
+      <div class="row"><span class="chev">▸</span><span class="ic" style="color:var(--lilac)">▦</span><span class="name">Acme Workspace</span><span class="sum">Claude · Interactive · main</span><span class="tag">ws</span><span class="cnt">3</span></div>
+    </div></div>
+    <p class="cap">Row height unchanged (30 px). The existing hover tooltip still names the full config.</p>
+  </div>
+
+  <div class="lane">
+    <h3>B · A second meta line<span class="badge">B</span></h3>
+    <p class="worst">Worst case: a launched container is 46 px where a never-launched one is 30 px, so the list gains a ragged rhythm.</p>
+    <div class="side"><div class="body" style="padding-top:8px">
+      <div class="row two-line"><span class="chev" style="margin-top:2px">▾</span><span class="ic" style="margin-top:2px">⑂</span><div class="lines"><div class="l1"><span class="name">acme-api</span><span class="tag">repo</span><span class="cnt">2</span></div><div class="l2">Claude · Interactive · main · opus</div></div></div>
+      <div class="row"><span class="chev">▸</span><span class="ic" style="color:var(--lilac)">▦</span><span class="name">Acme Workspace</span><span class="tag">ws</span><span class="cnt">3</span></div>
+    </div></div>
+    <p class="cap">Matches the Tauri tree-container meta line; the summary gets the full width.</p>
+  </div>
+
+  <div class="lane">
+    <h3>C · Tooltip only<span class="badge">C</span></h3>
+    <p class="worst">Worst case: the summary is invisible until the pointer rests on the row, so the row never shows at a glance which target a launch used.</p>
+    <div class="side"><div class="body" style="padding-top:8px">
+      <div class="tip">
+        <div class="row hover"><span class="chev">▾</span><span class="ic">⑂</span><span class="name">acme-api</span><span class="tag">repo</span><span class="cnt">2</span></div>
+        <div class="tipb">Last launch: Claude · Interactive · main · opus</div>
+      </div>
+      <div class="row" style="margin-top:34px"><span class="chev">▸</span><span class="ic" style="color:var(--lilac)">▦</span><span class="name">Acme Workspace</span><span class="tag">ws</span><span class="cnt">3</span></div>
+    </div></div>
+    <p class="cap">No layout change; only the tooltip is added.</p>
+  </div>
+
+</div>
+
+<!-- ============ 3. ROW FOCUS ============ -->
+<h2>3 · How a container row gains keyboard focus</h2>
+<p class="q">All three fold with Enter or Space once the row is focused. The open part is how focus arrives. The ring is the app's existing 2 px ACCENT focus ring.</p>
+<div class="lanes">
+
+  <div class="lane">
+    <h3>A · Click to focus<span class="badge">A</span></h3>
+    <p class="worst">Worst case: with no pointer in play there is no way to move keyboard focus onto a row, so the fold keys stay mouse-first.</p>
+    <div class="side"><div class="body" style="padding-top:8px">
+      <div class="row focus"><span class="chev">▾</span><span class="ic">⑂</span><span class="name">acme-api</span><span class="tag">repo</span><span class="cnt">2</span></div>
+      <div class="row"><span class="chev">▸</span><span class="ic" style="color:var(--lilac)">▦</span><span class="name">Acme Workspace</span><span class="tag">ws</span><span class="cnt">3</span></div>
+    </div></div>
+    <p class="cap">A click on a row focuses it; Enter/Space folds that row. No Up/Down or Tab traversal — Tab keeps going to the terminal.</p>
+  </div>
+
+  <div class="lane">
+    <h3>B · Up/Down in the sidebar<span class="badge">B</span></h3>
+    <p class="worst">Worst case: the arrows stop reaching the focused terminal whenever the sidebar holds focus, so the user must click the terminal to type an arrow again.</p>
+    <div class="side"><div class="body" style="padding-top:8px">
+      <div class="row"><span class="chev">▾</span><span class="ic" style="color:var(--lilac)">▦</span><span class="name">Acme Workspace</span><span class="tag">ws</span><span class="cnt">3</span></div>
+      <div class="row focus"><span class="chev">▾</span><span class="ic">⑂</span><span class="name">acme-api</span><span class="tag">repo</span><span class="cnt">2</span></div>
+    </div></div>
+    <p class="cap">A click focuses the row; Up/Down move the focus container by container; Enter/Space folds; Escape returns focus to the terminal.</p>
+  </div>
+
+  <div class="lane">
+    <h3>C · Tab through rows<span class="badge">C</span></h3>
+    <p class="worst">Worst case: Tab stops being a way back into the terminal from the sidebar, and a long container list makes reaching the last row many presses.</p>
+    <div class="side"><div class="body" style="padding-top:8px">
+      <div class="row focus"><span class="chev">▾</span><span class="ic" style="color:var(--lilac)">▦</span><span class="name">Acme Workspace</span><span class="tag">ws</span><span class="cnt">3</span></div>
+      <div class="row"><span class="chev">▾</span><span class="ic">⑂</span><span class="name">acme-api</span><span class="tag">repo</span><span class="cnt">2</span></div>
+    </div></div>
+    <p class="cap">Tab moves row by row (Tauri's tabIndex behaviour); after the last row, Tab returns to the terminal.</p>
+  </div>
+
+</div>
+
+<!-- ============ 4. BANNER WORDING ============ -->
+<h2>4 · Detached banner wording</h2>
+<p class="q">The Tauri text ends “Use the session header to stop or pop them out”, but native has no pop-outs until Phase 5 and stop-all is P4.11b; the banner must not promise a control that does not exist.</p>
+<div class="lanes">
+
+  <div class="lane">
+    <h3>A · Adapted Tauri text<span class="badge">A</span></h3>
+    <p class="worst">Worst case: three lines of grey text above the very sessions the user is looking for.</p>
+    <div class="side"><div class="body" style="padding:8px">
+      <div class="banner">These sessions are still alive, but their repo or workspace is no longer registered. Stop them from each session’s header.</div>
+    </div></div>
+  </div>
+
+  <div class="lane">
+    <h3>B · Short<span class="badge">B</span></h3>
+    <p class="worst">Worst case: it says what happened but not where the controls are.</p>
+    <div class="side"><div class="body" style="padding:8px">
+      <div class="banner">These sessions are still running. Their repo or workspace is no longer registered.</div>
+    </div></div>
+  </div>
+
+  <div class="lane">
+    <h3>C · Short with where to act<span class="badge">C</span></h3>
+    <p class="worst">Worst case: it is the longest of the two short options, and the Resume hint duplicates the button once C in section 1 is chosen.</p>
+    <div class="side"><div class="body" style="padding:8px">
+      <div class="banner">These sessions are still running, but their repo or workspace is no longer registered. Resume one from its row, or stop it from its header.</div>
+    </div></div>
+  </div>
+
+</div>
+
+<p class="note"><b>Already ruled, not asked:</b> fold keys are Enter/Space; ▶ launch-last and double-click are RT-19 (P4.11b); Detached “stop all” is RT-19; the count of abandoned sessions is every <code>is_abandoned</code> snapshot (the same set the daemon’s bulk resume acts on); an empty container row stays focusable; Escape clears the row focus before it drops an armed confirm; Resume all has no pending state (failures toast one per session); the parity line for the container row stays unticked until RT-19 lands.</p>
+
+</body>
+</html>
