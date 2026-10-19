@@ -13,7 +13,6 @@
 
 ## Wave 2 — Daily driver: close the port's gaps
 
-- [ ] RT-18 P4.10d: Add repo and Add workspace on DIR and SH containers
 - [ ] RT-19 P4.11b: Launch last again, and stop all in Detached
 - [ ] RT-20 P4.11c: Full container menu and spawn entry points
 - [ ] RT-21 P4.15a: Preset wizard sources and variables
@@ -34,6 +33,7 @@
 - [ ] RT-202 Accept the 1015 and 1016 mouse-report encodings
 - [ ] RT-204 Clear the container row focus when the sidebar stops showing the container list
 - [ ] RT-205 Re-sync a watched .code-workspace once at daemon start
+- [ ] RT-207 Move the .code-workspace folder scan off the connection's dispatch task
 
 ## Wave 2b — Hook status
 
@@ -45,6 +45,8 @@
 - [ ] RT-193 Make SpawnArgs' hook settings a constructor argument, not a comment-enforced None
 - [ ] RT-203 Clear pending_input whenever a session leaves AwaitingInput
 - [ ] RT-206 Reject a leading hyphen in a hook-reported conversation id
+- [ ] RT-208 Stop the hook shim sending the daemon token to a stale port, and make its unsafe-token test real
+- [ ] RT-209 Treat the terminal's automatic replies as not-owner input for a hook prompt
 
 ## Wave 3 — Cutover: remote mode, installer and v0.1.0-alpha
 
