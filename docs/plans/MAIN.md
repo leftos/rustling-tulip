@@ -5,6 +5,7 @@
 ## Wave 1a — Claude sessions on DeepSeek
 
 - [ ] RT-176 Import a DeepSeek session started with a model alias as DeepSeek
+- [ ] RT-192 Verify the DeepSeek provider's model and env handling
 
 ## Wave 1c — Session labels, menus and busy tracking
 
@@ -12,7 +13,6 @@
 
 ## Wave 2 — Daily driver: close the port's gaps
 
-- [/] RT-13 P4.17: Keep an untouched layout when panes come and go
 - [ ] RT-23 Give the Shell dialog the shared checkbox row and make one section helper
 - [ ] RT-15 P4.10b: Remove a repo or workspace
 - [ ] RT-16 P4.11a: Container row keyboard fold, last-launch summary, Detached banner
@@ -23,7 +23,6 @@
 - [ ] RT-21 P4.15a: Preset wizard sources and variables
 - [ ] RT-22 P4.15b: Preset wizard preview and launching
 - [ ] RT-169 Audit the native terminal's rendering against xterm: fit, fonts, clipboard, GPU-loss fallback
-- [ ] RT-170 Prove and tick the keyboard and focus parity lines: commit, rename, Esc, combobox, menus, modal focus
 - [ ] RT-171 Phase 5a: pane drag-and-drop (P5.1–P5.5)
 - [ ] RT-174 Refuse a plain-shell request's agent options before git work
 - [ ] RT-179 Keep keyboard focus when pressing Worktrees Save disables it
