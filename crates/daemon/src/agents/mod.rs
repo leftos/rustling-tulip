@@ -14,6 +14,8 @@ mod codex;
 mod cursor;
 pub(crate) mod providers;
 
+pub(crate) use claude::build_hook_settings;
+
 use crate::session::SessionRegistry;
 use futures::future::BoxFuture;
 use protocol::{Agent, AgentOptions, SessionMember};
@@ -130,6 +132,13 @@ pub struct CommonSpawnFields<'a> {
     /// `--workspace <cwd> --trust` on every spawn. Ignored by the Claude
     /// backend.
     pub cwd: Option<&'a str>,
+    /// The settings file the Claude backend passes as `--settings` on an
+    /// interactive spawn, fresh or resumed: the hooks file this daemon wrote
+    /// for the session (see [`build_hook_settings`]). `None` for a spawn
+    /// without hooks — Codex, Cursor, or a Claude spawn whose file could not be
+    /// written — which stays on the terminal heuristic. Headless spawns never
+    /// carry it.
+    pub hook_settings: Option<&'a Path>,
 }
 
 /// Implemented once per supported CLI. Methods are designed so the caller

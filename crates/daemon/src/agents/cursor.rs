@@ -409,6 +409,7 @@ mod tests {
             resume_conversation: None,
             add_dirs: &[],
             cwd: None,
+            hook_settings: None,
         }
     }
 

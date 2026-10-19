@@ -3804,6 +3804,9 @@ impl SpawnArgs {
             resume_conversation: self.resume_conversation.as_deref(),
             add_dirs: &self.add_dirs,
             cwd: Some(&self.cwd),
+            // Only `spawn_interactive_session` writes a settings file and
+            // overrides this with its path.
+            hook_settings: None,
         }
     }
 }
@@ -3908,6 +3911,49 @@ fn interactive_meta(
     )
 }
 
+/// Write the new session's injected hook settings file and return the path to
+/// pass as `--settings`, or `None` when this spawn gets no hooks.
+///
+/// Only an interactive Claude spawn gets hooks. A cached tracer binary that
+/// cannot be resolved, or a failed write, turns hooks off for this spawn with a
+/// `warn!` and never refuses it: a session without them falls back to the
+/// terminal heuristic. The file is written eagerly, before the argv (which
+/// names it), into the session's own `sessions/<id>/`, creating that directory
+/// before `meta.json`'s writer would. A graceful stop deletes the whole
+/// directory, so the file goes with it.
+fn write_hook_settings(hub: &Hub, session_id: &str, agent: Agent) -> Option<PathBuf> {
+    if agent != Agent::Claude {
+        return None;
+    }
+    let tracer_exe = match tracer_client::cached_tracer_exe(&hub.dirs) {
+        Ok(path) => path,
+        Err(err) => {
+            warn!(
+                %session_id,
+                error = %format!("{err:#}"),
+                "resolving the cached tracer for the hook settings failed; spawning without hooks"
+            );
+            return None;
+        }
+    };
+    let dir = hub.dirs.sessions_dir.join(session_id);
+    let path = dir.join("hook-settings.json");
+    let settings = crate::agents::build_hook_settings(&tracer_exe, session_id, &hub.dirs.config);
+    let written = std::fs::create_dir_all(&dir)
+        .map_err(anyhow::Error::from)
+        .and_then(|()| orphan::write_atomic(&path, settings.as_bytes()));
+    if let Err(err) = written {
+        warn!(
+            %session_id,
+            path = %path.display(),
+            error = %format!("{err:#}"),
+            "writing the hook settings file failed; spawning without hooks"
+        );
+        return None;
+    }
+    Some(path)
+}
+
 #[expect(
     clippy::too_many_arguments,
     clippy::too_many_lines,
@@ -3948,9 +3994,14 @@ async fn spawn_interactive_session(
             .clone()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
     });
+    // The argv names the injected settings file, so it is written before the
+    // argv is built. Only Claude takes it; a failure leaves this spawn on the
+    // heuristic.
+    let hook_settings = write_hook_settings(hub, &session_id, agent);
     let common = CommonSpawnFields {
         claude_session_id: claude_session_id.as_deref(),
         resume_conversation: conversation.resume.as_deref(),
+        hook_settings: hook_settings.as_deref(),
         ..cfg.common()
     };
     let args = backend.build_interactive_args(

@@ -75,7 +75,7 @@ pub async fn spawn(
     spec: PtySpawnSpec,
     expected_output_subscribers: usize,
 ) -> anyhow::Result<TracerSpawn> {
-    let tracer_path = locate_tracer_exe(dirs)?;
+    let tracer_path = cached_tracer_exe(dirs)?;
     let pipe = tracer_socket_name(&spec.session_id);
     debug!(
         tracer = %tracer_path.display(),
@@ -129,6 +129,18 @@ pub async fn reattach(
     )
     .await?;
     Ok(handle)
+}
+
+/// The cached `rt-tracer` path a spawn will run, resolved before [`spawn`]:
+/// an interactive Claude spawn's `--settings` file names the shim it must run
+/// as a hook, and the argv is built before the tracer exists. Idempotent and
+/// cheap on the cached-hit path, so the spawn resolving it again costs a hash
+/// of the template.
+///
+/// [`spawn`] resolves through this same function, so the file the agent gets
+/// and the tracer the session runs cannot disagree.
+pub(crate) fn cached_tracer_exe(dirs: &Dirs) -> anyhow::Result<PathBuf> {
+    locate_tracer_exe(dirs)
 }
 
 /// Resolve the cached `rt-tracer` path, copying the shipped template into
