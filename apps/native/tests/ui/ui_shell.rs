@@ -343,6 +343,22 @@ fn clicking_the_checkbox_then_space_toggles_it(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn save_default_row_draws_the_shared_checkbox(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &fixture());
+    h.open_shell_dialog_from_more();
+    assert!(
+        h.bounds("shell-save-default-tick").origin.x >= px(0.0),
+        "ticked: the shared row draws the tick"
+    );
+    h.click_on("shell-save-default");
+    assert!(
+        h.bounds("shell-save-default-empty").origin.x >= px(0.0),
+        "unticked: the shared row draws the empty box"
+    );
+}
+
+#[gpui::test]
 fn shell_dialog_unticked_does_not_save_default(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     seed_ui(&dir, Some("C:\\old"));

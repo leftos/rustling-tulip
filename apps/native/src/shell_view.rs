@@ -13,6 +13,7 @@ use crate::session_menu::{backdrop, dialog_button};
 use crate::shell_dialog::{
     FOLDER_PLACEHOLDER, PATH_HINT, ShellControl, ShellForm, standalone_shell_request,
 };
+use crate::spawn_view::checkbox_row;
 use crate::spawns::OpenIn;
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
 use crate::{BORDER, HOVER_BG, MUTED, RootView, TEXT};
@@ -461,29 +462,15 @@ fn save_default_row(
     focus: ShellControl,
     cx: &mut Context<RootView>,
 ) -> Stateful<Div> {
-    let mark = if form.save_default() { "☑" } else { "☐" };
-    div()
-        .id(ShellControl::SaveDefault.selector())
-        .debug_selector(|| ShellControl::SaveDefault.selector().to_owned())
-        .flex()
-        .items_center()
-        .gap(px(6.0))
-        .px(px(6.0))
-        .py(px(3.0))
-        .rounded(px(4.0))
-        .border_1()
-        .border_color(gpui::rgb(if focus == ShellControl::SaveDefault {
-            TEXT
-        } else {
-            BORDER
-        }))
-        .cursor_pointer()
-        .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
-        .child(mark)
-        .child(SAVE_DEFAULT_LABEL)
-        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-            this.press_shell_control(ShellControl::SaveDefault, window, cx);
-        }))
+    checkbox_row(
+        ShellControl::SaveDefault.selector(),
+        form.save_default(),
+        focus == ShellControl::SaveDefault,
+        SAVE_DEFAULT_LABEL,
+    )
+    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+        this.press_shell_control(ShellControl::SaveDefault, window, cx);
+    }))
 }
 
 /// A link-style button: plain text that lights up under the pointer.

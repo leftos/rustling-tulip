@@ -1547,6 +1547,9 @@ pub(crate) fn checkbox_row(
     label: impl IntoElement,
 ) -> Stateful<Div> {
     let name = selector.to_owned();
+    // Debug selectors, so a spec can tell the tick from the empty box.
+    let tick = format!("{name}-tick");
+    let empty = format!("{name}-empty");
     let mark = div()
         .flex()
         .flex_none()
@@ -1562,9 +1565,12 @@ pub(crate) fn checkbox_row(
             mark.bg(gpui::rgb(ACCENT))
                 .border_color(gpui::rgb(ACCENT))
                 .text_color(gpui::rgb(ON_ACCENT))
-                .child("✓")
+                .child(div().debug_selector(|| tick).child("✓"))
         })
-        .when(!checked, |mark| mark.border_color(gpui::rgb(LINE_STRONG)))
+        .when(!checked, |mark| {
+            mark.debug_selector(|| empty)
+                .border_color(gpui::rgb(LINE_STRONG))
+        })
         .when(focused, |mark| mark.child(focus_ring(CHECK_RADIUS)));
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))

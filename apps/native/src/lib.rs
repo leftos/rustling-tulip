@@ -60,6 +60,7 @@ mod repo_add;
 mod run_confirm;
 mod sc_writes;
 mod scrollback_load;
+mod section;
 mod session_actions;
 mod session_menu;
 mod settings_view;
@@ -128,6 +129,7 @@ use crate::notify::{SilentNotifier, SystemNotifier};
 use crate::open::SystemOpener;
 use crate::quit_view::{ExitView, Quitter};
 use crate::run_confirm::RunConfirm;
+use crate::section::flyout_section;
 use crate::session_actions::{Duplicates, HeaderStopConfirm, Prefills, self_exited};
 use crate::session_menu::popover_frame;
 use crate::session_menu::{ContainerMenu, DeleteDialog, SessionMenu, ShellMenu};
@@ -2406,7 +2408,7 @@ impl RootView {
     /// "Logs & files": open the logs, reveal the config folder; disabled with
     /// the error when the config dir could not be resolved.
     fn files_section(&self) -> Div {
-        let section = section("Logs & files");
+        let section = flyout_section("Logs & files");
         match &self.paths {
             Ok(paths) => section
                 .child(open_button(
@@ -2450,7 +2452,7 @@ impl RootView {
     /// "Control": restart, and the two-click stop.
     fn control_section(&self, cx: &mut Context<Self>) -> Div {
         let armed = self.stop.armed;
-        section("Control")
+        flyout_section("Control")
             .child(
                 action_button("restart-daemon", "Restart daemon", TEXT, true).on_click(
                     cx.listener(|this, _: &ClickEvent, _, cx| {
@@ -2592,18 +2594,6 @@ fn detail_row(label: &'static str, value: impl IntoElement) -> Div {
         .gap(px(12.0))
         .child(div().text_color(gpui::rgb(MUTED)).child(label))
         .child(value)
-}
-
-/// A flyout section: a top border and a muted heading.
-fn section(label: &'static str) -> Div {
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(2.0))
-        .pt(px(6.0))
-        .border_t_1()
-        .border_color(gpui::rgb(BORDER))
-        .child(div().text_color(gpui::rgb(MUTED)).child(label))
 }
 
 /// A clickable text button; a disabled one is dimmed and takes no clicks.

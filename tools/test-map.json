@@ -369,6 +369,12 @@
     },
     {
       "paths": [
+        "apps/native/src/section.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & test(/^section::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_settings|ui_appearance_editor|ui_keys)::/))"
+    },
+    {
+      "paths": [
         "apps/native/src/session_actions.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native) & test(/^session_actions::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_delete_worktree|ui_session_actions)::/))"

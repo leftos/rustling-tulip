@@ -23,6 +23,7 @@ use crate::buttons::{ButtonSize, field_frame_with_ring, focus_ring, outlined_but
 use crate::fonts;
 use crate::notices::ToastKind;
 use crate::palette::{GROUND, HOVER, LINE_STRONG};
+use crate::section::field_column;
 use crate::session_menu::{backdrop, dialog_button, muted_row};
 use crate::settings_view::SettingsControl;
 use crate::spawn_view::{
@@ -749,7 +750,7 @@ impl RootView {
             .border_color(gpui::rgb(LINE_STRONG))
             .rounded(px(LIST_RADIUS))
             .children(rows);
-        section("Font family")
+        field_column("Font family")
             .child(input_box(
                 AppearanceStop::FamilyFilter,
                 &editor.family_filter,
@@ -759,15 +760,6 @@ impl RootView {
             .child(list)
             .child(hint_line("appearance-family-hint", view.family_hint()))
     }
-}
-
-/// A row's column: its label, then what the caller adds.
-fn section(label: &'static str) -> Div {
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(7.0))
-        .child(field_label(label))
 }
 
 /// A row's reset link: its row, its text, and whether it has the keyboard.

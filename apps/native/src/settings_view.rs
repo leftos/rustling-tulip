@@ -25,6 +25,7 @@ use crate::buttons::{field_frame, focus_ring};
 use crate::mouse::CopyOnSelect;
 use crate::notify::{NotifyState, WINDOWS_NOTIFICATION_SETTINGS};
 use crate::palette::{CHIP, HOVER, LINE, RAISED, SUBTLE, TEXT_2, TRANSPARENT};
+use crate::section::section;
 use crate::session_menu::{backdrop, dialog_button};
 use crate::sidebar::{LeafDensity, NotifySkip, SidebarView};
 use crate::spawn_form::{
@@ -54,8 +55,7 @@ const CONTENT_PAD_Y: f32 = 16.0;
 /// The modal's width: the tab list, the content and its padding, and the
 /// card's 1 px edges.
 const PANEL_WIDTH: f32 = TAB_LIST_WIDTH + CONTENT_WIDTH + 2.0 * CONTENT_PAD_X + 2.0;
-/// The size of a section's head, and of a hint.
-const SECTION_HEAD_SIZE: f32 = 14.0;
+/// The size of a hint.
 const HINT_SIZE: f32 = 12.5;
 /// The corner radius of a text link, and of the title preview's chip.
 const LINK_RADIUS: f32 = 4.0;
@@ -1483,16 +1483,6 @@ impl RootView {
             .child(preview);
         vec![section.into_any_element()]
     }
-}
-
-/// A titled group of rows.
-fn section(title: &'static str) -> Div {
-    div().flex().flex_col().gap(px(10.0)).pb(px(18.0)).child(
-        div()
-            .text_size(px(SECTION_HEAD_SIZE))
-            .font_weight(FontWeight::BOLD)
-            .child(title),
-    )
 }
 
 /// A quiet line under or beside a control.
