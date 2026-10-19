@@ -209,6 +209,9 @@ fn modal_part_shown(root: &RootView, selector: &str) -> Option<bool> {
 /// Unbound or Detached banner while that container is expanded, and the
 /// view toggle. `None` for any other selector.
 fn sidebar_part_shown(root: &RootView, selector: &str) -> Option<bool> {
+    if let Some(shown) = container_banner_part_shown(root, selector) {
+        return Some(shown);
+    }
     let containers = || {
         root.sidebar_containers()
             .into_iter()
@@ -234,6 +237,34 @@ fn sidebar_part_shown(root: &RootView, selector: &str) -> Option<bool> {
     } else {
         Some(listed(selector.strip_prefix("leaf-")?))
     }
+}
+
+/// Whether the folder banner of the DIR or SH container a
+/// `container-<key>-banner`, `-add-repo` or `-add-workspace` selector names
+/// is drawn; `None` for any other selector.
+fn container_banner_part_shown(root: &RootView, selector: &str) -> Option<bool> {
+    let rest = selector.strip_prefix("container-")?;
+    let (key, wants_suggestion) = if let Some(key) = rest.strip_suffix("-banner") {
+        (key, false)
+    } else if let Some(key) = rest.strip_suffix("-add-repo") {
+        (key, false)
+    } else {
+        (rest.strip_suffix("-add-workspace")?, true)
+    };
+    let Some(path) = banner_path(root, key) else {
+        return Some(false);
+    };
+    Some(!wants_suggestion || root.cwd_workspace_suggestion(&path).is_some())
+}
+
+/// The folder an expanded DIR or SH container with `key` draws its banner
+/// for.
+fn banner_path(root: &RootView, key: &str) -> Option<String> {
+    root.sidebar_containers()
+        .into_iter()
+        .find(|c| c.key == key && !c.collapsed)
+        .filter(|c| matches!(c.kind, ContainerKind::Shell | ContainerKind::Dir))
+        .and_then(|c| c.path)
 }
 
 /// Whether the model still shows what a `headless-` selector tags: the

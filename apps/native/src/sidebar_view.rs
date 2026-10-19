@@ -155,7 +155,14 @@ impl RootView {
             };
             let groups: Vec<AnyElement> = containers
                 .iter()
-                .map(|container| container_rows(container, &rows, window, cx))
+                .map(|container| {
+                    let add_workspace = container
+                        .path
+                        .as_deref()
+                        .and_then(|path| self.cwd_workspace_suggestion(path))
+                        .map(|suggestion| suggestion.suggested_name.clone());
+                    container_rows(container, add_workspace.as_deref(), &rows, window, cx)
+                })
                 .collect();
             body.children(groups)
         };
@@ -355,6 +362,25 @@ impl RootView {
         }
         tracing::info!("adding repo {} as {}", add.path, add.name);
         self.send(add.message());
+    }
+
+    /// Add repo for a DIR or SH container's folder: the folder is registered
+    /// straight away, with no picker and no change to the next pick's folder.
+    pub(crate) fn add_repo_at(&mut self, path: String, _cx: &mut Context<Self>) {
+        tracing::info!("adding repo {path}");
+        self.send(ClientMessage::AddRepo { path, name: None });
+    }
+
+    /// Add workspace for a DIR or SH container's folder: accepts the
+    /// `.code-workspace` its scan found, without watching it.
+    pub(crate) fn add_workspace_from_scan(&mut self, path: &str, _cx: &mut Context<Self>) {
+        let Some(suggestion) = self.cwd_workspace_suggestion(path).cloned() else {
+            return;
+        };
+        self.send(ClientMessage::AcceptVscodeWorkspaceSuggestion {
+            suggestion,
+            watch: false,
+        });
     }
 
     /// The layer under the open ⋯ menu that keeps a click outside it from
@@ -557,11 +583,13 @@ fn divider(active: bool, cx: &mut Context<RootView>) -> Stateful<Div> {
         .on_mouse_down(MouseButton::Left, cx.listener(RootView::start_drag))
 }
 
-/// A container row, then (unless it is collapsed) the Unbound or Detached
-/// container's banner and its leaves; grouped under the container's key,
-/// since the tabs view can list a session under more than one tab.
+/// A container row, then (unless it is collapsed) the folder banner of a DIR
+/// or SH container, the Unbound or Detached container's banner, and its
+/// leaves; grouped under the container's key, since the tabs view can list a
+/// session under more than one tab.
 fn container_rows(
     container: &Container,
+    add_workspace: Option<&str>,
     ctx: &LeafRows<'_>,
     window: &Window,
     cx: &mut Context<RootView>,
@@ -569,6 +597,11 @@ fn container_rows(
     let focused = ctx.focused_row == Some(container.key.as_str());
     let mut rows = vec![container_row(container, focused, cx).into_any_element()];
     if !container.collapsed {
+        if matches!(container.kind, ContainerKind::Dir | ContainerKind::Shell)
+            && let Some(path) = container.path.as_deref()
+        {
+            rows.push(path_banner(container, path, add_workspace, cx).into_any_element());
+        }
         if container.kind == ContainerKind::Unbound {
             rows.push(unbound_banner().into_any_element());
         }
@@ -586,6 +619,71 @@ fn container_rows(
         .flex_none()
         .children(rows)
         .into_any_element()
+}
+
+/// The folder under an expanded DIR or SH container, with the actions its
+/// container offers: Add repo always, Add workspace once a scan found a
+/// `.code-workspace` file there.
+fn path_banner(
+    container: &Container,
+    path: &str,
+    add_workspace: Option<&str>,
+    cx: &mut Context<RootView>,
+) -> Div {
+    let key = container.key.clone();
+    let banner_selector = format!("container-{key}-banner");
+    let repo_selector = format!("container-{key}-add-repo");
+    let repo_path = path.to_owned();
+    let repo_tip = format!("Add repo: {path}");
+    let banner = div()
+        .debug_selector(move || banner_selector.clone())
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap_x(px(6.0))
+        .pl(px(LEAF_INDENT))
+        .pr(px(ROW_PADDING))
+        .py(px(4.0))
+        .text_size(px(TAG_TEXT_SIZE + 1.0))
+        .text_color(gpui::rgb(MUTED))
+        .child(div().flex_1().min_w(px(0.0)).child(truncating(
+            &format!("container-{key}-path"),
+            StyledText::new(path.to_owned()),
+        )))
+        .child(
+            banner_link(repo_selector, "Add repo", repo_tip).on_click(cx.listener(
+                move |this, _: &ClickEvent, _window, cx| {
+                    this.add_repo_at(repo_path.clone(), cx);
+                },
+            )),
+        );
+    let Some(name) = add_workspace else {
+        return banner;
+    };
+    let workspace_selector = format!("container-{key}-add-workspace");
+    let workspace_path = path.to_owned();
+    let workspace_tip = format!("Add workspace: {name}");
+    banner.child(
+        banner_link(workspace_selector, "Add workspace", workspace_tip).on_click(cx.listener(
+            move |this, _: &ClickEvent, _window, cx| {
+                this.add_workspace_from_scan(&workspace_path, cx);
+            },
+        )),
+    )
+}
+
+/// A banner action: plain text that reads as a link, naming what it acts on
+/// in its hover text.
+fn banner_link(selector: String, label: &'static str, tip: String) -> Stateful<Div> {
+    div()
+        .id(SharedString::from(selector.clone()))
+        .debug_selector(move || selector.clone())
+        .flex_none()
+        .cursor_pointer()
+        .text_color(gpui::rgb(TEXT_2))
+        .hover(|style| style.text_color(gpui::rgb(TEXT)))
+        .tooltip(tooltip(tip))
+        .child(label)
 }
 
 /// The text under an expanded Unbound container, with the pill it names.

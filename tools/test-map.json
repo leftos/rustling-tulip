@@ -575,7 +575,7 @@
       "paths": [
         "apps/native/src/vscode_suggestion_view.rs"
       ],
-      "filter": "(binary_id(rustling-tulip-native::ui) & test(/^(ui_vscode_prompt)::/))"
+      "filter": "(binary_id(rustling-tulip-native::ui) & test(/^(ui_vscode_prompt|ui_sidebar)::/))"
     },
     {
       "paths": [

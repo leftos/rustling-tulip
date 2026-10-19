@@ -9,6 +9,7 @@ use protocol::{DaemonMessage, VscodeWorkspaceSuggestion};
 
 use crate::fonts;
 use crate::notice_view::modal_panel;
+use crate::scan_key;
 use crate::session_menu::{backdrop, dialog_button};
 use crate::vscode_suggestion::{
     BodyStyle, DISMISS_LABEL, SuggestionButton, TITLE, VscodeSuggestions, WATCH_TIP,
@@ -36,8 +37,25 @@ impl RootView {
                 self.on_vscode_parsed(suggestion.clone(), cx);
                 true
             }
+            DaemonMessage::VscodeWorkspacesScanned { path, suggestions } => {
+                self.on_vscode_workspaces_scanned(path, suggestions, cx);
+                true
+            }
             _ => false,
         }
+    }
+
+    /// The answer to a DIR or SH folder scan: keep its first suggestion, or
+    /// none, under the folder's normalized path.
+    pub(crate) fn on_vscode_workspaces_scanned(
+        &mut self,
+        path: &str,
+        suggestions: &[VscodeWorkspaceSuggestion],
+        cx: &mut Context<Self>,
+    ) {
+        self.cwd_workspace_scans
+            .insert(scan_key(path), suggestions.first().cloned());
+        cx.notify();
     }
 
     /// The daemon pushed a suggestion: queue it, and show it when nothing

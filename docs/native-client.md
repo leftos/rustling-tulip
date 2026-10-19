@@ -17,6 +17,14 @@ This doc records the decisions a change to the client needs to know; what each f
 
   A click focuses the container row and folds it; while the sidebar holds keyboard focus the focused row draws the 2 px `ACCENT` ring (`container-<key>-focus`), Up and Down move that focus among the visible container rows, Enter and Space fold, and Esc clears it and returns the keyboard to the terminal. The focus also clears on a Repos/Tabs switch and when its container leaves the list.
 
+  A DIR or SH container draws a folder banner under its row while expanded (`container-<key>-banner`): the folder path on one truncated line (`container-<key>-path`), then `Add repo` (`container-<key>-add-repo`, hover `Add repo: <folder>`) and, once the folder's scan answers with a suggestion, `Add workspace` (`container-<key>-add-workspace`, hover `Add workspace: <suggested name>`). The links keep their room while the path ends in `…`.
+
+  The banner folds with its container, and only DIR and SH containers draw one: a repo, workspace, tab, Unbound or Detached container never does, nor an SH with no cwd.
+
+  `Add repo` registers that folder straight away (`AddRepo { path, name: None }`), opening no picker and leaving the toolbar's Add repo… start folder (`last_repo_dir`) alone. `Add workspace` accepts the scanned `VscodeWorkspaceSuggestion` as it stands (`AcceptVscodeWorkspaceSuggestion { watch: false }`), with no creator dialog and no `needs 2 repos` gate.
+
+  The client sends `ScanVscodeWorkspaces` once for each distinct DIR or SH folder on a connection, keyed by the folder's normalized path (case-folded on Windows): a folder first seen in a session list or update, or regrouped by a repo or workspace registry change, is scanned then, and the same folder is never rescanned. Answers for a folder are dropped on `Welcome` and while the connection overlay is up, so a reconnect scans again.
+
   An expanded Detached container shows: `These sessions are still running, but their repo or workspace is no longer registered. Resume one from its row, or stop it from its header.` The toolbar's `⋯` menu gains `Resume all abandoned (N)` under a separator when N ≥ 2, sending `ResumeAllAbandoned`.
 
 - **Workspace creator** (`workspace_creator.rs` model, `workspace_creator_view.rs` view): `Add workspace…` follows `Add repo…` in the `⋯` menu; under two repos it draws muted with `needs 2 repos` and does nothing, and the menu's tooltip names only the rows shown. It opens `New workspace`, with `From repos` and `From VS Code workspace` tabs; From repos needs a name and at least two ticked members, and says `No repos registered yet.` when none exist.

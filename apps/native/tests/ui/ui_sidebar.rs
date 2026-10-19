@@ -11,7 +11,8 @@ use crate::support;
 use gpui::{Modifiers, TestAppContext, point, px};
 use protocol::{
     AgentOptions, AttentionReason, ClaudeProvider, ClientMessage, DaemonMessage, PermissionMode,
-    SessionMode, SessionSnapshot, SpawnConfig, SpawnTarget, SplitDirection, WorktreeReusePolicy,
+    SessionMode, SessionSnapshot, SpawnConfig, SpawnTarget, SplitDirection, VscodeWorkspaceFolder,
+    VscodeWorkspaceSuggestion, WorktreeReusePolicy,
 };
 use rustling_tulip_native::{DETACHED_BANNER, SidebarView, TabPill, resume_all_label};
 use support::{Fixture, Harness, TestDir, pane, repo, session, split, tab, workspace};
@@ -1454,5 +1455,354 @@ fn resume_all_appears_at_two_abandoned_and_sends_resume_all(cx: &mut TestAppCont
         h.root(|root, _| root.sidebar_abandoned_count()),
         1,
         "the count follows Sessions"
+    );
+}
+
+/// The DIR container's folder banner selectors; the key carries the
+/// normalized path.
+const DIR_BANNER: &str = "container-cwd:D:\\scratch\\dir-banner";
+const DIR_ADD_REPO: &str = "container-cwd:D:\\scratch\\dir-add-repo";
+const DIR_ADD_WORKSPACE: &str = "container-cwd:D:\\scratch\\dir-add-workspace";
+/// The SH container's folder banner selectors.
+const SH_BANNER: &str = "container-standalone:sh-banner";
+const SH_ADD_REPO: &str = "container-standalone:sh-add-repo";
+const SH_ADD_WORKSPACE: &str = "container-standalone:sh-add-workspace";
+
+/// A `.code-workspace` file in `D:/elsewhere`, the SH container's folder.
+fn suggestion() -> VscodeWorkspaceSuggestion {
+    VscodeWorkspaceSuggestion {
+        source_path: "D:/elsewhere/team.code-workspace".to_owned(),
+        suggested_name: "team".to_owned(),
+        folders: vec![VscodeWorkspaceFolder {
+            path: "D:/elsewhere".to_owned(),
+            name: None,
+            matched_repo_id: None,
+        }],
+    }
+}
+
+/// A DIR session at `D:/scratch/dir`, a standalone SH at `D:/elsewhere`, a
+/// standalone with no cwd, a repo and a workspace session, and one whose
+/// repo is gone (Detached).
+fn banner_fixture() -> Fixture {
+    Fixture {
+        repos: vec![repo("r1", "D:/src/r1"), repo("r2", "D:/src/r2")],
+        workspaces: vec![workspace("ws1", &["r1"])],
+        sessions: vec![
+            session("dir").dir_shell("D:/scratch/dir").build(),
+            session("sh").shell("D:/elsewhere").build(),
+            session("nocwd").shell("").build(),
+            session("repo").in_repo("r2").build(),
+            session("ws").in_workspace("ws1").build(),
+            session("gone").in_repo("r9").abandoned().build(),
+        ],
+        tabs: vec![tab("t1", &pane("p1", None))],
+    }
+}
+
+/// The paths the client asked the daemon to scan since the last call.
+fn scanned_paths(h: &mut Harness<'_>) -> Vec<String> {
+    h.sent()
+        .into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::ScanVscodeWorkspaces { path } => Some(path),
+            _ => None,
+        })
+        .collect()
+}
+
+#[gpui::test]
+fn dir_and_shell_containers_draw_their_folder_banner(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &banner_fixture());
+
+    assert!(h.in_model(DIR_BANNER), "the DIR's folder");
+    assert!(h.in_model(SH_BANNER), "the SH's folder");
+    assert!(painted(&mut h, DIR_BANNER), "drawn");
+    let row = h.bounds("container-cwd:D:\\scratch\\dir");
+    let banner = h.bounds(DIR_BANNER);
+    assert!(
+        row.bottom() <= banner.top(),
+        "under its container row, above its leaves"
+    );
+
+    h.click_on("container-cwd:D:\\scratch\\dir");
+    assert!(!h.in_model(DIR_BANNER), "folded with its container");
+    assert!(!h.in_model(DIR_ADD_REPO));
+    assert!(!h.in_model(DIR_ADD_WORKSPACE));
+}
+
+#[gpui::test]
+fn only_dir_and_shell_containers_draw_a_folder_banner(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &banner_fixture());
+
+    for key in ["ws:ws1", "repo:r2", "detached", "standalone:nocwd"] {
+        let banner = format!("container-{key}-banner");
+        assert!(!h.in_model(&banner), "{key} draws no banner");
+        assert!(!painted(&mut h, &banner), "{key} paints no banner");
+        let add_repo = format!("container-{key}-add-repo");
+        assert!(!h.in_model(&add_repo), "{key} offers no Add repo");
+    }
+
+    h.click_on("sidebar-view-tabs");
+    assert!(
+        !h.in_model("container-tab:t1-banner"),
+        "a tab draws no banner"
+    );
+    assert!(
+        !painted(&mut h, "container-tab:t1-banner"),
+        "a tab paints no banner"
+    );
+    assert!(!h.in_model("container-unbound-banner"), "nor does Unbound");
+    assert!(
+        !painted(&mut h, "container-unbound-banner"),
+        "nor does Unbound paint one"
+    );
+}
+
+#[gpui::test]
+fn banner_add_repo_sends_the_folder_without_a_picker(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &banner_fixture());
+    h.sent();
+
+    h.click_on(DIR_ADD_REPO);
+    let sent = h.sent();
+    assert_eq!(sent.len(), 1, "sent {sent:?}");
+    assert!(
+        matches!(&sent[0], ClientMessage::AddRepo { path, name: None }
+            if path == "D:\\scratch\\dir"),
+        "the container's folder, named by the daemon"
+    );
+    assert_eq!(h.folder_asks(), 0, "no picker opened");
+}
+
+#[gpui::test]
+fn folder_scans_run_once_per_distinct_path_and_welcome_clears_them(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = banner_fixture();
+    let mut h = Harness::with(cx, &dir, &fixture);
+    let mut first = scanned_paths(&mut h);
+    first.sort();
+    assert_eq!(
+        first,
+        ["D:\\elsewhere", "D:\\scratch\\dir"],
+        "one scan per DIR and SH folder"
+    );
+    assert!(
+        !first.iter().any(|path| path == "D:/src/r2"),
+        "a repo's folder is never scanned"
+    );
+
+    h.send(DaemonMessage::Sessions {
+        sessions: fixture.sessions.clone(),
+    });
+    assert!(
+        scanned_paths(&mut h).is_empty(),
+        "a second list rescans nothing"
+    );
+
+    h.send(support::welcome(support::PROTOCOL));
+    h.sent();
+    h.send(DaemonMessage::Sessions {
+        sessions: fixture.sessions.clone(),
+    });
+    let mut rescanned = scanned_paths(&mut h);
+    rescanned.sort();
+    assert_eq!(
+        rescanned, first,
+        "Welcome clears the state, so the next list rescans"
+    );
+}
+
+#[gpui::test]
+fn add_workspace_appears_after_the_scan_and_accepts_the_suggestion(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &banner_fixture());
+
+    assert!(!h.in_model(SH_ADD_WORKSPACE), "no scan answer yet");
+    assert!(h.in_model(SH_ADD_REPO), "Add repo is always drawn");
+
+    let suggestion = suggestion();
+    h.send(DaemonMessage::VscodeWorkspacesScanned {
+        path: "D:/elsewhere".to_owned(),
+        suggestions: vec![suggestion.clone()],
+    });
+    assert!(h.in_model(SH_ADD_WORKSPACE), "the scan found one");
+
+    h.sent();
+    h.click_on(SH_ADD_WORKSPACE);
+    let sent = h.sent();
+    assert_eq!(sent.len(), 1, "sent {sent:?}");
+    assert!(
+        matches!(
+            &sent[0],
+            ClientMessage::AcceptVscodeWorkspaceSuggestion { suggestion: accepted, watch: false }
+                if *accepted == suggestion
+        ),
+        "the folder's suggestion, accepted without watching"
+    );
+}
+
+#[gpui::test]
+fn empty_scan_answer_draws_no_add_workspace(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &banner_fixture());
+
+    h.send(DaemonMessage::VscodeWorkspacesScanned {
+        path: "D:\\scratch\\dir".to_owned(),
+        suggestions: Vec::new(),
+    });
+    assert!(!h.in_model(DIR_ADD_WORKSPACE), "nothing to add");
+    assert!(h.in_model(DIR_ADD_REPO), "Add repo stays");
+
+    h.send(DaemonMessage::VscodeWorkspacesScanned {
+        path: "D:/scratch/dir".to_owned(),
+        suggestions: vec![suggestion()],
+    });
+    assert!(
+        h.in_model(DIR_ADD_WORKSPACE),
+        "answers are keyed by the normalized path"
+    );
+}
+
+#[gpui::test]
+fn a_session_update_scans_its_folder_once(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &banner_fixture());
+    h.sent();
+
+    h.send(DaemonMessage::SessionUpdated {
+        session: session("late").shell("D:/late").build(),
+        request_id: None,
+    });
+    assert_eq!(
+        scanned_paths(&mut h),
+        ["D:\\late"],
+        "a shell spawned after the list scans its folder"
+    );
+
+    h.send(DaemonMessage::SessionUpdated {
+        session: session("late").shell("D:/late").build(),
+        request_id: None,
+    });
+    assert!(
+        scanned_paths(&mut h).is_empty(),
+        "the same session's folder is not rescanned"
+    );
+
+    h.send(DaemonMessage::SessionUpdated {
+        session: session("sh").shell("D:/moved").build(),
+        request_id: None,
+    });
+    assert_eq!(
+        scanned_paths(&mut h),
+        ["D:\\moved"],
+        "a shell moved to a new folder scans it once"
+    );
+}
+
+#[gpui::test]
+fn folder_scans_fold_case_and_answer_both_casings(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        sessions: Vec::new(),
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.sent();
+
+    h.send(DaemonMessage::SessionUpdated {
+        session: session("upper").dir_shell("D:/Elsewhere").build(),
+        request_id: None,
+    });
+    h.send(DaemonMessage::SessionUpdated {
+        session: session("lower").dir_shell("D:\\elsewhere").build(),
+        request_id: None,
+    });
+    let scans = scanned_paths(&mut h);
+    assert_eq!(scans.len(), 1, "one folder, one scan: {scans:?}");
+    assert_eq!(scans[0].to_lowercase(), "d:\\elsewhere");
+
+    h.send(DaemonMessage::VscodeWorkspacesScanned {
+        path: "D:\\ELSEWHERE".to_owned(),
+        suggestions: vec![suggestion()],
+    });
+    assert!(
+        h.root(|root, _| root.cwd_workspace_suggestion("D:/elsewhere").is_some()),
+        "the answer is found through the other casing"
+    );
+    assert!(
+        h.root(|root, _| root.cwd_workspace_suggestion("D:\\Elsewhere").is_some()),
+        "and through the folder's own casing"
+    );
+    assert!(h.in_model("container-cwd:D:\\Elsewhere-add-workspace"));
+    assert!(h.in_model("container-cwd:D:\\elsewhere-add-workspace"));
+}
+
+#[gpui::test]
+fn a_registry_change_scans_a_regrouped_shell_folder(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        repos: vec![repo("r1", "D:/src/r1")],
+        sessions: vec![session("sh").shell("D:/src/r1").build()],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    assert_eq!(tree_keys(&mut h), ["repo:r1"], "the shell sits in its repo");
+    assert!(
+        !h.in_model("container-standalone:sh-banner"),
+        "so there is no SH container yet"
+    );
+    h.sent();
+
+    h.send(DaemonMessage::Repos { repos: Vec::new() });
+    assert_eq!(tree_keys(&mut h), ["standalone:sh"], "regrouped into SH");
+    assert!(h.in_model("container-standalone:sh-banner"));
+    assert_eq!(
+        scanned_paths(&mut h),
+        ["D:\\src\\r1"],
+        "the regrouped container's folder is scanned"
+    );
+
+    h.send(DaemonMessage::VscodeWorkspacesScanned {
+        path: "D:/src/r1".to_owned(),
+        suggestions: vec![suggestion()],
+    });
+    assert!(
+        h.in_model("container-standalone:sh-add-workspace"),
+        "the answer reaches the new SH container"
+    );
+}
+
+#[gpui::test]
+fn a_long_folder_path_keeps_the_links_on_the_row(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let path = format!("D:/{}", "segment/".repeat(15).trim_end_matches('/'));
+    assert!(path.len() >= 120, "the path is long: {}", path.len());
+    let key = format!("cwd:{}", path.replace('/', "\\"));
+    let fixture = Fixture {
+        sessions: vec![session("dir").dir_shell(&path).build()],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.send(DaemonMessage::VscodeWorkspacesScanned {
+        path: path.clone(),
+        suggestions: vec![suggestion()],
+    });
+
+    let banner = format!("container-{key}-banner");
+    let add_repo = format!("container-{key}-add-repo");
+    let add_workspace = format!("container-{key}-add-workspace");
+    assert!(painted(&mut h, &banner), "the banner is drawn");
+    assert!(painted(&mut h, &add_repo), "Add repo is drawn");
+    assert!(painted(&mut h, &add_workspace), "Add workspace is drawn");
+
+    let panel = h.bounds("sidebar-panel");
+    let link = h.bounds(&add_repo);
+    assert!(
+        link.left() >= panel.left() && link.right() <= panel.right(),
+        "the link stays inside the row: {link:?} in {panel:?}"
     );
 }

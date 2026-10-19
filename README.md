@@ -79,6 +79,7 @@ Start with [docs/architecture.md](docs/architecture.md) for how the pieces fit a
 - **Feature PR**: the draft pull request from a marker's `feat/<name>` into `main`, opened with the first item under the marker and merged with `--rebase` by `/ship` once every item under the marker has landed.
 - **First-connect chooser**: the dialog a client with no saved tab layout gets when it connects, offering start empty, open all active sessions in a chosen arrangement, adopt a previous layout or copy another client's; see `docs/native-client.md` ("Tab layouts").
 - **Fix round**: review findings sent back to the worker that made the change.
+- **Folder banner**: the line under an expanded DIR or SH container in the native sidebar, naming the container's folder on one truncated line with an `Add repo` link and, once the daemon finds a `.code-workspace` there, an `Add workspace` link; see `docs/native-client.md` ("Repos and the no-repos states").
 - **Folder-only entry**: a history entry with no spawn config (imported from a tracer log, or a standalone session); it is recovered by running claude in its folder with its `--add-dir` set, never by checking out a branch.
 - **Forwarder**: the daemon's per-connection task that streams one session's PTY output to one client; `LoadScrollback` replaces it.
 - **Hand-off ready**: a session whose orchestrator ended its turn with `Run /clear, then /nextup to continue.` and has no background work left (RT-85).

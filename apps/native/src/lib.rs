@@ -113,7 +113,7 @@ use gpui::{
 };
 use protocol::{
     AppearanceOverrides, ClientMessage, DaemonMessage, GridNode, RepoEntry, SessionSnapshot,
-    TabEntry, WorkspaceEntry,
+    TabEntry, VscodeWorkspaceSuggestion, WorkspaceEntry,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -142,7 +142,9 @@ use crate::session_menu::popover_frame;
 use crate::session_menu::{ContainerMenu, DeleteDialog, SessionMenu, ShellMenu};
 use crate::shell_dialog::PendingQuickShell;
 use crate::shell_view::ShellDialog;
-use crate::sidebar::{SidebarModel, UiState, can_attach, load_ui_state, save_ui_state};
+use crate::sidebar::{
+    SidebarModel, UiState, can_attach, load_ui_state, normalize_fs_path, save_ui_state,
+};
 use crate::source_control::ScModel;
 use crate::spawn_form::BranchCache;
 use crate::spawn_view::SpawnModal;
@@ -514,6 +516,9 @@ pub struct RootView {
     vscode_suggestions: VscodeSuggestions,
     /// The prompt's keyboard focus, so Esc, Enter and Tab reach it.
     vscode_prompt_focus: FocusHandle,
+    /// The `.code-workspace` scan answers for the DIR and SH container
+    /// folders, keyed by normalized path; `None` until the answer arrives.
+    cwd_workspace_scans: HashMap<String, Option<VscodeWorkspaceSuggestion>>,
     /// The toasts, the action-failed notice and the checkout prompt.
     notices: Notices,
     /// Wakes the view when the next toast's time is up.
@@ -836,6 +841,7 @@ impl RootView {
             workspace_creator_focus: cx.focus_handle(),
             vscode_suggestions: VscodeSuggestions::default(),
             vscode_prompt_focus: cx.focus_handle(),
+            cwd_workspace_scans: HashMap::new(),
             worktrees_root: None,
             worktrees_tab: None,
             worktrees_manager: None,
@@ -892,6 +898,37 @@ impl RootView {
                 self.sidebar.tab_containers(self.tabs.tabs())
             }
             SidebarView::Tabs => Vec::new(),
+        }
+    }
+
+    /// The `.code-workspace` file a DIR or SH container's folder holds, once
+    /// its scan answered; `None` while the answer is pending or empty.
+    #[must_use]
+    pub fn cwd_workspace_suggestion(&self, path: &str) -> Option<&VscodeWorkspaceSuggestion> {
+        self.cwd_workspace_scans
+            .get(&scan_key(path))
+            .and_then(Option::as_ref)
+    }
+
+    /// Asks the daemon to scan each DIR or SH container's folder for a
+    /// `.code-workspace` file, once per distinct folder on a connection.
+    fn scan_unseen_cwd_paths(&mut self) {
+        if !self.conn.is_open() {
+            return;
+        }
+        for container in self.sidebar.containers() {
+            if !matches!(container.kind, ContainerKind::Shell | ContainerKind::Dir) {
+                continue;
+            }
+            let Some(path) = container.path else {
+                continue;
+            };
+            let key = scan_key(&path);
+            if self.cwd_workspace_scans.contains_key(&key) {
+                continue;
+            }
+            self.cwd_workspace_scans.insert(key, None);
+            self.send(ClientMessage::ScanVscodeWorkspaces { path });
         }
     }
 
@@ -1123,6 +1160,9 @@ impl RootView {
     fn on_containers_changed(&mut self, cx: &mut Context<Self>) {
         self.settle_container_sends();
         self.apply_pane_fonts(cx);
+        // A registry change regroups shells: one can gain a new SH or DIR
+        // container whose folder has not been scanned.
+        self.scan_unseen_cwd_paths();
     }
 
     /// The cursor shape pane `pane_id` renders.
@@ -1669,6 +1709,7 @@ impl RootView {
             self.close_shell_dialog(window, cx);
             self.close_workspace_creator(window, cx);
             self.vscode_suggestions.clear();
+            self.cwd_workspace_scans.clear();
             self.close_appearance_editor(window, cx);
             self.close_discard_confirm(window, cx);
             self.close_stash_drop_confirm(window, cx);
@@ -1922,6 +1963,7 @@ impl RootView {
         self.close_shell_dialog(window, cx);
         self.close_workspace_creator(window, cx);
         self.vscode_suggestions.clear();
+        self.cwd_workspace_scans.clear();
         self.close_appearance_editor(window, cx);
         self.close_discard_confirm(window, cx);
         self.close_stash_drop_confirm(window, cx);
@@ -2009,6 +2051,9 @@ impl RootView {
         }
         self.place_duplicate(request_id, session, window, cx);
         self.place_spawn(request_id, session, window, cx);
+        // A shell spawned after the session list, or moved to a new folder by
+        // its own cwd report, reveals a folder only its snapshot names.
+        self.scan_unseen_cwd_paths();
     }
 
     /// The daemon's whole session list: every pane refreshes from it, the
@@ -2027,6 +2072,7 @@ impl RootView {
         self.attach_waiting_panes(cx);
         self.apply_pane_fonts(cx);
         self.try_wanted_session(window, cx);
+        self.scan_unseen_cwd_paths();
     }
 
     /// Keys the root takes before the panes see them. The worktree
@@ -2898,6 +2944,17 @@ impl Render for Tip {
             .text_size(px(UI_TEXT_SIZE))
             .text_color(gpui::rgb(TEXT))
             .child(self.0.clone())
+    }
+}
+
+/// The key a DIR or SH folder's scan answer is stored under: its normalized
+/// path, case-folded where the file system folds case.
+fn scan_key(path: &str) -> String {
+    let key = normalize_fs_path(path);
+    if cfg!(windows) {
+        key.to_lowercase()
+    } else {
+        key
     }
 }
 

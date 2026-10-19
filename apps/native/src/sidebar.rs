@@ -251,6 +251,10 @@ pub struct Container {
     pub summary: Option<String>,
     /// The row's hover text, when it has one.
     pub hover: Option<String>,
+    /// The folder the row's actions act on: a DIR container's path, or a
+    /// standalone shell's current folder; `None` for every other kind and
+    /// for a shell with no folder.
+    pub path: Option<String>,
     pub leaves: Vec<Leaf>,
     /// Any leaf shows attention ([`Leaf::shows_attention`]).
     pub attention: bool,
@@ -1264,6 +1268,19 @@ fn container(
     name: String,
     mut sessions: Vec<&SessionSnapshot>,
 ) -> Container {
+    let path = match kind {
+        ContainerKind::Dir => Some(id.to_owned()),
+        ContainerKind::Shell => sessions
+            .first()
+            .and_then(|s| s.current_cwd.as_deref())
+            .filter(|cwd| !cwd.is_empty())
+            .map(normalize_fs_path),
+        ContainerKind::Workspace
+        | ContainerKind::Repo
+        | ContainerKind::Detached
+        | ContainerKind::Tab
+        | ContainerKind::Unbound => None,
+    };
     sessions.sort_by(|a, b| cmp_ci(&a.label, &b.label));
     let leaves: Vec<Leaf> = apply_session_order(sessions, inputs.session_order.get(id))
         .into_iter()
@@ -1296,6 +1313,7 @@ fn container(
         name,
         summary,
         hover: None,
+        path,
         leaves,
     }
 }
@@ -1525,6 +1543,7 @@ fn tab_view_container(
         name,
         summary: None,
         hover: Some(hover),
+        path: None,
         leaves,
     }
 }
@@ -1624,7 +1643,7 @@ fn path_contains(parent: &str, child: &str) -> bool {
 
 /// Windows-looking paths (a drive prefix or any backslash) get backslashes;
 /// trailing separators go, except on a root of three characters or fewer.
-fn normalize_fs_path(path: &str) -> String {
+pub(crate) fn normalize_fs_path(path: &str) -> String {
     let drive = matches!(
         path.as_bytes(),
         [letter, b':', b'\\' | b'/', ..] if letter.is_ascii_alphabetic()
@@ -2126,6 +2145,83 @@ mod tests {
         assert_eq!(dir.kind, ContainerKind::Dir);
         assert_eq!(dir.name, "proj");
         assert_eq!(dir.id, "C:\\elsewhere\\proj");
+    }
+
+    #[test]
+    fn dir_container_banner_path_is_its_normalized_id() {
+        let tree = Fixture::new(
+            vec![],
+            vec![],
+            vec![shell("s", Some("C:/elsewhere/proj/"), SessionKind::Single)],
+        )
+        .build();
+        let dir = tree.first().expect("DIR");
+        assert_eq!(dir.kind, ContainerKind::Dir);
+        assert_eq!(dir.path.as_deref(), Some("C:\\elsewhere\\proj"));
+    }
+
+    #[test]
+    fn shell_container_banner_path_is_its_session_cwd() {
+        let tree = Fixture::new(
+            vec![],
+            vec![],
+            vec![shell("s", Some("C:\\elsewhere"), SessionKind::Standalone)],
+        )
+        .build();
+        let sh = tree.first().expect("SH");
+        assert_eq!(sh.kind, ContainerKind::Shell);
+        assert_eq!(sh.path.as_deref(), Some("C:\\elsewhere"));
+
+        let forward = Fixture::new(
+            vec![],
+            vec![],
+            vec![shell(
+                "s",
+                Some("C:/elsewhere/proj"),
+                SessionKind::Standalone,
+            )],
+        )
+        .build();
+        assert_eq!(
+            forward.first().expect("SH").path.as_deref(),
+            Some("C:\\elsewhere\\proj"),
+            "a forward-slash cwd is normalized like a DIR's id"
+        );
+    }
+
+    #[test]
+    fn shell_container_without_a_cwd_has_no_banner_path() {
+        let tree = Fixture::new(
+            vec![],
+            vec![],
+            vec![shell("s", None, SessionKind::Standalone)],
+        )
+        .build();
+        assert_eq!(tree.first().expect("SH").path, None);
+    }
+
+    #[test]
+    fn repo_workspace_and_tab_containers_have_no_banner_path() {
+        let tree = Fixture::new(
+            vec![repo("r1", "D:\\src\\r1")],
+            vec![workspace("w1", &[])],
+            vec![],
+        )
+        .build();
+        assert_eq!(keys(&tree), ["ws:w1", "repo:r1"]);
+        assert!(tree.iter().all(|c| c.path.is_none()));
+
+        let tabs = [tab("t1", &pane("p1", Some("s1")))];
+        let tab_tree = build_tab_containers(
+            &tabs,
+            &[session("s1")],
+            &HashSet::new(),
+            &HashSet::new(),
+            &BTreeSet::new(),
+        );
+        let tab_container = tab_tree.first().expect("TAB");
+        assert_eq!(tab_container.kind, ContainerKind::Tab);
+        assert_eq!(tab_container.path, None);
     }
 
     #[test]
