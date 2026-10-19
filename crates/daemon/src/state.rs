@@ -461,6 +461,7 @@ mod tests {
                 },
             },
             created_at: chrono::Utc::now(),
+            picked_layout: None,
         }
     }
 

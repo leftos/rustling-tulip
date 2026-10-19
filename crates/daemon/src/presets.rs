@@ -1565,6 +1565,9 @@ fn attach_to_tab(
                 .grid_mut()
                 .ok_or_else(|| anyhow!("cannot populate non-grid tab: {tab_id}"))?;
             *grid = new_grid;
+            // The preset's layout rewrites the grid; it is not a pick, so the
+            // tab stops keeping a layout the user chose earlier.
+            tab.picked_layout = None;
             Ok::<_, anyhow::Error>(tab.clone())
         })
         .map_err(|e| {
@@ -1600,6 +1603,7 @@ fn open_new_tab(
             },
         },
         created_at: Utc::now(),
+        picked_layout: None,
     };
     let tab_id = tab.id.clone();
     hub.state
@@ -2396,6 +2400,49 @@ mod tests {
                 return job;
             }
         }
+    }
+
+    /// A launch step rewrites the grid from the preset's layout, which is not
+    /// a pick: the tab must not keep rebuilding a layout chosen earlier.
+    #[test]
+    fn attaching_a_launched_session_clears_the_remembered_layout() {
+        let (hub, _events, _scratch) = test_hub();
+        hub.state
+            .mutate_client_layout("test-client", |tabs| {
+                tabs.push(TabEntry {
+                    id: "t1".to_string(),
+                    name: "preset".to_string(),
+                    content: protocol::TabContent::Grid {
+                        grid: GridNode::Pane {
+                            pane_id: "p0".to_string(),
+                            session_id: Some("s0".to_string()),
+                        },
+                    },
+                    created_at: Utc::now(),
+                    picked_layout: Some(protocol::RearrangeLayout::Horizontal),
+                });
+            })
+            .expect("seed the client layout");
+        let mut state = TabState {
+            layout: Some(TabBuildLayout::Linear(SplitDirection::Horizontal)),
+            base_name: "preset".to_string(),
+            cap: None,
+            tab_ids: vec!["t1".to_string()],
+            current_tab_id: Some("t1".to_string()),
+            current_panes: vec![("p0".to_string(), Some("s0".to_string()))],
+            tab_count: 1,
+            client_id: "test-client".to_string(),
+        };
+
+        attach_to_tab(&hub, &mut state, "s1", &["s1".to_string()]).expect("attach the session");
+
+        let tabs = hub.state.client_layout("test-client");
+        assert_eq!(tabs.len(), 1);
+        assert_eq!(tabs[0].picked_layout, None);
+        assert_eq!(
+            tabs::collect_panes(tabs[0].grid().expect("a grid tab")).len(),
+            2
+        );
     }
 
     fn test_hub() -> (Hub, broadcast::Receiver<PresetEvent>, ScratchDir) {

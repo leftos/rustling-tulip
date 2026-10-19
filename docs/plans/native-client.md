@@ -33,20 +33,6 @@ Items:
 
 Split in two. **P4.15a** sources (file, folder, inline, GitHub issue ranges) and variables (toggle, file, folder, text, required). **P4.15b** preview (grouped by tab, max panes per tab, script commands) and launching (progress, counts, Cancel, Select launched, Stop all), sticky progress and failure toasts one per job, the first tab created made active, preset-launched sessions highlighted; needs P4.11c. Parity: "Preset wizard", "Sticky preset progress…", "Preset-launched sessions highlighted".
 
-## P4.17 Keep an untouched layout when panes come and go
-
-New, not a parity line. When a tab's layout was last set by picking a layout type (side by side, grid, …) and the user has not resized its panes since, adding or removing a session rebuilds that same layout type over the new pane count, so side by side stays evenly balanced. Once the user drags a divider, the tab keeps its sizes and adding or removing a pane falls back to today's behaviour.
-
-Rulings (user): the "untouched since picked" flag is per client, since two clients can show the same sessions in different tabs and layouts (a laptop attached remotely beside the desktop's big screen); it is saved with that tab's layout, which the daemon already keys by client id. Both pickers set it: Rearrange ▸ and the first-connect chooser.
-
-A picked grid keeps its column count as panes come and go (3 columns plus a 4th pane is 3 + 1); a pick of the automatic count (the Rearrange shortcut, the chooser's best fit) re-picks it for the new pane count (mock: [canvases/rt-13-grid-cols](./canvases/rt-13-grid-cols/index.html)).
-
-Orchestrator decisions (not owner rulings), from the code map: the flag is `TabEntry.picked_layout: Option<RearrangeLayout>` (`#[serde(default)]`, additive, also read by `TabEntry`'s hand-written deserializer), held and applied in the daemon, which owns the layouts (`crates/daemon/src/tabs.rs`, the `server.rs` tab handlers); the client changes nothing. `RearrangeTab` and `ExtractToNewTab` with a layout set it (Rearrange ▸, the chooser's first tab and its overflow tabs, and Move panes to a new tab, whose dialog picks a layout); `SetPaneRatio` (a divider drag) and any same-tab `MovePane` clear it.
-
-Every pane add or removal on a flagged tab rebuilds it: `SplitPane`, `ClosePane`, `close_session_panes` (each client's tabs separately), the source of `ExtractToNewTab` and of a cross-tab `MovePane`, and the destination of a cross-tab `MovePane`. `MergeTabs`, `CreateTab` and preset-launched tabs leave it unset.
-
-Undo snapshots and cloned layouts carry it as is. A rebuild keeps unbound (empty) panes and the panes' current order, so a spawned pane lands where the split put it. Nothing in the UI shows the flag.
-
 ## Phase 5 — windows and drag-and-drop
 
 Pane / tab / session pop-outs as windows of one process, pane drag-and-drop with edge overlays, sidebar and tab drag-to-reorder. The split below goes to the user with its open questions before anything is dispatched. Items run in build order: drag-and-drop first (P5.1–P5.5), then pop-outs (P5.6–P5.11), then docs (P5.12). Each is a plain-Rust model with unit tests under a thin GPUI view, and ticks the parity lines it delivers; parity lines are cited by their opening words and section in [native-client-parity.md](./native-client-parity.md).
@@ -55,7 +41,14 @@ Drag-and-drop (P5.1–P5.5) is Phase 5a, RT-171 in Wave 2, before the cutover; t
 
 ### What already exists
 
-- **Protocol**: drag-and-drop needs no change. `MovePane` with `PaneDropEdge` (`Left`, `Right`, `Top`, `Bottom`, `Replace`, `OuterLeft`/`OuterRight`/`OuterTop`/`OuterBottom`), `ReorderTabs`, `ReorderContainers`, `ReorderSessions`, `SplitPane { new_session_id }` and `ReplacePaneSession` are all in `crates/protocol/src/lib.rs`. The daemon's move (`crates/daemon/src/server.rs` `move_pane`, `crates/daemon/src/tabs.rs` `insert_adjacent` / `insert_in`) keeps the moved pane's id, swaps sessions for a same-tab `Replace`, gives the destination pane the source's session for a cross-tab `Replace` (its old session goes unbound), wraps the whole root for an outer edge, refuses moving a tab's only pane within that tab, and removes a source tab left empty.
+- **Protocol**: drag-and-drop needs no protocol change. `MovePane` with `PaneDropEdge` (`Left`, `Right`, `Top`, `Bottom`, `Replace`, `OuterLeft`/`OuterRight`/`OuterTop`/`OuterBottom`), `ReorderTabs`, `ReorderContainers`, `ReorderSessions`, `SplitPane { new_session_id }` and `ReplacePaneSession` are all in `crates/protocol/src/lib.rs`.
+
+  The daemon's move (`crates/daemon/src/server.rs` `move_pane`, `crates/daemon/src/tabs.rs` `move_pane`, built on `insert_adjacent` / `insert_in`) keeps the moved pane's id, swaps sessions for a same-tab `Replace`, gives the destination pane the source's session for a cross-tab `Replace` (its old session goes unbound).
+
+  It wraps the whole root for an outer edge, refuses moving a tab's only pane within that tab, and removes a source tab left empty. It also maintains a tab's untouched (picked) layout: a same-tab move clears it, and a cross-tab move rebuilds both untouched tabs (`docs/native-client.md`, "Tab layouts").
+
+  P5.1–P5.5 add drag gestures on top of that placement rather than reimplementing it.
+
 - **Client**: `TabsModel` folds `TabsReordered` (`tabs.rs` `reorder`) and `SidebarModel` folds `ContainersReordered` / `SessionsReordered` and orders by them (`sidebar.rs` `apply_container_order`, `apply_session_order`). `tabs::pane_rects`, `tabs::pick_balanced_drop_target` (the pane menu's Move to ▸, `pane_menu.rs`), `tabs::size_drivers`, `undo::MOVED_PANE`, `RootView::record_undo` and `TabsModel::mark_closing_if_last_pane` exist. No GPUI drag-and-drop API is used yet: divider and sidebar-width drags are raw mouse move / up on the root (`lib.rs` `on_drag_move`, `on_drag_end`). A pane's terminal is a `TerminalPane` entity in a `PaneSlot` keyed by pane id (`grid_view.rs`); app shortcuts are the root's `capture_key_down` (`lib.rs`).
 - **Tauri reference** (tag `tauri-last`, `apps/tauri-app/src/`): `components/GridRenderer.tsx` `computeEdge` (outer band 0.12 of the pane on edges touching the grid boundary, the nearer at a corner; centre box 0.35–0.65 swaps; else the nearer axis's half) and `PoppedOutPaneCard`; `components/TabBar.tsx` (before / after by the pill's half, a pane entering a pill activates it, a pane dropped on a pill placed by `pickBalancedDropTarget`); `components/Sidebar.tsx` (container and leaf reorder by the row's half, leaves reorder only inside workspace, repo and tab containers, a bound leaf also carries its first pane); `PaneWindow.tsx`, `TabWindow.tsx`, `SessionWindow.tsx`; `src-tauri/src/lib.rs` `open_pane_window` / `open_tab_window` / `open_session_window` (an open window is focused, 1100×720, min 700×400).
 

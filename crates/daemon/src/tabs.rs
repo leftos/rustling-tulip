@@ -55,6 +55,7 @@ pub fn make_tab(
             },
         },
         created_at: Utc::now(),
+        picked_layout: None,
     }
 }
 
@@ -405,6 +406,7 @@ pub fn clone_tabs_fresh_ids(tabs: &[TabEntry]) -> Vec<TabEntry> {
                 name: t.name.clone(),
                 content,
                 created_at: t.created_at,
+                picked_layout: t.picked_layout,
             }
         })
         .collect()
@@ -470,6 +472,7 @@ pub fn close_session_panes(tabs: &mut Vec<TabEntry>, session_id: &str) -> Sessio
         if emptied {
             removed_tab_ids.push(tab.id.clone());
         } else {
+            reapply_if_untouched(tab);
             updated.push(tab.clone());
         }
     }
@@ -847,6 +850,181 @@ fn build_for_layout(
     }
 }
 
+/// The layout [`build_for_layout`] actually builds for `layout`: a variant this
+/// build does not know falls back to `Balanced`, and that is the type a later
+/// rebuild re-applies.
+const fn built_layout(layout: RearrangeLayout) -> RearrangeLayout {
+    match layout {
+        RearrangeLayout::Unknown => RearrangeLayout::Balanced,
+        other => other,
+    }
+}
+
+/// Arrange `tab` per `layout` as a layout picker does (Rearrange, the
+/// first-connect chooser) and mark it untouched since that pick, so later pane
+/// additions and removals rebuild the same layout type. The remembered type is
+/// the one actually built, so an unknown wire layout is remembered as
+/// `Balanced` rather than falling back again on every rebuild.
+pub fn pick_layout(tab: &mut TabEntry, layout: RearrangeLayout) -> anyhow::Result<()> {
+    let grid = grid_or_err_mut(tab)?;
+    *grid = rearrange_grid(grid, layout)?;
+    tab.picked_layout = Some(built_layout(layout));
+    Ok(())
+}
+
+/// The user arranged `tab`'s panes by hand (a divider drag, a move within the
+/// tab): from now on adding or removing a pane keeps the sizes it has.
+pub fn touch(tab: &mut TabEntry) {
+    tab.picked_layout = None;
+}
+
+/// Rebuild an untouched tab's picked layout over the panes it holds now, keeping
+/// their ids, their walk order and the empty ones. Returns true when the tab
+/// was rebuilt; a tab touched since its pick, or never picked, is left alone.
+pub fn reapply_if_untouched(tab: &mut TabEntry) -> bool {
+    let Some(layout) = tab.picked_layout else {
+        return false;
+    };
+    let Some(grid) = tab.grid_mut() else {
+        return false;
+    };
+    let Some(rebuilt) = build_for_layout(&collect_panes(grid), layout) else {
+        return false;
+    };
+    *grid = rebuilt;
+    true
+}
+
+/// [`split_pane`] on `tab`'s grid, then rebuild the tab's layout when it is
+/// untouched since picked. Returns the new pane's id.
+pub fn split_tab_pane(
+    tab: &mut TabEntry,
+    target: &str,
+    direction: SplitDirection,
+    place: SplitPlace,
+    new_session_id: Option<String>,
+) -> anyhow::Result<String> {
+    let new_pane_id = split_pane(
+        grid_or_err_mut(tab)?,
+        target,
+        direction,
+        place,
+        new_session_id,
+    )?;
+    reapply_if_untouched(tab);
+    Ok(new_pane_id)
+}
+
+/// [`close_pane`] on `tab`'s grid, then rebuild the surviving panes' layout
+/// when the tab is untouched since picked. Returns `Ok(true)` when the close
+/// emptied the tab (caller removes it).
+pub fn close_tab_pane(tab: &mut TabEntry, target: &str) -> anyhow::Result<bool> {
+    let emptied = close_pane(grid_or_err_mut(tab)?, target)?;
+    if !emptied {
+        reapply_if_untouched(tab);
+    }
+    Ok(emptied)
+}
+
+/// [`set_pane_ratio`] on `tab`'s grid: a divider drag, so the tab is touched.
+pub fn set_tab_pane_ratio(tab: &mut TabEntry, split_path: &[u8], ratio: f32) -> anyhow::Result<()> {
+    set_pane_ratio(grid_or_err_mut(tab)?, split_path, ratio)?;
+    touch(tab);
+    Ok(())
+}
+
+/// The tab a [`close_pane_in_tabs`] changed.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ClosedTab {
+    Updated(TabEntry),
+    Removed(String),
+}
+
+/// Close `pane_id` in `tab_id`: the tab is rebuilt when it is untouched since a
+/// pick, and removed when that was its last pane. Caller broadcasts the outcome.
+pub fn close_pane_in_tabs(
+    tabs: &mut Vec<TabEntry>,
+    tab_id: &str,
+    pane_id: &str,
+) -> anyhow::Result<ClosedTab> {
+    let tab = find_tab_mut(tabs, tab_id)?;
+    let emptied = close_tab_pane(tab, pane_id)?;
+    if emptied {
+        tabs.retain(|t| t.id != tab_id);
+        Ok(ClosedTab::Removed(tab_id.to_string()))
+    } else {
+        Ok(ClosedTab::Updated(tab.clone()))
+    }
+}
+
+/// One pane move: the pane `src_pane_id` of `src_tab_id` dropped on `edge` of
+/// `dst_pane_id` in `dst_tab_id` (the same tab or another).
+pub struct PaneMove<'a> {
+    pub src_tab_id: &'a str,
+    pub src_pane_id: &'a str,
+    pub dst_tab_id: &'a str,
+    pub dst_pane_id: &'a str,
+    pub edge: PaneDropEdge,
+}
+
+/// A tab a [`move_pane`] changed, in the order the caller broadcasts them.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MovedTab {
+    Updated(TabEntry),
+    Removed(String),
+}
+
+/// Move a pane within a tab or across tabs. A move within one tab, a swap
+/// included, is a hand arrangement and touches the tab; a move across tabs
+/// rebuilds each untouched side over its new pane count. On error `tabs` may be
+/// half-changed, so the caller runs this inside a mutation that rolls back.
+pub fn move_pane(tabs: &mut Vec<TabEntry>, mv: &PaneMove<'_>) -> anyhow::Result<Vec<MovedTab>> {
+    if mv.src_tab_id == mv.dst_tab_id {
+        move_within_tab(tabs, mv)
+    } else {
+        move_across_tabs(tabs, mv)
+    }
+}
+
+fn move_within_tab(tabs: &mut [TabEntry], mv: &PaneMove<'_>) -> anyhow::Result<Vec<MovedTab>> {
+    let tab = find_tab_mut(tabs, mv.src_tab_id)?;
+    let grid = grid_or_err_mut(tab)?;
+    if mv.edge == PaneDropEdge::Replace {
+        swap_pane_sessions(grid, mv.src_pane_id, mv.dst_pane_id)?;
+    } else {
+        let (extracted, source_empty) = extract_pane(grid, mv.src_pane_id)?;
+        if source_empty {
+            return Err(anyhow!("cannot move the only pane within the same tab"));
+        }
+        insert_adjacent(grid, mv.dst_pane_id, mv.edge, extracted)?;
+    }
+    touch(tab);
+    Ok(vec![MovedTab::Updated(tab.clone())])
+}
+
+fn move_across_tabs(tabs: &mut Vec<TabEntry>, mv: &PaneMove<'_>) -> anyhow::Result<Vec<MovedTab>> {
+    let src_tab = find_tab_mut(tabs, mv.src_tab_id)?;
+    let (extracted, source_empty) = extract_pane(grid_or_err_mut(src_tab)?, mv.src_pane_id)?;
+    let mut moved = Vec::new();
+    if source_empty {
+        tabs.retain(|t| t.id != mv.src_tab_id);
+        moved.push(MovedTab::Removed(mv.src_tab_id.to_string()));
+    } else {
+        reapply_if_untouched(src_tab);
+        moved.push(MovedTab::Updated(src_tab.clone()));
+    }
+    let dst_tab = find_tab_mut(tabs, mv.dst_tab_id)?;
+    insert_adjacent(
+        grid_or_err_mut(dst_tab)?,
+        mv.dst_pane_id,
+        mv.edge,
+        extracted,
+    )?;
+    reapply_if_untouched(dst_tab);
+    moved.push(MovedTab::Updated(dst_tab.clone()));
+    Ok(moved)
+}
+
 /// Merge multiple tabs into a single new tab. Removes the source tabs from
 /// `tabs` and returns the new tab. Caller is responsible for broadcasting
 /// `TabRemoved` for each consumed id and `TabUpdated` for the survivor.
@@ -881,23 +1059,36 @@ pub fn merge_tabs(
         name: resolved_name,
         content: TabContent::Grid { grid },
         created_at: Utc::now(),
+        picked_layout: None,
     };
     tabs.push(entry.clone());
     Ok(entry)
 }
 
+/// What [`extract_to_new_tab`] changed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExtractOutcome {
+    /// The fresh tab holding the extracted panes.
+    pub new_tab: TabEntry,
+    /// The source tab as it survives, or `None` when the extraction emptied
+    /// and removed it.
+    pub source: Option<TabEntry>,
+}
+
 /// Move a set of panes out of `source_tab_id` into a fresh tab. Returns the
-/// new tab. `layout` controls how the new tab arranges the extracted panes;
-/// `None` keeps the historical horizontal tiling. If extracting empties the
-/// source tab, the source is removed (caller must broadcast `TabRemoved` for
-/// the source as well).
+/// new tab and the surviving source tab. `layout` controls how the new tab
+/// arranges the extracted panes and is a pick: the new tab is untouched since
+/// it. `None` keeps the historical horizontal tiling and picks nothing. A
+/// surviving source tab untouched since its own pick is rebuilt over the panes
+/// left. If extracting empties the source tab, the source is removed (caller
+/// must broadcast `TabRemoved` for the source as well).
 pub fn extract_to_new_tab(
     tabs: &mut Vec<TabEntry>,
     source_tab_id: &str,
     pane_ids: &[String],
     name: Option<String>,
     layout: Option<RearrangeLayout>,
-) -> anyhow::Result<(TabEntry, bool)> {
+) -> anyhow::Result<ExtractOutcome> {
     if pane_ids.is_empty() {
         return Err(anyhow!("extract requires at least one pane"));
     }
@@ -922,9 +1113,15 @@ pub fn extract_to_new_tab(
     }
     if source_empty {
         tabs.retain(|t| t.id != source_tab_id);
+    } else {
+        reapply_if_untouched(source);
     }
-    let layout = layout.unwrap_or(RearrangeLayout::Horizontal);
-    let grid = build_for_layout(&extracted, layout)
+    let source = if source_empty {
+        None
+    } else {
+        tabs.iter().find(|t| t.id == source_tab_id).cloned()
+    };
+    let grid = build_for_layout(&extracted, layout.unwrap_or(RearrangeLayout::Horizontal))
         .ok_or_else(|| anyhow!("extract produced empty tab"))?;
     let resolved_name = name.unwrap_or_else(|| next_default_name(tabs));
     let entry = TabEntry {
@@ -932,9 +1129,13 @@ pub fn extract_to_new_tab(
         name: resolved_name,
         content: TabContent::Grid { grid },
         created_at: Utc::now(),
+        picked_layout: layout.map(built_layout),
     };
     tabs.push(entry.clone());
-    Ok((entry, source_empty))
+    Ok(ExtractOutcome {
+        new_tab: entry,
+        source,
+    })
 }
 
 /// Validate `ordered_ids` is a permutation of the existing tab ids and apply
@@ -1002,6 +1203,7 @@ mod tests {
                 grid: pane("p-restored", Some("s-restored")),
             },
             created_at: Utc::now(),
+            picked_layout: None,
         };
 
         let inserted = restore_tab(&mut tabs, restored.clone(), 1).expect("restore");
@@ -1032,6 +1234,7 @@ mod tests {
                 grid: pane("restored-pane", None),
             },
             created_at: original.created_at,
+            picked_layout: None,
         };
 
         let restored =
@@ -1171,6 +1374,7 @@ mod tests {
             name: id.to_string(),
             content: TabContent::Grid { grid },
             created_at: Utc::now(),
+            picked_layout: None,
         }
     }
 
@@ -1602,6 +1806,7 @@ mod tests {
             name: name.to_string(),
             content: TabContent::Grid { grid },
             created_at: Utc::now(),
+            picked_layout: None,
         }
     }
 
@@ -1661,7 +1866,7 @@ mod tests {
             "A",
             split(Horizontal, 0.5, pane("p1", Some("s1")), pane("p2", None)),
         )];
-        let (new_tab, source_empty) = extract_to_new_tab(
+        let outcome = extract_to_new_tab(
             &mut tabs,
             "t1",
             &["p1".to_string()],
@@ -1669,7 +1874,8 @@ mod tests {
             None,
         )
         .expect("extract");
-        assert!(!source_empty);
+        assert!(outcome.source.is_some());
+        let new_tab = outcome.new_tab;
         assert_eq!(tabs.len(), 2);
         let source = tabs.iter().find(|t| t.id == "t1").expect("source");
         assert!(
@@ -1683,10 +1889,9 @@ mod tests {
     #[test]
     fn extract_to_new_tab_empties_source_when_all_panes_moved() {
         let mut tabs = vec![make_tab_with("t1", "A", pane("only", Some("s1")))];
-        let (_, source_empty) =
-            extract_to_new_tab(&mut tabs, "t1", &["only".to_string()], None, None)
-                .expect("extract");
-        assert!(source_empty);
+        let outcome = extract_to_new_tab(&mut tabs, "t1", &["only".to_string()], None, None)
+            .expect("extract");
+        assert!(outcome.source.is_none());
         assert_eq!(tabs.len(), 1);
         assert_ne!(tabs[0].id, "t1");
     }
@@ -1740,7 +1945,7 @@ mod tests {
         }
         let mut tabs = vec![make_tab_with("t1", "A", grid)];
         let moved: Vec<String> = (0..4).map(|i| format!("p{i}")).collect();
-        let (new_tab, source_empty) = extract_to_new_tab(
+        let outcome = extract_to_new_tab(
             &mut tabs,
             "t1",
             &moved,
@@ -1748,7 +1953,8 @@ mod tests {
             Some(RearrangeLayout::Grid { cols: 2 }),
         )
         .expect("extract");
-        assert!(!source_empty);
+        assert!(outcome.source.is_some());
+        let new_tab = outcome.new_tab;
         let new_grid = grid_or_err(&new_tab).expect("new grid");
         let GridNode::Split {
             direction, first, ..
@@ -1934,5 +2140,397 @@ mod tests {
         ];
         assert!(reorder_tabs(&mut tabs, &["a".to_string()]).is_err());
         assert!(reorder_tabs(&mut tabs, &["a".to_string(), "z".to_string()]).is_err());
+    }
+
+    /// Panes `ids`, each bound to the session `s-<id>`.
+    fn bound(ids: &[&str]) -> Vec<(String, Option<String>)> {
+        ids.iter()
+            .map(|id| ((*id).to_string(), Some(format!("s-{id}"))))
+            .collect()
+    }
+
+    /// A tab laid out per `layout` over `panes` and marked untouched since
+    /// that pick.
+    fn picked_tab(
+        id: &str,
+        panes: &[(String, Option<String>)],
+        layout: RearrangeLayout,
+    ) -> TabEntry {
+        let grid = build_for_layout(panes, layout).expect("non-empty panes");
+        TabEntry {
+            picked_layout: Some(layout),
+            ..grid_tab(id, grid)
+        }
+    }
+
+    fn grid_of(tab: &TabEntry) -> &GridNode {
+        tab.grid().expect("a grid tab")
+    }
+
+    #[test]
+    fn pick_layout_marks_tab_untouched_and_remembers_the_type() {
+        let mut tab = grid_tab(
+            "T",
+            split(
+                Vertical,
+                0.3,
+                pane("a", Some("s-a")),
+                pane("b", Some("s-b")),
+            ),
+        );
+        pick_layout(&mut tab, RearrangeLayout::Horizontal).expect("pick");
+        assert_eq!(tab.picked_layout, Some(RearrangeLayout::Horizontal));
+        assert_eq!(
+            grid_of(&tab),
+            &build_balanced(&bound(&["a", "b"]), Horizontal).expect("grid")
+        );
+    }
+
+    /// An unknown wire layout is built as `Balanced`, so that fallback — not
+    /// `Unknown` — is the type later rebuilds re-apply.
+    #[test]
+    fn pick_layout_with_an_unknown_layout_remembers_the_built_layout() {
+        let mut tab = grid_tab(
+            "T",
+            split(
+                Vertical,
+                0.3,
+                pane("a", Some("s-a")),
+                pane("b", Some("s-b")),
+            ),
+        );
+        pick_layout(&mut tab, RearrangeLayout::Unknown).expect("pick");
+        assert_eq!(tab.picked_layout, Some(RearrangeLayout::Balanced));
+        assert_eq!(
+            grid_of(&tab),
+            &build_balanced(&bound(&["a", "b"]), Horizontal).expect("grid")
+        );
+    }
+
+    #[test]
+    fn split_pane_on_an_untouched_horizontal_tab_stays_evenly_balanced() {
+        let mut tab = picked_tab("T", &bound(&["a", "b"]), RearrangeLayout::Horizontal);
+        let new_id = split_tab_pane(
+            &mut tab,
+            "b",
+            Vertical,
+            SplitPlace::Second,
+            Some("s-c".to_string()),
+        )
+        .expect("split");
+        let mut panes = bound(&["a", "b"]);
+        panes.push((new_id, Some("s-c".to_string())));
+        assert_eq!(
+            grid_of(&tab),
+            &build_balanced(&panes, Horizontal).expect("grid")
+        );
+        assert_eq!(tab.picked_layout, Some(RearrangeLayout::Horizontal));
+    }
+
+    #[test]
+    fn split_pane_on_an_untouched_three_column_grid_makes_three_plus_one() {
+        let three_cols = RearrangeLayout::Grid { cols: 3 };
+        let mut tab = picked_tab("T", &bound(&["a", "b", "c"]), three_cols);
+        let new_id =
+            split_tab_pane(&mut tab, "c", Horizontal, SplitPlace::Second, None).expect("split");
+        let mut panes = bound(&["a", "b", "c"]);
+        panes.push((new_id, None));
+        let three_plus_one = build_grid(&panes, 3).expect("grid");
+        assert_ne!(
+            three_plus_one,
+            build_grid(&panes, 0).expect("grid"),
+            "four panes auto-pick two columns, so the kept count is visible"
+        );
+        assert_eq!(grid_of(&tab), &three_plus_one);
+        assert_eq!(tab.picked_layout, Some(three_cols));
+    }
+
+    #[test]
+    fn split_pane_on_an_untouched_auto_grid_re_picks_the_columns() {
+        let auto = RearrangeLayout::Grid { cols: 0 };
+        let mut tab = picked_tab("T", &bound(&["a", "b", "c", "d"]), auto);
+        let new_id =
+            split_tab_pane(&mut tab, "d", Horizontal, SplitPlace::Second, None).expect("split");
+        let mut panes = bound(&["a", "b", "c", "d"]);
+        panes.push((new_id, None));
+        assert_eq!(auto_grid_cols(4), 2);
+        assert_eq!(auto_grid_cols(5), 3);
+        assert_eq!(grid_of(&tab), &build_grid(&panes, 3).expect("grid"));
+        assert_eq!(tab.picked_layout, Some(auto), "the pick stays automatic");
+    }
+
+    #[test]
+    fn close_pane_on_an_untouched_vertical_tab_rebalances() {
+        let mut tab = picked_tab(
+            "T",
+            &bound(&["a", "b", "c", "d"]),
+            RearrangeLayout::Vertical,
+        );
+        assert!(!close_tab_pane(&mut tab, "a").expect("close"));
+        assert_eq!(
+            grid_of(&tab),
+            &build_balanced(&bound(&["b", "c", "d"]), Vertical).expect("grid")
+        );
+        assert_eq!(tab.picked_layout, Some(RearrangeLayout::Vertical));
+    }
+
+    #[test]
+    fn close_session_panes_rebuilds_untouched_tabs_only() {
+        let mut panes = bound(&["b", "c", "d"]);
+        panes.insert(0, ("a".to_string(), Some("doomed".to_string())));
+        let grid = build_balanced(&panes, Horizontal).expect("grid");
+        let mut tabs = vec![
+            picked_tab("picked", &panes, RearrangeLayout::Horizontal),
+            grid_tab("touched", grid),
+        ];
+
+        let result = close_session_panes(&mut tabs, "doomed");
+
+        assert_eq!(result.updated.len(), 2);
+        assert_eq!(
+            grid_of(&tabs[0]),
+            &build_balanced(&bound(&["b", "c", "d"]), Horizontal).expect("grid")
+        );
+        assert_eq!(tabs[0].picked_layout, Some(RearrangeLayout::Horizontal));
+        assert_eq!(
+            grid_of(&tabs[1]),
+            &split(
+                Horizontal,
+                0.5,
+                pane("b", Some("s-b")),
+                split(
+                    Horizontal,
+                    0.5,
+                    pane("c", Some("s-c")),
+                    pane("d", Some("s-d"))
+                ),
+            ),
+            "the touched tab's sibling fills the space as before"
+        );
+        assert_eq!(
+            result.updated[0], tabs[0],
+            "the broadcast carries the rebuild"
+        );
+    }
+
+    #[test]
+    fn set_pane_ratio_clears_the_untouched_flag() {
+        let mut tab = picked_tab("T", &bound(&["a", "b"]), RearrangeLayout::Horizontal);
+        set_tab_pane_ratio(&mut tab, &[], 0.7).expect("set ratio");
+        assert_eq!(tab.picked_layout, None);
+        let GridNode::Split { ratio, .. } = grid_of(&tab) else {
+            panic!("expected Split");
+        };
+        assert!((ratio - 0.7).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn split_pane_on_a_touched_tab_keeps_todays_behaviour() {
+        let mut tab = grid_tab(
+            "T",
+            build_balanced(&bound(&["a", "b"]), Horizontal).expect("grid"),
+        );
+        let new_id =
+            split_tab_pane(&mut tab, "b", Vertical, SplitPlace::Second, None).expect("split");
+        assert_eq!(
+            grid_of(&tab),
+            &split(
+                Horizontal,
+                0.5,
+                pane("a", Some("s-a")),
+                split(Vertical, 0.5, pane("b", Some("s-b")), pane(&new_id, None)),
+            )
+        );
+        assert_eq!(tab.picked_layout, None);
+    }
+
+    #[test]
+    fn reapply_keeps_pane_ids_order_and_empty_panes() {
+        let grid = split(
+            Vertical,
+            0.3,
+            pane("a", Some("s-a")),
+            split(Horizontal, 0.8, pane("e", None), pane("b", Some("s-b"))),
+        );
+        let mut tab = TabEntry {
+            picked_layout: Some(RearrangeLayout::Horizontal),
+            ..grid_tab("T", grid)
+        };
+        assert!(reapply_if_untouched(&mut tab));
+        let expected = vec![
+            ("a".to_string(), Some("s-a".to_string())),
+            ("e".to_string(), None),
+            ("b".to_string(), Some("s-b".to_string())),
+        ];
+        assert_eq!(collect_panes(grid_of(&tab)), expected);
+        assert_eq!(
+            grid_of(&tab),
+            &build_balanced(&expected, Horizontal).expect("grid")
+        );
+        assert_eq!(tab.picked_layout, Some(RearrangeLayout::Horizontal));
+
+        let mut touched = grid_tab("U", pane("x", None));
+        assert!(
+            !reapply_if_untouched(&mut touched),
+            "an unflagged tab is left alone"
+        );
+    }
+
+    #[test]
+    fn reapply_with_one_pane_left_is_a_single_pane() {
+        let three_cols = RearrangeLayout::Grid { cols: 3 };
+        let mut tab = picked_tab("T", &bound(&["a", "b"]), three_cols);
+        assert!(!close_tab_pane(&mut tab, "b").expect("close"));
+        assert_eq!(grid_of(&tab), &pane("a", Some("s-a")));
+        assert_eq!(tab.picked_layout, Some(three_cols));
+    }
+
+    #[test]
+    fn extract_to_new_tab_with_a_layout_marks_the_new_tab_and_rebuilds_an_untouched_source() {
+        let mut tabs = vec![picked_tab(
+            "src",
+            &bound(&["a", "b", "c", "d", "e"]),
+            RearrangeLayout::Horizontal,
+        )];
+        let outcome = extract_to_new_tab(
+            &mut tabs,
+            "src",
+            &["a".to_string()],
+            None,
+            Some(RearrangeLayout::Vertical),
+        )
+        .expect("extract");
+        assert!(outcome.source.is_some());
+        let new_tab = outcome.new_tab;
+        assert_eq!(new_tab.picked_layout, Some(RearrangeLayout::Vertical));
+        assert_eq!(
+            grid_of(&tabs[0]),
+            &build_balanced(&bound(&["b", "c", "d", "e"]), Horizontal).expect("grid")
+        );
+
+        let unpicked = extract_to_new_tab(&mut tabs, "src", &["b".to_string()], None, None)
+            .expect("extract without a layout")
+            .new_tab;
+        assert_eq!(
+            unpicked.picked_layout, None,
+            "no layout chosen, nothing picked"
+        );
+    }
+
+    #[test]
+    fn extract_to_new_tab_with_an_unknown_layout_remembers_the_built_layout() {
+        let mut tabs = vec![picked_tab(
+            "src",
+            &bound(&["a", "b"]),
+            RearrangeLayout::Horizontal,
+        )];
+        let outcome = extract_to_new_tab(
+            &mut tabs,
+            "src",
+            &["a".to_string()],
+            None,
+            Some(RearrangeLayout::Unknown),
+        )
+        .expect("extract");
+        assert_eq!(
+            outcome.new_tab.picked_layout,
+            Some(RearrangeLayout::Balanced)
+        );
+        assert_eq!(grid_of(&outcome.new_tab), &pane("a", Some("s-a")));
+    }
+
+    fn pane_move<'a>(
+        src: (&'a str, &'a str),
+        dst: (&'a str, &'a str),
+        edge: PaneDropEdge,
+    ) -> PaneMove<'a> {
+        PaneMove {
+            src_tab_id: src.0,
+            src_pane_id: src.1,
+            dst_tab_id: dst.0,
+            dst_pane_id: dst.1,
+            edge,
+        }
+    }
+
+    #[test]
+    fn move_pane_across_tabs_rebuilds_both_untouched_tabs() {
+        let mut tabs = vec![
+            picked_tab(
+                "S",
+                &bound(&["a", "b", "c", "d"]),
+                RearrangeLayout::Horizontal,
+            ),
+            picked_tab("D", &bound(&["x", "y"]), RearrangeLayout::Vertical),
+        ];
+        let moved = move_pane(
+            &mut tabs,
+            &pane_move(("S", "a"), ("D", "y"), PaneDropEdge::Right),
+        )
+        .expect("move");
+        assert_eq!(
+            grid_of(&tabs[0]),
+            &build_balanced(&bound(&["b", "c", "d"]), Horizontal).expect("grid")
+        );
+        assert_eq!(
+            grid_of(&tabs[1]),
+            &build_balanced(&bound(&["x", "y", "a"]), Vertical).expect("grid")
+        );
+        assert_eq!(tabs[1].picked_layout, Some(RearrangeLayout::Vertical));
+        assert_eq!(
+            moved,
+            vec![
+                MovedTab::Updated(tabs[0].clone()),
+                MovedTab::Updated(tabs[1].clone())
+            ]
+        );
+    }
+
+    #[test]
+    fn same_tab_move_clears_the_flag() {
+        let mut tabs = vec![
+            picked_tab("M", &bound(&["a", "b", "c"]), RearrangeLayout::Horizontal),
+            picked_tab("W", &bound(&["x", "y"]), RearrangeLayout::Horizontal),
+        ];
+        move_pane(
+            &mut tabs,
+            &pane_move(("M", "a"), ("M", "c"), PaneDropEdge::Bottom),
+        )
+        .expect("move within the tab");
+        move_pane(
+            &mut tabs,
+            &pane_move(("W", "x"), ("W", "y"), PaneDropEdge::Replace),
+        )
+        .expect("swap within the tab");
+        assert_eq!(tabs[0].picked_layout, None, "a move clears the flag");
+        assert_eq!(tabs[1].picked_layout, None, "a swap clears the flag");
+    }
+
+    #[test]
+    fn merge_tabs_leaves_the_new_tab_unflagged() {
+        let mut tabs = vec![
+            picked_tab("A", &bound(&["a"]), RearrangeLayout::Horizontal),
+            picked_tab("B", &bound(&["b"]), RearrangeLayout::Vertical),
+        ];
+        let merged = merge_tabs(
+            &mut tabs,
+            &["A".to_string(), "B".to_string()],
+            None,
+            MergeLayout::TileHorizontal,
+        )
+        .expect("merge");
+        assert_eq!(merged.picked_layout, None);
+    }
+
+    #[test]
+    fn clone_tabs_fresh_ids_keeps_the_flag() {
+        let three_cols = RearrangeLayout::Grid { cols: 3 };
+        let src = vec![
+            picked_tab("P", &bound(&["a", "b"]), three_cols),
+            grid_tab("U", pane("c", None)),
+        ];
+        let cloned = clone_tabs_fresh_ids(&src);
+        assert_eq!(cloned[0].picked_layout, Some(three_cols));
+        assert_eq!(cloned[1].picked_layout, None);
     }
 }

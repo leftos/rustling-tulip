@@ -1379,6 +1379,12 @@ pub struct TabEntry {
     pub name: String,
     pub content: TabContent,
     pub created_at: DateTime<Utc>,
+    /// The layout type this tab was last arranged with by a picker (Rearrange
+    /// or the first-connect chooser), kept while the user has not resized its
+    /// panes since. `Some` means untouched since that pick: the daemon rebuilds
+    /// the same layout type whenever a pane is added or removed. `None` means
+    /// never picked, or touched since (a divider drag, a same-tab move).
+    pub picked_layout: Option<RearrangeLayout>,
 }
 
 impl TabEntry {
@@ -1419,6 +1425,8 @@ impl<'de> Deserialize<'de> for TabEntry {
             #[serde(default)]
             grid: Option<GridNode>,
             created_at: DateTime<Utc>,
+            #[serde(default)]
+            picked_layout: Option<RearrangeLayout>,
         }
         let raw = Raw::deserialize(deserializer)?;
         let content = match (raw.content, raw.grid) {
@@ -1435,6 +1443,7 @@ impl<'de> Deserialize<'de> for TabEntry {
             name: raw.name,
             content,
             created_at: raw.created_at,
+            picked_layout: raw.picked_layout,
         })
     }
 }
@@ -4197,7 +4206,32 @@ mod tests {
                 },
             },
             created_at: DateTime::from_timestamp(1_700_000_000, 0).expect("valid timestamp"),
+            picked_layout: None,
         }
+    }
+
+    #[test]
+    fn tab_entry_picked_layout_round_trips() {
+        for picked in [
+            RearrangeLayout::Grid { cols: 3 },
+            RearrangeLayout::Horizontal,
+        ] {
+            let original = TabEntry {
+                picked_layout: Some(picked),
+                ..sample_tab()
+            };
+            let json = serde_json::to_string(&original).expect("serialize");
+            let decoded: TabEntry = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(decoded.picked_layout, Some(picked), "{json}");
+            assert_eq!(decoded, original);
+        }
+    }
+
+    #[test]
+    fn tab_entry_without_picked_layout_decodes_as_none() {
+        let json = r#"{"id":"t","name":"Tab","content":{"kind":"grid","grid":{"kind":"pane","pane_id":"p1","session_id":null}},"created_at":"2023-11-14T22:13:20Z"}"#;
+        let decoded: TabEntry = serde_json::from_str(json).expect("a pre-flag tab still decodes");
+        assert_eq!(decoded.picked_layout, None);
     }
 
     #[test]

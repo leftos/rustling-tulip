@@ -188,6 +188,82 @@ fn dragging_a_split_divider_sends_one_ratio_on_release(cx: &mut TestAppContext) 
     );
 }
 
+/// A press that never moves is a click on the handle, not a resize: sending a
+/// ratio for it would clear the tab's untouched layout for nothing.
+#[gpui::test]
+fn a_divider_click_or_a_one_pixel_jitter_sends_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let grid = split(
+        SplitDirection::Horizontal,
+        pane("p1", Some("s1")),
+        split(SplitDirection::Vertical, pane("p2", None), pane("p3", None)),
+    );
+    let fixture = Fixture {
+        sessions: vec![session("s1").build()],
+        tabs: vec![tab("t1", &grid)],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.sent();
+
+    let at = h.center("divider-t1-[1]");
+    h.cx.simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+    h.cx.simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+    assert!(h.sent().is_empty(), "a click on a divider resizes nothing");
+
+    h.cx.simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+    let jitter = point(at.x, at.y + px(1.0));
+    h.cx.simulate_mouse_move(jitter, MouseButton::Left, Modifiers::none());
+    h.cx.simulate_mouse_up(jitter, MouseButton::Left, Modifiers::none());
+    assert!(h.sent().is_empty(), "a 1 px jitter is a click, not a drag");
+}
+
+/// A tab update that rebuilds the tree renumbers its splits: `split_path` may
+/// still lead to a split, but not the one the press grabbed. The drag must end
+/// so no ratio lands on the wrong split.
+#[gpui::test]
+fn a_tab_update_that_rebuilds_the_tree_cancels_the_divider_drag(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let grid = split(
+        SplitDirection::Horizontal,
+        pane("p1", Some("s1")),
+        split(SplitDirection::Vertical, pane("p2", None), pane("p3", None)),
+    );
+    let fixture = Fixture {
+        sessions: vec![session("s1").build()],
+        tabs: vec![tab("t1", &grid)],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.sent();
+
+    let from = h.center("divider-t1-[1]");
+    h.cx.simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+    h.send(DaemonMessage::TabUpdated {
+        tab: tab(
+            "t1",
+            &split(
+                SplitDirection::Horizontal,
+                pane("p1", Some("s1")),
+                split(
+                    SplitDirection::Horizontal,
+                    pane("p2", None),
+                    pane("p3", None),
+                ),
+            ),
+        ),
+    });
+    h.sent();
+
+    let to = point(from.x, from.y + px(60.0));
+    h.cx.simulate_mouse_move(to, MouseButton::Left, Modifiers::none());
+    h.cx.simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
+    assert!(
+        h.sent().is_empty(),
+        "the drag was dropped, so no ratio lands on the rebuilt tree's split"
+    );
+}
+
 #[gpui::test]
 fn same_session_in_two_panes_detaches_only_with_the_last(cx: &mut TestAppContext) {
     let dir = TestDir::new();

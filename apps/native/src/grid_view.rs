@@ -928,10 +928,11 @@ impl RootView {
             .debug_selector(|| name)
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                     this.drag = Some(Drag::Divider {
                         tab_id: tab_id.clone(),
                         split_path: split_path.clone(),
+                        origin: (event.position.x / px(1.0), event.position.y / px(1.0)),
                         ratio: None,
                     });
                     cx.stop_propagation();

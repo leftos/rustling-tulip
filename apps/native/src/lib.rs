@@ -105,7 +105,8 @@ use gpui::{
     WindowBounds, WindowOptions, div, prelude::*, pulsating_between, px, size,
 };
 use protocol::{
-    AppearanceOverrides, ClientMessage, DaemonMessage, RepoEntry, SessionSnapshot, TabEntry,
+    AppearanceOverrides, ClientMessage, DaemonMessage, GridNode, RepoEntry, SessionSnapshot,
+    TabEntry,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -318,6 +319,9 @@ pub(crate) const WINDOW_SIZE: (u16, u16) = (1000, 640);
 
 /// Text size of the footer, flyout and overlay.
 const UI_TEXT_SIZE: f32 = 12.0;
+/// How far a divider press must travel before it resizes the split; anything
+/// shorter is a click on the handle and sends nothing.
+const DIVIDER_DRAG_THRESHOLD: f32 = 3.0;
 /// The footer's height in logical pixels.
 pub const FOOTER_HEIGHT: f32 = 28.0;
 /// Text size of the footer's counts and status text.
@@ -341,6 +345,9 @@ enum Drag {
     Divider {
         tab_id: String,
         split_path: Vec<u8>,
+        /// Where the press landed; a press that stays within
+        /// [`DIVIDER_DRAG_THRESHOLD`] of it is a click, not a resize.
+        origin: (f32, f32),
         ratio: Option<f32>,
     },
     /// The source-control split between the changes and the History.
@@ -1338,10 +1345,13 @@ impl RootView {
             Some(Drag::Divider {
                 tab_id,
                 split_path,
+                origin,
                 ratio,
             }) => {
-                if let Some(next) =
-                    divider_ratio(&self.tabs, self.grid_bounds, tab_id, split_path, at)
+                let travelled = (at.0 - origin.0).hypot(at.1 - origin.1);
+                if (ratio.is_some() || travelled >= DIVIDER_DRAG_THRESHOLD)
+                    && let Some(next) =
+                        divider_ratio(&self.tabs, self.grid_bounds, tab_id, split_path, at)
                 {
                     self.tabs.set_ratio(tab_id, split_path, next);
                     *ratio = Some(next);
@@ -1373,12 +1383,75 @@ impl RootView {
                 tab_id,
                 split_path,
                 ratio: Some(ratio),
+                ..
             }) => self.send(ClientMessage::SetPaneRatio {
                 tab_id,
                 split_path,
                 ratio,
             }),
             Some(Drag::Divider { ratio: None, .. }) | None => {}
+        }
+    }
+
+    /// Folds a tab message in, ending a divider drag whose tree it rebuilt.
+    /// Returns whether the message was a tab message.
+    fn fold_tabs(
+        &mut self,
+        msg: &DaemonMessage,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let drag_tree = self.divider_tree_before(msg);
+        if !self.tabs.apply(msg) {
+            return false;
+        }
+        self.drop_stale_divider_drag(drag_tree);
+        self.confirm.disarm();
+        self.after_tabs_change(window, cx);
+        true
+    }
+
+    /// The tree an in-flight divider drag points into, kept when `msg` can
+    /// rebuild it and compared after the fold.
+    fn divider_tree_before(&self, msg: &DaemonMessage) -> Option<(String, GridNode)> {
+        if matches!(
+            msg,
+            DaemonMessage::Tabs { .. }
+                | DaemonMessage::TabUpdated { .. }
+                | DaemonMessage::TabRemoved { .. }
+        ) {
+            self.divider_drag_tree()
+        } else {
+            None
+        }
+    }
+
+    /// The tree an in-flight divider drag's `split_path` points into, if any.
+    fn divider_drag_tree(&self) -> Option<(String, GridNode)> {
+        let Some(Drag::Divider { tab_id, .. }) = &self.drag else {
+            return None;
+        };
+        let grid = self.tabs.tab(tab_id)?.grid()?.clone();
+        Some((tab_id.clone(), grid))
+    }
+
+    /// A tab update that rebuilt the dragged tab's tree renumbers its splits,
+    /// so the drag's held path would land the ratio on a split the press did
+    /// not grab. The drag ends instead, and its release sends nothing.
+    fn drop_stale_divider_drag(&mut self, before: Option<(String, GridNode)>) {
+        let Some((tab_id, before)) = before else {
+            return;
+        };
+        let still_dragging = matches!(
+            &self.drag,
+            Some(Drag::Divider { tab_id: dragged, .. }) if *dragged == tab_id
+        );
+        if !still_dragging {
+            return;
+        }
+        let after = self.tabs.tab(&tab_id).and_then(|tab| tab.grid().cloned());
+        if after.as_ref() != Some(&before) {
+            self.drag = None;
         }
     }
 
@@ -1552,9 +1625,7 @@ impl RootView {
         if let DaemonMessage::Tabs { tabs } = &msg {
             self.on_tab_list(tabs, window, cx);
         }
-        if self.tabs.apply(&msg) {
-            self.confirm.disarm();
-            self.after_tabs_change(window, cx);
+        if self.fold_tabs(&msg, window, cx) {
             return;
         }
         match msg {

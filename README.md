@@ -76,6 +76,7 @@ Start with [docs/architecture.md](docs/architecture.md) for how the pieces fit a
 - **Fan-out ledger**: the parent's event log for one fan-out, in the repo's git common dir.
 - **Feature marker**: `branch: feat/<name>` in a wave's Linear project content; every item in that project lands on the `feat/<name>` branch instead of `main` (user-level `nextup` §3, "Feature branches").
 - **Feature PR**: the draft pull request from a marker's `feat/<name>` into `main`, opened with the first item under the marker and merged with `--rebase` by `/ship` once every item under the marker has landed.
+- **First-connect chooser**: the dialog a client with no saved tab layout gets when it connects, offering start empty, open all active sessions in a chosen arrangement, adopt a previous layout or copy another client's; see `docs/native-client.md` ("Tab layouts").
 - **Fix round**: review findings sent back to the worker that made the change.
 - **Folder-only entry**: a history entry with no spawn config (imported from a tracer log, or a standalone session); it is recovered by running claude in its folder with its `--add-dir` set, never by checking out a branch.
 - **Forwarder**: the daemon's per-connection task that streams one session's PTY output to one client; `LoadScrollback` replaces it.
@@ -128,6 +129,7 @@ Start with [docs/architecture.md](docs/architecture.md) for how the pieces fit a
 - **Tracking issue**: the issue `Merge feat/<name> (#N)`, last in a feature marker's project, that stands for its feature PR until the PR merges.
 - **Unexpected end**: a session whose tracer was lost (killed or crashed) rather than one that exited or was closed; these are pre-ticked for recovery.
 - **Unseen turn**: an agent session whose turn ended while this client wasn't showing it focused; it shows the waiting ring until focused.
+- **Untouched (picked) layout**: a tab whose layout type was last chosen by a pick (Rearrange or the first-connect chooser) and has not been resized or hand-arranged since; the daemon rebuilds that type as panes come and go, and the per-client flag is `TabEntry.picked_layout`; see `docs/native-client.md` ("Tab layouts").
 - **Warm-up gate**: auto-switch making no decision until every usable account has been polled since it started.
 - **Wave**: a release-sized bundle of plan items that share owning files, so one implementer reads those files once and one review covers the bundle; each wave is a Linear project whose content names its files, review and verification.
 - **Worker**: a subagent or rustling-tulip session running one brief in one worktree.

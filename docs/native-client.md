@@ -30,6 +30,20 @@ Machine-local UI state lives in native-ui.json in the config dir (`UiState` in `
 
 Settings → Worktrees edits the daemon's worktrees-root override, and shows `Saved` only once the daemon has echoed the last save. Manage worktrees (opened from that tab) lists the root's groups titled by their `.rt-group` name, deletes one group or every stale one, and "Launch session here" opens the spawn dialog with the target locked and that worktree pinned (the spawn form's `Lock`, which a duplicate prefill reuses). Folder pickers go through `RootDeps.pick_folder`, so specs inject a fake: GPUI's test platform cannot prompt.
 
+## Tab layouts
+
+A client's tabs and their split trees are daemon-side and keyed by client id (`state.rs` `ClientLayout`), so two clients can show the same sessions in different tabs and layouts. A tab's layout type is a `RearrangeLayout`; `TabEntry.picked_layout` records the type last picked for that tab, and holds only while the user has not arranged the tab's panes by hand since.
+
+A pick marks the tab with `RearrangeTab`; an `ExtractToNewTab` that names a layout marks its new tab too (the first-connect chooser's overflow tabs, the Move-panes dialog; the chooser's first tab is rearranged). The remembered type is the one the daemon actually built, so a wire layout it does not know is kept as `Balanced`.
+
+While a tab is untouched since its pick, the daemon rebuilds it on every pane addition or removal: `SplitPane`, `ClosePane`, a session-removal close across each client's tabs (`close_session_panes`), the source of `ExtractToNewTab`, and both sides of a cross-tab `MovePane`. A rebuild keeps pane ids, their order and unbound panes.
+
+A concrete grid keeps its column count (a three-column pick with a fourth pane is three plus one); a pick of the automatic column count re-picks the columns for the new pane count.
+
+`SetPaneRatio` (a divider drag) and any same-tab `MovePane`, a swap included, clear the flag, after which panes keep the sizes they have. `MergeTabs`, `CreateTab` and `InitLayout`'s own build leave it unset, a preset launch clears it, and undo snapshots and cloned layouts carry it as is.
+
+The client sends no `SetPaneRatio` for a divider press that stays within 3 logical px of where it landed, so a click on the handle does not count as a resize. A tab update that rebuilds the dragged tab's split tree renumbers its splits, so the client ends the in-flight drag instead of sending its held path.
+
 ## Terminal
 
 - **Scrollback-first attach**: `LoadScrollback` with live output buffered meanwhile; an 8 s request timeout with retries after 2 s and 4 s, each with its own `request_id`, and a reply to an older id dropped. When the daemon restarts the forwarder (`forwarder_restarted: true`) the held-back output is discarded, since it is already in the history. The logical scrollback cap is 5000 lines.

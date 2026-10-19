@@ -2469,8 +2469,7 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         } => {
             let updated = hub.state.try_mutate_client_layout(client_id, |tabs| {
                 let tab = tabs::find_tab_mut(tabs, &tab_id)?;
-                let grid = tabs::grid_or_err_mut(tab)?;
-                tabs::split_pane(grid, &pane_id, direction, place, new_session_id)?;
+                tabs::split_tab_pane(tab, &pane_id, direction, place, new_session_id)?;
                 Ok::<_, anyhow::Error>(tab.clone())
             });
             match updated {
@@ -2480,21 +2479,13 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         }
         ClientMessage::ClosePane { tab_id, pane_id } => {
             let outcome = hub.state.try_mutate_client_layout(client_id, |tabs| {
-                let tab = tabs::find_tab_mut(tabs, &tab_id)?;
-                let grid = tabs::grid_or_err_mut(tab)?;
-                let empty = tabs::close_pane(grid, &pane_id)?;
-                if empty {
-                    tabs.retain(|t| t.id != tab_id);
-                    Ok::<_, anyhow::Error>(CloseOutcome::TabRemoved(tab_id.clone()))
-                } else {
-                    Ok(CloseOutcome::TabUpdated(tab.clone()))
-                }
+                tabs::close_pane_in_tabs(tabs, &tab_id, &pane_id)
             })?;
             match outcome {
-                CloseOutcome::TabRemoved(id) => {
+                tabs::ClosedTab::Removed(id) => {
                     hub.emit_tab(client_id, TabEvent::Removed(id));
                 }
-                CloseOutcome::TabUpdated(tab) => {
+                tabs::ClosedTab::Updated(tab) => {
                     hub.emit_tab(client_id, TabEvent::Updated(tab));
                 }
             }
@@ -2506,8 +2497,7 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         } => {
             let updated = hub.state.mutate_client_layout(client_id, |tabs| {
                 let tab = tabs::find_tab_mut(tabs, &tab_id)?;
-                let grid = tabs::grid_or_err_mut(tab)?;
-                tabs::set_pane_ratio(grid, &split_path, ratio)?;
+                tabs::set_tab_pane_ratio(tab, &split_path, ratio)?;
                 Ok::<_, anyhow::Error>(tab.clone())
             })??;
             hub.emit_tab(client_id, TabEvent::Updated(updated));
@@ -2558,9 +2548,7 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         ClientMessage::RearrangeTab { tab_id, layout } => {
             let updated = hub.state.try_mutate_client_layout(client_id, |tabs| {
                 let tab = tabs::find_tab_mut(tabs, &tab_id)?;
-                let grid = tabs::grid_or_err_mut(tab)?;
-                let new_grid = tabs::rearrange_grid(grid, layout)?;
-                *grid = new_grid;
+                tabs::pick_layout(tab, layout)?;
                 Ok::<_, anyhow::Error>(tab.clone())
             })?;
             hub.emit_tab(client_id, TabEvent::Updated(updated));
@@ -2594,26 +2582,19 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
             request_id,
         } => {
             let extracted = hub.state.try_mutate_client_layout(client_id, |tabs| {
-                let (new_tab, source_empty) =
-                    tabs::extract_to_new_tab(tabs, &source_tab_id, &pane_ids, name, layout)?;
-                let source_survivor = if source_empty {
-                    None
-                } else {
-                    tabs.iter().find(|t| t.id == source_tab_id).cloned()
-                };
-                Ok::<_, anyhow::Error>((new_tab, source_empty, source_survivor))
+                tabs::extract_to_new_tab(tabs, &source_tab_id, &pane_ids, name, layout)
             });
-            let (new_tab, source_empty, source_survivor) = match extracted {
+            let tabs::ExtractOutcome { new_tab, source } = match extracted {
                 Ok(extracted) => extracted,
                 Err(err) => {
                     send_tab_failure(out_tx, &err, request_id);
                     return Ok(());
                 }
             };
-            if source_empty {
-                hub.emit_tab(client_id, TabEvent::Removed(source_tab_id));
-            } else if let Some(survivor) = source_survivor {
+            if let Some(survivor) = source {
                 hub.emit_tab(client_id, TabEvent::Updated(survivor));
+            } else {
+                hub.emit_tab(client_id, TabEvent::Removed(source_tab_id));
             }
             hub.emit_tab(client_id, TabEvent::Updated(new_tab));
         }
@@ -2737,11 +2718,6 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
     Ok(())
 }
 
-enum CloseOutcome {
-    TabRemoved(String),
-    TabUpdated(TabEntry),
-}
-
 /// Move a pane between (possibly same) tabs and produce the broadcast events
 /// to fire afterwards. Performs extract + insert under a single fallible
 /// mutation so an extract that is never followed by its insert — a missing
@@ -2756,45 +2732,23 @@ fn move_pane(
     dst_pane_id: &str,
     edge: PaneDropEdge,
 ) -> anyhow::Result<Vec<TabEvent>> {
-    hub.state.try_mutate_client_layout(client_id, |tabs| {
-        if src_tab_id == dst_tab_id {
-            let tab = tabs::find_tab_mut(tabs, src_tab_id)?;
-            let grid = tabs::grid_or_err_mut(tab)?;
-            if edge == PaneDropEdge::Replace {
-                tabs::swap_pane_sessions(grid, src_pane_id, dst_pane_id)?;
-            } else {
-                let (extracted, source_empty) = tabs::extract_pane(grid, src_pane_id)?;
-                if source_empty {
-                    return Err(anyhow!("cannot move the only pane within the same tab"));
-                }
-                tabs::insert_adjacent(grid, dst_pane_id, edge, extracted)?;
-            }
-            Ok::<_, anyhow::Error>(vec![TabEvent::Updated(tab.clone())])
-        } else {
-            let (extracted_node, source_empty) = {
-                let src_tab = tabs::find_tab_mut(tabs, src_tab_id)?;
-                let src_grid = tabs::grid_or_err_mut(src_tab)?;
-                tabs::extract_pane(src_grid, src_pane_id)?
-            };
-            let mut events = Vec::new();
-            if source_empty {
-                tabs.retain(|t| t.id != src_tab_id);
-                events.push(TabEvent::Removed(src_tab_id.to_string()));
-            } else {
-                let src_snapshot = tabs
-                    .iter()
-                    .find(|t| t.id == src_tab_id)
-                    .cloned()
-                    .ok_or_else(|| anyhow!("source tab vanished mid-mutation: {src_tab_id}"))?;
-                events.push(TabEvent::Updated(src_snapshot));
-            }
-            let dst_tab = tabs::find_tab_mut(tabs, dst_tab_id)?;
-            let dst_grid = tabs::grid_or_err_mut(dst_tab)?;
-            tabs::insert_adjacent(dst_grid, dst_pane_id, edge, extracted_node)?;
-            events.push(TabEvent::Updated(dst_tab.clone()));
-            Ok(events)
-        }
-    })
+    let mv = tabs::PaneMove {
+        src_tab_id,
+        src_pane_id,
+        dst_tab_id,
+        dst_pane_id,
+        edge,
+    };
+    let moved = hub
+        .state
+        .try_mutate_client_layout(client_id, |tabs| tabs::move_pane(tabs, &mv))?;
+    Ok(moved
+        .into_iter()
+        .map(|tab| match tab {
+            tabs::MovedTab::Updated(tab) => TabEvent::Updated(tab),
+            tabs::MovedTab::Removed(id) => TabEvent::Removed(id),
+        })
+        .collect())
 }
 
 /// Stop every active session (kill PTY / headless child, drop orphan sidecar)
@@ -2866,6 +2820,7 @@ fn open_diff_tab(
                 worktree_path: worktree_path_owned.clone(),
             },
             created_at: chrono::Utc::now(),
+            picked_layout: None,
         };
         let id = new_tab.id.clone();
         tabs.push(new_tab.clone());
@@ -6351,10 +6306,6 @@ async fn stop_session(hub: &Hub, session_id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Auto-close every pane bound to `session_id` across all client layouts when
-/// the session is removed: a pane's sibling fills its space, and a tab whose
-/// last pane closed is removed entirely. Emits scoped `TabUpdated` (survivors)
-/// / `TabRemoved` (emptied tabs) per affected client.
 /// Build a one-tab layout with a pane per currently-running session — the
 /// "open all active sessions" first-connect choice. Empty when no sessions
 /// exist (the client starts with no tabs).
@@ -6373,9 +6324,16 @@ fn build_all_sessions_layout(hub: &Hub) -> Vec<TabEntry> {
         name: "All sessions".to_string(),
         content: TabContent::Grid { grid },
         created_at: Utc::now(),
+        picked_layout: None,
     }]
 }
 
+/// Auto-close every pane bound to `session_id` across all client layouts when
+/// the session is removed: a pane's sibling fills its space, and a tab whose
+/// last pane closed is removed entirely. A surviving tab untouched since its
+/// layout was picked is rebuilt in that layout, by each client's own flag.
+/// Emits scoped `TabUpdated` (survivors) / `TabRemoved` (emptied tabs) per
+/// affected client.
 fn close_session_panes(hub: &Hub, session_id: &str) {
     // Per-client outcomes: a surviving tab to re-broadcast, or a tab id whose
     // last pane closed (already removed from that client's layout).
@@ -11356,6 +11314,7 @@ mod tests {
                     name: "Tab".to_string(),
                     content: TabContent::Grid { grid },
                     created_at: Utc::now(),
+                    picked_layout: None,
                 });
             })
             .expect("seed the client layout");
@@ -11397,5 +11356,158 @@ mod tests {
             before,
             "a failed same-tab move is rolled back too"
         );
+    }
+
+    mod untouched_layout {
+        use super::*;
+        use protocol::{GridNode, RearrangeLayout, SplitDirection};
+
+        /// Dispatch `msg` as client `c1`, failing when the dispatch errors.
+        async fn dispatch_ok(hub: &Hub, msg: ClientMessage) {
+            let (out_tx, _out_rx) = mpsc::unbounded_channel();
+            let (file_tx, _file_rx) = mpsc::channel(1);
+            let pty_forwarders: PtyForwarders = Arc::new(AsyncMutex::new(HashMap::new()));
+            let fetches: FetchRegistry = Arc::new(AsyncMutex::new(HashMap::new()));
+            let ctx = ConnCtx {
+                out_tx: &out_tx,
+                file_tx: &file_tx,
+                pty_forwarders: &pty_forwarders,
+                fetches: &fetches,
+                client_id: "c1",
+                client_name: None,
+                connection: 1,
+            };
+            dispatch(hub, msg, &ctx).await.expect("dispatch succeeds");
+        }
+
+        fn rearrange(layout: RearrangeLayout) -> ClientMessage {
+            ClientMessage::RearrangeTab {
+                tab_id: "t1".to_string(),
+                layout,
+            }
+        }
+
+        fn only_tab(hub: &Hub, client_id: &str) -> TabEntry {
+            let tabs = hub.state.client_layout(client_id);
+            assert_eq!(tabs.len(), 1, "{tabs:?}");
+            tabs.into_iter().next().expect("one tab")
+        }
+
+        /// Panes `p1`..`p4`, `p1` bound to `doomed` and the rest to their own
+        /// sessions.
+        fn four_panes() -> Vec<(String, Option<String>)> {
+            vec![
+                ("p1".to_string(), Some("doomed".to_string())),
+                ("p2".to_string(), Some("s2".to_string())),
+                ("p3".to_string(), Some("s3".to_string())),
+                ("p4".to_string(), Some("s4".to_string())),
+            ]
+        }
+
+        fn seed_four_panes(hub: &Hub, client_id: &str, picked: Option<RearrangeLayout>) {
+            let grid = tabs::build_balanced(&four_panes(), protocol::SplitDirection::Horizontal)
+                .expect("four panes build a grid");
+            hub.state
+                .mutate_client_layout(client_id, |tabs| {
+                    tabs.push(TabEntry {
+                        id: "t1".to_string(),
+                        name: "Tab".to_string(),
+                        content: TabContent::Grid { grid },
+                        created_at: Utc::now(),
+                        picked_layout: picked,
+                    });
+                })
+                .expect("seed the client layout");
+        }
+
+        #[tokio::test]
+        async fn rearrange_tab_sets_the_untouched_flag() {
+            let (hub, _scratch) = test_hub("pick-rearrange");
+            seed_two_pane_layout(&hub, "c1");
+            dispatch_ok(&hub, rearrange(RearrangeLayout::Vertical)).await;
+            assert_eq!(
+                only_tab(&hub, "c1").picked_layout,
+                Some(RearrangeLayout::Vertical)
+            );
+        }
+
+        #[tokio::test]
+        async fn set_pane_ratio_message_clears_the_flag() {
+            let (hub, _scratch) = test_hub("pick-ratio");
+            seed_two_pane_layout(&hub, "c1");
+            dispatch_ok(&hub, rearrange(RearrangeLayout::Horizontal)).await;
+            dispatch_ok(
+                &hub,
+                ClientMessage::SetPaneRatio {
+                    tab_id: "t1".to_string(),
+                    split_path: Vec::new(),
+                    ratio: 0.7,
+                },
+            )
+            .await;
+            assert_eq!(only_tab(&hub, "c1").picked_layout, None);
+        }
+
+        #[test]
+        fn session_removal_rebuilds_each_clients_untouched_tab_independently() {
+            let (hub, _scratch) = test_hub("pick-session-removal");
+            seed_four_panes(&hub, "c1", Some(RearrangeLayout::Horizontal));
+            seed_four_panes(&hub, "c2", None);
+
+            close_session_panes(&hub, "doomed");
+
+            let survivors = &four_panes()[1..];
+            let picked = only_tab(&hub, "c1");
+            assert_eq!(
+                picked.grid(),
+                tabs::build_balanced(survivors, protocol::SplitDirection::Horizontal).as_ref(),
+                "the untouched tab is rebuilt evenly"
+            );
+            assert_eq!(picked.picked_layout, Some(RearrangeLayout::Horizontal));
+            let touched = only_tab(&hub, "c2");
+            let collapsed = GridNode::Split {
+                direction: SplitDirection::Horizontal,
+                ratio: 0.5,
+                first: Box::new(GridNode::Pane {
+                    pane_id: "p2".to_string(),
+                    session_id: Some("s2".to_string()),
+                }),
+                second: Box::new(GridNode::Split {
+                    direction: SplitDirection::Horizontal,
+                    ratio: 0.5,
+                    first: Box::new(GridNode::Pane {
+                        pane_id: "p3".to_string(),
+                        session_id: Some("s3".to_string()),
+                    }),
+                    second: Box::new(GridNode::Pane {
+                        pane_id: "p4".to_string(),
+                        session_id: Some("s4".to_string()),
+                    }),
+                }),
+            };
+            assert_eq!(
+                touched.grid(),
+                Some(&collapsed),
+                "the touched tab keeps the sizes it had: closing p1 folds its split into p2"
+            );
+            assert_eq!(touched.picked_layout, None);
+            assert_eq!(
+                tabs::collect_panes(touched.grid().expect("grid")),
+                survivors.to_vec()
+            );
+        }
+
+        #[tokio::test]
+        async fn flag_persists_across_state_reload() {
+            let (hub, _scratch) = test_hub("pick-reload");
+            seed_two_pane_layout(&hub, "c1");
+            dispatch_ok(&hub, rearrange(RearrangeLayout::Grid { cols: 3 })).await;
+            let reloaded = AppState::load_or_default(&hub.dirs).expect("reload state");
+            let tabs = reloaded.client_layout("c1");
+            assert_eq!(
+                tabs.first().and_then(|t| t.picked_layout),
+                Some(RearrangeLayout::Grid { cols: 3 })
+            );
+        }
     }
 }
