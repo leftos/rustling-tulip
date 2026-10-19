@@ -198,8 +198,8 @@ fn modal_part_shown(root: &RootView, selector: &str) -> Option<bool> {
 /// Whether the sessions panel's model still shows what a sidebar selector
 /// tags, assuming the panel itself is shown: a leaf while an expanded
 /// container lists the session, its pill too once the tab list is in, the
-/// Unbound banner while Unbound is expanded, and the view toggle. `None`
-/// for any other selector.
+/// Unbound or Detached banner while that container is expanded, and the
+/// view toggle. `None` for any other selector.
 fn sidebar_part_shown(root: &RootView, selector: &str) -> Option<bool> {
     let containers = || {
         root.sidebar_containers()
@@ -209,6 +209,8 @@ fn sidebar_part_shown(root: &RootView, selector: &str) -> Option<bool> {
     let listed = |id: &str| containers().any(|c| c.leaves.iter().any(|leaf| leaf.id == id));
     if selector == "unbound-banner" {
         Some(containers().any(|c| c.kind == ContainerKind::Unbound))
+    } else if selector == "detached-banner" {
+        Some(containers().any(|c| c.kind == ContainerKind::Detached))
     } else if selector.starts_with("sidebar-view-") {
         Some(true)
     } else if selector == "sidebar-no-repos" || selector == "sidebar-add-repo" {

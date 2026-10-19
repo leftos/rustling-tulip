@@ -21,7 +21,6 @@ Rulings (user):
 
 Items:
 
-- **P4.11a Container row.** Parity "Container row" (keyboard fold, last-launch summary; not ▶), "Repos view" Detached banner, Resume all (N). `sidebar.rs` (summary text, abandoned count), `sidebar_view.rs`, `lib.rs` key routing. Extends `ui_sidebar.rs`.
 - **P4.10c Workspace creator and the "VS Code workspace detected" prompt**, + Workspace in the `⋯` menu. New `workspace_creator.rs` / `workspace_creator_view.rs` and `vscode_suggestion.rs` with its view; `sidebar_view.rs`, `lib.rs` (`RootView::on_message` for `VscodeWorkspaceSuggestion`, `VscodeWorkspaceParsed`). Specs `ui_workspace_creator.rs`, `ui_vscode_prompt.rs`. Needs P4.10a.
 - **P4.10d DIR/SH container actions** ("Add repo", "Add workspace" on the path banner). `sidebar.rs`, `sidebar_view.rs`, `lib.rs`; extends `ui_sidebar.rs`. Needs P4.10a, P4.10c.
 - **P4.11b Launch last again and Detached stop all.** ▶, double-click, "Launch last again ▸" (current / new / named tab / edit first), the Detached two-click stop all. New `launch_last.rs`; `spawns.rs` / `spawn_view.rs` (replay via `to_duplicate_request`, edit first via `SpawnEntry::Duplicate`), `session_menu.rs`, `sidebar_view.rs`. Spec `ui_launch_last.rs`. Needs P4.11a and, for `spawn_view.rs`, ES.6 landed on `main` or rebased past.

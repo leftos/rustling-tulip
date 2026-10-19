@@ -3,9 +3,9 @@
 //! layout. Plain Rust, so every rule is unit-tested; `sidebar_view` renders it.
 
 use protocol::{
-    Agent, AppearanceOverrides, ClaudeProvider, CodexSandbox, ContainerRef, DaemonMessage,
-    PermissionMode, RepoEntry, SessionKind, SessionMode, SessionSnapshot, SessionStatus, TabEntry,
-    WorkspaceEntry,
+    Agent, AgentOptions, AppearanceOverrides, ClaudeProvider, CodexSandbox, ContainerRef,
+    DaemonMessage, PermissionMode, RepoEntry, SessionKind, SessionMode, SessionSnapshot,
+    SessionStatus, SpawnConfig, SpawnTarget, TabEntry, WorkspaceEntry,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use std::cmp::Ordering;
@@ -16,7 +16,9 @@ use std::sync::LazyLock;
 use crate::appearance::{self, AppColors, AppLevel, Resolved};
 use crate::fonts::{self, FontSettings};
 use crate::source_control::{Part, ScKey, ScUiState};
-use crate::spawn_form::provider_hover_name;
+use crate::spawn_form::{
+    approval_label, codex_sandbox_label, cursor_sandbox_label, provider_hover_name,
+};
 use crate::tabs::collect_panes;
 use crate::window_state::WindowState;
 
@@ -60,6 +62,10 @@ impl ContainerKind {
 /// The Unbound container's hover text.
 pub const UNBOUND_HOVER: &str = "Sessions alive but not referenced by any tab. \
      Click the unbound pill on a session to open it in a new tab.";
+
+/// What an expanded Detached container says above its sessions.
+pub const DETACHED_BANNER: &str = "These sessions are still running, but their repo or workspace \
+     is no longer registered. Resume one from its row, or stop it from its header.";
 
 /// How the sessions panel groups its sessions.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -240,12 +246,27 @@ pub struct Container {
     pub id: String,
     pub kind: ContainerKind,
     pub name: String,
+    /// The last launch's one-line summary; repos and workspaces that have
+    /// launched before have one.
+    pub summary: Option<String>,
     /// The row's hover text, when it has one.
     pub hover: Option<String>,
     pub leaves: Vec<Leaf>,
     /// Any leaf shows attention ([`Leaf::shows_attention`]).
     pub attention: bool,
     pub collapsed: bool,
+}
+
+impl Container {
+    /// The row's hover text: its own, else the last launch's summary.
+    #[must_use]
+    pub fn tooltip(&self) -> Option<String> {
+        self.hover.clone().or_else(|| {
+            self.summary
+                .as_ref()
+                .map(|summary| format!("Last launch: {summary}"))
+        })
+    }
 }
 
 /// Everything the container tree is built from.
@@ -641,6 +662,13 @@ impl SidebarModel {
 
     pub fn sessions(&self) -> &[SessionSnapshot] {
         &self.sessions
+    }
+
+    /// How many sessions are abandoned, the set `ResumeAllAbandoned` acts
+    /// on.
+    #[must_use]
+    pub fn abandoned_count(&self) -> usize {
+        self.sessions.iter().filter(|s| s.is_abandoned).count()
     }
 
     /// The registered repos, in the daemon's order.
@@ -1221,6 +1249,23 @@ fn container(
         .map(|s| leaf(s, inputs.attention, inputs.unseen, false))
         .collect();
     let key = container_key(kind, id);
+    let summary = match kind {
+        ContainerKind::Repo => inputs
+            .repos
+            .iter()
+            .find(|r| r.id == id)
+            .and_then(|r| launch_summary(r.last_spawn_config.as_ref())),
+        ContainerKind::Workspace => inputs
+            .workspaces
+            .iter()
+            .find(|w| w.id == id)
+            .and_then(|w| launch_summary(w.last_spawn_config.as_ref())),
+        ContainerKind::Shell
+        | ContainerKind::Dir
+        | ContainerKind::Detached
+        | ContainerKind::Tab
+        | ContainerKind::Unbound => None,
+    };
     Container {
         collapsed: inputs.collapsed.contains(&key),
         attention: leaves.iter().any(Leaf::shows_attention),
@@ -1228,6 +1273,7 @@ fn container(
         id: id.to_owned(),
         kind,
         name,
+        summary,
         hover: None,
         leaves,
     }
@@ -1261,6 +1307,108 @@ fn leaf(
         trusted: s.elevated_authority,
         tooltip: leaf_tooltip(s),
     }
+}
+
+/// One line naming a container's last launch: the agent and run mode, the
+/// target, the model, the agent's authority setting, `trusted`, and the env
+/// rows it carried. Parts that are absent are left out; no config, no line.
+#[must_use]
+pub fn launch_summary(config: Option<&SpawnConfig>) -> Option<String> {
+    let config = config?;
+    let mut parts = vec![agent_summary_label(&config.agent_options, config.mode)];
+    match config.mode {
+        SessionMode::Interactive => parts.push("Interactive".to_owned()),
+        SessionMode::Headless => parts.push("Headless".to_owned()),
+        SessionMode::PlainShell => {}
+    }
+    parts.push(match &config.target {
+        SpawnTarget::Single {
+            branch_name,
+            base_branch,
+            use_worktree,
+            ..
+        }
+        | SpawnTarget::Workspace {
+            branch_name,
+            base_branch,
+            use_worktree,
+            ..
+        } => {
+            if *use_worktree {
+                format!(
+                    "new worktree from {}",
+                    base_branch.as_deref().unwrap_or(branch_name)
+                )
+            } else {
+                branch_name.clone()
+            }
+        }
+        SpawnTarget::Standalone { .. } => "standalone".to_owned(),
+    });
+    if let Some(model) = config.model.as_deref().filter(|model| !model.is_empty()) {
+        parts.push(model.to_owned());
+    }
+    if config.dangerously_skip_permissions {
+        parts.push("trusted".to_owned());
+    } else if config.mode != SessionMode::PlainShell
+        && let Some(authority) = authority_label(&config.agent_options)
+    {
+        parts.push(authority.to_owned());
+    }
+    if !config.extra_env.is_empty() {
+        parts.push(format!("{} env", config.extra_env.len()));
+    }
+    Some(parts.join(" · "))
+}
+
+/// The agent's name in a launch summary; a plain-shell config names the
+/// shell.
+fn agent_summary_label(options: &AgentOptions, mode: SessionMode) -> String {
+    if mode == SessionMode::PlainShell {
+        return "Shell".to_owned();
+    }
+    match options {
+        AgentOptions::Claude { .. } => "Claude",
+        AgentOptions::Codex { .. } => "Codex",
+        AgentOptions::Cursor { .. } => "Cursor",
+    }
+    .to_owned()
+}
+
+/// The agent's own authority setting, as the spawn form labels it; `None`
+/// when the config leaves it to the CLI.
+fn authority_label(options: &AgentOptions) -> Option<&'static str> {
+    match options {
+        AgentOptions::Claude {
+            permission_mode, ..
+        } => permission_mode.map(|mode| approval_label(Some(mode))),
+        AgentOptions::Codex { sandbox } => {
+            sandbox.map(|sandbox| codex_sandbox_label(Some(sandbox)))
+        }
+        AgentOptions::Cursor { sandbox, .. } => {
+            sandbox.map(|sandbox| cursor_sandbox_label(Some(sandbox)))
+        }
+    }
+}
+
+/// The ⋯ menu's bulk-resume row while two or more sessions are abandoned.
+#[must_use]
+pub fn resume_all_label(count: usize) -> Option<String> {
+    (count >= 2).then(|| format!("Resume all abandoned ({count})"))
+}
+
+/// The key focused row navigation moves to: `delta` rows from `current`
+/// among `keys`, clamped to the ends; with no current row, the first for a
+/// forward move and the last for a backward one.
+#[must_use]
+pub fn move_row_focus(keys: &[String], current: Option<&str>, delta: isize) -> Option<String> {
+    let last = keys.len().checked_sub(1)?.cast_signed();
+    let index = match current.and_then(|key| keys.iter().position(|k| k == key)) {
+        Some(index) => (index.cast_signed() + delta).clamp(0, last),
+        None if delta < 0 => last,
+        None => 0,
+    };
+    keys.get(index.cast_unsigned()).cloned()
 }
 
 /// The key a container folds by.
@@ -1354,6 +1502,7 @@ fn tab_view_container(
         id: id.to_owned(),
         kind,
         name,
+        summary: None,
         hover: Some(hover),
         leaves,
     }
@@ -1746,7 +1895,8 @@ mod tests {
     use super::*;
     use crate::tabs::tests::{pane, tab};
     use protocol::{
-        AttentionReason, CodexSandbox, GridNode, PermissionMode, SessionMember, SplitDirection,
+        AttentionReason, CodexSandbox, CursorSandbox, GridNode, PermissionMode, SessionMember,
+        SplitDirection,
     };
     use serde_json::json;
     use std::path::PathBuf;
@@ -3307,6 +3457,166 @@ mod tests {
         assert!(
             (loaded.sidebar_width - 333.0).abs() < f32::EPSILON,
             "the rest of the file still loads"
+        );
+    }
+
+    fn spawn_config(target: SpawnTarget, mode: SessionMode) -> SpawnConfig {
+        SpawnConfig {
+            target,
+            mode,
+            dangerously_skip_permissions: false,
+            agent_options: AgentOptions::claude(None),
+            model: None,
+            extra_env: Vec::new(),
+        }
+    }
+
+    fn single_target(branch: &str, base: Option<&str>, use_worktree: bool) -> SpawnTarget {
+        SpawnTarget::Single {
+            repo_id: "r1".to_owned(),
+            branch_name: branch.to_owned(),
+            base_branch: base.map(str::to_owned),
+            use_worktree,
+            checkout_strategy: None,
+            worktree_reuse: protocol::WorktreeReusePolicy::default(),
+            existing_worktree: None,
+        }
+    }
+
+    #[test]
+    fn launch_summary_names_a_worktree_configs_parts() {
+        let mut config = spawn_config(
+            single_target("feat/x", Some("main"), true),
+            SessionMode::Interactive,
+        );
+        config.agent_options = AgentOptions::claude(Some(PermissionMode::AcceptEdits));
+        config.model = Some("opus".to_owned());
+        config.extra_env = vec![
+            ("A".to_owned(), "1".to_owned()),
+            ("B".to_owned(), "2".to_owned()),
+        ];
+        assert_eq!(
+            launch_summary(Some(&config)).as_deref(),
+            Some("Claude · Interactive · new worktree from main · opus · accept edits · 2 env")
+        );
+    }
+
+    #[test]
+    fn launch_summary_names_an_in_place_branch() {
+        let config = spawn_config(
+            single_target("feat/x", Some("main"), false),
+            SessionMode::Interactive,
+        );
+        assert_eq!(
+            launch_summary(Some(&config)).as_deref(),
+            Some("Claude · Interactive · feat/x"),
+            "no base, model, authority or env is invented"
+        );
+    }
+
+    #[test]
+    fn launch_summary_names_a_standalone_shell() {
+        let config = spawn_config(
+            SpawnTarget::Standalone {
+                cwd: None,
+                add_dirs: Vec::new(),
+            },
+            SessionMode::PlainShell,
+        );
+        assert_eq!(
+            launch_summary(Some(&config)).as_deref(),
+            Some("Shell · standalone")
+        );
+    }
+
+    #[test]
+    fn launch_summary_is_none_without_a_config() {
+        assert_eq!(launch_summary(None), None);
+    }
+
+    #[test]
+    fn abandoned_count_counts_the_abandoned_sessions() {
+        let mut model = model_with(vec![in_repo("a", "r1"), in_repo("b", "r1")]);
+        assert_eq!(model.abandoned_count(), 0);
+        let mut abandoned = in_repo("b", "r1");
+        abandoned.is_abandoned = true;
+        model.apply(&DaemonMessage::SessionUpdated {
+            session: abandoned,
+            request_id: None,
+        });
+        assert_eq!(model.abandoned_count(), 1);
+    }
+
+    #[test]
+    fn row_focus_moves_and_clamps_at_the_ends() {
+        let keys: Vec<String> = ["a", "b", "c"]
+            .iter()
+            .map(|key| (*key).to_owned())
+            .collect();
+        assert_eq!(move_row_focus(&keys, Some("b"), -1).as_deref(), Some("a"));
+        assert_eq!(move_row_focus(&keys, Some("b"), 1).as_deref(), Some("c"));
+        assert_eq!(
+            move_row_focus(&keys, Some("a"), -1).as_deref(),
+            Some("a"),
+            "the top holds"
+        );
+        assert_eq!(
+            move_row_focus(&keys, Some("c"), 1).as_deref(),
+            Some("c"),
+            "the bottom holds"
+        );
+        assert_eq!(
+            move_row_focus(&keys, None, 1).as_deref(),
+            Some("a"),
+            "no current row starts at the first"
+        );
+        assert_eq!(
+            move_row_focus(&keys, None, -1).as_deref(),
+            Some("c"),
+            "a backward move with no current row starts at the last"
+        );
+        assert_eq!(move_row_focus(&[], None, 1), None, "no rows, no focus");
+    }
+
+    #[test]
+    fn launch_summary_says_trusted_instead_of_the_authority() {
+        let mut config = spawn_config(
+            single_target("feat/x", Some("main"), false),
+            SessionMode::Interactive,
+        );
+        config.agent_options = AgentOptions::claude(Some(PermissionMode::AcceptEdits));
+        config.dangerously_skip_permissions = true;
+        assert_eq!(
+            launch_summary(Some(&config)).as_deref(),
+            Some("Claude · Interactive · feat/x · trusted")
+        );
+    }
+
+    #[test]
+    fn launch_summary_names_each_agents_authority_setting() {
+        let mut codex = spawn_config(
+            single_target("feat/x", Some("main"), false),
+            SessionMode::Interactive,
+        );
+        codex.agent_options = AgentOptions::Codex {
+            sandbox: Some(CodexSandbox::WorkspaceWrite),
+        };
+        assert_eq!(
+            launch_summary(Some(&codex)).as_deref(),
+            Some("Codex · Interactive · feat/x · workspace-write")
+        );
+
+        let mut cursor = spawn_config(
+            single_target("feat/x", Some("main"), false),
+            SessionMode::Interactive,
+        );
+        cursor.agent_options = AgentOptions::Cursor {
+            plan_mode: false,
+            sandbox: Some(CursorSandbox::Enabled),
+        };
+        assert_eq!(
+            launch_summary(Some(&cursor)).as_deref(),
+            Some("Cursor · Interactive · feat/x · enabled")
         );
     }
 }

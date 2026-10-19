@@ -184,8 +184,8 @@ pub use crate::quit_view::QuitFn;
 pub use crate::recover_view::RecoverRow;
 pub use crate::shell_marks::{ShellDot, ShellStatus};
 pub use crate::sidebar::{
-    Activity, Container, ContainerKind, DEFAULT_WIDTH as SIDEBAR_DEFAULT_WIDTH, Leaf, LeafState,
-    SidebarView,
+    Activity, Container, ContainerKind, DEFAULT_WIDTH as SIDEBAR_DEFAULT_WIDTH, DETACHED_BANNER,
+    Leaf, LeafState, SidebarView, resume_all_label,
 };
 pub use crate::source_control::{Bucket, ScKey};
 pub use crate::source_control_view::{ScContext, ScPanel, ScPickerRow, ScSectionRow};
@@ -401,6 +401,8 @@ pub struct RootView {
     /// Focus for the sidebar, which takes it on a click so Ctrl+B there
     /// toggles the sidebar instead of reaching the terminal.
     sidebar_focus: FocusHandle,
+    /// The container row the sidebar's keyboard acts on, when any.
+    row_focus: Option<String>,
     /// The session named on the command line, focused once the tabs and
     /// the sessions have arrived.
     wanted_session: Option<String>,
@@ -727,6 +729,7 @@ impl RootView {
             ui_dir,
             drag: None,
             sidebar_focus: cx.focus_handle(),
+            row_focus: None,
             wanted_session: wanted,
             sessions_loaded: false,
             status: String::new(),
@@ -866,6 +869,19 @@ impl RootView {
         self.sidebar.sidebar_view()
     }
 
+    /// The container row the sidebar's keys act on, if any.
+    #[must_use]
+    pub fn sidebar_row_focus(&self) -> Option<&str> {
+        self.row_focus.as_deref()
+    }
+
+    /// How many sessions are abandoned, the set the ⋯ menu's bulk resume
+    /// acts on.
+    #[must_use]
+    pub fn sidebar_abandoned_count(&self) -> usize {
+        self.sidebar.abandoned_count()
+    }
+
     /// Which tabs show session `id`, as its leaf's pill tells it; `None`
     /// until the daemon's tab list is in, when leaves show no pill.
     #[must_use]
@@ -881,6 +897,7 @@ impl RootView {
     /// changed.
     pub(crate) fn set_sidebar_view(&mut self, view: SidebarView, cx: &mut Context<Self>) {
         if self.sidebar.set_sidebar_view(view) {
+            self.row_focus = None;
             self.save_ui();
         }
         cx.notify();
@@ -1265,6 +1282,24 @@ impl RootView {
         self.save_ui();
     }
 
+    /// Focuses a container row, so the sidebar's keys fold it and the ring
+    /// follows it.
+    pub fn focus_container_row(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.row_focus = Some(key.to_owned());
+        self.sidebar_focus.focus(window);
+        cx.notify();
+    }
+
+    /// Drops the row focus when its container is no longer listed.
+    fn prune_container_row_focus(&mut self) {
+        let Some(key) = self.row_focus.as_deref() else {
+            return;
+        };
+        if !self.sidebar_containers().iter().any(|c| c.key == key) {
+            self.row_focus = None;
+        }
+    }
+
     /// A leaf click: show the pane holding the session, or place the
     /// session when no pane shows it. A session without a terminal only has
     /// its attention and its unseen turn cleared.
@@ -1636,6 +1671,7 @@ impl RootView {
         let focused = self.focused_session();
         self.sidebar.set_focused_session(focused.as_deref());
         self.sidebar.apply(msg);
+        self.prune_container_row_focus();
         self.forget_remembered_session(msg);
         if before.is_some_and(|before| self.needs_you_list() != before) {
             self.arm_needs_you_repaint(cx);
@@ -2009,6 +2045,10 @@ impl RootView {
             }
             return;
         }
+        if self.on_container_row_key(ks, window, cx) {
+            cx.stop_propagation();
+            return;
+        }
         if ks.key == "escape" {
             let tab_close = self.tabs.close_confirm.disarm();
             let remove_armed = self.repo_remove.disarm();
@@ -2019,6 +2059,51 @@ impl RootView {
         if self.on_shortcut(ks, window, cx) {
             cx.stop_propagation();
             cx.notify();
+        }
+    }
+
+    /// The keys a focused container row takes: Up and Down move the row
+    /// focus, Enter and Space fold the row, and Escape hands the keyboard
+    /// back to the terminal. `false` when the sidebar does not hold the
+    /// keyboard or no row is focused, so the keys reach the terminal.
+    fn on_container_row_key(
+        &mut self,
+        ks: &Keystroke,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.sidebar_focus.is_focused(window) || self.row_focus.is_none() {
+            return false;
+        }
+        self.prune_container_row_focus();
+        let Some(key) = self.row_focus.clone() else {
+            return false;
+        };
+        match ks.key.as_str() {
+            "up" | "down" => {
+                let keys: Vec<String> = self
+                    .sidebar_containers()
+                    .into_iter()
+                    .map(|container| container.key)
+                    .collect();
+                let delta = if ks.key == "down" { 1 } else { -1 };
+                if let Some(next) = crate::sidebar::move_row_focus(&keys, Some(&key), delta) {
+                    self.row_focus = Some(next);
+                    cx.notify();
+                }
+                true
+            }
+            "enter" | "space" => {
+                self.toggle_container(&key);
+                cx.notify();
+                true
+            }
+            "escape" => {
+                self.row_focus = None;
+                self.focus_active_pane(window, cx);
+                true
+            }
+            _ => false,
         }
     }
 

@@ -40,11 +40,11 @@ Close behind: the paste and key quirks (native clipboard read, Shift+Enter bytes
 - [x] Activity bar (Sessions / Source control) with a change badge (caps at 99+); clicking the active item collapses the sidebar; persisted — `ActivityBar.tsx`
 - [x] Resizable, collapsible sidebar with persisted width — `ResizableSplit.tsx`
 - [x] Header: brand, Settings, Repos/Tabs view toggle (also saved as the default) — `Sidebar.tsx` (native: the toggle in P4.9; it and Settings > General > Default view are one value)
-- [ ] Toolbar: + Session (disabled with "needs repo"), + Shell, Shell…, + Repo (picker remembers the last dir), + Workspace (needs 2 repos), "Resume all (N)" — `Sidebar.tsx` (native: + Session landed in P1.7c, + Shell and Shell… in P1.7d, in a toolbar row under the header that wraps; + Repo as "Add repo…" in the `⋯` menu in P4.10a; + Workspace waits for P4.10c, Resume all for P4.11a)
-- [ ] Repos view: workspace, repo, SH and DIR containers plus a "Detached" bucket with a banner — `Sidebar.tsx` `buildContainers` (native: containers and Detached bucket done in P1.4; the Detached banner is still missing)
+- [ ] Toolbar: + Session (disabled with "needs repo"), + Shell, Shell…, + Repo (picker remembers the last dir), + Workspace (needs 2 repos), "Resume all (N)" — `Sidebar.tsx` (native: + Session landed in P1.7c, + Shell and Shell… in P1.7d, in a 30 px toolbar row under the header; + Repo as "Add repo…" and Resume all as "Resume all abandoned (N)" (shown at N ≥ 2, under a separator) are rows of the `⋯` menu, in P4.10a and P4.11a; + Workspace waits for P4.10c)
+- [x] Repos view: workspace, repo, SH and DIR containers plus a "Detached" bucket with a banner — `Sidebar.tsx` `buildContainers` (native: containers and Detached bucket done in P1.4; the Detached banner in P4.11a)
 - [x] Plain-shell sessions regroup under the container matching their live cwd — `Sidebar.tsx` `findContainerForCwd`
 - [x] Tabs view: one container per tab plus an "Unbound" bucket with a banner — `Sidebar.tsx` `buildTabContainers` (native: P4.9)
-- [ ] Container row: collapse chip (Enter/Space), count, "!" roll-up, kind tag, last-launch summary, ▶ launch-last; double-click launches last in the current tab — `Sidebar.tsx` `ContainerNode`
+- [ ] Container row: collapse chip (Enter/Space), count, "!" roll-up, kind tag, last-launch summary, ▶ launch-last; double-click launches last in the current tab — `Sidebar.tsx` `ContainerNode` (native: the keyboard fold and the last-launch summary landed in P4.11a; ▶ launch-last and double-click remain RT-19)
 - [x] Remove repo/workspace: inline two-click; with live sessions a dialog (Cancel / Remove anyway / Stop and remove) — `Sidebar.tsx`, `RepoRemoveDialog.tsx` (native: P4.10b)
 - [ ] Detached container "stop all" with two-click confirm — `Sidebar.tsx`
 - [ ] DIR/SH containers: "Add repo"; "Add workspace" when a `.code-workspace` is found — `Sidebar.tsx`

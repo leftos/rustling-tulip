@@ -12,7 +12,7 @@ use crate::assets::{
     SIDEBAR_FOLDER_ICON, SIDEBAR_MORE_ICON, SIDEBAR_PLUS_ICON, SIDEBAR_SHELL_ICON,
     SIDEBAR_TABS_ICON, SIDEBAR_WORKSPACE_ICON,
 };
-use crate::buttons::{ButtonSize, outlined_button, primary_button};
+use crate::buttons::{ButtonSize, focus_ring, outlined_button, primary_button};
 use crate::ellipsis::{ellipsized, truncating};
 use crate::fonts::{DEFAULT_FAMILY, UI_FAMILY};
 use crate::grid_view::{ADD_REPO_TIP, NO_REPOS_TIP, SPAWN_TIP};
@@ -22,9 +22,11 @@ use crate::palette::{
 };
 use crate::repo_add::RepoAdd;
 use crate::session_actions::inline_actions;
-use crate::session_menu::{BorderedButton, MENU_MAX_SHARE, bordered_button, menu_frame, menu_item};
+use crate::session_menu::{
+    BorderedButton, MENU_MAX_SHARE, bordered_button, menu_frame, menu_item, menu_separator,
+};
 use crate::sidebar::{
-    Activity, Container, ContainerKind, Leaf, LeafDensity, SidebarView, can_attach,
+    Activity, Container, ContainerKind, DETACHED_BANNER, Leaf, LeafDensity, SidebarView, can_attach,
 };
 use crate::spawn_form::{provider_chip_text, provider_chip_tip};
 use crate::spawn_view::SpawnEntry;
@@ -36,7 +38,7 @@ use gpui::{
     MouseDownEvent, PathBuilder, Pixels, SharedString, Stateful, StyledText, Svg, TextRun, Window,
     anchored, canvas, deferred, div, font, point, prelude::*, px, svg,
 };
-use protocol::{Agent, SessionMode, SessionStatus};
+use protocol::{Agent, ClientMessage, SessionMode, SessionStatus};
 
 pub(crate) const ROW_HEIGHT: f32 = 22.0;
 pub(crate) const ROW_PADDING: f32 = 8.0;
@@ -124,6 +126,14 @@ impl RootView {
                 )
             })
         } else {
+            // The ring and the row keys follow the keyboard: a row the
+            // sidebar no longer holds (a menu or a pane took over) draws
+            // none.
+            let focused_row = self
+                .sidebar_focus
+                .is_focused(window)
+                .then_some(self.row_focus.as_deref())
+                .flatten();
             let rows = LeafRows {
                 attached: attached.as_deref(),
                 accents: self.sidebar.session_accents(),
@@ -136,6 +146,7 @@ impl RootView {
                     .map(|s| s.id.as_str())
                     .collect(),
                 density: self.sidebar.leaf_density(),
+                focused_row,
                 subline_room: width
                     - 2.0 * BODY_INSET_X
                     - LEAF_PAD_LEFT
@@ -211,6 +222,15 @@ impl RootView {
                     this.add_repo(cx);
                 },
             ));
+            let resume =
+                crate::sidebar::resume_all_label(self.sidebar.abandoned_count()).map(|label| {
+                    menu_item(MORE_RESUME_ALL_ROW, label, false).on_click(cx.listener(
+                        |this, _: &ClickEvent, window, cx| {
+                            this.close_more_menu(window, cx);
+                            this.send(ClientMessage::ResumeAllAbandoned);
+                        },
+                    ))
+                });
             let frame = menu_frame(
                 "sidebar-more-menu",
                 &self.menu_focus,
@@ -222,6 +242,13 @@ impl RootView {
             )
             .child(shell)
             .child(add_repo);
+            let frame = if let Some(row) = resume {
+                frame
+                    .child(menu_separator().debug_selector(|| MORE_RESUME_ALL_SEPARATOR.to_owned()))
+                    .child(row)
+            } else {
+                frame
+            };
             let panel = anchored()
                 .anchor(Corner::TopRight)
                 .offset(point(px(MORE_BUTTON_SIZE), px(MORE_BUTTON_SIZE + 2.0)))
@@ -324,8 +351,12 @@ const MORE_BUTTON: &str = "sidebar-more";
 const MORE_SHELL_ROW: &str = "sidebar-more-shell-dialog";
 /// The ⋯ menu's row that picks a folder to register as a repo.
 const MORE_ADD_REPO_ROW: &str = "sidebar-more-add-repo";
+/// The ⋯ menu's row that resumes every abandoned session.
+const MORE_RESUME_ALL_ROW: &str = "more-resume-all";
+/// The line above that row.
+const MORE_RESUME_ALL_SEPARATOR: &str = "more-resume-all-separator";
 /// The ⋯ button's hover text.
-const MORE_TIP: &str = "More: Shell…, Add repo…";
+const MORE_TIP: &str = "More: Shell…, Add repo…, Resume all";
 /// What the sessions panel says while no repo or workspace is registered.
 const NO_REPOS_NOTE: &str = "No repos or workspaces yet.";
 
@@ -485,19 +516,23 @@ fn divider(active: bool, cx: &mut Context<RootView>) -> Stateful<Div> {
         .on_mouse_down(MouseButton::Left, cx.listener(RootView::start_drag))
 }
 
-/// A container row, then (unless it is collapsed) the Unbound banner and
-/// its leaves; grouped under the container's key, since the tabs view can
-/// list a session under more than one tab.
+/// A container row, then (unless it is collapsed) the Unbound or Detached
+/// container's banner and its leaves; grouped under the container's key,
+/// since the tabs view can list a session under more than one tab.
 fn container_rows(
     container: &Container,
     ctx: &LeafRows<'_>,
     window: &Window,
     cx: &mut Context<RootView>,
 ) -> AnyElement {
-    let mut rows = vec![container_row(container, cx).into_any_element()];
+    let focused = ctx.focused_row == Some(container.key.as_str());
+    let mut rows = vec![container_row(container, focused, cx).into_any_element()];
     if !container.collapsed {
         if container.kind == ContainerKind::Unbound {
             rows.push(unbound_banner().into_any_element());
+        }
+        if container.kind == ContainerKind::Detached {
+            rows.push(detached_banner().into_any_element());
         }
         for leaf in &container.leaves {
             rows.push(leaf_row(leaf, ctx, window, cx).into_any_element());
@@ -530,6 +565,22 @@ fn unbound_banner() -> Div {
         .child("pill on a session to open it in a new tab.")
 }
 
+/// The text under an expanded Detached container.
+fn detached_banner() -> Div {
+    div()
+        .debug_selector(|| "detached-banner".to_owned())
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap_x(px(3.0))
+        .pl(px(LEAF_INDENT))
+        .pr(px(ROW_PADDING))
+        .py(px(4.0))
+        .text_size(px(TAG_TEXT_SIZE + 1.0))
+        .text_color(gpui::rgb(MUTED))
+        .child(DETACHED_BANNER)
+}
+
 /// The unbound pill's look: dim italic text in a dim border.
 fn unbound_pill_look<E: Styled>(pill: E) -> E {
     pill.flex_none()
@@ -556,6 +607,8 @@ struct LeafRows<'a> {
     density: LeafDensity,
     /// The width a Comfortable subline's text and chips share, in px.
     subline_room: f32,
+    /// The container row the sidebar's keys act on, if any.
+    focused_row: Option<&'a str>,
 }
 
 impl LeafRows<'_> {
@@ -834,19 +887,33 @@ fn kind_icon(kind: ContainerKind) -> Option<(&'static str, &'static str, u32)> {
 /// attention badge, the kind tag and the session count, each tagged
 /// `container-<key>-<part>`.
 fn container_parts(container: &Container) -> Vec<AnyElement> {
+    let mut parts = Vec::new();
+    if let Some(icon) = container_icon(container) {
+        parts.push(icon);
+    }
+    parts.extend(container_info_parts(container));
+    parts
+}
+
+/// The container's kind icon, when its kind has one.
+fn container_icon(container: &Container) -> Option<AnyElement> {
+    let part = |suffix: &str| format!("container-{}-{suffix}", container.key);
+    let (path, suffix, color) = kind_icon(container.kind)?;
+    let selector = part(&format!("icon-{suffix}"));
+    Some(
+        div()
+            .debug_selector(|| selector)
+            .flex()
+            .flex_none()
+            .child(icon(path, 14.0, color))
+            .into_any_element(),
+    )
+}
+
+/// The row's name, badge, tag and count.
+fn container_info_parts(container: &Container) -> Vec<AnyElement> {
     let part = |suffix: &str| format!("container-{}-{suffix}", container.key);
     let mut parts = Vec::new();
-    if let Some((path, suffix, color)) = kind_icon(container.kind) {
-        let selector = part(&format!("icon-{suffix}"));
-        parts.push(
-            div()
-                .debug_selector(|| selector)
-                .flex()
-                .flex_none()
-                .child(icon(path, 14.0, color))
-                .into_any_element(),
-        );
-    }
     parts.push(
         truncating(&part("name"), StyledText::new(container.name.clone()))
             .flex_1()
@@ -901,9 +968,13 @@ fn container_badge(selector: String) -> Div {
         .child("!")
 }
 
-/// A container row: a click folds it; a right-click on a repo or
-/// workspace opens its menu.
-fn container_row(container: &Container, cx: &mut Context<RootView>) -> Stateful<Div> {
+/// A container row: a click focuses and folds it; a right-click on a repo
+/// or workspace opens its menu. A row with a launch summary is two lines.
+fn container_row(
+    container: &Container,
+    focused: bool,
+    cx: &mut Context<RootView>,
+) -> Stateful<Div> {
     let key = container.key.clone();
     let name = format!("container-{}", container.key);
     let level = match container.kind {
@@ -915,23 +986,38 @@ fn container_row(container: &Container, cx: &mut Context<RootView>) -> Stateful<
         | ContainerKind::Tab
         | ContainerKind::Unbound => None,
     };
-    div()
+    let summary = container.summary.clone();
+    let row = div()
         .id(SharedString::from(name.clone()))
         .debug_selector(|| name)
+        .relative()
         .flex()
         .flex_none()
-        .items_center()
         .gap(px(7.0))
-        .h(px(30.0))
+        .h(px(if summary.is_some() { 46.0 } else { 30.0 }))
         .pl(px(4.0))
         .pr(px(8.0))
         .cursor_pointer()
         .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
-        .child(chevron(container))
-        .children(container_parts(container))
-        .when_some(container.hover.clone(), |row, tip| {
-            row.tooltip(tooltip(tip))
-        })
+        .when(focused, |row| row.child(container_focus_ring(container)));
+    let row = if summary.is_some() {
+        row.items_start().pt(px(5.0))
+    } else {
+        row.items_center()
+    };
+    let row = if let Some(summary) = summary.as_deref() {
+        let row = row.child(div().mt(px(2.0)).child(chevron(container)));
+        let row = if let Some(icon) = container_icon(container) {
+            row.child(div().mt(px(2.0)).child(icon))
+        } else {
+            row
+        };
+        row.child(container_lines(container, summary))
+    } else {
+        row.child(chevron(container))
+            .children(container_parts(container))
+    };
+    row.when_some(container.tooltip(), |row, tip| row.tooltip(tooltip(tip)))
         .when_some(level, |row, level| {
             row.on_mouse_down(
                 MouseButton::Right,
@@ -941,10 +1027,40 @@ fn container_row(container: &Container, cx: &mut Context<RootView>) -> Stateful<
                 }),
             )
         })
-        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+            this.focus_container_row(&key, window, cx);
             this.toggle_container(&key);
             cx.notify();
         }))
+}
+
+/// The 2 px accent ring of the container row holding the keyboard.
+fn container_focus_ring(container: &Container) -> Div {
+    focus_ring(4.0).debug_selector(|| format!("container-{}-focus", container.key))
+}
+
+/// A two-line row's text: the name line over the launch summary.
+fn container_lines(container: &Container, summary: &str) -> Div {
+    let part = |suffix: &str| format!("container-{}-{suffix}", container.key);
+    let line = div()
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .children(container_info_parts(container));
+    let selector = part("summary");
+    div()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_w(px(0.0))
+        .child(line)
+        .child(
+            truncating(&selector, StyledText::new(summary.to_owned()))
+                .debug_selector(|| selector)
+                .mt(px(1.0))
+                .text_size(px(10.5))
+                .text_color(gpui::rgb(MUTED)),
+        )
 }
 
 /// A session's leaf at the panel's density: a stripe in its accent down

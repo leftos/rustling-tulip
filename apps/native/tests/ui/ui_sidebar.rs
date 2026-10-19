@@ -10,9 +10,10 @@ use crate::support;
 
 use gpui::{Modifiers, TestAppContext, point, px};
 use protocol::{
-    AttentionReason, ClaudeProvider, ClientMessage, DaemonMessage, SessionSnapshot, SplitDirection,
+    AgentOptions, AttentionReason, ClaudeProvider, ClientMessage, DaemonMessage, PermissionMode,
+    SessionMode, SessionSnapshot, SpawnConfig, SpawnTarget, SplitDirection, WorktreeReusePolicy,
 };
-use rustling_tulip_native::{SidebarView, TabPill};
+use rustling_tulip_native::{DETACHED_BANNER, SidebarView, TabPill, resume_all_label};
 use support::{Fixture, Harness, TestDir, pane, repo, session, split, tab, workspace};
 
 /// The keys of the sidebar's containers, in the order it shows them.
@@ -358,6 +359,44 @@ fn unbound_container_shows_its_banner(cx: &mut TestAppContext) {
     h.click_on("container-unbound");
     assert!(!h.in_model("unbound-banner"), "folded with its container");
     assert!(!h.in_model("leaf-s2"));
+}
+
+#[gpui::test]
+fn detached_container_shows_its_banner(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        sessions: vec![session("s1").in_repo("gone").abandoned().build()],
+        tabs: vec![tab("t1", &pane("p1", None))],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    assert_eq!(
+        DETACHED_BANNER,
+        "These sessions are still running, but their repo or workspace is no longer registered. \
+         Resume one from its row, or stop it from its header.",
+        "the owner-ruled wording"
+    );
+    assert!(h.in_model("detached-banner"), "the bucket's banner");
+    let banner = h.bounds("detached-banner");
+    assert!(painted(&mut h, "detached-banner"), "drawn");
+    assert!(
+        h.bounds("container-detached").bottom() <= banner.top(),
+        "under its container row"
+    );
+    assert!(
+        h.bounds("leaf-s1").top() >= banner.bottom(),
+        "above its leaves"
+    );
+
+    h.click_on("container-detached");
+    assert!(!h.in_model("detached-banner"), "folded with its container");
+    assert!(!h.in_model("leaf-s1"));
+
+    h.send(DaemonMessage::Repos {
+        repos: vec![repo("gone", "D:/src/gone")],
+    });
+    assert!(h.in_model("leaf-s1"), "the repo is registered now");
+    assert!(!h.in_model("detached-banner"), "so there is no Detached");
 }
 
 #[gpui::test]
@@ -1089,5 +1128,331 @@ fn repo_container_draws_its_icon_tag_count_and_attention_badge(cx: &mut TestAppC
     assert!(
         drawn(&mut h, "container-repo:r1-badge"),
         "attention badges it"
+    );
+}
+
+const FULL_SUMMARY: &str =
+    "Claude · Interactive · new worktree from main · opus · accept edits · 2 env";
+
+fn summary_config(target: SpawnTarget) -> SpawnConfig {
+    SpawnConfig {
+        target,
+        mode: SessionMode::Interactive,
+        dangerously_skip_permissions: false,
+        agent_options: AgentOptions::claude(Some(PermissionMode::AcceptEdits)),
+        model: Some("opus".to_owned()),
+        extra_env: vec![
+            ("A".to_owned(), "1".to_owned()),
+            ("B".to_owned(), "2".to_owned()),
+        ],
+    }
+}
+
+fn single_target() -> SpawnTarget {
+    SpawnTarget::Single {
+        repo_id: "r1".to_owned(),
+        branch_name: "feat/x".to_owned(),
+        base_branch: Some("main".to_owned()),
+        use_worktree: true,
+        checkout_strategy: None,
+        worktree_reuse: WorktreeReusePolicy::default(),
+        existing_worktree: None,
+    }
+}
+
+fn workspace_target() -> SpawnTarget {
+    SpawnTarget::Workspace {
+        workspace_id: "w1".to_owned(),
+        branch_name: "feat/x".to_owned(),
+        base_branch: Some("main".to_owned()),
+        use_worktree: true,
+        worktree_reuse: WorktreeReusePolicy::default(),
+        existing_worktrees: Vec::new(),
+    }
+}
+
+fn container_summary(h: &mut Harness<'_>, key: &str) -> Option<String> {
+    h.root(|root, _| {
+        root.sidebar_containers()
+            .into_iter()
+            .find(|container| container.key == key)
+            .and_then(|container| container.summary)
+    })
+}
+
+fn container_tooltip(h: &mut Harness<'_>, key: &str) -> Option<String> {
+    h.root(|root, _| {
+        root.sidebar_containers()
+            .into_iter()
+            .find(|container| container.key == key)
+            .and_then(|container| container.tooltip())
+    })
+}
+
+#[gpui::test]
+fn repo_row_shows_its_last_launch_summary(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = Fixture::single(session("s1").in_repo("r1").build());
+    fixture.repos = vec![repo("r1", "D:/src/r1")];
+    let mut h = Harness::with(cx, &dir, &fixture);
+
+    assert!(
+        !painted(&mut h, "container-repo:r1-summary"),
+        "a repo that never launched has no summary"
+    );
+    assert_eq!(
+        h.bounds("container-repo:r1").size.height,
+        px(30.0),
+        "one line"
+    );
+
+    let mut launched = repo("r1", "D:/src/r1");
+    launched.last_spawn_config = Some(summary_config(single_target()));
+    h.send(DaemonMessage::Repos {
+        repos: vec![launched],
+    });
+
+    assert_eq!(
+        container_summary(&mut h, "repo:r1").as_deref(),
+        Some(FULL_SUMMARY),
+        "the model carries the summary"
+    );
+    assert_eq!(
+        container_tooltip(&mut h, "repo:r1"),
+        Some(format!("Last launch: {FULL_SUMMARY}"))
+    );
+    assert!(painted(&mut h, "container-repo:r1-summary"), "drawn");
+    assert_eq!(
+        h.bounds("container-repo:r1").size.height,
+        px(46.0),
+        "two lines"
+    );
+    assert!(
+        h.bounds("container-repo:r1-summary").top() >= h.bounds("container-repo:r1-tag").bottom(),
+        "on the second line"
+    );
+}
+
+#[gpui::test]
+fn workspace_row_shows_its_last_launch_summary(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        repos: vec![repo("r1", "D:/src/r1")],
+        workspaces: vec![workspace("w1", &["r1"])],
+        sessions: vec![session("s1").in_workspace("w1").build()],
+        tabs: vec![tab("t1", &pane("p1", Some("s1")))],
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+
+    assert!(
+        !painted(&mut h, "container-ws:w1-summary"),
+        "a workspace that never launched has no summary"
+    );
+    assert_eq!(
+        h.bounds("container-ws:w1").size.height,
+        px(30.0),
+        "one line"
+    );
+
+    let mut launched = workspace("w1", &["r1"]);
+    launched.last_spawn_config = Some(summary_config(workspace_target()));
+    h.send(DaemonMessage::Workspaces {
+        workspaces: vec![launched],
+    });
+
+    assert_eq!(
+        container_summary(&mut h, "ws:w1").as_deref(),
+        Some(FULL_SUMMARY),
+        "the model carries the summary"
+    );
+    assert_eq!(
+        container_tooltip(&mut h, "ws:w1"),
+        Some(format!("Last launch: {FULL_SUMMARY}"))
+    );
+    assert!(painted(&mut h, "container-ws:w1-summary"), "drawn");
+    assert_eq!(
+        h.bounds("container-ws:w1").size.height,
+        px(46.0),
+        "two lines"
+    );
+    assert!(
+        h.bounds("container-ws:w1-summary").top() >= h.bounds("container-ws:w1-tag").bottom(),
+        "on the second line"
+    );
+}
+
+#[gpui::test]
+fn container_row_enter_and_space_fold_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = Fixture::single(session("s1").in_repo("r1").build());
+    fixture.repos = vec![repo("r1", "D:/src/r1"), repo("r2", "D:/src/r2")];
+    fixture.sessions.push(session("s2").in_repo("r2").build());
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.answer_scrollback("s1", b"");
+    h.sent_input("s1");
+
+    h.keys("enter");
+    assert_eq!(
+        h.sent_input("s1"),
+        b"\r",
+        "with no row focus the terminal takes Enter"
+    );
+
+    h.click_on("container-repo:r1");
+    assert_eq!(
+        h.root(|root, _| root.sidebar_row_focus().map(str::to_owned)),
+        Some("repo:r1".to_owned())
+    );
+    assert!(
+        drawn(&mut h, "container-repo:r1-focus"),
+        "the ring follows the row"
+    );
+    assert!(!h.in_model("leaf-s1"), "the click folded it");
+
+    h.sent_input("s1");
+    h.keys("enter");
+    assert!(h.in_model("leaf-s1"), "Enter expands it");
+    assert!(h.sent_input("s1").is_empty(), "Enter stays in the sidebar");
+    h.keys("space");
+    assert!(!h.in_model("leaf-s1"), "Space collapses it");
+    assert!(h.sent_input("s1").is_empty(), "Space stays in the sidebar");
+    assert!(
+        saved_ui(&dir)["collapsed_containers"]
+            .as_array()
+            .is_some_and(|keys| keys.iter().any(|key| key == "repo:r1")),
+        "the fold is saved"
+    );
+
+    h.keys("down");
+    assert_eq!(
+        h.root(|root, _| root.sidebar_row_focus().map(str::to_owned)),
+        Some("repo:r2".to_owned()),
+        "Down moves the ring"
+    );
+    assert!(h.sent_input("s1").is_empty(), "Down stays in the sidebar");
+    h.keys("up");
+    assert_eq!(
+        h.root(|root, _| root.sidebar_row_focus().map(str::to_owned)),
+        Some("repo:r1".to_owned()),
+        "Up moves it back"
+    );
+    assert!(h.sent_input("s1").is_empty(), "Up stays in the sidebar");
+
+    h.keys("escape");
+    assert_eq!(
+        h.root(|root, _| root.sidebar_row_focus().map(str::to_owned)),
+        None,
+        "Escape clears the row focus"
+    );
+    h.keys("a");
+    assert_eq!(
+        h.sent_input("s1"),
+        b"a",
+        "Escape returns the keyboard to the terminal"
+    );
+
+    // A menu takes the keyboard: the row keys no longer act on the row.
+    h.click_on("container-repo:r1");
+    h.click_on("sidebar-more");
+    h.keys("escape");
+    h.sent_input("s1");
+    h.keys("enter");
+    assert_eq!(
+        h.sent_input("s1"),
+        b"\r",
+        "the row keys stop once the sidebar loses focus"
+    );
+
+    // An armed confirm survives the Escape that clears the row focus.
+    let closes = |sent: &[ClientMessage], id: &str| {
+        sent.iter()
+            .filter(|message| matches!(message, ClientMessage::CloseTab { tab_id } if tab_id == id))
+            .count()
+    };
+    h.click_on("tab-close-t1");
+    assert!(h.sent().is_empty(), "the first close click only arms");
+    // Focusing the row without a press: a press anywhere drops the arm.
+    h.root_update(|root, window, cx| root.focus_container_row("repo:r1", window, cx));
+    assert_eq!(
+        h.root(|root, _| root.sidebar_row_focus().map(str::to_owned)),
+        Some("repo:r1".to_owned())
+    );
+    h.keys("escape");
+    assert_eq!(
+        h.root(|root, _| root.sidebar_row_focus().map(str::to_owned)),
+        None,
+        "Escape clears the row focus first"
+    );
+    h.click_on("tab-close-t1");
+    assert_eq!(
+        closes(&h.sent(), "t1"),
+        1,
+        "the armed confirm survived that Escape"
+    );
+}
+
+#[gpui::test]
+fn resume_all_appears_at_two_abandoned_and_sends_resume_all(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(
+        cx,
+        &dir,
+        &Fixture::single(session("s1").abandoned().build()),
+    );
+    h.sent();
+    assert_eq!(h.root(|root, _| root.sidebar_abandoned_count()), 1);
+
+    h.click_on("sidebar-more");
+    assert!(
+        !painted(&mut h, "more-resume-all"),
+        "one abandoned session uses its leaf's Resume"
+    );
+    assert!(
+        !painted(&mut h, "more-resume-all-separator"),
+        "so its separator is absent too"
+    );
+
+    h.send(DaemonMessage::Sessions {
+        sessions: vec![
+            session("s1").abandoned().build(),
+            session("s2").abandoned().build(),
+        ],
+    });
+    assert_eq!(h.root(|root, _| root.sidebar_abandoned_count()), 2);
+    assert_eq!(
+        resume_all_label(2).as_deref(),
+        Some("Resume all abandoned (2)")
+    );
+    assert!(
+        painted(&mut h, "more-resume-all"),
+        "two abandoned sessions offer the bulk resume"
+    );
+    assert!(
+        painted(&mut h, "more-resume-all-separator"),
+        "the line above it is drawn"
+    );
+    assert!(
+        h.bounds("sidebar-more-add-repo").bottom() <= h.bounds("more-resume-all-separator").top(),
+        "the separator sits under the menu's other rows"
+    );
+    assert!(
+        h.bounds("more-resume-all-separator").bottom() <= h.bounds("more-resume-all").top(),
+        "and above Resume all"
+    );
+
+    h.click_on("more-resume-all");
+    let sent = h.sent();
+    assert!(
+        matches!(sent.as_slice(), [ClientMessage::ResumeAllAbandoned]),
+        "sent {sent:?}"
+    );
+
+    h.send(DaemonMessage::Sessions {
+        sessions: vec![session("s1").abandoned().build()],
+    });
+    assert_eq!(
+        h.root(|root, _| root.sidebar_abandoned_count()),
+        1,
+        "the count follows Sessions"
     );
 }

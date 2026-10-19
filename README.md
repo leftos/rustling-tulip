@@ -86,6 +86,7 @@ Start with [docs/architecture.md](docs/architecture.md) for how the pieces fit a
 - **HS.1, SA.1, DB.1, SS.1, DF.1, FT.1, DI.1**: step ids in the subplans `hook-status.md`, `spoken-alerts.md` (SA alerts, DB Dashboard), `subagent-streams.md`, `dispatch-follow.md`, `remote-file-transfer.md` and `dictation.md` under `docs/plans/`.
 - **Hysteresis (status)**: holding a status change until several checks agree, so a half-drawn screen does not flip a session's status and back; a planned idea for the screen-based status (RT-74).
 - **Landed**: an issue's state once its commit is on `main` (or on its feature branch), waiting for the owner's acknowledgement, which moves it to Done.
+- **Last-launch summary**: the muted second line of a repo's or workspace's container row in the native sidebar, naming the stored spawn config's agent, run mode, target, model, authority (or `trusted`) and env-row count, absent parts omitted; the row's tooltip reads `Last launch: <summary>`; see `docs/native-client.md` ("Repos and the no-repos states").
 - **Locked key**: a routing variable choosing the endpoint or the credential, which a session's environment rows may not set; a spawn that tries is refused.
 - **MA1, MA2, …**: item ids in `docs/plans/mobile-app.md`, the iOS and Android app's phases (distinct from the macOS plan's M0–M4).
 - **Native client**: the GPUI + `alacritty_terminal` desktop client under `apps/native`; see `docs/native-client.md`.
