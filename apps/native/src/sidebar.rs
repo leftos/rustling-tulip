@@ -3,9 +3,9 @@
 //! layout. Plain Rust, so every rule is unit-tested; `sidebar_view` renders it.
 
 use protocol::{
-    Agent, AppearanceOverrides, AttentionReason, ClaudeProvider, CodexSandbox, ContainerRef,
-    DaemonMessage, PermissionMode, RepoEntry, SessionKind, SessionMode, SessionSnapshot,
-    SessionStatus, TabEntry, WorkspaceEntry,
+    Agent, AppearanceOverrides, ClaudeProvider, CodexSandbox, ContainerRef, DaemonMessage,
+    PermissionMode, RepoEntry, SessionKind, SessionMode, SessionSnapshot, SessionStatus, TabEntry,
+    WorkspaceEntry,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use std::cmp::Ordering;
