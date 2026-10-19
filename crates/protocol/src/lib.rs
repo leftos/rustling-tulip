@@ -1317,7 +1317,7 @@ pub enum MergeLayout {
 /// Target layout for [`ClientMessage::RearrangeTab`]. Pane identities are
 /// preserved (so sessions stay bound to the same pane id); only the
 /// surrounding split tree is rebuilt.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RearrangeLayout {
     /// One row of N columns.
@@ -1329,10 +1329,18 @@ pub enum RearrangeLayout {
     /// strip with sub-strips).
     Balanced,
     /// True 2D grid. `cols` is the number of columns per row; the daemon
-    /// computes rows from `ceil(N/cols)`. When `cols == 0`, the daemon
-    /// auto-picks `ceil(sqrt(N))` so callers that just want "make this
-    /// look like a grid" don't have to do the math.
-    Grid { cols: u32 },
+    /// computes rows from `ceil(N/cols)`. When `cols == 0`, the daemon picks
+    /// the column count so callers that just want "make this look like a
+    /// grid" don't have to do the math: `ceil(sqrt(N))` when `aspect` is
+    /// `None`, and the aspect-aware best fit — the column count whose cells
+    /// come closest to square — when it is `Some`. `aspect` is the pane
+    /// area's width over its height, so a stored automatic grid can be
+    /// re-picked when the area changes shape; it is ignored for `cols != 0`.
+    Grid {
+        cols: u32,
+        #[serde(default)]
+        aspect: Option<f32>,
+    },
     /// Forward-compat fallback: a layout variant the current build doesn't
     /// know. Daemon dispatch falls back to `Balanced`. Serializes as
     /// `{"kind":"unknown"}` if ever round-tripped — daemon never
@@ -4213,7 +4221,10 @@ mod tests {
     #[test]
     fn tab_entry_picked_layout_round_trips() {
         for picked in [
-            RearrangeLayout::Grid { cols: 3 },
+            RearrangeLayout::Grid {
+                cols: 3,
+                aspect: None,
+            },
             RearrangeLayout::Horizontal,
         ] {
             let original = TabEntry {
@@ -5446,6 +5457,37 @@ mod tests {
     }
 
     #[test]
+    fn legacy_grid_layout_decodes_without_an_aspect() {
+        // A `Grid` written before the aspect field still decodes; with no
+        // aspect the daemon picks `ceil(sqrt(N))`.
+        let legacy = r#"{"kind":"grid","cols":2}"#;
+        let parsed: RearrangeLayout = serde_json::from_str(legacy).expect("decode");
+        assert_eq!(
+            parsed,
+            RearrangeLayout::Grid {
+                cols: 2,
+                aspect: None
+            }
+        );
+    }
+
+    #[test]
+    fn grid_layout_round_trips_its_aspect() {
+        let auto = RearrangeLayout::Grid {
+            cols: 0,
+            aspect: Some(1.6),
+        };
+        let json = serde_json::to_string(&auto).expect("serialize");
+        let decoded: RearrangeLayout = serde_json::from_str(&json).expect("decode");
+        assert_eq!(decoded, auto, "{json}");
+
+        // A daemon or client one version ahead may add fields beside it.
+        let extra = r#"{"kind":"grid","cols":0,"aspect":1.6,"future_field":3}"#;
+        let decoded: RearrangeLayout = serde_json::from_str(extra).expect("decode");
+        assert_eq!(decoded, auto, "an unknown field does not fail the layout");
+    }
+
+    #[test]
     fn tab_layout_unknown_variant_decodes() {
         let future = r#""future_only_layout""#;
         let parsed: TabLayout = serde_json::from_str(future).expect("decode");
@@ -5472,7 +5514,13 @@ mod tests {
         // happy path.
         let json = r#"{"kind":"grid","cols":3}"#;
         let parsed: RearrangeLayout = serde_json::from_str(json).expect("decode");
-        assert!(matches!(parsed, RearrangeLayout::Grid { cols: 3 }));
+        assert!(matches!(
+            parsed,
+            RearrangeLayout::Grid {
+                cols: 3,
+                aspect: None
+            }
+        ));
     }
 
     #[test]

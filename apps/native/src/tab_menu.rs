@@ -3,11 +3,11 @@
 
 use protocol::{MergeLayout, RearrangeLayout, TabContent, TabEntry};
 
-use crate::layout_chooser::{best_fit_grid_cols, grid_shapes};
+use crate::layout_chooser::grid_shapes;
 use crate::tabs::TabSelection;
 
 /// What a row of the tab menu does when pressed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum TabAction {
     Rename,
     /// Swaps the rows for the Grid submenu.
@@ -26,7 +26,7 @@ pub(crate) enum TabAction {
 }
 
 /// A line of the tab menu.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum MenuLine {
     /// A muted line that does nothing.
     Label(String),
@@ -89,18 +89,27 @@ pub(crate) fn grid_label(cols: usize, bound: usize) -> String {
 fn grid_layout(cols: usize) -> RearrangeLayout {
     RearrangeLayout::Grid {
         cols: u32::try_from(cols).unwrap_or(u32::MAX),
+        aspect: None,
     }
 }
 
-/// The rearrange section for a grid of `bound` panes holding a session in
-/// a pane area `aspect` wide per unit of height: nothing under two panes;
-/// the section, or the Grid submenu when `grid_open`.
+/// The automatic grid: no column count, and the pane area's shape so the
+/// daemon fits the columns now and re-picks them when the area changes.
+fn auto_grid_layout(aspect: f32) -> RearrangeLayout {
+    RearrangeLayout::Grid {
+        cols: 0,
+        aspect: Some(aspect),
+    }
+}
+
+/// The rearrange section for a grid of `bound` panes in a pane area `aspect`
+/// wide per unit of height: nothing under two panes; the section, or the Grid
+/// submenu when `grid_open`.
 pub(crate) fn rearrange_lines(bound: usize, aspect: f32, grid_open: bool) -> Vec<MenuLine> {
     if bound < 2 {
         return Vec::new();
     }
-    let auto = best_fit_grid_cols(bound, aspect);
-    let shapes: Vec<usize> = grid_shapes(bound, aspect)
+    let shapes: Vec<usize> = grid_shapes(bound)
         .into_iter()
         .map(|shape| shape.cols)
         .filter(|cols| *cols > 0)
@@ -110,8 +119,8 @@ pub(crate) fn rearrange_lines(bound: usize, aspect: f32, grid_open: bool) -> Vec
             MenuLine::row("tab-menu-grid-back", "‹ Back", TabAction::CloseGrid),
             MenuLine::row(
                 "tab-menu-grid-auto",
-                format!("Auto ({})", grid_label(auto, bound)),
-                TabAction::Rearrange(grid_layout(auto)),
+                "Auto",
+                TabAction::Rearrange(auto_grid_layout(aspect)),
             ),
             MenuLine::Separator,
         ];
@@ -127,8 +136,8 @@ pub(crate) fn rearrange_lines(bound: usize, aspect: f32, grid_open: bool) -> Vec
     let grid = if shapes.is_empty() {
         MenuLine::row(
             "tab-menu-grid-auto",
-            "Grid (auto)",
-            TabAction::Rearrange(grid_layout(auto)),
+            "Auto",
+            TabAction::Rearrange(auto_grid_layout(aspect)),
         )
     } else {
         MenuLine::row("tab-menu-grid", "Grid ▸", TabAction::OpenGrid)
@@ -236,8 +245,10 @@ mod tests {
         assert_eq!(
             action(&two, "tab-menu-grid-auto"),
             Some(TabAction::Rearrange(RearrangeLayout::Grid {
-                cols: u32::try_from(best_fit_grid_cols(2, WIDE)).unwrap_or(0)
-            }))
+                cols: 0,
+                aspect: Some(WIDE)
+            })),
+            "Auto asks the daemon to fit the pane area"
         );
         assert_eq!(
             action(&two, "tab-menu-stacked"),
@@ -263,7 +274,7 @@ mod tests {
         );
         assert!(matches!(
             &submenu[1],
-            MenuLine::Row { label, .. } if label == "Auto (2 cols × 2 rows)"
+            MenuLine::Row { label, .. } if label == "Auto"
         ));
         assert!(matches!(
             &submenu[4],
@@ -271,7 +282,10 @@ mod tests {
         ));
         assert_eq!(
             action(&submenu, "tab-menu-grid-3"),
-            Some(TabAction::Rearrange(RearrangeLayout::Grid { cols: 3 }))
+            Some(TabAction::Rearrange(RearrangeLayout::Grid {
+                cols: 3,
+                aspect: None
+            }))
         );
     }
 }

@@ -1545,7 +1545,7 @@ fn attach_to_tab(
         .push((pane_id, Some(session_id.to_string())));
     let new_grid = match build_layout {
         TabBuildLayout::Linear(dir) => tabs::build_balanced(&state.current_panes, dir),
-        TabBuildLayout::AutoGrid => tabs::build_grid(&state.current_panes, 0),
+        TabBuildLayout::AutoGrid => tabs::build_grid(&state.current_panes, 0, None),
     }
     .ok_or_else(|| {
         LaunchFailure::new("layout builder returned None for non-empty input")

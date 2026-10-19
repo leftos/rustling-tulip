@@ -8,6 +8,8 @@
 
 use crate::support;
 
+use rustling_tulip_native::RootView;
+
 use gpui::{Modifiers, MouseButton, TestAppContext, point, px, size};
 use protocol::{
     ClientMessage, DaemonMessage, MergeLayout, RearrangeLayout, SplitDirection, SplitPlace,
@@ -497,6 +499,16 @@ fn rearranged(sent: &[ClientMessage]) -> Vec<RearrangeLayout> {
         .collect()
 }
 
+/// The pane area's shape the single automatic `RearrangeTab` in `sent`
+/// carried.
+fn auto_aspect(sent: &[ClientMessage]) -> f32 {
+    match rearranged(sent).as_slice() {
+        [RearrangeLayout::Grid { cols: 0, aspect }] => *aspect,
+        _ => None,
+    }
+    .expect("one automatic grid carrying the pane area's shape")
+}
+
 #[gpui::test]
 fn menu_rearrange_sends_rearrange_tab_with_aspect_cols(cx: &mut TestAppContext) {
     let dir = TestDir::new();
@@ -509,21 +521,17 @@ fn menu_rearrange_sends_rearrange_tab_with_aspect_cols(cx: &mut TestAppContext) 
         "two panes have no shape to pick"
     );
     h.click_on("tab-menu-grid-auto");
-    assert_eq!(
-        rearranged(&h.sent()),
-        [RearrangeLayout::Grid { cols: 2 }],
-        "a wide area fits two across"
-    );
+    let wide = auto_aspect(&h.sent());
     assert!(!h.in_model("tab-menu"), "the menu closes");
 
     h.cx.simulate_resize(size(px(420.0), px(1400.0)));
     h.cx.run_until_parked();
     h.right_click_on("tab-t1");
     h.click_on("tab-menu-grid-auto");
-    assert_eq!(
-        rearranged(&h.sent()),
-        [RearrangeLayout::Grid { cols: 1 }],
-        "a tall area stacks them"
+    let tall = auto_aspect(&h.sent());
+    assert!(
+        (tall - wide).abs() >= 0.01,
+        "a tall area carries its own shape: {wide} wide, {tall} tall"
     );
 
     h.right_click_on("tab-t1");
@@ -533,6 +541,112 @@ fn menu_rearrange_sends_rearrange_tab_with_aspect_cols(cx: &mut TestAppContext) 
     assert_eq!(
         rearranged(&h.sent()),
         [RearrangeLayout::Horizontal, RearrangeLayout::Vertical]
+    );
+}
+
+#[gpui::test]
+fn auto_grid_resends_follow_the_aspect_a_tab_was_picked_at(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = grid_of(&["s1", "s2"]);
+    let grid = fixture.tabs[0].grid().expect("a grid tab").clone();
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.sent();
+
+    // The menu's Auto row names no count and carries the area's shape.
+    h.right_click_on("tab-t1");
+    h.click_on("tab-menu-grid-auto");
+    let wide = auto_aspect(&h.sent());
+
+    // The daemon echoes the pick with the aspect it was given: the same shape
+    // has nothing left to re-send.
+    let mut picked = tab("t1", &grid);
+    picked.picked_layout = Some(RearrangeLayout::Grid {
+        cols: 0,
+        aspect: Some(wide),
+    });
+    h.send(DaemonMessage::TabUpdated { tab: picked });
+    assert_eq!(
+        h.root_update(|root, _window, _cx| root.auto_grid_resends_at(wide)),
+        0,
+        "the stored aspect is the one asked for"
+    );
+    assert!(rearranged(&h.sent()).is_empty(), "so nothing is sent");
+
+    // A pane area of another shape re-picks the automatic tab once, carrying
+    // that shape.
+    assert_eq!(
+        h.root_update(|root, _window, _cx| root.auto_grid_resends_at(0.5)),
+        1,
+        "a moved aspect re-picks the automatic tab once"
+    );
+    let tall = auto_aspect(&h.sent());
+    assert!(
+        (tall - 0.5).abs() < f32::EPSILON,
+        "with the shape it was asked for: {wide} was, {tall} is"
+    );
+
+    // A fixed count is the user's: a resize never touches it.
+    let mut fixed = tab("t1", &grid);
+    fixed.picked_layout = Some(RearrangeLayout::Grid {
+        cols: 2,
+        aspect: None,
+    });
+    h.send(DaemonMessage::TabUpdated { tab: fixed });
+    assert_eq!(
+        h.root_update(|root, _window, _cx| root.auto_grid_resends_at(0.5)),
+        0,
+        "a fixed grid is not automatic"
+    );
+    assert!(rearranged(&h.sent()).is_empty(), "so it sends nothing");
+}
+
+#[gpui::test]
+fn schedule_auto_grid_resend_waits_out_the_debounce(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = grid_of(&["s1", "s2"]);
+    let grid = fixture.tabs[0].grid().expect("a grid tab").clone();
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.sent();
+
+    // The menu's Auto row makes `t1` automatic; the daemon then says it was
+    // picked at a shape the harness's pane area does not have, and `t2` is
+    // pinned to a fixed count.
+    h.right_click_on("tab-t1");
+    h.click_on("tab-menu-grid-auto");
+    let mut automatic = tab("t1", &grid);
+    automatic.picked_layout = Some(RearrangeLayout::Grid {
+        cols: 0,
+        aspect: Some(0.5),
+    });
+    let mut pinned = tab("t2", &grid);
+    pinned.picked_layout = Some(RearrangeLayout::Grid {
+        cols: 2,
+        aspect: None,
+    });
+    h.send(DaemonMessage::Tabs {
+        tabs: vec![automatic, pinned],
+    });
+    h.sent();
+
+    h.root_update(RootView::schedule_auto_grid_resend);
+    h.advance(Duration::from_millis(249));
+    assert!(
+        rearranged(&h.sent()).is_empty(),
+        "the debounce has not passed"
+    );
+
+    h.advance(Duration::from_millis(1));
+    let sent = h.sent();
+    let aspect = auto_aspect(&sent);
+    assert!(
+        (aspect - 0.5).abs() >= 0.01,
+        "the re-pick carries the pane area's measured shape, not the stored 0.5"
+    );
+    assert!(
+        !sent
+            .iter()
+            .any(|m| matches!(m, ClientMessage::RearrangeTab { tab_id, .. } if tab_id == "t2")),
+        "a fixed grid is never re-sent: {sent:?}"
     );
 }
 
@@ -550,7 +664,7 @@ fn menu_grid_shape_sends_its_cols(cx: &mut TestAppContext) {
         "its rows replace the menu's"
     );
     assert!(
-        menu_text(&mut h).contains(&"Auto (2 cols × 2 rows)".to_owned()),
+        menu_text(&mut h).contains(&"Auto".to_owned()),
         "rows {:?}",
         menu_text(&mut h)
     );
@@ -558,7 +672,13 @@ fn menu_grid_shape_sends_its_cols(cx: &mut TestAppContext) {
     assert!(h.in_model("tab-menu-rename"), "Back restores the rows");
     h.click_on("tab-menu-grid");
     h.click_on("tab-menu-grid-3");
-    assert_eq!(rearranged(&h.sent()), [RearrangeLayout::Grid { cols: 3 }]);
+    assert_eq!(
+        rearranged(&h.sent()),
+        [RearrangeLayout::Grid {
+            cols: 3,
+            aspect: None
+        }]
+    );
     assert!(!h.in_model("tab-menu"));
 }
 

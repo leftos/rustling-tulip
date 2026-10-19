@@ -199,10 +199,10 @@ fn ctrl_shift_g_rearranges_a_grid_of_two_panes(cx: &mut TestAppContext) {
             sent.as_slice(),
             [ClientMessage::RearrangeTab {
                 tab_id,
-                layout: RearrangeLayout::Grid { cols: 0 },
+                layout: RearrangeLayout::Grid { cols: 0, aspect: Some(_) },
             }] if tab_id == "t1"
         ),
-        "sent {sent:?}"
+        "an automatic grid carrying the pane area's shape: {sent:?}"
     );
     assert!(h.sent_input("s1").is_empty(), "the terminal never saw it");
 }

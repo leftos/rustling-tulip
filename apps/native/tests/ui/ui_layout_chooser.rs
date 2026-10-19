@@ -98,7 +98,10 @@ fn open_all_grid_with_max_extracts_then_rearranges_on_tabs(cx: &mut TestAppConte
     h.send(DaemonMessage::Tabs {
         tabs: vec![tab("t1", &grid)],
     });
-    let layout = RearrangeLayout::Grid { cols: 2 };
+    let layout = RearrangeLayout::Grid {
+        cols: 2,
+        aspect: None,
+    };
     let sent = h.sent();
     let extracted: Vec<Vec<String>> = sent
         .iter()

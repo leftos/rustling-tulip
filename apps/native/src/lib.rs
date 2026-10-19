@@ -146,7 +146,10 @@ use crate::spawns::PendingSpawns;
 use crate::stash_view::StashUi;
 use crate::status_glyph::{GlyphSize, glyph_view};
 use crate::tab_bar::{Rename, TabMenu};
-use crate::tabs::{PaneTarget, Placement, TabsModel, find_tab_containing_session, tab_pills};
+use crate::tabs::{
+    PaneTarget, Placement, TabsModel, auto_grid_resends, find_tab_containing_session, is_auto_grid,
+    tab_pills,
+};
 use crate::term::ShellCommand;
 use crate::term_view::ScrollbackReply;
 use crate::undo::UndoShelf;
@@ -205,6 +208,10 @@ pub const PANE_GUTTER: f32 = 6.0;
 /// How long tab font steps and window moves wait before the layout is
 /// written out.
 const UI_SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
+/// How long a window resize waits before an automatic grid re-picks its
+/// columns: long enough that a drag is one re-pick, short enough that letting
+/// go of the window edge settles within a quarter second.
+const AUTO_GRID_RESIZE_DEBOUNCE: Duration = Duration::from_millis(250);
 /// The toast a session appearance change the daemon refused raises.
 const APPEARANCE_FAILED_TITLE: &str = "Couldn't change the appearance";
 /// This client's log file, under `<config dir>/logs/`.
@@ -465,6 +472,8 @@ pub struct RootView {
     ui_save_deadline: Option<Instant>,
     /// Wakes the view when the layout save is due.
     ui_save_timer: Option<Task<()>>,
+    /// Wakes the view when a resize's automatic grid re-pick is due.
+    auto_grid_timer: Option<Task<()>>,
     /// A header Stop waiting for its second click.
     confirm: HeaderStopConfirm,
     /// Restarts and resumes waiting for their duplicate.
@@ -641,7 +650,7 @@ impl RootView {
     /// window's record while another window has the keyboard, so leaving
     /// the window ends link mode; a resize moves every dot, so an open
     /// gutter menu closes with it rather than point at a row that is no
-    /// longer there.
+    /// longer there, and it also re-fits an automatic grid's columns.
     fn watch_window(window: &mut Window, cx: &mut Context<Self>) {
         cx.observe_window_activation(window, |root, window, cx| {
             if !window.is_window_active() {
@@ -651,6 +660,7 @@ impl RootView {
         .detach();
         cx.observe_window_bounds(window, |root, window, cx| {
             root.close_shell_menu(window, cx);
+            root.schedule_auto_grid_resend(window, cx);
         })
         .detach();
     }
@@ -747,6 +757,7 @@ impl RootView {
             seen_sessions: HashSet::new(),
             ui_save_deadline: None,
             ui_save_timer: None,
+            auto_grid_timer: None,
             confirm: HeaderStopConfirm::default(),
             duplicates: Duplicates::default(),
             prefills: Prefills::default(),
@@ -1190,6 +1201,44 @@ impl RootView {
             self.ui_save_timer = None;
             self.save_ui();
         }
+    }
+
+    /// Schedules the automatic grids' re-pick after
+    /// [`AUTO_GRID_RESIZE_DEBOUNCE`], when a tab is automatic at all;
+    /// `watch_window`'s `observe_window_bounds` calls this. Every resize during
+    /// the wait replaces the timer, so a drag settles as one re-pick; the timer
+    /// reads the aspect then, since the pane area recorded by the frame before
+    /// this callback is the size the window just left.
+    pub fn schedule_auto_grid_resend(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.tabs.tabs().iter().any(is_auto_grid) {
+            return;
+        }
+        self.auto_grid_timer = Some(cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor()
+                .timer(AUTO_GRID_RESIZE_DEBOUNCE)
+                .await;
+            // Fails only when the view is gone, and the re-pick with it.
+            this.update_in(cx, |this, _window, _cx| {
+                let aspect = this.pane_area_aspect();
+                this.auto_grid_resends_at(aspect);
+            })
+            .ok();
+        }));
+    }
+
+    /// The debounced automatic-grid re-send, run now for a pane area `aspect`
+    /// wide per unit of height: one `RearrangeTab` per automatic tab whose
+    /// stored aspect is not that one, returning how many were sent. The timer
+    /// above runs it with the measured aspect; a spec calls it directly.
+    pub fn auto_grid_resends_at(&mut self, aspect: f32) -> usize {
+        let resends = auto_grid_resends(self.tabs.tabs(), aspect);
+        for (tab_id, layout) in &resends {
+            self.send(ClientMessage::RearrangeTab {
+                tab_id: tab_id.clone(),
+                layout: *layout,
+            });
+        }
+        resends.len()
     }
 
     /// Hide or show the sidebar; hiding it hands the keyboard back to the

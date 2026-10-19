@@ -4,7 +4,7 @@
 
 use protocol::{ClientMessage, RearrangeLayout};
 
-use crate::layout_chooser::{best_fit_grid_cols, grid_shapes};
+use crate::layout_chooser::grid_shapes;
 use crate::tab_menu::grid_label;
 
 pub(crate) const TITLE: &str = "Move panes to a new tab";
@@ -165,18 +165,16 @@ impl MovePanes {
         self.shape = cols;
     }
 
-    /// The grid shapes for the ticked count, as `(cols, label)`: Auto
-    /// (with what it resolves to once a pane is ticked), then each fixed
-    /// shape.
-    pub(crate) fn shapes(&self, aspect: f32) -> Vec<(usize, String)> {
+    /// The grid shapes for the ticked count, as `(cols, label)`: Auto (the
+    /// daemon fits it to the pane area), then each fixed shape.
+    pub(crate) fn shapes(&self, _aspect: f32) -> Vec<(usize, String)> {
         let n = self.ticked_count();
         if n == 0 {
             return vec![(0, "Auto".to_owned())];
         }
-        let auto = best_fit_grid_cols(n, aspect);
-        let mut shapes = vec![(0, format!("Auto ({})", grid_label(auto, n)))];
+        let mut shapes = vec![(0, "Auto".to_owned())];
         shapes.extend(
-            grid_shapes(n, aspect)
+            grid_shapes(n)
                 .into_iter()
                 .filter(|shape| shape.cols > 0)
                 .map(|shape| (shape.cols, grid_label(shape.cols, n))),
@@ -246,8 +244,8 @@ impl MovePanes {
     }
 
     /// The extract the confirm sends, `name` trimmed and a blank one left
-    /// out, Auto resolved for a pane area `aspect` wide per unit of
-    /// height; `None` with nothing ticked.
+    /// out, Auto carrying a pane area `aspect` wide per unit of height so the
+    /// daemon fits its columns; `None` with nothing ticked.
     pub(crate) fn message(&self, name: &str, aspect: f32) -> Option<ClientMessage> {
         let pane_ids: Vec<String> = self
             .panes
@@ -263,12 +261,14 @@ impl MovePanes {
             LayoutChoice::SideBySide => RearrangeLayout::Horizontal,
             LayoutChoice::Stacked => RearrangeLayout::Vertical,
             LayoutChoice::Grid => {
-                let cols = match self.shape {
-                    0 => best_fit_grid_cols(pane_ids.len(), aspect),
-                    cols => cols,
-                };
+                let auto = self.shape == 0;
                 RearrangeLayout::Grid {
-                    cols: u32::try_from(cols).unwrap_or(u32::MAX),
+                    cols: if auto {
+                        0
+                    } else {
+                        u32::try_from(self.shape).unwrap_or(u32::MAX)
+                    },
+                    aspect: auto.then_some(aspect),
                 }
             }
         };
@@ -288,7 +288,6 @@ mod tests {
     use protocol::{ClientMessage, RearrangeLayout};
 
     use super::*;
-    use crate::layout_chooser::best_fit_grid_cols;
 
     const WIDE: f32 = 16.0 / 10.0;
 
@@ -332,14 +331,11 @@ mod tests {
         for i in 0..5 {
             d.toggle(i);
         }
-        let auto = best_fit_grid_cols(5, WIDE);
         let shapes = d.shapes(WIDE);
         assert_eq!(
             shapes[0],
-            (
-                0,
-                format!("Auto ({auto} cols × {} rows)", 5_usize.div_ceil(auto))
-            )
+            (0, "Auto".to_owned()),
+            "Auto names no count: the daemon fits it"
         );
         assert_eq!(
             shapes[1..],
@@ -394,18 +390,29 @@ mod tests {
         );
 
         d.set_layout(LayoutChoice::Grid);
-        let cols = |msg: Option<ClientMessage>| match msg {
+        let grid = |msg: Option<ClientMessage>| match msg {
             Some(ClientMessage::ExtractToNewTab {
-                layout: Some(RearrangeLayout::Grid { cols }),
+                layout: Some(RearrangeLayout::Grid { cols, aspect }),
                 ..
-            }) => Some(cols),
+            }) => Some((cols, aspect)),
             _ => None,
         };
-        let auto = u32::try_from(best_fit_grid_cols(3, WIDE)).unwrap_or(0);
-        assert_eq!(cols(d.message("", WIDE)), Some(auto), "Auto fits the area");
-        assert_eq!(cols(d.message("", 0.2)), Some(1), "a tall area stacks them");
+        assert_eq!(
+            grid(d.message("", WIDE)),
+            Some((0, Some(WIDE))),
+            "Auto asks the daemon to fit the pane area"
+        );
+        assert_eq!(
+            grid(d.message("", 0.2)),
+            Some((0, Some(0.2))),
+            "a tall area travels with it, so the daemon fits that"
+        );
         d.set_shape(2);
-        assert_eq!(cols(d.message("", WIDE)), Some(2));
+        assert_eq!(
+            grid(d.message("", WIDE)),
+            Some((2, None)),
+            "a picked shape is a fixed count"
+        );
     }
 
     #[test]

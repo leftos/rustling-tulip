@@ -5,8 +5,8 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use protocol::{
-    ClientMessage, DaemonMessage, GridNode, PaneDropEdge, SessionSnapshot, SessionStatus,
-    SplitDirection, SplitPlace, TabEntry,
+    ClientMessage, DaemonMessage, GridNode, PaneDropEdge, RearrangeLayout, SessionSnapshot,
+    SessionStatus, SplitDirection, SplitPlace, TabEntry,
 };
 
 /// The divider ratios the daemon accepts; it clamps to the same range.
@@ -207,6 +207,48 @@ fn walk_panes<'a>(node: &'a GridNode, out: &mut Vec<Pane<'a>>) {
             walk_panes(second, out);
         }
     }
+}
+
+/// How far the pane area's aspect must move from the one an automatic grid
+/// was picked at before the grid re-picks its columns: 0.01, so a rounding
+/// wobble is not a resize.
+pub const AUTO_GRID_ASPECT_EPSILON: f32 = 0.01;
+
+/// Whether `tab`'s pick is an automatic grid: it names no column count, so
+/// its columns follow the pane area's shape.
+pub fn is_auto_grid(tab: &TabEntry) -> bool {
+    matches!(
+        tab.picked_layout,
+        Some(RearrangeLayout::Grid { cols: 0, .. })
+    )
+}
+
+/// The auto-grid re-picks a resize asks for: one `Grid { cols: 0, aspect }`
+/// per automatic tab whose stored aspect is absent or differs from `aspect`
+/// by [`AUTO_GRID_ASPECT_EPSILON`] or more, in tab order. A tab picked with a
+/// fixed count, another layout, or never picked is left alone.
+pub fn auto_grid_resends(tabs: &[TabEntry], aspect: f32) -> Vec<(String, RearrangeLayout)> {
+    tabs.iter()
+        .filter_map(|tab| {
+            let Some(RearrangeLayout::Grid {
+                cols: 0,
+                aspect: stored,
+            }) = tab.picked_layout
+            else {
+                return None;
+            };
+            if stored.is_some_and(|stored| (stored - aspect).abs() < AUTO_GRID_ASPECT_EPSILON) {
+                return None;
+            }
+            Some((
+                tab.id.clone(),
+                RearrangeLayout::Grid {
+                    cols: 0,
+                    aspect: Some(aspect),
+                },
+            ))
+        })
+        .collect()
 }
 
 /// The rectangles of a split's two children inside `bounds`, laid out as the
@@ -2531,6 +2573,84 @@ pub(crate) mod tests {
             model.active_id(),
             Some("t1"),
             "a tab of that id later shows nothing new"
+        );
+    }
+
+    fn auto_grid(aspect: Option<f32>) -> RearrangeLayout {
+        RearrangeLayout::Grid { cols: 0, aspect }
+    }
+
+    /// A tab whose pick is `layout`.
+    fn picked_tab(id: &str, layout: RearrangeLayout) -> TabEntry {
+        let mut tab = tab(id, &pane("p1", None));
+        tab.picked_layout = Some(layout);
+        tab
+    }
+
+    #[test]
+    fn auto_grid_resends_follow_the_aspect_and_the_pick() {
+        let wide = 2.0;
+        assert!(
+            auto_grid_resends(&[picked_tab("a", auto_grid(Some(wide)))], wide).is_empty(),
+            "the stored aspect is the pane area's: nothing to re-pick"
+        );
+        assert!(
+            auto_grid_resends(&[picked_tab("a", auto_grid(Some(wide - 0.005)))], wide).is_empty(),
+            "a wobble under the epsilon is not a resize"
+        );
+        assert_eq!(
+            auto_grid_resends(&[picked_tab("a", auto_grid(Some(1.0)))], wide),
+            vec![("a".to_owned(), auto_grid(Some(wide)))],
+            "a moved aspect re-picks"
+        );
+        assert_eq!(
+            auto_grid_resends(&[picked_tab("a", auto_grid(None))], wide),
+            vec![("a".to_owned(), auto_grid(Some(wide)))],
+            "a pick with no aspect re-picks once the area is known"
+        );
+        assert!(
+            auto_grid_resends(
+                &[picked_tab(
+                    "a",
+                    RearrangeLayout::Grid {
+                        cols: 2,
+                        aspect: None
+                    }
+                )],
+                wide
+            )
+            .is_empty(),
+            "a fixed count is not touched by a resize"
+        );
+        assert!(
+            auto_grid_resends(&[picked_tab("a", RearrangeLayout::Horizontal)], wide).is_empty(),
+            "another layout is not touched either"
+        );
+    }
+
+    #[test]
+    fn auto_grid_resends_come_in_tab_order_and_skip_the_rest() {
+        let wide = 2.0;
+        let tabs = vec![
+            picked_tab("a", auto_grid(Some(1.0))),
+            tab("b", &pane("p1", None)),
+            picked_tab(
+                "c",
+                RearrangeLayout::Grid {
+                    cols: 3,
+                    aspect: None,
+                },
+            ),
+            diff_tab("d"),
+            picked_tab("e", auto_grid(None)),
+        ];
+        assert_eq!(
+            auto_grid_resends(&tabs, wide),
+            vec![
+                ("a".to_owned(), auto_grid(Some(wide))),
+                ("e".to_owned(), auto_grid(Some(wide))),
+            ],
+            "the two automatic tabs, in order; never-picked, fixed, and diff tabs stay"
         );
     }
 }

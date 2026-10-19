@@ -738,7 +738,8 @@ fn build_balanced_inner(panes: &[(String, Option<String>)], direction: SplitDire
 /// Pick a sensible column count for an auto-grid of `n` panes. Returns
 /// `ceil(sqrt(n))` so the result is the smallest grid wider than (or as
 /// wide as) it is tall. `n == 0` returns 1 so callers can divide without
-/// guarding.
+/// guarding. This is the fallback when the pane area's shape is unknown; see
+/// [`best_fit_grid_cols`] for the aspect-aware pick.
 #[must_use]
 pub fn auto_grid_cols(n: usize) -> u32 {
     if n == 0 {
@@ -754,17 +755,71 @@ pub fn auto_grid_cols(n: usize) -> u32 {
     cols.max(1)
 }
 
+/// The column count whose cells come closest to square for `n` panes in an
+/// area `aspect` wide per unit of height, with each empty cell weighing 0.3
+/// and a one-row or one-column strip of five or more 0.4 more; an aspect that
+/// is not a positive number counts as 16:9. Ported from the Tauri client's
+/// `bestFitGridCols`.
+#[must_use]
+pub(crate) fn best_fit_grid_cols(n: usize, aspect: f32) -> usize {
+    if n <= 1 {
+        return 1;
+    }
+    let aspect = f64::from(aspect);
+    let aspect = if aspect > 0.0 && aspect.is_finite() {
+        aspect
+    } else {
+        16.0 / 9.0
+    };
+    let mut best = 1;
+    let mut best_score = f64::INFINITY;
+    for cols in 1..=n {
+        let rows = n.div_ceil(cols);
+        let empties = rows * cols - n;
+        let cell_aspect = aspect * as_f64(rows) / as_f64(cols);
+        let mut score = cell_aspect.ln().abs() + 0.3 * as_f64(empties);
+        if (cols == 1 || cols == n) && n >= 5 {
+            score += 0.4;
+        }
+        if score < best_score {
+            best_score = score;
+            best = cols;
+        }
+    }
+    best
+}
+
+fn as_f64(n: usize) -> f64 {
+    f64::from(u32::try_from(n).unwrap_or(u32::MAX))
+}
+
+/// The automatic column count for `n` panes: the aspect-aware best fit when
+/// the pane area's shape is known, else [`auto_grid_cols`].
+fn auto_cols(n: usize, aspect: Option<f32>) -> u32 {
+    let cols = match aspect {
+        Some(aspect) => best_fit_grid_cols(n, aspect),
+        None => return auto_grid_cols(n),
+    };
+    u32::try_from(cols).unwrap_or(u32::MAX)
+}
+
 /// Build a true 2D grid: `cols` columns per row, rows stacked vertically.
 /// The last row may be short. Returns `None` for an empty input.
 ///
-/// `cols == 0` is rewritten to `auto_grid_cols(panes.len())` so callers
-/// can pass the daemon's autopick straight through.
-pub fn build_grid(panes: &[(String, Option<String>)], cols: u32) -> Option<GridNode> {
+/// `cols == 0` is rewritten to the automatic pick — [`best_fit_grid_cols`]
+/// when `aspect` (the pane area's width over its height) is known,
+/// [`auto_grid_cols`] otherwise — so callers can pass an automatic layout
+/// straight through.
+pub fn build_grid(
+    panes: &[(String, Option<String>)],
+    cols: u32,
+    aspect: Option<f32>,
+) -> Option<GridNode> {
     if panes.is_empty() {
         return None;
     }
     let cols = if cols == 0 {
-        auto_grid_cols(panes.len())
+        auto_cols(panes.len(), aspect)
     } else {
         cols
     };
@@ -839,7 +894,7 @@ fn build_for_layout(
             build_balanced(panes, SplitDirection::Horizontal)
         }
         RearrangeLayout::Vertical => build_balanced(panes, SplitDirection::Vertical),
-        RearrangeLayout::Grid { cols } => build_grid(panes, cols),
+        RearrangeLayout::Grid { cols, aspect } => build_grid(panes, cols, aspect),
         RearrangeLayout::Unknown => {
             // Forward-compat: client requested a layout this daemon doesn't
             // know. Fall back to Balanced (the safest known shape — keeps
@@ -860,14 +915,34 @@ const fn built_layout(layout: RearrangeLayout) -> RearrangeLayout {
     }
 }
 
+/// Whether `layout` is an automatic tab's re-fit: the tab is already automatic
+/// and the request names no column count either, so the only thing that
+/// changed is the pane area's shape. A fresh automatic pick (`picked` empty or
+/// naming something else) is not a re-fit, and neither is any fixed layout.
+fn is_auto_refit(picked: Option<RearrangeLayout>, layout: RearrangeLayout) -> bool {
+    matches!(picked, Some(RearrangeLayout::Grid { cols: 0, .. }))
+        && matches!(layout, RearrangeLayout::Grid { cols: 0, .. })
+}
+
 /// Arrange `tab` per `layout` as a layout picker does (Rearrange, the
 /// first-connect chooser) and mark it untouched since that pick, so later pane
 /// additions and removals rebuild the same layout type. The remembered type is
 /// the one actually built, so an unknown wire layout is remembered as
 /// `Balanced` rather than falling back again on every rebuild.
+///
+/// An automatic tab's re-fit — the client re-sending the automatic grid with
+/// the pane area's new shape after a resize — rebuilds over every pane it
+/// holds, empty ones included, since nobody asked for a tidy-up; every other
+/// pick drops the unbound panes as a tidy-up does.
 pub fn pick_layout(tab: &mut TabEntry, layout: RearrangeLayout) -> anyhow::Result<()> {
+    let refit = is_auto_refit(tab.picked_layout, layout);
     let grid = grid_or_err_mut(tab)?;
-    *grid = rearrange_grid(grid, layout)?;
+    if refit {
+        *grid = build_for_layout(&collect_panes(grid), layout)
+            .ok_or_else(|| anyhow!("re-fit produced an empty tab (unreachable)"))?;
+    } else {
+        *grid = rearrange_grid(grid, layout)?;
+    }
     tab.picked_layout = Some(built_layout(layout));
     Ok(())
 }
@@ -1950,7 +2025,10 @@ mod tests {
             "t1",
             &moved,
             None,
-            Some(RearrangeLayout::Grid { cols: 2 }),
+            Some(RearrangeLayout::Grid {
+                cols: 2,
+                aspect: None,
+            }),
         )
         .expect("extract");
         assert!(outcome.source.is_some());
@@ -2003,12 +2081,34 @@ mod tests {
         assert_eq!(auto_grid_cols(10), 4);
     }
 
+    /// Worked by hand from the Tauri client's score
+    /// `|ln(aspect × rows / cols)| + 0.3 × empties (+ 0.4 for a strip at 5+)`:
+    /// - 4 at 16:9: 2 cols scores 0.575, 3 cols 0.770, 4 cols 0.811 → 2.
+    /// - 9 at 16:9: 3 cols 0.575, 5 cols 0.641, 4 cols 1.188 → 3.
+    /// - 5 at 16:10: 3 cols 0.365, 4 cols 1.123, 2 cols 1.175 → 3.
+    /// - 3 at 1:2: 1 col 0.405, 2 cols 0.993, 3 cols 1.792 → 1.
+    /// - an aspect that is not positive or not finite falls back to 16:9,
+    ///   so 4 → 2.
+    #[test]
+    fn best_fit_grid_cols_matches_tauri_cases() {
+        assert_eq!(best_fit_grid_cols(0, 16.0 / 9.0), 1);
+        assert_eq!(best_fit_grid_cols(1, 16.0 / 9.0), 1);
+        assert_eq!(best_fit_grid_cols(4, 16.0 / 9.0), 2);
+        assert_eq!(best_fit_grid_cols(9, 16.0 / 9.0), 3);
+        assert_eq!(best_fit_grid_cols(5, 16.0 / 10.0), 3);
+        assert_eq!(best_fit_grid_cols(3, 0.5), 1);
+        assert_eq!(best_fit_grid_cols(4, 0.0), 2);
+        assert_eq!(best_fit_grid_cols(4, -3.0), 2);
+        assert_eq!(best_fit_grid_cols(4, f32::NAN), 2);
+        assert_eq!(best_fit_grid_cols(4, f32::INFINITY), 2);
+    }
+
     #[test]
     fn build_grid_six_panes_three_cols_two_rows() {
         let panes: Vec<(String, Option<String>)> = (0..6)
             .map(|i| (format!("p{i}"), Some(format!("s{i}"))))
             .collect();
-        let tree = build_grid(&panes, 3).expect("non-empty");
+        let tree = build_grid(&panes, 3, None).expect("non-empty");
         // Top-level: vertical split between row1 and row2.
         let GridNode::Split {
             direction,
@@ -2051,7 +2151,7 @@ mod tests {
     fn build_grid_short_last_row() {
         let panes: Vec<(String, Option<String>)> =
             (0..5).map(|i| (format!("p{i}"), None)).collect();
-        let tree = build_grid(&panes, 3).expect("non-empty");
+        let tree = build_grid(&panes, 3, None).expect("non-empty");
         // 5 panes / 3 cols = 2 rows; row 1 = [p0,p1,p2], row 2 = [p3,p4].
         let all: Vec<String> = collect_panes(&tree).into_iter().map(|(p, _)| p).collect();
         assert_eq!(all, vec!["p0", "p1", "p2", "p3", "p4"]);
@@ -2061,7 +2161,7 @@ mod tests {
     fn build_grid_auto_picks_cols_when_zero() {
         let panes: Vec<(String, Option<String>)> =
             (0..9).map(|i| (format!("p{i}"), None)).collect();
-        let tree = build_grid(&panes, 0).expect("non-empty");
+        let tree = build_grid(&panes, 0, None).expect("non-empty");
         // ceil(sqrt(9)) = 3 → 3 rows of 3.
         let GridNode::Split { first, .. } = &tree else {
             panic!("expected Split at root");
@@ -2071,9 +2171,28 @@ mod tests {
     }
 
     #[test]
+    fn build_grid_auto_uses_the_aspect_when_given() {
+        let panes: Vec<(String, Option<String>)> =
+            (0..3).map(|i| (format!("p{i}"), None)).collect();
+        let tall = build_grid(&panes, 0, Some(0.5)).expect("non-empty");
+        let square = build_grid(&panes, 0, None).expect("non-empty");
+        assert_eq!(
+            tall,
+            build_grid(&panes, 1, None).expect("non-empty"),
+            "three panes in an area half as wide as tall fit one column"
+        );
+        assert_eq!(
+            square,
+            build_grid(&panes, 2, None).expect("non-empty"),
+            "with no aspect it is ceil(sqrt(3)) = two columns"
+        );
+        assert_ne!(tall, square, "the aspect decides the auto pick");
+    }
+
+    #[test]
     fn build_grid_single_pane_returns_leaf() {
         let panes = vec![("only".to_string(), Some("s".to_string()))];
-        let tree = build_grid(&panes, 0).expect("non-empty");
+        let tree = build_grid(&panes, 0, None).expect("non-empty");
         assert!(matches!(tree, GridNode::Pane { pane_id, .. } if pane_id == "only"));
     }
 
@@ -2088,8 +2207,14 @@ mod tests {
             pane("p1", Some("s1")),
             split(Vertical, 0.5, pane("p2", Some("s2")), pane("p3", None)),
         );
-        let rearranged =
-            rearrange_grid(&original, RearrangeLayout::Grid { cols: 0 }).expect("rearrange");
+        let rearranged = rearrange_grid(
+            &original,
+            RearrangeLayout::Grid {
+                cols: 0,
+                aspect: None,
+            },
+        )
+        .expect("rearrange");
         let panes_after: Vec<(String, Option<String>)> = collect_panes(&rearranged);
         assert_eq!(panes_after.len(), 2);
         assert_eq!(panes_after[0].0, "p1");
@@ -2104,8 +2229,14 @@ mod tests {
         // tab with zero panes (no valid representation), so we fall back to
         // rearranging the original set in place.
         let original = split(Horizontal, 0.5, pane("p1", None), pane("p2", None));
-        let rearranged =
-            rearrange_grid(&original, RearrangeLayout::Grid { cols: 0 }).expect("rearrange");
+        let rearranged = rearrange_grid(
+            &original,
+            RearrangeLayout::Grid {
+                cols: 0,
+                aspect: None,
+            },
+        )
+        .expect("rearrange");
         let panes_after = collect_panes(&rearranged);
         assert_eq!(panes_after.len(), 2);
         assert_eq!(panes_after[0].0, "p1");
@@ -2229,16 +2360,19 @@ mod tests {
 
     #[test]
     fn split_pane_on_an_untouched_three_column_grid_makes_three_plus_one() {
-        let three_cols = RearrangeLayout::Grid { cols: 3 };
+        let three_cols = RearrangeLayout::Grid {
+            cols: 3,
+            aspect: None,
+        };
         let mut tab = picked_tab("T", &bound(&["a", "b", "c"]), three_cols);
         let new_id =
             split_tab_pane(&mut tab, "c", Horizontal, SplitPlace::Second, None).expect("split");
         let mut panes = bound(&["a", "b", "c"]);
         panes.push((new_id, None));
-        let three_plus_one = build_grid(&panes, 3).expect("grid");
+        let three_plus_one = build_grid(&panes, 3, None).expect("grid");
         assert_ne!(
             three_plus_one,
-            build_grid(&panes, 0).expect("grid"),
+            build_grid(&panes, 0, None).expect("grid"),
             "four panes auto-pick two columns, so the kept count is visible"
         );
         assert_eq!(grid_of(&tab), &three_plus_one);
@@ -2247,7 +2381,10 @@ mod tests {
 
     #[test]
     fn split_pane_on_an_untouched_auto_grid_re_picks_the_columns() {
-        let auto = RearrangeLayout::Grid { cols: 0 };
+        let auto = RearrangeLayout::Grid {
+            cols: 0,
+            aspect: None,
+        };
         let mut tab = picked_tab("T", &bound(&["a", "b", "c", "d"]), auto);
         let new_id =
             split_tab_pane(&mut tab, "d", Horizontal, SplitPlace::Second, None).expect("split");
@@ -2255,8 +2392,150 @@ mod tests {
         panes.push((new_id, None));
         assert_eq!(auto_grid_cols(4), 2);
         assert_eq!(auto_grid_cols(5), 3);
-        assert_eq!(grid_of(&tab), &build_grid(&panes, 3).expect("grid"));
+        assert_eq!(grid_of(&tab), &build_grid(&panes, 3, None).expect("grid"));
         assert_eq!(tab.picked_layout, Some(auto), "the pick stays automatic");
+    }
+
+    /// An automatic pick remembers the pane area's aspect, so a later pane
+    /// count re-picks from it rather than from `ceil(sqrt(N))`.
+    #[test]
+    fn split_pane_on_an_untouched_auto_grid_re_picks_from_its_stored_aspect() {
+        let tall_auto = RearrangeLayout::Grid {
+            cols: 0,
+            aspect: Some(0.5),
+        };
+        let mut tab = picked_tab("T", &bound(&["a", "b", "c"]), tall_auto);
+        assert_eq!(
+            grid_of(&tab),
+            &build_grid(&bound(&["a", "b", "c"]), 1, None).expect("grid"),
+            "three panes in an area half as wide as tall hold one column"
+        );
+        let new_id =
+            split_tab_pane(&mut tab, "c", Horizontal, SplitPlace::Second, None).expect("split");
+        let mut panes = bound(&["a", "b", "c"]);
+        panes.push((new_id, None));
+        assert_eq!(
+            best_fit_grid_cols(4, 0.5),
+            1,
+            "four panes at 1:2 still fit one column"
+        );
+        assert_eq!(auto_grid_cols(4), 2, "ceil(sqrt(4)) would pick two");
+        assert_eq!(
+            grid_of(&tab),
+            &build_grid(&panes, 0, Some(0.5)).expect("grid"),
+            "the rebuild re-picks from the stored aspect"
+        );
+        assert_eq!(
+            tab.picked_layout,
+            Some(tall_auto),
+            "the pick stays automatic"
+        );
+    }
+
+    #[test]
+    fn split_pane_on_an_untouched_fixed_grid_keeps_its_columns() {
+        let two_cols = RearrangeLayout::Grid {
+            cols: 2,
+            aspect: None,
+        };
+        let mut tab = picked_tab("T", &bound(&["a", "b", "c"]), two_cols);
+        let new_id =
+            split_tab_pane(&mut tab, "c", Horizontal, SplitPlace::Second, None).expect("split");
+        let mut panes = bound(&["a", "b", "c"]);
+        panes.push((new_id, None));
+        assert_eq!(
+            grid_of(&tab),
+            &build_grid(&panes, 2, None).expect("grid"),
+            "a fixed column count stays fixed"
+        );
+        assert_eq!(tab.picked_layout, Some(two_cols));
+    }
+
+    /// A resize re-sends an automatic tab's grid: that is a re-fit, not a
+    /// tidy-up, so it keeps the tab's empty panes and only re-picks the
+    /// columns from the new pane area's shape.
+    #[test]
+    fn auto_rearrange_keeps_the_unbound_pane_and_re_picks_from_the_new_aspect() {
+        let tall_auto = RearrangeLayout::Grid {
+            cols: 0,
+            aspect: Some(0.5),
+        };
+        let mut tab = picked_tab("T", &bound(&["a", "b", "c"]), tall_auto);
+        let empty_id =
+            split_tab_pane(&mut tab, "c", Horizontal, SplitPlace::Second, None).expect("split");
+        let mut panes = bound(&["a", "b", "c"]);
+        panes.push((empty_id.clone(), None));
+        assert_eq!(
+            collect_panes(grid_of(&tab)).len(),
+            4,
+            "the split left a pane"
+        );
+
+        let wide_auto = RearrangeLayout::Grid {
+            cols: 0,
+            aspect: Some(1.6),
+        };
+        pick_layout(&mut tab, wide_auto).expect("re-fit");
+        assert_eq!(
+            collect_panes(grid_of(&tab)),
+            panes,
+            "an automatic re-fit keeps the empty pane, in walk order"
+        );
+        assert_eq!(
+            grid_of(&tab),
+            &build_grid(&panes, 0, Some(1.6)).expect("grid"),
+            "the columns are re-picked from the new aspect"
+        );
+        assert_eq!(
+            tab.picked_layout,
+            Some(wide_auto),
+            "the new aspect is stored and the tab stays untouched"
+        );
+
+        // Untouched still means a later split re-picks from that aspect.
+        let new_id = split_tab_pane(
+            &mut tab,
+            &empty_id,
+            Horizontal,
+            SplitPlace::Second,
+            Some("s-d".to_string()),
+        )
+        .expect("split");
+        panes.push((new_id, Some("s-d".to_string())));
+        assert_eq!(
+            grid_of(&tab),
+            &build_grid(&panes, 0, Some(1.6)).expect("grid"),
+            "the following split re-picks from the stored aspect"
+        );
+        assert_eq!(tab.picked_layout, Some(wide_auto));
+    }
+
+    /// Only an automatic re-fit keeps the empty panes: an explicit grid is
+    /// still the user tidying the tab up.
+    #[test]
+    fn auto_tab_given_a_fixed_grid_still_drops_the_unbound_pane() {
+        let mut tab = picked_tab(
+            "T",
+            &bound(&["a", "b", "c"]),
+            RearrangeLayout::Grid {
+                cols: 0,
+                aspect: Some(0.5),
+            },
+        );
+        split_tab_pane(&mut tab, "c", Horizontal, SplitPlace::Second, None).expect("split");
+        assert_eq!(collect_panes(grid_of(&tab)).len(), 4);
+
+        let two_cols = RearrangeLayout::Grid {
+            cols: 2,
+            aspect: None,
+        };
+        pick_layout(&mut tab, two_cols).expect("pick");
+        assert_eq!(
+            collect_panes(grid_of(&tab)),
+            bound(&["a", "b", "c"]),
+            "a fixed pick drops the empty pane as before"
+        );
+        assert_eq!(tab.picked_layout, Some(two_cols));
     }
 
     #[test]
@@ -2378,7 +2657,10 @@ mod tests {
 
     #[test]
     fn reapply_with_one_pane_left_is_a_single_pane() {
-        let three_cols = RearrangeLayout::Grid { cols: 3 };
+        let three_cols = RearrangeLayout::Grid {
+            cols: 3,
+            aspect: None,
+        };
         let mut tab = picked_tab("T", &bound(&["a", "b"]), three_cols);
         assert!(!close_tab_pane(&mut tab, "b").expect("close"));
         assert_eq!(grid_of(&tab), &pane("a", Some("s-a")));
@@ -2524,7 +2806,10 @@ mod tests {
 
     #[test]
     fn clone_tabs_fresh_ids_keeps_the_flag() {
-        let three_cols = RearrangeLayout::Grid { cols: 3 };
+        let three_cols = RearrangeLayout::Grid {
+            cols: 3,
+            aspect: None,
+        };
         let src = vec![
             picked_tab("P", &bound(&["a", "b"]), three_cols),
             grid_tab("U", pane("c", None)),

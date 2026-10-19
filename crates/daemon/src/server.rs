@@ -6316,7 +6316,7 @@ fn build_all_sessions_layout(hub: &Hub) -> Vec<TabEntry> {
         .into_iter()
         .map(|s| (uuid::Uuid::new_v4().to_string(), Some(s.id)))
         .collect();
-    let Some(grid) = tabs::build_grid(&panes, 0) else {
+    let Some(grid) = tabs::build_grid(&panes, 0, None) else {
         return Vec::new();
     };
     vec![TabEntry {
@@ -11501,13 +11501,25 @@ mod tests {
         async fn flag_persists_across_state_reload() {
             let (hub, _scratch) = test_hub("pick-reload");
             seed_two_pane_layout(&hub, "c1");
-            dispatch_ok(&hub, rearrange(RearrangeLayout::Grid { cols: 3 })).await;
+            let fixed = RearrangeLayout::Grid {
+                cols: 3,
+                aspect: None,
+            };
+            dispatch_ok(&hub, rearrange(fixed)).await;
             let reloaded = AppState::load_or_default(&hub.dirs).expect("reload state");
             let tabs = reloaded.client_layout("c1");
-            assert_eq!(
-                tabs.first().and_then(|t| t.picked_layout),
-                Some(RearrangeLayout::Grid { cols: 3 })
-            );
+            assert_eq!(tabs.first().and_then(|t| t.picked_layout), Some(fixed));
+
+            // An automatic pick's aspect is part of the stored layout, so it
+            // survives a reload too.
+            let automatic = RearrangeLayout::Grid {
+                cols: 0,
+                aspect: Some(1.6),
+            };
+            dispatch_ok(&hub, rearrange(automatic)).await;
+            let reloaded = AppState::load_or_default(&hub.dirs).expect("reload state");
+            let tabs = reloaded.client_layout("c1");
+            assert_eq!(tabs.first().and_then(|t| t.picked_layout), Some(automatic));
         }
     }
 }

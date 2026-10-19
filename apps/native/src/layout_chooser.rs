@@ -59,7 +59,7 @@ impl Control {
 
 /// How the panes of every active session are laid out once the daemon has
 /// put them in one tab.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Arrangement {
     pub(crate) layout: RearrangeLayout,
     /// At most this many panes per tab; `None` keeps them all in one.
@@ -226,15 +226,16 @@ impl LayoutChooser {
         }
     }
 
-    /// What `control` reads; `aspect` resolves the Auto shape's size.
-    pub(crate) fn label(&self, control: &Control, aspect: f32) -> String {
+    /// What `control` reads; the pane area's aspect no longer resolves a
+    /// count here, since the daemon fits the Auto grid.
+    pub(crate) fn label(&self, control: &Control, _aspect: f32) -> String {
         match control {
             Control::StartEmpty => "Start empty".to_owned(),
             Control::OpenAll => "Open all active sessions".to_owned(),
             Control::Mode(Mode::Grid) => "Grid".to_owned(),
             Control::Mode(Mode::SideBySide) => "Side by side".to_owned(),
             Control::Mode(Mode::Stacked) => "Stacked".to_owned(),
-            Control::Shape(cols) => grid_shapes(self.count, aspect)
+            Control::Shape(cols) => grid_shapes(self.count)
                 .into_iter()
                 .find(|shape| shape.cols == *cols)
                 .map(|shape| shape.label)
@@ -293,13 +294,17 @@ impl LayoutChooser {
             Mode::SideBySide => RearrangeLayout::Horizontal,
             Mode::Stacked => RearrangeLayout::Vertical,
             Mode::Grid => {
-                let cols = if self.cols == 0 {
-                    best_fit_grid_cols(self.count, aspect)
-                } else {
-                    self.cols
-                };
+                // Auto names no count and carries the area's shape, so the
+                // daemon re-picks the columns when the area changes; a picked
+                // shape keeps the fixed count it names.
+                let auto = self.cols == 0;
                 RearrangeLayout::Grid {
-                    cols: u32::try_from(cols).unwrap_or(u32::MAX),
+                    cols: if auto {
+                        0
+                    } else {
+                        u32::try_from(self.cols).unwrap_or(u32::MAX)
+                    },
+                    aspect: auto.then_some(aspect),
                 }
             }
         };
@@ -318,13 +323,13 @@ fn plural(count: usize, noun: &str) -> String {
     }
 }
 
-/// The grid shapes for `n` panes: Auto (fitted to `aspect`), then every
-/// column count strictly between one column and `n`, each `cols × rows`.
-pub(crate) fn grid_shapes(n: usize, aspect: f32) -> Vec<GridShape> {
-    let auto = best_fit_grid_cols(n, aspect);
+/// The grid shapes for `n` panes: Auto, then every column count strictly
+/// between one column and `n`, each `cols × rows`. Auto's count belongs to the
+/// daemon, which fits it to the pane area.
+pub(crate) fn grid_shapes(n: usize) -> Vec<GridShape> {
     let auto_shape = GridShape {
         cols: 0,
-        label: format!("Auto ({auto} × {})", n.div_ceil(auto)),
+        label: "Auto".to_owned(),
     };
     std::iter::once(auto_shape)
         .chain((2..n).map(|cols| GridShape {
@@ -332,43 +337,6 @@ pub(crate) fn grid_shapes(n: usize, aspect: f32) -> Vec<GridShape> {
             label: format!("{cols} × {}", n.div_ceil(cols)),
         }))
         .collect()
-}
-
-/// The column count whose cells come closest to square for `n` panes in an
-/// area `aspect` wide per unit of height, with each empty cell weighing
-/// 0.3 and a one-row or one-column strip of five or more 0.4 more; an
-/// aspect that is not a positive number counts as 16:9. Ported from the
-/// Tauri client's `bestFitGridCols`.
-pub(crate) fn best_fit_grid_cols(n: usize, aspect: f32) -> usize {
-    if n <= 1 {
-        return 1;
-    }
-    let aspect = f64::from(aspect);
-    let aspect = if aspect > 0.0 && aspect.is_finite() {
-        aspect
-    } else {
-        16.0 / 9.0
-    };
-    let mut best = 1;
-    let mut best_score = f64::INFINITY;
-    for cols in 1..=n {
-        let rows = n.div_ceil(cols);
-        let empties = rows * cols - n;
-        let cell_aspect = aspect * as_f64(rows) / as_f64(cols);
-        let mut score = cell_aspect.ln().abs() + 0.3 * as_f64(empties);
-        if (cols == 1 || cols == n) && n >= 5 {
-            score += 0.4;
-        }
-        if score < best_score {
-            best_score = score;
-            best = cols;
-        }
-    }
-    best
-}
-
-fn as_f64(n: usize) -> f64 {
-    f64::from(u32::try_from(n).unwrap_or(u32::MAX))
 }
 
 /// What lays `pane_ids`, the first tab's panes in order, out as
@@ -489,26 +457,17 @@ mod tests {
 
     #[test]
     fn grid_shapes_list_auto_then_k_by_ceil() {
-        // 5 panes at 16:10: Auto resolves to 3 columns (see the cases below).
-        let shapes = grid_shapes(5, ASPECT);
+        let shapes = grid_shapes(5);
         let labels: Vec<(usize, &str)> = shapes
             .iter()
             .map(|shape| (shape.cols, shape.label.as_str()))
             .collect();
         assert_eq!(
             labels,
-            vec![
-                (0, "Auto (3 × 2)"),
-                (2, "2 × 3"),
-                (3, "3 × 2"),
-                (4, "4 × 2")
-            ]
+            vec![(0, "Auto"), (2, "2 × 3"), (3, "3 × 2"), (4, "4 × 2")],
+            "Auto names no count: the daemon fits it to the pane area"
         );
-        assert_eq!(
-            grid_shapes(2, 1.0).len(),
-            1,
-            "no shape between 1 and N columns"
-        );
+        assert_eq!(grid_shapes(2).len(), 1, "no shape between 1 and N columns");
 
         let mut model = chooser(5);
         assert!(!model.controls().contains(&Control::Shape(0)), "collapsed");
@@ -517,29 +476,12 @@ mod tests {
             model.controls().contains(&Control::Shape(4)),
             "grid is the default"
         );
-        assert_eq!(model.label(&Control::Shape(0), ASPECT), "Auto (3 × 2)");
+        assert_eq!(model.label(&Control::Shape(0), ASPECT), "Auto");
         model.press(&Control::Mode(Mode::SideBySide), ASPECT);
         assert!(
             !model.controls().contains(&Control::Shape(0)),
             "shapes are grid-only"
         );
-    }
-
-    /// Worked by hand from `utils/grid.ts`'s score
-    /// `|ln(aspect × rows / cols)| + 0.3 × empties (+ 0.4 for a strip at 5+)`:
-    /// - 4 at 16:9: 2 cols scores 0.575, 3 cols 0.770, 4 cols 0.811 → 2.
-    /// - 9 at 16:9: 3 cols 0.575, 5 cols 0.641, 4 cols 1.188 → 3.
-    /// - 5 at 16:10: 3 cols 0.365, 4 cols 1.123, 2 cols 1.175 → 3.
-    /// - 3 at 1:2: 1 col 0.405, 2 cols 0.993, 3 cols 1.792 → 1.
-    /// - an aspect that is not positive falls back to 16:9, so 4 → 2.
-    #[test]
-    fn best_fit_grid_cols_matches_tauri_cases() {
-        assert_eq!(best_fit_grid_cols(1, 16.0 / 9.0), 1);
-        assert_eq!(best_fit_grid_cols(4, 16.0 / 9.0), 2);
-        assert_eq!(best_fit_grid_cols(9, 16.0 / 9.0), 3);
-        assert_eq!(best_fit_grid_cols(5, 16.0 / 10.0), 3);
-        assert_eq!(best_fit_grid_cols(3, 0.5), 1);
-        assert_eq!(best_fit_grid_cols(4, 0.0), 2);
     }
 
     #[test]
@@ -575,18 +517,24 @@ mod tests {
         model.press(&Control::OpenAll, ASPECT);
         let auto = model.press(&Control::Confirm, ASPECT);
         let expected = Arrangement {
-            layout: RearrangeLayout::Grid { cols: 3 },
+            layout: RearrangeLayout::Grid {
+                cols: 0,
+                aspect: Some(ASPECT),
+            },
             max_per_tab: None,
         };
         assert!(
             matches!(&auto, Some((InitLayoutKind::AllSessions, Some(a))) if *a == expected),
-            "{auto:?}"
+            "{auto:?} is the automatic grid with the pane area's shape"
         );
         model.press(&Control::Shape(2), ASPECT);
         model.press(&Control::MaxUp, ASPECT);
         let chosen = model.press(&Control::Confirm, ASPECT);
         let expected = Arrangement {
-            layout: RearrangeLayout::Grid { cols: 2 },
+            layout: RearrangeLayout::Grid {
+                cols: 2,
+                aspect: None,
+            },
             max_per_tab: Some(1),
         };
         assert!(
@@ -609,7 +557,10 @@ mod tests {
     #[test]
     fn batches_split_after_the_first_by_max() {
         let panes: Vec<String> = (1..=5).map(|n| format!("p{n}")).collect();
-        let layout = RearrangeLayout::Grid { cols: 2 };
+        let layout = RearrangeLayout::Grid {
+            cols: 2,
+            aspect: None,
+        };
         let limited = Arrangement {
             layout,
             max_per_tab: Some(2),

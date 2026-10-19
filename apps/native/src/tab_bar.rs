@@ -751,7 +751,10 @@ impl RootView {
         }
         self.send(ClientMessage::RearrangeTab {
             tab_id: tab.id.clone(),
-            layout: RearrangeLayout::Grid { cols: 0 },
+            layout: RearrangeLayout::Grid {
+                cols: 0,
+                aspect: Some(self.pane_area_aspect()),
+            },
         });
         true
     }
