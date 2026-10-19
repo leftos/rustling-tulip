@@ -15,7 +15,7 @@
 //!   (elapsed-time counter, slow spinner) holds `working` instead of flapping
 
 use crate::osc_title::TitleActivity;
-use crate::session::{SessionRegistry, push_recent_action};
+use crate::session::{SessionRecord, SessionRegistry, push_recent_action};
 use protocol::{AttentionReason, SessionStatus};
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -116,6 +116,10 @@ pub fn watch(
     tokio::spawn(async move {
         let mut state = State::seed(initial);
         let mut last_output = Instant::now();
+        // The idle timer fires once per stretch of silence: a hook-reported
+        // `AwaitingInput` whose prompt still matches holds without rearming,
+        // and the next output starts a new stretch.
+        let mut idle_checked = false;
         let mut scrollback: Vec<u8> = Vec::with_capacity(SCROLLBACK_BYTES);
         let mut in_window: VecDeque<(Instant, u32)> = VecDeque::new();
         let mut out_window: VecDeque<(Instant, u32)> = VecDeque::new();
@@ -128,6 +132,7 @@ pub fn watch(
                     Ok(bytes) => {
                         let now = Instant::now();
                         last_output = now;
+                        idle_checked = false;
                         // Drain any input pulses that landed in our channel before
                         // (or alongside) this output chunk so the echo budget is
                         // computed against the right input volume. Without this,
@@ -164,14 +169,26 @@ pub fn watch(
                             "pty_state volume tick"
                         );
 
-                        let new_state = classify(&scrollback, state, active);
-                        on_transition(
-                            &registry,
-                            &session_id,
-                            &mut state,
-                            new_state,
-                            &attention_tx,
-                        );
+                        if record_status(&registry, &session_id)
+                            .is_some_and(|(_, hook_driven, _)| hook_driven)
+                        {
+                            // Hooks own every promotion while they are live.
+                            // The windows and the title activity above keep
+                            // feeding the two demotions the idle timer runs.
+                            debug!(
+                                session_id = %session_id,
+                                "hook-driven: classifier output ignored"
+                            );
+                        } else {
+                            let new_state = classify(&scrollback, state, active);
+                            on_transition(
+                                &registry,
+                                &session_id,
+                                &mut state,
+                                new_state,
+                                &attention_tx,
+                            );
+                        }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         warn!(session_id = %session_id, lagged = n, "pty state lagged");
@@ -190,13 +207,13 @@ pub fn watch(
                         // will reclassify with this volume in scope.
                     }
                 },
-                () = sleep_until(next_idle_check), if matches!(state, State::Working | State::AwaitingInput) => {
-                    let new_state = classify(&scrollback, State::Idle, false);
-                    on_transition(
+                () = sleep_until(next_idle_check), if !idle_checked && record_status(&registry, &session_id).is_some_and(|(status, _, _)| matches!(status, SessionStatus::Working | SessionStatus::AwaitingInput)) => {
+                    idle_checked = true;
+                    on_idle(
                         &registry,
                         &session_id,
+                        &scrollback,
                         &mut state,
-                        new_state,
                         &attention_tx,
                     );
                 }
@@ -369,15 +386,34 @@ fn append_scrollback(buf: &mut Vec<u8>, bytes: &[u8]) {
     }
 }
 
-fn classify(scrollback: &[u8], current: State, active: bool) -> State {
-    // Strip ANSI escape sequences and non-ASCII before matching: Claude's TUI
-    // emits a lot of color codes that would otherwise break naive substring
-    // matches. We work on the last ~2 KB of stripped output.
+/// Whether a prompt is on screen: the prompt regexes match the last ~2 KB of
+/// stripped output. ANSI escape sequences are stripped first, since Claude's
+/// TUI emits a lot of color codes that would otherwise break naive substring
+/// matches; multi-byte characters are kept whole. The byte offset is widened
+/// to a character boundary so a glyph straddling it cannot panic the slice.
+fn prompt_on_screen(scrollback: &[u8]) -> bool {
     let recent = strip_ansi(scrollback);
-    let tail_start = recent.len().saturating_sub(2048);
-    let tail = &recent[tail_start..];
+    let mut tail_start = recent.len().saturating_sub(2048);
+    while !recent.is_char_boundary(tail_start) {
+        tail_start += 1;
+    }
+    matches_prompt(&recent[tail_start..])
+}
 
-    if matches_prompt(tail) {
+/// The record's current status, whether hooks drive its promotions, and the
+/// hook ordering stamp, which a caller re-checks under the record lock
+/// before writing a transition or a demotion.
+fn record_status(
+    registry: &Arc<SessionRegistry>,
+    session_id: &str,
+) -> Option<(SessionStatus, bool, Option<u128>)> {
+    let arc = registry.get(session_id)?;
+    let guard = crate::sync::lock(&arc);
+    Some((guard.status, guard.hook_driven, guard.last_hook_time))
+}
+
+fn classify(scrollback: &[u8], current: State, active: bool) -> State {
+    if prompt_on_screen(scrollback) {
         State::AwaitingInput
     } else if active {
         // Genuine output beyond the echo budget, or a terminal-title repaint —
@@ -409,7 +445,7 @@ fn matches_prompt(tail: &str) -> bool {
 }
 
 fn strip_ansi(input: &[u8]) -> String {
-    let mut out = String::with_capacity(input.len());
+    let mut out: Vec<u8> = Vec::with_capacity(input.len());
     let mut i = 0;
     while i < input.len() {
         let b = input[i];
@@ -446,12 +482,146 @@ fn strip_ansi(input: &[u8]) -> String {
             i += 1;
             continue;
         }
-        if b.is_ascii() {
-            out.push(b as char);
-        }
+        out.push(b);
         i += 1;
     }
-    out
+    // Keep multi-byte characters whole and decode once: the prompt markers
+    // `❯` and `│` are UTF-8 beyond ASCII, and dropping those bytes would hide
+    // a real question prompt from `matches_prompt`.
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Run the idle timer's transition once a silence has lasted [`IDLE_AFTER`].
+///
+/// A hook-driven session is demoted without the classifier: `Working` to
+/// `Idle` because silence during hook-reported work means the turn was
+/// interrupted (an Esc interrupt fires no closing hook), and `AwaitingInput`
+/// to `Idle` once its prompt has left the screen, because a prompt dismissed
+/// from another client fires no hook either. An `AwaitingInput` whose prompt
+/// still matches holds. A session without hooks keeps the classifier's own
+/// reclassification.
+fn on_idle(
+    registry: &Arc<SessionRegistry>,
+    session_id: &str,
+    scrollback: &[u8],
+    state: &mut State,
+    attention_tx: &mpsc::UnboundedSender<AttentionEvent>,
+) {
+    match record_status(registry, session_id) {
+        Some((status, true, epoch)) => {
+            let demote = match status {
+                SessionStatus::Working => true,
+                SessionStatus::AwaitingInput => !prompt_on_screen(scrollback),
+                _ => false,
+            };
+            if demote {
+                *state = State::Idle;
+                demote_after_silence(registry, session_id, status, epoch);
+            }
+        }
+        Some((_, false, _)) => {
+            let new_state = classify(scrollback, State::Idle, false);
+            on_transition(registry, session_id, state, new_state, attention_tx);
+        }
+        None => {}
+    }
+}
+
+/// Demote `session_id` from `expected` to `Idle`, clearing the prompt it was
+/// waiting on.
+///
+/// The update checks `expected` and the hook ordering stamp again under the
+/// record lock: a promotion that landed since the caller read the record wins,
+/// and a status that left and returned through a newer hook event (an ABA) is
+/// not demoted at the old deadline.
+fn demote_after_silence(
+    registry: &Arc<SessionRegistry>,
+    session_id: &str,
+    expected: SessionStatus,
+    epoch: Option<u128>,
+) {
+    registry.update(session_id, |rec| {
+        if rec.status != expected || rec.last_hook_time != epoch {
+            return;
+        }
+        apply_status(rec, SessionStatus::Idle);
+        if expected == SessionStatus::AwaitingInput {
+            rec.pending_input = None;
+        }
+    });
+}
+
+/// The status transition path the PTY watcher and the hook route share.
+///
+/// Other paths write a status directly on the record — `SendInput`'s
+/// owner-key clear, stop, park and the exit watcher; this is the one that
+/// carries the `"awaiting input"` action and the single [`AttentionEvent`] on
+/// entry.
+///
+/// The current status and the hook ordering stamp are read from the record,
+/// never from a caller's cached copy: the hook handler mutates the record
+/// while the watcher task is parked. An unchanged status is a no-op, and the
+/// update re-checks the stamp under the lock, so a newer hook event that
+/// landed in between wins. On entry to `AwaitingInput` the record gains an
+/// `"awaiting input"` action and one [`AttentionEvent`], sent after the
+/// registry update returns so a slow consumer never holds the record lock.
+/// The write goes through [`SessionRegistry::update`], which stamps
+/// `status_since` and syncs the sidecar.
+pub fn transition(
+    registry: &Arc<SessionRegistry>,
+    session_id: &str,
+    next: SessionStatus,
+    attention_tx: &mpsc::UnboundedSender<AttentionEvent>,
+) {
+    // An unchanged status is not a transition: skip the update so nothing is
+    // mirrored to the sidecar or broadcast. The update below decides again
+    // under the lock, so a status or hook event that moved in between wins.
+    let Some((current, _, epoch)) = record_status(registry, session_id) else {
+        return;
+    };
+    if current == next {
+        return;
+    }
+    let mut entered_awaiting = false;
+    registry.update(session_id, |rec| {
+        if rec.last_hook_time != epoch {
+            return;
+        }
+        entered_awaiting = apply_status(rec, next);
+    });
+    if entered_awaiting {
+        announce_awaiting_input(session_id, attention_tx);
+    }
+}
+
+/// Apply `next` to `record` when it is a real change.
+///
+/// Sets the status and records the `"awaiting input"` action on entry.
+/// Answers whether the record entered `AwaitingInput`, so a caller holding a
+/// registry update can raise the one `Attention` after that update returns.
+pub fn apply_status(record: &mut SessionRecord, next: SessionStatus) -> bool {
+    if record.status == next {
+        return false;
+    }
+    record.status = next;
+    if next == SessionStatus::AwaitingInput {
+        push_recent_action(record, "awaiting input".to_string());
+        return true;
+    }
+    false
+}
+
+/// Send the one `Attention` an entry into `AwaitingInput` raises. Call it
+/// after the registry update has returned, so a slow consumer never holds the
+/// record lock.
+pub fn announce_awaiting_input(
+    session_id: &str,
+    attention_tx: &mpsc::UnboundedSender<AttentionEvent>,
+) {
+    let _ = attention_tx.send(AttentionEvent {
+        session_id: session_id.to_string(),
+        reason: AttentionReason::AwaitingInput,
+    });
 }
 
 fn on_transition(
@@ -464,20 +634,13 @@ fn on_transition(
     if next == *current {
         return;
     }
-    let prev = *current;
     *current = next;
-    registry.update(session_id, |rec| {
-        rec.status = SessionStatus::from(next);
-        if next == State::AwaitingInput && prev != State::AwaitingInput {
-            push_recent_action(rec, "awaiting input".to_string());
-        }
-    });
-    if next == State::AwaitingInput {
-        let _ = attention_tx.send(AttentionEvent {
-            session_id: session_id.to_string(),
-            reason: AttentionReason::AwaitingInput,
-        });
-    }
+    transition(
+        registry,
+        session_id,
+        SessionStatus::from(next),
+        attention_tx,
+    );
 }
 
 fn on_plain_shell_transition(
@@ -520,6 +683,18 @@ mod tests {
             classify(b"Do you want to proceed?", State::Working, true),
             State::AwaitingInput
         );
+    }
+
+    #[test]
+    fn prompt_tail_starts_on_a_char_boundary() {
+        // The 2 KB tail begins inside the three-byte `❯`. Slicing at the raw
+        // byte offset would panic, and a panicking watcher task stops
+        // reporting status for the rest of the session.
+        let mut screen = vec![b'a'; 2047];
+        screen.extend_from_slice("❯".as_bytes());
+        screen.resize(4096, b'a');
+        assert_eq!(screen.len(), 4096);
+        assert_eq!(classify(&screen, State::Idle, false), State::Idle);
     }
 
     #[test]
@@ -619,6 +794,7 @@ mod hysteresis_tests {
             agent_conversation_id: None,
             pending_input: None,
             last_hook_time: None,
+            hook_driven: false,
             busy_excluded: false,
         }
     }
@@ -639,9 +815,16 @@ mod hysteresis_tests {
     /// Start a watcher over a record that already carries `initial`, the way a
     /// session reattached from its sidecar does.
     fn start_from(tag: &str, plain_shell: bool, initial: SessionStatus) -> Harness {
-        let registry = SessionRegistry::new(scratch_dirs(tag));
         let mut record = test_record(SESSION);
         record.status = initial;
+        start_record(tag, plain_shell, record)
+    }
+
+    /// Start a watcher over `record` as the session's spawn or reattach left
+    /// it.
+    fn start_record(tag: &str, plain_shell: bool, record: SessionRecord) -> Harness {
+        let initial = record.status;
+        let registry = SessionRegistry::new(scratch_dirs(tag));
         registry.insert(record);
         let (output, output_rx) = broadcast::channel(64);
         let (input, input_rx) = mpsc::unbounded_channel();
@@ -689,6 +872,12 @@ mod hysteresis_tests {
             self.output
                 .send(frame.into_bytes())
                 .expect("watcher still subscribed");
+        }
+
+        /// Change the session record the way a hook event does while the
+        /// watcher is parked.
+        fn set_record(&self, f: impl FnOnce(&mut SessionRecord)) {
+            self.registry.update(SESSION, f);
         }
     }
 
@@ -782,6 +971,135 @@ mod hysteresis_tests {
             h.status(),
             SessionStatus::Idle,
             "silence past IDLE_AFTER demotes it"
+        );
+    }
+
+    /// While hooks own the status, output the classifier would read as work
+    /// must not promote a hook-reported `AwaitingInput`.
+    #[tokio::test(start_paused = true)]
+    async fn hook_awaiting_input_survives_working_output() {
+        let h = start_from("hook-survives-output", false, SessionStatus::AwaitingInput);
+        h.set_record(|record| record.hook_driven = true);
+        for tick in 0..3 {
+            h.heartbeat(tick);
+            settle().await;
+            assert_eq!(
+                h.status(),
+                SessionStatus::AwaitingInput,
+                "tick {tick}: classifier output promoted a hook-reported prompt"
+            );
+            tokio::time::sleep(HEARTBEAT / 4).await;
+        }
+    }
+
+    /// Hook-reported work with no further PTY output is an interrupted turn:
+    /// the silence demotion still ends it.
+    #[tokio::test(start_paused = true)]
+    async fn hook_working_demotes_to_idle_after_silence() {
+        let h = start("hook-working-silence", false);
+        h.set_record(|record| {
+            record.hook_driven = true;
+            record.status = SessionStatus::Working;
+        });
+        tokio::time::sleep(IDLE_AFTER + Duration::from_millis(50)).await;
+        settle().await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "silence demotes hook-reported work"
+        );
+    }
+
+    /// A hook-reported prompt whose text has left the screen is dismissed:
+    /// the same silence demotes it.
+    #[tokio::test(start_paused = true)]
+    async fn hook_awaiting_input_demotes_once_the_prompt_is_gone() {
+        let h = start("hook-prompt-gone", false);
+        h.set_record(|record| {
+            record.hook_driven = true;
+            record.status = SessionStatus::AwaitingInput;
+        });
+        h.output
+            .send(b"\x1b[2K\r$ ".to_vec())
+            .expect("watcher still subscribed");
+        settle().await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::AwaitingInput,
+            "a small redraw leaves it waiting"
+        );
+        tokio::time::sleep(IDLE_AFTER + Duration::from_millis(50)).await;
+        settle().await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "silence with no prompt demotes it"
+        );
+    }
+
+    /// A hook-reported prompt still on screen holds past `IDLE_AFTER`: the
+    /// demotion reads the screen, not the silence alone.
+    #[tokio::test(start_paused = true)]
+    async fn hook_awaiting_input_holds_while_the_prompt_matches() {
+        let h = start("hook-prompt-holds", false);
+        h.set_record(|record| {
+            record.hook_driven = true;
+            record.status = SessionStatus::AwaitingInput;
+        });
+        h.output
+            .send(b"\x1b[2K\rDo you want to proceed? 1. Yes 2. No ".to_vec())
+            .expect("watcher still subscribed");
+        settle().await;
+        tokio::time::sleep(IDLE_AFTER + Duration::from_millis(50)).await;
+        settle().await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::AwaitingInput,
+            "a prompt on screen holds the demotion"
+        );
+    }
+
+    /// A real `AskUserQuestion` screen carries markers outside ASCII: the
+    /// `❯` cursor with numbered options must hold the demotion as surely as
+    /// the ASCII "Do you want to" wording does.
+    #[tokio::test(start_paused = true)]
+    async fn hook_awaiting_input_holds_on_a_chevron_question() {
+        let h = start("hook-chevron-holds", false);
+        h.set_record(|record| {
+            record.hook_driven = true;
+            record.status = SessionStatus::AwaitingInput;
+        });
+        h.output
+            .send("\x1b[2K\r❯ 1. Yes  2. No ".as_bytes().to_vec())
+            .expect("watcher still subscribed");
+        settle().await;
+        tokio::time::sleep(IDLE_AFTER + Duration::from_millis(50)).await;
+        settle().await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::AwaitingInput,
+            "a chevron question on screen holds the demotion"
+        );
+    }
+
+    /// A session with no hook events keeps the heuristic's own classifier:
+    /// it still promotes on activity and demotes on silence.
+    #[tokio::test(start_paused = true)]
+    async fn hook_awaiting_input_is_not_demoted_without_hooks() {
+        let h = start_from("heuristic-intact", false, SessionStatus::AwaitingInput);
+        h.heartbeat(0);
+        settle().await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Working,
+            "the classifier still promotes on output"
+        );
+        tokio::time::sleep(IDLE_AFTER + Duration::from_millis(50)).await;
+        settle().await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "the classifier still demotes on silence"
         );
     }
 }

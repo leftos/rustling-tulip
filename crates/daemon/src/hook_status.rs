@@ -84,13 +84,19 @@ fn signal(status: Option<SessionStatus>, pending: PendingUpdate) -> HookSignal {
 ///
 /// A session that has stopped or errored keeps that status — a hook event
 /// still in flight when the session quit must not revive it — but the stamp
-/// still advances, so an even older event cannot apply either.
+/// still advances, so an even older event cannot apply either. The event
+/// still marks the session hook-driven: hooks own its promotions from its
+/// first applied event on.
 ///
-/// Writes the status and the pending input straight onto the record. The
-/// shared transition path and the hook-versus-heuristic arbitration replace
-/// this body later; this is the one place that turns a signal into session
-/// state.
+/// The status moves through [`crate::pty_state::apply_status`], the same
+/// helper the PTY watcher's transition uses, inside the same registry update
+/// as the ordering check and the `Stopped | Error` guard. One update for the
+/// whole event is what keeps two concurrent events in order and stops a
+/// terminal status written by the exit path from being revived. `status_since`
+/// and the sidecar still come from the registry update; the `Attention` on
+/// entry to `AwaitingInput` is sent once the update has returned.
 pub fn apply_signal(hub: &Hub, session_id: &str, event_time: Option<u128>, signal: &HookSignal) {
+    let mut entered_awaiting = false;
     hub.sessions.update(session_id, |record| {
         let Some(event_time) = event_time else {
             return;
@@ -99,11 +105,12 @@ pub fn apply_signal(hub: &Hub, session_id: &str, event_time: Option<u128>, signa
             return;
         }
         record.last_hook_time = Some(event_time);
+        record.hook_driven = true;
         if matches!(record.status, SessionStatus::Stopped | SessionStatus::Error) {
             return;
         }
         if let Some(status) = signal.status {
-            record.status = status;
+            entered_awaiting = crate::pty_state::apply_status(record, status);
         }
         match &signal.pending {
             PendingUpdate::Clear => record.pending_input = None,
@@ -115,6 +122,9 @@ pub fn apply_signal(hub: &Hub, session_id: &str, event_time: Option<u128>, signa
             }
         }
     });
+    if entered_awaiting {
+        crate::pty_state::announce_awaiting_input(session_id, &hub.attention_tx);
+    }
 }
 
 /// `SessionStart` says nothing about the status unless the session starts

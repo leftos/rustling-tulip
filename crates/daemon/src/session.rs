@@ -72,6 +72,10 @@ pub struct ScrollbackSnapshot {
 /// the `SessionRecord` so the handler can find it via the registry.
 pub type ScrollbackSnapshotReq = mpsc::UnboundedSender<oneshot::Sender<ScrollbackSnapshot>>;
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent runtime flags on one record; a state machine would not describe them"
+)]
 pub struct SessionRecord {
     pub id: String,
     /// Effective label surfaced to clients. Equals `user_label` when set,
@@ -195,6 +199,14 @@ pub struct SessionRecord {
     /// dropped. Runtime-only: a daemon restart resets it along with the
     /// hook-driven state.
     pub last_hook_time: Option<u128>,
+    /// True once a mapped hook event has been applied to this session. While
+    /// true, hook signals own every promotion into `Working` and
+    /// `AwaitingInput`, and the PTY classifier only demotes. Set by
+    /// [`crate::hook_status::apply_signal`]; never cleared while the record
+    /// lives, and reset only by a daemon restart, which rebuilds the record
+    /// (see [`Self::last_hook_time`]). Runtime-only: neither mirrored into
+    /// the sidecar nor sent on the wire.
+    pub hook_driven: bool,
 }
 
 impl SessionRecord {
@@ -501,6 +513,28 @@ impl SessionRegistry {
     where
         F: FnOnce(&mut SessionRecord),
     {
+        self.update_from_if_changed(id, origin, |record| {
+            f(record);
+            true
+        })
+    }
+
+    /// [`Self::update`], but `f` answers whether it changed anything. The
+    /// sidecar write and the broadcast are skipped when it answers `false`,
+    /// so a hot path can test and act in one lock without publishing a no-op
+    /// update. Returns whether the registry holds `id`.
+    pub fn update_if_changed<F>(&self, id: &str, f: F) -> bool
+    where
+        F: FnOnce(&mut SessionRecord) -> bool,
+    {
+        self.update_from_if_changed(id, None, f)
+    }
+
+    /// The shared body of [`Self::update_from`] and [`Self::update_if_changed`].
+    fn update_from_if_changed<F>(&self, id: &str, origin: Option<UpdateOrigin>, f: F) -> bool
+    where
+        F: FnOnce(&mut SessionRecord) -> bool,
+    {
         let Some(arc) = self.get(id) else {
             return false;
         };
@@ -508,7 +542,9 @@ impl SessionRegistry {
             let mut guard = lock(&arc);
             let was_error = guard.status == SessionStatus::Error;
             let was_status = guard.status;
-            f(&mut guard);
+            if !f(&mut guard) {
+                return true;
+            }
             if guard.status != was_status {
                 guard.status_since = Some(Utc::now());
             }
@@ -886,6 +922,7 @@ impl SessionRegistry {
             agent_conversation_id: meta.agent_conversation_id.clone(),
             pending_input: None,
             last_hook_time: None,
+            hook_driven: false,
             busy_excluded: meta.busy_excluded,
         };
         push_recent_action(&mut record, "reattached after daemon restart".to_string());
@@ -949,6 +986,7 @@ impl SessionRegistry {
             agent_conversation_id: meta.agent_conversation_id.clone(),
             pending_input: None,
             last_hook_time: None,
+            hook_driven: false,
             busy_excluded: meta.busy_excluded,
         };
         push_recent_action(
@@ -997,6 +1035,7 @@ impl SessionRegistry {
             agent_conversation_id: meta.agent_conversation_id.clone(),
             pending_input: None,
             last_hook_time: None,
+            hook_driven: false,
             busy_excluded: meta.busy_excluded,
         };
         push_recent_action(
@@ -1070,6 +1109,7 @@ mod tests {
             agent_conversation_id: None,
             pending_input: None,
             last_hook_time: None,
+            hook_driven: false,
             busy_excluded: false,
         }
     }

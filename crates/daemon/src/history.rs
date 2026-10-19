@@ -1560,6 +1560,7 @@ pub(crate) mod test_support {
             agent_conversation_id: None,
             pending_input: None,
             last_hook_time: None,
+            hook_driven: false,
             busy_excluded: false,
         }
     }

@@ -1843,6 +1843,24 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
                     let guard = crate::sync::lock(&rec);
                     (guard.pty.clone(), guard.input_notifier.clone())
                 };
+                // The owner's key answers a pending hook prompt: leave
+                // `AwaitingInput` at once, with no settle window. The test and
+                // the clear share one registry update, so a hook event cannot
+                // slip between them; a session without hooks is untouched,
+                // and the bytes are forwarded outside the record lock.
+                hub.sessions.update_if_changed(&session_id, |rec| {
+                    if !rec.hook_driven
+                        || (rec.status != SessionStatus::AwaitingInput
+                            && rec.pending_input.is_none())
+                    {
+                        return false;
+                    }
+                    if rec.status == SessionStatus::AwaitingInput {
+                        rec.status = SessionStatus::Idle;
+                    }
+                    rec.pending_input = None;
+                    true
+                });
                 if let Some(pty) = pty {
                     if let Some(tx) = notifier {
                         let _ = tx.send(bytes.len());
@@ -3868,6 +3886,7 @@ fn interactive_record(
         agent_conversation_id: conversation.own.clone(),
         pending_input: None,
         last_hook_time: None,
+        hook_driven: false,
         busy_excluded: false,
     };
     push_recent_action(&mut record, "session started".to_string());
@@ -4349,6 +4368,7 @@ async fn spawn_plain_shell_session(
         agent_conversation_id: None,
         pending_input: None,
         last_hook_time: None,
+        hook_driven: false,
         busy_excluded: false,
     };
     push_recent_action(
@@ -4497,6 +4517,7 @@ fn spawn_headless_session(
         agent_conversation_id: None,
         pending_input: None,
         last_hook_time: None,
+        hook_driven: false,
         busy_excluded: false,
     };
     push_recent_action(&mut record, "headless session started".to_string());
@@ -7345,6 +7366,29 @@ mod tests {
     /// `bin_templates`, so a spawn resolves the tracer template from that
     /// directory first (see [`spawnless_test_hub`]).
     fn test_hub_in(scratch: ScratchDir, bin_templates: Option<PathBuf>) -> (Hub, ScratchDir) {
+        let (hub, scratch, _attention) = build_test_hub(scratch, bin_templates);
+        (hub, scratch)
+    }
+
+    /// A hub over a fresh scratch dir whose attention events the test reads.
+    fn test_hub_with_attention(
+        tag: &str,
+    ) -> (
+        Hub,
+        ScratchDir,
+        mpsc::UnboundedReceiver<pty_state::AttentionEvent>,
+    ) {
+        build_test_hub(ScratchDir::new(tag), None)
+    }
+
+    fn build_test_hub(
+        scratch: ScratchDir,
+        bin_templates: Option<PathBuf>,
+    ) -> (
+        Hub,
+        ScratchDir,
+        mpsc::UnboundedReceiver<pty_state::AttentionEvent>,
+    ) {
         let config = scratch.path().join("config");
         let dirs = Dirs {
             config: config.clone(),
@@ -7363,7 +7407,7 @@ mod tests {
         std::fs::create_dir_all(&dirs.binaries_dir).expect("create binaries dir");
         let state = Arc::new(AppState::load_or_default(&dirs).expect("load test state"));
         let sessions = SessionRegistry::new(dirs.clone());
-        let (attention_tx, _) = mpsc::unbounded_channel();
+        let (attention_tx, attention_rx) = mpsc::unbounded_channel();
         let (shutdown_tx, _) = tokio::sync::watch::channel(false);
         let (tab_events, _) = broadcast::channel(16);
         let (preset_events, _) = broadcast::channel(16);
@@ -7393,7 +7437,7 @@ mod tests {
             keep_awake_status,
             recovering: RecoveryClaims::default(),
         };
-        (hub, scratch)
+        (hub, scratch, attention_rx)
     }
 
     /// Dispatch `msg` against `hub` and return the single message it put on
@@ -7999,6 +8043,7 @@ mod tests {
             agent_conversation_id: None,
             pending_input: None,
             last_hook_time: None,
+            hook_driven: false,
             busy_excluded: false,
         }
     }
@@ -8231,6 +8276,154 @@ mod tests {
             .await
             .expect("router answers");
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// One `Attention` per entry into `AwaitingInput`, on the real hook path:
+    /// classifier output matching the same prompt raises no second event, and
+    /// an event for a session already waiting raises none.
+    #[tokio::test(start_paused = true)]
+    async fn hook_awaiting_input_raises_one_attention() {
+        let (hub, _scratch, mut attention) = test_hub_with_attention("hook-attention");
+        hub.sessions.insert(idle_record("s1"));
+        let (output, output_rx) = broadcast::channel(16);
+        let (_input, input_rx) = mpsc::unbounded_channel();
+        pty_state::watch(
+            &hub.sessions,
+            "s1".to_owned(),
+            pty_state::WatchStreams {
+                output: output_rx,
+                input_pulses: input_rx,
+            },
+            hub.attention_tx.clone(),
+            SessionStatus::Idle,
+        );
+        let question = concat!(
+            r#"{"hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","#,
+            r#""tool_input":{"questions":[{"question":"Which?","header":"Pick","#,
+            r#""options":[{"label":"A"},{"label":"B"}],"multiSelect":false}]}}"#,
+        );
+        let event: serde_json::Value = serde_json::from_str(question).expect("parse hook body");
+        let signal = crate::hook_status::map_event(&event).expect("a question is mapped");
+        crate::hook_status::apply_signal(&hub, "s1", Some(100), &signal);
+        assert!(
+            matches!(
+                attention.try_recv().map(|event| event.reason),
+                Ok(AttentionReason::AwaitingInput)
+            ),
+            "the hook transition raises attention"
+        );
+        output
+            .send(b"\x1b[2K\rDo you want to proceed? 1. Yes 2. No ".to_vec())
+            .expect("watcher still subscribed");
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        crate::hook_status::apply_signal(&hub, "s1", Some(200), &signal);
+        assert!(
+            attention.try_recv().is_err(),
+            "classifier output and a repeat event raise no second event"
+        );
+    }
+
+    /// Dispatch `msg` against `hub` without expecting a reply.
+    async fn dispatch_silently(hub: &Hub, msg: ClientMessage) {
+        let (out_tx, _out_rx) = mpsc::unbounded_channel();
+        let (file_tx, _file_rx) = mpsc::channel(1);
+        let pty_forwarders: PtyForwarders = Arc::new(AsyncMutex::new(HashMap::new()));
+        let fetches: FetchRegistry = Arc::new(AsyncMutex::new(HashMap::new()));
+        let ctx = ConnCtx {
+            out_tx: &out_tx,
+            file_tx: &file_tx,
+            pty_forwarders: &pty_forwarders,
+            fetches: &fetches,
+            client_id: "c1",
+            client_name: None,
+            connection: 1,
+        };
+        dispatch(hub, msg, &ctx)
+            .await
+            .expect("a send-input dispatch succeeds");
+    }
+
+    /// The owner's key leaves a hook-reported prompt at once, with no settle
+    /// window.
+    #[tokio::test]
+    async fn owner_input_clears_a_pending_hook_prompt() {
+        use crate::history::test_support::{fake_pty, insert_live, record};
+        let (hub, _scratch) = test_hub("owner-input-clears");
+        let (pty, _exit_tx) = fake_pty();
+        insert_live(
+            &hub.sessions,
+            &hub.dirs,
+            record("s1", SessionMode::Interactive),
+            &pty,
+        );
+        hub.sessions.update("s1", |rec| {
+            rec.hook_driven = true;
+            rec.status = SessionStatus::AwaitingInput;
+            rec.pending_input = Some(protocol::PendingInput::Other {
+                message: "approve?".to_owned(),
+            });
+        });
+        let data_b64 = base64::engine::general_purpose::STANDARD.encode(b"y");
+        dispatch_silently(
+            &hub,
+            ClientMessage::SendInput {
+                session_id: "s1".to_owned(),
+                data_b64,
+            },
+        )
+        .await;
+        let snapshot = snapshot_of(&hub, "s1");
+        assert_eq!(
+            snapshot.status,
+            SessionStatus::Idle,
+            "the owner's key leaves the prompt at once"
+        );
+        assert_eq!(
+            snapshot.pending_input, None,
+            "the pending prompt is cleared"
+        );
+    }
+
+    /// A session with no hook events keeps exactly today's behaviour: input
+    /// never touches its status or pending state.
+    #[tokio::test]
+    async fn owner_input_leaves_a_heuristic_prompt_alone() {
+        use crate::history::test_support::{fake_pty, insert_live, record};
+        let (hub, _scratch) = test_hub("owner-input-heuristic");
+        let (pty, _exit_tx) = fake_pty();
+        insert_live(
+            &hub.sessions,
+            &hub.dirs,
+            record("s1", SessionMode::Interactive),
+            &pty,
+        );
+        hub.sessions.update("s1", |rec| {
+            rec.status = SessionStatus::AwaitingInput;
+            rec.pending_input = Some(protocol::PendingInput::Other {
+                message: "approve?".to_owned(),
+            });
+        });
+        let data_b64 = base64::engine::general_purpose::STANDARD.encode(b"y");
+        dispatch_silently(
+            &hub,
+            ClientMessage::SendInput {
+                session_id: "s1".to_owned(),
+                data_b64,
+            },
+        )
+        .await;
+        let snapshot = snapshot_of(&hub, "s1");
+        assert_eq!(
+            snapshot.status,
+            SessionStatus::AwaitingInput,
+            "a heuristic prompt is the classifier's to clear"
+        );
+        assert!(
+            snapshot.pending_input.is_some(),
+            "the heuristic's pending input is untouched"
+        );
     }
 
     #[tokio::test]
