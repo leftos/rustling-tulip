@@ -5,6 +5,7 @@
 //! an unknown event, an unknown field and a body that is not a JSON object
 //! are all ignored rather than refused.
 
+use crate::server::Hub;
 use protocol::{PendingInput, PendingQuestion, SessionStatus};
 use serde_json::Value;
 
@@ -70,6 +71,50 @@ pub fn map_event(body: &Value) -> Option<HookSignal> {
 /// their own.
 fn signal(status: Option<SessionStatus>, pending: PendingUpdate) -> HookSignal {
     HookSignal { status, pending }
+}
+
+/// Apply one mapped hook event to its session.
+///
+/// `event_time` is the event's `X-RT-Hook-Time`, nanoseconds since the Unix
+/// epoch. The ordering check, the stamp and the state writes happen in one
+/// registry update, so two concurrent events cannot stamp and then apply out
+/// of order. An event at or before the last applied one, or one with no time
+/// at all, changes nothing. An unmapped or malformed event never reaches
+/// here, so it neither stamps nor drops anything.
+///
+/// A session that has stopped or errored keeps that status — a hook event
+/// still in flight when the session quit must not revive it — but the stamp
+/// still advances, so an even older event cannot apply either.
+///
+/// Writes the status and the pending input straight onto the record. The
+/// shared transition path and the hook-versus-heuristic arbitration replace
+/// this body later; this is the one place that turns a signal into session
+/// state.
+pub fn apply_signal(hub: &Hub, session_id: &str, event_time: Option<u128>, signal: &HookSignal) {
+    hub.sessions.update(session_id, |record| {
+        let Some(event_time) = event_time else {
+            return;
+        };
+        if record.last_hook_time.is_some_and(|last| event_time <= last) {
+            return;
+        }
+        record.last_hook_time = Some(event_time);
+        if matches!(record.status, SessionStatus::Stopped | SessionStatus::Error) {
+            return;
+        }
+        if let Some(status) = signal.status {
+            record.status = status;
+        }
+        match &signal.pending {
+            PendingUpdate::Clear => record.pending_input = None,
+            PendingUpdate::Set(pending) => record.pending_input = Some(pending.clone()),
+            PendingUpdate::KeepOr(pending) => {
+                if record.pending_input.is_none() {
+                    record.pending_input = Some(pending.clone());
+                }
+            }
+        }
+    });
 }
 
 /// `SessionStart` says nothing about the status unless the session starts

@@ -85,6 +85,8 @@ Start with [docs/architecture.md](docs/architecture.md) for how the pieces fit a
 - **Forwarder**: the daemon's per-connection task that streams one session's PTY output to one client; `LoadScrollback` replaces it.
 - **Hand-off ready**: a session whose orchestrator ended its turn with `Run /clear, then /nextup to continue.` and has no background work left (RT-85).
 - **Hibernation**: stopping an idle, finished agent's process and resuming its conversation when the session is opened again; a planned idea (RT-73, `docs/plans/borrowed-ideas.md`).
+- **Hook shim**: the `rt-tracer.exe hook` subcommand an injected Claude Code hook runs; it reads the event on stdin, re-reads `daemon.json` on every call for the current port and token, and POSTs the body to the daemon's loopback `/hook/{session_id}` route with an `X-RT-Hook-Time` stamp, exiting 0 whatever happens.
+- **Hook-driven status**: a session's status taken from Claude Code hook events rather than the PTY heuristic, from its first authenticated event on; the heuristic keeps only its demotions once the arbitration lands (HS.6, `docs/plans/hook-status.md`).
 - **HS.1, SA.1, DB.1, SS.1, DF.1, FT.1, DI.1**: step ids in the subplans `hook-status.md`, `spoken-alerts.md` (SA alerts, DB Dashboard), `subagent-streams.md`, `dispatch-follow.md`, `remote-file-transfer.md` and `dictation.md` under `docs/plans/`.
 - **Hysteresis (status)**: holding a status change until several checks agree, so a half-drawn screen does not flip a session's status and back; a planned idea for the screen-based status (RT-74).
 - **Landed**: an issue's state once its commit is on `main` (or on its feature branch), waiting for the owner's acknowledgement, which moves it to Done.

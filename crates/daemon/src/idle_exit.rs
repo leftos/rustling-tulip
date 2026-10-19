@@ -235,6 +235,7 @@ mod tests {
             claude_session_id: None,
             agent_conversation_id: None,
             pending_input: None,
+            last_hook_time: None,
             busy_excluded: false,
         }
     }

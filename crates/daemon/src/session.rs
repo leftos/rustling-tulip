@@ -189,6 +189,12 @@ pub struct SessionRecord {
     /// [`SessionSnapshot::pending_input`]. Not persisted to the sidecar, so a
     /// reattached session starts with none and learns it from the next hook.
     pub pending_input: Option<PendingInput>,
+    /// Time of the last hook event applied to this session, in nanoseconds
+    /// since the Unix epoch, from the shim's `X-RT-Hook-Time` header. Async
+    /// hooks finish out of order, so an event at or before this time is
+    /// dropped. Runtime-only: a daemon restart resets it along with the
+    /// hook-driven state.
+    pub last_hook_time: Option<u128>,
 }
 
 impl SessionRecord {
@@ -879,6 +885,7 @@ impl SessionRegistry {
             claude_session_id: meta.claude_session_id.clone(),
             agent_conversation_id: meta.agent_conversation_id.clone(),
             pending_input: None,
+            last_hook_time: None,
             busy_excluded: meta.busy_excluded,
         };
         push_recent_action(&mut record, "reattached after daemon restart".to_string());
@@ -941,6 +948,7 @@ impl SessionRegistry {
             claude_session_id: meta.claude_session_id.clone(),
             agent_conversation_id: meta.agent_conversation_id.clone(),
             pending_input: None,
+            last_hook_time: None,
             busy_excluded: meta.busy_excluded,
         };
         push_recent_action(
@@ -988,6 +996,7 @@ impl SessionRegistry {
             claude_session_id: meta.claude_session_id.clone(),
             agent_conversation_id: meta.agent_conversation_id.clone(),
             pending_input: None,
+            last_hook_time: None,
             busy_excluded: meta.busy_excluded,
         };
         push_recent_action(
@@ -1060,6 +1069,7 @@ mod tests {
             claude_session_id: None,
             agent_conversation_id: None,
             pending_input: None,
+            last_hook_time: None,
             busy_excluded: false,
         }
     }

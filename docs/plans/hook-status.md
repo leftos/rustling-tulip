@@ -50,7 +50,7 @@ Why not `type: "http"` hooks posting straight to the daemon, as VelaTerm does:
 
 Why the tracer binary hosts the shim: the running tracer holds its cached copy open, and `binary_cache::gc` keeps every copy a live sidecar references, so the shim's path stays valid for exactly the session's lifetime, across rebuilds and installer upgrades. The tracer's `main` dispatches on a leading `hook` argument before `Cli::parse`, so the daemon's existing tracer invocation is unchanged and the tracer ABI (`docs/tracer-abi.md`) is untouched.
 
-Cost: one short process per hook event, off Claude's critical path (async). Async hooks finish out of order (the spike saw a `PostToolUse` land before the `PreToolUse` that started 114 ms earlier), so ordering is required: the daemon orders events by `X-RT-Hook-Time` and drops one older than the last it applied for that session.
+Cost: one short process per hook event, off Claude's critical path (async). Async hooks finish out of order (the spike saw a `PostToolUse` land before the `PreToolUse` that started 114 ms earlier), so ordering is required: the daemon orders events by `X-RT-Hook-Time` and drops one at or before the last it applied for that session, or one with no usable time.
 
 ### The injected settings
 
@@ -76,7 +76,9 @@ Only the primary cwd's settings load: hooks and `env` in an `--add-dir` root's `
 
 ### Auth
 
-The shim presents the daemon's own token from `daemon.json`, read fresh on each call, so a restarted daemon's new token just works. A per-session token would add nothing: the agent runs as the same user and can read `daemon.json` and its own environment anyway, and a per-session token would have to be persisted in `meta.json` to survive a daemon restart. The `/hook/:session_id` route is mounted on the loopback listener only; `build_router` splits into a shared router plus a loopback-only extension so the LAN TLS listener never serves it. The route answers `204` at once for any authenticated request (an unknown session id is logged at `debug!` and ignored) and `401` otherwise; the shim ignores both.
+The shim presents the daemon's own token from `daemon.json`, read fresh on each call, so a restarted daemon's new token just works. A per-session token would add nothing: the agent runs as the same user and can read `daemon.json` and its own environment anyway, and a per-session token would have to be persisted in `meta.json` to survive a daemon restart.
+
+The `POST /hook/{session_id}` route is mounted on the loopback listener only; `build_router` splits into a shared router plus a loopback-only extension (`build_loopback_router`) so the LAN TLS listener never serves it. Axum 0.8 names the parameter in braces (`{session_id}`, not `:session_id`). The route answers `204` at once for any authenticated request (an unknown session id is logged at `debug!` and ignored) and `401` otherwise; the shim ignores both.
 
 ### Mapping events to status
 
@@ -182,7 +184,13 @@ Answered (user): Q3 `Stop` means `Idle`, as today; `AwaitingInput` is kept for r
 - [x] **HS.1 Event parsing and mapping.** New `crates/daemon/src/hook_status.rs`: tolerant payload types and `map_event(&Value) -> Option<HookSignal>` per the mapping table, with `PermissionRequest` mapped by `tool_name` (`AskUserQuestion` to `Question`, `ExitPlanMode` to `PlanApproval`, else `Permission`) and `PlanApproval`'s plan optional. Proof: table-driven unit tests, one per row, plus an unknown event, a malformed body and an `ExitPlanMode` payload with `tool_input: {}`.
 - [x] **HS.2 Protocol: `pending_input`.** `crates/protocol/src/lib.rs`: `PendingInput`, `PendingQuestion`, the `SessionSnapshot` field; the daemon's snapshot builder (`session.rs`) fills it. Proof: a round-trip test and a `#[serde(other)]` test for an unknown `kind`.
 - [x] **HS.3 The shim.** `crates/tracer/src/main.rs` dispatches a leading `hook` argument to a new `crates/tracer/src/hook.rs` (stdin, `daemon.json`, POST, always exit 0). Proof: tests against a local `TcpListener` fake asserting the path, bearer token, `X-RT-Hook-Time` and verbatim body; missing `daemon.json` and a refused connection both exit 0 within the budget.
-- [ ] **HS.4 The daemon route.** `server.rs`: loopback-only `POST /hook/:session_id` (split `build_router`), bearer check through `secret::constant_time_eq`, `204` at once, hand-off to the session's hook state with out-of-order drop by `X-RT-Hook-Time` (required: async hooks finish out of order). Proof: router `oneshot` tests for `401` without or with a wrong token, `204` for an unknown session, a stale event ignored; a test that the LAN router has no `/hook` route.
+- [x] **HS.4 The daemon route.** `server.rs`: loopback-only `POST /hook/{session_id}` (Axum 0.8 path syntax, in braces rather than `:session_id`), bearer check through `secret::constant_time_eq`, `204` at once, hand-off to the session's hook state with out-of-order drop by `X-RT-Hook-Time` (required: async hooks finish out of order).
+
+  Done: the ordering check, the stamp and the state writes are one atomic registry update, so two concurrent events cannot stamp and then apply out of order; the body is read at most 1 MiB and a larger or unreadable body is treated as empty and still answered `204`.
+
+  A malformed or unmapped event changes nothing and does not advance the stamp, so it cannot silence a later event; an event for a `Stopped` or `Error` session leaves status and pending input untouched but still advances the ordering time; and the record's runtime-only `last_hook_time` is neither in the sidecar nor on the wire, so a daemon restart resets it.
+
+  Proof: router `oneshot` tests for `401` without or with a wrong token, `204` for an unknown session, a stale event ignored; a test that the LAN router has no `/hook` route.
 - [ ] **HS.5 Settings injection.** `agents/mod.rs` `CommonSpawnFields` gains a required `hook_settings: Option<&Path>` set by every caller; `agents/claude.rs` writes `hook-settings.json` (a `build_hook_settings` fn) and pushes `--settings <path>` for interactive spawns, fresh and resumed, never headless; `spawn_interactive_session` and `duplicate_session` pass it. Proof: unit tests on the argv (fresh, `--resume`, headless without it) and on the JSON (events, matchers, exec form, `async: true`, the cached tracer path).
 - [ ] **HS.6 Arbitration.** `pty_state.rs`: a per-session hook-driven flag; hook signals applied through the shared transition path (so `Attention` fires once on entry to `AwaitingInput`); the classifier silenced while hook-driven except two demotions, `Working → Idle` after silence and `AwaitingInput → Idle` once the prompt's regex stops matching and the screen is quiet for `IDLE_AFTER`; and any owner key sent while a prompt is pending clears `AwaitingInput` and `pending_input` at once.
 

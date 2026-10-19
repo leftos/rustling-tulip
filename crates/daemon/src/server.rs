@@ -31,6 +31,9 @@ use crate::{
 use anyhow::{Context as _, anyhow};
 use axum::Json;
 use axum::Router;
+use axum::body::Body;
+use axum::body::Bytes;
+use axum::extract::Path as AxumPath;
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::http::{HeaderMap, StatusCode};
@@ -562,7 +565,7 @@ pub async fn run(
     };
     start_hub_tasks(&hub, client_count_rx);
 
-    let app = build_router(hub.clone());
+    let app = build_loopback_router(hub.clone());
 
     let bind_start = std::time::Instant::now();
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
@@ -645,6 +648,84 @@ fn build_router(hub: Hub) -> Router {
         .route("/shutdown", post(shutdown_handler))
         .route("/pair", post(pair_handler))
         .with_state(hub)
+}
+
+/// The loopback listener's router: [`build_router`] plus the hook endpoint.
+///
+/// Hook events are a local-only input — the shim posts to `127.0.0.1` — so the
+/// LAN TLS listener keeps [`build_router`] and never serves `/hook/...`.
+fn build_loopback_router(hub: Hub) -> Router {
+    build_router(hub.clone()).merge(
+        Router::new()
+            .route("/hook/{session_id}", post(hook_handler))
+            .with_state(hub),
+    )
+}
+
+/// Most of a hook body the endpoint reads; anything larger is treated as an
+/// empty body and still answered `204`.
+const HOOK_BODY_LIMIT: usize = 1 << 20;
+
+/// `POST /hook/{session_id}` — one Claude Code hook event for a session.
+///
+/// Auth mirrors `/shutdown`: the daemon's own token as a bearer, compared in
+/// constant time. The answer is `204` for any authenticated request, whatever
+/// the body holds and whether or not the session exists, since the shim
+/// ignores it and a rejected event must never hold up the agent.
+///
+/// The body is read at most 1 MiB; a larger or unreadable body is treated as
+/// empty. A body that is not JSON, or an event the mapping does not know,
+/// changes nothing and does not order the session.
+///
+/// Async hooks finish out of order, so the event is applied only when its
+/// `X-RT-Hook-Time` (nanoseconds since the epoch) is strictly newer than the
+/// last one applied for the session. A missing or unparsable time is the
+/// oldest possible and is dropped.
+async fn hook_handler(
+    State(hub): State<Hub>,
+    AxumPath(session_id): AxumPath<String>,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
+    let Some(token) = presented_bearer(&headers) else {
+        return (StatusCode::UNAUTHORIZED, "missing bearer token").into_response();
+    };
+    if !crate::secret::constant_time_eq(token.as_bytes(), hub.auth_token.as_bytes()) {
+        return (StatusCode::UNAUTHORIZED, "bad bearer token").into_response();
+    }
+    if hub.sessions.get(&session_id).is_none() {
+        debug!(session_id, "hook event for an unknown session ignored");
+        return StatusCode::NO_CONTENT.into_response();
+    }
+    let body = axum::body::to_bytes(body, HOOK_BODY_LIMIT)
+        .await
+        .unwrap_or_else(|_| Bytes::new());
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return StatusCode::NO_CONTENT.into_response();
+    };
+    let Some(signal) = crate::hook_status::map_event(&value) else {
+        return StatusCode::NO_CONTENT.into_response();
+    };
+    crate::hook_status::apply_signal(&hub, &session_id, hook_time(&headers), &signal);
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// The `X-RT-Hook-Time` header, nanoseconds since the Unix epoch.
+fn hook_time(headers: &HeaderMap) -> Option<u128> {
+    headers
+        .get("x-rt-hook-time")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse().ok())
+}
+
+/// The bearer token a request presents, when it uses the expected
+/// `Authorization: Bearer <token>` form.
+fn presented_bearer(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(str::trim)
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -812,12 +893,7 @@ async fn ws_handler(State(hub): State<Hub>, ws: WebSocketUpgrade) -> Response {
 /// dir can already shut us down via `taskkill`, but we still gate the soft
 /// path so a stray local script can't trip it.
 async fn shutdown_handler(State(hub): State<Hub>, headers: HeaderMap) -> Response {
-    let presented = headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .map(str::trim);
-    let Some(token) = presented else {
+    let Some(token) = presented_bearer(&headers) else {
         return (StatusCode::UNAUTHORIZED, "missing bearer token").into_response();
     };
     if !crate::secret::constant_time_eq(token.as_bytes(), hub.auth_token.as_bytes()) {
@@ -3788,6 +3864,7 @@ fn interactive_record(
         claude_session_id: new.claude_session_id,
         agent_conversation_id: conversation.own.clone(),
         pending_input: None,
+        last_hook_time: None,
         busy_excluded: false,
     };
     push_recent_action(&mut record, "session started".to_string());
@@ -4134,6 +4211,7 @@ async fn spawn_plain_shell_session(
         claude_session_id: None,
         agent_conversation_id: None,
         pending_input: None,
+        last_hook_time: None,
         busy_excluded: false,
     };
     push_recent_action(
@@ -4281,6 +4359,7 @@ fn spawn_headless_session(
         claude_session_id: None,
         agent_conversation_id: None,
         pending_input: None,
+        last_hook_time: None,
         busy_excluded: false,
     };
     push_recent_action(&mut record, "headless session started".to_string());
@@ -7061,6 +7140,9 @@ mod child_env_probe {
 )]
 mod tests {
     use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt as _;
 
     #[test]
     fn welcome_carries_the_daemon_features_and_the_negotiated_version() {
@@ -7779,8 +7861,239 @@ mod tests {
             claude_session_id: None,
             agent_conversation_id: None,
             pending_input: None,
+            last_hook_time: None,
             busy_excluded: false,
         }
+    }
+
+    /// A `POST /hook/{session}` request, carrying the token and hook time
+    /// headers the shim sends when each is given.
+    fn hook_request(
+        session: &str,
+        token: Option<&str>,
+        hook_time: Option<&str>,
+        body: &str,
+    ) -> Request<Body> {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri(format!("/hook/{session}"));
+        if let Some(token) = token {
+            builder = builder.header("authorization", format!("Bearer {token}"));
+        }
+        if let Some(hook_time) = hook_time {
+            builder = builder.header("x-rt-hook-time", hook_time);
+        }
+        builder
+            .body(Body::from(body.to_owned()))
+            .expect("build hook request")
+    }
+
+    /// `id`'s snapshot, failing when the registry does not hold it.
+    fn snapshot_of(hub: &Hub, id: &str) -> protocol::SessionSnapshot {
+        hub.sessions
+            .snapshots()
+            .into_iter()
+            .find(|snapshot| snapshot.id == id)
+            .expect("session is in the registry")
+    }
+
+    #[tokio::test]
+    async fn hook_route_requires_a_bearer_token() {
+        let (hub, _scratch) = test_hub("hook-auth");
+        hub.sessions.insert(idle_record("s1"));
+        let body = r#"{"hook_event_name":"UserPromptSubmit"}"#;
+        for token in [None, Some("wrong-token")] {
+            let response = build_loopback_router(hub.clone())
+                .oneshot(hook_request("s1", token, Some("100"), body))
+                .await
+                .expect("router answers");
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{token:?}");
+        }
+        let snapshot = snapshot_of(&hub, "s1");
+        assert_eq!(snapshot.status, SessionStatus::Idle);
+        assert_eq!(snapshot.pending_input, None);
+    }
+
+    #[tokio::test]
+    async fn hook_route_accepts_an_unknown_session() {
+        let (hub, _scratch) = test_hub("hook-unknown");
+        let response = build_loopback_router(hub.clone())
+            .oneshot(hook_request(
+                "no-such-session",
+                Some("test-token"),
+                Some("100"),
+                "{}",
+            ))
+            .await
+            .expect("router answers");
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn hook_route_drops_a_stale_event() {
+        let (hub, _scratch) = test_hub("hook-stale");
+        hub.sessions.insert(idle_record("s1"));
+        let newer = r#"{"hook_event_name":"UserPromptSubmit"}"#;
+        let older = r#"{"hook_event_name":"Stop"}"#;
+        for (hook_time, body) in [("200", newer), ("100", older)] {
+            let response = build_loopback_router(hub.clone())
+                .oneshot(hook_request(
+                    "s1",
+                    Some("test-token"),
+                    Some(hook_time),
+                    body,
+                ))
+                .await
+                .expect("router answers");
+            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        }
+        assert_eq!(snapshot_of(&hub, "s1").status, SessionStatus::Working);
+    }
+
+    #[tokio::test]
+    async fn hook_route_applies_a_newer_event() {
+        let (hub, _scratch) = test_hub("hook-apply");
+        hub.sessions.insert(idle_record("s1"));
+        let body = concat!(
+            r#"{"hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","#,
+            r#""tool_input":{"questions":[{"question":"Which?","header":"Pick","#,
+            r#""options":[{"label":"A"},{"label":"B"}],"multiSelect":false}]}}"#,
+        );
+        let response = build_loopback_router(hub.clone())
+            .oneshot(hook_request("s1", Some("test-token"), Some("100"), body))
+            .await
+            .expect("router answers");
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        let snapshot = snapshot_of(&hub, "s1");
+        assert_eq!(snapshot.status, SessionStatus::AwaitingInput);
+        assert_eq!(
+            snapshot.pending_input,
+            Some(protocol::PendingInput::Question {
+                questions: vec![protocol::PendingQuestion {
+                    question: "Which?".to_owned(),
+                    header: "Pick".to_owned(),
+                    options: vec!["A".to_owned(), "B".to_owned()],
+                    multi_select: false,
+                }],
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn hook_route_ignores_a_malformed_body() {
+        let (hub, _scratch) = test_hub("hook-malformed");
+        hub.sessions.insert(idle_record("s1"));
+        let response = build_loopback_router(hub.clone())
+            .oneshot(hook_request(
+                "s1",
+                Some("test-token"),
+                Some("100"),
+                "not json",
+            ))
+            .await
+            .expect("router answers");
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        let snapshot = snapshot_of(&hub, "s1");
+        assert_eq!(snapshot.status, SessionStatus::Idle);
+        assert_eq!(snapshot.pending_input, None);
+    }
+
+    #[tokio::test]
+    async fn hook_route_unmapped_event_does_not_order() {
+        let (hub, _scratch) = test_hub("hook-unmapped");
+        hub.sessions.insert(idle_record("s1"));
+        let unmapped = r#"{"hook_event_name":"Notification","notification_type":"something_else"}"#;
+        let response = build_loopback_router(hub.clone())
+            .oneshot(hook_request(
+                "s1",
+                Some("test-token"),
+                Some("200"),
+                unmapped,
+            ))
+            .await
+            .expect("router answers");
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        let question = concat!(
+            r#"{"hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","#,
+            r#""tool_input":{"questions":[]}}"#,
+        );
+        let response = build_loopback_router(hub.clone())
+            .oneshot(hook_request(
+                "s1",
+                Some("test-token"),
+                Some("100"),
+                question,
+            ))
+            .await
+            .expect("router answers");
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(snapshot_of(&hub, "s1").status, SessionStatus::AwaitingInput);
+    }
+
+    #[tokio::test]
+    async fn hook_route_drops_an_equal_time_event() {
+        let (hub, _scratch) = test_hub("hook-equal-time");
+        hub.sessions.insert(idle_record("s1"));
+        let started = r#"{"hook_event_name":"UserPromptSubmit"}"#;
+        let stop = r#"{"hook_event_name":"Stop"}"#;
+        for body in [started, stop] {
+            let response = build_loopback_router(hub.clone())
+                .oneshot(hook_request("s1", Some("test-token"), Some("100"), body))
+                .await
+                .expect("router answers");
+            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        }
+        assert_eq!(snapshot_of(&hub, "s1").status, SessionStatus::Working);
+    }
+
+    #[tokio::test]
+    async fn hook_route_drops_an_event_without_a_usable_time() {
+        let (hub, _scratch) = test_hub("hook-no-time");
+        hub.sessions.insert(idle_record("s1"));
+        let body = r#"{"hook_event_name":"UserPromptSubmit"}"#;
+        for hook_time in [None, Some("abc")] {
+            let response = build_loopback_router(hub.clone())
+                .oneshot(hook_request("s1", Some("test-token"), hook_time, body))
+                .await
+                .expect("router answers");
+            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        }
+        let snapshot = snapshot_of(&hub, "s1");
+        assert_eq!(snapshot.status, SessionStatus::Idle);
+        assert_eq!(snapshot.pending_input, None);
+    }
+
+    #[tokio::test]
+    async fn hook_route_keeps_a_stopped_session_stopped() {
+        let (hub, _scratch) = test_hub("hook-stopped");
+        hub.sessions.insert(idle_record("s1"));
+        hub.sessions
+            .update("s1", |record| record.status = SessionStatus::Stopped);
+        let body = r#"{"hook_event_name":"PostToolUse"}"#;
+        let response = build_loopback_router(hub.clone())
+            .oneshot(hook_request("s1", Some("test-token"), Some("100"), body))
+            .await
+            .expect("router answers");
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        let snapshot = snapshot_of(&hub, "s1");
+        assert_eq!(snapshot.status, SessionStatus::Stopped);
+        assert_eq!(snapshot.pending_input, None);
+    }
+
+    #[tokio::test]
+    async fn lan_router_has_no_hook_route() {
+        let (hub, _scratch) = test_hub("hook-lan");
+        hub.sessions.insert(idle_record("s1"));
+        let response = build_router(hub)
+            .oneshot(hook_request(
+                "s1",
+                Some("test-token"),
+                Some("100"),
+                r#"{"hook_event_name":"UserPromptSubmit"}"#,
+            ))
+            .await
+            .expect("router answers");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
