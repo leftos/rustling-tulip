@@ -13,7 +13,7 @@
 
 ## Wave 2 — Daily driver: close the port's gaps
 
-- [ ] RT-19 P4.11b: Launch last again, and stop all in Detached
+- [/] RT-19 P4.11b: Launch last again, and stop all in Detached
 - [ ] RT-20 P4.11c: Full container menu and spawn entry points
 - [ ] RT-21 P4.15a: Preset wizard sources and variables
 - [ ] RT-22 P4.15b: Preset wizard preview and launching
@@ -47,6 +47,7 @@
 - [ ] RT-206 Reject a leading hyphen in a hook-reported conversation id
 - [ ] RT-208 Stop the hook shim sending the daemon token to a stale port, and make its unsafe-token test real
 - [ ] RT-209 Treat the terminal's automatic replies as not-owner input for a hook prompt
+- [ ] RT-210 Match Claude Code's hook matcher semantics in the fake CLI
 
 ## Wave 3 — Cutover: remote mode, installer and v0.1.0-alpha
 
