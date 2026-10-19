@@ -371,7 +371,7 @@
       "paths": [
         "apps/native/src/section.rs"
       ],
-      "filter": "(binary_id(rustling-tulip-native) & test(/^section::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_settings|ui_appearance_editor|ui_keys)::/))"
+      "filter": "(binary_id(rustling-tulip-native) & test(/^section::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_appearance_editor|ui_keys|ui_notifications|ui_settings|ui_worktrees)::/))"
     },
     {
       "paths": [

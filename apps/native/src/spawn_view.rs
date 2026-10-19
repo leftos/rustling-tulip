@@ -1547,9 +1547,8 @@ pub(crate) fn checkbox_row(
     label: impl IntoElement,
 ) -> Stateful<Div> {
     let name = selector.to_owned();
-    // Debug selectors, so a spec can tell the tick from the empty box.
-    let tick = format!("{name}-tick");
-    let empty = format!("{name}-empty");
+    // Each state tags the box itself, building its name only when a spec reads
+    // it, so a release render allocates nothing for them.
     let mark = div()
         .flex()
         .flex_none()
@@ -1562,13 +1561,14 @@ pub(crate) fn checkbox_row(
         .text_size(px(11.0))
         .font_weight(FontWeight::BOLD)
         .when(checked, |mark| {
-            mark.bg(gpui::rgb(ACCENT))
+            mark.debug_selector(|| format!("{name}-tick"))
+                .bg(gpui::rgb(ACCENT))
                 .border_color(gpui::rgb(ACCENT))
                 .text_color(gpui::rgb(ON_ACCENT))
-                .child(div().debug_selector(|| tick).child("✓"))
+                .child("✓")
         })
         .when(!checked, |mark| {
-            mark.debug_selector(|| empty)
+            mark.debug_selector(|| format!("{name}-empty"))
                 .border_color(gpui::rgb(LINE_STRONG))
         })
         .when(focused, |mark| mark.child(focus_ring(CHECK_RADIUS)));
