@@ -1352,6 +1352,11 @@ impl<'a> Harness<'a> {
     /// A right-button press and release on the element tagged `selector`.
     pub fn right_click_on(&mut self, selector: &str) {
         let at = self.center(selector);
+        self.right_click(at);
+    }
+
+    /// A right-button press and release at `at`.
+    pub fn right_click(&mut self, at: Point<Pixels>) {
         self.cx
             .simulate_mouse_down(at, MouseButton::Right, Modifiers::none());
         self.cx
@@ -1493,5 +1498,10 @@ impl<'a> Harness<'a> {
     pub fn window_width(&mut self) -> f32 {
         self.cx
             .update(|window, _| window.viewport_size().width / px(1.0))
+    }
+
+    pub fn window_height(&mut self) -> f32 {
+        self.cx
+            .update(|window, _| window.viewport_size().height / px(1.0))
     }
 }

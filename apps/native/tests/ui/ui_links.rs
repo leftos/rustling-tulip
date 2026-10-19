@@ -293,6 +293,16 @@ fn cancel_opens_nothing(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn run_confirm_escape_returns_focus_to_the_pane(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, _) = bat_link_clicked(cx, &dir);
+    h.keys("escape");
+    assert_eq!(h.run_confirm(), None, "Esc closes the confirm");
+    h.keys("a");
+    assert_eq!(h.sent_input("s1"), b"a", "the pane has the keyboard");
+}
+
+#[gpui::test]
 fn boxed_link_border_is_not_clickable(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let file = write_file(dir.path(), &format!("docs/{}.md", "a".repeat(16)));

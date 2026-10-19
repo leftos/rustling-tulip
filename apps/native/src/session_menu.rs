@@ -36,6 +36,9 @@ use crate::text_input::{TextInput, TextInputEvent};
 use crate::{BORDER, DANGER, HOVER_BG, MUTED, RootView, TEXT, UI_TEXT_SIZE, WARNING, tooltip};
 
 pub(crate) const MENU_WIDTH: f32 = 240.0;
+/// The share of the window's height a menu may take before its rows scroll,
+/// as the data lists take before theirs do.
+pub(crate) const MENU_MAX_SHARE: f32 = 0.6;
 const NEW_SESSION_TIP: &str = "Open the spawn dialog; the new session takes over this pane";
 const DIALOG_WIDTH: f32 = 440.0;
 
@@ -77,10 +80,13 @@ pub(crate) fn popover_frame(id: &'static str) -> Stateful<Div> {
 }
 
 /// The frame a context menu sits in, a [`popover_frame`] tagged `id` and
-/// holding `focus`; a press outside it runs `on_out`.
+/// holding `focus`; a press outside it runs `on_out`. It never grows past
+/// `max_height`, scrolling its rows instead, so a long menu stays inside the
+/// window.
 pub(crate) fn menu_frame(
     id: &'static str,
     focus: &FocusHandle,
+    max_height: Pixels,
     on_out: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> Stateful<Div> {
     popover_frame(id)
@@ -88,6 +94,8 @@ pub(crate) fn menu_frame(
         .flex()
         .flex_col()
         .w(px(MENU_WIDTH))
+        .max_h(max_height)
+        .overflow_y_scroll()
         .p(px(4.0))
         .on_mouse_down_out(on_out)
 }
@@ -135,6 +143,8 @@ pub(crate) struct SessionMenu {
     /// The `(tab, pane)` whose header opened the menu, which Move to ▸
     /// moves; `None` when it opened elsewhere.
     pane: Option<(String, String)>,
+    /// The most height its frame may take, from the window it opened in.
+    max_height: Pixels,
 }
 
 /// The label of a submenu's row back to the menu's rows.
@@ -181,6 +191,8 @@ pub(crate) struct ContainerMenu {
     level: Level,
     /// Where the right-click was, in window coordinates.
     at: Point<Pixels>,
+    /// The most height its frame may take, from the window it opened in.
+    max_height: Pixels,
 }
 
 fn preset_selector(name: &str) -> String {
@@ -207,6 +219,8 @@ pub(crate) struct ShellMenu {
     output: String,
     /// Where the dot's top-right corner is, in window coordinates.
     at: Point<Pixels>,
+    /// The most height its frame may take, from the window it opened in.
+    max_height: Pixels,
 }
 
 /// The four rows of the gutter menu, with the selector of each.
@@ -418,6 +432,7 @@ impl RootView {
             rename: None,
             submenu: Submenu::None,
             pane: pane.cloned(),
+            max_height: window.viewport_size().height * MENU_MAX_SHARE,
         });
         self.confirm.disarm();
         self.menu_focus.focus(window);
@@ -496,7 +511,11 @@ impl RootView {
         self.close_sc_picker(window, cx);
         self.close_sc_file_menu(window, cx);
         self.close_more_menu(window, cx);
-        self.container_menu = Some(ContainerMenu { level, at });
+        self.container_menu = Some(ContainerMenu {
+            level,
+            at,
+            max_height: window.viewport_size().height * MENU_MAX_SHARE,
+        });
         self.menu_focus.focus(window);
         cx.notify();
     }
@@ -525,6 +544,7 @@ impl RootView {
         let frame = menu_frame(
             "container-menu",
             &self.menu_focus,
+            menu.max_height,
             cx.listener(|this, _: &MouseDownEvent, window, cx| {
                 this.close_container_menu(window, cx);
                 cx.stop_propagation();
@@ -907,6 +927,7 @@ impl RootView {
         menu_frame(
             "session-menu",
             &self.menu_focus,
+            menu.max_height,
             cx.listener(|this, _: &MouseDownEvent, window, cx| {
                 this.close_session_menu(window, cx);
                 cx.stop_propagation();
@@ -2066,6 +2087,7 @@ impl RootView {
             command: command.command,
             output: command.output,
             at,
+            max_height: window.viewport_size().height * MENU_MAX_SHARE,
         });
         self.menu_focus.focus(window);
         cx.notify();
@@ -2128,6 +2150,7 @@ impl RootView {
         menu_frame(
             "shell-menu",
             &self.menu_focus,
+            menu.max_height,
             cx.listener(|this, _: &MouseDownEvent, window, cx| {
                 this.close_shell_menu(window, cx);
                 cx.stop_propagation();

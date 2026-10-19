@@ -22,7 +22,7 @@ use crate::palette::{
 };
 use crate::repo_add::RepoAdd;
 use crate::session_actions::inline_actions;
-use crate::session_menu::{BorderedButton, bordered_button, menu_frame, menu_item};
+use crate::session_menu::{BorderedButton, MENU_MAX_SHARE, bordered_button, menu_frame, menu_item};
 use crate::sidebar::{
     Activity, Container, ContainerKind, Leaf, LeafDensity, SidebarView, can_attach,
 };
@@ -79,7 +79,7 @@ impl RootView {
             let active = matches!(self.drag, Some(Drag::Sidebar));
             let panel = match self.sidebar.activity() {
                 Activity::Sessions => self.sidebar_panel(width, window, cx),
-                Activity::SourceControl => self.source_control_view(width, cx),
+                Activity::SourceControl => self.source_control_view(width, window, cx),
                 Activity::NeedsYou => self.needs_you_view(width, cx),
             };
             row.child(panel).child(divider(active, cx))
@@ -160,13 +160,13 @@ impl RootView {
             .text_size(px(UI_TEXT_SIZE))
             .text_color(gpui::rgb(TEXT))
             .child(header(self.sidebar.sidebar_view(), cx))
-            .child(self.toolbar(cx))
+            .child(self.toolbar(window, cx))
             .child(body)
     }
 
     /// The spawns under the header, in one row: Session, Shell and the ⋯
     /// menu.
-    fn toolbar(&self, cx: &mut Context<Self>) -> Div {
+    fn toolbar(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         div()
             .flex()
             .flex_none()
@@ -177,11 +177,11 @@ impl RootView {
             .pb(px(8.0))
             .child(add_session(self.has_repos(), cx))
             .child(add_shell(self.sidebar.quick_shell_dir(), cx))
-            .child(self.more_button(cx))
+            .child(self.more_button(window, cx))
     }
 
     /// The ⋯ button, with its menu under it while open.
-    fn more_button(&self, cx: &mut Context<Self>) -> Div {
+    fn more_button(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         let button = div()
             .id(MORE_BUTTON)
             .debug_selector(|| MORE_BUTTON.to_owned())
@@ -214,6 +214,7 @@ impl RootView {
             let frame = menu_frame(
                 "sidebar-more-menu",
                 &self.menu_focus,
+                window.viewport_size().height * MENU_MAX_SHARE,
                 cx.listener(|this, _: &MouseDownEvent, window, cx| {
                     this.close_more_menu(window, cx);
                     cx.stop_propagation();

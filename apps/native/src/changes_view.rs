@@ -23,7 +23,9 @@ use crate::palette::{CHANGE_DELETED, CHIP, LILAC, OCHRE, SUBTLE, TEXT_2, WAITING
 use crate::sc_writes::{
     ScWrites, WriteOp, bucket_paths, commit_box_shown, commit_enabled, row_paths,
 };
-use crate::session_menu::{backdrop, dialog_button, menu_frame, menu_item, menu_separator};
+use crate::session_menu::{
+    MENU_MAX_SHARE, backdrop, dialog_button, menu_frame, menu_item, menu_separator,
+};
 use crate::source_control::{Bucket, Folder, Part, ScKey, ScModel, Status, build_tree};
 use crate::source_control_view::ScSectionRow;
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
@@ -248,6 +250,8 @@ pub(crate) struct ScFileMenu {
     paths: Vec<String>,
     /// Where the right-click was, in window coordinates.
     at: Point<Pixels>,
+    /// The most height its frame may take, from the window it opened in.
+    max_height: Pixels,
 }
 
 /// What a bucket's tree rows are built from.
@@ -729,6 +733,7 @@ impl RootView {
         let mut frame = menu_frame(
             "sc-file-menu",
             &self.menu_focus,
+            menu.max_height,
             cx.listener(|this, _: &MouseDownEvent, window, cx| {
                 this.close_sc_file_menu(window, cx);
                 cx.stop_propagation();
@@ -1370,6 +1375,7 @@ fn file_row_view(
                     path: menu_path.clone(),
                     paths: menu_paths.clone(),
                     at: event.position,
+                    max_height: window.viewport_size().height * MENU_MAX_SHARE,
                 };
                 this.open_sc_file_menu(menu, window, cx);
             }),

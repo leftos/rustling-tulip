@@ -226,7 +226,9 @@ pub(crate) fn list_placement(
 
 #[cfg(test)]
 mod tests {
-    use super::{ComboRow, Combobox};
+    use super::{ComboRow, Combobox, list_placement};
+
+    use gpui::px;
 
     fn branches() -> Vec<String> {
         ["main", "wt/red-fox", "feature/Login"]
@@ -349,6 +351,31 @@ mod tests {
         combo.up();
         combo.up();
         assert_eq!(combo.highlight(3), 0);
+    }
+
+    #[test]
+    fn list_placement_keeps_a_fitting_list_below() {
+        let (above, height) = list_placement(px(0.0)..px(400.0), px(100.0)..px(130.0), px(100.0));
+        assert!(!above, "there is room below");
+        assert_eq!(height, px(100.0), "the list takes its wanted height");
+    }
+
+    #[test]
+    fn list_placement_flips_above_when_below_is_smaller() {
+        let (above, height) = list_placement(px(0.0)..px(300.0), px(200.0)..px(230.0), px(100.0));
+        assert!(above, "below has less room than above");
+        assert_eq!(height, px(100.0), "above holds the wanted height");
+    }
+
+    #[test]
+    fn list_placement_caps_to_the_larger_side() {
+        let (above, height) = list_placement(px(0.0)..px(250.0), px(100.0)..px(130.0), px(300.0));
+        assert!(!above, "below is the larger side");
+        assert_eq!(height, px(116.0), "capped to below's room after the gap");
+
+        let (above, height) = list_placement(px(0.0)..px(200.0), px(100.0)..px(130.0), px(300.0));
+        assert!(above, "above is the larger side");
+        assert_eq!(height, px(96.0), "capped to above's room after the gap");
     }
 
     #[test]

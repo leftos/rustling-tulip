@@ -108,6 +108,7 @@ Start with [docs/architecture.md](docs/architecture.md) for how the pieces fit a
 - **Ring (keyboard)**: a native dialog's ordered, wrapping list of stops that Tab and Shift-Tab walk; not the drawn focus ring, the outline around the focused control; see `docs/native-client.md` ("Keyboard reachability").
 - **Rollout file**: Codex's per-thread transcript under `$CODEX_HOME/sessions/YYYY/MM/DD/`, whose name carries the thread id.
 - **Routing variables**: the `ANTHROPIC_*` and `CLAUDE_*` environment variables that point Claude Code at another endpoint, credential and model; built at each spawn, never stored.
+- **Safe option**: the non-destructive button a confirm dialog opens on — Cancel, Keep running, Ignore, or a pane-only close; see `docs/native-client.md` ("Keyboard reachability").
 - **Sealing**: the daemon's replacing of a secret row's literal value with a secret reference before the spawn config is captured, at spawn and, for older files, at startup; see `docs/env-secrets.md`.
 - **Secret reference**: an environment-row value written `${secret:<id>}`, standing for a value the daemon saved in Windows Credential Manager; resolved at spawn, stored and echoed in place of the value.
 - **Secret row**: an environment row whose key has a `KEY`, `TOKEN`, `SECRET` or `PASSWORD` segment or which the dialog's Secret toggle marks.

@@ -198,9 +198,9 @@ The frontend has no search addon, bell handling or title parsing; `terminal_titl
 ## Misc & shortcuts
 
 - [x] App shortcuts, ignored in inputs, the terminal, modals and pop-outs: Ctrl+B sidebar, Ctrl+T new tab, Ctrl+N spawn, Ctrl+, settings, Ctrl+(Shift+)Tab cycle tabs, Ctrl+1–9 jump to tab, Ctrl+Shift+G auto-grid, Ctrl+= / − / 0 session font, Ctrl+Shift+= / − tab font — `utils/a11y.ts`, `App.tsx` (native, P4.14: the tab keys and Ctrl+Shift+G also act from the terminal, and Ctrl+Shift+N / Ctrl+Shift+T open from anywhere; user, 2026-09-26)
-- [ ] Other keys: Ctrl+Enter commits; Enter/Esc in rename fields; Esc closes menus and modals; arrows in the branch combobox — various
+- [x] Other keys: Ctrl+Enter commits; Enter/Esc in rename fields; Esc closes menus and modals; arrows in the branch combobox — various (native: `lib.rs` (`on_key_capture`, `on_shortcut`), `changes_view.rs` (the commit box), `session_menu.rs` and `tab_bar.rs` (rename rows), `combobox.rs` (Up and Down); proved by `ui_commit.rs`, `ui_session_actions.rs`, `ui_tabs.rs`, `ui_spawn_combobox.rs` and `ui_keys.rs`)
 - [x] Default right-click menu suppressed everywhere, Monaco included — `main.tsx` (native: GPUI has no default context menu)
-- [ ] Menus stay inside the viewport; modals focus the safe option and return focus on close — `utils/a11y.ts`
+- [x] Menus stay inside the viewport; modals focus the safe option and return focus on close — `utils/a11y.ts` (native: `session_menu.rs` (`menu_frame`, anchored and snapped, capped at 60% of the window with scrolling, as `combobox.rs` caps its data lists), each dialog's safe option and close fn returning focus to the pane; proved by `ui_keys.rs` and the per-dialog modules `ui_changes.rs`, `ui_links.rs`, `ui_panes.rs`, `ui_recover.rs`, `ui_shell.rs`, `ui_spawn_dialog.rs` and `ui_stashes.rs`)
 - [ ] File pickers remember the last folder per purpose — `api.ts` (native: Add repo and Shell… open at their remembered folders, the worktrees Browse at its field, through the client's own folder picker, in P4.10a; the `.code-workspace` file picker waits for P4.10c)
 
 ## Host capabilities to replace

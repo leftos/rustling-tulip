@@ -15,6 +15,7 @@ use crate::changes_view::{
     HEAD_HEIGHT, ScBucketRow, ScChanges, ScCommit, caret, changes_body, count_pill, head_title,
 };
 use crate::ellipsis::truncating;
+use crate::session_menu::MENU_MAX_SHARE;
 use crate::session_menu::menu_frame;
 use crate::session_menu::menu_item;
 use crate::sidebar::{Activity, display_label};
@@ -445,7 +446,12 @@ impl RootView {
     }
 
     /// The panel, `width` wide.
-    pub(crate) fn source_control_view(&self, width: f32, cx: &mut Context<Self>) -> Div {
+    pub(crate) fn source_control_view(
+        &self,
+        width: f32,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let panel = self.source_control_panel();
         let body = match panel.empty_hint {
             Some(hint) => div()
@@ -488,14 +494,14 @@ impl RootView {
             .bg(gpui::rgb(PANEL_BG))
             .text_size(px(UI_TEXT_SIZE))
             .text_color(gpui::rgb(TEXT))
-            .child(self.sc_header(&panel, cx))
+            .child(self.sc_header(&panel, window, cx))
             .when_some(panel.context.clone(), |view, context| {
                 view.child(context_line(context))
             })
             .child(body)
     }
 
-    fn sc_header(&self, panel: &ScPanel, cx: &mut Context<Self>) -> Div {
+    fn sc_header(&self, panel: &ScPanel, window: &Window, cx: &mut Context<Self>) -> Div {
         let actions = div()
             .flex()
             .min_w(px(0.0))
@@ -503,7 +509,7 @@ impl RootView {
             .gap(px(4.0))
             .when(panel.refresh, |row| row.child(refresh_button(cx)))
             .when_some(panel.picker.clone(), |row, label| {
-                row.child(self.picker(label, cx))
+                row.child(self.picker(label, window, cx))
             });
         div()
             .flex()
@@ -529,7 +535,7 @@ impl RootView {
     }
 
     /// The picker's button, with its menu under it while open.
-    fn picker(&self, label: String, cx: &mut Context<Self>) -> Div {
+    fn picker(&self, label: String, window: &Window, cx: &mut Context<Self>) -> Div {
         let button = div()
             .id("sc-picker")
             .debug_selector(|| "sc-picker".to_owned())
@@ -551,6 +557,7 @@ impl RootView {
             let frame = menu_frame(
                 "sc-picker-menu",
                 &self.menu_focus,
+                window.viewport_size().height * MENU_MAX_SHARE,
                 cx.listener(|this, _: &MouseDownEvent, window, cx| {
                     this.close_sc_picker(window, cx);
                     cx.stop_propagation();

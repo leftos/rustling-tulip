@@ -225,6 +225,20 @@ fn pane_close_esc_cancels(cx: &mut TestAppContext) {
     assert!(h.sent().is_empty());
 }
 
+#[gpui::test]
+fn pane_close_esc_returns_the_keyboard_to_the_pane(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &with_empty(session("s1").build()));
+    h.answer_scrollback("s1", b"");
+    h.sent();
+    h.click_on("close-pane-p1");
+    assert!(h.in_model("pane-close"));
+    h.keys("escape");
+    assert!(!h.in_model("pane-close"));
+    h.keys("a");
+    assert_eq!(h.sent_input("s1"), b"a", "the pane has the keyboard");
+}
+
 const TRUSTED_TIP: &str = "Trusted launch: permission prompts were bypassed";
 const HEADLESS_TIP: &str = "Headless session: it runs without a terminal";
 const DEEPSEEK_TIP: &str = "Claude Code routed to DeepSeek";

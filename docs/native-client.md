@@ -117,6 +117,10 @@ The editor walks the same stops, Close included, and draws the focus ring on its
 
 The stop order, ring step (`step`), where focus goes when a press disables its stop (`after_lost`, shared by Settings and the editor), cursor and highlight logic is plain Rust in `appearance_stops.rs`, unit-tested; Settings keeps its one focus slot, `settings_control`.
 
+Menus and modals keep to the window and hand the keyboard back. A context menu opens at its anchor and snaps inside the viewport, and its frame never grows past 60% of the window's height: a longer menu scrolls its rows instead (`session_menu.rs` `menu_frame`, `MENU_MAX_SHARE`). Confirm dialogs open on their safe option — Cancel, Keep running, Ignore, or a pane-only close — and every close path, Esc included, returns the keyboard to the pane.
+
+Esc has deliberate exceptions. It never dismisses the layout chooser, and it is ignored while a recovery or an exit is in flight. In a session rename it leaves the menu open and returns to its rows rather than closing them.
+
 ## Tests
 
 Three tiers, all Rust tests:

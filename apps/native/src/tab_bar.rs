@@ -14,7 +14,7 @@ use protocol::{
 use crate::assets::{TAB_CLOSE_ICON, TAB_NEW_ICON};
 use crate::fonts;
 use crate::palette::{CHIP, GROUND, SUBTLE, SURFACE, WORKING};
-use crate::session_menu::{menu_frame, menu_item, menu_separator, muted_row};
+use crate::session_menu::{MENU_MAX_SHARE, menu_frame, menu_item, menu_separator, muted_row};
 use crate::status_glyph::{GlyphSize, glyph, glyph_view};
 use crate::tab_menu::{MenuLine, TabAction, merge_lines, rearrange_lines};
 use crate::tabs::{PillClick, bound_pane_count, collect_panes, tab_session_counts};
@@ -80,6 +80,8 @@ pub(crate) struct TabMenu {
     grid_open: bool,
     /// Whether Close other tabs waits for its second press.
     close_others_armed: bool,
+    /// The most height its frame may take, from the window it opened in.
+    max_height: Pixels,
 }
 
 impl RootView {
@@ -261,6 +263,7 @@ impl RootView {
             at,
             grid_open: false,
             close_others_armed: false,
+            max_height: window.viewport_size().height * MENU_MAX_SHARE,
         });
         self.tab_menu_focus.focus(window);
         cx.notify();
@@ -336,6 +339,7 @@ impl RootView {
         menu_frame(
             "tab-menu",
             &self.tab_menu_focus,
+            menu.max_height,
             cx.listener(|this, _: &MouseDownEvent, window, cx| {
                 this.close_tab_menu(window, cx);
                 cx.stop_propagation();

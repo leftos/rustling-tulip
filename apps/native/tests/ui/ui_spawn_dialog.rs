@@ -364,6 +364,19 @@ fn escape_closes_and_backdrop_click_does_not(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn escape_returns_the_keyboard_to_the_pane(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &fixture());
+    h.answer_scrollback("s1", b"");
+    h.sent();
+    open(&mut h);
+    h.keys("escape");
+    assert!(!is_open(&mut h), "Esc closes the dialog");
+    h.keys("a");
+    assert_eq!(h.sent_input("s1"), b"a", "the pane has the keyboard");
+}
+
+#[gpui::test]
 fn share_worktree_confirm_for_active_existing_worktree(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &fixture());

@@ -10,7 +10,7 @@ use protocol::{ClientMessage, TabContent};
 
 use crate::move_panes_view::MovePanesDialog;
 use crate::pane_close::PaneClose;
-use crate::session_menu::{menu_frame, menu_item, menu_separator};
+use crate::session_menu::{MENU_MAX_SHARE, menu_frame, menu_item, menu_separator};
 use crate::tabs::{collect_panes, pick_balanced_drop_target};
 use crate::undo;
 use crate::{RootView, tooltip};
@@ -46,6 +46,8 @@ pub(crate) struct EmptyPaneMenu {
     at: Point<Pixels>,
     /// Whether the Move to submenu replaces the rows.
     move_open: bool,
+    /// The most height its frame may take, from the window it opened in.
+    max_height: Pixels,
 }
 
 /// What a row of the empty pane's menu does.
@@ -167,6 +169,7 @@ impl RootView {
             pane_id: pane_id.to_owned(),
             at,
             move_open: false,
+            max_height: window.viewport_size().height * MENU_MAX_SHARE,
         });
         self.pane_ui.menu_focus.focus(window);
         cx.notify();
@@ -283,6 +286,7 @@ impl RootView {
         let frame = menu_frame(
             "empty-pane-menu",
             &self.pane_ui.menu_focus,
+            menu.max_height,
             cx.listener(|this, _: &MouseDownEvent, window, cx| {
                 this.close_empty_pane_menu(window, cx);
                 cx.stop_propagation();

@@ -497,6 +497,26 @@ fn drop_opens_the_confirm_cancel_sends_nothing_and_confirming_sends_a_drop(
 }
 
 #[gpui::test]
+fn drop_confirm_escape_returns_focus_to_the_pane(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = Fixture::single(session("s1").in_repo("r1").build());
+    fixture.repos = vec![repo("r1", "C:/r1")];
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.answer_scrollback("s1", b"");
+    h.sent();
+    h.click_on("activity-source-control");
+    h.sent();
+    h.click_on(HEADER);
+    h.send(two_stashes());
+    h.click_on("sc-stash-drop-r1::|stash@{0}");
+    assert!(h.root(|root, _| root.stash_drop_confirm()).is_some());
+    h.keys("escape");
+    assert!(h.root(|root, _| root.stash_drop_confirm()).is_none());
+    h.keys("a");
+    assert_eq!(h.sent_input("s1"), b"a", "the pane has the keyboard");
+}
+
+#[gpui::test]
 fn pending_disables_the_buttons_and_a_list_re_enables_them(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let (mut h, _) = open_expanded(cx, &dir);

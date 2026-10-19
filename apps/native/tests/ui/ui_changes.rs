@@ -549,6 +549,18 @@ fn session_on_r1<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
 }
 
 #[gpui::test]
+fn discard_confirm_escape_returns_focus_to_the_pane(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = session_on_r1(cx, &dir);
+    h.click_on("sc-discard-all-r1::");
+    assert!(h.root(|root, _| root.discard_confirm_view()).is_some());
+    h.keys("escape");
+    assert!(h.root(|root, _| root.discard_confirm_view()).is_none());
+    h.keys("a");
+    assert_eq!(h.sent_input("s1"), b"a", "the pane has the keyboard");
+}
+
+#[gpui::test]
 fn a_welcome_closes_the_discard_confirm(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let (mut h, _) = open_panel(cx, &dir);
