@@ -581,9 +581,11 @@ pub struct SessionSnapshot {
     /// worktrees are currently in active use.
     #[serde(default)]
     pub worktree_paths: Vec<String>,
-    /// The Claude conversation id the daemon passed as `--session-id` when it
-    /// spawned this session. `None` for shells, headless runs, other agents,
-    /// and sessions spawned before the daemon recorded it.
+    /// Claude's conversation id: the one the daemon passed as `--session-id`
+    /// when it spawned this session, or one the agent's own `SessionStart`
+    /// hook reported after a `/clear` or fork started a new conversation.
+    /// `None` for shells, headless runs, other agents, and sessions spawned
+    /// before the daemon recorded it.
     #[serde(default)]
     pub claude_session_id: Option<String>,
     /// True when the user asked that this session not count as busy (a dev

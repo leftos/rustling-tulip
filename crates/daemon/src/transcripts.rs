@@ -131,7 +131,7 @@ fn project_dir(claude_home: &Path, cwd: &str) -> PathBuf {
     claude_home.join("projects").join(encode_project_dir(cwd))
 }
 
-fn is_plain_id(id: &str) -> bool {
+pub(crate) fn is_plain_id(id: &str) -> bool {
     !id.is_empty()
         && id
             .chars()

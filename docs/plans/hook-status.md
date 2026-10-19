@@ -102,7 +102,7 @@ A new `crates/daemon/src/hook_status.rs` parses the payload tolerantly (unknown 
 
 `PermissionRequest` fires for `AskUserQuestion` and `ExitPlanMode` too, 90-300 ms after their `PreToolUse`, so it is mapped by `tool_name`; mapped as one `Permission` row it would overwrite the richer pending input. `PostToolUse` for `ExitPlanMode` is the approval signal.
 
-`SessionStart` with `source` `clear` or `fork` is expected to carry a new conversation id (unverified); the daemon updates the record's `claude_session_id`, so the recover dialog (`history.rs`) resumes the conversation the session was really in. `claude --resume <id>` keeps the same id, so the update is a no-op there.
+`SessionStart` with `source` `clear` or `fork` carries a new conversation id (`clear` and `fork` still unverified against a live CLI); the daemon writes the record's `claude_session_id` whenever a `SessionStart` reports a different one, with no source gate, so `claude --resume <id>` is a no-op because the id matches. The id is mirrored into the sidecar, so a reattach keeps it, and the recover dialog (`history.rs`) resumes the conversation the session was really in.
 
 ### Coexisting with the heuristic
 
@@ -138,7 +138,7 @@ Every interactive Claude spawn writes its own settings file under its own rt ses
 
 `InjectorStartup::AgentTui` keeps its quiet-period wait.
 
-`SessionStart` fires about 50 ms after the input box appears, and after every startup dialog, so in a hook-driven session it is a possible earlier start signal than the quiet period; using it is optional and not part of this design. `verify_mode_marker` stays as is; `UserPromptSubmit`'s `permission_mode` arrives only after the prompt is sent, so the daemon logs a `warn!` when it differs from the injector's expected mode, which makes a failed plan-mode entry visible in `daemon.log`.
+`SessionStart` fires about 50 ms after the input box appears, and after every startup dialog, so in a hook-driven session it is a possible earlier start signal than the quiet period; using it is optional and not part of this design. `verify_mode_marker` stays as is; `UserPromptSubmit`'s `permission_mode` arrives only after the prompt is sent, so the daemon logs a `warn!` when it differs from the spawn's `--permission-mode` value, which makes a failed plan-mode entry visible in `daemon.log`. The injector's own intent is not stored anywhere, so a spawn with no flag (the Shift+Tab plan-mode preset among them) is never compared.
 
 ### Prior art to weigh before HS.3, HS.4 and HS.6
 
@@ -197,9 +197,9 @@ Answered (user): Q3 `Stop` means `Idle`, as today; `AwaitingInput` is kept for r
   Any owner key sent to a hook-driven session while a prompt is pending clears `AwaitingInput` and `pending_input` at once.
 
   Proof: paused-clock tokio tests: a hook `AwaitingInput` survives PTY output that the classifier reads as `Working`; hook `Working` plus silence demotes to `Idle`; hook `AwaitingInput` with the prompt gone from the screen plus silence demotes to `Idle`, while a still-matching prompt does not; an owner key while a prompt is pending returns the session to `Idle` at once; a session with no hook events behaves exactly as today (existing tests unchanged).
-- [ ] **HS.7 Conversation id and last message.** `hook_status.rs` / `session.rs`: `SessionStart` with `clear` / `fork` (and an in-session `/resume`, unverified) updates `claude_session_id`, and `claude --resume <id>` leaves it unchanged;
+- [x] **HS.7 Conversation id and last message.** `hook_status.rs` / `session.rs`: a `SessionStart` reporting a different `session_id` updates `claude_session_id` (validated by `transcripts::is_plain_id`, no source gate), and the id is mirrored into the sidecar through `orphan::RecordMirror`, so a restart keeps it;
 
-  `Stop` stores `last_assistant_message` (capped) on the record; `StopFailure` adds a `recent_actions` line; a `permission_mode` mismatch on `UserPromptSubmit` against the injector logs a `warn!`. Proof: unit tests on the record after each event, and a `history.rs` test that an ended session's entry carries the updated conversation id.
+  `Stop` stores `last_assistant_message` trimmed and capped at 8 KiB on the record, off the wire; `StopFailure` adds a `recent_actions` line; a `permission_mode` mismatch on `UserPromptSubmit` against the spawn's `--permission-mode` logs a `warn!`. Proof: record tests after each event, a sidecar round-trip through `SessionRegistry::update`, a `RecordMirror::matches` test on the id alone, and a `history.rs` test that an ended session's entry carries the hook-updated id — each also confirmed to fail against its deliberate mutation.
 - [ ] **HS.8 Shell recovery path.** `history.rs`: the shell-recovery injector writes the shell session's settings file and types `claude --settings <path> --resume <id>`. Proof: the existing test at the `content: format!("claude --resume …")` site updated to assert the new command.
 - [ ] **HS.9 End to end.** `tools/e2e/fake-claude/index.mjs` reads `--settings`, and on scripted cues runs the configured hook commands with the matching JSON on stdin (`UserPromptSubmit`, `PreToolUse AskUserQuestion`, `Stop`). A new case in `apps/native/tests/e2e_live.rs` asserts the snapshot goes `Working → AwaitingInput` with the question in `pending_input`, then `Idle`. Proof: `.\rt.ps1 native-e2e` green.
 - [ ] **HS.10 Codex.** Check whether `codex -c` accepts a hooks table per invocation. If it does, `agents/codex.rs` injects the same shim for `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `Stop` with an argv test; if not, record the finding in this doc and leave Codex on the heuristic. Proof: the argv test, or the recorded finding.

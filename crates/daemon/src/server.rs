@@ -706,7 +706,13 @@ async fn hook_handler(
     let Some(signal) = crate::hook_status::map_event(&value) else {
         return StatusCode::NO_CONTENT.into_response();
     };
-    crate::hook_status::apply_signal(&hub, &session_id, hook_time(&headers), &signal);
+    crate::hook_status::apply_signal(
+        &hub,
+        &session_id,
+        hook_time(&headers),
+        &signal,
+        &crate::hook_status::details(&value),
+    );
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -3887,6 +3893,7 @@ fn interactive_record(
         pending_input: None,
         last_hook_time: None,
         hook_driven: false,
+        last_assistant_message: None,
         busy_excluded: false,
     };
     push_recent_action(&mut record, "session started".to_string());
@@ -4369,6 +4376,7 @@ async fn spawn_plain_shell_session(
         pending_input: None,
         last_hook_time: None,
         hook_driven: false,
+        last_assistant_message: None,
         busy_excluded: false,
     };
     push_recent_action(
@@ -4518,6 +4526,7 @@ fn spawn_headless_session(
         pending_input: None,
         last_hook_time: None,
         hook_driven: false,
+        last_assistant_message: None,
         busy_excluded: false,
     };
     push_recent_action(&mut record, "headless session started".to_string());
@@ -8044,6 +8053,7 @@ mod tests {
             pending_input: None,
             last_hook_time: None,
             hook_driven: false,
+            last_assistant_message: None,
             busy_excluded: false,
         }
     }
@@ -8304,7 +8314,13 @@ mod tests {
         );
         let event: serde_json::Value = serde_json::from_str(question).expect("parse hook body");
         let signal = crate::hook_status::map_event(&event).expect("a question is mapped");
-        crate::hook_status::apply_signal(&hub, "s1", Some(100), &signal);
+        crate::hook_status::apply_signal(
+            &hub,
+            "s1",
+            Some(100),
+            &signal,
+            &crate::hook_status::details(&event),
+        );
         assert!(
             matches!(
                 attention.try_recv().map(|event| event.reason),
@@ -8318,11 +8334,337 @@ mod tests {
         for _ in 0..8 {
             tokio::task::yield_now().await;
         }
-        crate::hook_status::apply_signal(&hub, "s1", Some(200), &signal);
+        crate::hook_status::apply_signal(
+            &hub,
+            "s1",
+            Some(200),
+            &signal,
+            &crate::hook_status::details(&event),
+        );
         assert!(
             attention.try_recv().is_err(),
             "classifier output and a repeat event raise no second event"
         );
+    }
+
+    /// Apply the hook `body` to `s1` at `event_time`, as the route does.
+    fn apply_hook(hub: &Hub, body: &str, event_time: u128) {
+        let event: serde_json::Value = serde_json::from_str(body).expect("parse hook body");
+        let signal = crate::hook_status::map_event(&event).expect("the body maps to a signal");
+        crate::hook_status::apply_signal(
+            hub,
+            "s1",
+            Some(event_time),
+            &signal,
+            &crate::hook_status::details(&event),
+        );
+    }
+
+    /// `id`'s conversation id, read under its record lock.
+    fn conversation_id_of(hub: &Hub, id: &str) -> Option<String> {
+        let rec = hub.sessions.get(id).expect("session is in the registry");
+        crate::sync::lock(&rec).claude_session_id.clone()
+    }
+
+    /// The last assistant message `id`'s record holds.
+    fn last_message_of(hub: &Hub, id: &str) -> Option<String> {
+        let rec = hub.sessions.get(id).expect("session is in the registry");
+        crate::sync::lock(&rec).last_assistant_message.clone()
+    }
+
+    /// The newest recent action on `id`'s record.
+    fn last_action_of(hub: &Hub, id: &str) -> Option<String> {
+        let rec = hub.sessions.get(id).expect("session is in the registry");
+        crate::sync::lock(&rec).recent_actions.last().cloned()
+    }
+
+    /// A `SessionStart` for a `/clear` carries a new conversation id, and the
+    /// record moves to it.
+    #[tokio::test]
+    async fn hook_session_start_clear_updates_the_conversation_id() {
+        let (hub, _scratch) = test_hub("hook-session-start-clear");
+        hub.sessions.insert(idle_record("s1"));
+        hub.sessions.update("s1", |rec| {
+            rec.claude_session_id = Some("old-conv".to_owned());
+        });
+        apply_hook(
+            &hub,
+            r#"{"hook_event_name":"SessionStart","source":"clear","session_id":"new-conv"}"#,
+            100,
+        );
+        assert_eq!(
+            conversation_id_of(&hub, "s1").as_deref(),
+            Some("new-conv"),
+            "a clear moves the session to its new conversation"
+        );
+    }
+
+    /// A resumed session reports the id it already had, so the write is a
+    /// no-op.
+    #[tokio::test]
+    async fn hook_session_start_resume_with_the_same_id_leaves_it() {
+        let (hub, _scratch) = test_hub("hook-session-start-resume-same");
+        hub.sessions.insert(idle_record("s1"));
+        hub.sessions.update("s1", |rec| {
+            rec.claude_session_id = Some("same-conv".to_owned());
+        });
+        apply_hook(
+            &hub,
+            r#"{"hook_event_name":"SessionStart","source":"resume","session_id":"same-conv"}"#,
+            100,
+        );
+        assert_eq!(
+            conversation_id_of(&hub, "s1").as_deref(),
+            Some("same-conv"),
+            "a resume keeps the conversation it resumed"
+        );
+    }
+
+    /// There is no source gate: a `resume` that reports a different id moves
+    /// the record like any other `SessionStart`.
+    #[tokio::test]
+    async fn hook_session_start_resume_with_a_new_id_updates_it() {
+        let (hub, _scratch) = test_hub("hook-session-start-resume-new");
+        hub.sessions.insert(idle_record("s1"));
+        hub.sessions.update("s1", |rec| {
+            rec.claude_session_id = Some("old-conv".to_owned());
+        });
+        apply_hook(
+            &hub,
+            r#"{"hook_event_name":"SessionStart","source":"resume","session_id":"new-conv"}"#,
+            100,
+        );
+        assert_eq!(
+            conversation_id_of(&hub, "s1").as_deref(),
+            Some("new-conv"),
+            "the source does not gate the id write"
+        );
+    }
+
+    /// `Stop` keeps the message the turn ended with; a later `Stop` with no
+    /// message keeps it.
+    #[tokio::test]
+    async fn hook_stop_stores_the_last_message() {
+        let (hub, _scratch) = test_hub("hook-stop-message");
+        hub.sessions.insert(idle_record("s1"));
+        apply_hook(
+            &hub,
+            r#"{"hook_event_name":"Stop","last_assistant_message":"All done."}"#,
+            100,
+        );
+        assert_eq!(
+            last_message_of(&hub, "s1").as_deref(),
+            Some("All done."),
+            "a stop stores the message it ended with"
+        );
+        apply_hook(&hub, r#"{"hook_event_name":"Stop"}"#, 200);
+        assert_eq!(
+            last_message_of(&hub, "s1").as_deref(),
+            Some("All done."),
+            "an absent message keeps the previous one"
+        );
+        apply_hook(
+            &hub,
+            r#"{"hook_event_name":"Stop","last_assistant_message":""}"#,
+            300,
+        );
+        assert_eq!(
+            last_message_of(&hub, "s1").as_deref(),
+            Some("All done."),
+            "an empty message keeps the previous one too"
+        );
+    }
+
+    /// `StopFailure` leaves a recent-actions line, naming the reason when the
+    /// payload carries one.
+    #[tokio::test]
+    async fn hook_stop_failure_adds_a_recent_action() {
+        let (hub, _scratch) = test_hub("hook-stop-failure");
+        hub.sessions.insert(idle_record("s1"));
+        apply_hook(
+            &hub,
+            r#"{"hook_event_name":"StopFailure","reason":"overloaded"}"#,
+            100,
+        );
+        assert_eq!(
+            last_action_of(&hub, "s1").as_deref(),
+            Some("stop failed: overloaded"),
+            "the newest action names the failure"
+        );
+        apply_hook(&hub, r#"{"hook_event_name":"StopFailure"}"#, 200);
+        assert_eq!(
+            last_action_of(&hub, "s1").as_deref(),
+            Some("stop failed"),
+            "a failure with no reason leaves the bare line"
+        );
+    }
+
+    /// A `/clear`'s new id reaches the sidecar through the registry's mirror,
+    /// so a reattach or daemon restart keeps it.
+    #[tokio::test]
+    async fn hook_session_start_clear_reaches_the_sidecar() {
+        use crate::history::test_support::write_meta_for;
+        let (hub, _scratch) = test_hub("hook-sidecar-id");
+        write_meta_for(&hub.dirs, "s1");
+        hub.sessions.insert(idle_record("s1"));
+        // Bring the sidecar in line with the record first, so the id is the
+        // only mirrored field that differs when the hook lands.
+        hub.sessions.update("s1", |_| {});
+        apply_hook(
+            &hub,
+            r#"{"hook_event_name":"SessionStart","source":"clear","session_id":"new-conv"}"#,
+            100,
+        );
+        let meta = crate::orphan::load_meta(&hub.dirs, "s1").expect("load meta");
+        assert_eq!(
+            meta.claude_session_id.as_deref(),
+            Some("new-conv"),
+            "the hook's id is mirrored into the sidecar"
+        );
+    }
+
+    /// A terminal session takes no detail write: a late `/clear` event
+    /// changes neither its id nor its last message.
+    #[tokio::test]
+    async fn hook_session_start_clear_for_a_terminal_session_changes_nothing() {
+        let (hub, _scratch) = test_hub("hook-terminal-guard");
+        hub.sessions.insert(idle_record("s1"));
+        hub.sessions.update("s1", |rec| {
+            rec.status = SessionStatus::Stopped;
+            rec.claude_session_id = Some("old-conv".to_owned());
+            rec.last_assistant_message = Some("kept".to_owned());
+        });
+        apply_hook(
+            &hub,
+            r#"{"hook_event_name":"SessionStart","source":"clear","session_id":"new-conv"}"#,
+            100,
+        );
+        assert_eq!(
+            conversation_id_of(&hub, "s1").as_deref(),
+            Some("old-conv"),
+            "a terminal session keeps its id"
+        );
+        assert_eq!(
+            last_message_of(&hub, "s1").as_deref(),
+            Some("kept"),
+            "a terminal session keeps its message"
+        );
+    }
+
+    /// An event at or before the last applied time is dropped whole: it
+    /// changes neither the id nor the message.
+    #[tokio::test]
+    async fn hook_a_stale_event_changes_nothing() {
+        let (hub, _scratch) = test_hub("hook-stale-event");
+        hub.sessions.insert(idle_record("s1"));
+        hub.sessions.update("s1", |rec| {
+            rec.last_hook_time = Some(100);
+            rec.claude_session_id = Some("old-conv".to_owned());
+            rec.last_assistant_message = Some("kept".to_owned());
+        });
+        apply_hook(
+            &hub,
+            r#"{"hook_event_name":"SessionStart","source":"clear","session_id":"new-conv"}"#,
+            100,
+        );
+        apply_hook(
+            &hub,
+            r#"{"hook_event_name":"Stop","last_assistant_message":"stale"}"#,
+            99,
+        );
+        assert_eq!(
+            conversation_id_of(&hub, "s1").as_deref(),
+            Some("old-conv"),
+            "a stale start changes no id"
+        );
+        assert_eq!(
+            last_message_of(&hub, "s1").as_deref(),
+            Some("kept"),
+            "a stale stop changes no message"
+        );
+    }
+
+    /// The id later becomes `claude --resume <id>` and a transcript path, so
+    /// a value that is not plain is refused.
+    #[tokio::test]
+    async fn hook_session_start_refuses_a_non_plain_id() {
+        let (hub, _scratch) = test_hub("hook-plain-id");
+        hub.sessions.insert(idle_record("s1"));
+        hub.sessions.update("s1", |rec| {
+            rec.claude_session_id = Some("old-conv".to_owned());
+        });
+        for (index, id) in ["../x", r"C:\conversations\x", "a/b"].iter().enumerate() {
+            let body = serde_json::json!({
+                "hook_event_name": "SessionStart",
+                "source": "clear",
+                "session_id": id,
+            })
+            .to_string();
+            apply_hook(&hub, &body, 100 + index as u128);
+            assert_eq!(
+                conversation_id_of(&hub, "s1").as_deref(),
+                Some("old-conv"),
+                "{id} is refused"
+            );
+        }
+    }
+
+    /// A session with no id at all may gain one from a `/clear`.
+    #[tokio::test]
+    async fn hook_session_start_clear_sets_a_missing_id() {
+        let (hub, _scratch) = test_hub("hook-missing-id");
+        hub.sessions.insert(idle_record("s1"));
+        apply_hook(
+            &hub,
+            r#"{"hook_event_name":"SessionStart","source":"clear","session_id":"fresh-conv"}"#,
+            100,
+        );
+        assert_eq!(
+            conversation_id_of(&hub, "s1").as_deref(),
+            Some("fresh-conv"),
+            "a missing id is filled in"
+        );
+    }
+
+    /// The message is capped in bytes, so a multi-byte message over 8 KiB
+    /// cannot grow past it and is cut with the ellipsis.
+    #[tokio::test]
+    async fn hook_stop_caps_the_message_at_eight_kib() {
+        let (hub, _scratch) = test_hub("hook-stop-cap");
+        hub.sessions.insert(idle_record("s1"));
+        let body = serde_json::json!({
+            "hook_event_name": "Stop",
+            "last_assistant_message": "é".repeat(5000),
+        })
+        .to_string();
+        apply_hook(&hub, &body, 100);
+        let stored = last_message_of(&hub, "s1").expect("a message is stored");
+        assert!(stored.len() <= 8 * 1024, "{} bytes", stored.len());
+        assert!(stored.ends_with('…'), "the cut ends in the ellipsis");
+    }
+
+    /// The id the hook wrote is the one an ended session's history entry
+    /// carries.
+    #[tokio::test]
+    async fn hook_session_start_clear_reaches_the_history_entry() {
+        let (hub, _scratch) = test_hub("hook-history-id");
+        hub.sessions.insert(idle_record("s1"));
+        hub.sessions.update("s1", |rec| {
+            rec.claude_session_id = Some("old-conv".to_owned());
+        });
+        apply_hook(
+            &hub,
+            r#"{"hook_event_name":"SessionStart","source":"clear","session_id":"new-conv"}"#,
+            100,
+        );
+        let rec = hub.sessions.get("s1").expect("session is in the registry");
+        let guard = crate::sync::lock(&rec);
+        let entry = crate::history::entry_from_record(
+            &guard,
+            protocol::SessionEnd::TracerLost,
+            chrono::Utc::now(),
+        );
+        assert_eq!(entry.claude_session_id.as_deref(), Some("new-conv"));
     }
 
     /// Dispatch `msg` against `hub` without expecting a reply.

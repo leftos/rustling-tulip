@@ -569,6 +569,7 @@ pub struct RecordMirror {
     pub label: String,
     pub appearance: AppearanceOverrides,
     pub agent_conversation_id: Option<String>,
+    pub claude_session_id: Option<String>,
     pub busy_excluded: bool,
 }
 
@@ -585,6 +586,7 @@ impl RecordMirror {
             && meta.appearance == self.appearance
             && meta.accent_color.is_none()
             && meta.agent_conversation_id == self.agent_conversation_id
+            && meta.claude_session_id == self.claude_session_id
             && meta.busy_excluded == self.busy_excluded
     }
 
@@ -604,13 +606,15 @@ impl RecordMirror {
         meta.appearance = self.appearance.clone();
         meta.agent_conversation_id
             .clone_from(&self.agent_conversation_id);
+        meta.claude_session_id.clone_from(&self.claude_session_id);
         meta.busy_excluded = self.busy_excluded;
     }
 }
 
 /// Best-effort sync of the record's on-disk mirror into the sidecar: the
 /// recent-actions tail, the status/stamp pair, the terminal title and cwd,
-/// the labels, the appearance and the busy exclusion. Called by the registry
+/// the labels, the appearance, the two conversation ids (Claude's and the
+/// agent CLI's) and the busy exclusion. Called by the registry
 /// after every `update()` so abandoned sessions retain the most recent
 /// operational context and a reattach can bring back a session that was still
 /// waiting for input. Silently no-ops if the sidecar doesn't exist (e.g. for a
@@ -994,6 +998,99 @@ mod tests {
         }"#;
         let old_meta = load_meta_from_bytes(old).expect("parse old meta");
         assert_eq!(old_meta.claude_session_id, None);
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    /// A mirror over the fields `meta_from_record` writes for `s1`, carrying
+    /// the given conversation id.
+    fn mirror_for(claude_session_id: Option<&str>) -> RecordMirror {
+        RecordMirror {
+            recent_actions_tail: Vec::new(),
+            status: SessionStatus::Idle,
+            status_since: None,
+            terminal_title: None,
+            current_cwd: None,
+            default_label: "s1".to_owned(),
+            user_label: None,
+            label: "s1".to_owned(),
+            appearance: AppearanceOverrides::default(),
+            agent_conversation_id: None,
+            claude_session_id: claude_session_id.map(str::to_owned),
+            busy_excluded: false,
+        }
+    }
+
+    /// The spawn-time sidecar `meta_from_record` writes for `s1`, carrying
+    /// `claude_session_id`.
+    fn s1_meta(claude_session_id: Option<&str>) -> OrphanMeta {
+        meta_from_record(
+            "s1".to_string(),
+            4242,
+            "s1".to_string(),
+            SessionKind::Standalone,
+            SessionMode::Interactive,
+            vec![],
+            chrono::DateTime::from_timestamp(0, 0).unwrap(),
+            None,
+            Some("rt-tracer".to_string()),
+            Agent::Claude,
+            None,
+            None,
+            None,
+            Some(4242),
+            Some(r"\\.\pipe\rt-tracer-s1".to_string()),
+            None,
+            claude_session_id.map(str::to_owned),
+        )
+        .expect("build meta")
+    }
+
+    /// Only the conversation id differing is still a mismatch: the mirror
+    /// must not skip the write, and applying it moves the id.
+    #[test]
+    fn record_mirror_matches_on_the_conversation_id() {
+        let mirror = mirror_for(Some("new-conv"));
+        let mut meta = s1_meta(Some("old-conv"));
+        mirror.apply(&mut meta);
+        // Every other field now mirrors; only the id differs.
+        meta.claude_session_id = Some("old-conv".to_owned());
+        assert!(
+            !mirror.matches(&meta),
+            "a different conversation id is not a match"
+        );
+        mirror.apply(&mut meta);
+        assert_eq!(meta.claude_session_id.as_deref(), Some("new-conv"));
+    }
+
+    #[test]
+    fn record_mirror_applies_a_changed_conversation_id_and_skips_an_unchanged_one() {
+        let dirs = scratch_dirs("mirror-conversation-id");
+        let meta = s1_meta(Some("old-conv"));
+        write_meta(&dirs, &meta).expect("write meta");
+
+        // A changed id reaches disk.
+        sync_record_fields(&dirs, "s1", &mirror_for(Some("new-conv"))).expect("sync changed id");
+        assert_eq!(
+            load_meta(&dirs, "s1")
+                .expect("load meta")
+                .claude_session_id
+                .as_deref(),
+            Some("new-conv"),
+            "a /clear's conversation survives a reattach"
+        );
+
+        // A matching id leaves the file byte-for-byte as it was; the marker
+        // would not survive a rewrite.
+        let path = meta_path(&dirs, "s1");
+        let mut marked = std::fs::read(&path).expect("read sidecar");
+        marked.push(b'\n');
+        std::fs::write(&path, &marked).expect("write the marker");
+        sync_record_fields(&dirs, "s1", &mirror_for(Some("new-conv"))).expect("sync same id");
+        assert_eq!(
+            std::fs::read(&path).expect("read sidecar"),
+            marked,
+            "a matching mirror does not rewrite the sidecar"
+        );
         let _ = std::fs::remove_dir_all(&dirs.config);
     }
 

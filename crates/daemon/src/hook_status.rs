@@ -6,14 +6,106 @@
 //! are all ignored rather than refused.
 
 use crate::server::Hub;
-use protocol::{PendingInput, PendingQuestion, SessionStatus};
+use crate::session::{SessionRecord, push_recent_action};
+use protocol::{AgentOptions, PendingInput, PendingQuestion, SessionStatus, SpawnConfig};
 use serde_json::Value;
+use tracing::warn;
 
 /// Characters of a plan kept before the text is cut short.
 const PLAN_MAX_CHARS: usize = 2000;
 
 /// Characters of a serialised tool input kept as a permission summary.
 const DETAIL_MAX_CHARS: usize = 200;
+
+/// Bytes of a `Stop`'s last assistant message kept on the record.
+const LAST_MESSAGE_MAX_BYTES: usize = 8 * 1024;
+
+/// The payload fields a mapped event carries beside what [`map_event`] turns
+/// into a [`HookSignal`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct HookDetails {
+    /// The event's `hook_event_name`, or empty when it names none.
+    pub event: String,
+    /// Claude's conversation id for the session.
+    pub session_id: Option<String>,
+    /// The assistant message a `Stop` ended the turn with.
+    pub last_assistant_message: Option<String>,
+    /// The CLI's own permission mode at the time of the event.
+    pub permission_mode: Option<String>,
+    /// Why a `StopFailure` failed: the payload's `reason`, else its `message`.
+    pub failure_detail: Option<String>,
+}
+
+/// Read the extra fields out of one hook payload.
+///
+/// Tolerant like [`map_event`]: every field is optional, and one of the wrong
+/// JSON type reads as absent. Never panics.
+#[must_use]
+pub fn details(body: &Value) -> HookDetails {
+    let text = |key: &str| body.get(key).and_then(Value::as_str).map(str::to_owned);
+    HookDetails {
+        event: text("hook_event_name").unwrap_or_default(),
+        session_id: text("session_id"),
+        last_assistant_message: text("last_assistant_message"),
+        permission_mode: text("permission_mode"),
+        failure_detail: text("reason")
+            .filter(|reason| !reason.is_empty())
+            .or_else(|| text("message")),
+    }
+}
+
+/// `text` cut to at most `max_bytes` UTF-8 bytes on a character boundary,
+/// ending in `…`, which counts inside the cap — the same convention as
+/// [`truncate`]. Text within the cap is returned unchanged. A cap too small
+/// for the ellipsis keeps that many leading bytes and appends nothing.
+#[must_use]
+pub fn truncate_bytes(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_owned();
+    }
+    let ellipsis = '…'.len_utf8();
+    let mut end = if max_bytes < ellipsis {
+        max_bytes
+    } else {
+        max_bytes - ellipsis
+    };
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut cut = text[..end].to_owned();
+    if max_bytes >= ellipsis {
+        cut.push('…');
+    }
+    cut
+}
+
+/// The spawn's permission mode and the hook's report, when they differ.
+///
+/// Only a Claude spawn that passed `--permission-mode` states an expected
+/// mode: a spawn with no flag, or one running with
+/// `--dangerously-skip-permissions`, has nothing to compare against. The
+/// CLI's `"auto"` is a mode the daemon never passes, so it never mismatches.
+#[must_use]
+pub fn permission_mismatch(
+    spawn: &SpawnConfig,
+    reported: Option<&str>,
+) -> Option<(String, String)> {
+    if spawn.dangerously_skip_permissions {
+        return None;
+    }
+    let AgentOptions::Claude {
+        permission_mode: Some(mode),
+        ..
+    } = &spawn.agent_options
+    else {
+        return None;
+    };
+    let reported = reported?;
+    if reported == "auto" || reported == mode.as_cli_arg() {
+        return None;
+    }
+    Some((mode.as_cli_arg().to_owned(), reported.to_owned()))
+}
 
 /// What one hook event says about its session.
 #[derive(Debug, Clone, PartialEq)]
@@ -95,8 +187,21 @@ fn signal(status: Option<SessionStatus>, pending: PendingUpdate) -> HookSignal {
 /// terminal status written by the exit path from being revived. `status_since`
 /// and the sidecar still come from the registry update; the `Attention` on
 /// entry to `AwaitingInput` is sent once the update has returned.
-pub fn apply_signal(hub: &Hub, session_id: &str, event_time: Option<u128>, signal: &HookSignal) {
+///
+/// `details` carries the payload fields the signal itself does not: the
+/// conversation id a `SessionStart` reports, a `Stop`'s last message, a
+/// `StopFailure`'s reason and a `UserPromptSubmit`'s permission mode. They
+/// are written under the same update as the signal, after the ordering check
+/// and the terminal guard.
+pub fn apply_signal(
+    hub: &Hub,
+    session_id: &str,
+    event_time: Option<u128>,
+    signal: &HookSignal,
+    details: &HookDetails,
+) {
     let mut entered_awaiting = false;
+    let mut mismatch = None;
     hub.sessions.update(session_id, |record| {
         let Some(event_time) = event_time else {
             return;
@@ -121,10 +226,92 @@ pub fn apply_signal(hub: &Hub, session_id: &str, event_time: Option<u128>, signa
                 }
             }
         }
+        mismatch = apply_details(record, details);
     });
+    if let Some((expected, reported)) = mismatch {
+        warn!(
+            session_id,
+            expected, reported, "hook permission mode differs from the spawn's"
+        );
+    }
     if entered_awaiting {
         crate::pty_state::announce_awaiting_input(session_id, &hub.attention_tx);
     }
+}
+
+/// Apply the payload fields the event's signal does not carry, answering the
+/// permission mismatch a prompt reported.
+pub(crate) fn apply_details(
+    record: &mut SessionRecord,
+    details: &HookDetails,
+) -> Option<(String, String)> {
+    match details.event.as_str() {
+        "SessionStart" => {
+            update_conversation_id(record, details);
+            None
+        }
+        "Stop" => {
+            store_last_message(record, details);
+            None
+        }
+        "StopFailure" => {
+            record_stop_failure(record, details);
+            None
+        }
+        "UserPromptSubmit" => permission_warning(record, details),
+        _ => None,
+    }
+}
+
+/// The expected and reported modes a prompt's warning names, when they
+/// differ. The injector's own intent is not stored, so this compares against
+/// the CLI flag the daemon actually sent.
+pub(crate) fn permission_warning(
+    record: &SessionRecord,
+    details: &HookDetails,
+) -> Option<(String, String)> {
+    let spawn = record.spawn_config.as_ref()?;
+    permission_mismatch(spawn, details.permission_mode.as_deref())
+}
+
+/// A `SessionStart` on a new conversation moves the record to its id. A
+/// resumed one reports the id it already had, so the write is a no-op; a
+/// value that is not a plain id is refused, since it later becomes
+/// `claude --resume <id>` and a transcript path.
+fn update_conversation_id(record: &mut SessionRecord, details: &HookDetails) {
+    let Some(id) = details.session_id.as_deref() else {
+        return;
+    };
+    if crate::transcripts::is_plain_id(id) && record.claude_session_id.as_deref() != Some(id) {
+        record.claude_session_id = Some(id.to_owned());
+    }
+}
+
+/// A `Stop` keeps the message the turn ended with. A `Stop` with no message
+/// keeps the previous one; a message is capped so it cannot grow the record
+/// without bound.
+fn store_last_message(record: &mut SessionRecord, details: &HookDetails) {
+    let Some(message) = details.last_assistant_message.as_deref() else {
+        return;
+    };
+    let message = message.trim();
+    if !message.is_empty() {
+        record.last_assistant_message = Some(truncate_bytes(message, LAST_MESSAGE_MAX_BYTES));
+    }
+}
+
+/// A `StopFailure` leaves one recent-actions line, naming the payload's
+/// reason when it carries one.
+fn record_stop_failure(record: &mut SessionRecord, details: &HookDetails) {
+    let line = match details
+        .failure_detail
+        .as_deref()
+        .filter(|detail| !detail.is_empty())
+    {
+        Some(detail) => format!("stop failed: {}", truncate(detail, DETAIL_MAX_CHARS)),
+        None => "stop failed".to_owned(),
+    };
+    push_recent_action(record, line);
 }
 
 /// `SessionStart` says nothing about the status unless the session starts
@@ -308,6 +495,7 @@ fn truncate(text: &str, max: usize) -> String {
 )]
 mod tests {
     use super::*;
+    use protocol::{PermissionMode, SessionMode, SpawnTarget};
     use serde_json::json;
 
     /// The signal `body` maps to.
@@ -639,6 +827,167 @@ mod tests {
                 message: "An MCP server asks for input".to_owned(),
             })
         );
+    }
+
+    #[test]
+    fn details_reads_each_field() {
+        let body = json!({
+            "hook_event_name": "StopFailure",
+            "session_id": "0b6f4c7e-1111-4222-8333-944455556666",
+            "last_assistant_message": "Done.",
+            "permission_mode": "plan",
+            "reason": "overloaded",
+            "message": "ignored",
+        });
+        assert_eq!(
+            details(&body),
+            HookDetails {
+                event: "StopFailure".to_owned(),
+                session_id: Some("0b6f4c7e-1111-4222-8333-944455556666".to_owned()),
+                last_assistant_message: Some("Done.".to_owned()),
+                permission_mode: Some("plan".to_owned()),
+                failure_detail: Some("overloaded".to_owned()),
+            }
+        );
+    }
+
+    #[test]
+    fn details_tolerates_missing_fields() {
+        let missing = json!({"hook_event_name": "Stop"});
+        assert_eq!(
+            details(&missing),
+            HookDetails {
+                event: "Stop".to_owned(),
+                session_id: None,
+                last_assistant_message: None,
+                permission_mode: None,
+                failure_detail: None,
+            }
+        );
+        // A wrong-typed field reads as absent, and `message` stands in for a
+        // missing or non-string `reason`.
+        let typed = json!({"session_id": 7, "reason": 3, "message": "boom"});
+        let read = details(&typed);
+        assert_eq!(read.event, "");
+        assert_eq!(read.session_id, None);
+        assert_eq!(read.failure_detail.as_deref(), Some("boom"));
+    }
+
+    #[test]
+    fn truncate_bytes_cuts_on_a_char_boundary() {
+        // 10 bytes, with the two-byte `é` straddling bytes 5 and 6, so the
+        // cap's first landing point is inside a character.
+        let text = "aaaaaéZZZ";
+        let cut = truncate_bytes(text, 9);
+        assert_eq!(cut, "aaaaa…");
+        assert!(cut.len() <= 9, "{cut:?} is {} bytes", cut.len());
+        // The `…` counts inside the cap, like `truncate`.
+        assert_eq!(truncate_bytes(text, 8), "aaaaa…");
+    }
+
+    #[test]
+    fn truncate_bytes_keeps_short_text() {
+        assert_eq!(truncate_bytes("hello", LAST_MESSAGE_MAX_BYTES), "hello");
+        assert_eq!(truncate_bytes("", 0), "");
+        let at_cap = "b".repeat(LAST_MESSAGE_MAX_BYTES);
+        assert_eq!(truncate_bytes(&at_cap, LAST_MESSAGE_MAX_BYTES), at_cap);
+    }
+
+    #[test]
+    fn truncate_bytes_below_the_ellipsis_keeps_the_cap() {
+        assert_eq!(truncate_bytes("abcd", 0), "");
+        assert_eq!(truncate_bytes("abcd", 1), "a");
+        assert_eq!(truncate_bytes("abcd", 2), "ab");
+        // A cap this small still lands on a character boundary.
+        assert_eq!(truncate_bytes("éabcd", 1), "");
+        assert_eq!(truncate_bytes("éabcd", 2), "é");
+    }
+
+    #[test]
+    fn details_falls_back_from_an_empty_reason_to_the_message() {
+        let body = json!({
+            "hook_event_name": "StopFailure",
+            "reason": "",
+            "message": "boom",
+        });
+        assert_eq!(details(&body).failure_detail.as_deref(), Some("boom"));
+        let neither = json!({"hook_event_name": "StopFailure", "reason": ""});
+        assert_eq!(details(&neither).failure_detail, None);
+    }
+
+    /// The prompt route answers the pair `apply_signal` warns about, from the
+    /// payload and the spawn's flag.
+    #[test]
+    fn user_prompt_submit_answers_the_permission_mismatch() {
+        let mut rec = crate::history::test_support::record("s1", SessionMode::Interactive);
+        rec.spawn_config = Some(spawn_with(Some(PermissionMode::Plan), false));
+        let differing = json!({
+            "hook_event_name": "UserPromptSubmit",
+            "permission_mode": "default",
+        });
+        assert_eq!(
+            apply_details(&mut rec, &details(&differing)),
+            Some(("plan".to_owned(), "default".to_owned()))
+        );
+        let matching = json!({
+            "hook_event_name": "UserPromptSubmit",
+            "permission_mode": "plan",
+        });
+        assert_eq!(apply_details(&mut rec, &details(&matching)), None);
+    }
+
+    /// A spawn that passed `mode` as `--permission-mode`, or none.
+    fn spawn_with(mode: Option<PermissionMode>, yolo: bool) -> SpawnConfig {
+        SpawnConfig {
+            target: SpawnTarget::Standalone {
+                cwd: None,
+                add_dirs: Vec::new(),
+            },
+            mode: SessionMode::Interactive,
+            dangerously_skip_permissions: yolo,
+            agent_options: AgentOptions::claude(mode),
+            model: None,
+            extra_env: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn permission_mismatch_reports_a_different_mode() {
+        let spawn = spawn_with(Some(PermissionMode::Plan), false);
+        assert_eq!(
+            permission_mismatch(&spawn, Some("default")),
+            Some(("plan".to_owned(), "default".to_owned()))
+        );
+        assert_eq!(permission_mismatch(&spawn, Some("plan")), None);
+    }
+
+    #[test]
+    fn permission_mismatch_ignores_auto_and_missing_reports() {
+        let spawn = spawn_with(Some(PermissionMode::Plan), false);
+        assert_eq!(permission_mismatch(&spawn, Some("auto")), None);
+        assert_eq!(permission_mismatch(&spawn, None), None);
+    }
+
+    #[test]
+    fn permission_mismatch_needs_a_flagged_spawn() {
+        assert_eq!(
+            permission_mismatch(&spawn_with(None, false), Some("plan")),
+            None,
+            "no --permission-mode means nothing to compare against"
+        );
+        assert_eq!(
+            permission_mismatch(
+                &spawn_with(Some(PermissionMode::Plan), true),
+                Some("default")
+            ),
+            None,
+            "yolo passes no flag either"
+        );
+        let codex = SpawnConfig {
+            agent_options: AgentOptions::Codex { sandbox: None },
+            ..spawn_with(Some(PermissionMode::Plan), false)
+        };
+        assert_eq!(permission_mismatch(&codex, Some("plan")), None);
     }
 
     #[test]

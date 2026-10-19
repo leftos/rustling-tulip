@@ -175,9 +175,11 @@ pub struct SessionRecord {
     /// so a connection that lagged past its spawn reply gets it again after
     /// the resync list.
     pub spawn_origin: Option<UpdateOrigin>,
-    /// The Claude conversation id passed as `--session-id` at spawn. `None`
-    /// for shells, headless runs, other agents, and sessions whose sidecar
-    /// predates the field.
+    /// Claude's conversation id: the one passed as `--session-id` at spawn,
+    /// moved by the agent's own `SessionStart` hook when a `/clear` or fork
+    /// starts a new conversation. `None` for shells, headless runs, other
+    /// agents, and sessions whose sidecar predates the field; a hook-reported
+    /// id can fill it in.
     pub claude_session_id: Option<String>,
     /// The conversation id the session's own agent CLI resumes with, set only
     /// for Codex and Cursor sessions once it is known. Mirrored into the
@@ -207,6 +209,13 @@ pub struct SessionRecord {
     /// (see [`Self::last_hook_time`]). Runtime-only: neither mirrored into
     /// the sidecar nor sent on the wire.
     pub hook_driven: bool,
+    /// The assistant message the last `Stop` ended its turn with, trimmed and
+    /// capped at 8 KiB, as the agent CLI's own hook reported it. `None` until
+    /// a `Stop` reports one; a `Stop` with no message keeps the previous one.
+    /// Runtime-only: neither mirrored into the sidecar nor sent on the wire.
+    /// Stored for the plans' alerts summarizer and the agent CLI's `--last`,
+    /// both still unbuilt; nothing reads it yet.
+    pub last_assistant_message: Option<String>,
 }
 
 impl SessionRecord {
@@ -503,6 +512,7 @@ impl SessionRegistry {
             label: guard.label.clone(),
             appearance: guard.appearance.clone(),
             agent_conversation_id: guard.agent_conversation_id.clone(),
+            claude_session_id: guard.claude_session_id.clone(),
             busy_excluded: guard.busy_excluded,
         }
     }
@@ -923,6 +933,7 @@ impl SessionRegistry {
             pending_input: None,
             last_hook_time: None,
             hook_driven: false,
+            last_assistant_message: None,
             busy_excluded: meta.busy_excluded,
         };
         push_recent_action(&mut record, "reattached after daemon restart".to_string());
@@ -987,6 +998,7 @@ impl SessionRegistry {
             pending_input: None,
             last_hook_time: None,
             hook_driven: false,
+            last_assistant_message: None,
             busy_excluded: meta.busy_excluded,
         };
         push_recent_action(
@@ -1036,6 +1048,7 @@ impl SessionRegistry {
             pending_input: None,
             last_hook_time: None,
             hook_driven: false,
+            last_assistant_message: None,
             busy_excluded: meta.busy_excluded,
         };
         push_recent_action(
@@ -1110,6 +1123,7 @@ mod tests {
             pending_input: None,
             last_hook_time: None,
             hook_driven: false,
+            last_assistant_message: None,
             busy_excluded: false,
         }
     }

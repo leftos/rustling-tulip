@@ -1561,6 +1561,7 @@ pub(crate) mod test_support {
             pending_input: None,
             last_hook_time: None,
             hook_driven: false,
+            last_assistant_message: None,
             busy_excluded: false,
         }
     }
@@ -1627,6 +1628,31 @@ mod tests {
             Some("019a2b3c-codex")
         );
         assert_eq!(entry.claude_session_id, None);
+    }
+
+    /// The hook path moves the record to a `/clear`'s conversation, and the
+    /// entry written at the end carries it.
+    #[test]
+    fn entry_from_record_carries_the_hook_updated_conversation_id() {
+        let mut rec = record("s1", SessionMode::Interactive);
+        rec.claude_session_id = Some("old-conv".to_owned());
+        let body = serde_json::json!({
+            "hook_event_name": "SessionStart",
+            "source": "clear",
+            "session_id": "new-conv",
+        });
+        crate::hook_status::apply_details(&mut rec, &crate::hook_status::details(&body));
+        assert_eq!(
+            rec.claude_session_id.as_deref(),
+            Some("new-conv"),
+            "the hook path moves the record"
+        );
+        let entry = entry_from_record(&rec, SessionEnd::TracerLost, Utc::now());
+        assert_eq!(
+            entry.claude_session_id.as_deref(),
+            Some("new-conv"),
+            "the ended session keeps the conversation it really was in"
+        );
     }
 
     #[test]
