@@ -4,10 +4,6 @@
 
 ## Wave 1a — Claude sessions on DeepSeek
 
-- [ ] RT-3 Run Claude sessions on DeepSeek as a per-session Claude provider
-  - [!] RT-5 DK.3b, DK.5–DK.13: provider capability, spawn environment, dialog and chip
-  - [!] RT-175 Don't seal an env row the DeepSeek provider removes from the child
-- [ ] RT-6 Merge feat/deepseek-sessions (#8)
 - [ ] RT-176 Import a DeepSeek session started with a model alias as DeepSeek
 
 ## Wave 1c — Session labels, menus and busy tracking
@@ -43,7 +39,7 @@
   - [ ] RT-84 Show a background state when a turn ends with subagents, shells or wakeups still running
   - [ ] RT-85 Flag a session hand-off ready when its orchestrator says to /clear and /nextup
   - [ ] RT-188 Keep subagent events, idle_prompt and a restart from clearing a pending hook prompt
-- [ ] RT-189 Merge feat/hook-status (#198)
+  - [ ] RT-189 Merge feat/hook-status to main (#198)
 
 ## Wave 3 — Cutover: remote mode, installer and v0.1.0-alpha
 
@@ -212,6 +208,7 @@
 ## Ideas needing a design pass
 
 - [ ] RT-52 Link a worktree to a GitHub issue or PR at spawn
+- [ ] RT-191 Plan a built-in browser that agents can navigate
 - [ ] RT-53 Agent CLI: let an agent in one session drive other sessions
 - [ ] RT-131 Design a plugin layer on the agent CLI, then move one event-driven feature onto it
 - [ ] RT-54 Agent skill pack: fan work out to worktrees, then review and merge
