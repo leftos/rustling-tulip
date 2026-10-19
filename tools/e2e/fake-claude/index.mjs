@@ -19,6 +19,12 @@
  *   - Reports one environment variable for "/env <NAME>" as
  *     "RT_ENV <NAME> unset" when unset or empty, "RT_ENV <NAME> sha256=<hex>"
  *     when NAME ends in _KEY or _TOKEN, else "RT_ENV <NAME> <value>".
+ *   - Reads the `--settings <path>` hooks document the daemon injects. On
+ *     "/rt-hook prompt" it runs the `UserPromptSubmit` hooks with a prompt
+ *     event on stdin; on "/rt-hook ask" it runs the `PreToolUse` hooks with an
+ *     `AskUserQuestion` event, prints a line the daemon reads as a prompt, then
+ *     runs the `Stop` hooks 5 s later. A missing or unreadable settings file
+ *     leaves the run hookless rather than failing it.
  *   - Exits cleanly on "/exit\n" or SIGTERM/SIGBREAK.
  *   - Acknowledges (but does not act on) the `--add-dir`, `-p`,
  *     `--model`, and `--permission-mode` flags the daemon may pass.
@@ -33,8 +39,9 @@
  *     pre-create a chat before it spawns a session.
  *   - "RT_RESUMED <id>" for argv `--resume <id>`.
  */
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -50,6 +57,9 @@ const PROMPT = `fake-${AGENT}> `;
 /// `apps/native/tests/e2e_recover.rs`; changing one means changing both.
 const CODEX_THREAD_ID = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b";
 const CURSOR_CHAT_ID = "3f1c2b9e-7a4d-4e8f-9b2a-6c5d4e3f2a1b";
+/// How long after "/rt-hook ask" the fake runs its `Stop` hooks: long enough
+/// for a spec to observe the prompt, short enough to stay inside its wait.
+const STOP_AFTER_MS = 5000;
 
 // A crash here used to be invisible: node exits 1, the PTY closes, and the
 // daemon just reports "child exited code=1" with no cause — which reads as a
@@ -80,6 +90,10 @@ process.on("unhandledRejection", (err) => {
 
 const args = process.argv.slice(2);
 const flags = parseArgs(args);
+// Every interactive Claude spawn passes `--settings`; a run whose file is
+// missing or malformed stays hookless with a line naming the path, because the
+// daemon itself spawns without hooks when it cannot write the file.
+const settingsDoc = loadSettings(flags.settings);
 
 // The daemon runs `create-chat` to pre-create a Cursor chat before it spawns
 // the session, and reads the id off the first line of stdout.
@@ -214,8 +228,116 @@ function handleLine(line) {
     emitEnv(line.slice("/env ".length).trim());
     return;
   }
+  if (line === "/rt-hook prompt") {
+    runHooks("UserPromptSubmit", {
+      hook_event_name: "UserPromptSubmit",
+      prompt: line,
+      permission_mode: "auto",
+    });
+    process.stdout.write(`${TAG} working\r\n`);
+    process.stdout.write(PROMPT);
+    return;
+  }
+  if (line === "/rt-hook ask") {
+    runHooks(
+      "PreToolUse",
+      {
+        hook_event_name: "PreToolUse",
+        tool_name: "AskUserQuestion",
+        tool_input: {
+          questions: [
+            {
+              question: "Do you prefer tea or coffee?",
+              header: "Drink",
+              options: [{ label: "Tea" }, { label: "Coffee" }],
+              multiSelect: false,
+            },
+          ],
+        },
+      },
+      "AskUserQuestion",
+    );
+    // A line the daemon's prompt matcher recognizes, so a hook-reported
+    // `AwaitingInput` survives its idle silence until the Stop hook arrives.
+    process.stdout.write("❯ 1. Tea 2. Coffee\r\n");
+    setTimeout(() => {
+      runHooks("Stop", {
+        hook_event_name: "Stop",
+        last_assistant_message: "Which do you prefer?",
+      });
+      process.stdout.write(PROMPT);
+    }, STOP_AFTER_MS);
+    return;
+  }
   process.stdout.write(`${TAG} echo: ${line}\r\n`);
   process.stdout.write(PROMPT);
+}
+
+/**
+ * Runs every hook the settings document configures for `event`, with
+ * `payload` on its stdin, before this returns. Each one is synchronous on
+ * purpose: the daemon applies the event before it answers the hook, so the
+ * cue that follows already sees the status the daemon holds, and the hooks'
+ * ordering stamps stay increasing. The document's `async` field is ignored.
+ *
+ * @param {string} event
+ * @param {object} payload
+ * @param {string} [toolName] the matcher's subject, the event's tool name
+ */
+function runHooks(event, payload, toolName) {
+  const groups = settingsDoc?.hooks?.[event];
+  if (!Array.isArray(groups)) {
+    return;
+  }
+  for (const group of groups) {
+    if (!hookGroupMatches(group, toolName)) {
+      continue;
+    }
+    const hooks = Array.isArray(group?.hooks) ? group.hooks : [];
+    for (const hook of hooks) {
+      if (hook?.type !== "command" || typeof hook.command !== "string") {
+        continue;
+      }
+      const result = spawnSync(
+        hook.command,
+        Array.isArray(hook.args) ? hook.args : [],
+        {
+          input: JSON.stringify(payload),
+          timeout: 5000,
+          windowsHide: true,
+        },
+      );
+      // A hook that cannot start would otherwise fail the spec only when its
+      // status never arrives, with nothing naming the cause.
+      if (result.error !== undefined || result.status === null) {
+        const reason = result.error?.message ?? "no exit status";
+        process.stdout.write(`${TAG} hook-error ${event}: ${reason}\r\n`);
+      }
+    }
+  }
+}
+
+/**
+ * Whether one entry of an event's hook list applies to the event. An entry
+ * with no matcher runs for every event; one with a matcher runs only when the
+ * whole tool name matches it, as the agent CLI matches matchers.
+ *
+ * @param {any} group
+ * @param {string | undefined} toolName
+ * @returns {boolean}
+ */
+function hookGroupMatches(group, toolName) {
+  if (typeof group?.matcher !== "string") {
+    return true;
+  }
+  if (typeof toolName !== "string") {
+    return false;
+  }
+  try {
+    return new RegExp(`^(?:${group.matcher})$`).test(toolName);
+  } catch {
+    return false;
+  }
 }
 
 /// Whether this run has already written its thread's rollout.
@@ -391,13 +513,14 @@ function lineBreakLength(value, index) {
  * @param {string[]} argv
  */
 function parseArgs(argv) {
-  /** @type {{addDirs: string[], prompt: string | null, model: string | null, permissionMode: string | null, skipPermissions: boolean}} */
+  /** @type {{addDirs: string[], prompt: string | null, model: string | null, permissionMode: string | null, skipPermissions: boolean, settings: string | null}} */
   const out = {
     addDirs: [],
     prompt: null,
     model: null,
     permissionMode: null,
     skipPermissions: false,
+    settings: null,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -409,9 +532,40 @@ function parseArgs(argv) {
       out.model = argv[++i];
     } else if (a === "--permission-mode" && argv[i + 1] !== undefined) {
       out.permissionMode = argv[++i];
+    } else if (a === "--settings" && argv[i + 1] !== undefined) {
+      out.settings = argv[++i];
     } else if (a === "--dangerously-skip-permissions") {
       out.skipPermissions = true;
     }
   }
   return out;
+}
+
+/**
+ * The hooks document the spawn's `--settings` path names, or null when the
+ * spawn named none or the file cannot be read or parsed. Either failure
+ * prints one line and leaves the run hookless rather than failing it: the
+ * daemon spawns without hooks when it cannot write the file, and every
+ * interactive spawn on this branch passes the flag.
+ *
+ * @param {string | null} path
+ * @returns {any | null}
+ */
+function loadSettings(path) {
+  if (path === null) {
+    return null;
+  }
+  let text;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch {
+    process.stdout.write(`${TAG} settings-missing ${path}\r\n`);
+    return null;
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    process.stdout.write(`${TAG} settings-invalid ${path}\r\n`);
+    return null;
+  }
 }

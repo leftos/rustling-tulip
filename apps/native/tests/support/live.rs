@@ -544,6 +544,27 @@ impl LiveClient {
             .find_map(pick)
     }
 
+    /// How many messages the daemon has sent this client so far.
+    pub fn message_count(&self) -> usize {
+        self.messages.lock().expect("message log lock").len()
+    }
+
+    /// The first answer `pick` gives among the messages from index `from` on,
+    /// newest first.
+    pub fn find_message_from<R>(
+        &self,
+        from: usize,
+        pick: impl FnMut(&DaemonMessage) -> Option<R>,
+    ) -> Option<R> {
+        self.messages
+            .lock()
+            .expect("message log lock")
+            .iter()
+            .skip(from)
+            .rev()
+            .find_map(pick)
+    }
+
     /// Sends `msg` to the daemon as the client would.
     pub fn send(&self, msg: ClientMessage) {
         self.tx
