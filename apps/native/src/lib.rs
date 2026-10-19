@@ -91,8 +91,12 @@ mod text_input;
 mod theme;
 mod undo;
 mod undo_view;
+mod vscode_suggestion;
+mod vscode_suggestion_view;
 mod window_state;
 mod window_title;
+mod workspace_creator;
+mod workspace_creator_view;
 mod worktrees_manager;
 mod worktrees_manager_view;
 
@@ -109,7 +113,7 @@ use gpui::{
 };
 use protocol::{
     AppearanceOverrides, ClientMessage, DaemonMessage, GridNode, RepoEntry, SessionSnapshot,
-    TabEntry,
+    TabEntry, WorkspaceEntry,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -153,7 +157,9 @@ use crate::tabs::{
 use crate::term::ShellCommand;
 use crate::term_view::ScrollbackReply;
 use crate::undo::UndoShelf;
+use crate::vscode_suggestion::VscodeSuggestions;
 use crate::window_state::{RestoreRect, WindowState};
+use crate::workspace_creator_view::WorkspaceCreatorDialog;
 
 pub use crate::assets::Assets;
 pub use crate::changes_view::{
@@ -225,6 +231,11 @@ pub type Clock = Arc<dyn Fn() -> Instant + Send + Sync>;
 pub type FolderPicker =
     Rc<dyn Fn(&mut App, Option<PathBuf>) -> LocalBoxFuture<'static, Option<PathBuf>>>;
 
+/// Asks the user for one file, opening at the given folder when there is
+/// one; resolves to `None` when they cancel or the picker fails. The
+/// workspace creator's Browse is its only caller.
+pub type FilePicker = FolderPicker;
+
 /// What the root view talks to and where it keeps its files.
 pub struct RootDeps {
     /// Commands for the network thread (or a spec's fake daemon).
@@ -250,6 +261,8 @@ pub struct RootDeps {
     /// Asks for a folder: the Shell… dialog's and the Worktrees tab's
     /// Browse, and Add repo.
     pub pick_folder: FolderPicker,
+    /// Asks for a file: the workspace creator's `.code-workspace` Browse.
+    pub pick_file: FilePicker,
 }
 
 /// Opens the client's window on a live daemon connection, focusing
@@ -491,6 +504,16 @@ pub struct RootView {
     repo_remove: RepoRemove,
     /// The Remove dialog's keyboard focus, so Esc, Enter and Tab reach it.
     repo_remove_focus: FocusHandle,
+    /// The workspace creator, while open: its mode, name, ticks, parse and
+    /// wait for the daemon, beside the name field's input entity.
+    workspace_creator: Option<WorkspaceCreatorDialog>,
+    /// The creator's keyboard focus when its name field has it not.
+    workspace_creator_focus: FocusHandle,
+    /// The VS Code workspace suggestions the daemon pushed, shown one at a
+    /// time.
+    vscode_suggestions: VscodeSuggestions,
+    /// The prompt's keyboard focus, so Esc, Enter and Tab reach it.
+    vscode_prompt_focus: FocusHandle,
     /// The toasts, the action-failed notice and the checkout prompt.
     notices: Notices,
     /// Wakes the view when the next toast's time is up.
@@ -570,6 +593,8 @@ pub struct RootView {
     last_focused_session: Option<String>,
     /// Asks for a folder.
     pick_folder: FolderPicker,
+    /// Asks for a `.code-workspace` file, for the workspace creator.
+    pick_file: FilePicker,
     /// The worktrees root and whether the user set it, as this connection
     /// last heard.
     worktrees_root: Option<(String, bool)>,
@@ -636,6 +661,7 @@ impl RootView {
                 Arc::new(SystemNotifier)
             },
             pick_folder: folder_picker::system_folder_picker(window),
+            pick_file: folder_picker::system_file_picker(window),
         };
         let root = Self::with_transport(deps, window, cx);
         // The cloaked window neither restores nor saves its place.
@@ -706,6 +732,7 @@ impl RootView {
             open,
             notify,
             pick_folder,
+            pick_file,
         } = deps;
         Self::watch_window(window, cx);
         Self::watch_close_request(window, cx);
@@ -804,6 +831,11 @@ impl RootView {
             last_active_tab: None,
             last_focused_session: None,
             pick_folder,
+            pick_file,
+            workspace_creator: None,
+            workspace_creator_focus: cx.focus_handle(),
+            vscode_suggestions: VscodeSuggestions::default(),
+            vscode_prompt_focus: cx.focus_handle(),
             worktrees_root: None,
             worktrees_tab: None,
             worktrees_manager: None,
@@ -945,6 +977,8 @@ impl RootView {
             || self.recover.is_some()
             || self.delete_dialog.is_some()
             || self.repo_remove.dialog().is_some()
+            || self.workspace_creator.is_some()
+            || self.vscode_prompt_open()
             || self.changes.discard.is_some()
             || self.changes.file_menu.is_some()
             || self.stash.drop.is_some()
@@ -1633,6 +1667,8 @@ impl RootView {
             self.close_flyout();
             self.close_spawn_dialog(window, cx);
             self.close_shell_dialog(window, cx);
+            self.close_workspace_creator(window, cx);
+            self.vscode_suggestions.clear();
             self.close_appearance_editor(window, cx);
             self.close_discard_confirm(window, cx);
             self.close_stash_drop_confirm(window, cx);
@@ -1721,6 +1757,9 @@ impl RootView {
         self.drop_stale_session_ui(window, cx);
         self.on_spawn_dialog_message(&msg, window, cx);
         self.on_dialog_message(&msg, window, cx);
+        if self.on_vscode_message(&msg, window, cx) {
+            return;
+        }
         if let DaemonMessage::Tabs { tabs } = &msg {
             self.on_tab_list(tabs, window, cx);
         }
@@ -1732,12 +1771,7 @@ impl RootView {
             DaemonMessage::Error {
                 message,
                 request_id,
-            } => {
-                // A refused removal drops the armed row; the dialog, if the
-                // refusal was its answer's, stays open.
-                self.repo_remove.disarm();
-                self.on_daemon_error(message, request_id.as_deref(), window, cx);
-            }
+            } => self.on_refusal(message, request_id.as_deref(), window, cx),
             DaemonMessage::ActionFailed {
                 title,
                 detail,
@@ -1756,10 +1790,7 @@ impl RootView {
                 branch,
                 dirty_count,
                 request_id,
-            } => {
-                let ask = notices::CheckoutAsk::new(repo_id, branch, dirty_count, request_id);
-                self.on_checkout_confirm(ask, window, cx);
-            }
+            } => self.ask_checkout(repo_id, branch, dirty_count, request_id, window, cx),
             DaemonMessage::LayoutInitRequired {
                 has_legacy,
                 active_session_count,
@@ -1805,12 +1836,59 @@ impl RootView {
                 self.prune_source_control(&repos);
                 self.on_containers_changed(cx);
             }
-            DaemonMessage::Workspaces { .. } => self.on_containers_changed(cx),
+            DaemonMessage::Workspaces { workspaces } => {
+                self.on_workspaces(&workspaces, window, cx);
+            }
             DaemonMessage::KeepAwakeStatus { enabled, active } => {
                 self.set_keep_awake(Some(settings_view::KeepAwake { enabled, active }));
             }
             _ => {}
         }
+    }
+
+    /// A daemon refusal: an unrouted one (`None`) while the workspace creator
+    /// waits fails a pending create or parse inline there, and raises no
+    /// toast. A routed refusal (`Some`) answers its own request and takes the
+    /// generic path, as every other refusal does.
+    fn on_refusal(
+        &mut self,
+        message: String,
+        request_id: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let inline = request_id.is_none() && self.on_creator_error(&message, cx);
+        self.repo_remove.disarm();
+        if !inline {
+            self.on_daemon_error(message, request_id, window, cx);
+        }
+    }
+
+    /// The registry's workspaces after a broadcast: the panels follow, and
+    /// the workspace creator closes on the name it was waiting for.
+    fn on_workspaces(
+        &mut self,
+        workspaces: &[WorkspaceEntry],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.on_containers_changed(cx);
+        self.settle_workspace_creator(workspaces, window, cx);
+    }
+
+    /// The daemon asks whether to discard uncommitted changes before a
+    /// checkout; the confirm prompt takes it from here.
+    fn ask_checkout(
+        &mut self,
+        repo_id: String,
+        branch: String,
+        dirty_count: u32,
+        request_id: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let ask = notices::CheckoutAsk::new(repo_id, branch, dirty_count, request_id);
+        self.on_checkout_confirm(ask, window, cx);
     }
 
     /// Hands the message to the cleanup-failed dialog, the worktrees
@@ -1842,6 +1920,8 @@ impl RootView {
         self.prefills.clear();
         self.close_spawn_dialog(window, cx);
         self.close_shell_dialog(window, cx);
+        self.close_workspace_creator(window, cx);
+        self.vscode_suggestions.clear();
         self.close_appearance_editor(window, cx);
         self.close_discard_confirm(window, cx);
         self.close_stash_drop_confirm(window, cx);
@@ -2004,6 +2084,12 @@ impl RootView {
             }
             return;
         }
+        if self.vscode_prompt_open() || self.workspace_creator.is_some() {
+            if self.on_creator_dialogs_key(ks, window, cx) {
+                cx.stop_propagation();
+            }
+            return;
+        }
         if self.repo_remove.dialog().is_some() {
             self.on_repo_remove_key(ks, window, cx);
             cx.stop_propagation();
@@ -2050,9 +2136,8 @@ impl RootView {
             return;
         }
         if ks.key == "escape" {
-            let tab_close = self.tabs.close_confirm.disarm();
-            let remove_armed = self.repo_remove.disarm();
-            if self.confirm.disarm() || tab_close || remove_armed {
+            let armed = self.disarm_escape_arms();
+            if armed {
                 cx.notify();
             }
         }
@@ -2060,6 +2145,14 @@ impl RootView {
             cx.stop_propagation();
             cx.notify();
         }
+    }
+
+    /// Esc's one-click arms: a header Stop, a tab close and a container
+    /// removal's armed row. Returns whether one was dropped.
+    fn disarm_escape_arms(&mut self) -> bool {
+        let tab_close = self.tabs.close_confirm.disarm();
+        let remove_armed = self.repo_remove.disarm();
+        self.confirm.disarm() || tab_close || remove_armed
     }
 
     /// The keys a focused container row takes: Up and Down move the row
@@ -2385,6 +2478,8 @@ impl Render for RootView {
             (delete_dialog, None)
         };
         let repo_remove_layer = self.repo_remove_layer(cx);
+        let workspace_creator_layer = self.workspace_creator_layer(cx);
+        let vscode_prompt_layer = self.vscode_prompt_layer(cx);
 
         div()
             .relative()
@@ -2422,6 +2517,8 @@ impl Render for RootView {
             .children(self.move_panes_layer(cx))
             .children(delete_under)
             .children(repo_remove_layer)
+            .children(workspace_creator_layer)
+            .children(vscode_prompt_layer)
             .children(self.discard_confirm_layer(cx))
             .children(self.stash_drop_layer(cx))
             .children(self.notice_layers(cx))

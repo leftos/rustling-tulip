@@ -49,5 +49,7 @@ mod ui_spawn_preview;
 mod ui_stashes;
 mod ui_tabs;
 mod ui_terminal;
+mod ui_vscode_prompt;
+mod ui_workspace_creator;
 mod ui_worktree_cleanup;
 mod ui_worktrees;

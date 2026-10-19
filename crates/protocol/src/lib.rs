@@ -375,6 +375,10 @@ pub struct WorkspaceEntry {
     /// changes. `None` for workspaces created manually.
     #[serde(default)]
     pub linked_vscode_workspace: Option<String>,
+    /// True when the linked `.code-workspace` file is watched and the members
+    /// are re-synced when it changes.
+    #[serde(default)]
+    pub watch_vscode_workspace: bool,
     /// Persistent UI preference; see [`RepoEntry::default_use_worktree`].
     #[serde(default = "default_true")]
     pub default_use_worktree: bool,
@@ -3906,6 +3910,28 @@ pub struct GitRemoteUrl {
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_workspace_entry_defaults_to_not_watching_its_file() {
+        let entry: WorkspaceEntry =
+            serde_json::from_str(r#"{"id":"w1","name":"ws","member_repo_ids":[]}"#)
+                .expect("an entry without the field decodes");
+        assert!(
+            !entry.watch_vscode_workspace,
+            "a workspace written before watching existed is not watched"
+        );
+        let json = serde_json::to_string(&entry).expect("serializes");
+        let back: WorkspaceEntry = serde_json::from_str(&json).expect("round-trips");
+        assert_eq!(back, entry);
+
+        let watched = WorkspaceEntry {
+            watch_vscode_workspace: true,
+            ..entry
+        };
+        let json = serde_json::to_string(&watched).expect("serializes");
+        let back: WorkspaceEntry = serde_json::from_str(&json).expect("round-trips");
+        assert!(back.watch_vscode_workspace, "the flag survives the wire");
+    }
 
     #[test]
     fn appearance_normalizes_colours_and_drops_blanks() {

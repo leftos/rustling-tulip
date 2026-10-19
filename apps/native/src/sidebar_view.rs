@@ -193,6 +193,13 @@ impl RootView {
 
     /// The ⋯ button, with its menu under it while open.
     fn more_button(&self, window: &Window, cx: &mut Context<Self>) -> Div {
+        // The tip names the rows the menu actually shows: Resume all is
+        // suppressed below two abandoned sessions.
+        let tip = if crate::sidebar::resume_all_label(self.sidebar.abandoned_count()).is_some() {
+            MORE_TIP
+        } else {
+            MORE_TIP_WITHOUT_RESUME
+        };
         let button = div()
             .id(MORE_BUTTON)
             .debug_selector(|| MORE_BUTTON.to_owned())
@@ -204,7 +211,7 @@ impl RootView {
             .rounded(px(6.0))
             .cursor_pointer()
             .hover(|style| style.bg(gpui::rgb(HOVER)))
-            .tooltip(tooltip(MORE_TIP))
+            .tooltip(tooltip(tip))
             .child(icon(SIDEBAR_MORE_ICON, 15.0, TEXT_2))
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                 this.open_more_menu(window, cx);
@@ -222,6 +229,32 @@ impl RootView {
                     this.add_repo(cx);
                 },
             ));
+            let add_workspace = if self.sidebar.repos().len() < 2 {
+                div()
+                    .id(MORE_ADD_WORKSPACE_ROW)
+                    .debug_selector(|| MORE_ADD_WORKSPACE_ROW.to_owned())
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .px(px(8.0))
+                    .py(px(3.0))
+                    .rounded(px(4.0))
+                    .text_color(gpui::rgb(MUTED))
+                    .child("Add workspace…")
+                    .child(
+                        div()
+                            .debug_selector(|| "sidebar-more-add-workspace-hint".to_owned())
+                            .text_size(px(11.0))
+                            .child(NEEDS_TWO_REPOS),
+                    )
+            } else {
+                menu_item(MORE_ADD_WORKSPACE_ROW, "Add workspace…", false).on_click(cx.listener(
+                    |this, _: &ClickEvent, window, cx| {
+                        this.close_more_menu(window, cx);
+                        this.open_workspace_creator(window, cx);
+                    },
+                ))
+            };
             let resume =
                 crate::sidebar::resume_all_label(self.sidebar.abandoned_count()).map(|label| {
                     menu_item(MORE_RESUME_ALL_ROW, label, false).on_click(cx.listener(
@@ -241,7 +274,8 @@ impl RootView {
                 }),
             )
             .child(shell)
-            .child(add_repo);
+            .child(add_repo)
+            .child(add_workspace);
             let frame = if let Some(row) = resume {
                 frame
                     .child(menu_separator().debug_selector(|| MORE_RESUME_ALL_SEPARATOR.to_owned()))
@@ -351,12 +385,19 @@ const MORE_BUTTON: &str = "sidebar-more";
 const MORE_SHELL_ROW: &str = "sidebar-more-shell-dialog";
 /// The ⋯ menu's row that picks a folder to register as a repo.
 const MORE_ADD_REPO_ROW: &str = "sidebar-more-add-repo";
+/// The ⋯ menu's row that opens the workspace creator.
+const MORE_ADD_WORKSPACE_ROW: &str = "sidebar-more-add-workspace";
+/// The note the workspace row carries while fewer than two repos exist.
+const NEEDS_TWO_REPOS: &str = "needs 2 repos";
 /// The ⋯ menu's row that resumes every abandoned session.
 const MORE_RESUME_ALL_ROW: &str = "more-resume-all";
 /// The line above that row.
 const MORE_RESUME_ALL_SEPARATOR: &str = "more-resume-all-separator";
-/// The ⋯ button's hover text.
-const MORE_TIP: &str = "More: Shell…, Add repo…, Resume all";
+/// The ⋯ button's hover text while Resume all is shown.
+const MORE_TIP: &str = "More: Shell…, Add repo…, Add workspace…, Resume all";
+/// The ⋯ button's hover text while fewer than two abandoned sessions leave
+/// Resume all off the menu.
+const MORE_TIP_WITHOUT_RESUME: &str = "More: Shell…, Add repo…, Add workspace…";
 /// What the sessions panel says while no repo or workspace is registered.
 const NO_REPOS_NOTE: &str = "No repos or workspaces yet.";
 

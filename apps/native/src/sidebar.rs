@@ -330,6 +330,10 @@ pub struct UiState {
     /// last added.
     #[serde(default)]
     pub last_repo_dir: Option<String>,
+    /// The folder the workspace creator's file picker opens at: the parent of
+    /// the `.code-workspace` file it last picked.
+    #[serde(default)]
+    pub last_vscode_dir: Option<String>,
     /// The font every new terminal pane starts from.
     #[serde(default)]
     pub terminal_font: FontSettings,
@@ -517,6 +521,7 @@ impl Default for UiState {
             active_tab_id: None,
             quick_shell_dir: None,
             last_repo_dir: None,
+            last_vscode_dir: None,
             terminal_font: FontSettings::default(),
             tab_font_sizes: BTreeMap::new(),
             source_control: ScUiState::default(),
@@ -1044,6 +1049,22 @@ impl SidebarModel {
             return false;
         }
         self.ui.last_repo_dir = Some(dir.to_owned());
+        true
+    }
+
+    /// The folder the workspace creator's file picker opens at, once a
+    /// `.code-workspace` file was picked.
+    pub fn last_vscode_dir(&self) -> Option<&str> {
+        self.ui.last_vscode_dir.as_deref()
+    }
+
+    /// Records the folder the workspace creator's file picker opens at next;
+    /// returns whether it changed, so the caller knows whether to save.
+    pub fn set_last_vscode_dir(&mut self, dir: &str) -> bool {
+        if self.ui.last_vscode_dir.as_deref() == Some(dir) {
+            return false;
+        }
+        self.ui.last_vscode_dir = Some(dir.to_owned());
         true
     }
 }
@@ -2741,6 +2762,7 @@ mod tests {
             active_tab_id: Some("t1".to_owned()),
             quick_shell_dir: Some("C:\\work".to_owned()),
             last_repo_dir: Some("D:\\src".to_owned()),
+            last_vscode_dir: Some("E:\\workspaces".to_owned()),
             terminal_font: FontSettings {
                 family: Some("JetBrains Mono".to_owned()),
                 size: 15.0,
@@ -3172,11 +3194,19 @@ mod tests {
         assert_eq!(model.last_repo_dir(), None);
         assert!(model.set_last_repo_dir("D:\\src"));
         assert!(!model.set_last_repo_dir("D:\\src"), "unchanged");
+        assert_eq!(model.last_vscode_dir(), None);
+        assert!(model.set_last_vscode_dir("E:\\workspaces"));
+        assert!(!model.set_last_vscode_dir("E:\\workspaces"), "unchanged");
 
         let dir = TestDir::new("last-repo-dir");
         save_ui_state(&dir.0, model.ui_state()).expect("save");
         let loaded = load_ui_state(&dir.0);
         assert_eq!(loaded.last_repo_dir.as_deref(), Some("D:\\src"));
+        assert_eq!(
+            loaded.last_vscode_dir.as_deref(),
+            Some("E:\\workspaces"),
+            "the file picker's own folder round-trips too"
+        );
         assert_eq!(&loaded, model.ui_state());
     }
 
@@ -3194,6 +3224,10 @@ mod tests {
         assert_eq!(
             loaded.last_repo_dir, None,
             "an older file has no repo folder"
+        );
+        assert_eq!(
+            loaded.last_vscode_dir, None,
+            "an older file has no VS Code folder either"
         );
     }
 

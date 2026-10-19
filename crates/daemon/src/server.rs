@@ -529,6 +529,13 @@ pub async fn run(
     // 0 — see `crates/daemon/src/git_watch.rs`.
     crate::git_watch::start(&state, &sessions, &state_events, &client_count_rx);
 
+    // One watcher per linked `.code-workspace` file a workspace asked to
+    // watch: a change re-parses the file and re-syncs the workspace's
+    // members. The supervisor owns the handles and listens on `state_events`
+    // for workspace changes, so a new link is armed and a removed or
+    // disabled one stops — see `crates/daemon/src/vscode_watch.rs`.
+    crate::vscode_watch::start(&state, &state_events);
+
     // Keep the host awake for as long as a session has a live child, so an
     // aggressive power plan can't sleep the machine out from under a running
     // task. Same liveness predicate as the idle-exit watcher below.
@@ -1528,6 +1535,7 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
                 &name,
                 member_repo_ids,
                 linked_vscode_workspace,
+                None,
             )?;
             let (workspaces, container_order) = hub
                 .state
@@ -6873,7 +6881,7 @@ fn scan_vscode_workspace_files(
 async fn accept_vscode_suggestion(
     hub: &Hub,
     suggestion: VscodeWorkspaceSuggestion,
-    _watch: bool,
+    watch: bool,
     _out_tx: &mpsc::UnboundedSender<DaemonMessage>,
 ) -> anyhow::Result<()> {
     let mut member_repo_ids = Vec::with_capacity(suggestion.folders.len());
@@ -6892,6 +6900,7 @@ async fn accept_vscode_suggestion(
         &suggestion.suggested_name,
         member_repo_ids,
         Some(suggestion.source_path.clone()),
+        Some(watch),
     )?;
     let (repos, workspaces) = hub
         .state
@@ -7273,6 +7282,7 @@ mod tests {
                     name: "w1".to_string(),
                     member_repo_ids: vec!["r1".to_string()],
                     linked_vscode_workspace: None,
+                    watch_vscode_workspace: false,
                     default_use_worktree: true,
                     appearance: AppearanceOverrides::default(),
                     last_spawn_config: None,
@@ -10948,6 +10958,7 @@ mod tests {
                 name: name.to_string(),
                 member_repo_ids: members.iter().map(|m| (*m).to_string()).collect(),
                 linked_vscode_workspace: None,
+                watch_vscode_workspace: false,
                 default_use_worktree: true,
                 appearance: AppearanceOverrides::default(),
                 last_spawn_config: None,
@@ -11216,6 +11227,58 @@ mod tests {
                 "{msg:?}"
             );
             assert!(foreign.join("keep.txt").is_file());
+        }
+
+        #[tokio::test]
+        async fn accepting_a_vscode_suggestion_stores_whether_it_watches() {
+            let (hub, _scratch) = test_hub("vscode-watch-flag");
+            hub.state
+                .mutate(|s| s.repos.push(repo_entry("r1", "r1", Path::new("C:/r1"))))
+                .expect("register the repo");
+            let suggestion = |name: &str| protocol::VscodeWorkspaceSuggestion {
+                source_path: format!("C:/work/{name}.code-workspace"),
+                suggested_name: name.to_string(),
+                folders: vec![protocol::VscodeWorkspaceFolder {
+                    path: "C:/r1".to_string(),
+                    name: None,
+                    matched_repo_id: Some("r1".to_string()),
+                }],
+            };
+
+            assert_eq!(
+                dispatch_err(
+                    &hub,
+                    ClientMessage::AcceptVscodeWorkspaceSuggestion {
+                        suggestion: suggestion("watched"),
+                        watch: true,
+                    },
+                )
+                .await,
+                None
+            );
+            assert_eq!(
+                dispatch_err(
+                    &hub,
+                    ClientMessage::AcceptVscodeWorkspaceSuggestion {
+                        suggestion: suggestion("plain"),
+                        watch: false,
+                    },
+                )
+                .await,
+                None
+            );
+
+            let (watched, plain) = hub.state.with_persisted(|s| {
+                let flag = |name: &str| {
+                    s.workspaces
+                        .iter()
+                        .find(|workspace| workspace.name == name)
+                        .map(|workspace| workspace.watch_vscode_workspace)
+                };
+                (flag("watched"), flag("plain"))
+            });
+            assert_eq!(watched, Some(true), "Create & watch records the flag");
+            assert_eq!(plain, Some(false), "Create records that it does not watch");
         }
 
         #[tokio::test]

@@ -40,7 +40,7 @@ Close behind: the paste and key quirks (native clipboard read, Shift+Enter bytes
 - [x] Activity bar (Sessions / Source control) with a change badge (caps at 99+); clicking the active item collapses the sidebar; persisted — `ActivityBar.tsx`
 - [x] Resizable, collapsible sidebar with persisted width — `ResizableSplit.tsx`
 - [x] Header: brand, Settings, Repos/Tabs view toggle (also saved as the default) — `Sidebar.tsx` (native: the toggle in P4.9; it and Settings > General > Default view are one value)
-- [ ] Toolbar: + Session (disabled with "needs repo"), + Shell, Shell…, + Repo (picker remembers the last dir), + Workspace (needs 2 repos), "Resume all (N)" — `Sidebar.tsx` (native: + Session landed in P1.7c, + Shell and Shell… in P1.7d, in a 30 px toolbar row under the header; + Repo as "Add repo…" and Resume all as "Resume all abandoned (N)" (shown at N ≥ 2, under a separator) are rows of the `⋯` menu, in P4.10a and P4.11a; + Workspace waits for P4.10c)
+- [x] Toolbar: + Session (disabled with "needs repo"), + Shell, Shell…, + Repo (picker remembers the last dir), + Workspace (needs 2 repos), "Resume all (N)" — `Sidebar.tsx` (native: + Session landed in P1.7c, + Shell and Shell… in P1.7d, in a 30 px toolbar row under the header; + Repo as "Add repo…", + Workspace as "Add workspace…" (muted with "needs 2 repos" under two repos) and Resume all as "Resume all abandoned (N)" (at N ≥ 2, under a separator) are `⋯` rows in P4.10a, P4.10c and P4.11a)
 - [x] Repos view: workspace, repo, SH and DIR containers plus a "Detached" bucket with a banner — `Sidebar.tsx` `buildContainers` (native: containers and Detached bucket done in P1.4; the Detached banner in P4.11a)
 - [x] Plain-shell sessions regroup under the container matching their live cwd — `Sidebar.tsx` `findContainerForCwd`
 - [x] Tabs view: one container per tab plus an "Unbound" bucket with a banner — `Sidebar.tsx` `buildTabContainers` (native: P4.9)
@@ -53,8 +53,8 @@ Close behind: the paste and key quirks (native clipboard read, Shift+Enter bytes
 - [x] Session leaf: status dot (pulses while working, hollow while spawning), label and tooltip, runtime tag, accent stripe, trusted marker, "!", orphan / abandoned / inactive tags, Resume/Dismiss, tab pill (`T:name`, `T:×N`, unbound button) — `Sidebar.tsx` `SessionLeaf`, `TabPill` (native: the tab pill landed in P4.9; the label tooltip, trusted marker, the three tags and their inline Resume / Dismiss in P4.12a; the pulsing and hollow dot with the sidebar in P1)
 - [x] Click a leaf to jump to its tab and pane and clear attention; double-click an unbound leaf to add it to the active tab — `Sidebar.tsx`, `App.tsx` `onSelectSession` (native: a single click places an unbound leaf in the active tab, by the user's ruling, so there is no double-click action)
 - [ ] Drag a leaf onto a pane or a tab pill — `Sidebar.tsx`
-- [ ] Workspace creator: from repos (name + ≥2 members) or from a VS Code workspace file (parse, show registered / will register) — `WorkspaceCreator.tsx`
-- [ ] Daemon-pushed "VS Code workspace detected" prompt: Not now / Create / Create & watch — `VscodeSuggestionToast.tsx`
+- [x] Workspace creator: from repos (name + ≥2 members) or from a VS Code workspace file (parse, show registered / will register) — `WorkspaceCreator.tsx` (native: P4.10c)
+- [x] Daemon-pushed "VS Code workspace detected" prompt: Not now / Create / Create & watch — `VscodeSuggestionToast.tsx` (native: P4.10c)
 - [ ] Empty states: no repos (different wording on remote); main area shows Select a tab / Spawn a session / Open shell + Add repo — `Sidebar.tsx`, `App.tsx` `EmptyState` (native: Spawn a session and Open shell landed in P1.7d, the sidebar's "No repos or workspaces yet." and the Add repo buttons in P4.10a; the remote wording waits for Phase 6)
 
 ## Sessions
@@ -203,7 +203,7 @@ The frontend has no search addon, bell handling or title parsing; `terminal_titl
 - [x] Other keys: Ctrl+Enter commits; Enter/Esc in rename fields; Esc closes menus and modals; arrows in the branch combobox — various (native: `lib.rs` (`on_key_capture`, `on_shortcut`), `changes_view.rs` (the commit box), `session_menu.rs` and `tab_bar.rs` (rename rows), `combobox.rs` (Up and Down); proved by `ui_commit.rs`, `ui_session_actions.rs`, `ui_tabs.rs`, `ui_spawn_combobox.rs` and `ui_keys.rs`)
 - [x] Default right-click menu suppressed everywhere, Monaco included — `main.tsx` (native: GPUI has no default context menu)
 - [x] Menus stay inside the viewport; modals focus the safe option and return focus on close — `utils/a11y.ts` (native: `session_menu.rs` (`menu_frame`, anchored and snapped, capped at 60% of the window with scrolling, as `combobox.rs` caps its data lists), each dialog's safe option and close fn returning focus to the pane; proved by `ui_keys.rs` and the per-dialog modules `ui_changes.rs`, `ui_links.rs`, `ui_panes.rs`, `ui_recover.rs`, `ui_shell.rs`, `ui_spawn_dialog.rs` and `ui_stashes.rs`)
-- [ ] File pickers remember the last folder per purpose — `api.ts` (native: Add repo and Shell… open at their remembered folders, the worktrees Browse at its field, through the client's own folder picker, in P4.10a; the `.code-workspace` file picker waits for P4.10c)
+- [x] File pickers remember the last folder per purpose — `api.ts` (native: Add repo and Shell… open at their remembered folders, the worktrees Browse at its field, through the client's own folder picker, in P4.10a; the workspace creator's Browse filters to `.code-workspace` on Windows and remembers its own last folder (`last_vscode_dir`), in P4.10c)
 
 ## Host capabilities to replace
 

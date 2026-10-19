@@ -636,6 +636,7 @@ impl<'a> Harness<'a> {
             open: opener.clone(),
             notify: notifier.clone(),
             pick_folder: PickRecorder::picker(&picker),
+            pick_file: PickRecorder::file_picker(&picker),
         };
         let (root, cx) =
             cx.add_window_view(move |window, cx| RootView::with_transport(deps, window, cx));

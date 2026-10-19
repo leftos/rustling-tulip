@@ -23,9 +23,9 @@ use protocol::{
     SplitDirection, TabEntry, WorkspaceEntry,
 };
 use rustling_tulip_native::{
-    Activity, Clock, Connection, ContainerKind, FolderPicker, HandshakeInfo, NetCommand, NetDeps,
-    NetEvent, Notifier, NotifyState, OpenFailure, Opener, QuitFn, RootDeps, RootView, ScPanel,
-    bind_keys, spawn_net,
+    Activity, Clock, Connection, ContainerKind, FilePicker, FolderPicker, HandshakeInfo,
+    NetCommand, NetDeps, NetEvent, Notifier, NotifyState, OpenFailure, Opener, QuitFn, RootDeps,
+    RootView, ScPanel, bind_keys, spawn_net,
 };
 use serde_json::{Value, json};
 
@@ -179,6 +179,14 @@ fn modal_part_shown(root: &RootView, selector: &str) -> Option<bool> {
         root.recover_open()
     } else if selector.starts_with("recover-") && selector != "recover-badge" {
         has(root.recover_controls())
+    } else if selector == "workspace-creator" || selector == "workspace-creator-panel" {
+        root.workspace_creator_open()
+    } else if selector.starts_with("workspace-creator-") {
+        has(root.workspace_creator_controls())
+    } else if selector == "vscode-prompt" || selector == "vscode-prompt-panel" {
+        root.vscode_prompt_open()
+    } else if selector.starts_with("vscode-prompt-") {
+        has(root.vscode_prompt_controls())
     } else if selector == "repo-remove-dialog" || selector == "repo-remove-panel" {
         root.repo_remove_open()
     } else if selector.starts_with("repo-remove-") {
@@ -676,8 +684,11 @@ pub struct Harness<'a> {
 #[derive(Default)]
 pub struct PickRecorder {
     next: std::cell::RefCell<Option<PathBuf>>,
+    next_file: std::cell::RefCell<Option<PathBuf>>,
     asks: Cell<usize>,
+    file_asks: Cell<usize>,
     starts: std::cell::RefCell<Vec<Option<PathBuf>>>,
+    file_starts: std::cell::RefCell<Vec<Option<PathBuf>>>,
 }
 
 impl PickRecorder {
@@ -687,6 +698,16 @@ impl PickRecorder {
             recorder.asks.set(recorder.asks.get() + 1);
             recorder.starts.borrow_mut().push(start);
             let picked = recorder.next.borrow().clone();
+            Box::pin(async move { picked })
+        })
+    }
+
+    fn file_picker(recorder: &Rc<Self>) -> FilePicker {
+        let recorder = Rc::clone(recorder);
+        Rc::new(move |_: &mut App, start: Option<PathBuf>| {
+            recorder.file_asks.set(recorder.file_asks.get() + 1);
+            recorder.file_starts.borrow_mut().push(start);
+            let picked = recorder.next_file.borrow().clone();
             Box::pin(async move { picked })
         })
     }
@@ -853,6 +874,7 @@ impl<'a> Harness<'a> {
             open: opener.clone(),
             notify: notifier.clone(),
             pick_folder: PickRecorder::picker(&picker),
+            pick_file: PickRecorder::file_picker(&picker),
         };
         let (root, cx) =
             cx.add_window_view(move |window, cx| RootView::with_transport(deps, window, cx));
@@ -897,6 +919,7 @@ impl<'a> Harness<'a> {
             open: opener.clone(),
             notify: notifier.clone(),
             pick_folder: PickRecorder::picker(&picker),
+            pick_file: PickRecorder::file_picker(&picker),
         };
         let (root, cx) =
             cx.add_window_view(move |window, cx| RootView::with_transport(deps, window, cx));
@@ -944,6 +967,21 @@ impl<'a> Harness<'a> {
     /// The folder each ask of the folder picker opened at, oldest first.
     pub fn folder_starts(&self) -> Vec<Option<PathBuf>> {
         self.picker.starts.borrow().clone()
+    }
+
+    /// Makes the file picker answer `file` (a cancel when `None`).
+    pub fn set_picked_file(&self, file: Option<&str>) {
+        *self.picker.next_file.borrow_mut() = file.map(PathBuf::from);
+    }
+
+    /// How many times the file picker was asked.
+    pub fn file_asks(&self) -> usize {
+        self.picker.file_asks.get()
+    }
+
+    /// The folder each ask of the file picker opened at, oldest first.
+    pub fn file_starts(&self) -> Vec<Option<PathBuf>> {
+        self.picker.file_starts.borrow().clone()
     }
 
     /// Reports `host` as behind a mapped network drive from now on.

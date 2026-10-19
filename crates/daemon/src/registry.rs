@@ -244,6 +244,7 @@ pub fn upsert_workspace(
     name: &str,
     member_repo_ids: Vec<String>,
     linked_vscode_workspace: Option<String>,
+    watch_vscode_workspace: Option<bool>,
 ) -> anyhow::Result<WorkspaceEntry> {
     // Reject empty or whitespace-only names — they render as `WS ` rows in
     // the sidebar with nothing to disambiguate from one another. Also reject
@@ -266,18 +267,19 @@ pub fn upsert_workspace(
         ));
     }
     ensure_group_slug_free(state, &trimmed_name, Some(id.as_str()))?;
-    // Preserve the existing worktree-default and the last-spawn-config when
-    // updating an existing workspace; only first-time upserts start fresh.
-    let (prior_default_use_worktree, prior_appearance, prior_last_spawn_config) = state
-        .with_persisted(|s| {
+    // Preserve the existing worktree-default, watch flag and last-spawn-config
+    // when updating an existing workspace; only first-time upserts start fresh.
+    let (prior_default_use_worktree, prior_appearance, prior_last_spawn_config, prior_watch) =
+        state.with_persisted(|s| {
             s.workspaces
                 .iter()
                 .find(|w| w.id == id)
-                .map_or((None, None, None), |w| {
+                .map_or((None, None, None, None), |w| {
                     (
                         Some(w.default_use_worktree),
                         Some(w.appearance.clone()),
                         w.last_spawn_config.clone(),
+                        Some(w.watch_vscode_workspace),
                     )
                 })
         });
@@ -286,6 +288,7 @@ pub fn upsert_workspace(
         name: trimmed_name,
         member_repo_ids,
         linked_vscode_workspace,
+        watch_vscode_workspace: watch_vscode_workspace.or(prior_watch).unwrap_or(false),
         default_use_worktree: prior_default_use_worktree.unwrap_or(true),
         appearance: prior_appearance.unwrap_or_default(),
         last_spawn_config: prior_last_spawn_config,

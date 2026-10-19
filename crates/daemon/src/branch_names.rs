@@ -442,6 +442,7 @@ mod tests {
                     name: "ws".to_string(),
                     member_repo_ids: vec!["r1".to_string(), "r2".to_string()],
                     linked_vscode_workspace: None,
+                    watch_vscode_workspace: false,
                     default_use_worktree: true,
                     appearance: AppearanceOverrides::default(),
                     last_spawn_config: None,

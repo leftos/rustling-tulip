@@ -567,6 +567,30 @@
     },
     {
       "paths": [
+        "apps/native/src/vscode_suggestion.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & test(/^vscode_suggestion::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_vscode_prompt|ui_workspace_creator)::/))"
+    },
+    {
+      "paths": [
+        "apps/native/src/vscode_suggestion_view.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native::ui) & test(/^(ui_vscode_prompt)::/))"
+    },
+    {
+      "paths": [
+        "apps/native/src/workspace_creator.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & test(/^workspace_creator::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_vscode_prompt|ui_workspace_creator)::/))"
+    },
+    {
+      "paths": [
+        "apps/native/src/workspace_creator_view.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native::ui) & test(/^(ui_workspace_creator)::/))"
+    },
+    {
+      "paths": [
         "apps/native/src/worktrees_manager.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native) & test(/^worktrees_manager::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_delete_worktree|ui_worktrees)::/))"
@@ -786,6 +810,18 @@
         "apps/native/tests/ui/ui_terminal.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native::ui) & test(/^(ui_terminal)::/))"
+    },
+    {
+      "paths": [
+        "apps/native/tests/ui/ui_vscode_prompt.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native::ui) & test(/^(ui_vscode_prompt)::/))"
+    },
+    {
+      "paths": [
+        "apps/native/tests/ui/ui_workspace_creator.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native::ui) & test(/^(ui_workspace_creator)::/))"
     },
     {
       "paths": [

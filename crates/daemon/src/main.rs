@@ -51,6 +51,7 @@ mod tracer_log;
 mod transcripts;
 mod user_env;
 mod vscode;
+mod vscode_watch;
 mod workspace;
 mod worktree_cleanup;
 mod worktrees_admin;
