@@ -13,7 +13,6 @@
 
 ## Wave 2 — Daily driver: close the port's gaps
 
-- [ ] RT-15 P4.10b: Remove a repo or workspace
 - [ ] RT-16 P4.11a: Container row keyboard fold, last-launch summary, Detached banner
 - [ ] RT-17 P4.10c: Workspace creator, + Workspace and the VS Code workspace prompt
 - [ ] RT-18 P4.10d: Add repo and Add workspace on DIR and SH containers
@@ -29,7 +28,7 @@
 - [!] RT-182 Replace the Tauri-era toasts with two notifications: Needs you and Finished
 - [ ] RT-183 Remove headless runs from the native client
 - [ ] RT-186 Resync the tab list when a connection's tab-event broadcast lags
-- [ ] RT-190 Re-pick the grid columns for a best-fit or auto pick as panes come and go
+- [ ] RT-195 Give the container menu a keyboard route
 
 ## Wave 2b — Hook status
 
@@ -166,6 +165,7 @@
 - [ ] RT-40 Add Integration Footguns and Test locations sections to architecture.md
 - [ ] RT-62 Write down the ops-tower relationship in the docs and on RT-28, RT-55 and RT-56
 - [ ] RT-63 Split markdown lines of 500+ characters
+- [ ] RT-194 Record that a removed repo's session keeps streaming in docs/ux-audit.md
 
 ## Build tooling
 
@@ -223,3 +223,7 @@
 ## Backlog
 
 - [ ] RT-59 Split the oversized daemon, protocol and native UI source files
+
+## No project
+
+- [ ] RT-196 Gate the profile's push recipe through the provenance check
