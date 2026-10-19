@@ -57,6 +57,8 @@ mod quit_view;
 mod recover;
 mod recover_view;
 mod repo_add;
+mod repo_remove;
+mod repo_remove_view;
 mod run_confirm;
 mod sc_writes;
 mod scrollback_load;
@@ -128,6 +130,7 @@ use crate::notices::Notices;
 use crate::notify::{SilentNotifier, SystemNotifier};
 use crate::open::SystemOpener;
 use crate::quit_view::{ExitView, Quitter};
+use crate::repo_remove::RepoRemove;
 use crate::run_confirm::RunConfirm;
 use crate::section::flyout_section;
 use crate::session_actions::{Duplicates, HeaderStopConfirm, Prefills, self_exited};
@@ -472,6 +475,11 @@ pub struct RootView {
     delete_dialog: Option<DeleteDialog>,
     /// The confirm's keyboard focus, so Esc, Enter and Tab reach it.
     dialog_focus: FocusHandle,
+    /// The repo/workspace Remove flow: the armed container-menu row and the
+    /// dialog that lists its live sessions.
+    repo_remove: RepoRemove,
+    /// The Remove dialog's keyboard focus, so Esc, Enter and Tab reach it.
+    repo_remove_focus: FocusHandle,
     /// The toasts, the action-failed notice and the checkout prompt.
     notices: Notices,
     /// Wakes the view when the next toast's time is up.
@@ -744,6 +752,8 @@ impl RootView {
             prefills: Prefills::default(),
             delete_dialog: None,
             dialog_focus: cx.focus_handle(),
+            repo_remove: RepoRemove::default(),
+            repo_remove_focus: cx.focus_handle(),
             notices: Notices::default(),
             toast_timer: None,
             notice_focus: cx.focus_handle(),
@@ -896,8 +906,9 @@ impl RootView {
 
     /// Whether a dialog, modal or menu is drawn over the panes and holds the
     /// keyboard: the Settings modal, the spawn, Shell…, delete-worktree,
-    /// discard, stash drop, run, recover, Manage worktrees, layout chooser,
-    /// cleanup-failed, exit and pane dialogs and menus, or a modal notice.
+    /// repo/workspace Remove, discard, stash drop, run, recover, Manage
+    /// worktrees, layout chooser, cleanup-failed, exit and pane dialogs and
+    /// menus, or a modal notice.
     fn overlay_open(&self) -> bool {
         self.spawn_dialog.is_some()
             || self.shell_dialog.is_some()
@@ -905,6 +916,7 @@ impl RootView {
             || self.worktrees_manager.is_some()
             || self.recover.is_some()
             || self.delete_dialog.is_some()
+            || self.repo_remove.dialog().is_some()
             || self.changes.discard.is_some()
             || self.changes.file_menu.is_some()
             || self.stash.drop.is_some()
@@ -1635,7 +1647,12 @@ impl RootView {
             DaemonMessage::Error {
                 message,
                 request_id,
-            } => self.on_daemon_error(message, request_id.as_deref(), window, cx),
+            } => {
+                // A refused removal drops the armed row; the dialog, if the
+                // refusal was its answer's, stays open.
+                self.repo_remove.disarm();
+                self.on_daemon_error(message, request_id.as_deref(), window, cx);
+            }
             DaemonMessage::ActionFailed {
                 title,
                 detail,
@@ -1902,6 +1919,11 @@ impl RootView {
             }
             return;
         }
+        if self.repo_remove.dialog().is_some() {
+            self.on_repo_remove_key(ks, window, cx);
+            cx.stop_propagation();
+            return;
+        }
         if self.delete_dialog.is_some() {
             self.on_delete_dialog_key(ks, window, cx);
             cx.stop_propagation();
@@ -1940,7 +1962,8 @@ impl RootView {
         }
         if ks.key == "escape" {
             let tab_close = self.tabs.close_confirm.disarm();
-            if self.confirm.disarm() || tab_close {
+            let remove_armed = self.repo_remove.disarm();
+            if self.confirm.disarm() || tab_close || remove_armed {
                 cx.notify();
             }
         }
@@ -2121,11 +2144,13 @@ impl RootView {
         mods.shift || self.outside_terminal(window, cx)
     }
 
-    /// A press anywhere that did not stop at a tab's close button or a
-    /// session action's confirm drops what they armed.
+    /// A press anywhere that did not stop at a tab's close button, a session
+    /// action's confirm or a container menu's Remove row drops what they
+    /// armed.
     fn on_any_mouse_down(&mut self, _: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         let tab_close = self.tabs.close_confirm.disarm();
-        if self.confirm.disarm() || tab_close {
+        let remove_armed = self.repo_remove.disarm();
+        if self.confirm.disarm() || tab_close || remove_armed {
             cx.notify();
         }
     }
@@ -2225,6 +2250,7 @@ impl Render for RootView {
         } else {
             (delete_dialog, None)
         };
+        let repo_remove_layer = self.repo_remove_layer(cx);
 
         div()
             .relative()
@@ -2261,6 +2287,7 @@ impl Render for RootView {
             .children(self.pane_close_layer(cx))
             .children(self.move_panes_layer(cx))
             .children(delete_under)
+            .children(repo_remove_layer)
             .children(self.discard_confirm_layer(cx))
             .children(self.stash_drop_layer(cx))
             .children(self.notice_layers(cx))

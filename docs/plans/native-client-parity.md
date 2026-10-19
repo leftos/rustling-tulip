@@ -45,7 +45,7 @@ Close behind: the paste and key quirks (native clipboard read, Shift+Enter bytes
 - [x] Plain-shell sessions regroup under the container matching their live cwd — `Sidebar.tsx` `findContainerForCwd`
 - [x] Tabs view: one container per tab plus an "Unbound" bucket with a banner — `Sidebar.tsx` `buildTabContainers` (native: P4.9)
 - [ ] Container row: collapse chip (Enter/Space), count, "!" roll-up, kind tag, last-launch summary, ▶ launch-last; double-click launches last in the current tab — `Sidebar.tsx` `ContainerNode`
-- [ ] Remove repo/workspace: inline two-click; with live sessions a dialog (Cancel / Remove anyway / Stop and remove) — `Sidebar.tsx`, `RepoRemoveDialog.tsx`
+- [x] Remove repo/workspace: inline two-click; with live sessions a dialog (Cancel / Remove anyway / Stop and remove) — `Sidebar.tsx`, `RepoRemoveDialog.tsx` (native: P4.10b)
 - [ ] Detached container "stop all" with two-click confirm — `Sidebar.tsx`
 - [ ] DIR/SH containers: "Add repo"; "Add workspace" when a `.code-workspace` is found — `Sidebar.tsx`
 - [ ] Drag-reorder containers, tab containers (shared with the TabBar) and leaves, saved on the daemon — `Sidebar.tsx`

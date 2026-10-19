@@ -184,6 +184,8 @@ const BACK_ROW: &str = "accent-back";
 const ACCENT_FAILED_TITLE: &str = "Couldn't set the accent";
 /// The container menu's one row.
 const CONTAINER_APPEARANCE_ROW: &str = "container-menu-appearance";
+/// The container menu's last row: Remove, or its armed confirm.
+const CONTAINER_REMOVE_ROW: &str = "container-menu-remove";
 
 /// The open repo or workspace context menu.
 pub(crate) struct ContainerMenu {
@@ -193,6 +195,13 @@ pub(crate) struct ContainerMenu {
     at: Point<Pixels>,
     /// The most height its frame may take, from the window it opened in.
     max_height: Pixels,
+}
+
+impl ContainerMenu {
+    /// The repo or workspace the menu acts on.
+    pub(crate) fn level(&self) -> &Level {
+        &self.level
+    }
 }
 
 fn preset_selector(name: &str) -> String {
@@ -475,6 +484,13 @@ impl RootView {
         {
             self.close_container_menu(window, cx);
         }
+        if self
+            .repo_remove
+            .dialog()
+            .is_some_and(|dialog| !self.container_listed(dialog.level()))
+        {
+            self.close_repo_remove_dialog(window, cx);
+        }
         self.drop_stale_appearance_editor(window, cx);
     }
 
@@ -521,8 +537,9 @@ impl RootView {
     }
 
     /// Closes the container menu and hands the keyboard back to the active
-    /// pane.
+    /// pane, dropping a Remove row's arm with it.
     pub(crate) fn close_container_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.repo_remove.disarm();
         if self.container_menu.take().is_some() {
             self.focus_active_pane(window, cx);
             cx.notify();
@@ -541,6 +558,24 @@ impl RootView {
                 this.open_appearance_editor(level.clone(), window, cx);
             },
         ));
+        let remove_level = menu.level.clone();
+        let remove_key = crate::repo_remove::container_key(&menu.level);
+        let remove_row = menu_item(
+            CONTAINER_REMOVE_ROW,
+            crate::repo_remove::row_label(
+                &menu.level,
+                self.repo_remove.armed() == Some(remove_key.as_str()),
+            ),
+            true,
+        )
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|_, _: &MouseDownEvent, _, cx| cx.stop_propagation()),
+        )
+        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+            this.click_remove_container(&remove_level, window, cx);
+            cx.stop_propagation();
+        }));
         let frame = menu_frame(
             "container-menu",
             &self.menu_focus,
@@ -550,7 +585,9 @@ impl RootView {
                 cx.stop_propagation();
             }),
         )
-        .child(row);
+        .child(row)
+        .child(menu_separator())
+        .child(remove_row);
         let panel = anchored().position(menu.at).snap_to_window().child(frame);
         Some([
             backdrop.into_any_element(),
@@ -884,8 +921,9 @@ impl RootView {
         }
     }
 
-    /// Closes the menus and the delete-worktree confirm and drops every
-    /// armed confirm, as when the connection goes.
+    /// Closes the menus, the delete-worktree confirm and the repo/workspace
+    /// Remove dialog, and drops every armed confirm, as when the connection
+    /// goes.
     pub(crate) fn reset_session_ui(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_session_menu(window, cx);
         self.close_container_menu(window, cx);
@@ -895,6 +933,7 @@ impl RootView {
         self.close_sc_file_menu(window, cx);
         self.close_more_menu(window, cx);
         self.close_delete_dialog(window, cx);
+        self.close_repo_remove_dialog(window, cx);
     }
 
     /// The open menu over a layer that keeps a click outside it from

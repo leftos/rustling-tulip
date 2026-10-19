@@ -179,6 +179,10 @@ fn modal_part_shown(root: &RootView, selector: &str) -> Option<bool> {
         root.recover_open()
     } else if selector.starts_with("recover-") && selector != "recover-badge" {
         has(root.recover_controls())
+    } else if selector == "repo-remove-dialog" || selector == "repo-remove-panel" {
+        root.repo_remove_open()
+    } else if selector.starts_with("repo-remove-") {
+        has(root.repo_remove_buttons())
     } else if selector == "exit-confirm-dialog" {
         root.exit_dialog_open()
     } else if selector.starts_with("exit-") {
