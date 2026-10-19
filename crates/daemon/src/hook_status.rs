@@ -7,7 +7,9 @@
 
 use crate::server::Hub;
 use crate::session::{SessionRecord, push_recent_action};
-use protocol::{AgentOptions, PendingInput, PendingQuestion, SessionStatus, SpawnConfig};
+use protocol::{
+    AgentOptions, PendingInput, PendingQuestion, SessionMode, SessionStatus, SpawnConfig,
+};
 use serde_json::Value;
 use tracing::warn;
 
@@ -213,6 +215,13 @@ pub fn apply_signal(
         record.hook_driven = true;
         if matches!(record.status, SessionStatus::Stopped | SessionStatus::Error) {
             return;
+        }
+        // A shell outlives the CLI whose hooks drive it: once that CLI ends,
+        // its hooks stop arriving and the shell classifier owns the status
+        // again. The status itself is left alone; the plain-shell silence
+        // demotion ends a stale `Working`.
+        if details.event == "SessionEnd" && record.mode == SessionMode::PlainShell {
+            record.hook_driven = false;
         }
         if let Some(status) = signal.status {
             entered_awaiting = crate::pty_state::apply_status(record, status);

@@ -207,7 +207,14 @@ pub fn watch(
                         // will reclassify with this volume in scope.
                     }
                 },
-                () = sleep_until(next_idle_check), if !idle_checked && record_status(&registry, &session_id).is_some_and(|(status, _, _)| matches!(status, SessionStatus::Working | SessionStatus::AwaitingInput)) => {
+                () = sleep_until(next_idle_check),
+                    if !idle_checked
+                        && record_status(&registry, &session_id).is_some_and(|(status, _, _)| {
+                            matches!(
+                                status,
+                                SessionStatus::Working | SessionStatus::AwaitingInput
+                            )
+                        }) => {
                     idle_checked = true;
                     on_idle(
                         &registry,
@@ -273,12 +280,21 @@ pub fn watch_plain_shell(
                         // A title change (e.g. a `cd` that repaints the cwd in
                         // the prompt) counts as activity alongside command output.
                         let title_changed = title_activity.feed(&bytes);
-                        let next = if shell_output_is_working(in_sum, out_sum) || title_changed {
-                            State::Working
+                        if let Some((status, true, _)) = record_status(&registry, &session_id) {
+                            // Hooks own the status while they are live: a
+                            // shell classifier promotion would overwrite a
+                            // hook-reported `AwaitingInput` with `Working`.
+                            // Keep the local state in step with the record so
+                            // the idle tick reads the same status.
+                            state = State::seed_plain_shell(status);
                         } else {
-                            state
-                        };
-                        on_plain_shell_transition(&registry, &session_id, &mut state, next);
+                            let next = if shell_output_is_working(in_sum, out_sum) || title_changed {
+                                State::Working
+                            } else {
+                                state
+                            };
+                            on_plain_shell_transition(&registry, &session_id, &mut state, next);
+                        }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         warn!(session_id = %session_id, lagged = n, "plain shell state lagged");
@@ -292,8 +308,34 @@ pub fn watch_plain_shell(
                         trim_window(&mut in_window, now);
                     }
                 },
-                () = sleep_until(next_idle_check), if state == State::Working => {
-                    on_plain_shell_transition(&registry, &session_id, &mut state, State::Idle);
+                () = sleep_until(next_idle_check),
+                    if plain_shell_idle_due(&registry, &session_id, state) => {
+                    if let Some((status, true, epoch)) = record_status(&registry, &session_id) {
+                        // The record's status is the truth while hooks are
+                        // live: sync the local state, then end a hook-reported
+                        // `Working` turn whose PTY has gone quiet. The demotion
+                        // re-checks the status and hook stamp under the lock,
+                        // so a promotion that landed since the read wins. A
+                        // hook-reported `AwaitingInput` is left alone.
+                        state = State::seed_plain_shell(status);
+                        if status == SessionStatus::Working {
+                            state = State::Idle;
+                            demote_after_silence(
+                                &registry,
+                                &session_id,
+                                SessionStatus::Working,
+                                epoch,
+                            );
+                        }
+                    } else {
+                        // Hooks that have ended leave the record `Working`;
+                        // adopt it so the demotion writes even when no PTY
+                        // chunk synced the local state since the hook event.
+                        if let Some((status, false, _)) = record_status(&registry, &session_id) {
+                            state = State::seed_plain_shell(status);
+                        }
+                        on_plain_shell_transition(&registry, &session_id, &mut state, State::Idle);
+                    }
                 }
             }
         }
@@ -410,6 +452,19 @@ fn record_status(
     let arc = registry.get(session_id)?;
     let guard = crate::sync::lock(&arc);
     Some((guard.status, guard.hook_driven, guard.last_hook_time))
+}
+
+/// Whether a plain shell's idle tick is due: the classifier's own `Working`,
+/// or a record still reporting `Working` when the PTY goes quiet — a
+/// hook-driven screen, or one whose hooks have since ended. A hook-reported
+/// `AwaitingInput` never ticks here; the prompt matcher that would end it
+/// belongs to the agent watcher.
+fn plain_shell_idle_due(registry: &Arc<SessionRegistry>, session_id: &str, state: State) -> bool {
+    match record_status(registry, session_id) {
+        Some((status, true, _)) => status == SessionStatus::Working,
+        Some((status, false, _)) => state == State::Working || status == SessionStatus::Working,
+        None => state == State::Working,
+    }
 }
 
 fn classify(scrollback: &[u8], current: State, active: bool) -> State {
@@ -1009,6 +1064,100 @@ mod hysteresis_tests {
             SessionStatus::Idle,
             "silence demotes hook-reported work"
         );
+    }
+
+    /// While hooks own a plain shell, output the shell classifier would read
+    /// as work must not promote a hook-reported `Idle`.
+    #[tokio::test(start_paused = true)]
+    async fn hook_plain_shell_idle_survives_working_output() {
+        let h = start("shell-hook-idle", true);
+        h.set_record(|record| record.hook_driven = true);
+        for tick in 0..3 {
+            h.heartbeat(tick);
+            settle().await;
+            assert_eq!(
+                h.status(),
+                SessionStatus::Idle,
+                "tick {tick}: shell output promoted a hook-reported idle"
+            );
+            tokio::time::sleep(HEARTBEAT / 4).await;
+        }
+    }
+
+    /// Hook-reported work in a plain shell with no further PTY output is an
+    /// interrupted turn: the silence demotion still ends it.
+    #[tokio::test(start_paused = true)]
+    async fn hook_plain_shell_working_demotes_to_idle_after_silence() {
+        let h = start("shell-hook-working", true);
+        h.set_record(|record| {
+            record.hook_driven = true;
+            record.status = SessionStatus::Working;
+        });
+        tokio::time::sleep(IDLE_AFTER + Duration::from_millis(50)).await;
+        settle().await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "silence demotes hook-reported work"
+        );
+    }
+
+    /// A hook-driven `Working` whose CLI has ended must still demote: the
+    /// clear leaves `hook_driven` false, and the local state may never have
+    /// seen the `Working` chunk.
+    #[tokio::test(start_paused = true)]
+    async fn plain_shell_demotes_a_working_record_after_its_hooks_end() {
+        let h = start("shell-hooks-ended", true);
+        h.set_record(|record| {
+            record.status = SessionStatus::Working;
+            record.hook_driven = false;
+        });
+        tokio::time::sleep(IDLE_AFTER + Duration::from_millis(50)).await;
+        settle().await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "silence demotes a Working left by ended hooks"
+        );
+    }
+
+    /// The shell classifier never overwrites a hook-reported prompt, and the
+    /// plain-shell watcher carries no prompt matcher for the silence
+    /// demotion, so it holds.
+    #[tokio::test(start_paused = true)]
+    async fn hook_plain_shell_awaiting_input_survives_output() {
+        let h = start("shell-hook-awaiting", true);
+        h.set_record(|record| {
+            record.hook_driven = true;
+            record.status = SessionStatus::AwaitingInput;
+        });
+        for tick in 0..3 {
+            h.heartbeat(tick);
+            settle().await;
+            assert_eq!(
+                h.status(),
+                SessionStatus::AwaitingInput,
+                "tick {tick}: shell output overwrote a hook-reported prompt"
+            );
+            tokio::time::sleep(HEARTBEAT / 4).await;
+        }
+        tokio::time::sleep(IDLE_AFTER + Duration::from_millis(50)).await;
+        settle().await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::AwaitingInput,
+            "the plain shell leaves a hook-reported prompt alone"
+        );
+    }
+
+    /// A plain shell without hooks still promotes on its own output.
+    #[tokio::test(start_paused = true)]
+    async fn non_hook_plain_shell_promotes_on_its_own_output() {
+        let h = start("shell-promote", true);
+        assert_eq!(h.status(), SessionStatus::Idle);
+        h.heartbeat(0);
+        settle().await;
+        assert_eq!(h.status(), SessionStatus::Working);
     }
 
     /// A hook-reported prompt whose text has left the screen is dismissed:

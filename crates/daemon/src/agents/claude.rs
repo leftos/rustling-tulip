@@ -215,8 +215,8 @@ fn extend_common(
 /// session's lifetime, and `config_dir` is the daemon's config dir, where the
 /// shim reads `daemon.json` for the current port and auth token.
 ///
-/// `pub(crate)` so a later step's shell-recovery injector can write the same
-/// file for a shell session.
+/// `pub(crate)` so the plain-shell recovery path writes the same file for a
+/// shell session.
 pub(crate) fn build_hook_settings(
     tracer_exe: &Path,
     session_id: &str,

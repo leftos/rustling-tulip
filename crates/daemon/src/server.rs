@@ -3937,8 +3937,8 @@ fn interactive_meta(
     )
 }
 
-/// The injected hook settings one interactive Claude spawn wrote, and what it
-/// made on disk.
+/// The injected hook settings one spawn wrote — an interactive Claude session
+/// or a plain-shell recovery — and what it made on disk.
 struct HookSettings {
     /// The `--settings` file's path.
     path: PathBuf,
@@ -3997,17 +3997,39 @@ fn remove_session_dir_if_empty(path: &Path, session_id: &str) {
     }
 }
 
+/// Render a recovered shell's typed command for `settings`: the settings
+/// clause names the quoted path when the spawn wrote a file, and is dropped
+/// entirely otherwise.
+///
+/// The path is always double-quoted, since the config dir can hold spaces. A
+/// path holding a double quote cannot be quoted for cmd and POSIX shells at
+/// once, so it renders the hookless form a missing file does: the shell parses
+/// the command either way.
+pub(crate) fn render_shell_resume(content: &str, settings: Option<&Path>) -> String {
+    match settings {
+        Some(path) if !path.to_string_lossy().contains('"') => content.replace(
+            history::HOOK_SETTINGS_SLOT,
+            &format!("\"{}\"", path.display()),
+        ),
+        Some(_) | None => {
+            content.replace(&format!("--settings {} ", history::HOOK_SETTINGS_SLOT), "")
+        }
+    }
+}
+
 /// Write the new session's injected hook settings file and return what to pass
 /// as `--settings`, or `None` when this spawn gets no hooks.
 ///
-/// Only an interactive Claude spawn gets hooks. A cached tracer binary that
-/// cannot be resolved, or a failed write, turns hooks off for this spawn with a
-/// `warn!` and never refuses it: a session without them falls back to the
-/// terminal heuristic. The file is written eagerly, before the argv (which
-/// names it), into the session's own `sessions/<id>/`, creating that directory
-/// before `meta.json`'s writer would. A graceful stop deletes the whole
-/// directory, and a spawn that then fails removes what this call made (see
-/// [`HookSettings::discard`]).
+/// Only an interactive Claude spawn and a plain-shell recovery (a spawn
+/// carrying a [`protocol::InjectorStartup::ShellPrompt`] injector) get hooks.
+/// A cached tracer binary that cannot be resolved, or a failed write, turns
+/// hooks off for this spawn with a `warn!` and never refuses it: a session
+/// without them falls back to the terminal heuristic. The file is written
+/// eagerly, before whatever names it (an interactive spawn's argv, a
+/// recovery's typed command), into the session's own `sessions/<id>/`,
+/// creating that directory before `meta.json`'s writer would. A graceful stop
+/// deletes the whole directory, and a spawn that then fails removes what this
+/// call made (see [`HookSettings::discard`]).
 fn write_hook_settings(hub: &Hub, session_id: &str, agent: Agent) -> Option<HookSettings> {
     if agent != Agent::Claude {
         return None;
@@ -4303,6 +4325,19 @@ async fn spawn_plain_shell_session(
     }
 
     let shell = resolve_shell_program(&hub.dirs)?;
+    // A recovered shell gets the same injected hooks an interactive Claude
+    // spawn does, so the CLI's reports drive its status. The file is written
+    // after the last fallible setup step and before the spawn, and the
+    // command the injector types names it.
+    let hook_settings = if cfg
+        .prompt_injector
+        .as_ref()
+        .is_some_and(|injector| injector.startup == protocol::InjectorStartup::ShellPrompt)
+    {
+        write_hook_settings(hub, &session_id, cfg.agent())
+    } else {
+        None
+    };
     let initial_cwd = primary_cwd.to_string_lossy().into_owned();
     let mut env = cfg.env.set.clone();
     for (k, v) in shell.extra_env {
@@ -4324,13 +4359,33 @@ async fn spawn_plain_shell_session(
     };
     #[cfg(test)]
     child_env_probe::record(&spec.env, &spec.env_remove);
-    let tracer_spawn = tracer_client::spawn(
-        &hub.dirs,
-        spec,
-        expected_output_subscribers(SessionMode::PlainShell),
-    )
-    .await
-    .context("spawning plain shell via tracer")?;
+    let expected_subscribers = expected_output_subscribers(SessionMode::PlainShell);
+    let spawn_result = match &hook_settings {
+        // The same cached copy the settings file names, so that file can only
+        // name the tracer this session really runs.
+        Some(settings) => {
+            tracer_client::spawn_with_tracer(
+                &settings.tracer_exe,
+                &hub.dirs,
+                spec,
+                expected_subscribers,
+            )
+            .await
+        }
+        None => tracer_client::spawn(&hub.dirs, spec, expected_subscribers).await,
+    };
+    let tracer_spawn = match spawn_result {
+        Ok(spawned) => spawned,
+        Err(err) => {
+            // A failed spawn must leave neither a settings file with nothing
+            // to clean it up nor a sidecar-less session dir, which the orphan
+            // scan skips forever.
+            if let Some(settings) = hook_settings {
+                settings.discard(&session_id);
+            }
+            return Err(err.context("spawning plain shell via tracer"));
+        }
+    };
     let pty = tracer_spawn.handle;
     let tracer_pid = tracer_spawn.tracer_pid;
     let tracer_pipe = tracer_spawn.pipe_name;
@@ -4447,8 +4502,16 @@ async fn spawn_plain_shell_session(
         write_meta_then_sync(hub, &meta);
     }
 
-    // A recovered shell types `claude --resume <id>` through an injector.
-    if let Some(injector) = cfg.prompt_injector.clone() {
+    // A recovered shell types its resume command through an injector, naming
+    // the hook settings file this spawn wrote, or the hookless form when it
+    // wrote none.
+    if let Some(mut injector) = cfg.prompt_injector.clone() {
+        let settings = hook_settings.as_ref().map(HookSettings::path);
+        for step in &mut injector.steps {
+            if let protocol::InjectorStep::Text { content, .. } = step {
+                *content = render_shell_resume(content, settings);
+            }
+        }
         inject::run(session_id.clone(), Arc::clone(&pty), injector);
     }
     Ok(snap)
@@ -8360,6 +8423,71 @@ mod tests {
         );
     }
 
+    /// Whether `id`'s record is driven by hook reports.
+    fn hook_driven_of(hub: &Hub, id: &str) -> bool {
+        let rec = hub.sessions.get(id).expect("session is in the registry");
+        crate::sync::lock(&rec).hook_driven
+    }
+
+    /// The pending input `id`'s record holds.
+    fn pending_input_of(hub: &Hub, id: &str) -> Option<protocol::PendingInput> {
+        let rec = hub.sessions.get(id).expect("session is in the registry");
+        crate::sync::lock(&rec).pending_input.clone()
+    }
+
+    /// A shell outlives the CLI whose hooks drive it: its `SessionEnd` hands
+    /// the status back to the shell classifier, while an interactive session
+    /// stays hook-driven.
+    #[test]
+    fn hook_status_clears_hook_driven_on_a_shell_session_end() {
+        let (hub, _scratch) = test_hub("hook-session-end");
+        let mut shell = idle_record("shell");
+        shell.mode = SessionMode::PlainShell;
+        hub.sessions.insert(shell);
+        hub.sessions.insert(idle_record("agent"));
+        let apply = |id: &str, body: &str, event_time: u128| {
+            let event: serde_json::Value = serde_json::from_str(body).expect("parse hook body");
+            let signal = crate::hook_status::map_event(&event).expect("the body maps to a signal");
+            crate::hook_status::apply_signal(
+                &hub,
+                id,
+                Some(event_time),
+                &signal,
+                &crate::hook_status::details(&event),
+            );
+        };
+
+        for id in ["shell", "agent"] {
+            apply(id, r#"{"hook_event_name":"UserPromptSubmit"}"#, 100);
+            apply(
+                id,
+                r#"{"hook_event_name":"Elicitation","mcp_server_name":"MCP","message":"pick"}"#,
+                150,
+            );
+            assert!(hook_driven_of(&hub, id), "{id} is driven by its hooks");
+            assert!(
+                pending_input_of(&hub, id).is_some(),
+                "{id} waits on its prompt"
+            );
+        }
+
+        let end = r#"{"hook_event_name":"SessionEnd","reason":"prompt_input_exit"}"#;
+        apply("shell", end, 200);
+        apply("agent", end, 200);
+        assert!(
+            !hook_driven_of(&hub, "shell"),
+            "the shell falls back to its classifier once its CLI ends"
+        );
+        assert!(
+            pending_input_of(&hub, "shell").is_none(),
+            "the end clears the shell's pending prompt"
+        );
+        assert!(
+            hook_driven_of(&hub, "agent"),
+            "the agent session stays hook-driven"
+        );
+    }
+
     /// `id`'s conversation id, read under its record lock.
     fn conversation_id_of(hub: &Hub, id: &str) -> Option<String> {
         let rec = hub.sessions.get(id).expect("session is in the registry");
@@ -9545,8 +9673,8 @@ mod tests {
         test_hub_in(scratch, Some(templates))
     }
 
-    /// A session `id`'s hook settings file, under the literal name HS.8 and
-    /// HS.9 depend on.
+    /// A session `id`'s hook settings file, under the fixed name its spawn
+    /// passes as `--settings` and the hook command reads.
     fn hook_settings_file(hub: &Hub, id: &str) -> PathBuf {
         hub.dirs.sessions_dir.join(id).join("hook-settings.json")
     }
@@ -9591,6 +9719,72 @@ mod tests {
                 None,
                 folder.to_path_buf(),
                 None,
+                &cfg,
+                stored_config,
+            )
+            .await
+            .expect_err("the stub tracer is not a runnable executable")
+        )
+    }
+
+    /// The command `history::shell_request` puts on a recovery's injector,
+    /// before the spawn renders its settings slot.
+    fn shell_resume_command(conversation: &str) -> String {
+        format!(
+            "claude --settings {} --resume {conversation}",
+            history::HOOK_SETTINGS_SLOT
+        )
+    }
+
+    /// Run a real plain-shell recovery spawn for `session_id` in `folder` on
+    /// `hub`, which gets as far as the stub tracer and fails there, and answer
+    /// the error's whole chain.
+    async fn failing_plain_shell_recovery_spawn(
+        hub: &Hub,
+        folder: &Path,
+        session_id: &str,
+    ) -> String {
+        let request = env_spawn(
+            SpawnTarget::Standalone {
+                cwd: Some(folder.to_string_lossy().into_owned()),
+                add_dirs: Vec::new(),
+            },
+            SessionMode::PlainShell,
+            Vec::new(),
+            None,
+        );
+        let stored_config = protocol::SpawnConfig::from_request(&request);
+        let cfg = SpawnArgs {
+            dangerously_skip_permissions: false,
+            agent_options: AgentOptions::claude(None),
+            model: None,
+            env: crate::agents::providers::SpawnEnv::default(),
+            prompt_injector: Some(protocol::PromptInjector {
+                steps: vec![
+                    protocol::InjectorStep::Delay { ms: 2000 },
+                    protocol::InjectorStep::Text {
+                        content: shell_resume_command("abc-123"),
+                        newline: true,
+                    },
+                ],
+                verify_mode_marker: None,
+                startup: protocol::InjectorStartup::ShellPrompt,
+            }),
+            origin: None,
+            resume_conversation: None,
+            add_dirs: Vec::new(),
+            cwd: folder.to_string_lossy().into_owned(),
+        };
+        format!(
+            "{:#}",
+            spawn_plain_shell_session(
+                hub,
+                session_id.to_owned(),
+                "cleanup".to_owned(),
+                SessionKind::Standalone,
+                Vec::new(),
+                None,
+                folder.to_path_buf(),
                 &cfg,
                 stored_config,
             )
@@ -9748,6 +9942,69 @@ mod tests {
         );
         assert!(
             hub.dirs.sessions_dir.join(session_id).exists(),
+            "a directory this spawn did not create is kept"
+        );
+    }
+
+    #[test]
+    fn render_shell_resume_quotes_a_path_with_spaces() {
+        let path = Path::new(r"C:\Users\Some Name\config\sessions\s1\hook-settings.json");
+        assert_eq!(
+            render_shell_resume(&shell_resume_command("abc-123"), Some(path)),
+            r#"claude --settings "C:\Users\Some Name\config\sessions\s1\hook-settings.json" --resume abc-123"#
+        );
+    }
+
+    #[test]
+    fn render_shell_resume_drops_the_clause_without_settings() {
+        assert_eq!(
+            render_shell_resume(&shell_resume_command("abc-123"), None),
+            "claude --resume abc-123"
+        );
+    }
+
+    #[test]
+    fn render_shell_resume_drops_the_clause_for_an_unquotable_path() {
+        let path = Path::new("C:\\odd\"name\\hook-settings.json");
+        assert_eq!(
+            render_shell_resume(&shell_resume_command("abc-123"), Some(path)),
+            "claude --resume abc-123"
+        );
+    }
+
+    #[tokio::test]
+    async fn render_shell_resume_removes_the_settings_of_a_failed_plain_shell_spawn() {
+        let (hub, scratch) = hook_test_hub("shell-hook-settings-cleanup");
+        let folder = scratch.path().join("folder");
+        std::fs::create_dir_all(&folder).expect("create folder");
+        let session_id = "cleanup-shell";
+        let file = hook_settings_file(&hub, session_id);
+
+        let error = failing_plain_shell_recovery_spawn(&hub, &folder, session_id).await;
+        assert!(error.contains("spawning plain shell via tracer"), "{error}");
+        assert!(
+            !file.exists(),
+            "the failed spawn removed the settings file it wrote"
+        );
+        assert!(
+            !hub.dirs.sessions_dir.join(session_id).exists(),
+            "and the session dir it created"
+        );
+
+        // A marker at the id is gone afterwards only if the spawn itself
+        // rewrote and then removed it — a spawn that skipped the writer would
+        // leave it behind. The dir pre-existed, so this spawn keeps it.
+        let dir = hub.dirs.sessions_dir.join(session_id);
+        std::fs::create_dir_all(&dir).expect("pre-create the session dir");
+        std::fs::write(&file, b"stale marker").expect("write the marker");
+        let error = failing_plain_shell_recovery_spawn(&hub, &folder, session_id).await;
+        assert!(error.contains("spawning plain shell via tracer"), "{error}");
+        assert!(
+            !file.exists(),
+            "the failed spawn rewrote and removed the marked file"
+        );
+        assert!(
+            dir.exists(),
             "a directory this spawn did not create is kept"
         );
     }

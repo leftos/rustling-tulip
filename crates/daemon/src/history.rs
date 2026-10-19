@@ -42,8 +42,14 @@ const CANDIDATE_GRACE: TimeDelta = TimeDelta::minutes(2);
 /// How far before its end a session with no known start is searched from.
 const UNKNOWN_START_LOOKBACK: TimeDelta = TimeDelta::days(1);
 /// The longest a recovered shell waits for its prompt before typing
-/// `claude --resume <id>`; it types sooner once the prompt has printed.
+/// `claude --settings <path> --resume <id>`; it types sooner once the prompt
+/// has printed.
 const SHELL_RESUME_DELAY_MS: u32 = 2000;
+/// The `--settings` path slot a recovered shell's typed command carries until
+/// its spawn, which mints the session id the file lives under, replaces it
+/// with the quoted path (see [`crate::server::render_shell_resume`]). Braces
+/// cannot occur in a validated conversation id.
+pub(crate) const HOOK_SETTINGS_SLOT: &str = "{rt-hook-settings}";
 /// The tracer-log importer's revision, stamped on every entry it writes. An
 /// unrecovered import from [`UPGRADABLE_IMPORT_REV`] is upgraded in place,
 /// and one from before it is read again from its log.
@@ -1395,8 +1401,10 @@ fn recovered_claude_flags(entry: &HistoryEntry) -> ClaudeFlags {
     }
 }
 
-/// A plain shell in `folder` that types `claude --resume <id>` once it is up,
-/// when a conversation was chosen, carrying the env rows `entry` recorded.
+/// A plain shell in `folder` that types `claude --settings <path> --resume
+/// <id>` once it is up, when a conversation was chosen, carrying the env rows
+/// `entry` recorded. The spawn renders [`HOOK_SETTINGS_SLOT`] with the
+/// settings file it wrote, or drops the clause when it wrote none.
 fn shell_request(entry: &HistoryEntry, folder: &str, conversation: Option<&str>) -> SpawnRequest {
     let prompt_injector = conversation.map(|id| PromptInjector {
         steps: vec![
@@ -1404,7 +1412,7 @@ fn shell_request(entry: &HistoryEntry, folder: &str, conversation: Option<&str>)
                 ms: SHELL_RESUME_DELAY_MS,
             },
             InjectorStep::Text {
-                content: format!("claude --resume {id}"),
+                content: format!("claude --settings {HOOK_SETTINGS_SLOT} --resume {id}"),
                 newline: true,
             },
         ],
@@ -3376,7 +3384,7 @@ mod recovery_tests {
             [
                 InjectorStep::Delay { ms: 2000 },
                 InjectorStep::Text {
-                    content: format!("claude --resume {CONV}"),
+                    content: format!("claude --settings {HOOK_SETTINGS_SLOT} --resume {CONV}"),
                     newline: true,
                 },
             ]

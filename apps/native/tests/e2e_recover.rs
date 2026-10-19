@@ -2,8 +2,8 @@
 //! `.tmp/native-e2e/`, its real tracers and `tools/e2e/fake-claude`. A
 //! session's tracer is killed, the daemon records the session as lost, and
 //! the history recovers it as Claude resuming its conversation and as a
-//! plain shell typing `claude --resume`, which runs the harness's `claude`
-//! stub. Ignored by default; run by `.\rt.ps1 native-e2e`.
+//! plain shell typing `claude --settings … --resume`, which runs the
+//! harness's `claude` stub. Ignored by default; run by `.\rt.ps1 native-e2e`.
 
 #![expect(
     clippy::expect_used,
@@ -37,8 +37,8 @@ const SPAWN: Duration = Duration::from_secs(30);
 const ENDED: Duration = Duration::from_secs(30);
 /// How long a reply to one request may take.
 const REPLY: Duration = Duration::from_secs(10);
-/// How long a recovered shell gets to run `claude --resume`: its injector
-/// types once the prompt has printed, well inside this.
+/// How long a recovered shell gets to run `claude --settings … --resume`: its
+/// injector types once the prompt has printed, well inside this.
 const ECHO: Duration = Duration::from_secs(10);
 /// The conversation the recovered shell resumes.
 const SHELL_CONVERSATION: &str = "abc-123";
@@ -348,6 +348,14 @@ fn scrollback(
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
+/// `text` with quotes and all whitespace removed, so a wrapped scrollback line
+/// and the shell's own quote stripping cannot fail a command comparison.
+fn squeeze(text: &str) -> String {
+    text.chars()
+        .filter(|c| *c != '"' && !c.is_whitespace())
+        .collect()
+}
+
 /// Polls the session's scrollback until it contains `want`, for [`ECHO`].
 fn wait_scrollback_contains(
     h: &mut Harness<'_>,
@@ -489,7 +497,8 @@ fn recover_claude_session(
 }
 
 /// Step 8: a plain shell loses its tracer and is recovered as a shell that
-/// types `claude --resume <conversation>`.
+/// types `claude --settings <path> --resume <conversation>`, naming the hook
+/// settings file its spawn wrote.
 fn recover_shell_session(
     h: &mut Harness<'_>,
     client: &LiveClient,
@@ -519,9 +528,38 @@ fn recover_shell_session(
         s.id == new_id && s.mode == SessionMode::PlainShell
     });
     // The stub prints its marker and arguments: the typed command ran, and
-    // ran the stub rather than the user's `claude`.
-    let ran = format!("{CLAUDE_STUB_MARKER} --resume {SHELL_CONVERSATION}");
-    wait_scrollback_contains(h, client, &new_id, &ran);
+    // ran the stub rather than the user's `claude`. The command names the
+    // recovered session's own hook settings file, so its status is
+    // hook-driven. The scrollback is the raw ConPTY stream, so the PTY's
+    // wrapping and the shell's quote stripping must not fail the comparison.
+    let settings = daemon
+        .config_dir()
+        .join("sessions")
+        .join(&new_id)
+        .join("hook-settings.json");
+    wait_scrollback_contains(h, client, &new_id, CLAUDE_STUB_MARKER);
+    let expected = squeeze(&format!(
+        "{CLAUDE_STUB_MARKER} --settings {} --resume {SHELL_CONVERSATION}",
+        settings.display()
+    ));
+    let deadline = Instant::now() + ECHO;
+    for attempt in 0.. {
+        let typed = squeeze(&scrollback(
+            h,
+            client,
+            &new_id,
+            &format!("scrollback-shell-{attempt}"),
+        ));
+        if typed.contains(&expected) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out after {ECHO:?} waiting for the recovered shell to run \
+             {expected:?}; the scrollback holds {typed:?}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 /// An interactive spawn of the agent `agent_options` selects, in place in

@@ -79,11 +79,12 @@ pub async fn spawn(
     spawn_with_tracer(&tracer, dirs, spec, expected_output_subscribers).await
 }
 
-/// [`spawn`] with the cached `rt-tracer` already resolved. An interactive
-/// Claude spawn resolves it before its argv, because the injected hook settings
-/// file names that same copy as its hook command, and hands the path here: the
-/// file the agent runs and the tracer the session runs are then one path, not
-/// two resolutions a template rebuild could pull apart.
+/// [`spawn`] with the cached `rt-tracer` already resolved. A spawn that writes
+/// an injected hook settings file — an interactive Claude spawn, whose argv
+/// names it, or a plain-shell recovery, whose typed command does — resolves it
+/// first, because that file names the same copy as its hook command, and hands
+/// the path here: the file the agent runs and the tracer the session runs are
+/// then one path, not two resolutions a template rebuild could pull apart.
 pub(crate) async fn spawn_with_tracer(
     tracer: &Path,
     dirs: &Dirs,

@@ -106,11 +106,11 @@ A new `crates/daemon/src/hook_status.rs` parses the payload tolerantly (unknown 
 
 ### Coexisting with the heuristic
 
-Each session starts heuristic-driven. The first mapped hook event that passes the ordering check makes it **hook-driven** for the rest of its life (reset only on a daemon restart, until the next event arrives); a malformed or unmapped event changes nothing. While hook-driven:
+Each session starts heuristic-driven. The first mapped hook event that passes the ordering check makes it **hook-driven**, reset only on a daemon restart until the next event arrives; a malformed or unmapped event changes nothing. A plain shell's `SessionEnd` is the one thing that clears the flag, handing its status back to the shell classifier. While hook-driven:
 
-- Hooks own every promotion into `AwaitingInput` and `Working`; the heuristic's classifier stops promoting and stops sending attention events.
-- The heuristic keeps two demotions. First, `Working` to `Idle` after `IDLE_AFTER` of PTY silence: `Stop` does not fire on a user interrupt (Esc), and Claude's TUI repaints at least once a second while it works, so silence during hook-reported `Working` means the turn was interrupted. The spike confirmed Esc mid-tool and Esc mid-text fire no closing event, so this demotion is required.
-- Second, `AwaitingInput` to `Idle` once the prompt's regex stops matching and the screen goes quiet for `IDLE_AFTER`. Rejecting a plan, denying or cancelling a permission and dismissing a question fire no hook, so a prompt dismissed from another client would otherwise leave the session `AwaitingInput` until the next prompt.
+- Hooks own every promotion into `AwaitingInput` and `Working`; the heuristic's classifier stops promoting and stops sending attention events. Both watchers honour the flag: the plain-shell watcher never lets its output classifier overwrite a hook-reported status.
+- The heuristic keeps two demotions. First, `Working` to `Idle` after `IDLE_AFTER` of PTY silence: `Stop` does not fire on a user interrupt (Esc), and Claude's TUI repaints at least once a second while it works, so silence during hook-reported `Working` means the turn was interrupted. The spike confirmed Esc mid-tool and Esc mid-text fire no closing event, so this demotion is required. The plain-shell watcher keeps this same silence demotion.
+- Second, `AwaitingInput` to `Idle` once the prompt's regex stops matching and the screen goes quiet for `IDLE_AFTER`. Rejecting a plan, denying or cancelling a permission and dismissing a question fire no hook, so a prompt dismissed from another client would otherwise leave the session `AwaitingInput` until the next prompt. A plain shell's watcher has no prompt matcher, so a hook-reported `AwaitingInput` there is never demoted this way and holds until the next hook event or the owner's key.
 - The owner's own input also leaves `AwaitingInput`: any key the owner sends to a session while it shows a pending prompt clears `AwaitingInput` at once and clears `pending_input`. A later `PreToolUse` or `PostToolUse` promotes the session again, so an answered prompt that continues the turn returns to `Working`.
 
 A session whose hooks never run (Codex, Cursor, a `disableAllHooks` or `allowManagedHooksOnly` user, an older `claude`) stays heuristic-driven with no change in behaviour. No setting is needed to turn the feature off.
@@ -126,7 +126,11 @@ Additive only; `supported` does not change.
 
 ### Resumed, duplicated and recovered sessions
 
-Every interactive Claude spawn writes its own settings file under its own rt session id, whether it starts fresh, resumes (`--resume`, which keeps the conversation id), is duplicated (`duplicate_session` builds a new spawn) or is recovered through `RecoverSessions`. The recovery path that types `claude --resume <id>` into a plain shell (`history.rs`, the shell-recovery injector) writes the settings file for the shell's session and types `claude --settings <path> --resume <id>`. A tracer-reattached session keeps its original settings; its shim finds the new daemon through `daemon.json`. Events fired while no daemon runs are lost; the session shows the heuristic's status until the next event.
+Every interactive Claude spawn writes its own settings file under its own rt session id, whether it starts fresh, resumes (`--resume`, which keeps the conversation id), is duplicated (`duplicate_session` builds a new spawn) or is recovered through `RecoverSessions`.
+
+A recovery into a plain shell builds its injector in `history.rs` with a `{rt-hook-settings}` slot; the spawn (`server.rs::spawn_plain_shell_session`) writes the shell session's settings file, since only it knows the rt session id, and its injector types `claude --settings <path> --resume <id>`, or drops the clause when it wrote no file.
+
+A tracer-reattached session keeps its original settings; its shim finds the new daemon through `daemon.json`. Events fired while no daemon runs are lost; the session shows the heuristic's status until the next event.
 
 ### Headless, Codex, Cursor
 
@@ -200,7 +204,15 @@ Answered (user): Q3 `Stop` means `Idle`, as today; `AwaitingInput` is kept for r
 - [x] **HS.7 Conversation id and last message.** `hook_status.rs` / `session.rs`: a `SessionStart` reporting a different `session_id` updates `claude_session_id` (validated by `transcripts::is_plain_id`, no source gate), and the id is mirrored into the sidecar through `orphan::RecordMirror`, so a restart keeps it;
 
   `Stop` stores `last_assistant_message` trimmed and capped at 8 KiB on the record, off the wire; `StopFailure` adds a `recent_actions` line; a `permission_mode` mismatch on `UserPromptSubmit` against the spawn's `--permission-mode` logs a `warn!`. Proof: record tests after each event, a sidecar round-trip through `SessionRegistry::update`, a `RecordMirror::matches` test on the id alone, and a `history.rs` test that an ended session's entry carries the hook-updated id — each also confirmed to fail against its deliberate mutation.
-- [ ] **HS.8 Shell recovery path.** `history.rs`: the shell-recovery injector writes the shell session's settings file and types `claude --settings <path> --resume <id>`. Proof: the existing test at the `content: format!("claude --resume …")` site updated to assert the new command.
+- [x] **HS.8 Shell recovery path.** `history.rs`'s `shell_request` carries `claude --settings {rt-hook-settings} --resume <id>` on the shell-recovery injector (`HOOK_SETTINGS_SLOT`), since the rt session id exists only once the spawn mints it.
+
+  `server.rs::spawn_plain_shell_session` writes `sessions/<id>/hook-settings.json` through `write_hook_settings`, spawns through `tracer_client::spawn_with_tracer` on the same cached tracer the file names, and renders the slot through `render_shell_resume`: the quoted path when the file was written, and the clause dropped — `claude --resume <id>` — when it was not or the path holds a double quote.
+
+  A failed spawn discards the file and the `sessions/<id>/` dir it created; a natural exit leaves the file for the graceful stop that removes the whole dir.
+
+  A recovered shell's status is hook-driven from its first mapped event: `watch_plain_shell` honours `hook_driven`, so its output classifier never overwrites a hook report; its idle tick demotes a hook-reported `Working` after `IDLE_AFTER` of silence and leaves a hook-reported `AwaitingInput` alone, since the watcher has no prompt matcher; and a `SessionEnd` clears the flag, handing the status back to the shell classifier.
+
+  Proof: the `history.rs` test asserting the slot command; `server.rs` tests for the quoted path, the dropped clause with no settings or an unquotable path, the failed spawn's cleanup and the shell-only `SessionEnd` clear; and `pty_state.rs` `hysteresis_tests` for the classifier, silence and `AwaitingInput` cases.
 - [ ] **HS.9 End to end.** `tools/e2e/fake-claude/index.mjs` reads `--settings`, and on scripted cues runs the configured hook commands with the matching JSON on stdin (`UserPromptSubmit`, `PreToolUse AskUserQuestion`, `Stop`). A new case in `apps/native/tests/e2e_live.rs` asserts the snapshot goes `Working → AwaitingInput` with the question in `pending_input`, then `Idle`. Proof: `.\rt.ps1 native-e2e` green.
 - [ ] **HS.10 Codex.** Check whether `codex -c` accepts a hooks table per invocation. If it does, `agents/codex.rs` injects the same shim for `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `Stop` with an argv test; if not, record the finding in this doc and leave Codex on the heuristic. Proof: the argv test, or the recorded finding.
 - [ ] **HS.11 Docs.** CLAUDE.md's "Status detection" invariant and the `sessions/<id>/` layout line (`hook-settings.json`); a README glossary entry for "hook shim" and "hook-driven"; delete the first item of `borrowed-ideas.md`; promote the design's lasting decisions into `docs/architecture.md` (including that a workspace session loads only `members[0]`'s repo hooks, since `--add-dir` roots load none) and delete this doc. Proof: the diff.
