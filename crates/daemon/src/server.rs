@@ -3911,8 +3911,68 @@ fn interactive_meta(
     )
 }
 
-/// Write the new session's injected hook settings file and return the path to
-/// pass as `--settings`, or `None` when this spawn gets no hooks.
+/// The injected hook settings one interactive Claude spawn wrote, and what it
+/// made on disk.
+struct HookSettings {
+    /// The `--settings` file's path.
+    path: PathBuf,
+    /// The cached `rt-tracer` the file's hook command names. This is the same
+    /// path the spawn runs its tracer from, so the file and the supervisor
+    /// cannot disagree about which copy runs the shim.
+    tracer_exe: PathBuf,
+    /// True when writing the file created `sessions/<id>/`; a spawn that then
+    /// fails removes only a directory it made.
+    created_dir: bool,
+}
+
+impl HookSettings {
+    /// The file the spawn passes as `--settings`.
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Remove what this spawn wrote after the tracer spawn that would have run
+    /// it failed: always the file, and the directory only when this spawn
+    /// created it, so no sidecar-less `sessions/<id>/` is left behind for the
+    /// orphan scan to skip forever.
+    fn discard(self, session_id: &str) {
+        match std::fs::remove_file(&self.path) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => warn!(
+                %session_id,
+                path = %self.path.display(),
+                error = %format!("{err:#}"),
+                "removing the hook settings file of a failed spawn failed"
+            ),
+        }
+        if self.created_dir {
+            remove_session_dir_if_empty(&self.path, session_id);
+        }
+    }
+}
+
+/// Remove the session directory `path` sits in, best-effort: only a directory
+/// this daemon made for the failed spawn is a candidate, and a non-empty one
+/// (another writer got there first) is left alone.
+fn remove_session_dir_if_empty(path: &Path, session_id: &str) {
+    let Some(dir) = path.parent() else {
+        return;
+    };
+    match std::fs::remove_dir(dir) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => warn!(
+            %session_id,
+            path = %dir.display(),
+            error = %format!("{err:#}"),
+            "removing the session dir of a failed spawn failed"
+        ),
+    }
+}
+
+/// Write the new session's injected hook settings file and return what to pass
+/// as `--settings`, or `None` when this spawn gets no hooks.
 ///
 /// Only an interactive Claude spawn gets hooks. A cached tracer binary that
 /// cannot be resolved, or a failed write, turns hooks off for this spawn with a
@@ -3920,8 +3980,9 @@ fn interactive_meta(
 /// terminal heuristic. The file is written eagerly, before the argv (which
 /// names it), into the session's own `sessions/<id>/`, creating that directory
 /// before `meta.json`'s writer would. A graceful stop deletes the whole
-/// directory, so the file goes with it.
-fn write_hook_settings(hub: &Hub, session_id: &str, agent: Agent) -> Option<PathBuf> {
+/// directory, and a spawn that then fails removes what this call made (see
+/// [`HookSettings::discard`]).
+fn write_hook_settings(hub: &Hub, session_id: &str, agent: Agent) -> Option<HookSettings> {
     if agent != Agent::Claude {
         return None;
     }
@@ -3938,6 +3999,7 @@ fn write_hook_settings(hub: &Hub, session_id: &str, agent: Agent) -> Option<Path
     };
     let dir = hub.dirs.sessions_dir.join(session_id);
     let path = dir.join("hook-settings.json");
+    let created_dir = !dir.exists();
     let settings = crate::agents::build_hook_settings(&tracer_exe, session_id, &hub.dirs.config);
     let written = std::fs::create_dir_all(&dir)
         .map_err(anyhow::Error::from)
@@ -3949,9 +4011,18 @@ fn write_hook_settings(hub: &Hub, session_id: &str, agent: Agent) -> Option<Path
             error = %format!("{err:#}"),
             "writing the hook settings file failed; spawning without hooks"
         );
+        // The spawn continues without hooks, so release a directory this call
+        // made; a later success on this path can create it again.
+        if created_dir {
+            remove_session_dir_if_empty(&path, session_id);
+        }
         return None;
     }
-    Some(path)
+    Some(HookSettings {
+        path,
+        tracer_exe,
+        created_dir,
+    })
 }
 
 #[expect(
@@ -4001,7 +4072,7 @@ async fn spawn_interactive_session(
     let common = CommonSpawnFields {
         claude_session_id: claude_session_id.as_deref(),
         resume_conversation: conversation.resume.as_deref(),
-        hook_settings: hook_settings.as_deref(),
+        hook_settings: hook_settings.as_ref().map(HookSettings::path),
         ..cfg.common()
     };
     let args = backend.build_interactive_args(
@@ -4035,15 +4106,30 @@ async fn spawn_interactive_session(
     };
     #[cfg(test)]
     child_env_probe::record(&spec.env, &spec.env_remove);
-    let tracer_spawn = match tracer_client::spawn(
-        &hub.dirs,
-        spec,
-        expected_output_subscribers(SessionMode::Interactive),
-    )
-    .await
-    {
+    let expected_subscribers = expected_output_subscribers(SessionMode::Interactive);
+    let spawn_result = match &hook_settings {
+        // The same cached copy the settings file names, so that file can only
+        // name the tracer this session really runs.
+        Some(settings) => {
+            tracer_client::spawn_with_tracer(
+                &settings.tracer_exe,
+                &hub.dirs,
+                spec,
+                expected_subscribers,
+            )
+            .await
+        }
+        None => tracer_client::spawn(&hub.dirs, spec, expected_subscribers).await,
+    };
+    let tracer_spawn = match spawn_result {
         Ok(spawned) => spawned,
         Err(err) => {
+            // A failed spawn must leave neither a settings file with nothing
+            // to clean it up nor a sidecar-less session dir, which the orphan
+            // scan skips forever.
+            if let Some(settings) = hook_settings {
+                settings.discard(&session_id);
+            }
             if let Some(created) = &conversation.created {
                 warn!(
                     %session_id,
@@ -8905,6 +8991,165 @@ mod tests {
         std::fs::remove_dir_all(&hub.dirs.binaries_dir).expect("remove binaries dir");
         std::fs::write(&hub.dirs.binaries_dir, b"not a directory").expect("block binaries dir");
         (hub, scratch)
+    }
+
+    /// A test hub whose cached tracer *does* resolve: its scratch dir holds a
+    /// dummy `rt-tracer` template and its binaries dir is a real directory, so
+    /// staging the template into the binary cache works. The stub is not a
+    /// runnable executable, so a spawn that gets as far as starting the tracer
+    /// still fails there — after the hook settings file was written.
+    fn hook_test_hub(tag: &str) -> (Hub, ScratchDir) {
+        let scratch = ScratchDir::new(tag);
+        let templates = scratch.path().join("templates");
+        std::fs::create_dir_all(&templates).expect("create templates dir");
+        std::fs::write(
+            templates.join(crate::tracer_client::tracer_exe_name()),
+            b"stub rt-tracer template",
+        )
+        .expect("write stub tracer template");
+        test_hub_in(scratch, Some(templates))
+    }
+
+    /// A session `id`'s hook settings file, under the literal name HS.8 and
+    /// HS.9 depend on.
+    fn hook_settings_file(hub: &Hub, id: &str) -> PathBuf {
+        hub.dirs.sessions_dir.join(id).join("hook-settings.json")
+    }
+
+    #[test]
+    fn hook_settings_are_off_without_a_cached_tracer() {
+        let (hub, _scratch) = spawnless_test_hub("hook-settings-no-tracer");
+        assert!(
+            write_hook_settings(&hub, "no-tracer", Agent::Claude).is_none(),
+            "hooks are off when the cached tracer cannot be resolved"
+        );
+        let file = hook_settings_file(&hub, "no-tracer");
+        assert_eq!(
+            file.file_name().and_then(|name| name.to_str()),
+            Some("hook-settings.json")
+        );
+        assert!(!file.exists(), "no settings file was written");
+        assert!(
+            !hub.dirs.sessions_dir.join("no-tracer").exists(),
+            "no session dir was created either"
+        );
+    }
+
+    #[test]
+    fn hook_settings_name_the_cached_tracer_for_an_interactive_claude() {
+        let (hub, _scratch) = hook_test_hub("hook-settings-claude");
+        let settings = write_hook_settings(&hub, "claude-session", Agent::Claude)
+            .expect("a cached tracer resolves");
+        assert!(settings.created_dir, "the session dir did not exist before");
+        let file = hook_settings_file(&hub, "claude-session");
+        assert_eq!(
+            settings.path(),
+            file,
+            "the spawn passes the file under its literal name"
+        );
+        let cached = crate::tracer_client::cached_tracer_exe(&hub.dirs).expect("resolves");
+        let text = std::fs::read_to_string(&file).expect("the settings file is readable");
+        let document: serde_json::Value =
+            serde_json::from_str(&text).expect("the settings file is JSON");
+        assert_eq!(
+            document
+                .as_object()
+                .expect("a JSON object")
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["hooks"],
+            "the file holds only a hooks key"
+        );
+        let hook = &document["hooks"]["SessionStart"][0]["hooks"][0];
+        assert_eq!(
+            hook["command"].as_str(),
+            cached.to_str(),
+            "the hook command names the cached tracer the spawn runs"
+        );
+        assert_eq!(hook["args"][1], "--session");
+        assert_eq!(hook["args"][2], "claude-session");
+        assert_eq!(hook["args"][3], "--config-dir");
+        assert_eq!(
+            hook["args"][4],
+            hub.dirs.config.to_string_lossy().as_ref(),
+            "the shim reads daemon.json from the daemon's config dir"
+        );
+    }
+
+    #[test]
+    fn hook_settings_are_for_claude_only() {
+        // The hub resolves a tracer, so a spawn agent other than Claude would
+        // get a file here if the writer's gate were missing.
+        let (hub, _scratch) = hook_test_hub("hook-settings-agents");
+        for (agent, id) in [
+            (Agent::Codex, "codex-session"),
+            (Agent::Cursor, "cursor-session"),
+        ] {
+            assert!(
+                write_hook_settings(&hub, id, agent).is_none(),
+                "{agent:?} spawns get no hook settings"
+            );
+            assert!(
+                !hook_settings_file(&hub, id).exists(),
+                "{agent:?} spawn wrote no file"
+            );
+            assert!(
+                !hub.dirs.sessions_dir.join(id).exists(),
+                "{agent:?} spawn created no session dir"
+            );
+        }
+    }
+
+    #[test]
+    fn discarding_hook_settings_keeps_a_session_dir_it_did_not_create() {
+        let (hub, _scratch) = hook_test_hub("hook-settings-keep-dir");
+        let dir = hub.dirs.sessions_dir.join("pre-made");
+        std::fs::create_dir_all(&dir).expect("pre-create the session dir");
+        let settings = write_hook_settings(&hub, "pre-made", Agent::Claude).expect("writes");
+        assert!(!settings.created_dir, "the dir was already there");
+        assert!(hook_settings_file(&hub, "pre-made").exists());
+        settings.discard("pre-made");
+        assert!(
+            !hook_settings_file(&hub, "pre-made").exists(),
+            "the file is removed"
+        );
+        assert!(
+            dir.exists(),
+            "a directory this spawn did not create is kept"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_tracer_spawn_removes_its_hook_settings() {
+        let (hub, scratch) = hook_test_hub("hook-settings-cleanup");
+        let folder = scratch.path().join("folder");
+        std::fs::create_dir_all(&folder).expect("create folder");
+        let mut request = env_spawn(
+            SpawnTarget::Standalone {
+                cwd: Some(folder.to_string_lossy().into_owned()),
+                add_dirs: Vec::new(),
+            },
+            SessionMode::Interactive,
+            Vec::new(),
+            None,
+        );
+        request.agent_options = AgentOptions::claude(None);
+        let error = format!(
+            "{:#}",
+            spawn_session(&hub, request, None)
+                .await
+                .expect_err("the stub tracer is not a runnable executable")
+        );
+        assert!(error.contains("spawning claude via tracer"), "{error}");
+        let leftovers: Vec<PathBuf> = std::fs::read_dir(&hub.dirs.sessions_dir)
+            .expect("read the sessions dir")
+            .map(|entry| entry.expect("a readable entry").path())
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "a failed spawn leaves neither the settings file nor the dir it made: {leftovers:?}"
+        );
     }
 
     /// Write a history entry for `id` in `mode`, recovered or not.

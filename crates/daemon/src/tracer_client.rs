@@ -75,10 +75,24 @@ pub async fn spawn(
     spec: PtySpawnSpec,
     expected_output_subscribers: usize,
 ) -> anyhow::Result<TracerSpawn> {
-    let tracer_path = cached_tracer_exe(dirs)?;
+    let tracer = cached_tracer_exe(dirs)?;
+    spawn_with_tracer(&tracer, dirs, spec, expected_output_subscribers).await
+}
+
+/// [`spawn`] with the cached `rt-tracer` already resolved. An interactive
+/// Claude spawn resolves it before its argv, because the injected hook settings
+/// file names that same copy as its hook command, and hands the path here: the
+/// file the agent runs and the tracer the session runs are then one path, not
+/// two resolutions a template rebuild could pull apart.
+pub(crate) async fn spawn_with_tracer(
+    tracer: &Path,
+    dirs: &Dirs,
+    spec: PtySpawnSpec,
+    expected_output_subscribers: usize,
+) -> anyhow::Result<TracerSpawn> {
     let pipe = tracer_socket_name(&spec.session_id);
     debug!(
-        tracer = %tracer_path.display(),
+        tracer = %tracer.display(),
         pipe = %pipe,
         program = %spec.program,
         "tracer_client: spawning tracer"
@@ -86,7 +100,7 @@ pub async fn spawn(
 
     let log_path = tracer_log_path(dirs, &spec.session_id);
     let tracer_pid = spawn_tracer_process(&TracerLaunch {
-        tracer: &tracer_path,
+        tracer,
         spec: &spec,
         pipe_name: &pipe,
         log_path: log_path.as_deref(),
@@ -107,7 +121,7 @@ pub async fn spawn(
         handle,
         tracer_pid,
         pipe_name: pipe,
-        tracer_exe_path: tracer_path,
+        tracer_exe_path: tracer.to_path_buf(),
     })
 }
 
@@ -133,12 +147,11 @@ pub async fn reattach(
 
 /// The cached `rt-tracer` path a spawn will run, resolved before [`spawn`]:
 /// an interactive Claude spawn's `--settings` file names the shim it must run
-/// as a hook, and the argv is built before the tracer exists. Idempotent and
-/// cheap on the cached-hit path, so the spawn resolving it again costs a hash
-/// of the template.
-///
-/// [`spawn`] resolves through this same function, so the file the agent gets
-/// and the tracer the session runs cannot disagree.
+/// as a hook, and the argv is built before the tracer exists. That spawn
+/// resolves the path once (through this function), writes the file from it and
+/// passes the same path to [`spawn_with_tracer`], so the hook command and the
+/// running supervisor are one copy. Every other spawn resolves through
+/// [`spawn`], which calls this for itself.
 pub(crate) fn cached_tracer_exe(dirs: &Dirs) -> anyhow::Result<PathBuf> {
     locate_tracer_exe(dirs)
 }
