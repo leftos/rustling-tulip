@@ -70,6 +70,8 @@ tokio-rustls = { version = "0.26", default-features = false, features = [
     "logging",
 ] }
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
+# Reads the tailnet certificate's notAfter for the remote-access status.
+x509-parser = "0.18.1"
 # TLS-terminating server for the LAN listener. `tls-rustls-no-provider` keeps us
 # on the `ring` provider we build the ServerConfig with (no aws-lc default).
 axum-server = { version = "0.8", default-features = false, features = [

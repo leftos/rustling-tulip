@@ -123,6 +123,13 @@ pub struct Hub {
     /// The running tailnet listener, if remote access is on and it started.
     /// Dropping it stops the listener; the daemon keeps it for its lifetime.
     pub tailnet: Arc<AsyncMutex<Option<TailnetListener>>>,
+    /// The current `RemoteStatus` snapshot and the generation of the listener
+    /// it follows. Every client gets the snapshot at connect (the
+    /// initial-state push reads it) and again on every change. Written at
+    /// startup by `start_remote_access` (through `begin_remote_generation`),
+    /// by [`ClientMessage::ConfigureRemote`] and by the listener's status
+    /// relay.
+    pub remote_status: Arc<tokio::sync::watch::Sender<RemoteSlot>>,
     /// The active short-code pairing window, if the host has one open.
     /// [`ClientMessage::StartPairing`] opens it; the `/pair` HTTP handler and
     /// [`ClientMessage::CancelPairing`] consume/clear it. `None` when no
@@ -271,6 +278,15 @@ pub enum StateEvent {
     KeepAwakeStatus {
         enabled: bool,
         active: bool,
+    },
+    /// Broadcast on every remote-access status change: a
+    /// [`ClientMessage::ConfigureRemote`] or the tailnet listener's own state
+    /// moving. Mirrors [`protocol::DaemonMessage::RemoteStatus`]; it carries
+    /// no token, so every client may see it.
+    RemoteStatus {
+        enabled: bool,
+        port: u16,
+        state: protocol::RemoteState,
     },
     /// The whole session history, broadcast after it changes.
     SessionHistory(Vec<protocol::SessionHistoryItem>),
@@ -491,6 +507,18 @@ fn start_keep_awake(
     (enabled_tx, status_rx)
 }
 
+/// Forward every attention event into the registry's session-event broadcast.
+fn spawn_attention_forwarder(
+    sessions: Arc<SessionRegistry>,
+    mut attention_rx: mpsc::UnboundedReceiver<pty_state::AttentionEvent>,
+) {
+    tokio::spawn(async move {
+        while let Some(evt) = attention_rx.recv().await {
+            sessions.fan_out_attention(evt.session_id, evt.reason);
+        }
+    });
+}
+
 pub async fn run(
     state: Arc<AppState>,
     dirs: Dirs,
@@ -508,7 +536,7 @@ pub async fn run(
         .as_ref()
         .map_or_else(lan::generate_auth_token, |c| c.auth_token.clone());
 
-    let (attention_tx, mut attention_rx) = mpsc::unbounded_channel::<pty_state::AttentionEvent>();
+    let (attention_tx, attention_rx) = mpsc::unbounded_channel::<pty_state::AttentionEvent>();
     let sessions = SessionRegistry::new(dirs.clone());
 
     // Reattach orphans BEFORE binding the WS server. Doing the reattach
@@ -525,12 +553,7 @@ pub async fn run(
     // Forward attention events through the registry's broadcast so all
     // attached clients see them via the same SessionEvent channel they
     // already subscribe to.
-    let sessions_for_attention = Arc::clone(&sessions);
-    tokio::spawn(async move {
-        while let Some(evt) = attention_rx.recv().await {
-            sessions_for_attention.fan_out_attention(evt.session_id, evt.reason);
-        }
-    });
+    spawn_attention_forwarder(Arc::clone(&sessions), attention_rx);
 
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
     let (tab_events, _) = broadcast::channel(TAB_EVENT_CAPACITY);
@@ -575,6 +598,7 @@ pub async fn run(
         advertiser: Arc::new(AsyncMutex::new(None)),
         remote_enabled: Arc::new(tokio::sync::watch::Sender::new(remote.enabled)),
         tailnet: Arc::new(AsyncMutex::new(None)),
+        remote_status: Arc::new(tokio::sync::watch::Sender::new(RemoteSlot::initial(remote))),
         pairing: Arc::new(AsyncMutex::new(None)),
         keep_awake_enabled: Arc::new(keep_awake_tx),
         keep_awake_status: keep_awake_status_rx,
@@ -794,18 +818,120 @@ fn serving_name(status: &ListenerStatus) -> Option<String> {
     }
 }
 
-/// Follow the listener's status watch into `slot` until the listener ends,
-/// then clear it.
-fn spawn_serving_name(mut status: tokio::sync::watch::Receiver<ListenerStatus>, slot: NameSlot) {
-    tokio::spawn(async move {
-        loop {
-            set_serving_name(&slot, serving_name(&status.borrow_and_update()));
-            if status.changed().await.is_err() {
-                break;
-            }
+/// The remote-access status clients are shown: the persisted switch and
+/// port, and what the listener is doing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteSnapshot {
+    pub enabled: bool,
+    pub port: u16,
+    pub state: protocol::RemoteState,
+}
+
+/// The current remote status and the generation of the listener slot it
+/// belongs to. Every start or stop of the listener begins a new generation,
+/// and a relay publishes only into its own, so a dropped listener's late
+/// status never lands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteSlot {
+    pub generation: u64,
+    pub snapshot: RemoteSnapshot,
+}
+
+impl RemoteSlot {
+    /// Generation zero: `remote`'s switch and port, no listener yet.
+    pub(crate) fn initial(remote: crate::remote_config::RemoteConfig) -> Self {
+        Self {
+            generation: 0,
+            snapshot: RemoteSnapshot {
+                enabled: remote.enabled,
+                port: remote.port,
+                state: protocol::RemoteState::Off,
+            },
         }
-        set_serving_name(&slot, None);
+    }
+}
+
+fn broadcast_remote(state_events: &broadcast::Sender<StateEvent>, snapshot: &RemoteSnapshot) {
+    let _ = state_events.send(StateEvent::RemoteStatus {
+        enabled: snapshot.enabled,
+        port: snapshot.port,
+        state: snapshot.state.clone(),
     });
+}
+
+/// Begin a new generation showing `remote`'s switch and port with `state`,
+/// broadcast it, and return it. Called with [`Hub::tailnet`] held, whenever
+/// the listener slot changes; the broadcast goes out under the watch's lock,
+/// so it is ordered with every relay's.
+fn begin_remote_generation(
+    hub: &Hub,
+    remote: crate::remote_config::RemoteConfig,
+    state: protocol::RemoteState,
+) -> u64 {
+    let mut generation = 0;
+    hub.remote_status.send_modify(|slot| {
+        slot.generation += 1;
+        generation = slot.generation;
+        slot.snapshot = RemoteSnapshot {
+            enabled: remote.enabled,
+            port: remote.port,
+            state,
+        };
+        broadcast_remote(&hub.state_events, &slot.snapshot);
+    });
+    generation
+}
+
+/// Broadcast the current remote status unchanged, so a
+/// [`ClientMessage::ConfigureRemote`] that changes nothing is still answered.
+fn rebroadcast_remote(hub: &Hub) {
+    hub.remote_status.send_if_modified(|slot| {
+        broadcast_remote(&hub.state_events, &slot.snapshot);
+        false
+    });
+}
+
+/// Follows one listener's status watch for the generation it was started
+/// in: the serving name into the router's [`NameSlot`], the mapped state
+/// into [`Hub::remote_status`] and to every client.
+struct RemoteRelay {
+    remote_status: Arc<tokio::sync::watch::Sender<RemoteSlot>>,
+    state_events: broadcast::Sender<StateEvent>,
+    generation: u64,
+    port: u16,
+}
+
+impl RemoteRelay {
+    /// Publish `state` unless a newer generation began or nothing changed.
+    fn publish(&self, state: protocol::RemoteState) {
+        self.remote_status.send_if_modified(|slot| {
+            if slot.generation != self.generation || slot.snapshot.state == state {
+                return false;
+            }
+            slot.snapshot.state = state;
+            broadcast_remote(&self.state_events, &slot.snapshot);
+            true
+        });
+    }
+
+    /// Follow `status` until the listener ends, then clear `names`.
+    fn spawn(
+        self,
+        mut status: tokio::sync::watch::Receiver<ListenerStatus>,
+        names: NameSlot,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            loop {
+                let current = status.borrow_and_update().clone();
+                set_serving_name(&names, serving_name(&current));
+                self.publish(crate::tailnet_listener::remote_state(&current, self.port));
+                if status.changed().await.is_err() {
+                    break;
+                }
+            }
+            set_serving_name(&names, None);
+        })
+    }
 }
 
 /// Split a `Host` header into its name and port, trimming a trailing dot from
@@ -938,24 +1064,52 @@ fn remote_listener_allowed(
         && !lan_config.is_some_and(|cfg| cfg.enabled && cfg.port == remote.port)
 }
 
-/// Start the tailnet listener when [`remote_listener_allowed`] says so. A
-/// missing certificate directory or any other failure is logged and leaves
-/// remote access down; it never propagates out of [`run`].
-fn start_tailnet_listener(
+/// Why the tailnet listener did not start although `lan.json` puts LAN
+/// access on its port: `PortInUse` while the LAN listener holds that port,
+/// `BindFailed` while the LAN listener is not bound yet or failed to bind.
+/// That includes daemon startup, where the LAN listener binds in a spawned
+/// task with retry and is usually not bound yet when this runs.
+async fn lan_conflict_state(hub: &Hub, port: u16) -> protocol::RemoteState {
+    if hub.lan_handle.lock().await.is_some() {
+        warn!(
+            port,
+            "remote access is on but the LAN listener holds the same port; tailnet listener not \
+             started"
+        );
+        protocol::RemoteState::PortInUse
+    } else {
+        warn!(
+            port,
+            "remote access is on but lan.json puts LAN access on the same port; tailnet listener \
+             not started"
+        );
+        protocol::RemoteState::BindFailed {
+            reason: format!(
+                "LAN access is configured on port {port} too; turn LAN access off or choose \
+                 another port"
+            ),
+        }
+    }
+}
+
+/// Start the tailnet listener when [`remote_listener_allowed`] says so, or
+/// return the state that says why it did not: [`protocol::RemoteState::Off`]
+/// while remote access is off, the LAN conflict ([`lan_conflict_state`]:
+/// `BindFailed` for a same-port `lan.json` whose LAN listener is not bound
+/// yet, startup included, or failed to bind), or the certificate dir that
+/// could not be created. Every refusal is logged; none propagates out of
+/// [`run`].
+async fn start_tailnet_listener(
     hub: &Hub,
     remote: crate::remote_config::RemoteConfig,
     lan_config: Option<&lan::LanConfig>,
     shutdown: tokio::sync::watch::Receiver<bool>,
-) -> Option<TailnetListener> {
+) -> Result<TailnetListener, protocol::RemoteState> {
     if !remote_listener_allowed(remote, lan_config) {
-        if remote.enabled {
-            warn!(
-                port = remote.port,
-                "remote access is on but the LAN listener holds the same port; tailnet listener \
-                 not started"
-            );
+        if !remote.enabled || remote.port == 0 {
+            return Err(protocol::RemoteState::Off);
         }
-        return None;
+        return Err(lan_conflict_state(hub, remote.port).await);
     }
     let tailnet_dir = match Dirs::ensure_tailnet_dir() {
         Ok(dir) => dir,
@@ -964,31 +1118,115 @@ fn start_tailnet_listener(
                 ?err,
                 "remote access enabled but the tailnet certificate dir could not be created"
             );
-            return None;
+            return Err(protocol::RemoteState::CertFailed {
+                // Fixed text: the error names a host path, which stays in
+                // the log line above and never goes on the wire.
+                reason: "the tailnet certificate dir could not be created; see daemon.log"
+                    .to_owned(),
+            });
         }
     };
     let names = name_slot();
     let router = build_tailnet_router(hub.clone(), Arc::clone(&names), remote.port);
     let listener = TailnetListener::start(router, tailnet_dir, remote.port, shutdown);
-    spawn_serving_name(listener.status(), names);
-    Some(listener)
+    let relay = RemoteRelay {
+        remote_status: Arc::clone(&hub.remote_status),
+        state_events: hub.state_events.clone(),
+        generation: begin_remote_generation(hub, remote, protocol::RemoteState::Starting),
+        port: remote.port,
+    };
+    relay.spawn(listener.status(), names);
+    Ok(listener)
 }
 
-/// Store the started tailnet listener in the hub, or leave remote access down
-/// with the reason already logged.
+/// Bring the listener in `slot` in line with `remote`: drop the running one,
+/// then start a new one when remote access is on, beginning a new status
+/// generation either way. The caller holds [`Hub::tailnet`].
+async fn apply_remote_config(
+    hub: &Hub,
+    slot: &mut Option<TailnetListener>,
+    remote: crate::remote_config::RemoteConfig,
+    lan_config: Option<&lan::LanConfig>,
+    shutdown: tokio::sync::watch::Receiver<bool>,
+) {
+    if slot.take().is_some() {
+        info!("remote access: tailnet listener stopped");
+    }
+    match start_tailnet_listener(hub, remote, lan_config, shutdown).await {
+        Ok(listener) => {
+            info!(
+                port = remote.port,
+                "remote access enabled; tailnet listener started"
+            );
+            *slot = Some(listener);
+        }
+        Err(state) => {
+            begin_remote_generation(hub, remote, state);
+        }
+    }
+}
+
+/// Start the tailnet listener into the hub when `remote.json` turns remote
+/// access on, or leave it down with the reason logged and published.
 async fn start_remote_access(
     hub: &Hub,
     remote: crate::remote_config::RemoteConfig,
     lan_config: Option<&lan::LanConfig>,
     shutdown: tokio::sync::watch::Receiver<bool>,
 ) {
-    if let Some(listener) = start_tailnet_listener(hub, remote, lan_config, shutdown) {
-        info!(
-            port = remote.port,
-            "remote access enabled; tailnet listener started"
-        );
-        *hub.tailnet.lock().await = Some(listener);
+    let mut slot = hub.tailnet.lock().await;
+    apply_remote_config(hub, &mut slot, remote, lan_config, shutdown).await;
+}
+
+/// [`ClientMessage::ConfigureRemote`]: persist the switch, flip the watch
+/// idle exit reads, start, stop or restart the listener, and broadcast the
+/// status. [`Hub::tailnet`] stays locked throughout, so concurrent requests
+/// serialise and `remote.json`, [`Hub::remote_enabled`] and the listener slot
+/// agree whenever it is released. A request that changes nothing writes
+/// nothing, keeps the running listener and re-broadcasts the status. When
+/// the previous start was refused (no listener in the slot), an identical
+/// `enabled: true` is not "nothing": it re-saves and retries the start.
+/// `port: Some(0)` is refused with an `Error` and changes nothing. A tailnet
+/// (or any non-local) connection is refused before this runs, with "remote
+/// access is local-only".
+async fn configure_remote(
+    hub: &Hub,
+    enabled: bool,
+    port: Option<u16>,
+    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
+) -> anyhow::Result<()> {
+    if port == Some(0) {
+        let _ = out_tx.send(DaemonMessage::Error {
+            message: "remote access needs a port from 1 to 65535".to_owned(),
+            request_id: None,
+        });
+        return Ok(());
     }
+    let mut slot = hub.tailnet.lock().await;
+    let shown = hub.remote_status.borrow().snapshot.clone();
+    let remote = crate::remote_config::RemoteConfig {
+        enabled,
+        port: port.unwrap_or(shown.port),
+    };
+    let unchanged =
+        shown.enabled == enabled && shown.port == remote.port && slot.is_some() == enabled;
+    if unchanged {
+        rebroadcast_remote(hub);
+        return Ok(());
+    }
+    crate::remote_config::save(&hub.dirs, remote)?;
+    hub.remote_enabled.send_replace(enabled);
+    let lan_config = lan::load(&hub.dirs);
+    apply_remote_config(
+        hub,
+        &mut slot,
+        remote,
+        lan_config.as_ref(),
+        hub.shutdown_tx.subscribe(),
+    )
+    .await;
+    info!(enabled, port = remote.port, "remote access configured");
+    Ok(())
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -1422,6 +1660,17 @@ fn spawn_state_forwarder(
                 }
                 Ok(StateEvent::KeepAwakeStatus { enabled, active }) => {
                     let _ = out_tx.send(DaemonMessage::KeepAwakeStatus { enabled, active });
+                }
+                Ok(StateEvent::RemoteStatus {
+                    enabled,
+                    port,
+                    state,
+                }) => {
+                    let _ = out_tx.send(DaemonMessage::RemoteStatus {
+                        enabled,
+                        port,
+                        state,
+                    });
                 }
                 Ok(StateEvent::SessionHistory(items)) => {
                     let _ = out_tx.send(DaemonMessage::SessionHistory {
@@ -1870,6 +2119,16 @@ fn push_initial_state(
         enabled: keep_awake.enabled,
         active: keep_awake.active,
     });
+    // Held across the send: every RemoteStatus broadcast is published under
+    // the watch's write lock, so none can reach the state forwarder between
+    // this read and the send, and the client never ends on an older status.
+    let remote = hub.remote_status.borrow();
+    let _ = out_tx.send(DaemonMessage::RemoteStatus {
+        enabled: remote.snapshot.enabled,
+        port: remote.snapshot.port,
+        state: remote.snapshot.state.clone(),
+    });
+    drop(remote);
 }
 
 /// The reason `msg` is host-only and refused on a tailnet connection, if it
@@ -1882,6 +2141,7 @@ fn host_only_refusal(msg: &ClientMessage, auth: &AuthKind) -> Option<&'static st
     match msg {
         ClientMessage::Shutdown { .. } => Some("shutdown is local-only"),
         ClientMessage::ConfigureLan { .. } => Some("LAN access is local-only"),
+        ClientMessage::ConfigureRemote { .. } => Some("remote access is local-only"),
         ClientMessage::StartPairing | ClientMessage::CancelPairing => Some("pairing is local-only"),
         _ => None,
     }
@@ -2767,6 +3027,9 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
                 fingerprint: lan::fingerprint(&hub.dirs),
                 addresses: lan::detect_addresses(),
             });
+        }
+        ClientMessage::ConfigureRemote { enabled, port } => {
+            configure_remote(hub, enabled, port, out_tx).await?;
         }
         ClientMessage::SetKeepAwake { enabled } => {
             hub.state.set_keep_awake(enabled)?;
@@ -7973,6 +8236,9 @@ mod tests {
             advertiser: Arc::new(AsyncMutex::new(None)),
             remote_enabled: Arc::new(remote_enabled),
             tailnet: Arc::new(AsyncMutex::new(None)),
+            remote_status: Arc::new(tokio::sync::watch::Sender::new(RemoteSlot::initial(
+                crate::remote_config::RemoteConfig::default(),
+            ))),
             pairing: Arc::new(AsyncMutex::new(None)),
             keep_awake_enabled: Arc::new(keep_awake_enabled),
             keep_awake_status,
@@ -12004,7 +12270,7 @@ mod tests {
     /// lives, so recovery's transcript check reads it and not the user's own.
     struct ScratchClaudeHome {
         path: PathBuf,
-        prior: Option<std::ffi::OsString>,
+        _var: crate::env_secrets::test_support::EnvVarGuard,
     }
 
     impl ScratchClaudeHome {
@@ -12012,10 +12278,10 @@ mod tests {
             let path = std::env::temp_dir().join(format!("rt-claude-home-{label}"));
             let _ = std::fs::remove_dir_all(&path);
             std::fs::create_dir_all(&path).expect("create scratch claude home");
-            let prior = std::env::var_os("CLAUDE_CONFIG_DIR");
-            // SAFETY: callers hold CLAUDE_HOME_LOCK for the guard's lifetime.
-            unsafe { std::env::set_var("CLAUDE_CONFIG_DIR", &path) };
-            Self { path, prior }
+            // Callers hold CLAUDE_HOME_LOCK for the guard's lifetime.
+            let var =
+                crate::env_secrets::test_support::EnvVarGuard::set("CLAUDE_CONFIG_DIR", &path);
+            Self { path, _var: var }
         }
 
         /// A transcript for `folder` and `id`, as Claude Code files one.
@@ -12031,13 +12297,6 @@ mod tests {
 
     impl Drop for ScratchClaudeHome {
         fn drop(&mut self) {
-            // SAFETY: as in `new` — CLAUDE_HOME_LOCK is still held.
-            unsafe {
-                match &self.prior {
-                    Some(value) => std::env::set_var("CLAUDE_CONFIG_DIR", value),
-                    None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
-                }
-            }
             let _ = std::fs::remove_dir_all(&self.path);
         }
     }
@@ -14105,6 +14364,7 @@ mod tests {
         let serving = ListenerStatus::Serving {
             name: "host.tail1234.ts.net".to_owned(),
             addrs: Vec::new(),
+            cert_expires_at: None,
         };
         assert_eq!(
             serving_name(&serving),
@@ -14280,12 +14540,119 @@ mod tests {
             crate::remote_config::RemoteConfig::default(),
             None,
             shutdown_rx,
-        );
+        )
+        .await;
         assert!(
-            started.is_none(),
+            matches!(started, Err(protocol::RemoteState::Off)),
             "remote access off starts no tailnet listener"
         );
         assert!(hub.tailnet.lock().await.is_none());
+    }
+
+    /// `lan.json` contents with LAN access on at `port`.
+    fn lan_on(port: u16) -> lan::LanConfig {
+        lan::LanConfig {
+            enabled: true,
+            port,
+            auth_token: String::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_start_reports_port_in_use_while_the_lan_listener_holds_the_port() {
+        let scratch = ScratchDir::new("remote-start-lan-bound");
+        // Declared before the hub, so the env vars are restored only
+        // after the hub and its listener are gone.
+        let _env = FakeTailscaleEnv::new(scratch.path()).await;
+        let (hub, _scratch) = test_hub_in(scratch, None);
+        *hub.lan_handle.lock().await = Some(axum_server::Handle::new());
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let on = crate::remote_config::RemoteConfig {
+            enabled: true,
+            port: 8787,
+        };
+        let started = start_tailnet_listener(&hub, on, Some(&lan_on(8787)), shutdown_rx).await;
+        assert!(
+            matches!(started, Err(protocol::RemoteState::PortInUse)),
+            "the bound LAN listener holds the port"
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_start_with_an_unbound_lan_claim_is_not_port_in_use() {
+        let scratch = ScratchDir::new("remote-start-lan-unbound");
+        // Declared before the hub, so the env vars are restored only
+        // after the hub and its listener are gone.
+        let _env = FakeTailscaleEnv::new(scratch.path()).await;
+        let (hub, _scratch) = test_hub_in(scratch, None);
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let on = crate::remote_config::RemoteConfig {
+            enabled: true,
+            port: 8787,
+        };
+        let started = start_tailnet_listener(&hub, on, Some(&lan_on(8787)), shutdown_rx).await;
+        let state = started.err();
+        assert!(
+            matches!(&state, Some(protocol::RemoteState::BindFailed { reason }) if reason.contains("8787")),
+            "lan.json claims the port but no LAN listener is bound: {state:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_start_reports_cert_failed_when_the_tailnet_dir_cannot_be_made() {
+        let scratch = ScratchDir::new("remote-start-no-dir");
+        let blocker = scratch.path().join("a-file");
+        std::fs::write(&blocker, b"not a dir").expect("write the blocking file");
+        // Declared before the hub, so the env vars are restored only
+        // after the hub and its listener are gone.
+        let _env =
+            FakeTailscaleEnv::with_tailnet_dir(scratch.path(), &blocker.join("tailnet")).await;
+        let (hub, scratch) = test_hub_in(scratch, None);
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let on = crate::remote_config::RemoteConfig {
+            enabled: true,
+            port: 8787,
+        };
+        let started = start_tailnet_listener(&hub, on, None, shutdown_rx).await;
+        let state = started.err();
+        assert!(
+            matches!(&state, Some(protocol::RemoteState::CertFailed { reason }) if reason.contains("tailnet")),
+            "the certificate dir sits under a file: {state:?}"
+        );
+        if let Some(protocol::RemoteState::CertFailed { reason }) = &state {
+            assert!(
+                !reason.contains('\\') && !reason.contains('/'),
+                "the wire reason carries no path: {reason}"
+            );
+            let scratch_name = scratch
+                .path()
+                .file_name()
+                .expect("the scratch dir has a name")
+                .to_string_lossy();
+            assert!(
+                !reason.contains(scratch_name.as_ref()),
+                "the wire reason carries no part of the host's paths: {reason}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_start_with_a_usable_setup_starts_the_listener() {
+        let scratch = ScratchDir::new("remote-start-ok");
+        // Declared before the hub, so the env vars are restored only
+        // after the hub and its listener are gone.
+        let _env = FakeTailscaleEnv::new(scratch.path()).await;
+        let (hub, _scratch) = test_hub_in(scratch, None);
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let on = crate::remote_config::RemoteConfig {
+            enabled: true,
+            port: 8787,
+        };
+        let started = start_tailnet_listener(&hub, on, Some(&lan_on(9000)), shutdown_rx).await;
+        assert!(
+            started.is_ok(),
+            "a LAN listener on another port is no conflict"
+        );
     }
 
     #[test]
@@ -14317,5 +14684,297 @@ mod tests {
             },
             None
         ));
+    }
+
+    // --- ConfigureRemote and RemoteStatus ---
+
+    /// Points the tailnet listener at a `tailscale` that does not exist (so
+    /// `whoami` fails with `NotInstalled`) and at a scratch certificate dir
+    /// while it lives, holding the crate's env lock; dropping it restores
+    /// both variables before the lock is released (fields drop in order).
+    struct FakeTailscaleEnv {
+        _vars: [crate::env_secrets::test_support::EnvVarGuard; 2],
+        _lock: tokio::sync::MutexGuard<'static, ()>,
+    }
+
+    impl FakeTailscaleEnv {
+        async fn new(scratch: &Path) -> Self {
+            Self::with_tailnet_dir(scratch, &scratch.join("tailnet")).await
+        }
+
+        /// The same, with the certificate dir at `tailnet_dir`.
+        async fn with_tailnet_dir(scratch: &Path, tailnet_dir: &Path) -> Self {
+            use crate::env_secrets::test_support::EnvVarGuard;
+            let lock = crate::env_secrets::test_support::ENV_LOCK.lock().await;
+            let vars = [
+                EnvVarGuard::set(
+                    "RUSTLING_TULIP_TAILSCALE",
+                    scratch.join("no-such-tailscale.exe"),
+                ),
+                EnvVarGuard::set("RUSTLING_TULIP_TAILNET_DIR", tailnet_dir),
+            ];
+            Self {
+                _vars: vars,
+                _lock: lock,
+            }
+        }
+    }
+
+    /// The next `RemoteStatus` broadcast on `events` that `pred` accepts,
+    /// skipping every other event.
+    async fn next_remote_status(
+        events: &mut broadcast::Receiver<StateEvent>,
+        mut pred: impl FnMut(bool, u16, &protocol::RemoteState) -> bool,
+    ) -> (bool, u16, protocol::RemoteState) {
+        // A generous ceiling on the real clock: a missing broadcast fails
+        // here instead of hanging; every awaited one is a local event.
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                if let StateEvent::RemoteStatus {
+                    enabled,
+                    port,
+                    state,
+                } = events
+                    .recv()
+                    .await
+                    .expect("the state event channel stays open")
+                    && pred(enabled, port, &state)
+                {
+                    return (enabled, port, state);
+                }
+            }
+        })
+        .await
+        .expect("the awaited RemoteStatus is broadcast")
+    }
+
+    #[tokio::test]
+    async fn tailnet_configure_remote_is_refused_and_writes_nothing() {
+        let scratch = ScratchDir::new("configure-remote-tailnet");
+        // A regression of the refusal must never reach a real Tailscale.
+        // Declared before the hub, so the env vars are restored only
+        // after the hub and its listener are gone.
+        let _env = FakeTailscaleEnv::new(scratch.path()).await;
+        let (hub, _scratch) = test_hub_in(scratch, None);
+        let remote_file = hub.dirs.remote_config_file.clone();
+        assert!(!remote_file.exists());
+        let mut events = hub.state_events.subscribe();
+        let tailnet = AuthKind::Tailnet(test_peer());
+        let reply = dispatch_one_as(
+            &hub,
+            ClientMessage::ConfigureRemote {
+                enabled: true,
+                port: Some(9000),
+            },
+            &tailnet,
+        )
+        .await;
+        assert!(
+            matches!(&reply, DaemonMessage::Error { message, .. } if message == "remote access is local-only"),
+            "{reply:?}"
+        );
+        assert!(
+            !remote_file.exists(),
+            "a refused ConfigureRemote writes no remote.json"
+        );
+        assert!(!*hub.remote_enabled.borrow(), "the switch stays off");
+        assert!(hub.tailnet.lock().await.is_none(), "no listener starts");
+        assert!(
+            matches!(
+                events.try_recv(),
+                Err(broadcast::error::TryRecvError::Empty)
+            ),
+            "nothing is broadcast"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_configure_remote_on_persists_starts_and_broadcasts() {
+        let scratch = ScratchDir::new("configure-remote-on");
+        // Declared before the hub, so the env vars are restored only
+        // after the hub and its listener are gone.
+        let _env = FakeTailscaleEnv::new(scratch.path()).await;
+        let (hub, _scratch) = test_hub_in(scratch, None);
+        let mut events = hub.state_events.subscribe();
+        let sent = dispatch_all(
+            &hub,
+            ClientMessage::ConfigureRemote {
+                enabled: true,
+                port: None,
+            },
+        )
+        .await;
+        assert!(sent.is_empty(), "the answer is a broadcast: {sent:?}");
+
+        let saved: crate::remote_config::RemoteConfig = serde_json::from_slice(
+            &std::fs::read(&hub.dirs.remote_config_file).expect("remote.json is written"),
+        )
+        .expect("remote.json parses");
+        assert!(saved.enabled);
+        assert_eq!(saved.port, crate::remote_config::DEFAULT_REMOTE_PORT);
+        assert!(*hub.remote_enabled.borrow(), "idle exit sees the switch on");
+        assert!(hub.tailnet.lock().await.is_some(), "the listener runs");
+
+        let (enabled, port, _) = next_remote_status(&mut events, |_, _, _| true).await;
+        assert!(enabled);
+        assert_eq!(port, crate::remote_config::DEFAULT_REMOTE_PORT);
+        let (_, _, state) = next_remote_status(&mut events, |_, _, state| {
+            *state != protocol::RemoteState::Starting
+        })
+        .await;
+        assert_eq!(
+            state,
+            protocol::RemoteState::NotInstalled,
+            "the listener ran the fake (missing) tailscale, never a real one"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_configure_remote_off_persists_stops_and_broadcasts_off() {
+        let scratch = ScratchDir::new("configure-remote-off");
+        // Declared before the hub, so the env vars are restored only
+        // after the hub and its listener are gone.
+        let _env = FakeTailscaleEnv::new(scratch.path()).await;
+        let (hub, _scratch) = test_hub_in(scratch, None);
+        let on = ClientMessage::ConfigureRemote {
+            enabled: true,
+            port: None,
+        };
+        dispatch_all(&hub, on).await;
+        assert!(hub.tailnet.lock().await.is_some());
+        let mut events = hub.state_events.subscribe();
+
+        let off = ClientMessage::ConfigureRemote {
+            enabled: false,
+            port: None,
+        };
+        dispatch_all(&hub, off).await;
+        let saved = crate::remote_config::load(&hub.dirs);
+        assert!(hub.dirs.remote_config_file.exists());
+        assert!(!saved.enabled, "remote.json says off");
+        assert!(
+            !*hub.remote_enabled.borrow(),
+            "idle exit sees the switch off"
+        );
+        assert!(
+            hub.tailnet.lock().await.is_none(),
+            "the listener is dropped"
+        );
+        let (_, _, state) = next_remote_status(&mut events, |enabled, _, _| !enabled).await;
+        assert_eq!(state, protocol::RemoteState::Off);
+        assert_eq!(
+            hub.remote_status.borrow().snapshot.state,
+            protocol::RemoteState::Off
+        );
+    }
+
+    #[tokio::test]
+    async fn a_repeated_configure_remote_rewrites_nothing_and_rebroadcasts() {
+        let scratch = ScratchDir::new("configure-remote-repeat");
+        // Declared before the hub, so the env vars are restored only
+        // after the hub and its listener are gone.
+        let _env = FakeTailscaleEnv::new(scratch.path()).await;
+        let (hub, _scratch) = test_hub_in(scratch, None);
+        let on = || ClientMessage::ConfigureRemote {
+            enabled: true,
+            port: None,
+        };
+        dispatch_all(&hub, on()).await;
+        // Same switch and port as saved; the marker shows whether a second
+        // request rewrites the file.
+        let marked = br#"{"enabled":true,"port":8787,"marker":1}"#;
+        std::fs::write(&hub.dirs.remote_config_file, marked).expect("mark remote.json");
+        let generation = hub.remote_status.borrow().generation;
+        let mut events = hub.state_events.subscribe();
+
+        dispatch_all(&hub, on()).await;
+        assert_eq!(
+            std::fs::read(&hub.dirs.remote_config_file).expect("remote.json is still there"),
+            marked,
+            "an identical request does not rewrite remote.json"
+        );
+        assert_eq!(
+            hub.remote_status.borrow().generation,
+            generation,
+            "the running listener is kept"
+        );
+        assert!(hub.tailnet.lock().await.is_some());
+        assert!(*hub.remote_enabled.borrow());
+        let (enabled, port, _) = next_remote_status(&mut events, |_, _, _| true).await;
+        assert!(enabled, "the current status is re-broadcast");
+        assert_eq!(port, crate::remote_config::DEFAULT_REMOTE_PORT);
+    }
+
+    #[tokio::test]
+    async fn a_stale_remote_relay_never_overwrites_off() {
+        let (hub, _scratch) = test_hub("remote-stale-relay");
+        let on = crate::remote_config::RemoteConfig {
+            enabled: true,
+            port: 8787,
+        };
+        let generation = begin_remote_generation(&hub, on, protocol::RemoteState::Starting);
+        let (old_status, status_rx) = tokio::sync::watch::channel(ListenerStatus::Starting);
+        let relay = RemoteRelay {
+            remote_status: Arc::clone(&hub.remote_status),
+            state_events: hub.state_events.clone(),
+            generation,
+            port: 8787,
+        }
+        .spawn(status_rx, name_slot());
+
+        dispatch_all(
+            &hub,
+            ClientMessage::ConfigureRemote {
+                enabled: false,
+                port: None,
+            },
+        )
+        .await;
+        let mut events = hub.state_events.subscribe();
+        // The old listener's watch fires after the switch went off, then ends.
+        old_status.send_replace(ListenerStatus::TailscaleDown(
+            tailnet::TailnetError::NotRunning,
+        ));
+        drop(old_status);
+        relay.await.expect("the relay task ends with its watch");
+
+        assert_eq!(
+            hub.remote_status.borrow().snapshot.state,
+            protocol::RemoteState::Off,
+            "the last status stays Off"
+        );
+        assert!(
+            matches!(
+                events.try_recv(),
+                Err(broadcast::error::TryRecvError::Empty)
+            ),
+            "the stale status is never broadcast"
+        );
+    }
+
+    #[test]
+    fn a_new_client_gets_remote_status_at_connect() {
+        let (hub, _scratch) = test_hub("remote-status-connect");
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        push_initial_state(&hub, &out_tx, "c1", false);
+        let mut remote = Vec::new();
+        while let Ok(message) = out_rx.try_recv() {
+            if let DaemonMessage::RemoteStatus {
+                enabled,
+                port,
+                state,
+            } = message
+            {
+                remote.push((enabled, port, state));
+            }
+        }
+        assert_eq!(
+            remote,
+            [(
+                false,
+                crate::remote_config::DEFAULT_REMOTE_PORT,
+                protocol::RemoteState::Off
+            )]
+        );
     }
 }

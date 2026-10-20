@@ -1602,6 +1602,7 @@ dependencies = [
  "which 8.0.2",
  "windows 0.61.3",
  "windows-native-keyring-store",
+ "x509-parser",
 ]
 
 [[package]]

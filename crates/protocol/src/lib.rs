@@ -2592,6 +2592,19 @@ pub enum ClientMessage {
         enabled: bool,
         port: u16,
     },
+    /// Turn opt-in remote (Tailscale) access on or off, and optionally move
+    /// its port; `port: None` keeps the configured one. The daemon persists
+    /// the switch to `remote.json`, starts, stops or restarts the tailnet
+    /// listener at once, and broadcasts [`DaemonMessage::RemoteStatus`] to
+    /// every connected client. Turning it on in a bad state (Tailscale not
+    /// installed, HTTPS disabled, a tagged host) still persists the switch;
+    /// the status says why the listener is down. Host-only: a tailnet
+    /// connection gets an `Error` and nothing changes.
+    ConfigureRemote {
+        enabled: bool,
+        #[serde(default)]
+        port: Option<u16>,
+    },
     /// Turn the keep-awake hold on or off. While enabled the daemon asks the
     /// OS not to idle-sleep the machine for as long as any session has a live
     /// child (the display still sleeps on its own timer). The daemon persists
@@ -3299,6 +3312,17 @@ pub enum DaemonMessage {
         enabled: bool,
         active: bool,
     },
+    /// Current remote (Tailscale) access status. Sent once at initial state
+    /// and broadcast on every change: a [`ClientMessage::ConfigureRemote`],
+    /// or the tailnet listener's own state moving (Tailscale going down, a
+    /// certificate loading, a rename). `enabled` is the persisted
+    /// `remote.json` switch, `port` its configured port, and `state` what the
+    /// listener is doing. It never carries a token.
+    RemoteStatus {
+        enabled: bool,
+        port: u16,
+        state: RemoteState,
+    },
     /// Reply to [`ClientMessage::StartPairing`], sent only to the requesting
     /// connection (the code must never reach other clients). `code` is the
     /// short numeric pairing code for the user to read out; `ttl_secs` is how
@@ -3920,6 +3944,61 @@ pub enum SuggestTarget {
     },
     Workspace {
         workspace_id: String,
+    },
+    #[serde(other)]
+    Unknown,
+}
+
+/// What remote access is doing, as [`DaemonMessage::RemoteStatus`] reports
+/// it. `Off` whenever the `remote.json` switch is off. With the switch on,
+/// `PortInUse`, `BindFailed` and `CertFailed` can also mean the listener
+/// never started (the LAN listener's port, or a certificate dir that could
+/// not be created); every other arm is the running listener's state.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RemoteState {
+    /// Remote access is switched off; no listener runs.
+    Off,
+    /// The listener started and has not heard from Tailscale yet, or its
+    /// first certificate check is still running.
+    Starting,
+    /// The `tailscale` CLI was not found.
+    NotInstalled,
+    /// The CLI could not reach `tailscaled`.
+    NotRunning,
+    /// `tailscaled` refused this Windows user: it is in use by another user,
+    /// or runs in server mode.
+    OtherWindowsUser,
+    /// Tailscale is logged out or stopped.
+    NotConnected,
+    /// The CLI timed out, printed output that does not parse, or failed
+    /// another way; `reason` is its error text.
+    TailscaleError { reason: String },
+    /// HTTPS certificates are disabled in the tailnet's admin console, so the
+    /// listener stays down.
+    HttpsDisabled,
+    /// This host's node is tagged, so it has no owner to admit and the
+    /// listener binds nothing.
+    HostTagged,
+    /// No certificate is in service for another reason, or the listener's
+    /// certificate dir could not be created; `reason` says which.
+    CertFailed { reason: String },
+    /// The configured port is taken: it stayed in use on every tailnet
+    /// address, or the host's LAN listener is bound to it, so the listener
+    /// did not start.
+    PortInUse,
+    /// Every tailnet address failed to bind for another reason, or the
+    /// listener did not start because `lan.json` puts LAN access on the same
+    /// port while the LAN listener is not bound yet or failed to bind, which
+    /// includes daemon startup; `reason` says which.
+    BindFailed { reason: String },
+    /// Serving at `https://{name}:{port}`. `cert_expires_at` is the
+    /// certificate's `notAfter` in Unix seconds, `None` when it could not be
+    /// read.
+    Serving {
+        name: String,
+        port: u16,
+        cert_expires_at: Option<u64>,
     },
     #[serde(other)]
     Unknown,
@@ -5567,6 +5646,125 @@ mod tests {
             panic!("expected Unknown");
         };
         assert_eq!(type_tag, "future_only_broadcast");
+    }
+
+    /// Every [`RemoteState`] arm the daemon sends.
+    fn every_remote_state() -> Vec<RemoteState> {
+        vec![
+            RemoteState::Off,
+            RemoteState::Starting,
+            RemoteState::NotInstalled,
+            RemoteState::NotRunning,
+            RemoteState::OtherWindowsUser,
+            RemoteState::NotConnected,
+            RemoteState::TailscaleError {
+                reason: "the tailscale CLI did not finish in time".to_owned(),
+            },
+            RemoteState::HttpsDisabled,
+            RemoteState::HostTagged,
+            RemoteState::CertFailed {
+                reason: "no certificate".to_owned(),
+            },
+            RemoteState::PortInUse,
+            RemoteState::BindFailed {
+                reason: "100.64.0.1:8787: access denied".to_owned(),
+            },
+            RemoteState::Serving {
+                name: "desktop.tail1234.ts.net".to_owned(),
+                port: 8787,
+                cert_expires_at: Some(1_790_000_000),
+            },
+            RemoteState::Serving {
+                name: "desktop.tail1234.ts.net".to_owned(),
+                port: 9000,
+                cert_expires_at: None,
+            },
+        ]
+    }
+
+    #[test]
+    fn remote_status_round_trips_every_state() {
+        for state in every_remote_state() {
+            let msg = DaemonMessage::RemoteStatus {
+                enabled: true,
+                port: 8787,
+                state: state.clone(),
+            };
+            let json = serde_json::to_string(&msg).expect("serializes");
+            let back: DaemonMessage = serde_json::from_str(&json).expect("round-trips");
+            let DaemonMessage::RemoteStatus {
+                enabled,
+                port,
+                state: back_state,
+            } = back
+            else {
+                panic!("expected RemoteStatus from {json}");
+            };
+            assert!(enabled);
+            assert_eq!(port, 8787);
+            assert_eq!(back_state, state, "{json}");
+        }
+    }
+
+    #[test]
+    fn remote_status_wire_shape_is_snake_case_tagged() {
+        let msg = DaemonMessage::RemoteStatus {
+            enabled: false,
+            port: 8787,
+            state: RemoteState::OtherWindowsUser,
+        };
+        let value = serde_json::to_value(&msg).expect("serializes");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "type": "remote_status",
+                "enabled": false,
+                "port": 8787,
+                "state": {"kind": "other_windows_user"}
+            })
+        );
+    }
+
+    #[test]
+    fn remote_status_with_an_unknown_state_decodes_as_unknown() {
+        let json = r#"{"type":"remote_status","enabled":true,"port":8787,
+            "state":{"kind":"future_state","detail":"x"}}"#;
+        let parsed: DaemonMessage = serde_json::from_str(json).expect("the message still decodes");
+        let DaemonMessage::RemoteStatus { state, .. } = parsed else {
+            panic!("expected RemoteStatus");
+        };
+        assert_eq!(state, RemoteState::Unknown);
+    }
+
+    #[test]
+    fn configure_remote_round_trips_with_and_without_a_port() {
+        for port in [None, Some(9000)] {
+            let msg = ClientMessage::ConfigureRemote {
+                enabled: true,
+                port,
+            };
+            let json = serde_json::to_string(&msg).expect("serializes");
+            let back: ClientMessage = serde_json::from_str(&json).expect("round-trips");
+            let ClientMessage::ConfigureRemote {
+                enabled,
+                port: back_port,
+            } = back
+            else {
+                panic!("expected ConfigureRemote from {json}");
+            };
+            assert!(enabled);
+            assert_eq!(back_port, port, "{json}");
+        }
+        let omitted: ClientMessage =
+            serde_json::from_str(r#"{"type":"configure_remote","enabled":false}"#)
+                .expect("an omitted port decodes");
+        assert!(matches!(
+            omitted,
+            ClientMessage::ConfigureRemote {
+                enabled: false,
+                port: None
+            }
+        ));
     }
 
     #[test]

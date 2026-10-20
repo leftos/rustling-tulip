@@ -483,7 +483,7 @@ fn write_index(path: &Path, entries: &[IndexEntry]) -> anyhow::Result<()> {
 #[expect(clippy::expect_used, reason = "tests fail loudly on setup errors")]
 pub(crate) mod test_support {
     use super::CONFIG_DIR_VAR;
-    use std::ffi::OsString;
+    use std::ffi::{OsStr, OsString};
     use std::path::PathBuf;
     use std::sync::{Arc, OnceLock};
 
@@ -492,12 +492,44 @@ pub(crate) mod test_support {
     /// mutex, so an async test can hold it across its awaits.
     pub(crate) static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+    /// Sets one environment variable while the guard lives; dropping it
+    /// restores the prior value, unsetting the variable only when it was
+    /// unset. The caller holds the lock that serialises the tests writing
+    /// this variable for the guard's whole lifetime.
+    pub(crate) struct EnvVarGuard {
+        name: &'static str,
+        prior: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        pub(crate) fn set(name: &'static str, value: impl AsRef<OsStr>) -> Self {
+            let prior = std::env::var_os(name);
+            // SAFETY: nextest runs each test in its own process, and the
+            // caller holds the lock that keeps every other test writing this
+            // variable out while it changes.
+            unsafe { std::env::set_var(name, value) };
+            Self { name, prior }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            // SAFETY: as in `set`: one process per test, and the caller's lock
+            // is still held.
+            unsafe {
+                match &self.prior {
+                    Some(value) => std::env::set_var(self.name, value),
+                    None => std::env::remove_var(self.name),
+                }
+            }
+        }
+    }
+
     /// A config dir under the temp root that `RUSTLING_TULIP_CONFIG_DIR` points
-    /// at while the guard lives. Drop restores the var's prior value (unsetting
-    /// it only when it was unset) and removes the dir.
+    /// at while the guard lives. Drop removes the dir and restores the var.
     pub(crate) struct ScratchConfigDir {
         path: PathBuf,
-        prior: Option<OsString>,
+        _var: EnvVarGuard,
     }
 
     impl ScratchConfigDir {
@@ -507,22 +539,14 @@ pub(crate) mod test_support {
                 uuid::Uuid::new_v4().simple()
             ));
             std::fs::create_dir_all(&path).expect("create scratch config dir");
-            let prior = std::env::var_os(CONFIG_DIR_VAR);
-            // SAFETY: callers hold ENV_LOCK for the guard's lifetime.
-            unsafe { std::env::set_var(CONFIG_DIR_VAR, &path) };
-            Self { path, prior }
+            // Callers hold ENV_LOCK for the guard's lifetime.
+            let var = EnvVarGuard::set(CONFIG_DIR_VAR, &path);
+            Self { path, _var: var }
         }
     }
 
     impl Drop for ScratchConfigDir {
         fn drop(&mut self) {
-            // SAFETY: as in `new` — ENV_LOCK is still held by the caller.
-            unsafe {
-                match &self.prior {
-                    Some(value) => std::env::set_var(CONFIG_DIR_VAR, value),
-                    None => std::env::remove_var(CONFIG_DIR_VAR),
-                }
-            }
             let _ = std::fs::remove_dir_all(&self.path);
         }
     }

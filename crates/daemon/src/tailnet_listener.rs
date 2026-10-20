@@ -62,10 +62,16 @@ pub enum ListenerStatus {
     /// Serving on `addrs` (one server per address), as `name`: the
     /// `MagicDNS` name (no trailing dot) of the certificate in service, which
     /// lags a rename until the new name's certificate has loaded.
+    /// `cert_expires_at` is that certificate's `notAfter` in Unix seconds,
+    /// `None` when it could not be read.
     Serving {
         name: String,
         addrs: Vec<SocketAddr>,
+        cert_expires_at: Option<u64>,
     },
+    /// This host's node is tagged, so the owner rule admits nobody: no
+    /// server runs and no certificate is asked for.
+    HostTagged,
     /// HTTPS certificates are disabled in the tailnet's admin console; no
     /// server runs, even when a certificate had loaded before.
     HttpsDisabled,
@@ -82,6 +88,72 @@ pub enum ListenerStatus {
     /// in a row), or listed no address to bind; no server runs, and `whoami`
     /// is retried with backoff.
     TailscaleDown(TailnetError),
+}
+
+/// The reason [`protocol::RemoteState::CertFailed`] gives for
+/// [`ListenerStatus::CertFailed`], which carries none.
+const CERT_FAILED_REASON: &str = "no certificate is in service: tailscale cert failed, its files \
+                                  were unusable, or Tailscale gave no MagicDNS name";
+
+/// The remote-access state a client is shown for the listener's `status`,
+/// listening on `port`.
+#[must_use]
+pub fn remote_state(status: &ListenerStatus, port: u16) -> protocol::RemoteState {
+    use protocol::RemoteState;
+    match status {
+        ListenerStatus::Starting => RemoteState::Starting,
+        ListenerStatus::Serving {
+            name,
+            cert_expires_at,
+            ..
+        } => RemoteState::Serving {
+            name: name.clone(),
+            port,
+            cert_expires_at: *cert_expires_at,
+        },
+        ListenerStatus::HttpsDisabled
+        | ListenerStatus::TailscaleDown(TailnetError::HttpsDisabled) => RemoteState::HttpsDisabled,
+        ListenerStatus::HostTagged => RemoteState::HostTagged,
+        ListenerStatus::CertFailed => RemoteState::CertFailed {
+            reason: CERT_FAILED_REASON.to_owned(),
+        },
+        ListenerStatus::PortInUse { .. } => RemoteState::PortInUse,
+        ListenerStatus::BindFailed(reason) => RemoteState::BindFailed {
+            reason: reason.clone(),
+        },
+        ListenerStatus::TailscaleDown(TailnetError::NotInstalled) => RemoteState::NotInstalled,
+        ListenerStatus::TailscaleDown(TailnetError::NotRunning) => RemoteState::NotRunning,
+        ListenerStatus::TailscaleDown(TailnetError::AccessDenied) => RemoteState::OtherWindowsUser,
+        ListenerStatus::TailscaleDown(TailnetError::NotConnected) => RemoteState::NotConnected,
+        ListenerStatus::TailscaleDown(
+            err @ (TailnetError::Timeout | TailnetError::BadOutput(_) | TailnetError::Failed(_)),
+        ) => RemoteState::TailscaleError {
+            reason: err.to_string(),
+        },
+    }
+}
+
+/// The `notAfter` of the first certificate in `cert_pem`, in Unix seconds;
+/// `None`, with a warning, when it does not parse.
+fn cert_expiry(cert_pem: &[u8]) -> Option<u64> {
+    let parsed = x509_parser::pem::parse_x509_pem(cert_pem)
+        .map_err(|err| err.to_string())
+        .and_then(|(_, pem)| {
+            pem.parse_x509()
+                .map(|cert| cert.validity().not_after.timestamp())
+                .map_err(|err| err.to_string())
+        });
+    match parsed.map(u64::try_from) {
+        Ok(Ok(expires_at)) => Some(expires_at),
+        Ok(Err(_)) => {
+            tracing::warn!("tailnet listener: the certificate's notAfter is before 1970");
+            None
+        }
+        Err(err) => {
+            tracing::warn!(%err, "tailnet listener: could not read the certificate's notAfter");
+            None
+        }
+    }
 }
 
 /// Ports, intervals and budgets; [`ListenerOptions::PRODUCTION`] in the
@@ -369,11 +441,13 @@ impl Drop for AbortOnDrop {
 }
 
 /// The certificate in service: the SHA-256 digests of the files it was built
-/// from (never the key itself), and the name it was asked for.
+/// from (never the key itself), the name it was asked for, and its
+/// `notAfter` in Unix seconds when that parsed.
 struct LoadedCert {
     name: String,
     cert_digest: [u8; 32],
     key_digest: [u8; 32],
+    expires_at: Option<u64>,
 }
 
 /// The certificate as the cert task last left it, for the supervisor.
@@ -388,14 +462,19 @@ enum CertState {
         name: String,
         status: ListenerStatus,
     },
-    /// The certificate for `name` is in service in `tls`.
-    Ready { name: String, tls: RustlsConfig },
+    /// The certificate for `name`, expiring at `expires_at` (Unix seconds,
+    /// when readable), is in service in `tls`.
+    Ready {
+        name: String,
+        expires_at: Option<u64>,
+        tls: RustlsConfig,
+    },
 }
 
 impl CertState {
     /// Whether `other` tells the supervisor nothing new. Every `Ready`
-    /// carries the one config the worker keeps, so its name is all that
-    /// can change.
+    /// carries the one config the worker keeps, so its name and expiry are
+    /// all that can change.
     fn same_as(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Pending, Self::Pending) => true,
@@ -407,11 +486,15 @@ impl CertState {
                 },
             ) => name == other_name && status == other_status,
             (
-                Self::Ready { name, .. },
                 Self::Ready {
-                    name: other_name, ..
+                    name, expires_at, ..
                 },
-            ) => name == other_name,
+                Self::Ready {
+                    name: other_name,
+                    expires_at: other_expires_at,
+                    ..
+                },
+            ) => name == other_name && expires_at == other_expires_at,
             _ => false,
         }
     }
@@ -589,10 +672,15 @@ impl<A: TailnetApi> CertWorker<A> {
         let key_pem = std::fs::read(key_file).map_err(CertFailure::Read)?;
         let cert_digest: [u8; 32] = Sha256::digest(&cert_pem).into();
         let key_digest: [u8; 32] = Sha256::digest(&key_pem).into();
-        let unchanged = self.loaded.as_ref().is_some_and(|loaded| {
-            loaded.cert_digest == cert_digest && loaded.key_digest == key_digest
-        });
-        if !unchanged {
+        let unchanged = self
+            .loaded
+            .as_ref()
+            .filter(|loaded| loaded.cert_digest == cert_digest && loaded.key_digest == key_digest);
+        let expires_at = match unchanged {
+            Some(loaded) => loaded.expires_at,
+            None => cert_expiry(&cert_pem),
+        };
+        if unchanged.is_none() {
             let config = server_config(&cert_pem, &key_pem).map_err(CertFailure::Unusable)?;
             if let Some(tls) = &self.tls {
                 tls.reload_from_config(config);
@@ -604,18 +692,17 @@ impl<A: TailnetApi> CertWorker<A> {
                 tracing::info!(%name, "tailnet listener: certificate loaded");
             }
         }
-        let renamed = self
-            .loaded
-            .as_ref()
-            .is_none_or(|loaded| loaded.name != name);
         self.loaded = Some(LoadedCert {
             name: name.to_owned(),
             cert_digest,
             key_digest,
+            expires_at,
         });
-        if renamed && let Some(tls) = &self.tls {
+        // Publishes only a new name or a new expiry.
+        if let Some(tls) = &self.tls {
             self.set_state(CertState::Ready {
                 name: name.to_owned(),
+                expires_at,
                 tls: tls.clone(),
             });
         }
@@ -684,6 +771,13 @@ enum BindError {
 struct BindOutcome {
     in_use: bool,
     failure: Option<String>,
+}
+
+/// The certificate the servers serve: its name and its `notAfter` in Unix
+/// seconds, when readable.
+struct ServingCert {
+    name: String,
+    expires_at: Option<u64>,
 }
 
 /// Whether the supervisor goes on or shutdown cut the work short.
@@ -756,6 +850,13 @@ impl<A: TailnetApi, S: Serve<A>> Supervisor<A, S> {
                 break;
             };
             let pause = match answer {
+                Ok(who) if tailnet::host_can_serve(&who).is_err() => {
+                    down_backoff = self.options.down_backoff;
+                    self.transient_failures = 0;
+                    self.last_down_error = None;
+                    self.host_tagged().await;
+                    self.options.poll_interval
+                }
                 Ok(who) => {
                     self.host.send_replace(Some(who.clone()));
                     down_backoff = self.options.down_backoff;
@@ -855,6 +956,23 @@ impl<A: TailnetApi, S: Serve<A>> Supervisor<A, S> {
         self.publish(ListenerStatus::TailscaleDown(err));
     }
 
+    /// The host's node is tagged: the owner rule admits nobody, so stop every
+    /// server, ask for no certificate, and say why. `whoami` keeps being
+    /// polled, so removing the tag brings the listener up.
+    async fn host_tagged(&mut self) {
+        if *self.status.borrow() != ListenerStatus::HostTagged {
+            tracing::warn!(
+                "tailnet listener: this host's Tailscale node is tagged; remote access stays down"
+            );
+        }
+        self.last_who = None;
+        self.host.send_replace(None);
+        self.cert_name
+            .send_if_modified(|current| current.take().is_some());
+        self.stop_all().await;
+        self.publish(ListenerStatus::HostTagged);
+    }
+
     /// Make sure a certificate is in service for `who`'s name, then bring the
     /// servers in line with `who`'s addresses: stop the ones whose address
     /// vanished (or whose task ended), start the missing ones.
@@ -875,8 +993,13 @@ impl<A: TailnetApi, S: Serve<A>> Supervisor<A, S> {
         }
         let state = self.cert.borrow_and_update().clone();
         let down = match state {
-            CertState::Ready { name, tls } => {
-                return self.serve_addresses(who, name, &tls, shutdown).await;
+            CertState::Ready {
+                name,
+                expires_at,
+                tls,
+            } => {
+                let cert = ServingCert { name, expires_at };
+                return self.serve_addresses(who, cert, &tls, shutdown).await;
             }
             _ if name.is_none() => ListenerStatus::CertFailed,
             CertState::Down {
@@ -905,11 +1028,11 @@ impl<A: TailnetApi, S: Serve<A>> Supervisor<A, S> {
     }
 
     /// Bring the servers in line with `who`'s addresses, serving `tls` as
-    /// `cert_name`.
+    /// `cert`'s name.
     async fn serve_addresses(
         &mut self,
         who: &WhoIs,
-        cert_name: String,
+        cert: ServingCert,
         tls: &RustlsConfig,
         shutdown: &mut watch::Receiver<bool>,
     ) -> Flow {
@@ -934,7 +1057,7 @@ impl<A: TailnetApi, S: Serve<A>> Supervisor<A, S> {
                 return Flow::Shutdown;
             }
         }
-        self.publish(self.status_after(cert_name, outcome));
+        self.publish(self.status_after(cert, outcome));
         Flow::Continue
     }
 
@@ -1043,10 +1166,14 @@ impl<A: TailnetApi, S: Serve<A>> Supervisor<A, S> {
         }
     }
 
-    fn status_after(&self, name: String, outcome: BindOutcome) -> ListenerStatus {
+    fn status_after(&self, cert: ServingCert, outcome: BindOutcome) -> ListenerStatus {
         if !self.servers.is_empty() {
             let addrs = self.servers.values().map(|server| server.local).collect();
-            return ListenerStatus::Serving { name, addrs };
+            return ListenerStatus::Serving {
+                name: cert.name,
+                addrs,
+                cert_expires_at: cert.expires_at,
+            };
         }
         if outcome.in_use {
             return ListenerStatus::PortInUse {
@@ -3921,6 +4048,132 @@ mod tests {
             assert!(
                 round.await.expect("a round's task"),
                 "the four rounds are admitted"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_tagged_host_publishes_host_tagged_and_binds_nothing() {
+        let mut tagged = whoami_with(&["127.0.0.1/32"]);
+        tagged.node.tags = vec!["tag:server".to_owned()];
+        let fake = Arc::new(FakeTailnet::with_whoami(Ok(tagged)));
+        let serve = Arc::new(PlainServe::default());
+        let (listener, shutdown) = start(&fake, &serve, options(0));
+
+        let status = wait_for_status(&listener, |s| *s != ListenerStatus::Starting).await;
+        assert_eq!(status, ListenerStatus::HostTagged);
+        assert_eq!(serve.started.load(Ordering::SeqCst), 0, "nothing bound");
+        assert!(
+            fake.cert_calls().is_empty(),
+            "a tagged host asks for no certificate"
+        );
+        shutdown.send_replace(true);
+    }
+
+    #[tokio::test]
+    async fn serving_reports_the_certificate_expiry() {
+        let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
+        let serve = Arc::new(PlainServe::default());
+        let (listener, shutdown) = start(&fake, &serve, options(0));
+
+        let status = wait_for_status(&listener, is_serving).await;
+        let expected = cert_expiry(fake.leaf.cert_pem.as_bytes());
+        assert!(expected.is_some(), "the test leaf has a readable notAfter");
+        assert!(
+            matches!(&status, ListenerStatus::Serving { cert_expires_at, .. } if *cert_expires_at == expected),
+            "{status:?}"
+        );
+        shutdown.send_replace(true);
+    }
+
+    #[test]
+    fn cert_expiry_reads_not_after_as_unix_seconds() {
+        let mut params = CertificateParams::new(vec![host().to_owned()]).expect("leaf params");
+        params.not_after = rcgen::date_time_ymd(2030, 1, 1);
+        let key = KeyPair::generate().expect("leaf key");
+        let cert = params.self_signed(&key).expect("self-signed leaf");
+        // 2030-01-01T00:00:00Z.
+        assert_eq!(cert_expiry(cert.pem().as_bytes()), Some(1_893_456_000));
+    }
+
+    #[test]
+    fn cert_expiry_of_garbage_is_none() {
+        assert_eq!(cert_expiry(b"not a certificate"), None);
+        assert_eq!(
+            cert_expiry(b"-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn remote_state_maps_every_listener_status() {
+        use protocol::RemoteState;
+        let addr: SocketAddr = "100.64.0.1:9000".parse().expect("a socket address");
+        let table = [
+            (ListenerStatus::Starting, RemoteState::Starting),
+            (
+                ListenerStatus::Serving {
+                    name: "desktop.tail1234.ts.net".to_owned(),
+                    addrs: vec![addr],
+                    cert_expires_at: Some(1_893_456_000),
+                },
+                RemoteState::Serving {
+                    name: "desktop.tail1234.ts.net".to_owned(),
+                    port: 9000,
+                    cert_expires_at: Some(1_893_456_000),
+                },
+            ),
+            (ListenerStatus::HttpsDisabled, RemoteState::HttpsDisabled),
+            (ListenerStatus::HostTagged, RemoteState::HostTagged),
+            (
+                ListenerStatus::CertFailed,
+                RemoteState::CertFailed {
+                    reason: CERT_FAILED_REASON.to_owned(),
+                },
+            ),
+            (
+                ListenerStatus::PortInUse { port: 9000 },
+                RemoteState::PortInUse,
+            ),
+            (
+                ListenerStatus::BindFailed("100.64.0.1:9000: denied".to_owned()),
+                RemoteState::BindFailed {
+                    reason: "100.64.0.1:9000: denied".to_owned(),
+                },
+            ),
+            (
+                ListenerStatus::TailscaleDown(TailnetError::NotInstalled),
+                RemoteState::NotInstalled,
+            ),
+            (
+                ListenerStatus::TailscaleDown(TailnetError::NotRunning),
+                RemoteState::NotRunning,
+            ),
+            (
+                ListenerStatus::TailscaleDown(TailnetError::AccessDenied),
+                RemoteState::OtherWindowsUser,
+            ),
+            (
+                ListenerStatus::TailscaleDown(TailnetError::NotConnected),
+                RemoteState::NotConnected,
+            ),
+            (
+                ListenerStatus::TailscaleDown(TailnetError::HttpsDisabled),
+                RemoteState::HttpsDisabled,
+            ),
+        ];
+        for (status, expected) in table {
+            assert_eq!(remote_state(&status, 9000), expected, "{status:?}");
+        }
+        for err in [
+            TailnetError::Timeout,
+            TailnetError::BadOutput("whoami listed no address to bind".to_owned()),
+            TailnetError::Failed("exit status 1".to_owned()),
+        ] {
+            let reason = err.to_string();
+            assert_eq!(
+                remote_state(&ListenerStatus::TailscaleDown(err), 9000),
+                RemoteState::TailscaleError { reason }
             );
         }
     }

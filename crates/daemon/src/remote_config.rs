@@ -68,10 +68,23 @@ pub fn load(dirs: &Dirs) -> RemoteConfig {
     }
 }
 
+/// Write `cfg` to `remote.json` through a temp file and a rename, so a reader
+/// never sees a half-written switch.
+///
+/// # Errors
+///
+/// Serializing, writing the temp file or renaming it failed; `remote.json`
+/// is then unchanged.
+pub fn save(dirs: &Dirs, cfg: RemoteConfig) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+    let bytes = serde_json::to_vec_pretty(&cfg).context("serializing remote.json")?;
+    crate::orphan::write_atomic(&dirs.remote_config_file, &bytes).context("writing remote.json")
+}
+
 #[cfg(test)]
 #[expect(clippy::expect_used, reason = "tests assert preconditions with expect")]
 mod tests {
-    use super::{DEFAULT_REMOTE_PORT, load};
+    use super::{DEFAULT_REMOTE_PORT, RemoteConfig, load, save};
     use crate::paths::Dirs;
 
     fn scratch_dirs(tag: &str) -> Dirs {
@@ -126,6 +139,31 @@ mod tests {
         let cfg = load(&dirs);
         assert!(!cfg.enabled, "a zero port means remote access is off");
         assert_eq!(cfg.port, DEFAULT_REMOTE_PORT);
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn save_then_load_round_trips() {
+        let dirs = scratch_dirs("round-trip");
+        for cfg in [
+            RemoteConfig {
+                enabled: true,
+                port: 9000,
+            },
+            RemoteConfig {
+                enabled: false,
+                port: DEFAULT_REMOTE_PORT,
+            },
+        ] {
+            save(&dirs, cfg).expect("save remote.json");
+            assert_eq!(load(&dirs), cfg);
+        }
+        let leftovers: Vec<_> = std::fs::read_dir(&dirs.config)
+            .expect("list the scratch dir")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name() != "remote.json")
+            .collect();
+        assert!(leftovers.is_empty(), "no temp file is left: {leftovers:?}");
         let _ = std::fs::remove_dir_all(&dirs.config);
     }
 

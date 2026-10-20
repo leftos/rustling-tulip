@@ -2497,6 +2497,9 @@ mod tests {
             advertiser: Arc::new(AsyncMutex::new(None)),
             remote_enabled: Arc::new(remote_enabled),
             tailnet: Arc::new(AsyncMutex::new(None)),
+            remote_status: Arc::new(watch::Sender::new(crate::server::RemoteSlot::initial(
+                crate::remote_config::RemoteConfig::default(),
+            ))),
             pairing: Arc::new(AsyncMutex::new(None)),
             keep_awake_enabled: Arc::new(keep_awake_enabled),
             keep_awake_status,
