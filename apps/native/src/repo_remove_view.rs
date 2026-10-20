@@ -194,9 +194,9 @@ impl RootView {
     /// is open.
     #[must_use]
     pub fn repo_remove_armed_label(&self) -> Option<String> {
-        let level = self.container_menu.as_ref()?.level();
+        let level = self.container_menu.as_ref()?.level()?;
         let armed = self.repo_remove.armed()?;
-        (armed == container_key(level)).then(|| row_label(level, true))
+        (armed == container_key(&level)).then(|| row_label(&level, true))
     }
 
     /// The open dialog's heading.

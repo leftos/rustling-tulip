@@ -17,6 +17,7 @@ mod ui_appearance;
 mod ui_appearance_editor;
 mod ui_changes;
 mod ui_commit;
+mod ui_container_menu;
 mod ui_delete_worktree;
 mod ui_diff_tab;
 mod ui_diff_view;

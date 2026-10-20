@@ -1441,7 +1441,14 @@ impl RootView {
                 .unregistered(self.sidebar.repos(), self.sidebar.workspaces())
                 .is_none()
             {
-                self.open_spawn_dialog(SpawnEntry::Locked(lock), window, cx);
+                self.open_spawn_dialog(
+                    SpawnEntry::Locked {
+                        lock,
+                        preselect: None,
+                    },
+                    window,
+                    cx,
+                );
             }
             return;
         };
@@ -1771,6 +1778,20 @@ impl RootView {
         true
     }
 
+    /// Folds a tab-list message, then drops a container menu whose tab,
+    /// repo or workspace it removed; answers whether the message folded a
+    /// tab list.
+    fn fold_tabs_and_drop_stale_menus(
+        &mut self,
+        msg: &DaemonMessage,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let folded = self.fold_tabs(msg, window, cx);
+        self.drop_stale_container_menu(window, cx);
+        folded
+    }
+
     /// The tree an in-flight divider drag points into, kept when `msg` can
     /// rebuild it and compared after the fold.
     fn divider_tree_before(&self, msg: &DaemonMessage) -> Option<(String, GridNode)> {
@@ -1994,7 +2015,7 @@ impl RootView {
         if let DaemonMessage::Tabs { tabs } = &msg {
             self.on_tab_list(tabs, window, cx);
         }
-        if self.fold_tabs(&msg, window, cx) {
+        if self.fold_tabs_and_drop_stale_menus(&msg, window, cx) {
             return;
         }
         match msg {

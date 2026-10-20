@@ -18,7 +18,7 @@ use crate::grid_view::{NO_REPOS_TIP, PANE_PENDING_TIP};
 use crate::launch_last;
 use crate::notice_view::modal_panel;
 use crate::notices::{ActionFailedNotice, ToastKind};
-use crate::open::OpenJob;
+use crate::open::{OpenJob, VsCodeTarget, copy_path, repo_folder, workspace_vscode_target};
 use crate::open_view::Then;
 use crate::palette::{CHIP, LINE_STRONG, SCRIM};
 use crate::session_actions::{
@@ -197,6 +197,19 @@ const CONTAINER_LAUNCH_LAST_CURRENT: &str = "container-launch-last-current";
 const CONTAINER_LAUNCH_LAST_NEW: &str = "container-launch-last-new";
 const CONTAINER_LAUNCH_LAST_EDIT: &str = "container-launch-last-edit";
 const CONTAINER_LAUNCH_LAST_TAB_PREFIX: &str = "container-launch-last-tab-";
+/// The container menu's first row: the spawn dialog, held on the container
+/// or, for a tab container, on that tab.
+const CONTAINER_SPAWN_ROW: &str = "container-menu-spawn";
+/// The container menu's preset row, disabled until the preset wizard lands.
+const CONTAINER_PRESET_ROW: &str = "container-menu-launch-preset";
+const CONTAINER_PRESET_TIP: &str = "Presets arrive with the preset wizard";
+/// The container menu's open rows.
+const CONTAINER_EXPLORER_ROW: &str = "container-menu-explorer";
+const CONTAINER_VSCODE_ROW: &str = "container-menu-vscode";
+const CONTAINER_COPY_PATH_ROW: &str = "container-menu-copy-path";
+/// Why an open row is disabled: a workspace has no single folder, and a
+/// workspace whose members have none leaves VS Code nothing to open.
+const CONTAINER_NO_FOLDER_TIP: &str = "This container has no folder";
 
 /// The submenu that replaces the container menu's rows, if any.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -214,10 +227,40 @@ enum ContainerLaunch {
     Edit,
 }
 
-/// The open repo or workspace context menu.
+/// The container a container menu acts on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum MenuContainer {
+    Repo(String),
+    Workspace(String),
+    Tab(String),
+}
+
+impl MenuContainer {
+    /// The appearance and remove level the container names, for the two
+    /// kinds that have one.
+    fn level(&self) -> Option<Level> {
+        match self {
+            Self::Repo(id) => Some(Level::Repo(id.clone())),
+            Self::Workspace(id) => Some(Level::Workspace(id.clone())),
+            Self::Tab(_) => None,
+        }
+    }
+
+    /// The spawn target the container names, for the two kinds that have
+    /// one.
+    fn target(&self) -> Option<Target> {
+        match self {
+            Self::Repo(id) => Some(Target::Repo(id.clone())),
+            Self::Workspace(id) => Some(Target::Workspace(id.clone())),
+            Self::Tab(_) => None,
+        }
+    }
+}
+
+/// The open repo, workspace or tab container's context menu.
 pub(crate) struct ContainerMenu {
-    /// The repo or workspace it acts on.
-    level: Level,
+    /// The container it acts on.
+    container: MenuContainer,
     /// Where the right-click was, in window coordinates.
     at: Point<Pixels>,
     /// The submenu that replaces the rows, if any.
@@ -227,9 +270,9 @@ pub(crate) struct ContainerMenu {
 }
 
 impl ContainerMenu {
-    /// The repo or workspace the menu acts on.
-    pub(crate) fn level(&self) -> &Level {
-        &self.level
+    /// The appearance and remove level the menu acts on.
+    pub(crate) fn level(&self) -> Option<Level> {
+        self.container.level()
     }
 }
 
@@ -507,24 +550,62 @@ impl RootView {
             self.close_delete_dialog(window, cx);
         }
         if self
-            .container_menu
-            .as_ref()
-            .is_some_and(|menu| !self.container_listed(&menu.level))
-        {
-            self.close_container_menu(window, cx);
-        }
-        if self
             .repo_remove
             .dialog()
-            .is_some_and(|dialog| !self.container_listed(dialog.level()))
+            .is_some_and(|dialog| !self.level_listed(dialog.level()))
         {
             self.close_repo_remove_dialog(window, cx);
         }
         self.drop_stale_appearance_editor(window, cx);
     }
 
+    /// Closes the container menu when the container it acts on left the
+    /// registry or the tab list. It runs after a tab list is folded, so a
+    /// removed tab's menu cannot outlive it.
+    pub(crate) fn drop_stale_container_menu(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .container_menu
+            .as_ref()
+            .is_some_and(|menu| !self.container_listed(&menu.container))
+        {
+            self.close_container_menu(window, cx);
+        }
+    }
+
+    /// Whether the container a menu names is still there.
+    fn container_listed(&self, container: &MenuContainer) -> bool {
+        match container {
+            MenuContainer::Repo(id) => self.sidebar.repos().iter().any(|repo| &repo.id == id),
+            MenuContainer::Workspace(id) => self.sidebar.workspaces().iter().any(|ws| &ws.id == id),
+            MenuContainer::Tab(id) => self.tabs.tabs().iter().any(|tab| &tab.id == id),
+        }
+    }
+
+    /// Whether the tab container `id` can hold a spawn: only a grid tab can.
+    fn tab_spawnable(&self, id: &str) -> bool {
+        self.tabs
+            .tabs()
+            .iter()
+            .find(|tab| tab.id == id)
+            .is_some_and(|tab| tab.grid().is_some())
+    }
+
+    /// The session a tab container's spawn starts on: the first pane that
+    /// holds one.
+    fn tab_preselect(&self, id: &str) -> Option<String> {
+        let tab = self.tabs.tabs().iter().find(|tab| tab.id == id)?;
+        collect_panes(tab.grid()?)
+            .into_iter()
+            .find_map(|pane| pane.session)
+            .map(str::to_owned)
+    }
+
     /// Whether the repo or workspace `level` names is registered.
-    fn container_listed(&self, level: &Level) -> bool {
+    fn level_listed(&self, level: &Level) -> bool {
         match level {
             Level::Repo(id) => self.sidebar.repos().iter().any(|repo| &repo.id == id),
             Level::Workspace(id) => self.sidebar.workspaces().iter().any(|ws| &ws.id == id),
@@ -538,19 +619,20 @@ impl RootView {
         self.container_menu.is_some()
     }
 
-    /// The repo or workspace `level` names, as a container a launch replays.
-    fn launch_container(level: &Level) -> Option<launch_last::Container<'_>> {
-        match level {
-            Level::Repo(id) => Some(launch_last::Container::Repo(id)),
-            Level::Workspace(id) => Some(launch_last::Container::Workspace(id)),
-            Level::Session(_) | Level::App => None,
+    /// The repo or workspace `container` names, as a container a launch
+    /// replays.
+    fn launch_container(container: &MenuContainer) -> Option<launch_last::Container<'_>> {
+        match container {
+            MenuContainer::Repo(id) => Some(launch_last::Container::Repo(id)),
+            MenuContainer::Workspace(id) => Some(launch_last::Container::Workspace(id)),
+            MenuContainer::Tab(_) => None,
         }
     }
 
     /// The stored launch config of the repo or workspace the container menu
     /// acts on.
-    fn container_launch_config(&self, level: &Level) -> Option<SpawnConfig> {
-        Self::launch_container(level)
+    fn container_launch_config(&self, container: &MenuContainer) -> Option<SpawnConfig> {
+        Self::launch_container(container)
             .and_then(|container| self.sidebar.last_spawn_config(container))
     }
 
@@ -562,14 +644,52 @@ impl RootView {
             return Vec::new();
         };
         match menu.submenu {
-            ContainerSubmenu::None => {
-                let mut actions = vec![CONTAINER_APPEARANCE_ROW.to_owned()];
-                if self.container_launch_config(menu.level()).is_some() {
-                    actions.push(CONTAINER_LAUNCH_LAST_ROW.to_owned());
+            ContainerSubmenu::None => match &menu.container {
+                MenuContainer::Tab(id) if self.tab_spawnable(id) => {
+                    vec![vec![CONTAINER_SPAWN_ROW.to_owned()]]
                 }
-                vec![actions, vec![CONTAINER_REMOVE_ROW.to_owned()]]
-            }
+                MenuContainer::Tab(_) => Vec::new(),
+                MenuContainer::Repo(_) | MenuContainer::Workspace(_) => {
+                    let mut groups = vec![vec![CONTAINER_SPAWN_ROW.to_owned()]];
+                    if self.container_launch_config(&menu.container).is_some() {
+                        groups.push(vec![CONTAINER_LAUNCH_LAST_ROW.to_owned()]);
+                    }
+                    groups.push(vec![
+                        CONTAINER_APPEARANCE_ROW.to_owned(),
+                        CONTAINER_PRESET_ROW.to_owned(),
+                    ]);
+                    groups.push(vec![
+                        CONTAINER_EXPLORER_ROW.to_owned(),
+                        CONTAINER_VSCODE_ROW.to_owned(),
+                        CONTAINER_COPY_PATH_ROW.to_owned(),
+                    ]);
+                    groups.push(vec![CONTAINER_REMOVE_ROW.to_owned()]);
+                    groups
+                }
+            },
             ContainerSubmenu::LaunchLast => submenu_groups(self.container_launch_lines()),
+        }
+    }
+
+    /// The tooltip of the container menu row tagged `selector` when the row
+    /// is disabled.
+    #[must_use]
+    pub fn container_menu_disabled_tip(&self, selector: &str) -> Option<&'static str> {
+        let menu = self.container_menu.as_ref()?;
+        if menu.submenu != ContainerSubmenu::None {
+            return None;
+        }
+        match selector {
+            CONTAINER_PRESET_ROW => Some(CONTAINER_PRESET_TIP),
+            CONTAINER_EXPLORER_ROW | CONTAINER_COPY_PATH_ROW => self
+                .container_folder(&menu.container)
+                .is_none()
+                .then_some(CONTAINER_NO_FOLDER_TIP),
+            CONTAINER_VSCODE_ROW => self
+                .container_vscode_job(&menu.container)
+                .is_none()
+                .then_some(CONTAINER_NO_FOLDER_TIP),
+            _ => None,
         }
     }
 
@@ -581,18 +701,31 @@ impl RootView {
             return Vec::new();
         };
         match menu.submenu {
-            ContainerSubmenu::None => {
-                let mut labels = vec!["Appearance…".to_owned()];
-                if self.container_launch_config(menu.level()).is_some() {
-                    labels.push(CONTAINER_LAUNCH_LAST_LABEL.to_owned());
+            ContainerSubmenu::None => match &menu.container {
+                MenuContainer::Tab(id) if self.tab_spawnable(id) => {
+                    vec!["Spawn session here".to_owned()]
                 }
-                let key = crate::repo_remove::container_key(menu.level());
-                labels.push(crate::repo_remove::row_label(
-                    menu.level(),
-                    self.repo_remove.armed() == Some(key.as_str()),
-                ));
-                labels
-            }
+                MenuContainer::Tab(_) => Vec::new(),
+                MenuContainer::Repo(_) | MenuContainer::Workspace(_) => {
+                    let mut labels = vec!["Spawn session".to_owned()];
+                    if self.container_launch_config(&menu.container).is_some() {
+                        labels.push(CONTAINER_LAUNCH_LAST_LABEL.to_owned());
+                    }
+                    labels.push("Appearance…".to_owned());
+                    labels.push("Launch preset…".to_owned());
+                    labels.push("Open in Explorer".to_owned());
+                    labels.push("Open in VS Code".to_owned());
+                    labels.push("Copy path".to_owned());
+                    if let Some(level) = menu.container.level() {
+                        let key = crate::repo_remove::container_key(&level);
+                        labels.push(crate::repo_remove::row_label(
+                            &level,
+                            self.repo_remove.armed() == Some(key.as_str()),
+                        ));
+                    }
+                    labels
+                }
+            },
             ContainerSubmenu::LaunchLast => self
                 .container_launch_lines()
                 .into_iter()
@@ -667,7 +800,7 @@ impl RootView {
 
     /// A line of the Launch last again submenu.
     fn container_launch_line(
-        level: &Level,
+        container: &MenuContainer,
         line: SubmenuLine<ContainerLaunch>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -683,16 +816,16 @@ impl RootView {
                 label,
                 choice,
             } => {
-                let level = level.clone();
+                let container = container.clone();
                 match choice {
                     ContainerLaunch::Placement(placement) => menu_item(&selector, label, false)
                         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                            this.choose_container_launch(&level, placement.clone(), window, cx);
+                            this.choose_container_launch(&container, placement.clone(), window, cx);
                         }))
                         .into_any_element(),
                     ContainerLaunch::Edit => menu_item(&selector, label, false)
                         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                            this.open_container_launch_edit(&level, window, cx);
+                            this.open_container_launch_edit(&container, window, cx);
                         }))
                         .into_any_element(),
                 }
@@ -704,20 +837,20 @@ impl RootView {
     /// where `placement` says.
     fn choose_container_launch(
         &mut self,
-        level: &Level,
+        container: &MenuContainer,
         placement: launch_last::Placement,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.close_container_menu(window, cx);
-        match level {
-            Level::Repo(id) => {
+        match container {
+            MenuContainer::Repo(id) => {
                 self.launch_last_row(launch_last::Container::Repo(id), placement, window, cx);
             }
-            Level::Workspace(id) => {
+            MenuContainer::Workspace(id) => {
                 self.launch_last_row(launch_last::Container::Workspace(id), placement, window, cx);
             }
-            Level::Session(_) | Level::App => {}
+            MenuContainer::Tab(_) => {}
         }
     }
 
@@ -725,16 +858,14 @@ impl RootView {
     /// the container's stored config, held on that container.
     fn open_container_launch_edit(
         &mut self,
-        level: &Level,
+        container: &MenuContainer,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let target = match level {
-            Level::Repo(id) => Target::Repo(id.clone()),
-            Level::Workspace(id) => Target::Workspace(id.clone()),
-            Level::Session(_) | Level::App => return,
+        let Some(target) = container.target() else {
+            return;
         };
-        let Some(config) = self.container_launch_config(level) else {
+        let Some(config) = self.container_launch_config(container) else {
             return;
         };
         self.close_container_menu(window, cx);
@@ -752,16 +883,16 @@ impl RootView {
         );
     }
 
-    /// Opens the context menu of the repo or workspace `level` at `at`,
-    /// taking the keyboard so Esc reaches it; any other menu gives way.
+    /// Opens the context menu of `container` at `at`, taking the keyboard so
+    /// Esc reaches it; any other menu gives way.
     pub(crate) fn open_container_menu(
         &mut self,
-        level: Level,
+        container: MenuContainer,
         at: Point<Pixels>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.container_listed(&level) {
+        if !self.container_listed(&container) {
             return;
         }
         self.close_session_menu(window, cx);
@@ -771,7 +902,7 @@ impl RootView {
         self.close_sc_file_menu(window, cx);
         self.close_more_menu(window, cx);
         self.container_menu = Some(ContainerMenu {
-            level,
+            container,
             at,
             submenu: ContainerSubmenu::None,
             max_height: window.viewport_size().height * MENU_MAX_SHARE,
@@ -790,40 +921,150 @@ impl RootView {
         }
     }
 
+    /// The folder Explorer and Copy path act on: a repo's own, and none for
+    /// a workspace.
+    fn container_folder(&self, container: &MenuContainer) -> Option<PathBuf> {
+        match container {
+            MenuContainer::Repo(id) => repo_folder(self.sidebar.repos(), id),
+            MenuContainer::Workspace(_) | MenuContainer::Tab(_) => None,
+        }
+    }
+
+    /// The path Copy path puts on the clipboard: a repo's own folder, and
+    /// none for a workspace.
+    fn container_copy_path(&self, container: &MenuContainer) -> Option<String> {
+        match container {
+            MenuContainer::Repo(id) => copy_path(self.sidebar.repos(), id),
+            MenuContainer::Workspace(_) | MenuContainer::Tab(_) => None,
+        }
+    }
+
+    /// The job Open in VS Code hands the opener: a repo's folder, a
+    /// workspace's linked `.code-workspace` file, or its member folders.
+    fn container_vscode_job(&self, container: &MenuContainer) -> Option<OpenJob> {
+        match container {
+            MenuContainer::Repo(id) => repo_folder(self.sidebar.repos(), id)
+                .map(|folder| OpenJob::VsCodeFolder(vec![folder])),
+            MenuContainer::Workspace(id) => {
+                workspace_vscode_target(self.sidebar.workspaces(), self.sidebar.repos(), id).map(
+                    |target| match target {
+                        VsCodeTarget::WorkspaceFile(path) => OpenJob::VsCodeWorkspace(path),
+                        VsCodeTarget::Folders(paths) => OpenJob::VsCodeFolder(paths),
+                    },
+                )
+            }
+            MenuContainer::Tab(_) => None,
+        }
+    }
+
+    /// The Explorer, VS Code and Copy path rows, a disabled one where the
+    /// container has no folder to act on.
+    fn container_open_rows(
+        &self,
+        container: &MenuContainer,
+        cx: &mut Context<Self>,
+    ) -> [AnyElement; 3] {
+        let explorer = match self.container_folder(container) {
+            Some(folder) => {
+                let job = OpenJob::Folder(folder);
+                menu_item(CONTAINER_EXPLORER_ROW, "Open in Explorer", false)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.close_container_menu(window, cx);
+                        this.dispatch_open(job.clone(), Then::Nothing, window, cx);
+                    }))
+                    .into_any_element()
+            }
+            None => disabled_row(
+                CONTAINER_EXPLORER_ROW,
+                "Open in Explorer",
+                CONTAINER_NO_FOLDER_TIP,
+            )
+            .into_any_element(),
+        };
+        let vscode = match self.container_vscode_job(container) {
+            Some(job) => menu_item(CONTAINER_VSCODE_ROW, "Open in VS Code", false)
+                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                    this.close_container_menu(window, cx);
+                    this.dispatch_open(job.clone(), Then::Nothing, window, cx);
+                }))
+                .into_any_element(),
+            None => disabled_row(
+                CONTAINER_VSCODE_ROW,
+                "Open in VS Code",
+                CONTAINER_NO_FOLDER_TIP,
+            )
+            .into_any_element(),
+        };
+        let copy = match self.container_copy_path(container) {
+            Some(path) => menu_item(CONTAINER_COPY_PATH_ROW, "Copy path", false)
+                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                    this.close_container_menu(window, cx);
+                    this.copy_to_clipboard(&path, cx);
+                }))
+                .into_any_element(),
+            None => disabled_row(
+                CONTAINER_COPY_PATH_ROW,
+                "Copy path",
+                CONTAINER_NO_FOLDER_TIP,
+            )
+            .into_any_element(),
+        };
+        [explorer, vscode, copy]
+    }
+
+    /// The rows `submenu` shows over `frame`.
+    fn container_menu_frame(
+        &self,
+        container: &MenuContainer,
+        submenu: ContainerSubmenu,
+        frame: Stateful<Div>,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        match submenu {
+            ContainerSubmenu::None => match container {
+                MenuContainer::Tab(id) if self.tab_spawnable(id) => {
+                    let preselect = self.tab_preselect(id);
+                    let tab = id.clone();
+                    frame.child(
+                        menu_item(CONTAINER_SPAWN_ROW, "Spawn session here", false).on_click(
+                            cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                this.close_container_menu(window, cx);
+                                this.open_spawn_dialog(
+                                    SpawnEntry::Locked {
+                                        lock: Lock::for_tab(tab.clone()),
+                                        preselect: preselect.clone(),
+                                    },
+                                    window,
+                                    cx,
+                                );
+                            }),
+                        ),
+                    )
+                }
+                MenuContainer::Tab(_) => frame,
+                MenuContainer::Repo(_) | MenuContainer::Workspace(_) => {
+                    self.container_menu_rows(container, frame, cx)
+                }
+            },
+            ContainerSubmenu::LaunchLast => {
+                let mut frame = frame;
+                for line in self.container_launch_lines() {
+                    frame = frame.child(Self::container_launch_line(container, line, cx));
+                }
+                frame
+            }
+        }
+    }
+
     /// The open container menu over a layer that keeps a click outside it
     /// from reaching what lies beneath.
     pub(crate) fn container_menu_layer(&self, cx: &mut Context<Self>) -> Option<[AnyElement; 2]> {
         let menu = self.container_menu.as_ref()?;
-        let level = menu.level.clone();
+        let container = menu.container.clone();
         let submenu = menu.submenu;
         let at = menu.at;
         let max_height = menu.max_height;
         let backdrop = div().absolute().top_0().left_0().size_full().occlude();
-        let appearance_level = level.clone();
-        let appearance = menu_item(CONTAINER_APPEARANCE_ROW, "Appearance…", false).on_click(
-            cx.listener(move |this, _: &ClickEvent, window, cx| {
-                this.close_container_menu(window, cx);
-                this.open_appearance_editor(appearance_level.clone(), window, cx);
-            }),
-        );
-        let remove_level = level.clone();
-        let remove_key = crate::repo_remove::container_key(&level);
-        let remove_row = menu_item(
-            CONTAINER_REMOVE_ROW,
-            crate::repo_remove::row_label(
-                &level,
-                self.repo_remove.armed() == Some(remove_key.as_str()),
-            ),
-            true,
-        )
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(|_, _: &MouseDownEvent, _, cx| cx.stop_propagation()),
-        )
-        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-            this.click_remove_container(&remove_level, window, cx);
-            cx.stop_propagation();
-        }));
         let frame = menu_frame(
             "container-menu",
             &self.menu_focus,
@@ -833,44 +1074,96 @@ impl RootView {
                 cx.stop_propagation();
             }),
         );
-        let frame = match submenu {
-            ContainerSubmenu::None => {
-                let frame = frame.child(appearance);
-                let frame = if self.container_launch_config(&level).is_some() {
-                    frame.child(
-                        menu_item(
-                            CONTAINER_LAUNCH_LAST_ROW,
-                            CONTAINER_LAUNCH_LAST_LABEL,
-                            false,
-                        )
-                        .on_click(cx.listener(
-                            |this, _: &ClickEvent, window, cx| {
-                                this.show_container_submenu(
-                                    ContainerSubmenu::LaunchLast,
-                                    window,
-                                    cx,
-                                );
-                            },
-                        )),
-                    )
-                } else {
-                    frame
-                };
-                frame.child(menu_separator()).child(remove_row)
-            }
-            ContainerSubmenu::LaunchLast => {
-                let mut frame = frame;
-                for line in self.container_launch_lines() {
-                    frame = frame.child(Self::container_launch_line(&level, line, cx));
-                }
-                frame
-            }
-        };
+        let frame = self.container_menu_frame(&container, submenu, frame, cx);
         let panel = anchored().position(at).snap_to_window().child(frame);
         Some([
             backdrop.into_any_element(),
             deferred(panel).with_priority(1).into_any_element(),
         ])
+    }
+
+    /// The rows a repo's or workspace's menu draws over `frame`.
+    fn container_menu_rows(
+        &self,
+        container: &MenuContainer,
+        frame: Stateful<Div>,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let Some(level) = container.level() else {
+            return frame;
+        };
+        let spawn_container = container.clone();
+        let spawn = menu_item(CONTAINER_SPAWN_ROW, "Spawn session", false).on_click(cx.listener(
+            move |this, _: &ClickEvent, window, cx| {
+                let Some(target) = spawn_container.target() else {
+                    return;
+                };
+                this.close_container_menu(window, cx);
+                this.open_spawn_dialog(
+                    SpawnEntry::Locked {
+                        lock: Lock::for_target(target),
+                        preselect: None,
+                    },
+                    window,
+                    cx,
+                );
+            },
+        ));
+        let appearance_container = container.clone();
+        let appearance = menu_item(CONTAINER_APPEARANCE_ROW, "Appearance…", false).on_click(
+            cx.listener(move |this, _: &ClickEvent, window, cx| {
+                let Some(level) = appearance_container.level() else {
+                    return;
+                };
+                this.close_container_menu(window, cx);
+                this.open_appearance_editor(level, window, cx);
+            }),
+        );
+        let preset = disabled_row(CONTAINER_PRESET_ROW, "Launch preset…", CONTAINER_PRESET_TIP);
+        let [explorer, vscode, copy] = self.container_open_rows(container, cx);
+        let key = crate::repo_remove::container_key(&level);
+        let remove_container = container.clone();
+        let remove_row = menu_item(
+            CONTAINER_REMOVE_ROW,
+            crate::repo_remove::row_label(&level, self.repo_remove.armed() == Some(key.as_str())),
+            true,
+        )
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|_, _: &MouseDownEvent, _, cx| cx.stop_propagation()),
+        )
+        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+            if let Some(level) = remove_container.level() {
+                this.click_remove_container(&level, window, cx);
+            }
+            cx.stop_propagation();
+        }));
+        let mut frame = frame.child(spawn).child(menu_separator());
+        if self.container_launch_config(container).is_some() {
+            frame = frame
+                .child(
+                    menu_item(
+                        CONTAINER_LAUNCH_LAST_ROW,
+                        CONTAINER_LAUNCH_LAST_LABEL,
+                        false,
+                    )
+                    .on_click(cx.listener(
+                        |this, _: &ClickEvent, window, cx| {
+                            this.show_container_submenu(ContainerSubmenu::LaunchLast, window, cx);
+                        },
+                    )),
+                )
+                .child(menu_separator());
+        }
+        frame
+            .child(appearance)
+            .child(preset)
+            .child(menu_separator())
+            .child(explorer)
+            .child(vscode)
+            .child(copy)
+            .child(menu_separator())
+            .child(remove_row)
     }
 
     fn set_menu_mode(&mut self, mode: MenuMode, window: &mut Window, cx: &mut Context<Self>) {
@@ -2250,6 +2543,24 @@ pub(crate) fn menu_item(
         .cursor_pointer()
         .text_color(gpui::rgb(if danger { DANGER } else { TEXT }))
         .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
+        .child(label)
+}
+
+/// A menu row that is drawn but cannot be pressed: muted, with `tip` as its
+/// tooltip.
+fn disabled_row(selector: &str, label: &'static str, tip: &'static str) -> Stateful<Div> {
+    let name = selector.to_owned();
+    div()
+        .id(ElementId::Name(SharedString::from(name.clone())))
+        .debug_selector(move || name)
+        .flex()
+        .items_center()
+        .px(px(8.0))
+        .py(px(3.0))
+        .rounded(px(4.0))
+        .text_color(gpui::rgb(MUTED))
+        .cursor_default()
+        .tooltip(tooltip(tip))
         .child(label)
 }
 

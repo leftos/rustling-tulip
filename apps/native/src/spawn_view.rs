@@ -120,9 +120,14 @@ pub(crate) enum SpawnEntry {
         aim: PaneAim,
         preselect: Option<String>,
     },
-    /// Held on one target, pinned to an existing worktree when the lock
-    /// names one: "Launch session here" in Manage worktrees.
-    Locked(Lock),
+    /// Held on one target or tab, pinned to an existing worktree when the
+    /// lock names one, and starting on `preselect`'s repo or workspace when
+    /// given: "Launch session here" in Manage worktrees, or a container
+    /// menu's spawn row.
+    Locked {
+        lock: Lock,
+        preselect: Option<String>,
+    },
     /// A Shift-duplicate: held on the source's repo or workspace when it
     /// has one, and filled from `prefill` over the Spawn defaults.
     Duplicate {
@@ -164,14 +169,14 @@ pub(crate) enum SpawnModal {
     Form(Box<SpawnDialog>),
     /// "No repos yet." with Add repo, Spawn disabled; the first repo to
     /// arrive opens the form from `entry`.
-    NoRepos(SpawnEntry),
+    NoRepos(Box<SpawnEntry>),
 }
 
 impl SpawnEntry {
     /// The target the dialog is held on, if any.
     fn lock(&self) -> Option<&Lock> {
         match self {
-            Self::Locked(lock) => Some(lock),
+            Self::Locked { lock, .. } => Some(lock),
             Self::Duplicate { lock, .. } => lock.as_ref(),
             Self::Toolbar | Self::Pane { .. } => None,
         }
@@ -531,7 +536,7 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if entry.lock().is_none() && !self.has_repos() {
+        if entry.lock().and_then(Lock::target).is_none() && !self.has_repos() {
             self.prefills.clear();
             if self.spawn_dialog_blocker(None, false).is_some() {
                 return false;
@@ -542,7 +547,7 @@ impl RootView {
         let (aim, preselect, lock, prefill) = match entry {
             SpawnEntry::Toolbar => (None, None, None, None),
             SpawnEntry::Pane { aim, preselect } => (Some(aim), preselect, None, None),
-            SpawnEntry::Locked(lock) => (None, None, Some(lock), None),
+            SpawnEntry::Locked { lock, preselect } => (None, preselect, Some(lock), None),
             SpawnEntry::Duplicate { lock, prefill } => (None, None, lock, Some(prefill)),
         };
         self.prefills.clear();
@@ -619,7 +624,7 @@ impl RootView {
         self.close_flyout();
         self.close_tab_menu(window, cx);
         self.close_more_menu(window, cx);
-        self.spawn_dialog = Some(SpawnModal::NoRepos(entry));
+        self.spawn_dialog = Some(SpawnModal::NoRepos(Box::new(entry)));
         self.apply_spawn_focus(window, cx);
     }
 
@@ -628,7 +633,7 @@ impl RootView {
     fn leave_no_repos(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.spawn_dialog.take() {
             Some(SpawnModal::NoRepos(entry)) => {
-                self.open_spawn_dialog(entry, window, cx);
+                self.open_spawn_dialog(*entry, window, cx);
                 if self.spawn_dialog.is_none() {
                     self.focus_active_pane(window, cx);
                     cx.notify();
@@ -1818,6 +1823,19 @@ fn provider_field(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>)
 }
 
 fn open_in_field(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) -> Div {
+    if let Some(id) = form.open_in_locked() {
+        let control = Control::OpenIn(OpenChoice::Tab(id.to_owned()));
+        let name = form
+            .tab_name(id)
+            .map_or_else(|| id.to_owned(), str::to_owned);
+        let look = Look {
+            selected: true,
+            focused: *focus == control,
+            enabled: false,
+        };
+        let chip = option_button(&control, name, look, cx);
+        return field("Open in").child(segmented(vec![chip.into_any_element()]));
+    }
     let chosen = form.open_in();
     let tabs = form.tabs();
     let current = Control::OpenIn(OpenChoice::CurrentTab);

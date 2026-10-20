@@ -49,7 +49,7 @@ Close behind: the paste and key quirks (native clipboard read, Shift+Enter bytes
 - [x] Detached container "stop all" with two-click confirm — `Sidebar.tsx` (native: P4.11b, in the expanded Detached banner)
 - [x] DIR/SH containers: "Add repo"; "Add workspace" when a `.code-workspace` is found — `Sidebar.tsx` (native: P4.10d)
 - [ ] Drag-reorder containers, tab containers (shared with the TabBar) and leaves, saved on the daemon — `Sidebar.tsx`
-- [ ] Container context menu: spawn (here / in tab), Launch last again ▸ current / new / named tab / edit first, Appearance…, Launch preset (loading / failed / none), open in Explorer, open in VS Code (repo, linked or multi-root), copy path, Remove — `Sidebar.tsx` `ContainerContextMenu` (native: Appearance… landed in P2.10; `Launch last again ▸` with Current tab / New tab / named tab / `Edit first…` in P4.11b)
+- [x] Container context menu: spawn (here / in tab), Launch last again ▸ current / new / named tab / edit first, Appearance…, Launch preset (loading / failed / none), open in Explorer, open in VS Code (repo, linked or multi-root), copy path, Remove — `Sidebar.tsx` `ContainerContextMenu` (native: Appearance… in P2.10; `Launch last again ▸` in P4.11b; spawn here / in tab, Explorer, VS Code and copy path in P4.11c; `Launch preset…` present but disabled until P4.15)
 - [x] Session leaf: status dot (pulses while working, hollow while spawning), label and tooltip, runtime tag, accent stripe, trusted marker, "!", orphan / abandoned / inactive tags, Resume/Dismiss, tab pill (`T:name`, `T:×N`, unbound button) — `Sidebar.tsx` `SessionLeaf`, `TabPill` (native: the tab pill landed in P4.9; the label tooltip, trusted marker, the three tags and their inline Resume / Dismiss in P4.12a; the pulsing and hollow dot with the sidebar in P1)
 - [x] Click a leaf to jump to its tab and pane and clear attention; double-click an unbound leaf to add it to the active tab — `Sidebar.tsx`, `App.tsx` `onSelectSession` (native: a single click places an unbound leaf in the active tab, by the user's ruling, so there is no double-click action)
 - [ ] Drag a leaf onto a pane or a tab pill — `Sidebar.tsx`
@@ -74,7 +74,7 @@ Close behind: the paste and key quirks (native clipboard read, Shift+Enter bytes
 
 ## Spawn dialog & launch flows
 
-- [ ] Entry points: toolbar, Ctrl+N, container menu (target locked), empty pane (preselected), tab container (tab fixed), duplicate (prefilled), worktree manager (worktree pinned) — `SpawnDialog.tsx` (native: toolbar and Ctrl+N / Ctrl+Shift+N landed in P1.7c; worktree manager, worktree pinned, landed in P4.4b; duplicate, prefilled, landed in P4.12c)
+- [x] Entry points: toolbar, Ctrl+N, container menu (target locked), empty pane (preselected), tab container (tab fixed), duplicate (prefilled), worktree manager (worktree pinned) — `SpawnDialog.tsx` (native: toolbar and Ctrl+N / Ctrl+Shift+N landed in P1.7c; worktree manager, worktree pinned, landed in P4.4b; duplicate, prefilled, landed in P4.12c; the container menu and tab container in P4.11c)
 - [x] Target picker ([REPO]/[WS]) or fixed label; "no repos" state with + Add repo — `SpawnDialog.tsx` (native: the picker landed in P1.7c, the "no repos" state with Add repo in P4.10a)
 - [x] Runtime radio: claude / codex / cursor / plain shell; defaults to the target's last spawn unless the user changed it — `SpawnDialog.tsx`
 - [x] "Open in": current tab / new tab / each other tab — `SpawnDialog.tsx`

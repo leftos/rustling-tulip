@@ -372,6 +372,14 @@ impl Opener for NoOpener {
         Err(OpenFailure::Failed("the shot opens nothing".to_owned()))
     }
 
+    fn vscode_folder(&self, _paths: &[PathBuf]) -> Result<(), OpenFailure> {
+        Err(OpenFailure::Failed("the shot opens nothing".to_owned()))
+    }
+
+    fn vscode_workspace(&self, _path: &Path) -> Result<(), OpenFailure> {
+        Err(OpenFailure::Failed("the shot opens nothing".to_owned()))
+    }
+
     fn default_app(&self, _path: &Path) -> Result<(), String> {
         Err("the shot opens nothing".to_owned())
     }

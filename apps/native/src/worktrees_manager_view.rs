@@ -329,7 +329,14 @@ impl RootView {
         tracing::info!(path = %entry.path, "worktrees manager: launching into the group");
         self.worktrees_manager = None;
         self.close_appearance_editor(window, cx);
-        self.open_spawn_dialog(SpawnEntry::Locked(lock), window, cx);
+        self.open_spawn_dialog(
+            SpawnEntry::Locked {
+                lock,
+                preselect: None,
+            },
+            window,
+            cx,
+        );
         cx.notify();
     }
 

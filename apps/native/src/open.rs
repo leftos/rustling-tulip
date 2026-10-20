@@ -13,7 +13,7 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use protocol::SessionSnapshot;
+use protocol::{RepoEntry, SessionSnapshot, WorkspaceEntry};
 
 use crate::links::TerminalLinkCandidate;
 use crate::sidebar::load_unc_hosts;
@@ -87,6 +87,22 @@ pub trait Opener: Send + Sync {
     /// is looked for, else why it would not start.
     fn vscode(&self, path: &Path, line: u32, column: u32) -> Result<(), OpenFailure>;
 
+    /// Opens `paths` in VS Code as one multi-root workspace: the first as the
+    /// window's folder and every other added to it.
+    ///
+    /// # Errors
+    /// [`OpenFailure::VsCodeNotFound`] when no VS Code is installed where it
+    /// is looked for, else why it would not start; an empty list is a
+    /// [`OpenFailure::Failed`].
+    fn vscode_folder(&self, paths: &[PathBuf]) -> Result<(), OpenFailure>;
+
+    /// Opens the `.code-workspace` file `path` in VS Code.
+    ///
+    /// # Errors
+    /// [`OpenFailure::VsCodeNotFound`] when no VS Code is installed where it
+    /// is looked for, else why it would not start.
+    fn vscode_workspace(&self, path: &Path) -> Result<(), OpenFailure>;
+
     /// Opens `path` with the app the OS has registered for it, which asks
     /// the user to pick one for a type it has none for; a folder opens in
     /// the file manager.
@@ -135,6 +151,14 @@ impl Opener for SystemOpener {
         spawn_vscode(path, line, column)
     }
 
+    fn vscode_folder(&self, paths: &[PathBuf]) -> Result<(), OpenFailure> {
+        spawn_vscode_paths(paths)
+    }
+
+    fn vscode_workspace(&self, path: &Path) -> Result<(), OpenFailure> {
+        spawn_vscode_paths(&[path.to_path_buf()])
+    }
+
     fn default_app(&self, path: &Path) -> Result<(), String> {
         if path.is_dir() {
             open_folder(path)
@@ -173,6 +197,62 @@ pub enum OpenAction {
     DefaultApp(PathBuf),
 }
 
+/// Where a workspace row's "Open in VS Code" points.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VsCodeTarget {
+    /// A linked `.code-workspace` file.
+    WorkspaceFile(PathBuf),
+    /// The members' folders, opened as a multi-root workspace.
+    Folders(Vec<PathBuf>),
+}
+
+/// The folder the registered repo `repo_id` lives in; a blank path names
+/// none.
+#[must_use]
+pub fn repo_folder(repos: &[RepoEntry], repo_id: &str) -> Option<PathBuf> {
+    repos
+        .iter()
+        .find(|repo| repo.id == repo_id)
+        .map(|repo| repo.path.trim())
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+}
+
+/// Where the workspace `workspace_id` opens in VS Code: its linked
+/// `.code-workspace` file when it has one, else its members' folders in
+/// member order, missing or blank ones skipped. `None` when neither yields
+/// a path.
+#[must_use]
+pub fn workspace_vscode_target(
+    workspaces: &[WorkspaceEntry],
+    repos: &[RepoEntry],
+    workspace_id: &str,
+) -> Option<VsCodeTarget> {
+    let workspace = workspaces
+        .iter()
+        .find(|workspace| workspace.id == workspace_id)?;
+    if let Some(linked) = workspace
+        .linked_vscode_workspace
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    {
+        return Some(VsCodeTarget::WorkspaceFile(PathBuf::from(linked)));
+    }
+    let folders: Vec<PathBuf> = workspace
+        .member_repo_ids
+        .iter()
+        .filter_map(|id| repo_folder(repos, id))
+        .collect();
+    (!folders.is_empty()).then_some(VsCodeTarget::Folders(folders))
+}
+
+/// The repo `repo_id`'s folder as the path Copy path puts on the clipboard.
+#[must_use]
+pub fn copy_path(repos: &[RepoEntry], repo_id: &str) -> Option<String> {
+    repo_folder(repos, repo_id).map(|path| path.to_string_lossy().into_owned())
+}
+
 /// One thing handed to the [`Opener`] on a background thread.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OpenJob {
@@ -182,6 +262,12 @@ pub enum OpenJob {
         line: u32,
         column: u32,
     },
+    /// A folder in the OS file manager.
+    Folder(PathBuf),
+    /// Folders opened in VS Code as one multi-root workspace.
+    VsCodeFolder(Vec<PathBuf>),
+    /// A `.code-workspace` file opened in VS Code.
+    VsCodeWorkspace(PathBuf),
     /// A file for its default app. Unless the user `confirmed` it, a file
     /// that runs code comes back as [`JobOutcome::AskFirst`] unopened.
     DefaultApp {
@@ -208,11 +294,15 @@ impl OpenJob {
         match self {
             Self::Url(url) => opener.url(url).map_err(OpenFailure::Failed),
             Self::VsCode { path, line, column } => opener.vscode(path, *line, *column),
+            Self::VsCodeFolder(paths) => opener.vscode_folder(paths),
+            Self::VsCodeWorkspace(path) => opener.vscode_workspace(path),
             Self::DefaultApp {
                 path,
                 confirmed: false,
             } if runs_code(path, opener) => return Ok(JobOutcome::AskFirst(path.clone())),
-            Self::DefaultApp { path, .. } => opener.default_app(path).map_err(OpenFailure::Failed),
+            Self::Folder(path) | Self::DefaultApp { path, .. } => {
+                opener.default_app(path).map_err(OpenFailure::Failed)
+            }
             Self::Reveal(path) => opener.reveal(path).map_err(OpenFailure::Failed),
         }
         .map(|()| JobOutcome::Opened)
@@ -502,6 +592,33 @@ fn spawn_vscode(path: &Path, line: u32, column: u32) -> Result<(), OpenFailure> 
     }))
 }
 
+/// Launches the first VS Code command that starts, with `paths[0]` as the
+/// window's folder and every other path added to it (`--add`).
+fn spawn_vscode_paths(paths: &[PathBuf]) -> Result<(), OpenFailure> {
+    let Some((first, rest)) = paths.split_first() else {
+        return Err(OpenFailure::Failed(
+            "no folder to open in VS Code".to_owned(),
+        ));
+    };
+    let mut failure = None;
+    for command in vscode_commands() {
+        let mut child = Command::new(&command);
+        child.arg(first);
+        for path in rest {
+            child.arg("--add").arg(path);
+        }
+        no_window(&mut child);
+        match child.spawn() {
+            Ok(_) => return Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => failure = Some(format!("{}: {err}", command.display())),
+        }
+    }
+    Err(failure.map_or(OpenFailure::VsCodeNotFound, |err| {
+        OpenFailure::Failed(format!("failed to launch VS Code ({err})"))
+    }))
+}
+
 /// Keeps a console child from flashing a console window.
 #[cfg(windows)]
 fn no_window(command: &mut Command) {
@@ -718,12 +835,13 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use protocol::SessionSnapshot;
+    use protocol::{RepoEntry, SessionSnapshot, WorkspaceEntry};
     use serde_json::json;
 
     use super::{
-        OpenAction, OpenFailure, Opener, Resolution, base_dirs, existing_on_disk, resolve_with,
-        runs_code, simplify_path, unc_host, validate_http_url,
+        OpenAction, OpenFailure, Opener, Resolution, VsCodeTarget, base_dirs, copy_path,
+        existing_on_disk, repo_folder, resolve_with, runs_code, simplify_path, unc_host,
+        validate_http_url, workspace_vscode_target,
     };
     use crate::links::TerminalLinkCandidate;
 
@@ -772,6 +890,14 @@ mod tests {
         }
 
         fn vscode(&self, _: &Path, _: u32, _: u32) -> Result<(), OpenFailure> {
+            Err(OpenFailure::VsCodeNotFound)
+        }
+
+        fn vscode_folder(&self, _: &[PathBuf]) -> Result<(), OpenFailure> {
+            Err(OpenFailure::VsCodeNotFound)
+        }
+
+        fn vscode_workspace(&self, _: &Path) -> Result<(), OpenFailure> {
             Err(OpenFailure::VsCodeNotFound)
         }
 
@@ -834,6 +960,101 @@ mod tests {
             Resolution::Open(OpenAction::DefaultApp(path)) => Ok(path),
             other => Err(format!("{other:?}")),
         }
+    }
+
+    fn repo_at(id: &str, path: &str) -> RepoEntry {
+        serde_json::from_value(json!({ "id": id, "name": id, "path": path })).expect("repo fixture")
+    }
+
+    fn workspace_with(id: &str, members: &[&str], linked: Option<&str>) -> WorkspaceEntry {
+        serde_json::from_value(json!({
+            "id": id, "name": id, "member_repo_ids": members,
+            "linked_vscode_workspace": linked,
+        }))
+        .expect("workspace fixture")
+    }
+
+    #[test]
+    fn a_repo_opens_its_own_folder() {
+        let repos = [repo_at("r1", "D:/src/r1"), repo_at("r2", "D:/src/r2")];
+        assert_eq!(repo_folder(&repos, "r1"), Some(PathBuf::from("D:/src/r1")));
+        assert_eq!(repo_folder(&repos, "gone"), None);
+        assert_eq!(
+            repo_folder(&[repo_at("blank", "  ")], "blank"),
+            None,
+            "a blank path names no folder"
+        );
+    }
+
+    #[test]
+    fn a_linked_workspace_opens_its_file() {
+        let repos = [repo_at("r1", "D:/src/r1")];
+        let workspaces = [workspace_with(
+            "w1",
+            &["r1"],
+            Some("D:/ws/my.code-workspace"),
+        )];
+        assert_eq!(
+            workspace_vscode_target(&workspaces, &repos, "w1"),
+            Some(VsCodeTarget::WorkspaceFile(PathBuf::from(
+                "D:/ws/my.code-workspace"
+            )))
+        );
+    }
+
+    #[test]
+    fn a_workspace_without_a_link_opens_member_folders_in_order() {
+        let repos = [repo_at("r1", "D:/src/r1"), repo_at("r2", "D:/src/r2")];
+        let workspaces = [workspace_with("w1", &["r2", "r1"], None)];
+        assert_eq!(
+            workspace_vscode_target(&workspaces, &repos, "w1"),
+            Some(VsCodeTarget::Folders(vec![
+                PathBuf::from("D:/src/r2"),
+                PathBuf::from("D:/src/r1"),
+            ]))
+        );
+    }
+
+    #[test]
+    fn a_missing_workspace_member_is_skipped() {
+        let repos = [
+            repo_at("r1", "D:/src/r1"),
+            repo_at("blank", " "),
+            repo_at("r2", "D:/src/r2"),
+        ];
+        let workspaces = [workspace_with("w1", &["gone", "r1", "blank", "r2"], None)];
+        assert_eq!(
+            workspace_vscode_target(&workspaces, &repos, "w1"),
+            Some(VsCodeTarget::Folders(vec![
+                PathBuf::from("D:/src/r1"),
+                PathBuf::from("D:/src/r2"),
+            ])),
+            "only the members with a folder, in member order"
+        );
+    }
+
+    #[test]
+    fn a_workspace_with_no_resolvable_folder_has_no_target() {
+        let repos = [repo_at("r1", "D:/src/r1")];
+        let workspaces = [
+            workspace_with("empty", &[], None),
+            workspace_with("gone", &["missing"], None),
+            workspace_with("blank-link", &["missing"], Some(" ")),
+        ];
+        for id in ["empty", "gone", "blank-link", "unknown"] {
+            assert_eq!(
+                workspace_vscode_target(&workspaces, &repos, id),
+                None,
+                "{id} names no target"
+            );
+        }
+    }
+
+    #[test]
+    fn copy_path_is_the_repo_folder() {
+        let repos = [repo_at("r1", "D:/src/r1")];
+        assert_eq!(copy_path(&repos, "r1"), Some("D:/src/r1".to_owned()));
+        assert_eq!(copy_path(&repos, "gone"), None);
     }
 
     #[test]

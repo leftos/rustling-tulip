@@ -6,22 +6,7 @@ The rulings the native client's open items need before they are briefed. Each it
 
 - **Landing:** each item is committed to `main` as soon as it is green, and pushed at checkpoints (a finished wave), not after every item.
 - **Autonomy:** drive the native client to done without stopping between items or waves. Technical decisions are settled in the session and recorded here as rulings; only questions about behaviour the user will see go to the user. Phases 5 and 6 are split into brief-sized items from their parity sections when their wave comes up, and the split goes to the user before anything is dispatched.
-- **Phase 4 scope:** its named features plus every parity line not claimed by Phase 5 (drag-and-drop, pop-outs) or Phase 6 (remote). Every item mounts into `RootView` (`lib.rs`), so concurrent items rebase onto `main` before landing. Concurrency ceiling 3. Dependencies: P4.11c → P4.15b (the launch path). P4.12c builds on the spawn form's target lock (`spawn_form.rs` `Lock`: a locked target plus an optional pinned worktree and `share_confirmed`), which P4.4b added for "Launch session here".
-## P4.10 and P4.11: repos, workspaces and containers
-
-Split (user) into seven items, landing on `main` in this order: P4.10a (landed; its rulings are in [docs/native-client.md](../native-client.md)) → P4.10b (landed; its flow is in [docs/native-client.md](../native-client.md)) → P4.11a → P4.10c (landed; its flow is in [docs/native-client.md](../native-client.md)) → P4.10d (landed; its flow is in [docs/native-client.md](../native-client.md)) ∥ P4.11b (landed; its rules are in [docs/native-client.md](../native-client.md)) → P4.11c. Every daemon message they use exists (`AddRepo`, `RemoveRepo`, `UpsertWorkspace`, `RemoveWorkspace`, `ResumeAllAbandoned`, `ScanVscodeWorkspaces`, `ParseVscodeWorkspace`, `AcceptVscodeWorkspaceSuggestion`, `VscodeWorkspaceSuggestion`, `VscodeWorkspaceParsed`, `SuggestBranchName`, `StopSession`); the group adds only the additive `#[serde(default)]` field `WorkspaceEntry.watch_vscode_workspace`, so no protocol bump. `sidebar_view.rs` and `session_menu.rs` are shared, so two run at once at most. The Tauri app on the `tauri-last` tag (`apps/tauri-app/src/components/Sidebar.tsx` (`655–675` for the workspace row), `RepoRemoveDialog.tsx`, `VscodeSuggestionToast.tsx`, `App.tsx` `1852–1861`, `3313–3325`, `4171–4175`) settles any behaviour not ruled here.
-
-Rulings (user):
-
-- **Toolbar:** + Repo and + Workspace are rows in the sidebar toolbar's `⋯` menu beside Shell…; the 30 px button row stays + Session, + Shell, `⋯`. + Workspace is disabled with "needs 2 repos" while fewer than two repos exist.
-- **Resume all (N):** shown from N ≥ 2; a single abandoned session has its leaf's Resume.
-- **Launch last:** ▶ shows at the container row's right on hover or keyboard focus; a double-click on the row replays the last config into the current tab, a single click still folds. No stored config opens the dialog locked to the container; a trusted config opens the dialog prefilled; a worktree config waits for `SuggestBranchName`, as Tauri did.
-- **Open in VS Code on a workspace:** the linked `.code-workspace` file when the workspace has one, else a new window with every member folder.
-- **`AddRepo` has no `request_id`:** a refusal arrives as the generic `Error` toast; no protocol change.
-
-Items:
-
-- **P4.11c Full container menu and spawn entry points.** Spawn here / in tab, presets entry (disabled until P4.15), Explorer, VS Code (`open.rs` gains a folder and a `.code-workspace` job), copy path, the tab-container menu, the container and tab-container locks (`spawn_form.rs` `Lock` gains a tab). `session_menu.rs`, `spawn_form.rs`, `spawn_view.rs`, `open.rs`, `sidebar_view.rs`. Needs P4.10b, P4.11b.
+- **Phase 4 scope:** its named features plus every parity line not claimed by Phase 5 (drag-and-drop, pop-outs) or Phase 6 (remote). Every item mounts into `RootView` (`lib.rs`), so concurrent items rebase onto `main` before landing. Concurrency ceiling 3. Dependencies: P4.11c → P4.15b (the launch path). P4.12c builds on the spawn form's target lock (`spawn_form.rs` `Lock`: a locked target or tab, an optional pinned worktree and `share_confirmed`), which P4.4b added for "Launch session here".
 
 ## P4.15 Preset wizard
 

@@ -6,7 +6,6 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use crate::appearance;
-use crate::appearance_view::Level;
 use crate::assets::{
     SIDEBAR_BRANCH_ICON, SIDEBAR_CHEVRON_DOWN_ICON, SIDEBAR_CHEVRON_RIGHT_ICON,
     SIDEBAR_FOLDER_ICON, SIDEBAR_MORE_ICON, SIDEBAR_PLAY_ICON, SIDEBAR_PLUS_ICON,
@@ -24,7 +23,8 @@ use crate::palette::{
 use crate::repo_add::RepoAdd;
 use crate::session_actions::inline_actions;
 use crate::session_menu::{
-    BorderedButton, MENU_MAX_SHARE, bordered_button, menu_frame, menu_item, menu_separator,
+    BorderedButton, MENU_MAX_SHARE, MenuContainer, bordered_button, menu_frame, menu_item,
+    menu_separator,
 };
 use crate::sidebar::{
     Activity, Container, ContainerKind, DETACHED_BANNER, Leaf, LeafDensity, SidebarView, can_attach,
@@ -1232,13 +1232,13 @@ fn container_row(
     let click_key = key.clone();
     let click_id = container.id.clone();
     let name = format!("container-{}", container.key);
-    let level = match container.kind {
-        ContainerKind::Repo => Some(Level::Repo(container.id.clone())),
-        ContainerKind::Workspace => Some(Level::Workspace(container.id.clone())),
+    let container_menu = match container.kind {
+        ContainerKind::Repo => Some(MenuContainer::Repo(container.id.clone())),
+        ContainerKind::Workspace => Some(MenuContainer::Workspace(container.id.clone())),
+        ContainerKind::Tab => Some(MenuContainer::Tab(container.id.clone())),
         ContainerKind::Shell
         | ContainerKind::Dir
         | ContainerKind::Detached
-        | ContainerKind::Tab
         | ContainerKind::Unbound => None,
     };
     let launchable = matches!(
@@ -1282,11 +1282,11 @@ fn container_row(
         row.child(container_launch(container, two_line, cx))
     });
     row.when_some(container.tooltip(), |row, tip| row.tooltip(tooltip(tip)))
-        .when_some(level, |row, level| {
+        .when_some(container_menu, |row, menu| {
             row.on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                    this.open_container_menu(level.clone(), event.position, window, cx);
+                    this.open_container_menu(menu.clone(), event.position, window, cx);
                     cx.stop_propagation();
                 }),
             )

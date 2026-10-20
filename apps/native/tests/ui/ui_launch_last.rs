@@ -1252,8 +1252,13 @@ fn an_armed_remove_row_does_not_survive_the_launch_last_submenu(cx: &mut TestApp
     assert_eq!(
         h.root(|root, _| root.container_menu_labels()),
         [
-            "Appearance…",
+            "Spawn session",
             "Launch last again ▸",
+            "Appearance…",
+            "Launch preset…",
+            "Open in Explorer",
+            "Open in VS Code",
+            "Copy path",
             "Confirm: remove repo…"
         ],
         "the first click arms the Remove row"
@@ -1265,7 +1270,16 @@ fn an_armed_remove_row_does_not_survive_the_launch_last_submenu(cx: &mut TestApp
 
     assert_eq!(
         h.root(|root, _| root.container_menu_labels()),
-        ["Appearance…", "Launch last again ▸", "Remove repo"],
+        [
+            "Spawn session",
+            "Launch last again ▸",
+            "Appearance…",
+            "Launch preset…",
+            "Open in Explorer",
+            "Open in VS Code",
+            "Copy path",
+            "Remove repo"
+        ],
         "Back returns the row unarmed"
     );
     h.click_on("container-menu-remove");
@@ -1287,17 +1301,33 @@ fn back_returns_the_launch_last_submenu_to_the_top_level(cx: &mut TestAppContext
     assert_eq!(
         h.root(|root, _| root.container_menu_groups()),
         vec![
+            vec!["container-menu-spawn".to_owned()],
+            vec!["container-launch-last".to_owned()],
             vec![
                 "container-menu-appearance".to_owned(),
-                "container-launch-last".to_owned(),
+                "container-menu-launch-preset".to_owned(),
+            ],
+            vec![
+                "container-menu-explorer".to_owned(),
+                "container-menu-vscode".to_owned(),
+                "container-menu-copy-path".to_owned(),
             ],
             vec!["container-menu-remove".to_owned()],
         ],
-        "Appearance, Launch last again, then Remove"
+        "Spawn, Launch last again, appearance and preset, the open rows, then Remove"
     );
     assert_eq!(
         h.root(|root, _| root.container_menu_labels()),
-        ["Appearance…", "Launch last again ▸", "Remove repo"],
+        [
+            "Spawn session",
+            "Launch last again ▸",
+            "Appearance…",
+            "Launch preset…",
+            "Open in Explorer",
+            "Open in VS Code",
+            "Copy path",
+            "Remove repo"
+        ],
     );
 }
 

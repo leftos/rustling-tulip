@@ -257,6 +257,18 @@ impl RootView {
                 tracing::warn!(path = %path.display(), "VS Code not found; opening the file in its default app");
                 self.open_in_default_app(path, Then::SayVsCodeMissing, window, cx);
             }
+            (Err(OpenFailure::VsCodeNotFound), OpenJob::VsCodeFolder(paths)) => {
+                if let Some(path) = paths.first() {
+                    tracing::warn!(path = %path.display(), "VS Code not found; opening the folder in the file manager");
+                    self.open_in_default_app(path.clone(), Then::SayVsCodeMissing, window, cx);
+                } else {
+                    tracing::warn!("VS Code not found and the job names no folder");
+                }
+            }
+            (Err(OpenFailure::VsCodeNotFound), OpenJob::VsCodeWorkspace(path)) => {
+                tracing::warn!(path = %path.display(), "VS Code not found; opening the workspace file in its default app");
+                self.open_in_default_app(path, Then::SayVsCodeMissing, window, cx);
+            }
             (Err(OpenFailure::VsCodeNotFound), job) => {
                 tracing::warn!(?job, "VS Code not found for a job that does not use it");
             }

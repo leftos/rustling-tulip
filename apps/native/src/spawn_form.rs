@@ -768,11 +768,19 @@ impl ExistingOption {
     }
 }
 
-/// A dialog held on one target, optionally pinned to one of its existing
-/// worktrees: the target cannot be changed while the dialog is open.
+/// Where a lock fixes the dialog: its target, or its tab.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LockPlace {
+    Target(Target),
+    Tab(String),
+}
+
+/// A dialog held on one target or one tab, optionally pinned to an existing
+/// worktree: the target or the placement cannot be changed while the dialog
+/// is open.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Lock {
-    target: Target,
+    place: LockPlace,
     pin: Option<ExistingOption>,
     /// The worktrees manager's own share confirm already answered for the
     /// pin.
@@ -802,13 +810,13 @@ impl Lock {
                     pin: Pin::Worktree(worktree_path.clone()),
                 };
                 Some(Self {
-                    target: Target::Repo(repo_id.clone()),
+                    place: LockPlace::Target(Target::Repo(repo_id.clone())),
                     pin: Some(pin),
                     share_confirmed: false,
                 })
             }
             WorktreeLaunchTarget::Workspace { workspace_id, .. } => Some(Self {
-                target: Target::Workspace(workspace_id.clone()),
+                place: LockPlace::Target(Target::Workspace(workspace_id.clone())),
                 pin: ExistingOption::from_group(entry, workspace_id),
                 share_confirmed: false,
             }),
@@ -816,13 +824,31 @@ impl Lock {
         }
     }
 
-    /// A lock on `target` alone, with no worktree pinned: the dialog a
-    /// Shift-duplicate opens.
+    /// A lock on `target` alone, with no worktree pinned and the placement
+    /// left free: the dialog a container menu or a Shift-duplicate opens.
     pub(crate) fn for_target(target: Target) -> Self {
         Self {
-            target,
+            place: LockPlace::Target(target),
             pin: None,
             share_confirmed: false,
+        }
+    }
+
+    /// A lock on `tab_id` alone: the placement is fixed to that tab and the
+    /// target stays free. The dialog a tab container's menu opens.
+    pub(crate) fn for_tab(tab_id: String) -> Self {
+        Self {
+            place: LockPlace::Tab(tab_id),
+            pin: None,
+            share_confirmed: false,
+        }
+    }
+
+    /// The target the lock holds, if it holds one.
+    pub(crate) fn target(&self) -> Option<&Target> {
+        match &self.place {
+            LockPlace::Target(target) => Some(target),
+            LockPlace::Tab(_) => None,
         }
     }
 
@@ -840,14 +866,16 @@ impl Lock {
         repos: &[RepoEntry],
         workspaces: &[WorkspaceEntry],
     ) -> Option<&'static str> {
-        match &self.target {
-            Target::Repo(id) if !repos.iter().any(|repo| &repo.id == id) => {
+        match &self.place {
+            LockPlace::Target(Target::Repo(id)) if !repos.iter().any(|repo| &repo.id == id) => {
                 Some("the repo is no longer registered")
             }
-            Target::Workspace(id) if !workspaces.iter().any(|workspace| &workspace.id == id) => {
+            LockPlace::Target(Target::Workspace(id))
+                if !workspaces.iter().any(|workspace| &workspace.id == id) =>
+            {
                 Some("the workspace is no longer registered")
             }
-            _ => None,
+            LockPlace::Tab(_) | LockPlace::Target(_) => None,
         }
     }
 }
@@ -955,6 +983,9 @@ pub(crate) struct SpawnForm {
     target: Target,
     /// The target cannot be changed.
     locked: bool,
+    /// The tab the placement is fixed to, when a tab container's menu opened
+    /// the dialog.
+    tab_lock: Option<String>,
     runtime: RuntimeChoice,
     provider: ProviderChoice,
     tabs: TabChoices,
@@ -1022,6 +1053,42 @@ pub(crate) struct FormInputs<'a> {
     pub claude_provider_supported: bool,
 }
 
+/// A dialog's opening state: target, pinned worktree, share confirm, whether
+/// the target is locked, and the tab the placement is locked to.
+type OpeningLock = (Target, Option<ExistingOption>, bool, bool, Option<String>);
+
+/// How a dialog opens, or `None` when a locked target left the registry or
+/// there is nothing to spawn into.
+fn opening_lock(
+    focused: Option<&SessionSnapshot>,
+    repos: &[RepoEntry],
+    workspaces: &[WorkspaceEntry],
+    lock: Option<Lock>,
+) -> Option<OpeningLock> {
+    let Some(lock) = lock else {
+        return Some((
+            initial_target(focused, repos, workspaces)?,
+            None,
+            false,
+            false,
+            None,
+        ));
+    };
+    if lock.unregistered(repos, workspaces).is_some() {
+        return None;
+    }
+    match lock.place {
+        LockPlace::Target(target) => Some((target, lock.pin, lock.share_confirmed, true, None)),
+        LockPlace::Tab(tab) => Some((
+            initial_target(focused, repos, workspaces)?,
+            None,
+            false,
+            false,
+            Some(tab),
+        )),
+    }
+}
+
 impl SpawnForm {
     /// The form over `inputs` and the requests its target needs, or `None`
     /// when there is nothing to spawn into or the locked target is not
@@ -1031,24 +1098,8 @@ impl SpawnForm {
         cache: &mut BranchCache,
         now: Instant,
     ) -> Option<(Self, Vec<ClientMessage>)> {
-        let (target, pin, share_confirmed) = match inputs.lock {
-            Some(Lock {
-                target,
-                pin,
-                share_confirmed,
-            }) => {
-                let registered = match &target {
-                    Target::Repo(id) => inputs.repos.iter().any(|r| &r.id == id),
-                    Target::Workspace(id) => inputs.workspaces.iter().any(|w| &w.id == id),
-                };
-                (registered.then_some(target)?, Some(pin), share_confirmed)
-            }
-            None => (
-                initial_target(inputs.focused, inputs.repos, inputs.workspaces)?,
-                None,
-                false,
-            ),
-        };
+        let (target, pin, share_confirmed, locked, tab_lock) =
+            opening_lock(inputs.focused, inputs.repos, inputs.workspaces, inputs.lock)?;
         let open_in = if inputs.tabs.current.is_some() {
             OpenChoice::CurrentTab
         } else {
@@ -1059,7 +1110,8 @@ impl SpawnForm {
             repos: inputs.repos.to_vec(),
             workspaces: inputs.workspaces.to_vec(),
             target: target.clone(),
-            locked: pin.is_some(),
+            locked,
+            tab_lock: None,
             runtime: RuntimeChoice {
                 agent: Agent::Claude,
                 plain_shell: false,
@@ -1101,6 +1153,12 @@ impl SpawnForm {
             share_confirmed,
             submitted: false,
         };
+        if let Some(tab) = tab_lock
+            && form.offers_tab(&tab)
+        {
+            form.open_in = OpenChoice::Tab(tab.clone());
+            form.tab_lock = Some(tab);
+        }
         let mut messages = form.load_target(target, cache, now);
         messages.push(ClientMessage::ListEnvNames {
             request_id: Some(form.env_names_request.clone()),
@@ -1110,7 +1168,7 @@ impl SpawnForm {
         } else {
             Control::Target(form.target.clone())
         };
-        if let Some(Some(option)) = pin {
+        if let Some(option) = pin {
             messages.extend(form.pin(option));
         }
         Some((form, messages))
@@ -1151,6 +1209,13 @@ impl SpawnForm {
             Some(config) => self.apply_config(config, cache, now),
             None => Vec::new(),
         }
+    }
+
+    /// Whether Open in offers the grid tab `id`: the active tab or another
+    /// one.
+    fn offers_tab(&self, id: &str) -> bool {
+        self.tabs.current.as_ref().is_some_and(|tab| tab.id == id)
+            || self.tabs.others.iter().any(|tab| tab.id == id)
     }
 
     /// Picks `choice`: a named tab that is the current one picks the
@@ -1971,10 +2036,18 @@ impl SpawnForm {
         Some(self.load_target(first, cache, now))
     }
 
-    /// Replaces the tabs; a choice whose tab went away falls back to the
-    /// current tab, else a new one.
+    /// Replaces the tabs; a locked tab that went away drops its lock, and a
+    /// choice whose tab went away falls back to the current tab, else a new
+    /// one.
     pub(crate) fn set_tabs(&mut self, tabs: TabChoices) {
         self.tabs = tabs;
+        if let Some(id) = self.tab_lock.clone() {
+            if self.offers_tab(&id) {
+                self.open_in = OpenChoice::Tab(id);
+                return;
+            }
+            self.tab_lock = None;
+        }
         let still_there = match &self.open_in {
             OpenChoice::CurrentTab => self.tabs.current.is_some(),
             OpenChoice::NewTab => true,
@@ -2343,6 +2416,22 @@ impl SpawnForm {
         &self.open_in
     }
 
+    /// The tab the placement is locked to, when a tab container's menu
+    /// opened the dialog.
+    pub(crate) fn open_in_locked(&self) -> Option<&str> {
+        self.tab_lock.as_deref()
+    }
+
+    /// The name of the grid tab `id`, when the dialog knows it.
+    pub(crate) fn tab_name(&self, id: &str) -> Option<&str> {
+        self.tabs
+            .current
+            .as_ref()
+            .filter(|tab| tab.id == id)
+            .or_else(|| self.tabs.others.iter().find(|tab| tab.id == id))
+            .map(|tab| tab.name.as_str())
+    }
+
     /// Whether the trusted-launch checkbox shows (not for a plain shell).
     pub(crate) fn trusted_shown(&self) -> bool {
         !self.runtime.plain_shell
@@ -2534,16 +2623,18 @@ impl SpawnForm {
         if self.provider_shown() && self.provider_enabled() {
             ring.extend(PROVIDER_CHOICES.map(Control::Provider));
         }
-        if self.tabs.current.is_some() {
-            ring.push(Control::OpenIn(OpenChoice::CurrentTab));
+        if self.tab_lock.is_none() {
+            if self.tabs.current.is_some() {
+                ring.push(Control::OpenIn(OpenChoice::CurrentTab));
+            }
+            ring.push(Control::OpenIn(OpenChoice::NewTab));
+            ring.extend(
+                self.tabs
+                    .others
+                    .iter()
+                    .map(|t| Control::OpenIn(OpenChoice::Tab(t.id.clone()))),
+            );
         }
-        ring.push(Control::OpenIn(OpenChoice::NewTab));
-        ring.extend(
-            self.tabs
-                .others
-                .iter()
-                .map(|t| Control::OpenIn(OpenChoice::Tab(t.id.clone()))),
-        );
         ring.extend(self.worktree_controls());
         ring.extend(self.run_controls());
         ring.extend(self.advanced_controls());
@@ -4922,11 +5013,7 @@ mod tests {
 
     #[test]
     fn locked_target_shows_alone_and_ignores_target_presses() {
-        let setup = locked_setup(Lock {
-            target: Target::Repo("r2".to_owned()),
-            pin: None,
-            share_confirmed: false,
-        });
+        let setup = locked_setup(Lock::for_target(Target::Repo("r2".to_owned())));
         let mut form = setup.open(&mut BranchCache::default()).0;
         assert!(form.target_locked());
         assert_eq!(form.shown_targets(), [Target::Repo("r2".to_owned())]);
@@ -4940,11 +5027,7 @@ mod tests {
         press(&mut form, &Control::Target(Target::Repo("r1".to_owned())));
         assert_eq!(form.target(), &Target::Repo("r2".to_owned()));
         let mut unknown = setup;
-        unknown.lock = Some(Lock {
-            target: Target::Repo("gone".to_owned()),
-            pin: None,
-            share_confirmed: false,
-        });
+        unknown.lock = Some(Lock::for_target(Target::Repo("gone".to_owned())));
         assert!(
             SpawnForm::open(
                 FormInputs {
@@ -4973,6 +5056,95 @@ mod tests {
         assert_eq!(form.shown_targets(), [Target::Repo("r2".to_owned())]);
         assert_eq!(form.mode(), WorktreeMode::New, "no worktree is pinned");
         assert_eq!(form.existing_selected(), None);
+    }
+
+    #[test]
+    fn a_target_lock_locks_only_the_target() {
+        let mut setup = locked_setup(Lock::for_target(Target::Repo("r2".to_owned())));
+        setup.tabs = tabs(Some("t1"), &["t2"]);
+        let form = setup.open(&mut BranchCache::default()).0;
+        assert!(form.target_locked(), "the target cannot change");
+        assert_eq!(form.open_in_locked(), None, "the placement stays free");
+        assert_eq!(form.open_in(), &OpenChoice::CurrentTab);
+        assert!(
+            form.controls()
+                .iter()
+                .any(|control| matches!(control, Control::OpenIn(_))),
+            "the Open-in ring stays"
+        );
+        assert_eq!(form.build_request().1, OpenIn::CurrentTab("t1".to_owned()));
+    }
+
+    #[test]
+    fn a_tab_lock_fixes_placement_to_that_tab() {
+        let mut setup = Setup::repos(vec![repo("r1"), repo("r2")]);
+        setup.tabs = tabs(Some("t1"), &["t2"]);
+        setup.lock = Some(Lock::for_tab("t2".to_owned()));
+        let form = setup.open(&mut BranchCache::default()).0;
+        assert_eq!(form.open_in_locked(), Some("t2"));
+        assert_eq!(form.open_in(), &OpenChoice::Tab("t2".to_owned()));
+        assert_eq!(form.build_request().1, OpenIn::Tab("t2".to_owned()));
+        assert!(
+            !form
+                .controls()
+                .iter()
+                .any(|control| matches!(control, Control::OpenIn(_))),
+            "the placement cannot change"
+        );
+
+        let mut active = Setup::repos(vec![repo("r1")]);
+        active.tabs = tabs(Some("t1"), &["t2"]);
+        active.lock = Some(Lock::for_tab("t1".to_owned()));
+        let form = active.open(&mut BranchCache::default()).0;
+        assert_eq!(form.open_in_locked(), Some("t1"));
+        assert_eq!(
+            form.open_in(),
+            &OpenChoice::Tab("t1".to_owned()),
+            "a locked active tab is named, not Current tab"
+        );
+    }
+
+    #[test]
+    fn a_tab_lock_keeps_the_target_picker_free() {
+        let mut setup = Setup::repos(vec![repo("r1"), repo("r2")]);
+        setup.tabs = tabs(Some("t1"), &["t2"]);
+        setup.lock = Some(Lock::for_tab("t2".to_owned()));
+        let mut form = setup.open(&mut BranchCache::default()).0;
+        assert!(!form.target_locked(), "the target can still change");
+        assert_eq!(
+            form.shown_targets(),
+            [Target::Repo("r1".to_owned()), Target::Repo("r2".to_owned())]
+        );
+        press(&mut form, &Control::Target(Target::Repo("r2".to_owned())));
+        assert_eq!(form.target(), &Target::Repo("r2".to_owned()));
+    }
+
+    #[test]
+    fn a_closed_locked_tab_falls_back_to_the_current_tab() {
+        let mut setup = Setup::repos(vec![repo("r1")]);
+        setup.tabs = tabs(Some("t1"), &["t2"]);
+        setup.lock = Some(Lock::for_tab("t2".to_owned()));
+        let mut form = setup.open(&mut BranchCache::default()).0;
+        form.set_tabs(tabs(Some("t3"), &[]));
+        assert_eq!(form.open_in_locked(), None, "the lock goes with its tab");
+        assert_eq!(form.open_in(), &OpenChoice::CurrentTab);
+        assert_eq!(form.build_request().1, OpenIn::CurrentTab("t3".to_owned()));
+    }
+
+    #[test]
+    fn a_tab_only_lock_still_opens_with_repos() {
+        let lock = Lock::for_tab("t2".to_owned());
+        assert_eq!(
+            lock.unregistered(&[repo("r1")], &[]),
+            None,
+            "a tab-only lock is always registered"
+        );
+        let mut setup = Setup::repos(vec![repo("r1")]);
+        setup.tabs = tabs(Some("t1"), &["t2"]);
+        setup.lock = Some(lock);
+        let form = setup.open(&mut BranchCache::default()).0;
+        assert_eq!(form.target(), &Target::Repo("r1".to_owned()));
+        assert_eq!(form.open_in_locked(), Some("t2"));
     }
 
     /// A stored spawn config on `r1`, with `fields` laid over a claude,

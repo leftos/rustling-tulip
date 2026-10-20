@@ -753,6 +753,10 @@ pub enum Opened {
         line: u32,
         column: u32,
     },
+    /// Folders opened as one multi-root VS Code workspace.
+    VsCodeFolder(Vec<PathBuf>),
+    /// A `.code-workspace` file opened in VS Code.
+    VsCodeWorkspace(PathBuf),
     DefaultApp(PathBuf),
     /// Shown selected in its folder.
     Reveal(PathBuf),
@@ -765,6 +769,8 @@ pub enum Opened {
 pub struct OpenRecorder {
     opened: Mutex<Vec<Opened>>,
     mapped_hosts: Mutex<Vec<String>>,
+    /// Every VS Code job reports VS Code missing while this is set.
+    vscode_missing: Mutex<bool>,
 }
 
 impl OpenRecorder {
@@ -773,6 +779,15 @@ impl OpenRecorder {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .push(opened);
+    }
+
+    /// The failure a VS Code job reports, while a spec made VS Code missing.
+    fn vscode_failure(&self) -> Option<OpenFailure> {
+        (*self
+            .vscode_missing
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner))
+        .then_some(OpenFailure::VsCodeNotFound)
     }
 }
 
@@ -783,11 +798,30 @@ impl Opener for OpenRecorder {
     }
 
     fn vscode(&self, path: &Path, line: u32, column: u32) -> Result<(), OpenFailure> {
+        if let Some(failure) = self.vscode_failure() {
+            return Err(failure);
+        }
         self.record(Opened::VsCode {
             path: path.to_path_buf(),
             line,
             column,
         });
+        Ok(())
+    }
+
+    fn vscode_folder(&self, paths: &[PathBuf]) -> Result<(), OpenFailure> {
+        if let Some(failure) = self.vscode_failure() {
+            return Err(failure);
+        }
+        self.record(Opened::VsCodeFolder(paths.to_vec()));
+        Ok(())
+    }
+
+    fn vscode_workspace(&self, path: &Path) -> Result<(), OpenFailure> {
+        if let Some(failure) = self.vscode_failure() {
+            return Err(failure);
+        }
+        self.record(Opened::VsCodeWorkspace(path.to_path_buf()));
         Ok(())
     }
 
@@ -974,8 +1008,18 @@ impl<'a> Harness<'a> {
         self.quits.get()
     }
 
-    /// Everything the terminals' Ctrl+clicks opened, oldest first, once
-    /// the view has settled.
+    /// Makes every VS Code job report VS Code missing, so its caller falls
+    /// back.
+    pub fn fail_vscode_opens(&self) {
+        *self
+            .opener
+            .vscode_missing
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = true;
+    }
+
+    /// Everything the opener was asked to open, oldest first, once the view
+    /// has settled.
     pub fn opened(&mut self) -> Vec<Opened> {
         self.cx.run_until_parked();
         self.opener
