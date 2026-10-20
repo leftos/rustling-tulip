@@ -1,6 +1,8 @@
 # Hook-reported agent status
 
-Take a Claude session's working / awaiting input / idle status from Claude Code's own hooks instead of guessing it from PTY output, and keep `crates/daemon/src/pty_state.rs`'s heuristic as the fallback. Index line: [MAIN.md](./MAIN.md), Wave 2. Background and VelaTerm's prior art: [borrowed-ideas.md](./borrowed-ideas.md), first item.
+Delivered; its durable decisions now live in the docs below (`docs/architecture.md`, `CLAUDE.md`, `README.md`), and this file stays while RT-25 links it.
+
+Take a session's working / awaiting input / idle status from the agent's own hooks instead of guessing it from PTY output, and keep `crates/daemon/src/pty_state.rs`'s heuristic as the fallback. Claude Code is hooked through a settings file, and an opted-in Codex session through the `-c` tables its spawn passes. Index line: [MAIN.md](./MAIN.md), Wave 2. Background and VelaTerm's prior art were in [borrowed-ideas.md](./borrowed-ideas.md) until that entry was removed on delivery.
 
 Items that build on this one: "Spoken alerts when an agent waits" ([spoken-alerts.md](./spoken-alerts.md)) needs the waiting signal plus the pending `AskUserQuestion` questions and permission prompts on the daemon; the "Needs You" view ([borrowed-ideas.md](./borrowed-ideas.md)) groups sessions by this status; the mobile app's MA6 ([mobile-app.md](./mobile-app.md)) shows live status and answers prompts.
 
@@ -10,7 +12,7 @@ Items that build on this one: "Spoken alerts when an agent waits" ([spoken-alert
 
 ## Sources
 
-All Claude Code facts below are from the current docs, fetched as Markdown (`<page>.md`).
+All Claude Code and Codex facts below are from the current docs, fetched as Markdown (`<page>.md`).
 
 - **Handler types.** Hooks may be `command`, `http`, `mcp_tool`, `prompt` or `agent`. An `http` hook POSTs the event's JSON input with `Content-Type: application/json`; its `headers` values interpolate `$VAR` / `${VAR}` only for names listed in `allowedEnvVars`. https://code.claude.com/docs/en/hooks#http-hook-fields
 - **HTTP failure is non-blocking.** Non-2xx, connection failure and a non-JSON 2xx body are all non-blocking errors; "execution continues". A timeout cancels the hook. https://code.claude.com/docs/en/hooks#http-response-handling
@@ -23,13 +25,19 @@ All Claude Code facts below are from the current docs, fetched as Markdown (`<pa
 - **Common input.** Every event carries `session_id` (Claude's conversation id), `transcript_path`, `cwd`, `permission_mode`, `hook_event_name`, and more. https://code.claude.com/docs/en/hooks#common-input-fields
 - **Events used here.** `SessionStart` (`source`: `startup`, `resume`, `clear`, `compact`, `fork`), `UserPromptSubmit`, `PreToolUse` / `PostToolUse` / `PostToolUseFailure` (`tool_name`, `tool_input`, `tool_use_id`), `PermissionRequest` (`tool_name`, `tool_input`, `permission_suggestions`; fires the moment Claude asks, while the `permission_prompt` notification waits about six seconds), `Notification` (`message`, `title`, `notification_type`: `permission_prompt`, `idle_prompt` about 60 s after a reply, `elicitation_dialog`, …), `Elicitation` (an MCP server asks for input), `Stop` (`last_assistant_message`, `background_tasks`; "Does not run if the stoppage occurred due to a user interrupt"), `StopFailure` (API errors), `SessionEnd` (`reason`). https://code.claude.com/docs/en/hooks#sessionstart, https://code.claude.com/docs/en/hooks#permissionrequest, https://code.claude.com/docs/en/hooks#notification, https://code.claude.com/docs/en/hooks#stop, https://code.claude.com/docs/en/hooks#sessionend
 - **`AskUserQuestion` input.** `PreToolUse` matches `AskUserQuestion`; its `tool_input.questions` is an array of `{question, header, options[{label}], multiSelect}`. `ExitPlanMode`'s input gets the plan text and `planFilePath` injected. https://code.claude.com/docs/en/hooks#askuserquestion
-- **Codex.** Codex has `SessionStart`, `SessionEnd`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `UserPromptSubmit`, `Stop`, `Interrupt` and more; only command handlers run; hooks are read from `~/.codex/hooks.json`, `~/.codex/config.toml` and the repo's `.codex/`; the docs name no per-invocation override. https://learn.chatgpt.com/docs/hooks (redirected from https://developers.openai.com/codex/hooks)
+- **Codex.** Codex has `SessionStart`, `SessionEnd`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `UserPromptSubmit`, `Stop`, `Interrupt` and more; only command handlers run; hooks are read from `~/.codex/hooks.json`, `~/.codex/config.toml` and the repo's `.codex/`.
+
+  A `-c hooks.<Event>=…` value carries a hook table for one run, which is how the opt-in injects them (HS.10); no file is written. https://learn.chatgpt.com/docs/hooks (redirected from https://developers.openai.com/codex/hooks)
 
 ## The daemon today
 
 Re-read this section against `pty_state.rs` and `session.rs` before HS.6: the status now persists in the sidecar and a reattached session restores it (2c16f41, b378bcc).
 
-- **Spawn.** `server.rs::spawn_interactive_session` builds argv through `AgentBackend::build_interactive_args` (`crates/daemon/src/agents/claude.rs`, `codex.rs`, `cursor.rs`), with the cross-agent `CommonSpawnFields` from `agents/mod.rs`. Claude gets `--session-id <uuid>` (new) or `--resume <id>` (recovery). The argv is logged at `info!` and handed to the tracer client in a `PtySpawnSpec` with `env: merged_env(&cfg.extra_env)`; the tracer runs the child from its content-addressed copy under the binaries cache (`binary_cache.rs`). Because the injected hook settings file names that copy as its hook command, the cached tracer path is resolved before the argv is built (`tracer_client::cached_tracer_exe`), and the spawn hands that same path to `tracer_client::spawn_with_tracer`, so the settings file and the running supervisor name one cache copy.
+- **Spawn.** `server.rs::spawn_interactive_session` builds argv through `AgentBackend::build_interactive_args` (`crates/daemon/src/agents/claude.rs`, `codex.rs`, `cursor.rs`), with the cross-agent `CommonSpawnFields` from `agents/mod.rs`. Claude gets `--session-id <uuid>` (new) or `--resume <id>` (recovery).
+
+  The argv is logged at `info!` and handed to the tracer client in a `PtySpawnSpec` with `env: merged_env(&cfg.extra_env)`; the tracer runs the child from its content-addressed copy under the binaries cache (`binary_cache.rs`).
+
+  Because the injected hook settings file, or a Codex spawn's `-c` hook command, names that copy as its hook command, the cached tracer path is resolved before the argv is built (`tracer_client::cached_tracer_exe`), and the spawn hands that same path to `tracer_client::spawn_with_tracer`, so the commands and the running supervisor name one cache copy.
 - **HTTP.** `build_router` in `server.rs` serves `/ws`, `/health`, `/shutdown` (bearer auth against the in-memory `auth_token`, compared with `secret::constant_time_eq`) and `/pair`. The same router is served on the loopback listener and on the opt-in LAN TLS listener. The loopback port is ephemeral (`127.0.0.1:0`) and changes on every daemon start; `daemon.json` carries the current port and token.
 - **Status.** `protocol::SessionStatus` is `Spawning | Idle | Working | AwaitingInput | Stopped | Error` on `SessionSnapshot.status`. Neither it nor `AttentionReason` has a `#[serde(other)] Unknown`, so neither can gain a variant without a protocol bump (CLAUDE.md "When to bump").
 
@@ -113,7 +121,7 @@ Each session starts heuristic-driven. The first mapped hook event that passes th
 - Second, `AwaitingInput` to `Idle` once the prompt's regex stops matching and the screen goes quiet for `IDLE_AFTER`. Rejecting a plan, denying or cancelling a permission and dismissing a question fire no hook, so a prompt dismissed from another client would otherwise leave the session `AwaitingInput` until the next prompt. A plain shell's watcher has no prompt matcher, so a hook-reported `AwaitingInput` there is never demoted this way and holds until the next hook event or the owner's key.
 - The owner's own input also leaves `AwaitingInput`: any key the owner sends to a session while it shows a pending prompt clears `AwaitingInput` at once and clears `pending_input`. A later `PreToolUse` or `PostToolUse` promotes the session again, so an answered prompt that continues the turn returns to `Working`.
 
-A session whose hooks never run (Codex, Cursor, a `disableAllHooks` or `allowManagedHooksOnly` user, an older `claude`) stays heuristic-driven with no change in behaviour. No setting is needed to turn the feature off.
+A session whose hooks never run (Codex without the hooks toggle, Cursor, a `disableAllHooks` or `allowManagedHooksOnly` user, an older `claude`) stays heuristic-driven with no change in behaviour. Claude needs no setting to turn the feature off; Codex's hooks are off by default and opt in through the Settings "Report status from Codex hooks" toggle.
 
 An untrusted folder is heuristic-driven only until the user accepts the trust dialog in the terminal, then turns hook-driven at `SessionStart`. No hook fires while the trust dialog or the external-imports dialog that follows it is up, so the heuristic's prompt regexes and `AwaitingInput` attention must keep covering those dialogs. A fresh folder under a trusted parent still shows the dialog, and a new worktree should be expected to show it too (unverified for the worktrees path).
 
@@ -135,7 +143,7 @@ A tracer-reattached session keeps its original settings; its shim finds the new 
 ### Headless, Codex, Cursor
 
 - Headless Claude sessions keep the stream-json parser and get no hooks.
-- Codex has the right events but reads hooks only from `~/.codex/` and the repo's `.codex/`; writing there would edit the user's configuration, which this design never does. Codex's generic `-c key=value` config override might carry a hooks table per invocation; that is unverified and is the first thing HS.10 checks. Until then Codex stays heuristic-driven.
+- Codex is hooked only when the spawn opts in (`AgentOptions::Codex::hooks`, the Settings "Report status from Codex hooks" toggle, off by default). An opted-in spawn passes one `-c hooks.<Event>=…` table for each of `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse` and `Stop`, whose command handler is the same tracer shim, plus `--dangerously-bypass-hook-trust`; no settings file is written. Opting out leaves Codex heuristic-driven.
 - Cursor stays heuristic-driven.
 
 ### Prompt injectors
@@ -160,7 +168,9 @@ Orca (`github.com/stablyai/orca`) and ThinkTerm (`github.com/RoversX/ThinkTerm`,
 
 ## Open questions
 
-Answered (user): Q3 `Stop` means `Idle`, as today; `AwaitingInput` is kept for real questions (AskUserQuestion, permission requests, plan approval). Settled (orchestrator, technical): Q1 (a) async command hooks through the tracer's `hook` subcommand; Q2 (a) hooks own promotions, the heuristic only demotes (`Working` after silence, `AwaitingInput` once its prompt is gone) and the owner's key clears `AwaitingInput`; Q4 (a) the daemon's token from `daemon.json`; Q5 (a) `rt-tracer.exe hook`; Q6 (a) Codex gets hooks only if `codex -c` carries them per run.
+Answered (user): Q3 `Stop` means `Idle`, as today; `AwaitingInput` is kept for real questions (AskUserQuestion, permission requests, plan approval).
+
+Settled (orchestrator, technical): Q1 (a) async command hooks through the tracer's `hook` subcommand; Q2 (a) hooks own promotions, the heuristic only demotes (`Working` after silence, `AwaitingInput` once its prompt is gone) and the owner's key clears `AwaitingInput`; Q4 (a) the daemon's token from `daemon.json`; Q5 (a) `rt-tracer.exe hook`; Q6 (a) Codex gets hooks only through `codex -c`, per run, which HS.10 confirmed carries them.
 
 1. **Hook transport.** (a) Recommended: async command hooks running the tracer's `hook` subcommand, which reads `daemon.json` each call. Worst case: one extra process per tool call, and a hook event lost while the daemon is down. (b) `type: "http"` hooks posting straight to the daemon, with the settings file rewritten on each daemon start. Worst case: Claude does not re-read a `--settings` file mid-session (unverified), so every session outliving a daemon restart loses hook status for good. (c) The shim writes to the tracer's named pipe and the tracer relays, buffering while the daemon is down. Worst case: a tracer ABI addition and the most code, for events a restart would otherwise drop.
 2. **Hooks versus heuristic.** (a) Recommended: hooks own promotions; the heuristic may only demote `Working` to `Idle` after silence and `AwaitingInput` to `Idle` once its prompt is gone and the screen is quiet; the owner's key clears `AwaitingInput`.
@@ -168,7 +178,7 @@ Answered (user): Q3 `Stop` means `Idle`, as today; `AwaitingInput` is kept for r
 3. **What `Stop` means.** (a) Recommended: `Idle`, as today; the alerts item fires on the stop through its own signal and the kept `last_assistant_message`. Worst case: a client that wants "turn finished" has to watch `Working → Idle`. (b) `AwaitingInput`, as VelaTerm does. Worst case: every finished turn raises an `Attention` and an OS notification (P4.3), which is noisy with many sessions.
 4. **Auth.** (a) Recommended: the daemon's token from `daemon.json`, read per call. Worst case: none beyond today's trust boundary (any same-user process can already read it). (b) A per-session token in the child's environment, persisted in `meta.json`. Worst case: more state to keep in step across restarts, with no attacker it keeps out.
 5. **Which binary hosts the shim.** (a) Recommended: a `hook` subcommand of `rt-tracer.exe`, run from the session's cached copy. Worst case: the tracer binary grows a second job. (b) A new `rt-hook.exe`. Worst case: another binary for the binaries cache, the installer and `gc` to track per session. (c) A subcommand of `rustling-tulipd.exe`. Worst case: its cached copy is not pinned by the session, so `gc` can prune it under a live session.
-6. **Codex.** (a) Recommended: HS.10 checks `codex -c` for a per-invocation hooks table and implements it only if it works; otherwise Codex stays on the heuristic. Worst case: Codex never gets hook status. (b) Write hooks into `~/.codex/hooks.json`. Worst case: rustling-tulip edits the user's Codex configuration, which the design forbids.
+6. **Codex.** (a) Recommended: HS.10 checks `codex -c` for a per-invocation hooks table and implements it only if it works; otherwise Codex stays on the heuristic. Settled: it works, and an opted-in spawn passes the tables. Worst case: Codex never gets hook status. (b) Write hooks into `~/.codex/hooks.json`. Worst case: rustling-tulip edits the user's Codex configuration, which the design forbids.
 
 ## Unverified by the spike
 
@@ -214,5 +224,7 @@ Answered (user): Q3 `Stop` means `Idle`, as today; `AwaitingInput` is kept for r
 
   Proof: the `history.rs` test asserting the slot command; `server.rs` tests for the quoted path, the dropped clause with no settings or an unquotable path, the failed spawn's cleanup and the shell-only `SessionEnd` clear; and `pty_state.rs` `hysteresis_tests` for the classifier, silence and `AwaitingInput` cases.
 - [x] **HS.9 End to end.** `tools/e2e/fake-claude/index.mjs` reads `--settings`, and on scripted cues runs the configured hook commands with the matching JSON on stdin (`UserPromptSubmit`, `PreToolUse AskUserQuestion`, `Stop`). A new case in `apps/native/tests/e2e_live.rs` asserts the snapshot goes `Working → AwaitingInput` with the question in `pending_input`, then `Idle`. Proof: `.\rt.ps1 native-e2e` green.
-- [ ] **HS.10 Codex.** Check whether `codex -c` accepts a hooks table per invocation. If it does, `agents/codex.rs` injects the same shim for `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `Stop` with an argv test; if not, record the finding in this doc and leave Codex on the heuristic. Proof: the argv test, or the recorded finding.
+- [x] **HS.10 Codex.** `codex -c` accepts a hooks table per invocation. `agents/codex.rs` (`hook_shim_for`, `codex_hook_overrides`) injects the same shim for `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse` and `Stop`, plus `--dangerously-bypass-hook-trust`, on an interactive fresh or resumed spawn whose `AgentOptions::Codex.hooks` is set.
+
+  A spawn with hooks off adds nothing, and headless never adds them. The toggle is the Settings "Report status from Codex hooks" (off by default). Proof: `agents/codex.rs` `mod tests` (`fresh_spawn_with_hooks_registers_every_event_and_the_bypass`, `resume_spawn_with_hooks_registers_every_event_and_the_bypass`, `hooks_off_or_a_missing_shim_add_nothing`, `headless_never_adds_hooks`).
 - [ ] **HS.11 Docs.** CLAUDE.md's "Status detection" invariant and the `sessions/<id>/` layout line (`hook-settings.json`); a README glossary entry for "hook shim" and "hook-driven"; delete the first item of `borrowed-ideas.md`; promote the design's lasting decisions into `docs/architecture.md` (including that a workspace session loads only `members[0]`'s repo hooks, since `--add-dir` roots load none) and delete this doc. Proof: the diff.

@@ -117,7 +117,9 @@ Both sides resolve the config dir via the `directories` crate as `ProjectDirs::f
 
 - `state.json` — persisted repos + workspaces + tabs, plus daemon-side host settings (`worktrees_root_override`, `keep_awake`) that must apply with no window open (see `crates/daemon/src/state.rs`).
 - `daemon.json` — handshake (port + auth_token + pid + supported_versions); written on daemon start, removed on graceful shutdown.
-- `sessions/<id>/meta.json` + `scrollback.bin` — orphan-recovery sidecar and PTY scrollback ring.
+- `sessions/<id>/meta.json` + `scrollback.bin` — orphan-recovery sidecar and PTY scrollback ring. `hook-settings.json` sits beside them for an interactive Claude spawn (passed as `--settings`) and for a recovered shell carrying a shell-prompt injector; a graceful stop deletes it with the sidecar.
+
+  An opted-in Codex spawn writes no file: its hooks go through the `-c` tables on its argv.
 - `history/<id>.json` — session history: one entry per ended session (how it ended, its spawn config and folders, its `busy_excluded` flag when true, its `provider` when not Anthropic (`"provider":"deepseek"`, inferred for a tracer-log import from its `--model`), its conversation id: Claude's `claude_session_id`, or the Codex or Cursor CLI's own `agent_conversation_id`), written on every end path, backfilled at startup from `logs/tracer-*.log`, pruned after 7 days (`crates/daemon/src/history.rs`). The recover dialog lists these and `RecoverSessions` respawns them: a Claude entry with `claude --resume`, a Codex or Cursor entry as its own agent in the same folder, resuming its conversation (`codex resume`, `cursor-agent --resume`) when it can, else a fresh run.
 - `env-secrets.json` — index of the secret env-row values sealed into Windows Credential Manager (`{id, key, created_at}`, never a value); the values are Credential Manager entries under the service `rustling-tulip` (`rustling-tulip:<8 hex of the config dir's SHA-256>` while `RUSTLING_TULIP_CONFIG_DIR` is set), user `env/<KEY>/<id>`. Stored configs carry `${secret:<id>}` references instead (`crates/daemon/src/env_secrets.rs`, `docs/env-secrets.md`).
 - `codex-contested.json` — Codex rollout ids found while two Codex sessions waited in one folder, which no session may claim as its conversation (`crates/daemon/src/codex_rollout.rs`); entries drop after 7 days.
@@ -152,6 +154,7 @@ Before every breaking bump, verify that `daemon_client::ensure_running` retires 
 - `state.json` — repo + workspace registry plus host settings (never sessions)
 - `daemon.json` — handshake (port, token, pid, supported protocol versions)
 - `sessions/<id>/meta.json` — orphan-recovery sidecar; written at spawn, deleted on graceful stop
+- `sessions/<id>/hook-settings.json` — the hooks document an interactive Claude spawn passes as `--settings` (a recovered shell's injector types its path); written at spawn, deleted on a graceful stop; an opted-in Codex spawn injects hooks through `-c` instead and writes none
 - `sessions/<id>/scrollback.bin` — 2 MB ring (trims to 1.5 MB on overflow), replayed via `LoadScrollback` on attach
 - `sessions/<id>/scrollback.truncated` — flag file iff the ring overflowed
 
@@ -161,7 +164,9 @@ Sessions are deliberately **not** in `state.json` — they're rebuilt from sidec
 
 **Status detection is heuristic for interactive PTY mode** (`pty_state.rs`): regex against known TUI prompts + an output/input byte-volume comparison + a terminal-title-change heartbeat (`osc_title::TitleActivity` — a repainting spinner/elapsed-time title counts as activity) + idle timeout. It's intentionally coarse and version-fragile, and it is the fallback for a session without hook reports.
 
-A Claude session turns hook-driven on its first mapped hook event that passes the ordering check, after which hook reports drive its status: hooks own every promotion into `Working` and `AwaitingInput`, and the heuristic keeps only two demotions after `IDLE_AFTER` (2.5 s) of PTY silence — `Working` to `Idle`, and `AwaitingInput` to `Idle` once the prompt regex stops matching the last 2 KiB of screen.
+A session turns hook-driven on its first mapped hook event that passes the ordering check, from either source: Claude Code's hooks, injected through the settings file its spawn writes, or an opted-in Codex run's hooks, injected through the `-c` tables its spawn passes (the Settings "Report status from Codex hooks" toggle, off by default).
+
+After that, hook reports drive its status: hooks own every promotion into `Working` and `AwaitingInput`, and the heuristic keeps only two demotions after `IDLE_AFTER` (2.5 s) of PTY silence — `Working` to `Idle`, and `AwaitingInput` to `Idle` once the prompt regex stops matching the last 2 KiB of screen.
 
 An owner key sent to a hook-driven session with a pending prompt clears `AwaitingInput` and `pending_input` at once. Token and cost figures exist only for headless runs, where they come from the CLI's stream-json (`agents/claude.rs::handle_headless_line`), so an interactive session's snapshot carries none. Headless mode (`claude --print --output-format stream-json`) uses `crates/daemon/src/headless.rs` for structured events.
 

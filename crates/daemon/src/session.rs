@@ -203,18 +203,17 @@ pub struct SessionRecord {
     pub last_hook_time: Option<u128>,
     /// True once a mapped hook event has been applied to this session. While
     /// true, hook signals own every promotion into `Working` and
-    /// `AwaitingInput`, and the PTY classifier only demotes. Set by
-    /// [`crate::hook_status::apply_signal`]; never cleared while the record
-    /// lives, and reset only by a daemon restart, which rebuilds the record
-    /// (see [`Self::last_hook_time`]). Runtime-only: neither mirrored into
-    /// the sidecar nor sent on the wire.
+    /// `AwaitingInput`, and the PTY classifier only demotes. Set by the first
+    /// accepted signal from [`crate::hook_status::apply_signal`]; cleared by a
+    /// daemon restart's rebuild of the record (see [`Self::last_hook_time`])
+    /// and by a plain shell's own `SessionEnd`, after which the classifier
+    /// owns its status again. Runtime-only: neither mirrored into the sidecar
+    /// nor sent on the wire.
     pub hook_driven: bool,
     /// The assistant message the last `Stop` ended its turn with, trimmed and
     /// capped at 8 KiB, as the agent CLI's own hook reported it. `None` until
     /// a `Stop` reports one; a `Stop` with no message keeps the previous one.
     /// Runtime-only: neither mirrored into the sidecar nor sent on the wire.
-    /// Stored for the plans' alerts summarizer and the agent CLI's `--last`,
-    /// both still unbuilt; nothing reads it yet.
     pub last_assistant_message: Option<String>,
 }
 

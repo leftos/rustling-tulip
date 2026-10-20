@@ -20,7 +20,7 @@ A session is listed when any of these holds, checked in this order (the first ma
 
 | Reason | Condition | Source | Leaves the list when |
 | - | - | - | - |
-| **Asking** | `status == AwaitingInput` | today's heuristic, or hook status once Wave 2 lands | the status changes (answered, interrupted, ended) |
+| **Asking** | `status == AwaitingInput` | the heuristic, or the agent's hook reports once hook-driven | the status changes (answered, interrupted, ended) |
 | **Answer** | `status == Idle`, `summary.kind == NeedsAnswer`, and `summary.updated_at >= status_since` (the summary is about this stop, not an older one) | Wave 9 summarizer (SA.6) | the status changes (a new prompt makes it `Working`) |
 | **Ended** | `status` is `Error` or `Stopped`, and the session is in the client's attention set | today's `Attention { Error / Stopped }` | the user clicks the row or its leaf (the attention clears), or the session is discarded |
 
@@ -74,7 +74,7 @@ No new message. `pending_input` (HS.2) and `summary` (SA.1) arrive on the existi
 ### Degraded mode and what each wave adds
 
 - **Before Wave 2**: Asking rows from the `pty_state.rs` heuristic (a prompt regex match: permission prompts, numbered choices, `AskUserQuestion` framing); its idle check reclassifies the scrollback tail, so the state holds while the prompt is still on screen. Line 2 is "Waiting for input" plus the terminal title. Ended rows from today's attention events. A question asked in prose at the end of a turn is invisible (the session is just `Idle`).
-- **With Wave 2**: Asking becomes reliable for hook-driven Claude sessions, and line 2 carries the real question, permission or plan. Codex, Cursor and hook-less sessions stay on the heuristic.
+- **With Wave 2**: Asking becomes reliable for hook-driven sessions — Claude Code's, or an opted-in Codex run's — and line 2 carries the real question, permission or plan. Codex without the hooks toggle, Cursor and hook-less sessions stay on the heuristic.
 - **With Wave 9**: Answer rows appear (prose questions at a stop), and headlines fill line 2 where no `pending_input` exists.
 
 ### Orca's board, for comparison

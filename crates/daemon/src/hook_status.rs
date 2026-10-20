@@ -1,9 +1,11 @@
-//! Maps Claude Code hook payloads onto session status and pending input.
+//! Maps agent hook payloads onto session status and pending input.
 //!
-//! The daemon's own status watcher (`pty_state`) guesses the status from the
-//! byte stream; these hooks are the agent's own report. Reading is tolerant:
-//! an unknown event, an unknown field and a body that is not a JSON object
-//! are all ignored rather than refused.
+//! Claude Code hooks arrive through the settings file a spawn injects, and an
+//! opted-in Codex session through the `-c` hooks table its spawn injects; both
+//! shims post to the same endpoint. The daemon's own status watcher
+//! (`pty_state`) guesses the status from the byte stream; these hooks are the
+//! agent's own report. Reading is tolerant: an unknown event, an unknown field
+//! and a body that is not a JSON object are all ignored rather than refused.
 
 use crate::server::Hub;
 use crate::session::{SessionRecord, push_recent_action};
