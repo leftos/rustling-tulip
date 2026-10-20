@@ -162,7 +162,7 @@ Answered (user): Q1–Q14 all (a): one shared connection and `RootView`; a tab p
 
 ## Phase 6 — remote and cutover
 
-- Connection picker, LAN pairing and the pinned-TLS tunnel, built on the shared client-core crate the mobile app also uses (MA1 in [mobile-app.md](./mobile-app.md)), recovered from `remote.rs` on the `tauri-last` tag.
+- Connection picker and host profiles over the tailnet listener (`remote-access.md`), built on the shared client-core crate the mobile app also uses (MA1 in [mobile-app.md](./mobile-app.md)).
 - Autostart: `remote.rs` and `autostart.rs` are recovered from the `tauri-last` tag.
 - Remote file transfer's client half ([remote-file-transfer.md](./remote-file-transfer.md), FT.2–FT.4).
 - Cutover: the installer ships the native client, and on uninstall deletes the daemon's `rustling-tulip-daemon` login `Run` value; update CLAUDE.md.

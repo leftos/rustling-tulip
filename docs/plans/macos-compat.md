@@ -94,10 +94,7 @@ abstracted. Two viable shapes:
 - [x] Retry semantics ported to portable `io::ErrorKind` (`NotFound` /
       `ConnectionRefused`) plus the Windows `ERROR_PIPE_BUSY`/231 raw-code check.
 
-**Watch:** the Windows side just shipped a re-arm retry fix (see
-`remote-lan-access.md` → Post-merge robustness). The Unix path needs an
-equivalent reconnect story so a daemon restart reattaches to a still-running
-tracer over the socket.
+**Watch:** the Windows side just shipped a re-arm retry fix (see `archive/remote-lan-access.md` → Post-merge robustness fixes). The Unix path needs an equivalent reconnect story so a daemon restart reattaches to a still-running tracer over the socket.
 
 ## 2. `job_object` — compile gate + Unix process-tree cleanup
 
@@ -186,7 +183,7 @@ Confirmed dual-arm or platform-neutral during the sweep:
   guarded by extension checks — never runs on macOS.
 - **Headless mode**: `headless.rs:70–74` CREATE_NO_WINDOW is gated; Unix is a no-op.
 - **Frontend path handling**: `api.ts` `parentDir` and `PresetLaunchDialog.tsx`
-  `joinPath` handle both separators; remote-mode/LAN/mDNS code is platform-neutral.
+  `joinPath` handle both separators; remote-mode (tailnet) code is platform-neutral.
 
 ## Suggested phasing (when greenlit)
 

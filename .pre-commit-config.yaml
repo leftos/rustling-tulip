@@ -37,9 +37,9 @@ repos:
       - id: check-json
       - id: check-toml
       - id: check-yaml
-      # The daemon generates a TLS private key at runtime (lan-key.pem). It
-      # lives in the config dir, not the repo, but the cost of being wrong here
-      # is a leaked key in git history.
+      # `tailscale cert` writes a TLS private key for the daemon at runtime. It
+      # lives in the machine-local data dir, not the repo, but the cost of being
+      # wrong here is a leaked key in git history.
       - id: detect-private-key
       # Cargo.lock and the native client's bundled fonts are legitimately
       # large; nothing else should be.

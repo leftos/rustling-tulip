@@ -7,39 +7,38 @@ A phone client for the daemon, for the user's own use: check on sessions, answer
 ## Rulings
 
 - **Scope, in phases:** monitor and respond first, then a full terminal, then the conversation view.
-- **Reach: anywhere, over Tailscale or through the relay, both built from the start** (and LAN direct at home). This reverses the "attach beyond the LAN" and "mobile companion app" non-goals in [architecture.md](../architecture.md#non-goals). The relay (MA2, RT-94) and per-device credentials (MA3, RT-96) are built in Wave 3 with the remote desktop, which uses them too. (Superseded: no relay and no pinned TLS; Tailscale is the only remote path, RT-143 and `remote-access.md`.)
+- **Reach: anywhere, over Tailscale or through the relay, both built from the start** . This reverses the "attach beyond the LAN" and "mobile companion app" non-goals in [architecture.md](../architecture.md#non-goals). The relay (MA2, RT-94) and per-device credentials (MA3, RT-96) are built in Wave 3 with the remote desktop, which uses them too. (Superseded: no relay and no pinned TLS; Tailscale is the only remote path, RT-143 and `remote-access.md`.)
 - **Android first.** The MVP is Android (RT-38 and its sub-issues), built and sideloaded from Windows; the iOS pipeline (MA5, RT-117) is in the backlog. What the app shows and how it alerts is in [off-orca.md](./off-orca.md) (sections 2, 3 and 5). (Superseded: the phone is an iPhone PWA over Tailscale, RT-143.)
 - **Relay:** a Rust binary in this workspace (`crates/relay`) on a small VPS (Fly.io or Hetzner). It pairs a daemon with a phone and forwards bytes it cannot read. (Superseded: this repo has no `crates/relay`; RT-143.)
-- **Encryption:** the pinned TLS of the LAN listener, run end to end through the relay. The phone does the same TLS handshake it would do on the LAN, pinned to the daemon's certificate fingerprint, inside the relay's WebSocket. The relay never holds a key, and one crypto path serves both the LAN and the relay. (Superseded: the listener serves `tailscale cert` TLS, nothing is pinned, `remote-access.md`.)
+- **Encryption:** the tailnet listener serves `tailscale cert` TLS and nothing is pinned (`remote-access.md`).
 - **Stack:** Flutter UI over a shared Rust core (protocol types, pinned-TLS connect, pairing profiles) through `flutter_rust_bridge`. No hand-kept protocol mirror. (Superseded: no Flutter; the phone is a PWA, RT-143.)
 - **Audience: the user only.** Android by sideload; iOS, when it comes, through TestFlight on a personal Apple Developer account. No store listing. This also keeps within Anthropic's personal-use terms (see [gui-mode-billing.md](../spikes/gui-mode-billing.md)).
 - **Push notifications:** the daemon sends them itself (APNs and FCM) with the user's own keys. The relay plays no part in push. (Superseded: APNs/FCM are re-planned with the PWA, RT-143.)
 - **iOS builds:** cloud macOS CI (GitHub Actions macOS runners or Codemagic) builds, signs and uploads to TestFlight. There is no Mac.
-- **Priority:** after native client Phase 6, which brings back the pinned-TLS client and the pairing flow this app reuses.
+- **Priority:** after native client Phase 6, which builds the remote client this app reuses.
 
 ## How it connects
 
 ```text
 phone (Flutter UI)
   └─ Rust core: pinned-TLS client ──wss──▶ relay (VPS) ◀──wss── daemon, outbound, opt-in
-                  └────────── TLS session, end to end ──────────┘   └─ same TLS acceptor as the LAN listener (lan.rs)
-on the LAN: phone ──pinned TLS──▶ daemon LAN listener directly (mDNS discovery)
+                  └────────── TLS session, end to end ──────────┘   └─ same TLS acceptor as the tailnet listener
+on the tailnet: phone ──tailscale cert TLS──▶ daemon tailnet listener directly
 ```
 
-What already exists: the daemon's opt-in LAN TLS listener with a self-signed certificate (`crates/daemon/src/lan.rs`), short-code pairing (`pairing.rs`), mDNS discovery (`discovery.rs`) and constant-time secret checks (`secret.rs`). The client-side pinned-TLS tunnel and saved host profiles are in the Tauri app's `apps/tauri-app/src-tauri/src/remote.rs` on the `tauri-last` tag. It is a byte-level proxy that never parses WebSocket frames, which is why it can run inside a relay stream unchanged.
+What already exists: the daemon's opt-in tailnet listener (`crates/daemon/src/tailnet_listener.rs`, switched by `remote.json` and `ConfigureRemote`) with `tailscale cert` TLS, the owner rule in `crates/tailnet` and constant-time secret checks (`secret.rs`). Per-device approval is TS.3b (`remote-access.md`). The Tauri app's pinned-TLS tunnel and saved host profiles (`apps/tauri-app/src-tauri/src/remote.rs` on the `tauri-last` tag) are history only.
 
 ## Phases
 
 Item ids are MA1, MA2, … (mobile app), distinct from the macOS plan's M0–M4.
 
-- [ ] **MA1 Shared client core.** A crate (name to settle, for example `crates/remote-client`) holding the pinned-TLS connect, host profiles and pairing, recovered from `remote.rs`. Native client Phase 6 builds its remote mode on this crate rather than on its own copy, so the two share the code from the start.
+- [ ] **MA1 Shared client core.** A crate (name to settle, for example `crates/remote-client`) holding the tailnet connect and host profiles. Native client Phase 6 builds its remote mode on this crate rather than on its own copy, so the two share the code from the start.
 - [ ] **MA2 Relay.**
   - `crates/relay`: a WebSocket rendezvous. A daemon registers under a random rendezvous id; a phone connects with that id plus its device credential; the relay pipes the two sockets' bytes together.
-  - The daemon side is an opt-in setting: when on, it keeps an outbound connection to the relay, reconnects with backoff, and hands each relayed stream to the same TLS acceptor the LAN listener uses.
+  - The daemon side is an opt-in setting: when on, it keeps an outbound connection to the relay, reconnects with backoff, and hands each relayed stream to the same TLS acceptor the tailnet listener uses.
   - Deployment on the chosen VPS: a container, TLS on the relay's public endpoint (in addition to the end-to-end TLS inside), and restart on failure.
-- [ ] **MA3 Per-device credentials.** Each paired phone gets its own token, revocable from the native client's Settings. Today one `lan.json` token is shared by every remote client, which is too coarse for a device carried outside the home.
-- [ ] **MA4 Flutter shell and pairing.** The app skeleton, the Rust core through `flutter_rust_bridge`, and pairing by QR code shown in the native client's Settings. The QR code carries the certificate fingerprint, the relay endpoint, the rendezvous id and a one-time pairing code. LAN discovery through mDNS is used when the phone is at home.
-- [ ] **MA5 iOS build pipeline.** CI on a macOS runner builds, signs and uploads to TestFlight. Needs a paid Apple Developer Program membership, a signing certificate and a provisioning profile, and an App Store Connect API key as CI secrets. Android builds locally on Windows.
+- [ ] **MA3 Per-device credentials.** Each approved phone gets its own token, revocable from the native client's Settings (TS.3b in `remote-access.md`).
+- [ ] **MA4 Flutter shell and pairing.** The app skeleton, the Rust core through `flutter_rust_bridge`, and pairing by QR code shown in the native client's Settings. The QR code carries the certificate fingerprint, the relay endpoint, the rendezvous id and a one-time pairing code.- [ ] **MA5 iOS build pipeline.** CI on a macOS runner builds, signs and uploads to TestFlight. Needs a paid Apple Developer Program membership, a signing certificate and a provisioning profile, and an App Store Connect API key as CI secrets. Android builds locally on Windows.
 - [ ] **MA6 Monitor and respond.** A session list grouped as in the sidebar, with live status and attention marks; the recent output of a session as plain text; reply to a prompt; answer a permission prompt; Stop and Resume. It's much better with hook-reported status ([borrowed-ideas.md](./borrowed-ideas.md)).
 - [ ] **MA7 Push notifications.** A new additive protocol message registers a device's push token with the daemon. On `Attention`, the daemon sends APNs and FCM pushes with the user's keys, respecting the existing notification toggles. The keys live in the config dir, outside `state.json`.
 - [ ] **MA8 Full terminal.** A terminal per session with a phone key bar (Esc, Tab, arrows, Ctrl), resizing that doesn't fight the desktop's size for the same session, and scrollback replay.

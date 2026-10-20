@@ -9,7 +9,7 @@
 //! held continuously for [`GRACE_PERIOD`].
 //!
 //! What keeps the daemon alive:
-//! - any attached WS client (`Hub::client_count` > 0), local, LAN or tailnet;
+//! - any attached WS client (`Hub::client_count` > 0), local or tailnet;
 //! - any session whose child is (or may be) running — see [`blocks_exit`];
 //! - an in-flight preset launch job, which is about to spawn sessions;
 //! - remote access being switched on in `remote.json`, whatever the tailnet
@@ -217,10 +217,7 @@ mod tests {
             config: root.clone(),
             state_file: root.join("state.json"),
             handshake_file: root.join("daemon.json"),
-            lan_config_file: root.join("lan.json"),
             remote_config_file: root.join("remote.json"),
-            lan_cert_file: root.join("lan-cert.pem"),
-            lan_key_file: root.join("lan-key.pem"),
             sessions_dir: root.join("sessions"),
             worktrees_dir: root.join("worktrees"),
             binaries_dir: root.join("binaries"),

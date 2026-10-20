@@ -92,7 +92,7 @@ DF.1 adds a round-trip test per new message and one proving an unknown `Dispatch
 - **Daemon restart mid-run.** The dispatch run is not the daemon's child, so it keeps going. The new daemon's startup scan finds the file, the pid guard passes, and the tailer replays the stream from byte 0, so clients get the full log. A Stop issued just before the restart has already killed the tree or has not happened.
 - **Tool crash** (Python killed, `claude` orphaned or dead): while `claude` lives, the run stays listed and Stop still works through `pid`. Once `claude` is gone, the next liveness tick drops the run and deletes the file. **Machine reboot**: every pid is gone, and the startup scan drops and deletes every stale file.
 - **Pid reuse**: the start-time window rejects a recycled pid, so the daemon never lists, or kills, an unrelated process.
-- **Many clients**: every connection gets the same broadcasts. A Stop from one shows `Stopping` and then removal on all of them. LAN clients see runs like local ones; Stop from a LAN client is allowed like `StopSession`.
+- **Many clients**: every connection gets the same broadcasts. A Stop from one shows `Stopping` and then removal on all of them. Tailnet clients see runs like local ones; Stop from a tailnet client is allowed like `StopSession`.
 
 ### 8. Native client
 

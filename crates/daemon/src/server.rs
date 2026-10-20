@@ -3,12 +3,9 @@
 use crate::agents::{CommonSpawnFields, HookShim};
 use crate::branch_fate::{self, FateInput, SessionBase};
 use crate::branch_names;
-use crate::discovery;
 use crate::file_fetch;
 use crate::history;
-use crate::lan;
 use crate::orphan::{self, OrphanMeta};
-use crate::pairing;
 use crate::paths::Dirs;
 use crate::pty::PtySpawnSpec;
 use crate::registry::{
@@ -30,7 +27,6 @@ use crate::{
     user_env, vscode, workspace as ws,
 };
 use anyhow::{Context as _, anyhow};
-use axum::Json;
 use axum::Router;
 use axum::body::Body;
 use axum::body::Bytes;
@@ -106,16 +102,6 @@ pub struct Hub {
     /// listening — the broadcasts would just be dropped on the floor and
     /// every event would cost a couple of `git` subprocesses for nothing.
     pub client_count: Arc<tokio::sync::watch::Sender<usize>>,
-    /// Handle to the running opt-in LAN TLS listener, if any.
-    /// [`ClientMessage::ConfigureLan`] stores the handle here on enable and
-    /// takes it on disable to drive a graceful shutdown; the daemon-wide
-    /// shutdown task also tears it down. `None` when LAN access is off.
-    pub lan_handle: Arc<AsyncMutex<Option<axum_server::Handle<SocketAddr>>>>,
-    /// Live mDNS advertisement for LAN discovery, present while the LAN
-    /// listener is bound. Started by [`start_lan_listener`] and dropped
-    /// (which unregisters the service) by [`stop_lan_listener`] and at
-    /// daemon shutdown. `None` when LAN access is off.
-    pub advertiser: Arc<AsyncMutex<Option<discovery::Advertiser>>>,
     /// The persisted remote-access switch: `true` while `remote.json` says
     /// remote access is on, whatever the listener's own state. Idle exit
     /// reads it so a host with remote access on never exits.
@@ -130,11 +116,6 @@ pub struct Hub {
     /// by [`ClientMessage::ConfigureRemote`] and by the listener's status
     /// relay.
     pub remote_status: Arc<tokio::sync::watch::Sender<RemoteSlot>>,
-    /// The active short-code pairing window, if the host has one open.
-    /// [`ClientMessage::StartPairing`] opens it; the `/pair` HTTP handler and
-    /// [`ClientMessage::CancelPairing`] consume/clear it. `None` when no
-    /// pairing is in progress.
-    pub pairing: Arc<AsyncMutex<Option<pairing::PairingSession>>>,
     /// The persisted keep-awake setting, published to the watcher.
     /// [`ClientMessage::SetKeepAwake`] writes it here after saving to
     /// `state.json`; the watcher re-derives the OS hold and broadcasts the
@@ -254,22 +235,6 @@ pub enum StateEvent {
     WorktreesRootChanged {
         root: String,
         is_override: bool,
-    },
-    /// Broadcast after a successful [`ClientMessage::ConfigureLan`] so every
-    /// connected client's Settings UI reflects the new LAN access state
-    /// without polling. Mirrors [`protocol::DaemonMessage::LanStatus`].
-    LanStatus {
-        enabled: bool,
-        port: u16,
-        fingerprint: Option<String>,
-        addresses: Vec<String>,
-    },
-    /// Broadcast when the active pairing window ends (paired / expired /
-    /// cancelled / locked out) so every connected host window clears the
-    /// displayed code. Carries no code, so broadcasting to all clients —
-    /// including a remote laptop — is safe.
-    PairingEnded {
-        reason: protocol::PairingEndReason,
     },
     /// Broadcast by the keep-awake watcher whenever the setting changes or the
     /// hold engages/releases as sessions come and go, so every connected
@@ -526,15 +491,12 @@ pub async fn run(
     abandoned: Vec<OrphanMeta>,
 ) -> anyhow::Result<()> {
     let run_start = std::time::Instant::now();
-    // LAN access (opt-in) persists its auth token in `lan.json` so a paired
-    // remote client survives daemon restarts. When LAN has never been enabled,
-    // fall back to a fresh per-start token — loopback-only, exactly as before.
-    // Remote access is off unless `remote.json` turns it on; idle exit reads
-    // that switch, so it is seeded from the persisted value.
-    let (lan_config, remote) = (lan::load(&dirs), crate::remote_config::load(&dirs));
-    let auth_token: String = lan_config
-        .as_ref()
-        .map_or_else(lan::generate_auth_token, |c| c.auth_token.clone());
+    // A fresh loopback token every start. Remote access is off unless
+    // `remote.json` turns it on; idle exit reads that switch, so it is seeded
+    // from the persisted value.
+    remove_retired_lan_files(&dirs.config);
+    let remote = crate::remote_config::load(&dirs);
+    let auth_token = crate::secret::generate_auth_token();
 
     let (attention_tx, attention_rx) = mpsc::unbounded_channel::<pty_state::AttentionEvent>();
     let sessions = SessionRegistry::new(dirs.clone());
@@ -594,12 +556,9 @@ pub async fn run(
         preset_cancellations: Arc::new(AsyncMutex::new(HashMap::new())),
         state_events,
         client_count,
-        lan_handle: Arc::new(AsyncMutex::new(None)),
-        advertiser: Arc::new(AsyncMutex::new(None)),
         remote_enabled: Arc::new(tokio::sync::watch::Sender::new(remote.enabled)),
         tailnet: Arc::new(AsyncMutex::new(None)),
         remote_status: Arc::new(tokio::sync::watch::Sender::new(RemoteSlot::initial(remote))),
-        pairing: Arc::new(AsyncMutex::new(None)),
         keep_awake_enabled: Arc::new(keep_awake_tx),
         keep_awake_status: keep_awake_status_rx,
         recovering: RecoveryClaims::default(),
@@ -628,36 +587,8 @@ pub async fn run(
         "handshake file written; daemon ready for clients"
     );
 
-    // Opt-in LAN TLS listener. When enabled in `lan.json`, bind a second
-    // listener on `0.0.0.0:<port>` serving the *same* Router over TLS. The
-    // loopback listener above stays plaintext and unchanged. Failures here are
-    // logged and swallowed — they never block local clients.
-    if lan_config.as_ref().is_some_and(|c| c.enabled) {
-        let port = lan_config
-            .as_ref()
-            .map_or(lan::DEFAULT_LAN_PORT, |c| c.port);
-        // Bring the LAN listener up off the critical path: its bind retries for
-        // up to ~10s while a restarting daemon's predecessor releases the port,
-        // and that must never delay the loopback `serve` below — local clients
-        // come first.
-        let hub_for_lan = hub.clone();
-        tokio::spawn(async move {
-            match start_lan_listener(&hub_for_lan, port).await {
-                Ok(fingerprint) => {
-                    info!(port, %fingerprint, "LAN access enabled at startup; TLS listener bound");
-                }
-                Err(err) => error!(?err, "LAN access enabled but listener failed to start"),
-            }
-        });
-    }
-
     // Opt-in tailnet listener: started after the handshake, never awaited.
-    start_remote_access(&hub, remote, lan_config.as_ref(), shutdown_rx.clone()).await;
-
-    // Tear down the LAN listener + mDNS advertisement (started at boot or via
-    // ConfigureLan) when the daemon shuts down, off the same watch the loopback
-    // listener uses.
-    spawn_lan_teardown(&hub, shutdown_rx.clone());
+    start_remote_access(&hub, remote, shutdown_rx.clone()).await;
 
     let shutdown_signal = async move {
         // Returns once the Shutdown handler flips the watch to `true`. A
@@ -684,27 +615,37 @@ pub async fn run(
     serve_result
 }
 
-/// Build the axum Router with all routes + Hub state. Shared by the loopback
-/// listener and the opt-in LAN TLS listener so both serve identical routes.
-fn build_router(hub: Hub) -> Router {
+/// The loopback listener's router: `/ws`, `/health`, `/shutdown` and the hook
+/// endpoint the shim posts to on `127.0.0.1`.
+fn build_loopback_router(hub: Hub) -> Router {
     Router::new()
         .route("/ws", get(ws_handler))
         .route("/health", get(|| async { "ok" }))
         .route("/shutdown", post(shutdown_handler))
-        .route("/pair", post(pair_handler))
+        .route("/hook/{session_id}", post(hook_handler))
         .with_state(hub)
 }
 
-/// The loopback listener's router: [`build_router`] plus the hook endpoint.
-///
-/// Hook events are a local-only input — the shim posts to `127.0.0.1` — so the
-/// LAN TLS listener keeps [`build_router`] and never serves `/hook/...`.
-fn build_loopback_router(hub: Hub) -> Router {
-    build_router(hub.clone()).merge(
-        Router::new()
-            .route("/hook/{session_id}", post(hook_handler))
-            .with_state(hub),
-    )
+/// The files the retired LAN listener kept in the config dir: its config,
+/// which holds a bearer token, its certificate and its private key. Nothing
+/// reads them.
+const RETIRED_LAN_FILES: [&str; 3] = ["lan.json", "lan-cert.pem", "lan-key.pem"];
+
+/// Delete [`RETIRED_LAN_FILES`] from `config`, best-effort, at startup. A
+/// missing file is the usual case; a failed delete is logged and never stops
+/// the daemon.
+fn remove_retired_lan_files(config: &Path) {
+    for name in RETIRED_LAN_FILES {
+        match std::fs::remove_file(config.join(name)) {
+            Ok(()) => info!(file = name, "removed a retired LAN access file"),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => error!(
+                ?err,
+                file = name,
+                "could not remove a retired LAN access file"
+            ),
+        }
+    }
 }
 
 /// Most of a hook body the endpoint reads; anything larger is treated as an
@@ -785,7 +726,7 @@ fn presented_bearer(headers: &HeaderMap) -> Option<&str> {
         .map(str::trim)
 }
 
-/// How a connection authenticates. The loopback and LAN listeners compare the
+/// How a connection authenticates. The loopback listener compares the
 /// `daemon.json` token; the tailnet listener never looks at it and instead
 /// reads the presented value as the device's token.
 #[derive(Clone, Debug)]
@@ -995,7 +936,7 @@ struct TailnetState {
 }
 
 /// The router the tailnet listener serves: `/ws` and `/health` only. It never
-/// carries `/shutdown`, `/pair` or a CORS layer, so a tailnet client cannot
+/// carries `/shutdown` or a CORS layer, so a tailnet client cannot
 /// manage the host's process and a browser cannot act for another origin.
 fn build_tailnet_router(hub: Hub, names: NameSlot, port: u16) -> Router {
     Router::new()
@@ -1053,63 +994,23 @@ async fn tailnet_ws_handler(
     ws.on_upgrade(move |socket| client_session(state.hub, socket, AuthKind::Tailnet(peer)))
 }
 
-/// Whether the tailnet listener should start: remote access on, a usable
-/// port, and no LAN listener already holding that port.
-fn remote_listener_allowed(
-    remote: crate::remote_config::RemoteConfig,
-    lan_config: Option<&lan::LanConfig>,
-) -> bool {
-    remote.enabled
-        && remote.port != 0
-        && !lan_config.is_some_and(|cfg| cfg.enabled && cfg.port == remote.port)
-}
-
-/// Why the tailnet listener did not start although `lan.json` puts LAN
-/// access on its port: `PortInUse` while the LAN listener holds that port,
-/// `BindFailed` while the LAN listener is not bound yet or failed to bind.
-/// That includes daemon startup, where the LAN listener binds in a spawned
-/// task with retry and is usually not bound yet when this runs.
-async fn lan_conflict_state(hub: &Hub, port: u16) -> protocol::RemoteState {
-    if hub.lan_handle.lock().await.is_some() {
-        warn!(
-            port,
-            "remote access is on but the LAN listener holds the same port; tailnet listener not \
-             started"
-        );
-        protocol::RemoteState::PortInUse
-    } else {
-        warn!(
-            port,
-            "remote access is on but lan.json puts LAN access on the same port; tailnet listener \
-             not started"
-        );
-        protocol::RemoteState::BindFailed {
-            reason: format!(
-                "LAN access is configured on port {port} too; turn LAN access off or choose \
-                 another port"
-            ),
-        }
-    }
+/// Whether the tailnet listener should start: remote access on and a usable
+/// port.
+fn remote_listener_allowed(remote: crate::remote_config::RemoteConfig) -> bool {
+    remote.enabled && remote.port != 0
 }
 
 /// Start the tailnet listener when [`remote_listener_allowed`] says so, or
 /// return the state that says why it did not: [`protocol::RemoteState::Off`]
-/// while remote access is off, the LAN conflict ([`lan_conflict_state`]:
-/// `BindFailed` for a same-port `lan.json` whose LAN listener is not bound
-/// yet, startup included, or failed to bind), or the certificate dir that
-/// could not be created. Every refusal is logged; none propagates out of
-/// [`run`].
-async fn start_tailnet_listener(
+/// while remote access is off, or the certificate dir that could not be
+/// created. Every refusal is logged; none propagates out of [`run`].
+fn start_tailnet_listener(
     hub: &Hub,
     remote: crate::remote_config::RemoteConfig,
-    lan_config: Option<&lan::LanConfig>,
     shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> Result<TailnetListener, protocol::RemoteState> {
-    if !remote_listener_allowed(remote, lan_config) {
-        if !remote.enabled || remote.port == 0 {
-            return Err(protocol::RemoteState::Off);
-        }
-        return Err(lan_conflict_state(hub, remote.port).await);
+    if !remote_listener_allowed(remote) {
+        return Err(protocol::RemoteState::Off);
     }
     let tailnet_dir = match Dirs::ensure_tailnet_dir() {
         Ok(dir) => dir,
@@ -1142,17 +1043,16 @@ async fn start_tailnet_listener(
 /// Bring the listener in `slot` in line with `remote`: drop the running one,
 /// then start a new one when remote access is on, beginning a new status
 /// generation either way. The caller holds [`Hub::tailnet`].
-async fn apply_remote_config(
+fn apply_remote_config(
     hub: &Hub,
     slot: &mut Option<TailnetListener>,
     remote: crate::remote_config::RemoteConfig,
-    lan_config: Option<&lan::LanConfig>,
     shutdown: tokio::sync::watch::Receiver<bool>,
 ) {
     if slot.take().is_some() {
         info!("remote access: tailnet listener stopped");
     }
-    match start_tailnet_listener(hub, remote, lan_config, shutdown).await {
+    match start_tailnet_listener(hub, remote, shutdown) {
         Ok(listener) => {
             info!(
                 port = remote.port,
@@ -1171,11 +1071,10 @@ async fn apply_remote_config(
 async fn start_remote_access(
     hub: &Hub,
     remote: crate::remote_config::RemoteConfig,
-    lan_config: Option<&lan::LanConfig>,
     shutdown: tokio::sync::watch::Receiver<bool>,
 ) {
     let mut slot = hub.tailnet.lock().await;
-    apply_remote_config(hub, &mut slot, remote, lan_config, shutdown).await;
+    apply_remote_config(hub, &mut slot, remote, shutdown);
 }
 
 /// [`ClientMessage::ConfigureRemote`]: persist the switch, flip the watch
@@ -1216,141 +1115,9 @@ async fn configure_remote(
     }
     crate::remote_config::save(&hub.dirs, remote)?;
     hub.remote_enabled.send_replace(enabled);
-    let lan_config = lan::load(&hub.dirs);
-    apply_remote_config(
-        hub,
-        &mut slot,
-        remote,
-        lan_config.as_ref(),
-        hub.shutdown_tx.subscribe(),
-    )
-    .await;
+    apply_remote_config(hub, &mut slot, remote, hub.shutdown_tx.subscribe());
     info!(enabled, port = remote.port, "remote access configured");
     Ok(())
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct PairRequest {
-    code: String,
-}
-
-#[derive(Debug, serde::Serialize)]
-struct PairResponse {
-    token: String,
-    protocol_version: u32,
-}
-
-/// `POST /pair` — exchange a valid pairing code for the daemon's auth token.
-///
-/// Reachable on the LAN TLS listener: a discovering laptop pins the cert from
-/// the mDNS TXT record, then submits the host's short code here. The endpoint
-/// is unauthenticated by design — the short-lived, attempt-capped code *is* the
-/// authorization. A match consumes the window and hands back the token (the
-/// laptop then connects over the normal pinned-TLS WS path); any terminal
-/// outcome broadcasts [`protocol::DaemonMessage::PairingEnded`] so the host UI
-/// clears the displayed code.
-async fn pair_handler(State(hub): State<Hub>, Json(req): Json<PairRequest>) -> Response {
-    let outcome = {
-        let mut slot = hub.pairing.lock().await;
-        pairing::validate(&mut slot, &req.code, std::time::Instant::now())
-    };
-    if let Some(reason) = outcome.end_reason() {
-        let _ = hub.state_events.send(StateEvent::PairingEnded { reason });
-    }
-    match outcome {
-        pairing::PairOutcome::Matched => {
-            info!("HTTP /pair: code accepted; handing back auth token");
-            (
-                StatusCode::OK,
-                Json(PairResponse {
-                    token: hub.auth_token.clone(),
-                    protocol_version: PROTOCOL_VERSION,
-                }),
-            )
-                .into_response()
-        }
-        pairing::PairOutcome::Wrong => {
-            (StatusCode::FORBIDDEN, "invalid pairing code").into_response()
-        }
-        pairing::PairOutcome::TooManyAttempts => (
-            StatusCode::FORBIDDEN,
-            "too many attempts; ask the host for a new code",
-        )
-            .into_response(),
-        pairing::PairOutcome::Expired => {
-            (StatusCode::FORBIDDEN, "pairing code expired").into_response()
-        }
-        pairing::PairOutcome::NoSession => {
-            (StatusCode::FORBIDDEN, "no pairing in progress").into_response()
-        }
-    }
-}
-
-/// Start (or restart) the opt-in LAN TLS listener on `0.0.0.0:<port>`, serving
-/// the same Router over TLS (rustls, ring). Stops any previously-running LAN
-/// listener first so a port change or re-enable never leaks a listener. Returns
-/// the pinned cert fingerprint on success.
-async fn start_lan_listener(hub: &Hub, port: u16) -> anyhow::Result<String> {
-    stop_lan_listener(hub).await;
-    let cert = lan::ensure_cert(&hub.dirs)?;
-    let fingerprint = cert.fingerprint;
-    let lan_addr = SocketAddr::from((Ipv4Addr::UNSPECIFIED, port));
-    // Bind synchronously with retry so the result is the real bind outcome (a
-    // failure propagates to the caller's log) and a supervisor handoff doesn't
-    // lose the port race against the outgoing daemon's graceful drain.
-    let listener = lan::bind_listener(lan_addr).await?;
-    let tls_config = axum_server::tls_rustls::RustlsConfig::from_config(cert.server_config);
-    let handle = axum_server::Handle::new();
-    *hub.lan_handle.lock().await = Some(handle.clone());
-    let app = build_router(hub.clone());
-    let server = axum_server::from_tcp_rustls(listener, tls_config)
-        .context("building LAN TLS server from bound listener")?;
-    tokio::spawn(async move {
-        if let Err(err) = server.handle(handle).serve(app.into_make_service()).await {
-            error!(?err, "LAN TLS listener exited with error");
-        }
-    });
-
-    // Advertise over mDNS so a laptop can discover this host without a typed
-    // address. Best-effort: a failure here (no responder, blocked UDP 5353)
-    // leaves the working TLS listener up — pairing by pasted code still works.
-    match discovery::advertise(port, &fingerprint, &lan::detect_addresses()) {
-        Ok(adv) => *hub.advertiser.lock().await = Some(adv),
-        Err(err) => warn!(
-            ?err,
-            "mDNS advertising failed to start; LAN listener still bound"
-        ),
-    }
-
-    Ok(fingerprint)
-}
-
-/// Spawn the task that gracefully stops the LAN TLS listener and drops its
-/// mDNS advertisement when the daemon-wide shutdown watch flips to `true`.
-fn spawn_lan_teardown(hub: &Hub, mut shutdown_rx: tokio::sync::watch::Receiver<bool>) {
-    let lan_handle_slot = hub.lan_handle.clone();
-    let advertiser_slot = hub.advertiser.clone();
-    tokio::spawn(async move {
-        while shutdown_rx.changed().await.is_ok() {
-            if *shutdown_rx.borrow() {
-                if let Some(handle) = lan_handle_slot.lock().await.take() {
-                    handle.graceful_shutdown(Some(Duration::from_secs(3)));
-                }
-                drop(advertiser_slot.lock().await.take());
-                break;
-            }
-        }
-    });
-}
-
-/// Gracefully stop the LAN TLS listener if running; no-op otherwise. Also drops
-/// the mDNS advertisement (its `Drop` unregisters the service).
-async fn stop_lan_listener(hub: &Hub) {
-    let handle = hub.lan_handle.lock().await.take();
-    if let Some(handle) = handle {
-        handle.graceful_shutdown(Some(std::time::Duration::from_secs(3)));
-    }
-    drop(hub.advertiser.lock().await.take());
 }
 
 fn write_handshake(dirs: &Dirs, port: u16, auth_token: &str) -> anyhow::Result<()> {
@@ -1642,22 +1409,6 @@ fn spawn_state_forwarder(
                 Ok(StateEvent::WorktreesRootChanged { root, is_override }) => {
                     let _ = out_tx.send(DaemonMessage::WorktreesRootChanged { root, is_override });
                 }
-                Ok(StateEvent::LanStatus {
-                    enabled,
-                    port,
-                    fingerprint,
-                    addresses,
-                }) => {
-                    let _ = out_tx.send(DaemonMessage::LanStatus {
-                        enabled,
-                        port,
-                        fingerprint,
-                        addresses,
-                    });
-                }
-                Ok(StateEvent::PairingEnded { reason }) => {
-                    let _ = out_tx.send(DaemonMessage::PairingEnded { reason });
-                }
                 Ok(StateEvent::KeepAwakeStatus { enabled, active }) => {
                     let _ = out_tx.send(DaemonMessage::KeepAwakeStatus { enabled, active });
                 }
@@ -1924,8 +1675,8 @@ struct Handshake {
 const TAILNET_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Read and check the mandatory `Hello`. A tailnet connection gets
-/// [`TAILNET_HANDSHAKE_TIMEOUT`] to send it; the loopback and LAN listeners
-/// keep the un-timed handshake they always had.
+/// [`TAILNET_HANDSHAKE_TIMEOUT`] to send it; the loopback listener keeps an
+/// un-timed handshake.
 async fn handshake(
     hub: &Hub,
     auth: &AuthKind,
@@ -2107,13 +1858,6 @@ fn push_initial_state(
         root: hub.state.worktrees_dir().to_string_lossy().into_owned(),
         is_override: hub.state.worktrees_root_is_override(),
     });
-    let lan_cfg = lan::load(&hub.dirs);
-    let _ = out_tx.send(DaemonMessage::LanStatus {
-        enabled: lan_cfg.as_ref().is_some_and(|c| c.enabled),
-        port: lan_cfg.as_ref().map_or(lan::DEFAULT_LAN_PORT, |c| c.port),
-        fingerprint: lan::fingerprint(&hub.dirs),
-        addresses: lan::detect_addresses(),
-    });
     let keep_awake = *hub.keep_awake_status.borrow();
     let _ = out_tx.send(DaemonMessage::KeepAwakeStatus {
         enabled: keep_awake.enabled,
@@ -2131,6 +1875,11 @@ fn push_initial_state(
     drop(remote);
 }
 
+/// The `Error` every connection gets for `ConfigureLan`, `StartPairing` and
+/// `CancelPairing`: the messages stay decodable, and nothing else happens.
+const LAN_RETIRED: &str = "LAN access and pairing codes are retired; remote access runs over \
+                           Tailscale (turn it on with ConfigureRemote).";
+
 /// The reason `msg` is host-only and refused on a tailnet connection, if it
 /// is. Checked before the match so no side effect can run first; a message
 /// that manages the host joins this set here.
@@ -2140,9 +1889,7 @@ fn host_only_refusal(msg: &ClientMessage, auth: &AuthKind) -> Option<&'static st
     }
     match msg {
         ClientMessage::Shutdown { .. } => Some("shutdown is local-only"),
-        ClientMessage::ConfigureLan { .. } => Some("LAN access is local-only"),
         ClientMessage::ConfigureRemote { .. } => Some("remote access is local-only"),
-        ClientMessage::StartPairing | ClientMessage::CancelPairing => Some("pairing is local-only"),
         _ => None,
     }
 }
@@ -3000,32 +2747,13 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
                 is_override,
             });
         }
-        ClientMessage::ConfigureLan { enabled, port } => {
-            // Persist the config (with the stable auth token so a paired remote
-            // client survives restarts), then bring the TLS listener up/down
-            // live, and broadcast the resulting status to every client.
-            let cfg = lan::LanConfig {
-                enabled,
-                port,
-                auth_token: hub.auth_token.clone(),
-            };
-            lan::save(&hub.dirs, &cfg)?;
-            if enabled {
-                match start_lan_listener(hub, port).await {
-                    Ok(fingerprint) => {
-                        info!(port, %fingerprint, "LAN access enabled via ConfigureLan");
-                    }
-                    Err(err) => error!(?err, "ConfigureLan: failed to start LAN listener"),
-                }
-            } else {
-                stop_lan_listener(hub).await;
-                info!("LAN access disabled via ConfigureLan");
-            }
-            let _ = hub.state_events.send(StateEvent::LanStatus {
-                enabled,
-                port,
-                fingerprint: lan::fingerprint(&hub.dirs),
-                addresses: lan::detect_addresses(),
+        ClientMessage::ConfigureLan { .. }
+        | ClientMessage::StartPairing
+        | ClientMessage::CancelPairing => {
+            info!("dispatch: a retired LAN access message was answered with an Error");
+            let _ = out_tx.send(DaemonMessage::Error {
+                message: LAN_RETIRED.to_owned(),
+                request_id: None,
             });
         }
         ClientMessage::ConfigureRemote { enabled, port } => {
@@ -3035,26 +2763,6 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
             hub.state.set_keep_awake(enabled)?;
             hub.keep_awake_enabled.send_replace(enabled);
             info!(enabled, "keep-awake setting changed");
-        }
-        ClientMessage::StartPairing => {
-            // Open a fresh pairing window and hand the code back to *this*
-            // connection only — broadcasting it would leak the code to a
-            // remote client. The `/pair` HTTP endpoint validates submissions.
-            let session = pairing::PairingSession::new(std::time::Instant::now());
-            let code = session.code().to_string();
-            *hub.pairing.lock().await = Some(session);
-            let ttl_secs = u32::try_from(pairing::PAIRING_TTL.as_secs()).unwrap_or(u32::MAX);
-            info!("pairing window opened");
-            let _ = out_tx.send(DaemonMessage::PairingStarted { code, ttl_secs });
-        }
-        ClientMessage::CancelPairing => {
-            let had_session = hub.pairing.lock().await.take().is_some();
-            if had_session {
-                info!("pairing window cancelled by host");
-                let _ = hub.state_events.send(StateEvent::PairingEnded {
-                    reason: protocol::PairingEndReason::Cancelled,
-                });
-            }
         }
         ClientMessage::InspectWorktreesRoot => {
             let root = hub.state.worktrees_dir();
@@ -8194,10 +7902,7 @@ mod tests {
             config: config.clone(),
             state_file: config.join("state.json"),
             handshake_file: config.join("daemon.json"),
-            lan_config_file: config.join("lan.json"),
             remote_config_file: config.join("remote.json"),
-            lan_cert_file: config.join("lan-cert.pem"),
-            lan_key_file: config.join("lan-key.pem"),
             sessions_dir: config.join("sessions"),
             worktrees_dir: scratch.path().join("worktrees"),
             binaries_dir: scratch.path().join("binaries"),
@@ -8232,14 +7937,11 @@ mod tests {
             preset_cancellations: Arc::new(AsyncMutex::new(HashMap::new())),
             state_events,
             client_count: Arc::new(client_count),
-            lan_handle: Arc::new(AsyncMutex::new(None)),
-            advertiser: Arc::new(AsyncMutex::new(None)),
             remote_enabled: Arc::new(remote_enabled),
             tailnet: Arc::new(AsyncMutex::new(None)),
             remote_status: Arc::new(tokio::sync::watch::Sender::new(RemoteSlot::initial(
                 crate::remote_config::RemoteConfig::default(),
             ))),
-            pairing: Arc::new(AsyncMutex::new(None)),
             keep_awake_enabled: Arc::new(keep_awake_enabled),
             keep_awake_status,
             recovering: RecoveryClaims::default(),
@@ -8810,10 +8512,7 @@ mod tests {
             config: root.clone(),
             state_file: root.join("state.json"),
             handshake_file: root.join("daemon.json"),
-            lan_config_file: root.join("lan.json"),
             remote_config_file: root.join("remote.json"),
-            lan_cert_file: root.join("lan-cert.pem"),
-            lan_key_file: root.join("lan-key.pem"),
             sessions_dir: root.join("sessions"),
             worktrees_dir: root.join("worktrees"),
             binaries_dir: root.join("binaries"),
@@ -9078,22 +8777,6 @@ mod tests {
         let snapshot = snapshot_of(&hub, "s1");
         assert_eq!(snapshot.status, SessionStatus::Stopped);
         assert_eq!(snapshot.pending_input, None);
-    }
-
-    #[tokio::test]
-    async fn lan_router_has_no_hook_route() {
-        let (hub, _scratch) = test_hub("hook-lan");
-        hub.sessions.insert(idle_record("s1"));
-        let response = build_router(hub)
-            .oneshot(hook_request(
-                "s1",
-                Some("test-token"),
-                Some("100"),
-                r#"{"hook_event_name":"UserPromptSubmit"}"#,
-            ))
-            .await
-            .expect("router answers");
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     /// One `Attention` per entry into `AwaitingInput`, on the real hook path:
@@ -14144,6 +13827,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tailnet_router_has_no_hook_route() {
+        let (hub, _scratch) = test_hub("hook-tailnet");
+        hub.sessions.insert(idle_record("s1"));
+        let response = build_tailnet_router(hub, name_slot(), 8787)
+            .oneshot(hook_request(
+                "s1",
+                Some("test-token"),
+                Some("100"),
+                r#"{"hook_event_name":"UserPromptSubmit"}"#,
+            ))
+            .await
+            .expect("the router answers");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
     async fn tailnet_router_serves_health_constantly() {
         let (hub, _scratch) = test_hub("tailnet-router-health");
         let router = build_tailnet_router(hub, name_slot(), 8787);
@@ -14161,7 +13860,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn loopback_router_keeps_all_four_routes() {
+    async fn loopback_router_keeps_its_routes() {
         let (hub, _scratch) = test_hub("loopback-router-routes");
         let router = build_loopback_router(hub);
         let health = router
@@ -14188,20 +13887,6 @@ mod tests {
             .await
             .expect("the router answers");
         assert_eq!(shutdown.status(), StatusCode::UNAUTHORIZED);
-
-        let pair = router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri("/pair")
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"code":"123456"}"#))
-                    .expect("build the request"),
-            )
-            .await
-            .expect("the router answers");
-        assert_eq!(pair.status(), StatusCode::FORBIDDEN);
 
         // The hook endpoint is loopback-only and needs the bearer token.
         let hook = router
@@ -14439,28 +14124,133 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tailnet_configure_lan_is_refused_and_writes_nothing() {
-        let (hub, _scratch) = test_hub("configure-lan-tailnet");
-        let lan_file = hub.dirs.lan_config_file.clone();
-        assert!(!lan_file.exists());
+    async fn retired_lan_messages_get_the_tailscale_error() {
+        let (hub, _scratch) = test_hub("retired-lan");
+        let lan_file = hub.dirs.config.join("lan.json");
         let tailnet = AuthKind::Tailnet(test_peer());
+        for auth in [&AuthKind::Local, &tailnet] {
+            for msg in [
+                ClientMessage::ConfigureLan {
+                    enabled: false,
+                    port: 9000,
+                },
+                ClientMessage::StartPairing,
+                ClientMessage::CancelPairing,
+            ] {
+                let reply = dispatch_one_as(&hub, msg.clone(), auth).await;
+                assert!(
+                    matches!(
+                        &reply,
+                        DaemonMessage::Error { message, request_id: None } if message == LAN_RETIRED
+                    ),
+                    "{auth:?} {msg:?}: {reply:?}"
+                );
+            }
+        }
+        assert!(LAN_RETIRED.contains("Tailscale"), "{LAN_RETIRED}");
+        assert!(!lan_file.exists(), "a retired message writes no lan.json");
+    }
+
+    #[tokio::test]
+    async fn inert_configure_lan_binds_nothing() {
+        let (hub, _scratch) = test_hub("inert-configure-lan");
+        let mut events = hub.state_events.subscribe();
+        // The test holds the port itself, on loopback only, for the whole test.
+        let own = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .expect("bind the test's own loopback listener");
+        let port = own.local_addr().expect("the bound address").port();
         let reply = dispatch_one_as(
             &hub,
             ClientMessage::ConfigureLan {
                 enabled: true,
-                port: 9000,
+                port,
             },
-            &tailnet,
+            &AuthKind::Local,
         )
         .await;
         assert!(
-            matches!(&reply, DaemonMessage::Error { message, .. } if message == "LAN access is local-only"),
+            matches!(&reply, DaemonMessage::Error { message, .. } if message == LAN_RETIRED),
             "{reply:?}"
         );
+        assert!(hub.tailnet.lock().await.is_none(), "no listener starts");
         assert!(
-            !lan_file.exists(),
-            "a refused ConfigureLan writes no lan.json"
+            matches!(
+                events.try_recv(),
+                Err(broadcast::error::TryRecvError::Empty)
+            ),
+            "nothing is broadcast"
         );
+        let client = std::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+            .expect("connect to the test's port");
+        let (_accepted, peer) = own
+            .accept()
+            .expect("the test's own listener still owns the port");
+        assert_eq!(
+            peer,
+            client.local_addr().expect("the client's address"),
+            "the connection reached the test's listener"
+        );
+    }
+
+    #[tokio::test]
+    async fn pair_route_is_gone() {
+        let (hub, _scratch) = test_hub("pair-route-gone");
+        let routers = [
+            ("loopback", build_loopback_router(hub.clone())),
+            ("tailnet", build_tailnet_router(hub, name_slot(), 8787)),
+        ];
+        for (name, router) in routers {
+            let response = router
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri("/pair")
+                        .header("content-type", "application/json")
+                        .body(Body::from(r#"{"code":"123456"}"#))
+                        .expect("build the request"),
+                )
+                .await
+                .expect("the router answers");
+            assert_eq!(
+                response.status(),
+                StatusCode::NOT_FOUND,
+                "/pair must not exist on the {name} router"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn stale_lan_json_never_blocks_remote_start() {
+        let scratch = ScratchDir::new("stale-lan-json");
+        // Declared before the hub, so the env vars are restored only
+        // after the hub and its listener are gone.
+        let _env = FakeTailscaleEnv::new(scratch.path()).await;
+        let (hub, _scratch) = test_hub_in(scratch, None);
+        std::fs::write(
+            hub.dirs.config.join("lan.json"),
+            br#"{"enabled":true,"port":8787,"auth_token":"x"}"#,
+        )
+        .expect("write a leftover lan.json");
+        let mut events = hub.state_events.subscribe();
+        let sent = dispatch_all(
+            &hub,
+            ClientMessage::ConfigureRemote {
+                enabled: true,
+                port: Some(8787),
+            },
+        )
+        .await;
+        assert!(sent.is_empty(), "the answer is a broadcast: {sent:?}");
+        let (_, port, state) = next_remote_status(&mut events, |_, _, _| true).await;
+        assert_eq!(port, 8787);
+        assert!(
+            !matches!(
+                state,
+                protocol::RemoteState::PortInUse | protocol::RemoteState::BindFailed { .. }
+            ),
+            "a leftover lan.json claims no port: {state:?}"
+        );
+        assert!(hub.tailnet.lock().await.is_some(), "the listener runs");
     }
 
     #[tokio::test(start_paused = true)]
@@ -14538,10 +14328,8 @@ mod tests {
         let started = start_tailnet_listener(
             &hub,
             crate::remote_config::RemoteConfig::default(),
-            None,
             shutdown_rx,
-        )
-        .await;
+        );
         assert!(
             matches!(started, Err(protocol::RemoteState::Off)),
             "remote access off starts no tailnet listener"
@@ -14549,53 +14337,23 @@ mod tests {
         assert!(hub.tailnet.lock().await.is_none());
     }
 
-    /// `lan.json` contents with LAN access on at `port`.
-    fn lan_on(port: u16) -> lan::LanConfig {
-        lan::LanConfig {
-            enabled: true,
-            port,
-            auth_token: String::new(),
+    #[test]
+    fn leftover_lan_files_are_deleted_at_startup() {
+        let scratch = ScratchDir::new("leftover-lan-files");
+        let config = scratch.path();
+        std::fs::write(config.join("lan.json"), b"{}").expect("write lan.json");
+        std::fs::write(config.join("lan-cert.pem"), b"cert").expect("write lan-cert.pem");
+        std::fs::write(config.join("remote.json"), b"{}").expect("write remote.json");
+        remove_retired_lan_files(config);
+        for name in RETIRED_LAN_FILES {
+            assert!(!config.join(name).exists(), "{name} is removed");
         }
-    }
-
-    #[tokio::test]
-    async fn remote_start_reports_port_in_use_while_the_lan_listener_holds_the_port() {
-        let scratch = ScratchDir::new("remote-start-lan-bound");
-        // Declared before the hub, so the env vars are restored only
-        // after the hub and its listener are gone.
-        let _env = FakeTailscaleEnv::new(scratch.path()).await;
-        let (hub, _scratch) = test_hub_in(scratch, None);
-        *hub.lan_handle.lock().await = Some(axum_server::Handle::new());
-        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-        let on = crate::remote_config::RemoteConfig {
-            enabled: true,
-            port: 8787,
-        };
-        let started = start_tailnet_listener(&hub, on, Some(&lan_on(8787)), shutdown_rx).await;
         assert!(
-            matches!(started, Err(protocol::RemoteState::PortInUse)),
-            "the bound LAN listener holds the port"
+            config.join("remote.json").exists(),
+            "only the retired files go"
         );
-    }
-
-    #[tokio::test]
-    async fn remote_start_with_an_unbound_lan_claim_is_not_port_in_use() {
-        let scratch = ScratchDir::new("remote-start-lan-unbound");
-        // Declared before the hub, so the env vars are restored only
-        // after the hub and its listener are gone.
-        let _env = FakeTailscaleEnv::new(scratch.path()).await;
-        let (hub, _scratch) = test_hub_in(scratch, None);
-        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-        let on = crate::remote_config::RemoteConfig {
-            enabled: true,
-            port: 8787,
-        };
-        let started = start_tailnet_listener(&hub, on, Some(&lan_on(8787)), shutdown_rx).await;
-        let state = started.err();
-        assert!(
-            matches!(&state, Some(protocol::RemoteState::BindFailed { reason }) if reason.contains("8787")),
-            "lan.json claims the port but no LAN listener is bound: {state:?}"
-        );
+        // Every file already gone: still no panic and nothing to do.
+        remove_retired_lan_files(config);
     }
 
     #[tokio::test]
@@ -14613,7 +14371,7 @@ mod tests {
             enabled: true,
             port: 8787,
         };
-        let started = start_tailnet_listener(&hub, on, None, shutdown_rx).await;
+        let started = start_tailnet_listener(&hub, on, shutdown_rx);
         let state = started.err();
         assert!(
             matches!(&state, Some(protocol::RemoteState::CertFailed { reason }) if reason.contains("tailnet")),
@@ -14648,41 +14406,26 @@ mod tests {
             enabled: true,
             port: 8787,
         };
-        let started = start_tailnet_listener(&hub, on, Some(&lan_on(9000)), shutdown_rx).await;
-        assert!(
-            started.is_ok(),
-            "a LAN listener on another port is no conflict"
-        );
+        let started = start_tailnet_listener(&hub, on, shutdown_rx);
+        assert!(started.is_ok(), "remote access on starts the listener");
     }
 
     #[test]
-    fn remote_and_lan_on_the_same_port_is_refused() {
-        let remote = crate::remote_config::RemoteConfig {
-            enabled: true,
-            port: 8787,
-        };
-        let lan = |enabled: bool, port: u16| lan::LanConfig {
-            enabled,
-            port,
-            auth_token: String::new(),
-        };
-        assert!(
-            !remote_listener_allowed(remote, Some(&lan(true, 8787))),
-            "the LAN listener already holds the port"
-        );
-        assert!(remote_listener_allowed(remote, Some(&lan(true, 9000))));
-        assert!(remote_listener_allowed(remote, Some(&lan(false, 8787))));
-        assert!(remote_listener_allowed(remote, None));
+    fn remote_listener_needs_the_switch_and_a_port() {
+        assert!(remote_listener_allowed(
+            crate::remote_config::RemoteConfig {
+                enabled: true,
+                port: 8787,
+            }
+        ));
         assert!(!remote_listener_allowed(
-            crate::remote_config::RemoteConfig::default(),
-            None
+            crate::remote_config::RemoteConfig::default()
         ));
         assert!(!remote_listener_allowed(
             crate::remote_config::RemoteConfig {
                 enabled: true,
                 port: 0
-            },
-            None
+            }
         ));
     }
 

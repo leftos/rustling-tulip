@@ -1,6 +1,6 @@
 # Remote file transfer
 
-When the native client is connected to a daemon on another machine over Remote LAN access (see `docs/remote-lan-access.md`), fetch a file from the host and open it on the machine you're sitting at. There are two triggers: clicking a path link in a terminal (the same gesture that opens a link locally), and a "Fetch file…" popup where you type any path under a repo.
+When the native client is connected to a daemon on another machine over remote (tailnet) access (see `docs/plans/remote-access.md`), fetch a file from the host and open it on the machine you're sitting at. There are two triggers: clicking a path link in a terminal (the same gesture that opens a link locally), and a "Fetch file…" popup where you type any path under a repo.
 
 In this doc, the **host** is the machine running the daemon and the **remote client** is the machine running the native client connected to it.
 

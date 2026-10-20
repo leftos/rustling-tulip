@@ -52,7 +52,7 @@ A typed key is stored in **Windows Credential Manager** through `keyring-core` 1
 
 - The key is set with a write-only `SetProviderKey` and never leaves the daemon again: status carries only `missing`, `stored`, `env_found`, `env_missing` or `rejected`. Its type redacts itself in `Debug` and is never logged.
 - An environment variable is read at call time from the daemon's environment, falling back to `HKCU\Environment` (the daemon started at login keeps the environment it was born with; the spike's `api.py` does the same).
-- A paired LAN client may set a key: pairing already grants spawning a shell, so this adds no power.
+- An approved tailnet client may set a key: a remote connection already grants spawning a shell, so this adds no power.
 - Never in `state.json` or `native-ui.json`. `state.json` gains a secret-free `summarizer` block: `enabled`, `provider`, per-provider key source (`stored` or `env` with a variable name), `daily_cap_usd`, `dashboard_refresh`.
 
 ### Protocol (additive)

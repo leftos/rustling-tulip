@@ -11,18 +11,6 @@ pub mod env_rows;
 
 include!(concat!(env!("OUT_DIR"), "/protocol_version.rs"));
 
-/// mDNS service type the daemon advertises and clients browse for LAN
-/// discovery. Single source of truth so the advertiser and the browser can't
-/// drift (a mismatch would silently break discovery).
-pub const MDNS_SERVICE_TYPE: &str = "_rustling-tulip._tcp.local.";
-
-/// mDNS TXT key carrying the LAN cert's SHA-256 fingerprint (lowercase hex), so
-/// a discovering client can pin it before pairing.
-pub const MDNS_TXT_FINGERPRINT: &str = "fp";
-
-/// mDNS TXT key carrying the host's human-readable name (e.g. its hostname).
-pub const MDNS_TXT_NAME: &str = "name";
-
 /// `Welcome.features` entry: the daemon can spawn a Claude session against a
 /// chosen provider (`ClaudeProvider`). A client offers the provider choice
 /// only when the connected daemon lists it.
@@ -2033,10 +2021,9 @@ pub enum InitLayoutKind {
     Unknown,
 }
 
-/// Why a pairing window ended, carried by [`DaemonMessage::PairingEnded`] so the
-/// host UI can clear (or annotate) the displayed code. Serialized as a
-/// `snake_case` string with a catch-all so an older client keeps decoding a
-/// newer reason.
+/// Why a pairing window ended, carried by [`DaemonMessage::PairingEnded`].
+/// Retired with LAN pairing: it stays decodable, and the daemon never sends
+/// it. Serialized as a `snake_case` string with a catch-all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PairingEndReason {
@@ -2086,7 +2073,7 @@ pub enum EnvScope {
 pub enum ClientMessage {
     /// Always the first message after WS upgrade. Fails the connection if the
     /// token does not match. `auth_token` is the daemon's `daemon.json` token
-    /// on a loopback or LAN connection; on a tailnet connection the daemon
+    /// on a loopback connection; on a tailnet connection the daemon
     /// never compares it to that token, and the value is instead the device's
     /// own token, checked against the host's approved devices. The daemon
     /// negotiates a wire version from the
@@ -2583,11 +2570,9 @@ pub enum ClientMessage {
     SetWorktreesRoot {
         path: Option<String>,
     },
-    /// Enable or disable opt-in LAN access (the `0.0.0.0` TLS listener) and
-    /// set its port. The daemon persists this to `lan.json` (along with the
-    /// stable auth token), binds or tears down the TLS listener immediately
-    /// (no restart needed), then broadcasts [`DaemonMessage::LanStatus`] to
-    /// every connected client. Loopback access is unaffected.
+    /// Retired with LAN access: it stays decodable, and the daemon answers it
+    /// on every connection with an `Error` naming Tailscale remote access
+    /// ([`ClientMessage::ConfigureRemote`]). It writes and binds nothing.
     ConfigureLan {
         enabled: bool,
         port: u16,
@@ -2614,15 +2599,13 @@ pub enum ClientMessage {
     SetKeepAwake {
         enabled: bool,
     },
-    /// Begin a pairing window. The daemon generates a short numeric code and
-    /// replies — to this connection only, so the code never reaches other
-    /// clients — with [`DaemonMessage::PairingStarted`]. A discovering device
-    /// submits the code to the daemon's `/pair` endpoint over the pinned-TLS
-    /// LAN channel to obtain the auth token. Only meaningful on the host while
-    /// LAN access is enabled.
+    /// Retired with LAN pairing: it stays decodable, and the daemon answers it
+    /// on every connection with the same `Error` as
+    /// [`ClientMessage::ConfigureLan`].
     StartPairing,
-    /// Cancel the active pairing window early. The daemon clears it and
-    /// broadcasts [`DaemonMessage::PairingEnded`].
+    /// Retired with LAN pairing: it stays decodable, and the daemon answers it
+    /// on every connection with the same `Error` as
+    /// [`ClientMessage::ConfigureLan`].
     CancelPairing,
     /// Scan the current worktrees root and report every `wt.<branch>/`
     /// group found under it, cross-referenced against the live and
@@ -3288,13 +3271,8 @@ pub enum DaemonMessage {
         root: String,
         is_override: bool,
     },
-    /// Current opt-in LAN access status. Broadcast in response to
-    /// [`ClientMessage::ConfigureLan`] and sent once at initial state so a
-    /// freshly-connected client can render the Settings UI without polling.
-    /// `fingerprint` is the SHA-256 (lowercase hex) of the self-signed TLS
-    /// leaf cert that remote clients pin; `None` until LAN has been enabled
-    /// at least once (no cert yet). `addresses` is the daemon host's detected
-    /// non-loopback IPv4 addresses, for assembling the remote connection code.
+    /// Retired with LAN access: it stays decodable, and the daemon never
+    /// sends it.
     LanStatus {
         enabled: bool,
         port: u16,
@@ -3323,17 +3301,14 @@ pub enum DaemonMessage {
         port: u16,
         state: RemoteState,
     },
-    /// Reply to [`ClientMessage::StartPairing`], sent only to the requesting
-    /// connection (the code must never reach other clients). `code` is the
-    /// short numeric pairing code for the user to read out; `ttl_secs` is how
-    /// long it stays valid, so the UI can show a countdown.
+    /// Retired with LAN pairing: it stays decodable, and the daemon never
+    /// sends it.
     PairingStarted {
         code: String,
         ttl_secs: u32,
     },
-    /// Broadcast when the active pairing window ends — a device paired, the
-    /// code expired or was cancelled, or too many wrong codes were tried — so
-    /// the host UI can clear the displayed code.
+    /// Retired with LAN pairing: it stays decodable, and the daemon never
+    /// sends it.
     PairingEnded {
         reason: PairingEndReason,
     },
@@ -3951,9 +3926,9 @@ pub enum SuggestTarget {
 
 /// What remote access is doing, as [`DaemonMessage::RemoteStatus`] reports
 /// it. `Off` whenever the `remote.json` switch is off. With the switch on,
-/// `PortInUse`, `BindFailed` and `CertFailed` can also mean the listener
-/// never started (the LAN listener's port, or a certificate dir that could
-/// not be created); every other arm is the running listener's state.
+/// `CertFailed` can also mean the listener never started (a certificate dir
+/// that could not be created); every other arm is the running listener's
+/// state.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RemoteState {
@@ -3983,14 +3958,11 @@ pub enum RemoteState {
     /// No certificate is in service for another reason, or the listener's
     /// certificate dir could not be created; `reason` says which.
     CertFailed { reason: String },
-    /// The configured port is taken: it stayed in use on every tailnet
-    /// address, or the host's LAN listener is bound to it, so the listener
-    /// did not start.
+    /// The configured port stayed in use on every tailnet address, so the
+    /// listener did not start.
     PortInUse,
-    /// Every tailnet address failed to bind for another reason, or the
-    /// listener did not start because `lan.json` puts LAN access on the same
-    /// port while the LAN listener is not bound yet or failed to bind, which
-    /// includes daemon startup; `reason` says which.
+    /// Every tailnet address failed to bind for another reason; `reason` says
+    /// which.
     BindFailed { reason: String },
     /// Serving at `https://{name}:{port}`. `cert_expires_at` is the
     /// certificate's `notAfter` in Unix seconds, `None` when it could not be
@@ -4070,6 +4042,41 @@ pub struct GitRemoteUrl {
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retired_lan_variants_still_decode() {
+        for json in [
+            r#"{"type":"configure_lan","enabled":true,"port":8787}"#,
+            r#"{"type":"start_pairing"}"#,
+            r#"{"type":"cancel_pairing"}"#,
+        ] {
+            let value: serde_json::Value = serde_json::from_str(json).expect("valid JSON");
+            let decoded = InboundClientMessage::from_json_str(json)
+                .expect("a retired client message decodes");
+            let InboundClientMessage::Known(msg) = decoded else {
+                panic!("{json} decodes as a known message");
+            };
+            assert_eq!(
+                serde_json::to_value(&msg).expect("serializes"),
+                value,
+                "{json} round-trips"
+            );
+        }
+        for json in [
+            r#"{"type":"lan_status","enabled":false,"port":8787,"fingerprint":null,"addresses":[]}"#,
+            r#"{"type":"pairing_started","code":"123456","ttl_secs":120}"#,
+            r#"{"type":"pairing_ended","reason":"cancelled"}"#,
+        ] {
+            let value: serde_json::Value = serde_json::from_str(json).expect("valid JSON");
+            let msg: DaemonMessage =
+                serde_json::from_str(json).expect("a retired daemon message decodes");
+            assert_eq!(
+                serde_json::to_value(&msg).expect("serializes"),
+                value,
+                "{json} round-trips"
+            );
+        }
+    }
 
     #[test]
     fn a_workspace_entry_defaults_to_not_watching_its_file() {

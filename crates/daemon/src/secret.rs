@@ -1,27 +1,39 @@
-//! Comparison helper for secrets that arrive over the wire.
+//! Helpers for the daemon's secrets: minting the auth token, comparing a
+//! caller-supplied value against a secret, and writing a secret to disk.
 //!
 //! Every secret the daemon checks against a caller-supplied value — the auth
-//! token on the WS handshake and the `/shutdown` endpoint, the short pairing
-//! code — goes through [`constant_time_eq`] rather than `==`. Rust's `==` on
-//! slices and strings short-circuits at the first differing byte, so its
-//! runtime leaks how long a shared prefix was.
-//!
-//! On the loopback listener that leak is uninteresting. It matters because the
-//! same router is served by the opt-in LAN TLS listener on `0.0.0.0` (see
-//! `server::start_lan_listener`), which puts these comparisons in front of
-//! anyone on the network. Remote timing analysis through TLS and network jitter
-//! is not a practical attack today; using the constant-time path everywhere
-//! costs nothing and removes the question.
+//! token on the WS handshake and the `/shutdown` endpoint — goes through
+//! [`constant_time_eq`] rather than `==`. Rust's `==` on slices and strings
+//! short-circuits at the first differing byte, so its runtime leaks how long a
+//! shared prefix was. On the loopback listener that leak is uninteresting;
+//! using the constant-time path everywhere costs nothing and removes the
+//! question.
 //!
 //! [`write_private`] covers the other half: the files those secrets are
-//! persisted to (`daemon.json`, `lan.json`, `lan-key.pem`).
+//! persisted to (`daemon.json` and the others that hold a secret).
+
+use rand::Rng as _;
+use rand::distributions::Alphanumeric;
+
+const AUTH_TOKEN_LEN: usize = 48;
+
+/// Generate a fresh 48-char alphanumeric auth token, the `daemon.json` token
+/// for one daemon run.
+#[must_use]
+pub fn generate_auth_token() -> String {
+    rand::thread_rng()
+        .sample_iter(&Alphanumeric)
+        .take(AUTH_TOKEN_LEN)
+        .map(char::from)
+        .collect()
+}
 
 /// Write a secret-bearing file so only its owner can read it.
 ///
 /// On Windows the config dir's ACL is already user-scoped, so this is the same
 /// as `fs::write`. On Unix, `fs::write` creates `0666 & ~umask` — typically
-/// `0644`, i.e. world-readable — which would expose the LAN TLS private key and
-/// the auth token to every local user. The mode is set at creation time so a
+/// `0644`, i.e. world-readable — which would expose the auth token to every
+/// local user. The mode is set at creation time so a
 /// freshly created file is never briefly readable, and applied again afterwards
 /// so an existing file written by an older build gets tightened.
 ///
@@ -72,6 +84,14 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 )]
 mod tests {
     use super::constant_time_eq;
+
+    #[test]
+    fn auth_tokens_are_48_alphanumeric_chars_and_fresh() {
+        let token = super::generate_auth_token();
+        assert_eq!(token.len(), 48, "{token}");
+        assert!(token.chars().all(|c| c.is_ascii_alphanumeric()), "{token}");
+        assert_ne!(token, super::generate_auth_token(), "each call is fresh");
+    }
 
     #[test]
     fn equal_slices_match() {

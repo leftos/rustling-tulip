@@ -162,7 +162,7 @@ Answered (user): Q1 (b) each CLI's own update command only, an install it cannot
 7. **The opt-out.**
    - (a) *Recommended.* One host setting, `agent_updates` in `state.json` (on by default), with a Settings → General toggle, carried like `keep_awake`. Worst case: a user who wants Claude updated but Codex pinned has to pin Codex another way (its `check_for_update_on_startup = false` does not stop `codex update`).
    - (b) One toggle per CLI. Worst case: three settings for a feature most users leave on.
-   - (c) An environment variable on the daemon only (`RUSTLING_TULIP_AGENT_UPDATES=0`). Worst case: the daemon started from the login `Run` entry does not see a variable set later, and a phone or LAN client cannot change it.
+   - (c) An environment variable on the daemon only (`RUSTLING_TULIP_AGENT_UPDATES=0`). Worst case: the daemon started from the login `Run` entry does not see a variable set later, and a phone or other remote client cannot change it.
 8. **The override variables (`RUSTLING_TULIP_CLAUDE`, `RUSTLING_TULIP_CODEX`, `RUSTLING_TULIP_CURSOR_AGENT`).**
    - (a) *Recommended.* A set override skips the update for that CLI, logged once. The e2e fake-claude never meets an update, and a user pointing at a pinned build keeps it. Worst case: a user who set the variable only to pick one of two installed copies gets no updates for it.
    - (b) Update the override's program too. Worst case: the live e2e tier runs `fake-claude.cmd update`, which the shim does not know, and every e2e spawn logs a failure and waits for it.

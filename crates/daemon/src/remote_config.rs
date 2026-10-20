@@ -1,7 +1,7 @@
 //! Opt-in remote (Tailscale) access: the persisted `remote.json` switch.
 //!
 //! Remote access is off unless the user turns it on. The file lives in the
-//! config dir beside `lan.json` and holds only the switch and the port; the
+//! config dir and holds only the switch and the port; the
 //! device tokens that authorize a tailnet client are not stored here.
 //!
 //! An absent file, an unreadable or corrupt one, and a zero port all mean the
@@ -95,9 +95,6 @@ mod tests {
             config: root.clone(),
             state_file: root.join("state.json"),
             handshake_file: root.join("daemon.json"),
-            lan_config_file: root.join("lan.json"),
-            lan_cert_file: root.join("lan-cert.pem"),
-            lan_key_file: root.join("lan-key.pem"),
             remote_config_file: root.join("remote.json"),
             sessions_dir: root.join("sessions"),
             worktrees_dir: root.join("worktrees"),

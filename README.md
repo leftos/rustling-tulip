@@ -54,7 +54,7 @@ Start with [docs/architecture.md](docs/architecture.md) for how the pieces fit a
 - **Agent page / Agents category**: the Settings modal's `Agents` group row, a label with no page of its own, and the Claude, Codex and Cursor pages under it that hold each runtime's spawn defaults, such as Claude's approval mode and Codex's hooks toggle.
 - **Agent skill pack**: the `rt-*` skills and the `rt-worker` agent under `agent-pack/`, installed into `~/.claude` so an agent can fan work out, review it and merge it.
 - **Attention feed**: the daemon's one stream of items that want the user (Needs you, Hand-off ready, Progress, Done, Fleet), shared by every client and the phone push, resolved everywhere at once; planned (RT-87, `docs/plans/off-orca.md`).
-- **Auth kind**: how a connection authenticates, `Local` (loopback or LAN, checked against the `daemon.json` token) or `Tailnet` (the admitted peer's identity, with the presented value read as its device token); it also decides which host-only messages the connection may send (`AuthKind` in `crates/daemon/src/server.rs`).
+- **Auth kind**: how a connection authenticates, `Local` (loopback, checked against the `daemon.json` token) or `Tailnet` (the admitted peer's identity, with the presented value read as its device token); it also decides which host-only messages the connection may send (`AuthKind` in `crates/daemon/src/server.rs`).
 - **Auto-switch**: moving the active account to another one when its binding usage window reaches the threshold, run by the daemon or by `cswap auto`, never both.
 - **Background state**: a session whose turn ended while its subagents, background shells or a scheduled wakeup still run; it never counts as finished (RT-84).
 - **Binding window**: whichever of an account's usage windows (5-hour, 7-day, per-model) is fullest; its percentage decides auto-switch.
@@ -67,7 +67,7 @@ Start with [docs/architecture.md](docs/architecture.md) for how the pieces fit a
 - **claude-swap / cswap**: the user's multi-account switcher for Claude Code (`github.com/leftos/claude-swap`), whose store and rules the daemon's accounts module shares; see `docs/plans/accounts.md`.
 - **Clear and continue**: the planned one-click session action that types `/clear`, waits for the clear to finish, then types `/nextup`; refused while background work runs (RT-91).
 - **Closing mark**: the native client's flag on a tab it expects the daemon to remove (closing it, closing its last pane, moving its only pane out), read by placement and Undo until the removal arrives; a refused move clears it, and closing a last pane while a split or move for that tab is in flight does not set it.
-- **Connection origin**: whether a client connected on the local port (`Local`) or through the LAN listener or relay (`Remote`); account administration is local only.
+- **Connection origin**: the planned `Welcome` field saying whether a client connected on the loopback listener (`Local`) or the tailnet listener (`Remote`), mapped from the connection's auth kind; account administration is local only (CA.1, `docs/plans/accounts.md`).
 - **Container menu**: the native client's right-click menu on a repo's or workspace's sidebar row (spawn, `Launch last again ▸`, `Appearance…`, `Launch preset…`, the open rows, Remove); see `docs/native-client.md`.
 - **Conversation id**: Claude Code's own id for a session's conversation (`claude_session_id`), which `claude --resume` takes; distinct from the rustling-tulip session id and from a Codex or Cursor session's `agent_conversation_id`.
 - **Detached**: the native client's last Repos-view container, drawn only while it holds sessions, for sessions with no container of their own (their repo or workspace was removed, or their repo is now a member of a workspace); they keep running and streaming.
@@ -135,7 +135,7 @@ Start with [docs/architecture.md](docs/architecture.md) for how the pieces fit a
 - **Secret reference**: an environment-row value written `${secret:<id>}`, standing for a value the daemon saved in Windows Credential Manager; resolved at spawn, stored and echoed in place of the value.
 - **Secret row**: an environment row whose key has a `KEY`, `TOKEN`, `SECRET` or `PASSWORD` segment or which the dialog's Secret toggle marks.
 - **Session history**: the daemon's record of ended sessions, one `history/<id>.json` per session under the config dir, kept 7 days; see `docs/architecture.md` (Session history and recovery) and `docs/native-client.md` (Session recovery).
-- **Shared client core**: the planned Rust crate holding the pinned-TLS connect, host profiles and pairing, used by both the native client's remote mode and the mobile app.
+- **Shared client core**: the planned Rust crate holding the tailnet connect and host profiles, used by both the native client's remote mode and the mobile app.
 - **Spike**: throwaway code that proves an approach works, kept outside the main build (`spikes/`) and deleted once its code is ported.
 - **Status glyph**: the shape-and-colour mark for a session's status in the native client (working arc, asking diamond, waiting ring, idle dot); see `docs/native-client.md`.
 - **`status_since`**: the daemon's stamp of a session's last status change, on its snapshot and kept across a reattach; Needs You measures waits from it.

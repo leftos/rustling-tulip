@@ -134,7 +134,7 @@ Plain Rust, no GPUI:
 
 ### What it does not do
 
-- It shows only the daemon host's gates: the mutexes are in the host's logon session and the claims in its `%LOCALAPPDATA%`. A LAN client sees the host's slots, named by `machine`, never its own machine's (Open question 5).
+- It shows only the daemon host's gates: the mutexes are in the host's logon session and the claims in its `%LOCALAPPDATA%`. A tailnet client sees the host's slots, named by `machine`, never its own machine's (Open question 5).
 - It does not start, stop or reorder gates unless Open question 2 rules otherwise.
 - `gate-dashboard.ps1` stays as it is; nothing here changes the gate.
 
@@ -191,8 +191,8 @@ Answered (user): Q1 (a) two-line rows; Q2 (c) open the log, copy values, and a c
    - (b) Only a count in the pool header ("3 of 3 busy · 2 waiting"), from the same scan. Worst case: the user sees two waiting but not which sessions they belong to.
    - (c) Not listed. Worst case: a session sitting on `gate: waiting for a heavy slot` looks idle in the view, which is the confusion the view exists to end.
 5. **Gates of other machines.**
-   - (a) *Recommended.* Only the daemon host's gates, headed with its `machine` name; a LAN client sees the host's slots, never its own machine's, and never an aggregate. Worst case: a user on the laptop reads the host's slots as the laptop's, until they read the header.
-   - (b) The host's gates, and the daemon does not send `GateSlots` to LAN connections at all. Worst case: a user watching host builds from the laptop has no view of why they wait.
+   - (a) *Recommended.* Only the daemon host's gates, headed with its `machine` name; a tailnet client sees the host's slots, never its own machine's, and never an aggregate. Worst case: a user on the laptop reads the host's slots as the laptop's, until they read the header.
+   - (b) The host's gates, and the daemon does not send `GateSlots` to tailnet connections at all. Worst case: a user watching host builds from the laptop has no view of why they wait.
    - (c) Each client also reads its own machine's gates locally and shows both. Worst case: the client grows a second reader and the Windows probe, duplicating the daemon's, for a case no one has asked for.
 6. **What the badge counts.**
    - (a) *Recommended.* Busy plus held slots across both pools (every slot taken), in the accent colour, hidden at 0. Worst case: an old gate copy holding a slot without a claim keeps the badge at 1 with no command to show for it.
