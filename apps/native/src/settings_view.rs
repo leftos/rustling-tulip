@@ -1683,16 +1683,6 @@ fn group_row(label: &'static str) -> Div {
         .child(label)
 }
 
-/// A titled group of rows.
-fn section(title: &'static str) -> Div {
-    div().flex().flex_col().gap(px(10.0)).pb(px(18.0)).child(
-        div()
-            .text_size(px(SECTION_HEAD_SIZE))
-            .font_weight(FontWeight::BOLD)
-            .child(title),
-    )
-}
-
 /// A quiet line under or beside a control.
 fn hint(text: &'static str) -> Div {
     div()

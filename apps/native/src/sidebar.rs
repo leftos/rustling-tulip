@@ -1454,7 +1454,7 @@ fn authority_label(options: &AgentOptions) -> Option<&'static str> {
         AgentOptions::Claude {
             permission_mode, ..
         } => permission_mode.map(|mode| approval_label(Some(mode))),
-        AgentOptions::Codex { sandbox } => {
+        AgentOptions::Codex { sandbox, .. } => {
             sandbox.map(|sandbox| codex_sandbox_label(Some(sandbox)))
         }
         AgentOptions::Cursor { sandbox, .. } => {
@@ -3880,6 +3880,7 @@ mod tests {
         );
         codex.agent_options = AgentOptions::Codex {
             sandbox: Some(CodexSandbox::WorkspaceWrite),
+            hooks: false,
         };
         assert_eq!(
             launch_summary(Some(&codex)).as_deref(),

@@ -1220,7 +1220,7 @@ impl SpawnForm {
                 self.advanced.permission_mode = *permission_mode;
                 permission_mode.is_some()
             }
-            AgentOptions::Codex { sandbox, hooks } => {
+            AgentOptions::Codex { sandbox, hooks, .. } => {
                 self.advanced.codex_sandbox = *sandbox;
                 self.codex_hooks = *hooks;
                 sandbox.is_some()
