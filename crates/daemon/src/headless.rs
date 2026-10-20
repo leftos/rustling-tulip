@@ -252,23 +252,23 @@ mod tests {
         }
     }
 
-    /// A child that outlives the test by a wide margin, so "did `kill` return
-    /// before the child would have exited anyway" is unambiguous. Must not
-    /// depend on stdin: `spawn` gives the child `Stdio::null()`, which makes
-    /// `cmd /c pause` and `timeout` exit immediately. `ping` against loopback
-    /// sleeps ~1 s per echo and ignores stdin entirely.
-    ///
-    /// ~20 s: comfortably longer than the 10 s death poll below (so a surviving
-    /// child is unambiguous) while keeping a regression from stalling the suite
-    /// — the harness waits on the leaked child's stdout pipe before reporting.
+    /// A passing run never reaches this; it fires only when `kill` waits for the
+    /// child's own exit or the exit waiter never runs. Sized in minutes, far above
+    /// the longest scheduler stall measured here (31.8 s): raising a hang guard is
+    /// free, while raising a must-beat bound only moves the flake.
+    const HANG_GUARD: Duration = Duration::from_secs(120);
+
+    /// The child must outlive every bound below. `spawn` gives it
+    /// `Stdio::null()`, so `cmd /c pause` and `timeout` exit immediately; `ping`
+    /// against loopback ignores stdin and sleeps ~1 s per echo.
     fn long_lived_spec() -> HeadlessSpec {
         let (program, args) = if cfg!(windows) {
             (
                 "ping".to_string(),
-                vec!["-n".to_string(), "20".to_string(), "127.0.0.1".to_string()],
+                vec!["-n".to_string(), "600".to_string(), "127.0.0.1".to_string()],
             )
         } else {
-            ("sleep".to_string(), vec!["20".to_string()])
+            ("sleep".to_string(), vec!["600".to_string()])
         };
         HeadlessSpec {
             program,
@@ -296,23 +296,44 @@ mod tests {
         .expect("spawn long-lived headless child");
         let pid = handle.pid().expect("child reports a pid");
 
-        let started = Instant::now();
-        handle.kill().await;
-        let kill_elapsed = started.elapsed();
-        assert!(
-            kill_elapsed < Duration::from_secs(2),
-            "kill() should not wait on the child; took {kill_elapsed:?}"
-        );
+        assert!(pid_is_alive(pid), "fixture exited before kill()");
 
-        // The waiter does the actual terminate, so poll for the process to go.
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while Instant::now() < deadline {
-            if !pid_is_alive(pid) {
-                return;
-            }
+        // The old 2 s must-beat bound was removed deliberately: a wall-clock
+        // bound flakes under load. A `kill()` that blocks still fails at the
+        // 120 s hang guard, which is a hang guard, not a promptness bound.
+        if tokio::time::timeout(HANG_GUARD, handle.kill())
+            .await
+            .is_err()
+        {
+            force_kill(pid);
+            panic!("kill() waited on the child instead of returning at once");
+        }
+
+        // The waiter does the terminate. Wait for the state it reaches -- the pid
+        // gone -- never for a wall-clock window: a loaded machine may not run this
+        // process for tens of seconds.
+        let deadline = Instant::now() + HANG_GUARD;
+        while pid_is_alive(pid) {
+            assert!(
+                Instant::now() < deadline,
+                "child pid {pid} still alive {HANG_GUARD:?} after kill()"
+            );
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        panic!("child pid {pid} still alive after kill()");
+    }
+
+    /// Force-terminates the fixture when the hang guard fires, so a broken
+    /// `kill` does not leave a child running for the rest of its ten minutes.
+    fn force_kill(pid: u32) {
+        let pid = pid.to_string();
+        let (program, args) = if cfg!(windows) {
+            ("taskkill", vec!["/PID", pid.as_str(), "/F"])
+        } else {
+            ("kill", vec!["-9", pid.as_str()])
+        };
+        // Best effort: the test is already failing, and the child may have
+        // exited between the guard firing and this call.
+        let _ = std::process::Command::new(program).args(args).status();
     }
 
     /// Killing after the child has already exited must not panic, hang, or
@@ -340,11 +361,14 @@ mod tests {
     }
 
     fn pid_is_alive(pid: u32) -> bool {
-        use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
-        let mut sys = System::new_with_specifics(
-            RefreshKind::new().with_processes(ProcessRefreshKind::new()),
+        use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+        let pid = Pid::from_u32(pid);
+        let mut sys = System::new();
+        sys.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[pid]),
+            true,
+            ProcessRefreshKind::new(),
         );
-        sys.refresh_processes(ProcessesToUpdate::All, true);
-        sys.process(sysinfo::Pid::from_u32(pid)).is_some()
+        sys.process(pid).is_some()
     }
 }

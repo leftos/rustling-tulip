@@ -127,6 +127,7 @@ Start with [docs/architecture.md](docs/architecture.md) for how the pieces fit a
 - **Stop (keyboard)**: a control Tab and Shift-Tab land on in a native dialog; see `docs/native-client.md` ("Keyboard reachability").
 - **Subplan**: a `docs/plans/*.md` design file holding the design and rulings for open items, linked from their issues and deleted once nothing open links it and its durable text is promoted into `docs/`.
 - **Summary view**: the planned third view of a session beside terminal and chat, one summarizer line per stretch of work (RT-111).
+- **Suspend rig**: a driver that freezes only the process under test, for longer than the bound under test, then resumes it, so a starvation-only failure goes red without loading the machine; one long freeze reproduces while repeated short ones do not, since the process wins a run window.
 - **Swatch line**: one row of colour swatches in the native client's Appearance views that is a single keyboard stop; Left and Right move along it.
 - **Tailnet**: the user's Tailscale network; the daemon's tailnet listener serves TLS on the host's tailnet addresses (port 8787) with a `tailscale cert` certificate, and `crates/tailnet` wraps the `tailscale` CLI; see `docs/plans/remote-access.md`.
 - **tauri branch**: the branch holding the earlier, retired Tauri desktop app, cut from the `tauri-last` tag and kept as history. Nothing is fixed or built there, and daemon fixes are not cherry-picked to it.
