@@ -10,6 +10,7 @@
 //! Paths are resolved the same way `crates/daemon/src/paths.rs` resolves them,
 //! so a client and the daemon it spawns agree on where each file lives.
 
+pub mod autostart;
 mod supervisor;
 
 pub use supervisor::ensure_running;

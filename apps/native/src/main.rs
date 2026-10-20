@@ -89,6 +89,10 @@ fn install_panic_hook() {
 fn main() {
     init_tracing();
     install_panic_hook();
+    // Bring the login launch up to date: an entry already naming this install's
+    // daemon is rewritten in its current `--detach` form. An entry naming any
+    // other path, or none at all, is left alone.
+    daemon_client::autostart::refresh_registration();
     let wanted_session = std::env::args().nth(1);
     Application::new()
         .with_assets(Assets)
