@@ -158,6 +158,11 @@ impl RootView {
         self.close_sc_file_menu(window, cx);
         self.close_more_menu(window, cx);
         self.sidebar.click_activity(item);
+        // The Stop all chip lives only in the sessions panel, so a switch
+        // away from it, or a fold, takes any arm with it.
+        if self.sidebar.is_collapsed() || self.sidebar.activity() != Activity::Sessions {
+            self.detached_stop_all.disarm();
+        }
         self.drag = None;
         self.save_ui();
         if self.sidebar.is_collapsed() {

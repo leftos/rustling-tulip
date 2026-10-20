@@ -781,10 +781,13 @@ impl FakeDaemon {
             ))?,
             ClientMessage::GetFileSnapshot { .. } => file_snapshot(msg)?,
             ClientMessage::ListBranches { repo_id } => parse_message(branches(repo_id))?,
-            ClientMessage::SuggestBranchName { target } => DaemonMessage::BranchNameSuggestion {
-                target: target.clone(),
-                name: "feat/sidebar-density".to_owned(),
-            },
+            ClientMessage::SuggestBranchName { target, request_id } => {
+                DaemonMessage::BranchNameSuggestion {
+                    target: target.clone(),
+                    name: "feat/sidebar-density".to_owned(),
+                    request_id: request_id.clone(),
+                }
+            }
             _ => return Ok(Vec::new()),
         };
         Ok(vec![reply])

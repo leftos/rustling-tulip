@@ -1885,10 +1885,24 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
             let worktrees = annotate_worktrees(hub, raw);
             let _ = out_tx.send(DaemonMessage::Worktrees { repo_id, worktrees });
         }
-        ClientMessage::SuggestBranchName { target } => {
-            let name =
-                branch_names::suggest(&hub.state, &hub.state.worktrees_dir(), &target).await?;
-            let _ = out_tx.send(DaemonMessage::BranchNameSuggestion { target, name });
+        ClientMessage::SuggestBranchName { target, request_id } => {
+            match branch_names::suggest(&hub.state, &hub.state.worktrees_dir(), &target).await {
+                Ok(name) => {
+                    let _ = out_tx.send(DaemonMessage::BranchNameSuggestion {
+                        target,
+                        name,
+                        request_id,
+                    });
+                }
+                // Route the failure to the request that asked, so its own wait
+                // ends here rather than after its timeout too.
+                Err(err) => {
+                    let _ = out_tx.send(DaemonMessage::Error {
+                        message: err.to_string(),
+                        request_id,
+                    });
+                }
+            }
         }
         ClientMessage::ListCommits {
             repo_id,

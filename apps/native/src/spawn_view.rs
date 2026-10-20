@@ -524,19 +524,20 @@ impl RootView {
     /// Opens the dialog from `entry`, unless the connection is down or
     /// another dialog or menu is open. It starts on the preselected
     /// session's repo or workspace, else the focused one's; with no repo it
-    /// opens in its no-repos state.
+    /// opens in its no-repos state. Returns whether a dialog opened.
     pub(crate) fn open_spawn_dialog(
         &mut self,
         entry: SpawnEntry,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         if entry.lock().is_none() && !self.has_repos() {
             self.prefills.clear();
-            if self.spawn_dialog_blocker(None, false).is_none() {
-                self.open_no_repos_dialog(entry, window, cx);
+            if self.spawn_dialog_blocker(None, false).is_some() {
+                return false;
             }
-            return;
+            self.open_no_repos_dialog(entry, window, cx);
+            return true;
         }
         let (aim, preselect, lock, prefill) = match entry {
             SpawnEntry::Toolbar => (None, None, None, None),
@@ -546,7 +547,7 @@ impl RootView {
         };
         self.prefills.clear();
         if self.spawn_dialog_blocker(lock.as_ref(), false).is_some() {
-            return;
+            return false;
         }
         let focused = preselect.or_else(|| self.focused_session());
         let inputs = FormInputs {
@@ -561,7 +562,7 @@ impl RootView {
         let now = (self.now)();
         let Some((mut form, mut messages)) = SpawnForm::open(inputs, &mut self.branch_cache, now)
         else {
-            return;
+            return false;
         };
         if let Some(prefill) = &prefill {
             messages.extend(form.apply_prefill(prefill, &self.branch_cache, now));
@@ -602,6 +603,7 @@ impl RootView {
         self.send_all(messages);
         self.after_spawn_change(cx);
         self.apply_spawn_focus(window, cx);
+        true
     }
 
     /// The dialog in its no-repos state, waiting to open the form from
@@ -1134,7 +1136,14 @@ impl RootView {
             DaemonMessage::Repos { .. } | DaemonMessage::Workspaces { .. }
         );
         let suggestion = matches!(msg, DaemonMessage::BranchNameSuggestion { .. });
-        if let DaemonMessage::BranchNameSuggestion { target, name } = msg
+        // The dialog asks without a request id, so a reply carrying one
+        // answers a launch-last wait instead.
+        if let DaemonMessage::BranchNameSuggestion {
+            target,
+            name,
+            request_id,
+        } = msg
+            && request_id.is_none()
             && let Some(target) = Target::from_suggest(target)
         {
             self.branch_cache.insert(target.clone(), name.clone());

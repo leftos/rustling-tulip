@@ -15,6 +15,7 @@ use crate::appearance_view::Level;
 use crate::branch_fate::{DeleteWorktreeConfirm, DialogButton, confirm_messages};
 use crate::buttons::{ButtonKind, ButtonSize, button, field_frame, focus_ring, outlined_button};
 use crate::grid_view::{NO_REPOS_TIP, PANE_PENDING_TIP};
+use crate::launch_last;
 use crate::notice_view::modal_panel;
 use crate::notices::{ActionFailedNotice, ToastKind};
 use crate::open::OpenJob;
@@ -186,6 +187,32 @@ const ACCENT_FAILED_TITLE: &str = "Couldn't set the accent";
 const CONTAINER_APPEARANCE_ROW: &str = "container-menu-appearance";
 /// The container menu's last row: Remove, or its armed confirm.
 const CONTAINER_REMOVE_ROW: &str = "container-menu-remove";
+/// The container menu's row opening the Launch last again submenu.
+const CONTAINER_LAUNCH_LAST_ROW: &str = "container-launch-last";
+const CONTAINER_LAUNCH_LAST_LABEL: &str = "Launch last again ▸";
+/// The Launch last again submenu's fixed rows; a named tab's selector is
+/// [`CONTAINER_LAUNCH_LAST_TAB_PREFIX`] and the tab's id.
+const CONTAINER_LAUNCH_LAST_BACK: &str = "container-launch-last-back";
+const CONTAINER_LAUNCH_LAST_CURRENT: &str = "container-launch-last-current";
+const CONTAINER_LAUNCH_LAST_NEW: &str = "container-launch-last-new";
+const CONTAINER_LAUNCH_LAST_EDIT: &str = "container-launch-last-edit";
+const CONTAINER_LAUNCH_LAST_TAB_PREFIX: &str = "container-launch-last-tab-";
+
+/// The submenu that replaces the container menu's rows, if any.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContainerSubmenu {
+    None,
+    LaunchLast,
+}
+
+/// What a row of the Launch last again submenu does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ContainerLaunch {
+    /// Replay the stored config where the placement names.
+    Placement(launch_last::Placement),
+    /// Open the spawn dialog prefilled instead of replaying.
+    Edit,
+}
 
 /// The open repo or workspace context menu.
 pub(crate) struct ContainerMenu {
@@ -193,6 +220,8 @@ pub(crate) struct ContainerMenu {
     level: Level,
     /// Where the right-click was, in window coordinates.
     at: Point<Pixels>,
+    /// The submenu that replaces the rows, if any.
+    submenu: ContainerSubmenu,
     /// The most height its frame may take, from the window it opened in.
     max_height: Pixels,
 }
@@ -509,6 +538,220 @@ impl RootView {
         self.container_menu.is_some()
     }
 
+    /// The repo or workspace `level` names, as a container a launch replays.
+    fn launch_container(level: &Level) -> Option<launch_last::Container<'_>> {
+        match level {
+            Level::Repo(id) => Some(launch_last::Container::Repo(id)),
+            Level::Workspace(id) => Some(launch_last::Container::Workspace(id)),
+            Level::Session(_) | Level::App => None,
+        }
+    }
+
+    /// The stored launch config of the repo or workspace the container menu
+    /// acts on.
+    fn container_launch_config(&self, level: &Level) -> Option<SpawnConfig> {
+        Self::launch_container(level)
+            .and_then(|container| self.sidebar.last_spawn_config(container))
+    }
+
+    /// The selectors of the container menu's rows as shown now, in the groups
+    /// its separators divide; empty while it is closed.
+    #[must_use]
+    pub fn container_menu_groups(&self) -> Vec<Vec<String>> {
+        let Some(menu) = self.container_menu.as_ref() else {
+            return Vec::new();
+        };
+        match menu.submenu {
+            ContainerSubmenu::None => {
+                let mut actions = vec![CONTAINER_APPEARANCE_ROW.to_owned()];
+                if self.container_launch_config(menu.level()).is_some() {
+                    actions.push(CONTAINER_LAUNCH_LAST_ROW.to_owned());
+                }
+                vec![actions, vec![CONTAINER_REMOVE_ROW.to_owned()]]
+            }
+            ContainerSubmenu::LaunchLast => submenu_groups(self.container_launch_lines()),
+        }
+    }
+
+    /// The labels of the container menu's rows as shown now; empty while it
+    /// is closed.
+    #[must_use]
+    pub fn container_menu_labels(&self) -> Vec<String> {
+        let Some(menu) = self.container_menu.as_ref() else {
+            return Vec::new();
+        };
+        match menu.submenu {
+            ContainerSubmenu::None => {
+                let mut labels = vec!["Appearance…".to_owned()];
+                if self.container_launch_config(menu.level()).is_some() {
+                    labels.push(CONTAINER_LAUNCH_LAST_LABEL.to_owned());
+                }
+                let key = crate::repo_remove::container_key(menu.level());
+                labels.push(crate::repo_remove::row_label(
+                    menu.level(),
+                    self.repo_remove.armed() == Some(key.as_str()),
+                ));
+                labels
+            }
+            ContainerSubmenu::LaunchLast => self
+                .container_launch_lines()
+                .into_iter()
+                .filter_map(|line| match line {
+                    SubmenuLine::Separator => None,
+                    SubmenuLine::Back { .. } => Some(SUBMENU_BACK.to_owned()),
+                    SubmenuLine::Choice { label, .. } => Some(label),
+                })
+                .collect(),
+        }
+    }
+
+    /// The Launch last again submenu: Back, Current tab, New tab, every grid
+    /// tab by name, then Edit first….
+    fn container_launch_lines(&self) -> Vec<SubmenuLine<ContainerLaunch>> {
+        let mut lines = vec![
+            SubmenuLine::Back {
+                selector: CONTAINER_LAUNCH_LAST_BACK,
+            },
+            SubmenuLine::Choice {
+                selector: CONTAINER_LAUNCH_LAST_CURRENT.to_owned(),
+                label: "Current tab".to_owned(),
+                choice: ContainerLaunch::Placement(launch_last::Placement::CurrentTab),
+            },
+            SubmenuLine::Choice {
+                selector: CONTAINER_LAUNCH_LAST_NEW.to_owned(),
+                label: "New tab".to_owned(),
+                choice: ContainerLaunch::Placement(launch_last::Placement::NewTab),
+            },
+        ];
+        let tabs: Vec<SubmenuLine<ContainerLaunch>> = self
+            .tabs
+            .tabs()
+            .iter()
+            .filter(|tab| tab.grid().is_some())
+            .map(|tab| SubmenuLine::Choice {
+                selector: format!("{CONTAINER_LAUNCH_LAST_TAB_PREFIX}{}", tab.id),
+                label: tab.name.clone(),
+                choice: ContainerLaunch::Placement(launch_last::Placement::Tab(tab.id.clone())),
+            })
+            .collect();
+        if !tabs.is_empty() {
+            lines.push(SubmenuLine::Separator);
+            lines.extend(tabs);
+        }
+        lines.push(SubmenuLine::Separator);
+        lines.push(SubmenuLine::Choice {
+            selector: CONTAINER_LAUNCH_LAST_EDIT.to_owned(),
+            label: "Edit first…".to_owned(),
+            choice: ContainerLaunch::Edit,
+        });
+        lines
+    }
+
+    /// Swaps the container menu's rows for `submenu`, or back to them.
+    fn show_container_submenu(
+        &mut self,
+        submenu: ContainerSubmenu,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(menu) = &mut self.container_menu else {
+            return;
+        };
+        menu.submenu = submenu;
+        // The submenu hides the Remove row, so its arm cannot outlive the
+        // swap; Back returns it unarmed.
+        self.repo_remove.disarm();
+        self.menu_focus.focus(window);
+        cx.notify();
+    }
+
+    /// A line of the Launch last again submenu.
+    fn container_launch_line(
+        level: &Level,
+        line: SubmenuLine<ContainerLaunch>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        match line {
+            SubmenuLine::Back { selector } => menu_item(selector, SUBMENU_BACK, false)
+                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                    this.show_container_submenu(ContainerSubmenu::None, window, cx);
+                }))
+                .into_any_element(),
+            SubmenuLine::Separator => menu_separator().into_any_element(),
+            SubmenuLine::Choice {
+                selector,
+                label,
+                choice,
+            } => {
+                let level = level.clone();
+                match choice {
+                    ContainerLaunch::Placement(placement) => menu_item(&selector, label, false)
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            this.choose_container_launch(&level, placement.clone(), window, cx);
+                        }))
+                        .into_any_element(),
+                    ContainerLaunch::Edit => menu_item(&selector, label, false)
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            this.open_container_launch_edit(&level, window, cx);
+                        }))
+                        .into_any_element(),
+                }
+            }
+        }
+    }
+
+    /// Closes the container menu and replays its container's last launch
+    /// where `placement` says.
+    fn choose_container_launch(
+        &mut self,
+        level: &Level,
+        placement: launch_last::Placement,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_container_menu(window, cx);
+        match level {
+            Level::Repo(id) => {
+                self.launch_last_row(launch_last::Container::Repo(id), placement, window, cx);
+            }
+            Level::Workspace(id) => {
+                self.launch_last_row(launch_last::Container::Workspace(id), placement, window, cx);
+            }
+            Level::Session(_) | Level::App => {}
+        }
+    }
+
+    /// Closes the container menu and opens the spawn dialog prefilled with
+    /// the container's stored config, held on that container.
+    fn open_container_launch_edit(
+        &mut self,
+        level: &Level,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let target = match level {
+            Level::Repo(id) => Target::Repo(id.clone()),
+            Level::Workspace(id) => Target::Workspace(id.clone()),
+            Level::Session(_) | Level::App => return,
+        };
+        let Some(config) = self.container_launch_config(level) else {
+            return;
+        };
+        self.close_container_menu(window, cx);
+        let prefill = Prefill {
+            config: Some(config),
+            open_in: None,
+        };
+        self.open_spawn_dialog(
+            SpawnEntry::Duplicate {
+                lock: Some(Lock::for_target(target)),
+                prefill: Box::new(prefill),
+            },
+            window,
+            cx,
+        );
+    }
+
     /// Opens the context menu of the repo or workspace `level` at `at`,
     /// taking the keyboard so Esc reaches it; any other menu gives way.
     pub(crate) fn open_container_menu(
@@ -530,6 +773,7 @@ impl RootView {
         self.container_menu = Some(ContainerMenu {
             level,
             at,
+            submenu: ContainerSubmenu::None,
             max_height: window.viewport_size().height * MENU_MAX_SHARE,
         });
         self.menu_focus.focus(window);
@@ -550,20 +794,24 @@ impl RootView {
     /// from reaching what lies beneath.
     pub(crate) fn container_menu_layer(&self, cx: &mut Context<Self>) -> Option<[AnyElement; 2]> {
         let menu = self.container_menu.as_ref()?;
-        let backdrop = div().absolute().top_0().left_0().size_full().occlude();
         let level = menu.level.clone();
-        let row = menu_item(CONTAINER_APPEARANCE_ROW, "Appearance…", false).on_click(cx.listener(
-            move |this, _: &ClickEvent, window, cx| {
+        let submenu = menu.submenu;
+        let at = menu.at;
+        let max_height = menu.max_height;
+        let backdrop = div().absolute().top_0().left_0().size_full().occlude();
+        let appearance_level = level.clone();
+        let appearance = menu_item(CONTAINER_APPEARANCE_ROW, "Appearance…", false).on_click(
+            cx.listener(move |this, _: &ClickEvent, window, cx| {
                 this.close_container_menu(window, cx);
-                this.open_appearance_editor(level.clone(), window, cx);
-            },
-        ));
-        let remove_level = menu.level.clone();
-        let remove_key = crate::repo_remove::container_key(&menu.level);
+                this.open_appearance_editor(appearance_level.clone(), window, cx);
+            }),
+        );
+        let remove_level = level.clone();
+        let remove_key = crate::repo_remove::container_key(&level);
         let remove_row = menu_item(
             CONTAINER_REMOVE_ROW,
             crate::repo_remove::row_label(
-                &menu.level,
+                &level,
                 self.repo_remove.armed() == Some(remove_key.as_str()),
             ),
             true,
@@ -579,16 +827,46 @@ impl RootView {
         let frame = menu_frame(
             "container-menu",
             &self.menu_focus,
-            menu.max_height,
+            max_height,
             cx.listener(|this, _: &MouseDownEvent, window, cx| {
                 this.close_container_menu(window, cx);
                 cx.stop_propagation();
             }),
-        )
-        .child(row)
-        .child(menu_separator())
-        .child(remove_row);
-        let panel = anchored().position(menu.at).snap_to_window().child(frame);
+        );
+        let frame = match submenu {
+            ContainerSubmenu::None => {
+                let frame = frame.child(appearance);
+                let frame = if self.container_launch_config(&level).is_some() {
+                    frame.child(
+                        menu_item(
+                            CONTAINER_LAUNCH_LAST_ROW,
+                            CONTAINER_LAUNCH_LAST_LABEL,
+                            false,
+                        )
+                        .on_click(cx.listener(
+                            |this, _: &ClickEvent, window, cx| {
+                                this.show_container_submenu(
+                                    ContainerSubmenu::LaunchLast,
+                                    window,
+                                    cx,
+                                );
+                            },
+                        )),
+                    )
+                } else {
+                    frame
+                };
+                frame.child(menu_separator()).child(remove_row)
+            }
+            ContainerSubmenu::LaunchLast => {
+                let mut frame = frame;
+                for line in self.container_launch_lines() {
+                    frame = frame.child(Self::container_launch_line(&level, line, cx));
+                }
+                frame
+            }
+        };
+        let panel = anchored().position(at).snap_to_window().child(frame);
         Some([
             backdrop.into_any_element(),
             deferred(panel).with_priority(1).into_any_element(),

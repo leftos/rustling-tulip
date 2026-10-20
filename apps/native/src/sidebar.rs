@@ -15,6 +15,7 @@ use std::sync::LazyLock;
 
 use crate::appearance::{self, AppColors, AppLevel, Resolved};
 use crate::fonts::{self, FontSettings};
+use crate::launch_last;
 use crate::source_control::{Part, ScKey, ScUiState};
 use crate::spawn_form::{
     approval_label, codex_sandbox_label, cursor_sandbox_label, provider_hover_name,
@@ -693,6 +694,12 @@ impl SidebarModel {
     /// The registered workspaces, in the daemon's order.
     pub fn workspaces(&self) -> &[WorkspaceEntry] {
         &self.workspaces
+    }
+
+    /// The spawn config `container` last launched with, when it has one.
+    #[must_use]
+    pub fn last_spawn_config(&self, container: launch_last::Container<'_>) -> Option<SpawnConfig> {
+        launch_last::stored_config(container, &self.repos, &self.workspaces)
     }
 
     pub fn session(&self, id: &str) -> Option<&SessionSnapshot> {
@@ -3662,6 +3669,63 @@ mod tests {
     #[test]
     fn launch_summary_is_none_without_a_config() {
         assert_eq!(launch_summary(None), None);
+    }
+
+    #[test]
+    fn last_spawn_config_reads_the_repo_and_workspace_records() {
+        let mut model = model_with(Vec::new());
+        model.apply(&DaemonMessage::Workspaces {
+            workspaces: vec![workspace("w1", &["r1"])],
+        });
+        let repo_config = spawn_config(
+            single_target("feat/x", None, false),
+            SessionMode::Interactive,
+        );
+        let mut launched = repo("r1", "D:\\r1");
+        launched.last_spawn_config = Some(repo_config.clone());
+        model.apply(&DaemonMessage::Repos {
+            repos: vec![launched],
+        });
+
+        assert_eq!(
+            model.last_spawn_config(launch_last::Container::Repo("r1")),
+            Some(repo_config),
+            "the repo's stored config"
+        );
+        assert_eq!(
+            model.last_spawn_config(launch_last::Container::Repo("r9")),
+            None,
+            "an unknown repo has none"
+        );
+
+        let mut workspace_config = spawn_config(
+            SpawnTarget::Workspace {
+                workspace_id: "w1".to_owned(),
+                branch_name: "feat/x".to_owned(),
+                base_branch: None,
+                use_worktree: false,
+                worktree_reuse: protocol::WorktreeReusePolicy::default(),
+                existing_worktrees: Vec::new(),
+            },
+            SessionMode::Interactive,
+        );
+        workspace_config.model = Some("sonnet".to_owned());
+        let mut launched = workspace("w1", &["r1"]);
+        launched.last_spawn_config = Some(workspace_config.clone());
+        model.apply(&DaemonMessage::Workspaces {
+            workspaces: vec![launched],
+        });
+
+        assert_eq!(
+            model.last_spawn_config(launch_last::Container::Workspace("w1")),
+            Some(workspace_config),
+            "the workspace's stored config"
+        );
+        assert_eq!(
+            model.last_spawn_config(launch_last::Container::Workspace("w9")),
+            None,
+            "an unknown workspace has none"
+        );
     }
 
     #[test]

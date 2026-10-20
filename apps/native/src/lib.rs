@@ -33,6 +33,7 @@ mod headless_view;
 mod history;
 mod history_view;
 mod keys;
+pub mod launch_last;
 mod layout_chooser;
 mod layout_chooser_view;
 mod links;
@@ -113,7 +114,7 @@ use gpui::{
 };
 use protocol::{
     AppearanceOverrides, ClientMessage, DaemonMessage, GridNode, RepoEntry, SessionSnapshot,
-    TabEntry, VscodeWorkspaceSuggestion, WorkspaceEntry,
+    SuggestTarget, TabEntry, VscodeWorkspaceSuggestion, WorkspaceEntry,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -146,8 +147,8 @@ use crate::sidebar::{
     SidebarModel, UiState, can_attach, load_ui_state, normalize_fs_path, save_ui_state,
 };
 use crate::source_control::ScModel;
-use crate::spawn_form::BranchCache;
-use crate::spawn_view::SpawnModal;
+use crate::spawn_form::{BranchCache, Lock, Prefill, Target};
+use crate::spawn_view::{SpawnEntry, SpawnModal};
 use crate::spawns::PendingSpawns;
 use crate::stash_view::StashUi;
 use crate::status_glyph::{GlyphSize, glyph_view};
@@ -222,6 +223,15 @@ const UI_SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 const AUTO_GRID_RESIZE_DEBOUNCE: Duration = Duration::from_millis(250);
 /// The toast a session appearance change the daemon refused raises.
 const APPEARANCE_FAILED_TITLE: &str = "Couldn't change the appearance";
+/// The toast a launch-last replay of a trusted config raises before the
+/// spawn dialog opens.
+const TRUSTED_LAUNCH_TITLE: &str = "Review trusted launch";
+const TRUSTED_LAUNCH_DETAIL: &str =
+    "Launch last uses elevated authority, so the full spawn dialog opens before replay.";
+/// The toast a launch-last branch wait raises when the daemon stays silent.
+const LAUNCH_LAST_TIMEOUT_TITLE: &str = "Couldn't pick a branch name for launch-last";
+const LAUNCH_LAST_TIMEOUT_DETAIL: &str =
+    "The daemon didn't answer in time. Try again, or use the spawn dialog.";
 /// This client's log file, under `<config dir>/logs/`.
 pub const LOG_FILE: &str = "native.log";
 
@@ -418,6 +428,11 @@ pub struct RootView {
     sidebar_focus: FocusHandle,
     /// The container row the sidebar's keyboard acts on, when any.
     row_focus: Option<String>,
+    /// The container row the pointer is over, while it is over one.
+    hovered_container: Option<String>,
+    /// The launch-last replay waiting for the daemon's fresh branch name,
+    /// if any.
+    launch_last: launch_last::State,
     /// The session named on the command line, focused once the tabs and
     /// the sessions have arrived.
     wanted_session: Option<String>,
@@ -493,6 +508,8 @@ pub struct RootView {
     auto_grid_timer: Option<Task<()>>,
     /// A header Stop waiting for its second click.
     confirm: HeaderStopConfirm,
+    /// The Detached banner's Stop all waiting for its second click.
+    detached_stop_all: sidebar_view::DetachedStopAll,
     /// Restarts and resumes waiting for their duplicate.
     duplicates: Duplicates,
     /// A Shift-duplicate waiting for its source's spawn config.
@@ -762,6 +779,8 @@ impl RootView {
             drag: None,
             sidebar_focus: cx.focus_handle(),
             row_focus: None,
+            hovered_container: None,
+            launch_last: launch_last::State::default(),
             wanted_session: wanted,
             sessions_loaded: false,
             status: String::new(),
@@ -794,6 +813,7 @@ impl RootView {
             ui_save_timer: None,
             auto_grid_timer: None,
             confirm: HeaderStopConfirm::default(),
+            detached_stop_all: sidebar_view::DetachedStopAll::default(),
             duplicates: Duplicates::default(),
             prefills: Prefills::default(),
             delete_dialog: None,
@@ -1340,6 +1360,11 @@ impl RootView {
         self.close_sc_picker(window, cx);
         self.close_sc_file_menu(window, cx);
         self.sidebar.toggle_sidebar();
+        // The Stop all chip lives only in the sessions panel, so a fold
+        // takes any arm with it.
+        if self.sidebar.is_collapsed() {
+            self.detached_stop_all.disarm();
+        }
         self.drag = None;
         self.save_ui();
         if self.sidebar.is_collapsed() {
@@ -1362,6 +1387,169 @@ impl RootView {
         self.row_focus = Some(key.to_owned());
         self.sidebar_focus.focus(window);
         cx.notify();
+    }
+
+    /// Records the container row under the pointer, redrawing only when the
+    /// row changes.
+    pub(crate) fn set_hovered_container(&mut self, key: &str, over: bool, cx: &mut Context<Self>) {
+        let next = if over {
+            Some(key.to_owned())
+        } else if self.hovered_container.as_deref() == Some(key) {
+            None
+        } else {
+            self.hovered_container.clone()
+        };
+        if next != self.hovered_container {
+            self.hovered_container = next;
+            cx.notify();
+        }
+    }
+
+    /// The ▶ or a double-click on a repo or workspace row: replay its last
+    /// launch, or open the spawn dialog when there is nothing to replay. A
+    /// second gesture for the same target inside the double-click interval
+    /// is the same gesture, so it launches nothing; a spec also calls this
+    /// where a modal covers the row.
+    pub fn launch_last_row(
+        &mut self,
+        container: launch_last::Container<'_>,
+        placement: launch_last::Placement,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let gesture_target = match container {
+            launch_last::Container::Repo(id) => SuggestTarget::Repo {
+                repo_id: id.to_owned(),
+            },
+            launch_last::Container::Workspace(id) => SuggestTarget::Workspace {
+                workspace_id: id.to_owned(),
+            },
+        };
+        if !self
+            .launch_last
+            .note_activation(&gesture_target, (self.now)())
+        {
+            return;
+        }
+        let Some(config) = self.sidebar.last_spawn_config(container) else {
+            let target = match container {
+                launch_last::Container::Repo(id) => Target::Repo(id.to_owned()),
+                launch_last::Container::Workspace(id) => Target::Workspace(id.to_owned()),
+            };
+            let lock = Lock::for_target(target);
+            if lock
+                .unregistered(self.sidebar.repos(), self.sidebar.workspaces())
+                .is_none()
+            {
+                self.open_spawn_dialog(SpawnEntry::Locked(lock), window, cx);
+            }
+            return;
+        };
+        let Some(target) = Target::from_spawn(&config.target) else {
+            return;
+        };
+        let placement = self.launch_last_placement(placement);
+        if config.dangerously_skip_permissions {
+            let prefill = Prefill {
+                config: Some(config),
+                open_in: Some(placement.open_choice()),
+            };
+            if self.open_spawn_dialog(
+                SpawnEntry::Duplicate {
+                    lock: Some(Lock::for_target(target)),
+                    prefill: Box::new(prefill),
+                },
+                window,
+                cx,
+            ) {
+                self.push_toast(
+                    ToastKind::Warning,
+                    TRUSTED_LAUNCH_TITLE,
+                    Some(TRUSTED_LAUNCH_DETAIL.to_owned()),
+                    cx,
+                );
+            }
+            return;
+        }
+        if let Some(target) = launch_last::suggestion_target(&config) {
+            let (generation, request_id) =
+                self.launch_last.begin(config, placement, target.clone());
+            self.send(ClientMessage::SuggestBranchName {
+                target,
+                request_id: Some(request_id),
+            });
+            Self::arm_launch_last_timeout(generation, cx);
+            return;
+        }
+        let request = launch_last::replay_request(&config, None);
+        let open_in = placement.open_in();
+        self.spawn(request, open_in, cx);
+    }
+
+    /// The placement a click resolved, with the tab on screen read now.
+    fn launch_last_placement(&self, placement: launch_last::Placement) -> launch_last::Placement {
+        match placement {
+            launch_last::Placement::CurrentTab => {
+                let tabs =
+                    spawn_form::TabChoices::from_tabs(self.tabs.tabs(), self.tabs.active_id());
+                launch_last::Placement::from_open_in(spawn_form::current_tab_open_in(&tabs))
+            }
+            placement => placement,
+        }
+    }
+
+    /// Arms the branch wait's deadline: past it, nothing is spawned and a
+    /// toast says why. A later click replaces the wait, and its timer with
+    /// it.
+    fn arm_launch_last_timeout(generation: u64, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(spawn_form::SUGGESTION_TIMEOUT)
+                .await;
+            // Fails only when the view is gone, and the wait with it.
+            this.update(cx, |this, cx| this.launch_last_expired(generation, cx))
+                .ok();
+        })
+        .detach();
+    }
+
+    /// The branch wait expired without a reply: the launch is dropped and a
+    /// toast names the failure.
+    fn launch_last_expired(&mut self, generation: u64, cx: &mut Context<Self>) {
+        if self.launch_last.expire(generation).is_none() {
+            return;
+        }
+        self.push_toast(
+            ToastKind::Error,
+            LAUNCH_LAST_TIMEOUT_TITLE,
+            Some(LAUNCH_LAST_TIMEOUT_DETAIL.to_owned()),
+            cx,
+        );
+    }
+
+    /// A branch-name reply for the launch-last wait: the spawn goes out with
+    /// the fresh name. Only the reply echoing the wait's own `request_id`
+    /// finishes it, so the spawn dialog's suggestion does not.
+    fn on_launch_last_message(&mut self, msg: &DaemonMessage, cx: &mut Context<Self>) {
+        let DaemonMessage::BranchNameSuggestion {
+            target,
+            name,
+            request_id,
+        } = msg
+        else {
+            return;
+        };
+        let Some(pending) = self.launch_last.take_match(target, request_id.as_deref()) else {
+            return;
+        };
+        // The name just went to this launch, so a spawn dialog opened later
+        // must not prefill it as free.
+        if let Some(target) = Target::from_suggest(target) {
+            self.branch_cache.remove(&target);
+        }
+        let request = launch_last::replay_request(&pending.config, Some(name.clone()));
+        let open_in = pending.placement.open_in();
+        self.spawn(request, open_in, cx);
     }
 
     /// Drops the row focus when its container is no longer listed.
@@ -1684,6 +1872,7 @@ impl RootView {
             NetEvent::State(conn) => {
                 if !conn.is_open() {
                     self.set_keep_awake(None);
+                    self.launch_last.clear();
                 }
                 self.conn = conn;
                 self.sync_spawn_provider_support(cx);
@@ -1797,6 +1986,7 @@ impl RootView {
         }
         self.drop_stale_session_ui(window, cx);
         self.on_spawn_dialog_message(&msg, window, cx);
+        self.on_launch_last_message(&msg, cx);
         self.on_dialog_message(&msg, window, cx);
         if self.on_vscode_message(&msg, window, cx) {
             return;
@@ -1812,7 +2002,7 @@ impl RootView {
             DaemonMessage::Error {
                 message,
                 request_id,
-            } => self.on_refusal(message, request_id.as_deref(), window, cx),
+            } => self.on_daemon_failure(message, request_id.as_deref(), window, cx),
             DaemonMessage::ActionFailed {
                 title,
                 detail,
@@ -1887,6 +2077,21 @@ impl RootView {
         }
     }
 
+    /// A daemon `Error`: the launch-last wait it answers ends here, so the
+    /// daemon's report is the only one and its timeout toast never follows.
+    fn on_daemon_failure(
+        &mut self,
+        message: String,
+        request_id: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(id) = request_id {
+            let _ = self.launch_last.take_request(id);
+        }
+        self.on_refusal(message, request_id, window, cx);
+    }
+
     /// A daemon refusal: an unrouted one (`None`) while the workspace creator
     /// waits fails a pending create or parse inline there, and raises no
     /// toast. A routed refusal (`Some`) answers its own request and takes the
@@ -1959,6 +2164,7 @@ impl RootView {
         self.status.clear();
         self.duplicates.clear();
         self.prefills.clear();
+        self.launch_last.clear();
         self.close_spawn_dialog(window, cx);
         self.close_shell_dialog(window, cx);
         self.close_workspace_creator(window, cx);
@@ -2193,12 +2399,14 @@ impl RootView {
         }
     }
 
-    /// Esc's one-click arms: a header Stop, a tab close and a container
-    /// removal's armed row. Returns whether one was dropped.
+    /// Esc's one-click arms: a header Stop, a tab close, a container
+    /// removal's armed row and the Detached banner's Stop all. Returns
+    /// whether one was dropped.
     fn disarm_escape_arms(&mut self) -> bool {
         let tab_close = self.tabs.close_confirm.disarm();
         let remove_armed = self.repo_remove.disarm();
-        self.confirm.disarm() || tab_close || remove_armed
+        let detached_stop_all = self.detached_stop_all.disarm();
+        self.confirm.disarm() || tab_close || remove_armed || detached_stop_all
     }
 
     /// The keys a focused container row takes: Up and Down move the row

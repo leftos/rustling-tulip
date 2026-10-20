@@ -25,6 +25,7 @@ mod ui_font_size;
 mod ui_headless;
 mod ui_history;
 mod ui_keys;
+mod ui_launch_last;
 mod ui_layout_chooser;
 mod ui_links;
 mod ui_needs_you;

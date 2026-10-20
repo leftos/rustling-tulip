@@ -9,13 +9,14 @@ use crate::appearance;
 use crate::appearance_view::Level;
 use crate::assets::{
     SIDEBAR_BRANCH_ICON, SIDEBAR_CHEVRON_DOWN_ICON, SIDEBAR_CHEVRON_RIGHT_ICON,
-    SIDEBAR_FOLDER_ICON, SIDEBAR_MORE_ICON, SIDEBAR_PLUS_ICON, SIDEBAR_SHELL_ICON,
-    SIDEBAR_TABS_ICON, SIDEBAR_WORKSPACE_ICON,
+    SIDEBAR_FOLDER_ICON, SIDEBAR_MORE_ICON, SIDEBAR_PLAY_ICON, SIDEBAR_PLUS_ICON,
+    SIDEBAR_SHELL_ICON, SIDEBAR_TABS_ICON, SIDEBAR_WORKSPACE_ICON,
 };
 use crate::buttons::{ButtonSize, focus_ring, outlined_button, primary_button};
 use crate::ellipsis::{ellipsized, truncating};
 use crate::fonts::{DEFAULT_FAMILY, UI_FAMILY};
 use crate::grid_view::{ADD_REPO_TIP, NO_REPOS_TIP, SPAWN_TIP};
+use crate::launch_last;
 use crate::palette::{
     ACCENT, ASKING, CHIP, HOVER, LILAC, LINE, LINE_STRONG, ON_ACCENT, ON_ASKING, RAISED, SUBTLE,
     TEXT_2, TRANSPARENT,
@@ -32,7 +33,9 @@ use crate::spawn_form::{provider_chip_text, provider_chip_tip};
 use crate::spawn_view::SpawnEntry;
 use crate::status_glyph::{GlyphSize, glyph, glyph_view};
 use crate::tabs::{TabPill, tab_pills};
-use crate::{Drag, HOVER_BG, MUTED, PANEL_BG, RootView, TEXT, UI_TEXT_SIZE, drag_handle, tooltip};
+use crate::{
+    DANGER, Drag, HOVER_BG, MUTED, PANEL_BG, RootView, TEXT, UI_TEXT_SIZE, drag_handle, tooltip,
+};
 use gpui::{
     AnyElement, Bounds, ClickEvent, Context, Corner, Corners, Div, FontWeight, MouseButton,
     MouseDownEvent, PathBuilder, Pixels, SharedString, Stateful, StyledText, Svg, TextRun, Window,
@@ -67,7 +70,7 @@ const PILL_MAX_WIDTH: f32 = 96.0;
 impl RootView {
     /// The rail, the panel it picks with its divider, and the terminal pane
     /// side by side; a folded panel leaves the rail alone.
-    pub(crate) fn main_row(&self, window: &Window, cx: &mut Context<Self>) -> Div {
+    pub(crate) fn main_row(&mut self, window: &Window, cx: &mut Context<Self>) -> Div {
         let row = div()
             .flex()
             .flex_row()
@@ -98,9 +101,13 @@ impl RootView {
         )
     }
 
-    fn sidebar_panel(&self, width: f32, window: &Window, cx: &mut Context<Self>) -> Div {
+    fn sidebar_panel(&mut self, width: f32, window: &Window, cx: &mut Context<Self>) -> Div {
         let attached = self.focused_session();
         let containers = self.sidebar_containers();
+        // The chip is the only way to arm, so an arm cannot outlive it.
+        if !detached_stop_all_shown(&containers) {
+            self.detached_stop_all.disarm();
+        }
         let body = div()
             .id("sidebar-body")
             .flex()
@@ -147,6 +154,8 @@ impl RootView {
                     .collect(),
                 density: self.sidebar.leaf_density(),
                 focused_row,
+                hovered_row: self.hovered_container.as_deref(),
+                detached_stop_all: self.detached_stop_all.armed(),
                 subline_room: width
                     - 2.0 * BODY_INSET_X
                     - LEAF_PAD_LEFT
@@ -595,7 +604,8 @@ fn container_rows(
     cx: &mut Context<RootView>,
 ) -> AnyElement {
     let focused = ctx.focused_row == Some(container.key.as_str());
-    let mut rows = vec![container_row(container, focused, cx).into_any_element()];
+    let hovered = ctx.hovered_row == Some(container.key.as_str());
+    let mut rows = vec![container_row(container, focused, hovered, cx).into_any_element()];
     if !container.collapsed {
         if matches!(container.kind, ContainerKind::Dir | ContainerKind::Shell)
             && let Some(path) = container.path.as_deref()
@@ -606,7 +616,7 @@ fn container_rows(
             rows.push(unbound_banner().into_any_element());
         }
         if container.kind == ContainerKind::Detached {
-            rows.push(detached_banner().into_any_element());
+            rows.push(detached_banner(container, ctx.detached_stop_all, cx).into_any_element());
         }
         for leaf in &container.leaves {
             rows.push(leaf_row(leaf, ctx, window, cx).into_any_element());
@@ -704,9 +714,67 @@ fn unbound_banner() -> Div {
         .child("pill on a session to open it in a new tab.")
 }
 
-/// The text under an expanded Detached container.
-fn detached_banner() -> Div {
-    div()
+/// The Detached banner's Stop all waiting for its second click.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum DetachedStopAll {
+    #[default]
+    Idle,
+    Armed,
+}
+
+impl DetachedStopAll {
+    /// Whether the chip shows its confirming label.
+    pub(crate) const fn armed(self) -> bool {
+        matches!(self, Self::Armed)
+    }
+
+    /// A click with no argument carrying whether it was armed on entry: the
+    /// first click arms it, the second disarms it.
+    pub(crate) fn click(&mut self) -> bool {
+        let armed = self.armed();
+        *self = if armed { Self::Idle } else { Self::Armed };
+        armed
+    }
+
+    /// Returns whether it was armed.
+    pub(crate) fn disarm(&mut self) -> bool {
+        let armed = self.armed();
+        *self = Self::Idle;
+        armed
+    }
+}
+
+/// The Detached banner's Stop all chip: selector, both labels and each
+/// state's hover text.
+const DETACHED_STOP_ALL_SELECTOR: &str = "detached-stop-all";
+const DETACHED_STOP_ALL: &str = "Stop all";
+const DETACHED_STOP_ALL_ARMED: &str = "Confirm: stop all";
+const DETACHED_STOP_ALL_TIP: &str = "Stop every session still running in this container";
+const DETACHED_STOP_ALL_ARMED_TIP: &str = "Click again to stop every running session";
+
+/// Whether the Detached container's banner shows its Stop all chip: the
+/// container is expanded and one of its leaves still runs.
+fn detached_stop_all_shown(containers: &[Container]) -> bool {
+    containers.iter().any(|container| {
+        container.kind == ContainerKind::Detached
+            && !container.collapsed
+            && container
+                .leaves
+                .iter()
+                .any(|leaf| leaf.status != SessionStatus::Stopped)
+    })
+}
+
+/// The text under an expanded Detached container, with its Stop all chip
+/// while one of its leaves still runs.
+fn detached_banner(container: &Container, armed: bool, cx: &mut Context<RootView>) -> Div {
+    let live: Vec<String> = container
+        .leaves
+        .iter()
+        .filter(|leaf| leaf.status != SessionStatus::Stopped)
+        .map(|leaf| leaf.id.clone())
+        .collect();
+    let banner = div()
         .debug_selector(|| "detached-banner".to_owned())
         .flex()
         .flex_wrap()
@@ -716,8 +784,46 @@ fn detached_banner() -> Div {
         .pr(px(ROW_PADDING))
         .py(px(4.0))
         .text_size(px(TAG_TEXT_SIZE + 1.0))
-        .text_color(gpui::rgb(MUTED))
-        .child(DETACHED_BANNER)
+        .text_color(gpui::rgb(MUTED));
+    if live.is_empty() {
+        return banner.child(DETACHED_BANNER);
+    }
+    banner
+        .child(div().flex_1().min_w(px(0.0)).child(DETACHED_BANNER))
+        .child(detached_stop_all_chip(live, armed, cx))
+}
+
+/// The Detached banner's Stop all chip: the first click arms it, the second
+/// stops every leaf in `live`.
+fn detached_stop_all_chip(
+    live: Vec<String>,
+    armed: bool,
+    cx: &mut Context<RootView>,
+) -> AnyElement {
+    let tip = if armed {
+        DETACHED_STOP_ALL_ARMED_TIP
+    } else {
+        DETACHED_STOP_ALL_TIP
+    };
+    chip(
+        div()
+            .id(SharedString::from(DETACHED_STOP_ALL_SELECTOR))
+            .debug_selector(|| DETACHED_STOP_ALL_SELECTOR.to_owned()),
+        ChipSize::Row,
+    )
+    .cursor_pointer()
+    .text_color(gpui::rgb(if armed { DANGER } else { TEXT_2 }))
+    .hover(|style| style.bg(gpui::rgb(HOVER)))
+    .tooltip(tooltip(tip))
+    .child(if armed {
+        DETACHED_STOP_ALL_ARMED
+    } else {
+        DETACHED_STOP_ALL
+    })
+    .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+        this.click_detached_stop_all(&live, cx);
+    }))
+    .into_any_element()
 }
 
 /// The unbound pill's look: dim italic text in a dim border.
@@ -748,6 +854,10 @@ struct LeafRows<'a> {
     subline_room: f32,
     /// The container row the sidebar's keys act on, if any.
     focused_row: Option<&'a str>,
+    /// The container row the pointer is over, if any.
+    hovered_row: Option<&'a str>,
+    /// The Detached banner's Stop all is armed.
+    detached_stop_all: bool,
 }
 
 impl LeafRows<'_> {
@@ -1108,13 +1218,19 @@ fn container_badge(selector: String) -> Div {
 }
 
 /// A container row: a click focuses and folds it; a right-click on a repo
-/// or workspace opens its menu. A row with a launch summary is two lines.
+/// or workspace opens its menu; a double-click there replays its last
+/// launch, and its ▶ replays into the current tab. A row with a launch
+/// summary is two lines.
 fn container_row(
     container: &Container,
     focused: bool,
+    hovered: bool,
     cx: &mut Context<RootView>,
 ) -> Stateful<Div> {
     let key = container.key.clone();
+    let hover_key = key.clone();
+    let click_key = key.clone();
+    let click_id = container.id.clone();
     let name = format!("container-{}", container.key);
     let level = match container.kind {
         ContainerKind::Repo => Some(Level::Repo(container.id.clone())),
@@ -1125,7 +1241,13 @@ fn container_row(
         | ContainerKind::Tab
         | ContainerKind::Unbound => None,
     };
+    let launchable = matches!(
+        container.kind,
+        ContainerKind::Repo | ContainerKind::Workspace
+    );
+    let workspace = container.kind == ContainerKind::Workspace;
     let summary = container.summary.clone();
+    let two_line = summary.is_some();
     let row = div()
         .id(SharedString::from(name.clone()))
         .debug_selector(|| name)
@@ -1156,6 +1278,9 @@ fn container_row(
         row.child(chevron(container))
             .children(container_parts(container))
     };
+    let row = row.when(launchable && (hovered || focused), |row| {
+        row.child(container_launch(container, two_line, cx))
+    });
     row.when_some(container.tooltip(), |row, tip| row.tooltip(tooltip(tip)))
         .when_some(level, |row, level| {
             row.on_mouse_down(
@@ -1166,11 +1291,62 @@ fn container_row(
                 }),
             )
         })
-        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-            this.focus_container_row(&key, window, cx);
-            this.toggle_container(&key);
+        .on_hover(cx.listener(move |this, over: &bool, _window, cx| {
+            this.set_hovered_container(&hover_key, *over, cx);
+        }))
+        .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+            if launchable && event.click_count() >= 2 {
+                let container = if workspace {
+                    launch_last::Container::Workspace(&click_id)
+                } else {
+                    launch_last::Container::Repo(&click_id)
+                };
+                this.launch_last_row(container, launch_last::Placement::CurrentTab, window, cx);
+                return;
+            }
+            this.focus_container_row(&click_key, window, cx);
+            this.toggle_container(&click_key);
             cx.notify();
         }))
+}
+
+/// A repo or workspace row's launch-last ▶, at the row's right. It acts on
+/// the press and stops it reaching the row, so the row never folds.
+fn container_launch(
+    container: &Container,
+    two_line: bool,
+    cx: &mut Context<RootView>,
+) -> Stateful<Div> {
+    let selector = format!("container-{}-launch", container.key);
+    let name = selector.clone();
+    let id = container.id.clone();
+    let workspace = container.kind == ContainerKind::Workspace;
+    div()
+        .id(SharedString::from(selector))
+        .debug_selector(|| name)
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .size(px(16.0))
+        .rounded(px(4.0))
+        .cursor_pointer()
+        .hover(|style| style.bg(gpui::rgb(HOVER)))
+        .when(two_line, |button| button.mt(px(2.0)))
+        .tooltip(tooltip("Launch last again in the current tab"))
+        .child(icon(SIDEBAR_PLAY_ICON, 12.0, SUBTLE))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                cx.stop_propagation();
+                let container = if workspace {
+                    launch_last::Container::Workspace(&id)
+                } else {
+                    launch_last::Container::Repo(&id)
+                };
+                this.launch_last_row(container, launch_last::Placement::CurrentTab, window, cx);
+            }),
+        )
 }
 
 /// The 2 px accent ring of the container row holding the keyboard.
@@ -1558,6 +1734,35 @@ impl RootView {
                 .into_iter()
                 .map(|inline| (format!("leaf-{}-{id}", inline.key), inline.tip.to_owned()))
                 .collect()
+        })
+    }
+
+    /// The Detached banner's Stop all chip was clicked: the first click arms
+    /// it, the second stops each leaf in `live` and disarms.
+    fn click_detached_stop_all(&mut self, live: &[String], cx: &mut Context<Self>) {
+        if self.detached_stop_all.click() {
+            for session_id in live {
+                self.send(ClientMessage::StopSession {
+                    session_id: session_id.clone(),
+                    cleanup: Vec::new(),
+                });
+            }
+        }
+        cx.notify();
+    }
+
+    /// The Detached banner's Stop all label, while its chip is shown — an
+    /// unfolded sidebar on the sessions panel with a live leaf: the armed
+    /// text after the first click.
+    #[must_use]
+    pub fn detached_stop_all_label(&self) -> Option<&'static str> {
+        let visible = !self.sidebar.is_collapsed()
+            && self.sidebar.activity() == Activity::Sessions
+            && detached_stop_all_shown(&self.sidebar_containers());
+        visible.then_some(if self.detached_stop_all.armed() {
+            DETACHED_STOP_ALL_ARMED
+        } else {
+            DETACHED_STOP_ALL
         })
     }
 }

@@ -1009,20 +1009,30 @@ impl<'de> Deserialize<'de> for SpawnConfig {
 }
 
 impl SpawnTarget {
-    /// Reset any worktree-collision decision back to
-    /// [`WorktreeReusePolicy::Reuse`].
+    /// Drop the one-shot answers a persisted [`SpawnConfig`] must not
+    /// replay: the worktree-collision decision goes back to
+    /// [`WorktreeReusePolicy::Reuse`], and an in-place target's
+    /// [`SpawnTarget::Single::checkout_strategy`] goes back to `None`.
     ///
-    /// `RecreateFromBase` is a one-shot answer the user gave about one
-    /// specific collision they were shown. It must not survive into a
-    /// persisted [`SpawnConfig`], where the paths that replay the stored
-    /// policy — "launch last again" from the dialog and resuming an
-    /// abandoned session — would delete a worktree nobody was asked about.
-    /// A duplicate of a worktree session replays no policy at all; see
-    /// [`SpawnConfig::to_duplicate_request`].
+    /// Both are answers the user gave about one launch they were shown: a
+    /// `RecreateFromBase` collision policy, and a `Carry` or `Stash` for a
+    /// dirty checkout. Replaying either from "launch last again" or a
+    /// resumed session would act on a collision or a dirty tree nobody was
+    /// asked about — deleting a worktree, or carrying changes the user never
+    /// chose for that tree. A duplicate of a worktree session replays no
+    /// policy at all; see [`SpawnConfig::to_duplicate_request`].
     #[must_use]
-    pub fn with_reuse_policy_reset(mut self) -> Self {
+    pub fn with_one_shot_answers_cleared(mut self) -> Self {
         match &mut self {
-            Self::Single { worktree_reuse, .. } | Self::Workspace { worktree_reuse, .. } => {
+            Self::Single {
+                worktree_reuse,
+                checkout_strategy,
+                ..
+            } => {
+                *worktree_reuse = WorktreeReusePolicy::Reuse;
+                *checkout_strategy = None;
+            }
+            Self::Workspace { worktree_reuse, .. } => {
                 *worktree_reuse = WorktreeReusePolicy::Reuse;
             }
             Self::Standalone { .. } => {}
@@ -1053,7 +1063,7 @@ impl SpawnConfig {
     #[must_use]
     pub fn from_request(req: &SpawnRequest) -> Self {
         Self {
-            target: req.target.clone().with_reuse_policy_reset(),
+            target: req.target.clone().with_one_shot_answers_cleared(),
             mode: req.mode,
             dangerously_skip_permissions: req.dangerously_skip_permissions,
             agent_options: req.agent_options.clone(),
@@ -2250,9 +2260,14 @@ pub enum ClientMessage {
     },
     /// Ask the daemon for a `wt/<adjective>-<noun>` branch name that exists in
     /// no member repo's local or remote refs. Answered with
-    /// [`DaemonMessage::BranchNameSuggestion`].
+    /// [`DaemonMessage::BranchNameSuggestion`], which echoes `request_id` so a
+    /// client with two waits for one target can match the reply to its own; a
+    /// request that set none gets none back. A failed suggestion is answered
+    /// with [`DaemonMessage::Error`] carrying the same `request_id`.
     SuggestBranchName {
         target: SuggestTarget,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
     /// Resume every session currently in the abandoned bucket. The daemon
     /// iterates and re-spawns each one; per-session failures (missing
@@ -3183,10 +3198,13 @@ pub enum DaemonMessage {
     },
     /// Reply to [`ClientMessage::SuggestBranchName`]: a branch name free in
     /// every member repo. `target` echoes the request so a client with several
-    /// open spawn forms can route the reply to the one that asked.
+    /// open spawn forms can route the reply to the one that asked, and
+    /// `request_id` echoes the id that request set (`None` when it set none).
     BranchNameSuggestion {
         target: SuggestTarget,
         name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
     /// Broadcast whenever the worktrees root changes — fired both in
     /// response to [`ClientMessage::SetWorktreesRoot`] and at first
@@ -3613,8 +3631,9 @@ pub enum DaemonMessage {
         message: String,
         /// The `request_id` of the spawn, duplicate, session appearance
         /// change or git read (`RepoStatus`, `ListStashes`, `ListCommits`,
-        /// `GetCommit`, `GetRemoteUrl`) or spawn preview (`PreviewSpawn`,
-        /// `PreviewWorkspaceSpawn`) that failed, on the reply to its requester.
+        /// `GetCommit`, `GetRemoteUrl`), spawn preview (`PreviewSpawn`,
+        /// `PreviewWorkspaceSpawn`) or branch-name suggestion
+        /// (`SuggestBranchName`) that failed, on the reply to its requester.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
     },
@@ -3830,8 +3849,10 @@ pub enum WorktreeReusePolicy {
 /// Which repo or workspace a branch-name suggestion is for.
 ///
 /// Echoed back on [`DaemonMessage::BranchNameSuggestion`] so a client with
-/// several open spawn forms can route the reply to the one that asked.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// several open spawn forms can route the reply to the one that asked. A
+/// client with two waits that share one target also sets `request_id` on the
+/// request, and the reply echoes it; a request that set none gets none back.
+#[derive(Debug, Clone, Hash, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SuggestTarget {
     Repo {
@@ -4934,6 +4955,40 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_captured_config_drops_the_one_shot_answers() {
+        let mut req = claude_spawn_request(ClaudeProvider::Anthropic);
+        let SpawnTarget::Single {
+            checkout_strategy,
+            worktree_reuse,
+            ..
+        } = &mut req.target
+        else {
+            panic!("expected a single target");
+        };
+        *checkout_strategy = Some(CheckoutStrategy::Carry);
+        *worktree_reuse = WorktreeReusePolicy::RecreateFromBase;
+
+        let config = SpawnConfig::from_request(&req);
+        let SpawnTarget::Single {
+            checkout_strategy,
+            worktree_reuse,
+            ..
+        } = &config.target
+        else {
+            panic!("expected a single target");
+        };
+        assert_eq!(
+            *checkout_strategy, None,
+            "the confirmed checkout is one launch's answer"
+        );
+        assert_eq!(
+            *worktree_reuse,
+            WorktreeReusePolicy::Reuse,
+            "and so is the collision policy"
+        );
+    }
+
     fn duplicate_source_config(target: SpawnTarget) -> SpawnConfig {
         SpawnConfig {
             target,
@@ -5695,32 +5750,55 @@ mod tests {
 
     #[test]
     fn suggest_branch_name_message_round_trips() {
-        let msg = ClientMessage::SuggestBranchName {
-            target: SuggestTarget::Workspace {
-                workspace_id: "ws1".to_string(),
-            },
+        let target = SuggestTarget::Workspace {
+            workspace_id: "ws1".to_string(),
         };
-        let json = serde_json::to_string(&msg).expect("serialize");
-        assert!(json.contains(r#""type":"suggest_branch_name""#));
-        assert!(json.contains(r#""kind":"workspace""#));
-        let decoded: ClientMessage = serde_json::from_str(&json).expect("deserialize");
-        match decoded {
-            ClientMessage::SuggestBranchName { target } => assert_eq!(
-                target,
-                SuggestTarget::Workspace {
-                    workspace_id: "ws1".to_string()
+        for request_id in [None, Some("launch-last-0".to_string())] {
+            let msg = ClientMessage::SuggestBranchName {
+                target: target.clone(),
+                request_id: request_id.clone(),
+            };
+            let json = serde_json::to_string(&msg).expect("serialize");
+            assert!(json.contains(r#""type":"suggest_branch_name""#));
+            assert!(json.contains(r#""kind":"workspace""#));
+            if request_id.is_some() {
+                assert!(json.contains(r#""request_id":"launch-last-0""#));
+            } else {
+                assert!(
+                    !json.contains("request_id"),
+                    "an unset id stays off the wire"
+                );
+            }
+            match serde_json::from_str::<ClientMessage>(&json).expect("deserialize") {
+                ClientMessage::SuggestBranchName {
+                    target: decoded_target,
+                    request_id: decoded_id,
+                } => {
+                    assert_eq!(decoded_target, target);
+                    assert_eq!(decoded_id, request_id);
                 }
-            ),
+                other => panic!("unexpected variant: {other:?}"),
+            }
+        }
+
+        // A frame from before the field existed decodes with no id.
+        let old = r#"{"type":"suggest_branch_name","target":{"kind":"repo","repo_id":"r1"}}"#;
+        match serde_json::from_str::<ClientMessage>(old).expect("deserialize an old frame") {
+            ClientMessage::SuggestBranchName { request_id, .. } => assert_eq!(request_id, None),
             other => panic!("unexpected variant: {other:?}"),
         }
     }
 
     #[test]
     fn branch_name_suggestion_message_round_trips() {
-        let json = r#"{"type":"branch_name_suggestion","target":{"kind":"repo","repo_id":"r1"},"name":"wt/brave-otter"}"#;
-        let decoded: DaemonMessage = serde_json::from_str(json).expect("deserialize");
-        match decoded {
-            DaemonMessage::BranchNameSuggestion { target, name } => {
+        // A frame from before the field existed decodes with no id.
+        let old = r#"{"type":"branch_name_suggestion","target":{"kind":"repo","repo_id":"r1"},"name":"wt/brave-otter"}"#;
+        match serde_json::from_str::<DaemonMessage>(old).expect("deserialize an old frame") {
+            DaemonMessage::BranchNameSuggestion {
+                target,
+                name,
+                request_id,
+            } => {
                 assert_eq!(
                     target,
                     SuggestTarget::Repo {
@@ -5728,9 +5806,39 @@ mod tests {
                     }
                 );
                 assert_eq!(name, "wt/brave-otter");
+                assert_eq!(request_id, None, "an old frame carries no id");
             }
             other => panic!("unexpected variant: {other:?}"),
         }
+
+        let reply = DaemonMessage::BranchNameSuggestion {
+            target: SuggestTarget::Repo {
+                repo_id: "r1".to_string(),
+            },
+            name: "wt/brave-otter".to_string(),
+            request_id: Some("launch-last-3".to_string()),
+        };
+        let json = serde_json::to_string(&reply).expect("serialize");
+        assert!(json.contains(r#""request_id":"launch-last-3""#));
+        match serde_json::from_str::<DaemonMessage>(&json).expect("deserialize") {
+            DaemonMessage::BranchNameSuggestion { request_id, .. } => {
+                assert_eq!(request_id.as_deref(), Some("launch-last-3"));
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+
+        let unset = DaemonMessage::BranchNameSuggestion {
+            target: SuggestTarget::Repo {
+                repo_id: "r1".to_string(),
+            },
+            name: "wt/brave-otter".to_string(),
+            request_id: None,
+        };
+        let json = serde_json::to_string(&unset).expect("serialize");
+        assert!(
+            !json.contains("request_id"),
+            "an unset id stays off the wire"
+        );
     }
 
     #[test]

@@ -56,6 +56,7 @@ fn suggest(h: &mut Harness<'_>, repo_id: &str, name: &str) {
             repo_id: repo_id.to_owned(),
         },
         name: name.to_owned(),
+        request_id: None,
     });
 }
 
@@ -80,6 +81,7 @@ fn suggestions(sent: &[ClientMessage], repo_id: &str) -> usize {
         .filter(|msg| {
             matches!(msg, ClientMessage::SuggestBranchName {
                 target: SuggestTarget::Repo { repo_id: id },
+                ..
             } if id == repo_id)
         })
         .count()

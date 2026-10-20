@@ -86,6 +86,7 @@ fn submit(h: &mut Harness<'_>, repo_id: &str) -> SpawnRequest {
             repo_id: repo_id.to_owned(),
         },
         name: "wt/brave-fox".to_owned(),
+        request_id: None,
     });
     h.click_on("spawn-submit");
     assert!(!is_open(h), "the submit closed the dialog");

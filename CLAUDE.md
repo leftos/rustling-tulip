@@ -179,6 +179,8 @@ Sessions are deliberately **not** in `state.json` — they're rebuilt from sidec
 
   The tab-layout requests `CreateTab` / `MergeTabs` / `MovePane` / `ExtractToNewTab` / `SplitPane` take one too; it comes back only on the `Error` that refuses the request (success is a broadcast `TabUpdated`, which carries none), and a refusal without one still gets `Error { request_id: None }`. `ListSessionHistory`, `RecoverSessions` and `ListEnvNames` echo theirs on their `SessionHistory`, `RecoverResult` and `EnvNames` replies.
 
+  `SuggestBranchName` echoes its id on `BranchNameSuggestion`, and on the `Error` that answers a failed suggestion.
+
 ## Style and lints
 
 Workspace `Cargo.toml` enforces clippy pedantic + denies on `unwrap_used`, `panic`, `dbg_macro`, `todo`, `print_*`, `exit`, etc. Use `tracing::{error,warn,info,debug}` instead of `println!`. Use `expect_used = "warn"` — prefer `?` and `anyhow::Context`. Non-test code has no `.expect()` allowance; the `#[expect(clippy::expect_used, reason = "...")]` attributes that exist are on test modules.

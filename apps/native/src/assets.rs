@@ -57,6 +57,8 @@ pub(crate) const SIDEBAR_TABS_ICON: &str = "icons/sidebar-tabs.svg";
 pub(crate) const SIDEBAR_PLUS_ICON: &str = "icons/sidebar-plus.svg";
 /// The toolbar's ⋯ menu dots.
 pub(crate) const SIDEBAR_MORE_ICON: &str = "icons/sidebar-more.svg";
+/// A repo or workspace row's launch-last ▶.
+pub(crate) const SIDEBAR_PLAY_ICON: &str = "icons/sidebar-play.svg";
 
 /// A narrow diff tab header's whitespace toggle: an open box, `␣`.
 pub(crate) const DIFF_WHITESPACE_ICON: &str = "icons/diff-whitespace.svg";
@@ -72,7 +74,7 @@ pub(crate) const DIFF_NEXT_ICON: &str = "icons/diff-next.svg";
 pub(crate) const DIFF_LAST_ICON: &str = "icons/diff-last.svg";
 
 /// Every bundled asset, by the path the views ask for it under.
-const ASSETS: [(&str, &[u8]); 31] = [
+const ASSETS: [(&str, &[u8]); 32] = [
     (
         SESSIONS_ICON,
         include_bytes!("../assets/icons/sessions.svg"),
@@ -163,6 +165,10 @@ const ASSETS: [(&str, &[u8]); 31] = [
     (
         SIDEBAR_MORE_ICON,
         include_bytes!("../assets/icons/sidebar-more.svg"),
+    ),
+    (
+        SIDEBAR_PLAY_ICON,
+        include_bytes!("../assets/icons/sidebar-play.svg"),
     ),
     (
         DIFF_WHITESPACE_ICON,

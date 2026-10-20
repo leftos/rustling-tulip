@@ -44,12 +44,12 @@ Close behind: the paste and key quirks (native clipboard read, Shift+Enter bytes
 - [x] Repos view: workspace, repo, SH and DIR containers plus a "Detached" bucket with a banner — `Sidebar.tsx` `buildContainers` (native: containers and Detached bucket done in P1.4; the Detached banner in P4.11a)
 - [x] Plain-shell sessions regroup under the container matching their live cwd — `Sidebar.tsx` `findContainerForCwd`
 - [x] Tabs view: one container per tab plus an "Unbound" bucket with a banner — `Sidebar.tsx` `buildTabContainers` (native: P4.9)
-- [ ] Container row: collapse chip (Enter/Space), count, "!" roll-up, kind tag, last-launch summary, ▶ launch-last; double-click launches last in the current tab — `Sidebar.tsx` `ContainerNode` (native: the keyboard fold and the last-launch summary landed in P4.11a; ▶ launch-last and double-click remain RT-19)
+- [x] Container row: collapse chip (Enter/Space), count, "!" roll-up, kind tag, last-launch summary, ▶ launch-last; double-click launches last in the current tab — `Sidebar.tsx` `ContainerNode` (native: the keyboard fold and the last-launch summary landed in P4.11a; ▶ launch-last and double-click in P4.11b)
 - [x] Remove repo/workspace: inline two-click; with live sessions a dialog (Cancel / Remove anyway / Stop and remove) — `Sidebar.tsx`, `RepoRemoveDialog.tsx` (native: P4.10b)
-- [ ] Detached container "stop all" with two-click confirm — `Sidebar.tsx`
+- [x] Detached container "stop all" with two-click confirm — `Sidebar.tsx` (native: P4.11b, in the expanded Detached banner)
 - [x] DIR/SH containers: "Add repo"; "Add workspace" when a `.code-workspace` is found — `Sidebar.tsx` (native: P4.10d)
 - [ ] Drag-reorder containers, tab containers (shared with the TabBar) and leaves, saved on the daemon — `Sidebar.tsx`
-- [ ] Container context menu: spawn (here / in tab), Launch last again ▸ current / new / named tab / edit first, Appearance…, Launch preset (loading / failed / none), open in Explorer, open in VS Code (repo, linked or multi-root), copy path, Remove — `Sidebar.tsx` `ContainerContextMenu` (native: Appearance… landed in P2.10)
+- [ ] Container context menu: spawn (here / in tab), Launch last again ▸ current / new / named tab / edit first, Appearance…, Launch preset (loading / failed / none), open in Explorer, open in VS Code (repo, linked or multi-root), copy path, Remove — `Sidebar.tsx` `ContainerContextMenu` (native: Appearance… landed in P2.10; `Launch last again ▸` with Current tab / New tab / named tab / `Edit first…` in P4.11b)
 - [x] Session leaf: status dot (pulses while working, hollow while spawning), label and tooltip, runtime tag, accent stripe, trusted marker, "!", orphan / abandoned / inactive tags, Resume/Dismiss, tab pill (`T:name`, `T:×N`, unbound button) — `Sidebar.tsx` `SessionLeaf`, `TabPill` (native: the tab pill landed in P4.9; the label tooltip, trusted marker, the three tags and their inline Resume / Dismiss in P4.12a; the pulsing and hollow dot with the sidebar in P1)
 - [x] Click a leaf to jump to its tab and pane and clear attention; double-click an unbound leaf to add it to the active tab — `Sidebar.tsx`, `App.tsx` `onSelectSession` (native: a single click places an unbound leaf in the active tab, by the user's ruling, so there is no double-click action)
 - [ ] Drag a leaf onto a pane or a tab pill — `Sidebar.tsx`
@@ -89,7 +89,7 @@ Close behind: the paste and key quirks (native clipboard read, Shift+Enter bytes
 - [x] Double-submit guard; Esc closes, backdrop click doesn't — `SpawnDialog.tsx`
 - [x] Dirty in-place checkout prompts Carry changes / Stash & switch, then resends — `CheckoutConfirmModal.tsx`
 - [x] "Spawning session…" toast; placement (new tab / this pane / smart) and terminal focus — `App.tsx`, `utils/autofocus.ts`
-- [ ] Launch last again: replays the config; worktree launches wait for a fresh branch name (toast on timeout); trusted configs open the full dialog with a warning — `App.tsx` `onLaunchLast`
+- [x] Launch last again: replays the config; worktree launches wait for a fresh branch name (toast on timeout); trusted configs open the full dialog with a warning — `App.tsx` `onLaunchLast`
 - [x] Standalone shell: quick default dir, or a dialog with Browse and "Use as quick shell default" — `StandaloneShellDialog.tsx`
 - [ ] Preset wizard: source (file / folder / inline / GitHub issue ranges) → variables (toggle / file / folder / text, required fields) → preview (grouped by tab, max panes per tab, script commands) → launching (progress, counts, Cancel, Select launched, Stop all) — `PresetLaunchDialog.tsx`, `utils/parsePrompts.ts`, `utils/parseIssueSpec.ts`
 - [ ] Sticky preset progress and failure toasts, one per job; the first tab created becomes active — `App.tsx`

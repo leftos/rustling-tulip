@@ -90,7 +90,7 @@ impl BranchCache {
         self.0.insert(target, name);
     }
 
-    fn remove(&mut self, target: &Target) {
+    pub(crate) fn remove(&mut self, target: &Target) {
         self.0.remove(target);
     }
 }
@@ -1342,8 +1342,11 @@ impl SpawnForm {
             return None;
         }
         self.branch.pending_until = Some(now + SUGGESTION_TIMEOUT);
+        // The dialog's own replies carry no id, so every suggestion for its
+        // target still reaches it.
         Some(ClientMessage::SuggestBranchName {
             target: self.target.suggest(),
+            request_id: None,
         })
     }
 
@@ -3616,6 +3619,7 @@ mod tests {
                 target: SuggestTarget::Repo {
                     repo_id: "r1".to_owned()
                 },
+                request_id: None,
             }
         ));
         assert!(form.suggestion_pending(Instant::now()));
@@ -5108,7 +5112,8 @@ mod tests {
                 &ClientMessage::SuggestBranchName {
                     target: SuggestTarget::Repo {
                         repo_id: "r1".to_owned()
-                    }
+                    },
+                    request_id: None,
                 }
             ),
             "the worktree the prefill turned on asks for a fresh branch: sent {sent:?}"
