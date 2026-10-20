@@ -173,7 +173,7 @@
       "paths": [
         "apps/native/src/drag.rs"
       ],
-      "filter": "(binary_id(rustling-tulip-native) & test(/^drag::/))"
+      "filter": "(binary_id(rustling-tulip-native) & test(/^drag::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_pane_drag)::/))"
     },
     {
       "paths": [
@@ -197,7 +197,7 @@
       "paths": [
         "apps/native/src/grid_view.rs"
       ],
-      "filter": "(binary_id(rustling-tulip-native) & test(/^grid_view::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_pane_spawn|ui_panes|ui_session_actions|ui_tabs)::/))"
+      "filter": "(binary_id(rustling-tulip-native) & test(/^grid_view::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_pane_drag|ui_pane_spawn|ui_panes|ui_session_actions|ui_tabs)::/))"
     },
     {
       "paths": [
@@ -329,7 +329,7 @@
       "paths": [
         "apps/native/src/pane_menu.rs"
       ],
-      "filter": "(binary_id(rustling-tulip-native) & test(/^pane_menu::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_keys|ui_panes)::/))"
+      "filter": "(binary_id(rustling-tulip-native) & test(/^pane_menu::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_keys|ui_pane_drag|ui_panes)::/))"
     },
     {
       "paths": [
@@ -545,7 +545,7 @@
       "paths": [
         "apps/native/src/tabs.rs"
       ],
-      "filter": "(binary_id(rustling-tulip-native) & test(/^tabs::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_layout_chooser|ui_shortcuts|ui_tabs)::/))"
+      "filter": "(binary_id(rustling-tulip-native) & test(/^tabs::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_layout_chooser|ui_pane_drag|ui_shortcuts|ui_tabs)::/))"
     },
     {
       "paths": [
@@ -581,7 +581,7 @@
       "paths": [
         "apps/native/src/undo.rs"
       ],
-      "filter": "(binary_id(rustling-tulip-native) & test(/^undo::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_tabs)::/))"
+      "filter": "(binary_id(rustling-tulip-native) & test(/^undo::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_pane_drag|ui_tabs)::/))"
     },
     {
       "paths": [
@@ -738,6 +738,12 @@
         "apps/native/tests/ui/ui_notifications.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native::ui) & test(/^(ui_notifications)::/))"
+    },
+    {
+      "paths": [
+        "apps/native/tests/ui/ui_pane_drag.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native::ui) & test(/^(ui_pane_drag)::/))"
     },
     {
       "paths": [

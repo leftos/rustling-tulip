@@ -1,12 +1,11 @@
 //! The plain-Rust half of drag and drop: what a drag carries, the edge of a
 //! pane a pointer points at, the message a pane drop sends, and where a row or
-//! pill reorder puts the dragged item.
-
-#![expect(dead_code, reason = "called only from unit tests")]
+//! pill reorder puts the dragged item, the overlay a hovered pane draws, and
+//! the label a dragged pane's ghost shows.
 
 use protocol::{ClientMessage, ContainerRef, GridNode, PaneDropEdge, SplitDirection, TabEntry};
 
-use crate::tabs::OuterSides;
+use crate::tabs::{self, OuterSides, Rect};
 use crate::undo;
 
 /// How much of a pane's side that touches the grid's edge is its outer band.
@@ -15,9 +14,26 @@ pub const OUTER_BAND: f32 = 0.12;
 pub const CENTRE_LOW: f32 = 0.35;
 /// The centre box's upper bound on both axes of a pane.
 pub const CENTRE_HIGH: f32 = 0.65;
+/// How far an outer strip's overlay reaches into the pane, as a share of the
+/// pane across that side.
+pub const OUTER_STRIP: f32 = 0.14;
+/// How far the centre overlay sits in from each side of the pane, as a share
+/// of the pane along that axis.
+pub const CENTRE_INSET: f32 = 0.12;
+/// The badge in the centre overlay.
+pub const SWAP_BADGE: &str = "Swap panes";
+/// What the header of a pane that shows no session says, and its ghost.
+pub const EMPTY_PANE_LABEL: &str = "Empty pane";
 
 /// What a drag carries: the item the pointer picked up.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the Tab, Container and Leaf payloads are constructed only by tests"
+    )
+)]
 pub enum DragPayload {
     /// A pane, dragged by its header.
     Pane { tab_id: String, pane_id: String },
@@ -34,18 +50,128 @@ pub enum DragPayload {
 
 /// Which half of a row or pill a pointer points at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(test), expect(dead_code, reason = "used only by tests"))]
 pub enum Side {
     Before,
     After,
 }
 
-/// A pane drop's message, the undo label it records, and the tabs it changes.
+/// A pane move, a drop's or a menu's: the pane, where it goes, and the undo
+/// label it records.
 #[derive(Debug, Clone)]
 pub struct PaneDrop {
-    pub message: ClientMessage,
-    pub undo_label: &'static str,
     pub src_tab_id: String,
+    pub src_pane_id: String,
     pub dst_tab_id: String,
+    pub dst_pane_id: String,
+    pub edge: PaneDropEdge,
+    pub request_id: Option<String>,
+    pub undo_label: &'static str,
+}
+
+impl PaneDrop {
+    /// The [`ClientMessage::MovePane`] the move sends.
+    #[must_use]
+    pub fn message(&self) -> ClientMessage {
+        ClientMessage::MovePane {
+            src_tab_id: self.src_tab_id.clone(),
+            src_pane_id: self.src_pane_id.clone(),
+            dst_tab_id: self.dst_tab_id.clone(),
+            dst_pane_id: self.dst_pane_id.clone(),
+            edge: self.edge,
+            request_id: self.request_id.clone(),
+        }
+    }
+}
+
+/// What part of a pane a drop overlay tints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverlayKind {
+    /// A half of the pane: the dropped pane splits it.
+    Half,
+    /// A strip along the grid's edge: the dropped pane splits the whole grid.
+    Outer,
+    /// The centre box: the two panes swap.
+    Centre,
+}
+
+/// The overlay a pane draws while a drop would land on `edge` of it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DropOverlay {
+    pub kind: OverlayKind,
+    /// Where the tint goes, in the units of the pane it was asked for.
+    pub rect: Rect,
+}
+
+/// The overlay for a drop on `edge` of `pane`: that half, a strip
+/// [`OUTER_STRIP`] deep along an outer side, or the centre inset by
+/// [`CENTRE_INSET`] on every side.
+#[must_use]
+pub fn drop_overlay(edge: PaneDropEdge, pane: Rect) -> DropOverlay {
+    let Rect {
+        x,
+        y,
+        width: w,
+        height: h,
+    } = pane;
+    let (strip_w, strip_h) = (w * OUTER_STRIP, h * OUTER_STRIP);
+    let (inset_w, inset_h) = (w * CENTRE_INSET, h * CENTRE_INSET);
+    let (kind, rect) = match edge {
+        PaneDropEdge::Left => (OverlayKind::Half, Rect::new(x, y, w / 2.0, h)),
+        PaneDropEdge::Right => (OverlayKind::Half, Rect::new(x + w / 2.0, y, w / 2.0, h)),
+        PaneDropEdge::Top => (OverlayKind::Half, Rect::new(x, y, w, h / 2.0)),
+        PaneDropEdge::Bottom => (OverlayKind::Half, Rect::new(x, y + h / 2.0, w, h / 2.0)),
+        PaneDropEdge::OuterLeft => (OverlayKind::Outer, Rect::new(x, y, strip_w, h)),
+        PaneDropEdge::OuterRight => (
+            OverlayKind::Outer,
+            Rect::new(x + w - strip_w, y, strip_w, h),
+        ),
+        PaneDropEdge::OuterTop => (OverlayKind::Outer, Rect::new(x, y, w, strip_h)),
+        PaneDropEdge::OuterBottom => (
+            OverlayKind::Outer,
+            Rect::new(x, y + h - strip_h, w, strip_h),
+        ),
+        PaneDropEdge::Replace => (
+            OverlayKind::Centre,
+            Rect::new(
+                x + inset_w,
+                y + inset_h,
+                w - 2.0 * inset_w,
+                h - 2.0 * inset_h,
+            ),
+        ),
+    };
+    DropOverlay { kind, rect }
+}
+
+/// What a dragged pane's ghost says: its header's label, or
+/// [`EMPTY_PANE_LABEL`] for a pane that shows no session.
+#[must_use]
+pub fn ghost_label(title: Option<&str>) -> String {
+    title.unwrap_or(EMPTY_PANE_LABEL).to_owned()
+}
+
+/// The pane of `grid`, laid out in `bounds` with dividers `thickness` wide,
+/// under the pointer at `at`, and the edge of it the pointer points at; none
+/// over a divider or outside the grid.
+#[must_use]
+pub fn pane_target(
+    grid: &GridNode,
+    bounds: Rect,
+    thickness: f32,
+    at: (f32, f32),
+) -> Option<(String, PaneDropEdge)> {
+    let rects = tabs::pane_rects(grid, bounds, thickness);
+    let sides = tabs::outer_edges(grid, bounds, thickness);
+    let ((pane_id, rect), (_, outer)) = rects.into_iter().zip(sides).find(|((_, rect), _)| {
+        at.0 >= rect.x
+            && at.0 < rect.x + rect.width
+            && at.1 >= rect.y
+            && at.1 < rect.y + rect.height
+    })?;
+    let x = (at.0 - rect.x) / rect.width;
+    let y = (at.1 - rect.y) / rect.height;
+    Some((pane_id, drop_edge(x, y, outer)))
 }
 
 /// Whether `(x, y)` — fractions of a pane — lies in the box that swaps panes.
@@ -99,6 +225,7 @@ pub fn drop_edge(x: f32, y: f32, outer: OuterSides) -> PaneDropEdge {
 /// Which half of a row or pill starting at `start` and `len` long `pos` points
 /// at. A pointer exactly at the middle counts as the second half.
 #[must_use]
+#[cfg_attr(not(test), expect(dead_code, reason = "used only by tests"))]
 pub fn side_of(pos: f32, start: f32, len: f32) -> Side {
     if pos < start + len / 2.0 {
         Side::Before
@@ -110,6 +237,7 @@ pub fn side_of(pos: f32, start: f32, len: f32) -> Side {
 /// `ids` with `dragged` moved to `side` of `target`: before it or after it.
 /// The same item, or one either side does not name, leaves the list as it is.
 #[must_use]
+#[cfg_attr(not(test), expect(dead_code, reason = "used only by tests"))]
 pub fn reorder<T: Clone + PartialEq>(ids: &[T], dragged: &T, target: &T, side: Side) -> Vec<T> {
     let mut out = ids.to_vec();
     if dragged == target {
@@ -138,6 +266,7 @@ pub fn reorder<T: Clone + PartialEq>(ids: &[T], dragged: &T, target: &T, side: S
 /// The [`ClientMessage::ReorderTabs`] a pill dropped `side` of `target` sends,
 /// or none when the order it would set is the one already in place.
 #[must_use]
+#[cfg_attr(not(test), expect(dead_code, reason = "called only from unit tests"))]
 pub fn reorder_tabs(
     tab_ids: &[String],
     dragged: &str,
@@ -154,6 +283,7 @@ pub fn reorder_tabs(
 /// `target` sends, or none when the order it would set is the one already in
 /// place.
 #[must_use]
+#[cfg_attr(not(test), expect(dead_code, reason = "called only from unit tests"))]
 pub fn reorder_containers(
     containers: &[ContainerRef],
     dragged: &ContainerRef,
@@ -249,17 +379,13 @@ pub fn pane_drop(
         undo::MOVED_PANE
     };
     Some(PaneDrop {
-        message: ClientMessage::MovePane {
-            src_tab_id: src_tab_id.clone(),
-            src_pane_id: src_pane_id.clone(),
-            dst_tab_id: dst_tab.to_owned(),
-            dst_pane_id: dst_pane.to_owned(),
-            edge,
-            request_id,
-        },
-        undo_label,
         src_tab_id: src_tab_id.clone(),
+        src_pane_id: src_pane_id.clone(),
         dst_tab_id: dst_tab.to_owned(),
+        dst_pane_id: dst_pane.to_owned(),
+        edge,
+        request_id,
+        undo_label,
     })
 }
 
@@ -583,14 +709,14 @@ mod tests {
         assert_eq!(swapped.undo_label, undo::SWAPPED_PANES);
         assert!(
             matches!(
-                &swapped.message,
+                &swapped.message(),
                 ClientMessage::MovePane {
                     edge: PaneDropEdge::Replace,
                     ..
                 }
             ),
             "{:?}",
-            swapped.message
+            swapped.message()
         );
 
         let moved = dropped(&tabs, &drag("t1", "a"), "t1", "b", PaneDropEdge::Right)
@@ -603,6 +729,88 @@ mod tests {
             across.undo_label,
             undo::MOVED_PANE,
             "a centre drop in another tab keeps the daemon's unbind"
+        );
+    }
+
+    /// A pane 200 by 100 whose corner is not at the origin.
+    const PANE: Rect = Rect::new(10.0, 20.0, 200.0, 100.0);
+
+    fn assert_overlay(edge: PaneDropEdge, kind: OverlayKind, expected: Rect) {
+        let overlay = drop_overlay(edge, PANE);
+        assert_eq!(overlay.kind, kind, "{edge:?}");
+        let close = |a: f32, b: f32| (a - b).abs() < 1e-3;
+        let got = overlay.rect;
+        assert!(
+            close(got.x, expected.x)
+                && close(got.y, expected.y)
+                && close(got.width, expected.width)
+                && close(got.height, expected.height),
+            "{edge:?}: {got:?} is not {expected:?}"
+        );
+    }
+
+    #[test]
+    fn a_half_overlay_covers_that_half_of_the_pane() {
+        let half = OverlayKind::Half;
+        assert_overlay(
+            PaneDropEdge::Left,
+            half,
+            Rect::new(10.0, 20.0, 100.0, 100.0),
+        );
+        assert_overlay(
+            PaneDropEdge::Right,
+            half,
+            Rect::new(110.0, 20.0, 100.0, 100.0),
+        );
+        assert_overlay(PaneDropEdge::Top, half, Rect::new(10.0, 20.0, 200.0, 50.0));
+        assert_overlay(
+            PaneDropEdge::Bottom,
+            half,
+            Rect::new(10.0, 70.0, 200.0, 50.0),
+        );
+    }
+
+    #[test]
+    fn an_outer_strip_runs_along_its_side_for_14_percent_of_the_pane() {
+        let outer = OverlayKind::Outer;
+        assert_overlay(
+            PaneDropEdge::OuterLeft,
+            outer,
+            Rect::new(10.0, 20.0, 28.0, 100.0),
+        );
+        assert_overlay(
+            PaneDropEdge::OuterRight,
+            outer,
+            Rect::new(182.0, 20.0, 28.0, 100.0),
+        );
+        assert_overlay(
+            PaneDropEdge::OuterTop,
+            outer,
+            Rect::new(10.0, 20.0, 200.0, 14.0),
+        );
+        assert_overlay(
+            PaneDropEdge::OuterBottom,
+            outer,
+            Rect::new(10.0, 106.0, 200.0, 14.0),
+        );
+    }
+
+    #[test]
+    fn the_centre_overlay_is_inset_12_percent_on_every_side() {
+        assert_overlay(
+            PaneDropEdge::Replace,
+            OverlayKind::Centre,
+            Rect::new(34.0, 32.0, 152.0, 76.0),
+        );
+    }
+
+    #[test]
+    fn the_ghost_shows_the_header_label() {
+        assert_eq!(ghost_label(Some("api work")), "api work");
+        assert_eq!(
+            ghost_label(None),
+            "Empty pane",
+            "an empty pane's ghost says what its header says"
         );
     }
 
@@ -751,7 +959,7 @@ mod tests {
         assert_eq!(drop.src_tab_id, "t1");
         assert_eq!(drop.dst_tab_id, "t2");
         assert_eq!(
-            wire(&drop.message),
+            wire(&drop.message()),
             json!({
                 "type": "move_pane",
                 "src_tab_id": "t1",
@@ -773,7 +981,7 @@ mod tests {
 
         assert!(
             matches!(
-                &drop.message,
+                &drop.message(),
                 ClientMessage::MovePane {
                     dst_pane_id,
                     edge: PaneDropEdge::OuterLeft,
@@ -781,7 +989,7 @@ mod tests {
                 } if dst_pane_id == "c"
             ),
             "{:?}",
-            drop.message
+            drop.message()
         );
     }
 

@@ -1541,6 +1541,48 @@ impl<'a> Harness<'a> {
         self.cx.run_until_parked();
     }
 
+    /// Starts a drag-and-drop gesture the way a hand does: a left press at
+    /// `from`, then a move 6 px to the right, past the 2 px gpui waits for
+    /// before it starts a drag. That first move starts the drag and reaches
+    /// no drop target; [`Self::drag_to`] then moves the dragged item.
+    pub fn start_drag(&mut self, from: Point<Pixels>) {
+        self.cx
+            .simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+        self.cx.simulate_mouse_move(
+            point(from.x + px(6.0), from.y),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        self.cx.run_until_parked();
+    }
+
+    /// Moves the mouse to `to` with the left button held, as a drag does.
+    pub fn drag_to(&mut self, to: Point<Pixels>) {
+        self.cx
+            .simulate_mouse_move(to, MouseButton::Left, Modifiers::none());
+        self.cx.run_until_parked();
+    }
+
+    /// Releases the held left button at `at`, ending a drag there.
+    pub fn release(&mut self, at: Point<Pixels>) {
+        self.cx
+            .simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+        self.cx.run_until_parked();
+    }
+
+    /// A whole drag-and-drop: started at `from`, moved onto `to` and
+    /// released there.
+    pub fn drag_and_drop(&mut self, from: Point<Pixels>, to: Point<Pixels>) {
+        self.start_drag(from);
+        self.drag_to(to);
+        self.release(to);
+    }
+
+    /// Whether a drag-and-drop gesture is under way.
+    pub fn dragging(&mut self) -> bool {
+        self.root(|_, cx| cx.has_active_drag())
+    }
+
     /// Holds `modifiers` and moves the mouse to `at`, as the platform
     /// reports them: the modifier change, then the move carrying it.
     pub fn hover(&mut self, at: Point<Pixels>, modifiers: Modifiers) {

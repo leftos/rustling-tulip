@@ -113,6 +113,10 @@ The client sends no `SetPaneRatio` for a divider press that stays within 3 logic
 
 `pane_drop` builds the `MovePane` with its undo label (`undo::MOVED_PANE`, or `undo::SWAPPED_PANES` for a same-tab centre drop). It sends nothing for a diff or missing tab, a pane a grid does not hold, a self-drop, a non-pane payload, or a same-tab drop onto the facing half of the source's own split sibling, which would rebuild the same tree.
 
+A pane drag starts from the header's drag area: the title, the glyph and the empty stretch, not the buttons, chips, Stop or exit code, whose press goes to `press_on_header_control`. `drag::pane_target` finds the pane under the pointer and its edge from the pane rects, so the shown tab's grid carries one drop layer over it (`grid_view.rs`): it does not occlude the panes, and it stops mouse propagation only while a drag runs, so terminals get no mouse reports then. A refused drop (what `pane_drop` sends nothing for) shows no overlay and sends nothing; an accepted one goes out through `send_pane_move`, the path the pane menu's Move to ▸ shares.
+
+The overlay (`drag::drop_overlay`) is the accent at 22% over the half with a 1 px border, a strip 14% deep at 40% with a 2 px border for an outer edge, or the centre inset 12% on every side with a `Swap panes` badge. The ghost is a pill of the header's label (`Empty pane` for a pane with no session) on `GROUND` at 78% with the pane's accent border. Esc cancels the drag whichever element has focus (the root's key capture), and a tab update that arrives mid-drag ends it when it touches the drag's source tab or the shown tab. A drop lands only in the tab the drag started in.
+
 `reorder` moves one id before or after another (`Side` from the pointer's half of the row or pill); `reorder_tabs` and `reorder_containers` build `ReorderTabs` / `ReorderContainers` and give none when the order would not change.
 
 ## Settings

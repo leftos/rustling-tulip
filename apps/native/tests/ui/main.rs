@@ -31,6 +31,7 @@ mod ui_layout_chooser;
 mod ui_links;
 mod ui_needs_you;
 mod ui_notifications;
+mod ui_pane_drag;
 mod ui_pane_spawn;
 mod ui_panes;
 mod ui_preset_wizard;

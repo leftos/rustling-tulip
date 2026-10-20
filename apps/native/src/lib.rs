@@ -118,8 +118,8 @@ use gpui::{
     WindowBounds, WindowOptions, div, prelude::*, pulsating_between, px, size,
 };
 use protocol::{
-    AppearanceOverrides, ClientMessage, DaemonMessage, GridNode, RepoEntry, SessionSnapshot,
-    SuggestTarget, TabEntry, VscodeWorkspaceSuggestion, WorkspaceEntry,
+    AppearanceOverrides, ClientMessage, DaemonMessage, GridNode, PaneDropEdge, RepoEntry,
+    SessionSnapshot, SuggestTarget, TabEntry, VscodeWorkspaceSuggestion, WorkspaceEntry,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -132,6 +132,7 @@ use crate::appearance_view::AppearanceEditor;
 use crate::changes_view::ChangesUi;
 use crate::connection::{DotKind, Footer};
 use crate::copied::Copied;
+use crate::drag::DragPayload;
 use crate::footer::{CountSpan, StopConfirm, flyout_rows, log_paths, status_counts};
 use crate::grid_view::{PaneSlot, RetryGate, divider_ratio};
 use crate::needs_you_view::moves_needs_you;
@@ -404,6 +405,14 @@ use palette::{
     CHIP, LINE_STRONG, SCRIM, STATUS_ERR, STATUS_IDLE, STATUS_OK, SUNKEN, SURFACE, TEXT_2,
 };
 
+/// The tabs a pane drag depends on, as they stood before a tab message.
+struct PaneDragTabs {
+    /// The shown tab's id.
+    shown: Option<String>,
+    /// The source tab and the shown tab, by id, with their entries.
+    tabs: Vec<(String, Option<TabEntry>)>,
+}
+
 /// What a press on a drag handle is resizing.
 enum Drag {
     Sidebar,
@@ -452,6 +461,13 @@ pub struct RootView {
     /// not be resolved.
     ui_dir: Option<PathBuf>,
     drag: Option<Drag>,
+    /// The pane of the shown tab a drag-and-drop gesture is over, and the
+    /// edge of it a drop there takes, while the drop would be accepted.
+    pane_drop: Option<(String, PaneDropEdge)>,
+    /// The pane a header drag picked up, set when gpui starts the drag. It
+    /// tells a pane drag from any other gpui drag (files dragged in from
+    /// the OS), and counts only while gpui still has a drag under way.
+    pane_drag: Option<DragPayload>,
     /// Focus for the sidebar, which takes it on a click so Ctrl+B there
     /// toggles the sidebar instead of reaching the terminal.
     sidebar_focus: FocusHandle,
@@ -819,6 +835,8 @@ impl RootView {
             renaming: None,
             ui_dir,
             drag: None,
+            pane_drop: None,
+            pane_drag: None,
             sidebar_focus: cx.focus_handle(),
             row_focus: None,
             hovered_container: None,
@@ -1794,6 +1812,71 @@ impl RootView {
             self.finish_drag();
             cx.notify();
         }
+        if self.pane_drop.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Esc while a pane drag is under way cancels it, whatever has the
+    /// keyboard; returns whether it did.
+    fn on_pane_drag_key(
+        &mut self,
+        ks: &Keystroke,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        ks.key == "escape" && self.end_pane_drag(window, cx)
+    }
+
+    /// The pane being dragged, while gpui's drag under way is a pane drag.
+    pub(crate) fn active_pane_drag(&self, cx: &App) -> Option<&DragPayload> {
+        self.pane_drag.as_ref().filter(|_| cx.has_active_drag())
+    }
+
+    /// Ends a pane drag without a drop: Esc, or a change to its source tab
+    /// or the shown tab. Any other gpui drag is left alone. Returns whether
+    /// a pane drag was under way.
+    fn end_pane_drag(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.active_pane_drag(cx).is_none() {
+            return false;
+        }
+        cx.stop_active_drag(window);
+        self.pane_drag = None;
+        self.pane_drop = None;
+        cx.notify();
+        true
+    }
+
+    /// The tabs a pane drag under way depends on, as they stand: its source
+    /// tab and the shown tab.
+    fn pane_drag_tabs(&self, cx: &App) -> Option<PaneDragTabs> {
+        let DragPayload::Pane { tab_id, .. } = self.active_pane_drag(cx)? else {
+            return None;
+        };
+        let shown = self.tabs.active_tab().map(|tab| tab.id.clone());
+        let tabs = std::iter::once(tab_id.clone())
+            .chain(shown.clone())
+            .map(|id| {
+                let entry = self.tabs.tab(&id).cloned();
+                (id, entry)
+            })
+            .collect();
+        Some(PaneDragTabs { shown, tabs })
+    }
+
+    /// Whether folding `msg` touched a tab a pane drag depends on: it named
+    /// one, changed one, or changed which tab is shown.
+    fn tabs_change_touches(&self, msg: &DaemonMessage, before: &PaneDragTabs) -> bool {
+        let named = match msg {
+            DaemonMessage::TabUpdated { tab } => Some(tab.id.as_str()),
+            DaemonMessage::TabRemoved { tab_id } => Some(tab_id.as_str()),
+            _ => None,
+        };
+        let shown = self.tabs.active_tab().map(|tab| tab.id.as_str());
+        shown != before.shown.as_deref()
+            || before.tabs.iter().any(|(id, entry)| {
+                named == Some(id.as_str()) || self.tabs.tab(id) != entry.as_ref()
+            })
     }
 
     /// Ends a drag: the sidebar width is saved; a moved divider's ratio goes
@@ -1834,16 +1917,21 @@ impl RootView {
     }
 
     /// Folds a tab-list message, then drops a container menu whose tab,
-    /// repo or workspace it removed; answers whether the message folded a
-    /// tab list.
+    /// repo or workspace it removed, and ends a pane drag whose source tab
+    /// or shown tab it touched; answers whether the message folded a tab
+    /// list.
     fn fold_tabs_and_drop_stale_menus(
         &mut self,
         msg: &DaemonMessage,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        let drag_tabs = self.pane_drag_tabs(cx);
         let folded = self.fold_tabs(msg, window, cx);
         self.drop_stale_container_menu(window, cx);
+        if folded && drag_tabs.is_some_and(|before| self.tabs_change_touches(msg, &before)) {
+            self.end_pane_drag(window, cx);
+        }
         folded
     }
 
@@ -2364,7 +2452,8 @@ impl RootView {
         self.scan_unseen_cwd_paths();
     }
 
-    /// Keys the root takes before the panes see them. The worktree
+    /// Keys the root takes before the panes see them. Esc during a
+    /// drag-and-drop gesture cancels it and goes no further. The worktree
     /// cleanup-failed dialog, else the exit dialog, else
     /// the first-connect layout chooser, else the run confirm, else a modal
     /// notice, else the delete-worktree confirm, else the spawn
@@ -2381,7 +2470,7 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         let ks = &event.keystroke;
-        if self.on_cleanup_failed_key(ks, window, cx) {
+        if self.on_pane_drag_key(ks, window, cx) || self.on_cleanup_failed_key(ks, window, cx) {
             cx.stop_propagation();
             return;
         }
@@ -2799,6 +2888,11 @@ impl Render for RootView {
         // Tab switches and renames made here change the title without a
         // daemon message.
         self.refresh_window_title(window, cx);
+        // A pane drag gpui ended on a release no pane took leaves nothing
+        // behind to mistake a later drag for it.
+        if !cx.has_active_drag() {
+            self.pane_drag = None;
+        }
         let footer = self.conn.footer(self.sidebar.sessions().len());
         let flyout = self
             .flyout_open

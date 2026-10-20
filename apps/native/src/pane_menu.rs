@@ -8,6 +8,7 @@ use gpui::{
 };
 use protocol::{ClientMessage, TabContent};
 
+use crate::drag::PaneDrop;
 use crate::move_panes_view::MovePanesDialog;
 use crate::pane_close::PaneClose;
 use crate::session_menu::{MENU_MAX_SHARE, menu_frame, menu_item, menu_separator};
@@ -220,24 +221,42 @@ impl RootView {
             tracing::warn!(tab = %dst_tab_id, "move pane: the tab has no pane to drop on");
             return;
         };
-        let snapshots = [tab_id, dst_tab_id]
+        self.send_pane_move(
+            &PaneDrop {
+                src_tab_id: tab_id.to_owned(),
+                src_pane_id: pane_id.to_owned(),
+                dst_tab_id: dst_tab_id.to_owned(),
+                dst_pane_id,
+                edge,
+                request_id: Some(crate::new_request_id()),
+                undo_label: undo::MOVED_PANE,
+            },
+            cx,
+        );
+    }
+
+    /// Sends a pane move, a menu's or a drop's: both tabs as they stand go
+    /// on the undo shelf under the move's label, a source tab the move
+    /// leaves with no pane counts as closing until the daemon answers, and
+    /// the request is noted as in flight.
+    pub(crate) fn send_pane_move(&mut self, drop: &PaneDrop, cx: &mut Context<Self>) {
+        let across_tabs = drop.dst_tab_id != drop.src_tab_id;
+        let mut tab_ids = vec![drop.src_tab_id.as_str()];
+        if across_tabs {
+            tab_ids.push(drop.dst_tab_id.as_str());
+        }
+        let snapshots = tab_ids
             .into_iter()
-            .filter_map(|id| self.tab_snapshot(id, Some(pane_id)))
+            .filter_map(|id| self.tab_snapshot(id, Some(&drop.src_pane_id)))
             .collect();
-        self.record_undo(undo::MOVED_PANE.to_owned(), snapshots, cx);
-        let request_id = crate::new_request_id();
-        self.tabs
-            .mark_closing_if_last_pane(tab_id, Some(&request_id));
-        let msg = ClientMessage::MovePane {
-            src_tab_id: tab_id.to_owned(),
-            src_pane_id: pane_id.to_owned(),
-            dst_tab_id: dst_tab_id.to_owned(),
-            dst_pane_id,
-            edge,
-            request_id: Some(request_id),
-        };
-        self.tabs.note_layout_request(&msg);
-        self.send(msg);
+        self.record_undo(drop.undo_label.to_owned(), snapshots, cx);
+        if across_tabs {
+            self.tabs
+                .mark_closing_if_last_pane(&drop.src_tab_id, drop.request_id.as_deref());
+        }
+        let message = drop.message();
+        self.tabs.note_layout_request(&message);
+        self.send(message);
     }
 
     /// Runs a press on a row of the open empty-pane menu.

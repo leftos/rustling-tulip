@@ -5,22 +5,25 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use gpui::{
-    AnyElement, App, Bounds, ClickEvent, Context, CursorStyle, Div, ElementId, Entity, FocusHandle,
-    FontWeight, HighlightStyle, MouseButton, MouseDownEvent, Pixels, SharedString, Stateful,
-    StyledText, Subscription, Window, canvas, div, prelude::*, px, relative,
+    AnyElement, App, Bounds, ClickEvent, Context, CursorStyle, Div, DragMoveEvent, ElementId,
+    Entity, FocusHandle, FontWeight, HighlightStyle, MouseButton, MouseDownEvent, Pixels, Point,
+    SharedString, Stateful, StyledText, Subscription, Window, canvas, div, prelude::*, px,
+    relative,
 };
 use protocol::{
-    ClaudeProvider, ClientMessage, GridNode, SessionMember, SessionMode, SessionSnapshot,
-    SessionStatus, SplitDirection, SplitPlace, TabContent, TabEntry,
+    ClaudeProvider, ClientMessage, GridNode, PaneDropEdge, SessionMember, SessionMode,
+    SessionSnapshot, SessionStatus, SplitDirection, SplitPlace, TabContent, TabEntry,
 };
 
 use crate::appearance::{self, PaneFrame, Resolved};
 use crate::diff_tab::LOADING_TEXT as DIFF_LOADING_TEXT;
+use crate::drag::{self, DragPayload, OverlayKind, PaneDrop};
 use crate::ellipsis::{ellipsized, truncating};
 use crate::fonts::DEFAULT_FAMILY;
 use crate::headless;
 use crate::palette::{
-    ACCENT, CHIP, HOVER, LILAC, LINE, LINE_STRONG, RAISED, SUBTLE, SURFACE, TEXT_2, TRANSPARENT,
+    ACCENT, CHIP, GROUND, HOVER, LILAC, LINE, LINE_STRONG, RAISED, SUBTLE, SURFACE, TEXT_2,
+    TRANSPARENT,
 };
 use crate::session_menu::{BorderedButton, bordered_button};
 use crate::shell_dialog::standalone_shell_request;
@@ -154,18 +157,23 @@ pub(crate) fn divider_ratio(
     split_path: &[u8],
     at: (f32, f32),
 ) -> Option<f32> {
-    let bounds = bounds?;
     let grid = model.tab(tab_id)?.grid()?;
-    let rect = tabs::Rect::new(
-        bounds.origin.x / px(1.0) + PANE_GUTTER,
-        bounds.origin.y / px(1.0) + PANE_GUTTER,
-        (bounds.size.width / px(1.0) - 2.0 * PANE_GUTTER).max(0.0),
-        (bounds.size.height / px(1.0) - 2.0 * PANE_GUTTER).max(0.0),
-    );
+    let rect = grid_rect(bounds?);
     let divider = tabs::dividers(grid, rect, PANE_GUTTER)
         .into_iter()
         .find(|d| d.split_path == split_path)?;
     Some(tabs::ratio_at(&divider, at.0, at.1))
+}
+
+/// What the panes of a grid laid out in `bounds` fill: the area inside the
+/// gutter that pads it.
+fn grid_rect(bounds: Bounds<Pixels>) -> tabs::Rect {
+    tabs::Rect::new(
+        bounds.origin.x / px(1.0) + PANE_GUTTER,
+        bounds.origin.y / px(1.0) + PANE_GUTTER,
+        (bounds.size.width / px(1.0) - 2.0 * PANE_GUTTER).max(0.0),
+        (bounds.size.height / px(1.0) - 2.0 * PANE_GUTTER).max(0.0),
+    )
 }
 
 /// The pane that answers each session's terminal queries, by session: its
@@ -863,10 +871,12 @@ impl RootView {
                     let name = format!("tab-grid-{}", tab.id);
                     div()
                         .debug_selector(|| name)
+                        .relative()
                         .flex()
                         .size_full()
                         .p(px(PANE_GUTTER))
                         .child(self.render_node(&tab.id, grid, &mut Vec::new(), cx))
+                        .child(drop_layer(&tab.id, cx))
                         .into_any_element()
                 }
             },
@@ -983,9 +993,13 @@ impl RootView {
             .children(self.exited_overlay(tab_id, pane_id, session_id, cx))
             .children(self.abandoned_overlay(pane_id, session_id, cx));
         let colors = self.frame_colors(pane_id, session_id, focused);
+        let overlay = self
+            .pane_drop_overlay(cx)
+            .filter(|(target, _)| target == pane_id)
+            .map(|(_, edge)| drop_overlay(pane_id, edge, colors.accent_line));
         let frame = format!("pane-frame-{pane_id}");
         let header = self
-            .pane_header(tab_id, pane_id, session_id, cx)
+            .pane_header(tab_id, pane_id, session_id, colors.accent_line, cx)
             .bg(gpui::rgb(header_fill(focused)))
             .child(
                 div()
@@ -1007,28 +1021,54 @@ impl RootView {
             .border_color(gpui::rgb(colors.border))
             .child(header)
             .child(body)
+            .children(overlay)
             .into_any_element()
     }
 
     /// The session's status glyph, name and chips (runtime, repo:branch
     /// with a count of further members, headless, trusted), its Stop or
     /// exit code, split right and down (Shift: left and up), move and
-    /// close. A right-click opens the session's menu.
+    /// close. A right-click opens the session's menu; a left press dragged
+    /// anywhere but on a button or a chip drags the pane, its ghost edged
+    /// in `accent`.
     fn pane_header(
         &self,
         tab_id: &str,
         pane_id: &str,
         session_id: Option<&str>,
+        accent: u32,
         cx: &mut Context<Self>,
-    ) -> Div {
+    ) -> Stateful<Div> {
         let parts = session_id
             .and_then(|id| self.sidebar.session(id))
             .map(|session| header_parts(session, self.sidebar.is_unseen(&session.id)));
         let menu_ids = (tab_id.to_owned(), pane_id.to_owned());
         let menu_session = session_id.map(str::to_owned);
         let name = format!("pane-header-{pane_id}");
+        let label: SharedString =
+            drag::ghost_label(parts.as_ref().map(|parts| parts.title.as_str())).into();
+        let payload = DragPayload::Pane {
+            tab_id: tab_id.to_owned(),
+            pane_id: pane_id.to_owned(),
+        };
+        let root = cx.entity().downgrade();
+        let stop = self.header_stop(pane_id, session_id, cx);
+        let controls = (!stop.is_empty()).then(|| header_controls(cx).children(stop));
         div()
+            .id(ElementId::Name(SharedString::from(name.clone())))
             .debug_selector(|| name)
+            .on_drag(payload, move |payload, offset, _, cx| {
+                if let Err(err) = root.update(cx, |this, _| this.pane_drag = Some(payload.clone()))
+                {
+                    tracing::warn!(%err, "pane drag: the window's root view is gone");
+                }
+                let label = label.clone();
+                cx.new(|_| PaneGhost {
+                    label,
+                    accent,
+                    offset,
+                })
+            })
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -1054,10 +1094,83 @@ impl RootView {
             .border_color(gpui::rgb(LINE))
             .text_size(px(UI_TEXT_SIZE))
             .text_color(gpui::rgb(TEXT_2))
-            .children(header_title(pane_id, parts.as_ref()))
+            .children(header_title(pane_id, parts.as_ref(), cx))
             .child(div().flex_1())
-            .children(self.header_stop(pane_id, session_id, cx))
+            .children(controls)
             .children(Self::header_buttons(tab_id, pane_id, session_id, cx))
+    }
+
+    /// Follows a drag over the shown tab: the pane under the pointer and the
+    /// edge a drop there takes, while that drop would be accepted.
+    fn on_pane_drag_move(
+        &mut self,
+        event: &DragMoveEvent<DragPayload>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let payload = event.drag(cx).clone();
+        let target = self
+            .drop_at(&payload, event.event.position, None)
+            .map(|(pane_id, edge, _)| (pane_id, edge));
+        if target != self.pane_drop {
+            self.pane_drop = target;
+            cx.notify();
+        }
+    }
+
+    /// A drop on the shown tab: the move the pane under the pointer takes,
+    /// worked out again where the release is, with its undo entry.
+    fn on_pane_drop(&mut self, payload: &DragPayload, window: &mut Window, cx: &mut Context<Self>) {
+        self.pane_drop = None;
+        self.pane_drag = None;
+        let request_id = Some(new_request_id());
+        if let Some((_, _, drop)) = self.drop_at(payload, window.mouse_position(), request_id) {
+            self.send_pane_move(&drop, cx);
+        }
+        cx.notify();
+    }
+
+    /// The pane of the shown tab under `at` and the drop `payload` makes
+    /// there, when the drop would be accepted: a pane drops only in the tab
+    /// it was picked up in.
+    fn drop_at(
+        &self,
+        payload: &DragPayload,
+        at: Point<Pixels>,
+        request_id: Option<String>,
+    ) -> Option<(String, PaneDropEdge, PaneDrop)> {
+        let tab = self.tabs.active_tab()?;
+        let DragPayload::Pane { tab_id, .. } = payload else {
+            return None;
+        };
+        if *tab_id != tab.id {
+            return None;
+        }
+        let rect = grid_rect(self.grid_bounds?);
+        let at = (at.x / px(1.0), at.y / px(1.0));
+        let (pane_id, edge) = drag::pane_target(tab.grid()?, rect, PANE_GUTTER, at)?;
+        let drop = drag::pane_drop(
+            self.tabs.tabs(),
+            payload,
+            &tab.id,
+            &pane_id,
+            edge,
+            request_id,
+        )?;
+        Some((pane_id, edge, drop))
+    }
+
+    /// A left press on a header button, chip or Stop: it disarms what any
+    /// press disarms but goes no further, so the header never takes it as
+    /// the start of a pane drag.
+    fn press_on_header_control(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.on_any_mouse_down(event, window, cx);
+        cx.stop_propagation();
     }
 
     /// Split right and down (Shift: left and up), move to a new tab when
@@ -1072,7 +1185,7 @@ impl RootView {
         let (right, down, close) = (ids.clone(), ids.clone(), ids);
         let close_session = session_id.map(str::to_owned);
         let mut buttons = vec![
-            header_button(pane_id, "split-right", "│", "Split right (Shift: left)")
+            header_button(pane_id, "split-right", "│", "Split right (Shift: left)", cx)
                 .on_click(cx.listener(move |this, event: &ClickEvent, _, _| {
                     let (tab, pane) = &right;
                     this.split_pane(
@@ -1083,7 +1196,7 @@ impl RootView {
                     );
                 }))
                 .into_any_element(),
-            header_button(pane_id, "split-down", "─", "Split down (Shift: up)")
+            header_button(pane_id, "split-down", "─", "Split down (Shift: up)", cx)
                 .on_click(cx.listener(move |this, event: &ClickEvent, _, _| {
                     let (tab, pane) = &down;
                     this.split_pane(tab, pane, SplitDirection::Vertical, event.modifiers().shift);
@@ -1098,6 +1211,7 @@ impl RootView {
                     "pane-move-new-tab",
                     "↗",
                     "Move this pane to a new tab",
+                    cx,
                 )
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, _| {
                     this.move_pane_to_new_tab(&tab, &pane);
@@ -1106,7 +1220,7 @@ impl RootView {
             );
         }
         buttons.push(
-            header_button(pane_id, "close-pane", "×", "Close pane")
+            header_button(pane_id, "close-pane", "×", "Close pane", cx)
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                     let (tab_id, pane_id) = &close;
                     this.close_pane_clicked(tab_id, pane_id, close_session.as_deref(), window, cx);
@@ -1132,6 +1246,15 @@ impl RootView {
     pub fn pane_header_parts(&self, pane_id: &str) -> Option<PaneHeaderParts> {
         self.active_pane_session(pane_id)
             .map(|session| header_parts(session, self.sidebar.is_unseen(&session.id)))
+    }
+
+    /// The pane the drop overlay is drawn on and the edge it shows, while a
+    /// pane drag is under way.
+    #[must_use]
+    pub fn pane_drop_overlay(&self, cx: &App) -> Option<(String, PaneDropEdge)> {
+        self.pane_drop
+            .clone()
+            .filter(|_| self.active_pane_drag(cx).is_some())
     }
 }
 
@@ -1286,7 +1409,11 @@ fn header_fill(focused: bool) -> u32 {
 
 /// The header's left side: the status glyph, the name and the chips, or
 /// "Empty pane".
-fn header_title(pane_id: &str, parts: Option<&PaneHeaderParts>) -> Vec<AnyElement> {
+fn header_title(
+    pane_id: &str,
+    parts: Option<&PaneHeaderParts>,
+    cx: &mut Context<RootView>,
+) -> Vec<AnyElement> {
     let title_id = format!("pane-title-{pane_id}");
     let selector = title_id.clone();
     let title = div()
@@ -1297,7 +1424,7 @@ fn header_title(pane_id: &str, parts: Option<&PaneHeaderParts>) -> Vec<AnyElemen
         .overflow_hidden()
         .whitespace_nowrap();
     let Some(parts) = parts else {
-        return vec![title.child("Empty pane").into_any_element()];
+        return vec![title.child(drag::EMPTY_PANE_LABEL).into_any_element()];
     };
     let title = title
         .text_size(px(TITLE_TEXT_SIZE))
@@ -1323,19 +1450,28 @@ fn header_title(pane_id: &str, parts: Option<&PaneHeaderParts>) -> Vec<AnyElemen
             .tooltip(tooltip(parts.title_tip.clone()))
             .into_any_element(),
     ];
-    out.extend(parts.chips.iter().map(|chip| header_chip(pane_id, chip)));
+    out.extend(
+        parts
+            .chips
+            .iter()
+            .map(|chip| header_chip(pane_id, chip, cx)),
+    );
     out
 }
 
 /// A 20 px Geist Mono chip: the claude runtime washed in the accent, the
 /// codex runtime in lilac, repo:branch with its repo name bright, trusted
 /// outlined, the rest filled.
-fn header_chip(pane_id: &str, chip: &HeaderChip) -> AnyElement {
+fn header_chip(pane_id: &str, chip: &HeaderChip, cx: &mut Context<RootView>) -> AnyElement {
     let name = format!("pane-chip-{pane_id}-{}", chip.kind.name());
     let selector = name.clone();
     let base = div()
         .id(ElementId::Name(SharedString::from(name.clone())))
         .debug_selector(|| selector)
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(RootView::press_on_header_control),
+        )
         .flex()
         .flex_none()
         .items_center()
@@ -1453,11 +1589,16 @@ fn header_button(
     action: &str,
     glyph: &'static str,
     tip: &'static str,
+    cx: &mut Context<RootView>,
 ) -> Stateful<Div> {
     let name = format!("{action}-{pane_id}");
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))
         .debug_selector(|| name)
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(RootView::press_on_header_control),
+        )
         .flex()
         .flex_none()
         .items_center()
@@ -1491,6 +1632,131 @@ fn gutter_handle(id: ElementId, vertical_line: bool, active: bool) -> Stateful<D
             .w_full()
             .cursor(CursorStyle::ResizeUpDown)
     }
+}
+
+/// The fill of a dragged pane's ghost and of the swap badge: the ground at
+/// 78%, as `0xRRGGBBAA`.
+const GHOST_FILL: u32 = (GROUND << 8) | 0xc7;
+/// How strongly a half or the centre box is tinted with the accent.
+const DROP_TINT_ALPHA: f32 = 0.22;
+/// How strongly an outer strip is tinted with the accent.
+const OUTER_TINT_ALPHA: f32 = 0.40;
+/// The ghost's and the swap badge's text size.
+const GHOST_TEXT_SIZE: f32 = 12.0;
+
+/// What follows the pointer while a pane is dragged: a pill with the pane's
+/// header label, edged in the pane's accent, its corner at the pointer.
+struct PaneGhost {
+    label: SharedString,
+    accent: u32,
+    /// Where the pointer sat in the header when the drag started. gpui
+    /// draws the ghost that far up and left of the pointer, as if the
+    /// header itself were dragged; the pill moves back by it.
+    offset: Point<Pixels>,
+}
+
+impl Render for PaneGhost {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().child(
+            ghost_pill(self.label.clone(), self.accent)
+                .debug_selector(|| "pane-drag-ghost".to_owned())
+                .absolute()
+                .left(self.offset.x)
+                .top(self.offset.y),
+        )
+    }
+}
+
+/// A translucent pill with `text`, edged in `accent`: the drag ghost and the
+/// swap badge.
+fn ghost_pill(text: impl Into<SharedString>, accent: u32) -> Div {
+    div()
+        .flex_none()
+        .px(px(10.0))
+        .py(px(3.0))
+        .rounded_full()
+        .bg(gpui::rgba(GHOST_FILL))
+        .border_1()
+        .border_color(gpui::rgb(accent))
+        .whitespace_nowrap()
+        .font_family(crate::fonts::UI_FAMILY)
+        .text_size(px(GHOST_TEXT_SIZE))
+        .text_color(gpui::rgb(TEXT))
+        .child(text.into())
+}
+
+/// The header's Stop or exit code, in a row a left press on which never
+/// starts a pane drag.
+fn header_controls(cx: &mut Context<RootView>) -> Div {
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap(px(8.0))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(RootView::press_on_header_control),
+        )
+}
+
+/// A layer over the shown tab's grid that follows a drag-and-drop gesture
+/// and takes its drop. It blocks no pointer, but while a drag is under way
+/// it keeps the mouse from the terminals beneath it.
+fn drop_layer(tab_id: &str, cx: &mut Context<RootView>) -> Stateful<Div> {
+    div()
+        .id(ElementId::Name(SharedString::from(format!(
+            "pane-drop-layer-{tab_id}"
+        ))))
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .on_drag_move(cx.listener(RootView::on_pane_drag_move))
+        .on_drop(cx.listener(RootView::on_pane_drop))
+        .on_mouse_move(|_, _, cx| {
+            if cx.has_active_drag() {
+                cx.stop_propagation();
+            }
+        })
+        .on_any_mouse_down(|_, _, cx| {
+            if cx.has_active_drag() {
+                cx.stop_propagation();
+            }
+        })
+}
+
+/// The tint over pane `pane_id` for a drop on `edge`, in the pane's
+/// `accent`: a half, an outer strip, or the centre box with its badge.
+fn drop_overlay(pane_id: &str, edge: PaneDropEdge, accent: u32) -> AnyElement {
+    let overlay = drag::drop_overlay(edge, tabs::Rect::new(0.0, 0.0, 1.0, 1.0));
+    let (alpha, border) = match overlay.kind {
+        OverlayKind::Half | OverlayKind::Centre => (DROP_TINT_ALPHA, 1.0),
+        OverlayKind::Outer => (OUTER_TINT_ALPHA, 2.0),
+    };
+    let name = format!("pane-drop-overlay-{pane_id}");
+    let rect = overlay.rect;
+    div()
+        .debug_selector(|| name)
+        .absolute()
+        .left(relative(rect.x))
+        .top(relative(rect.y))
+        .w(relative(rect.width))
+        .h(relative(rect.height))
+        .bg(gpui::Rgba {
+            a: alpha,
+            ..gpui::rgb(accent)
+        })
+        .border(px(border))
+        .border_color(gpui::rgb(accent))
+        .when(overlay.kind == OverlayKind::Centre, |centre| {
+            centre
+                .rounded(px(PANE_RADIUS))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(ghost_pill(drag::SWAP_BADGE, accent))
+        })
+        .into_any_element()
 }
 
 /// An invisible layer that records where the grid was laid out, for the

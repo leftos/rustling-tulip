@@ -316,7 +316,6 @@ fn walk_rects(node: &GridNode, bounds: Rect, thickness: f32, out: &mut Vec<(Stri
     clippy::struct_excessive_bools,
     reason = "four independent sides, not a state machine"
 )]
-#[cfg_attr(not(test), expect(dead_code, reason = "called only from unit tests"))]
 pub struct OuterSides {
     pub left: bool,
     pub right: bool,
@@ -328,7 +327,6 @@ pub struct OuterSides {
 /// `bounds` with dividers `thickness` wide, in [`pane_rects`] order. A side
 /// touches when it lies within half a pixel of the bound, since the pane
 /// rectangles are sums and differences of `f32` measures.
-#[cfg_attr(not(test), expect(dead_code, reason = "called only from unit tests"))]
 pub fn outer_edges(grid: &GridNode, bounds: Rect, thickness: f32) -> Vec<(String, OuterSides)> {
     const TOUCH_EPSILON: f32 = 0.5;
     let right = bounds.x + bounds.width;
