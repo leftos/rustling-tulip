@@ -8,15 +8,18 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use protocol::{
-    LaunchPresetSource, PresetEntry, PresetPromptSource, PresetTarget, PresetVariable,
-    PresetVariableKind,
+    ClientMessage, LaunchPresetSource, PresetEntry, PresetPromptSource, PresetTarget,
+    PresetVariable, PresetVariableKind,
 };
 
 use crate::FileFilter;
+use crate::preset_launch::{
+    MAX_PER_TAB_INVALID, MaxPerTab, Preview, PreviewRow, ScriptCommand, ScriptStage, default_cap,
+    effective_cap, group_by_tab, groups_by_tab, launch_button_label, preview_summary,
+    script_commands,
+};
 use crate::preset_prompts::{issue_summary, parse_issue_spec, parse_prompts};
 
-/// The tooltip of the last stage's Next, which is disabled.
-pub const PREVIEW_LATER_TIP: &str = "Preview and launch arrive with the next update";
 pub const SOURCE_LEGEND: &str = "Prompt source";
 pub const FILE_LABEL: &str = "Prompts file";
 pub const FILE_PLACEHOLDER: &str = "Pick a .txt or .md file…";
@@ -41,6 +44,7 @@ pub const PROMPTS_FILTER_EXTENSIONS: [&str; 2] = ["txt", "md"];
 pub enum Stage {
     Source,
     Variables,
+    Preview,
 }
 
 /// The kind of prompt source picked.
@@ -83,6 +87,7 @@ impl Stage {
         match self {
             Self::Source => "source",
             Self::Variables => "variables",
+            Self::Preview => "preview",
         }
     }
 }
@@ -115,14 +120,28 @@ pub struct NextButton {
     pub tip: Option<String>,
 }
 
+/// Launch as drawn on the preview: its label, whether it can be pressed,
+/// and its tooltip.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaunchButton {
+    pub label: String,
+    pub enabled: bool,
+    pub tip: Option<String>,
+}
+
+/// What pressing Launch sends.
+#[derive(Debug, Clone)]
+pub enum LaunchStep {
+    /// The script variables run first.
+    Scripts(ClientMessage),
+    /// The launch itself.
+    Launch(ClientMessage),
+}
+
 /// The open wizard's state.
 #[derive(Debug, Clone)]
 pub struct PresetWizard {
     entry: PresetEntry,
-    #[expect(
-        dead_code,
-        reason = "the launch request carries it; Next on the last stage sends none"
-    )]
     target: PresetTarget,
     stage: Stage,
     source_kind: SourceKind,
@@ -131,6 +150,11 @@ pub struct PresetWizard {
     inline_text: String,
     issues_spec: String,
     values: HashMap<String, String>,
+    /// The source repo's path, which fills a script's `{repo_root}`.
+    repo_root: Option<String>,
+    max_per_tab: String,
+    preview: Preview,
+    scripts: ScriptStage,
 }
 
 impl PresetWizard {
@@ -144,6 +168,9 @@ impl PresetWizard {
         let folder_path =
             source_repo_path.and_then(|repo| default_folder_path(&entry.prompt_sources, repo));
         let values = initial_values(&entry.variables);
+        let max_per_tab = default_cap(&entry)
+            .map(|cap| cap.to_string())
+            .unwrap_or_default();
         Self {
             entry,
             target,
@@ -154,7 +181,225 @@ impl PresetWizard {
             inline_text: String::new(),
             issues_spec: String::new(),
             values,
+            repo_root: source_repo_path.map(str::to_owned),
+            max_per_tab,
+            preview: Preview::Ready(Vec::new()),
+            scripts: ScriptStage::Idle,
         }
+    }
+
+    /// Every variable holding a value, in the preset's order, as the daemon
+    /// takes them: defaults and edits alike, untrimmed.
+    #[must_use]
+    pub fn variable_values(&self) -> Vec<(String, String)> {
+        self.entry
+            .variables
+            .iter()
+            .filter_map(|variable| {
+                self.values
+                    .get(&variable.name)
+                    .map(|value| (variable.name.clone(), value.clone()))
+            })
+            .collect()
+    }
+
+    /// Whether the preview shows the max-panes field: the preset packs its
+    /// sessions into tabs.
+    #[must_use]
+    pub fn shows_max_per_tab(&self) -> bool {
+        groups_by_tab(&self.entry)
+    }
+
+    #[must_use]
+    pub fn max_per_tab_text(&self) -> &str {
+        &self.max_per_tab
+    }
+
+    pub fn set_max_per_tab(&mut self, text: String) {
+        self.max_per_tab = text;
+    }
+
+    /// The cap the launch packs tabs by.
+    #[must_use]
+    pub fn launch_cap(&self) -> Option<u32> {
+        effective_cap(&self.entry, MaxPerTab::parse(&self.max_per_tab))
+    }
+
+    /// Starts the preview, as entering the Preview stage does each time. An
+    /// inline or issue source previews here; a file or folder is read by the
+    /// daemon, so the request `id` goes out and only its answer is taken.
+    pub fn start_preview(&mut self, id: String) -> Option<ClientMessage> {
+        self.preview = match self.source_kind {
+            SourceKind::Inline => Preview::Ready(parse_prompts(&self.inline_text)),
+            SourceKind::GithubIssues => match parse_issue_spec(&self.issues_spec) {
+                Ok(issues) => Preview::Ready(
+                    issues
+                        .iter()
+                        .map(|issue| format!("GitHub issue #{issue}"))
+                        .collect(),
+                ),
+                Err(err) => Preview::Failed(err),
+            },
+            SourceKind::File | SourceKind::Folder => {
+                let Some(source) = self.launch_source() else {
+                    self.preview = Preview::Failed("source not ready".to_owned());
+                    return None;
+                };
+                self.preview = Preview::Loading { id: id.clone() };
+                return Some(ClientMessage::PreviewPreset {
+                    id,
+                    target: self.target.clone(),
+                    preset_id: self.entry.id.clone(),
+                    source,
+                    variable_values: self.variable_values(),
+                });
+            }
+        };
+        None
+    }
+
+    /// The daemon's answer to preview request `id`; any but the latest is
+    /// dropped.
+    pub fn apply_preview(&mut self, id: &str, result: Result<Vec<String>, String>) {
+        if !matches!(&self.preview, Preview::Loading { id: latest } if latest == id) {
+            return;
+        }
+        self.preview = match result {
+            Ok(prompts) => Preview::Ready(prompts),
+            Err(err) => Preview::Failed(err),
+        };
+    }
+
+    #[must_use]
+    pub fn preview(&self) -> &Preview {
+        &self.preview
+    }
+
+    /// The previewed prompts in the tabs they land in.
+    #[must_use]
+    pub fn preview_groups(&self) -> Vec<Vec<PreviewRow>> {
+        match &self.preview {
+            Preview::Ready(prompts) => group_by_tab(prompts, self.launch_cap()),
+            Preview::Loading { .. } | Preview::Failed(_) => Vec::new(),
+        }
+    }
+
+    /// The line over the preview list, once the prompts are known.
+    #[must_use]
+    pub fn preview_summary(&self) -> Option<String> {
+        let Preview::Ready(prompts) = &self.preview else {
+            return None;
+        };
+        let tabs = self
+            .shows_max_per_tab()
+            .then(|| group_by_tab(prompts, self.launch_cap()).len());
+        Some(preview_summary(prompts.len(), tabs))
+    }
+
+    /// The preset's script commands as they would run now.
+    #[must_use]
+    pub fn script_commands(&self) -> Vec<ScriptCommand> {
+        script_commands(
+            &self.entry.variables,
+            &self.values,
+            self.repo_root.as_deref(),
+        )
+    }
+
+    #[must_use]
+    pub fn script_stage(&self) -> &ScriptStage {
+        &self.scripts
+    }
+
+    /// Whether the script variables are running.
+    #[must_use]
+    pub fn scripts_running(&self) -> bool {
+        matches!(self.scripts, ScriptStage::Running { .. })
+    }
+
+    /// Launch on the preview: it waits for prompts, a valid max-panes value
+    /// and any script run in flight.
+    #[must_use]
+    pub fn launch_button(&self) -> LaunchButton {
+        let prompts = match &self.preview {
+            Preview::Ready(prompts) => prompts.len(),
+            Preview::Loading { .. } | Preview::Failed(_) => 0,
+        };
+        let label = launch_button_label(&self.scripts, self.script_commands().len(), prompts);
+        let invalid = MaxPerTab::parse(&self.max_per_tab) == MaxPerTab::Invalid;
+        LaunchButton {
+            label,
+            enabled: self.stage == Stage::Preview
+                && prompts > 0
+                && !invalid
+                && !self.scripts_running(),
+            tip: invalid.then(|| MAX_PER_TAB_INVALID.to_owned()),
+        }
+    }
+
+    /// Presses Launch with the fresh id `id`: the script variables run first
+    /// under it when the preset has any, else the launch goes as job `id`.
+    pub fn press_launch(&mut self, id: String) -> Option<LaunchStep> {
+        if !self.launch_button().enabled {
+            return None;
+        }
+        if self.script_commands().is_empty() {
+            let values = self.variable_values();
+            return self.launch_message(id, values).map(LaunchStep::Launch);
+        }
+        self.scripts = ScriptStage::Running { id: id.clone() };
+        Some(LaunchStep::Scripts(ClientMessage::ResolvePresetScripts {
+            id,
+            target: self.target.clone(),
+            preset_id: self.entry.id.clone(),
+            variable_values: self.variable_values(),
+        }))
+    }
+
+    /// The daemon's answer to script request `id`: the resolved values go
+    /// out as job `job_id`'s launch while the launch is still valid, or the
+    /// error shows; either way short of a launch, Launch retries.
+    pub fn apply_scripts(
+        &mut self,
+        id: &str,
+        result: Result<Vec<(String, String)>, String>,
+        job_id: String,
+    ) -> Option<ClientMessage> {
+        if !matches!(&self.scripts, ScriptStage::Running { id: latest } if latest == id) {
+            return None;
+        }
+        match result {
+            Ok(values) => {
+                self.scripts = ScriptStage::Idle;
+                if !self.launch_button().enabled {
+                    return None;
+                }
+                self.scripts = ScriptStage::Done;
+                self.launch_message(job_id, values)
+            }
+            Err(error) => {
+                self.scripts = ScriptStage::Failed { error };
+                None
+            }
+        }
+    }
+
+    fn launch_message(
+        &self,
+        job_id: String,
+        values: Vec<(String, String)>,
+    ) -> Option<ClientMessage> {
+        Some(ClientMessage::LaunchPreset {
+            job_id,
+            target: self.target.clone(),
+            preset_id: self.entry.id.clone(),
+            source: self.launch_source()?,
+            variable_values: values,
+            use_worktree_override: None,
+            max_panes_per_tab_override: MaxPerTab::parse(&self.max_per_tab)
+                .cap()
+                .filter(|_| self.shows_max_per_tab()),
+        })
     }
 
     #[must_use]
@@ -217,7 +462,6 @@ impl PresetWizard {
     /// The launch source the picked source produces, once it is ready. An
     /// issue spec goes as typed: the daemon expands it.
     #[must_use]
-    #[cfg_attr(not(test), expect(dead_code, reason = "called only from unit tests"))]
     pub fn launch_source(&self) -> Option<LaunchPresetSource> {
         if !self.is_source_ready() {
             return None;
@@ -372,30 +616,17 @@ impl PresetWizard {
             && self.value(&variable.name).trim().is_empty()
     }
 
-    /// Next on the stage on screen. Source waits for its source, then moves
-    /// to the variables, or is the last Next when none is prompted; on the
-    /// variables it names the labels still missing. Next on the last stage
-    /// is disabled.
+    /// Next on the stage on screen. Source waits for its source; the
+    /// variables name the labels still missing; the preview has no Next.
     #[must_use]
     pub fn next_button(&self) -> NextButton {
-        let last = || NextButton {
-            enabled: false,
-            tip: Some(PREVIEW_LATER_TIP.to_owned()),
-        };
+        let enabled = |enabled: bool| NextButton { enabled, tip: None };
         match self.stage {
-            Stage::Source if !self.is_source_ready() => NextButton {
-                enabled: false,
-                tip: None,
-            },
-            Stage::Source if self.prompted_variables().is_empty() => last(),
-            Stage::Source => NextButton {
-                enabled: true,
-                tip: None,
-            },
+            Stage::Source => enabled(self.is_source_ready()),
             Stage::Variables => {
                 let missing = self.missing_required();
                 if missing.is_empty() {
-                    return last();
+                    return enabled(true);
                 }
                 let labels: Vec<&str> = missing.iter().map(|v| v.label.as_str()).collect();
                 NextButton {
@@ -403,26 +634,35 @@ impl PresetWizard {
                     tip: Some(format!("Fill in: {}", labels.join(", "))),
                 }
             }
+            Stage::Preview => enabled(false),
         }
     }
 
-    /// Moves to the next stage when Next can be pressed; returns whether it
-    /// moved.
+    /// Moves to the next stage when Next can be pressed: Source goes to the
+    /// variables, or to the preview when none is prompted. Returns whether
+    /// it moved.
     pub fn advance(&mut self) -> bool {
-        let moves = self.stage == Stage::Source && self.next_button().enabled;
-        if moves {
-            self.stage = Stage::Variables;
+        if !self.next_button().enabled {
+            return false;
         }
-        moves
+        self.stage = match self.stage {
+            Stage::Source if !self.prompted_variables().is_empty() => Stage::Variables,
+            Stage::Source | Stage::Variables | Stage::Preview => Stage::Preview,
+        };
+        true
     }
 
-    /// Moves back a stage; returns whether it moved.
+    /// Moves back a stage, skipping the variables when none is prompted;
+    /// not while scripts run. Returns whether it moved.
     pub fn back(&mut self) -> bool {
-        let moves = self.stage == Stage::Variables;
-        if moves {
-            self.stage = Stage::Source;
-        }
-        moves
+        let to = match self.stage {
+            Stage::Source => return false,
+            _ if self.scripts_running() => return false,
+            Stage::Preview if !self.prompted_variables().is_empty() => Stage::Variables,
+            Stage::Variables | Stage::Preview => Stage::Source,
+        };
+        self.stage = to;
+        true
     }
 }
 
@@ -539,6 +779,7 @@ pub fn source_label(source: &PresetPromptSource) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::preset_launch::MAX_PER_TAB_INVALID;
     use serde_json::json;
 
     #[expect(
@@ -814,13 +1055,22 @@ mod tests {
         assert_eq!(
             wizard.next_button(),
             NextButton {
-                enabled: false,
-                tip: Some(PREVIEW_LATER_TIP.to_owned())
-            },
-            "Next on Source is the last Next"
+                enabled: true,
+                tip: None
+            }
         );
-        assert!(!wizard.advance());
-        assert_eq!(wizard.stage(), Stage::Source);
+        assert!(wizard.advance());
+        assert_eq!(
+            wizard.stage(),
+            Stage::Preview,
+            "Next on Source goes straight to the preview"
+        );
+        assert!(wizard.back());
+        assert_eq!(
+            wizard.stage(),
+            Stage::Source,
+            "Back from the preview skips the variables too"
+        );
     }
 
     #[test]
@@ -844,11 +1094,166 @@ mod tests {
         assert_eq!(
             wizard.next_button(),
             NextButton {
-                enabled: false,
-                tip: Some(PREVIEW_LATER_TIP.to_owned())
+                enabled: true,
+                tip: None
             }
         );
-        assert!(!wizard.advance(), "Next on the last stage is disabled");
+        assert!(wizard.advance());
+        assert_eq!(wizard.stage(), Stage::Preview);
+        assert!(!wizard.next_button().enabled, "the preview has no Next");
+        assert!(!wizard.advance());
+        assert!(wizard.back());
+        assert_eq!(wizard.stage(), Stage::Variables);
+    }
+
+    fn pairs(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn variable_values_follow_the_preset_order_with_defaults_and_edits() {
+        let mut wizard = inline_ready(json!([
+            {"name": "z", "label": "Z", "kind": {"kind": "text"}, "default": "zed"},
+            text_variable("a", "A"),
+            toggle_variable("m", "false"),
+            text_variable("unset", "Unset")
+        ]));
+        wizard.set_value("a", " typed ".to_owned());
+        wizard.toggle("m");
+        assert_eq!(
+            wizard.variable_values(),
+            pairs(&[("z", "zed"), ("a", " typed "), ("m", "true")]),
+            "unprompted defaults go too, values untrimmed, an unset one left out"
+        );
+        wizard.set_value("a", String::new());
+        assert_eq!(
+            wizard.variable_values(),
+            pairs(&[("z", "zed"), ("a", ""), ("m", "true")]),
+            "a cleared value goes empty"
+        );
+    }
+
+    fn grouped(sources: serde_json::Value, cap: Option<u32>) -> PresetWizard {
+        let mut entry = preset(sources, json!([]));
+        entry.tab_grouping = protocol::TabGroupingConfig::NewTab {
+            layout: protocol::TabLayout::AutoGrid,
+            max_panes_per_tab: cap,
+            tab_name_template: None,
+        };
+        PresetWizard::new(entry, target(), Some("D:\\src\\r1"))
+    }
+
+    #[test]
+    fn max_panes_starts_at_the_preset_cap_and_an_invalid_one_disables_launch() {
+        let mut wizard = grouped(json!([{"kind": "inline"}]), Some(3));
+        wizard.set_inline_text("- a\n- b".to_owned());
+        assert!(wizard.advance());
+        assert!(wizard.start_preview("p1".to_owned()).is_none());
+        assert_eq!(wizard.max_per_tab_text(), "3");
+        assert_eq!(
+            wizard.launch_button(),
+            LaunchButton {
+                label: "Launch 2 sessions".to_owned(),
+                enabled: true,
+                tip: None
+            }
+        );
+        for bad in ["0", "-2", "2.5", "two"] {
+            wizard.set_max_per_tab(bad.to_owned());
+            assert_eq!(
+                wizard.launch_button(),
+                LaunchButton {
+                    label: "Launch 2 sessions".to_owned(),
+                    enabled: false,
+                    tip: Some(MAX_PER_TAB_INVALID.to_owned())
+                },
+                "{bad:?} is no cap"
+            );
+        }
+        wizard.set_max_per_tab(" ".to_owned());
+        assert!(
+            wizard.launch_button().enabled,
+            "blank is the preset default"
+        );
+        assert_eq!(wizard.launch_cap(), Some(3));
+        wizard.set_max_per_tab("1".to_owned());
+        assert_eq!(wizard.launch_cap(), Some(1));
+    }
+
+    #[test]
+    fn scripts_that_resolve_after_the_cap_went_invalid_do_not_launch() {
+        let mut entry = preset(
+            json!([{"kind": "inline"}]),
+            json!([{"name": "s", "label": "S",
+                    "kind": {"kind": "script", "cmd": "fetch", "args": []}}]),
+        );
+        entry.tab_grouping = protocol::TabGroupingConfig::NewTab {
+            layout: protocol::TabLayout::AutoGrid,
+            max_panes_per_tab: Some(2),
+            tab_name_template: None,
+        };
+        let mut wizard = PresetWizard::new(entry, target(), Some("D:\\src\\r1"));
+        wizard.set_inline_text("- a".to_owned());
+        assert!(wizard.advance());
+        assert!(wizard.start_preview("p1".to_owned()).is_none());
+        assert!(matches!(
+            wizard.press_launch("r1".to_owned()),
+            Some(LaunchStep::Scripts(_))
+        ));
+        wizard.set_max_per_tab("0".to_owned());
+        assert!(
+            wizard
+                .apply_scripts("r1", Ok(Vec::new()), "j1".to_owned())
+                .is_none(),
+            "an invalid cap holds the launch"
+        );
+        assert_eq!(wizard.stage(), Stage::Preview);
+        assert_eq!(
+            wizard.launch_button(),
+            LaunchButton {
+                label: "Run script & launch 1 session".to_owned(),
+                enabled: false,
+                tip: Some(MAX_PER_TAB_INVALID.to_owned())
+            },
+            "Launch is the retry once the cap is fixed"
+        );
+        wizard.set_max_per_tab("2".to_owned());
+        assert!(wizard.launch_button().enabled);
+    }
+
+    #[test]
+    fn the_preview_groups_by_the_cap_only_with_tab_grouping() {
+        let mut wizard = grouped(json!([{"kind": "inline"}]), Some(3));
+        wizard.set_inline_text("- 1\n- 2\n- 3\n- 4\n- 5\n- 6\n- 7".to_owned());
+        assert!(wizard.advance());
+        assert!(wizard.start_preview("p1".to_owned()).is_none());
+        let sizes = |wizard: &PresetWizard| -> Vec<usize> {
+            wizard.preview_groups().iter().map(Vec::len).collect()
+        };
+        assert_eq!(sizes(&wizard), [3, 3, 1]);
+        assert_eq!(
+            wizard.preview_summary().as_deref(),
+            Some("7 prompts ready to spawn. → 3 tabs.")
+        );
+        wizard.set_max_per_tab("10".to_owned());
+        assert_eq!(sizes(&wizard), [7]);
+        assert_eq!(
+            wizard.preview_summary().as_deref(),
+            Some("7 prompts ready to spawn. → 1 tab.")
+        );
+
+        let mut flat = inline_ready(json!([]));
+        assert!(flat.advance());
+        assert!(flat.start_preview("p1".to_owned()).is_none());
+        assert_eq!(sizes(&flat), [1], "no grouping is one group");
+        assert_eq!(
+            flat.preview_summary().as_deref(),
+            Some("1 prompt ready to spawn.")
+        );
+        assert!(!flat.shows_max_per_tab());
     }
 
     fn toggle_variable(name: &str, default: &str) -> serde_json::Value {

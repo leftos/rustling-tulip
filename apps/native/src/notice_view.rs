@@ -4,7 +4,7 @@
 
 use gpui::{
     AnyElement, BoxShadow, ClickEvent, Context, Div, ElementId, FontWeight, Keystroke,
-    SharedString, Stateful, Window, div, point, prelude::*, px,
+    SharedString, Stateful, Window, div, point, prelude::*, px, relative,
 };
 use protocol::{ClientMessage, SessionSnapshot, SpawnRequest, SpawnTarget};
 
@@ -12,7 +12,7 @@ use crate::buttons::{ButtonSize, outlined_button};
 use crate::notices::{
     ActionFailedNotice, CheckoutAsk, CheckoutChoice, CheckoutPrompt, Toast, ToastKind, ToastSpec,
 };
-use crate::palette::{CHIP, DIALOG_SHADOW, LINE_STRONG, SURFACE, TOAST_SHADOW};
+use crate::palette::{ACCENT, CHIP, DIALOG_SHADOW, LINE_STRONG, SURFACE, TOAST_SHADOW};
 use crate::session_menu::{backdrop, dialog_button};
 use crate::spawns::OpenIn;
 use crate::{DANGER, FOOTER_HEIGHT, MUTED, RootView, TEXT, UI_TEXT_SIZE, WARNING};
@@ -122,7 +122,17 @@ impl RootView {
         id
     }
 
+    /// The × on toast `id`; a preset job's progress toast stays closed.
     fn dismiss_toast(&mut self, id: u64, cx: &mut Context<Self>) {
+        let key = self
+            .notices
+            .toasts()
+            .iter()
+            .find(|toast| toast.id == id)
+            .and_then(|toast| toast.key.clone());
+        if let Some(key) = key {
+            self.preset_launches.dismiss(&key);
+        }
         if self.notices.dismiss(id) {
             self.schedule_toast_expiry(cx);
             cx.notify();
@@ -422,7 +432,16 @@ impl RootView {
         if toasts.is_empty() {
             return None;
         }
-        let cards: Vec<AnyElement> = toasts.iter().map(|toast| toast_card(toast, cx)).collect();
+        let cards: Vec<AnyElement> = toasts
+            .iter()
+            .map(|toast| {
+                let progress = toast
+                    .key
+                    .as_deref()
+                    .and_then(|key| self.preset_launches.progress(key));
+                toast_card(toast, progress, cx)
+            })
+            .collect();
         Some(
             div()
                 .absolute()
@@ -531,9 +550,10 @@ impl RootView {
     }
 }
 
-/// A toast: its title, its muted detail and its dismiss button; an error's
-/// border is red.
-fn toast_card(toast: &Toast, cx: &mut Context<RootView>) -> AnyElement {
+/// A toast: its title, its muted detail, a thin bar under them when it
+/// reports `progress` (0 to 1), and its dismiss button; an error's border is
+/// red.
+fn toast_card(toast: &Toast, progress: Option<f32>, cx: &mut Context<RootView>) -> AnyElement {
     let id = toast.id;
     let close = outlined_button(&format!("toast-close-{id}"), ButtonSize::Compact, true)
         .flex_none()
@@ -562,7 +582,8 @@ fn toast_card(toast: &Toast, cx: &mut Context<RootView>) -> AnyElement {
                 .font_weight(FontWeight::SEMIBOLD)
                 .child(toast.title.clone()),
         )
-        .children(detail);
+        .children(detail)
+        .children(progress.map(|fraction| progress_bar(id, fraction)));
     let name = format!("toast-{id}");
     toast_frame(ElementId::Name(SharedString::from(name.clone())))
         .debug_selector(|| name)
@@ -574,6 +595,26 @@ fn toast_card(toast: &Toast, cx: &mut Context<RootView>) -> AnyElement {
         .child(body)
         .child(close)
         .into_any_element()
+}
+
+/// A thin bar filled `fraction` (0 to 1) of its width, under toast `id`'s
+/// detail.
+fn progress_bar(id: u64, fraction: f32) -> Div {
+    let selector = format!("toast-progress-{id}");
+    div()
+        .debug_selector(move || selector)
+        .mt(px(4.0))
+        .h(px(3.0))
+        .w_full()
+        .rounded(px(2.0))
+        .bg(gpui::rgb(LINE_STRONG))
+        .child(
+            div()
+                .h_full()
+                .rounded(px(2.0))
+                .bg(gpui::rgb(ACCENT))
+                .w(relative(fraction.clamp(0.0, 1.0))),
+        )
 }
 
 /// The card a toast, an undo entry and the copied chip sit in, tagged `id`:

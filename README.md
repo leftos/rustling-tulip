@@ -115,6 +115,7 @@ Start with [docs/architecture.md](docs/architecture.md) for how the pieces fit a
 - **PF, AT, SV, RD, AR, OT**: idea ids in `docs/plans/off-orca.md` (files across machines, attention streams, session views, remote desktop, artifacts by account, absorbing ops-tower).
 - **Plan snapshot**: `docs/plans/MAIN.md`, generated from the Linear team's issues, one line an item, by wave in working order; never edited by hand.
 - **Preset**: a named launch recipe the daemon stores for a repo or workspace: the prompt sources it allows, its variables and its target tabs, launched through the preset wizard.
+- **Preset job**: one preset launch the native client started, named by a client-made job id; the client's registry follows it through the daemon's progress messages and shows one toast for it.
 - **Preset wizard**: the native client's modal that walks a preset's prompt source and variables before launching it; see `docs/native-client.md`.
 - **Progress update**: an attention-feed item for a stop while work continues, or a summary of work in progress; shown in the feed, never pushed to the phone.
 - **Prompt source**: where a preset launch takes its prompts from: a prompts file, a folder of `.md` files, inline text or GitHub issue ranges, limited to the sources the preset allows.

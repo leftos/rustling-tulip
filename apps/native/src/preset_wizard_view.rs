@@ -1,7 +1,9 @@
 //! The preset wizard on screen: the prompt source stage, the variables
-//! stage, and Cancel, Back and Next. Its state and every rule live in
-//! [`crate::preset_wizard`]; this view renders it and forwards clicks,
-//! edits, picks and Esc.
+//! stage, the preview with its Launch, and Cancel, Back and Next; and the
+//! launch jobs' progress toasts once the wizard has closed. Its state and
+//! every rule live in [`crate::preset_wizard`] and [`crate::preset_launch`];
+//! this view renders it and forwards clicks, edits, picks, Esc and the
+//! daemon's answers.
 
 use std::path::PathBuf;
 
@@ -9,14 +11,22 @@ use gpui::{
     AnyElement, ClickEvent, Context, Div, Entity, FontWeight, Keystroke, Stateful, Subscription,
     Window, div, prelude::*, px,
 };
-use protocol::{PresetEntry, PresetPromptSource, PresetTarget, PresetVariable, PresetVariableKind};
+use protocol::{
+    ClientMessage, DaemonMessage, PresetEntry, PresetPromptSource, PresetTarget, PresetVariable,
+    PresetVariableKind,
+};
 
 use crate::notice_view::modal_panel;
+use crate::preset_launch::{
+    LAUNCH_CAVEAT, MAX_PER_TAB_LABEL, MAX_PER_TAB_PLACEHOLDER, PREVIEW_EMPTY, Preview, PreviewRow,
+    SCRIPT_UNRESOLVED, SCRIPTS_LEGEND, SCRIPTS_NOTE, ScriptLine, max_per_tab_note, tab_header,
+};
 use crate::preset_wizard::{
     CLEAR_LABEL, FILE_LABEL, FILE_PLACEHOLDER, FOLDER_LABEL, FOLDER_PLACEHOLDER, INLINE_LABEL,
     INLINE_PLACEHOLDER, ISSUES_HINT, ISSUES_LABEL, ISSUES_NOTE, ISSUES_PLACEHOLDER, IssuesFeedback,
-    NextButton, PICK_LABEL, Pick, PresetWizard, REQUIRED_HINT, REQUIRED_NOTE, SOURCE_LEGEND,
-    SourceKind, Stage, shows_required, source_label, takes_text, variable_placeholder,
+    LaunchButton, LaunchStep, NextButton, PICK_LABEL, Pick, PresetWizard, REQUIRED_HINT,
+    REQUIRED_NOTE, SOURCE_LEGEND, SourceKind, Stage, shows_required, source_label, takes_text,
+    variable_placeholder,
 };
 use crate::session_menu::{backdrop, dialog_button};
 use crate::spawn_view::checkbox_row;
@@ -28,6 +38,7 @@ pub(crate) struct PresetWizardDialog {
     wizard: PresetWizard,
     inline_input: Entity<TextInput>,
     issues_input: Entity<TextInput>,
+    max_per_tab_input: Entity<TextInput>,
     /// The text field of each prompted variable typed as text, by name.
     text_inputs: Vec<(String, Entity<TextInput>)>,
     _subscriptions: Vec<Subscription>,
@@ -38,7 +49,18 @@ pub(crate) struct PresetWizardDialog {
 enum Field {
     Inline,
     Issues,
+    MaxPerTab,
     Variable(String),
+}
+
+impl PresetWizardDialog {
+    /// The max-panes field takes no edit while the scripts run, as Cancel
+    /// and Back take no click.
+    fn lock_max_per_tab(&self, cx: &mut Context<RootView>) {
+        let running = self.wizard.scripts_running();
+        self.max_per_tab_input
+            .update(cx, |input, cx| input.set_read_only(running, cx));
+    }
 }
 
 /// The selector of a variable's field; its Pick… and Clear add `-pick` and
@@ -77,6 +99,15 @@ impl RootView {
             window,
             cx,
         ));
+        let max_per_tab = wizard.max_per_tab_text().to_owned();
+        let max_per_tab_input =
+            cx.new(|cx| TextInput::new(max_per_tab, MAX_PER_TAB_PLACEHOLDER, cx));
+        subscriptions.extend(Self::watch_preset_field(
+            &max_per_tab_input,
+            Field::MaxPerTab,
+            window,
+            cx,
+        ));
         let mut text_inputs = Vec::new();
         for variable in wizard.prompted_variables() {
             if !takes_text(&variable.kind) {
@@ -93,6 +124,7 @@ impl RootView {
             wizard,
             inline_input,
             issues_input,
+            max_per_tab_input,
             text_inputs,
             _subscriptions: subscriptions,
         });
@@ -121,6 +153,7 @@ impl RootView {
                 match &field {
                     Field::Inline => dialog.wizard.set_inline_text(text),
                     Field::Issues => dialog.wizard.set_issues_spec(text),
+                    Field::MaxPerTab => dialog.wizard.set_max_per_tab(text),
                     Field::Variable(name) => dialog.wizard.set_value(name, text),
                 }
             }
@@ -162,6 +195,133 @@ impl RootView {
             change(&mut dialog.wizard);
             cx.notify();
         }
+    }
+
+    /// Next: entering the preview asks for it again each time.
+    fn advance_preset_wizard(&mut self, cx: &mut Context<Self>) {
+        let Some(dialog) = &mut self.preset_wizard else {
+            return;
+        };
+        let wizard = &mut dialog.wizard;
+        let request = if wizard.advance() && wizard.stage() == Stage::Preview {
+            wizard.start_preview(crate::new_request_id())
+        } else {
+            None
+        };
+        cx.notify();
+        if let Some(msg) = request {
+            self.send(msg);
+        }
+    }
+
+    /// Launch: the scripts run first when the preset has any, else the
+    /// launch goes.
+    fn press_preset_launch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(dialog) = &mut self.preset_wizard else {
+            return;
+        };
+        let step = dialog.wizard.press_launch(crate::new_request_id());
+        dialog.lock_max_per_tab(cx);
+        cx.notify();
+        match step {
+            Some(LaunchStep::Scripts(msg)) => self.send(msg),
+            Some(LaunchStep::Launch(msg)) => self.send_preset_launch(msg, window, cx),
+            None => {}
+        }
+    }
+
+    /// Sends launch `msg`, records its job, shows its progress toast and
+    /// closes the wizard.
+    fn send_preset_launch(
+        &mut self,
+        msg: ClientMessage,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (Some(dialog), ClientMessage::LaunchPreset { job_id, .. }) =
+            (&self.preset_wizard, &msg)
+        else {
+            return;
+        };
+        let wizard = &dialog.wizard;
+        let spec = self.preset_launches.start(
+            job_id.clone(),
+            wizard.entry().name.clone(),
+            wizard.shows_max_per_tab(),
+            wizard.launch_cap(),
+        );
+        self.send(msg);
+        self.push_toast_spec(spec, cx);
+        self.close_preset_wizard(window, cx);
+    }
+
+    /// The daemon's answer to the wizard's preview or script requests, and
+    /// the job events of this window's launches.
+    pub(crate) fn on_preset_launch_message(
+        &mut self,
+        msg: &DaemonMessage,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match msg {
+            DaemonMessage::PresetPreview { id, prompts } => {
+                self.with_preset_wizard(cx, |wizard| {
+                    wizard.apply_preview(id, Ok(prompts.clone()));
+                });
+            }
+            DaemonMessage::PresetPreviewError { id, error } => {
+                self.with_preset_wizard(cx, |wizard| wizard.apply_preview(id, Err(error.clone())));
+            }
+            DaemonMessage::PresetScriptsResolved { id, values, .. } => {
+                self.finish_preset_scripts(id, Ok(values.clone()), window, cx);
+            }
+            DaemonMessage::PresetScriptsError { id, error, .. } => {
+                self.finish_preset_scripts(id, Err(error.clone()), window, cx);
+            }
+            _ => {
+                if let Some(spec) = self.preset_launches.on_message(msg) {
+                    self.push_toast_spec(spec, cx);
+                }
+            }
+        }
+    }
+
+    fn finish_preset_scripts(
+        &mut self,
+        id: &str,
+        result: Result<Vec<(String, String)>, String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(dialog) = &mut self.preset_wizard else {
+            return;
+        };
+        let launch = dialog
+            .wizard
+            .apply_scripts(id, result, crate::new_request_id());
+        dialog.lock_max_per_tab(cx);
+        cx.notify();
+        if let Some(msg) = launch {
+            self.send_preset_launch(msg, window, cx);
+        }
+    }
+
+    /// Forgets this window's launch jobs and drops their toasts, as a new
+    /// connection must.
+    pub(crate) fn reset_preset_launches(&mut self, cx: &mut Context<Self>) {
+        for key in self.preset_launches.clear() {
+            let shown: Vec<u64> = self
+                .notices
+                .toasts()
+                .iter()
+                .filter(|toast| toast.key.as_deref() == Some(key.as_str()))
+                .map(|toast| toast.id)
+                .collect();
+            for id in shown {
+                self.notices.dismiss(id);
+            }
+        }
+        cx.notify();
     }
 
     /// Asks the file or folder picker for `pick`; the answer fills it when
@@ -206,6 +366,7 @@ impl RootView {
         let body = match wizard.stage() {
             Stage::Source => source_body(dialog, cx),
             Stage::Variables => variables_body(dialog, cx),
+            Stage::Preview => preview_body(dialog),
         };
         let panel = modal_panel("preset-wizard-panel")
             .track_focus(&self.preset_wizard_focus)
@@ -302,6 +463,189 @@ impl RootView {
                 IssuesFeedback::Ok(line) | IssuesFeedback::Error(line) => line,
             })
     }
+
+    /// The line over the preview list.
+    #[must_use]
+    pub fn preset_wizard_preview_line(&self) -> Option<String> {
+        self.preset_wizard
+            .as_ref()
+            .map(|d| preview_line_of(&d.wizard))
+    }
+
+    /// The preview's rows as drawn, `[n] first line`, by tab.
+    #[must_use]
+    pub fn preset_wizard_preview_groups(&self) -> Vec<Vec<String>> {
+        self.preset_wizard.as_ref().map_or_else(Vec::new, |d| {
+            d.wizard
+                .preview_groups()
+                .iter()
+                .map(|group| group.iter().map(PreviewRow::text).collect())
+                .collect()
+        })
+    }
+
+    /// Launch as drawn on the preview.
+    #[must_use]
+    pub fn preset_wizard_launch(&self) -> Option<LaunchButton> {
+        self.preset_wizard
+            .as_ref()
+            .map(|d| d.wizard.launch_button())
+    }
+
+    /// The script commands as drawn: each label and its command line.
+    #[must_use]
+    pub fn preset_wizard_scripts(&self) -> Vec<(String, String)> {
+        self.preset_wizard.as_ref().map_or_else(Vec::new, |d| {
+            d.wizard
+                .script_commands()
+                .into_iter()
+                .map(|command| {
+                    let line = match command.line {
+                        ScriptLine::Ready(line) => line,
+                        ScriptLine::Unresolved => SCRIPT_UNRESOLVED.to_owned(),
+                        skipped @ ScriptLine::Skipped(_) => skipped.note().unwrap_or_default(),
+                    };
+                    (command.label, line)
+                })
+                .collect()
+        })
+    }
+
+    /// The line under the script commands after a failed run.
+    #[must_use]
+    pub fn preset_wizard_script_error(&self) -> Option<String> {
+        self.preset_wizard
+            .as_ref()
+            .and_then(|d| d.wizard.script_stage().failure())
+    }
+
+    /// How far the launch job of toast `key` has come, 0 to 1, while it
+    /// runs.
+    #[must_use]
+    pub fn preset_launch_progress(&self, key: &str) -> Option<f32> {
+        self.preset_launches.progress(key)
+    }
+}
+
+/// The line over the preview list.
+fn preview_line_of(wizard: &PresetWizard) -> String {
+    crate::preset_launch::preview_line(wizard.preview(), wizard.preview_summary())
+}
+
+/// The Preview stage: the summary or the reason it failed, the script
+/// commands, the max-panes field, the caveat and the prompts by tab.
+fn preview_body(dialog: &PresetWizardDialog) -> Div {
+    let wizard = &dialog.wizard;
+    let line = match wizard.preview() {
+        Preview::Failed(_) => div()
+            .debug_selector(|| "preset-preview-error".to_owned())
+            .text_color(gpui::rgb(DANGER))
+            .child(preview_line_of(wizard)),
+        Preview::Loading { .. } | Preview::Ready(_) => {
+            muted(preview_line_of(wizard)).debug_selector(|| "preset-preview-summary".to_owned())
+        }
+    };
+    let max_per_tab = wizard.shows_max_per_tab().then(|| {
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .child(field_label(
+                MAX_PER_TAB_LABEL.to_owned(),
+                Some(max_per_tab_note(wizard.entry())),
+            ))
+            .child(input_box(
+                "preset-max-per-tab".to_owned(),
+                &dialog.max_per_tab_input,
+            ))
+    });
+    let prompts = match wizard.preview() {
+        Preview::Ready(prompts) => Some(prompts.len()),
+        Preview::Loading { .. } | Preview::Failed(_) => None,
+    };
+    let caveat = prompts
+        .filter(|count| *count > 0)
+        .map(|_| muted(LAUNCH_CAVEAT));
+    let list = match prompts {
+        Some(0) => Some(muted(PREVIEW_EMPTY)),
+        Some(_) => Some(preview_list(wizard)),
+        None => None,
+    };
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(8.0))
+        .child(line)
+        .children(scripts_section(wizard))
+        .children(max_per_tab)
+        .children(caveat)
+        .children(list)
+}
+
+/// The prompts, under a `Tab n of m` header each when they fill several
+/// tabs.
+fn preview_list(wizard: &PresetWizard) -> Div {
+    let groups = wizard.preview_groups();
+    let count = groups.len();
+    let groups = groups.into_iter().enumerate().map(|(at, group)| {
+        let header = (count > 1).then(|| muted(tab_header(at, count)));
+        let rows = group.into_iter().map(|row| {
+            let selector = format!("preset-preview-row-{}", row.index);
+            div().debug_selector(move || selector).child(row.text())
+        });
+        div().flex().flex_col().children(header).children(rows)
+    });
+    div()
+        .debug_selector(|| "preset-preview-list".to_owned())
+        .flex()
+        .flex_col()
+        .gap(px(6.0))
+        .children(groups)
+}
+
+/// The script commands that run before the launch, as they would run.
+fn scripts_section(wizard: &PresetWizard) -> Option<Div> {
+    let commands = wizard.script_commands();
+    if commands.is_empty() {
+        return None;
+    }
+    let stage = wizard.script_stage();
+    let rows = commands.into_iter().map(|command| {
+        let selector = format!("preset-script-row-{}", command.name);
+        let line = match &command.line {
+            ScriptLine::Ready(line) => Some(div().child(line.clone())),
+            ScriptLine::Unresolved => {
+                Some(div().text_color(gpui::rgb(DANGER)).child(SCRIPT_UNRESOLVED))
+            }
+            ScriptLine::Skipped(_) => None,
+        };
+        div()
+            .debug_selector(move || selector)
+            .flex()
+            .flex_col()
+            .child(field_label(command.label.clone(), command.line.note()))
+            .children(line)
+    });
+    let failure = stage.failure().map(|text| {
+        div()
+            .debug_selector(|| "preset-script-error".to_owned())
+            .text_color(gpui::rgb(DANGER))
+            .child(text)
+    });
+    Some(
+        div()
+            .debug_selector(|| "preset-script-section".to_owned())
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .child(field_label(
+                SCRIPTS_LEGEND.to_owned(),
+                stage.legend_note().map(str::to_owned),
+            ))
+            .child(muted(SCRIPTS_NOTE))
+            .children(rows)
+            .children(failure),
+    )
 }
 
 /// A muted label line.
@@ -571,41 +915,57 @@ fn variable_field(
         .children(missing)
 }
 
-/// Cancel, Back after the first stage, and Next with its tooltip.
+/// Cancel, Back after the first stage, and Next with its tooltip, or
+/// Launch on the preview. Cancel and Back wait while scripts run.
 fn wizard_footer(wizard: &PresetWizard, cx: &mut Context<RootView>) -> Div {
-    let cancel = dialog_button("preset-cancel", "Cancel".to_owned(), false, false, true).on_click(
-        cx.listener(|this, _: &ClickEvent, window, cx| this.close_preset_wizard(window, cx)),
+    let idle = !wizard.scripts_running();
+    let cancel = dialog_button("preset-cancel", "Cancel".to_owned(), false, false, idle).when(
+        idle,
+        |button| {
+            button.on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                this.close_preset_wizard(window, cx);
+            }))
+        },
     );
     let back = (wizard.stage() != Stage::Source).then(|| {
-        dialog_button("preset-back", "Back".to_owned(), false, false, true).on_click(cx.listener(
-            |this, _: &ClickEvent, _, cx| {
+        dialog_button("preset-back", "Back".to_owned(), false, false, idle).when(idle, |button| {
+            button.on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                 this.with_preset_wizard(cx, |wizard| {
                     wizard.back();
                 });
-            },
-        ))
+            }))
+        })
     });
-    let state = wizard.next_button();
-    let next = dialog_button(
-        "preset-next",
-        "Next".to_owned(),
-        false,
-        false,
-        state.enabled,
-    )
-    .when_some(state.tip, |button, tip| button.tooltip(tooltip(tip)))
-    .when(state.enabled, |button| {
-        button.on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-            this.with_preset_wizard(cx, |wizard| {
-                wizard.advance();
-            });
-        }))
-    });
+    let forward = if wizard.stage() == Stage::Preview {
+        let state = wizard.launch_button();
+        dialog_button("preset-launch", state.label, false, false, state.enabled)
+            .when_some(state.tip, |button, tip| button.tooltip(tooltip(tip)))
+            .when(state.enabled, |button| {
+                button.on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                    this.press_preset_launch(window, cx);
+                }))
+            })
+    } else {
+        let state = wizard.next_button();
+        dialog_button(
+            "preset-next",
+            "Next".to_owned(),
+            false,
+            false,
+            state.enabled,
+        )
+        .when_some(state.tip, |button, tip| button.tooltip(tooltip(tip)))
+        .when(state.enabled, |button| {
+            button.on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                this.advance_preset_wizard(cx);
+            }))
+        })
+    };
     div()
         .flex()
         .justify_end()
         .gap(px(6.0))
         .child(cancel)
         .children(back)
-        .child(next)
+        .child(forward)
 }

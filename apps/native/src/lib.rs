@@ -54,6 +54,7 @@ pub mod palette;
 mod pane_close;
 mod pane_close_view;
 mod pane_menu;
+mod preset_launch;
 mod preset_prompts;
 pub(crate) mod preset_wizard;
 mod preset_wizard_view;
@@ -193,7 +194,7 @@ pub use crate::notices::{
 };
 pub use crate::notify::{Notifier, NotifyState};
 pub use crate::open::{OpenFailure, Opener};
-pub use crate::preset_wizard::{NextButton, PREVIEW_LATER_TIP};
+pub use crate::preset_wizard::{LaunchButton, NextButton};
 pub use crate::quit_view::QuitFn;
 pub use crate::recover_view::RecoverRow;
 pub use crate::shell_marks::{ShellDot, ShellStatus};
@@ -649,6 +650,8 @@ pub struct RootView {
     preset_wizard: Option<preset_wizard_view::PresetWizardDialog>,
     /// The preset wizard's keyboard focus.
     preset_wizard_focus: FocusHandle,
+    /// The preset launch jobs this window started, which outlive the wizard.
+    preset_launches: preset_launch::PresetLaunches,
     /// The worktrees root and whether the user set it, as this connection
     /// last heard.
     worktrees_root: Option<(String, bool)>,
@@ -891,6 +894,7 @@ impl RootView {
             pick_file,
             preset_wizard: None,
             preset_wizard_focus: cx.focus_handle(),
+            preset_launches: preset_launch::PresetLaunches::default(),
             workspace_creator: None,
             workspace_creator_focus: cx.focus_handle(),
             vscode_suggestions: VscodeSuggestions::default(),
@@ -2196,8 +2200,8 @@ impl RootView {
     }
 
     /// Hands the message to the cleanup-failed dialog, the worktrees
-    /// manager and the Recover dialog, and a spawn config to the
-    /// Shift-duplicate waiting for it.
+    /// manager, the Recover dialog, the preset wizard and its launch jobs,
+    /// and a spawn config to the Shift-duplicate waiting for it.
     fn on_dialog_message(
         &mut self,
         msg: &DaemonMessage,
@@ -2208,6 +2212,7 @@ impl RootView {
         self.on_worktrees_message(msg, cx);
         self.on_recover_message(msg, window, cx);
         self.on_preset_message(msg, cx);
+        self.on_preset_launch_message(msg, window, cx);
         if let DaemonMessage::SpawnConfigReply { session_id, config } = msg {
             self.on_spawn_config(session_id, config.clone(), window, cx);
         }
@@ -2228,6 +2233,7 @@ impl RootView {
         self.close_shell_dialog(window, cx);
         self.close_workspace_creator(window, cx);
         self.close_preset_wizard(window, cx);
+        self.reset_preset_launches(cx);
         self.vscode_suggestions.clear();
         self.cwd_workspace_scans.clear();
         self.close_appearance_editor(window, cx);

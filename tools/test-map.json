@@ -287,7 +287,7 @@
       "paths": [
         "apps/native/src/notice_view.rs"
       ],
-      "filter": "(binary_id(rustling-tulip-native) & test(/^notice_view::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_keys|ui_spawn)::/))"
+      "filter": "(binary_id(rustling-tulip-native) & test(/^notice_view::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_keys|ui_preset_wizard|ui_spawn)::/))"
     },
     {
       "paths": [
@@ -333,6 +333,12 @@
     },
     {
       "paths": [
+        "apps/native/src/preset_launch.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & test(/^(preset_launch|preset_wizard)::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_container_menu|ui_preset_wizard)::/))"
+    },
+    {
+      "paths": [
         "apps/native/src/preset_prompts.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native) & test(/^(preset_prompts|preset_wizard)::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_preset_wizard)::/))"
@@ -347,7 +353,7 @@
       "paths": [
         "apps/native/src/preset_wizard_view.rs"
       ],
-      "filter": "(binary_id(rustling-tulip-native::ui) & test(/^(ui_container_menu|ui_preset_wizard)::/))"
+      "filter": "(binary_id(rustling-tulip-native) & test(/^preset_launch::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_container_menu|ui_preset_wizard)::/))"
     },
     {
       "paths": [

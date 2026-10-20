@@ -10,7 +10,13 @@ The rulings the native client's open items need before they are briefed. Each it
 
 ## P4.15b Preset wizard preview and launch
 
-The wizard's sources and variables stages exist (see [native-client.md](../native-client.md)); its last stage's Next is disabled until this item adds the preview (grouped by tab, max panes per tab, script commands) and launching (progress, counts, Cancel, Select launched, Stop all), sticky progress and failure toasts one per job, the first tab created made active, preset-launched sessions highlighted; needs P4.11c. Parity: "Preset wizard", "Sticky preset progress…", "Preset-launched sessions highlighted".
+The wizard's preview, launch, job registry and progress toasts exist (see [native-client.md](../native-client.md)). Still owed:
+
+- Toast buttons: Cancel (while the job runs), Select launched and Stop all.
+- The first tab a job creates becomes active.
+- The sidebar highlights preset-launched sessions.
+
+Rulings: Stop all stops the job's created sessions with no confirm. Select launched highlights only, as a tinted leaf background. The toast keeps Select launched and Stop all after the job ends. Parity: "Preset wizard", "Sticky preset progress…", "Preset-launched sessions highlighted".
 
 ## Phase 5 — windows and drag-and-drop
 
