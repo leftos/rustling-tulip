@@ -13,7 +13,6 @@
 
 ## Wave 2 — Daily driver: close the port's gaps
 
-- [/] RT-20 P4.11c: Full container menu and spawn entry points · release vNext
 - [ ] RT-21 P4.15a: Preset wizard sources and variables · release vNext
 - [ ] RT-22 P4.15b: Preset wizard preview and launching · release vNext
 - [ ] RT-171 Phase 5a: pane drag-and-drop (P5.1–P5.5) · release vNext
@@ -71,7 +70,6 @@
 - [ ] RT-166 TS.3b: device tokens issued only after the owner approves the device on the host PC · release vNext
 - [ ] RT-163 TS.5: retire the LAN listener, /pair and mDNS · release vNext
 - [ ] RT-162 TS.4: ConfigureRemote and RemoteStatus messages · release vNext
-- [/] RT-161 TS.3: wire the tailnet listener into the daemon: auth kind, device token, router, idle exit · release vNext
 - [ ] RT-158 P6.6: Remote tests over a fake Tailscale, hand checklist, and the docs pass · release vNext
 - [ ] RT-157 P6.7: Cutover: installer (and the firewall rule, once ruled) · release vNext
 - [ ] RT-156 P6.5: Autostart: start the daemon on login · release vNext
