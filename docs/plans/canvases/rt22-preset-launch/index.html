@@ -1,0 +1,483 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>RT-22 Preset Launch</title>
+<style>
+  @font-face { font-family: "Schibsted Grotesk"; font-weight: 400; src: url("../../../../apps/native/assets/fonts/SchibstedGrotesk/SchibstedGrotesk-Regular.ttf"); }
+  @font-face { font-family: "Schibsted Grotesk"; font-weight: 500; src: url("../../../../apps/native/assets/fonts/SchibstedGrotesk/SchibstedGrotesk-Medium.ttf"); }
+  @font-face { font-family: "Schibsted Grotesk"; font-weight: 600; src: url("../../../../apps/native/assets/fonts/SchibstedGrotesk/SchibstedGrotesk-SemiBold.ttf"); }
+  @font-face { font-family: "Schibsted Grotesk"; font-weight: 700; src: url("../../../../apps/native/assets/fonts/SchibstedGrotesk/SchibstedGrotesk-Bold.ttf"); }
+  @font-face { font-family: "Geist Mono"; font-weight: 400; src: url("../../../../apps/native/assets/fonts/GeistMono/GeistMono-Regular.ttf"); }
+  @font-face { font-family: "Geist Mono"; font-weight: 700; src: url("../../../../apps/native/assets/fonts/GeistMono/GeistMono-Bold.ttf"); }
+
+  /* apps/native/src/palette.rs */
+  :root {
+    --sunken: #0B0A0D;
+    --ground: #111013;
+    --term: #0C0B0E;
+    --surface: #161519;
+    --raised: #1B1A1F;
+    --chip: #232129;
+    --hover: #2C2A33;
+    --line: #2A2830;
+    --line-strong: #3A3742;
+    --text: #EDE9E4;
+    --text2: #A7A2AD;
+    --subtle: #8C8794;
+    --faint: #6E6A77;
+    --accent: #F07A62;
+    --on-accent: #1C100D;
+    --working: #6CA6FF;
+    --asking: #F6BC4E;
+    --on-asking: #2A1B00;
+    --waiting: #4FC89D;
+    --danger: #F26D6D;
+    --lilac: #C9B8FF;
+    --claude-chip: #372628;
+    --launched-tint: #302122;
+    --ui: "Schibsted Grotesk", "Segoe UI", system-ui, sans-serif;
+    --mono: "Geist Mono", Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: #08070A; color: var(--text); font-family: var(--ui); }
+  body { padding: 28px 24px 48px; }
+  h1 { font-size: 19px; font-weight: 700; margin: 0 0 4px; letter-spacing: .2px; }
+  .sub { color: var(--subtle); font-size: 12.5px; margin: 0 0 22px; }
+  h2 { font-size: 13px; font-weight: 700; letter-spacing: .6px; text-transform: uppercase; color: var(--text2); margin: 30px 0 4px; }
+  .q { color: var(--subtle); font-size: 12px; margin: 0 0 14px; }
+  .lanes { display: flex; gap: 16px; align-items: flex-start; }
+  .lane { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 12px 12px 12px; }
+  .lane > h3 { font-size: 13px; font-weight: 700; margin: 0 0 2px; color: var(--text); }
+  .lane > h3 .opt { display: inline-block; font-size: 10.5px; font-weight: 700; letter-spacing: .5px; padding: 1px 6px; border-radius: 4px; background: var(--accent); color: var(--on-accent); margin-right: 7px; vertical-align: 1px; }
+  .lane > .cap { font-size: 11.5px; color: var(--subtle); margin: 0 0 10px; line-height: 1.45; }
+  .lane > .after { font-size: 10.5px; font-weight: 700; letter-spacing: .5px; text-transform: uppercase; color: var(--text2); margin: 12px 0 6px; }
+  .lane > .after span { text-transform: none; letter-spacing: 0; font-weight: 400; color: var(--subtle); }
+  .lane > .foot { font-size: 11.5px; color: var(--text2); margin: 10px 0 0; }
+
+  /* ---------- window ---------- */
+  .win { position: relative; width: 584px; height: 520px; display: grid; grid-template-columns: 52px 210px 1fr; grid-template-rows: 1fr 28px; background: var(--sunken); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; font-size: 12px; }
+  .win.strip { grid-template-rows: 1fr 28px 28px; }
+  .rail { grid-column: 1; grid-row: 1; background: var(--sunken); border-right: 1px solid var(--line); display: flex; flex-direction: column; align-items: center; padding-top: 8px; gap: 10px; position: relative; }
+  .win.strip .rail, .win.strip .side, .win.strip .main { grid-row: 1; }
+  .rail .it { width: 36px; height: 36px; border-radius: 8px; display: flex; align-items: center; justify-content: center; color: var(--subtle); position: relative; }
+  .rail .it.on { background: var(--chip); color: var(--text); }
+  .rail .bar { position: absolute; left: 0; top: 14px; width: 2px; height: 24px; background: var(--accent); }
+  .rail svg { width: 18px; height: 18px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+  .rail .badge { position: absolute; right: 2px; top: 1px; min-width: 14px; height: 14px; border-radius: 7px; background: var(--chip); color: var(--text); font-size: 9.5px; font-weight: 700; display: flex; align-items: center; justify-content: center; padding: 0 3px; }
+
+  .side { grid-column: 2; grid-row: 1; background: var(--surface); border-right: 1px solid var(--line); display: flex; flex-direction: column; min-width: 0; overflow: hidden; }
+  .shead { height: 42px; flex: none; display: flex; align-items: center; padding: 0 8px 0 12px; font-weight: 700; font-size: 13.5px; }
+  .seg { margin-left: auto; display: flex; background: var(--raised); border-radius: 6px; padding: 2px; }
+  .seg span { font-size: 11.5px; padding: 2px 7px; border-radius: 4px; color: var(--subtle); font-weight: 500; }
+  .seg .on { background: var(--hover); color: var(--text); }
+  .toolbar { display: flex; gap: 6px; padding: 2px 8px 8px; flex: none; }
+  .btn { height: 30px; border-radius: 6px; border: 1px solid var(--line-strong); padding: 0 10px; display: inline-flex; align-items: center; justify-content: center; gap: 5px; font-size: 12.5px; color: var(--text); white-space: nowrap; background: transparent; }
+  .btn.primary { background: var(--accent); color: var(--on-accent); font-weight: 700; border-color: transparent; }
+  .btn.danger { color: var(--danger); }
+  .btn.grow { flex: 1; }
+  .btn.reg { height: 32px; padding: 0 14px; border-radius: 7px; }
+  .btn.cmp { height: 28px; padding: 0 12px; font-size: 12px; }
+  .btn.sm { height: 24px; padding: 0 9px; font-size: 11.5px; border-radius: 5px; }
+  .btn.x { width: 28px; height: 28px; padding: 0; font-size: 11px; color: var(--text2); }
+
+  .crow { height: 28px; display: flex; align-items: center; gap: 7px; padding: 0 10px; font-weight: 700; font-size: 12.5px; flex: none; }
+  .crow .chev { color: var(--subtle); font-size: 9px; width: 9px; }
+  .crow .ic { color: var(--text2); font-size: 11px; width: 12px; text-align: center; }
+  .crow .nm { flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .crow .tag { font-family: var(--mono); font-size: 10px; color: var(--subtle); font-weight: 400; }
+  .crow .cnt { font-family: var(--mono); font-size: 10.5px; color: var(--subtle); font-weight: 400; min-width: 10px; text-align: right; }
+
+  .leaf { position: relative; margin: 0 8px 3px; height: 52px; border-radius: 6px; padding: 8px 8px 0 12px; flex: none; }
+  .leaf::before { content: ""; position: absolute; left: 3px; top: 7px; bottom: 7px; width: 3px; border-radius: 2px; background: var(--accent); }
+  .leaf.sel { background: var(--chip); }
+  .leaf .l1 { display: flex; align-items: center; gap: 8px; height: 18px; }
+  .leaf .t { flex: 1; font-size: 13px; font-weight: 500; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .leaf .t.idle { color: var(--text2); }
+  .leaf .ag { font-family: var(--mono); font-size: 11px; color: var(--accent); }
+  .leaf .ag.codex { color: var(--lilac); }
+  .leaf .ag.pwsh { color: var(--subtle); }
+  .leaf .l2 { margin: 4px 0 0 20px; display: flex; gap: 8px; align-items: center; font-size: 11.5px; color: var(--subtle); white-space: nowrap; overflow: hidden; }
+  .leaf .l2 .br { overflow: hidden; text-overflow: ellipsis; }
+  .tchip { font-family: var(--mono); font-size: 10.5px; border: 1px solid var(--line-strong); border-radius: 4px; padding: 0 4px; line-height: 15px; color: var(--text2); flex: none; }
+  .warn { width: 15px; height: 15px; border-radius: 3px; background: var(--asking); color: var(--on-asking); font-size: 10px; font-weight: 700; display: inline-flex; align-items: center; justify-content: center; flex: none; }
+  /* B1: launched marker at the leaf's outer left edge */
+  .leaf.mk-stripe::after { content: ""; position: absolute; left: 0; top: 3px; bottom: 3px; width: 2px; border-radius: 1px; background: var(--accent); }
+  /* B2: tinted launched leaf */
+  .leaf.mk-tint { background: var(--launched-tint); }
+
+  /* status glyphs */
+  .g { width: 12px; height: 12px; flex: none; border-radius: 50%; position: relative; display: inline-block; }
+  .g.work { border: 1.6px solid var(--working); }
+  .g.work::after { content: ""; position: absolute; left: 2px; top: 2px; width: 5px; height: 5px; border-radius: 50%; background: var(--working); }
+  .g.wait { border: 1.6px solid var(--waiting); }
+  .g.spawn { border: 1.6px dashed var(--faint); }
+  .g.idle::after { content: ""; position: absolute; left: 4px; top: 4px; width: 5px; height: 5px; border-radius: 50%; background: var(--faint); }
+  .g.ask { border-radius: 2px; transform: rotate(45deg) scale(.82); background: var(--asking); }
+  .g.ok { border-radius: 0; }
+  .g.ok::after { content: "✓"; position: absolute; inset: -3px 0 0 0; font-size: 12px; color: var(--waiting); font-weight: 700; text-align: center; }
+  .g.queued::after { content: ""; position: absolute; left: 4px; top: 4px; width: 4px; height: 4px; border-radius: 50%; background: var(--line-strong); }
+
+  /* main column */
+  .main { grid-column: 3; grid-row: 1; display: flex; flex-direction: column; min-width: 0; background: #000; }
+  .tabs { height: 38px; flex: none; display: flex; background: var(--surface); border-bottom: 1px solid var(--line); }
+  .tab { display: flex; align-items: center; gap: 7px; padding: 0 9px; border-right: 1px solid var(--line); font-size: 12.5px; color: var(--text2); white-space: nowrap; }
+  .tab.on { background: var(--ground); color: var(--text); }
+  .tab .x { color: var(--subtle); font-size: 11px; }
+  .tab .plus { color: var(--subtle); font-size: 16px; }
+  .bp { display: inline-flex; align-items: center; gap: 4px; height: 18px; padding: 0 6px; border-radius: 9px; background: var(--chip); font-family: var(--mono); font-size: 10.5px; color: var(--text2); }
+  .bp.live { color: var(--working); }
+  .bp .g { width: 10px; height: 10px; }
+  .bp .g.work::after { left: 1.5px; top: 1.5px; width: 4px; height: 4px; }
+  .panes { flex: 1; display: flex; flex-direction: column; gap: 6px; padding: 6px; min-height: 0; }
+  .pane { flex: 1; display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; background: var(--term); min-height: 0; position: relative; }
+  .pane.focus { border-color: var(--accent); }
+  .pane.focus::before { content: ""; position: absolute; left: 0; top: 0; width: 3px; height: 36px; background: var(--accent); }
+  .ph { height: 36px; flex: none; display: flex; align-items: center; gap: 8px; padding: 0 10px 0 12px; background: var(--surface); border-bottom: 1px solid var(--line); }
+  .pane.focus .ph { background: var(--chip); }
+  .ph .pt { font-weight: 600; font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ph .ac { font-family: var(--mono); font-size: 11px; color: var(--accent); background: var(--claude-chip); border-radius: 5px; padding: 1px 6px; }
+  .ph .ac.sh { color: var(--text2); background: var(--chip); }
+  .ph .stop { margin-left: auto; font-size: 12px; color: var(--text2); }
+  .term { padding: 8px 12px; font-family: var(--mono); font-size: 11.5px; line-height: 17px; color: var(--text); white-space: pre; overflow: hidden; }
+  .term .d { color: var(--subtle); }
+  .term .gr { color: var(--waiting); }
+  .term .or { color: var(--accent); }
+  .term .lil { color: #B787F0; }
+  .term .hr { color: var(--line-strong); }
+
+  /* footer */
+  .footer { grid-column: 1 / -1; display: flex; align-items: center; gap: 12px; padding: 0 10px; background: var(--sunken); border-top: 1px solid var(--line); font-size: 11.5px; color: var(--text2); white-space: nowrap; overflow: hidden; }
+  .fpill { display: inline-flex; align-items: center; gap: 6px; height: 20px; padding: 0 9px; border: 1px solid var(--line-strong); border-radius: 10px; }
+  .fpill .dot { width: 7px; height: 7px; border-radius: 50%; background: #3FB96A; }
+  .fi { display: inline-flex; align-items: center; gap: 5px; }
+  .fi .g { width: 10px; height: 10px; }
+  .fi .g.work::after { left: 1.5px; top: 1.5px; width: 4px; height: 4px; }
+
+  /* modal */
+  .scrim { position: absolute; inset: 0; background: rgba(6, 5, 8, .66); display: flex; align-items: center; justify-content: center; z-index: 5; }
+  .modal { width: 440px; background: var(--surface); border: 1px solid var(--line-strong); border-radius: 14px; padding: 14px; box-shadow: 0 30px 80px rgba(0, 0, 0, .6); display: flex; flex-direction: column; gap: 10px; font-size: 12px; }
+  .mh { display: flex; align-items: center; gap: 8px; }
+  .mh .ti { font-weight: 600; font-size: 13px; }
+  .mh .sp { flex: 1; }
+  .steps { display: flex; gap: 6px; font-size: 11px; color: var(--faint); }
+  .steps .on { color: var(--text); font-weight: 600; }
+  .stat { display: flex; align-items: baseline; gap: 8px; }
+  .stat b { font-weight: 600; font-size: 12.5px; }
+  .stat .r { margin-left: auto; color: var(--text2); font-size: 11.5px; }
+  .pbar { height: 6px; border-radius: 3px; background: var(--chip); overflow: hidden; }
+  .pbar i { display: block; height: 100%; width: 50%; background: var(--accent); border-radius: 3px; }
+  .pbar.thin { height: 4px; }
+  .plist { background: var(--sunken); border: 1px solid var(--line); border-radius: 8px; padding: 4px 8px 6px; }
+  .plist .gh { font-size: 10px; font-weight: 700; letter-spacing: .5px; text-transform: uppercase; color: var(--subtle); padding: 6px 0 3px; }
+  .plist .gh span { text-transform: none; letter-spacing: 0; font-weight: 400; color: var(--faint); }
+  .prow { display: flex; align-items: center; gap: 8px; height: 22px; font-size: 12px; }
+  .prow .n { font-family: var(--mono); font-size: 10.5px; color: var(--faint); width: 22px; }
+  .prow .pt { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .prow .pt.pq { color: var(--text2); }
+  .prow .s { font-size: 11px; color: var(--subtle); }
+  .mfoot { display: flex; align-items: center; gap: 6px; }
+  .mfoot .sp { flex: 1; }
+  .hint { font-size: 11px; color: var(--subtle); text-align: right; margin-top: -4px; }
+
+  /* toast */
+  .toast { position: absolute; right: 8px; bottom: 36px; width: 320px; padding: 12px 14px; background: var(--chip); border: 1px solid var(--line-strong); border-radius: 10px; box-shadow: 0 18px 40px rgba(0, 0, 0, .45); display: flex; align-items: flex-start; gap: 8px; z-index: 4; font-size: 12px; }
+  .toast .tb { flex: 1; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .toast .tt { font-weight: 600; }
+  .toast .td { color: var(--text2); }
+  .toast .pbar { margin: 6px 0 2px; }
+  .toast .acts { display: flex; gap: 6px; margin-top: 8px; }
+
+  /* A3 strip */
+  .lstrip { grid-column: 1 / -1; grid-row: 2; display: flex; align-items: center; gap: 9px; padding: 0 8px 0 12px; background: var(--surface); border-top: 1px solid var(--line); font-size: 12px; white-space: nowrap; position: relative; }
+  .lstrip .nm { font-weight: 600; }
+  .lstrip .ct { color: var(--text2); font-size: 11.5px; }
+  .lstrip .pbar { width: 110px; flex: none; }
+  .lstrip .sp { flex: 1; }
+  .lstrip .more { width: 24px; height: 22px; border: 1px solid var(--line-strong); border-radius: 5px; display: flex; align-items: center; justify-content: center; color: var(--text2); font-size: 13px; letter-spacing: 1px; }
+  .lstrip .more.open { background: var(--hover); color: var(--text); }
+  .win.strip .footer { grid-row: 3; }
+  .menu { position: absolute; right: 8px; bottom: 30px; width: 196px; background: var(--chip); border: 1px solid var(--line-strong); border-radius: 8px; padding: 4px; box-shadow: 0 18px 40px rgba(0, 0, 0, .45); z-index: 6; }
+  .menu div { font-size: 12px; color: var(--text); padding: 6px 8px; border-radius: 5px; }
+  .menu div.hov { background: var(--hover); }
+  .menu div.dg { color: var(--danger); }
+  .menu .sep { height: 1px; background: var(--line); margin: 4px 2px; padding: 0; }
+
+  /* crop frames (the second view under a lane) */
+  .crop { position: relative; width: 584px; height: 168px; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: #000; display: grid; grid-template-rows: 1fr 28px; }
+  .crop.strip { grid-template-rows: 1fr 28px 28px; }
+  .crop .cterm { padding: 6px; display: flex; }
+  .crop .cterm .pane { flex: 1; }
+  .crop .footer { grid-column: 1; }
+  .crop.strip .lstrip { grid-column: 1; grid-row: 2; }
+  .crop.strip .footer { grid-row: 3; }
+
+  /* question B */
+  .sidecut { width: 280px; height: 470px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; display: flex; flex-direction: column; font-size: 12px; }
+  .note { font-size: 11.5px; color: var(--subtle); margin-top: 26px; line-height: 1.55; border-top: 1px solid var(--line); padding-top: 14px; max-width: 1200px; }
+  .note b { color: var(--text2); }
+</style>
+</head>
+<body>
+
+<h1>RT-22 · P4.15b — preset launch</h1>
+<p class="sub">Preset “Issue sweep” (claude, GitHub issues #212–#217, max 3 panes per tab) launches 6 sessions into 2 new tabs. Every frame is mid-launch: 3 sessions created, tab “sweep 1” created, tab “sweep 2” not yet. Colours, fonts and sizes are the native client’s (palette.rs, buttons.rs, notice_view.rs, sidebar_view.rs).</p>
+
+<!-- ======================= QUESTION A ======================= -->
+<h2>A · Where does launch progress live after the user presses Launch?</h2>
+<p class="q">The actions are the same in every lane: Cancel launch (stop before the next session spawns), Select launched (mark the created sessions in the sidebar), Stop all (stop the created sessions), Close.</p>
+<div class="lanes">
+
+  <!-- ---------- A1 ---------- -->
+  <div class="lane">
+    <h3><span class="opt">A1</span>Stays in the wizard</h3>
+    <p class="cap">The dialog turns into a Launching stage with the bar, the per-tab list and all four actions; Close leaves the launch running.</p>
+    <div class="win">
+      <div class="rail">
+        <div class="bar"></div>
+        <div class="it on"><svg viewBox="0 0 24 24"><path d="M5 7h14M5 12h14M5 17h14"/></svg></div>
+        <div class="it"><svg viewBox="0 0 24 24"><path d="M4 13l3-8h10l3 8v6H4z"/><path d="M4 13h5l1 2h4l1-2h5"/></svg><span class="badge">1</span></div>
+        <div class="it"><svg viewBox="0 0 24 24"><circle cx="6" cy="6" r="2"/><circle cx="6" cy="18" r="2"/><circle cx="18" cy="9" r="2"/><path d="M6 8v8M18 11c0 4-6 3-11 6"/></svg><span class="badge">5</span></div>
+      </div>
+      <div class="side">
+        <div class="shead">Sessions<span class="seg"><span class="on">Repos</span><span>Tabs</span></span></div>
+        <div class="toolbar"><span class="btn primary grow">+ Session</span><span class="btn">&gt;_ Shell</span><span class="btn">⋯</span></div>
+        <div class="crow"><span class="chev">▾</span><span class="ic">⑂</span><span class="nm">rustling-tulip</span><span class="tag">REPO</span><span class="cnt">5</span></div>
+        <div class="leaf sel"><div class="l1"><span class="g work"></span><span class="t">Petal footer polish</span><span class="ag">claude</span></div><div class="l2"><span class="br">feat/petal-footer</span><span class="tchip">T:tulip</span></div></div>
+        <div class="leaf"><div class="l1"><span class="g ask"></span><span class="t">Recover dialog keys</span><span class="ag">claude</span></div><div class="l2"><span class="br">feat/recover-keys</span><span class="tchip">unbound</span></div></div>
+        <div class="leaf"><div class="l1"><span class="g spawn"></span><span class="t idle">#212 Scrollback ring trims early</span></div><div class="l2"><span class="br">issue-212</span><span class="tchip">T:sweep 1</span></div></div>
+        <div class="leaf"><div class="l1"><span class="g spawn"></span><span class="t idle">#213 Tab rename drops IME input</span></div><div class="l2"><span class="br">issue-213</span><span class="tchip">T:sweep 1</span></div></div>
+        <div class="leaf"><div class="l1"><span class="g spawn"></span><span class="t idle">#214 Footer pill overlaps toast</span></div><div class="l2"><span class="br">issue-214</span><span class="tchip">T:sweep 1</span></div></div>
+      </div>
+      <div class="main">
+        <div class="tabs">
+          <div class="tab on"><span class="bp live"><span class="g work"></span>1/1</span>tulip<span class="x">✕</span></div>
+          <div class="tab"><span class="bp">0/3</span>sweep 1<span class="x">✕</span></div>
+          <div class="tab"><span class="plus">+</span></div>
+        </div>
+        <div class="panes">
+          <div class="pane focus">
+            <div class="ph"><span class="g work"></span><span class="pt">Petal footer polish</span><span class="ac">claude</span><span class="stop">Stop</span></div>
+<div class="term"><span class="gr">●</span> <b>Update</b>(apps/native/src/footer.rs)
+<span class="d">  L Updated footer.rs, 6 additions</span>
+
+<span class="gr">●</span> <b>Bash</b>(cargo nextest run -p rustli…
+<span class="d">  L Running…</span>
+
+<span class="or">✻ Brewing…</span> <span class="d">(38s · ↑ 2.1k tokens)</span>
+<span class="hr">────────────────────────────────────</span>
+&gt;</div>
+          </div>
+        </div>
+      </div>
+      <div class="footer"><span class="fpill"><span class="dot"></span>daemon · 10 sessions</span><span class="fi"><span class="g ask" style="width:10px;height:10px"></span>1 need you</span><span class="fi"><span class="g work"></span>1 working</span></div>
+
+      <div class="scrim">
+        <div class="modal">
+          <div class="mh"><span class="ti">Launch preset · Issue sweep</span><span class="ac" style="font-family:var(--mono);font-size:11px;color:var(--accent);background:var(--claude-chip);border-radius:5px;padding:1px 6px">claude</span><span class="sp"></span><span class="btn x">✕</span></div>
+          <div class="steps"><span>Source</span><span>›</span><span>Variables</span><span>›</span><span>Preview</span><span>›</span><span class="on">Launching</span></div>
+          <div class="stat"><b>Spawning 3 of 6 sessions</b><span class="r">1 of 2 tabs · 0 failed</span></div>
+          <div class="pbar"><i></i></div>
+          <div class="plist">
+            <div class="gh">Tab 1 of 2 · sweep 1 <span>· created</span></div>
+            <div class="prow"><span class="g ok"></span><span class="n">[1]</span><span class="pt">#212 Scrollback ring trims early</span></div>
+            <div class="prow"><span class="g ok"></span><span class="n">[2]</span><span class="pt">#213 Tab rename drops IME input</span></div>
+            <div class="prow"><span class="g ok"></span><span class="n">[3]</span><span class="pt">#214 Footer pill overlaps toast</span></div>
+            <div class="gh">Tab 2 of 2 · sweep 2 <span>· not yet created</span></div>
+            <div class="prow"><span class="g spawn"></span><span class="n">[4]</span><span class="pt pq">#215 Diff whitespace toggle resets</span><span class="s">spawning…</span></div>
+            <div class="prow"><span class="g queued"></span><span class="n">[5]</span><span class="pt pq">#216 Stash list misses untracked</span><span class="s">queued</span></div>
+            <div class="prow"><span class="g queued"></span><span class="n">[6]</span><span class="pt pq">#217 Sidebar width not restored</span><span class="s">queued</span></div>
+          </div>
+          <div class="hint">Close leaves the launch running.</div>
+          <div class="mfoot"><span class="btn reg danger">Cancel launch</span><span class="sp"></span><span class="btn reg">Select launched</span><span class="btn reg danger">Stop all</span><span class="btn reg">Close</span></div>
+        </div>
+      </div>
+    </div>
+
+    <p class="after">After Close <span>— the only trace left: a sticky toast, no action buttons</span></p>
+    <div class="crop">
+      <div class="cterm"><div class="pane focus"><div class="ph"><span class="g work"></span><span class="pt">Petal footer polish</span><span class="ac">claude</span><span class="stop">Stop</span></div>
+<div class="term"><span class="or">✻ Brewing…</span> <span class="d">(41s · ↑ 2.3k tokens)</span>
+&gt;</div></div></div>
+      <div class="footer"><span class="fpill"><span class="dot"></span>daemon · 10 sessions</span><span class="fi"><span class="g ask" style="width:10px;height:10px"></span>1 need you</span><span class="fi"><span class="g work"></span>2 working</span></div>
+      <div class="toast"><div class="tb"><span class="tt">Launching Issue sweep · 3 of 6</span><span class="td">1 of 2 tabs created</span></div><span class="btn x">✕</span></div>
+    </div>
+  </div>
+
+  <!-- ---------- A2 ---------- -->
+  <div class="lane">
+    <h3><span class="opt">A2</span>Toast with actions</h3>
+    <p class="cap">Launch closes the dialog at once; a sticky toast carries the progress and small Cancel, Select and Stop all buttons.</p>
+    <div class="win">
+      <div class="rail">
+        <div class="bar"></div>
+        <div class="it on"><svg viewBox="0 0 24 24"><path d="M5 7h14M5 12h14M5 17h14"/></svg></div>
+        <div class="it"><svg viewBox="0 0 24 24"><path d="M4 13l3-8h10l3 8v6H4z"/><path d="M4 13h5l1 2h4l1-2h5"/></svg><span class="badge">1</span></div>
+        <div class="it"><svg viewBox="0 0 24 24"><circle cx="6" cy="6" r="2"/><circle cx="6" cy="18" r="2"/><circle cx="18" cy="9" r="2"/><path d="M6 8v8M18 11c0 4-6 3-11 6"/></svg><span class="badge">5</span></div>
+      </div>
+      <div class="side">
+        <div class="shead">Sessions<span class="seg"><span class="on">Repos</span><span>Tabs</span></span></div>
+        <div class="toolbar"><span class="btn primary grow">+ Session</span><span class="btn">&gt;_ Shell</span><span class="btn">⋯</span></div>
+        <div class="crow"><span class="chev">▾</span><span class="ic">⑂</span><span class="nm">rustling-tulip</span><span class="tag">REPO</span><span class="cnt">5</span></div>
+        <div class="leaf sel"><div class="l1"><span class="g work"></span><span class="t">Petal footer polish</span><span class="ag">claude</span></div><div class="l2"><span class="br">feat/petal-footer</span><span class="tchip">T:tulip</span></div></div>
+        <div class="leaf"><div class="l1"><span class="g ask"></span><span class="t">Recover dialog keys</span><span class="ag">claude</span></div><div class="l2"><span class="br">feat/recover-keys</span><span class="tchip">unbound</span></div></div>
+        <div class="leaf"><div class="l1"><span class="g spawn"></span><span class="t idle">#212 Scrollback ring trims early</span></div><div class="l2"><span class="br">issue-212</span><span class="tchip">T:sweep 1</span></div></div>
+        <div class="leaf"><div class="l1"><span class="g spawn"></span><span class="t idle">#213 Tab rename drops IME input</span></div><div class="l2"><span class="br">issue-213</span><span class="tchip">T:sweep 1</span></div></div>
+        <div class="leaf"><div class="l1"><span class="g spawn"></span><span class="t idle">#214 Footer pill overlaps toast</span></div><div class="l2"><span class="br">issue-214</span><span class="tchip">T:sweep 1</span></div></div>
+      </div>
+      <div class="main">
+        <div class="tabs">
+          <div class="tab on"><span class="bp live"><span class="g work"></span>1/1</span>tulip<span class="x">✕</span></div>
+          <div class="tab"><span class="bp">0/3</span>sweep 1<span class="x">✕</span></div>
+          <div class="tab"><span class="plus">+</span></div>
+        </div>
+        <div class="panes">
+          <div class="pane focus">
+            <div class="ph"><span class="g work"></span><span class="pt">Petal footer polish</span><span class="ac">claude</span><span class="stop">Stop</span></div>
+<div class="term"><span class="gr">●</span> <b>Update</b>(apps/native/src/footer.rs)
+<span class="d">  L Updated footer.rs, 6 additions</span>
+
+<span class="gr">●</span> <b>Bash</b>(cargo nextest run -p rustli…
+<span class="d">  L Running…</span>
+
+<span class="or">✻ Brewing…</span> <span class="d">(38s · ↑ 2.1k tokens)</span>
+<span class="hr">────────────────────────────────────</span>
+&gt;</div>
+          </div>
+        </div>
+      </div>
+      <div class="footer"><span class="fpill"><span class="dot"></span>daemon · 10 sessions</span><span class="fi"><span class="g ask" style="width:10px;height:10px"></span>1 need you</span><span class="fi"><span class="g work"></span>1 working</span></div>
+
+      <div class="toast">
+        <div class="tb">
+          <span class="tt">Launching Issue sweep</span>
+          <span class="td">3 of 6 sessions · 1 of 2 tabs</span>
+          <div class="pbar thin"><i></i></div>
+          <div class="acts"><span class="btn sm danger">Cancel</span><span class="btn sm">Select</span><span class="btn sm danger">Stop all</span></div>
+        </div>
+        <span class="btn x">✕</span>
+      </div>
+    </div>
+
+    <p class="after">When the launch ends <span>— assumed: Cancel drops out, the toast stays until dismissed</span></p>
+    <div class="crop">
+      <div class="cterm"><div class="pane focus"><div class="ph"><span class="g work"></span><span class="pt">Petal footer polish</span><span class="ac">claude</span><span class="stop">Stop</span></div>
+<div class="term"><span class="or">✻ Brewing…</span> <span class="d">(52s · ↑ 3.0k tokens)</span>
+&gt;</div></div></div>
+      <div class="footer"><span class="fpill"><span class="dot"></span>daemon · 13 sessions</span><span class="fi"><span class="g ask" style="width:10px;height:10px"></span>1 need you</span><span class="fi"><span class="g work"></span>5 working</span></div>
+      <div class="toast" style="bottom:34px">
+        <div class="tb">
+          <span class="tt">Launched Issue sweep · 6 of 6</span>
+          <span class="td">6 sessions in 2 tabs</span>
+          <div class="acts"><span class="btn sm">Select</span><span class="btn sm danger">Stop all</span></div>
+        </div>
+        <span class="btn x">✕</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ---------- A3 ---------- -->
+  <div class="lane">
+    <h3><span class="opt">A3</span>Progress strip in the footer</h3>
+    <p class="cap">Launch closes the dialog; a one-line strip above the footer shows the job, and its ⋯ menu holds the actions.</p>
+    <div class="win strip">
+      <div class="rail">
+        <div class="bar"></div>
+        <div class="it on"><svg viewBox="0 0 24 24"><path d="M5 7h14M5 12h14M5 17h14"/></svg></div>
+        <div class="it"><svg viewBox="0 0 24 24"><path d="M4 13l3-8h10l3 8v6H4z"/><path d="M4 13h5l1 2h4l1-2h5"/></svg><span class="badge">1</span></div>
+        <div class="it"><svg viewBox="0 0 24 24"><circle cx="6" cy="6" r="2"/><circle cx="6" cy="18" r="2"/><circle cx="18" cy="9" r="2"/><path d="M6 8v8M18 11c0 4-6 3-11 6"/></svg><span class="badge">5</span></div>
+      </div>
+      <div class="side">
+        <div class="shead">Sessions<span class="seg"><span class="on">Repos</span><span>Tabs</span></span></div>
+        <div class="toolbar"><span class="btn primary grow">+ Session</span><span class="btn">&gt;_ Shell</span><span class="btn">⋯</span></div>
+        <div class="crow"><span class="chev">▾</span><span class="ic">⑂</span><span class="nm">rustling-tulip</span><span class="tag">REPO</span><span class="cnt">5</span></div>
+        <div class="leaf sel"><div class="l1"><span class="g work"></span><span class="t">Petal footer polish</span><span class="ag">claude</span></div><div class="l2"><span class="br">feat/petal-footer</span><span class="tchip">T:tulip</span></div></div>
+        <div class="leaf"><div class="l1"><span class="g ask"></span><span class="t">Recover dialog keys</span><span class="ag">claude</span></div><div class="l2"><span class="br">feat/recover-keys</span><span class="tchip">unbound</span></div></div>
+        <div class="leaf"><div class="l1"><span class="g spawn"></span><span class="t idle">#212 Scrollback ring trims early</span></div><div class="l2"><span class="br">issue-212</span><span class="tchip">T:sweep 1</span></div></div>
+        <div class="leaf"><div class="l1"><span class="g spawn"></span><span class="t idle">#213 Tab rename drops IME input</span></div><div class="l2"><span class="br">issue-213</span><span class="tchip">T:sweep 1</span></div></div>
+        <div class="leaf"><div class="l1"><span class="g spawn"></span><span class="t idle">#214 Footer pill overlaps toast</span></div><div class="l2"><span class="br">issue-214</span><span class="tchip">T:sweep 1</span></div></div>
+      </div>
+      <div class="main">
+        <div class="tabs">
+          <div class="tab on"><span class="bp live"><span class="g work"></span>1/1</span>tulip<span class="x">✕</span></div>
+          <div class="tab"><span class="bp">0/3</span>sweep 1<span class="x">✕</span></div>
+          <div class="tab"><span class="plus">+</span></div>
+        </div>
+        <div class="panes">
+          <div class="pane focus">
+            <div class="ph"><span class="g work"></span><span class="pt">Petal footer polish</span><span class="ac">claude</span><span class="stop">Stop</span></div>
+<div class="term"><span class="gr">●</span> <b>Update</b>(apps/native/src/footer.rs)
+<span class="d">  L Updated footer.rs, 6 additions</span>
+
+<span class="gr">●</span> <b>Bash</b>(cargo nextest run -p rustli…
+<span class="d">  L Running…</span>
+
+<span class="or">✻ Brewing…</span> <span class="d">(38s · ↑ 2.1k tokens)</span>
+<span class="hr">────────────────────────────────────</span>
+&gt;</div>
+          </div>
+        </div>
+      </div>
+      <div class="lstrip"><span class="g work"></span><span class="nm">Launching Issue sweep</span><span class="ct">3 / 6 sessions · 1 / 2 tabs</span><span class="sp"></span><span class="pbar thin"><i></i></span><span class="more">⋯</span></div>
+      <div class="footer"><span class="fpill"><span class="dot"></span>daemon · 10 sessions</span><span class="fi"><span class="g ask" style="width:10px;height:10px"></span>1 need you</span><span class="fi"><span class="g work"></span>1 working</span></div>
+    </div>
+
+    <p class="after">⋯ menu open <span>— the actions are one click further away</span></p>
+    <div class="crop strip">
+      <div class="cterm"><div class="pane focus"><div class="ph"><span class="g work"></span><span class="pt">Petal footer polish</span><span class="ac">claude</span><span class="stop">Stop</span></div>
+<div class="term"><span class="or">✻ Brewing…</span> <span class="d">(41s · ↑ 2.3k tokens)</span>
+&gt;</div></div></div>
+      <div class="lstrip"><span class="g work"></span><span class="nm">Launching Issue sweep</span><span class="ct">3 / 6 sessions · 1 / 2 tabs</span><span class="sp"></span><span class="pbar thin"><i></i></span><span class="more open">⋯</span>
+        <div class="menu"><div class="dg">Cancel launch</div><div class="hov">Select launched</div><div class="sep"></div><div class="dg">Stop all</div></div>
+      </div>
+      <div class="footer"><span class="fpill"><span class="dot"></span>daemon · 10 sessions</span><span class="fi"><span class="g ask" style="width:10px;height:10px"></span>1 need you</span><span class="fi"><span class="g work"></span>2 working</span></div>
+    </div>
+  </div>
+
+</div>
+
+<!-- ======================= QUESTION B ======================= -->
+<h2>B · How are preset-launched sessions marked in the sidebar?</h2>
+<p class="q">The three #21x leaves came from the preset; Petal footer polish is the focused session (its usual chip fill), the other two are ordinary sessions.</p>
+<div class="lanes">
+
+  <div class="lane">
+    <h3><span class="opt">B1</span>2 px accent stripe</h3>
+    <p class="cap">A 2 px accent stripe on the leaf’s outer left edge, beside the 3 px session-colour bar every leaf already draws.</p>
+    <div class="sidecut">
+      <div class="shead">Sessions<span class="seg"><span class="on">Repos</span><span>Tabs</span></span></div>
+      <div class="toolbar"><span class="btn primary grow">+ Session <span style="font-family:var(--mono);font-weight:400;font-size:10.5px;opacity:.8">Ctrl N</span></span><span class="btn">&gt;_ Shell</span><span class="btn">⋯</span></div>
+      <div class="crow"><span class="chev">▾</span><span class="ic">⑂</span><span class="nm">rustling-tulip</span><span class="tag">REPO</span><span class="cnt">6</span></div>
+      <div class="leaf sel"><div class="l1"><span class="g work"></span><span class="t">Petal footer polish</span><span class="ag">claude</span></div><div class="l2"><span class="br">feat/petal-footer</span><span class="tchip">T:tulip</span></div></div>
+      <div class="leaf"><div class="l1"><span class="g ask"></span><span class="t">Recover dialog keys</span><span class="warn">!</span><span class="ag">claude</span></div><div class="l2"><span class="br">feat/recover-keys</span><span class="tchip">unbound</span></div></div>
+      <div class="leaf mk-stripe"><div class="l1"><span class="g work"></span><span class="t">#212 Scrollback ring trims…</span><span class="ag">claude</span></div><div class="l2"><span class="br">issue-212</span><span class="tchip">T:sweep 1</span></div></div>
+      <div class="leaf mk-stripe"><div class="l1"><span class="g wait"></span><span class="t">#213 Tab rename drops IME…</span><span class="ag">claude</span></div><div class="l2"><span class="br">issue-213</span><span class="tchip">T:sweep 1</span></div></div>
+      <div class="leaf mk-stripe"><div class="l1"><span class="g work"></span><span class="t">#214 Footer pill overlaps…</span><span class="ag">claude</span></div><div class="l2"><span class="br">issue-214</span><span class="tchip">T:sweep 1</span></div></div>
+      <div class="leaf"><div class="l1"><span class="g wait"></span><span class="t">Review diff model</span><span class="ag codex">codex</span></div><div class="l2"><span class="br">main</span><span class="tchip">unbound</span></div></div>
+    </div>
+    <p class="foot">Shown after Select launched; cleared on any session click.</p>
+  </div>
+
+  <div class="lane">
+    <h3><span class="opt">B2</span>Tinted leaf background</h3>
+    <p class="cap">The launched leaves take an accent-tinted fill, warmer than the focused leaf’s neutral chip fill.</p>
+    <div class="sidecut">
+      <div class="shead">Sessions<span class="seg"><span class="on">Repos</span><span>Tabs</span></span></div>
+      <div class="toolbar"><span class="btn primary grow">+ Session <span style="font-family:var(--mono);font-weight:400;font-size:10.5px;opacity:.8">Ctrl N</span></span><span class="btn">&gt;_ Shell</span><span class="btn">⋯</span></div>
+      <div class="crow"><span class="chev">▾</span><span class="ic">⑂</span><span class="nm">rustling-tulip</span><span class="tag">REPO</span><span class="cnt">6</span></div>
+      <div class="leaf sel"><div class="l1"><span class="g work"></span><span class="t">Petal footer polish</span><span class="ag">claude</span></div><div class="l2"><span class="br">feat/petal-footer</span><span class="tchip">T:tulip</span></div></div>
+      <div class="leaf"><div class="l1"><span class="g ask"></span><span class="t">Recover dialog keys</span><span class="warn">!</span><span class="ag">claude</span></div><div class="l2"><span class="br">feat/recover-keys</span><span class="tchip">unbound</span></div></div>
+      <div class="leaf mk-tint"><div class="l1"><span class="g work"></span><span class="t">#212 Scrollback ring trims…</span><span class="ag">claude</span></div><div class="l2"><span class="br">issue-212</span><span class="tchip">T:sweep 1</span></div></div>
+      <div class="leaf mk-tint"><div class="l1"><span class="g wait"></span><span class="t">#213 Tab rename drops IME…</span><span class="ag">claude</span></div><div class="l2"><span class="br">issue-213</span><span class="tchip">T:sweep 1</span></div></div>
+      <div class="leaf mk-tint"><div class="l1"><span class="g work"></span><span class="t">#214 Footer pill overlaps…</span><span class="ag">claude</span></div><div class="l2"><span class="br">issue-214</span><span class="tchip">T:sweep 1</span></div></div>
+      <div class="leaf"><div class="l1"><span class="g wait"></span><span class="t">Review diff model</span><span class="ag codex">codex</span></div><div class="l2"><span class="br">main</span><span class="tchip">unbound</span></div></div>
+    </div>
+    <p class="foot">Shown after Select launched; cleared on any session click.</p>
+  </div>
+
+</div>
+
+<p class="note"><b>Fixed in every lane, not asked:</b> the toast’s ✕ is the existing toast close; tab names “sweep 1 / sweep 2” and the session titles are sample data; the sidebar marker colour is the client accent (#F07A62), the same colour as the default session bar.</p>
+
+</body>
+</html>
