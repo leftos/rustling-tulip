@@ -22,6 +22,7 @@ use crate::palette::{
     ACCENT, CHIP, GROUND, HOVER, LINE, LINE_STRONG, ON_ACCENT, RAISED, SPAWN_BADGE_OK, SUBTLE,
     TEXT_2, TRANSPARENT,
 };
+use crate::remote_mode::spawn_no_repos_note;
 use crate::session_menu::{backdrop, dialog_button};
 use crate::spawn_form::{
     APPROVAL_CHOICES, Control, EnvRow, EnvRowNote, FormInputs, ListField, Lock, MODEL_ALIASES,
@@ -34,7 +35,7 @@ use crate::spawn_preview::{
 };
 use crate::spawns::PaneAim;
 use crate::text_input::{NavKey, TextChanged, TextInput, TextInputEvent};
-use crate::{DANGER, MUTED, RootView, TEXT, WARNING, tooltip};
+use crate::{DANGER, MUTED, RootView, TEXT, WARNING, tagged_text, tooltip};
 
 /// The spawn dialog's width, as on the Spawn board.
 const DIALOG_WIDTH: f32 = 640.0;
@@ -76,8 +77,6 @@ const LIST_RADIUS: f32 = 10.0;
 /// scrolls past it.
 const PANEL_MAX_HEIGHT: f32 = 0.9;
 const DIALOG_TITLE: &str = "Spawn session";
-/// What the dialog says while no repo is registered.
-const NO_REPOS_NOTE: &str = "No repos yet.";
 const SHARE_TITLE: &str = "Share this worktree?";
 const SHARE_BODY: &str = "A session is already running in the worktree you picked. Both agents will see each other's uncommitted edits, and concurrent writes to the same file will overwrite one another.";
 const RANDOM_TIP: &str = "Generate a random worktree branch name";
@@ -158,8 +157,9 @@ pub(crate) struct SpawnDialog {
 /// repo is registered.
 pub(crate) enum SpawnModal {
     Form(Box<SpawnDialog>),
-    /// "No repos yet." with Add repo, Spawn disabled; the first repo to
-    /// arrive opens the form from `entry`.
+    /// [`spawn_no_repos_note`]'s wording (the host's short name on a remote
+    /// one) with Add repo, Spawn disabled; the first repo to arrive opens the
+    /// form from `entry`.
     NoRepos(Box<SpawnEntry>),
 }
 
@@ -1238,8 +1238,8 @@ impl RootView {
         }
     }
 
-    /// The dialog with no repo to spawn into: "No repos yet." over Add repo,
-    /// and Spawn disabled.
+    /// The dialog with no repo to spawn into: the target's no-repos note over
+    /// Add repo, and Spawn disabled.
     fn no_repos_layer(&self, cx: &mut Context<Self>) -> AnyElement {
         let close = close_button("spawn-close", false).on_click(
             cx.listener(|this, _: &ClickEvent, window, cx| this.close_spawn_dialog(window, cx)),
@@ -1260,7 +1260,13 @@ impl RootView {
             .gap(px(12.0))
             .px(px(DIALOG_PAD_X))
             .py(px(16.0))
-            .child(div().text_color(gpui::rgb(TEXT_2)).child(NO_REPOS_NOTE))
+            .child(
+                tagged_text(
+                    "spawn-no-repos-note",
+                    spawn_no_repos_note(self.conn.target()),
+                )
+                .text_color(gpui::rgb(TEXT_2)),
+            )
             .child(add);
         let cancel = button(
             "spawn-cancel",

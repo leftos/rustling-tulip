@@ -12,6 +12,32 @@ pub const LOCAL_FILES_REASON: &str = "Not available on a remote host: this opens
 /// The toast a Ctrl+click on a path link shows on a remote host.
 pub const PATH_LINK_REASON: &str = "Paths on a remote host can't be opened from this PC yet";
 
+/// What the sidebar's empty-registry note says on the local daemon.
+const SIDEBAR_NO_REPOS_NOTE: &str = "No repos or workspaces yet.";
+
+/// What the spawn dialog's note says while the local daemon has no repo.
+const SPAWN_NO_REPOS_NOTE: &str = "No repos yet.";
+
+/// What the sidebar's empty-registry note reads on `target`: the local
+/// daemon's wording, or one naming the remote host its registry is empty on.
+#[must_use]
+pub fn sidebar_no_repos_note(target: &Target) -> String {
+    match target.short_name() {
+        Some(host) => format!("No repos or workspaces on {host} yet."),
+        None => SIDEBAR_NO_REPOS_NOTE.to_owned(),
+    }
+}
+
+/// What the spawn dialog's note reads on `target`, as
+/// [`sidebar_no_repos_note`] does.
+#[must_use]
+pub fn spawn_no_repos_note(target: &Target) -> String {
+    match target.short_name() {
+        Some(host) => format!("No repos on {host} yet."),
+        None => SPAWN_NO_REPOS_NOTE.to_owned(),
+    }
+}
+
 /// What the client may do on one connection target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Capabilities {
@@ -56,7 +82,7 @@ impl Capabilities {
 
 #[cfg(test)]
 mod tests {
-    use super::{Capabilities, LOCAL_FILES_REASON};
+    use super::{Capabilities, LOCAL_FILES_REASON, sidebar_no_repos_note, spawn_no_repos_note};
     use crate::target::Target;
 
     fn local() -> Capabilities {
@@ -83,5 +109,24 @@ mod tests {
     fn daemon_is_managed_only_on_the_local_daemon() {
         assert!(local().manages_daemon());
         assert!(!remote().manages_daemon());
+    }
+
+    #[test]
+    fn local_notes_keep_their_wording() {
+        assert_eq!(
+            sidebar_no_repos_note(&Target::Local),
+            "No repos or workspaces yet."
+        );
+        assert_eq!(spawn_no_repos_note(&Target::Local), "No repos yet.");
+    }
+
+    #[test]
+    fn remote_notes_name_the_host() {
+        let target = Target::tailnet("box.tail1234.ts.net", None);
+        assert_eq!(
+            sidebar_no_repos_note(&target),
+            "No repos or workspaces on box yet."
+        );
+        assert_eq!(spawn_no_repos_note(&target), "No repos on box yet.");
     }
 }

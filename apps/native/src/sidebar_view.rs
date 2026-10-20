@@ -22,7 +22,7 @@ use crate::palette::{
     RAISED, SUBTLE, TEXT_2, TRANSPARENT,
 };
 use crate::preset_launch::LaunchHighlight;
-use crate::remote_mode::Capabilities;
+use crate::remote_mode::{Capabilities, sidebar_no_repos_note};
 use crate::repo_add::RepoAdd;
 use crate::session_actions::inline_actions;
 use crate::session_menu::disabled_row;
@@ -37,8 +37,10 @@ use crate::spawn_form::{provider_chip_text, provider_chip_tip};
 use crate::spawn_view::SpawnEntry;
 use crate::status_glyph::{GlyphSize, glyph, glyph_view};
 use crate::tabs::{TabPill, tab_pills};
+use crate::target::Target;
 use crate::{
-    DANGER, Drag, HOVER_BG, MUTED, PANEL_BG, RootView, TEXT, UI_TEXT_SIZE, drag_handle, tooltip,
+    DANGER, Drag, HOVER_BG, MUTED, PANEL_BG, RootView, TEXT, UI_TEXT_SIZE, drag_handle,
+    tagged_text, tooltip,
 };
 use gpui::{
     AnyElement, Bounds, ClickEvent, Context, Corner, Corners, Div, FontWeight, MouseButton,
@@ -126,7 +128,7 @@ impl RootView {
         // with nothing to list.
         let no_repos = self.no_repos_yet();
         let body = body.when(no_repos, |body| {
-            body.child(no_repos_note(self.add_repo_gate(), cx))
+            body.child(no_repos_note(self.add_repo_gate(), self.conn.target(), cx))
         });
         let body = if containers.is_empty() {
             body.when(!no_repos, |body| {
@@ -474,12 +476,10 @@ const MORE_TIP: &str = "More: Shell…, Add repo…, Add workspace…, Resume al
 /// The ⋯ button's hover text while fewer than two abandoned sessions leave
 /// Resume all off the menu.
 const MORE_TIP_WITHOUT_RESUME: &str = "More: Shell…, Add repo…, Add workspace…";
-/// What the sessions panel says while no repo or workspace is registered.
-const NO_REPOS_NOTE: &str = "No repos or workspaces yet.";
 
 /// The note an empty registry shows, with the Add repo button under it,
-/// drawn as `gate` says.
-fn no_repos_note(gate: AddRepoGate, cx: &mut Context<RootView>) -> Div {
+/// drawn as `gate` says, in the wording `target` calls for.
+fn no_repos_note(gate: AddRepoGate, target: &Target, cx: &mut Context<RootView>) -> Div {
     let add = BorderedButton {
         selector: "sidebar-add-repo".to_owned(),
         label: "Add repo",
@@ -494,7 +494,10 @@ fn no_repos_note(gate: AddRepoGate, cx: &mut Context<RootView>) -> Div {
         .gap(px(6.0))
         .px(px(ROW_PADDING))
         .py(px(6.0))
-        .child(div().text_color(gpui::rgb(MUTED)).child(NO_REPOS_NOTE))
+        .child(
+            tagged_text("sidebar-no-repos-note", sidebar_no_repos_note(target))
+                .text_color(gpui::rgb(MUTED)),
+        )
         .child(bordered_button(add, cx, |this, _, cx| this.add_repo(cx)))
 }
 /// The ⋯ button's side, in px.

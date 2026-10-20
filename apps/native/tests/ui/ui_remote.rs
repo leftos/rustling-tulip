@@ -494,6 +494,71 @@ fn restart_reads_reconnect_now_on_remote(cx: &mut TestAppContext) {
     );
 }
 
+#[gpui::test]
+fn no_repos_note_names_the_remote_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    assert!(shows(
+        &mut h,
+        "sidebar-no-repos-note",
+        "No repos or workspaces yet."
+    ));
+
+    h.set_connection(remote());
+    assert!(
+        shows(
+            &mut h,
+            "sidebar-no-repos-note",
+            "No repos or workspaces on box yet."
+        ),
+        "the note says whose registry is empty"
+    );
+}
+
+#[gpui::test]
+fn spawn_dialog_no_repos_note_names_the_remote_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = with_repos(cx, &dir, Vec::new());
+    h.keys("ctrl-shift-n");
+    assert!(h.root(|root, _| root.spawn_dialog_no_repos()));
+    assert!(shows(&mut h, "spawn-no-repos-note", "No repos yet."));
+
+    h.set_connection(remote());
+    assert!(
+        h.root(|root, _| root.spawn_dialog_no_repos()),
+        "the dialog stays open"
+    );
+    assert!(
+        shows(&mut h, "spawn-no-repos-note", "No repos on box yet."),
+        "the note says whose registry is empty"
+    );
+}
+
+/// A connection to the tailnet host [`HOST`] that was open and dropped: what
+/// the user reconnects from.
+fn dropped_remote() -> Connection {
+    let mut conn = remote();
+    conn.on_closed("socket closed".to_owned());
+    conn
+}
+
+#[gpui::test]
+fn reconnect_from_a_dropped_remote_connection_sends_restart(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    h.set_connection(dropped_remote());
+    h.commands();
+
+    h.click_on("daemon-pill");
+    assert!(shows(&mut h, "restart-daemon", "Reconnect now"));
+    h.click_on("restart-daemon");
+    let commands = h.commands();
+    assert!(
+        matches!(commands.as_slice(), [NetCommand::Restart]),
+        "the button asks for one Reconnect: no stop, shutdown or target switch"
+    );
+}
+
 /// Whether the open flyout's detail rows read `labels`, `|`-joined.
 fn details_read(h: &mut Harness<'_>, labels: &str) -> bool {
     shows(h, "flyout-details", labels)

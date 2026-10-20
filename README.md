@@ -60,7 +60,7 @@ Start with [docs/architecture.md](docs/architecture.md) for how the pieces fit a
 - **Brief**: a worker's instructions: tree root, files, the change, and a proving command.
 - **Busy-excluded**: a per-session daemon flag (`busy_excluded` on the snapshot, sidecar and history entry) marking a session the user does not want counted as busy; set by `SetSessionBusyExcluded`, optionally carried to a duplicate and kept through reattach and recovery.
 - **CA.0, CA.1, …**: step ids in `docs/plans/accounts.md` (Claude accounts), distinct from `agent-cli.md`'s AC steps.
-- **Capability table**: `apps/native/src/remote_mode.rs` (`Capabilities`), the one place that says what the native client may do on its connection target (open local files, manage the daemon, show the Remote access page); views ask it rather than the target.
+- **Capability table**: `apps/native/src/remote_mode.rs` (`Capabilities`), the one place that says what the native client may do on its connection target (open local files, manage the daemon); views ask it rather than the target.
 - **Chat mirror**: the planned chat view of a Claude session, built from its transcript and hook prompts while its terminal keeps running, answering prompts by typing keys into the PTY (RT-51).
 - **Claim lease**: a short-lived marker in the account store saying one process is fetching an account's usage, so another does not fetch it too.
 - **Claude provider**: the service a Claude session's `claude` CLI talks to, Anthropic (the default) or DeepSeek, chosen per spawn and kept by every respawn; not an agent.

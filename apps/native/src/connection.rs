@@ -542,6 +542,15 @@ mod tests {
     }
 
     #[test]
+    fn restart_after_a_drop_on_a_tailnet_target_fresh_connects_to_it() {
+        let mut conn = open_remote();
+        conn.on_closed("dropped".to_owned());
+        let host = conn.target().clone();
+        assert_eq!(conn.restart(), RestartAction::FreshConnect);
+        assert_eq!(conn.target(), &host, "the redial keeps the host it was on");
+    }
+
+    #[test]
     fn remote_auth_failed_left_by_reconnect() {
         let mut conn = remote();
         conn.on_connecting();

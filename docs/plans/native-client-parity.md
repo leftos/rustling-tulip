@@ -55,7 +55,7 @@ Close behind: the paste and key quirks (native clipboard read, Shift+Enter bytes
 - [ ] Drag a leaf onto a pane or a tab pill — `Sidebar.tsx`
 - [x] Workspace creator: from repos (name + ≥2 members) or from a VS Code workspace file (parse, show registered / will register) — `WorkspaceCreator.tsx` (native: P4.10c)
 - [x] Daemon-pushed "VS Code workspace detected" prompt: Not now / Create / Create & watch — `VscodeSuggestionToast.tsx` (native: P4.10c)
-- [ ] Empty states: no repos (different wording on remote); main area shows Select a tab / Spawn a session / Open shell + Add repo — `Sidebar.tsx`, `App.tsx` `EmptyState` (native: Spawn a session and Open shell landed in P1.7d, the sidebar's "No repos or workspaces yet." and the Add repo buttons in P4.10a; the remote wording waits for Phase 6)
+- [x] Empty states: no repos (different wording on remote); main area shows Select a tab / Spawn a session / Open shell + Add repo — `Sidebar.tsx`, `App.tsx` `EmptyState` (native: Spawn a session and Open shell landed in P1.7d, the sidebar's "No repos or workspaces yet." and the Add repo buttons in P4.10a; on a remote host the sidebar and spawn dialog notes name the host since RT-172)
 
 ## Sessions
 
