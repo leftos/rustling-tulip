@@ -13,8 +13,8 @@
 
 ## Wave 2 — Daily driver: close the port's gaps
 
-- [/] RT-21 P4.15a: Preset wizard sources and variables · release vNext
 - [ ] RT-22 P4.15b: Preset wizard preview and launching · release vNext
+  - [ ] RT-251 P4.15b part 2: preset launch jobs, toasts, first tab, Select launched, Stop all · release vNext
 - [ ] RT-171 Phase 5a: pane drag-and-drop (P5.1–P5.5) · release vNext
   - [ ] RT-230 P5.2: Pane drag-and-drop in the shown tab · release vNext
   - [ ] RT-231 P5.3: Tab strip drag · release vNext
@@ -45,6 +45,9 @@
 - [ ] RT-237 Diagnose the VS Code fallback's dispatch order when two opens are queued · release vNext
 - [ ] RT-238 Route a ListPresets failure by request_id · release vNext
 - [ ] RT-239 Skip touch and broadcast for a MovePane that leaves the grid unchanged
+- [ ] RT-254 Keep preset job events when the broadcast lags
+- [ ] RT-255 Reject or document a preset max_panes_per_tab of 0
+- [ ] RT-256 Name the failing script variable in PresetScriptsError
 
 ## Wave 2b — Hook status
 
@@ -71,14 +74,11 @@
 - [ ] RT-173 Import remote sessions: offer to arrange a remote host's sessions when their count changed · release vNext
 - [ ] RT-172 Remote mode: Reconnect in place of Restart, and the no-repos note on a remote host · release vNext
 - [ ] RT-166 TS.3b: device tokens issued only after the owner approves the device on the host PC · release vNext
-- [ ] RT-163 TS.5: retire the LAN listener, /pair and mDNS · release vNext
-- [/] RT-162 TS.4: ConfigureRemote and RemoteStatus messages · release vNext
 - [ ] RT-158 P6.6: Remote tests over a fake Tailscale, hand checklist, and the docs pass · release vNext
 - [ ] RT-157 P6.7: Cutover: installer (and the firewall rule, once ruled) · release vNext
 - [ ] RT-154 P6.4: Host Settings: Remote access (Tailscale) panel · release vNext
 - [ ] RT-152 P6.3: Host picker from the tailnet's machines, typed-name fallback, boot reconnect · release vNext
 - [ ] RT-151 P6.2: Remote-mode rules: what is disabled, hidden or retargeted · release vNext
-- [ ] RT-150 P6.1: Transport seam: Target::{Local, Tailnet(host)} in net.rs over public-CA TLS · release vNext
 - [ ] RT-96 Remote devices: list connected tailnet devices, block one and drop its connections · release vNext
 - [ ] RT-35 FT.2: native download sink for fetched files · release vNext
 - [ ] RT-36 FT.3: fetch a file by clicking a terminal path link in remote mode · release vNext
@@ -87,7 +87,6 @@
 - [ ] RT-184 Let only the client with recent input own a session's terminal size · release vNext
 - [ ] RT-187 Await the tailnet servers after the listener's supervisor panics · release vNext
 - [ ] RT-240 Close tailnet sessions when their listener drops · release vNext
-- [ ] RT-242 Send path-free TailscaleError reasons to clients · release vNext
 - [ ] RT-243 Split tailnet Supervisor::run and carry the real CertFailed reason
 - [ ] RT-245 Make the tailnet handshake client-count test load-proof
 
@@ -197,6 +196,7 @@
 - [ ] RT-194 Record that a removed repo's session keeps streaming in docs/ux-audit.md
 - [ ] RT-226 Define container, tab container, lock and container menu in the glossary
 - [ ] RT-228 Document the local load-burn recipe and the load-sensitive test lessons
+- [ ] RT-249 Add docs/README.md as the docs start page
 
 ## Build tooling
 
@@ -213,6 +213,8 @@
 - [ ] RT-180 Answer the cursor query once in the live tier's scrollback wait
 - [ ] RT-227 Print git's exit code, stdout and stderr when a workspace git command fails
 - [ ] RT-234 Make kill_is_idempotent_and_safe_after_exit wait for the child's exit instead of sleeping 300 ms
+- [ ] RT-252 Make production_tls_config_builds hold on a builder without CA certificates
+- [ ] RT-253 Check whether the daemon's tokio-rustls can be dev-only after TS.5
 
 ## macOS
 
