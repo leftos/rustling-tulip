@@ -49,7 +49,6 @@
   - [ ] RT-85 Flag a session hand-off ready when its orchestrator says to /clear and /nextup
   - [ ] RT-188 Keep subagent events, idle_prompt and a restart from clearing a pending hook prompt
   - [ ] RT-189 Merge feat/hook-status to main (#198)
-  - [/] RT-213 Settings: an Agents category with a page per agent, and a Codex hooks toggle
   - [ ] RT-218 Keep a hook-driven session recoverable when its agent dies without a hook event
   - [ ] RT-219 Cap the length of hook-derived pending input strings
   - [ ] RT-220 Quote the characters a shell still expands in the hook shim command
