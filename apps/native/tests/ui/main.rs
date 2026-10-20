@@ -33,6 +33,7 @@ mod ui_needs_you;
 mod ui_notifications;
 mod ui_pane_spawn;
 mod ui_panes;
+mod ui_preset_wizard;
 mod ui_quit;
 mod ui_recover;
 mod ui_repo_remove;

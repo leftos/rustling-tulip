@@ -68,6 +68,7 @@ Start with [docs/architecture.md](docs/architecture.md) for how the pieces fit a
 - **Clear and continue**: the planned one-click session action that types `/clear`, waits for the clear to finish, then types `/nextup`; refused while background work runs (RT-91).
 - **Closing mark**: the native client's flag on a tab it expects the daemon to remove (closing it, closing its last pane, moving its only pane out), read by placement and Undo until the removal arrives; a refused move clears it, and closing a last pane while a split or move for that tab is in flight does not set it.
 - **Connection origin**: whether a client connected on the local port (`Local`) or through the LAN listener or relay (`Remote`); account administration is local only.
+- **Container menu**: the native client's right-click menu on a repo's or workspace's sidebar row (spawn, `Launch last again ▸`, `Appearance…`, `Launch preset…`, the open rows, Remove); see `docs/native-client.md`.
 - **Conversation id**: Claude Code's own id for a session's conversation (`claude_session_id`), which `claude --resume` takes; distinct from the rustling-tulip session id and from a Codex or Cursor session's `agent_conversation_id`.
 - **Detached**: the native client's last Repos-view container, drawn only while it holds sessions, for sessions with no container of their own (their repo or workspace was removed, or their repo is now a member of a workspace); they keep running and streaming.
 - **Detached stop all**: the two-click `Stop all` chip in an expanded Detached container's banner: the first click arms `Confirm: stop all`, the second stops every leaf still running, and Esc disarms; it is absent once every leaf is stopped or the container, sidebar or Sessions panel is folded away; see `docs/native-client.md` ("Repos and the no-repos states").
@@ -113,7 +114,10 @@ Start with [docs/architecture.md](docs/architecture.md) for how the pieces fit a
 - **Petal**: the approved refreshed look for the native client (graphite ground, tulip-coral accent, status shapes), its settled design in `docs/native-client.md` ("Petal chrome", "Theme and fonts").
 - **PF, AT, SV, RD, AR, OT**: idea ids in `docs/plans/off-orca.md` (files across machines, attention streams, session views, remote desktop, artifacts by account, absorbing ops-tower).
 - **Plan snapshot**: `docs/plans/MAIN.md`, generated from the Linear team's issues, one line an item, by wave in working order; never edited by hand.
+- **Preset**: a named launch recipe the daemon stores for a repo or workspace: the prompt sources it allows, its variables and its target tabs, launched through the preset wizard.
+- **Preset wizard**: the native client's modal that walks a preset's prompt source and variables before launching it; see `docs/native-client.md`.
 - **Progress update**: an attention-feed item for a stop while work continues, or a summary of work in progress; shown in the feed, never pushed to the phone.
+- **Prompt source**: where a preset launch takes its prompts from: a prompts file, a folder of `.md` files, inline text or GitHub issue ranges, limited to the sources the preset allows.
 - **Provider table**: the daemon's built-in, not user-editable list of the environment variables each non-Anthropic provider sets, removes and locks (`crates/daemon/src/agents/providers.rs`).
 - **Quarantine**: an account whose refresh token was rejected (`invalid_grant`), skipped until it is logged in again.
 - **RA.1, CR.0**: step ids of the finished own-agent recovery design (RA recovery steps, CR the Cursor spike), named in commit messages.

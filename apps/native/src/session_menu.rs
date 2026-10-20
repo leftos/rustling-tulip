@@ -8,7 +8,10 @@ use gpui::{
     FontWeight, Keystroke, MouseButton, MouseDownEvent, Pixels, Point, ScrollWheelEvent,
     SharedString, Stateful, Subscription, Task, Window, anchored, deferred, div, prelude::*, px,
 };
-use protocol::{MemberBranchFate, SessionSnapshot, SpawnConfig, TabEntry};
+use protocol::{
+    ClientMessage, DaemonMessage, MemberBranchFate, PresetEntry, PresetTarget, SessionSnapshot,
+    SpawnConfig, TabEntry,
+};
 
 use crate::appearance::{self, ACCENT_PRESETS, AppearanceChange};
 use crate::appearance_view::Level;
@@ -200,9 +203,75 @@ const CONTAINER_LAUNCH_LAST_TAB_PREFIX: &str = "container-launch-last-tab-";
 /// The container menu's first row: the spawn dialog, held on the container
 /// or, for a tab container, on that tab.
 const CONTAINER_SPAWN_ROW: &str = "container-menu-spawn";
-/// The container menu's preset row, disabled until the preset wizard lands.
+/// The container menu's single preset row while the list is out, failed or
+/// empty; a listed preset's row adds `-<index>`.
 const CONTAINER_PRESET_ROW: &str = "container-menu-launch-preset";
-const CONTAINER_PRESET_TIP: &str = "Presets arrive with the preset wizard";
+const PRESET_LOADING_LABEL: &str = "Launch preset… (loading)";
+const PRESET_FAILED_LABEL: &str = "Launch preset… (failed to load)";
+const PRESET_NONE_LABEL: &str = "Launch preset… (none defined)";
+const PRESET_NONE_TIP: &str = "No .rustling-tulip/presets.json in this repo";
+
+/// The presets a repo's or workspace's menu lists, asked for each time it
+/// opens.
+#[derive(Debug, Clone)]
+pub(crate) enum MenuPresets {
+    Loading,
+    Failed(String),
+    Listed(Vec<PresetEntry>),
+}
+
+impl MenuPresets {
+    /// The listed preset at `index`, while the list holds one there.
+    fn entry(&self, index: usize) -> Option<&PresetEntry> {
+        match self {
+            Self::Listed(entries) => entries.get(index),
+            Self::Loading | Self::Failed(_) => None,
+        }
+    }
+}
+
+/// What a preset row does.
+enum PresetAction {
+    /// Nothing; the tooltip, when there is one, says why.
+    Disabled(Option<String>),
+    /// Opens the wizard for the listed preset at this index.
+    Launch(usize),
+}
+
+/// One preset row of the container menu.
+struct PresetRow {
+    selector: String,
+    label: String,
+    action: PresetAction,
+}
+
+/// The preset rows `presets` draws: one disabled row while loading, failed
+/// or empty, else a row per preset.
+fn preset_rows(presets: &MenuPresets) -> Vec<PresetRow> {
+    let single = |label: &str, tip: Option<String>| {
+        vec![PresetRow {
+            selector: CONTAINER_PRESET_ROW.to_owned(),
+            label: label.to_owned(),
+            action: PresetAction::Disabled(tip),
+        }]
+    };
+    match presets {
+        MenuPresets::Loading => single(PRESET_LOADING_LABEL, None),
+        MenuPresets::Failed(err) => single(PRESET_FAILED_LABEL, Some(err.clone())),
+        MenuPresets::Listed(entries) if entries.is_empty() => {
+            single(PRESET_NONE_LABEL, Some(PRESET_NONE_TIP.to_owned()))
+        }
+        MenuPresets::Listed(entries) => entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| PresetRow {
+                selector: format!("{CONTAINER_PRESET_ROW}-{index}"),
+                label: format!("Launch preset · {}", entry.name),
+                action: PresetAction::Launch(index),
+            })
+            .collect(),
+    }
+}
 /// The container menu's open rows.
 const CONTAINER_EXPLORER_ROW: &str = "container-menu-explorer";
 const CONTAINER_VSCODE_ROW: &str = "container-menu-vscode";
@@ -255,6 +324,20 @@ impl MenuContainer {
             Self::Tab(_) => None,
         }
     }
+
+    /// The preset target the container names, for the two kinds that have
+    /// presets.
+    fn preset_target(&self) -> Option<PresetTarget> {
+        match self {
+            Self::Repo(id) => Some(PresetTarget::Repo {
+                repo_id: id.clone(),
+            }),
+            Self::Workspace(id) => Some(PresetTarget::Workspace {
+                workspace_id: id.clone(),
+            }),
+            Self::Tab(_) => None,
+        }
+    }
 }
 
 /// The open repo, workspace or tab container's context menu.
@@ -267,6 +350,9 @@ pub(crate) struct ContainerMenu {
     submenu: ContainerSubmenu,
     /// The most height its frame may take, from the window it opened in.
     max_height: Pixels,
+    /// The presets its preset rows show; a tab container's list stays
+    /// empty and unshown.
+    presets: MenuPresets,
 }
 
 impl ContainerMenu {
@@ -654,10 +740,13 @@ impl RootView {
                     if self.container_launch_config(&menu.container).is_some() {
                         groups.push(vec![CONTAINER_LAUNCH_LAST_ROW.to_owned()]);
                     }
-                    groups.push(vec![
-                        CONTAINER_APPEARANCE_ROW.to_owned(),
-                        CONTAINER_PRESET_ROW.to_owned(),
-                    ]);
+                    let mut middle = vec![CONTAINER_APPEARANCE_ROW.to_owned()];
+                    middle.extend(
+                        preset_rows(&menu.presets)
+                            .into_iter()
+                            .map(|row| row.selector),
+                    );
+                    groups.push(middle);
                     groups.push(vec![
                         CONTAINER_EXPLORER_ROW.to_owned(),
                         CONTAINER_VSCODE_ROW.to_owned(),
@@ -674,23 +763,29 @@ impl RootView {
     /// The tooltip of the container menu row tagged `selector` when the row
     /// is disabled.
     #[must_use]
-    pub fn container_menu_disabled_tip(&self, selector: &str) -> Option<&'static str> {
+    pub fn container_menu_disabled_tip(&self, selector: &str) -> Option<String> {
         let menu = self.container_menu.as_ref()?;
         if menu.submenu != ContainerSubmenu::None {
             return None;
         }
-        match selector {
-            CONTAINER_PRESET_ROW => Some(CONTAINER_PRESET_TIP),
-            CONTAINER_EXPLORER_ROW | CONTAINER_COPY_PATH_ROW => self
-                .container_folder(&menu.container)
-                .is_none()
-                .then_some(CONTAINER_NO_FOLDER_TIP),
-            CONTAINER_VSCODE_ROW => self
-                .container_vscode_job(&menu.container)
-                .is_none()
-                .then_some(CONTAINER_NO_FOLDER_TIP),
-            _ => None,
+        if selector.starts_with(CONTAINER_PRESET_ROW) {
+            menu.container.preset_target()?;
+            return preset_rows(&menu.presets)
+                .into_iter()
+                .find(|row| row.selector == selector)
+                .and_then(|row| match row.action {
+                    PresetAction::Disabled(tip) => tip,
+                    PresetAction::Launch(_) => None,
+                });
         }
+        let no_folder = match selector {
+            CONTAINER_EXPLORER_ROW | CONTAINER_COPY_PATH_ROW => {
+                self.container_folder(&menu.container).is_none()
+            }
+            CONTAINER_VSCODE_ROW => self.container_vscode_job(&menu.container).is_none(),
+            _ => false,
+        };
+        no_folder.then(|| CONTAINER_NO_FOLDER_TIP.to_owned())
     }
 
     /// The labels of the container menu's rows as shown now; empty while it
@@ -712,7 +807,7 @@ impl RootView {
                         labels.push(CONTAINER_LAUNCH_LAST_LABEL.to_owned());
                     }
                     labels.push("Appearance…".to_owned());
-                    labels.push("Launch preset…".to_owned());
+                    labels.extend(preset_rows(&menu.presets).into_iter().map(|row| row.label));
                     labels.push("Open in Explorer".to_owned());
                     labels.push("Open in VS Code".to_owned());
                     labels.push("Copy path".to_owned());
@@ -901,14 +996,100 @@ impl RootView {
         self.close_sc_picker(window, cx);
         self.close_sc_file_menu(window, cx);
         self.close_more_menu(window, cx);
+        let target = container.preset_target();
+        let presets = if target.is_some() {
+            MenuPresets::Loading
+        } else {
+            MenuPresets::Listed(Vec::new())
+        };
         self.container_menu = Some(ContainerMenu {
             container,
             at,
             submenu: ContainerSubmenu::None,
             max_height: window.viewport_size().height * MENU_MAX_SHARE,
+            presets,
         });
+        if let Some(target) = target {
+            self.send(ClientMessage::ListPresets { target });
+        }
         self.menu_focus.focus(window);
         cx.notify();
+    }
+
+    /// A `Presets` reply fills the open menu's preset rows when it is that
+    /// menu's container's list and the rows still load or show a failure:
+    /// an unrouted `Error` may have been another list's, so the menu's own
+    /// list replaces it. Any other reply is dropped.
+    pub(crate) fn on_preset_message(&mut self, msg: &DaemonMessage, cx: &mut Context<Self>) {
+        let DaemonMessage::Presets { target, entries } = msg else {
+            return;
+        };
+        let waiting = self.container_menu.as_mut().filter(|menu| {
+            matches!(menu.presets, MenuPresets::Loading | MenuPresets::Failed(_))
+                && menu.container.preset_target().as_ref() == Some(target)
+        });
+        let Some(menu) = waiting else {
+            tracing::debug!("dropping a preset list no open menu waits for: {target:?}");
+            return;
+        };
+        menu.presets = MenuPresets::Listed(entries.clone());
+        cx.notify();
+    }
+
+    /// An unrouted `Error` while the open menu's preset rows load is the
+    /// list's failure (`ListPresets` carries no request id): the rows show
+    /// it. Returns whether the menu took it.
+    pub(crate) fn on_preset_list_error(&mut self, message: &str, cx: &mut Context<Self>) -> bool {
+        let Some(menu) = self
+            .container_menu
+            .as_mut()
+            .filter(|menu| matches!(menu.presets, MenuPresets::Loading))
+        else {
+            return false;
+        };
+        menu.presets = MenuPresets::Failed(message.to_owned());
+        cx.notify();
+        true
+    }
+
+    /// The open menu's preset rows; a listed preset's row closes the menu
+    /// and opens the wizard for it on the menu's container.
+    fn container_preset_rows(
+        &self,
+        container: &MenuContainer,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let (Some(menu), Some(target)) = (self.container_menu.as_ref(), container.preset_target())
+        else {
+            return Vec::new();
+        };
+        preset_rows(&menu.presets)
+            .into_iter()
+            .map(|row| match row.action {
+                PresetAction::Disabled(Some(tip)) => {
+                    disabled_row(&row.selector, row.label, tip).into_any_element()
+                }
+                PresetAction::Disabled(None) => {
+                    inert_row(&row.selector, row.label).into_any_element()
+                }
+                PresetAction::Launch(index) => {
+                    let target = target.clone();
+                    menu_item(&row.selector, row.label, false)
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            let entry = this
+                                .container_menu
+                                .as_ref()
+                                .and_then(|menu| menu.presets.entry(index))
+                                .cloned();
+                            this.close_container_menu(window, cx);
+                            if let Some(entry) = entry {
+                                this.open_preset_wizard(entry, target.clone(), window, cx);
+                            }
+                        }))
+                        .into_any_element()
+                }
+            })
+            .collect()
     }
 
     /// Closes the container menu and hands the keyboard back to the active
@@ -1119,7 +1300,7 @@ impl RootView {
                 this.open_appearance_editor(level, window, cx);
             }),
         );
-        let preset = disabled_row(CONTAINER_PRESET_ROW, "Launch preset…", CONTAINER_PRESET_TIP);
+        let presets = self.container_preset_rows(container, cx);
         let [explorer, vscode, copy] = self.container_open_rows(container, cx);
         let key = crate::repo_remove::container_key(&level);
         let remove_container = container.clone();
@@ -1157,7 +1338,7 @@ impl RootView {
         }
         frame
             .child(appearance)
-            .child(preset)
+            .children(presets)
             .child(menu_separator())
             .child(explorer)
             .child(vscode)
@@ -2548,8 +2729,18 @@ pub(crate) fn menu_item(
 
 /// A menu row that is drawn but cannot be pressed: muted, with `tip` as its
 /// tooltip.
-fn disabled_row(selector: &str, label: &'static str, tip: &'static str) -> Stateful<Div> {
+fn disabled_row(
+    selector: &str,
+    label: impl Into<SharedString>,
+    tip: impl Into<SharedString>,
+) -> Stateful<Div> {
+    inert_row(selector, label).tooltip(tooltip(tip))
+}
+
+/// A menu row that is drawn muted and cannot be pressed, with no tooltip.
+fn inert_row(selector: &str, label: impl Into<SharedString>) -> Stateful<Div> {
     let name = selector.to_owned();
+    let label: SharedString = label.into();
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))
         .debug_selector(move || name)
@@ -2560,7 +2751,6 @@ fn disabled_row(selector: &str, label: &'static str, tip: &'static str) -> State
         .rounded(px(4.0))
         .text_color(gpui::rgb(MUTED))
         .cursor_default()
-        .tooltip(tooltip(tip))
         .child(label)
 }
 

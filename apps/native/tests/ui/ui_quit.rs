@@ -501,6 +501,7 @@ fn closing_the_window_closes_the_appearance_editor_settings_and_container_menu(
     h.keys("escape");
 
     h.right_click_on("container-repo:r1");
+    h.sent(); // opening the menu asked for its presets
     assert!(h.root(|root, _| root.container_menu_open()));
     assert!(!close(&mut h));
     assert!(

@@ -8,7 +8,7 @@
 use crate::support;
 
 use gpui::TestAppContext;
-use protocol::{ClientMessage, DaemonMessage};
+use protocol::{ClientMessage, DaemonMessage, PresetTarget};
 use support::{Fixture, Harness, TestDir, pane, repo, session, tab, workspace};
 
 /// Repo `r1`, registered, with nothing running in it.
@@ -69,6 +69,8 @@ fn pairs(expected: &[(&str, &str)]) -> Vec<(String, String)> {
 /// Opens the container menu of `container` and clicks its Remove row.
 fn click_remove(h: &mut Harness<'_>, container: &str) {
     h.right_click_on(container);
+    // Opening the menu asks for the container's presets; drain that request.
+    h.sent();
     h.click_on("container-menu-remove");
 }
 
@@ -218,6 +220,14 @@ fn a_refusal_drops_the_armed_row_and_toasts(cx: &mut TestAppContext) {
         Some("repo:r1".to_owned()),
         "the row waits for its second click"
     );
+    // The preset rows have loaded, so the refusal is not taken as their
+    // list's failure.
+    h.send(DaemonMessage::Presets {
+        target: PresetTarget::Repo {
+            repo_id: "r1".to_owned(),
+        },
+        entries: Vec::new(),
+    });
 
     h.send(DaemonMessage::Error {
         message: "the registry is read-only".to_owned(),

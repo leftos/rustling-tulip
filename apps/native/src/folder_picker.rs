@@ -14,15 +14,7 @@ use std::rc::Rc;
 use futures::FutureExt as _;
 use gpui::{App, Window};
 
-use crate::{FilePicker, FolderPicker};
-
-/// What the OS dialog asks for.
-#[cfg(windows)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PickerKind {
-    Folder,
-    File,
-}
+use crate::{FileFilter, FilePicker, FolderPicker};
 
 /// How long the start folder's existence check may take before the dialog
 /// opens without it: a folder on an offline network share would otherwise
@@ -36,48 +28,66 @@ const START_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 /// view's update.
 #[cfg(windows)]
 pub(crate) fn system_folder_picker(window: &Window) -> FolderPicker {
-    system_picker(window, PickerKind::Folder)
+    let pick = system_picker(window);
+    Rc::new(move |cx: &mut App, start: Option<PathBuf>| pick(cx, start, None))
 }
 
-/// The OS file picker, filtered to `.code-workspace` files and opened at the
-/// given folder: the workspace creator's Browse. Same threading rules as
-/// [`system_folder_picker`].
+/// The OS file picker, filtered to the given file types and opened at the
+/// given folder: the workspace creator's Browse and the preset wizard's
+/// file pickers. Same threading rules as [`system_folder_picker`].
 #[cfg(windows)]
 pub(crate) fn system_file_picker(window: &Window) -> FilePicker {
-    system_picker(window, PickerKind::File)
+    let pick = system_picker(window);
+    Rc::new(
+        move |cx: &mut App, start: Option<PathBuf>, filter: FileFilter| {
+            pick(cx, start, Some(filter))
+        },
+    )
 }
+
+/// A picker for a folder (no filter) or for a file of the filter's types.
+#[cfg(windows)]
+type FilteredPicker = Rc<
+    dyn Fn(
+        &mut App,
+        Option<PathBuf>,
+        Option<FileFilter>,
+    ) -> futures::future::LocalBoxFuture<'static, Option<PathBuf>>,
+>;
 
 /// The shared body of the two pickers: check the start folder, then show the
 /// dialog on the foreground executor.
 #[cfg(windows)]
-fn system_picker(window: &Window, kind: PickerKind) -> FolderPicker {
+fn system_picker(window: &Window) -> FilteredPicker {
     let owner = owner_address(window);
-    Rc::new(move |cx: &mut App, start: Option<PathBuf>| {
-        let checked = start.map(|start| {
-            cx.background_executor().spawn(async move {
-                start_folder_check(start, START_CHECK_TIMEOUT, std::path::Path::is_dir)
-            })
-        });
-        let foreground = cx.foreground_executor().clone();
-        async move {
-            let start = match checked {
-                Some(check) => check.await,
-                None => None,
-            };
-            foreground
-                .spawn(async move {
-                    match pick_dialog(kind, start.as_deref(), owner) {
-                        Ok(picked) => picked,
-                        Err(err) => {
-                            tracing::warn!("the picker failed: {err:#}");
-                            None
-                        }
-                    }
+    Rc::new(
+        move |cx: &mut App, start: Option<PathBuf>, filter: Option<FileFilter>| {
+            let checked = start.map(|start| {
+                cx.background_executor().spawn(async move {
+                    start_folder_check(start, START_CHECK_TIMEOUT, std::path::Path::is_dir)
                 })
-                .await
-        }
-        .boxed_local()
-    })
+            });
+            let foreground = cx.foreground_executor().clone();
+            async move {
+                let start = match checked {
+                    Some(check) => check.await,
+                    None => None,
+                };
+                foreground
+                    .spawn(async move {
+                        match pick_dialog(filter.as_ref(), start.as_deref(), owner) {
+                            Ok(picked) => picked,
+                            Err(err) => {
+                                tracing::warn!("the picker failed: {err:#}");
+                                None
+                            }
+                        }
+                    })
+                    .await
+            }
+            .boxed_local()
+        },
+    )
 }
 
 /// `start` when `probe` says it is a folder within `timeout`, else `None`
@@ -122,38 +132,39 @@ fn start_folder_check(
 /// The platform's folder picker through GPUI, which takes no start folder.
 #[cfg(not(windows))]
 pub(crate) fn system_folder_picker(_window: &Window) -> FolderPicker {
-    system_picker(false)
+    Rc::new(|cx: &mut App, _start: Option<PathBuf>| system_pick(cx, false))
 }
 
 /// The platform's file picker through GPUI, with the same filter caveat as
 /// GPUI's own: the platform shows any file.
 #[cfg(not(windows))]
 pub(crate) fn system_file_picker(_window: &Window) -> FilePicker {
-    system_picker(true)
+    Rc::new(|cx: &mut App, _start: Option<PathBuf>, _filter: FileFilter| system_pick(cx, true))
 }
 
 #[cfg(not(windows))]
-fn system_picker(files: bool) -> FolderPicker {
-    Rc::new(move |cx: &mut App, _start: Option<PathBuf>| {
-        let picked = cx.prompt_for_paths(gpui::PathPromptOptions {
-            files,
-            directories: !files,
-            multiple: false,
-            prompt: None,
-        });
-        async move {
-            match picked.await {
-                Ok(Ok(Some(paths))) => paths.into_iter().next(),
-                Ok(Err(err)) => {
-                    tracing::warn!("the picker failed: {err:#}");
-                    None
-                }
-                // Cancelled, or the picker's sender went before it answered.
-                Ok(Ok(None)) | Err(_) => None,
+fn system_pick(
+    cx: &mut App,
+    files: bool,
+) -> futures::future::LocalBoxFuture<'static, Option<PathBuf>> {
+    let picked = cx.prompt_for_paths(gpui::PathPromptOptions {
+        files,
+        directories: !files,
+        multiple: false,
+        prompt: None,
+    });
+    async move {
+        match picked.await {
+            Ok(Ok(Some(paths))) => paths.into_iter().next(),
+            Ok(Err(err)) => {
+                tracing::warn!("the picker failed: {err:#}");
+                None
             }
+            // Cancelled, or the picker's sender went before it answered.
+            Ok(Ok(None)) | Err(_) => None,
         }
-        .boxed_local()
-    })
+    }
+    .boxed_local()
 }
 
 /// The address of `window`'s Win32 handle, which owns the dialog; `None`
@@ -174,12 +185,28 @@ fn owner_address(window: &Window) -> Option<usize> {
     }
 }
 
-/// Shows the folder or `.code-workspace` file dialog, at `start` (a folder
-/// that passed [`start_folder_check`]) when given, modal to the window at
-/// `owner`; `None` when the user cancels.
+/// The dialog's filter: its name and its `;`-joined patterns, every file
+/// when the filter names no extension. An extension written with its dot
+/// (`.log`) is the same as one without.
+#[cfg(windows)]
+fn filter_spec(filter: &FileFilter) -> (String, String) {
+    if filter.extensions.is_empty() {
+        return (filter.name.clone(), "*.*".to_owned());
+    }
+    let patterns: Vec<String> = filter
+        .extensions
+        .iter()
+        .map(|ext| format!("*.{}", ext.strip_prefix('.').unwrap_or(ext)))
+        .collect();
+    (filter.name.clone(), patterns.join(";"))
+}
+
+/// Shows the folder dialog (no filter) or the file dialog of the filter's
+/// types, at `start` (a folder that passed [`start_folder_check`]) when
+/// given, modal to the window at `owner`; `None` when the user cancels.
 #[cfg(windows)]
 fn pick_dialog(
-    kind: PickerKind,
+    filter: Option<&FileFilter>,
     start: Option<&std::path::Path>,
     owner: Option<usize>,
 ) -> anyhow::Result<Option<PathBuf>> {
@@ -191,25 +218,29 @@ fn pick_dialog(
         FileOpenDialog, IFileOpenDialog, IShellItem, SHCreateItemFromParsingName,
         SIGDN_FILESYSPATH,
     };
-    use windows::core::{HSTRING, w};
+    use windows::core::{HSTRING, PCWSTR};
 
     // SAFETY: COM is initialised on this thread: GPUI's Windows platform
     // calls `OleInitialize(None)` on the UI thread when it starts, and the
     // picker runs on that thread's foreground executor.
     let dialog: IFileOpenDialog = unsafe { CoCreateInstance(&FileOpenDialog, None, CLSCTX_ALL) }
         .context("creating the picker dialog")?;
-    let options = match kind {
-        PickerKind::Folder => FOS_FILEMUSTEXIST | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM,
-        PickerKind::File => FOS_FILEMUSTEXIST | FOS_FORCEFILESYSTEM,
+    let options = if filter.is_some() {
+        FOS_FILEMUSTEXIST | FOS_FORCEFILESYSTEM
+    } else {
+        FOS_FILEMUSTEXIST | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM
     };
     // SAFETY: `dialog` is a live dialog this thread created.
     unsafe { dialog.SetOptions(options) }.context("setting the picker dialog's options")?;
-    if kind == PickerKind::File {
+    if let Some(filter) = filter {
+        let (name, spec) = filter_spec(filter);
+        let (name, spec) = (HSTRING::from(name), HSTRING::from(spec));
         let filters = [COMDLG_FILTERSPEC {
-            pszName: w!("VS Code workspace"),
-            pszSpec: w!("*.code-workspace"),
+            pszName: PCWSTR(name.as_ptr()),
+            pszSpec: PCWSTR(spec.as_ptr()),
         }];
-        // SAFETY: `dialog` is live and `filters` outlives the call.
+        // SAFETY: `dialog` is live, and `filters` and the strings it points
+        // into outlive the call.
         unsafe { dialog.SetFileTypes(&filters) }.context("setting the file dialog's filter")?;
     }
     if let Some(start) = start {
@@ -264,9 +295,34 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::time::Duration;
 
-    use super::start_folder_check;
+    use super::{filter_spec, start_folder_check};
+    use crate::FileFilter;
 
     const WAIT: Duration = Duration::from_secs(5);
+
+    #[test]
+    fn filter_spec_without_extensions_offers_every_file() {
+        assert_eq!(
+            filter_spec(&FileFilter::new("Any", &[])),
+            ("Any".to_owned(), "*.*".to_owned())
+        );
+    }
+
+    #[test]
+    fn filter_spec_joins_the_extensions() {
+        assert_eq!(
+            filter_spec(&FileFilter::new("Prompts", &["txt", "md"])),
+            ("Prompts".to_owned(), "*.txt;*.md".to_owned())
+        );
+    }
+
+    #[test]
+    fn filter_spec_drops_a_leading_dot() {
+        assert_eq!(
+            filter_spec(&FileFilter::new("Logs", &[".log"])),
+            ("Logs".to_owned(), "*.log".to_owned())
+        );
+    }
 
     #[test]
     fn an_existing_folder_is_kept() {

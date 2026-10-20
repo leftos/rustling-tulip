@@ -54,6 +54,9 @@ pub mod palette;
 mod pane_close;
 mod pane_close_view;
 mod pane_menu;
+mod preset_prompts;
+pub(crate) mod preset_wizard;
+mod preset_wizard_view;
 mod quit;
 mod quit_view;
 mod recover;
@@ -190,6 +193,7 @@ pub use crate::notices::{
 };
 pub use crate::notify::{Notifier, NotifyState};
 pub use crate::open::{OpenFailure, Opener};
+pub use crate::preset_wizard::{NextButton, PREVIEW_LATER_TIP};
 pub use crate::quit_view::QuitFn;
 pub use crate::recover_view::RecoverRow;
 pub use crate::shell_marks::{ShellDot, ShellStatus};
@@ -244,10 +248,31 @@ pub type Clock = Arc<dyn Fn() -> Instant + Send + Sync>;
 pub type FolderPicker =
     Rc<dyn Fn(&mut App, Option<PathBuf>) -> LocalBoxFuture<'static, Option<PathBuf>>>;
 
-/// Asks the user for one file, opening at the given folder when there is
-/// one; resolves to `None` when they cancel or the picker fails. The
-/// workspace creator's Browse is its only caller.
-pub type FilePicker = FolderPicker;
+/// The file types a file picker offers: the filter's name and the
+/// extensions it lets through, without dots; no extensions offers every
+/// file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileFilter {
+    pub name: String,
+    pub extensions: Vec<String>,
+}
+
+impl FileFilter {
+    #[must_use]
+    pub fn new(name: &str, extensions: &[&str]) -> Self {
+        Self {
+            name: name.to_owned(),
+            extensions: extensions.iter().map(|ext| (*ext).to_owned()).collect(),
+        }
+    }
+}
+
+/// Asks the user for one file of the filter's types, opening at the given
+/// folder when there is one; resolves to `None` when they cancel or the
+/// picker fails. The workspace creator's Browse and the preset wizard's file
+/// pickers call it.
+pub type FilePicker =
+    Rc<dyn Fn(&mut App, Option<PathBuf>, FileFilter) -> LocalBoxFuture<'static, Option<PathBuf>>>;
 
 /// What the root view talks to and where it keeps its files.
 pub struct RootDeps {
@@ -274,7 +299,8 @@ pub struct RootDeps {
     /// Asks for a folder: the Shell… dialog's and the Worktrees tab's
     /// Browse, and Add repo.
     pub pick_folder: FolderPicker,
-    /// Asks for a file: the workspace creator's `.code-workspace` Browse.
+    /// Asks for a file: the workspace creator's `.code-workspace` Browse and
+    /// the preset wizard's file pickers.
     pub pick_file: FilePicker,
 }
 
@@ -616,8 +642,13 @@ pub struct RootView {
     last_focused_session: Option<String>,
     /// Asks for a folder.
     pick_folder: FolderPicker,
-    /// Asks for a `.code-workspace` file, for the workspace creator.
+    /// Asks for a file: a `.code-workspace` for the workspace creator, a
+    /// prompts or variable file for the preset wizard.
     pick_file: FilePicker,
+    /// The preset wizard, while open.
+    preset_wizard: Option<preset_wizard_view::PresetWizardDialog>,
+    /// The preset wizard's keyboard focus.
+    preset_wizard_focus: FocusHandle,
     /// The worktrees root and whether the user set it, as this connection
     /// last heard.
     worktrees_root: Option<(String, bool)>,
@@ -858,6 +889,8 @@ impl RootView {
             last_focused_session: None,
             pick_folder,
             pick_file,
+            preset_wizard: None,
+            preset_wizard_focus: cx.focus_handle(),
             workspace_creator: None,
             workspace_creator_focus: cx.focus_handle(),
             vscode_suggestions: VscodeSuggestions::default(),
@@ -1036,6 +1069,7 @@ impl RootView {
             || self.delete_dialog.is_some()
             || self.repo_remove.dialog().is_some()
             || self.workspace_creator.is_some()
+            || self.preset_wizard.is_some()
             || self.vscode_prompt_open()
             || self.changes.discard.is_some()
             || self.changes.file_menu.is_some()
@@ -1919,6 +1953,7 @@ impl RootView {
             self.close_spawn_dialog(window, cx);
             self.close_shell_dialog(window, cx);
             self.close_workspace_creator(window, cx);
+            self.close_preset_wizard(window, cx);
             self.vscode_suggestions.clear();
             self.cwd_workspace_scans.clear();
             self.close_appearance_editor(window, cx);
@@ -2125,7 +2160,8 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let inline = request_id.is_none() && self.on_creator_error(&message, cx);
+        let inline = request_id.is_none()
+            && (self.on_creator_error(&message, cx) || self.on_preset_list_error(&message, cx));
         self.repo_remove.disarm();
         if !inline {
             self.on_daemon_error(message, request_id, window, cx);
@@ -2171,6 +2207,7 @@ impl RootView {
         self.on_cleanup_failed_message(msg, window, cx);
         self.on_worktrees_message(msg, cx);
         self.on_recover_message(msg, window, cx);
+        self.on_preset_message(msg, cx);
         if let DaemonMessage::SpawnConfigReply { session_id, config } = msg {
             self.on_spawn_config(session_id, config.clone(), window, cx);
         }
@@ -2190,6 +2227,7 @@ impl RootView {
         self.close_spawn_dialog(window, cx);
         self.close_shell_dialog(window, cx);
         self.close_workspace_creator(window, cx);
+        self.close_preset_wizard(window, cx);
         self.vscode_suggestions.clear();
         self.cwd_workspace_scans.clear();
         self.close_appearance_editor(window, cx);
@@ -2358,7 +2396,7 @@ impl RootView {
             }
             return;
         }
-        if self.vscode_prompt_open() || self.workspace_creator.is_some() {
+        if self.creator_dialog_open() {
             if self.on_creator_dialogs_key(ks, window, cx) {
                 cx.stop_propagation();
             }
@@ -2794,6 +2832,7 @@ impl Render for RootView {
             .children(delete_under)
             .children(repo_remove_layer)
             .children(workspace_creator_layer)
+            .children(self.preset_wizard_layer(cx))
             .children(vscode_prompt_layer)
             .children(self.discard_confirm_layer(cx))
             .children(self.stash_drop_layer(cx))

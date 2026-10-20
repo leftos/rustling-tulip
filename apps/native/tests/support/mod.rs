@@ -23,9 +23,9 @@ use protocol::{
     SplitDirection, TabEntry, WorkspaceEntry,
 };
 use rustling_tulip_native::{
-    Activity, Clock, Connection, ContainerKind, FilePicker, FolderPicker, HandshakeInfo,
-    NetCommand, NetDeps, NetEvent, Notifier, NotifyState, OpenFailure, Opener, QuitFn, RootDeps,
-    RootView, ScPanel, bind_keys, spawn_net,
+    Activity, Clock, Connection, ContainerKind, FileFilter, FilePicker, FolderPicker,
+    HandshakeInfo, NetCommand, NetDeps, NetEvent, Notifier, NotifyState, OpenFailure, Opener,
+    QuitFn, RootDeps, RootView, ScPanel, bind_keys, spawn_net,
 };
 use serde_json::{Value, json};
 
@@ -720,6 +720,7 @@ pub struct PickRecorder {
     file_asks: Cell<usize>,
     starts: std::cell::RefCell<Vec<Option<PathBuf>>>,
     file_starts: std::cell::RefCell<Vec<Option<PathBuf>>>,
+    file_filters: std::cell::RefCell<Vec<FileFilter>>,
 }
 
 impl PickRecorder {
@@ -735,12 +736,15 @@ impl PickRecorder {
 
     fn file_picker(recorder: &Rc<Self>) -> FilePicker {
         let recorder = Rc::clone(recorder);
-        Rc::new(move |_: &mut App, start: Option<PathBuf>| {
-            recorder.file_asks.set(recorder.file_asks.get() + 1);
-            recorder.file_starts.borrow_mut().push(start);
-            let picked = recorder.next_file.borrow().clone();
-            Box::pin(async move { picked })
-        })
+        Rc::new(
+            move |_: &mut App, start: Option<PathBuf>, filter: FileFilter| {
+                recorder.file_asks.set(recorder.file_asks.get() + 1);
+                recorder.file_starts.borrow_mut().push(start);
+                recorder.file_filters.borrow_mut().push(filter);
+                let picked = recorder.next_file.borrow().clone();
+                Box::pin(async move { picked })
+            },
+        )
     }
 }
 
@@ -1057,6 +1061,11 @@ impl<'a> Harness<'a> {
     /// The folder each ask of the file picker opened at, oldest first.
     pub fn file_starts(&self) -> Vec<Option<PathBuf>> {
         self.picker.file_starts.borrow().clone()
+    }
+
+    /// The filter each ask of the file picker offered, oldest first.
+    pub fn file_filters(&self) -> Vec<FileFilter> {
+        self.picker.file_filters.borrow().clone()
     }
 
     /// Reports `host` as behind a mapped network drive from now on.

@@ -167,7 +167,16 @@ impl RootView {
         }
     }
 
-    /// The prompt or the creator, when open, takes the keys it handles.
+    /// Whether the VS Code prompt, the workspace creator or the preset
+    /// wizard is open, each of which takes the keys it handles.
+    pub(crate) fn creator_dialog_open(&self) -> bool {
+        self.vscode_prompt_open()
+            || self.workspace_creator.is_some()
+            || self.preset_wizard.is_some()
+    }
+
+    /// The prompt, the creator or the preset wizard, when open, takes the
+    /// keys it handles.
     /// `false` means the key belongs to a field (the name edit passes through).
     pub(crate) fn on_creator_dialogs_key(
         &mut self,
@@ -182,7 +191,7 @@ impl RootView {
         if self.workspace_creator.is_some() {
             return self.on_workspace_creator_key(keystroke, window, cx);
         }
-        false
+        self.on_preset_wizard_key(keystroke, window, cx)
     }
 
     /// Ticks or unticks `repo_id` in the From-repos member list.
@@ -207,7 +216,8 @@ impl RootView {
             .last_vscode_dir()
             .or_else(|| self.sidebar.last_repo_dir())
             .map(std::path::PathBuf::from);
-        let picked = (self.pick_file)(cx, start);
+        let filter = crate::FileFilter::new("VS Code workspace", &["code-workspace"]);
+        let picked = (self.pick_file)(cx, start, filter);
         cx.spawn(async move |this, cx| {
             let picked = picked.await;
             // Fails only when the view is gone, and its window with it.

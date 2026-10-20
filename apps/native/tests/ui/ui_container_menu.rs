@@ -8,7 +8,7 @@ use crate::support;
 use std::path::PathBuf;
 
 use gpui::{TestAppContext, px};
-use protocol::WorkspaceEntry;
+use protocol::{ClientMessage, DaemonMessage, PresetEntry, PresetTarget, WorkspaceEntry};
 use rustling_tulip_native::ToastKind;
 use serde_json::json;
 use support::{Fixture, Harness, Opened, TestDir, pane, repo, session, tab};
@@ -85,7 +85,7 @@ fn container_menu_lists_spawn_preset_explorer_vscode_copy_and_remove(cx: &mut Te
         [
             "Spawn session",
             "Appearance…",
-            "Launch preset…",
+            "Launch preset… (loading)",
             "Open in Explorer",
             "Open in VS Code",
             "Copy path",
@@ -183,20 +183,252 @@ fn a_tab_row_without_a_target_lock_keeps_the_picker(cx: &mut TestAppContext) {
     );
 }
 
+/// A preset named `name` with an inline source, as the daemon lists it.
+fn preset(id: &str, name: &str) -> PresetEntry {
+    serde_json::from_value(json!({
+        "id": id, "name": name, "source_repo_id": "r1",
+        "prompt_sources": [{"kind": "inline"}],
+        "prompt_template": "{prompt}", "branch_template": "tmp/{index}",
+        "tab_grouping": {"kind": "none"},
+        "injector": {"startup_delay_ms": 0, "pre_input": [], "post_input": []}
+    }))
+    .expect("preset fixture")
+}
+
+fn repo_target(id: &str) -> PresetTarget {
+    PresetTarget::Repo {
+        repo_id: id.to_owned(),
+    }
+}
+
+/// The `ListPresets` requests the client sent since the last read.
+fn preset_requests(h: &mut Harness<'_>) -> Vec<PresetTarget> {
+    h.sent()
+        .into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::ListPresets { target } => Some(target),
+            _ => None,
+        })
+        .collect()
+}
+
+fn preset_labels(h: &mut Harness<'_>) -> Vec<String> {
+    h.root(|root, _| root.container_menu_labels())
+        .into_iter()
+        .filter(|label| label.starts_with("Launch preset"))
+        .collect()
+}
+
 #[gpui::test]
-fn the_preset_row_is_disabled(cx: &mut TestAppContext) {
+fn the_preset_row_loads_on_every_open(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &two_repos());
+    h.sent();
     open(&mut h, "container-repo:r1");
 
     assert_eq!(
-        h.root(|root, _| { root.container_menu_disabled_tip("container-menu-launch-preset") }),
-        Some("Presets arrive with the preset wizard")
+        preset_requests(&mut h),
+        [repo_target("r1")],
+        "opening asks for the repo's presets"
+    );
+    assert_eq!(preset_labels(&mut h), ["Launch preset… (loading)"]);
+    assert_eq!(
+        h.root(|root, _| root.container_menu_disabled_tip("container-menu-launch-preset")),
+        None,
+        "the loading row has no tooltip"
     );
     h.click_on("container-menu-launch-preset");
     assert!(
-        !h.root(|root, _| root.spawn_dialog_open()),
-        "the disabled row opens nothing"
+        h.root(|root, _| root.container_menu_open()),
+        "the loading row cannot be pressed"
+    );
+
+    h.send(DaemonMessage::Presets {
+        target: repo_target("r1"),
+        entries: Vec::new(),
+    });
+    h.keys("escape");
+    open(&mut h, "container-repo:r1");
+    assert_eq!(
+        preset_requests(&mut h),
+        [repo_target("r1")],
+        "a reopen asks again rather than reuse the last list"
+    );
+    assert_eq!(preset_labels(&mut h), ["Launch preset… (loading)"]);
+
+    h.keys("escape");
+    h.load(&with_workspace(&["r1", "r2"], None));
+    open(&mut h, "container-ws:ws1");
+    assert_eq!(
+        preset_requests(&mut h),
+        [PresetTarget::Workspace {
+            workspace_id: "ws1".to_owned()
+        }],
+        "a workspace asks for its members' presets"
+    );
+}
+
+#[gpui::test]
+fn a_failed_list_shows_the_error_without_a_toast(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_repos());
+    open(&mut h, "container-repo:r1");
+    h.send(DaemonMessage::Error {
+        message: "presets.json: expected value at line 1".to_owned(),
+        request_id: None,
+    });
+
+    assert_eq!(preset_labels(&mut h), ["Launch preset… (failed to load)"]);
+    assert_eq!(
+        h.root(|root, _| root.container_menu_disabled_tip("container-menu-launch-preset")),
+        Some("presets.json: expected value at line 1".to_owned())
+    );
+    assert!(
+        h.root(|root, _| root.toasts().is_empty()),
+        "the failure shows in the row, not as a toast"
+    );
+
+    h.send(DaemonMessage::Error {
+        message: "something else".to_owned(),
+        request_id: None,
+    });
+    assert_eq!(
+        h.root(|root, _| root.toasts().len()),
+        1,
+        "once the rows have loaded, an unrouted error toasts as before"
+    );
+    assert_eq!(preset_labels(&mut h), ["Launch preset… (failed to load)"]);
+}
+
+#[gpui::test]
+fn no_presets_shows_the_none_row(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_repos());
+    open(&mut h, "container-repo:r1");
+    h.send(DaemonMessage::Presets {
+        target: repo_target("r1"),
+        entries: Vec::new(),
+    });
+
+    assert_eq!(preset_labels(&mut h), ["Launch preset… (none defined)"]);
+    assert_eq!(
+        h.root(|root, _| root.container_menu_disabled_tip("container-menu-launch-preset")),
+        Some("No .rustling-tulip/presets.json in this repo".to_owned())
+    );
+}
+
+#[gpui::test]
+fn listed_presets_get_a_row_each(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_repos());
+    open(&mut h, "container-repo:r1");
+    h.send(DaemonMessage::Presets {
+        target: repo_target("r1"),
+        entries: vec![preset("a", "Bug triage"), preset("b", "Docs sweep")],
+    });
+
+    assert_eq!(
+        preset_labels(&mut h),
+        ["Launch preset · Bug triage", "Launch preset · Docs sweep"]
+    );
+    assert_eq!(
+        h.root(|root, _| root.container_menu_groups())[1],
+        [
+            "container-menu-appearance".to_owned(),
+            "container-menu-launch-preset-0".to_owned(),
+            "container-menu-launch-preset-1".to_owned(),
+        ]
+    );
+    assert_eq!(
+        h.root(|root, _| root.container_menu_disabled_tip("container-menu-launch-preset-1")),
+        None,
+        "a preset row is enabled"
+    );
+}
+
+#[gpui::test]
+fn a_preset_row_closes_the_menu_and_opens_the_wizard(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_repos());
+    open(&mut h, "container-repo:r1");
+    h.send(DaemonMessage::Presets {
+        target: repo_target("r1"),
+        entries: vec![preset("a", "Bug triage"), preset("b", "Docs sweep")],
+    });
+    h.click_on("container-menu-launch-preset-1");
+
+    assert!(
+        !h.root(|root, _| root.container_menu_open()),
+        "the menu closed"
+    );
+    assert_eq!(
+        h.root(|root, _| root.preset_wizard_title()).as_deref(),
+        Some("Launch preset · Docs sweep")
+    );
+}
+
+#[gpui::test]
+fn a_reply_for_another_container_is_dropped(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_repos());
+    open(&mut h, "container-repo:r1");
+    h.send(DaemonMessage::Presets {
+        target: repo_target("r2"),
+        entries: vec![preset("a", "Elsewhere")],
+    });
+    assert_eq!(preset_labels(&mut h), ["Launch preset… (loading)"]);
+
+    h.keys("escape");
+    h.send(DaemonMessage::Presets {
+        target: repo_target("r1"),
+        entries: vec![preset("a", "Late")],
+    });
+    open(&mut h, "container-repo:r2");
+    h.send(DaemonMessage::Presets {
+        target: repo_target("r1"),
+        entries: vec![preset("a", "Moved")],
+    });
+    assert_eq!(
+        preset_labels(&mut h),
+        ["Launch preset… (loading)"],
+        "a reply for a closed or moved menu fills nothing"
+    );
+}
+
+#[gpui::test]
+fn a_failed_row_takes_its_own_list_when_it_arrives(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_repos());
+    open(&mut h, "container-repo:r1");
+    h.keys("escape");
+    open(&mut h, "container-repo:r2");
+    h.send(DaemonMessage::Error {
+        message: "r1's presets.json is malformed".to_owned(),
+        request_id: None,
+    });
+    assert_eq!(preset_labels(&mut h), ["Launch preset… (failed to load)"]);
+
+    h.send(DaemonMessage::Presets {
+        target: repo_target("r2"),
+        entries: vec![preset("a", "Bug triage")],
+    });
+    assert_eq!(
+        preset_labels(&mut h),
+        ["Launch preset · Bug triage"],
+        "the menu's own list replaces a failure it was charged with"
+    );
+}
+
+#[gpui::test]
+fn a_tab_container_has_no_preset_tip(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_tabs());
+    h.click_on("sidebar-view-tabs");
+    open(&mut h, "container-tab:t2");
+    assert_eq!(
+        h.root(|root, _| root.container_menu_disabled_tip("container-menu-launch-preset")),
+        None,
+        "a tab container draws no preset row, so it has no tooltip"
     );
 }
 
@@ -325,13 +557,15 @@ fn workspace_explorer_and_copy_are_disabled(cx: &mut TestAppContext) {
     open(&mut h, "container-ws:ws1");
     for selector in ["container-menu-explorer", "container-menu-copy-path"] {
         assert_eq!(
-            h.root(|root, _| root.container_menu_disabled_tip(selector)),
+            h.root(|root, _| root.container_menu_disabled_tip(selector))
+                .as_deref(),
             Some("This container has no folder"),
             "{selector} is disabled"
         );
     }
     assert_eq!(
-        h.root(|root, _| root.container_menu_disabled_tip("container-menu-vscode")),
+        h.root(|root, _| root.container_menu_disabled_tip("container-menu-vscode"))
+            .as_deref(),
         None,
         "a workspace with member folders opens in VS Code"
     );
@@ -341,7 +575,8 @@ fn workspace_explorer_and_copy_are_disabled(cx: &mut TestAppContext) {
     h.keys("escape");
     open(&mut h, "container-ws:ws2");
     assert_eq!(
-        h.root(|root, _| root.container_menu_disabled_tip("container-menu-vscode")),
+        h.root(|root, _| root.container_menu_disabled_tip("container-menu-vscode"))
+            .as_deref(),
         Some("This container has no folder"),
         "a workspace with no resolvable folder cannot open in VS Code"
     );

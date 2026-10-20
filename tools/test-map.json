@@ -179,7 +179,7 @@
       "paths": [
         "apps/native/src/folder_picker.rs"
       ],
-      "filter": "(binary_id(rustling-tulip-native) & test(/^folder_picker::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_repos)::/))"
+      "filter": "(binary_id(rustling-tulip-native) & test(/^folder_picker::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_preset_wizard|ui_repos|ui_workspace_creator)::/))"
     },
     {
       "paths": [
@@ -333,6 +333,24 @@
     },
     {
       "paths": [
+        "apps/native/src/preset_prompts.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & test(/^(preset_prompts|preset_wizard)::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_preset_wizard)::/))"
+    },
+    {
+      "paths": [
+        "apps/native/src/preset_wizard.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & test(/^preset_wizard::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_container_menu|ui_preset_wizard)::/))"
+    },
+    {
+      "paths": [
+        "apps/native/src/preset_wizard_view.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native::ui) & test(/^(ui_container_menu|ui_preset_wizard)::/))"
+    },
+    {
+      "paths": [
         "apps/native/src/quit.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native) & test(/^quit::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_quit)::/))"
@@ -407,7 +425,7 @@
       "paths": [
         "apps/native/src/session_menu.rs"
       ],
-      "filter": "(binary_id(rustling-tulip-native) & test(/^session_menu::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_appearance|ui_appearance_editor|ui_container_menu|ui_keys|ui_launch_last|ui_repo_remove|ui_session_actions)::/))"
+      "filter": "(binary_id(rustling-tulip-native) & test(/^session_menu::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_appearance|ui_appearance_editor|ui_container_menu|ui_keys|ui_launch_last|ui_preset_wizard|ui_repo_remove|ui_session_actions)::/))"
     },
     {
       "paths": [
@@ -726,6 +744,12 @@
         "apps/native/tests/ui/ui_panes.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native::ui) & test(/^(ui_panes)::/))"
+    },
+    {
+      "paths": [
+        "apps/native/tests/ui/ui_preset_wizard.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native::ui) & test(/^(ui_preset_wizard)::/))"
     },
     {
       "paths": [

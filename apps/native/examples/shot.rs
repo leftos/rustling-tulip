@@ -34,7 +34,7 @@ use protocol::{ClientMessage, DaemonMessage, GridNode, SessionSnapshot, SplitDir
 use rustling_tulip_native::fonts;
 use rustling_tulip_native::offscreen::show_cloaked;
 use rustling_tulip_native::{
-    Activity, Assets, Clock, Connection, FilePicker, FolderPicker, HandshakeInfo,
+    Activity, Assets, Clock, Connection, FileFilter, FilePicker, FolderPicker, HandshakeInfo,
     NATIVE_PROTOCOL_VERSIONS, NetCommand, NetEvent, Notifier, NotifyState, OpenFailure, Opener,
     RAIL_ITEM_HEIGHT, RAIL_WIDTH, RootDeps, RootView, bind_keys,
 };
@@ -255,8 +255,9 @@ fn deps(
     let now: Clock = Arc::new(move || started);
     let pick_folder: FolderPicker =
         Rc::new(|_: &mut App, _: Option<PathBuf>| futures::future::ready(None).boxed_local());
-    let pick_file: FilePicker =
-        Rc::new(|_: &mut App, _: Option<PathBuf>| futures::future::ready(None).boxed_local());
+    let pick_file: FilePicker = Rc::new(|_: &mut App, _: Option<PathBuf>, _: FileFilter| {
+        futures::future::ready(None).boxed_local()
+    });
     RootDeps {
         tx,
         events,

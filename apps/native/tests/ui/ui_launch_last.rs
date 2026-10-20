@@ -755,6 +755,7 @@ fn container_launch_current_tab_replays_into_the_active_tab(cx: &mut TestAppCont
     );
 
     h.right_click_on("container-repo:r1");
+    h.sent(); // opening the menu asked for its presets
     h.click_on("container-launch-last");
     h.click_on("container-launch-last-current");
     assert!(
@@ -781,6 +782,7 @@ fn container_launch_new_tab_replays_into_a_new_tab(cx: &mut TestAppContext) {
     h.sent();
 
     h.right_click_on("container-repo:r1");
+    h.sent(); // opening the menu asked for its presets
     h.click_on("container-launch-last");
     h.click_on("container-launch-last-new");
 
@@ -809,6 +811,7 @@ fn container_launch_named_tab_replays_into_that_tab(cx: &mut TestAppContext) {
     h.sent();
 
     h.right_click_on("container-repo:r1");
+    h.sent(); // opening the menu asked for its presets
     h.click_on("container-launch-last");
     h.click_on("container-launch-last-tab-t2");
 
@@ -897,6 +900,7 @@ fn a_tab_switch_during_the_branch_wait_leaves_the_placement_where_the_click_name
     h.sent();
 
     h.right_click_on("container-repo:r1");
+    h.sent(); // opening the menu asked for its presets
     h.click_on("container-launch-last");
     h.click_on("container-launch-last-current");
     let sent = h.sent();
@@ -1248,6 +1252,7 @@ fn an_armed_remove_row_does_not_survive_the_launch_last_submenu(cx: &mut TestApp
     h.sent();
 
     h.right_click_on("container-repo:r1");
+    h.sent(); // opening the menu asked for its presets
     h.click_on("container-menu-remove");
     assert_eq!(
         h.root(|root, _| root.container_menu_labels()),
@@ -1255,7 +1260,7 @@ fn an_armed_remove_row_does_not_survive_the_launch_last_submenu(cx: &mut TestApp
             "Spawn session",
             "Launch last again ▸",
             "Appearance…",
-            "Launch preset…",
+            "Launch preset… (loading)",
             "Open in Explorer",
             "Open in VS Code",
             "Copy path",
@@ -1274,7 +1279,7 @@ fn an_armed_remove_row_does_not_survive_the_launch_last_submenu(cx: &mut TestApp
             "Spawn session",
             "Launch last again ▸",
             "Appearance…",
-            "Launch preset…",
+            "Launch preset… (loading)",
             "Open in Explorer",
             "Open in VS Code",
             "Copy path",
@@ -1322,7 +1327,7 @@ fn back_returns_the_launch_last_submenu_to_the_top_level(cx: &mut TestAppContext
             "Spawn session",
             "Launch last again ▸",
             "Appearance…",
-            "Launch preset…",
+            "Launch preset… (loading)",
             "Open in Explorer",
             "Open in VS Code",
             "Copy path",
@@ -1359,6 +1364,7 @@ fn a_click_outside_closes_the_whole_menu_from_the_launch_last_submenu(cx: &mut T
     let mut h = two_tabs(cx, &dir, Some(config(single_target(false))));
     h.sent();
     h.right_click_on("container-repo:r1");
+    h.sent(); // opening the menu asked for its presets
     h.click_on("container-launch-last");
 
     let outside = h.center("new-tab");

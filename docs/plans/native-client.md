@@ -8,9 +8,9 @@ The rulings the native client's open items need before they are briefed. Each it
 - **Autonomy:** drive the native client to done without stopping between items or waves. Technical decisions are settled in the session and recorded here as rulings; only questions about behaviour the user will see go to the user. Phases 5 and 6 are split into brief-sized items from their parity sections when their wave comes up, and the split goes to the user before anything is dispatched.
 - **Phase 4 scope:** its named features plus every parity line not claimed by Phase 5 (drag-and-drop, pop-outs) or Phase 6 (remote). Every item mounts into `RootView` (`lib.rs`), so concurrent items rebase onto `main` before landing. Concurrency ceiling 3. Dependencies: P4.11c → P4.15b (the launch path). P4.12c builds on the spawn form's target lock (`spawn_form.rs` `Lock`: a locked target or tab, an optional pinned worktree and `share_confirmed`), which P4.4b added for "Launch session here".
 
-## P4.15 Preset wizard
+## P4.15b Preset wizard preview and launch
 
-Split in two. **P4.15a** sources (file, folder, inline, GitHub issue ranges) and variables (toggle, file, folder, text, required). **P4.15b** preview (grouped by tab, max panes per tab, script commands) and launching (progress, counts, Cancel, Select launched, Stop all), sticky progress and failure toasts one per job, the first tab created made active, preset-launched sessions highlighted; needs P4.11c. Parity: "Preset wizard", "Sticky preset progress…", "Preset-launched sessions highlighted".
+The wizard's sources and variables stages exist (see [native-client.md](../native-client.md)); its last stage's Next is disabled until this item adds the preview (grouped by tab, max panes per tab, script commands) and launching (progress, counts, Cancel, Select launched, Stop all), sticky progress and failure toasts one per job, the first tab created made active, preset-launched sessions highlighted; needs P4.11c. Parity: "Preset wizard", "Sticky preset progress…", "Preset-launched sessions highlighted".
 
 ## Phase 5 — windows and drag-and-drop
 
