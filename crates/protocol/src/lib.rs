@@ -3947,7 +3947,9 @@ pub enum RemoteState {
     /// Tailscale is logged out or stopped.
     NotConnected,
     /// The CLI timed out, printed output that does not parse, or failed
-    /// another way; `reason` is its error text.
+    /// another way; `reason` is a fixed text naming which of the three, with
+    /// no file path, CLI output or address in it. The CLI's own error text is
+    /// in the daemon log.
     TailscaleError { reason: String },
     /// HTTPS certificates are disabled in the tailnet's admin console, so the
     /// listener stays down.
@@ -3961,8 +3963,9 @@ pub enum RemoteState {
     /// The configured port stayed in use on every tailnet address, so the
     /// listener did not start.
     PortInUse,
-    /// Every tailnet address failed to bind for another reason; `reason` says
-    /// which.
+    /// Every tailnet address failed to bind for another reason; `reason` is a
+    /// fixed text with no file path, OS error text or tailnet address in it.
+    /// The bind error itself is in the daemon log.
     BindFailed { reason: String },
     /// Serving at `https://{name}:{port}`. `cert_expires_at` is the
     /// certificate's `notAfter` in Unix seconds, `None` when it could not be

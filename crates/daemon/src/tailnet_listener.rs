@@ -92,8 +92,31 @@ pub enum ListenerStatus {
 
 /// The reason [`protocol::RemoteState::CertFailed`] gives for
 /// [`ListenerStatus::CertFailed`], which carries none.
-const CERT_FAILED_REASON: &str = "no certificate is in service: tailscale cert failed, its files \
-                                  were unusable, or Tailscale gave no MagicDNS name";
+const CERT_FAILED_REASON: &str = "No certificate is in service: tailscale cert failed, its files \
+                                  were unusable, or Tailscale gave no MagicDNS name; see the \
+                                  daemon log.";
+
+/// The reason [`protocol::RemoteState::TailscaleError`] gives for
+/// [`TailnetError::Timeout`]. Like the other reasons below it is a fixed
+/// text: the error's own text, logged in `daemon.log`, can carry the CLI's
+/// path and its stderr, and every connected client sees the reason.
+const TAILSCALE_TIMEOUT_REASON: &str =
+    "The Tailscale CLI did not answer in time; see the daemon log.";
+
+/// The reason [`protocol::RemoteState::TailscaleError`] gives for
+/// [`TailnetError::BadOutput`].
+const TAILSCALE_BAD_OUTPUT_REASON: &str =
+    "The Tailscale CLI printed output the daemon could not read; see the daemon log.";
+
+/// The reason [`protocol::RemoteState::TailscaleError`] gives for
+/// [`TailnetError::Failed`].
+const TAILSCALE_FAILED_REASON: &str = "The Tailscale CLI reported an error; see the daemon log.";
+
+/// The reason [`protocol::RemoteState::BindFailed`] gives for
+/// [`ListenerStatus::BindFailed`], whose own text names the tailnet address
+/// and the OS error.
+const BIND_FAILED_REASON: &str =
+    "The daemon could not listen on this PC's tailnet address; see the daemon log.";
 
 /// The remote-access state a client is shown for the listener's `status`,
 /// listening on `port`.
@@ -118,17 +141,21 @@ pub fn remote_state(status: &ListenerStatus, port: u16) -> protocol::RemoteState
             reason: CERT_FAILED_REASON.to_owned(),
         },
         ListenerStatus::PortInUse { .. } => RemoteState::PortInUse,
-        ListenerStatus::BindFailed(reason) => RemoteState::BindFailed {
-            reason: reason.clone(),
+        ListenerStatus::BindFailed(_) => RemoteState::BindFailed {
+            reason: BIND_FAILED_REASON.to_owned(),
         },
         ListenerStatus::TailscaleDown(TailnetError::NotInstalled) => RemoteState::NotInstalled,
         ListenerStatus::TailscaleDown(TailnetError::NotRunning) => RemoteState::NotRunning,
         ListenerStatus::TailscaleDown(TailnetError::AccessDenied) => RemoteState::OtherWindowsUser,
         ListenerStatus::TailscaleDown(TailnetError::NotConnected) => RemoteState::NotConnected,
-        ListenerStatus::TailscaleDown(
-            err @ (TailnetError::Timeout | TailnetError::BadOutput(_) | TailnetError::Failed(_)),
-        ) => RemoteState::TailscaleError {
-            reason: err.to_string(),
+        ListenerStatus::TailscaleDown(TailnetError::Timeout) => RemoteState::TailscaleError {
+            reason: TAILSCALE_TIMEOUT_REASON.to_owned(),
+        },
+        ListenerStatus::TailscaleDown(TailnetError::BadOutput(_)) => RemoteState::TailscaleError {
+            reason: TAILSCALE_BAD_OUTPUT_REASON.to_owned(),
+        },
+        ListenerStatus::TailscaleDown(TailnetError::Failed(_)) => RemoteState::TailscaleError {
+            reason: TAILSCALE_FAILED_REASON.to_owned(),
         },
     }
 }
@@ -350,6 +377,8 @@ impl TailnetListener {
             last_who: None,
             no_name_reported: false,
             bind_failures: BTreeMap::new(),
+            dropped_prefixes: BTreeSet::new(),
+            no_address_reported: false,
             transient_failures: 0,
             last_down_error: None,
             #[cfg(test)]
@@ -813,6 +842,12 @@ struct Supervisor<A, S> {
     no_name_reported: bool,
     /// The last bind failure per address, so a repeat logs at debug.
     bind_failures: BTreeMap<IpAddr, ErrorKind>,
+    /// The `whoami` prefixes dropped as unbindable and logged at warn
+    /// already, so a repeat logs at debug.
+    dropped_prefixes: BTreeSet<String>,
+    /// Whether `whoami` listing no address to bind was logged at warn
+    /// already in the current episode.
+    no_address_reported: bool,
     /// Consecutive transient `whoami` failures.
     transient_failures: u32,
     /// The last `whoami` failure that took Tailscale down, so a repeat with
@@ -932,6 +967,7 @@ impl<A: TailnetApi, S: Serve<A>> Supervisor<A, S> {
     /// transient one (timeout, unparsable output, other CLI failure) keeps
     /// the servers and the status, until [`TRANSIENT_LIMIT`] in a row.
     async fn whoami_failed(&mut self, err: TailnetError) {
+        self.no_address_reported = false;
         if is_transient(&err) {
             self.transient_failures += 1;
             if self.transient_failures < TRANSIENT_LIMIT {
@@ -1036,7 +1072,7 @@ impl<A: TailnetApi, S: Serve<A>> Supervisor<A, S> {
         tls: &RustlsConfig,
         shutdown: &mut watch::Receiver<bool>,
     ) -> Flow {
-        let wanted = bind_addresses(&who.node.addresses);
+        let wanted = bind_addresses(&who.node.addresses, &mut self.dropped_prefixes);
         self.bind_failures.retain(|ip, _| wanted.contains(ip));
         let stale: Vec<IpAddr> = self
             .servers
@@ -1057,7 +1093,8 @@ impl<A: TailnetApi, S: Serve<A>> Supervisor<A, S> {
                 return Flow::Shutdown;
             }
         }
-        self.publish(self.status_after(cert, outcome));
+        let status = self.status_after(cert, outcome);
+        self.publish(status);
         Flow::Continue
     }
 
@@ -1166,7 +1203,11 @@ impl<A: TailnetApi, S: Serve<A>> Supervisor<A, S> {
         }
     }
 
-    fn status_after(&self, cert: ServingCert, outcome: BindOutcome) -> ListenerStatus {
+    fn status_after(&mut self, cert: ServingCert, outcome: BindOutcome) -> ListenerStatus {
+        let no_address = self.servers.is_empty() && !outcome.in_use && outcome.failure.is_none();
+        if !no_address {
+            self.no_address_reported = false;
+        }
         if !self.servers.is_empty() {
             let addrs = self.servers.values().map(|server| server.local).collect();
             return ListenerStatus::Serving {
@@ -1180,12 +1221,18 @@ impl<A: TailnetApi, S: Serve<A>> Supervisor<A, S> {
                 port: self.options.port,
             };
         }
-        match outcome.failure {
-            Some(reason) => ListenerStatus::BindFailed(reason),
-            None => ListenerStatus::TailscaleDown(TailnetError::BadOutput(
-                "whoami listed no address to bind".to_owned(),
-            )),
+        if let Some(reason) = outcome.failure {
+            return ListenerStatus::BindFailed(reason);
         }
+        if self.no_address_reported {
+            tracing::debug!("tailnet listener: whoami still lists no address to bind");
+        } else {
+            self.no_address_reported = true;
+            tracing::warn!(
+                "tailnet listener: whoami listed no address to bind; reporting not connected, retrying"
+            );
+        }
+        ListenerStatus::TailscaleDown(TailnetError::NotConnected)
     }
 
     /// Publish `status`, waking watchers only when it changed.
@@ -1627,23 +1674,33 @@ fn is_transient(err: &TailnetError) -> bool {
 
 /// The addresses to bind from `whoami`'s CIDR prefixes (`100.x.y.z/32`,
 /// `fd7a:…/128`): prefix length stripped, IPv4-mapped forms canonicalised,
-/// the unspecified address and anything unparsable dropped.
-fn bind_addresses(prefixes: &[String]) -> BTreeSet<IpAddr> {
+/// the unspecified address and anything unparsable dropped. A dropped
+/// prefix is logged at warn the first time, at debug while `reported` holds
+/// it; `reported` keeps only the prefixes this call dropped, so one that
+/// comes back after a gap warns again.
+fn bind_addresses(prefixes: &[String], reported: &mut BTreeSet<String>) -> BTreeSet<IpAddr> {
     let mut out = BTreeSet::new();
+    let mut dropped = BTreeSet::new();
     for prefix in prefixes {
         let text = prefix.split_once('/').map_or(prefix.as_str(), |(ip, _)| ip);
-        match text.parse::<IpAddr>() {
+        let why = match text.parse::<IpAddr>() {
             Ok(ip) if ip.to_canonical().is_unspecified() => {
-                tracing::warn!(%prefix, "tailnet listener: never binds the unspecified address");
+                "never binds the unspecified address".to_owned()
             }
             Ok(ip) => {
                 out.insert(ip.to_canonical());
+                continue;
             }
-            Err(err) => {
-                tracing::warn!(%prefix, %err, "tailnet listener: unparsable whoami address");
-            }
+            Err(err) => format!("unparsable whoami address: {err}"),
+        };
+        if reported.contains(prefix) {
+            tracing::debug!(%prefix, %why, "tailnet listener: whoami address still dropped");
+        } else {
+            tracing::warn!(%prefix, %why, "tailnet listener: whoami address dropped");
         }
+        dropped.insert(prefix.clone());
     }
+    *reported = dropped;
     out
 }
 
@@ -2253,7 +2310,7 @@ mod tests {
             "::ffff:0.0.0.0/128".to_owned(),
         ];
         assert_eq!(
-            bind_addresses(&prefixes),
+            bind_addresses(&prefixes, &mut BTreeSet::new()),
             BTreeSet::from([V4_LOOPBACK]),
             "a mapped address binds as its IPv4 form; a mapped unspecified one not at all"
         );
@@ -2319,6 +2376,31 @@ mod tests {
             ),
             "the serving name drops its trailing dot: {status:?}"
         );
+        shutdown.send_replace(true);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn no_tailnet_address_reports_not_connected() {
+        let fake = Arc::new(FakeTailnet::with_addresses(&["0.0.0.0/0", "::/0"]));
+        let serve = Arc::new(PlainServe::default());
+        let (listener, shutdown) = start(&fake, &serve, options(0));
+        let status = wait_for_status(&listener, |s| *s != ListenerStatus::Starting).await;
+        assert_eq!(
+            status,
+            ListenerStatus::TailscaleDown(TailnetError::NotConnected)
+        );
+        assert_eq!(
+            remote_state(&status, 9000),
+            protocol::RemoteState::NotConnected
+        );
+        assert_eq!(serve.started.load(Ordering::SeqCst), 0, "nothing bound");
+        tokio::time::timeout(Duration::from_secs(120), async {
+            while fake.whoami_calls() < 2 {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        })
+        .await
+        .expect("whoami is asked again after reporting no address");
         shutdown.send_replace(true);
     }
 
@@ -4138,7 +4220,7 @@ mod tests {
             (
                 ListenerStatus::BindFailed("100.64.0.1:9000: denied".to_owned()),
                 RemoteState::BindFailed {
-                    reason: "100.64.0.1:9000: denied".to_owned(),
+                    reason: BIND_FAILED_REASON.to_owned(),
                 },
             ),
             (
@@ -4165,16 +4247,85 @@ mod tests {
         for (status, expected) in table {
             assert_eq!(remote_state(&status, 9000), expected, "{status:?}");
         }
-        for err in [
-            TailnetError::Timeout,
-            TailnetError::BadOutput("whoami listed no address to bind".to_owned()),
-            TailnetError::Failed("exit status 1".to_owned()),
+        for (err, reason) in [
+            (TailnetError::Timeout, TAILSCALE_TIMEOUT_REASON),
+            (
+                TailnetError::BadOutput("whoami printed no JSON".to_owned()),
+                TAILSCALE_BAD_OUTPUT_REASON,
+            ),
+            (
+                TailnetError::Failed("exit status 1".to_owned()),
+                TAILSCALE_FAILED_REASON,
+            ),
         ] {
-            let reason = err.to_string();
             assert_eq!(
                 remote_state(&ListenerStatus::TailscaleDown(err), 9000),
-                RemoteState::TailscaleError { reason }
+                RemoteState::TailscaleError {
+                    reason: reason.to_owned()
+                }
             );
         }
+    }
+
+    #[test]
+    fn tailscale_error_reasons_are_fixed_and_path_free() {
+        use protocol::RemoteState;
+        let cases = [
+            (TailnetError::Timeout, TAILSCALE_TIMEOUT_REASON, None),
+            (
+                TailnetError::BadOutput(
+                    "C:\\Program Files\\Tailscale\\tailscale.exe: junk".to_owned(),
+                ),
+                TAILSCALE_BAD_OUTPUT_REASON,
+                Some("junk"),
+            ),
+            (
+                TailnetError::Failed(
+                    "waiting for C:\\Program Files\\Tailscale\\tailscale.exe: stderr text"
+                        .to_owned(),
+                ),
+                TAILSCALE_FAILED_REASON,
+                Some("stderr text"),
+            ),
+        ];
+        for (err, expected, detail) in cases {
+            let label = format!("{err:?}");
+            let state = remote_state(&ListenerStatus::TailscaleDown(err), 9000);
+            assert_eq!(
+                state,
+                RemoteState::TailscaleError {
+                    reason: expected.to_owned()
+                },
+                "{label}"
+            );
+            let RemoteState::TailscaleError { reason } = &state else {
+                continue;
+            };
+            for forbidden in ["\\", "/", ".exe"].into_iter().chain(detail) {
+                assert!(
+                    !reason.contains(forbidden),
+                    "{label}: {reason:?} holds {forbidden:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bind_failed_reason_is_fixed_and_path_free() {
+        use protocol::RemoteState;
+        let input = "100.64.0.1:8787: access denied";
+        let state = remote_state(&ListenerStatus::BindFailed(input.to_owned()), 8787);
+        assert_eq!(
+            state,
+            RemoteState::BindFailed {
+                reason: BIND_FAILED_REASON.to_owned()
+            }
+        );
+        let RemoteState::BindFailed { reason } = &state else {
+            return;
+        };
+        assert!(!reason.contains(input), "{reason:?}");
+        assert!(!reason.contains("100."), "{reason:?}");
+        assert!(!reason.contains("access denied"), "{reason:?}");
     }
 }
