@@ -8,6 +8,8 @@
 
 use std::time::{Duration, SystemTime};
 
+use crate::target::Target;
+
 /// How often the standby watchdog ticks.
 pub const TICK: Duration = Duration::from_secs(30);
 /// A gap between watchdog ticks at least this long means the machine slept.
@@ -72,10 +74,26 @@ pub struct Footer {
     pub dot: DotKind,
     /// The short state text ("3 sessions", "disconnected", …).
     pub label: String,
-    /// The daemon's port, only while the connection is open.
+    /// The local daemon's port, only while the connection is open; never
+    /// set on a remote host.
     pub port: Option<u16>,
+    /// A remote host's short name; `None` on the local daemon.
+    pub host: Option<String>,
     /// The label, followed by " — <reason>" when the state carries one.
     pub tooltip: String,
+}
+
+impl Footer {
+    /// The footer pill's text: `daemon · <label>`, with ` · :<port>` while
+    /// open, on the local daemon; `<host> · <label>` on a remote host.
+    #[must_use]
+    pub fn pill(&self) -> String {
+        match (&self.host, self.port) {
+            (Some(host), _) => format!("{host} · {}", self.label),
+            (None, Some(port)) => format!("daemon · {} · :{port}", self.label),
+            (None, None) => format!("daemon · {}", self.label),
+        }
+    }
 }
 
 /// Reconnect delay before attempt `attempt` (0-based): 0.5 s doubling per
@@ -96,6 +114,7 @@ pub struct Connection {
     attempt: u32,
     socket_live: bool,
     port: Option<u16>,
+    target: Target,
 }
 
 impl Default for Connection {
@@ -105,9 +124,16 @@ impl Default for Connection {
 }
 
 impl Connection {
-    /// A machine at boot: [`State::Init`], never connected, no stop request.
+    /// A machine at boot on the local daemon: [`State::Init`], never
+    /// connected, no stop request.
     #[must_use]
     pub fn new() -> Self {
+        Self::for_target(Target::Local)
+    }
+
+    /// A machine at boot on `target`.
+    #[must_use]
+    pub fn for_target(target: Target) -> Self {
         Self {
             state: State::Init,
             stop_requested: false,
@@ -115,12 +141,32 @@ impl Connection {
             attempt: 0,
             socket_live: false,
             port: None,
+            target,
         }
+    }
+
+    /// Start over on `target`: back to boot, with the backoff, the stop
+    /// request and the first-connect overlay reset.
+    pub fn switch_target(&mut self, target: Target) {
+        *self = Self::for_target(target);
     }
 
     #[must_use]
     pub fn state(&self) -> &State {
         &self.state
+    }
+
+    /// The daemon this machine connects to.
+    #[must_use]
+    pub fn target(&self) -> &Target {
+        &self.target
+    }
+
+    /// Whether Stop is offered: only the local daemon's process is ever
+    /// stopped from here.
+    #[must_use]
+    pub fn can_stop(&self) -> bool {
+        self.target.is_local()
     }
 
     #[must_use]
@@ -197,10 +243,12 @@ impl Connection {
 
     /// Decide what Restart does. A fresh connect resets the machine to
     /// [`State::Connecting`] with the stop request cleared and the backoff
-    /// reset; a shutdown leaves the state alone for the close to drive.
+    /// reset; a shutdown leaves the state alone for the close to drive. On a
+    /// remote host Restart is always a fresh connect (Reconnect now): the
+    /// host's daemon is never shut down from here.
     pub fn restart(&mut self) -> RestartAction {
         let dead = matches!(self.state, State::AuthFailed { .. } | State::Error { .. });
-        if dead || self.stop_requested || !self.socket_live {
+        if dead || self.stop_requested || !self.socket_live || !self.target.is_local() {
             self.stop_requested = false;
             self.state = State::Connecting;
             self.attempt = 0;
@@ -210,9 +258,12 @@ impl Connection {
         }
     }
 
-    /// The user stopped the daemon: no reconnect until a Restart.
+    /// The user stopped the daemon: no reconnect until a Restart. Ignored on
+    /// a remote host, which [`Connection::can_stop`] never offers.
     pub fn stop(&mut self) {
-        self.stop_requested = true;
+        if self.can_stop() {
+            self.stop_requested = true;
+        }
     }
 
     /// Why the connection is closed, failed or rejected; `None` otherwise.
@@ -250,14 +301,45 @@ impl Connection {
         };
         Footer {
             dot,
-            port: self.port.filter(|_| self.is_open()),
+            port: self
+                .port
+                .filter(|_| self.is_open() && self.target.is_local()),
+            host: self.target.short_name().map(str::to_owned),
             label,
             tooltip,
         }
     }
 
-    /// The full-window overlay text shown until the first connect, or `None`
-    /// once connected or when the footer carries a failure instead.
+    /// What the Restart action is called: Restart on the local daemon,
+    /// Reconnect on a remote host (see [`Connection::restart`]).
+    #[must_use]
+    pub fn restart_label(&self) -> &'static str {
+        if self.target.is_local() {
+            "Restart daemon"
+        } else {
+            "Reconnect now"
+        }
+    }
+
+    /// The full-window overlay text shown until the first connect, naming a
+    /// remote host by its short name, or `None` when [`Connection::overlay`]
+    /// shows none.
+    #[must_use]
+    pub fn overlay_text(&self) -> Option<String> {
+        let local = self.overlay()?;
+        let Some(host) = self.target.short_name() else {
+            return Some(local.to_owned());
+        };
+        Some(match self.state {
+            State::Closed { .. } => format!("{host} dropped — reconnecting…"),
+            _ => format!("Connecting to {host}…"),
+        })
+    }
+
+    /// The local daemon's full-window overlay text shown until the first
+    /// connect, or `None` once connected or when the footer carries a
+    /// failure instead. [`Connection::overlay_text`] is the text for any
+    /// target.
     #[must_use]
     pub fn overlay(&self) -> Option<&'static str> {
         if self.has_ever_connected {
@@ -304,6 +386,7 @@ mod tests {
     use super::{
         Connection, DotKind, RESUME_GAP, RestartAction, State, TICK, Watchdog, backoff_delay,
     };
+    use crate::target::Target;
     use protocol::FEATURE_CLAUDE_PROVIDER;
     use std::time::{Duration, SystemTime};
 
@@ -423,6 +506,126 @@ mod tests {
         stopped.stop();
         assert_eq!(stopped.restart(), RestartAction::FreshConnect);
         assert_eq!(stopped.on_closed("dropped".to_owned()), Some(HALF_SECOND));
+    }
+
+    fn remote() -> Connection {
+        Connection::for_target(Target::tailnet("box.tail1234.ts.net", None))
+    }
+
+    fn open_remote() -> Connection {
+        let mut conn = remote();
+        conn.on_connecting();
+        conn.on_socket_open(8787);
+        conn.on_welcome(23, Vec::new());
+        conn
+    }
+
+    #[test]
+    fn remote_restart_reconnects_without_shutdown() {
+        assert_eq!(open_remote().restart_label(), "Reconnect now");
+        assert_eq!(open(20).restart_label(), "Restart daemon");
+        assert_eq!(open_remote().restart(), RestartAction::FreshConnect);
+
+        let mut conn = remote();
+        for _ in 0..3 {
+            conn.on_closed("refused".to_owned());
+        }
+        conn.on_connecting();
+        conn.on_socket_open(8787);
+        assert_eq!(conn.restart(), RestartAction::FreshConnect);
+        assert_eq!(conn.state(), &State::Connecting);
+        assert_eq!(
+            conn.on_closed("dropped".to_owned()),
+            Some(HALF_SECOND),
+            "Reconnect resets the backoff"
+        );
+    }
+
+    #[test]
+    fn remote_auth_failed_left_by_reconnect() {
+        let mut conn = remote();
+        conn.on_connecting();
+        conn.on_socket_open(8787);
+        conn.on_auth_failed("device not approved".to_owned());
+        assert_eq!(conn.on_closed("closed".to_owned()), None);
+        assert_eq!(conn.restart(), RestartAction::FreshConnect);
+        assert_eq!(conn.state(), &State::Connecting);
+        assert_eq!(conn.on_closed("dropped".to_owned()), Some(HALF_SECOND));
+    }
+
+    #[test]
+    fn switch_target_leaves_auth_failed() {
+        let mut conn = open_remote();
+        conn.on_closed("dropped".to_owned());
+        conn.on_connecting();
+        conn.on_socket_open(8787);
+        conn.on_auth_failed("device not approved".to_owned());
+
+        let other = Target::tailnet("other.tail1234.ts.net", None);
+        conn.switch_target(other.clone());
+        assert_eq!(conn.target(), &other);
+        assert_eq!(conn.state(), &State::Init);
+        assert_eq!(
+            conn.overlay_text().as_deref(),
+            Some("Connecting to other…"),
+            "a new host shows the first-connect overlay again"
+        );
+        assert_eq!(
+            conn.on_closed("refused".to_owned()),
+            Some(HALF_SECOND),
+            "the new host reconnects with a reset backoff"
+        );
+    }
+
+    #[test]
+    fn remote_pill_shows_short_name_without_port() {
+        let footer = open_remote().footer(3);
+        assert_eq!(footer.port, None);
+        assert_eq!(footer.pill(), "box · 3 sessions");
+        let mut closed = open_remote();
+        closed.on_closed("dropped".to_owned());
+        assert_eq!(closed.footer(3).pill(), "box · disconnected");
+
+        assert_eq!(open(20).footer(3).pill(), "daemon · 3 sessions · :51418");
+        assert_eq!(Connection::new().footer(0).pill(), "daemon · starting…");
+    }
+
+    #[test]
+    fn remote_overlay_says_connecting_to_short_name() {
+        let mut conn = remote();
+        assert_eq!(conn.overlay_text().as_deref(), Some("Connecting to box…"));
+        conn.on_connecting();
+        assert_eq!(conn.overlay_text().as_deref(), Some("Connecting to box…"));
+        conn.on_closed("refused".to_owned());
+        assert_eq!(
+            conn.overlay_text().as_deref(),
+            Some("box dropped — reconnecting…")
+        );
+        assert_eq!(open_remote().overlay_text(), None);
+
+        let mut local = Connection::new();
+        assert_eq!(local.overlay_text().as_deref(), Some("Starting daemon…"));
+        local.on_connecting();
+        assert_eq!(
+            local.overlay_text().as_deref(),
+            Some("Connecting to daemon…")
+        );
+    }
+
+    #[test]
+    fn remote_stop_is_unavailable() {
+        assert!(
+            Connection::new().can_stop(),
+            "Stop stays on the local daemon"
+        );
+        let mut conn = open_remote();
+        assert!(!conn.can_stop());
+        conn.stop();
+        assert_eq!(
+            conn.on_closed("dropped".to_owned()),
+            Some(HALF_SECOND),
+            "a Stop must not end the reconnects to a remote host"
+        );
     }
 
     #[test]

@@ -113,8 +113,9 @@ pub fn status_counts(
 }
 
 /// The flyout's detail rows as (label, value), in display order: State, then
-/// Port, PID and Protocol when a handshake is known, Sessions while open, and
-/// Reason when the state carries one.
+/// on the local daemon Port, PID and Protocol when a handshake is known, or
+/// on a remote host its full name and port as Host, then Sessions while open,
+/// and Reason when the state carries one.
 #[must_use]
 pub fn flyout_rows(
     conn: &Connection,
@@ -122,7 +123,9 @@ pub fn flyout_rows(
     session_count: usize,
 ) -> Vec<(&'static str, String)> {
     let mut rows = vec![("State", conn.footer(session_count).label)];
-    if let Some(info) = handshake {
+    if let Some(address) = conn.target().address() {
+        rows.push(("Host", address));
+    } else if let Some(info) = handshake {
         rows.push(("Port", info.port.to_string()));
         rows.push(("PID", info.pid.to_string()));
         rows.push(("Protocol", format!("v{}", info.protocol_version)));
@@ -205,6 +208,7 @@ mod tests {
     };
     use crate::connection::Connection;
     use crate::net::HandshakeInfo;
+    use crate::target::Target;
     use protocol::{SessionMode, SessionSnapshot, SessionStatus};
     use serde_json::json;
     use std::collections::HashSet;
@@ -485,6 +489,23 @@ mod tests {
                 row("Protocol", "v18"),
                 row("Reason", "connection reset"),
             ]
+        );
+    }
+
+    #[test]
+    fn remote_flyout_shows_full_name_and_port() {
+        let mut conn = Connection::for_target(Target::tailnet("Box.tail1234.ts.net.", None));
+        conn.on_connecting();
+        conn.on_socket_open(8787);
+        conn.on_welcome(23, Vec::new());
+        assert_eq!(
+            flyout_rows(&conn, Some(&HANDSHAKE), 3),
+            vec![
+                row("State", "3 sessions"),
+                row("Host", "box.tail1234.ts.net:8787"),
+                row("Sessions", "3"),
+            ],
+            "a remote host shows its name and port, never the local daemon's port or PID"
         );
     }
 

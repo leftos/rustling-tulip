@@ -6,6 +6,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context as _, Result};
@@ -13,13 +14,16 @@ use daemon_client::ClientIdentity;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender};
 use futures::{SinkExt as _, StreamExt as _};
 use protocol::{ClientMessage, DaemonHandshake, DaemonMessage, InboundDaemonMessage};
+use rustls::pki_types::CertificateDer;
+use rustls::{ClientConfig, RootCertStore};
 use tokio::net::TcpStream;
 use tokio::time::{Instant, Interval, MissedTickBehavior};
 use tokio_tungstenite::tungstenite::{self, Message};
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{Connector, MaybeTlsStream, WebSocketStream};
 use tracing::{debug, error, info, warn};
 
 use crate::connection::{Connection, PROBE_TIMEOUT, RestartAction, State, TICK, Watchdog};
+use crate::target::{TailnetHost, Target};
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 type Frame = Option<Result<Message, tungstenite::Error>>;
@@ -33,6 +37,9 @@ pub const NATIVE_PROTOCOL_VERSIONS: &[u32] = protocol::SUPPORTED_PROTOCOL_VERSIO
 /// A pending force-stop of the daemon.
 pub type StopFuture = Pin<Box<dyn Future<Output = Result<()>>>>;
 
+/// Looks up the device token this client holds for a tailnet host.
+pub type TokenFor = Box<dyn Fn(&str) -> Option<String> + Send>;
+
 /// How the network thread reaches its daemon.
 pub struct NetDeps {
     /// Starts an `ensure_running`: the daemon step of each connection
@@ -42,6 +49,40 @@ pub struct NetDeps {
     pub identity: Option<ClientIdentity>,
     /// Force-stops the daemon, for [`NetCommand::Stop`].
     pub stop: Box<dyn Fn() -> StopFuture + Send>,
+    /// The device token this client holds for a tailnet host, sent in its
+    /// `Hello`; `None` when it holds none, and then no socket is opened.
+    pub token_for: TokenFor,
+    /// The TLS client config a tailnet dial uses. `None`, the production
+    /// value, builds one from the OS certificate store on first use; only
+    /// tests set it, to trust a test CA.
+    pub tls: Option<Arc<ClientConfig>>,
+}
+
+/// A client config trusting the OS certificate store's roots, on the `ring`
+/// provider. An empty store fails: there is no fallback.
+fn os_tls_config() -> Result<Arc<ClientConfig>> {
+    let loaded = rustls_native_certs::load_native_certs();
+    if !loaded.errors.is_empty() {
+        warn!(errors = ?loaded.errors, "some OS root certificates could not be loaded");
+    }
+    tls_config_trusting(loaded.certs)
+}
+
+/// A client config whose only roots are the parsable ones among `certs`.
+fn tls_config_trusting(certs: Vec<CertificateDer<'static>>) -> Result<Arc<ClientConfig>> {
+    let mut roots = RootCertStore::empty();
+    let (added, ignored) = roots.add_parsable_certificates(certs);
+    debug!(added, ignored, "loaded the OS root certificates");
+    if roots.is_empty() {
+        anyhow::bail!("no usable root certificates in the OS certificate store");
+    }
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let config = ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .context("choosing the TLS protocol versions")?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    Ok(Arc::new(config))
 }
 
 impl NetDeps {
@@ -58,6 +99,8 @@ impl NetDeps {
             ensure: Box::new(ensure_daemon),
             identity,
             stop: Box::new(|| Box::pin(daemon_client::stop())),
+            token_for: Box::new(|_| None),
+            tls: None,
         }
     }
 }
@@ -85,6 +128,9 @@ pub enum NetCommand {
         before: Vec<ClientMessage>,
         drain: bool,
     },
+    /// Connect to this daemon instead, now: drop the live socket and start
+    /// the connection over on it.
+    SwitchTarget(Target),
 }
 
 /// The running daemon's handshake without its auth token.
@@ -139,7 +185,7 @@ pub fn spawn_with(
 ) {
     let spawned = std::thread::Builder::new()
         .name("net".to_owned())
-        .spawn(move || run_thread(commands, events, deps, WELCOME_TIMEOUT));
+        .spawn(move || run_thread(commands, events, deps, Target::Local, WELCOME_TIMEOUT));
     if let Err(err) = spawned {
         error!("spawning the network thread: {err}");
     }
@@ -150,11 +196,12 @@ fn ensure_daemon() -> EnsureFuture {
 }
 
 /// The network thread's body: build the runtime and run the loop on it until
-/// the command channel closes.
+/// the command channel closes, connecting to `target` first.
 fn run_thread(
     commands: UnboundedReceiver<NetCommand>,
     events: UnboundedSender<NetEvent>,
     deps: NetDeps,
+    target: Target,
     welcome_timeout: Duration,
 ) {
     match tokio::runtime::Builder::new_current_thread()
@@ -163,7 +210,7 @@ fn run_thread(
     {
         // `Net::new` builds a tokio interval, so it runs inside the runtime.
         Ok(rt) => rt.block_on(async move {
-            Net::new(commands, events, deps, welcome_timeout)
+            Net::new(commands, events, deps, target, welcome_timeout)
                 .run()
                 .await;
         }),
@@ -214,6 +261,7 @@ impl Net {
         commands: UnboundedReceiver<NetCommand>,
         events: UnboundedSender<NetEvent>,
         deps: NetDeps,
+        target: Target,
         welcome_timeout: Duration,
     ) -> Self {
         let mut ticker = tokio::time::interval_at(Instant::now() + TICK, TICK);
@@ -221,7 +269,7 @@ impl Net {
         Self {
             commands,
             events,
-            conn: Connection::new(),
+            conn: Connection::for_target(target),
             deps,
             welcome_timeout,
             ticker,
@@ -258,10 +306,19 @@ impl Net {
         Next::Wait(delay)
     }
 
-    /// One connection attempt: ensure a daemon, open the socket, pump it. A
-    /// command that arrives while the daemon or the socket is still coming up
-    /// is handled at once and may cancel the attempt.
+    /// One connection attempt on the current target. A command that arrives
+    /// while the daemon or the socket is still coming up is handled at once
+    /// and may cancel the attempt.
     async fn attempt(&mut self) -> Next {
+        match self.conn.target().clone() {
+            Target::Local => self.attempt_local().await,
+            Target::Tailnet(host) => self.attempt_tailnet(&host).await,
+        }
+    }
+
+    /// The local daemon: ensure it runs, open the loopback socket, pump it
+    /// with the `daemon.json` token.
+    async fn attempt_local(&mut self) -> Next {
         let ensured = match self.or_command((self.deps.ensure)()).await {
             Ok(ensured) => ensured,
             Err(next) => return next,
@@ -288,6 +345,60 @@ impl Net {
         };
         self.conn.on_socket_open(handshake.port);
         self.pump(ws, handshake.auth_token).await
+    }
+
+    /// A tailnet host: never a local daemon step. Without a device token for
+    /// the host no socket is opened (the `daemon.json` token never leaves
+    /// this machine); with one, dial its listener over TLS and pump it.
+    async fn attempt_tailnet(&mut self, host: &TailnetHost) -> Next {
+        let Some(token) = (self.deps.token_for)(host.name()) else {
+            let reason = format!("no device token for {}", host.name());
+            warn!(%reason, "not connecting to the tailnet host");
+            return self.failed(reason);
+        };
+        let config = match self.tls_config() {
+            Ok(config) => config,
+            Err(err) => {
+                let reason = format!("{err:#}");
+                warn!(%reason, "no TLS configuration for the tailnet host");
+                return self.failed(reason);
+            }
+        };
+        self.conn.on_connecting();
+        self.emit_state();
+        let url = host.url();
+        let connect = Box::pin(tokio_tungstenite::connect_async_tls_with_config(
+            url.as_str(),
+            None,
+            false,
+            Some(Connector::Rustls(config)),
+        ));
+        let ws = match self.or_command(connect).await {
+            Ok(Ok((ws, _))) => ws,
+            Ok(Err(err)) => return self.closed(format!("connecting to {url}: {err}")),
+            Err(next) => return next,
+        };
+        self.conn.on_socket_open(host.port());
+        self.pump(ws, token).await
+    }
+
+    /// The attempt failed before a socket opened: show `reason` and wait the
+    /// backoff.
+    fn failed(&mut self, reason: String) -> Next {
+        let delay = self.conn.on_error(reason);
+        self.emit_state();
+        Next::Wait(delay)
+    }
+
+    /// The client config a tailnet dial uses: the one the deps carry, else
+    /// the OS store's, built on first use and kept for this thread.
+    fn tls_config(&mut self) -> Result<Arc<ClientConfig>> {
+        if let Some(config) = &self.deps.tls {
+            return Ok(Arc::clone(config));
+        }
+        let config = os_tls_config()?;
+        self.deps.tls = Some(Arc::clone(&config));
+        Ok(config)
     }
 
     /// Drive `work` to completion unless a command cuts it short. Commands
@@ -424,12 +535,31 @@ impl Net {
                 Step::Continue
             }
             Some(NetCommand::Shutdown { before, drain }) => self.shutdown(ws, &before, drain).await,
+            Some(NetCommand::SwitchTarget(target)) => {
+                self.switch_target(target);
+                Step::Leave(Next::Connect)
+            }
         }
+    }
+
+    fn switch_target(&mut self, target: Target) {
+        info!(daemon = ?target, "switching the daemon target; connecting from scratch");
+        self.conn.switch_target(target);
+        self.emit_state();
     }
 
     /// Sends `before`, then the shutdown, and reports it sent. A failed send
     /// closes the socket; the view's wait then offers Force quit.
     async fn shutdown(&mut self, ws: &mut Socket, before: &[ClientMessage], drain: bool) -> Step {
+        if !self.conn.target().is_local() {
+            warn!(
+                drain,
+                before = before.len(),
+                "quit on a tailnet host: a remote daemon is never shut down from here; nothing sent"
+            );
+            self.emit(NetEvent::ShutdownFailed);
+            return Step::Continue;
+        }
         info!(
             drain,
             before = before.len(),
@@ -477,13 +607,20 @@ impl Net {
         resumed
     }
 
-    async fn stop(&mut self) {
+    /// Force-stop the local daemon; true when it was stopped. A tailnet
+    /// host's daemon is never stopped from here.
+    async fn stop(&mut self) -> bool {
+        if !self.conn.can_stop() {
+            warn!(daemon = ?self.conn.target(), "stop: not offered on a tailnet host; ignored");
+            return false;
+        }
         info!("stopping the daemon");
         self.conn.stop();
         self.emit_state();
         if let Err(err) = (self.deps.stop)().await {
             warn!("stopping the daemon: {err:#}");
         }
+        true
     }
 
     /// Wait for the reconnect delay (or, with `None`, only for a command).
@@ -521,9 +658,10 @@ impl Net {
                 self.emit_state();
                 Some(Next::Connect)
             }
-            Some(NetCommand::Stop) => {
-                self.stop().await;
-                Some(Next::Wait(None))
+            Some(NetCommand::Stop) => self.stop().await.then_some(Next::Wait(None)),
+            Some(NetCommand::SwitchTarget(target)) => {
+                self.switch_target(target);
+                Some(Next::Connect)
             }
             Some(NetCommand::Shutdown { before, drain }) => {
                 warn!(
@@ -559,15 +697,34 @@ async fn sleep_until(deadline: Option<Instant>) {
     reason = "tests assert preconditions with expect; failure messages aid debugging"
 )]
 mod tests {
-    use super::{EnsureFuture, Net, NetCommand, NetDeps, NetEvent, WELCOME_TIMEOUT, run_thread};
-    use crate::connection::State;
-    use futures::channel::mpsc::{UnboundedReceiver, unbounded};
+    use super::{
+        EnsureFuture, NATIVE_PROTOCOL_VERSIONS, Net, NetCommand, NetDeps, NetEvent,
+        WELCOME_TIMEOUT, run_thread, tls_config_trusting,
+    };
+    use crate::connection::{Connection, State};
+    use crate::target::Target;
+    use futures::StreamExt as _;
+    use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
     use protocol::ClientMessage;
     use protocol::DaemonHandshake;
-    use std::net::TcpListener;
+    use protocol::DaemonMessage;
+    use rcgen::{
+        BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer,
+        KeyPair, KeyUsagePurpose,
+    };
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
+    use std::sync::mpsc;
+    use std::thread::JoinHandle;
     use std::time::{Duration, Instant};
     use tokio_tungstenite::tungstenite;
+    use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+
+    /// How long the TLS tests wait for an event before calling it missing: a
+    /// backstop only, never the expected wait.
+    const BACKSTOP: Duration = Duration::from_secs(30);
 
     /// Deps that ensure with `ensure`, send no identity and never stop.
     fn deps(ensure: fn() -> EnsureFuture) -> NetDeps {
@@ -575,6 +732,8 @@ mod tests {
             ensure: Box::new(ensure),
             identity: None,
             stop: Box::new(|| Box::pin(async { Ok(()) })),
+            token_for: Box::new(|_| None),
+            tls: None,
         }
     }
 
@@ -673,6 +832,7 @@ mod tests {
             commands,
             events,
             deps(ensure_never_after_close),
+            Target::Local,
             WELCOME_TIMEOUT,
         );
 
@@ -692,6 +852,7 @@ mod tests {
                 commands,
                 events,
                 deps(ensure_counting_restarts),
+                Target::Local,
                 WELCOME_TIMEOUT,
             );
         });
@@ -722,6 +883,7 @@ mod tests {
                 commands,
                 events,
                 deps(ensure_silent_server),
+                Target::Local,
                 Duration::from_millis(200),
             );
         });
@@ -754,6 +916,7 @@ mod tests {
                 commands,
                 events,
                 deps(ensure_silent_server),
+                Target::Local,
                 WELCOME_TIMEOUT,
             );
             net.hello("test-token".to_owned())
@@ -771,5 +934,544 @@ mod tests {
             protocol_versions,
             protocol::SUPPORTED_PROTOCOL_VERSIONS.to_vec()
         );
+    }
+
+    /// The name the fake TLS daemon's certificate is issued for; it resolves
+    /// to loopback, where the daemon listens.
+    const TLS_HOST: &str = "localhost";
+    /// The device token the tailnet tests hold for [`TLS_HOST`].
+    const DEVICE_TOKEN: &str = "device-token";
+
+    /// A test certificate authority.
+    struct TestCa {
+        der: CertificateDer<'static>,
+        issuer: Issuer<'static, KeyPair>,
+    }
+
+    impl TestCa {
+        fn new() -> Self {
+            let mut params = CertificateParams::new(Vec::<String>::new()).expect("CA params");
+            params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+            params
+                .distinguished_name
+                .push(DnType::CommonName, "rustling-tulip native test CA");
+            params.key_usages = vec![
+                KeyUsagePurpose::KeyCertSign,
+                KeyUsagePurpose::DigitalSignature,
+            ];
+            let key = KeyPair::generate().expect("CA key");
+            let cert = params.self_signed(&key).expect("self-signed CA");
+            Self {
+                der: cert.der().clone(),
+                issuer: Issuer::new(params, key),
+            }
+        }
+
+        /// A leaf for [`TLS_HOST`] with a fresh key, signed by this CA.
+        fn leaf(&self) -> (CertificateDer<'static>, PrivateKeyDer<'static>) {
+            let mut params =
+                CertificateParams::new(vec![TLS_HOST.to_owned()]).expect("leaf params");
+            params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+            let key = KeyPair::generate().expect("leaf key");
+            let cert = params
+                .signed_by(&key, &self.issuer)
+                .expect("leaf signed by the CA");
+            let key = PrivatePkcs8KeyDer::from(key.serialize_der());
+            (cert.der().clone(), key.into())
+        }
+
+        /// A client config whose only root is this CA.
+        fn client_config(&self) -> Arc<rustls::ClientConfig> {
+            tls_config_trusting(vec![self.der.clone()]).expect("a config trusting the test CA")
+        }
+    }
+
+    /// What the fake TLS daemon saw.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum Seen {
+        /// A TCP connection was accepted.
+        Accepted,
+        /// The WebSocket upgrade request's `Host` and `Origin` headers.
+        Upgrade {
+            host: Option<String>,
+            origin: Option<String>,
+        },
+        /// The TLS handshake or the WebSocket upgrade failed.
+        TlsFailed,
+        /// A `Hello` carrying this auth token.
+        Hello(String),
+        /// Any other client message, by its type tag.
+        Message(String),
+        /// An upgraded connection closed.
+        Closed,
+    }
+
+    /// A loopback TLS WebSocket daemon whose certificate for [`TLS_HOST`] is
+    /// signed by `ca`. It answers each `Hello` with `Welcome` and reports
+    /// what it sees on the returned receiver.
+    fn tls_daemon(ca: &TestCa) -> (u16, mpsc::Receiver<Seen>) {
+        let (cert, key) = ca.leaf();
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let config = rustls::ServerConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .expect("server protocol versions")
+            .with_no_client_auth()
+            .with_single_cert(vec![cert], key)
+            .expect("server certificate");
+        let config = Arc::new(config);
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind a loopback port");
+        let port = listener.local_addr().expect("listener address").port();
+        let (seen_tx, seen) = mpsc::channel();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { return };
+                if seen_tx.send(Seen::Accepted).is_err() {
+                    return;
+                }
+                let config = Arc::clone(&config);
+                let seen_tx = seen_tx.clone();
+                std::thread::spawn(move || serve_tls(stream, config, &seen_tx));
+            }
+        });
+        (port, seen)
+    }
+
+    /// One fake-daemon connection: TLS, the upgrade, then each message.
+    fn serve_tls(stream: TcpStream, config: Arc<rustls::ServerConfig>, seen: &mpsc::Sender<Seen>) {
+        let conn = rustls::ServerConnection::new(config).expect("a TLS server connection");
+        let header = |request: &Request, name: &str| {
+            request
+                .headers()
+                .get(name)
+                .map(|value| value.to_str().expect("an ASCII header").to_owned())
+        };
+        #[expect(
+            clippy::result_large_err,
+            reason = "tungstenite's upgrade callback type fixes the error as its ErrorResponse"
+        )]
+        let record_upgrade = |request: &Request, response: Response| {
+            let _ = seen.send(Seen::Upgrade {
+                host: header(request, "host"),
+                origin: header(request, "origin"),
+            });
+            Ok(response)
+        };
+        let tls = rustls::StreamOwned::new(conn, stream);
+        let Ok(mut ws) = tungstenite::accept_hdr(tls, record_upgrade) else {
+            let _ = seen.send(Seen::TlsFailed);
+            return;
+        };
+        loop {
+            let text = match ws.read() {
+                Ok(tungstenite::Message::Text(text)) => text,
+                Ok(_) => continue,
+                Err(_) => {
+                    let _ = seen.send(Seen::Closed);
+                    return;
+                }
+            };
+            let value: serde_json::Value =
+                serde_json::from_str(text.as_str()).expect("a JSON client message");
+            let kind = value["type"].as_str().expect("a typed message").to_owned();
+            if kind != "hello" {
+                let _ = seen.send(Seen::Message(kind));
+                continue;
+            }
+            let token = value["auth_token"].as_str().expect("Hello's token");
+            let _ = seen.send(Seen::Hello(token.to_owned()));
+            let welcome = DaemonMessage::Welcome {
+                protocol_version: 23,
+                supported_versions: vec![23],
+                features: Vec::new(),
+            };
+            let welcome = serde_json::to_string(&welcome).expect("encode Welcome");
+            if ws.send(tungstenite::Message::Text(welcome.into())).is_err() {
+                let _ = seen.send(Seen::Closed);
+                return;
+            }
+        }
+    }
+
+    /// What `seen` reports, up to and including the first event `done`
+    /// accepts; `None` when [`BACKSTOP`] passes first.
+    fn seen_until(
+        seen: &mpsc::Receiver<Seen>,
+        mut done: impl FnMut(&Seen) -> bool,
+    ) -> Option<Vec<Seen>> {
+        let deadline = Instant::now() + BACKSTOP;
+        let mut log = Vec::new();
+        while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+            let event = seen.recv_timeout(left).ok()?;
+            let finished = done(&event);
+            log.push(event);
+            if finished {
+                return Some(log);
+            }
+        }
+        None
+    }
+
+    /// The token of the next `Hello` the fake daemon sees.
+    fn next_hello(seen: &mpsc::Receiver<Seen>) -> Option<String> {
+        match seen_until(seen, |event| matches!(event, Seen::Hello(_)))?.pop() {
+            Some(Seen::Hello(token)) => Some(token),
+            _ => None,
+        }
+    }
+
+    /// Wait for an event `want` accepts, up to [`BACKSTOP`].
+    fn saw(events: &mut UnboundedReceiver<NetEvent>, want: impl Fn(&NetEvent) -> bool) -> bool {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("build a test runtime");
+        runtime.block_on(async {
+            let found = async {
+                while let Some(event) = events.next().await {
+                    if want(&event) {
+                        return true;
+                    }
+                }
+                false
+            };
+            tokio::time::timeout(BACKSTOP, found).await.unwrap_or(false)
+        })
+    }
+
+    /// Wait for a state event whose connection `want` accepts.
+    fn saw_state(
+        events: &mut UnboundedReceiver<NetEvent>,
+        want: impl Fn(&Connection) -> bool,
+    ) -> bool {
+        saw(
+            events,
+            |event| matches!(event, NetEvent::State(conn) if want(conn)),
+        )
+    }
+
+    /// The network thread on `deps`, connecting to `target` first.
+    fn run_net(
+        deps: NetDeps,
+        target: Target,
+    ) -> (
+        UnboundedSender<NetCommand>,
+        UnboundedReceiver<NetEvent>,
+        JoinHandle<()>,
+    ) {
+        let (view_tx, commands) = unbounded();
+        let (events, view_rx) = unbounded();
+        let net = std::thread::spawn(move || {
+            run_thread(commands, events, deps, target, WELCOME_TIMEOUT);
+        });
+        (view_tx, view_rx, net)
+    }
+
+    fn stop_net(view_tx: UnboundedSender<NetCommand>, net: JoinHandle<()>) {
+        drop(view_tx);
+        net.join()
+            .expect("net thread exits when the command channel closes");
+    }
+
+    static TAILNET_ENSURES: AtomicUsize = AtomicUsize::new(0);
+    static TAILNET_STOPS: AtomicUsize = AtomicUsize::new(0);
+
+    /// An `ensure_running` that counts its calls and fails: a tailnet
+    /// target must never start a local daemon.
+    fn ensure_must_not_run() -> EnsureFuture {
+        TAILNET_ENSURES.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async { Err(anyhow::anyhow!("ensure ran for a tailnet target")) })
+    }
+
+    /// Deps for a tailnet target trusting only `ca`, holding `token` for
+    /// [`TLS_HOST`] and none for any other host; a stop is counted.
+    fn tailnet_deps(ca: &TestCa, token: Option<&'static str>) -> NetDeps {
+        NetDeps {
+            ensure: Box::new(ensure_must_not_run),
+            identity: None,
+            stop: Box::new(|| {
+                TAILNET_STOPS.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async { Ok(()) })
+            }),
+            token_for: Box::new(move |host| token.filter(|_| host == TLS_HOST).map(str::to_owned)),
+            tls: Some(ca.client_config()),
+        }
+    }
+
+    #[test]
+    fn production_tls_config_builds() {
+        let config = super::os_tls_config().expect("a config from the OS certificate store");
+        assert!(
+            !config.crypto_provider().cipher_suites.is_empty(),
+            "the ring provider offers cipher suites"
+        );
+    }
+
+    #[test]
+    fn empty_root_store_fails_closed() {
+        let err = tls_config_trusting(Vec::new()).expect_err("no roots must not build a config");
+        assert!(
+            format!("{err:#}").contains("no usable root certificates"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn tailnet_upgrade_sends_host_with_port_and_no_origin() {
+        let ca = TestCa::new();
+        let (port, seen) = tls_daemon(&ca);
+        let (view_tx, _view_rx, net) = run_net(
+            tailnet_deps(&ca, Some(DEVICE_TOKEN)),
+            Target::tailnet(TLS_HOST, Some(port)),
+        );
+
+        let log = seen_until(&seen, |event| matches!(event, Seen::Upgrade { .. }))
+            .expect("no upgrade request");
+        assert_eq!(
+            log.last(),
+            Some(&Seen::Upgrade {
+                host: Some(format!("{TLS_HOST}:{port}")),
+                origin: None,
+            }),
+            "the tailnet listener needs Host = name:port and no Origin"
+        );
+        stop_net(view_tx, net);
+    }
+
+    #[test]
+    fn switch_target_while_waiting_reconnects() {
+        let ca = TestCa::new();
+        let (port, seen) = tls_daemon(&ca);
+        let (view_tx, mut view_rx, net) = run_net(
+            tailnet_deps(&ca, Some(DEVICE_TOKEN)),
+            Target::tailnet("elsewhere.tail1234.ts.net", None),
+        );
+        assert!(
+            saw_state(&mut view_rx, |conn| matches!(
+                conn.state(),
+                State::Error { .. }
+            )),
+            "the host without a token did not fail"
+        );
+
+        let switched = Target::tailnet(TLS_HOST, Some(port));
+        view_tx
+            .unbounded_send(NetCommand::SwitchTarget(switched.clone()))
+            .expect("net thread is running");
+        assert_eq!(
+            next_hello(&seen).as_deref(),
+            Some(DEVICE_TOKEN),
+            "SwitchTarget during the backoff did not dial the new host"
+        );
+        assert!(
+            saw_state(&mut view_rx, |conn| conn.is_open()
+                && conn.target() == &switched),
+            "the new host never opened"
+        );
+        stop_net(view_tx, net);
+    }
+
+    #[test]
+    fn tailnet_target_sends_hello_with_device_token_over_tls() {
+        let ca = TestCa::new();
+        let (port, seen) = tls_daemon(&ca);
+        let target = Target::tailnet(TLS_HOST, Some(port));
+        let (view_tx, mut view_rx, net) =
+            run_net(tailnet_deps(&ca, Some(DEVICE_TOKEN)), target.clone());
+
+        assert_eq!(
+            next_hello(&seen).as_deref(),
+            Some(DEVICE_TOKEN),
+            "Hello must carry the device token for the host"
+        );
+        assert!(
+            saw_state(&mut view_rx, |conn| conn.is_open()
+                && conn.target() == &target),
+            "the Welcome over TLS did not open the connection"
+        );
+        stop_net(view_tx, net);
+    }
+
+    #[test]
+    fn tailnet_target_without_token_fails_closed_without_hello() {
+        let ca = TestCa::new();
+        let (port, seen) = tls_daemon(&ca);
+        let (view_tx, mut view_rx, net) = run_net(
+            tailnet_deps(&ca, None),
+            Target::tailnet(TLS_HOST, Some(port)),
+        );
+        let names_host = |conn: &Connection| matches!(conn.state(), State::Error { reason } if reason.contains(TLS_HOST));
+
+        assert!(
+            saw_state(&mut view_rx, names_host),
+            "no Error naming the host"
+        );
+        assert!(
+            saw_state(&mut view_rx, names_host),
+            "the missing token was not retried after the backoff"
+        );
+        assert_eq!(
+            seen.try_recv().ok(),
+            None,
+            "a socket was opened without a device token"
+        );
+        stop_net(view_tx, net);
+    }
+
+    #[test]
+    fn tailnet_target_never_runs_ensure() {
+        let ca = TestCa::new();
+        let (port, seen) = tls_daemon(&ca);
+        let (view_tx, _view_rx, net) = run_net(
+            tailnet_deps(&ca, Some(DEVICE_TOKEN)),
+            Target::tailnet(TLS_HOST, Some(port)),
+        );
+
+        assert!(
+            next_hello(&seen).is_some(),
+            "the first attempt sent no Hello"
+        );
+        view_tx
+            .unbounded_send(NetCommand::Restart)
+            .expect("net thread is running");
+        assert!(next_hello(&seen).is_some(), "Reconnect sent no Hello");
+        stop_net(view_tx, net);
+        assert_eq!(
+            TAILNET_ENSURES.load(Ordering::SeqCst),
+            0,
+            "ensure_running ran for a tailnet target"
+        );
+    }
+
+    #[test]
+    fn untrusted_certificate_never_sends_hello() {
+        let trusted = TestCa::new();
+        let (port, seen) = tls_daemon(&TestCa::new());
+        let (view_tx, mut view_rx, net) = run_net(
+            tailnet_deps(&trusted, Some(DEVICE_TOKEN)),
+            Target::tailnet(TLS_HOST, Some(port)),
+        );
+        let url = format!("connecting to wss://{TLS_HOST}:{port}/ws");
+
+        assert!(
+            saw_state(&mut view_rx, |conn| {
+                matches!(conn.state(), State::Closed { reason } if reason.starts_with(&url))
+            }),
+            "the untrusted certificate did not fail the connect"
+        );
+        // A connection's TlsFailed comes from its own serve thread, so it may
+        // land after the retry's accept: read on until both are in.
+        let (mut accepts, mut failed) = (0, false);
+        let log = seen_until(&seen, |event| {
+            match event {
+                Seen::Accepted => accepts += 1,
+                Seen::TlsFailed => failed = true,
+                _ => {}
+            }
+            accepts >= 2 && failed
+        })
+        .expect("no backoff retry and failed handshake after the untrusted certificate");
+        assert!(
+            !log.iter().any(|event| matches!(event, Seen::Hello(_))),
+            "Hello went to an untrusted server: {log:?}"
+        );
+        assert!(
+            log.contains(&Seen::TlsFailed),
+            "no failed handshake: {log:?}"
+        );
+        stop_net(view_tx, net);
+    }
+
+    #[test]
+    fn tailnet_target_never_sends_shutdown() {
+        let ca = TestCa::new();
+        let (port, seen) = tls_daemon(&ca);
+        let (view_tx, mut view_rx, net) = run_net(
+            tailnet_deps(&ca, Some(DEVICE_TOKEN)),
+            Target::tailnet(TLS_HOST, Some(port)),
+        );
+        assert!(
+            next_hello(&seen).is_some(),
+            "the first attempt sent no Hello"
+        );
+        assert!(saw_state(&mut view_rx, Connection::is_open), "never opened");
+
+        view_tx
+            .unbounded_send(NetCommand::Restart)
+            .expect("net thread is running");
+        assert!(next_hello(&seen).is_some(), "Restart did not reconnect");
+        assert!(
+            saw_state(&mut view_rx, Connection::is_open),
+            "never reopened"
+        );
+        for command in [
+            NetCommand::Stop,
+            NetCommand::Shutdown {
+                before: vec![ClientMessage::ListRepos],
+                drain: true,
+            },
+            NetCommand::Send(Box::new(ClientMessage::ListRepos)),
+        ] {
+            view_tx
+                .unbounded_send(command)
+                .expect("net thread is running");
+        }
+
+        let marker = Seen::Message("list_repos".to_owned());
+        let log = seen_until(&seen, |event| *event == marker).expect("the marker never arrived");
+        let messages: Vec<&Seen> = log
+            .iter()
+            .filter(|event| matches!(event, Seen::Message(_)))
+            .collect();
+        assert_eq!(
+            messages,
+            vec![&marker],
+            "only the marker may reach a tailnet host"
+        );
+        assert!(
+            saw(&mut view_rx, |event| matches!(
+                event,
+                NetEvent::ShutdownFailed
+            )),
+            "quit on a tailnet host must report that nothing was sent"
+        );
+        stop_net(view_tx, net);
+        assert_eq!(
+            TAILNET_STOPS.load(Ordering::SeqCst),
+            0,
+            "Stop ran on a tailnet host"
+        );
+    }
+
+    #[test]
+    fn switch_target_reconnects_at_once() {
+        let ca = TestCa::new();
+        let (first_port, first) = tls_daemon(&ca);
+        let (second_port, second) = tls_daemon(&ca);
+        let (view_tx, mut view_rx, net) = run_net(
+            tailnet_deps(&ca, Some(DEVICE_TOKEN)),
+            Target::tailnet(TLS_HOST, Some(first_port)),
+        );
+        assert!(next_hello(&first).is_some(), "the first host got no Hello");
+        assert!(saw_state(&mut view_rx, Connection::is_open), "never opened");
+
+        let switched = Target::tailnet(TLS_HOST, Some(second_port));
+        view_tx
+            .unbounded_send(NetCommand::SwitchTarget(switched.clone()))
+            .expect("net thread is running");
+        assert_eq!(
+            next_hello(&second).as_deref(),
+            Some(DEVICE_TOKEN),
+            "SwitchTarget did not dial the new host"
+        );
+        assert!(
+            seen_until(&first, |event| *event == Seen::Closed).is_some(),
+            "the old host's socket stayed open"
+        );
+        assert!(
+            saw_state(&mut view_rx, |conn| conn.is_open()
+                && conn.target() == &switched),
+            "the new host never opened"
+        );
+        stop_net(view_tx, net);
     }
 }

@@ -88,6 +88,7 @@ pub mod syntax;
 mod tab_bar;
 mod tab_menu;
 mod tabs;
+pub mod target;
 mod term;
 mod term_input;
 mod term_view;

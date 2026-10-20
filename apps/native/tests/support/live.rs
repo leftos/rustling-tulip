@@ -795,6 +795,8 @@ fn live_deps(config: &Path) -> NetDeps {
             let dir = stop_dir.clone();
             Box::pin(async move { daemon_client::stop_in(&dir).await })
         }),
+        token_for: Box::new(|_| None),
+        tls: None,
     }
 }
 

@@ -36,7 +36,19 @@ chrono = { workspace = true }
 
 gpui = "0.2.2"
 alacritty_terminal = "0.26.0"
-tokio-tungstenite = "0.29.0"
+# `rustls-tls-native-roots`: a tailnet host is dialled over TLS through
+# `Connector::Rustls`, with the client config net.rs builds from the OS
+# certificate store on the `ring` provider below.
+tokio-tungstenite = { version = "0.29.0", features = ["rustls-tls-native-roots"] }
+# TLS for the tailnet dial, pinned to the `ring` provider as the daemon is: keeps
+# `aws-lc-sys` (and its NASM/CMake build requirement) out of the tree.
+rustls = { version = "0.23", default-features = false, features = [
+    "ring",
+    "std",
+    "tls12",
+    "logging",
+] }
+rustls-native-certs = "0.8"
 futures = "0.3"
 base64 = "0.22"
 unicode-segmentation = "1.13.2"
@@ -66,6 +78,8 @@ windows = { version = "0.61", features = [
 gpui = { version = "0.2.2", features = ["test-support"] }
 png = "0.18"
 sha2 = "0.10"
+# The fake TLS daemon in net.rs's tests: a test CA and a leaf signed by it.
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 
 [target.'cfg(windows)'.dev-dependencies]
 windows = { version = "0.61", features = [
