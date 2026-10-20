@@ -4191,6 +4191,14 @@ fn spawn_tracer_exe<'a>(
         .or_else(|| codex_shim.map(|shim| shim.tracer_exe.as_path()))
 }
 
+/// Announce a replayed prompt's attention, once its session is published and
+/// only when the record still holds the prompt after the whole replay.
+fn announce_replayed_prompt(hub: &Hub, session_id: &str, awaiting: bool) {
+    if awaiting {
+        pty_state::announce_awaiting_input(session_id, &hub.attention_tx);
+    }
+}
+
 #[expect(
     clippy::too_many_arguments,
     clippy::too_many_lines,
@@ -4352,7 +4360,7 @@ async fn spawn_interactive_session(
     // streams in before the per-client forwarder is started. Hook events held
     // for this id while the tracer spawned are applied to the record here, so
     // the first broadcast is still the wired publish below.
-    let (pending, awaiting_entries) = hub.pending_hooks.insert_with_pending(hub, record);
+    let (pending, awaiting) = hub.pending_hooks.insert_with_pending(hub, record);
     let snap_tx = attach_lifecycle(
         &hub.sessions,
         session_id.clone(),
@@ -4383,9 +4391,7 @@ async fn spawn_interactive_session(
     );
     let snap = crate::sync::lock(pending.arc()).snapshot();
     pending.publish_from(cfg.origin.clone());
-    for _ in 0..awaiting_entries {
-        pty_state::announce_awaiting_input(&session_id, &hub.attention_tx);
-    }
+    announce_replayed_prompt(hub, &session_id, awaiting);
 
     if let Some(mut meta) = meta {
         meta.status = Some(snap.status);
@@ -4569,7 +4575,7 @@ async fn spawn_plain_shell_session(
 
     // Two-stage insert — see spawn_interactive_session for the same pattern
     // and rationale, including the held hook events applied here.
-    let (pending, awaiting_entries) = hub.pending_hooks.insert_with_pending(hub, record);
+    let (pending, awaiting) = hub.pending_hooks.insert_with_pending(hub, record);
     let snap_tx = attach_lifecycle(
         &hub.sessions,
         session_id.clone(),
@@ -4602,9 +4608,7 @@ async fn spawn_plain_shell_session(
     );
     let snap = crate::sync::lock(pending.arc()).snapshot();
     pending.publish_from(cfg.origin.clone());
-    for _ in 0..awaiting_entries {
-        pty_state::announce_awaiting_input(&session_id, &hub.attention_tx);
-    }
+    announce_replayed_prompt(hub, &session_id, awaiting);
 
     if let Some(pid) = pid
         && let Ok(mut meta) = orphan::meta_from_record(
@@ -8565,7 +8569,7 @@ mod tests {
             hub.sessions.get("s1").is_none(),
             "the spawn has not inserted its record yet"
         );
-        let (pending, _awaiting_entries) = hub
+        let (pending, _awaiting) = hub
             .pending_hooks
             .insert_with_pending(&hub, idle_record("s1"));
         pending.publish();
@@ -8575,6 +8579,85 @@ mod tests {
             "the kickoff prompt's hook survived the insert"
         );
         assert!(hook_driven_of(&hub, "s1"), "hooks now drive the session");
+    }
+
+    /// A buffered prompt followed by an event that clears it must not raise a
+    /// stale "Needs you": the announcement follows the record's final state,
+    /// not the number of events that passed through `AwaitingInput`.
+    #[tokio::test]
+    async fn a_cleared_buffered_prompt_raises_no_attention() {
+        let (hub, _scratch, mut attention) = test_hub_with_attention("hook-replay-cleared");
+        for (time, body) in [
+            (
+                100,
+                r#"{"hook_event_name":"PermissionRequest","tool_name":"Bash"}"#,
+            ),
+            (200, r#"{"hook_event_name":"Stop"}"#),
+        ] {
+            let time = time.to_string();
+            let response = build_loopback_router(hub.clone())
+                .oneshot(hook_request(
+                    "s1",
+                    Some("test-token"),
+                    Some(time.as_str()),
+                    body,
+                ))
+                .await
+                .expect("router answers");
+            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        }
+        let (pending, awaiting) = hub
+            .pending_hooks
+            .insert_with_pending(&hub, idle_record("s1"));
+        pending.publish();
+        announce_replayed_prompt(&hub, "s1", awaiting);
+        let snapshot = snapshot_of(&hub, "s1");
+        assert_eq!(
+            snapshot.status,
+            SessionStatus::Idle,
+            "the Stop cleared the prompt"
+        );
+        assert_eq!(snapshot.pending_input, None, "no prompt is pending");
+        assert!(
+            attention.try_recv().is_err(),
+            "a prompt cleared during the replay raises no attention"
+        );
+    }
+
+    /// A buffered prompt still held after the whole replay raises exactly one
+    /// attention, naming `AwaitingInput`.
+    #[tokio::test]
+    async fn a_buffered_prompt_still_held_raises_one_attention() {
+        let (hub, _scratch, mut attention) = test_hub_with_attention("hook-replay-held");
+        let response = build_loopback_router(hub.clone())
+            .oneshot(hook_request(
+                "s1",
+                Some("test-token"),
+                Some("100"),
+                r#"{"hook_event_name":"PermissionRequest","tool_name":"Bash"}"#,
+            ))
+            .await
+            .expect("router answers");
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        let (pending, awaiting) = hub
+            .pending_hooks
+            .insert_with_pending(&hub, idle_record("s1"));
+        pending.publish();
+        announce_replayed_prompt(&hub, "s1", awaiting);
+        let snapshot = snapshot_of(&hub, "s1");
+        assert_eq!(snapshot.status, SessionStatus::AwaitingInput);
+        assert!(
+            snapshot.pending_input.is_some(),
+            "the prompt is still pending"
+        );
+        assert!(
+            matches!(
+                attention.try_recv().map(|event| event.reason),
+                Ok(AttentionReason::AwaitingInput)
+            ),
+            "the held prompt raises one attention"
+        );
+        assert!(attention.try_recv().is_err(), "exactly one attention");
     }
 
     /// Apply the hook `body` to `s1` at `event_time`, as the route does.

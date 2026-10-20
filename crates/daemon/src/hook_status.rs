@@ -344,28 +344,27 @@ impl PendingHooks {
 
     /// Insert `record` with every held event for its id already applied,
     /// under the buffer lock so a concurrent [`Self::defer`] cannot land
-    /// between the take and the insert. Answers how many of the applied
-    /// events entered `AwaitingInput`, so the caller raises their
-    /// `Attention` events after publishing the session.
+    /// between the take and the insert. Answers whether the record still holds
+    /// an `AwaitingInput` prompt after the whole replay, so the caller raises
+    /// its one `Attention` after publishing the session: a later event in the
+    /// buffer may have cleared the prompt an earlier one set.
     pub fn insert_with_pending<'a>(
         &self,
         hub: &'a Hub,
         mut record: SessionRecord,
-    ) -> (PendingInsert<'a>, usize) {
+    ) -> (PendingInsert<'a>, bool) {
         let session_id = record.id.clone();
         let mut buffer = crate::sync::lock(&self.0);
         prune_expired(&mut buffer, Instant::now());
         let events = buffer.remove(&session_id).unwrap_or_default();
-        let mut entered_awaiting = 0;
         for event in events {
-            let (entered, mismatch) =
+            let (_, mismatch) =
                 apply_to_record(&mut record, event.event_time, &event.signal, &event.details);
-            if entered {
-                entered_awaiting += 1;
-            }
             log_mismatch(&session_id, mismatch.as_ref());
         }
-        (hub.sessions.insert_pending(record), entered_awaiting)
+        let awaiting =
+            record.status == SessionStatus::AwaitingInput && record.pending_input.is_some();
+        (hub.sessions.insert_pending(record), awaiting)
     }
 }
 
