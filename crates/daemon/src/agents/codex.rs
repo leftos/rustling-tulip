@@ -4,7 +4,7 @@
 //! `codex exec --json`. The JSONL event shape is defined in
 //! `openai/codex` → `codex-rs/exec/src/exec_events.rs`.
 
-use super::{AgentBackend, CommonSpawnFields, workspace_prelude};
+use super::{AgentBackend, CommonSpawnFields, HookShim, workspace_prelude};
 use crate::session::{SessionRegistry, push_recent_action};
 use protocol::{AgentOptions, CodexSandbox, SessionMember, SessionStatus};
 use serde::Deserialize;
@@ -44,7 +44,8 @@ impl AgentBackend for CodexBackend {
         initial_prompt: Option<&str>,
     ) -> Vec<String> {
         let sandbox = sandbox_of(opts);
-        build_args(common, sandbox, members, initial_prompt)
+        let hook_shim = hook_shim_for(opts, common);
+        build_args(common, sandbox, members, initial_prompt, hook_shim)
     }
 
     fn build_headless_args(
@@ -138,12 +139,75 @@ impl AgentBackend for CodexBackend {
 
 fn sandbox_of(opts: &AgentOptions) -> Option<CodexSandbox> {
     match opts {
-        AgentOptions::Codex { sandbox } => *sandbox,
+        AgentOptions::Codex { sandbox, .. } => *sandbox,
         AgentOptions::Claude { .. } | AgentOptions::Cursor { .. } => {
             debug_assert!(false, "codex backend invoked with non-codex options");
             None
         }
     }
+}
+
+/// The shim this interactive spawn injects: only a request that opted into
+/// hooks and a daemon that resolved a cached tracer get one.
+fn hook_shim_for<'a>(opts: &AgentOptions, common: &CommonSpawnFields<'a>) -> Option<HookShim<'a>> {
+    match opts {
+        AgentOptions::Codex { hooks: true, .. } => common.hook_shim,
+        AgentOptions::Codex { hooks: false, .. } => None,
+        AgentOptions::Claude { .. } | AgentOptions::Cursor { .. } => {
+            debug_assert!(false, "codex backend invoked with non-codex options");
+            None
+        }
+    }
+}
+
+/// The Codex hook events the injected shim subscribes to, matching the
+/// daemon's status mapping.
+const HOOK_EVENTS: [&str; 5] = [
+    "UserPromptSubmit",
+    "PreToolUse",
+    "PermissionRequest",
+    "PostToolUse",
+    "Stop",
+];
+
+/// The `-c`/value pairs registering `shim` for every hook event. Each value
+/// is a one-entry hook table whose command handler runs
+/// `<cached rt-tracer.exe> hook --session <id> --config-dir "<dir>"`. Both
+/// paths are quoted, since a Windows profile path commonly holds a space.
+fn codex_hook_overrides(shim: HookShim<'_>) -> Vec<String> {
+    let command = toml_basic_string(&format!(
+        "\"{}\" hook --session {} --config-dir \"{}\"",
+        shim.tracer_exe.display(),
+        shim.session_id,
+        shim.config_dir.display(),
+    ));
+    HOOK_EVENTS
+        .iter()
+        .flat_map(|event| {
+            [
+                "-c".to_string(),
+                format!(
+                    "hooks.{event}=[{{hooks=[{{type=\"command\",command={command},timeout=10}}]}}]"
+                ),
+            ]
+        })
+        .collect()
+}
+
+/// `value` as a TOML basic string, quotes included. A Windows path carries
+/// backslashes and can carry a double quote; both are escaped.
+fn toml_basic_string(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len() + 2);
+    escaped.push('"');
+    for ch in value.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            other => escaped.push(other),
+        }
+    }
+    escaped.push('"');
+    escaped
 }
 
 /// Apply one item-event to the session record. `is_terminal` is true only
@@ -216,6 +280,8 @@ fn handle_item(rec: &mut crate::session::SessionRecord, item: ThreadItem, is_ter
 /// - `--model <id>` when [`CommonSpawnFields::model`] is set
 /// - permission/sandbox: `--yolo` overrides everything; otherwise
 ///   `--sandbox <value>` when a sandbox is set
+/// - `-c hooks.<Event>=...` for each of [`HOOK_EVENTS`] plus
+///   `--dangerously-bypass-hook-trust` when `hook_shim` is set
 /// - trailing positional `<prompt>` when no prompt-injector is attached;
 ///   carries `<workspace_prelude>\n<initial_prompt>` for workspace spawns,
 ///   or just `<initial_prompt>`, or just `<workspace_prelude>`, depending
@@ -238,9 +304,10 @@ fn build_args(
     sandbox: Option<CodexSandbox>,
     members: &[SessionMember],
     initial_prompt: Option<&str>,
+    hook_shim: Option<HookShim<'_>>,
 ) -> Vec<String> {
     if let Some(id) = common.resume_conversation {
-        return build_resume_args(common, sandbox, members, id);
+        return build_resume_args(common, sandbox, members, id, hook_shim);
     }
     let mut args: Vec<String> = Vec::new();
     push_cwd_and_trust(&mut args, common.cwd);
@@ -261,6 +328,10 @@ fn build_args(
     } else if let Some(s) = sandbox {
         args.push("--sandbox".to_string());
         args.push(s.as_cli_arg().to_string());
+    }
+    if let Some(shim) = hook_shim {
+        args.extend(codex_hook_overrides(shim));
+        args.push("--dangerously-bypass-hook-trust".to_string());
     }
     if !common.has_prompt_injector {
         let prelude = workspace_prelude(members);
@@ -284,6 +355,7 @@ fn build_resume_args(
     sandbox: Option<CodexSandbox>,
     members: &[SessionMember],
     id: &str,
+    hook_shim: Option<HookShim<'_>>,
 ) -> Vec<String> {
     let mut args: Vec<String> = vec!["resume".to_string()];
     push_cwd_and_trust(&mut args, common.cwd);
@@ -304,6 +376,10 @@ fn build_resume_args(
     } else if let Some(s) = sandbox {
         args.push("--sandbox".to_string());
         args.push(s.as_cli_arg().to_string());
+    }
+    if let Some(shim) = hook_shim {
+        args.extend(codex_hook_overrides(shim));
+        args.push("--dangerously-bypass-hook-trust".to_string());
     }
     args.push(id.to_string());
     args
@@ -523,6 +599,7 @@ mod tests {
             add_dirs: &[],
             cwd: None,
             hook_settings: None,
+            hook_shim: None,
         }
     }
 
@@ -540,10 +617,20 @@ mod tests {
         }
     }
 
+    /// [`build_args`] for a spawn without hooks, which these cases cover.
+    fn args_of(
+        common: &CommonSpawnFields<'_>,
+        sandbox: Option<CodexSandbox>,
+        members: &[SessionMember],
+        initial_prompt: Option<&str>,
+    ) -> Vec<String> {
+        build_args(common, sandbox, members, initial_prompt, None)
+    }
+
     #[test]
     fn resume_passes_cd_flags_and_id_without_prompt() {
         let m = members(&["X:/dev/a"]);
-        let args = build_args(
+        let args = args_of(
             &resuming(false, Some("gpt-5"), Some("X:/dev/a")),
             Some(CodexSandbox::WorkspaceWrite),
             &m,
@@ -564,14 +651,14 @@ mod tests {
                 RESUME_ID
             ]
         );
-        let without_cwd = build_args(&resuming(false, None, None), None, &m, Some("hello"));
+        let without_cwd = args_of(&resuming(false, None, None), None, &m, Some("hello"));
         assert_eq!(without_cwd, ["resume", RESUME_ID]);
     }
 
     #[test]
     fn resume_uses_bypass_flag_not_yolo() {
         let m = members(&["X:/dev/a"]);
-        let args = build_args(
+        let args = args_of(
             &resuming(true, None, Some("X:/dev/a")),
             Some(CodexSandbox::ReadOnly),
             &m,
@@ -594,7 +681,7 @@ mod tests {
     #[test]
     fn resume_workspace_keeps_add_dirs_and_drops_prelude() {
         let m = members(&["X:/dev/a", "X:/dev/b"]);
-        let args = build_args(
+        let args = args_of(
             &resuming(false, None, Some("X:/dev/a")),
             None,
             &m,
@@ -622,7 +709,7 @@ mod tests {
             add_dirs: &extra,
             ..common(false, None, false)
         };
-        let args = build_args(&common, None, &[], None);
+        let args = args_of(&common, None, &[], None);
         assert_eq!(args, ["--add-dir", "X:/dev/b", "--add-dir", "X:/dev/c"]);
     }
 
@@ -633,14 +720,14 @@ mod tests {
             add_dirs: &extra,
             ..resuming(false, None, None)
         };
-        let args = build_args(&fields, None, &[], None);
+        let args = args_of(&fields, None, &[], None);
         assert_eq!(args, ["resume", "--add-dir", "X:/dev/b", RESUME_ID]);
     }
 
     #[test]
     fn workspace_sandbox_and_prompt_round_trip() {
         let m = members(&["X:/dev/a", "X:/dev/b"]);
-        let args = build_args(
+        let args = args_of(
             &common(false, Some("gpt-5"), false),
             Some(CodexSandbox::WorkspaceWrite),
             &m,
@@ -666,7 +753,7 @@ mod tests {
     #[test]
     fn yolo_overrides_sandbox() {
         let m = members(&["X:/dev/a"]);
-        let args = build_args(
+        let args = args_of(
             &common(true, None, false),
             Some(CodexSandbox::ReadOnly),
             &m,
@@ -679,7 +766,7 @@ mod tests {
     #[test]
     fn injector_present_omits_positional_prompt() {
         let m = members(&["X:/dev/a"]);
-        let args = build_args(
+        let args = args_of(
             &common(false, None, true),
             None,
             &m,
@@ -691,14 +778,14 @@ mod tests {
     #[test]
     fn single_repo_no_options_no_prompt_is_empty() {
         let m = members(&["X:/dev/a"]);
-        let args = build_args(&common(false, None, false), None, &m, None);
+        let args = args_of(&common(false, None, false), None, &m, None);
         assert_eq!(args, [] as [std::string::String; 0]);
     }
 
     #[test]
     fn sandbox_emitted_when_skip_is_false() {
         let m = members(&["X:/dev/a"]);
-        let args = build_args(
+        let args = args_of(
             &common(false, None, false),
             Some(CodexSandbox::DangerFullAccess),
             &m,
@@ -734,7 +821,7 @@ mod tests {
             (false, Some(CodexSandbox::WorkspaceWrite)),
             (false, None),
         ] {
-            let args = build_args(&in_folder(skip, cwd), sandbox, &m, Some("go"));
+            let args = args_of(&in_folder(skip, cwd), sandbox, &m, Some("go"));
             let cd = value_after(&args, "-C");
             assert_eq!(cd, cwd, "{args:?}");
             assert_eq!(
@@ -750,7 +837,7 @@ mod tests {
     #[test]
     fn resume_args_pre_trust_and_pass_cwd() {
         let m = members(&[r"X:\dev\a"]);
-        let args = build_args(&resuming(false, None, Some(r"X:\dev\a")), None, &m, None);
+        let args = args_of(&resuming(false, None, Some(r"X:\dev\a")), None, &m, None);
         assert_eq!(
             args,
             [
@@ -768,9 +855,9 @@ mod tests {
     fn a_cwd_with_a_quote_gets_no_trust_override() {
         let cwd = r"X:\dev\o'brien";
         let m = members(&[cwd]);
-        let fresh = build_args(&in_folder(true, cwd), None, &m, None);
+        let fresh = args_of(&in_folder(true, cwd), None, &m, None);
         assert_eq!(fresh, ["-C", cwd, "--yolo"]);
-        let resumed = build_args(&resuming(true, None, Some(cwd)), None, &m, None);
+        let resumed = args_of(&resuming(true, None, Some(cwd)), None, &m, None);
         assert_eq!(
             resumed,
             [
@@ -783,11 +870,131 @@ mod tests {
         );
     }
 
+    const TRACER: &str = r"X:\rt\tracer.exe";
+    const HOOK_CONFIG: &str = r"C:\Users\a b\AppData\Roaming\leftos\rustling-tulip\config";
+    const HOOK_SESSION: &str = "0b6f4c7e-1111-4222-8333-944455556666";
+
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "the helper returns a copy of the fields it is handed"
+    )]
+    fn with_shim(base: CommonSpawnFields<'_>) -> CommonSpawnFields<'_> {
+        CommonSpawnFields {
+            hook_shim: Some(HookShim {
+                tracer_exe: std::path::Path::new(TRACER),
+                session_id: HOOK_SESSION,
+                config_dir: std::path::Path::new(HOOK_CONFIG),
+            }),
+            ..base
+        }
+    }
+
+    fn hooked(hooks: bool) -> AgentOptions {
+        AgentOptions::Codex {
+            sandbox: None,
+            hooks,
+        }
+    }
+
+    fn hook_value(event: &str) -> String {
+        format!(
+            r#"hooks.{event}=[{{hooks=[{{type="command",command="\"X:\\rt\\tracer.exe\" hook --session {HOOK_SESSION} --config-dir \"C:\\Users\\a b\\AppData\\Roaming\\leftos\\rustling-tulip\\config\"",timeout=10}}]}}]"#
+        )
+    }
+
+    fn assert_hooked(args: &[String]) {
+        for event in HOOK_EVENTS {
+            assert!(
+                args.windows(2)
+                    .any(|w| w[0] == "-c" && w[1] == hook_value(event)),
+                "{event} missing from {args:?}"
+            );
+        }
+        assert!(
+            args.contains(&"--dangerously-bypass-hook-trust".to_string()),
+            "{args:?}"
+        );
+    }
+
+    #[test]
+    fn fresh_spawn_with_hooks_registers_every_event_and_the_bypass() {
+        let m = members(&["X:/dev/a"]);
+        let args = CodexBackend.build_interactive_args(
+            &hooked(true),
+            &with_shim(common(false, None, false)),
+            &m,
+            None,
+        );
+        assert_hooked(&args);
+        assert_eq!(args.len(), 11, "{args:?}");
+    }
+
+    #[test]
+    fn resume_spawn_with_hooks_registers_every_event_and_the_bypass() {
+        let m = members(&["X:/dev/a"]);
+        let args = CodexBackend.build_interactive_args(
+            &hooked(true),
+            &with_shim(resuming(false, None, None)),
+            &m,
+            None,
+        );
+        assert_hooked(&args);
+        assert_eq!(args.first().map(String::as_str), Some("resume"));
+        assert_eq!(args.last().map(String::as_str), Some(RESUME_ID));
+        assert_eq!(args.len(), 13, "{args:?}");
+    }
+
+    #[test]
+    fn hooks_off_or_a_missing_shim_add_nothing() {
+        let m = members(&["X:/dev/a"]);
+        let without_shim = CodexBackend.build_interactive_args(
+            &hooked(true),
+            &common(false, None, false),
+            &m,
+            None,
+        );
+        assert!(without_shim.is_empty(), "{without_shim:?}");
+        let off = CodexBackend.build_interactive_args(
+            &hooked(false),
+            &with_shim(common(false, None, false)),
+            &m,
+            None,
+        );
+        assert!(off.is_empty(), "{off:?}");
+    }
+
+    #[test]
+    fn headless_never_adds_hooks() {
+        let m = members(&["X:/dev/a"]);
+        let args = CodexBackend.build_headless_args(
+            &hooked(true),
+            &with_shim(common(false, None, false)),
+            &m,
+            "go",
+        );
+        assert!(!args.iter().any(|arg| arg.contains("hooks.")), "{args:?}");
+        assert!(
+            !args.contains(&"--dangerously-bypass-hook-trust".to_string()),
+            "{args:?}"
+        );
+        assert_eq!(args, ["exec", "--json", "go"]);
+    }
+
+    #[test]
+    fn toml_basic_string_escapes_backslashes_and_quotes() {
+        assert_eq!(
+            toml_basic_string(r#"C:\Users\a b\"quoted"\x"#),
+            r#""C:\\Users\\a b\\\"quoted\"\\x""#
+        );
+        assert_eq!(toml_basic_string("plain"), r#""plain""#);
+    }
+
     #[test]
     fn exec_args_are_unchanged() {
         let m = members(&[r"X:\dev\a", r"X:\dev\b"]);
         let opts = AgentOptions::Codex {
             sandbox: Some(CodexSandbox::ReadOnly),
+            hooks: false,
         };
         let common = CommonSpawnFields {
             model: Some("gpt-5"),

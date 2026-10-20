@@ -993,7 +993,10 @@ mod tests {
             "yolo passes no flag either"
         );
         let codex = SpawnConfig {
-            agent_options: AgentOptions::Codex { sandbox: None },
+            agent_options: AgentOptions::Codex {
+                sandbox: None,
+                hooks: false,
+            },
             ..spawn_with(Some(PermissionMode::Plan), false)
         };
         assert_eq!(permission_mismatch(&codex, Some("plan")), None);

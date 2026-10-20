@@ -356,6 +356,7 @@ mod tests {
             add_dirs: &[],
             cwd: None,
             hook_settings: None,
+            hook_shim: None,
         }
     }
 

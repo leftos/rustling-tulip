@@ -1783,7 +1783,10 @@ mod tests {
             },
             mode: SessionMode::Interactive,
             dangerously_skip_permissions: false,
-            agent_options: AgentOptions::Codex { sandbox: None },
+            agent_options: AgentOptions::Codex {
+                sandbox: None,
+                hooks: false,
+            },
             model: None,
             extra_env: vec![("CODEX_HOME".to_owned(), home.to_string_lossy().into_owned())],
         });
@@ -2570,7 +2573,10 @@ mod recovery_tests {
         let mut entry = folder_only(vec![member("r1", r"D:\repo")]);
         let mut config = workspace_config();
         config.mode = SessionMode::PlainShell;
-        config.agent_options = AgentOptions::Codex { sandbox: None };
+        config.agent_options = AgentOptions::Codex {
+            sandbox: None,
+            hooks: false,
+        };
         entry.spawn_config = Some(config);
 
         let req = plan(&entry, &item(RecoverAs::Claude, Some(CONV)))
@@ -2707,7 +2713,10 @@ mod recovery_tests {
     fn an_interactive_config_with_other_options_keeps_its_model_and_skip() {
         let mut entry = folder_only(vec![member("", r"D:\foo")]);
         let mut config = workspace_config();
-        config.agent_options = AgentOptions::Codex { sandbox: None };
+        config.agent_options = AgentOptions::Codex {
+            sandbox: None,
+            hooks: false,
+        };
         assert_eq!(config.mode, SessionMode::Interactive);
         entry.spawn_config = Some(config);
         let request = plan(&entry, &item(RecoverAs::Claude, Some(CONV)))
@@ -2780,6 +2789,7 @@ mod recovery_tests {
             dangerously_skip_permissions: false,
             agent_options: AgentOptions::Codex {
                 sandbox: Some(protocol::CodexSandbox::WorkspaceWrite),
+                hooks: false,
             },
             model: Some("gpt-5-codex".to_owned()),
             extra_env: vec![("CODEX_HOME".to_owned(), r"D:\codex-home".to_owned())],

@@ -101,6 +101,20 @@ pub async fn spawn_conversation(
     SpawnConversation::new(agent, resume, created)
 }
 
+/// The session's cached tracer and identity a hook shim needs. Claude uses
+/// [`CommonSpawnFields::hook_settings`]; Codex uses this to build the `-c`
+/// overrides that register the shim for one run.
+#[derive(Clone, Copy)]
+pub struct HookShim<'a> {
+    /// The cached `rt-tracer.exe` the shim runs from, which stays valid for
+    /// the session's lifetime.
+    pub tracer_exe: &'a Path,
+    /// The rustling-tulip session id the shim reports events for.
+    pub session_id: &'a str,
+    /// The daemon's config dir, where the shim reads `daemon.json`.
+    pub config_dir: &'a Path,
+}
+
 /// Cross-agent context bundled together so trait signatures stay readable.
 /// Fields are borrowed from the in-flight [`SpawnArgs`] so the caller doesn't
 /// have to clone anything to call a backend method.
@@ -138,7 +152,14 @@ pub struct CommonSpawnFields<'a> {
     /// without hooks — Codex, Cursor, or a Claude spawn whose file could not be
     /// written — which stays on the terminal heuristic. Headless spawns never
     /// carry it.
+    ///
+    /// Claude uses this; Codex uses [`Self::hook_shim`] instead.
     pub hook_settings: Option<&'a Path>,
+    /// The shim a backend that injects hooks through its argv runs, or `None`
+    /// when this spawn gets no hooks or the backend has no such path. Codex
+    /// uses this; Claude uses [`Self::hook_settings`] instead. Headless spawns
+    /// never carry it.
+    pub hook_shim: Option<HookShim<'a>>,
 }
 
 /// Implemented once per supported CLI. Methods are designed so the caller

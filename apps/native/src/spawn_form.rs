@@ -1215,7 +1215,7 @@ impl SpawnForm {
                 self.advanced.permission_mode = *permission_mode;
                 permission_mode.is_some()
             }
-            AgentOptions::Codex { sandbox } => {
+            AgentOptions::Codex { sandbox, .. } => {
                 self.advanced.codex_sandbox = *sandbox;
                 sandbox.is_some()
             }
@@ -2929,6 +2929,7 @@ impl SpawnForm {
             },
             Agent::Codex => AgentOptions::Codex {
                 sandbox: advanced.codex_sandbox.filter(|_| !suppress),
+                hooks: false,
             },
             Agent::Cursor => AgentOptions::Cursor {
                 plan_mode: advanced.cursor_plan && !plain,
@@ -4168,13 +4169,17 @@ mod tests {
         assert_eq!(
             request_of(&form).agent_options,
             AgentOptions::Codex {
-                sandbox: Some(CodexSandbox::WorkspaceWrite)
+                sandbox: Some(CodexSandbox::WorkspaceWrite),
+                hooks: false,
             }
         );
         press(&mut form, &Control::Trusted);
         assert_eq!(
             request_of(&form).agent_options,
-            AgentOptions::Codex { sandbox: None }
+            AgentOptions::Codex {
+                sandbox: None,
+                hooks: false,
+            }
         );
         press(&mut form, &Control::Trusted);
 
@@ -4754,7 +4759,8 @@ mod tests {
         assert_eq!(
             request_of(&form).agent_options,
             AgentOptions::Codex {
-                sandbox: Some(CodexSandbox::ReadOnly)
+                sandbox: Some(CodexSandbox::ReadOnly),
+                hooks: false,
             }
         );
         press(&mut form, &Control::Runtime(Runtime::Agent(Agent::Cursor)));
@@ -5022,7 +5028,8 @@ mod tests {
         assert!(matches!(
             request.agent_options,
             AgentOptions::Codex {
-                sandbox: Some(CodexSandbox::ReadOnly)
+                sandbox: Some(CodexSandbox::ReadOnly),
+                hooks: false,
             }
         ));
     }

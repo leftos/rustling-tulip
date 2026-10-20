@@ -112,6 +112,10 @@ pub enum AgentOptions {
         /// overrides sandbox).
         #[serde(default)]
         sandbox: Option<CodexSandbox>,
+        /// Run the injected hook shim for this Codex session (requires the
+        /// trust bypass; off by default).
+        #[serde(default)]
+        hooks: bool,
     },
     Cursor {
         /// When `true`, cursor spawns with `--plan` (read-only / planning
@@ -1037,6 +1041,7 @@ impl<'de> Deserialize<'de> for SpawnConfig {
                     Agent::Claude => AgentOptions::claude(helper.permission_mode),
                     Agent::Codex => AgentOptions::Codex {
                         sandbox: helper.codex_sandbox,
+                        hooks: false,
                     },
                     // Cursor was introduced in v20 alongside `agent_options`,
                     // so legacy (v18) JSON should never carry `agent: "cursor"`.
@@ -1964,6 +1969,7 @@ impl<'de> Deserialize<'de> for PresetEntry {
                     Agent::Claude => AgentOptions::claude(helper.permission_mode),
                     Agent::Codex => AgentOptions::Codex {
                         sandbox: helper.codex_sandbox,
+                        hooks: false,
                     },
                     // Cursor was introduced in v20 alongside `agent_options`,
                     // so legacy (v18) JSON should never carry `agent: "cursor"`.
@@ -4837,6 +4843,7 @@ mod tests {
             dangerously_skip_permissions: false,
             agent_options: AgentOptions::Codex {
                 sandbox: Some(CodexSandbox::WorkspaceWrite),
+                hooks: false,
             },
             model: Some("gpt-5.1-codex".to_string()),
             extra_env: vec![],
@@ -4851,6 +4858,33 @@ mod tests {
         assert_eq!(req.agent(), Agent::Codex);
         assert!(json.contains(r#""kind":"codex""#));
         assert!(json.contains(r#""sandbox":"workspace-write""#));
+    }
+
+    #[test]
+    fn a_codex_payload_without_hooks_decodes_with_hooks_off() {
+        let options: AgentOptions =
+            serde_json::from_str(r#"{"kind":"codex","sandbox":null}"#).expect("decode");
+        assert_eq!(
+            options,
+            AgentOptions::Codex {
+                sandbox: None,
+                hooks: false,
+            }
+        );
+    }
+
+    #[test]
+    fn codex_hooks_round_trip() {
+        let options = AgentOptions::Codex {
+            sandbox: Some(CodexSandbox::ReadOnly),
+            hooks: true,
+        };
+        let json = serde_json::to_string(&options).expect("serialize");
+        assert!(json.contains(r#""hooks":true"#), "{json}");
+        assert_eq!(
+            serde_json::from_str::<AgentOptions>(&json).expect("deserialize"),
+            options
+        );
     }
 
     #[test]
@@ -4971,7 +5005,11 @@ mod tests {
         assert_eq!(options.claude_provider(), Some(ClaudeProvider::Unknown));
         // Only a Claude variant carries a provider; Codex and Cursor have none.
         assert_eq!(
-            AgentOptions::Codex { sandbox: None }.claude_provider(),
+            AgentOptions::Codex {
+                sandbox: None,
+                hooks: false,
+            }
+            .claude_provider(),
             None
         );
         assert_eq!(
@@ -5318,6 +5356,7 @@ mod tests {
             cfg.agent_options,
             AgentOptions::Codex {
                 sandbox: Some(CodexSandbox::WorkspaceWrite),
+                hooks: false,
             }
         );
 
@@ -5694,6 +5733,7 @@ mod tests {
             preset.agent_options,
             AgentOptions::Codex {
                 sandbox: Some(CodexSandbox::DangerFullAccess),
+                hooks: false,
             }
         );
 

@@ -1,6 +1,6 @@
 //! WebSocket server, message dispatch, and session orchestration glue.
 
-use crate::agents::CommonSpawnFields;
+use crate::agents::{CommonSpawnFields, HookShim};
 use crate::branch_fate::{self, FateInput, SessionBase};
 use crate::branch_names;
 use crate::discovery;
@@ -3828,9 +3828,10 @@ impl SpawnArgs {
             resume_conversation: self.resume_conversation.as_deref(),
             add_dirs: &self.add_dirs,
             cwd: Some(&self.cwd),
-            // Only `spawn_interactive_session` writes a settings file and
-            // overrides this with its path.
+            // Only `spawn_interactive_session` writes a settings file or
+            // resolves a shim and overrides these.
             hook_settings: None,
+            hook_shim: None,
         }
     }
 }
@@ -4073,6 +4074,66 @@ fn write_hook_settings(hub: &Hub, session_id: &str, agent: Agent) -> Option<Hook
     })
 }
 
+/// The cached tracer a Codex hook shim runs from, and the config dir whose
+/// `daemon.json` it reads, owned so the borrowed [`HookShim`] built from them
+/// lives through the spawn.
+struct CodexHookShim {
+    tracer_exe: PathBuf,
+    config_dir: PathBuf,
+}
+
+/// The hook shim an interactive Codex spawn runs, or `None` when the request
+/// did not opt in, the cached tracer cannot be resolved, or a path the shim's
+/// command names holds a double quote (which no shell can quote safely). A
+/// `None` leaves the session on the terminal heuristic, exactly as a Claude
+/// spawn does when its settings file cannot be written.
+fn codex_hook_shim(hub: &Hub, session_id: &str, opts: &AgentOptions) -> Option<CodexHookShim> {
+    let AgentOptions::Codex { hooks: true, .. } = opts else {
+        return None;
+    };
+    match tracer_client::cached_tracer_exe(&hub.dirs) {
+        Ok(tracer_exe) => {
+            let config_dir = hub.dirs.config.clone();
+            if let Some(path) = [tracer_exe.as_path(), config_dir.as_path()]
+                .into_iter()
+                .find(|path| path.to_string_lossy().contains('"'))
+            {
+                warn!(
+                    %session_id,
+                    path = %path.display(),
+                    "a path the Codex hook shim command names holds a double quote, which cannot be quoted safely; spawning without hooks"
+                );
+                return None;
+            }
+            Some(CodexHookShim {
+                tracer_exe,
+                config_dir,
+            })
+        }
+        Err(err) => {
+            warn!(
+                %session_id,
+                error = %format!("{err:#}"),
+                "resolving the cached tracer for the Codex hook shim failed; spawning without hooks"
+            );
+            None
+        }
+    }
+}
+
+/// The cached tracer an interactive spawn must run, resolved before its argv
+/// was built: the Claude hook settings file's copy first, then the Codex
+/// shim's. `None` leaves [`tracer_client::spawn`] to resolve the cache for
+/// itself.
+fn spawn_tracer_exe<'a>(
+    hook_settings: Option<&'a HookSettings>,
+    codex_shim: Option<&'a CodexHookShim>,
+) -> Option<&'a Path> {
+    hook_settings
+        .map(|settings| settings.tracer_exe.as_path())
+        .or_else(|| codex_shim.map(|shim| shim.tracer_exe.as_path()))
+}
+
 #[expect(
     clippy::too_many_arguments,
     clippy::too_many_lines,
@@ -4117,10 +4178,18 @@ async fn spawn_interactive_session(
     // argv is built. Only Claude takes it; a failure leaves this spawn on the
     // heuristic.
     let hook_settings = write_hook_settings(hub, &session_id, agent);
+    // Codex injects the same shim through `-c` overrides instead of a settings
+    // file, so its argv names the cached tracer directly.
+    let codex_shim = codex_hook_shim(hub, &session_id, &cfg.agent_options);
     let common = CommonSpawnFields {
         claude_session_id: claude_session_id.as_deref(),
         resume_conversation: conversation.resume.as_deref(),
         hook_settings: hook_settings.as_ref().map(HookSettings::path),
+        hook_shim: codex_shim.as_ref().map(|shim| HookShim {
+            tracer_exe: &shim.tracer_exe,
+            session_id: &session_id,
+            config_dir: &shim.config_dir,
+        }),
         ..cfg.common()
     };
     let args = backend.build_interactive_args(
@@ -4155,17 +4224,12 @@ async fn spawn_interactive_session(
     #[cfg(test)]
     child_env_probe::record(&spec.env, &spec.env_remove);
     let expected_subscribers = expected_output_subscribers(SessionMode::Interactive);
-    let spawn_result = match &hook_settings {
-        // The same cached copy the settings file names, so that file can only
-        // name the tracer this session really runs.
-        Some(settings) => {
-            tracer_client::spawn_with_tracer(
-                &settings.tracer_exe,
-                &hub.dirs,
-                spec,
-                expected_subscribers,
-            )
-            .await
+    let spawn_result = match spawn_tracer_exe(hook_settings.as_ref(), codex_shim.as_ref()) {
+        // The same cached copy an injected file or argv names, so the hook
+        // command can only name the tracer this session really runs.
+        Some(tracer_exe) => {
+            tracer_client::spawn_with_tracer(tracer_exe, &hub.dirs, spec, expected_subscribers)
+                .await
         }
         None => tracer_client::spawn(&hub.dirs, spec, expected_subscribers).await,
     };
@@ -4305,7 +4369,9 @@ async fn spawn_plain_shell_session(
                 "plain shell sessions do not accept a permission_mode"
             ));
         }
-        AgentOptions::Codex { sandbox: Some(_) }
+        AgentOptions::Codex {
+            sandbox: Some(_), ..
+        }
         | AgentOptions::Cursor {
             sandbox: Some(_), ..
         } => {
@@ -9793,6 +9859,69 @@ mod tests {
         )
     }
 
+    fn codex_hooked() -> AgentOptions {
+        AgentOptions::Codex {
+            sandbox: None,
+            hooks: true,
+        }
+    }
+
+    #[test]
+    fn codex_hooks_are_off_when_a_shim_path_cannot_be_quoted() {
+        let (mut hub, _scratch) = hook_test_hub("codex-hooks-unquotable");
+        hub.dirs.config =
+            PathBuf::from(r#"C:\Users\a "b"\AppData\Roaming\leftos\rustling-tulip\config"#);
+        assert!(
+            codex_hook_shim(&hub, "codex-session", &codex_hooked()).is_none(),
+            "a quote in the config dir refuses the shim instead of an unquotable command"
+        );
+    }
+
+    fn test_hook_settings(tracer: &str) -> HookSettings {
+        HookSettings {
+            path: PathBuf::from("hook-settings.json"),
+            tracer_exe: PathBuf::from(tracer),
+            created_dir: false,
+        }
+    }
+
+    fn test_codex_shim(tracer: &str) -> CodexHookShim {
+        CodexHookShim {
+            tracer_exe: PathBuf::from(tracer),
+            config_dir: PathBuf::from(r"C:\config"),
+        }
+    }
+
+    #[test]
+    fn spawn_tracer_prefers_the_claude_hook_settings() {
+        let settings = test_hook_settings(r"C:\cache\settings-tracer.exe");
+        let shim = test_codex_shim(r"C:\cache\shim-tracer.exe");
+        assert_eq!(
+            spawn_tracer_exe(Some(&settings), Some(&shim)),
+            Some(Path::new(r"C:\cache\settings-tracer.exe")),
+            "a Claude spawn runs the copy its settings file names"
+        );
+    }
+
+    #[test]
+    fn spawn_tracer_uses_the_codex_shim_without_claude_settings() {
+        let shim = test_codex_shim(r"C:\cache\shim-tracer.exe");
+        assert_eq!(
+            spawn_tracer_exe(None, Some(&shim)),
+            Some(Path::new(r"C:\cache\shim-tracer.exe")),
+            "a Codex spawn runs the copy its -c command names"
+        );
+    }
+
+    #[test]
+    fn spawn_tracer_is_none_when_neither_shim_names_a_copy() {
+        assert_eq!(
+            spawn_tracer_exe(None, None),
+            None,
+            "a spawn without hooks resolves the cache for itself"
+        );
+    }
+
     #[test]
     fn hook_settings_are_off_without_a_cached_tracer() {
         let (hub, _scratch) = spawnless_test_hub("hook-settings-no-tracer");
@@ -10148,7 +10277,10 @@ mod tests {
             Vec::new(),
             None,
         );
-        request.agent_options = AgentOptions::Codex { sandbox: None };
+        request.agent_options = AgentOptions::Codex {
+            sandbox: None,
+            hooks: false,
+        };
         record.spawn_config = Some(protocol::SpawnConfig::from_request(&request));
         let mut entry =
             history::entry_from_record(&record, SessionEnd::TracerLost, chrono::Utc::now());
@@ -10244,7 +10376,10 @@ mod tests {
     fn spawn_args_common_carries_the_cwd() {
         let cfg = SpawnArgs {
             dangerously_skip_permissions: false,
-            agent_options: AgentOptions::Codex { sandbox: None },
+            agent_options: AgentOptions::Codex {
+                sandbox: None,
+                hooks: false,
+            },
             model: None,
             env: crate::agents::providers::SpawnEnv::default(),
             prompt_injector: None,
@@ -11147,7 +11282,10 @@ mod tests {
             worktree_path: folder.clone(),
         }];
         let mut request = request.clone();
-        request.agent_options = AgentOptions::Codex { sandbox: None };
+        request.agent_options = AgentOptions::Codex {
+            sandbox: None,
+            hooks: false,
+        };
         record.spawn_config = Some(protocol::SpawnConfig::from_request(&request));
         let mut entry = history::entry_from_record(&record, SessionEnd::TracerLost, Utc::now());
         entry.primary_cwd = Some(folder);
@@ -11481,7 +11619,13 @@ mod tests {
         let (hub, _scratch) = spawnless_test_hub("standalone-agents");
         for (mode, agent_options) in [
             (SessionMode::Headless, AgentOptions::claude(None)),
-            (SessionMode::Headless, AgentOptions::Codex { sandbox: None }),
+            (
+                SessionMode::Headless,
+                AgentOptions::Codex {
+                    sandbox: None,
+                    hooks: false,
+                },
+            ),
             (
                 SessionMode::Headless,
                 AgentOptions::Cursor {
@@ -11563,9 +11707,15 @@ mod tests {
         let (hub, scratch) = spawnless_test_hub("standalone-codex");
         let folder = scratch.path().join("plain-codex");
         std::fs::create_dir_all(&folder).expect("create folder");
-        let error =
-            standalone_agent_spawn_error(&hub, AgentOptions::Codex { sandbox: None }, &folder)
-                .await;
+        let error = standalone_agent_spawn_error(
+            &hub,
+            AgentOptions::Codex {
+                sandbox: None,
+                hooks: false,
+            },
+            &folder,
+        )
+        .await;
         assert!(error.contains("spawning codex via tracer"), "{error}");
         assert_standalone_agent_runs_in(&folder);
         assert!(hub.sessions.snapshots().is_empty(), "nothing was spawned");
@@ -11590,9 +11740,15 @@ mod tests {
     async fn standalone_codex_in_a_missing_folder_fails_with_folder_not_found() {
         let (hub, scratch) = spawnless_test_hub("standalone-codex-missing");
         let folder = scratch.path().join("gone");
-        let error =
-            standalone_agent_spawn_error(&hub, AgentOptions::Codex { sandbox: None }, &folder)
-                .await;
+        let error = standalone_agent_spawn_error(
+            &hub,
+            AgentOptions::Codex {
+                sandbox: None,
+                hooks: false,
+            },
+            &folder,
+        )
+        .await;
         assert!(error.contains("reading the standalone folder"), "{error}");
         assert!(error.contains(&*folder.to_string_lossy()), "{error}");
     }
@@ -11609,7 +11765,10 @@ mod tests {
             worktree_path: folder.to_owned(),
         }];
         let mut request = env_spawn(target, SessionMode::Interactive, Vec::new(), None);
-        request.agent_options = AgentOptions::Codex { sandbox: None };
+        request.agent_options = AgentOptions::Codex {
+            sandbox: None,
+            hooks: false,
+        };
         record.spawn_config = Some(protocol::SpawnConfig::from_request(&request));
         let mut entry =
             history::entry_from_record(&record, SessionEnd::TracerLost, chrono::Utc::now());
