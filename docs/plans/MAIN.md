@@ -13,10 +13,7 @@
 
 ## Wave 2 — Daily driver: close the port's gaps
 
-- [ ] RT-22 P4.15b: Preset wizard preview and launching · release vNext
-  - [ ] RT-251 P4.15b part 2: preset launch jobs, toasts, first tab, Select launched, Stop all · release vNext
 - [ ] RT-171 Phase 5a: pane drag-and-drop (P5.1–P5.5) · release vNext
-  - [ ] RT-230 P5.2: Pane drag-and-drop in the shown tab · release vNext
   - [ ] RT-231 P5.3: Tab strip drag · release vNext
   - [ ] RT-232 P5.4: Sidebar drag-to-reorder · release vNext
   - [ ] RT-233 P5.5: Drag a leaf onto a pane or a tab pill · release vNext
@@ -48,6 +45,8 @@
 - [ ] RT-254 Keep preset job events when the broadcast lags
 - [ ] RT-255 Reject or document a preset max_panes_per_tab of 0
 - [ ] RT-256 Name the failing script variable in PresetScriptsError
+- [ ] RT-259 Preset wizard: say so when Esc closes it while its scripts still run
+- [ ] RT-261 Preset launch: Stop all misses sessions whose snapshot hasn't arrived yet
 
 ## Wave 2b — Hook status
 
@@ -70,15 +69,14 @@
 ## Wave 3 — Cutover: remote mode, installer and v0.1.0-alpha
 
 - [ ] RT-244 Preset wizard: typed host paths instead of local pickers in remote mode
+- [ ] RT-257 P6.2b: typed host path for Add repo and Browse on a remote host · release vNext
 - [ ] RT-247 Merge feat/remote-mode to main (#201)
 - [ ] RT-173 Import remote sessions: offer to arrange a remote host's sessions when their count changed · release vNext
-- [ ] RT-172 Remote mode: Reconnect in place of Restart, and the no-repos note on a remote host · release vNext
 - [ ] RT-166 TS.3b: device tokens issued only after the owner approves the device on the host PC · release vNext
 - [ ] RT-158 P6.6: Remote tests over a fake Tailscale, hand checklist, and the docs pass · release vNext
 - [ ] RT-157 P6.7: Cutover: installer (and the firewall rule, once ruled) · release vNext
 - [ ] RT-154 P6.4: Host Settings: Remote access (Tailscale) panel · release vNext
 - [ ] RT-152 P6.3: Host picker from the tailnet's machines, typed-name fallback, boot reconnect · release vNext
-- [ ] RT-151 P6.2: Remote-mode rules: what is disabled, hidden or retargeted · release vNext
 - [ ] RT-96 Remote devices: list connected tailnet devices, block one and drop its connections · release vNext
 - [ ] RT-35 FT.2: native download sink for fetched files · release vNext
 - [ ] RT-36 FT.3: fetch a file by clicking a terminal path link in remote mode · release vNext
@@ -89,6 +87,7 @@
 - [ ] RT-240 Close tailnet sessions when their listener drops · release vNext
 - [ ] RT-243 Split tailnet Supervisor::run and carry the real CertFailed reason
 - [ ] RT-245 Make the tailnet handshake client-count test load-proof
+- [ ] RT-258 Remote mode: don't send this PC's remembered folders to a remote host
 
 ## Wave 4 — Mobile app (iPhone PWA over Tailscale)
 
@@ -215,6 +214,8 @@
 - [ ] RT-234 Make kill_is_idempotent_and_safe_after_exit wait for the child's exit instead of sleeping 300 ms
 - [ ] RT-252 Make production_tls_config_builds hold on a builder without CA certificates
 - [ ] RT-253 Check whether the daemon's tokio-rustls can be dev-only after TS.5
+- [ ] RT-260 Autostart test: stop writing to the live HKCU Run key
+- [ ] RT-262 Run the ui_ellipsis specs: test-release builds without debug assertions
 
 ## macOS
 
@@ -264,3 +265,4 @@
 
 - [ ] RT-59 Split the oversized daemon, protocol and native UI source files
 - [ ] RT-241 Order keep-awake's connect-time push after concurrent broadcasts
+- [ ] RT-263 Split RootView::on_key_capture under the 100-line limit
