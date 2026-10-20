@@ -13,10 +13,9 @@
 
 ## Wave 2 — Daily driver: close the port's gaps
 
-- [ ] RT-21 P4.15a: Preset wizard sources and variables · release vNext
+- [/] RT-21 P4.15a: Preset wizard sources and variables · release vNext
 - [ ] RT-22 P4.15b: Preset wizard preview and launching · release vNext
 - [ ] RT-171 Phase 5a: pane drag-and-drop (P5.1–P5.5) · release vNext
-  - [ ] RT-229 P5.1: Drag model — payloads, drop edges, reorder · release vNext
   - [ ] RT-230 P5.2: Pane drag-and-drop in the shown tab · release vNext
   - [ ] RT-231 P5.3: Tab strip drag · release vNext
   - [ ] RT-232 P5.4: Sidebar drag-to-reorder · release vNext
@@ -44,6 +43,8 @@
 - [ ] RT-235 Check a VS Code or Explorer target still exists before opening it · release vNext
 - [ ] RT-236 Fold the container menu's disabled-tip table into its row definitions · release vNext
 - [ ] RT-237 Diagnose the VS Code fallback's dispatch order when two opens are queued · release vNext
+- [ ] RT-238 Route a ListPresets failure by request_id · release vNext
+- [ ] RT-239 Skip touch and broadcast for a MovePane that leaves the grid unchanged
 
 ## Wave 2b — Hook status
 
@@ -65,14 +66,15 @@
 
 ## Wave 3 — Cutover: remote mode, installer and v0.1.0-alpha
 
+- [ ] RT-244 Preset wizard: typed host paths instead of local pickers in remote mode
+- [ ] RT-247 Merge feat/remote-mode to main (#201)
 - [ ] RT-173 Import remote sessions: offer to arrange a remote host's sessions when their count changed · release vNext
 - [ ] RT-172 Remote mode: Reconnect in place of Restart, and the no-repos note on a remote host · release vNext
 - [ ] RT-166 TS.3b: device tokens issued only after the owner approves the device on the host PC · release vNext
 - [ ] RT-163 TS.5: retire the LAN listener, /pair and mDNS · release vNext
-- [ ] RT-162 TS.4: ConfigureRemote and RemoteStatus messages · release vNext
+- [/] RT-162 TS.4: ConfigureRemote and RemoteStatus messages · release vNext
 - [ ] RT-158 P6.6: Remote tests over a fake Tailscale, hand checklist, and the docs pass · release vNext
 - [ ] RT-157 P6.7: Cutover: installer (and the firewall rule, once ruled) · release vNext
-- [ ] RT-156 P6.5: Autostart: start the daemon on login · release vNext
 - [ ] RT-154 P6.4: Host Settings: Remote access (Tailscale) panel · release vNext
 - [ ] RT-152 P6.3: Host picker from the tailnet's machines, typed-name fallback, boot reconnect · release vNext
 - [ ] RT-151 P6.2: Remote-mode rules: what is disabled, hidden or retargeted · release vNext
@@ -84,6 +86,10 @@
 - [ ] RT-129 Write the release procedure for v0.1.0-alpha · release vNext
 - [ ] RT-184 Let only the client with recent input own a session's terminal size · release vNext
 - [ ] RT-187 Await the tailnet servers after the listener's supervisor panics · release vNext
+- [ ] RT-240 Close tailnet sessions when their listener drops · release vNext
+- [ ] RT-242 Send path-free TailscaleError reasons to clients · release vNext
+- [ ] RT-243 Split tailnet Supervisor::run and carry the real CertFailed reason
+- [ ] RT-245 Make the tailnet handshake client-count test load-proof
 
 ## Wave 4 — Mobile app (iPhone PWA over Tailscale)
 
@@ -213,6 +219,7 @@
 - [!] RT-46 Verify macOS support M0–M3 on real Mac hardware
 - [ ] RT-82 DI.6: macOS dictation through SFSpeechRecognizer and right Option
 - [ ] RT-47 M4: macOS packaging, signing and notarization
+- [ ] RT-246 Compile-check the macOS and Linux autostart modules, and decide --detach for the LaunchAgent
 
 ## Agent CLIs
 
@@ -254,3 +261,4 @@
 ## Backlog
 
 - [ ] RT-59 Split the oversized daemon, protocol and native UI source files
+- [ ] RT-241 Order keep-awake's connect-time push after concurrent broadcasts
