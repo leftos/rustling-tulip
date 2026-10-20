@@ -97,6 +97,14 @@ While a tab stays automatic, a window resize re-sends its automatic layout with 
 
 The client sends no `SetPaneRatio` for a divider press that stays within 3 logical px of where it landed, so a click on the handle does not count as a resize. A tab update that rebuilds the dragged tab's split tree renumbers its splits, so the client ends the in-flight drag instead of sending its held path.
 
+## Drag model
+
+`apps/native/src/drag.rs` is the plain-Rust half of every drag. `DragPayload` is a `Pane`, a `Tab`, a `Container` or a `Leaf`. `drop_edge` maps the pointer's fraction of a pane to a `PaneDropEdge`: the outer band (`OUTER_BAND`, 0.12) on a side that touches the grid boundary (`tabs::outer_edges`, within 0.5 px), the nearer outer edge at a corner; the centre box (`CENTRE_LOW` 0.35 to `CENTRE_HIGH` 0.65) is `Replace`; otherwise the half on the nearer axis.
+
+`pane_drop` builds the `MovePane` with its undo label (`undo::MOVED_PANE`, or `undo::SWAPPED_PANES` for a same-tab centre drop). It sends nothing for a diff or missing tab, a pane a grid does not hold, a self-drop, a non-pane payload, or a same-tab drop onto the facing half of the source's own split sibling, which would rebuild the same tree.
+
+`reorder` moves one id before or after another (`Side` from the pointer's half of the row or pill); `reorder_tabs` and `reorder_containers` build `ReorderTabs` / `ReorderContainers` and give none when the order would not change.
+
 ## Settings
 
 The Settings modal's tab list reads General, Notifications, Spawn defaults, Worktrees, Appearance and App title, then a non-selectable `Agents` group row and the Claude, Codex and Cursor pages. The group row is a label only: no page, click, hover or keyboard stop.

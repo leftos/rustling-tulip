@@ -28,7 +28,7 @@ Drag-and-drop (P5.1–P5.5) is Phase 5a, RT-171 in Wave 2, before the cutover; t
 
   P5.1–P5.5 add drag gestures on top of that placement rather than reimplementing it.
 
-- **Client**: `TabsModel` folds `TabsReordered` (`tabs.rs` `reorder`) and `SidebarModel` folds `ContainersReordered` / `SessionsReordered` and orders by them (`sidebar.rs` `apply_container_order`, `apply_session_order`). `tabs::pane_rects`, `tabs::pick_balanced_drop_target` (the pane menu's Move to ▸, `pane_menu.rs`), `tabs::size_drivers`, `undo::MOVED_PANE`, `RootView::record_undo` and `TabsModel::mark_closing_if_last_pane` exist. No GPUI drag-and-drop API is used yet: divider and sidebar-width drags are raw mouse move / up on the root (`lib.rs` `on_drag_move`, `on_drag_end`). A pane's terminal is a `TerminalPane` entity in a `PaneSlot` keyed by pane id (`grid_view.rs`); app shortcuts are the root's `capture_key_down` (`lib.rs`).
+- **Client**: `TabsModel` folds `TabsReordered` (`tabs.rs` `reorder`) and `SidebarModel` folds `ContainersReordered` / `SessionsReordered` and orders by them (`sidebar.rs` `apply_container_order`, `apply_session_order`). `tabs::pane_rects`, `tabs::pick_balanced_drop_target` (the pane menu's Move to ▸, `pane_menu.rs`), `tabs::size_drivers`, `undo::MOVED_PANE`, `undo::SWAPPED_PANES`, `tabs::outer_edges`, the drag model in `drag.rs` (`docs/native-client.md`, "Drag model"), `RootView::record_undo` and `TabsModel::mark_closing_if_last_pane` exist. No GPUI drag-and-drop API is used yet: divider and sidebar-width drags are raw mouse move / up on the root (`lib.rs` `on_drag_move`, `on_drag_end`). A pane's terminal is a `TerminalPane` entity in a `PaneSlot` keyed by pane id (`grid_view.rs`); app shortcuts are the root's `capture_key_down` (`lib.rs`).
 - **Tauri reference** (tag `tauri-last`, `apps/tauri-app/src/`): `components/GridRenderer.tsx` `computeEdge` (outer band 0.12 of the pane on edges touching the grid boundary, the nearer at a corner; centre box 0.35–0.65 swaps; else the nearer axis's half) and `PoppedOutPaneCard`; `components/TabBar.tsx` (before / after by the pill's half, a pane entering a pill activates it, a pane dropped on a pill placed by `pickBalancedDropTarget`); `components/Sidebar.tsx` (container and leaf reorder by the row's half, leaves reorder only inside workspace, repo and tab containers, a bound leaf also carries its first pane); `PaneWindow.tsx`, `TabWindow.tsx`, `SessionWindow.tsx`; `src-tauri/src/lib.rs` `open_pane_window` / `open_tab_window` / `open_session_window` (an open window is focused, 1100×720, min 700×400).
 
 ### GPUI 0.2.2
@@ -55,14 +55,6 @@ Read from `~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gpui-0.2.2/src
 - Unseen turns clear "when … a focused pane shows it", and "The unseen set is per window and not saved" (`docs/native-client.md`, Status glyphs). A session focused in a pop-out counts as shown.
 - Protocol: changes stay additive (CLAUDE.md, Architecture invariants).
 - Verification: "UI hand-test (multi-window and drag can't be fully specced)" (the Phase 5 project's verification, now Wave 2's for drag-and-drop and Wave 7's for pop-outs); "a visible result no test can prove lands on green gates and is listed for a hand-test" (the nextup profile, "Agents and gates").
-
-### P5.1 Drag model: payloads, drop edges, reorder
-
-- **Does**: the plain-Rust half of every drag. `DragPayload` (`Pane { tab_id, pane_id }`, `Tab(tab_id)`, `Container(ContainerRef)`, `Leaf { session_id, container_id }`); `drop_edge(x, y, outer) -> PaneDropEdge` over the pointer's fraction of the pane (geometry per Q7); `outer_edges(grid, bounds)` over `tabs::pane_rects`, the sides of each pane that touch the grid's boundary; `pane_drop(payload, dst_tab, dst_pane, edge) -> Option<ClientMessage>` with the undo label (a self-drop, a drop on a diff tab and a same-tab move of a tab's only pane give none); `reorder(ids, dragged, target, side) -> Vec<String>`, the side taken from the pointer's half of the row or pill. No parity line alone; P5.2–P5.5 build on it.
-- **Files**: new `apps/native/src/drag.rs`; `tabs.rs` (`outer_edges` beside `pane_rects`); `lib.rs` (`mod drag`).
-- **Core / view**: all core, no view.
-- **Proof**: `cargo test -p rustling-tulip-native --lib drag::` and `tabs::tests::outer_edges`, red first: `centre_box_is_replace`, `nearer_axis_picks_the_half`, `outer_band_only_where_the_pane_touches_the_grid_edge`, `grid_corner_takes_the_nearer_outer_edge`, `self_drop_sends_nothing`, `only_pane_cannot_move_within_its_tab`, `swap_is_labelled_swapped_panes`, `reorder_before_and_after`, `reorder_onto_itself_is_unchanged`, `outer_edges_of_a_two_by_two_grid`.
-- **Needs**: Q7.
 
 ### P5.2 Pane drag-and-drop in the shown tab
 

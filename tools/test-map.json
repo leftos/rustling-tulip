@@ -171,6 +171,12 @@
     },
     {
       "paths": [
+        "apps/native/src/drag.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & test(/^drag::/))"
+    },
+    {
+      "paths": [
         "apps/native/src/folder_picker.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native) & test(/^folder_picker::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_repos)::/))"

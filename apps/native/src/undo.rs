@@ -16,6 +16,9 @@ pub const UNDO_LABEL: &str = "Undo";
 pub const CLOSED_EMPTY_PANE: &str = "Closed empty pane";
 /// What the shelf says of a pane moved into another tab.
 pub const MOVED_PANE: &str = "Moved pane";
+/// What the shelf says of a same-tab centre drop, which swaps two sessions.
+#[cfg_attr(not(test), expect(dead_code, reason = "called only from unit tests"))]
+pub const SWAPPED_PANES: &str = "Swapped panes";
 
 /// What the shelf says of a closed tab named `name`.
 #[must_use]

@@ -310,6 +310,43 @@ fn walk_rects(node: &GridNode, bounds: Rect, thickness: f32, out: &mut Vec<(Stri
     }
 }
 
+/// The sides of a pane that lie on the boundary of the grid it sits in.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "four independent sides, not a state machine"
+)]
+#[cfg_attr(not(test), expect(dead_code, reason = "called only from unit tests"))]
+pub struct OuterSides {
+    pub left: bool,
+    pub right: bool,
+    pub top: bool,
+    pub bottom: bool,
+}
+
+/// Every pane's sides that touch the grid's boundary when `grid` fills
+/// `bounds` with dividers `thickness` wide, in [`pane_rects`] order. A side
+/// touches when it lies within half a pixel of the bound, since the pane
+/// rectangles are sums and differences of `f32` measures.
+#[cfg_attr(not(test), expect(dead_code, reason = "called only from unit tests"))]
+pub fn outer_edges(grid: &GridNode, bounds: Rect, thickness: f32) -> Vec<(String, OuterSides)> {
+    const TOUCH_EPSILON: f32 = 0.5;
+    let right = bounds.x + bounds.width;
+    let bottom = bounds.y + bounds.height;
+    pane_rects(grid, bounds, thickness)
+        .into_iter()
+        .map(|(pane_id, rect)| {
+            let sides = OuterSides {
+                left: (rect.x - bounds.x).abs() <= TOUCH_EPSILON,
+                right: (rect.x + rect.width - right).abs() <= TOUCH_EPSILON,
+                top: (rect.y - bounds.y).abs() <= TOUCH_EPSILON,
+                bottom: (rect.y + rect.height - bottom).abs() <= TOUCH_EPSILON,
+            };
+            (pane_id, sides)
+        })
+        .collect()
+}
+
 /// Every split's divider when `grid` fills `bounds`, parents before their
 /// children.
 pub fn dividers(grid: &GridNode, bounds: Rect, thickness: f32) -> Vec<Divider> {
@@ -1345,7 +1382,12 @@ pub(crate) mod tests {
         }
     }
 
-    fn split(direction: SplitDirection, ratio: f32, first: GridNode, second: GridNode) -> GridNode {
+    pub(crate) fn split(
+        direction: SplitDirection,
+        ratio: f32,
+        first: GridNode,
+        second: GridNode,
+    ) -> GridNode {
         GridNode::Split {
             direction,
             ratio,
@@ -1364,7 +1406,7 @@ pub(crate) mod tests {
         .expect("tab fixture")
     }
 
-    fn diff_tab(id: &str) -> TabEntry {
+    pub(crate) fn diff_tab(id: &str) -> TabEntry {
         serde_json::from_value(json!({
             "id": id,
             "name": id,
@@ -1462,6 +1504,154 @@ pub(crate) mod tests {
                 ("b".to_owned(), Rect::new(106.0, 0.0, 98.0, 26.0)),
                 ("c".to_owned(), Rect::new(106.0, 30.0, 98.0, 74.0)),
             ]
+        );
+    }
+
+    #[test]
+    fn outer_edges_of_a_two_by_two_grid() {
+        let grid = split(
+            V,
+            0.5,
+            split(H, 0.5, pane("a", None), pane("b", None)),
+            split(H, 0.5, pane("c", None), pane("d", None)),
+        );
+
+        let found = outer_edges(&grid, Rect::new(0.0, 0.0, 204.0, 104.0), 4.0);
+
+        let sides: Vec<(&str, OuterSides)> = found
+            .iter()
+            .map(|(id, sides)| (id.as_str(), *sides))
+            .collect();
+        assert_eq!(
+            sides,
+            [
+                (
+                    "a",
+                    OuterSides {
+                        left: true,
+                        top: true,
+                        ..OuterSides::default()
+                    }
+                ),
+                (
+                    "b",
+                    OuterSides {
+                        right: true,
+                        top: true,
+                        ..OuterSides::default()
+                    }
+                ),
+                (
+                    "c",
+                    OuterSides {
+                        left: true,
+                        bottom: true,
+                        ..OuterSides::default()
+                    }
+                ),
+                (
+                    "d",
+                    OuterSides {
+                        right: true,
+                        bottom: true,
+                        ..OuterSides::default()
+                    }
+                ),
+            ],
+            "each pane touches the two sides of the grid its column and row end at"
+        );
+    }
+
+    #[test]
+    fn outer_edges_of_a_lone_pane_is_all_four() {
+        let found = outer_edges(&pane("a", None), Rect::new(10.0, 20.0, 100.0, 50.0), 4.0);
+        assert_eq!(
+            found,
+            [(
+                "a".to_owned(),
+                OuterSides {
+                    left: true,
+                    right: true,
+                    top: true,
+                    bottom: true,
+                }
+            )],
+            "a pane that fills the grid touches every side"
+        );
+    }
+
+    #[test]
+    fn outer_edges_with_uneven_ratios() {
+        let found = outer_edges(&three(), Rect::new(0.0, 0.0, 204.0, 104.0), 4.0);
+        assert_eq!(
+            found,
+            vec![
+                (
+                    "a".to_owned(),
+                    OuterSides {
+                        left: true,
+                        top: true,
+                        bottom: true,
+                        ..OuterSides::default()
+                    }
+                ),
+                (
+                    "b".to_owned(),
+                    OuterSides {
+                        right: true,
+                        top: true,
+                        ..OuterSides::default()
+                    }
+                ),
+                (
+                    "c".to_owned(),
+                    OuterSides {
+                        right: true,
+                        bottom: true,
+                        ..OuterSides::default()
+                    }
+                ),
+            ],
+            "a nested pane touches only the sides its own edge of the grid ends at"
+        );
+    }
+
+    #[test]
+    fn outer_edges_accept_a_bound_a_fraction_off() {
+        let bounds = Rect::new(3.3, 0.0, 1000.0, 100.0);
+        let grid = split(H, 1.0 / 3.0, pane("a", None), pane("b", None));
+
+        let rects = pane_rects(&grid, bounds, 4.0);
+        let (_, far) = rects.get(1).expect("the second pane");
+        let off = (far.x + far.width - (bounds.x + bounds.width)).abs();
+        assert!(
+            off > 0.0 && off < 0.5,
+            "the split leaves the far side {off} off its bound, inside the tolerance"
+        );
+
+        assert_eq!(
+            outer_edges(&grid, bounds, 4.0),
+            vec![
+                (
+                    "a".to_owned(),
+                    OuterSides {
+                        left: true,
+                        top: true,
+                        bottom: true,
+                        ..OuterSides::default()
+                    }
+                ),
+                (
+                    "b".to_owned(),
+                    OuterSides {
+                        right: true,
+                        top: true,
+                        bottom: true,
+                        ..OuterSides::default()
+                    }
+                ),
+            ],
+            "a side a fraction off its bound still touches the grid"
         );
     }
 

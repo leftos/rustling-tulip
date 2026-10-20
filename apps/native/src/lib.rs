@@ -23,6 +23,7 @@ mod diff_tab;
 mod diff_tab_view;
 pub mod diff_view;
 mod discard_confirm;
+mod drag;
 pub mod ellipsis;
 mod folder_picker;
 pub mod fonts;
