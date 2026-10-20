@@ -69,7 +69,7 @@ const SEGMENT_TEXT_SIZE: f32 = 12.5;
 /// The dialog's ordinary buttons: outlined, regular.
 const OUTLINED: (ButtonKind, ButtonSize) = (ButtonKind::Outlined, ButtonSize::Regular);
 /// The opacity of a disabled control, as `buttons.rs` dims a button.
-const DISABLED_OPACITY: f32 = 0.45;
+pub(crate) const DISABLED_OPACITY: f32 = 0.45;
 /// The corner radius of a notice box in the dialog.
 const NOTICE_RADIUS: f32 = 8.0;
 /// The corner radius of a branch list, as a popover's.
@@ -556,6 +556,7 @@ impl RootView {
             focused: focused.as_deref().and_then(|id| self.sidebar.session(id)),
             tabs: TabChoices::from_tabs(self.tabs.tabs(), self.tabs.active_id()),
             spawn_defaults: self.sidebar.ui_state().spawn,
+            codex_hooks: self.sidebar.ui_state().agents.codex.hooks,
             lock,
             claude_provider_supported: self.conn.supports(protocol::FEATURE_CLAUDE_PROVIDER),
         };

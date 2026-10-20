@@ -377,6 +377,9 @@ pub struct UiState {
     /// The Settings modal's Spawn defaults tab.
     #[serde(default)]
     pub spawn: SpawnDefaults,
+    /// The Settings modal's agent pages.
+    #[serde(default)]
+    pub agents: AgentsSettings,
 }
 
 /// What the spawn dialog pre-fills from the Spawn defaults tab; every
@@ -395,6 +398,23 @@ pub struct SpawnDefaults {
     /// not know loads as Anthropic.
     #[serde(deserialize_with = "deserialize_known_provider")]
     pub claude_provider: ClaudeProvider,
+}
+
+/// The per-agent settings the Settings modal's agent pages hold.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AgentsSettings {
+    /// Codex's settings.
+    pub codex: CodexAgentSettings,
+}
+
+/// Codex's settings on its Settings page.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CodexAgentSettings {
+    /// A Codex spawn runs the injected hooks with
+    /// `--dangerously-bypass-hook-trust`.
+    pub hooks: bool,
 }
 
 /// `provider`, with one this client does not know read as Anthropic, so
@@ -539,6 +559,7 @@ impl Default for UiState {
             title: TitleSettings::default(),
             notifications: NotificationSettings::default(),
             spawn: SpawnDefaults::default(),
+            agents: AgentsSettings::default(),
         }
     }
 }
@@ -921,6 +942,11 @@ impl SidebarModel {
     /// The sandbox mode a spawn dialog opens with for Codex.
     pub fn set_spawn_codex_sandbox(&mut self, sandbox: Option<CodexSandbox>) {
         self.ui.spawn.codex_sandbox = sandbox;
+    }
+
+    /// Whether a Codex spawn runs the injected hooks.
+    pub fn set_codex_hooks(&mut self, on: bool) {
+        self.ui.agents.codex.hooks = on;
     }
 
     /// Records the main window's place; returns whether it changed.
@@ -2903,6 +2929,9 @@ mod tests {
                 codex_sandbox: Some(CodexSandbox::DangerFullAccess),
                 claude_provider: ClaudeProvider::Deepseek,
             },
+            agents: AgentsSettings {
+                codex: CodexAgentSettings { hooks: true },
+            },
         };
         save_ui_state(&dir.0, &state).expect("first save");
         save_ui_state(&dir.0, &state).expect("save over the existing file");
@@ -2955,6 +2984,63 @@ mod tests {
                 claude_provider: ClaudeProvider::Deepseek,
             }
         );
+    }
+
+    #[test]
+    fn agents_codex_hooks_defaults_off() {
+        let dir = TestDir::new("agents-hooks");
+        assert!(!UiState::default().agents.codex.hooks, "off by default");
+
+        std::fs::write(dir.0.join(UI_FILE), r#"{ "sidebar_collapsed": true }"#).expect("write");
+        assert!(
+            !load_ui_state(&dir.0).agents.codex.hooks,
+            "a file saved before the agent pages existed loads false"
+        );
+
+        std::fs::write(dir.0.join(UI_FILE), r#"{ "agents": { "codex": {} } }"#).expect("write");
+        assert!(
+            !load_ui_state(&dir.0).agents.codex.hooks,
+            "a group missing the field fills it"
+        );
+    }
+
+    #[test]
+    fn agents_codex_hooks_round_trip() {
+        let dir = TestDir::new("agents-hooks-round-trip");
+        let state = UiState {
+            agents: AgentsSettings {
+                codex: CodexAgentSettings { hooks: true },
+            },
+            ..UiState::default()
+        };
+        save_ui_state(&dir.0, &state).expect("save");
+        assert!(
+            load_ui_state(&dir.0).agents.codex.hooks,
+            "the chosen value round trips"
+        );
+    }
+
+    #[test]
+    fn agents_with_the_wrong_type_gives_the_whole_file_defaults() {
+        let dir = TestDir::new("agents-wrong-type");
+        std::fs::write(
+            dir.0.join(UI_FILE),
+            r#"{ "sidebar_collapsed": true, "agents": "on" }"#,
+        )
+        .expect("write");
+        assert_eq!(
+            load_ui_state(&dir.0),
+            UiState::default(),
+            "a wrong-shaped group resets the whole file, as every other group does"
+        );
+    }
+
+    #[test]
+    fn codex_hooks_setter_writes_the_field() {
+        let mut model = SidebarModel::new(UiState::default());
+        assert!(!model.ui_state().agents.codex.hooks);
+        model.set_codex_hooks(true);
+        assert!(model.ui_state().agents.codex.hooks);
     }
 
     #[test]

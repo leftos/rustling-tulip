@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use gpui::{
     AnyElement, App, ClickEvent, Context, Div, Entity, EntityId, FocusHandle, Focusable as _,
-    FontWeight, Keystroke, MouseButton, MouseDownEvent, Stateful, Subscription, Window, div,
-    prelude::*, px,
+    FontWeight, Keystroke, MouseButton, MouseDownEvent, Stateful, StyledText, Subscription,
+    TextRun, Window, div, prelude::*, px,
 };
 use protocol::{
     ClaudeProvider, ClientMessage, CodexSandbox, FEATURE_CLAUDE_PROVIDER, PermissionMode,
@@ -22,6 +22,7 @@ use crate::appearance;
 use crate::appearance_stops::{AppearanceStop, after_lost};
 use crate::appearance_view::{Level, close_footer};
 use crate::buttons::{field_frame, focus_ring};
+use crate::fonts;
 use crate::mouse::CopyOnSelect;
 use crate::notify::{NotifyState, WINDOWS_NOTIFICATION_SETTINGS};
 use crate::palette::{CHIP, HOVER, LINE, RAISED, SUBTLE, TEXT_2, TRANSPARENT};
@@ -33,8 +34,8 @@ use crate::spawn_form::{
     approval_label, codex_sandbox_label, provider_label,
 };
 use crate::spawn_view::{
-    CLAUDE_LOCKED, CODEX_LOCKED, Look, checkbox_row, choice_button, close_button, dialog_card,
-    dialog_title_bar, field, segmented,
+    CLAUDE_LOCKED, CODEX_LOCKED, DISABLED_OPACITY, Look, checkbox_row, choice_button, close_button,
+    dialog_card, dialog_title_bar, field, segmented,
 };
 use crate::tabs::tab_session_counts;
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
@@ -64,6 +65,17 @@ const CHIP_RADIUS: f32 = 5.0;
 /// flickering between working and idle does not flicker the taskbar.
 const TITLE_DEBOUNCE: Duration = Duration::from_millis(350);
 const NOT_CONNECTED: &str = "(daemon not connected)";
+/// The flag [`CODEX_HOOKS_HINT`] names, drawn in the code style there.
+const CODEX_HOOKS_FLAG: &str = "--dangerously-bypass-hook-trust";
+const CODEX_HOOKS_HINT: &str = "Turning this on makes Codex run the injected hooks with --dangerously-bypass-hook-trust, which also runs any unreviewed repo's hooks outside Codex's sandbox.";
+/// The Codex hooks toggle's label.
+const CODEX_HOOKS_LABEL: &str = "Report status from Codex hooks";
+const CODEX_HOOKS_LOCKED: &str =
+    "Trusted launch keeps the hooks setting in effect; this lock only stops editing it here.";
+/// The Claude page's locked provider note: unlike the approval mode, the
+/// provider is sent under trusted launch, so the choice stays in effect.
+const PROVIDER_LOCKED: &str =
+    "Trusted launch keeps the provider choice in effect; this lock only stops editing it here.";
 const WORKTREES_HINT: &str = "Per-session git worktrees land under this directory. Changes take effect for new sessions only — sessions already spawned keep their existing worktree paths.";
 
 /// A tab of the Settings modal, in the order the list shows them.
@@ -76,16 +88,22 @@ pub(crate) enum SettingsTab {
     Worktrees,
     Appearance,
     AppTitle,
+    Claude,
+    Codex,
+    Cursor,
 }
 
 impl SettingsTab {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 9] = [
         Self::General,
         Self::Notifications,
         Self::SpawnDefaults,
         Self::Worktrees,
         Self::Appearance,
         Self::AppTitle,
+        Self::Claude,
+        Self::Codex,
+        Self::Cursor,
     ];
 
     const fn label(self) -> &'static str {
@@ -96,6 +114,9 @@ impl SettingsTab {
             Self::Worktrees => "Worktrees",
             Self::Appearance => "Appearance",
             Self::AppTitle => "App title",
+            Self::Claude => "Claude",
+            Self::Codex => "Codex",
+            Self::Cursor => "Cursor",
         }
     }
 
@@ -107,6 +128,9 @@ impl SettingsTab {
             Self::Worktrees => "settings-tab-worktrees",
             Self::Appearance => "settings-tab-appearance",
             Self::AppTitle => "settings-tab-app-title",
+            Self::Claude => "settings-tab-claude",
+            Self::Codex => "settings-tab-codex",
+            Self::Cursor => "settings-tab-cursor",
         }
     }
 
@@ -121,6 +145,38 @@ impl SettingsTab {
         Self::ALL[next]
     }
 }
+
+/// A row of the Settings tab list: a real tab, or a group label with no
+/// page of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SettingsRow {
+    Group(&'static str),
+    Tab(SettingsTab),
+}
+
+impl SettingsRow {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Group(label) => label,
+            Self::Tab(tab) => tab.label(),
+        }
+    }
+}
+
+/// The tab list's rows, in order. A group row is drawn between the tabs
+/// and never reached by the keyboard.
+const ROWS: [SettingsRow; 10] = [
+    SettingsRow::Tab(SettingsTab::General),
+    SettingsRow::Tab(SettingsTab::Notifications),
+    SettingsRow::Tab(SettingsTab::SpawnDefaults),
+    SettingsRow::Tab(SettingsTab::Worktrees),
+    SettingsRow::Tab(SettingsTab::Appearance),
+    SettingsRow::Tab(SettingsTab::AppTitle),
+    SettingsRow::Group("Agents"),
+    SettingsRow::Tab(SettingsTab::Claude),
+    SettingsRow::Tab(SettingsTab::Codex),
+    SettingsRow::Tab(SettingsTab::Cursor),
+];
 
 /// The General tab's Default view choices, in the order they show.
 const SIDEBAR_VIEW_CHOICES: [SidebarView; 2] = [SidebarView::Repos, SidebarView::Tabs];
@@ -148,6 +204,7 @@ pub(crate) enum SettingsControl {
     SpawnApproval(Option<PermissionMode>),
     SpawnProvider(ClaudeProvider),
     SpawnCodexSandbox(Option<CodexSandbox>),
+    CodexHooks,
     WorktreesPath,
     WorktreesBrowse,
     WorktreesSave,
@@ -197,6 +254,7 @@ impl SettingsControl {
                     "settings-spawn-codex-sandbox-danger-full-access"
                 }
             },
+            Self::CodexHooks => "settings-agents-codex-hooks",
             Self::WorktreesPath => "settings-worktrees-root-input",
             Self::WorktreesBrowse => "settings-worktrees-root-browse",
             Self::WorktreesSave => "settings-worktrees-root-save",
@@ -270,7 +328,7 @@ impl RootView {
             .is_some_and(|editor| editor.level == Level::App)
     }
 
-    /// Why the Spawn defaults "Claude provider" row is disabled, while
+    /// Why the Claude page's "Claude provider" row is disabled, while
     /// Settings is open and it is.
     #[must_use]
     pub fn settings_provider_tip(&self) -> Option<&'static str> {
@@ -282,6 +340,24 @@ impl RootView {
     #[must_use]
     pub fn settings_provider_choice(&self) -> &'static str {
         provider_label(self.shown_default_provider())
+    }
+
+    /// The label of the Codex page's hooks toggle, as the page draws it.
+    #[must_use]
+    pub fn settings_codex_hooks_label(&self) -> &'static str {
+        CODEX_HOOKS_LABEL
+    }
+
+    /// The hint under the Codex page's hooks toggle, as the page draws it.
+    #[must_use]
+    pub fn settings_codex_hooks_hint(&self) -> &'static str {
+        CODEX_HOOKS_HINT
+    }
+
+    /// The note under the Claude page's locked provider row, as it draws it.
+    #[must_use]
+    pub fn settings_provider_locked_note(&self) -> &'static str {
+        PROVIDER_LOCKED
     }
 
     /// The "Claude provider" choice shown selected: the saved default, or
@@ -299,6 +375,12 @@ impl RootView {
     #[must_use]
     pub fn settings_tab_labels(&self) -> Vec<&'static str> {
         SettingsTab::ALL.iter().map(|tab| tab.label()).collect()
+    }
+
+    /// Every label the Settings tab list draws, group rows included.
+    #[must_use]
+    pub fn settings_tab_rows(&self) -> Vec<&'static str> {
+        ROWS.iter().copied().map(SettingsRow::label).collect()
     }
 
     /// The label of the Settings tab shown.
@@ -377,7 +459,10 @@ impl RootView {
             .into_iter()
             .chain(NOTIFY_SKIP_CHOICES.map(SettingsControl::NotifySkip))
             .collect(),
-            SettingsTab::SpawnDefaults => self.spawn_default_controls(),
+            SettingsTab::SpawnDefaults => vec![SettingsControl::SpawnTrusted],
+            SettingsTab::Claude => self.claude_controls(),
+            SettingsTab::Codex => self.codex_controls(),
+            SettingsTab::Cursor => Vec::new(),
             SettingsTab::Worktrees => {
                 let mut controls = vec![
                     SettingsControl::WorktreesPath,
@@ -400,22 +485,32 @@ impl RootView {
         }
     }
 
-    /// The Spawn defaults tab's controls in drawing order: the toggle, the
-    /// approval choices while trusted launch has not locked them, the
-    /// provider choices while the daemon can route to another provider, and
-    /// the sandbox choices while trusted launch has not locked them.
-    fn spawn_default_controls(&self) -> Vec<SettingsControl> {
-        let unlocked = !self.sidebar.ui_state().spawn.trusted;
-        let mut controls = vec![SettingsControl::SpawnTrusted];
-        if unlocked {
-            controls.extend(APPROVAL_CHOICES.map(SettingsControl::SpawnApproval));
+    /// The Claude page's controls in drawing order, while trusted launch
+    /// has not locked them; the provider choices leave while the daemon
+    /// cannot route to another provider.
+    fn claude_controls(&self) -> Vec<SettingsControl> {
+        if self.sidebar.ui_state().spawn.trusted {
+            return Vec::new();
         }
+        let mut controls = APPROVAL_CHOICES
+            .map(SettingsControl::SpawnApproval)
+            .to_vec();
         if self.claude_provider_supported() {
             controls.extend(PROVIDER_CHOICES.map(SettingsControl::SpawnProvider));
         }
-        if unlocked {
-            controls.extend(CODEX_SANDBOX_CHOICES.map(SettingsControl::SpawnCodexSandbox));
+        controls
+    }
+
+    /// The Codex page's controls in drawing order, while trusted launch
+    /// has not locked them.
+    fn codex_controls(&self) -> Vec<SettingsControl> {
+        if self.sidebar.ui_state().spawn.trusted {
+            return Vec::new();
         }
+        let mut controls = CODEX_SANDBOX_CHOICES
+            .map(SettingsControl::SpawnCodexSandbox)
+            .to_vec();
+        controls.push(SettingsControl::CodexHooks);
         controls
     }
 
@@ -555,6 +650,7 @@ impl RootView {
             SettingsControl::SpawnCodexSandbox(sandbox) => {
                 self.set_spawn_codex_sandbox(sandbox, cx);
             }
+            SettingsControl::CodexHooks => self.toggle_codex_hooks(cx),
             SettingsControl::WorktreesPath => {}
             SettingsControl::WorktreesBrowse => self.browse_worktrees_root(cx),
             SettingsControl::WorktreesSave => self.save_worktrees_root(),
@@ -902,6 +998,13 @@ impl RootView {
         cx.notify();
     }
 
+    fn toggle_codex_hooks(&mut self, cx: &mut Context<Self>) {
+        let on = !self.sidebar.ui_state().agents.codex.hooks;
+        self.sidebar.set_codex_hooks(on);
+        self.save_ui();
+        cx.notify();
+    }
+
     /// Opens Windows' notification settings on a background thread; a
     /// failure is only logged.
     fn open_windows_notification_settings(&self, cx: &mut Context<Self>) {
@@ -1097,43 +1200,20 @@ impl RootView {
     }
 
     /// The tab list on the raised ground; the shown tab is filled and bold,
-    /// and ringed while the list has the keyboard.
+    /// and ringed while the list has the keyboard. A group row is a label
+    /// only: no id, no click, no hover and no ring.
     fn settings_tab_list(&self, window: &Window, cx: &mut Context<Self>) -> Stateful<Div> {
         let list_focused = self.settings_tabs_focus.is_focused(window);
-        let tabs = SettingsTab::ALL.map(|tab| {
-            let shown = tab == self.settings_tab;
-            let selector = tab.selector();
-            let (text, weight) = if shown {
-                (TEXT, FontWeight::SEMIBOLD)
-            } else {
-                (TEXT_2, FontWeight::MEDIUM)
-            };
-            div()
-                .id(selector)
-                .debug_selector(|| selector.to_owned())
-                .flex()
-                .flex_none()
-                .items_center()
-                .h(px(TAB_ROW_HEIGHT))
-                .px(px(12.0))
-                .rounded(px(TAB_ROW_RADIUS))
-                .border_1()
-                .border_color(gpui::rgba(TRANSPARENT))
-                .font_weight(weight)
-                .text_color(gpui::rgb(text))
-                .cursor_pointer()
-                .when(shown, |row| row.bg(gpui::rgb(CHIP)))
-                .when(!shown, |row| {
-                    row.hover(|style| style.bg(gpui::rgb(HOVER)).text_color(gpui::rgb(TEXT)))
-                })
-                .when(shown && list_focused, |row| {
-                    row.child(focus_ring(TAB_ROW_RADIUS))
-                })
-                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                    this.select_settings_tab(tab, window, cx);
-                }))
-                .child(tab.label())
-        });
+        let tabs: Vec<AnyElement> = ROWS
+            .iter()
+            .copied()
+            .map(|row| match row {
+                SettingsRow::Group(label) => group_row(label).into_any_element(),
+                SettingsRow::Tab(tab) => self
+                    .settings_tab_row(tab, list_focused, cx)
+                    .into_any_element(),
+            })
+            .collect();
         div()
             .id("settings-tabs")
             .track_focus(&self.settings_tabs_focus)
@@ -1150,6 +1230,48 @@ impl RootView {
             .children(tabs)
     }
 
+    /// One clickable tab row; the shown one is filled, bold, and ringed
+    /// while the list has the keyboard.
+    fn settings_tab_row(
+        &self,
+        tab: SettingsTab,
+        list_focused: bool,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let shown = tab == self.settings_tab;
+        let selector = tab.selector();
+        let (text, weight) = if shown {
+            (TEXT, FontWeight::SEMIBOLD)
+        } else {
+            (TEXT_2, FontWeight::MEDIUM)
+        };
+        div()
+            .id(selector)
+            .debug_selector(|| selector.to_owned())
+            .flex()
+            .flex_none()
+            .items_center()
+            .h(px(TAB_ROW_HEIGHT))
+            .px(px(12.0))
+            .rounded(px(TAB_ROW_RADIUS))
+            .border_1()
+            .border_color(gpui::rgba(TRANSPARENT))
+            .font_weight(weight)
+            .text_color(gpui::rgb(text))
+            .cursor_pointer()
+            .when(shown, |row| row.bg(gpui::rgb(CHIP)))
+            .when(!shown, |row| {
+                row.hover(|style| style.bg(gpui::rgb(HOVER)).text_color(gpui::rgb(TEXT)))
+            })
+            .when(shown && list_focused, |row| {
+                row.child(focus_ring(TAB_ROW_RADIUS))
+            })
+            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                this.select_settings_tab(tab, window, cx);
+            }))
+            .child(tab.label())
+    }
+
     fn settings_content(&self, window: &Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let focused = self.focused_settings_control(window, cx);
         match self.settings_tab {
@@ -1162,6 +1284,9 @@ impl RootView {
             SettingsTab::AppTitle => self.app_title_tab(focused, cx),
             SettingsTab::Notifications => self.notifications_tab(focused, cx),
             SettingsTab::SpawnDefaults => self.spawn_defaults_tab(focused, cx),
+            SettingsTab::Claude => self.claude_tab(focused, cx),
+            SettingsTab::Codex => self.codex_tab(focused, cx),
+            SettingsTab::Cursor => Self::cursor_tab(),
             SettingsTab::Worktrees => self.worktrees_tab_content(focused, cx),
         }
     }
@@ -1239,22 +1364,43 @@ impl RootView {
         vec![section.into_any_element()]
     }
 
-    /// The Spawn defaults tab: trusted launch, and the two agent options it
-    /// locks while it is on.
+    /// The Spawn defaults tab: trusted launch, which locks every agent row
+    /// on its own page while it is on.
     fn spawn_defaults_tab(
+        &self,
+        focused: Option<SettingsControl>,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let trusted = toggle(
+            SettingsControl::SpawnTrusted,
+            ToggleState {
+                checked: self.sidebar.ui_state().spawn.trusted,
+                enabled: true,
+            },
+            "Trusted launch by default",
+            focused,
+            cx,
+        );
+        let section = section("Spawn defaults")
+            .child(hint(
+                "Pre-fill these in the spawn dialog. You can override on every spawn.",
+            ))
+            .child(trusted)
+            .child(hint(
+                "When enabled, new Claude, Codex and Cursor sessions bypass approval prompts. \
+                 Codex and Cursor also bypass sandboxing.",
+            ));
+        vec![section.into_any_element()]
+    }
+
+    /// The Claude page: approval mode and provider.
+    fn claude_tab(
         &self,
         focused: Option<SettingsControl>,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let spawn = self.sidebar.ui_state().spawn;
         let locked = spawn.trusted;
-        let trusted = toggle(
-            SettingsControl::SpawnTrusted,
-            spawn.trusted,
-            "Trusted launch by default",
-            focused,
-            cx,
-        );
         let approval = choice_row(
             "Claude approval mode",
             &APPROVAL_CHOICES.map(|mode| {
@@ -1271,9 +1417,22 @@ impl RootView {
         let provider = provider_row(
             self.shown_default_provider(),
             self.claude_provider_supported(),
+            locked,
             focused,
             cx,
         );
+        let section = section("Claude").child(approval).child(provider);
+        vec![section.into_any_element()]
+    }
+
+    /// The Codex page: sandbox mode and the hooks toggle.
+    fn codex_tab(
+        &self,
+        focused: Option<SettingsControl>,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let spawn = self.sidebar.ui_state().spawn;
+        let locked = spawn.trusted;
         let sandbox = choice_row(
             "Codex sandbox mode",
             &CODEX_SANDBOX_CHOICES.map(|sandbox| {
@@ -1287,18 +1446,32 @@ impl RootView {
             focused,
             cx,
         );
-        let section = section("Spawn defaults")
-            .child(hint(
-                "Pre-fill these in the spawn dialog. You can override on every spawn.",
-            ))
-            .child(trusted)
-            .child(hint(
-                "When enabled, new Claude, Codex and Cursor sessions bypass approval prompts. \
-                 Codex and Cursor also bypass sandboxing.",
-            ))
-            .child(approval)
-            .child(provider)
-            .child(sandbox);
+        let hooks = toggle(
+            SettingsControl::CodexHooks,
+            ToggleState {
+                checked: self.sidebar.ui_state().agents.codex.hooks,
+                enabled: !locked,
+            },
+            CODEX_HOOKS_LABEL,
+            focused,
+            cx,
+        );
+        let mut section = section("Codex").child(sandbox).child(hooks);
+        if locked {
+            section = section.child(
+                hint(CODEX_HOOKS_LOCKED)
+                    .debug_selector(|| "settings-agents-codex-hooks-locked".to_owned()),
+            );
+        }
+        let section = section.child(codex_hooks_hint());
+        vec![section.into_any_element()]
+    }
+
+    /// The Cursor page: no settings yet.
+    fn cursor_tab() -> Vec<AnyElement> {
+        let section = section("Cursor").child(
+            hint("No settings yet.").debug_selector(|| "settings-agents-cursor-empty".to_owned()),
+        );
         vec![section.into_any_element()]
     }
 
@@ -1336,7 +1509,10 @@ impl RootView {
         let settings = &self.sidebar.ui_state().notifications;
         let needs_you = toggle(
             SettingsControl::NotifyNeedsYou,
-            settings.awaiting_input,
+            ToggleState {
+                checked: settings.awaiting_input,
+                enabled: true,
+            },
             "Needs you",
             focused,
             cx,
@@ -1420,7 +1596,10 @@ impl RootView {
             .child(choice_row("Leaf density", &densities, None, focused, cx));
         let copy = toggle(
             SettingsControl::CopyOnSelect,
-            self.sidebar.ui_state().general.copy_on_select,
+            ToggleState {
+                checked: self.sidebar.ui_state().general.copy_on_select,
+                enabled: true,
+            },
             "Copy selection to clipboard automatically",
             focused,
             cx,
@@ -1444,14 +1623,20 @@ impl RootView {
         let title = &self.sidebar.ui_state().title;
         let count = toggle(
             SettingsControl::TitleCount,
-            title.show_count,
+            ToggleState {
+                checked: title.show_count,
+                enabled: true,
+            },
             "Show busy/total terminal count",
             focused,
             cx,
         );
         let suffix = toggle(
             SettingsControl::TitleSuffix,
-            title.suffix,
+            ToggleState {
+                checked: title.suffix,
+                enabled: true,
+            },
             "Append “ — rustling-tulip” suffix",
             focused,
             cx,
@@ -1485,12 +1670,64 @@ impl RootView {
     }
 }
 
+/// A group label in the tab list: painted, never a tab stop.
+fn group_row(label: &'static str) -> Div {
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .h(px(TAB_ROW_HEIGHT))
+        .px(px(12.0))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(gpui::rgb(SUBTLE))
+        .child(label)
+}
+
+/// A titled group of rows.
+fn section(title: &'static str) -> Div {
+    div().flex().flex_col().gap(px(10.0)).pb(px(18.0)).child(
+        div()
+            .text_size(px(SECTION_HEAD_SIZE))
+            .font_weight(FontWeight::BOLD)
+            .child(title),
+    )
+}
+
 /// A quiet line under or beside a control.
 fn hint(text: &'static str) -> Div {
     div()
         .text_size(px(HINT_SIZE))
         .text_color(gpui::rgb(SUBTLE))
         .child(text)
+}
+
+/// [`CODEX_HOOKS_HINT`] with [`CODEX_HOOKS_FLAG`] drawn in the code style:
+/// the interface family for the sentence, the mono family for the flag.
+fn codex_hooks_hint() -> Div {
+    let Some((before, after)) = CODEX_HOOKS_HINT.split_once(CODEX_HOOKS_FLAG) else {
+        return hint(CODEX_HOOKS_HINT);
+    };
+    let plain = |len: usize| TextRun {
+        len,
+        font: gpui::font(fonts::UI_FAMILY),
+        color: gpui::rgb(SUBTLE).into(),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    let runs = vec![
+        plain(before.len()),
+        TextRun {
+            font: gpui::font(fonts::DEFAULT_FAMILY),
+            color: gpui::rgb(TEXT_2).into(),
+            ..plain(CODEX_HOOKS_FLAG.len())
+        },
+        plain(after.len()),
+    ];
+    div()
+        .text_size(px(HINT_SIZE))
+        .text_color(gpui::rgb(SUBTLE))
+        .child(StyledText::new(CODEX_HOOKS_HINT).with_runs(runs))
 }
 
 /// A click handler that presses `control`.
@@ -1526,18 +1763,37 @@ fn settings_button(
     }
 }
 
-/// `control`'s checkbox row, ticked when `checked` and ringed when it has
-/// the keyboard.
+/// How a Settings toggle is drawn: ticked when `checked`, and dimmed and
+/// inert when not `enabled`.
+#[derive(Debug, Clone, Copy)]
+struct ToggleState {
+    checked: bool,
+    enabled: bool,
+}
+
+/// `control`'s checkbox row, ticked when its state says so and ringed when
+/// it has the keyboard.
 fn toggle(
     control: SettingsControl,
-    checked: bool,
+    state: ToggleState,
     label: &'static str,
     focused: Option<SettingsControl>,
     cx: &mut Context<RootView>,
 ) -> Div {
-    let row = checkbox_row(control.selector(), checked, focused == Some(control), label)
-        .on_click(press(control, cx));
-    div().flex().child(row)
+    let row = checkbox_row(
+        control.selector(),
+        state.checked,
+        focused == Some(control),
+        label,
+    );
+    if state.enabled {
+        div().flex().child(row.on_click(press(control, cx)))
+    } else {
+        div()
+            .flex()
+            .opacity(DISABLED_OPACITY)
+            .child(row.cursor_default())
+    }
 }
 
 /// The "Claude provider" row; without daemon support its choices are dimmed,
@@ -1545,9 +1801,11 @@ fn toggle(
 fn provider_row(
     chosen: ClaudeProvider,
     supported: bool,
+    locked: bool,
     focused: Option<SettingsControl>,
     cx: &mut Context<RootView>,
 ) -> AnyElement {
+    let enabled = supported && !locked;
     let buttons = PROVIDER_CHOICES
         .into_iter()
         .map(|provider| {
@@ -1555,7 +1813,7 @@ fn provider_row(
             let look = Look {
                 selected: provider == chosen,
                 focused: focused == Some(control),
-                enabled: supported,
+                enabled,
             };
             choice_button(
                 control.selector().to_owned(),
@@ -1575,7 +1833,15 @@ fn provider_row(
     } else {
         row.tooltip(tooltip(PROVIDER_UNSUPPORTED_TIP))
     };
-    field("Claude provider").child(row).into_any_element()
+    let row = field("Claude provider").child(row);
+    let row = if locked {
+        row.child(
+            hint(PROVIDER_LOCKED).debug_selector(|| "settings-spawn-provider-locked".to_owned()),
+        )
+    } else {
+        row
+    };
+    row.into_any_element()
 }
 
 /// A labelled row of segmented choices, laid out as the spawn dialog's;

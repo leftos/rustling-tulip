@@ -51,6 +51,7 @@ Start with [docs/architecture.md](docs/architecture.md) for how the pieces fit a
 - **Active account**: the Claude login in `.credentials.json` that every Anthropic Claude session on the machine uses; a switch changes it for all of them at once.
 - **Agent conversation id**: the id a Codex or Cursor session's own CLI resumes with, recorded on the session and its history entry (`agent_conversation_id`); Claude's stays in `claude_session_id`.
 - **Agent harness**: a terminal coding-agent CLI the daemon can spawn as a session's runtime (Claude Code, Codex, Cursor, and the ones `docs/plans/agent-harnesses.md` adds); its Tier A / B / C says whether its conversation id is chosen before launch, pre-created, or found after launch.
+- **Agent page / Agents category**: the Settings modal's `Agents` group row, a label with no page of its own, and the Claude, Codex and Cursor pages under it that hold each runtime's spawn defaults, such as Claude's approval mode and Codex's hooks toggle.
 - **Agent skill pack**: the `rt-*` skills and the `rt-worker` agent under `agent-pack/`, installed into `~/.claude` so an agent can fan work out, review it and merge it.
 - **Attention feed**: the daemon's one stream of items that want the user (Needs you, Hand-off ready, Progress, Done, Fleet), shared by every client and the phone push, resolved everywhere at once; planned (RT-87, `docs/plans/off-orca.md`).
 - **Auto-switch**: moving the active account to another one when its binding usage window reaches the threshold, run by the daemon or by `cswap auto`, never both.

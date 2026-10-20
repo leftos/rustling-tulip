@@ -439,7 +439,8 @@ fn dialog_opens_with_saved_spawn_defaults(cx: &mut TestAppContext) {
                 "trusted": true,
                 "permission_mode": "plan",
                 "codex_sandbox": "read-only",
-            }
+            },
+            "agents": { "codex": { "hooks": true } }
         })
         .to_string(),
     )
@@ -468,6 +469,20 @@ fn dialog_opens_with_saved_spawn_defaults(cx: &mut TestAppContext) {
     assert!(
         request.dangerously_skip_permissions,
         "the saved trusted default reaches the daemon"
+    );
+
+    reply(&mut h, &request);
+    open(&mut h);
+    h.click_on("spawn-agent-codex");
+    suggest(&mut h, "r1", "wt/calm-owl");
+    h.click_on("spawn-submit");
+    let codex = the_spawn(&h.sent());
+    assert!(
+        matches!(
+            &codex.agent_options,
+            AgentOptions::Codex { hooks: true, .. }
+        ),
+        "the saved hooks choice reaches the daemon"
     );
 }
 
@@ -659,7 +674,13 @@ fn provider_row_shows_for_claude_only_and_sends_deepseek(cx: &mut TestAppContext
     h.click_on("spawn-agent-codex");
     h.click_on("spawn-submit");
     let codex = the_spawn(&h.sent());
-    assert!(matches!(codex.agent_options, AgentOptions::Codex { .. }));
+    assert!(
+        matches!(
+            &codex.agent_options,
+            AgentOptions::Codex { hooks: false, .. }
+        ),
+        "the default leaves Codex hooks off"
+    );
     assert_eq!(
         wire_provider(&codex),
         None,

@@ -16,13 +16,16 @@ use protocol::{ClientMessage, DaemonMessage, SplitDirection, TabEntry};
 use rustling_tulip_native::SidebarView;
 use support::{Fixture, Harness, TestDir, pane, session, split, tab};
 
-const TAB_SELECTORS: [&str; 6] = [
+const TAB_SELECTORS: [&str; 9] = [
     "settings-tab-general",
     "settings-tab-notifications",
     "settings-tab-spawn-defaults",
     "settings-tab-worktrees",
     "settings-tab-appearance",
     "settings-tab-app-title",
+    "settings-tab-claude",
+    "settings-tab-codex",
+    "settings-tab-cursor",
 ];
 
 /// Tab `t1`, `work`, active: pane `p1` shows the working session `s1`, pane
@@ -102,6 +105,21 @@ fn settings_opens_on_general_with_tab_order(cx: &mut TestAppContext) {
     assert!(h.root(|root, _| root.settings_open()));
     assert_eq!(shown_tab(&mut h), "General");
     assert_eq!(
+        h.root(|root, _| root.settings_tab_rows()),
+        [
+            "General",
+            "Notifications",
+            "Spawn defaults",
+            "Worktrees",
+            "Appearance",
+            "App title",
+            "Agents",
+            "Claude",
+            "Codex",
+            "Cursor"
+        ]
+    );
+    assert_eq!(
         h.root(|root, _| root.settings_tab_labels()),
         [
             "General",
@@ -109,8 +127,12 @@ fn settings_opens_on_general_with_tab_order(cx: &mut TestAppContext) {
             "Spawn defaults",
             "Worktrees",
             "Appearance",
-            "App title"
-        ]
+            "App title",
+            "Claude",
+            "Codex",
+            "Cursor"
+        ],
+        "the tab-only probe leaves the group out"
     );
     let tops: Vec<f32> = TAB_SELECTORS
         .iter()
@@ -180,10 +202,22 @@ fn down_moves_to_next_tab(cx: &mut TestAppContext) {
     h.keys("down down down down");
     assert_eq!(shown_tab(&mut h), "App title");
     h.keys("down");
-    assert_eq!(shown_tab(&mut h), "App title", "Down stops at the last tab");
+    assert_eq!(
+        shown_tab(&mut h),
+        "Claude",
+        "Down skips the Agents group row"
+    );
+    h.keys("down down");
+    assert_eq!(
+        shown_tab(&mut h),
+        "Cursor",
+        "Down reaches the last agent page"
+    );
+    h.keys("down");
+    assert_eq!(shown_tab(&mut h), "Cursor", "Down stops at the last tab");
     h.keys("up");
-    assert_eq!(shown_tab(&mut h), "Appearance");
-    h.keys("up up up up up");
+    assert_eq!(shown_tab(&mut h), "Codex");
+    h.keys("up up up up up up up up");
     assert_eq!(shown_tab(&mut h), "General", "Up stops at the first tab");
 }
 
@@ -556,33 +590,67 @@ fn spawn_defaults_tab_shows_choices_and_saves(cx: &mut TestAppContext) {
     h.keys("ctrl-,");
     h.click_on("settings-tab-spawn-defaults");
     assert_eq!(shown_tab(&mut h), "Spawn defaults");
+    assert!(
+        h.bounds("settings-spawn-trusted").origin.x >= px(0.0),
+        "the trusted launch toggle is painted"
+    );
     for selector in [
-        "settings-spawn-trusted",
+        "settings-spawn-approval-cli-default",
+        "settings-spawn-provider-anthropic",
+        "settings-spawn-codex-sandbox-cli-default",
+    ] {
+        assert!(
+            h.bounds(selector).origin.x < px(0.0),
+            "{selector} moved to its agent page"
+        );
+    }
+
+    h.click_on("settings-tab-claude");
+    assert_eq!(shown_tab(&mut h), "Claude");
+    for selector in [
         "settings-spawn-approval-cli-default",
         "settings-spawn-approval-accept-edits",
-        "settings-spawn-codex-sandbox-cli-default",
-        "settings-spawn-codex-sandbox-workspace-write",
+        "settings-spawn-provider-anthropic",
     ] {
         assert!(
             h.bounds(selector).origin.x >= px(0.0),
             "{selector} is painted"
         );
     }
-
     h.click_on("settings-spawn-approval-accept-edits");
     assert_eq!(
         saved_ui(&dir)["spawn"]["permission_mode"],
         "accept_edits",
         "saved at once"
     );
+
+    h.click_on("settings-tab-codex");
+    assert_eq!(shown_tab(&mut h), "Codex");
+    for selector in [
+        "settings-spawn-codex-sandbox-cli-default",
+        "settings-spawn-codex-sandbox-workspace-write",
+        "settings-agents-codex-hooks",
+    ] {
+        assert!(
+            h.bounds(selector).origin.x >= px(0.0),
+            "{selector} is painted"
+        );
+    }
     h.click_on("settings-spawn-codex-sandbox-workspace-write");
     assert_eq!(saved_ui(&dir)["spawn"]["codex_sandbox"], "workspace-write");
+
+    h.click_on("settings-tab-spawn-defaults");
     h.click_on("settings-spawn-trusted");
     assert_eq!(saved_ui(&dir)["spawn"]["trusted"], true);
     assert_eq!(
         saved_ui(&dir)["spawn"]["permission_mode"],
         "accept_edits",
         "the values stay saved while trusted locks the rows"
+    );
+    assert_eq!(
+        saved_ui(&dir)["spawn"]["codex_sandbox"],
+        "workspace-write",
+        "the Codex value stays saved too"
     );
 }
 
@@ -591,24 +659,39 @@ fn spawn_defaults_trusted_disables_choices_and_leaves_ring(cx: &mut TestAppConte
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);
     h.keys("ctrl-,");
-    h.click_on("settings-tab-spawn-defaults");
+    h.click_on("settings-tab-codex");
     assert!(
-        h.bounds("settings-spawn-approval-locked").origin.x < px(0.0),
+        h.bounds("settings-agents-codex-hooks-locked").origin.x < px(0.0),
         "no locked note while trusted is off"
+    );
+    h.click_on("settings-tab-spawn-defaults");
+    h.keys("tab");
+    assert_eq!(settings_focus(&mut h), Some("settings-spawn-trusted"));
+    h.keys("tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("list"),
+        "trusted launch is the page's only control"
     );
 
     h.click_on("settings-spawn-trusted");
     assert_eq!(saved_ui(&dir)["spawn"]["trusted"], true);
-    for selector in [
-        "settings-spawn-approval-locked",
-        "settings-spawn-codex-sandbox-locked",
-    ] {
-        assert!(
-            h.bounds(selector).origin.x >= px(0.0),
-            "{selector} shows why the choices are dead"
-        );
-    }
 
+    h.click_on("settings-tab-claude");
+    assert!(
+        h.bounds("settings-spawn-approval-locked").origin.x >= px(0.0),
+        "the approval row says why it is dead"
+    );
+    assert!(
+        h.bounds("settings-spawn-provider-locked").origin.x >= px(0.0),
+        "the provider row says why it is dead"
+    );
+    assert_eq!(
+        h.root(|root, _| root.settings_provider_locked_note()),
+        "Trusted launch keeps the provider choice in effect; \
+         this lock only stops editing it here.",
+        "the provider note says the choice stays in effect"
+    );
     h.click_on("settings-spawn-approval-accept-edits");
     assert!(
         h.bounds("settings-spawn-approval-accept-edits").origin.x >= px(0.0),
@@ -618,21 +701,55 @@ fn spawn_defaults_trusted_disables_choices_and_leaves_ring(cx: &mut TestAppConte
         saved_ui(&dir)["spawn"]["permission_mode"].is_null(),
         "a click on it saves nothing"
     );
-
+    h.click_on("settings-spawn-provider-deepseek");
+    assert_eq!(
+        saved_ui(&dir)["spawn"]["claude_provider"],
+        "anthropic",
+        "a click on the locked provider saves nothing"
+    );
+    h.click_on("settings-tab-claude");
+    assert_eq!(settings_focus(&mut h), Some("list"));
     h.keys("tab");
     assert_eq!(
         settings_focus(&mut h),
-        Some("settings-spawn-provider-anthropic"),
-        "the locked choices left the ring; the provider, which trusted launch does not lock, stays"
+        Some("list"),
+        "every locked Claude row left the ring"
     );
-    h.keys("tab tab");
+
+    h.click_on("settings-tab-codex");
+    for selector in [
+        "settings-spawn-codex-sandbox-locked",
+        "settings-agents-codex-hooks-locked",
+    ] {
+        assert!(
+            h.bounds(selector).origin.x >= px(0.0),
+            "{selector} shows why the row is dead"
+        );
+    }
+    h.click_on("settings-agents-codex-hooks");
+    assert_eq!(
+        saved_ui(&dir)["agents"]["codex"]["hooks"],
+        false,
+        "a click on the disabled toggle saves nothing"
+    );
+    h.click_on("settings-tab-codex");
+    h.keys("tab");
     assert_eq!(
         settings_focus(&mut h),
         Some("list"),
-        "the locked Codex choices left the ring too"
+        "the locked Codex rows left the ring"
     );
-    h.keys("shift-tab shift-tab shift-tab");
-    assert_eq!(settings_focus(&mut h), Some("settings-spawn-trusted"));
+
+    h.click_on("settings-tab-spawn-defaults");
+    h.click_on("settings-spawn-trusted");
+    assert_eq!(saved_ui(&dir)["spawn"]["trusted"], false);
+    h.click_on("settings-tab-codex");
+    h.click_on("settings-agents-codex-hooks");
+    assert_eq!(
+        saved_ui(&dir)["agents"]["codex"]["hooks"],
+        true,
+        "the toggle works again"
+    );
 }
 
 #[gpui::test]
@@ -646,7 +763,7 @@ fn claude_provider_default_is_disabled_without_the_feature(cx: &mut TestAppConte
     let mut h = opened(cx, &dir);
     h.welcome_without_features();
     h.keys("ctrl-,");
-    h.click_on("settings-tab-spawn-defaults");
+    h.click_on("settings-tab-claude");
     assert_eq!(
         h.root(|root, _| root.settings_provider_tip()),
         Some("Restart the daemon to use DeepSeek: .\\rt.ps1 restart")
@@ -676,8 +793,8 @@ fn claude_provider_default_is_disabled_without_the_feature(cx: &mut TestAppConte
     h.keys("tab");
     assert_eq!(
         settings_focus(&mut h),
-        Some("settings-spawn-codex-sandbox-cli-default"),
-        "Tab skips the disabled provider row"
+        Some("list"),
+        "Tab skips the disabled provider row and leaves the page"
     );
     assert_eq!(
         saved_ui(&dir)["spawn"]["claude_provider"],
@@ -699,7 +816,7 @@ fn claude_provider_default_saves_and_seeds_the_dialog(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);
     h.keys("ctrl-,");
-    h.click_on("settings-tab-spawn-defaults");
+    h.click_on("settings-tab-claude");
     tab_to(&mut h, "settings-spawn-provider-deepseek");
     h.keys("enter");
     assert_eq!(saved_ui(&dir)["spawn"]["claude_provider"], "deepseek");
@@ -732,9 +849,18 @@ fn tab_walks_spawn_default_choices(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);
     h.keys("ctrl-,");
+
     h.click_on("settings-tab-spawn-defaults");
     h.keys("tab");
     assert_eq!(settings_focus(&mut h), Some("settings-spawn-trusted"));
+    h.keys("tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("list"),
+        "the page's one control is done"
+    );
+
+    h.click_on("settings-tab-claude");
     h.keys("tab");
     assert_eq!(
         settings_focus(&mut h),
@@ -769,7 +895,20 @@ fn tab_walks_spawn_default_choices(cx: &mut TestAppContext) {
         settings_focus(&mut h),
         Some("settings-spawn-provider-deepseek")
     );
-    h.keys("tab tab");
+    h.keys("tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("list"),
+        "the provider is the page's last row"
+    );
+
+    h.click_on("settings-tab-codex");
+    h.keys("tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("settings-spawn-codex-sandbox-cli-default")
+    );
+    h.keys("tab");
     assert_eq!(
         settings_focus(&mut h),
         Some("settings-spawn-codex-sandbox-read-only")
@@ -787,13 +926,113 @@ fn tab_walks_spawn_default_choices(cx: &mut TestAppContext) {
         Some("settings-spawn-codex-sandbox-danger-full-access")
     );
     h.keys("tab");
+    assert_eq!(settings_focus(&mut h), Some("settings-agents-codex-hooks"));
+    h.keys("space");
+    assert_eq!(saved_ui(&dir)["agents"]["codex"]["hooks"], true);
+    h.keys("tab");
     assert_eq!(settings_focus(&mut h), Some("list"), "back to the tab list");
     h.keys("shift-tab");
     assert_eq!(
         settings_focus(&mut h),
-        Some("settings-spawn-codex-sandbox-danger-full-access"),
+        Some("settings-agents-codex-hooks"),
         "Shift+Tab walks back"
     );
+}
+
+#[gpui::test]
+fn agents_group_row_is_not_selectable(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.keys("ctrl-,");
+    h.keys("down down down down down");
+    assert_eq!(shown_tab(&mut h), "App title");
+    h.keys("down");
+    assert_eq!(shown_tab(&mut h), "Claude", "Down skips the group row");
+    h.keys("up");
+    assert_eq!(shown_tab(&mut h), "App title");
+
+    let at = point(
+        h.bounds("settings-tab-app-title").origin.x + px(8.0),
+        h.bounds("settings-tab-claude").origin.y - px(10.0),
+    );
+    h.click(at, Modifiers::none());
+    assert_eq!(
+        shown_tab(&mut h),
+        "App title",
+        "a click on the group row selects nothing and opens no page"
+    );
+}
+
+#[gpui::test]
+fn cursor_tab_shows_no_settings_yet(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-cursor");
+    assert_eq!(shown_tab(&mut h), "Cursor");
+    assert!(
+        h.bounds("settings-agents-cursor-empty").origin.x >= px(0.0),
+        "the page says there is nothing to set"
+    );
+    assert_eq!(settings_focus(&mut h), Some("list"));
+    h.keys("tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("list"),
+        "the page has no controls"
+    );
+}
+
+#[gpui::test]
+fn codex_hooks_toggle_pins_its_label_and_hint(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-codex");
+    assert_eq!(
+        h.root(|root, _| root.settings_codex_hooks_label()),
+        "Report status from Codex hooks",
+        "the toggle's label"
+    );
+    assert_eq!(
+        h.root(|root, _| root.settings_codex_hooks_hint()),
+        "Turning this on makes Codex run the injected hooks with \
+         --dangerously-bypass-hook-trust, which also runs any unreviewed \
+         repo's hooks outside Codex's sandbox.",
+        "the hint keeps its exact sentence"
+    );
+}
+
+#[gpui::test]
+fn tab_rows_list_every_tab_of_the_tab_enum_in_order(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.keys("ctrl-,");
+    let mut rows = h.root(|root, _| root.settings_tab_rows());
+    // The list interleaves the "Agents" group row; the tabs it draws must be
+    // SettingsTab::ALL in the same order, or Down/Up leaves a tab unreachable.
+    rows.retain(|label| *label != "Agents");
+    assert_eq!(
+        rows,
+        h.root(|root, _| root.settings_tab_labels()),
+        "the tab list's tabs are SettingsTab::ALL in order"
+    );
+}
+
+#[gpui::test]
+fn codex_hooks_toggle_saves_and_clears(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-codex");
+    h.click_on("settings-agents-codex-hooks");
+    assert_eq!(
+        saved_ui(&dir)["agents"]["codex"]["hooks"],
+        true,
+        "saved at once"
+    );
+    h.click_on("settings-agents-codex-hooks");
+    assert_eq!(saved_ui(&dir)["agents"]["codex"]["hooks"], false);
 }
 
 fn can_apply(h: &mut Harness<'_>, row: &str) -> bool {

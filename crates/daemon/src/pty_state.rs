@@ -482,15 +482,40 @@ fn classify(scrollback: &[u8], current: State, active: bool) -> State {
     }
 }
 
+/// Whether Codex's selection cursor opens the first option and the second
+/// option follows it: a `› 1.` line, then at most two blank lines, then a
+/// line starting `2.`. Codex draws the same `› ` as its composer cursor, so
+/// neither the glyph alone nor a typed `› 1.` with numbered output elsewhere
+/// in the tail is a prompt.
+fn has_selection_cursor(tail: &str) -> bool {
+    let lines: Vec<&str> = tail.lines().collect();
+    lines.iter().enumerate().any(|(at, line)| {
+        let Some(rest) = line.trim_start().strip_prefix('›') else {
+            return false;
+        };
+        if !rest.trim_start().starts_with("1.") {
+            return false;
+        }
+        let mut next = at + 1;
+        while next < lines.len() && next - at <= 2 && lines[next].trim().is_empty() {
+            next += 1;
+        }
+        lines
+            .get(next)
+            .is_some_and(|option| option.trim_start().starts_with("2."))
+    })
+}
+
 fn matches_prompt(tail: &str) -> bool {
     // Permission-prompt heuristics. Order matters loosely; first match wins.
     //
     // 1. Numbered choices on consecutive lines: `1. <something>` `2. <something>`
-    //    with a `❯` cursor or "(esc to cancel)" footer.
+    //    with a `❯` cursor, a Codex `› 1.` selection line, or "(esc to cancel)"
+    //    footer.
     // 2. "Do you want to" wording (Claude's edit/bash permission prompts).
     // 3. AskUserQuestion blocks contain "│" framing plus numbered options.
     let has_numbered = tail.contains("1.") && tail.contains("2.");
-    let has_chevron = tail.contains("❯") || tail.contains(">>>");
+    let has_chevron = tail.contains("❯") || tail.contains(">>>") || has_selection_cursor(tail);
     let has_do_you_want = tail.contains("Do you want to");
     let has_choose_option =
         tail.contains("Choose an option") || tail.contains("Press 1") || tail.contains("(y/n)");
@@ -715,7 +740,7 @@ fn on_plain_shell_transition(
 
 #[cfg(test)]
 mod tests {
-    use super::{State, classify, shell_output_is_working};
+    use super::{State, classify, matches_prompt, shell_output_is_working};
 
     #[test]
     fn active_signal_promotes_idle_to_working() {
@@ -750,6 +775,50 @@ mod tests {
         screen.resize(4096, b'a');
         assert_eq!(screen.len(), 4096);
         assert_eq!(classify(&screen, State::Idle, false), State::Idle);
+    }
+
+    /// Codex's approval prompt, shaped as the review describes it: numbered
+    /// options under a `›` selection cursor. Unverified against a live Codex
+    /// CLI, which this machine does not have.
+    const CODEX_APPROVAL: &str = "  Would you like to run the following command?\n\
+         \n\
+         \u{203a} 1. Yes, proceed (y)\n\
+           2. Yes, and don't ask again for this command (a)\n\
+           3. No, and tell Codex what to do differently (esc)";
+
+    #[test]
+    fn codex_approval_with_its_cursor_matches() {
+        assert!(matches_prompt(CODEX_APPROVAL));
+    }
+
+    #[test]
+    fn codex_approval_without_its_cursor_does_not_match() {
+        // The same block with the selection cursor gone: numbered options
+        // alone are not a prompt.
+        assert!(!matches_prompt(&CODEX_APPROVAL.replace('\u{203a}', "")));
+    }
+
+    #[test]
+    fn composer_cursor_before_numbered_output_does_not_match() {
+        // Codex's composer draws `› ` too, so a bare containment check would
+        // read a working session's numbered output as a prompt.
+        let tail = "\u{203a} run the tests\n1. compiling crate\n2. linking crate\n";
+        assert!(!matches_prompt(tail));
+    }
+
+    #[test]
+    fn typed_cursor_with_numbered_output_elsewhere_does_not_match() {
+        // A `› 1.` the user typed, with numbered output later in the tail:
+        // the second option must follow the cursor's option line directly.
+        let tail = "\u{203a} 1. let me check\n\nHere is the plan:\n\
+                    1. compiling crate\n2. linking crate\n";
+        assert!(!matches_prompt(tail));
+    }
+
+    #[test]
+    fn plain_numbered_output_does_not_match() {
+        let output = "Build output:\n1. compiling crate\n2. linking crate\n";
+        assert!(!matches_prompt(output));
     }
 
     #[test]

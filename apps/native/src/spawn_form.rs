@@ -960,6 +960,8 @@ pub(crate) struct SpawnForm {
     tabs: TabChoices,
     open_in: OpenChoice,
     trusted: bool,
+    /// A Codex spawn runs the injected hooks.
+    codex_hooks: bool,
     use_worktree: bool,
     /// The user changed the worktree checkbox since the target loaded.
     worktree_chosen: bool,
@@ -1011,6 +1013,8 @@ pub(crate) struct FormInputs<'a> {
     pub tabs: TabChoices,
     /// The saved Spawn defaults every field is seeded from.
     pub spawn_defaults: SpawnDefaults,
+    /// The saved Codex hooks choice a Codex spawn starts from.
+    pub codex_hooks: bool,
     /// The target the dialog is held on, and the worktree it is pinned to.
     pub lock: Option<Lock>,
     /// The connected daemon routes Claude to a chosen provider; without it
@@ -1071,6 +1075,7 @@ impl SpawnForm {
             tabs: inputs.tabs,
             open_in,
             trusted: defaults.trusted,
+            codex_hooks: inputs.codex_hooks,
             use_worktree: true,
             worktree_chosen: false,
             mode: WorktreeMode::New,
@@ -1215,8 +1220,9 @@ impl SpawnForm {
                 self.advanced.permission_mode = *permission_mode;
                 permission_mode.is_some()
             }
-            AgentOptions::Codex { sandbox, .. } => {
+            AgentOptions::Codex { sandbox, hooks } => {
                 self.advanced.codex_sandbox = *sandbox;
+                self.codex_hooks = *hooks;
                 sandbox.is_some()
             }
             AgentOptions::Cursor { plan_mode, sandbox } => {
@@ -2929,7 +2935,7 @@ impl SpawnForm {
             },
             Agent::Codex => AgentOptions::Codex {
                 sandbox: advanced.codex_sandbox.filter(|_| !suppress),
-                hooks: false,
+                hooks: self.codex_hooks,
             },
             Agent::Cursor => AgentOptions::Cursor {
                 plan_mode: advanced.cursor_plan && !plain,
@@ -3234,6 +3240,7 @@ mod tests {
         focused: Option<SessionSnapshot>,
         tabs: TabChoices,
         spawn_defaults: SpawnDefaults,
+        codex_hooks: bool,
         lock: Option<Lock>,
         provider_supported: bool,
     }
@@ -3246,6 +3253,7 @@ mod tests {
                 focused: None,
                 tabs: tabs(Some("t1"), &[]),
                 spawn_defaults: SpawnDefaults::default(),
+                codex_hooks: false,
                 lock: None,
                 provider_supported: true,
             }
@@ -3257,6 +3265,12 @@ mod tests {
             self
         }
 
+        /// The saved Codex hooks choice the dialog opens over.
+        fn codex_hooks(mut self, on: bool) -> Self {
+            self.codex_hooks = on;
+            self
+        }
+
         fn open(&self, cache: &mut BranchCache) -> (SpawnForm, Vec<ClientMessage>) {
             SpawnForm::open(
                 FormInputs {
@@ -3265,6 +3279,7 @@ mod tests {
                     focused: self.focused.as_ref(),
                     tabs: self.tabs.clone(),
                     spawn_defaults: self.spawn_defaults,
+                    codex_hooks: self.codex_hooks,
                     lock: self.lock.clone(),
                     claude_provider_supported: self.provider_supported,
                 },
@@ -3662,6 +3677,7 @@ mod tests {
                 focused: None,
                 tabs: TabChoices::default(),
                 spawn_defaults: SpawnDefaults::default(),
+                codex_hooks: false,
                 lock: None,
                 claude_provider_supported: true,
             },
@@ -3789,6 +3805,7 @@ mod tests {
             focused: None,
             tabs: tabs(Some("t1"), &[]),
             spawn_defaults: SpawnDefaults::default(),
+            codex_hooks: false,
             lock: None,
             provider_supported: true,
         };
@@ -3830,6 +3847,7 @@ mod tests {
             focused: None,
             tabs: tabs(None, &[]),
             spawn_defaults: SpawnDefaults::default(),
+            codex_hooks: false,
             lock: None,
             provider_supported: true,
         };
@@ -4866,6 +4884,7 @@ mod tests {
             focused: None,
             tabs: TabChoices::default(),
             spawn_defaults: SpawnDefaults::default(),
+            codex_hooks: false,
             lock: None,
             provider_supported: true,
         }
@@ -4934,6 +4953,7 @@ mod tests {
                     focused: None,
                     tabs: TabChoices::default(),
                     spawn_defaults: SpawnDefaults::default(),
+                    codex_hooks: false,
                     lock: unknown.lock.clone(),
                     claude_provider_supported: true,
                 },
@@ -5509,6 +5529,60 @@ mod tests {
             form.model_placeholder(),
             "CLI default",
             "Codex's model is not DeepSeek's"
+        );
+    }
+
+    #[test]
+    fn a_codex_spawn_sends_the_saved_hooks_choice() {
+        let setup = Setup::repos(vec![repo("r1")]).codex_hooks(true);
+        let mut form = setup.open(&mut BranchCache::default()).0;
+        press(&mut form, &Control::Runtime(Runtime::Agent(Agent::Codex)));
+        assert!(
+            matches!(
+                request_of(&form).agent_options,
+                AgentOptions::Codex { hooks: true, .. }
+            ),
+            "the saved choice reaches the spawn"
+        );
+        press(&mut form, &Control::Runtime(Runtime::Agent(Agent::Claude)));
+        assert!(matches!(
+            request_of(&form).agent_options,
+            AgentOptions::Claude { .. }
+        ));
+        press(&mut form, &Control::Runtime(Runtime::Agent(Agent::Cursor)));
+        assert!(matches!(
+            request_of(&form).agent_options,
+            AgentOptions::Cursor { .. }
+        ));
+    }
+
+    #[test]
+    fn a_duplicate_codex_source_hooks_beat_the_saved_choice() {
+        let on = duplicated(stored_config(&json!({
+            "agent_options": { "kind": "codex", "sandbox": null, "hooks": true },
+        })));
+        assert!(
+            matches!(
+                on.build_request().0.agent_options,
+                AgentOptions::Codex { hooks: true, .. }
+            ),
+            "a source with hooks on wins over the saved choice off"
+        );
+
+        let mut setup = duplicate_setup(repo("r1"));
+        setup.codex_hooks = true;
+        let (form, _) = duplicate_on(
+            &setup,
+            stored_config(&json!({
+                "agent_options": { "kind": "codex", "sandbox": null, "hooks": false },
+            })),
+        );
+        assert!(
+            matches!(
+                form.build_request().0.agent_options,
+                AgentOptions::Codex { hooks: false, .. }
+            ),
+            "a source with hooks off wins over the saved choice on"
         );
     }
 }
