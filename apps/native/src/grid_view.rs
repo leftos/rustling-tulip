@@ -775,11 +775,12 @@ impl RootView {
         let shell = bordered_button(shell, cx, |this, _, cx| this.quick_shell(cx));
         let mut buttons = vec![spawn, shell];
         if !has_repos {
+            let gate = self.add_repo_gate();
             let add = BorderedButton {
                 selector: "empty-add-repo".to_owned(),
                 label: "Add repo",
-                tip: ADD_REPO_TIP,
-                enabled: true,
+                tip: gate.tip,
+                enabled: gate.enabled,
             };
             buttons.push(bordered_button(add, cx, |this, _, cx| this.add_repo(cx)));
         }

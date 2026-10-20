@@ -189,19 +189,24 @@ impl WorkspaceCreator {
         self.focus
     }
 
+    /// Moves the keyboard to `control` when the creator draws it.
     pub(crate) fn set_focus(&mut self, control: CreatorControl) {
-        if self.controls().contains(&control) {
+        if self.controls(true).contains(&control) {
             self.focus = control;
         }
     }
 
-    /// The keyboard stops on screen, in reading and Tab order.
-    pub(crate) fn controls(&self) -> Vec<CreatorControl> {
+    /// The keyboard stops on screen, in reading and Tab order; Browse is
+    /// one only with `browse`, while this PC's file picker can answer for
+    /// the daemon.
+    pub(crate) fn controls(&self, browse: bool) -> Vec<CreatorControl> {
         let mut controls = vec![CreatorControl::FromRepos, CreatorControl::FromVscode];
         match self.mode {
             CreatorMode::FromRepos => controls.push(CreatorControl::Name),
             CreatorMode::FromVscode => {
-                controls.push(CreatorControl::Browse);
+                if browse {
+                    controls.push(CreatorControl::Browse);
+                }
                 if self.suggestion.is_some() {
                     controls.push(CreatorControl::Name);
                 }
@@ -212,9 +217,10 @@ impl WorkspaceCreator {
         controls
     }
 
-    /// Tab and Shift+Tab: the next or previous stop, wrapping.
-    pub(crate) fn move_focus(&mut self, forward: bool) {
-        let controls = self.controls();
+    /// Tab and Shift+Tab: the next or previous stop of
+    /// [`Self::controls`] with `browse`, wrapping.
+    pub(crate) fn move_focus(&mut self, forward: bool, browse: bool) {
+        let controls = self.controls(browse);
         let count = controls.len();
         let index = controls
             .iter()
@@ -503,13 +509,13 @@ mod tests {
         );
         let mut creator = WorkspaceCreator::default();
         assert_eq!(creator.focus(), CreatorControl::FromRepos);
-        creator.move_focus(true);
+        creator.move_focus(true, true);
         assert_eq!(
             creator.focus(),
             CreatorControl::FromVscode,
             "the second tab follows the first"
         );
-        creator.move_focus(false);
+        creator.move_focus(false, true);
         assert_eq!(creator.focus(), CreatorControl::FromRepos, "and back");
 
         creator.set_mode(CreatorMode::FromVscode);
@@ -518,9 +524,9 @@ mod tests {
             CreatorControl::FromVscode,
             "a mode switch lands on its tab"
         );
-        creator.move_focus(true);
+        creator.move_focus(true, true);
         assert_eq!(creator.focus(), CreatorControl::Browse, "then Browse");
-        creator.move_focus(true);
+        creator.move_focus(true, true);
         assert_eq!(
             creator.focus(),
             CreatorControl::Cancel,
@@ -530,11 +536,40 @@ mod tests {
         creator.begin_parse("C:/work/team.code-workspace".to_owned());
         assert!(creator.parsed(suggestion("team", 2)));
         creator.set_focus(CreatorControl::Browse);
-        creator.move_focus(true);
+        creator.move_focus(true, true);
         assert_eq!(
             creator.focus(),
             CreatorControl::Name,
             "a parsed file adds its name field after Browse"
+        );
+    }
+
+    #[test]
+    fn browse_leaves_the_ring_where_no_picker_answers() {
+        let mut creator = WorkspaceCreator::default();
+        creator.set_mode(CreatorMode::FromVscode);
+        assert_eq!(
+            creator.controls(false),
+            [
+                CreatorControl::FromRepos,
+                CreatorControl::FromVscode,
+                CreatorControl::Cancel,
+                CreatorControl::Create,
+            ]
+        );
+        creator.move_focus(true, false);
+        assert_eq!(
+            creator.focus(),
+            CreatorControl::Cancel,
+            "Tab steps over Browse"
+        );
+        creator.move_focus(false, false);
+        assert_eq!(creator.focus(), CreatorControl::FromVscode, "and back");
+        creator.move_focus(true, true);
+        assert_eq!(
+            creator.focus(),
+            CreatorControl::Browse,
+            "where a picker answers, Browse is a stop"
         );
     }
 

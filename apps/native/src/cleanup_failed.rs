@@ -164,11 +164,14 @@ impl CleanupFailed {
         }
     }
 
-    /// The controls in Tab order: ✕, each Open folder, each checkbox,
+    /// The controls in Tab order: ✕, each Open folder (only with
+    /// `open_folders`, while this PC can reveal the folders), each checkbox,
     /// Ignore and the retry button.
-    pub(crate) fn controls(&self) -> Vec<Control> {
+    pub(crate) fn controls(&self, open_folders: bool) -> Vec<Control> {
         let mut controls = vec![Control::Close];
-        controls.extend((0..self.failures.len()).map(Control::OpenFolder));
+        if open_folders {
+            controls.extend((0..self.failures.len()).map(Control::OpenFolder));
+        }
         controls.extend(
             self.processes
                 .iter()
@@ -182,9 +185,10 @@ impl CleanupFailed {
         self.focused
     }
 
-    /// Moves the focus to the next control, or the previous one, wrapping.
-    pub(crate) fn move_focus(&mut self, forward: bool) {
-        let controls = self.controls();
+    /// Moves the focus to the next control, or the previous one, wrapping,
+    /// over [`Self::controls`] with `open_folders`.
+    pub(crate) fn move_focus(&mut self, forward: bool, open_folders: bool) {
+        let controls = self.controls(open_folders);
         let count = controls.len();
         let at = controls
             .iter()
@@ -340,6 +344,45 @@ mod tests {
         assert_eq!(pids, [10, 20, 30]);
         assert_eq!(dialog.ticked_pids(), [10, 20, 30]);
         assert_eq!(dialog.focused(), Control::Ignore);
+    }
+
+    #[test]
+    fn open_folder_leaves_the_ring_where_this_pc_cannot_reveal() {
+        let mut dialog = entry(vec![failure("a", vec![proc(10, "node.exe")])]);
+        assert_eq!(
+            dialog.controls(true),
+            [
+                Control::Close,
+                Control::OpenFolder(0),
+                Control::Process(10),
+                Control::Ignore,
+                Control::Retry,
+            ]
+        );
+        assert_eq!(
+            dialog.controls(false),
+            [
+                Control::Close,
+                Control::Process(10),
+                Control::Ignore,
+                Control::Retry,
+            ]
+        );
+        dialog.move_focus(false, false);
+        dialog.move_focus(false, false);
+        assert_eq!(
+            dialog.focused(),
+            Control::Close,
+            "Shift+Tab steps over Open folder"
+        );
+        dialog.move_focus(true, false);
+        assert_eq!(dialog.focused(), Control::Process(10), "and so does Tab");
+        dialog.move_focus(false, true);
+        assert_eq!(
+            dialog.focused(),
+            Control::OpenFolder(0),
+            "where it can reveal, Open folder is a stop"
+        );
     }
 
     #[test]

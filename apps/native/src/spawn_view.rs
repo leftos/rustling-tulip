@@ -17,7 +17,6 @@ use protocol::{Agent, DaemonMessage};
 use crate::assets::{SIDEBAR_CHEVRON_DOWN_ICON, SIDEBAR_CHEVRON_RIGHT_ICON};
 use crate::buttons::{ButtonKind, ButtonSize, button, field_frame, focus_ring};
 use crate::combobox::{ComboRow, list_placement};
-use crate::grid_view::ADD_REPO_TIP;
 use crate::notice_view::{MODAL_RADIUS, modal_panel};
 use crate::palette::{
     ACCENT, CHIP, GROUND, HOVER, LINE, LINE_STRONG, ON_ACCENT, RAISED, SPAWN_BADGE_OK, SUBTLE,
@@ -1245,11 +1244,14 @@ impl RootView {
         let close = close_button("spawn-close", false).on_click(
             cx.listener(|this, _: &ClickEvent, window, cx| this.close_spawn_dialog(window, cx)),
         );
-        let add = button("spawn-add-repo", OUTLINED.0, OUTLINED.1, true)
+        let gate = self.add_repo_gate();
+        let add = button("spawn-add-repo", OUTLINED.0, OUTLINED.1, gate.enabled)
             .flex_none()
             .child("Add repo")
-            .tooltip(tooltip(ADD_REPO_TIP))
-            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.add_repo(cx)));
+            .tooltip(tooltip(gate.tip))
+            .when(gate.enabled, |add| {
+                add.on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.add_repo(cx)))
+            });
         let body = div()
             .debug_selector(|| "spawn-no-repos".to_owned())
             .flex()

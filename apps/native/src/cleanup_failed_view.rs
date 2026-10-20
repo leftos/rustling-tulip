@@ -13,7 +13,7 @@ use crate::notice_view::modal_panel;
 use crate::open::OpenJob;
 use crate::open_view::Then;
 use crate::session_menu::{backdrop, dialog_button};
-use crate::{MUTED, RootView};
+use crate::{MUTED, RootView, tooltip};
 
 const TITLE: &str = "Worktree didn't clean up";
 /// The most of the window's height the folder and process list takes.
@@ -38,15 +38,15 @@ impl RootView {
         self.cleanup_failed.head().map(CleanupFailed::body)
     }
 
-    /// The open dialog's controls in the keyboard's order: selector and
-    /// label.
+    /// Every control the open dialog draws, in drawing order (the
+    /// keyboard's on the local daemon): selector and label.
     #[must_use]
     pub fn cleanup_failed_controls(&self) -> Vec<(String, String)> {
         let Some(dialog) = self.cleanup_failed.head() else {
             return Vec::new();
         };
         dialog
-            .controls()
+            .controls(true)
             .into_iter()
             .map(|control| (control.selector(), dialog.label(control)))
             .collect()
@@ -114,12 +114,13 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        let open_folders = self.capabilities().opens_local_files();
         let Some(dialog) = self.cleanup_failed.head_mut() else {
             return false;
         };
         match keystroke.key.as_str() {
             "tab" => {
-                dialog.move_focus(!keystroke.modifiers.shift);
+                dialog.move_focus(!keystroke.modifiers.shift, open_folders);
                 cx.notify();
             }
             "enter" | "space" => {
@@ -206,8 +207,9 @@ impl RootView {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let dialog = self.cleanup_failed.head()?;
+        let refusal = self.capabilities().local_files_refusal();
         let mut button =
-            |control: Control, danger: bool| cleanup_button(dialog, control, danger, cx);
+            |control: Control, danger: bool| cleanup_button(dialog, control, danger, refusal, cx);
         let header = div()
             .flex()
             .items_center()
@@ -277,11 +279,13 @@ impl RootView {
 }
 
 /// A button of the dialog, ringed while focused; a checkbox shows its
-/// mark before the process name.
+/// mark before the process name. Open folder is disabled with
+/// `open_refusal` as its tooltip when one is given.
 fn cleanup_button(
     dialog: &CleanupFailed,
     control: Control,
     danger: bool,
+    open_refusal: Option<&'static str>,
     cx: &mut Context<RootView>,
 ) -> Stateful<Div> {
     let label = match control {
@@ -291,16 +295,20 @@ fn cleanup_button(
         }
         _ => dialog.label(control),
     };
-    dialog_button(
+    let refusal = open_refusal.filter(|_| matches!(control, Control::OpenFolder(_)));
+    let button = dialog_button(
         &control.selector(),
         label,
         danger,
         control == dialog.focused(),
-        true,
-    )
-    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-        this.press_cleanup_control(control, window, cx);
-    }))
+        refusal.is_none(),
+    );
+    match refusal {
+        Some(tip) => button.tooltip(tooltip(tip)),
+        None => button.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+            this.press_cleanup_control(control, window, cx);
+        })),
+    }
 }
 
 /// A folder still on disk: its path and Open folder over the reason.

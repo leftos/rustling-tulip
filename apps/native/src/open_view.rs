@@ -12,6 +12,7 @@ use crate::links::{LinkKind, TerminalLink, TerminalLinkCandidate};
 use crate::notice_view::modal_panel;
 use crate::notices::{ToastKind, ToastSpec};
 use crate::open::{self, JobOutcome, OpenAction, OpenFailure, OpenJob, Resolution};
+use crate::remote_mode::PATH_LINK_REASON;
 use crate::run_confirm::{RunButton, RunConfirm};
 use crate::session_menu::{backdrop, dialog_button};
 use crate::{MUTED, RootView};
@@ -67,6 +68,20 @@ impl RootView {
                     );
                 }
             },
+            // A host path is not on this PC; resolving it here could open
+            // a local file of the same name.
+            LinkKind::Path if !self.capabilities().opens_local_files() => {
+                tracing::warn!(
+                    "refusing terminal path link {} on a remote host",
+                    link.target
+                );
+                self.push_toast(
+                    ToastKind::Warning,
+                    COULD_NOT_OPEN,
+                    Some(PATH_LINK_REASON.to_owned()),
+                    cx,
+                );
+            }
             LinkKind::Path => self.resolve_path(link.candidates.clone(), base_dirs, window, cx),
         }
     }
@@ -204,7 +219,8 @@ impl RootView {
     }
 
     /// Hands `job` to the opener on a background thread and reports how it
-    /// went.
+    /// went. On a remote host only a URL opens; any other job would open a
+    /// host path on this PC, so it is refused with a toast.
     pub(crate) fn dispatch_open(
         &mut self,
         job: OpenJob,
@@ -212,6 +228,18 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !matches!(job, OpenJob::Url(_))
+            && let Some(reason) = self.capabilities().local_files_refusal()
+        {
+            tracing::warn!(?job, "refusing a local open on a remote host");
+            self.push_toast(
+                ToastKind::Warning,
+                COULD_NOT_OPEN,
+                Some(reason.to_owned()),
+                cx,
+            );
+            return;
+        }
         let opener = Arc::clone(&self.opener);
         let run = {
             let job = job.clone();

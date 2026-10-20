@@ -117,7 +117,8 @@ impl RootView {
 
     /// The main window asked to close. With nothing the daemon could stop,
     /// or no connection or session list to judge by, the app quits at once;
-    /// otherwise the exit dialog opens and the window stays. Returns whether
+    /// otherwise the exit dialog opens and the window stays. On a remote
+    /// host the app always quits at once, sending the host nothing. Returns whether
     /// the window may close.
     pub(crate) fn on_close_requested(
         &mut self,
@@ -129,6 +130,13 @@ impl RootView {
         }
         if self.exit.is_some() {
             return false;
+        }
+        // The host's daemon and sessions are not this client's to stop: the
+        // close only drops the connection.
+        if !self.capabilities().manages_daemon() {
+            tracing::info!("window close on a remote host: disconnecting and quitting");
+            self.request_quit(cx);
+            return true;
         }
         let active = self.exit_counts().active;
         let connected = self.conn.is_open();

@@ -36,7 +36,7 @@ use crate::spawn_view::{
 use crate::tabs::tab_session_counts;
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
 use crate::window_title::compute_title;
-use crate::{RootView, TEXT, tooltip};
+use crate::{Pick, RootView, TEXT, tooltip};
 
 /// The tab list's width, its padding and edge included.
 const TAB_LIST_WIDTH: f32 = 150.0;
@@ -419,10 +419,10 @@ impl RootView {
             SettingsTab::SpawnDefaults => vec![SettingsControl::SpawnTrusted],
             SettingsTab::Claude => self.claude_controls(),
             SettingsTab::Worktrees => {
-                let mut controls = vec![
-                    SettingsControl::WorktreesPath,
-                    SettingsControl::WorktreesBrowse,
-                ];
+                let mut controls = vec![SettingsControl::WorktreesPath];
+                if self.capabilities().opens_local_files() {
+                    controls.push(SettingsControl::WorktreesBrowse);
+                }
                 if self.worktrees_save_enabled() {
                     controls.push(SettingsControl::WorktreesSave);
                 }
@@ -755,17 +755,11 @@ impl RootView {
         } else {
             Some(PathBuf::from(current))
         };
-        let picked = (self.pick_folder)(cx, start);
-        cx.spawn(async move |this, cx| {
-            let Some(path) = picked.await else {
-                return;
-            };
-            let path = path.to_string_lossy().into_owned();
-            // Fails only when the view is gone, and its window with it.
-            this.update(cx, |this, cx| this.finish_worktrees_browse(asked, path, cx))
-                .ok();
-        })
-        .detach();
+        self.pick_local(Pick::Folder, start, cx, move |this, picked, cx| {
+            if let Some(path) = picked {
+                this.finish_worktrees_browse(asked, path.to_string_lossy().into_owned(), cx);
+            }
+        });
     }
 
     fn finish_worktrees_browse(&mut self, asked: EntityId, path: String, cx: &mut Context<Self>) {
@@ -1244,13 +1238,15 @@ impl RootView {
                 }),
             )
             .child(tab.input.clone());
+        let refusal = self.capabilities().local_files_refusal();
         let browse = settings_button(
             SettingsControl::WorktreesBrowse,
             "Browse…",
-            true,
+            refusal.is_none(),
             focused,
             cx,
-        );
+        )
+        .when_some(refusal, |button, tip| button.tooltip(tooltip(tip)));
         let path_row = div()
             .flex()
             .items_center()

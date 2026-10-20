@@ -60,6 +60,7 @@ mod quit;
 mod quit_view;
 mod recover;
 mod recover_view;
+pub(crate) mod remote_mode;
 mod repo_add;
 mod repo_remove;
 mod repo_remove_view;
@@ -141,6 +142,7 @@ use crate::notices::Notices;
 use crate::notify::{SilentNotifier, SystemNotifier};
 use crate::open::SystemOpener;
 use crate::quit_view::{ExitView, Quitter};
+use crate::remote_mode::Capabilities;
 use crate::repo_remove::RepoRemove;
 use crate::run_confirm::RunConfirm;
 use crate::section::flyout_section;
@@ -279,6 +281,14 @@ impl FileFilter {
 /// pickers call it.
 pub type FilePicker =
     Rc<dyn Fn(&mut App, Option<PathBuf>, FileFilter) -> LocalBoxFuture<'static, Option<PathBuf>>>;
+
+/// Which of this PC's pickers [`RootView::pick_local`] asks, and for a file
+/// the types it offers.
+#[derive(Debug, Clone)]
+pub(crate) enum Pick {
+    Folder,
+    File(FileFilter),
+}
 
 /// What the root view talks to and where it keeps its files.
 pub struct RootDeps {
@@ -1084,6 +1094,53 @@ impl RootView {
         let request_id = new_request_id();
         self.tabs.arm_create(&request_id);
         self.send(Placement::NewTab.message(id, Some(request_id)));
+    }
+
+    /// What the client may do on the daemon it connects to now.
+    fn capabilities(&self) -> Capabilities {
+        Capabilities::for_target(self.conn.target())
+    }
+
+    /// Asks this PC's `pick` picker, opening at `start`, and hands its
+    /// answer to `then`. Every picker goes through here: none opens on a
+    /// remote host (returns `false`), and an answer that lands after the
+    /// target turned remote reaches `then` as a cancel.
+    fn pick_local(
+        &mut self,
+        pick: Pick,
+        start: Option<PathBuf>,
+        cx: &mut Context<Self>,
+        then: impl FnOnce(&mut Self, Option<PathBuf>, &mut Context<Self>) + 'static,
+    ) -> bool {
+        if !self.capabilities().opens_local_files() {
+            tracing::info!(?pick, "no picker opens on a remote host");
+            return false;
+        }
+        let picked = match &pick {
+            Pick::Folder => (self.pick_folder)(cx, start),
+            Pick::File(filter) => (self.pick_file)(cx, start, filter.clone()),
+        };
+        cx.spawn(async move |this, cx| {
+            let picked = picked.await;
+            // Fails only when the view is gone, and its window with it.
+            this.update(cx, |this, cx| {
+                let picked = if this.capabilities().opens_local_files() {
+                    picked
+                } else {
+                    if picked.is_some() {
+                        tracing::info!(
+                            ?pick,
+                            "dropping a pick that landed after the switch to a remote host"
+                        );
+                    }
+                    None
+                };
+                then(this, picked, cx);
+            })
+            .ok();
+        })
+        .detach();
+        true
     }
 
     /// Whether the sidebar is hidden.
@@ -2058,6 +2115,10 @@ impl RootView {
     }
 
     fn click_stop(&mut self) {
+        if !self.capabilities().manages_daemon() {
+            tracing::warn!("ignoring Stop: the connected daemon is a remote host's");
+            return;
+        }
         if self.stop.click() {
             self.command(NetCommand::Stop);
             self.handshake = None;
@@ -2083,6 +2144,10 @@ impl RootView {
                 if !conn.is_open() {
                     self.set_keep_awake(None);
                     self.launch_last.clear();
+                }
+                // The handshake is the old target's daemon's.
+                if conn.target() != self.conn.target() {
+                    self.handshake = None;
                 }
                 self.conn = conn;
                 self.sync_spawn_provider_support(cx);
@@ -2951,10 +3016,11 @@ impl Render for RootView {
         let flyout = self
             .flyout_open
             .then(|| [flyout_backdrop(cx).into_any_element(), self.flyout(cx)]);
+        let restart_label = self.conn.restart_label();
         let overlay = self
             .conn
-            .overlay()
-            .map(|text| connecting_overlay(text, footer.dot, cx));
+            .overlay_text()
+            .map(|text| connecting_overlay(text, restart_label, footer.dot, cx));
         // The quit's walk draws its confirm above the exit dialog.
         let delete_dialog = self.delete_dialog_layer(cx);
         let (delete_under, delete_over) = if self.exit_walk_confirm_open() {
@@ -3050,13 +3116,11 @@ impl RootView {
     /// The bottom bar: the daemon pill, the status counts, then the
     /// attached session's status, right-aligned and the first to truncate.
     fn footer_bar(&self, footer: &Footer, cx: &mut Context<Self>) -> Div {
-        let text = match footer.port {
-            Some(port) => format!("daemon · {} · :{port}", footer.label),
-            None => format!("daemon · {}", footer.label),
-        };
+        let text = footer.pill();
         let counts = status_counts(self.sidebar.sessions(), |id| self.sidebar.is_unseen(id));
         let pill = div()
             .id("daemon-pill")
+            .debug_selector(|| "daemon-pill".to_owned())
             .flex()
             .flex_none()
             .items_center()
@@ -3071,7 +3135,7 @@ impl RootView {
             .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
             .when(self.flyout_open, |pill| pill.bg(gpui::rgb(HOVER_BG)))
             .child(status_dot(footer.dot, "footer-dot"))
-            .child(text)
+            .child(tagged_text("daemon-pill", text))
             .tooltip(tooltip(footer.tooltip.clone()))
             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                 this.toggle_flyout();
@@ -3101,12 +3165,15 @@ impl RootView {
 
     /// The troubleshooting flyout above the pill: details, files, control.
     fn flyout(&self, cx: &mut Context<Self>) -> AnyElement {
+        let manages_daemon = self.capabilities().manages_daemon();
         let rows = flyout_rows(
             &self.conn,
             self.handshake.as_ref(),
             self.sidebar.sessions().len(),
         );
+        let labels: Vec<&'static str> = rows.iter().map(|(label, _)| *label).collect();
         let details = div()
+            .debug_selector(move || format!("flyout-details={}", labels.join("|")))
             .flex()
             .flex_col()
             .gap(px(2.0))
@@ -3114,7 +3181,9 @@ impl RootView {
                 rows.into_iter()
                     .map(|(label, value)| detail_row(label, value)),
             )
-            .child(self.handshake_row(cx));
+            .when(manages_daemon, |details| {
+                details.child(self.handshake_row(cx))
+            });
         popover_frame("daemon-flyout")
             .absolute()
             .left(px(PADDING))
@@ -3126,8 +3195,8 @@ impl RootView {
             .p(px(10.0))
             .child(div().font_weight(FontWeight::SEMIBOLD).child("Daemon"))
             .child(details)
-            .child(self.files_section())
-            .child(self.control_section(cx))
+            .child(self.files_section(manages_daemon))
+            .child(self.control_section(manages_daemon, cx))
             .into_any_element()
     }
 
@@ -3150,16 +3219,19 @@ impl RootView {
     }
 
     /// "Logs & files": open the logs, reveal the config folder; disabled with
-    /// the error when the config dir could not be resolved.
-    fn files_section(&self) -> Div {
+    /// the error when the config dir could not be resolved. `daemon.log`
+    /// shows only with `daemon_log`, as a remote host's log is not here.
+    fn files_section(&self, daemon_log: bool) -> Div {
         let section = flyout_section("Logs & files");
         match &self.paths {
             Ok(paths) => section
-                .child(open_button(
-                    "open-daemon-log",
-                    "Open daemon.log",
-                    &paths.daemon_log,
-                ))
+                .when(daemon_log, |section| {
+                    section.child(open_button(
+                        "open-daemon-log",
+                        "Open daemon.log",
+                        &paths.daemon_log,
+                    ))
+                })
                 .child(open_button(
                     "open-native-log",
                     "Open native.log",
@@ -3171,12 +3243,14 @@ impl RootView {
                         .on_click(move |_, _, cx| cx.reveal_path(&dir))
                 }),
             Err(err) => section
-                .child(action_button(
-                    "open-daemon-log",
-                    "Open daemon.log",
-                    TEXT,
-                    false,
-                ))
+                .when(daemon_log, |section| {
+                    section.child(action_button(
+                        "open-daemon-log",
+                        "Open daemon.log",
+                        TEXT,
+                        false,
+                    ))
+                })
                 .child(action_button(
                     "open-native-log",
                     "Open native.log",
@@ -3193,26 +3267,29 @@ impl RootView {
         }
     }
 
-    /// "Control": restart, and the two-click stop.
-    fn control_section(&self, cx: &mut Context<Self>) -> Div {
+    /// "Control": restart (Reconnect now on a remote host), and the
+    /// two-click stop only with `stop`.
+    fn control_section(&self, stop: bool, cx: &mut Context<Self>) -> Div {
         let armed = self.stop.armed;
         flyout_section("Control")
             .child(
-                action_button("restart-daemon", "Restart daemon", TEXT, true).on_click(
+                action_button("restart-daemon", self.conn.restart_label(), TEXT, true).on_click(
                     cx.listener(|this, _: &ClickEvent, _, cx| {
                         this.restart();
                         cx.notify();
                     }),
                 ),
             )
-            .child(
-                action_button("stop-daemon", self.stop.label(), DANGER, true)
-                    .when(armed, |button| button.bg(gpui::rgb(DANGER_BG)))
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.click_stop();
-                        cx.notify();
-                    })),
-            )
+            .when(stop, |section| {
+                section.child(
+                    action_button("stop-daemon", self.stop.label(), DANGER, true)
+                        .when(armed, |button| button.bg(gpui::rgb(DANGER_BG)))
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.click_stop();
+                            cx.notify();
+                        })),
+                )
+            })
     }
 }
 
@@ -3235,7 +3312,8 @@ fn flyout_backdrop(cx: &mut Context<RootView>) -> Stateful<Div> {
 
 /// The full-window card shown until the first connect, with a restart link.
 fn connecting_overlay(
-    text: &'static str,
+    text: String,
+    restart_label: &'static str,
     dot: DotKind,
     cx: &mut Context<RootView>,
 ) -> Stateful<Div> {
@@ -3245,7 +3323,7 @@ fn connecting_overlay(
         .text_color(gpui::rgb(MUTED))
         .cursor_pointer()
         .hover(|style| style.text_color(gpui::rgb(TEXT)))
-        .child("Restart daemon")
+        .child(tagged_text("overlay-restart", restart_label))
         .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
             this.restart();
             cx.notify();
@@ -3263,7 +3341,7 @@ fn connecting_overlay(
         .border_color(gpui::rgb(LINE_STRONG))
         .rounded(px(MODAL_RADIUS))
         .child(status_dot(dot, "overlay-dot"))
-        .child(div().text_color(gpui::rgb(TEXT)).child(text))
+        .child(tagged_text("connecting-overlay", text).text_color(gpui::rgb(TEXT)))
         .child(restart);
     div()
         .id("connecting-overlay")
@@ -3349,6 +3427,7 @@ fn action_button(
 ) -> Stateful<Div> {
     div()
         .id(id)
+        .debug_selector(move || id.to_owned())
         .px(px(6.0))
         .py(px(3.0))
         .rounded(px(4.0))
@@ -3359,7 +3438,17 @@ fn action_button(
                 .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
         })
         .when(!enabled, |button| button.opacity(0.5))
-        .child(label)
+        .child(tagged_text(id, label))
+}
+
+/// `text` in a box a spec finds by `<selector>=<text>`, so it reads what the
+/// element shows rather than what the model would say.
+fn tagged_text(selector: &'static str, text: impl Into<SharedString>) -> Div {
+    let text = text.into();
+    let tag = text.clone();
+    div()
+        .debug_selector(move || format!("{selector}={tag}"))
+        .child(text)
 }
 
 /// A button that opens `path` with the system's default application.
@@ -3383,6 +3472,7 @@ impl Render for Tip {
             .rounded(px(10.0))
             .text_size(px(UI_TEXT_SIZE))
             .text_color(gpui::rgb(TEXT))
+            .debug_selector(|| format!("tooltip={}", self.0))
             .child(self.0.clone())
     }
 }

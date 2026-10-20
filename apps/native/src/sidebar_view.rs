@@ -5,6 +5,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
+use crate::Pick;
 use crate::appearance;
 use crate::assets::{
     SIDEBAR_BRANCH_ICON, SIDEBAR_CHEVRON_DOWN_ICON, SIDEBAR_CHEVRON_RIGHT_ICON,
@@ -21,8 +22,10 @@ use crate::palette::{
     RAISED, SUBTLE, TEXT_2, TRANSPARENT,
 };
 use crate::preset_launch::LaunchHighlight;
+use crate::remote_mode::Capabilities;
 use crate::repo_add::RepoAdd;
 use crate::session_actions::inline_actions;
+use crate::session_menu::disabled_row;
 use crate::session_menu::{
     BorderedButton, MENU_MAX_SHARE, MenuContainer, bordered_button, menu_frame, menu_item,
     menu_separator,
@@ -122,7 +125,9 @@ impl RootView {
         // sessions still list under it; "No sessions" is for a registry
         // with nothing to list.
         let no_repos = self.no_repos_yet();
-        let body = body.when(no_repos, |body| body.child(no_repos_note(cx)));
+        let body = body.when(no_repos, |body| {
+            body.child(no_repos_note(self.add_repo_gate(), cx))
+        });
         let body = if containers.is_empty() {
             body.when(!no_repos, |body| {
                 body.child(
@@ -241,12 +246,7 @@ impl RootView {
                     this.open_shell_dialog(window, cx);
                 },
             ));
-            let add_repo = menu_item(MORE_ADD_REPO_ROW, "Add repo…", false).on_click(cx.listener(
-                |this, _: &ClickEvent, window, cx| {
-                    this.close_more_menu(window, cx);
-                    this.add_repo(cx);
-                },
-            ));
+            let add_repo = self.more_add_repo_row(cx);
             let add_workspace = if self.sidebar.repos().len() < 2 {
                 div()
                     .id(MORE_ADD_WORKSPACE_ROW)
@@ -348,18 +348,33 @@ impl RootView {
             && self.sidebar.workspaces().is_empty()
     }
 
+    /// The ⋯ menu's Add repo… row, drawn as [`Self::add_repo_gate`] says.
+    fn more_add_repo_row(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        let gate = self.add_repo_gate();
+        if !gate.enabled {
+            return disabled_row(MORE_ADD_REPO_ROW, "Add repo…", gate.tip);
+        }
+        menu_item(MORE_ADD_REPO_ROW, "Add repo…", false).on_click(cx.listener(
+            |this, _: &ClickEvent, window, cx| {
+                this.close_more_menu(window, cx);
+                this.add_repo(cx);
+            },
+        ))
+    }
+
+    /// How every Add repo control is drawn on the daemon connected to now.
+    pub(crate) fn add_repo_gate(&self) -> AddRepoGate {
+        AddRepoGate::for_caps(self.capabilities())
+    }
+
     /// Add repo: the picker opens at the folder the last added repo sits
     /// in, and the folder picked is registered with the daemon. A cancel
     /// sends nothing; a refusal comes back as the daemon's error toast.
     pub(crate) fn add_repo(&mut self, cx: &mut Context<Self>) {
         let start = self.sidebar.last_repo_dir().map(PathBuf::from);
-        let picked = (self.pick_folder)(cx, start);
-        cx.spawn(async move |this, cx| {
-            let picked = picked.await;
-            // Fails only when the view is gone, and its window with it.
-            this.update(cx, |this, _| this.finish_add_repo(picked)).ok();
-        })
-        .detach();
+        self.pick_local(Pick::Folder, start, cx, |this, picked, _| {
+            this.finish_add_repo(picked);
+        });
     }
 
     /// The picker's answer: the folder beside it is remembered and the
@@ -409,6 +424,30 @@ impl RootView {
     }
 }
 
+/// Whether an Add repo control takes a press, and its tooltip. Add repo
+/// opens this PC's folder picker, so where `caps` opens no local files it
+/// is disabled with the reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AddRepoGate {
+    pub(crate) enabled: bool,
+    pub(crate) tip: &'static str,
+}
+
+impl AddRepoGate {
+    pub(crate) fn for_caps(caps: Capabilities) -> Self {
+        match caps.local_files_refusal() {
+            Some(reason) => Self {
+                enabled: false,
+                tip: reason,
+            },
+            None => Self {
+                enabled: true,
+                tip: ADD_REPO_TIP,
+            },
+        }
+    }
+}
+
 /// Whether the toolbar's ⋯ menu is open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MoreMenu {
@@ -438,13 +477,14 @@ const MORE_TIP_WITHOUT_RESUME: &str = "More: Shell…, Add repo…, Add workspac
 /// What the sessions panel says while no repo or workspace is registered.
 const NO_REPOS_NOTE: &str = "No repos or workspaces yet.";
 
-/// The note an empty registry shows, with the Add repo button under it.
-fn no_repos_note(cx: &mut Context<RootView>) -> Div {
+/// The note an empty registry shows, with the Add repo button under it,
+/// drawn as `gate` says.
+fn no_repos_note(gate: AddRepoGate, cx: &mut Context<RootView>) -> Div {
     let add = BorderedButton {
         selector: "sidebar-add-repo".to_owned(),
         label: "Add repo",
-        tip: ADD_REPO_TIP,
-        enabled: true,
+        tip: gate.tip,
+        enabled: gate.enabled,
     };
     div()
         .debug_selector(|| "sidebar-no-repos".to_owned())
@@ -1799,10 +1839,32 @@ impl RootView {
 
 #[cfg(test)]
 mod tests {
-    use super::{chip_texts, seen_idle};
+    use super::{AddRepoGate, chip_texts, seen_idle};
+    use crate::grid_view::ADD_REPO_TIP;
+    use crate::remote_mode::{Capabilities, LOCAL_FILES_REASON};
     use crate::sidebar::{Leaf, LeafState};
     use crate::tabs::TabPill;
+    use crate::target::Target;
     use protocol::{Agent, ClaudeProvider, SessionMode, SessionStatus};
+
+    #[test]
+    fn add_repo_is_offered_only_where_this_pcs_picker_answers() {
+        assert_eq!(
+            AddRepoGate::for_caps(Capabilities::for_target(&Target::Local)),
+            AddRepoGate {
+                enabled: true,
+                tip: ADD_REPO_TIP,
+            }
+        );
+        let remote = Target::tailnet("box.tail1234.ts.net", None);
+        assert_eq!(
+            AddRepoGate::for_caps(Capabilities::for_target(&remote)),
+            AddRepoGate {
+                enabled: false,
+                tip: LOCAL_FILES_REASON,
+            }
+        );
+    }
 
     /// A Claude leaf in `main`, tagged `orphan`, on `provider`.
     fn leaf(provider: Option<ClaudeProvider>) -> Leaf {

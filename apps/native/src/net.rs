@@ -698,8 +698,8 @@ async fn sleep_until(deadline: Option<Instant>) {
 )]
 mod tests {
     use super::{
-        EnsureFuture, NATIVE_PROTOCOL_VERSIONS, Net, NetCommand, NetDeps, NetEvent,
-        WELCOME_TIMEOUT, run_thread, tls_config_trusting,
+        EnsureFuture, Net, NetCommand, NetDeps, NetEvent, WELCOME_TIMEOUT, run_thread,
+        tls_config_trusting,
     };
     use crate::connection::{Connection, State};
     use crate::target::Target;

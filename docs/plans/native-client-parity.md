@@ -21,11 +21,11 @@ Close behind: the paste and key quirks (native clipboard read, Shift+Enter bytes
 - [x] Standby-resume watchdog: a 30s tick arriving >90s late probes liveness with `list_repos` (3s) and forces a reconnect if the socket is half-open — `App.tsx`
 - [x] Full-screen "Starting/Connecting to daemon…" overlay with spinner and "Restart daemon", until the first connect — `App.tsx` `ConnectingOverlay`
 - [x] Footer status pill: state dot, "N sessions", ":port", reason tooltip — `components/DaemonFooter.tsx`
-- [ ] Footer pill remote-host chip (with the connection picker, Phase 6) — `components/DaemonFooter.tsx`
+- [ ] Footer pill remote-host chip (with the connection picker, Phase 6) — `components/DaemonFooter.tsx` (native: the pill names the remote host since P6.2a; the picker is P6.3)
 - [x] Footer troubleshooting flyout: state, port, pid, protocol, session count, reason, copy handshake path; Esc / outside click closes — `DaemonFooter.tsx`
 - [x] Open daemon.log / app.log in the default app; reveal the config dir (native: daemon.log and native.log) — `DaemonFooter.tsx`, `lib.rs` `daemon_paths`
 - [x] Restart daemon (graceful `shutdown` then respawn; forced fresh connect in auth-failed/stopped) — `App.tsx` `onRestartDaemon`
-- [ ] "Reconnect" in place of Restart on a remote connection (Phase 6) — `App.tsx` `onRestartDaemon`
+- [x] "Reconnect" in place of Restart on a remote connection (Phase 6) — `App.tsx` `onRestartDaemon`
 - [x] Stop daemon with two-click confirm (kill pid, remove handshake, no respawn) — `DaemonFooter.tsx`, `lib.rs` `stop_daemon`
 - [x] Main-window close intercepted; quits silently when no sessions are active — `App.tsx` `onCloseRequested`
 - [x] Exit dialog: keep running (default), stop and keep worktrees, stop and remove worktrees (branch fate per session, "Session n of m"), abandon and quit, orphan note, force quit after 5s stuck — `ExitConfirmDialog.tsx`, `utils/exitWorktreeQueue.ts`
@@ -173,7 +173,7 @@ The frontend has no search addon, bell handling or title parsing; `terminal_titl
 - [x] Notifications settings: permission badge, "Request permission" — `SettingsModal.tsx` (native: Windows' read-only toast state and a link to its notification settings)
 - [x] Attention: leaf highlight and "!", container roll-up; cleared when the user selects the session or it calms down — `App.tsx`, `Sidebar.tsx`
 - [x] Toasts: error / warning / info, 8s auto-dismiss, optional sticky, same-key toasts update in place — `ErrorToast.tsx` (native: P1.7c, and warning, sticky and same-key update in P4.1)
-- [ ] Toasts for failed git writes and for actions unavailable on remote — `App.tsx` (native: failed git writes toast and show a section banner since P3.4)
+- [x] Toasts for failed git writes and for actions unavailable on remote — `App.tsx` (native: failed git writes toast and show a section banner since P3.4)
 - [x] "✓ copied" chip after a confirmed clipboard write — `CopyPulse.tsx`, `utils/clipboard.ts`
 - [x] Preset-launched sessions highlighted in the sidebar — `App.tsx`
 
@@ -194,7 +194,7 @@ The frontend has no search addon, bell handling or title parsing; `terminal_titl
 - [ ] Pair a device: one-time code with countdown and Cancel, and the pairing outcome — `SettingsModal.tsx` `PairDevicePanel`
 - [ ] Start daemon on login (HKCU Run key / LaunchAgent) — `src-tauri/src/autostart.rs` (native: the registration and the startup refresh in P6.5, `daemon_client::autostart`; the toggle arrives with the Remote access panel, P6.4)
 - [ ] Remote host profiles over Tailscale: the host picker from the tailnet's machines, a typed MagicDNS name, the chosen connection saved, and the client verifying the listener's `tailscale cert` TLS itself — no pinned-TLS tunnel, local plaintext bridge, pairing over it or `remote-profiles.json` (`docs/plans/remote-access.md`, P6.1–P6.3)
-- [ ] Remote mode disables local-file actions (add repo, reveal, VS Code, pickers become typed paths, terminal path links) — `utils/remoteMode.ts`
+- [ ] Remote mode disables local-file actions (add repo, reveal, VS Code, pickers become typed paths, terminal path links) — `utils/remoteMode.ts` (native: disabled with a reason since P6.2a; typed paths are P6.2b, RT-257)
 - [ ] Chosen connection saved; a missing saved host falls back to local — `App.tsx`
 
 ## Misc & shortcuts

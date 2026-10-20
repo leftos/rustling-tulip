@@ -16,7 +16,7 @@ use crate::shell_dialog::{
 use crate::spawn_view::checkbox_row;
 use crate::spawns::OpenIn;
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
-use crate::{BORDER, HOVER_BG, MUTED, RootView, TEXT};
+use crate::{BORDER, HOVER_BG, MUTED, Pick, RootView, TEXT, tooltip};
 
 const TITLE: &str = "Open a shell";
 const SAVE_DEFAULT_LABEL: &str = "Use as quick shell default";
@@ -48,7 +48,7 @@ impl RootView {
     pub fn shell_dialog_focus(&self, cx: &App) -> Option<&'static str> {
         let dialog = self.shell_dialog.as_ref()?;
         let folder = shell_folder(dialog, cx);
-        let focused = dialog.form.focused(folder);
+        let focused = dialog.form.focused(folder, self.shell_browse_offered());
         Some(focused.selector())
     }
 
@@ -225,17 +225,20 @@ impl RootView {
         let Some(folder) = self.shell_dialog_folder(cx) else {
             return false;
         };
+        let browse = self.shell_browse_offered();
         let Some(focused) = self
             .shell_dialog
             .as_ref()
-            .map(|dialog| dialog.form.focused(&folder))
+            .map(|dialog| dialog.form.focused(&folder, browse))
         else {
             return false;
         };
         match key {
             "tab" => {
                 if let Some(dialog) = &mut self.shell_dialog {
-                    dialog.form.move_focus(!keystroke.modifiers.shift, &folder);
+                    dialog
+                        .form
+                        .move_focus(!keystroke.modifiers.shift, &folder, browse);
                 }
                 self.apply_shell_focus(window, cx);
                 true
@@ -283,7 +286,7 @@ impl RootView {
     /// happens only while this dialog is the one that asked and the field
     /// still holds what it held then. Browse is disabled meanwhile.
     fn browse_for_folder(&mut self, cx: &mut Context<Self>) {
-        let Some(dialog) = &mut self.shell_dialog else {
+        let Some(dialog) = &self.shell_dialog else {
             return;
         };
         if dialog.form.browsing() {
@@ -291,7 +294,6 @@ impl RootView {
         }
         let generation = dialog.form.generation();
         let folder = shell_folder(dialog, cx).to_owned();
-        dialog.form.begin_browse(&folder);
         // The picker opens at the typed folder, else the remembered one.
         let typed = folder.trim();
         let start = if typed.is_empty() {
@@ -299,16 +301,13 @@ impl RootView {
         } else {
             Some(std::path::PathBuf::from(typed))
         };
-        let picked = (self.pick_folder)(cx, start);
-        cx.spawn(async move |this, cx| {
-            let picked = picked.await.map(|path| path.to_string_lossy().into_owned());
-            // Fails only when the view is gone, and its window with it.
-            this.update(cx, |this, cx| {
-                this.finish_browse(generation, picked.as_deref(), cx);
-            })
-            .ok();
-        })
-        .detach();
+        let asked = self.pick_local(Pick::Folder, start, cx, move |this, picked, cx| {
+            let picked = picked.map(|path| path.to_string_lossy().into_owned());
+            this.finish_browse(generation, picked.as_deref(), cx);
+        });
+        if asked && let Some(dialog) = &mut self.shell_dialog {
+            dialog.form.begin_browse(&folder);
+        }
         cx.notify();
     }
 
@@ -333,12 +332,20 @@ impl RootView {
         let Some(dialog) = &self.shell_dialog else {
             return;
         };
-        let focus = dialog.form.focused(shell_folder(dialog, cx));
+        let focus = dialog
+            .form
+            .focused(shell_folder(dialog, cx), self.shell_browse_offered());
         match focus {
             ShellControl::Folder => dialog.folder_input.read(cx).focus_handle(cx).focus(window),
             _ => self.shell_focus.focus(window),
         }
         cx.notify();
+    }
+
+    /// Whether Browse is offered: this PC's folder picker answers only for
+    /// the local daemon.
+    fn shell_browse_offered(&self) -> bool {
+        self.capabilities().opens_local_files()
     }
 
     /// Whether the folder field holds the keyboard.
@@ -358,7 +365,7 @@ impl RootView {
         let dialog = self.shell_dialog.as_ref()?;
         let form = &dialog.form;
         let folder = shell_folder(dialog, cx).to_owned();
-        let focus = form.focused(&folder);
+        let focus = form.focused(&folder, self.shell_browse_offered());
         let close = dialog_button(
             ShellControl::Close.selector(),
             "✕".to_owned(),
@@ -375,7 +382,8 @@ impl RootView {
             .justify_between()
             .child(div().font_weight(FontWeight::SEMIBOLD).child(TITLE))
             .child(close);
-        let browse_enabled = !form.browsing();
+        let refusal = self.capabilities().local_files_refusal();
+        let browse_enabled = !form.browsing() && refusal.is_none();
         let browse = dialog_button(
             ShellControl::Browse.selector(),
             "Browse…".to_owned(),
@@ -383,6 +391,7 @@ impl RootView {
             focus == ShellControl::Browse,
             browse_enabled,
         )
+        .when_some(refusal, |button, tip| button.tooltip(tooltip(tip)))
         .when(browse_enabled, |button| {
             button.on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                 this.press_shell_control(ShellControl::Browse, window, cx);

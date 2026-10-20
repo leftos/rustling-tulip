@@ -6,6 +6,7 @@ use std::collections::HashMap;
 
 use protocol::{ClientMessage, SessionMode, SessionSnapshot, SessionStatus, TabEntry};
 
+use crate::remote_mode::Capabilities;
 use crate::sidebar::{LeafState, can_attach, runtime_label};
 use crate::spawn_form::{OpenChoice, Target};
 use crate::tabs::{
@@ -478,11 +479,12 @@ pub(crate) fn menu_entries(session: &SessionSnapshot, mode: MenuMode) -> Vec<Men
 /// to ▸ while a pane shows the session, else Add to current tab and Add to
 /// new tab when it can be shown in a pane (only the first, reading Add to
 /// new tab, when placing it would open a tab anyway); Reveal worktree when
-/// it has a worktree of its own.
+/// it has a worktree of its own, dimmed where `caps` opens no local files.
 pub(crate) fn session_rows(
     session: &SessionSnapshot,
     tabs: &TabsModel,
     sessions: &[SessionSnapshot],
+    caps: Capabilities,
 ) -> Vec<OfferedRow> {
     let offered = |row| OfferedRow {
         row,
@@ -502,7 +504,10 @@ pub(crate) fn session_rows(
         }
     }
     if worktree_to_reveal(session).is_some() {
-        rows.push(offered(SessionRow::RevealWorktree));
+        rows.push(OfferedRow {
+            row: SessionRow::RevealWorktree,
+            disabled: caps.local_files_refusal(),
+        });
     }
     rows
 }
@@ -936,6 +941,7 @@ mod tests {
         menu_entries, move_lines, move_source, overlay_actions, pane_shows_exit, plan,
         rename_message, self_exited, session_rows, worktree_to_reveal,
     };
+    use crate::remote_mode::Capabilities;
     use crate::spawn_form::{OpenChoice, Target};
     use crate::tabs::TabsModel;
     use crate::tabs::tests::{model_with, pane, tab};
@@ -1433,8 +1439,13 @@ mod tests {
             .any(|m| matches!(m, ClientMessage::DiscardSession { .. }))
     }
 
+    /// The capabilities on the local daemon.
+    fn local() -> Capabilities {
+        Capabilities::for_target(&crate::target::Target::Local)
+    }
+
     fn rows_of(s: &SessionSnapshot, tabs: &TabsModel) -> Vec<SessionRow> {
-        session_rows(s, tabs, &[])
+        session_rows(s, tabs, &[], local())
             .into_iter()
             .map(|offered| offered.row)
             .collect()
@@ -1454,7 +1465,7 @@ mod tests {
             abandoned(),
         ] {
             assert_eq!(
-                session_rows(&s, &tabs, &[]).first(),
+                session_rows(&s, &tabs, &[], local()).first(),
                 Some(&offered),
                 "{:?}",
                 action_state(&s)
@@ -1470,7 +1481,7 @@ mod tests {
             let mut s = session(status);
             s.mode = SessionMode::Headless;
             assert_eq!(
-                session_rows(&s, &tabs, &[]).first(),
+                session_rows(&s, &tabs, &[], local()).first(),
                 Some(&OfferedRow {
                     row: SessionRow::Duplicate,
                     disabled: Some(HEADLESS_UNSUPPORTED_TIP),

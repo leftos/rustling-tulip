@@ -18,7 +18,7 @@ use crate::workspace_creator::{
     CreatorControl, CreatorMode, FILE_LABEL, MEMBERS_LABEL, NAME_PLACEHOLDER, NO_FILE,
     NO_REPOS_NOTE, PARSING, Settled, TITLE, WORKSPACE_NAME_LABEL, WorkspaceCreator,
 };
-use crate::{BORDER, DANGER, MUTED, RootView, TEXT};
+use crate::{BORDER, DANGER, MUTED, Pick, RootView, TEXT, tooltip};
 
 /// The open creator: its model and the name field's input entity.
 pub(crate) struct WorkspaceCreatorDialog {
@@ -124,8 +124,11 @@ impl RootView {
                 true
             }
             "tab" => {
+                let browse = self.capabilities().opens_local_files();
                 if let Some(dialog) = &mut self.workspace_creator {
-                    dialog.creator.move_focus(!keystroke.modifiers.shift);
+                    dialog
+                        .creator
+                        .move_focus(!keystroke.modifiers.shift, browse);
                 }
                 self.apply_workspace_creator_focus(window, cx);
                 true
@@ -217,14 +220,9 @@ impl RootView {
             .or_else(|| self.sidebar.last_repo_dir())
             .map(std::path::PathBuf::from);
         let filter = crate::FileFilter::new("VS Code workspace", &["code-workspace"]);
-        let picked = (self.pick_file)(cx, start, filter);
-        cx.spawn(async move |this, cx| {
-            let picked = picked.await;
-            // Fails only when the view is gone, and its window with it.
-            this.update(cx, |this, cx| this.finish_browse_workspace_file(picked, cx))
-                .ok();
-        })
-        .detach();
+        self.pick_local(Pick::File(filter), start, cx, |this, picked, cx| {
+            this.finish_browse_workspace_file(picked, cx);
+        });
         cx.notify();
     }
 
@@ -378,7 +376,10 @@ impl RootView {
             CreatorMode::FromRepos => {
                 repos_body(dialog, self.sidebar.repos(), focus, cx).into_any_element()
             }
-            CreatorMode::FromVscode => vscode_body(dialog, focus, cx).into_any_element(),
+            CreatorMode::FromVscode => {
+                vscode_body(dialog, focus, self.capabilities().local_files_refusal(), cx)
+                    .into_any_element()
+            }
         };
         let error = creator.error().map(|message| {
             div()
@@ -639,22 +640,26 @@ fn repos_body(
 }
 
 /// The From-VS-Code body: Browse, the parse's state, and the parsed file's
-/// name field and folder rows.
+/// name field and folder rows. Browse is disabled with `browse_refusal` as
+/// its tooltip when one is given.
 fn vscode_body(
     dialog: &WorkspaceCreatorDialog,
     focus: CreatorControl,
+    browse_refusal: Option<&'static str>,
     cx: &mut Context<RootView>,
 ) -> Div {
     let creator = &dialog.creator;
     let file = creator.file().unwrap_or(NO_FILE);
+    let browse_enabled = !creator.parsing() && browse_refusal.is_none();
     let browse = dialog_button(
         CreatorControl::Browse.selector(),
         "Browse…".to_owned(),
         false,
         focus == CreatorControl::Browse,
-        !creator.parsing(),
+        browse_enabled,
     )
-    .when(!creator.parsing(), |button| {
+    .when_some(browse_refusal, |button, tip| button.tooltip(tooltip(tip)))
+    .when(browse_enabled, |button| {
         button.on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
             this.press_workspace_control(CreatorControl::Browse, window, cx);
         }))

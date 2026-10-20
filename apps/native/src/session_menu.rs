@@ -24,6 +24,7 @@ use crate::notices::{ActionFailedNotice, ToastKind};
 use crate::open::{OpenJob, VsCodeTarget, copy_path, repo_folder, workspace_vscode_target};
 use crate::open_view::Then;
 use crate::palette::{CHIP, LINE_STRONG, SCRIM};
+use crate::remote_mode::Capabilities;
 use crate::session_actions::{
     ABANDONED_ACTIONS, ActionState, DuplicateTarget, HEADLESS_UNSUPPORTED_TIP, MenuEntry, MenuMode,
     MoveTarget, OfferedRow, PendingPrefill, PlacedFocus, SessionAction, SessionRow, Step, Submenu,
@@ -456,7 +457,14 @@ impl RootView {
         self.actions_menu()
             .filter(|menu| menu.submenu == Submenu::None)
             .and_then(|menu| self.sidebar.session(&menu.session_id))
-            .map(|session| session_rows(session, &self.tabs, self.sidebar.sessions()))
+            .map(|session| {
+                session_rows(
+                    session,
+                    &self.tabs,
+                    self.sidebar.sessions(),
+                    self.capabilities(),
+                )
+            })
             .unwrap_or_default()
     }
 
@@ -805,14 +813,22 @@ impl RootView {
                 .container_launch_headless(&menu.container)
                 .then(|| HEADLESS_UNSUPPORTED_TIP.to_owned());
         }
-        let no_folder = match selector {
-            CONTAINER_EXPLORER_ROW | CONTAINER_COPY_PATH_ROW => {
-                self.container_folder(&menu.container).is_none()
-            }
-            CONTAINER_VSCODE_ROW => self.container_vscode_job(&menu.container).is_none(),
-            _ => false,
+        let tip = match selector {
+            CONTAINER_COPY_PATH_ROW => self
+                .container_folder(&menu.container)
+                .is_none()
+                .then_some(CONTAINER_NO_FOLDER_TIP),
+            CONTAINER_EXPLORER_ROW => open_row_tip(
+                self.container_folder(&menu.container).is_some(),
+                self.capabilities(),
+            ),
+            CONTAINER_VSCODE_ROW => open_row_tip(
+                self.container_vscode_job(&menu.container).is_some(),
+                self.capabilities(),
+            ),
+            _ => None,
         };
-        no_folder.then(|| CONTAINER_NO_FOLDER_TIP.to_owned())
+        tip.map(str::to_owned)
     }
 
     /// The labels of the container menu's rows as shown now; empty while it
@@ -1166,14 +1182,20 @@ impl RootView {
     }
 
     /// The Explorer, VS Code and Copy path rows, a disabled one where the
-    /// container has no folder to act on.
+    /// container has no folder to act on; on a remote host Explorer and VS
+    /// Code are disabled, as they open the folder on this PC.
     fn container_open_rows(
         &self,
         container: &MenuContainer,
         cx: &mut Context<Self>,
     ) -> [AnyElement; 3] {
-        let explorer = match self.container_folder(container) {
-            Some(folder) => {
+        let caps = self.capabilities();
+        let refusal = caps.local_files_refusal();
+        let explorer = match (self.container_folder(container), refusal) {
+            (Some(_), Some(tip)) => {
+                disabled_row(CONTAINER_EXPLORER_ROW, "Open in Explorer", tip).into_any_element()
+            }
+            (Some(folder), None) => {
                 let job = OpenJob::Folder(folder);
                 menu_item(CONTAINER_EXPLORER_ROW, "Open in Explorer", false)
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
@@ -1182,21 +1204,24 @@ impl RootView {
                     }))
                     .into_any_element()
             }
-            None => disabled_row(
+            (None, _) => disabled_row(
                 CONTAINER_EXPLORER_ROW,
                 "Open in Explorer",
                 CONTAINER_NO_FOLDER_TIP,
             )
             .into_any_element(),
         };
-        let vscode = match self.container_vscode_job(container) {
-            Some(job) => menu_item(CONTAINER_VSCODE_ROW, "Open in VS Code", false)
+        let vscode = match (self.container_vscode_job(container), refusal) {
+            (Some(_), Some(tip)) => {
+                disabled_row(CONTAINER_VSCODE_ROW, "Open in VS Code", tip).into_any_element()
+            }
+            (Some(job), None) => menu_item(CONTAINER_VSCODE_ROW, "Open in VS Code", false)
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                     this.close_container_menu(window, cx);
                     this.dispatch_open(job.clone(), Then::Nothing, window, cx);
                 }))
                 .into_any_element(),
-            None => disabled_row(
+            (None, _) => disabled_row(
                 CONTAINER_VSCODE_ROW,
                 "Open in VS Code",
                 CONTAINER_NO_FOLDER_TIP,
@@ -2772,9 +2797,19 @@ pub(crate) fn menu_item(
         .child(label)
 }
 
+/// Why a container's Explorer or VS Code row is disabled: it has no folder
+/// to open, or `caps` opens no local files; `None` when it is offered.
+fn open_row_tip(has_folder: bool, caps: Capabilities) -> Option<&'static str> {
+    if has_folder {
+        caps.local_files_refusal()
+    } else {
+        Some(CONTAINER_NO_FOLDER_TIP)
+    }
+}
+
 /// A menu row that is drawn but cannot be pressed: muted, with `tip` as its
 /// tooltip.
-fn disabled_row(
+pub(crate) fn disabled_row(
     selector: &str,
     label: impl Into<SharedString>,
     tip: impl Into<SharedString>,

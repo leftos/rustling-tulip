@@ -689,6 +689,9 @@ pub struct PickRecorder {
     starts: std::cell::RefCell<Vec<Option<PathBuf>>>,
     file_starts: std::cell::RefCell<Vec<Option<PathBuf>>>,
     file_filters: std::cell::RefCell<Vec<FileFilter>>,
+    /// While set, a folder ask waits for [`Harness::release_picked_folder`].
+    hold: Cell<bool>,
+    held: std::cell::RefCell<Option<futures::channel::oneshot::Sender<Option<PathBuf>>>>,
 }
 
 impl PickRecorder {
@@ -697,6 +700,11 @@ impl PickRecorder {
         Rc::new(move |_: &mut App, start: Option<PathBuf>| {
             recorder.asks.set(recorder.asks.get() + 1);
             recorder.starts.borrow_mut().push(start);
+            if recorder.hold.get() {
+                let (answer, answered) = futures::channel::oneshot::channel();
+                *recorder.held.borrow_mut() = Some(answer);
+                return Box::pin(async move { answered.await.ok().flatten() });
+            }
             let picked = recorder.next.borrow().clone();
             Box::pin(async move { picked })
         })
@@ -1011,6 +1019,24 @@ impl<'a> Harness<'a> {
     /// Makes the folder picker answer `folder` (a cancel when `None`).
     pub fn set_picked_folder(&self, folder: Option<&str>) {
         *self.picker.next.borrow_mut() = folder.map(PathBuf::from);
+    }
+
+    /// Makes every folder ask wait until [`Self::release_picked_folder`]
+    /// answers it.
+    pub fn hold_picks(&self) {
+        self.picker.hold.set(true);
+    }
+
+    /// Answers the held folder ask with `folder` (a cancel when `None`) and
+    /// lets the view settle.
+    pub fn release_picked_folder(&mut self, folder: Option<&str>) {
+        let answer = self.picker.held.borrow_mut().take();
+        assert!(answer.is_some(), "a folder ask is held");
+        if let Some(answer) = answer {
+            // The receiver is gone only when the view dropped the pick.
+            answer.send(folder.map(PathBuf::from)).ok();
+        }
+        self.cx.run_until_parked();
     }
 
     /// How many times the folder picker was asked.

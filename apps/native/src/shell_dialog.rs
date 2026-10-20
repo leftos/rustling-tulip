@@ -160,15 +160,15 @@ impl ShellForm {
     }
 
     /// The focusable controls, in the order they are drawn; Open shell joins
-    /// them only while it can go, and the clear link only while there is a
-    /// folder to clear.
-    pub(crate) fn controls(&self, folder: &str) -> Vec<ShellControl> {
-        let mut ring = vec![
-            ShellControl::Close,
-            ShellControl::Folder,
-            ShellControl::Browse,
-            ShellControl::SaveDefault,
-        ];
+    /// them only while it can go, the clear link only while there is a
+    /// folder to clear, and Browse only while `browse` (a picker on this PC
+    /// can answer for the daemon).
+    pub(crate) fn controls(&self, folder: &str, browse: bool) -> Vec<ShellControl> {
+        let mut ring = vec![ShellControl::Close, ShellControl::Folder];
+        if browse {
+            ring.push(ShellControl::Browse);
+        }
+        ring.push(ShellControl::SaveDefault);
         if self.remembered {
             ring.push(ShellControl::ClearDefault);
         }
@@ -180,8 +180,8 @@ impl ShellForm {
     }
 
     /// The focused control; one that is gone gives way to the first.
-    pub(crate) fn focused(&self, folder: &str) -> ShellControl {
-        let ring = self.controls(folder);
+    pub(crate) fn focused(&self, folder: &str, browse: bool) -> ShellControl {
+        let ring = self.controls(folder, browse);
         if ring.contains(&self.focus) {
             self.focus
         } else {
@@ -194,11 +194,11 @@ impl ShellForm {
     }
 
     /// Tab (`forward`) or Shift+Tab: the next or previous control, wrapping.
-    pub(crate) fn move_focus(&mut self, forward: bool, folder: &str) {
-        let ring = self.controls(folder);
+    pub(crate) fn move_focus(&mut self, forward: bool, folder: &str, browse: bool) {
+        let ring = self.controls(folder, browse);
         let at = ring
             .iter()
-            .position(|c| *c == self.focused(folder))
+            .position(|c| *c == self.focused(folder, browse))
             .unwrap_or(0);
         let len = ring.len();
         let next = if forward {
@@ -343,7 +343,7 @@ mod tests {
         assert_eq!(form.generation(), 7);
         assert!(form.remembered(), "there is a folder to clear");
         assert!(form.save_default());
-        assert_eq!(form.focused("C:\\work"), ShellControl::Folder);
+        assert_eq!(form.focused("C:\\work", true), ShellControl::Folder);
         assert!(!form.browsing());
 
         let fresh = ShellForm::new(8, None);
@@ -374,7 +374,7 @@ mod tests {
     fn the_focus_ring_wraps_and_follows_the_folder() {
         let mut form = ShellForm::new(1, Some("C:\\old"));
         assert_eq!(
-            form.controls("C:\\work"),
+            form.controls("C:\\work", true),
             [
                 ShellControl::Close,
                 ShellControl::Folder,
@@ -386,29 +386,69 @@ mod tests {
             ]
         );
         form.set_focus(ShellControl::ClearDefault);
-        form.move_focus(true, "C:\\work");
-        assert_eq!(form.focused("C:\\work"), ShellControl::Cancel);
-        form.move_focus(true, "C:\\work");
-        assert_eq!(form.focused("C:\\work"), ShellControl::Submit);
-        form.move_focus(true, "C:\\work");
-        assert_eq!(form.focused("C:\\work"), ShellControl::Close, "wraps");
-        form.move_focus(false, "C:\\work");
-        assert_eq!(form.focused("C:\\work"), ShellControl::Submit, "and back");
+        form.move_focus(true, "C:\\work", true);
+        assert_eq!(form.focused("C:\\work", true), ShellControl::Cancel);
+        form.move_focus(true, "C:\\work", true);
+        assert_eq!(form.focused("C:\\work", true), ShellControl::Submit);
+        form.move_focus(true, "C:\\work", true);
+        assert_eq!(form.focused("C:\\work", true), ShellControl::Close, "wraps");
+        form.move_focus(false, "C:\\work", true);
+        assert_eq!(
+            form.focused("C:\\work", true),
+            ShellControl::Submit,
+            "and back"
+        );
 
         assert_eq!(
-            form.focused("relative"),
+            form.focused("relative", true),
             ShellControl::Close,
             "a folder that cannot open drops Submit and the focus gives way"
         );
-        assert!(!form.controls("relative").contains(&ShellControl::Submit));
+        assert!(
+            !form
+                .controls("relative", true)
+                .contains(&ShellControl::Submit)
+        );
 
         let plain = ShellForm::new(2, None);
         assert!(
             !plain
-                .controls("C:\\work")
+                .controls("C:\\work", true)
                 .contains(&ShellControl::ClearDefault),
             "no remembered folder, no clear link"
         );
+    }
+
+    #[test]
+    fn browse_leaves_the_ring_where_no_picker_answers() {
+        let mut form = ShellForm::new(1, None);
+        assert_eq!(
+            form.controls("C:\\work", false),
+            [
+                ShellControl::Close,
+                ShellControl::Folder,
+                ShellControl::SaveDefault,
+                ShellControl::Cancel,
+                ShellControl::Submit,
+            ]
+        );
+        form.set_focus(ShellControl::Folder);
+        form.move_focus(true, "C:\\work", false);
+        assert_eq!(
+            form.focused("C:\\work", false),
+            ShellControl::SaveDefault,
+            "Tab steps over Browse"
+        );
+        form.move_focus(false, "C:\\work", false);
+        assert_eq!(form.focused("C:\\work", false), ShellControl::Folder);
+
+        form.set_focus(ShellControl::Browse);
+        assert_eq!(
+            form.focused("C:\\work", false),
+            ShellControl::Close,
+            "a focused Browse gives way once it leaves"
+        );
+        assert_eq!(form.focused("C:\\work", true), ShellControl::Browse);
     }
 
     #[test]
