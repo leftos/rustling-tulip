@@ -8,12 +8,15 @@
 //! and a body that is not a JSON object are all ignored rather than refused.
 
 use crate::server::Hub;
-use crate::session::{SessionRecord, push_recent_action};
+use crate::session::{PendingInsert, SessionRecord, push_recent_action};
 use protocol::{
     AgentOptions, PendingInput, PendingQuestion, SessionMode, SessionStatus, SpawnConfig,
 };
 use serde_json::Value;
-use tracing::warn;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tracing::{debug, warn};
 
 /// Characters of a plan kept before the text is cut short.
 const PLAN_MAX_CHARS: usize = 2000;
@@ -23,6 +26,16 @@ const DETAIL_MAX_CHARS: usize = 200;
 
 /// Bytes of a `Stop`'s last assistant message kept on the record.
 const LAST_MESSAGE_MAX_BYTES: usize = 8 * 1024;
+
+/// How long a hook event waits for the session it names to be inserted. Past
+/// it the event is dropped: the session either spawned long ago or never will.
+const PENDING_HOOK_TTL: Duration = Duration::from_secs(30);
+
+/// Most events held for one session id while it is being spawned.
+const PENDING_HOOK_MAX_PER_SESSION: usize = 32;
+
+/// Most session ids whose early events are held at once.
+const PENDING_HOOK_MAX_SESSIONS: usize = 64;
 
 /// The payload fields a mapped event carries beside what [`map_event`] turns
 /// into a [`HookSignal`].
@@ -207,47 +220,162 @@ pub fn apply_signal(
     let mut entered_awaiting = false;
     let mut mismatch = None;
     hub.sessions.update(session_id, |record| {
-        let Some(event_time) = event_time else {
-            return;
-        };
-        if record.last_hook_time.is_some_and(|last| event_time <= last) {
-            return;
-        }
-        record.last_hook_time = Some(event_time);
-        record.hook_driven = true;
-        if matches!(record.status, SessionStatus::Stopped | SessionStatus::Error) {
-            return;
-        }
-        // A shell outlives the CLI whose hooks drive it: once that CLI ends,
-        // its hooks stop arriving and the shell classifier owns the status
-        // again. The status itself is left alone; the plain-shell silence
-        // demotion ends a stale `Working`.
-        if details.event == "SessionEnd" && record.mode == SessionMode::PlainShell {
-            record.hook_driven = false;
-        }
-        if let Some(status) = signal.status {
-            entered_awaiting = crate::pty_state::apply_status(record, status);
-        }
-        match &signal.pending {
-            PendingUpdate::Clear => record.pending_input = None,
-            PendingUpdate::Set(pending) => record.pending_input = Some(pending.clone()),
-            PendingUpdate::KeepOr(pending) => {
-                if record.pending_input.is_none() {
-                    record.pending_input = Some(pending.clone());
-                }
+        (entered_awaiting, mismatch) = apply_to_record(record, event_time, signal, details);
+    });
+    log_mismatch(session_id, mismatch.as_ref());
+    if entered_awaiting {
+        crate::pty_state::announce_awaiting_input(session_id, &hub.attention_tx);
+    }
+}
+
+/// Apply one mapped event to `record`: the ordering check, the stamp and the
+/// state writes, as [`apply_signal`] and the pending-event replay both need.
+/// Answers whether the record entered `AwaitingInput`, and the permission
+/// mismatch the event reported.
+pub(crate) fn apply_to_record(
+    record: &mut SessionRecord,
+    event_time: Option<u128>,
+    signal: &HookSignal,
+    details: &HookDetails,
+) -> (bool, Option<(String, String)>) {
+    let Some(event_time) = event_time else {
+        return (false, None);
+    };
+    if record.last_hook_time.is_some_and(|last| event_time <= last) {
+        return (false, None);
+    }
+    record.last_hook_time = Some(event_time);
+    record.hook_driven = true;
+    if matches!(record.status, SessionStatus::Stopped | SessionStatus::Error) {
+        return (false, None);
+    }
+    // A shell outlives the CLI whose hooks drive it: once that CLI ends, its
+    // hooks stop arriving and the shell classifier owns the status again. The
+    // status itself is left alone; the plain-shell silence demotion ends a
+    // stale `Working`.
+    if details.event == "SessionEnd" && record.mode == SessionMode::PlainShell {
+        record.hook_driven = false;
+    }
+    let entered_awaiting = signal
+        .status
+        .is_some_and(|status| crate::pty_state::apply_status(record, status));
+    match &signal.pending {
+        PendingUpdate::Clear => record.pending_input = None,
+        PendingUpdate::Set(pending) => record.pending_input = Some(pending.clone()),
+        PendingUpdate::KeepOr(pending) => {
+            if record.pending_input.is_none() {
+                record.pending_input = Some(pending.clone());
             }
         }
-        mismatch = apply_details(record, details);
-    });
+    }
+    (entered_awaiting, apply_details(record, details))
+}
+
+/// Warn about a hook-reported permission mode that differs from the spawn's.
+fn log_mismatch(session_id: &str, mismatch: Option<&(String, String)>) {
     if let Some((expected, reported)) = mismatch {
         warn!(
             session_id,
             expected, reported, "hook permission mode differs from the spawn's"
         );
     }
-    if entered_awaiting {
-        crate::pty_state::announce_awaiting_input(session_id, &hub.attention_tx);
+}
+
+/// One hook event that arrived before its session was inserted.
+#[derive(Debug, Clone)]
+struct PendingHook {
+    at: Instant,
+    event_time: Option<u128>,
+    signal: HookSignal,
+    details: HookDetails,
+}
+
+/// Hook events that arrived for a session id the registry did not hold yet,
+/// i.e. a spawn in flight. Bounded by [`PENDING_HOOK_TTL`] and the two count
+/// caps; an event is applied to its record when the spawn inserts it and
+/// dropped when it expires or a cap evicts it.
+#[derive(Clone, Default)]
+pub struct PendingHooks(Arc<std::sync::Mutex<HashMap<String, Vec<PendingHook>>>>);
+
+impl PendingHooks {
+    /// Hold an event for `session_id` until its spawn inserts the session.
+    ///
+    /// The buffer lock is also the insert's lock: an event either lands in
+    /// the buffer before the insert takes it (and is replayed into the
+    /// record), or this call finds the session registered and applies the
+    /// event directly. Neither order can drop it.
+    pub fn defer(
+        &self,
+        hub: &Hub,
+        session_id: &str,
+        event_time: Option<u128>,
+        signal: &HookSignal,
+        details: &HookDetails,
+    ) {
+        let mut buffer = crate::sync::lock(&self.0);
+        let now = Instant::now();
+        prune_expired(&mut buffer, now);
+        if hub.sessions.get(session_id).is_some() {
+            drop(buffer);
+            apply_signal(hub, session_id, event_time, signal, details);
+            return;
+        }
+        if !buffer.contains_key(session_id) && buffer.len() >= PENDING_HOOK_MAX_SESSIONS {
+            let oldest = buffer
+                .iter()
+                .min_by_key(|(_, events)| events.last().map(|event| event.at))
+                .map(|(id, _)| id.clone());
+            if let Some(oldest) = oldest {
+                buffer.remove(&oldest);
+            }
+        }
+        let events = buffer.entry(session_id.to_owned()).or_default();
+        if events.len() >= PENDING_HOOK_MAX_PER_SESSION {
+            events.remove(0);
+        }
+        events.push(PendingHook {
+            at: now,
+            event_time,
+            signal: signal.clone(),
+            details: details.clone(),
+        });
+        debug!(session_id, "hook event held until its session is inserted");
     }
+
+    /// Insert `record` with every held event for its id already applied,
+    /// under the buffer lock so a concurrent [`Self::defer`] cannot land
+    /// between the take and the insert. Answers how many of the applied
+    /// events entered `AwaitingInput`, so the caller raises their
+    /// `Attention` events after publishing the session.
+    pub fn insert_with_pending<'a>(
+        &self,
+        hub: &'a Hub,
+        mut record: SessionRecord,
+    ) -> (PendingInsert<'a>, usize) {
+        let session_id = record.id.clone();
+        let mut buffer = crate::sync::lock(&self.0);
+        prune_expired(&mut buffer, Instant::now());
+        let events = buffer.remove(&session_id).unwrap_or_default();
+        let mut entered_awaiting = 0;
+        for event in events {
+            let (entered, mismatch) =
+                apply_to_record(&mut record, event.event_time, &event.signal, &event.details);
+            if entered {
+                entered_awaiting += 1;
+            }
+            log_mismatch(&session_id, mismatch.as_ref());
+        }
+        (hub.sessions.insert_pending(record), entered_awaiting)
+    }
+}
+
+/// Drop held events older than [`PENDING_HOOK_TTL`], and the ids left with
+/// none.
+fn prune_expired(buffer: &mut HashMap<String, Vec<PendingHook>>, now: Instant) {
+    buffer.retain(|_, events| {
+        events.retain(|event| now.saturating_duration_since(event.at) < PENDING_HOOK_TTL);
+        !events.is_empty()
+    });
 }
 
 /// Apply the payload fields the event's signal does not carry, answering the

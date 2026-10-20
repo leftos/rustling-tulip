@@ -130,6 +130,9 @@ pub struct Hub {
     /// The session ids a recovery or a Resume is spawning for right now, so
     /// the two never start the same session twice.
     pub recovering: RecoveryClaims,
+    /// Hook events that arrived for a session id before its spawn inserted
+    /// it; applied to the record at insertion (bounded by age and count).
+    pub pending_hooks: crate::hook_status::PendingHooks,
 }
 
 /// The session ids being recovered or resumed right now.
@@ -562,6 +565,7 @@ pub async fn run(
         keep_awake_enabled: Arc::new(keep_awake_tx),
         keep_awake_status: keep_awake_status_rx,
         recovering: RecoveryClaims::default(),
+        pending_hooks: crate::hook_status::PendingHooks::default(),
     };
     start_hub_tasks(&hub, client_count_rx);
 
@@ -674,6 +678,11 @@ const HOOK_BODY_LIMIT: usize = 1 << 20;
 /// the body holds and whether or not the session exists, since the shim
 /// ignores it and a rejected event must never hold up the agent.
 ///
+/// An event for a session id the registry does not hold yet is held in
+/// [`crate::hook_status::PendingHooks`] and applied when the spawn inserts the
+/// record: the tracer starts the child, whose hooks fire at once, before the
+/// daemon has inserted the record.
+///
 /// The body is read at most 1 MiB; a larger or unreadable body is treated as
 /// empty. A body that is not JSON, or an event the mapping does not know,
 /// changes nothing and does not order the session.
@@ -694,10 +703,6 @@ async fn hook_handler(
     if !crate::secret::constant_time_eq(token.as_bytes(), hub.auth_token.as_bytes()) {
         return (StatusCode::UNAUTHORIZED, "bad bearer token").into_response();
     }
-    if hub.sessions.get(&session_id).is_none() {
-        debug!(session_id, "hook event for an unknown session ignored");
-        return StatusCode::NO_CONTENT.into_response();
-    }
     let body = axum::body::to_bytes(body, HOOK_BODY_LIMIT)
         .await
         .unwrap_or_else(|_| Bytes::new());
@@ -707,13 +712,17 @@ async fn hook_handler(
     let Some(signal) = crate::hook_status::map_event(&value) else {
         return StatusCode::NO_CONTENT.into_response();
     };
-    crate::hook_status::apply_signal(
-        &hub,
-        &session_id,
-        hook_time(&headers),
-        &signal,
-        &crate::hook_status::details(&value),
-    );
+    let event_time = hook_time(&headers);
+    let details = crate::hook_status::details(&value);
+    if hub.sessions.get(&session_id).is_none() {
+        // A spawn may have started the child — whose hooks fire from its
+        // argv — before its record is inserted. Hold the event for the
+        // insertion instead of dropping it on the floor.
+        hub.pending_hooks
+            .defer(&hub, &session_id, event_time, &signal, &details);
+        return StatusCode::NO_CONTENT.into_response();
+    }
+    crate::hook_status::apply_signal(&hub, &session_id, event_time, &signal, &details);
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -4340,8 +4349,10 @@ async fn spawn_interactive_session(
     // client's LoadScrollback request — the client could see the session and
     // request scrollback before scrollback_snapshot_req is wired up, fall through
     // to a direct file read (empty before first output), and miss any output that
-    // streams in before the per-client forwarder is started.
-    let pending = hub.sessions.insert_pending(record);
+    // streams in before the per-client forwarder is started. Hook events held
+    // for this id while the tracer spawned are applied to the record here, so
+    // the first broadcast is still the wired publish below.
+    let (pending, awaiting_entries) = hub.pending_hooks.insert_with_pending(hub, record);
     let snap_tx = attach_lifecycle(
         &hub.sessions,
         session_id.clone(),
@@ -4372,6 +4383,9 @@ async fn spawn_interactive_session(
     );
     let snap = crate::sync::lock(pending.arc()).snapshot();
     pending.publish_from(cfg.origin.clone());
+    for _ in 0..awaiting_entries {
+        pty_state::announce_awaiting_input(&session_id, &hub.attention_tx);
+    }
 
     if let Some(mut meta) = meta {
         meta.status = Some(snap.status);
@@ -4554,8 +4568,8 @@ async fn spawn_plain_shell_session(
     );
 
     // Two-stage insert — see spawn_interactive_session for the same pattern
-    // and rationale.
-    let pending = hub.sessions.insert_pending(record);
+    // and rationale, including the held hook events applied here.
+    let (pending, awaiting_entries) = hub.pending_hooks.insert_with_pending(hub, record);
     let snap_tx = attach_lifecycle(
         &hub.sessions,
         session_id.clone(),
@@ -4588,6 +4602,9 @@ async fn spawn_plain_shell_session(
     );
     let snap = crate::sync::lock(pending.arc()).snapshot();
     pending.publish_from(cfg.origin.clone());
+    for _ in 0..awaiting_entries {
+        pty_state::announce_awaiting_input(&session_id, &hub.attention_tx);
+    }
 
     if let Some(pid) = pid
         && let Ok(mut meta) = orphan::meta_from_record(
@@ -7623,6 +7640,7 @@ mod tests {
             keep_awake_enabled: Arc::new(keep_awake_enabled),
             keep_awake_status,
             recovering: RecoveryClaims::default(),
+            pending_hooks: crate::hook_status::PendingHooks::default(),
         };
         (hub, scratch, attention_rx)
     }
@@ -8523,6 +8541,40 @@ mod tests {
             attention.try_recv().is_err(),
             "classifier output and a repeat event raise no second event"
         );
+    }
+
+    /// A hook event that arrives while its session is still being spawned —
+    /// the tracer has started the child, but the record is not inserted yet —
+    /// is held and applied at insertion, so a `SessionStart` or the kickoff
+    /// prompt's `UserPromptSubmit` is not dropped on the unknown-session
+    /// branch.
+    #[tokio::test]
+    async fn hook_before_the_insert_is_applied_after_it() {
+        let (hub, _scratch) = test_hub("hook-before-insert");
+        let response = build_loopback_router(hub.clone())
+            .oneshot(hook_request(
+                "s1",
+                Some("test-token"),
+                Some("100"),
+                r#"{"hook_event_name":"UserPromptSubmit"}"#,
+            ))
+            .await
+            .expect("router answers");
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(
+            hub.sessions.get("s1").is_none(),
+            "the spawn has not inserted its record yet"
+        );
+        let (pending, _awaiting_entries) = hub
+            .pending_hooks
+            .insert_with_pending(&hub, idle_record("s1"));
+        pending.publish();
+        assert_eq!(
+            snapshot_of(&hub, "s1").status,
+            SessionStatus::Working,
+            "the kickoff prompt's hook survived the insert"
+        );
+        assert!(hook_driven_of(&hub, "s1"), "hooks now drive the session");
     }
 
     /// Apply the hook `body` to `s1` at `event_time`, as the route does.

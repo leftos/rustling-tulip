@@ -169,9 +169,8 @@ pub fn watch(
                             "pty_state volume tick"
                         );
 
-                        if record_status(&registry, &session_id)
-                            .is_some_and(|(_, hook_driven, _)| hook_driven)
-                        {
+                        let read = record_status(&registry, &session_id);
+                        if read.is_some_and(|read| read.hook_driven) {
                             // Hooks own every promotion while they are live.
                             // The windows and the title activity above keep
                             // feeding the two demotions the idle timer runs.
@@ -179,13 +178,14 @@ pub fn watch(
                                 session_id = %session_id,
                                 "hook-driven: classifier output ignored"
                             );
-                        } else {
+                        } else if let Some(read) = read {
                             let new_state = classify(&scrollback, state, active);
                             on_transition(
                                 &registry,
                                 &session_id,
                                 &mut state,
                                 new_state,
+                                read,
                                 &attention_tx,
                             );
                         }
@@ -209,9 +209,9 @@ pub fn watch(
                 },
                 () = sleep_until(next_idle_check),
                     if !idle_checked
-                        && record_status(&registry, &session_id).is_some_and(|(status, _, _)| {
+                        && record_status(&registry, &session_id).is_some_and(|read| {
                             matches!(
-                                status,
+                                read.status,
                                 SessionStatus::Working | SessionStatus::AwaitingInput
                             )
                         }) => {
@@ -280,20 +280,32 @@ pub fn watch_plain_shell(
                         // A title change (e.g. a `cd` that repaints the cwd in
                         // the prompt) counts as activity alongside command output.
                         let title_changed = title_activity.feed(&bytes);
-                        if let Some((status, true, _)) = record_status(&registry, &session_id) {
-                            // Hooks own the status while they are live: a
-                            // shell classifier promotion would overwrite a
-                            // hook-reported `AwaitingInput` with `Working`.
-                            // Keep the local state in step with the record so
-                            // the idle tick reads the same status.
-                            state = State::seed_plain_shell(status);
-                        } else {
-                            let next = if shell_output_is_working(in_sum, out_sum) || title_changed {
-                                State::Working
-                            } else {
-                                state
-                            };
-                            on_plain_shell_transition(&registry, &session_id, &mut state, next);
+                        match record_status(&registry, &session_id) {
+                            Some(read) if read.hook_driven => {
+                                // Hooks own the status while they are live: a
+                                // shell classifier promotion would overwrite a
+                                // hook-reported `AwaitingInput` with `Working`.
+                                // Keep the local state in step with the record
+                                // so the idle tick reads the same status.
+                                state = State::seed_plain_shell(read.status);
+                            }
+                            Some(read) => {
+                                let next =
+                                    if shell_output_is_working(in_sum, out_sum) || title_changed {
+                                        State::Working
+                                    } else {
+                                        state
+                                    };
+                                on_plain_shell_transition(
+                                    &registry,
+                                    &session_id,
+                                    &mut state,
+                                    next,
+                                    read,
+                                );
+                            }
+                            // The record is gone; there is nothing to write.
+                            None => {}
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
@@ -310,31 +322,40 @@ pub fn watch_plain_shell(
                 },
                 () = sleep_until(next_idle_check),
                     if plain_shell_idle_due(&registry, &session_id, state) => {
-                    if let Some((status, true, epoch)) = record_status(&registry, &session_id) {
+                    let read = record_status(&registry, &session_id);
+                    if let Some(read) = read
+                        && read.hook_driven
+                    {
                         // The record's status is the truth while hooks are
                         // live: sync the local state, then end a hook-reported
                         // `Working` turn whose PTY has gone quiet. The demotion
                         // re-checks the status and hook stamp under the lock,
                         // so a promotion that landed since the read wins. A
                         // hook-reported `AwaitingInput` is left alone.
-                        state = State::seed_plain_shell(status);
-                        if status == SessionStatus::Working {
+                        state = State::seed_plain_shell(read.status);
+                        if read.status == SessionStatus::Working {
                             state = State::Idle;
                             demote_after_silence(
                                 &registry,
                                 &session_id,
                                 SessionStatus::Working,
-                                epoch,
+                                read.last_hook_time,
                             );
                         }
-                    } else {
+                    } else if let Some(read) = read
+                        && !read.hook_driven
+                    {
                         // Hooks that have ended leave the record `Working`;
                         // adopt it so the demotion writes even when no PTY
                         // chunk synced the local state since the hook event.
-                        if let Some((status, false, _)) = record_status(&registry, &session_id) {
-                            state = State::seed_plain_shell(status);
-                        }
-                        on_plain_shell_transition(&registry, &session_id, &mut state, State::Idle);
+                        state = State::seed_plain_shell(read.status);
+                        on_plain_shell_transition(
+                            &registry,
+                            &session_id,
+                            &mut state,
+                            State::Idle,
+                            read,
+                        );
                     }
                 }
             }
@@ -442,16 +463,26 @@ fn prompt_on_screen(scrollback: &[u8]) -> bool {
     matches_prompt(&recent[tail_start..])
 }
 
+/// The record fields a classifier read before deciding a transition, and the
+/// write re-checks under the record lock: a hook event or a hook-driven change
+/// that landed in between wins over the classifier.
+#[derive(Clone, Copy, Debug)]
+struct StatusRead {
+    status: SessionStatus,
+    hook_driven: bool,
+    last_hook_time: Option<u128>,
+}
+
 /// The record's current status, whether hooks drive its promotions, and the
-/// hook ordering stamp, which a caller re-checks under the record lock
-/// before writing a transition or a demotion.
-fn record_status(
-    registry: &Arc<SessionRegistry>,
-    session_id: &str,
-) -> Option<(SessionStatus, bool, Option<u128>)> {
+/// hook ordering stamp, as one snapshot the caller carries into its write.
+fn record_status(registry: &Arc<SessionRegistry>, session_id: &str) -> Option<StatusRead> {
     let arc = registry.get(session_id)?;
     let guard = crate::sync::lock(&arc);
-    Some((guard.status, guard.hook_driven, guard.last_hook_time))
+    Some(StatusRead {
+        status: guard.status,
+        hook_driven: guard.hook_driven,
+        last_hook_time: guard.last_hook_time,
+    })
 }
 
 /// Whether a plain shell's idle tick is due: the classifier's own `Working`,
@@ -461,8 +492,8 @@ fn record_status(
 /// belongs to the agent watcher.
 fn plain_shell_idle_due(registry: &Arc<SessionRegistry>, session_id: &str, state: State) -> bool {
     match record_status(registry, session_id) {
-        Some((status, true, _)) => status == SessionStatus::Working,
-        Some((status, false, _)) => state == State::Working || status == SessionStatus::Working,
+        Some(read) if read.hook_driven => read.status == SessionStatus::Working,
+        Some(read) => state == State::Working || read.status == SessionStatus::Working,
         None => state == State::Working,
     }
 }
@@ -588,20 +619,20 @@ fn on_idle(
     attention_tx: &mpsc::UnboundedSender<AttentionEvent>,
 ) {
     match record_status(registry, session_id) {
-        Some((status, true, epoch)) => {
-            let demote = match status {
+        Some(read) if read.hook_driven => {
+            let demote = match read.status {
                 SessionStatus::Working => true,
                 SessionStatus::AwaitingInput => !prompt_on_screen(scrollback),
                 _ => false,
             };
             if demote {
                 *state = State::Idle;
-                demote_after_silence(registry, session_id, status, epoch);
+                demote_after_silence(registry, session_id, read.status, read.last_hook_time);
             }
         }
-        Some((_, false, _)) => {
+        Some(read) => {
             let new_state = classify(scrollback, State::Idle, false);
-            on_transition(registry, session_id, state, new_state, attention_tx);
+            on_transition(registry, session_id, state, new_state, read, attention_tx);
         }
         None => {}
     }
@@ -631,40 +662,37 @@ fn demote_after_silence(
     });
 }
 
-/// The status transition path the PTY watcher and the hook route share.
+/// The status transition path the PTY watcher uses.
 ///
 /// Other paths write a status directly on the record — `SendInput`'s
 /// owner-key clear, stop, park and the exit watcher; this is the one that
 /// carries the `"awaiting input"` action and the single [`AttentionEvent`] on
 /// entry.
 ///
-/// The current status and the hook ordering stamp are read from the record,
-/// never from a caller's cached copy: the hook handler mutates the record
-/// while the watcher task is parked. An unchanged status is a no-op, and the
-/// update re-checks the stamp under the lock, so a newer hook event that
-/// landed in between wins. On entry to `AwaitingInput` the record gains an
-/// `"awaiting input"` action and one [`AttentionEvent`], sent after the
-/// registry update returns so a slow consumer never holds the record lock.
-/// The write goes through [`SessionRegistry::update`], which stamps
-/// `status_since` and syncs the sidecar.
-pub fn transition(
+/// `read` is the snapshot the classifier decided from. The update re-checks
+/// the hook ordering stamp and the hook-driven flag under the lock, so a hook
+/// event that landed after the classifier's read wins and its status is not
+/// overwritten by the classifier's write. An unchanged status is a no-op. On
+/// entry to `AwaitingInput` the record gains an `"awaiting input"` action and
+/// one [`AttentionEvent`], sent after the registry update returns so a slow
+/// consumer never holds the record lock. The write goes through
+/// [`SessionRegistry::update`], which stamps `status_since` and syncs the
+/// sidecar.
+fn transition(
     registry: &Arc<SessionRegistry>,
     session_id: &str,
     next: SessionStatus,
+    read: StatusRead,
     attention_tx: &mpsc::UnboundedSender<AttentionEvent>,
 ) {
     // An unchanged status is not a transition: skip the update so nothing is
-    // mirrored to the sidecar or broadcast. The update below decides again
-    // under the lock, so a status or hook event that moved in between wins.
-    let Some((current, _, epoch)) = record_status(registry, session_id) else {
-        return;
-    };
-    if current == next {
+    // mirrored to the sidecar or broadcast.
+    if read.status == next {
         return;
     }
     let mut entered_awaiting = false;
     registry.update(session_id, |rec| {
-        if rec.last_hook_time != epoch {
+        if rec.last_hook_time != read.last_hook_time || rec.hook_driven != read.hook_driven {
             return;
         }
         entered_awaiting = apply_status(rec, next);
@@ -709,6 +737,7 @@ fn on_transition(
     session_id: &str,
     current: &mut State,
     next: State,
+    read: StatusRead,
     attention_tx: &mpsc::UnboundedSender<AttentionEvent>,
 ) {
     if next == *current {
@@ -719,6 +748,7 @@ fn on_transition(
         registry,
         session_id,
         SessionStatus::from(next),
+        read,
         attention_tx,
     );
 }
@@ -728,12 +758,16 @@ fn on_plain_shell_transition(
     session_id: &str,
     current: &mut State,
     next: State,
+    read: StatusRead,
 ) {
     if next == *current {
         return;
     }
     *current = next;
     registry.update(session_id, |rec| {
+        if rec.hook_driven != read.hook_driven || rec.last_hook_time != read.last_hook_time {
+            return;
+        }
         rec.status = SessionStatus::from(next);
     });
 }
@@ -850,7 +884,10 @@ mod tests {
     reason = "tests assert preconditions with expect; failure messages aid debugging"
 )]
 mod hysteresis_tests {
-    use super::{IDLE_AFTER, State, WatchStreams, watch, watch_plain_shell};
+    use super::{
+        IDLE_AFTER, State, WatchStreams, on_plain_shell_transition, on_transition, record_status,
+        watch, watch_plain_shell,
+    };
     use crate::paths::Dirs;
     use crate::session::{SessionRecord, SessionRegistry};
     use chrono::Utc;
@@ -1320,5 +1357,85 @@ mod hysteresis_tests {
             SessionStatus::Idle,
             "the classifier still demotes on silence"
         );
+    }
+
+    /// The status record `id`'s registry holds, failing when it is gone.
+    fn status_in(registry: &SessionRegistry) -> SessionStatus {
+        let record = registry.get(SESSION).expect("session registered");
+        record.lock().expect("record lock").status
+    }
+
+    /// A hook event that lands between the classifier's read of the record
+    /// and its write must keep the hook's status: the write is refused because
+    /// the hook-driven flag or the hook stamp moved since that read.
+    #[test]
+    fn a_hook_landing_after_the_read_keeps_its_awaiting_input() {
+        let registry = SessionRegistry::new(scratch_dirs("hook-race-agent"));
+        registry.insert(test_record(SESSION));
+        let read = record_status(&registry, SESSION).expect("the session is registered");
+        assert!(!read.hook_driven, "the read saw no hooks");
+        // A hook event lands after the read and before the classifier writes.
+        registry.update(SESSION, |record| {
+            record.status = SessionStatus::AwaitingInput;
+            record.hook_driven = true;
+            record.last_hook_time = Some(7);
+        });
+        let mut state = State::Idle;
+        let (attention, _receiver) = mpsc::unbounded_channel();
+        on_transition(
+            &registry,
+            SESSION,
+            &mut state,
+            State::Working,
+            read,
+            &attention,
+        );
+        assert_eq!(
+            status_in(&registry),
+            SessionStatus::AwaitingInput,
+            "the classifier overwrote a hook prompt that landed after its read"
+        );
+    }
+
+    /// The plain shell's write carries no stamp check at all: a hook event
+    /// landing after the classifier's read must survive that write too.
+    #[test]
+    fn a_hook_landing_after_the_plain_shell_read_keeps_its_awaiting_input() {
+        let registry = SessionRegistry::new(scratch_dirs("hook-race-shell"));
+        registry.insert(test_record(SESSION));
+        let read = record_status(&registry, SESSION).expect("the session is registered");
+        assert!(!read.hook_driven, "the read saw no hooks");
+        registry.update(SESSION, |record| {
+            record.status = SessionStatus::AwaitingInput;
+            record.hook_driven = true;
+            record.last_hook_time = Some(7);
+        });
+        let mut state = State::Idle;
+        on_plain_shell_transition(&registry, SESSION, &mut state, State::Working, read);
+        assert_eq!(
+            status_in(&registry),
+            SessionStatus::AwaitingInput,
+            "the shell classifier's unguarded write overwrote a hook prompt"
+        );
+    }
+
+    /// The guard refuses only a stale read: a transition taken with the record
+    /// unchanged since the read still lands.
+    #[test]
+    fn a_write_after_the_read_still_applies_without_a_hook() {
+        let registry = SessionRegistry::new(scratch_dirs("classifier-write"));
+        registry.insert(test_record(SESSION));
+        let read = record_status(&registry, SESSION).expect("the session is registered");
+        let mut state = State::Idle;
+        let (attention, _receiver) = mpsc::unbounded_channel();
+        on_transition(
+            &registry,
+            SESSION,
+            &mut state,
+            State::Working,
+            read,
+            &attention,
+        );
+        assert_eq!(status_in(&registry), SessionStatus::Working);
     }
 }
