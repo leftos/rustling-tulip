@@ -1009,6 +1009,7 @@ mod tests {
             state_file: tmp.join("state.json"),
             handshake_file: tmp.join("daemon.json"),
             lan_config_file: tmp.join("lan.json"),
+            remote_config_file: tmp.join("remote.json"),
             lan_cert_file: tmp.join("lan-cert.pem"),
             lan_key_file: tmp.join("lan-key.pem"),
             sessions_dir: tmp.join("sessions"),

@@ -168,7 +168,6 @@ struct Wiring<A, S> {
 /// watches it publishes. Dropping it stops the supervisor and every server.
 pub struct TailnetListener {
     status: watch::Receiver<ListenerStatus>,
-    name: watch::Receiver<Option<String>>,
     /// The supervisor task. [`TailnetListener::stopped`] waits on it in
     /// place rather than taking it, so a `stopped()` dropped before it
     /// returns still leaves the handle here for [`Drop`] to abort.
@@ -195,7 +194,7 @@ pub struct TailnetListener {
 
 impl TailnetListener {
     /// Start the listener and return at once: it serves `router` over TLS on
-    /// port 8787 of each of the host's tailnet addresses, with the
+    /// port `port` of each of the host's tailnet addresses, with the
     /// certificate `tailscale cert` writes into `tailnet_dir` as
     /// `<name>.crt` and `<name>.key`, until `shutdown` turns true (or its
     /// sender is dropped) or the listener is dropped. Only the host owner's
@@ -204,6 +203,7 @@ impl TailnetListener {
     pub fn start(
         router: axum::Router,
         tailnet_dir: PathBuf,
+        port: u16,
         shutdown: watch::Receiver<bool>,
     ) -> Self {
         let wiring = Wiring {
@@ -211,7 +211,11 @@ impl TailnetListener {
             serve: Arc::new(TlsServe { router }),
             policy: PeerPolicy::PRODUCTION,
         };
-        Self::start_with(wiring, ListenerOptions::PRODUCTION, tailnet_dir, shutdown)
+        let options = ListenerOptions {
+            port,
+            ..ListenerOptions::PRODUCTION
+        };
+        Self::start_with(wiring, options, tailnet_dir, shutdown)
     }
 
     /// Start the supervisor and return at once; it asks `whoami` for the
@@ -233,7 +237,6 @@ impl TailnetListener {
             WhoisLimits::PRODUCTION,
         );
         let (status_tx, status) = watch::channel(ListenerStatus::Starting);
-        let (name_tx, name) = watch::channel(None);
         #[cfg(test)]
         let reloads = Arc::new(AtomicUsize::new(0));
         let (cert_tx, cert) = watch::channel(CertState::Pending);
@@ -267,7 +270,6 @@ impl TailnetListener {
             host,
             options,
             status: status_tx,
-            name: name_tx,
             servers: BTreeMap::new(),
             cert,
             cert_name,
@@ -286,7 +288,6 @@ impl TailnetListener {
         let supervisor = tokio::spawn(supervisor.run(shutdown));
         Self {
             status,
-            name,
             supervisor,
             cert_state,
             #[cfg(test)]
@@ -316,13 +317,6 @@ impl TailnetListener {
         self.status.clone()
     }
 
-    /// The host's `MagicDNS` name (`*.ts.net`, no trailing dot) from the last
-    /// `whoami` that answered; `None` before one has, or when it gave none.
-    #[must_use]
-    pub fn name(&self) -> Option<String> {
-        self.name.borrow().clone()
-    }
-
     /// Wait until the supervisor has ended and the cert task has ended too,
     /// so no `tailscale cert` call outlives the listener.
     ///
@@ -337,6 +331,14 @@ impl TailnetListener {
     ///
     /// Dropping this future before it returns hands the listener to [`Drop`],
     /// which aborts the supervisor, and with it the cert task.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the daemon drops the listener to stop it; the tests wait on this to \
+                      assert the shutdown path"
+        )
+    )]
     pub async fn stopped(mut self) {
         if let Err(err) = (&mut self.supervisor).await
             && !err.is_cancelled()
@@ -701,7 +703,6 @@ struct Supervisor<A, S> {
     host: watch::Sender<Option<WhoIs>>,
     options: ListenerOptions,
     status: watch::Sender<ListenerStatus>,
-    name: watch::Sender<Option<String>>,
     servers: BTreeMap<IpAddr, Server>,
     /// What the cert task has in service.
     cert: watch::Receiver<CertState>,
@@ -860,13 +861,6 @@ impl<A: TailnetApi, S: Serve<A>> Supervisor<A, S> {
     async fn apply(&mut self, who: &WhoIs, shutdown: &mut watch::Receiver<bool>) -> Flow {
         let trimmed = who.node.name.trim_end_matches('.');
         let name = (!trimmed.is_empty()).then(|| trimmed.to_owned());
-        self.name.send_if_modified(|current| {
-            let changed = *current != name;
-            if changed {
-                current.clone_from(&name);
-            }
-            changed
-        });
         self.report_no_name(name.is_none());
         self.cert_name.send_if_modified(|current| {
             let changed = *current != name;
@@ -1099,6 +1093,12 @@ impl AuthorizedPeer {
     #[must_use]
     pub fn identity(&self) -> &PeerIdentity {
         &self.0
+    }
+
+    /// A peer a test attaches directly, standing in for the acceptor.
+    #[cfg(test)]
+    pub(crate) fn for_tests(identity: PeerIdentity) -> Self {
+        Self(identity)
     }
 }
 
@@ -2185,10 +2185,12 @@ mod tests {
         assert!(addrs.iter().all(|a| !a.ip().is_unspecified()));
         assert!(addrs.iter().all(|a| a.port() != 0), "{addrs:?}");
         std::net::TcpStream::connect(addrs[0]).expect("the bound address accepts connections");
-        assert_eq!(
-            listener.name().as_deref(),
-            Some("desktop.tail1234.ts.net"),
-            "the name drops its trailing dot"
+        assert!(
+            matches!(
+                &status,
+                ListenerStatus::Serving { name, .. } if name == "desktop.tail1234.ts.net"
+            ),
+            "the serving name drops its trailing dot: {status:?}"
         );
         shutdown.send_replace(true);
     }
@@ -2203,7 +2205,6 @@ mod tests {
         let (listener, shutdown) = start(&fake, &serve, options(0));
         let status = wait_for_status(&listener, |s| *s != ListenerStatus::Starting).await;
         assert_eq!(status, ListenerStatus::CertFailed);
-        assert_eq!(listener.name(), None);
         assert!(
             fake.cert_calls().is_empty(),
             "no name, no certificate to ask for"
@@ -2987,7 +2988,6 @@ mod tests {
             renamed_checks >= 2,
             "the new name's check is retried: {renamed_checks}"
         );
-        assert_eq!(listener.name().as_deref(), Some(RENAMED), "whoami's name");
         assert!(
             seen.lock().expect("status log lock").is_empty(),
             "the status kept the name of the certificate in service"

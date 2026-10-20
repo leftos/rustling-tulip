@@ -2085,7 +2085,11 @@ pub enum EnvScope {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMessage {
     /// Always the first message after WS upgrade. Fails the connection if the
-    /// token does not match. The daemon negotiates a wire version from the
+    /// token does not match. `auth_token` is the daemon's `daemon.json` token
+    /// on a loopback or LAN connection; on a tailnet connection the daemon
+    /// never compares it to that token, and the value is instead the device's
+    /// own token, checked against the host's approved devices. The daemon
+    /// negotiates a wire version from the
     /// union of `protocol_version` (scalar back-compat) and `protocol_versions`
     /// (new clients advertise every version they can speak). Sending both is
     /// the supported pattern; older peers that only know about the scalar

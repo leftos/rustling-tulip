@@ -23,6 +23,7 @@ use crate::session::{
 };
 use crate::state::AppState;
 use crate::tabs;
+use crate::tailnet_listener::{AuthorizedPeer, ListenerStatus, TailnetListener};
 use crate::tracer_client;
 use crate::{
     env_secrets, git, git_inspect, git_write, headless, inject, osc_title, pty_state, spawn_plan,
@@ -34,9 +35,10 @@ use axum::Router;
 use axum::body::Body;
 use axum::body::Bytes;
 use axum::extract::Path as AxumPath;
-use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::http::{HeaderMap, StatusCode};
+use axum::extract::{FromRequestParts, State};
+use axum::http::request::Parts;
+use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use base64::Engine as _;
@@ -51,6 +53,7 @@ use protocol::{
     SessionMode, SessionStatus, SpawnRequest, SpawnTarget, TabContent, TabEntry,
     VscodeWorkspaceSuggestion,
 };
+use sha2::{Digest as _, Sha256};
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -113,6 +116,13 @@ pub struct Hub {
     /// (which unregisters the service) by [`stop_lan_listener`] and at
     /// daemon shutdown. `None` when LAN access is off.
     pub advertiser: Arc<AsyncMutex<Option<discovery::Advertiser>>>,
+    /// The persisted remote-access switch: `true` while `remote.json` says
+    /// remote access is on, whatever the listener's own state. Idle exit
+    /// reads it so a host with remote access on never exits.
+    pub remote_enabled: Arc<tokio::sync::watch::Sender<bool>>,
+    /// The running tailnet listener, if remote access is on and it started.
+    /// Dropping it stops the listener; the daemon keeps it for its lifetime.
+    pub tailnet: Arc<AsyncMutex<Option<TailnetListener>>>,
     /// The active short-code pairing window, if the host has one open.
     /// [`ClientMessage::StartPairing`] opens it; the `/pair` HTTP handler and
     /// [`ClientMessage::CancelPairing`] consume/clear it. `None` when no
@@ -491,7 +501,9 @@ pub async fn run(
     // LAN access (opt-in) persists its auth token in `lan.json` so a paired
     // remote client survives daemon restarts. When LAN has never been enabled,
     // fall back to a fresh per-start token — loopback-only, exactly as before.
-    let lan_config = lan::load(&dirs);
+    // Remote access is off unless `remote.json` turns it on; idle exit reads
+    // that switch, so it is seeded from the persisted value.
+    let (lan_config, remote) = (lan::load(&dirs), crate::remote_config::load(&dirs));
     let auth_token: String = lan_config
         .as_ref()
         .map_or_else(lan::generate_auth_token, |c| c.auth_token.clone());
@@ -561,6 +573,8 @@ pub async fn run(
         client_count,
         lan_handle: Arc::new(AsyncMutex::new(None)),
         advertiser: Arc::new(AsyncMutex::new(None)),
+        remote_enabled: Arc::new(tokio::sync::watch::Sender::new(remote.enabled)),
+        tailnet: Arc::new(AsyncMutex::new(None)),
         pairing: Arc::new(AsyncMutex::new(None)),
         keep_awake_enabled: Arc::new(keep_awake_tx),
         keep_awake_status: keep_awake_status_rx,
@@ -612,6 +626,9 @@ pub async fn run(
             }
         });
     }
+
+    // Opt-in tailnet listener: started after the handshake, never awaited.
+    start_remote_access(&hub, remote, lan_config.as_ref(), shutdown_rx.clone()).await;
 
     // Tear down the LAN listener + mDNS advertisement (started at boot or via
     // ConfigureLan) when the daemon shuts down, off the same watch the loopback
@@ -742,6 +759,236 @@ fn presented_bearer(headers: &HeaderMap) -> Option<&str> {
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
         .map(str::trim)
+}
+
+/// How a connection authenticates. The loopback and LAN listeners compare the
+/// `daemon.json` token; the tailnet listener never looks at it and instead
+/// reads the presented value as the device's token.
+#[derive(Clone, Debug)]
+enum AuthKind {
+    Local,
+    Tailnet(tailnet::PeerIdentity),
+}
+
+/// The `MagicDNS` name the tailnet router accepts: the name of the
+/// certificate in service, shared between the listener's status watch and the
+/// `/ws` handler. Cleared whenever no certificate is serving, so a rename or a
+/// failed certificate fails closed.
+type NameSlot = Arc<std::sync::Mutex<Option<String>>>;
+
+fn name_slot() -> NameSlot {
+    Arc::new(std::sync::Mutex::new(None))
+}
+
+fn set_serving_name(slot: &NameSlot, name: Option<String>) {
+    *crate::sync::lock(slot) = name;
+}
+
+/// The name a tailnet upgrade may carry: only a certificate in service names
+/// one; every other status clears it, so the accepted origin follows the
+/// certificate, never the last `whoami` answer.
+fn serving_name(status: &ListenerStatus) -> Option<String> {
+    match status {
+        ListenerStatus::Serving { name, .. } => Some(name.clone()),
+        _ => None,
+    }
+}
+
+/// Follow the listener's status watch into `slot` until the listener ends,
+/// then clear it.
+fn spawn_serving_name(mut status: tokio::sync::watch::Receiver<ListenerStatus>, slot: NameSlot) {
+    tokio::spawn(async move {
+        loop {
+            set_serving_name(&slot, serving_name(&status.borrow_and_update()));
+            if status.changed().await.is_err() {
+                break;
+            }
+        }
+        set_serving_name(&slot, None);
+    });
+}
+
+/// Split a `Host` header into its name and port, trimming a trailing dot from
+/// the name. A suffix that is not a port number stays part of the name.
+fn split_host(host: &str) -> (&str, Option<u16>) {
+    match host.rsplit_once(':') {
+        Some((name, port)) => match port.parse::<u16>() {
+            Ok(port) => (name.trim_end_matches('.'), Some(port)),
+            Err(_) => (host.trim_end_matches('.'), None),
+        },
+        None => (host.trim_end_matches('.'), None),
+    }
+}
+
+/// Whether a tailnet `/ws` upgrade carries the headers the PWA or the native
+/// client would send. Fail closed: an unknown name, a missing or duplicated
+/// `Host`, a foreign or duplicated `Origin` are all refused. The accepted
+/// `Origin` is exactly `https://{name}:{port}`, and the bare name is a `Host`
+/// only on the default HTTPS port.
+fn tailnet_upgrade_allowed(headers: &HeaderMap, name: Option<&str>, port: u16) -> bool {
+    let Some(name) = name else {
+        return false;
+    };
+    let mut hosts = headers.get_all(axum::http::header::HOST).iter();
+    let (Some(host), None) = (hosts.next(), hosts.next()) else {
+        return false;
+    };
+    let Ok(host) = host.to_str() else {
+        return false;
+    };
+    let (host_name, host_port) = split_host(host);
+    if !host_name.eq_ignore_ascii_case(name) {
+        return false;
+    }
+    let host_ok = match host_port {
+        Some(host_port) => host_port == port,
+        None => port == 443,
+    };
+    if !host_ok {
+        return false;
+    }
+
+    let mut origins = headers.get_all(axum::http::header::ORIGIN).iter();
+    match (origins.next(), origins.next()) {
+        (None, None) => true,
+        (Some(origin), None) => origin.to_str().is_ok_and(|origin| {
+            // A browser serializes the default HTTPS port out of `Origin`, so
+            // at 443 the bare origin is the one the PWA sends.
+            origin == format!("https://{name}:{port}")
+                || (port == 443 && origin == format!("https://{name}"))
+        }),
+        _ => false,
+    }
+}
+
+#[derive(Clone)]
+struct TailnetState {
+    hub: Hub,
+    names: NameSlot,
+    port: u16,
+}
+
+/// The router the tailnet listener serves: `/ws` and `/health` only. It never
+/// carries `/shutdown`, `/pair` or a CORS layer, so a tailnet client cannot
+/// manage the host's process and a browser cannot act for another origin.
+fn build_tailnet_router(hub: Hub, names: NameSlot, port: u16) -> Router {
+    Router::new()
+        .route("/ws", get(tailnet_ws_handler))
+        .route("/health", get(|| async { "ok" }))
+        .with_state(TailnetState { hub, names, port })
+}
+
+/// The peer the tailnet listener's acceptor admitted. Extracting it refuses
+/// the request with a bodiless 403 when it is absent, so a request that never
+/// passed the acceptor can never become a connection.
+struct TailnetPeer(AuthorizedPeer);
+
+impl<S: Send + Sync> FromRequestParts<S> for TailnetPeer {
+    type Rejection = Response;
+
+    fn from_request_parts(
+        parts: &mut Parts,
+        _state: &S,
+    ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send {
+        std::future::ready(
+            parts
+                .extensions
+                .get::<AuthorizedPeer>()
+                .cloned()
+                .map(TailnetPeer)
+                .ok_or_else(|| {
+                    warn!("tailnet /ws without an AuthorizedPeer extension; refused");
+                    StatusCode::FORBIDDEN.into_response()
+                }),
+        )
+    }
+}
+
+/// The tailnet `/ws` upgrade: refused with a bodiless 403 unless the request
+/// came through the listener's acceptor and its `Host`/`Origin` name this
+/// host. Only an [`AuthorizedPeer`] becomes a connection.
+async fn tailnet_ws_handler(
+    State(state): State<TailnetState>,
+    TailnetPeer(peer): TailnetPeer,
+    uri: Uri,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Response {
+    if uri.scheme().is_some() || uri.authority().is_some() {
+        warn!(%uri, "tailnet /ws with an absolute-form request URI; refused");
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let name = crate::sync::lock(&state.names).clone();
+    if !tailnet_upgrade_allowed(&headers, name.as_deref(), state.port) {
+        warn!("tailnet /ws upgrade refused: Host/Origin does not name this host");
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let peer = peer.identity().clone();
+    ws.on_upgrade(move |socket| client_session(state.hub, socket, AuthKind::Tailnet(peer)))
+}
+
+/// Whether the tailnet listener should start: remote access on, a usable
+/// port, and no LAN listener already holding that port.
+fn remote_listener_allowed(
+    remote: crate::remote_config::RemoteConfig,
+    lan_config: Option<&lan::LanConfig>,
+) -> bool {
+    remote.enabled
+        && remote.port != 0
+        && !lan_config.is_some_and(|cfg| cfg.enabled && cfg.port == remote.port)
+}
+
+/// Start the tailnet listener when [`remote_listener_allowed`] says so. A
+/// missing certificate directory or any other failure is logged and leaves
+/// remote access down; it never propagates out of [`run`].
+fn start_tailnet_listener(
+    hub: &Hub,
+    remote: crate::remote_config::RemoteConfig,
+    lan_config: Option<&lan::LanConfig>,
+    shutdown: tokio::sync::watch::Receiver<bool>,
+) -> Option<TailnetListener> {
+    if !remote_listener_allowed(remote, lan_config) {
+        if remote.enabled {
+            warn!(
+                port = remote.port,
+                "remote access is on but the LAN listener holds the same port; tailnet listener \
+                 not started"
+            );
+        }
+        return None;
+    }
+    let tailnet_dir = match Dirs::ensure_tailnet_dir() {
+        Ok(dir) => dir,
+        Err(err) => {
+            error!(
+                ?err,
+                "remote access enabled but the tailnet certificate dir could not be created"
+            );
+            return None;
+        }
+    };
+    let names = name_slot();
+    let router = build_tailnet_router(hub.clone(), Arc::clone(&names), remote.port);
+    let listener = TailnetListener::start(router, tailnet_dir, remote.port, shutdown);
+    spawn_serving_name(listener.status(), names);
+    Some(listener)
+}
+
+/// Store the started tailnet listener in the hub, or leave remote access down
+/// with the reason already logged.
+async fn start_remote_access(
+    hub: &Hub,
+    remote: crate::remote_config::RemoteConfig,
+    lan_config: Option<&lan::LanConfig>,
+    shutdown: tokio::sync::watch::Receiver<bool>,
+) {
+    if let Some(listener) = start_tailnet_listener(hub, remote, lan_config, shutdown) {
+        info!(
+            port = remote.port,
+            "remote access enabled; tailnet listener started"
+        );
+        *hub.tailnet.lock().await = Some(listener);
+    }
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -894,7 +1141,7 @@ fn write_handshake(dirs: &Dirs, port: u16, auth_token: &str) -> anyhow::Result<(
 }
 
 async fn ws_handler(State(hub): State<Hub>, ws: WebSocketUpgrade) -> Response {
-    ws.on_upgrade(move |socket| client_session(hub, socket))
+    ws.on_upgrade(move |socket| client_session(hub, socket, AuthKind::Local))
 }
 
 /// Out-of-band graceful-shutdown trigger. Mirrors the WS
@@ -925,7 +1172,7 @@ async fn shutdown_handler(State(hub): State<Hub>, headers: HeaderMap) -> Respons
     (StatusCode::ACCEPTED, "shutting down").into_response()
 }
 
-async fn client_session(hub: Hub, socket: WebSocket) {
+async fn client_session(hub: Hub, socket: WebSocket, auth: AuthKind) {
     // RAII-tracked so `git_watch` can pause its refreshers when no UI is
     // listening. Dropped on normal return and on panic.
     let _client_guard = ClientCountGuard::new(Arc::clone(&hub.client_count));
@@ -941,7 +1188,7 @@ async fn client_session(hub: Hub, socket: WebSocket) {
     let send_task = tokio::spawn(send_pump(sender, out_rx, file_rx));
 
     // Mandatory handshake.
-    let handshake = match handshake(&hub, &mut receiver, &out_tx).await {
+    let handshake = match handshake(&hub, &auth, &mut receiver, &out_tx).await {
         Ok(v) => v,
         Err(err) => {
             warn!(?err, "client handshake failed");
@@ -1020,6 +1267,7 @@ async fn client_session(hub: Hub, socket: WebSocket) {
         client_id: &client_id,
         client_name: client_name.as_deref(),
         connection,
+        auth: &auth,
     };
     recv_loop(&hub, &mut receiver, &ctx).await;
 
@@ -1257,6 +1505,8 @@ struct ConnCtx<'a> {
     /// This connection's id, unique for the daemon's run: a client may hold
     /// several connections under one `client_id`.
     connection: u64,
+    /// How this connection authenticated, deciding which messages it may use.
+    auth: &'a AuthKind,
 }
 
 /// Drain a connection's outbound queues into its WebSocket. Control and PTY
@@ -1422,8 +1672,31 @@ struct Handshake {
     client_name: Option<String>,
 }
 
+const TAILNET_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Read and check the mandatory `Hello`. A tailnet connection gets
+/// [`TAILNET_HANDSHAKE_TIMEOUT`] to send it; the loopback and LAN listeners
+/// keep the un-timed handshake they always had.
 async fn handshake(
     hub: &Hub,
+    auth: &AuthKind,
+    receiver: &mut futures::stream::SplitStream<WebSocket>,
+    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
+) -> anyhow::Result<Handshake> {
+    match auth {
+        AuthKind::Local => read_hello(hub, auth, receiver, out_tx).await,
+        AuthKind::Tailnet(_) => tokio::time::timeout(
+            TAILNET_HANDSHAKE_TIMEOUT,
+            read_hello(hub, auth, receiver, out_tx),
+        )
+        .await
+        .map_err(|_| anyhow!("tailnet handshake timed out before Hello"))?,
+    }
+}
+
+async fn read_hello(
+    hub: &Hub,
+    auth: &AuthKind,
     receiver: &mut futures::stream::SplitStream<WebSocket>,
     out_tx: &mpsc::UnboundedSender<DaemonMessage>,
 ) -> anyhow::Result<Handshake> {
@@ -1445,9 +1718,7 @@ async fn handshake(
     else {
         return Err(anyhow!("first message must be Hello"));
     };
-    if !crate::secret::constant_time_eq(auth_token.as_bytes(), hub.auth_token.as_bytes()) {
-        return Err(anyhow!("invalid auth token"));
-    }
+    check_hello_auth(hub, auth, &auth_token)?;
     let negotiated =
         negotiate_protocol_version(protocol_version, &protocol_versions).ok_or_else(|| {
             anyhow!(
@@ -1468,6 +1739,40 @@ async fn handshake(
         client_id,
         client_name,
     })
+}
+
+/// Decide whether the value in `Hello.auth_token` may connect on this
+/// listener. This is the single allow/deny point for a tailnet device token.
+fn check_hello_auth(hub: &Hub, auth: &AuthKind, presented: &str) -> anyhow::Result<()> {
+    match auth {
+        AuthKind::Local => {
+            if crate::secret::constant_time_eq(presented.as_bytes(), hub.auth_token.as_bytes()) {
+                Ok(())
+            } else {
+                Err(anyhow!("invalid auth token"))
+            }
+        }
+        AuthKind::Tailnet(peer) => {
+            if authorize_device(peer, presented) {
+                Ok(())
+            } else {
+                Err(anyhow!("device not approved"))
+            }
+        }
+    }
+}
+
+/// Whether `peer` may connect with `presented_token`.
+///
+/// The device-approval flow stores a SHA-256 digest per approved device and
+/// this check hashes the presented value and compares it in constant time.
+/// No device is approved yet, so every token is refused; the presented value
+/// is never logged, stored or echoed.
+fn authorize_device(peer: &tailnet::PeerIdentity, presented_token: &str) -> bool {
+    debug!(device = %peer.name, "tailnet device token presented");
+    let presented = Sha256::digest(presented_token.as_bytes());
+    let approved: Option<[u8; 32]> = None;
+    approved.is_some_and(|stored| crate::secret::constant_time_eq(&presented, &stored))
 }
 
 /// The capabilities this daemon lists in `Welcome.features` (`protocol::FEATURE_*`).
@@ -1567,6 +1872,21 @@ fn push_initial_state(
     });
 }
 
+/// The reason `msg` is host-only and refused on a tailnet connection, if it
+/// is. Checked before the match so no side effect can run first; a message
+/// that manages the host joins this set here.
+fn host_only_refusal(msg: &ClientMessage, auth: &AuthKind) -> Option<&'static str> {
+    if matches!(auth, AuthKind::Local) {
+        return None;
+    }
+    match msg {
+        ClientMessage::Shutdown { .. } => Some("shutdown is local-only"),
+        ClientMessage::ConfigureLan { .. } => Some("LAN access is local-only"),
+        ClientMessage::StartPairing | ClientMessage::CancelPairing => Some("pairing is local-only"),
+        _ => None,
+    }
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "dispatch is a flat match over the protocol message set; \
@@ -1575,12 +1895,21 @@ fn push_initial_state(
 async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::Result<()> {
     let ConnCtx {
         out_tx,
+        auth,
         pty_forwarders,
         client_id,
         client_name,
         connection,
         ..
     } = *ctx;
+    if let Some(reason) = host_only_refusal(&msg, auth) {
+        warn!(%reason, "dispatch: host-only message refused on a tailnet connection");
+        let _ = out_tx.send(DaemonMessage::Error {
+            message: reason.to_owned(),
+            request_id: None,
+        });
+        return Ok(());
+    }
     match msg {
         ClientMessage::Hello { .. } | ClientMessage::Attach { session_id: _ } => {
             // Hello: already consumed by handshake; ignore subsequent ones.
@@ -6047,7 +6376,7 @@ fn start_hub_tasks(hub: &Hub, client_count_rx: tokio::sync::watch::Receiver<usiz
     // abandoned sessions come back from them on the next daemon start.
     crate::idle_exit::spawn(
         Arc::clone(&hub.sessions),
-        client_count_rx,
+        crate::idle_exit::Watches::new(client_count_rx, hub.remote_enabled.subscribe()),
         hub.shutdown_tx.clone(),
         Arc::clone(&hub.preset_cancellations),
         crate::idle_exit::GRACE_PERIOD,
@@ -7603,6 +7932,7 @@ mod tests {
             state_file: config.join("state.json"),
             handshake_file: config.join("daemon.json"),
             lan_config_file: config.join("lan.json"),
+            remote_config_file: config.join("remote.json"),
             lan_cert_file: config.join("lan-cert.pem"),
             lan_key_file: config.join("lan-key.pem"),
             sessions_dir: config.join("sessions"),
@@ -7622,6 +7952,7 @@ mod tests {
         let (state_events, _) = broadcast::channel(16);
         let (client_count, _) = tokio::sync::watch::channel(0usize);
         let (keep_awake_enabled, _) = tokio::sync::watch::channel(true);
+        let (remote_enabled, _) = tokio::sync::watch::channel(false);
         let (_, keep_awake_status) = tokio::sync::watch::channel(crate::keep_awake::Status {
             enabled: true,
             active: false,
@@ -7640,6 +7971,8 @@ mod tests {
             client_count: Arc::new(client_count),
             lan_handle: Arc::new(AsyncMutex::new(None)),
             advertiser: Arc::new(AsyncMutex::new(None)),
+            remote_enabled: Arc::new(remote_enabled),
+            tailnet: Arc::new(AsyncMutex::new(None)),
             pairing: Arc::new(AsyncMutex::new(None)),
             keep_awake_enabled: Arc::new(keep_awake_enabled),
             keep_awake_status,
@@ -7652,6 +7985,13 @@ mod tests {
     /// Dispatch `msg` against `hub` and return the single message it put on
     /// the wire, failing when it dispatched none or more than one.
     async fn dispatch_one(hub: &Hub, msg: ClientMessage) -> DaemonMessage {
+        let local = AuthKind::Local;
+        dispatch_one_as(hub, msg, &local).await
+    }
+
+    /// Dispatch `msg` over a connection of `auth` and return its single
+    /// reply.
+    async fn dispatch_one_as(hub: &Hub, msg: ClientMessage, auth: &AuthKind) -> DaemonMessage {
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
         let (file_tx, _file_rx) = mpsc::channel(1);
         let pty_forwarders: PtyForwarders = Arc::new(AsyncMutex::new(HashMap::new()));
@@ -7664,6 +8004,7 @@ mod tests {
             client_id: "c1",
             client_name: None,
             connection: 1,
+            auth,
         };
         dispatch(hub, msg, &ctx)
             .await
@@ -8204,6 +8545,7 @@ mod tests {
             state_file: root.join("state.json"),
             handshake_file: root.join("daemon.json"),
             lan_config_file: root.join("lan.json"),
+            remote_config_file: root.join("remote.json"),
             lan_cert_file: root.join("lan-cert.pem"),
             lan_key_file: root.join("lan-key.pem"),
             sessions_dir: root.join("sessions"),
@@ -9051,6 +9393,7 @@ mod tests {
         let (file_tx, _file_rx) = mpsc::channel(1);
         let pty_forwarders: PtyForwarders = Arc::new(AsyncMutex::new(HashMap::new()));
         let fetches: FetchRegistry = Arc::new(AsyncMutex::new(HashMap::new()));
+        let local = AuthKind::Local;
         let ctx = ConnCtx {
             out_tx: &out_tx,
             file_tx: &file_tx,
@@ -9059,6 +9402,7 @@ mod tests {
             client_id: "c1",
             client_name: None,
             connection: 1,
+            auth: &local,
         };
         dispatch(hub, msg, &ctx)
             .await
@@ -9526,6 +9870,7 @@ mod tests {
         let (file_tx, _file_rx) = mpsc::channel(1);
         let pty_forwarders: PtyForwarders = Arc::new(AsyncMutex::new(HashMap::new()));
         let fetches: FetchRegistry = Arc::new(AsyncMutex::new(HashMap::new()));
+        let local = AuthKind::Local;
         let ctx = ConnCtx {
             out_tx: &out_tx,
             file_tx: &file_tx,
@@ -9534,6 +9879,7 @@ mod tests {
             client_id: "c1",
             client_name: None,
             connection: 1,
+            auth: &local,
         };
         dispatch(hub, msg, &ctx).await.expect("dispatch succeeds");
         let mut sent = Vec::new();
@@ -12949,6 +13295,7 @@ mod tests {
             let (file_tx, _file_rx) = mpsc::channel(1);
             let pty_forwarders: PtyForwarders = Arc::new(AsyncMutex::new(HashMap::new()));
             let fetches: FetchRegistry = Arc::new(AsyncMutex::new(HashMap::new()));
+            let local = AuthKind::Local;
             let ctx = ConnCtx {
                 out_tx: &out_tx,
                 file_tx: &file_tx,
@@ -12957,6 +13304,7 @@ mod tests {
                 client_id: "c1",
                 client_name: None,
                 connection: 1,
+                auth: &local,
             };
             dispatch(hub, msg, &ctx).await.err().map(|e| e.to_string())
         }
@@ -13291,6 +13639,7 @@ mod tests {
             let (file_tx, _file_rx) = mpsc::channel(1);
             let pty_forwarders: PtyForwarders = Arc::new(AsyncMutex::new(HashMap::new()));
             let fetches: FetchRegistry = Arc::new(AsyncMutex::new(HashMap::new()));
+            let local = AuthKind::Local;
             let ctx = ConnCtx {
                 out_tx: &out_tx,
                 file_tx: &file_tx,
@@ -13299,6 +13648,7 @@ mod tests {
                 client_id: "c1",
                 client_name: None,
                 connection: 1,
+                auth: &local,
             };
             dispatch(hub, msg, &ctx).await.expect("dispatch succeeds");
         }
@@ -13444,5 +13794,528 @@ mod tests {
             let tabs = reloaded.client_layout("c1");
             assert_eq!(tabs.first().and_then(|t| t.picked_layout), Some(automatic));
         }
+    }
+
+    // --- Tailnet listener: auth kind, routers, Origin/Host, handshake ---
+
+    use crate::tailnet_listener::AuthorizedPeer;
+    use axum::http::Method;
+
+    /// The owner's laptop as `tailscale whois` describes it.
+    fn test_peer() -> tailnet::PeerIdentity {
+        tailnet::PeerIdentity {
+            stable_id: "nPeerCNTRL".to_owned(),
+            name: "laptop.tail1234.ts.net".to_owned(),
+            user_id: 2,
+            login: "owner@example.com".to_owned(),
+        }
+    }
+
+    fn header_map(pairs: &[(&str, &str)]) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        for (name, value) in pairs {
+            headers.append(
+                axum::http::HeaderName::try_from(*name).expect("a header name"),
+                axum::http::HeaderValue::try_from(*value).expect("a header value"),
+            );
+        }
+        headers
+    }
+
+    /// A WebSocket upgrade request, with any extra headers a case needs.
+    fn ws_upgrade_request(uri: &str, extra: &[(&str, &str)]) -> Request<Body> {
+        let mut builder = Request::builder()
+            .uri(uri)
+            .header("connection", "Upgrade")
+            .header("upgrade", "websocket")
+            .header("sec-websocket-version", "13")
+            .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==");
+        for (name, value) in extra {
+            builder = builder.header(*name, *value);
+        }
+        builder.body(Body::empty()).expect("build the request")
+    }
+
+    async fn body_text(response: Response) -> String {
+        let bytes = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .expect("read the response body");
+        String::from_utf8(bytes.to_vec()).expect("utf-8 body")
+    }
+
+    #[tokio::test]
+    async fn tailnet_router_has_no_shutdown_or_pair() {
+        let (hub, _scratch) = test_hub("tailnet-router-routes");
+        let router = build_tailnet_router(hub, name_slot(), 8787);
+        for uri in ["/shutdown", "/pair"] {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri(uri)
+                        .body(Body::empty())
+                        .expect("build the request"),
+                )
+                .await
+                .expect("the router answers");
+            assert_eq!(
+                response.status(),
+                StatusCode::NOT_FOUND,
+                "{uri} must not exist on the tailnet router"
+            );
+        }
+        for uri in ["/health", "/ws"] {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .body(Body::empty())
+                        .expect("build the request"),
+                )
+                .await
+                .expect("the router answers");
+            assert_ne!(
+                response.status(),
+                StatusCode::NOT_FOUND,
+                "{uri} must exist on the tailnet router"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn tailnet_router_serves_health_constantly() {
+        let (hub, _scratch) = test_hub("tailnet-router-health");
+        let router = build_tailnet_router(hub, name_slot(), 8787);
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .expect("build the request"),
+            )
+            .await
+            .expect("the router answers");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(body_text(response).await, "ok");
+    }
+
+    #[tokio::test]
+    async fn loopback_router_keeps_all_four_routes() {
+        let (hub, _scratch) = test_hub("loopback-router-routes");
+        let router = build_loopback_router(hub);
+        let health = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .expect("build the request"),
+            )
+            .await
+            .expect("the router answers");
+        assert_eq!(health.status(), StatusCode::OK);
+
+        let shutdown = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/shutdown")
+                    .body(Body::empty())
+                    .expect("build the request"),
+            )
+            .await
+            .expect("the router answers");
+        assert_eq!(shutdown.status(), StatusCode::UNAUTHORIZED);
+
+        let pair = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/pair")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"code":"123456"}"#))
+                    .expect("build the request"),
+            )
+            .await
+            .expect("the router answers");
+        assert_eq!(pair.status(), StatusCode::FORBIDDEN);
+
+        // The hook endpoint is loopback-only and needs the bearer token.
+        let hook = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/hook/some-session")
+                    .body(Body::empty())
+                    .expect("build the request"),
+            )
+            .await
+            .expect("the router answers");
+        assert_eq!(hook.status(), StatusCode::UNAUTHORIZED);
+
+        let ws = router
+            .oneshot(ws_upgrade_request("/ws", &[]))
+            .await
+            .expect("the router answers");
+        assert_ne!(ws.status(), StatusCode::NOT_FOUND, "/ws must exist");
+    }
+
+    #[tokio::test]
+    async fn tailnet_ws_without_authorized_peer_does_not_upgrade() {
+        let (hub, _scratch) = test_hub("tailnet-no-peer");
+        let names = name_slot();
+        set_serving_name(&names, Some("host.tail1234.ts.net".to_owned()));
+        let router = build_tailnet_router(hub, names, 8787);
+        let response = router
+            .oneshot(ws_upgrade_request(
+                "/ws",
+                &[("host", "host.tail1234.ts.net:8787")],
+            ))
+            .await
+            .expect("the router answers");
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "a request without an AuthorizedPeer never becomes a connection"
+        );
+    }
+
+    #[test]
+    fn tailnet_upgrade_allowed() {
+        let name = Some("host.tail1234.ts.net");
+        let host = "host.tail1234.ts.net:8787";
+        let origin = "https://host.tail1234.ts.net:8787";
+
+        // A native client sends Host and no Origin.
+        assert!(super::tailnet_upgrade_allowed(
+            &header_map(&[("host", host)]),
+            name,
+            8787
+        ));
+        // The PWA's own origin.
+        assert!(super::tailnet_upgrade_allowed(
+            &header_map(&[("host", host), ("origin", origin)]),
+            name,
+            8787
+        ));
+        // Mixed case and a trailing dot name the same host.
+        assert!(super::tailnet_upgrade_allowed(
+            &header_map(&[("host", "HOST.Tail1234.TS.NET.:8787")]),
+            name,
+            8787
+        ));
+        // `Origin: null` is an opaque origin, never the PWA.
+        assert!(!super::tailnet_upgrade_allowed(
+            &header_map(&[("host", host), ("origin", "null")]),
+            name,
+            8787
+        ));
+        // A foreign origin.
+        assert!(!super::tailnet_upgrade_allowed(
+            &header_map(&[("host", host), ("origin", "https://evil.example")]),
+            name,
+            8787
+        ));
+        // A look-alike name.
+        assert!(!super::tailnet_upgrade_allowed(
+            &header_map(&[
+                ("host", host),
+                ("origin", "https://host.tail1234.ts.net.evil.ts.net:8787"),
+            ]),
+            name,
+            8787
+        ));
+        // Duplicate Origin headers are ambiguous.
+        assert!(!super::tailnet_upgrade_allowed(
+            &header_map(&[("host", host), ("origin", origin), ("origin", origin)]),
+            name,
+            8787
+        ));
+        // Host is required, and exactly once.
+        assert!(!super::tailnet_upgrade_allowed(
+            &header_map(&[]),
+            name,
+            8787
+        ));
+        assert!(!super::tailnet_upgrade_allowed(
+            &header_map(&[("host", "other.ts.net:8787")]),
+            name,
+            8787
+        ));
+        assert!(!super::tailnet_upgrade_allowed(
+            &header_map(&[("host", host), ("host", "other.ts.net:8787")]),
+            name,
+            8787
+        ));
+        // The bare name is the default port only.
+        assert!(!super::tailnet_upgrade_allowed(
+            &header_map(&[("host", "host.tail1234.ts.net")]),
+            name,
+            8787
+        ));
+        assert!(super::tailnet_upgrade_allowed(
+            &header_map(&[("host", "host.tail1234.ts.net")]),
+            name,
+            443
+        ));
+        assert!(super::tailnet_upgrade_allowed(
+            &header_map(&[
+                ("host", "host.tail1234.ts.net:443"),
+                ("origin", "https://host.tail1234.ts.net:443"),
+            ]),
+            name,
+            443
+        ));
+        // A browser drops the default HTTPS port from Origin.
+        assert!(super::tailnet_upgrade_allowed(
+            &header_map(&[
+                ("host", "host.tail1234.ts.net"),
+                ("origin", "https://host.tail1234.ts.net"),
+            ]),
+            name,
+            443
+        ));
+        // The bare origin is the default HTTPS port only.
+        assert!(!super::tailnet_upgrade_allowed(
+            &header_map(&[("host", host), ("origin", "https://host.tail1234.ts.net"),]),
+            name,
+            8787
+        ));
+        // Without a certificate in service there is no name to match.
+        assert!(!super::tailnet_upgrade_allowed(
+            &header_map(&[("host", host)]),
+            None,
+            8787
+        ));
+        // A rename only matters once the slot follows the certificate.
+        assert!(!super::tailnet_upgrade_allowed(
+            &header_map(&[("host", host)]),
+            Some("renamed.tail1234.ts.net"),
+            8787
+        ));
+    }
+
+    #[test]
+    fn serving_name_follows_only_the_serving_status() {
+        let serving = ListenerStatus::Serving {
+            name: "host.tail1234.ts.net".to_owned(),
+            addrs: Vec::new(),
+        };
+        assert_eq!(
+            serving_name(&serving),
+            Some("host.tail1234.ts.net".to_owned())
+        );
+        for status in [
+            ListenerStatus::Starting,
+            ListenerStatus::HttpsDisabled,
+            ListenerStatus::CertFailed,
+            ListenerStatus::PortInUse { port: 8787 },
+            ListenerStatus::BindFailed("in use".to_owned()),
+            ListenerStatus::TailscaleDown(tailnet::TailnetError::NotConnected),
+        ] {
+            assert_eq!(
+                serving_name(&status),
+                None,
+                "{status:?} must clear the name"
+            );
+        }
+    }
+
+    #[test]
+    fn tailnet_hello_never_accepts_the_daemon_token() {
+        let (hub, _scratch) = test_hub("tailnet-hello");
+        let auth = AuthKind::Tailnet(test_peer());
+        let err = check_hello_auth(&hub, &auth, "test-token")
+            .expect_err("the daemon token is not a device token");
+        assert_eq!(err.to_string(), "device not approved");
+        assert!(
+            !err.to_string().contains("test-token"),
+            "the reason never echoes the presented value"
+        );
+        assert!(
+            !err.to_string().contains("invalid auth token"),
+            "a tailnet refusal is never the loopback reason"
+        );
+        let err = check_hello_auth(&hub, &auth, "any-other-value")
+            .expect_err("no device is approved yet");
+        assert_eq!(err.to_string(), "device not approved");
+    }
+
+    #[test]
+    fn local_hello_still_accepts_the_daemon_token() {
+        let (hub, _scratch) = test_hub("local-hello");
+        assert!(check_hello_auth(&hub, &AuthKind::Local, "test-token").is_ok());
+        let err = check_hello_auth(&hub, &AuthKind::Local, "wrong")
+            .expect_err("a wrong loopback token is refused");
+        assert_eq!(err.to_string(), "invalid auth token");
+    }
+
+    #[tokio::test]
+    async fn shutdown_from_tailnet_is_refused_and_local_still_shuts_down() {
+        let (hub, _scratch) = test_hub("shutdown-tailnet");
+        let mut local = hub.shutdown_tx.subscribe();
+        let tailnet = AuthKind::Tailnet(test_peer());
+        let reply = dispatch_one_as(&hub, ClientMessage::Shutdown { drain: false }, &tailnet).await;
+        assert!(
+            matches!(&reply, DaemonMessage::Error { message, .. } if message == "shutdown is local-only"),
+            "{reply:?}"
+        );
+        assert!(
+            !*hub.shutdown_tx.borrow(),
+            "a tailnet Shutdown never flips the watch"
+        );
+
+        let local_auth = AuthKind::Local;
+        let _ = dispatch_one_as(&hub, ClientMessage::Shutdown { drain: false }, &local_auth).await;
+        assert!(
+            *local.borrow_and_update(),
+            "a local Shutdown still flips the watch"
+        );
+    }
+
+    #[tokio::test]
+    async fn tailnet_configure_lan_is_refused_and_writes_nothing() {
+        let (hub, _scratch) = test_hub("configure-lan-tailnet");
+        let lan_file = hub.dirs.lan_config_file.clone();
+        assert!(!lan_file.exists());
+        let tailnet = AuthKind::Tailnet(test_peer());
+        let reply = dispatch_one_as(
+            &hub,
+            ClientMessage::ConfigureLan {
+                enabled: true,
+                port: 9000,
+            },
+            &tailnet,
+        )
+        .await;
+        assert!(
+            matches!(&reply, DaemonMessage::Error { message, .. } if message == "LAN access is local-only"),
+            "{reply:?}"
+        );
+        assert!(
+            !lan_file.exists(),
+            "a refused ConfigureLan writes no lan.json"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tailnet_handshake_without_hello_times_out_and_releases_the_client_count() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let (hub, _scratch) = test_hub("tailnet-handshake-timeout");
+        let mut count = hub.client_count.subscribe();
+        let names = name_slot();
+        set_serving_name(&names, Some("host.tail1234.ts.net".to_owned()));
+        let app = build_tailnet_router(hub.clone(), names, 8787)
+            .layer(axum::Extension(AuthorizedPeer::for_tests(test_peer())));
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind a scratch listener");
+        let addr = listener.local_addr().expect("the bound address");
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+
+        let mut client = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("connect to the scratch listener");
+        let request = "GET /ws HTTP/1.1\r\n\
+                       Host: host.tail1234.ts.net:8787\r\n\
+                       Connection: Upgrade\r\n\
+                       Upgrade: websocket\r\n\
+                       Sec-WebSocket-Version: 13\r\n\
+                       Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n";
+        client
+            .write_all(request.as_bytes())
+            .await
+            .expect("send the upgrade request");
+        let mut response = Vec::new();
+        let mut buf = [0u8; 1024];
+        while !response.windows(4).any(|w| w == b"\r\n\r\n") {
+            let read = client
+                .read(&mut buf)
+                .await
+                .expect("read the upgrade response");
+            assert!(read > 0, "the server closed before upgrading");
+            response.extend_from_slice(&buf[..read]);
+        }
+        assert!(
+            String::from_utf8_lossy(&response).starts_with("HTTP/1.1 101"),
+            "{}",
+            String::from_utf8_lossy(&response)
+        );
+
+        count.changed().await.expect("the session holds a client");
+        assert_eq!(
+            *count.borrow_and_update(),
+            1,
+            "the silent connection counts while it waits"
+        );
+
+        // The handshake deadline is on the paused clock; a connection that
+        // never sends Hello must be closed, releasing its slot. The ceiling is
+        // the daemon's own 10 s timeout plus a margin, so a hang fails here.
+        tokio::time::timeout(Duration::from_secs(11), async {
+            while *count.borrow_and_update() != 0 {
+                count.changed().await.expect("the count channel stays open");
+            }
+        })
+        .await
+        .expect("a timed-out handshake releases its client count");
+
+        server.abort();
+    }
+
+    // --- Boot wiring and the remote switch ---
+
+    #[tokio::test]
+    async fn remote_disabled_starts_no_tailnet_listener() {
+        let (hub, _scratch) = test_hub("remote-off");
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let started = start_tailnet_listener(
+            &hub,
+            crate::remote_config::RemoteConfig::default(),
+            None,
+            shutdown_rx,
+        );
+        assert!(
+            started.is_none(),
+            "remote access off starts no tailnet listener"
+        );
+        assert!(hub.tailnet.lock().await.is_none());
+    }
+
+    #[test]
+    fn remote_and_lan_on_the_same_port_is_refused() {
+        let remote = crate::remote_config::RemoteConfig {
+            enabled: true,
+            port: 8787,
+        };
+        let lan = |enabled: bool, port: u16| lan::LanConfig {
+            enabled,
+            port,
+            auth_token: String::new(),
+        };
+        assert!(
+            !remote_listener_allowed(remote, Some(&lan(true, 8787))),
+            "the LAN listener already holds the port"
+        );
+        assert!(remote_listener_allowed(remote, Some(&lan(true, 9000))));
+        assert!(remote_listener_allowed(remote, Some(&lan(false, 8787))));
+        assert!(remote_listener_allowed(remote, None));
+        assert!(!remote_listener_allowed(
+            crate::remote_config::RemoteConfig::default(),
+            None
+        ));
+        assert!(!remote_listener_allowed(
+            crate::remote_config::RemoteConfig {
+                enabled: true,
+                port: 0
+            },
+            None
+        ));
     }
 }

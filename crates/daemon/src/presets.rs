@@ -2459,6 +2459,7 @@ mod tests {
             state_file: config.join("state.json"),
             handshake_file: config.join("daemon.json"),
             lan_config_file: config.join("lan.json"),
+            remote_config_file: config.join("remote.json"),
             lan_cert_file: config.join("lan-cert.pem"),
             lan_key_file: config.join("lan-key.pem"),
             sessions_dir,
@@ -2475,6 +2476,7 @@ mod tests {
         let (state_events, _) = broadcast::channel(16);
         let (client_count, _) = watch::channel(0);
         let (keep_awake_enabled, _) = watch::channel(true);
+        let (remote_enabled, _) = watch::channel(false);
         let (_, keep_awake_status) = watch::channel(crate::keep_awake::Status {
             enabled: true,
             active: false,
@@ -2493,6 +2495,8 @@ mod tests {
             client_count: Arc::new(client_count),
             lan_handle: Arc::new(AsyncMutex::new(None)),
             advertiser: Arc::new(AsyncMutex::new(None)),
+            remote_enabled: Arc::new(remote_enabled),
+            tailnet: Arc::new(AsyncMutex::new(None)),
             pairing: Arc::new(AsyncMutex::new(None)),
             keep_awake_enabled: Arc::new(keep_awake_enabled),
             keep_awake_status,

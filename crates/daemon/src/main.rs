@@ -36,6 +36,7 @@ mod presets;
 mod pty;
 mod pty_state;
 mod registry;
+mod remote_config;
 mod scrollback;
 mod secret;
 mod server;
@@ -44,7 +45,6 @@ mod spawn_plan;
 mod state;
 mod sync;
 mod tabs;
-#[expect(dead_code, reason = "wired by TS.3 (RT-161)")]
 mod tailnet_listener;
 mod termstate;
 mod tracer_client;

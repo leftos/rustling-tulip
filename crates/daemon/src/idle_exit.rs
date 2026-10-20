@@ -9,9 +9,11 @@
 //! held continuously for [`GRACE_PERIOD`].
 //!
 //! What keeps the daemon alive:
-//! - any attached WS client (`Hub::client_count` > 0), local or LAN;
+//! - any attached WS client (`Hub::client_count` > 0), local, LAN or tailnet;
 //! - any session whose child is (or may be) running — see [`blocks_exit`];
-//! - an in-flight preset launch job, which is about to spawn sessions.
+//! - an in-flight preset launch job, which is about to spawn sessions;
+//! - remote access being switched on in `remote.json`, whatever the tailnet
+//!   listener's own state: the host must be up when Tailscale recovers.
 //!
 //! What does NOT keep it alive: `Stopped`/`Error` records (inert — the child
 //! is gone) and abandoned records (rebuilt from their on-disk sidecars by the
@@ -39,18 +41,37 @@ pub const GRACE_PERIOD: Duration = Duration::from_secs(30);
 /// be spawned, so the watcher holds off even though the registry is idle.
 type PresetJobs = Arc<AsyncMutex<HashMap<String, watch::Sender<bool>>>>;
 
+/// The activity watches the watcher reads beside the session events: the
+/// attached-client count and the persisted remote-access switch.
+pub(crate) struct Watches {
+    client_count: watch::Receiver<usize>,
+    remote_access: watch::Receiver<bool>,
+}
+
+impl Watches {
+    pub(crate) fn new(
+        client_count: watch::Receiver<usize>,
+        remote_access: watch::Receiver<bool>,
+    ) -> Self {
+        Self {
+            client_count,
+            remote_access,
+        }
+    }
+}
+
 /// Spawn the idle-exit watcher task. Runs for the daemon's lifetime; flips
 /// `shutdown_tx` to `true` (and exits) once the idle condition has held for
-/// `grace`, or exits silently if either input channel closes (the daemon is
+/// `grace`, or exits silently if an input channel closes (the daemon is
 /// already tearing down some other way).
 pub fn spawn(
     sessions: Arc<SessionRegistry>,
-    client_count: watch::Receiver<usize>,
+    watches: Watches,
     shutdown_tx: watch::Sender<bool>,
     preset_jobs: PresetJobs,
     grace: Duration,
 ) {
-    tokio::spawn(run(sessions, client_count, shutdown_tx, preset_jobs, grace));
+    tokio::spawn(run(sessions, watches, shutdown_tx, preset_jobs, grace));
 }
 
 /// A session keeps the daemon alive while its child is — or may still be —
@@ -65,28 +86,32 @@ pub(crate) fn blocks_exit(status: SessionStatus, is_abandoned: bool) -> bool {
     !is_abandoned && !matches!(status, SessionStatus::Stopped | SessionStatus::Error)
 }
 
-/// True when no client is attached and no session blocks the exit. Reads the
-/// latest client count (marking it seen, so a subsequent `changed()` only
-/// wakes on a genuinely new value) and sweeps the full registry — the watcher
-/// never trusts event payloads, only current state.
-fn is_idle(client_count: &mut watch::Receiver<usize>, sessions: &SessionRegistry) -> bool {
-    *client_count.borrow_and_update() == 0
+/// True when no client is attached, no session blocks the exit, and remote
+/// access is off. Reads the latest values (marking them seen, so a subsequent
+/// `changed()` only wakes on a genuinely new one) and sweeps the full
+/// registry — the watcher never trusts event payloads, only current state.
+fn is_idle(watches: &mut Watches, sessions: &SessionRegistry) -> bool {
+    let remote_on = *watches.remote_access.borrow_and_update();
+    *watches.client_count.borrow_and_update() == 0
+        && !remote_on
         && !sessions
             .snapshots()
             .iter()
             .any(|s| blocks_exit(s.status, s.is_abandoned))
 }
 
-/// Block until the client count or any session changes. Returns `false` when
-/// a channel is gone (daemon teardown) — the watcher should exit. A `Lagged`
-/// session-event receiver is fine: the caller re-derives state from registry
-/// snapshots, so dropped events only mean a spurious wake-up.
+/// Block until the client count, remote access or any session changes.
+/// Returns `false` when a channel is gone (daemon teardown) — the watcher
+/// should exit. A `Lagged` session-event receiver is fine: the caller
+/// re-derives state from registry snapshots, so dropped events only mean a
+/// spurious wake-up.
 async fn wait_for_change(
-    client_count: &mut watch::Receiver<usize>,
+    watches: &mut Watches,
     session_events: &mut broadcast::Receiver<SessionEvent>,
 ) -> bool {
     tokio::select! {
-        res = client_count.changed() => res.is_ok(),
+        res = watches.client_count.changed() => res.is_ok(),
+        res = watches.remote_access.changed() => res.is_ok(),
         evt = session_events.recv() => !matches!(evt, Err(RecvError::Closed)),
     }
 }
@@ -103,7 +128,7 @@ enum GraceOutcome {
 /// Wait out the grace period, bailing early if the idle condition breaks.
 async fn idle_held_for(
     grace: Duration,
-    client_count: &mut watch::Receiver<usize>,
+    watches: &mut Watches,
     session_events: &mut broadcast::Receiver<SessionEvent>,
     sessions: &SessionRegistry,
 ) -> GraceOutcome {
@@ -112,13 +137,14 @@ async fn idle_held_for(
     loop {
         let alive = tokio::select! {
             () = &mut deadline => return GraceOutcome::Expired,
-            res = client_count.changed() => res.is_ok(),
+            res = watches.client_count.changed() => res.is_ok(),
+            res = watches.remote_access.changed() => res.is_ok(),
             evt = session_events.recv() => !matches!(evt, Err(RecvError::Closed)),
         };
         if !alive {
             return GraceOutcome::Closed;
         }
-        if !is_idle(client_count, sessions) {
+        if !is_idle(watches, sessions) {
             return GraceOutcome::ActivityResumed;
         }
     }
@@ -126,24 +152,24 @@ async fn idle_held_for(
 
 async fn run(
     sessions: Arc<SessionRegistry>,
-    mut client_count: watch::Receiver<usize>,
+    mut watches: Watches,
     shutdown_tx: watch::Sender<bool>,
     preset_jobs: PresetJobs,
     grace: Duration,
 ) {
     let mut session_events = sessions.subscribe();
     loop {
-        if !is_idle(&mut client_count, &sessions) {
-            if !wait_for_change(&mut client_count, &mut session_events).await {
+        if !is_idle(&mut watches, &sessions) {
+            if !wait_for_change(&mut watches, &mut session_events).await {
                 return;
             }
             continue;
         }
         info!(
             grace_secs = grace.as_secs(),
-            "idle-exit: no clients and no live sessions; grace timer started"
+            "idle-exit: no clients, no live sessions and remote access off; grace timer started"
         );
-        match idle_held_for(grace, &mut client_count, &mut session_events, &sessions).await {
+        match idle_held_for(grace, &mut watches, &mut session_events, &sessions).await {
             GraceOutcome::ActivityResumed => {
                 info!("idle-exit: activity resumed; grace timer cancelled");
             }
@@ -154,7 +180,7 @@ async fn run(
                     continue;
                 }
                 // The preset-lock await above could have raced a spawn.
-                if !is_idle(&mut client_count, &sessions) {
+                if !is_idle(&mut watches, &sessions) {
                     continue;
                 }
                 info!(
@@ -192,6 +218,7 @@ mod tests {
             state_file: root.join("state.json"),
             handshake_file: root.join("daemon.json"),
             lan_config_file: root.join("lan.json"),
+            remote_config_file: root.join("remote.json"),
             lan_cert_file: root.join("lan-cert.pem"),
             lan_key_file: root.join("lan-key.pem"),
             sessions_dir: root.join("sessions"),
@@ -245,6 +272,7 @@ mod tests {
     struct Harness {
         sessions: Arc<SessionRegistry>,
         count_tx: watch::Sender<usize>,
+        remote_tx: watch::Sender<bool>,
         shutdown_rx: watch::Receiver<bool>,
         preset_jobs: PresetJobs,
     }
@@ -252,13 +280,18 @@ mod tests {
     const GRACE: Duration = Duration::from_secs(30);
 
     fn start(tag: &str, initial_clients: usize) -> Harness {
+        start_with_remote(tag, initial_clients, false)
+    }
+
+    fn start_with_remote(tag: &str, initial_clients: usize, remote_access: bool) -> Harness {
         let sessions = SessionRegistry::new(scratch_dirs(tag));
         let (count_tx, count_rx) = watch::channel(initial_clients);
+        let (remote_tx, remote_rx) = watch::channel(remote_access);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let preset_jobs: PresetJobs = Arc::new(AsyncMutex::new(HashMap::new()));
         spawn(
             Arc::clone(&sessions),
-            count_rx,
+            Watches::new(count_rx, remote_rx),
             shutdown_tx,
             Arc::clone(&preset_jobs),
             GRACE,
@@ -266,6 +299,7 @@ mod tests {
         Harness {
             sessions,
             count_tx,
+            remote_tx,
             shutdown_rx,
             preset_jobs,
         }
@@ -362,5 +396,24 @@ mod tests {
         assert_no_shutdown_for(&mut h, GRACE * 4).await;
         h.count_tx.send(0).expect("watcher holds the receiver");
         assert_shutdown_within(&mut h, GRACE * 2).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn remote_access_on_blocks_exit() {
+        let mut h = start_with_remote("remote-on", 0, true);
+        assert_no_shutdown_for(&mut h, GRACE * 4).await;
+        h.remote_tx.send(false).expect("watcher holds the receiver");
+        assert_shutdown_within(&mut h, GRACE * 2).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn turning_remote_access_off_restarts_the_grace_timer() {
+        let mut h = start_with_remote("remote-off", 0, true);
+        // No grace timer runs at all while remote access is on.
+        assert_no_shutdown_for(&mut h, GRACE * 4).await;
+        h.remote_tx.send(false).expect("watcher holds the receiver");
+        // The grace period starts now, not when the daemon went idle.
+        assert_no_shutdown_for(&mut h, GRACE / 2).await;
+        assert_shutdown_within(&mut h, GRACE).await;
     }
 }

@@ -21,6 +21,10 @@ pub struct Dirs {
     pub lan_cert_file: PathBuf,
     /// Private key (PEM) paired with `lan_cert_file`.
     pub lan_key_file: PathBuf,
+    /// Opt-in remote (Tailscale) access config: `<config>/remote.json` holds
+    /// `{ enabled, port }`. Absent until the user turns remote access on; a
+    /// missing, unreadable or zero-port file means off.
+    pub remote_config_file: PathBuf,
     /// Per-session sidecar directory: `<config>/sessions/<session-id>/` holds
     /// `meta.json` (orphan recovery) and `scrollback.bin` (replay on attach).
     pub sessions_dir: PathBuf,
@@ -247,6 +251,7 @@ impl Dirs {
             lan_config_file: config.join("lan.json"),
             lan_cert_file: config.join("lan-cert.pem"),
             lan_key_file: config.join("lan-key.pem"),
+            remote_config_file: config.join("remote.json"),
             sessions_dir,
             worktrees_dir,
             binaries_dir,
@@ -264,7 +269,6 @@ impl Dirs {
 
     /// The tailnet listener's certificate dir (see [`resolve_tailnet_dir`]),
     /// created if missing.
-    #[expect(dead_code, reason = "wired by TS.3 (RT-161)")]
     pub fn ensure_tailnet_dir() -> anyhow::Result<PathBuf> {
         let dir = resolve_tailnet_dir()?;
         std::fs::create_dir_all(&dir)
@@ -277,7 +281,6 @@ impl Dirs {
 /// `RUSTLING_TULIP_TAILNET_DIR` when set (used by e2e isolation). Falls back
 /// to `<data_local>/leftos/rustling-tulip/data/tailnet/`: the private key
 /// `tailscale cert` writes stays machine-local and never roams.
-#[expect(dead_code, reason = "wired by TS.3 (RT-161)")]
 pub fn resolve_tailnet_dir() -> anyhow::Result<PathBuf> {
     let override_dir = std::env::var_os("RUSTLING_TULIP_TAILNET_DIR");
     tailnet_dir_from(override_dir.as_deref(), || {
@@ -289,7 +292,6 @@ pub fn resolve_tailnet_dir() -> anyhow::Result<PathBuf> {
 
 /// The tailnet dir an override value names, else `tailnet` under the
 /// data-local dir. An empty override counts as unset.
-#[cfg_attr(not(test), expect(dead_code, reason = "wired by TS.3 (RT-161)"))]
 fn tailnet_dir_from(
     override_dir: Option<&OsStr>,
     data_local: impl FnOnce() -> anyhow::Result<PathBuf>,

@@ -885,6 +885,7 @@ mod tests {
             state_file: config.join("state.json"),
             handshake_file: config.join("daemon.json"),
             lan_config_file: config.join("lan.json"),
+            remote_config_file: config.join("remote.json"),
             lan_cert_file: config.join("lan-cert.pem"),
             lan_key_file: config.join("lan-key.pem"),
             sessions_dir: config.join("sessions"),

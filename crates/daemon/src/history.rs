@@ -1523,6 +1523,7 @@ pub(crate) mod test_support {
             state_file: root.join("state.json"),
             handshake_file: root.join("daemon.json"),
             lan_config_file: root.join("lan.json"),
+            remote_config_file: root.join("remote.json"),
             lan_cert_file: root.join("lan-cert.pem"),
             lan_key_file: root.join("lan-key.pem"),
             sessions_dir: root.join("sessions"),
