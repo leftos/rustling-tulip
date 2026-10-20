@@ -666,7 +666,8 @@ fn build_loopback_router(hub: Hub) -> Router {
 /// empty body and still answered `204`.
 const HOOK_BODY_LIMIT: usize = 1 << 20;
 
-/// `POST /hook/{session_id}` — one Claude Code hook event for a session.
+/// `POST /hook/{session_id}` — one agent hook event for a session, from a
+/// Claude Code session or an opted-in Codex one.
 ///
 /// Auth mirrors `/shutdown`: the daemon's own token as a bearer, compared in
 /// constant time. The answer is `204` for any authenticated request, whatever
@@ -3998,6 +3999,42 @@ fn remove_session_dir_if_empty(path: &Path, session_id: &str) {
     }
 }
 
+/// Remove a gracefully stopped session's hook settings file, then its session
+/// directory when that file was all it still held. A natural exit keeps the
+/// file (see [`write_hook_settings`]); a session that never got hooks — a Codex
+/// spawn, or one whose settings write failed — has no file to remove, which is
+/// not an error. A directory still holding `scrollback.bin` is left in place.
+fn remove_hook_settings(hub: &Hub, session_id: &str) {
+    let path = hook_settings_path(&hub.dirs, session_id);
+    match std::fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => warn!(
+            %session_id,
+            path = %path.display(),
+            error = %format!("{err:#}"),
+            "removing a stopped session's hook settings failed"
+        ),
+    }
+    let Some(dir) = path.parent() else {
+        return;
+    };
+    match std::fs::remove_dir(dir) {
+        Ok(()) => {}
+        Err(err)
+            if matches!(
+                err.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
+            ) => {}
+        Err(err) => warn!(
+            %session_id,
+            path = %dir.display(),
+            error = %format!("{err:#}"),
+            "removing a stopped session's empty directory failed"
+        ),
+    }
+}
+
 /// Render a recovered shell's typed command for `settings`: the settings
 /// clause names the quoted path when the spawn wrote a file, and is dropped
 /// entirely otherwise.
@@ -4018,6 +4055,16 @@ pub(crate) fn render_shell_resume(content: &str, settings: Option<&Path>) -> Str
     }
 }
 
+/// The file name a spawn's injected Claude hook settings land under, inside the
+/// session's own directory.
+const HOOK_SETTINGS_FILE: &str = "hook-settings.json";
+
+/// `session_id`'s injected hook settings file, which a Claude spawn passes as
+/// `--settings` and the hook shim reads.
+fn hook_settings_path(dirs: &Dirs, session_id: &str) -> PathBuf {
+    dirs.sessions_dir.join(session_id).join(HOOK_SETTINGS_FILE)
+}
+
 /// Write the new session's injected hook settings file and return what to pass
 /// as `--settings`, or `None` when this spawn gets no hooks.
 ///
@@ -4029,8 +4076,9 @@ pub(crate) fn render_shell_resume(content: &str, settings: Option<&Path>) -> Str
 /// eagerly, before whatever names it (an interactive spawn's argv, a
 /// recovery's typed command), into the session's own `sessions/<id>/`,
 /// creating that directory before `meta.json`'s writer would. A graceful stop
-/// deletes the whole directory, and a spawn that then fails removes what this
-/// call made (see [`HookSettings::discard`]).
+/// deletes the sidecar and this file, and the directory itself when that
+/// leaves it empty; a natural exit keeps the file. A spawn that then fails
+/// removes what this call made (see [`HookSettings::discard`]).
 fn write_hook_settings(hub: &Hub, session_id: &str, agent: Agent) -> Option<HookSettings> {
     if agent != Agent::Claude {
         return None;
@@ -4047,7 +4095,7 @@ fn write_hook_settings(hub: &Hub, session_id: &str, agent: Agent) -> Option<Hook
         }
     };
     let dir = hub.dirs.sessions_dir.join(session_id);
-    let path = dir.join("hook-settings.json");
+    let path = dir.join(HOOK_SETTINGS_FILE);
     let created_dir = !dir.exists();
     let settings = crate::agents::build_hook_settings(&tracer_exe, session_id, &hub.dirs.config);
     let written = std::fs::create_dir_all(&dir)
@@ -6703,6 +6751,7 @@ async fn stop_session(hub: &Hub, session_id: &str) -> anyhow::Result<()> {
         }
     }
     hub.sessions.delete_sidecar(session_id);
+    remove_hook_settings(hub, session_id);
     Ok(())
 }
 
@@ -9742,7 +9791,7 @@ mod tests {
     /// A session `id`'s hook settings file, under the fixed name its spawn
     /// passes as `--settings` and the hook command reads.
     fn hook_settings_file(hub: &Hub, id: &str) -> PathBuf {
-        hub.dirs.sessions_dir.join(id).join("hook-settings.json")
+        hook_settings_path(&hub.dirs, id)
     }
 
     /// Run a real interactive Claude spawn for `session_id` in `folder` on
@@ -10135,6 +10184,39 @@ mod tests {
         assert!(
             dir.exists(),
             "a directory this spawn did not create is kept"
+        );
+    }
+
+    /// A graceful stop removes the hook settings file a spawn wrote, its
+    /// sidecar, and the session directory once that file was all it held.
+    #[tokio::test]
+    async fn a_graceful_stop_removes_the_hook_settings_file() {
+        use crate::history::test_support::{fake_pty, insert_live, record, write_meta_for};
+        let (hub, _scratch) = test_hub("stop-hook-settings");
+        let (pty, _exit_tx) = fake_pty();
+        insert_live(
+            &hub.sessions,
+            &hub.dirs,
+            record("s1", SessionMode::Interactive),
+            &pty,
+        );
+        write_meta_for(&hub.dirs, "s1");
+        let file = hook_settings_file(&hub, "s1");
+        std::fs::write(&file, b"{\"hooks\":{}}").expect("write hook settings");
+
+        stop_session(&hub, "s1").await.expect("stop");
+
+        assert!(
+            !file.exists(),
+            "a graceful stop removes the hook settings file"
+        );
+        assert!(
+            orphan::load_meta(&hub.dirs, "s1").is_err(),
+            "and the session no longer appears as an orphan"
+        );
+        assert!(
+            !hub.dirs.sessions_dir.join("s1").exists(),
+            "and its directory, which held nothing else"
         );
     }
 
