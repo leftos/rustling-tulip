@@ -6,17 +6,7 @@ The rulings the native client's open items need before they are briefed. Each it
 
 - **Landing:** each item is committed to `main` as soon as it is green, and pushed at checkpoints (a finished wave), not after every item.
 - **Autonomy:** drive the native client to done without stopping between items or waves. Technical decisions are settled in the session and recorded here as rulings; only questions about behaviour the user will see go to the user. Phases 5 and 6 are split into brief-sized items from their parity sections when their wave comes up, and the split goes to the user before anything is dispatched.
-- **Phase 4 scope:** its named features plus every parity line not claimed by Phase 5 (drag-and-drop, pop-outs) or Phase 6 (remote). Every item mounts into `RootView` (`lib.rs`), so concurrent items rebase onto `main` before landing. Concurrency ceiling 3. Dependencies: P4.11c → P4.15b (the launch path). P4.12c builds on the spawn form's target lock (`spawn_form.rs` `Lock`: a locked target or tab, an optional pinned worktree and `share_confirmed`), which P4.4b added for "Launch session here".
-
-## P4.15b Preset wizard preview and launch
-
-The wizard's preview, launch, job registry and progress toasts exist (see [native-client.md](../native-client.md)). Still owed:
-
-- Toast buttons: Cancel (while the job runs), Select launched and Stop all.
-- The first tab a job creates becomes active.
-- The sidebar highlights preset-launched sessions.
-
-Rulings: Stop all stops the job's created sessions with no confirm. Select launched highlights only, as a tinted leaf background. The toast keeps Select launched and Stop all after the job ends. Parity: "Preset wizard", "Sticky preset progress…", "Preset-launched sessions highlighted".
+- **Phase 4 scope:** its named features plus every parity line not claimed by Phase 5 (drag-and-drop, pop-outs) or Phase 6 (remote). Every item mounts into `RootView` (`lib.rs`), so concurrent items rebase onto `main` before landing. Concurrency ceiling 3. P4.12c builds on the spawn form's target lock (`spawn_form.rs` `Lock`: a locked target or tab, an optional pinned worktree and `share_confirmed`), which P4.4b added for "Launch session here".
 
 ## Phase 5 — windows and drag-and-drop
 

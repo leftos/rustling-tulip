@@ -190,7 +190,8 @@ pub use crate::net::{
     StopFuture, spawn_with as spawn_net,
 };
 pub use crate::notices::{
-    ActionFailedNotice, CheckoutChoice, CheckoutPrompt, TOAST_LIFETIME, Toast, ToastKind, ToastSpec,
+    ActionFailedNotice, CheckoutChoice, CheckoutPrompt, TOAST_LIFETIME, Toast, ToastAction,
+    ToastKind, ToastSpec, toast_action_selector,
 };
 pub use crate::notify::{Notifier, NotifyState};
 pub use crate::open::{OpenFailure, Opener};
@@ -652,6 +653,12 @@ pub struct RootView {
     preset_wizard_focus: FocusHandle,
     /// The preset launch jobs this window started, which outlive the wizard.
     preset_launches: preset_launch::PresetLaunches,
+    /// The sessions a launch toast's Select marked in the sidebar, until a
+    /// session click or a new connection; in memory only.
+    launched_highlight: preset_launch::LaunchHighlight,
+    /// How many times the launch toasts' buttons were refitted; specs read
+    /// it to see a terminal frame skip that upkeep.
+    preset_launch_syncs: u64,
     /// The worktrees root and whether the user set it, as this connection
     /// last heard.
     worktrees_root: Option<(String, bool)>,
@@ -895,6 +902,8 @@ impl RootView {
             preset_wizard: None,
             preset_wizard_focus: cx.focus_handle(),
             preset_launches: preset_launch::PresetLaunches::default(),
+            launched_highlight: preset_launch::LaunchHighlight::default(),
+            preset_launch_syncs: 0,
             workspace_creator: None,
             workspace_creator_focus: cx.focus_handle(),
             vscode_suggestions: VscodeSuggestions::default(),
@@ -1608,10 +1617,17 @@ impl RootView {
         }
     }
 
-    /// A leaf click: show the pane holding the session, or place the
-    /// session when no pane shows it. A session without a terminal only has
-    /// its attention and its unseen turn cleared.
+    /// A session click (a sidebar leaf, a Needs You row): clears the Select
+    /// launched marks and shows the session; see [`Self::show_session`].
     fn select_session(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.launched_highlight.clear();
+        self.show_session(id, window, cx);
+    }
+
+    /// Shows the pane holding the session, or places the session when no
+    /// pane shows it. A session without a terminal only has its attention
+    /// and its unseen turn cleared.
+    fn show_session(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.sidebar.clear_attention(id);
         self.sidebar.mark_seen(id);
         if let Some((tab_id, pane_id)) = find_tab_containing_session(self.tabs.tabs(), id) {
@@ -1667,7 +1683,7 @@ impl RootView {
             self.status = format!("session {id} not found");
             return;
         }
-        self.select_session(&id, window, cx);
+        self.show_session(&id, window, cx);
     }
 
     /// After any change to the tab model: terminals follow the layout, the
@@ -2234,6 +2250,7 @@ impl RootView {
         self.close_workspace_creator(window, cx);
         self.close_preset_wizard(window, cx);
         self.reset_preset_launches(cx);
+        self.launched_highlight.clear();
         self.vscode_suggestions.clear();
         self.cwd_workspace_scans.clear();
         self.close_appearance_editor(window, cx);

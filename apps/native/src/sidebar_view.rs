@@ -17,9 +17,10 @@ use crate::fonts::{DEFAULT_FAMILY, UI_FAMILY};
 use crate::grid_view::{ADD_REPO_TIP, NO_REPOS_TIP, SPAWN_TIP};
 use crate::launch_last;
 use crate::palette::{
-    ACCENT, ASKING, CHIP, HOVER, LILAC, LINE, LINE_STRONG, ON_ACCENT, ON_ASKING, RAISED, SUBTLE,
-    TEXT_2, TRANSPARENT,
+    ACCENT, ASKING, CHIP, HOVER, LAUNCHED_TINT, LILAC, LINE, LINE_STRONG, ON_ACCENT, ON_ASKING,
+    RAISED, SUBTLE, TEXT_2, TRANSPARENT,
 };
+use crate::preset_launch::LaunchHighlight;
 use crate::repo_add::RepoAdd;
 use crate::session_actions::inline_actions;
 use crate::session_menu::{
@@ -156,6 +157,7 @@ impl RootView {
                 focused_row,
                 hovered_row: self.hovered_container.as_deref(),
                 detached_stop_all: self.detached_stop_all.armed(),
+                highlighted: &self.launched_highlight,
                 subline_room: width
                     - 2.0 * BODY_INSET_X
                     - LEAF_PAD_LEFT
@@ -858,6 +860,8 @@ struct LeafRows<'a> {
     hovered_row: Option<&'a str>,
     /// The Detached banner's Stop all is armed.
     detached_stop_all: bool,
+    /// The sessions Select launched marked.
+    highlighted: &'a LaunchHighlight,
 }
 
 impl LeafRows<'_> {
@@ -1394,7 +1398,8 @@ fn leaf_row(
         .get(id)
         .copied()
         .unwrap_or(appearance::BUILTIN_ACCENT);
-    let row = leaf_frame(leaf, selected, accent, ctx.density, cx);
+    let ground = leaf_ground(selected, ctx.highlighted.contains(id));
+    let row = leaf_frame(leaf, ground, accent, ctx.density, cx);
     match ctx.density {
         LeafDensity::Compact => {
             let chips = leaf_chips(leaf, ctx.pill(id), ctx.attachable(id), ChipSize::Row, cx);
@@ -1419,11 +1424,32 @@ fn leaf_row(
     }
 }
 
-/// The leaf's box: selection and hover grounds, its hover text, the accent
-/// stripe, and the clicks.
+impl RootView {
+    /// The fill session `id`'s leaf draws with: see [`leaf_ground`].
+    #[must_use]
+    pub fn leaf_fill(&self, id: &str) -> Option<u32> {
+        let selected = self.focused_session().as_deref() == Some(id);
+        leaf_ground(selected, self.launched_highlight.contains(id))
+    }
+}
+
+/// A leaf's fill: the chip while `selected`, else the launched tint while
+/// `highlighted` by Select launched; None leaves the ground, lit on hover.
+fn leaf_ground(selected: bool, highlighted: bool) -> Option<u32> {
+    if selected {
+        Some(CHIP)
+    } else if highlighted {
+        Some(LAUNCHED_TINT)
+    } else {
+        None
+    }
+}
+
+/// The leaf's box: its fill `ground`, or the hover fill without one, its
+/// hover text, the accent stripe, and the clicks.
 fn leaf_frame(
     leaf: &Leaf,
-    selected: bool,
+    ground: Option<u32>,
     accent: u32,
     density: LeafDensity,
     cx: &mut Context<RootView>,
@@ -1442,8 +1468,8 @@ fn leaf_frame(
         .pr(px(ROW_PADDING))
         .rounded(px(6.0))
         .cursor_pointer()
-        .when(selected, |row| row.bg(gpui::rgb(CHIP)))
-        .when(!selected, |row| {
+        .when_some(ground, |row, ground| row.bg(gpui::rgb(ground)))
+        .when(ground.is_none(), |row| {
             row.hover(|style| style.bg(gpui::rgb(RAISED)))
         })
         .tooltip(tooltip(leaf.hover(density)))

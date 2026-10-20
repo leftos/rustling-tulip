@@ -36,7 +36,26 @@ pub struct Toast {
     pub key: Option<String>,
     /// A sticky toast never goes by itself; only the × closes it.
     pub sticky: bool,
+    /// The buttons under its text, in order.
+    pub actions: Vec<ToastAction>,
     expires_at: Instant,
+}
+
+/// A button on a toast. A click hands the toast's key and the action's id
+/// to whoever raised the toast.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToastAction {
+    /// Names the action to its handler and in the button's selector.
+    pub id: &'static str,
+    pub label: &'static str,
+    /// Drawn as a destructive action.
+    pub danger: bool,
+}
+
+/// The selector of action `action`'s button on toast `toast_id`.
+#[must_use]
+pub fn toast_action_selector(toast_id: u64, action: &str) -> String {
+    format!("toast-action-{toast_id}-{action}")
 }
 
 /// A toast to show: what it reports, and what it does when a toast of the
@@ -51,6 +70,8 @@ pub struct ToastSpec {
     pub key: Option<String>,
     /// Never goes by itself.
     pub sticky: bool,
+    /// The buttons under its text, in order.
+    pub actions: Vec<ToastAction>,
 }
 
 /// A refused or failed action that blocks until the user dismisses it.
@@ -226,14 +247,15 @@ impl Notices {
                 detail,
                 key: None,
                 sticky: false,
+                actions: Vec::new(),
             },
             now,
         )
     }
 
     /// Shows `spec`. A key matching a toast on screen updates that toast in
-    /// place — same id, same place, its kind, title, detail and stickiness
-    /// replaced — and restarts its lifetime unless it is now sticky; any
+    /// place — same id, same place, its kind, title, detail, stickiness and
+    /// actions replaced — and restarts its lifetime unless it is now sticky; any
     /// other push appends a toast, and one arriving while [`MAX_TOASTS`] are
     /// already shown evicts the timed toast among them that has waited
     /// longest, an update counting as a wait's end. A toast is never its own
@@ -245,6 +267,7 @@ impl Notices {
             detail,
             key,
             sticky,
+            actions,
         } = spec;
         if let Some(at) = key.as_deref().and_then(|key| self.keyed_at(key)) {
             let toast = &mut self.toasts[at];
@@ -252,6 +275,7 @@ impl Notices {
             toast.title = title;
             toast.detail = detail;
             toast.sticky = sticky;
+            toast.actions = actions;
             toast.expires_at = now + TOAST_LIFETIME;
             return toast.id;
         }
@@ -267,9 +291,24 @@ impl Notices {
             detail,
             key,
             sticky,
+            actions,
             expires_at: now + TOAST_LIFETIME,
         });
         id
+    }
+
+    /// Replaces the buttons of the toast of `key`, leaving its lifetime as
+    /// it runs; returns whether they changed.
+    pub fn set_actions(&mut self, key: &str, actions: Vec<ToastAction>) -> bool {
+        let Some(at) = self.keyed_at(key) else {
+            return false;
+        };
+        let toast = &mut self.toasts[at];
+        if toast.actions == actions {
+            return false;
+        }
+        toast.actions = actions;
+        true
     }
 
     /// Where the toast of `key` shows, if one does.
@@ -494,6 +533,7 @@ mod tests {
             detail: None,
             key: None,
             sticky: false,
+            actions: Vec::new(),
         }
     }
 
@@ -610,6 +650,66 @@ mod tests {
         assert_eq!(updated.detail.as_deref(), Some("two"));
         assert_eq!(updated.key.as_deref(), Some("k"));
         assert!(!updated.sticky, "the update replaces the stickiness");
+    }
+
+    const GO: ToastAction = ToastAction {
+        id: "go",
+        label: "Go",
+        danger: false,
+    };
+    const STOP: ToastAction = ToastAction {
+        id: "stop",
+        label: "Stop",
+        danger: true,
+    };
+
+    #[test]
+    fn a_keyed_push_replaces_the_actions() {
+        let start = Instant::now();
+        let mut notices = Notices::default();
+        let id = notices.push_spec(
+            ToastSpec {
+                actions: vec![GO, STOP],
+                ..keyed("A")
+            },
+            start,
+        );
+        assert_eq!(notices.toasts()[0].actions, [GO, STOP]);
+        notices.push_spec(
+            ToastSpec {
+                actions: vec![GO],
+                ..keyed("A")
+            },
+            start,
+        );
+        assert_eq!(
+            notices.toasts()[0].actions,
+            [GO],
+            "the update replaces them"
+        );
+        assert_eq!(
+            toast_action_selector(id, "go"),
+            format!("toast-action-{id}-go")
+        );
+    }
+
+    #[test]
+    fn setting_actions_keeps_the_toasts_lifetime() {
+        let start = Instant::now();
+        let mut notices = Notices::default();
+        notices.push_spec(keyed("A"), start);
+        assert!(notices.set_actions("k", vec![STOP]));
+        assert!(!notices.set_actions("k", vec![STOP]), "nothing changed");
+        assert!(
+            !notices.set_actions("other", vec![GO]),
+            "no toast of that key"
+        );
+        assert_eq!(notices.toasts()[0].actions, [STOP]);
+        assert_eq!(
+            notices.next_expiry(),
+            Some(start + TOAST_LIFETIME),
+            "the timer runs on from the push"
+        );
     }
 
     #[test]

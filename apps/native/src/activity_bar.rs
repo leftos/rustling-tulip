@@ -10,7 +10,7 @@ use crate::assets::{
     NEEDS_YOU_ICON, RECOVER_ICON, SESSIONS_ICON, SETTINGS_ICON, SOURCE_CONTROL_ICON,
 };
 use crate::palette::{ACCENT, CHIP, HOVER, SUBTLE, SUNKEN};
-use crate::sidebar::Activity;
+use crate::sidebar::{Activity, SidebarModel};
 use crate::{BORDER, RootView, TEXT, tooltip};
 
 /// The rail's width in logical pixels, its right border included.
@@ -153,11 +153,32 @@ impl RootView {
     /// A rail click: see [`crate::sidebar::SidebarModel::click_activity`].
     /// Folding the panel hands the keyboard back to the active pane.
     fn click_activity(&mut self, item: Activity, window: &mut Window, cx: &mut Context<Self>) {
+        self.change_activity(|sidebar| sidebar.click_activity(item), window, cx);
+    }
+
+    /// Shows the sessions panel, unfolding it, as a rail click on Sessions
+    /// would but without folding an open panel; the keyboard stays put.
+    pub(crate) fn show_sessions_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.change_activity(
+            |sidebar| sidebar.show_activity(Activity::Sessions),
+            window,
+            cx,
+        );
+    }
+
+    /// Changes the rail's panel by `change`, closing the menus the change
+    /// would strand.
+    fn change_activity(
+        &mut self,
+        change: impl FnOnce(&mut SidebarModel),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.close_shell_menu(window, cx);
         self.close_sc_picker(window, cx);
         self.close_sc_file_menu(window, cx);
         self.close_more_menu(window, cx);
-        self.sidebar.click_activity(item);
+        change(&mut self.sidebar);
         // The Stop all chip lives only in the sessions panel, so a switch
         // away from it, or a fold, takes any arm with it.
         if self.sidebar.is_collapsed() || self.sidebar.activity() != Activity::Sessions {

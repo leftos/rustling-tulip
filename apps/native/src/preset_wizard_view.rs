@@ -18,8 +18,9 @@ use protocol::{
 
 use crate::notice_view::modal_panel;
 use crate::preset_launch::{
-    LAUNCH_CAVEAT, MAX_PER_TAB_LABEL, MAX_PER_TAB_PLACEHOLDER, PREVIEW_EMPTY, Preview, PreviewRow,
-    SCRIPT_UNRESOLVED, SCRIPTS_LEGEND, SCRIPTS_NOTE, ScriptLine, max_per_tab_note, tab_header,
+    JobAction, LAUNCH_CAVEAT, MAX_PER_TAB_LABEL, MAX_PER_TAB_PLACEHOLDER, PREVIEW_EMPTY, Preview,
+    PreviewRow, SCRIPT_UNRESOLVED, SCRIPTS_LEGEND, SCRIPTS_NOTE, ScriptLine, max_per_tab_note,
+    tab_header, touches_launches,
 };
 use crate::preset_wizard::{
     CLEAR_LABEL, FILE_LABEL, FILE_PLACEHOLDER, FOLDER_LABEL, FOLDER_PLACEHOLDER, INLINE_LABEL,
@@ -28,6 +29,7 @@ use crate::preset_wizard::{
     REQUIRED_NOTE, SOURCE_LEGEND, SourceKind, Stage, shows_required, source_label, takes_text,
     variable_placeholder,
 };
+use crate::repo_remove::{is_live, stop_message};
 use crate::session_menu::{backdrop, dialog_button};
 use crate::spawn_view::checkbox_row;
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
@@ -278,12 +280,97 @@ impl RootView {
             DaemonMessage::PresetScriptsError { id, error, .. } => {
                 self.finish_preset_scripts(id, Err(error.clone()), window, cx);
             }
-            _ => {
-                if let Some(spec) = self.preset_launches.on_message(msg) {
-                    self.push_toast_spec(spec, cx);
-                }
+            _ if touches_launches(msg) => self.on_launch_job_message(msg, window, cx),
+            _ => {}
+        }
+    }
+
+    /// A job event or a session or tab change: folds a job event of this
+    /// window's launches, keeps Select's marks on its job, shows a first
+    /// tab, and refits the toasts' buttons.
+    fn on_launch_job_message(
+        &mut self,
+        msg: &DaemonMessage,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let sidebar = &self.sidebar;
+        let live = |id: &str| sidebar.session(id).is_some_and(is_live);
+        if let Some(spec) = self.preset_launches.on_message(&live, msg) {
+            self.push_toast_spec(spec, cx);
+        }
+        self.launched_highlight.follow(&self.preset_launches);
+        self.show_first_launch_tabs(window, cx);
+        self.sync_preset_toast_actions(cx);
+    }
+
+    /// Shows each tab-grouping job's first tab once its id is known: now
+    /// when the tab is in, else when it arrives.
+    fn show_first_launch_tabs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        for tab_id in self.preset_launches.take_first_tabs() {
+            if self.tabs.tab(&tab_id).is_some() {
+                self.tabs.activate(&tab_id);
+                self.after_tabs_change(window, cx);
+            } else {
+                self.tabs.activate_on_arrival(&tab_id, None);
             }
         }
+    }
+
+    /// Fits each launch toast's buttons to its job: Stop all only while one
+    /// of its sessions is live, which any session update may change.
+    fn sync_preset_toast_actions(&mut self, cx: &mut Context<Self>) {
+        self.preset_launch_syncs += 1;
+        let sidebar = &self.sidebar;
+        let live = |id: &str| sidebar.session(id).is_some_and(is_live);
+        let mut changed = false;
+        for (key, actions) in self.preset_launches.shown_actions(&live) {
+            changed |= self.notices.set_actions(&key, actions);
+        }
+        if changed {
+            cx.notify();
+        }
+    }
+
+    /// Button `action` on launch toast `key`: Cancel cancels the running
+    /// job, Select marks its sessions (and those it makes later) and shows
+    /// the sessions panel, Stop all cancels a running job, then stops its
+    /// live sessions and keeps their worktrees.
+    pub(crate) fn press_preset_toast_action(
+        &mut self,
+        key: &str,
+        action: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let sidebar = &self.sidebar;
+        let live = |id: &str| sidebar.session(id).is_some_and(is_live);
+        match self.preset_launches.press(key, action, &live) {
+            Some(JobAction::Cancel(job_id)) => {
+                self.send(ClientMessage::CancelPresetLaunch { job_id });
+            }
+            Some(JobAction::Select) => {
+                self.launched_highlight.select(key, &self.preset_launches);
+                self.show_sessions_panel(window, cx);
+            }
+            Some(JobAction::StopAll { cancel, sessions }) => {
+                if let Some(job_id) = cancel {
+                    self.send(ClientMessage::CancelPresetLaunch { job_id });
+                }
+                for session_id in sessions {
+                    self.send(stop_message(&session_id));
+                }
+            }
+            None => {}
+        }
+        self.sync_preset_toast_actions(cx);
+        cx.notify();
+    }
+
+    /// How many times the launch toasts' buttons were refitted.
+    #[must_use]
+    pub fn preset_launch_syncs(&self) -> u64 {
+        self.preset_launch_syncs
     }
 
     fn finish_preset_scripts(
@@ -306,10 +393,10 @@ impl RootView {
         }
     }
 
-    /// Forgets this window's launch jobs and drops their toasts, as a new
-    /// connection must.
+    /// Forgets this window's running launch jobs and drops their toasts, as
+    /// a new connection must; ended jobs keep theirs.
     pub(crate) fn reset_preset_launches(&mut self, cx: &mut Context<Self>) {
-        for key in self.preset_launches.clear() {
+        for key in self.preset_launches.drop_running() {
             let shown: Vec<u64> = self
                 .notices
                 .toasts()
@@ -524,6 +611,12 @@ impl RootView {
     #[must_use]
     pub fn preset_launch_progress(&self, key: &str) -> Option<f32> {
         self.preset_launches.progress(key)
+    }
+
+    /// Whether the launch job of toast `key` is still in the registry.
+    #[must_use]
+    pub fn preset_launch_known(&self, key: &str) -> bool {
+        self.preset_launches.knows(key)
     }
 }
 

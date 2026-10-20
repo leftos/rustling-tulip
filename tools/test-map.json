@@ -71,7 +71,7 @@
       "paths": [
         "apps/native/src/activity_bar.rs"
       ],
-      "filter": "(binary_id(rustling-tulip-native) & test(/^activity_bar::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_needs_you|ui_sidebar|ui_source_control)::/))"
+      "filter": "(binary_id(rustling-tulip-native) & test(/^activity_bar::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_needs_you|ui_preset_wizard|ui_sidebar|ui_source_control)::/))"
     },
     {
       "paths": [
@@ -293,7 +293,7 @@
       "paths": [
         "apps/native/src/notices.rs"
       ],
-      "filter": "(binary_id(rustling-tulip-native) & test(/^notices::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_spawn)::/))"
+      "filter": "(binary_id(rustling-tulip-native) & test(/^notices::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_preset_wizard|ui_spawn)::/))"
     },
     {
       "paths": [
@@ -461,13 +461,13 @@
       "paths": [
         "apps/native/src/sidebar.rs"
       ],
-      "filter": "(binary_id(rustling-tulip-native) & test(/^sidebar::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_appearance|ui_font_size|ui_launch_last|ui_settings|ui_sidebar)::/))"
+      "filter": "(binary_id(rustling-tulip-native) & test(/^sidebar::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_appearance|ui_font_size|ui_launch_last|ui_preset_wizard|ui_settings|ui_sidebar)::/))"
     },
     {
       "paths": [
         "apps/native/src/sidebar_view.rs"
       ],
-      "filter": "(binary_id(rustling-tulip-native) & test(/^sidebar_view::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_container_menu|ui_keys|ui_launch_last|ui_repos|ui_sidebar)::/))"
+      "filter": "(binary_id(rustling-tulip-native) & test(/^sidebar_view::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_container_menu|ui_keys|ui_launch_last|ui_preset_wizard|ui_repos|ui_sidebar)::/))"
     },
     {
       "paths": [

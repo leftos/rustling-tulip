@@ -130,6 +130,24 @@ fn session_menu_part_shown(root: &RootView, selector: &str) -> Option<bool> {
     Some(shown)
 }
 
+/// Whether the model shows the toast part `selector` tags: an action
+/// button (`toast-action-<id>-<action>`), the × or the card; None when it
+/// tags no toast part.
+fn toast_part_shown(root: &RootView, selector: &str) -> Option<bool> {
+    if let Some((id, action)) = selector
+        .strip_prefix("toast-action-")
+        .and_then(|rest| rest.split_once('-'))
+    {
+        return Some(root.toasts().iter().any(|toast| {
+            toast.id.to_string() == id && toast.actions.iter().any(|a| a.id == action)
+        }));
+    }
+    let id = selector
+        .strip_prefix("toast-close-")
+        .or_else(|| selector.strip_prefix("toast-"))?;
+    Some(root.toasts().iter().any(|toast| toast.id.to_string() == id))
+}
+
 fn modal_part_shown(root: &RootView, selector: &str) -> Option<bool> {
     let has = |controls: Vec<(String, String)>| controls.iter().any(|(c, _)| c == selector);
     let shown = if selector == "layout-chooser" {
@@ -924,6 +942,13 @@ pub fn quit_recorder(quits: &Rc<Cell<usize>>) -> QuitFn {
 impl<'a> Harness<'a> {
     /// Opens the window with its layout in `dir` and connects it.
     pub fn open(cx: &'a mut TestAppContext, dir: &TestDir) -> Self {
+        Self::open_wanting(cx, dir, None)
+    }
+
+    /// Opens the window as [`Self::open`] does, `wanted` given on the
+    /// command line as the session to focus once the layout and the
+    /// sessions are in.
+    pub fn open_wanting(cx: &'a mut TestAppContext, dir: &TestDir, wanted: Option<&str>) -> Self {
         cx.update(bind_keys);
         let (tx, commands) = unbounded();
         let (events, rx) = unbounded();
@@ -937,7 +962,7 @@ impl<'a> Harness<'a> {
             events: rx,
             ui_dir: Some(dir.path().to_path_buf()),
             paths: Err("specs have no config dir".to_owned()),
-            wanted: None,
+            wanted: wanted.map(str::to_owned),
             now: clock.clock(),
             quit: quit_recorder(&quits),
             open: opener.clone(),
@@ -1381,11 +1406,8 @@ impl<'a> Harness<'a> {
                 root.delete_dialog_buttons()
                     .iter()
                     .any(|(button, _)| *button == selector)
-            } else if let Some(id) = selector
-                .strip_prefix("toast-close-")
-                .or_else(|| selector.strip_prefix("toast-"))
-            {
-                root.toasts().iter().any(|toast| toast.id.to_string() == id)
+            } else if let Some(shown) = toast_part_shown(root, &selector) {
+                shown
             } else if selector.starts_with("action-failed-") {
                 root.action_failed().is_some()
             } else if selector.starts_with("checkout-") {

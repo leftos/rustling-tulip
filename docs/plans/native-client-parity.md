@@ -91,8 +91,8 @@ Close behind: the paste and key quirks (native clipboard read, Shift+Enter bytes
 - [x] "Spawning session…" toast; placement (new tab / this pane / smart) and terminal focus — `App.tsx`, `utils/autofocus.ts`
 - [x] Launch last again: replays the config; worktree launches wait for a fresh branch name (toast on timeout); trusted configs open the full dialog with a warning — `App.tsx` `onLaunchLast`
 - [x] Standalone shell: quick default dir, or a dialog with Browse and "Use as quick shell default" — `StandaloneShellDialog.tsx`
-- [ ] Preset wizard: source (file / folder / inline / GitHub issue ranges) → variables (toggle / file / folder / text, required fields) → preview (grouped by tab, max panes per tab, script commands) → launching (progress, counts, Cancel, Select launched, Stop all) — `PresetLaunchDialog.tsx`, `utils/parsePrompts.ts`, `utils/parseIssueSpec.ts` (native: sources, variables, preview and launch with progress counts done; Cancel, Select launched and Stop all open)
-- [ ] Sticky preset progress and failure toasts, one per job; the first tab created becomes active — `App.tsx` (native: the toasts done; first-tab activation open)
+- [x] Preset wizard: source (file / folder / inline / GitHub issue ranges) → variables (toggle / file / folder / text, required fields) → preview (grouped by tab, max panes per tab, script commands) → launching (progress, counts, Cancel, Select launched, Stop all) — `PresetLaunchDialog.tsx`, `utils/parsePrompts.ts`, `utils/parseIssueSpec.ts`
+- [x] Sticky preset progress and failure toasts, one per job; the first tab created becomes active — `App.tsx`
 
 ## Tabs & panes / layout
 
@@ -175,7 +175,7 @@ The frontend has no search addon, bell handling or title parsing; `terminal_titl
 - [x] Toasts: error / warning / info, 8s auto-dismiss, optional sticky, same-key toasts update in place — `ErrorToast.tsx` (native: P1.7c, and warning, sticky and same-key update in P4.1)
 - [ ] Toasts for failed git writes and for actions unavailable on remote — `App.tsx` (native: failed git writes toast and show a section banner since P3.4)
 - [x] "✓ copied" chip after a confirmed clipboard write — `CopyPulse.tsx`, `utils/clipboard.ts`
-- [ ] Preset-launched sessions highlighted in the sidebar — `App.tsx`
+- [x] Preset-launched sessions highlighted in the sidebar — `App.tsx`
 
 ## Pop-out windows
 

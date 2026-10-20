@@ -810,6 +810,12 @@ impl SidebarModel {
         }
     }
 
+    /// Shows `item`'s panel, unfolding a folded one; never folds it.
+    pub fn show_activity(&mut self, item: Activity) {
+        self.ui.activity = item;
+        self.ui.sidebar_collapsed = false;
+    }
+
     /// The source-control panel's persisted state.
     pub fn source_control(&self) -> &ScUiState {
         &self.ui.source_control
@@ -3665,6 +3671,21 @@ mod tests {
         let source_control: Activity =
             serde_json::from_str(r#""source_control""#).expect("deserialise");
         assert_eq!(source_control, Activity::SourceControl);
+    }
+
+    #[test]
+    fn showing_an_activity_unfolds_the_panel_and_never_folds_it() {
+        let mut model = model_with(Vec::new());
+        model.click_activity(Activity::Sessions);
+        assert!(model.is_collapsed(), "a click on the active item folds");
+        model.show_activity(Activity::Sessions);
+        assert!(!model.is_collapsed());
+        assert_eq!(model.activity(), Activity::Sessions);
+        model.show_activity(Activity::Sessions);
+        assert!(!model.is_collapsed(), "showing it again keeps it open");
+        model.show_activity(Activity::NeedsYou);
+        assert_eq!(model.activity(), Activity::NeedsYou);
+        assert!(!model.is_collapsed());
     }
 
     #[test]

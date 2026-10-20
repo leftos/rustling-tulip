@@ -8,8 +8,13 @@
 //! disables Launch; Launch runs the scripts first, shows their error inline
 //! and retries, then sends the launch and closes; this window's job shows a
 //! sticky progress toast that a completion replaces, a failure raises one
-//! toast and another client's job none; Cancel, Esc (also from a text
-//! field), a new `Welcome` and a lost connection close it.
+//! sticky toast and another client's job none; the toast's Cancel, Select
+//! and Stop all buttons follow the job (Select tints its sessions' leaves
+//! until a session click or a new connection, Stop all stops only live
+//! ones), a closed or timed-out ended toast drops its job, a new `Welcome`
+//! keeps ended jobs' toasts, and a tab-grouping job's first tab is shown
+//! once; Cancel, Esc (also from a text field), a new `Welcome` and a lost
+//! connection close the wizard.
 
 use crate::support;
 
@@ -20,9 +25,13 @@ use protocol::{
     ClientMessage, DaemonMessage, PresetEntry, PresetLaunchJobSnapshot, PresetLaunchJobStatus,
     PresetTarget,
 };
-use rustling_tulip_native::{FileFilter, LaunchButton, NextButton, Toast, ToastKind};
+use rustling_tulip_native::palette::{CHIP, LAUNCHED_TINT};
+use rustling_tulip_native::{
+    Activity, FileFilter, LaunchButton, NextButton, Toast, ToastKind, toast_action_selector,
+};
 use serde_json::json;
-use support::{Fixture, Harness, PROTOCOL, TestDir, repo, session};
+use std::time::Duration;
+use support::{Fixture, Harness, PROTOCOL, TestDir, pane, repo, session, tab};
 
 /// Repos `r1` and `r2`, one session of `r1`.
 fn two_repos() -> Fixture {
@@ -462,6 +471,17 @@ fn scripts_request(h: &mut Harness<'_>) -> String {
 }
 
 fn job(job_id: &str, status: PresetLaunchJobStatus, launched: u32, tabs: &[&str]) -> DaemonMessage {
+    job_with(job_id, status, launched, tabs, &[])
+}
+
+/// Job `job_id`'s snapshot naming the sessions it made.
+fn job_with(
+    job_id: &str,
+    status: PresetLaunchJobStatus,
+    launched: u32,
+    tabs: &[&str],
+    sessions: &[&str],
+) -> DaemonMessage {
     let error = (status == PresetLaunchJobStatus::Failed).then(|| "boom".to_owned());
     DaemonMessage::PresetLaunchJobUpdated {
         job: PresetLaunchJobSnapshot {
@@ -472,13 +492,104 @@ fn job(job_id: &str, status: PresetLaunchJobStatus, launched: u32, tabs: &[&str]
             },
             total: 3,
             launched,
-            created_session_ids: Vec::new(),
-            created_tab_ids: tabs.iter().map(|tab| (*tab).to_owned()).collect(),
+            created_session_ids: strings(sessions),
+            created_tab_ids: strings(tabs),
             status,
             error,
             current_tab_id: None,
         },
     }
+}
+
+fn strings(items: &[&str]) -> Vec<String> {
+    items.iter().map(|item| (*item).to_owned()).collect()
+}
+
+/// The failure message of job `job_id`, naming the sessions it made.
+fn failed_with(job_id: &str, sessions: &[&str]) -> DaemonMessage {
+    DaemonMessage::PresetLaunchFailed {
+        job_id: job_id.to_owned(),
+        preset_id: "triage".to_owned(),
+        error: "boom".to_owned(),
+        partial_session_ids: strings(sessions),
+        partial_tab_ids: Vec::new(),
+    }
+}
+
+/// Job `job_id`'s progress: `launched` of three, in tabs `tabs`.
+fn progress(job_id: &str, launched: u32, tabs: &[&str]) -> DaemonMessage {
+    DaemonMessage::PresetLaunchProgress {
+        job_id: job_id.to_owned(),
+        preset_id: "triage".to_owned(),
+        total: 3,
+        launched,
+        current_tab_id: tabs.last().map(|tab| (*tab).to_owned()),
+        tab_ids: strings(tabs),
+    }
+}
+
+/// r1's session `id`, at `status`, as a session update.
+fn session_update(id: &str, status: &str) -> DaemonMessage {
+    DaemonMessage::SessionUpdated {
+        session: session(id).in_repo("r1").status(status).build(),
+        request_id: None,
+    }
+}
+
+/// Job `job_id`'s toast.
+fn job_toast(h: &mut Harness<'_>, job_id: &str) -> Toast {
+    let key = Some(format!("preset:{job_id}"));
+    toasts(h)
+        .into_iter()
+        .find(|toast| toast.key == key)
+        .expect("the job's toast shows")
+}
+
+/// The ids of the buttons on job `job_id`'s toast.
+fn actions(h: &mut Harness<'_>, job_id: &str) -> Vec<&'static str> {
+    job_toast(h, job_id)
+        .actions
+        .iter()
+        .map(|action| action.id)
+        .collect()
+}
+
+/// Presses button `action` on job `job_id`'s toast.
+fn press(h: &mut Harness<'_>, job_id: &str, action: &str) {
+    let id = job_toast(h, job_id).id;
+    h.click_on(&toast_action_selector(id, action));
+}
+
+fn leaf_fill(h: &mut Harness<'_>, id: &str) -> Option<u32> {
+    h.root(|root, _| root.leaf_fill(id))
+}
+
+fn active_tab(h: &mut Harness<'_>) -> Option<String> {
+    h.root(|root, _| root.active_tab_id().map(str::to_owned))
+}
+
+/// Tab `id` with one empty pane arrives.
+fn tab_arrives(h: &mut Harness<'_>, id: &str) {
+    h.send(DaemonMessage::TabUpdated {
+        tab: tab(id, &pane(&format!("p-{id}"), None)),
+    });
+}
+
+/// The stops the client sent, by session id.
+fn stops(h: &mut Harness<'_>) -> Vec<String> {
+    h.sent()
+        .into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::StopSession {
+                session_id,
+                cleanup,
+            } => {
+                assert!(cleanup.is_empty(), "the worktrees are kept");
+                Some(session_id)
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// Launches three issue prompts packed two to a tab; returns the job id.
@@ -845,7 +956,7 @@ fn failed_job_raises_one_toast(cx: &mut TestAppContext) {
     assert_eq!(shown[0].kind, ToastKind::Warning);
     assert_eq!(shown[0].title, "Preset launch failed: Triage");
     assert_eq!(shown[0].detail.as_deref(), Some("boom"));
-    assert!(!shown[0].sticky);
+    assert!(shown[0].sticky, "a failure stays until closed");
 
     let second = launch_three(&mut h);
     h.send(DaemonMessage::PresetLaunchFailed {
@@ -893,13 +1004,537 @@ fn completed_job_replaces_the_sticky_toast(cx: &mut TestAppContext) {
     assert_eq!(h.root(|root, _| root.preset_launch_progress(&key)), None);
 
     h.send(support::welcome(PROTOCOL));
-    assert!(
-        toasts(&mut h).is_empty(),
-        "a new connection drops the job's toast"
+    let kept = toasts(&mut h);
+    assert_eq!(
+        kept.len(),
+        1,
+        "a new connection keeps a finished job's toast"
     );
+    assert_eq!(kept[0].title, "Launched Triage");
     h.send(job(&job_id, PresetLaunchJobStatus::Spawning, 1, &[]));
+    assert_eq!(
+        toasts(&mut h)[0].title,
+        "Launched Triage",
+        "a late event changes nothing"
+    );
+}
+
+#[gpui::test]
+fn running_toast_offers_cancel_select_stop_all(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_repos());
+    let job_id = launch_three(&mut h);
+    assert_eq!(
+        actions(&mut h, &job_id),
+        ["cancel", "select"],
+        "nothing to stop before a session exists"
+    );
+    h.send(session_update("s2", "working"));
+    h.send(job_with(
+        &job_id,
+        PresetLaunchJobStatus::Spawning,
+        1,
+        &["t1"],
+        &["s2"],
+    ));
+    assert_eq!(actions(&mut h, &job_id), ["cancel", "select", "stop-all"]);
+    let toast = job_toast(&mut h, &job_id);
+    let labels: Vec<&str> = toast.actions.iter().map(|action| action.label).collect();
+    assert_eq!(labels, ["Cancel", "Select", "Stop all"]);
+    for action in ["cancel", "select", "stop-all"] {
+        let button = h.bounds(&toast_action_selector(toast.id, action));
+        assert!(
+            button.size.width > gpui::px(0.0),
+            "{action} is drawn on the toast"
+        );
+    }
+}
+
+#[gpui::test]
+fn cancel_sends_cancel_preset_launch(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_repos());
+    let job_id = launch_three(&mut h);
+    h.sent();
+    press(&mut h, &job_id, "cancel");
+    let cancels: Vec<String> = h
+        .sent()
+        .into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::CancelPresetLaunch { job_id } => Some(job_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(cancels, [job_id]);
+}
+
+#[gpui::test]
+fn finished_toast_drops_cancel_keeps_select_and_stop_all(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_repos());
+    let job_id = launch_three(&mut h);
+    h.send(session_update("s2", "idle"));
+    h.send(job_with(
+        &job_id,
+        PresetLaunchJobStatus::Completed,
+        3,
+        &["t1", "t2"],
+        &["s2"],
+    ));
+    assert_eq!(actions(&mut h, &job_id), ["select", "stop-all"]);
+    assert!(
+        !job_toast(&mut h, &job_id).sticky,
+        "a clean success keeps its timer"
+    );
+}
+
+#[gpui::test]
+fn failed_toast_stays_until_closed(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_repos());
+    let job_id = launch_three(&mut h);
+    h.send(session_update("s2", "idle"));
+    h.send(failed_with(&job_id, &["s2"]));
+    h.advance(Duration::from_secs(9));
+    assert_eq!(
+        actions(&mut h, &job_id),
+        ["select", "stop-all"],
+        "the warning outlasts a toast's lifetime, buttons and all"
+    );
+    let id = job_toast(&mut h, &job_id).id;
+    h.click_on(&format!("toast-close-{id}"));
+    assert!(toasts(&mut h).is_empty(), "the × closes it");
+}
+
+#[gpui::test]
+fn closing_a_finished_toast_drops_the_job(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_repos());
+    let known = |h: &mut Harness<'_>, job_id: &str| {
+        let key = format!("preset:{job_id}");
+        h.root(|root, _| root.preset_launch_known(&key))
+    };
+    let closed = launch_three(&mut h);
+    h.send(failed_with(&closed, &[]));
+    assert!(known(&mut h, &closed));
+    let id = job_toast(&mut h, &closed).id;
+    h.click_on(&format!("toast-close-{id}"));
+    assert!(!known(&mut h, &closed), "the × drops the ended job");
+    h.send(job(&closed, PresetLaunchJobStatus::Failed, 1, &[]));
     assert!(
         toasts(&mut h).is_empty(),
-        "a new connection forgets the job"
+        "a closed job's events show nothing"
+    );
+
+    let timed = launch_three(&mut h);
+    h.send(job(
+        &timed,
+        PresetLaunchJobStatus::Completed,
+        3,
+        &["t1", "t2"],
+    ));
+    assert!(known(&mut h, &timed));
+    h.advance(Duration::from_secs(9));
+    assert!(toasts(&mut h).is_empty(), "the success timed out");
+    assert!(
+        !known(&mut h, &timed),
+        "a timed-out job is forgotten with its toast"
+    );
+}
+
+#[gpui::test]
+fn stop_all_stops_only_live_created_sessions(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_repos());
+    let job_id = launch_three(&mut h);
+    h.send(session_update("s2", "working"));
+    h.send(session_update("s3", "stopped"));
+    h.send(job_with(
+        &job_id,
+        PresetLaunchJobStatus::Spawning,
+        3,
+        &["t1"],
+        &["s2", "s3", "gone"],
+    ));
+    h.sent();
+    press(&mut h, &job_id, "stop-all");
+    assert_eq!(
+        stops(&mut h),
+        ["s2"],
+        "a stopped or unknown session is not stopped again, s1 is not the job's"
+    );
+    h.send(session_update("s2", "stopped"));
+    assert_eq!(
+        actions(&mut h, &job_id),
+        ["select"],
+        "Stop all goes once nothing it would stop runs, and its cancel took Cancel"
+    );
+}
+
+#[gpui::test]
+fn stop_all_includes_a_failed_jobs_partial_sessions(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_repos());
+    let job_id = launch_three(&mut h);
+    h.send(session_update("s2", "working"));
+    h.send(session_update("s3", "idle"));
+    h.send(job_with(
+        &job_id,
+        PresetLaunchJobStatus::Spawning,
+        1,
+        &["t1"],
+        &["s3"],
+    ));
+    h.send(failed_with(&job_id, &["s2"]));
+    h.sent();
+    press(&mut h, &job_id, "stop-all");
+    assert_eq!(stops(&mut h), ["s3", "s2"]);
+}
+
+/// Launches a job that makes s1 (the focused session), s2, s3 and s5, all
+/// but s5 already listed, and ends it; returns its id.
+fn finished_job_of_four(h: &mut Harness<'_>) -> String {
+    let job_id = launch_three(h);
+    h.send(session_update("s2", "idle"));
+    h.send(session_update("s3", "idle"));
+    h.send(job_with(
+        &job_id,
+        PresetLaunchJobStatus::Completed,
+        3,
+        &["t1", "t2"],
+        &["s1", "s2", "s3", "s5"],
+    ));
+    job_id
+}
+
+#[gpui::test]
+fn select_launched_tints_job_sessions_and_shows_sessions(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_repos());
+    let job_id = finished_job_of_four(&mut h);
+    h.click_on("activity-needs-you");
+    assert_eq!(h.root(|root, _| root.activity()), Activity::NeedsYou);
+    assert_eq!(leaf_fill(&mut h, "s2"), None, "no tint before Select");
+    let tab_before = active_tab(&mut h);
+
+    press(&mut h, &job_id, "select");
+    assert_eq!(h.root(|root, _| root.activity()), Activity::Sessions);
+    assert_eq!(leaf_fill(&mut h, "s2"), Some(LAUNCHED_TINT));
+    assert_eq!(leaf_fill(&mut h, "s3"), Some(LAUNCHED_TINT));
+    assert_eq!(
+        leaf_fill(&mut h, "s1"),
+        Some(CHIP),
+        "the focused leaf keeps its fill"
+    );
+    assert_eq!(active_tab(&mut h), tab_before, "no focus change");
+
+    h.send(session_update("s5", "idle"));
+    assert_eq!(
+        leaf_fill(&mut h, "s5"),
+        Some(LAUNCHED_TINT),
+        "a session listed later is tinted when it appears"
+    );
+    press(&mut h, &job_id, "select");
+    assert!(
+        !h.root(|root, _| root.sidebar_collapsed()),
+        "a second Select leaves the panel open"
+    );
+    assert_eq!(h.root(|root, _| root.activity()), Activity::Sessions);
+}
+
+#[gpui::test]
+fn session_click_clears_the_highlight(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_repos());
+    let job_id = finished_job_of_four(&mut h);
+    press(&mut h, &job_id, "select");
+    assert_eq!(leaf_fill(&mut h, "s3"), Some(LAUNCHED_TINT));
+    h.click_on("leaf-s2");
+    assert_eq!(leaf_fill(&mut h, "s3"), None, "any session click clears it");
+}
+
+#[gpui::test]
+fn welcome_keeps_finished_job_toasts_and_drops_running_ones(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_repos());
+    let finished = launch_three(&mut h);
+    h.send(session_update("s2", "idle"));
+    h.send(failed_with(&finished, &["s2"]));
+    let running = launch_three(&mut h);
+    assert_eq!(toasts(&mut h).len(), 2);
+
+    h.send(support::welcome(PROTOCOL));
+    h.load(&two_repos());
+    h.send(session_update("s2", "idle"));
+    let keys: Vec<Option<String>> = toasts(&mut h).into_iter().map(|toast| toast.key).collect();
+    assert_eq!(keys, [Some(format!("preset:{finished}"))]);
+    assert_eq!(actions(&mut h, &finished), ["select", "stop-all"]);
+    h.sent();
+    press(&mut h, &finished, "stop-all");
+    assert_eq!(stops(&mut h), ["s2"], "its buttons still act");
+    h.send(job(&running, PresetLaunchJobStatus::Spawning, 1, &[]));
+    assert_eq!(
+        toasts(&mut h).len(),
+        1,
+        "the running job is forgotten with its toast"
+    );
+}
+
+#[gpui::test]
+fn welcome_clears_the_highlight(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_repos());
+    let job_id = finished_job_of_four(&mut h);
+    press(&mut h, &job_id, "select");
+    assert_eq!(leaf_fill(&mut h, "s2"), Some(LAUNCHED_TINT));
+    h.send(support::welcome(PROTOCOL));
+    h.load(&two_repos());
+    h.send(session_update("s2", "idle"));
+    assert_eq!(leaf_fill(&mut h, "s2"), None);
+}
+
+#[gpui::test]
+fn first_tab_activated_once_with_tab_grouping(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_repos());
+    let job_id = launch_three(&mut h);
+    h.send(job(&job_id, PresetLaunchJobStatus::Spawning, 1, &["t9"]));
+    assert_eq!(
+        active_tab(&mut h).as_deref(),
+        Some("t1"),
+        "t9 is not in yet"
+    );
+    tab_arrives(&mut h, "t9");
+    assert_eq!(
+        active_tab(&mut h).as_deref(),
+        Some("t9"),
+        "the first tab shows on arrival"
+    );
+
+    h.click_on("tab-t1");
+    h.send(progress(&job_id, 3, &["t9", "t10"]));
+    tab_arrives(&mut h, "t10");
+    tab_arrives(&mut h, "t9");
+    assert_eq!(
+        active_tab(&mut h).as_deref(),
+        Some("t1"),
+        "once per job: neither a later tab nor an update takes over"
+    );
+
+    let second = launch_three(&mut h);
+    tab_arrives(&mut h, "t20");
+    assert_eq!(active_tab(&mut h).as_deref(), Some("t1"));
+    h.send(progress(&second, 1, &["t20"]));
+    assert_eq!(
+        active_tab(&mut h).as_deref(),
+        Some("t20"),
+        "a first tab already in shows once its id is known"
+    );
+}
+
+#[gpui::test]
+fn no_first_tab_activation_without_tab_grouping(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_repos());
+    preview_issues(&mut h, preset(all_sources(), json!([])), "1,2,3");
+    h.click_on("preset-launch");
+    let job_id = launched_job(&mut h);
+    h.send(job(&job_id, PresetLaunchJobStatus::Spawning, 1, &["t9"]));
+    tab_arrives(&mut h, "t9");
+    assert_eq!(active_tab(&mut h).as_deref(), Some("t1"));
+}
+
+#[gpui::test]
+fn progress_bar_fill_is_a_third_after_one_of_three(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_repos());
+    let job_id = launch_three(&mut h);
+    h.send(progress(&job_id, 1, &["t1"]));
+    let id = job_toast(&mut h, &job_id).id;
+    let track = h.bounds(&format!("toast-progress-{id}"));
+    let fill = h.bounds(&format!("toast-progress-fill-{id}"));
+    assert!(track.size.width > gpui::px(0.0), "the track is drawn");
+    let third = track.size.width / 3.0;
+    assert!(
+        (fill.size.width - third).abs() <= gpui::px(1.0),
+        "the fill is a third of the track: {:?} of {:?}",
+        fill.size.width,
+        track.size.width
+    );
+}
+
+/// The cancels and stops the client sent, in order, as `cancel <job>` and
+/// `stop <session>`.
+fn cancels_and_stops(h: &mut Harness<'_>) -> Vec<String> {
+    h.sent()
+        .into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::CancelPresetLaunch { job_id } => Some(format!("cancel {job_id}")),
+            ClientMessage::StopSession { session_id, .. } => Some(format!("stop {session_id}")),
+            _ => None,
+        })
+        .collect()
+}
+
+#[gpui::test]
+fn cancel_is_dropped_once_pressed(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_repos());
+    let job_id = launch_three(&mut h);
+    h.sent();
+    press(&mut h, &job_id, "cancel");
+    assert_eq!(cancels_and_stops(&mut h), [format!("cancel {job_id}")]);
+    assert_eq!(
+        actions(&mut h, &job_id),
+        ["select"],
+        "a second press cannot send another cancel"
+    );
+    h.send(job(&job_id, PresetLaunchJobStatus::Spawning, 1, &["t1"]));
+    assert_eq!(
+        actions(&mut h, &job_id),
+        ["select"],
+        "nor does a snapshot of the still running job bring it back"
+    );
+}
+
+#[gpui::test]
+fn stop_all_on_a_running_launch_cancels_it_first(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_repos());
+    let job_id = launch_three(&mut h);
+    h.send(session_update("s2", "working"));
+    h.send(session_update("s3", "idle"));
+    h.send(job_with(
+        &job_id,
+        PresetLaunchJobStatus::Spawning,
+        2,
+        &["t1"],
+        &["s2", "s3"],
+    ));
+    h.sent();
+    press(&mut h, &job_id, "stop-all");
+    assert_eq!(
+        cancels_and_stops(&mut h),
+        [
+            format!("cancel {job_id}"),
+            "stop s2".to_owned(),
+            "stop s3".to_owned()
+        ]
+    );
+    assert_eq!(actions(&mut h, &job_id), ["select", "stop-all"]);
+}
+
+#[gpui::test]
+fn select_follows_a_running_launch(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_repos());
+    let job_id = launch_three(&mut h);
+    h.send(session_update("s2", "working"));
+    h.send(job_with(
+        &job_id,
+        PresetLaunchJobStatus::Spawning,
+        1,
+        &["t1"],
+        &["s2"],
+    ));
+    press(&mut h, &job_id, "select");
+    assert_eq!(leaf_fill(&mut h, "s2"), Some(LAUNCHED_TINT));
+    h.send(job_with(
+        &job_id,
+        PresetLaunchJobStatus::Spawning,
+        2,
+        &["t1"],
+        &["s2", "s3"],
+    ));
+    h.send(session_update("s3", "working"));
+    assert_eq!(
+        leaf_fill(&mut h, "s3"),
+        Some(LAUNCHED_TINT),
+        "a session the job makes after the click is tinted as it arrives"
+    );
+}
+
+#[gpui::test]
+fn needs_you_row_click_clears_the_highlight(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_repos());
+    let job_id = finished_job_of_four(&mut h);
+    h.send(session_update("s4", "awaiting_input"));
+    press(&mut h, &job_id, "select");
+    assert_eq!(leaf_fill(&mut h, "s2"), Some(LAUNCHED_TINT));
+    h.click_on("activity-needs-you");
+    h.click_on("needs-you-row-s4");
+    assert_eq!(leaf_fill(&mut h, "s2"), None, "a Needs You click clears it");
+}
+
+#[gpui::test]
+fn a_programmatic_selection_keeps_the_highlight(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::open_wanting(cx, &dir, Some("s2"));
+    let fixture = two_repos();
+    h.send(DaemonMessage::Repos {
+        repos: fixture.repos.clone(),
+    });
+    h.send(DaemonMessage::Workspaces {
+        workspaces: Vec::new(),
+    });
+    let mut sessions = fixture.sessions.clone();
+    sessions.push(session("s2").in_repo("r1").build());
+    h.send(DaemonMessage::Sessions { sessions });
+    let job_id = launch_three(&mut h);
+    h.send(session_update("s3", "idle"));
+    h.send(job_with(
+        &job_id,
+        PresetLaunchJobStatus::Completed,
+        3,
+        &["t1", "t2"],
+        &["s2", "s3"],
+    ));
+    press(&mut h, &job_id, "select");
+    assert_eq!(leaf_fill(&mut h, "s3"), Some(LAUNCHED_TINT));
+    h.sent();
+
+    // The layout's arrival lets the command line's session be shown.
+    h.send(DaemonMessage::Tabs {
+        tabs: fixture.tabs.clone(),
+    });
+    let placed = h
+        .sent()
+        .iter()
+        .any(|msg| format!("{msg:?}").contains("\"s2\""));
+    assert!(placed, "the wanted session s2 was shown");
+    assert_eq!(
+        leaf_fill(&mut h, "s3"),
+        Some(LAUNCHED_TINT),
+        "a selection no click made keeps the highlight"
+    );
+}
+
+#[gpui::test]
+fn select_from_a_folded_sidebar_unfolds_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_repos());
+    let job_id = finished_job_of_four(&mut h);
+    h.click_on("activity-sessions");
+    assert!(h.root(|root, _| root.sidebar_collapsed()), "folded");
+    press(&mut h, &job_id, "select");
+    assert!(!h.root(|root, _| root.sidebar_collapsed()));
+    assert_eq!(h.root(|root, _| root.activity()), Activity::Sessions);
+    assert_eq!(leaf_fill(&mut h, "s2"), Some(LAUNCHED_TINT));
+}
+
+#[gpui::test]
+fn output_frames_skip_the_launch_toast_upkeep(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_repos());
+    launch_three(&mut h);
+    let syncs = |h: &mut Harness<'_>| h.root(|root, _| root.preset_launch_syncs());
+    let before = syncs(&mut h);
+    h.pty_raw("s1", b"output");
+    assert_eq!(syncs(&mut h), before, "a terminal frame refits nothing");
+    h.send(session_update("s2", "idle"));
+    assert!(
+        syncs(&mut h) > before,
+        "a session update refits the buttons"
     );
 }

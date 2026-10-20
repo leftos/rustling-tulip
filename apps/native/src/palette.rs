@@ -23,6 +23,9 @@ pub const RAISED: u32 = 0x001b_1a1f;
 pub const CHIP: u32 = 0x0023_2129;
 /// The fill of a hovered row or button, as `0xRRGGBB`.
 pub const HOVER: u32 = 0x002c_2a33;
+/// The fill of a sidebar leaf a preset launch's Select marked: the accent
+/// washed into the ground, as `0xRRGGBB`.
+pub const LAUNCHED_TINT: u32 = 0x0030_2122;
 /// The built-in terminal ground, as `0xRRGGBB`.
 pub const TERMINAL_GROUND: u32 = 0x000c_0b0e;
 
@@ -184,6 +187,7 @@ mod tests {
         assert_eq!(RAISED, 0x001b_1a1f);
         assert_eq!(CHIP, 0x0023_2129);
         assert_eq!(HOVER, 0x002c_2a33);
+        assert_eq!(LAUNCHED_TINT, 0x0030_2122);
         assert_eq!(TERMINAL_GROUND, 0x000c_0b0e);
         assert_eq!(LINE, 0x002a_2830);
         assert_eq!(LINE_STRONG, 0x003a_3742);

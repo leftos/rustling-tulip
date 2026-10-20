@@ -450,6 +450,7 @@ fn sticky_toast_outlives_eight_seconds_and_closes_on_x(cx: &mut TestAppContext) 
                 detail: None,
                 key: Some("job".to_owned()),
                 sticky: true,
+                actions: Vec::new(),
             },
             cx,
         )
@@ -476,6 +477,7 @@ fn keyed_toast_updates_in_place_in_the_view(cx: &mut TestAppContext) {
         detail: None,
         key: Some("job".to_owned()),
         sticky: false,
+        actions: Vec::new(),
     };
     let first = h.root_update(|root, _window, cx| root.push_toast_spec(patch("Copying"), cx));
     let again = h.root_update(|root, _window, cx| root.push_toast_spec(patch("Copied"), cx));

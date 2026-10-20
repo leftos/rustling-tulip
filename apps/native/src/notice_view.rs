@@ -11,8 +11,10 @@ use protocol::{ClientMessage, SessionSnapshot, SpawnRequest, SpawnTarget};
 use crate::buttons::{ButtonSize, outlined_button};
 use crate::notices::{
     ActionFailedNotice, CheckoutAsk, CheckoutChoice, CheckoutPrompt, Toast, ToastKind, ToastSpec,
+    toast_action_selector,
 };
 use crate::palette::{ACCENT, CHIP, DIALOG_SHADOW, LINE_STRONG, SURFACE, TOAST_SHADOW};
+use crate::preset_launch::job_id_of;
 use crate::session_menu::{backdrop, dialog_button};
 use crate::spawns::OpenIn;
 use crate::{DANGER, FOOTER_HEIGHT, MUTED, RootView, TEXT, UI_TEXT_SIZE, WARNING};
@@ -109,6 +111,7 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         self.notices.push(kind, title, detail, (self.now)());
+        self.forget_closed_jobs();
         self.schedule_toast_expiry(cx);
         cx.notify();
     }
@@ -117,9 +120,37 @@ impl RootView {
     /// toast's id.
     pub fn push_toast_spec(&mut self, spec: ToastSpec, cx: &mut Context<Self>) -> u64 {
         let id = self.notices.push_spec(spec, (self.now)());
+        self.forget_closed_jobs();
         self.schedule_toast_expiry(cx);
         cx.notify();
         id
+    }
+
+    /// Drops the ended launch jobs whose toast went: closed, timed out or
+    /// pushed out by a newer one.
+    fn forget_closed_jobs(&mut self) {
+        let toasts = self.notices.toasts();
+        self.preset_launches
+            .retain_shown(|key| toasts.iter().any(|toast| toast.key.as_deref() == Some(key)));
+    }
+
+    /// Button `action` on toast `id`: a preset job's goes to its registry.
+    fn press_toast_action(
+        &mut self,
+        id: u64,
+        action: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let key = self
+            .notices
+            .toasts()
+            .iter()
+            .find(|toast| toast.id == id)
+            .and_then(|toast| toast.key.clone());
+        if let Some(key) = key.filter(|key| job_id_of(key).is_some()) {
+            self.press_preset_toast_action(&key, action, window, cx);
+        }
     }
 
     /// The × on toast `id`; a preset job's progress toast stays closed.
@@ -134,6 +165,7 @@ impl RootView {
             self.preset_launches.dismiss(&key);
         }
         if self.notices.dismiss(id) {
+            self.forget_closed_jobs();
             self.schedule_toast_expiry(cx);
             cx.notify();
         }
@@ -157,6 +189,7 @@ impl RootView {
     /// may lag the timer, and wait for the next.
     fn expire_toasts(&mut self, cx: &mut Context<Self>) {
         if self.notices.expire((self.now)()) {
+            self.forget_closed_jobs();
             cx.notify();
         }
         self.schedule_toast_expiry(cx);
@@ -551,8 +584,8 @@ impl RootView {
 }
 
 /// A toast: its title, its muted detail, a thin bar under them when it
-/// reports `progress` (0 to 1), and its dismiss button; an error's border is
-/// red.
+/// reports `progress` (0 to 1), its action buttons, and its dismiss button;
+/// an error's border is red.
 fn toast_card(toast: &Toast, progress: Option<f32>, cx: &mut Context<RootView>) -> AnyElement {
     let id = toast.id;
     let close = outlined_button(&format!("toast-close-{id}"), ButtonSize::Compact, true)
@@ -583,7 +616,8 @@ fn toast_card(toast: &Toast, progress: Option<f32>, cx: &mut Context<RootView>) 
                 .child(toast.title.clone()),
         )
         .children(detail)
-        .children(progress.map(|fraction| progress_bar(id, fraction)));
+        .children(progress.map(|fraction| progress_bar(id, fraction)))
+        .children(toast_actions(toast, cx));
     let name = format!("toast-{id}");
     toast_frame(ElementId::Name(SharedString::from(name.clone())))
         .debug_selector(|| name)
@@ -610,11 +644,35 @@ fn progress_bar(id: u64, fraction: f32) -> Div {
         .bg(gpui::rgb(LINE_STRONG))
         .child(
             div()
+                .debug_selector(move || format!("toast-progress-fill-{id}"))
                 .h_full()
                 .rounded(px(2.0))
                 .bg(gpui::rgb(ACCENT))
                 .w(relative(fraction.clamp(0.0, 1.0))),
         )
+}
+
+/// Toast `toast`'s action buttons in a row, a destructive one's label red;
+/// None without actions.
+fn toast_actions(toast: &Toast, cx: &mut Context<RootView>) -> Option<Div> {
+    if toast.actions.is_empty() {
+        return None;
+    }
+    let id = toast.id;
+    let buttons = toast.actions.iter().map(|action| {
+        let action_id = action.id;
+        outlined_button(
+            &toast_action_selector(id, action_id),
+            ButtonSize::Compact,
+            true,
+        )
+        .when(action.danger, |button| button.text_color(gpui::rgb(DANGER)))
+        .child(action.label)
+        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+            this.press_toast_action(id, action_id, window, cx);
+        }))
+    });
+    Some(div().flex().gap(px(6.0)).mt(px(6.0)).children(buttons))
 }
 
 /// The card a toast, an undo entry and the copied chip sit in, tagged `id`:

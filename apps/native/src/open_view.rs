@@ -141,6 +141,7 @@ impl RootView {
                         ),
                         key: Some(format!("unc-refused:{}", host.to_lowercase())),
                         sticky: false,
+                        actions: Vec::new(),
                     },
                     cx,
                 );
@@ -248,6 +249,7 @@ impl RootView {
                         detail: Some(format!("Opened {} in its default app.", file_name(&path))),
                         key: None,
                         sticky: false,
+                        actions: Vec::new(),
                     },
                     cx,
                 );

@@ -4,14 +4,14 @@
 //! launch jobs this window started, which folds the daemon's job events into
 //! the toast each job shows.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use protocol::{
     DaemonMessage, PresetEntry, PresetLaunchJobSnapshot, PresetLaunchJobStatus, PresetVariable,
     PresetVariableKind, TabGroupingConfig,
 };
 
-use crate::notices::{ToastKind, ToastSpec};
+use crate::notices::{ToastAction, ToastKind, ToastSpec};
 
 /// The most characters of a prompt's first line a preview row shows.
 pub const FIRST_LINE_PREVIEW_LIMIT: usize = 80;
@@ -365,10 +365,46 @@ fn interpolate(
     Some(out)
 }
 
+/// What every launch job's toast key starts with.
+const TOAST_PREFIX: &str = "preset:";
+
 /// The key of a launch job's toast.
 #[must_use]
 pub fn toast_key(job_id: &str) -> String {
-    format!("preset:{job_id}")
+    format!("{TOAST_PREFIX}{job_id}")
+}
+
+/// The job id of launch toast key `key`; None for another toast's key.
+#[must_use]
+pub fn job_id_of(key: &str) -> Option<&str> {
+    key.strip_prefix(TOAST_PREFIX)
+}
+
+/// Whether `msg` can change a launch job or what its toast offers: a job
+/// event, or a session or tab change. Terminal output and the rest cannot.
+#[must_use]
+pub fn touches_launches(msg: &DaemonMessage) -> bool {
+    matches!(
+        msg,
+        DaemonMessage::Sessions { .. }
+            | DaemonMessage::SessionUpdated { .. }
+            | DaemonMessage::SessionRemoved { .. }
+            | DaemonMessage::Tabs { .. }
+            | DaemonMessage::TabUpdated { .. }
+            | DaemonMessage::PresetLaunchJobUpdated { .. }
+            | DaemonMessage::PresetLaunchProgress { .. }
+            | DaemonMessage::PresetLaunchFailed { .. }
+    )
+}
+
+/// The job a job event is about.
+fn job_of_message(msg: &DaemonMessage) -> Option<&str> {
+    match msg {
+        DaemonMessage::PresetLaunchJobUpdated { job } => Some(&job.job_id),
+        DaemonMessage::PresetLaunchProgress { job_id, .. }
+        | DaemonMessage::PresetLaunchFailed { job_id, .. } => Some(job_id),
+        _ => None,
+    }
 }
 
 /// Where a launch job stands.
@@ -379,6 +415,17 @@ enum JobState {
     Cancelled,
     /// Failed for the reason given; empty while no message named one.
     Failed(String),
+}
+
+/// What a launch job knows of its first tab.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FirstTab {
+    /// No message named a tab yet.
+    Unknown,
+    /// Named, not yet handed out to be shown.
+    Known(String),
+    /// Handed out; it is never shown again.
+    Shown,
 }
 
 /// A launch job this window started.
@@ -393,9 +440,153 @@ struct LaunchJob {
     state: JobState,
     /// The user closed the progress toast: only the end shows again.
     progress_dismissed: bool,
+    /// The sessions the job made, partial ones of a failure included, in
+    /// the order first heard.
+    session_ids: Vec<String>,
+    /// The first tab the job made, as far as it is known and shown.
+    first_tab: FirstTab,
+    /// A cancel went out for the running job; its end is still to come.
+    cancel_requested: bool,
+}
+
+/// The toast button that cancels a running launch.
+pub const CANCEL: ToastAction = ToastAction {
+    id: "cancel",
+    label: "Cancel",
+    danger: true,
+};
+/// The toast button that marks the launch's sessions in the sidebar.
+pub const SELECT: ToastAction = ToastAction {
+    id: "select",
+    label: "Select",
+    danger: false,
+};
+/// The toast button that stops the launch's live sessions.
+pub const STOP_ALL: ToastAction = ToastAction {
+    id: "stop-all",
+    label: "Stop all",
+    danger: true,
+};
+
+/// What a press on a launch toast's button does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JobAction {
+    /// Cancel the running job of this id.
+    Cancel(String),
+    /// Mark the job's sessions, following it as it makes more.
+    Select,
+    /// Cancel the running job `cancel` names first, then stop these live
+    /// sessions.
+    StopAll {
+        cancel: Option<String>,
+        sessions: Vec<String>,
+    },
 }
 
 impl LaunchJob {
+    /// Notes the sessions and the first tab job event `msg` names.
+    fn fold_ids_of(&mut self, msg: &DaemonMessage) {
+        match msg {
+            DaemonMessage::PresetLaunchJobUpdated { job } => {
+                self.fold_ids(&job.created_session_ids, &job.created_tab_ids);
+            }
+            DaemonMessage::PresetLaunchProgress { tab_ids, .. } => self.fold_ids(&[], tab_ids),
+            DaemonMessage::PresetLaunchFailed {
+                partial_session_ids,
+                partial_tab_ids,
+                ..
+            } => self.fold_ids(partial_session_ids, partial_tab_ids),
+            _ => {}
+        }
+    }
+
+    /// Folds job event `msg`'s state and counts; returns whether its toast
+    /// changes. Only a running job takes a snapshot or progress.
+    fn fold_event(&mut self, msg: &DaemonMessage) -> bool {
+        let running = self.state == JobState::Running;
+        match msg {
+            DaemonMessage::PresetLaunchJobUpdated { job } if running => {
+                self.fold_snapshot(job);
+                true
+            }
+            DaemonMessage::PresetLaunchProgress {
+                total,
+                launched,
+                tab_ids,
+                ..
+            } if running => {
+                self.total = *total;
+                self.launched = *launched;
+                self.tabs_created = tab_ids.len();
+                true
+            }
+            DaemonMessage::PresetLaunchFailed { error, .. } => self.fold_failure(error),
+            _ => false,
+        }
+    }
+
+    /// A failure message: fails the job unless it ended otherwise or its
+    /// failure already has a reason; returns whether it did.
+    fn fold_failure(&mut self, error: &str) -> bool {
+        let known = matches!(&self.state, JobState::Failed(reason) if !reason.is_empty());
+        let ended = matches!(self.state, JobState::Completed | JobState::Cancelled);
+        if known || ended {
+            return false;
+        }
+        self.state = JobState::Failed(error.to_owned());
+        true
+    }
+
+    /// Marks the running job cancel-requested; returns whether a cancel is
+    /// to go out: not once it ended, nor a second time.
+    fn request_cancel(&mut self) -> bool {
+        let send = self.state == JobState::Running && !self.cancel_requested;
+        self.cancel_requested |= send;
+        send
+    }
+
+    /// Stop all: the live sessions, after a cancel when the job still runs;
+    /// None with nothing live to stop.
+    fn stop_all(&mut self, job_id: &str, live: &dyn Fn(&str) -> bool) -> Option<JobAction> {
+        let sessions: Vec<String> = self
+            .session_ids
+            .iter()
+            .filter(|id| live(id))
+            .cloned()
+            .collect();
+        if sessions.is_empty() {
+            return None;
+        }
+        let cancel = self.request_cancel().then(|| job_id.to_owned());
+        Some(JobAction::StopAll { cancel, sessions })
+    }
+
+    /// Notes the sessions and the first tab a message names.
+    fn fold_ids(&mut self, sessions: &[String], tabs: &[String]) {
+        for id in sessions {
+            if !self.session_ids.contains(id) {
+                self.session_ids.push(id.clone());
+            }
+        }
+        if self.first_tab == FirstTab::Unknown
+            && let Some(tab) = tabs.first()
+        {
+            self.first_tab = FirstTab::Known(tab.clone());
+        }
+    }
+
+    /// The toast's buttons: Cancel while it runs and no cancel went out,
+    /// Select, and Stop all while one of its sessions is `live`.
+    fn actions(&self, live: &dyn Fn(&str) -> bool) -> Vec<ToastAction> {
+        let cancel = (self.state == JobState::Running && !self.cancel_requested).then_some(CANCEL);
+        let stop = self
+            .session_ids
+            .iter()
+            .any(|id| live(id))
+            .then_some(STOP_ALL);
+        cancel.into_iter().chain([SELECT]).chain(stop).collect()
+    }
+
     /// The tabs the launch fills.
     fn tabs(&self) -> u32 {
         self.cap.map_or(1, |cap| self.total.div_ceil(cap.max(1)))
@@ -439,7 +630,7 @@ impl LaunchJob {
         ))
     }
 
-    fn toast(&self, job_id: &str) -> ToastSpec {
+    fn toast(&self, job_id: &str, live: &dyn Fn(&str) -> bool) -> ToastSpec {
         let preset = &self.preset;
         let (kind, title, detail, sticky) = match &self.state {
             JobState::Running => (
@@ -477,7 +668,7 @@ impl LaunchJob {
                 ToastKind::Warning,
                 format!("Preset launch failed: {preset}"),
                 (!reason.is_empty()).then(|| reason.clone()),
-                false,
+                true,
             ),
         };
         ToastSpec {
@@ -486,6 +677,7 @@ impl LaunchJob {
             detail,
             key: Some(toast_key(job_id)),
             sticky,
+            actions: self.actions(live),
         }
     }
 }
@@ -516,48 +708,111 @@ impl PresetLaunches {
             tabs_created: 0,
             state: JobState::Running,
             progress_dismissed: false,
+            session_ids: Vec::new(),
+            first_tab: FirstTab::Unknown,
+            cancel_requested: false,
         };
-        let spec = job.toast(&job_id);
+        let spec = job.toast(&job_id, &|_| false);
         self.jobs.insert(job_id, job);
         spec
     }
 
     /// Folds a job event of one of these jobs; returns the toast it now
-    /// shows, or None when the message changes nothing shown.
-    pub fn on_message(&mut self, msg: &DaemonMessage) -> Option<ToastSpec> {
-        let job_id = match msg {
-            DaemonMessage::PresetLaunchJobUpdated { job } => &job.job_id,
-            DaemonMessage::PresetLaunchProgress { job_id, .. }
-            | DaemonMessage::PresetLaunchFailed { job_id, .. } => job_id,
-            _ => return None,
-        };
+    /// shows, its Stop all offered while a session is `live`, or None when
+    /// the message changes nothing shown. Session and tab ids fold in
+    /// whatever the job's state.
+    pub fn on_message(
+        &mut self,
+        live: &dyn Fn(&str) -> bool,
+        msg: &DaemonMessage,
+    ) -> Option<ToastSpec> {
+        let job_id = job_of_message(msg)?;
         let launch = self.jobs.get_mut(job_id)?;
-        match msg {
-            DaemonMessage::PresetLaunchJobUpdated { job } if launch.state == JobState::Running => {
-                launch.fold_snapshot(job);
-            }
-            DaemonMessage::PresetLaunchProgress {
-                total,
-                launched,
-                tab_ids,
-                ..
-            } if launch.state == JobState::Running => {
-                launch.total = *total;
-                launch.launched = *launched;
-                launch.tabs_created = tab_ids.len();
-            }
-            DaemonMessage::PresetLaunchFailed { error, .. } => {
-                let known = matches!(&launch.state, JobState::Failed(reason) if !reason.is_empty());
-                let ended = matches!(launch.state, JobState::Completed | JobState::Cancelled);
-                if known || ended {
-                    return None;
-                }
-                launch.state = JobState::Failed(error.clone());
-            }
-            _ => return None,
+        launch.fold_ids_of(msg);
+        if !launch.fold_event(msg) {
+            return None;
         }
         (launch.state != JobState::Running || !launch.progress_dismissed)
-            .then(|| launch.toast(job_id))
+            .then(|| launch.toast(job_id, live))
+    }
+
+    /// Each job's toast key and its buttons, Stop all offered while one of
+    /// its sessions is `live`; sorted by key.
+    #[must_use]
+    pub fn shown_actions(&self, live: &dyn Fn(&str) -> bool) -> Vec<(String, Vec<ToastAction>)> {
+        let mut shown: Vec<(String, Vec<ToastAction>)> = self
+            .jobs
+            .iter()
+            .map(|(job_id, job)| (toast_key(job_id), job.actions(live)))
+            .collect();
+        shown.sort_by(|a, b| a.0.cmp(&b.0));
+        shown
+    }
+
+    /// A press of button `action` on toast `key`: what it does, or None when
+    /// the toast is no job's or the job no longer offers it. Cancel goes
+    /// out once, only while the job runs, and so does Stop all's cancel;
+    /// Stop all needs a session `live`.
+    pub fn press(
+        &mut self,
+        key: &str,
+        action: &str,
+        live: &dyn Fn(&str) -> bool,
+    ) -> Option<JobAction> {
+        let job_id = job_id_of(key)?;
+        let job = self.jobs.get_mut(job_id)?;
+        match action {
+            id if id == CANCEL.id => job
+                .request_cancel()
+                .then(|| JobAction::Cancel(job_id.to_owned())),
+            id if id == SELECT.id => Some(JobAction::Select),
+            id if id == STOP_ALL.id => job.stop_all(job_id, live),
+            _ => None,
+        }
+    }
+
+    /// The sessions the job of toast `key` made so far; none for a key no
+    /// job of these has.
+    #[must_use]
+    pub fn session_ids(&self, key: &str) -> Vec<String> {
+        job_id_of(key)
+            .and_then(|job_id| self.jobs.get(job_id))
+            .map(|job| job.session_ids.clone())
+            .unwrap_or_default()
+    }
+
+    /// The first tab of each tab-grouping job whose first tab is known and
+    /// not yet handed out; each job's is handed out once.
+    pub fn take_first_tabs(&mut self) -> Vec<String> {
+        let mut tabs: Vec<String> = self
+            .jobs
+            .values_mut()
+            .filter(|job| job.grouped)
+            .filter_map(
+                |job| match std::mem::replace(&mut job.first_tab, FirstTab::Shown) {
+                    FirstTab::Known(tab) => Some(tab),
+                    unknown_or_shown => {
+                        job.first_tab = unknown_or_shown;
+                        None
+                    }
+                },
+            )
+            .collect();
+        tabs.sort();
+        tabs
+    }
+
+    /// Whether the job of toast `key` is one of these.
+    #[must_use]
+    pub fn knows(&self, key: &str) -> bool {
+        job_id_of(key).is_some_and(|job_id| self.jobs.contains_key(job_id))
+    }
+
+    /// Drops the ended jobs whose toast is no longer `shown` (closed or timed
+    /// out); a running job stays, its end still to show.
+    pub fn retain_shown(&mut self, shown: impl Fn(&str) -> bool) {
+        self.jobs
+            .retain(|job_id, job| job.state == JobState::Running || shown(&toast_key(job_id)));
     }
 
     /// How far the job of toast `key` has come, 0 to 1, while it runs.
@@ -567,8 +822,7 @@ impl PresetLaunches {
         reason = "a fraction from 0 to 1 fits an f32"
     )]
     pub fn progress(&self, key: &str) -> Option<f32> {
-        let job_id = key.strip_prefix("preset:")?;
-        let job = self.jobs.get(job_id)?;
+        let job = self.jobs.get(job_id_of(key)?)?;
         if job.state != JobState::Running {
             return None;
         }
@@ -581,9 +835,7 @@ impl PresetLaunches {
     /// The user closed toast `key`: when it is a running job's progress, its
     /// later progress stays hidden and only the job's end shows.
     pub fn dismiss(&mut self, key: &str) {
-        let job = key
-            .strip_prefix("preset:")
-            .and_then(|job_id| self.jobs.get_mut(job_id));
+        let job = job_id_of(key).and_then(|job_id| self.jobs.get_mut(job_id));
         if let Some(job) = job
             && job.state == JobState::Running
         {
@@ -591,16 +843,55 @@ impl PresetLaunches {
         }
     }
 
-    /// Forgets every job, as a new connection must; returns their toasts'
-    /// keys.
-    pub fn clear(&mut self) -> Vec<String> {
+    /// Forgets the running jobs, whose progress a new connection no longer
+    /// reports; returns their toasts' keys. Ended jobs keep their toasts.
+    pub fn drop_running(&mut self) -> Vec<String> {
         let mut keys: Vec<String> = self
             .jobs
-            .drain()
-            .map(|(job_id, _)| toast_key(&job_id))
+            .iter()
+            .filter(|(_, job)| job.state == JobState::Running)
+            .map(|(job_id, _)| toast_key(job_id))
             .collect();
+        self.jobs.retain(|_, job| job.state != JobState::Running);
         keys.sort();
         keys
+    }
+}
+
+/// The sessions a launch toast's Select marked: the selected job's, kept
+/// up as it makes more, until cleared. A session it marked stays marked
+/// after the job leaves the registry.
+#[derive(Debug, Default)]
+pub struct LaunchHighlight {
+    /// The toast key of the job the marks follow.
+    job: Option<String>,
+    sessions: HashSet<String>,
+}
+
+impl LaunchHighlight {
+    /// Marks the sessions of the job of toast `key`, in place of any marks.
+    pub fn select(&mut self, key: &str, launches: &PresetLaunches) {
+        self.job = Some(key.to_owned());
+        self.sessions = launches.session_ids(key).into_iter().collect();
+    }
+
+    /// Marks the sessions the followed job made since.
+    pub fn follow(&mut self, launches: &PresetLaunches) {
+        if let Some(key) = &self.job {
+            self.sessions.extend(launches.session_ids(key));
+        }
+    }
+
+    /// Drops every mark and follows no job.
+    pub fn clear(&mut self) {
+        self.job = None;
+        self.sessions.clear();
+    }
+
+    /// Whether session `id` is marked.
+    #[must_use]
+    pub fn contains(&self, id: &str) -> bool {
+        self.sessions.contains(id)
     }
 }
 
@@ -780,9 +1071,15 @@ mod tests {
         let mut launches = PresetLaunches::default();
         launches.start("j1".to_owned(), "Sweep".to_owned(), true, Some(3));
         let foreign = snapshot("other", PresetLaunchJobStatus::Spawning);
-        assert_eq!(launches.on_message(&updated(foreign)), None);
-        assert_eq!(launches.on_message(&progress("other", 1, &[])), None);
-        assert_eq!(launches.on_message(&failed("other", "boom")), None);
+        assert_eq!(launches.on_message(&all_live, &updated(foreign)), None);
+        assert_eq!(
+            launches.on_message(&all_live, &progress("other", 1, &[])),
+            None
+        );
+        assert_eq!(
+            launches.on_message(&all_live, &failed("other", "boom")),
+            None
+        );
     }
 
     #[test]
@@ -796,14 +1093,17 @@ mod tests {
         );
         assert_eq!(first.key.as_deref(), Some("preset:j1"));
         let spawning = launches
-            .on_message(&updated(snapshot("j1", PresetLaunchJobStatus::Spawning)))
+            .on_message(
+                &all_live,
+                &updated(snapshot("j1", PresetLaunchJobStatus::Spawning)),
+            )
             .unwrap_or(first.clone());
         assert_eq!(
             spawning.detail.as_deref(),
             Some("0 of 6 sessions · 0 of 2 tabs")
         );
         let third = launches
-            .on_message(&progress("j1", 3, &["t1"]))
+            .on_message(&all_live, &progress("j1", 3, &["t1"]))
             .unwrap_or(first.clone());
         assert_eq!(
             texts(&third),
@@ -826,7 +1126,7 @@ mod tests {
         let mut done = snapshot("j1", PresetLaunchJobStatus::Completed);
         done.launched = 6;
         done.created_tab_ids = strings(&["t1", "t2"]);
-        let spec = launches.on_message(&updated(done));
+        let spec = launches.on_message(&all_live, &updated(done));
         assert_eq!(
             spec.as_ref().map(texts),
             Some((
@@ -838,7 +1138,7 @@ mod tests {
         );
         assert_eq!(launches.progress("preset:j1"), None, "no bar once done");
         assert_eq!(
-            launches.on_message(&progress("j1", 6, &["t1", "t2"])),
+            launches.on_message(&all_live, &progress("j1", 6, &["t1", "t2"])),
             None,
             "a late event changes nothing"
         );
@@ -848,7 +1148,7 @@ mod tests {
         let mut one = snapshot("j2", PresetLaunchJobStatus::Spawning);
         one.total = 1;
         assert_eq!(
-            flat.on_message(&updated(one.clone()))
+            flat.on_message(&all_live, &updated(one.clone()))
                 .and_then(|spec| spec.detail),
             Some("0 of 1 session".to_owned()),
             "no tabs part without grouping"
@@ -856,7 +1156,8 @@ mod tests {
         one.status = PresetLaunchJobStatus::Completed;
         one.launched = 1;
         assert_eq!(
-            flat.on_message(&updated(one)).and_then(|spec| spec.detail),
+            flat.on_message(&all_live, &updated(one))
+                .and_then(|spec| spec.detail),
             Some("1 session".to_owned())
         );
     }
@@ -868,7 +1169,10 @@ mod tests {
         let mut cancelled = snapshot("j1", PresetLaunchJobStatus::Cancelled);
         cancelled.launched = 2;
         assert_eq!(
-            launches.on_message(&updated(cancelled)).as_ref().map(texts),
+            launches
+                .on_message(&all_live, &updated(cancelled))
+                .as_ref()
+                .map(texts),
             Some((
                 ToastKind::Info,
                 "Cancelled Sweep",
@@ -885,44 +1189,315 @@ mod tests {
         let mut job = snapshot("j1", PresetLaunchJobStatus::Failed);
         job.error = Some("no such folder".to_owned());
         assert_eq!(
-            launches.on_message(&updated(job)).as_ref().map(texts),
+            launches
+                .on_message(&all_live, &updated(job))
+                .as_ref()
+                .map(texts),
             Some((
                 ToastKind::Warning,
                 "Preset launch failed: Sweep",
                 Some("no such folder"),
-                false
-            ))
+                true
+            )),
+            "a failure stays until closed"
         );
-        assert_eq!(launches.on_message(&failed("j1", "no such folder")), None);
+        assert_eq!(
+            launches.on_message(&all_live, &failed("j1", "no such folder")),
+            None
+        );
 
         launches.start("j2".to_owned(), "Other".to_owned(), false, None);
         assert_eq!(
             launches
-                .on_message(&updated(snapshot("j2", PresetLaunchJobStatus::Failed)))
+                .on_message(
+                    &all_live,
+                    &updated(snapshot("j2", PresetLaunchJobStatus::Failed))
+                )
                 .and_then(|spec| spec.detail),
             None,
             "the snapshot named no reason"
         );
         assert_eq!(
             launches
-                .on_message(&failed("j2", "spawn refused"))
+                .on_message(&all_live, &failed("j2", "spawn refused"))
                 .and_then(|spec| spec.detail),
             Some("spawn refused".to_owned()),
             "the failure message fills the reason in on the same toast"
         );
-        assert_eq!(launches.on_message(&failed("j2", "spawn refused")), None);
+        assert_eq!(
+            launches.on_message(&all_live, &failed("j2", "spawn refused")),
+            None
+        );
     }
 
     #[test]
-    fn clearing_forgets_every_job_and_names_their_toasts() {
+    fn a_new_connection_forgets_running_jobs_and_keeps_finished_ones() {
         let mut launches = PresetLaunches::default();
         launches.start("j1".to_owned(), "Sweep".to_owned(), true, Some(3));
-        assert_eq!(launches.clear(), ["preset:j1"]);
+        launches.start("j2".to_owned(), "Done".to_owned(), false, None);
+        launches.on_message(
+            &all_live,
+            &updated(snapshot("j2", PresetLaunchJobStatus::Completed)),
+        );
+        assert_eq!(launches.drop_running(), ["preset:j1"]);
         assert_eq!(
-            launches.on_message(&progress("j1", 1, &[])),
+            launches.on_message(&all_live, &progress("j1", 1, &[])),
             None,
             "a forgotten job is foreign"
         );
+        assert!(
+            launches.press("preset:j2", SELECT.id, &all_live).is_some(),
+            "the finished job keeps its buttons"
+        );
+    }
+
+    fn all_live(_: &str) -> bool {
+        true
+    }
+
+    fn with_sessions(mut job: PresetLaunchJobSnapshot, ids: &[&str]) -> PresetLaunchJobSnapshot {
+        job.created_session_ids = strings(ids);
+        job
+    }
+
+    fn ids(actions: &[ToastAction]) -> Vec<&'static str> {
+        actions.iter().map(|action| action.id).collect()
+    }
+
+    #[test]
+    fn the_buttons_follow_the_job_and_its_live_sessions() {
+        let mut launches = PresetLaunches::default();
+        let first = launches.start("j1".to_owned(), "Sweep".to_owned(), true, Some(3));
+        assert_eq!(
+            ids(&first.actions),
+            ["cancel", "select"],
+            "nothing to stop yet"
+        );
+        let spawning = with_sessions(snapshot("j1", PresetLaunchJobStatus::Spawning), &["s1"]);
+        let spec = launches.on_message(&all_live, &updated(spawning));
+        assert_eq!(
+            spec.map(|spec| ids(&spec.actions)),
+            Some(vec!["cancel", "select", "stop-all"])
+        );
+        assert_eq!(
+            [CANCEL.label, SELECT.label, STOP_ALL.label],
+            ["Cancel", "Select", "Stop all"]
+        );
+        assert_eq!(
+            [CANCEL.danger, SELECT.danger, STOP_ALL.danger],
+            [true, false, true],
+            "Cancel and Stop all are destructive"
+        );
+        let none_live = |_: &str| false;
+        let shown = launches.shown_actions(&none_live);
+        assert_eq!(
+            shown
+                .iter()
+                .map(|(key, actions)| (key.as_str(), ids(actions)))
+                .collect::<Vec<_>>(),
+            [("preset:j1", vec!["cancel", "select"])],
+            "Stop all goes once nothing it would stop runs"
+        );
+        let done = with_sessions(snapshot("j1", PresetLaunchJobStatus::Completed), &["s1"]);
+        let spec = launches.on_message(&all_live, &updated(done));
+        assert_eq!(
+            spec.map(|spec| ids(&spec.actions)),
+            Some(vec!["select", "stop-all"]),
+            "an ended job drops Cancel"
+        );
+    }
+
+    #[test]
+    fn session_ids_fold_after_the_job_ends() {
+        let mut launches = PresetLaunches::default();
+        launches.start("j1".to_owned(), "Sweep".to_owned(), true, Some(3));
+        let mut msg = failed("j1", "boom");
+        if let DaemonMessage::PresetLaunchFailed {
+            partial_session_ids,
+            ..
+        } = &mut msg
+        {
+            *partial_session_ids = strings(&["s1"]);
+        }
+        launches.on_message(&all_live, &msg);
+        let late = with_sessions(snapshot("j1", PresetLaunchJobStatus::Failed), &["s1", "s2"]);
+        assert_eq!(launches.on_message(&all_live, &updated(late)), None);
+        assert_eq!(
+            launches.session_ids("preset:j1"),
+            strings(&["s1", "s2"]),
+            "the partial ids and the later snapshot's, once each"
+        );
+        assert_eq!(
+            launches.press("preset:j1", SELECT.id, &all_live),
+            Some(JobAction::Select)
+        );
+    }
+
+    #[test]
+    fn a_pressed_cancel_goes_until_the_job_ends() {
+        let mut launches = PresetLaunches::default();
+        launches.start("j1".to_owned(), "Sweep".to_owned(), true, Some(3));
+        assert_eq!(
+            launches.press("preset:j1", CANCEL.id, &all_live),
+            Some(JobAction::Cancel("j1".to_owned()))
+        );
+        assert_eq!(
+            ids(&launches.shown_actions(&all_live)[0].1),
+            ["select"],
+            "Cancel goes once pressed"
+        );
+        assert_eq!(
+            launches.press("preset:j1", CANCEL.id, &all_live),
+            None,
+            "a second press sends nothing"
+        );
+        let still = with_sessions(snapshot("j1", PresetLaunchJobStatus::Spawning), &["s1"]);
+        let spec = launches.on_message(&all_live, &updated(still));
+        assert_eq!(
+            spec.map(|spec| ids(&spec.actions)),
+            Some(vec!["select", "stop-all"]),
+            "a snapshot of the still running job does not bring it back"
+        );
+    }
+
+    #[test]
+    fn stop_all_on_a_running_job_cancels_it_first_and_stops_the_live_sessions() {
+        let mut launches = PresetLaunches::default();
+        launches.start("j1".to_owned(), "Sweep".to_owned(), true, Some(3));
+        let job = with_sessions(
+            snapshot("j1", PresetLaunchJobStatus::Spawning),
+            &["s1", "s2"],
+        );
+        launches.on_message(&all_live, &updated(job));
+        let s2_live = |id: &str| id == "s2";
+        assert_eq!(
+            launches.press("preset:j1", STOP_ALL.id, &s2_live),
+            Some(JobAction::StopAll {
+                cancel: Some("j1".to_owned()),
+                sessions: strings(&["s2"])
+            })
+        );
+        assert_eq!(
+            launches.press("preset:j1", CANCEL.id, &all_live),
+            None,
+            "Stop all already asked for the cancel"
+        );
+        assert_eq!(
+            launches.press("preset:j1", STOP_ALL.id, &s2_live),
+            Some(JobAction::StopAll {
+                cancel: None,
+                sessions: strings(&["s2"])
+            }),
+            "the cancel is asked once"
+        );
+    }
+
+    #[test]
+    fn stop_all_on_an_ended_job_only_stops_and_cancel_needs_a_running_job() {
+        let mut launches = PresetLaunches::default();
+        launches.start("j1".to_owned(), "Sweep".to_owned(), true, Some(3));
+        assert_eq!(launches.press("preset:j1", "nope", &all_live), None);
+        assert_eq!(launches.press("preset:other", SELECT.id, &all_live), None);
+        let done = with_sessions(snapshot("j1", PresetLaunchJobStatus::Cancelled), &["s1"]);
+        launches.on_message(&all_live, &updated(done));
+        assert_eq!(
+            launches.press("preset:j1", CANCEL.id, &all_live),
+            None,
+            "nothing to cancel once it ended"
+        );
+        assert_eq!(
+            launches.press("preset:j1", STOP_ALL.id, &all_live),
+            Some(JobAction::StopAll {
+                cancel: None,
+                sessions: strings(&["s1"])
+            })
+        );
+        assert_eq!(
+            launches.press("preset:j1", STOP_ALL.id, &|_| false),
+            None,
+            "nothing live to stop"
+        );
+    }
+
+    #[test]
+    fn the_highlight_follows_the_selected_job_until_cleared() {
+        let mut launches = PresetLaunches::default();
+        launches.start("j1".to_owned(), "Sweep".to_owned(), true, Some(3));
+        launches.start("j2".to_owned(), "Other".to_owned(), false, None);
+        let fold = |launches: &mut PresetLaunches, job_id: &str, ids: &[&str]| {
+            let job = with_sessions(snapshot(job_id, PresetLaunchJobStatus::Spawning), ids);
+            launches.on_message(&all_live, &updated(job));
+        };
+        fold(&mut launches, "j1", &["s1"]);
+        fold(&mut launches, "j2", &["s9"]);
+        let mut highlight = LaunchHighlight::default();
+        highlight.select("preset:j1", &launches);
+        assert!(highlight.contains("s1") && !highlight.contains("s9"));
+        fold(&mut launches, "j1", &["s1", "s2"]);
+        highlight.follow(&launches);
+        assert!(highlight.contains("s2"), "a session made after the click");
+        highlight.select("preset:j2", &launches);
+        assert!(
+            !highlight.contains("s1") && highlight.contains("s9"),
+            "another job's Select replaces it"
+        );
+        highlight.clear();
+        fold(&mut launches, "j2", &["s9", "s10"]);
+        highlight.follow(&launches);
+        assert!(
+            !highlight.contains("s9") && !highlight.contains("s10"),
+            "a cleared highlight follows nothing"
+        );
+    }
+
+    #[test]
+    fn only_session_tab_and_job_messages_touch_the_launches() {
+        let output = DaemonMessage::PtyOutput {
+            session_id: "s1".to_owned(),
+            data_b64: String::new(),
+        };
+        assert!(!touches_launches(&output), "a terminal frame");
+        assert!(touches_launches(&progress("j1", 1, &[])));
+        assert!(touches_launches(&failed("j1", "boom")));
+        assert!(touches_launches(&DaemonMessage::SessionRemoved {
+            session_id: "s1".to_owned()
+        }));
+        assert!(touches_launches(&DaemonMessage::Tabs { tabs: Vec::new() }));
+    }
+
+    #[test]
+    fn the_first_tab_is_handed_out_once_and_only_with_tab_grouping() {
+        let mut launches = PresetLaunches::default();
+        launches.start("j1".to_owned(), "Sweep".to_owned(), true, Some(3));
+        launches.start("j2".to_owned(), "Flat".to_owned(), false, None);
+        assert!(launches.take_first_tabs().is_empty(), "no tab known yet");
+        launches.on_message(&all_live, &progress("j1", 1, &["t1"]));
+        launches.on_message(&all_live, &progress("j2", 1, &["t9"]));
+        assert_eq!(launches.take_first_tabs(), ["t1"]);
+        launches.on_message(&all_live, &progress("j1", 4, &["t1", "t2"]));
+        assert!(launches.take_first_tabs().is_empty(), "once per job");
+    }
+
+    #[test]
+    fn a_finished_job_leaves_when_its_toast_is_gone() {
+        let mut launches = PresetLaunches::default();
+        launches.start("j1".to_owned(), "Sweep".to_owned(), true, Some(3));
+        launches.start("j2".to_owned(), "Done".to_owned(), false, None);
+        launches.on_message(
+            &all_live,
+            &updated(snapshot("j2", PresetLaunchJobStatus::Completed)),
+        );
+        launches.retain_shown(|_| false);
+        assert!(
+            launches.press("preset:j1", SELECT.id, &all_live).is_some(),
+            "a running job stays with its toast closed"
+        );
+        assert_eq!(launches.press("preset:j2", SELECT.id, &all_live), None);
+        assert!(launches.knows("preset:j1"));
+        assert!(!launches.knows("preset:j2"), "the closed job is gone");
+        assert!(!launches.knows("j1"), "a key, not a job id");
+        assert_eq!(job_id_of(&toast_key("j1")), Some("j1"));
+        assert_eq!(job_id_of("unc-refused:host"), None);
     }
 
     #[expect(
@@ -963,7 +1538,7 @@ mod tests {
         job.total = 3;
         assert_eq!(
             launches
-                .on_message(&updated(job))
+                .on_message(&all_live, &updated(job))
                 .and_then(|spec| spec.detail),
             Some("0 of 3 sessions · 0 of 3 tabs".to_owned())
         );
@@ -975,19 +1550,19 @@ mod tests {
         launches.start("j1".to_owned(), "Sweep".to_owned(), true, Some(3));
         assert_eq!(
             launches
-                .on_message(&failed("j1", "boom"))
+                .on_message(&all_live, &failed("j1", "boom"))
                 .as_ref()
                 .map(texts),
             Some((
                 ToastKind::Warning,
                 "Preset launch failed: Sweep",
                 Some("boom"),
-                false
+                true
             ))
         );
         let mut job = snapshot("j1", PresetLaunchJobStatus::Failed);
         job.error = Some("boom".to_owned());
-        assert_eq!(launches.on_message(&updated(job)), None);
+        assert_eq!(launches.on_message(&all_live, &updated(job)), None);
     }
 
     #[test]
@@ -996,9 +1571,15 @@ mod tests {
         launches.start("j1".to_owned(), "Sweep".to_owned(), true, Some(3));
         launches.dismiss("preset:j1");
         launches.dismiss("preset:unknown");
-        assert_eq!(launches.on_message(&progress("j1", 2, &["t1"])), None);
         assert_eq!(
-            launches.on_message(&updated(snapshot("j1", PresetLaunchJobStatus::Spawning))),
+            launches.on_message(&all_live, &progress("j1", 2, &["t1"])),
+            None
+        );
+        assert_eq!(
+            launches.on_message(
+                &all_live,
+                &updated(snapshot("j1", PresetLaunchJobStatus::Spawning))
+            ),
             None
         );
         assert_eq!(
@@ -1009,11 +1590,13 @@ mod tests {
         let mut done = snapshot("j1", PresetLaunchJobStatus::Completed);
         done.launched = 6;
         assert_eq!(
-            launches.on_message(&updated(done)).map(|spec| spec.title),
+            launches
+                .on_message(&all_live, &updated(done))
+                .map(|spec| spec.title),
             Some("Launched Sweep".to_owned()),
             "the end still shows once"
         );
-        assert_eq!(launches.on_message(&failed("j1", "late")), None);
+        assert_eq!(launches.on_message(&all_live, &failed("j1", "late")), None);
     }
 
     #[test]

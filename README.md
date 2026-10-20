@@ -135,11 +135,13 @@ Start with [docs/architecture.md](docs/architecture.md) for how the pieces fit a
 - **Sealing**: the daemon's replacing of a secret row's literal value with a secret reference before the spawn config is captured, at spawn and, for older files, at startup; see `docs/env-secrets.md`.
 - **Secret reference**: an environment-row value written `${secret:<id>}`, standing for a value the daemon saved in Windows Credential Manager; resolved at spawn, stored and echoed in place of the value.
 - **Secret row**: an environment row whose key has a `KEY`, `TOKEN`, `SECRET` or `PASSWORD` segment or which the dialog's Secret toggle marks.
+- **Select launched**: the button on a preset job's toast that tints that job's sessions in the sidebar (palette `LAUNCHED_TINT`) and shows the Sessions view; any session click or a `Welcome` clears the tint.
 - **Session history**: the daemon's record of ended sessions, one `history/<id>.json` per session under the config dir, kept 7 days; see `docs/architecture.md` (Session history and recovery) and `docs/native-client.md` (Session recovery).
 - **Shared client core**: the planned Rust crate holding the tailnet connect and host profiles, used by both the native client's remote mode and the mobile app.
 - **Spike**: throwaway code that proves an approach works, kept outside the main build (`spikes/`) and deleted once its code is ported.
 - **Status glyph**: the shape-and-colour mark for a session's status in the native client (working arc, asking diamond, waiting ring, idle dot); see `docs/native-client.md`.
 - **`status_since`**: the daemon's stamp of a session's last status change, on its snapshot and kept across a reattach; Needs You measures waits from it.
+- **Sticky toast**: a toast with no timeout that stays until its × is clicked or something replaces it; a running preset job's toast and a failed launch's toast are sticky.
 - **Stop (keyboard)**: a control Tab and Shift-Tab land on in a native dialog; see `docs/native-client.md` ("Keyboard reachability").
 - **Subplan**: a `docs/plans/*.md` design file holding the design and rulings for open items, linked from their issues and deleted once nothing open links it and its durable text is promoted into `docs/`.
 - **Summary view**: the planned third view of a session beside terminal and chat, one summarizer line per stretch of work (RT-111).
