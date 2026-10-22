@@ -171,8 +171,10 @@ async fn reattach_one(
                         Some(dirs.clone()),
                     );
                     let (in_tx, in_rx) = mpsc::unbounded_channel::<usize>();
-                    let screen: screen::SharedScreen =
-                        Arc::new(Mutex::new(screen::Screen::new(120, 32)));
+                    let screen: screen::SharedScreen = Arc::new(Mutex::new(screen::Screen::new(
+                        screen::REATTACH_COLS,
+                        screen::REATTACH_ROWS,
+                    )));
                     let restored = {
                         let mut guard = crate::sync::lock(pending.arc());
                         guard.scrollback_snapshot_req = Some(snap_tx);
@@ -181,6 +183,7 @@ async fn reattach_one(
                         guard.status
                     };
                     screen::watch(screen, meta.session_id.clone(), pty.output.subscribe());
+                    pty.resize(screen::REATTACH_COLS, screen::REATTACH_ROWS);
                     if meta.mode == SessionMode::PlainShell {
                         pty_state::watch_plain_shell(
                             &sessions,

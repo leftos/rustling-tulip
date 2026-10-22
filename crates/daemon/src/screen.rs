@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use alacritty_terminal::Term;
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::index::Column;
+use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::Config;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::vte::ansi::Processor;
@@ -19,6 +19,15 @@ use tokio::sync::broadcast;
 
 /// The character a TUI draws a horizontal rule with.
 const RULE_CHAR: char = '─';
+
+/// The grid width a reattached session starts at: the daemon does not know
+/// the size the tracer's PTY last had, so the replay is applied to a grid of
+/// this size and the PTY is moved to it as well; the client's first `Resize`
+/// moves both together.
+pub const REATTACH_COLS: u16 = 120;
+
+/// The grid height a reattached session starts at.
+pub const REATTACH_ROWS: u16 = 32;
 
 /// The grid of one session, shared between the watcher that feeds it and its
 /// readers.
@@ -108,11 +117,22 @@ impl Screen {
         self.parser.advance(&mut self.term, bytes);
     }
 
-    /// Resizes the grid with the PTY; a zero dimension becomes one.
+    /// Drops any escape sequence the parser had half read, so the rest of the
+    /// stream starts from the ground state instead of being swallowed.
+    pub fn reset_parser(&mut self) {
+        self.parser = Processor::new();
+    }
+
+    /// Resizes the grid with the PTY. A zero dimension is ignored: with no
+    /// history a collapsed grid would lose the frame the PTY still shows.
     pub fn resize(&mut self, cols: u16, rows: u16) {
+        if cols == 0 || rows == 0 {
+            tracing::debug!(cols, rows, "screen: ignoring a zero-size resize");
+            return;
+        }
         let size = Size {
-            cols: usize::from(cols.max(1)),
-            rows: usize::from(rows.max(1)),
+            cols: usize::from(cols),
+            rows: usize::from(rows),
         };
         self.term.resize(size);
         self.cols = size.cols;
@@ -123,10 +143,9 @@ impl Screen {
     #[must_use]
     pub fn rows(&self) -> Vec<String> {
         let grid = self.term.grid();
-        let first = grid.topmost_line();
         (0..self.rows)
             .map(|index| {
-                let row = &grid[first + index];
+                let row = &grid[Line::from(index)];
                 let mut text = String::with_capacity(self.cols);
                 for column in 0..self.cols {
                     let cell = &row[Column(column)];
@@ -137,6 +156,9 @@ impl Screen {
                         continue;
                     }
                     text.push(cell.c);
+                    if let Some(extra) = cell.zerowidth() {
+                        text.extend(extra);
+                    }
                 }
                 text.trim_end().to_owned()
             })
@@ -226,6 +248,7 @@ pub fn watch(screen: SharedScreen, session_id: String, mut output: broadcast::Re
             match output.recv().await {
                 Ok(bytes) => crate::sync::lock(&screen).feed(&bytes),
                 Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    crate::sync::lock(&screen).reset_parser();
                     tracing::warn!(
                         session_id = %session_id,
                         skipped,
@@ -358,6 +381,35 @@ mod tests {
         let mut screen = Screen::new(20, 4);
         screen.feed("日本 ok".as_bytes());
         assert_eq!(screen.rows()[0], "日本 ok");
+    }
+
+    #[test]
+    fn a_combining_mark_stays_with_its_letter() {
+        let mut screen = Screen::new(20, 4);
+        // Built rather than written out so the source stays NFC.
+        let combining = char::from_u32(0x0301).expect("a combining acute accent");
+        let typed = format!("cafe{combining}");
+        screen.feed(typed.as_bytes());
+        assert_eq!(screen.rows()[0], typed);
+    }
+
+    #[test]
+    fn a_zero_size_resize_keeps_the_grid() {
+        let mut screen = Screen::new(40, 6);
+        screen.feed(b"keep me");
+        screen.resize(0, 6);
+        screen.resize(40, 0);
+        assert_eq!(screen.rows()[0], "keep me");
+        assert_eq!(screen.rows().len(), 6);
+    }
+
+    #[test]
+    fn a_reset_parser_drops_a_cut_sequence() {
+        let mut screen = Screen::new(40, 6);
+        screen.feed(b"\x1b]0;half a title");
+        screen.reset_parser();
+        screen.feed(b"\r\nafter");
+        assert_eq!(screen.bottom_non_empty_lines(1), ["after"]);
     }
 
     #[tokio::test]
