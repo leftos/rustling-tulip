@@ -622,7 +622,7 @@ fn session_rows() -> Vec<Row> {
             status: "idle",
             members: json!([member(YAAT, "main", YAAT_PATH)]),
             minutes: 25,
-            extra: json!({}),
+            extra: json!({ "background": true }),
         },
         Row {
             id: "s-proto",

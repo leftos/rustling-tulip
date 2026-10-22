@@ -291,6 +291,68 @@ fn live_hook_status_reports_working_asking_and_idle(cx: &mut TestAppContext) {
     assert_eq!(stopped.pending_input, None, "Stop clears the pending input");
 }
 
+/// A turn that ends with a background shell still running: the session is
+/// `Idle` with the background flag set, and the next prompt clears it.
+#[gpui::test]
+#[ignore = "e2e: run via .\\rt.ps1 native-e2e"]
+fn live_hook_status_reports_background_beside_idle(cx: &mut TestAppContext) {
+    let node = Command::new("node")
+        .arg("--version")
+        .output()
+        .is_ok_and(|out| out.status.success());
+    assert!(node, "node not on PATH; fake-claude needs it");
+    let daemon = LiveDaemon::start("hook-background");
+    let repo = daemon.git_fixture();
+    let (mut h, client) = Harness::open_live(cx, &daemon);
+    wait_connected(&mut h, &client, &daemon);
+
+    client.send(ClientMessage::AddRepo {
+        path: repo.to_string_lossy().into_owned(),
+        name: None,
+    });
+    let mut repo_id = None;
+    h.wait_until("the fixture repo in state.json", SPAWN, |_| {
+        repo_id = daemon.repo_id(&repo);
+        repo_id.is_some()
+    });
+    client.send(spawn_claude_in_place(
+        &repo_id.expect("the repo was registered"),
+    ));
+    let pane = place_first_session(&mut h, &client);
+
+    let session = wait_snapshot(&mut h, &client, "the claude session", |_| true);
+    let id = session.id.clone();
+
+    // The ready banner is briefly classified `Working`; cue only once the
+    // spawn has settled.
+    let settled = wait_status(&mut h, &client, 0, &id, SessionStatus::Idle);
+    assert!(
+        !settled.background,
+        "nothing runs in the background at spawn"
+    );
+
+    let from = client.message_count();
+    h.type_into(&pane, "/rt-hook bg\n");
+    let mut found = None;
+    h.wait_until(
+        &format!("session {id} to report Idle with background work"),
+        SPAWN,
+        |_| {
+            found = snapshot_from(&client, from, |s| {
+                s.id == id && s.status == SessionStatus::Idle && s.background
+            });
+            found.is_some()
+        },
+    );
+    let background = found.expect("a background snapshot was found");
+    assert_eq!(background.status, SessionStatus::Idle);
+
+    let from = client.message_count();
+    h.type_into(&pane, "/rt-hook prompt\n");
+    let working = wait_status(&mut h, &client, from, &id, SessionStatus::Working);
+    assert!(!working.background, "a new turn clears the background flag");
+}
+
 /// The processes still running from under `dir` once they have had
 /// [`EXIT`] to go.
 fn survivors_under(dir: &Path) -> Vec<(u32, PathBuf)> {

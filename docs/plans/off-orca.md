@@ -103,7 +103,7 @@ Goal: know when you are needed, on whatever screen you are near, without being p
 
 - **AT.1 A richer status.** Beside `Working / AwaitingInput / Idle`, the daemon knows a turn ended **with work still running**: `Stop.background_tasks` non-empty, live subagents (`SubagentStart` without `SubagentStop`, or RT-30's subagent tracking), a pending `ScheduleWakeup`/loop, or child processes of the agent still alive.
 
-  That session shows a **background** state (its own glyph: a hollow ring that spins) and never counts as finished. This rule is already in `hook-status.md`'s prior art (Orca's `claudeRunningNonAgentTask`); it is RT-84, under RT-25.
+  That session shows a **background** state (its own glyph: a ring with a spinning arc) and never counts as finished. A `Stop` with `background_tasks` or a one-shot cron is done (RT-84, under RT-25); the other sources listed above are not read yet.
 - **AT.2 Hand-off ready.** The orchestrator's checkpoint ends its turn with the exact line `Run /clear, then /nextup to continue.` (nextup `SKILL.md:208`), after writing `~/.claude/handoffs/nextup-<repo>.md` (header `<!-- nextup-handoff written=… expires=… -->`), and the context-budget hook pauses with "…run /clear, then /nextup" (`~/.claude/hooks/context-budget.ps1`).
 
   The daemon matches the marker in `Stop.last_assistant_message` (or the transcript's turn-end text) on an idle session with no background work and sets a **hand-off ready** flag (RT-85). The marker strings live in one table so `/pickup` and other loops can be added.

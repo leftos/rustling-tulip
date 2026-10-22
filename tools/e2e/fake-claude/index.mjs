@@ -21,8 +21,10 @@
  *     "/rt-hook prompt" it runs the `UserPromptSubmit` hooks with a prompt
  *     event on stdin; on "/rt-hook ask" it runs the `PreToolUse` hooks with an
  *     `AskUserQuestion` event, prints a line the daemon reads as a prompt, then
- *     runs the `Stop` hooks 5 s later. A missing or unreadable settings file
- *     leaves the run hookless rather than failing it.
+ *     runs the `Stop` hooks 5 s later; on "/rt-hook bg" it runs the
+ *     `UserPromptSubmit` hooks and then a `Stop` whose `background_tasks` lists
+ *     a running shell. A missing or unreadable settings file leaves the run
+ *     hookless rather than failing it.
  *   - Exits cleanly on "/exit\n" or SIGTERM/SIGBREAK.
  *   - Acknowledges (but does not act on) the `--add-dir`, `-p`,
  *     `--model`, and `--permission-mode` flags the daemon may pass.
@@ -203,6 +205,30 @@ function handleLine(line) {
       permission_mode: "auto",
     });
     process.stdout.write(`${TAG} working\r\n`);
+    process.stdout.write(PROMPT);
+    return;
+  }
+  if (line === "/rt-hook bg") {
+    runHooks("UserPromptSubmit", {
+      hook_event_name: "UserPromptSubmit",
+      prompt: line,
+      permission_mode: "auto",
+    });
+    runHooks("Stop", {
+      hook_event_name: "Stop",
+      last_assistant_message: "started",
+      background_tasks: [
+        {
+          id: "bfake0001",
+          type: "shell",
+          status: "running",
+          description: "fake background shell",
+          command: "sleep 600",
+        },
+      ],
+      session_crons: [],
+    });
+    process.stdout.write(`${TAG} background\r\n`);
     process.stdout.write(PROMPT);
     return;
   }
