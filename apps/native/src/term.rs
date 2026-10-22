@@ -385,6 +385,9 @@ pub struct TextSpan {
     pub col: usize,
     pub text: String,
     pub fg: Rgb,
+    /// The cell's own underline colour, resolved like its foreground; `None`
+    /// when the cell carries none and the underline takes the text colour.
+    pub underline_color: Option<Rgb>,
     /// Cell flags masked to [`SPAN_STYLE`]. A `WIDE_CHAR` span holds one
     /// two-cell glyph, shaped without the per-cell width lock.
     pub flags: Flags,
@@ -395,7 +398,9 @@ pub struct TextSpan {
 
 pub const SPAN_STYLE: Flags = Flags::BOLD
     .union(Flags::ITALIC)
-    .union(Flags::UNDERLINE)
+    .union(Flags::DIM)
+    .union(Flags::STRIKEOUT)
+    .union(Flags::ALL_UNDERLINES)
     .union(Flags::WIDE_CHAR);
 
 pub struct BgSpan {
@@ -878,7 +883,18 @@ impl LinkWindow {
         let edge = i32::try_from(self.rows.len())
             .unwrap_or(i32::MAX)
             .saturating_sub(1);
-        let mut links = links::detect_row_links(&self.rows, self.cols);
+        let mut links = links::hyperlink_links(&self.rows, self.cols);
+        let hyperlinks = links.len();
+        // A hyperlink's own target wins over the text it runs under, so a
+        // detected link sharing a cell with one is dropped.
+        for link in links::detect_row_links(&self.rows, self.cols) {
+            let shadowed = links[..hyperlinks]
+                .iter()
+                .any(|hyperlink| shares_a_cell(hyperlink, &link));
+            if !shadowed {
+                links.push(link);
+            }
+        }
         links.retain(|link| {
             let cut_short =
                 (self.cut_above && link.start_row == 0) || (self.cut_below && link.end_row == edge);
@@ -889,6 +905,17 @@ impl LinkWindow {
         }
         links
     }
+}
+
+/// Whether two links cover any cell in common.
+fn shares_a_cell(a: &TerminalLink, b: &TerminalLink) -> bool {
+    a.segments.iter().any(|first| {
+        b.segments.iter().any(|second| {
+            first.row == second.row
+                && first.start_column < second.end_column
+                && second.start_column < first.end_column
+        })
+    })
 }
 
 /// The row reader the link detector works on. Every method here hands out
@@ -992,6 +1019,7 @@ impl Terminal {
         let mut row = TerminalRow {
             text: String::with_capacity(grid.columns()),
             columns: Vec::with_capacity(grid.columns()),
+            hyperlinks: Vec::with_capacity(grid.columns()),
             is_wrapped: self.wraps(line),
         };
         for column in 0..grid.columns() {
@@ -1004,6 +1032,8 @@ impl Terminal {
             }
             row.text.push(cell.c);
             row.columns.push(links::column_limit(column));
+            row.hyperlinks
+                .push(cell.hyperlink().map(|link| link.uri().to_owned()));
         }
         row
     }
@@ -1092,6 +1122,13 @@ impl SpanBuilder {
                 resolve(bg, palette.colors, palette.theme),
             )
         };
+        // Dim text is drawn short of the background it sits on; a selected
+        // cell keeps the selection's foreground.
+        let fg = if !selected && cell.flags.contains(Flags::DIM) {
+            blend(fg, palette.background, 0.4)
+        } else {
+            fg
+        };
         let wide = cell.flags.contains(Flags::WIDE_CHAR);
         self.push_bg(row, col, if wide { 2 } else { 1 }, bg, palette.background);
         let hidden = cell.flags.contains(Flags::HIDDEN);
@@ -1111,6 +1148,9 @@ impl SpanBuilder {
             col,
             text,
             fg,
+            underline_color: cell
+                .underline_color()
+                .map(|color| resolve(color, palette.colors, palette.theme)),
             flags: cell.flags & SPAN_STYLE,
             cluster: !hidden && zero_width.is_some(),
         });
@@ -1125,6 +1165,7 @@ impl SpanBuilder {
             && last.row == span.row
             && last.col + last.text.chars().count() == span.col
             && last.fg == span.fg
+            && last.underline_color == span.underline_color
         {
             last.text.push_str(&span.text);
             return;
@@ -1224,11 +1265,14 @@ mod tests {
     use alacritty_terminal::selection::SelectionType;
     use alacritty_terminal::term::cell::Flags;
     use alacritty_terminal::term::color::Colors;
-    use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor};
+    use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Rgb};
 
+    use crate::links::LinkKind;
     use crate::theme::Theme;
 
-    use super::{GridSize, SpanBuilder, Terminal, TextSpan, brighten, default_named, resolve, rgb};
+    use super::{
+        GridSize, SpanBuilder, Terminal, TextSpan, blend, brighten, default_named, resolve, rgb,
+    };
 
     fn default_theme() -> Theme {
         Theme::default()
@@ -1240,6 +1284,7 @@ mod tests {
             col,
             text: text.to_owned(),
             fg: rgb(fg),
+            underline_color: None,
             flags,
             cluster: false,
         }
@@ -1612,6 +1657,64 @@ mod tests {
     }
 
     #[test]
+    fn dim_text_blends_toward_the_background() {
+        let theme = default_theme();
+        let snap = fed(b"\x1b[2mx\x1b[0my").snapshot();
+        let fg_of = |c: char| {
+            snap.text
+                .iter()
+                .find(|s| s.text.starts_with(c))
+                .map(|s| s.fg)
+        };
+        let dim = blend(theme.fg, theme.bg, 0.4);
+        assert_eq!(
+            fg_of('x'),
+            Some(dim),
+            "dim text moves toward the background"
+        );
+        assert_eq!(fg_of('y'), Some(theme.fg), "a reset cell does not");
+    }
+
+    #[test]
+    fn underline_styles_reach_the_span() {
+        let curled = fed(b"\x1b[4:3mC\x1b[0m").snapshot();
+        let c = curled.text.iter().find(|s| s.text.starts_with('C'));
+        assert_eq!(
+            c.map(|s| s.flags.contains(Flags::UNDERCURL)),
+            Some(true),
+            "the C span carries the curl"
+        );
+        let struck = fed(b"\x1b[9mS\x1b[0m").snapshot();
+        let s = struck.text.iter().find(|s| s.text.starts_with('S'));
+        assert_eq!(
+            s.map(|s| s.flags.contains(Flags::STRIKEOUT)),
+            Some(true),
+            "the S span carries the strikeout"
+        );
+    }
+
+    #[test]
+    fn underline_colour_reaches_the_span() {
+        let snap = fed(b"\x1b[4m\x1b[58:2::255:0:0mr\x1b[0mp").snapshot();
+        let under = |c: char| {
+            snap.text
+                .iter()
+                .find(|s| s.text.starts_with(c))
+                .map(|s| s.underline_color)
+        };
+        assert_eq!(
+            under('r'),
+            Some(Some(Rgb { r: 255, g: 0, b: 0 })),
+            "the r span keeps its own underline colour"
+        );
+        assert_eq!(
+            under('p'),
+            Some(None),
+            "a plain cell has no underline colour"
+        );
+    }
+
+    #[test]
     fn default_fg_bg_resolve_to_theme_defaults() {
         let theme = default_theme();
         let colors = Colors::default();
@@ -1686,6 +1789,33 @@ mod tests {
         assert_eq!(links[0].target, "X:/dev/project/long/name/file.ts");
         assert_eq!(links[0].start_row, -1);
         assert_eq!(links[0].end_row, 0);
+    }
+
+    #[test]
+    fn osc8_link_is_found_near_its_line() {
+        let term = fed(b"\x1b]8;;https://example.com\x1b\\click\x1b]8;;\x1b\\ rest");
+        let links = term.detect_links_near(0);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].kind, LinkKind::Url);
+        assert_eq!(links[0].target, "https://example.com");
+        assert_eq!(links[0].text, "click");
+        assert_eq!(
+            (
+                links[0].start_row,
+                links[0].start_column,
+                links[0].end_column
+            ),
+            (0, 0, 5)
+        );
+    }
+
+    #[test]
+    fn osc8_link_over_url_text_wins() {
+        let mut term = Terminal::new(GridSize { cols: 30, rows: 2 }, CursorShape::Block);
+        term.feed(b"\x1b]8;;https://example.com\x1b\\https://other.test\x1b]8;;\x1b\\");
+        let links = term.detect_links_near(0);
+        assert_eq!(links.len(), 1, "got {links:?}");
+        assert_eq!(links[0].target, "https://example.com");
     }
 
     #[test]

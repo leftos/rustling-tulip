@@ -16,10 +16,10 @@ use futures::channel::mpsc::UnboundedSender;
 use gpui::{
     AnyElement, App, BorderStyle, Bounds, Context, CursorStyle, DispatchPhase, ElementInputHandler,
     EntityInputHandler, EventEmitter, FocusHandle, Font, FontFeatures, FontStyle, FontWeight,
-    HitboxBehavior, KeyDownEvent, Keystroke, Modifiers, MouseButton, MouseDownEvent,
+    HitboxBehavior, Hsla, KeyDownEvent, Keystroke, Modifiers, MouseButton, MouseDownEvent,
     MouseExitEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Rgba, ScrollWheelEvent,
-    SharedString, Subscription, Task, TextRun, UTF16Selection, UnderlineStyle, Window, canvas, div,
-    fill, font, outline, point, prelude::*, px, size,
+    SharedString, StrikethroughStyle, Subscription, Task, TextRun, UTF16Selection, UnderlineStyle,
+    Window, canvas, div, fill, font, outline, point, prelude::*, px, size,
 };
 use protocol::{ClientMessage, SessionMode, SessionSnapshot};
 
@@ -1845,8 +1845,43 @@ fn paint_cursor(
     window.paint_quad(quad);
 }
 
+/// The decorations a cell's flags ask for, drawn in `fg` unless the cell
+/// carries an underline colour of its own. GPUI draws a plain or a wavy
+/// underline and nothing between, so dotted and dashed take the plain one and
+/// a double underline is the plain one twice as thick.
+#[must_use]
+pub fn decorations(
+    flags: Flags,
+    fg: Rgb,
+    underline_color: Option<Rgb>,
+) -> (Option<UnderlineStyle>, Option<StrikethroughStyle>) {
+    let underline = flags
+        .intersects(Flags::ALL_UNDERLINES)
+        .then(|| UnderlineStyle {
+            color: Some(colour(underline_color.unwrap_or(fg))),
+            thickness: if flags.contains(Flags::DOUBLE_UNDERLINE) {
+                px(2.0)
+            } else {
+                px(1.0)
+            },
+            wavy: flags.contains(Flags::UNDERCURL),
+        });
+    let strikethrough = flags
+        .contains(Flags::STRIKEOUT)
+        .then(|| StrikethroughStyle {
+            color: Some(colour(fg)),
+            thickness: px(1.0),
+        });
+    (underline, strikethrough)
+}
+
+fn colour(c: Rgb) -> Hsla {
+    to_rgba(c).into()
+}
+
 fn text_run(span: &TextSpan, m: &Metrics) -> TextRun {
     let color = to_rgba(span.fg);
+    let (underline, strikethrough) = decorations(span.flags, span.fg, span.underline_color);
     TextRun {
         len: span.text.len(),
         font: Font {
@@ -1864,15 +1899,8 @@ fn text_run(span: &TextSpan, m: &Metrics) -> TextRun {
         },
         color: color.into(),
         background_color: None,
-        underline: span
-            .flags
-            .contains(Flags::UNDERLINE)
-            .then(|| UnderlineStyle {
-                color: Some(color.into()),
-                thickness: px(1.0),
-                wavy: false,
-            }),
-        strikethrough: None,
+        underline,
+        strikethrough,
     }
 }
 
@@ -1944,8 +1972,12 @@ mod tests {
     use std::convert::Infallible;
     use std::time::Instant;
 
+    use alacritty_terminal::term::cell::Flags;
+    use alacritty_terminal::vte::ansi::Rgb;
+
     use super::{
-        Attachment, ReplyVerdict, ShellStatus, SizeGate, dot_color, paste_log_line, terminal_font,
+        Attachment, ReplyVerdict, ShellStatus, SizeGate, decorations, dot_color, paste_log_line,
+        terminal_font, to_rgba,
     };
     use crate::palette::{DANGER, WAITING};
     use crate::term_input;
@@ -2060,5 +2092,64 @@ mod tests {
         attach(&mut attachment, "a");
         attachment.take();
         assert!(!accept_scrollback(&mut attachment));
+    }
+
+    #[test]
+    fn decorations_follow_the_flags() {
+        let fg = Rgb {
+            r: 0x11,
+            g: 0x22,
+            b: 0x33,
+        };
+        let other = Rgb { r: 1, g: 2, b: 3 };
+
+        assert_eq!(
+            decorations(Flags::empty(), fg, None),
+            (None, None),
+            "a plain cell has neither decoration"
+        );
+
+        let (underline, strikethrough) = decorations(Flags::UNDERCURL, fg, None);
+        assert!(
+            underline
+                .as_ref()
+                .is_some_and(|u| u.wavy && u.thickness == gpui::px(1.0)),
+            "a curl is wavy and thin, got {underline:?}"
+        );
+        assert_eq!(underline.and_then(|u| u.color), Some(to_rgba(fg).into()));
+        assert_eq!(strikethrough, None);
+
+        let (underline, _) = decorations(Flags::DOUBLE_UNDERLINE, fg, None);
+        assert!(
+            underline
+                .as_ref()
+                .is_some_and(|u| !u.wavy && u.thickness == gpui::px(2.0)),
+            "a double underline is a thick plain one, got {underline:?}"
+        );
+
+        let (underline, _) = decorations(Flags::DOTTED_UNDERLINE, fg, None);
+        assert!(
+            underline
+                .as_ref()
+                .is_some_and(|u| !u.wavy && u.thickness == gpui::px(1.0)),
+            "a dotted underline draws plain, got {underline:?}"
+        );
+
+        let (underline, strikethrough) = decorations(Flags::STRIKEOUT, fg, None);
+        assert_eq!(underline, None);
+        let struck: Option<gpui::Hsla> = strikethrough.and_then(|s| s.color);
+        assert_eq!(
+            struck,
+            Some(to_rgba(fg).into()),
+            "a struck cell draws in the text colour"
+        );
+
+        let (underline, _) = decorations(Flags::UNDERLINE, fg, Some(other));
+        let own: Option<gpui::Hsla> = underline.and_then(|u| u.color);
+        assert_eq!(
+            own,
+            Some(to_rgba(other).into()),
+            "the cell's own underline colour wins over the text colour"
+        );
     }
 }

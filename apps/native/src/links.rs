@@ -29,6 +29,8 @@ pub struct TerminalRow {
     pub text: String,
     /// The grid column each character of `text` starts in, one entry each.
     pub columns: Vec<u16>,
+    /// The OSC 8 hyperlink each character of `text` carries, one entry each.
+    pub hyperlinks: Vec<Option<String>>,
     /// This row continues the one above it — a soft wrap.
     pub is_wrapped: bool,
 }
@@ -268,6 +270,160 @@ pub fn detect_row_links(rows: &[TerminalRow], cols: usize) -> Vec<TerminalLink> 
         links.extend(detect_segment_links(&group));
     }
     links
+}
+
+/// Every OSC 8 hyperlink in `rows`: one link per maximal run of consecutive
+/// characters on one row carrying the same URI. A run never continues across
+/// a row, wrapped or not.
+#[must_use]
+pub fn hyperlink_links(rows: &[TerminalRow], cols: usize) -> Vec<TerminalLink> {
+    let mut links = Vec::new();
+    for (at, row) in rows.iter().enumerate() {
+        let count = row.text.chars().count();
+        let mut index = 0;
+        while index < count {
+            let Some(uri) = row.hyperlinks.get(index).and_then(Option::as_deref) else {
+                index += 1;
+                continue;
+            };
+            let start = index;
+            while index < count && row.hyperlinks.get(index).and_then(Option::as_deref) == Some(uri)
+            {
+                index += 1;
+            }
+            let Some(kind) = hyperlink_kind(uri) else {
+                continue;
+            };
+            links.push(build_hyperlink_link(kind, uri, at, row, start, index, cols));
+        }
+    }
+    links
+}
+
+/// What a hyperlink URI points at: `http` and `https` are a URL, `file` a
+/// path, and every other scheme is left alone.
+fn hyperlink_kind(uri: &str) -> Option<LinkKind> {
+    if starts_with_ignore_case(uri, "http://") || starts_with_ignore_case(uri, "https://") {
+        Some(LinkKind::Url)
+    } else if starts_with_ignore_case(uri, "file://") {
+        Some(LinkKind::Path)
+    } else {
+        None
+    }
+}
+
+fn starts_with_ignore_case(value: &str, prefix: &str) -> bool {
+    value
+        .get(..prefix.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+}
+
+/// The path a `file:` URI names: the scheme, an optional host and the
+/// percent escapes off the front, with the slash a drive-rooted path starts
+/// with dropped so Windows reads it as absolute.
+///
+/// A `localhost` host says the same machine; any other host is a UNC share,
+/// whose path takes backslashes.
+fn file_uri_path(uri: &str) -> String {
+    let rest = uri.get("file://".len()..).unwrap_or(uri);
+    let (host, path) = match rest.find('/') {
+        Some(slash) => (&rest[..slash], &rest[slash..]),
+        None => ("", rest),
+    };
+    // `file://C:/x` puts a drive where the host goes; it names no share.
+    if !host.is_empty() && !host.eq_ignore_ascii_case("localhost") && !is_bare_drive(host) {
+        let path = percent_decode(path).replace('/', "\\");
+        return format!("\\\\{host}{path}");
+    }
+    strip_uri_root(&percent_decode(path))
+}
+
+/// `/C:/x` is the drive-rooted path `C:/x`: the leading slash is the URI's
+/// separator, not a root.
+fn strip_uri_root(path: &str) -> String {
+    let bytes = path.as_bytes();
+    let drive_rooted = bytes.len() >= 3
+        && bytes[0] == b'/'
+        && bytes[1].is_ascii_alphabetic()
+        && bytes[2] == b':'
+        && (bytes.len() == 3 || bytes[3] == b'/');
+    if drive_rooted {
+        path.get(1..).unwrap_or(path).to_owned()
+    } else {
+        path.to_owned()
+    }
+}
+
+/// `%20`-style escapes decoded as bytes, so a multi-byte character spelled as
+/// several escapes comes back whole. An escape that is not two hex digits is
+/// kept as the text it was.
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%'
+            && let Some(byte) = bytes.get(index + 1..index + 3).and_then(hex_pair)
+        {
+            out.push(byte);
+            index += 3;
+        } else {
+            out.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_pair(escape: &[u8]) -> Option<u8> {
+    let high = char::from(*escape.first()?).to_digit(16)?;
+    let low = char::from(*escape.get(1)?).to_digit(16)?;
+    u8::try_from(high * 16 + low).ok()
+}
+
+/// One hyperlink run as a link: its characters, its URI, and the cells it
+/// takes on its row.
+fn build_hyperlink_link(
+    kind: LinkKind,
+    uri: &str,
+    at: usize,
+    row: &TerminalRow,
+    start: usize,
+    end: usize,
+    cols: usize,
+) -> TerminalLink {
+    let target = match kind {
+        LinkKind::Url => uri.to_owned(),
+        LinkKind::Path => file_uri_path(uri),
+    };
+    // The run's last cell ends where the next character starts; at the row's
+    // end there is no next character, so it reaches the row's width, as the
+    // spacer cell behind a trailing wide glyph is never in the row's text.
+    let start_column = column_of(row, start, cols);
+    let end_column = column_after(row, end.saturating_sub(1), cols);
+    TerminalLink {
+        kind,
+        text: row.text.chars().skip(start).take(end - start).collect(),
+        target: target.clone(),
+        line: None,
+        column: None,
+        candidates: vec![TerminalLinkCandidate {
+            path: target,
+            line: None,
+            column: None,
+        }],
+        start_index: start,
+        end_index: end,
+        start_row: row_index(at),
+        start_column,
+        end_row: row_index(at),
+        end_column,
+        segments: vec![LinkSegment {
+            row: row_index(at),
+            start_column,
+            end_column,
+        }],
+    }
 }
 
 /// Whether `below` continues `above` across a hard line break — a real
@@ -672,9 +828,11 @@ fn overlaps_existing_link(start_index: usize, end_index: usize, links: &[Termina
 
 #[cfg(test)]
 mod tests {
+    use std::ops::Range;
+
     use super::{
         LinkKind, LinkSegment, TerminalLink, TerminalLinkCandidate, TerminalRow, can_stitch,
-        detect_links, detect_row_links, group_rows, trim_link_candidate,
+        detect_links, detect_row_links, group_rows, hyperlink_links, trim_link_candidate,
     };
 
     /// A row of `text` padded to `cols`, with each character of `two_column`
@@ -694,9 +852,11 @@ mod tests {
             columns.push(at(column));
             column += 1;
         }
+        let hyperlinks = vec![None; padded.chars().count()];
         TerminalRow {
             text: padded,
             columns,
+            hyperlinks,
             is_wrapped,
         }
     }
@@ -704,6 +864,140 @@ mod tests {
     /// A row of `text` padded to `cols`, one column to a character.
     fn row(text: &str, cols: usize, is_wrapped: bool) -> TerminalRow {
         row_with(text, cols, is_wrapped, &[])
+    }
+
+    /// A row of `text` padded to `cols` whose characters in each `(range,
+    /// uri)` entry carry that OSC 8 hyperlink.
+    fn linked_row(text: &str, cols: usize, linked: &[(Range<usize>, &str)]) -> TerminalRow {
+        let mut row = row(text, cols, false);
+        let count = row.text.chars().count();
+        row.hyperlinks = (0..count)
+            .map(|index| {
+                linked
+                    .iter()
+                    .find(|(range, _)| range.contains(&index))
+                    .map(|(_, uri)| (*uri).to_owned())
+            })
+            .collect();
+        row
+    }
+
+    #[test]
+    fn hyperlink_run_becomes_one_url_link() {
+        let rows = [linked_row(
+            "see click",
+            12,
+            &[(4..9, "https://example.com")],
+        )];
+
+        let links = hyperlink_links(&rows, 12);
+
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].kind, LinkKind::Url);
+        assert_eq!(links[0].text, "click");
+        assert_eq!(links[0].target, "https://example.com");
+        assert_eq!(
+            links[0].candidates,
+            vec![candidate("https://example.com", None, None)]
+        );
+        assert_eq!(links[0].start_row, 0);
+        assert_eq!(links[0].end_row, 0);
+        assert_eq!(links[0].start_index, 4);
+        assert_eq!(links[0].end_index, 9);
+        assert_eq!(links[0].start_column, 4);
+        assert_eq!(links[0].end_column, 9);
+        assert_eq!(
+            links[0].segments,
+            vec![LinkSegment {
+                row: 0,
+                start_column: 4,
+                end_column: 9,
+            }]
+        );
+    }
+
+    #[test]
+    fn file_hyperlink_becomes_a_path() {
+        let rows = [linked_row(
+            "ab",
+            4,
+            &[
+                (0..1, "file:///C:/a%20b/x.rs"),
+                (1..2, "file://localhost/C:/x"),
+            ],
+        )];
+
+        let links = hyperlink_links(&rows, 4);
+
+        assert_eq!(links.len(), 2);
+        assert_eq!(links[0].kind, LinkKind::Path);
+        assert_eq!(links[0].target, "C:/a b/x.rs");
+        assert_eq!(links[0].line, None);
+        assert_eq!(
+            links[0].candidates,
+            vec![candidate("C:/a b/x.rs", None, None)]
+        );
+        assert_eq!(links[1].target, "C:/x");
+    }
+
+    #[test]
+    fn wide_glyph_hyperlink_at_row_end_covers_both_cells() {
+        let mut row = row_with("        漢", 10, false, &['漢']);
+        let last = row.text.chars().count() - 1;
+        row.hyperlinks[last] = Some("https://example.com".to_owned());
+
+        let links = hyperlink_links(&[row], 10);
+
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].text, "漢");
+        assert_eq!(
+            links[0].segments,
+            vec![LinkSegment {
+                row: 0,
+                start_column: 8,
+                end_column: 10,
+            }],
+            "the glyph's two cells, to the row's end"
+        );
+    }
+
+    #[test]
+    fn unc_file_hyperlink_becomes_a_unc_path() {
+        let rows = [linked_row("ab", 4, &[(0..1, "file://server/share/x")])];
+
+        let links = hyperlink_links(&rows, 4);
+
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].kind, LinkKind::Path);
+        assert_eq!(links[0].target, r"\\server\share\x");
+    }
+
+    #[test]
+    fn unknown_scheme_hyperlink_is_ignored() {
+        let rows = [linked_row("mail", 6, &[(0..4, "mailto:a@b")])];
+
+        assert_eq!(hyperlink_links(&rows, 6), Vec::<TerminalLink>::new());
+    }
+
+    #[test]
+    fn adjacent_runs_with_different_uris_split() {
+        let rows = [linked_row(
+            "abcdef",
+            8,
+            &[(0..3, "https://a.test"), (3..6, "https://b.test")],
+        )];
+
+        let links = hyperlink_links(&rows, 8);
+
+        assert_eq!(targets(&links), ["https://a.test", "https://b.test"]);
+        assert_eq!(links[1].text, "def");
+        assert_eq!(links[1].start_index, 3);
+        assert_eq!(links[1].end_index, 6);
+        assert_eq!(
+            (links[1].start_column, links[1].end_column),
+            (3, 6),
+            "the second run's columns"
+        );
     }
 
     fn candidate(path: &str, line: Option<u32>, column: Option<u32>) -> TerminalLinkCandidate {
