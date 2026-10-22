@@ -23,6 +23,16 @@ linear: rustling-tulip
 - Pull requests: `gh pr list --repo leftos/rustling-tulip --state open --json number,title,baseRefName`. An unplanned PR gets an **add**, "Review and land PR #N", naming its base branch, its files, whether the checks pass and whether it merges cleanly; a bot's dependency bump goes to `Backlog`.
 - Hotspots (two items touching one wait on each other): `crates/protocol/src/lib.rs`, `crates/daemon/src/server.rs`, and in the native client `apps/native/src/lib.rs` (`RootView`), which every native item mounts into.
 
+## Working mode: ship fast (owner ruling, until the first release)
+
+The goal is the first release as soon as possible; this overrides the user-level loop where they differ.
+
+- **Per item:** the implementer's gates are `cargo fmt --all --check`, `cargo clippy` on the touched crates, and the item's own new or changed tests by name. No reached tests, no full suite, no load-burn, no `--slot critical`.
+- **Review:** one `code-review` pass per item. Only real bugs in the item's own change go back (one fix round); every other finding (hardening, style, coverage, behaviour not asked for) is dropped, not booked. Nits ride the next change touching their file.
+- **Full suite:** only at milestones: the end of a wave, a push, a feature-branch merge and the release step. A red milestone run becomes the next item.
+- **Mocks:** only for a big visual choice (a new view or layout). Small looks are decided by the orchestrator from the existing palette and shown as a `native-shot` at landing.
+- **No backward compatibility** (CLAUDE.md): breaking wire and file changes need no migration.
+
 ## Rulings every brief carries
 
 - **Protocol:** additive changes only, the `add-protocol-message` skill's 3-step pattern, no `protocol-version.json` bump for additive changes (CLAUDE.md "When to bump").
