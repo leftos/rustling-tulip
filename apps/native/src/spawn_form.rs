@@ -1,6 +1,5 @@
 //! The spawn dialog's form: target, runtime, Open in, worktree new or
-//! existing, branch and base branch, run mode and headless prompt, trusted
-//! launch, the Advanced section (model, the agent's approval or sandbox
+//! existing, branch and base branch, trusted launch, the Advanced section (model, the agent's approval or sandbox
 //! options, extra environment variables), the "Share this worktree?"
 //! confirm and the keyboard focus ring. `spawn_view` renders it and forwards
 //! input; the daemon requests it needs come back as messages.
@@ -120,31 +119,6 @@ impl Runtime {
     }
 }
 
-/// How an agent session runs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RunMode {
-    Interactive,
-    Headless,
-}
-
-impl RunMode {
-    pub(crate) const ALL: [Self; 2] = [Self::Interactive, Self::Headless];
-
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::Interactive => "Interactive",
-            Self::Headless => "Headless (one-shot prompt, no terminal)",
-        }
-    }
-
-    fn selector_part(self) -> &'static str {
-        match self {
-            Self::Interactive => "interactive",
-            Self::Headless => "headless",
-        }
-    }
-}
-
 /// The model aliases offered as chips while the runtime is claude.
 pub(crate) const MODEL_ALIASES: [&str; 3] = ["opus", "sonnet", "haiku"];
 
@@ -210,8 +184,8 @@ fn provider_part(provider: ClaudeProvider) -> String {
     provider_label(provider).to_lowercase()
 }
 
-/// The provider a stored spawn ran Claude on, when it was a Claude
-/// interactive or headless spawn: one with no provider field ran on
+/// The provider a stored spawn ran Claude on, when it was a Claude agent
+/// spawn: one with no provider field ran on
 /// Anthropic, and one this client does not know reads as Anthropic.
 /// `None` for a plain shell or no stored spawn.
 fn stored_claude_provider(config: Option<&SpawnConfig>) -> Option<ClaudeProvider> {
@@ -506,8 +480,6 @@ pub(crate) enum Control {
     Branch,
     Random,
     Base,
-    RunMode(RunMode),
-    Prompt,
     AdvancedToggle,
     Model,
     ModelChip(&'static str),
@@ -558,12 +530,10 @@ impl Control {
         }
     }
 
-    /// The selectors of the run-mode and Advanced controls; `selector`
-    /// answers for every other control.
+    /// The selectors of the Advanced controls; `selector` answers for every
+    /// other control.
     fn advanced_selector(&self) -> String {
         match self {
-            Self::RunMode(mode) => format!("spawn-runmode-{}", mode.selector_part()),
-            Self::Prompt => "spawn-headless-prompt".to_owned(),
             Self::AdvancedToggle => "spawn-advanced".to_owned(),
             Self::Model => "spawn-model".to_owned(),
             Self::ModelChip(alias) => format!("spawn-model-{alias}"),
@@ -847,13 +817,11 @@ fn same_key(a: &str, b: &str) -> bool {
     }
 }
 
-/// The runtime, the run mode, and whether the user has chosen them.
+/// The runtime, and whether the user has chosen it.
 #[derive(Debug, Clone, Copy)]
 struct RuntimeChoice {
     agent: Agent,
     plain_shell: bool,
-    /// Headless rather than interactive.
-    headless: bool,
     touched: Touched,
 }
 
@@ -871,7 +839,8 @@ struct Advanced {
 #[derive(Debug, Clone, Copy, Default)]
 struct Touched {
     agent: bool,
-    run_mode: bool,
+    /// Plain shell or agent.
+    shell_or_agent: bool,
 }
 
 /// The Claude provider: the one picked, the saved default it falls back to,
@@ -966,8 +935,6 @@ pub(crate) struct SpawnForm {
     existing: Existing,
     /// Where a new worktree would fork from, and what to do on a collision.
     preview: Preview,
-    /// The headless prompt, as typed.
-    prompt: String,
     advanced: Advanced,
     focus: Control,
     share: Option<ShareButton>,
@@ -1064,7 +1031,6 @@ impl SpawnForm {
             runtime: RuntimeChoice {
                 agent: Agent::Claude,
                 plain_shell: false,
-                headless: false,
                 touched: Touched::default(),
             },
             provider: ProviderChoice {
@@ -1090,7 +1056,6 @@ impl SpawnForm {
             refs: Refs::default(),
             existing: Existing::default(),
             preview: Preview::default(),
-            prompt: String::new(),
             advanced: Advanced {
                 permission_mode: defaults.permission_mode,
                 ..Advanced::default()
@@ -1186,10 +1151,9 @@ impl SpawnForm {
         self.runtime = RuntimeChoice {
             agent: config.agent_options.agent(),
             plain_shell: config.mode == SessionMode::PlainShell,
-            headless: config.mode == SessionMode::Headless,
             touched: Touched {
                 agent: true,
-                run_mode: true,
+                shell_or_agent: true,
             },
         };
         self.trusted = config.dangerously_skip_permissions;
@@ -1210,7 +1174,7 @@ impl SpawnForm {
         }
     }
 
-    /// The provider a Claude interactive or headless source ran on, chosen
+    /// The provider a Claude agent source ran on, chosen
     /// over the last spawn and the default. A plain shell carries Anthropic
     /// options without having picked a provider, so it leaves the choice
     /// to them.
@@ -1397,9 +1361,8 @@ impl SpawnForm {
         if !touched.agent {
             self.runtime.agent = agent;
         }
-        if !touched.run_mode {
+        if !touched.shell_or_agent {
             self.runtime.plain_shell = plain_shell;
-            self.runtime.headless = false;
         }
         if !self.provider.touched {
             self.provider.chosen = last_provider.unwrap_or(self.provider.default);
@@ -2041,52 +2004,15 @@ impl SpawnForm {
                 self.runtime.touched.agent = true;
                 if self.runtime.plain_shell {
                     self.runtime.plain_shell = false;
-                    self.runtime.headless = false;
-                    self.runtime.touched.run_mode = true;
+                    self.runtime.touched.shell_or_agent = true;
                 }
             }
             Runtime::PlainShell => {
                 self.runtime.plain_shell = true;
-                self.runtime.headless = false;
-                self.runtime.touched.run_mode = true;
+                self.runtime.touched.shell_or_agent = true;
                 self.trusted = false;
             }
         }
-    }
-
-    /// Interactive or headless; a plain shell counts as interactive.
-    pub(crate) fn run_mode(&self) -> RunMode {
-        if self.runtime.headless && !self.runtime.plain_shell {
-            RunMode::Headless
-        } else {
-            RunMode::Interactive
-        }
-    }
-
-    /// Whether the run mode shows (not for a plain shell).
-    pub(crate) fn run_mode_shown(&self) -> bool {
-        !self.runtime.plain_shell
-    }
-
-    fn set_run_mode(&mut self, mode: RunMode) {
-        if !self.run_mode_shown() {
-            return;
-        }
-        self.runtime.headless = mode == RunMode::Headless;
-        self.runtime.touched.run_mode = true;
-    }
-
-    pub(crate) fn prompt(&self) -> &str {
-        &self.prompt
-    }
-
-    pub(crate) fn prompt_placeholder(&self) -> String {
-        format!("What should {} do?", self.runtime.agent.as_label())
-    }
-
-    /// The user typed in the prompt field.
-    pub(crate) fn edit_prompt(&mut self, text: &str) {
-        text.clone_into(&mut self.prompt);
     }
 
     pub(crate) fn advanced_open(&self) -> bool {
@@ -2125,7 +2051,7 @@ impl SpawnForm {
         }
     }
 
-    /// Whether the Provider row shows: Claude, interactive or headless.
+    /// Whether the Provider row shows: Claude, not a plain shell.
     pub(crate) fn provider_shown(&self) -> bool {
         self.runtime.agent == Agent::Claude && !self.runtime.plain_shell
     }
@@ -2504,16 +2430,15 @@ impl SpawnForm {
         self.refs.fetch_failed
     }
 
-    /// Whether Spawn can go: a branch name or a picked worktree, a prompt
-    /// when headless, and no env row with a problem.
+    /// Whether Spawn can go: a branch name or a picked worktree, and no env
+    /// row with a problem.
     pub(crate) fn can_submit(&self) -> bool {
         let located = if self.pinning() {
             self.selected_option().is_some()
         } else {
             !self.branch.value.trim().is_empty()
         };
-        let prompted = self.run_mode() == RunMode::Interactive || !self.prompt.trim().is_empty();
-        located && prompted && self.env_valid()
+        located && self.env_valid()
     }
 
     /// The focusable controls, in the order they are drawn.
@@ -2548,17 +2473,9 @@ impl SpawnForm {
         ring
     }
 
-    /// Run mode (headless only when it can be chosen), the prompt and
-    /// trusted launch.
+    /// Trusted launch, while it shows.
     fn run_controls(&self) -> Vec<Control> {
         let mut ring = Vec::new();
-        if self.run_mode_shown() {
-            ring.push(Control::RunMode(RunMode::Interactive));
-            ring.push(Control::RunMode(RunMode::Headless));
-        }
-        if self.run_mode() == RunMode::Headless {
-            ring.push(Control::Prompt);
-        }
         if self.trusted_shown() {
             ring.push(Control::Trusted);
         }
@@ -2735,12 +2652,10 @@ impl SpawnForm {
             Control::Branch
             | Control::Base
             | Control::Target(_)
-            | Control::Prompt
             | Control::Model
             | Control::EnvKey(_)
             | Control::EnvValue(_) => Vec::new(),
             Control::Provider(_)
-            | Control::RunMode(_)
             | Control::AdvancedToggle
             | Control::ModelChip(_)
             | Control::Approval(_)
@@ -2756,7 +2671,7 @@ impl SpawnForm {
         Outcome::Stay(messages)
     }
 
-    /// A press on a provider, run-mode or Advanced control. The options
+    /// A press on a provider or Advanced control. The options
     /// trusted launch overrides do not change while it is on, nor the
     /// provider while the daemon cannot route to it.
     fn press_option(&mut self, control: &Control) {
@@ -2766,7 +2681,6 @@ impl SpawnForm {
                 self.provider.chosen = *provider;
                 self.provider.touched = true;
             }
-            Control::RunMode(mode) => self.set_run_mode(*mode),
             Control::AdvancedToggle => self.advanced.open = !self.advanced.open,
             Control::ModelChip(alias) => (*alias).clone_into(&mut self.advanced.model),
             Control::Approval(mode) if !locked => self.advanced.permission_mode = *mode,
@@ -2869,12 +2783,16 @@ impl SpawnForm {
     /// The spawn the form describes, where it opens, and the worktree
     /// default to save when the checkbox differs from it.
     pub(crate) fn build_request(&self) -> (SpawnRequest, OpenIn, Option<ClientMessage>) {
-        let mode = self.session_mode();
+        let mode = if self.runtime.plain_shell {
+            SessionMode::PlainShell
+        } else {
+            SessionMode::Interactive
+        };
         let request = SpawnRequest {
             label: None,
             target: self.spawn_target(),
             mode,
-            initial_prompt: (mode == SessionMode::Headless).then(|| self.prompt.trim().to_owned()),
+            initial_prompt: None,
             dangerously_skip_permissions: self.trusted(),
             agent_options: self.agent_options(),
             model: self.wire_model(),
@@ -2885,14 +2803,6 @@ impl SpawnForm {
             resume_conversation: None,
         };
         (request, self.placement(), self.worktree_default_change())
-    }
-
-    fn session_mode(&self) -> SessionMode {
-        match (self.runtime.plain_shell, self.run_mode()) {
-            (true, _) => SessionMode::PlainShell,
-            (false, RunMode::Interactive) => SessionMode::Interactive,
-            (false, RunMode::Headless) => SessionMode::Headless,
-        }
     }
 
     /// The agent's options. A plain shell or a trusted launch sends no
@@ -3350,7 +3260,7 @@ mod tests {
         assert_eq!(
             open_repo(headless).runtime(),
             Runtime::Agent(Agent::Claude),
-            "only a plain shell sticks as the run mode"
+            "a stored headless config seeds an interactive agent"
         );
     }
 
@@ -3916,8 +3826,6 @@ mod tests {
                 Control::Branch,
                 Control::Random,
                 Control::Base,
-                Control::RunMode(RunMode::Interactive),
-                Control::RunMode(RunMode::Headless),
                 Control::Trusted,
                 Control::AdvancedToggle,
                 Control::Cancel,
@@ -3951,50 +3859,8 @@ mod tests {
     }
 
     #[test]
-    fn headless_sends_mode_and_trimmed_prompt() {
-        let mut form = ready_form();
-        assert_eq!(form.run_mode(), RunMode::Interactive);
-        assert!(!form.controls().contains(&Control::Prompt));
-        press(&mut form, &Control::RunMode(RunMode::Headless));
-        assert_eq!(form.run_mode(), RunMode::Headless);
-        assert!(form.controls().contains(&Control::Prompt));
-        assert_eq!(form.prompt_placeholder(), "What should claude do?");
-        form.edit_prompt("  fix the bug\n");
-        let request = submission(press(&mut form, &Control::Submit)).request;
-        assert_eq!(request.mode, SessionMode::Headless);
-        assert_eq!(request.initial_prompt.as_deref(), Some("fix the bug"));
-
-        let mut interactive = ready_form();
-        interactive.edit_prompt("kept, not sent");
-        let request = request_of(&interactive);
-        assert_eq!(request.mode, SessionMode::Interactive);
-        assert_eq!(request.initial_prompt, None, "only headless sends it");
-    }
-
-    #[test]
-    fn headless_requires_a_prompt() {
-        let mut form = ready_form();
-        press(&mut form, &Control::RunMode(RunMode::Headless));
-        assert!(!form.can_submit());
-        assert!(!form.controls().contains(&Control::Submit));
-        form.edit_prompt("  \n ");
-        assert!(!form.can_submit(), "blank after trimming");
-        assert!(matches!(
-            form.submit(&mut BranchCache::default()),
-            Outcome::Stay(_)
-        ));
-        form.edit_prompt("go");
-        assert!(form.can_submit());
-        press(&mut form, &Control::RunMode(RunMode::Interactive));
-        form.edit_prompt("");
-        assert!(form.can_submit(), "interactive needs no prompt");
-    }
-
-    #[test]
     fn plain_shell_clears_to_interactive_and_sends_no_agent_extras() {
         let mut form = ready_form();
-        press(&mut form, &Control::RunMode(RunMode::Headless));
-        form.edit_prompt("do it");
         form.edit_model("opus");
         press(&mut form, &Control::AdvancedToggle);
         press(&mut form, &Control::Approval(Some(PermissionMode::Plan)));
@@ -4006,11 +3872,7 @@ mod tests {
         assert!(
             !ring.iter().any(|c| matches!(
                 c,
-                Control::RunMode(_)
-                    | Control::Prompt
-                    | Control::Model
-                    | Control::ModelChip(_)
-                    | Control::Approval(_)
+                Control::Model | Control::ModelChip(_) | Control::Approval(_)
             )),
             "no agent controls for a plain shell: {ring:?}"
         );
@@ -4024,8 +3886,8 @@ mod tests {
 
         press(&mut form, &Control::Runtime(Runtime::Agent(Agent::Claude)));
         assert_eq!(
-            form.run_mode(),
-            RunMode::Interactive,
+            request_of(&form).mode,
+            SessionMode::Interactive,
             "an agent after a plain shell runs interactive"
         );
     }
@@ -4557,11 +4419,9 @@ mod tests {
     }
 
     #[test]
-    fn runtime_switch_keeps_prompt_and_advanced_values() {
+    fn runtime_switch_keeps_advanced_values() {
         let mut form = ready_form();
         press(&mut form, &Control::AdvancedToggle);
-        press(&mut form, &Control::RunMode(RunMode::Headless));
-        form.edit_prompt("p");
         form.edit_model("m");
         press(&mut form, &Control::Approval(Some(PermissionMode::Plan)));
         press(&mut form, &Control::EnvAdd);
@@ -4570,9 +4430,7 @@ mod tests {
         press(&mut form, &Control::Runtime(Runtime::PlainShell));
 
         press(&mut form, &Control::Runtime(Runtime::Agent(Agent::Claude)));
-        press(&mut form, &Control::RunMode(RunMode::Headless));
         let request = request_of(&form);
-        assert_eq!(request.initial_prompt.as_deref(), Some("p"));
         assert_eq!(request.model.as_deref(), Some("m"));
         assert_eq!(
             request.agent_options,
@@ -4915,16 +4773,15 @@ mod tests {
     }
 
     #[test]
-    fn a_duplicate_prefill_carries_model_env_agent_and_run_mode() {
+    fn a_duplicate_prefill_carries_model_env_and_agent() {
         let form = duplicated(stored_config(&json!({
-            "mode": "headless",
+            "mode": "interactive",
             "dangerously_skip_permissions": true,
             "agent_options": { "kind": "claude" },
             "model": "sonnet",
             "extra_env": [["API_TOKEN", "${env:API_TOKEN}"], ["LEVEL", "3"]],
         })));
         assert_eq!(form.runtime(), Runtime::Agent(Agent::Claude));
-        assert_eq!(form.run_mode(), RunMode::Headless);
         assert!(form.trusted());
         assert_eq!(form.model(), "sonnet");
         assert!(form.advanced_open(), "the prefilled Advanced values show");
@@ -5208,7 +5065,7 @@ mod tests {
     #[test]
     fn the_last_spawn_provider_beats_the_default() {
         let mut r1 = repo("r1");
-        r1.last_spawn_config = Some(deepseek_config("headless"));
+        r1.last_spawn_config = Some(deepseek_config("interactive"));
         assert_eq!(open_repo(r1.clone()).provider(), ClaudeProvider::Deepseek);
 
         let mut form = Setup::repos(vec![repo("r0"), r1])
@@ -5267,10 +5124,6 @@ mod tests {
             ClaudeProvider::Anthropic,
             "a Claude last spawn with no provider field went to Anthropic"
         );
-        assert_eq!(
-            seeded_over_deepseek_default(config("claude", "headless")),
-            ClaudeProvider::Anthropic
-        );
         let mut unknown = config("claude", "interactive");
         unknown.agent_options = AgentOptions::Claude {
             permission_mode: None,
@@ -5303,8 +5156,6 @@ mod tests {
             "a plain shell never carries DeepSeek"
         );
         press(&mut form, &Control::Runtime(Runtime::Agent(Agent::Claude)));
-        press(&mut form, &Control::RunMode(RunMode::Headless));
-        assert!(form.provider_shown(), "headless Claude shows the row");
         assert_eq!(sent_provider(&form), Some(ClaudeProvider::Deepseek));
     }
 

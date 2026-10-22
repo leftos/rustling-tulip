@@ -478,6 +478,35 @@ fn launch_last_with_a_trusted_config_prefills_the_dialog_and_warns(cx: &mut Test
 }
 
 #[gpui::test]
+fn launch_last_of_a_headless_config_launches_nothing_and_warns(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut stored = config(single_target(false));
+    stored.mode = SessionMode::Headless;
+    let mut h = harness(cx, &dir, stored);
+
+    let row = h.center("container-repo:r1");
+    h.double_click(row);
+
+    assert_eq!(
+        spawn_count(&h.sent()),
+        0,
+        "a headless config is never replayed"
+    );
+    assert!(
+        !h.root(|root, _| root.spawn_dialog_open()),
+        "nor opened in the dialog"
+    );
+    assert!(
+        toasts(&mut h).contains(&(
+            ToastKind::Warning,
+            "Headless runs aren't supported in this client".to_owned()
+        )),
+        "a warning says why: {:?}",
+        toasts(&mut h)
+    );
+}
+
+#[gpui::test]
 fn pressing_the_quick_button_replays_without_folding_the_row(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = harness(cx, &dir, config(single_target(false)));

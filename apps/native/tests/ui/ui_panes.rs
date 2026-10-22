@@ -240,7 +240,6 @@ fn pane_close_esc_returns_the_keyboard_to_the_pane(cx: &mut TestAppContext) {
 }
 
 const TRUSTED_TIP: &str = "Trusted launch: permission prompts were bypassed";
-const HEADLESS_TIP: &str = "Headless session: it runs without a terminal";
 const DEEPSEEK_TIP: &str = "Claude Code routed to DeepSeek";
 const UNKNOWN_PROVIDER_TIP: &str = "Claude Code routed to a provider this client does not know";
 /// A pane header's height, in logical pixels.
@@ -305,7 +304,7 @@ fn side_by_side(s1: SessionSnapshot, s2: SessionSnapshot) -> Fixture {
 }
 
 #[gpui::test]
-fn pane_header_shows_runtime_trusted_and_headless_chips(cx: &mut TestAppContext) {
+fn pane_header_shows_runtime_and_trusted_chips(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let fixture = side_by_side(
         session("s1")
@@ -314,7 +313,7 @@ fn pane_header_shows_runtime_trusted_and_headless_chips(cx: &mut TestAppContext)
             .label("repo · main")
             .cwd("D:/src/repo")
             .build(),
-        session("s2").headless().build(),
+        session("s2").build(),
     );
     let mut h = Harness::with(cx, &dir, &fixture);
 
@@ -331,28 +330,69 @@ fn pane_header_shows_runtime_trusted_and_headless_chips(cx: &mut TestAppContext)
     );
 
     let header = header_of(&mut h, "p2");
-    assert_eq!(
-        header.chips,
-        [
-            runtime("claude"),
-            chip(HeaderChipKind::Headless, "headless", HEADLESS_TIP),
-        ],
-        "a headless session says so in a chip"
-    );
+    assert_eq!(header.chips, [runtime("claude")], "untrusted: no chip");
 
     for selector in [
         "pane-chip-p1-runtime",
         "pane-chip-p1-trusted",
         "pane-chip-p2-runtime",
-        "pane-chip-p2-headless",
     ] {
         assert!(
             (height_of(&mut h, selector) - CHIP_HEIGHT).abs() < 0.5,
             "{selector} is a {CHIP_HEIGHT} px chip"
         );
     }
-    assert!(never_painted(&mut h, "pane-chip-p1-headless"));
     assert!(never_painted(&mut h, "pane-chip-p2-trusted"));
+}
+
+#[gpui::test]
+fn headless_pane_shows_unsupported_note(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        sessions: vec![session("s1").headless().build()],
+        tabs: vec![tab("t1", &pane("p1", Some("s1")))],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+
+    assert_eq!(
+        h.root(|root, _| root.pane_note("p1")),
+        Some("Headless session — not shown in this client")
+    );
+    assert!(!never_painted(&mut h, "pane-note-p1"), "the note is drawn");
+    assert!(
+        never_painted(&mut h, "headless-stat-status-p1"),
+        "no stats are drawn"
+    );
+}
+
+#[gpui::test]
+fn ctrl_n_opens_the_spawn_dialog_with_a_headless_pane_focused(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        repos: vec![support::repo("r1", "C:/r1")],
+        sessions: vec![session("s1").build(), session("s2").headless().build()],
+        tabs: vec![
+            tab("t1", &pane("p1", Some("s1"))),
+            tab("t2", &pane("p2", Some("s2"))),
+        ],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    // The spec's window starts inactive and gets no focus events until it
+    // is activated, as the desktop does; a frame lets the activation land.
+    h.cx.update(|window, _| window.activate_window());
+    let _ = h.bounds("tab-t2");
+
+    h.click_on("tab-t2");
+    let _ = h.bounds("pane-note-p2");
+    assert_eq!(h.root(|root, _| root.focused_pane()), Some("p2".to_owned()));
+    h.keys("ctrl-n");
+
+    assert!(
+        h.root(|root, _| root.spawn_dialog_open()),
+        "the headless pane's focus does not eat the app's shortcut"
+    );
 }
 
 #[gpui::test]

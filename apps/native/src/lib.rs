@@ -29,8 +29,6 @@ mod folder_picker;
 pub mod fonts;
 mod footer;
 mod grid_view;
-mod headless;
-mod headless_view;
 mod history;
 mod history_view;
 mod keys;
@@ -119,7 +117,8 @@ use gpui::{
 };
 use protocol::{
     AppearanceOverrides, ClientMessage, DaemonMessage, GridNode, PaneDropEdge, RepoEntry,
-    SessionSnapshot, SuggestTarget, TabEntry, VscodeWorkspaceSuggestion, WorkspaceEntry,
+    SessionMode, SessionSnapshot, SuggestTarget, TabEntry, VscodeWorkspaceSuggestion,
+    WorkspaceEntry,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -144,7 +143,9 @@ use crate::quit_view::{ExitView, Quitter};
 use crate::repo_remove::RepoRemove;
 use crate::run_confirm::RunConfirm;
 use crate::section::flyout_section;
-use crate::session_actions::{Duplicates, HeaderStopConfirm, Prefills, self_exited};
+use crate::session_actions::{
+    Duplicates, HEADLESS_UNSUPPORTED_TIP, HeaderStopConfirm, Prefills, self_exited,
+};
 use crate::session_menu::popover_frame;
 use crate::session_menu::{ContainerMenu, DeleteDialog, SessionMenu, ShellMenu};
 use crate::shell_dialog::PendingQuickShell;
@@ -445,9 +446,6 @@ pub struct RootView {
     tabs: TabsModel,
     /// A terminal for every pane of every tab, by pane id.
     panes: HashMap<String, PaneSlot>,
-    /// The panes whose headless log shows every action rather than the tail,
-    /// by pane id.
-    headless_show_all: HashSet<String>,
     /// Scrollback retries already sent, so each goes out once per session.
     retries: RetryGate,
     /// Where the active tab's split tree was last laid out; divider drags
@@ -844,7 +842,6 @@ impl RootView {
             tabs: TabsModel::new(ui.active_tab_id.clone()),
             sidebar: SidebarModel::new(ui),
             panes: HashMap::new(),
-            headless_show_all: HashSet::new(),
             retries: RetryGate::default(),
             grid_bounds: None,
             renaming: None,
@@ -1538,6 +1535,10 @@ impl RootView {
             }
             return;
         };
+        if config.mode == SessionMode::Headless {
+            self.push_toast(ToastKind::Warning, HEADLESS_UNSUPPORTED_TIP, None, cx);
+            return;
+        }
         let Some(target) = Target::from_spawn(&config.target) else {
             return;
         };

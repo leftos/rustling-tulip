@@ -4,9 +4,8 @@
 
 use std::collections::HashMap;
 
-use protocol::{ClientMessage, SessionSnapshot, SessionStatus, TabEntry};
+use protocol::{ClientMessage, SessionMode, SessionSnapshot, SessionStatus, TabEntry};
 
-use crate::headless;
 use crate::sidebar::{LeafState, can_attach, runtime_label};
 use crate::spawn_form::{OpenChoice, Target};
 use crate::tabs::{
@@ -136,9 +135,9 @@ pub(crate) struct OfferedRow {
     pub(crate) disabled: Option<&'static str>,
 }
 
-/// Why a headless session's Duplicate ▸ is dimmed.
-pub(crate) const HEADLESS_DUPLICATE_TIP: &str =
-    "Headless sessions are one-shot kickoffs; spawn a new one instead";
+/// Why a headless session's Duplicate ▸ and a headless config's Launch last
+/// again are refused.
+pub(crate) const HEADLESS_UNSUPPORTED_TIP: &str = "Headless runs aren't supported in this client";
 
 /// A line of a submenu.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -294,11 +293,22 @@ pub(crate) fn header_shows_exit_code(session: &SessionSnapshot) -> bool {
 }
 
 /// Whether the stopped-pane overlay covers the terminal: a stopped session
-/// that was not abandoned, and that had a terminal to cover — a headless
-/// pane keeps its stats and log, and the session's menu still offers the
-/// actions.
+/// that was not abandoned and had a terminal to cover — a headless pane
+/// keeps its note, and the session's menu still offers the actions.
 pub(crate) fn pane_shows_exit(session: &SessionSnapshot) -> bool {
-    header_shows_exit_code(session) && !session.is_abandoned && !headless::is_headless(session)
+    header_shows_exit_code(session)
+        && !session.is_abandoned
+        && session.mode != SessionMode::Headless
+}
+
+/// Why `action` is dimmed for `session`, if it is: a headless session is
+/// never rerun, so its Restart is refused.
+pub(crate) fn action_disabled_tip(
+    action: SessionAction,
+    session: &SessionSnapshot,
+) -> Option<&'static str> {
+    (action == SessionAction::Restart && session.mode == SessionMode::Headless)
+        .then_some(HEADLESS_UNSUPPORTED_TIP)
 }
 
 /// A button a sidebar leaf or the abandoned-pane overlay draws beside the
@@ -375,7 +385,7 @@ pub(crate) fn self_exited(prev: Option<SessionStatus>, session: &SessionSnapshot
         && session.exit_code.is_some()
         && !session.is_inactive
         && !session.is_abandoned
-        && !headless::is_headless(session)
+        && session.mode != SessionMode::Headless
 }
 
 fn exit_code(session: &SessionSnapshot) -> String {
@@ -480,7 +490,7 @@ pub(crate) fn session_rows(
     };
     let mut rows = vec![OfferedRow {
         row: SessionRow::Duplicate,
-        disabled: headless::is_headless(session).then_some(HEADLESS_DUPLICATE_TIP),
+        disabled: (session.mode == SessionMode::Headless).then_some(HEADLESS_UNSUPPORTED_TIP),
     }];
     if find_tab_containing_session(tabs.tabs(), &session.id).is_some() {
         rows.push(offered(SessionRow::MoveTo));
@@ -919,7 +929,7 @@ fn restart_placement(original: String, new_id: &str, bindings: &[PaneBinding]) -
 )]
 mod tests {
     use super::{
-        ActionState, DuplicateTarget, Duplicates, HEADLESS_DUPLICATE_TIP, HeaderStopConfirm,
+        ActionState, DuplicateTarget, Duplicates, HEADLESS_UNSUPPORTED_TIP, HeaderStopConfirm,
         MenuEntry, MenuMode, MoveTarget, OfferedRow, PendingPrefill, PlacedFocus, Prefills,
         SessionAction, SessionRow, Step, SubmenuLine, action_state, busy_exclusion_message,
         busy_row, exit_code_label, exited_message, header_shows_exit_code, menu_actions,
@@ -1463,14 +1473,14 @@ mod tests {
                 session_rows(&s, &tabs, &[]).first(),
                 Some(&OfferedRow {
                     row: SessionRow::Duplicate,
-                    disabled: Some(HEADLESS_DUPLICATE_TIP),
+                    disabled: Some(HEADLESS_UNSUPPORTED_TIP),
                 }),
                 "{status}"
             );
         }
         assert_eq!(
-            HEADLESS_DUPLICATE_TIP,
-            "Headless sessions are one-shot kickoffs; spawn a new one instead"
+            HEADLESS_UNSUPPORTED_TIP,
+            "Headless runs aren't supported in this client"
         );
     }
 

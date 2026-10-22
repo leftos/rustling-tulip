@@ -8,7 +8,10 @@ use crate::support;
 use std::path::PathBuf;
 
 use gpui::{TestAppContext, px};
-use protocol::{ClientMessage, DaemonMessage, PresetEntry, PresetTarget, WorkspaceEntry};
+use protocol::{
+    AgentOptions, ClientMessage, DaemonMessage, PresetEntry, PresetTarget, SessionMode,
+    SpawnConfig, SpawnTarget, WorkspaceEntry, WorktreeReusePolicy,
+};
 use rustling_tulip_native::ToastKind;
 use serde_json::json;
 use support::{Fixture, Harness, Opened, TestDir, pane, repo, session, tab};
@@ -91,6 +94,54 @@ fn container_menu_lists_spawn_preset_explorer_vscode_copy_and_remove(cx: &mut Te
             "Copy path",
             "Remove repo",
         ]
+    );
+}
+
+#[gpui::test]
+fn launch_last_row_is_disabled_for_a_headless_config(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = two_repos();
+    fixture.repos[0].last_spawn_config = Some(SpawnConfig {
+        target: SpawnTarget::Single {
+            repo_id: "r1".to_owned(),
+            branch_name: "feat/x".to_owned(),
+            base_branch: None,
+            use_worktree: false,
+            checkout_strategy: None,
+            worktree_reuse: WorktreeReusePolicy::default(),
+            existing_worktree: None,
+        },
+        mode: SessionMode::Headless,
+        dangerously_skip_permissions: false,
+        agent_options: AgentOptions::claude(None),
+        model: None,
+        extra_env: Vec::new(),
+    });
+    let mut h = Harness::with(cx, &dir, &fixture);
+    open(&mut h, "container-repo:r1");
+
+    assert!(
+        h.root(|root, _| root.container_menu_groups())
+            .concat()
+            .contains(&"container-launch-last".to_owned()),
+        "the row is offered, dimmed"
+    );
+    assert_eq!(
+        h.root(|root, _| root.container_menu_disabled_tip("container-launch-last")),
+        Some("Headless runs aren't supported in this client".to_owned())
+    );
+    h.click_on("container-launch-last");
+    assert!(
+        !h.root(|root, _| root.container_menu_groups())
+            .concat()
+            .contains(&"container-launch-last-back".to_owned()),
+        "the click opens no submenu"
+    );
+    assert!(!h.root(|root, _| root.spawn_dialog_open()));
+    assert!(
+        h.sent()
+            .iter()
+            .all(|message| !matches!(message, ClientMessage::SpawnSession(_)))
     );
 }
 

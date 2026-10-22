@@ -20,7 +20,6 @@ use crate::diff_tab::LOADING_TEXT as DIFF_LOADING_TEXT;
 use crate::drag::{self, DragPayload, OverlayKind, PaneDrop};
 use crate::ellipsis::{ellipsized, truncating};
 use crate::fonts::DEFAULT_FAMILY;
-use crate::headless;
 use crate::palette::{
     ACCENT, CHIP, GROUND, HOVER, LINE, LINE_STRONG, RAISED, SUBTLE, SURFACE, TEXT_2, TRANSPARENT,
 };
@@ -64,7 +63,6 @@ const RUNTIME_WASH_ALPHA: f32 = 0.13;
 const HEADER_BUTTON_SIZE: f32 = 26.0;
 const HEADER_BUTTON_RADIUS: f32 = 6.0;
 const TRUSTED_TIP: &str = "Trusted launch: permission prompts were bypassed";
-const HEADLESS_TIP: &str = "Headless session: it runs without a terminal";
 /// The accent line down a pane header's left edge, below its top corner.
 const ACCENT_LINE_WIDTH: f32 = 3.0;
 
@@ -146,6 +144,8 @@ impl RetryGate {
 
 /// What a pane shows while its session has no terminal attached yet.
 const WAITING_NOTE: &str = "Waiting for session…";
+/// What a pane bound to a headless session draws in place of a terminal.
+const HEADLESS_NOTE: &str = "Headless session — not shown in this client";
 
 /// The ratio the split at `split_path` of `tab_id` takes with the pointer
 /// at `at`, when the tab has been laid out in `bounds`.
@@ -232,8 +232,6 @@ impl RootView {
             }
             keep
         });
-        self.headless_show_all
-            .retain(|pane_id| live.contains(pane_id.as_str()));
     }
 
     /// Gives every pane a terminal and records its session; returns the
@@ -259,7 +257,6 @@ impl RootView {
                 slot.attached = false;
                 slot.session = binding.session_id;
                 shown.extend(slot.session.clone());
-                self.headless_show_all.remove(&binding.pane_id);
             }
         }
         shown
@@ -575,9 +572,9 @@ impl RootView {
         }
     }
 
-    /// Whether a pane showing a session has the keyboard. A headless pane
-    /// holds the keyboard through its body rather than a terminal, so the
-    /// app's shortcuts stay live after a click in it.
+    /// Whether a pane showing a session has the keyboard. A headless pane's
+    /// hidden terminal can hold the focus but shows nothing, so the app's
+    /// shortcuts stay live there.
     pub(crate) fn terminal_focused(&self, window: &Window, cx: &Context<Self>) -> bool {
         self.panes.values().any(|slot| {
             let Some(session) = slot
@@ -587,7 +584,7 @@ impl RootView {
             else {
                 return false;
             };
-            !headless::is_headless(session) && slot.view.read(cx).is_focused(window)
+            session.mode != SessionMode::Headless && slot.view.read(cx).is_focused(window)
         })
     }
 
@@ -965,16 +962,7 @@ impl RootView {
                 .debug_selector(|| format!("pane-grid-{pane_id}"))
                 .child(slot.view.clone())
                 .into_any_element(),
-            (Some(id), _) => match self.sidebar.session(id) {
-                Some(session) if headless::is_headless(session) => {
-                    let focus = self
-                        .panes
-                        .get(pane_id)
-                        .map(|slot| slot.view.read(cx).focus_handle());
-                    self.headless_body(pane_id, session, focus, cx)
-                }
-                _ => muted_note(WAITING_NOTE).into_any_element(),
-            },
+            (Some(id), slot) => self.note_body(pane_id, id, slot, cx),
             (None, Some(slot)) => {
                 let handle = slot.view.read(cx).focus_handle();
                 self.empty_pane(tab_id, pane_id, Some(handle), cx)
@@ -1025,7 +1013,7 @@ impl RootView {
     }
 
     /// The session's status glyph, name and chips (runtime, repo:branch
-    /// with a count of further members, headless, trusted), its Stop or
+    /// with a count of further members, trusted), its Stop or
     /// exit code, split right and down (Shift: left and up), move and
     /// close. A right-click opens the session's menu; a left press dragged
     /// anywhere but on a button or a chip drags the pane, its ghost edged
@@ -1249,6 +1237,43 @@ impl RootView {
             .map(|session| header_parts(session, self.sidebar.is_unseen(&session.id)))
     }
 
+    /// The body of a pane showing `session_id` before its terminal attaches:
+    /// a muted note. A headless pane never attaches, so its note holds the
+    /// pane's focus handle and a click in it focuses the pane, as an empty
+    /// pane does, and the app's shortcuts stay live.
+    fn note_body(
+        &self,
+        pane_id: &str,
+        session_id: &str,
+        slot: Option<&PaneSlot>,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let session = self.sidebar.session(session_id);
+        let note = muted_note(body_note(session)).debug_selector(|| format!("pane-note-{pane_id}"));
+        let headless = session.is_some_and(|session| session.mode == SessionMode::Headless);
+        match slot.filter(|_| headless) {
+            Some(slot) => {
+                let handle = slot.view.read(cx).focus_handle();
+                note.track_focus(&handle)
+                    .on_mouse_down(MouseButton::Left, move |_, window, _| {
+                        handle.focus(window);
+                    })
+                    .into_any_element()
+            }
+            None => note.into_any_element(),
+        }
+    }
+
+    /// The note the body of pane `pane_id` draws where a terminal would be,
+    /// while the pane shows a session it has not attached to; `None`
+    /// otherwise.
+    #[must_use]
+    pub fn pane_note(&self, pane_id: &str) -> Option<&'static str> {
+        let slot = self.panes.get(pane_id).filter(|slot| !slot.attached)?;
+        let session = self.sidebar.session(slot.session.as_deref()?);
+        Some(body_note(session))
+    }
+
     /// The pane the drop overlay is drawn on and the edge it shows, while a
     /// pane drag is under way.
     #[must_use]
@@ -1283,7 +1308,6 @@ pub enum HeaderChipKind {
     Branch,
     /// `+N`: the further members of a workspace session.
     More,
-    Headless,
     Trusted,
     /// The non-Anthropic endpoint a Claude session is routed to.
     Provider,
@@ -1296,7 +1320,6 @@ impl HeaderChipKind {
             Self::Runtime => "runtime",
             Self::Branch => "branch",
             Self::More => "more",
-            Self::Headless => "headless",
             Self::Trusted => "trusted",
             Self::Provider => "provider",
         }
@@ -1333,13 +1356,6 @@ fn header_parts(session: &SessionSnapshot, unseen: bool) -> PaneHeaderParts {
         chips.push(provider_chip(provider));
     }
     chips.extend(member_chips(&session.members));
-    if headless::is_headless(session) {
-        chips.push(HeaderChip::new(
-            HeaderChipKind::Headless,
-            "headless",
-            HEADLESS_TIP,
-        ));
-    }
     if session.elevated_authority {
         chips.push(HeaderChip::new(
             HeaderChipKind::Trusted,
@@ -1351,7 +1367,7 @@ fn header_parts(session: &SessionSnapshot, unseen: bool) -> PaneHeaderParts {
         status: session.status,
         mode: session.mode,
         unseen,
-        status_tip: format!("status: {}", headless::status_label(session.status)),
+        status_tip: format!("status: {}", status_label(session.status)),
         title: display_label(session),
         title_tip: label_tooltip(session),
         chips,
@@ -1508,9 +1524,7 @@ fn header_chip(pane_id: &str, chip: &HeaderChip, cx: &mut Context<RootView>) -> 
             .bg(gpui::rgba(TRANSPARENT))
             .border_color(gpui::rgb(LINE_STRONG))
             .child(text),
-        HeaderChipKind::More | HeaderChipKind::Headless | HeaderChipKind::Provider => {
-            base.child(text)
-        }
+        HeaderChipKind::More | HeaderChipKind::Provider => base.child(text),
     }
     .into_any_element()
 }
@@ -1554,6 +1568,29 @@ fn split_box(direction: SplitDirection, ratio: f32, parts: [AnyElement; 3]) -> A
         .child(divider)
         .child(cell().flex_1().child(second))
         .into_any_element()
+}
+
+/// The note a pane draws for `session` while it has no terminal to show: a
+/// headless session is never shown in this client, any other waits to
+/// attach.
+fn body_note(session: Option<&SessionSnapshot>) -> &'static str {
+    if session.is_some_and(|session| session.mode == SessionMode::Headless) {
+        HEADLESS_NOTE
+    } else {
+        WAITING_NOTE
+    }
+}
+
+/// The session's status as the pane header's status tip spells it.
+fn status_label(status: SessionStatus) -> &'static str {
+    match status {
+        SessionStatus::Spawning => "starting",
+        SessionStatus::Idle => "idle",
+        SessionStatus::Working => "working",
+        SessionStatus::AwaitingInput => "awaiting input",
+        SessionStatus::Stopped => "stopped",
+        SessionStatus::Error => "error",
+    }
 }
 
 /// Muted text centred in the space it is given.
@@ -1780,13 +1817,23 @@ fn bounds_probe(cx: &mut Context<RootView>) -> impl IntoElement {
     reason = "tests assert preconditions with expect; failure messages aid debugging"
 )]
 mod tests {
-    use super::{HeaderChip, HeaderChipKind, RetryGate, header_parts};
+    use super::{HeaderChip, HeaderChipKind, RetryGate, header_parts, status_label};
     use crate::spawn_form::provider_chip_tip;
-    use protocol::{ClaudeProvider, SessionMode, SessionSnapshot};
+    use protocol::{ClaudeProvider, SessionMode, SessionSnapshot, SessionStatus};
     use serde_json::json;
 
     const DEEPSEEK_PROVIDER_TIP: &str = "Claude Code routed to DeepSeek";
     const UNKNOWN_PROVIDER_TIP: &str = "Claude Code routed to a provider this client does not know";
+
+    #[test]
+    fn status_labels() {
+        assert_eq!(status_label(SessionStatus::Spawning), "starting");
+        assert_eq!(status_label(SessionStatus::Idle), "idle");
+        assert_eq!(status_label(SessionStatus::Working), "working");
+        assert_eq!(status_label(SessionStatus::AwaitingInput), "awaiting input");
+        assert_eq!(status_label(SessionStatus::Stopped), "stopped");
+        assert_eq!(status_label(SessionStatus::Error), "error");
+    }
 
     /// The tip table names every endpoint, so the `Anthropic` arm exists even
     /// though no chip is drawn for it.

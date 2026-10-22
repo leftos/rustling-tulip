@@ -62,10 +62,10 @@ Close behind: the paste and key quirks (native clipboard read, Shift+Enter bytes
 - [ ] Session context menu: rename inline (blank restores the default), Duplicate ▸ new tab (Shift = prefilled dialog) or an existing tab, Move to ▸, Add to current / new tab, Pop out, Appearance…, Accent ▸ (presets / recent / custom / inherit), Reveal worktree — `SessionContextMenu.tsx`, `MoveToSubmenu.tsx`, `MenuSubmenu.tsx` (native: Appearance… and Accent ▸ landed in P2.10; Duplicate ▸, Move to ▸, Add to current / new tab and Reveal worktree in P4.12b; Shift on Duplicate ▸ in P4.12c)
 - [x] Actions by state: running → Stop (delete or keep worktree); stopped → Restart / park / remove (± worktree); inactive → Resume / remove (± worktree) — `SessionContextMenu.tsx`
 - [x] Stopping a session with no pane parks it or discards it — `SessionContextMenu.tsx`
-- [ ] Pane header: status dot, label, runtime chip, trusted chip, "· headless", one repo:branch chip per member (path in tooltip), Pop out, two-step Stop or "exit code N" — `SessionPane.tsx` (native: all but Pop out, which comes with Phase 5, landed in P4.12a; member chips sit on a second row)
+- [ ] Pane header: status dot, label, runtime chip, trusted chip, one repo:branch chip per member (path in tooltip), Pop out, two-step Stop or "exit code N" — `SessionPane.tsx` (native: all but Pop out, which comes with Phase 5, landed in P4.12a; member chips sit on a second row)
 - [x] Stopped-pane overlay: Restart in place, New session… into this pane, remove pane keep worktree, remove pane (± worktree) — `SessionPane.tsx`
 - [x] Abandoned overlay (shows the last prompt) with Resume / Dismiss; orphan banner — `SessionPane.tsx` (native: P4.12a; the banner names the session's runtime)
-- [x] Headless view: status, tokens in/out, cost, recent-actions log (last 200, "Show all") — `SessionPane.tsx` `HeadlessView` (native: P4.6; the daemon keeps 200 actions, the same as the tail, so "Show all" appears only if one side's cap changes)
+- [x] Dropped by RT-183 (the native client has no headless view; a pane bound to a headless session shows one muted line): Headless view: status, tokens in/out, cost, recent-actions log (last 200, "Show all") — `SessionPane.tsx` `HeadlessView` (native: P4.6; the daemon keeps 200 actions, the same as the tail, so "Show all" appears only if one side's cap changes)
 - [x] Display label order: user label → shell cwd name → terminal title (skipping bare shell names) → daemon label → runtime — `utils/sessionLabel.ts` (native: P4.12a, everywhere a session is named)
 - [x] Sessions without a worktree that exit on their own are discarded automatically — `App.tsx` (native: P4.12a; headless and abandoned sessions are kept, and after a reconnect nothing is discarded until the fresh session list arrives)
 - [x] Delete-worktree confirm (the only path to deleting one): per-branch fate from the daemon, delete all / keep vs delete (commits lost) / worktree only, 10s fallback, safe option focused — `DeleteWorktreeDialog.tsx`, `utils/branchFate.ts`
@@ -78,7 +78,7 @@ Close behind: the paste and key quirks (native clipboard read, Shift+Enter bytes
 - [x] Target picker ([REPO]/[WS]) or fixed label; "no repos" state with + Add repo — `SpawnDialog.tsx` (native: the picker landed in P1.7c, the "no repos" state with Add repo in P4.10a)
 - [x] Runtime radio: claude / plain shell; defaults to the target's last spawn unless the user changed it — `SpawnDialog.tsx`
 - [x] "Open in": current tab / new tab / each other tab — `SpawnDialog.tsx`
-- [x] Mode Interactive / Headless (prompt textarea; no headless for cursor) — `SpawnDialog.tsx`
+- [x] Dropped by RT-183 (the native spawn dialog has no Mode row or Prompt field): Mode Interactive / Headless (prompt textarea; no headless for cursor) — `SpawnDialog.tsx`
 - [x] Trusted launch checkbox (per-runtime skip-permissions / yolo flag) with a warning banner — `SpawnDialog.tsx`
 - [x] Advanced: model, Claude approval mode, env vars (invalid-key and duplicate warnings) — `SpawnDialog.tsx`
 - [x] Single-repo: create worktree (saved per repo), new / use existing, picker (in use / stopped / stale, size, age), confirm before sharing with a live session — `SpawnDialog.tsx` `SingleForm`

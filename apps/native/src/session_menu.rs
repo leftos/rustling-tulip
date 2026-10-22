@@ -9,8 +9,8 @@ use gpui::{
     SharedString, Stateful, Subscription, Task, Window, anchored, deferred, div, prelude::*, px,
 };
 use protocol::{
-    ClientMessage, DaemonMessage, MemberBranchFate, PresetEntry, PresetTarget, SessionSnapshot,
-    SpawnConfig, TabEntry,
+    ClientMessage, DaemonMessage, MemberBranchFate, PresetEntry, PresetTarget, SessionMode,
+    SessionSnapshot, SpawnConfig, TabEntry,
 };
 
 use crate::appearance::{self, ACCENT_PRESETS, AppearanceChange};
@@ -25,12 +25,12 @@ use crate::open::{OpenJob, VsCodeTarget, copy_path, repo_folder, workspace_vscod
 use crate::open_view::Then;
 use crate::palette::{CHIP, LINE_STRONG, SCRIM};
 use crate::session_actions::{
-    ABANDONED_ACTIONS, ActionState, DuplicateTarget, MenuEntry, MenuMode, MoveTarget, OfferedRow,
-    PendingPrefill, PlacedFocus, SessionAction, SessionRow, Step, Submenu, SubmenuLine,
-    abandoned_lines, action_state, busy_exclusion_message, busy_row, duplicate_lines,
-    exit_code_label, exited_message, header_shows_exit_code, menu_entries, move_lines, move_source,
-    orphan_banner_text, overlay_actions, pane_shows_exit, plan, rename_message, session_rows,
-    worktree_to_reveal,
+    ABANDONED_ACTIONS, ActionState, DuplicateTarget, HEADLESS_UNSUPPORTED_TIP, MenuEntry, MenuMode,
+    MoveTarget, OfferedRow, PendingPrefill, PlacedFocus, SessionAction, SessionRow, Step, Submenu,
+    SubmenuLine, abandoned_lines, action_disabled_tip, action_state, busy_exclusion_message,
+    busy_row, duplicate_lines, exit_code_label, exited_message, header_shows_exit_code,
+    menu_entries, move_lines, move_source, orphan_banner_text, overlay_actions, pane_shows_exit,
+    plan, rename_message, session_rows, worktree_to_reveal,
 };
 use crate::sidebar::can_attach;
 use crate::spawn_form::{Lock, Prefill, Target};
@@ -500,6 +500,21 @@ impl RootView {
     /// The tooltip of the menu row tagged `selector` when it is dimmed.
     #[must_use]
     pub fn menu_disabled_tip(&self, selector: &str) -> Option<&'static str> {
+        let session = self
+            .menu
+            .as_ref()
+            .and_then(|menu| self.sidebar.session(&menu.session_id));
+        let action_tip = self
+            .rows()
+            .into_iter()
+            .find(|row| row.selector == selector)
+            .and_then(|row| match (row.entry, session) {
+                (MenuEntry::Action(action), Some(session)) => action_disabled_tip(action, session),
+                _ => None,
+            });
+        if action_tip.is_some() {
+            return action_tip;
+        }
         self.offered_rows()
             .into_iter()
             .find(|offered| offered.row.selector() == selector)
@@ -722,6 +737,13 @@ impl RootView {
             .and_then(|container| self.sidebar.last_spawn_config(container))
     }
 
+    /// Whether the container's stored launch config is a headless run, which
+    /// this client refuses to replay.
+    fn container_launch_headless(&self, container: &MenuContainer) -> bool {
+        self.container_launch_config(container)
+            .is_some_and(|config| config.mode == SessionMode::Headless)
+    }
+
     /// The selectors of the container menu's rows as shown now, in the groups
     /// its separators divide; empty while it is closed.
     #[must_use]
@@ -777,6 +799,11 @@ impl RootView {
                     PresetAction::Disabled(tip) => tip,
                     PresetAction::Launch(_) => None,
                 });
+        }
+        if selector == CONTAINER_LAUNCH_LAST_ROW {
+            return self
+                .container_launch_headless(&menu.container)
+                .then(|| HEADLESS_UNSUPPORTED_TIP.to_owned());
         }
         let no_folder = match selector {
             CONTAINER_EXPLORER_ROW | CONTAINER_COPY_PATH_ROW => {
@@ -1320,7 +1347,15 @@ impl RootView {
             cx.stop_propagation();
         }));
         let mut frame = frame.child(spawn).child(menu_separator());
-        if self.container_launch_config(container).is_some() {
+        if self.container_launch_headless(container) {
+            frame = frame
+                .child(disabled_row(
+                    CONTAINER_LAUNCH_LAST_ROW,
+                    CONTAINER_LAUNCH_LAST_LABEL,
+                    HEADLESS_UNSUPPORTED_TIP,
+                ))
+                .child(menu_separator());
+        } else if self.container_launch_config(container).is_some() {
             frame = frame
                 .child(
                     menu_item(
@@ -1560,6 +1595,9 @@ impl RootView {
         let Some(session) = self.sidebar.session(session_id).cloned() else {
             return;
         };
+        if action_disabled_tip(action, &session).is_some() {
+            return;
+        }
         cx.notify();
         self.confirm.disarm();
         match plan(action, &session, self.is_shown(session_id)) {
@@ -2000,6 +2038,13 @@ impl RootView {
         label: &'static str,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
+        if let Some(tip) = self
+            .sidebar
+            .session(session_id)
+            .and_then(|session| action_disabled_tip(action, session))
+        {
+            return disabled_row(selector, label, tip);
+        }
         let button = menu_item(selector, label, is_danger(action));
         if !self.action_ready(session_id, action) {
             return button.opacity(0.6).cursor_default();

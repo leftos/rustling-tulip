@@ -15,7 +15,7 @@ use crate::support;
 use gpui::{Modifiers, TestAppContext, point, px};
 use protocol::{
     AgentOptions, ClientMessage, DaemonMessage, EnvName, EnvScope, PermissionMode,
-    RootWorktreeStatus, SessionMode, SpawnRequest, SpawnTarget, SuggestTarget, WorktreeInfo,
+    RootWorktreeStatus, SpawnRequest, SpawnTarget, SuggestTarget, WorktreeInfo,
 };
 use rustling_tulip_native::RootView;
 use support::{Fixture, Harness, TestDir, repo, session};
@@ -470,7 +470,7 @@ fn tab_cycles_controls(cx: &mut TestAppContext) {
     let mut h = Harness::with(cx, &dir, &fixture());
     open(&mut h);
     let mut seen = vec![focus(&mut h).expect("a focus")];
-    for _ in 0..7 {
+    for _ in 0..5 {
         h.keys("tab");
         seen.push(focus(&mut h).expect("a focus"));
     }
@@ -480,8 +480,6 @@ fn tab_cycles_controls(cx: &mut TestAppContext) {
             "spawn-branch",
             "spawn-branch-random",
             "spawn-base-branch",
-            "spawn-runmode-interactive",
-            "spawn-runmode-headless",
             "spawn-skip-perms",
             "spawn-advanced",
             "spawn-cancel"
@@ -506,34 +504,6 @@ fn tab_cycles_controls(cx: &mut TestAppContext) {
         "Space chooses the focused option"
     );
     assert!(is_open(&mut h));
-}
-
-fn prompt(h: &mut Harness<'_>) -> Option<String> {
-    h.root(RootView::spawn_dialog_prompt)
-}
-
-/// Opens the dialog with a branch name, picks Headless and moves the
-/// keyboard to the prompt.
-fn open_headless(h: &mut Harness<'_>) {
-    open(h);
-    suggest(h, "r1", "wt/brave-fox");
-    h.click_on("spawn-runmode-headless");
-    h.keys("tab");
-    assert_eq!(focus(h).as_deref(), Some("spawn-headless-prompt"));
-}
-
-#[gpui::test]
-fn headless_spawn_sends_the_prompt(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    let mut h = Harness::with(cx, &dir, &fixture());
-    open_headless(&mut h);
-    h.keys("space f i x space");
-    assert_eq!(prompt(&mut h).as_deref(), Some(" fix "));
-    h.keys("ctrl-enter");
-    let request = the_spawn(&h.sent());
-    assert_eq!(request.mode, SessionMode::Headless);
-    assert_eq!(request.initial_prompt.as_deref(), Some("fix"), "trimmed");
-    assert!(!is_open(&mut h));
 }
 
 #[gpui::test]
@@ -1100,20 +1070,6 @@ fn invalid_env_key_blocks_spawn(cx: &mut TestAppContext) {
     h.click_on("spawn-submit");
     let request = the_spawn(&h.sent());
     assert_eq!(request.extra_env, [("a".to_owned(), String::new())]);
-}
-
-#[gpui::test]
-fn enter_in_the_prompt_inserts_a_newline_not_a_submit(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    let mut h = Harness::with(cx, &dir, &fixture());
-    open_headless(&mut h);
-    h.keys("a enter b");
-    assert_eq!(spawns(&h.sent()), [] as [protocol::SpawnRequest; 0]);
-    assert!(is_open(&mut h));
-    assert_eq!(prompt(&mut h).as_deref(), Some("a\nb"));
-    h.keys("ctrl-enter");
-    let request = the_spawn(&h.sent());
-    assert_eq!(request.initial_prompt.as_deref(), Some("a\nb"));
 }
 
 #[gpui::test]

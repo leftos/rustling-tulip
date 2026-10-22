@@ -26,8 +26,8 @@ use crate::palette::{
 use crate::session_menu::{backdrop, dialog_button};
 use crate::spawn_form::{
     APPROVAL_CHOICES, Control, EnvRow, EnvRowNote, FormInputs, ListField, Lock, MODEL_ALIASES,
-    OpenChoice, Outcome, PROVIDER_CHOICES, Prefill, RunMode, Runtime, ShareButton, SpawnForm,
-    TabChoices, Target, WorktreeMode, approval_label, provider_label,
+    OpenChoice, Outcome, PROVIDER_CHOICES, Prefill, Runtime, ShareButton, SpawnForm, TabChoices,
+    Target, WorktreeMode, approval_label, provider_label,
 };
 use crate::spawn_preview::{
     CollisionNotice, RECREATE_LABEL, REUSE_NOTE, ReuseChoice, Tone, collision_notice, member_row,
@@ -85,7 +85,6 @@ const RANDOM_TIP: &str = "Generate a random worktree branch name";
 const SUGGESTING: &str = "Picking a name no existing branch uses…";
 const FETCH_FAILED: &str = "Couldn't reach the remote — comparing against the last fetched refs.";
 const CURRENT_TAB_DISABLED: &str = "The current tab cannot host terminal panes";
-const PROMPT_ROWS: (usize, usize) = (3, 8);
 pub(crate) const CLAUDE_LOCKED: &str = "Ignored while trusted launch is on. Claude will run without --permission-mode. The chosen value is preserved for when you toggle trusted launch off.";
 const NO_ENV: &str = "No extra env vars.";
 const ENV_VALUE_PLACEHOLDER: &str = "value";
@@ -137,7 +136,6 @@ pub(crate) struct SpawnDialog {
     aim: Option<PaneAim>,
     branch_input: Entity<TextInput>,
     base_input: Entity<TextInput>,
-    prompt_input: Entity<TextInput>,
     model_input: Entity<TextInput>,
     /// One pair of fields per env row of the form, in order.
     env_inputs: Vec<EnvInputs>,
@@ -190,7 +188,6 @@ impl SpawnDialog {
         match control {
             Control::Branch => Some(&self.branch_input),
             Control::Base => Some(&self.base_input),
-            Control::Prompt => Some(&self.prompt_input),
             Control::Model => Some(&self.model_input),
             Control::EnvKey(index) => self.env_inputs.get(*index).map(|row| &row.key),
             Control::EnvValue(index) => self.env_inputs.get(*index).map(|row| &row.value),
@@ -199,18 +196,13 @@ impl SpawnDialog {
     }
 
     fn inputs(&self) -> impl Iterator<Item = &Entity<TextInput>> {
-        [
-            &self.branch_input,
-            &self.base_input,
-            &self.prompt_input,
-            &self.model_input,
-        ]
-        .into_iter()
-        .chain(
-            self.env_inputs
-                .iter()
-                .flat_map(|row| [&row.key, &row.value]),
-        )
+        [&self.branch_input, &self.base_input, &self.model_input]
+            .into_iter()
+            .chain(
+                self.env_inputs
+                    .iter()
+                    .flat_map(|row| [&row.key, &row.value]),
+            )
     }
 }
 
@@ -226,7 +218,6 @@ struct EnvInputs {
 enum Field {
     Branch,
     Base,
-    Prompt,
     Model,
     EnvKey(usize),
     EnvValue(usize),
@@ -237,7 +228,6 @@ impl Field {
         match self {
             Self::Branch => Control::Branch,
             Self::Base => Control::Base,
-            Self::Prompt => Control::Prompt,
             Self::Model => Control::Model,
             Self::EnvKey(index) => Control::EnvKey(index),
             Self::EnvValue(index) => Control::EnvValue(index),
@@ -315,10 +305,6 @@ impl RootView {
             form.existing_selected()
                 .map(|key| Control::Existing(key.to_owned())),
         );
-        chosen.extend(
-            form.run_mode_shown()
-                .then(|| Control::RunMode(form.run_mode())),
-        );
         chosen.extend(agent_options_chosen(form));
         chosen.extend(
             (0..form.env_rows().len())
@@ -383,13 +369,6 @@ impl RootView {
                 vec![row.repo, row.branch, badges.join(" · "), row.path]
             })
             .collect()
-    }
-
-    /// The text of the headless prompt field, while the dialog is open.
-    #[must_use]
-    pub fn spawn_dialog_prompt(&self, cx: &gpui::App) -> Option<String> {
-        let dialog = self.form_dialog()?;
-        Some(dialog.prompt_input.read(cx).text().to_owned())
     }
 
     /// The text of the model field, while the dialog is open.
@@ -572,22 +551,16 @@ impl RootView {
         self.close_more_menu(window, cx);
         let branch_input = cx.new(|cx| TextInput::new(form.branch().to_owned(), "", cx));
         let base_input = cx.new(|cx| TextInput::new(form.base().to_owned(), "", cx));
-        let prompt_input = cx.new(|cx| {
-            TextInput::multi_line(form.prompt().to_owned(), form.prompt_placeholder(), cx)
-                .with_rows(PROMPT_ROWS.0, PROMPT_ROWS.1)
-        });
         let model_input =
             cx.new(|cx| TextInput::new(form.model().to_owned(), form.model_placeholder(), cx));
         let mut subscriptions = Self::watch_field(&branch_input, Field::Branch, window, cx);
         subscriptions.extend(Self::watch_field(&base_input, Field::Base, window, cx));
-        subscriptions.extend(Self::watch_field(&prompt_input, Field::Prompt, window, cx));
         subscriptions.extend(Self::watch_field(&model_input, Field::Model, window, cx));
         self.spawn_dialog = Some(SpawnModal::Form(Box::new(SpawnDialog {
             form,
             aim,
             branch_input,
             base_input,
-            prompt_input,
             model_input,
             env_inputs: Vec::new(),
             _subscriptions: subscriptions,
@@ -679,7 +652,7 @@ impl RootView {
         }
     }
 
-    /// Enter submits (Ctrl+Enter in the prompt), Esc closes, an edit
+    /// Enter submits, Esc closes, an edit
     /// reaches the form and a click in the field moves the form's focus
     /// there. In a field with a branch list, Enter and Esc go to the list
     /// while it shows, Up and Down move through it, and leaving the field
@@ -714,7 +687,6 @@ impl RootView {
                 match field {
                     Field::Branch => form.edit_branch(&text, &mut this.branch_cache),
                     Field::Base => form.edit_base(&text),
-                    Field::Prompt => form.edit_prompt(&text),
                     Field::Model => form.edit_model(&text),
                     Field::EnvKey(index) => form.edit_env_key(index, &text),
                     Field::EnvValue(index) => form.edit_env_value(index, &text),
@@ -940,8 +912,7 @@ impl RootView {
         let placeholders = (form.branch_placeholder(now), form.default_base());
         sync_field(&dialog.branch_input, &branch, placeholders.0, cx);
         sync_field(&dialog.base_input, &base, placeholders.1, cx);
-        let (prompt, model) = (form.prompt().to_owned(), form.model().to_owned());
-        sync_field(&dialog.prompt_input, &prompt, form.prompt_placeholder(), cx);
+        let model = form.model().to_owned();
         sync_field(
             &dialog.model_input,
             &model,
@@ -1203,7 +1174,6 @@ impl RootView {
             .children(provider_field(form, &focus, cx))
             .child(open_in_field(form, &focus, cx));
         let run = divided()
-            .children(run_rows(dialog, &focus, cx))
             .children(trusted_rows(form, &focus, cx))
             .child(advanced_section(dialog, &focus, cx));
         let body = div()
@@ -2328,34 +2298,6 @@ fn preview_table(form: &SpawnForm) -> AnyElement {
         .child(header)
         .children(rows)
         .into_any_element()
-}
-
-/// Run mode (not for a plain shell), and the prompt while headless.
-fn run_rows(dialog: &SpawnDialog, focus: &Control, cx: &mut Context<RootView>) -> Vec<AnyElement> {
-    let form = &dialog.form;
-    let mut rows = Vec::new();
-    if form.run_mode_shown() {
-        let buttons = RunMode::ALL
-            .into_iter()
-            .map(|mode| {
-                let control = Control::RunMode(mode);
-                let look = Look {
-                    selected: form.run_mode() == mode,
-                    focused: *focus == control,
-                    enabled: true,
-                };
-                option_button(&control, mode.label(), look, cx).into_any_element()
-            })
-            .collect();
-        rows.push(field("Mode").child(segmented(buttons)).into_any_element());
-    }
-    if form.run_mode() == RunMode::Headless {
-        let input = input_box(&Control::Prompt, &dialog.prompt_input, focus, cx)
-            .items_start()
-            .py(px(7.0));
-        rows.push(field("Prompt").child(input).into_any_element());
-    }
-    rows
 }
 
 /// The chosen approval option, for the runtime on show.

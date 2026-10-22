@@ -739,6 +739,47 @@ fn headless_session_that_finishes_is_kept(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn stopped_headless_pane_shows_the_note_not_the_exit_overlay(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = single(cx, &dir, session("s1").headless().status("working").build());
+
+    h.send(updated(session("s1").headless().exited(0).build(), None));
+
+    assert_eq!(
+        h.root(|root, _| root.pane_note("p1")),
+        Some("Headless session — not shown in this client")
+    );
+    assert!(
+        !h.in_model("exited-restart-p1"),
+        "no exit overlay covers the note"
+    );
+}
+
+#[gpui::test]
+fn restart_of_a_headless_session_is_disabled(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = single(cx, &dir, session("s1").headless().exited(0).build());
+
+    h.right_click_on("leaf-s1");
+    assert!(
+        rows(&mut h).contains(&"menu-restart".to_owned()),
+        "offered, dimmed: {:?}",
+        rows(&mut h)
+    );
+    assert_eq!(
+        h.root(|root, _| root.menu_disabled_tip("menu-restart")),
+        Some("Headless runs aren't supported in this client")
+    );
+    h.click_on("menu-restart");
+    assert!(
+        !h.sent()
+            .iter()
+            .any(|message| matches!(message, ClientMessage::DuplicateSession { .. })),
+        "a headless session is never rerun"
+    );
+}
+
+#[gpui::test]
 fn disconnect_closes_menu(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = single(cx, &dir, session("s1").build());
@@ -1296,7 +1337,7 @@ fn duplicate_of_headless_session_is_disabled(cx: &mut TestAppContext) {
     );
     assert_eq!(
         h.root(|root, _| root.menu_disabled_tip("session-menu-duplicate")),
-        Some("Headless sessions are one-shot kickoffs; spawn a new one instead")
+        Some("Headless runs aren't supported in this client")
     );
     let before = groups(&mut h);
     h.click_on("session-menu-duplicate");

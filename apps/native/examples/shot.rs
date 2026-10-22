@@ -581,7 +581,6 @@ fn session_rows() -> Vec<Row> {
             extra: json!({
                 "has_per_session_worktree": true,
                 "worktree_paths": [PETAL_TREE],
-                "metrics": { "input_tokens": 182_400, "output_tokens": 9_870, "cost_usd": 1.42, "last_activity_at": null },
                 "terminal_title": "Petal footer polish",
             }),
         },

@@ -104,7 +104,7 @@ pub const DIFF_WORD_WASH_ALPHA: f32 = 0.30;
 /// The sidebar's and panels' background, which is [`SURFACE`], as
 /// `0xRRGGBB`.
 pub const PANEL_BG: u32 = SURFACE;
-/// The pane header's and the headless strip's background, which is
+/// The pane header's background, which is
 /// [`SUNKEN`], as `0xRRGGBB`.
 pub const BAR_BG: u32 = SUNKEN;
 /// A hovered row's or button's fill, which is [`HOVER`], as `0xRRGGBB`.

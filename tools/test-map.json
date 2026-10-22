@@ -201,18 +201,6 @@
     },
     {
       "paths": [
-        "apps/native/src/headless.rs"
-      ],
-      "filter": "(binary_id(rustling-tulip-native) & test(/^headless::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_headless)::/))"
-    },
-    {
-      "paths": [
-        "apps/native/src/headless_view.rs"
-      ],
-      "filter": "(binary_id(rustling-tulip-native) & test(/^headless_view::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_headless)::/))"
-    },
-    {
-      "paths": [
         "apps/native/src/history.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native) & test(/^history::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_diff_tab|ui_history)::/))"
@@ -690,12 +678,6 @@
         "apps/native/tests/ui/ui_font_size.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native::ui) & test(/^(ui_font_size)::/))"
-    },
-    {
-      "paths": [
-        "apps/native/tests/ui/ui_headless.rs"
-      ],
-      "filter": "(binary_id(rustling-tulip-native::ui) & test(/^(ui_headless)::/))"
     },
     {
       "paths": [
