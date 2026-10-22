@@ -33,7 +33,7 @@ All Claude Code and Codex facts below are from the current docs, fetched as Mark
 
 Re-read this section against `pty_state.rs` and `session.rs` before HS.6: the status now persists in the sidecar and a reattached session restores it (2c16f41, b378bcc).
 
-- **Spawn.** `server.rs::spawn_interactive_session` builds argv through `AgentBackend::build_interactive_args` (`crates/daemon/src/agents/claude.rs`, `codex.rs`, `cursor.rs`), with the cross-agent `CommonSpawnFields` from `agents/mod.rs`. Claude gets `--session-id <uuid>` (new) or `--resume <id>` (recovery).
+- **Spawn.** `server/spawn.rs::spawn_interactive_session` builds argv through `AgentBackend::build_interactive_args` (`crates/daemon/src/agents/claude.rs`, `codex.rs`, `cursor.rs`), with the cross-agent `CommonSpawnFields` from `agents/mod.rs`. Claude gets `--session-id <uuid>` (new) or `--resume <id>` (recovery).
 
   The argv is logged at `info!` and handed to the tracer client in a `PtySpawnSpec` with `env: merged_env(&cfg.extra_env)`; the tracer runs the child from its content-addressed copy under the binaries cache (`binary_cache.rs`).
 
@@ -138,7 +138,7 @@ Additive only; `supported` does not change.
 
 Every interactive Claude spawn writes its own settings file under its own rt session id, whether it starts fresh, resumes (`--resume`, which keeps the conversation id), is duplicated (`duplicate_session` builds a new spawn) or is recovered through `RecoverSessions`.
 
-A recovery into a plain shell builds its injector in `history.rs` with a `{rt-hook-settings}` slot; the spawn (`server.rs::spawn_plain_shell_session`) writes the shell session's settings file, since only it knows the rt session id, and its injector types `claude --settings <path> --resume <id>`, or drops the clause when it wrote no file.
+A recovery into a plain shell builds its injector in `history.rs` with a `{rt-hook-settings}` slot; the spawn (`server/spawn.rs::spawn_plain_shell_session`) writes the shell session's settings file, since only it knows the rt session id, and its injector types `claude --settings <path> --resume <id>`, or drops the clause when it wrote no file.
 
 A tracer-reattached session keeps its original settings; its shim finds the new daemon through `daemon.json`. Events fired while no daemon runs are lost; the session shows the heuristic's status until the next event.
 
@@ -218,7 +218,7 @@ Settled (orchestrator, technical): Q1 (a) async command hooks through the tracer
   `Stop` stores `last_assistant_message` trimmed and capped at 8 KiB on the record, off the wire; `StopFailure` adds a `recent_actions` line; a `permission_mode` mismatch on `UserPromptSubmit` against the spawn's `--permission-mode` logs a `warn!`. Proof: record tests after each event, a sidecar round-trip through `SessionRegistry::update`, a `RecordMirror::matches` test on the id alone, and a `history.rs` test that an ended session's entry carries the hook-updated id — each also confirmed to fail against its deliberate mutation.
 - [x] **HS.8 Shell recovery path.** `history.rs`'s `shell_request` carries `claude --settings {rt-hook-settings} --resume <id>` on the shell-recovery injector (`HOOK_SETTINGS_SLOT`), since the rt session id exists only once the spawn mints it.
 
-  `server.rs::spawn_plain_shell_session` writes `sessions/<id>/hook-settings.json` through `write_hook_settings`, spawns through `tracer_client::spawn_with_tracer` on the same cached tracer the file names, and renders the slot through `render_shell_resume`: the quoted path when the file was written, and the clause dropped — `claude --resume <id>` — when it was not or the path holds a double quote.
+  `server/spawn.rs::spawn_plain_shell_session` writes `sessions/<id>/hook-settings.json` through `write_hook_settings`, spawns through `tracer_client::spawn_with_tracer` on the same cached tracer the file names, and renders the slot through `render_shell_resume`: the quoted path when the file was written, and the clause dropped — `claude --resume <id>` — when it was not or the path holds a double quote.
 
   A failed spawn discards the file and the `sessions/<id>/` dir it created; a natural exit leaves the file for the graceful stop that removes the whole dir.
 

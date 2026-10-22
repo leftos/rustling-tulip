@@ -16,7 +16,7 @@ Owner rulings (binding):
 
 Orchestrator decisions, made while scoping RT-265:
 
-- The plain shell is the app's built-in baseline, not a plugin: `SessionMode::PlainShell`, `spawn_plain_shell_session` (`crates/daemon/src/server.rs`), `resolve_shell_program`, `pty_state::watch_plain_shell` and the client's `Runtime::PlainShell` (`apps/native/src/spawn_form.rs`) stay app code.
+- The plain shell is the app's built-in baseline, not a plugin: `SessionMode::PlainShell`, `spawn_plain_shell_session` (`crates/daemon/src/server/spawn.rs`), `resolve_shell_program`, `pty_state::watch_plain_shell` and the client's `Runtime::PlainShell` (`apps/native/src/spawn_form.rs`) stay app code.
 - The shell's Claude leaks are removed by this work: the shell record stamped `agent: Agent::Claude` (`server.rs:4849`), its sidecar written with `Agent::Claude` (`server.rs:4924`), the client sending `AgentOptions::claude(None)` for a shell (`apps/native/src/shell_dialog.rs:241`), and a recovered shell carrying Claude hooks and typing `claude --resume` (`server.rs:4766-4771`, `crates/daemon/src/history.rs:1404-1431`).
 
 Orchestrator decisions, from an independent review of the first draft against the code:
@@ -39,7 +39,7 @@ The plugin also owns its recovery choices and shell-typed resume command; its he
 
 Outside the seam (app code, agent-neutral): the plain shell; the PTY, `rt-tracer.exe`, the tracer ABI and reattach; scrollback; tabs and layouts; worktrees, workspaces and git. The hook side the app keeps is the `/hook/{session_id}` route, the hook ordering stamp, the early-event buffer and `apply_status` (`crates/daemon/src/hook_status.rs`, `pty_state.rs`), plus the idle demotions and the byte-volume and title heuristics.
 
-Also app code: env-row sealing and `${env:}` / `${secret:}` resolution; the base environment keep-list; npm-shim resolution (`resolve_agent_program`, `server.rs:7203`); the trusted-launch flag (`dangerously_skip_permissions`) and its `elevated_authority` chip; every process the app runs for a plugin (a pre-create, a discovery poll) with its timeout and kill; history storage, pruning and the recover dialog's layout; the schema validation function.
+Also app code: env-row sealing and `${env:}` / `${secret:}` resolution; the base environment keep-list; npm-shim resolution (`resolve_agent_program`, `server/spawn/shell.rs`); the trusted-launch flag (`dangerously_skip_permissions`) and its `elevated_authority` chip; every process the app runs for a plugin (a pre-create, a discovery poll) with its timeout and kill; history storage, pruning and the recover dialog's layout; the schema validation function.
 
 ## Crate layout
 

@@ -57,9 +57,9 @@ Guardrails:
 - If the field is binary, use `data_b64: String` and document the encoding in the Rust doc comment.
 - Add a `///` doc comment explaining what the message is for and when the peer should emit it.
 
-### 2. `crates/daemon/src/server.rs`
+### 2. `crates/daemon/src/server.rs` and `crates/daemon/src/server/<domain>.rs`
 
-For a `ClientMessage` variant, add an arm to the dispatch `match` in the receive loop (around the existing `ClientMessage::ListRepos`, `ClientMessage::AddRepo` arms). For a `DaemonMessage` variant, add the code that constructs and sends it from wherever the new behaviour fires.
+For a `ClientMessage` variant, add the arm to the `handle` of the domain module under `crates/daemon/src/server/` that owns it (`sessions`, `tabs`, `git`, `recovery`, `settings`, `spawn`), and list the variant in that domain's or-pattern in `dispatch` in `server.rs`, whose exhaustive `match` routes it; a variant outside those groups (handshake, fetch, shutdown, remote configuration, presets) gets its arm inline in `dispatch`. For a `DaemonMessage` variant, add the code that constructs and sends it from wherever the new behaviour fires.
 
 Guardrails:
 - If the handler does I/O or anything slow, `tokio::spawn` it — never block the WS receive loop.

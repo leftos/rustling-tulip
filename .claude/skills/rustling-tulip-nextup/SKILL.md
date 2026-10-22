@@ -21,7 +21,7 @@ linear: rustling-tulip
 - Pre-loop hooks: none.
 - Tracker: **triage** as plan-operations says (GitHub issues reach team RT through Linear's sync; an untriaged one is top-level with no project), each placed in the project that shares its files, else in `Backlog`.
 - Pull requests: `gh pr list --repo leftos/rustling-tulip --state open --json number,title,baseRefName`. An unplanned PR gets an **add**, "Review and land PR #N", naming its base branch, its files, whether the checks pass and whether it merges cleanly; a bot's dependency bump goes to `Backlog`.
-- Hotspots (two items touching one wait on each other): `crates/protocol/src/lib.rs`, `crates/daemon/src/server.rs`, and in the native client `apps/native/src/lib.rs` (`RootView`), which every native item mounts into.
+- Hotspots (two items touching one wait on each other): `crates/protocol/src/lib.rs`, `crates/daemon/src/server.rs` (`dispatch`; a change confined to one `server/<domain>.rs` module conflicts only with items touching that module), and in the native client `apps/native/src/lib.rs` (`RootView`), which every native item mounts into.
 
 ## Working mode: ship fast (owner ruling, until the first release)
 
