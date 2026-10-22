@@ -188,8 +188,9 @@ pub struct SessionRecord {
     /// What the session is waiting for while its status is
     /// [`SessionStatus::AwaitingInput`], as the agent CLI's own hooks last
     /// reported it. `None` until a hook reports one; copied into
-    /// [`SessionSnapshot::pending_input`]. Not persisted to the sidecar, so a
-    /// reattached session starts with none and learns it from the next hook.
+    /// [`SessionSnapshot::pending_input`]. Mirrored to the sidecar beside the
+    /// status, so a session reattached `AwaitingInput` keeps what it was
+    /// asking; any other restored status starts with none.
     pub pending_input: Option<PendingInput>,
     /// Time of the last hook event applied to this session, in nanoseconds
     /// since the Unix epoch, from the shim's `X-RT-Hook-Time` header. Async
@@ -500,6 +501,7 @@ impl SessionRegistry {
             recent_actions_tail: trim_recent_tail(&guard.recent_actions),
             status: guard.status,
             status_since: guard.status_since,
+            pending_input: guard.pending_input.clone(),
             terminal_title: guard.terminal_title.clone(),
             current_cwd: guard.current_cwd.clone(),
             default_label: guard.default_label.clone(),
@@ -956,6 +958,12 @@ impl SessionRegistry {
             ) => (restored, since),
             _ => (SessionStatus::Idle, Utc::now()),
         };
+        // A prompt is only pending beside the status that waits on it.
+        let pending_input = if status == SessionStatus::AwaitingInput {
+            meta.pending_input.clone()
+        } else {
+            None
+        };
         let mut record = SessionRecord {
             id: meta.session_id.clone(),
             label,
@@ -987,7 +995,7 @@ impl SessionRegistry {
             scrollback_snapshot_req: None,
             spawn_origin: None,
             claude_session_id: meta.claude_session_id.clone(),
-            pending_input: None,
+            pending_input,
             last_hook_time: None,
             hook_driven: false,
             last_assistant_message: None,
@@ -1345,6 +1353,18 @@ mod tests {
     /// leaves it. The fixture is literal JSON: it pins the on-disk shape
     /// rather than the struct this build happens to serialize.
     fn write_sidecar_with_status(dirs: &Dirs, id: &str, status: &str, since: DateTime<Utc>) {
+        write_sidecar_with_fields(dirs, id, status, since, "");
+    }
+
+    /// [`write_sidecar_with_status`] with `extra` (comma-led JSON members)
+    /// appended to the object.
+    fn write_sidecar_with_fields(
+        dirs: &Dirs,
+        id: &str,
+        status: &str,
+        since: DateTime<Utc>,
+        extra: &str,
+    ) {
         let dir = dirs.sessions_dir.join(id);
         std::fs::create_dir_all(&dir).expect("create session dir");
         let since = since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
@@ -1352,9 +1372,51 @@ mod tests {
             r#"{{"on_disk_version": 2, "session_id": "{id}", "pid": 1234, "label": "{id}",
                 "kind": "standalone", "mode": "interactive", "members": [],
                 "started_at": "2024-01-01T00:00:00Z",
-                "status": "{status}", "status_since": "{since}"}}"#
+                "status": "{status}", "status_since": "{since}"{extra}}}"#
         );
         std::fs::write(dir.join("meta.json"), json).expect("write meta.json");
+    }
+
+    const PENDING_BASH: &str = r#", "pending_input": {"kind": "permission", "tool_name": "Bash", "summary": "cargo build"}"#;
+
+    /// Reattach `s1` from a sidecar holding `status` and a pending Bash
+    /// prompt; answers the restored snapshot's pending input.
+    fn reattach_with_pending(tag: &str, status: &str) -> Option<PendingInput> {
+        use crate::history::test_support::{fake_pty, scratch_dirs};
+        let dirs = scratch_dirs(tag);
+        let since = DateTime::from_timestamp(1_700_000_000, 0).expect("a fixed stamp");
+        write_sidecar_with_fields(&dirs, "s1", status, since, PENDING_BASH);
+        let meta = crate::orphan::load_meta(&dirs, "s1").expect("load meta");
+        let registry = SessionRegistry::new(dirs.clone());
+        let (pty, _exit_tx) = fake_pty();
+        registry.insert_reattached(&meta, pty).publish();
+        let snapshots = registry.snapshots();
+        let _ = std::fs::remove_dir_all(&dirs.config);
+        assert_eq!(snapshots.len(), 1);
+        snapshots[0].pending_input.clone()
+    }
+
+    #[tokio::test]
+    async fn reattach_restores_pending_input_with_awaiting_input() {
+        assert_eq!(
+            reattach_with_pending("reattach-pending-awaiting", "awaiting_input"),
+            Some(PendingInput::Permission {
+                tool_name: "Bash".to_owned(),
+                summary: "cargo build".to_owned(),
+            }),
+            "a restored prompt keeps what it was asking"
+        );
+    }
+
+    #[tokio::test]
+    async fn reattach_drops_pending_input_when_not_awaiting_input() {
+        for status in ["idle", "working"] {
+            assert_eq!(
+                reattach_with_pending(&format!("reattach-pending-{status}"), status),
+                None,
+                "a {status} session restores no prompt"
+            );
+        }
     }
 
     /// The exit watcher's history write must land before the `Stopped` update

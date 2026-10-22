@@ -15,7 +15,8 @@ use crate::paths::Dirs;
 use anyhow::{Context as _, anyhow};
 use chrono::{DateTime, Utc};
 use protocol::{
-    Agent, AppearanceOverrides, SessionKind, SessionMember, SessionMode, SessionStatus, SpawnConfig,
+    Agent, AppearanceOverrides, PendingInput, SessionKind, SessionMember, SessionMode,
+    SessionStatus, SpawnConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -135,6 +136,11 @@ pub struct OrphanMeta {
     /// `status` is `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status_since: Option<DateTime<Utc>>,
+    /// What the session was waiting for when the sidecar was last written, as
+    /// its hooks reported it. A reattach restores it only beside a restored
+    /// `AwaitingInput`. Absent when nothing was pending.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_input: Option<PendingInput>,
     /// OS pid of the `rt-tracer.exe` process supervising this session's PTY.
     /// `None` for sidecars written before C.3 (no tracer in the picture) and
     /// for any future spawn path that doesn't go through a tracer. Liveness
@@ -536,6 +542,7 @@ pub fn meta_from_record(
         // `meta_from_record` never sees that record.
         status: None,
         status_since: None,
+        pending_input: None,
         tracer_pid,
         tracer_pipe,
         tracer_exe_path,
@@ -555,6 +562,7 @@ pub struct RecordMirror {
     pub recent_actions_tail: Vec<String>,
     pub status: SessionStatus,
     pub status_since: Option<DateTime<Utc>>,
+    pub pending_input: Option<PendingInput>,
     pub terminal_title: Option<String>,
     pub current_cwd: Option<String>,
     pub default_label: String,
@@ -570,6 +578,7 @@ impl RecordMirror {
         meta.recent_actions_tail == self.recent_actions_tail
             && meta.status == Some(self.status)
             && meta.status_since == self.status_since
+            && meta.pending_input == self.pending_input
             && meta.terminal_title == self.terminal_title
             && meta.current_cwd == self.current_cwd
             && meta.default_label.as_deref() == Some(self.default_label.as_str())
@@ -586,6 +595,7 @@ impl RecordMirror {
             .clone_from(&self.recent_actions_tail);
         meta.status = Some(self.status);
         meta.status_since = self.status_since;
+        meta.pending_input.clone_from(&self.pending_input);
         meta.terminal_title.clone_from(&self.terminal_title);
         meta.current_cwd.clone_from(&self.current_cwd);
         meta.default_label = Some(self.default_label.clone());
@@ -838,6 +848,7 @@ mod tests {
             recent_actions_tail: Vec::new(),
             status: None,
             status_since: None,
+            pending_input: None,
             tracer_pid: Some(1234),
             tracer_pipe: Some(r"\\.\pipe\rt-tracer-s1".to_string()),
             tracer_exe_path: Some(r"C:\cache\rt-tracer-aaaaaaaaaaaaaaaa.exe".to_string()),
@@ -994,6 +1005,7 @@ mod tests {
             recent_actions_tail: Vec::new(),
             status: SessionStatus::Idle,
             status_since: None,
+            pending_input: None,
             terminal_title: None,
             current_cwd: None,
             default_label: "s1".to_owned(),
@@ -1028,6 +1040,37 @@ mod tests {
             claude_session_id.map(str::to_owned),
         )
         .expect("build meta")
+    }
+
+    /// A pending prompt reaches the sidecar with its status and loads back;
+    /// once nothing is pending the field leaves the file.
+    #[test]
+    fn orphan_meta_round_trips_pending_input() {
+        let dirs = scratch_dirs("pending-input-round-trip");
+        write_meta(&dirs, &s1_meta(None)).expect("write meta");
+        let pending = PendingInput::Permission {
+            tool_name: "Bash".to_owned(),
+            summary: "cargo build".to_owned(),
+        };
+        let mut mirror = mirror_for(None);
+        mirror.status = SessionStatus::AwaitingInput;
+        mirror.pending_input = Some(pending.clone());
+        sync_record_fields(&dirs, "s1", &mirror).expect("sync the prompt");
+        let loaded = load_meta(&dirs, "s1").expect("load meta");
+        assert_eq!(loaded.status, Some(SessionStatus::AwaitingInput));
+        assert_eq!(loaded.pending_input, Some(pending));
+
+        sync_record_fields(&dirs, "s1", &mirror_for(None)).expect("sync the answer");
+        let text = std::fs::read_to_string(meta_path(&dirs, "s1")).expect("read sidecar");
+        assert!(
+            !text.contains("pending_input"),
+            "nothing pending writes no field: {text}"
+        );
+        assert_eq!(
+            load_meta(&dirs, "s1").expect("load meta").pending_input,
+            None
+        );
+        let _ = std::fs::remove_dir_all(&dirs.config);
     }
 
     /// Only the conversation id differing is still a mismatch: the mirror

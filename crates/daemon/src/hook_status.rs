@@ -50,6 +50,10 @@ pub struct HookDetails {
     pub permission_mode: Option<String>,
     /// Why a `StopFailure` failed: the payload's `reason`, else its `message`.
     pub failure_detail: Option<String>,
+    /// Whether a subagent's tool call fired the event: its input carries a
+    /// non-empty `agent_id`. (`agent_type` alone also marks a main agent run
+    /// with `--agent`, so it is not the marker.)
+    pub subagent: bool,
 }
 
 /// Read the extra fields out of one hook payload.
@@ -67,6 +71,7 @@ pub fn details(body: &Value) -> HookDetails {
         failure_detail: text("reason")
             .filter(|reason| !reason.is_empty())
             .or_else(|| text("message")),
+        subagent: text("agent_id").is_some_and(|id| !id.is_empty()),
     }
 }
 
@@ -255,6 +260,9 @@ pub(crate) fn apply_to_record(
     if details.event == "SessionEnd" && record.mode == SessionMode::PlainShell {
         record.hook_driven = false;
     }
+    if leaves_pending_alone(record, signal, details) {
+        return (false, apply_details(record, details));
+    }
     let entered_awaiting = signal
         .status
         .is_some_and(|status| crate::pty_state::apply_status(record, status));
@@ -268,6 +276,28 @@ pub(crate) fn apply_to_record(
         }
     }
     (entered_awaiting, apply_details(record, details))
+}
+
+/// Whether an event must leave the record's status and pending input alone,
+/// because the main agent's prompt is still waiting.
+///
+/// A subagent's event never ends or replaces a pending prompt: its tool calls
+/// fire the same hooks while the main agent waits on the user, and its own
+/// `PermissionRequest` counts only when nothing is pending. An `idle_prompt`
+/// notification (the only `Notification` that maps to `Idle`) is ignored
+/// while the record waits on a pending prompt.
+fn leaves_pending_alone(
+    record: &SessionRecord,
+    signal: &HookSignal,
+    details: &HookDetails,
+) -> bool {
+    if record.pending_input.is_none() {
+        return false;
+    }
+    let waiting = record.status == SessionStatus::AwaitingInput;
+    let idle_prompt = details.event == "Notification" && signal.status == Some(SessionStatus::Idle);
+    (details.subagent && (waiting || matches!(signal.pending, PendingUpdate::Set(_))))
+        || (idle_prompt && waiting)
 }
 
 /// Warn about a hook-reported permission mode that differs from the spawn's.
@@ -938,6 +968,125 @@ mod tests {
         assert!(map_event(&json!({"hook_event_name": "Notification"})).is_none());
     }
 
+    /// The main agent's open permission prompt, last stamped at 1.
+    fn record_with_open_prompt() -> SessionRecord {
+        let mut record = crate::history::test_support::record("s1", SessionMode::Interactive);
+        record.status = SessionStatus::AwaitingInput;
+        record.pending_input = Some(main_prompt());
+        record.last_hook_time = Some(1);
+        record.hook_driven = true;
+        record
+    }
+
+    fn main_prompt() -> PendingInput {
+        PendingInput::Permission {
+            tool_name: "Bash".to_owned(),
+            summary: "cargo build".to_owned(),
+        }
+    }
+
+    /// Apply `body` to `record` at hook time `time`, as the hook route does.
+    fn apply_body(record: &mut SessionRecord, time: u128, body: &Value) {
+        apply_to_record(record, Some(time), &signal(body), &details(body));
+    }
+
+    #[test]
+    fn subagent_post_tool_use_keeps_the_main_prompt() {
+        let mut record = record_with_open_prompt();
+        let body = json!({
+            "hook_event_name": "PostToolUse",
+            "agent_id": "a0123456789abcdef",
+            "agent_type": "Explore",
+            "tool_name": "Read",
+        });
+        apply_body(&mut record, 2, &body);
+        assert_eq!(record.status, SessionStatus::AwaitingInput);
+        assert_eq!(record.pending_input, Some(main_prompt()));
+    }
+
+    #[test]
+    fn subagent_permission_request_does_not_replace_the_main_prompt() {
+        let mut record = record_with_open_prompt();
+        let body = json!({
+            "hook_event_name": "PermissionRequest",
+            "agent_id": "a0123456789abcdef",
+            "tool_name": "Write",
+            "tool_input": {"file_path": "notes.txt"},
+        });
+        apply_body(&mut record, 2, &body);
+        assert_eq!(record.status, SessionStatus::AwaitingInput);
+        assert_eq!(record.pending_input, Some(main_prompt()));
+    }
+
+    #[test]
+    fn subagent_permission_request_sets_a_prompt_when_none_is_pending() {
+        let mut record = crate::history::test_support::record("s1", SessionMode::Interactive);
+        record.status = SessionStatus::Working;
+        record.last_hook_time = Some(1);
+        let body = json!({
+            "hook_event_name": "PermissionRequest",
+            "agent_id": "a0123456789abcdef",
+            "tool_name": "Write",
+            "tool_input": {"file_path": "notes.txt"},
+        });
+        apply_body(&mut record, 2, &body);
+        assert_eq!(record.status, SessionStatus::AwaitingInput);
+        assert!(
+            matches!(
+                &record.pending_input,
+                Some(PendingInput::Permission { tool_name, .. }) if tool_name == "Write"
+            ),
+            "the subagent's prompt is pending: {:?}",
+            record.pending_input
+        );
+    }
+
+    #[test]
+    fn main_agent_post_tool_use_still_clears_the_prompt() {
+        // `agent_type` alone marks a main agent run with `--agent`, and an
+        // empty `agent_id` names no subagent.
+        let bodies = [
+            json!({"hook_event_name": "PostToolUse", "tool_name": "Bash"}),
+            json!({"hook_event_name": "PostToolUse", "agent_type": "reviewer"}),
+            json!({"hook_event_name": "PostToolUse", "agent_id": ""}),
+        ];
+        for body in bodies {
+            let mut record = record_with_open_prompt();
+            apply_body(&mut record, 2, &body);
+            assert_eq!(record.status, SessionStatus::Working, "{body}");
+            assert_eq!(record.pending_input, None, "{body}");
+        }
+    }
+
+    fn idle_prompt() -> Value {
+        json!({"hook_event_name": "Notification", "notification_type": "idle_prompt"})
+    }
+
+    #[test]
+    fn idle_prompt_over_an_open_prompt_is_ignored() {
+        let mut record = record_with_open_prompt();
+        apply_body(&mut record, 2, &idle_prompt());
+        assert_eq!(record.status, SessionStatus::AwaitingInput);
+        assert_eq!(record.pending_input, Some(main_prompt()));
+    }
+
+    #[test]
+    fn idle_prompt_without_a_prompt_still_idles() {
+        let mut working = crate::history::test_support::record("s1", SessionMode::Interactive);
+        working.status = SessionStatus::Working;
+        apply_body(&mut working, 2, &idle_prompt());
+        assert_eq!(working.status, SessionStatus::Idle);
+
+        let mut awaiting = record_with_open_prompt();
+        awaiting.pending_input = None;
+        apply_body(&mut awaiting, 2, &idle_prompt());
+        assert_eq!(
+            awaiting.status,
+            SessionStatus::Idle,
+            "nothing pending: the idle notification ends the wait"
+        );
+    }
+
     #[test]
     fn an_elicitation_names_the_mcp_server() {
         assert_eq!(
@@ -984,6 +1133,7 @@ mod tests {
                 last_assistant_message: Some("Done.".to_owned()),
                 permission_mode: Some("plan".to_owned()),
                 failure_detail: Some("overloaded".to_owned()),
+                subagent: false,
             }
         );
     }
@@ -999,6 +1149,7 @@ mod tests {
                 last_assistant_message: None,
                 permission_mode: None,
                 failure_detail: None,
+                subagent: false,
             }
         );
         // A wrong-typed field reads as absent, and `message` stands in for a
