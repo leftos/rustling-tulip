@@ -1049,9 +1049,16 @@ impl SpawnConfig {
     /// directory, pinned or not: the pin goes with the branch it was cloned
     /// alongside, and the clone derives its path from `fresh_branch` like any
     /// other fresh spawn. In-place and standalone targets clone verbatim.
+    ///
+    /// Every one-shot answer the target carries is dropped, whatever the
+    /// config's own provenance: a config stored before
+    /// [`SpawnConfig::from_request`] cleared them still holds a `Carry`/`Stash`
+    /// checkout choice and a [`WorktreeReusePolicy::RecreateFromBase`] collision
+    /// choice, and this is the path every replay runs through.
     #[must_use]
     pub fn to_duplicate_request(&self, fresh_branch: Option<String>) -> SpawnRequest {
         let mut req = self.to_clone_request();
+        req.target = req.target.with_one_shot_answers_cleared();
         let Some(fresh) = fresh_branch else {
             return req;
         };
@@ -5195,6 +5202,72 @@ mod tests {
                     "every member of a duplicate gets its own directory"
                 );
             }
+            other => panic!("expected a workspace target, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_duplicate_of_a_stored_carry_config_asks_about_the_checkout_again() {
+        for stored in [CheckoutStrategy::Carry, CheckoutStrategy::Stash] {
+            let mut config = duplicate_source_config(single_target("main", false));
+            let SpawnTarget::Single {
+                checkout_strategy, ..
+            } = &mut config.target
+            else {
+                panic!("expected a single target");
+            };
+            *checkout_strategy = Some(stored);
+
+            let req = config.to_duplicate_request(None);
+
+            match req.target {
+                SpawnTarget::Single {
+                    checkout_strategy, ..
+                } => assert_eq!(
+                    checkout_strategy, None,
+                    "a {stored:?} answer stored by an older build is for one launch"
+                ),
+                other => panic!("expected a single target, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_duplicate_of_a_stored_recreate_config_reuses() {
+        let mut config = duplicate_source_config(single_target("wt/sleepy-otter", true));
+        let SpawnTarget::Single { worktree_reuse, .. } = &mut config.target else {
+            panic!("expected a single target");
+        };
+        *worktree_reuse = WorktreeReusePolicy::RecreateFromBase;
+        match config.to_duplicate_request(None).target {
+            SpawnTarget::Single { worktree_reuse, .. } => assert_eq!(
+                worktree_reuse,
+                WorktreeReusePolicy::Reuse,
+                "a stored collision answer is not a duplicate's to replay"
+            ),
+            other => panic!("expected a single target, got {other:?}"),
+        }
+
+        let config = duplicate_source_config(SpawnTarget::Workspace {
+            workspace_id: "ws1".to_string(),
+            branch_name: "wt/sleepy-otter".to_string(),
+            base_branch: None,
+            use_worktree: true,
+            worktree_reuse: WorktreeReusePolicy::RecreateFromBase,
+            existing_worktrees: Vec::new(),
+        });
+        match config.to_duplicate_request(None).target {
+            SpawnTarget::Workspace { worktree_reuse, .. } => {
+                assert_eq!(worktree_reuse, WorktreeReusePolicy::Reuse);
+            }
+            other => panic!("expected a workspace target, got {other:?}"),
+        }
+        match &config.target {
+            SpawnTarget::Workspace { worktree_reuse, .. } => assert_eq!(
+                *worktree_reuse,
+                WorktreeReusePolicy::RecreateFromBase,
+                "the stored config itself still holds the answer it was saved with"
+            ),
             other => panic!("expected a workspace target, got {other:?}"),
         }
     }
