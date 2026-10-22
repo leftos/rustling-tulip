@@ -10,7 +10,7 @@
 use crate::support;
 
 use gpui::{TestAppContext, px};
-use protocol::{AttentionReason, DaemonMessage, TabEntry};
+use protocol::{AttentionReason, DaemonMessage, SessionSnapshot, TabEntry};
 use rustling_tulip_native::NotifyState;
 use support::{Fixture, Harness, Opened, TestDir, pane, repo, session, tab};
 
@@ -18,6 +18,13 @@ fn attention(id: &str, reason: AttentionReason) -> DaemonMessage {
     DaemonMessage::Attention {
         session_id: id.to_owned(),
         reason,
+    }
+}
+
+fn updated(session: SessionSnapshot) -> DaemonMessage {
+    DaemonMessage::SessionUpdated {
+        session,
+        request_id: None,
     }
 }
 
@@ -76,6 +83,95 @@ fn stopped_and_error_attention_raise_no_toast(cx: &mut TestAppContext) {
     );
 }
 
+#[gpui::test]
+fn a_turn_ending_notifies_finished_with_label(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.send(updated(
+        session("s2").user_label("review").status("working").build(),
+    ));
+    h.send(updated(session("s2").user_label("review").build()));
+    assert_eq!(
+        h.notified(),
+        [shown("Finished", "review")],
+        "only the idle update notifies"
+    );
+}
+
+#[gpui::test]
+fn a_turn_ending_with_background_work_waits(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.send(updated(
+        session("s2").user_label("review").status("working").build(),
+    ));
+    let mut holding = session("s2").user_label("review").build();
+    holding.background = true;
+    h.send(updated(holding));
+    assert!(h.notified().is_empty(), "the background work still runs");
+    h.send(updated(session("s2").user_label("review").build()));
+    assert_eq!(
+        h.notified(),
+        [shown("Finished", "review")],
+        "the last of the work is done"
+    );
+}
+
+#[gpui::test]
+fn a_relist_never_notifies_finished(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.send(updated(
+        session("s2").user_label("review").status("working").build(),
+    ));
+    h.send(DaemonMessage::Sessions {
+        sessions: vec![
+            session("s1").user_label("fix login").build(),
+            session("s2").user_label("review").build(),
+        ],
+    });
+    assert!(
+        h.notified().is_empty(),
+        "a relist says nothing about a turn"
+    );
+}
+
+#[gpui::test]
+fn finished_toggle_off_silences_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    save_notifications(&dir, &serde_json::json!({ "finished": false }));
+    let mut h = opened(cx, &dir);
+    h.send(updated(
+        session("s2").user_label("review").status("working").build(),
+    ));
+    h.send(updated(session("s2").user_label("review").build()));
+    assert!(h.notified().is_empty(), "the toggle is off");
+    h.send(attention("s2", AttentionReason::AwaitingInput));
+    assert_eq!(
+        h.notified(),
+        [shown("Needs you", "review")],
+        "Needs you still fires"
+    );
+}
+
+#[gpui::test]
+fn finished_skips_a_session_on_screen(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_tabs(cx, &dir);
+    focus_window(&mut h);
+    h.send(updated(
+        session("s1")
+            .user_label("fix login")
+            .status("working")
+            .build(),
+    ));
+    h.send(updated(session("s1").user_label("fix login").build()));
+    assert!(
+        h.notified().is_empty(),
+        "the owner watched that turn finish"
+    );
+}
+
 fn saved_ui(dir: &TestDir) -> serde_json::Value {
     let text = std::fs::read_to_string(dir.path().join("native-ui.json")).expect("a saved layout");
     serde_json::from_str(&text).expect("native-ui.json is JSON")
@@ -91,13 +187,15 @@ fn on_notifications_tab<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harnes
 }
 
 #[gpui::test]
-fn notifications_tab_has_one_needs_you_toggle(cx: &mut TestAppContext) {
+fn notifications_tab_has_needs_you_and_finished_toggles(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = on_notifications_tab(cx, &dir);
-    assert!(
-        h.bounds("settings-notify-needs-you").origin.x >= px(0.0),
-        "the Needs you toggle is painted"
-    );
+    for selector in ["settings-notify-needs-you", "settings-notify-finished"] {
+        assert!(
+            h.bounds(selector).origin.x >= px(0.0),
+            "{selector} is painted"
+        );
+    }
     for gone in ["settings-notify-stopped", "settings-notify-error"] {
         assert!(
             h.bounds(gone).origin.x < px(0.0),
@@ -108,13 +206,20 @@ fn notifications_tab_has_one_needs_you_toggle(cx: &mut TestAppContext) {
     h.click_on("settings-notify-needs-you");
     let saved = saved_ui(&dir);
     assert_eq!(saved["notifications"]["awaiting_input"], false);
+    assert_eq!(
+        saved["notifications"]["finished"], true,
+        "the Finished toggle is untouched"
+    );
     assert!(saved["notifications"].get("stopped").is_none());
     assert!(saved["notifications"].get("error").is_none());
+
+    h.click_on("settings-notify-finished");
+    assert_eq!(saved_ui(&dir)["notifications"]["finished"], false);
 
     h.send(attention("s2", AttentionReason::AwaitingInput));
     assert!(h.notified().is_empty(), "the toggle took effect at once");
 
-    assert_eq!(settings_focus(&mut h), Some("settings-notify-needs-you"));
+    assert_eq!(settings_focus(&mut h), Some("settings-notify-finished"));
     for stop in [
         "settings-notify-skip-on-screen",
         "settings-notify-skip-focused",

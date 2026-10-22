@@ -2183,14 +2183,14 @@ impl RootView {
     fn on_message(&mut self, msg: DaemonMessage, window: &mut Window, cx: &mut Context<Self>) {
         // The sidebar takes the message before the panes do, so what a
         // snapshot changed is read from the old one.
-        let (moved, exit_discard) = self.before_fold(&msg);
+        let (moved, exit_discard, finished) = self.before_fold(&msg);
         self.fold_sidebar(&msg, cx);
         if let Some(discard) = exit_discard {
             self.send(discard);
         }
         // Windows deactivates a window it minimizes, so a minimized window
         // counts as not focused.
-        self.notify_on(&msg, window.is_window_active(), cx);
+        self.notify_on(&msg, finished, window.is_window_active(), cx);
         if self.on_panel_message(&msg, window, cx) {
             return;
         }
@@ -2411,10 +2411,11 @@ impl RootView {
             != Some(session.appearance.clone())
     }
 
-    /// What a session snapshot changes against the copy the sidebar still
-    /// holds: whether it moved the session's appearance, and the discard
-    /// its exit calls for.
-    fn before_fold(&mut self, msg: &DaemonMessage) -> (Option<bool>, Option<ClientMessage>) {
+    /// What a message changes against the copy the sidebar still holds:
+    /// whether a session snapshot moved its appearance, the discard its exit
+    /// calls for, and whether it ended the session's turn. A relist or a
+    /// reconnect never ends one.
+    fn before_fold(&mut self, msg: &DaemonMessage) -> (Option<bool>, Option<ClientMessage>, bool) {
         match msg {
             DaemonMessage::Welcome { .. } => self.seen_sessions.clear(),
             DaemonMessage::SessionRemoved { session_id } => {
@@ -2425,12 +2426,13 @@ impl RootView {
             }
             DaemonMessage::SessionUpdated { session, .. } => {
                 let discard = self.exit_discard(session);
+                let finished = crate::notify::finished(self.sidebar.session(&session.id), session);
                 self.seen_sessions.insert(session.id.clone());
-                return (Some(self.appearance_moved(session)), discard);
+                return (Some(self.appearance_moved(session)), discard, finished);
             }
             _ => {}
         }
-        (None, None)
+        (None, None, false)
     }
 
     /// The discard of a session with no worktree of its own that `session`

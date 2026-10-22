@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use gpui::Context;
-use protocol::{AttentionReason, DaemonMessage, SessionSnapshot};
+use protocol::{AttentionReason, DaemonMessage, SessionMode, SessionSnapshot, SessionStatus};
 
 use crate::RootView;
 use crate::sidebar::{NotifySkip, display_label};
@@ -141,6 +141,9 @@ impl Notifications {
 /// The title of the notification a session awaiting input raises.
 pub(crate) const NEEDS_YOU_TITLE: &str = "Needs you";
 
+/// The title of the notification a session raises when its turn ends.
+pub(crate) const FINISHED_TITLE: &str = "Finished";
+
 /// Whether a notification for a session is skipped under `skip_when`:
 /// `focused` is whether the client window has the keyboard, `on_screen`
 /// answers whether a pane of its active tab shows the session, and is
@@ -168,38 +171,69 @@ pub(crate) fn body(session: Option<&SessionSnapshot>) -> String {
         .map_or_else(|| PRODUCT_NAME.to_owned(), |(label, _)| label)
 }
 
+/// Whether `after` ends a turn the session was running: it is idle with no
+/// background work left, an agent rather than a plain shell, and the copy the
+/// client still held was working, or idle waiting on background work the
+/// agent left running. A session seen for the first time raises nothing.
+#[must_use]
+pub(crate) fn finished(before: Option<&SessionSnapshot>, after: &SessionSnapshot) -> bool {
+    if after.status != SessionStatus::Idle
+        || after.background
+        || after.mode == SessionMode::PlainShell
+    {
+        return false;
+    }
+    before.is_some_and(|before| {
+        before.status == SessionStatus::Working
+            || (before.status == SessionStatus::Idle && before.background)
+    })
+}
+
 impl RootView {
     /// Folds `msg` into the notifications: a session awaiting input raises
-    /// Needs you while its toggle is on, unless the skip setting says the
-    /// owner is looking at it already. `window_focused` is whether this
-    /// client window has the keyboard.
+    /// Needs you while its toggle is on, and one `finished` marks as having
+    /// ended its turn raises Finished while that toggle is on, unless the
+    /// skip setting says the owner is looking at it already. `window_focused`
+    /// is whether this client window has the keyboard.
     pub(crate) fn notify_on(
         &self,
         msg: &DaemonMessage,
+        finished: bool,
         window_focused: bool,
         cx: &mut Context<Self>,
     ) {
-        let DaemonMessage::Attention {
-            session_id,
-            reason: AttentionReason::AwaitingInput,
-        } = msg
-        else {
-            return;
+        let (session_id, session, title, wanted) = match msg {
+            DaemonMessage::SessionUpdated { session, .. } if finished => {
+                let wanted = self.sidebar.ui_state().notifications.finished;
+                (session.id.as_str(), Some(session), FINISHED_TITLE, wanted)
+            }
+            DaemonMessage::Attention {
+                session_id,
+                reason: AttentionReason::AwaitingInput,
+            } => {
+                let wanted = self.sidebar.ui_state().notifications.awaiting_input;
+                (
+                    session_id.as_str(),
+                    self.sidebar.session(session_id),
+                    NEEDS_YOU_TITLE,
+                    wanted,
+                )
+            }
+            _ => return,
         };
-        let settings = &self.sidebar.ui_state().notifications;
-        if !settings.awaiting_input {
+        if !wanted {
             return;
         }
-        if skips(settings.skip_when, window_focused, || {
+        let skip_when = self.sidebar.ui_state().notifications.skip_when;
+        if skips(skip_when, window_focused, || {
             self.session_on_screen(session_id)
         }) {
             return;
         }
-        let session = self.sidebar.sessions().iter().find(|s| &s.id == session_id);
         let body = body(session);
         let notifier = Arc::clone(&self.notifications.notifier);
         cx.background_executor()
-            .spawn(async move { notifier.notify(NEEDS_YOU_TITLE, &body) })
+            .spawn(async move { notifier.notify(title, &body) })
             .detach();
     }
 }
@@ -261,6 +295,50 @@ mod tests {
         assert_eq!(body(None), "rustling-tulip", "an unknown session");
         let bare = snapshot(&serde_json::json!({ "label": "", "mode": "plain_shell" }));
         assert_eq!(body(Some(&bare)), "rustling-tulip", "named only by its id");
+    }
+
+    #[test]
+    fn finished_fires_when_working_goes_idle() {
+        let working = snapshot(&serde_json::json!({ "status": "working" }));
+        let idle = snapshot(&serde_json::json!({ "status": "idle" }));
+        assert!(finished(Some(&working), &idle));
+    }
+
+    #[test]
+    fn finished_waits_while_background_work_runs() {
+        let working = snapshot(&serde_json::json!({ "status": "working" }));
+        let holding = snapshot(&serde_json::json!({ "status": "idle", "background": true }));
+        assert!(!finished(Some(&working), &holding));
+    }
+
+    #[test]
+    fn finished_fires_when_background_work_ends() {
+        let holding = snapshot(&serde_json::json!({ "status": "idle", "background": true }));
+        let idle = snapshot(&serde_json::json!({ "status": "idle" }));
+        assert!(finished(Some(&holding), &idle));
+    }
+
+    #[test]
+    fn finished_ignores_a_plain_shell() {
+        let working = snapshot(&serde_json::json!({ "status": "working", "mode": "plain_shell" }));
+        let idle = snapshot(&serde_json::json!({ "status": "idle", "mode": "plain_shell" }));
+        assert!(!finished(Some(&working), &idle), "a shell has no turn");
+    }
+
+    #[test]
+    fn finished_ignores_a_first_sighting() {
+        let idle = snapshot(&serde_json::json!({ "status": "idle" }));
+        assert!(!finished(None, &idle), "nothing says a turn ended");
+    }
+
+    #[test]
+    fn finished_ignores_a_prompt_answered_to_idle() {
+        let asking = snapshot(&serde_json::json!({ "status": "awaiting_input" }));
+        let idle = snapshot(&serde_json::json!({ "status": "idle" }));
+        assert!(
+            !finished(Some(&asking), &idle),
+            "an answer is no turn's end"
+        );
     }
 
     #[test]

@@ -79,7 +79,7 @@ Speech runs in the **native client**: it has the audio device and knows whether 
 
 ### Settings UI
 
-A new **Alerts** tab after Notifications in `settings_view.rs` (the Notifications tab keeps its `Needs you` toggle, the `Skip notifications when` row and the Windows link):
+A new **Alerts** tab after Notifications in `settings_view.rs` (the Notifications tab keeps its `Needs you` and `Finished` toggles, the `Skip notifications when` row and the Windows link):
 
 1. Summarizer on / off; provider segmented (DeepSeek, Anthropic) with its privacy line; key source segmented (Stored key, Environment variable); a masked `text_input` with Save and Clear, or a variable-name field; the key state (`stored`, `found`, `not set`, `rejected`).
 2. Daily cap (dollars) and today's spend.

@@ -418,6 +418,9 @@ pub struct NotificationSettings {
     /// Whether a session awaiting input raises Needs you; on unless turned
     /// off.
     pub awaiting_input: bool,
+    /// Whether a session whose turn ended with no background work left
+    /// raises Finished; on unless turned off.
+    pub finished: bool,
     /// When a notification for a session the owner is looking at is skipped.
     #[serde(deserialize_with = "skip_or_default")]
     pub skip_when: NotifySkip,
@@ -442,6 +445,7 @@ impl Default for NotificationSettings {
     fn default() -> Self {
         Self {
             awaiting_input: true,
+            finished: true,
             skip_when: NotifySkip::default(),
         }
     }
@@ -906,6 +910,11 @@ impl SidebarModel {
     /// Whether a session awaiting input raises Needs you.
     pub fn set_notification(&mut self, on: bool) {
         self.ui.notifications.awaiting_input = on;
+    }
+
+    /// Whether a session whose turn ended raises Finished.
+    pub fn set_finished_notification(&mut self, on: bool) {
+        self.ui.notifications.finished = on;
     }
 
     /// Records when a notification for a session on screen is skipped;
@@ -2933,6 +2942,7 @@ mod tests {
             },
             notifications: NotificationSettings {
                 awaiting_input: false,
+                finished: false,
                 skip_when: NotifySkip::Never,
             },
             spawn: SpawnDefaults {
@@ -3217,6 +3227,35 @@ mod tests {
         let loaded = load_ui_state(&dir.0);
         assert_eq!(loaded.notifications, NotificationSettings::default());
         assert!(loaded.notifications.awaiting_input, "Needs you is on");
+    }
+
+    #[test]
+    fn finished_notification_defaults_on() {
+        let dir = TestDir::new("notifications-finished-default");
+        std::fs::write(
+            dir.0.join(UI_FILE),
+            r#"{ "notifications": { "awaiting_input": false } }"#,
+        )
+        .expect("write");
+        let loaded = load_ui_state(&dir.0);
+        assert!(
+            !loaded.notifications.awaiting_input,
+            "the saved choice survives"
+        );
+        assert!(loaded.notifications.finished, "Finished is on");
+    }
+
+    #[test]
+    fn finished_notification_round_trips() {
+        let dir = TestDir::new("notifications-finished-round-trip");
+        let mut model = SidebarModel::default();
+        assert!(model.ui_state().notifications.finished, "on by default");
+        model.set_finished_notification(false);
+        save_ui_state(&dir.0, model.ui_state()).expect("save");
+        let text = std::fs::read_to_string(dir.0.join(UI_FILE)).expect("read");
+        let saved: serde_json::Value = serde_json::from_str(&text).expect("JSON");
+        assert_eq!(saved["notifications"]["finished"], false);
+        assert!(!load_ui_state(&dir.0).notifications.finished);
     }
 
     #[test]

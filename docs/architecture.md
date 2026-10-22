@@ -42,7 +42,7 @@ The earlier Tauri desktop app is retired and not on `main`: the `tauri` branch, 
 
   Status (working, awaiting input, idle, stopped) comes from Claude Code's hooks once a session turns hook-driven, injected through a settings file at spawn.
 
-  The PTY-stream heuristic is the fallback, reduced to two demotions to idle after silence; a session awaiting input raises an OS notification in each native client, unless its skip setting says the owner is already looking at the session.
+  The PTY-stream heuristic is the fallback, reduced to two demotions to idle after silence; a session awaiting input, or an agent that finishes its turn with no background work left, raises an OS notification in each native client, unless its skip setting says the owner is already looking at the session.
 - **Workspaces**: a named set of registered repos, created from repos or from a VS Code `.code-workspace` file. A workspace session runs one agent with its cwd in the first member's worktree and `--add-dir` for every other member; worktrees keep the members' relative paths (layout in CLAUDE.md, "Where things live on disk").
 
   Only `members[0]`'s repo hooks load: an `--add-dir` root's `.claude/settings.json` hooks are not read. A `.code-workspace` file found beside a repo is offered as a workspace.

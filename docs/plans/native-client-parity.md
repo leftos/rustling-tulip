@@ -169,7 +169,7 @@ The frontend has no search addon, bell handling or title parsing; `terminal_titl
 
 ## Notifications & attention
 
-- [x] OS notifications for awaiting input / stopped / error, each toggleable; body is the session label; permission requested at startup — `App.tsx` (native: P4.3; Windows has no permission prompt; only awaiting input notifies, titled `Needs you`, with one toggle and a skip-when setting, and stopped and errored raise no toast)
+- [x] OS notifications for awaiting input / stopped / error, each toggleable; body is the session label; permission requested at startup — `App.tsx` (native: P4.3; Windows has no permission prompt; `Needs you` for awaiting input and `Finished` for an agent whose turn ends with no background work, each with a toggle and one shared skip-when setting, and stopped and errored raise no toast)
 - [x] Notifications settings: permission badge, "Request permission" — `SettingsModal.tsx` (native: Windows' read-only toast state and a link to its notification settings)
 - [x] Attention: leaf highlight and "!", container roll-up; cleared when the user selects the session or it calms down — `App.tsx`, `Sidebar.tsx`
 - [x] Toasts: error / warning / info, 8s auto-dismiss, optional sticky, same-key toasts update in place — `ErrorToast.tsx` (native: P1.7c, and warning, sticky and same-key update in P4.1)

@@ -1,6 +1,6 @@
 # Needs you and Finished: the only two notifications
 
-The native client used to fire the three OS toasts ported from the Tauri app: "Claude is awaiting input", "Claude session stopped" (the process exited) and "Claude session errored", each with its own toggle in Settings → Notifications. TN.1 and TN.2 removed them: `notify.rs` now raises only `Needs you`, titled so, with the session's label as its body, one toggle and the skip-when setting (`apps/native/src/notify.rs:142`, `settings_view.rs`). This item adds the second notification, **Finished**, and carries both to the mobile client.
+The native client used to fire the three OS toasts ported from the Tauri app: "Claude is awaiting input", "Claude session stopped" (the process exited) and "Claude session errored", each with its own toggle in Settings → Notifications. TN.1 to TN.3 replaced them on the desktop: `notify.rs` raises `Needs you` and `Finished`, each with the session's label as its body and its own toggle, under one skip-when setting (`apps/native/src/notify.rs`, `settings_view.rs`). What stays open here is the mobile half (RT-105, RT-143) and the detection RT-74 sharpens.
 
 ## Rulings (owner)
 
@@ -37,7 +37,7 @@ The native client used to fire the three OS toasts ported from the Tauri app: "C
 
 - [x] **TN.1 Needs you only.** Remove the stopped and errored toasts, their toggles, `notify.rs`'s own-stop bookkeeping and their specs; retitle the awaiting-input toast `Needs you`; one Needs you toggle remains in Settings → Notifications.
 - [x] **TN.2 Desktop suppression setting.** The window-focused flag and the active tab's panes decide; the setting's three choices, default "skip when focused and the pane is on screen".
-- [ ] **TN.3 Finished**, after RT-84: the live Working → Idle transition with no background work, its toggle, and the same suppression.
-- [ ] **TN.4 Docs.** `docs/native-client.md` Notifications, `docs/architecture.md` (the "attention raises an OS notification" line), `docs/plans/spoken-alerts.md` (already reads the shipped tab; refresh it when Finished lands), and the parity line in `docs/plans/native-client-parity.md`.
+- [x] **TN.3 Finished**, after RT-84: the live Working → Idle transition with no background work, its toggle, and the same suppression.
+- [x] **TN.4 Docs.** `docs/native-client.md` Notifications, `docs/architecture.md` (the "attention raises an OS notification" line), `docs/plans/spoken-alerts.md` (already reads the shipped tab; refresh it when Finished lands), and the parity line in `docs/plans/native-client-parity.md`.
 
 The code map with file lines and named tests: `.tmp/map-rt182.md` at the time of planning; re-explore before the first brief if the code has moved.

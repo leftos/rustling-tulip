@@ -178,6 +178,7 @@ pub(crate) enum SettingsControl {
     TitleSuffix,
     NotifySettingsLink,
     NotifyNeedsYou,
+    NotifyFinished,
     NotifySkip(NotifySkip),
     SpawnTrusted,
     SpawnApproval(Option<PermissionMode>),
@@ -203,6 +204,7 @@ impl SettingsControl {
             Self::TitleSuffix => "settings-title-product-suffix",
             Self::NotifySettingsLink => "settings-open-windows-notifications",
             Self::NotifyNeedsYou => "settings-notify-needs-you",
+            Self::NotifyFinished => "settings-notify-finished",
             Self::NotifySkip(NotifySkip::OnScreen) => "settings-notify-skip-on-screen",
             Self::NotifySkip(NotifySkip::Focused) => "settings-notify-skip-focused",
             Self::NotifySkip(NotifySkip::Never) => "settings-notify-skip-never",
@@ -409,6 +411,7 @@ impl RootView {
             SettingsTab::Notifications => [
                 SettingsControl::NotifySettingsLink,
                 SettingsControl::NotifyNeedsYou,
+                SettingsControl::NotifyFinished,
             ]
             .into_iter()
             .chain(NOTIFY_SKIP_CHOICES.map(SettingsControl::NotifySkip))
@@ -580,6 +583,7 @@ impl RootView {
             SettingsControl::TitleSuffix => self.toggle_title_suffix(window, cx),
             SettingsControl::NotifySettingsLink => self.open_windows_notification_settings(cx),
             SettingsControl::NotifyNeedsYou => self.toggle_notification(cx),
+            SettingsControl::NotifyFinished => self.toggle_finished_notification(cx),
             SettingsControl::NotifySkip(skip) => self.set_notify_skip(skip, cx),
             SettingsControl::SpawnTrusted => self.toggle_spawn_trusted(cx),
             SettingsControl::SpawnApproval(mode) => self.set_spawn_permission_mode(mode, cx),
@@ -890,6 +894,13 @@ impl RootView {
     fn toggle_notification(&mut self, cx: &mut Context<Self>) {
         let on = !self.sidebar.ui_state().notifications.awaiting_input;
         self.sidebar.set_notification(on);
+        self.save_ui();
+        cx.notify();
+    }
+
+    fn toggle_finished_notification(&mut self, cx: &mut Context<Self>) {
+        let on = !self.sidebar.ui_state().notifications.finished;
+        self.sidebar.set_finished_notification(on);
         self.save_ui();
         cx.notify();
     }
@@ -1386,6 +1397,16 @@ impl RootView {
             focused,
             cx,
         );
+        let finished = toggle(
+            SettingsControl::NotifyFinished,
+            ToggleState {
+                checked: settings.finished,
+                enabled: true,
+            },
+            "Finished",
+            focused,
+            cx,
+        );
         let skip_when = settings.skip_when;
         let skips = NOTIFY_SKIP_CHOICES.map(|choice| {
             let text = match choice {
@@ -1403,10 +1424,12 @@ impl RootView {
         let section = section("Notifications")
             .child(windows)
             .child(hint(
-                "Fire an OS notification when a session needs you: a question, \
-                 a permission prompt or a plan approval.",
+                "Fire an OS notification when a session needs you (a question, \
+                 a permission prompt or a plan approval) or finishes its turn \
+                 with no background work left.",
             ))
             .child(needs_you)
+            .child(finished)
             .child(skip_row);
         vec![section.into_any_element()]
     }
