@@ -388,6 +388,9 @@ pub struct TextSpan {
     /// Cell flags masked to [`SPAN_STYLE`]. A `WIDE_CHAR` span holds one
     /// two-cell glyph, shaped without the per-cell width lock.
     pub flags: Flags,
+    /// One cell whose text carries combining or zero-width characters after
+    /// its base character; shaped without the per-cell width lock.
+    pub cluster: bool,
 }
 
 pub const SPAN_STYLE: Flags = Flags::BOLD
@@ -1091,23 +1094,33 @@ impl SpanBuilder {
         };
         let wide = cell.flags.contains(Flags::WIDE_CHAR);
         self.push_bg(row, col, if wide { 2 } else { 1 }, bg, palette.background);
-        let ch = if cell.flags.contains(Flags::HIDDEN) {
-            ' '
-        } else {
-            cell.c
+        let hidden = cell.flags.contains(Flags::HIDDEN);
+        let zero_width = cell.zerowidth().filter(|zw| !zw.is_empty());
+        let text = match (hidden, zero_width) {
+            (true, _) => " ".to_owned(),
+            (false, Some(zw)) => {
+                let mut text = String::with_capacity(cell.c.len_utf8() + zw.len() * 4);
+                text.push(cell.c);
+                text.extend(zw);
+                text
+            }
+            (false, None) => cell.c.to_string(),
         };
         self.push_text(TextSpan {
             row,
             col,
-            text: ch.to_string(),
+            text,
             fg,
             flags: cell.flags & SPAN_STYLE,
+            cluster: !hidden && zero_width.is_some(),
         });
     }
 
     fn push_text(&mut self, span: TextSpan) {
         if let Some(last) = self.text.last_mut()
             && !span.flags.contains(Flags::WIDE_CHAR)
+            && !last.cluster
+            && !span.cluster
             && last.flags == span.flags
             && last.row == span.row
             && last.col + last.text.chars().count() == span.col
@@ -1228,6 +1241,7 @@ mod tests {
             text: text.to_owned(),
             fg: rgb(fg),
             flags,
+            cluster: false,
         }
     }
 
@@ -1427,6 +1441,52 @@ mod tests {
         assert!(row0[1].flags.contains(Flags::WIDE_CHAR));
         assert_eq!(row0[2].col, 3);
         assert!(row0[2].text.starts_with('b'));
+    }
+
+    #[test]
+    fn combining_mark_stays_with_its_base() {
+        let snap = fed("ae\u{301}b".as_bytes()).snapshot();
+        let row0: Vec<_> = snap.text.iter().filter(|s| s.row == 0).collect();
+        assert_eq!(
+            (row0[0].col, row0[0].text.as_str(), row0[0].cluster),
+            (0, "a", false)
+        );
+        assert_eq!(
+            (row0[1].col, row0[1].text.as_str(), row0[1].cluster),
+            (1, "e\u{301}", true)
+        );
+        assert_eq!(
+            (row0[2].col, row0[2].text.trim_end(), row0[2].cluster),
+            (2, "b", false),
+            "b must not merge into the cluster span"
+        );
+    }
+
+    #[test]
+    fn zwj_sequence_stays_in_one_cell_span() {
+        let snap = fed("👨\u{200d}👩".as_bytes()).snapshot();
+        let row0: Vec<_> = snap.text.iter().filter(|s| s.row == 0).collect();
+        let zwj: Vec<_> = row0
+            .iter()
+            .filter(|s| s.text.contains('\u{200d}'))
+            .collect();
+        let texts: Vec<_> = row0.iter().map(|s| s.text.as_str()).collect();
+        assert!(!zwj.is_empty(), "the ZWJ was dropped: {texts:?}");
+        assert!(
+            zwj.iter().all(|s| s.cluster),
+            "every span holding the ZWJ is a cluster span: {texts:?}"
+        );
+    }
+
+    #[test]
+    fn hidden_cell_draws_no_zero_width() {
+        let snap = fed("\x1b[8me\u{301}\x1b[0m".as_bytes()).snapshot();
+        let row0: Vec<_> = snap.text.iter().filter(|s| s.row == 0).collect();
+        let texts: Vec<_> = row0.iter().map(|s| s.text.as_str()).collect();
+        assert!(
+            !row0.iter().any(|s| s.text.contains('\u{301}')),
+            "a hidden cell paints nothing: {texts:?}"
+        );
     }
 
     #[test]

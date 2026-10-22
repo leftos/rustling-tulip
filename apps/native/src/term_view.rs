@@ -3,6 +3,7 @@
 
 use std::cell::RefCell;
 use std::ops::Range;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
@@ -14,11 +15,11 @@ use base64::engine::general_purpose::STANDARD as B64;
 use futures::channel::mpsc::UnboundedSender;
 use gpui::{
     AnyElement, App, BorderStyle, Bounds, Context, CursorStyle, DispatchPhase, ElementInputHandler,
-    EntityInputHandler, EventEmitter, FocusHandle, Font, FontStyle, FontWeight, HitboxBehavior,
-    KeyDownEvent, Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseExitEvent,
-    MouseMoveEvent, MouseUpEvent, Pixels, Point, Rgba, ScrollWheelEvent, SharedString,
-    Subscription, Task, TextRun, UTF16Selection, UnderlineStyle, Window, canvas, div, fill, font,
-    outline, point, prelude::*, px, size,
+    EntityInputHandler, EventEmitter, FocusHandle, Font, FontFeatures, FontStyle, FontWeight,
+    HitboxBehavior, KeyDownEvent, Keystroke, Modifiers, MouseButton, MouseDownEvent,
+    MouseExitEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Rgba, ScrollWheelEvent,
+    SharedString, Subscription, Task, TextRun, UTF16Selection, UnderlineStyle, Window, canvas, div,
+    fill, font, outline, point, prelude::*, px, size,
 };
 use protocol::{ClientMessage, SessionMode, SessionSnapshot};
 
@@ -970,12 +971,16 @@ impl TerminalPane {
     }
 
     fn paste(&mut self, cx: &mut Context<Self>) {
-        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
+        let text = cx.read_from_clipboard().and_then(|item| item.text());
+        let bracketed = self.term.bracketed_paste();
+        let bytes = term_input::paste_input(text.as_deref(), bracketed);
+        let pasted = text.as_deref().filter(|text| !text.is_empty());
+        // A paste no session took is not logged: nothing saw it. A clipboard
+        // with no text sends `^V` and logs nothing, since nothing was pasted.
+        let Some(text) = pasted else {
+            self.send_input(&bytes);
             return;
         };
-        let bracketed = self.term.bracketed_paste();
-        let bytes = term_input::paste_bytes(&text, bracketed);
-        // A paste no session took is not logged: nothing saw it.
         if let Some(session_id) = self.send_input(&bytes) {
             tracing::info!(
                 "{}",
@@ -1646,15 +1651,28 @@ struct Metrics {
     font: Font,
 }
 
-fn metrics(window: &Window, family: SharedString, settings: &FontSettings) -> Metrics {
-    let font = Font {
-        weight: if settings.bold {
+/// The font the terminal draws in: the settings' family, at the bold weight
+/// when the settings ask for it, with every ligature feature off. A ligature
+/// draws `->` as one substituted glyph, and the per-cell width lock then
+/// shifts every glyph after it one cell left.
+fn terminal_font(family: SharedString, bold: bool) -> Font {
+    Font {
+        weight: if bold {
             FontWeight::BOLD
         } else {
             FontWeight::NORMAL
         },
+        features: FontFeatures(Arc::new(vec![
+            ("calt".into(), 0),
+            ("liga".into(), 0),
+            ("clig".into(), 0),
+        ])),
         ..font(family)
-    };
+    }
+}
+
+fn metrics(window: &Window, family: SharedString, settings: &FontSettings) -> Metrics {
+    let font = terminal_font(family, settings.bold);
     let text = window.text_system();
     let font_id = text.resolve_font(&font);
     let font_size = px(settings.size);
@@ -1907,7 +1925,8 @@ fn paint_span(
     window: &mut Window,
     cx: &mut App,
 ) {
-    let force_width = (!span.flags.contains(Flags::WIDE_CHAR)).then_some(m.cell_width);
+    let force_width =
+        (!span.flags.contains(Flags::WIDE_CHAR) && !span.cluster).then_some(m.cell_width);
     let line = window.text_system().shape_line(
         SharedString::from(span.text.clone()),
         m.font_size,
@@ -1925,7 +1944,9 @@ mod tests {
     use std::convert::Infallible;
     use std::time::Instant;
 
-    use super::{Attachment, ReplyVerdict, ShellStatus, SizeGate, dot_color, paste_log_line};
+    use super::{
+        Attachment, ReplyVerdict, ShellStatus, SizeGate, dot_color, paste_log_line, terminal_font,
+    };
     use crate::palette::{DANGER, WAITING};
     use crate::term_input;
 
@@ -1957,6 +1978,24 @@ mod tests {
             "paste#1 session=s1 chars=7 bracketed=true sent_bytes=19"
         );
         assert!(!line.contains(secret), "never the text, got {line}");
+    }
+
+    #[test]
+    fn terminal_font_turns_off_ligatures() {
+        for bold in [false, true] {
+            let font = terminal_font(gpui::SharedString::from("Cascadia Mono"), bold);
+            let tags = font.features.tag_value_list();
+            for tag in ["calt", "liga", "clig"] {
+                let value = tags.iter().find(|(t, _)| t == tag).map(|(_, v)| *v);
+                assert_eq!(value, Some(0), "{tag} off when bold={bold}, got {tags:?}");
+            }
+            let weight = if bold {
+                gpui::FontWeight::BOLD
+            } else {
+                gpui::FontWeight::NORMAL
+            };
+            assert_eq!(font.weight, weight, "bold={bold}");
+        }
     }
 
     #[test]

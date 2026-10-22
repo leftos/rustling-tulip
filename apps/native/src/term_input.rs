@@ -148,6 +148,18 @@ pub fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
     }
 }
 
+/// The bytes a paste sends. With no text on the clipboard, an image-only
+/// clipboard reads as no text on Windows, so the paste goes out as a plain
+/// `^V` (0x16) and the program decides what to do with it — an agent's own
+/// image paste reads the bitmap itself. Text pastes exactly as
+/// [`paste_bytes`] sends it.
+pub fn paste_input(text: Option<&str>, bracketed: bool) -> Vec<u8> {
+    match text {
+        Some(text) if !text.is_empty() => paste_bytes(text, bracketed),
+        _ => vec![0x16],
+    }
+}
+
 #[cfg(test)]
 #[expect(
     clippy::expect_used,
@@ -158,7 +170,7 @@ mod tests {
     use gpui::{Keystroke, Modifiers};
     use protocol::{Agent, SessionMode, SessionSnapshot, SessionStatus};
 
-    use super::{KeyAction, SessionContext, key_action, paste_bytes};
+    use super::{KeyAction, SessionContext, key_action, paste_bytes, paste_input};
 
     fn session(mode: SessionMode, agent: Agent) -> SessionContext {
         SessionContext {
@@ -336,6 +348,24 @@ mod tests {
             b"\x1b[200~x\x1b[201~".to_vec()
         );
         assert_eq!(paste_bytes("a\x1b[201~b", false), b"a\x1b[201~b".to_vec());
+    }
+
+    #[test]
+    fn paste_without_text_sends_ctrl_v() {
+        assert_eq!(paste_input(None, false), vec![0x16]);
+        assert_eq!(paste_input(None, true), vec![0x16]);
+        assert_eq!(paste_input(Some(""), false), vec![0x16]);
+        assert_eq!(paste_input(Some(""), true), vec![0x16]);
+    }
+
+    #[test]
+    fn paste_with_text_matches_paste_bytes() {
+        for bracketed in [false, true] {
+            assert_eq!(
+                paste_input(Some("hi"), bracketed),
+                paste_bytes("hi", bracketed)
+            );
+        }
     }
 
     #[test]
