@@ -60,6 +60,10 @@
                  stays cloaked and never takes focus. Writes
                  `.tmp\shots\<view>.png` unless a second argument or -Out
                  gives another path, and prints the PNG's path.
+      installer  Build the release binaries (daemon, tracer, native
+                 client), then package them into an NSIS setup exe under
+                 `target\installer\` and print its path. Always release;
+                 needs NSIS 3 (`winget install NSIS.NSIS`).
       help       Print the subcommand summary.
 
 .PARAMETER Command
@@ -112,7 +116,7 @@
     Justification = 'Top-level params consumed by sub-functions via $script: scope.')]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('', 'build', 'launch', 'setup', 'stop', 'restart', 'test', 'clippy', 'fmt', 'clean', 'native', 'native-e2e', 'native-smoke', 'native-shot', 'help')]
+    [ValidateSet('', 'build', 'launch', 'setup', 'stop', 'restart', 'test', 'clippy', 'fmt', 'clean', 'native', 'native-e2e', 'native-smoke', 'native-shot', 'installer', 'help')]
     [string]$Command = '',
 
     [switch]$Release,
@@ -569,6 +573,67 @@ function Invoke-BuildSweep {
     }
 }
 
+# Reads `version` from the `[workspace.package]` table of the workspace manifest.
+function Get-WorkspaceVersion {
+    $manifest = Get-Content -Raw -Path $ManifestPath
+    $table = [regex]::Match($manifest, '(?ms)^\[workspace\.package\]\s*$(.*?)(?=^\[|\z)')
+    if (-not $table.Success) { throw "No [workspace.package] table in $ManifestPath." }
+    $version = [regex]::Match($table.Groups[1].Value, '(?m)^version\s*=\s*"([^"]+)"').Groups[1].Value
+    if (-not $version) { throw "No version line in [workspace.package] in $ManifestPath." }
+    return $version
+}
+
+# NSIS's makensis.exe: the default install location, then PATH. $null when absent.
+function Get-MakensisPath {
+    $roots = @(${env:ProgramFiles(x86)}, $env:ProgramFiles) | Where-Object { $_ }
+    foreach ($root in $roots) {
+        $candidate = Join-Path $root 'NSIS\makensis.exe'
+        if (Test-Path $candidate) { return $candidate }
+    }
+    $onPath = Get-Command makensis -ErrorAction SilentlyContinue
+    if ($onPath) { return $onPath.Source }
+    return $null
+}
+
+# Builds the release binaries and packages them into the NSIS setup exe.
+# Always release: an installer ships release binaries whatever -Release says.
+function Invoke-Installer {
+    Assert-Tooling
+
+    $makensis = Get-MakensisPath
+    if (-not $makensis) {
+        throw 'NSIS 3 is required to build the installer: winget install NSIS.NSIS.'
+    }
+
+    $version = Get-WorkspaceVersion
+    # VIProductVersion takes four numeric parts, so the pre-release suffix
+    # (`0.1.0-alpha`) stays out of it and only names the exe and DisplayVersion.
+    $numericVersion = ($version -split '-', 2)[0]
+    $binDir = Join-Path $ScriptDir 'target/release'
+    $installerDir = Join-Path $ScriptDir 'target/installer'
+    $outFile = Join-Path $installerDir "rustling-tulip-$version-setup.exe"
+    $nsiScript = Join-Path $ScriptDir 'tools/installer/rustling-tulip.nsi'
+
+    Write-Host "==> Building daemon + tracer + native client (release, $version)..." -ForegroundColor Cyan
+    Invoke-Gated -Slot heavy -Name build-release -Command @(
+        'cargo', 'build', '--manifest-path', $ManifestPath, '--release',
+        '-p', 'daemon', '-p', 'tracer', '-p', 'rustling-tulip-native'
+    )
+    Test-CargoExitOk 'cargo build --release -p daemon -p tracer -p rustling-tulip-native'
+
+    if (-not (Test-Path $installerDir)) {
+        New-Item -ItemType Directory -Force -Path $installerDir | Out-Null
+    }
+    Write-Host "==> Packaging rustling-tulip $version with NSIS..." -ForegroundColor Cyan
+    Invoke-Gated -Slot light -Name makensis -Command @(
+        $makensis, '/V2', '/WX',
+        "/DVERSION=$version", "/DNUMVERSION=$numericVersion",
+        "/DBINDIR=$binDir", "/DOUTFILE=$outFile", $nsiScript
+    )
+    Test-CargoExitOk 'makensis'
+    Write-Host $outFile
+}
+
 function Invoke-Stop {
     # Explicit user `stop` gesture -- tear down sessions too. (Restart
     # path leaves tracers alive so Phase C.3 reattach can resume
@@ -978,6 +1043,10 @@ Commands:
              <out.png> is the PNG to write; -Out says the same thing.
              Default: .tmp\shots\<view>.png. No daemon starts; the window
              stays cloaked and never takes focus.
+  installer  Build the release binaries, then package them into an NSIS
+             setup exe (target\installer\rustling-tulip-<version>-setup.exe)
+             and print its path. Always release. Needs NSIS 3:
+             `winget install NSIS.NSIS`.
   help       This message.
 
 `launch` and `native` reuse a running daemon whose protocol matches, even
@@ -1026,6 +1095,7 @@ switch ($effective) {
     'native-e2e'   { Invoke-NativeE2e }
     'native-smoke' { Invoke-NativeSmoke }
     'native-shot'  { Invoke-NativeShot }
+    'installer'    { Invoke-Installer }
     'help'      { Show-Help }
     default     { throw "Unknown command: $effective" }
 }
