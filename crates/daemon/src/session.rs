@@ -843,6 +843,8 @@ async fn watch_exit(
     registry.update(&session_id, |rec| {
         abandoned = matches!(exit, PtyExit::TracerLost) && rec.pty.is_some();
         rec.status = SessionStatus::Stopped;
+        // A stopped session has nothing left waiting on it.
+        rec.pending_input = None;
         rec.pty = None;
         rec.input_notifier = None;
         rec.scrollback_snapshot_req = None;
@@ -1482,6 +1484,39 @@ mod tests {
                 Err(broadcast::error::RecvError::Closed) => std::future::pending().await,
             }
         }
+    }
+
+    /// A session that exits while a hook prompt is pending stops with no
+    /// prompt left on it: a stopped session has nothing to answer.
+    #[tokio::test]
+    async fn an_exited_session_drops_its_pending_input() {
+        use crate::history::test_support::{fake_pty, insert_live, record, scratch_dirs};
+        use crate::pty::PtyExit;
+        use std::time::Duration;
+
+        let dirs = scratch_dirs("exit-drops-pending");
+        let registry = SessionRegistry::new(dirs.clone());
+        let (pty, exit_tx) = fake_pty();
+        let mut rec = record("s1", SessionMode::Interactive);
+        rec.status = SessionStatus::AwaitingInput;
+        rec.pending_input = Some(PendingInput::Permission {
+            tool_name: "Bash".to_owned(),
+            summary: "cargo build".to_owned(),
+        });
+        rec.hook_driven = true;
+        insert_live(&registry, &dirs, rec, &pty);
+        let mut events = registry.subscribe();
+
+        exit_tx.send(PtyExit::Code(0)).expect("report the exit");
+        tokio::time::timeout(Duration::from_secs(5), next_stopped(&mut events))
+            .await
+            .expect("the Stopped update arrives");
+
+        let rec = registry.get("s1").expect("the session is still listed");
+        let record = crate::sync::lock(&rec);
+        assert_eq!(record.status, SessionStatus::Stopped);
+        assert_eq!(record.pending_input, None, "the prompt left with the exit");
+        let _ = std::fs::remove_dir_all(&dirs.config);
     }
 
     /// Every status change must reach the sidecar, in the same read-modify-

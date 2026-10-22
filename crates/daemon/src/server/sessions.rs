@@ -653,6 +653,8 @@ async fn park_session(hub: &Hub, session_id: &str) {
     let mut headless_handle = None;
     hub.sessions.update(session_id, |r| {
         r.is_inactive = true;
+        // A parked session has nothing left waiting on it.
+        r.pending_input = None;
         pty = r.pty.take();
         headless_handle = r.headless.take();
         r.input_notifier = None;
@@ -1042,6 +1044,8 @@ pub(super) async fn stop_session(hub: &Hub, session_id: &str) -> anyhow::Result<
     let mut headless_handle = None;
     hub.sessions.update(session_id, |r| {
         r.status = protocol::SessionStatus::Stopped;
+        // A stopped session has nothing left waiting on it.
+        r.pending_input = None;
         pty = r.pty.take();
         headless_handle = r.headless.take();
         r.input_notifier = None;
@@ -1444,6 +1448,54 @@ mod tests {
         let entries = history::read_all(&hub.dirs);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].end, SessionEnd::StoppedByUser);
+    }
+
+    /// A stopped session drops the hook prompt it was waiting on: nothing
+    /// is left to answer once the process is gone.
+    #[tokio::test]
+    async fn a_stopped_session_drops_its_pending_input() {
+        use crate::history::test_support::{fake_pty, insert_live, record};
+        let (hub, _scratch) = test_hub("stop-drops-pending");
+        let (pty, _exit_tx) = fake_pty();
+        let mut rec = record("s1", SessionMode::Interactive);
+        rec.status = SessionStatus::AwaitingInput;
+        rec.pending_input = Some(protocol::PendingInput::Permission {
+            tool_name: "Bash".to_owned(),
+            summary: "cargo build".to_owned(),
+        });
+        rec.hook_driven = true;
+        insert_live(&hub.sessions, &hub.dirs, rec, &pty);
+        stop_session(&hub, "s1").await.expect("stop");
+        let snapshot = snapshot_of(&hub, "s1");
+        assert_eq!(snapshot.status, SessionStatus::Stopped);
+        assert_eq!(
+            snapshot.pending_input, None,
+            "the prompt left with the stop"
+        );
+    }
+
+    /// A parked session drops its prompt the same way: it keeps its record
+    /// for Resume, but nothing is waiting on it.
+    #[tokio::test]
+    async fn a_parked_session_drops_its_pending_input() {
+        use crate::history::test_support::{fake_pty, insert_live, record};
+        let (hub, _scratch) = test_hub("park-drops-pending");
+        let (pty, _exit_tx) = fake_pty();
+        let mut rec = record("s1", SessionMode::Interactive);
+        rec.status = SessionStatus::AwaitingInput;
+        rec.pending_input = Some(protocol::PendingInput::Permission {
+            tool_name: "Bash".to_owned(),
+            summary: "cargo build".to_owned(),
+        });
+        rec.hook_driven = true;
+        insert_live(&hub.sessions, &hub.dirs, rec, &pty);
+        park_session(&hub, "s1").await;
+        let snapshot = snapshot_of(&hub, "s1");
+        assert_eq!(snapshot.status, SessionStatus::Stopped);
+        assert_eq!(
+            snapshot.pending_input, None,
+            "the prompt left with the park"
+        );
     }
 
     #[tokio::test]

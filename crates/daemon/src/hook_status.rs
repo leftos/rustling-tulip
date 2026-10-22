@@ -254,11 +254,16 @@ pub(crate) fn apply_to_record(
         return (false, None);
     }
     // A shell outlives the CLI whose hooks drive it: once that CLI ends, its
-    // hooks stop arriving and the shell classifier owns the status again. The
-    // status itself is left alone; the plain-shell silence demotion ends a
-    // stale `Working`.
+    // hooks stop arriving and the shell classifier owns the status again. A
+    // stale `Working` ends through the plain-shell silence demotion; an
+    // `AwaitingInput` ends here, since the agent that asked has ended and no
+    // other event would demote it.
     if details.event == "SessionEnd" && record.mode == SessionMode::PlainShell {
         record.hook_driven = false;
+        if record.status == SessionStatus::AwaitingInput {
+            crate::pty_state::apply_status(record, SessionStatus::Idle);
+            record.pending_input = None;
+        }
     }
     if leaves_pending_alone(record, signal, details) {
         return (false, apply_details(record, details));
@@ -1106,6 +1111,33 @@ mod tests {
             awaiting.status,
             SessionStatus::Idle,
             "nothing pending: the idle notification ends the wait"
+        );
+    }
+
+    /// A plain shell outlives the CLI whose hooks drive it, so its `SessionEnd`
+    /// is the last word on the question that CLI asked: the agent is gone and
+    /// no other event would end the wait.
+    #[test]
+    fn a_plain_shell_session_end_ends_a_hook_prompt() {
+        let mut record = crate::history::test_support::record("s1", SessionMode::PlainShell);
+        record.status = SessionStatus::AwaitingInput;
+        record.pending_input = Some(main_prompt());
+        record.last_hook_time = Some(1);
+        record.hook_driven = true;
+        apply_body(
+            &mut record,
+            2,
+            &json!({"hook_event_name": "SessionEnd", "reason": "prompt_input_exit"}),
+        );
+        assert_eq!(
+            record.status,
+            SessionStatus::Idle,
+            "the ended agent's question is over"
+        );
+        assert_eq!(record.pending_input, None, "the prompt left with the agent");
+        assert!(
+            !record.hook_driven,
+            "the shell classifier owns the status again"
         );
     }
 
