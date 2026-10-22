@@ -437,24 +437,9 @@ pub(super) async fn duplicate_session(
         }
     };
     let origin = request_origin(connection, request_id.clone());
-    if let Err(err) = spawn_keeping_busy_excluded(hub, req, origin, busy_excluded).await {
+    if let Err(err) = spawn_session(hub, req, origin, busy_excluded).await {
         send_spawn_failure(out_tx, &err, request_id.as_deref());
     }
-}
-
-/// Spawn `req`, then, when `busy_excluded` is set, mark the new session as
-/// not counted as busy (see [`adopt_busy_excluded`]). Every spawn that keeps
-/// a session's exclusion (Restart, Resume, recovery) goes through here. The
-/// returned snapshot is the spawn's, taken before the flag was set.
-pub(super) async fn spawn_keeping_busy_excluded(
-    hub: &Hub,
-    req: SpawnRequest,
-    origin: Option<UpdateOrigin>,
-    busy_excluded: bool,
-) -> anyhow::Result<protocol::SessionSnapshot> {
-    let snapshot = spawn_session(hub, req, origin).await?;
-    adopt_busy_excluded(&hub.sessions, &snapshot.id, busy_excluded);
-    Ok(snapshot)
 }
 
 /// The busy exclusion a copy of `source_id` starts with: the source's when
@@ -465,15 +450,6 @@ fn carried_busy_excluded(sessions: &SessionRegistry, source_id: &str, carry: boo
         && sessions
             .get(source_id)
             .is_some_and(|rec| crate::sync::lock(&rec).busy_excluded)
-}
-
-/// Mark the freshly spawned `session_id` as not counted as busy when
-/// `excluded` is set; the registry update mirrors it into the sidecar and
-/// broadcasts the session. A counted session needs no update.
-fn adopt_busy_excluded(sessions: &SessionRegistry, session_id: &str, excluded: bool) {
-    if excluded {
-        sessions.update(session_id, |guard| guard.busy_excluded = true);
-    }
 }
 
 /// The origin of a registry update made by connection `connection`'s
@@ -1631,22 +1607,6 @@ mod tests {
             "a Restart or Resume keeps the flag"
         );
         assert!(!carried_busy_excluded(&sessions, "ghost", true));
-    }
-
-    #[test]
-    fn adopt_busy_excluded_marks_and_broadcasts_only_an_excluded_session() {
-        let (sessions, _dirs) = appearance_registry("busy-adopt");
-        sessions.insert(idle_record("copy"));
-        let mut events = sessions.subscribe();
-        adopt_busy_excluded(&sessions, "copy", false);
-        assert!(events.try_recv().is_err(), "a counted copy needs no update");
-        adopt_busy_excluded(&sessions, "copy", true);
-        let rec = sessions.get("copy").expect("the copy is registered");
-        assert!(crate::sync::lock(&rec).busy_excluded);
-        assert!(
-            matches!(events.try_recv(), Ok(SessionEvent::Updated(snap, None)) if snap.busy_excluded),
-            "the copy's flag is broadcast"
-        );
     }
 
     #[tokio::test]

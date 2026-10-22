@@ -1520,7 +1520,7 @@ async fn spawn_one(
         request_id: None,
         resume_conversation: None,
     };
-    let snapshot = spawn_session(hub, req, None).await.map_err(|e| {
+    let snapshot = spawn_session(hub, req, None, false).await.map_err(|e| {
         LaunchFailure::new(format!("spawn failed at #{index}: {e}"))
             .with_partials(session_ids, &plan.tab_state.tab_ids)
     })?;

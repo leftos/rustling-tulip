@@ -124,7 +124,7 @@ pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> 
                 // broadcast, which carries `request_id` on this connection.
                 let request_id = req.request_id.clone();
                 let origin = request_origin(connection, request_id.clone());
-                if let Err(err) = spawn_session(hub, req, origin).await {
+                if let Err(err) = spawn_session(hub, req, origin, false).await {
                     send_spawn_failure(out_tx, &err, request_id.as_deref());
                 }
             }
@@ -214,8 +214,9 @@ pub(crate) async fn spawn_session(
     hub: &Hub,
     req: SpawnRequest,
     origin: Option<UpdateOrigin>,
+    busy_excluded: bool,
 ) -> anyhow::Result<protocol::SessionSnapshot> {
-    spawn_session_with(hub, req, origin, user_env::resolve).await
+    spawn_session_with(hub, req, origin, busy_excluded, user_env::resolve).await
 }
 
 /// [`spawn_session`] with the variable lookup `resolve` in place of
@@ -231,6 +232,7 @@ async fn spawn_session_with<R>(
     hub: &Hub,
     mut req: SpawnRequest,
     origin: Option<UpdateOrigin>,
+    busy_excluded: bool,
     resolve: R,
 ) -> anyhow::Result<protocol::SessionSnapshot>
 where
@@ -444,6 +446,7 @@ where
                 prompt,
                 &cfg,
                 stored_config,
+                busy_excluded,
             )
         }
         SessionMode::PlainShell => {
@@ -462,6 +465,7 @@ where
                 primary_cwd,
                 &cfg,
                 stored_config,
+                busy_excluded,
             )
             .await
         }
@@ -477,6 +481,7 @@ where
                 initial_prompt,
                 &cfg,
                 stored_config,
+                busy_excluded,
             )
             .await
         }
@@ -564,6 +569,7 @@ struct NewInteractive {
     last_prompt: Option<String>,
     claude_session_id: Option<String>,
     started_at: chrono::DateTime<Utc>,
+    busy_excluded: bool,
 }
 
 /// The record of a new interactive session.
@@ -606,9 +612,75 @@ fn interactive_record(
         last_hook_time: None,
         hook_driven: false,
         last_assistant_message: None,
-        busy_excluded: false,
+        busy_excluded: new.busy_excluded,
     };
     push_recent_action(&mut record, "session started".to_string());
+    record
+}
+
+/// What a new plain-shell session's record takes from its spawn.
+struct NewPlainShell {
+    session_id: String,
+    label: String,
+    kind: SessionKind,
+    members: Vec<SessionMember>,
+    workspace_id: Option<String>,
+    shell_label: String,
+    cwd: String,
+    stored_config: protocol::SpawnConfig,
+    started_at: chrono::DateTime<Utc>,
+    busy_excluded: bool,
+}
+
+/// The record of a new plain-shell session.
+fn plain_shell_record(
+    new: NewPlainShell,
+    pty: Option<Arc<crate::pty::PtyHandle>>,
+) -> SessionRecord {
+    let mut record = SessionRecord {
+        id: new.session_id,
+        label: new.label.clone(),
+        default_label: new.label,
+        user_label: None,
+        kind: new.kind,
+        members: new.members.clone(),
+        mode: SessionMode::PlainShell,
+        started_at: new.started_at,
+        status: SessionStatus::Idle,
+        status_since: Some(new.started_at),
+        exit_code: None,
+        metrics: SessionMetrics::default(),
+        recent_actions: Vec::new(),
+        pty,
+        headless: None,
+        workspace_id: new.workspace_id,
+        // Plain-shell sessions have no agent CLI in the picture; the record
+        // still needs an agent, so it carries the default one.
+        agent: Agent::Claude,
+        terminal_title: None,
+        program_name: Some(new.shell_label.clone()),
+        current_cwd: Some(new.cwd),
+        appearance: AppearanceOverrides::default(),
+        spawn_config: Some(new.stored_config.clone()),
+        is_abandoned: false,
+        is_inactive: false,
+        worktree_paths: worktree_paths_for_config(&new.stored_config, &new.members),
+        // Plain shells never carry a kickoff prompt.
+        last_prompt: None,
+        input_notifier: None,
+        scrollback_snapshot_req: None,
+        spawn_origin: None,
+        claude_session_id: None,
+        pending_input: None,
+        last_hook_time: None,
+        hook_driven: false,
+        last_assistant_message: None,
+        busy_excluded: new.busy_excluded,
+    };
+    push_recent_action(
+        &mut record,
+        format!("session started: {}", new.shell_label.as_str()),
+    );
     record
 }
 
@@ -665,6 +737,7 @@ async fn spawn_interactive_session(
     initial_prompt: Option<String>,
     cfg: &SpawnArgs,
     stored_config: protocol::SpawnConfig,
+    busy_excluded: bool,
 ) -> anyhow::Result<protocol::SessionSnapshot> {
     let last_prompt = initial_prompt.clone();
     let agent = cfg.agent();
@@ -762,6 +835,7 @@ async fn spawn_interactive_session(
             last_prompt,
             claude_session_id,
             started_at: Utc::now(),
+            busy_excluded,
         },
         Some(Arc::clone(&pty)),
     );
@@ -844,6 +918,7 @@ async fn spawn_plain_shell_session(
     primary_cwd: PathBuf,
     cfg: &SpawnArgs,
     stored_config: protocol::SpawnConfig,
+    busy_excluded: bool,
 ) -> anyhow::Result<protocol::SessionSnapshot> {
     let shell = resolve_shell_program(&hub.dirs)?;
     // A recovered shell gets the same injected hooks an interactive Claude
@@ -914,49 +989,20 @@ async fn spawn_plain_shell_session(
     let pid = pty.pid();
 
     let started_at = Utc::now();
-    let mut record = SessionRecord {
-        id: session_id.clone(),
-        label: label.clone(),
-        default_label: label.clone(),
-        user_label: None,
-        kind: kind.clone(),
-        members: members.clone(),
-        mode: SessionMode::PlainShell,
-        started_at,
-        status: SessionStatus::Idle,
-        status_since: Some(started_at),
-        exit_code: None,
-        metrics: SessionMetrics::default(),
-        recent_actions: Vec::new(),
-        pty: Some(Arc::clone(&pty)),
-        headless: None,
-        workspace_id: workspace_id.clone(),
-        // Plain-shell sessions have no agent CLI in the picture; the record
-        // still needs an agent, so it carries the default one.
-        agent: Agent::Claude,
-        terminal_title: None,
-        program_name: Some(shell.label.clone()),
-        current_cwd: Some(initial_cwd.clone()),
-        appearance: AppearanceOverrides::default(),
-        spawn_config: Some(stored_config.clone()),
-        is_abandoned: false,
-        is_inactive: false,
-        worktree_paths: worktree_paths_for_config(&stored_config, &members),
-        // Plain shells never carry a kickoff prompt.
-        last_prompt: None,
-        input_notifier: None,
-        scrollback_snapshot_req: None,
-        spawn_origin: None,
-        claude_session_id: None,
-        pending_input: None,
-        last_hook_time: None,
-        hook_driven: false,
-        last_assistant_message: None,
-        busy_excluded: false,
-    };
-    push_recent_action(
-        &mut record,
-        format!("session started: {}", shell.label.as_str()),
+    let record = plain_shell_record(
+        NewPlainShell {
+            session_id: session_id.clone(),
+            label: label.clone(),
+            kind: kind.clone(),
+            members: members.clone(),
+            workspace_id: workspace_id.clone(),
+            shell_label: shell.label.clone(),
+            cwd: initial_cwd.clone(),
+            stored_config: stored_config.clone(),
+            started_at,
+            busy_excluded,
+        },
+        Some(Arc::clone(&pty)),
     );
 
     // Two-stage insert — see spawn_interactive_session for the same pattern
@@ -1055,6 +1101,7 @@ fn spawn_headless_session(
     prompt: String,
     cfg: &SpawnArgs,
     stored_config: protocol::SpawnConfig,
+    busy_excluded: bool,
 ) -> anyhow::Result<protocol::SessionSnapshot> {
     // The dispatcher already rejects headless mode for backends that don't
     // support it; if we got here, the backend can build headless args.
@@ -1110,7 +1157,7 @@ fn spawn_headless_session(
         last_hook_time: None,
         hook_driven: false,
         last_assistant_message: None,
-        busy_excluded: false,
+        busy_excluded,
     };
     push_recent_action(&mut record, "headless session started".to_string());
     // Held unpublished until the child runs, so a failed spawn is never
@@ -1773,6 +1820,7 @@ mod tests {
                 None,
                 &cfg,
                 stored_config,
+                false,
             )
             .await
             .expect_err("the stub tracer is not a runnable executable")
@@ -1838,6 +1886,7 @@ mod tests {
                 folder.to_path_buf(),
                 &cfg,
                 stored_config,
+                false,
             )
             .await
             .expect_err("the stub tracer is not a runnable executable")
@@ -2054,7 +2103,7 @@ mod tests {
         );
         // Straight into `spawn_session`, the path every replay (duplicate,
         // resume, recover) takes, past the dispatcher's own early check.
-        let err = spawn_session(&hub, req, None)
+        let err = spawn_session(&hub, req, None, false)
             .await
             .expect_err("an unset reference refuses");
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
@@ -2087,7 +2136,7 @@ mod tests {
         req.agent_options = AgentOptions::claude(Some(protocol::PermissionMode::Plan));
         // Straight into `spawn_session`, the path every replay (duplicate,
         // resume, recover) takes, past the dispatcher's own early check.
-        let err = spawn_session(&hub, req, None)
+        let err = spawn_session(&hub, req, None, false)
             .await
             .expect_err("a plain shell refuses a permission mode");
         let text = format!("{err:#}");
@@ -2173,7 +2222,7 @@ mod tests {
         let req = env_spawn(target, SessionMode::PlainShell, extra.clone(), None);
         let _ = child_env_probe::take();
         // The spawnless hub fails at the tracer, after the spec is built.
-        spawn_session(&hub, req, None)
+        spawn_session(&hub, req, None, false)
             .await
             .expect_err("no tracer can start");
         let child = child_env_probe::take().expect("a spawn spec's env was built");
@@ -2224,7 +2273,7 @@ mod tests {
             Vec::new(),
             Some("rq-ds"),
         );
-        let err = spawn_session_with(&hub, req, None, |_| None)
+        let err = spawn_session_with(&hub, req, None, false, |_| None)
             .await
             .expect_err("a missing key refuses");
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
@@ -2274,7 +2323,7 @@ mod tests {
         );
         let _ = child_env_probe::take();
         // The spawnless hub fails at the tracer, after the spec is built.
-        spawn_session_with(&hub, req, None, deepseek_key)
+        spawn_session_with(&hub, req, None, false, deepseek_key)
             .await
             .expect_err("no tracer can start");
         let child = child_env_probe::take().expect("a spawn spec's env was built");
@@ -2305,7 +2354,7 @@ mod tests {
         let req = deepseek_spawn(in_place_main(), SessionMode::Interactive, Vec::new(), None);
         let _ = child_env_probe::take_both();
         // The spawnless hub fails at the tracer, after the spec is built.
-        spawn_session_with(&hub, req, None, deepseek_key)
+        spawn_session_with(&hub, req, None, false, deepseek_key)
             .await
             .expect_err("no tracer can start");
         let (child, removed) = child_env_probe::take_both().expect("a spawn spec was built");
@@ -2338,7 +2387,7 @@ mod tests {
             None,
         );
         // No key anywhere: the shell refusal comes first, not the key's.
-        let err = spawn_session_with(&hub, req, None, |_| None)
+        let err = spawn_session_with(&hub, req, None, false, |_| None)
             .await
             .expect_err("a plain shell refuses a provider");
         let text = format!("{err:#}");
@@ -2460,7 +2509,7 @@ mod tests {
             rows.clone(),
             None,
         );
-        let err = spawn_session_with(&hub, req, None, deepseek_key)
+        let err = spawn_session_with(&hub, req, None, false, deepseek_key)
             .await
             .expect_err("the row refuses");
         let failure = err
@@ -2570,6 +2619,7 @@ mod tests {
                 last_prompt: None,
                 claude_session_id: None,
                 started_at: Utc::now(),
+                busy_excluded: false,
             },
             None,
         );
@@ -2589,6 +2639,102 @@ mod tests {
         history::write_if_absent(&hub.dirs, &entry).expect("write the history entry");
     }
 
+    /// Standalone target whose folder is the hub's own config dir.
+    fn standalone_here(hub: &Hub) -> SpawnTarget {
+        SpawnTarget::Standalone {
+            cwd: Some(hub.dirs.config.to_string_lossy().into_owned()),
+            add_dirs: Vec::new(),
+        }
+    }
+
+    /// Put `record` into `hub`'s registry unpublished and then publish it,
+    /// answering the snapshot it was published with, the way a spawn's first
+    /// record reaches clients without a child.
+    fn publish_record(hub: &Hub, record: SessionRecord) -> protocol::SessionSnapshot {
+        let pending = hub.sessions.insert_pending(record);
+        let snap = crate::sync::lock(pending.arc()).snapshot();
+        pending.publish_from(None);
+        snap
+    }
+
+    #[tokio::test]
+    #[expect(clippy::panic, reason = "a missing broadcast fails the test loudly")]
+    async fn a_busy_excluded_record_publishes_the_exclusion_in_its_first_update_plain_shell() {
+        let (hub, _scratch) = test_hub("busy-first-plain-shell");
+        let mut events = hub.sessions.subscribe();
+        let request = env_spawn(
+            standalone_here(&hub),
+            SessionMode::PlainShell,
+            Vec::new(),
+            None,
+        );
+        let record = plain_shell_record(
+            NewPlainShell {
+                session_id: "shell-1".to_owned(),
+                label: "shell-1".to_owned(),
+                kind: SessionKind::Standalone,
+                members: Vec::new(),
+                workspace_id: None,
+                shell_label: "pwsh".to_owned(),
+                cwd: hub.dirs.config.to_string_lossy().into_owned(),
+                stored_config: protocol::SpawnConfig::from_request(&request),
+                started_at: Utc::now(),
+                busy_excluded: true,
+            },
+            None,
+        );
+        let snap = publish_record(&hub, record);
+        assert!(snap.busy_excluded, "the first record carries the flag");
+        let Ok(crate::session::SessionEvent::Updated(first, None)) = events.try_recv() else {
+            panic!("expected the record's first SessionUpdated");
+        };
+        assert_eq!(first.id, snap.id, "the update is the new record's");
+        assert!(
+            first.busy_excluded,
+            "the first update carries the flag without a follow-up write"
+        );
+    }
+
+    #[tokio::test]
+    #[expect(clippy::panic, reason = "a missing broadcast fails the test loudly")]
+    async fn a_busy_excluded_record_publishes_the_exclusion_in_its_first_update_interactive() {
+        let (hub, _scratch) = test_hub("busy-first-interactive");
+        let mut events = hub.sessions.subscribe();
+        let request = env_spawn(
+            standalone_here(&hub),
+            SessionMode::Interactive,
+            Vec::new(),
+            None,
+        );
+        let record = interactive_record(
+            NewInteractive {
+                session_id: "agent-1".to_owned(),
+                label: "agent-1".to_owned(),
+                kind: SessionKind::Standalone,
+                members: Vec::new(),
+                workspace_id: None,
+                agent: Agent::Claude,
+                cwd: hub.dirs.config.to_string_lossy().into_owned(),
+                stored_config: protocol::SpawnConfig::from_request(&request),
+                last_prompt: None,
+                claude_session_id: None,
+                started_at: Utc::now(),
+                busy_excluded: true,
+            },
+            None,
+        );
+        let snap = publish_record(&hub, record);
+        assert!(snap.busy_excluded, "the first record carries the flag");
+        let Ok(crate::session::SessionEvent::Updated(first, None)) = events.try_recv() else {
+            panic!("expected the record's first SessionUpdated");
+        };
+        assert_eq!(first.id, snap.id, "the update is the new record's");
+        assert!(
+            first.busy_excluded,
+            "the first update carries the flag without a follow-up write"
+        );
+    }
+
     /// A spawn whose dialog row holds a literal secret. The spawnless hub
     /// cannot stage a tracer, so the spawn stops after the config is captured —
     /// which is the part this test is about.
@@ -2603,7 +2749,7 @@ mod tests {
         if let SpawnTarget::Single { branch_name, .. } = &mut target {
             "main".clone_into(branch_name);
         }
-        spawn_session(&hub, secret_literal_spawn(target), None)
+        spawn_session(&hub, secret_literal_spawn(target), None, false)
             .await
             .expect_err("no tracer can start");
 
@@ -2667,7 +2813,7 @@ mod tests {
             None,
         );
         let _ = child_env_probe::take();
-        spawn_session(&hub, req, None)
+        spawn_session(&hub, req, None, false)
             .await
             .expect_err("no tracer can start");
         let child = child_env_probe::take().expect("a spawn spec's env was built");
@@ -2695,6 +2841,7 @@ mod tests {
             &hub,
             env_spawn(target, SessionMode::Interactive, rows.clone(), None),
             None,
+            false,
         )
         .await
         .expect_err("no tracer can start");
@@ -2728,7 +2875,7 @@ mod tests {
         );
         req.secret_env_keys = vec!["GH_PAT".to_owned()];
         let _ = child_env_probe::take();
-        spawn_session(&hub, req, None)
+        spawn_session(&hub, req, None, false)
             .await
             .expect_err("no tracer can start");
 
@@ -2822,7 +2969,7 @@ mod tests {
         );
         // Straight into `spawn_session`, the path every replay takes, past the
         // dispatcher's own early check.
-        let err = spawn_session(&hub, req, None)
+        let err = spawn_session(&hub, req, None, false)
             .await
             .expect_err("a missing saved secret refuses");
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
@@ -2944,7 +3091,7 @@ mod tests {
                 request_id: None,
                 resume_conversation: None,
             };
-            let err = spawn_session(&hub, req, None)
+            let err = spawn_session(&hub, req, None, false)
                 .await
                 .expect_err("refused before anything spawns");
             assert!(
@@ -2976,7 +3123,7 @@ mod tests {
             None,
         );
         req.agent_options = agent_options;
-        let err = spawn_session(hub, req, None)
+        let err = spawn_session(hub, req, None, false)
             .await
             .expect_err("the spawnless hub launches nothing");
         format!("{err:#}")

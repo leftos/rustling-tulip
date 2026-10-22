@@ -1,8 +1,7 @@
 //! Session history and recovery: reattaching orphans at startup, resuming abandoned sessions, recovering ended ones from history, and recovery claims.
 use super::connection::ConnCtx;
-use super::sessions::spawn_keeping_busy_excluded;
 use super::settings::{env_names, register_repo};
-use super::spawn::{check_spawn_request, expected_output_subscribers};
+use super::spawn::{check_spawn_request, expected_output_subscribers, spawn_session};
 use super::tabs::rebind_session_panes;
 use super::{Hub, StateEvent};
 use crate::orphan::OrphanMeta;
@@ -249,7 +248,7 @@ pub(super) async fn resume_abandoned(
         .get(session_id)
         .ok_or_else(|| anyhow!("unknown session: {session_id}"))?;
     let (req, busy_excluded) = abandoned_resume_request(&crate::sync::lock(&rec))?;
-    let snap = spawn_keeping_busy_excluded(hub, req, None, busy_excluded).await?;
+    let snap = spawn_session(hub, req, None, busy_excluded).await?;
     finish_resume(hub, session_id, &snap.id, out_tx);
     Ok(())
 }
@@ -434,7 +433,7 @@ async fn recover_one(
         let current = crate::git::current_branch(Path::new(folder)).await;
         plan.name_branch(history::branch_or_placeholder(current));
     }
-    let snapshot = spawn_keeping_busy_excluded(hub, plan.request, None, busy_excluded)
+    let snapshot = spawn_session(hub, plan.request, None, busy_excluded)
         .await
         .map_err(|err| format!("{err:#}"))?;
     finish_recovery(hub, &item.history_id, &snapshot.id, out_tx);
