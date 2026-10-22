@@ -4,6 +4,7 @@ use super::sessions::spawn_session_forwarder;
 use super::tabs::ensure_client_layout;
 use super::{Hub, PresetEvent, ScopedTabEvent, StateEvent, TabEvent, dispatch};
 use crate::file_fetch;
+use crate::state::AppState;
 use axum::extract::ws::{Message, WebSocket};
 use futures::{SinkExt as _, StreamExt as _};
 use protocol::{DaemonMessage, InboundClientMessage};
@@ -124,7 +125,8 @@ pub(super) async fn client_session(hub: Hub, socket: WebSocket, auth: AuthKind) 
     // filtered to this connection's `client_id` (per-client layouts); preset
     // and registry events are forwarded to every client.
     let tab_event_task = spawn_tab_forwarder(
-        hub.tab_events.subscribe(),
+        hub.tab_events.clone(),
+        Arc::clone(&hub.state),
         out_tx.clone(),
         client_id.clone(),
     );
@@ -170,11 +172,18 @@ pub(super) async fn client_session(hub: Hub, socket: WebSocket, auth: AuthKind) 
     info!("client_session: returning");
 }
 
+/// Forwards tab-layout events for `client_id` to the connection's `out_tx`. A
+/// connection that falls behind the broadcast buffer gets its whole tab list
+/// in place of the events it missed, and the events after it.
 fn spawn_tab_forwarder(
-    mut rx: broadcast::Receiver<ScopedTabEvent>,
+    sender: broadcast::Sender<ScopedTabEvent>,
+    state: Arc<AppState>,
     out_tx: mpsc::UnboundedSender<DaemonMessage>,
     client_id: String,
 ) -> tokio::task::JoinHandle<()> {
+    // Subscribed before the task starts, so no event sent after this call
+    // is missed.
+    let mut rx = sender.subscribe();
     tokio::spawn(async move {
         loop {
             match rx.recv().await {
@@ -195,7 +204,17 @@ fn spawn_tab_forwarder(
                     }
                 }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
-                    warn!(lagged = n, "client tab event stream lagged");
+                    warn!(
+                        lagged = n,
+                        %client_id,
+                        "client tab event stream lagged; resending the tab list"
+                    );
+                    // Subscribe before taking the layout: the stale buffered
+                    // events go with the old receiver, and every event after
+                    // the list applies on top of it.
+                    rx = sender.subscribe();
+                    let tabs = state.client_layout(&client_id);
+                    let _ = out_tx.send(DaemonMessage::Tabs { tabs });
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
             }
@@ -505,5 +524,68 @@ async fn recv_loop(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "tests assert preconditions with expect; failure messages aid debugging"
+)]
+mod tests {
+    use super::*;
+    use crate::server::test_support::{next_message, test_hub};
+
+    #[tokio::test]
+    async fn a_lagged_tab_forwarder_resyncs_with_the_tab_list() {
+        let (hub, _scratch) = test_hub("lagged-tab-forwarder");
+        let client_id = "lagged-client".to_string();
+        let tab = hub
+            .state
+            .mutate_client_layout(&client_id, |tabs| {
+                let tab = crate::tabs::make_tab(None, None, tabs);
+                tabs.push(tab.clone());
+                tab
+            })
+            .expect("seed the client's layout with one tab");
+
+        let (out_tx, mut rx) = mpsc::unbounded_channel();
+        let forwarder = spawn_tab_forwarder(
+            hub.tab_events.clone(),
+            Arc::clone(&hub.state),
+            out_tx,
+            client_id.clone(),
+        );
+
+        // The current-thread runtime first polls the forwarder at the await
+        // below, by which time the broadcast buffer has overflowed. One more
+        // event than production's capacity outruns the smaller channel the
+        // test hub builds (test_support gives it room for 16).
+        for _ in 0..=crate::server::TAB_EVENT_CAPACITY {
+            hub.emit_tab(&client_id, TabEvent::Updated(tab.clone()));
+        }
+        let listed = match next_message(&mut rx).await {
+            DaemonMessage::Tabs { tabs } => Some(tabs),
+            _ => None,
+        };
+        assert_eq!(
+            listed.expect("the lagged connection gets the tab list"),
+            hub.state.client_layout(&client_id),
+            "the list is this client's layout as it stands"
+        );
+
+        // The missed events are not replayed after the list; the events after
+        // it arrive on the fresh subscription.
+        hub.emit_tab(&client_id, TabEvent::Removed("after".to_string()));
+        let removed = match next_message(&mut rx).await {
+            DaemonMessage::TabRemoved { tab_id } => Some(tab_id),
+            _ => None,
+        };
+        assert_eq!(
+            removed.expect("events after the list still arrive"),
+            "after".to_string(),
+            "the forwarder keeps draining its new subscription"
+        );
+        forwarder.abort();
     }
 }
