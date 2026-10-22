@@ -120,6 +120,8 @@ pub struct Leaf {
     pub busy_excluded: bool,
     /// The agent's last turn ended while this client looked elsewhere.
     pub unseen: bool,
+    /// The session is idle with its turn's background work still running.
+    pub background: bool,
     pub state: LeafState,
     /// Launched with approval prompts bypassed.
     pub trusted: bool,
@@ -593,7 +595,7 @@ impl SidebarModel {
         match msg {
             DaemonMessage::Sessions { sessions } => {
                 for session in sessions {
-                    let before = self.session(&session.id).map(|s| s.status);
+                    let before = self.turn_state(&session.id);
                     self.note_turn(before, session);
                 }
                 self.unseen
@@ -616,7 +618,7 @@ impl SidebarModel {
     /// Replace or append the session; a session that settled back into
     /// working, idle or spawning on its own no longer needs attention.
     fn update_session(&mut self, session: &SessionSnapshot) {
-        let before = self.session(&session.id).map(|s| s.status);
+        let before = self.turn_state(&session.id);
         self.note_turn(before, session);
         match self.sessions.iter_mut().find(|s| s.id == session.id) {
             Some(existing) => existing.clone_from(session),
@@ -630,13 +632,25 @@ impl SidebarModel {
         }
     }
 
-    /// An agent session going from working to idle while another session
-    /// is shown focused joins the unseen set; any status but idle leaves
-    /// it, so the set holds only idle sessions.
-    fn note_turn(&mut self, before: Option<SessionStatus>, session: &SessionSnapshot) {
+    /// The listed session's status and background flag, before an update
+    /// replaces them.
+    fn turn_state(&self, id: &str) -> Option<(SessionStatus, bool)> {
+        self.session(id).map(|s| (s.status, s.background))
+    }
+
+    /// An agent session whose turn ends while another session is shown
+    /// focused joins the unseen set: it goes idle with no background work
+    /// left, from working or from idle with background work. Any status but
+    /// idle leaves the set, so it holds only idle sessions.
+    fn note_turn(&mut self, before: Option<(SessionStatus, bool)>, session: &SessionSnapshot) {
+        let turn_running = matches!(
+            before,
+            Some((SessionStatus::Working, _) | (SessionStatus::Idle, true))
+        );
         match session.status {
             SessionStatus::Idle
-                if before == Some(SessionStatus::Working)
+                if turn_running
+                    && !session.background
                     && session.mode != SessionMode::PlainShell
                     && self.focused.as_deref() != Some(session.id.as_str()) =>
             {
@@ -1345,6 +1359,7 @@ fn leaf(
         attention: attention.contains(&s.id),
         busy_excluded: s.busy_excluded,
         unseen: unseen.contains(&s.id),
+        background: s.background,
         state: LeafState::of(s),
         trusted: s.elevated_authority,
         tooltip: leaf_tooltip(s),
@@ -2643,6 +2658,56 @@ mod tests {
             assert!(unseen_of(&model, "a"), "{mode:?}");
             assert!(!unseen_of(&model, "b"), "{mode:?}: b never worked");
         }
+    }
+
+    /// `session` goes idle, with `background` work still running or not.
+    fn set_idle(model: &mut SidebarModel, session: &SessionSnapshot, background: bool) {
+        let mut updated = session.clone();
+        updated.status = SessionStatus::Idle;
+        updated.background = background;
+        model.apply(&DaemonMessage::SessionUpdated {
+            session: updated,
+            request_id: None,
+        });
+    }
+
+    fn leaf_background(model: &SidebarModel, id: &str) -> Option<bool> {
+        model
+            .containers()
+            .iter()
+            .flat_map(|c| c.leaves.iter())
+            .find(|l| l.id == id)
+            .map(|l| l.background)
+    }
+
+    #[test]
+    fn a_turn_ending_with_background_is_not_unseen() {
+        let a = in_repo("a", "r1");
+        let mut model = model_with(vec![a.clone(), in_repo("b", "r1")]);
+        model.set_focused_session(Some("b"));
+        set_status(&mut model, &a, SessionStatus::Working);
+        set_idle(&mut model, &a, true);
+        assert!(!model.is_unseen("a"), "the turn's work is still running");
+        assert_eq!(leaf_background(&model, "a"), Some(true));
+    }
+
+    #[test]
+    fn background_ending_marks_the_session_unseen() {
+        let a = in_repo("a", "r1");
+        let mut model = model_with(vec![a.clone(), in_repo("b", "r1")]);
+        model.set_focused_session(Some("b"));
+        set_status(&mut model, &a, SessionStatus::Working);
+        set_idle(&mut model, &a, true);
+        set_idle(&mut model, &a, false);
+        assert!(model.is_unseen("a"), "the background work ended the turn");
+        assert_eq!(leaf_background(&model, "a"), Some(false));
+
+        let mut model = model_with(vec![a.clone(), in_repo("b", "r1")]);
+        model.set_focused_session(Some("a"));
+        set_status(&mut model, &a, SessionStatus::Working);
+        set_idle(&mut model, &a, true);
+        set_idle(&mut model, &a, false);
+        assert!(!model.is_unseen("a"), "it ended in the focused pane");
     }
 
     #[test]

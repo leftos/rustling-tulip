@@ -311,6 +311,19 @@ mod tests {
     }
 
     #[test]
+    fn a_background_session_never_needs_you() {
+        let mut bg = session("s1");
+        bg.background = true;
+        let mut model = list(vec![bg]);
+        assert!(rows(&model).is_empty(), "background work is not a question");
+        attend(&mut model, "s1");
+        assert!(
+            rows(&model).is_empty(),
+            "attention alone does not list an idle session with background work"
+        );
+    }
+
+    #[test]
     fn asking_rows_oldest_first_then_unknown_since_then_ended() {
         let mut oldest = asking("s1");
         oldest.status_since = Some(stamp(-300));

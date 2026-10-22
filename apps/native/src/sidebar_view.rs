@@ -1495,14 +1495,20 @@ fn leaf_frame(
         }))
 }
 
+/// Whether the leaf's label draws dimmed: the session is idle with no
+/// background work running, and its turn has been seen.
+fn seen_idle(leaf: &Leaf) -> bool {
+    leaf.status == SessionStatus::Idle && !leaf.background && !leaf.unseen
+}
+
 /// The label line's start: the status glyph, the label (dimmed once an
 /// idle session's turn has been seen), the `!` badge or, on a session that
 /// does not count as busy, its marker, and the runtime tag.
 fn label_head(leaf: &Leaf) -> Vec<AnyElement> {
-    let seen_idle = leaf.status == SessionStatus::Idle && !leaf.unseen;
+    let seen_idle = seen_idle(leaf);
     let mut parts = vec![
         glyph_view(
-            glyph(leaf.status, leaf.mode, leaf.unseen),
+            glyph(leaf.status, leaf.background, leaf.mode, leaf.unseen),
             GlyphSize::Leaf,
             &format!("leaf-glyph-{}", leaf.id),
         ),
@@ -1793,7 +1799,7 @@ impl RootView {
 
 #[cfg(test)]
 mod tests {
-    use super::chip_texts;
+    use super::{chip_texts, seen_idle};
     use crate::sidebar::{Leaf, LeafState};
     use crate::tabs::TabPill;
     use protocol::{Agent, ClaudeProvider, SessionMode, SessionStatus};
@@ -1812,10 +1818,30 @@ mod tests {
             attention: false,
             busy_excluded: false,
             unseen: false,
+            background: false,
             state: LeafState::Orphan,
             trusted: false,
             tooltip: "s1".to_owned(),
         }
+    }
+
+    #[test]
+    fn a_background_leaf_is_not_drawn_as_seen_idle() {
+        let settled = leaf(None);
+        assert!(seen_idle(&settled), "a seen idle leaf dims its label");
+        let running = Leaf {
+            background: true,
+            ..leaf(None)
+        };
+        assert!(
+            !seen_idle(&running),
+            "background work is still running, so the label stays bright"
+        );
+        let unseen = Leaf {
+            unseen: true,
+            ..leaf(None)
+        };
+        assert!(!seen_idle(&unseen), "an unseen turn stays bright");
     }
 
     #[test]

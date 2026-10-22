@@ -566,6 +566,15 @@ mod tests {
     }
 
     #[test]
+    fn a_background_session_warns_like_a_working_one() {
+        let mut background = session("bg", "idle", &["r1"], true);
+        background.background = true;
+        let working = session("work", "working", &["r1"], true);
+        assert_eq!(Counts::of(&[background]), counts(1, 1, 0));
+        assert_eq!(Counts::of(&[working]), counts(1, 1, 0));
+    }
+
+    #[test]
     fn buttons_without_worktrees_offer_stop_and_abandon() {
         let dialog = ExitDialog::new();
         assert_eq!(

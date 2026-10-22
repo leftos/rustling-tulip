@@ -693,13 +693,15 @@ pub fn session_changes(
     changes
 }
 
-/// Whether `session` is doing something worth surfacing: working, waiting
-/// for an answer, or still starting.
+/// Whether `session` is doing something worth surfacing: working, idle with
+/// its turn's background work still running, waiting for an answer, or
+/// still starting.
 fn is_busy(session: &SessionSnapshot) -> bool {
-    matches!(
-        session.status,
-        SessionStatus::Working | SessionStatus::AwaitingInput | SessionStatus::Spawning
-    )
+    match session.status {
+        SessionStatus::Working | SessionStatus::AwaitingInput | SessionStatus::Spawning => true,
+        SessionStatus::Idle => session.background,
+        SessionStatus::Stopped | SessionStatus::Error => false,
+    }
 }
 
 /// The busy and total live terminals of `tab`, as `(busy, total)`: every
@@ -2592,6 +2594,27 @@ pub(crate) mod tests {
             tab_session_counts(&tab("t", &grid), &[ask, idle]),
             Some((0, 2)),
             "excluded sessions stay in total whatever their status"
+        );
+    }
+
+    #[test]
+    fn a_background_session_counts_as_busy_on_the_pill() {
+        let grid = split(
+            H,
+            0.5,
+            pane("a", Some("bg")),
+            split(V, 0.5, pane("b", Some("idle")), pane("c", Some("server"))),
+        );
+        let mut bg = with_status("bg", SessionStatus::Idle);
+        bg.background = true;
+        let mut server = with_status("server", SessionStatus::Idle);
+        server.background = true;
+        server.busy_excluded = true;
+        let sessions = [bg, with_status("idle", SessionStatus::Idle), server];
+        assert_eq!(
+            tab_session_counts(&tab("t", &grid), &sessions),
+            Some((1, 3)),
+            "idle with background work is busy, unless marked not to count"
         );
     }
 

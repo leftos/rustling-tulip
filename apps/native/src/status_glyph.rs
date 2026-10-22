@@ -34,6 +34,9 @@ pub enum Shape {
     Asking,
     /// A hollow ring: an agent's turn ended while this client looked away.
     Waiting,
+    /// The hollow ring with the working arc spinning over it: the turn
+    /// ended with background work still running.
+    Background,
     /// A small dot.
     Idle,
     /// The hollow ring, faint.
@@ -52,6 +55,7 @@ impl Shape {
             Self::Working => "working",
             Self::Asking => "asking",
             Self::Waiting => "waiting",
+            Self::Background => "background",
             Self::Idle => "idle",
             Self::Spawning => "spawning",
             Self::Stopped => "stopped",
@@ -99,15 +103,18 @@ impl GlyphSize {
     }
 }
 
-/// The glyph a session with `status` in `mode` shows. An idle agent
+/// The glyph a session with `status` in `mode` shows. An idle session whose
+/// turn left `background` work running shows the background ring, seen or
+/// not; `background` beside any other status is ignored. An idle agent
 /// session whose turn this client has not seen (`unseen`) shows the waiting
-/// ring; an idle plain shell always shows the idle dot.
+/// ring; an idle plain shell otherwise shows the idle dot.
 #[must_use]
-pub fn glyph(status: SessionStatus, mode: SessionMode, unseen: bool) -> Glyph {
+pub fn glyph(status: SessionStatus, background: bool, mode: SessionMode, unseen: bool) -> Glyph {
     let agent = mode != SessionMode::PlainShell;
     let (shape, color) = match status {
         SessionStatus::Working => (Shape::Working, WORKING),
         SessionStatus::AwaitingInput => (Shape::Asking, ASKING),
+        SessionStatus::Idle if background => (Shape::Background, WORKING),
         SessionStatus::Idle if agent && unseen => (Shape::Waiting, WAITING),
         SessionStatus::Idle => (Shape::Idle, FAINT),
         SessionStatus::Spawning => (Shape::Spawning, FAINT),
@@ -122,7 +129,7 @@ pub fn glyph(status: SessionStatus, mode: SessionMode, unseen: bool) -> Glyph {
         } else {
             1.0
         },
-        spins: shape == Shape::Working,
+        spins: matches!(shape, Shape::Working | Shape::Background),
     }
 }
 
@@ -150,6 +157,13 @@ impl Glyph {
                 Layer {
                     color: ON_ASKING,
                     ..own(STATUS_QUESTION_ICON)
+                },
+            ],
+            Shape::Background => vec![
+                own(STATUS_RING_ICON),
+                Layer {
+                    spins: self.spins,
+                    ..own(STATUS_ARC_ICON)
                 },
             ],
             Shape::Waiting | Shape::Spawning => vec![own(STATUS_RING_ICON)],
@@ -236,11 +250,14 @@ mod tests {
         SessionMode::PlainShell,
     ];
 
-    /// The shape a status shows for a seen agent, an unseen agent, and a
-    /// plain shell seen or not.
-    fn expected(status: SessionStatus) -> (Shape, Shape, Shape) {
+    /// The shape a status with or without `background` work shows for a
+    /// seen agent, an unseen agent, and a plain shell seen or not.
+    fn expected(status: SessionStatus, background: bool) -> (Shape, Shape, Shape) {
         match status {
             SessionStatus::Spawning => (Shape::Spawning, Shape::Spawning, Shape::Spawning),
+            SessionStatus::Idle if background => {
+                (Shape::Background, Shape::Background, Shape::Background)
+            }
             SessionStatus::Idle => (Shape::Idle, Shape::Waiting, Shape::Idle),
             SessionStatus::Working => (Shape::Working, Shape::Working, Shape::Working),
             SessionStatus::AwaitingInput => (Shape::Asking, Shape::Asking, Shape::Asking),
@@ -252,17 +269,72 @@ mod tests {
     #[test]
     fn every_status_mode_and_unseen_maps_to_its_shape() {
         for status in STATUSES {
-            let (seen_agent, unseen_agent, shell) = expected(status);
+            for background in [false, true] {
+                let (seen_agent, unseen_agent, shell) = expected(status, background);
+                for mode in MODES {
+                    for unseen in [false, true] {
+                        let want = match (mode, unseen) {
+                            (SessionMode::PlainShell, _) => shell,
+                            (_, false) => seen_agent,
+                            (_, true) => unseen_agent,
+                        };
+                        assert_eq!(
+                            glyph(status, background, mode, unseen).shape,
+                            want,
+                            "{status:?} background={background} {mode:?} unseen={unseen}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn background_idle_spins_the_ring() {
+        for mode in MODES {
+            for unseen in [false, true] {
+                let g = glyph(SessionStatus::Idle, true, mode, unseen);
+                assert_eq!(
+                    g,
+                    Glyph {
+                        shape: Shape::Background,
+                        color: WORKING,
+                        opacity: 1.0,
+                        spins: true,
+                    },
+                    "{mode:?} unseen={unseen}"
+                );
+                let layers: Vec<_> = g
+                    .layers()
+                    .iter()
+                    .map(|l| (l.icon, l.color, l.spins))
+                    .collect();
+                assert_eq!(
+                    layers,
+                    [
+                        (STATUS_RING_ICON, WORKING, false),
+                        (STATUS_ARC_ICON, WORKING, true),
+                    ],
+                    "the ring with the working arc turning over it, and no core"
+                );
+            }
+        }
+        assert_eq!(Shape::Background.name(), "background");
+        assert_eq!(
+            layers_of(SessionStatus::Idle, true),
+            [(STATUS_RING_ICON, WAITING, false)],
+            "the waiting ring still stands still"
+        );
+    }
+
+    #[test]
+    fn background_ignored_beside_working() {
+        for status in STATUSES.into_iter().filter(|s| *s != SessionStatus::Idle) {
             for mode in MODES {
                 for unseen in [false, true] {
-                    let want = match (mode, unseen) {
-                        (SessionMode::PlainShell, _) => shell,
-                        (_, false) => seen_agent,
-                        (_, true) => unseen_agent,
-                    };
                     assert_eq!(
-                        glyph(status, mode, unseen).shape,
-                        want,
+                        glyph(status, true, mode, unseen),
+                        glyph(status, false, mode, unseen),
                         "{status:?} {mode:?} unseen={unseen}"
                     );
                 }
@@ -275,9 +347,9 @@ mod tests {
         for status in STATUSES {
             for mode in MODES {
                 for unseen in [false, true] {
-                    let g = glyph(status, mode, unseen);
+                    let g = glyph(status, false, mode, unseen);
                     let (color, opacity, spins) = match g.shape {
-                        Shape::Working => (WORKING, 1.0, true),
+                        Shape::Working | Shape::Background => (WORKING, 1.0, true),
                         Shape::Asking => (ASKING, 1.0, false),
                         Shape::Waiting => (WAITING, 1.0, false),
                         Shape::Idle | Shape::Spawning => (FAINT, 1.0, false),
@@ -297,7 +369,7 @@ mod tests {
     }
 
     fn layers_of(status: SessionStatus, unseen: bool) -> Vec<(&'static str, u32, bool)> {
-        glyph(status, SessionMode::Interactive, unseen)
+        glyph(status, false, SessionMode::Interactive, unseen)
             .layers()
             .into_iter()
             .map(|l| (l.icon, l.color, l.spins))
@@ -342,11 +414,11 @@ mod tests {
     #[test]
     fn idle_and_stopped_draw_the_small_dot() {
         for status in [SessionStatus::Idle, SessionStatus::Stopped] {
-            let layers = glyph(status, SessionMode::PlainShell, false).layers();
+            let layers = glyph(status, false, SessionMode::PlainShell, false).layers();
             let scales: Vec<(&str, f32)> = layers.iter().map(|l| (l.icon, l.scale)).collect();
             assert_eq!(scales, [(STATUS_DOT_ICON, IDLE_DOT_SCALE)], "{status:?}");
         }
-        let error = glyph(SessionStatus::Error, SessionMode::Interactive, false).layers();
+        let error = glyph(SessionStatus::Error, false, SessionMode::Interactive, false).layers();
         assert!(error.iter().all(|l| (l.scale - 1.0).abs() < f32::EPSILON));
     }
 

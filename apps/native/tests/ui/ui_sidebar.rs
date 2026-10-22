@@ -792,6 +792,38 @@ fn background_turn_ending_waits_until_its_leaf_is_clicked(cx: &mut TestAppContex
 }
 
 #[gpui::test]
+fn a_background_turn_end_shows_the_spinning_ring_and_stays_seen(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = Fixture::single(session("s1").build());
+    fixture.sessions.push(session("s2").build());
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.answer_scrollback("s1", b"");
+    let send = |h: &mut Harness<'_>, session: SessionSnapshot| {
+        h.send(DaemonMessage::SessionUpdated {
+            session,
+            request_id: None,
+        });
+    };
+
+    send(&mut h, session("s2").status("working").build());
+    let mut background = session("s2").build();
+    background.background = true;
+    send(&mut h, background);
+    assert!(
+        leaf_glyph(&mut h, "s2", "background"),
+        "the turn ended with work still running"
+    );
+    assert_eq!(leaf_unseen(&mut h, "s2"), Some(false), "not finished yet");
+
+    send(&mut h, session("s2").build());
+    assert!(
+        leaf_glyph(&mut h, "s2", "waiting"),
+        "the background work ended"
+    );
+    assert_eq!(leaf_unseen(&mut h, "s2"), Some(true));
+}
+
+#[gpui::test]
 fn unseen_session_rebound_into_the_focused_pane_is_seen(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut fixture = Fixture::single(session("s1").build());

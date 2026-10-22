@@ -1291,6 +1291,8 @@ pub struct PaneHeaderParts {
     pub mode: SessionMode,
     /// The agent's last turn ended while this client looked elsewhere.
     pub unseen: bool,
+    /// The session is idle with its turn's background work still running.
+    pub background: bool,
     /// The status glyph's hover text.
     pub status_tip: String,
     pub title: String,
@@ -1367,7 +1369,11 @@ fn header_parts(session: &SessionSnapshot, unseen: bool) -> PaneHeaderParts {
         status: session.status,
         mode: session.mode,
         unseen,
-        status_tip: format!("status: {}", status_label(session.status)),
+        background: session.background,
+        status_tip: format!(
+            "status: {}",
+            status_label(session.status, session.background)
+        ),
         title: display_label(session),
         title_tip: label_tooltip(session),
         chips,
@@ -1452,7 +1458,7 @@ fn header_title(
             .id(SharedString::from(format!("pane-status-{pane_id}")))
             .flex_none()
             .child(glyph_view(
-                glyph(parts.status, parts.mode, parts.unseen),
+                glyph(parts.status, parts.background, parts.mode, parts.unseen),
                 GlyphSize::Leaf,
                 &format!("pane-glyph-{pane_id}"),
             ))
@@ -1581,10 +1587,13 @@ fn body_note(session: Option<&SessionSnapshot>) -> &'static str {
     }
 }
 
-/// The session's status as the pane header's status tip spells it.
-fn status_label(status: SessionStatus) -> &'static str {
+/// The session's status as the pane header's status tip spells it; an idle
+/// session with its turn's `background` work still running reads
+/// "background".
+fn status_label(status: SessionStatus, background: bool) -> &'static str {
     match status {
         SessionStatus::Spawning => "starting",
+        SessionStatus::Idle if background => "background",
         SessionStatus::Idle => "idle",
         SessionStatus::Working => "working",
         SessionStatus::AwaitingInput => "awaiting input",
@@ -1827,12 +1836,15 @@ mod tests {
 
     #[test]
     fn status_labels() {
-        assert_eq!(status_label(SessionStatus::Spawning), "starting");
-        assert_eq!(status_label(SessionStatus::Idle), "idle");
-        assert_eq!(status_label(SessionStatus::Working), "working");
-        assert_eq!(status_label(SessionStatus::AwaitingInput), "awaiting input");
-        assert_eq!(status_label(SessionStatus::Stopped), "stopped");
-        assert_eq!(status_label(SessionStatus::Error), "error");
+        assert_eq!(status_label(SessionStatus::Spawning, false), "starting");
+        assert_eq!(status_label(SessionStatus::Idle, false), "idle");
+        assert_eq!(status_label(SessionStatus::Working, false), "working");
+        assert_eq!(
+            status_label(SessionStatus::AwaitingInput, false),
+            "awaiting input"
+        );
+        assert_eq!(status_label(SessionStatus::Stopped, false), "stopped");
+        assert_eq!(status_label(SessionStatus::Error, false), "error");
     }
 
     /// The tip table names every endpoint, so the `Anthropic` arm exists even

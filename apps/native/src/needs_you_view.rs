@@ -138,11 +138,19 @@ impl RootView {
                     || {
                         glyph(
                             SessionStatus::AwaitingInput,
+                            false,
                             SessionMode::Interactive,
                             false,
                         )
                     },
-                    |s| glyph(s.status, s.mode, self.sidebar.is_unseen(&s.id)),
+                    |s| {
+                        glyph(
+                            s.status,
+                            s.background,
+                            s.mode,
+                            self.sidebar.is_unseen(&s.id),
+                        )
+                    },
                 );
                 needs_you_row(row, mark, now, cx)
             }))

@@ -18,6 +18,8 @@ pub struct StatusCounts {
     pub need_you: usize,
     /// Sessions working.
     pub working: usize,
+    /// Idle sessions whose turn left background work running.
+    pub background: usize,
     /// Agent sessions whose finished turn this client has not seen.
     pub waiting: usize,
 }
@@ -27,6 +29,7 @@ pub struct StatusCounts {
 pub enum CountKind {
     NeedYou,
     Working,
+    Background,
     Waiting,
 }
 
@@ -37,6 +40,7 @@ impl CountKind {
         match self {
             Self::NeedYou => "need-you",
             Self::Working => "working",
+            Self::Background => "background",
             Self::Waiting => "waiting",
         }
     }
@@ -45,12 +49,13 @@ impl CountKind {
     /// counts shows in its leaf.
     #[must_use]
     pub fn glyph(self) -> Glyph {
-        let (status, unseen) = match self {
-            Self::NeedYou => (SessionStatus::AwaitingInput, false),
-            Self::Working => (SessionStatus::Working, false),
-            Self::Waiting => (SessionStatus::Idle, true),
+        let (status, background, unseen) = match self {
+            Self::NeedYou => (SessionStatus::AwaitingInput, false, false),
+            Self::Working => (SessionStatus::Working, false, false),
+            Self::Background => (SessionStatus::Idle, true, false),
+            Self::Waiting => (SessionStatus::Idle, false, true),
         };
-        glyph(status, SessionMode::Interactive, unseen)
+        glyph(status, background, SessionMode::Interactive, unseen)
     }
 }
 
@@ -62,13 +67,14 @@ pub struct CountSpan {
 }
 
 impl StatusCounts {
-    /// The spans the footer shows, in order need you, working, waiting; a
-    /// zero count has none.
+    /// The spans the footer shows, in order need you, working, background,
+    /// waiting; a zero count has none.
     #[must_use]
     pub fn spans(self) -> Vec<CountSpan> {
         [
             (CountKind::NeedYou, self.need_you, "need you"),
             (CountKind::Working, self.working, "working"),
+            (CountKind::Background, self.background, "background"),
             (CountKind::Waiting, self.waiting, "waiting"),
         ]
         .into_iter()
@@ -84,8 +90,8 @@ impl StatusCounts {
 /// Counts `sessions` by the glyph each shows, `is_unseen` telling whether a
 /// session's finished turn is in the client's unseen set. A plain shell
 /// shows the idle dot whatever the set says, so it is never waiting. A
-/// session marked "Don't count as busy" is never working, but still needs
-/// you when it asks.
+/// session marked "Don't count as busy" is never working or background, but
+/// still needs you when it asks.
 #[must_use]
 pub fn status_counts(
     sessions: &[SessionSnapshot],
@@ -93,10 +99,12 @@ pub fn status_counts(
 ) -> StatusCounts {
     let mut counts = StatusCounts::default();
     for session in sessions {
-        match glyph(session.status, session.mode, is_unseen(&session.id)).shape {
+        let unseen = is_unseen(&session.id);
+        match glyph(session.status, session.background, session.mode, unseen).shape {
             Shape::Asking => counts.need_you += 1,
-            Shape::Working if session.busy_excluded => {}
+            Shape::Working | Shape::Background if session.busy_excluded => {}
             Shape::Working => counts.working += 1,
+            Shape::Background => counts.background += 1,
             Shape::Waiting => counts.waiting += 1,
             Shape::Idle | Shape::Spawning | Shape::Stopped | Shape::Error => {}
         }
@@ -263,6 +271,7 @@ mod tests {
             StatusCounts {
                 need_you: 2,
                 working: 3,
+                background: 0,
                 waiting: 1,
             }
         );
@@ -359,6 +368,58 @@ mod tests {
                 need_you: 1,
                 ..StatusCounts::default()
             }
+        );
+    }
+
+    fn in_background(id: &str) -> SessionSnapshot {
+        let mut s = agent(id, SessionStatus::Idle);
+        s.background = true;
+        s
+    }
+
+    #[test]
+    fn background_sessions_count_on_their_own() {
+        let sessions = [
+            agent("work", SessionStatus::Working),
+            in_background("bg-1"),
+            in_background("bg-2"),
+            agent("done", SessionStatus::Idle),
+        ];
+        let counts = counts(&sessions, &["bg-2", "done"]);
+        assert_eq!(
+            counts,
+            StatusCounts {
+                working: 1,
+                background: 2,
+                waiting: 1,
+                ..StatusCounts::default()
+            },
+            "an unseen mark does not make a background session waiting"
+        );
+        assert_eq!(
+            counts.spans(),
+            vec![
+                span(CountKind::Working, "1 working"),
+                span(CountKind::Background, "2 background"),
+                span(CountKind::Waiting, "1 waiting"),
+            ]
+        );
+        assert_eq!(CountKind::Background.name(), "background");
+        assert_eq!(CountKind::Background.glyph().shape.name(), "background");
+    }
+
+    #[test]
+    fn busy_excluded_background_is_not_counted() {
+        let mut server = in_background("server");
+        server.busy_excluded = true;
+        let sessions = [server, in_background("bg")];
+        assert_eq!(
+            counts(&sessions, &[]),
+            StatusCounts {
+                background: 1,
+                ..StatusCounts::default()
+            },
+            "only the counted background session counts"
         );
     }
 

@@ -1120,7 +1120,12 @@ fn busy_badge(tab_id: &str, busy: usize, total: usize) -> Stateful<Div> {
         .tooltip(tooltip(format!("{busy} of {total} panes busy")))
         .when(pill.glyph, |row| {
             row.child(glyph_view(
-                glyph(SessionStatus::Working, SessionMode::Interactive, false),
+                glyph(
+                    SessionStatus::Working,
+                    false,
+                    SessionMode::Interactive,
+                    false,
+                ),
                 GlyphSize::Pill,
                 &glyph_id,
             ))
@@ -1197,7 +1202,12 @@ impl Render for PillGhost {
                 .text_color(gpui::rgb(pill.color))
                 .when(pill.glyph, |row| {
                     row.child(glyph_view(
-                        glyph(SessionStatus::Working, SessionMode::Interactive, false),
+                        glyph(
+                            SessionStatus::Working,
+                            false,
+                            SessionMode::Interactive,
+                            false,
+                        ),
                         GlyphSize::Pill,
                         &glyph_id,
                     ))
