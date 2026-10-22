@@ -344,6 +344,20 @@ function Test-CargoExitOk {
     if ($LASTEXITCODE -ne 0) { throw "$What failed (exit $LASTEXITCODE)" }
 }
 
+# Runs a command through tools/gate.ps1, or directly when already inside a gate's
+# command: a nested gate call would queue behind the slot this run already holds.
+function Invoke-Gated([string]$Slot, [string]$Name, [string[]]$Command) {
+    if ($env:GATE_SLOT_HELD) {
+        & $Command[0] @($Command | Select-Object -Skip 1)
+        return
+    }
+    $tmp = Join-Path $ScriptDir '.tmp'
+    if (-not (Test-Path $tmp)) { New-Item -ItemType Directory -Force -Path $tmp | Out-Null }
+    $timeout = if ($Slot -eq 'heavy') { 3600 } else { 900 }
+    $log = Join-Path $tmp "rt-$Name.log"
+    & pwsh -NoProfile -File (Join-Path $ScriptDir 'tools/gate.ps1') run --log $log --timeout $timeout --slot $Slot -- @Command
+}
+
 function Stop-DaemonProcesses {
     [CmdletBinding()]
     [OutputType([bool])]
@@ -528,7 +542,7 @@ function Invoke-Build {
     if ($Release) { $buildArgs += '--release' }
     $modeLabel = if ($Release) { 'release' } else { 'debug' }
     Write-Host "==> Building daemon + tracer + native client ($modeLabel)..." -ForegroundColor Cyan
-    & cargo @buildArgs
+    Invoke-Gated -Slot heavy -Name build -Command (@('cargo') + $buildArgs)
     Test-CargoExitOk 'cargo build -p daemon -p tracer -p rustling-tulip-native'
     Invoke-BuildSweep
 }
@@ -549,7 +563,7 @@ function Invoke-BuildSweep {
     }
 
     Write-Host "==> Sweeping build output older than $SweepAgeDays days..." -ForegroundColor Cyan
-    & cargo sweep --time $SweepAgeDays $ScriptDir
+    Invoke-Gated -Slot light -Name sweep -Command @('cargo', 'sweep', '--time', $SweepAgeDays, $ScriptDir)
     if ($LASTEXITCODE -ne 0) {
         Write-Host "==> cargo sweep failed (exit $LASTEXITCODE); continuing." -ForegroundColor Yellow
     }
@@ -596,7 +610,20 @@ function Assert-Nextest {
 
 function Invoke-Test {
     Assert-Nextest
-    if ($Validate) { Test-TestMap; return }
+    if ($Validate) {
+        # -Validate reads nextest's JSON listings, which a gate call would mix its
+        # own lines into: re-run this script under one gate and let the child's
+        # calls run directly (it sees GATE_SLOT_HELD). Heavy: its nextest listings
+        # keep several cores busy.
+        if (-not $env:GATE_SLOT_HELD) {
+            Invoke-Gated -Slot heavy -Name test-validate -Command @(
+                'pwsh', '-NoProfile', '-File', $PSCommandPath, 'test', '-Validate'
+            )
+            exit $LASTEXITCODE
+        }
+        Test-TestMap
+        return
+    }
     if ($Reached) { Invoke-ReachedTest; return }
     if ($PrintOnly) { Write-Host 'full suite'; return }
     Invoke-FullSuite
@@ -604,7 +631,12 @@ function Invoke-Test {
 
 function Invoke-FullSuite {
     Write-Host '==> cargo nextest run --cargo-profile test-release (workspace)...' -ForegroundColor Cyan
-    & cargo nextest run --manifest-path $ManifestPath --workspace --cargo-profile test-release @Rest
+    $nextestArgs = @(
+        'cargo', 'nextest', 'run', '--manifest-path', $ManifestPath,
+        '--workspace', '--cargo-profile', 'test-release'
+    )
+    if ($Rest) { $nextestArgs += $Rest }
+    Invoke-Gated -Slot heavy -Name test -Command $nextestArgs
     Test-CargoExitOk 'cargo nextest run'
 }
 
@@ -702,7 +734,12 @@ function Invoke-ReachedTest {
     if ($PrintOnly -or $selection.Kind -eq 'none') { return }
     if ($selection.Kind -eq 'full') { Invoke-FullSuite; return }
     # A reached set may hold only ignored tests (the live specs): not a failure.
-    & cargo nextest run --manifest-path $ManifestPath --workspace --cargo-profile test-release --no-tests warn -E $selection.Filter @Rest
+    $nextestArgs = @(
+        'cargo', 'nextest', 'run', '--manifest-path', $ManifestPath,
+        '--workspace', '--cargo-profile', 'test-release', '--no-tests', 'warn', '-E', $selection.Filter
+    )
+    if ($Rest) { $nextestArgs += $Rest }
+    Invoke-Gated -Slot heavy -Name test-reached -Command $nextestArgs
     Test-CargoExitOk 'cargo nextest run (reached)'
 }
 
@@ -778,21 +815,26 @@ function Get-RowTestCount([string]$LogPath, [string[]]$ListArgs) {
 function Invoke-Clippy {
     Test-Tool 'cargo' 'Install Rust via https://rustup.rs.'
     Write-Host '==> cargo clippy --all-targets --all-features -- -D warnings...' -ForegroundColor Cyan
-    & cargo clippy --manifest-path $ManifestPath --all-targets --all-features @Rest -- -D warnings
+    $clippyArgs = @('cargo', 'clippy', '--manifest-path', $ManifestPath, '--all-targets', '--all-features')
+    if ($Rest) { $clippyArgs += $Rest }
+    $clippyArgs += @('--', '-D', 'warnings')
+    Invoke-Gated -Slot heavy -Name clippy -Command $clippyArgs
     Test-CargoExitOk 'cargo clippy'
 }
 
 function Invoke-Fmt {
     Test-Tool 'cargo' 'Install Rust via https://rustup.rs.'
     Write-Host '==> cargo fmt --all...' -ForegroundColor Cyan
-    & cargo fmt --manifest-path $ManifestPath --all @Rest
+    $fmtArgs = @('cargo', 'fmt', '--manifest-path', $ManifestPath, '--all')
+    if ($Rest) { $fmtArgs += $Rest }
+    Invoke-Gated -Slot light -Name fmt -Command $fmtArgs
     Test-CargoExitOk 'cargo fmt'
 }
 
 function Invoke-Clean {
     Test-Tool 'cargo' 'Install Rust via https://rustup.rs.'
     Write-Host '==> cargo clean...' -ForegroundColor Cyan
-    & cargo clean --manifest-path $ManifestPath
+    Invoke-Gated -Slot light -Name clean -Command @('cargo', 'clean', '--manifest-path', $ManifestPath)
     Test-CargoExitOk 'cargo clean'
 }
 
@@ -802,7 +844,7 @@ function Build-DaemonAndTracer([string]$CargoProfile) {
     if ($CargoProfile) { $buildArgs += @('--profile', $CargoProfile) }
     elseif ($Release) { $buildArgs += '--release' }
     Write-Host '==> Building daemon + tracer...' -ForegroundColor Cyan
-    & cargo @buildArgs
+    Invoke-Gated -Slot heavy -Name build-daemon -Command (@('cargo') + $buildArgs)
     Test-CargoExitOk 'cargo build -p daemon -p tracer'
 }
 
@@ -810,11 +852,18 @@ function Start-NativeClient {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '',
         Justification = 'Dev script: the calling subcommand is the user gesture.')]
     param()
+    # The build goes through the gate; `cargo run` stays up for as long as the
+    # user keeps the client open, so it runs directly and holds no slot.
+    $buildArgs = @('cargo', 'build', '--manifest-path', $ManifestPath, '-p', 'rustling-tulip-native')
+    if ($Release) { $buildArgs += '--release' }
+    $modeLabel = if ($Release) { 'release' } else { 'debug' }
+    Write-Host "==> Building native client ($modeLabel)..." -ForegroundColor Cyan
+    Invoke-Gated -Slot heavy -Name build-native -Command $buildArgs
+    Test-CargoExitOk 'cargo build -p rustling-tulip-native'
     $cargoArgs = @('run', '--manifest-path', $ManifestPath, '-p', 'rustling-tulip-native')
     if ($Release) { $cargoArgs += '--release' }
     # Everything after `--` goes to the client, not cargo (the session id).
     if ($Rest) { $cargoArgs += @('--') + $Rest }
-    $modeLabel = if ($Release) { 'release' } else { 'debug' }
     Write-Host "==> Running native client ($modeLabel)..." -ForegroundColor Cyan
     & cargo @cargoArgs
     Test-CargoExitOk 'cargo run -p rustling-tulip-native'
@@ -833,20 +882,24 @@ function Invoke-Native {
 # -Release). One at a time (the serial-live test group in
 # .config/nextest.toml): each spec owns a daemon and, for the smoke specs, a
 # client window.
-function Invoke-NativeSpecFile([string[]]$TestFiles) {
+function Invoke-NativeSpecFile([string[]]$TestFiles, [string]$Slot, [string]$Name) {
     Assert-Nextest
     $cargoProfile = if ($Release) { 'release' } else { 'test-release' }
     Build-DaemonAndTracer $cargoProfile
-    $targets = @($TestFiles | ForEach-Object { @('--test', $_) })
+    $targets = @($TestFiles | ForEach-Object { '--test'; $_ })
     $names = $TestFiles -join ', '
     Write-Host "==> Running native specs: $names ($cargoProfile)..." -ForegroundColor Cyan
-    & cargo nextest run --manifest-path $ManifestPath -p rustling-tulip-native --cargo-profile $cargoProfile --run-ignored only @targets
+    $specArgs = @(
+        'cargo', 'nextest', 'run', '--manifest-path', $ManifestPath,
+        '-p', 'rustling-tulip-native', '--cargo-profile', $cargoProfile, '--run-ignored', 'only'
+    ) + $targets
+    Invoke-Gated -Slot $Slot -Name $Name -Command $specArgs
     Test-CargoExitOk "cargo nextest run -p rustling-tulip-native ($names)"
 }
 
-function Invoke-NativeE2e { Invoke-NativeSpecFile @('e2e_live', 'e2e_recover') }
+function Invoke-NativeE2e { Invoke-NativeSpecFile -TestFiles @('e2e_live', 'e2e_recover') -Slot heavy -Name e2e }
 
-function Invoke-NativeSmoke { Invoke-NativeSpecFile 'smoke_window' }
+function Invoke-NativeSmoke { Invoke-NativeSpecFile -TestFiles 'smoke_window' -Slot light -Name smoke }
 
 # Writes a PNG of the native client's window showing one view, over a fake
 # daemon with fixed content (apps/native/examples/shot.rs). No daemon starts,
@@ -866,11 +919,14 @@ function Invoke-NativeShot {
     } else {
         Join-Path $ScriptDir '.tmp' 'shots' "$view.png"
     }
-    $cargoArgs = @('run', '--manifest-path', $ManifestPath, '-p', 'rustling-tulip-native', '--example', 'shot')
+    $cargoArgs = @(
+        'cargo', 'run', '--manifest-path', $ManifestPath,
+        '-p', 'rustling-tulip-native', '--example', 'shot'
+    )
     if ($Release) { $cargoArgs += '--release' }
     $cargoArgs += @('--', $view, $outPath)
     Write-Host "==> Taking a shot of the native client's '$view' view..." -ForegroundColor Cyan
-    & cargo @cargoArgs
+    Invoke-Gated -Slot heavy -Name shot -Command $cargoArgs
     Test-CargoExitOk 'cargo run -p rustling-tulip-native --example shot'
     Write-Host $outPath
 }
