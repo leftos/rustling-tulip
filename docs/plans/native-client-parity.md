@@ -107,7 +107,7 @@ Close behind: the paste and key quirks (native clipboard read, Shift+Enter bytes
 - [x] Split tree with draggable dividers (5–95%), ratio saved on release — `GridRenderer.tsx` `SplitRenderer`
 - [x] Focused pane remembered per tab; a new split gets focus — `utils/grid.ts`
 - [x] Split right/down (Shift = left/up), move to new tab, close pane from the header; empty panes get floating buttons — `SessionPane.tsx`, `GridRenderer.tsx` (native: split and close landed in P1.5; the header's move-to-new-tab button in P4.13b; empty panes keep the header's buttons and add the empty-pane menu instead of floating buttons)
-- [ ] **(hard)** Pane drag and drop from the header or ⠿ handle: edge overlay for splits, centre swap, outer band splits at the top level, across tabs — `GridRenderer.tsx` `computeEdge` (native: within the shown tab since P5.2; across tabs is P5.3)
+- [ ] **(hard)** Pane drag and drop from the header or ⠿ handle: edge overlay for splits, centre swap, outer band splits at the top level, across tabs — `GridRenderer.tsx` `computeEdge` (native: within the shown tab since P5.2; across tabs by pill hover and pill drop since P5.3b, edge drops only; the cross-tab centre swap is P5.3c)
 - [x] Closing a pane with a session: close pane only / discard session keep worktree / delete worktree — `PaneCloseDialog.tsx` (native: P4.13b; when the daemon refuses the discard, the pane stays open beside its error)
 - [x] Empty pane placeholder and its context menu (Move to ▸, Close) — `EmptyPane.tsx`, `GridRenderer.tsx` `PaneContextMenu` (native: the menu in P4.13b, on a right-click of the empty pane's header or body)
 - [x] Smart placement: next to the same repo → an empty pane → split the largest pane along its longer side — `App.tsx` `paneTargetForSession`

@@ -1052,14 +1052,18 @@ impl RootView {
             pane_id: pane_id.to_owned(),
         };
         let root = cx.entity().downgrade();
+        let drag_session = session_id.map(str::to_owned);
         let stop = self.header_stop(pane_id, session_id, cx);
         let controls = (!stop.is_empty()).then(|| header_controls(cx).children(stop));
         div()
             .id(ElementId::Name(SharedString::from(name.clone())))
             .debug_selector(|| name)
             .on_drag(payload, move |payload, offset, _, cx| {
-                if let Err(err) = root.update(cx, |this, _| this.pane_drag = Some(payload.clone()))
-                {
+                let drag_session = drag_session.clone();
+                if let Err(err) = root.update(cx, |this, _| {
+                    this.pane_drag = Some(payload.clone());
+                    this.pane_drag_session = drag_session;
+                }) {
                     tracing::warn!(%err, "pane drag: the window's root view is gone");
                 }
                 let label = label.clone();
@@ -1123,6 +1127,7 @@ impl RootView {
     fn on_pane_drop(&mut self, payload: &DragPayload, window: &mut Window, cx: &mut Context<Self>) {
         self.pane_drop = None;
         self.pane_drag = None;
+        self.pane_drag_session = None;
         let request_id = Some(new_request_id());
         if let Some((_, _, drop)) = self.drop_at(payload, window.mouse_position(), request_id) {
             self.send_pane_move(&drop, cx);
@@ -1131,8 +1136,8 @@ impl RootView {
     }
 
     /// The pane of the shown tab under `at` and the drop `payload` makes
-    /// there, when the drop would be accepted: a pane drops only in the tab
-    /// it was picked up in.
+    /// there, when the drop would be accepted: a pane from any tab drops on a
+    /// pane of the shown one.
     fn drop_at(
         &self,
         payload: &DragPayload,
@@ -1140,12 +1145,9 @@ impl RootView {
         request_id: Option<String>,
     ) -> Option<(String, PaneDropEdge, PaneDrop)> {
         let tab = self.tabs.active_tab()?;
-        let DragPayload::Pane { tab_id, .. } = payload else {
+        let DragPayload::Pane { .. } = payload else {
             return None;
         };
-        if *tab_id != tab.id {
-            return None;
-        }
         let rect = grid_rect(self.grid_bounds?);
         let at = (at.x / px(1.0), at.y / px(1.0));
         let (pane_id, edge) = drag::pane_target(tab.grid()?, rect, PANE_GUTTER, at)?;

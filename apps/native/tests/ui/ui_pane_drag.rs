@@ -303,7 +303,7 @@ fn header_button_press_never_starts_a_drag(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn tabs_change_mid_drag_ends_the_drag(cx: &mut TestAppContext) {
+fn pane_drag_survives_an_update_of_the_shown_tab(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let fixture = pair();
     let mut h = attached(cx, &dir, &fixture);
@@ -316,7 +316,58 @@ fn tabs_change_mid_drag_ends_the_drag(cx: &mut TestAppContext) {
     let shown = fixture.tabs.first().expect("the fixture's tab").clone();
     h.send(DaemonMessage::TabUpdated { tab: shown });
 
-    assert!(!h.dragging(), "a tab change ends the drag");
+    assert!(h.dragging(), "an update that keeps p1 keeps its drag");
+    assert_eq!(
+        overlay(&mut h),
+        None,
+        "the drop targets wait for the next move"
+    );
+    let again = at(&mut h, "p2", 0.85, 0.5);
+    h.drag_to(again);
+    assert_eq!(
+        overlay(&mut h),
+        Some(("p2".to_owned(), PaneDropEdge::Right)),
+        "the next move works the target out afresh"
+    );
+    h.release(again);
+    assert_moved_onto(&mut h, "p2", PaneDropEdge::Right);
+}
+
+#[gpui::test]
+fn pane_drag_ends_when_the_dragged_pane_is_gone(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, &pair());
+    let from = header_point(&mut h, "p1");
+    let to = at(&mut h, "p2", 0.8, 0.5);
+    h.start_drag(from);
+    h.drag_to(to);
+    assert!(overlay(&mut h).is_some(), "the drag is over p2");
+
+    h.send(DaemonMessage::TabUpdated {
+        tab: tab("t1", &pane("p2", Some("s2"))),
+    });
+
+    assert!(!h.dragging(), "the dragged pane is gone, so is its drag");
+    assert_eq!(overlay(&mut h), None);
+    h.release(to);
+    assert!(moves(&mut h).is_empty());
+}
+
+#[gpui::test]
+fn pane_drag_ends_when_its_session_is_removed(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, &pair());
+    let from = header_point(&mut h, "p1");
+    let to = at(&mut h, "p2", 0.8, 0.5);
+    h.start_drag(from);
+    h.drag_to(to);
+    assert!(overlay(&mut h).is_some(), "the drag is over p2");
+
+    h.send(DaemonMessage::SessionRemoved {
+        session_id: "s1".to_owned(),
+    });
+
+    assert!(!h.dragging(), "the dragged session left, so is its drag");
     assert_eq!(overlay(&mut h), None);
     h.release(to);
     assert!(moves(&mut h).is_empty());
@@ -404,7 +455,7 @@ fn esc_and_tab_updates_leave_a_file_drag_alone(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn only_a_change_to_the_source_or_shown_tab_ends_the_drag(cx: &mut TestAppContext) {
+fn pane_drag_survives_the_source_tab_being_updated_when_the_pane_stays(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let fixture = two_tabs();
     let mut h = attached(cx, &dir, &fixture);
@@ -430,14 +481,27 @@ fn only_a_change_to_the_source_or_shown_tab_ends_the_drag(cx: &mut TestAppContex
 
     let source = fixture.tabs.first().expect("the fixture's t1").clone();
     h.send(DaemonMessage::TabUpdated { tab: source });
-    assert!(!h.dragging(), "an update to the source tab ends the drag");
-    assert_eq!(overlay(&mut h), None);
-    h.release(lower);
-    assert!(moves(&mut h).is_empty());
+    assert!(
+        h.dragging(),
+        "an update to the source tab that keeps p1 keeps the drag"
+    );
+    assert_eq!(
+        overlay(&mut h),
+        None,
+        "the drop targets wait for the next move"
+    );
+    let again = at(&mut h, "p2", 0.85, 0.55);
+    h.drag_to(again);
+    assert_eq!(
+        overlay(&mut h),
+        Some(("p2".to_owned(), PaneDropEdge::Right))
+    );
+    h.release(again);
+    assert_moved_onto(&mut h, "p2", PaneDropEdge::Right);
 }
 
 #[gpui::test]
-fn a_drop_in_another_tab_than_the_source_is_refused(cx: &mut TestAppContext) {
+fn a_drop_in_another_tab_than_the_source_is_allowed(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = attached(cx, &dir, &two_tabs());
     let from = header_point(&mut h, "p1");
@@ -447,12 +511,32 @@ fn a_drop_in_another_tab_than_the_source_is_refused(cx: &mut TestAppContext) {
     let to = at(&mut h, "p4", 0.8, 0.5);
     h.drag_to(to);
     assert!(h.dragging(), "the drag goes on in the newly shown tab");
-    assert_eq!(overlay(&mut h), None, "a pane drops only in its own tab");
+    assert_eq!(
+        overlay(&mut h),
+        Some(("p4".to_owned(), PaneDropEdge::Right)),
+        "the shown tab's grid takes the pane"
+    );
 
     h.release(to);
     let sent = moves(&mut h);
-    assert!(sent.is_empty(), "sent {sent:?}");
-    assert_eq!(undo_messages(&mut h), Vec::<String>::new());
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [ClientMessage::MovePane {
+                src_tab_id,
+                src_pane_id,
+                dst_tab_id,
+                dst_pane_id,
+                edge: PaneDropEdge::Right,
+                request_id: Some(_),
+            }] if src_tab_id == "t1"
+                && src_pane_id == "p1"
+                && dst_tab_id == "t2"
+                && dst_pane_id == "p4"
+        ),
+        "sent {sent:?}"
+    );
+    assert_eq!(undo_messages(&mut h), ["Moved pane"]);
 }
 
 #[gpui::test]

@@ -1,7 +1,8 @@
 //! The plain-Rust half of drag and drop: what a drag carries, the edge of a
 //! pane a pointer points at, the message a pane drop sends, and where a row or
-//! pill reorder puts the dragged item, the overlay a hovered pane draws, and
-//! the label a dragged pane's ghost shows.
+//! pill reorder puts the dragged item, the overlay a hovered pane draws, the
+//! label a dragged pane's ghost shows, what a pane over a pill does, and
+//! whether a pane drag still has a pane and a session to end at.
 
 use protocol::{ClientMessage, ContainerRef, GridNode, PaneDropEdge, SplitDirection, TabEntry};
 
@@ -221,6 +222,74 @@ pub fn drop_edge(x: f32, y: f32, outer: OuterSides) -> PaneDropEdge {
     }
 }
 
+/// What a pane drag over a tab's pill does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PillPaneHover {
+    /// Show that tab, so the pane can drop on a pane in it.
+    Activate,
+    /// A diff tab takes no pane: the pill does not show that tab and shows
+    /// the no-drop state.
+    Inert,
+    /// Nothing: the pill is the shown tab, or the strip has no such pill.
+    Nothing,
+}
+
+/// Whether the pill of tab `pill` takes a pane dropped on it: a grid tab
+/// does, a diff tab does not, and neither does a tab the strip lacks.
+#[must_use]
+pub fn pill_takes_pane(tabs: &[TabEntry], pill: &str) -> bool {
+    tabs.iter()
+        .find(|tab| tab.id == pill)
+        .and_then(TabEntry::grid)
+        .is_some()
+}
+
+/// What a pane drag over the pill of tab `pill` does, given the strip's
+/// `tabs` and the shown tab `active`: a grid tab that is not shown is
+/// activated, a diff tab is inert, and the shown tab and an unknown pill do
+/// nothing.
+#[must_use]
+pub fn pill_pane_hover(tabs: &[TabEntry], active: Option<&str>, pill: &str) -> PillPaneHover {
+    if !tabs.iter().any(|tab| tab.id == pill) {
+        return PillPaneHover::Nothing;
+    }
+    if !pill_takes_pane(tabs, pill) {
+        return PillPaneHover::Inert;
+    }
+    if active == Some(pill) {
+        return PillPaneHover::Nothing;
+    }
+    PillPaneHover::Activate
+}
+
+/// Whether a pane drag still has somewhere to go: the pane is still in its
+/// source tab, still shows the session it showed when the drag started (an
+/// empty pane keeps dragging while it is there), and that session is still
+/// in the client's model, as `session_exists` says.
+#[must_use]
+pub fn pane_drag_alive(
+    tabs: &[TabEntry],
+    src_tab: &str,
+    pane_id: &str,
+    session: Option<&str>,
+    session_exists: impl FnOnce(&str) -> bool,
+) -> bool {
+    let Some(grid) = tabs
+        .iter()
+        .find(|tab| tab.id == src_tab)
+        .and_then(TabEntry::grid)
+    else {
+        return false;
+    };
+    let Some(pane) = tabs::collect_panes(grid)
+        .into_iter()
+        .find(|pane| pane.id == pane_id)
+    else {
+        return false;
+    };
+    pane.session == session && session.is_none_or(session_exists)
+}
+
 /// Which half of a row or pill starting at `start` and `len` long `pos` points
 /// at. A pointer exactly at the middle counts as the second half.
 #[must_use]
@@ -338,8 +407,10 @@ fn drops_back_in_place(grid: &GridNode, src: &str, dst: &str, edge: PaneDropEdge
 /// The message `payload` dropped on `dst_pane` of `dst_tab` sends, with the
 /// undo label it records: none for a payload that is not a pane, a tab that is
 /// gone or has no grid (a diff tab), a pane either grid does not hold, a pane
-/// dropped on itself, and a drop that would rebuild the tree it left — the
-/// daemon would clear the tab's picked layout for a move that changes nothing.
+/// dropped on itself, a drop that would rebuild the tree it left — the
+/// daemon would clear the tab's picked layout for a move that changes nothing
+/// — and a centre drop in another tab, which the daemon would apply as an
+/// unbind of the destination pane's session until the cross-tab swap lands.
 #[must_use]
 pub fn pane_drop(
     tabs: &[TabEntry],
@@ -364,6 +435,9 @@ pub fn pane_drop(
         return None;
     }
     let within_one_tab = src_tab_id == dst_tab;
+    if !within_one_tab && edge == PaneDropEdge::Replace {
+        return None;
+    }
     if within_one_tab
         && (src_pane_id == dst_pane || drops_back_in_place(src_grid, src_pane_id, dst_pane, edge))
     {
@@ -718,13 +792,137 @@ mod tests {
         let moved = dropped(&tabs, &drag("t1", "a"), "t1", "b", PaneDropEdge::Right)
             .expect("a same-tab edge drop");
         assert_eq!(moved.undo_label, undo::MOVED_PANE);
+    }
 
-        let across =
-            dropped(&tabs, &drag("t1", "a"), "t2", "c", PaneDropEdge::Replace).expect("a drop");
+    #[test]
+    fn cross_tab_centre_drop_is_refused() {
+        let tabs = tabs();
+
+        assert!(
+            dropped(&tabs, &drag("t1", "a"), "t2", "c", PaneDropEdge::Replace).is_none(),
+            "until the cross-tab swap lands, a centre drop in another tab would unbind the \
+             destination pane's session"
+        );
+        assert!(
+            dropped(&tabs, &drag("t1", "a"), "t2", "c", PaneDropEdge::Right).is_some(),
+            "an edge drop in another tab still moves the pane"
+        );
+    }
+
+    #[test]
+    fn pill_hover_activates_a_grid_tab() {
+        let tabs = tabs();
+
         assert_eq!(
-            across.undo_label,
-            undo::MOVED_PANE,
-            "a centre drop in another tab keeps the daemon's unbind"
+            pill_pane_hover(&tabs, Some("t1"), "t2"),
+            PillPaneHover::Activate
+        );
+        assert_eq!(
+            pill_pane_hover(&tabs, Some("t3"), "t1"),
+            PillPaneHover::Activate,
+            "a grid tab takes a pane from any other tab, a diff one included"
+        );
+    }
+
+    #[test]
+    fn pill_hover_is_inert_on_a_diff_tab() {
+        let tabs = tabs();
+
+        assert_eq!(
+            pill_pane_hover(&tabs, Some("t1"), "t3"),
+            PillPaneHover::Inert,
+            "a diff tab takes no pane"
+        );
+    }
+
+    #[test]
+    fn pill_hover_on_the_active_tab_is_nothing() {
+        let tabs = tabs();
+
+        assert_eq!(
+            pill_pane_hover(&tabs, Some("t1"), "t1"),
+            PillPaneHover::Nothing
+        );
+        assert_eq!(
+            pill_pane_hover(&tabs, None, "gone"),
+            PillPaneHover::Nothing,
+            "a pill the strip does not hold"
+        );
+    }
+
+    /// The sessions the [`tabs`] fixture's panes show.
+    fn known_session(id: &str) -> bool {
+        ["s1", "s2", "s3"].contains(&id)
+    }
+
+    #[test]
+    fn pane_drag_alive_while_the_pane_and_session_stand() {
+        let tabs = tabs();
+
+        assert!(pane_drag_alive(&tabs, "t1", "a", Some("s1"), known_session));
+        assert!(pane_drag_alive(&tabs, "t1", "b", Some("s2"), known_session));
+        assert!(
+            pane_drag_alive(&tabs, "t2", "c", Some("s3"), known_session),
+            "a tab's only pane drags"
+        );
+    }
+
+    #[test]
+    fn pane_drag_dies_with_its_pane() {
+        let tabs = tabs();
+
+        assert!(!pane_drag_alive(
+            &tabs,
+            "t1",
+            "gone",
+            Some("s1"),
+            known_session
+        ));
+        assert!(
+            !pane_drag_alive(&tabs, "gone", "a", Some("s1"), known_session),
+            "the source tab left the strip"
+        );
+        assert!(
+            !pane_drag_alive(&tabs, "t3", "a", Some("s1"), known_session),
+            "a diff tab holds no pane"
+        );
+    }
+
+    #[test]
+    fn pane_drag_dies_with_its_session() {
+        let tabs = tabs();
+
+        assert!(
+            !pane_drag_alive(&tabs, "t1", "a", Some("s1"), |_| false),
+            "the session left the client, so the pane has nowhere to go back to"
+        );
+    }
+
+    #[test]
+    fn pane_drag_dies_when_the_pane_takes_another_session() {
+        let tabs = tabs();
+
+        assert!(!pane_drag_alive(
+            &tabs,
+            "t1",
+            "a",
+            Some("s2"),
+            known_session
+        ));
+        assert!(
+            !pane_drag_alive(&tabs, "t1", "a", None, known_session),
+            "a pane that showed a session and now shows none"
+        );
+    }
+
+    #[test]
+    fn an_empty_pane_keeps_dragging_while_it_is_there() {
+        let tabs = vec![tab("t1", &pane("e", None))];
+
+        assert!(pane_drag_alive(&tabs, "t1", "e", None, known_session));
+        assert!(
+            !pane_drag_alive(&tabs, "t1", "e", Some("s1"), known_session),
+            "an empty pane the drag started on does not become a session's"
         );
     }
 
@@ -1040,7 +1238,7 @@ mod tests {
             ),
         ];
 
-        let drop = dropped(&tabs, &drag("t1", "a"), "t2", "d", PaneDropEdge::Replace)
+        let drop = dropped(&tabs, &drag("t1", "a"), "t2", "d", PaneDropEdge::Right)
             .expect("an empty pane drags like any other");
         assert_eq!(drop.undo_label, undo::MOVED_PANE);
     }

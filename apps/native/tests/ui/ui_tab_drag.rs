@@ -1,15 +1,17 @@
 //! Tab pill drag-and-drop specs: a pill dragged onto another pill's half
 //! reorders the strip at once and sends the new order, the insertion mark
-//! that shows where it lands, and every way a pill drag ends without a
-//! reorder.
+//! that shows where it lands, every way a pill drag ends without a reorder,
+//! and a pane dragged over a pill, which shows its tab or is refused.
 
 use crate::support;
 
 use gpui::{Pixels, Point, TestAppContext, point};
 use protocol::{
-    ClientMessage, DaemonMessage, SplitDirection, VscodeWorkspaceFolder, VscodeWorkspaceSuggestion,
+    ClientMessage, DaemonMessage, PaneDropEdge, SplitDirection, TabEntry, VscodeWorkspaceFolder,
+    VscodeWorkspaceSuggestion,
 };
 use rustling_tulip_native::{RootView, Side};
+use serde_json::json;
 use support::{Fixture, Harness, TestDir, pane, repo, session, split, tab};
 
 /// Tabs `t1`, `t2` and `t3`, each one empty pane, in that order.
@@ -22,6 +24,100 @@ fn three_tabs() -> Fixture {
         ],
         ..Fixture::default()
     }
+}
+
+/// Tab `t1`: `p1` showing `s1` beside `p2` showing `s2`, shown; tab `t2`:
+/// `p3` showing `s3` beside `p4` showing `s4`.
+fn pane_tabs() -> Fixture {
+    Fixture {
+        sessions: ["s1", "s2", "s3", "s4"]
+            .iter()
+            .map(|id| session(id).build())
+            .collect(),
+        tabs: vec![
+            tab(
+                "t1",
+                &split(
+                    SplitDirection::Horizontal,
+                    pane("p1", Some("s1")),
+                    pane("p2", Some("s2")),
+                ),
+            ),
+            tab(
+                "t2",
+                &split(
+                    SplitDirection::Horizontal,
+                    pane("p3", Some("s3")),
+                    pane("p4", Some("s4")),
+                ),
+            ),
+        ],
+        ..Fixture::default()
+    }
+}
+
+/// A diff tab `t3` beside [`pane_tabs`]'s two grid tabs.
+fn with_diff_tab() -> Fixture {
+    let mut fixture = pane_tabs();
+    fixture.tabs.push(diff_tab("t3"));
+    fixture
+}
+
+fn diff_tab(id: &str) -> TabEntry {
+    serde_json::from_value(json!({
+        "id": id,
+        "name": "a.rs",
+        "content": { "kind": "diff", "repo_id": "r1", "path": "a.rs", "against": null },
+        "created_at": "2026-01-01T00:00:00Z",
+    }))
+    .expect("diff tab fixture")
+}
+
+/// The shown tab's id.
+fn active(h: &mut Harness) -> Option<String> {
+    h.root(|root, _| root.active_tab_id().map(str::to_owned))
+}
+
+/// A point on `pane`'s header, over its title, where a drag starts.
+fn header_point(h: &mut Harness, pane: &str) -> Point<Pixels> {
+    let title = h.bounds(&format!("pane-title-{pane}"));
+    assert!(
+        title.origin.x >= Pixels::ZERO,
+        "{pane}'s title is on screen"
+    );
+    title.center()
+}
+
+/// The point `fx` across and `fy` down `pane`'s card.
+fn at(h: &mut Harness, pane: &str, fx: f32, fy: f32) -> Point<Pixels> {
+    let frame = h.bounds(&format!("pane-frame-{pane}"));
+    assert!(frame.origin.x >= Pixels::ZERO, "{pane} is on screen");
+    point(
+        frame.origin.x + frame.size.width * fx,
+        frame.origin.y + frame.size.height * fy,
+    )
+}
+
+/// The pane moves among what the client sent since the last call.
+fn moves(h: &mut Harness) -> Vec<ClientMessage> {
+    h.sent()
+        .into_iter()
+        .filter(|msg| matches!(msg, ClientMessage::MovePane { .. }))
+        .collect()
+}
+
+fn undo_messages(h: &mut Harness) -> Vec<String> {
+    h.root(|root, _| {
+        root.undo_entries()
+            .iter()
+            .map(|entry| entry.message.clone())
+            .collect()
+    })
+}
+
+/// The pane the drop overlay is drawn on, and the edge it shows.
+fn overlay(h: &mut Harness) -> Option<(String, PaneDropEdge)> {
+    h.root(RootView::pane_drop_overlay)
 }
 
 /// The point `fx` across `tab`'s pill, at its middle height.
@@ -249,48 +345,215 @@ fn esc_cancels_a_drag_while_a_text_input_has_focus(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn pane_drag_over_a_pill_does_nothing_yet(cx: &mut TestAppContext) {
+fn pane_over_a_pill_activates_that_tab(cx: &mut TestAppContext) {
     let dir = TestDir::new();
-    let fixture = Fixture {
-        sessions: vec![session("s1").build(), session("s2").build()],
-        tabs: vec![
-            tab(
-                "t1",
-                &split(
-                    SplitDirection::Horizontal,
-                    pane("p1", Some("s1")),
-                    pane("p2", Some("s2")),
-                ),
-            ),
-            tab("t2", &pane("p3", None)),
-        ],
-        ..Fixture::default()
-    };
-    let mut h = Harness::with(cx, &dir, &fixture);
+    let mut h = Harness::with(cx, &dir, &pane_tabs());
     h.sent();
-    let from = h.bounds("pane-title-p1").center();
-    let over = on_pill(&mut h, "t2", 0.8);
+    let from = header_point(&mut h, "p1");
+    let over = on_pill(&mut h, "t2", 0.5);
 
     h.start_drag(from);
     assert!(h.dragging(), "the header drag is under way");
     h.drag_to(over);
+
+    assert_eq!(
+        active(&mut h),
+        Some("t2".to_owned()),
+        "hovering t2's pill shows it, so the pane can drop on a pane there"
+    );
+    assert!(h.dragging(), "the drag goes on in the newly shown tab");
     assert_eq!(mark(&mut h), None, "a pane shows no insertion mark");
     assert_eq!(
-        h.root(|root, _| root.active_tab_id().map(str::to_owned)),
-        Some("t1".to_owned()),
-        "hovering t2's pill does not show it"
+        overlay(&mut h),
+        None,
+        "the overlay waits for the next move over the new tab's grid"
     );
-    h.release(over);
-
     let sent = h.sent();
     assert!(
         !sent.iter().any(|msg| matches!(
             msg,
             ClientMessage::ReorderTabs { .. } | ClientMessage::MovePane { .. }
         )),
-        "a pane dropped on a pill sends nothing: {sent:?}"
+        "hovering a pill sends no move: {sent:?}"
     );
     assert_eq!(strip(&mut h), order(&["t1", "t2"]));
+}
+
+#[gpui::test]
+fn pane_over_its_own_pill_does_not_reactivate(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &pane_tabs());
+    h.sent();
+    let from = header_point(&mut h, "p1");
+    let over = on_pill(&mut h, "t1", 0.8);
+
+    h.start_drag(from);
+    h.drag_to(over);
+
+    assert_eq!(active(&mut h), Some("t1".to_owned()), "t1 stays shown");
+    assert!(h.dragging(), "the drag goes on");
+    assert_eq!(mark(&mut h), None, "a pane shows no insertion mark");
+    assert!(moves(&mut h).is_empty(), "no move is sent");
+}
+
+#[gpui::test]
+fn pane_dropped_on_a_pill_moves_it_balanced_with_undo(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &pane_tabs());
+    h.sent();
+    let from = header_point(&mut h, "p1");
+    let over = on_pill(&mut h, "t2", 0.5);
+    h.start_drag(from);
+    h.drag_to(over);
+    assert_eq!(
+        active(&mut h),
+        Some("t2".to_owned()),
+        "the pill's tab shows"
+    );
+
+    h.release(over);
+
+    let sent = moves(&mut h);
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [ClientMessage::MovePane {
+                src_tab_id,
+                src_pane_id,
+                dst_tab_id,
+                dst_pane_id,
+                edge,
+                request_id: Some(_),
+            }] if src_tab_id == "t1"
+                && src_pane_id == "p1"
+                && dst_tab_id == "t2"
+                && dst_pane_id == "p3"
+                && (*edge == PaneDropEdge::Right || *edge == PaneDropEdge::Bottom)
+        ),
+        "t2's two panes are equal, so the balanced target takes the first, p3, and splits it \
+         across its longer side: sent {sent:?}"
+    );
+    assert_eq!(undo_messages(&mut h), ["Moved pane"]);
+}
+
+#[gpui::test]
+fn pane_dropped_on_its_own_pill_sends_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &pane_tabs());
+    h.sent();
+    let from = header_point(&mut h, "p1");
+    let over = on_pill(&mut h, "t1", 0.8);
+    h.start_drag(from);
+    h.drag_to(over);
+
+    h.release(over);
+
+    assert!(moves(&mut h).is_empty(), "no move is sent");
+    assert_eq!(undo_messages(&mut h), Vec::<String>::new());
+}
+
+#[gpui::test]
+fn diff_pill_refuses_a_pane(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &with_diff_tab());
+    h.sent();
+    let from = header_point(&mut h, "p1");
+    let over = on_pill(&mut h, "t3", 0.5);
+    h.start_drag(from);
+    h.drag_to(over);
+
+    assert_eq!(
+        active(&mut h),
+        Some("t1".to_owned()),
+        "a diff pill does not show its tab"
+    );
+    assert!(
+        h.root(|root, cx| root.pill_no_drop("t3", cx)),
+        "the diff pill shows the no-drop state"
+    );
+    assert!(
+        !h.root(|root, cx| root.pill_no_drop("t2", cx)),
+        "a grid tab's pill takes a pane"
+    );
+    assert_eq!(overlay(&mut h), None);
+
+    h.release(over);
+
+    assert!(moves(&mut h).is_empty(), "no move is sent");
+    assert_eq!(undo_messages(&mut h), Vec::<String>::new());
+    assert!(
+        !h.root(|root, cx| root.pill_no_drop("t3", cx)),
+        "the no-drop state goes with the drag"
+    );
+}
+
+#[gpui::test]
+fn cross_tab_edge_drop_sends_move_pane(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &pane_tabs());
+    h.sent();
+    let from = header_point(&mut h, "p1");
+    let over = on_pill(&mut h, "t2", 0.5);
+    h.start_drag(from);
+    h.drag_to(over);
+    assert_eq!(
+        active(&mut h),
+        Some("t2".to_owned()),
+        "the pill's tab shows"
+    );
+
+    let to = at(&mut h, "p4", 0.8, 0.5);
+    h.drag_to(to);
+    assert_eq!(
+        overlay(&mut h),
+        Some(("p4".to_owned(), PaneDropEdge::Right)),
+        "the shown tab's drop layer takes a pane from another tab"
+    );
+
+    h.release(to);
+
+    let sent = moves(&mut h);
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [ClientMessage::MovePane {
+                src_tab_id,
+                src_pane_id,
+                dst_tab_id,
+                dst_pane_id,
+                edge: PaneDropEdge::Right,
+                request_id: Some(_),
+            }] if src_tab_id == "t1"
+                && src_pane_id == "p1"
+                && dst_tab_id == "t2"
+                && dst_pane_id == "p4"
+        ),
+        "sent {sent:?}"
+    );
+    assert_eq!(undo_messages(&mut h), ["Moved pane"]);
+}
+
+#[gpui::test]
+fn cross_tab_centre_drop_is_refused(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &pane_tabs());
+    h.sent();
+    let from = header_point(&mut h, "p1");
+    let over = on_pill(&mut h, "t2", 0.5);
+    h.start_drag(from);
+    h.drag_to(over);
+
+    let centre = at(&mut h, "p4", 0.5, 0.5);
+    h.drag_to(centre);
+    assert_eq!(
+        overlay(&mut h),
+        None,
+        "until the cross-tab swap lands, a centre drop in another tab would unbind p4's session"
+    );
+
+    h.release(centre);
+    assert!(moves(&mut h).is_empty(), "no move is sent");
+    assert_eq!(undo_messages(&mut h), Vec::<String>::new());
 }
 
 #[gpui::test]

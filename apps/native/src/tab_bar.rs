@@ -3,9 +3,9 @@
 //! for a new tab.
 
 use gpui::{
-    AnyElement, App, ClickEvent, Context, Div, DragMoveEvent, ElementId, Entity, Focusable as _,
-    Keystroke, MouseButton, MouseDownEvent, Pixels, Point, SharedString, Stateful, Subscription,
-    Window, anchored, deferred, div, prelude::*, px, svg,
+    AnyElement, App, ClickEvent, Context, CursorStyle, Div, DragMoveEvent, ElementId, Entity,
+    Focusable as _, Keystroke, MouseButton, MouseDownEvent, Pixels, Point, SharedString, Stateful,
+    Subscription, Window, anchored, deferred, div, prelude::*, px, svg,
 };
 use protocol::{
     ClientMessage, MergeLayout, RearrangeLayout, SessionMode, SessionStatus, TabContent, TabEntry,
@@ -587,6 +587,7 @@ impl RootView {
         });
         let name = format!("tab-{}", tab.id);
         let dragged = self.active_tab_drag(cx) == Some(tab.id.as_str());
+        let no_drop = self.pill_no_drop(&tab.id, cx);
         let mark = self
             .tab_drop_mark(cx)
             .filter(|(id, _)| *id == tab.id)
@@ -597,11 +598,11 @@ impl RootView {
             .id(ElementId::Name(SharedString::from(name.clone())))
             .debug_selector(|| name)
             .relative()
-            .on_drag_move(
-                cx.listener(move |this, event: &DragMoveEvent<DragPayload>, _, cx| {
-                    this.on_pill_drag_move(&move_id, event, cx);
-                }),
-            )
+            .on_drag_move(cx.listener(
+                move |this, event: &DragMoveEvent<DragPayload>, window, cx| {
+                    this.on_pill_drag_move(&move_id, event, window, cx);
+                },
+            ))
             .on_drop(cx.listener(move |this, payload: &DragPayload, _, cx| {
                 this.on_pill_drop(&drop_id, payload, cx);
             }))
@@ -621,6 +622,9 @@ impl RootView {
             .border_r_1()
             .border_color(gpui::rgb(BORDER))
             .cursor_pointer()
+            .when(no_drop, |pill| {
+                pill.cursor(CursorStyle::OperationNotAllowed)
+            })
             .when(active, |pill| pill.text_color(gpui::rgb(TEXT)))
             .when(!active, |pill| {
                 pill.hover(|style| style.bg(gpui::rgb(HOVER_BG)))
@@ -706,20 +710,32 @@ impl RootView {
             .filter(|_| self.active_tab_drag(cx).is_some())
     }
 
+    /// Whether `tab_id`'s pill shows the no-drop state: a pane drag is under
+    /// way and that pill's tab takes no pane.
+    #[must_use]
+    pub fn pill_no_drop(&self, tab_id: &str, cx: &App) -> bool {
+        self.active_pane_drag(cx).is_some()
+            && drag::pill_pane_hover(self.tabs.tabs(), self.tabs.active_id(), tab_id)
+                == drag::PillPaneHover::Inert
+    }
+
     /// Follows a drag over `tab_id`'s pill: a pill dragged over its half
-    /// that would change the order marks that side; anything else (a pane,
-    /// the pointer elsewhere) takes the mark off this pill. gpui calls this
-    /// for every move of the drag, over the pill or not.
+    /// that would change the order marks that side; a pane dragged over a
+    /// grid tab's pill shows that tab, so the pane can drop on a pane in it;
+    /// anything else takes the mark off this pill. gpui calls this for every
+    /// move of the drag, over the pill or not.
     fn on_pill_drag_move(
         &mut self,
         tab_id: &str,
         event: &DragMoveEvent<DragPayload>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let at = event.event.position;
         let bounds = event.bounds;
+        let over_pill = bounds.contains(&at);
         let target = match event.drag(cx) {
-            DragPayload::Tab(dragged) if bounds.contains(&at) => {
+            DragPayload::Tab(dragged) if over_pill => {
                 let side = drag::side_of(
                     at.x / px(1.0),
                     bounds.origin.x / px(1.0),
@@ -738,35 +754,62 @@ impl RootView {
             self.tab_drop = None;
             cx.notify();
         }
+        let activate = over_pill
+            && matches!(event.drag(cx), DragPayload::Pane { .. })
+            && drag::pill_pane_hover(self.tabs.tabs(), self.tabs.active_id(), tab_id)
+                == drag::PillPaneHover::Activate;
+        if activate {
+            self.tabs.activate(tab_id);
+            self.pane_drop = None;
+            self.after_tabs_change(window, cx);
+        }
     }
 
     /// A drop on `tab_id`'s pill: a pill dropped where the mark stands takes
     /// the new order at once and sends it; the daemon's echo then agrees.
-    /// A pane, or a drop that keeps the order, does nothing.
+    /// A pane dropped on another grid tab's pill moves there at that tab's
+    /// balanced drop target. A drop on the pane's own tab's pill, on a diff
+    /// tab's pill, or one that keeps the order, does nothing.
     fn on_pill_drop(&mut self, tab_id: &str, payload: &DragPayload, cx: &mut Context<Self>) {
         let mark = self.tab_drop.take();
         self.tab_drag = None;
+        self.pane_drop = None;
+        self.pane_drag = None;
+        self.pane_drag_session = None;
         cx.notify();
-        let (DragPayload::Tab(dragged), Some((target, side))) = (payload, mark) else {
-            return;
-        };
-        if target != tab_id {
-            return;
+        match payload {
+            DragPayload::Pane {
+                tab_id: src_tab,
+                pane_id,
+            } => {
+                if src_tab != tab_id && drag::pill_takes_pane(self.tabs.tabs(), tab_id) {
+                    self.move_pane_to_tab(src_tab, pane_id, tab_id, cx);
+                }
+            }
+            DragPayload::Tab(dragged) => {
+                let Some((target, side)) = mark else {
+                    return;
+                };
+                if target != tab_id {
+                    return;
+                }
+                let Some(msg) = drag::reorder_tabs(&self.tab_ids(), dragged, &target, side) else {
+                    return;
+                };
+                let ClientMessage::ReorderTabs { ordered_ids } = &msg else {
+                    return;
+                };
+                if !self.tabs.reorder_local(ordered_ids) {
+                    tracing::warn!(
+                        ?ordered_ids,
+                        "pill drop: the new order is not the strip's tabs"
+                    );
+                    return;
+                }
+                self.send(msg);
+            }
+            _ => {}
         }
-        let Some(msg) = drag::reorder_tabs(&self.tab_ids(), dragged, &target, side) else {
-            return;
-        };
-        let ClientMessage::ReorderTabs { ordered_ids } = &msg else {
-            return;
-        };
-        if !self.tabs.reorder_local(ordered_ids) {
-            tracing::warn!(
-                ?ordered_ids,
-                "pill drop: the new order is not the strip's tabs"
-            );
-            return;
-        }
-        self.send(msg);
     }
 
     /// A click on `tab_id`'s pill. Ctrl toggles the tab in the selection
