@@ -4,26 +4,20 @@
 
 ## Release 1 — v0.1.0-alpha: Claude daily driver
 
-### M1 — Restructure: Claude and shells only (6/8 done)
-- [ ] RT-183 Remove headless runs from the native client · release vNext
-- [ ] RT-274 Split server.rs into handler modules by domain · release vNext
+### M1 — Restructure: Claude and shells only (8/8 done)
 
-### M2 — Daily-driver fixes (6/22 done)
+### M2 — Daily-driver fixes (10/22 done)
 - [ ] RT-186 Resync the tab list when a connection's tab-event broadcast lags · release vNext
 - [ ] RT-181 Clear a tab's closing mark when the daemon rejects its ClosePane · release vNext
 - [ ] RT-174 Refuse a plain-shell request's agent options before git work · release vNext
 - [ ] RT-222 Clear a stored spawn config's one-shot answers when launch-last replays it · release vNext
 - [ ] RT-165 Carry the busy exclusion in the new session's first record on Restart, Resume and Recover · release vNext
 - [ ] RT-203 Clear pending_input whenever a session leaves AwaitingInput · release vNext
-- [ ] RT-264 Stop matches_prompt reading an idle Claude box plus a numbered answer as a prompt · release vNext
 - [ ] RT-209 Treat the terminal's automatic replies as not-owner input for a hook prompt · release vNext
 - [ ] RT-208 Stop the hook shim sending the daemon token to a stale port, and make its unsafe-token test real · release vNext
 - [ ] RT-231 P5.3: Tab strip drag · release vNext
   - [ ] RT-270 P5.3c: Touch the drop tab and swap panes atomically across tabs · release vNext
 - [!] RT-182 Replace the Tauri-era toasts with two notifications: Needs you and Finished · release vNext
-- [ ] RT-188 Keep subagent events, idle_prompt and a restart from clearing a pending hook prompt · release vNext
-- [ ] RT-218 Keep a hook-driven session recoverable when its agent dies without a hook event · release vNext
-- [ ] RT-225 Carry the hook stamp the watcher read, and re-arm the idle deadline on a hook status · release vNext
 - [ ] RT-84 Show a background state when a turn ends with subagents, shells or wakeups still running · release vNext
 
 ### M3 — Cutover and v0.1.0-alpha (2/3 done)
@@ -51,6 +45,7 @@
 - [ ] RT-158 P6.6: Remote tests over a fake Tailscale, hand checklist, and the docs pass · release vNext+1
 - [ ] RT-244 Preset wizard: typed host paths instead of local pickers in remote mode
 - [ ] RT-166 TS.3b: device tokens issued only after the owner approves the device on the host PC · release vNext+1
+- [ ] RT-278 Prove the daemon holds the token before a client reuses, retires or kills it
 
 ## Wave 1a — Claude sessions on DeepSeek
 
@@ -264,3 +259,4 @@
 - [ ] RT-59 Split the oversized daemon, protocol and native UI source files
 - [ ] RT-241 Order keep-awake's connect-time push after concurrent broadcasts
 - [ ] RT-263 Split RootView::on_key_capture under the 100-line limit
+- [ ] RT-279 Stop sending loopback bearer tokens in cleartext
