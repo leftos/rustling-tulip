@@ -946,9 +946,17 @@ function Invoke-Native {
 # tracer are built first in the same profile (test-release, or release with
 # -Release). One at a time (the serial-live test group in
 # .config/nextest.toml): each spec owns a daemon and, for the smoke specs, a
-# client window.
-function Invoke-NativeSpecFile([string[]]$TestFiles, [string]$Slot, [string]$Name) {
+# client window. The build and the specs run as one gate call, re-entering
+# this script under the gate: gated separately, the build and the specs could
+# run on different machines, leaving the specs without the daemon binary.
+function Invoke-NativeSpecFile([string]$Verb, [string[]]$TestFiles, [string]$Slot, [string]$Name) {
     Assert-Nextest
+    if (-not $env:GATE_SLOT_HELD) {
+        $reentry = @('pwsh', '-NoProfile', '-File', $PSCommandPath, $Verb)
+        if ($Release) { $reentry += '-Release' }
+        Invoke-Gated -Slot $Slot -Name $Name -Command $reentry
+        exit $LASTEXITCODE
+    }
     $cargoProfile = if ($Release) { 'release' } else { 'test-release' }
     Build-DaemonAndTracer $cargoProfile
     $targets = @($TestFiles | ForEach-Object { '--test'; $_ })
@@ -962,9 +970,9 @@ function Invoke-NativeSpecFile([string[]]$TestFiles, [string]$Slot, [string]$Nam
     Test-CargoExitOk "cargo nextest run -p rustling-tulip-native ($names)"
 }
 
-function Invoke-NativeE2e { Invoke-NativeSpecFile -TestFiles @('e2e_live', 'e2e_recover') -Slot heavy -Name e2e }
+function Invoke-NativeE2e { Invoke-NativeSpecFile -Verb native-e2e -TestFiles @('e2e_live', 'e2e_recover') -Slot heavy -Name e2e }
 
-function Invoke-NativeSmoke { Invoke-NativeSpecFile -TestFiles 'smoke_window' -Slot light -Name smoke }
+function Invoke-NativeSmoke { Invoke-NativeSpecFile -Verb native-smoke -TestFiles 'smoke_window' -Slot light -Name smoke }
 
 # Writes a PNG of the native client's window showing one view, over a fake
 # daemon with fixed content (apps/native/examples/shot.rs). No daemon starts,
