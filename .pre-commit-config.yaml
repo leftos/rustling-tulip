@@ -7,9 +7,9 @@
 #   prek auto-update --cooldown-days 7
 #
 # There is no CI in this repo yet, so these hooks are the only automated
-# gates. They run at pre-commit: hygiene plus the lint gates (fmt, clippy), so
-# every commit is warning-free without a per-edit hook adding latency inside
-# the editing loop. No hook runs the tests: they run by hand through
+# gates. Hygiene and fmt run at pre-commit, so a commit stays cheap; clippy
+# (which compiles GPUI) runs at pre-push, so what reaches origin is
+# warning-free. No hook runs the tests: they run by hand through
 # `.\rt.ps1 test` (cargo-nextest, full suite), or `.\rt.ps1 test -Reached`
 # for the tests one change reaches (tools/test-map.json).
 #
@@ -65,4 +65,4 @@ repos:
         language: system
         types: [rust]
         pass_filenames: false
-        stages: [pre-commit]
+        stages: [pre-push]
