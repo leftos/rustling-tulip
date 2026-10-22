@@ -283,7 +283,8 @@ pub(crate) fn apply_to_record(
 ///
 /// A subagent's event never ends or replaces a pending prompt: its tool calls
 /// fire the same hooks while the main agent waits on the user, and its own
-/// `PermissionRequest` counts only when nothing is pending. An `idle_prompt`
+/// `PermissionRequest` counts only when no prompt is waiting (a pending value
+/// left beside another status is stale and is replaced). An `idle_prompt`
 /// notification (the only `Notification` that maps to `Idle`) is ignored
 /// while the record waits on a pending prompt.
 fn leaves_pending_alone(
@@ -296,8 +297,7 @@ fn leaves_pending_alone(
     }
     let waiting = record.status == SessionStatus::AwaitingInput;
     let idle_prompt = details.event == "Notification" && signal.status == Some(SessionStatus::Idle);
-    (details.subagent && (waiting || matches!(signal.pending, PendingUpdate::Set(_))))
-        || (idle_prompt && waiting)
+    waiting && (details.subagent || idle_prompt)
 }
 
 /// Warn about a hook-reported permission mode that differs from the spawn's.
@@ -1016,6 +1016,28 @@ mod tests {
         apply_body(&mut record, 2, &body);
         assert_eq!(record.status, SessionStatus::AwaitingInput);
         assert_eq!(record.pending_input, Some(main_prompt()));
+    }
+
+    #[test]
+    fn subagent_permission_request_sets_a_prompt_over_a_stale_pending_value() {
+        let mut record = record_with_open_prompt();
+        record.status = SessionStatus::Working;
+        let body = json!({
+            "hook_event_name": "PermissionRequest",
+            "agent_id": "a0123456789abcdef",
+            "tool_name": "Write",
+            "tool_input": {"file_path": "notes.txt"},
+        });
+        apply_body(&mut record, 2, &body);
+        assert_eq!(record.status, SessionStatus::AwaitingInput);
+        assert!(
+            matches!(
+                &record.pending_input,
+                Some(PendingInput::Permission { tool_name, .. }) if tool_name == "Write"
+            ),
+            "the subagent's prompt replaces the stale value: {:?}",
+            record.pending_input
+        );
     }
 
     #[test]

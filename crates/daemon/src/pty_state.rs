@@ -834,7 +834,7 @@ fn transition(
         if rec.last_hook_time != read.last_hook_time || rec.hook_driven != read.hook_driven {
             return;
         }
-        entered_awaiting = apply_status(rec, next);
+        entered_awaiting = apply_watcher_status(rec, next);
     });
     if entered_awaiting {
         announce_awaiting_input(session_id, attention_tx);
@@ -907,8 +907,20 @@ fn on_plain_shell_transition(
         if rec.hook_driven != read.hook_driven || rec.last_hook_time != read.last_hook_time {
             return;
         }
-        rec.status = SessionStatus::from(next);
+        apply_watcher_status(rec, SessionStatus::from(next));
     });
+}
+
+/// [`apply_status`] for a status watcher's own write: leaving `AwaitingInput`
+/// also drops the prompt it was waiting on, since no hook will (a prompt
+/// restored on reattach, or one dismissed while hooks are not driving).
+fn apply_watcher_status(record: &mut SessionRecord, next: SessionStatus) -> bool {
+    let was_awaiting = record.status == SessionStatus::AwaitingInput;
+    let entered_awaiting = apply_status(record, next);
+    if was_awaiting && record.status != SessionStatus::AwaitingInput {
+        record.pending_input = None;
+    }
+    entered_awaiting
 }
 
 #[cfg(test)]
@@ -1688,6 +1700,49 @@ mod hysteresis_tests {
             SessionStatus::AwaitingInput,
             "a chevron question on screen holds the demotion"
         );
+    }
+
+    /// A record reattached `AwaitingInput` with its pending prompt, which
+    /// hooks no longer drive until their next event.
+    fn restored_prompt_record() -> SessionRecord {
+        let mut record = test_record(SESSION);
+        record.status = SessionStatus::AwaitingInput;
+        record.pending_input = Some(protocol::PendingInput::Permission {
+            tool_name: "Bash".to_owned(),
+            summary: "cargo build".to_owned(),
+        });
+        record
+    }
+
+    fn pending_input(h: &Harness) -> Option<protocol::PendingInput> {
+        let rec = h.registry.get(SESSION).expect("session registered");
+        rec.lock().expect("record lock").pending_input.clone()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_restored_prompt_is_cleared_when_the_classifier_leaves_awaiting_input() {
+        let h = start_record("restored-prompt-cleared", false, restored_prompt_record());
+        h.output
+            .send(b"\x1b[2K\r$ ".to_vec())
+            .expect("watcher still subscribed");
+        settle().await;
+        tokio::time::sleep(IDLE_AFTER + Duration::from_millis(50)).await;
+        settle().await;
+        assert_eq!(h.status(), SessionStatus::Idle, "silence ends the wait");
+        assert_eq!(pending_input(&h), None, "the prompt left with the wait");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_restored_prompt_is_cleared_when_the_plain_shell_classifier_leaves_awaiting_input() {
+        let h = start_record(
+            "shell-restored-prompt-cleared",
+            true,
+            restored_prompt_record(),
+        );
+        h.heartbeat(0);
+        settle().await;
+        assert_eq!(h.status(), SessionStatus::Working, "shell output promotes");
+        assert_eq!(pending_input(&h), None, "the prompt left with the wait");
     }
 
     /// A session with no hook events keeps the heuristic's own classifier:
