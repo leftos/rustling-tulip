@@ -22,8 +22,7 @@ use crate::ellipsis::{ellipsized, truncating};
 use crate::fonts::DEFAULT_FAMILY;
 use crate::headless;
 use crate::palette::{
-    ACCENT, CHIP, GROUND, HOVER, LILAC, LINE, LINE_STRONG, RAISED, SUBTLE, SURFACE, TEXT_2,
-    TRANSPARENT,
+    ACCENT, CHIP, GROUND, HOVER, LINE, LINE_STRONG, RAISED, SUBTLE, SURFACE, TEXT_2, TRANSPARENT,
 };
 use crate::session_menu::{BorderedButton, bordered_button};
 use crate::shell_dialog::standalone_shell_request;
@@ -1461,9 +1460,8 @@ fn header_title(
     out
 }
 
-/// A 20 px Geist Mono chip: the claude runtime washed in the accent, the
-/// codex runtime in lilac, repo:branch with its repo name bright, trusted
-/// outlined, the rest filled.
+/// A 20 px Geist Mono chip: the claude runtime washed in the accent,
+/// repo:branch with its repo name bright, trusted outlined, the rest filled.
 fn header_chip(pane_id: &str, chip: &HeaderChip, cx: &mut Context<RootView>) -> AnyElement {
     let name = format!("pane-chip-{pane_id}-{}", chip.kind.name());
     let selector = name.clone();
@@ -1502,7 +1500,6 @@ fn header_chip(pane_id: &str, chip: &HeaderChip, cx: &mut Context<RootView>) -> 
                     ..gpui::rgb(ACCENT)
                 })
                 .text_color(gpui::rgb(ACCENT)),
-            "codex" => base.text_color(gpui::rgb(LILAC)),
             _ => base,
         }
         .child(text),
@@ -1918,19 +1915,7 @@ mod tests {
     }
 
     #[test]
-    fn a_session_that_is_not_claude_shows_no_provider_chip() {
-        for agent in ["codex", "cursor"] {
-            let parts = header_parts(&session_with(agent, "deepseek"), false);
-            assert_eq!(
-                parts.chips,
-                [chip(
-                    HeaderChipKind::Runtime,
-                    agent,
-                    &format!("Running {agent}")
-                )],
-                "{agent} says no provider, whatever the snapshot reports"
-            );
-        }
+    fn a_plain_shell_shows_no_provider_chip() {
         let mut shell = session_with("claude", "deepseek");
         shell.mode = SessionMode::PlainShell;
         shell.program_name = Some("pwsh".to_owned());

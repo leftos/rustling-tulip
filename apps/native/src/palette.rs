@@ -71,8 +71,8 @@ pub const ON_ASKING: u32 = 0x002a_1b00;
 pub const WAITING: u32 = 0x004f_c89d;
 /// Something that failed, as `0xRRGGBB`.
 pub const DANGER: u32 = 0x00f2_6d6d;
-/// The Codex runtime tag, a renamed file's letter and a diff's strings, as
-/// `0xRRGGBB`.
+/// A workspace's sidebar tag, a renamed file's letter and a diff's strings,
+/// as `0xRRGGBB`.
 pub const LILAC: u32 = 0x00c9_b8ff;
 /// A modified file's letter, a mixed hunk's ruler marker, and a diff's
 /// types and numbers, as `0xRRGGBB`.

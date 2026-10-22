@@ -3,15 +3,18 @@
 
 use alacritty_terminal::vte::ansi::CursorShape;
 use gpui::Keystroke;
-use protocol::{Agent, SessionMode, SessionSnapshot, SessionStatus};
+use protocol::{SessionMode, SessionSnapshot, SessionStatus};
 
 use crate::keys;
+
+/// Shift+Enter inserts a newline without submitting: `\` + CR is line
+/// continuation for claude and for shells.
+const SHIFT_ENTER: &[u8] = b"\\\r";
 
 /// The parts of the attached session that shape its input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SessionContext {
     pub mode: SessionMode,
-    pub agent: Agent,
     pub status: SessionStatus,
 }
 
@@ -19,7 +22,6 @@ impl SessionContext {
     pub fn of(session: &SessionSnapshot) -> Self {
         Self {
             mode: session.mode,
-            agent: session.agent,
             status: session.status,
         }
     }
@@ -39,16 +41,6 @@ impl SessionContext {
             CursorShape::Block
         }
     }
-
-    /// Shift+Enter inserts a newline without submitting: `\` + CR is line
-    /// continuation for claude and shells, codex and cursor bind LF.
-    fn shift_enter(self) -> &'static [u8] {
-        if self.mode == SessionMode::PlainShell || self.agent == Agent::Claude {
-            b"\\\r"
-        } else {
-            b"\n"
-        }
-    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -66,16 +58,11 @@ pub enum KeyAction {
 /// Decides what a keystroke does. `None` means the terminal does not handle
 /// it. Ctrl+C copies when there is a selection and interrupts otherwise;
 /// Ctrl+Shift+C only ever copies; Ctrl+V and Ctrl+Shift+V paste.
-pub fn key_action(
-    ks: &Keystroke,
-    app_cursor: bool,
-    has_selection: bool,
-    session: SessionContext,
-) -> Option<KeyAction> {
+pub fn key_action(ks: &Keystroke, app_cursor: bool, has_selection: bool) -> Option<KeyAction> {
     let m = ks.modifiers;
     let key = ks.key.to_ascii_lowercase();
     if m.shift && !m.control && !m.platform && key == "enter" {
-        return Some(KeyAction::Send(session.shift_enter().to_vec()));
+        return Some(KeyAction::Send(SHIFT_ENTER.to_vec()));
     }
     if m.control && !m.alt && !m.platform {
         match key.as_str() {
@@ -168,20 +155,19 @@ pub fn paste_input(text: Option<&str>, bracketed: bool) -> Vec<u8> {
 mod tests {
     use alacritty_terminal::vte::ansi::CursorShape;
     use gpui::{Keystroke, Modifiers};
-    use protocol::{Agent, SessionMode, SessionSnapshot, SessionStatus};
+    use protocol::{SessionMode, SessionSnapshot, SessionStatus};
 
     use super::{KeyAction, SessionContext, key_action, paste_bytes, paste_input};
 
-    fn session(mode: SessionMode, agent: Agent) -> SessionContext {
+    fn session(mode: SessionMode) -> SessionContext {
         SessionContext {
             mode,
-            agent,
             status: SessionStatus::Idle,
         }
     }
 
     fn claude() -> SessionContext {
-        session(SessionMode::Interactive, Agent::Claude)
+        session(SessionMode::Interactive)
     }
 
     fn key(name: &str, modifiers: Modifiers) -> Keystroke {
@@ -224,7 +210,7 @@ mod tests {
     }
 
     fn action(ks: &Keystroke, has_selection: bool) -> Option<KeyAction> {
-        key_action(ks, false, has_selection, claude())
+        key_action(ks, false, has_selection)
     }
 
     #[expect(
@@ -276,21 +262,11 @@ mod tests {
     }
 
     #[test]
-    fn shift_enter_sends_per_agent_newline() {
-        let cases: [(SessionMode, Agent, &[u8]); 4] = [
-            (SessionMode::PlainShell, Agent::Claude, b"\\\r"),
-            (SessionMode::Interactive, Agent::Claude, b"\\\r"),
-            (SessionMode::Interactive, Agent::Codex, b"\n"),
-            (SessionMode::Interactive, Agent::Cursor, b"\n"),
-        ];
-        let enter = key("enter", shift());
-        for (mode, agent, bytes) in cases {
-            assert_eq!(
-                key_action(&enter, false, false, session(mode, agent)),
-                Some(KeyAction::Send(bytes.to_vec())),
-                "{mode:?} {agent:?}"
-            );
-        }
+    fn shift_enter_sends_line_continuation() {
+        assert_eq!(
+            action(&key("enter", shift()), false),
+            Some(KeyAction::Send(b"\\\r".to_vec()))
+        );
         let plain = key("enter", Modifiers::default());
         assert_eq!(action(&plain, false), Some(KeyAction::Send(b"\r".to_vec())));
     }
@@ -369,7 +345,7 @@ mod tests {
     }
 
     #[test]
-    fn a_session_context_reads_mode_agent_and_status() {
+    fn a_session_context_reads_mode_and_status() {
         let snapshot = |id: &str, status: &str| -> SessionSnapshot {
             serde_json::from_value(serde_json::json!({
                 "id": id,
@@ -382,7 +358,7 @@ mod tests {
                 "exit_code": null,
                 "metrics": { "input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0, "last_activity_at": null },
                 "recent_actions": [],
-                "agent": "codex",
+                "agent": "claude",
             }))
             .expect("session fixture")
         };
@@ -390,7 +366,6 @@ mod tests {
             SessionContext::of(&snapshot("b", "stopped")),
             SessionContext {
                 mode: SessionMode::PlainShell,
-                agent: Agent::Codex,
                 status: SessionStatus::Stopped,
             }
         );
@@ -415,7 +390,7 @@ mod tests {
     fn default_cursor_is_a_bar_for_agents_and_a_block_for_shells() {
         assert_eq!(claude().default_cursor_shape(), CursorShape::Beam);
         assert_eq!(
-            session(SessionMode::PlainShell, Agent::Claude).default_cursor_shape(),
+            session(SessionMode::PlainShell).default_cursor_shape(),
             CursorShape::Block
         );
     }

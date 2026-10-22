@@ -25,10 +25,9 @@ use crate::palette::{
 };
 use crate::session_menu::{backdrop, dialog_button};
 use crate::spawn_form::{
-    APPROVAL_CHOICES, CODEX_SANDBOX_CHOICES, CURSOR_SANDBOX_CHOICES, Control, EnvRow, EnvRowNote,
-    FormInputs, ListField, Lock, MODEL_ALIASES, OpenChoice, Outcome, PROVIDER_CHOICES, Prefill,
-    RunMode, Runtime, ShareButton, SpawnForm, TabChoices, Target, WorktreeMode, approval_label,
-    codex_sandbox_label, cursor_sandbox_label, provider_label,
+    APPROVAL_CHOICES, Control, EnvRow, EnvRowNote, FormInputs, ListField, Lock, MODEL_ALIASES,
+    OpenChoice, Outcome, PROVIDER_CHOICES, Prefill, RunMode, Runtime, ShareButton, SpawnForm,
+    TabChoices, Target, WorktreeMode, approval_label, provider_label,
 };
 use crate::spawn_preview::{
     CollisionNotice, RECREATE_LABEL, REUSE_NOTE, ReuseChoice, Tone, collision_notice, member_row,
@@ -86,13 +85,8 @@ const RANDOM_TIP: &str = "Generate a random worktree branch name";
 const SUGGESTING: &str = "Picking a name no existing branch uses…";
 const FETCH_FAILED: &str = "Couldn't reach the remote — comparing against the last fetched refs.";
 const CURRENT_TAB_DISABLED: &str = "The current tab cannot host terminal panes";
-const HEADLESS_DISABLED: &str = "headless mode is not yet supported for cursor";
 const PROMPT_ROWS: (usize, usize) = (3, 8);
 pub(crate) const CLAUDE_LOCKED: &str = "Ignored while trusted launch is on. Claude will run without --permission-mode. The chosen value is preserved for when you toggle trusted launch off.";
-pub(crate) const CODEX_LOCKED: &str = "Ignored while trusted launch is on. Codex will run with --yolo, which overrides sandbox mode. The chosen value is preserved for when you toggle trusted launch off.";
-const CURSOR_LOCKED: &str = "Ignored while trusted launch is on. Cursor will run with --yolo, which overrides sandbox mode. The chosen value is preserved for when you toggle trusted launch off.";
-const CURSOR_PLAN_LABEL: &str = "Plan mode (read-only / planning)";
-const CURSOR_PLAN_TIP: &str = "Start cursor in --plan mode (read-only / planning)";
 const NO_ENV: &str = "No extra env vars.";
 const ENV_VALUE_PLACEHOLDER: &str = "value";
 const REMOVE_ENV_TIP: &str = "Remove env var";
@@ -561,7 +555,6 @@ impl RootView {
             focused: focused.as_deref().and_then(|id| self.sidebar.session(id)),
             tabs: TabChoices::from_tabs(self.tabs.tabs(), self.tabs.active_id()),
             spawn_defaults: self.sidebar.ui_state().spawn,
-            codex_hooks: self.sidebar.ui_state().agents.codex.hooks,
             lock,
             claude_provider_supported: self.conn.supports(protocol::FEATURE_CLAUDE_PROVIDER),
         };
@@ -2346,17 +2339,12 @@ fn run_rows(dialog: &SpawnDialog, focus: &Control, cx: &mut Context<RootView>) -
             .into_iter()
             .map(|mode| {
                 let control = Control::RunMode(mode);
-                let enabled = mode == RunMode::Interactive || form.headless_enabled();
                 let look = Look {
                     selected: form.run_mode() == mode,
                     focused: *focus == control,
-                    enabled,
+                    enabled: true,
                 };
-                option_button(&control, mode.label(), look, cx)
-                    .when(!enabled, |button| {
-                        button.tooltip(tooltip(HEADLESS_DISABLED))
-                    })
-                    .into_any_element()
+                option_button(&control, mode.label(), look, cx).into_any_element()
             })
             .collect();
         rows.push(field("Mode").child(segmented(buttons)).into_any_element());
@@ -2370,17 +2358,10 @@ fn run_rows(dialog: &SpawnDialog, focus: &Control, cx: &mut Context<RootView>) -
     rows
 }
 
-/// The chosen approval or sandbox option and the plan-mode box, for the
-/// runtime on show.
+/// The chosen approval option, for the runtime on show.
 fn agent_options_chosen(form: &SpawnForm) -> Vec<Control> {
     match form.runtime() {
         Runtime::Agent(Agent::Claude) => vec![Control::Approval(form.permission_mode())],
-        Runtime::Agent(Agent::Codex) => vec![Control::CodexSandbox(form.codex_sandbox())],
-        Runtime::Agent(Agent::Cursor) => {
-            let mut chosen = vec![Control::CursorSandbox(form.cursor_sandbox())];
-            chosen.extend(form.cursor_plan().then_some(Control::CursorPlan));
-            chosen
-        }
         Runtime::PlainShell => Vec::new(),
     }
 }
@@ -2467,8 +2448,7 @@ fn model_field(
     Some(field("Model").child(row).into_any_element())
 }
 
-/// Claude's approval mode, Codex's sandbox, or Cursor's plan mode and
-/// sandbox; nothing for a plain shell.
+/// Claude's approval mode; nothing for a plain shell.
 fn agent_option_rows(
     form: &SpawnForm,
     focus: &Control,
@@ -2493,37 +2473,6 @@ fn agent_option_rows(
                 focus,
                 cx,
             )]
-        }
-        Runtime::Agent(Agent::Codex) => {
-            let chosen = form.codex_sandbox();
-            let choices = CODEX_SANDBOX_CHOICES.map(|s| {
-                (
-                    Control::CodexSandbox(s),
-                    codex_sandbox_label(s),
-                    s == chosen,
-                )
-            });
-            vec![option_field(
-                "Codex sandbox mode",
-                &choices,
-                note(CODEX_LOCKED),
-                focus,
-                cx,
-            )]
-        }
-        Runtime::Agent(Agent::Cursor) => {
-            let chosen = form.cursor_sandbox();
-            let choices = CURSOR_SANDBOX_CHOICES.map(|s| {
-                (
-                    Control::CursorSandbox(s),
-                    cursor_sandbox_label(s),
-                    s == chosen,
-                )
-            });
-            vec![
-                cursor_plan_checkbox(form, focus, cx),
-                option_field("Cursor sandbox", &choices, note(CURSOR_LOCKED), focus, cx),
-            ]
         }
         Runtime::PlainShell => Vec::new(),
     }
@@ -2552,27 +2501,6 @@ fn option_field(
     field(label)
         .child(segmented(buttons))
         .children(locked_note.map(muted))
-        .into_any_element()
-}
-
-fn cursor_plan_checkbox(
-    form: &SpawnForm,
-    focus: &Control,
-    cx: &mut Context<RootView>,
-) -> AnyElement {
-    let control = Control::CursorPlan;
-    let focused = *focus == control;
-    let row = checkbox_row(
-        &control.selector(),
-        form.cursor_plan(),
-        focused,
-        CURSOR_PLAN_LABEL,
-    )
-    .tooltip(tooltip(CURSOR_PLAN_TIP))
-    .on_click(press_control(&control, cx));
-    div()
-        .flex()
-        .child(reveal_when_focused(row, &control, focused, cx))
         .into_any_element()
 }
 

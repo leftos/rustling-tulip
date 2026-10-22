@@ -37,7 +37,7 @@ A value Credential Manager cannot take (over its credential size limit) refuses 
 
 ## Resolving
 
-`resolve_env_refs` in `server.rs` resolves both reference kinds for the child, and `codex_rollout`'s `CODEX_HOME` lookup goes through the same resolver. A missing secret (deleted in Credential Manager, or cleaned up) refuses, never spawns without the variable: "A saved secret is missing", "`<KEY>`'s saved value is no longer in Windows Credential Manager."
+`resolve_env_refs` in `server.rs` resolves both reference kinds for the child. A missing secret (deleted in Credential Manager, or cleaned up) refuses, never spawns without the variable: "A saved secret is missing", "`<KEY>`'s saved value is no longer in Windows Credential Manager."
 
 The `SpawnSession` pre-check refuses it before a checkout confirm and before any git work. Duplicate, Restart, Resume, Recover and Launch last all re-resolve, so each fails the same way until the user types the value again.
 

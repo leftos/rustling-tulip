@@ -119,7 +119,7 @@ pub struct SessionRecord {
     /// Short program name driving this session. For `Mode::PlainShell`
     /// this is the shell label (`"pwsh"`, `"cmd"`, `"bash"`, …); for
     /// `Mode::Interactive` / `Mode::Headless` it's the agent token
-    /// (`"claude"`, `"codex"`). Mirrored on disk via
+    /// (`"claude"`). Mirrored on disk via
     /// [`crate::orphan::OrphanMeta::program_name`] so reattach restores
     /// the same chip after a daemon restart.
     pub program_name: Option<String>,
@@ -181,10 +181,6 @@ pub struct SessionRecord {
     /// agents, and sessions whose sidecar predates the field; a hook-reported
     /// id can fill it in.
     pub claude_session_id: Option<String>,
-    /// The conversation id the session's own agent CLI resumes with, set only
-    /// for Codex and Cursor sessions once it is known. Mirrored into the
-    /// sidecar and copied into the session's history entry.
-    pub agent_conversation_id: Option<String>,
     /// True when the user asked that this session not count as busy. Set by
     /// `SetSessionBusyExcluded`, mirrored into the sidecar and copied into the
     /// session's history entry, so reattach, Resume and recovery keep it.
@@ -510,7 +506,6 @@ impl SessionRegistry {
             user_label: guard.user_label.clone(),
             label: guard.label.clone(),
             appearance: guard.appearance.clone(),
-            agent_conversation_id: guard.agent_conversation_id.clone(),
             claude_session_id: guard.claude_session_id.clone(),
             busy_excluded: guard.busy_excluded,
         }
@@ -928,7 +923,6 @@ impl SessionRegistry {
             scrollback_snapshot_req: None,
             spawn_origin: None,
             claude_session_id: meta.claude_session_id.clone(),
-            agent_conversation_id: meta.agent_conversation_id.clone(),
             pending_input: None,
             last_hook_time: None,
             hook_driven: false,
@@ -993,7 +987,6 @@ impl SessionRegistry {
             scrollback_snapshot_req: None,
             spawn_origin: None,
             claude_session_id: meta.claude_session_id.clone(),
-            agent_conversation_id: meta.agent_conversation_id.clone(),
             pending_input: None,
             last_hook_time: None,
             hook_driven: false,
@@ -1043,7 +1036,6 @@ impl SessionRegistry {
             scrollback_snapshot_req: None,
             spawn_origin: None,
             claude_session_id: meta.claude_session_id.clone(),
-            agent_conversation_id: meta.agent_conversation_id.clone(),
             pending_input: None,
             last_hook_time: None,
             hook_driven: false,
@@ -1116,7 +1108,6 @@ mod tests {
             scrollback_snapshot_req: None,
             spawn_origin: None,
             claude_session_id: None,
-            agent_conversation_id: None,
             pending_input: None,
             last_hook_time: None,
             hook_driven: false,
@@ -1504,29 +1495,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dirs.config);
     }
 
-    #[test]
-    fn setting_agent_conversation_id_on_the_record_reaches_the_sidecar() {
-        use crate::history::test_support::{record, scratch_dirs, write_meta_for};
-        let dirs = scratch_dirs("sidecar-agent-conversation-id");
-        write_meta_for(&dirs, "s1");
-        let registry = SessionRegistry::new(dirs.clone());
-        registry.insert(record("s1", SessionMode::Interactive));
-
-        registry.update("s1", |rec| {
-            rec.agent_conversation_id = Some("019a2b3c-codex".to_string());
-        });
-
-        let meta = crate::orphan::load_meta(&dirs, "s1").expect("load meta");
-        assert_eq!(
-            meta.agent_conversation_id.as_deref(),
-            Some("019a2b3c-codex")
-        );
-        let _ = std::fs::remove_dir_all(&dirs.config);
-    }
-
-    /// A Codex session's sidecar carrying a captured conversation id.
-    fn codex_meta_with_conversation() -> OrphanMeta {
-        let mut meta = crate::orphan::meta_from_record(
+    /// A standalone interactive session's sidecar.
+    fn standalone_meta() -> OrphanMeta {
+        crate::orphan::meta_from_record(
             "s1".to_string(),
             1,
             "s1".to_string(),
@@ -1536,7 +1507,7 @@ mod tests {
             Utc::now(),
             None,
             None,
-            Agent::Codex,
+            Agent::Claude,
             None,
             None,
             None,
@@ -1545,56 +1516,7 @@ mod tests {
             None,
             None,
         )
-        .expect("build meta");
-        meta.agent_conversation_id = Some("019a2b3c-codex".to_string());
-        meta
-    }
-
-    fn assert_keeps_agent_conversation_id(registry: &SessionRegistry) {
-        let arc = registry.get("s1").expect("the inserted session");
-        assert_eq!(
-            lock(&arc).agent_conversation_id.as_deref(),
-            Some("019a2b3c-codex")
-        );
-    }
-
-    #[test]
-    fn abandoned_insert_keeps_agent_conversation_id() {
-        use crate::history::test_support::scratch_dirs;
-        let dirs = scratch_dirs("abandoned-agent-conversation-id");
-        let registry = SessionRegistry::new(dirs.clone());
-
-        registry.insert_abandoned(&codex_meta_with_conversation());
-
-        assert_keeps_agent_conversation_id(&registry);
-        let _ = std::fs::remove_dir_all(&dirs.config);
-    }
-
-    #[test]
-    fn orphan_insert_keeps_agent_conversation_id() {
-        use crate::history::test_support::scratch_dirs;
-        let dirs = scratch_dirs("orphan-agent-conversation-id");
-        let registry = SessionRegistry::new(dirs.clone());
-
-        registry.insert_orphan(&codex_meta_with_conversation());
-
-        assert_keeps_agent_conversation_id(&registry);
-        let _ = std::fs::remove_dir_all(&dirs.config);
-    }
-
-    #[tokio::test]
-    async fn reattached_insert_keeps_agent_conversation_id() {
-        use crate::history::test_support::{fake_pty, scratch_dirs};
-        let dirs = scratch_dirs("reattached-agent-conversation-id");
-        let registry = SessionRegistry::new(dirs.clone());
-        let (pty, _exit_tx) = fake_pty();
-
-        registry
-            .insert_reattached(&codex_meta_with_conversation(), pty)
-            .publish();
-
-        assert_keeps_agent_conversation_id(&registry);
-        let _ = std::fs::remove_dir_all(&dirs.config);
+        .expect("build meta")
     }
 
     #[test]
@@ -1625,7 +1547,7 @@ mod tests {
 
     /// A sidecar for `s1` whose session does not count as busy.
     fn excluded_meta() -> OrphanMeta {
-        let mut meta = codex_meta_with_conversation();
+        let mut meta = standalone_meta();
         meta.busy_excluded = true;
         meta
     }

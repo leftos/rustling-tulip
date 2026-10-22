@@ -3,9 +3,9 @@
 //! layout. Plain Rust, so every rule is unit-tested; `sidebar_view` renders it.
 
 use protocol::{
-    Agent, AgentOptions, AppearanceOverrides, ClaudeProvider, CodexSandbox, ContainerRef,
-    DaemonMessage, PermissionMode, RepoEntry, SessionKind, SessionMode, SessionSnapshot,
-    SessionStatus, SpawnConfig, SpawnTarget, TabEntry, WorkspaceEntry,
+    Agent, AgentOptions, AppearanceOverrides, ClaudeProvider, ContainerRef, DaemonMessage,
+    PermissionMode, RepoEntry, SessionKind, SessionMode, SessionSnapshot, SessionStatus,
+    SpawnConfig, SpawnTarget, TabEntry, WorkspaceEntry,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use std::cmp::Ordering;
@@ -17,9 +17,7 @@ use crate::appearance::{self, AppColors, AppLevel, Resolved};
 use crate::fonts::{self, FontSettings};
 use crate::launch_last;
 use crate::source_control::{Part, ScKey, ScUiState};
-use crate::spawn_form::{
-    approval_label, codex_sandbox_label, cursor_sandbox_label, provider_hover_name,
-};
+use crate::spawn_form::{approval_label, provider_hover_name};
 use crate::tabs::collect_panes;
 use crate::window_state::WindowState;
 
@@ -377,44 +375,21 @@ pub struct UiState {
     /// The Settings modal's Spawn defaults tab.
     #[serde(default)]
     pub spawn: SpawnDefaults,
-    /// The Settings modal's agent pages.
-    #[serde(default)]
-    pub agents: AgentsSettings,
 }
 
 /// What the spawn dialog pre-fills from the Spawn defaults tab; every
-/// field off is the `claude` / `codex` CLI's own default.
+/// field off is the `claude` CLI's own default.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SpawnDefaults {
-    /// New Claude, Codex and Cursor sessions bypass approval prompts; Codex
-    /// and Cursor also bypass sandboxing.
+    /// New Claude sessions bypass approval prompts.
     pub trusted: bool,
     /// Claude's `--permission-mode` pre-fill.
     pub permission_mode: Option<PermissionMode>,
-    /// Codex's `--sandbox` pre-fill.
-    pub codex_sandbox: Option<CodexSandbox>,
     /// The endpoint a Claude spawn pre-selects; a provider this client does
     /// not know loads as Anthropic.
     #[serde(deserialize_with = "deserialize_known_provider")]
     pub claude_provider: ClaudeProvider,
-}
-
-/// The per-agent settings the Settings modal's agent pages hold.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct AgentsSettings {
-    /// Codex's settings.
-    pub codex: CodexAgentSettings,
-}
-
-/// Codex's settings on its Settings page.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct CodexAgentSettings {
-    /// A Codex spawn runs the injected hooks with
-    /// `--dangerously-bypass-hook-trust`.
-    pub hooks: bool,
 }
 
 /// `provider`, with one this client does not know read as Anthropic, so
@@ -559,7 +534,6 @@ impl Default for UiState {
             title: TitleSettings::default(),
             notifications: NotificationSettings::default(),
             spawn: SpawnDefaults::default(),
-            agents: AgentsSettings::default(),
         }
     }
 }
@@ -943,16 +917,6 @@ impl SidebarModel {
     /// The provider a spawn dialog opens with for Claude.
     pub fn set_spawn_claude_provider(&mut self, provider: ClaudeProvider) {
         self.ui.spawn.claude_provider = provider;
-    }
-
-    /// The sandbox mode a spawn dialog opens with for Codex.
-    pub fn set_spawn_codex_sandbox(&mut self, sandbox: Option<CodexSandbox>) {
-        self.ui.spawn.codex_sandbox = sandbox;
-    }
-
-    /// Whether a Codex spawn runs the injected hooks.
-    pub fn set_codex_hooks(&mut self, on: bool) {
-        self.ui.agents.codex.hooks = on;
     }
 
     /// Records the main window's place; returns whether it changed.
@@ -1447,8 +1411,6 @@ fn agent_summary_label(options: &AgentOptions, mode: SessionMode) -> String {
     }
     match options {
         AgentOptions::Claude { .. } => "Claude",
-        AgentOptions::Codex { .. } => "Codex",
-        AgentOptions::Cursor { .. } => "Cursor",
     }
     .to_owned()
 }
@@ -1460,12 +1422,6 @@ fn authority_label(options: &AgentOptions) -> Option<&'static str> {
         AgentOptions::Claude {
             permission_mode, ..
         } => permission_mode.map(|mode| approval_label(Some(mode))),
-        AgentOptions::Codex { sandbox, .. } => {
-            sandbox.map(|sandbox| codex_sandbox_label(Some(sandbox)))
-        }
-        AgentOptions::Cursor { sandbox, .. } => {
-            sandbox.map(|sandbox| cursor_sandbox_label(Some(sandbox)))
-        }
     }
 }
 
@@ -1816,8 +1772,7 @@ pub fn runtime_label(s: &SessionSnapshot) -> Option<String> {
 
 /// The endpoint a session is routed to when a chip should say so: its
 /// Claude provider on any non-Anthropic endpoint, and `None` for an
-/// Anthropic session or one that is not Claude at all (a Codex or Cursor
-/// session, or a plain shell), whatever its provider field reads. Both the
+/// Anthropic session or a plain shell, whatever its provider field reads. Both the
 /// pane header and the leaf go through this, so the two cannot disagree.
 #[must_use]
 pub fn chip_provider(s: &SessionSnapshot) -> Option<ClaudeProvider> {
@@ -1973,10 +1928,7 @@ pub fn save_ui_state(dir: &Path, state: &UiState) -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use crate::tabs::tests::{pane, tab};
-    use protocol::{
-        AttentionReason, CodexSandbox, CursorSandbox, GridNode, PermissionMode, SessionMember,
-        SplitDirection,
-    };
+    use protocol::{AttentionReason, GridNode, PermissionMode, SessionMember, SplitDirection};
     use serde_json::json;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
@@ -2514,18 +2466,7 @@ mod tests {
     }
 
     #[test]
-    fn only_a_claude_session_carries_a_provider() {
-        for agent in [Agent::Codex, Agent::Cursor] {
-            let mut s = session("id");
-            s.agent = agent;
-            s.claude_provider = ClaudeProvider::Deepseek;
-            let listed = leaf(&s, &HashSet::new(), &HashSet::new(), false);
-            assert_eq!(
-                listed.provider, None,
-                "a {agent:?} session says no provider"
-            );
-            assert_eq!(listed.tooltip, "id");
-        }
+    fn a_plain_shell_carries_no_provider() {
         let mut sh = shell("sh", Some("D:/src/app"), SessionKind::Standalone);
         sh.claude_provider = ClaudeProvider::Deepseek;
         let listed = leaf(&sh, &HashSet::new(), &HashSet::new(), false);
@@ -2548,9 +2489,9 @@ mod tests {
     #[test]
     fn runtime_tag_is_agent_or_program() {
         let mut agent = session("a");
-        agent.agent = protocol::Agent::Codex;
+        agent.agent = protocol::Agent::Claude;
         agent.program_name = Some("node".to_owned());
-        assert_eq!(runtime_label(&agent).as_deref(), Some("codex"));
+        assert_eq!(runtime_label(&agent).as_deref(), Some("claude"));
         let mut sh = shell("s", None, SessionKind::Standalone);
         assert_eq!(runtime_label(&sh), None);
         sh.program_name = Some("pwsh".to_owned());
@@ -2932,11 +2873,7 @@ mod tests {
             spawn: SpawnDefaults {
                 trusted: true,
                 permission_mode: Some(PermissionMode::Plan),
-                codex_sandbox: Some(CodexSandbox::DangerFullAccess),
                 claude_provider: ClaudeProvider::Deepseek,
-            },
-            agents: AgentsSettings {
-                codex: CodexAgentSettings { hooks: true },
             },
         };
         save_ui_state(&dir.0, &state).expect("first save");
@@ -2951,7 +2888,6 @@ mod tests {
         let defaults = SpawnDefaults {
             trusted: true,
             permission_mode: Some(PermissionMode::AcceptEdits),
-            codex_sandbox: Some(CodexSandbox::WorkspaceWrite),
             claude_provider: ClaudeProvider::Anthropic,
         };
         let state = UiState {
@@ -2964,7 +2900,6 @@ mod tests {
         let off = SpawnDefaults::default();
         assert!(!off.trusted);
         assert_eq!(off.permission_mode, None);
-        assert_eq!(off.codex_sandbox, None);
 
         std::fs::write(dir.0.join(UI_FILE), r#"{ "sidebar_collapsed": true }"#).expect("write");
         assert_eq!(
@@ -2979,74 +2914,15 @@ mod tests {
         let mut model = SidebarModel::new(UiState::default());
         model.set_spawn_trusted(true);
         model.set_spawn_permission_mode(Some(PermissionMode::Plan));
-        model.set_spawn_codex_sandbox(Some(CodexSandbox::ReadOnly));
         model.set_spawn_claude_provider(ClaudeProvider::Deepseek);
         assert_eq!(
             model.ui_state().spawn,
             SpawnDefaults {
                 trusted: true,
                 permission_mode: Some(PermissionMode::Plan),
-                codex_sandbox: Some(CodexSandbox::ReadOnly),
                 claude_provider: ClaudeProvider::Deepseek,
             }
         );
-    }
-
-    #[test]
-    fn agents_codex_hooks_defaults_off() {
-        let dir = TestDir::new("agents-hooks");
-        assert!(!UiState::default().agents.codex.hooks, "off by default");
-
-        std::fs::write(dir.0.join(UI_FILE), r#"{ "sidebar_collapsed": true }"#).expect("write");
-        assert!(
-            !load_ui_state(&dir.0).agents.codex.hooks,
-            "a file saved before the agent pages existed loads false"
-        );
-
-        std::fs::write(dir.0.join(UI_FILE), r#"{ "agents": { "codex": {} } }"#).expect("write");
-        assert!(
-            !load_ui_state(&dir.0).agents.codex.hooks,
-            "a group missing the field fills it"
-        );
-    }
-
-    #[test]
-    fn agents_codex_hooks_round_trip() {
-        let dir = TestDir::new("agents-hooks-round-trip");
-        let state = UiState {
-            agents: AgentsSettings {
-                codex: CodexAgentSettings { hooks: true },
-            },
-            ..UiState::default()
-        };
-        save_ui_state(&dir.0, &state).expect("save");
-        assert!(
-            load_ui_state(&dir.0).agents.codex.hooks,
-            "the chosen value round trips"
-        );
-    }
-
-    #[test]
-    fn agents_with_the_wrong_type_gives_the_whole_file_defaults() {
-        let dir = TestDir::new("agents-wrong-type");
-        std::fs::write(
-            dir.0.join(UI_FILE),
-            r#"{ "sidebar_collapsed": true, "agents": "on" }"#,
-        )
-        .expect("write");
-        assert_eq!(
-            load_ui_state(&dir.0),
-            UiState::default(),
-            "a wrong-shaped group resets the whole file, as every other group does"
-        );
-    }
-
-    #[test]
-    fn codex_hooks_setter_writes_the_field() {
-        let mut model = SidebarModel::new(UiState::default());
-        assert!(!model.ui_state().agents.codex.hooks);
-        model.set_codex_hooks(true);
-        assert!(model.ui_state().agents.codex.hooks);
     }
 
     #[test]
@@ -3894,31 +3770,15 @@ mod tests {
     }
 
     #[test]
-    fn launch_summary_names_each_agents_authority_setting() {
-        let mut codex = spawn_config(
+    fn launch_summary_names_the_approval_mode() {
+        let mut config = spawn_config(
             single_target("feat/x", Some("main"), false),
             SessionMode::Interactive,
         );
-        codex.agent_options = AgentOptions::Codex {
-            sandbox: Some(CodexSandbox::WorkspaceWrite),
-            hooks: false,
-        };
+        config.agent_options = AgentOptions::claude(Some(PermissionMode::AcceptEdits));
         assert_eq!(
-            launch_summary(Some(&codex)).as_deref(),
-            Some("Codex · Interactive · feat/x · workspace-write")
-        );
-
-        let mut cursor = spawn_config(
-            single_target("feat/x", Some("main"), false),
-            SessionMode::Interactive,
-        );
-        cursor.agent_options = AgentOptions::Cursor {
-            plan_mode: false,
-            sandbox: Some(CursorSandbox::Enabled),
-        };
-        assert_eq!(
-            launch_summary(Some(&cursor)).as_deref(),
-            Some("Cursor · Interactive · feat/x · enabled")
+            launch_summary(Some(&config)).as_deref(),
+            Some("Claude · Interactive · feat/x · accept edits")
         );
     }
 }

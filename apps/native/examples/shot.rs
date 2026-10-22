@@ -602,12 +602,12 @@ fn session_rows() -> Vec<Row> {
             extra: json!({ "has_per_session_worktree": true, "worktree_paths": [RECOVER_TREE] }),
         },
         Row {
-            id: "s-codex",
+            id: "s-review",
             label: "Review diff model",
             status: "idle",
             members: json!([member(TULIP, "main", TULIP_PATH)]),
             minutes: 1,
-            extra: json!({ "agent": "codex", "program_name": "codex" }),
+            extra: json!({}),
         },
         Row {
             id: "s-strip",
@@ -702,7 +702,7 @@ impl FakeDaemon {
     }
 
     /// The connection, the handshake and the lists a daemon sends first,
-    /// then a finished Codex turn (unseen) and a session asking for input.
+    /// then a finished review turn (unseen) and a session asking for input.
     fn greet(&self, fixture: &Fixture) -> Result<()> {
         let version = NATIVE_PROTOCOL_VERSIONS.first().copied().unwrap_or(1);
         let mut conn = Connection::new();
@@ -728,22 +728,22 @@ impl FakeDaemon {
         })?;
         self.send(fixture.tabs.clone())?;
         self.send(fixture.keep_awake.clone())?;
-        self.finish_codex_turn(fixture)?;
+        self.finish_review_turn(fixture)?;
         self.send(fixture.attention.clone())
     }
 
-    /// The Codex session works, then goes idle while nobody looks at it.
-    fn finish_codex_turn(&self, fixture: &Fixture) -> Result<()> {
-        let codex = fixture
+    /// The review session works, then goes idle while nobody looks at it.
+    fn finish_review_turn(&self, fixture: &Fixture) -> Result<()> {
+        let review = fixture
             .sessions
             .iter()
-            .find(|session| session.id == "s-codex")
-            .context("the fixture has no Codex session")?;
+            .find(|session| session.id == "s-review")
+            .context("the fixture has no review session")?;
         for status in [
             protocol::SessionStatus::Working,
             protocol::SessionStatus::Idle,
         ] {
-            let mut session = codex.clone();
+            let mut session = review.clone();
             session.status = status;
             session.status_since = Some(self.now);
             self.send(DaemonMessage::SessionUpdated {
@@ -812,7 +812,7 @@ fn stashes(now: DateTime<Utc>, repo_id: &str, worktree_path: Option<&str>) -> Va
         "worktree_path": worktree_path,
         "stashes": [
             { "id": "stash@{0}", "subject": "On feat/petal-footer: try a darker pill border", "created_at": at(3) },
-            { "id": "stash@{1}", "subject": "WIP on main: 73ee3ee feat: recover Codex and Cursor rows as their own agent", "created_at": at(50) },
+            { "id": "stash@{1}", "subject": "WIP on main: 73ee3ee feat: recover dialog keeps the chosen conversation", "created_at": at(50) },
         ],
     })
 }
@@ -838,7 +838,7 @@ fn commits(now: DateTime<Utc>, repo_id: &str, offset: u32, worktree_path: Option
         ),
         (
             "73ee3ee",
-            "feat: recover Codex and Cursor rows as their own agent",
+            "feat: recover dialog keeps the chosen conversation",
         ),
     ];
     let commits: Vec<Value> = if offset == 0 {
@@ -929,7 +929,7 @@ fn file_snapshot(msg: &ClientMessage) -> Result<DaemonMessage> {
 fn screen_for(session_id: &str) -> String {
     let lines = match session_id {
         "s-shell" => SHELL_SCREEN,
-        "s-codex" => CODEX_SCREEN,
+        "s-review" => CLAUDE_REVIEW_SCREEN,
         "s-petal" => CLAUDE_WORKING_SCREEN,
         _ => CLAUDE_IDLE_SCREEN,
     };
@@ -961,8 +961,8 @@ const CLAUDE_WORKING_SCREEN: &[&str] = &[
 const CLAUDE_IDLE_SCREEN: &[&str] = &[
     "\x1b[90m>\x1b[0m Summarize what changed since the last release",
     "",
-    "\x1b[37m●\x1b[0m Three changes landed since v0.9.2: Codex and Cursor rows",
-    "  recover as their own agent, the METAR parser accepts RMK groups,",
+    "\x1b[37m●\x1b[0m Three changes landed since v0.9.2: the recover dialog",
+    "  keeps the chosen conversation, the METAR parser accepts RMK groups,",
     "  and the strip layout keeps its column widths across restarts.",
     "",
     "\x1b[90m──────────────────────────────────────────────────────────────────\x1b[0m",
@@ -971,15 +971,16 @@ const CLAUDE_IDLE_SCREEN: &[&str] = &[
     "  \x1b[90m? for shortcuts\x1b[0m\x1b[?25l",
 ];
 
-const CODEX_SCREEN: &[&str] = &[
-    "\x1b[1m>_ OpenAI Codex\x1b[0m \x1b[90m(v0.46.0)\x1b[0m",
+const CLAUDE_REVIEW_SCREEN: &[&str] = &[
+    "\x1b[90m>\x1b[0m Review diff_model.rs for the hunk-merge edge cases",
     "",
-    "\x1b[36m›\x1b[0m Review diff_model.rs for the hunk-merge edge cases",
-    "",
-    "\x1b[90m•\x1b[0m Two hunks one context line apart merge into one; the tests",
+    "\x1b[37m●\x1b[0m Two hunks one context line apart merge into one; the tests",
     "  cover a gap of three but not of one. Added that case.",
     "",
-    "\x1b[36m›\x1b[0m ",
+    "\x1b[90m──────────────────────────────────────────────────────────────────\x1b[0m",
+    "> ",
+    "\x1b[90m──────────────────────────────────────────────────────────────────\x1b[0m",
+    "  \x1b[90m? for shortcuts\x1b[0m\x1b[?25l",
 ];
 
 const SHELL_SCREEN: &[&str] = &[

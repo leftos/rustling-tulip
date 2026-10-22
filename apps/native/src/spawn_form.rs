@@ -10,10 +10,10 @@ use std::time::{Duration, Instant};
 
 use protocol::env_rows::{self, Reference, is_secret_key};
 use protocol::{
-    Agent, AgentOptions, ClaudeProvider, ClientMessage, CodexSandbox, CursorSandbox, DaemonMessage,
-    EnvName, EnvScope, MemberSpawnPreview, PermissionMode, PinnedMemberWorktree, RepoEntry,
-    RootWorktreeEntry, RootWorktreeStatus, SessionMode, SessionSnapshot, SpawnConfig, SpawnRequest,
-    SpawnTarget, SuggestTarget, TabEntry, WorkspaceEntry, WorktreeInfo, WorktreeLaunchTarget,
+    Agent, AgentOptions, ClaudeProvider, ClientMessage, DaemonMessage, EnvName, EnvScope,
+    MemberSpawnPreview, PermissionMode, PinnedMemberWorktree, RepoEntry, RootWorktreeEntry,
+    RootWorktreeStatus, SessionMode, SessionSnapshot, SpawnConfig, SpawnRequest, SpawnTarget,
+    SuggestTarget, TabEntry, WorkspaceEntry, WorktreeInfo, WorktreeLaunchTarget,
     WorktreeReusePolicy,
 };
 
@@ -103,12 +103,7 @@ pub(crate) enum Runtime {
 }
 
 impl Runtime {
-    pub(crate) const ALL: [Self; 4] = [
-        Self::Agent(Agent::Claude),
-        Self::Agent(Agent::Codex),
-        Self::Agent(Agent::Cursor),
-        Self::PlainShell,
-    ];
+    pub(crate) const ALL: [Self; 2] = [Self::Agent(Agent::Claude), Self::PlainShell];
 
     pub(crate) fn label(self) -> &'static str {
         match self {
@@ -218,7 +213,7 @@ fn provider_part(provider: ClaudeProvider) -> String {
 /// The provider a stored spawn ran Claude on, when it was a Claude
 /// interactive or headless spawn: one with no provider field ran on
 /// Anthropic, and one this client does not know reads as Anthropic.
-/// `None` for a plain shell, Codex, Cursor or no stored spawn.
+/// `None` for a plain shell or no stored spawn.
 fn stored_claude_provider(config: Option<&SpawnConfig>) -> Option<ClaudeProvider> {
     config
         .filter(|c| c.mode != SessionMode::PlainShell)
@@ -233,21 +228,6 @@ pub(crate) const APPROVAL_CHOICES: [Option<PermissionMode>; 5] = [
     Some(PermissionMode::AcceptEdits),
     Some(PermissionMode::BypassPermissions),
     Some(PermissionMode::Plan),
-];
-
-/// Codex's sandbox modes, the CLI default first.
-pub(crate) const CODEX_SANDBOX_CHOICES: [Option<CodexSandbox>; 4] = [
-    None,
-    Some(CodexSandbox::ReadOnly),
-    Some(CodexSandbox::WorkspaceWrite),
-    Some(CodexSandbox::DangerFullAccess),
-];
-
-/// Cursor's sandbox modes, the CLI default first.
-pub(crate) const CURSOR_SANDBOX_CHOICES: [Option<CursorSandbox>; 3] = [
-    None,
-    Some(CursorSandbox::Enabled),
-    Some(CursorSandbox::Disabled),
 ];
 
 pub(crate) fn approval_label(mode: Option<PermissionMode>) -> &'static str {
@@ -267,18 +247,6 @@ fn approval_part(mode: Option<PermissionMode>) -> &'static str {
         Some(PermissionMode::AcceptEdits) => "accept-edits",
         Some(PermissionMode::BypassPermissions) => "bypass-permissions",
         Some(PermissionMode::Plan) => "plan",
-    }
-}
-
-pub(crate) fn codex_sandbox_label(sandbox: Option<CodexSandbox>) -> &'static str {
-    sandbox.map_or("CLI default (read-only)", CodexSandbox::as_cli_arg)
-}
-
-pub(crate) fn cursor_sandbox_label(sandbox: Option<CursorSandbox>) -> &'static str {
-    match sandbox {
-        None => "CLI default",
-        Some(CursorSandbox::Enabled) => "enabled",
-        Some(CursorSandbox::Disabled) => "disabled",
     }
 }
 
@@ -544,9 +512,6 @@ pub(crate) enum Control {
     Model,
     ModelChip(&'static str),
     Approval(Option<PermissionMode>),
-    CodexSandbox(Option<CodexSandbox>),
-    CursorPlan,
-    CursorSandbox(Option<CursorSandbox>),
     EnvKey(usize),
     EnvValue(usize),
     /// A secret row's Show / Hide button beside its masked value.
@@ -603,15 +568,6 @@ impl Control {
             Self::Model => "spawn-model".to_owned(),
             Self::ModelChip(alias) => format!("spawn-model-{alias}"),
             Self::Approval(mode) => format!("spawn-approval-{}", approval_part(*mode)),
-            Self::CodexSandbox(sandbox) => format!(
-                "spawn-codex-sandbox-{}",
-                sandbox.map_or("cli-default", CodexSandbox::as_cli_arg)
-            ),
-            Self::CursorPlan => "spawn-cursor-plan-mode".to_owned(),
-            Self::CursorSandbox(sandbox) => format!(
-                "spawn-cursor-sandbox-{}",
-                sandbox.map_or("cli-default", |s| cursor_sandbox_label(Some(s)))
-            ),
             Self::EnvKey(index) => format!("spawn-env-key-{index}"),
             Self::EnvValue(index) => format!("spawn-env-value-{index}"),
             Self::EnvReveal(index) => format!("spawn-env-value-{index}-reveal"),
@@ -896,7 +852,7 @@ fn same_key(a: &str, b: &str) -> bool {
 struct RuntimeChoice {
     agent: Agent,
     plain_shell: bool,
-    /// Headless rather than interactive; never set for cursor.
+    /// Headless rather than interactive.
     headless: bool,
     touched: Touched,
 }
@@ -908,9 +864,6 @@ struct Advanced {
     open: bool,
     model: String,
     permission_mode: Option<PermissionMode>,
-    codex_sandbox: Option<CodexSandbox>,
-    cursor_plan: bool,
-    cursor_sandbox: Option<CursorSandbox>,
     env: Vec<EnvRow>,
 }
 
@@ -991,8 +944,6 @@ pub(crate) struct SpawnForm {
     tabs: TabChoices,
     open_in: OpenChoice,
     trusted: bool,
-    /// A Codex spawn runs the injected hooks.
-    codex_hooks: bool,
     use_worktree: bool,
     /// The user changed the worktree checkbox since the target loaded.
     worktree_chosen: bool,
@@ -1044,8 +995,6 @@ pub(crate) struct FormInputs<'a> {
     pub tabs: TabChoices,
     /// The saved Spawn defaults every field is seeded from.
     pub spawn_defaults: SpawnDefaults,
-    /// The saved Codex hooks choice a Codex spawn starts from.
-    pub codex_hooks: bool,
     /// The target the dialog is held on, and the worktree it is pinned to.
     pub lock: Option<Lock>,
     /// The connected daemon routes Claude to a chosen provider; without it
@@ -1127,7 +1076,6 @@ impl SpawnForm {
             tabs: inputs.tabs,
             open_in,
             trusted: defaults.trusted,
-            codex_hooks: inputs.codex_hooks,
             use_worktree: true,
             worktree_chosen: false,
             mode: WorktreeMode::New,
@@ -1145,7 +1093,6 @@ impl SpawnForm {
             prompt: String::new(),
             advanced: Advanced {
                 permission_mode: defaults.permission_mode,
-                codex_sandbox: defaults.codex_sandbox,
                 ..Advanced::default()
             },
             focus: Control::Branch,
@@ -1245,7 +1192,6 @@ impl SpawnForm {
                 run_mode: true,
             },
         };
-        self.snap_headless();
         self.trusted = config.dangerously_skip_permissions;
         let options_set = self.apply_agent_options(&config.agent_options);
         self.apply_source_provider(config);
@@ -1275,8 +1221,8 @@ impl SpawnForm {
         }
     }
 
-    /// The source agent's own approval or sandbox options, replacing the
-    /// defaults'; returns whether the source set any of them.
+    /// The source agent's own approval options, replacing the defaults';
+    /// returns whether the source set any of them.
     fn apply_agent_options(&mut self, options: &AgentOptions) -> bool {
         match options {
             AgentOptions::Claude {
@@ -1284,16 +1230,6 @@ impl SpawnForm {
             } => {
                 self.advanced.permission_mode = *permission_mode;
                 permission_mode.is_some()
-            }
-            AgentOptions::Codex { sandbox, hooks, .. } => {
-                self.advanced.codex_sandbox = *sandbox;
-                self.codex_hooks = *hooks;
-                sandbox.is_some()
-            }
-            AgentOptions::Cursor { plan_mode, sandbox } => {
-                self.advanced.cursor_plan = *plan_mode;
-                self.advanced.cursor_sandbox = *sandbox;
-                *plan_mode || sandbox.is_some()
             }
         }
     }
@@ -1467,15 +1403,6 @@ impl SpawnForm {
         }
         if !self.provider.touched {
             self.provider.chosen = last_provider.unwrap_or(self.provider.default);
-        }
-        self.snap_headless();
-    }
-
-    /// Cursor has no headless mode: it runs interactive, and the snap is
-    /// not a choice the user made.
-    fn snap_headless(&mut self) {
-        if self.runtime.agent == Agent::Cursor {
-            self.runtime.headless = false;
         }
     }
 
@@ -2117,7 +2044,6 @@ impl SpawnForm {
                     self.runtime.headless = false;
                     self.runtime.touched.run_mode = true;
                 }
-                self.snap_headless();
             }
             Runtime::PlainShell => {
                 self.runtime.plain_shell = true;
@@ -2142,17 +2068,11 @@ impl SpawnForm {
         !self.runtime.plain_shell
     }
 
-    /// Whether headless can be chosen (not for cursor).
-    pub(crate) fn headless_enabled(&self) -> bool {
-        self.runtime.agent != Agent::Cursor
-    }
-
     fn set_run_mode(&mut self, mode: RunMode) {
-        let headless = mode == RunMode::Headless;
-        if !self.run_mode_shown() || (headless && !self.headless_enabled()) {
+        if !self.run_mode_shown() {
             return;
         }
-        self.runtime.headless = headless;
+        self.runtime.headless = mode == RunMode::Headless;
         self.runtime.touched.run_mode = true;
     }
 
@@ -2239,18 +2159,6 @@ impl SpawnForm {
 
     pub(crate) fn permission_mode(&self) -> Option<PermissionMode> {
         self.advanced.permission_mode
-    }
-
-    pub(crate) fn codex_sandbox(&self) -> Option<CodexSandbox> {
-        self.advanced.codex_sandbox
-    }
-
-    pub(crate) fn cursor_plan(&self) -> bool {
-        self.advanced.cursor_plan
-    }
-
-    pub(crate) fn cursor_sandbox(&self) -> Option<CursorSandbox> {
-        self.advanced.cursor_sandbox
     }
 
     pub(crate) fn env_rows(&self) -> &[EnvRow] {
@@ -2444,19 +2352,14 @@ impl SpawnForm {
     /// The flag a trusted launch passes the agent.
     pub(crate) fn trusted_flag(&self) -> &'static str {
         match self.runtime.agent {
-            Agent::Codex | Agent::Cursor => "--yolo",
             Agent::Claude => "--dangerously-skip-permissions",
         }
     }
 
     /// The trusted-launch warning's text before "Uses <flag>.".
-    pub(crate) fn trusted_detail(&self) -> String {
+    pub(crate) fn trusted_detail(&self) -> &'static str {
         match self.runtime.agent {
-            Agent::Codex | Agent::Cursor => format!(
-                "{} approvals and sandboxing are bypassed for this session.",
-                capitalised(self.runtime.agent.as_label())
-            ),
-            Agent::Claude => "Claude approval prompts are bypassed for this session.".to_owned(),
+            Agent::Claude => "Claude approval prompts are bypassed for this session.",
         }
     }
 
@@ -2651,9 +2554,7 @@ impl SpawnForm {
         let mut ring = Vec::new();
         if self.run_mode_shown() {
             ring.push(Control::RunMode(RunMode::Interactive));
-            if self.headless_enabled() {
-                ring.push(Control::RunMode(RunMode::Headless));
-            }
+            ring.push(Control::RunMode(RunMode::Headless));
         }
         if self.run_mode() == RunMode::Headless {
             ring.push(Control::Prompt);
@@ -2718,15 +2619,7 @@ impl SpawnForm {
         let locked = self.trusted();
         match self.runtime.agent {
             Agent::Claude if !locked => APPROVAL_CHOICES.map(Control::Approval).to_vec(),
-            Agent::Codex if !locked => CODEX_SANDBOX_CHOICES.map(Control::CodexSandbox).to_vec(),
-            Agent::Cursor => {
-                let mut ring = vec![Control::CursorPlan];
-                if !locked {
-                    ring.extend(CURSOR_SANDBOX_CHOICES.map(Control::CursorSandbox));
-                }
-                ring
-            }
-            Agent::Claude | Agent::Codex => Vec::new(),
+            Agent::Claude => Vec::new(),
         }
     }
 
@@ -2851,9 +2744,6 @@ impl SpawnForm {
             | Control::AdvancedToggle
             | Control::ModelChip(_)
             | Control::Approval(_)
-            | Control::CodexSandbox(_)
-            | Control::CursorPlan
-            | Control::CursorSandbox(_)
             | Control::EnvReveal(_)
             | Control::EnvSecret(_)
             | Control::EnvReplace(_)
@@ -2880,9 +2770,6 @@ impl SpawnForm {
             Control::AdvancedToggle => self.advanced.open = !self.advanced.open,
             Control::ModelChip(alias) => (*alias).clone_into(&mut self.advanced.model),
             Control::Approval(mode) if !locked => self.advanced.permission_mode = *mode,
-            Control::CodexSandbox(sandbox) if !locked => self.advanced.codex_sandbox = *sandbox,
-            Control::CursorSandbox(sandbox) if !locked => self.advanced.cursor_sandbox = *sandbox,
-            Control::CursorPlan => self.advanced.cursor_plan = !self.advanced.cursor_plan,
             Control::EnvAdd => {
                 self.advanced.env.push(EnvRow::default());
                 self.focus = Control::EnvKey(self.advanced.env.len() - 1);
@@ -3009,11 +2896,9 @@ impl SpawnForm {
     }
 
     /// The agent's options. A plain shell or a trusted launch sends no
-    /// approval mode or sandbox; cursor's plan mode goes whenever an agent
-    /// runs; a provider goes only where the Provider row shows.
+    /// approval mode; a provider goes only where the Provider row shows.
     fn agent_options(&self) -> AgentOptions {
-        let plain = self.runtime.plain_shell;
-        let suppress = plain || self.trusted();
+        let suppress = self.runtime.plain_shell || self.trusted();
         let advanced = &self.advanced;
         match self.runtime.agent {
             Agent::Claude => AgentOptions::Claude {
@@ -3023,14 +2908,6 @@ impl SpawnForm {
                 } else {
                     ClaudeProvider::Anthropic
                 },
-            },
-            Agent::Codex => AgentOptions::Codex {
-                sandbox: advanced.codex_sandbox.filter(|_| !suppress),
-                hooks: self.codex_hooks,
-            },
-            Agent::Cursor => AgentOptions::Cursor {
-                plan_mode: advanced.cursor_plan && !plain,
-                sandbox: advanced.cursor_sandbox.filter(|_| !suppress),
             },
         }
     }
@@ -3160,14 +3037,6 @@ pub(crate) fn initial_target(
     from_session
         .or_else(|| workspaces.first().map(|w| Target::Workspace(w.id.clone())))
         .or_else(|| repos.first().map(|r| Target::Repo(r.id.clone())))
-}
-
-/// `word` with its first letter in upper case, to open a sentence.
-fn capitalised(word: &str) -> String {
-    let mut chars = word.chars();
-    chars.next().map_or_else(String::new, |first| {
-        first.to_uppercase().chain(chars).collect()
-    })
 }
 
 fn is_plain_shell(config: Option<&SpawnConfig>) -> bool {
@@ -3331,7 +3200,6 @@ mod tests {
         focused: Option<SessionSnapshot>,
         tabs: TabChoices,
         spawn_defaults: SpawnDefaults,
-        codex_hooks: bool,
         lock: Option<Lock>,
         provider_supported: bool,
     }
@@ -3344,7 +3212,6 @@ mod tests {
                 focused: None,
                 tabs: tabs(Some("t1"), &[]),
                 spawn_defaults: SpawnDefaults::default(),
-                codex_hooks: false,
                 lock: None,
                 provider_supported: true,
             }
@@ -3356,12 +3223,6 @@ mod tests {
             self
         }
 
-        /// The saved Codex hooks choice the dialog opens over.
-        fn codex_hooks(mut self, on: bool) -> Self {
-            self.codex_hooks = on;
-            self
-        }
-
         fn open(&self, cache: &mut BranchCache) -> (SpawnForm, Vec<ClientMessage>) {
             SpawnForm::open(
                 FormInputs {
@@ -3370,7 +3231,6 @@ mod tests {
                     focused: self.focused.as_ref(),
                     tabs: self.tabs.clone(),
                     spawn_defaults: self.spawn_defaults,
-                    codex_hooks: self.codex_hooks,
                     lock: self.lock.clone(),
                     claude_provider_supported: self.provider_supported,
                 },
@@ -3385,12 +3245,11 @@ mod tests {
         Setup::repos(vec![repo]).open(&mut BranchCache::default()).0
     }
 
-    /// Both agent slots on, so a case can tell which one the dialog read.
+    /// Every default on, so a case can tell the dialog read them.
     fn all_defaults() -> SpawnDefaults {
         SpawnDefaults {
             trusted: true,
             permission_mode: Some(PermissionMode::Plan),
-            codex_sandbox: Some(CodexSandbox::WorkspaceWrite),
             claude_provider: ClaudeProvider::Anthropic,
         }
     }
@@ -3468,18 +3327,15 @@ mod tests {
     #[test]
     fn runtime_defaults_to_last_spawn_then_last_agent_then_claude() {
         let mut from_config = repo("r1");
-        from_config.last_spawn_config = Some(config("codex", "interactive"));
-        from_config.last_agent = Some(Agent::Cursor);
-        assert_eq!(
-            open_repo(from_config).runtime(),
-            Runtime::Agent(Agent::Codex)
-        );
+        from_config.last_spawn_config = Some(config("claude", "plain_shell"));
+        from_config.last_agent = Some(Agent::Claude);
+        assert_eq!(open_repo(from_config).runtime(), Runtime::PlainShell);
 
         let mut from_agent = repo("r1");
-        from_agent.last_agent = Some(Agent::Cursor);
+        from_agent.last_agent = Some(Agent::Claude);
         assert_eq!(
             open_repo(from_agent).runtime(),
-            Runtime::Agent(Agent::Cursor)
+            Runtime::Agent(Agent::Claude)
         );
         assert_eq!(
             open_repo(repo("r1")).runtime(),
@@ -3500,23 +3356,25 @@ mod tests {
 
     #[test]
     fn touched_runtime_ignores_later_defaults() {
-        let mut codex = repo("r2");
-        codex.last_spawn_config = Some(config("codex", "plain_shell"));
-        let mut form = Setup::repos(vec![repo("r1"), codex])
+        let mut shell = repo("r2");
+        shell.last_spawn_config = Some(config("claude", "plain_shell"));
+        let mut shell_too = repo("r3");
+        shell_too.last_spawn_config = Some(config("claude", "plain_shell"));
+        let mut form = Setup::repos(vec![repo("r1"), shell, shell_too])
             .open(&mut BranchCache::default())
             .0;
-        press(&mut form, &Control::Runtime(Runtime::Agent(Agent::Cursor)));
+        press(&mut form, &Control::Runtime(Runtime::Agent(Agent::Claude)));
         press(&mut form, &Control::Target(Target::Repo("r2".to_owned())));
         assert_eq!(
             form.runtime(),
             Runtime::PlainShell,
             "the untouched run mode still follows r2"
         );
-        press(&mut form, &Control::Runtime(Runtime::Agent(Agent::Cursor)));
-        press(&mut form, &Control::Target(Target::Repo("r1".to_owned())));
+        press(&mut form, &Control::Runtime(Runtime::Agent(Agent::Claude)));
+        press(&mut form, &Control::Target(Target::Repo("r3".to_owned())));
         assert_eq!(
             form.runtime(),
-            Runtime::Agent(Agent::Cursor),
+            Runtime::Agent(Agent::Claude),
             "both touched now"
         );
     }
@@ -3541,19 +3399,17 @@ mod tests {
     }
 
     #[test]
-    fn open_prefills_trusted_approval_and_sandbox_from_defaults() {
+    fn open_prefills_trusted_and_approval_from_defaults() {
         let mut cache = BranchCache::default();
         let (form, _) = Setup::repos(vec![repo("r1")])
             .defaults(all_defaults())
             .open(&mut cache);
         assert!(form.trusted(), "trusted launch pre-filled");
         assert_eq!(form.permission_mode(), Some(PermissionMode::Plan));
-        assert_eq!(form.codex_sandbox(), Some(CodexSandbox::WorkspaceWrite));
 
         let (plain, _) = Setup::repos(vec![repo("r2")]).open(&mut cache);
         assert!(!plain.trusted(), "off when no default is saved");
         assert_eq!(plain.permission_mode(), None);
-        assert_eq!(plain.codex_sandbox(), None);
     }
 
     #[test]
@@ -3566,10 +3422,6 @@ mod tests {
             &mut form,
             &Control::Approval(Some(PermissionMode::AcceptEdits)),
         );
-        press(
-            &mut form,
-            &Control::CodexSandbox(Some(CodexSandbox::DangerFullAccess)),
-        );
         assert_eq!(form.permission_mode(), Some(PermissionMode::AcceptEdits));
 
         press(&mut form, &Control::Target(Target::Repo("r2".to_owned())));
@@ -3577,11 +3429,6 @@ mod tests {
             form.permission_mode(),
             Some(PermissionMode::AcceptEdits),
             "the user's approval choice survives the switch"
-        );
-        assert_eq!(
-            form.codex_sandbox(),
-            Some(CodexSandbox::DangerFullAccess),
-            "and the sandbox choice"
         );
         assert!(!form.trusted(), "trusted stays as the user left it");
     }
@@ -3606,38 +3453,14 @@ mod tests {
     }
 
     #[test]
-    fn trusted_flag_label_follows_runtime() {
-        let mut form = open_repo(repo("r1"));
+    fn trusted_flag_label_names_claude_flag() {
+        let form = open_repo(repo("r1"));
         assert_eq!(form.trusted_flag(), "--dangerously-skip-permissions");
         assert_eq!(
             form.trusted_detail(),
             "Claude approval prompts are bypassed for this session."
         );
-        press(&mut form, &Control::Runtime(Runtime::Agent(Agent::Codex)));
-        assert_eq!(form.trusted_flag(), "--yolo");
-        assert_eq!(
-            form.trusted_detail(),
-            "Codex approvals and sandboxing are bypassed for this session."
-        );
-        press(&mut form, &Control::Runtime(Runtime::Agent(Agent::Cursor)));
-        assert_eq!(form.trusted_flag(), "--yolo");
         assert!(!form.trusted(), "trusted launch starts off");
-    }
-
-    #[test]
-    fn trusted_detail_opens_with_a_capital() {
-        let mut form = open_repo(repo("r1"));
-        press(&mut form, &Control::Runtime(Runtime::Agent(Agent::Cursor)));
-        assert_eq!(
-            form.trusted_detail(),
-            "Cursor approvals and sandboxing are bypassed for this session."
-        );
-        assert_eq!(
-            Runtime::Agent(Agent::Cursor).label(),
-            "cursor",
-            "the button stays"
-        );
-        assert_eq!(capitalised(""), "");
     }
 
     #[test]
@@ -3768,7 +3591,6 @@ mod tests {
                 focused: None,
                 tabs: TabChoices::default(),
                 spawn_defaults: SpawnDefaults::default(),
-                codex_hooks: false,
                 lock: None,
                 claude_provider_supported: true,
             },
@@ -3896,7 +3718,6 @@ mod tests {
             focused: None,
             tabs: tabs(Some("t1"), &[]),
             spawn_defaults: SpawnDefaults::default(),
-            codex_hooks: false,
             lock: None,
             provider_supported: true,
         };
@@ -3938,7 +3759,6 @@ mod tests {
             focused: None,
             tabs: tabs(None, &[]),
             spawn_defaults: SpawnDefaults::default(),
-            codex_hooks: false,
             lock: None,
             provider_supported: true,
         };
@@ -4085,8 +3905,6 @@ mod tests {
                 Control::Close,
                 Control::Target(Target::Repo("r1".to_owned())),
                 Control::Runtime(Runtime::Agent(Agent::Claude)),
-                Control::Runtime(Runtime::Agent(Agent::Codex)),
-                Control::Runtime(Runtime::Agent(Agent::Cursor)),
                 Control::Runtime(Runtime::PlainShell),
                 Control::Provider(ClaudeProvider::Anthropic),
                 Control::Provider(ClaudeProvider::Deepseek),
@@ -4173,43 +3991,6 @@ mod tests {
     }
 
     #[test]
-    fn cursor_snaps_headless_back_without_touching() {
-        let mut shell = repo("r2");
-        shell.last_spawn_config = Some(config("claude", "plain_shell"));
-        let mut form = Setup::repos(vec![repo("r1"), shell])
-            .open(&mut BranchCache::default())
-            .0;
-        form.runtime.headless = true;
-        press(&mut form, &Control::Runtime(Runtime::Agent(Agent::Cursor)));
-        assert_eq!(form.run_mode(), RunMode::Interactive);
-        assert!(!form.runtime.touched.run_mode, "the snap is not a choice");
-        press(&mut form, &Control::Target(Target::Repo("r2".to_owned())));
-        assert_eq!(
-            form.runtime(),
-            Runtime::PlainShell,
-            "the run mode still follows the target"
-        );
-
-        let mut form = ready_form();
-        press(&mut form, &Control::RunMode(RunMode::Headless));
-        press(&mut form, &Control::Runtime(Runtime::Agent(Agent::Cursor)));
-        assert_eq!(form.run_mode(), RunMode::Interactive);
-        assert!(!form.headless_enabled());
-        assert!(
-            !form
-                .controls()
-                .contains(&Control::RunMode(RunMode::Headless)),
-            "disabled, so out of the ring"
-        );
-        press(&mut form, &Control::RunMode(RunMode::Headless));
-        assert_eq!(form.run_mode(), RunMode::Interactive, "a press is inert");
-        press(&mut form, &Control::Runtime(Runtime::Agent(Agent::Codex)));
-        assert!(form.headless_enabled());
-        press(&mut form, &Control::RunMode(RunMode::Headless));
-        assert_eq!(request_of(&form).mode, SessionMode::Headless);
-    }
-
-    #[test]
     fn plain_shell_clears_to_interactive_and_sends_no_agent_extras() {
         let mut form = ready_form();
         press(&mut form, &Control::RunMode(RunMode::Headless));
@@ -4241,7 +4022,7 @@ mod tests {
         assert_eq!(request.agent_options, AgentOptions::claude(None));
         assert_eq!(request.extra_env, env(&[("FOO", "1")]));
 
-        press(&mut form, &Control::Runtime(Runtime::Agent(Agent::Codex)));
+        press(&mut form, &Control::Runtime(Runtime::Agent(Agent::Claude)));
         assert_eq!(
             form.run_mode(),
             RunMode::Interactive,
@@ -4250,7 +4031,7 @@ mod tests {
     }
 
     #[test]
-    fn trusted_suppresses_permission_mode_and_sandboxes_but_keeps_cursor_plan() {
+    fn trusted_suppresses_permission_mode() {
         let mut form = ready_form();
         press(&mut form, &Control::AdvancedToggle);
         press(
@@ -4269,54 +4050,6 @@ mod tests {
         );
         press(&mut form, &Control::Trusted);
         assert_eq!(request_of(&form).agent_options, accept);
-
-        press(&mut form, &Control::Runtime(Runtime::Agent(Agent::Codex)));
-        press(
-            &mut form,
-            &Control::CodexSandbox(Some(CodexSandbox::WorkspaceWrite)),
-        );
-        assert_eq!(
-            request_of(&form).agent_options,
-            AgentOptions::Codex {
-                sandbox: Some(CodexSandbox::WorkspaceWrite),
-                hooks: false,
-            }
-        );
-        press(&mut form, &Control::Trusted);
-        assert_eq!(
-            request_of(&form).agent_options,
-            AgentOptions::Codex {
-                sandbox: None,
-                hooks: false,
-            }
-        );
-        press(&mut form, &Control::Trusted);
-
-        press(&mut form, &Control::Runtime(Runtime::Agent(Agent::Cursor)));
-        press(
-            &mut form,
-            &Control::CursorSandbox(Some(CursorSandbox::Disabled)),
-        );
-        press(&mut form, &Control::CursorPlan);
-        press(&mut form, &Control::Trusted);
-        assert!(form.controls().contains(&Control::CursorPlan));
-        assert!(!form.controls().contains(&Control::CursorSandbox(None)));
-        assert_eq!(
-            request_of(&form).agent_options,
-            AgentOptions::Cursor {
-                plan_mode: true,
-                sandbox: None
-            }
-        );
-        press(&mut form, &Control::Runtime(Runtime::PlainShell));
-        assert_eq!(
-            request_of(&form).agent_options,
-            AgentOptions::Cursor {
-                plan_mode: false,
-                sandbox: None
-            },
-            "a plain shell drops plan mode"
-        );
     }
 
     #[test]
@@ -4327,13 +4060,6 @@ mod tests {
         assert_eq!(request_of(&form).model.as_deref(), Some("claude-opus-4"));
         form.edit_model("   ");
         assert_eq!(request_of(&form).model, None);
-        press(&mut form, &Control::Runtime(Runtime::Agent(Agent::Codex)));
-        form.edit_model("gpt-5");
-        assert_eq!(
-            request_of(&form).model.as_deref(),
-            Some("gpt-5"),
-            "every agent takes a model"
-        );
     }
 
     #[test]
@@ -4348,13 +4074,13 @@ mod tests {
         press(&mut form, &Control::ModelChip("haiku"));
         assert_eq!(form.model(), "haiku");
         assert_eq!(request_of(&form).model.as_deref(), Some("haiku"));
-        press(&mut form, &Control::Runtime(Runtime::Agent(Agent::Codex)));
+        press(&mut form, &Control::Provider(ClaudeProvider::Deepseek));
         assert!(
             !form
                 .controls()
                 .iter()
                 .any(|c| matches!(c, Control::ModelChip(_))),
-            "claude aliases only for claude"
+            "claude aliases only on Anthropic"
         );
         assert!(form.controls().contains(&Control::Model));
         assert_eq!(form.model(), "haiku");
@@ -4841,17 +4567,6 @@ mod tests {
         press(&mut form, &Control::EnvAdd);
         form.edit_env_key(0, "A");
         form.edit_env_value(0, "1");
-        press(&mut form, &Control::Runtime(Runtime::Agent(Agent::Codex)));
-        press(
-            &mut form,
-            &Control::CodexSandbox(Some(CodexSandbox::ReadOnly)),
-        );
-        press(&mut form, &Control::Runtime(Runtime::Agent(Agent::Cursor)));
-        press(&mut form, &Control::CursorPlan);
-        press(
-            &mut form,
-            &Control::CursorSandbox(Some(CursorSandbox::Enabled)),
-        );
         press(&mut form, &Control::Runtime(Runtime::PlainShell));
 
         press(&mut form, &Control::Runtime(Runtime::Agent(Agent::Claude)));
@@ -4864,22 +4579,6 @@ mod tests {
             AgentOptions::claude(Some(PermissionMode::Plan))
         );
         assert_eq!(request.extra_env, env(&[("A", "1")]));
-        press(&mut form, &Control::Runtime(Runtime::Agent(Agent::Codex)));
-        assert_eq!(
-            request_of(&form).agent_options,
-            AgentOptions::Codex {
-                sandbox: Some(CodexSandbox::ReadOnly),
-                hooks: false,
-            }
-        );
-        press(&mut form, &Control::Runtime(Runtime::Agent(Agent::Cursor)));
-        assert_eq!(
-            request_of(&form).agent_options,
-            AgentOptions::Cursor {
-                plan_mode: true,
-                sandbox: Some(CursorSandbox::Enabled)
-            }
-        );
     }
 
     #[test]
@@ -4975,7 +4674,6 @@ mod tests {
             focused: None,
             tabs: TabChoices::default(),
             spawn_defaults: SpawnDefaults::default(),
-            codex_hooks: false,
             lock: None,
             provider_supported: true,
         }
@@ -5036,7 +4734,6 @@ mod tests {
                     focused: None,
                     tabs: TabChoices::default(),
                     spawn_defaults: SpawnDefaults::default(),
-                    codex_hooks: false,
                     lock: unknown.lock.clone(),
                     claude_provider_supported: true,
                 },
@@ -5200,7 +4897,7 @@ mod tests {
         assert_eq!(claude.runtime(), Runtime::Agent(Agent::Claude));
         assert!(
             !claude.advanced_open(),
-            "the Codex sandbox default is not the claude source's own setting"
+            "the approval-mode default is not the source's own setting"
         );
         let planned = duplicated(stored_config(&json!({
             "agent_options": { "kind": "claude", "permission_mode": "plan" },
@@ -5209,21 +4906,12 @@ mod tests {
             planned.advanced_open(),
             "the source's own approval mode shows"
         );
-        let codex = duplicated(stored_config(&json!({
-            "agent_options": { "kind": "codex", "sandbox": "read-only" },
-        })));
-        assert!(codex.advanced_open(), "the source's own sandbox shows");
-        assert_eq!(codex.runtime(), Runtime::Agent(Agent::Codex));
-        assert_eq!(codex.codex_sandbox(), Some(CodexSandbox::ReadOnly));
-        let (request, _, _) = codex.build_request();
+        let (request, _, _) = planned.build_request();
         assert!(!request.dangerously_skip_permissions);
-        assert!(matches!(
+        assert_eq!(
             request.agent_options,
-            AgentOptions::Codex {
-                sandbox: Some(CodexSandbox::ReadOnly),
-                hooks: false,
-            }
-        ));
+            AgentOptions::claude(Some(PermissionMode::Plan))
+        );
     }
 
     #[test]
@@ -5231,14 +4919,14 @@ mod tests {
         let form = duplicated(stored_config(&json!({
             "mode": "headless",
             "dangerously_skip_permissions": true,
-            "agent_options": { "kind": "codex", "sandbox": null },
-            "model": "gpt-5",
+            "agent_options": { "kind": "claude" },
+            "model": "sonnet",
             "extra_env": [["API_TOKEN", "${env:API_TOKEN}"], ["LEVEL", "3"]],
         })));
-        assert_eq!(form.runtime(), Runtime::Agent(Agent::Codex));
+        assert_eq!(form.runtime(), Runtime::Agent(Agent::Claude));
         assert_eq!(form.run_mode(), RunMode::Headless);
         assert!(form.trusted());
-        assert_eq!(form.model(), "gpt-5");
+        assert_eq!(form.model(), "sonnet");
         assert!(form.advanced_open(), "the prefilled Advanced values show");
         assert_eq!(
             form.env_rows(),
@@ -5247,12 +4935,6 @@ mod tests {
                 EnvRow::prefilled("LEVEL", "3"),
             ]
         );
-        let cursor = duplicated(stored_config(&json!({
-            "agent_options": { "kind": "cursor", "plan_mode": true, "sandbox": "disabled" },
-        })));
-        assert_eq!(cursor.runtime(), Runtime::Agent(Agent::Cursor));
-        assert!(cursor.cursor_plan());
-        assert_eq!(cursor.cursor_sandbox(), Some(CursorSandbox::Disabled));
         let shell = duplicated(stored_config(&json!({ "mode": "plain_shell" })));
         assert_eq!(shell.runtime(), Runtime::PlainShell);
     }
@@ -5452,8 +5134,7 @@ mod tests {
         }
     }
 
-    /// The provider the form's spawn request carries; `None` for Codex and
-    /// Cursor.
+    /// The provider the form's spawn request carries.
     fn sent_provider(form: &SpawnForm) -> Option<ClaudeProvider> {
         form.build_request().0.agent_options.claude_provider()
     }
@@ -5600,32 +5281,19 @@ mod tests {
             ClaudeProvider::Anthropic,
             "an unknown last provider counts as Anthropic"
         );
-        for (kind, mode) in [
-            ("claude", "plain_shell"),
-            ("codex", "interactive"),
-            ("cursor", "interactive"),
-        ] {
-            assert_eq!(
-                seeded_over_deepseek_default(config(kind, mode)),
-                ClaudeProvider::Deepseek,
-                "a {kind} {mode} last spawn leaves the default"
-            );
-        }
+        assert_eq!(
+            seeded_over_deepseek_default(config("claude", "plain_shell")),
+            ClaudeProvider::Deepseek,
+            "a plain-shell last spawn leaves the default"
+        );
     }
 
     #[test]
-    fn codex_cursor_and_plain_shell_send_no_provider() {
+    fn a_plain_shell_sends_no_provider() {
         let mut form = Setup::repos(vec![repo("r1")])
             .defaults(provider_defaults(ClaudeProvider::Deepseek))
             .open(&mut BranchCache::default())
             .0;
-        for agent in [Agent::Codex, Agent::Cursor] {
-            press(&mut form, &Control::Runtime(Runtime::Agent(agent)));
-            assert!(!form.provider_shown(), "{agent:?} hides the row");
-            assert_eq!(provider_stops(&form), Vec::<Control>::new());
-            assert_eq!(sent_provider(&form), None, "{agent:?} has no provider");
-        }
-        press(&mut form, &Control::Runtime(Runtime::Agent(Agent::Claude)));
         press(&mut form, &Control::Runtime(Runtime::PlainShell));
         assert!(!form.provider_shown(), "a plain shell hides the row");
         assert_eq!(provider_stops(&form), Vec::<Control>::new());
@@ -5641,10 +5309,10 @@ mod tests {
     }
 
     #[test]
-    fn switching_claude_codex_claude_keeps_the_choice() {
+    fn switching_claude_shell_claude_keeps_the_choice() {
         let mut form = open_repo(repo("r1"));
         press(&mut form, &Control::Provider(ClaudeProvider::Deepseek));
-        press(&mut form, &Control::Runtime(Runtime::Agent(Agent::Codex)));
+        press(&mut form, &Control::Runtime(Runtime::PlainShell));
         press(&mut form, &Control::Runtime(Runtime::Agent(Agent::Claude)));
         assert_eq!(form.provider(), ClaudeProvider::Deepseek);
         assert_eq!(sent_provider(&form), Some(ClaudeProvider::Deepseek));
@@ -5696,65 +5364,11 @@ mod tests {
         assert!(!form.model_chips_shown());
         assert!(!form.controls().contains(&Control::ModelChip("opus")));
         assert_eq!(form.model_placeholder(), "deepseek-flash");
-        press(&mut form, &Control::Runtime(Runtime::Agent(Agent::Codex)));
+        press(&mut form, &Control::Runtime(Runtime::PlainShell));
         assert_eq!(
             form.model_placeholder(),
             "CLI default",
-            "Codex's model is not DeepSeek's"
-        );
-    }
-
-    #[test]
-    fn a_codex_spawn_sends_the_saved_hooks_choice() {
-        let setup = Setup::repos(vec![repo("r1")]).codex_hooks(true);
-        let mut form = setup.open(&mut BranchCache::default()).0;
-        press(&mut form, &Control::Runtime(Runtime::Agent(Agent::Codex)));
-        assert!(
-            matches!(
-                request_of(&form).agent_options,
-                AgentOptions::Codex { hooks: true, .. }
-            ),
-            "the saved choice reaches the spawn"
-        );
-        press(&mut form, &Control::Runtime(Runtime::Agent(Agent::Claude)));
-        assert!(matches!(
-            request_of(&form).agent_options,
-            AgentOptions::Claude { .. }
-        ));
-        press(&mut form, &Control::Runtime(Runtime::Agent(Agent::Cursor)));
-        assert!(matches!(
-            request_of(&form).agent_options,
-            AgentOptions::Cursor { .. }
-        ));
-    }
-
-    #[test]
-    fn a_duplicate_codex_source_hooks_beat_the_saved_choice() {
-        let on = duplicated(stored_config(&json!({
-            "agent_options": { "kind": "codex", "sandbox": null, "hooks": true },
-        })));
-        assert!(
-            matches!(
-                on.build_request().0.agent_options,
-                AgentOptions::Codex { hooks: true, .. }
-            ),
-            "a source with hooks on wins over the saved choice off"
-        );
-
-        let mut setup = duplicate_setup(repo("r1"));
-        setup.codex_hooks = true;
-        let (form, _) = duplicate_on(
-            &setup,
-            stored_config(&json!({
-                "agent_options": { "kind": "codex", "sandbox": null, "hooks": false },
-            })),
-        );
-        assert!(
-            matches!(
-                form.build_request().0.agent_options,
-                AgentOptions::Codex { hooks: false, .. }
-            ),
-            "a source with hooks off wins over the saved choice on"
+            "a plain shell's model is not DeepSeek's"
         );
     }
 }

@@ -10,7 +10,6 @@ mod agents;
 mod binary_cache;
 mod branch_fate;
 mod branch_names;
-mod codex_rollout;
 mod detach;
 mod env_secrets;
 mod file_fetch;

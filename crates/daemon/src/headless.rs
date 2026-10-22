@@ -35,7 +35,7 @@ pub struct HeadlessSpec {
     pub cwd: PathBuf,
     pub env: Vec<(String, String)>,
     /// Agent kind. Drives which backend's `handle_headless_line` parses
-    /// stdout — claude's stream-json, codex's exec-json, etc.
+    /// stdout — claude's stream-json.
     pub agent: Agent,
 }
 

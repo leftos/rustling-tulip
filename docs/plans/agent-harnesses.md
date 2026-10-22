@@ -1,10 +1,10 @@
 # A runtime dropdown of every popular agent harness
 
-Design for the "A runtime dropdown of every popular agent harness" line in [MAIN.md](./MAIN.md) (Backlog, Agent CLIs): the spawn dialog's runtime choice grows from Claude / Codex / Cursor / shell into a dropdown of the popular terminal agent CLIs, Google Antigravity and Pi among them (user). Step ids are `AH.n`, written once the open questions below are answered.
+Design for the "A runtime dropdown of every popular agent harness" line in [MAIN.md](./MAIN.md) (Backlog, Agent CLIs): the spawn dialog's runtime choice grows from Claude / shell into a dropdown of the popular terminal agent CLIs, Google Antigravity and Pi among them (user). Step ids are `AH.n`, written once the open questions below are answered.
 
 ## Problem
 
-The daemon runs three agent CLIs, each through a backend in `crates/daemon/src/agents/` (`AgentBackend`: `program_env_var`, `default_program`, `supports_headless`, `build_interactive_args`, `build_headless_args`), picked by the closed `protocol::Agent` enum (`Claude`, `Codex`, `Cursor`) and its `AgentOptions` options. Every other harness is reachable only by typing its command into a plain-shell session, which gets no status, no resume, no Recover and no chip.
+The daemon runs one agent CLI, Claude, through a backend in `crates/daemon/src/agents/` (`AgentBackend`: `program_env_var`, `default_program`, `supports_headless`, `build_interactive_args`, `build_headless_args`), picked by the closed `protocol::Agent` enum (`Claude`) and its `AgentOptions` options. Codex and Cursor support was removed for the first release and returns as plugins on the agent seam ([agent-plugins.md](./agent-plugins.md)); the Codex and Cursor mentions below describe how those backends worked and the patterns they set. Every other harness is reachable only by typing its command into a plain-shell session, which gets no status, no resume, no Recover and no chip.
 
 ## Findings
 
@@ -65,8 +65,8 @@ These are one spike, AH.1, whose note lands in `docs/spikes/dsh-tui.md`.
 
 ## Design (to be completed from the answers)
 
-- One backend module per harness under `crates/daemon/src/agents/`, a `protocol::Agent` variant and an `AgentOptions` variant each, and a `RUSTLING_TULIP_<NAME>` program override per harness as for Claude and Codex.
-- Conversation id capture per tier, as the existing three do: Tier A passes a chosen id; Tier B pre-creates; Tier C finds it after launch. The id lands in `agent_conversation_id`, so own-agent recovery covers every harness that can resume.
+- One backend module per harness under `crates/daemon/src/agents/`, a `protocol::Agent` variant and an `AgentOptions` variant each, and a `RUSTLING_TULIP_<NAME>` program override per harness as for Claude.
+- Conversation id capture per tier, as the removed Codex and Cursor backends did: Tier A passes a chosen id; Tier B pre-creates; Tier C finds it after launch. Where the id lands and how own-agent recovery returns are decided with the plugin seam.
 - The spawn dialog's runtime choice becomes a dropdown (`spawn_form.rs` state, `spawn_view.rs` view); its grouping, the handling of uninstalled CLIs and the per-harness options follow the answers below.
 
 ## Open questions

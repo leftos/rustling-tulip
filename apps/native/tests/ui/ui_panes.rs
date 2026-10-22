@@ -314,7 +314,7 @@ fn pane_header_shows_runtime_trusted_and_headless_chips(cx: &mut TestAppContext)
             .label("repo · main")
             .cwd("D:/src/repo")
             .build(),
-        session("s2").headless().agent("codex").build(),
+        session("s2").headless().build(),
     );
     let mut h = Harness::with(cx, &dir, &fixture);
 
@@ -334,7 +334,7 @@ fn pane_header_shows_runtime_trusted_and_headless_chips(cx: &mut TestAppContext)
     assert_eq!(
         header.chips,
         [
-            runtime("codex"),
+            runtime("claude"),
             chip(HeaderChipKind::Headless, "headless", HEADLESS_TIP),
         ],
         "a headless session says so in a chip"
@@ -365,7 +365,8 @@ fn deepseek_chip_follows_the_runtime_chip(cx: &mut TestAppContext) {
                 .build(),
             session("s2").build(),
             session("s3")
-                .agent("codex")
+                .shell("D:/x")
+                .program_name("pwsh")
                 .claude_provider(ClaudeProvider::Deepseek)
                 .build(),
         ],
@@ -389,8 +390,8 @@ fn deepseek_chip_follows_the_runtime_chip(cx: &mut TestAppContext) {
     assert_eq!(header_of(&mut h, "p2").chips, [runtime("claude")]);
     assert_eq!(
         header_of(&mut h, "p3").chips,
-        [runtime("codex")],
-        "a Codex session says no provider, whatever the snapshot reports"
+        [runtime("pwsh")],
+        "a plain shell says no provider, whatever the snapshot reports"
     );
 
     assert!(

@@ -906,16 +906,11 @@ impl TerminalPane {
     }
 
     fn on_key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let Some(session) = self.session else {
+        if self.session.is_none() {
             return;
-        };
+        }
         let ks = &event.keystroke;
-        let action = term_input::key_action(
-            ks,
-            self.term.app_cursor(),
-            self.term.has_selection(),
-            session,
-        );
+        let action = term_input::key_action(ks, self.term.app_cursor(), self.term.has_selection());
         let Some(action) = action else {
             self.last_key_char = ks.key_char.clone().filter(|text| text.chars().count() == 1);
             return;

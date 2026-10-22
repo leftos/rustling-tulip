@@ -641,13 +641,21 @@ fn abandoned_overlay_resume_sends_resume_abandoned(cx: &mut TestAppContext) {
 #[gpui::test]
 fn orphan_pane_shows_banner_naming_runtime(cx: &mut TestAppContext) {
     let dir = TestDir::new();
-    let mut h = single(cx, &dir, session("s1").orphan().agent("codex").build());
+    let mut h = single(
+        cx,
+        &dir,
+        session("s1")
+            .orphan()
+            .shell("D:/x")
+            .program_name("pwsh")
+            .build(),
+    );
 
     assert!(painted(&mut h, "orphan-banner-p1"));
     assert_eq!(
         notice_of(&mut h, "p1"),
         [
-            "PTY stream lost across daemon restart. The underlying codex process is still running, \
+            "PTY stream lost across daemon restart. The underlying pwsh process is still running, \
              but live input/output is not available. Use Stop to kill the recorded PID and clean up, \
              then spawn a new session."
         ]

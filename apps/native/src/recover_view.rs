@@ -49,9 +49,6 @@ pub struct RecoverRow {
     pub conversations: usize,
     /// The chosen "Recover as" text, when the row offers the choice.
     pub recover_as: Option<String>,
-    /// The one way an own-agent row recovers, where a Claude row shows
-    /// nothing.
-    pub fixed_how: Option<String>,
     /// The last recovery's failure.
     pub error: Option<String>,
 }
@@ -113,7 +110,6 @@ impl RootView {
                     .shows_recover_as
                     .then(|| row.chosen().map(|o| o.label.clone()))
                     .flatten(),
-                fixed_how: row.fixed_how.clone(),
                 error: row.error.clone(),
             })
             .collect()
@@ -655,9 +651,6 @@ fn row_block(dialog: &RecoverDialog, id: &str, cx: &mut Context<RootView>) -> Di
         .gap(px(8.0))
         .pl(px(28.0))
         .child(muted(row.place.clone()));
-    if let Some(how) = row.fixed_how.clone() {
-        details = details.child(muted(how));
-    }
     if row.disabled.is_none() {
         if resumes(row) {
             details = details.child(conversation_choice(dialog, row, cx));

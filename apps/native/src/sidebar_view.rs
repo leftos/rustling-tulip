@@ -1609,8 +1609,6 @@ fn runtime_color(leaf: &Leaf) -> u32 {
     }
     match leaf.agent {
         Agent::Claude => ACCENT,
-        Agent::Codex => LILAC,
-        Agent::Cursor => TEXT_2,
     }
 }
 

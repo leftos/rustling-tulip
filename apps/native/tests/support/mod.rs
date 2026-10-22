@@ -587,21 +587,9 @@ impl HistoryItemBuilder {
         self.end(json!({"type": "stopped_by_user"}))
     }
 
-    /// Run by the `agent` CLI: `"claude"`, `"codex"` or `"cursor"`.
+    /// Run by the `agent` CLI: `"claude"`.
     pub fn agent(self, agent: &str) -> Self {
         self.entry("agent", json!(agent))
-    }
-
-    /// Recorded with `id` as the conversation its own CLI resumes with (a
-    /// Codex rollout, a Cursor chat).
-    pub fn agent_conversation_id(self, id: &str) -> Self {
-        self.entry("agent_conversation_id", json!(id))
-    }
-
-    /// Whether the daemon can resume the entry's own conversation.
-    pub fn own_agent_resumable(mut self, resumable: bool) -> Self {
-        self.0["own_agent_resumable"] = json!(resumable);
-        self
     }
 
     /// Ended `minutes` ago.

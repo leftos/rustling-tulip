@@ -81,9 +81,8 @@ pub struct OrphanMeta {
     /// legacy `claude`/`node` heuristic.
     #[serde(default)]
     pub program_name: Option<String>,
-    /// Which CLI spawned this session. `None` for metas written by daemon
-    /// versions that pre-date codex support; reattach defaults to
-    /// `Agent::Claude` in that case (the only agent that existed then).
+    /// Which CLI spawned this session. `None` for metas written before this
+    /// field existed; reattach defaults to `Agent::Claude` in that case.
     #[serde(default)]
     pub agent: Option<Agent>,
     /// Latest OSC-emitted window title. Stored alongside the canonical label
@@ -163,11 +162,6 @@ pub struct OrphanMeta {
     /// this field existed.
     #[serde(default)]
     pub claude_session_id: Option<String>,
-    /// The conversation id the session's own agent CLI resumes with (Codex,
-    /// Cursor). `None` for Claude sessions, for a session whose id is not
-    /// known yet, and for sidecars written before this field existed.
-    #[serde(default)]
-    pub agent_conversation_id: Option<String>,
     /// True when the user asked that this session not count as busy, so a
     /// reattached session keeps it. False for sidecars written before this
     /// field existed.
@@ -547,7 +541,6 @@ pub fn meta_from_record(
         tracer_exe_path,
         claude_session_id,
         // Mirrored from the record, like the status.
-        agent_conversation_id: None,
         busy_excluded: false,
     })
 }
@@ -568,7 +561,6 @@ pub struct RecordMirror {
     pub user_label: Option<String>,
     pub label: String,
     pub appearance: AppearanceOverrides,
-    pub agent_conversation_id: Option<String>,
     pub claude_session_id: Option<String>,
     pub busy_excluded: bool,
 }
@@ -585,7 +577,6 @@ impl RecordMirror {
             && meta.label == self.label
             && meta.appearance == self.appearance
             && meta.accent_color.is_none()
-            && meta.agent_conversation_id == self.agent_conversation_id
             && meta.claude_session_id == self.claude_session_id
             && meta.busy_excluded == self.busy_excluded
     }
@@ -604,8 +595,6 @@ impl RecordMirror {
         // record was built, so it is dropped from every rewrite.
         meta.accent_color = None;
         meta.appearance = self.appearance.clone();
-        meta.agent_conversation_id
-            .clone_from(&self.agent_conversation_id);
         meta.claude_session_id.clone_from(&self.claude_session_id);
         meta.busy_excluded = self.busy_excluded;
     }
@@ -853,7 +842,6 @@ mod tests {
             tracer_pipe: Some(r"\\.\pipe\rt-tracer-s1".to_string()),
             tracer_exe_path: Some(r"C:\cache\rt-tracer-aaaaaaaaaaaaaaaa.exe".to_string()),
             claude_session_id: None,
-            agent_conversation_id: None,
             busy_excluded: false,
         };
         let bytes = serde_json::to_vec(&original).expect("serialize");
@@ -1012,7 +1000,6 @@ mod tests {
             user_label: None,
             label: "s1".to_owned(),
             appearance: AppearanceOverrides::default(),
-            agent_conversation_id: None,
             claude_session_id: claude_session_id.map(str::to_owned),
             busy_excluded: false,
         }
@@ -1137,58 +1124,6 @@ mod tests {
             Some(options),
             "a reattached session keeps its provider"
         );
-        let _ = std::fs::remove_dir_all(&dirs.config);
-    }
-
-    #[test]
-    fn agent_conversation_id_round_trips_and_defaults_on_old_meta() {
-        let dirs = scratch_dirs("agent-conversation-id");
-        let mut meta = meta_from_record(
-            "s-codex".to_string(),
-            4242,
-            "repo:main".to_string(),
-            SessionKind::Single,
-            SessionMode::Interactive,
-            vec![],
-            chrono::DateTime::from_timestamp(0, 0).unwrap(),
-            None,
-            Some("rt-tracer".to_string()),
-            Agent::Codex,
-            None,
-            None,
-            None,
-            Some(4242),
-            Some(r"\\.\pipe\rt-tracer-s-codex".to_string()),
-            None,
-            None,
-        )
-        .expect("build meta");
-        assert_eq!(meta.agent_conversation_id, None);
-        meta.agent_conversation_id = Some("019a2b3c-codex".to_string());
-        write_meta(&dirs, &meta).expect("write meta");
-        let loaded = load_meta(&dirs, "s-codex").expect("load meta");
-        assert_eq!(
-            loaded.agent_conversation_id.as_deref(),
-            Some("019a2b3c-codex")
-        );
-        assert_eq!(loaded.claude_session_id, None);
-
-        // A sidecar written before the field existed decodes with `None`.
-        let old = br#"{
-            "on_disk_version": 2,
-            "session_id": "old",
-            "pid": 9001,
-            "label": "legacy",
-            "kind": "single",
-            "mode": "interactive",
-            "members": [],
-            "started_at": "2024-01-01T00:00:00Z",
-            "program_name": "rt-tracer",
-            "tracer_pid": 9001,
-            "tracer_pipe": "\\\\.\\pipe\\rt-tracer-old"
-        }"#;
-        let old_meta = load_meta_from_bytes(old).expect("parse old meta");
-        assert_eq!(old_meta.agent_conversation_id, None);
         let _ = std::fs::remove_dir_all(&dirs.config);
     }
 }

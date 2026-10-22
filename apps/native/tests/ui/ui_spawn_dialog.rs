@@ -353,8 +353,8 @@ fn escape_closes_and_backdrop_click_does_not(cx: &mut TestAppContext) {
     );
     assert!(is_open(&mut h), "a backdrop click keeps the form");
 
-    h.click_on("spawn-agent-codex");
-    assert_eq!(focus(&mut h).as_deref(), Some("spawn-agent-codex"));
+    h.click_on("spawn-agent-plain-shell");
+    assert_eq!(focus(&mut h).as_deref(), Some("spawn-agent-plain-shell"));
     h.keys("escape");
     assert!(!is_open(&mut h), "Esc on a button closes");
 
@@ -437,10 +437,8 @@ fn dialog_opens_with_saved_spawn_defaults(cx: &mut TestAppContext) {
         serde_json::json!({
             "spawn": {
                 "trusted": true,
-                "permission_mode": "plan",
-                "codex_sandbox": "read-only",
-            },
-            "agents": { "codex": { "hooks": true } }
+                "permission_mode": "plan"
+            }
         })
         .to_string(),
     )
@@ -456,12 +454,6 @@ fn dialog_opens_with_saved_spawn_defaults(cx: &mut TestAppContext) {
         chosen.contains(&"spawn-approval-plan".to_owned()),
         "Claude approval pre-filled: {chosen:?}"
     );
-    h.click_on("spawn-agent-codex");
-    let chosen = selected(&mut h);
-    assert!(
-        chosen.contains(&"spawn-codex-sandbox-read-only".to_owned()),
-        "Codex sandbox pre-filled: {chosen:?}"
-    );
 
     suggest(&mut h, "r1", "wt/brave-fox");
     h.click_on("spawn-submit");
@@ -469,20 +461,6 @@ fn dialog_opens_with_saved_spawn_defaults(cx: &mut TestAppContext) {
     assert!(
         request.dangerously_skip_permissions,
         "the saved trusted default reaches the daemon"
-    );
-
-    reply(&mut h, &request);
-    open(&mut h);
-    h.click_on("spawn-agent-codex");
-    suggest(&mut h, "r1", "wt/calm-owl");
-    h.click_on("spawn-submit");
-    let codex = the_spawn(&h.sent());
-    assert!(
-        matches!(
-            &codex.agent_options,
-            AgentOptions::Codex { hooks: true, .. }
-        ),
-        "the saved hooks choice reaches the daemon"
     );
 }
 
@@ -521,10 +499,10 @@ fn tab_cycles_controls(cx: &mut TestAppContext) {
     assert_eq!(focus(&mut h).as_deref(), Some("spawn-cancel"), "and back");
 
     h.keys("tab tab tab tab tab");
-    assert_eq!(focus(&mut h).as_deref(), Some("spawn-agent-codex"));
+    assert_eq!(focus(&mut h).as_deref(), Some("spawn-agent-plain-shell"));
     h.keys("space");
     assert!(
-        selected(&mut h).contains(&"spawn-agent-codex".to_owned()),
+        selected(&mut h).contains(&"spawn-agent-plain-shell".to_owned()),
         "Space chooses the focused option"
     );
     assert!(is_open(&mut h));
@@ -559,26 +537,6 @@ fn headless_spawn_sends_the_prompt(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn headless_is_disabled_for_cursor(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    let mut h = Harness::with(cx, &dir, &fixture());
-    open(&mut h);
-    h.click_on("spawn-runmode-headless");
-    assert!(selected(&mut h).contains(&"spawn-runmode-headless".to_owned()));
-    h.click_on("spawn-agent-cursor");
-    let chosen = selected(&mut h);
-    assert!(
-        chosen.contains(&"spawn-runmode-interactive".to_owned()),
-        "cursor snaps back to interactive: {chosen:?}"
-    );
-    h.click_on("spawn-runmode-headless");
-    assert!(
-        !selected(&mut h).contains(&"spawn-runmode-headless".to_owned()),
-        "a click on the disabled choice does nothing"
-    );
-}
-
-#[gpui::test]
 fn advanced_opens_and_sends_model_approval_and_env(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &fixture());
@@ -606,7 +564,7 @@ fn advanced_opens_and_sends_model_approval_and_env(cx: &mut TestAppContext) {
 }
 
 /// The provider `request` names on the wire; `None` when it names none
-/// (Anthropic is skipped, Codex and Cursor have no provider).
+/// (Anthropic is skipped, a plain shell has no provider).
 fn wire_provider(request: &SpawnRequest) -> Option<String> {
     let options = serde_json::to_value(&request.agent_options).expect("agent options encode");
     options
@@ -643,23 +601,18 @@ fn provider_row_shows_for_claude_only_and_sends_deepseek(cx: &mut TestAppContext
         "the fake daemon routes providers"
     );
     let with_row = runtime_to_open_in(&mut h);
-    for runtime in [
-        "spawn-agent-codex",
-        "spawn-agent-cursor",
-        "spawn-agent-plain-shell",
-    ] {
-        h.click_on(runtime);
-        let chosen = selected(&mut h);
-        assert!(
-            chosen.contains(&runtime.to_owned())
-                && !chosen.iter().any(|s| s.starts_with("spawn-provider-")),
-            "{runtime} hides the row: {chosen:?}"
-        );
-        assert!(
-            runtime_to_open_in(&mut h) < with_row,
-            "{runtime} takes the row out of the layout"
-        );
-    }
+    let shell = "spawn-agent-plain-shell";
+    h.click_on(shell);
+    let chosen = selected(&mut h);
+    assert!(
+        chosen.contains(&shell.to_owned())
+            && !chosen.iter().any(|s| s.starts_with("spawn-provider-")),
+        "{shell} hides the row: {chosen:?}"
+    );
+    assert!(
+        runtime_to_open_in(&mut h) < with_row,
+        "{shell} takes the row out of the layout"
+    );
     h.click_on("spawn-agent-claude");
     tab_to(&mut h, "tab", "spawn-provider-deepseek", 6);
     h.keys("space");
@@ -667,25 +620,6 @@ fn provider_row_shows_for_claude_only_and_sends_deepseek(cx: &mut TestAppContext
     h.click_on("spawn-submit");
     let request = the_spawn(&h.sent());
     assert_eq!(wire_provider(&request).as_deref(), Some("deepseek"));
-    reply(&mut h, &request);
-
-    open(&mut h);
-    suggest(&mut h, "r1", "wt/calm-owl");
-    h.click_on("spawn-agent-codex");
-    h.click_on("spawn-submit");
-    let codex = the_spawn(&h.sent());
-    assert!(
-        matches!(
-            &codex.agent_options,
-            AgentOptions::Codex { hooks: false, .. }
-        ),
-        "the default leaves Codex hooks off"
-    );
-    assert_eq!(
-        wire_provider(&codex),
-        None,
-        "a Codex spawn names no provider"
-    );
 }
 
 #[gpui::test]
@@ -722,7 +656,7 @@ fn provider_row_is_disabled_without_the_feature(cx: &mut TestAppContext) {
         "no provider stop between the runtime line and Open in"
     );
     h.click_on("spawn-agent-claude");
-    h.keys("tab tab tab tab");
+    h.keys("tab tab");
     assert_eq!(
         focus(&mut h).as_deref(),
         Some("spawn-placement-current-tab"),
@@ -1289,7 +1223,7 @@ fn dialog_takes_the_spawn_boards_sizes(cx: &mut TestAppContext) {
         );
     }
     for selector in [
-        "spawn-agent-codex",
+        "spawn-agent-claude",
         "spawn-placement-new-tab",
         "spawn-worktree-mode-new",
     ] {

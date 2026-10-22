@@ -26,8 +26,6 @@ fn default_true() -> bool {
 pub enum Agent {
     #[default]
     Claude,
-    Codex,
-    Cursor,
 }
 
 impl Agent {
@@ -36,8 +34,6 @@ impl Agent {
     pub fn as_label(self) -> &'static str {
         match self {
             Self::Claude => "claude",
-            Self::Codex => "codex",
-            Self::Cursor => "cursor",
         }
     }
 
@@ -46,7 +42,7 @@ impl Agent {
     /// against every known agent's program name).
     #[must_use]
     pub fn all() -> &'static [Self] {
-        &[Self::Claude, Self::Codex, Self::Cursor]
+        &[Self::Claude]
     }
 }
 
@@ -94,28 +90,6 @@ pub enum AgentOptions {
         #[serde(default, skip_serializing_if = "ClaudeProvider::is_anthropic")]
         provider: ClaudeProvider,
     },
-    Codex {
-        /// Codex's `--sandbox <value>` flag. Ignored when
-        /// [`SpawnRequest::dangerously_skip_permissions`] is true (yolo
-        /// overrides sandbox).
-        #[serde(default)]
-        sandbox: Option<CodexSandbox>,
-        /// Run the injected hook shim for this Codex session (requires the
-        /// trust bypass; off by default).
-        #[serde(default)]
-        hooks: bool,
-    },
-    Cursor {
-        /// When `true`, cursor spawns with `--plan` (read-only / planning
-        /// mode). Ignored when [`SpawnRequest::dangerously_skip_permissions`]
-        /// is true (yolo bypasses sandboxing entirely).
-        #[serde(default)]
-        plan_mode: bool,
-        /// Cursor's `--sandbox enabled|disabled` flag. Ignored when
-        /// `dangerously_skip_permissions` is true.
-        #[serde(default)]
-        sandbox: Option<CursorSandbox>,
-    },
 }
 
 impl AgentOptions {
@@ -124,8 +98,6 @@ impl AgentOptions {
     pub fn agent(&self) -> Agent {
         match self {
             Self::Claude { .. } => Agent::Claude,
-            Self::Codex { .. } => Agent::Codex,
-            Self::Cursor { .. } => Agent::Cursor,
         }
     }
 
@@ -140,13 +112,11 @@ impl AgentOptions {
         }
     }
 
-    /// The Claude provider this variant carries. `None` for Codex and Cursor,
-    /// which have no provider.
+    /// The Claude provider this variant carries.
     #[must_use]
     pub fn claude_provider(&self) -> Option<ClaudeProvider> {
         match self {
             Self::Claude { provider, .. } => Some(*provider),
-            Self::Codex { .. } | Self::Cursor { .. } => None,
         }
     }
 }
@@ -154,46 +124,6 @@ impl AgentOptions {
 impl Default for AgentOptions {
     fn default() -> Self {
         Self::claude(None)
-    }
-}
-
-/// Codex sandbox policy. Maps to `codex --sandbox <value>`.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "kebab-case")]
-pub enum CodexSandbox {
-    ReadOnly,
-    WorkspaceWrite,
-    DangerFullAccess,
-}
-
-impl CodexSandbox {
-    /// CLI value as expected by `codex --sandbox <X>`.
-    #[must_use]
-    pub fn as_cli_arg(self) -> &'static str {
-        match self {
-            Self::ReadOnly => "read-only",
-            Self::WorkspaceWrite => "workspace-write",
-            Self::DangerFullAccess => "danger-full-access",
-        }
-    }
-}
-
-/// Cursor sandbox policy. Maps to `cursor-agent --sandbox <value>`.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "snake_case")]
-pub enum CursorSandbox {
-    Enabled,
-    Disabled,
-}
-
-impl CursorSandbox {
-    /// CLI value as expected by `cursor-agent --sandbox <X>`.
-    #[must_use]
-    pub fn as_cli_arg(self) -> &'static str {
-        match self {
-            Self::Enabled => "enabled",
-            Self::Disabled => "disabled",
-        }
     }
 }
 
@@ -528,12 +458,11 @@ pub struct SessionSnapshot {
     #[serde(default)]
     pub terminal_title: Option<String>,
     /// Short label for whatever program is driving this session — `"claude"`,
-    /// `"codex"`, `"pwsh"`, `"powershell"`, `"cmd"`, `"bash"`, `"sh"`, etc.
+    /// `"pwsh"`, `"powershell"`, `"cmd"`, `"bash"`, `"sh"`, etc.
     /// Surfaced in the UI next to the session title so users can tell
     /// what's running at a glance regardless of mode. `None` for sessions
     /// reattached from sidecars written by daemons that pre-date this
-    /// field — the UI falls back to `agent` (which only distinguishes
-    /// claude / codex) in that case.
+    /// field — the UI falls back to `agent` in that case.
     #[serde(default)]
     pub program_name: Option<String>,
     /// Current working directory last reported by the session. Plain shells
@@ -547,8 +476,7 @@ pub struct SessionSnapshot {
     #[serde(default)]
     pub appearance: AppearanceOverrides,
     /// True when the session was launched with approvals/permission prompts
-    /// bypassed (`--dangerously-skip-permissions` for Claude or `--yolo` for
-    /// Codex). Clients use this to keep elevated authority visible after the
+    /// bypassed (`--dangerously-skip-permissions` for Claude). Clients use this to keep elevated authority visible after the
     /// spawn dialog closes.
     #[serde(default)]
     pub elevated_authority: bool,
@@ -732,11 +660,6 @@ pub struct HistoryEntry {
     /// entries and for imports from before revisions were stamped.
     #[serde(default)]
     pub import_rev: u32,
-    /// The conversation id the session's own agent CLI resumes with: set
-    /// only for Codex and Cursor sessions. A Claude conversation stays in
-    /// `claude_session_id`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_conversation_id: Option<String>,
     /// The session's [`SessionSnapshot::busy_excluded`] when it ended, so a
     /// recovered session keeps it. Absent means false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -849,9 +772,8 @@ pub enum SpawnTarget {
         /// choose its platform default, usually the user's home directory.
         #[serde(default)]
         cwd: Option<String>,
-        /// Extra directories an interactive Claude or Codex session is given
-        /// with `--add-dir`; Cursor runs in `cwd` only. Plain shells ignore
-        /// them.
+        /// Extra directories an interactive Claude session is given with
+        /// `--add-dir`. Plain shells ignore them.
         #[serde(default)]
         add_dirs: Vec<String>,
     },
@@ -904,8 +826,7 @@ pub struct SpawnRequest {
     pub mode: SessionMode,
     pub initial_prompt: Option<String>,
     /// For `agent == Claude`: corresponds to claude's
-    /// `--dangerously-skip-permissions`. For `agent == Codex`: corresponds to
-    /// codex's `--yolo` (`--dangerously-bypass-approvals-and-sandbox`).
+    /// `--dangerously-skip-permissions`.
     pub dangerously_skip_permissions: bool,
     /// Per-agent options. The variant tag doubles as the agent selector —
     /// `agent_options.agent()` yields the [`Agent`] kind that drives executable
@@ -913,7 +834,7 @@ pub struct SpawnRequest {
     /// agent's CLI.
     pub agent_options: AgentOptions,
     /// Optional model override. When `None`, the CLI's default applies.
-    /// Sent as `--model <id>` to both claude and codex.
+    /// Sent as `--model <id>` to claude.
     pub model: Option<String>,
     /// Extra environment variables merged on top of the daemon's keep-list;
     /// later entries override the keep-list on key collision. A value written
@@ -952,10 +873,8 @@ pub struct SpawnRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
     /// The agent's conversation to resume. An interactive Claude spawn passes
-    /// `--resume <id>` instead of a fresh `--session-id`, and Codex runs
-    /// `codex resume <id>`; both drop the initial prompt. Cursor passes
-    /// `--resume <id>` and still sends the initial prompt, so a client that
-    /// wants a prompt-free resume sends none. A daemon that cannot resume the
+    /// `--resume <id>` instead of a fresh `--session-id` and drops the initial
+    /// prompt. A daemon that cannot resume the
     /// chosen agent's conversation ignores it and starts a fresh run. Not
     /// part of [`SpawnConfig`], so it is never replayed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -981,7 +900,7 @@ impl SpawnRequest {
 /// - `prompt_injector`: same — injectors deliver kickoff content.
 ///
 /// Decoding accepts both the current shape (with `agent_options`) and the
-/// legacy v18 shape (with flat `agent` / `permission_mode` / `codex_sandbox`).
+/// legacy v18 shape (with flat `agent` / `permission_mode`).
 /// Serialization always emits the current shape, so `state.json` entries
 /// rewritten by the daemon are upgraded transparently.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -1018,8 +937,6 @@ impl<'de> Deserialize<'de> for SpawnConfig {
             agent: Option<Agent>,
             #[serde(default)]
             permission_mode: Option<PermissionMode>,
-            #[serde(default)]
-            codex_sandbox: Option<CodexSandbox>,
         }
         let helper = Helper::deserialize(deserializer)?;
         let agent_options =
@@ -1027,18 +944,6 @@ impl<'de> Deserialize<'de> for SpawnConfig {
                 .agent_options
                 .unwrap_or_else(|| match helper.agent.unwrap_or_default() {
                     Agent::Claude => AgentOptions::claude(helper.permission_mode),
-                    Agent::Codex => AgentOptions::Codex {
-                        sandbox: helper.codex_sandbox,
-                        hooks: false,
-                    },
-                    // Cursor was introduced in v20 alongside `agent_options`,
-                    // so legacy (v18) JSON should never carry `agent: "cursor"`.
-                    // If it somehow does (manually-edited state file), fall
-                    // back to the default Cursor variant.
-                    Agent::Cursor => AgentOptions::Cursor {
-                        plan_mode: false,
-                        sandbox: None,
-                    },
                 });
         Ok(Self {
             target: helper.target,
@@ -1850,7 +1755,7 @@ pub enum TabGroupingConfig {
 /// [`DaemonMessage::Presets`] response.
 ///
 /// Decoding accepts both the current shape (with `agent_options`) and the
-/// legacy v18 shape (with flat `agent` / `permission_mode` / `codex_sandbox`).
+/// legacy v18 shape (with flat `agent` / `permission_mode`).
 /// Serialization always emits the current shape, so files re-saved by the
 /// daemon are upgraded transparently. See the manual `Deserialize` impl below.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -1906,7 +1811,7 @@ impl<'de> Deserialize<'de> for PresetEntry {
         D: serde::Deserializer<'de>,
     {
         // Helper holds every field accepted on the wire, including the legacy
-        // flat fields (`agent` / `permission_mode` / `codex_sandbox`) that
+        // flat fields (`agent` / `permission_mode`) that
         // pre-v19 preset files may carry. After decode we normalize into the
         // canonical `agent_options` shape.
         #[derive(Deserialize)]
@@ -1941,8 +1846,6 @@ impl<'de> Deserialize<'de> for PresetEntry {
             agent: Option<Agent>,
             #[serde(default)]
             permission_mode: Option<PermissionMode>,
-            #[serde(default)]
-            codex_sandbox: Option<CodexSandbox>,
             tab_grouping: TabGroupingConfig,
             injector: InjectorTemplate,
             #[serde(default = "default_stagger_ms")]
@@ -1955,18 +1858,6 @@ impl<'de> Deserialize<'de> for PresetEntry {
                 .agent_options
                 .unwrap_or_else(|| match helper.agent.unwrap_or_default() {
                     Agent::Claude => AgentOptions::claude(helper.permission_mode),
-                    Agent::Codex => AgentOptions::Codex {
-                        sandbox: helper.codex_sandbox,
-                        hooks: false,
-                    },
-                    // Cursor was introduced in v20 alongside `agent_options`,
-                    // so legacy (v18) JSON should never carry `agent: "cursor"`.
-                    // If it somehow does (manually-edited state file), fall
-                    // back to the default Cursor variant.
-                    Agent::Cursor => AgentOptions::Cursor {
-                        plan_mode: false,
-                        sandbox: None,
-                    },
                 });
         Ok(Self {
             id: helper.id,
@@ -2894,9 +2785,8 @@ pub enum ClientMessage {
 pub struct RecoverItem {
     /// The ended session's id: its history entry's `session_id`.
     pub history_id: String,
-    /// The conversation to resume, when one was chosen: a Claude conversation
-    /// for the Claude kinds, the entry's own `agent_conversation_id` for
-    /// [`RecoverAs::OwnAgent`]. `None` recovers as a fresh run.
+    /// The Claude conversation to resume, when one was chosen. `None`
+    /// recovers as a fresh run.
     #[serde(default)]
     pub conversation_id: Option<String>,
     pub how: RecoverAs,
@@ -2913,10 +2803,6 @@ pub enum RecoverAs {
     /// A plain shell in the session's folder, typing `claude --resume <id>`
     /// when a conversation was chosen.
     Shell,
-    /// The session's own agent (Codex, Cursor) with its recorded settings, in
-    /// the session's own target, resuming its own conversation when one is
-    /// given.
-    OwnAgent,
     /// A kind from a newer client. The item fails with an error.
     #[serde(other)]
     Unknown,
@@ -2934,10 +2820,6 @@ pub struct SessionHistoryItem {
     /// The registered repo whose path is the entry's folder.
     #[serde(default)]
     pub folder_repo_id: Option<String>,
-    /// Whether [`RecoverAs::OwnAgent`] can resume the entry's own
-    /// conversation; false means it recovers as a fresh run.
-    #[serde(default)]
-    pub own_agent_resumable: bool,
 }
 
 /// A Claude conversation a history entry may be recovered into.
@@ -4920,103 +4802,6 @@ mod tests {
     }
 
     #[test]
-    fn spawn_request_round_trip_codex() {
-        let req = SpawnRequest {
-            label: Some("codex-test".to_string()),
-            target: SpawnTarget::Workspace {
-                workspace_id: "ws1".to_string(),
-                branch_name: "feat/x".to_string(),
-                base_branch: None,
-                use_worktree: true,
-                worktree_reuse: WorktreeReusePolicy::Reuse,
-                existing_worktrees: Vec::new(),
-            },
-            mode: SessionMode::Interactive,
-            initial_prompt: Some("refactor authentication".to_string()),
-            dangerously_skip_permissions: false,
-            agent_options: AgentOptions::Codex {
-                sandbox: Some(CodexSandbox::WorkspaceWrite),
-                hooks: false,
-            },
-            model: Some("gpt-5.1-codex".to_string()),
-            extra_env: vec![],
-            secret_env_keys: Vec::new(),
-            prompt_injector: None,
-            request_id: None,
-            resume_conversation: None,
-        };
-        let json = serde_json::to_string(&req).expect("serialize");
-        let decoded: SpawnRequest = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(req, decoded);
-        assert_eq!(req.agent(), Agent::Codex);
-        assert!(json.contains(r#""kind":"codex""#));
-        assert!(json.contains(r#""sandbox":"workspace-write""#));
-    }
-
-    #[test]
-    fn a_codex_payload_without_hooks_decodes_with_hooks_off() {
-        let options: AgentOptions =
-            serde_json::from_str(r#"{"kind":"codex","sandbox":null}"#).expect("decode");
-        assert_eq!(
-            options,
-            AgentOptions::Codex {
-                sandbox: None,
-                hooks: false,
-            }
-        );
-    }
-
-    #[test]
-    fn codex_hooks_round_trip() {
-        let options = AgentOptions::Codex {
-            sandbox: Some(CodexSandbox::ReadOnly),
-            hooks: true,
-        };
-        let json = serde_json::to_string(&options).expect("serialize");
-        assert!(json.contains(r#""hooks":true"#), "{json}");
-        assert_eq!(
-            serde_json::from_str::<AgentOptions>(&json).expect("deserialize"),
-            options
-        );
-    }
-
-    #[test]
-    fn spawn_request_round_trip_cursor() {
-        let req = SpawnRequest {
-            label: Some("cursor-test".to_string()),
-            target: SpawnTarget::Single {
-                repo_id: "r1".to_string(),
-                branch_name: "feat/y".to_string(),
-                base_branch: None,
-                use_worktree: true,
-                checkout_strategy: None,
-                worktree_reuse: WorktreeReusePolicy::Reuse,
-                existing_worktree: None,
-            },
-            mode: SessionMode::Interactive,
-            initial_prompt: Some("investigate".to_string()),
-            dangerously_skip_permissions: false,
-            agent_options: AgentOptions::Cursor {
-                plan_mode: true,
-                sandbox: Some(CursorSandbox::Enabled),
-            },
-            model: Some("sonnet-4".to_string()),
-            extra_env: vec![],
-            secret_env_keys: Vec::new(),
-            prompt_injector: None,
-            request_id: None,
-            resume_conversation: None,
-        };
-        let json = serde_json::to_string(&req).expect("serialize");
-        let decoded: SpawnRequest = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(req, decoded);
-        assert_eq!(req.agent(), Agent::Cursor);
-        assert!(json.contains(r#""kind":"cursor""#));
-        assert!(json.contains(r#""plan_mode":true"#));
-        assert!(json.contains(r#""sandbox":"enabled""#));
-    }
-
-    #[test]
     fn spawn_request_round_trip_standalone_shell() {
         let req = SpawnRequest {
             label: None,
@@ -5096,23 +4881,6 @@ mod tests {
         let options: AgentOptions =
             serde_json::from_str(r#"{"kind":"claude","provider":"mistral"}"#).expect("decode");
         assert_eq!(options.claude_provider(), Some(ClaudeProvider::Unknown));
-        // Only a Claude variant carries a provider; Codex and Cursor have none.
-        assert_eq!(
-            AgentOptions::Codex {
-                sandbox: None,
-                hooks: false,
-            }
-            .claude_provider(),
-            None
-        );
-        assert_eq!(
-            AgentOptions::Cursor {
-                plan_mode: false,
-                sandbox: None,
-            }
-            .claude_provider(),
-            None
-        );
     }
 
     #[test]
@@ -5419,45 +5187,6 @@ mod tests {
             }
             other => panic!("expected a workspace target, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn spawn_config_decodes_legacy_v18_shape() {
-        // Pre-v19 `state.json` carried flat `agent` + `permission_mode` +
-        // `codex_sandbox` instead of `agent_options`. The custom Deserialize
-        // must convert old entries transparently so existing state files
-        // load on the first run of a v19 daemon.
-        let legacy = r#"{
-            "target": {
-                "kind": "single",
-                "repo_id": "r1",
-                "branch_name": "bug/1",
-                "base_branch": null,
-                "use_worktree": true
-            },
-            "mode": "interactive",
-            "dangerously_skip_permissions": false,
-            "agent": "codex",
-            "model": "gpt-5",
-            "permission_mode": null,
-            "codex_sandbox": "workspace-write",
-            "extra_env": []
-        }"#;
-        let cfg: SpawnConfig = serde_json::from_str(legacy).expect("decode legacy");
-        assert_eq!(cfg.agent_options.agent(), Agent::Codex);
-        assert_eq!(
-            cfg.agent_options,
-            AgentOptions::Codex {
-                sandbox: Some(CodexSandbox::WorkspaceWrite),
-                hooks: false,
-            }
-        );
-
-        // Re-encoding emits the new shape; decoding round-trips.
-        let json = serde_json::to_string(&cfg).expect("serialize new shape");
-        assert!(json.contains(r#""agent_options""#));
-        let decoded: SpawnConfig = serde_json::from_str(&json).expect("decode new shape");
-        assert_eq!(cfg, decoded);
     }
 
     #[test]
@@ -5922,38 +5651,6 @@ mod tests {
         }"#;
         let preset: PresetEntry = serde_json::from_str(legacy).expect("parse legacy preset");
         assert_eq!(preset.agent_options, AgentOptions::claude(None));
-    }
-
-    #[test]
-    fn preset_entry_decodes_legacy_v18_codex_shape() {
-        // v17–v18 preset files carried flat `agent: "codex"` + `codex_sandbox`.
-        // The custom Deserialize must map them onto `agent_options` so old
-        // presets keep working on a v19 daemon.
-        let legacy = r#"{
-            "id": "yolo",
-            "name": "Yolo",
-            "prompt_sources": [{"kind":"inline"}],
-            "prompt_template": "{prompt}",
-            "branch_template": "tmp/{index}",
-            "tab_grouping": {"kind":"none"},
-            "injector": {"startup_delay_ms": 0, "pre_input": [], "post_input": []},
-            "agent": "codex",
-            "codex_sandbox": "danger-full-access"
-        }"#;
-        let preset: PresetEntry = serde_json::from_str(legacy).expect("parse legacy preset");
-        assert_eq!(
-            preset.agent_options,
-            AgentOptions::Codex {
-                sandbox: Some(CodexSandbox::DangerFullAccess),
-                hooks: false,
-            }
-        );
-
-        // Re-serialization always emits the new shape; the legacy fields
-        // never appear.
-        let json = serde_json::to_string(&preset).expect("serialize");
-        assert!(json.contains(r#""agent_options""#));
-        assert!(!json.contains(r#""codex_sandbox""#));
     }
 
     #[test]
@@ -6775,7 +6472,7 @@ mod tests {
                 "end":{"type":"tracer_lost"},"claude_session_id":null,"source":"tracer_log","recovered_at":null,
                 "end_time_known":true,"import_rev":1},
        "candidates":[{"id":"85573bb1-c581-489e-baaa-94d5a384744c","last_active":"2026-09-27T18:27:37Z","title":"Fix the …"}],
-       "folder_is_git_repo":true,"folder_repo_id":"repo-yaat","own_agent_resumable":false}
+       "folder_is_git_repo":true,"folder_repo_id":"repo-yaat"}
     ]}"#;
 
     #[test]
@@ -6844,57 +6541,6 @@ mod tests {
         let entry: HistoryEntry = assert_round_trip(&json);
         assert!(!entry.end_time_known);
         assert_eq!(entry.import_rev, 1);
-    }
-
-    #[test]
-    fn history_entry_agent_conversation_id_round_trips_and_defaults() {
-        let json = format!(
-            r#"{IMPORTED_ENTRY_PREFIX},"end_time_known":true,"import_rev":0,"agent_conversation_id":"019a2b3c-codex"}}"#
-        );
-        let entry: HistoryEntry = assert_round_trip(&json);
-        assert_eq!(
-            entry.agent_conversation_id.as_deref(),
-            Some("019a2b3c-codex")
-        );
-
-        let old = format!("{IMPORTED_ENTRY_PREFIX}}}");
-        let entry: HistoryEntry = serde_json::from_str(&old).expect("decode an older entry");
-        assert_eq!(entry.agent_conversation_id, None);
-        let encoded = serde_json::to_value(&entry).expect("encode");
-        assert!(encoded.get("agent_conversation_id").is_none(), "{encoded}");
-    }
-
-    #[test]
-    fn own_agent_recover_item_round_trips() {
-        let item: RecoverItem = assert_round_trip(
-            r#"{"history_id":"h1","conversation_id":"019a2b3c-codex","how":{"type":"own_agent"}}"#,
-        );
-        assert_eq!(item.how, RecoverAs::OwnAgent);
-        assert_eq!(item.conversation_id.as_deref(), Some("019a2b3c-codex"));
-
-        let fresh: RecoverItem = assert_round_trip(
-            r#"{"history_id":"h2","conversation_id":null,"how":{"type":"own_agent"}}"#,
-        );
-        assert_eq!(fresh.how, RecoverAs::OwnAgent);
-        assert_eq!(fresh.conversation_id, None);
-    }
-
-    #[test]
-    fn history_item_resumable_defaults_false() {
-        let mut msg: serde_json::Value =
-            serde_json::from_str(SESSION_HISTORY_JSON).expect("contract is json");
-        let item = &mut msg["items"][0];
-        item.as_object_mut()
-            .expect("an item is an object")
-            .remove("own_agent_resumable");
-        let decoded: SessionHistoryItem =
-            serde_json::from_value(item.clone()).expect("decode an item from an older daemon");
-        assert!(!decoded.own_agent_resumable);
-
-        item["own_agent_resumable"] = serde_json::json!(true);
-        let decoded: SessionHistoryItem = serde_json::from_value(item.clone()).expect("decode");
-        assert!(decoded.own_agent_resumable);
-        assert_eq!(serde_json::to_value(&decoded).expect("encode"), *item);
     }
 
     #[test]

@@ -76,11 +76,11 @@ Close behind: the paste and key quirks (native clipboard read, Shift+Enter bytes
 
 - [x] Entry points: toolbar, Ctrl+N, container menu (target locked), empty pane (preselected), tab container (tab fixed), duplicate (prefilled), worktree manager (worktree pinned) — `SpawnDialog.tsx` (native: toolbar and Ctrl+N / Ctrl+Shift+N landed in P1.7c; worktree manager, worktree pinned, landed in P4.4b; duplicate, prefilled, landed in P4.12c; the container menu and tab container in P4.11c)
 - [x] Target picker ([REPO]/[WS]) or fixed label; "no repos" state with + Add repo — `SpawnDialog.tsx` (native: the picker landed in P1.7c, the "no repos" state with Add repo in P4.10a)
-- [x] Runtime radio: claude / codex / cursor / plain shell; defaults to the target's last spawn unless the user changed it — `SpawnDialog.tsx`
+- [x] Runtime radio: claude / plain shell; defaults to the target's last spawn unless the user changed it — `SpawnDialog.tsx`
 - [x] "Open in": current tab / new tab / each other tab — `SpawnDialog.tsx`
 - [x] Mode Interactive / Headless (prompt textarea; no headless for cursor) — `SpawnDialog.tsx`
 - [x] Trusted launch checkbox (per-runtime skip-permissions / yolo flag) with a warning banner — `SpawnDialog.tsx`
-- [x] Advanced: model, Claude approval mode, Codex sandbox, Cursor plan mode + sandbox, env vars (invalid-key and duplicate warnings) — `SpawnDialog.tsx`
+- [x] Advanced: model, Claude approval mode, env vars (invalid-key and duplicate warnings) — `SpawnDialog.tsx`
 - [x] Single-repo: create worktree (saved per repo), new / use existing, picker (in use / stopped / stale, size, age), confirm before sharing with a live session — `SpawnDialog.tsx` `SingleForm`
 - [x] Branch combobox: lists all branches, filters as you type, marks current, "Create branch" row, arrow/Enter, Esc closes the list only — `BranchCombobox.tsx`
 - [x] Suggested branch name, "Random", "picking a name…", cached between opens — `SpawnDialog.tsx` `useBranchField`, `utils/branchSuggestion.ts`
@@ -123,7 +123,7 @@ Close behind: the paste and key quirks (native clipboard read, Shift+Enter bytes
 - [x] Refit + `resize` on container resize, font change, scrollback drawn — `Terminal.tsx`
 - [x] Input dropped once the session is stopped or errored — `Terminal.tsx`
 - [x] Cursor: bar for agents, block for shells, no blink; programs can hide it or change its shape — `Terminal.tsx`
-- [x] **(hard)** Shift+Enter newline: `\` + CR for claude and shells, `\n` for codex/cursor — `Terminal.tsx`
+- [x] **(hard)** Shift+Enter newline: `\` + CR — `Terminal.tsx`
 - [x] Ctrl/Cmd+C copies with a selection, else sends ^C; Ctrl+Shift+C always copies — `Terminal.tsx`
 - [x] **(hard)** Paste via the native clipboard read (WebView2 can truncate), bracketed when the program asks, every paste logged — `Terminal.tsx`, `lib.rs` `read_clipboard_text` (native: GPUI clipboard, bracketed and sanitised, in P1.6; paste logging in P2.1)
 - [x] Copy on select (setting, on by default) — `Terminal.tsx` (native: a saved General setting since P4.2a)
@@ -160,9 +160,9 @@ The frontend has no search addon, bell handling or title parsing; `terminal_titl
 
 ## Settings & appearance
 
-- [x] Settings tabs: General / Notifications / Spawn defaults / Worktrees / Remote access / Appearance / App Title; changes save immediately — `SettingsModal.tsx`, `utils/settings.ts` (native: the frame landed in P4.2a with every tab but Remote access, which comes with Phase 6, and an Agents category whose Claude, Codex and Cursor pages hold the per-agent settings; Tab walks the tab list and the shown tab's controls)
+- [x] Settings tabs: General / Notifications / Spawn defaults / Worktrees / Remote access / Appearance / App Title; changes save immediately — `SettingsModal.tsx`, `utils/settings.ts` (native: the frame landed in P4.2a with every tab but Remote access, which comes with Phase 6, and an Agents category whose Claude page holds the per-agent settings; Tab walks the tab list and the shown tab's controls)
 - [x] General: keep the machine awake (with status), default sidebar view, copy on select — `SettingsModal.tsx` (native: keep awake and copy on select in P4.2a; the default sidebar view comes with P4.9)
-- [x] Settings defaults: trusted default, Claude approval mode, Codex sandbox — `SettingsModal.tsx` (native: P4.2b; Spawn defaults holds only trusted launch, while the Claude page holds approval mode and provider and the Codex page sandbox mode and the hooks toggle; the trusted hint also names Cursor, which the default reaches)
+- [x] Settings defaults: trusted default, Claude approval mode — `SettingsModal.tsx` (native: P4.2b; Spawn defaults holds only trusted launch, while the Claude page holds approval mode and provider)
 - [x] App title: busy count and product suffix toggles, live preview — `SettingsModal.tsx`
 - [x] Appearance editor at app / repo-workspace / session level: accent colour, shell background (presets, 12 recent, custom), font family, size, bold, each showing its resolved value and source — `AppearanceEditor.tsx`, `utils/appearance.ts`
 - [x] Session accent drives the sidebar stripe, pane frame and focus colour — `SessionPane.tsx`, `utils/sessionColor.ts`

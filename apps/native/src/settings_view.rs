@@ -11,18 +11,15 @@ use std::time::Duration;
 
 use gpui::{
     AnyElement, App, ClickEvent, Context, Div, Entity, EntityId, FocusHandle, Focusable as _,
-    FontWeight, Keystroke, MouseButton, MouseDownEvent, Stateful, StyledText, Subscription,
-    TextRun, Window, div, prelude::*, px,
+    FontWeight, Keystroke, MouseButton, MouseDownEvent, Stateful, Subscription, Window, div,
+    prelude::*, px,
 };
-use protocol::{
-    ClaudeProvider, ClientMessage, CodexSandbox, FEATURE_CLAUDE_PROVIDER, PermissionMode,
-};
+use protocol::{ClaudeProvider, ClientMessage, FEATURE_CLAUDE_PROVIDER, PermissionMode};
 
 use crate::appearance;
 use crate::appearance_stops::{AppearanceStop, after_lost};
 use crate::appearance_view::{Level, close_footer};
 use crate::buttons::{field_frame, focus_ring};
-use crate::fonts;
 use crate::mouse::CopyOnSelect;
 use crate::notify::{NotifyState, WINDOWS_NOTIFICATION_SETTINGS};
 use crate::palette::{CHIP, HOVER, LINE, RAISED, SUBTLE, TEXT_2, TRANSPARENT};
@@ -30,12 +27,11 @@ use crate::section::section;
 use crate::session_menu::{backdrop, dialog_button};
 use crate::sidebar::{LeafDensity, NotifySkip, SidebarView};
 use crate::spawn_form::{
-    APPROVAL_CHOICES, CODEX_SANDBOX_CHOICES, PROVIDER_CHOICES, PROVIDER_UNSUPPORTED_TIP,
-    approval_label, codex_sandbox_label, provider_label,
+    APPROVAL_CHOICES, PROVIDER_CHOICES, PROVIDER_UNSUPPORTED_TIP, approval_label, provider_label,
 };
 use crate::spawn_view::{
-    CLAUDE_LOCKED, CODEX_LOCKED, DISABLED_OPACITY, Look, checkbox_row, choice_button, close_button,
-    dialog_card, dialog_title_bar, field, segmented,
+    CLAUDE_LOCKED, DISABLED_OPACITY, Look, checkbox_row, choice_button, close_button, dialog_card,
+    dialog_title_bar, field, segmented,
 };
 use crate::tabs::tab_session_counts;
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
@@ -65,13 +61,6 @@ const CHIP_RADIUS: f32 = 5.0;
 /// flickering between working and idle does not flicker the taskbar.
 const TITLE_DEBOUNCE: Duration = Duration::from_millis(350);
 const NOT_CONNECTED: &str = "(daemon not connected)";
-/// The flag [`CODEX_HOOKS_HINT`] names, drawn in the code style there.
-const CODEX_HOOKS_FLAG: &str = "--dangerously-bypass-hook-trust";
-const CODEX_HOOKS_HINT: &str = "Turning this on makes Codex run the injected hooks with --dangerously-bypass-hook-trust, which also runs any unreviewed repo's hooks outside Codex's sandbox.";
-/// The Codex hooks toggle's label.
-const CODEX_HOOKS_LABEL: &str = "Report status from Codex hooks";
-const CODEX_HOOKS_LOCKED: &str =
-    "Trusted launch keeps the hooks setting in effect; this lock only stops editing it here.";
 /// The Claude page's locked provider note: unlike the approval mode, the
 /// provider is sent under trusted launch, so the choice stays in effect.
 const PROVIDER_LOCKED: &str =
@@ -89,12 +78,10 @@ pub(crate) enum SettingsTab {
     Appearance,
     AppTitle,
     Claude,
-    Codex,
-    Cursor,
 }
 
 impl SettingsTab {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 7] = [
         Self::General,
         Self::Notifications,
         Self::SpawnDefaults,
@@ -102,8 +89,6 @@ impl SettingsTab {
         Self::Appearance,
         Self::AppTitle,
         Self::Claude,
-        Self::Codex,
-        Self::Cursor,
     ];
 
     const fn label(self) -> &'static str {
@@ -115,8 +100,6 @@ impl SettingsTab {
             Self::Appearance => "Appearance",
             Self::AppTitle => "App title",
             Self::Claude => "Claude",
-            Self::Codex => "Codex",
-            Self::Cursor => "Cursor",
         }
     }
 
@@ -129,8 +112,6 @@ impl SettingsTab {
             Self::Appearance => "settings-tab-appearance",
             Self::AppTitle => "settings-tab-app-title",
             Self::Claude => "settings-tab-claude",
-            Self::Codex => "settings-tab-codex",
-            Self::Cursor => "settings-tab-cursor",
         }
     }
 
@@ -165,7 +146,7 @@ impl SettingsRow {
 
 /// The tab list's rows, in order. A group row is drawn between the tabs
 /// and never reached by the keyboard.
-const ROWS: [SettingsRow; 10] = [
+const ROWS: [SettingsRow; 8] = [
     SettingsRow::Tab(SettingsTab::General),
     SettingsRow::Tab(SettingsTab::Notifications),
     SettingsRow::Tab(SettingsTab::SpawnDefaults),
@@ -174,8 +155,6 @@ const ROWS: [SettingsRow; 10] = [
     SettingsRow::Tab(SettingsTab::AppTitle),
     SettingsRow::Group("Agents"),
     SettingsRow::Tab(SettingsTab::Claude),
-    SettingsRow::Tab(SettingsTab::Codex),
-    SettingsRow::Tab(SettingsTab::Cursor),
 ];
 
 /// The General tab's Default view choices, in the order they show.
@@ -203,8 +182,6 @@ pub(crate) enum SettingsControl {
     SpawnTrusted,
     SpawnApproval(Option<PermissionMode>),
     SpawnProvider(ClaudeProvider),
-    SpawnCodexSandbox(Option<CodexSandbox>),
-    CodexHooks,
     WorktreesPath,
     WorktreesBrowse,
     WorktreesSave,
@@ -244,17 +221,6 @@ impl SettingsControl {
                 ClaudeProvider::Deepseek => "settings-spawn-provider-deepseek",
                 ClaudeProvider::Unknown => "settings-spawn-provider-unknown",
             },
-            Self::SpawnCodexSandbox(sandbox) => match sandbox {
-                None => "settings-spawn-codex-sandbox-cli-default",
-                Some(CodexSandbox::ReadOnly) => "settings-spawn-codex-sandbox-read-only",
-                Some(CodexSandbox::WorkspaceWrite) => {
-                    "settings-spawn-codex-sandbox-workspace-write"
-                }
-                Some(CodexSandbox::DangerFullAccess) => {
-                    "settings-spawn-codex-sandbox-danger-full-access"
-                }
-            },
-            Self::CodexHooks => "settings-agents-codex-hooks",
             Self::WorktreesPath => "settings-worktrees-root-input",
             Self::WorktreesBrowse => "settings-worktrees-root-browse",
             Self::WorktreesSave => "settings-worktrees-root-save",
@@ -340,18 +306,6 @@ impl RootView {
     #[must_use]
     pub fn settings_provider_choice(&self) -> &'static str {
         provider_label(self.shown_default_provider())
-    }
-
-    /// The label of the Codex page's hooks toggle, as the page draws it.
-    #[must_use]
-    pub fn settings_codex_hooks_label(&self) -> &'static str {
-        CODEX_HOOKS_LABEL
-    }
-
-    /// The hint under the Codex page's hooks toggle, as the page draws it.
-    #[must_use]
-    pub fn settings_codex_hooks_hint(&self) -> &'static str {
-        CODEX_HOOKS_HINT
     }
 
     /// The note under the Claude page's locked provider row, as it draws it.
@@ -461,8 +415,6 @@ impl RootView {
             .collect(),
             SettingsTab::SpawnDefaults => vec![SettingsControl::SpawnTrusted],
             SettingsTab::Claude => self.claude_controls(),
-            SettingsTab::Codex => self.codex_controls(),
-            SettingsTab::Cursor => Vec::new(),
             SettingsTab::Worktrees => {
                 let mut controls = vec![
                     SettingsControl::WorktreesPath,
@@ -498,19 +450,6 @@ impl RootView {
         if self.claude_provider_supported() {
             controls.extend(PROVIDER_CHOICES.map(SettingsControl::SpawnProvider));
         }
-        controls
-    }
-
-    /// The Codex page's controls in drawing order, while trusted launch
-    /// has not locked them.
-    fn codex_controls(&self) -> Vec<SettingsControl> {
-        if self.sidebar.ui_state().spawn.trusted {
-            return Vec::new();
-        }
-        let mut controls = CODEX_SANDBOX_CHOICES
-            .map(SettingsControl::SpawnCodexSandbox)
-            .to_vec();
-        controls.push(SettingsControl::CodexHooks);
         controls
     }
 
@@ -647,10 +586,6 @@ impl RootView {
             SettingsControl::SpawnProvider(provider) => {
                 self.set_spawn_claude_provider(provider, cx);
             }
-            SettingsControl::SpawnCodexSandbox(sandbox) => {
-                self.set_spawn_codex_sandbox(sandbox, cx);
-            }
-            SettingsControl::CodexHooks => self.toggle_codex_hooks(cx),
             SettingsControl::WorktreesPath => {}
             SettingsControl::WorktreesBrowse => self.browse_worktrees_root(cx),
             SettingsControl::WorktreesSave => self.save_worktrees_root(),
@@ -992,19 +927,6 @@ impl RootView {
         cx.notify();
     }
 
-    fn set_spawn_codex_sandbox(&mut self, sandbox: Option<CodexSandbox>, cx: &mut Context<Self>) {
-        self.sidebar.set_spawn_codex_sandbox(sandbox);
-        self.save_ui();
-        cx.notify();
-    }
-
-    fn toggle_codex_hooks(&mut self, cx: &mut Context<Self>) {
-        let on = !self.sidebar.ui_state().agents.codex.hooks;
-        self.sidebar.set_codex_hooks(on);
-        self.save_ui();
-        cx.notify();
-    }
-
     /// Opens Windows' notification settings on a background thread; a
     /// failure is only logged.
     fn open_windows_notification_settings(&self, cx: &mut Context<Self>) {
@@ -1285,8 +1207,6 @@ impl RootView {
             SettingsTab::Notifications => self.notifications_tab(focused, cx),
             SettingsTab::SpawnDefaults => self.spawn_defaults_tab(focused, cx),
             SettingsTab::Claude => self.claude_tab(focused, cx),
-            SettingsTab::Codex => self.codex_tab(focused, cx),
-            SettingsTab::Cursor => Self::cursor_tab(),
             SettingsTab::Worktrees => self.worktrees_tab_content(focused, cx),
         }
     }
@@ -1387,8 +1307,7 @@ impl RootView {
             ))
             .child(trusted)
             .child(hint(
-                "When enabled, new Claude, Codex and Cursor sessions bypass approval prompts. \
-                 Codex and Cursor also bypass sandboxing.",
+                "When enabled, new Claude sessions bypass approval prompts.",
             ));
         vec![section.into_any_element()]
     }
@@ -1422,56 +1341,6 @@ impl RootView {
             cx,
         );
         let section = section("Claude").child(approval).child(provider);
-        vec![section.into_any_element()]
-    }
-
-    /// The Codex page: sandbox mode and the hooks toggle.
-    fn codex_tab(
-        &self,
-        focused: Option<SettingsControl>,
-        cx: &mut Context<Self>,
-    ) -> Vec<AnyElement> {
-        let spawn = self.sidebar.ui_state().spawn;
-        let locked = spawn.trusted;
-        let sandbox = choice_row(
-            "Codex sandbox mode",
-            &CODEX_SANDBOX_CHOICES.map(|sandbox| {
-                (
-                    SettingsControl::SpawnCodexSandbox(sandbox),
-                    codex_sandbox_label(sandbox),
-                    sandbox == spawn.codex_sandbox,
-                )
-            }),
-            locked.then_some((CODEX_LOCKED, "settings-spawn-codex-sandbox-locked")),
-            focused,
-            cx,
-        );
-        let hooks = toggle(
-            SettingsControl::CodexHooks,
-            ToggleState {
-                checked: self.sidebar.ui_state().agents.codex.hooks,
-                enabled: !locked,
-            },
-            CODEX_HOOKS_LABEL,
-            focused,
-            cx,
-        );
-        let mut section = section("Codex").child(sandbox).child(hooks);
-        if locked {
-            section = section.child(
-                hint(CODEX_HOOKS_LOCKED)
-                    .debug_selector(|| "settings-agents-codex-hooks-locked".to_owned()),
-            );
-        }
-        let section = section.child(codex_hooks_hint());
-        vec![section.into_any_element()]
-    }
-
-    /// The Cursor page: no settings yet.
-    fn cursor_tab() -> Vec<AnyElement> {
-        let section = section("Cursor").child(
-            hint("No settings yet.").debug_selector(|| "settings-agents-cursor-empty".to_owned()),
-        );
         vec![section.into_any_element()]
     }
 
@@ -1689,35 +1558,6 @@ fn hint(text: &'static str) -> Div {
         .text_size(px(HINT_SIZE))
         .text_color(gpui::rgb(SUBTLE))
         .child(text)
-}
-
-/// [`CODEX_HOOKS_HINT`] with [`CODEX_HOOKS_FLAG`] drawn in the code style:
-/// the interface family for the sentence, the mono family for the flag.
-fn codex_hooks_hint() -> Div {
-    let Some((before, after)) = CODEX_HOOKS_HINT.split_once(CODEX_HOOKS_FLAG) else {
-        return hint(CODEX_HOOKS_HINT);
-    };
-    let plain = |len: usize| TextRun {
-        len,
-        font: gpui::font(fonts::UI_FAMILY),
-        color: gpui::rgb(SUBTLE).into(),
-        background_color: None,
-        underline: None,
-        strikethrough: None,
-    };
-    let runs = vec![
-        plain(before.len()),
-        TextRun {
-            font: gpui::font(fonts::DEFAULT_FAMILY),
-            color: gpui::rgb(TEXT_2).into(),
-            ..plain(CODEX_HOOKS_FLAG.len())
-        },
-        plain(after.len()),
-    ];
-    div()
-        .text_size(px(HINT_SIZE))
-        .text_color(gpui::rgb(SUBTLE))
-        .child(StyledText::new(CODEX_HOOKS_HINT).with_runs(runs))
 }
 
 /// A click handler that presses `control`.

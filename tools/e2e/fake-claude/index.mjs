@@ -1,14 +1,12 @@
 #!/usr/bin/env node
 /**
- * Deterministic stand-in for the agent CLIs the daemon spawns — `claude`,
- * `codex` and `cursor-agent`. Each backend's `program_env_var()` honors
- * `RUSTLING_TULIP_CLAUDE` / `RUSTLING_TULIP_CODEX` /
- * `RUSTLING_TULIP_CURSOR_AGENT`, so pointing all three at this script (via
- * the `fake-claude.cmd` wrapper on Windows) gives the harness a long-running
- * PTY child that doesn't depend on a real install, real credentials or a
- * logged-in account. `FAKE_AGENT` picks the mode, `claude` when unset.
+ * Deterministic stand-in for the `claude` CLI the daemon spawns. The backend's
+ * `program_env_var()` honors `RUSTLING_TULIP_CLAUDE`, so pointing it at this
+ * script (via the `fake-claude.cmd` wrapper on Windows) gives the harness a
+ * long-running PTY child that doesn't depend on a real install, real
+ * credentials or a logged-in account.
  *
- * Behavior (claude mode):
+ * Behavior:
  *   - Prints a stable banner the smoke test asserts on.
  *   - Echoes lines from stdin back so input from the harness is observable.
  *   - Reports the exact byte count + sha256 of an EOT-terminated payload as
@@ -28,35 +26,18 @@
  *   - Exits cleanly on "/exit\n" or SIGTERM/SIGBREAK.
  *   - Acknowledges (but does not act on) the `--add-dir`, `-p`,
  *     `--model`, and `--permission-mode` flags the daemon may pass.
- *
- * Codex mode (`FAKE_AGENT=codex`) adds:
- *   - A rollout file under `$CODEX_HOME` written on the first input line,
- *     named and shaped as the daemon's `codex_rollout` reader expects.
- *   - "RT_RESUMED <id>" for argv `resume … <id>`.
- *
- * Cursor mode (`FAKE_AGENT=cursor`) adds:
- *   - A chat id printed by `create-chat`, which the daemon runs to
- *     pre-create a chat before it spawns a session.
- *   - "RT_RESUMED <id>" for argv `--resume <id>`.
  */
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { appendFileSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-/// The agent this run stands in for; a spec picks it with an env row.
-const AGENT = (process.env.FAKE_AGENT ?? "claude").trim().toLowerCase();
-/// Prefix every line this shim prints carries, so a mode's output names the
-/// agent it is standing in for.
-const TAG = `[fake-${AGENT}]`;
+/// Prefix every line this shim prints carries, so its output names the agent
+/// it is standing in for.
+const TAG = "[fake-claude]";
 const READY_BANNER = `${TAG} ready`;
-const PROMPT = `fake-${AGENT}> `;
-/// The thread id the codex mode writes into its rollout, and the chat id the
-/// cursor mode's `create-chat` prints. Both are asserted by
-/// `apps/native/tests/e2e_recover.rs`; changing one means changing both.
-const CODEX_THREAD_ID = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b";
-const CURSOR_CHAT_ID = "3f1c2b9e-7a4d-4e8f-9b2a-6c5d4e3f2a1b";
+const PROMPT = "fake-claude> ";
 /// How long after "/rt-hook ask" the fake runs its `Stop` hooks: long enough
 /// for a spec to observe the prompt, short enough to stay inside its wait.
 const STOP_AFTER_MS = 5000;
@@ -95,15 +76,6 @@ const flags = parseArgs(args);
 // daemon itself spawns without hooks when it cannot write the file.
 const settingsDoc = loadSettings(flags.settings);
 
-// The daemon runs `create-chat` to pre-create a Cursor chat before it spawns
-// the session, and reads the id off the first line of stdout.
-if (AGENT === "cursor" && args.includes("create-chat")) {
-  process.stdout.write(`${CURSOR_CHAT_ID}\n`);
-  process.exit(0);
-}
-
-const resumed = resumedConversation(AGENT, args);
-
 process.stdout.write(`${READY_BANNER} (pid: ${process.pid})\r\n`);
 if (flags.addDirs.length > 0) {
   process.stdout.write(
@@ -121,9 +93,6 @@ if (flags.skipPermissions) {
 }
 if (flags.prompt !== null) {
   process.stdout.write(`${TAG} prompt: ${flags.prompt}\r\n`);
-}
-if (resumed !== null) {
-  process.stdout.write(`${TAG} RT_RESUMED ${resumed}\r\n`);
 }
 process.stdout.write(PROMPT);
 
@@ -204,7 +173,6 @@ process.on("SIGBREAK", exitClean);
  * @param {string} line
  */
 function handleLine(line) {
-  writeCodexRolloutOnce();
   if (line === "/exit") {
     process.stdout.write(`${TAG} bye\r\n`);
     process.exit(0);
@@ -338,89 +306,6 @@ function hookGroupMatches(group, toolName) {
   } catch {
     return false;
   }
-}
-
-/// Whether this run has already written its thread's rollout.
-let rolloutWritten = false;
-
-/**
- * Codex writes a thread's rollout on the first user message, and the daemon
- * finds the thread id in that file's name and in its `session_meta` first
- * line. Only a fresh thread writes one: a resumed thread already has its
- * file, whose name predates this run.
- */
-function writeCodexRolloutOnce() {
-  if (AGENT !== "codex" || rolloutWritten || resumed !== null) {
-    return;
-  }
-  rolloutWritten = true;
-  try {
-    const home = process.env.CODEX_HOME || join(homedir(), ".codex");
-    const now = new Date();
-    const day = [
-      String(now.getFullYear()),
-      pad2(now.getMonth() + 1),
-      pad2(now.getDate()),
-    ];
-    const dir = join(home, "sessions", ...day);
-    mkdirSync(dir, { recursive: true });
-    const stamp = `${day.join("-")}T${pad2(now.getHours())}-${pad2(now.getMinutes())}-${pad2(now.getSeconds())}`;
-    const cwd = process.cwd();
-    const meta = JSON.stringify({
-      timestamp: now.toISOString(),
-      ordinal: 0,
-      type: "session_meta",
-      payload: {
-        id: CODEX_THREAD_ID,
-        session_id: CODEX_THREAD_ID,
-        cwd,
-        source: "cli",
-        runtime_workspace_roots: [cwd],
-      },
-    });
-    writeFileSync(
-      join(dir, `rollout-${stamp}-${CODEX_THREAD_ID}.jsonl`),
-      `${meta}\n`,
-    );
-  } catch (err) {
-    reportFatal("writeCodexRollout", err);
-  }
-}
-
-/**
- * The conversation a spawn's argv resumes, else null. Codex resumes with
- * `codex resume [flags] <id>`, the id last; cursor-agent with
- * `--resume <id>` (as does a first Cursor spawn, which opens the chat the
- * daemon pre-created). Claude keeps its own behaviour here.
- *
- * @param {string} agent
- * @param {string[]} argv
- * @returns {string | null}
- */
-function resumedConversation(agent, argv) {
-  if (agent === "codex" && argv[0] === "resume") {
-    return resumableId(argv[argv.length - 1]);
-  }
-  if (agent === "cursor") {
-    const at = argv.indexOf("--resume");
-    return at === -1 ? null : resumableId(argv[at + 1]);
-  }
-  return null;
-}
-
-/**
- * @param {string | undefined} id
- * @returns {string | null}
- */
-function resumableId(id) {
-  return id === undefined || id.startsWith("-") ? null : id;
-}
-
-/**
- * @param {number} value
- */
-function pad2(value) {
-  return String(value).padStart(2, "0");
 }
 
 /**

@@ -1,8 +1,8 @@
 //! Sticky terminal-mode tracking for scrollback replay.
 //!
 //! xterm derives its bracketed-paste flag from the child's `\e[?2004h` /
-//! `\e[?2004l` sequences in the output stream. An interactive agent (claude,
-//! codex) enables bracketed paste ONCE at startup. When a long-lived session's
+//! `\e[?2004l` sequences in the output stream. An interactive agent (claude)
+//! enables bracketed paste ONCE at startup. When a long-lived session's
 //! scrollback ring overflows and trims that early enable sequence, a
 //! daemon-restart / reattach replays only the trimmed tail into a fresh xterm,
 //! which therefore never re-sees the enable and leaves its flag off. Pastes

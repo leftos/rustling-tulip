@@ -672,10 +672,7 @@ fn inline_button_does_not_focus_the_leaf(cx: &mut TestAppContext) {
 fn trusted_runtime_tag_tooltip(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let fixture = Fixture {
-        sessions: vec![
-            session("s1").trusted().agent("codex").build(),
-            session("s2").build(),
-        ],
+        sessions: vec![session("s1").trusted().build(), session("s2").build()],
         tabs: vec![tab("t1", &pane("p1", None))],
         ..Fixture::default()
     };
@@ -684,8 +681,8 @@ fn trusted_runtime_tag_tooltip(cx: &mut TestAppContext) {
     assert_eq!(
         tags(&mut h, "s1"),
         [tag(
-            "codex",
-            "Running codex; approval prompts were bypassed"
+            "claude",
+            "Running claude; approval prompts were bypassed"
         )]
     );
     assert_eq!(tags(&mut h, "s2"), [tag("claude", "Running claude")]);

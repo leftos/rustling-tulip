@@ -1,119 +1,21 @@
 //! Per-agent backend abstraction.
 //!
-//! Each AI CLI the daemon knows how to spawn (claude, codex, …) is represented
-//! by an [`AgentBackend`] implementation in its own submodule. Callers route
-//! through [`backend_for`] to fetch the trait object for a given [`Agent`]
-//! variant — there is no per-agent branching in `server.rs` or `headless.rs`
-//! anymore.
+//! Each AI CLI the daemon knows how to spawn is represented by an
+//! [`AgentBackend`] implementation in its own submodule; today that is Claude
+//! Code alone. Callers route through [`backend_for`] to fetch the trait object
+//! for a given [`Agent`] variant.
 //!
-//! Adding a third agent means: add a variant to [`protocol::Agent`] and
+//! Adding an agent means: add a variant to [`protocol::Agent`] and
 //! [`protocol::AgentOptions`], implement [`AgentBackend`] in a new submodule,
 //! and extend [`backend_for`] / [`Agent::all`] to dispatch to it.
 mod claude;
-mod codex;
-mod cursor;
 pub(crate) mod providers;
 
 pub(crate) use claude::build_hook_settings;
 
 use crate::session::SessionRegistry;
-use futures::future::BoxFuture;
 use protocol::{Agent, AgentOptions, SessionMember};
 use std::path::Path;
-use std::time::Duration;
-use tracing::{info, warn};
-
-/// How long a fresh spawn waits for its agent to pre-create a conversation.
-const PRECREATE_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// How an interactive spawn's agent is launched, for running it once before
-/// the spawn to pre-create a conversation.
-pub struct Launch<'a> {
-    /// The resolved program, as the spawn runs it.
-    pub program: &'a str,
-    /// Arguments the resolved program takes before the agent's own.
-    pub prepend: &'a [String],
-    /// The session's working directory.
-    pub cwd: &'a Path,
-    /// The environment the spawned agent gets.
-    pub env: &'a [(String, String)],
-}
-
-/// The agent conversation an interactive spawn opens and records.
-#[derive(Debug, Default, PartialEq, Eq)]
-pub struct SpawnConversation {
-    /// A conversation pre-created for this spawn.
-    pub created: Option<String>,
-    /// The conversation the argv resumes: the pre-created one, else the
-    /// requested one.
-    pub resume: Option<String>,
-    /// The id the session records as its own agent's conversation.
-    pub own: Option<String>,
-}
-
-impl SpawnConversation {
-    /// The conversation a spawn of `agent` opens, given the conversation it
-    /// was asked to resume and the one pre-created for it.
-    #[must_use]
-    pub fn new(agent: Agent, resume: Option<&str>, created: Option<String>) -> Self {
-        let own = backend_for(agent).own_conversation_at_spawn(resume, created.as_deref());
-        let resume = created.clone().or_else(|| resume.map(str::to_owned));
-        Self {
-            created,
-            resume,
-            own,
-        }
-    }
-}
-
-/// Decide the conversation an interactive spawn of `agent` opens: a fresh
-/// run of an agent that pre-creates its conversation does so first (with a
-/// [`PRECREATE_TIMEOUT`] wait), and a failure is logged and leaves the spawn
-/// as it would be without one.
-pub async fn spawn_conversation(
-    agent: Agent,
-    resume: Option<&str>,
-    launch: &Launch<'_>,
-) -> SpawnConversation {
-    let pending = if resume.is_none() {
-        backend_for(agent).precreate_conversation(launch)
-    } else {
-        None
-    };
-    let created = match pending {
-        None => None,
-        Some(pending) => match pending.await {
-            Ok(id) => {
-                info!(agent = agent.as_label(), conversation = %id, cwd = %launch.cwd.display(), "pre-created the agent's conversation");
-                Some(id)
-            }
-            Err(err) => {
-                warn!(
-                    agent = agent.as_label(),
-                    error = %format!("{err:#}"),
-                    cwd = %launch.cwd.display(),
-                    "pre-creating the agent's conversation failed; spawning without a recorded conversation"
-                );
-                None
-            }
-        },
-    };
-    SpawnConversation::new(agent, resume, created)
-}
-
-/// The session's cached tracer and identity a hook shim needs. Claude uses
-/// [`CommonSpawnFields::hook_settings`]; Codex uses this to build the `-c`
-/// overrides that register the shim for one run.
-#[derive(Clone, Copy)]
-pub struct HookShim<'a> {
-    /// The cached `rt-tracer.exe` the shim runs from, which stays valid for
-    /// the session's lifetime.
-    pub tracer_exe: &'a Path,
-    /// The rustling-tulip session id the shim reports events for.
-    pub session_id: &'a str,
-    /// The daemon's config dir, where the shim reads `daemon.json`.
-    pub config_dir: &'a Path,
-}
 
 /// Cross-agent context bundled together so trait signatures stay readable.
 /// Fields are borrowed from the in-flight [`SpawnArgs`] so the caller doesn't
@@ -127,44 +29,26 @@ pub struct CommonSpawnFields<'a> {
     /// headless paths.
     pub has_prompt_injector: bool,
     /// Conversation id the Claude backend passes as `--session-id` on an
-    /// interactive spawn. Ignored by headless paths and by other backends.
+    /// interactive spawn. Ignored by headless paths.
     pub claude_session_id: Option<&'a str>,
-    /// Conversation the Claude backend resumes with `--resume` and the Codex
-    /// backend with `codex resume`, in place of `--session-id` (Claude) and
-    /// any initial prompt. The Cursor backend passes `--resume <id>` ahead of
-    /// its other flags and keeps the initial prompt.
+    /// Conversation the Claude backend resumes with `--resume`, in place of
+    /// `--session-id` and any initial prompt.
     pub resume_conversation: Option<&'a str>,
     /// Directories a standalone target carries as extra folders. The Claude
     /// backend adds them with `--add-dir` after the extra members' worktrees;
-    /// the Codex backend adds them the same way on interactive spawns and
-    /// resumes. The Cursor backend cannot pass them (it logs a warning naming
-    /// the folders it drops), and headless spawns ignore them.
+    /// headless spawns ignore them.
     pub add_dirs: &'a [String],
-    /// The session's working directory, which the Codex backend passes as
-    /// `-C <cwd>` with a `-c` override marking it trusted on every
-    /// interactive spawn and resume, and the Cursor backend as
-    /// `--workspace <cwd> --trust` on every spawn. Ignored by the Claude
-    /// backend.
-    pub cwd: Option<&'a str>,
     /// The settings file the Claude backend passes as `--settings` on an
     /// interactive spawn, fresh or resumed: the hooks file this daemon wrote
     /// for the session (see [`build_hook_settings`]). `None` for a spawn
-    /// without hooks — Codex, Cursor, or a Claude spawn whose file could not be
-    /// written — which stays on the terminal heuristic. Headless spawns never
-    /// carry it.
-    ///
-    /// Claude uses this; Codex uses [`Self::hook_shim`] instead.
+    /// whose file could not be written, which stays on the terminal
+    /// heuristic. Headless spawns never carry it.
     pub hook_settings: Option<&'a Path>,
-    /// The shim a backend that injects hooks through its argv runs, or `None`
-    /// when this spawn gets no hooks or the backend has no such path. Codex
-    /// uses this; Claude uses [`Self::hook_settings`] instead. Headless spawns
-    /// never carry it.
-    pub hook_shim: Option<HookShim<'a>>,
 }
 
 /// Implemented once per supported CLI. Methods are designed so the caller
 /// (server.rs / headless.rs) doesn't need to know which backend it is talking
-/// to; routing happens entirely at [`backend_for`].
+/// to; routing happens at [`backend_for`].
 pub trait AgentBackend: Send + Sync {
     /// Environment-variable name that overrides the default executable name.
     /// Example: `"RUSTLING_TULIP_CLAUDE"`.
@@ -175,7 +59,6 @@ pub trait AgentBackend: Send + Sync {
     fn default_program(&self) -> &'static str;
 
     /// Whether this CLI supports headless (non-PTY, structured JSON) mode.
-    /// PR1: only claude returns `true`.
     fn supports_headless(&self) -> bool {
         false
     }
@@ -206,8 +89,8 @@ pub trait AgentBackend: Send + Sync {
 
     /// Process one raw stdout line emitted by a headless child. The default
     /// implementation does nothing; backends with headless support override
-    /// this to parse their stream-json/exec-json format and update
-    /// `metrics` / `recent_actions` on the session record.
+    /// this to parse their stream-json format and update `metrics` /
+    /// `recent_actions` on the session record.
     fn handle_headless_line(
         &self,
         _registry: &SessionRegistry,
@@ -221,32 +104,9 @@ pub trait AgentBackend: Send + Sync {
     fn resolve_program(&self) -> String {
         std::env::var(self.program_env_var()).unwrap_or_else(|_| self.default_program().to_string())
     }
-
-    /// The id an interactive spawn records as the session's own agent
-    /// conversation, given the conversation it resumes and the one
-    /// pre-created for it. The default records none (Claude's id is
-    /// `claude_session_id`).
-    fn own_conversation_at_spawn(
-        &self,
-        _resume: Option<&str>,
-        _created: Option<&str>,
-    ) -> Option<String> {
-        None
-    }
-
-    /// Pre-create an empty conversation for a fresh interactive spawn, so
-    /// the session knows its id up front. `None` for agents that don't.
-    fn precreate_conversation<'a>(
-        &self,
-        _launch: &'a Launch<'a>,
-    ) -> Option<BoxFuture<'a, anyhow::Result<String>>> {
-        None
-    }
 }
 
 static CLAUDE: claude::ClaudeBackend = claude::ClaudeBackend;
-static CODEX: codex::CodexBackend = codex::CodexBackend;
-static CURSOR: cursor::CursorBackend = cursor::CursorBackend;
 
 /// Look up the backend instance for a given [`Agent`] variant. Always
 /// returns a static reference (backends are stateless).
@@ -254,8 +114,6 @@ static CURSOR: cursor::CursorBackend = cursor::CursorBackend;
 pub fn backend_for(agent: Agent) -> &'static dyn AgentBackend {
     match agent {
         Agent::Claude => &CLAUDE,
-        Agent::Codex => &CODEX,
-        Agent::Cursor => &CURSOR,
     }
 }
 
@@ -265,9 +123,7 @@ pub fn backend_for(agent: Agent) -> &'static dyn AgentBackend {
 /// original-repo paths referenced in `CLAUDE.md` / `AGENTS.md` that no
 /// longer match where the session is rooted.
 ///
-/// Claude delivers it via `--append-system-prompt` (invisible to the user);
-/// codex prepends it to the positional prompt (no system-prompt flag). Both
-/// backends call this helper.
+/// Claude delivers it via `--append-system-prompt` (invisible to the user).
 pub(crate) fn workspace_prelude(members: &[SessionMember]) -> Option<String> {
     if members.len() < 2 {
         return None;
@@ -292,57 +148,4 @@ pub(crate) fn workspace_prelude(members: &[SessionMember]) -> Option<String> {
         );
     }
     Some(out)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn own_conversation_claude_untouched() {
-        let resumed = SpawnConversation::new(Agent::Claude, Some("claude-1"), None);
-        assert_eq!(resumed.own, None);
-        assert_eq!(resumed.resume.as_deref(), Some("claude-1"));
-        assert_eq!(
-            SpawnConversation::new(Agent::Claude, None, None),
-            SpawnConversation::default()
-        );
-    }
-
-    #[test]
-    fn own_conversation_codex_resumed_keeps_id() {
-        let conversation = SpawnConversation::new(Agent::Codex, Some("codex-1"), None);
-        assert_eq!(conversation.own.as_deref(), Some("codex-1"));
-        assert_eq!(conversation.resume.as_deref(), Some("codex-1"));
-    }
-
-    #[test]
-    fn own_conversation_codex_fresh_has_none() {
-        assert_eq!(
-            SpawnConversation::new(Agent::Codex, None, None),
-            SpawnConversation::default()
-        );
-    }
-
-    #[test]
-    fn own_conversation_cursor_uses_created_id() {
-        let fresh = SpawnConversation::new(Agent::Cursor, None, Some("chat-new".to_owned()));
-        assert_eq!(fresh.own.as_deref(), Some("chat-new"));
-        assert_eq!(fresh.resume.as_deref(), Some("chat-new"));
-        let resumed = SpawnConversation::new(Agent::Cursor, Some("chat-old"), None);
-        assert_eq!(
-            resumed.own.as_deref(),
-            Some("chat-old"),
-            "a resumed Cursor spawn keeps the recorded chat"
-        );
-        assert_eq!(resumed.resume.as_deref(), Some("chat-old"));
-    }
-
-    #[test]
-    fn own_conversation_cursor_failed_create_has_none() {
-        assert_eq!(
-            SpawnConversation::new(Agent::Cursor, None, None),
-            SpawnConversation::default()
-        );
-    }
 }

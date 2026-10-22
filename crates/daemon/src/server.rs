@@ -1,6 +1,6 @@
 //! WebSocket server, message dispatch, and session orchestration glue.
 
-use crate::agents::{CommonSpawnFields, HookShim};
+use crate::agents::CommonSpawnFields;
 use crate::branch_fate::{self, FateInput, SessionBase};
 use crate::branch_names;
 use crate::file_fetch;
@@ -429,7 +429,6 @@ async fn reattach_one(
                         meta.mode == SessionMode::PlainShell,
                     );
                     pending.publish();
-                    crate::codex_rollout::watch_session(&sessions, &dirs, &meta.session_id);
                 }
                 Err(err) => {
                     warn!(
@@ -659,7 +658,7 @@ fn remove_retired_lan_files(config: &Path) {
 const HOOK_BODY_LIMIT: usize = 1 << 20;
 
 /// `POST /hook/{session_id}` — one agent hook event for a session, from a
-/// Claude Code session or an opted-in Codex one.
+/// Claude Code session.
 ///
 /// Auth mirrors `/shutdown`: the daemon's own token as a bearer, compared in
 /// constant time. The answer is `204` for any authenticated request, whatever
@@ -3821,7 +3820,6 @@ where
         origin,
         resume_conversation,
         add_dirs: standalone_add_dirs,
-        cwd: primary_cwd.to_string_lossy().into_owned(),
     };
 
     // Record last-used agent per targeted repo. Best-effort: a state.json
@@ -4124,8 +4122,6 @@ struct SpawnArgs {
     resume_conversation: Option<String>,
     /// A standalone target's extra `--add-dir` directories.
     add_dirs: Vec<String>,
-    /// The session's working directory: the primary member's folder.
-    cwd: String,
 }
 
 impl SpawnArgs {
@@ -4143,11 +4139,9 @@ impl SpawnArgs {
             claude_session_id: None,
             resume_conversation: self.resume_conversation.as_deref(),
             add_dirs: &self.add_dirs,
-            cwd: Some(&self.cwd),
-            // Only `spawn_interactive_session` writes a settings file or
-            // resolves a shim and overrides these.
+            // Only `spawn_interactive_session` writes a settings file and
+            // overrides this.
             hook_settings: None,
-            hook_shim: None,
         }
     }
 }
@@ -4167,12 +4161,9 @@ struct NewInteractive {
     started_at: chrono::DateTime<Utc>,
 }
 
-/// The record of a new interactive session, carrying its own agent's
-/// conversation from the start, so its first sidecar write and its spawn
-/// reply hold it and an agent that exits at once ends with it.
+/// The record of a new interactive session.
 fn interactive_record(
     new: NewInteractive,
-    conversation: &crate::agents::SpawnConversation,
     pty: Option<Arc<crate::pty::PtyHandle>>,
 ) -> SessionRecord {
     let mut record = SessionRecord {
@@ -4206,7 +4197,6 @@ fn interactive_record(
         scrollback_snapshot_req: None,
         spawn_origin: None,
         claude_session_id: new.claude_session_id,
-        agent_conversation_id: conversation.own.clone(),
         pending_input: None,
         last_hook_time: None,
         hook_driven: false,
@@ -4316,9 +4306,8 @@ fn remove_session_dir_if_empty(path: &Path, session_id: &str) {
 
 /// Remove a gracefully stopped session's hook settings file, then its session
 /// directory when that file was all it still held. A natural exit keeps the
-/// file (see [`write_hook_settings`]); a session that never got hooks — a Codex
-/// spawn, or one whose settings write failed — has no file to remove, which is
-/// not an error. A directory still holding `scrollback.bin` is left in place.
+/// file (see [`write_hook_settings`]); a session that never got hooks — one
+/// whose settings write failed — has no file to remove, which is not an error. A directory still holding `scrollback.bin` is left in place.
 fn remove_hook_settings(hub: &Hub, session_id: &str) {
     let path = hook_settings_path(&hub.dirs, session_id);
     match std::fs::remove_file(&path) {
@@ -4437,66 +4426,6 @@ fn write_hook_settings(hub: &Hub, session_id: &str, agent: Agent) -> Option<Hook
     })
 }
 
-/// The cached tracer a Codex hook shim runs from, and the config dir whose
-/// `daemon.json` it reads, owned so the borrowed [`HookShim`] built from them
-/// lives through the spawn.
-struct CodexHookShim {
-    tracer_exe: PathBuf,
-    config_dir: PathBuf,
-}
-
-/// The hook shim an interactive Codex spawn runs, or `None` when the request
-/// did not opt in, the cached tracer cannot be resolved, or a path the shim's
-/// command names holds a double quote (which no shell can quote safely). A
-/// `None` leaves the session on the terminal heuristic, exactly as a Claude
-/// spawn does when its settings file cannot be written.
-fn codex_hook_shim(hub: &Hub, session_id: &str, opts: &AgentOptions) -> Option<CodexHookShim> {
-    let AgentOptions::Codex { hooks: true, .. } = opts else {
-        return None;
-    };
-    match tracer_client::cached_tracer_exe(&hub.dirs) {
-        Ok(tracer_exe) => {
-            let config_dir = hub.dirs.config.clone();
-            if let Some(path) = [tracer_exe.as_path(), config_dir.as_path()]
-                .into_iter()
-                .find(|path| path.to_string_lossy().contains('"'))
-            {
-                warn!(
-                    %session_id,
-                    path = %path.display(),
-                    "a path the Codex hook shim command names holds a double quote, which cannot be quoted safely; spawning without hooks"
-                );
-                return None;
-            }
-            Some(CodexHookShim {
-                tracer_exe,
-                config_dir,
-            })
-        }
-        Err(err) => {
-            warn!(
-                %session_id,
-                error = %format!("{err:#}"),
-                "resolving the cached tracer for the Codex hook shim failed; spawning without hooks"
-            );
-            None
-        }
-    }
-}
-
-/// The cached tracer an interactive spawn must run, resolved before its argv
-/// was built: the Claude hook settings file's copy first, then the Codex
-/// shim's. `None` leaves [`tracer_client::spawn`] to resolve the cache for
-/// itself.
-fn spawn_tracer_exe<'a>(
-    hook_settings: Option<&'a HookSettings>,
-    codex_shim: Option<&'a CodexHookShim>,
-) -> Option<&'a Path> {
-    hook_settings
-        .map(|settings| settings.tracer_exe.as_path())
-        .or_else(|| codex_shim.map(|shim| shim.tracer_exe.as_path()))
-}
-
 /// Announce a replayed prompt's attention, once its session is published and
 /// only when the record still holds the prompt after the whole replay.
 fn announce_replayed_prompt(hub: &Hub, session_id: &str, awaiting: bool) {
@@ -4527,17 +4456,6 @@ async fn spawn_interactive_session(
     let backend = crate::agents::backend_for(agent);
     let raw_program = backend.resolve_program();
     let (program, prepend_args) = resolve_agent_program(&raw_program);
-    let conversation = crate::agents::spawn_conversation(
-        agent,
-        cfg.resume_conversation.as_deref(),
-        &crate::agents::Launch {
-            program: &program,
-            prepend: &prepend_args,
-            cwd: &primary_cwd,
-            env: &cfg.env.set,
-        },
-    )
-    .await;
     // Claude gets a known conversation id so the session can be resumed with
     // `claude --resume <id>` after it ends. A resumed conversation keeps its id.
     let claude_session_id = (agent == Agent::Claude).then(|| {
@@ -4549,18 +4467,9 @@ async fn spawn_interactive_session(
     // argv is built. Only Claude takes it; a failure leaves this spawn on the
     // heuristic.
     let hook_settings = write_hook_settings(hub, &session_id, agent);
-    // Codex injects the same shim through `-c` overrides instead of a settings
-    // file, so its argv names the cached tracer directly.
-    let codex_shim = codex_hook_shim(hub, &session_id, &cfg.agent_options);
     let common = CommonSpawnFields {
         claude_session_id: claude_session_id.as_deref(),
-        resume_conversation: conversation.resume.as_deref(),
         hook_settings: hook_settings.as_ref().map(HookSettings::path),
-        hook_shim: codex_shim.as_ref().map(|shim| HookShim {
-            tracer_exe: &shim.tracer_exe,
-            session_id: &session_id,
-            config_dir: &shim.config_dir,
-        }),
         ..cfg.common()
     };
     let args = backend.build_interactive_args(
@@ -4595,8 +4504,11 @@ async fn spawn_interactive_session(
     #[cfg(test)]
     child_env_probe::record(&spec.env, &spec.env_remove);
     let expected_subscribers = expected_output_subscribers(SessionMode::Interactive);
-    let spawn_result = match spawn_tracer_exe(hook_settings.as_ref(), codex_shim.as_ref()) {
-        // The same cached copy an injected file or argv names, so the hook
+    let spawn_result = match hook_settings
+        .as_ref()
+        .map(|settings| settings.tracer_exe.as_path())
+    {
+        // The same cached copy the injected settings file names, so the hook
         // command can only name the tracer this session really runs.
         Some(tracer_exe) => {
             tracer_client::spawn_with_tracer(tracer_exe, &hub.dirs, spec, expected_subscribers)
@@ -4612,14 +4524,6 @@ async fn spawn_interactive_session(
             // scan skips forever.
             if let Some(settings) = hook_settings {
                 settings.discard(&session_id);
-            }
-            if let Some(created) = &conversation.created {
-                warn!(
-                    %session_id,
-                    agent = agent.as_label(),
-                    conversation = %created,
-                    "the spawn failed after its conversation was pre-created; that empty conversation is left with the agent"
-                );
             }
             return Err(err.context(format!("spawning {} via tracer", agent.as_label())));
         }
@@ -4644,7 +4548,6 @@ async fn spawn_interactive_session(
             claude_session_id,
             started_at: Utc::now(),
         },
-        &conversation,
         Some(Arc::clone(&pty)),
     );
     let meta = pty
@@ -4704,7 +4607,6 @@ async fn spawn_interactive_session(
         meta.status_since = snap.status_since;
         write_meta_then_sync(hub, &meta);
     }
-    crate::codex_rollout::watch_session(&hub.sessions, &hub.dirs, &session_id);
 
     if let Some(injector) = cfg.prompt_injector.clone() {
         inject::run(session_id.clone(), Arc::clone(&pty), injector);
@@ -4734,29 +4636,14 @@ async fn spawn_plain_shell_session(
     if cfg.model.is_some() {
         return Err(anyhow!("plain shell sessions do not accept a model"));
     }
-    match &cfg.agent_options {
-        AgentOptions::Claude {
-            permission_mode: Some(_),
-            ..
-        } => {
-            return Err(anyhow!(
-                "plain shell sessions do not accept a permission_mode"
-            ));
-        }
-        AgentOptions::Codex {
-            sandbox: Some(_), ..
-        }
-        | AgentOptions::Cursor {
-            sandbox: Some(_), ..
-        } => {
-            return Err(anyhow!("plain shell sessions do not accept a sandbox"));
-        }
-        AgentOptions::Cursor {
-            plan_mode: true, ..
-        } => {
-            return Err(anyhow!("plain shell sessions do not accept a plan_mode"));
-        }
-        AgentOptions::Claude { .. } | AgentOptions::Codex { .. } | AgentOptions::Cursor { .. } => {}
+    if let AgentOptions::Claude {
+        permission_mode: Some(_),
+        ..
+    } = &cfg.agent_options
+    {
+        return Err(anyhow!(
+            "plain shell sessions do not accept a permission_mode"
+        ));
     }
     if cfg.dangerously_skip_permissions {
         return Err(anyhow!(
@@ -4850,8 +4737,8 @@ async fn spawn_plain_shell_session(
         pty: Some(Arc::clone(&pty)),
         headless: None,
         workspace_id: workspace_id.clone(),
-        // Plain-shell sessions have no agent CLI in the picture; label them
-        // as claude so the UI badge doesn't render `· codex` on a pwsh prompt.
+        // Plain-shell sessions have no agent CLI in the picture; the record
+        // still needs an agent, so it carries the default one.
         agent: Agent::Claude,
         terminal_title: None,
         program_name: Some(shell.label.clone()),
@@ -4867,7 +4754,6 @@ async fn spawn_plain_shell_session(
         scrollback_snapshot_req: None,
         spawn_origin: None,
         claude_session_id: None,
-        agent_conversation_id: None,
         pending_input: None,
         last_hook_time: None,
         hook_driven: false,
@@ -5026,7 +4912,6 @@ fn spawn_headless_session(
         scrollback_snapshot_req: None,
         spawn_origin: None,
         claude_session_id: None,
-        agent_conversation_id: None,
         pending_input: None,
         last_hook_time: None,
         hook_driven: false,
@@ -6045,7 +5930,7 @@ fn spawn_standalone_shell(cwd: Option<&str>) -> anyhow::Result<SpawnResolution> 
 fn standalone_supports(mode: SessionMode, agent: Agent) -> bool {
     match mode {
         SessionMode::PlainShell => true,
-        SessionMode::Interactive => matches!(agent, Agent::Claude | Agent::Codex | Agent::Cursor),
+        SessionMode::Interactive => matches!(agent, Agent::Claude),
         SessionMode::Headless => false,
     }
 }
@@ -6329,12 +6214,7 @@ async fn session_history_items(hub: &Hub) -> Vec<protocol::SessionHistoryItem> {
     let repos = hub.state.with_persisted(|s| s.repos.clone());
     tokio::task::spawn_blocking(move || {
         let claude_home = crate::transcripts::claude_home();
-        history::history_items(
-            &dirs,
-            &repos,
-            claude_home.as_deref(),
-            crate::codex_rollout::codex_home,
-        )
+        history::history_items(&dirs, &repos, claude_home.as_deref())
     })
     .await
     .unwrap_or_else(|err| {
@@ -6420,7 +6300,7 @@ async fn recover_one(
         .state
         .with_persisted(|s| (s.repos.clone(), s.workspaces.clone()));
     let planned_item = item.clone();
-    // Planning looks up transcripts and rollouts on disk.
+    // Planning looks up transcripts on disk.
     let mut plan = tokio::task::spawn_blocking(move || {
         let registered = history::Registered {
             repos: &repos,
@@ -6428,7 +6308,7 @@ async fn recover_one(
         };
         let claude_home = crate::transcripts::claude_home();
         history::plan_recovery(&entry, &planned_item, &registered, |agent, folder, id| {
-            recovery_conversation_exists(&entry, claude_home.as_deref(), agent, folder, id)
+            recovery_conversation_exists(claude_home.as_deref(), agent, folder, id)
         })
     })
     .await
@@ -6469,10 +6349,8 @@ fn recovery_busy_excluded(live: Option<&SessionRecord>, entry: &protocol::Histor
 }
 
 /// Whether `agent` still holds conversation `id` for `folder`: Claude Code's
-/// transcript, or Codex's rollout under the Codex home `entry`'s spawn
-/// recorded. A recorded Cursor chat always counts.
+/// transcript.
 fn recovery_conversation_exists(
-    entry: &protocol::HistoryEntry,
     claude_home: Option<&Path>,
     agent: Agent,
     folder: &str,
@@ -6482,9 +6360,6 @@ fn recovery_conversation_exists(
         Agent::Claude => {
             claude_home.is_some_and(|home| crate::transcripts::transcript_exists(home, folder, id))
         }
-        Agent::Codex => crate::codex_rollout::codex_home(history::recorded_env(entry))
-            .is_some_and(|home| crate::codex_rollout::rollout_exists(&home, id)),
-        Agent::Cursor => true,
     }
 }
 
@@ -7172,8 +7047,8 @@ fn rebind_session_panes(hub: &Hub, old_id: &str, new_id: &str) {
 /// Resolve an agent-program name into something `CreateProcess` /
 /// portable-pty can actually launch. Returns `(program, prepended_args)`.
 ///
-/// On Windows, agent CLIs distributed via npm (e.g. codex from
-/// `@openai/codex`, claude from `@anthropic-ai/claude-code`) land on
+/// On Windows, agent CLIs distributed via npm (e.g. claude from
+/// `@anthropic-ai/claude-code`) land on
 /// PATH as `.cmd` shims. Two layers of fixup matter here:
 ///
 /// 1. `CreateProcess` does NOT execute `.cmd` or `.bat` directly, so
@@ -7192,7 +7067,7 @@ fn rebind_session_panes(hub: &Hub, old_id: &str, new_id: &str) {
 /// We dodge both by, when the `.cmd` is an npm-style shim, peeking
 /// into the sibling `node_modules/.../bin/` directory and spawning
 /// either the native `<stem>.exe` (newer claude-code distribution) or
-/// `node.exe <stem>.js` (codex, older claude) directly. That removes
+/// `node.exe <stem>.js` (older claude) directly. That removes
 /// cmd.exe from the chain entirely.
 ///
 /// Order of preference for a `.cmd` shim:
@@ -7239,7 +7114,7 @@ fn resolve_agent_program(name: &str) -> (String, Vec<String>) {
 /// - Native binary distribution (`@anthropic-ai/claude-code` since
 ///   ~2026): `<dir>/node_modules/<pkg>/bin/<stem>.exe`. Returned as
 ///   `(<exe>, [])` — no node prefix.
-/// - JS entrypoint (codex, older claude): `<dir>/node_modules/<pkg>/
+/// - JS entrypoint (older claude): `<dir>/node_modules/<pkg>/
 ///   bin/<stem>.js`. Returned as `(node.exe, [<js>])`. The `node.exe`
 ///   resolution prefers a sibling next to the shim (nvm-style install
 ///   layout) over a PATH-resolved one, so node-version managers stay
@@ -7272,7 +7147,7 @@ fn npm_shim_to_native_program(shim: &Path) -> Option<(PathBuf, Vec<String>)> {
         let name = entry.file_name();
         let name_str = name.to_str()?;
         if name_str.starts_with('@') {
-            // Scoped: walk one more level (e.g. node_modules/@openai/codex/bin/codex.js).
+            // Scoped: walk one more level (e.g. node_modules/@anthropic-ai/claude-code/bin/claude.js).
             if let Ok(inner) = std::fs::read_dir(&p) {
                 for sub in inner.flatten() {
                     let bin = sub.path().join("bin");
@@ -8563,7 +8438,6 @@ mod tests {
             scrollback_snapshot_req: None,
             spawn_origin: None,
             claude_session_id: None,
-            agent_conversation_id: None,
             pending_input: None,
             last_hook_time: None,
             hook_driven: false,
@@ -10258,7 +10132,6 @@ mod tests {
             origin: None,
             resume_conversation: None,
             add_dirs: Vec::new(),
-            cwd: folder.to_string_lossy().into_owned(),
         };
         format!(
             "{:#}",
@@ -10325,7 +10198,6 @@ mod tests {
             origin: None,
             resume_conversation: None,
             add_dirs: Vec::new(),
-            cwd: folder.to_string_lossy().into_owned(),
         };
         format!(
             "{:#}",
@@ -10343,69 +10215,6 @@ mod tests {
             .await
             .expect_err("the stub tracer is not a runnable executable")
         )
-    }
-
-    fn codex_hooked() -> AgentOptions {
-        AgentOptions::Codex {
-            sandbox: None,
-            hooks: true,
-        }
-    }
-
-    #[test]
-    fn codex_hooks_are_off_when_a_shim_path_cannot_be_quoted() {
-        let (mut hub, _scratch) = hook_test_hub("codex-hooks-unquotable");
-        hub.dirs.config =
-            PathBuf::from(r#"C:\Users\a "b"\AppData\Roaming\leftos\rustling-tulip\config"#);
-        assert!(
-            codex_hook_shim(&hub, "codex-session", &codex_hooked()).is_none(),
-            "a quote in the config dir refuses the shim instead of an unquotable command"
-        );
-    }
-
-    fn test_hook_settings(tracer: &str) -> HookSettings {
-        HookSettings {
-            path: PathBuf::from("hook-settings.json"),
-            tracer_exe: PathBuf::from(tracer),
-            created_dir: false,
-        }
-    }
-
-    fn test_codex_shim(tracer: &str) -> CodexHookShim {
-        CodexHookShim {
-            tracer_exe: PathBuf::from(tracer),
-            config_dir: PathBuf::from(r"C:\config"),
-        }
-    }
-
-    #[test]
-    fn spawn_tracer_prefers_the_claude_hook_settings() {
-        let settings = test_hook_settings(r"C:\cache\settings-tracer.exe");
-        let shim = test_codex_shim(r"C:\cache\shim-tracer.exe");
-        assert_eq!(
-            spawn_tracer_exe(Some(&settings), Some(&shim)),
-            Some(Path::new(r"C:\cache\settings-tracer.exe")),
-            "a Claude spawn runs the copy its settings file names"
-        );
-    }
-
-    #[test]
-    fn spawn_tracer_uses_the_codex_shim_without_claude_settings() {
-        let shim = test_codex_shim(r"C:\cache\shim-tracer.exe");
-        assert_eq!(
-            spawn_tracer_exe(None, Some(&shim)),
-            Some(Path::new(r"C:\cache\shim-tracer.exe")),
-            "a Codex spawn runs the copy its -c command names"
-        );
-    }
-
-    #[test]
-    fn spawn_tracer_is_none_when_neither_shim_names_a_copy() {
-        assert_eq!(
-            spawn_tracer_exe(None, None),
-            None,
-            "a spawn without hooks resolves the cache for itself"
-        );
     }
 
     #[test]
@@ -10467,30 +10276,6 @@ mod tests {
             hub.dirs.config.to_string_lossy().as_ref(),
             "the shim reads daemon.json from the daemon's config dir"
         );
-    }
-
-    #[test]
-    fn hook_settings_are_for_claude_only() {
-        // The hub resolves a tracer, so a spawn agent other than Claude would
-        // get a file here if the writer's gate were missing.
-        let (hub, _scratch) = hook_test_hub("hook-settings-agents");
-        for (agent, id) in [
-            (Agent::Codex, "codex-session"),
-            (Agent::Cursor, "cursor-session"),
-        ] {
-            assert!(
-                write_hook_settings(&hub, id, agent).is_none(),
-                "{agent:?} spawns get no hook settings"
-            );
-            assert!(
-                !hook_settings_file(&hub, id).exists(),
-                "{agent:?} spawn wrote no file"
-            );
-            assert!(
-                !hub.dirs.sessions_dir.join(id).exists(),
-                "{agent:?} spawn created no session dir"
-            );
-        }
     }
 
     #[test]
@@ -10775,139 +10560,6 @@ mod tests {
         assert!(hub.sessions.snapshots().is_empty(), "nothing was spawned");
         let entry = history::read_one(&hub.dirs, "shell").expect("entry kept");
         assert_eq!(entry.recovered_at, None, "a failed recovery is not marked");
-    }
-
-    #[tokio::test]
-    #[expect(clippy::panic, reason = "a wrong reply fails the test loudly")]
-    async fn recover_own_agent_codex_reaches_codex_spawn() {
-        let (hub, _scratch, repo) = env_ref_repo_hub("recover-own-codex");
-        let folder = repo.to_string_lossy().into_owned();
-        let mut record = history::test_support::record("codex", SessionMode::Interactive);
-        record.agent = Agent::Codex;
-        record.members = vec![SessionMember {
-            repo_id: "r1".to_owned(),
-            repo_name: "r1".to_owned(),
-            branch: "main".to_owned(),
-            worktree_path: folder.clone(),
-        }];
-        let mut request = env_spawn(
-            single_target(true, Some(&folder)),
-            SessionMode::Interactive,
-            Vec::new(),
-            None,
-        );
-        request.agent_options = AgentOptions::Codex {
-            sandbox: None,
-            hooks: false,
-        };
-        record.spawn_config = Some(protocol::SpawnConfig::from_request(&request));
-        let mut entry =
-            history::entry_from_record(&record, SessionEnd::TracerLost, chrono::Utc::now());
-        entry.primary_cwd = Some(folder);
-        history::write_if_absent(&hub.dirs, &entry).expect("write history entry");
-        let reply = dispatch_one(
-            &hub,
-            ClientMessage::RecoverSessions {
-                request_id: None,
-                items: vec![protocol::RecoverItem {
-                    history_id: "codex".to_owned(),
-                    conversation_id: None,
-                    how: protocol::RecoverAs::OwnAgent,
-                }],
-            },
-        )
-        .await;
-        let DaemonMessage::RecoverResult { results, .. } = reply else {
-            panic!("expected recover_result, got {reply:?}");
-        };
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].session_id, None);
-        let error = results[0].error.as_deref().unwrap_or_default();
-        assert!(error.contains("spawning codex via tracer"), "{error}");
-        assert!(hub.sessions.snapshots().is_empty(), "nothing was spawned");
-    }
-
-    #[test]
-    fn spawn_record_carries_the_own_conversation_into_the_first_sidecar_write() {
-        let dirs = history::test_support::scratch_dirs("spawn-own-conversation");
-        let registry = SessionRegistry::new(dirs.clone());
-        let cases = [
-            (
-                "codex-resumed",
-                Agent::Codex,
-                Some("codex-1"),
-                None,
-                "codex-1",
-            ),
-            (
-                "cursor-created",
-                Agent::Cursor,
-                None,
-                Some("chat-1".to_owned()),
-                "chat-1",
-            ),
-        ];
-        for (id, agent, resume, created, want) in cases {
-            let conversation = crate::agents::SpawnConversation::new(agent, resume, created);
-            let request = env_spawn(
-                single_target(true, Some(r"X:\wt\repo")),
-                SessionMode::Interactive,
-                Vec::new(),
-                None,
-            );
-            let record = interactive_record(
-                NewInteractive {
-                    session_id: id.to_owned(),
-                    label: id.to_owned(),
-                    kind: SessionKind::Single,
-                    members: Vec::new(),
-                    workspace_id: None,
-                    agent,
-                    cwd: r"X:\wt\repo".to_owned(),
-                    stored_config: protocol::SpawnConfig::from_request(&request),
-                    last_prompt: None,
-                    claude_session_id: None,
-                    started_at: Utc::now(),
-                },
-                &conversation,
-                None,
-            );
-            assert_eq!(record.agent_conversation_id.as_deref(), Some(want), "{id}");
-            let meta = interactive_meta(
-                &record,
-                4242,
-                TracerSidecar {
-                    pid: 4243,
-                    pipe: format!(r"\\.\pipe\rt-tracer-{id}"),
-                    exe_path: "rt-tracer.exe".to_owned(),
-                },
-            )
-            .expect("sidecar meta");
-            registry.insert(record);
-            registry.write_sidecar(&meta);
-            let written = orphan::load_meta(&dirs, id).expect("the first sidecar write");
-            assert_eq!(written.agent_conversation_id.as_deref(), Some(want), "{id}");
-        }
-        let _ = std::fs::remove_dir_all(&dirs.config);
-    }
-
-    #[test]
-    fn spawn_args_common_carries_the_cwd() {
-        let cfg = SpawnArgs {
-            dangerously_skip_permissions: false,
-            agent_options: AgentOptions::Codex {
-                sandbox: None,
-                hooks: false,
-            },
-            model: None,
-            env: crate::agents::providers::SpawnEnv::default(),
-            prompt_injector: None,
-            origin: None,
-            resume_conversation: None,
-            add_dirs: Vec::new(),
-            cwd: "X:/wt/repo".to_owned(),
-        };
-        assert_eq!(cfg.common().cwd, Some("X:/wt/repo"));
     }
 
     /// A lookup that knows only `A` (as `va`) in the process scope.
@@ -11539,7 +11191,6 @@ mod tests {
     /// (which is what the spawn hands these constructors) to the same
     /// constructors here.
     fn record_stopped_session(hub: &Hub, id: &str, stored: &protocol::SpawnConfig) {
-        let conversation = crate::agents::SpawnConversation::new(Agent::Claude, None, None);
         let record = interactive_record(
             NewInteractive {
                 session_id: id.to_owned(),
@@ -11554,7 +11205,6 @@ mod tests {
                 claude_session_id: None,
                 started_at: Utc::now(),
             },
-            &conversation,
             None,
         );
         let meta = interactive_meta(
@@ -11791,47 +11441,6 @@ mod tests {
             Some(SECRET_SENTINEL),
             "a resume resolves the reference the record holds"
         );
-
-        let mut record = history::test_support::record("codex", SessionMode::Interactive);
-        record.agent = Agent::Codex;
-        record.members = vec![SessionMember {
-            repo_id: "r1".to_owned(),
-            repo_name: "r1".to_owned(),
-            branch: "main".to_owned(),
-            worktree_path: folder.clone(),
-        }];
-        let mut request = request.clone();
-        request.agent_options = AgentOptions::Codex {
-            sandbox: None,
-            hooks: false,
-        };
-        record.spawn_config = Some(protocol::SpawnConfig::from_request(&request));
-        let mut entry = history::entry_from_record(&record, SessionEnd::TracerLost, Utc::now());
-        entry.primary_cwd = Some(folder);
-        history::write_if_absent(&hub.dirs, &entry).expect("write history entry");
-
-        let _ = child_env_probe::take();
-        let error = recover_one(
-            &hub,
-            &protocol::RecoverItem {
-                history_id: "codex".to_owned(),
-                conversation_id: None,
-                how: protocol::RecoverAs::OwnAgent,
-            },
-            &out_tx,
-        )
-        .await
-        .expect_err("no tracer can start");
-        assert!(error.contains("spawning codex via tracer"), "{error}");
-        assert_eq!(
-            child_value(
-                &child_env_probe::take().expect("the recovery built an env"),
-                "ANTHROPIC_API_KEY"
-            )
-            .as_deref(),
-            Some(SECRET_SENTINEL),
-            "a recovery resolves the reference the history entry holds"
-        );
     }
 
     #[tokio::test]
@@ -12024,7 +11633,6 @@ mod tests {
         record.spawn_config = Some(protocol::SpawnConfig::from_request(&request));
         let mut entry = history::entry_from_record(&record, SessionEnd::TracerLost, Utc::now());
         entry.primary_cwd = Some(folder.to_owned());
-        entry.agent_conversation_id = Some(RECOVERY_CONVERSATION.to_owned());
         history::write_if_absent(&hub.dirs, &entry).expect("write history entry");
     }
 
@@ -12129,23 +11737,7 @@ mod tests {
     #[tokio::test]
     async fn standalone_target_refuses_headless() {
         let (hub, _scratch) = spawnless_test_hub("standalone-agents");
-        for (mode, agent_options) in [
-            (SessionMode::Headless, AgentOptions::claude(None)),
-            (
-                SessionMode::Headless,
-                AgentOptions::Codex {
-                    sandbox: None,
-                    hooks: false,
-                },
-            ),
-            (
-                SessionMode::Headless,
-                AgentOptions::Cursor {
-                    plan_mode: false,
-                    sandbox: None,
-                },
-            ),
-        ] {
+        for (mode, agent_options) in [(SessionMode::Headless, AgentOptions::claude(None))] {
             let req = SpawnRequest {
                 label: None,
                 target: SpawnTarget::Standalone {
@@ -12215,138 +11807,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn standalone_target_spawns_interactive_codex_in_the_folder() {
-        let (hub, scratch) = spawnless_test_hub("standalone-codex");
-        let folder = scratch.path().join("plain-codex");
+    async fn standalone_target_spawns_interactive_claude_in_the_folder() {
+        let (hub, scratch) = spawnless_test_hub("standalone-claude");
+        let folder = scratch.path().join("plain-claude");
         std::fs::create_dir_all(&folder).expect("create folder");
-        let error = standalone_agent_spawn_error(
-            &hub,
-            AgentOptions::Codex {
-                sandbox: None,
-                hooks: false,
-            },
-            &folder,
-        )
-        .await;
-        assert!(error.contains("spawning codex via tracer"), "{error}");
+        let error = standalone_agent_spawn_error(&hub, AgentOptions::claude(None), &folder).await;
+        assert!(error.contains("spawning claude via tracer"), "{error}");
         assert_standalone_agent_runs_in(&folder);
         assert!(hub.sessions.snapshots().is_empty(), "nothing was spawned");
     }
 
     #[tokio::test]
-    async fn standalone_target_spawns_interactive_cursor_in_the_folder() {
-        let (hub, scratch) = spawnless_test_hub("standalone-cursor");
-        let folder = scratch.path().join("plain-cursor");
-        std::fs::create_dir_all(&folder).expect("create folder");
-        let options = AgentOptions::Cursor {
-            plan_mode: false,
-            sandbox: None,
-        };
-        let error = standalone_agent_spawn_error(&hub, options, &folder).await;
-        assert!(error.contains("spawning cursor via tracer"), "{error}");
-        assert_standalone_agent_runs_in(&folder);
-        assert!(hub.sessions.snapshots().is_empty(), "nothing was spawned");
-    }
-
-    #[tokio::test]
-    async fn standalone_codex_in_a_missing_folder_fails_with_folder_not_found() {
-        let (hub, scratch) = spawnless_test_hub("standalone-codex-missing");
+    async fn standalone_claude_in_a_missing_folder_fails_with_folder_not_found() {
+        let (hub, scratch) = spawnless_test_hub("standalone-claude-missing");
         let folder = scratch.path().join("gone");
-        let error = standalone_agent_spawn_error(
-            &hub,
-            AgentOptions::Codex {
-                sandbox: None,
-                hooks: false,
-            },
-            &folder,
-        )
-        .await;
+        let error = standalone_agent_spawn_error(&hub, AgentOptions::claude(None), &folder).await;
         assert!(error.contains("reading the standalone folder"), "{error}");
         assert!(error.contains(&*folder.to_string_lossy()), "{error}");
-    }
-
-    /// A Codex history entry `id` whose one member ran in `folder` as repo
-    /// `r1`, spawned at `target`; the hub registers no repo or workspace.
-    fn unregistered_codex_entry(hub: &Hub, id: &str, folder: &str, target: SpawnTarget) {
-        let mut record = history::test_support::record(id, SessionMode::Interactive);
-        record.agent = Agent::Codex;
-        record.members = vec![SessionMember {
-            repo_id: "r1".to_owned(),
-            repo_name: "r1".to_owned(),
-            branch: "main".to_owned(),
-            worktree_path: folder.to_owned(),
-        }];
-        let mut request = env_spawn(target, SessionMode::Interactive, Vec::new(), None);
-        request.agent_options = AgentOptions::Codex {
-            sandbox: None,
-            hooks: false,
-        };
-        record.spawn_config = Some(protocol::SpawnConfig::from_request(&request));
-        let mut entry =
-            history::entry_from_record(&record, SessionEnd::TracerLost, chrono::Utc::now());
-        entry.primary_cwd = Some(folder.to_owned());
-        history::write_if_absent(&hub.dirs, &entry).expect("write history entry");
-    }
-
-    #[tokio::test]
-    async fn own_agent_recovery_of_an_unregistered_repo_entry_spawns_standalone() {
-        let gone_workspace = SpawnTarget::Workspace {
-            workspace_id: "gone-ws".to_owned(),
-            branch_name: "wt/x".to_owned(),
-            base_branch: None,
-            use_worktree: true,
-            worktree_reuse: protocol::WorktreeReusePolicy::Reuse,
-            existing_worktrees: Vec::new(),
-        };
-        assert_own_agent_recovers_standalone("recover-own-standalone", &gone_workspace).await;
-    }
-
-    #[tokio::test]
-    async fn own_agent_recovery_of_a_removed_single_repo_entry_spawns_standalone() {
-        let removed_repo = single_target(true, None);
-        assert_own_agent_recovers_standalone("recover-own-single", &removed_repo).await;
-    }
-
-    /// Own-agent recovery of two Codex entries spawned at `target` on a hub
-    /// that registers nothing: one whose recorded folder exists reaches the
-    /// Codex spawn, and one whose folder is gone fails naming that folder.
-    #[expect(clippy::panic, reason = "a wrong reply fails the test loudly")]
-    async fn assert_own_agent_recovers_standalone(tag: &str, target: &SpawnTarget) {
-        let (hub, scratch) = spawnless_test_hub(tag);
-        let folder = scratch.path().join("recorded");
-        std::fs::create_dir_all(&folder).expect("create folder");
-        let missing = scratch.path().join("recorded-gone");
-        unregistered_codex_entry(&hub, "codex", &folder.to_string_lossy(), target.clone());
-        unregistered_codex_entry(
-            &hub,
-            "codex-missing",
-            &missing.to_string_lossy(),
-            target.clone(),
-        );
-        let reply = dispatch_one(
-            &hub,
-            ClientMessage::RecoverSessions {
-                request_id: None,
-                items: ["codex", "codex-missing"]
-                    .map(|id| protocol::RecoverItem {
-                        history_id: id.to_owned(),
-                        conversation_id: None,
-                        how: protocol::RecoverAs::OwnAgent,
-                    })
-                    .to_vec(),
-            },
-        )
-        .await;
-        let DaemonMessage::RecoverResult { results, .. } = reply else {
-            panic!("expected recover_result, got {reply:?}");
-        };
-        assert_eq!(results.len(), 2);
-        let spawned = results[0].error.as_deref().unwrap_or_default();
-        assert!(spawned.contains("spawning codex via tracer"), "{spawned}");
-        let gone = results[1].error.as_deref().unwrap_or_default();
-        assert!(gone.contains("reading the standalone folder"), "{gone}");
-        assert!(gone.contains(&*missing.to_string_lossy()), "{gone}");
-        assert!(hub.sessions.snapshots().is_empty(), "nothing was spawned");
     }
 
     fn accent(color: &str) -> AppearanceOverrides {
@@ -13005,21 +12482,21 @@ mod tests {
             );
         }
 
-        /// Codex's layout (and older claude installs): no native exe,
-        /// just the JS entry. Resolver should fall back to running it
-        /// under `node.exe`.
+        /// Older claude installs' layout: no native exe, just the JS
+        /// entry. Resolver should fall back to running it under
+        /// `node.exe`.
         #[test]
         fn scoped_js_entry_resolved_via_node() {
             let scratch = Scratch::new("scoped-js");
             let dir = scratch.path();
-            let shim = dir.join("codex.cmd");
+            let shim = dir.join("claude.cmd");
             touch(&shim);
             let js = dir
                 .join("node_modules")
-                .join("@openai")
-                .join("codex")
+                .join("@anthropic-ai")
+                .join("claude-code")
                 .join("bin")
-                .join("codex.js");
+                .join("claude.js");
             touch(&js);
             // Sibling node.exe so the test doesn't depend on a
             // PATH-resolved `node` being installed on the runner.

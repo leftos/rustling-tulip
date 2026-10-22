@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, TimeZone, Utc};
 use protocol::{
-    Agent, ClientMessage, ConversationCandidate, DaemonMessage, HistoryEntry, RecoverAs,
-    RecoverItem, RecoverItemResult, SessionEnd, SessionHistoryItem, SessionMode,
+    ClientMessage, ConversationCandidate, DaemonMessage, HistoryEntry, RecoverAs, RecoverItem,
+    RecoverItemResult, SessionEnd, SessionHistoryItem, SessionMode,
 };
 
 use crate::spawn_form::human_relative_time;
@@ -281,8 +281,7 @@ fn default_conversation(item: &SessionHistoryItem) -> Option<usize> {
 pub struct RecoverOption {
     pub how: RecoverAs,
     pub label: String,
-    /// Whether it resumes the chosen conversation. False for a plain shell
-    /// and for an own-agent row that starts a fresh run.
+    /// Whether it resumes the chosen conversation. False for a plain shell.
     pub resumes: bool,
 }
 
@@ -292,57 +291,10 @@ fn chooses_how(entry: &HistoryEntry) -> bool {
     entry.mode == SessionMode::PlainShell || entry.spawn_config.is_none()
 }
 
-/// The CLI an entry's own agent runs, as its rows name it.
-fn agent_name(agent: Agent) -> &'static str {
-    match agent {
-        Agent::Claude => "Claude",
-        Agent::Codex => "Codex",
-        Agent::Cursor => "Cursor",
-    }
-}
-
-/// Whether an own-agent entry resumes its conversation: the daemon says it
-/// can and the id to resume with was recorded.
-fn own_agent_resumes(item: &SessionHistoryItem) -> bool {
-    item.own_agent_resumable && item.entry.agent_conversation_id.is_some()
-}
-
-/// The text an own-agent row shows where a Claude row shows nothing: whether
-/// it resumes its own conversation or starts a fresh run. None for a Claude
-/// row, for an own-agent row the daemon refuses for want of spawn settings,
-/// and for an entry already recovered, which shows only its stamp.
-fn own_agent_text(item: &SessionHistoryItem) -> Option<String> {
-    let entry = &item.entry;
-    if entry.agent == Agent::Claude || entry.spawn_config.is_none() || entry.recovered_at.is_some()
-    {
-        return None;
-    }
-    let run = if own_agent_resumes(item) {
-        "resumes its conversation"
-    } else if entry.agent_conversation_id.is_some() {
-        "fresh run: its conversation is gone"
-    } else {
-        "fresh run: no conversation recorded"
-    };
-    Some(format!("{} session, {run}", agent_name(entry.agent)))
-}
-
 /// The ways `item` can be recovered, the default first-chosen index among
 /// them. Empty when nothing can be offered.
 fn recover_options(item: &SessionHistoryItem, names: &Names) -> (Vec<RecoverOption>, usize) {
     let entry = &item.entry;
-    if entry.agent != Agent::Claude {
-        let options = if entry.spawn_config.is_some() {
-            vec![RecoverOption {
-                how: RecoverAs::OwnAgent,
-                label: format!("{} session", agent_name(entry.agent)),
-                resumes: own_agent_resumes(item),
-            }]
-        } else {
-            Vec::new()
-        };
-        return (options, 0);
-    }
     let has_candidate = !item.candidates.is_empty();
     if !chooses_how(entry) {
         let options = if has_candidate {
@@ -423,12 +375,6 @@ fn folder_claude_options(item: &SessionHistoryItem, names: &Names) -> Vec<Recove
     }
 }
 
-/// Whether a row joins the pre-tick: a loss the daemon may recover, and not
-/// an own-agent row that would start a fresh run.
-fn pre_ticked(item: &SessionHistoryItem) -> bool {
-    item.entry.agent == Agent::Claude || own_agent_resumes(item)
-}
-
 /// The last component of a path, either separator.
 fn last_segment(path: &str) -> &str {
     path.trim_end_matches(['\\', '/'])
@@ -450,9 +396,6 @@ pub struct Row {
     /// `(conversation id, choice text)`, newest first.
     pub conversations: Vec<(String, String)>,
     pub conversation: Option<usize>,
-    /// The one way an own-agent row recovers, where a Claude row shows its
-    /// "Recover as" choice. None for a Claude row.
-    pub fixed_how: Option<String>,
     pub options: Vec<RecoverOption>,
     pub option: usize,
     /// Whether the row shows its "Recover as" choice.
@@ -470,36 +413,15 @@ impl Row {
         let (options, option) = recover_options(item, names);
         let disabled = match entry.recovered_at {
             Some(at) => Some(format!("recovered {}", clock(at, now))),
-            None if options.is_empty() => Some(
-                match entry.agent {
-                    Agent::Claude => "no conversation found",
-                    Agent::Codex | Agent::Cursor => "no spawn settings recorded",
-                }
-                .to_owned(),
-            ),
+            None if options.is_empty() => Some("no conversation found".to_owned()),
             None => None,
         };
         let now_utc = now.with_timezone(&Utc);
-        let own = entry.agent != Agent::Claude;
-        let conversations: Vec<(String, String)> = if own && own_agent_resumes(item) {
-            entry
-                .agent_conversation_id
-                .iter()
-                .map(|id| (id.clone(), "its own conversation".to_owned()))
-                .collect()
-        } else if own {
-            Vec::new()
-        } else {
-            item.candidates
-                .iter()
-                .map(|c| (c.id.clone(), conversation_label(c, now_utc)))
-                .collect()
-        };
-        let conversation = if own {
-            (!conversations.is_empty()).then_some(0)
-        } else {
-            default_conversation(item)
-        };
+        let conversations: Vec<(String, String)> = item
+            .candidates
+            .iter()
+            .map(|c| (c.id.clone(), conversation_label(c, now_utc)))
+            .collect();
         Self {
             id: entry.session_id.clone(),
             label: row_label(entry),
@@ -507,9 +429,8 @@ impl Row {
             ended: ended_text(entry, now),
             disabled,
             conversations,
-            conversation,
-            fixed_how: own_agent_text(item),
-            shows_recover_as: !own && chooses_how(entry) && !options.is_empty(),
+            conversation: default_conversation(item),
+            shows_recover_as: chooses_how(entry) && !options.is_empty(),
             options,
             option,
             error: None,
@@ -624,8 +545,7 @@ pub struct RecoverDialog {
 }
 
 impl RecoverDialog {
-    /// The dialog over `items`: the unrecovered losses ticked, except an
-    /// own-agent row that would start a fresh run.
+    /// The dialog over `items`: the unrecovered losses ticked.
     pub fn new<Tz: TimeZone>(
         items: &[SessionHistoryItem],
         names: &Names,
@@ -640,7 +560,7 @@ impl RecoverDialog {
             .collect();
         let ticked: HashSet<String> = items
             .iter()
-            .filter(|item| counts(&item.entry) && pre_ticked(item))
+            .filter(|item| counts(&item.entry))
             .map(|item| item.entry.session_id.clone())
             .filter(|id| rows.get(id).is_some_and(Row::enabled))
             .collect();
@@ -663,9 +583,8 @@ impl RecoverDialog {
     /// conversation, "Recover as" choice and error, and its tick while it
     /// can be recovered; a row gone from `items` drops. New rows join, the
     /// losses ticked, unless only a recovery's failed rows are listed. A
-    /// tick the pre-tick rule made follows the rule again, so an own-agent
-    /// row that can no longer resume loses it; a tick or untick the user
-    /// made stands.
+    /// tick the pre-tick rule made follows the rule again; a tick or untick
+    /// the user made stands.
     pub fn refresh<Tz: TimeZone>(
         &mut self,
         items: &[SessionHistoryItem],
@@ -1759,14 +1678,6 @@ mod tests {
         );
     }
 
-    /// A Codex or Cursor session in repo `r1`, lost at `ended`, with no
-    /// recorded conversation id.
-    fn own_agent(id: &str, agent: Agent, ended: &str) -> SessionHistoryItem {
-        let mut item = lost(id, ended);
-        item.entry.agent = agent;
-        item
-    }
-
     /// The one item a dialog of one row sends.
     fn sent(dialog: &mut RecoverDialog) -> Vec<RecoverItem> {
         let msg = dialog
@@ -1779,164 +1690,11 @@ mod tests {
     }
 
     #[test]
-    fn codex_resumable_row_sends_own_agent_with_its_id() {
-        let mut codex = own_agent("x", Agent::Codex, "2026-09-28T09:00:00Z");
-        codex.entry.agent_conversation_id = Some("rollout-7".to_owned());
-        codex.own_agent_resumable = true;
-        let mut dialog = dialog(&[codex]);
-        let row = dialog.row("x").expect("row");
-        assert_eq!(
-            row.options,
-            [RecoverOption {
-                how: RecoverAs::OwnAgent,
-                label: "Codex session".to_owned(),
-                resumes: true,
-            }]
-        );
-        assert_eq!(
-            row.conversations,
-            [("rollout-7".to_owned(), "its own conversation".to_owned())]
-        );
-        assert_eq!(
-            row.fixed_how.as_deref(),
-            Some("Codex session, resumes its conversation")
-        );
-        assert!(row.disabled.is_none());
-        assert!(!row.shows_recover_as, "one choice needs no Recover as");
-        assert!(dialog.is_ticked("x"), "a resumable loss is pre-ticked");
-        assert_eq!(
-            sent(&mut dialog),
-            [RecoverItem {
-                history_id: "x".to_owned(),
-                conversation_id: Some("rollout-7".to_owned()),
-                how: RecoverAs::OwnAgent,
-            }]
-        );
-    }
-
-    #[test]
-    fn codex_fresh_row_sends_own_agent_without_id() {
-        let codex = own_agent("x", Agent::Codex, "2026-09-28T09:00:00Z");
-        let mut dialog = dialog(&[codex]);
-        let row = dialog.row("x").expect("row");
-        assert!(row.conversations.is_empty(), "no conversation to send");
-        assert!(!row.chosen().expect("chosen").resumes);
-        assert_eq!(
-            row.fixed_how.as_deref(),
-            Some("Codex session, fresh run: no conversation recorded")
-        );
-        dialog.toggle("x");
-        assert_eq!(
-            sent(&mut dialog),
-            [RecoverItem {
-                history_id: "x".to_owned(),
-                conversation_id: None,
-                how: RecoverAs::OwnAgent,
-            }]
-        );
-    }
-
-    #[test]
-    fn codex_row_with_claude_candidates_offers_no_claude_choice() {
-        let mut codex = own_agent("x", Agent::Codex, "2026-09-28T09:00:00Z");
-        codex.entry.agent_conversation_id = Some("rollout-7".to_owned());
-        codex.own_agent_resumable = true;
-        codex.candidates = vec![candidate("c-x", "2026-09-28T09:00:00Z", Some("Fix it"))];
-        let dialog = dialog(&[codex]);
-        let row = dialog.row("x").expect("row");
-        let labels: Vec<&str> = row.options.iter().map(|o| o.label.as_str()).collect();
-        assert_eq!(
-            labels,
-            ["Codex session"],
-            "a Codex entry never offers a Claude conversation"
-        );
-        assert_eq!(
-            row.conversations,
-            [("rollout-7".to_owned(), "its own conversation".to_owned())],
-            "its own id, not the Claude candidate"
-        );
-    }
-
-    #[test]
-    fn codex_row_without_spawn_config_is_disabled_with_reason() {
-        let mut codex = own_agent("x", Agent::Codex, "2026-09-28T09:00:00Z");
-        codex.entry.spawn_config = None;
-        codex.entry.agent_conversation_id = Some("rollout-7".to_owned());
-        codex.own_agent_resumable = true;
-        let mut dialog = dialog(&[codex]);
-        let row = dialog.row("x").expect("row");
-        assert_eq!(row.options, [] as [crate::recover::RecoverOption; 0]);
-        assert_eq!(
-            row.disabled.as_deref(),
-            Some("no spawn settings recorded"),
-            "not the Claude reason"
-        );
-        assert!(row.fixed_how.is_none(), "no choice to describe");
-        dialog.select_all();
-        assert!(!dialog.is_ticked("x"), "a disabled row never ticks");
-    }
-
-    #[test]
-    fn cursor_row_is_labelled_cursor_session() {
-        let mut cursor = own_agent("x", Agent::Cursor, "2026-09-28T09:00:00Z");
-        cursor.entry.agent_conversation_id = Some("chat-9".to_owned());
-        cursor.own_agent_resumable = true;
-        let dialog = dialog(&[cursor]);
-        let row = dialog.row("x").expect("row");
-        assert_eq!(row.chosen().expect("chosen").label, "Cursor session");
-        assert_eq!(
-            row.conversations,
-            [("chat-9".to_owned(), "its own conversation".to_owned())]
-        );
-        assert_eq!(
-            row.fixed_how.as_deref(),
-            Some("Cursor session, resumes its conversation")
-        );
-    }
-
-    #[test]
-    fn codex_gone_conversation_says_so() {
-        let mut codex = own_agent("x", Agent::Codex, "2026-09-28T09:00:00Z");
-        codex.entry.agent_conversation_id = Some("rollout-7".to_owned());
-        let dialog = dialog(&[codex]);
-        let row = dialog.row("x").expect("row");
-        assert_eq!(
-            row.fixed_how.as_deref(),
-            Some("Codex session, fresh run: its conversation is gone")
-        );
-        assert!(!row.chosen().expect("chosen").resumes);
-        assert_eq!(
-            row.conversations,
-            [] as [(std::string::String, std::string::String); 0]
-        );
-    }
-
-    #[test]
-    fn fresh_run_own_agent_row_is_not_preticked() {
-        let mut resumable = own_agent("r", Agent::Codex, "2026-09-28T09:00:00Z");
-        resumable.entry.agent_conversation_id = Some("rollout-7".to_owned());
-        resumable.own_agent_resumable = true;
-        let fresh = own_agent("f", Agent::Cursor, "2026-09-28T09:00:30Z");
-        let dialog = dialog(&[resumable, fresh, lost("c", "2026-09-28T09:00:10Z")]);
-        let ticked: Vec<&str> = ["r", "f", "c"]
-            .into_iter()
-            .filter(|id| dialog.is_ticked(id))
-            .collect();
-        assert_eq!(
-            ticked,
-            ["r", "c"],
-            "a fresh own-agent run is left out, a resumable one joins the Claude losses"
-        );
-    }
-
-    #[test]
     fn claude_row_is_unchanged() {
-        let mut claude = lost("c", "2026-09-28T09:00:00Z");
-        claude.entry.agent_conversation_id = Some("not-a-claude-id".to_owned());
+        let claude = lost("c", "2026-09-28T09:00:00Z");
         let mut dialog = dialog(&[claude]);
         let row = dialog.row("c").expect("row");
         assert_eq!(row.chosen().expect("chosen").label, "Claude session");
-        assert!(row.fixed_how.is_none(), "a Claude row describes nothing");
         assert_eq!(
             row.conversations,
             [("c-c".to_owned(), "Fix it · 1h ago".to_owned())]
@@ -1951,71 +1709,6 @@ mod tests {
                 how: RecoverAs::Claude,
             }]
         );
-    }
-
-    #[test]
-    fn resumable_flag_without_id_is_a_fresh_run() {
-        let mut codex = own_agent("x", Agent::Codex, "2026-09-28T09:00:00Z");
-        codex.own_agent_resumable = true;
-        let mut dialog = dialog(&[codex]);
-        let row = dialog.row("x").expect("row");
-        assert!(!row.chosen().expect("chosen").resumes, "no id to resume");
-        assert_eq!(
-            row.conversations,
-            [] as [(std::string::String, std::string::String); 0]
-        );
-        assert_eq!(
-            row.fixed_how.as_deref(),
-            Some("Codex session, fresh run: no conversation recorded")
-        );
-        assert!(!dialog.is_ticked("x"), "a fresh run is not pre-ticked");
-        dialog.toggle("x");
-        assert_eq!(
-            sent(&mut dialog),
-            [RecoverItem {
-                history_id: "x".to_owned(),
-                conversation_id: None,
-                how: RecoverAs::OwnAgent,
-            }]
-        );
-    }
-
-    #[test]
-    fn recovered_own_agent_row_has_no_fixed_how() {
-        let mut codex = own_agent("x", Agent::Codex, "2026-09-28T09:00:00Z");
-        codex.entry.agent_conversation_id = Some("rollout-7".to_owned());
-        codex.own_agent_resumable = true;
-        codex.entry.recovered_at = Some(utc("2026-09-28T09:10:00Z"));
-        let dialog = dialog(&[codex]);
-        let row = dialog.row("x").expect("row");
-        assert_eq!(row.disabled.as_deref(), Some("recovered 11:10"));
-        assert!(row.fixed_how.is_none(), "only the recovered stamp shows");
-        assert!(!dialog.is_ticked("x"));
-    }
-
-    #[test]
-    fn refresh_unticks_an_own_agent_row_that_can_no_longer_resume() {
-        let mut codex = own_agent("x", Agent::Codex, "2026-09-28T09:00:00Z");
-        codex.entry.agent_conversation_id = Some("rollout-7".to_owned());
-        codex.own_agent_resumable = true;
-        let mut dialog = dialog(std::slice::from_ref(&codex));
-        assert!(dialog.is_ticked("x"), "pre-ticked while it can resume");
-        let mut gone = codex;
-        gone.own_agent_resumable = false;
-        dialog.refresh(&[gone], &Names::default(), &now());
-        assert!(dialog.row("x").is_some_and(Row::enabled));
-        assert!(!dialog.is_ticked("x"), "the rule's tick is withdrawn");
-        assert_eq!(dialog.recover_label(), "Recover 0");
-    }
-
-    #[test]
-    fn refresh_keeps_a_user_tick_on_a_fresh_run_row() {
-        let codex = own_agent("x", Agent::Codex, "2026-09-28T09:00:00Z");
-        let mut dialog = dialog(std::slice::from_ref(&codex));
-        assert!(!dialog.is_ticked("x"));
-        dialog.toggle("x");
-        dialog.refresh(&[codex], &Names::default(), &now());
-        assert!(dialog.is_ticked("x"), "the user's tick stands");
     }
 
     #[test]
@@ -2050,26 +1743,5 @@ mod tests {
         );
         assert!(!dialog.is_ticked("a"), "the user's untick stands");
         assert_eq!(dialog.recover_label(), "Recover 0");
-    }
-
-    #[test]
-    fn resumable_own_agent_row_with_an_expected_end_is_not_preticked() {
-        let mut codex = own_agent("x", Agent::Codex, "2026-09-28T09:00:00Z");
-        codex.entry.agent_conversation_id = Some("rollout-7".to_owned());
-        codex.own_agent_resumable = true;
-        codex.entry.end = SessionEnd::StoppedByUser;
-        let dialog = dialog(&[codex]);
-        assert!(!dialog.is_ticked("x"), "only a loss is pre-ticked");
-        assert_eq!(dialog.recover_label(), "Recover 0");
-    }
-
-    #[test]
-    fn resumable_own_agent_row_with_a_clean_end_is_not_preticked() {
-        let mut codex = own_agent("x", Agent::Codex, "2026-09-28T09:00:00Z");
-        codex.entry.agent_conversation_id = Some("rollout-7".to_owned());
-        codex.own_agent_resumable = true;
-        codex.entry.end = SessionEnd::Exited { code: 0 };
-        let dialog = dialog(&[codex]);
-        assert!(!dialog.is_ticked("x"), "only a loss is pre-ticked");
     }
 }

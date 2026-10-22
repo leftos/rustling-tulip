@@ -164,18 +164,13 @@ impl AgentBackend for ClaudeBackend {
     }
 }
 
-/// The permission mode and provider in `opts`, which the Claude backend is
-/// only ever given for a Claude spawn.
+/// The permission mode and provider in `opts`.
 fn claude_options(opts: &AgentOptions) -> (Option<PermissionMode>, ClaudeProvider) {
     match opts {
         AgentOptions::Claude {
             permission_mode,
             provider,
         } => (*permission_mode, *provider),
-        AgentOptions::Codex { .. } | AgentOptions::Cursor { .. } => {
-            debug_assert!(false, "claude backend invoked with non-claude options");
-            (None, ClaudeProvider::Anthropic)
-        }
     }
 }
 
@@ -354,9 +349,7 @@ mod tests {
             claude_session_id: None,
             resume_conversation: None,
             add_dirs: &[],
-            cwd: None,
             hook_settings: None,
-            hook_shim: None,
         }
     }
 

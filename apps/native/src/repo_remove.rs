@@ -487,7 +487,7 @@ mod tests {
         let model = model(&["r1"], &[]);
         let mut s = in_repo("s1", "r1");
         s.label = "feature work".to_owned();
-        s.agent = Agent::Codex;
+        s.agent = Agent::Claude;
         let level = Level::Repo("r1".to_owned());
         let listed = live_owned_sessions(&level, &[s], &model);
         assert_eq!(
@@ -495,10 +495,10 @@ mod tests {
             [RepoRemoveSession {
                 id: "s1".to_owned(),
                 label: "feature work".to_owned(),
-                agent: Some("codex".to_owned()),
+                agent: Some("claude".to_owned()),
             }]
         );
-        assert_eq!(listed[0].row_text(), "feature work (codex)");
+        assert_eq!(listed[0].row_text(), "feature work (claude)");
     }
 
     #[test]

@@ -334,7 +334,6 @@ mod tests {
             scrollback_snapshot_req: None,
             spawn_origin: None,
             claude_session_id: None,
-            agent_conversation_id: None,
             pending_input: None,
             last_hook_time: None,
             hook_driven: false,

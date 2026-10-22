@@ -36,15 +36,11 @@ fn near(h: &mut Harness<'_>, col: usize, row: usize, dx: f32) -> Point<gpui::Pix
 }
 
 #[gpui::test]
-fn shift_enter_sends_line_continuation_per_agent(cx: &mut TestAppContext) {
+fn shift_enter_sends_line_continuation(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let cases = [
-        (
-            session("sh").shell("D:/x").agent("codex").build(),
-            b"\\\r".as_slice(),
-        ),
+        (session("sh").shell("D:/x").build(), b"\\\r".as_slice()),
         (session("cl").build(), b"\\\r".as_slice()),
-        (session("cx").agent("codex").build(), b"\n".as_slice()),
     ];
     for (s, want) in cases {
         let id = s.id.clone();
