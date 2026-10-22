@@ -17,6 +17,15 @@ use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::vte::ansi::Processor;
 use tokio::sync::broadcast;
 
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the screen rules have no caller yet: the status watchers read them in a later change"
+    )
+)]
+pub mod rules;
+
 /// The character a TUI draws a horizontal rule with.
 const RULE_CHAR: char = '─';
 

@@ -1,0 +1,74 @@
+  4. Apples float because about a quarter of their volume is air.
+  5. Pineapple contains bromelain, an enzyme that breaks down protein.
+  6. An avocado is a berry with a single seed.
+  7. A raspberry is an aggregate fruit made of many small drupelets.
+  8. Ripe cranberries bounce, and growers have used that to sort them.
+  9. Kiwifruit used to be sold as the "Chinese gooseberry."
+  10. Grapefruit can change how the body breaks down some medications.
+  11. Peaches and nectarines are the same species, and nectarines are smooth because of one recessive gene.
+  12. Each cashew nut grows attached to a fleshy fruit called the cashew apple.
+  13. Durian is banned on Singapore's public transit because of its smell.
+  14. Over 7,500 varieties of apple are grown around the world.
+  15. A single pomegranate can hold hundreds of juicy seeds, called arils.
+  16. A fig is really a cluster of flowers turned inward.
+  17. Watermelon is about 92% water.
+  18. Blueberries get their color from pigments called anthocyanins.
+  19. A coconut is a drupe, not a true nut.
+  20. Mangoes are related to cashews and pistachios.
+  21. Bananas are slightly radioactive because of the potassium-40 they contain.
+  22. Apples, pears, cherries and plums all belong to the rose family.
+  23. The sweet orange is thought to be a hybrid of pomelo and mandarin.
+  24. The Cavendish is the banana most of the world exports.
+  25. Grapes and raisins can cause kidney failure in dogs.
+  26. A pineapple plant takes well over a year to produce one fruit.
+  27. Dragon fruit grows on a climbing cactus.
+  28. A jackfruit can weigh more than 30 kg, making it the largest fruit that grows on trees.
+  29. Miracle fruit contains miraculin, a protein that makes sour foods taste sweet.
+  30. Cherry pits contain amygdalin, which can release cyanide when crushed.
+  31. Ripening apples give off ethylene, a gas that speeds up the ripening of fruit nearby.
+  32. Bell peppers are fruits, botanically speaking.
+  33. By weight, a kiwifruit has more vitamin C than an orange.
+  34. Plantains are bananas that are usually cooked before eating.
+  35. Olives are drupes, the same type of fruit as cherries.
+  36. A US court ruled in 1947 that rhubarb counts as a fruit for customs, although it is a vegetable botanically.
+  37. The part of a lychee you eat is a fleshy layer around the seed called an aril.
+  38. Astringent persimmons are full of tannins until they are completely ripe.
+  39. Seedless watermelons are triploid, so they can't produce mature seeds.
+  40. Raw quinces are hard and sour, so they are almost always cooked.
+
+  The plant world sorts fruit quite differently from the kitchen.
+
+✻ Brewed for 26s · done 5:34 PM
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+   Rewind
+
+   Restore the code and/or conversation to the point before…
+
+     ↑ 2 more
+     Use the AskUserQuestion tool once, with three questions: (1) single choice, header "Next fn": which function to add next (su…
+     No code changes
+
+     Plan adding a div(a, b) function to calc.py plus one pytest test that division by zero raises ZeroDivisionError. Keep the pl…
+     3 files changed +30 -5
+
+     when you finish, also tell me how many lines calc.py has
+     ⚠ No code restore
+
+     and a second queued message
+     ⚠ No code restore
+
+     Do three things in parallel in one message: (a) start a background Bash command with run_in_background: python -c "import ti…
+     No code changes
+
+     ! git status --short
+     No code changes
+
+     Without using any tools, write a numbered list of 40 short fruit facts, one line each, then one closing sentence.
+     No code changes
+
+   ❯ (current)
+
+
+
+
+   Enter to continue · Esc to cancel

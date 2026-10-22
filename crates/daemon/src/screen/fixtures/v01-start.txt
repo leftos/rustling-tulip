@@ -1,0 +1,20 @@
+PS C:\Users\lefto\AppData\Local\Temp\claude\X--dev-rustling-tulip\2d069daa-1f0f-43ac-84d8-a6a2a11ed017\scratchpad\lab\vanilla> claude
+--settings "C:\Users\lefto\AppData\Local\Temp\claude\X--dev-rustling-tulip\2d069daa-1f0f-43ac-84d8-a6a2a11ed017\scratchpad\lab\tools\h
+ooks-vanilla.json" --session-id a5e53eca-52ba-4761-8b8c-8060532fde02
+
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Accessing workspace:
+
+ C:\Users\lefto\AppData\Local\Temp\claude\X--dev-rustling-tulip\2d069daa-1f0f-43ac-84d8-a6a2a11ed017\scratchpad\lab\vanilla
+
+ Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source project, or work
+ from your team). If not, take a moment to review what's in this folder first.
+
+ Claude Code'll be able to read, edit, and execute files here.
+
+ Security guide
+
+ ❯ No, exit
+   Yes, I trust this folder
+
+ Enter to confirm · Esc to cancel

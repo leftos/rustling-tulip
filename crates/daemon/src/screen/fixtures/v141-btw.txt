@@ -1,0 +1,74 @@
+  17. Watermelon is about 92% water.
+  18. Blueberries get their color from pigments called anthocyanins.
+  19. A coconut is a drupe, not a true nut.
+  20. Mangoes are related to cashews and pistachios.
+  21. Bananas are slightly radioactive because of the potassium-40 they contain.
+  22. Apples, pears, cherries and plums all belong to the rose family.
+  23. The sweet orange is thought to be a hybrid of pomelo and mandarin.
+  24. The Cavendish is the banana most of the world exports.
+  25. Grapes and raisins can cause kidney failure in dogs.
+  26. A pineapple plant takes well over a year to produce one fruit.
+  27. Dragon fruit grows on a climbing cactus.
+  28. A jackfruit can weigh more than 30 kg, making it the largest fruit that grows on trees.
+  29. Miracle fruit contains miraculin, a protein that makes sour foods taste sweet.
+  30. Cherry pits contain amygdalin, which can release cyanide when crushed.
+  31. Ripening apples give off ethylene, a gas that speeds up the ripening of fruit nearby.
+  32. Bell peppers are fruits, botanically speaking.
+  33. By weight, a kiwifruit has more vitamin C than an orange.
+  34. Plantains are bananas that are usually cooked before eating.
+  35. Olives are drupes, the same type of fruit as cherries.
+  36. A US court ruled in 1947 that rhubarb counts as a fruit for customs, although it is a vegetable botanically.
+  37. The part of a lychee you eat is a fleshy layer around the seed called an aril.
+  38. Astringent persimmons are full of tannins until they are completely ripe.
+  39. Seedless watermelons are triploid, so they can't produce mature seeds.
+  40. Raw quinces are hard and sour, so they are almost always cooked.
+
+  The plant world sorts fruit quite differently from the kitchen.
+
+✻ Brewed for 26s · done 5:34 PM
+
+❯ pasted line 1
+  pasted line 2
+  pasted line 3
+  pasted line 4
+  pasted line 5
+  pasted line 6
+  pasted line 7
+  pasted line 8
+  pasted line 9
+  pasted line 10
+  pasted line 11
+  pasted line 12
+  pasted line 13
+  pasted line 14
+  pasted line 15
+  pasted line 16
+  pasted line 17
+  pasted line 18
+  pasted line 19
+  pasted line 20
+  pasted line 21
+  pasted line 22
+  pasted line 23
+  pasted line 24
+  pasted line 25
+  pasted line 26
+  pasted line 27
+  pasted line 28
+  pasted line 29
+  pasted line 30
+  and reply with just the number of pasted lines
+
+● 30
+
+✻ Cogitated for 4s · done 5:41 PM
+
+❯ /model
+  ⎿  Kept model as Opus 5.5 (default)
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔ ● high · /effort ▔
+
+    /btw what is 2+2
+
+      4
+
+    ↑/↓ to scroll · c to copy · f to fork · Esc to close
