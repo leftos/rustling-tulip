@@ -2482,6 +2482,7 @@ mod tests {
             state,
             sessions,
             auth_token: "test-token".to_string(),
+            tailnet_handshake_timeout: crate::server::TAILNET_HANDSHAKE_TIMEOUT,
             attention_tx,
             dirs,
             shutdown_tx,

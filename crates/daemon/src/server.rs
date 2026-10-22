@@ -71,6 +71,11 @@ pub struct Hub {
     pub state: Arc<AppState>,
     pub sessions: Arc<SessionRegistry>,
     pub auth_token: String,
+    /// How long a tailnet connection has to send its `Hello` before the
+    /// handshake is refused. Production sets [`TAILNET_HANDSHAKE_TIMEOUT`]; a
+    /// test moves it out of the way to observe a connection that is still
+    /// waiting, or shrinks it to pin the timeout branch.
+    pub tailnet_handshake_timeout: Duration,
     pub attention_tx: mpsc::UnboundedSender<pty_state::AttentionEvent>,
     pub dirs: Dirs,
     /// Set to `true` by the [`ClientMessage::Shutdown`] handler; axum's
@@ -548,6 +553,7 @@ pub async fn run(
         state,
         sessions,
         auth_token: auth_token.clone(),
+        tailnet_handshake_timeout: TAILNET_HANDSHAKE_TIMEOUT,
         attention_tx,
         dirs: dirs.clone(),
         shutdown_tx,
@@ -1672,11 +1678,11 @@ struct Handshake {
     client_name: Option<String>,
 }
 
-const TAILNET_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+pub const TAILNET_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Read and check the mandatory `Hello`. A tailnet connection gets
-/// [`TAILNET_HANDSHAKE_TIMEOUT`] to send it; the loopback listener keeps an
-/// un-timed handshake.
+/// [`Hub::tailnet_handshake_timeout`] to send it; the loopback listener keeps
+/// an un-timed handshake.
 async fn handshake(
     hub: &Hub,
     auth: &AuthKind,
@@ -1686,7 +1692,7 @@ async fn handshake(
     match auth {
         AuthKind::Local => read_hello(hub, auth, receiver, out_tx).await,
         AuthKind::Tailnet(_) => tokio::time::timeout(
-            TAILNET_HANDSHAKE_TIMEOUT,
+            hub.tailnet_handshake_timeout,
             read_hello(hub, auth, receiver, out_tx),
         )
         .await
@@ -7929,6 +7935,7 @@ mod tests {
             state,
             sessions,
             auth_token: "test-token".to_string(),
+            tailnet_handshake_timeout: TAILNET_HANDSHAKE_TIMEOUT,
             attention_tx,
             dirs,
             shutdown_tx,
@@ -14253,12 +14260,17 @@ mod tests {
         assert!(hub.tailnet.lock().await.is_some(), "the listener runs");
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn tailnet_handshake_without_hello_times_out_and_releases_the_client_count() {
+    /// Serve the tailnet router on a scratch listener and open one tailnet
+    /// WebSocket connection that never sends its `Hello`. Returns the
+    /// connected client stream and the serving task.
+    async fn silent_tailnet_connection(
+        hub: &Hub,
+    ) -> (
+        tokio::net::TcpStream,
+        tokio::task::JoinHandle<std::io::Result<()>>,
+    ) {
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
-        let (hub, _scratch) = test_hub("tailnet-handshake-timeout");
-        let mut count = hub.client_count.subscribe();
         let names = name_slot();
         set_serving_name(&names, Some("host.tail1234.ts.net".to_owned()));
         let app = build_tailnet_router(hub.clone(), names, 8787)
@@ -14297,24 +14309,101 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&response)
         );
+        (client, server)
+    }
 
-        count.changed().await.expect("the session holds a client");
-        assert_eq!(
-            *count.borrow_and_update(),
-            1,
-            "the silent connection counts while it waits"
-        );
+    /// Wait until the client count reaches `want`, failing at the hang guard
+    /// rather than at a timing bound.
+    async fn wait_for_client_count(count: &mut tokio::sync::watch::Receiver<usize>, want: usize) {
+        let reached = tokio::time::timeout(Duration::from_secs(120), async {
+            while *count.borrow_and_update() != want {
+                count.changed().await.expect("the count channel stays open");
+            }
+        })
+        .await;
+        assert!(reached.is_ok(), "the client count never reached {want}");
+    }
 
-        // The handshake deadline is on the paused clock; a connection that
-        // never sends Hello must be closed, releasing its slot. The ceiling is
-        // the daemon's own 10 s timeout plus a margin, so a hang fails here.
-        tokio::time::timeout(Duration::from_secs(11), async {
+    /// A tailnet connection that has not sent `Hello` yet holds a client slot
+    /// for as long as the handshake is open, and closing it releases the slot.
+    /// The handshake deadline is set far past any passing run, so no deadline
+    /// can race the count.
+    #[tokio::test]
+    async fn tailnet_connection_counts_while_it_waits_for_hello() {
+        let (mut hub, _scratch) = test_hub("tailnet-count-while-waiting");
+        hub.tailnet_handshake_timeout = Duration::from_secs(600);
+        let mut count = hub.client_count.subscribe();
+
+        let (client, server) = silent_tailnet_connection(&hub).await;
+        wait_for_client_count(&mut count, 1).await;
+
+        drop(client);
+        wait_for_client_count(&mut count, 0).await;
+
+        server.abort();
+    }
+
+    /// A tailnet connection that never sends `Hello` is answered and closed at
+    /// the handshake deadline, releasing its client slot. The 1 ms limit pins
+    /// the timeout branch; the test asserts what the branch did and never how
+    /// long it took.
+    #[tokio::test]
+    async fn tailnet_handshake_without_hello_times_out_and_releases_the_client_count() {
+        use tokio::io::AsyncReadExt as _;
+
+        let (mut hub, _scratch) = test_hub("tailnet-handshake-timeout");
+        hub.tailnet_handshake_timeout = Duration::from_millis(1);
+        let mut count = hub.client_count.subscribe();
+        // Mark the starting 0 as already seen, so a receiver that never
+        // observes the count move waits out the guard instead of passing on
+        // its first value.
+        count.borrow_and_update();
+
+        let (mut client, server) = silent_tailnet_connection(&hub).await;
+
+        // The daemon closed the connection: after whatever it sends on a
+        // refused handshake, the client's stream ends at EOF or a connection
+        // error. Anything else means it is still open.
+        let mut buf = [0u8; 256];
+        tokio::time::timeout(Duration::from_secs(120), async {
+            loop {
+                match client.read(&mut buf).await {
+                    Ok(0) => break,
+                    Ok(_) => {}
+                    Err(err) => {
+                        assert!(
+                            matches!(
+                                err.kind(),
+                                std::io::ErrorKind::ConnectionReset
+                                    | std::io::ErrorKind::ConnectionAborted
+                                    | std::io::ErrorKind::BrokenPipe
+                            ),
+                            "unexpected read error: {err}"
+                        );
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("the daemon closes a connection that missed its handshake");
+
+        // The client can see EOF before the session's guard is dropped, so the
+        // count is checked after the close. One observed change proves the
+        // connection took a slot, and a value back at 0 proves the timed-out
+        // handshake gave it back; a leaked guard never sends again and waits
+        // out the guard.
+        let released = tokio::time::timeout(Duration::from_secs(120), async {
+            count.changed().await.expect("the count channel stays open");
             while *count.borrow_and_update() != 0 {
                 count.changed().await.expect("the count channel stays open");
             }
         })
-        .await
-        .expect("a timed-out handshake releases its client count");
+        .await;
+        assert!(
+            released.is_ok(),
+            "a timed-out handshake releases its client count"
+        );
 
         server.abort();
     }
