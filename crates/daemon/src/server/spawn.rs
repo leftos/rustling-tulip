@@ -248,6 +248,7 @@ where
     // writes nothing to the credential store and checks nothing out.
     let provider = request_provider(&req);
     crate::agents::providers::check_request(req.mode, provider, &req.extra_env)?;
+    check_plain_shell_options(&req)?;
     // A secret row's literal moves into the credential store and becomes a
     // `${secret:<id>}` reference before anything captures the request, so the
     // session record, the sidecar, `state.json`, the `Repos`/`Workspaces`
@@ -844,27 +845,6 @@ async fn spawn_plain_shell_session(
     cfg: &SpawnArgs,
     stored_config: protocol::SpawnConfig,
 ) -> anyhow::Result<protocol::SessionSnapshot> {
-    // Fail-fast: the dialog should clear these for shell spawns, but a
-    // client could send a malformed request. Reject rather than silently
-    // ignore so the bug surfaces.
-    if cfg.model.is_some() {
-        return Err(anyhow!("plain shell sessions do not accept a model"));
-    }
-    if let AgentOptions::Claude {
-        permission_mode: Some(_),
-        ..
-    } = &cfg.agent_options
-    {
-        return Err(anyhow!(
-            "plain shell sessions do not accept a permission_mode"
-        ));
-    }
-    if cfg.dangerously_skip_permissions {
-        return Err(anyhow!(
-            "plain shell sessions do not accept dangerously_skip_permissions"
-        ));
-    }
-
     let shell = resolve_shell_program(&hub.dirs)?;
     // A recovered shell gets the same injected hooks an interactive Claude
     // spawn does, so the CLI's reports drive its status. The file is written
@@ -1528,7 +1508,8 @@ pub(crate) fn resolve_env_refs(
 }
 
 /// Everything the daemon can check about a spawn request before it does work
-/// it can't undo, on the mode, the provider (`Anthropic` when its options
+/// it can't undo, on the mode, its agent options (see
+/// [`check_plain_shell_options`]), the provider (`Anthropic` when its options
 /// name none) and the env rows the request will spawn with: see
 /// [`check_env_rows_with`]. The dispatcher runs it before a checkout
 /// confirm, and recovery on the planned request before it registers a repo;
@@ -1543,6 +1524,7 @@ pub(super) fn check_spawn_request_with(
     request: &SpawnRequest,
     resolve: impl Fn(&str) -> Option<(user_env::Secret, user_env::Origin)>,
 ) -> Result<(), spawn_plan::SpawnFailure> {
+    check_plain_shell_options(request)?;
     check_env_rows_with(
         &request.extra_env,
         &request.secret_env_keys,
@@ -1550,6 +1532,35 @@ pub(super) fn check_spawn_request_with(
         request_provider(request),
         resolve,
     )
+}
+
+/// A plain shell takes no agent options: a request carrying a model, a
+/// permission mode or `dangerously_skip_permissions` is refused before any
+/// git work or capture.
+fn check_plain_shell_options(request: &SpawnRequest) -> Result<(), spawn_plan::SpawnFailure> {
+    if request.mode != SessionMode::PlainShell {
+        return Ok(());
+    }
+    let detail = if request.model.is_some() {
+        "Plain shell sessions do not accept a model."
+    } else if matches!(
+        &request.agent_options,
+        AgentOptions::Claude {
+            permission_mode: Some(_),
+            ..
+        }
+    ) {
+        "Plain shell sessions do not accept a permission mode."
+    } else if request.dangerously_skip_permissions {
+        "Plain shell sessions do not accept dangerously_skip_permissions."
+    } else {
+        return Ok(());
+    };
+    Err(spawn_plan::SpawnFailure {
+        title: "Couldn't start the shell session".to_owned(),
+        detail: detail.to_owned(),
+        hint: None,
+    })
 }
 
 /// The Claude provider `request` spawns on: its options', else Anthropic.
@@ -2062,6 +2073,66 @@ mod tests {
         let made = std::fs::read_dir(hub.state.worktrees_dir()).map_or(0, Iterator::count);
         assert_eq!(made, 0, "nothing under the worktrees root");
         assert!(hub.sessions.snapshots().is_empty(), "nothing was spawned");
+    }
+
+    #[tokio::test]
+    async fn a_worktree_plain_shell_request_with_a_permission_mode_is_refused_before_git_work() {
+        let (hub, _scratch, repo) = env_ref_repo_hub("shell-permission-mode");
+        let mut req = env_spawn(
+            single_target(true, None),
+            SessionMode::PlainShell,
+            Vec::new(),
+            Some("rq-pm"),
+        );
+        req.agent_options = AgentOptions::claude(Some(protocol::PermissionMode::Plan));
+        // Straight into `spawn_session`, the path every replay (duplicate,
+        // resume, recover) takes, past the dispatcher's own early check.
+        let err = spawn_session(&hub, req, None)
+            .await
+            .expect_err("a plain shell refuses a permission mode");
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("Plain shell sessions do not accept a permission mode"),
+            "{text}"
+        );
+        let worktrees = git_ok(&repo, &["worktree", "list", "--porcelain"]);
+        assert_eq!(
+            worktrees
+                .lines()
+                .filter(|l| l.starts_with("worktree "))
+                .count(),
+            1,
+            "only the main worktree: {worktrees}"
+        );
+        assert_eq!(git_ok(&repo, &["branch", "--list", "wt/x"]).trim(), "");
+        let made = std::fs::read_dir(hub.state.worktrees_dir()).map_or(0, Iterator::count);
+        assert_eq!(made, 0, "nothing under the worktrees root");
+        assert!(
+            hub.state
+                .with_persisted(|s| s.repos[0].last_spawn_config.clone())
+                .is_none(),
+            "no last spawn config was stored"
+        );
+        assert!(hub.sessions.snapshots().is_empty(), "nothing was spawned");
+    }
+
+    #[test]
+    fn a_plain_shell_request_with_a_model_is_refused_by_the_pre_check() {
+        let mut req = env_spawn(
+            single_target(true, None),
+            SessionMode::PlainShell,
+            Vec::new(),
+            Some("rq-md"),
+        );
+        req.model = Some("claude-sonnet-4-5".to_owned());
+        let failure =
+            check_spawn_request_with(&req, |_| None).expect_err("the pre-check refuses a model");
+        assert_eq!(failure.title, "Couldn't start the shell session");
+        assert_eq!(
+            failure.detail,
+            "Plain shell sessions do not accept a model."
+        );
+        assert!(failure.hint.is_none(), "{:?}", failure.hint);
     }
 
     #[tokio::test]
