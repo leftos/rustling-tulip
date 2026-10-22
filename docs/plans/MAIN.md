@@ -6,22 +6,17 @@
 
 ### M1 — Restructure: Claude and shells only (8/8 done)
 
-### M2 — Daily-driver fixes (10/22 done)
-- [ ] RT-186 Resync the tab list when a connection's tab-event broadcast lags · release vNext
-- [ ] RT-181 Clear a tab's closing mark when the daemon rejects its ClosePane · release vNext
-- [ ] RT-174 Refuse a plain-shell request's agent options before git work · release vNext
-- [ ] RT-222 Clear a stored spawn config's one-shot answers when launch-last replays it · release vNext
-- [ ] RT-165 Carry the busy exclusion in the new session's first record on Restart, Resume and Recover · release vNext
-- [ ] RT-203 Clear pending_input whenever a session leaves AwaitingInput · release vNext
-- [ ] RT-209 Treat the terminal's automatic replies as not-owner input for a hook prompt · release vNext
-- [ ] RT-208 Stop the hook shim sending the daemon token to a stale port, and make its unsafe-token test real · release vNext
+### M2 — Daily-driver fixes (18/22 done)
 - [ ] RT-231 P5.3: Tab strip drag · release vNext
-  - [ ] RT-270 P5.3c: Touch the drop tab and swap panes atomically across tabs · release vNext
+  - [/] RT-270 P5.3c: Touch the drop tab and swap panes atomically across tabs · release vNext
 - [!] RT-182 Replace the Tauri-era toasts with two notifications: Needs you and Finished · release vNext
-- [ ] RT-84 Show a background state when a turn ends with subagents, shells or wakeups still running · release vNext
+- [/] RT-84 Show a background state when a turn ends with subagents, shells or wakeups still running · release vNext
 
 ### M3 — Cutover and v0.1.0-alpha (2/3 done)
 - [ ] RT-247 Merge feat/remote-mode to main (#201) · release vNext
+
+### No milestone
+- [ ] RT-280 Update rustls-webpki and webpki-roots past RUSTSEC-2026-0381/0382 · release vNext
 
 ## Release 2 — Remote mode and the agent seam
 
