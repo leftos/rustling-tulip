@@ -347,17 +347,20 @@ pub fn reorder<T: Clone + PartialEq>(ids: &[T], dragged: &T, target: &T, side: S
 
 /// The [`ClientMessage::ReorderTabs`] a pill dropped `side` of `target` sends,
 /// or none when the order it would set is the one already in place.
+/// `request_id` is the id the drop's reply answers, or none for the preview
+/// a drag over a pill only asks whether the drop would change the order.
 #[must_use]
 pub fn reorder_tabs(
     tab_ids: &[String],
     dragged: &str,
     target: &str,
     side: Side,
+    request_id: Option<String>,
 ) -> Option<ClientMessage> {
     let ordered = reorder(tab_ids, &dragged.to_owned(), &target.to_owned(), side);
     (ordered != tab_ids).then_some(ClientMessage::ReorderTabs {
         ordered_ids: ordered,
-        request_id: None,
+        request_id,
     })
 }
 
@@ -1168,21 +1171,22 @@ mod tests {
             .map(|id| (*id).to_owned())
             .collect();
 
-        let message = reorder_tabs(&ids, "a", "d", Side::After).expect("a reorder");
+        let message = reorder_tabs(&ids, "a", "d", Side::After, None).expect("a reorder");
         assert_eq!(
             wire(&message),
             json!({"type": "reorder_tabs", "ordered_ids": ["b", "c", "d", "a"]}),
             "the first pill goes last"
         );
 
-        let message = reorder_tabs(&ids, "d", "a", Side::Before).expect("a reorder");
+        let message = reorder_tabs(&ids, "d", "a", Side::Before, None).expect("a reorder");
         assert_eq!(
             wire(&message),
             json!({"type": "reorder_tabs", "ordered_ids": ["d", "a", "b", "c"]}),
             "the last pill goes first"
         );
 
-        let message = reorder_tabs(&ids, "a", "b", Side::After).expect("a swap of neighbours");
+        let message =
+            reorder_tabs(&ids, "a", "b", Side::After, None).expect("a swap of neighbours");
         assert_eq!(
             wire(&message),
             json!({"type": "reorder_tabs", "ordered_ids": ["b", "a", "c", "d"]}),
@@ -1194,9 +1198,9 @@ mod tests {
     fn reorder_tabs_onto_itself_sends_nothing() {
         let ids: Vec<String> = ["a", "b"].iter().map(|id| (*id).to_owned()).collect();
 
-        assert!(reorder_tabs(&ids, "a", "a", Side::After).is_none());
+        assert!(reorder_tabs(&ids, "a", "a", Side::After, None).is_none());
         assert!(
-            reorder_tabs(&ids, "a", "b", Side::Before).is_none(),
+            reorder_tabs(&ids, "a", "b", Side::Before, None).is_none(),
             "a drop that leaves the order as it is sends nothing"
         );
     }

@@ -741,7 +741,7 @@ impl RootView {
                     bounds.origin.x / px(1.0),
                     bounds.size.width / px(1.0),
                 );
-                drag::reorder_tabs(&self.tab_ids(), dragged, tab_id, side)
+                drag::reorder_tabs(&self.tab_ids(), dragged, tab_id, side, None)
                     .map(|_| (tab_id.to_owned(), side))
             }
             _ => None,
@@ -793,13 +793,29 @@ impl RootView {
                 if target != tab_id {
                     return;
                 }
-                let Some(msg) = drag::reorder_tabs(&self.tab_ids(), dragged, &target, side) else {
+                let Some(msg) = drag::reorder_tabs(
+                    &self.tab_ids(),
+                    dragged,
+                    &target,
+                    side,
+                    Some(crate::new_request_id()),
+                ) else {
                     return;
                 };
-                let ClientMessage::ReorderTabs { ordered_ids, .. } = &msg else {
+                let ClientMessage::ReorderTabs {
+                    ordered_ids,
+                    request_id,
+                } = &msg
+                else {
                     return;
                 };
+                if let Some(id) = request_id {
+                    self.tabs.note_reorder(id, ordered_ids);
+                }
                 if !self.tabs.reorder_local(ordered_ids) {
+                    if let Some(id) = request_id {
+                        self.tabs.fail_reorder(id);
+                    }
                     tracing::warn!(
                         ?ordered_ids,
                         "pill drop: the new order is not the strip's tabs"

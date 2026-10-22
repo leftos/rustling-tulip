@@ -194,7 +194,7 @@ An owner key sent to a hook-driven session with a pending prompt clears `Awaitin
 
   A connection whose session-event stream lags is sent a fresh `Sessions` list, then its spawn replies again with their `request_id`; one whose tab-event stream lags is sent its client's fresh `Tabs` list. A `Scrollback` with `forwarder_restarted: true` means the old forwarder has stopped and the new one starts after this reply, so output a client held back before it is already in the history.
 
-  The tab-layout requests `CreateTab` / `MergeTabs` / `MovePane` / `ExtractToNewTab` / `SplitPane` / `ClosePane` take one too; it comes back only on the `Error` that refuses the request (success is a broadcast `TabUpdated` or `TabRemoved`, which carries none), and a refusal without one still gets `Error { request_id: None }`. `ListSessionHistory`, `RecoverSessions` and `ListEnvNames` echo theirs on their `SessionHistory`, `RecoverResult` and `EnvNames` replies.
+  The tab-layout requests `CreateTab` / `MergeTabs` / `MovePane` / `ExtractToNewTab` / `SplitPane` / `ClosePane` / `SwapPanes` / `ReorderTabs` take one too; it comes back only on the `Error` that refuses the request (success is a broadcast `TabUpdated` or `TabRemoved`, which carries none), and a refusal without one still gets `Error { request_id: None }`. `ListSessionHistory`, `RecoverSessions` and `ListEnvNames` echo theirs on their `SessionHistory`, `RecoverResult` and `EnvNames` replies.
 
   `SuggestBranchName` echoes its id on `BranchNameSuggestion`, and on the `Error` that answers a failed suggestion.
 

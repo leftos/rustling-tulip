@@ -209,6 +209,7 @@ impl RootView {
         if let Some(id) = request_id {
             self.tabs.disarm_create(id);
             self.tabs.fail_layout_request(id);
+            self.tabs.fail_reorder(id);
             self.spawns.fail(id);
             self.quick_shell_saves.fail(id);
             self.settle_checkout(id, window, cx);

@@ -10,7 +10,7 @@ use protocol::{
     ClientMessage, DaemonMessage, PaneDropEdge, SplitDirection, TabEntry, VscodeWorkspaceFolder,
     VscodeWorkspaceSuggestion,
 };
-use rustling_tulip_native::{RootView, Side};
+use rustling_tulip_native::{RootView, Side, ToastKind};
 use serde_json::json;
 use support::{Fixture, Harness, TestDir, pane, repo, session, split, tab};
 
@@ -154,6 +154,27 @@ fn reorders(h: &mut Harness) -> Vec<Vec<String>> {
         .collect()
 }
 
+/// The id the tab reorder the client sent carries.
+fn reorder_request_id(h: &mut Harness) -> String {
+    h.sent()
+        .into_iter()
+        .find_map(|msg| match msg {
+            ClientMessage::ReorderTabs { request_id, .. } => request_id,
+            _ => None,
+        })
+        .expect("the reorder carries a request id")
+}
+
+/// Every toast's kind, title and detail, oldest first.
+fn toasts(h: &mut Harness) -> Vec<(ToastKind, String, Option<String>)> {
+    h.root(|root, _| {
+        root.toasts()
+            .iter()
+            .map(|toast| (toast.kind, toast.title.clone(), toast.detail.clone()))
+            .collect()
+    })
+}
+
 fn order(ids: &[&str]) -> Vec<String> {
     ids.iter().map(|id| (*id).to_owned()).collect()
 }
@@ -195,6 +216,38 @@ fn reorder_shows_before_the_daemon_echo(cx: &mut TestAppContext) {
         ordered_ids: order(&["t3", "t1", "t2"]),
     });
     assert_eq!(strip(&mut h), order(&["t3", "t1", "t2"]), "the echo agrees");
+}
+
+#[gpui::test]
+fn refused_reorder_snaps_the_strip_back_with_a_toast(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &three_tabs());
+    h.sent();
+    let from = on_pill(&mut h, "t1", 0.5);
+    let to = on_pill(&mut h, "t3", 0.8);
+
+    h.drag_and_drop(from, to);
+    assert_eq!(strip(&mut h), order(&["t2", "t3", "t1"]));
+    let id = reorder_request_id(&mut h);
+
+    h.send(DaemonMessage::Error {
+        message: "unknown tab".to_owned(),
+        request_id: Some(id),
+    });
+
+    assert_eq!(
+        strip(&mut h),
+        order(&["t1", "t2", "t3"]),
+        "the refused drop puts the strip back where it was"
+    );
+    assert_eq!(
+        toasts(&mut h),
+        [(
+            ToastKind::Error,
+            "Daemon error".to_owned(),
+            Some("unknown tab".to_owned())
+        )]
+    );
 }
 
 #[gpui::test]

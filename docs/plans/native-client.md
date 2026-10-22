@@ -16,7 +16,7 @@ Drag-and-drop (P5.1–P5.5) is Phase 5a, RT-171 in Wave 2, before the cutover; t
 
 ### What already exists
 
-- **Protocol**: drag-and-drop needs no protocol change. `MovePane` with `PaneDropEdge` (`Left`, `Right`, `Top`, `Bottom`, `Replace`, `OuterLeft`/`OuterRight`/`OuterTop`/`OuterBottom`), `ReorderTabs`, `ReorderContainers`, `ReorderSessions`, `SplitPane { new_session_id }` and `ReplacePaneSession` are all in `crates/protocol/src/lib.rs`.
+- **Protocol**: drag-and-drop rides on the existing messages plus the additive `SwapPanes`, `MovePane.touch` and `ReorderTabs.request_id`. `MovePane` with `PaneDropEdge` (`Left`, `Right`, `Top`, `Bottom`, `Replace`, `OuterLeft`/`OuterRight`/`OuterTop`/`OuterBottom`), `ReorderTabs`, `ReorderContainers`, `ReorderSessions`, `SplitPane { new_session_id }` and `ReplacePaneSession` are all in `crates/protocol/src/lib.rs`.
 
   The daemon's move (`crates/daemon/src/server.rs` `move_pane`, `crates/daemon/src/tabs.rs` `move_pane`, built on `insert_adjacent` / `insert_in`) keeps the moved pane's id, swaps sessions for a same-tab `Replace`, gives the destination pane the source's session for a cross-tab `Replace` (its old session goes unbound).
 
@@ -51,18 +51,6 @@ Read from `~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gpui-0.2.2/src
 - Unseen turns clear "when … a focused pane shows it", and "The unseen set is per window and not saved" (`docs/native-client.md`, Status glyphs). A session focused in a pop-out counts as shown.
 - Protocol: changes stay additive (CLAUDE.md, Architecture invariants).
 - Verification: "UI hand-test (multi-window and drag can't be fully specced)" (the Phase 5 project's verification, now Wave 2's for drag-and-drop and Wave 7's for pop-outs); "a visible result no test can prove lands on green gates and is listed for a hand-test" (the nextup profile, "Agents and gates").
-
-### P5.3 Tab strip drag
-
-- **Does**: drag a pill to reorder, with an insertion mark before or after the hovered pill by its half, applied locally at once and sent as `ReorderTabs` (the daemon's `TabsReordered` reconciles); a pane drag over a pill activates that tab (Q10), so the pane can drop on a pane there; a pane dropped on a pill goes where `pick_balanced_drop_target` says, with "Moved pane" undo; a diff tab's pill takes no pane. Parity: "Drag to reorder; a pane dragged over a pill activates that tab; dropping on a pill places the pane automatically" (Tabs & panes), and "across tabs" of the pane drag line.
-- **Files**: `tab_bar.rs`; `tabs.rs` (`TabsModel::reorder` callable for the local apply); new `tests/ui/ui_tab_drag.rs`.
-- **Core / view**: `drag::reorder`, `TabsModel::reorder`, `pick_balanced_drop_target`; the view draws the mark and routes the drops.
-- **Proof**: `cargo test -p rustling-tulip-native --test ui ui_tab_drag`, red first: `pill_dropped_after_another_reorders_the_tabs`, `reorder_shows_before_the_daemon_echo`, `pane_over_a_pill_activates_that_tab`, `pane_dropped_on_a_pill_moves_it_balanced_with_undo`, `diff_pill_refuses_a_pane`.
-- **Needs**: P5.2; Wave 2 (its `tab_bar.rs` and `tabs.rs` items land first); Q10.
-- **Parts**, landed on main in this order:
-  - **P5.3a** pill reorder, plus P5.2's re-review leftovers (`pane_drop` cleared beside `pane_drag`, Esc cancelling a drag over a focused text input, the `grid_view.rs` test-map row); client only. The insertion mark is a 2 px accent bar at the edge where the pill will land; the dragged pill stays in its slot at 40% opacity and a small copy of it (badge and label) rides under the cursor; no other pill moves (lane A of `docs/plans/canvases/tab-drag-mark/index.html`).
-  - **P5.3b** (landed) a pane over a grid pill activates its tab, a drop on the pill moves the pane there, and the shown tab takes edge drops from another tab; a diff pill is inert with the no-drop cursor; a pane drag ends only when its pane leaves the source tab, takes another session or loses its session. A cross-tab centre drop is refused until P5.3c, since today's `MovePane` would overwrite the destination's session rather than swap.
-  - **P5.3c** an additive `MovePane` field that lets the daemon `touch` the destination on an edge or centre drop (Q12), and the cross-tab centre-drop swap (Q14) as one additive `SwapPanes` request the daemon applies atomically to both tabs, touching both, with a `request_id` so a refusal rolls the client back; and an optional `request_id` on `ReorderTabs`, so a refused reorder snaps the strip back to the daemon's order with a toast.
 
 ### P5.4 Sidebar drag-to-reorder
 

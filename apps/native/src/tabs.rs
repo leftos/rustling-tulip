@@ -173,6 +173,11 @@ pub struct TabsModel {
     /// when it carries one. A tab one names is not marked closing, since
     /// the request may keep it.
     layout_in_flight: Vec<(String, Option<String>)>,
+    /// The reorders this client sent that no echo has settled, oldest
+    /// first: the request's id, the strip's order before it applied and the
+    /// order it sent. A refusal hands the order it found to the entry after
+    /// it, or puts it back when it is the last one pending.
+    pending_reorders: VecDeque<(String, Vec<String>, Vec<String>)>,
 }
 
 /// `ratio` inside the daemon's range; a ratio that is not a number becomes
@@ -950,7 +955,7 @@ impl TabsModel {
             DaemonMessage::Tabs { tabs } => self.replace_all(tabs),
             DaemonMessage::TabUpdated { tab } => self.upsert(tab),
             DaemonMessage::TabRemoved { tab_id } => self.remove(tab_id),
-            DaemonMessage::TabsReordered { ordered_ids } => self.reorder(ordered_ids),
+            DaemonMessage::TabsReordered { ordered_ids } => self.settle_reorder(ordered_ids),
             _ => return false,
         }
         true
@@ -972,6 +977,7 @@ impl TabsModel {
             .retain(|tab_id, _| live.contains(tab_id.as_str()));
         self.layout_in_flight
             .retain(|(tab_id, _)| live.contains(tab_id.as_str()));
+        self.pending_reorders.clear();
         let active = self
             .active
             .take()
@@ -1086,6 +1092,81 @@ impl TabsModel {
         }
         self.reorder(ordered);
         true
+    }
+
+    /// Remembers the strip's order as it stands and the order `request_id`'s
+    /// reorder sends, before it applies: the refusal of that request puts
+    /// the first back, unless a later reorder is still pending.
+    pub fn note_reorder(&mut self, request_id: &str, sent_order: &[String]) {
+        let order = self.tabs.iter().map(|tab| tab.id.clone()).collect();
+        self.pending_reorders
+            .push_back((request_id.to_owned(), order, sent_order.to_vec()));
+    }
+
+    /// The daemon refused the reorder `request_id`: it is no longer
+    /// pending. A later reorder sent the order that follows the refused
+    /// change, so its entry takes over the order the refused one found and
+    /// the strip is left as it is; the last reorder pending puts its own
+    /// order back.
+    pub fn fail_reorder(&mut self, request_id: &str) {
+        let Some(at) = self
+            .pending_reorders
+            .iter()
+            .position(|(id, _, _)| id == request_id)
+        else {
+            return;
+        };
+        let Some((_, previous, _)) = self.pending_reorders.remove(at) else {
+            return;
+        };
+        if let Some((_, next_previous, _)) = self.pending_reorders.get_mut(at) {
+            *next_previous = previous;
+        } else {
+            self.restore_order(&previous);
+        }
+    }
+
+    /// The daemon's answer to a reorder: it settles the oldest pending entry
+    /// that sent that order, and every older entry goes with it, refused or
+    /// superseded, since the daemon answers in order. The answer is the
+    /// strip's order only once nothing newer is pending; otherwise the strip
+    /// already shows the newer local one. An answer no entry sent — a
+    /// restore's, or another window's reorder — is the strip's as it comes.
+    fn settle_reorder(&mut self, ordered_ids: &[String]) {
+        let Some(at) = self
+            .pending_reorders
+            .iter()
+            .position(|(_, _, sent)| sent.as_slice() == ordered_ids)
+        else {
+            self.reorder(ordered_ids);
+            return;
+        };
+        self.pending_reorders.drain(..=at);
+        if self.pending_reorders.is_empty() {
+            self.reorder(ordered_ids);
+        }
+    }
+
+    /// `order` as the strip's order, keeping the tabs it no longer holds out
+    /// and any tab it does not name after the ones it does; the shown tab
+    /// and the selection stay.
+    fn restore_order(&mut self, order: &[String]) {
+        let mut slots: Vec<Option<TabEntry>> = std::mem::take(&mut self.tabs)
+            .into_iter()
+            .map(Some)
+            .collect();
+        let mut restored = Vec::with_capacity(slots.len());
+        for id in order {
+            let at = slots
+                .iter()
+                .position(|slot| slot.as_ref().is_some_and(|tab| &tab.id == id));
+            if let Some(tab) = at.and_then(|at| slots[at].take()) {
+                restored.push(tab);
+            }
+        }
+        restored.extend(slots.into_iter().flatten());
+        self.tabs = restored;
+        self.prune_selection();
     }
 
     /// Forgets selected tabs the list no longer holds.
@@ -1328,6 +1409,7 @@ impl TabsModel {
     /// none of the old one's requests.
     pub fn clear_layout_requests(&mut self) {
         self.layout_in_flight.clear();
+        self.pending_reorders.clear();
     }
 
     /// Where `session` goes: into the active tab by
@@ -2404,6 +2486,201 @@ pub(crate) mod tests {
                 "{wrong:?} changes nothing"
             );
         }
+    }
+
+    /// `t1`, `t2` and `t3`, each one empty pane, in that order.
+    fn three_strip() -> TabsModel {
+        model_with(&[
+            tab("t1", &pane("a", None)),
+            tab("t2", &pane("b", None)),
+            tab("t3", &pane("c", None)),
+        ])
+    }
+
+    #[test]
+    fn a_refused_reorder_restores_the_previous_order() {
+        let mut model = three_strip();
+        model.note_reorder("r1", &ids(&["t2", "t3", "t1"]));
+        assert!(model.reorder_local(&ids(&["t2", "t3", "t1"])));
+
+        model.fail_reorder("r1");
+
+        assert_eq!(strip_order(&model), ["t1", "t2", "t3"]);
+    }
+
+    #[test]
+    fn two_refused_reorders_restore_the_daemons_order() {
+        let mut model = three_strip();
+        model.note_reorder("r1", &ids(&["t2", "t1", "t3"]));
+        assert!(model.reorder_local(&ids(&["t2", "t1", "t3"])));
+        model.note_reorder("r2", &ids(&["t3", "t2", "t1"]));
+        assert!(model.reorder_local(&ids(&["t3", "t2", "t1"])));
+
+        model.fail_reorder("r1");
+
+        assert_eq!(
+            strip_order(&model),
+            ["t3", "t2", "t1"],
+            "r2 is still pending, so the refused r1 leaves the strip"
+        );
+
+        model.fail_reorder("r2");
+
+        assert_eq!(
+            strip_order(&model),
+            ["t1", "t2", "t3"],
+            "the refusal hands its order on, so the last one goes back to the daemon's"
+        );
+    }
+
+    #[test]
+    fn an_echo_settles_the_pending_reorder_it_answers() {
+        let mut model = three_strip();
+        model.note_reorder("r1", &ids(&["t2", "t1", "t3"]));
+        assert!(model.reorder_local(&ids(&["t2", "t1", "t3"])));
+        model.note_reorder("r2", &ids(&["t3", "t2", "t1"]));
+        assert!(model.reorder_local(&ids(&["t3", "t2", "t1"])));
+
+        model.apply(&DaemonMessage::TabsReordered {
+            ordered_ids: ids(&["t3", "t2", "t1"]),
+        });
+
+        assert_eq!(strip_order(&model), ["t3", "t2", "t1"]);
+        model.fail_reorder("r2");
+        model.fail_reorder("r1");
+        assert_eq!(
+            strip_order(&model),
+            ["t3", "t2", "t1"],
+            "the echo settled r2 and dropped the older r1 with it"
+        );
+    }
+
+    #[test]
+    fn a_restore_echo_settles_no_pending_reorder() {
+        let mut model = three_strip();
+        model.note_reorder("r1", &ids(&["t2", "t3", "t1"]));
+        assert!(model.reorder_local(&ids(&["t2", "t3", "t1"])));
+
+        model.apply(&DaemonMessage::TabsReordered {
+            ordered_ids: ids(&["t3", "t1", "t2"]),
+        });
+
+        assert_eq!(
+            strip_order(&model),
+            ["t3", "t1", "t2"],
+            "an echo r1 never sent is applied as it comes"
+        );
+
+        model.fail_reorder("r1");
+
+        assert_eq!(
+            strip_order(&model),
+            ["t1", "t2", "t3"],
+            "r1 is still pending, so its refusal snaps back"
+        );
+    }
+
+    #[test]
+    fn an_older_echo_does_not_move_the_strip_while_a_newer_reorder_is_pending() {
+        let mut model = three_strip();
+        model.note_reorder("r1", &ids(&["t2", "t1", "t3"]));
+        assert!(model.reorder_local(&ids(&["t2", "t1", "t3"])));
+        model.note_reorder("r2", &ids(&["t3", "t2", "t1"]));
+        assert!(model.reorder_local(&ids(&["t3", "t2", "t1"])));
+
+        model.apply(&DaemonMessage::TabsReordered {
+            ordered_ids: ids(&["t2", "t1", "t3"]),
+        });
+
+        assert_eq!(
+            strip_order(&model),
+            ["t3", "t2", "t1"],
+            "r1's echo must not pull the strip back under the pending r2"
+        );
+
+        model.apply(&DaemonMessage::TabsReordered {
+            ordered_ids: ids(&["t3", "t2", "t1"]),
+        });
+
+        assert_eq!(
+            strip_order(&model),
+            ["t3", "t2", "t1"],
+            "the last reorder's echo is the strip's order"
+        );
+    }
+
+    #[test]
+    fn a_refusal_with_another_reorder_pending_leaves_the_strip() {
+        let mut model = three_strip();
+        model.note_reorder("r1", &ids(&["t2", "t1", "t3"]));
+        assert!(model.reorder_local(&ids(&["t2", "t1", "t3"])));
+        model.note_reorder("r2", &ids(&["t3", "t2", "t1"]));
+        assert!(model.reorder_local(&ids(&["t3", "t2", "t1"])));
+
+        model.fail_reorder("r1");
+
+        assert_eq!(
+            strip_order(&model),
+            ["t3", "t2", "t1"],
+            "r2 is still pending, so the refused r1 leaves the strip"
+        );
+
+        model.apply(&DaemonMessage::TabsReordered {
+            ordered_ids: ids(&["t3", "t2", "t1"]),
+        });
+        model.fail_reorder("r2");
+
+        assert_eq!(
+            strip_order(&model),
+            ["t3", "t2", "t1"],
+            "r2's echo settled it, so refusing it changes nothing"
+        );
+    }
+
+    #[test]
+    fn a_reconnect_forgets_pending_reorders() {
+        let mut model = three_strip();
+        model.note_reorder("r1", &ids(&["t2", "t3", "t1"]));
+        assert!(model.reorder_local(&ids(&["t2", "t3", "t1"])));
+
+        model.clear_layout_requests();
+        model.fail_reorder("r1");
+
+        assert_eq!(
+            strip_order(&model),
+            ["t2", "t3", "t1"],
+            "a fresh connection answers none of the old one's requests"
+        );
+    }
+
+    #[test]
+    fn a_fresh_tab_list_forgets_pending_reorders() {
+        let mut model = three_strip();
+        let wanted = ids(&["t2", "t3", "t1"]);
+        model.note_reorder("r1", &wanted);
+        assert!(model.reorder_local(&wanted));
+        let fresh: Vec<TabEntry> = wanted.iter().map(|id| tab(id, &pane("p", None))).collect();
+
+        assert!(model.apply(&tabs_msg(&fresh)));
+        model.fail_reorder("r1");
+
+        assert_eq!(strip_order(&model), ["t2", "t3", "t1"]);
+    }
+
+    #[test]
+    fn a_snap_back_keeps_a_tab_created_since_the_drop() {
+        let mut model = three_strip();
+        model.note_reorder("r1", &ids(&["t2", "t3", "t1"]));
+        assert!(model.reorder_local(&ids(&["t2", "t3", "t1"])));
+        model.apply(&updated(&tab("t4", &pane("d", None))));
+
+        model.fail_reorder("r1");
+
+        assert_eq!(
+            strip_order(&model),
+            ["t1", "t2", "t3", "t4"],
+            "the new tab comes after the restored ones"
+        );
     }
 
     #[test]
