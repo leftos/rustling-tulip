@@ -51,7 +51,7 @@ The goal is the first release as soon as possible; this overrides the user-level
   - the live tier, `pwsh ./rt.ps1 native-e2e` (heavy), and the OS tier, `pwsh ./rt.ps1 native-smoke` (light), when a wave's verification names them
 - test mode: unstable
 - stable milestone: Release 1 — v0.1.0-alpha: Claude daily driver
-- release step: cutting a versioned release (the first is `v0.1.0-alpha`) from the Linear release pipeline's `vNext`, only after a green full suite (procedure: RT-129).
+- release step: cutting a versioned release (the first is `v0.1.0-alpha`) from the Linear release pipeline's `vNext`, only after a green full suite (procedure: `docs/release.md`).
 - test map: `tools/test-map.json` (keys `central`, `ignore`, `rows`: source paths to nextest filtersets), read by `rt.ps1 test -Reached`. A landed change's reached tests are `pwsh -NoProfile -File ./rt.ps1 test -Reached -PrintOnly` for the filter (it runs no cargo command; every `rt.ps1` verb that does gates itself), then `pwsh -NoProfile -File tools/gate.ps1 run … -- cargo nextest run --workspace --cargo-profile test-release --no-tests warn -E '<filter>'` so the run routes. A central file or an unmapped file runs the full suite. The live and smoke tiers run through `rt.ps1 native-e2e` and `native-smoke`.
 - UI that only a person can verify: when a native item's visible result can't be proved by a test, it lands on green gates, and the checkpoint lists it under "hand-test" with what to look at. A **visual fix** (something already landed that looks wrong) is not committed until the user confirms it by hand-testing; edit, ask, then squash (memory: commit-only-after-confirmation).
 - Parent-side gate: `git -C <wt> status --short` in the worktree and in the main checkout.
