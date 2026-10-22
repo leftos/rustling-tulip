@@ -65,6 +65,33 @@ pub(super) async fn hook_handler(
     StatusCode::NO_CONTENT.into_response()
 }
 
+/// `GET /proof` — the daemon proves to the hook shim that it holds this run's
+/// token before the shim sends it a hook body or the bearer token.
+///
+/// The request carries exactly one `X-RT-Challenge` of 64 lowercase hex (32
+/// bytes); the answer is `204` with `x-rt-proof` set to
+/// `HMAC-SHA256(hub.proof_key, challenge)` in lowercase hex and no body. A
+/// missing, repeated or malformed challenge is `400`. Loopback router only.
+pub(super) async fn proof_handler(State(hub): State<Hub>, headers: HeaderMap) -> Response {
+    let mut values = headers.get_all("x-rt-challenge").iter();
+    let (Some(value), None) = (values.next(), values.next()) else {
+        return (StatusCode::BAD_REQUEST, "expected one X-RT-Challenge").into_response();
+    };
+    let Some(challenge) = value
+        .to_str()
+        .ok()
+        .and_then(tracer_protocol::parse_lower_hex32)
+    else {
+        return (StatusCode::BAD_REQUEST, "malformed X-RT-Challenge").into_response();
+    };
+    let proof = tracer_protocol::daemon_proof(&hub.proof_key, &challenge);
+    (
+        StatusCode::NO_CONTENT,
+        [("x-rt-proof", tracer_protocol::to_lower_hex(&proof))],
+    )
+        .into_response()
+}
+
 /// The `X-RT-Hook-Time` header, nanoseconds since the Unix epoch.
 fn hook_time(headers: &HeaderMap) -> Option<u128> {
     headers
@@ -452,6 +479,142 @@ mod tests {
             "the held prompt raises one attention"
         );
         assert!(attention.try_recv().is_err(), "exactly one attention");
+    }
+
+    /// A `GET /proof` carrying one `X-RT-Challenge` header per entry of
+    /// `challenges`.
+    fn proof_request(challenges: &[&str]) -> axum::http::Request<Body> {
+        let mut builder = axum::http::Request::builder().method("GET").uri("/proof");
+        for challenge in challenges {
+            builder = builder.header("x-rt-challenge", *challenge);
+        }
+        builder.body(Body::empty()).expect("build proof request")
+    }
+
+    #[tokio::test]
+    async fn proof_answers_a_valid_challenge() {
+        let (hub, _scratch) = test_hub("proof-valid");
+        let challenge = [0x5au8; 32];
+        let response = build_loopback_router(hub.clone())
+            .oneshot(proof_request(&[&tracer_protocol::to_lower_hex(&challenge)]))
+            .await
+            .expect("router answers");
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        let proofs: Vec<_> = response.headers().get_all("x-rt-proof").iter().collect();
+        assert_eq!(proofs.len(), 1, "exactly one proof header");
+        let expected = tracer_protocol::to_lower_hex(&tracer_protocol::daemon_proof(
+            &hub.proof_key,
+            &challenge,
+        ));
+        assert_eq!(proofs[0].to_str().expect("ascii proof"), expected);
+        assert_eq!(
+            hub.proof_key,
+            tracer_protocol::daemon_proof_key(&hub.auth_token),
+            "the key is derived from the run's token"
+        );
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .expect("read body");
+        assert!(body.is_empty(), "no body: {body:?}");
+    }
+
+    /// The daemon's real `/proof` answer, as hyper writes it on the wire,
+    /// passes the shim's own head check and verifies.
+    #[tokio::test]
+    async fn the_real_proof_response_passes_the_shims_check() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        // A hang guard, never a must-beat bound: a passing run answers in
+        // milliseconds.
+        const GUARD: std::time::Duration = std::time::Duration::from_secs(120);
+        let (hub, _scratch) = test_hub("proof-wire");
+        let proof_key = hub.proof_key;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind the loopback router");
+        let addr = listener.local_addr().expect("listener addr");
+        let server = tokio::spawn(axum::serve(listener, build_loopback_router(hub)).into_future());
+
+        let challenge = [0xc3u8; 32];
+        let mut stream = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("connect to the router");
+        let request = format!(
+            "GET /proof HTTP/1.1\r\nHost: {addr}\r\nX-RT-Challenge: {}\r\n\r\n",
+            tracer_protocol::to_lower_hex(&challenge)
+        );
+        stream
+            .write_all(request.as_bytes())
+            .await
+            .expect("write the proof request");
+        let mut head = Vec::new();
+        let read_head = async {
+            let mut byte = [0u8; 1];
+            while !head.ends_with(b"\r\n\r\n") {
+                let read = stream.read(&mut byte).await.expect("read the answer");
+                assert_ne!(read, 0, "the router closed before a full head");
+                head.push(byte[0]);
+            }
+        };
+        tokio::time::timeout(GUARD, read_head)
+            .await
+            .expect("the router answered");
+        server.abort();
+
+        let head = String::from_utf8(head).expect("a text head");
+        let head = head
+            .strip_suffix("\r\n\r\n")
+            .expect("the head's blank line");
+        let proof = tracer_protocol::parse_daemon_proof_head(head);
+        assert!(
+            proof.is_some(),
+            "the shim's check refused the real head: {head:?}"
+        );
+        let proof = proof.expect("checked above");
+        assert!(
+            tracer_protocol::verify_daemon_proof(&proof_key, &challenge, &proof),
+            "the proof verifies against the hub's key"
+        );
+    }
+
+    #[tokio::test]
+    async fn proof_refuses_a_missing_or_malformed_challenge() {
+        let (hub, _scratch) = test_hub("proof-malformed");
+        let valid = tracer_protocol::to_lower_hex(&[0x11u8; 32]);
+        let upper = valid.to_ascii_uppercase().replace('1', "A");
+        let short = &valid[..63];
+        let cases: [&[&str]; 4] = [&[], &[upper.as_str()], &[short], &[&valid, &valid]];
+        for challenges in cases {
+            let response = build_loopback_router(hub.clone())
+                .oneshot(proof_request(challenges))
+                .await
+                .expect("router answers");
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "challenges: {challenges:?}"
+            );
+            assert!(response.headers().get("x-rt-proof").is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn the_tailnet_router_has_no_proof_route() {
+        use crate::server::remote::{build_tailnet_router, name_slot};
+        let (hub, _scratch) = test_hub("proof-tailnet");
+        let challenge = tracer_protocol::to_lower_hex(&[0x22u8; 32]);
+        let response = build_tailnet_router(hub, name_slot(), 8787)
+            .oneshot(proof_request(&[&challenge]))
+            .await
+            .expect("the router answers");
+        assert!(
+            matches!(
+                response.status(),
+                StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
+            ),
+            "status: {}",
+            response.status()
+        );
+        assert!(response.headers().get("x-rt-proof").is_none());
     }
 
     /// Apply the hook `body` to `s1` at `event_time`, as the route does.

@@ -6679,6 +6679,7 @@ dependencies = [
  "anyhow",
  "base64",
  "clap",
+ "getrandom 0.3.4",
  "interprocess",
  "libc",
  "portable-pty",
@@ -6695,8 +6696,10 @@ dependencies = [
 name = "tracer-protocol"
 version = "0.1.0"
 dependencies = [
+ "hmac",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "thiserror 2.0.18",
 ]
 

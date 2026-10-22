@@ -30,7 +30,7 @@ pub(crate) use self::spawn::{render_shell_resume, resolve_env_refs};
 
 use self::connection::{AuthKind, ConnCtx, cancel_fetch, client_session, start_fetch};
 use self::git::repo_target_or_err;
-use self::hooks::{hook_handler, presented_bearer};
+use self::hooks::{hook_handler, presented_bearer, proof_handler};
 use self::recovery::{reattach_orphans, start_history_broadcaster};
 use self::remote::{
     configure_remote, host_only_refusal, remove_retired_lan_files, start_remote_access,
@@ -66,6 +66,9 @@ pub struct Hub {
     pub state: Arc<AppState>,
     pub sessions: Arc<SessionRegistry>,
     pub auth_token: String,
+    /// `tracer_protocol::daemon_proof_key(auth_token)`, derived once per run:
+    /// the key `/proof` answers the hook shim's challenges with.
+    pub proof_key: [u8; 32],
     /// How long a tailnet connection has to send its `Hello` before the
     /// handshake is refused. Production sets [`TAILNET_HANDSHAKE_TIMEOUT`]; a
     /// test moves it out of the way to observe a connection that is still
@@ -321,6 +324,7 @@ pub async fn run(
     let hub = Hub {
         state,
         sessions,
+        proof_key: tracer_protocol::daemon_proof_key(&auth_token),
         auth_token: auth_token.clone(),
         tailnet_handshake_timeout: TAILNET_HANDSHAKE_TIMEOUT,
         attention_tx,
@@ -390,13 +394,15 @@ pub async fn run(
     serve_result
 }
 
-/// The loopback listener's router: `/ws`, `/health`, `/shutdown` and the hook
-/// endpoint the shim posts to on `127.0.0.1`.
+/// The loopback listener's router: `/ws`, `/health`, `/shutdown`, the `/proof`
+/// the hook shim checks first and the hook endpoint it posts to on
+/// `127.0.0.1`.
 fn build_loopback_router(hub: Hub) -> Router {
     Router::new()
         .route("/ws", get(ws_handler))
         .route("/health", get(|| async { "ok" }))
         .route("/shutdown", post(shutdown_handler))
+        .route("/proof", get(proof_handler))
         .route("/hook/{session_id}", post(hook_handler))
         .with_state(hub)
 }

@@ -16,6 +16,13 @@
 
 use serde::{Deserialize, Serialize};
 
+mod proof;
+
+pub use proof::{
+    DAEMON_PROOF_CONTEXT, daemon_proof, daemon_proof_key, parse_daemon_proof_head,
+    parse_lower_hex32, to_lower_hex, verify_daemon_proof,
+};
+
 /// Current ABI version. Bumped only for removed messages, renamed fields,
 /// or semantic changes — additive changes (new variant, new
 /// `#[serde(default)]` field) ride on the wrapper machinery.

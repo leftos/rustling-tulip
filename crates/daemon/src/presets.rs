@@ -2482,6 +2482,7 @@ mod tests {
             state,
             sessions,
             auth_token: "test-token".to_string(),
+            proof_key: tracer_protocol::daemon_proof_key("test-token"),
             tailnet_handshake_timeout: crate::server::TAILNET_HANDSHAKE_TIMEOUT,
             attention_tx,
             dirs,

@@ -46,6 +46,14 @@ the pipe is connected. The tracer replies `TracerWelcome { version, supported }`
 echoing the negotiated version. Negotiation is `max(common)` of advertised
 sets. An empty intersection closes the pipe.
 
+### Daemon proof
+
+`tracer-protocol` also holds the proof the hook shim (`rt-tracer.exe hook`) asks of a loopback listener before it sends it a hook body or the bearer token. The shim sends `GET /proof` with `X-RT-Challenge: <64 lowercase hex>` (32 random bytes); the daemon answers `204` with `x-rt-proof: <64 lowercase hex>` and no body, and only then does the shim send its `POST /hook/<id>` on the same connection.
+
+The daemon derives `proof_key = HMAC-SHA256(key = auth_token, msg = DAEMON_PROOF_CONTEXT)` once per run, with `DAEMON_PROOF_CONTEXT = b"rustling-tulip/daemon-proof/v1"`, and the proof is `HMAC-SHA256(proof_key, challenge)`. Both sides call the same functions: `daemon_proof_key`, `daemon_proof`, `verify_daemon_proof` (constant time), `to_lower_hex`, `parse_lower_hex32`, and `parse_daemon_proof_head`, the shim's check of the answer's head (a `204`, exactly one `x-rt-proof`, no body announced).
+
+These are new functions only: no message or type changes, so they are additive and not a `TRACER_VERSION` bump. A change to the context string or the derivation is breaking, since a shim and a daemon from different builds would then never agree; the `v1` in the context names the version.
+
 ## What counts as a bump
 
 **NOT a bump** (additive, ride on `#[serde(default)]` + `Unknown` wrapper):

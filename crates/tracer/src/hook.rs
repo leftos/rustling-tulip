@@ -4,9 +4,11 @@
 //! hooks are exec-form command hooks running
 //! `<cached rt-tracer.exe> hook --session <id> --config-dir <dir>`. One
 //! invocation reads the event JSON from stdin, looks the daemon's current port
-//! and auth token up in `daemon.json`, POSTs the body verbatim to
-//! `/hook/<session id>` and exits 0 whatever happens: a hook must never fail
-//! the agent's turn.
+//! and auth token up in `daemon.json`, makes the listener on that port prove
+//! with `GET /proof` that it holds this run's daemon token, then POSTs the
+//! body verbatim to `/hook/<session id>` on the same connection, and exits 0
+//! whatever happens: a hook must never fail the agent's turn. A listener that
+//! cannot prove it is the daemon is sent nothing more.
 //!
 //! The tracer's `main` dispatches here on a leading `hook` argument before it
 //! builds the tokio runtime or parses the tracer's own CLI, so the daemon's
@@ -21,7 +23,8 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// The shim's whole-run budget, covering reading stdin, the connect, the
-/// writes and the status line: one deadline, not a timeout per step.
+/// proof round trip, the writes and the status line: one deadline, not a
+/// timeout per step.
 pub(crate) const BUDGET: Duration = Duration::from_secs(2);
 
 /// How much of stdin the scanner pulls per read.
@@ -37,11 +40,31 @@ pub(crate) enum Outcome {
     Posted,
     /// The daemon answered, but not `2xx`.
     Rejected,
-    /// Nothing usable came back: no status line, a read error, or the deadline.
+    /// Nothing usable came back: no full proof answer head or no status line,
+    /// a read error, a closed connection, or the deadline.
     NoResponse,
+    /// A listener answered the proof request but did not prove it is the
+    /// daemon; nothing else was sent.
+    Unproven,
     /// The request was never sent: no usable stdin, a bad invocation or
-    /// handshake, an unsafe header value, or a connect or write that failed.
+    /// handshake, an unsafe header value, no random challenge, or a connect
+    /// or write that failed.
     Skipped,
+}
+
+/// The most of the proof answer's head the shim reads; a longer head is not
+/// the daemon's.
+const PROOF_HEAD_LIMIT: usize = 8 * 1024;
+
+/// What the listener made of the proof request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Proof {
+    /// It answered with this run's daemon proof.
+    Proven,
+    /// A head arrived and failed a check.
+    Unproven,
+    /// No full head arrived.
+    NoResponse,
 }
 
 /// The `hook` subcommand's arguments.
@@ -348,7 +371,8 @@ fn scan(reader: &mut impl BufRead) -> Scanned {
     }
 }
 
-/// POSTs `body` verbatim to the daemon's `/hook/<session id>` route.
+/// POSTs `body` verbatim to the daemon's `/hook/<session id>` route, once the
+/// listener has proved on the same connection that it holds the daemon token.
 fn post(
     daemon: &Daemon,
     session_id: &str,
@@ -359,13 +383,24 @@ fn post(
     if !is_safe_session_id(session_id) || !is_safe_token(&daemon.token) {
         return Outcome::Skipped;
     }
+    let mut challenge = [0u8; 32];
+    if getrandom::fill(&mut challenge).is_err() {
+        return Outcome::Skipped;
+    }
     let addr = SocketAddr::from(([127, 0, 0, 1], daemon.port));
     let Some(left) = left_until(deadline) else {
         return Outcome::Skipped;
     };
-    let Ok(mut stream) = TcpStream::connect_timeout(&addr, left) else {
+    let Ok(stream) = TcpStream::connect_timeout(&addr, left) else {
         return Outcome::Skipped;
     };
+    // One reader for the whole connection, so no byte it buffers is lost
+    // between the proof answer and the status line.
+    let mut reader = BufReader::new(&stream);
+    if let Err(outcome) = prove(daemon, &mut reader, &stream, &challenge, deadline) {
+        return outcome;
+    }
+    let mut writer = &stream;
     let request = format!(
         "POST /hook/{session_id} HTTP/1.1\r\n\
          Host: 127.0.0.1:{port}\r\n\
@@ -381,33 +416,145 @@ fn post(
     );
     // Each step gets the time actually left, so the whole run cannot spend the
     // budget once per socket operation.
-    if !arm_write(&stream, deadline) || stream.write_all(request.as_bytes()).is_err() {
+    if !arm_write(&stream, deadline) || writer.write_all(request.as_bytes()).is_err() {
         return Outcome::Skipped;
     }
-    if !arm_write(&stream, deadline) || stream.write_all(body).is_err() {
+    if !arm_write(&stream, deadline) || writer.write_all(body).is_err() {
         return Outcome::Skipped;
     }
-    let _ = stream.flush();
+    let _ = writer.flush();
     if !arm_read(&stream, deadline) {
         return Outcome::NoResponse;
     }
     // The daemon answers `204` at once, and its body says nothing the shim
     // needs, so the status line is all it reads.
     let mut status_line = String::new();
-    if BufReader::new(&stream).read_line(&mut status_line).is_err() {
+    if reader.read_line(&mut status_line).is_err() {
         return Outcome::NoResponse;
     }
     status_outcome(&status_line)
 }
 
-/// The status line's code as an outcome: `2xx` is `Posted`, any other code is
-/// `Rejected`, and anything that is not a status line is `NoResponse`.
-fn status_outcome(status_line: &str) -> Outcome {
-    match status_line
+/// Sends the proof request for `challenge` and checks the answer; `Err` is
+/// the run's outcome when the listener did not prove it is the daemon.
+fn prove(
+    daemon: &Daemon,
+    reader: &mut BufReader<&TcpStream>,
+    stream: &TcpStream,
+    challenge: &[u8; 32],
+    deadline: Instant,
+) -> Result<(), Outcome> {
+    let proof_request = format!(
+        "GET /proof HTTP/1.1\r\n\
+         Host: 127.0.0.1:{port}\r\n\
+         X-RT-Challenge: {challenge}\r\n\
+         \r\n",
+        port = daemon.port,
+        challenge = tracer_protocol::to_lower_hex(challenge),
+    );
+    let mut writer = stream;
+    if !arm_write(stream, deadline) || writer.write_all(proof_request.as_bytes()).is_err() {
+        return Err(Outcome::Skipped);
+    }
+    let _ = writer.flush();
+    let proof_key = tracer_protocol::daemon_proof_key(&daemon.token);
+    match read_proof(reader, stream, deadline, &proof_key, challenge) {
+        Proof::Proven => Ok(()),
+        Proof::Unproven => Err(Outcome::Unproven),
+        Proof::NoResponse => Err(Outcome::NoResponse),
+    }
+}
+
+/// Reads the listener's answer to the proof request and checks it.
+fn read_proof(
+    reader: &mut BufReader<&TcpStream>,
+    stream: &TcpStream,
+    deadline: Instant,
+    proof_key: &[u8; 32],
+    challenge: &[u8; 32],
+) -> Proof {
+    match read_response_head(reader, stream, deadline) {
+        Head::Complete(head) => {
+            let proven = std::str::from_utf8(&head)
+                .ok()
+                .and_then(tracer_protocol::parse_daemon_proof_head)
+                .is_some_and(|proof| {
+                    tracer_protocol::verify_daemon_proof(proof_key, challenge, &proof)
+                });
+            if proven {
+                Proof::Proven
+            } else {
+                Proof::Unproven
+            }
+        }
+        Head::TooLarge => Proof::Unproven,
+        Head::Missing => Proof::NoResponse,
+    }
+}
+
+/// What came back as a response head.
+enum Head {
+    /// The head through its blank line, without the blank line.
+    Complete(Vec<u8>),
+    /// The head ran past [`PROOF_HEAD_LIMIT`] bytes, complete or not.
+    TooLarge,
+    /// A read error, a closed connection or the deadline came first.
+    Missing,
+}
+
+/// Reads a response head up to its `\r\n\r\n`, arming each read with the time
+/// left, and consumes exactly the head so what follows stays in `reader`.
+fn read_response_head(
+    reader: &mut BufReader<&TcpStream>,
+    stream: &TcpStream,
+    deadline: Instant,
+) -> Head {
+    let mut head: Vec<u8> = Vec::new();
+    loop {
+        if !arm_read(stream, deadline) {
+            return Head::Missing;
+        }
+        let Ok(chunk) = reader.fill_buf() else {
+            return Head::Missing;
+        };
+        if chunk.is_empty() {
+            return Head::Missing;
+        }
+        let scanned_from = head.len().saturating_sub(3);
+        let before = head.len();
+        head.extend_from_slice(chunk);
+        let end = head[scanned_from..]
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .map(|at| scanned_from + at);
+        if let Some(end) = end {
+            if end > PROOF_HEAD_LIMIT {
+                return Head::TooLarge;
+            }
+            reader.consume(end + 4 - before);
+            head.truncate(end);
+            return Head::Complete(head);
+        }
+        let used = head.len() - before;
+        reader.consume(used);
+        if head.len() > PROOF_HEAD_LIMIT {
+            return Head::TooLarge;
+        }
+    }
+}
+
+/// The status code a status line carries, if it is one.
+fn status_code(status_line: &str) -> Option<u16> {
+    status_line
         .split_whitespace()
         .nth(1)
         .and_then(|code| code.parse::<u16>().ok())
-    {
+}
+
+/// The status line's code as an outcome: `2xx` is `Posted`, any other code is
+/// `Rejected`, and anything that is not a status line is `NoResponse`.
+fn status_outcome(status_line: &str) -> Outcome {
+    match status_code(status_line) {
         Some(200..=299) => Outcome::Posted,
         Some(_) => Outcome::Rejected,
         None => Outcome::NoResponse,
@@ -559,7 +706,7 @@ mod tests {
     }
 
     #[test]
-    fn silent_listener_returns_after_the_budget() {
+    fn a_silent_listener_is_no_response() {
         let (port, head_rx) = silent_daemon();
         let dir = scratch_dir("silent");
         write_daemon_json(&dir, port, TOKEN);
@@ -582,15 +729,136 @@ mod tests {
         assert_eq!(
             outcome,
             Outcome::NoResponse,
-            "the request was sent and never answered"
+            "the proof request was sent and never answered"
         );
         let head = head_rx
             .recv_timeout(GUARD)
-            .expect("the request reached the listener");
+            .expect("the proof request reached the listener");
         let head = String::from_utf8_lossy(&head).to_string();
         assert!(
-            head.starts_with(&format!("POST /hook/{SESSION} HTTP/1.1\r\n")),
+            head.starts_with("GET /proof HTTP/1.1\r\n"),
             "request line: {head}"
+        );
+        assert!(
+            challenge_of(head.as_bytes()).is_some(),
+            "a challenge header: {head}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn posts_after_a_real_proof_exchange() {
+        let fake = FakeDaemon::answering();
+        let dir = scratch_dir("proof-exchange");
+        write_daemon_json(&dir, fake.port, TOKEN);
+
+        let outcome = run(
+            Cursor::new(INPUT.as_bytes().to_vec()),
+            &dir,
+            SESSION,
+            unix_nanos(),
+            LONG_BUDGET,
+        );
+
+        assert_eq!(outcome, Outcome::Posted);
+        let port = fake.port;
+        // The fake accepts one connection, so the POST rode the proved one.
+        let exchange = fake.finish_exchange();
+        let proof_head = String::from_utf8_lossy(&exchange.proof_head).to_string();
+        assert!(
+            proof_head.starts_with(&format!(
+                "GET /proof HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nX-RT-Challenge: "
+            )),
+            "proof request: {proof_head}"
+        );
+        assert!(
+            challenge_of(&exchange.proof_head).is_some(),
+            "a 64 lowercase hex challenge: {proof_head}"
+        );
+        assert!(
+            !proof_head.contains("Connection: close"),
+            "the proof request keeps the connection open: {proof_head}"
+        );
+        let request = String::from_utf8_lossy(&exchange.request).to_string();
+        assert!(
+            request.starts_with(&format!("POST /hook/{SESSION} HTTP/1.1\r\n")),
+            "request line: {request}"
+        );
+        assert!(exchange.request.ends_with(INPUT.as_bytes()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sends_nothing_to_a_listener_without_the_proof() {
+        let fake = UnprovenFake::answering(|_| "HTTP/1.1 204 No Content\r\n\r\n".to_owned());
+        assert_unproven(fake, "no-proof");
+    }
+
+    #[test]
+    fn sends_nothing_to_a_listener_with_a_wrong_proof() {
+        let fake = UnprovenFake::answering(|challenge| {
+            let wrong = tracer_protocol::daemon_proof(
+                &tracer_protocol::daemon_proof_key("not-the-token"),
+                challenge,
+            );
+            proof_answer(&wrong, "")
+        });
+        assert_unproven(fake, "wrong-proof");
+    }
+
+    #[test]
+    fn a_proof_answer_with_a_body_is_unproven() {
+        let fake = UnprovenFake::answering(|challenge| {
+            let mut answer =
+                proof_answer(&correct_proof(TOKEN, challenge), "Content-Length: 5\r\n");
+            answer.push_str("hello");
+            answer
+        });
+        assert_unproven(fake, "proof-body");
+    }
+
+    #[test]
+    fn a_proof_answer_with_two_proof_headers_is_unproven() {
+        let fake = UnprovenFake::answering(|challenge| {
+            let proof = tracer_protocol::to_lower_hex(&correct_proof(TOKEN, challenge));
+            proof_answer(
+                &correct_proof(TOKEN, challenge),
+                &format!("X-RT-Proof: {proof}\r\n"),
+            )
+        });
+        assert_unproven(fake, "two-proofs");
+    }
+
+    #[test]
+    fn a_proof_head_over_the_limit_is_unproven() {
+        // A correct proof whose head, terminator included, comes in one write
+        // and runs past the limit.
+        let fake = UnprovenFake::answering(|challenge| {
+            let padding = format!("X-Padding: {}\r\n", "a".repeat(PROOF_HEAD_LIMIT));
+            proof_answer(&correct_proof(TOKEN, challenge), &padding)
+        });
+        assert_unproven(fake, "proof-head-limit");
+    }
+
+    /// Runs the shim against `fake` and asserts it is `Unproven` and that the
+    /// fake saw nothing after the proof request.
+    fn assert_unproven(fake: UnprovenFake, name: &str) {
+        let dir = scratch_dir(name);
+        write_daemon_json(&dir, fake.port, TOKEN);
+
+        let outcome = run(
+            Cursor::new(INPUT.as_bytes().to_vec()),
+            &dir,
+            SESSION,
+            unix_nanos(),
+            LONG_BUDGET,
+        );
+
+        assert_eq!(outcome, Outcome::Unproven);
+        let after = fake.handle.join().expect("the fake daemon thread");
+        assert_eq!(
+            after, 0,
+            "the shim sent {after} bytes after an unproven answer"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -617,10 +885,14 @@ mod tests {
 
     #[test]
     fn rejects_an_unsafe_token() {
-        // The fake would answer, so a request that got through would be `Posted`.
-        let fake = FakeDaemon::answering();
+        // The fake proves itself for this token and would accept the event, so
+        // a request that got through would be `Posted`.
+        let unsafe_token = "ok\r\nX-Injected: yes";
+        let fake = FakeDaemon::answering_for(unsafe_token);
         let dir = scratch_dir("unsafe-token");
-        write_daemon_json(&dir, fake.port, "ok\r\nX-Injected: yes");
+        write_daemon_json(&dir, fake.port, unsafe_token);
+        let daemon = read_daemon(&dir).expect("the daemon.json parses");
+        assert_eq!(daemon.token, unsafe_token, "only the token is unsafe");
 
         let outcome = run(
             Cursor::new(INPUT.as_bytes().to_vec()),
@@ -781,36 +1053,120 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A one-shot fake daemon on a free loopback port: it reads the request,
-    /// answers `204 No Content` and hands the raw request bytes back.
+    /// The answer a fake gives the hook POST when it accepts the event.
+    const NO_CONTENT: &str = "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n";
+
+    /// What a fake daemon read off its one connection.
+    struct Exchange {
+        /// The proof request's head.
+        proof_head: Vec<u8>,
+        /// The hook request that followed the proof, head and body.
+        request: Vec<u8>,
+    }
+
+    /// A one-shot fake daemon on a free loopback port: it proves itself for
+    /// the token it was given, reads the hook request on the same connection,
+    /// answers it and hands the raw bytes back.
     struct FakeDaemon {
         port: u16,
-        handle: thread::JoinHandle<Vec<u8>>,
+        handle: thread::JoinHandle<Exchange>,
     }
 
     impl FakeDaemon {
-        /// One that reads the request and answers `204 No Content`.
+        /// One that proves itself for [`TOKEN`] and answers `204 No Content`.
         fn answering() -> Self {
-            Self::replying("HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+            Self::answering_for(TOKEN)
         }
 
-        /// One that reads the request and answers `response` verbatim.
+        /// One that proves itself for `token` and answers `204 No Content`.
+        fn answering_for(token: &str) -> Self {
+            Self::serving(token, NO_CONTENT)
+        }
+
+        /// One that proves itself for [`TOKEN`] and answers the hook request
+        /// with `response` verbatim.
         fn replying(response: &'static str) -> Self {
+            Self::serving(TOKEN, response)
+        }
+
+        fn serving(token: &str, response: &'static str) -> Self {
+            let proof_key = tracer_protocol::daemon_proof_key(token);
             let listener = TcpListener::bind("127.0.0.1:0").expect("bind the fake daemon");
             let port = listener.local_addr().expect("fake daemon addr").port();
             let handle = thread::spawn(move || {
                 let (mut stream, _) = listener.accept().expect("accept the shim");
+                let proof_head = read_head(&mut stream);
+                let challenge = challenge_of(&proof_head).expect("the shim sent a challenge");
+                let proof = tracer_protocol::daemon_proof(&proof_key, &challenge);
+                let _ = stream.write_all(proof_answer(&proof, "").as_bytes());
+                let _ = stream.flush();
                 let request = read_request(&mut stream);
                 let _ = stream.write_all(response.as_bytes());
                 let _ = stream.flush();
-                request
+                Exchange {
+                    proof_head,
+                    request,
+                }
             });
             Self { port, handle }
         }
 
+        /// The hook request the fake read.
         fn finish(self) -> Vec<u8> {
+            self.finish_exchange().request
+        }
+
+        fn finish_exchange(self) -> Exchange {
             self.handle.join().expect("the fake daemon thread")
         }
+    }
+
+    /// A fake listener that answers the proof request with whatever its
+    /// `answer` builds from the challenge, then counts the bytes the shim
+    /// sends after it: a shim that drops the stream sends none.
+    struct UnprovenFake {
+        port: u16,
+        handle: thread::JoinHandle<usize>,
+    }
+
+    impl UnprovenFake {
+        fn answering(answer: fn(&[u8; 32]) -> String) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind the fake listener");
+            let port = listener.local_addr().expect("fake listener addr").port();
+            let handle = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().expect("accept the shim");
+                let head = read_head(&mut stream);
+                let challenge = challenge_of(&head).expect("the shim sent a challenge");
+                let _ = stream.write_all(answer(&challenge).as_bytes());
+                let _ = stream.flush();
+                // EOF, or a reset when the shim closed with our answer still
+                // unread: either way no second request arrived.
+                let mut after = [0u8; 1024];
+                stream.read(&mut after).unwrap_or(0)
+            });
+            Self { port, handle }
+        }
+    }
+
+    /// The `204` proof answer carrying `proof`, with `extra` header lines.
+    fn proof_answer(proof: &[u8; 32], extra: &str) -> String {
+        format!(
+            "HTTP/1.1 204 No Content\r\nx-rt-proof: {}\r\n{extra}\r\n",
+            tracer_protocol::to_lower_hex(proof)
+        )
+    }
+
+    /// The proof a daemon holding `token` gives for `challenge`.
+    fn correct_proof(token: &str, challenge: &[u8; 32]) -> [u8; 32] {
+        tracer_protocol::daemon_proof(&tracer_protocol::daemon_proof_key(token), challenge)
+    }
+
+    /// The challenge a proof request head carries, when it is 64 lowercase hex.
+    fn challenge_of(head: &[u8]) -> Option<[u8; 32]> {
+        String::from_utf8_lossy(head)
+            .lines()
+            .find_map(|line| line.strip_prefix("X-RT-Challenge: "))
+            .and_then(tracer_protocol::parse_lower_hex32)
     }
 
     /// A fake daemon that reads the request head and then never answers, on a
@@ -862,10 +1218,13 @@ mod tests {
 
     /// Writes the `daemon.json` a daemon would have left in its config dir.
     fn write_daemon_json(dir: &Path, port: u16, token: &str) {
-        let json = format!(
-            "{{\"protocol_version\": 24, \"port\": {port}, \"auth_token\": \"{token}\", \"pid\": 1}}"
-        );
-        std::fs::write(dir.join("daemon.json"), json).expect("write daemon.json");
+        let json = serde_json::json!({
+            "protocol_version": 24,
+            "port": port,
+            "auth_token": token,
+            "pid": 1,
+        });
+        std::fs::write(dir.join("daemon.json"), json.to_string()).expect("write daemon.json");
     }
 
     /// A scratch directory under the worktree's `.tmp`, unique per test.

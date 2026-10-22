@@ -122,6 +122,7 @@ pub(super) fn build_test_hub(
         state,
         sessions,
         auth_token: "test-token".to_string(),
+        proof_key: tracer_protocol::daemon_proof_key("test-token"),
         tailnet_handshake_timeout: TAILNET_HANDSHAKE_TIMEOUT,
         attention_tx,
         dirs,

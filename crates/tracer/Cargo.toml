@@ -26,6 +26,8 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 base64 = "0.22"
+# The hook shim's 32-byte proof challenge (`hook.rs`).
+getrandom = "0.3"
 portable-pty = "0.9"
 clap = { version = "4", features = ["derive"] }
 # Cross-platform local-socket transport for the daemon↔tracer IPC: named

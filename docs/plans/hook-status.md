@@ -48,7 +48,9 @@ Re-read this section against `pty_state.rs` and `session.rs` before HS.6: the st
 
 ### Transport: a hook shim that reads `daemon.json` on every call
 
-The injected hooks are **command hooks in exec form, `async: true`**, running a small subcommand of the session's own tracer binary: `<cached rt-tracer.exe> hook --session <rt session id> --config-dir <dir>`. The shim reads the event JSON from stdin, reads `daemon.json` from the config dir for the current port and auth token, POSTs the body verbatim to `http://127.0.0.1:<port>/hook/<rt session id>` with `Authorization: Bearer <token>` and an `X-RT-Hook-Time` header (nanoseconds, taken when the shim starts), and exits 0 whatever happens. It is a hand-written HTTP/1.1 POST over `std::net::TcpStream` with a 2 s budget, so the tracer gains no dependency.
+The injected hooks are **command hooks in exec form, `async: true`**, running a small subcommand of the session's own tracer binary: `<cached rt-tracer.exe> hook --session <rt session id> --config-dir <dir>`. The shim reads the event JSON from stdin, reads `daemon.json` from the config dir for the current port and auth token, and exits 0 whatever happens.
+
+On one connection it first sends `GET /proof` with a random `X-RT-Challenge` and goes on only when the listener answers `204` with an `x-rt-proof` that is the HMAC of the challenge under a key derived from this run's token (RT-208, `tracer_protocol::daemon_proof`); a listener that cannot prove it is the daemon is sent nothing more. Then it POSTs the body verbatim to `http://127.0.0.1:<port>/hook/<rt session id>` with `Authorization: Bearer <token>` and an `X-RT-Hook-Time` header (nanoseconds, taken when the shim starts). It is hand-written HTTP/1.1 over `std::net::TcpStream` with a 2 s budget for the whole exchange; the tracer depends on `getrandom` for the challenge and on `tracer-protocol`'s `hmac`/`sha2` for the proof.
 
 Why not `type: "http"` hooks posting straight to the daemon, as VelaTerm does:
 
