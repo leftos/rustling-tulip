@@ -1210,10 +1210,27 @@ impl<'a> Harness<'a> {
                 ClientMessage::SendInput {
                     session_id,
                     data_b64,
+                    ..
                 } if session_id == session => Some(B64.decode(data_b64).expect("input base64")),
                 _ => None,
             })
             .flatten()
+            .collect()
+    }
+
+    /// The `automatic` flag on each input sent to `session` since the last
+    /// drain, oldest first.
+    pub fn sent_input_flags(&mut self, session: &str) -> Vec<bool> {
+        self.sent()
+            .into_iter()
+            .filter_map(|msg| match msg {
+                ClientMessage::SendInput {
+                    session_id,
+                    automatic,
+                    ..
+                } if session_id == session => Some(automatic),
+                _ => None,
+            })
             .collect()
     }
 

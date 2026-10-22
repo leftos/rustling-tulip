@@ -387,6 +387,38 @@ fn cursor_position_query_is_answered_live_but_not_from_history(cx: &mut TestAppC
     );
 }
 
+#[gpui::test]
+fn a_query_reply_is_sent_as_automatic_input(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
+    h.pty("s1", b"\x1b[6n");
+    let flags = h.sent_input_flags("s1");
+    assert!(!flags.is_empty(), "the query is answered");
+    assert!(flags.iter().all(|automatic| *automatic), "{flags:?}");
+}
+
+#[gpui::test]
+fn mouse_motion_reports_are_sent_as_automatic_input(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, session("s1").build());
+    h.pty("s1", b"\x1b[?1003h\x1b[?1006h");
+
+    let at = h.cell_center("p1", 2, 3);
+    h.hover(at, Modifiers::none());
+    let flags = h.sent_input_flags("s1");
+    assert_eq!(flags, [true], "a hover report is the terminal's own");
+}
+
+#[gpui::test]
+fn typed_keys_are_sent_as_owner_input(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, session("s1").build());
+    h.keys("a");
+    let flags = h.sent_input_flags("s1");
+    assert!(!flags.is_empty(), "the key is sent");
+    assert!(flags.iter().all(|automatic| !*automatic), "{flags:?}");
+}
+
 /// The input sent to `s1` after its scrollback is answered with `history`.
 fn input_after_history(cx: &mut TestAppContext, history: &[u8]) -> Vec<u8> {
     let dir = TestDir::new();

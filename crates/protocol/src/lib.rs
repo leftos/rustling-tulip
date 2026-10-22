@@ -2140,6 +2140,11 @@ pub enum ClientMessage {
     SendInput {
         session_id: String,
         data_b64: String,
+        /// True for bytes the client's terminal sent on its own: replies to the
+        /// child's queries, mouse-wheel reports and the arrow keys the wheel
+        /// sends on an alternate screen. They never answer a hook prompt.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        automatic: bool,
     },
     Resize {
         session_id: String,
@@ -5448,6 +5453,50 @@ mod tests {
             assert_eq!(port, 8787);
             assert_eq!(back_state, state, "{json}");
         }
+    }
+
+    #[test]
+    fn send_input_omits_automatic_when_false_and_defaults_it_when_absent() {
+        let owner = ClientMessage::SendInput {
+            session_id: "s1".to_owned(),
+            data_b64: "eQ==".to_owned(),
+            automatic: false,
+        };
+        let json = serde_json::to_value(&owner).expect("encodes");
+        assert!(json.get("automatic").is_none(), "{json}");
+
+        let absent: ClientMessage =
+            serde_json::from_str(r#"{"type":"send_input","session_id":"s1","data_b64":"eQ=="}"#)
+                .expect("a message without the flag decodes");
+        assert!(
+            matches!(
+                absent,
+                ClientMessage::SendInput {
+                    automatic: false,
+                    ..
+                }
+            ),
+            "an absent flag is owner input"
+        );
+
+        let automatic = ClientMessage::SendInput {
+            session_id: "s1".to_owned(),
+            data_b64: "eQ==".to_owned(),
+            automatic: true,
+        };
+        let json = serde_json::to_string(&automatic).expect("encodes");
+        assert!(json.contains(r#""automatic":true"#), "{json}");
+        let back: ClientMessage = serde_json::from_str(&json).expect("round-trips");
+        assert!(
+            matches!(
+                back,
+                ClientMessage::SendInput {
+                    automatic: true,
+                    ..
+                }
+            ),
+            "{json}"
+        );
     }
 
     #[test]

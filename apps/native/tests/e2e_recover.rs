@@ -453,6 +453,7 @@ fn wait_scrollback_contains(
             client.send(ClientMessage::SendInput {
                 session_id: session_id.to_owned(),
                 data_b64: base64::engine::general_purpose::STANDARD.encode(CURSOR_AT_ORIGIN),
+                automatic: true,
             });
             answered = true;
         }
@@ -672,6 +673,7 @@ fn type_line(client: &LiveClient, session_id: &str, line: &str) {
     client.send(ClientMessage::SendInput {
         session_id: session_id.to_owned(),
         data_b64: base64::engine::general_purpose::STANDARD.encode(format!("{line}\r")),
+        automatic: false,
     });
 }
 

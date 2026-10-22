@@ -781,7 +781,7 @@ impl TerminalPane {
     fn service_term(&mut self, cx: &mut Context<Self>) {
         let replies = self.term.take_replies();
         if self.answers_queries && !replies.is_empty() {
-            self.send_to_child(&replies);
+            self.send_to_child(&replies, true);
         }
         let copies = self.term.take_copies();
         if self.answers_queries {
@@ -851,7 +851,7 @@ impl TerminalPane {
     /// Sends what the user typed or pasted, and scrolls to the live screen.
     /// Returns the session it went to, or `None` when it sent nothing.
     fn send_input(&mut self, bytes: &[u8]) -> Option<String> {
-        let sent_to = self.send_to_child(bytes);
+        let sent_to = self.send_to_child(bytes, false);
         if sent_to.is_some() {
             self.term.scroll_to_bottom();
         }
@@ -859,9 +859,9 @@ impl TerminalPane {
     }
 
     /// Sends `bytes` as input unless nothing is attached or the session has
-    /// stopped. Returns the session it sent to, or `None` when it sent
-    /// nothing.
-    fn send_to_child(&self, bytes: &[u8]) -> Option<String> {
+    /// stopped, flagged `automatic` for bytes the terminal sent on its own.
+    /// Returns the session it sent to, or `None` when it sent nothing.
+    fn send_to_child(&self, bytes: &[u8], automatic: bool) -> Option<String> {
         let session_id = self.attachment.session_id.clone()?;
         if !self.session.is_some_and(SessionContext::accepts_input) {
             return None;
@@ -869,6 +869,7 @@ impl TerminalPane {
         self.send(ClientMessage::SendInput {
             session_id: session_id.clone(),
             data_b64: B64.encode(bytes),
+            automatic,
         });
         Some(session_id)
     }
@@ -1023,10 +1024,10 @@ impl TerminalPane {
                 mouse::Button::WheelDown
             };
             for _ in 0..lines.unsigned_abs() {
-                self.report(button, mouse::ReportKind::Press, modifiers, cell);
+                self.report(button, mouse::ReportKind::Press, modifiers, cell, true);
             }
         } else if mouse::wheel_sends_arrows(mode) {
-            self.send_to_child(&mouse::wheel_arrows(lines, self.term.app_cursor()));
+            self.send_to_child(&mouse::wheel_arrows(lines, self.term.app_cursor()), true);
         } else {
             self.term.scroll(lines);
         }
@@ -1039,12 +1040,16 @@ impl TerminalPane {
         Some(ViewportCell::at(x, y, cell, self.term.size()))
     }
 
+    /// Sends the encoded report, flagged `automatic` for a report the terminal
+    /// produced on its own — a wheel report or a motion report — rather than
+    /// one the owner clicked.
     fn report(
         &self,
         button: mouse::Button,
         kind: mouse::ReportKind,
         modifiers: Modifiers,
         cell: ViewportCell,
+        automatic: bool,
     ) {
         let report = mouse::Report {
             button,
@@ -1057,7 +1062,7 @@ impl TerminalPane {
             cell,
         };
         let encoding = mouse::Encoding::of(self.term.mode());
-        self.send_to_child(&mouse::encode(&report, encoding));
+        self.send_to_child(&mouse::encode(&report, encoding), automatic);
     }
 
     fn on_mouse_down(
@@ -1101,7 +1106,13 @@ impl TerminalPane {
             .down(button, self.term.mode(), event.modifiers.shift)
         {
             Some(Gesture::Report) => {
-                self.report(button, mouse::ReportKind::Press, event.modifiers, cell);
+                self.report(
+                    button,
+                    mouse::ReportKind::Press,
+                    event.modifiers,
+                    cell,
+                    false,
+                );
             }
             Some(Gesture::Select) => {
                 let point = cell.to_point(self.term.display_offset());
@@ -1258,7 +1269,7 @@ impl TerminalPane {
             return;
         }
         self.last_motion = Some((cell.row, cell.col));
-        self.report(button, mouse::ReportKind::Motion, modifiers, cell);
+        self.report(button, mouse::ReportKind::Motion, modifiers, cell, true);
     }
 
     /// Ends a reported press, or a selection: a click that selected nothing
@@ -1270,7 +1281,13 @@ impl TerminalPane {
         match self.tracker.up(button) {
             Some(Gesture::Report) => {
                 if let Some(cell) = self.cell_at(event.position) {
-                    self.report(button, mouse::ReportKind::Release, event.modifiers, cell);
+                    self.report(
+                        button,
+                        mouse::ReportKind::Release,
+                        event.modifiers,
+                        cell,
+                        false,
+                    );
                 }
                 return;
             }

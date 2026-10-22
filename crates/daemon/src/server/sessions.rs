@@ -133,6 +133,7 @@ pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> 
         ClientMessage::SendInput {
             session_id,
             data_b64,
+            automatic,
         } => {
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(data_b64.as_bytes())
@@ -147,19 +148,25 @@ pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> 
                 // the clear share one registry update, so a hook event cannot
                 // slip between them; a session without hooks is untouched,
                 // and the bytes are forwarded outside the record lock.
-                hub.sessions.update_if_changed(&session_id, |rec| {
-                    if !rec.hook_driven
-                        || (rec.status != SessionStatus::AwaitingInput
-                            && rec.pending_input.is_none())
-                    {
-                        return false;
-                    }
-                    if rec.status == SessionStatus::AwaitingInput {
-                        rec.status = SessionStatus::Idle;
-                    }
-                    rec.pending_input = None;
-                    true
-                });
+                //
+                // Bytes the terminal sent on its own (replies to the child's
+                // queries, wheel reports) are not the owner answering, so they
+                // leave the prompt and its pending input alone.
+                if !automatic {
+                    hub.sessions.update_if_changed(&session_id, |rec| {
+                        if !rec.hook_driven
+                            || (rec.status != SessionStatus::AwaitingInput
+                                && rec.pending_input.is_none())
+                        {
+                            return false;
+                        }
+                        if rec.status == SessionStatus::AwaitingInput {
+                            rec.status = SessionStatus::Idle;
+                        }
+                        rec.pending_input = None;
+                        true
+                    });
+                }
                 if let Some(pty) = pty {
                     if let Some(tx) = notifier {
                         let _ = tx.send(bytes.len());
@@ -1176,6 +1183,7 @@ mod tests {
             ClientMessage::SendInput {
                 session_id: "s1".to_owned(),
                 data_b64,
+                automatic: false,
             },
         )
         .await;
@@ -1188,6 +1196,47 @@ mod tests {
         assert_eq!(
             snapshot.pending_input, None,
             "the pending prompt is cleared"
+        );
+    }
+
+    /// The terminal's own replies never answer a hook-reported prompt.
+    #[tokio::test]
+    async fn automatic_input_leaves_a_hook_prompt_pending() {
+        use crate::history::test_support::{fake_pty, insert_live, record};
+        let (hub, _scratch) = test_hub("automatic-input-keeps");
+        let (pty, _exit_tx) = fake_pty();
+        insert_live(
+            &hub.sessions,
+            &hub.dirs,
+            record("s1", SessionMode::Interactive),
+            &pty,
+        );
+        hub.sessions.update("s1", |rec| {
+            rec.hook_driven = true;
+            rec.status = SessionStatus::AwaitingInput;
+            rec.pending_input = Some(protocol::PendingInput::Other {
+                message: "approve?".to_owned(),
+            });
+        });
+        let data_b64 = base64::engine::general_purpose::STANDARD.encode(b"\x1b[12;1R");
+        dispatch_silently(
+            &hub,
+            ClientMessage::SendInput {
+                session_id: "s1".to_owned(),
+                data_b64,
+                automatic: true,
+            },
+        )
+        .await;
+        let snapshot = snapshot_of(&hub, "s1");
+        assert_eq!(
+            snapshot.status,
+            SessionStatus::AwaitingInput,
+            "a terminal reply does not answer the prompt"
+        );
+        assert!(
+            snapshot.pending_input.is_some(),
+            "the pending prompt survives a terminal reply"
         );
     }
 
@@ -1216,6 +1265,7 @@ mod tests {
             ClientMessage::SendInput {
                 session_id: "s1".to_owned(),
                 data_b64,
+                automatic: false,
             },
         )
         .await;
