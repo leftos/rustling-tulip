@@ -27,6 +27,8 @@ linear: rustling-tulip
 
 The goal is the first release as soon as possible; this overrides the user-level loop where they differ.
 
+- **No questions to the owner:** no `AskUserQuestion`, no interview, no decision round put to the owner, branch verdicts included. Every open decision, behaviour and look included, is the orchestrator's: settle it from the docs and code, record it with **settle** `--by orchestrator`, and keep going. The owner polishes once the release is a working daily driver.
+
 - **Per item:** the implementer's gates are `cargo fmt --all --check`, `cargo clippy` on the touched crates, and the item's own new or changed tests by name. No reached tests, no full suite, no load-burn, no `--slot critical`.
 - **Review:** one `code-review` pass per item. Only real bugs in the item's own change go back (one fix round); every other finding (hardening, style, coverage, behaviour not asked for) is dropped, not booked. Nits ride the next change touching their file.
 - **Full suite:** only at milestones: the end of a Release 1 milestone (or a wave), a push, a feature-branch merge and the release step. A red milestone run becomes the next item.
