@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tab Drag Mark</title>
+<style>
+  @font-face {
+    font-family: "Schibsted Grotesk";
+    font-weight: 400;
+    src: url("../../../../apps/native/assets/fonts/SchibstedGrotesk/SchibstedGrotesk-Regular.ttf") format("truetype");
+  }
+  @font-face {
+    font-family: "Schibsted Grotesk";
+    font-weight: 600;
+    src: url("../../../../apps/native/assets/fonts/SchibstedGrotesk/SchibstedGrotesk-SemiBold.ttf") format("truetype");
+  }
+  @font-face {
+    font-family: "Geist Mono";
+    font-weight: 400;
+    src: url("../../../../apps/native/assets/fonts/GeistMono/GeistMono-Regular.ttf") format("truetype");
+  }
+
+  /* Tokens from apps/native/src/palette.rs */
+  :root {
+    --ground: #111013;
+    --sunken: #0b0a0d;
+    --surface: #161519;
+    --raised: #1b1a1f;
+    --chip: #232129;
+    --hover: #2c2a33;
+    --line: #2a2830;
+    --line-strong: #3a3742;
+    --text: #ede9e4;
+    --text-2: #a7a2ad;
+    --subtle: #8c8794;
+    --accent: #f07a62;
+    --working: #6ca6ff;
+    color-scheme: dark;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--sunken);
+    color: var(--text);
+    font-family: "Schibsted Grotesk", system-ui, sans-serif;
+    font-size: 14px;
+    line-height: 1.45;
+  }
+  main { max-width: 1240px; margin: 0 auto; padding: 28px 16px 48px; }
+  h1 { font-size: 20px; font-weight: 600; margin: 0 0 6px; }
+  .lede { color: var(--text-2); margin: 0 0 4px; max-width: 900px; }
+  .order { color: var(--subtle); margin: 0 0 24px; font-size: 13px; }
+  .order b { color: var(--text); font-weight: 600; }
+
+  section.lane { margin: 0 0 28px; padding: 18px 18px 20px; background: #0f0e11; border: 1px solid var(--line); border-radius: 8px; }
+  section.lane h2 { font-size: 16px; font-weight: 600; margin: 0 0 2px; }
+  section.lane h2 .tag { display: inline-block; min-width: 22px; padding: 0 6px; margin-right: 8px; border-radius: 4px; background: var(--accent); color: #1c100d; text-align: center; }
+  section.lane p.how { color: var(--text-2); margin: 0 0 14px; font-size: 13px; }
+
+  .moments { display: grid; grid-template-columns: repeat(auto-fit, minmax(520px, 1fr)); gap: 18px; }
+  .moment h3 { font-size: 13px; font-weight: 600; margin: 0 0 8px; color: var(--text); }
+  .moment h3 span { color: var(--text-2); font-weight: 400; }
+  .result { margin: 8px 0 0; font-size: 12px; color: var(--subtle); }
+  .result b { color: var(--text-2); font-weight: 400; }
+
+  /* A window snippet: the tab strip with a little of the main area under it. */
+  .window { border: 1px solid var(--line-strong); border-radius: 6px; overflow: hidden; background: var(--ground); }
+  .below { height: 44px; background: var(--ground); }
+
+  /* The tab strip: apps/native/src/tab_bar.rs tab_bar() and tab_pill(). */
+  .strip {
+    display: flex; align-items: center; height: 38px;
+    background: var(--surface); border-bottom: 1px solid var(--line);
+    font-size: 12px; color: var(--text-2);
+    font-family: "Schibsted Grotesk", sans-serif;
+  }
+  .pill {
+    position: relative;
+    display: flex; align-items: center; gap: 8px; height: 100%;
+    padding: 0 12px 0 14px; border-right: 1px solid var(--line);
+    white-space: nowrap; flex: none;
+  }
+  .pill.active { background: var(--ground); color: var(--text); }
+  .pill .x { width: 16px; height: 16px; border-radius: 3px; display: flex; align-items: center; justify-content: center; flex: none; }
+  .pill .x svg { width: 12px; height: 12px; color: var(--subtle); }
+  .badge {
+    display: flex; align-items: center; gap: 4px; flex: none;
+    height: 18px; padding: 0 6px; border-radius: 9px; background: var(--chip);
+    font-family: "Geist Mono", monospace; font-size: 10.5px; color: var(--subtle);
+  }
+  .badge.busy { color: var(--working); }
+  .badge svg { width: 9px; height: 9px; }
+  .newtab { width: 38px; height: 100%; display: flex; align-items: center; justify-content: center; flex: none; }
+  .newtab svg { width: 15px; height: 15px; color: var(--text-2); }
+
+  /* Drag marks. */
+  .pill.dimmed { opacity: 0.4; }
+  .gap { height: 100%; flex: none; border-right: 1px solid var(--line); }
+  .gap .pill { visibility: hidden; border-right: 0; }
+  .bar {
+    position: absolute; top: 5px; bottom: 5px; width: 2px; border-radius: 1px;
+    background: var(--accent); z-index: 5;
+  }
+  .bar.before { left: -1.5px; }
+  .bar.after { right: -1.5px; }
+
+  /* The cursor and what follows it, placed inside the "tests" pill. */
+  .cursor { position: absolute; top: 27px; width: 0; height: 0; z-index: 20; }
+  .cursor.left { left: 25%; }
+  .cursor.right { left: 75%; }
+  .cursor svg.arrow { position: absolute; left: -1px; top: -1px; width: 14px; height: 20px; z-index: 22; filter: drop-shadow(0 1px 1px rgba(0,0,0,.6)); }
+  .ghost {
+    position: absolute; z-index: 21; pointer-events: none;
+    display: flex; align-items: center; gap: 8px; white-space: nowrap;
+    color: var(--text); background: var(--raised);
+    border: 1px solid var(--line-strong); border-radius: 4px;
+    box-shadow: 0 6px 16px rgba(0,0,0,.55);
+  }
+  .ghost.small { left: 10px; top: 14px; height: 26px; padding: 0 10px 0 10px; font-size: 11px; opacity: 0.85; }
+  .ghost.small .badge { height: 15px; font-size: 9.5px; padding: 0 5px; }
+  .ghost.full { left: -18px; top: 12px; height: 38px; padding: 0 12px 0 14px; font-size: 12px; opacity: 0.92; }
+
+  .real img { display: block; max-width: 100%; height: auto; }
+  .real .cap { font-size: 12px; color: var(--subtle); margin: 8px 0 0; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Where will the dragged tab land?</h1>
+  <p class="lede">RT-231 (P5.3, tab strip drag): while a tab pill is dragged along the tab strip, how does the strip show the slot it will drop into? Three ways, each shown at two moments with the cursor over the "tests" pill. Every strip below is rebuilt in HTML from the client's own values (font, sizes, colours); only the top one is a real capture.</p>
+  <p class="order">Before the drag the tabs run <b>api · logs · main · tests · docs</b>, with "main" shown. The user has picked up <b>logs</b> and is dragging it right, past "main", onto "tests".</p>
+
+  <section class="lane real">
+    <h2>Today (no drag)</h2>
+    <p class="how">The real tab strip from <code>rt.ps1 native-shot main</code>: "tulip" is the shown tab, "yaat" is not.</p>
+    <img src="real-strip.png" alt="The real tab strip of the native client with two tabs, tulip and yaat">
+  </section>
+
+  <div id="lanes"></div>
+</main>
+
+<script>
+  const X_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M6 6l12 12"/><path d="M18 6L6 18"/></svg>';
+  const PLUS_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>';
+  const WORK_GLYPH = '<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="6" cy="6" r="5" stroke-opacity="0.3"/><path d="M6 1a5 5 0 0 1 5 5"/><circle cx="6" cy="6" r="2" fill="currentColor" stroke="none"/></svg>';
+  const ARROW = '<svg class="arrow" viewBox="0 0 14 20"><path d="M1 1v15.5l3.8-3.6 2.6 5.9 2.6-1.1-2.6-5.8H13z" fill="#fff" stroke="#000" stroke-width="1.2" stroke-linejoin="round"/></svg>';
+
+  const TABS = {
+    api:   {},
+    logs:  { badge: [1, 2] },
+    main:  { badge: [0, 3], active: true },
+    tests: {},
+    docs:  {},
+  };
+
+  function badge(name) {
+    const b = TABS[name].badge;
+    if (!b) return '';
+    const busy = b[0] > 0;
+    return `<span class="badge${busy ? ' busy' : ''}">${busy ? WORK_GLYPH : ''}${b[0]}/${b[1]}</span>`;
+  }
+
+  function pill(name, extra = '', inner = '') {
+    const cls = ['pill'];
+    if (TABS[name].active) cls.push('active');
+    if (extra) cls.push(extra);
+    return `<div class="${cls.join(' ')}">${badge(name)}<span>${name}</span><span class="x">${X_ICON}</span>${inner}</div>`;
+  }
+
+  function ghost(kind) {
+    return `<div class="ghost ${kind}">${badge('logs')}<span>logs</span>${kind === 'full' ? `<span class="x">${X_ICON}</span>` : ''}</div>`;
+  }
+
+  function cursor(side, ghostKind) {
+    return `<div class="cursor ${side}">${ARROW}${ghostKind ? ghost(ghostKind) : ''}</div>`;
+  }
+
+  /* A strip for one lane and moment. side: "left" (before tests) or "right" (after tests). */
+  function strip(lane, side) {
+    const parts = [];
+    const bar = `<div class="bar ${side === 'left' ? 'before' : 'after'}"></div>`;
+    if (lane === 'B') {
+      const gap = `<div class="gap">${pill('logs')}</div>`;
+      parts.push(pill('api'), pill('main'));
+      if (side === 'left') parts.push(gap);
+      parts.push(pill('tests', '', cursor(side, 'full')));
+      if (side === 'right') parts.push(gap);
+      parts.push(pill('docs'));
+    } else {
+      const ghostKind = lane === 'A' ? 'small' : null;
+      parts.push(pill('api'), pill('logs', 'dimmed'), pill('main'));
+      parts.push(pill('tests', '', bar + cursor(side, ghostKind)));
+      parts.push(pill('docs'));
+    }
+    return `<div class="window"><div class="strip">${parts.join('')}<div class="newtab">${PLUS_ICON}</div></div><div class="below"></div></div>`;
+  }
+
+  const LANES = [
+    { id: 'A', title: 'Bar and a small ghost',
+      how: 'A 2 px accent bar stands at the edge where the tab will land. The dragged pill stays in its own slot at 40% opacity, and a small copy of it rides under the cursor.' },
+    { id: 'B', title: 'The strip opens a gap',
+      how: 'The dragged pill is lifted out, so its own slot closes up. The other pills slide apart to open a gap as wide as the dragged pill at the slot it will land in, and the full-size pill rides under the cursor.' },
+    { id: 'C', title: 'Bar only',
+      how: 'As A, but nothing follows the cursor: the dragged pill stays in its slot at 40% opacity, and the accent bar alone shows where it will land.' },
+  ];
+
+  const MOMENTS = [
+    { side: 'left', title: 'Cursor on the left half of "tests"', lands: 'lands before "tests"', result: 'api · main · logs · tests · docs' },
+    { side: 'right', title: 'Cursor on the right half of "tests"', lands: 'lands after "tests"', result: 'api · main · tests · logs · docs' },
+  ];
+
+  document.getElementById('lanes').innerHTML = LANES.map(l => `
+    <section class="lane">
+      <h2><span class="tag">${l.id}</span>${l.title}</h2>
+      <p class="how">${l.how}</p>
+      <div class="moments">
+        ${MOMENTS.map(m => `
+          <div class="moment">
+            <h3>${m.title} <span>— ${m.lands}</span></h3>
+            ${strip(l.id, m.side)}
+            <p class="result">Dropped here, the tabs become <b>${m.result}</b></p>
+          </div>`).join('')}
+      </div>
+    </section>`).join('');
+</script>
+</body>
+</html>
