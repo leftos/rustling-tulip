@@ -6,17 +6,18 @@
 
 ### M1 — Restructure: Claude and shells only (8/8 done)
 
-### M2 — Daily-driver fixes (18/22 done)
-- [ ] RT-231 P5.3: Tab strip drag · release vNext
-  - [/] RT-270 P5.3c: Touch the drop tab and swap panes atomically across tabs · release vNext
-- [!] RT-182 Replace the Tauri-era toasts with two notifications: Needs you and Finished · release vNext
-- [/] RT-84 Show a background state when a turn ends with subagents, shells or wakeups still running · release vNext
+### M2 — Daily-driver fixes (23/31 done)
+- [ ] RT-281 Take a Claude session's status from hooks and its screen, never from output silence · release vNext
+  - [ ] RT-283 SS.1: Keep a rendered screen per Claude session in the daemon · release vNext
+  - [ ] RT-284 SS.2: Read a Claude session's state from its screen with rules and fixtures · release vNext
+  - [ ] RT-285 SS.3: Replace the silence and volume status with the screen-driven write · release vNext
+  - [ ] RT-286 SS.4: Check a reattached session's restored status against its screen · release vNext
+  - [ ] RT-287 SS.5: End a plain shell's claude status when its Claude screen is gone · release vNext
+  - [ ] RT-288 SS.6: Paint Claude-shaped screens in fake-claude and drive the live tier by them · release vNext
+- [ ] RT-290 Run native-e2e and native-smoke's build and specs on one machine · release vNext
 
 ### M3 — Cutover and v0.1.0-alpha (2/3 done)
 - [ ] RT-247 Merge feat/remote-mode to main (#201) · release vNext
-
-### No milestone
-- [ ] RT-280 Update rustls-webpki and webpki-roots past RUSTSEC-2026-0381/0382 · release vNext
 
 ## Release 2 — Remote mode and the agent seam
 
@@ -255,3 +256,4 @@
 - [ ] RT-241 Order keep-awake's connect-time push after concurrent broadcasts
 - [ ] RT-263 Split RootView::on_key_capture under the 100-line limit
 - [ ] RT-279 Stop sending loopback bearer tokens in cleartext
+- [ ] RT-289 Classify a plain shell by its prompt at the cursor, not by output volume
