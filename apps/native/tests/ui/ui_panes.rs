@@ -1327,6 +1327,7 @@ fn layout_request_id(msg: &ClientMessage) -> Option<String> {
     match msg {
         ClientMessage::SplitPane { request_id, .. }
         | ClientMessage::MovePane { request_id, .. }
+        | ClientMessage::SwapPanes { request_id, .. }
         | ClientMessage::ExtractToNewTab { request_id, .. }
         | ClientMessage::ClosePane { request_id, .. } => request_id.clone(),
         _ => None,

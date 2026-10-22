@@ -65,21 +65,36 @@ pub struct PaneDrop {
     pub dst_tab_id: String,
     pub dst_pane_id: String,
     pub edge: PaneDropEdge,
+    /// Whether the destination tab counts as arranged by hand from then on: a
+    /// drop on a pane does, a pill drop or the menu's "Move to ▸ tab" does not.
+    pub touch: bool,
+    /// Whether the two panes exchange their sessions instead of one moving.
+    pub swap: bool,
     pub request_id: Option<String>,
     pub undo_label: &'static str,
 }
 
 impl PaneDrop {
-    /// The [`ClientMessage::MovePane`] the move sends.
+    /// The [`ClientMessage::SwapPanes`] a swap sends, or the
+    /// [`ClientMessage::MovePane`] a move sends.
     #[must_use]
     pub fn message(&self) -> ClientMessage {
+        if self.swap {
+            return ClientMessage::SwapPanes {
+                src_tab_id: self.src_tab_id.clone(),
+                src_pane_id: self.src_pane_id.clone(),
+                dst_tab_id: self.dst_tab_id.clone(),
+                dst_pane_id: self.dst_pane_id.clone(),
+                request_id: self.request_id.clone(),
+            };
+        }
         ClientMessage::MovePane {
             src_tab_id: self.src_tab_id.clone(),
             src_pane_id: self.src_pane_id.clone(),
             dst_tab_id: self.dst_tab_id.clone(),
             dst_pane_id: self.dst_pane_id.clone(),
             edge: self.edge,
-            touch: false,
+            touch: self.touch,
             request_id: self.request_id.clone(),
         }
     }
@@ -371,6 +386,19 @@ fn contains_pane(grid: &GridNode, pane_id: &str) -> bool {
     }
 }
 
+/// Whether the pane `pane_id` of `grid` shows a session.
+fn pane_is_bound(grid: &GridNode, pane_id: &str) -> bool {
+    match grid {
+        GridNode::Pane {
+            pane_id: id,
+            session_id,
+        } => id == pane_id && session_id.is_some(),
+        GridNode::Split { first, second, .. } => {
+            pane_is_bound(first, pane_id) || pane_is_bound(second, pane_id)
+        }
+    }
+}
+
 /// Whether `node` is the pane `pane_id`.
 fn is_pane(node: &GridNode, pane_id: &str) -> bool {
     matches!(node, GridNode::Pane { pane_id: id, .. } if id == pane_id)
@@ -409,10 +437,12 @@ fn drops_back_in_place(grid: &GridNode, src: &str, dst: &str, edge: PaneDropEdge
 /// The message `payload` dropped on `dst_pane` of `dst_tab` sends, with the
 /// undo label it records: none for a payload that is not a pane, a tab that is
 /// gone or has no grid (a diff tab), a pane either grid does not hold, a pane
-/// dropped on itself, a drop that would rebuild the tree it left — the
-/// daemon would clear the tab's picked layout for a move that changes nothing
-/// — and a centre drop in another tab, which the daemon would apply as an
-/// unbind of the destination pane's session until the cross-tab swap lands.
+/// dropped on itself, and a drop that would rebuild the tree it left — the
+/// daemon would clear the tab's picked layout for a move that changes nothing.
+/// An edge or centre drop onto a pane counts the destination tab as arranged
+/// by hand, and a centre drop in another tab counts both tabs; a centre drop
+/// in another tab swaps the two panes' sessions when the destination pane
+/// shows one, and moves the pane into the empty one when it does not.
 #[must_use]
 pub fn pane_drop(
     tabs: &[TabEntry],
@@ -437,15 +467,14 @@ pub fn pane_drop(
         return None;
     }
     let within_one_tab = src_tab_id == dst_tab;
-    if !within_one_tab && edge == PaneDropEdge::Replace {
-        return None;
-    }
     if within_one_tab
         && (src_pane_id == dst_pane || drops_back_in_place(src_grid, src_pane_id, dst_pane, edge))
     {
         return None;
     }
-    let undo_label = if within_one_tab && edge == PaneDropEdge::Replace {
+    let bound = pane_is_bound(dst_grid, dst_pane);
+    let swap = !within_one_tab && edge == PaneDropEdge::Replace && bound;
+    let undo_label = if edge == PaneDropEdge::Replace && bound {
         undo::SWAPPED_PANES
     } else {
         undo::MOVED_PANE
@@ -456,6 +485,8 @@ pub fn pane_drop(
         dst_tab_id: dst_tab.to_owned(),
         dst_pane_id: dst_pane.to_owned(),
         edge,
+        touch: true,
+        swap,
         request_id,
         undo_label,
     })
@@ -797,18 +828,96 @@ mod tests {
     }
 
     #[test]
-    fn cross_tab_centre_drop_is_refused() {
+    fn cross_tab_centre_drop_onto_a_bound_pane_swaps() {
         let tabs = tabs();
 
-        assert!(
-            dropped(&tabs, &drag("t1", "a"), "t2", "c", PaneDropEdge::Replace).is_none(),
-            "until the cross-tab swap lands, a centre drop in another tab would unbind the \
-             destination pane's session"
+        let drop = pane_drop(
+            &tabs,
+            &drag("t1", "a"),
+            "t2",
+            "c",
+            PaneDropEdge::Replace,
+            Some("r7".to_owned()),
+        )
+        .expect("a cross-tab centre drop onto a bound pane swaps the two sessions");
+        assert_eq!(drop.undo_label, undo::SWAPPED_PANES);
+        assert_eq!(
+            wire(&drop.message()),
+            json!({
+                "type": "swap_panes",
+                "src_tab_id": "t1",
+                "src_pane_id": "a",
+                "dst_tab_id": "t2",
+                "dst_pane_id": "c",
+                "request_id": "r7",
+            })
         );
         assert!(
             dropped(&tabs, &drag("t1", "a"), "t2", "c", PaneDropEdge::Right).is_some(),
             "an edge drop in another tab still moves the pane"
         );
+    }
+
+    #[test]
+    fn cross_tab_centre_drop_onto_an_empty_pane_moves_with_touch() {
+        let tabs = vec![
+            tab(
+                "t1",
+                &split(H, 0.5, pane("a", Some("s1")), pane("b", Some("s2"))),
+            ),
+            tab("t2", &split(H, 0.5, pane("c", Some("s3")), pane("d", None))),
+        ];
+
+        let drop = dropped(&tabs, &drag("t1", "a"), "t2", "d", PaneDropEdge::Replace)
+            .expect("a cross-tab centre drop onto an empty pane moves the pane");
+        assert_eq!(drop.undo_label, undo::MOVED_PANE);
+        assert!(
+            matches!(
+                &drop.message(),
+                ClientMessage::MovePane {
+                    edge: PaneDropEdge::Replace,
+                    touch: true,
+                    ..
+                }
+            ),
+            "{:?}",
+            drop.message()
+        );
+    }
+
+    #[test]
+    fn same_tab_centre_drop_onto_an_empty_pane_is_labelled_moved() {
+        let tabs = vec![tab(
+            "t1",
+            &split(H, 0.5, pane("a", Some("s1")), pane("b", None)),
+        )];
+
+        let drop = dropped(&tabs, &drag("t1", "a"), "t1", "b", PaneDropEdge::Replace)
+            .expect("a same-tab centre drop onto an empty pane");
+        assert_eq!(
+            drop.undo_label,
+            undo::MOVED_PANE,
+            "only a pane that shows a session swaps"
+        );
+    }
+
+    #[test]
+    fn edge_and_centre_drops_set_touch() {
+        let tabs = tabs();
+
+        for (dst_tab, dst_pane, edge) in [
+            ("t1", "b", PaneDropEdge::Right),
+            ("t1", "b", PaneDropEdge::Replace),
+            ("t2", "c", PaneDropEdge::Right),
+        ] {
+            let drop =
+                dropped(&tabs, &drag("t1", "a"), dst_tab, dst_pane, edge).expect("the drop lands");
+            assert!(
+                matches!(&drop.message(), ClientMessage::MovePane { touch: true, .. }),
+                "a {edge:?} drop onto {dst_pane} touches: {:?}",
+                drop.message()
+            );
+        }
     }
 
     #[test]
@@ -1163,6 +1272,7 @@ mod tests {
                 "dst_tab_id": "t2",
                 "dst_pane_id": "c",
                 "edge": "left",
+                "touch": true,
                 "request_id": "r7",
             })
         );

@@ -228,6 +228,8 @@ impl RootView {
                 dst_tab_id: dst_tab_id.to_owned(),
                 dst_pane_id,
                 edge,
+                touch: false,
+                swap: false,
                 request_id: Some(crate::new_request_id()),
                 undo_label: undo::MOVED_PANE,
             },
@@ -237,8 +239,11 @@ impl RootView {
 
     /// Sends a pane move, a menu's or a drop's: both tabs as they stand go
     /// on the undo shelf under the move's label, a source tab the move
-    /// leaves with no pane counts as closing until the daemon answers, and
-    /// the request is noted as in flight.
+    /// leaves with no pane counts as closing until the daemon answers (a
+    /// swap empties no tab), and the request is noted as in flight. A swap
+    /// gives the keyboard to the destination pane, which comes to show the
+    /// dragged session, and its undo snapshots each tab on the pane holding
+    /// the session that tab put there.
     pub(crate) fn send_pane_move(&mut self, drop: &PaneDrop, cx: &mut Context<Self>) {
         let across_tabs = drop.dst_tab_id != drop.src_tab_id;
         let mut tab_ids = vec![drop.src_tab_id.as_str()];
@@ -247,16 +252,26 @@ impl RootView {
         }
         let snapshots = tab_ids
             .into_iter()
-            .filter_map(|id| self.tab_snapshot(id, Some(&drop.src_pane_id)))
+            .filter_map(|id| {
+                let focus = if drop.swap && id == drop.dst_tab_id {
+                    drop.dst_pane_id.as_str()
+                } else {
+                    drop.src_pane_id.as_str()
+                };
+                self.tab_snapshot(id, Some(focus))
+            })
             .collect();
         self.record_undo(drop.undo_label.to_owned(), snapshots, cx);
-        if across_tabs {
+        if across_tabs && !drop.swap {
             self.tabs
                 .mark_closing_if_last_pane(&drop.src_tab_id, drop.request_id.as_deref());
         }
         let message = drop.message();
         self.tabs.note_layout_request(&message);
         self.send(message);
+        if drop.swap {
+            self.tabs.focus_pane(&drop.dst_tab_id, &drop.dst_pane_id);
+        }
     }
 
     /// Runs a press on a row of the open empty-pane menu.

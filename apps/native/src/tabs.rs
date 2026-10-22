@@ -1251,12 +1251,12 @@ impl TabsModel {
         }
     }
 
-    /// Records a split, move, extract or snapshot restore this client is
-    /// sending as in flight for each tab it names, until a reply about that
-    /// tab answers it. A move of a pane onto itself gets no reply, so it is
-    /// not recorded; every other message is ignored. A snapshot restore
-    /// carries no id: its tab's update answers a success, and a refusal
-    /// means the tab is gone, which its `TabRemoved` reports.
+    /// Records a split, move, swap, extract or snapshot restore this client
+    /// is sending as in flight for each tab it names, until a reply about
+    /// that tab answers it. A move or swap of a pane with itself gets no
+    /// reply, so it is not recorded; every other message is ignored. A
+    /// snapshot restore carries no id: its tab's update answers a success,
+    /// and a refusal means the tab is gone, which its `TabRemoved` reports.
     pub fn note_layout_request(&mut self, msg: &ClientMessage) {
         let (tab_ids, request_id) = match msg {
             ClientMessage::SplitPane {
@@ -1272,6 +1272,22 @@ impl TabsModel {
                 ..
             } => {
                 if src_pane_id == dst_pane_id {
+                    return;
+                }
+                let mut tab_ids = vec![src_tab_id];
+                if dst_tab_id != src_tab_id {
+                    tab_ids.push(dst_tab_id);
+                }
+                (tab_ids, request_id.as_ref())
+            }
+            ClientMessage::SwapPanes {
+                src_tab_id,
+                src_pane_id,
+                dst_tab_id,
+                dst_pane_id,
+                request_id,
+            } => {
+                if src_tab_id == dst_tab_id && src_pane_id == dst_pane_id {
                     return;
                 }
                 let mut tab_ids = vec![src_tab_id];
@@ -2256,6 +2272,27 @@ pub(crate) mod tests {
         assert!(!marks(&mut model, "t2"), "the destination");
         model.note_layout_request(&move_request(("t3", "c"), ("t3", "c"), "m2"));
         assert!(marks(&mut model, "t3"), "a move onto itself is no request");
+    }
+
+    fn swap_request(src: (&str, &str), dst: (&str, &str), request_id: &str) -> ClientMessage {
+        ClientMessage::SwapPanes {
+            src_tab_id: src.0.to_owned(),
+            src_pane_id: src.1.to_owned(),
+            dst_tab_id: dst.0.to_owned(),
+            dst_pane_id: dst.1.to_owned(),
+            request_id: Some(request_id.to_owned()),
+        }
+    }
+
+    #[test]
+    fn a_swap_in_flight_marks_both_tabs_and_a_failed_swap_clears_it() {
+        let mut model = model_with(&[tab("t1", &pane("a", None)), tab("t2", &pane("b", None))]);
+        model.note_layout_request(&swap_request(("t1", "a"), ("t2", "b"), "w1"));
+        assert!(!marks(&mut model, "t1"), "the source");
+        assert!(!marks(&mut model, "t2"), "the destination");
+        model.fail_layout_request("w1");
+        assert!(marks(&mut model, "t1"), "the refused swap changes nothing");
+        assert!(marks(&mut model, "t2"));
     }
 
     #[test]

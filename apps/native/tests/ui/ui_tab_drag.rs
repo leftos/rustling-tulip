@@ -115,6 +115,12 @@ fn undo_messages(h: &mut Harness) -> Vec<String> {
     })
 }
 
+/// The id of the newest undo entry.
+fn undo_id(h: &mut Harness) -> u64 {
+    h.root(|root, _| root.undo_entries().first().map(|entry| entry.id))
+        .expect("an undo entry")
+}
+
 /// The pane the drop overlay is drawn on, and the edge it shows.
 fn overlay(h: &mut Harness) -> Option<(String, PaneDropEdge)> {
     h.root(RootView::pane_drop_overlay)
@@ -423,13 +429,14 @@ fn pane_dropped_on_a_pill_moves_it_balanced_with_undo(cx: &mut TestAppContext) {
                 dst_tab_id,
                 dst_pane_id,
                 edge,
+                touch,
                 request_id: Some(_),
-                ..
             }] if src_tab_id == "t1"
                 && src_pane_id == "p1"
                 && dst_tab_id == "t2"
                 && dst_pane_id == "p3"
                 && (*edge == PaneDropEdge::Right || *edge == PaneDropEdge::Bottom)
+                && !*touch
         ),
         "t2's two panes are equal, so the balanced target takes the first, p3, and splits it \
          across its longer side: sent {sent:?}"
@@ -523,8 +530,8 @@ fn cross_tab_edge_drop_sends_move_pane(cx: &mut TestAppContext) {
                 dst_tab_id,
                 dst_pane_id,
                 edge: PaneDropEdge::Right,
+                touch: true,
                 request_id: Some(_),
-                ..
             }] if src_tab_id == "t1"
                 && src_pane_id == "p1"
                 && dst_tab_id == "t2"
@@ -536,7 +543,7 @@ fn cross_tab_edge_drop_sends_move_pane(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn cross_tab_centre_drop_is_refused(cx: &mut TestAppContext) {
+fn cross_tab_centre_drop_sends_swap_panes_with_undo(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &pane_tabs());
     h.sent();
@@ -549,13 +556,161 @@ fn cross_tab_centre_drop_is_refused(cx: &mut TestAppContext) {
     h.drag_to(centre);
     assert_eq!(
         overlay(&mut h),
-        None,
-        "until the cross-tab swap lands, a centre drop in another tab would unbind p4's session"
+        Some(("p4".to_owned(), PaneDropEdge::Replace)),
+        "the centre of another tab's pane takes the drop"
     );
 
     h.release(centre);
-    assert!(moves(&mut h).is_empty(), "no move is sent");
-    assert_eq!(undo_messages(&mut h), Vec::<String>::new());
+
+    let sent = h.sent();
+    let swaps: Vec<&ClientMessage> = sent
+        .iter()
+        .filter(|msg| matches!(msg, ClientMessage::SwapPanes { .. }))
+        .collect();
+    assert!(
+        matches!(
+            swaps.as_slice(),
+            [ClientMessage::SwapPanes {
+                src_tab_id,
+                src_pane_id,
+                dst_tab_id,
+                dst_pane_id,
+                request_id: Some(_),
+            }] if src_tab_id == "t1"
+                && src_pane_id == "p1"
+                && dst_tab_id == "t2"
+                && dst_pane_id == "p4"
+        ),
+        "a cross-tab centre drop swaps the two panes' sessions: {sent:?}"
+    );
+    assert!(
+        !sent
+            .iter()
+            .any(|msg| matches!(msg, ClientMessage::MovePane { .. })),
+        "a swap is not also a move: {sent:?}"
+    );
+    assert_eq!(undo_messages(&mut h), ["Swapped panes"]);
+
+    let focus_panes: Vec<(String, Option<String>)> = h.root(|root, _| {
+        root.undo_entries()
+            .first()
+            .map(|entry| {
+                entry
+                    .snapshots
+                    .iter()
+                    .map(|snapshot| (snapshot.tab.id.clone(), snapshot.focus_pane.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    });
+    assert_eq!(
+        focus_panes,
+        [
+            ("t1".to_owned(), Some("p1".to_owned())),
+            ("t2".to_owned(), Some("p4".to_owned())),
+        ],
+        "each tab comes back focused on the pane its snapshot puts there"
+    );
+
+    let id = undo_id(&mut h);
+    h.click_on(&format!("undo-action-{id}"));
+    let restores = h.sent();
+    assert!(
+        matches!(
+            restores.as_slice(),
+            [ClientMessage::RestoreTabSnapshot { tab: first },
+             ClientMessage::RestoreTabSnapshot { tab: second }]
+            if first.id == "t1" && second.id == "t2"
+        ),
+        "one snapshot goes back per tab: {restores:?}"
+    );
+}
+
+#[gpui::test]
+fn a_cross_tab_swap_focuses_the_destination_pane(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &pane_tabs());
+    h.sent();
+    let from = header_point(&mut h, "p1");
+    let over = on_pill(&mut h, "t2", 0.5);
+    h.start_drag(from);
+    h.drag_to(over);
+    let centre = at(&mut h, "p4", 0.5, 0.5);
+    h.drag_to(centre);
+
+    h.release(centre);
+
+    assert_eq!(
+        h.root(|root, _| root.focused_pane()),
+        Some("p4".to_owned()),
+        "the swapped-in session takes the keyboard in its new pane"
+    );
+}
+
+/// Tabs `t1` (one pane) and `t2` (`p3` beside `p4`), every pane bound.
+fn one_pane_beside_two() -> Fixture {
+    Fixture {
+        sessions: ["s1", "s3", "s4"]
+            .iter()
+            .map(|id| session(id).build())
+            .collect(),
+        tabs: vec![
+            tab("t1", &pane("p1", Some("s1"))),
+            tab(
+                "t2",
+                &split(
+                    SplitDirection::Horizontal,
+                    pane("p3", Some("s3")),
+                    pane("p4", Some("s4")),
+                ),
+            ),
+        ],
+        ..Fixture::default()
+    }
+}
+
+/// The id the swap among `sent` carries.
+fn swap_request_id(sent: &[ClientMessage]) -> Option<String> {
+    sent.iter().find_map(|msg| match msg {
+        ClientMessage::SwapPanes { request_id, .. } => request_id.clone(),
+        _ => None,
+    })
+}
+
+#[gpui::test]
+fn a_refused_swap_clears_the_in_flight_mark(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &one_pane_beside_two());
+    h.sent();
+    let from = header_point(&mut h, "p1");
+    let over = on_pill(&mut h, "t2", 0.5);
+    h.start_drag(from);
+    h.drag_to(over);
+    let centre = at(&mut h, "p4", 0.5, 0.5);
+    h.drag_to(centre);
+    h.release(centre);
+
+    let sent = h.sent();
+    let request_id = swap_request_id(&sent).expect("the swap carries a request id");
+    let id = undo_id(&mut h);
+
+    h.send(DaemonMessage::Error {
+        message: "refused".to_owned(),
+        request_id: Some(request_id),
+    });
+    h.sent();
+    h.click_on(&format!("undo-action-{id}"));
+    let restores = h.sent();
+    assert!(
+        matches!(
+            restores.as_slice(),
+            [ClientMessage::RestoreTabSnapshot { tab: first },
+             ClientMessage::RestoreTabSnapshot { tab: second }]
+            if first.id == "t1" && second.id == "t2"
+        ),
+        "a swap empties no tab, so neither is closing and both are replaced in place: \
+         {restores:?}"
+    );
 }
 
 #[gpui::test]
