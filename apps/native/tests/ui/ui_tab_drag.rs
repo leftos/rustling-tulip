@@ -142,7 +142,7 @@ fn reorders(h: &mut Harness) -> Vec<Vec<String>> {
     h.sent()
         .into_iter()
         .filter_map(|msg| match msg {
-            ClientMessage::ReorderTabs { ordered_ids } => Some(ordered_ids),
+            ClientMessage::ReorderTabs { ordered_ids, .. } => Some(ordered_ids),
             _ => None,
         })
         .collect()
@@ -424,6 +424,7 @@ fn pane_dropped_on_a_pill_moves_it_balanced_with_undo(cx: &mut TestAppContext) {
                 dst_pane_id,
                 edge,
                 request_id: Some(_),
+                ..
             }] if src_tab_id == "t1"
                 && src_pane_id == "p1"
                 && dst_tab_id == "t2"
@@ -523,6 +524,7 @@ fn cross_tab_edge_drop_sends_move_pane(cx: &mut TestAppContext) {
                 dst_pane_id,
                 edge: PaneDropEdge::Right,
                 request_id: Some(_),
+                ..
             }] if src_tab_id == "t1"
                 && src_pane_id == "p1"
                 && dst_tab_id == "t2"

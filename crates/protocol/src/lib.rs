@@ -2588,6 +2588,9 @@ pub enum ClientMessage {
     /// set; mismatches are rejected.
     ReorderTabs {
         ordered_ids: Vec<String>,
+        /// Echoed on the [`DaemonMessage::Error`] that refuses it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
     /// Reply to [`DaemonMessage::LayoutInitRequired`]: the client picked how to
     /// seed its brand-new per-client layout. The daemon creates the layout for
@@ -2658,6 +2661,26 @@ pub enum ClientMessage {
         dst_tab_id: String,
         dst_pane_id: String,
         edge: PaneDropEdge,
+        /// Set by an edge or centre drop on a pane: the destination tab counts
+        /// as arranged by hand, so later pane changes no longer rebuild its
+        /// picked layout. A pill drop leaves it false.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        touch: bool,
+        /// Echoed on the [`DaemonMessage::Error`] that refuses it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    /// Exchange the sessions of two panes, in one tab or across two. Both
+    /// panes keep their ids and both tabs keep their topology; both tabs are
+    /// treated as arranged by hand. A swap of a pane with itself is a silent
+    /// no-op; an unknown tab or pane, or a diff tab, is refused and changes
+    /// nothing. A refused swap is answered with [`DaemonMessage::Error`]
+    /// carrying `request_id`.
+    SwapPanes {
+        src_tab_id: String,
+        src_pane_id: String,
+        dst_tab_id: String,
+        dst_pane_id: String,
         /// Echoed on the [`DaemonMessage::Error`] that refuses it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
@@ -4122,8 +4145,8 @@ mod tests {
         ));
     }
 
-    /// The four tab-layout requests, each carrying `request_id`.
-    fn tab_layout_requests(request_id: Option<&str>) -> [ClientMessage; 5] {
+    /// The tab-layout requests, each carrying `request_id`.
+    fn tab_layout_requests(request_id: Option<&str>) -> [ClientMessage; 7] {
         let request_id = request_id.map(str::to_owned);
         [
             ClientMessage::SplitPane {
@@ -4151,6 +4174,18 @@ mod tests {
                 dst_tab_id: "t2".to_owned(),
                 dst_pane_id: "p2".to_owned(),
                 edge: PaneDropEdge::Replace,
+                touch: false,
+                request_id: request_id.clone(),
+            },
+            ClientMessage::SwapPanes {
+                src_tab_id: "t1".to_owned(),
+                src_pane_id: "p1".to_owned(),
+                dst_tab_id: "t2".to_owned(),
+                dst_pane_id: "p2".to_owned(),
+                request_id: request_id.clone(),
+            },
+            ClientMessage::ReorderTabs {
+                ordered_ids: vec!["t2".to_owned(), "t1".to_owned()],
                 request_id: request_id.clone(),
             },
             ClientMessage::ExtractToNewTab {
@@ -4169,6 +4204,8 @@ mod tests {
             | ClientMessage::CreateTab { request_id, .. }
             | ClientMessage::MergeTabs { request_id, .. }
             | ClientMessage::MovePane { request_id, .. }
+            | ClientMessage::SwapPanes { request_id, .. }
+            | ClientMessage::ReorderTabs { request_id, .. }
             | ClientMessage::ExtractToNewTab { request_id, .. } => request_id.as_deref(),
             other => panic!("not a tab-layout request: {other:?}"),
         }
@@ -4193,6 +4230,39 @@ mod tests {
             serde_json::from_str(r#"{"type":"create_tab","name":null,"initial_session_id":null}"#)
                 .expect("an older client's create_tab decodes");
         assert_eq!(tab_layout_request_id(&old), None);
+    }
+
+    #[test]
+    fn move_pane_touch_flag_is_optional_and_defaults_false() {
+        let decoded: ClientMessage = serde_json::from_str(
+            r#"{"type":"move_pane","src_tab_id":"t1","src_pane_id":"p1","dst_tab_id":"t2","dst_pane_id":"p2","edge":"right"}"#,
+        )
+        .expect("a move without touch decodes");
+        assert!(matches!(
+            decoded,
+            ClientMessage::MovePane { touch: false, .. }
+        ));
+
+        let mut msg = ClientMessage::MovePane {
+            src_tab_id: "t1".to_owned(),
+            src_pane_id: "p1".to_owned(),
+            dst_tab_id: "t2".to_owned(),
+            dst_pane_id: "p2".to_owned(),
+            edge: PaneDropEdge::Right,
+            touch: true,
+            request_id: None,
+        };
+        let json = serde_json::to_string(&msg).expect("serializes");
+        assert!(json.contains(r#""touch":true"#), "{json}");
+        let back: ClientMessage = serde_json::from_str(&json).expect("round-trips");
+        assert!(matches!(back, ClientMessage::MovePane { touch: true, .. }));
+
+        let ClientMessage::MovePane { touch, .. } = &mut msg else {
+            panic!("built a move_pane");
+        };
+        *touch = false;
+        let json = serde_json::to_string(&msg).expect("serializes");
+        assert!(!json.contains("touch"), "false is omitted: {json}");
     }
 
     #[test]

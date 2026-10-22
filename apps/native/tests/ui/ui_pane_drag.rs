@@ -136,6 +136,7 @@ fn assert_moved_onto(h: &mut Harness, dst: &str, edge: PaneDropEdge) {
                 dst_pane_id,
                 edge: sent_edge,
                 request_id: Some(_),
+                ..
             }] if src_tab_id == "t1"
                 && src_pane_id == "p1"
                 && dst_tab_id == "t1"
@@ -529,6 +530,7 @@ fn a_drop_in_another_tab_than_the_source_is_allowed(cx: &mut TestAppContext) {
                 dst_pane_id,
                 edge: PaneDropEdge::Right,
                 request_id: Some(_),
+                ..
             }] if src_tab_id == "t1"
                 && src_pane_id == "p1"
                 && dst_tab_id == "t2"

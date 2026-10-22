@@ -4,7 +4,7 @@ use super::git::repo_path_or_err;
 use super::{Hub, StateEvent, TabEvent};
 use crate::registry::{reorder_containers, set_session_order};
 use chrono::Utc;
-use protocol::{ClientMessage, DaemonMessage, InitLayoutKind, PaneDropEdge, TabContent, TabEntry};
+use protocol::{ClientMessage, DaemonMessage, InitLayoutKind, TabContent, TabEntry};
 use tokio::sync::mpsc;
 use tracing::warn;
 
@@ -110,11 +110,17 @@ pub(super) fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow
             })??;
             hub.emit_tab(client_id, TabEvent::Updated(updated));
         }
-        ClientMessage::ReorderTabs { ordered_ids } => {
-            hub.state.mutate_client_layout(client_id, |tabs| {
+        ClientMessage::ReorderTabs {
+            ordered_ids,
+            request_id,
+        } => {
+            let reordered = hub.state.try_mutate_client_layout(client_id, |tabs| {
                 crate::tabs::reorder_tabs(tabs, &ordered_ids)
-            })??;
-            hub.emit_tab(client_id, TabEvent::Reordered(ordered_ids));
+            });
+            match reordered {
+                Ok(()) => hub.emit_tab(client_id, TabEvent::Reordered(ordered_ids)),
+                Err(err) => send_tab_failure(out_tx, &err, request_id),
+            }
         }
         ClientMessage::InitLayout { kind } => {
             // First-connect chooser reply: seed this client's brand-new layout
@@ -225,24 +231,54 @@ pub(super) fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow
             dst_tab_id,
             dst_pane_id,
             edge,
+            touch,
             request_id,
         } => {
             if src_pane_id == dst_pane_id {
                 // Self-move is a no-op; don't mutate or broadcast.
             } else {
-                let moved = move_pane(
-                    hub,
-                    client_id,
-                    &src_tab_id,
-                    &src_pane_id,
-                    &dst_tab_id,
-                    &dst_pane_id,
+                let mv = crate::tabs::PaneMove {
+                    src_tab_id: &src_tab_id,
+                    src_pane_id: &src_pane_id,
+                    dst_tab_id: &dst_tab_id,
+                    dst_pane_id: &dst_pane_id,
                     edge,
-                );
-                match moved {
+                    touch,
+                };
+                match move_pane(hub, client_id, &mv) {
                     Ok(events) => {
                         for event in events {
                             hub.emit_tab(client_id, event);
+                        }
+                    }
+                    Err(err) => send_tab_failure(out_tx, &err, request_id),
+                }
+            }
+        }
+        ClientMessage::SwapPanes {
+            src_tab_id,
+            src_pane_id,
+            dst_tab_id,
+            dst_pane_id,
+            request_id,
+        } => {
+            if src_tab_id == dst_tab_id && src_pane_id == dst_pane_id {
+                // A swap of a pane with itself is a no-op; don't mutate or
+                // broadcast.
+            } else {
+                let swap = crate::tabs::PaneSwap {
+                    src_tab_id: &src_tab_id,
+                    src_pane_id: &src_pane_id,
+                    dst_tab_id: &dst_tab_id,
+                    dst_pane_id: &dst_pane_id,
+                };
+                let swapped = hub.state.try_mutate_client_layout(client_id, |tabs| {
+                    crate::tabs::swap_panes(tabs, &swap)
+                });
+                match swapped {
+                    Ok(changed) => {
+                        for tab in changed {
+                            hub.emit_tab(client_id, moved_event(tab));
                         }
                     }
                     Err(err) => send_tab_failure(out_tx, &err, request_id),
@@ -340,29 +376,20 @@ pub(super) fn ensure_client_layout(hub: &Hub, client_id: &str, client_name: Opti
 fn move_pane(
     hub: &Hub,
     client_id: &str,
-    src_tab_id: &str,
-    src_pane_id: &str,
-    dst_tab_id: &str,
-    dst_pane_id: &str,
-    edge: PaneDropEdge,
+    mv: &crate::tabs::PaneMove<'_>,
 ) -> anyhow::Result<Vec<TabEvent>> {
-    let mv = crate::tabs::PaneMove {
-        src_tab_id,
-        src_pane_id,
-        dst_tab_id,
-        dst_pane_id,
-        edge,
-    };
     let moved = hub
         .state
-        .try_mutate_client_layout(client_id, |tabs| crate::tabs::move_pane(tabs, &mv))?;
-    Ok(moved
-        .into_iter()
-        .map(|tab| match tab {
-            crate::tabs::MovedTab::Updated(tab) => TabEvent::Updated(tab),
-            crate::tabs::MovedTab::Removed(id) => TabEvent::Removed(id),
-        })
-        .collect())
+        .try_mutate_client_layout(client_id, |tabs| crate::tabs::move_pane(tabs, mv))?;
+    Ok(moved.into_iter().map(moved_event).collect())
+}
+
+/// The broadcast event for one tab a move or a swap changed.
+fn moved_event(tab: crate::tabs::MovedTab) -> TabEvent {
+    match tab {
+        crate::tabs::MovedTab::Updated(tab) => TabEvent::Updated(tab),
+        crate::tabs::MovedTab::Removed(id) => TabEvent::Removed(id),
+    }
 }
 
 struct OpenDiffOutcome {
@@ -439,9 +466,9 @@ fn short_rev(rev: &str) -> &str {
 }
 
 /// Answers a failed tab-layout request (`CreateTab`, `SplitPane`, `ClosePane`,
-/// `MergeTabs`, `MovePane`, `ExtractToNewTab`) with an `Error` to this requester
-/// only, carrying the `request_id` it asked with so the client can drop what it
-/// armed for it.
+/// `MergeTabs`, `MovePane`, `SwapPanes`, `ReorderTabs`, `ExtractToNewTab`) with
+/// an `Error` to this requester only, carrying the `request_id` it asked with
+/// so the client can drop what it armed for it.
 fn send_tab_failure(
     out_tx: &mpsc::UnboundedSender<DaemonMessage>,
     err: &anyhow::Error,
@@ -550,11 +577,12 @@ mod tests {
     use super::*;
     use crate::server::connection::{AuthKind, FetchRegistry, PtyForwarders};
     use crate::server::dispatch;
-    use crate::server::test_support::{dispatch_one, seed_two_pane_layout, test_hub};
+    use crate::server::test_support::{dispatch_one, drain, seed_two_pane_layout, test_hub};
     use crate::state::AppState;
+    use protocol::PaneDropEdge;
     use std::collections::HashMap;
     use std::sync::Arc;
-    use tokio::sync::Mutex as AsyncMutex;
+    use tokio::sync::{Mutex as AsyncMutex, broadcast};
     fn merge_of_one(request_id: Option<&str>) -> ClientMessage {
         ClientMessage::MergeTabs {
             tab_ids: vec!["t1".to_string()],
@@ -607,6 +635,7 @@ mod tests {
                 dst_tab_id: "ghost-tab".to_string(),
                 dst_pane_id: "p2".to_string(),
                 edge: PaneDropEdge::Right,
+                touch: false,
                 request_id: Some("v1".to_string()),
             },
         )
@@ -736,11 +765,7 @@ mod tests {
         let err = move_pane(
             &hub,
             "c1",
-            "t1",
-            "p1",
-            "ghost-tab",
-            "p2",
-            PaneDropEdge::Right,
+            &move_of(("t1", "p1"), ("ghost-tab", "p2"), PaneDropEdge::Right),
         )
         .expect_err("the destination tab is unknown");
         assert!(
@@ -753,13 +778,255 @@ mod tests {
             "the extracted pane is back in its source tab"
         );
 
-        move_pane(&hub, "c1", "t1", "p1", "t1", "p1", PaneDropEdge::Right)
-            .expect_err("the pane cannot be inserted next to itself");
+        move_pane(
+            &hub,
+            "c1",
+            &move_of(("t1", "p1"), ("t1", "p1"), PaneDropEdge::Right),
+        )
+        .expect_err("the pane cannot be inserted next to itself");
         assert_eq!(
             hub.state.client_layout("c1"),
             before,
             "a failed same-tab move is rolled back too"
         );
+    }
+
+    /// One pane move, as a pill drop or a menu sends it.
+    fn move_of<'a>(
+        src: (&'a str, &'a str),
+        dst: (&'a str, &'a str),
+        edge: PaneDropEdge,
+    ) -> crate::tabs::PaneMove<'a> {
+        crate::tabs::PaneMove {
+            src_tab_id: src.0,
+            src_pane_id: src.1,
+            dst_tab_id: dst.0,
+            dst_pane_id: dst.1,
+            edge,
+            touch: false,
+        }
+    }
+
+    /// Dispatch `msg` as client `c1`, returning every message it sent to that
+    /// connection. A request that answers nothing on success leaves it empty.
+    async fn dispatch_all(hub: &Hub, msg: ClientMessage) -> Vec<DaemonMessage> {
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        let (file_tx, _file_rx) = mpsc::channel(1);
+        let pty_forwarders: PtyForwarders = Arc::new(AsyncMutex::new(HashMap::new()));
+        let fetches: FetchRegistry = Arc::new(AsyncMutex::new(HashMap::new()));
+        let local = AuthKind::Local;
+        let ctx = ConnCtx {
+            out_tx: &out_tx,
+            file_tx: &file_tx,
+            pty_forwarders: &pty_forwarders,
+            fetches: &fetches,
+            client_id: "c1",
+            client_name: None,
+            connection: 1,
+            auth: &local,
+        };
+        dispatch(hub, msg, &ctx).await.expect("dispatch succeeds");
+        drain(&mut out_rx)
+    }
+
+    /// Every tab event the hub emitted since `rx` was made.
+    fn take_tab_events(
+        rx: &mut broadcast::Receiver<crate::server::ScopedTabEvent>,
+    ) -> Vec<TabEvent> {
+        let mut out = Vec::new();
+        while let Ok(scoped) = rx.try_recv() {
+            out.push(scoped.event);
+        }
+        out
+    }
+
+    /// A tab whose panes, in order, are `panes`, each bound to `s-<pane id>`.
+    fn seeded_tab(id: &str, panes: &[&str]) -> TabEntry {
+        let bound: Vec<(String, Option<String>)> = panes
+            .iter()
+            .map(|pane| ((*pane).to_string(), Some(format!("s-{pane}"))))
+            .collect();
+        let grid = crate::tabs::build_balanced(&bound, protocol::SplitDirection::Horizontal)
+            .expect("panes build a grid");
+        TabEntry {
+            id: id.to_string(),
+            name: id.to_string(),
+            content: TabContent::Grid { grid },
+            created_at: Utc::now(),
+            picked_layout: None,
+        }
+    }
+
+    /// Tabs `t1` (panes `p1`, `p2`) and `t2` (panes `p3`, `p4`), all bound.
+    fn seed_bound_layout(hub: &Hub, client_id: &str) {
+        hub.state
+            .mutate_client_layout(client_id, |tabs| {
+                tabs.push(seeded_tab("t1", &["p1", "p2"]));
+                tabs.push(seeded_tab("t2", &["p3", "p4"]));
+            })
+            .expect("seed the client layout");
+    }
+
+    fn swap_of(src: (&str, &str), dst: (&str, &str), request_id: Option<&str>) -> ClientMessage {
+        ClientMessage::SwapPanes {
+            src_tab_id: src.0.to_string(),
+            src_pane_id: src.1.to_string(),
+            dst_tab_id: dst.0.to_string(),
+            dst_pane_id: dst.1.to_string(),
+            request_id: request_id.map(str::to_owned),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refused_swap_panes_echoes_its_request_id_and_rolls_back() {
+        let (hub, _scratch) = test_hub("swap-rid");
+        seed_bound_layout(&hub, "c1");
+        let before = hub.state.client_layout("c1");
+        let msg = dispatch_one(&hub, swap_of(("t1", "p1"), ("ghost-tab", "p2"), Some("w1"))).await;
+        assert!(
+            matches!(
+                &msg,
+                DaemonMessage::Error { message, request_id: Some(id) }
+                    if id == "w1" && message.contains("ghost-tab")
+            ),
+            "{msg:?}"
+        );
+        assert_eq!(
+            hub.state.client_layout("c1"),
+            before,
+            "the refused swap changed nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn swap_panes_emits_a_tab_update_for_each_tab() {
+        let (hub, _scratch) = test_hub("swap-events");
+        seed_bound_layout(&hub, "c1");
+        let mut events = hub.tab_events.subscribe();
+
+        let replies = dispatch_all(&hub, swap_of(("t1", "p1"), ("t2", "p3"), None)).await;
+        assert!(
+            replies.is_empty(),
+            "a swap answers nothing on success: {replies:?}"
+        );
+
+        let events = take_tab_events(&mut events);
+        let sessions = |tab: &TabEntry| crate::tabs::collect_panes(tab.grid().expect("a grid tab"));
+        let [TabEvent::Updated(src), TabEvent::Updated(dst)] = events.as_slice() else {
+            unreachable!("expected one update per tab, got {events:?}");
+        };
+        assert_eq!(src.id, "t1");
+        assert_eq!(
+            sessions(src),
+            vec![
+                ("p1".to_string(), Some("s-p3".to_string())),
+                ("p2".to_string(), Some("s-p2".to_string())),
+            ]
+        );
+        assert_eq!(dst.id, "t2");
+        assert_eq!(
+            sessions(dst),
+            vec![
+                ("p3".to_string(), Some("s-p1".to_string())),
+                ("p4".to_string(), Some("s-p4".to_string())),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_swap_of_a_pane_with_itself_is_a_silent_no_op() {
+        let (hub, _scratch) = test_hub("swap-self");
+        seed_bound_layout(&hub, "c1");
+        let before = hub.state.client_layout("c1");
+        let mut events = hub.tab_events.subscribe();
+
+        let replies = dispatch_all(&hub, swap_of(("t1", "p1"), ("t1", "p1"), None)).await;
+        assert!(replies.is_empty(), "{replies:?}");
+        assert!(
+            take_tab_events(&mut events).is_empty(),
+            "a swap with itself broadcasts nothing"
+        );
+        assert_eq!(hub.state.client_layout("c1"), before);
+    }
+
+    #[tokio::test]
+    async fn a_refused_reorder_tabs_echoes_its_request_id() {
+        let (hub, _scratch) = test_hub("reorder-rid");
+        seed_bound_layout(&hub, "c1");
+        let before = hub.state.client_layout("c1");
+        let msg = dispatch_one(
+            &hub,
+            ClientMessage::ReorderTabs {
+                ordered_ids: vec!["t2".to_string()],
+                request_id: Some("o1".to_string()),
+            },
+        )
+        .await;
+        assert!(
+            matches!(
+                &msg,
+                DaemonMessage::Error { message, request_id: Some(id) }
+                    if id == "o1" && message.contains("reorder set mismatch")
+            ),
+            "{msg:?}"
+        );
+        assert_eq!(hub.state.client_layout("c1"), before);
+    }
+
+    #[tokio::test]
+    async fn an_id_less_reorder_failure_still_answers_without_one() {
+        let (hub, _scratch) = test_hub("reorder-no-rid");
+        seed_bound_layout(&hub, "c1");
+        let msg = dispatch_one(
+            &hub,
+            ClientMessage::ReorderTabs {
+                ordered_ids: vec!["t2".to_string()],
+                request_id: None,
+            },
+        )
+        .await;
+        assert!(
+            matches!(
+                &msg,
+                DaemonMessage::Error { message, request_id: None }
+                    if message.contains("reorder set mismatch")
+            ),
+            "{msg:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reorder_tabs_success_still_broadcasts_tabs_reordered() {
+        let (hub, _scratch) = test_hub("reorder-ok");
+        seed_bound_layout(&hub, "c1");
+        let mut events = hub.tab_events.subscribe();
+        let reversed = vec!["t2".to_string(), "t1".to_string()];
+
+        let replies = dispatch_all(
+            &hub,
+            ClientMessage::ReorderTabs {
+                ordered_ids: reversed.clone(),
+                request_id: Some("o2".to_string()),
+            },
+        )
+        .await;
+        assert!(
+            replies.is_empty(),
+            "a reorder answers nothing on success: {replies:?}"
+        );
+
+        let events = take_tab_events(&mut events);
+        assert!(
+            matches!(events.as_slice(), [TabEvent::Reordered(ids)] if ids == &reversed),
+            "{events:?}"
+        );
+        let ids: Vec<String> = hub
+            .state
+            .client_layout("c1")
+            .into_iter()
+            .map(|tab| tab.id)
+            .collect();
+        assert_eq!(ids, reversed);
     }
 
     mod untouched_layout {

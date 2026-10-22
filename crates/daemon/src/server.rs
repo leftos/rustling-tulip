@@ -565,6 +565,7 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         | ClientMessage::SetPaneRatio { .. }
         | ClientMessage::ReplacePaneSession { .. }
         | ClientMessage::MovePane { .. }
+        | ClientMessage::SwapPanes { .. }
         | ClientMessage::RearrangeTab { .. }
         | ClientMessage::MergeTabs { .. }
         | ClientMessage::ExtractToNewTab { .. }) => tabs::handle(hub, m, ctx)?,

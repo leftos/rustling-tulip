@@ -796,7 +796,7 @@ impl RootView {
                 let Some(msg) = drag::reorder_tabs(&self.tab_ids(), dragged, &target, side) else {
                     return;
                 };
-                let ClientMessage::ReorderTabs { ordered_ids } = &msg else {
+                let ClientMessage::ReorderTabs { ordered_ids, .. } = &msg else {
                     return;
                 };
                 if !self.tabs.reorder_local(ordered_ids) {

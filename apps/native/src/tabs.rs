@@ -2194,6 +2194,7 @@ pub(crate) mod tests {
             dst_tab_id: dst.0.to_owned(),
             dst_pane_id: dst.1.to_owned(),
             edge: PaneDropEdge::Right,
+            touch: false,
             request_id: Some(request_id.to_owned()),
         }
     }

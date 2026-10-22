@@ -79,6 +79,7 @@ impl PaneDrop {
             dst_tab_id: self.dst_tab_id.clone(),
             dst_pane_id: self.dst_pane_id.clone(),
             edge: self.edge,
+            touch: false,
             request_id: self.request_id.clone(),
         }
     }
@@ -341,6 +342,7 @@ pub fn reorder_tabs(
     let ordered = reorder(tab_ids, &dragged.to_owned(), &target.to_owned(), side);
     (ordered != tab_ids).then_some(ClientMessage::ReorderTabs {
         ordered_ids: ordered,
+        request_id: None,
     })
 }
 

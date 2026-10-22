@@ -1040,6 +1040,9 @@ pub struct PaneMove<'a> {
     pub dst_tab_id: &'a str,
     pub dst_pane_id: &'a str,
     pub edge: PaneDropEdge,
+    /// An edge or centre drop: the destination counts as arranged by hand,
+    /// so it keeps its sizes instead of being rebuilt.
+    pub touch: bool,
 }
 
 /// A tab a [`move_pane`] changed, in the order the caller broadcasts them.
@@ -1051,8 +1054,10 @@ pub enum MovedTab {
 
 /// Move a pane within a tab or across tabs. A move within one tab, a swap
 /// included, is a hand arrangement and touches the tab; a move across tabs
-/// rebuilds each untouched side over its new pane count. On error `tabs` may be
-/// half-changed, so the caller runs this inside a mutation that rolls back.
+/// rebuilds each untouched side over its new pane count, unless it carries
+/// [`PaneMove::touch`], which touches the destination instead. On error `tabs`
+/// may be half-changed, so the caller runs this inside a mutation that rolls
+/// back.
 pub fn move_pane(tabs: &mut Vec<TabEntry>, mv: &PaneMove<'_>) -> anyhow::Result<Vec<MovedTab>> {
     if mv.src_tab_id == mv.dst_tab_id {
         move_within_tab(tabs, mv)
@@ -1095,9 +1100,70 @@ fn move_across_tabs(tabs: &mut Vec<TabEntry>, mv: &PaneMove<'_>) -> anyhow::Resu
         mv.edge,
         extracted,
     )?;
-    reapply_if_untouched(dst_tab);
+    if mv.touch {
+        touch(dst_tab);
+    } else {
+        reapply_if_untouched(dst_tab);
+    }
     moved.push(MovedTab::Updated(dst_tab.clone()));
     Ok(moved)
+}
+
+/// One pane swap: the pane `src_pane_id` of `src_tab_id` and the pane
+/// `dst_pane_id` of `dst_tab_id` (the same tab or another) exchange their
+/// sessions.
+#[expect(
+    clippy::struct_field_names,
+    reason = "the fields mirror the src/dst ids of the wire message"
+)]
+pub struct PaneSwap<'a> {
+    pub src_tab_id: &'a str,
+    pub src_pane_id: &'a str,
+    pub dst_tab_id: &'a str,
+    pub dst_pane_id: &'a str,
+}
+
+/// Swap two panes' session bindings. Both pane ids and both topologies stay,
+/// and both tabs are touched as hand arrangements. Returns one updated tab per
+/// changed tab. Both panes are read before either is written, so an unknown
+/// tab or pane leaves `tabs` as it was.
+pub fn swap_panes(tabs: &mut [TabEntry], swap: &PaneSwap<'_>) -> anyhow::Result<Vec<MovedTab>> {
+    if swap.src_tab_id == swap.dst_tab_id {
+        let tab = find_tab_mut(tabs, swap.src_tab_id)?;
+        swap_pane_sessions(grid_or_err_mut(tab)?, swap.src_pane_id, swap.dst_pane_id)?;
+        touch(tab);
+        return Ok(vec![MovedTab::Updated(tab.clone())]);
+    }
+    let src_session = pane_session_at(tabs, swap.src_tab_id, swap.src_pane_id)?;
+    let dst_session = pane_session_at(tabs, swap.dst_tab_id, swap.dst_pane_id)?;
+    let src_tab = find_tab_mut(tabs, swap.src_tab_id)?;
+    replace_pane_session(grid_or_err_mut(src_tab)?, swap.src_pane_id, dst_session)?;
+    touch(src_tab);
+    let src = src_tab.clone();
+    let dst_tab = find_tab_mut(tabs, swap.dst_tab_id)?;
+    replace_pane_session(grid_or_err_mut(dst_tab)?, swap.dst_pane_id, src_session)?;
+    touch(dst_tab);
+    Ok(vec![
+        MovedTab::Updated(src),
+        MovedTab::Updated(dst_tab.clone()),
+    ])
+}
+
+/// The session bound to `pane_id` in `tab_id`, or the error naming the missing
+/// tab, the tab without a grid, or the missing pane.
+fn pane_session_at(
+    tabs: &[TabEntry],
+    tab_id: &str,
+    pane_id: &str,
+) -> anyhow::Result<Option<String>> {
+    let tab = tabs
+        .iter()
+        .find(|tab| tab.id == tab_id)
+        .with_context(|| format!("unknown tab: {tab_id}"))?;
+    match pane_session(grid_or_err(tab)?, pane_id) {
+        PaneSessionLookup::Found(session_id) => Ok(session_id),
+        PaneSessionLookup::Missing => Err(anyhow!("pane not found: {pane_id}")),
+    }
 }
 
 /// Merge multiple tabs into a single new tab. Removes the source tabs from
@@ -1448,6 +1514,21 @@ mod tests {
             id: id.to_string(),
             name: id.to_string(),
             content: TabContent::Grid { grid },
+            created_at: Utc::now(),
+            picked_layout: None,
+        }
+    }
+
+    fn diff_tab(id: &str) -> TabEntry {
+        TabEntry {
+            id: id.to_string(),
+            name: id.to_string(),
+            content: TabContent::Diff {
+                repo_id: "r1".to_string(),
+                path: "src/a.rs".to_string(),
+                against: None,
+                worktree_path: None,
+            },
             created_at: Utc::now(),
             picked_layout: None,
         }
@@ -2730,6 +2811,29 @@ mod tests {
             dst_tab_id: dst.0,
             dst_pane_id: dst.1,
             edge,
+            touch: false,
+        }
+    }
+
+    /// [`pane_move`] as an edge or centre drop sends it: the destination tab
+    /// counts as arranged by hand.
+    fn pane_move_touching<'a>(
+        src: (&'a str, &'a str),
+        dst: (&'a str, &'a str),
+        edge: PaneDropEdge,
+    ) -> PaneMove<'a> {
+        PaneMove {
+            touch: true,
+            ..pane_move(src, dst, edge)
+        }
+    }
+
+    fn pane_swap<'a>(src: (&'a str, &'a str), dst: (&'a str, &'a str)) -> PaneSwap<'a> {
+        PaneSwap {
+            src_tab_id: src.0,
+            src_pane_id: src.1,
+            dst_tab_id: dst.0,
+            dst_pane_id: dst.1,
         }
     }
 
@@ -2784,6 +2888,182 @@ mod tests {
         .expect("swap within the tab");
         assert_eq!(tabs[0].picked_layout, None, "a move clears the flag");
         assert_eq!(tabs[1].picked_layout, None, "a swap clears the flag");
+    }
+
+    #[test]
+    fn move_pane_across_tabs_with_touch_clears_the_destination_flag_and_rebuilds_the_source() {
+        let mut tabs = vec![
+            picked_tab("S", &bound(&["a", "b", "c"]), RearrangeLayout::Horizontal),
+            picked_tab("D", &bound(&["x", "y"]), RearrangeLayout::Vertical),
+        ];
+        move_pane(
+            &mut tabs,
+            &pane_move_touching(("S", "a"), ("D", "y"), PaneDropEdge::Right),
+        )
+        .expect("move");
+
+        assert_eq!(
+            grid_of(&tabs[0]),
+            &build_balanced(&bound(&["b", "c"]), Horizontal).expect("grid"),
+            "the source still rebuilds its picked layout"
+        );
+        assert_eq!(tabs[0].picked_layout, Some(RearrangeLayout::Horizontal));
+        assert_eq!(
+            grid_of(&tabs[1]),
+            &split(
+                Vertical,
+                0.5,
+                pane("x", Some("s-x")),
+                split(
+                    Horizontal,
+                    0.5,
+                    pane("y", Some("s-y")),
+                    pane("a", Some("s-a"))
+                ),
+            ),
+            "the touched destination keeps the sizes it had"
+        );
+        assert_eq!(
+            tabs[1].picked_layout, None,
+            "an edge drop touches the destination"
+        );
+    }
+
+    #[test]
+    fn move_pane_across_tabs_without_touch_still_rebuilds_both() {
+        let mut tabs = vec![
+            picked_tab("S", &bound(&["a", "b", "c"]), RearrangeLayout::Horizontal),
+            picked_tab("D", &bound(&["x", "y"]), RearrangeLayout::Horizontal),
+        ];
+        move_pane(
+            &mut tabs,
+            &pane_move(("S", "a"), ("D", "x"), PaneDropEdge::Bottom),
+        )
+        .expect("move");
+
+        assert_eq!(
+            grid_of(&tabs[0]),
+            &build_balanced(&bound(&["b", "c"]), Horizontal).expect("grid")
+        );
+        assert_eq!(
+            grid_of(&tabs[1]),
+            &build_balanced(&bound(&["x", "a", "y"]), Horizontal).expect("grid"),
+            "an untouched destination is rebuilt over its panes in walk order, \
+             dropping the vertical insert for a flat row"
+        );
+        assert_eq!(tabs[1].picked_layout, Some(RearrangeLayout::Horizontal));
+    }
+
+    #[test]
+    fn swap_panes_across_tabs_swaps_sessions_and_keeps_topology() {
+        let mut tabs = vec![
+            picked_tab("A", &bound(&["a", "b"]), RearrangeLayout::Horizontal),
+            picked_tab("B", &bound(&["x", "y"]), RearrangeLayout::Vertical),
+        ];
+        let swapped = swap_panes(&mut tabs, &pane_swap(("A", "a"), ("B", "y"))).expect("swap");
+
+        assert_eq!(
+            grid_of(&tabs[0]),
+            &split(
+                Horizontal,
+                0.5,
+                pane("a", Some("s-y")),
+                pane("b", Some("s-b"))
+            )
+        );
+        assert_eq!(
+            grid_of(&tabs[1]),
+            &split(
+                Vertical,
+                0.5,
+                pane("x", Some("s-x")),
+                pane("y", Some("s-a"))
+            )
+        );
+        assert_eq!(
+            swapped,
+            vec![
+                MovedTab::Updated(tabs[0].clone()),
+                MovedTab::Updated(tabs[1].clone())
+            ]
+        );
+    }
+
+    #[test]
+    fn swap_panes_across_tabs_touches_both_tabs() {
+        let mut tabs = vec![
+            picked_tab("A", &bound(&["a"]), RearrangeLayout::Horizontal),
+            picked_tab("B", &bound(&["x"]), RearrangeLayout::Vertical),
+        ];
+        swap_panes(&mut tabs, &pane_swap(("A", "a"), ("B", "x"))).expect("swap");
+
+        assert_eq!(tabs[0].picked_layout, None, "the source tab is touched");
+        assert_eq!(
+            tabs[1].picked_layout, None,
+            "the destination tab is touched"
+        );
+    }
+
+    #[test]
+    fn swap_panes_across_tabs_with_a_missing_pane_changes_nothing() {
+        let mut tabs = vec![
+            picked_tab("A", &bound(&["a", "b"]), RearrangeLayout::Horizontal),
+            picked_tab("B", &bound(&["x", "y"]), RearrangeLayout::Vertical),
+        ];
+        let before = tabs.clone();
+
+        let err = swap_panes(&mut tabs, &pane_swap(("A", "a"), ("B", "ghost")))
+            .expect_err("the destination pane is missing");
+        assert!(err.to_string().contains("pane not found: ghost"), "{err}");
+        assert_eq!(tabs, before);
+
+        let err = swap_panes(&mut tabs, &pane_swap(("ghost", "a"), ("B", "y")))
+            .expect_err("the source tab is unknown");
+        assert!(err.to_string().contains("unknown tab: ghost"), "{err}");
+        assert_eq!(tabs, before);
+    }
+
+    #[test]
+    fn swap_panes_with_a_diff_tab_is_refused() {
+        let mut tabs = vec![
+            picked_tab("A", &bound(&["a"]), RearrangeLayout::Horizontal),
+            diff_tab("D"),
+        ];
+        let before = tabs.clone();
+
+        for swap in [
+            pane_swap(("A", "a"), ("D", "p1")),
+            pane_swap(("D", "p1"), ("A", "a")),
+        ] {
+            let err = swap_panes(&mut tabs, &swap).expect_err("a diff tab has no grid");
+            assert!(err.to_string().contains("not a grid tab"), "{err}");
+            assert_eq!(tabs, before);
+        }
+    }
+
+    #[test]
+    fn swap_panes_within_one_tab_swaps_and_touches_it() {
+        let mut tabs = vec![picked_tab(
+            "M",
+            &bound(&["a", "b", "c"]),
+            RearrangeLayout::Horizontal,
+        )];
+        let swapped = swap_panes(&mut tabs, &pane_swap(("M", "a"), ("M", "c"))).expect("swap");
+
+        assert_eq!(
+            collect_panes(grid_of(&tabs[0])),
+            vec![
+                ("a".to_string(), Some("s-c".to_string())),
+                ("b".to_string(), Some("s-b".to_string())),
+                ("c".to_string(), Some("s-a".to_string())),
+            ]
+        );
+        assert_eq!(tabs[0].picked_layout, None, "a swap touches the tab");
+        assert_eq!(
+            swapped,
+            vec![MovedTab::Updated(tabs[0].clone())],
+            "one update for the one tab"
+        );
     }
 
     #[test]
