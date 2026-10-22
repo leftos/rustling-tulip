@@ -1071,6 +1071,21 @@ impl TabsModel {
         self.prune_selection();
     }
 
+    /// `ordered` as the strip's order, applied before the daemon echoes it;
+    /// the shown tab and the selection stay. A list that is not a
+    /// permutation of the tabs changes nothing. Returns whether it applied.
+    pub fn reorder_local(&mut self, ordered: &[String]) -> bool {
+        let mut current: Vec<&str> = self.tabs.iter().map(|t| t.id.as_str()).collect();
+        let mut wanted: Vec<&str> = ordered.iter().map(String::as_str).collect();
+        current.sort_unstable();
+        wanted.sort_unstable();
+        if current != wanted {
+            return false;
+        }
+        self.reorder(ordered);
+        true
+    }
+
     /// Forgets selected tabs the list no longer holds.
     fn prune_selection(&mut self) {
         let live: HashSet<&str> = self.tabs.iter().map(|t| t.id.as_str()).collect();
@@ -2303,6 +2318,52 @@ pub(crate) mod tests {
         });
         let ids: Vec<&str> = model.tabs().iter().map(|t| t.id.as_str()).collect();
         assert_eq!(ids, ["t2", "t1"]);
+    }
+
+    fn strip_order(model: &TabsModel) -> Vec<&str> {
+        model.tabs().iter().map(|t| t.id.as_str()).collect()
+    }
+
+    fn ids(ids: &[&str]) -> Vec<String> {
+        ids.iter().map(|id| (*id).to_owned()).collect()
+    }
+
+    #[test]
+    fn reorder_local_applies_a_permutation_and_keeps_the_active_tab() {
+        let mut model = model_with(&[
+            tab("t1", &pane("a", None)),
+            tab("t2", &pane("b", None)),
+            tab("t3", &pane("c", None)),
+        ]);
+        model.activate("t2");
+        model
+            .selection
+            .click(&["t1", "t2", "t3"], Some("t2"), "t3", PillClick::Toggle);
+
+        assert!(model.reorder_local(&ids(&["t3", "t1", "t2"])));
+
+        assert_eq!(strip_order(&model), ["t3", "t1", "t2"]);
+        assert_eq!(model.active_id(), Some("t2"), "the shown tab stays");
+        assert!(model.selection.contains("t3"), "the selection stays");
+    }
+
+    #[test]
+    fn reorder_local_refuses_a_list_that_is_not_a_permutation() {
+        let mut model = model_with(&[tab("t1", &pane("a", None)), tab("t2", &pane("b", None))]);
+        for wrong in [
+            ids(&["t2"]),
+            ids(&["t2", "t1", "t9"]),
+            ids(&["t2", "t2"]),
+            ids(&["t2", "t9"]),
+            Vec::new(),
+        ] {
+            assert!(!model.reorder_local(&wrong), "{wrong:?} is refused");
+            assert_eq!(
+                strip_order(&model),
+                ["t1", "t2"],
+                "{wrong:?} changes nothing"
+            );
+        }
     }
 
     #[test]

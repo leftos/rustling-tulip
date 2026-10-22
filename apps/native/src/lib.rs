@@ -179,6 +179,7 @@ pub use crate::diff_tab::{
     BINARY_TEXT, DiffTabBody, DiffTabHeader, EMPTY_TEXT, FINAL_NEWLINE_NOTE, LINE_ENDINGS_NOTE,
     LOADING_TEXT as DIFF_LOADING_TEXT, OPEN_FAILED_TITLE as DIFF_OPEN_FAILED_TITLE, WHITESPACE_TIP,
 };
+pub use crate::drag::Side;
 pub use crate::footer::LogPaths;
 pub use crate::grid_view::{HeaderChip, HeaderChipKind, PaneHeaderParts};
 pub use crate::history::{
@@ -433,6 +434,11 @@ enum Drag {
 }
 
 /// The window's content: sidebar, tabs and panes, footer and overlays.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the flags belong to unrelated features (the sessions list loaded, the flyout, \
+              the source-control picker, a drag-ending Esc), not to one state an enum could hold"
+)]
 pub struct RootView {
     tx: UnboundedSender<NetCommand>,
     /// The terminals' clock.
@@ -468,6 +474,18 @@ pub struct RootView {
     /// tells a pane drag from any other gpui drag (files dragged in from
     /// the OS), and counts only while gpui still has a drag under way.
     pane_drag: Option<DragPayload>,
+    /// The pill a pill drag is over and the side of it the dragged pill
+    /// lands on, while a drop there would change the strip's order.
+    tab_drop: Option<(String, Side)>,
+    /// The tab whose pill a drag picked up, set when gpui starts the drag;
+    /// it counts only while gpui still has a drag under way.
+    tab_drag: Option<String>,
+    /// Whether the key press under way is an Esc that ended a drag; the
+    /// root's key capture then drops it so nothing below sees it.
+    escape_ended_drag: bool,
+    /// The window's keystroke interceptor, which lets Esc end a drag before
+    /// gpui dispatches the key to any keymap action.
+    _drag_escape: gpui::Subscription,
     /// Focus for the sidebar, which takes it on a click so Ctrl+B there
     /// toggles the sidebar instead of reaching the terminal.
     sidebar_focus: FocusHandle,
@@ -817,6 +835,7 @@ impl RootView {
         Self::watch_window(window, cx);
         Self::watch_close_request(window, cx);
         Self::forward_net_events(events, window, cx);
+        let drag_escape = Self::intercept_drag_escape(window, cx);
         let ui = ui_dir
             .as_deref()
             .map_or_else(UiState::default, load_ui_state);
@@ -837,6 +856,10 @@ impl RootView {
             drag: None,
             pane_drop: None,
             pane_drag: None,
+            tab_drop: None,
+            tab_drag: None,
+            escape_ended_drag: false,
+            _drag_escape: drag_escape,
             sidebar_focus: cx.focus_handle(),
             row_focus: None,
             hovered_container: None,
@@ -1812,20 +1835,53 @@ impl RootView {
             self.finish_drag();
             cx.notify();
         }
-        if self.pane_drop.take().is_some() {
+        let pane_drop = self.pane_drop.take().is_some();
+        let tab_drop = self.tab_drop.take().is_some();
+        if pane_drop || tab_drop {
             cx.notify();
         }
     }
 
-    /// Esc while a pane drag is under way cancels it, whatever has the
-    /// keyboard; returns whether it did.
-    fn on_pane_drag_key(
+    /// Lets Esc end a pane or pill drag before gpui dispatches the key to
+    /// any keymap action, so a focused text input that binds Esc never sees
+    /// it. gpui runs keystroke interceptors before keymap actions and skips
+    /// the actions once one stops propagation; it still hands that key to
+    /// the first capture listener on the focus path, the root's
+    /// [`Self::on_key_capture`], which drops it.
+    fn intercept_drag_escape(window: &mut Window, cx: &mut Context<Self>) -> gpui::Subscription {
+        let root = cx.weak_entity();
+        let handle = window.window_handle();
+        cx.intercept_keystrokes(move |event, window, cx| {
+            if window.window_handle() != handle {
+                return;
+            }
+            match root.update(cx, |this, cx| {
+                this.on_drag_escape(&event.keystroke, window, cx)
+            }) {
+                Ok(true) => cx.stop_propagation(),
+                Ok(false) => {}
+                Err(err) => tracing::warn!(%err, "drag Esc: the window's root view is gone"),
+            }
+        })
+    }
+
+    /// Esc while a pane or pill drag is under way ends it, whatever has the
+    /// keyboard; remembers whether it did, for the root's key capture, so
+    /// every key press sets it afresh. Returns whether it did.
+    fn on_drag_escape(
         &mut self,
         ks: &Keystroke,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        ks.key == "escape" && self.end_pane_drag(window, cx)
+        self.escape_ended_drag = ks.key == "escape" && self.end_drag(window, cx);
+        self.escape_ended_drag
+    }
+
+    /// Whether the key press under way is an Esc that ended a drag; it is
+    /// answered once.
+    fn take_drag_escape(&mut self) -> bool {
+        std::mem::take(&mut self.escape_ended_drag)
     }
 
     /// The pane being dragged, while gpui's drag under way is a pane drag.
@@ -1833,16 +1889,18 @@ impl RootView {
         self.pane_drag.as_ref().filter(|_| cx.has_active_drag())
     }
 
-    /// Ends a pane drag without a drop: Esc, or a change to its source tab
-    /// or the shown tab. Any other gpui drag is left alone. Returns whether
-    /// a pane drag was under way.
-    fn end_pane_drag(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if self.active_pane_drag(cx).is_none() {
+    /// Ends a pane or pill drag without a drop: Esc, or for a pane drag a
+    /// change to its source tab or the shown tab. Any other gpui drag is
+    /// left alone. Returns whether a pane or pill drag was under way.
+    fn end_drag(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.active_pane_drag(cx).is_none() && self.active_tab_drag(cx).is_none() {
             return false;
         }
         cx.stop_active_drag(window);
         self.pane_drag = None;
         self.pane_drop = None;
+        self.tab_drag = None;
+        self.tab_drop = None;
         cx.notify();
         true
     }
@@ -1930,7 +1988,10 @@ impl RootView {
         let folded = self.fold_tabs(msg, window, cx);
         self.drop_stale_container_menu(window, cx);
         if folded && drag_tabs.is_some_and(|before| self.tabs_change_touches(msg, &before)) {
-            self.end_pane_drag(window, cx);
+            self.end_drag(window, cx);
+        }
+        if folded {
+            self.drop_stale_pill_drag(window, cx);
         }
         folded
     }
@@ -2452,8 +2513,9 @@ impl RootView {
         self.scan_unseen_cwd_paths();
     }
 
-    /// Keys the root takes before the panes see them. Esc during a
-    /// drag-and-drop gesture cancels it and goes no further. The worktree
+    /// Keys the root takes before the panes see them. An Esc that ended a
+    /// pane or pill drag ([`Self::intercept_drag_escape`]) goes no further.
+    /// The worktree
     /// cleanup-failed dialog, else the exit dialog, else
     /// the first-connect layout chooser, else the run confirm, else a modal
     /// notice, else the delete-worktree confirm, else the spawn
@@ -2470,7 +2532,7 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         let ks = &event.keystroke;
-        if self.on_pane_drag_key(ks, window, cx) || self.on_cleanup_failed_key(ks, window, cx) {
+        if self.take_drag_escape() || self.on_cleanup_failed_key(ks, window, cx) {
             cx.stop_propagation();
             return;
         }
@@ -2888,10 +2950,14 @@ impl Render for RootView {
         // Tab switches and renames made here change the title without a
         // daemon message.
         self.refresh_window_title(window, cx);
-        // A pane drag gpui ended on a release no pane took leaves nothing
-        // behind to mistake a later drag for it.
+        // A pane or pill drag gpui ended on a release no listener took (a
+        // modal over the window swallows it) leaves nothing behind to
+        // mistake a later drag for it: no payload, no overlay, no mark.
         if !cx.has_active_drag() {
             self.pane_drag = None;
+            self.pane_drop = None;
+            self.tab_drag = None;
+            self.tab_drop = None;
         }
         let footer = self.conn.footer(self.sidebar.sessions().len());
         let flyout = self

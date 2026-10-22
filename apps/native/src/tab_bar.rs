@@ -3,17 +3,18 @@
 //! for a new tab.
 
 use gpui::{
-    AnyElement, ClickEvent, Context, Div, ElementId, Entity, Focusable as _, Keystroke,
-    MouseButton, MouseDownEvent, Pixels, Point, SharedString, Stateful, Subscription, Window,
-    anchored, deferred, div, prelude::*, px, svg,
+    AnyElement, App, ClickEvent, Context, Div, DragMoveEvent, ElementId, Entity, Focusable as _,
+    Keystroke, MouseButton, MouseDownEvent, Pixels, Point, SharedString, Stateful, Subscription,
+    Window, anchored, deferred, div, prelude::*, px, svg,
 };
 use protocol::{
     ClientMessage, MergeLayout, RearrangeLayout, SessionMode, SessionStatus, TabContent, TabEntry,
 };
 
 use crate::assets::{TAB_CLOSE_ICON, TAB_NEW_ICON};
+use crate::drag::{self, DragPayload, Side};
 use crate::fonts;
-use crate::palette::{CHIP, GROUND, SUBTLE, SURFACE, WORKING};
+use crate::palette::{ACCENT, CHIP, GROUND, LINE_STRONG, RAISED, SUBTLE, SURFACE, WORKING};
 use crate::session_menu::{MENU_MAX_SHARE, menu_frame, menu_item, menu_separator, muted_row};
 use crate::status_glyph::{GlyphSize, glyph, glyph_view};
 use crate::tab_menu::{MenuLine, TabAction, merge_lines, rearrange_lines};
@@ -585,9 +586,25 @@ impl RootView {
             cx.notify();
         });
         let name = format!("tab-{}", tab.id);
+        let dragged = self.active_tab_drag(cx) == Some(tab.id.as_str());
+        let mark = self
+            .tab_drop_mark(cx)
+            .filter(|(id, _)| *id == tab.id)
+            .map(|(_, side)| insertion_mark(&tab.id, side));
+        let (move_id, drop_id) = (tab.id.clone(), tab.id.clone());
+        let ghost = self.pill_ghost(tab, cx);
         div()
             .id(ElementId::Name(SharedString::from(name.clone())))
             .debug_selector(|| name)
+            .relative()
+            .on_drag_move(
+                cx.listener(move |this, event: &DragMoveEvent<DragPayload>, _, cx| {
+                    this.on_pill_drag_move(&move_id, event, cx);
+                }),
+            )
+            .on_drop(cx.listener(move |this, payload: &DragPayload, _, cx| {
+                this.on_pill_drop(&drop_id, payload, cx);
+            }))
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -612,14 +629,144 @@ impl RootView {
             .when_some(look.outline(accent), |pill, outline| {
                 pill.border_1().border_color(gpui::rgb(outline))
             })
+            .when(dragged, |pill| pill.opacity(DRAGGED_PILL_OPACITY))
             .when(rename.is_none(), move |pill| {
                 pill.on_click(on_click)
                     .on_mouse_down(MouseButton::Middle, on_middle)
+                    .on_drag(DragPayload::Tab(tab.id.clone()), ghost)
             })
             .children(badge)
             .child(label)
             .child(close_button(&tab.id, armed, cx))
+            .children(mark)
             .into_any_element()
+    }
+
+    /// What starts `tab`'s pill drag: it records the tab as the one being
+    /// dragged and builds the small copy of the pill that follows the
+    /// pointer.
+    fn pill_ghost(
+        &self,
+        tab: &TabEntry,
+        cx: &mut Context<Self>,
+    ) -> impl Fn(&DragPayload, Point<Pixels>, &mut Window, &mut App) -> Entity<PillGhost> + 'static
+    {
+        let root = cx.entity().downgrade();
+        let tab_id = tab.id.clone();
+        let label: SharedString = pill_label(tab).into();
+        let badge = self.tab_badge(&tab.id);
+        move |_, offset, _, cx| {
+            let dragged = tab_id.clone();
+            if let Err(err) = root.update(cx, |this, _| this.tab_drag = Some(dragged)) {
+                tracing::warn!(%err, "pill drag: the window's root view is gone");
+            }
+            let (tab_id, label) = (tab_id.clone(), label.clone());
+            cx.new(|_| PillGhost {
+                tab_id,
+                label,
+                badge,
+                offset,
+            })
+        }
+    }
+
+    /// The tab being dragged by its pill, while gpui's drag under way is a
+    /// pill drag.
+    pub(crate) fn active_tab_drag(&self, cx: &App) -> Option<&str> {
+        self.tab_drag.as_deref().filter(|_| cx.has_active_drag())
+    }
+
+    /// After a tab message: a pill drag whose tab left the strip ends as
+    /// Esc ends it, and a mark on a tab that left the strip goes.
+    pub(crate) fn drop_stale_pill_drag(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let gone = |tabs: &crate::tabs::TabsModel, id: &str| tabs.tab(id).is_none();
+        if self
+            .active_tab_drag(cx)
+            .is_some_and(|id| gone(&self.tabs, id))
+        {
+            self.end_drag(window, cx);
+            return;
+        }
+        if self
+            .tab_drop
+            .as_ref()
+            .is_some_and(|(id, _)| gone(&self.tabs, id))
+        {
+            self.tab_drop = None;
+            cx.notify();
+        }
+    }
+
+    /// The pill the insertion mark stands on and the side of it, while a
+    /// pill drag is under way and a drop there would change the order.
+    #[must_use]
+    pub fn tab_drop_mark(&self, cx: &App) -> Option<(String, Side)> {
+        self.tab_drop
+            .clone()
+            .filter(|_| self.active_tab_drag(cx).is_some())
+    }
+
+    /// Follows a drag over `tab_id`'s pill: a pill dragged over its half
+    /// that would change the order marks that side; anything else (a pane,
+    /// the pointer elsewhere) takes the mark off this pill. gpui calls this
+    /// for every move of the drag, over the pill or not.
+    fn on_pill_drag_move(
+        &mut self,
+        tab_id: &str,
+        event: &DragMoveEvent<DragPayload>,
+        cx: &mut Context<Self>,
+    ) {
+        let at = event.event.position;
+        let bounds = event.bounds;
+        let target = match event.drag(cx) {
+            DragPayload::Tab(dragged) if bounds.contains(&at) => {
+                let side = drag::side_of(
+                    at.x / px(1.0),
+                    bounds.origin.x / px(1.0),
+                    bounds.size.width / px(1.0),
+                );
+                drag::reorder_tabs(&self.tab_ids(), dragged, tab_id, side)
+                    .map(|_| (tab_id.to_owned(), side))
+            }
+            _ => None,
+        };
+        let marked_here = self.tab_drop.as_ref().is_some_and(|(id, _)| id == tab_id);
+        if target.is_some() && target != self.tab_drop {
+            self.tab_drop = target;
+            cx.notify();
+        } else if target.is_none() && marked_here {
+            self.tab_drop = None;
+            cx.notify();
+        }
+    }
+
+    /// A drop on `tab_id`'s pill: a pill dropped where the mark stands takes
+    /// the new order at once and sends it; the daemon's echo then agrees.
+    /// A pane, or a drop that keeps the order, does nothing.
+    fn on_pill_drop(&mut self, tab_id: &str, payload: &DragPayload, cx: &mut Context<Self>) {
+        let mark = self.tab_drop.take();
+        self.tab_drag = None;
+        cx.notify();
+        let (DragPayload::Tab(dragged), Some((target, side))) = (payload, mark) else {
+            return;
+        };
+        if target != tab_id {
+            return;
+        }
+        let Some(msg) = drag::reorder_tabs(&self.tab_ids(), dragged, &target, side) else {
+            return;
+        };
+        let ClientMessage::ReorderTabs { ordered_ids } = &msg else {
+            return;
+        };
+        if !self.tabs.reorder_local(ordered_ids) {
+            tracing::warn!(
+                ?ordered_ids,
+                "pill drop: the new order is not the strip's tabs"
+            );
+            return;
+        }
+        self.send(msg);
     }
 
     /// A click on `tab_id`'s pill. Ctrl toggles the tab in the selection
@@ -936,6 +1083,109 @@ fn busy_badge(tab_id: &str, busy: usize, total: usize) -> Stateful<Div> {
             ))
         })
         .child(pill.text)
+}
+
+/// How opaque a pill stays in its slot while it is dragged.
+const DRAGGED_PILL_OPACITY: f32 = 0.4;
+/// The insertion mark's width, and how far it stands in from the pill's top
+/// and bottom.
+const MARK_WIDTH: f32 = 2.0;
+const MARK_INSET: f32 = 5.0;
+/// How far the mark sits out past the pill's edge, so it straddles the
+/// border between two pills.
+const MARK_OUTSET: f32 = 1.5;
+/// Where the pill ghost sits, right of and below the pointer.
+const GHOST_NUDGE: Point<Pixels> = Point {
+    x: px(10.0),
+    y: px(14.0),
+};
+const GHOST_HEIGHT: f32 = 26.0;
+const GHOST_TEXT_SIZE: f32 = 11.0;
+const GHOST_OPACITY: f32 = 0.85;
+const GHOST_BADGE_HEIGHT: f32 = 15.0;
+const GHOST_BADGE_TEXT_SIZE: f32 = 9.5;
+
+/// The accent bar at `side` of `tab_id`'s pill, where a dragged pill lands.
+fn insertion_mark(tab_id: &str, side: Side) -> Div {
+    let selector = format!("tab-drop-mark-{tab_id}");
+    let bar = div()
+        .debug_selector(move || selector)
+        .absolute()
+        .top(px(MARK_INSET))
+        .bottom(px(MARK_INSET))
+        .w(px(MARK_WIDTH))
+        .rounded(px(MARK_WIDTH / 2.0))
+        .bg(gpui::rgb(ACCENT));
+    match side {
+        Side::Before => bar.left(px(-MARK_OUTSET)),
+        Side::After => bar.right(px(-MARK_OUTSET)),
+    }
+}
+
+/// The small copy of a dragged pill that follows the pointer: its busy
+/// badge, when it has one, and its label.
+pub(crate) struct PillGhost {
+    tab_id: String,
+    label: SharedString,
+    /// The pill's busy and total pane counts.
+    badge: Option<(usize, usize)>,
+    /// Where the pointer sat in the pill when the drag started. gpui draws
+    /// the ghost that far up and left of the pointer; the ghost moves back
+    /// by it.
+    offset: Point<Pixels>,
+}
+
+impl Render for PillGhost {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let badge = self.badge.map(|(busy, total)| {
+            let pill = BusyPill::of(busy, total);
+            let glyph_id = format!("tab-ghost-glyph-{}", self.tab_id);
+            div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap(px(4.0))
+                .h(px(GHOST_BADGE_HEIGHT))
+                .px(px(5.0))
+                .rounded(px(GHOST_BADGE_HEIGHT / 2.0))
+                .bg(gpui::rgb(CHIP))
+                .font_family(fonts::DEFAULT_FAMILY)
+                .text_size(px(GHOST_BADGE_TEXT_SIZE))
+                .text_color(gpui::rgb(pill.color))
+                .when(pill.glyph, |row| {
+                    row.child(glyph_view(
+                        glyph(SessionStatus::Working, SessionMode::Interactive, false),
+                        GlyphSize::Pill,
+                        &glyph_id,
+                    ))
+                })
+                .child(pill.text)
+        });
+        div().child(
+            div()
+                .debug_selector(|| "tab-drag-ghost".to_owned())
+                .absolute()
+                .left(self.offset.x + GHOST_NUDGE.x)
+                .top(self.offset.y + GHOST_NUDGE.y)
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .h(px(GHOST_HEIGHT))
+                .px(px(10.0))
+                .whitespace_nowrap()
+                .bg(gpui::rgb(RAISED))
+                .border_1()
+                .border_color(gpui::rgb(LINE_STRONG))
+                .rounded(px(4.0))
+                .shadow_lg()
+                .opacity(GHOST_OPACITY)
+                .font_family(fonts::UI_FAMILY)
+                .text_size(px(GHOST_TEXT_SIZE))
+                .text_color(gpui::rgb(TEXT))
+                .children(badge)
+                .child(self.label.clone()),
+        )
+    }
 }
 
 /// The close icon, or ✓ while a close waits for its second click. It acts

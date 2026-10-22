@@ -31,7 +31,7 @@ pub const EMPTY_PANE_LABEL: &str = "Empty pane";
     not(test),
     expect(
         dead_code,
-        reason = "the Tab, Container and Leaf payloads are constructed only by tests"
+        reason = "the Container and Leaf payloads are constructed only by tests"
     )
 )]
 pub enum DragPayload {
@@ -50,7 +50,6 @@ pub enum DragPayload {
 
 /// Which half of a row or pill a pointer points at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(not(test), expect(dead_code, reason = "used only by tests"))]
 pub enum Side {
     Before,
     After,
@@ -225,7 +224,6 @@ pub fn drop_edge(x: f32, y: f32, outer: OuterSides) -> PaneDropEdge {
 /// Which half of a row or pill starting at `start` and `len` long `pos` points
 /// at. A pointer exactly at the middle counts as the second half.
 #[must_use]
-#[cfg_attr(not(test), expect(dead_code, reason = "used only by tests"))]
 pub fn side_of(pos: f32, start: f32, len: f32) -> Side {
     if pos < start + len / 2.0 {
         Side::Before
@@ -237,7 +235,6 @@ pub fn side_of(pos: f32, start: f32, len: f32) -> Side {
 /// `ids` with `dragged` moved to `side` of `target`: before it or after it.
 /// The same item, or one either side does not name, leaves the list as it is.
 #[must_use]
-#[cfg_attr(not(test), expect(dead_code, reason = "used only by tests"))]
 pub fn reorder<T: Clone + PartialEq>(ids: &[T], dragged: &T, target: &T, side: Side) -> Vec<T> {
     let mut out = ids.to_vec();
     if dragged == target {
@@ -266,7 +263,6 @@ pub fn reorder<T: Clone + PartialEq>(ids: &[T], dragged: &T, target: &T, side: S
 /// The [`ClientMessage::ReorderTabs`] a pill dropped `side` of `target` sends,
 /// or none when the order it would set is the one already in place.
 #[must_use]
-#[cfg_attr(not(test), expect(dead_code, reason = "called only from unit tests"))]
 pub fn reorder_tabs(
     tab_ids: &[String],
     dragged: &str,
