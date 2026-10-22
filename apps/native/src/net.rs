@@ -25,13 +25,10 @@ type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 type Frame = Option<Result<Message, tungstenite::Error>>;
 /// A pending `ensure_running`, boxed so tests can substitute one.
 pub type EnsureFuture = Pin<Box<dyn Future<Output = Result<DaemonHandshake>>>>;
-/// The protocol versions the native client speaks: only 23, the first whose
-/// daemon echoes `request_id`. An older daemon is retired and replaced.
-pub const NATIVE_PROTOCOL_VERSIONS: &[u32] = &[23];
-
-/// The version `Hello` names as preferred: the highest native version, first
-/// in [`NATIVE_PROTOCOL_VERSIONS`].
-const NATIVE_PROTOCOL_VERSION: u32 = NATIVE_PROTOCOL_VERSIONS[0];
+/// The protocol versions the native client speaks, the protocol crate's
+/// generated `protocol-version.json` constants. A daemon supporting none of
+/// them is retired and replaced.
+pub const NATIVE_PROTOCOL_VERSIONS: &[u32] = protocol::SUPPORTED_PROTOCOL_VERSIONS;
 
 /// A pending force-stop of the daemon.
 pub type StopFuture = Pin<Box<dyn Future<Output = Result<()>>>>;
@@ -314,7 +311,7 @@ impl Net {
 
     fn hello(&self, auth_token: String) -> ClientMessage {
         ClientMessage::Hello {
-            protocol_version: NATIVE_PROTOCOL_VERSION,
+            protocol_version: protocol::PROTOCOL_VERSION,
             protocol_versions: NATIVE_PROTOCOL_VERSIONS.to_vec(),
             auth_token,
             client_id: self.deps.identity.as_ref().map(|id| id.client_id.clone()),
@@ -562,10 +559,7 @@ async fn sleep_until(deadline: Option<Instant>) {
     reason = "tests assert preconditions with expect; failure messages aid debugging"
 )]
 mod tests {
-    use super::{
-        EnsureFuture, NATIVE_PROTOCOL_VERSIONS, Net, NetCommand, NetDeps, NetEvent,
-        WELCOME_TIMEOUT, run_thread,
-    };
+    use super::{EnsureFuture, Net, NetCommand, NetDeps, NetEvent, WELCOME_TIMEOUT, run_thread};
     use crate::connection::State;
     use futures::channel::mpsc::{UnboundedReceiver, unbounded};
     use protocol::ClientMessage;
@@ -748,8 +742,7 @@ mod tests {
     }
 
     #[test]
-    fn native_hello_offers_only_23() {
-        assert_eq!(NATIVE_PROTOCOL_VERSIONS, &[23]);
+    fn native_hello_offers_only_the_current_version() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -773,7 +766,10 @@ mod tests {
         else {
             unreachable!("hello() builds a Hello, got {hello:?}");
         };
-        assert_eq!(protocol_version, 23);
-        assert_eq!(protocol_versions, vec![23]);
+        assert_eq!(protocol_version, protocol::PROTOCOL_VERSION);
+        assert_eq!(
+            protocol_versions,
+            protocol::SUPPORTED_PROTOCOL_VERSIONS.to_vec()
+        );
     }
 }
