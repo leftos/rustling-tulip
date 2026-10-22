@@ -283,8 +283,14 @@ impl RootView {
             }
             MenuAction::Close => {
                 self.record_pane_close(&tab_id, &pane_id, None, cx);
-                self.tabs.mark_closing_if_last_pane(&tab_id, None);
-                self.send(ClientMessage::ClosePane { tab_id, pane_id });
+                let request_id = crate::new_request_id();
+                self.tabs
+                    .mark_closing_if_last_pane(&tab_id, Some(&request_id));
+                self.send(ClientMessage::ClosePane {
+                    tab_id,
+                    pane_id,
+                    request_id: Some(request_id),
+                });
             }
         }
         self.close_empty_pane_menu(window, cx);

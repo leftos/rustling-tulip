@@ -151,18 +151,20 @@ impl PaneClose {
         self.focus = controls[next];
     }
 
-    pub(crate) fn close_pane_message(&self) -> ClientMessage {
+    pub(crate) fn close_pane_message(&self, request_id: &str) -> ClientMessage {
         ClientMessage::ClosePane {
             tab_id: self.tab_id.clone(),
             pane_id: self.pane_id.clone(),
+            request_id: Some(request_id.to_owned()),
         }
     }
 
     /// Close the pane, stop the session unless it has already ended, and
     /// discard it keeping every member's worktree, the branch left to the
-    /// daemon's automatic choice.
-    pub(crate) fn discard_keep_messages(&self) -> Vec<ClientMessage> {
-        let mut messages = vec![self.close_pane_message()];
+    /// daemon's automatic choice. `request_id` is the id the close carries,
+    /// whose refusal clears the tab's closing mark.
+    pub(crate) fn discard_keep_messages(&self, request_id: &str) -> Vec<ClientMessage> {
+        let mut messages = vec![self.close_pane_message(request_id)];
         if !matches!(self.status, SessionStatus::Stopped | SessionStatus::Error) {
             messages.push(ClientMessage::StopSession {
                 session_id: self.session_id.clone(),
@@ -289,7 +291,7 @@ mod tests {
     fn discard_keep_skips_stop_when_stopped_or_error() {
         let kinds = |dialog: &PaneClose| -> Vec<String> {
             dialog
-                .discard_keep_messages()
+                .discard_keep_messages("q1")
                 .iter()
                 .map(|msg| wire(msg)["type"].as_str().unwrap_or_default().to_owned())
                 .collect()
@@ -312,9 +314,12 @@ mod tests {
     #[test]
     fn discard_keep_sends_keep_worktree_cleanup_per_member() {
         let two = dialog(SessionStatus::Stopped, true, &["r1", "r2"]);
-        let messages = two.discard_keep_messages();
+        let messages = two.discard_keep_messages("q1");
         assert!(
-            matches!(&messages[0], ClientMessage::ClosePane { tab_id, pane_id } if tab_id == "t1" && pane_id == "p1"),
+            matches!(&messages[0], ClientMessage::ClosePane { tab_id, pane_id, request_id }
+                if tab_id == "t1"
+                    && pane_id == "p1"
+                    && request_id.as_deref() == Some("q1")),
             "{messages:?}"
         );
         let Some(ClientMessage::DiscardSession {
@@ -334,7 +339,7 @@ mod tests {
             "{cleanup:?}"
         );
         assert!(matches!(
-            two.close_pane_message(),
+            two.close_pane_message("q1"),
             ClientMessage::ClosePane { .. }
         ));
     }

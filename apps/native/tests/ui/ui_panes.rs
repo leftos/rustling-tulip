@@ -96,7 +96,7 @@ fn pane_close_on_empty_pane_sends_close_immediately(cx: &mut TestAppContext) {
     h.click_on("close-pane-p2");
     let sent = h.sent();
     assert!(
-        matches!(sent.as_slice(), [ClientMessage::ClosePane { tab_id, pane_id }] if tab_id == "t1" && pane_id == "p2"),
+        matches!(sent.as_slice(), [ClientMessage::ClosePane { tab_id, pane_id, .. }] if tab_id == "t1" && pane_id == "p2"),
         "sent {sent:?}"
     );
     assert!(!h.in_model("pane-close"), "no dialog for an empty pane");
@@ -146,7 +146,7 @@ fn pane_only_sends_close_pane(cx: &mut TestAppContext) {
     h.click_on("pane-close-only");
     let sent = h.sent();
     assert!(
-        matches!(sent.as_slice(), [ClientMessage::ClosePane { tab_id, pane_id }] if tab_id == "t1" && pane_id == "p1"),
+        matches!(sent.as_slice(), [ClientMessage::ClosePane { tab_id, pane_id, .. }] if tab_id == "t1" && pane_id == "p1"),
         "sent {sent:?}"
     );
     assert!(!h.in_model("pane-close"), "the dialog closes");
@@ -1054,7 +1054,7 @@ fn pane_only_close_offers_undo_with_session_label(cx: &mut TestAppContext) {
     h.click_on("pane-close-only");
     let sent = h.sent();
     assert!(
-        matches!(sent.as_slice(), [ClientMessage::ClosePane { tab_id, pane_id }] if tab_id == "t1" && pane_id == "p1"),
+        matches!(sent.as_slice(), [ClientMessage::ClosePane { tab_id, pane_id, .. }] if tab_id == "t1" && pane_id == "p1"),
         "sent {sent:?}"
     );
 
@@ -1327,7 +1327,8 @@ fn layout_request_id(msg: &ClientMessage) -> Option<String> {
     match msg {
         ClientMessage::SplitPane { request_id, .. }
         | ClientMessage::MovePane { request_id, .. }
-        | ClientMessage::ExtractToNewTab { request_id, .. } => request_id.clone(),
+        | ClientMessage::ExtractToNewTab { request_id, .. }
+        | ClientMessage::ClosePane { request_id, .. } => request_id.clone(),
         _ => None,
     }
 }
@@ -1383,6 +1384,35 @@ fn a_rejected_move_unmarks_the_source_tab(cx: &mut TestAppContext) {
     assert!(
         matches!(&sent[0], ClientMessage::RestoreTabSnapshot { tab } if tab.id == "t1"),
         "the refused move left t1 in place, so it is replaced in place: {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn a_rejected_close_pane_unmarks_the_tab(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        sessions: vec![session("s1").build()],
+        tabs: vec![tab("t1", &pane("p1", Some("s1")))],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.sent();
+    h.click_on("close-pane-p1");
+    h.click_on("pane-close-only");
+    let sent = h.sent();
+    let request_id = sent
+        .iter()
+        .find_map(layout_request_id)
+        .expect("the close carries a request id");
+    let undo = newest_undo(&mut h);
+
+    refuse(&mut h, request_id);
+    h.sent();
+    h.click_on(&format!("undo-action-{undo}"));
+    let sent = h.sent();
+    assert!(
+        matches!(sent.as_slice(), [ClientMessage::RestoreTabSnapshot { tab }] if tab.id == "t1"),
+        "the refused close left t1 in place, so it is replaced in place: {sent:?}"
     );
 }
 

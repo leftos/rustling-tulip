@@ -2609,10 +2609,15 @@ pub enum ClientMessage {
         request_id: Option<String>,
     },
     /// Close a pane. If it was the only pane in the tab, the tab is removed.
-    /// Otherwise the parent split collapses to the remaining sibling.
+    /// Otherwise the parent split collapses to the remaining sibling. A
+    /// refused close is answered with [`DaemonMessage::Error`] carrying
+    /// `request_id`.
     ClosePane {
         tab_id: String,
         pane_id: String,
+        /// Echoed on the [`DaemonMessage::Error`] that refuses it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
     /// Update a single split's ratio. `split_path` is a sequence of 0/1
     /// indices (0 = first child, 1 = second child) descending from the tab

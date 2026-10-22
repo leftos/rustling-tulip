@@ -176,17 +176,22 @@ pub(super) fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow
                 Err(err) => send_tab_failure(out_tx, &err, request_id),
             }
         }
-        ClientMessage::ClosePane { tab_id, pane_id } => {
+        ClientMessage::ClosePane {
+            tab_id,
+            pane_id,
+            request_id,
+        } => {
             let outcome = hub.state.try_mutate_client_layout(client_id, |tabs| {
                 crate::tabs::close_pane_in_tabs(tabs, &tab_id, &pane_id)
-            })?;
+            });
             match outcome {
-                crate::tabs::ClosedTab::Removed(id) => {
+                Ok(crate::tabs::ClosedTab::Removed(id)) => {
                     hub.emit_tab(client_id, TabEvent::Removed(id));
                 }
-                crate::tabs::ClosedTab::Updated(tab) => {
+                Ok(crate::tabs::ClosedTab::Updated(tab)) => {
                     hub.emit_tab(client_id, TabEvent::Updated(tab));
                 }
+                Err(err) => send_tab_failure(out_tx, &err, request_id),
             }
         }
         ClientMessage::SetPaneRatio {
@@ -433,9 +438,10 @@ fn short_rev(rev: &str) -> &str {
     if rev.len() > 7 { &rev[..7] } else { rev }
 }
 
-/// Answers a failed tab-layout request (`CreateTab`, `SplitPane`, `MergeTabs`,
-/// `MovePane`, `ExtractToNewTab`) with an `Error` to this requester only, carrying the
-/// `request_id` it asked with so the client can drop what it armed for it.
+/// Answers a failed tab-layout request (`CreateTab`, `SplitPane`, `ClosePane`,
+/// `MergeTabs`, `MovePane`, `ExtractToNewTab`) with an `Error` to this requester
+/// only, carrying the `request_id` it asked with so the client can drop what it
+/// armed for it.
 fn send_tab_failure(
     out_tx: &mpsc::UnboundedSender<DaemonMessage>,
     err: &anyhow::Error,
@@ -666,6 +672,29 @@ mod tests {
                 &msg,
                 DaemonMessage::Error { message, request_id: Some(id) }
                     if id == "x1" && message.contains("ghost-tab")
+            ),
+            "{msg:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_close_pane_echoes_its_request_id() {
+        let (hub, _scratch) = test_hub("close-pane-rid");
+        seed_two_pane_layout(&hub, "c1");
+        let msg = dispatch_one(
+            &hub,
+            ClientMessage::ClosePane {
+                tab_id: "t1".to_string(),
+                pane_id: "ghost-pane".to_string(),
+                request_id: Some("r1".to_string()),
+            },
+        )
+        .await;
+        assert!(
+            matches!(
+                &msg,
+                DaemonMessage::Error { message, request_id: Some(id) }
+                    if id == "r1" && message.contains("ghost-pane")
             ),
             "{msg:?}"
         );
