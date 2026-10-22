@@ -4,8 +4,7 @@
 //! priority: the highest-priority rule whose matcher hits its region, and none
 //! of whose guards does, decides the reading. An overlay rule keeps whatever
 //! state the session already has, since the overlay is drawn over a turn that
-//! may be running or done. Nothing calls this yet; the status watchers read it
-//! in a later change.
+//! may be running or done. Only the tests call it.
 
 use std::cmp::Reverse;
 use std::sync::LazyLock;
@@ -16,13 +15,13 @@ use super::Screen;
 
 /// The spinner line of a turn in progress: a cycling glyph, a capitalised
 /// verb, an ellipsis, then the optional phase, the elapsed time and the token
-/// details.
-const SPINNER: &str = r"^\s*[·✢*✶✻✽]\s+\p{Lu}[\p{L}'’-]*…(?:\s+·\s+[\p{L} ]+?)?(?:\s+\(.*\))?\s*$";
+/// details, which the terminal width may cut off mid-detail.
+const SPINNER: &str = r"^\s*[·✢*✶✻✽✳]\s+\p{Lu}[\p{L}'’-]*…(?:\s+·\s+[\p{L} ]+?)?(?:\s+\(.*)?\s*$";
 
 /// The spinner a turn keeps painted while its hooks run: Claude leaves it up
 /// across a hook-reported stop or tool start, so the line is not a turn of its
 /// own.
-const HOOKS_RUNNING: &str = r"^\s*[·✢*✶✻✽]\s+\S.*\(running \p{L}+ hooks…";
+const HOOKS_RUNNING: &str = r"^\s*[·✢*✶✻✽✳]\s+\S.*\(running \p{L}+ hooks…";
 
 /// The state a Claude session's screen shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,15 +61,6 @@ pub struct Reading {
 enum Region {
     /// The last `n` non-empty rows.
     BottomNonEmpty(usize),
-    /// The rows below the last rule row.
-    #[cfg_attr(
-        test,
-        expect(
-            dead_code,
-            reason = "no rule reads this region yet; the reader is there for the rules a later table adds"
-        )
-    )]
-    AfterLastRule,
     /// The rows between the prompt box's two rules.
     PromptBoxBody,
     /// The last `n` non-empty rows above the prompt box.
@@ -155,7 +145,7 @@ static CLAUDE_RULES: &[Rule] = &[
         name: "dialog_question_review",
         priority: 980,
         region: Region::BottomNonEmpty(24),
-        matcher: Matcher::Contains("Ready to submit your answers?"),
+        matcher: Matcher::Line(r"^\s*(?:❯\s*)?\d+\.\s+Submit answers\s*$"),
         not: &[],
         verdict: Verdict::State(ScreenState::AwaitingInput),
     },
@@ -163,7 +153,7 @@ static CLAUDE_RULES: &[Rule] = &[
         name: "dialog_plan",
         priority: 980,
         region: Region::BottomNonEmpty(24),
-        matcher: Matcher::Contains("Would you like to proceed?"),
+        matcher: Matcher::Contains("Tell Claude what to change"),
         not: &[],
         verdict: Verdict::State(ScreenState::AwaitingInput),
     },
@@ -178,7 +168,7 @@ static CLAUDE_RULES: &[Rule] = &[
     Rule {
         name: "turn_hooks_running",
         priority: 975,
-        region: Region::AbovePromptBox(12),
+        region: Region::AbovePromptBox(24),
         matcher: Matcher::Line(HOOKS_RUNNING),
         not: &[],
         verdict: Verdict::Keep,
@@ -186,7 +176,7 @@ static CLAUDE_RULES: &[Rule] = &[
     Rule {
         name: "turn_spinner",
         priority: 970,
-        region: Region::AbovePromptBox(12),
+        region: Region::AbovePromptBox(24),
         matcher: Matcher::Line(SPINNER),
         not: &[],
         verdict: Verdict::State(ScreenState::Working),
@@ -194,7 +184,7 @@ static CLAUDE_RULES: &[Rule] = &[
     Rule {
         name: "overlay_heads_up",
         priority: 960,
-        region: Region::AbovePromptBox(16),
+        region: Region::AbovePromptBox(24),
         matcher: Matcher::Contains("✦ Heads up ·"),
         not: &[],
         verdict: Verdict::Keep,
@@ -211,7 +201,7 @@ static CLAUDE_RULES: &[Rule] = &[
         name: "idle_prompt_box",
         priority: 940,
         region: Region::PromptBoxBody,
-        matcher: Matcher::Line(r"^\s*❯"),
+        matcher: Matcher::Line(r"^\s*(?:❯|!)(?:\s|$)"),
         not: &[],
         verdict: Verdict::State(ScreenState::Idle),
     },
@@ -284,8 +274,8 @@ struct RegionLines {
 }
 
 impl RegionLines {
-    /// The lines of `region`, read now when this evaluation has not needed it
-    /// yet.
+    /// The lines of `region`, read now unless this evaluation has already read
+    /// them.
     fn get(&mut self, screen: &Screen, region: Region) -> &[String] {
         let index = if let Some(index) = self.read.iter().position(|(key, _)| *key == region) {
             index
@@ -357,7 +347,6 @@ impl CompiledMatcher {
 fn region_lines(screen: &Screen, region: Region) -> Vec<String> {
     match region {
         Region::BottomNonEmpty(n) => screen.bottom_non_empty_lines(n),
-        Region::AfterLastRule => screen.after_last_horizontal_rule(),
         Region::PromptBoxBody => screen.prompt_box_body(),
         Region::AbovePromptBox(n) => screen.above_prompt_box(n),
         Region::Title => screen.title().into_iter().collect(),
@@ -625,6 +614,9 @@ mod tests {
             "✶ Wibbling… ",
             "✢ Puzzling… (3m 3s · ↓ 9.2k tokens)",
             "* Wibbling… (4s · ↓ 304 tokens)",
+            "✳ Cooking… (3s · ↓ 120 tokens)",
+            "· Cooking… (21s · ↓ 1.1k tokens · thinking with hi…",
+            "✻ Brewing… (3s · ↓",
         ];
         for line in spinners {
             assert!(spinner.is_match(line), "read as no spinner: {line:?}");
@@ -656,6 +648,75 @@ mod tests {
         for line in others {
             assert!(!hooks.is_match(line), "read as running hooks: {line:?}");
         }
+    }
+
+    /// The index of a capture's box prompt row: the last row that starts with
+    /// the prompt glyph.
+    fn prompt_row<S: AsRef<str>>(lines: &[S]) -> usize {
+        lines
+            .iter()
+            .rposition(|line| line.as_ref().trim_start().starts_with('❯'))
+            .expect("the capture's prompt row")
+    }
+
+    /// A capture with `rows` inserted above the box's top rule.
+    fn with_rows_above_the_box(capture: &str, rows: &[&str]) -> String {
+        let lines: Vec<&str> = capture.lines().collect();
+        let prompt = prompt_row(&lines);
+        let top = lines[..prompt]
+            .iter()
+            .rposition(|line| line.trim_start().starts_with('─'))
+            .expect("the box's top rule");
+        let mut built: Vec<&str> = lines[..top].to_vec();
+        built.extend_from_slice(rows);
+        built.extend_from_slice(&lines[top..]);
+        built.join("\r\n")
+    }
+
+    /// A capture whose box row reads the bash-mode prompt.
+    fn with_bash_prompt(capture: &str) -> String {
+        let mut lines: Vec<String> = capture.lines().map(str::to_owned).collect();
+        let prompt = prompt_row(&lines);
+        lines[prompt] = "! ".to_owned();
+        lines.join("\r\n")
+    }
+
+    #[test]
+    fn reply_prose_is_not_a_dialog() {
+        let frame = with_rows_above_the_box(
+            include_str!("fixtures/v03-ready.txt"),
+            &[
+                "● I've drafted the change. Would you like to proceed?",
+                "Ready to submit your answers?",
+            ],
+        );
+        let reading = read_claude(&screen_from(&frame));
+        assert_eq!(reading.verdict, Verdict::State(ScreenState::Idle));
+        assert_eq!(reading.rule, Some("idle_prompt_box"));
+    }
+
+    #[test]
+    fn a_long_todo_list_keeps_the_spinner_in_view() {
+        let mut rows = vec!["· Cooking… (21s · ↓ 1.1k tokens)".to_owned()];
+        for task in 1..=15 {
+            rows.push(format!("  ⎿  ◻ task {task}"));
+        }
+        rows.push("─".repeat(40));
+        rows.push("❯ ".to_owned());
+        rows.push("─".repeat(40));
+        rows.push("  ? for shortcuts".to_owned());
+        let reading = read_claude(&screen_from(&rows.join("\r\n")));
+        assert_eq!(reading.verdict, Verdict::State(ScreenState::Working));
+        assert_eq!(reading.rule, Some("turn_spinner"));
+    }
+
+    #[test]
+    fn a_bash_mode_box_reads_idle() {
+        let frame = with_bash_prompt(include_str!("fixtures/v03-ready.txt"));
+        let reading = read_claude(&screen_from(&frame));
+        assert_eq!(reading.verdict, Verdict::State(ScreenState::Idle));
+        assert_eq!(reading.rule, Some("idle_prompt_box"));
+        assert!(!reading.from_title);
     }
 
     #[test]

@@ -19,10 +19,7 @@ use tokio::sync::broadcast;
 
 #[cfg_attr(
     not(test),
-    expect(
-        dead_code,
-        reason = "the screen rules have no caller yet: the status watchers read them in a later change"
-    )
+    expect(dead_code, reason = "the screen rules are read by the tests only")
 )]
 pub mod rules;
 
@@ -93,10 +90,7 @@ pub struct Screen {
 
 #[cfg_attr(
     not(test),
-    expect(
-        dead_code,
-        reason = "the region readers are the screen rules' API; only the tests call them yet"
-    )
+    expect(dead_code, reason = "the region readers are read by the tests only")
 )]
 impl Screen {
     /// A blank grid `cols` by `rows`; a zero dimension becomes one.
