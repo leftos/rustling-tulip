@@ -527,6 +527,11 @@ pub struct SessionSnapshot {
     /// daemon decodes as [`PendingInput::Unknown`].
     #[serde(default)]
     pub pending_input: Option<PendingInput>,
+    /// True while the session is `Idle` but its agent's last turn ended with
+    /// background work still running: a background shell or subagent, or a
+    /// pending one-shot wakeup. Always false beside any other status.
+    #[serde(default)]
+    pub background: bool,
 }
 
 /// What a session is waiting for, as the agent CLI's own hooks last reported
@@ -6965,6 +6970,24 @@ mod tests {
             snapshot.pending_input, None,
             "a snapshot from before the field reads as None"
         );
+    }
+
+    #[test]
+    fn snapshot_without_background_decodes() {
+        let snapshot: SessionSnapshot =
+            serde_json::from_str(SNAPSHOT_WITHOUT_STATUS_SINCE).expect("an older snapshot decodes");
+        assert!(
+            !snapshot.background,
+            "a snapshot from before the field reads as no background work"
+        );
+        let json = serde_json::to_value(SessionSnapshot {
+            background: true,
+            ..snapshot
+        })
+        .expect("encode");
+        assert_eq!(json.get("background"), Some(&serde_json::json!(true)));
+        let back: SessionSnapshot = serde_json::from_value(json).expect("decode");
+        assert!(back.background, "the flag round-trips");
     }
 
     #[test]

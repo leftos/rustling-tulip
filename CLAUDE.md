@@ -168,7 +168,9 @@ After that, hook reports drive its status: hooks own every promotion into `Worki
 
 The silence is counted from the later of the last PTY output and the last hook-reported status or stamp change, so a hook status that arrives while the PTY is quiet still ends. A plain shell's silence demotion also clears `hook_driven`, handing the shell back to its own Idle/Working classifier until the next mapped hook event.
 
-A subagent's hook event (an `agent_id` in its input) never ends or replaces the main agent's pending prompt, and a subagent `PermissionRequest` raises one only when none is pending. A `Notification` `idle_prompt` does not leave `AwaitingInput` while a hook-reported prompt is pending.
+A subagent's hook event (an `agent_id` in its input) never ends or replaces the main agent's pending prompt and never promotes the session to `Working`, and a subagent `PermissionRequest` raises one only when none is pending.
+
+A main-agent `Stop` whose `background_tasks` lists a running task, or whose `session_crons` holds a one-shot cron, sets the snapshot's `background` flag beside `Idle` (RT-84); any status change, a stop, a park or an exit clears it, PTY silence does not, and it is never written to the sidecar. A `Notification` `idle_prompt` does not leave `AwaitingInput` while a hook-reported prompt is pending.
 
 An owner key sent to a hook-driven session with a pending prompt clears `AwaitingInput` and `pending_input` at once (a `SendInput` marked `automatic`, the client's query replies, wheel and pointer-motion reports, never does), and a status watcher write (the classifier or a silence demotion) that moves a session off `AwaitingInput` clears `pending_input` in the same update. Token and cost figures exist only for headless runs, where they come from the CLI's stream-json (`agents/claude.rs::handle_headless_line`), so an interactive session's snapshot carries none. Headless mode (`claude --print --output-format stream-json`) uses `crates/daemon/src/headless.rs` for structured events.
 

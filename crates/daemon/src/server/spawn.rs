@@ -611,6 +611,7 @@ fn interactive_record(
         pending_input: None,
         last_hook_time: None,
         hook_driven: false,
+        background: false,
         last_assistant_message: None,
         busy_excluded: new.busy_excluded,
     };
@@ -674,6 +675,7 @@ fn plain_shell_record(
         pending_input: None,
         last_hook_time: None,
         hook_driven: false,
+        background: false,
         last_assistant_message: None,
         busy_excluded: new.busy_excluded,
     };
@@ -1156,6 +1158,7 @@ fn spawn_headless_session(
         pending_input: None,
         last_hook_time: None,
         hook_driven: false,
+        background: false,
         last_assistant_message: None,
         busy_excluded,
     };

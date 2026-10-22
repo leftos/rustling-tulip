@@ -212,6 +212,13 @@ pub struct SessionRecord {
     /// a `Stop` reports one; a `Stop` with no message keeps the previous one.
     /// Runtime-only: neither mirrored into the sidecar nor sent on the wire.
     pub last_assistant_message: Option<String>,
+    /// True while the session is `Idle` but the main agent's last `Stop`
+    /// reported background work still running; copied into
+    /// [`SessionSnapshot::background`]. Set by that `Stop`, cleared by any
+    /// status change ([`crate::pty_state::apply_status`]) and by the writers
+    /// that set a terminal status directly. Runtime-only: a reattached or
+    /// rebuilt record starts with it false.
+    pub background: bool,
 }
 
 impl SessionRecord {
@@ -276,6 +283,7 @@ impl SessionRecord {
             busy_excluded: self.busy_excluded,
             claude_provider,
             pending_input: self.pending_input.clone(),
+            background: self.background,
         }
     }
 }
@@ -845,6 +853,7 @@ async fn watch_exit(
         rec.status = SessionStatus::Stopped;
         // A stopped session has nothing left waiting on it.
         rec.pending_input = None;
+        rec.background = false;
         rec.pty = None;
         rec.input_notifier = None;
         rec.scrollback_snapshot_req = None;
@@ -930,6 +939,7 @@ impl SessionRegistry {
             pending_input: None,
             last_hook_time: None,
             hook_driven: false,
+            background: false,
             last_assistant_message: None,
             busy_excluded: meta.busy_excluded,
         };
@@ -1000,6 +1010,7 @@ impl SessionRegistry {
             pending_input,
             last_hook_time: None,
             hook_driven: false,
+            background: false,
             last_assistant_message: None,
             busy_excluded: meta.busy_excluded,
         };
@@ -1049,6 +1060,7 @@ impl SessionRegistry {
             pending_input: None,
             last_hook_time: None,
             hook_driven: false,
+            background: false,
             last_assistant_message: None,
             busy_excluded: meta.busy_excluded,
         };
@@ -1121,6 +1133,7 @@ mod tests {
             pending_input: None,
             last_hook_time: None,
             hook_driven: false,
+            background: false,
             last_assistant_message: None,
             busy_excluded: false,
         }
@@ -1504,6 +1517,7 @@ mod tests {
             summary: "cargo build".to_owned(),
         });
         rec.hook_driven = true;
+        rec.background = true;
         insert_live(&registry, &dirs, rec, &pty);
         let mut events = registry.subscribe();
 
@@ -1516,6 +1530,7 @@ mod tests {
         let record = crate::sync::lock(&rec);
         assert_eq!(record.status, SessionStatus::Stopped);
         assert_eq!(record.pending_input, None, "the prompt left with the exit");
+        assert!(!record.background, "no background work outlives the exit");
         let _ = std::fs::remove_dir_all(&dirs.config);
     }
 

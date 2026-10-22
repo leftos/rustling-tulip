@@ -54,6 +54,11 @@ pub struct HookDetails {
     /// non-empty `agent_id`. (`agent_type` alone also marks a main agent run
     /// with `--agent`, so it is not the marker.)
     pub subagent: bool,
+    /// Whether the payload reports background work: a `background_tasks`
+    /// element with `"status": "running"`, or a `session_crons` element with
+    /// `"recurring": false` (a pending one-shot wakeup). Missing keys,
+    /// non-arrays and malformed elements count as none.
+    pub background_work: bool,
 }
 
 /// Read the extra fields out of one hook payload.
@@ -72,7 +77,25 @@ pub fn details(body: &Value) -> HookDetails {
             .filter(|reason| !reason.is_empty())
             .or_else(|| text("message")),
         subagent: text("agent_id").is_some_and(|id| !id.is_empty()),
+        background_work: reports_background_work(body),
     }
+}
+
+/// Whether `body` lists a running background task or a pending one-shot
+/// cron. A recurring cron alone is not background work.
+fn reports_background_work(body: &Value) -> bool {
+    let array = |key: &str| body.get(key).and_then(Value::as_array);
+    let running_task = array("background_tasks").is_some_and(|tasks| {
+        tasks
+            .iter()
+            .any(|task| task.get("status").and_then(Value::as_str) == Some("running"))
+    });
+    let one_shot_cron = array("session_crons").is_some_and(|crons| {
+        crons
+            .iter()
+            .any(|cron| cron.get("recurring").and_then(Value::as_bool) == Some(false))
+    });
+    running_task || one_shot_cron
 }
 
 /// `text` cut to at most `max_bytes` UTF-8 bytes on a character boundary,
@@ -268,8 +291,11 @@ pub(crate) fn apply_to_record(
     if leaves_pending_alone(record, signal, details) {
         return (false, apply_details(record, details));
     }
+    // A subagent works on while the main agent is idle, so its events never
+    // promote the session into `Working`.
     let entered_awaiting = signal
         .status
+        .filter(|status| !(details.subagent && *status == SessionStatus::Working))
         .is_some_and(|status| crate::pty_state::apply_status(record, status));
     match &signal.pending {
         PendingUpdate::Clear => record.pending_input = None,
@@ -424,6 +450,11 @@ pub(crate) fn apply_details(
         }
         "Stop" => {
             store_last_message(record, details);
+            // Only the main agent's turn end says whether work runs on; the
+            // status is already `Idle` here, in the same update.
+            if !details.subagent {
+                record.background = details.background_work;
+            }
             None
         }
         "StopFailure" => {
@@ -1178,6 +1209,7 @@ mod tests {
             "permission_mode": "plan",
             "reason": "overloaded",
             "message": "ignored",
+            "background_tasks": [{"id": "b1", "type": "shell", "status": "running"}],
         });
         assert_eq!(
             details(&body),
@@ -1188,6 +1220,7 @@ mod tests {
                 permission_mode: Some("plan".to_owned()),
                 failure_detail: Some("overloaded".to_owned()),
                 subagent: false,
+                background_work: true,
             }
         );
     }
@@ -1204,15 +1237,154 @@ mod tests {
                 permission_mode: None,
                 failure_detail: None,
                 subagent: false,
+                background_work: false,
             }
         );
         // A wrong-typed field reads as absent, and `message` stands in for a
         // missing or non-string `reason`.
-        let typed = json!({"session_id": 7, "reason": 3, "message": "boom"});
+        let typed = json!({
+            "session_id": 7,
+            "reason": 3,
+            "message": "boom",
+            "background_tasks": {"status": "running"},
+            "session_crons": "nope",
+        });
         let read = details(&typed);
         assert_eq!(read.event, "");
         assert_eq!(read.session_id, None);
         assert_eq!(read.failure_detail.as_deref(), Some("boom"));
+        assert!(!read.background_work, "non-arrays are no background work");
+    }
+
+    /// A hook-driven record mid-turn, last stamped at 1.
+    fn turn_record() -> SessionRecord {
+        let mut record = crate::history::test_support::record("s1", SessionMode::Interactive);
+        record.status = SessionStatus::Working;
+        record.last_hook_time = Some(1);
+        record.hook_driven = true;
+        record
+    }
+
+    /// A main-agent `Stop` carrying `tasks` and `crons`.
+    fn main_stop(tasks: &Value, crons: &Value) -> Value {
+        json!({
+            "hook_event_name": "Stop",
+            "last_assistant_message": "started",
+            "background_tasks": tasks,
+            "session_crons": crons,
+        })
+    }
+
+    #[test]
+    fn a_main_stop_with_a_running_task_sets_background_beside_idle() {
+        let mut record = turn_record();
+        let tasks = json!([{"id": "b1", "type": "shell", "status": "running"}]);
+        apply_body(&mut record, 2, &main_stop(&tasks, &json!([])));
+        assert_eq!(record.status, SessionStatus::Idle);
+        assert!(record.background, "a running shell is background work");
+        assert!(record.snapshot().background, "the snapshot carries it");
+    }
+
+    #[test]
+    fn a_main_stop_with_a_one_shot_cron_sets_background() {
+        let mut record = turn_record();
+        let crons = json!([{"id": "c1", "schedule": "21 12 * * *", "recurring": false}]);
+        apply_body(&mut record, 2, &main_stop(&json!([]), &crons));
+        assert_eq!(record.status, SessionStatus::Idle);
+        assert!(record.background, "a pending wakeup is background work");
+    }
+
+    #[test]
+    fn a_recurring_cron_alone_leaves_background_false() {
+        let mut record = turn_record();
+        let crons = json!([{"id": "c1", "schedule": "* * * * *", "recurring": true}]);
+        apply_body(&mut record, 2, &main_stop(&json!([]), &crons));
+        assert_eq!(record.status, SessionStatus::Idle);
+        assert!(!record.background);
+    }
+
+    #[test]
+    fn a_main_stop_with_no_running_work_leaves_background_false() {
+        let bodies = [
+            main_stop(&json!([]), &json!([])),
+            json!({"hook_event_name": "Stop", "last_assistant_message": "done"}),
+            main_stop(
+                &json!([{"id": "b1", "type": "shell", "status": "completed"}]),
+                &json!([]),
+            ),
+            main_stop(&json!([7, {"status": 3}]), &json!([{"recurring": "no"}])),
+        ];
+        for body in bodies {
+            let mut record = turn_record();
+            record.status = SessionStatus::Idle;
+            record.background = true;
+            apply_body(&mut record, 2, &body);
+            assert_eq!(record.status, SessionStatus::Idle, "{body}");
+            assert!(!record.background, "{body}");
+        }
+    }
+
+    #[test]
+    fn a_subagent_stop_leaves_background_alone() {
+        let mut set = turn_record();
+        set.status = SessionStatus::Idle;
+        set.background = true;
+        apply_body(
+            &mut set,
+            2,
+            &json!({"hook_event_name": "Stop", "agent_id": "a1", "background_tasks": []}),
+        );
+        assert!(set.background, "a subagent's Stop does not clear it");
+
+        let mut unset = turn_record();
+        unset.status = SessionStatus::Idle;
+        apply_body(
+            &mut unset,
+            2,
+            &json!({
+                "hook_event_name": "Stop",
+                "agent_id": "a1",
+                "background_tasks": [{"id": "a1", "type": "subagent", "status": "running"}],
+            }),
+        );
+        assert!(!unset.background, "a subagent's Stop does not set it");
+    }
+
+    #[test]
+    fn a_prompt_submit_after_a_background_stop_clears_it() {
+        let mut record = turn_record();
+        let tasks = json!([{"id": "b1", "type": "shell", "status": "running"}]);
+        apply_body(&mut record, 2, &main_stop(&tasks, &json!([])));
+        assert!(record.background);
+        apply_body(
+            &mut record,
+            3,
+            &json!({"hook_event_name": "UserPromptSubmit", "prompt": "<task-notification>"}),
+        );
+        assert_eq!(record.status, SessionStatus::Working);
+        assert!(!record.background, "leaving Idle clears the flag");
+    }
+
+    #[test]
+    fn a_subagent_tool_event_never_promotes_to_working() {
+        for event in ["PreToolUse", "PostToolUse", "PostToolUseFailure"] {
+            let mut record = turn_record();
+            record.status = SessionStatus::Idle;
+            record.background = true;
+            apply_body(
+                &mut record,
+                2,
+                &json!({
+                    "hook_event_name": event,
+                    "agent_id": "a1",
+                    "agent_type": "general-purpose",
+                    "tool_name": "Bash",
+                }),
+            );
+            assert_eq!(record.status, SessionStatus::Idle, "{event}");
+            assert!(record.background, "{event}");
+            assert_eq!(record.last_hook_time, Some(2), "{event} still stamps");
+        }
     }
 
     #[test]

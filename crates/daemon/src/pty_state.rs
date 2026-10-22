@@ -843,14 +843,17 @@ fn transition(
 
 /// Apply `next` to `record` when it is a real change.
 ///
-/// Sets the status and records the `"awaiting input"` action on entry.
-/// Answers whether the record entered `AwaitingInput`, so a caller holding a
-/// registry update can raise the one `Attention` after that update returns.
+/// Sets the status, clears the background flag (true only beside the `Idle`
+/// a `Stop` writes after this) and records the `"awaiting input"` action on
+/// entry. Answers whether the record entered `AwaitingInput`, so a caller
+/// holding a registry update can raise the one `Attention` after that update
+/// returns.
 pub fn apply_status(record: &mut SessionRecord, next: SessionStatus) -> bool {
     if record.status == next {
         return false;
     }
     record.status = next;
+    record.background = false;
     if next == SessionStatus::AwaitingInput {
         push_recent_action(record, "awaiting input".to_string());
         return true;
@@ -1129,6 +1132,7 @@ mod hysteresis_tests {
             pending_input: None,
             last_hook_time: None,
             hook_driven: false,
+            background: false,
             last_assistant_message: None,
             busy_excluded: false,
         }
@@ -1356,6 +1360,28 @@ mod hysteresis_tests {
             h.status(),
             SessionStatus::Idle,
             "silence demotes hook-reported work"
+        );
+    }
+
+    /// An `Idle` whose turn ended with background work still running is not
+    /// demoted or cleared by PTY silence: only a status change ends it.
+    #[tokio::test(start_paused = true)]
+    async fn idle_with_background_survives_silence() {
+        let h = start("hook-idle-background", false);
+        h.set_record(|record| {
+            record.hook_driven = true;
+            record.status = SessionStatus::Idle;
+            record.background = true;
+        });
+        h.heartbeat(0);
+        settle().await;
+        tokio::time::sleep(IDLE_AFTER + Duration::from_millis(50)).await;
+        settle().await;
+        assert_eq!(h.status(), SessionStatus::Idle);
+        let rec = h.registry.get(SESSION).expect("session registered");
+        assert!(
+            rec.lock().expect("record lock").background,
+            "silence leaves the background flag set"
         );
     }
 

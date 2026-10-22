@@ -638,6 +638,7 @@ async fn park_session(hub: &Hub, session_id: &str) {
         r.is_inactive = true;
         // A parked session has nothing left waiting on it.
         r.pending_input = None;
+        r.background = false;
         pty = r.pty.take();
         headless_handle = r.headless.take();
         r.input_notifier = None;
@@ -1029,6 +1030,7 @@ pub(super) async fn stop_session(hub: &Hub, session_id: &str) -> anyhow::Result<
         r.status = protocol::SessionStatus::Stopped;
         // A stopped session has nothing left waiting on it.
         r.pending_input = None;
+        r.background = false;
         pty = r.pty.take();
         headless_handle = r.headless.take();
         r.input_notifier = None;
@@ -1490,6 +1492,7 @@ mod tests {
             summary: "cargo build".to_owned(),
         });
         rec.hook_driven = true;
+        rec.background = true;
         insert_live(&hub.sessions, &hub.dirs, rec, &pty);
         stop_session(&hub, "s1").await.expect("stop");
         let snapshot = snapshot_of(&hub, "s1");
@@ -1498,6 +1501,7 @@ mod tests {
             snapshot.pending_input, None,
             "the prompt left with the stop"
         );
+        assert!(!snapshot.background, "no background work outlives the stop");
     }
 
     /// A parked session drops its prompt the same way: it keeps its record

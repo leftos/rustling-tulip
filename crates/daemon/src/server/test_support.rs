@@ -260,6 +260,7 @@ pub(super) fn idle_record(id: &str) -> SessionRecord {
         pending_input: None,
         last_hook_time: None,
         hook_driven: false,
+        background: false,
         last_assistant_message: None,
         busy_excluded: false,
     }
