@@ -15,7 +15,7 @@
 //!   (elapsed-time counter, slow spinner) holds `working` instead of flapping
 
 use crate::osc_title::TitleActivity;
-use crate::session::{SessionRecord, SessionRegistry, push_recent_action};
+use crate::session::{SessionEvent, SessionRecord, SessionRegistry, push_recent_action};
 use protocol::{AttentionReason, SessionStatus};
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -113,12 +113,13 @@ pub fn watch(
         mut output,
         mut input_pulses,
     } = streams;
+    let mut wake = RecordWake::new(&registry, &session_id);
     tokio::spawn(async move {
         let mut state = State::seed(initial);
         let mut last_output = Instant::now();
         // The idle timer fires once per stretch of silence: a hook-reported
         // `AwaitingInput` whose prompt still matches holds without rearming,
-        // and the next output starts a new stretch.
+        // and the next output or hook-reported status starts a new stretch.
         let mut idle_checked = false;
         let mut scrollback: Vec<u8> = Vec::with_capacity(SCROLLBACK_BYTES);
         let mut in_window: VecDeque<(Instant, u32)> = VecDeque::new();
@@ -127,7 +128,10 @@ pub fn watch(
 
         loop {
             let next_idle_check = last_output + IDLE_AFTER;
+            // In arm order: a pending hook status re-arms the deadline before
+            // a stale deadline can fire.
             tokio::select! {
+                biased;
                 msg = output.recv() => match msg {
                     Ok(bytes) => {
                         let now = Instant::now();
@@ -207,14 +211,14 @@ pub fn watch(
                         // will reclassify with this volume in scope.
                     }
                 },
+                event = wake.events.recv(), if wake.open => {
+                    if wake.changed(&registry, &session_id, event) {
+                        last_output = Instant::now();
+                        idle_checked = false;
+                    }
+                },
                 () = sleep_until(next_idle_check),
-                    if !idle_checked
-                        && record_status(&registry, &session_id).is_some_and(|read| {
-                            matches!(
-                                read.status,
-                                SessionStatus::Working | SessionStatus::AwaitingInput
-                            )
-                        }) => {
+                    if !idle_checked && agent_idle_due(&registry, &session_id) => {
                     idle_checked = true;
                     on_idle(
                         &registry,
@@ -234,11 +238,11 @@ pub fn watch(
 /// Plain shells deliberately avoid the Claude prompt classifier, but they can
 /// still expose useful activity: command output should set the status to
 /// `Working`, while echoed input and prompt redraws should leave it `Idle`.
-/// `initial` is the status the session's record already carries. A plain
-/// shell only moves between `Idle` and `Working`, and its idle timer only
-/// fires from `Working`, so any other stored status seeds `Idle` (see
-/// [`State::seed_plain_shell`]): seeded `AwaitingInput` the watcher would
-/// never leave it.
+/// `initial` is the status the session's record already carries. The shell
+/// classifier only moves between `Idle` and `Working`, so any other stored
+/// status seeds `Idle` (see [`State::seed_plain_shell`]). Hooks injected into
+/// an agent the shell runs can report `AwaitingInput`; the idle timer demotes
+/// it once its prompt has left the screen (see [`on_plain_shell_idle`]).
 pub fn watch_plain_shell(
     registry: &Arc<SessionRegistry>,
     session_id: String,
@@ -250,20 +254,30 @@ pub fn watch_plain_shell(
         mut output,
         mut input_pulses,
     } = streams;
+    let mut wake = RecordWake::new(&registry, &session_id);
     tokio::spawn(async move {
         let mut state = State::seed_plain_shell(initial);
         let mut last_output = Instant::now();
+        // The idle timer fires once per stretch of silence; the next output
+        // or hook-reported status starts a new stretch.
+        let mut idle_checked = false;
+        // Read only to tell whether a hook-reported prompt is still on screen.
+        let mut scrollback: Vec<u8> = Vec::with_capacity(SCROLLBACK_BYTES);
         let mut in_window: VecDeque<(Instant, u32)> = VecDeque::new();
         let mut out_window: VecDeque<(Instant, u32)> = VecDeque::new();
         let mut title_activity = TitleActivity::new();
 
         loop {
             let next_idle_check = last_output + IDLE_AFTER;
+            // In arm order: a pending hook status re-arms the deadline before
+            // a stale deadline can fire.
             tokio::select! {
+                biased;
                 msg = output.recv() => match msg {
                     Ok(bytes) => {
                         let now = Instant::now();
                         last_output = now;
+                        idle_checked = false;
                         // See watcher in `watch` for the rationale — drain
                         // pending input pulses before classifying so a fast
                         // typist's keystroke doesn't race ahead of its own
@@ -271,6 +285,7 @@ pub fn watch_plain_shell(
                         while let Ok(n) = input_pulses.try_recv() {
                             push_window(&mut in_window, now, n);
                         }
+                        append_scrollback(&mut scrollback, &bytes);
                         push_window(&mut out_window, now, bytes.len());
                         trim_window(&mut in_window, now);
                         trim_window(&mut out_window, now);
@@ -320,47 +335,65 @@ pub fn watch_plain_shell(
                         trim_window(&mut in_window, now);
                     }
                 },
-                () = sleep_until(next_idle_check),
-                    if plain_shell_idle_due(&registry, &session_id, state) => {
-                    let read = record_status(&registry, &session_id);
-                    if let Some(read) = read
-                        && read.hook_driven
-                    {
-                        // The record's status is the truth while hooks are
-                        // live: sync the local state, then end a hook-reported
-                        // `Working` turn whose PTY has gone quiet. The demotion
-                        // re-checks the status and hook stamp under the lock,
-                        // so a promotion that landed since the read wins. A
-                        // hook-reported `AwaitingInput` is left alone.
-                        state = State::seed_plain_shell(read.status);
-                        if read.status == SessionStatus::Working {
-                            state = State::Idle;
-                            demote_after_silence(
-                                &registry,
-                                &session_id,
-                                SessionStatus::Working,
-                                read.last_hook_time,
-                            );
-                        }
-                    } else if let Some(read) = read
-                        && !read.hook_driven
-                    {
-                        // Hooks that have ended leave the record `Working`;
-                        // adopt it so the demotion writes even when no PTY
-                        // chunk synced the local state since the hook event.
-                        state = State::seed_plain_shell(read.status);
-                        on_plain_shell_transition(
-                            &registry,
-                            &session_id,
-                            &mut state,
-                            State::Idle,
-                            read,
-                        );
+                event = wake.events.recv(), if wake.open => {
+                    if wake.changed(&registry, &session_id, event) {
+                        last_output = Instant::now();
+                        idle_checked = false;
                     }
+                },
+                () = sleep_until(next_idle_check),
+                    if !idle_checked && plain_shell_idle_due(&registry, &session_id, state) => {
+                    idle_checked = true;
+                    on_plain_shell_idle(&registry, &session_id, &scrollback, &mut state);
                 }
             }
         }
     });
+}
+
+/// Run a plain shell's idle transition once a silence has lasted
+/// [`IDLE_AFTER`].
+///
+/// While hooks drive the shell the record's status is the truth: a
+/// hook-reported `Working` ends (an interrupted turn, or an agent killed
+/// without a closing hook), and so does an `AwaitingInput` whose prompt has
+/// left the screen. Either demotion also hands the shell back to its own
+/// classifier by clearing `hook_driven`; the next mapped hook event sets it
+/// again. The demotion re-checks the status and hook stamp under the lock, so
+/// a promotion that landed since the read wins.
+fn on_plain_shell_idle(
+    registry: &Arc<SessionRegistry>,
+    session_id: &str,
+    scrollback: &[u8],
+    state: &mut State,
+) {
+    match record_status(registry, session_id) {
+        Some(read) if read.hook_driven => {
+            *state = State::seed_plain_shell(read.status);
+            let demote = match read.status {
+                SessionStatus::Working => true,
+                SessionStatus::AwaitingInput => !prompt_on_screen(scrollback),
+                _ => false,
+            };
+            if demote {
+                *state = State::Idle;
+                demote_plain_shell_after_silence(
+                    registry,
+                    session_id,
+                    read.status,
+                    read.last_hook_time,
+                );
+            }
+        }
+        Some(read) => {
+            // Hooks that have ended leave the record `Working`; adopt it so
+            // the demotion writes even when no PTY chunk synced the local
+            // state since the hook event.
+            *state = State::seed_plain_shell(read.status);
+            on_plain_shell_transition(registry, session_id, state, State::Idle, read);
+        }
+        None => {}
+    }
 }
 
 fn push_window(window: &mut VecDeque<(Instant, u32)>, now: Instant, bytes: usize) {
@@ -416,9 +449,9 @@ impl State {
     }
 
     /// The plain-shell watcher's starting point for a record already carrying
-    /// `status`. A shell only moves between `Idle` and `Working`, and only
-    /// `Working` arms its idle timer, so every other stored status starts at
-    /// `Idle`.
+    /// `status`. The shell classifier only moves between `Idle` and `Working`,
+    /// so every other stored status starts at `Idle`; a hook-reported
+    /// `AwaitingInput` stays on the record, which the idle tick reads.
     fn seed_plain_shell(status: SessionStatus) -> Self {
         match status {
             SessionStatus::Working => Self::Working,
@@ -485,14 +518,86 @@ fn record_status(registry: &Arc<SessionRegistry>, session_id: &str) -> Option<St
     })
 }
 
+/// The registry's session events, read for one session: a hook event changes
+/// the record's status or hook stamp without any PTY byte, and the watcher has
+/// to restart its idle deadline from that change.
+struct RecordWake {
+    events: broadcast::Receiver<SessionEvent>,
+    /// False once the registry's event stream has closed.
+    open: bool,
+    /// The status and hook stamp last seen; `None` once the record is gone.
+    seen: Option<(SessionStatus, Option<u128>)>,
+}
+
+impl RecordWake {
+    /// Subscribe before the watcher task starts, so an event that lands
+    /// before its first poll is not missed.
+    fn new(registry: &Arc<SessionRegistry>, session_id: &str) -> Self {
+        Self {
+            events: registry.subscribe(),
+            open: true,
+            seen: Self::mark(registry, session_id),
+        }
+    }
+
+    fn mark(
+        registry: &Arc<SessionRegistry>,
+        session_id: &str,
+    ) -> Option<(SessionStatus, Option<u128>)> {
+        record_status(registry, session_id).map(|read| (read.status, read.last_hook_time))
+    }
+
+    /// Take one registry event; answers whether this session's status or
+    /// hook stamp changed since the last one seen. A lagged stream re-reads
+    /// the record, since the missed events may have changed it.
+    fn changed(
+        &mut self,
+        registry: &Arc<SessionRegistry>,
+        session_id: &str,
+        event: Result<SessionEvent, broadcast::error::RecvError>,
+    ) -> bool {
+        match event {
+            Ok(SessionEvent::Updated(snapshot, _)) if snapshot.id == session_id => {
+                self.reread(registry, session_id)
+            }
+            Ok(_) => false,
+            Err(broadcast::error::RecvError::Lagged(_)) => self.reread(registry, session_id),
+            Err(broadcast::error::RecvError::Closed) => {
+                self.open = false;
+                false
+            }
+        }
+    }
+
+    fn reread(&mut self, registry: &Arc<SessionRegistry>, session_id: &str) -> bool {
+        let mark = Self::mark(registry, session_id);
+        let changed = mark != self.seen;
+        self.seen = mark;
+        changed
+    }
+}
+
+/// Whether the agent watcher's idle tick is due: the record reports `Working`
+/// or `AwaitingInput`, the two statuses a silence can end.
+fn agent_idle_due(registry: &Arc<SessionRegistry>, session_id: &str) -> bool {
+    record_status(registry, session_id).is_some_and(|read| {
+        matches!(
+            read.status,
+            SessionStatus::Working | SessionStatus::AwaitingInput
+        )
+    })
+}
+
 /// Whether a plain shell's idle tick is due: the classifier's own `Working`,
-/// or a record still reporting `Working` when the PTY goes quiet — a
-/// hook-driven screen, or one whose hooks have since ended. A hook-reported
-/// `AwaitingInput` never ticks here; the prompt matcher that would end it
-/// belongs to the agent watcher.
+/// a record still reporting `Working` when the PTY goes quiet (a hook-driven
+/// screen, or one whose hooks have since ended), or a hook-reported
+/// `AwaitingInput`, which the tick demotes once its prompt has left the screen.
 fn plain_shell_idle_due(registry: &Arc<SessionRegistry>, session_id: &str, state: State) -> bool {
     match record_status(registry, session_id) {
-        Some(read) if read.hook_driven => read.status == SessionStatus::Working,
+        Some(read) if read.hook_driven => matches!(
+            read.status,
+            SessionStatus::Working | SessionStatus::AwaitingInput
+        ),
         Some(read) => state == State::Working || read.status == SessionStatus::Working,
         None => state == State::Working,
     }
@@ -514,20 +619,43 @@ fn classify(scrollback: &[u8], current: State, active: bool) -> State {
 }
 
 fn matches_prompt(tail: &str) -> bool {
-    // Permission-prompt heuristics. Order matters loosely; first match wins.
+    // Permission-prompt heuristics; any one of them is a prompt.
     //
-    // 1. Numbered choices on consecutive lines: `1. <something>` `2. <something>`
-    //    with a `❯` cursor or "(esc to cancel)" footer.
+    // 1. The `❯` selection cursor on an option line: the chevron, then on the
+    //    same line an option number such as `1.` and a space or tab. Numbered
+    //    text elsewhere (a numbered answer, the banner's `v2.1.307`) beside the
+    //    idle input box's lone `❯` is not a prompt.
     // 2. "Do you want to" wording (Claude's edit/bash permission prompts).
-    // 3. AskUserQuestion blocks contain "│" framing plus numbered options.
-    let has_numbered = tail.contains("1.") && tail.contains("2.");
-    let has_chevron = tail.contains("❯") || tail.contains(">>>");
+    // 3. "Choose an option", "Press 1" or "(y/n)" wording.
+    // 4. AskUserQuestion blocks contain "│" framing plus the tool name.
     let has_do_you_want = tail.contains("Do you want to");
     let has_choose_option =
         tail.contains("Choose an option") || tail.contains("Press 1") || tail.contains("(y/n)");
     let has_ask_user = tail.contains("│") && tail.contains("AskUserQuestion");
 
-    has_do_you_want || has_choose_option || has_ask_user || (has_numbered && has_chevron)
+    has_do_you_want || has_choose_option || has_ask_user || has_option_chevron(tail)
+}
+
+/// Whether some `❯` is followed on its own line by an option number: spaces or
+/// tabs, then one or two digits starting 1-9, a dot, and a space or tab.
+fn has_option_chevron(tail: &str) -> bool {
+    tail.split('❯')
+        .skip(1)
+        .any(|after| starts_with_option_number(after.trim_start_matches([' ', '\t'])))
+}
+
+/// Whether `text` opens with an option number such as `1. ` or `12.\t`.
+fn starts_with_option_number(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let digits = bytes
+        .iter()
+        .take(2)
+        .take_while(|b| b.is_ascii_digit())
+        .count();
+    let first_nonzero = bytes.first().is_some_and(|b| (b'1'..=b'9').contains(b));
+    first_nonzero
+        && bytes.get(digits) == Some(&b'.')
+        && matches!(bytes.get(digits + 1), Some(b' ' | b'\t'))
 }
 
 fn strip_ansi(input: &[u8]) -> String {
@@ -627,14 +755,41 @@ fn demote_after_silence(
     epoch: Option<u128>,
 ) {
     registry.update(session_id, |rec| {
-        if rec.status != expected || rec.last_hook_time != epoch {
-            return;
-        }
-        apply_status(rec, SessionStatus::Idle);
-        if expected == SessionStatus::AwaitingInput {
-            rec.pending_input = None;
+        demote_if_unchanged(rec, expected, epoch);
+    });
+}
+
+/// [`demote_after_silence`] for a plain shell, which also clears
+/// `hook_driven` so the shell's own classifier runs again.
+fn demote_plain_shell_after_silence(
+    registry: &Arc<SessionRegistry>,
+    session_id: &str,
+    expected: SessionStatus,
+    epoch: Option<u128>,
+) {
+    registry.update(session_id, |rec| {
+        if demote_if_unchanged(rec, expected, epoch) {
+            rec.hook_driven = false;
         }
     });
+}
+
+/// Demote `rec` from `expected` to `Idle` when neither its status nor its hook
+/// stamp has moved, clearing the prompt it was waiting on; answers whether it
+/// did.
+fn demote_if_unchanged(
+    rec: &mut SessionRecord,
+    expected: SessionStatus,
+    epoch: Option<u128>,
+) -> bool {
+    if rec.status != expected || rec.last_hook_time != epoch {
+        return false;
+    }
+    apply_status(rec, SessionStatus::Idle);
+    if expected == SessionStatus::AwaitingInput {
+        rec.pending_input = None;
+    }
+    true
 }
 
 /// The status transition path the PTY watcher uses.
@@ -792,6 +947,69 @@ mod tests {
         assert!(!matches_prompt(output));
     }
 
+    /// Claude Code's idle input box: a lone `❯` between two solid rules, then
+    /// the user's status lines.
+    fn idle_box() -> String {
+        let rule = "─".repeat(135);
+        [
+            rule.as_str(),
+            "❯",
+            rule.as_str(),
+            concat!(
+                "  ctx:   0%  |  sub: 5h  38% (3h40m) · 7d  86% / F   0% (5d16h)",
+                "  |  ds: $  17.40  |  X: 252G free  |  Opus 5.5  |  master*  |  C:\\Us…"
+            ),
+            "  ⏵⏵ auto mode on (shift+tab to cycle) · ← 2 agents",
+        ]
+        .join("\n")
+    }
+
+    #[test]
+    fn idle_box_after_a_numbered_answer_is_not_a_prompt() {
+        let answer = [
+            "● 1. Botanically, bananas count as berries but strawberries don't.",
+            "  2. A strawberry carries about 200 seeds on its outside.",
+            "  3. Apples float because about a quarter of their volume is air.",
+            "✻ Cooked for 26s · done 5:36 PM",
+            "❯ C:/Program Files/Git/compact",
+            "❯ /compact",
+            "  ⎿  Compacted (ctrl+o to see full summary)",
+        ]
+        .join("\n");
+        let tail = format!("{answer}\n{}", idle_box());
+        assert!(!matches_prompt(&tail));
+    }
+
+    #[test]
+    fn banner_version_and_idle_box_are_not_a_prompt() {
+        let tail = format!(" ▐▛███▛█   Claude Code v2.1.307\n{}", idle_box());
+        assert!(!matches_prompt(&tail));
+    }
+
+    #[test]
+    fn chevron_on_an_option_line_is_a_prompt() {
+        let prompts = [
+            "❯ 1. Yes  2. No ",
+            "❯ 1. Tea 2. Coffee",
+            "Which function should be added to calc.py next?\n❯ 1. sub\n  2. div\n  3. pow",
+            "Ready to submit your answers?\n❯ 1. Submit answers\n  2. Cancel",
+            concat!(
+                "Claude has written up a plan and is ready to execute. Would you like to proceed?\n",
+                "❯ 1. Yes, and use auto mode\n  2. Yes, manually approve edits\n",
+                "  3. Tell Claude what to change"
+            ),
+            "Do you want to proceed? 1. Yes 2. No ",
+        ];
+        for prompt in prompts {
+            assert!(matches_prompt(prompt), "not read as a prompt: {prompt:?}");
+        }
+    }
+
+    #[test]
+    fn chevron_then_newline_number_is_not_a_prompt() {
+        assert!(!matches_prompt("❯\n1. a\n2. b"));
+    }
+
     #[test]
     fn shell_output_below_minimum_does_not_mark_working() {
         assert!(!shell_output_is_working(0, 120));
@@ -898,7 +1116,7 @@ mod hysteresis_tests {
     struct Harness {
         registry: Arc<SessionRegistry>,
         output: broadcast::Sender<Vec<u8>>,
-        _input: mpsc::UnboundedSender<usize>,
+        input: mpsc::UnboundedSender<usize>,
         _attention: mpsc::UnboundedReceiver<super::AttentionEvent>,
     }
 
@@ -950,7 +1168,7 @@ mod hysteresis_tests {
         Harness {
             registry,
             output,
-            _input: input,
+            input,
             _attention: attention_rx,
         }
     }
@@ -960,6 +1178,12 @@ mod hysteresis_tests {
             let rec = self.registry.get(SESSION).expect("session registered");
             let guard = rec.lock().expect("record lock");
             guard.status
+        }
+
+        fn hook_driven(&self) -> bool {
+            let rec = self.registry.get(SESSION).expect("session registered");
+            let guard = rec.lock().expect("record lock");
+            guard.hook_driven
         }
 
         /// Emit one elapsed-time title repaint, e.g. `ESC ] 0 ; ⠋ 3s BEL`.
@@ -1142,6 +1366,79 @@ mod hysteresis_tests {
         );
     }
 
+    /// Mark the record hook-driven `Working` at hook stamp `stamp`, the way a
+    /// hook event does.
+    fn set_hook_working(h: &Harness, stamp: u128) {
+        h.set_record(|record| {
+            record.hook_driven = true;
+            record.status = SessionStatus::Working;
+            record.last_hook_time = Some(stamp);
+        });
+    }
+
+    /// A hook-reported `Working` that lands while the watcher is parked must
+    /// arm the idle deadline itself: no PTY byte follows an interrupted turn.
+    async fn assert_hook_working_set_after_start_demotes(h: &Harness) {
+        settle().await;
+        set_hook_working(h, 1);
+        tokio::time::sleep(IDLE_AFTER + Duration::from_millis(50)).await;
+        settle().await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "silence after a hook-reported Working demotes it"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn hook_working_set_after_start_demotes_after_silence() {
+        let h = start("hook-working-late", false);
+        assert_hook_working_set_after_start_demotes(&h).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn hook_working_set_after_start_demotes_after_silence_plain_shell() {
+        let h = start("shell-hook-working-late", true);
+        assert_hook_working_set_after_start_demotes(&h).await;
+    }
+
+    /// The idle deadline counts from the hook-reported `Working`, not from
+    /// the last PTY output long before it: a wake right after the hook event
+    /// must not demote the fresh turn at once.
+    async fn assert_hook_working_after_long_idle_waits(h: &Harness) {
+        settle().await;
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        settle().await;
+        assert_eq!(h.status(), SessionStatus::Idle, "silent from the start");
+        set_hook_working(h, 1);
+        h.input.send(1).expect("watcher still subscribed");
+        settle().await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Working,
+            "a stale deadline demoted the fresh hook-reported turn"
+        );
+        tokio::time::sleep(IDLE_AFTER + Duration::from_millis(50)).await;
+        settle().await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "silence past IDLE_AFTER from the hook event demotes it"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn hook_working_after_a_long_idle_is_not_demoted_at_once() {
+        let h = start("hook-working-long-idle", false);
+        assert_hook_working_after_long_idle_waits(&h).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn hook_working_after_a_long_idle_is_not_demoted_at_once_plain_shell() {
+        let h = start("shell-hook-working-long-idle", true);
+        assert_hook_working_after_long_idle_waits(&h).await;
+    }
+
     /// A hook-driven `Working` whose CLI has ended must still demote: the
     /// clear leaves `hook_driven` false, and the local state may never have
     /// seen the `Working` chunk.
@@ -1162,15 +1459,17 @@ mod hysteresis_tests {
     }
 
     /// The shell classifier never overwrites a hook-reported prompt, and the
-    /// plain-shell watcher carries no prompt matcher for the silence
-    /// demotion, so it holds.
+    /// silence demotion holds while the prompt is still on screen.
     #[tokio::test(start_paused = true)]
-    async fn hook_plain_shell_awaiting_input_survives_output() {
+    async fn hook_plain_shell_awaiting_input_holds_while_the_prompt_shows() {
         let h = start("shell-hook-awaiting", true);
         h.set_record(|record| {
             record.hook_driven = true;
             record.status = SessionStatus::AwaitingInput;
         });
+        h.output
+            .send("\x1b[2K\r❯ 1. Yes  2. No ".as_bytes().to_vec())
+            .expect("watcher still subscribed");
         for tick in 0..3 {
             h.heartbeat(tick);
             settle().await;
@@ -1186,7 +1485,69 @@ mod hysteresis_tests {
         assert_eq!(
             h.status(),
             SessionStatus::AwaitingInput,
-            "the plain shell leaves a hook-reported prompt alone"
+            "a prompt on screen holds the demotion"
+        );
+    }
+
+    /// A hook-reported prompt in a plain shell whose text has left the screen
+    /// is over (the agent may have died without a closing hook): silence
+    /// demotes it and hands the shell back to its own classifier.
+    #[tokio::test(start_paused = true)]
+    async fn hook_plain_shell_awaiting_input_demotes_once_the_prompt_is_gone() {
+        let h = start("shell-hook-prompt-gone", true);
+        h.set_record(|record| {
+            record.hook_driven = true;
+            record.status = SessionStatus::AwaitingInput;
+            record.last_hook_time = Some(1);
+        });
+        h.output
+            .send(b"\x1b[2K\r$ ".to_vec())
+            .expect("watcher still subscribed");
+        settle().await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::AwaitingInput,
+            "a small redraw leaves it waiting"
+        );
+        tokio::time::sleep(IDLE_AFTER + Duration::from_millis(50)).await;
+        settle().await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "silence with no prompt demotes it"
+        );
+        assert!(!h.hook_driven(), "the demotion leaves hooks in charge");
+    }
+
+    /// Silence that ends a hook-reported turn in a plain shell also ends the
+    /// hooks' hold on it, so a killed agent does not mute the shell for good.
+    #[tokio::test(start_paused = true)]
+    async fn plain_shell_silence_demotion_clears_hook_driven() {
+        let h = start("shell-hook-release", true);
+        settle().await;
+        set_hook_working(&h, 1);
+        tokio::time::sleep(IDLE_AFTER + Duration::from_millis(50)).await;
+        settle().await;
+        assert_eq!(h.status(), SessionStatus::Idle, "silence demotes it");
+        assert!(!h.hook_driven(), "the demotion leaves hooks in charge");
+    }
+
+    /// Once the silence demotion has released a plain shell from its hooks,
+    /// the shell's own output promotes it again.
+    #[tokio::test(start_paused = true)]
+    async fn plain_shell_classifier_runs_again_after_hook_driven_clears() {
+        let h = start("shell-hook-release-promote", true);
+        settle().await;
+        set_hook_working(&h, 1);
+        tokio::time::sleep(IDLE_AFTER + Duration::from_millis(50)).await;
+        settle().await;
+        assert_eq!(h.status(), SessionStatus::Idle, "silence demotes it");
+        h.heartbeat(0);
+        settle().await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Working,
+            "the shell classifier promotes on its own output again"
         );
     }
 
