@@ -1,9 +1,8 @@
 //! One client WebSocket connection: its id and auth kind, the client count, the event forwarders, the send pump and the receive loop.
 use super::handshake::{handshake, push_initial_state};
+use super::sessions::spawn_session_forwarder;
 use super::tabs::ensure_client_layout;
-use super::{
-    Hub, PresetEvent, ScopedTabEvent, StateEvent, TabEvent, dispatch, spawn_session_forwarder,
-};
+use super::{Hub, PresetEvent, ScopedTabEvent, StateEvent, TabEvent, dispatch};
 use crate::file_fetch;
 use axum::extract::ws::{Message, WebSocket};
 use futures::{SinkExt as _, StreamExt as _};

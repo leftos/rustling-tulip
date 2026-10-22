@@ -1,10 +1,10 @@
 //! Session history and recovery: reattaching orphans at startup, resuming abandoned sessions, recovering ended ones from history, and recovery claims.
 use super::connection::ConnCtx;
+use super::sessions::spawn_keeping_busy_excluded;
 use super::settings::{env_names, register_repo};
+use super::spawn::{check_spawn_request, expected_output_subscribers};
 use super::tabs::rebind_session_panes;
-use super::{
-    Hub, StateEvent, check_spawn_request, expected_output_subscribers, spawn_keeping_busy_excluded,
-};
+use super::{Hub, StateEvent};
 use crate::orphan::OrphanMeta;
 use crate::paths::Dirs;
 use crate::session::{SessionRecord, SessionRegistry, attach_lifecycle};
@@ -522,7 +522,7 @@ pub(super) fn discard_abandoned(
 mod tests {
     use super::*;
     use crate::env_secrets;
-    use crate::server::check_spawn_request_with;
+    use crate::server::spawn::check_spawn_request_with;
     use crate::server::test_support::{
         MISSING_SECRET_ID, UNSET_REF, deepseek_key, deepseek_options, deepseek_spawn, dispatch_one,
         env, env_spawn, git_init, git_ok, secret_ref, spawnless_test_hub, test_hub,

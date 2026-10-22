@@ -7,7 +7,8 @@ use super::connection::{AuthKind, ConnCtx, FetchRegistry, NEXT_CONNECTION, PtyFo
 use super::handshake::TAILNET_HANDSHAKE_TIMEOUT;
 use super::recovery::RecoveryClaims;
 use super::remote::RemoteSlot;
-use super::{Hub, dispatch, hook_settings_path};
+use super::spawn::hook_settings_path;
+use super::{Hub, dispatch};
 use crate::paths::Dirs;
 use crate::session::{SessionRecord, SessionRegistry};
 use crate::state::AppState;

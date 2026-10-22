@@ -91,10 +91,11 @@ pub(super) fn presented_bearer(headers: &HeaderMap) -> Option<&str> {
 mod tests {
     use super::*;
     use crate::pty_state;
+    use crate::server::build_loopback_router;
+    use crate::server::spawn::announce_replayed_prompt;
     use crate::server::test_support::{
         hook_request, idle_record, snapshot_of, test_hub, test_hub_with_attention,
     };
-    use crate::server::{announce_replayed_prompt, build_loopback_router};
     use protocol::{AttentionReason, SessionMode, SessionStatus};
     use tokio::sync::{broadcast, mpsc};
     use tower::ServiceExt as _;
