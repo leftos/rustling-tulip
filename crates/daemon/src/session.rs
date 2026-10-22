@@ -5,6 +5,7 @@ use crate::history;
 use crate::orphan::{self, OrphanMeta};
 use crate::paths::Dirs;
 use crate::pty::{PtyExit, PtyHandle};
+use crate::screen::SharedScreen;
 use crate::scrollback;
 use crate::sync::{lock, read, write};
 use crate::termstate::{self, BracketedPasteTracker};
@@ -162,6 +163,10 @@ pub struct SessionRecord {
     /// for headless, orphaned, or stopped sessions. Cleared by the exit
     /// watcher when the child dies.
     pub input_notifier: Option<mpsc::UnboundedSender<usize>>,
+    /// The rendered screen of an interactive or plain-shell PTY session,
+    /// fed from its output broadcast; `None` for headless and orphan
+    /// records.
+    pub screen: Option<SharedScreen>,
     /// Sender for the `attach_lifecycle` task's snapshot-request channel.
     /// `Some` for PTY sessions whose lifecycle task is running. The
     /// `LoadScrollback` handler uses this to ask the lifecycle task for an
@@ -933,6 +938,7 @@ impl SessionRegistry {
             worktree_paths: Vec::new(),
             last_prompt: meta.last_prompt.clone(),
             input_notifier: None,
+            screen: None,
             scrollback_snapshot_req: None,
             spawn_origin: None,
             claude_session_id: meta.claude_session_id.clone(),
@@ -1004,6 +1010,7 @@ impl SessionRegistry {
             worktree_paths: Vec::new(),
             last_prompt: meta.last_prompt.clone(),
             input_notifier: None,
+            screen: None,
             scrollback_snapshot_req: None,
             spawn_origin: None,
             claude_session_id: meta.claude_session_id.clone(),
@@ -1054,6 +1061,7 @@ impl SessionRegistry {
             worktree_paths: Vec::new(),
             last_prompt: meta.last_prompt.clone(),
             input_notifier: None,
+            screen: None,
             scrollback_snapshot_req: None,
             spawn_origin: None,
             claude_session_id: meta.claude_session_id.clone(),
@@ -1127,6 +1135,7 @@ mod tests {
             worktree_paths: Vec::new(),
             last_prompt: None,
             input_notifier: None,
+            screen: None,
             scrollback_snapshot_req: None,
             spawn_origin: None,
             claude_session_id: None,

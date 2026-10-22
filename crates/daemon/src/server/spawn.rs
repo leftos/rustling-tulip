@@ -28,7 +28,7 @@ use crate::registry::{
 };
 use crate::session::{SessionRecord, UpdateOrigin, attach_lifecycle, new_id, push_recent_action};
 use crate::{
-    env_secrets, headless, inject, orphan, osc_title, pty_state, spawn_plan, tracer_client,
+    env_secrets, headless, inject, orphan, osc_title, pty_state, screen, spawn_plan, tracer_client,
     user_env, workspace as ws,
 };
 use anyhow::{Context as _, anyhow};
@@ -39,7 +39,7 @@ use protocol::{
     SessionMember, SessionMetrics, SessionMode, SessionStatus, SpawnRequest, SpawnTarget,
 };
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
@@ -504,7 +504,7 @@ where
 
 pub(super) fn expected_output_subscribers(mode: SessionMode) -> usize {
     match mode {
-        SessionMode::Interactive | SessionMode::PlainShell => 3,
+        SessionMode::Interactive | SessionMode::PlainShell => 4,
         SessionMode::Headless => 0,
     }
 }
@@ -605,6 +605,7 @@ fn interactive_record(
         is_inactive: false,
         last_prompt: new.last_prompt,
         input_notifier: None,
+        screen: None,
         scrollback_snapshot_req: None,
         spawn_origin: None,
         claude_session_id: new.claude_session_id,
@@ -669,6 +670,7 @@ fn plain_shell_record(
         // Plain shells never carry a kickoff prompt.
         last_prompt: None,
         input_notifier: None,
+        screen: None,
         scrollback_snapshot_req: None,
         spawn_origin: None,
         claude_session_id: None,
@@ -791,6 +793,7 @@ async fn spawn_interactive_session(
         cols: 120,
         rows: 32,
     };
+    let (cols, rows) = (spec.cols, spec.rows);
     #[cfg(test)]
     super::child_env_probe::record(&spec.env, &spec.env_remove);
     let expected_subscribers = expected_output_subscribers(SessionMode::Interactive);
@@ -868,11 +871,14 @@ async fn spawn_interactive_session(
         Some(hub.dirs.clone()),
     );
     let (in_tx, in_rx) = mpsc::unbounded_channel::<usize>();
+    let screen: screen::SharedScreen = Arc::new(Mutex::new(screen::Screen::new(cols, rows)));
     {
         let mut guard = crate::sync::lock(pending.arc());
         guard.scrollback_snapshot_req = Some(snap_tx);
         guard.input_notifier = Some(in_tx);
+        guard.screen = Some(Arc::clone(&screen));
     }
+    screen::watch(screen, session_id.clone(), pty.output.subscribe());
     pty_state::watch(
         &hub.sessions,
         session_id.clone(),
@@ -955,6 +961,7 @@ async fn spawn_plain_shell_session(
         cols: 120,
         rows: 32,
     };
+    let (cols, rows) = (spec.cols, spec.rows);
     #[cfg(test)]
     super::child_env_probe::record(&spec.env, &spec.env_remove);
     let expected_subscribers = expected_output_subscribers(SessionMode::PlainShell);
@@ -1017,11 +1024,14 @@ async fn spawn_plain_shell_session(
         Some(hub.dirs.clone()),
     );
     let (in_tx, in_rx) = mpsc::unbounded_channel::<usize>();
+    let screen: screen::SharedScreen = Arc::new(Mutex::new(screen::Screen::new(cols, rows)));
     {
         let mut guard = crate::sync::lock(pending.arc());
         guard.scrollback_snapshot_req = Some(snap_tx);
         guard.input_notifier = Some(in_tx);
+        guard.screen = Some(Arc::clone(&screen));
     }
+    screen::watch(screen, session_id.clone(), pty.output.subscribe());
     pty_state::watch_plain_shell(
         &hub.sessions,
         session_id.clone(),
@@ -1152,6 +1162,7 @@ fn spawn_headless_session(
         worktree_paths: worktree_paths_for_config(&stored_config, &members),
         last_prompt: last_prompt.clone(),
         input_notifier: None,
+        screen: None,
         scrollback_snapshot_req: None,
         spawn_origin: None,
         claude_session_id: None,

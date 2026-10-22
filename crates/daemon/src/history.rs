@@ -1441,6 +1441,7 @@ pub(crate) mod test_support {
             worktree_paths: Vec::new(),
             last_prompt: None,
             input_notifier: None,
+            screen: None,
             scrollback_snapshot_req: None,
             spawn_origin: None,
             claude_session_id: None,

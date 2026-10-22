@@ -7,11 +7,11 @@ use super::{Hub, StateEvent};
 use crate::orphan::OrphanMeta;
 use crate::paths::Dirs;
 use crate::session::{SessionRecord, SessionRegistry, attach_lifecycle};
-use crate::{history, orphan, osc_title, pty_state, tracer_client};
+use crate::{history, orphan, osc_title, pty_state, screen, tracer_client};
 use anyhow::anyhow;
 use protocol::{Agent, ClientMessage, DaemonMessage, SessionEnd, SessionMode, SpawnRequest};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
@@ -171,12 +171,16 @@ async fn reattach_one(
                         Some(dirs.clone()),
                     );
                     let (in_tx, in_rx) = mpsc::unbounded_channel::<usize>();
+                    let screen: screen::SharedScreen =
+                        Arc::new(Mutex::new(screen::Screen::new(120, 32)));
                     let restored = {
                         let mut guard = crate::sync::lock(pending.arc());
                         guard.scrollback_snapshot_req = Some(snap_tx);
                         guard.input_notifier = Some(in_tx);
+                        guard.screen = Some(Arc::clone(&screen));
                         guard.status
                     };
+                    screen::watch(screen, meta.session_id.clone(), pty.output.subscribe());
                     if meta.mode == SessionMode::PlainShell {
                         pty_state::watch_plain_shell(
                             &sessions,

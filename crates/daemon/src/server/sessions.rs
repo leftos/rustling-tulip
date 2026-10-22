@@ -181,9 +181,15 @@ pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> 
             rows,
         } => {
             if let Some(rec) = hub.sessions.get(&session_id) {
-                let pty = crate::sync::lock(&rec).pty.clone();
+                let (pty, screen) = {
+                    let guard = crate::sync::lock(&rec);
+                    (guard.pty.clone(), guard.screen.clone())
+                };
                 if let Some(pty) = pty {
                     pty.resize(cols, rows);
+                }
+                if let Some(screen) = screen {
+                    crate::sync::lock(&screen).resize(cols, rows);
                 }
             }
         }
