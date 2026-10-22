@@ -219,14 +219,15 @@ pub fn watch(
                 },
                 () = sleep_until(next_idle_check),
                     if !idle_checked && agent_idle_due(&registry, &session_id) => {
-                    idle_checked = true;
-                    on_idle(
-                        &registry,
-                        &session_id,
-                        &scrollback,
-                        &mut state,
-                        &attention_tx,
-                    );
+                    // A hook status on the record whose broadcast is still on
+                    // its way starts a new stretch instead of meeting the old
+                    // deadline.
+                    if wake.reread(&registry, &session_id) {
+                        last_output = Instant::now();
+                    } else {
+                        idle_checked = true;
+                        on_idle(&registry, &session_id, &scrollback, &mut state, &attention_tx);
+                    }
                 }
             }
         }
@@ -343,8 +344,13 @@ pub fn watch_plain_shell(
                 },
                 () = sleep_until(next_idle_check),
                     if !idle_checked && plain_shell_idle_due(&registry, &session_id, state) => {
-                    idle_checked = true;
-                    on_plain_shell_idle(&registry, &session_id, &scrollback, &mut state);
+                    // See `watch`: a change not yet broadcast restarts the stretch.
+                    if wake.reread(&registry, &session_id) {
+                        last_output = Instant::now();
+                    } else {
+                        idle_checked = true;
+                        on_plain_shell_idle(&registry, &session_id, &scrollback, &mut state);
+                    }
                 }
             }
         }
@@ -569,6 +575,9 @@ impl RecordWake {
         }
     }
 
+    /// Re-read the record's status and hook stamp; answers whether they moved
+    /// since the last ones seen. The idle tick calls it too, since a registry
+    /// update writes the record before it broadcasts the change.
     fn reread(&mut self, registry: &Arc<SessionRegistry>, session_id: &str) -> bool {
         let mark = Self::mark(registry, session_id);
         let changed = mark != self.seen;
@@ -1180,6 +1189,14 @@ mod hysteresis_tests {
             guard.status
         }
 
+        /// Change the record without the registry's `Updated` broadcast: the
+        /// window a registry update leaves between its record write and its
+        /// event, while it syncs the sidecar.
+        fn set_record_unbroadcast(&self, f: impl FnOnce(&mut SessionRecord)) {
+            let rec = self.registry.get(SESSION).expect("session registered");
+            f(&mut rec.lock().expect("record lock"));
+        }
+
         fn hook_driven(&self) -> bool {
             let rec = self.registry.get(SESSION).expect("session registered");
             let guard = rec.lock().expect("record lock");
@@ -1425,6 +1442,46 @@ mod hysteresis_tests {
             SessionStatus::Idle,
             "silence past IDLE_AFTER from the hook event demotes it"
         );
+    }
+
+    /// A hook-reported prompt already on the record but not yet broadcast
+    /// must not meet a stale deadline: the watcher woken by anything else
+    /// restarts the deadline from the change it reads instead of demoting.
+    async fn assert_unbroadcast_hook_status_waits(h: &Harness) {
+        settle().await;
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        settle().await;
+        h.set_record_unbroadcast(|record| {
+            record.hook_driven = true;
+            record.status = SessionStatus::AwaitingInput;
+            record.last_hook_time = Some(1);
+        });
+        h.input.send(1).expect("watcher still subscribed");
+        settle().await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::AwaitingInput,
+            "a stale deadline demoted a hook prompt its broadcast had not reached"
+        );
+        tokio::time::sleep(IDLE_AFTER + Duration::from_millis(50)).await;
+        settle().await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "silence past IDLE_AFTER with no prompt on screen demotes it"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_hook_status_written_before_its_broadcast_is_not_demoted_at_once() {
+        let h = start("hook-unbroadcast", false);
+        assert_unbroadcast_hook_status_waits(&h).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_hook_status_written_before_its_broadcast_is_not_demoted_at_once_plain_shell() {
+        let h = start("shell-hook-unbroadcast", true);
+        assert_unbroadcast_hook_status_waits(&h).await;
     }
 
     #[tokio::test(start_paused = true)]
