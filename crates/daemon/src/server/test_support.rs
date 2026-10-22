@@ -5,18 +5,19 @@
 )]
 use super::connection::{AuthKind, ConnCtx, FetchRegistry, NEXT_CONNECTION, PtyForwarders};
 use super::handshake::TAILNET_HANDSHAKE_TIMEOUT;
+use super::recovery::RecoveryClaims;
 use super::remote::RemoteSlot;
-use super::{Hub, RecoveryClaims, dispatch, hook_settings_path};
+use super::{Hub, dispatch, hook_settings_path};
 use crate::paths::Dirs;
 use crate::session::{SessionRecord, SessionRegistry};
 use crate::state::AppState;
-use crate::{pty_state, tabs};
+use crate::{pty_state, user_env};
 use axum::body::Body;
 use axum::http::Request;
 use chrono::Utc;
 use protocol::{
-    Agent, AppearanceOverrides, ClientMessage, DaemonMessage, SessionKind, SessionMetrics,
-    SessionMode, SessionStatus, TabContent, TabEntry,
+    Agent, AgentOptions, AppearanceOverrides, ClientMessage, DaemonMessage, SessionKind,
+    SessionMetrics, SessionMode, SessionStatus, SpawnRequest, SpawnTarget, TabContent, TabEntry,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -417,7 +418,7 @@ pub(super) async fn only_update(
 /// Seed `client_id` with one tab whose grid is two empty panes side by
 /// side, so a move has a source and a destination pane to aim at.
 pub(super) fn seed_two_pane_layout(hub: &Hub, client_id: &str) {
-    let grid = tabs::build_balanced(
+    let grid = crate::tabs::build_balanced(
         &[("p1".to_string(), None), ("p2".to_string(), None)],
         protocol::SplitDirection::Horizontal,
     )
@@ -465,4 +466,133 @@ pub(super) fn test_peer() -> tailnet::PeerIdentity {
         user_id: 2,
         login: "owner@example.com".to_owned(),
     }
+}
+
+pub(super) fn repo_entry(id: &str, name: &str, path: &Path) -> protocol::RepoEntry {
+    protocol::RepoEntry {
+        id: id.to_string(),
+        name: name.to_string(),
+        path: path.to_string_lossy().into_owned(),
+        default_branch: None,
+        default_use_worktree: true,
+        appearance: AppearanceOverrides::default(),
+        last_agent: None,
+        last_spawn_config: None,
+    }
+}
+
+pub(super) fn workspace_entry(id: &str, name: &str, members: &[&str]) -> protocol::WorkspaceEntry {
+    protocol::WorkspaceEntry {
+        id: id.to_string(),
+        name: name.to_string(),
+        member_repo_ids: members.iter().map(|m| (*m).to_string()).collect(),
+        linked_vscode_workspace: None,
+        watch_vscode_workspace: false,
+        default_use_worktree: true,
+        appearance: AppearanceOverrides::default(),
+        last_spawn_config: None,
+    }
+}
+
+/// Dispatch `msg` and return the error the client would be sent.
+pub(super) async fn dispatch_err(hub: &Hub, msg: ClientMessage) -> Option<String> {
+    let (out_tx, _out_rx) = mpsc::unbounded_channel();
+    let (file_tx, _file_rx) = mpsc::channel(1);
+    let pty_forwarders: PtyForwarders = Arc::new(AsyncMutex::new(HashMap::new()));
+    let fetches: FetchRegistry = Arc::new(AsyncMutex::new(HashMap::new()));
+    let local = AuthKind::Local;
+    let ctx = ConnCtx {
+        out_tx: &out_tx,
+        file_tx: &file_tx,
+        pty_forwarders: &pty_forwarders,
+        fetches: &fetches,
+        client_id: "c1",
+        client_name: None,
+        connection: 1,
+        auth: &local,
+    };
+    dispatch(hub, msg, &ctx).await.err().map(|e| e.to_string())
+}
+
+/// A lookup that knows only `A` (as `va`) in the process scope.
+pub(super) fn lookup_a(name: &str) -> Option<(user_env::Secret, user_env::Origin)> {
+    user_env::resolve_with(
+        name,
+        |n| (n == "A").then(|| "va".to_owned()),
+        |_| None,
+        |_| None,
+    )
+}
+
+pub(super) fn env(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+    pairs
+        .iter()
+        .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+        .collect()
+}
+
+pub(super) fn env_spawn(
+    target: SpawnTarget,
+    mode: SessionMode,
+    extra_env: Vec<(String, String)>,
+    request_id: Option<&str>,
+) -> SpawnRequest {
+    SpawnRequest {
+        label: None,
+        target,
+        mode,
+        initial_prompt: None,
+        dangerously_skip_permissions: false,
+        agent_options: AgentOptions::claude(None),
+        model: None,
+        extra_env,
+        secret_env_keys: Vec::new(),
+        prompt_injector: None,
+        request_id: request_id.map(str::to_owned),
+        resume_conversation: None,
+    }
+}
+
+pub(super) const UNSET_REF: &str = "${env:RT_TEST_UNSET_ENV_REF_4C1D}";
+
+/// A `DEEPSEEK_API_KEY` value no stored file or reply may hold.
+pub(super) const DEEPSEEK_KEY_SENTINEL: &str = "sk-deepseek-sentinel-a41c9e";
+
+/// Claude options on the `DeepSeek` provider.
+pub(super) fn deepseek_options() -> AgentOptions {
+    AgentOptions::Claude {
+        permission_mode: None,
+        provider: protocol::ClaudeProvider::Deepseek,
+    }
+}
+
+/// A lookup that knows `DEEPSEEK_API_KEY` only.
+pub(super) fn deepseek_key(name: &str) -> Option<(user_env::Secret, user_env::Origin)> {
+    (name == "DEEPSEEK_API_KEY").then(|| {
+        (
+            user_env::Secret::new(DEEPSEEK_KEY_SENTINEL.to_owned()),
+            user_env::Origin::Process,
+        )
+    })
+}
+
+pub(super) fn deepseek_spawn(
+    target: SpawnTarget,
+    mode: SessionMode,
+    extra_env: Vec<(String, String)>,
+    request_id: Option<&str>,
+) -> SpawnRequest {
+    SpawnRequest {
+        agent_options: deepseek_options(),
+        ..env_spawn(target, mode, extra_env, request_id)
+    }
+}
+
+/// A syntactically valid secret id (32 lower-case hex) the store has never
+/// seen, so a row written `${secret:…}` with it resolves nowhere.
+pub(super) const MISSING_SECRET_ID: &str = "0123456789abcdef0123456789abcdef";
+
+/// The `${secret:<id>}` reference standing for `id`.
+pub(super) fn secret_ref(id: &str) -> String {
+    format!("${{secret:{id}}}")
 }

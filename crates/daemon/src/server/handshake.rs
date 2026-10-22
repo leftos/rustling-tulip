@@ -1,5 +1,4 @@
 //! The WebSocket handshake: reading and authorising `Hello`, negotiating the protocol version, `Welcome`, and the initial state push.
-
 use super::Hub;
 use super::connection::AuthKind;
 use anyhow::{Context as _, anyhow};

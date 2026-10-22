@@ -10,22 +10,36 @@ mod connection;
 mod handshake;
 pub(crate) use self::handshake::TAILNET_HANDSHAKE_TIMEOUT;
 
+mod git;
+mod tabs;
+
+mod hooks;
+mod recovery;
+mod settings;
+pub(crate) use self::recovery::RecoveryClaims;
+
 use self::connection::{
     AuthKind, ConnCtx, PtyForwarders, cancel_fetch, client_session, start_fetch,
 };
-use self::remote::{
-    LAN_RETIRED, configure_remote, host_only_refusal, remove_retired_lan_files, start_remote_access,
+use self::git::{
+    active_sessions_using_worktree, blocked_discard_message, probe_locking_processes,
+    repo_target_or_err, retry_worktree_cleanup, worktree_in_use_failure,
 };
+use self::hooks::{hook_handler, presented_bearer};
+use self::recovery::{reattach_orphans, record_end, start_history_broadcaster};
+use self::remote::{
+    configure_remote, host_only_refusal, remove_retired_lan_files, start_remote_access,
+};
+use self::settings::start_keep_awake;
+use self::tabs::close_session_panes;
 use crate::agents::CommonSpawnFields;
 use crate::branch_fate::{FateInput, SessionBase};
 use crate::orphan::OrphanMeta;
 use crate::paths::Dirs;
 use crate::pty::PtySpawnSpec;
 use crate::registry::{
-    add_repo, persist_last_agent, persist_repo_last_spawn_config,
-    persist_workspace_last_spawn_config, remove_repo, remove_workspace, reorder_containers,
-    set_repo_appearance, set_repo_worktree_default, set_session_order, set_workspace_appearance,
-    set_workspace_worktree_default, upsert_workspace,
+    persist_last_agent, persist_repo_last_spawn_config, persist_workspace_last_spawn_config,
+    set_repo_appearance, set_workspace_appearance,
 };
 use crate::session::{
     ScrollbackSnapshot, SessionEvent, SessionRecord, SessionRegistry, UpdateOrigin,
@@ -34,15 +48,13 @@ use crate::session::{
 use crate::state::AppState;
 use crate::tailnet_listener::TailnetListener;
 use crate::{
-    branch_fate, branch_names, env_secrets, file_fetch, git, git_inspect, git_write, headless,
-    history, inject, orphan, osc_title, pty_state, spawn_plan, tabs, tracer_client, user_env,
-    vscode, workspace as ws,
+    branch_fate, branch_names, env_secrets, file_fetch, headless, history, inject, orphan,
+    osc_title, pty_state, spawn_plan, tracer_client, user_env, workspace as ws,
 };
 use anyhow::{Context as _, anyhow};
 use axum::Router;
-use axum::body::{Body, Bytes};
+use axum::extract::State;
 use axum::extract::ws::WebSocketUpgrade;
-use axum::extract::{Path as AxumPath, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -51,10 +63,9 @@ use chrono::Utc;
 use directories::UserDirs;
 use protocol::{
     Agent, AgentOptions, AppearanceOverrides, AttentionReason, BranchCleanup, ClientMessage,
-    DaemonHandshake, DaemonMessage, InitLayoutKind, MemberBranchFate, PROTOCOL_VERSION,
-    PaneDropEdge, PresetLaunchJobSnapshot, SUPPORTED_PROTOCOL_VERSIONS, SessionEnd, SessionKind,
-    SessionMember, SessionMetrics, SessionMode, SessionStatus, SpawnRequest, SpawnTarget,
-    TabContent, TabEntry, VscodeWorkspaceSuggestion,
+    DaemonHandshake, DaemonMessage, MemberBranchFate, PROTOCOL_VERSION, PresetLaunchJobSnapshot,
+    SUPPORTED_PROTOCOL_VERSIONS, SessionEnd, SessionKind, SessionMember, SessionMetrics,
+    SessionMode, SessionStatus, SpawnRequest, SpawnTarget, TabEntry,
 };
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -135,39 +146,6 @@ pub struct Hub {
     /// it; applied to the record at insertion (bounded by age and count).
     pub pending_hooks: crate::hook_status::PendingHooks,
 }
-
-/// The session ids being recovered or resumed right now.
-#[derive(Clone, Default)]
-pub struct RecoveryClaims(Arc<std::sync::Mutex<std::collections::HashSet<String>>>);
-
-impl RecoveryClaims {
-    /// Claims `id` for one recovery; None while another holds it. The claim
-    /// ends when the returned guard drops, on every exit path.
-    pub(crate) fn claim(&self, id: &str) -> Option<RecoveryClaim> {
-        if !crate::sync::lock(&self.0).insert(id.to_owned()) {
-            return None;
-        }
-        Some(RecoveryClaim {
-            claims: self.clone(),
-            id: id.to_owned(),
-        })
-    }
-}
-
-/// One held claim from [`RecoveryClaims::claim`].
-pub(crate) struct RecoveryClaim {
-    claims: RecoveryClaims,
-    id: String,
-}
-
-impl Drop for RecoveryClaim {
-    fn drop(&mut self) {
-        crate::sync::lock(&self.claims.0).remove(&self.id);
-    }
-}
-
-/// The error a recovery or Resume gets while another holds the session.
-const ALREADY_RECOVERING: &str = "already being recovered";
 
 impl Hub {
     /// Broadcast a tab-layout change scoped to one client's layout. Only that
@@ -281,178 +259,6 @@ pub enum PresetEvent {
 const TAB_EVENT_CAPACITY: usize = 256;
 const PRESET_EVENT_CAPACITY: usize = 64;
 const STATE_EVENT_CAPACITY: usize = 64;
-
-/// Reattach orphan sessions (alive but detached) and abandoned sessions
-/// (dead, daemon crashed mid-run) before any clients connect so the
-/// initial state snapshot already includes them.
-///
-/// Post-C.3: orphans whose sidecar carries `tracer_pid` + `tracer_pipe` get
-/// wired up to the still-running rt-tracer via pipe, restoring full IO.
-/// A reattach failure (tracer died between liveness check and pipe open,
-/// or another daemon claimed the pipe first) routes the session to the
-/// abandoned bucket so the user can Resume from B.2's UI. Legacy sidecars
-/// (no tracer fields) fall through to the read-only orphan path — pre-C.3
-/// children can't survive the daemon anyway, so this branch is only ever
-/// taken by sidecars from a downgrade scenario.
-async fn reattach_orphans(
-    sessions: &Arc<SessionRegistry>,
-    dirs: &Dirs,
-    attention_tx: &mpsc::UnboundedSender<pty_state::AttentionEvent>,
-    orphans: Vec<OrphanMeta>,
-    abandoned: Vec<OrphanMeta>,
-) {
-    let total_start = std::time::Instant::now();
-    let orphan_count = orphans.len();
-    let abandoned_count = abandoned.len();
-    info!(orphan_count, abandoned_count, "reattach_orphans: begin");
-    // Reattach concurrently. Each orphan's tracer connect can block up to the
-    // per-tracer reattach budget, so a sequential loop made boot time scale
-    // with the number of unreachable tracers (N × budget) and stalled the
-    // handshake — a single dead tracer would delay every session. All
-    // reattaches still complete before the caller binds the listener, so the
-    // "clients only see fully-wired sessions" invariant holds; the registry
-    // mutations inside each task are independently locked.
-    let mut tasks = Vec::with_capacity(orphans.len());
-    for meta in orphans {
-        tasks.push(tokio::spawn(reattach_one(
-            Arc::clone(sessions),
-            dirs.clone(),
-            attention_tx.clone(),
-            meta,
-        )));
-    }
-    for task in tasks {
-        if let Err(err) = task.await {
-            warn!(?err, "reattach_orphans: reattach task failed to join");
-        }
-    }
-    for meta in abandoned {
-        sessions.insert_abandoned(&meta);
-    }
-    info!(
-        orphan_count,
-        abandoned_count,
-        elapsed_ms = u64::try_from(total_start.elapsed().as_millis()).unwrap_or(u64::MAX),
-        "reattach_orphans: done"
-    );
-}
-
-/// Reattach a single orphan to its still-running tracer, or route it to the
-/// abandoned bucket if the tracer is unreachable. Runs as its own task so a
-/// slow/dead tracer doesn't serialize the others (see `reattach_orphans`).
-async fn reattach_one(
-    sessions: Arc<SessionRegistry>,
-    dirs: Dirs,
-    attention_tx: mpsc::UnboundedSender<pty_state::AttentionEvent>,
-    meta: OrphanMeta,
-) {
-    let session_start = std::time::Instant::now();
-    match (meta.tracer_pipe.as_deref(), meta.tracer_pid) {
-        (Some(pipe), Some(tracer_pid)) => {
-            match tracer_client::reattach(
-                &meta.session_id,
-                pipe,
-                tracer_pid,
-                expected_output_subscribers(meta.mode),
-            )
-            .await
-            {
-                Ok(pty) => {
-                    info!(
-                        session_id = %meta.session_id,
-                        tracer_pid,
-                        elapsed_ms = u64::try_from(session_start.elapsed().as_millis()).unwrap_or(u64::MAX),
-                        "tracer reattach succeeded"
-                    );
-                    let pending = sessions.insert_reattached(&meta, Arc::clone(&pty));
-                    let snap_tx = attach_lifecycle(
-                        &sessions,
-                        meta.session_id.clone(),
-                        &pty,
-                        Some(dirs.clone()),
-                    );
-                    let (in_tx, in_rx) = mpsc::unbounded_channel::<usize>();
-                    let restored = {
-                        let mut guard = crate::sync::lock(pending.arc());
-                        guard.scrollback_snapshot_req = Some(snap_tx);
-                        guard.input_notifier = Some(in_tx);
-                        guard.status
-                    };
-                    if meta.mode == SessionMode::PlainShell {
-                        pty_state::watch_plain_shell(
-                            &sessions,
-                            meta.session_id.clone(),
-                            pty_state::WatchStreams {
-                                output: pty.output.subscribe(),
-                                input_pulses: in_rx,
-                            },
-                            restored,
-                        );
-                    } else {
-                        pty_state::watch(
-                            &sessions,
-                            meta.session_id.clone(),
-                            pty_state::WatchStreams {
-                                output: pty.output.subscribe(),
-                                input_pulses: in_rx,
-                            },
-                            attention_tx.clone(),
-                            restored,
-                        );
-                    }
-                    osc_title::watch(
-                        &sessions,
-                        meta.session_id.clone(),
-                        pty.output.subscribe(),
-                        meta.mode == SessionMode::PlainShell,
-                    );
-                    pending.publish();
-                }
-                Err(err) => {
-                    warn!(
-                        ?err,
-                        session_id = %meta.session_id,
-                        tracer_pid,
-                        elapsed_ms = u64::try_from(session_start.elapsed().as_millis()).unwrap_or(u64::MAX),
-                        "tracer reattach failed; routing to abandoned"
-                    );
-                    sessions.insert_abandoned(&meta);
-                }
-            }
-        }
-        _ => {
-            sessions.insert_orphan(&meta);
-        }
-    }
-}
-
-/// Wire up the keep-awake watcher: seed its setting watch from persisted
-/// state, spawn the task, and hand back the two ends the [`Hub`] keeps — the
-/// setting sender (written by [`ClientMessage::SetKeepAwake`]) and the status
-/// receiver (read by the initial-state push).
-fn start_keep_awake(
-    state: &AppState,
-    sessions: &Arc<SessionRegistry>,
-    state_events: &broadcast::Sender<StateEvent>,
-) -> (
-    tokio::sync::watch::Sender<bool>,
-    tokio::sync::watch::Receiver<crate::keep_awake::Status>,
-) {
-    let enabled = state.keep_awake();
-    let (enabled_tx, enabled_rx) = tokio::sync::watch::channel(enabled);
-    let (status_tx, status_rx) = tokio::sync::watch::channel(crate::keep_awake::Status {
-        enabled,
-        active: false,
-    });
-    crate::keep_awake::spawn(
-        Arc::clone(sessions),
-        enabled_rx,
-        status_tx,
-        state_events.clone(),
-        crate::keep_awake::native(),
-    );
-    (enabled_tx, status_rx)
-}
 
 /// Forward every attention event into the registry's session-event broadcast.
 fn spawn_attention_forwarder(
@@ -609,84 +415,6 @@ fn build_loopback_router(hub: Hub) -> Router {
         .with_state(hub)
 }
 
-/// Most of a hook body the endpoint reads; anything larger is treated as an
-/// empty body and still answered `204`.
-const HOOK_BODY_LIMIT: usize = 1 << 20;
-
-/// `POST /hook/{session_id}` — one agent hook event for a session, from a
-/// Claude Code session.
-///
-/// Auth mirrors `/shutdown`: the daemon's own token as a bearer, compared in
-/// constant time. The answer is `204` for any authenticated request, whatever
-/// the body holds and whether or not the session exists, since the shim
-/// ignores it and a rejected event must never hold up the agent.
-///
-/// An event for a session id the registry does not hold yet is held in
-/// [`crate::hook_status::PendingHooks`] and applied when the spawn inserts the
-/// record: the tracer starts the child, whose hooks fire at once, before the
-/// daemon has inserted the record.
-///
-/// The body is read at most 1 MiB; a larger or unreadable body is treated as
-/// empty. A body that is not JSON, or an event the mapping does not know,
-/// changes nothing and does not order the session.
-///
-/// Async hooks finish out of order, so the event is applied only when its
-/// `X-RT-Hook-Time` (nanoseconds since the epoch) is strictly newer than the
-/// last one applied for the session. A missing or unparsable time is the
-/// oldest possible and is dropped.
-async fn hook_handler(
-    State(hub): State<Hub>,
-    AxumPath(session_id): AxumPath<String>,
-    headers: HeaderMap,
-    body: Body,
-) -> Response {
-    let Some(token) = presented_bearer(&headers) else {
-        return (StatusCode::UNAUTHORIZED, "missing bearer token").into_response();
-    };
-    if !crate::secret::constant_time_eq(token.as_bytes(), hub.auth_token.as_bytes()) {
-        return (StatusCode::UNAUTHORIZED, "bad bearer token").into_response();
-    }
-    let body = axum::body::to_bytes(body, HOOK_BODY_LIMIT)
-        .await
-        .unwrap_or_else(|_| Bytes::new());
-    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&body) else {
-        return StatusCode::NO_CONTENT.into_response();
-    };
-    let Some(signal) = crate::hook_status::map_event(&value) else {
-        return StatusCode::NO_CONTENT.into_response();
-    };
-    let event_time = hook_time(&headers);
-    let details = crate::hook_status::details(&value);
-    if hub.sessions.get(&session_id).is_none() {
-        // A spawn may have started the child — whose hooks fire from its
-        // argv — before its record is inserted. Hold the event for the
-        // insertion instead of dropping it on the floor.
-        hub.pending_hooks
-            .defer(&hub, &session_id, event_time, &signal, &details);
-        return StatusCode::NO_CONTENT.into_response();
-    }
-    crate::hook_status::apply_signal(&hub, &session_id, event_time, &signal, &details);
-    StatusCode::NO_CONTENT.into_response()
-}
-
-/// The `X-RT-Hook-Time` header, nanoseconds since the Unix epoch.
-fn hook_time(headers: &HeaderMap) -> Option<u128> {
-    headers
-        .get("x-rt-hook-time")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.trim().parse().ok())
-}
-
-/// The bearer token a request presents, when it uses the expected
-/// `Authorization: Bearer <token>` form.
-fn presented_bearer(headers: &HeaderMap) -> Option<&str> {
-    headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .map(str::trim)
-}
-
 fn write_handshake(dirs: &Dirs, port: u16, auth_token: &str) -> anyhow::Result<()> {
     let pid = std::process::id();
     let payload = DaemonHandshake {
@@ -744,31 +472,6 @@ async fn shutdown_handler(State(hub): State<Hub>, headers: HeaderMap) -> Respons
     (StatusCode::ACCEPTED, "shutting down").into_response()
 }
 
-/// Ensure a layout exists for a non-chooser connection: an existing client
-/// (refresh its name) or the shared legacy key (no `client_id`). Legacy
-/// connections mirror the pre-per-client global layout without consuming it,
-/// so a real client can still adopt it through the first-connect chooser
-/// (`CloneLegacy`). Real clients with no layout never reach here — they go
-/// through the chooser.
-fn ensure_client_layout(hub: &Hub, client_id: &str, client_name: Option<&str>) {
-    if hub.state.has_client_layout(client_id) {
-        if let Err(err) = hub
-            .state
-            .set_client_name(client_id, client_name.map(std::string::ToString::to_string))
-        {
-            warn!(?err, "failed to refresh client layout name");
-        }
-        return;
-    }
-    if let Err(err) = hub.state.set_client_layout(
-        client_id,
-        client_name.map(std::string::ToString::to_string),
-        hub.state.legacy_tabs(),
-    ) {
-        warn!(?err, %client_id, "failed to initialize legacy client layout");
-    }
-}
-
 #[expect(
     clippy::too_many_lines,
     reason = "dispatch is a flat match over the protocol message set; \
@@ -780,7 +483,6 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         auth,
         pty_forwarders,
         client_id,
-        client_name,
         connection,
         ..
     } = *ctx;
@@ -800,64 +502,24 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
             // snapshot read. Kept in the protocol for back-compat with
             // older clients that send it.
         }
-        ClientMessage::ListRepos => {
-            let repos = hub.state.with_persisted(|s| s.repos.clone());
-            let _ = out_tx.send(DaemonMessage::Repos { repos });
-        }
-        ClientMessage::AddRepo { path, name } => {
-            register_repo(hub, &path, name, out_tx).await?;
-        }
-        ClientMessage::RemoveRepo { repo_id } => {
-            remove_repo(&hub.state, &repo_id)?;
-            let (repos, workspaces, container_order) = hub.state.with_persisted(|s| {
-                (
-                    s.repos.clone(),
-                    s.workspaces.clone(),
-                    s.container_order.clone(),
-                )
-            });
-            let _ = hub.state_events.send(StateEvent::Repos(repos));
-            let _ = hub.state_events.send(StateEvent::Workspaces(workspaces));
-            let _ = hub
-                .state_events
-                .send(StateEvent::ContainersReordered(container_order));
-        }
-        ClientMessage::ListWorkspaces => {
-            let workspaces = hub.state.with_persisted(|s| s.workspaces.clone());
-            let _ = out_tx.send(DaemonMessage::Workspaces { workspaces });
-        }
-        ClientMessage::UpsertWorkspace {
-            id,
-            name,
-            member_repo_ids,
-            linked_vscode_workspace,
-        } => {
-            upsert_workspace(
-                &hub.state,
-                id,
-                &name,
-                member_repo_ids,
-                linked_vscode_workspace,
-                None,
-            )?;
-            let (workspaces, container_order) = hub
-                .state
-                .with_persisted(|s| (s.workspaces.clone(), s.container_order.clone()));
-            let _ = hub.state_events.send(StateEvent::Workspaces(workspaces));
-            let _ = hub
-                .state_events
-                .send(StateEvent::ContainersReordered(container_order));
-        }
-        ClientMessage::RemoveWorkspace { workspace_id } => {
-            remove_workspace(&hub.state, &workspace_id)?;
-            let (workspaces, container_order) = hub
-                .state
-                .with_persisted(|s| (s.workspaces.clone(), s.container_order.clone()));
-            let _ = hub.state_events.send(StateEvent::Workspaces(workspaces));
-            let _ = hub
-                .state_events
-                .send(StateEvent::ContainersReordered(container_order));
-        }
+        m @ (ClientMessage::ListRepos
+        | ClientMessage::AddRepo { .. }
+        | ClientMessage::RemoveRepo { .. }
+        | ClientMessage::ListWorkspaces
+        | ClientMessage::UpsertWorkspace { .. }
+        | ClientMessage::RemoveWorkspace { .. }
+        | ClientMessage::AcceptVscodeWorkspaceSuggestion { .. }
+        | ClientMessage::ParseVscodeWorkspace { .. }
+        | ClientMessage::ScanVscodeWorkspaces { .. }
+        | ClientMessage::SetRepoWorktreeDefault { .. }
+        | ClientMessage::SetWorkspaceWorktreeDefault { .. }
+        | ClientMessage::SetWorktreesRoot { .. }
+        | ClientMessage::ConfigureLan { .. }
+        | ClientMessage::StartPairing
+        | ClientMessage::CancelPairing
+        | ClientMessage::SetKeepAwake { .. }
+        | ClientMessage::InspectWorktreesRoot
+        | ClientMessage::DeleteWorktreeAt { .. }) => settings::handle(hub, m, ctx).await?,
         ClientMessage::PreviewWorkspaceSpawn {
             workspace_id,
             branch_name,
@@ -921,33 +583,25 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
                 Err(err) => send_preview_failure(out_tx, &err, request_id),
             }
         }
-        ClientMessage::FetchRepo { repo_id } => {
-            fetch_repo(hub, repo_id, out_tx).await;
-        }
-        ClientMessage::AcceptVscodeWorkspaceSuggestion { suggestion, watch } => {
-            accept_vscode_suggestion(hub, suggestion, watch, out_tx).await?;
-            // Broadcast container order in case new repos were registered.
-            let container_order = hub.state.with_persisted(|s| s.container_order.clone());
-            let _ = hub
-                .state_events
-                .send(StateEvent::ContainersReordered(container_order));
-        }
-        ClientMessage::ParseVscodeWorkspace { path } => {
-            let known_repos: Vec<(String, String)> = hub.state.with_persisted(|s| {
-                s.repos
-                    .iter()
-                    .map(|r| (r.id.clone(), r.path.clone()))
-                    .collect()
-            });
-            let suggestion =
-                crate::vscode::parse_workspace_file(std::path::Path::new(&path), &known_repos)
-                    .map_err(|e| anyhow!("parse_vscode_workspace: {e}"))?;
-            let _ = out_tx.send(DaemonMessage::VscodeWorkspaceParsed { suggestion });
-        }
-        ClientMessage::ScanVscodeWorkspaces { path } => {
-            let suggestions = scan_vscode_workspaces_in_path(hub, &path);
-            let _ = out_tx.send(DaemonMessage::VscodeWorkspacesScanned { path, suggestions });
-        }
+        m @ (ClientMessage::FetchRepo { .. }
+        | ClientMessage::ListBranches { .. }
+        | ClientMessage::ListWorktrees { .. }
+        | ClientMessage::SuggestBranchName { .. }
+        | ClientMessage::ListCommits { .. }
+        | ClientMessage::GetCommit { .. }
+        | ClientMessage::GetFileDiff { .. }
+        | ClientMessage::GetRemoteUrl { .. }
+        | ClientMessage::RepoStatus { .. }
+        | ClientMessage::StageFiles { .. }
+        | ClientMessage::UnstageFiles { .. }
+        | ClientMessage::CommitRepo { .. }
+        | ClientMessage::DiscardChanges { .. }
+        | ClientMessage::StashPush { .. }
+        | ClientMessage::ListStashes { .. }
+        | ClientMessage::StashPop { .. }
+        | ClientMessage::StashApply { .. }
+        | ClientMessage::StashDrop { .. }
+        | ClientMessage::GetFileSnapshot { .. }) => git::handle(hub, m, ctx).await?,
         ClientMessage::ListSessions => {
             let _ = out_tx.send(DaemonMessage::Sessions {
                 sessions: hub.sessions.snapshots(),
@@ -1119,12 +773,31 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
                 reason: AttentionReason::Stopped,
             });
         }
-        ClientMessage::ResumeAbandoned { session_id } => {
-            resume_abandoned(hub, &session_id, out_tx).await?;
-        }
-        ClientMessage::DiscardAbandoned { session_id } => {
-            discard_abandoned(hub, &session_id, out_tx);
-        }
+        m @ (ClientMessage::OpenDiffTab { .. }
+        | ClientMessage::ListTabs
+        | ClientMessage::CreateTab { .. }
+        | ClientMessage::CloseTab { .. }
+        | ClientMessage::RestoreTab { .. }
+        | ClientMessage::RestoreTabSnapshot { .. }
+        | ClientMessage::RenameTab { .. }
+        | ClientMessage::ReorderTabs { .. }
+        | ClientMessage::InitLayout { .. }
+        | ClientMessage::ReorderContainers { .. }
+        | ClientMessage::ReorderSessions { .. }
+        | ClientMessage::SplitPane { .. }
+        | ClientMessage::ClosePane { .. }
+        | ClientMessage::SetPaneRatio { .. }
+        | ClientMessage::ReplacePaneSession { .. }
+        | ClientMessage::MovePane { .. }
+        | ClientMessage::RearrangeTab { .. }
+        | ClientMessage::MergeTabs { .. }
+        | ClientMessage::ExtractToNewTab { .. }) => tabs::handle(hub, m, ctx)?,
+        m @ (ClientMessage::ResumeAbandoned { .. }
+        | ClientMessage::DiscardAbandoned { .. }
+        | ClientMessage::ResumeAllAbandoned
+        | ClientMessage::ListEnvNames { .. }
+        | ClientMessage::ListSessionHistory { .. }
+        | ClientMessage::RecoverSessions { .. }) => recovery::handle(hub, m, ctx).await?,
         ClientMessage::ParkSession { session_id } => {
             park_session(hub, &session_id).await;
         }
@@ -1143,409 +816,6 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
             targets,
         } => {
             retry_worktree_cleanup(hub, &session_id, &kill_pids, &targets, out_tx).await;
-        }
-        ClientMessage::ResumeAllAbandoned => {
-            resume_all_abandoned(hub, out_tx).await;
-        }
-        ClientMessage::ListBranches { repo_id } => {
-            let repo_path = hub
-                .state
-                .with_persisted(|s| {
-                    s.repos
-                        .iter()
-                        .find(|r| r.id == repo_id)
-                        .map(|r| r.path.clone())
-                })
-                .ok_or_else(|| anyhow!("unknown repo: {repo_id}"))?;
-            let path = PathBuf::from(&repo_path);
-            // A git failure here (repo moved, `git` off PATH, held index.lock)
-            // renders as an empty branch list, which is indistinguishable from
-            // a repo that genuinely has none. Degrading is right — the dialog
-            // still opens — but it must leave a trail.
-            let branches = git::list_branches(&path)
-                .await
-                .unwrap_or_else(|err| {
-                    warn!(?err, %repo_id, path = %path.display(), "list_branches failed; reporting none");
-                    Vec::new()
-                });
-            let current = git::current_branch(&path).await.unwrap_or_else(|err| {
-                warn!(?err, %repo_id, path = %path.display(), "current_branch failed");
-                None
-            });
-            // Same degrade-but-leave-a-trail policy as the local list: a repo
-            // with no remote legitimately has none, so an empty vec is not by
-            // itself an error signal.
-            let remote_branches = git::list_remote_branches(&path)
-                .await
-                .unwrap_or_else(|err| {
-                    warn!(?err, %repo_id, path = %path.display(), "list_remote_branches failed; reporting none");
-                    Vec::new()
-                });
-            let _ = out_tx.send(DaemonMessage::Branches {
-                repo_id,
-                branches,
-                current,
-                remote_branches,
-            });
-        }
-        ClientMessage::ListWorktrees { repo_id } => {
-            let repo_path = hub
-                .state
-                .with_persisted(|s| {
-                    s.repos
-                        .iter()
-                        .find(|r| r.id == repo_id)
-                        .map(|r| r.path.clone())
-                })
-                .ok_or_else(|| anyhow!("unknown repo: {repo_id}"))?;
-            let path = PathBuf::from(&repo_path);
-            let raw = git::list_worktrees(&path).await.unwrap_or_else(|err| {
-                warn!(?err, %repo_id, path = %path.display(), "list_worktrees failed; reporting none");
-                Vec::new()
-            });
-            let worktrees = annotate_worktrees(hub, raw);
-            let _ = out_tx.send(DaemonMessage::Worktrees { repo_id, worktrees });
-        }
-        ClientMessage::SuggestBranchName { target, request_id } => {
-            match branch_names::suggest(&hub.state, &hub.state.worktrees_dir(), &target).await {
-                Ok(name) => {
-                    let _ = out_tx.send(DaemonMessage::BranchNameSuggestion {
-                        target,
-                        name,
-                        request_id,
-                    });
-                }
-                // Route the failure to the request that asked, so its own wait
-                // ends here rather than after its timeout too.
-                Err(err) => {
-                    let _ = out_tx.send(DaemonMessage::Error {
-                        message: err.to_string(),
-                        request_id,
-                    });
-                }
-            }
-        }
-        ClientMessage::ListCommits {
-            repo_id,
-            branch,
-            limit,
-            offset,
-            worktree_path,
-            request_id,
-        } => {
-            reply_git_read(out_tx, &repo_id, request_id, "commit list", async {
-                let path = repo_target_or_err(hub, &repo_id, worktree_path.as_deref())?;
-                let commits =
-                    git_inspect::list_commits(&path, branch.as_deref(), limit, offset).await?;
-                Ok(DaemonMessage::Commits {
-                    repo_id: repo_id.clone(),
-                    commits,
-                    offset,
-                    worktree_path: worktree_path.clone(),
-                })
-            })
-            .await;
-        }
-        ClientMessage::GetCommit {
-            repo_id,
-            sha,
-            request_id,
-        } => {
-            reply_git_read(out_tx, &repo_id, request_id, "commit detail", async {
-                let path = repo_path_or_err(hub, &repo_id)?;
-                let detail = git_inspect::get_commit(&path, &sha).await?;
-                Ok(DaemonMessage::CommitDetail {
-                    repo_id: repo_id.clone(),
-                    detail,
-                })
-            })
-            .await;
-        }
-        ClientMessage::GetFileDiff {
-            repo_id,
-            path,
-            against,
-            worktree_path,
-        } => {
-            file_fetch::check_relative(&path)?;
-            let repo = repo_target_or_err(hub, &repo_id, worktree_path.as_deref())?;
-            let diff = git_inspect::file_diff(&repo, &path, against.as_deref()).await?;
-            let _ = out_tx.send(DaemonMessage::FileDiff {
-                repo_id,
-                path,
-                against,
-                diff,
-                worktree_path,
-            });
-        }
-        ClientMessage::GetRemoteUrl {
-            repo_id,
-            request_id,
-        } => {
-            reply_git_read(out_tx, &repo_id, request_id, "remote url", async {
-                let repo = repo_path_or_err(hub, &repo_id)?;
-                let info = git_inspect::remote_url(&repo_id, &repo).await?;
-                Ok(DaemonMessage::RemoteUrl(info))
-            })
-            .await;
-        }
-        ClientMessage::RepoStatus {
-            repo_id,
-            worktree_path,
-            request_id,
-        } => {
-            reply_git_read(out_tx, &repo_id, request_id, "status", async {
-                let repo = repo_target_or_err(hub, &repo_id, worktree_path.as_deref())?;
-                let (index_changes, worktree_changes) = git_inspect::repo_status(&repo).await?;
-                Ok(DaemonMessage::RepoStatus {
-                    repo_id: repo_id.clone(),
-                    index_changes,
-                    worktree_changes,
-                    worktree_path: worktree_path.clone(),
-                })
-            })
-            .await;
-        }
-        ClientMessage::StageFiles {
-            repo_id,
-            paths,
-            worktree_path,
-        } => {
-            handle_git_write(
-                hub,
-                out_tx,
-                &repo_id,
-                worktree_path.as_deref(),
-                "stage",
-                async {
-                    let repo = repo_target_or_err(hub, &repo_id, worktree_path.as_deref())?;
-                    git_write::stage(&repo, &paths).await?;
-                    Ok(None)
-                },
-            )
-            .await;
-        }
-        ClientMessage::UnstageFiles {
-            repo_id,
-            paths,
-            worktree_path,
-        } => {
-            handle_git_write(
-                hub,
-                out_tx,
-                &repo_id,
-                worktree_path.as_deref(),
-                "unstage",
-                async {
-                    let repo = repo_target_or_err(hub, &repo_id, worktree_path.as_deref())?;
-                    git_write::unstage(&repo, &paths).await?;
-                    Ok(None)
-                },
-            )
-            .await;
-        }
-        ClientMessage::CommitRepo {
-            repo_id,
-            message,
-            worktree_path,
-        } => {
-            handle_git_write(
-                hub,
-                out_tx,
-                &repo_id,
-                worktree_path.as_deref(),
-                "commit",
-                async {
-                    let repo = repo_target_or_err(hub, &repo_id, worktree_path.as_deref())?;
-                    let (sha, short_sha) = git_write::commit(&repo, &message).await?;
-                    Ok(Some(DaemonMessage::CommitOk {
-                        repo_id: repo_id.clone(),
-                        sha,
-                        short_sha,
-                        worktree_path: worktree_path.clone(),
-                    }))
-                },
-            )
-            .await;
-        }
-        ClientMessage::DiscardChanges {
-            repo_id,
-            paths,
-            worktree_path,
-        } => {
-            handle_git_write(
-                hub,
-                out_tx,
-                &repo_id,
-                worktree_path.as_deref(),
-                "discard",
-                async {
-                    let repo = repo_target_or_err(hub, &repo_id, worktree_path.as_deref())?;
-                    git_write::discard(&repo, &paths).await?;
-                    Ok(None)
-                },
-            )
-            .await;
-        }
-        ClientMessage::StashPush {
-            repo_id,
-            message,
-            worktree_path,
-        } => {
-            handle_stash_write(
-                hub,
-                out_tx,
-                &repo_id,
-                worktree_path.as_deref(),
-                "stash_push",
-                async {
-                    let repo = repo_target_or_err(hub, &repo_id, worktree_path.as_deref())?;
-                    git_write::stash_push(&repo, &message).await
-                },
-            )
-            .await;
-        }
-        ClientMessage::ListStashes {
-            repo_id,
-            worktree_path,
-            request_id,
-        } => {
-            reply_git_read(out_tx, &repo_id, request_id, "stash list", async {
-                let repo = repo_target_or_err(hub, &repo_id, worktree_path.as_deref())?;
-                let stashes = git_write::stash_list(&repo).await?;
-                Ok(DaemonMessage::Stashes {
-                    repo_id: repo_id.clone(),
-                    stashes,
-                    worktree_path: worktree_path.clone(),
-                })
-            })
-            .await;
-        }
-        ClientMessage::StashPop {
-            repo_id,
-            stash_id,
-            worktree_path,
-        } => {
-            handle_stash_write(
-                hub,
-                out_tx,
-                &repo_id,
-                worktree_path.as_deref(),
-                "stash_pop",
-                async {
-                    let repo = repo_target_or_err(hub, &repo_id, worktree_path.as_deref())?;
-                    git_write::stash_pop(&repo, &stash_id).await
-                },
-            )
-            .await;
-        }
-        ClientMessage::StashApply {
-            repo_id,
-            stash_id,
-            worktree_path,
-        } => {
-            handle_stash_write(
-                hub,
-                out_tx,
-                &repo_id,
-                worktree_path.as_deref(),
-                "stash_apply",
-                async {
-                    let repo = repo_target_or_err(hub, &repo_id, worktree_path.as_deref())?;
-                    git_write::stash_apply(&repo, &stash_id).await
-                },
-            )
-            .await;
-        }
-        ClientMessage::StashDrop {
-            repo_id,
-            stash_id,
-            worktree_path,
-        } => {
-            handle_stash_write(
-                hub,
-                out_tx,
-                &repo_id,
-                worktree_path.as_deref(),
-                "stash_drop",
-                async {
-                    let repo = repo_target_or_err(hub, &repo_id, worktree_path.as_deref())?;
-                    git_write::stash_drop(&repo, &stash_id).await
-                },
-            )
-            .await;
-        }
-        ClientMessage::OpenDiffTab {
-            id,
-            repo_id,
-            path,
-            against,
-            worktree_path,
-        } => {
-            let outcome = open_diff_tab(
-                hub,
-                client_id,
-                &repo_id,
-                &path,
-                against.as_deref(),
-                worktree_path.as_deref(),
-            );
-            match outcome {
-                Ok(outcome) => {
-                    if let Some(new_tab) = outcome.created {
-                        hub.emit_tab(client_id, TabEvent::Updated(new_tab));
-                    }
-                    let _ = out_tx.send(DaemonMessage::DiffTabOpened {
-                        id,
-                        tab_id: outcome.tab_id,
-                    });
-                }
-                Err(err) => {
-                    let _ = out_tx.send(DaemonMessage::Error {
-                        message: format!("open diff tab failed: {err:#}"),
-                        request_id: Some(id),
-                    });
-                }
-            }
-        }
-        ClientMessage::GetFileSnapshot {
-            id,
-            repo_id,
-            path,
-            against,
-            worktree_path,
-        } => {
-            let snapshot = match file_fetch::check_relative(&path)
-                .and_then(|()| repo_target_or_err(hub, &repo_id, worktree_path.as_deref()))
-            {
-                Ok(repo) => git_inspect::file_snapshot(&repo, &path, against.as_deref()).await,
-                Err(err) => Err(err),
-            };
-            match snapshot {
-                Ok(content) => {
-                    let _ = out_tx.send(DaemonMessage::FileSnapshot {
-                        id,
-                        repo_id,
-                        path: path.clone(),
-                        against,
-                        old: content.old,
-                        new: content.new,
-                        language: git_inspect::language_for_path(&path).to_string(),
-                        unavailable: content.unavailable,
-                        worktree_path,
-                    });
-                }
-                Err(err) => {
-                    let _ = out_tx.send(DaemonMessage::FileSnapshotError {
-                        id,
-                        repo_id,
-                        path,
-                        against,
-                        error: format!("{err:#}"),
-                        worktree_path,
-                    });
-                }
-            }
         }
         ClientMessage::FetchFile {
             id,
@@ -1602,308 +872,8 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
             let send_result = hub.shutdown_tx.send(true);
             info!(?send_result, "dispatch: shutdown_tx.send returned");
         }
-        ClientMessage::SetRepoWorktreeDefault { repo_id, value } => {
-            set_repo_worktree_default(&hub.state, &repo_id, value)?;
-            let repos = hub.state.with_persisted(|s| s.repos.clone());
-            let _ = hub.state_events.send(StateEvent::Repos(repos));
-        }
-        ClientMessage::SetWorkspaceWorktreeDefault {
-            workspace_id,
-            value,
-        } => {
-            set_workspace_worktree_default(&hub.state, &workspace_id, value)?;
-            let workspaces = hub.state.with_persisted(|s| s.workspaces.clone());
-            let _ = hub.state_events.send(StateEvent::Workspaces(workspaces));
-        }
-        ClientMessage::SetWorktreesRoot { path } => {
-            let (resolved, is_override) = hub.state.set_worktrees_root(path)?;
-            let _ = hub.state_events.send(StateEvent::WorktreesRootChanged {
-                root: resolved.to_string_lossy().into_owned(),
-                is_override,
-            });
-        }
-        ClientMessage::ConfigureLan { .. }
-        | ClientMessage::StartPairing
-        | ClientMessage::CancelPairing => {
-            info!("dispatch: a retired LAN access message was answered with an Error");
-            let _ = out_tx.send(DaemonMessage::Error {
-                message: LAN_RETIRED.to_owned(),
-                request_id: None,
-            });
-        }
         ClientMessage::ConfigureRemote { enabled, port } => {
             configure_remote(hub, enabled, port, out_tx).await?;
-        }
-        ClientMessage::SetKeepAwake { enabled } => {
-            hub.state.set_keep_awake(enabled)?;
-            hub.keep_awake_enabled.send_replace(enabled);
-            info!(enabled, "keep-awake setting changed");
-        }
-        ClientMessage::InspectWorktreesRoot => {
-            let root = hub.state.worktrees_dir();
-            let is_override = hub.state.worktrees_root_is_override();
-            let entries = crate::worktrees_admin::scan_root(&root, &hub.sessions, &hub.state);
-            let _ = out_tx.send(DaemonMessage::WorktreesRootSnapshot {
-                root: root.to_string_lossy().into_owned(),
-                is_override,
-                entries,
-            });
-        }
-        ClientMessage::DeleteWorktreeAt { path } => {
-            let root = hub.state.worktrees_dir();
-            let target = std::path::PathBuf::from(&path);
-            crate::worktrees_admin::delete_group(&root, &target, &hub.sessions).await?;
-            // Push a fresh snapshot only to the requesting client. Other
-            // windows with the modal open can refresh on demand.
-            let is_override = hub.state.worktrees_root_is_override();
-            let entries = crate::worktrees_admin::scan_root(&root, &hub.sessions, &hub.state);
-            let _ = out_tx.send(DaemonMessage::WorktreesRootSnapshot {
-                root: root.to_string_lossy().into_owned(),
-                is_override,
-                entries,
-            });
-        }
-        ClientMessage::ListTabs => {
-            let tabs = hub.state.client_layout(client_id);
-            let _ = out_tx.send(DaemonMessage::Tabs { tabs });
-        }
-        ClientMessage::CreateTab {
-            name,
-            initial_session_id,
-            request_id,
-        } => {
-            // Resolve the default name against the current tab list so
-            // sequential opens produce `Tab`, `Tab 2`, `Tab 3`, ...
-            let created = hub.state.mutate_client_layout(client_id, |tabs| {
-                let tab = tabs::make_tab(name, initial_session_id, tabs);
-                tabs.push(tab.clone());
-                tab
-            });
-            match created {
-                Ok(new_tab) => hub.emit_tab(client_id, TabEvent::Updated(new_tab)),
-                Err(err) => send_tab_failure(out_tx, &err, request_id),
-            }
-        }
-        ClientMessage::CloseTab { tab_id } => {
-            let removed = hub.state.mutate_client_layout(client_id, |tabs| {
-                let prev = tabs.len();
-                tabs.retain(|t| t.id != tab_id);
-                prev != tabs.len()
-            })?;
-            if removed {
-                hub.emit_tab(client_id, TabEvent::Removed(tab_id));
-            }
-        }
-        ClientMessage::RestoreTab { tab, index } => {
-            let (restored, ordered_ids) =
-                hub.state.try_mutate_client_layout(client_id, |tabs| {
-                    let restored = tabs::restore_tab(tabs, tab, index)?;
-                    let ordered_ids = tabs.iter().map(|t| t.id.clone()).collect();
-                    Ok::<_, anyhow::Error>((restored, ordered_ids))
-                })?;
-            hub.emit_tab(client_id, TabEvent::Updated(restored));
-            hub.emit_tab(client_id, TabEvent::Reordered(ordered_ids));
-        }
-        ClientMessage::RestoreTabSnapshot { tab } => {
-            let restored = hub.state.try_mutate_client_layout(client_id, |tabs| {
-                tabs::restore_tab_snapshot(tabs, tab)
-            })?;
-            hub.emit_tab(client_id, TabEvent::Updated(restored));
-        }
-        ClientMessage::RenameTab { tab_id, name } => {
-            let updated = hub.state.mutate_client_layout(client_id, |tabs| {
-                tabs::find_tab_mut(tabs, &tab_id).map(|t| {
-                    t.name = name;
-                    t.clone()
-                })
-            })??;
-            hub.emit_tab(client_id, TabEvent::Updated(updated));
-        }
-        ClientMessage::ReorderTabs { ordered_ids } => {
-            hub.state
-                .mutate_client_layout(client_id, |tabs| tabs::reorder_tabs(tabs, &ordered_ids))??;
-            hub.emit_tab(client_id, TabEvent::Reordered(ordered_ids));
-        }
-        ClientMessage::InitLayout { kind } => {
-            // First-connect chooser reply: seed this client's brand-new layout
-            // and send it the resulting tabs. CloneClient deep-copies another
-            // client's layout with fresh pane ids (same sessions); AllSessions
-            // builds one tab of panes over every running session.
-            let clear_legacy = matches!(kind, InitLayoutKind::CloneLegacy);
-            let tabs = match kind {
-                InitLayoutKind::Empty | InitLayoutKind::Unknown => Vec::new(),
-                InitLayoutKind::CloneLegacy => hub.state.legacy_tabs(),
-                InitLayoutKind::CloneClient { client_id: source } => {
-                    tabs::clone_tabs_fresh_ids(&hub.state.client_layout(&source))
-                }
-                InitLayoutKind::AllSessions => build_all_sessions_layout(hub),
-            };
-            hub.state.set_client_layout(
-                client_id,
-                client_name.map(std::string::ToString::to_string),
-                tabs,
-            )?;
-            if clear_legacy {
-                hub.state.clear_legacy_tabs()?;
-            }
-            let _ = out_tx.send(DaemonMessage::Tabs {
-                tabs: hub.state.client_layout(client_id),
-            });
-        }
-        ClientMessage::ReorderContainers { ordered } => {
-            let applied = reorder_containers(&hub.state, ordered)?;
-            let _ = hub
-                .state_events
-                .send(StateEvent::ContainersReordered(applied));
-        }
-        ClientMessage::ReorderSessions {
-            container_id,
-            ordered_ids,
-        } => {
-            set_session_order(&hub.state, &container_id, ordered_ids.clone())?;
-            let _ = hub.state_events.send(StateEvent::SessionsReordered {
-                container_id,
-                ordered_ids,
-            });
-        }
-        ClientMessage::SplitPane {
-            tab_id,
-            pane_id,
-            direction,
-            place,
-            new_session_id,
-            request_id,
-        } => {
-            let updated = hub.state.try_mutate_client_layout(client_id, |tabs| {
-                let tab = tabs::find_tab_mut(tabs, &tab_id)?;
-                tabs::split_tab_pane(tab, &pane_id, direction, place, new_session_id)?;
-                Ok::<_, anyhow::Error>(tab.clone())
-            });
-            match updated {
-                Ok(updated) => hub.emit_tab(client_id, TabEvent::Updated(updated)),
-                Err(err) => send_tab_failure(out_tx, &err, request_id),
-            }
-        }
-        ClientMessage::ClosePane { tab_id, pane_id } => {
-            let outcome = hub.state.try_mutate_client_layout(client_id, |tabs| {
-                tabs::close_pane_in_tabs(tabs, &tab_id, &pane_id)
-            })?;
-            match outcome {
-                tabs::ClosedTab::Removed(id) => {
-                    hub.emit_tab(client_id, TabEvent::Removed(id));
-                }
-                tabs::ClosedTab::Updated(tab) => {
-                    hub.emit_tab(client_id, TabEvent::Updated(tab));
-                }
-            }
-        }
-        ClientMessage::SetPaneRatio {
-            tab_id,
-            split_path,
-            ratio,
-        } => {
-            let updated = hub.state.mutate_client_layout(client_id, |tabs| {
-                let tab = tabs::find_tab_mut(tabs, &tab_id)?;
-                tabs::set_tab_pane_ratio(tab, &split_path, ratio)?;
-                Ok::<_, anyhow::Error>(tab.clone())
-            })??;
-            hub.emit_tab(client_id, TabEvent::Updated(updated));
-        }
-        ClientMessage::ReplacePaneSession {
-            tab_id,
-            pane_id,
-            session_id,
-        } => {
-            let updated = hub.state.mutate_client_layout(client_id, |tabs| {
-                let tab = tabs::find_tab_mut(tabs, &tab_id)?;
-                let grid = tabs::grid_or_err_mut(tab)?;
-                tabs::replace_pane_session(grid, &pane_id, session_id)?;
-                Ok::<_, anyhow::Error>(tab.clone())
-            })??;
-            hub.emit_tab(client_id, TabEvent::Updated(updated));
-        }
-        ClientMessage::MovePane {
-            src_tab_id,
-            src_pane_id,
-            dst_tab_id,
-            dst_pane_id,
-            edge,
-            request_id,
-        } => {
-            if src_pane_id == dst_pane_id {
-                // Self-move is a no-op; don't mutate or broadcast.
-            } else {
-                let moved = move_pane(
-                    hub,
-                    client_id,
-                    &src_tab_id,
-                    &src_pane_id,
-                    &dst_tab_id,
-                    &dst_pane_id,
-                    edge,
-                );
-                match moved {
-                    Ok(events) => {
-                        for event in events {
-                            hub.emit_tab(client_id, event);
-                        }
-                    }
-                    Err(err) => send_tab_failure(out_tx, &err, request_id),
-                }
-            }
-        }
-        ClientMessage::RearrangeTab { tab_id, layout } => {
-            let updated = hub.state.try_mutate_client_layout(client_id, |tabs| {
-                let tab = tabs::find_tab_mut(tabs, &tab_id)?;
-                tabs::pick_layout(tab, layout)?;
-                Ok::<_, anyhow::Error>(tab.clone())
-            })?;
-            hub.emit_tab(client_id, TabEvent::Updated(updated));
-        }
-        ClientMessage::MergeTabs {
-            tab_ids,
-            name,
-            layout,
-            request_id,
-        } => {
-            let merged = hub.state.try_mutate_client_layout(client_id, |tabs| {
-                tabs::merge_tabs(tabs, &tab_ids, name, layout)
-            });
-            let new_tab = match merged {
-                Ok(new_tab) => new_tab,
-                Err(err) => {
-                    send_tab_failure(out_tx, &err, request_id);
-                    return Ok(());
-                }
-            };
-            for id in &tab_ids {
-                hub.emit_tab(client_id, TabEvent::Removed(id.clone()));
-            }
-            hub.emit_tab(client_id, TabEvent::Updated(new_tab));
-        }
-        ClientMessage::ExtractToNewTab {
-            source_tab_id,
-            pane_ids,
-            name,
-            layout,
-            request_id,
-        } => {
-            let extracted = hub.state.try_mutate_client_layout(client_id, |tabs| {
-                tabs::extract_to_new_tab(tabs, &source_tab_id, &pane_ids, name, layout)
-            });
-            let tabs::ExtractOutcome { new_tab, source } = match extracted {
-                Ok(extracted) => extracted,
-                Err(err) => {
-                    send_tab_failure(out_tx, &err, request_id);
-                    return Ok(());
-                }
-            };
-            if let Some(survivor) = source {
-                hub.emit_tab(client_id, TabEvent::Updated(survivor));
-            } else {
-                hub.emit_tab(client_id, TabEvent::Removed(source_tab_id));
-            }
-            hub.emit_tab(client_id, TabEvent::Updated(new_tab));
         }
         ClientMessage::ListPresets { target } => {
             let entries = crate::presets::list(hub, &target).await?;
@@ -1973,21 +943,6 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
                 }
             }
         }
-        ClientMessage::ListEnvNames { request_id } => {
-            let names = env_names().await;
-            let _ = out_tx.send(DaemonMessage::EnvNames { names, request_id });
-        }
-        ClientMessage::ListSessionHistory { request_id } => {
-            let items = session_history_items(hub).await;
-            let _ = out_tx.send(DaemonMessage::SessionHistory { request_id, items });
-        }
-        ClientMessage::RecoverSessions { request_id, items } => {
-            let results = recover_sessions(hub, &items, out_tx).await;
-            let _ = out_tx.send(DaemonMessage::RecoverResult {
-                request_id,
-                results,
-            });
-        }
         ClientMessage::ResolvePresetScripts {
             id,
             target,
@@ -2025,39 +980,6 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
     Ok(())
 }
 
-/// Move a pane between (possibly same) tabs and produce the broadcast events
-/// to fire afterwards. Performs extract + insert under a single fallible
-/// mutation so an extract that is never followed by its insert — a missing
-/// destination tab, an insert edge the grid can't take — rolls the layout back
-/// instead of persisting a pane that vanished from both tabs.
-fn move_pane(
-    hub: &Hub,
-    client_id: &str,
-    src_tab_id: &str,
-    src_pane_id: &str,
-    dst_tab_id: &str,
-    dst_pane_id: &str,
-    edge: PaneDropEdge,
-) -> anyhow::Result<Vec<TabEvent>> {
-    let mv = tabs::PaneMove {
-        src_tab_id,
-        src_pane_id,
-        dst_tab_id,
-        dst_pane_id,
-        edge,
-    };
-    let moved = hub
-        .state
-        .try_mutate_client_layout(client_id, |tabs| tabs::move_pane(tabs, &mv))?;
-    Ok(moved
-        .into_iter()
-        .map(|tab| match tab {
-            tabs::MovedTab::Updated(tab) => TabEvent::Updated(tab),
-            tabs::MovedTab::Removed(id) => TabEvent::Removed(id),
-        })
-        .collect())
-}
-
 /// Stop every active session (kill PTY / headless child, drop orphan sidecar)
 /// and clear the registry. Worktrees are intentionally left in place — exit
 /// is the wrong moment to ask the user about per-member cleanup.
@@ -2077,79 +999,6 @@ async fn shutdown_all(hub: &Hub) {
         info!(session_id = %id, "shutdown_all: session stopped");
     }
     info!("shutdown_all: complete");
-}
-
-struct OpenDiffOutcome {
-    tab_id: String,
-    /// `Some` when a new tab was created (caller should broadcast
-    /// `TabUpdated`); `None` when an existing diff tab matched and we just
-    /// focused it.
-    created: Option<TabEntry>,
-}
-
-/// Find or create a diff tab keyed on (`repo_id`, `path`, `against`).
-/// Returns the tab id either way so the client can activate it.
-fn open_diff_tab(
-    hub: &Hub,
-    client_id: &str,
-    repo_id: &str,
-    path: &str,
-    against: Option<&str>,
-    worktree_path: Option<&str>,
-) -> anyhow::Result<OpenDiffOutcome> {
-    repo_path_or_err(hub, repo_id)?;
-    let against_owned = against.map(str::to_string);
-    let worktree_path_owned = worktree_path.map(str::to_string);
-    let outcome: anyhow::Result<OpenDiffOutcome> = hub.state.mutate_client_layout(client_id, |tabs| {
-        if let Some(existing) = tabs.iter().find(|t| {
-            matches!(
-                &t.content,
-                TabContent::Diff {
-                    repo_id: r,
-                    path: p,
-                    against: a,
-                    worktree_path: w,
-                } if r == repo_id && p == path && a.as_deref() == against && w.as_deref() == worktree_path
-            )
-        }) {
-            return Ok(OpenDiffOutcome {
-                tab_id: existing.id.clone(),
-                created: None,
-            });
-        }
-        let new_tab = TabEntry {
-            id: uuid::Uuid::new_v4().to_string(),
-            name: diff_tab_name(path, against_owned.as_deref()),
-            content: TabContent::Diff {
-                repo_id: repo_id.to_string(),
-                path: path.to_string(),
-                against: against_owned.clone(),
-                worktree_path: worktree_path_owned.clone(),
-            },
-            created_at: chrono::Utc::now(),
-            picked_layout: None,
-        };
-        let id = new_tab.id.clone();
-        tabs.push(new_tab.clone());
-        Ok(OpenDiffOutcome {
-            tab_id: id,
-            created: Some(new_tab),
-        })
-    })?;
-    outcome
-}
-
-fn diff_tab_name(path: &str, against: Option<&str>) -> String {
-    let basename = path.rsplit(['/', '\\']).next().unwrap_or(path);
-    match against {
-        None => format!("{basename} (changes)"),
-        Some("HEAD") => format!("{basename} (staged)"),
-        Some(rev) => format!("{basename} @ {}", short_rev(rev)),
-    }
-}
-
-fn short_rev(rev: &str) -> &str {
-    if rev.len() > 7 { &rev[..7] } else { rev }
 }
 
 /// Whether a spawn target runs in a daemon-managed worktree. A standalone
@@ -2182,86 +1031,6 @@ fn worktree_paths_for_config(
     }
 }
 
-fn repo_path_or_err(hub: &Hub, repo_id: &str) -> anyhow::Result<PathBuf> {
-    repo_target_or_err(hub, repo_id, None)
-}
-
-/// Resolve the working directory git operations should target for
-/// `(repo_id, worktree_path)`. `worktree_path = None` falls back to the
-/// registered repo path (current behavior). `worktree_path = Some(...)`
-/// uses that path after validating (a) the repo is registered and (b)
-/// the supplied path is either under the daemon's worktrees root *or*
-/// equal to the registered repo's own path. The repo-path equality case
-/// is what makes non-worktree sessions work: their `SessionMember::
-/// worktree_path` literally equals the registered repo path, and the
-/// sidebar passes that through verbatim. Allowing both forms keeps the
-/// security invariant (no redirecting git to arbitrary directories)
-/// while not breaking the natural data flow.
-fn repo_target_or_err(
-    hub: &Hub,
-    repo_id: &str,
-    worktree_path: Option<&str>,
-) -> anyhow::Result<PathBuf> {
-    let registered_path = hub.state.with_persisted(|s| {
-        s.repos
-            .iter()
-            .find(|r| r.id == repo_id)
-            .map(|r| r.path.clone())
-    });
-    let Some(registered_path) = registered_path else {
-        return Err(anyhow!("unknown repo: {repo_id}"));
-    };
-    let Some(wt) = worktree_path else {
-        return Ok(PathBuf::from(registered_path));
-    };
-    let wt_buf = PathBuf::from(wt);
-    let registered_buf = PathBuf::from(&registered_path);
-    if wt_buf == registered_buf {
-        return Ok(wt_buf);
-    }
-    let wt_root = hub.state.worktrees_dir();
-    let canon_wt =
-        std::fs::canonicalize(&wt_buf).with_context(|| format!("resolving worktree_path {wt}"))?;
-    let canon_root = std::fs::canonicalize(&wt_root)
-        .with_context(|| format!("resolving worktrees root {}", wt_root.display()))?;
-    if canon_wt.starts_with(&canon_root) {
-        return Ok(wt_buf);
-    }
-    Err(anyhow!(
-        "worktree_path {wt} is not under the worktrees root {} and \
-         does not match the registered repo path",
-        wt_root.display()
-    ))
-}
-
-/// Runs a git read (`RepoStatus`, `ListStashes`, `ListCommits`, `GetCommit`,
-/// `GetRemoteUrl`) and puts the message `body` produces on the wire. A
-/// failure becomes a `Error` sent to this requester only, carrying the
-/// `request_id` it asked with, so the client can tell which read failed
-/// instead of leaving its section stuck on "loading…".
-async fn reply_git_read<F>(
-    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
-    repo_id: &str,
-    request_id: Option<String>,
-    label: &str,
-    body: F,
-) where
-    F: std::future::Future<Output = anyhow::Result<DaemonMessage>>,
-{
-    match body.await {
-        Ok(msg) => {
-            let _ = out_tx.send(msg);
-        }
-        Err(err) => {
-            warn!(?err, repo_id, label, "git read failed");
-            let _ = out_tx.send(DaemonMessage::Error {
-                message: format!("{label} failed: {err:#}"),
-                request_id,
-            });
-        }
-    }
-}
-
 /// Answers a failed spawn preview (`PreviewSpawn`, `PreviewWorkspaceSpawn`)
 /// with an `Error` to this requester only, carrying the `request_id` it asked
 /// with so the client can clear that pending preview.
@@ -2275,190 +1044,6 @@ fn send_preview_failure(
         message: err.to_string(),
         request_id,
     });
-}
-
-/// Answers a failed tab-layout request (`CreateTab`, `SplitPane`, `MergeTabs`,
-/// `MovePane`, `ExtractToNewTab`) with an `Error` to this requester only, carrying the
-/// `request_id` it asked with so the client can drop what it armed for it.
-fn send_tab_failure(
-    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
-    err: &anyhow::Error,
-    request_id: Option<String>,
-) {
-    warn!(?err, "tab layout request failed");
-    let _ = out_tx.send(DaemonMessage::Error {
-        message: err.to_string(),
-        request_id,
-    });
-}
-
-/// Runs a stage/unstage/commit body, then on success broadcasts the fresh
-/// `RepoStatus` to all connected clients (including this one) and emits the
-/// optional follow-up message (e.g. `CommitOk`). On failure, sends
-/// `GitWriteError { operation }` to the caller only — peer clients learn
-/// nothing happened because the broadcast is never sent. A write that
-/// succeeds but whose status refresh fails — or whose repo-path lookup
-/// fails because the repo was unregistered mid-write — also answers the
-/// caller with `GitWriteError`, so its pending state clears.
-async fn handle_git_write<F>(
-    hub: &Hub,
-    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
-    repo_id: &str,
-    worktree_path: Option<&str>,
-    operation: &str,
-    body: F,
-) where
-    F: std::future::Future<Output = anyhow::Result<Option<DaemonMessage>>>,
-{
-    let outcome = body.await;
-    match outcome {
-        Ok(follow_up) => {
-            match repo_target_or_err(hub, repo_id, worktree_path) {
-                Ok(repo) => match git_inspect::repo_status(&repo).await {
-                    Ok((index_changes, worktree_changes)) => {
-                        let _ = hub.state_events.send(StateEvent::RepoStatus {
-                            repo_id: repo_id.to_string(),
-                            worktree_path: worktree_path.map(str::to_owned),
-                            index_changes,
-                            worktree_changes,
-                        });
-                    }
-                    Err(err) => {
-                        warn!(?err, repo_id, "git_write: post-write status refresh failed");
-                        send_post_write_error(
-                            out_tx,
-                            repo_id,
-                            worktree_path,
-                            operation,
-                            "status refresh failed",
-                            &err,
-                        );
-                    }
-                },
-                Err(err) => {
-                    warn!(?err, repo_id, "git_write: repo path lookup failed");
-                    send_post_write_error(
-                        out_tx,
-                        repo_id,
-                        worktree_path,
-                        operation,
-                        "repo lookup failed",
-                        &err,
-                    );
-                }
-            }
-            if let Some(msg) = follow_up {
-                let _ = out_tx.send(msg);
-            }
-        }
-        Err(err) => {
-            warn!(operation, repo_id, ?err, "git_write: operation failed");
-            let _ = out_tx.send(DaemonMessage::GitWriteError {
-                repo_id: repo_id.to_string(),
-                operation: operation.to_string(),
-                error: format!("{err:#}"),
-                worktree_path: worktree_path.map(str::to_owned),
-            });
-        }
-    }
-}
-
-/// Tells the writer that its write landed but the step after it failed — the
-/// status read, or the repo-path lookup when the repo was unregistered
-/// mid-write — so a client waiting on that write for `operation` stops
-/// waiting. `prefix` names which of them failed.
-fn send_post_write_error(
-    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
-    repo_id: &str,
-    worktree_path: Option<&str>,
-    operation: &str,
-    prefix: &str,
-    err: &anyhow::Error,
-) {
-    let _ = out_tx.send(DaemonMessage::GitWriteError {
-        repo_id: repo_id.to_string(),
-        operation: operation.to_string(),
-        error: format!("{prefix}: {err:#}"),
-        worktree_path: worktree_path.map(str::to_owned),
-    });
-}
-
-/// Like [`handle_git_write`] but for stash mutations: in addition to the
-/// post-write `RepoStatus` refresh, broadcasts a fresh `Stashes` snapshot
-/// so every connected sidebar sees the new stash list without re-requesting.
-async fn handle_stash_write<F>(
-    hub: &Hub,
-    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
-    repo_id: &str,
-    worktree_path: Option<&str>,
-    operation: &str,
-    body: F,
-) where
-    F: std::future::Future<Output = anyhow::Result<()>>,
-{
-    let outcome = body.await;
-    match outcome {
-        Ok(()) => match repo_target_or_err(hub, repo_id, worktree_path) {
-            Ok(repo) => {
-                match git_inspect::repo_status(&repo).await {
-                    Ok((index_changes, worktree_changes)) => {
-                        let _ = hub.state_events.send(StateEvent::RepoStatus {
-                            repo_id: repo_id.to_string(),
-                            worktree_path: worktree_path.map(str::to_owned),
-                            index_changes,
-                            worktree_changes,
-                        });
-                    }
-                    Err(err) => {
-                        warn!(
-                            ?err,
-                            repo_id, "stash_write: post-write status refresh failed"
-                        );
-                        send_post_write_error(
-                            out_tx,
-                            repo_id,
-                            worktree_path,
-                            operation,
-                            "status refresh failed",
-                            &err,
-                        );
-                    }
-                }
-                match git_write::stash_list(&repo).await {
-                    Ok(stashes) => {
-                        let _ = hub.state_events.send(StateEvent::Stashes {
-                            repo_id: repo_id.to_string(),
-                            worktree_path: worktree_path.map(str::to_owned),
-                            stashes,
-                        });
-                    }
-                    Err(err) => {
-                        warn!(?err, repo_id, "stash_write: stash_list refresh failed");
-                    }
-                }
-            }
-            Err(err) => {
-                warn!(?err, repo_id, "stash_write: repo path lookup failed");
-                send_post_write_error(
-                    out_tx,
-                    repo_id,
-                    worktree_path,
-                    operation,
-                    "repo lookup failed",
-                    &err,
-                );
-            }
-        },
-        Err(err) => {
-            warn!(operation, repo_id, ?err, "stash_write: operation failed");
-            let _ = out_tx.send(DaemonMessage::GitWriteError {
-                repo_id: repo_id.to_string(),
-                operation: operation.to_string(),
-                error: format!("{err:#}"),
-                worktree_path: worktree_path.map(str::to_owned),
-            });
-        }
-    }
 }
 
 /// If `req` is an in-place single-repo spawn that would switch a dirty working
@@ -2484,11 +1069,11 @@ async fn in_place_checkout_confirm(hub: &Hub, req: &SpawnRequest) -> Option<Daem
             .map(|r| r.path.clone())
     })?;
     let repo_path = PathBuf::from(repo_path);
-    if !git::is_initialized(&repo_path).await {
+    if !crate::git::is_initialized(&repo_path).await {
         return None;
     }
-    match git::in_place_checkout_preflight(&repo_path, branch_name).await {
-        Ok(git::InPlaceCheckout::Dirty { count }) => Some(checkout_confirm_reply(
+    match crate::git::in_place_checkout_preflight(&repo_path, branch_name).await {
+        Ok(crate::git::InPlaceCheckout::Dirty { count }) => Some(checkout_confirm_reply(
             repo_id,
             branch_name,
             req.request_id.as_deref(),
@@ -3846,183 +2431,6 @@ type SpawnResolution = (
     Option<String>,
 );
 
-/// Decorate `git worktree list` output for the spawn dialog's existing-worktree
-/// picker: whether a session holds each worktree, and — for the ones under the
-/// RT worktrees root — which `wt.<slug>/` group they belong to plus its size
-/// and last-modified. Worktrees created outside RT are listed too and are
-/// equally launchable; they just carry no group metadata.
-fn annotate_worktrees(hub: &Hub, raw: Vec<(String, PathBuf)>) -> Vec<protocol::WorktreeInfo> {
-    let snapshots = hub.sessions.snapshots();
-    let groups =
-        crate::worktrees_admin::scan_root(&hub.state.worktrees_dir(), &hub.sessions, &hub.state);
-    let mut group_by_member: std::collections::HashMap<String, &protocol::RootWorktreeEntry> =
-        std::collections::HashMap::new();
-    for entry in &groups {
-        for member in &entry.members {
-            group_by_member.insert(
-                crate::paths::normalize_path_key(&member.worktree_path),
-                entry,
-            );
-        }
-    }
-    raw.into_iter()
-        .map(|(branch, path)| {
-            let path = path.to_string_lossy().into_owned();
-            let key = crate::paths::normalize_path_key(&path);
-            let group = group_by_member.get(&key).copied();
-            protocol::WorktreeInfo {
-                branch,
-                path,
-                status: worktree_status(&snapshots, &key),
-                group_path: group.map(|g| g.path.clone()),
-                size_bytes: group.and_then(|g| g.size_bytes),
-                last_modified_unix: group.and_then(|g| g.last_modified_unix),
-            }
-        })
-        .collect()
-}
-
-/// Per-path counterpart of the per-group classification the worktrees manager
-/// does: Active while a session is running in it, Detached while a stopped or
-/// parked session still claims it, Stale when nothing references it.
-fn worktree_status(
-    snapshots: &[protocol::SessionSnapshot],
-    key: &str,
-) -> protocol::RootWorktreeStatus {
-    let mut claimed_by_dead_session = false;
-    for snap in snapshots {
-        let uses_it = snap
-            .worktree_paths
-            .iter()
-            .any(|p| crate::paths::normalize_path_key(p) == key)
-            || snap
-                .members
-                .iter()
-                .any(|m| crate::paths::normalize_path_key(&m.worktree_path) == key);
-        if !uses_it {
-            continue;
-        }
-        if crate::worktrees_admin::is_session_live(snap) {
-            return protocol::RootWorktreeStatus::Active;
-        }
-        claimed_by_dead_session = true;
-    }
-    if claimed_by_dead_session {
-        protocol::RootWorktreeStatus::Detached
-    } else {
-        protocol::RootWorktreeStatus::Stale
-    }
-}
-
-/// Live (running, non-parked) sessions other than `exclude_id` whose recorded
-/// worktree paths include `worktree_path`. Uses the same "active" filter as
-/// `ListWorktrees` (not Stopped/Error, not parked), so a worktree offered for
-/// reuse in the spawn dialog is never wrongly flagged as in-use. Returned as
-/// `(session_id, label)` pairs.
-fn active_sessions_using_worktree(
-    hub: &Hub,
-    worktree_path: &str,
-    exclude_id: Option<&str>,
-) -> Vec<(String, String)> {
-    let target = crate::paths::normalize_path_key(worktree_path);
-    hub.sessions
-        .snapshots()
-        .into_iter()
-        .filter(|s| exclude_id != Some(s.id.as_str()))
-        .filter(|s| {
-            !matches!(
-                s.status,
-                protocol::SessionStatus::Stopped | protocol::SessionStatus::Error
-            ) && !s.is_inactive
-        })
-        .filter(|s| {
-            s.worktree_paths
-                .iter()
-                .any(|p| crate::paths::normalize_path_key(p) == target)
-                || s.members
-                    .iter()
-                    .any(|m| crate::paths::normalize_path_key(&m.worktree_path) == target)
-        })
-        .map(|s| (s.id.clone(), s.label.clone()))
-        .collect()
-}
-
-/// If this discard would remove any worktree still bound to another live
-/// session, returns the ready-to-send `ActionFailed` modal that refuses it
-/// (and logs a warning); otherwise `None`, meaning the discard is safe.
-/// Removing a shared worktree would yank the dir out from under that other
-/// session's running child (the shared-worktree corruption).
-fn blocked_discard_message(
-    hub: &Hub,
-    session_id: &str,
-    cleanup: &[protocol::CleanupAction],
-    members: &[SessionMember],
-) -> Option<DaemonMessage> {
-    let mut blockers = Vec::new();
-    for action in cleanup {
-        if !action.remove_worktree {
-            continue;
-        }
-        let Some(member) = members.iter().find(|m| m.repo_id == action.repo_id) else {
-            continue;
-        };
-        let users = active_sessions_using_worktree(hub, &member.worktree_path, Some(session_id));
-        if !users.is_empty() {
-            let labels = users
-                .iter()
-                .map(|(_, label)| label.clone())
-                .collect::<Vec<_>>()
-                .join(", ");
-            blockers.push(format!("{} (used by {labels})", member.worktree_path));
-        }
-    }
-    if blockers.is_empty() {
-        return None;
-    }
-    warn!(
-        session_id,
-        ?blockers,
-        "discard_session: refused — worktree still in use by another live session"
-    );
-    Some(DaemonMessage::ActionFailed {
-        title: "Can't remove worktree".to_string(),
-        detail: format!(
-            "This session's worktree is still in use by another live session, so removing it would break that session:\n\n{}",
-            blockers.join("\n")
-        ),
-        hint: Some(
-            "Close the other session(s) first, then remove the worktree — or discard this session while keeping the worktree."
-                .to_string(),
-        ),
-        request_id: None,
-    })
-}
-
-/// Build the `SpawnFailure` returned when a target worktree is already bound
-/// to a live session — the collision that previously slipped through the
-/// "worktree dir already present, skipping add" reuse and corrupted the other
-/// session on discard.
-fn worktree_in_use_failure(
-    branch_name: &str,
-    users: &[(String, String)],
-) -> spawn_plan::SpawnFailure {
-    let labels = users
-        .iter()
-        .map(|(_, label)| label.clone())
-        .collect::<Vec<_>>()
-        .join(", ");
-    spawn_plan::SpawnFailure {
-        title: "Worktree already in use".to_string(),
-        detail: format!(
-            "The worktree for branch '{branch_name}' is already in use by another live session ({labels}). Two sessions can't share one worktree."
-        ),
-        hint: Some(
-            "Pick a different branch name — the Random button on the spawn dialog generates a unique one — or close the other session first."
-                .to_string(),
-        ),
-    }
-}
-
 /// Map a raw `git worktree add` failure to a tailored `SpawnFailure`. Known
 /// git refusals (branch already checked out, path already exists) get an
 /// actionable message; anything else falls back to git's full stderr chain.
@@ -4336,7 +2744,7 @@ async fn preview_single_spawn(
         .ok_or_else(|| anyhow!("unknown repo: {repo_id}"))?;
     let repo_path = PathBuf::from(&repo.path);
 
-    let branch_exists = git::list_branches(&repo_path)
+    let branch_exists = crate::git::list_branches(&repo_path)
         .await
         .unwrap_or_default()
         .iter()
@@ -4396,36 +2804,12 @@ async fn single_worktree_target(
     branch_name: &str,
 ) -> anyhow::Result<PathBuf> {
     let repo_path = Path::new(&repo.path);
-    let derived = git::single_worktree_path(worktrees_root, branch_name, &repo.name);
+    let derived = crate::git::single_worktree_path(worktrees_root, branch_name, &repo.name);
     let target =
-        git::existing_or_derived_worktree(repo_path, worktrees_root, branch_name, derived).await;
-    git::refuse_foreign_worktree_folder(repo_path, &repo.name, &target).await?;
+        crate::git::existing_or_derived_worktree(repo_path, worktrees_root, branch_name, derived)
+            .await;
+    crate::git::refuse_foreign_worktree_folder(repo_path, &repo.name, &target).await?;
     Ok(target)
-}
-
-/// Run a fetch for `repo_id` and report the outcome.
-///
-/// Failure is reported, never raised: a fetch is a freshness improvement, so
-/// an offline machine or an auth-expired remote must still leave the spawn
-/// dialog fully usable against cached refs.
-async fn fetch_repo(hub: &Hub, repo_id: String, out_tx: &mpsc::UnboundedSender<DaemonMessage>) {
-    let Some(repo_path) = hub.state.with_persisted(|s| {
-        s.repos
-            .iter()
-            .find(|r| r.id == repo_id)
-            .map(|r| r.path.clone())
-    }) else {
-        warn!(%repo_id, "fetch_repo: unknown repo");
-        return;
-    };
-    let error = match git::fetch(Path::new(&repo_path)).await {
-        Ok(()) => None,
-        Err(err) => {
-            warn!(?err, %repo_id, "fetch_repo: fetch failed; previews fall back to cached refs");
-            Some(format!("{err:#}"))
-        }
-    };
-    let _ = out_tx.send(DaemonMessage::RepoFetched { repo_id, error });
 }
 
 /// Measure the leftover sitting where a spawn wanted to go, the same way the
@@ -4492,7 +2876,7 @@ async fn materialize_single_worktree(
         )
         .await;
     }
-    let branch_exists = git::list_branches(repo_path)
+    let branch_exists = crate::git::list_branches(repo_path)
         .await
         .unwrap_or_default()
         .iter()
@@ -4511,7 +2895,7 @@ async fn materialize_single_worktree(
                     branch_name,
                     base, "deleting leftover branch and forking fresh from base"
                 );
-                if let Err(err) = git::delete_branch(repo_path, branch_name).await {
+                if let Err(err) = crate::git::delete_branch(repo_path, branch_name).await {
                     debug!(?err, branch_name, "leftover branch delete failed");
                 }
                 Some(base)
@@ -4530,7 +2914,7 @@ async fn materialize_single_worktree(
     } else {
         Some(base)
     };
-    git::worktree_add(repo_path, worktree_path, branch_name, create_from)
+    crate::git::worktree_add(repo_path, worktree_path, branch_name, create_from)
         .await
         .map_err(|e| anyhow::Error::new(classify_worktree_error(&e, branch_name)))
 }
@@ -4570,7 +2954,7 @@ async fn recreate_or_reuse_worktree(
                 base,
                 "recreating existing worktree from base; uncommitted work there is discarded"
             );
-            git::worktree_remove(repo_path, worktree_path)
+            crate::git::worktree_remove(repo_path, worktree_path)
                 .await
                 .with_context(|| {
                     format!(
@@ -4582,13 +2966,13 @@ async fn recreate_or_reuse_worktree(
             // `-b` would fail on "branch already exists". Delete it too — the
             // user asked for a fresh fork from `base`, not a rebind to the old
             // branch tip.
-            if let Err(err) = git::delete_branch(repo_path, branch_name).await {
+            if let Err(err) = crate::git::delete_branch(repo_path, branch_name).await {
                 debug!(
                     ?err,
                     branch_name, "no local branch to delete before recreate"
                 );
             }
-            git::worktree_add(repo_path, worktree_path, branch_name, Some(base))
+            crate::git::worktree_add(repo_path, worktree_path, branch_name, Some(base))
                 .await
                 .map_err(|e| anyhow::Error::new(classify_worktree_error(&e, branch_name)))
         }
@@ -4655,7 +3039,7 @@ fn reject_pin_without_worktree(target: &SpawnTarget) -> anyhow::Result<()> {
 /// than the requested name so the sidebar shows the branch the agent will
 /// really be working on.
 async fn pinned_branch(worktree: &Path, requested: &str) -> String {
-    match git::current_branch(worktree).await {
+    match crate::git::current_branch(worktree).await {
         Ok(Some(branch)) => branch,
         Ok(None) => {
             info!(
@@ -4699,7 +3083,7 @@ async fn spawn_single(
     // caller-supplied `branch_name` is still recorded on the member so the
     // session label and sidebar grouping stay coherent, but no branch is
     // created or checked out.
-    if !git::is_initialized(&repo_path).await {
+    if !crate::git::is_initialized(&repo_path).await {
         if let Some(pinned) = existing_worktree {
             return Err(anyhow!(
                 "cannot pin worktree {pinned}: {} is not a git repository",
@@ -4759,15 +3143,15 @@ async fn spawn_single(
         )
         .await?;
         crate::worktrees_admin::mark_group(
-            &git::group_dir(&hub.state.worktrees_dir(), branch_name, &repo.name),
-            git::GroupKind::Repo,
+            &crate::git::group_dir(&hub.state.worktrees_dir(), branch_name, &repo.name),
+            crate::git::GroupKind::Repo,
             &repo.name,
             &[worktree_path.as_path()],
         );
         log_fork_point(&repo_path, branch_name, &base_for_create, &worktree_path).await;
         (worktree_path, branch_name.to_string())
     } else {
-        git::checkout_in_place(
+        crate::git::checkout_in_place(
             &repo_path,
             branch_name,
             Some(&base_for_create),
@@ -4890,8 +3274,8 @@ async fn spawn_workspace(
             .map(|m| m.working_path.as_path())
             .collect();
         crate::worktrees_admin::mark_group(
-            &git::group_dir(&hub.state.worktrees_dir(), branch_name, &workspace.name),
-            git::GroupKind::Workspace,
+            &crate::git::group_dir(&hub.state.worktrees_dir(), branch_name, &workspace.name),
+            crate::git::GroupKind::Workspace,
             &workspace.name,
             &created,
         );
@@ -4936,163 +3320,6 @@ async fn spawn_workspace(
     ))
 }
 
-/// Resume an abandoned session: read its sidecar (spawn config +
-/// `last_prompt`), spawn a fresh session with the same config and the
-/// captured prompt, then remove the abandoned placeholder from the
-/// registry + delete the on-disk sidecar.
-///
-/// The new session gets a new id (`spawn_session` generates one), so
-/// the old abandoned record's UI bindings are NOT automatically
-/// transferred. The frontend can listen for the `SessionUpdated`
-/// message and decide whether to swap it into the same tab/pane.
-async fn resume_abandoned(
-    hub: &Hub,
-    session_id: &str,
-    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
-) -> anyhow::Result<()> {
-    let _claim = hub
-        .recovering
-        .claim(session_id)
-        .ok_or_else(|| anyhow!("session {session_id} is {ALREADY_RECOVERING}"))?;
-    let rec = hub
-        .sessions
-        .get(session_id)
-        .ok_or_else(|| anyhow!("unknown session: {session_id}"))?;
-    let (req, busy_excluded) = abandoned_resume_request(&crate::sync::lock(&rec))?;
-    let snap = spawn_keeping_busy_excluded(hub, req, None, busy_excluded).await?;
-    finish_resume(hub, session_id, &snap.id, out_tx);
-    Ok(())
-}
-
-/// The request that resumes the abandoned `rec`, replaying its first prompt,
-/// and the busy exclusion the resumed session keeps.
-fn abandoned_resume_request(rec: &SessionRecord) -> anyhow::Result<(SpawnRequest, bool)> {
-    let session_id = &rec.id;
-    if !rec.is_abandoned {
-        return Err(anyhow!(
-            "session {session_id} is not abandoned; refusing to resume"
-        ));
-    }
-    let Some(stored) = &rec.spawn_config else {
-        return Err(anyhow!(
-            "session {session_id} has no stored spawn config; cannot resume"
-        ));
-    };
-    let mut req = stored.to_clone_request();
-    req.initial_prompt.clone_from(&rec.last_prompt);
-    Ok((req, rec.busy_excluded))
-}
-
-/// After a successful Resume spawn of the abandoned `old_id` as `new_id`:
-/// rebind any pane that pointed at the abandoned session to the fresh one,
-/// in every client layout, so the resume reattaches to its original slot
-/// instead of orphaning into the sidebar as an unbound session; remove the
-/// abandoned placeholder and its sidecar (if the spawn failed, the
-/// placeholder stays so the user can try again); and mark its history entry
-/// recovered, so it stops counting as a session to recover.
-fn finish_resume(
-    hub: &Hub,
-    old_id: &str,
-    new_id: &str,
-    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
-) {
-    rebind_session_panes(hub, old_id, new_id);
-    discard_abandoned(hub, old_id, out_tx);
-    mark_history_recovered(hub, old_id);
-}
-
-/// Resume every session currently flagged as abandoned. Iterates the
-/// registry snapshot (taken upfront to avoid mutating it while iterating),
-/// calls `resume_abandoned` for each, and emits an `Error` message per
-/// failure so the user can see which ones didn't make it. Successful
-/// resumes are handled by `resume_abandoned` itself (the spawn broadcasts
-/// the new session's `SessionUpdated`, and it consumes the sidecar).
-async fn resume_all_abandoned(hub: &Hub, out_tx: &mpsc::UnboundedSender<DaemonMessage>) {
-    let abandoned_ids: Vec<String> = hub
-        .sessions
-        .snapshots()
-        .into_iter()
-        .filter(|s| s.is_abandoned)
-        .map(|s| s.id)
-        .collect();
-    info!(
-        count = abandoned_ids.len(),
-        "resume_all_abandoned: starting bulk resume"
-    );
-    for id in abandoned_ids {
-        if let Err(err) = resume_abandoned(hub, &id, out_tx).await {
-            warn!(session_id = %id, ?err, "bulk resume: per-session failure");
-            let _ = out_tx.send(DaemonMessage::Error {
-                message: format!("resume {id}: {err}"),
-                request_id: None,
-            });
-        }
-    }
-}
-
-/// Record in the session history that `session_id` ended for `end`. The first
-/// record for a session wins; see [`history::write_if_absent`].
-fn record_end(hub: &Hub, session_id: &str, end: SessionEnd) {
-    history::record_session_end(&hub.sessions, &hub.dirs, session_id, end);
-}
-
-/// Register the folder at `path` as a repo (or find it already registered),
-/// broadcast the new registry, and offer the requester any VS Code workspace
-/// found beside it.
-async fn register_repo(
-    hub: &Hub,
-    path: &str,
-    name: Option<String>,
-    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
-) -> anyhow::Result<protocol::RepoEntry> {
-    let entry = add_repo(&hub.state, path, name).await?;
-    let (repos, container_order) = hub
-        .state
-        .with_persisted(|s| (s.repos.clone(), s.container_order.clone()));
-    let _ = hub.state_events.send(StateEvent::Repos(repos));
-    let _ = hub
-        .state_events
-        .send(StateEvent::ContainersReordered(container_order));
-    for suggestion in scan_vscode_workspaces(hub, &entry.path) {
-        // VSCode workspace suggestions are per-client (only the
-        // adder gets prompted), so this stays on out_tx.
-        let _ = out_tx.send(DaemonMessage::VscodeWorkspaceSuggestion {
-            repo_id: entry.id.clone(),
-            suggestion,
-        });
-    }
-    debug!(repo_id = %entry.id, "repo added");
-    Ok(entry)
-}
-
-/// The names of the variables an `${env:NAME}` reference can read, never
-/// their values, listed off the async runtime because it reads the registry.
-async fn env_names() -> Vec<protocol::EnvName> {
-    tokio::task::spawn_blocking(user_env::names)
-        .await
-        .unwrap_or_else(|err| {
-            warn!(?err, "listing the environment variable names failed");
-            Vec::new()
-        })
-}
-
-/// The session history as the client lists it, read off the async runtime.
-/// A session still in the Abandoned group is listed too: recovering it from
-/// the history removes it from that group.
-async fn session_history_items(hub: &Hub) -> Vec<protocol::SessionHistoryItem> {
-    let dirs = hub.dirs.clone();
-    let repos = hub.state.with_persisted(|s| s.repos.clone());
-    tokio::task::spawn_blocking(move || {
-        let claude_home = crate::transcripts::claude_home();
-        history::history_items(&dirs, &repos, claude_home.as_deref())
-    })
-    .await
-    .unwrap_or_else(|err| {
-        warn!(?err, "building the session history failed");
-        Vec::new()
-    })
-}
-
 /// Start the tasks that watch the hub for the daemon's lifetime.
 fn start_hub_tasks(hub: &Hub, client_count_rx: tokio::sync::watch::Receiver<usize>) {
     start_history_broadcaster(hub);
@@ -5108,173 +3335,6 @@ fn start_hub_tasks(hub: &Hub, client_count_rx: tokio::sync::watch::Receiver<usiz
         Arc::clone(&hub.preset_cancellations),
         crate::idle_exit::GRACE_PERIOD,
     );
-}
-
-/// Broadcast the session history to every client whenever it changes while
-/// the daemon runs: a session ending, or one being recovered.
-fn start_history_broadcaster(hub: &Hub) {
-    let hub = hub.clone();
-    let mut changes = history::subscribe_changes();
-    tokio::spawn(async move {
-        while changes.changed().await.is_ok() {
-            let items = session_history_items(&hub).await;
-            let _ = hub.state_events.send(StateEvent::SessionHistory(items));
-        }
-    });
-}
-
-/// Recover each item in order: plan it from its history entry, register its
-/// repo when asked, spawn it, and mark the entry recovered. A failed item
-/// doesn't stop the others; each gets its own result.
-async fn recover_sessions(
-    hub: &Hub,
-    items: &[protocol::RecoverItem],
-    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
-) -> Vec<protocol::RecoverItemResult> {
-    let mut results = Vec::with_capacity(items.len());
-    for item in items {
-        let outcome = recover_one(hub, item, out_tx).await;
-        if let Err(error) = &outcome {
-            warn!(history_id = %item.history_id, %error, "recover_sessions: item failed");
-        }
-        let (session_id, error) = match outcome {
-            Ok(id) => (Some(id), None),
-            Err(error) => (None, Some(error)),
-        };
-        results.push(protocol::RecoverItemResult {
-            history_id: item.history_id.clone(),
-            session_id,
-            error,
-        });
-    }
-    results
-}
-
-async fn recover_one(
-    hub: &Hub,
-    item: &protocol::RecoverItem,
-    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
-) -> Result<String, String> {
-    let _claim = hub
-        .recovering
-        .claim(&item.history_id)
-        .ok_or_else(|| ALREADY_RECOVERING.to_owned())?;
-    let entry = history::read_one(&hub.dirs, &item.history_id)
-        .ok_or_else(|| format!("no history entry {}", item.history_id))?;
-    let busy_excluded = {
-        let live = hub.sessions.get(&item.history_id);
-        let guard = live.as_ref().map(|rec| crate::sync::lock(rec));
-        recovery_busy_excluded(guard.as_deref(), &entry)
-    };
-    let (repos, workspaces) = hub
-        .state
-        .with_persisted(|s| (s.repos.clone(), s.workspaces.clone()));
-    let planned_item = item.clone();
-    // Planning looks up transcripts on disk.
-    let mut plan = tokio::task::spawn_blocking(move || {
-        let registered = history::Registered {
-            repos: &repos,
-            workspaces: &workspaces,
-        };
-        let claude_home = crate::transcripts::claude_home();
-        history::plan_recovery(&entry, &planned_item, &registered, |agent, folder, id| {
-            recovery_conversation_exists(claude_home.as_deref(), agent, folder, id)
-        })
-    })
-    .await
-    .map_err(|err| format!("planning the recovery failed: {err}"))??;
-    // A row the recovery would spawn with that can't be resolved — an unset env
-    // variable, or a saved secret no longer in the store — or that couldn't be
-    // sealed, or a provider key that isn't set, refuses it here, on the request
-    // the plan will spawn and before the registration and branch lookup below:
-    // registering a repo writes `state.json` and broadcasts `Repos`, and a
-    // recovery that then failed would leave a repo the user never asked for
-    // behind a spawn that never happened. Planning only reads.
-    check_spawn_request(&plan.request).map_err(|failure| format!("{failure}"))?;
-    if let Some(path) = plan.register_repo.clone() {
-        let repo = register_repo(hub, &path, None, out_tx)
-            .await
-            .map_err(|err| format!("registering {path}: {err:#}"))?;
-        plan.bind_registered_repo(&repo.id);
-    }
-    if let Some(folder) = plan.placeholder_branch_folder() {
-        let current = git::current_branch(Path::new(folder)).await;
-        plan.name_branch(history::branch_or_placeholder(current));
-    }
-    let snapshot = spawn_keeping_busy_excluded(hub, plan.request, None, busy_excluded)
-        .await
-        .map_err(|err| format!("{err:#}"))?;
-    finish_recovery(hub, &item.history_id, &snapshot.id, out_tx);
-    Ok(snapshot.id)
-}
-
-/// The busy exclusion a recovered session starts with. A session still in
-/// the Abandoned group (`live`) may have been toggled after its history entry
-/// was written, so its flag wins; otherwise the entry's.
-fn recovery_busy_excluded(live: Option<&SessionRecord>, entry: &protocol::HistoryEntry) -> bool {
-    match live {
-        Some(rec) if rec.is_abandoned => rec.busy_excluded,
-        _ => entry.busy_excluded,
-    }
-}
-
-/// Whether `agent` still holds conversation `id` for `folder`: Claude Code's
-/// transcript.
-fn recovery_conversation_exists(
-    claude_home: Option<&Path>,
-    agent: Agent,
-    folder: &str,
-    id: &str,
-) -> bool {
-    match agent {
-        Agent::Claude => {
-            claude_home.is_some_and(|home| crate::transcripts::transcript_exists(home, folder, id))
-        }
-    }
-}
-
-/// After a successful recovery spawn of `history_id` as `new_id`: mark the
-/// history entry recovered and, when that session still sits in the
-/// Abandoned group, hand its panes to `new_id` in every client layout and
-/// remove it from there. Its history entry already exists, so the removal
-/// writes no second end.
-fn finish_recovery(
-    hub: &Hub,
-    history_id: &str,
-    new_id: &str,
-    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
-) {
-    mark_history_recovered(hub, history_id);
-    let still_abandoned = hub
-        .sessions
-        .get(history_id)
-        .is_some_and(|rec| crate::sync::lock(&rec).is_abandoned);
-    if still_abandoned {
-        rebind_session_panes(hub, history_id, new_id);
-        discard_abandoned(hub, history_id, out_tx);
-    }
-}
-
-/// Stamp the history entry for `session_id` recovered now, logging a failure
-/// instead of returning it: the recovery itself already succeeded.
-fn mark_history_recovered(hub: &Hub, session_id: &str) {
-    if let Err(err) = history::mark_recovered(&hub.dirs, session_id, chrono::Utc::now()) {
-        warn!(?err, history_id = %session_id, "failed to mark history entry recovered");
-    }
-}
-
-/// Remove an abandoned session from the registry + delete its sidecar.
-/// Used both as the cleanup step after a successful Resume and as the
-/// user-initiated "Dismiss" action for sessions they don't want to
-/// recover.
-fn discard_abandoned(hub: &Hub, session_id: &str, out_tx: &mpsc::UnboundedSender<DaemonMessage>) {
-    record_end(hub, session_id, SessionEnd::StoppedByUser);
-    hub.sessions.delete_sidecar(session_id);
-    orphan::try_delete_session_dir(&hub.dirs, session_id);
-    hub.sessions.remove(session_id);
-    let _ = out_tx.send(DaemonMessage::SessionRemoved {
-        session_id: session_id.to_string(),
-    });
 }
 
 /// Kill the session's process if still alive, then mark it `is_inactive =
@@ -5383,12 +3443,12 @@ async fn reap_discarded_session_branch(
         BranchCleanup::Auto | BranchCleanup::Unknown => {}
     }
 
-    match git::branch_merge_status(Path::new(repo_path), branch, targets).await {
-        Ok(git::BranchMergeStatus::Merged { into, via }) => {
+    match crate::git::branch_merge_status(Path::new(repo_path), branch, targets).await {
+        Ok(crate::git::BranchMergeStatus::Merged { into, via }) => {
             let reason = format!("already in {into} ({via:?})");
             force_delete_session_branch(repo_path, branch, &reason).await;
         }
-        Ok(git::BranchMergeStatus::Unmerged { unique_commits }) => info!(
+        Ok(crate::git::BranchMergeStatus::Unmerged { unique_commits }) => info!(
             branch,
             repo = %repo_path,
             unique_commits,
@@ -5408,7 +3468,7 @@ async fn reap_discarded_session_branch(
 /// `git branch -D` with the outcome logged either way. `why` is folded into
 /// the success line so the log says what licensed the delete.
 async fn force_delete_session_branch(repo_path: &str, branch: &str, why: &str) {
-    match git::delete_branch(Path::new(repo_path), branch).await {
+    match crate::git::delete_branch(Path::new(repo_path), branch).await {
         Ok(()) => info!(
             branch,
             repo = %repo_path,
@@ -5658,108 +3718,6 @@ async fn discard_session(
     }
 }
 
-/// Convert the per-platform [`crate::lock_finder`] output into the wire
-/// protocol's `WorktreeLockingProcess` shape. Returned list is empty on
-/// non-Windows platforms (the `lock_finder` stub returns an empty Vec).
-fn probe_locking_processes(member_path: &Path) -> Vec<protocol::WorktreeLockingProcess> {
-    crate::lock_finder::processes_holding(&[member_path])
-        .into_iter()
-        .map(|p| protocol::WorktreeLockingProcess {
-            pid: p.pid,
-            name: p.name,
-            cmdline: p.cmdline,
-        })
-        .collect()
-}
-
-/// Handler for [`ClientMessage::RetryWorktreeCleanup`]. Kills the listed
-/// pids (graceful Restart Manager shutdown first, then hard kill), then
-/// re-runs the robust cleanup against each target. Re-emits
-/// [`DaemonMessage::WorktreeCleanupFailed`] for any member that's still
-/// wedged so the user can iterate.
-async fn retry_worktree_cleanup(
-    hub: &Hub,
-    session_id: &str,
-    kill_pids: &[u32],
-    targets: &[protocol::RetryWorktreeTarget],
-    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
-) {
-    // Defence: refuse any target that isn't under the configured
-    // worktrees root. A crafted message could otherwise be made to
-    // delete an arbitrary directory the daemon has write access to.
-    let root = hub.state.worktrees_dir();
-    let root_canon = std::fs::canonicalize(&root).ok();
-    let mut valid_targets: Vec<&protocol::RetryWorktreeTarget> = Vec::new();
-    for target in targets {
-        let canon = std::fs::canonicalize(&target.member_path).ok();
-        let ok = match (&canon, &root_canon) {
-            (Some(c), Some(r)) => c.starts_with(r),
-            // If the path is gone already, count as success — nothing to do.
-            (None, _) => {
-                continue;
-            }
-            _ => false,
-        };
-        if !ok {
-            warn!(
-                target = %target.member_path,
-                "retry_worktree_cleanup: refusing target outside worktrees root"
-            );
-            continue;
-        }
-        valid_targets.push(target);
-    }
-
-    if !kill_pids.is_empty() {
-        let target_paths: Vec<&Path> = valid_targets
-            .iter()
-            .map(|t| Path::new(t.member_path.as_str()))
-            .collect();
-        crate::lock_finder::terminate_processes(&target_paths, kill_pids).await;
-        // Brief grace period for the OS to release file handles after
-        // the kill — without this, the immediate retry races handle
-        // teardown the same way the original cleanup raced the kill.
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    }
-
-    let mut member_parents: Vec<PathBuf> = Vec::new();
-    let mut failures: Vec<protocol::WorktreeCleanupFailure> = Vec::new();
-    for target in &valid_targets {
-        let member = PathBuf::from(&target.member_path);
-        match crate::worktree_cleanup::remove_member(Path::new(&target.repo_path), &member).await {
-            crate::worktree_cleanup::CleanupOutcome::Removed => {}
-            crate::worktree_cleanup::CleanupOutcome::StillOnDisk { reason } => {
-                let locking_processes = probe_locking_processes(&member);
-                failures.push(protocol::WorktreeCleanupFailure {
-                    member_path: target.member_path.clone(),
-                    repo_path: target.repo_path.clone(),
-                    reason,
-                    locking_processes,
-                });
-            }
-        }
-        if let Some(parent) = member.parent()
-            && !member_parents.iter().any(|p| p == parent)
-        {
-            member_parents.push(parent.to_path_buf());
-        }
-    }
-    for parent in &member_parents {
-        crate::worktree_cleanup::prune_empty_ancestors(parent, &root);
-    }
-
-    if !failures.is_empty() {
-        let _ = out_tx.send(DaemonMessage::WorktreeCleanupFailed {
-            session_id: session_id.to_string(),
-            // Session is already discarded; we don't have a label here.
-            // Frontend should retain the original label from the first
-            // failure event and reuse it across retries.
-            session_label: session_id.to_string(),
-            failures,
-        });
-    }
-}
-
 async fn stop_session(hub: &Hub, session_id: &str) -> anyhow::Result<()> {
     if hub.sessions.get(session_id).is_none() {
         return Err(anyhow!("unknown session: {session_id}"));
@@ -5825,93 +3783,6 @@ async fn stop_session(hub: &Hub, session_id: &str) -> anyhow::Result<()> {
     hub.sessions.delete_sidecar(session_id);
     remove_hook_settings(hub, session_id);
     Ok(())
-}
-
-/// Build a one-tab layout with a pane per currently-running session — the
-/// "open all active sessions" first-connect choice. Empty when no sessions
-/// exist (the client starts with no tabs).
-fn build_all_sessions_layout(hub: &Hub) -> Vec<TabEntry> {
-    let panes: Vec<(String, Option<String>)> = hub
-        .sessions
-        .snapshots()
-        .into_iter()
-        .map(|s| (uuid::Uuid::new_v4().to_string(), Some(s.id)))
-        .collect();
-    let Some(grid) = tabs::build_grid(&panes, 0, None) else {
-        return Vec::new();
-    };
-    vec![TabEntry {
-        id: uuid::Uuid::new_v4().to_string(),
-        name: "All sessions".to_string(),
-        content: TabContent::Grid { grid },
-        created_at: Utc::now(),
-        picked_layout: None,
-    }]
-}
-
-/// Auto-close every pane bound to `session_id` across all client layouts when
-/// the session is removed: a pane's sibling fills its space, and a tab whose
-/// last pane closed is removed entirely. A surviving tab untouched since its
-/// layout was picked is rebuilt in that layout, by each client's own flag.
-/// Emits scoped `TabUpdated` (survivors) / `TabRemoved` (emptied tabs) per
-/// affected client.
-fn close_session_panes(hub: &Hub, session_id: &str) {
-    // Per-client outcomes: a surviving tab to re-broadcast, or a tab id whose
-    // last pane closed (already removed from that client's layout).
-    enum Outcome {
-        Updated(String, TabEntry),
-        Removed(String, String),
-    }
-    let outcomes = match hub.state.mutate_all_layouts(|layouts| {
-        let mut out: Vec<Outcome> = Vec::new();
-        for (cid, layout) in layouts.iter_mut() {
-            let result = tabs::close_session_panes(&mut layout.tabs, session_id);
-            for tab in result.updated {
-                out.push(Outcome::Updated(cid.clone(), tab));
-            }
-            for tab_id in result.removed_tab_ids {
-                out.push(Outcome::Removed(cid.clone(), tab_id));
-            }
-        }
-        out
-    }) {
-        Ok(list) => list,
-        Err(err) => {
-            warn!(?err, "close_session_panes: state.mutate failed");
-            return;
-        }
-    };
-    for outcome in outcomes {
-        match outcome {
-            Outcome::Updated(cid, tab) => hub.emit_tab(&cid, TabEvent::Updated(tab)),
-            Outcome::Removed(cid, tab_id) => hub.emit_tab(&cid, TabEvent::Removed(tab_id)),
-        }
-    }
-}
-
-/// Rebind every pane bound to `old_id` to `new_id` across every client's
-/// layout, broadcasting a scoped `TabUpdated` per affected tab. Used by
-/// `resume_abandoned` so a resumed session reattaches to the pane its
-/// abandoned predecessor occupied instead of orphaning into the sidebar.
-fn rebind_session_panes(hub: &Hub, old_id: &str, new_id: &str) {
-    let outcomes = match hub.state.mutate_all_layouts(|layouts| {
-        let mut out: Vec<(String, TabEntry)> = Vec::new();
-        for (cid, layout) in layouts.iter_mut() {
-            for tab in tabs::rebind_session(&mut layout.tabs, old_id, new_id) {
-                out.push((cid.clone(), tab));
-            }
-        }
-        out
-    }) {
-        Ok(list) => list,
-        Err(err) => {
-            warn!(?err, "rebind_session_panes: state.mutate failed");
-            return;
-        }
-    };
-    for (cid, tab) in outcomes {
-        hub.emit_tab(&cid, TabEvent::Updated(tab));
-    }
 }
 
 /// Resolve an agent-program name into something `CreateProcess` /
@@ -6358,71 +4229,6 @@ fn powershell_cwd_prompt_script_minimal() -> String {
 const BASH_INIT_SCRIPT: &str = include_str!("../shell-init/bash-init.sh");
 const ZSH_INIT_SCRIPT: &str = include_str!("../shell-init/zsh-init.zshrc");
 
-fn scan_vscode_workspaces(hub: &Hub, repo_path: &str) -> Vec<VscodeWorkspaceSuggestion> {
-    scan_vscode_workspace_files(hub, repo_path, true)
-}
-
-fn scan_vscode_workspaces_in_path(hub: &Hub, path: &str) -> Vec<VscodeWorkspaceSuggestion> {
-    scan_vscode_workspace_files(hub, path, false)
-}
-
-fn scan_vscode_workspace_files(
-    hub: &Hub,
-    dir_path: &str,
-    require_multiple_folders: bool,
-) -> Vec<VscodeWorkspaceSuggestion> {
-    let known: Vec<(String, String)> = hub.state.with_persisted(|s| {
-        s.repos
-            .iter()
-            .map(|r| (r.id.clone(), r.path.clone()))
-            .collect()
-    });
-    let dir = std::path::Path::new(dir_path);
-    vscode::find_workspace_files(dir)
-        .into_iter()
-        .filter_map(|file| match vscode::parse_workspace_file(&file, &known) {
-            Ok(s) if !require_multiple_folders || s.folders.len() > 1 => Some(s),
-            Ok(_) => None,
-            Err(err) => {
-                warn!(?err, file = %file.display(), "failed to parse code-workspace");
-                None
-            }
-        })
-        .collect()
-}
-
-async fn accept_vscode_suggestion(
-    hub: &Hub,
-    suggestion: VscodeWorkspaceSuggestion,
-    watch: bool,
-    _out_tx: &mpsc::UnboundedSender<DaemonMessage>,
-) -> anyhow::Result<()> {
-    let mut member_repo_ids = Vec::with_capacity(suggestion.folders.len());
-    for folder in &suggestion.folders {
-        let repo_id = if let Some(id) = folder.matched_repo_id.clone() {
-            id
-        } else {
-            let entry = add_repo(&hub.state, &folder.path, folder.name.clone()).await?;
-            entry.id
-        };
-        member_repo_ids.push(repo_id);
-    }
-    upsert_workspace(
-        &hub.state,
-        None,
-        &suggestion.suggested_name,
-        member_repo_ids,
-        Some(suggestion.source_path.clone()),
-        Some(watch),
-    )?;
-    let (repos, workspaces) = hub
-        .state
-        .with_persisted(|s| (s.repos.clone(), s.workspaces.clone()));
-    let _ = hub.state_events.send(StateEvent::Repos(repos));
-    let _ = hub.state_events.send(StateEvent::Workspaces(workspaces));
-    Ok(())
-}
-
 /// The spawn's `extra_env` with each reference (see
 /// [`protocol::env_rows::reference`]) replaced by the value it stands for: an
 /// env reference by the value `lookup` finds for it, a secret reference by the
@@ -6557,74 +4363,15 @@ mod child_env_probe {
 )]
 mod tests {
     use super::connection::FetchRegistry;
+    use super::recovery::{discard_abandoned, resume_abandoned};
     use super::test_support::{
-        ScratchDir, appearance_registry, dispatch_all, dispatch_one, drain, env_ref_repo_hub,
-        git_init, git_ok, hook_request, hook_settings_file, hook_test_hub, idle_record,
-        next_message, only_update, seed_two_pane_layout, snapshot_of, spawnless_test_hub, test_hub,
-        test_hub_with_attention, wait_until,
+        DEEPSEEK_KEY_SENTINEL, MISSING_SECRET_ID, ScratchDir, UNSET_REF, appearance_registry,
+        deepseek_key, deepseek_options, deepseek_spawn, dispatch_all, dispatch_one, env,
+        env_ref_repo_hub, env_spawn, git_init, git_ok, hook_settings_file, hook_test_hub,
+        idle_record, lookup_a, next_message, only_update, repo_entry, secret_ref, snapshot_of,
+        spawnless_test_hub, test_hub, wait_until, workspace_entry,
     };
     use super::*;
-    use tower::ServiceExt as _;
-
-    #[tokio::test]
-    async fn a_failed_repo_status_read_echoes_its_request_id() {
-        let (hub, _scratch) = test_hub("status-rid");
-        let msg = dispatch_one(
-            &hub,
-            ClientMessage::RepoStatus {
-                repo_id: "no-such-repo".to_string(),
-                worktree_path: None,
-                request_id: Some("q1".to_string()),
-            },
-        )
-        .await;
-        assert!(
-            matches!(
-                &msg,
-                DaemonMessage::Error { message, request_id: Some(id) }
-                    if id == "q1" && message.starts_with("status failed:")
-            ),
-            "{msg:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_failed_remote_url_read_echoes_its_request_id() {
-        let (hub, scratch) = test_hub("remote-rid");
-        let repo = scratch.path().join("repo");
-        std::fs::create_dir_all(&repo).expect("create repo dir");
-        git_init(&repo);
-        hub.state
-            .mutate(|s| {
-                s.repos.push(protocol::RepoEntry {
-                    id: "r1".to_string(),
-                    name: "r1".to_string(),
-                    path: repo.to_string_lossy().into_owned(),
-                    default_branch: None,
-                    default_use_worktree: true,
-                    appearance: AppearanceOverrides::default(),
-                    last_agent: None,
-                    last_spawn_config: None,
-                });
-            })
-            .expect("register repo");
-        let msg = dispatch_one(
-            &hub,
-            ClientMessage::GetRemoteUrl {
-                repo_id: "r1".to_string(),
-                request_id: Some("q2".to_string()),
-            },
-        )
-        .await;
-        assert!(
-            matches!(
-                &msg,
-                DaemonMessage::Error { message, request_id: Some(id) }
-                    if id == "q2" && message.starts_with("remote url failed:")
-            ),
-            "{msg:?}"
-        );
-    }
 
     /// A hub with one `git init`ed repo `r1` and a workspace `w1` holding it.
     fn hub_with_previewable_repo(tag: &str) -> (Hub, ScratchDir) {
@@ -6707,128 +4454,6 @@ mod tests {
         );
     }
 
-    fn merge_of_one(request_id: Option<&str>) -> ClientMessage {
-        ClientMessage::MergeTabs {
-            tab_ids: vec!["t1".to_string()],
-            name: None,
-            layout: protocol::MergeLayout::TileVertical,
-            request_id: request_id.map(str::to_owned),
-        }
-    }
-
-    #[tokio::test]
-    async fn a_rejected_merge_echoes_its_request_id() {
-        let (hub, _scratch) = test_hub("merge-rid");
-        seed_two_pane_layout(&hub, "c1");
-        let msg = dispatch_one(&hub, merge_of_one(Some("m1"))).await;
-        assert!(
-            matches!(
-                &msg,
-                DaemonMessage::Error { message, request_id: Some(id) }
-                    if id == "m1" && message.contains("at least two tabs")
-            ),
-            "{msg:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn an_id_less_merge_failure_still_answers_without_one() {
-        let (hub, _scratch) = test_hub("merge-no-rid");
-        seed_two_pane_layout(&hub, "c1");
-        let msg = dispatch_one(&hub, merge_of_one(None)).await;
-        assert!(
-            matches!(
-                &msg,
-                DaemonMessage::Error { message, request_id: None }
-                    if message.contains("at least two tabs")
-            ),
-            "{msg:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_rolled_back_move_pane_echoes_its_request_id() {
-        let (hub, _scratch) = test_hub("move-rid");
-        seed_two_pane_layout(&hub, "c1");
-        let before = hub.state.client_layout("c1");
-        let msg = dispatch_one(
-            &hub,
-            ClientMessage::MovePane {
-                src_tab_id: "t1".to_string(),
-                src_pane_id: "p1".to_string(),
-                dst_tab_id: "ghost-tab".to_string(),
-                dst_pane_id: "p2".to_string(),
-                edge: PaneDropEdge::Right,
-                request_id: Some("v1".to_string()),
-            },
-        )
-        .await;
-        assert!(
-            matches!(
-                &msg,
-                DaemonMessage::Error { message, request_id: Some(id) }
-                    if id == "v1" && message.contains("ghost-tab")
-            ),
-            "{msg:?}"
-        );
-        assert_eq!(
-            hub.state.client_layout("c1"),
-            before,
-            "the move rolled back"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_rejected_split_echoes_its_request_id() {
-        let (hub, _scratch) = test_hub("split-rid");
-        seed_two_pane_layout(&hub, "c1");
-        let msg = dispatch_one(
-            &hub,
-            ClientMessage::SplitPane {
-                tab_id: "ghost-tab".to_string(),
-                pane_id: "p1".to_string(),
-                direction: protocol::SplitDirection::Horizontal,
-                place: protocol::SplitPlace::Second,
-                new_session_id: None,
-                request_id: Some("s1".to_string()),
-            },
-        )
-        .await;
-        assert!(
-            matches!(
-                &msg,
-                DaemonMessage::Error { message, request_id: Some(id) }
-                    if id == "s1" && message.contains("ghost-tab")
-            ),
-            "{msg:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_rejected_extract_echoes_its_request_id() {
-        let (hub, _scratch) = test_hub("extract-rid");
-        seed_two_pane_layout(&hub, "c1");
-        let msg = dispatch_one(
-            &hub,
-            ClientMessage::ExtractToNewTab {
-                source_tab_id: "ghost-tab".to_string(),
-                pane_ids: vec!["p1".to_string()],
-                name: None,
-                layout: None,
-                request_id: Some("x1".to_string()),
-            },
-        )
-        .await;
-        assert!(
-            matches!(
-                &msg,
-                DaemonMessage::Error { message, request_id: Some(id) }
-                    if id == "x1" && message.contains("ghost-tab")
-            ),
-            "{msg:?}"
-        );
-    }
-
     #[tokio::test]
     async fn a_workspace_spawn_preview_echoes_its_request_id() {
         let (hub, _scratch) = hub_with_previewable_repo("ws-preview-rid");
@@ -6871,150 +4496,6 @@ mod tests {
                 DaemonMessage::Error { request_id: Some(id), .. } if id == "p4"
             ),
             "{msg:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_snapshot_of_a_path_escaping_the_repo_answers_with_its_id() {
-        let (hub, _scratch) = test_hub("snapshot-escape");
-        let msg = dispatch_one(
-            &hub,
-            ClientMessage::GetFileSnapshot {
-                id: "diff-snap-1".to_string(),
-                repo_id: "r1".to_string(),
-                path: "../outside.txt".to_string(),
-                against: None,
-                worktree_path: None,
-            },
-        )
-        .await;
-        assert!(
-            matches!(
-                &msg,
-                DaemonMessage::FileSnapshotError { id, path, error, .. }
-                    if id == "diff-snap-1" && path == "../outside.txt" && !error.is_empty()
-            ),
-            "{msg:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn opening_a_diff_tab_of_an_unknown_repo_answers_with_its_request_id() {
-        let (hub, _scratch) = test_hub("open-diff-unknown");
-        let msg = dispatch_one(
-            &hub,
-            ClientMessage::OpenDiffTab {
-                id: "diff-open-1".to_string(),
-                repo_id: "no-such-repo".to_string(),
-                path: "src/a.rs".to_string(),
-                against: None,
-                worktree_path: None,
-            },
-        )
-        .await;
-        assert!(
-            matches!(
-                &msg,
-                DaemonMessage::Error { message, request_id: Some(id) }
-                    if id == "diff-open-1" && message.contains("unknown repo")
-            ),
-            "{msg:?}"
-        );
-    }
-
-    /// A hub with `r1` registered over a folder whose `.git` points at a
-    /// git dir that does not exist, so every status read of it fails.
-    fn hub_with_broken_repo(tag: &str) -> (Hub, ScratchDir) {
-        let (hub, scratch) = test_hub(tag);
-        let folder = scratch.path().join("broken");
-        std::fs::create_dir_all(&folder).expect("create repo dir");
-        std::fs::write(folder.join(".git"), "gitdir: missing-git-dir\n").expect("write .git file");
-        hub.state
-            .mutate(|s| {
-                s.repos.push(protocol::RepoEntry {
-                    id: "r1".to_string(),
-                    name: "r1".to_string(),
-                    path: folder.to_string_lossy().into_owned(),
-                    default_branch: None,
-                    default_use_worktree: true,
-                    appearance: AppearanceOverrides::default(),
-                    last_agent: None,
-                    last_spawn_config: None,
-                });
-            })
-            .expect("register repo");
-        (hub, scratch)
-    }
-
-    #[tokio::test]
-    async fn a_git_write_whose_status_refresh_fails_answers_with_a_write_error() {
-        let (hub, _scratch) = hub_with_broken_repo("write-refresh");
-        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
-        handle_git_write(&hub, &out_tx, "r1", None, "stage", async { Ok(None) }).await;
-        let messages = drain(&mut out_rx);
-        assert!(
-            matches!(
-                messages.as_slice(),
-                [DaemonMessage::GitWriteError { repo_id, operation, error, worktree_path: None }]
-                    if repo_id == "r1"
-                        && operation == "stage"
-                        && error.starts_with("status refresh failed: ")
-            ),
-            "{messages:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_stash_write_whose_status_refresh_fails_answers_with_a_write_error() {
-        let (hub, _scratch) = hub_with_broken_repo("stash-refresh");
-        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
-        handle_stash_write(&hub, &out_tx, "r1", None, "stash_push", async { Ok(()) }).await;
-        let messages = drain(&mut out_rx);
-        assert!(
-            matches!(
-                messages.as_slice(),
-                [DaemonMessage::GitWriteError { repo_id, operation, error, worktree_path: None }]
-                    if repo_id == "r1"
-                        && operation == "stash_push"
-                        && error.starts_with("status refresh failed: ")
-            ),
-            "{messages:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_git_write_whose_repo_is_gone_answers_with_a_write_error() {
-        let (hub, _scratch) = test_hub("write-repo-gone");
-        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
-        handle_git_write(&hub, &out_tx, "gone", None, "stage", async { Ok(None) }).await;
-        let messages = drain(&mut out_rx);
-        assert!(
-            matches!(
-                messages.as_slice(),
-                [DaemonMessage::GitWriteError { repo_id, operation, error, worktree_path: None }]
-                    if repo_id == "gone"
-                        && operation == "stage"
-                        && error.starts_with("repo lookup failed: ")
-            ),
-            "{messages:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_stash_write_whose_repo_is_gone_answers_with_a_write_error() {
-        let (hub, _scratch) = test_hub("stash-repo-gone");
-        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
-        handle_stash_write(&hub, &out_tx, "gone", None, "stash_push", async { Ok(()) }).await;
-        let messages = drain(&mut out_rx);
-        assert!(
-            matches!(
-                messages.as_slice(),
-                [DaemonMessage::GitWriteError { repo_id, operation, error, worktree_path: None }]
-                    if repo_id == "gone"
-                        && operation == "stash_push"
-                        && error.starts_with("repo lookup failed: ")
-            ),
-            "{messages:?}"
         );
     }
 
@@ -7061,746 +4542,6 @@ mod tests {
             "{second:?}"
         );
         assert!(forwarders.lock().await.contains_key("s1"));
-    }
-
-    #[tokio::test]
-    async fn hook_route_requires_a_bearer_token() {
-        let (hub, _scratch) = test_hub("hook-auth");
-        hub.sessions.insert(idle_record("s1"));
-        let body = r#"{"hook_event_name":"UserPromptSubmit"}"#;
-        for token in [None, Some("wrong-token")] {
-            let response = build_loopback_router(hub.clone())
-                .oneshot(hook_request("s1", token, Some("100"), body))
-                .await
-                .expect("router answers");
-            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{token:?}");
-        }
-        let snapshot = snapshot_of(&hub, "s1");
-        assert_eq!(snapshot.status, SessionStatus::Idle);
-        assert_eq!(snapshot.pending_input, None);
-    }
-
-    #[tokio::test]
-    async fn hook_route_accepts_an_unknown_session() {
-        let (hub, _scratch) = test_hub("hook-unknown");
-        let response = build_loopback_router(hub.clone())
-            .oneshot(hook_request(
-                "no-such-session",
-                Some("test-token"),
-                Some("100"),
-                "{}",
-            ))
-            .await
-            .expect("router answers");
-        assert_eq!(response.status(), StatusCode::NO_CONTENT);
-    }
-
-    #[tokio::test]
-    async fn hook_route_drops_a_stale_event() {
-        let (hub, _scratch) = test_hub("hook-stale");
-        hub.sessions.insert(idle_record("s1"));
-        let newer = r#"{"hook_event_name":"UserPromptSubmit"}"#;
-        let older = r#"{"hook_event_name":"Stop"}"#;
-        for (hook_time, body) in [("200", newer), ("100", older)] {
-            let response = build_loopback_router(hub.clone())
-                .oneshot(hook_request(
-                    "s1",
-                    Some("test-token"),
-                    Some(hook_time),
-                    body,
-                ))
-                .await
-                .expect("router answers");
-            assert_eq!(response.status(), StatusCode::NO_CONTENT);
-        }
-        assert_eq!(snapshot_of(&hub, "s1").status, SessionStatus::Working);
-    }
-
-    #[tokio::test]
-    async fn hook_route_applies_a_newer_event() {
-        let (hub, _scratch) = test_hub("hook-apply");
-        hub.sessions.insert(idle_record("s1"));
-        let body = concat!(
-            r#"{"hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","#,
-            r#""tool_input":{"questions":[{"question":"Which?","header":"Pick","#,
-            r#""options":[{"label":"A"},{"label":"B"}],"multiSelect":false}]}}"#,
-        );
-        let response = build_loopback_router(hub.clone())
-            .oneshot(hook_request("s1", Some("test-token"), Some("100"), body))
-            .await
-            .expect("router answers");
-        assert_eq!(response.status(), StatusCode::NO_CONTENT);
-        let snapshot = snapshot_of(&hub, "s1");
-        assert_eq!(snapshot.status, SessionStatus::AwaitingInput);
-        assert_eq!(
-            snapshot.pending_input,
-            Some(protocol::PendingInput::Question {
-                questions: vec![protocol::PendingQuestion {
-                    question: "Which?".to_owned(),
-                    header: "Pick".to_owned(),
-                    options: vec!["A".to_owned(), "B".to_owned()],
-                    multi_select: false,
-                }],
-            })
-        );
-    }
-
-    #[tokio::test]
-    async fn hook_route_ignores_a_malformed_body() {
-        let (hub, _scratch) = test_hub("hook-malformed");
-        hub.sessions.insert(idle_record("s1"));
-        let response = build_loopback_router(hub.clone())
-            .oneshot(hook_request(
-                "s1",
-                Some("test-token"),
-                Some("100"),
-                "not json",
-            ))
-            .await
-            .expect("router answers");
-        assert_eq!(response.status(), StatusCode::NO_CONTENT);
-        let snapshot = snapshot_of(&hub, "s1");
-        assert_eq!(snapshot.status, SessionStatus::Idle);
-        assert_eq!(snapshot.pending_input, None);
-    }
-
-    #[tokio::test]
-    async fn hook_route_unmapped_event_does_not_order() {
-        let (hub, _scratch) = test_hub("hook-unmapped");
-        hub.sessions.insert(idle_record("s1"));
-        let unmapped = r#"{"hook_event_name":"Notification","notification_type":"something_else"}"#;
-        let response = build_loopback_router(hub.clone())
-            .oneshot(hook_request(
-                "s1",
-                Some("test-token"),
-                Some("200"),
-                unmapped,
-            ))
-            .await
-            .expect("router answers");
-        assert_eq!(response.status(), StatusCode::NO_CONTENT);
-        let question = concat!(
-            r#"{"hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","#,
-            r#""tool_input":{"questions":[]}}"#,
-        );
-        let response = build_loopback_router(hub.clone())
-            .oneshot(hook_request(
-                "s1",
-                Some("test-token"),
-                Some("100"),
-                question,
-            ))
-            .await
-            .expect("router answers");
-        assert_eq!(response.status(), StatusCode::NO_CONTENT);
-        assert_eq!(snapshot_of(&hub, "s1").status, SessionStatus::AwaitingInput);
-    }
-
-    #[tokio::test]
-    async fn hook_route_drops_an_equal_time_event() {
-        let (hub, _scratch) = test_hub("hook-equal-time");
-        hub.sessions.insert(idle_record("s1"));
-        let started = r#"{"hook_event_name":"UserPromptSubmit"}"#;
-        let stop = r#"{"hook_event_name":"Stop"}"#;
-        for body in [started, stop] {
-            let response = build_loopback_router(hub.clone())
-                .oneshot(hook_request("s1", Some("test-token"), Some("100"), body))
-                .await
-                .expect("router answers");
-            assert_eq!(response.status(), StatusCode::NO_CONTENT);
-        }
-        assert_eq!(snapshot_of(&hub, "s1").status, SessionStatus::Working);
-    }
-
-    #[tokio::test]
-    async fn hook_route_drops_an_event_without_a_usable_time() {
-        let (hub, _scratch) = test_hub("hook-no-time");
-        hub.sessions.insert(idle_record("s1"));
-        let body = r#"{"hook_event_name":"UserPromptSubmit"}"#;
-        for hook_time in [None, Some("abc")] {
-            let response = build_loopback_router(hub.clone())
-                .oneshot(hook_request("s1", Some("test-token"), hook_time, body))
-                .await
-                .expect("router answers");
-            assert_eq!(response.status(), StatusCode::NO_CONTENT);
-        }
-        let snapshot = snapshot_of(&hub, "s1");
-        assert_eq!(snapshot.status, SessionStatus::Idle);
-        assert_eq!(snapshot.pending_input, None);
-    }
-
-    #[tokio::test]
-    async fn hook_route_keeps_a_stopped_session_stopped() {
-        let (hub, _scratch) = test_hub("hook-stopped");
-        hub.sessions.insert(idle_record("s1"));
-        hub.sessions
-            .update("s1", |record| record.status = SessionStatus::Stopped);
-        let body = r#"{"hook_event_name":"PostToolUse"}"#;
-        let response = build_loopback_router(hub.clone())
-            .oneshot(hook_request("s1", Some("test-token"), Some("100"), body))
-            .await
-            .expect("router answers");
-        assert_eq!(response.status(), StatusCode::NO_CONTENT);
-        let snapshot = snapshot_of(&hub, "s1");
-        assert_eq!(snapshot.status, SessionStatus::Stopped);
-        assert_eq!(snapshot.pending_input, None);
-    }
-
-    /// One `Attention` per entry into `AwaitingInput`, on the real hook path:
-    /// classifier output matching the same prompt raises no second event, and
-    /// an event for a session already waiting raises none.
-    #[tokio::test(start_paused = true)]
-    async fn hook_awaiting_input_raises_one_attention() {
-        let (hub, _scratch, mut attention) = test_hub_with_attention("hook-attention");
-        hub.sessions.insert(idle_record("s1"));
-        let (output, output_rx) = broadcast::channel(16);
-        let (_input, input_rx) = mpsc::unbounded_channel();
-        pty_state::watch(
-            &hub.sessions,
-            "s1".to_owned(),
-            pty_state::WatchStreams {
-                output: output_rx,
-                input_pulses: input_rx,
-            },
-            hub.attention_tx.clone(),
-            SessionStatus::Idle,
-        );
-        let question = concat!(
-            r#"{"hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","#,
-            r#""tool_input":{"questions":[{"question":"Which?","header":"Pick","#,
-            r#""options":[{"label":"A"},{"label":"B"}],"multiSelect":false}]}}"#,
-        );
-        let event: serde_json::Value = serde_json::from_str(question).expect("parse hook body");
-        let signal = crate::hook_status::map_event(&event).expect("a question is mapped");
-        crate::hook_status::apply_signal(
-            &hub,
-            "s1",
-            Some(100),
-            &signal,
-            &crate::hook_status::details(&event),
-        );
-        assert!(
-            matches!(
-                attention.try_recv().map(|event| event.reason),
-                Ok(AttentionReason::AwaitingInput)
-            ),
-            "the hook transition raises attention"
-        );
-        output
-            .send(b"\x1b[2K\rDo you want to proceed? 1. Yes 2. No ".to_vec())
-            .expect("watcher still subscribed");
-        for _ in 0..8 {
-            tokio::task::yield_now().await;
-        }
-        crate::hook_status::apply_signal(
-            &hub,
-            "s1",
-            Some(200),
-            &signal,
-            &crate::hook_status::details(&event),
-        );
-        assert!(
-            attention.try_recv().is_err(),
-            "classifier output and a repeat event raise no second event"
-        );
-    }
-
-    /// A hook event that arrives while its session is still being spawned —
-    /// the tracer has started the child, but the record is not inserted yet —
-    /// is held and applied at insertion, so a `SessionStart` or the kickoff
-    /// prompt's `UserPromptSubmit` is not dropped on the unknown-session
-    /// branch.
-    #[tokio::test]
-    async fn hook_before_the_insert_is_applied_after_it() {
-        let (hub, _scratch) = test_hub("hook-before-insert");
-        let response = build_loopback_router(hub.clone())
-            .oneshot(hook_request(
-                "s1",
-                Some("test-token"),
-                Some("100"),
-                r#"{"hook_event_name":"UserPromptSubmit"}"#,
-            ))
-            .await
-            .expect("router answers");
-        assert_eq!(response.status(), StatusCode::NO_CONTENT);
-        assert!(
-            hub.sessions.get("s1").is_none(),
-            "the spawn has not inserted its record yet"
-        );
-        let (pending, _awaiting) = hub
-            .pending_hooks
-            .insert_with_pending(&hub, idle_record("s1"));
-        pending.publish();
-        assert_eq!(
-            snapshot_of(&hub, "s1").status,
-            SessionStatus::Working,
-            "the kickoff prompt's hook survived the insert"
-        );
-        assert!(hook_driven_of(&hub, "s1"), "hooks now drive the session");
-    }
-
-    /// A buffered prompt followed by an event that clears it must not raise a
-    /// stale "Needs you": the announcement follows the record's final state,
-    /// not the number of events that passed through `AwaitingInput`.
-    #[tokio::test]
-    async fn a_cleared_buffered_prompt_raises_no_attention() {
-        let (hub, _scratch, mut attention) = test_hub_with_attention("hook-replay-cleared");
-        for (time, body) in [
-            (
-                100,
-                r#"{"hook_event_name":"PermissionRequest","tool_name":"Bash"}"#,
-            ),
-            (200, r#"{"hook_event_name":"Stop"}"#),
-        ] {
-            let time = time.to_string();
-            let response = build_loopback_router(hub.clone())
-                .oneshot(hook_request(
-                    "s1",
-                    Some("test-token"),
-                    Some(time.as_str()),
-                    body,
-                ))
-                .await
-                .expect("router answers");
-            assert_eq!(response.status(), StatusCode::NO_CONTENT);
-        }
-        let (pending, awaiting) = hub
-            .pending_hooks
-            .insert_with_pending(&hub, idle_record("s1"));
-        pending.publish();
-        announce_replayed_prompt(&hub, "s1", awaiting);
-        let snapshot = snapshot_of(&hub, "s1");
-        assert_eq!(
-            snapshot.status,
-            SessionStatus::Idle,
-            "the Stop cleared the prompt"
-        );
-        assert_eq!(snapshot.pending_input, None, "no prompt is pending");
-        assert!(
-            attention.try_recv().is_err(),
-            "a prompt cleared during the replay raises no attention"
-        );
-    }
-
-    /// A buffered prompt still held after the whole replay raises exactly one
-    /// attention, naming `AwaitingInput`.
-    #[tokio::test]
-    async fn a_buffered_prompt_still_held_raises_one_attention() {
-        let (hub, _scratch, mut attention) = test_hub_with_attention("hook-replay-held");
-        let response = build_loopback_router(hub.clone())
-            .oneshot(hook_request(
-                "s1",
-                Some("test-token"),
-                Some("100"),
-                r#"{"hook_event_name":"PermissionRequest","tool_name":"Bash"}"#,
-            ))
-            .await
-            .expect("router answers");
-        assert_eq!(response.status(), StatusCode::NO_CONTENT);
-        let (pending, awaiting) = hub
-            .pending_hooks
-            .insert_with_pending(&hub, idle_record("s1"));
-        pending.publish();
-        announce_replayed_prompt(&hub, "s1", awaiting);
-        let snapshot = snapshot_of(&hub, "s1");
-        assert_eq!(snapshot.status, SessionStatus::AwaitingInput);
-        assert!(
-            snapshot.pending_input.is_some(),
-            "the prompt is still pending"
-        );
-        assert!(
-            matches!(
-                attention.try_recv().map(|event| event.reason),
-                Ok(AttentionReason::AwaitingInput)
-            ),
-            "the held prompt raises one attention"
-        );
-        assert!(attention.try_recv().is_err(), "exactly one attention");
-    }
-
-    /// Apply the hook `body` to `s1` at `event_time`, as the route does.
-    fn apply_hook(hub: &Hub, body: &str, event_time: u128) {
-        let event: serde_json::Value = serde_json::from_str(body).expect("parse hook body");
-        let signal = crate::hook_status::map_event(&event).expect("the body maps to a signal");
-        crate::hook_status::apply_signal(
-            hub,
-            "s1",
-            Some(event_time),
-            &signal,
-            &crate::hook_status::details(&event),
-        );
-    }
-
-    /// Whether `id`'s record is driven by hook reports.
-    fn hook_driven_of(hub: &Hub, id: &str) -> bool {
-        let rec = hub.sessions.get(id).expect("session is in the registry");
-        crate::sync::lock(&rec).hook_driven
-    }
-
-    /// The pending input `id`'s record holds.
-    fn pending_input_of(hub: &Hub, id: &str) -> Option<protocol::PendingInput> {
-        let rec = hub.sessions.get(id).expect("session is in the registry");
-        crate::sync::lock(&rec).pending_input.clone()
-    }
-
-    /// A shell outlives the CLI whose hooks drive it: its `SessionEnd` hands
-    /// the status back to the shell classifier, while an interactive session
-    /// stays hook-driven.
-    #[test]
-    fn hook_status_clears_hook_driven_on_a_shell_session_end() {
-        let (hub, _scratch) = test_hub("hook-session-end");
-        let mut shell = idle_record("shell");
-        shell.mode = SessionMode::PlainShell;
-        hub.sessions.insert(shell);
-        hub.sessions.insert(idle_record("agent"));
-        let apply = |id: &str, body: &str, event_time: u128| {
-            let event: serde_json::Value = serde_json::from_str(body).expect("parse hook body");
-            let signal = crate::hook_status::map_event(&event).expect("the body maps to a signal");
-            crate::hook_status::apply_signal(
-                &hub,
-                id,
-                Some(event_time),
-                &signal,
-                &crate::hook_status::details(&event),
-            );
-        };
-
-        for id in ["shell", "agent"] {
-            apply(id, r#"{"hook_event_name":"UserPromptSubmit"}"#, 100);
-            apply(
-                id,
-                r#"{"hook_event_name":"Elicitation","mcp_server_name":"MCP","message":"pick"}"#,
-                150,
-            );
-            assert!(hook_driven_of(&hub, id), "{id} is driven by its hooks");
-            assert!(
-                pending_input_of(&hub, id).is_some(),
-                "{id} waits on its prompt"
-            );
-        }
-
-        let end = r#"{"hook_event_name":"SessionEnd","reason":"prompt_input_exit"}"#;
-        apply("shell", end, 200);
-        apply("agent", end, 200);
-        assert!(
-            !hook_driven_of(&hub, "shell"),
-            "the shell falls back to its classifier once its CLI ends"
-        );
-        assert!(
-            pending_input_of(&hub, "shell").is_none(),
-            "the end clears the shell's pending prompt"
-        );
-        assert!(
-            hook_driven_of(&hub, "agent"),
-            "the agent session stays hook-driven"
-        );
-    }
-
-    /// `id`'s conversation id, read under its record lock.
-    fn conversation_id_of(hub: &Hub, id: &str) -> Option<String> {
-        let rec = hub.sessions.get(id).expect("session is in the registry");
-        crate::sync::lock(&rec).claude_session_id.clone()
-    }
-
-    /// The last assistant message `id`'s record holds.
-    fn last_message_of(hub: &Hub, id: &str) -> Option<String> {
-        let rec = hub.sessions.get(id).expect("session is in the registry");
-        crate::sync::lock(&rec).last_assistant_message.clone()
-    }
-
-    /// The newest recent action on `id`'s record.
-    fn last_action_of(hub: &Hub, id: &str) -> Option<String> {
-        let rec = hub.sessions.get(id).expect("session is in the registry");
-        crate::sync::lock(&rec).recent_actions.last().cloned()
-    }
-
-    /// A `SessionStart` for a `/clear` carries a new conversation id, and the
-    /// record moves to it.
-    #[tokio::test]
-    async fn hook_session_start_clear_updates_the_conversation_id() {
-        let (hub, _scratch) = test_hub("hook-session-start-clear");
-        hub.sessions.insert(idle_record("s1"));
-        hub.sessions.update("s1", |rec| {
-            rec.claude_session_id = Some("old-conv".to_owned());
-        });
-        apply_hook(
-            &hub,
-            r#"{"hook_event_name":"SessionStart","source":"clear","session_id":"new-conv"}"#,
-            100,
-        );
-        assert_eq!(
-            conversation_id_of(&hub, "s1").as_deref(),
-            Some("new-conv"),
-            "a clear moves the session to its new conversation"
-        );
-    }
-
-    /// A resumed session reports the id it already had, so the write is a
-    /// no-op.
-    #[tokio::test]
-    async fn hook_session_start_resume_with_the_same_id_leaves_it() {
-        let (hub, _scratch) = test_hub("hook-session-start-resume-same");
-        hub.sessions.insert(idle_record("s1"));
-        hub.sessions.update("s1", |rec| {
-            rec.claude_session_id = Some("same-conv".to_owned());
-        });
-        apply_hook(
-            &hub,
-            r#"{"hook_event_name":"SessionStart","source":"resume","session_id":"same-conv"}"#,
-            100,
-        );
-        assert_eq!(
-            conversation_id_of(&hub, "s1").as_deref(),
-            Some("same-conv"),
-            "a resume keeps the conversation it resumed"
-        );
-    }
-
-    /// There is no source gate: a `resume` that reports a different id moves
-    /// the record like any other `SessionStart`.
-    #[tokio::test]
-    async fn hook_session_start_resume_with_a_new_id_updates_it() {
-        let (hub, _scratch) = test_hub("hook-session-start-resume-new");
-        hub.sessions.insert(idle_record("s1"));
-        hub.sessions.update("s1", |rec| {
-            rec.claude_session_id = Some("old-conv".to_owned());
-        });
-        apply_hook(
-            &hub,
-            r#"{"hook_event_name":"SessionStart","source":"resume","session_id":"new-conv"}"#,
-            100,
-        );
-        assert_eq!(
-            conversation_id_of(&hub, "s1").as_deref(),
-            Some("new-conv"),
-            "the source does not gate the id write"
-        );
-    }
-
-    /// `Stop` keeps the message the turn ended with; a later `Stop` with no
-    /// message keeps it.
-    #[tokio::test]
-    async fn hook_stop_stores_the_last_message() {
-        let (hub, _scratch) = test_hub("hook-stop-message");
-        hub.sessions.insert(idle_record("s1"));
-        apply_hook(
-            &hub,
-            r#"{"hook_event_name":"Stop","last_assistant_message":"All done."}"#,
-            100,
-        );
-        assert_eq!(
-            last_message_of(&hub, "s1").as_deref(),
-            Some("All done."),
-            "a stop stores the message it ended with"
-        );
-        apply_hook(&hub, r#"{"hook_event_name":"Stop"}"#, 200);
-        assert_eq!(
-            last_message_of(&hub, "s1").as_deref(),
-            Some("All done."),
-            "an absent message keeps the previous one"
-        );
-        apply_hook(
-            &hub,
-            r#"{"hook_event_name":"Stop","last_assistant_message":""}"#,
-            300,
-        );
-        assert_eq!(
-            last_message_of(&hub, "s1").as_deref(),
-            Some("All done."),
-            "an empty message keeps the previous one too"
-        );
-    }
-
-    /// `StopFailure` leaves a recent-actions line, naming the reason when the
-    /// payload carries one.
-    #[tokio::test]
-    async fn hook_stop_failure_adds_a_recent_action() {
-        let (hub, _scratch) = test_hub("hook-stop-failure");
-        hub.sessions.insert(idle_record("s1"));
-        apply_hook(
-            &hub,
-            r#"{"hook_event_name":"StopFailure","reason":"overloaded"}"#,
-            100,
-        );
-        assert_eq!(
-            last_action_of(&hub, "s1").as_deref(),
-            Some("stop failed: overloaded"),
-            "the newest action names the failure"
-        );
-        apply_hook(&hub, r#"{"hook_event_name":"StopFailure"}"#, 200);
-        assert_eq!(
-            last_action_of(&hub, "s1").as_deref(),
-            Some("stop failed"),
-            "a failure with no reason leaves the bare line"
-        );
-    }
-
-    /// A `/clear`'s new id reaches the sidecar through the registry's mirror,
-    /// so a reattach or daemon restart keeps it.
-    #[tokio::test]
-    async fn hook_session_start_clear_reaches_the_sidecar() {
-        use crate::history::test_support::write_meta_for;
-        let (hub, _scratch) = test_hub("hook-sidecar-id");
-        write_meta_for(&hub.dirs, "s1");
-        hub.sessions.insert(idle_record("s1"));
-        // Bring the sidecar in line with the record first, so the id is the
-        // only mirrored field that differs when the hook lands.
-        hub.sessions.update("s1", |_| {});
-        apply_hook(
-            &hub,
-            r#"{"hook_event_name":"SessionStart","source":"clear","session_id":"new-conv"}"#,
-            100,
-        );
-        let meta = crate::orphan::load_meta(&hub.dirs, "s1").expect("load meta");
-        assert_eq!(
-            meta.claude_session_id.as_deref(),
-            Some("new-conv"),
-            "the hook's id is mirrored into the sidecar"
-        );
-    }
-
-    /// A terminal session takes no detail write: a late `/clear` event
-    /// changes neither its id nor its last message.
-    #[tokio::test]
-    async fn hook_session_start_clear_for_a_terminal_session_changes_nothing() {
-        let (hub, _scratch) = test_hub("hook-terminal-guard");
-        hub.sessions.insert(idle_record("s1"));
-        hub.sessions.update("s1", |rec| {
-            rec.status = SessionStatus::Stopped;
-            rec.claude_session_id = Some("old-conv".to_owned());
-            rec.last_assistant_message = Some("kept".to_owned());
-        });
-        apply_hook(
-            &hub,
-            r#"{"hook_event_name":"SessionStart","source":"clear","session_id":"new-conv"}"#,
-            100,
-        );
-        assert_eq!(
-            conversation_id_of(&hub, "s1").as_deref(),
-            Some("old-conv"),
-            "a terminal session keeps its id"
-        );
-        assert_eq!(
-            last_message_of(&hub, "s1").as_deref(),
-            Some("kept"),
-            "a terminal session keeps its message"
-        );
-    }
-
-    /// An event at or before the last applied time is dropped whole: it
-    /// changes neither the id nor the message.
-    #[tokio::test]
-    async fn hook_a_stale_event_changes_nothing() {
-        let (hub, _scratch) = test_hub("hook-stale-event");
-        hub.sessions.insert(idle_record("s1"));
-        hub.sessions.update("s1", |rec| {
-            rec.last_hook_time = Some(100);
-            rec.claude_session_id = Some("old-conv".to_owned());
-            rec.last_assistant_message = Some("kept".to_owned());
-        });
-        apply_hook(
-            &hub,
-            r#"{"hook_event_name":"SessionStart","source":"clear","session_id":"new-conv"}"#,
-            100,
-        );
-        apply_hook(
-            &hub,
-            r#"{"hook_event_name":"Stop","last_assistant_message":"stale"}"#,
-            99,
-        );
-        assert_eq!(
-            conversation_id_of(&hub, "s1").as_deref(),
-            Some("old-conv"),
-            "a stale start changes no id"
-        );
-        assert_eq!(
-            last_message_of(&hub, "s1").as_deref(),
-            Some("kept"),
-            "a stale stop changes no message"
-        );
-    }
-
-    /// The id later becomes `claude --resume <id>` and a transcript path, so
-    /// a value that is not plain is refused.
-    #[tokio::test]
-    async fn hook_session_start_refuses_a_non_plain_id() {
-        let (hub, _scratch) = test_hub("hook-plain-id");
-        hub.sessions.insert(idle_record("s1"));
-        hub.sessions.update("s1", |rec| {
-            rec.claude_session_id = Some("old-conv".to_owned());
-        });
-        for (index, id) in ["../x", r"C:\conversations\x", "a/b"].iter().enumerate() {
-            let body = serde_json::json!({
-                "hook_event_name": "SessionStart",
-                "source": "clear",
-                "session_id": id,
-            })
-            .to_string();
-            apply_hook(&hub, &body, 100 + index as u128);
-            assert_eq!(
-                conversation_id_of(&hub, "s1").as_deref(),
-                Some("old-conv"),
-                "{id} is refused"
-            );
-        }
-    }
-
-    /// A session with no id at all may gain one from a `/clear`.
-    #[tokio::test]
-    async fn hook_session_start_clear_sets_a_missing_id() {
-        let (hub, _scratch) = test_hub("hook-missing-id");
-        hub.sessions.insert(idle_record("s1"));
-        apply_hook(
-            &hub,
-            r#"{"hook_event_name":"SessionStart","source":"clear","session_id":"fresh-conv"}"#,
-            100,
-        );
-        assert_eq!(
-            conversation_id_of(&hub, "s1").as_deref(),
-            Some("fresh-conv"),
-            "a missing id is filled in"
-        );
-    }
-
-    /// The message is capped in bytes, so a multi-byte message over 8 KiB
-    /// cannot grow past it and is cut with the ellipsis.
-    #[tokio::test]
-    async fn hook_stop_caps_the_message_at_eight_kib() {
-        let (hub, _scratch) = test_hub("hook-stop-cap");
-        hub.sessions.insert(idle_record("s1"));
-        let body = serde_json::json!({
-            "hook_event_name": "Stop",
-            "last_assistant_message": "é".repeat(5000),
-        })
-        .to_string();
-        apply_hook(&hub, &body, 100);
-        let stored = last_message_of(&hub, "s1").expect("a message is stored");
-        assert!(stored.len() <= 8 * 1024, "{} bytes", stored.len());
-        assert!(stored.ends_with('…'), "the cut ends in the ellipsis");
-    }
-
-    /// The id the hook wrote is the one an ended session's history entry
-    /// carries.
-    #[tokio::test]
-    async fn hook_session_start_clear_reaches_the_history_entry() {
-        let (hub, _scratch) = test_hub("hook-history-id");
-        hub.sessions.insert(idle_record("s1"));
-        hub.sessions.update("s1", |rec| {
-            rec.claude_session_id = Some("old-conv".to_owned());
-        });
-        apply_hook(
-            &hub,
-            r#"{"hook_event_name":"SessionStart","source":"clear","session_id":"new-conv"}"#,
-            100,
-        );
-        let rec = hub.sessions.get("s1").expect("session is in the registry");
-        let guard = crate::sync::lock(&rec);
-        let entry = crate::history::entry_from_record(
-            &guard,
-            protocol::SessionEnd::TracerLost,
-            chrono::Utc::now(),
-        );
-        assert_eq!(entry.claude_session_id.as_deref(), Some("new-conv"));
     }
 
     /// Dispatch `msg` against `hub` without expecting a reply.
@@ -8167,108 +4908,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[expect(clippy::panic, reason = "a wrong reply fails the test loudly")]
-    async fn list_env_names_replies_with_names_and_no_values() {
-        const NAME: &str = "RT_TEST_LIST_ENV_NAMES_7C21";
-        const SENTINEL: &str = "rt-sentinel-value-5d9a0e";
-        // SAFETY: the name is unique to this test and nothing else reads or
-        // writes it; std serializes environment access on Windows.
-        unsafe { std::env::set_var(NAME, SENTINEL) };
-        let (hub, _scratch) = test_hub("list-env-names");
-        let reply = dispatch_one(
-            &hub,
-            ClientMessage::ListEnvNames {
-                request_id: Some("r1".to_owned()),
-            },
-        )
-        .await;
-        // SAFETY: as above.
-        unsafe { std::env::remove_var(NAME) };
-        let json = serde_json::to_string(&reply).expect("the reply serializes");
-        let DaemonMessage::EnvNames { names, request_id } = reply else {
-            panic!("expected env_names, got {reply:?}");
-        };
-        assert_eq!(request_id.as_deref(), Some("r1"));
-        let entry = names
-            .iter()
-            .find(|entry| entry.name == NAME)
-            .expect("the process variable is listed");
-        assert!(entry.scopes.contains(&protocol::EnvScope::Process));
-        assert!(!json.contains(SENTINEL), "no value on the wire");
-    }
-
-    #[tokio::test]
-    #[expect(clippy::panic, reason = "a wrong reply fails the test loudly")]
-    async fn history_lists_abandoned_tracer_lost_session() {
-        use crate::history::test_support::record;
-        let (hub, _scratch) = spawnless_test_hub("history-abandoned");
-        write_history(&hub, "gone", SessionMode::PlainShell, false);
-        write_history(&hub, "abandoned", SessionMode::PlainShell, false);
-        write_history(&hub, "stopped", SessionMode::PlainShell, false);
-        let mut abandoned = record("abandoned", SessionMode::PlainShell);
-        abandoned.is_abandoned = true;
-        abandoned.status = protocol::SessionStatus::Stopped;
-        hub.sessions.insert(abandoned);
-        let mut stopped = record("stopped", SessionMode::PlainShell);
-        stopped.status = protocol::SessionStatus::Stopped;
-        hub.sessions.insert(stopped);
-        let reply =
-            dispatch_one(&hub, ClientMessage::ListSessionHistory { request_id: None }).await;
-        let DaemonMessage::SessionHistory { items, .. } = reply else {
-            panic!("expected session_history, got {reply:?}");
-        };
-        let mut ids: Vec<&str> = items.iter().map(|i| i.entry.session_id.as_str()).collect();
-        ids.sort_unstable();
-        assert_eq!(ids, ["abandoned", "gone", "stopped"]);
-        let abandoned_item = items
-            .iter()
-            .find(|i| i.entry.session_id == "abandoned")
-            .expect("abandoned listed");
-        assert_eq!(abandoned_item.entry.end, SessionEnd::TracerLost);
-    }
-
-    /// Insert `id` as an abandoned session with an unrecovered `TracerLost`
-    /// history entry, as a tracer loss leaves it.
-    fn insert_abandoned_with_history(hub: &Hub, id: &str) {
-        write_history(hub, id, SessionMode::Interactive, false);
-        let mut rec = crate::history::test_support::record(id, SessionMode::Interactive);
-        rec.is_abandoned = true;
-        rec.status = protocol::SessionStatus::Stopped;
-        hub.sessions.insert(rec);
-    }
-
-    #[tokio::test]
-    async fn recovering_abandoned_entry_removes_abandoned_session() {
-        let (hub, _scratch) = spawnless_test_hub("recover-abandoned");
-        insert_abandoned_with_history(&hub, "lost");
-        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
-        finish_recovery(&hub, "lost", "fresh", &out_tx);
-        assert!(
-            hub.sessions.get("lost").is_none(),
-            "left the Abandoned group"
-        );
-        assert!(matches!(
-            out_rx.try_recv(),
-            Ok(DaemonMessage::SessionRemoved { ref session_id }) if session_id == "lost"
-        ));
-        let entry = history::read_one(&hub.dirs, "lost").expect("entry kept");
-        assert!(entry.recovered_at.is_some(), "marked recovered");
-        assert_eq!(entry.end, SessionEnd::TracerLost, "no second end written");
-    }
-
-    #[tokio::test]
-    async fn resume_abandoned_marks_history_recovered() {
-        let (hub, _scratch) = spawnless_test_hub("resume-marks-recovered");
-        insert_abandoned_with_history(&hub, "lost");
-        let (out_tx, _out_rx) = mpsc::unbounded_channel();
-        finish_resume(&hub, "lost", "fresh", &out_tx);
-        assert!(hub.sessions.get("lost").is_none(), "placeholder removed");
-        let entry = history::read_one(&hub.dirs, "lost").expect("entry kept");
-        assert!(entry.recovered_at.is_some(), "a resume counts as recovery");
-        assert_eq!(entry.end, SessionEnd::TracerLost);
-    }
-
-    #[tokio::test]
     #[expect(clippy::panic, reason = "a missing broadcast fails the test loudly")]
     async fn set_session_busy_excluded_updates_the_registry_and_broadcasts() {
         let (hub, _scratch) = test_hub("busy-excluded-set");
@@ -8355,52 +4994,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn abandoned_resume_request_returns_the_records_busy_flag() {
-        let (hub, scratch) = spawnless_test_hub("resume-busy-excluded");
-        insert_abandoned_with_history(&hub, "lost");
-        let target = SpawnTarget::Standalone {
-            cwd: Some(scratch.path().to_string_lossy().into_owned()),
-            add_dirs: Vec::new(),
-        };
-        let stored = protocol::SpawnConfig::from_request(&env_spawn(
-            target,
-            SessionMode::Interactive,
-            Vec::new(),
-            None,
-        ));
-        hub.sessions.update("lost", |rec| {
-            rec.spawn_config = Some(stored);
-            rec.busy_excluded = true;
-        });
-        let rec = hub.sessions.get("lost").expect("lost is registered");
-        let (_request, busy_excluded) =
-            abandoned_resume_request(&crate::sync::lock(&rec)).expect("lost can resume");
-        assert!(busy_excluded, "the resumed session keeps the flag");
-    }
-
-    #[tokio::test]
-    async fn resume_abandoned_keeps_a_deepseek_provider() {
-        let (hub, scratch) = spawnless_test_hub("resume-deepseek");
-        insert_abandoned_with_history(&hub, "lost");
-        let target = SpawnTarget::Standalone {
-            cwd: Some(scratch.path().to_string_lossy().into_owned()),
-            add_dirs: Vec::new(),
-        };
-        let stored = protocol::SpawnConfig::from_request(&deepseek_spawn(
-            target,
-            SessionMode::Interactive,
-            Vec::new(),
-            None,
-        ));
-        hub.sessions
-            .update("lost", |rec| rec.spawn_config = Some(stored));
-        let rec = hub.sessions.get("lost").expect("lost is registered");
-        let (request, _) =
-            abandoned_resume_request(&crate::sync::lock(&rec)).expect("lost can resume");
-        assert_eq!(request.agent_options, deepseek_options());
-    }
-
-    #[tokio::test]
     async fn duplicate_keeps_a_deepseek_provider() {
         let (hub, scratch) = spawnless_test_hub("duplicate-deepseek");
         let target = SpawnTarget::Standalone {
@@ -8419,197 +5012,6 @@ mod tests {
             .await
             .expect("source can be duplicated");
         assert_eq!(request.agent_options, deepseek_options());
-    }
-
-    /// The request `how` recovers `entry` with, resuming `conversation`,
-    /// planned against an empty registry with every conversation present.
-    fn planned_recovery(
-        entry: &protocol::HistoryEntry,
-        how: protocol::RecoverAs,
-        conversation: Option<&str>,
-    ) -> SpawnRequest {
-        let item = protocol::RecoverItem {
-            history_id: entry.session_id.clone(),
-            conversation_id: conversation.map(str::to_owned),
-            how,
-        };
-        let registered = history::Registered {
-            repos: &[],
-            workspaces: &[],
-        };
-        history::plan_recovery(entry, &item, &registered, |_, _, _| true)
-            .expect("the recovery plans")
-            .request
-    }
-
-    #[test]
-    fn the_recovery_pre_check_sees_the_provider_that_will_spawn() {
-        let folder = r"D:\deepseek-proj";
-        let mut rec = history::test_support::record("ds", SessionMode::Interactive);
-        rec.members = vec![SessionMember {
-            repo_id: String::new(),
-            repo_name: String::new(),
-            branch: "main".to_owned(),
-            worktree_path: folder.to_owned(),
-        }];
-        let anthropic = history::entry_from_record(&rec, SessionEnd::TracerLost, Utc::now());
-        let mut recorded = anthropic.clone();
-        recorded.spawn_config = Some(protocol::SpawnConfig::from_request(&deepseek_spawn(
-            SpawnTarget::Standalone {
-                cwd: Some(folder.to_owned()),
-                add_dirs: Vec::new(),
-            },
-            SessionMode::Interactive,
-            Vec::new(),
-            None,
-        )));
-        let mut imported = anthropic.clone();
-        imported.provider = protocol::ClaudeProvider::Deepseek;
-        let register = protocol::RecoverAs::RegisterRepoThenClaude {
-            path: folder.to_owned(),
-        };
-        for entry in [&recorded, &imported] {
-            for how in [protocol::RecoverAs::Claude, register.clone()] {
-                let request = planned_recovery(entry, how.clone(), Some(RECOVERY_CONVERSATION));
-                let failure = check_spawn_request_with(&request, |_| None)
-                    .expect_err("a DeepSeek recovery needs the key");
-                assert_eq!(
-                    failure.title, "Couldn't start the DeepSeek session",
-                    "{how:?}"
-                );
-                assert!(
-                    check_spawn_request_with(&request, deepseek_key).is_ok(),
-                    "{how:?}"
-                );
-            }
-        }
-        // A shell recovery spawns a plain shell with no provider, so it needs
-        // no key.
-        for conversation in [Some(RECOVERY_CONVERSATION), None] {
-            let shell = planned_recovery(&anthropic, protocol::RecoverAs::Shell, conversation);
-            assert_eq!(shell.mode, SessionMode::PlainShell);
-            assert!(
-                check_spawn_request_with(&shell, |_| None).is_ok(),
-                "{conversation:?}"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn the_end_path_writes_the_busy_flag_into_the_history_entry() {
-        let (hub, _scratch) = spawnless_test_hub("recover-busy-excluded");
-        let mut rec = history::test_support::record("s1", SessionMode::Interactive);
-        rec.busy_excluded = true;
-        hub.sessions.insert(rec);
-        record_end(&hub, "s1", SessionEnd::TracerLost);
-        let entry = history::test_support::wait_for_entry(&hub.dirs, "s1").await;
-        assert!(
-            entry.busy_excluded,
-            "the end path writes the flag recovery reads"
-        );
-    }
-
-    #[test]
-    fn recovery_takes_the_busy_flag_from_a_still_abandoned_session_else_the_entry() {
-        let mut entry = history::entry_from_record(
-            &history::test_support::record("lost", SessionMode::Interactive),
-            SessionEnd::TracerLost,
-            Utc::now(),
-        );
-        entry.busy_excluded = true;
-        let mut abandoned = history::test_support::record("lost", SessionMode::Interactive);
-        abandoned.is_abandoned = true;
-        assert!(
-            !recovery_busy_excluded(Some(&abandoned), &entry),
-            "a toggle on the abandoned leaf after the entry was written wins"
-        );
-        abandoned.busy_excluded = true;
-        entry.busy_excluded = false;
-        assert!(recovery_busy_excluded(Some(&abandoned), &entry));
-
-        let mut live = history::test_support::record("lost", SessionMode::Interactive);
-        live.busy_excluded = true;
-        assert!(
-            !recovery_busy_excluded(Some(&live), &entry),
-            "a session that is not abandoned is not the one being recovered"
-        );
-        entry.busy_excluded = true;
-        assert!(
-            recovery_busy_excluded(None, &entry),
-            "with no session left, the entry's flag"
-        );
-    }
-
-    #[tokio::test]
-    async fn recovering_abandoned_entry_rebinds_its_panes() {
-        let (hub, _scratch) = spawnless_test_hub("recover-rebinds");
-        insert_abandoned_with_history(&hub, "lost");
-        let tab = tabs::make_tab(None, Some("lost".to_owned()), &[]);
-        hub.state
-            .mutate_all_layouts(|layouts| {
-                layouts.insert(
-                    "client".to_owned(),
-                    crate::state::ClientLayout {
-                        name: None,
-                        tabs: vec![tab],
-                    },
-                );
-            })
-            .expect("seed a layout");
-        let (out_tx, _out_rx) = mpsc::unbounded_channel();
-        finish_recovery(&hub, "lost", "fresh", &out_tx);
-        let shown: Vec<Option<String>> = hub
-            .state
-            .mutate_all_layouts(|layouts| {
-                layouts["client"]
-                    .tabs
-                    .iter()
-                    .filter_map(|tab| match &tab.content {
-                        protocol::TabContent::Grid {
-                            grid: protocol::GridNode::Pane { session_id, .. },
-                        } => Some(session_id.clone()),
-                        _ => None,
-                    })
-                    .collect()
-            })
-            .expect("read the layout");
-        assert_eq!(shown, [Some("fresh".to_owned())], "the pane follows");
-    }
-
-    #[tokio::test]
-    #[expect(clippy::panic, reason = "a wrong reply fails the test loudly")]
-    async fn concurrent_recover_and_resume_claim_once() {
-        let claims = RecoveryClaims::default();
-        let first = claims.claim("x").expect("the first claim wins");
-        assert!(claims.claim("x").is_none(), "a second claim loses");
-        assert!(claims.claim("y").is_some(), "claims are per id");
-        drop(first);
-        assert!(claims.claim("x").is_some(), "a dropped claim frees the id");
-
-        let (hub, _scratch) = spawnless_test_hub("recover-claims");
-        insert_abandoned_with_history(&hub, "lost");
-        let _held = hub.recovering.claim("lost").expect("claim");
-        let (out_tx, _out_rx) = mpsc::unbounded_channel();
-        let resumed = resume_abandoned(&hub, "lost", &out_tx).await;
-        let err = resumed.expect_err("a Resume while a recovery holds it fails");
-        assert!(err.to_string().contains(ALREADY_RECOVERING), "{err}");
-        let reply = dispatch_one(
-            &hub,
-            ClientMessage::RecoverSessions {
-                request_id: None,
-                items: vec![protocol::RecoverItem {
-                    history_id: "lost".to_owned(),
-                    conversation_id: None,
-                    how: protocol::RecoverAs::Claude,
-                }],
-            },
-        )
-        .await;
-        let DaemonMessage::RecoverResult { results, .. } = reply else {
-            panic!("expected recover_result, got {reply:?}");
-        };
-        assert_eq!(results[0].error.as_deref(), Some(ALREADY_RECOVERING));
-        assert!(hub.sessions.get("lost").is_some(), "nothing was spawned");
     }
 
     /// Run a real interactive Claude spawn for `session_id` in `folder` on
@@ -8949,143 +5351,6 @@ mod tests {
         );
     }
 
-    /// Write a history entry for `id` in `mode`, recovered or not.
-    fn write_history(hub: &Hub, id: &str, mode: SessionMode, recovered: bool) {
-        let mut entry = history::entry_from_record(
-            &crate::history::test_support::record(id, mode),
-            SessionEnd::TracerLost,
-            chrono::Utc::now(),
-        );
-        entry.primary_cwd = Some(hub.dirs.config.to_string_lossy().into_owned());
-        entry.recovered_at = recovered.then(chrono::Utc::now);
-        history::write_if_absent(&hub.dirs, &entry).expect("write history entry");
-    }
-
-    #[tokio::test]
-    #[expect(clippy::panic, reason = "a wrong reply fails the test loudly")]
-    async fn list_session_history_replies_with_its_request_id() {
-        let (hub, _scratch) = spawnless_test_hub("list-history");
-        write_history(&hub, "shell", SessionMode::PlainShell, false);
-        write_history(&hub, "headless", SessionMode::Headless, false);
-        let reply = dispatch_one(
-            &hub,
-            ClientMessage::ListSessionHistory {
-                request_id: Some("r1".to_owned()),
-            },
-        )
-        .await;
-        let DaemonMessage::SessionHistory { request_id, items } = reply else {
-            panic!("expected session_history, got {reply:?}");
-        };
-        assert_eq!(request_id.as_deref(), Some("r1"));
-        let ids: Vec<&str> = items.iter().map(|i| i.entry.session_id.as_str()).collect();
-        assert_eq!(ids, ["shell"]);
-    }
-
-    #[tokio::test]
-    #[expect(clippy::panic, reason = "a wrong reply fails the test loudly")]
-    async fn recover_sessions_reports_each_failure_in_order() {
-        let (hub, _scratch) = spawnless_test_hub("recover-errors");
-        write_history(&hub, "done", SessionMode::Interactive, true);
-        let items = ["missing", "done", "done"]
-            .into_iter()
-            .zip([
-                protocol::RecoverAs::Claude,
-                protocol::RecoverAs::Shell,
-                protocol::RecoverAs::Unknown,
-            ])
-            .map(|(id, how)| protocol::RecoverItem {
-                history_id: id.to_owned(),
-                conversation_id: None,
-                how,
-            })
-            .collect();
-        let reply = dispatch_one(
-            &hub,
-            ClientMessage::RecoverSessions {
-                request_id: Some("r2".to_owned()),
-                items,
-            },
-        )
-        .await;
-        let DaemonMessage::RecoverResult {
-            request_id,
-            results,
-        } = reply
-        else {
-            panic!("expected recover_result, got {reply:?}");
-        };
-        assert_eq!(request_id.as_deref(), Some("r2"));
-        let outcome: Vec<(&str, Option<&str>, Option<&str>)> = results
-            .iter()
-            .map(|r| {
-                (
-                    r.history_id.as_str(),
-                    r.session_id.as_deref(),
-                    r.error.as_deref(),
-                )
-            })
-            .collect();
-        assert_eq!(
-            outcome,
-            [
-                ("missing", None, Some("no history entry missing")),
-                ("done", None, Some("already recovered")),
-                ("done", None, Some("already recovered")),
-            ]
-        );
-        assert!(
-            hub.sessions.snapshots().is_empty(),
-            "a refused item spawns nothing"
-        );
-    }
-
-    #[tokio::test]
-    #[expect(clippy::panic, reason = "a wrong reply fails the test loudly")]
-    async fn recovery_under_test_hub_cannot_spawn() {
-        let (hub, _scratch) = spawnless_test_hub("recover-cannot-spawn");
-        write_history(&hub, "shell", SessionMode::PlainShell, false);
-        let reply = dispatch_one(
-            &hub,
-            ClientMessage::RecoverSessions {
-                request_id: None,
-                items: vec![protocol::RecoverItem {
-                    history_id: "shell".to_owned(),
-                    conversation_id: None,
-                    how: protocol::RecoverAs::Shell,
-                }],
-            },
-        )
-        .await;
-        let DaemonMessage::RecoverResult { results, .. } = reply else {
-            panic!("expected recover_result, got {reply:?}");
-        };
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].session_id, None);
-        let error = results[0].error.as_deref().unwrap_or_default();
-        assert!(error.contains("cache dir"), "{error}");
-        assert!(hub.sessions.snapshots().is_empty(), "nothing was spawned");
-        let entry = history::read_one(&hub.dirs, "shell").expect("entry kept");
-        assert_eq!(entry.recovered_at, None, "a failed recovery is not marked");
-    }
-
-    /// A lookup that knows only `A` (as `va`) in the process scope.
-    fn lookup_a(name: &str) -> Option<(user_env::Secret, user_env::Origin)> {
-        user_env::resolve_with(
-            name,
-            |n| (n == "A").then(|| "va".to_owned()),
-            |_| None,
-            |_| None,
-        )
-    }
-
-    fn env(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
-        pairs
-            .iter()
-            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
-            .collect()
-    }
-
     #[test]
     fn a_whole_value_env_reference_resolves() {
         let resolved = resolve_env_refs(&env(&[("K", "${env:A}")]), lookup_a).expect("resolves");
@@ -9121,30 +5386,6 @@ mod tests {
             Some("Set it as a user environment variable, then spawn again.")
         );
     }
-
-    fn env_spawn(
-        target: SpawnTarget,
-        mode: SessionMode,
-        extra_env: Vec<(String, String)>,
-        request_id: Option<&str>,
-    ) -> SpawnRequest {
-        SpawnRequest {
-            label: None,
-            target,
-            mode,
-            initial_prompt: None,
-            dangerously_skip_permissions: false,
-            agent_options: AgentOptions::claude(None),
-            model: None,
-            extra_env,
-            secret_env_keys: Vec::new(),
-            prompt_injector: None,
-            request_id: request_id.map(str::to_owned),
-            resume_conversation: None,
-        }
-    }
-
-    const UNSET_REF: &str = "${env:RT_TEST_UNSET_ENV_REF_4C1D}";
 
     /// The reply must be the unset-reference refusal, echoing `rid`.
     #[expect(clippy::panic, reason = "a wrong reply fails the test loudly")]
@@ -9264,39 +5505,6 @@ mod tests {
             extra,
             "duplicate replays it"
         );
-    }
-
-    /// A `DEEPSEEK_API_KEY` value no stored file or reply may hold.
-    const DEEPSEEK_KEY_SENTINEL: &str = "sk-deepseek-sentinel-a41c9e";
-
-    /// Claude options on the `DeepSeek` provider.
-    fn deepseek_options() -> AgentOptions {
-        AgentOptions::Claude {
-            permission_mode: None,
-            provider: protocol::ClaudeProvider::Deepseek,
-        }
-    }
-
-    /// A lookup that knows `DEEPSEEK_API_KEY` only.
-    fn deepseek_key(name: &str) -> Option<(user_env::Secret, user_env::Origin)> {
-        (name == "DEEPSEEK_API_KEY").then(|| {
-            (
-                user_env::Secret::new(DEEPSEEK_KEY_SENTINEL.to_owned()),
-                user_env::Origin::Process,
-            )
-        })
-    }
-
-    fn deepseek_spawn(
-        target: SpawnTarget,
-        mode: SessionMode,
-        extra_env: Vec<(String, String)>,
-        request_id: Option<&str>,
-    ) -> SpawnRequest {
-        SpawnRequest {
-            agent_options: deepseek_options(),
-            ..env_spawn(target, mode, extra_env, request_id)
-        }
     }
 
     /// Repo `r1`'s `main`, in place: no worktree.
@@ -9606,15 +5814,6 @@ mod tests {
 
     /// A value no stored copy of a sealed row may ever hold.
     const SECRET_SENTINEL: &str = "rt-secret-sentinel-3d8f1a";
-
-    /// A syntactically valid secret id (32 lower-case hex) the store has never
-    /// seen, so a row written `${secret:…}` with it resolves nowhere.
-    const MISSING_SECRET_ID: &str = "0123456789abcdef0123456789abcdef";
-
-    /// The `${secret:<id>}` reference standing for `id`.
-    fn secret_ref(id: &str) -> String {
-        format!("${{secret:{id}}}")
-    }
 
     /// `key`'s value in a child env built by `providers::spawn_env`.
     fn child_value(child: &[(String, String)], key: &str) -> Option<String> {
@@ -10024,183 +6223,6 @@ mod tests {
         assert!(hint.is_none());
         assert_eq!(request_id.as_deref(), Some("rq-long"));
         assert!(hub.sessions.snapshots().is_empty(), "nothing was spawned");
-    }
-
-    /// The conversation the recovery-ordering entries record, with a transcript
-    /// Claude reads as still holding it.
-    const RECOVERY_CONVERSATION: &str = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
-
-    /// Serialises the tests that point `CLAUDE_CONFIG_DIR` at a scratch home:
-    /// the variable is process-global and tests run on parallel threads.
-    static CLAUDE_HOME_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-    /// A scratch Claude home `CLAUDE_CONFIG_DIR` points at while the guard
-    /// lives, so recovery's transcript check reads it and not the user's own.
-    struct ScratchClaudeHome {
-        path: PathBuf,
-        _var: crate::env_secrets::test_support::EnvVarGuard,
-    }
-
-    impl ScratchClaudeHome {
-        fn new(label: &str) -> Self {
-            let path = std::env::temp_dir().join(format!("rt-claude-home-{label}"));
-            let _ = std::fs::remove_dir_all(&path);
-            std::fs::create_dir_all(&path).expect("create scratch claude home");
-            // Callers hold CLAUDE_HOME_LOCK for the guard's lifetime.
-            let var =
-                crate::env_secrets::test_support::EnvVarGuard::set("CLAUDE_CONFIG_DIR", &path);
-            Self { path, _var: var }
-        }
-
-        /// A transcript for `folder` and `id`, as Claude Code files one.
-        fn write_transcript(&self, folder: &str, id: &str) {
-            let dir = self
-                .path
-                .join("projects")
-                .join(crate::transcripts::encode_project_dir(folder));
-            std::fs::create_dir_all(&dir).expect("create the transcript folder");
-            std::fs::write(dir.join(format!("{id}.jsonl")), "{}\n").expect("write the transcript");
-        }
-    }
-
-    impl Drop for ScratchClaudeHome {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.path);
-        }
-    }
-
-    /// The env lock and a scratch Claude home, for an async test.
-    async fn claude_home_scratch(
-        label: &str,
-    ) -> (tokio::sync::MutexGuard<'static, ()>, ScratchClaudeHome) {
-        let guard = CLAUDE_HOME_LOCK.lock().await;
-        (guard, ScratchClaudeHome::new(label))
-    }
-
-    /// A history entry for an unregistered Claude session that ran in `folder`
-    /// with `row` as its recorded env, which Claude still holds
-    /// [`RECOVERY_CONVERSATION`] for there.
-    fn unregistered_claude_entry(hub: &Hub, id: &str, folder: &str, row: (&str, String)) {
-        let mut record = history::test_support::record(id, SessionMode::Interactive);
-        record.agent = Agent::Claude;
-        record.members = vec![SessionMember {
-            repo_id: "r1".to_owned(),
-            repo_name: "r1".to_owned(),
-            branch: "main".to_owned(),
-            worktree_path: folder.to_owned(),
-        }];
-        let (key, value) = row;
-        let request = env_spawn(
-            SpawnTarget::Standalone {
-                cwd: Some(folder.to_owned()),
-                add_dirs: Vec::new(),
-            },
-            SessionMode::Interactive,
-            env(&[(key, &value)]),
-            None,
-        );
-        record.spawn_config = Some(protocol::SpawnConfig::from_request(&request));
-        let mut entry = history::entry_from_record(&record, SessionEnd::TracerLost, Utc::now());
-        entry.primary_cwd = Some(folder.to_owned());
-        history::write_if_absent(&hub.dirs, &entry).expect("write history entry");
-    }
-
-    /// Recover `id` as `RegisterRepoThenClaude` — the recovery that registers a
-    /// repo — and return the item's error.
-    #[expect(clippy::panic, reason = "a wrong reply fails the test loudly")]
-    async fn recover_registering(hub: &Hub, id: &str, folder: &str) -> String {
-        let reply = dispatch_one(
-            hub,
-            ClientMessage::RecoverSessions {
-                request_id: None,
-                items: vec![protocol::RecoverItem {
-                    history_id: id.to_owned(),
-                    conversation_id: Some(RECOVERY_CONVERSATION.to_owned()),
-                    how: protocol::RecoverAs::RegisterRepoThenClaude {
-                        path: folder.to_owned(),
-                    },
-                }],
-            },
-        )
-        .await;
-        let DaemonMessage::RecoverResult { results, .. } = reply else {
-            panic!("expected recover_result, got {reply:?}");
-        };
-        results[0].error.clone().expect("the recovery failed")
-    }
-
-    /// The registration a refused recovery must not have made: nothing in the
-    /// registry, no broadcast, and `state.json` byte-identical.
-    fn assert_nothing_registered(
-        hub: &Hub,
-        before: Option<&[u8]>,
-        events: &mut broadcast::Receiver<StateEvent>,
-    ) {
-        assert!(
-            hub.state.with_persisted(|s| s.repos.is_empty()),
-            "no repo was registered"
-        );
-        assert_eq!(
-            std::fs::read(&hub.dirs.state_file).ok().as_deref(),
-            before,
-            "state.json is untouched"
-        );
-        assert!(
-            matches!(
-                events.try_recv(),
-                Err(broadcast::error::TryRecvError::Empty)
-            ),
-            "no state event was broadcast"
-        );
-    }
-
-    #[tokio::test]
-    async fn recovering_with_a_missing_secret_registers_nothing() {
-        let (_lock, _secrets_dir) =
-            env_secrets::test_support::scratch_async("recover-missing-secret").await;
-        let (_home_lock, home) = claude_home_scratch("recover-missing-secret").await;
-        let (hub, scratch) = spawnless_test_hub("recover-missing-secret");
-        let folder = scratch.path().join("repo");
-        std::fs::create_dir_all(&folder).expect("create the folder");
-        git_init(&folder);
-        git_ok(&folder, &["commit", "--allow-empty", "-m", "seed"]);
-        let folder = folder.to_string_lossy().into_owned();
-        home.write_transcript(&folder, RECOVERY_CONVERSATION);
-        unregistered_claude_entry(
-            &hub,
-            "gone",
-            &folder,
-            ("ANTHROPIC_API_KEY", secret_ref(MISSING_SECRET_ID)),
-        );
-        let before = std::fs::read(&hub.dirs.state_file).ok();
-        let mut events = hub.state_events.subscribe();
-
-        let error = recover_registering(&hub, "gone", &folder).await;
-        assert!(error.contains("`ANTHROPIC_API_KEY`"), "{error}");
-        assert!(error.contains("A saved secret is missing"), "{error}");
-        assert_nothing_registered(&hub, before.as_deref(), &mut events);
-    }
-
-    #[tokio::test]
-    async fn recovering_with_an_unset_env_reference_registers_nothing() {
-        let (_lock, _secrets_dir) =
-            env_secrets::test_support::scratch_async("recover-unset-env").await;
-        let (_home_lock, home) = claude_home_scratch("recover-unset-env").await;
-        let (hub, scratch) = spawnless_test_hub("recover-unset-env");
-        let folder = scratch.path().join("repo");
-        std::fs::create_dir_all(&folder).expect("create the folder");
-        git_init(&folder);
-        git_ok(&folder, &["commit", "--allow-empty", "-m", "seed"]);
-        let folder = folder.to_string_lossy().into_owned();
-        home.write_transcript(&folder, RECOVERY_CONVERSATION);
-        unregistered_claude_entry(&hub, "gone", &folder, ("K", UNSET_REF.to_owned()));
-        let before = std::fs::read(&hub.dirs.state_file).ok();
-        let mut events = hub.state_events.subscribe();
-
-        let error = recover_registering(&hub, "gone", &folder).await;
-        assert!(error.contains("`RT_TEST_UNSET_ENV_REF_4C1D`"), "{error}");
-        assert!(error.contains("isn't set"), "{error}");
-        assert_nothing_registered(&hub, before.as_deref(), &mut events);
     }
 
     #[tokio::test]
@@ -10653,14 +6675,6 @@ mod tests {
         reject_pin_without_worktree(&target).expect_err("pin + in-place must not be accepted");
     }
 
-    /// A worktree nothing references is Stale; the picker uses that to tell a
-    /// leftover apart from one a stopped session still owns.
-    #[test]
-    fn worktree_status_is_stale_without_any_session() {
-        let status = worktree_status(&[], &crate::paths::normalize_path_key("X:/wt/repo"));
-        assert!(matches!(status, protocol::RootWorktreeStatus::Stale));
-    }
-
     // Per-agent argv builders + workspace-prelude tests live in the
     // `crate::agents` submodules now.
 
@@ -10980,32 +6994,6 @@ mod tests {
             git(dir, &["commit", "-m", "seed"]);
         }
 
-        fn repo_entry(id: &str, name: &str, path: &Path) -> protocol::RepoEntry {
-            protocol::RepoEntry {
-                id: id.to_string(),
-                name: name.to_string(),
-                path: path.to_string_lossy().into_owned(),
-                default_branch: None,
-                default_use_worktree: true,
-                appearance: AppearanceOverrides::default(),
-                last_agent: None,
-                last_spawn_config: None,
-            }
-        }
-
-        fn workspace_entry(id: &str, name: &str, members: &[&str]) -> protocol::WorkspaceEntry {
-            protocol::WorkspaceEntry {
-                id: id.to_string(),
-                name: name.to_string(),
-                member_repo_ids: members.iter().map(|m| (*m).to_string()).collect(),
-                linked_vscode_workspace: None,
-                watch_vscode_workspace: false,
-                default_use_worktree: true,
-                appearance: AppearanceOverrides::default(),
-                last_spawn_config: None,
-            }
-        }
-
         fn key(path: &str) -> String {
             crate::paths::normalize_path_key(path)
         }
@@ -11122,26 +7110,6 @@ mod tests {
                 key(&new_core.to_string_lossy())
             );
             assert!(!rows[1].worktree_exists);
-        }
-
-        /// Dispatch `msg` and return the error the client would be sent.
-        async fn dispatch_err(hub: &Hub, msg: ClientMessage) -> Option<String> {
-            let (out_tx, _out_rx) = mpsc::unbounded_channel();
-            let (file_tx, _file_rx) = mpsc::channel(1);
-            let pty_forwarders: PtyForwarders = Arc::new(AsyncMutex::new(HashMap::new()));
-            let fetches: FetchRegistry = Arc::new(AsyncMutex::new(HashMap::new()));
-            let local = AuthKind::Local;
-            let ctx = ConnCtx {
-                out_tx: &out_tx,
-                file_tx: &file_tx,
-                pty_forwarders: &pty_forwarders,
-                fetches: &fetches,
-                client_id: "c1",
-                client_name: None,
-                connection: 1,
-                auth: &local,
-            };
-            dispatch(hub, msg, &ctx).await.err().map(|e| e.to_string())
         }
 
         fn foreign_folder_message(path: &Path, repo_name: &str) -> String {
@@ -11270,343 +7238,6 @@ mod tests {
                 "{msg:?}"
             );
             assert!(foreign.join("keep.txt").is_file());
-        }
-
-        #[tokio::test]
-        async fn accepting_a_vscode_suggestion_stores_whether_it_watches() {
-            let (hub, _scratch) = test_hub("vscode-watch-flag");
-            hub.state
-                .mutate(|s| s.repos.push(repo_entry("r1", "r1", Path::new("C:/r1"))))
-                .expect("register the repo");
-            let suggestion = |name: &str| protocol::VscodeWorkspaceSuggestion {
-                source_path: format!("C:/work/{name}.code-workspace"),
-                suggested_name: name.to_string(),
-                folders: vec![protocol::VscodeWorkspaceFolder {
-                    path: "C:/r1".to_string(),
-                    name: None,
-                    matched_repo_id: Some("r1".to_string()),
-                }],
-            };
-
-            assert_eq!(
-                dispatch_err(
-                    &hub,
-                    ClientMessage::AcceptVscodeWorkspaceSuggestion {
-                        suggestion: suggestion("watched"),
-                        watch: true,
-                    },
-                )
-                .await,
-                None
-            );
-            assert_eq!(
-                dispatch_err(
-                    &hub,
-                    ClientMessage::AcceptVscodeWorkspaceSuggestion {
-                        suggestion: suggestion("plain"),
-                        watch: false,
-                    },
-                )
-                .await,
-                None
-            );
-
-            let (watched, plain) = hub.state.with_persisted(|s| {
-                let flag = |name: &str| {
-                    s.workspaces
-                        .iter()
-                        .find(|workspace| workspace.name == name)
-                        .map(|workspace| workspace.watch_vscode_workspace)
-                };
-                (flag("watched"), flag("plain"))
-            });
-            assert_eq!(watched, Some(true), "Create & watch records the flag");
-            assert_eq!(plain, Some(false), "Create records that it does not watch");
-        }
-
-        #[tokio::test]
-        async fn add_repo_refuses_a_name_whose_slug_is_taken_by_a_workspace() {
-            let (hub, scratch) = test_hub("slug-repo");
-            hub.state
-                .mutate(|s| s.workspaces.push(workspace_entry("w1", "shop", &[])))
-                .expect("register workspace");
-            let dir = scratch.path().join("shop-repo");
-            std::fs::create_dir_all(&dir).expect("create repo dir");
-
-            let err = dispatch_err(
-                &hub,
-                ClientMessage::AddRepo {
-                    path: dir.to_string_lossy().into_owned(),
-                    name: Some("Shop!".to_string()),
-                },
-            )
-            .await;
-
-            assert_eq!(
-                err.as_deref(),
-                Some(
-                    "Can't save \"Shop!\": its worktree folder name \"shop\" is already used by workspace \"shop\". Rename one of them."
-                )
-            );
-            assert!(hub.state.with_persisted(|s| s.repos.is_empty()));
-        }
-
-        #[tokio::test]
-        async fn upsert_workspace_refuses_a_slug_taken_by_a_repo() {
-            let (hub, scratch) = test_hub("slug-ws");
-            let dir = scratch.path().join("app");
-            hub.state
-                .mutate(|s| s.repos.push(repo_entry("r1", "My App", &dir)))
-                .expect("register repo");
-
-            let err = dispatch_err(
-                &hub,
-                ClientMessage::UpsertWorkspace {
-                    id: None,
-                    name: "my app".to_string(),
-                    member_repo_ids: vec!["r1".to_string()],
-                    linked_vscode_workspace: None,
-                },
-            )
-            .await;
-
-            assert_eq!(
-                err.as_deref(),
-                Some(
-                    "Can't save \"my app\": its worktree folder name \"my-app\" is already used by repo \"My App\". Rename one of them."
-                )
-            );
-            assert!(hub.state.with_persisted(|s| s.workspaces.is_empty()));
-        }
-
-        #[tokio::test]
-        async fn renaming_a_workspace_to_its_own_slug_is_allowed() {
-            let (hub, _scratch) = test_hub("slug-rename");
-            hub.state
-                .mutate(|s| s.workspaces.push(workspace_entry("w1", "Shop", &[])))
-                .expect("register workspace");
-
-            let err = dispatch_err(
-                &hub,
-                ClientMessage::UpsertWorkspace {
-                    id: Some("w1".to_string()),
-                    name: "shop!".to_string(),
-                    member_repo_ids: Vec::new(),
-                    linked_vscode_workspace: None,
-                },
-            )
-            .await;
-
-            assert_eq!(err, None);
-            let names: Vec<String> = hub
-                .state
-                .with_persisted(|s| s.workspaces.iter().map(|w| w.name.clone()).collect());
-            assert_eq!(names, vec!["shop!".to_string()]);
-        }
-    }
-
-    /// A cross-tab move extracts from the source before it discovers the
-    /// destination is unknown — and, within one tab, before it discovers the
-    /// insert target is gone; both roll the layout back.
-    #[test]
-    fn failed_cross_tab_move_leaves_layout_unchanged() {
-        let (hub, _scratch) = test_hub("rollback-move");
-        seed_two_pane_layout(&hub, "c1");
-        let before = hub.state.client_layout("c1");
-
-        let err = move_pane(
-            &hub,
-            "c1",
-            "t1",
-            "p1",
-            "ghost-tab",
-            "p2",
-            PaneDropEdge::Right,
-        )
-        .expect_err("the destination tab is unknown");
-        assert!(
-            err.to_string().contains("ghost-tab"),
-            "unexpected error: {err}"
-        );
-        assert_eq!(
-            hub.state.client_layout("c1"),
-            before,
-            "the extracted pane is back in its source tab"
-        );
-
-        move_pane(&hub, "c1", "t1", "p1", "t1", "p1", PaneDropEdge::Right)
-            .expect_err("the pane cannot be inserted next to itself");
-        assert_eq!(
-            hub.state.client_layout("c1"),
-            before,
-            "a failed same-tab move is rolled back too"
-        );
-    }
-
-    mod untouched_layout {
-        use super::*;
-        use protocol::{GridNode, RearrangeLayout, SplitDirection};
-
-        /// Dispatch `msg` as client `c1`, failing when the dispatch errors.
-        async fn dispatch_ok(hub: &Hub, msg: ClientMessage) {
-            let (out_tx, _out_rx) = mpsc::unbounded_channel();
-            let (file_tx, _file_rx) = mpsc::channel(1);
-            let pty_forwarders: PtyForwarders = Arc::new(AsyncMutex::new(HashMap::new()));
-            let fetches: FetchRegistry = Arc::new(AsyncMutex::new(HashMap::new()));
-            let local = AuthKind::Local;
-            let ctx = ConnCtx {
-                out_tx: &out_tx,
-                file_tx: &file_tx,
-                pty_forwarders: &pty_forwarders,
-                fetches: &fetches,
-                client_id: "c1",
-                client_name: None,
-                connection: 1,
-                auth: &local,
-            };
-            dispatch(hub, msg, &ctx).await.expect("dispatch succeeds");
-        }
-
-        fn rearrange(layout: RearrangeLayout) -> ClientMessage {
-            ClientMessage::RearrangeTab {
-                tab_id: "t1".to_string(),
-                layout,
-            }
-        }
-
-        fn only_tab(hub: &Hub, client_id: &str) -> TabEntry {
-            let tabs = hub.state.client_layout(client_id);
-            assert_eq!(tabs.len(), 1, "{tabs:?}");
-            tabs.into_iter().next().expect("one tab")
-        }
-
-        /// Panes `p1`..`p4`, `p1` bound to `doomed` and the rest to their own
-        /// sessions.
-        fn four_panes() -> Vec<(String, Option<String>)> {
-            vec![
-                ("p1".to_string(), Some("doomed".to_string())),
-                ("p2".to_string(), Some("s2".to_string())),
-                ("p3".to_string(), Some("s3".to_string())),
-                ("p4".to_string(), Some("s4".to_string())),
-            ]
-        }
-
-        fn seed_four_panes(hub: &Hub, client_id: &str, picked: Option<RearrangeLayout>) {
-            let grid = tabs::build_balanced(&four_panes(), protocol::SplitDirection::Horizontal)
-                .expect("four panes build a grid");
-            hub.state
-                .mutate_client_layout(client_id, |tabs| {
-                    tabs.push(TabEntry {
-                        id: "t1".to_string(),
-                        name: "Tab".to_string(),
-                        content: TabContent::Grid { grid },
-                        created_at: Utc::now(),
-                        picked_layout: picked,
-                    });
-                })
-                .expect("seed the client layout");
-        }
-
-        #[tokio::test]
-        async fn rearrange_tab_sets_the_untouched_flag() {
-            let (hub, _scratch) = test_hub("pick-rearrange");
-            seed_two_pane_layout(&hub, "c1");
-            dispatch_ok(&hub, rearrange(RearrangeLayout::Vertical)).await;
-            assert_eq!(
-                only_tab(&hub, "c1").picked_layout,
-                Some(RearrangeLayout::Vertical)
-            );
-        }
-
-        #[tokio::test]
-        async fn set_pane_ratio_message_clears_the_flag() {
-            let (hub, _scratch) = test_hub("pick-ratio");
-            seed_two_pane_layout(&hub, "c1");
-            dispatch_ok(&hub, rearrange(RearrangeLayout::Horizontal)).await;
-            dispatch_ok(
-                &hub,
-                ClientMessage::SetPaneRatio {
-                    tab_id: "t1".to_string(),
-                    split_path: Vec::new(),
-                    ratio: 0.7,
-                },
-            )
-            .await;
-            assert_eq!(only_tab(&hub, "c1").picked_layout, None);
-        }
-
-        #[test]
-        fn session_removal_rebuilds_each_clients_untouched_tab_independently() {
-            let (hub, _scratch) = test_hub("pick-session-removal");
-            seed_four_panes(&hub, "c1", Some(RearrangeLayout::Horizontal));
-            seed_four_panes(&hub, "c2", None);
-
-            close_session_panes(&hub, "doomed");
-
-            let survivors = &four_panes()[1..];
-            let picked = only_tab(&hub, "c1");
-            assert_eq!(
-                picked.grid(),
-                tabs::build_balanced(survivors, protocol::SplitDirection::Horizontal).as_ref(),
-                "the untouched tab is rebuilt evenly"
-            );
-            assert_eq!(picked.picked_layout, Some(RearrangeLayout::Horizontal));
-            let touched = only_tab(&hub, "c2");
-            let collapsed = GridNode::Split {
-                direction: SplitDirection::Horizontal,
-                ratio: 0.5,
-                first: Box::new(GridNode::Pane {
-                    pane_id: "p2".to_string(),
-                    session_id: Some("s2".to_string()),
-                }),
-                second: Box::new(GridNode::Split {
-                    direction: SplitDirection::Horizontal,
-                    ratio: 0.5,
-                    first: Box::new(GridNode::Pane {
-                        pane_id: "p3".to_string(),
-                        session_id: Some("s3".to_string()),
-                    }),
-                    second: Box::new(GridNode::Pane {
-                        pane_id: "p4".to_string(),
-                        session_id: Some("s4".to_string()),
-                    }),
-                }),
-            };
-            assert_eq!(
-                touched.grid(),
-                Some(&collapsed),
-                "the touched tab keeps the sizes it had: closing p1 folds its split into p2"
-            );
-            assert_eq!(touched.picked_layout, None);
-            assert_eq!(
-                tabs::collect_panes(touched.grid().expect("grid")),
-                survivors.to_vec()
-            );
-        }
-
-        #[tokio::test]
-        async fn flag_persists_across_state_reload() {
-            let (hub, _scratch) = test_hub("pick-reload");
-            seed_two_pane_layout(&hub, "c1");
-            let fixed = RearrangeLayout::Grid {
-                cols: 3,
-                aspect: None,
-            };
-            dispatch_ok(&hub, rearrange(fixed)).await;
-            let reloaded = AppState::load_or_default(&hub.dirs).expect("reload state");
-            let tabs = reloaded.client_layout("c1");
-            assert_eq!(tabs.first().and_then(|t| t.picked_layout), Some(fixed));
-
-            // An automatic pick's aspect is part of the stored layout, so it
-            // survives a reload too.
-            let automatic = RearrangeLayout::Grid {
-                cols: 0,
-                aspect: Some(1.6),
-            };
-            dispatch_ok(&hub, rearrange(automatic)).await;
-            let reloaded = AppState::load_or_default(&hub.dirs).expect("reload state");
-            let tabs = reloaded.client_layout("c1");
-            assert_eq!(tabs.first().and_then(|t| t.picked_layout), Some(automatic));
         }
     }
 

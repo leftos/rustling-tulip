@@ -1,0 +1,1169 @@
+//! Session history and recovery: reattaching orphans at startup, resuming abandoned sessions, recovering ended ones from history, and recovery claims.
+use super::connection::ConnCtx;
+use super::settings::{env_names, register_repo};
+use super::tabs::rebind_session_panes;
+use super::{
+    Hub, StateEvent, check_spawn_request, expected_output_subscribers, spawn_keeping_busy_excluded,
+};
+use crate::orphan::OrphanMeta;
+use crate::paths::Dirs;
+use crate::session::{SessionRecord, SessionRegistry, attach_lifecycle};
+use crate::{history, orphan, osc_title, pty_state, tracer_client};
+use anyhow::anyhow;
+use protocol::{Agent, ClientMessage, DaemonMessage, SessionEnd, SessionMode, SpawnRequest};
+use std::path::Path;
+use std::sync::Arc;
+use tokio::sync::mpsc;
+use tracing::{info, warn};
+
+/// Handle the history and recovery messages `dispatch` routes here.
+pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::Result<()> {
+    let ConnCtx { out_tx, .. } = *ctx;
+    match msg {
+        ClientMessage::ResumeAbandoned { session_id } => {
+            resume_abandoned(hub, &session_id, out_tx).await?;
+        }
+        ClientMessage::DiscardAbandoned { session_id } => {
+            discard_abandoned(hub, &session_id, out_tx);
+        }
+        ClientMessage::ResumeAllAbandoned => {
+            resume_all_abandoned(hub, out_tx).await;
+        }
+        ClientMessage::ListEnvNames { request_id } => {
+            let names = env_names().await;
+            let _ = out_tx.send(DaemonMessage::EnvNames { names, request_id });
+        }
+        ClientMessage::ListSessionHistory { request_id } => {
+            let items = session_history_items(hub).await;
+            let _ = out_tx.send(DaemonMessage::SessionHistory { request_id, items });
+        }
+        ClientMessage::RecoverSessions { request_id, items } => {
+            let results = recover_sessions(hub, &items, out_tx).await;
+            let _ = out_tx.send(DaemonMessage::RecoverResult {
+                request_id,
+                results,
+            });
+        }
+        _ => warn!("recovery::handle: dispatch routed a message this module does not handle"),
+    }
+    Ok(())
+}
+
+/// The session ids being recovered or resumed right now.
+#[derive(Clone, Default)]
+pub struct RecoveryClaims(Arc<std::sync::Mutex<std::collections::HashSet<String>>>);
+
+impl RecoveryClaims {
+    /// Claims `id` for one recovery; None while another holds it. The claim
+    /// ends when the returned guard drops, on every exit path.
+    pub(crate) fn claim(&self, id: &str) -> Option<RecoveryClaim> {
+        if !crate::sync::lock(&self.0).insert(id.to_owned()) {
+            return None;
+        }
+        Some(RecoveryClaim {
+            claims: self.clone(),
+            id: id.to_owned(),
+        })
+    }
+}
+
+/// One held claim from [`RecoveryClaims::claim`].
+pub(crate) struct RecoveryClaim {
+    claims: RecoveryClaims,
+    id: String,
+}
+
+impl Drop for RecoveryClaim {
+    fn drop(&mut self) {
+        crate::sync::lock(&self.claims.0).remove(&self.id);
+    }
+}
+
+/// The error a recovery or Resume gets while another holds the session.
+const ALREADY_RECOVERING: &str = "already being recovered";
+
+/// Reattach orphan sessions (alive but detached) and abandoned sessions
+/// (dead, daemon crashed mid-run) before any clients connect so the
+/// initial state snapshot already includes them.
+///
+/// Post-C.3: orphans whose sidecar carries `tracer_pid` + `tracer_pipe` get
+/// wired up to the still-running rt-tracer via pipe, restoring full IO.
+/// A reattach failure (tracer died between liveness check and pipe open,
+/// or another daemon claimed the pipe first) routes the session to the
+/// abandoned bucket so the user can Resume from B.2's UI. Legacy sidecars
+/// (no tracer fields) fall through to the read-only orphan path — pre-C.3
+/// children can't survive the daemon anyway, so this branch is only ever
+/// taken by sidecars from a downgrade scenario.
+pub(super) async fn reattach_orphans(
+    sessions: &Arc<SessionRegistry>,
+    dirs: &Dirs,
+    attention_tx: &mpsc::UnboundedSender<pty_state::AttentionEvent>,
+    orphans: Vec<OrphanMeta>,
+    abandoned: Vec<OrphanMeta>,
+) {
+    let total_start = std::time::Instant::now();
+    let orphan_count = orphans.len();
+    let abandoned_count = abandoned.len();
+    info!(orphan_count, abandoned_count, "reattach_orphans: begin");
+    // Reattach concurrently. Each orphan's tracer connect can block up to the
+    // per-tracer reattach budget, so a sequential loop made boot time scale
+    // with the number of unreachable tracers (N × budget) and stalled the
+    // handshake — a single dead tracer would delay every session. All
+    // reattaches still complete before the caller binds the listener, so the
+    // "clients only see fully-wired sessions" invariant holds; the registry
+    // mutations inside each task are independently locked.
+    let mut tasks = Vec::with_capacity(orphans.len());
+    for meta in orphans {
+        tasks.push(tokio::spawn(reattach_one(
+            Arc::clone(sessions),
+            dirs.clone(),
+            attention_tx.clone(),
+            meta,
+        )));
+    }
+    for task in tasks {
+        if let Err(err) = task.await {
+            warn!(?err, "reattach_orphans: reattach task failed to join");
+        }
+    }
+    for meta in abandoned {
+        sessions.insert_abandoned(&meta);
+    }
+    info!(
+        orphan_count,
+        abandoned_count,
+        elapsed_ms = u64::try_from(total_start.elapsed().as_millis()).unwrap_or(u64::MAX),
+        "reattach_orphans: done"
+    );
+}
+
+/// Reattach a single orphan to its still-running tracer, or route it to the
+/// abandoned bucket if the tracer is unreachable. Runs as its own task so a
+/// slow/dead tracer doesn't serialize the others (see `reattach_orphans`).
+async fn reattach_one(
+    sessions: Arc<SessionRegistry>,
+    dirs: Dirs,
+    attention_tx: mpsc::UnboundedSender<pty_state::AttentionEvent>,
+    meta: OrphanMeta,
+) {
+    let session_start = std::time::Instant::now();
+    match (meta.tracer_pipe.as_deref(), meta.tracer_pid) {
+        (Some(pipe), Some(tracer_pid)) => {
+            match tracer_client::reattach(
+                &meta.session_id,
+                pipe,
+                tracer_pid,
+                expected_output_subscribers(meta.mode),
+            )
+            .await
+            {
+                Ok(pty) => {
+                    info!(
+                        session_id = %meta.session_id,
+                        tracer_pid,
+                        elapsed_ms = u64::try_from(session_start.elapsed().as_millis()).unwrap_or(u64::MAX),
+                        "tracer reattach succeeded"
+                    );
+                    let pending = sessions.insert_reattached(&meta, Arc::clone(&pty));
+                    let snap_tx = attach_lifecycle(
+                        &sessions,
+                        meta.session_id.clone(),
+                        &pty,
+                        Some(dirs.clone()),
+                    );
+                    let (in_tx, in_rx) = mpsc::unbounded_channel::<usize>();
+                    let restored = {
+                        let mut guard = crate::sync::lock(pending.arc());
+                        guard.scrollback_snapshot_req = Some(snap_tx);
+                        guard.input_notifier = Some(in_tx);
+                        guard.status
+                    };
+                    if meta.mode == SessionMode::PlainShell {
+                        pty_state::watch_plain_shell(
+                            &sessions,
+                            meta.session_id.clone(),
+                            pty_state::WatchStreams {
+                                output: pty.output.subscribe(),
+                                input_pulses: in_rx,
+                            },
+                            restored,
+                        );
+                    } else {
+                        pty_state::watch(
+                            &sessions,
+                            meta.session_id.clone(),
+                            pty_state::WatchStreams {
+                                output: pty.output.subscribe(),
+                                input_pulses: in_rx,
+                            },
+                            attention_tx.clone(),
+                            restored,
+                        );
+                    }
+                    osc_title::watch(
+                        &sessions,
+                        meta.session_id.clone(),
+                        pty.output.subscribe(),
+                        meta.mode == SessionMode::PlainShell,
+                    );
+                    pending.publish();
+                }
+                Err(err) => {
+                    warn!(
+                        ?err,
+                        session_id = %meta.session_id,
+                        tracer_pid,
+                        elapsed_ms = u64::try_from(session_start.elapsed().as_millis()).unwrap_or(u64::MAX),
+                        "tracer reattach failed; routing to abandoned"
+                    );
+                    sessions.insert_abandoned(&meta);
+                }
+            }
+        }
+        _ => {
+            sessions.insert_orphan(&meta);
+        }
+    }
+}
+
+/// Resume an abandoned session: read its sidecar (spawn config +
+/// `last_prompt`), spawn a fresh session with the same config and the
+/// captured prompt, then remove the abandoned placeholder from the
+/// registry + delete the on-disk sidecar.
+///
+/// The new session gets a new id (`spawn_session` generates one), so
+/// the old abandoned record's UI bindings are NOT automatically
+/// transferred. The frontend can listen for the `SessionUpdated`
+/// message and decide whether to swap it into the same tab/pane.
+pub(super) async fn resume_abandoned(
+    hub: &Hub,
+    session_id: &str,
+    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
+) -> anyhow::Result<()> {
+    let _claim = hub
+        .recovering
+        .claim(session_id)
+        .ok_or_else(|| anyhow!("session {session_id} is {ALREADY_RECOVERING}"))?;
+    let rec = hub
+        .sessions
+        .get(session_id)
+        .ok_or_else(|| anyhow!("unknown session: {session_id}"))?;
+    let (req, busy_excluded) = abandoned_resume_request(&crate::sync::lock(&rec))?;
+    let snap = spawn_keeping_busy_excluded(hub, req, None, busy_excluded).await?;
+    finish_resume(hub, session_id, &snap.id, out_tx);
+    Ok(())
+}
+
+/// The request that resumes the abandoned `rec`, replaying its first prompt,
+/// and the busy exclusion the resumed session keeps.
+fn abandoned_resume_request(rec: &SessionRecord) -> anyhow::Result<(SpawnRequest, bool)> {
+    let session_id = &rec.id;
+    if !rec.is_abandoned {
+        return Err(anyhow!(
+            "session {session_id} is not abandoned; refusing to resume"
+        ));
+    }
+    let Some(stored) = &rec.spawn_config else {
+        return Err(anyhow!(
+            "session {session_id} has no stored spawn config; cannot resume"
+        ));
+    };
+    let mut req = stored.to_clone_request();
+    req.initial_prompt.clone_from(&rec.last_prompt);
+    Ok((req, rec.busy_excluded))
+}
+
+/// After a successful Resume spawn of the abandoned `old_id` as `new_id`:
+/// rebind any pane that pointed at the abandoned session to the fresh one,
+/// in every client layout, so the resume reattaches to its original slot
+/// instead of orphaning into the sidebar as an unbound session; remove the
+/// abandoned placeholder and its sidecar (if the spawn failed, the
+/// placeholder stays so the user can try again); and mark its history entry
+/// recovered, so it stops counting as a session to recover.
+fn finish_resume(
+    hub: &Hub,
+    old_id: &str,
+    new_id: &str,
+    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
+) {
+    rebind_session_panes(hub, old_id, new_id);
+    discard_abandoned(hub, old_id, out_tx);
+    mark_history_recovered(hub, old_id);
+}
+
+/// Resume every session currently flagged as abandoned. Iterates the
+/// registry snapshot (taken upfront to avoid mutating it while iterating),
+/// calls `resume_abandoned` for each, and emits an `Error` message per
+/// failure so the user can see which ones didn't make it. Successful
+/// resumes are handled by `resume_abandoned` itself (the spawn broadcasts
+/// the new session's `SessionUpdated`, and it consumes the sidecar).
+async fn resume_all_abandoned(hub: &Hub, out_tx: &mpsc::UnboundedSender<DaemonMessage>) {
+    let abandoned_ids: Vec<String> = hub
+        .sessions
+        .snapshots()
+        .into_iter()
+        .filter(|s| s.is_abandoned)
+        .map(|s| s.id)
+        .collect();
+    info!(
+        count = abandoned_ids.len(),
+        "resume_all_abandoned: starting bulk resume"
+    );
+    for id in abandoned_ids {
+        if let Err(err) = resume_abandoned(hub, &id, out_tx).await {
+            warn!(session_id = %id, ?err, "bulk resume: per-session failure");
+            let _ = out_tx.send(DaemonMessage::Error {
+                message: format!("resume {id}: {err}"),
+                request_id: None,
+            });
+        }
+    }
+}
+
+/// Record in the session history that `session_id` ended for `end`. The first
+/// record for a session wins; see [`history::write_if_absent`].
+pub(super) fn record_end(hub: &Hub, session_id: &str, end: SessionEnd) {
+    history::record_session_end(&hub.sessions, &hub.dirs, session_id, end);
+}
+
+/// The session history as the client lists it, read off the async runtime.
+/// A session still in the Abandoned group is listed too: recovering it from
+/// the history removes it from that group.
+async fn session_history_items(hub: &Hub) -> Vec<protocol::SessionHistoryItem> {
+    let dirs = hub.dirs.clone();
+    let repos = hub.state.with_persisted(|s| s.repos.clone());
+    tokio::task::spawn_blocking(move || {
+        let claude_home = crate::transcripts::claude_home();
+        history::history_items(&dirs, &repos, claude_home.as_deref())
+    })
+    .await
+    .unwrap_or_else(|err| {
+        warn!(?err, "building the session history failed");
+        Vec::new()
+    })
+}
+
+/// Broadcast the session history to every client whenever it changes while
+/// the daemon runs: a session ending, or one being recovered.
+pub(super) fn start_history_broadcaster(hub: &Hub) {
+    let hub = hub.clone();
+    let mut changes = history::subscribe_changes();
+    tokio::spawn(async move {
+        while changes.changed().await.is_ok() {
+            let items = session_history_items(&hub).await;
+            let _ = hub.state_events.send(StateEvent::SessionHistory(items));
+        }
+    });
+}
+
+/// Recover each item in order: plan it from its history entry, register its
+/// repo when asked, spawn it, and mark the entry recovered. A failed item
+/// doesn't stop the others; each gets its own result.
+async fn recover_sessions(
+    hub: &Hub,
+    items: &[protocol::RecoverItem],
+    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
+) -> Vec<protocol::RecoverItemResult> {
+    let mut results = Vec::with_capacity(items.len());
+    for item in items {
+        let outcome = recover_one(hub, item, out_tx).await;
+        if let Err(error) = &outcome {
+            warn!(history_id = %item.history_id, %error, "recover_sessions: item failed");
+        }
+        let (session_id, error) = match outcome {
+            Ok(id) => (Some(id), None),
+            Err(error) => (None, Some(error)),
+        };
+        results.push(protocol::RecoverItemResult {
+            history_id: item.history_id.clone(),
+            session_id,
+            error,
+        });
+    }
+    results
+}
+
+async fn recover_one(
+    hub: &Hub,
+    item: &protocol::RecoverItem,
+    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
+) -> Result<String, String> {
+    let _claim = hub
+        .recovering
+        .claim(&item.history_id)
+        .ok_or_else(|| ALREADY_RECOVERING.to_owned())?;
+    let entry = history::read_one(&hub.dirs, &item.history_id)
+        .ok_or_else(|| format!("no history entry {}", item.history_id))?;
+    let busy_excluded = {
+        let live = hub.sessions.get(&item.history_id);
+        let guard = live.as_ref().map(|rec| crate::sync::lock(rec));
+        recovery_busy_excluded(guard.as_deref(), &entry)
+    };
+    let (repos, workspaces) = hub
+        .state
+        .with_persisted(|s| (s.repos.clone(), s.workspaces.clone()));
+    let planned_item = item.clone();
+    // Planning looks up transcripts on disk.
+    let mut plan = tokio::task::spawn_blocking(move || {
+        let registered = history::Registered {
+            repos: &repos,
+            workspaces: &workspaces,
+        };
+        let claude_home = crate::transcripts::claude_home();
+        history::plan_recovery(&entry, &planned_item, &registered, |agent, folder, id| {
+            recovery_conversation_exists(claude_home.as_deref(), agent, folder, id)
+        })
+    })
+    .await
+    .map_err(|err| format!("planning the recovery failed: {err}"))??;
+    // A row the recovery would spawn with that can't be resolved — an unset env
+    // variable, or a saved secret no longer in the store — or that couldn't be
+    // sealed, or a provider key that isn't set, refuses it here, on the request
+    // the plan will spawn and before the registration and branch lookup below:
+    // registering a repo writes `state.json` and broadcasts `Repos`, and a
+    // recovery that then failed would leave a repo the user never asked for
+    // behind a spawn that never happened. Planning only reads.
+    check_spawn_request(&plan.request).map_err(|failure| format!("{failure}"))?;
+    if let Some(path) = plan.register_repo.clone() {
+        let repo = register_repo(hub, &path, None, out_tx)
+            .await
+            .map_err(|err| format!("registering {path}: {err:#}"))?;
+        plan.bind_registered_repo(&repo.id);
+    }
+    if let Some(folder) = plan.placeholder_branch_folder() {
+        let current = crate::git::current_branch(Path::new(folder)).await;
+        plan.name_branch(history::branch_or_placeholder(current));
+    }
+    let snapshot = spawn_keeping_busy_excluded(hub, plan.request, None, busy_excluded)
+        .await
+        .map_err(|err| format!("{err:#}"))?;
+    finish_recovery(hub, &item.history_id, &snapshot.id, out_tx);
+    Ok(snapshot.id)
+}
+
+/// The busy exclusion a recovered session starts with. A session still in
+/// the Abandoned group (`live`) may have been toggled after its history entry
+/// was written, so its flag wins; otherwise the entry's.
+fn recovery_busy_excluded(live: Option<&SessionRecord>, entry: &protocol::HistoryEntry) -> bool {
+    match live {
+        Some(rec) if rec.is_abandoned => rec.busy_excluded,
+        _ => entry.busy_excluded,
+    }
+}
+
+/// Whether `agent` still holds conversation `id` for `folder`: Claude Code's
+/// transcript.
+fn recovery_conversation_exists(
+    claude_home: Option<&Path>,
+    agent: Agent,
+    folder: &str,
+    id: &str,
+) -> bool {
+    match agent {
+        Agent::Claude => {
+            claude_home.is_some_and(|home| crate::transcripts::transcript_exists(home, folder, id))
+        }
+    }
+}
+
+/// After a successful recovery spawn of `history_id` as `new_id`: mark the
+/// history entry recovered and, when that session still sits in the
+/// Abandoned group, hand its panes to `new_id` in every client layout and
+/// remove it from there. Its history entry already exists, so the removal
+/// writes no second end.
+fn finish_recovery(
+    hub: &Hub,
+    history_id: &str,
+    new_id: &str,
+    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
+) {
+    mark_history_recovered(hub, history_id);
+    let still_abandoned = hub
+        .sessions
+        .get(history_id)
+        .is_some_and(|rec| crate::sync::lock(&rec).is_abandoned);
+    if still_abandoned {
+        rebind_session_panes(hub, history_id, new_id);
+        discard_abandoned(hub, history_id, out_tx);
+    }
+}
+
+/// Stamp the history entry for `session_id` recovered now, logging a failure
+/// instead of returning it: the recovery itself already succeeded.
+fn mark_history_recovered(hub: &Hub, session_id: &str) {
+    if let Err(err) = history::mark_recovered(&hub.dirs, session_id, chrono::Utc::now()) {
+        warn!(?err, history_id = %session_id, "failed to mark history entry recovered");
+    }
+}
+
+/// Remove an abandoned session from the registry + delete its sidecar.
+/// Used both as the cleanup step after a successful Resume and as the
+/// user-initiated "Dismiss" action for sessions they don't want to
+/// recover.
+pub(super) fn discard_abandoned(
+    hub: &Hub,
+    session_id: &str,
+    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
+) {
+    record_end(hub, session_id, SessionEnd::StoppedByUser);
+    hub.sessions.delete_sidecar(session_id);
+    orphan::try_delete_session_dir(&hub.dirs, session_id);
+    hub.sessions.remove(session_id);
+    let _ = out_tx.send(DaemonMessage::SessionRemoved {
+        session_id: session_id.to_string(),
+    });
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "tests assert preconditions with expect; failure messages aid debugging"
+)]
+mod tests {
+    use super::*;
+    use crate::env_secrets;
+    use crate::server::check_spawn_request_with;
+    use crate::server::test_support::{
+        MISSING_SECRET_ID, UNSET_REF, deepseek_key, deepseek_options, deepseek_spawn, dispatch_one,
+        env, env_spawn, git_init, git_ok, secret_ref, spawnless_test_hub, test_hub,
+    };
+    use chrono::Utc;
+    use protocol::{SessionMember, SpawnTarget};
+    use std::path::PathBuf;
+    use tokio::sync::broadcast;
+    #[tokio::test]
+    #[expect(clippy::panic, reason = "a wrong reply fails the test loudly")]
+    async fn list_env_names_replies_with_names_and_no_values() {
+        const NAME: &str = "RT_TEST_LIST_ENV_NAMES_7C21";
+        const SENTINEL: &str = "rt-sentinel-value-5d9a0e";
+        // SAFETY: the name is unique to this test and nothing else reads or
+        // writes it; std serializes environment access on Windows.
+        unsafe { std::env::set_var(NAME, SENTINEL) };
+        let (hub, _scratch) = test_hub("list-env-names");
+        let reply = dispatch_one(
+            &hub,
+            ClientMessage::ListEnvNames {
+                request_id: Some("r1".to_owned()),
+            },
+        )
+        .await;
+        // SAFETY: as above.
+        unsafe { std::env::remove_var(NAME) };
+        let json = serde_json::to_string(&reply).expect("the reply serializes");
+        let DaemonMessage::EnvNames { names, request_id } = reply else {
+            panic!("expected env_names, got {reply:?}");
+        };
+        assert_eq!(request_id.as_deref(), Some("r1"));
+        let entry = names
+            .iter()
+            .find(|entry| entry.name == NAME)
+            .expect("the process variable is listed");
+        assert!(entry.scopes.contains(&protocol::EnvScope::Process));
+        assert!(!json.contains(SENTINEL), "no value on the wire");
+    }
+
+    #[tokio::test]
+    #[expect(clippy::panic, reason = "a wrong reply fails the test loudly")]
+    async fn history_lists_abandoned_tracer_lost_session() {
+        use crate::history::test_support::record;
+        let (hub, _scratch) = spawnless_test_hub("history-abandoned");
+        write_history(&hub, "gone", SessionMode::PlainShell, false);
+        write_history(&hub, "abandoned", SessionMode::PlainShell, false);
+        write_history(&hub, "stopped", SessionMode::PlainShell, false);
+        let mut abandoned = record("abandoned", SessionMode::PlainShell);
+        abandoned.is_abandoned = true;
+        abandoned.status = protocol::SessionStatus::Stopped;
+        hub.sessions.insert(abandoned);
+        let mut stopped = record("stopped", SessionMode::PlainShell);
+        stopped.status = protocol::SessionStatus::Stopped;
+        hub.sessions.insert(stopped);
+        let reply =
+            dispatch_one(&hub, ClientMessage::ListSessionHistory { request_id: None }).await;
+        let DaemonMessage::SessionHistory { items, .. } = reply else {
+            panic!("expected session_history, got {reply:?}");
+        };
+        let mut ids: Vec<&str> = items.iter().map(|i| i.entry.session_id.as_str()).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, ["abandoned", "gone", "stopped"]);
+        let abandoned_item = items
+            .iter()
+            .find(|i| i.entry.session_id == "abandoned")
+            .expect("abandoned listed");
+        assert_eq!(abandoned_item.entry.end, SessionEnd::TracerLost);
+    }
+
+    /// Insert `id` as an abandoned session with an unrecovered `TracerLost`
+    /// history entry, as a tracer loss leaves it.
+    fn insert_abandoned_with_history(hub: &Hub, id: &str) {
+        write_history(hub, id, SessionMode::Interactive, false);
+        let mut rec = crate::history::test_support::record(id, SessionMode::Interactive);
+        rec.is_abandoned = true;
+        rec.status = protocol::SessionStatus::Stopped;
+        hub.sessions.insert(rec);
+    }
+
+    #[tokio::test]
+    async fn recovering_abandoned_entry_removes_abandoned_session() {
+        let (hub, _scratch) = spawnless_test_hub("recover-abandoned");
+        insert_abandoned_with_history(&hub, "lost");
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        finish_recovery(&hub, "lost", "fresh", &out_tx);
+        assert!(
+            hub.sessions.get("lost").is_none(),
+            "left the Abandoned group"
+        );
+        assert!(matches!(
+            out_rx.try_recv(),
+            Ok(DaemonMessage::SessionRemoved { ref session_id }) if session_id == "lost"
+        ));
+        let entry = history::read_one(&hub.dirs, "lost").expect("entry kept");
+        assert!(entry.recovered_at.is_some(), "marked recovered");
+        assert_eq!(entry.end, SessionEnd::TracerLost, "no second end written");
+    }
+
+    #[tokio::test]
+    async fn resume_abandoned_marks_history_recovered() {
+        let (hub, _scratch) = spawnless_test_hub("resume-marks-recovered");
+        insert_abandoned_with_history(&hub, "lost");
+        let (out_tx, _out_rx) = mpsc::unbounded_channel();
+        finish_resume(&hub, "lost", "fresh", &out_tx);
+        assert!(hub.sessions.get("lost").is_none(), "placeholder removed");
+        let entry = history::read_one(&hub.dirs, "lost").expect("entry kept");
+        assert!(entry.recovered_at.is_some(), "a resume counts as recovery");
+        assert_eq!(entry.end, SessionEnd::TracerLost);
+    }
+
+    #[tokio::test]
+    async fn abandoned_resume_request_returns_the_records_busy_flag() {
+        let (hub, scratch) = spawnless_test_hub("resume-busy-excluded");
+        insert_abandoned_with_history(&hub, "lost");
+        let target = SpawnTarget::Standalone {
+            cwd: Some(scratch.path().to_string_lossy().into_owned()),
+            add_dirs: Vec::new(),
+        };
+        let stored = protocol::SpawnConfig::from_request(&env_spawn(
+            target,
+            SessionMode::Interactive,
+            Vec::new(),
+            None,
+        ));
+        hub.sessions.update("lost", |rec| {
+            rec.spawn_config = Some(stored);
+            rec.busy_excluded = true;
+        });
+        let rec = hub.sessions.get("lost").expect("lost is registered");
+        let (_request, busy_excluded) =
+            abandoned_resume_request(&crate::sync::lock(&rec)).expect("lost can resume");
+        assert!(busy_excluded, "the resumed session keeps the flag");
+    }
+
+    #[tokio::test]
+    async fn resume_abandoned_keeps_a_deepseek_provider() {
+        let (hub, scratch) = spawnless_test_hub("resume-deepseek");
+        insert_abandoned_with_history(&hub, "lost");
+        let target = SpawnTarget::Standalone {
+            cwd: Some(scratch.path().to_string_lossy().into_owned()),
+            add_dirs: Vec::new(),
+        };
+        let stored = protocol::SpawnConfig::from_request(&deepseek_spawn(
+            target,
+            SessionMode::Interactive,
+            Vec::new(),
+            None,
+        ));
+        hub.sessions
+            .update("lost", |rec| rec.spawn_config = Some(stored));
+        let rec = hub.sessions.get("lost").expect("lost is registered");
+        let (request, _) =
+            abandoned_resume_request(&crate::sync::lock(&rec)).expect("lost can resume");
+        assert_eq!(request.agent_options, deepseek_options());
+    }
+
+    /// The request `how` recovers `entry` with, resuming `conversation`,
+    /// planned against an empty registry with every conversation present.
+    fn planned_recovery(
+        entry: &protocol::HistoryEntry,
+        how: protocol::RecoverAs,
+        conversation: Option<&str>,
+    ) -> SpawnRequest {
+        let item = protocol::RecoverItem {
+            history_id: entry.session_id.clone(),
+            conversation_id: conversation.map(str::to_owned),
+            how,
+        };
+        let registered = history::Registered {
+            repos: &[],
+            workspaces: &[],
+        };
+        history::plan_recovery(entry, &item, &registered, |_, _, _| true)
+            .expect("the recovery plans")
+            .request
+    }
+
+    #[test]
+    fn the_recovery_pre_check_sees_the_provider_that_will_spawn() {
+        let folder = r"D:\deepseek-proj";
+        let mut rec = history::test_support::record("ds", SessionMode::Interactive);
+        rec.members = vec![SessionMember {
+            repo_id: String::new(),
+            repo_name: String::new(),
+            branch: "main".to_owned(),
+            worktree_path: folder.to_owned(),
+        }];
+        let anthropic = history::entry_from_record(&rec, SessionEnd::TracerLost, Utc::now());
+        let mut recorded = anthropic.clone();
+        recorded.spawn_config = Some(protocol::SpawnConfig::from_request(&deepseek_spawn(
+            SpawnTarget::Standalone {
+                cwd: Some(folder.to_owned()),
+                add_dirs: Vec::new(),
+            },
+            SessionMode::Interactive,
+            Vec::new(),
+            None,
+        )));
+        let mut imported = anthropic.clone();
+        imported.provider = protocol::ClaudeProvider::Deepseek;
+        let register = protocol::RecoverAs::RegisterRepoThenClaude {
+            path: folder.to_owned(),
+        };
+        for entry in [&recorded, &imported] {
+            for how in [protocol::RecoverAs::Claude, register.clone()] {
+                let request = planned_recovery(entry, how.clone(), Some(RECOVERY_CONVERSATION));
+                let failure = check_spawn_request_with(&request, |_| None)
+                    .expect_err("a DeepSeek recovery needs the key");
+                assert_eq!(
+                    failure.title, "Couldn't start the DeepSeek session",
+                    "{how:?}"
+                );
+                assert!(
+                    check_spawn_request_with(&request, deepseek_key).is_ok(),
+                    "{how:?}"
+                );
+            }
+        }
+        // A shell recovery spawns a plain shell with no provider, so it needs
+        // no key.
+        for conversation in [Some(RECOVERY_CONVERSATION), None] {
+            let shell = planned_recovery(&anthropic, protocol::RecoverAs::Shell, conversation);
+            assert_eq!(shell.mode, SessionMode::PlainShell);
+            assert!(
+                check_spawn_request_with(&shell, |_| None).is_ok(),
+                "{conversation:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_end_path_writes_the_busy_flag_into_the_history_entry() {
+        let (hub, _scratch) = spawnless_test_hub("recover-busy-excluded");
+        let mut rec = history::test_support::record("s1", SessionMode::Interactive);
+        rec.busy_excluded = true;
+        hub.sessions.insert(rec);
+        record_end(&hub, "s1", SessionEnd::TracerLost);
+        let entry = history::test_support::wait_for_entry(&hub.dirs, "s1").await;
+        assert!(
+            entry.busy_excluded,
+            "the end path writes the flag recovery reads"
+        );
+    }
+
+    #[test]
+    fn recovery_takes_the_busy_flag_from_a_still_abandoned_session_else_the_entry() {
+        let mut entry = history::entry_from_record(
+            &history::test_support::record("lost", SessionMode::Interactive),
+            SessionEnd::TracerLost,
+            Utc::now(),
+        );
+        entry.busy_excluded = true;
+        let mut abandoned = history::test_support::record("lost", SessionMode::Interactive);
+        abandoned.is_abandoned = true;
+        assert!(
+            !recovery_busy_excluded(Some(&abandoned), &entry),
+            "a toggle on the abandoned leaf after the entry was written wins"
+        );
+        abandoned.busy_excluded = true;
+        entry.busy_excluded = false;
+        assert!(recovery_busy_excluded(Some(&abandoned), &entry));
+
+        let mut live = history::test_support::record("lost", SessionMode::Interactive);
+        live.busy_excluded = true;
+        assert!(
+            !recovery_busy_excluded(Some(&live), &entry),
+            "a session that is not abandoned is not the one being recovered"
+        );
+        entry.busy_excluded = true;
+        assert!(
+            recovery_busy_excluded(None, &entry),
+            "with no session left, the entry's flag"
+        );
+    }
+
+    #[tokio::test]
+    async fn recovering_abandoned_entry_rebinds_its_panes() {
+        let (hub, _scratch) = spawnless_test_hub("recover-rebinds");
+        insert_abandoned_with_history(&hub, "lost");
+        let tab = crate::tabs::make_tab(None, Some("lost".to_owned()), &[]);
+        hub.state
+            .mutate_all_layouts(|layouts| {
+                layouts.insert(
+                    "client".to_owned(),
+                    crate::state::ClientLayout {
+                        name: None,
+                        tabs: vec![tab],
+                    },
+                );
+            })
+            .expect("seed a layout");
+        let (out_tx, _out_rx) = mpsc::unbounded_channel();
+        finish_recovery(&hub, "lost", "fresh", &out_tx);
+        let shown: Vec<Option<String>> = hub
+            .state
+            .mutate_all_layouts(|layouts| {
+                layouts["client"]
+                    .tabs
+                    .iter()
+                    .filter_map(|tab| match &tab.content {
+                        protocol::TabContent::Grid {
+                            grid: protocol::GridNode::Pane { session_id, .. },
+                        } => Some(session_id.clone()),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .expect("read the layout");
+        assert_eq!(shown, [Some("fresh".to_owned())], "the pane follows");
+    }
+
+    #[tokio::test]
+    #[expect(clippy::panic, reason = "a wrong reply fails the test loudly")]
+    async fn concurrent_recover_and_resume_claim_once() {
+        let claims = RecoveryClaims::default();
+        let first = claims.claim("x").expect("the first claim wins");
+        assert!(claims.claim("x").is_none(), "a second claim loses");
+        assert!(claims.claim("y").is_some(), "claims are per id");
+        drop(first);
+        assert!(claims.claim("x").is_some(), "a dropped claim frees the id");
+
+        let (hub, _scratch) = spawnless_test_hub("recover-claims");
+        insert_abandoned_with_history(&hub, "lost");
+        let _held = hub.recovering.claim("lost").expect("claim");
+        let (out_tx, _out_rx) = mpsc::unbounded_channel();
+        let resumed = resume_abandoned(&hub, "lost", &out_tx).await;
+        let err = resumed.expect_err("a Resume while a recovery holds it fails");
+        assert!(err.to_string().contains(ALREADY_RECOVERING), "{err}");
+        let reply = dispatch_one(
+            &hub,
+            ClientMessage::RecoverSessions {
+                request_id: None,
+                items: vec![protocol::RecoverItem {
+                    history_id: "lost".to_owned(),
+                    conversation_id: None,
+                    how: protocol::RecoverAs::Claude,
+                }],
+            },
+        )
+        .await;
+        let DaemonMessage::RecoverResult { results, .. } = reply else {
+            panic!("expected recover_result, got {reply:?}");
+        };
+        assert_eq!(results[0].error.as_deref(), Some(ALREADY_RECOVERING));
+        assert!(hub.sessions.get("lost").is_some(), "nothing was spawned");
+    }
+
+    /// Write a history entry for `id` in `mode`, recovered or not.
+    fn write_history(hub: &Hub, id: &str, mode: SessionMode, recovered: bool) {
+        let mut entry = history::entry_from_record(
+            &crate::history::test_support::record(id, mode),
+            SessionEnd::TracerLost,
+            chrono::Utc::now(),
+        );
+        entry.primary_cwd = Some(hub.dirs.config.to_string_lossy().into_owned());
+        entry.recovered_at = recovered.then(chrono::Utc::now);
+        history::write_if_absent(&hub.dirs, &entry).expect("write history entry");
+    }
+
+    #[tokio::test]
+    #[expect(clippy::panic, reason = "a wrong reply fails the test loudly")]
+    async fn list_session_history_replies_with_its_request_id() {
+        let (hub, _scratch) = spawnless_test_hub("list-history");
+        write_history(&hub, "shell", SessionMode::PlainShell, false);
+        write_history(&hub, "headless", SessionMode::Headless, false);
+        let reply = dispatch_one(
+            &hub,
+            ClientMessage::ListSessionHistory {
+                request_id: Some("r1".to_owned()),
+            },
+        )
+        .await;
+        let DaemonMessage::SessionHistory { request_id, items } = reply else {
+            panic!("expected session_history, got {reply:?}");
+        };
+        assert_eq!(request_id.as_deref(), Some("r1"));
+        let ids: Vec<&str> = items.iter().map(|i| i.entry.session_id.as_str()).collect();
+        assert_eq!(ids, ["shell"]);
+    }
+
+    #[tokio::test]
+    #[expect(clippy::panic, reason = "a wrong reply fails the test loudly")]
+    async fn recover_sessions_reports_each_failure_in_order() {
+        let (hub, _scratch) = spawnless_test_hub("recover-errors");
+        write_history(&hub, "done", SessionMode::Interactive, true);
+        let items = ["missing", "done", "done"]
+            .into_iter()
+            .zip([
+                protocol::RecoverAs::Claude,
+                protocol::RecoverAs::Shell,
+                protocol::RecoverAs::Unknown,
+            ])
+            .map(|(id, how)| protocol::RecoverItem {
+                history_id: id.to_owned(),
+                conversation_id: None,
+                how,
+            })
+            .collect();
+        let reply = dispatch_one(
+            &hub,
+            ClientMessage::RecoverSessions {
+                request_id: Some("r2".to_owned()),
+                items,
+            },
+        )
+        .await;
+        let DaemonMessage::RecoverResult {
+            request_id,
+            results,
+        } = reply
+        else {
+            panic!("expected recover_result, got {reply:?}");
+        };
+        assert_eq!(request_id.as_deref(), Some("r2"));
+        let outcome: Vec<(&str, Option<&str>, Option<&str>)> = results
+            .iter()
+            .map(|r| {
+                (
+                    r.history_id.as_str(),
+                    r.session_id.as_deref(),
+                    r.error.as_deref(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            outcome,
+            [
+                ("missing", None, Some("no history entry missing")),
+                ("done", None, Some("already recovered")),
+                ("done", None, Some("already recovered")),
+            ]
+        );
+        assert!(
+            hub.sessions.snapshots().is_empty(),
+            "a refused item spawns nothing"
+        );
+    }
+
+    #[tokio::test]
+    #[expect(clippy::panic, reason = "a wrong reply fails the test loudly")]
+    async fn recovery_under_test_hub_cannot_spawn() {
+        let (hub, _scratch) = spawnless_test_hub("recover-cannot-spawn");
+        write_history(&hub, "shell", SessionMode::PlainShell, false);
+        let reply = dispatch_one(
+            &hub,
+            ClientMessage::RecoverSessions {
+                request_id: None,
+                items: vec![protocol::RecoverItem {
+                    history_id: "shell".to_owned(),
+                    conversation_id: None,
+                    how: protocol::RecoverAs::Shell,
+                }],
+            },
+        )
+        .await;
+        let DaemonMessage::RecoverResult { results, .. } = reply else {
+            panic!("expected recover_result, got {reply:?}");
+        };
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].session_id, None);
+        let error = results[0].error.as_deref().unwrap_or_default();
+        assert!(error.contains("cache dir"), "{error}");
+        assert!(hub.sessions.snapshots().is_empty(), "nothing was spawned");
+        let entry = history::read_one(&hub.dirs, "shell").expect("entry kept");
+        assert_eq!(entry.recovered_at, None, "a failed recovery is not marked");
+    }
+
+    /// The conversation the recovery-ordering entries record, with a transcript
+    /// Claude reads as still holding it.
+    const RECOVERY_CONVERSATION: &str = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
+
+    /// Serialises the tests that point `CLAUDE_CONFIG_DIR` at a scratch home:
+    /// the variable is process-global and tests run on parallel threads.
+    static CLAUDE_HOME_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// A scratch Claude home `CLAUDE_CONFIG_DIR` points at while the guard
+    /// lives, so recovery's transcript check reads it and not the user's own.
+    struct ScratchClaudeHome {
+        path: PathBuf,
+        _var: crate::env_secrets::test_support::EnvVarGuard,
+    }
+
+    impl ScratchClaudeHome {
+        fn new(label: &str) -> Self {
+            let path = std::env::temp_dir().join(format!("rt-claude-home-{label}"));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).expect("create scratch claude home");
+            // Callers hold CLAUDE_HOME_LOCK for the guard's lifetime.
+            let var =
+                crate::env_secrets::test_support::EnvVarGuard::set("CLAUDE_CONFIG_DIR", &path);
+            Self { path, _var: var }
+        }
+
+        /// A transcript for `folder` and `id`, as Claude Code files one.
+        fn write_transcript(&self, folder: &str, id: &str) {
+            let dir = self
+                .path
+                .join("projects")
+                .join(crate::transcripts::encode_project_dir(folder));
+            std::fs::create_dir_all(&dir).expect("create the transcript folder");
+            std::fs::write(dir.join(format!("{id}.jsonl")), "{}\n").expect("write the transcript");
+        }
+    }
+
+    impl Drop for ScratchClaudeHome {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    /// The env lock and a scratch Claude home, for an async test.
+    async fn claude_home_scratch(
+        label: &str,
+    ) -> (tokio::sync::MutexGuard<'static, ()>, ScratchClaudeHome) {
+        let guard = CLAUDE_HOME_LOCK.lock().await;
+        (guard, ScratchClaudeHome::new(label))
+    }
+
+    /// A history entry for an unregistered Claude session that ran in `folder`
+    /// with `row` as its recorded env, which Claude still holds
+    /// [`RECOVERY_CONVERSATION`] for there.
+    fn unregistered_claude_entry(hub: &Hub, id: &str, folder: &str, row: (&str, String)) {
+        let mut record = history::test_support::record(id, SessionMode::Interactive);
+        record.agent = Agent::Claude;
+        record.members = vec![SessionMember {
+            repo_id: "r1".to_owned(),
+            repo_name: "r1".to_owned(),
+            branch: "main".to_owned(),
+            worktree_path: folder.to_owned(),
+        }];
+        let (key, value) = row;
+        let request = env_spawn(
+            SpawnTarget::Standalone {
+                cwd: Some(folder.to_owned()),
+                add_dirs: Vec::new(),
+            },
+            SessionMode::Interactive,
+            env(&[(key, &value)]),
+            None,
+        );
+        record.spawn_config = Some(protocol::SpawnConfig::from_request(&request));
+        let mut entry = history::entry_from_record(&record, SessionEnd::TracerLost, Utc::now());
+        entry.primary_cwd = Some(folder.to_owned());
+        history::write_if_absent(&hub.dirs, &entry).expect("write history entry");
+    }
+
+    /// Recover `id` as `RegisterRepoThenClaude` — the recovery that registers a
+    /// repo — and return the item's error.
+    #[expect(clippy::panic, reason = "a wrong reply fails the test loudly")]
+    async fn recover_registering(hub: &Hub, id: &str, folder: &str) -> String {
+        let reply = dispatch_one(
+            hub,
+            ClientMessage::RecoverSessions {
+                request_id: None,
+                items: vec![protocol::RecoverItem {
+                    history_id: id.to_owned(),
+                    conversation_id: Some(RECOVERY_CONVERSATION.to_owned()),
+                    how: protocol::RecoverAs::RegisterRepoThenClaude {
+                        path: folder.to_owned(),
+                    },
+                }],
+            },
+        )
+        .await;
+        let DaemonMessage::RecoverResult { results, .. } = reply else {
+            panic!("expected recover_result, got {reply:?}");
+        };
+        results[0].error.clone().expect("the recovery failed")
+    }
+
+    /// The registration a refused recovery must not have made: nothing in the
+    /// registry, no broadcast, and `state.json` byte-identical.
+    fn assert_nothing_registered(
+        hub: &Hub,
+        before: Option<&[u8]>,
+        events: &mut broadcast::Receiver<StateEvent>,
+    ) {
+        assert!(
+            hub.state.with_persisted(|s| s.repos.is_empty()),
+            "no repo was registered"
+        );
+        assert_eq!(
+            std::fs::read(&hub.dirs.state_file).ok().as_deref(),
+            before,
+            "state.json is untouched"
+        );
+        assert!(
+            matches!(
+                events.try_recv(),
+                Err(broadcast::error::TryRecvError::Empty)
+            ),
+            "no state event was broadcast"
+        );
+    }
+
+    #[tokio::test]
+    async fn recovering_with_a_missing_secret_registers_nothing() {
+        let (_lock, _secrets_dir) =
+            env_secrets::test_support::scratch_async("recover-missing-secret").await;
+        let (_home_lock, home) = claude_home_scratch("recover-missing-secret").await;
+        let (hub, scratch) = spawnless_test_hub("recover-missing-secret");
+        let folder = scratch.path().join("repo");
+        std::fs::create_dir_all(&folder).expect("create the folder");
+        git_init(&folder);
+        git_ok(&folder, &["commit", "--allow-empty", "-m", "seed"]);
+        let folder = folder.to_string_lossy().into_owned();
+        home.write_transcript(&folder, RECOVERY_CONVERSATION);
+        unregistered_claude_entry(
+            &hub,
+            "gone",
+            &folder,
+            ("ANTHROPIC_API_KEY", secret_ref(MISSING_SECRET_ID)),
+        );
+        let before = std::fs::read(&hub.dirs.state_file).ok();
+        let mut events = hub.state_events.subscribe();
+
+        let error = recover_registering(&hub, "gone", &folder).await;
+        assert!(error.contains("`ANTHROPIC_API_KEY`"), "{error}");
+        assert!(error.contains("A saved secret is missing"), "{error}");
+        assert_nothing_registered(&hub, before.as_deref(), &mut events);
+    }
+
+    #[tokio::test]
+    async fn recovering_with_an_unset_env_reference_registers_nothing() {
+        let (_lock, _secrets_dir) =
+            env_secrets::test_support::scratch_async("recover-unset-env").await;
+        let (_home_lock, home) = claude_home_scratch("recover-unset-env").await;
+        let (hub, scratch) = spawnless_test_hub("recover-unset-env");
+        let folder = scratch.path().join("repo");
+        std::fs::create_dir_all(&folder).expect("create the folder");
+        git_init(&folder);
+        git_ok(&folder, &["commit", "--allow-empty", "-m", "seed"]);
+        let folder = folder.to_string_lossy().into_owned();
+        home.write_transcript(&folder, RECOVERY_CONVERSATION);
+        unregistered_claude_entry(&hub, "gone", &folder, ("K", UNSET_REF.to_owned()));
+        let before = std::fs::read(&hub.dirs.state_file).ok();
+        let mut events = hub.state_events.subscribe();
+
+        let error = recover_registering(&hub, "gone", &folder).await;
+        assert!(error.contains("`RT_TEST_UNSET_ENV_REF_4C1D`"), "{error}");
+        assert!(error.contains("isn't set"), "{error}");
+        assert_nothing_registered(&hub, before.as_deref(), &mut events);
+    }
+}
