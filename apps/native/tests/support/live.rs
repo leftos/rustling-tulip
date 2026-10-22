@@ -24,8 +24,10 @@ use serde_json::{Value, json};
 
 use super::{Harness, NotifyRecorder, OpenRecorder, Outbox, PickRecorder, TestClock};
 
-/// How long the daemon has to write `daemon.json` and answer `/health`.
-const START_TIMEOUT: Duration = Duration::from_secs(15);
+/// Hang guard for the daemon writing `daemon.json` and answering `/health`:
+/// a passing run never reaches it (load-proof-tests), and the wait already
+/// fails at once when the daemon exits.
+const START_TIMEOUT: Duration = Duration::from_secs(300);
 /// The id file the native client keeps its identity in.
 const CLIENT_ID_FILE: &str = "client-id-native";
 const MISSING_DAEMON: &str = "rustling-tulipd.exe not found next to the test binary; \
@@ -405,21 +407,35 @@ fn no_console(command: &mut Command) {
 #[cfg(not(windows))]
 fn no_console(_command: &mut Command) {}
 
-/// Force-kills `pid` and every process under it.
-#[cfg(windows)]
+/// Force-kills `pid` and, on Windows, every process under it.
 pub fn kill_tree(pid: u32) {
+    kill(pid, true);
+}
+
+/// Force-kills `pid` alone, leaving the processes under it to whatever
+/// owns them (a tracer's child dies with the tracer's kill-on-close job).
+pub fn kill_process(pid: u32) {
+    kill(pid, false);
+}
+
+/// Force-kills `pid`, with its tree when `tree` is set. A process that is
+/// already gone is not an error.
+#[cfg(windows)]
+fn kill(pid: u32, tree: bool) {
+    let pid = pid.to_string();
     let mut command = Command::new("taskkill");
-    command
-        .args(["/PID", &pid.to_string(), "/T", "/F"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+    command.args(["/PID", &pid, "/F"]);
+    if tree {
+        command.arg("/T");
+    }
+    command.stdout(Stdio::null()).stderr(Stdio::null());
     no_console(&mut command);
     let _ = command.status();
 }
 
-/// Force-kills `pid`.
+/// Force-kills `pid`; `kill` has no tree walk, so `tree` changes nothing.
 #[cfg(not(windows))]
-pub fn kill_tree(pid: u32) {
+fn kill(pid: u32, _tree: bool) {
     let _ = Command::new("kill")
         .args(["-KILL", &pid.to_string()])
         .status();
@@ -542,6 +558,21 @@ impl LiveClient {
             .iter()
             .rev()
             .find_map(pick)
+    }
+
+    /// Removes the newest message `pick` answers from the log and returns the
+    /// answer, so a poll that asks for a large reply again and again does not
+    /// grow the log. It shifts later indices, so a caller of
+    /// [`Self::find_message_from`] never takes messages.
+    pub fn take_message<R>(&self, mut pick: impl FnMut(&DaemonMessage) -> Option<R>) -> Option<R> {
+        let mut messages = self.messages.lock().expect("message log lock");
+        let (index, answer) = messages
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(index, msg)| pick(msg).map(|answer| (index, answer)))?;
+        messages.remove(index);
+        Some(answer)
     }
 
     /// How many messages the daemon has sent this client so far.

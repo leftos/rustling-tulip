@@ -184,7 +184,10 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     #[cfg(windows)]
     let _job_guard = if let Some(pid) = child_pid {
         match crate::job_object::assign_kill_on_close(pid) {
-            Ok(guard) => Some(guard),
+            Ok(guard) => {
+                info!(?child_pid, "supervisor: child bound to kill-on-close job");
+                Some(guard)
+            }
             Err(err) => {
                 tracing::warn!(
                     ?err,
