@@ -143,6 +143,8 @@ The tailnet listener's certificate lives in a third machine-local root beside th
 
 When adding a message, update both directions (`ClientMessage` + `DaemonMessage` if it's a request/response) and the matching match arms in `crates/daemon/src/server.rs` (handler) and the native client's handling (`apps/native/src/net.rs`, `on_daemon_message`). Changes stay additive where they can (see "When to bump" below).
 
+**No backward compatibility before the first release.** The app is unreleased: build as if from scratch. A breaking change to the wire, `state.json`, presets, sidecars or history is simply made, with no migration, legacy decoder, tolerant decode or backup; data that no longer decodes is ignored, and live sessions or history from an older build need not survive an upgrade. The bump rules below still apply to the version number.
+
 **When to bump `protocol-version.json`.** *Additive* changes (new variant on a tagged enum, new `#[serde(default)]` field on a struct, new message type) are NOT a protocol bump. The range-based handshake (`SUPPORTED_PROTOCOL_VERSIONS`) + the `InboundClientMessage::Unknown` / `InboundDaemonMessage::Unknown` parse wrappers absorb unknown top-level types.
 
 Nested enums that grow over time (`TabLayout`, `RearrangeLayout`, `InjectorStep`, `PresetVariableKind`) each carry a `#[serde(other)] Unknown` unit variant that absorbs unrecognized values *in place* — the containing message keeps decoding. New nested enums should follow the same `#[serde(other)]` pattern from day one.
