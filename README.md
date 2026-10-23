@@ -61,12 +61,14 @@ Start with [docs/architecture.md](docs/architecture.md) for how the pieces fit a
 - **Auto-resume**: the daemon resuming, by itself once its listener is bound, each session a reboot or any other joint death of the daemon and its tracers killed that qualifies (`recovery::auto_resume`); the rest stay in Recover. See `docs/architecture.md` (Session history and recovery).
 - **Auto-switch**: moving the active account to another one when its binding usage window reaches the threshold, run by the daemon or by `cswap auto`, never both.
 - **Background state**: a session whose turn ended while its subagents, background shells or a scheduled wakeup still run; it never counts as finished (RT-84).
+- **Baseline**: the conversations an agent already held for a folder, taken just before a `DiscoverAfterLaunch` session's program starts; only a conversation outside it can be that session's.
 - **Binding window**: whichever of an account's usage windows (5-hour, 7-day, per-model) is fullest; its percentage decides auto-switch.
 - **Brief**: a worker's instructions: tree root, files, the change, and a proving command.
 - **Busy-excluded**: a per-session daemon flag (`busy_excluded` on the snapshot, sidecar and history entry) marking a session the user does not want counted as busy; set by `SetSessionBusyExcluded`, optionally carried to a duplicate and kept through reattach and recovery.
 - **CA.0, CA.1, …**: step ids in `docs/plans/accounts.md` (Claude accounts), distinct from `agent-cli.md`'s AC steps.
 - **Capability table**: `apps/native/src/remote_mode.rs` (`Capabilities`), the one place that says what the native client may do on its connection target (open local files, manage the daemon); views ask it rather than the target.
 - **Chat mirror**: the planned chat view of a Claude session, built from its transcript and hook prompts while its terminal keeps running, answering prompts by typing keys into the PTY (RT-51).
+- **Claim**: discovery giving a newly found conversation to the one waiter eligible for it, which sets that session's conversation id; with two or more eligible waiters the id is contested instead.
 - **Claim lease**: a short-lived marker in the account store saying one process is fetching an account's usage, so another does not fetch it too.
 - **Claude provider**: the service a Claude session's `claude` CLI talks to, Anthropic (the default) or DeepSeek, chosen per spawn and kept by every respawn; not an agent.
 - **claude-swap / cswap**: the user's multi-account switcher for Claude Code (`github.com/leftos/claude-swap`), whose store and rules the daemon's accounts module shares; see `docs/plans/accounts.md`.
@@ -74,6 +76,7 @@ Start with [docs/architecture.md](docs/architecture.md) for how the pieces fit a
 - **Closing mark**: the native client's flag on a tab it expects the daemon to remove (closing it, closing its last pane, moving its only pane out), read by placement and Undo until the removal arrives; a refused move clears it, and closing a last pane while a split or move for that tab is in flight does not set it.
 - **Connection origin**: the planned `Welcome` field saying whether a client connected on the loopback listener (`Local`) or the tailnet listener (`Remote`), mapped from the connection's auth kind; account administration is local only (CA.1, `docs/plans/accounts.md`).
 - **Container menu**: the native client's right-click menu on a repo's or workspace's sidebar row (spawn, `Launch last again ▸`, `Appearance…`, `Launch preset…`, the open rows, Remove); see `docs/native-client.md`.
+- **Contested**: a conversation id that two or more waiting sessions in one folder were each eligible for, so discovery gave it to nobody; kept in `contested/<agent id>.json` for 7 days and never claimed meanwhile (`crates/daemon/src/conversations/contested.rs`).
 - **Conversation id**: Claude Code's own id for a session's conversation (`claude_session_id`), which `claude --resume` takes; distinct from the rustling-tulip session id.
 - **Detached**: the native client's last Repos-view container, drawn only while it holds sessions, for sessions with no container of their own (their repo or workspace was removed, or their repo is now a member of a workspace); they keep running and streaming.
 - **Detached stop all**: the two-click `Stop all` chip in an expanded Detached container's banner: the first click arms `Confirm: stop all`, the second stops every leaf still running, and Esc disarms; it is absent once every leaf is stopped or the container, sidebar or Sessions panel is folded away; see `docs/native-client.md` ("Repos and the no-repos states").
@@ -90,6 +93,7 @@ Start with [docs/architecture.md](docs/architecture.md) for how the pieces fit a
 - **Fan-out ledger**: the parent's event log for one fan-out, in the repo's git common dir.
 - **Feature marker**: `branch: feat/<name>` in a wave's Linear project content; every item in that project lands on the `feat/<name>` branch instead of `main` (user-level `nextup` §3, "Feature branches").
 - **Feature PR**: the draft pull request from a marker's `feat/<name>` into `main`, opened with the first item under the marker and merged with `--rebase` by `/ship` once every item under the marker has landed.
+- **Final look**: the last discovery pass for a session still without a conversation id, run inline in `history::record_session_end` before the history entry is built, so an id found late reaches the entry.
 - **First-connect chooser**: the dialog a client with no saved tab layout gets when it connects, offering start empty, open all active sessions in a chosen arrangement, adopt a previous layout or copy another client's; see `docs/native-client.md` ("Tab layouts").
 - **Fix round**: review findings sent back to the worker that made the change.
 - **Folder banner**: the line under an expanded DIR or SH container in the native sidebar, naming the container's folder on one truncated line with an `Add repo` link and, once the daemon finds a `.code-workspace` there, an `Add workspace` link; see `docs/native-client.md` ("Repos and the no-repos states").
@@ -125,6 +129,7 @@ Start with [docs/architecture.md](docs/architecture.md) for how the pieces fit a
 - **Petal**: the approved refreshed look for the native client (graphite ground, tulip-coral accent, status shapes), its settled design in `docs/native-client.md` ("Petal chrome", "Theme and fonts").
 - **PF, AT, SV, RD, AR, OT**: idea ids in `docs/plans/off-orca.md` (files across machines, attention streams, session views, remote desktop, artifacts by account, absorbing ops-tower).
 - **Plan snapshot**: `docs/plans/MAIN.md`, generated from the Linear team's issues, one line an item, by wave in working order; never edited by hand.
+- **Poller**: the task that runs a waiting session's discovery passes, every 2 s for 5 minutes, every 10 s up to an hour, then every minute while the session runs (`crates/daemon/src/conversations/discovery.rs`).
 - **Pre-create**: an agent's conversation id obtained by running its CLI once before the session starts, the way some agents (not Claude) need; the daemon's runner is `crates/daemon/src/conversations/pre_create.rs`.
 - **Preset**: a named launch recipe the daemon stores for a repo or workspace: the prompt sources it allows, its variables and its target tabs, launched through the preset wizard.
 - **Preset job**: one preset launch the native client started, named by a client-made job id; the client's registry follows it through the daemon's progress messages and shows one toast for it.
@@ -172,6 +177,7 @@ Start with [docs/architecture.md](docs/architecture.md) for how the pieces fit a
 - **Unexpected end**: a session whose tracer was lost (killed or crashed) rather than one that exited or was closed; these are pre-ticked for recovery.
 - **Unseen turn**: an agent session whose turn ended while this client wasn't showing it focused; it shows the waiting ring until focused.
 - **Untouched (picked) layout**: a tab whose layout type was last chosen by a pick (Rearrange or the first-connect chooser) and has not been hand-resized (a divider drag) or hand-arranged since; the daemon rebuilds that type as panes come and go, a pick of the automatic grid also remembers the pane area's aspect and follows it when the window is resized (that re-fit keeps the tab's empty panes, where a fixed pick just keeps its count), and the per-client flag is `TabEntry.picked_layout`; see `docs/native-client.md` ("Tab layouts").
+- **Waiter**: a `DiscoverAfterLaunch` session registered at spawn, with its baseline and launch time, until discovery claims a conversation for it or its final look runs.
 - **Warm-up gate**: auto-switch making no decision until every usable account has been polled since it started.
 - **Wave**: a release-sized bundle of plan items that share owning files, so one implementer reads those files once and one review covers the bundle; each wave is a Linear project whose content names its files, review and verification.
 - **Worker**: a subagent or rustling-tulip session running one brief in one worktree.

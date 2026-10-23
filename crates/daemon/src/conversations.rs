@@ -3,6 +3,8 @@
 //! plugin answers must be a plain id, since it later becomes a CLI argument
 //! and a path.
 
+pub(crate) mod contested;
+pub(crate) mod discovery;
 #[cfg(windows)]
 mod job;
 pub(crate) mod pre_create;

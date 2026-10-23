@@ -253,6 +253,14 @@ impl Dirs {
         self.config.join("history")
     }
 
+    /// Contested conversation ids: `<config>/contested/<agent id>.json`, one
+    /// store per agent (see [`crate::conversations::contested`]). Created on
+    /// first write.
+    #[must_use]
+    pub fn contested_dir(&self) -> PathBuf {
+        self.config.join("contested")
+    }
+
     /// The tailnet listener's certificate dir (see [`resolve_tailnet_dir`]),
     /// created if missing.
     pub fn ensure_tailnet_dir() -> anyhow::Result<PathBuf> {

@@ -75,7 +75,11 @@
     },
     {
       "paths": [
-        "crates/daemon/src/conversations.rs"
+        "crates/daemon/src/conversations.rs",
+        "crates/daemon/src/conversations/contested.rs",
+        "crates/daemon/src/conversations/discovery.rs",
+        "crates/daemon/src/conversations/job.rs",
+        "crates/daemon/src/conversations/pre_create.rs"
       ],
       "filter": "package(daemon) & (test(conversations) | test(history) | test(recover) | test(duplicate))"
     },

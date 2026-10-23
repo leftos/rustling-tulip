@@ -20,12 +20,15 @@ use super::connection::ConnCtx;
 use super::git::{active_sessions_using_worktree, worktree_in_use_failure};
 use super::sessions::{request_origin, write_meta_then_sync};
 use super::{Hub, StateEvent};
+use crate::conversations;
+use crate::conversations::discovery::{self, Baseline, Waiter};
 use crate::conversations::pre_create::{self, PreCreateSpec};
 use crate::orphan::OrphanMeta;
 use crate::pty::PtySpawnSpec;
 use crate::registry::{
     persist_last_agent, persist_repo_last_spawn_config, persist_workspace_last_spawn_config,
 };
+use crate::session::SessionRegistry;
 use crate::session::{SessionRecord, UpdateOrigin, attach_lifecycle, new_id, push_recent_action};
 use crate::{
     env_secrets, headless, inject, orphan, osc_title, pty_state, screen, spawn_plan, tracer_client,
@@ -835,22 +838,25 @@ fn plain_shell_meta(
     )
 }
 
-/// The conversation id an interactive spawn records and passes its CLI, and
-/// the conversation it resumes, as `backend` plans them: a minted id is
-/// recorded, a resumed one is recorded and resumed, a pre-created one is
-/// recorded when `program` (with `leading_args`, in `cwd`) printed one, and a
-/// plan the daemon cannot carry out yet records none.
+/// The conversation id an interactive spawn records and passes its CLI, the
+/// conversation it resumes, and the baseline its discovery starts from, as
+/// `backend` plans them: a minted id is recorded, a resumed one is recorded
+/// and resumed, a pre-created one is recorded when `program` (with
+/// `leading_args`, in `cwd`) printed one, and a discovered one is looked for
+/// after launch, against the conversations `backend` already holds for `cwd`
+/// (looked up with the rows of `extra_env`).
 async fn planned_conversation(
-    backend: &dyn AgentPlugin,
+    backend: &'static dyn AgentPlugin,
     cfg: &SpawnArgs,
     program: &str,
     leading_args: &[String],
     cwd: &Path,
-) -> (Option<String>, Option<String>) {
+    extra_env: &[(String, String)],
+) -> (Option<String>, Option<String>, Option<Baseline>) {
     match backend.conversation_plan(&cfg.options, cfg.resume_conversation.as_deref()) {
-        ConversationPlan::Minted(id) => (Some(id), None),
-        ConversationPlan::Resumed(id) => (Some(id.clone()), Some(id)),
-        ConversationPlan::None => (None, None),
+        ConversationPlan::Minted(id) => (Some(id), None, None),
+        ConversationPlan::Resumed(id) => (Some(id.clone()), Some(id), None),
+        ConversationPlan::None => (None, None, None),
         ConversationPlan::PreCreate { args, parse } => {
             let spec = PreCreateSpec {
                 program: program.to_owned(),
@@ -869,16 +875,70 @@ async fn planned_conversation(
                     "pre-create gave no conversation id; spawning without a recorded conversation"
                 );
             }
-            (id, None)
+            (id, None, None)
         }
-        ConversationPlan::DiscoverAfterLaunch => {
+        ConversationPlan::DiscoverAfterLaunch => (
+            None,
+            None,
+            discovery_baseline(backend, cwd, extra_env).await,
+        ),
+    }
+}
+
+/// The conversations `backend` holds for `folder` before the spawn, every
+/// one recorded up to now, so discovery never gives the new session one of
+/// them. `None`, logged, when the lookup itself fails: the session then
+/// records no conversation.
+async fn discovery_baseline(
+    backend: &'static dyn AgentPlugin,
+    folder: &Path,
+    extra_env: &[(String, String)],
+) -> Option<Baseline> {
+    let folder = folder.to_path_buf();
+    let extra_env = extra_env.to_vec();
+    let lookup = tokio::task::spawn_blocking(move || {
+        let rows = conversations::lookup_rows(&extra_env);
+        let launched_at = Utc::now();
+        let window = (chrono::DateTime::<Utc>::MIN_UTC, launched_at);
+        let ids = conversations::candidates(backend, &folder, window, &rows)
+            .into_iter()
+            .map(|found| found.id)
+            .collect();
+        Baseline {
+            ids,
+            plugin: backend,
+            rows,
+            folder,
+            launched_at,
+        }
+    });
+    match lookup.await {
+        Ok(baseline) => Some(baseline),
+        Err(err) => {
             warn!(
+                ?err,
                 agent = %backend.descriptor().id.0,
-                "conversation plan not supported yet; spawning without a recorded conversation"
+                "discovery baseline lookup failed; spawning without a recorded conversation"
             );
-            (None, None)
+            None
         }
     }
+}
+
+/// Register `session_id`'s waiter when its plan discovers its conversation:
+/// `discover` is the baseline taken before the spawn. Answers whether a
+/// waiter was registered, so the caller starts its poller once the session
+/// is published.
+fn register_discovery(
+    sessions: &SessionRegistry,
+    session_id: &str,
+    discover: Option<Baseline>,
+) -> bool {
+    let Some(baseline) = discover else {
+        return false;
+    };
+    discovery::register(sessions, Waiter::new(session_id.to_owned(), baseline));
+    true
 }
 
 #[expect(
@@ -904,8 +964,15 @@ async fn spawn_interactive_session(
     let backend = agent_registry::plugin(agent);
     let raw_program = backend.resolve_program();
     let (program, prepend_args) = resolve_agent_program(&raw_program);
-    let (claude_session_id, resume_conversation) =
-        planned_conversation(backend, cfg, &program, &prepend_args, &primary_cwd).await;
+    let (claude_session_id, resume_conversation, discover) = planned_conversation(
+        backend,
+        cfg,
+        &program,
+        &prepend_args,
+        &primary_cwd,
+        &stored_config.extra_env,
+    )
+    .await;
     // The argv names the injected settings file, so it is written before the
     // argv is built. Only Claude takes it; a failure leaves this spawn on the
     // heuristic.
@@ -975,6 +1042,7 @@ async fn spawn_interactive_session(
         pipe: tracer_spawn.pipe_name,
         exe_path: tracer_spawn.tracer_exe_path.to_string_lossy().into_owned(),
     };
+    let started_at = Utc::now();
     let record = interactive_record(
         NewInteractive {
             session_id: session_id.clone(),
@@ -987,7 +1055,7 @@ async fn spawn_interactive_session(
             stored_config,
             last_prompt,
             claude_session_id,
-            started_at: Utc::now(),
+            started_at,
             busy_excluded,
         },
         Some(Arc::clone(&pty)),
@@ -1010,7 +1078,10 @@ async fn spawn_interactive_session(
     // to a direct file read (empty before first output), and miss any output that
     // streams in before the per-client forwarder is started. Hook events held
     // for this id while the tracer spawned are applied to the record here, so
-    // the first broadcast is still the wired publish below.
+    // the first broadcast is still the wired publish below. The discovery
+    // waiter is registered before the exit watcher starts, so a child that
+    // exits at once still gets its final look.
+    let discovering = register_discovery(&hub.sessions, &session_id, discover);
     let (pending, awaiting) = hub.pending_hooks.insert_with_pending(hub, record);
     let snap_tx = attach_lifecycle(
         &hub.sessions,
@@ -1042,6 +1113,9 @@ async fn spawn_interactive_session(
     let snap = crate::sync::lock(pending.arc()).snapshot();
     pending.publish_from(cfg.origin.clone());
     announce_replayed_prompt(hub, &session_id, awaiting);
+    if discovering {
+        discovery::start_poller(&hub.sessions, hub.dirs.clone(), session_id.clone());
+    }
 
     if let Some(mut meta) = meta {
         meta.status = Some(snap.status);
@@ -1834,22 +1908,9 @@ mod tests {
             .map(|id| id.trim().to_owned())
     }
 
-    /// The conversation `planned_conversation` plans for a test agent whose
-    /// plan pre-creates it by running `script` in `powershell.exe`.
-    #[cfg(windows)]
-    async fn planned_by_pre_create(script: &str) -> (Option<String>, Option<String>) {
-        let agent = agent_api::test_agent::TestAgent {
-            plan: ConversationPlan::PreCreate {
-                args: vec![
-                    "-NoProfile".to_owned(),
-                    "-Command".to_owned(),
-                    script.to_owned(),
-                ],
-                parse: after_id,
-            },
-            found: Vec::new(),
-        };
-        let cfg = SpawnArgs {
+    /// The spawn arguments of a test agent spawn with its default options.
+    fn test_agent_spawn_args() -> SpawnArgs {
+        SpawnArgs {
             dangerously_skip_permissions: false,
             agent: Agent::Claude,
             options: [
@@ -1866,9 +1927,146 @@ mod tests {
             origin: None,
             resume_conversation: None,
             add_dirs: Vec::new(),
-        };
+        }
+    }
+
+    /// The conversation `planned_conversation` plans for a test agent whose
+    /// plan pre-creates it by running `script` in `powershell.exe`.
+    #[cfg(windows)]
+    async fn planned_by_pre_create(script: &str) -> (Option<String>, Option<String>) {
+        let agent = Box::leak(Box::new(agent_api::test_agent::TestAgent::new(
+            ConversationPlan::PreCreate {
+                args: vec![
+                    "-NoProfile".to_owned(),
+                    "-Command".to_owned(),
+                    script.to_owned(),
+                ],
+                parse: after_id,
+            },
+        )));
+        let cfg = test_agent_spawn_args();
         let scratch = ScratchDir::new("pre-create-plan");
-        planned_conversation(&agent, &cfg, "powershell.exe", &[], scratch.path()).await
+        let (id, resume, _) =
+            planned_conversation(agent, &cfg, "powershell.exe", &[], scratch.path(), &[]).await;
+        (id, resume)
+    }
+
+    #[tokio::test]
+    async fn discover_after_launch_spawn_registers_a_waiter_with_its_baseline() {
+        let agent: &'static agent_api::test_agent::TestAgent = Box::leak(Box::new(
+            agent_api::test_agent::TestAgent::new(ConversationPlan::DiscoverAfterLaunch),
+        ));
+        let scratch = ScratchDir::new("discover-plan");
+        agent.set_found(
+            &scratch.path().to_string_lossy(),
+            vec![agent_api::FoundConversation {
+                id: "before-1".to_owned(),
+                last_active: Utc::now(),
+                title: None,
+            }],
+        );
+        let cfg = test_agent_spawn_args();
+        let (id, resume, discover) =
+            planned_conversation(agent, &cfg, "test-agent.exe", &[], scratch.path(), &[]).await;
+        assert_eq!((id, resume), (None, None));
+        let baseline = discover.expect("a discover plan takes a baseline");
+
+        let dirs = history::test_support::scratch_dirs("discover-plan");
+        let registry = crate::session::SessionRegistry::new(dirs.clone());
+        registry.insert(history::test_support::record(
+            "s1",
+            SessionMode::Interactive,
+        ));
+        assert!(register_discovery(&registry, "s1", Some(baseline)));
+
+        let waiter = registry
+            .discovery()
+            .waiter("s1")
+            .expect("a registered waiter");
+        let expected: std::collections::HashSet<String> = ["before-1".to_owned()].into();
+        assert_eq!(waiter.baseline(), &expected);
+    }
+
+    #[tokio::test]
+    async fn a_conversation_created_during_start_up_is_claimed() {
+        let agent: &'static agent_api::test_agent::TestAgent = Box::leak(Box::new(
+            agent_api::test_agent::TestAgent::new(ConversationPlan::DiscoverAfterLaunch),
+        ));
+        let scratch = ScratchDir::new("discover-start-up");
+        let cfg = test_agent_spawn_args();
+        let (_, _, discover) =
+            planned_conversation(agent, &cfg, "test-agent.exe", &[], scratch.path(), &[]).await;
+        let baseline = discover.expect("a discover plan takes a baseline");
+        let launched_at = baseline.launched_at;
+
+        let dirs = history::test_support::scratch_dirs("discover-start-up");
+        let registry = crate::session::SessionRegistry::new(dirs.clone());
+        let mut record = history::test_support::record("s1", SessionMode::Interactive);
+        record.started_at = launched_at + chrono::TimeDelta::seconds(1);
+        registry.insert(record);
+        agent.set_found(
+            &scratch.path().to_string_lossy(),
+            vec![agent_api::FoundConversation {
+                id: "c-start".to_owned(),
+                last_active: launched_at + chrono::TimeDelta::milliseconds(500),
+                title: None,
+            }],
+        );
+        assert!(register_discovery(&registry, "s1", Some(baseline)));
+        let waiter = registry.discovery().waiter("s1").expect("the waiter");
+
+        discovery::pass(
+            &registry,
+            &dirs,
+            &waiter,
+            Utc::now(),
+            discovery::PassBy::Poller,
+        );
+
+        let rec = registry.get("s1").expect("the record");
+        assert_eq!(
+            crate::sync::lock(&rec).claude_session_id.as_deref(),
+            Some("c-start")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_child_that_exits_at_once_has_its_waiter_seen_by_the_final_look() {
+        let agent: &'static agent_api::test_agent::TestAgent = Box::leak(Box::new(
+            agent_api::test_agent::TestAgent::new(ConversationPlan::DiscoverAfterLaunch),
+        ));
+        let folder = r"D:\exit-at-once";
+        let baseline = Baseline {
+            ids: std::collections::HashSet::new(),
+            plugin: agent,
+            rows: agent_api::ResolvedRows::default(),
+            folder: PathBuf::from(folder),
+            launched_at: Utc::now() - chrono::TimeDelta::minutes(1),
+        };
+        agent.set_found(
+            folder,
+            vec![agent_api::FoundConversation {
+                id: "c-quick".to_owned(),
+                last_active: Utc::now(),
+                title: None,
+            }],
+        );
+        let dirs = history::test_support::scratch_dirs("discover-exit-at-once");
+        let registry = crate::session::SessionRegistry::new(dirs.clone());
+
+        assert!(register_discovery(&registry, "s1", Some(baseline)));
+        let (pty, exit) = history::test_support::fake_pty();
+        history::test_support::insert_live(
+            &registry,
+            &dirs,
+            history::test_support::record("s1", SessionMode::Interactive),
+            &pty,
+        );
+        exit.send(crate::pty::PtyExit::Code(0))
+            .expect("the exit watcher listens");
+
+        let entry = history::test_support::wait_for_entry(&dirs, "s1").await;
+        assert_eq!(entry.claude_session_id.as_deref(), Some("c-quick"));
     }
 
     #[cfg(windows)]

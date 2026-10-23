@@ -810,10 +810,7 @@ mod tests {
 
     #[test]
     fn adapter_plans_no_conversation_when_options_do_not_decode() {
-        let plugin: &dyn AgentPlugin = &TestAgent {
-            plan: ConversationPlan::Minted("m-1".to_string()),
-            ..TestAgent::default()
-        };
+        let plugin: &dyn AgentPlugin = &TestAgent::new(ConversationPlan::Minted("m-1".to_string()));
         let good = values(&[("mode", text("slow")), ("sandbox", OptionValue::Bool(true))]);
         assert!(
             matches!(plugin.conversation_plan(&good, None), ConversationPlan::Minted(id) if id == "m-1")
@@ -832,10 +829,9 @@ mod tests {
             last_active: chrono::DateTime::UNIX_EPOCH,
             title: Some("hello".to_string()),
         };
-        let plugin: &dyn AgentPlugin = &TestAgent {
-            found: vec![found.clone()],
-            ..TestAgent::default()
-        };
+        let agent = TestAgent::default();
+        agent.set_found(r"D:\proj", vec![found.clone()]);
+        let plugin: &dyn AgentPlugin = &agent;
         let rows = ResolvedRows::default();
         let query = ConversationQuery {
             folder: Path::new(r"D:\proj"),

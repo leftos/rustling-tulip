@@ -390,6 +390,8 @@ pub fn read_one(dirs: &Dirs, session_id: &str) -> Option<HistoryEntry> {
 
 /// Record that the session `session_id` ended for `end`, unless it is headless
 /// or already recorded. Failures are logged and never block the end path.
+/// A session still waiting for its conversation to be discovered gets a final
+/// look first, so an id found now is in the entry.
 pub fn record_session_end(
     registry: &SessionRegistry,
     dirs: &Dirs,
@@ -399,6 +401,7 @@ pub fn record_session_end(
     let Some(rec) = registry.get(session_id) else {
         return;
     };
+    conversations::discovery::final_look(registry, dirs, session_id, Utc::now());
     let entry = {
         let guard = lock(&rec);
         if guard.mode == SessionMode::Headless {

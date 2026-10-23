@@ -1,5 +1,6 @@
 //! In-memory session registry: spawned `claude` processes plus their state.
 
+use crate::conversations::discovery::Discovery;
 use crate::headless::HeadlessHandle;
 use crate::history;
 use crate::orphan::{self, OrphanMeta};
@@ -309,6 +310,8 @@ pub struct SessionRegistry {
     /// gate, then the registry map, then a record; this map's own lock is
     /// only held to look a gate up, with no other lock held.
     sidecar_gates: Mutex<HashMap<String, Arc<Mutex<SidecarGate>>>>,
+    /// The sessions waiting for their conversation ids to be discovered.
+    discovery: Discovery,
 }
 
 /// The per-session sidecar lock's state.
@@ -327,7 +330,13 @@ impl SessionRegistry {
             events,
             dirs: Some(dirs),
             sidecar_gates: Mutex::new(HashMap::new()),
+            discovery: Discovery::default(),
         })
+    }
+
+    /// The sessions waiting for their conversation ids to be discovered.
+    pub(crate) fn discovery(&self) -> &Discovery {
+        &self.discovery
     }
 
     /// The sidecar gate for `id`, created on first use.

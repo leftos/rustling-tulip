@@ -10,7 +10,9 @@ use protocol::{
     FieldOverride, FieldRule, OptionField, OptionValue, SessionMember, ShiftEnter, SpawnPlacement,
 };
 use serde::{Deserialize, Serialize};
-use std::sync::LazyLock;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
 
 /// The options [`TestAgent`] takes, one per field of [`DESCRIPTOR`].
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -88,14 +90,51 @@ pub static DESCRIPTOR: LazyLock<AgentDescriptor> = LazyLock::new(|| AgentDescrip
     chips: Vec::new(),
 });
 
+/// The conversations a [`TestAgent`] finds, keyed by the folder text a query
+/// names.
+type Script = HashMap<String, Vec<FoundConversation>>;
+
 /// An agent whose conversation answers the test sets: `conversation_plan`
-/// returns `plan` and `find_conversations` returns `found`, whatever either is
-/// asked. Its interactive argv is its `mode` and `sandbox` options, and its
+/// returns `plan`, whatever it is asked, and `find_conversations` returns
+/// the conversations last set for the query's folder (see
+/// [`TestAgent::set_found`]), only the one `known_id` names when it names
+/// one, and ignores the window. Clones share one script, so a test holding a
+/// clone can make a conversation appear while the daemon holds the agent.
+/// After [`TestAgent::set_panics`], `find_conversations` panics instead.
+/// Its interactive argv is its `mode` and `sandbox` options, and its
 /// environment sets `TEST_MODE` to its `mode`.
 #[derive(Debug, Clone, Default)]
 pub struct TestAgent {
     pub plan: ConversationPlan,
-    pub found: Vec<FoundConversation>,
+    script: Arc<Mutex<Script>>,
+    panics: Arc<AtomicBool>,
+}
+
+impl TestAgent {
+    /// An agent that plans `plan` and finds no conversation yet.
+    #[must_use]
+    pub fn new(plan: ConversationPlan) -> Self {
+        Self {
+            plan,
+            ..Self::default()
+        }
+    }
+
+    /// From now on, `find_conversations` panics when `panics` is true, as a
+    /// plugin with a bug would.
+    pub fn set_panics(&self, panics: bool) {
+        self.panics.store(panics, Ordering::SeqCst);
+    }
+
+    /// From now on, `find_conversations` for `folder` (its text as the query
+    /// names it, compared verbatim) answers `found`.
+    pub fn set_found(&self, folder: &str, found: Vec<FoundConversation>) {
+        self.script().insert(folder.to_string(), found);
+    }
+
+    fn script(&self) -> MutexGuard<'_, Script> {
+        self.script.lock().unwrap_or_else(PoisonError::into_inner)
+    }
 }
 
 impl Agent for TestAgent {
@@ -143,7 +182,71 @@ impl Agent for TestAgent {
         vec![opts.mode.clone(), opts.sandbox.to_string()]
     }
 
-    fn find_conversations(&self, _query: &ConversationQuery<'_>) -> Vec<FoundConversation> {
-        self.found.clone()
+    fn find_conversations(&self, query: &ConversationQuery<'_>) -> Vec<FoundConversation> {
+        assert!(
+            !self.panics.load(Ordering::SeqCst),
+            "test agent: find_conversations scripted to panic"
+        );
+        let folder = query.folder.to_string_lossy();
+        let found = self
+            .script()
+            .get(folder.as_ref())
+            .cloned()
+            .unwrap_or_default();
+        match query.known_id {
+            Some(id) => found.into_iter().filter(|c| c.id == id).collect(),
+            None => found,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TestAgent;
+    use crate::{
+        AgentPlugin, ConversationPlan, ConversationQuery, FoundConversation, ResolvedRows,
+    };
+    use std::path::Path;
+
+    fn conversation(id: &str) -> FoundConversation {
+        FoundConversation {
+            id: id.to_string(),
+            last_active: chrono::DateTime::UNIX_EPOCH,
+            title: None,
+        }
+    }
+
+    fn find(agent: &TestAgent, folder: &str, known_id: Option<&str>) -> Vec<FoundConversation> {
+        let plugin: &dyn AgentPlugin = agent;
+        let rows = ResolvedRows::default();
+        plugin.find_conversations(&ConversationQuery {
+            folder: Path::new(folder),
+            window: None,
+            known_id,
+            rows: &rows,
+        })
+    }
+
+    #[test]
+    fn script_changes_are_seen_by_the_next_find() {
+        let agent = TestAgent::new(ConversationPlan::DiscoverAfterLaunch);
+        let handle = agent.clone();
+        assert_eq!(find(&agent, r"D:\proj", None), []);
+        handle.set_found(r"D:\proj", vec![conversation("c-1")]);
+        assert_eq!(find(&agent, r"D:\proj", None), [conversation("c-1")]);
+        assert_eq!(find(&agent, r"D:\other", None), [], "another folder");
+        handle.set_found(r"D:\proj", vec![conversation("c-2"), conversation("c-1")]);
+        assert_eq!(
+            find(&agent, r"D:\proj", None),
+            [conversation("c-2"), conversation("c-1")]
+        );
+    }
+
+    #[test]
+    fn known_id_filters_the_found_list() {
+        let agent = TestAgent::new(ConversationPlan::None);
+        agent.set_found(r"D:\proj", vec![conversation("c-1"), conversation("c-2")]);
+        assert_eq!(find(&agent, r"D:\proj", Some("c-2")), [conversation("c-2")]);
+        assert_eq!(find(&agent, r"D:\proj", Some("c-9")), []);
     }
 }
