@@ -272,24 +272,17 @@ fn spawn_dialog_add_repo_drawn_disabled_on_remote(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn workspace_browse_focused_on_local_opens_no_picker_after_switch_to_remote(
-    cx: &mut TestAppContext,
-) {
+fn target_switch_closes_the_workspace_creator(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = with_repos(cx, &dir, two_repos());
-    h.set_picked_file(Some("D:/work/team.code-workspace"));
     vscode_creator(&mut h);
-    h.keys("tab");
-    assert_eq!(
-        creator_focus(&mut h).as_deref(),
-        Some("workspace-creator-browse")
-    );
+    assert!(h.root(|root, _| root.workspace_creator_open()));
 
     h.set_connection(remote());
-    h.keys("enter");
-    assert_eq!(h.file_asks(), 0, "no file picker opens on this PC");
-    assert_eq!(h.folder_asks(), 0);
-    assert_eq!(h.opened(), [], "nothing else opens either");
+    assert!(
+        !h.root(|root, _| root.workspace_creator_open()),
+        "the switch closes the creator opened on the local daemon"
+    );
 }
 
 #[gpui::test]
@@ -323,16 +316,19 @@ fn attached<'a>(cx: &'a mut TestAppContext, dir: &TestDir, s: SessionSnapshot) -
     h
 }
 
-/// [`attached`], then on a remote host.
+/// `s` alone in pane `p1`, its scrollback answered, the pane focused, on a
+/// remote host.
 fn attached_remote<'a>(
     cx: &'a mut TestAppContext,
     dir: &TestDir,
     s: SessionSnapshot,
 ) -> Harness<'a> {
-    let fixture = Fixture::single(s.clone());
-    let mut h = attached(cx, dir, s);
-    h.set_connection(remote());
-    h.load(&fixture);
+    let id = s.id.clone();
+    let mut h = Harness::on_target(cx, dir, remote_target(), &Fixture::single(s));
+    h.answer_scrollback(&id, b"");
+    let at = h.cell_center("p1", 0, 0);
+    h.click(at, Modifiers::none());
+    h.sent();
     h
 }
 
@@ -541,6 +537,7 @@ fn no_repos_note_names_the_remote_host(cx: &mut TestAppContext) {
     ));
 
     h.set_connection(remote());
+    h.load(&Fixture::default());
     assert!(
         shows(
             &mut h,
@@ -561,9 +558,12 @@ fn spawn_dialog_no_repos_note_names_the_remote_host(cx: &mut TestAppContext) {
 
     h.set_connection(remote());
     assert!(
-        h.root(|root, _| root.spawn_dialog_no_repos()),
-        "the dialog stays open"
+        !h.root(|root, _| root.spawn_dialog_no_repos()),
+        "the switch closes the dialog opened on the local daemon"
     );
+    reload_on_remote(&mut h, Vec::new());
+    h.keys("ctrl-shift-n");
+    assert!(h.root(|root, _| root.spawn_dialog_no_repos()));
     assert!(
         shows(&mut h, "spawn-no-repos-note", "No repos on box yet."),
         "the note says whose registry is empty"
@@ -655,6 +655,33 @@ fn with_repos<'a>(
     h
 }
 
+/// `s1` alone in pane `p1`, its scrollback answered, with `repos`, on a
+/// remote host.
+fn remote_with_repos<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+    repos: Vec<protocol::RepoEntry>,
+) -> Harness<'a> {
+    let mut fixture = Fixture::single(session("s1").build());
+    fixture.repos = repos;
+    let mut h = Harness::on_target(cx, dir, remote_target(), &fixture);
+    h.answer_scrollback("s1", b"");
+    h.sent();
+    h
+}
+
+/// Switches to a remote host that lists `s1` alone in pane `p1`, its
+/// scrollback answered, with `repos`: the second half of a spec whose first
+/// half ran on the local daemon.
+fn reload_on_remote(h: &mut Harness<'_>, repos: Vec<protocol::RepoEntry>) {
+    h.set_connection(remote());
+    let mut fixture = Fixture::single(session("s1").build());
+    fixture.repos = repos;
+    h.load(&fixture);
+    h.answer_scrollback("s1", b"");
+    h.sent();
+}
+
 /// Settings open on its Worktrees tab, the root at its default.
 fn worktrees_tab(h: &mut Harness<'_>) {
     h.send(DaemonMessage::WorktreesRootChanged {
@@ -679,8 +706,7 @@ fn two_repos() -> Vec<protocol::RepoEntry> {
 #[gpui::test]
 fn shell_browse_disabled_on_remote(cx: &mut TestAppContext) {
     let dir = TestDir::new();
-    let mut h = with_repos(cx, &dir, Vec::new());
-    h.set_connection(remote());
+    let mut h = remote_with_repos(cx, &dir, Vec::new());
     h.set_picked_folder(Some("D:/work"));
     h.open_shell_dialog_from_more();
     assert!(tooltip_on(&mut h, "shell-browse", LOCAL_FILES));
@@ -696,8 +722,7 @@ fn shell_browse_disabled_on_remote(cx: &mut TestAppContext) {
 #[gpui::test]
 fn worktrees_root_browse_disabled_on_remote(cx: &mut TestAppContext) {
     let dir = TestDir::new();
-    let mut h = with_repos(cx, &dir, Vec::new());
-    h.set_connection(remote());
+    let mut h = remote_with_repos(cx, &dir, Vec::new());
     h.set_picked_folder(Some("E:/trees"));
     worktrees_tab(&mut h);
     assert!(tooltip_on(
@@ -712,8 +737,7 @@ fn worktrees_root_browse_disabled_on_remote(cx: &mut TestAppContext) {
 #[gpui::test]
 fn workspace_file_browse_disabled_on_remote(cx: &mut TestAppContext) {
     let dir = TestDir::new();
-    let mut h = with_repos(cx, &dir, two_repos());
-    h.set_connection(remote());
+    let mut h = remote_with_repos(cx, &dir, two_repos());
     h.set_picked_file(Some("D:/work/team.code-workspace"));
     vscode_creator(&mut h);
     assert!(tooltip_on(&mut h, "workspace-creator-browse", LOCAL_FILES));
@@ -724,8 +748,7 @@ fn workspace_file_browse_disabled_on_remote(cx: &mut TestAppContext) {
 #[gpui::test]
 fn cleanup_open_folder_disabled_on_remote(cx: &mut TestAppContext) {
     let dir = TestDir::new();
-    let mut h = with_repos(cx, &dir, Vec::new());
-    h.set_connection(remote());
+    let mut h = remote_with_repos(cx, &dir, Vec::new());
     cleanup_failed(&mut h);
     assert!(tooltip_on(&mut h, "cleanup-open-folder-0", LOCAL_FILES));
     h.click_on("cleanup-open-folder-0");
@@ -755,7 +778,7 @@ fn shell_browse_leaves_the_tab_ring_on_remote(cx: &mut TestAppContext) {
     );
     h.keys("escape");
 
-    h.set_connection(remote());
+    reload_on_remote(&mut h, Vec::new());
     h.open_shell_dialog_from_more();
     h.keys("tab");
     assert_eq!(
@@ -789,7 +812,8 @@ fn worktrees_root_browse_leaves_the_tab_ring_on_remote(cx: &mut TestAppContext) 
         "Tab reaches Browse on the local daemon"
     );
 
-    h.set_connection(remote());
+    reload_on_remote(&mut h, Vec::new());
+    worktrees_tab(&mut h);
     h.click_on("settings-worktrees-root-input");
     h.keys("tab");
     assert_eq!(
@@ -826,7 +850,7 @@ fn workspace_file_browse_leaves_the_tab_ring_on_remote(cx: &mut TestAppContext) 
     );
     h.keys("escape");
 
-    h.set_connection(remote());
+    reload_on_remote(&mut h, two_repos());
     vscode_creator(&mut h);
     h.keys("tab");
     assert_eq!(
@@ -859,7 +883,7 @@ fn cleanup_open_folder_leaves_the_tab_ring_on_remote(cx: &mut TestAppContext) {
         "Shift+Tab from Ignore reaches Open folder on the local daemon"
     );
 
-    h.set_connection(remote());
+    reload_on_remote(&mut h, Vec::new());
     cleanup_failed(&mut h);
     assert_eq!(cleanup_focus(&mut h).as_deref(), Some("cleanup-ignore"));
     h.keys("shift-tab");
@@ -889,7 +913,9 @@ fn no_repos_dialog_keys_reach_no_add_repo_on_remote(cx: &mut TestAppContext) {
         "Enter presses Add repo on the local daemon"
     );
 
-    h.set_connection(remote());
+    reload_on_remote(&mut h, Vec::new());
+    h.keys("ctrl-shift-n");
+    assert!(h.root(|root, _| root.spawn_dialog_no_repos()));
     h.keys("enter space");
     assert_eq!(
         h.folder_asks(),

@@ -128,15 +128,15 @@ impl RootView {
         if self.quitter.requested() {
             return true;
         }
-        if self.exit.is_some() {
-            return false;
-        }
         // The host's daemon and sessions are not this client's to stop: the
-        // close only drops the connection.
+        // close only drops the connection, whatever dialog is up.
         if !self.capabilities().manages_daemon() {
             tracing::info!("window close on a remote host: disconnecting and quitting");
             self.request_quit(cx);
             return true;
+        }
+        if self.exit.is_some() {
+            return false;
         }
         let active = self.exit_counts().active;
         let connected = self.conn.is_open();
@@ -184,7 +184,7 @@ impl RootView {
     }
 
     /// Cancel: the dialog closes and the keyboard goes back where it was.
-    fn close_exit_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn close_exit_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         tracing::info!("exit dialog: cancelled");
         self.exit = None;
         self.after_notice_closed(window, cx);

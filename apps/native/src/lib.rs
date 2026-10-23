@@ -1364,8 +1364,10 @@ impl RootView {
     /// Drops the font overrides and the sidebar folds of tabs the daemon no
     /// longer lists, once it has listed any: before the first full list
     /// nothing is known to be gone, so an update for one tab prunes nothing.
+    /// A remote host's tab list prunes nothing: the saved entries are the
+    /// local daemon's.
     fn prune_tab_font_sizes(&mut self) {
-        if !self.tabs.is_loaded() {
+        if !self.tabs.is_loaded() || !self.conn.target().is_local() {
             return;
         }
         let live: HashSet<&str> = self.tabs.tabs().iter().map(|tab| tab.id.as_str()).collect();
@@ -1377,9 +1379,10 @@ impl RootView {
     }
 
     /// Drops the source-control pin and collapse state of repos a registry
-    /// snapshot no longer lists, saving when any went.
+    /// snapshot no longer lists, saving when any went. A remote host's list
+    /// prunes nothing: the saved entries are the local daemon's.
     fn prune_source_control(&mut self, repos: &[RepoEntry]) {
-        if self.sidebar.prune_source_control(repos) {
+        if self.conn.target().is_local() && self.sidebar.prune_source_control(repos) {
             self.save_ui();
         }
     }
@@ -1881,7 +1884,9 @@ impl RootView {
                 self.focus_active_diff_tab(window, cx);
             }
         }
-        if self.sidebar.set_active_tab(self.tabs.active_id()) {
+        // The saved active tab is the local daemon's; a remote host's tab
+        // ids are neither remembered nor saved.
+        if self.conn.target().is_local() && self.sidebar.set_active_tab(self.tabs.active_id()) {
             self.save_ui();
         }
         if self
@@ -2227,6 +2232,12 @@ impl RootView {
         };
         match event {
             NetEvent::State(conn) => {
+                // Everything the old target's daemon sent goes before the
+                // new target's state does, so the notices the rest of this
+                // arm raises survive it.
+                if conn.target() != self.conn.target() {
+                    self.reset_for_target(conn.target(), window, cx);
+                }
                 if !conn.is_open() {
                     self.set_keep_awake(None);
                     self.launch_last.clear();
@@ -2549,9 +2560,71 @@ impl RootView {
         }
     }
 
-    /// A new connection: fresh panes, nothing in flight, and every dialog,
-    /// menu and notice of the old one closed.
+    /// A new connection: fresh panes, nothing in flight, every dialog, menu
+    /// and notice of the old one closed, and the session history asked for
+    /// afresh.
     fn on_welcome(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.reset_for_new_daemon(window, cx);
+        self.reset_recover(window, cx);
+    }
+
+    /// The connection moved to another daemon (this PC's or a tailnet
+    /// host's): nothing the old daemon sent stays on screen or takes a
+    /// click, no drag goes on, and the exit dialog opened for it closes.
+    /// Sends nothing to either daemon and saves nothing; the new daemon's
+    /// lists fill the view again, and back on this PC its saved tab shows.
+    fn reset_for_target(
+        &mut self,
+        target: &target::Target,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        tracing::info!("connection target changed: clearing the old daemon's state");
+        self.pane_ui.close = None;
+        self.pane_ui.move_panes = None;
+        self.pane_ui.menu = None;
+        self.drag = None;
+        self.reset_for_new_daemon(window, cx);
+        self.sidebar.clear_daemon_state();
+        let restored_active = if target.is_local() {
+            self.sidebar.ui_state().active_tab_id.clone()
+        } else {
+            None
+        };
+        self.tabs.clear_for_switch(restored_active);
+        self.panes.clear();
+        self.sessions_loaded = false;
+        self.seen_sessions.clear();
+        self.last_focused_session = None;
+        self.last_active_tab = None;
+        self.retries = RetryGate::default();
+        self.renaming = None;
+        self.wanted_session = None;
+        self.sc = ScModel::default();
+        self.sc_picker_open = false;
+        self.changes.writes = sc_writes::ScWrites::default();
+        self.changes.file_menu = None;
+        self.stash.model = stashes::StashModel::default();
+        self.history = history::HistoryModel::default();
+        self.diff_tabs.clear();
+        self.diff_opens = diff_tab::DiffOpens::default();
+        self.session_history = recover::SessionHistory::default();
+        self.recover_requests.clear();
+        self.recover_batches.clear();
+        self.close_recover_on_overlay(window, cx);
+        self.branch_cache = BranchCache::default();
+        self.end_drag(window, cx);
+        self.clear_drag_state();
+        if self.exit.is_some() {
+            self.close_exit_dialog(window, cx);
+        }
+        cx.notify();
+    }
+
+    /// The part of a new connection's reset that sends nothing: fresh
+    /// panes, nothing in flight, and every dialog, menu and notice of the
+    /// old connection closed.
+    fn reset_for_new_daemon(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.set_keep_awake(None);
         self.set_remote_status(None, cx);
         self.reset_panes(cx);
@@ -2583,7 +2656,6 @@ impl RootView {
         self.close_layout_chooser(window, cx);
         self.reset_cleanup_failed(window, cx);
         self.reset_worktrees(window, cx);
-        self.reset_recover(window, cx);
     }
 
     /// Whether `session`'s snapshot moves its appearance, read against the

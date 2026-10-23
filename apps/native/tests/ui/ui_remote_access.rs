@@ -326,15 +326,18 @@ fn page_is_hidden_while_the_target_is_remote(cx: &mut TestAppContext) {
 
     h.set_connection(local());
     reload(&mut h);
+    h.keys("ctrl-,");
     assert_eq!(has_page(&mut h), (true, true));
     h.click_on(TAB);
     assert_eq!(shown_tab(&mut h), "Remote access");
     h.set_connection(remote());
     reload(&mut h);
     assert_eq!(shown_tab(&mut h), "General", "the shown page falls back");
+    h.keys("ctrl-,");
     assert_eq!(has_page(&mut h), (false, false));
     h.set_connection(local());
     reload(&mut h);
+    h.keys("ctrl-,");
     assert_eq!(has_page(&mut h), (true, true), "the row comes back");
 }
 

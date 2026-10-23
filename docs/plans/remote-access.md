@@ -71,19 +71,19 @@ File fetch (RT-35 to RT-37) follows P6.1 to P6.3; a host's download folder is ke
 
 A1 is RT-350, A2a RT-351, A2b RT-352, B RT-353, C RT-354; the orchestrator decisions on RT-152 settle the open choices. Line numbers are at ec89ea15.
 
-#### P6.3 part A1: DNS-name check (small, 1 file + docs)
+#### P6.3 part A1: DNS-name check (small, 1 file + docs). Landed on main
 - Files: apps/native/src/target.rs (test-map row exists at tools/test-map.json:36, no change needed).
 - Steps: add `HostNameError` (Display = the message the picker shows) and `Target::parse_tailnet(&str, Option<u16>)` (reuse by `Target::tailnet` is NOT wanted: keep that infallible for test fixtures); table tests.
 - Red-first tests (target.rs `mod tests`): `parse_tailnet_accepts_a_magicdns_name`, `parse_tailnet_trims_one_trailing_dot_and_lowercases`, `parse_tailnet_refuses_userinfo`, `parse_tailnet_refuses_path_query_and_fragment`, `parse_tailnet_refuses_a_port`, `parse_tailnet_refuses_whitespace_and_percent`, `parse_tailnet_refuses_empty_and_empty_labels`, `parse_tailnet_refuses_bad_label_edges` (leading/trailing hyphen, 64-char label, 254-char name), `parse_tailnet_refuses_ip_literals`, `parse_tailnet_refuses_a_bare_label` (only if OPEN DECISION 5 rules so).
 - Gate: `cargo nextest run -p rustling-tulip-native --cargo-profile test-release target::`; full suite last (stable mode).
 
-#### P6.3 part A2a: specs load after the switch (test-only refactor, lands green before A2b)
+#### P6.3 part A2a: specs load after the switch (test-only refactor, lands green before A2b). Landed on main
 - Files (6): apps/native/tests/support/mod.rs (central in the test map: full suite), apps/native/tests/ui/ui_remote.rs, ui_remote_access.rs, ui_file_fetch.rs, ui_fetch_dialog.rs, plus tools/test-map.json only if a row needs a new key (none expected).
 - Steps: add `Harness::on_target(cx, dir, target, &fixture)` (opens, reports `State` for `target` via `NetEvent::State(open_on(target, port))`, `Handshake`, `Welcome`, then `load(fixture)`) and a `Harness::switch_to(conn, &fixture)` for specs that start Local; migrate the 40+ sites listed in section 2.4 so each loads its fixture after the switch. Behaviour-neutral today, so it passes before and after A2b.
 - Tests: no new names; the migrated specs must stay green. Red-first concern: none (refactor), prove it by running `ui_remote|ui_remote_access|ui_file_fetch|ui_fetch_dialog` before/after.
 - Note `ui_remote.rs` is also in the `settings_view.rs`, `grid_view.rs` (concurrent item), `file_fetch_view.rs`, `quit_view.rs`, `connection.rs` rows' filters: no map edit.
 
-#### P6.3 part A2b: the reset and the exit dialog (hotspot: lib.rs, central)
+#### P6.3 part A2b: the reset and the exit dialog (hotspot: lib.rs, central). Landed on main
 - Files (6): apps/native/src/lib.rs, apps/native/src/sidebar.rs, apps/native/src/tabs.rs, apps/native/src/quit_view.rs, apps/native/tests/ui/ui_target_switch.rs (new) + apps/native/tests/ui/main.rs (`mod ui_target_switch;`, central) + tools/test-map.json (new spec's row; sidebar.rs/tabs.rs/quit_view.rs rows' filters gain `ui_target_switch`).
 
   That is 7 files counting main.rs; main.rs and test-map.json are one-line edits. If it must be 6, put the new spec inside ui_remote.rs (already a module) and skip main.rs and the new test-map row.

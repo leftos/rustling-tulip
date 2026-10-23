@@ -60,6 +60,7 @@ mod ui_spawn_preview;
 mod ui_stashes;
 mod ui_tab_drag;
 mod ui_tabs;
+mod ui_target_switch;
 mod ui_terminal;
 mod ui_vscode_prompt;
 mod ui_workspace_creator;

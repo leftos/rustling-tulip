@@ -581,6 +581,13 @@ impl SidebarModel {
         }
     }
 
+    /// Forgets everything the daemon sent, as a switch to another daemon
+    /// must; the layout in `ui` is this PC's and stays.
+    pub fn clear_daemon_state(&mut self) {
+        let ui = std::mem::take(&mut self.ui);
+        *self = Self::new(ui);
+    }
+
     /// Fold a daemon message into the model; messages it does not track are
     /// ignored.
     pub fn apply(&mut self, msg: &DaemonMessage) {
@@ -2032,6 +2039,45 @@ pub(crate) mod tests {
         assert_eq!(workspaces, ["w2", "w1"]);
         model.apply(&DaemonMessage::Repos { repos: Vec::new() });
         assert!(model.repos().is_empty(), "a new snapshot replaces the old");
+    }
+
+    #[test]
+    fn clear_daemon_state_keeps_the_ui_state() {
+        let mut model = SidebarModel::default();
+        model.apply(&DaemonMessage::Repos {
+            repos: vec![repo("r1", "C:/r1")],
+        });
+        model.apply(&DaemonMessage::Workspaces {
+            workspaces: vec![workspace("w1", &["r1"])],
+        });
+        model.apply(&DaemonMessage::Sessions {
+            sessions: vec![in_repo("s1", "r1")],
+        });
+        model.apply(&DaemonMessage::SessionsReordered {
+            container_id: "r1".to_owned(),
+            ordered_ids: vec!["s1".to_owned()],
+        });
+        model.apply(&DaemonMessage::Attention {
+            session_id: "s1".to_owned(),
+            reason: AttentionReason::AwaitingInput,
+        });
+        model.set_focused_session(Some("s1"));
+        assert!(model.set_active_tab(Some("t1")), "the UI value is set");
+
+        model.clear_daemon_state();
+
+        assert!(model.repos().is_empty(), "the old daemon's repos are gone");
+        assert!(!model.repos_loaded(), "the next host's list is awaited");
+        assert!(model.workspaces().is_empty(), "and its workspaces");
+        assert!(model.sessions().is_empty(), "and its sessions");
+        assert!(model.session_order.is_empty(), "and its session order");
+        assert!(model.attention.is_empty(), "and its attention marks");
+        assert!(model.focused.is_none());
+        assert_eq!(
+            model.ui_state().active_tab_id.as_deref(),
+            Some("t1"),
+            "the layout is this PC's and stays"
+        );
     }
 
     pub(crate) fn workspace(id: &str, members: &[&str]) -> WorkspaceEntry {
