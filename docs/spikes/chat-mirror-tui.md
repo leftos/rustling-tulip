@@ -108,7 +108,7 @@ Hooks and the transcript are identical; the screen differs in the user message (
 
 ## Defects found
 
-- `crates/daemon/src/pty_state.rs:540-556` (`matches_prompt`) reads the last 2 KB of raw output: `has_numbered && has_chevron` is true for any "1." + "2." + "❯", and Claude's idle input box always draws `❯`, a numbered answer has "1." and "2.", and the startup banner `v2.1.307` holds both. A Claude session without hooks reads `AwaitingInput` at idle after such output. The blinking `●` also keeps bytes flowing during a dialog, so a byte tail is a poor stand-in for the screen. Booked as RT-264, beside RT-74.
+- `crates/daemon/src/pty_state.rs:540-556` (`matches_prompt`) reads the last 2 KB of raw output: `has_numbered && has_chevron` is true for any "1." + "2." + "❯", and Claude's idle input box always draws `❯`, a numbered answer has "1." and "2.", and the startup banner `v2.1.307` holds both. A Claude session without hooks reads `AwaitingInput` at idle after such output. The blinking `●` also keeps bytes flowing during a dialog, so a byte tail is a poor stand-in for the screen. Booked as RT-264, beside RT-74; the screen engine (`crates/daemon/src/screen/rules.rs`, `docs/plans/screen-status.md`) replaced `matches_prompt` for Claude sessions.
 - ui-themes: `/context`'s command card fails (`ui.render hook skipped: … a text child holds a control character`) because the stdout carries SGR escapes; sent to its inbox.
 
 ## Prior art
