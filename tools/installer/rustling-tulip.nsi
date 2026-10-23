@@ -83,7 +83,7 @@ VIAddVersionKey "LegalCopyright" "leftos. MIT License."
 
   ; Pass the daemon.json path via env var so PowerShell sees it as a literal
   ; string -- avoids quote-in-quote gymnastics inside the -Command payload.
-  System::Call 'kernel32::SetEnvironmentVariableA(t "RT_DAEMON_JSON", t "$R0")'
+  System::Call 'kernel32::SetEnvironmentVariable(t "RT_DAEMON_JSON", t "$R0")'
 
   ; POST to /shutdown with the bearer token. -TimeoutSec 5 so a hung daemon
   ; doesn't block install indefinitely. Every `$` of the PowerShell payload is
