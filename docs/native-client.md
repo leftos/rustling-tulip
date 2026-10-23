@@ -95,7 +95,7 @@ This doc records the decisions a change to the client needs to know; what each f
 
 - Unknown daemon message types are logged with their tag and skipped; a frame that fails to decode is logged as an error.
 - The client logs to `logs/native.log`, rotated on each launch.
-
+- On Windows a build without debug assertions (release, test-release) is a GUI-subsystem exe, so an installed launch opens no console window; a debug build keeps the console and its stderr log.
 ## Persistence
 
 Machine-local UI state lives in native-ui.json in the config dir (`UiState` in `sidebar.rs`; the field list is in CLAUDE.md, "Where things live on disk"). Tab layouts, session appearance overrides and host settings such as keep-awake and the worktrees root live on the daemon, so every client sees them. Saves are debounced (layout and tab font sizes 500 ms) and flushed on quit.

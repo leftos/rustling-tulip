@@ -4,9 +4,17 @@
 //! a session id is focused once the layout and the sessions arrive, as a
 //! sidebar click would, placing it when no pane shows it. It starts the
 //! daemon when none is running and reconnects when the connection drops.
-//! Logs go to stderr and to `<config dir>/logs/native.log` (the previous
-//! launch's log kept as `native.log.old`), filtered by `RUST_LOG` (default
-//! `info`).
+//! Logs go to `<config dir>/logs/native.log` (the previous launch's log kept
+//! as `native.log.old`), filtered by `RUST_LOG` (default `info`), and to
+//! stderr only where the launch has one: a Windows build without debug
+//! assertions is a GUI-subsystem exe with no console, so only a debug build
+//! shows the log in a terminal.
+
+// An installed launch (Start menu, desktop shortcut) must not open a console
+// window beside the app, so release builds are GUI-subsystem exes; stderr
+// logging then goes nowhere and native.log keeps the log. Debug builds keep
+// the console so a terminal launch still shows the log.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 use anyhow::Context as _;
 use gpui::{App, Application};
@@ -48,7 +56,8 @@ fn open_log_file() -> anyhow::Result<File> {
 }
 
 /// Log to stderr and to `native.log`; stderr alone when the file cannot be
-/// opened.
+/// opened, which a Windows build without debug assertions has no console to
+/// show.
 fn init_tracing() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let (file_layer, file_error) = match open_log_file() {

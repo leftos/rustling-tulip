@@ -13,6 +13,7 @@
 #[path = "../support/mod.rs"]
 mod support;
 
+mod exe_subsystem;
 mod ui_appearance;
 mod ui_appearance_editor;
 mod ui_changes;

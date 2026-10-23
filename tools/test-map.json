@@ -81,9 +81,10 @@
     },
     {
       "paths": [
-        "apps/native/src/main.rs"
+        "apps/native/src/main.rs",
+        "apps/native/tests/ui/exe_subsystem.rs"
       ],
-      "filter": "binary_id(rustling-tulip-native::bin/rustling-tulip-native)"
+      "filter": "binary_id(rustling-tulip-native::bin/rustling-tulip-native) | (binary_id(rustling-tulip-native::ui) & test(/^(exe_subsystem)::/))"
     },
     {
       "paths": [
