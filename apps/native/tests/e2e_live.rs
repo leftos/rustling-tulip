@@ -253,8 +253,7 @@ fn live_hook_status_reports_working_asking_and_idle(cx: &mut TestAppContext) {
         "the hook args do not name this session and config dir"
     );
 
-    // The ready banner is briefly classified `Working`; cue only once the
-    // spawn has settled.
+    // The spawn paints the idle box, which matches the seeded Idle.
     let settled = wait_status(&mut h, &client, 0, &id, SessionStatus::Idle);
     assert_eq!(settled.pending_input, None, "nothing is pending at spawn");
 
@@ -264,6 +263,13 @@ fn live_hook_status_reports_working_asking_and_idle(cx: &mut TestAppContext) {
     assert_eq!(
         working.pending_input, None,
         "submitting a prompt leaves nothing pending"
+    );
+    std::thread::sleep(Duration::from_secs(4));
+    let newest = snapshot_from(&client, from, |s| s.id == id).map(|s| s.status);
+    assert_eq!(
+        newest,
+        Some(SessionStatus::Working),
+        "a quiet screen showing the spinner left Working"
     );
 
     let from = client.message_count();
@@ -282,13 +288,64 @@ fn live_hook_status_reports_working_asking_and_idle(cx: &mut TestAppContext) {
         "the question the hook reported"
     );
 
-    // The fake runs the `Stop` hook on its own timer, so this `Idle` comes
-    // from the hook chain rather than from a typed key clearing the prompt.
-    // The cursor is taken after the prompt was observed, so an `Idle` from
-    // before the `Stop` cannot satisfy it.
-    let from = client.message_count();
+    // The fake runs the Stop hook on its own timer. Between this cue and that
+    // Stop the screen shows the spinner and then the question, so the only
+    // Idle at or after this cursor is the Stop's, however late the
+    // AwaitingInput wait returned.
     let stopped = wait_status(&mut h, &client, from, &id, SessionStatus::Idle);
     assert_eq!(stopped.pending_input, None, "Stop clears the pending input");
+}
+
+/// An Esc mid-turn fires no hook: the interrupt row on the screen alone ends
+/// the turn, so the session drops from Working to Idle.
+#[gpui::test]
+#[ignore = "e2e: run via .\\rt.ps1 native-e2e"]
+fn live_esc_mid_turn_drops_working_to_idle_from_the_screen(cx: &mut TestAppContext) {
+    let node = Command::new("node")
+        .arg("--version")
+        .output()
+        .is_ok_and(|out| out.status.success());
+    assert!(node, "node not on PATH; fake-claude needs it");
+    let daemon = LiveDaemon::start("esc-interrupt");
+    let repo = daemon.git_fixture();
+    let (mut h, client) = Harness::open_live(cx, &daemon);
+    wait_connected(&mut h, &client, &daemon);
+
+    client.send(ClientMessage::AddRepo {
+        path: repo.to_string_lossy().into_owned(),
+        name: None,
+    });
+    let mut repo_id = None;
+    h.wait_until("the fixture repo in state.json", SPAWN, |_| {
+        repo_id = daemon.repo_id(&repo);
+        repo_id.is_some()
+    });
+    client.send(spawn_claude_in_place(
+        &repo_id.expect("the repo was registered"),
+    ));
+    let pane = place_first_session(&mut h, &client);
+
+    let session = wait_snapshot(&mut h, &client, "the claude session", |_| true);
+    let id = session.id.clone();
+    let settled = wait_status(&mut h, &client, 0, &id, SessionStatus::Idle);
+    assert_eq!(settled.pending_input, None, "nothing is pending at spawn");
+
+    let from = client.message_count();
+    h.type_into(&pane, "/rt-hook prompt\n");
+    wait_status(&mut h, &client, from, &id, SessionStatus::Working);
+    h.wait_for_row(&pane, "the turn's spinner", ECHO, |row| {
+        row.contains("Cooking…")
+    });
+    let from = client.message_count();
+    h.keys("escape");
+    h.wait_for_row(&pane, "the interrupt row", ECHO, |row| {
+        row.contains("Interrupted ·")
+    });
+    let idle = wait_status(&mut h, &client, from, &id, SessionStatus::Idle);
+    assert_eq!(
+        idle.pending_input, None,
+        "an interrupt leaves nothing pending"
+    );
 }
 
 /// A turn that ends with a background shell still running: the session is

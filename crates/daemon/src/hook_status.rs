@@ -277,8 +277,10 @@ pub(crate) fn apply_to_record(
         return (false, None);
     }
     // A shell outlives the CLI whose hooks drive it: once that CLI ends, its
-    // hooks stop arriving and the shell classifier owns the status again. A
-    // stale `Working` ends through the plain-shell silence demotion; an
+    // hooks stop arriving and the shell classifier owns the status again.
+    // Clearing `hook_driven` flips the shell's watcher
+    // (`pty_state::watch_plain_shell`) back to its classifier, re-seeded from
+    // the record, whose `SHELL_IDLE_AFTER` silence ends a stale `Working`; an
     // `AwaitingInput` ends here, since the agent that asked has ended and no
     // other event would demote it.
     if details.event == "SessionEnd" && record.mode == SessionMode::PlainShell {

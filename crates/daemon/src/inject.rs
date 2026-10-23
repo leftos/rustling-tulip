@@ -348,9 +348,8 @@ fn stripped_tail(buf: &[u8], n: usize) -> String {
 }
 
 /// Strip CSI / OSC escape sequences and `\r`, dropping non-ASCII bytes.
-/// Intentionally duplicated from [`pty_state::strip_ansi`] — small,
-/// self-contained, and only used here; factoring into a shared module
-/// would be premature for one caller.
+/// Small, self-contained and only used here: the injectors match a plain
+/// byte tail, while the status watchers read a rendered screen instead.
 fn strip_ansi(input: &[u8]) -> String {
     let mut out = String::with_capacity(input.len());
     let mut i = 0;

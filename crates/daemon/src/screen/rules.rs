@@ -5,7 +5,8 @@
 //! of whose guards does, decides the reading. An overlay rule keeps whatever
 //! state the session already has, since the overlay is drawn over a turn that
 //! may be running or done. An agent session's status watcher
-//! ([`crate::pty_state::watch`]) reads its screen through it.
+//! ([`crate::pty_state::watch`]) and the plain-shell watcher
+//! ([`crate::pty_state::watch_plain_shell`]) read its screen through it.
 
 use std::cmp::Reverse;
 use std::sync::LazyLock;

@@ -8,6 +8,19 @@
  *
  * Behavior:
  *   - Prints a stable banner the smoke test asserts on.
+ *   - Paints a bottom region the way Claude's TUI does, redrawn in place under
+ *     the lines it prints: the idle prompt box (`❯ ` between two `─` rules
+ *     over an auto-mode footer), the `· Cooking…` spinner line over the box
+ *     while a turn runs, the `⎿  Interrupted · …` row over it after an Esc,
+ *     the `✻ Churned for …` line and a `1 shell` footer after a turn that
+ *     leaves a background shell, and an `AskUserQuestion` dialog with its
+ *     `Esc to cancel` footer. Every paint sets the title to `◐ <name>` while
+ *     working and `✳ <name>` otherwise, the name being the last `/rename`
+ *     title or `Claude Code`; a resize repaints the region.
+ *   - An Esc that arrives alone, with nothing after it for 50 ms, is the Esc
+ *     key: it interrupts a running turn, painting the interrupt row and
+ *     running no hook, as Claude fires none on Esc; outside a turn it is
+ *     ignored. An Esc with anything after it is ordinary input.
  *   - Echoes lines from stdin back so input from the harness is observable.
  *   - Reports the exact byte count + sha256 of an EOT-terminated payload as
  *     "RT_PASTE_RESULT bytes=<n> sha=<hex>" for paste byte-fidelity assertions
@@ -19,12 +32,13 @@
  *     when NAME ends in _KEY or _TOKEN, else "RT_ENV <NAME> <value>".
  *   - Reads the `--settings <path>` hooks document the daemon injects. On
  *     "/rt-hook prompt" it runs the `UserPromptSubmit` hooks with a prompt
- *     event on stdin; on "/rt-hook ask" it runs the `PreToolUse` hooks with an
- *     `AskUserQuestion` event, prints a line the daemon reads as a prompt, then
- *     runs the `Stop` hooks 5 s later; on "/rt-hook bg" it runs the
- *     `UserPromptSubmit` hooks and then a `Stop` whose `background_tasks` lists
- *     a running shell. A missing or unreadable settings file leaves the run
- *     hookless rather than failing it.
+ *     event on stdin and paints the spinner, leaving the turn open; on
+ *     "/rt-hook ask" it runs the `PreToolUse` hooks with an `AskUserQuestion`
+ *     event, paints the question dialog, then runs the `Stop` hooks 5 s later
+ *     and paints the idle box; on "/rt-hook bg" it runs the `UserPromptSubmit`
+ *     hooks and then a `Stop` whose `background_tasks` lists a running shell,
+ *     and paints the background footer. A missing or unreadable settings file
+ *     leaves the run hookless rather than failing it.
  *   - Exits cleanly on "/exit\n" or SIGTERM/SIGBREAK.
  *   - Acknowledges (but does not act on) the `--add-dir`, `-p`,
  *     `--model`, and `--permission-mode` flags the daemon may pass.
@@ -39,10 +53,26 @@ import { join } from "node:path";
 /// it is standing in for.
 const TAG = "[fake-claude]";
 const READY_BANNER = `${TAG} ready`;
-const PROMPT = "fake-claude> ";
 /// How long after "/rt-hook ask" the fake runs its `Stop` hooks: long enough
 /// for a spec to observe the prompt, short enough to stay inside its wait.
 const STOP_AFTER_MS = 5000;
+/// The status row under the prompt box in auto mode.
+const AUTO_FOOTER = "  ⏵⏵ auto mode on (shift+tab to cycle)";
+
+/// The row strings of the bottom region painted last; empty while none is on
+/// screen.
+let paintedRegion = [];
+/// The terminal rows `paintedRegion` takes up, wrapped rows included.
+let paintedRows = 0;
+/// How long a lone Esc waits for the rest of a key sequence before it counts
+/// as the Esc key.
+const ESC_HOLD_MS = 50;
+/// The timer that turns a held-back Esc into an interrupt.
+let escTimer = null;
+/// The state painted last, which an Esc and a resize read.
+let paintedState = "idle";
+/// The title name the state glyph precedes: the last `/rename` title.
+let titleName = "Claude Code";
 
 // A crash here used to be invisible: node exits 1, the PTY closes, and the
 // daemon just reports "child exited code=1" with no cause — which reads as a
@@ -96,7 +126,12 @@ if (flags.skipPermissions) {
 if (flags.prompt !== null) {
   process.stdout.write(`${TAG} prompt: ${flags.prompt}\r\n`);
 }
-process.stdout.write(PROMPT);
+paint("idle");
+process.stdout.on("resize", () => {
+  // The terminal has already reflowed the region at the new width.
+  paintedRows = terminalRows(paintedRegion, terminalWidth());
+  paint(paintedState);
+});
 
 // Terminator for a paste-fidelity payload. A real bracketed paste's
 // \x1b[200~/\x1b[201~ markers do NOT survive ConPTY's raw-mode input delivery
@@ -118,8 +153,23 @@ if (process.stdin.isTTY && process.stdin.setRawMode) {
 }
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk) => {
+  if (escTimer !== null) {
+    clearTimeout(escTimer);
+    escTimer = null;
+  }
   buffer += chunk;
   pump();
+  // An Esc left alone may be the start of a key sequence split across
+  // chunks; it is the Esc key only if nothing follows it in time.
+  if (buffer === "\x1b") {
+    escTimer = setTimeout(() => {
+      escTimer = null;
+      if (buffer === "\x1b") {
+        buffer = "";
+        interrupt();
+      }
+    }, ESC_HOLD_MS);
+  }
 });
 process.stdin.on("end", () => process.exit(0));
 
@@ -160,10 +210,150 @@ function pump() {
 function emitPasteResult(text) {
   const bytes = Buffer.byteLength(text, "utf8");
   const sha = createHash("sha256").update(text, "utf8").digest("hex");
-  process.stdout.write(
-    `\r\n${TAG} RT_PASTE_RESULT bytes=${bytes} sha=${sha}\r\n`,
-  );
-  process.stdout.write(PROMPT);
+  paint("idle", [`${TAG} RT_PASTE_RESULT bytes=${bytes} sha=${sha}`]);
+}
+
+/**
+ * An Esc: a running turn ends on the interrupt row, with no hook, as Claude
+ * fires none on Esc; any other state ignores it.
+ */
+function interrupt() {
+  if (paintedState === "working") {
+    paint("interrupted", [`${TAG} interrupted`]);
+  }
+}
+
+/**
+ * The rows of the bottom region `state` paints, sized to the terminal.
+ *
+ * @param {string} state
+ * @returns {string[]}
+ */
+function regionFor(state) {
+  const cols = Math.max(20, terminalWidth() - 2);
+  const rule = "─".repeat(cols);
+  const promptBox = [rule, "❯ ", rule];
+  switch (state) {
+    case "idle":
+      return [...promptBox, AUTO_FOOTER];
+    case "working":
+      return ["· Cooking… (21s · ↓ 1.1k tokens)", "", ...promptBox, AUTO_FOOTER];
+    case "interrupted":
+      return [
+        "  ⎿  Interrupted · What should Claude do instead?",
+        "",
+        ...promptBox,
+        AUTO_FOOTER,
+      ];
+    case "background":
+      return [
+        "✻ Churned for 6s · done 8:01 PM",
+        "",
+        ...promptBox,
+        "  ⏵⏵ bypass permissions on · 1 shell · ← for agents · ↓ to manage",
+      ];
+    case "asking":
+      return questionRows(cols);
+    default:
+      throw new Error(`no region for state ${state}`);
+  }
+}
+
+/**
+ * The `AskUserQuestion` dialog the "/rt-hook ask" cue asks.
+ *
+ * @param {number} cols
+ * @returns {string[]}
+ */
+function questionRows(cols) {
+  const rule = `  ${"─".repeat(cols - 2)}`;
+  return [
+    rule,
+    "  ──",
+    "  ←  ☐ Drink  ✔ Submit  →",
+    "",
+    "  Do you prefer tea or coffee?",
+    "",
+    "  ❯ 1. Tea",
+    "    2. Coffee",
+    "    3. Type something.",
+    rule,
+    "  ──",
+    "    4. Chat about this",
+    "",
+    "  Enter to select · Tab/Arrow keys to navigate · Esc to cancel",
+  ];
+}
+
+/**
+ * Redraw the bottom region as `state`, with `logLines` printed above it:
+ * the previous region is cleared from its first row down, the lines join the
+ * log, and the new region follows with the cursor left on its last row. The
+ * title is set to the state's glyph and the session's name.
+ *
+ * @param {string} state
+ * @param {string[]} [logLines]
+ */
+function paint(state, logLines = []) {
+  const rows = regionFor(state);
+  const glyph = state === "working" ? "◐" : "✳";
+  let out = clearRegion();
+  for (const line of logLines) {
+    out += `${line}\r\n`;
+  }
+  out += `\x1b]0;${glyph} ${titleName}\x07`;
+  out += rows.join("\r\n");
+  process.stdout.write(out);
+  paintedRegion = rows;
+  paintedRows = terminalRows(rows, terminalWidth());
+  paintedState = state;
+}
+
+/**
+ * The sequence that clears the painted region, leaving the cursor at the
+ * start of its first row, so what follows lands in the log rather than over
+ * the region; empty when no region is on screen. Forgets the region.
+ *
+ * @returns {string}
+ */
+function clearRegion() {
+  if (paintedRows === 0) {
+    return "";
+  }
+  const up = paintedRows > 1 ? `\x1b[${paintedRows - 1}A` : "";
+  paintedRegion = [];
+  paintedRows = 0;
+  return `\r${up}\x1b[J`;
+}
+
+/**
+ * Print `line` to the log without repainting the region after it.
+ *
+ * @param {string} line
+ */
+function writeLog(line) {
+  process.stdout.write(`${clearRegion()}${line}\r\n`);
+}
+
+/** The terminal's width in columns. */
+function terminalWidth() {
+  return process.stdout.columns || 120;
+}
+
+/**
+ * The terminal rows `rows` take up at `width` columns, a row wider than the
+ * terminal wrapping onto more.
+ *
+ * @param {string[]} rows
+ * @param {number} width
+ * @returns {number}
+ */
+function terminalRows(rows, width) {
+  let total = 0;
+  for (const row of rows) {
+    total += Math.max(1, Math.ceil([...row].length / width));
+  }
+  return total;
 }
 
 const exitClean = () => process.exit(0);
@@ -176,18 +366,18 @@ process.on("SIGBREAK", exitClean);
  */
 function handleLine(line) {
   if (line === "/exit") {
-    process.stdout.write(`${TAG} bye\r\n`);
+    writeLog(`${TAG} bye`);
     process.exit(0);
   }
   if (line.startsWith("/rename ")) {
     const title = sanitizeOscTitle(line.slice("/rename ".length).trim());
     if (title.length > 0) {
       process.stdout.write(`\x1b]0;${title}\x07`);
-      process.stdout.write(`${TAG} renamed: ${title}\r\n`);
+      titleName = title;
+      paint("idle", [`${TAG} renamed: ${title}`]);
     } else {
-      process.stdout.write(`${TAG} rename ignored: empty title\r\n`);
+      paint("idle", [`${TAG} rename ignored: empty title`]);
     }
-    process.stdout.write(PROMPT);
     return;
   }
   if (line === "/stream") {
@@ -204,8 +394,7 @@ function handleLine(line) {
       prompt: line,
       permission_mode: "auto",
     });
-    process.stdout.write(`${TAG} working\r\n`);
-    process.stdout.write(PROMPT);
+    paint("working", [`${TAG} working`]);
     return;
   }
   if (line === "/rt-hook bg") {
@@ -228,8 +417,7 @@ function handleLine(line) {
       ],
       session_crons: [],
     });
-    process.stdout.write(`${TAG} background\r\n`);
-    process.stdout.write(PROMPT);
+    paint("background", [`${TAG} background`]);
     return;
   }
   if (line === "/rt-hook ask") {
@@ -251,20 +439,17 @@ function handleLine(line) {
       },
       "AskUserQuestion",
     );
-    // A line the daemon's prompt matcher recognizes, so a hook-reported
-    // `AwaitingInput` survives its idle silence until the Stop hook arrives.
-    process.stdout.write("❯ 1. Tea 2. Coffee\r\n");
+    paint("asking");
     setTimeout(() => {
       runHooks("Stop", {
         hook_event_name: "Stop",
         last_assistant_message: "Which do you prefer?",
       });
-      process.stdout.write(PROMPT);
+      paint("idle");
     }, STOP_AFTER_MS);
     return;
   }
-  process.stdout.write(`${TAG} echo: ${line}\r\n`);
-  process.stdout.write(PROMPT);
+  paint("idle", [`${TAG} echo: ${line}`]);
 }
 
 /**
@@ -305,7 +490,7 @@ function runHooks(event, payload, toolName) {
       // status never arrives, with nothing naming the cause.
       if (result.error !== undefined || result.status === null) {
         const reason = result.error?.message ?? "no exit status";
-        process.stdout.write(`${TAG} hook-error ${event}: ${reason}\r\n`);
+        writeLog(`${TAG} hook-error ${event}: ${reason}`);
       }
     }
   }
@@ -352,20 +537,23 @@ function emitEnv(name) {
   } else {
     report = value;
   }
-  process.stdout.write(`\r\n${TAG} RT_ENV ${name} ${report}\r\n`);
-  process.stdout.write(PROMPT);
+  paint("idle", [`${TAG} RT_ENV ${name} ${report}`]);
 }
 
+/**
+ * Twenty long chunk lines 80 ms apart, written into the log with no repaint
+ * between them, then the idle box.
+ */
 function emitStreamOutput() {
   let chunk = 0;
   const interval = setInterval(() => {
     chunk += 1;
-    process.stdout.write(
-      `${TAG} stream ${chunk.toString().padStart(2, "0")} ${"x".repeat(360)}\r\n`,
+    writeLog(
+      `${TAG} stream ${chunk.toString().padStart(2, "0")} ${"x".repeat(360)}`,
     );
     if (chunk >= 20) {
       clearInterval(interval);
-      process.stdout.write(PROMPT);
+      paint("idle");
     }
   }, 80);
 }
