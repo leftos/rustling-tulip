@@ -1200,7 +1200,7 @@ pub(crate) struct PillGhost {
 }
 
 impl Render for PillGhost {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let badge = self.badge.map(|(busy, total)| {
             let pill = BusyPill::of(busy, total);
             let glyph_id = format!("tab-ghost-glyph-{}", self.tab_id);
@@ -1248,7 +1248,7 @@ impl Render for PillGhost {
                 .rounded(px(4.0))
                 .shadow_lg()
                 .opacity(GHOST_OPACITY)
-                .font_family(fonts::UI_FAMILY)
+                .font_family(fonts::ui_family(cx))
                 .text_size(px(GHOST_TEXT_SIZE))
                 .text_color(gpui::rgb(TEXT))
                 .children(badge)

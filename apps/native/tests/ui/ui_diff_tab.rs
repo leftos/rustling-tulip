@@ -20,7 +20,7 @@ use protocol::{
     TabEntry,
 };
 use rustling_tulip_native::diff_view::{DiffView, Half};
-use rustling_tulip_native::fonts::UI_FAMILY;
+use rustling_tulip_native::fonts;
 use rustling_tulip_native::{
     BINARY_TEXT, DIFF_OPEN_FAILED_TITLE, DiffTabBody, DiffTabHeader, EMPTY_TEXT, ToastKind,
 };
@@ -528,9 +528,10 @@ fn resize(h: &mut Harness<'_>, (width, height): (f32, f32)) {
 
 /// `text`'s width, in px, shaped at the UI text size.
 fn shaped_width(h: &mut Harness<'_>, text: &str) -> f32 {
+    let family = h.cx.update(|_, cx| fonts::ui_family(cx));
     let run = TextRun {
         len: text.len(),
-        font: gpui::font(UI_FAMILY),
+        font: gpui::font(family),
         color: gpui::black(),
         background_color: None,
         underline: None,

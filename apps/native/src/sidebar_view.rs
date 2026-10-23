@@ -14,7 +14,7 @@ use crate::assets::{
 };
 use crate::buttons::{ButtonSize, focus_ring, outlined_button, primary_button};
 use crate::ellipsis::{ellipsized, truncating};
-use crate::fonts::{DEFAULT_FAMILY, UI_FAMILY};
+use crate::fonts::{self, DEFAULT_FAMILY};
 use crate::grid_view::{ADD_REPO_TIP, NO_REPOS_TIP, SPAWN_TIP};
 use crate::launch_last;
 use crate::palette::{
@@ -1117,7 +1117,7 @@ fn chip_texts(leaf: &Leaf, pill: Option<&TabPill>) -> Vec<String> {
 }
 
 /// The width `text` takes in `family` at `size` px, in px.
-fn text_width(window: &Window, text: &str, family: &'static str, size: f32) -> f32 {
+fn text_width(window: &Window, text: &str, family: impl Into<SharedString>, size: f32) -> f32 {
     let run = TextRun {
         len: text.len(),
         font: font(family),
@@ -1137,7 +1137,13 @@ fn text_width(window: &Window, text: &str, family: &'static str, size: f32) -> f
 
 /// Whether the subline's `text` and the subline-sized `chips` (their
 /// lettering) fit side by side in `room` px.
-fn chips_fit(window: &Window, text: Option<&str>, chips: &[String], room: f32) -> bool {
+fn chips_fit(
+    window: &Window,
+    text: Option<&str>,
+    chips: &[String],
+    room: f32,
+    ui_family: SharedString,
+) -> bool {
     if chips.is_empty() {
         return true;
     }
@@ -1152,7 +1158,7 @@ fn chips_fit(window: &Window, text: Option<&str>, chips: &[String], room: f32) -
         .sum::<f32>()
         - SUBLINE_GAP;
     let text_width = text.map_or(0.0, |text| {
-        text_width(window, text, UI_FAMILY, SUBLINE_TEXT_SIZE) + SUBLINE_GAP
+        text_width(window, text, ui_family, SUBLINE_TEXT_SIZE) + SUBLINE_GAP
     });
     text_width + chips_width <= room
 }
@@ -1682,7 +1688,13 @@ fn comfortable_lower(
     let pill = ctx.pill(&leaf.id);
     let attachable = ctx.attachable(&leaf.id);
     let texts = chip_texts(leaf, pill.as_ref());
-    let fits = chips_fit(window, leaf.subline.as_deref(), &texts, ctx.subline_room);
+    let fits = chips_fit(
+        window,
+        leaf.subline.as_deref(),
+        &texts,
+        ctx.subline_room,
+        fonts::ui_family(cx),
+    );
     let (inline, below) = if fits {
         (
             leaf_chips(leaf, pill, attachable, ChipSize::Subline, cx),

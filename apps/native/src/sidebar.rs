@@ -342,6 +342,10 @@ pub struct UiState {
     /// The font every new terminal pane starts from.
     #[serde(default)]
     pub terminal_font: FontSettings,
+    /// The family the interface draws in; `None` is
+    /// [`crate::fonts::DEFAULT_UI_FAMILY`].
+    #[serde(default)]
+    pub ui_font_family: Option<String>,
     /// Terminal font sizes overridden per tab, by tab id; a tab's size wins
     /// over its session's, its container's and the app's.
     #[serde(default)]
@@ -529,6 +533,7 @@ impl Default for UiState {
             last_repo_dir: None,
             last_vscode_dir: None,
             terminal_font: FontSettings::default(),
+            ui_font_family: None,
             tab_font_sizes: BTreeMap::new(),
             source_control: ScUiState::default(),
             app_appearance: AppColors::default(),
@@ -865,6 +870,11 @@ impl SidebarModel {
 
     pub fn set_terminal_font(&mut self, font: FontSettings) {
         self.ui.terminal_font = font;
+    }
+
+    /// Sets the family the interface draws in; `None` is the default.
+    pub fn set_ui_font_family(&mut self, family: Option<String>) {
+        self.ui.ui_font_family = family;
     }
 
     /// Whether the diff tabs show whitespace-only changes.
@@ -2901,6 +2911,25 @@ mod tests {
     }
 
     #[test]
+    fn ui_font_family_round_trips_and_defaults_to_none() {
+        assert_eq!(UiState::default().ui_font_family, None);
+        let dir = TestDir::new("ui-font");
+        let state = UiState {
+            ui_font_family: Some("Inter".to_owned()),
+            ..UiState::default()
+        };
+        save_ui_state(&dir.0, &state).expect("save");
+        assert_eq!(
+            load_ui_state(&dir.0).ui_font_family.as_deref(),
+            Some("Inter")
+        );
+
+        let older: UiState = serde_json::from_value(json!({ "sidebar_width": 300.0 }))
+            .expect("a file from before the UI font was saved");
+        assert_eq!(older.ui_font_family, None, "absent: the default family");
+    }
+
+    #[test]
     fn ui_state_round_trips() {
         let dir = TestDir::new("round-trip");
         let state = UiState {
@@ -2918,6 +2947,7 @@ mod tests {
                 size: 15.0,
                 bold: true,
             },
+            ui_font_family: Some("Inter".to_owned()),
             tab_font_sizes: [("t1".to_owned(), 20.0)].into(),
             source_control: ScUiState {
                 pinned_repo: Some("r1".to_owned()),

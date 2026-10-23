@@ -2,7 +2,8 @@
 //! the app level, whose rows (accent and frame, shell background, font
 //! family, size and bold) apply at once and each show the value the level
 //! resolves to and the level it comes from. At the app level its rows are
-//! the Settings modal's Appearance tab ([`crate::settings_view`]).
+//! the Settings modal's Appearance tab ([`crate::settings_view`]), which
+//! adds the font the interface draws in.
 
 use gpui::{
     AnyElement, App, ClickEvent, Context, Div, ElementId, Entity, Focusable as _, Keystroke,
@@ -16,8 +17,9 @@ use crate::appearance::{
     Source,
 };
 use crate::appearance_stops::{
-    AppearanceStop, ColorRow, FamilyEntry, FamilyPick, ResetRow, SwatchLine, after_lost,
-    family_entries, family_highlight, step, step_family, step_swatch, stops, swatch_cursor,
+    AppearanceStop, ColorRow, FamilyEntry, FamilyPick, FontList, ResetRow, SwatchLine, after_lost,
+    family_entries, family_highlight, same_family, step, step_family, step_swatch, stops,
+    swatch_cursor,
 };
 use crate::buttons::{ButtonSize, field_frame_with_ring, focus_ring, outlined_button};
 use crate::fonts;
@@ -78,6 +80,8 @@ pub(crate) struct AppearanceEditor {
     accent_hex: Entity<TextInput>,
     background_hex: Entity<TextInput>,
     family_filter: Entity<TextInput>,
+    /// The app level's UI font filter.
+    ui_family_filter: Entity<TextInput>,
     /// The installed families, loaded when the editor opens.
     system_families: Vec<SharedString>,
     /// The colour under the focused swatch line's cursor, once an arrow
@@ -86,12 +90,51 @@ pub(crate) struct AppearanceEditor {
     /// The family list row the highlight is on, once an arrow moved it off
     /// the chosen family.
     family_highlight: Option<FamilyPick>,
+    /// The UI font list's highlight, as the family list's.
+    ui_family_highlight: Option<FamilyPick>,
     /// Where the family list is scrolled to.
     family_scroll: ScrollHandle,
+    /// Where the UI font list is scrolled to.
+    ui_family_scroll: ScrollHandle,
     /// The stop Tab walks on from in a session's, repo's or workspace's
     /// editor; Settings keeps its own.
     stop: Option<AppearanceStop>,
     _subscriptions: Vec<Subscription>,
+}
+
+impl AppearanceEditor {
+    /// The installed families the editor listed when it opened.
+    pub(crate) fn system_families(&self) -> &[SharedString] {
+        &self.system_families
+    }
+
+    fn filter(&self, list: FontList) -> &Entity<TextInput> {
+        match list {
+            FontList::Terminal => &self.family_filter,
+            FontList::Ui => &self.ui_family_filter,
+        }
+    }
+
+    fn highlight(&self, list: FontList) -> Option<&FamilyPick> {
+        match list {
+            FontList::Terminal => self.family_highlight.as_ref(),
+            FontList::Ui => self.ui_family_highlight.as_ref(),
+        }
+    }
+
+    fn set_highlight(&mut self, list: FontList, pick: Option<FamilyPick>) {
+        match list {
+            FontList::Terminal => self.family_highlight = pick,
+            FontList::Ui => self.ui_family_highlight = pick,
+        }
+    }
+
+    fn scroll(&self, list: FontList) -> &ScrollHandle {
+        match list {
+            FontList::Terminal => &self.family_scroll,
+            FontList::Ui => &self.ui_family_scroll,
+        }
+    }
 }
 
 impl ColorRow {
@@ -269,25 +312,17 @@ impl RootView {
     /// level's own family from neither list reads `<name> (saved)`.
     #[must_use]
     pub fn appearance_family_names(&self, cx: &App) -> Vec<String> {
-        let Some(editor) = self.appearance_editor.as_ref() else {
+        let Some((entries, _)) = self.family_list(FontList::Terminal, cx) else {
             return Vec::new();
         };
-        let Some(view) = self.level_view(&editor.level) else {
-            return Vec::new();
-        };
-        let filter = editor.family_filter.read(cx).text();
-        family_entries(
-            &editor.system_families,
-            view.own.terminal_font_family.as_deref(),
-            filter,
-        )
-        .into_iter()
-        .filter_map(|entry| match entry {
-            FamilyEntry::Family { name, saved: true } => Some(format!("{name} (saved)")),
-            FamilyEntry::Family { name, .. } => Some(name.to_string()),
-            FamilyEntry::Reset | FamilyEntry::Header(_) => None,
-        })
-        .collect()
+        entries
+            .into_iter()
+            .filter_map(|entry| match entry {
+                FamilyEntry::Family { name, saved: true } => Some(format!("{name} (saved)")),
+                FamilyEntry::Family { name, .. } => Some(name.to_string()),
+                FamilyEntry::Reset | FamilyEntry::Header(_) => None,
+            })
+            .collect()
     }
 
     /// Opens the editor at `level`, closing any menu, unless another dialog
@@ -321,6 +356,7 @@ impl RootView {
         let accent_hex = cx.new(|cx| TextInput::new("", HEX_PLACEHOLDER, cx));
         let background_hex = cx.new(|cx| TextInput::new("", HEX_PLACEHOLDER, cx));
         let family_filter = cx.new(|cx| TextInput::new("", "Filter fonts", cx));
+        let ui_family_filter = cx.new(|cx| TextInput::new("", "Filter fonts", cx));
         let mut subscriptions = Self::watch_hex_field(&accent_hex, ColorRow::Accent, window, cx);
         subscriptions.extend(Self::watch_hex_field(
             &background_hex,
@@ -329,15 +365,19 @@ impl RootView {
             cx,
         ));
         subscriptions.extend(Self::watch_filter_field(&family_filter, window, cx));
+        subscriptions.extend(Self::watch_filter_field(&ui_family_filter, window, cx));
         self.appearance_editor = Some(AppearanceEditor {
             level,
             accent_hex,
             background_hex,
             family_filter,
+            ui_family_filter,
             system_families: fonts::system_families(cx),
             swatch_cursor: None,
             family_highlight: None,
+            ui_family_highlight: None,
             family_scroll: ScrollHandle::new(),
+            ui_family_scroll: ScrollHandle::new(),
             stop: None,
             _subscriptions: subscriptions,
         });
@@ -437,6 +477,7 @@ impl RootView {
                 &editor.accent_hex,
                 &editor.background_hex,
                 &editor.family_filter,
+                &editor.ui_family_filter,
             ]
             .into_iter()
             .any(|input| input.read(cx).focus_handle(cx).is_focused(window))
@@ -698,50 +739,71 @@ impl RootView {
         let editor = self.appearance_editor.as_ref()?;
         let view = self.level_view(&editor.level)?;
         let reset = editor.level.reset_label();
+        // The interface's font is the app's alone.
+        let ui_font = if editor.level == Level::App {
+            self.family_section(FontList::Ui, self.ui_font_hint(cx), focus, cx)
+        } else {
+            None
+        };
         let colours = div()
             .flex()
             .flex_col()
             .gap(px(12.0))
             .w(px(COLUMN_WIDTH))
             .child(self.color_section(editor, &view, ColorRow::Accent, focus, cx))
-            .child(self.color_section(editor, &view, ColorRow::Background, focus, cx));
+            .child(self.color_section(editor, &view, ColorRow::Background, focus, cx))
+            .children(ui_font);
         let font = div()
             .flex()
             .flex_col()
             .gap(px(12.0))
             .w(px(COLUMN_WIDTH))
-            .child(Self::family_section(editor, &view, focus, cx))
+            .children(self.family_section(FontList::Terminal, view.family_hint(), focus, cx))
             .child(size_section(&view, reset, focus, cx))
             .child(bold_section(&view, reset, focus, cx));
         Some(div().flex().gap(px(16.0)).child(colours).child(font))
     }
 
-    /// The font family: its filter, then the list under it, its highlight
-    /// ringed while the list has the keyboard.
+    /// The UI font row's hint: the family the interface draws in, from the
+    /// app when the user picked one.
+    fn ui_font_hint(&self, cx: &App) -> String {
+        ui_font_hint_text(
+            self.sidebar.ui_state().ui_font_family.as_deref(),
+            &fonts::ui_family(cx),
+        )
+    }
+
+    /// Font list `list`: its filter, then the list under it, its highlight
+    /// ringed while the list has the keyboard, then `hint`.
     fn family_section(
-        editor: &AppearanceEditor,
-        view: &LevelView,
+        &self,
+        list: FontList,
+        hint: String,
         focus: Option<AppearanceStop>,
         cx: &mut Context<Self>,
-    ) -> Div {
-        let own = view.own.terminal_font_family.as_deref();
-        let filter = editor.family_filter.read(cx).text().to_owned();
-        let entries = family_entries(&editor.system_families, own, &filter);
-        let reset = editor.level.reset_label();
-        let highlight = (focus == Some(AppearanceStop::FamilyList))
-            .then(|| family_highlight(&entries, editor.family_highlight.as_ref(), own))
+    ) -> Option<Div> {
+        let editor = self.appearance_editor.as_ref()?;
+        let (entries, own) = self.family_list(list, cx)?;
+        let rows_of = RowsOf {
+            list,
+            own: own.as_deref(),
+            reset: editor.level.reset_label(),
+        };
+        let highlight = (focus == Some(list.stop()))
+            .then(|| family_highlight(&entries, editor.highlight(list), own.as_deref()))
             .flatten();
         let rows: Vec<AnyElement> = entries
             .into_iter()
             .enumerate()
-            .map(|(at, entry)| family_row(&entry, own, reset, highlight == Some(at), cx))
+            .map(|(at, entry)| family_row(&entry, rows_of, highlight == Some(at), cx))
             .collect();
-        let list = div()
-            .id(AppearanceStop::FamilyList.selector())
-            .debug_selector(|| AppearanceStop::FamilyList.selector().to_owned())
+        let selector = list.stop().selector();
+        let list_box = div()
+            .id(selector)
+            .debug_selector(|| selector.to_owned())
             .h(px(FAMILY_LIST_HEIGHT))
             .overflow_y_scroll()
-            .track_scroll(&editor.family_scroll)
+            .track_scroll(editor.scroll(list))
             .flex()
             .flex_col()
             .p(px(3.0))
@@ -750,15 +812,34 @@ impl RootView {
             .border_color(gpui::rgb(LINE_STRONG))
             .rounded(px(LIST_RADIUS))
             .children(rows);
-        field_column("Font family")
-            .child(input_box(
-                AppearanceStop::FamilyFilter,
-                &editor.family_filter,
-                focus,
-                cx,
-            ))
-            .child(list)
-            .child(hint_line("appearance-family-hint", view.family_hint()))
+        let (label, hint_selector) = match list {
+            FontList::Terminal => ("Font family", "appearance-family-hint"),
+            FontList::Ui => ("UI font", "appearance-ui-family-hint"),
+        };
+        Some(
+            field_column(label)
+                .child(input_box(
+                    list.filter_stop(),
+                    editor.filter(list),
+                    focus,
+                    cx,
+                ))
+                .child(list_box)
+                .child(hint_line(hint_selector, hint)),
+        )
+    }
+}
+
+/// The UI font row's hint for the `stored` family and the `resolved` one
+/// the interface draws in: from the app when the stored family drew, else
+/// built-in, naming a stored family that is not installed.
+fn ui_font_hint_text(stored: Option<&str>, resolved: &str) -> String {
+    match stored {
+        None => format!("Resolved: {resolved} from built-in"),
+        Some(stored) if stored.eq_ignore_ascii_case(resolved) => {
+            format!("Resolved: {resolved} from app")
+        }
+        Some(stored) => format!("Resolved: {resolved} (built-in; {stored:?} is not installed)"),
     }
 }
 
@@ -945,7 +1026,7 @@ impl RootView {
             .appearance_editor
             .as_ref()
             .and_then(|editor| self.level_view(&editor.level));
-        stops(has_recent, close, |stop| match stop {
+        stops(has_recent, self.ui_font_shown(), close, |stop| match stop {
             AppearanceStop::Apply(row) => view
                 .as_ref()
                 .is_some_and(|view| self.hex_ready_in(row, view, cx).is_some()),
@@ -959,7 +1040,15 @@ impl RootView {
     /// Every stop in the order Tab walks them, enabled or not; `close`
     /// adds the editor's Close.
     pub(crate) fn appearance_stop_order(&self, close: bool) -> Vec<AppearanceStop> {
-        stops(!self.sidebar.recent_colors().is_empty(), close, |_| true)
+        let has_recent = !self.sidebar.recent_colors().is_empty();
+        stops(has_recent, self.ui_font_shown(), close, |_| true)
+    }
+
+    /// Whether the rows show the UI font: the app level's do.
+    fn ui_font_shown(&self) -> bool {
+        self.appearance_editor
+            .as_ref()
+            .is_some_and(|editor| editor.level == Level::App)
     }
 
     /// The Appearance stop that has the keyboard, if one does: Settings'
@@ -1076,6 +1165,7 @@ impl RootView {
         match stop {
             AppearanceStop::Hex(row) => Some(row.input(editor)),
             AppearanceStop::FamilyFilter => Some(&editor.family_filter),
+            AppearanceStop::UiFamilyFilter => Some(&editor.ui_family_filter),
             _ => None,
         }
     }
@@ -1114,10 +1204,11 @@ impl RootView {
         };
         editor.swatch_cursor = None;
         editor.family_highlight = None;
-        if stop == AppearanceStop::FamilyList
-            && let Some((entries, chosen)) = self.family_list(cx)
+        editor.ui_family_highlight = None;
+        if let Some(list) = stop.font_list()
+            && let Some((entries, chosen)) = self.family_list(list, cx)
         {
-            self.reveal_family_highlight(&entries, chosen.as_deref());
+            self.reveal_family_highlight(list, &entries, chosen.as_deref());
         }
     }
 
@@ -1134,10 +1225,13 @@ impl RootView {
                     self.pick_swatch(row, &appearance::hex(color), cx);
                 }
             }
-            AppearanceStop::Hex(_) | AppearanceStop::FamilyFilter => {}
+            AppearanceStop::Hex(_)
+            | AppearanceStop::FamilyFilter
+            | AppearanceStop::UiFamilyFilter => {}
             AppearanceStop::Apply(row) => self.apply_hex(row, cx),
             AppearanceStop::Reset(row) => self.reset_appearance_row(row, cx),
-            AppearanceStop::FamilyList => self.pick_highlighted_family(cx),
+            AppearanceStop::FamilyList => self.pick_highlighted_family(FontList::Terminal, cx),
+            AppearanceStop::UiFamilyList => self.pick_highlighted_family(FontList::Ui, cx),
             AppearanceStop::SizeDown => self.step_appearance_size(-1.0, cx),
             AppearanceStop::SizeUp => self.step_appearance_size(1.0, cx),
             AppearanceStop::Bold => self.toggle_appearance_bold(cx),
@@ -1163,17 +1257,20 @@ impl RootView {
                         step_swatch(&colors, editor.swatch_cursor, chosen, key == "right");
                 }
             }
-            (AppearanceStop::FamilyList, "up" | "down") => {
-                if let Some((entries, chosen)) = self.family_list(cx) {
+            (AppearanceStop::FamilyList | AppearanceStop::UiFamilyList, "up" | "down") => {
+                if let Some(list) = stop.font_list()
+                    && let Some((entries, chosen)) = self.family_list(list, cx)
+                {
                     if let Some(editor) = self.appearance_editor.as_mut() {
-                        editor.family_highlight = step_family(
+                        let next = step_family(
                             &entries,
-                            editor.family_highlight.as_ref(),
+                            editor.highlight(list),
                             chosen.as_deref(),
                             key == "down",
                         );
+                        editor.set_highlight(list, next);
                     }
-                    self.reveal_family_highlight(&entries, chosen.as_deref());
+                    self.reveal_family_highlight(list, &entries, chosen.as_deref());
                 }
             }
             _ => return false,
@@ -1207,45 +1304,74 @@ impl RootView {
         self.change_appearance(&reset_change(row), cx);
     }
 
-    /// The family list as it shows under the filter, and the level's own
-    /// family.
-    fn family_list(&self, cx: &App) -> Option<(Vec<FamilyEntry>, Option<String>)> {
+    /// Font list `list` as it shows under its filter, and the family it
+    /// has chosen: the level's own terminal family, or the app's UI font.
+    fn family_list(&self, list: FontList, cx: &App) -> Option<(Vec<FamilyEntry>, Option<String>)> {
         let editor = self.appearance_editor.as_ref()?;
-        let own = self.level_view(&editor.level)?.own.terminal_font_family;
-        let filter = editor.family_filter.read(cx).text();
-        let entries = family_entries(&editor.system_families, own.as_deref(), filter);
+        let (bundled, own): (&[&'static str], Option<String>) = match list {
+            FontList::Terminal => (
+                &fonts::BUNDLED_FAMILIES,
+                self.level_view(&editor.level)?.own.terminal_font_family,
+            ),
+            FontList::Ui => (
+                &fonts::BUNDLED_UI_FAMILIES,
+                self.sidebar.ui_state().ui_font_family.clone(),
+            ),
+        };
+        let filter = editor.filter(list).read(cx).text();
+        let entries = family_entries(bundled, &editor.system_families, own.as_deref(), filter);
         Some((entries, own))
     }
 
-    /// The family list row the highlight stands on.
-    fn highlighted_family_row(&self, cx: &App) -> Option<(Vec<FamilyEntry>, usize)> {
+    /// The row of font list `list` the highlight stands on.
+    fn highlighted_family_row(
+        &self,
+        list: FontList,
+        cx: &App,
+    ) -> Option<(Vec<FamilyEntry>, usize)> {
         let editor = self.appearance_editor.as_ref()?;
-        let (entries, own) = self.family_list(cx)?;
-        let at = family_highlight(&entries, editor.family_highlight.as_ref(), own.as_deref())?;
+        let (entries, own) = self.family_list(list, cx)?;
+        let at = family_highlight(&entries, editor.highlight(list), own.as_deref())?;
         Some((entries, at))
     }
 
-    /// Scrolls the family list, as `entries` lists it with the level's
-    /// own family `chosen`, so the highlighted row shows.
-    fn reveal_family_highlight(&self, entries: &[FamilyEntry], chosen: Option<&str>) {
+    /// Scrolls font list `list`, as `entries` lists it with its chosen
+    /// family `chosen`, so the highlighted row shows.
+    fn reveal_family_highlight(
+        &self,
+        list: FontList,
+        entries: &[FamilyEntry],
+        chosen: Option<&str>,
+    ) {
         let Some(editor) = self.appearance_editor.as_ref() else {
             return;
         };
-        if let Some(at) = family_highlight(entries, editor.family_highlight.as_ref(), chosen) {
-            editor.family_scroll.scroll_to_item(at);
+        if let Some(at) = family_highlight(entries, editor.highlight(list), chosen) {
+            editor.scroll(list).scroll_to_item(at);
         }
     }
 
-    fn pick_highlighted_family(&mut self, cx: &mut Context<Self>) {
+    /// Picks the highlighted row of font list `list`: the terminal family
+    /// changes at the editor's level, the UI font at the app's.
+    fn pick_highlighted_family(&mut self, list: FontList, cx: &mut Context<Self>) {
         let pick = self
-            .highlighted_family_row(cx)
+            .highlighted_family_row(list, cx)
             .and_then(|(entries, at)| entries.get(at).and_then(FamilyEntry::pick));
         let family = match pick {
             Some(FamilyPick::Reset) => None,
             Some(FamilyPick::Family(name)) => Some(name.to_string()),
             None => return,
         };
-        self.change_appearance(&AppearanceChange::font_family(family), cx);
+        match list {
+            FontList::Terminal => {
+                self.change_appearance(&AppearanceChange::font_family(family), cx);
+            }
+            FontList::Ui => {
+                if self.sidebar.ui_state().ui_font_family != family {
+                    self.set_ui_font(family, cx);
+                }
+            }
+        }
     }
 
     /// A press in field stop `stop`'s frame gives the field the keyboard
@@ -1278,7 +1404,11 @@ impl RootView {
             match aim {
                 Aim::Stop => {}
                 Aim::Swatch(color) => editor.swatch_cursor = Some(color),
-                Aim::Family(pick) => editor.family_highlight = Some(pick),
+                Aim::Family(pick) => {
+                    if let Some(list) = stop.font_list() {
+                        editor.set_highlight(list, Some(pick));
+                    }
+                }
             }
         }
         if aimed {
@@ -1429,24 +1559,30 @@ fn swatch(selector: String, color: u32, tip: String, mark: Mark) -> Stateful<Div
     }
 }
 
-/// One line of the family list: the reset row, a group header, or a
-/// family, the chosen one ticked and the `highlighted` one ringed.
+/// What a font list's rows share: the list, its chosen family, and what
+/// its reset row says.
+#[derive(Clone, Copy)]
+struct RowsOf<'a> {
+    list: FontList,
+    own: Option<&'a str>,
+    reset: &'static str,
+}
+
+/// One line of a font list: the reset row, a group header, or a family,
+/// the chosen one ticked and the `highlighted` one ringed.
 fn family_row(
     entry: &FamilyEntry,
-    own: Option<&str>,
-    reset: &'static str,
+    rows_of: RowsOf<'_>,
     highlighted: bool,
     cx: &mut Context<RootView>,
 ) -> AnyElement {
+    let RowsOf { list, own, reset } = rows_of;
+    let prefix = list.prefix();
     let ring = |row: Stateful<Div>| row.when(highlighted, |row| row.child(focus_ring(ROW_RADIUS)));
     match entry {
         FamilyEntry::Header(header) => muted_row(*header).into_any_element(),
-        FamilyEntry::Reset => ring(list_row("appearance-family-reset", reset, own.is_none()))
-            .on_click(click_stop(
-                AppearanceStop::FamilyList,
-                Aim::Family(FamilyPick::Reset),
-                cx,
-            ))
+        FamilyEntry::Reset => ring(list_row(&format!("{prefix}-reset"), reset, own.is_none()))
+            .on_click(click_stop(list.stop(), Aim::Family(FamilyPick::Reset), cx))
             .into_any_element(),
         FamilyEntry::Family { name, saved } => {
             let label = if *saved {
@@ -1454,18 +1590,14 @@ fn family_row(
             } else {
                 name.to_string()
             };
-            let chosen = own == Some(name.as_ref());
-            ring(list_row(
-                &format!("appearance-family-option-{name}"),
-                label,
-                chosen,
-            ))
-            .on_click(click_stop(
-                AppearanceStop::FamilyList,
-                Aim::Family(FamilyPick::Family(name.clone())),
-                cx,
-            ))
-            .into_any_element()
+            let chosen = same_family(own, name);
+            ring(list_row(&format!("{prefix}-option-{name}"), label, chosen))
+                .on_click(click_stop(
+                    list.stop(),
+                    Aim::Family(FamilyPick::Family(name.clone())),
+                    cx,
+                ))
+                .into_any_element()
         }
     }
 }
@@ -1649,4 +1781,25 @@ pub(crate) fn close_footer(
                 this.close_appearance_editor(window, cx);
             })),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ui_font_hint_text;
+
+    #[test]
+    fn the_ui_font_hint_names_its_source_and_a_missing_stored_family() {
+        assert_eq!(
+            ui_font_hint_text(None, "Geist"),
+            "Resolved: Geist from built-in"
+        );
+        assert_eq!(
+            ui_font_hint_text(Some("inter"), "Inter"),
+            "Resolved: Inter from app"
+        );
+        assert_eq!(
+            ui_font_hint_text(Some("Nope Sans"), "Geist"),
+            "Resolved: Geist (built-in; \"Nope Sans\" is not installed)"
+        );
+    }
 }

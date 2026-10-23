@@ -299,6 +299,8 @@ fn editor_tab_walks_the_same_stops_as_settings(cx: &mut TestAppContext) {
         ring.len() > 5,
         "Settings walks its Appearance stops: {ring:?}"
     );
+    // The UI font is the app's alone: no session's editor shows it.
+    ring.retain(|stop| !stop.starts_with("appearance-ui-family"));
     ring.push("appearance-footer-close");
 
     open_session_editor(&mut h, "s1");

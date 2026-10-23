@@ -5,8 +5,6 @@
 
 use gpui::SharedString;
 
-use crate::fonts::BUNDLED_FAMILIES;
-
 /// A colour row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum ColorRow {
@@ -54,6 +52,10 @@ pub(crate) enum AppearanceStop {
     FamilyFilter,
     /// The whole family list is one stop; Up and Down move its highlight.
     FamilyList,
+    /// The app level's UI font filter.
+    UiFamilyFilter,
+    /// The app level's UI font list, one stop like the family list.
+    UiFamilyList,
     SizeDown,
     SizeUp,
     Bold,
@@ -83,6 +85,8 @@ impl AppearanceStop {
             Self::Reset(ResetRow::Bold) => "appearance-bold-reset",
             Self::FamilyFilter => "appearance-family-filter",
             Self::FamilyList => "appearance-family-list",
+            Self::UiFamilyFilter => "appearance-ui-family-filter",
+            Self::UiFamilyList => "appearance-ui-family-list",
             Self::SizeDown => "appearance-size-down",
             Self::SizeUp => "appearance-size-up",
             Self::Bold => "appearance-bold",
@@ -92,7 +96,19 @@ impl AppearanceStop {
 
     /// Whether the stop is a text field, which takes typed keys.
     pub(crate) const fn is_field(self) -> bool {
-        matches!(self, Self::Hex(_) | Self::FamilyFilter)
+        matches!(
+            self,
+            Self::Hex(_) | Self::FamilyFilter | Self::UiFamilyFilter
+        )
+    }
+
+    /// The font list a list stop is.
+    pub(crate) const fn font_list(self) -> Option<FontList> {
+        match self {
+            Self::FamilyList => Some(FontList::Terminal),
+            Self::UiFamilyList => Some(FontList::Ui),
+            _ => None,
+        }
     }
 
     /// Whether the stop can be disabled, and so left out of the ring.
@@ -101,13 +117,49 @@ impl AppearanceStop {
     }
 }
 
+/// One of the font family lists: the terminal's, at every level, or the
+/// interface's, at the app level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FontList {
+    Terminal,
+    Ui,
+}
+
+impl FontList {
+    /// The prefix of the list's row and hint selectors.
+    pub(crate) const fn prefix(self) -> &'static str {
+        match self {
+            Self::Terminal => "appearance-family",
+            Self::Ui => "appearance-ui-family",
+        }
+    }
+
+    /// The list's stop.
+    pub(crate) const fn stop(self) -> AppearanceStop {
+        match self {
+            Self::Terminal => AppearanceStop::FamilyList,
+            Self::Ui => AppearanceStop::UiFamilyList,
+        }
+    }
+
+    /// The list's filter stop.
+    pub(crate) const fn filter_stop(self) -> AppearanceStop {
+        match self {
+            Self::Terminal => AppearanceStop::FamilyFilter,
+            Self::Ui => AppearanceStop::UiFamilyFilter,
+        }
+    }
+}
+
 /// The stops Tab walks, in reading order: per colour row its preset line,
 /// its recent line (`has_recent`), its hex field, Apply and its reset link;
-/// then the font filter and list, size − and + and the size reset, the bold
-/// checkbox and its reset, and Close (`close`). Apply and the reset links
-/// are left out while `enabled` says they do nothing.
+/// the UI font filter and list (`ui_font`); then the font filter and list,
+/// size − and + and the size reset, the bold checkbox and its reset, and
+/// Close (`close`). Apply and the reset links are left out while `enabled`
+/// says they do nothing.
 pub(crate) fn stops(
     has_recent: bool,
+    ui_font: bool,
     close: bool,
     enabled: impl Fn(AppearanceStop) -> bool,
 ) -> Vec<AppearanceStop> {
@@ -122,6 +174,9 @@ pub(crate) fn stops(
             AppearanceStop::Apply(row),
             AppearanceStop::Reset(ResetRow::Color(row)),
         ]);
+    }
+    if ui_font {
+        ring.extend([AppearanceStop::UiFamilyFilter, AppearanceStop::UiFamilyList]);
     }
     ring.extend([
         AppearanceStop::FamilyFilter,
@@ -238,21 +293,28 @@ impl FamilyEntry {
     }
 }
 
-/// The family list: the reset row, then each group with a match for
-/// `filter` (case-insensitive) under its header.
+/// The family list over the `bundled` and `system` families: the reset
+/// row, then each group with a match for `filter` (case-insensitive) under
+/// its header.
 pub(crate) fn family_entries(
+    bundled: &[&'static str],
     system: &[SharedString],
     own: Option<&str>,
     filter: &str,
 ) -> Vec<FamilyEntry> {
     let needle = filter.trim().to_lowercase();
     let matches = |name: &str| name.to_lowercase().contains(&needle);
-    let bundled: Vec<SharedString> = BUNDLED_FAMILIES
+    let bundled: Vec<SharedString> = bundled
         .iter()
         .map(|name| SharedString::from(*name))
         .collect();
     let saved: Vec<SharedString> = own
-        .filter(|name| !bundled.iter().chain(system).any(|family| family == name))
+        .filter(|name| {
+            !bundled
+                .iter()
+                .chain(system)
+                .any(|family| same_family(Some(name), family))
+        })
         .map(|name| SharedString::from(name.to_owned()))
         .into_iter()
         .collect();
@@ -275,6 +337,13 @@ pub(crate) fn family_entries(
     entries
 }
 
+/// Whether the `chosen` family is the listed `name`: families match
+/// without regard to case, as they resolve.
+#[must_use]
+pub(crate) fn same_family(chosen: Option<&str>, name: &str) -> bool {
+    chosen.is_some_and(|chosen| chosen.eq_ignore_ascii_case(name))
+}
+
 /// Where the family list's highlight stands among `entries`: on
 /// `highlight` while it is listed, else on the first row; with no
 /// highlight yet, on the `chosen` family (the reset row when the level
@@ -285,9 +354,13 @@ pub(crate) fn family_highlight(
     chosen: Option<&str>,
 ) -> Option<usize> {
     let find = |pick: &FamilyPick| {
-        entries
-            .iter()
-            .position(|entry| entry.pick().as_ref() == Some(pick))
+        entries.iter().position(|entry| match (entry.pick(), pick) {
+            (Some(FamilyPick::Reset), FamilyPick::Reset) => true,
+            (Some(FamilyPick::Family(listed)), FamilyPick::Family(name)) => {
+                same_family(Some(name), &listed)
+            }
+            _ => false,
+        })
     };
     let first = entries.iter().position(|entry| entry.pick().is_some());
     let wanted = highlight.cloned().unwrap_or_else(|| {
@@ -318,6 +391,7 @@ pub(crate) fn step_family(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fonts::{BUNDLED_FAMILIES, BUNDLED_UI_FAMILIES};
 
     use AppearanceStop::{
         Apply, Bold, Close, FamilyFilter, FamilyList, Hex, Reset, SizeDown, SizeUp, Swatches,
@@ -363,7 +437,7 @@ mod tests {
     fn the_family_list_groups_and_filters() {
         let system = [SharedString::from("Arial"), SharedString::from("Consolas")];
         assert_eq!(
-            names(&family_entries(&system, None, "")),
+            names(&family_entries(&BUNDLED_FAMILIES, &system, None, "")),
             [
                 "reset",
                 "[Bundled]",
@@ -377,7 +451,12 @@ mod tests {
             ]
         );
         assert_eq!(
-            names(&family_entries(&system, Some("Lost Mono"), "MONO")),
+            names(&family_entries(
+                &BUNDLED_FAMILIES,
+                &system,
+                Some("Lost Mono"),
+                "MONO"
+            )),
             [
                 "reset",
                 "[Current]",
@@ -389,10 +468,34 @@ mod tests {
             "a case-insensitive substring; a saved family neither list has"
         );
         assert_eq!(
-            names(&family_entries(&system, Some("Arial"), "zzz")),
+            names(&family_entries(
+                &BUNDLED_FAMILIES,
+                &system,
+                Some("Arial"),
+                "zzz"
+            )),
             ["reset"],
             "a listed family is not saved; nothing matches"
         );
+    }
+
+    #[test]
+    fn a_chosen_family_matches_without_regard_to_case() {
+        let entries = family_entries(&BUNDLED_UI_FAMILIES, &[], Some("inter"), "");
+        assert_eq!(
+            names(&entries),
+            ["reset", "[Bundled]", "Geist", "Inter", "Schibsted Grotesk"],
+            "a stored `inter` is the bundled Inter, not a saved row"
+        );
+        let at = family_highlight(&entries, None, Some("inter"));
+        assert_eq!(
+            at.and_then(|at| entries[at].pick()),
+            Some(family("Inter")),
+            "the highlight lands on Inter"
+        );
+        assert!(same_family(Some("inter"), "Inter"), "Inter is ticked");
+        assert!(!same_family(Some("inter"), "Geist"));
+        assert!(!same_family(None, "Inter"));
     }
 
     #[test]
@@ -416,9 +519,13 @@ mod tests {
             ]);
         }
         without.extend(tail);
-        assert_eq!(stops(false, false, |_| true), without, "no recent line");
+        assert_eq!(
+            stops(false, false, false, |_| true),
+            without,
+            "no recent line"
+        );
 
-        let with = stops(true, true, |_| true);
+        let with = stops(true, false, true, |_| true);
         assert_eq!(
             with[..5],
             [
@@ -440,7 +547,7 @@ mod tests {
 
     #[test]
     fn disabled_apply_and_reset_links_are_skipped() {
-        let ring = stops(false, false, |stop| {
+        let ring = stops(false, false, false, |stop| {
             stop != Apply(Background) && !matches!(stop, Reset(_))
         });
         assert_eq!(
@@ -458,7 +565,7 @@ mod tests {
                 Bold,
             ]
         );
-        let all_off = stops(false, false, |_| false);
+        let all_off = stops(false, false, false, |_| false);
         assert!(
             all_off.contains(&FamilyList) && all_off.contains(&Bold),
             "only Apply and the reset links can be disabled"
@@ -502,8 +609,8 @@ mod tests {
 
     #[test]
     fn after_lost_moves_to_the_next_stop_the_ring_holds() {
-        let order = stops(false, true, |_| true);
-        let ring = stops(false, true, |stop| {
+        let order = stops(false, false, true, |_| true);
+        let ring = stops(false, false, true, |stop| {
             !matches!(stop, Apply(Accent) | Reset(ResetRow::Color(Accent)))
         });
         assert_eq!(
@@ -511,10 +618,11 @@ mod tests {
             Some(Swatches(Background, Presets)),
             "past the disabled reset link to the next enabled stop"
         );
-        let ring_without_bold_reset = stops(false, false, |stop| stop != Reset(ResetRow::Bold));
+        let ring_without_bold_reset =
+            stops(false, false, false, |stop| stop != Reset(ResetRow::Bold));
         assert_eq!(
             after_lost(
-                &stops(false, false, |_| true),
+                &stops(false, false, false, |_| true),
                 &ring_without_bold_reset,
                 Reset(ResetRow::Bold)
             ),
@@ -634,14 +742,14 @@ mod tests {
     fn the_family_highlight_survives_a_narrowing_filter() {
         let system = [SharedString::from("Arial")];
         let highlight = family("Fira Code");
-        let narrowed = family_entries(&system, None, "fira");
+        let narrowed = family_entries(&BUNDLED_FAMILIES, &system, None, "fira");
         let at = family_highlight(&narrowed, Some(&highlight), None);
         assert_eq!(
             at.and_then(|at| narrowed[at].pick()),
             Some(highlight.clone()),
             "still listed: the same family"
         );
-        let gone = family_entries(&system, None, "arial");
+        let gone = family_entries(&BUNDLED_FAMILIES, &system, None, "arial");
         assert_eq!(
             family_highlight(&gone, Some(&highlight), Some("Arial")),
             Some(0),

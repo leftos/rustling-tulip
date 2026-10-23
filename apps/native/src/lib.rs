@@ -854,6 +854,7 @@ impl RootView {
             .as_deref()
             .map_or_else(UiState::default, load_ui_state);
         cx.set_global(mouse::CopyOnSelect(ui.general.copy_on_select));
+        fonts::set_ui_family(ui.ui_font_family.as_deref(), cx);
         let mut view = Self {
             tx,
             now,
@@ -1279,6 +1280,20 @@ impl RootView {
     pub fn set_app_font(&mut self, settings: fonts::FontSettings, cx: &mut Context<Self>) {
         self.sidebar.set_terminal_font(settings.normalized());
         self.after_font_change(cx);
+    }
+
+    /// Makes `family` (`None`: the default) the family the interface draws
+    /// in: saved on this machine and applied to every window at once.
+    pub fn set_ui_font(&mut self, family: Option<String>, cx: &mut Context<Self>) {
+        self.sidebar.set_ui_font_family(family);
+        let stored = self.sidebar.ui_state().ui_font_family.as_deref();
+        // The open editor has the installed families listed already.
+        match self.appearance_editor.as_ref() {
+            Some(editor) => fonts::set_ui_family_among(stored, editor.system_families(), cx),
+            None => fonts::set_ui_family(stored, cx),
+        }
+        self.save_ui();
+        cx.refresh_windows();
     }
 
     /// Sets the app level's colours, below every repo's, workspace's and
@@ -3058,7 +3073,7 @@ impl Render for RootView {
             .size_full()
             .flex()
             .flex_col()
-            .font_family(fonts::UI_FAMILY)
+            .font_family(fonts::ui_family(cx))
             .capture_key_down(cx.listener(Self::on_key_capture))
             .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
             .on_any_mouse_down(cx.listener(Self::on_any_mouse_down))
@@ -3482,11 +3497,11 @@ fn open_button(id: &'static str, label: &'static str, path: &Path) -> Stateful<D
 struct Tip(SharedString);
 
 impl Render for Tip {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .px(px(6.0))
             .py(px(2.0))
-            .font_family(fonts::UI_FAMILY)
+            .font_family(fonts::ui_family(cx))
             .bg(gpui::rgb(CHIP))
             .border_1()
             .border_color(gpui::rgb(LINE_STRONG))

@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use gpui::{Modifiers, Point, TestAppContext, point, px};
 use protocol::{ClientMessage, DaemonMessage, SplitDirection, TabEntry};
-use rustling_tulip_native::SidebarView;
+use rustling_tulip_native::{SidebarView, fonts};
 use support::{Fixture, Harness, TestDir, pane, session, split, tab};
 
 const TAB_SELECTORS: [&str; 7] = [
@@ -962,6 +962,8 @@ fn tab_walks_the_appearance_stops_and_shift_tab_walks_back(cx: &mut TestAppConte
         "appearance-accent-hex",
         "appearance-background-presets",
         "appearance-background-hex",
+        "appearance-ui-family-filter",
+        "appearance-ui-family-list",
         "appearance-family-filter",
         "appearance-family-list",
         "appearance-size-down",
@@ -1051,6 +1053,68 @@ fn appearance_family_list_down_highlights_and_enter_picks(cx: &mut TestAppContex
         "Resolved: default cascade from built-in",
         "Up stops at the reset row"
     );
+}
+
+#[gpui::test]
+fn settings_footer_stays_visible_on_a_short_window(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = appearance_tab(cx, &dir);
+    let height = 420.0;
+    h.cx.simulate_resize(gpui::size(px(1000.0), px(height)));
+    h.cx.run_until_parked();
+    let close = h.bounds("settings-footer-close");
+    assert!(
+        close.bottom() <= px(height),
+        "Close ends at {:?}, below the {height}px window",
+        close.bottom()
+    );
+    let content = h.bounds("settings-content");
+    assert!(
+        content.bottom() <= close.top(),
+        "the content scrolls above the footer: {content:?}, {close:?}"
+    );
+}
+
+/// The family the interface draws in.
+fn ui_family(h: &mut Harness<'_>) -> String {
+    h.cx.update(|_, cx| fonts::ui_family(cx).to_string())
+}
+
+#[gpui::test]
+fn a_ui_font_pick_redraws_the_interface_and_is_saved_and_reset_restores_the_default(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let mut h = appearance_tab(cx, &dir);
+    assert_eq!(ui_family(&mut h), "Geist", "nothing picked: the default");
+
+    h.click_on("appearance-ui-family-option-Inter");
+    assert_eq!(
+        saved_ui(&dir)["ui_font_family"],
+        "Inter",
+        "saved on this machine"
+    );
+    assert_eq!(ui_family(&mut h), "Inter", "the pick draws at once");
+
+    // A family the test text system knows: one of gpui's fallbacks.
+    h.click_on("appearance-ui-family-filter");
+    type_text(&mut h, "segoe");
+    h.click_on("appearance-ui-family-option-Segoe UI");
+    assert_eq!(ui_family(&mut h), "Segoe UI", "the pick draws at once");
+    assert_eq!(saved_ui(&dir)["ui_font_family"], "Segoe UI");
+    assert_eq!(
+        h.root(|root, cx| root.pane_font("p1", cx).and_then(|font| font.family)),
+        None,
+        "the terminal font is not the UI font"
+    );
+
+    h.click_on("appearance-ui-family-reset");
+    assert_eq!(
+        ui_family(&mut h),
+        "Geist",
+        "Use built-in restores the default"
+    );
+    assert_eq!(saved_ui(&dir)["ui_font_family"], serde_json::Value::Null);
 }
 
 #[gpui::test]

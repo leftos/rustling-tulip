@@ -984,7 +984,14 @@ impl RootView {
         let overlay = self
             .pane_drop_overlay(cx)
             .filter(|(target, _)| target == pane_id)
-            .map(|(_, edge)| drop_overlay(pane_id, edge, colors.accent_line));
+            .map(|(_, edge)| {
+                drop_overlay(
+                    pane_id,
+                    edge,
+                    colors.accent_line,
+                    crate::fonts::ui_family(cx),
+                )
+            });
         let frame = format!("pane-frame-{pane_id}");
         let header = self
             .pane_header(tab_id, pane_id, session_id, colors.accent_line, cx)
@@ -1702,9 +1709,9 @@ struct PaneGhost {
 }
 
 impl Render for PaneGhost {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div().child(
-            ghost_pill(self.label.clone(), self.accent)
+            ghost_pill(self.label.clone(), self.accent, crate::fonts::ui_family(cx))
                 .debug_selector(|| "pane-drag-ghost".to_owned())
                 .absolute()
                 .left(self.offset.x)
@@ -1714,8 +1721,8 @@ impl Render for PaneGhost {
 }
 
 /// A translucent pill with `text`, edged in `accent`: the drag ghost and the
-/// swap badge.
-fn ghost_pill(text: impl Into<SharedString>, accent: u32) -> Div {
+/// swap badge, drawn in the interface's `family`.
+fn ghost_pill(text: impl Into<SharedString>, accent: u32, family: SharedString) -> Div {
     div()
         .flex_none()
         .px(px(10.0))
@@ -1725,7 +1732,7 @@ fn ghost_pill(text: impl Into<SharedString>, accent: u32) -> Div {
         .border_1()
         .border_color(gpui::rgb(accent))
         .whitespace_nowrap()
-        .font_family(crate::fonts::UI_FAMILY)
+        .font_family(family)
         .text_size(px(GHOST_TEXT_SIZE))
         .text_color(gpui::rgb(TEXT))
         .child(text.into())
@@ -1772,8 +1779,14 @@ fn drop_layer(tab_id: &str, cx: &mut Context<RootView>) -> Stateful<Div> {
 }
 
 /// The tint over pane `pane_id` for a drop on `edge`, in the pane's
-/// `accent`: a half, an outer strip, or the centre box with its badge.
-fn drop_overlay(pane_id: &str, edge: PaneDropEdge, accent: u32) -> AnyElement {
+/// `accent`: a half, an outer strip, or the centre box with its badge,
+/// drawn in the interface's `family`.
+fn drop_overlay(
+    pane_id: &str,
+    edge: PaneDropEdge,
+    accent: u32,
+    family: SharedString,
+) -> AnyElement {
     let overlay = drag::drop_overlay(edge, tabs::Rect::new(0.0, 0.0, 1.0, 1.0));
     let (alpha, border) = match overlay.kind {
         OverlayKind::Half | OverlayKind::Centre => (DROP_TINT_ALPHA, 1.0),
@@ -1800,7 +1813,7 @@ fn drop_overlay(pane_id: &str, edge: PaneDropEdge, accent: u32) -> AnyElement {
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(ghost_pill(drag::SWAP_BADGE, accent))
+                .child(ghost_pill(drag::SWAP_BADGE, accent, family))
         })
         .into_any_element()
 }

@@ -49,6 +49,8 @@ const CONTENT_WIDTH: f32 = 656.0;
 /// The padding round the shown tab's rows.
 const CONTENT_PAD_X: f32 = 18.0;
 const CONTENT_PAD_Y: f32 = 16.0;
+/// The room kept above and below the panel on a window too short for it.
+const PANEL_MARGIN_Y: f32 = 24.0;
 /// The modal's width: the tab list, the content and its padding, and the
 /// card's 1 px edges.
 const PANEL_WIDTH: f32 = TAB_LIST_WIDTH + CONTENT_WIDTH + 2.0 * CONTENT_PAD_X + 2.0;
@@ -1105,11 +1107,18 @@ impl RootView {
                 this.close_appearance_editor(window, cx);
             },
         ));
+        // The body takes what the window leaves between the title bar and
+        // the footer, and the content scrolls within it.
         let body = div()
             .flex()
+            .flex_1()
+            .min_h(px(0.0))
             .child(self.settings_tab_list(window, cx))
             .child(
                 div()
+                    .id("settings-content")
+                    .debug_selector(|| "settings-content".to_owned())
+                    .overflow_y_scroll()
                     .flex()
                     .flex_col()
                     .flex_none()
@@ -1119,6 +1128,7 @@ impl RootView {
                     .children(self.settings_content(window, cx)),
             );
         let panel = dialog_card("settings-panel", PANEL_WIDTH)
+            .max_h(window.viewport_size().height - px(2.0 * PANEL_MARGIN_Y))
             .track_focus(&self.appearance_focus)
             .child(dialog_title_bar("Settings", close))
             .child(body)

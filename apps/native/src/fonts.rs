@@ -1,17 +1,21 @@
-//! The client's fonts: the terminal families and the interface family it
-//! bundles, the font settings a pane renders with, and how a requested
-//! family resolves against the fonts the text system knows.
+//! The client's fonts: the terminal and interface families it bundles, the
+//! font settings a pane renders with, the family the interface draws in,
+//! and how a requested family resolves against the fonts the text system
+//! knows.
 
 use std::borrow::Cow;
 
-use gpui::{App, SharedString, TextSystem};
+use gpui::{App, Global, SharedString, TextSystem};
 use serde::{Deserialize, Serialize};
 
 /// The family a pane renders in when the settings name none.
 pub const DEFAULT_FAMILY: &str = "Geist Mono";
-/// The family the client's own interface draws in; terminal panes draw in
-/// their own.
-pub const UI_FAMILY: &str = "Schibsted Grotesk";
+/// The family the client's own interface draws in when the user picked
+/// none; terminal panes draw in their own.
+pub const DEFAULT_UI_FAMILY: &str = "Geist";
+/// The proportional families the client ships for its interface, as their
+/// fonts name them; no terminal picker lists them.
+pub const BUNDLED_UI_FAMILIES: [&str; 3] = [DEFAULT_UI_FAMILY, "Inter", "Schibsted Grotesk"];
 pub const DEFAULT_SIZE: f32 = 13.0;
 /// The smallest size any level may set: the protocol's.
 pub const MIN_SIZE: f32 = *protocol::TERMINAL_FONT_SIZES.start() as f32;
@@ -91,9 +95,17 @@ const BUNDLED_FILES: [Face; 14] = [
     )),
 ];
 
-/// A bundled UI face and the weight its `OS/2` table declares.
+/// A bundled UI face, its family and the weight its `OS/2` table declares.
 struct UiFace {
     data: &'static [u8],
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the tests check each face's family and weight against it"
+        )
+    )]
+    family: &'static str,
     #[cfg_attr(
         not(test),
         expect(dead_code, reason = "the tests check each face's weight against it")
@@ -101,25 +113,137 @@ struct UiFace {
     weight: u16,
 }
 
-/// The bundled UI faces of [`UI_FAMILY`]: Regular, Medium, `SemiBold` and Bold.
-const UI_FILES: [UiFace; 4] = [
+/// The bundled UI faces of [`BUNDLED_UI_FAMILIES`]: Regular, Medium,
+/// `SemiBold` and Bold of each.
+const UI_FILES: [UiFace; 12] = [
+    UiFace {
+        data: include_bytes!("../assets/fonts/Geist/Geist-Regular.ttf"),
+        family: "Geist",
+        weight: 400,
+    },
+    UiFace {
+        data: include_bytes!("../assets/fonts/Geist/Geist-Medium.ttf"),
+        family: "Geist",
+        weight: 500,
+    },
+    UiFace {
+        data: include_bytes!("../assets/fonts/Geist/Geist-SemiBold.ttf"),
+        family: "Geist",
+        weight: 600,
+    },
+    UiFace {
+        data: include_bytes!("../assets/fonts/Geist/Geist-Bold.ttf"),
+        family: "Geist",
+        weight: 700,
+    },
+    UiFace {
+        data: include_bytes!("../assets/fonts/Inter/Inter-Regular.ttf"),
+        family: "Inter",
+        weight: 400,
+    },
+    UiFace {
+        data: include_bytes!("../assets/fonts/Inter/Inter-Medium.ttf"),
+        family: "Inter",
+        weight: 500,
+    },
+    UiFace {
+        data: include_bytes!("../assets/fonts/Inter/Inter-SemiBold.ttf"),
+        family: "Inter",
+        weight: 600,
+    },
+    UiFace {
+        data: include_bytes!("../assets/fonts/Inter/Inter-Bold.ttf"),
+        family: "Inter",
+        weight: 700,
+    },
     UiFace {
         data: include_bytes!("../assets/fonts/SchibstedGrotesk/SchibstedGrotesk-Regular.ttf"),
+        family: "Schibsted Grotesk",
         weight: 400,
     },
     UiFace {
         data: include_bytes!("../assets/fonts/SchibstedGrotesk/SchibstedGrotesk-Medium.ttf"),
+        family: "Schibsted Grotesk",
         weight: 500,
     },
     UiFace {
         data: include_bytes!("../assets/fonts/SchibstedGrotesk/SchibstedGrotesk-SemiBold.ttf"),
+        family: "Schibsted Grotesk",
         weight: 600,
     },
     UiFace {
         data: include_bytes!("../assets/fonts/SchibstedGrotesk/SchibstedGrotesk-Bold.ttf"),
+        family: "Schibsted Grotesk",
         weight: 700,
     },
 ];
+
+/// The family the interface draws in: the user's pick as resolved against
+/// the installed fonts.
+struct UiFont(SharedString);
+
+impl Global for UiFont {}
+
+/// The family the interface draws in; [`DEFAULT_UI_FAMILY`] until
+/// [`set_ui_family`] has run.
+#[must_use]
+pub fn ui_family(cx: &App) -> SharedString {
+    cx.try_global::<UiFont>().map_or_else(
+        || SharedString::new_static(DEFAULT_UI_FAMILY),
+        |font| font.0.clone(),
+    )
+}
+
+/// Makes `requested` (or [`DEFAULT_UI_FAMILY`]) the family the interface
+/// draws in, resolved against the fonts the text system knows; they are
+/// listed only for a family the client does not bundle.
+pub fn set_ui_family(requested: Option<&str>, cx: &mut App) {
+    let family = resolve_ui_family(requested, || available_families(cx.text_system()));
+    cx.set_global(UiFont(family));
+}
+
+/// [`set_ui_family`] against `installed`, the system's families as a font
+/// list already has them.
+pub fn set_ui_family_among(requested: Option<&str>, installed: &[SharedString], cx: &mut App) {
+    let family = resolve_ui_family(requested, || installed.to_vec());
+    cx.set_global(UiFont(family));
+}
+
+/// The family to draw the interface in for `requested` (or
+/// [`DEFAULT_UI_FAMILY`]): a bundled UI family as it is named, which the
+/// client registers at startup; else itself, as `available` names it, when
+/// the listing has it, else [`DEFAULT_UI_FAMILY`]. `available` is called
+/// only for a family not bundled; with nothing to check against, the family
+/// is returned unchecked.
+#[must_use]
+pub fn resolve_ui_family(
+    requested: Option<&str>,
+    available: impl FnOnce() -> Vec<SharedString>,
+) -> SharedString {
+    let Some(wanted) = requested else {
+        return SharedString::new_static(DEFAULT_UI_FAMILY);
+    };
+    if let Some(bundled) = BUNDLED_UI_FAMILIES
+        .iter()
+        .find(|family| family.eq_ignore_ascii_case(wanted))
+    {
+        return SharedString::new_static(bundled);
+    }
+    let available = available();
+    if available.is_empty() {
+        return SharedString::from(wanted.to_owned());
+    }
+    available
+        .iter()
+        .find(|family| family.eq_ignore_ascii_case(wanted))
+        .cloned()
+        .unwrap_or_else(|| {
+            tracing::warn!(
+                "the interface font {wanted:?} is not installed; drawing in {DEFAULT_UI_FAMILY}"
+            );
+            SharedString::new_static(DEFAULT_UI_FAMILY)
+        })
+}
 
 /// How a terminal pane draws its text.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -233,13 +357,14 @@ pub fn system_families(cx: &App) -> Vec<SharedString> {
 }
 
 /// `families` as a font picker lists them: sorted, each once, without the
-/// bundled ones — including the interface's family, which no terminal draws
-/// in — and without the hidden system faces whose names start with `.`.
+/// bundled ones — the interface's families included, which no terminal
+/// draws in — and without the hidden system faces whose names start with `.`.
 fn picker_families(families: Vec<SharedString>) -> Vec<SharedString> {
     let mut families: Vec<SharedString> = families
         .into_iter()
         .filter(|family| {
-            !BUNDLED_FAMILIES.contains(&family.as_ref()) && family.as_ref() != UI_FAMILY
+            !BUNDLED_FAMILIES.contains(&family.as_ref())
+                && !BUNDLED_UI_FAMILIES.contains(&family.as_ref())
         })
         .filter(|family| !family.starts_with('.'))
         .collect();
@@ -275,9 +400,124 @@ mod tests {
     }
 
     #[test]
-    fn the_picker_never_lists_the_ui_family() {
-        let listed = picker_families(names(&[UI_FAMILY, "Consolas"]));
+    fn terminal_picker_lists_no_ui_family() {
+        let listed = picker_families(names(&["Geist", "Inter", "Schibsted Grotesk", "Consolas"]));
         assert_eq!(listed, names(&["Consolas"]));
+    }
+
+    /// A listing of `families` that counts how often it is asked for.
+    fn counted<'a>(
+        families: &'a [&'static str],
+        calls: &'a std::cell::Cell<u32>,
+    ) -> impl FnOnce() -> Vec<SharedString> + 'a {
+        move || {
+            calls.set(calls.get() + 1);
+            names(families)
+        }
+    }
+
+    #[test]
+    fn ui_family_defaults_to_geist() {
+        assert_eq!(DEFAULT_UI_FAMILY, "Geist");
+        let calls = std::cell::Cell::new(0);
+        assert_eq!(
+            resolve_ui_family(None, counted(&["Arial"], &calls)),
+            "Geist"
+        );
+        assert_eq!(calls.get(), 0, "the default lists no fonts");
+        assert_eq!(
+            UiState::default().ui_font_family,
+            None,
+            "nothing stored: the default"
+        );
+    }
+
+    #[test]
+    fn a_bundled_ui_family_resolves_without_listing_fonts() {
+        let calls = std::cell::Cell::new(0);
+        assert_eq!(
+            resolve_ui_family(Some("inter"), counted(&["Arial"], &calls)),
+            "Inter",
+            "matched without regard to case, named as bundled"
+        );
+        assert_eq!(calls.get(), 0, "the bundled families are registered");
+    }
+
+    #[test]
+    fn an_unknown_ui_family_falls_back_to_the_default() {
+        let calls = std::cell::Cell::new(0);
+        assert_eq!(
+            resolve_ui_family(Some("Nope Sans"), counted(&["Arial"], &calls)),
+            "Geist"
+        );
+        assert_eq!(calls.get(), 1, "a stored family not bundled is looked up");
+        assert_eq!(
+            resolve_ui_family(Some("arial"), counted(&["Arial"], &calls)),
+            "Arial",
+            "matched without regard to case, named as installed"
+        );
+        assert_eq!(
+            resolve_ui_family(Some("Nope Sans"), Vec::new),
+            "Nope Sans",
+            "nothing to check against: the request unchecked"
+        );
+    }
+
+    /// The family names (`name` IDs 1 and 16) the face's Windows `name`
+    /// records carry.
+    fn name_table_families(data: &[u8]) -> Vec<String> {
+        let tables = usize::from(be_u16(data, 4));
+        let table = (0..tables)
+            .map(|i| 12 + i * 16)
+            .find(|&record| data.get(record..record + 4) == Some(b"name".as_slice()))
+            .map(|record| be_u32(data, record + 8))
+            .expect("a name table");
+        let count = usize::from(be_u16(data, table + 2));
+        let strings = table + usize::from(be_u16(data, table + 4));
+        (0..count)
+            .map(|i| table + 6 + i * 12)
+            .filter(|&record| be_u16(data, record) == 3)
+            .filter(|&record| matches!(be_u16(data, record + 6), 1 | 16))
+            .map(|record| {
+                let len = usize::from(be_u16(data, record + 8));
+                let at = strings + usize::from(be_u16(data, record + 10));
+                let bytes = data.get(at..at + len).expect("a name string in bounds");
+                let units: Vec<u16> = bytes
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|pair| u16::from_be_bytes(*pair))
+                    .collect();
+                String::from_utf16_lossy(&units)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn bundled_ui_families_register() {
+        for family in BUNDLED_UI_FAMILIES {
+            let faces: Vec<&UiFace> = UI_FILES
+                .iter()
+                .filter(|face| face.family == family)
+                .collect();
+            let weights: Vec<u16> = faces.iter().map(|face| face.weight).collect();
+            assert_eq!(weights, [400, 500, 600, 700], "{family}'s faces");
+            for face in faces {
+                assert!(
+                    name_table_families(face.data)
+                        .iter()
+                        .any(|name| name == family),
+                    "a {family} face names itself {family}: {:?}",
+                    name_table_families(face.data)
+                );
+            }
+        }
+        assert!(
+            UI_FILES
+                .iter()
+                .all(|face| BUNDLED_UI_FAMILIES.contains(&face.family)),
+            "every UI face belongs to a listed family"
+        );
     }
 
     #[test]
