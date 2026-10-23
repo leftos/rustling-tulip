@@ -696,9 +696,11 @@ struct TracerSidecar {
 }
 
 /// The spawn-time sidecar of the new interactive session `record`, whose
-/// child is `pid`. The direct daemon child is `rt-tracer.exe`, not the agent
-/// CLI, so `program_name` names the tracer and `agent` the CLI;
-/// `is_session_alive` prefers `tracer_pid` + "rt-tracer" when those are set.
+/// child is `pid`. `program_name` is the program the user runs: the agent's
+/// label, as the live record carries it, not the tracer the daemon spawns to
+/// supervise it. Liveness of a tracer-backed session comes from `tracer_pid`,
+/// which `is_session_alive` checks against the tracer's own name, and never
+/// from `program_name`.
 fn interactive_meta(
     record: &SessionRecord,
     pid: u32,
@@ -713,7 +715,7 @@ fn interactive_meta(
         record.members.clone(),
         record.started_at,
         record.workspace_id.clone(),
-        Some("rt-tracer".to_string()),
+        record.program_name.clone(),
         record.agent,
         record.spawn_config.clone(),
         record.last_prompt.clone(),
@@ -722,6 +724,51 @@ fn interactive_meta(
         Some(tracer.pipe),
         Some(tracer.exe_path),
         record.claude_session_id.clone(),
+    )
+}
+
+/// The spawn-time sidecar of a new plain-shell session whose child is `pid`.
+/// Like [`interactive_meta`], `program_name` is the program the user runs: the
+/// shell's label, as the live record carries it, not the tracer the daemon
+/// spawns to supervise it. Liveness of a tracer-backed session comes from
+/// `tracer_pid`. The record itself is already in the registry at the call
+/// site, so this takes the fields the sidecar needs instead of `&record`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "The call site holds the spawn's locals, not the record, so it passes them through"
+)]
+fn plain_shell_meta(
+    session_id: String,
+    pid: u32,
+    label: String,
+    kind: SessionKind,
+    members: Vec<SessionMember>,
+    started_at: chrono::DateTime<Utc>,
+    workspace_id: Option<String>,
+    program_name: Option<String>,
+    stored_config: Option<protocol::SpawnConfig>,
+    current_cwd: Option<String>,
+    tracer: TracerSidecar,
+) -> anyhow::Result<OrphanMeta> {
+    orphan::meta_from_record(
+        session_id,
+        pid,
+        label,
+        kind,
+        SessionMode::PlainShell,
+        members,
+        started_at,
+        workspace_id,
+        program_name,
+        Agent::Claude,
+        stored_config,
+        // Plain shells never carry a kickoff prompt.
+        None,
+        current_cwd,
+        Some(tracer.pid),
+        Some(tracer.pipe),
+        Some(tracer.exe_path),
+        None,
     )
 }
 
@@ -1052,25 +1099,22 @@ async fn spawn_plain_shell_session(
     announce_replayed_prompt(hub, &session_id, awaiting);
 
     if let Some(pid) = pid
-        && let Ok(mut meta) = orphan::meta_from_record(
+        && let Ok(mut meta) = plain_shell_meta(
             session_id.clone(),
             pid,
             label,
             kind,
-            SessionMode::PlainShell,
             members,
             started_at,
             workspace_id,
-            Some("rt-tracer".to_string()),
-            Agent::Claude,
+            Some(shell.label.clone()),
             Some(stored_config),
-            // Plain shells never carry a kickoff prompt.
-            None,
             Some(initial_cwd),
-            Some(tracer_pid),
-            Some(tracer_pipe),
-            Some(tracer_exe_path),
-            None,
+            TracerSidecar {
+                pid: tracer_pid,
+                pipe: tracer_pipe,
+                exe_path: tracer_exe_path,
+            },
         )
     {
         meta.status = Some(snap.status);
@@ -2666,6 +2710,97 @@ mod tests {
         let snap = crate::sync::lock(pending.arc()).snapshot();
         pending.publish_from(None);
         snap
+    }
+
+    /// A spawn-time config captured from a plain request, the way the spawn
+    /// paths capture one.
+    fn standalone_config(mode: SessionMode) -> protocol::SpawnConfig {
+        protocol::SpawnConfig::from_request(&env_spawn(
+            SpawnTarget::Standalone {
+                cwd: None,
+                add_dirs: Vec::new(),
+            },
+            mode,
+            Vec::new(),
+            None,
+        ))
+    }
+
+    /// The sidecar keeps the program the user runs, so a reattached session's
+    /// leaf reads `claude` and not the tracer supervising it.
+    #[test]
+    fn interactive_sidecar_names_the_agent_not_the_tracer() {
+        let record = interactive_record(
+            NewInteractive {
+                session_id: "agent-1".to_owned(),
+                label: "agent-1".to_owned(),
+                kind: SessionKind::Standalone,
+                members: Vec::new(),
+                workspace_id: None,
+                agent: Agent::Claude,
+                cwd: "C:\\work".to_owned(),
+                stored_config: standalone_config(SessionMode::Interactive),
+                last_prompt: None,
+                claude_session_id: None,
+                started_at: Utc::now(),
+                busy_excluded: false,
+            },
+            None,
+        );
+        let meta = interactive_meta(
+            &record,
+            42,
+            TracerSidecar {
+                pid: 7,
+                pipe: r"\\.\pipe\rt-tracer-agent-1".to_owned(),
+                exe_path: "rt-tracer.exe".to_owned(),
+            },
+        )
+        .expect("sidecar meta");
+        assert_eq!(meta.program_name, record.program_name);
+        assert_eq!(meta.program_name.as_deref(), Some("claude"));
+        assert_eq!(meta.tracer_pid, Some(7), "liveness runs off the tracer pid");
+    }
+
+    /// The same for a plain-shell session: its sidecar names the shell.
+    #[test]
+    fn plain_shell_sidecar_names_the_shell_not_the_tracer() {
+        let record = plain_shell_record(
+            NewPlainShell {
+                session_id: "shell-1".to_owned(),
+                label: "shell-1".to_owned(),
+                kind: SessionKind::Standalone,
+                members: Vec::new(),
+                workspace_id: None,
+                shell_label: "pwsh".to_owned(),
+                cwd: "C:\\work".to_owned(),
+                stored_config: standalone_config(SessionMode::PlainShell),
+                started_at: Utc::now(),
+                busy_excluded: false,
+            },
+            None,
+        );
+        let meta = plain_shell_meta(
+            record.id.clone(),
+            42,
+            record.label.clone(),
+            record.kind.clone(),
+            record.members.clone(),
+            record.started_at,
+            record.workspace_id.clone(),
+            record.program_name.clone(),
+            record.spawn_config.clone(),
+            record.current_cwd.clone(),
+            TracerSidecar {
+                pid: 7,
+                pipe: r"\\.\pipe\rt-tracer-shell-1".to_owned(),
+                exe_path: "rt-tracer.exe".to_owned(),
+            },
+        )
+        .expect("sidecar meta");
+        assert_eq!(meta.program_name, record.program_name);
+        assert_eq!(meta.program_name.as_deref(), Some("pwsh"));
+        assert_eq!(meta.tracer_pid, Some(7), "liveness runs off the tracer pid");
     }
 
     #[tokio::test]

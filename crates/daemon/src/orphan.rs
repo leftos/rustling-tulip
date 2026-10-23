@@ -74,12 +74,12 @@ pub struct OrphanMeta {
     /// and for metas written by earlier daemon versions.
     #[serde(default)]
     pub workspace_id: Option<String>,
-    /// Process name substring to match against during orphan-recovery's
-    /// liveness check (case-insensitive). `claude` sessions store the
-    /// program-name token (e.g. `"claude"`); `plain_shell` sessions store the
-    /// shell label (e.g. `"pwsh"`, `"cmd"`, `"bash"`). `None` for metas
-    /// written by earlier daemon versions: the check falls back to the
-    /// legacy `claude`/`node` heuristic.
+    /// The program the user runs, the label the leaf shows: the agent token
+    /// (e.g. `"claude"`) or the shell label (e.g. `"pwsh"`, `"cmd"`,
+    /// `"bash"`). A tracer-backed sidecar's liveness goes by `tracer_pid`;
+    /// only a sidecar without tracer fields matches its `pid` against this
+    /// name (case-insensitive substring), falling back to the legacy
+    /// `claude`/`node` heuristic when it is `None`.
     #[serde(default)]
     pub program_name: Option<String>,
     /// Which CLI spawned this session. `None` for metas written before this

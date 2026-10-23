@@ -690,10 +690,9 @@ where
         resize_tx,
         exit_rx,
         killer,
-        // Sidecar's `pid` field gets the tracer's pid so the legacy liveness
-        // check (`pid` + `program_name`) still resolves to a live process post-
-        // C.3. The explicit `tracer_pid` field carries the same value for
-        // forward-compatible reattach.
+        // The sidecar's `pid` field gets the tracer's pid; liveness and reattach
+        // go by `tracer_pid` (the same value) checked against the tracer's own
+        // name, while `program_name` names the program the user runs.
         pid: pid_for_handle,
     }));
     Ok((handle, negotiated))
