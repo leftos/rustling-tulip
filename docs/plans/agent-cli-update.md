@@ -38,7 +38,7 @@ A session runs whatever version of the CLI is on disk when it starts. Claude Cod
 - Every spawn, including presets (`presets.rs`), duplicates, recover and the in-place checkout confirm, goes through `server.rs::spawn_session`, which does the git and worktree work before `spawn_interactive_session` / `spawn_headless_session`. `spawn_interactive_session` awaits the pre-create runner (`conversations/pre_create.rs`, `PRE_CREATE_TIMEOUT` = 5 s) before the tracer spawn, only for a plugin whose `conversation_plan` is `PreCreate` (Cursor's `create-chat` is one such).
 - `dispatch` is awaited inside each connection's receive loop (`server.rs`, the `dispatch(hub, parsed, ctx).await` in the recv loop), so a `SpawnSession` that waits blocks every later message from that client, including `SendInput` to its other sessions, until it returns. Preset launches already run in a `tokio::spawn`ed task for this reason ("so the dispatcher returns immediately and the connection stays responsive while sessions spawn").
 - `spawn_plan.rs` holds base-ref resolution and `SpawnFailure`, not program resolution; it is not touched here.
-- Host settings that must apply with no window open live in `state.json` (`PersistedState::keep_awake`, `state.rs`) and travel as `ClientMessage::SetKeepAwake` / `DaemonMessage::KeepAwakeStatus`.
+- Host settings that must apply with no window open live in `state.json` (`PersistedState::keep_awake_mode`, `state.rs`) and travel as `ClientMessage::SetKeepAwakeMode` / `DaemonMessage::KeepAwakeStatus`.
 
 ## Design
 
@@ -92,8 +92,8 @@ pub async fn wait(ticket: UpdateTicket, limit: Duration) -> UpdateOutcome;
 
 ### The setting (Open question 7)
 
-- `PersistedState::agent_updates: bool`, `#[serde(default = "default_true")]`, beside `keep_awake` in `state.rs`, read at each spawn.
-- Additive `ClientMessage::SetAgentUpdates { enabled }` and `DaemonMessage::AgentUpdatesStatus { enabled }`, sent at initial state and broadcast on change, like `SetKeepAwake` / `KeepAwakeStatus`.
+- `PersistedState::agent_updates: bool`, `#[serde(default = "default_true")]`, beside `keep_awake_mode` in `state.rs`, read at each spawn.
+- Additive `ClientMessage::SetAgentUpdates { enabled }` and `DaemonMessage::AgentUpdatesStatus { enabled }`, sent at initial state and broadcast on change, like `SetKeepAwakeMode` / `KeepAwakeStatus`.
 - Settings → General gains "Update Claude, Codex and Cursor before launching" (on by default).
 
 ### Overrides and tests (Open question 8)
@@ -160,7 +160,7 @@ Answered (user): Q1 (b) each CLI's own update command only, an install it cannot
    - (b) `daemon.log` and recent actions only. Worst case: a CLI that has failed to update for weeks goes unnoticed until someone reads the log.
    - (c) A toast on every failure and every update. Worst case: a preset of eight sessions produces eight toasts.
 7. **The opt-out.**
-   - (a) *Recommended.* One host setting, `agent_updates` in `state.json` (on by default), with a Settings → General toggle, carried like `keep_awake`. Worst case: a user who wants Claude updated but Codex pinned has to pin Codex another way (its `check_for_update_on_startup = false` does not stop `codex update`).
+   - (a) *Recommended.* One host setting, `agent_updates` in `state.json` (on by default), with a Settings → General toggle, carried like `keep_awake_mode`. Worst case: a user who wants Claude updated but Codex pinned has to pin Codex another way (its `check_for_update_on_startup = false` does not stop `codex update`).
    - (b) One toggle per CLI. Worst case: three settings for a feature most users leave on.
    - (c) An environment variable on the daemon only (`RUSTLING_TULIP_AGENT_UPDATES=0`). Worst case: the daemon started from the login `Run` entry does not see a variable set later, and a phone or other remote client cannot change it.
 8. **The override variables (`RUSTLING_TULIP_CLAUDE`, `RUSTLING_TULIP_CODEX`, `RUSTLING_TULIP_CURSOR_AGENT`).**

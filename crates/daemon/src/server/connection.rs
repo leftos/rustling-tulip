@@ -285,8 +285,12 @@ fn spawn_state_forwarder(
                 Ok(StateEvent::WorktreesRootChanged { root, is_override }) => {
                     let _ = out_tx.send(DaemonMessage::WorktreesRootChanged { root, is_override });
                 }
-                Ok(StateEvent::KeepAwakeStatus { enabled, active }) => {
-                    let _ = out_tx.send(DaemonMessage::KeepAwakeStatus { enabled, active });
+                Ok(StateEvent::KeepAwakeStatus { mode, active }) => {
+                    let _ = out_tx.send(DaemonMessage::KeepAwakeStatus {
+                        enabled: mode != protocol::KeepAwakeMode::Off,
+                        mode,
+                        active,
+                    });
                 }
                 Ok(StateEvent::RemoteStatus {
                     enabled,

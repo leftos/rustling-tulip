@@ -10,7 +10,7 @@ use crate::session::SessionRegistry;
 use crate::state::AppState;
 use crate::{user_env, vscode};
 use anyhow::anyhow;
-use protocol::{ClientMessage, DaemonMessage, VscodeWorkspaceSuggestion};
+use protocol::{ClientMessage, DaemonMessage, KeepAwakeMode, VscodeWorkspaceSuggestion};
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, info, warn};
@@ -135,10 +135,14 @@ pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> 
             });
         }
         ClientMessage::SetKeepAwake { enabled } => {
-            hub.state.set_keep_awake(enabled)?;
-            hub.keep_awake_enabled.send_replace(enabled);
-            info!(enabled, "keep-awake setting changed");
+            let mode = if enabled {
+                KeepAwakeMode::Always
+            } else {
+                KeepAwakeMode::Off
+            };
+            set_keep_awake_mode(hub, mode)?;
         }
+        ClientMessage::SetKeepAwakeMode { mode } => set_keep_awake_mode(hub, mode)?,
         ClientMessage::InspectWorktreesRoot => {
             let root = hub.state.worktrees_dir();
             let is_override = hub.state.worktrees_root_is_override();
@@ -168,32 +172,46 @@ pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> 
     Ok(())
 }
 
-/// Wire up the keep-awake watcher: seed its setting watch from persisted
-/// state, spawn the task, and hand back the two ends the [`Hub`] keeps — the
-/// setting sender (written by [`ClientMessage::SetKeepAwake`]) and the status
+/// Persist `mode` and hand it to the keep-awake watcher, which re-derives the
+/// hold and broadcasts the status. A mode this daemon does not know is
+/// refused: logged, and nothing changes.
+fn set_keep_awake_mode(hub: &Hub, mode: KeepAwakeMode) -> anyhow::Result<()> {
+    if mode == KeepAwakeMode::Unknown {
+        warn!("keep-awake: refused a mode this daemon does not know; the setting is unchanged");
+        return Ok(());
+    }
+    hub.state.set_keep_awake_mode(mode)?;
+    hub.keep_awake_mode.send_replace(mode);
+    info!(?mode, "keep-awake mode changed");
+    Ok(())
+}
+
+/// Wire up the keep-awake watcher: seed its mode watch from persisted state,
+/// spawn the task, and hand back the two ends the [`Hub`] keeps — the mode
+/// sender (written by [`ClientMessage::SetKeepAwakeMode`]) and the status
 /// receiver (read by the initial-state push).
 pub(super) fn start_keep_awake(
     state: &AppState,
     sessions: &Arc<SessionRegistry>,
     state_events: &broadcast::Sender<StateEvent>,
 ) -> (
-    tokio::sync::watch::Sender<bool>,
+    tokio::sync::watch::Sender<KeepAwakeMode>,
     tokio::sync::watch::Receiver<crate::keep_awake::Status>,
 ) {
-    let enabled = state.keep_awake();
-    let (enabled_tx, enabled_rx) = tokio::sync::watch::channel(enabled);
+    let mode = state.keep_awake_mode();
+    let (mode_tx, mode_rx) = tokio::sync::watch::channel(mode);
     let (status_tx, status_rx) = tokio::sync::watch::channel(crate::keep_awake::Status {
-        enabled,
+        mode,
         active: false,
     });
     crate::keep_awake::spawn(
         Arc::clone(sessions),
-        enabled_rx,
+        mode_rx,
         status_tx,
         state_events.clone(),
         crate::keep_awake::native(),
     );
-    (enabled_tx, status_rx)
+    (mode_tx, status_rx)
 }
 
 /// Register the folder at `path` as a repo (or find it already registered),
@@ -440,5 +458,82 @@ mod tests {
             .state
             .with_persisted(|s| s.workspaces.iter().map(|w| w.name.clone()).collect());
         assert_eq!(names, vec!["shop!".to_string()]);
+    }
+
+    /// Leaves the host's power state alone.
+    struct NoHold;
+
+    impl crate::keep_awake::Inhibitor for NoHold {
+        fn set(&mut self, _hold: bool) {}
+    }
+
+    /// The mode of the next keep-awake status on the state broadcast.
+    async fn next_keep_awake_mode(rx: &mut broadcast::Receiver<StateEvent>) -> KeepAwakeMode {
+        loop {
+            let evt = rx.recv().await.expect("the state broadcast stays open");
+            if let StateEvent::KeepAwakeStatus { mode, .. } = evt {
+                return mode;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn set_keep_awake_mode_persists_and_broadcasts_the_mode() {
+        let (hub, _scratch) = test_hub("keep-awake-mode");
+        let mut events = hub.state_events.subscribe();
+        let (status_tx, _status_rx) = tokio::sync::watch::channel(crate::keep_awake::Status {
+            mode: hub.state.keep_awake_mode(),
+            active: false,
+        });
+        crate::keep_awake::spawn(
+            Arc::clone(&hub.sessions),
+            hub.keep_awake_mode.subscribe(),
+            status_tx,
+            hub.state_events.clone(),
+            Box::new(NoHold),
+        );
+        let wait = std::time::Duration::from_secs(5);
+        let first = tokio::time::timeout(wait, next_keep_awake_mode(&mut events))
+            .await
+            .expect("the watcher publishes its first status");
+        assert_eq!(first, KeepAwakeMode::WhenBusy, "the persisted default");
+
+        let sent = dispatch_err(
+            &hub,
+            ClientMessage::SetKeepAwakeMode {
+                mode: KeepAwakeMode::Always,
+            },
+        )
+        .await;
+        assert_eq!(sent, None, "the change is accepted");
+        assert_eq!(hub.state.keep_awake_mode(), KeepAwakeMode::Always);
+        let reloaded = AppState::load_or_default(&hub.dirs).expect("reload state");
+        assert_eq!(
+            reloaded.keep_awake_mode(),
+            KeepAwakeMode::Always,
+            "the mode reached state.json"
+        );
+        let broadcast = tokio::time::timeout(wait, next_keep_awake_mode(&mut events))
+            .await
+            .expect("the watcher broadcasts the new mode");
+        assert_eq!(broadcast, KeepAwakeMode::Always);
+    }
+
+    #[tokio::test]
+    async fn legacy_set_keep_awake_maps_onto_the_modes() {
+        let (hub, _scratch) = test_hub("keep-awake-legacy");
+        for (enabled, want) in [(false, KeepAwakeMode::Off), (true, KeepAwakeMode::Always)] {
+            let sent = dispatch_err(&hub, ClientMessage::SetKeepAwake { enabled }).await;
+            assert_eq!(
+                sent, None,
+                "SetKeepAwake {{ enabled: {enabled} }} is accepted"
+            );
+            assert_eq!(hub.state.keep_awake_mode(), want, "persisted for {enabled}");
+            assert_eq!(
+                *hub.keep_awake_mode.borrow(),
+                want,
+                "published for {enabled}"
+            );
+        }
     }
 }

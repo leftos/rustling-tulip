@@ -488,7 +488,7 @@ impl Fixture {
             tabs: parse_message(json!({ "type": "tabs", "tabs": tabs }))
                 .context("the fixture's tabs")?,
             keep_awake: parse_message(json!({
-                "type": "keep_awake_status", "enabled": true, "active": true,
+                "type": "keep_awake_status", "enabled": true, "mode": "when_busy", "active": true,
             }))
             .context("the fixture's keep-awake status")?,
             attention: parse_message(json!({

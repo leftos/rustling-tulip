@@ -2469,9 +2469,7 @@ impl RootView {
             DaemonMessage::ShutdownAck {} => self.on_shutdown_ack(cx),
             DaemonMessage::Repos { repos } => self.on_repos(&repos, cx),
             DaemonMessage::Workspaces { workspaces } => self.on_workspaces(&workspaces, window, cx),
-            DaemonMessage::KeepAwakeStatus { enabled, active } => {
-                self.set_keep_awake(Some(settings_view::KeepAwake { enabled, active }));
-            }
+            msg @ DaemonMessage::KeepAwakeStatus { .. } => self.on_keep_awake_status(&msg),
             msg @ DaemonMessage::RemoteStatus { .. } => self.on_remote_status(msg, cx),
             _ => {}
         }

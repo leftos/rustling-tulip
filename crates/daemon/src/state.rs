@@ -9,7 +9,7 @@
 use crate::env_secrets::{self, SealOutcome};
 use crate::paths::{Dirs, simplify_path};
 use anyhow::Context as _;
-use protocol::{ContainerRef, RepoEntry, TabEntry, WorkspaceEntry};
+use protocol::{ContainerRef, KeepAwakeMode, RepoEntry, TabEntry, WorkspaceEntry};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -33,13 +33,7 @@ pub struct ClientLayout {
     pub tabs: Vec<TabEntry>,
 }
 
-/// serde default for [`PersistedState::keep_awake`]. A state.json written
-/// before the setting existed must load as enabled, matching a fresh install.
-fn default_true() -> bool {
-    true
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PersistedState {
     pub repos: Vec<RepoEntry>,
     pub workspaces: Vec<WorkspaceEntry>,
@@ -73,30 +67,12 @@ pub struct PersistedState {
     /// effect on the next session without a daemon restart.
     #[serde(default)]
     pub worktrees_root_override: Option<String>,
-    /// Host setting: hold the OS awake while any session has a live child.
-    /// Lives here rather than in the app so it applies with no window open —
-    /// the daemon outlives the window. Old state.json files (and a fresh
-    /// install) default to enabled; see [`default_true`].
-    #[serde(default = "default_true")]
-    pub keep_awake: bool,
-}
-
-/// Hand-written so a fresh install (no state.json) matches what serde
-/// produces for a file without the field: `keep_awake` on. A derived
-/// `Default` would silently start with the hold disabled.
-impl Default for PersistedState {
-    fn default() -> Self {
-        Self {
-            repos: Vec::new(),
-            workspaces: Vec::new(),
-            layouts: HashMap::new(),
-            legacy_tabs: Vec::new(),
-            container_order: Vec::new(),
-            session_order: HashMap::new(),
-            worktrees_root_override: None,
-            keep_awake: default_true(),
-        }
-    }
+    /// Host setting: when the daemon holds the OS awake. Lives here rather
+    /// than in the app so it applies with no window open — the daemon
+    /// outlives the window. A fresh install and a state.json without the
+    /// field get [`KeepAwakeMode::WhenBusy`].
+    #[serde(default)]
+    pub keep_awake_mode: KeepAwakeMode,
 }
 
 #[derive(Debug)]
@@ -254,17 +230,17 @@ impl AppState {
         Ok((self.worktrees_dir(), self.worktrees_root_is_override()))
     }
 
-    /// Whether the daemon should hold the OS awake while a session is live.
-    /// Read at startup to seed the keep-awake watcher's setting watch.
-    pub fn keep_awake(&self) -> bool {
-        self.with_persisted(|s| s.keep_awake)
+    /// When the daemon should hold the OS awake. Read at startup to seed the
+    /// keep-awake watcher's setting watch.
+    pub fn keep_awake_mode(&self) -> KeepAwakeMode {
+        self.with_persisted(|s| s.keep_awake_mode)
     }
 
-    /// Persist the keep-awake setting. The caller re-publishes it on the
-    /// watch so the running watcher re-derives the hold without a restart.
-    pub fn set_keep_awake(&self, enabled: bool) -> anyhow::Result<()> {
+    /// Persist the keep-awake mode. The caller re-publishes it on the watch
+    /// so the running watcher re-derives the hold without a restart.
+    pub fn set_keep_awake_mode(&self, mode: KeepAwakeMode) -> anyhow::Result<()> {
         self.mutate(|s| {
-            s.keep_awake = enabled;
+            s.keep_awake_mode = mode;
         })
     }
 
@@ -526,43 +502,40 @@ mod tests {
     }
 
     #[test]
-    fn keep_awake_defaults_to_enabled_for_old_state_files() {
+    fn keep_awake_mode_defaults_to_when_busy_and_round_trips() {
         let json = r#"{"repos": [], "workspaces": []}"#;
-        let state: PersistedState = serde_json::from_str(json).expect("parse old state");
-        assert!(
-            state.keep_awake,
-            "a state.json predating the setting must load as enabled"
+        let old: PersistedState = serde_json::from_str(json).expect("parse old state");
+        assert_eq!(
+            old.keep_awake_mode,
+            KeepAwakeMode::WhenBusy,
+            "a state.json without the setting loads as When busy"
         );
-    }
 
-    #[test]
-    fn set_keep_awake_round_trips_through_disk() {
         let dirs = scratch_dirs("keepawake");
-        let state = AppState::load_or_default(&dirs).expect("load state");
-        assert!(state.keep_awake(), "fresh state starts enabled");
-        state
-            .set_keep_awake(false)
-            .expect("persist keep_awake=false");
-        assert!(!state.keep_awake());
-
-        let reloaded = AppState::load_or_default(&dirs).expect("reload state");
-        assert!(
-            !reloaded.keep_awake(),
-            "the disabled setting survives a reload"
-        );
-
-        let _ = std::fs::remove_dir_all(&dirs.config);
-    }
-
-    #[test]
-    fn fresh_install_without_state_file_keeps_awake() {
-        let dirs = scratch_dirs("keepawake-fresh");
         assert!(!dirs.state_file.exists(), "scratch dir starts empty");
         let state = AppState::load_or_default(&dirs).expect("load state");
-        assert!(
-            state.keep_awake(),
-            "a fresh install must default to holding the machine awake"
+        assert_eq!(
+            state.keep_awake_mode(),
+            KeepAwakeMode::WhenBusy,
+            "a fresh install holds the machine awake while a session is busy"
         );
+        state
+            .set_keep_awake_mode(KeepAwakeMode::Always)
+            .expect("persist the mode");
+        assert_eq!(state.keep_awake_mode(), KeepAwakeMode::Always);
+
+        let reloaded = AppState::load_or_default(&dirs).expect("reload state");
+        assert_eq!(
+            reloaded.keep_awake_mode(),
+            KeepAwakeMode::Always,
+            "the mode survives a reload"
+        );
+        let text = std::fs::read_to_string(&dirs.state_file).expect("read state.json");
+        assert!(
+            text.contains("\"keep_awake_mode\""),
+            "stored as keep_awake_mode"
+        );
+        assert!(!text.contains("\"keep_awake\""), "the boolean key is gone");
 
         let _ = std::fs::remove_dir_all(&dirs.config);
     }
@@ -618,21 +591,31 @@ mod tests {
     fn try_mutate_ok_commits_and_writes() {
         let dirs = scratch_dirs("try-ok");
         let state = AppState::load_or_default(&dirs).expect("load state");
-        state.set_keep_awake(false).expect("seed state.json");
+        state
+            .set_keep_awake_mode(KeepAwakeMode::Off)
+            .expect("seed state.json");
 
         state
             .try_mutate(|s| {
-                s.keep_awake = true;
+                s.keep_awake_mode = KeepAwakeMode::Always;
                 s.legacy_tabs.push(sample_tab("committed"));
                 Ok(())
             })
             .expect("a closure that returns Ok commits");
 
-        assert!(state.keep_awake(), "the clone's change is live");
+        assert_eq!(
+            state.keep_awake_mode(),
+            KeepAwakeMode::Always,
+            "the clone's change is live"
+        );
         assert_eq!(state.legacy_tabs().len(), 1, "and so is its tab");
 
         let reloaded = AppState::load_or_default(&dirs).expect("reload state");
-        assert!(reloaded.keep_awake(), "the change reached state.json");
+        assert_eq!(
+            reloaded.keep_awake_mode(),
+            KeepAwakeMode::Always,
+            "the change reached state.json"
+        );
         assert_eq!(
             reloaded.legacy_tabs().len(),
             1,
@@ -646,20 +629,26 @@ mod tests {
     fn try_mutate_err_leaves_state_and_disk_unchanged() {
         let dirs = scratch_dirs("try-err");
         let state = AppState::load_or_default(&dirs).expect("load state");
-        state.set_keep_awake(false).expect("seed state.json");
+        state
+            .set_keep_awake_mode(KeepAwakeMode::Off)
+            .expect("seed state.json");
         let before_bytes = std::fs::read(&dirs.state_file).expect("read state.json");
         assert!(before_bytes.len() > 2, "the seeded state.json has content");
 
         let err = state
             .try_mutate(|s| -> anyhow::Result<()> {
-                s.keep_awake = true;
+                s.keep_awake_mode = KeepAwakeMode::Always;
                 s.legacy_tabs.push(sample_tab("rolled-back"));
                 anyhow::bail!("closure failed after mutating");
             })
             .expect_err("the closure's error propagates");
         assert_eq!(err.to_string(), "closure failed after mutating");
 
-        assert!(!state.keep_awake(), "the in-memory change was rolled back");
+        assert_eq!(
+            state.keep_awake_mode(),
+            KeepAwakeMode::Off,
+            "the in-memory change was rolled back"
+        );
         assert!(
             state.legacy_tabs().is_empty(),
             "the in-memory tab was rolled back"

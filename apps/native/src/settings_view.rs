@@ -15,8 +15,8 @@ use gpui::{
     Window, div, prelude::*, px,
 };
 use protocol::{
-    ClaudeProvider, ClientMessage, DaemonMessage, FEATURE_CLAUDE_PROVIDER, PermissionMode,
-    RemoteState,
+    ClaudeProvider, ClientMessage, DaemonMessage, FEATURE_CLAUDE_PROVIDER, KeepAwakeMode,
+    PermissionMode, RemoteState,
 };
 
 use crate::appearance;
@@ -182,6 +182,13 @@ const ROWS: [SettingsRow; 9] = [
     SettingsRow::Tab(SettingsTab::Claude),
 ];
 
+/// The General tab's keep-awake choices, in the order they show.
+const KEEP_AWAKE_CHOICES: [KeepAwakeMode; 3] = [
+    KeepAwakeMode::Off,
+    KeepAwakeMode::WhenBusy,
+    KeepAwakeMode::Always,
+];
+
 /// The General tab's Default view choices, in the order they show.
 const SIDEBAR_VIEW_CHOICES: [SidebarView; 2] = [SidebarView::Repos, SidebarView::Tabs];
 
@@ -195,7 +202,7 @@ const NOTIFY_SKIP_CHOICES: [NotifySkip; 3] =
 /// A control of a Settings tab that Tab can reach.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SettingsControl {
-    KeepAwake,
+    KeepAwake(KeepAwakeMode),
     SidebarView(SidebarView),
     LeafDensity(LeafDensity),
     OpenTextExternally,
@@ -224,7 +231,12 @@ pub(crate) enum SettingsControl {
 impl SettingsControl {
     const fn selector(self) -> &'static str {
         match self {
-            Self::KeepAwake => "settings-keep-awake-toggle",
+            Self::KeepAwake(mode) => match mode {
+                KeepAwakeMode::Off => "settings-keep-awake-off",
+                KeepAwakeMode::WhenBusy => "settings-keep-awake-when-busy",
+                KeepAwakeMode::Always => "settings-keep-awake-always",
+                KeepAwakeMode::Unknown => "settings-keep-awake-unknown",
+            },
             Self::SidebarView(SidebarView::Repos) => "settings-sidebar-view-repos",
             Self::SidebarView(SidebarView::Tabs) => "settings-sidebar-view-tabs",
             Self::LeafDensity(LeafDensity::Comfortable) => "settings-leaf-density-comfortable",
@@ -304,35 +316,42 @@ pub(crate) struct RemoteAccessTab {
     _subscriptions: Vec<Subscription>,
 }
 
-/// The daemon's keep-awake setting and whether it holds the machine awake
-/// now.
+/// The daemon's keep-awake mode and whether it holds the machine awake now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct KeepAwake {
-    pub(crate) enabled: bool,
+    pub(crate) mode: KeepAwakeMode,
     pub(crate) active: bool,
 }
 
-/// What the keep-awake button offers.
-const fn keep_awake_label(state: Option<KeepAwake>) -> &'static str {
-    match state {
-        Some(KeepAwake { enabled: true, .. }) => "Allow sleep while sessions run",
-        _ => "Keep this machine awake while sessions run",
-    }
-}
-
-/// The line beside the keep-awake button.
+/// The line under the keep-awake choices, and their locked note while the
+/// daemon is not connected.
 const fn keep_awake_status(state: Option<KeepAwake>) -> &'static str {
     match state {
         None => "(daemon not connected)",
         Some(KeepAwake {
-            enabled: true,
-            active: true,
-        }) => "Holding the machine awake — a session is live.",
+            mode: KeepAwakeMode::Off,
+            ..
+        }) => "The machine may sleep while sessions run.",
         Some(KeepAwake {
-            enabled: true,
+            mode: KeepAwakeMode::WhenBusy,
+            active: true,
+        }) => "Holding the machine awake — a session is busy.",
+        Some(KeepAwake {
+            mode: KeepAwakeMode::WhenBusy,
             active: false,
-        }) => "Sleep is allowed until a session starts.",
-        Some(KeepAwake { enabled: false, .. }) => "The machine may sleep while sessions run.",
+        }) => "Sleep is allowed while no session is busy.",
+        Some(KeepAwake { active: true, .. }) => "Holding the machine awake — a session is live.",
+        Some(KeepAwake { active: false, .. }) => "Sleep is allowed until a session starts.",
+    }
+}
+
+/// A keep-awake choice's text.
+const fn keep_awake_choice_text(mode: KeepAwakeMode) -> &'static str {
+    match mode {
+        KeepAwakeMode::Off => "Off",
+        KeepAwakeMode::WhenBusy => "When busy",
+        KeepAwakeMode::Always => "Always",
+        KeepAwakeMode::Unknown => "Unknown",
     }
 }
 
@@ -433,10 +452,11 @@ impl RootView {
         self.settings_tab.label()
     }
 
-    /// The keep-awake button's label and whether it can be pressed.
+    /// The keep-awake choice selected, or `None` while the daemon has not
+    /// reported one and the choices are locked.
     #[must_use]
-    pub fn keep_awake_button(&self) -> (&'static str, bool) {
-        (keep_awake_label(self.keep_awake), self.keep_awake.is_some())
+    pub fn keep_awake_mode(&self) -> Option<KeepAwakeMode> {
+        self.keep_awake.map(|state| state.mode)
     }
 
     /// The keep-awake status line.
@@ -485,9 +505,12 @@ impl RootView {
     fn settings_controls(&self, cx: &App) -> Vec<SettingsControl> {
         match self.settings_tab {
             SettingsTab::General => {
-                let keep_awake = self.keep_awake.map(|_| SettingsControl::KeepAwake);
+                let keep_awake = self
+                    .keep_awake
+                    .map(|_| KEEP_AWAKE_CHOICES.map(SettingsControl::KeepAwake));
                 keep_awake
                     .into_iter()
+                    .flatten()
                     .chain(SIDEBAR_VIEW_CHOICES.map(SettingsControl::SidebarView))
                     .chain(LEAF_DENSITY_CHOICES.map(SettingsControl::LeafDensity))
                     .chain([
@@ -683,7 +706,7 @@ impl RootView {
     ) {
         self.move_settings_focus(control, window, cx);
         match control {
-            SettingsControl::KeepAwake => self.toggle_keep_awake(),
+            SettingsControl::KeepAwake(mode) => self.choose_keep_awake_mode(mode),
             SettingsControl::SidebarView(view) => self.set_sidebar_view(view, cx),
             SettingsControl::LeafDensity(density) => self.set_leaf_density(density, cx),
             SettingsControl::OpenTextExternally => self.toggle_open_text_externally(cx),
@@ -1371,11 +1394,18 @@ impl RootView {
         self.keep_awake = state;
     }
 
-    fn toggle_keep_awake(&mut self) {
-        if let Some(state) = self.keep_awake {
-            self.send(ClientMessage::SetKeepAwake {
-                enabled: !state.enabled,
-            });
+    /// Takes the daemon's [`DaemonMessage::KeepAwakeStatus`].
+    pub(crate) fn on_keep_awake_status(&mut self, msg: &DaemonMessage) {
+        if let DaemonMessage::KeepAwakeStatus { mode, active, .. } = *msg {
+            self.set_keep_awake(Some(KeepAwake { mode, active }));
+        }
+    }
+
+    /// Asks the daemon for `mode`; the choice follows its echo. Nothing is
+    /// sent while the daemon is not connected.
+    fn choose_keep_awake_mode(&mut self, mode: KeepAwakeMode) {
+        if self.keep_awake.is_some() {
+            self.send(ClientMessage::SetKeepAwakeMode { mode });
         }
     }
 
@@ -1938,30 +1968,28 @@ impl RootView {
         focused: Option<SettingsControl>,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        let (label, enabled) = self.keep_awake_button();
-        let keep_awake = SettingsControl::KeepAwake;
-        let button = dialog_button(
-            keep_awake.selector(),
-            label.to_owned(),
-            false,
-            focused == Some(keep_awake),
-            enabled,
-        );
-        let button = if enabled {
-            button.on_click(press(keep_awake, cx))
-        } else {
-            button
-        };
-        let status = hint(self.keep_awake_status())
-            .debug_selector(|| "settings-keep-awake-status".to_owned());
-        let power = section("Power").child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(10.0))
-                .child(button)
-                .child(status),
-        );
+        let selected = self.keep_awake_mode();
+        let modes = KEEP_AWAKE_CHOICES.map(|choice| {
+            (
+                SettingsControl::KeepAwake(choice),
+                keep_awake_choice_text(choice),
+                Some(choice) == selected,
+            )
+        });
+        let status_selector = "settings-keep-awake-status";
+        let status_text = self.keep_awake_status();
+        let locked = selected.is_none().then_some((status_text, status_selector));
+        let status =
+            selected.map(|_| hint(status_text).debug_selector(move || status_selector.to_owned()));
+        let power = section("Power")
+            .child(choice_row(
+                "Keep this PC awake",
+                &modes,
+                locked,
+                focused,
+                cx,
+            ))
+            .children(status);
         let view = self.sidebar.sidebar_view();
         let choices = SIDEBAR_VIEW_CHOICES.map(|choice| {
             let text = match choice {

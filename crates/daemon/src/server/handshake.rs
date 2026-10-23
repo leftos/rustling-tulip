@@ -211,7 +211,8 @@ pub(super) fn push_initial_state(
     });
     let keep_awake = *hub.keep_awake_status.borrow();
     let _ = out_tx.send(DaemonMessage::KeepAwakeStatus {
-        enabled: keep_awake.enabled,
+        enabled: keep_awake.mode != protocol::KeepAwakeMode::Off,
+        mode: keep_awake.mode,
         active: keep_awake.active,
     });
     // Held across the send: every RemoteStatus broadcast is published under

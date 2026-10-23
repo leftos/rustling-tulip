@@ -12,7 +12,7 @@ use crate::support;
 use std::time::Duration;
 
 use gpui::{Modifiers, Point, TestAppContext, point, px};
-use protocol::{ClientMessage, DaemonMessage, SplitDirection, TabEntry};
+use protocol::{ClientMessage, DaemonMessage, KeepAwakeMode, SplitDirection, TabEntry};
 use rustling_tulip_native::{SidebarView, fonts};
 use support::{Fixture, Harness, TestDir, pane, session, split, tab};
 
@@ -143,7 +143,7 @@ fn settings_opens_on_general_with_tab_order(cx: &mut TestAppContext) {
         tops.windows(2).all(|pair| pair[0] < pair[1]),
         "painted top to bottom in order: {tops:?}"
     );
-    assert!(h.bounds("settings-keep-awake-toggle").origin.x >= px(0.0));
+    assert!(h.bounds("settings-keep-awake-when-busy").origin.x >= px(0.0));
 
     h.click_on("settings-tab-worktrees");
     assert_eq!(shown_tab(&mut h), "Worktrees");
@@ -171,6 +171,7 @@ fn settings_takes_the_dialog_frames_sizes(cx: &mut TestAppContext) {
         "a 28 px close"
     );
     for selector in [
+        "settings-keep-awake-always",
         "settings-sidebar-view-repos",
         "settings-leaf-density-compact",
     ] {
@@ -212,44 +213,47 @@ fn down_moves_to_next_tab(cx: &mut TestAppContext) {
     assert_eq!(shown_tab(&mut h), "General", "Up stops at the first tab");
 }
 
+/// The daemon's keep-awake status for `mode`, as it sends it.
+fn keep_awake_status(mode: KeepAwakeMode, active: bool) -> DaemonMessage {
+    DaemonMessage::KeepAwakeStatus {
+        enabled: mode != KeepAwakeMode::Off,
+        mode,
+        active,
+    }
+}
+
 #[gpui::test]
-fn keep_awake_button_sends_toggle(cx: &mut TestAppContext) {
+fn keep_awake_choice_sends_the_mode(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);
-    h.send(DaemonMessage::KeepAwakeStatus {
-        enabled: false,
-        active: false,
-    });
+    h.send(keep_awake_status(KeepAwakeMode::Off, false));
     h.keys("ctrl-,");
     assert_eq!(
-        h.root(|root, _| root.keep_awake_button()),
-        ("Keep this machine awake while sessions run", true)
+        h.root(|root, _| root.keep_awake_mode()),
+        Some(KeepAwakeMode::Off)
     );
-    h.click_on("settings-keep-awake-toggle");
-    let toggles: Vec<bool> = h
+    h.click_on("settings-keep-awake-when-busy");
+    let modes: Vec<KeepAwakeMode> = h
         .sent()
         .iter()
         .filter_map(|msg| match msg {
-            ClientMessage::SetKeepAwake { enabled } => Some(*enabled),
+            ClientMessage::SetKeepAwakeMode { mode } => Some(*mode),
             _ => None,
         })
         .collect();
-    assert_eq!(toggles, [true]);
-
-    h.send(DaemonMessage::KeepAwakeStatus {
-        enabled: true,
-        active: false,
-    });
-    assert_eq!(
-        h.root(|root, _| root.keep_awake_button()),
-        ("Allow sleep while sessions run", true)
-    );
-    h.click_on("settings-keep-awake-toggle");
+    assert_eq!(modes, [KeepAwakeMode::WhenBusy]);
     assert!(
-        h.sent()
+        !h.sent()
             .iter()
-            .any(|msg| matches!(msg, ClientMessage::SetKeepAwake { enabled: false })),
-        "pressed again, it allows sleep"
+            .any(|msg| matches!(msg, ClientMessage::SetKeepAwake { .. })),
+        "the client sends only the mode message"
+    );
+
+    h.send(keep_awake_status(KeepAwakeMode::WhenBusy, false));
+    assert_eq!(
+        h.root(|root, _| root.keep_awake_mode()),
+        Some(KeepAwakeMode::WhenBusy),
+        "the daemon's echo selects the choice"
     );
 }
 
@@ -259,25 +263,44 @@ fn keep_awake_status_texts(cx: &mut TestAppContext) {
     let mut h = opened(cx, &dir);
     let status = |h: &mut Harness<'_>| h.root(|root, _| root.keep_awake_status());
     assert_eq!(status(&mut h), "(daemon not connected)");
-    assert!(!h.root(|root, _| root.keep_awake_button()).1, "disabled");
+    assert_eq!(h.root(|root, _| root.keep_awake_mode()), None, "locked");
     h.keys("ctrl-,");
-    h.click_on("settings-keep-awake-toggle");
+    h.click_on("settings-keep-awake-always");
     assert!(
         !h.sent()
             .iter()
-            .any(|msg| matches!(msg, ClientMessage::SetKeepAwake { .. })),
-        "a disabled button sends nothing"
+            .any(|msg| matches!(msg, ClientMessage::SetKeepAwakeMode { .. })),
+        "a locked choice sends nothing"
     );
 
+    let off = "The machine may sleep while sessions run.";
     let cases = [
-        (true, true, "Holding the machine awake — a session is live."),
-        (true, false, "Sleep is allowed until a session starts."),
-        (false, false, "The machine may sleep while sessions run."),
-        (false, true, "The machine may sleep while sessions run."),
+        (
+            KeepAwakeMode::Always,
+            true,
+            "Holding the machine awake — a session is live.",
+        ),
+        (
+            KeepAwakeMode::Always,
+            false,
+            "Sleep is allowed until a session starts.",
+        ),
+        (
+            KeepAwakeMode::WhenBusy,
+            true,
+            "Holding the machine awake — a session is busy.",
+        ),
+        (
+            KeepAwakeMode::WhenBusy,
+            false,
+            "Sleep is allowed while no session is busy.",
+        ),
+        (KeepAwakeMode::Off, false, off),
+        (KeepAwakeMode::Off, true, off),
     ];
-    for (enabled, active, text) in cases {
-        h.send(DaemonMessage::KeepAwakeStatus { enabled, active });
-        assert_eq!(status(&mut h), text, "enabled {enabled}, active {active}");
+    for (mode, active, text) in cases {
+        h.send(keep_awake_status(mode, active));
+        assert_eq!(status(&mut h), text, "mode {mode:?}, active {active}");
     }
 
     h.lose_connection();
@@ -470,28 +493,33 @@ fn leaf_density_choice_switches_the_leaves_saves_and_is_reached_by_tab(cx: &mut 
 fn tab_walks_general_controls_and_space_toggles(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);
-    h.send(DaemonMessage::KeepAwakeStatus {
-        enabled: false,
-        active: false,
-    });
+    h.send(keep_awake_status(KeepAwakeMode::Off, false));
     h.keys("ctrl-,");
     assert_eq!(settings_focus(&mut h), Some("list"));
 
     h.keys("tab");
-    assert_eq!(settings_focus(&mut h), Some("settings-keep-awake-toggle"));
+    assert_eq!(settings_focus(&mut h), Some("settings-keep-awake-off"));
+    h.keys("tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("settings-keep-awake-when-busy")
+    );
     h.keys("space");
     assert!(
-        h.sent()
-            .iter()
-            .any(|msg| matches!(msg, ClientMessage::SetKeepAwake { enabled: true })),
-        "Space presses the keep-awake button"
+        h.sent().iter().any(|msg| matches!(
+            msg,
+            ClientMessage::SetKeepAwakeMode {
+                mode: KeepAwakeMode::WhenBusy
+            }
+        )),
+        "Space presses the keep-awake choice"
     );
 
-    h.keys("tab tab tab tab tab");
+    h.keys("tab tab tab tab tab tab");
     assert_eq!(
         settings_focus(&mut h),
         Some("settings-general-open-text-externally"),
-        "past the two Default view and the two Leaf density choices"
+        "past Always, the two Default view and the two Leaf density choices"
     );
     h.keys("space");
     assert_eq!(saved_ui(&dir)["general"]["open_text_externally"], true);
@@ -517,7 +545,13 @@ fn tab_walks_general_controls_and_space_toggles(cx: &mut TestAppContext) {
         Some("settings-terminal-copy-on-selection"),
         "Shift+Tab walks back"
     );
-    h.keys("shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab");
+    h.keys("shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("settings-keep-awake-off"),
+        "back past every General control to the first keep-awake choice"
+    );
+    h.keys("shift-tab");
     assert_eq!(settings_focus(&mut h), Some("list"));
     assert_eq!(shown_tab(&mut h), "General");
 
@@ -570,14 +604,11 @@ fn general_default_view_row_switches_the_open_sidebar_and_saves(cx: &mut TestApp
 fn general_tab_ring_includes_the_default_view_choices(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);
-    h.send(DaemonMessage::KeepAwakeStatus {
-        enabled: false,
-        active: false,
-    });
+    h.send(keep_awake_status(KeepAwakeMode::Off, false));
     h.keys("ctrl-,");
     h.keys("tab");
-    assert_eq!(settings_focus(&mut h), Some("settings-keep-awake-toggle"));
-    h.keys("tab");
+    assert_eq!(settings_focus(&mut h), Some("settings-keep-awake-off"));
+    h.keys("tab tab tab");
     assert_eq!(settings_focus(&mut h), Some("settings-sidebar-view-repos"));
     h.keys("tab");
     assert_eq!(settings_focus(&mut h), Some("settings-sidebar-view-tabs"));

@@ -68,7 +68,7 @@ The earlier Tauri desktop app is retired and not on `main`: the `tauri` branch, 
 
   `crates/tailnet` wraps the CLI and the owner rule; a connection presents a device token rather than the `daemon.json` token (device approval is TS.3b).
 - **Remote file fetch**: `FetchFile` streams a file under a registered repo or session worktree in chunks, confined by one path-confinement helper that `GetFileSnapshot` and `GetFileDiff` share. The native client's sink (`RootView::fetch_remote_file`) saves it under the machine-local `remote-files` root and opens it; a Ctrl+click on a terminal path link on a remote host calls it (`fetch_link.rs` works out the readings), and so does the ⋯ menu's "Fetch file…" popup (`fetch_dialog.rs`, `fetch_dialog_view.rs`), a modal with progress, Cancel and inline errors.
-- **Host behaviour**: the daemon holds an idle-sleep inhibitor while any session has a live child (`keep_awake`, default on); a second daemon on the same config dir exits at once; the startup reap and binary-cache GC touch only tracers and binaries this config dir owns; the login entry runs `rustling-tulipd --detach`, which copies itself into the binary cache and starts that copy.
+- **Host behaviour**: the daemon holds an idle-sleep inhibitor as the `keep_awake_mode` host setting says (`SetKeepAwakeMode`; Off never holds, When busy, the default, holds while a session is busy by the client's own busy set, Always holds while any session has a live child); a second daemon on the same config dir exits at once; the startup reap and binary-cache GC touch only tracers and binaries this config dir owns; the login entry runs `rustling-tulipd --detach`, which copies itself into the binary cache and starts that copy.
 
 ## Task index
 

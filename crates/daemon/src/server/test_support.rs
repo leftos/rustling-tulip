@@ -112,10 +112,10 @@ pub(super) fn build_test_hub(
     let (preset_events, _) = broadcast::channel(16);
     let (state_events, _) = broadcast::channel(16);
     let (client_count, _) = tokio::sync::watch::channel(0usize);
-    let (keep_awake_enabled, _) = tokio::sync::watch::channel(true);
+    let (keep_awake_mode, _) = tokio::sync::watch::channel(protocol::KeepAwakeMode::default());
     let (remote_enabled, _) = tokio::sync::watch::channel(false);
     let (_, keep_awake_status) = tokio::sync::watch::channel(crate::keep_awake::Status {
-        enabled: true,
+        mode: protocol::KeepAwakeMode::default(),
         active: false,
     });
     let hub = Hub {
@@ -137,7 +137,7 @@ pub(super) fn build_test_hub(
         remote_status: Arc::new(tokio::sync::watch::Sender::new(RemoteSlot::initial(
             crate::remote_config::RemoteConfig::default(),
         ))),
-        keep_awake_enabled: Arc::new(keep_awake_enabled),
+        keep_awake_mode: Arc::new(keep_awake_mode),
         keep_awake_status,
         recovering: RecoveryClaims::default(),
         resume_in_flight: Arc::default(),

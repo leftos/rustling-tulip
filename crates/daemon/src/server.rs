@@ -119,11 +119,11 @@ pub struct Hub {
     /// by [`ClientMessage::ConfigureRemote`] and by the listener's status
     /// relay.
     pub remote_status: Arc<tokio::sync::watch::Sender<RemoteSlot>>,
-    /// The persisted keep-awake setting, published to the watcher.
-    /// [`ClientMessage::SetKeepAwake`] writes it here after saving to
+    /// The persisted keep-awake mode, published to the watcher.
+    /// [`ClientMessage::SetKeepAwakeMode`] writes it here after saving to
     /// `state.json`; the watcher re-derives the OS hold and broadcasts the
     /// resulting status itself.
-    pub keep_awake_enabled: Arc<tokio::sync::watch::Sender<bool>>,
+    pub keep_awake_mode: Arc<tokio::sync::watch::Sender<protocol::KeepAwakeMode>>,
     /// Latest keep-awake status from the watcher, read by the initial-state
     /// push so a freshly-connected client renders the toggle correctly
     /// without waiting for the next broadcast.
@@ -207,7 +207,7 @@ pub enum StateEvent {
     /// client's Settings UI reflects it without polling. Mirrors
     /// [`protocol::DaemonMessage::KeepAwakeStatus`].
     KeepAwakeStatus {
-        enabled: bool,
+        mode: protocol::KeepAwakeMode,
         active: bool,
     },
     /// Broadcast on every remote-access status change: a
@@ -363,7 +363,7 @@ pub async fn run(
         remote_enabled: Arc::new(tokio::sync::watch::Sender::new(remote.enabled)),
         tailnet: Arc::new(AsyncMutex::new(None)),
         remote_status: Arc::new(tokio::sync::watch::Sender::new(RemoteSlot::initial(remote))),
-        keep_awake_enabled: Arc::new(keep_awake_tx),
+        keep_awake_mode: Arc::new(keep_awake_tx),
         keep_awake_status: keep_awake_status_rx,
         recovering: RecoveryClaims::default(),
         resume_in_flight: Arc::default(),
@@ -543,6 +543,7 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         | ClientMessage::StartPairing
         | ClientMessage::CancelPairing
         | ClientMessage::SetKeepAwake { .. }
+        | ClientMessage::SetKeepAwakeMode { .. }
         | ClientMessage::InspectWorktreesRoot
         | ClientMessage::DeleteWorktreeAt { .. }) => settings::handle(hub, m, ctx).await?,
         m @ (ClientMessage::PreviewWorkspaceSpawn { .. }

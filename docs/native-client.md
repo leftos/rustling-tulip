@@ -102,7 +102,7 @@ This doc records the decisions a change to the client needs to know; what each f
 - On Windows a build without debug assertions (release, test-release) is a GUI-subsystem exe, so an installed launch opens no console window; a debug build keeps the console and its stderr log.
 ## Persistence
 
-Machine-local UI state lives in native-ui.json in the config dir (`UiState` in `sidebar.rs`; the field list is in CLAUDE.md, "Where things live on disk"). Tab layouts, session appearance overrides and host settings such as keep-awake and the worktrees root live on the daemon, so every client sees them. Saves are debounced (layout and tab font sizes 500 ms) and flushed on quit.
+Machine-local UI state lives in native-ui.json in the config dir (`UiState` in `sidebar.rs`; the field list is in CLAUDE.md, "Where things live on disk"). Tab layouts, session appearance overrides and host settings such as the keep-awake mode and the worktrees root live on the daemon, so every client sees them. Saves are debounced (layout and tab font sizes 500 ms) and flushed on quit.
 
 Settings → Worktrees edits the daemon's worktrees-root override, and shows `Saved` only once the daemon has echoed the last save. Manage worktrees (opened from that tab) lists the root's groups titled by their `.rt-group` name, deletes one group or every stale one, and "Launch session here" opens the spawn dialog with the target locked and that worktree pinned (the spawn form's `Lock`, which a duplicate prefill reuses). Folder and file pickers go through `RootDeps.pick_folder` / `RootDeps.pick_file`, so specs inject fakes: GPUI's test platform cannot prompt.
 

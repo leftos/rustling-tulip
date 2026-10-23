@@ -119,6 +119,24 @@ pub enum AccentToken {
     Unknown,
 }
 
+/// When the daemon holds the host awake.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeepAwakeMode {
+    /// Never: the machine sleeps on its own timer.
+    Off,
+    /// While a session is busy: working (a plain shell while it prints
+    /// output), waiting on the user, spawning, or idle with background work.
+    /// A session marked "Don't count as busy" never counts.
+    #[default]
+    WhenBusy,
+    /// While any session has a live child.
+    Always,
+    /// A mode from a newer peer; a daemon refuses it in a request.
+    #[serde(other)]
+    Unknown,
+}
+
 /// The bytes Shift+Enter sends to an agent's terminal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -2699,14 +2717,19 @@ pub enum ClientMessage {
         #[serde(default)]
         port: Option<u16>,
     },
-    /// Turn the keep-awake hold on or off. While enabled the daemon asks the
-    /// OS not to idle-sleep the machine for as long as any session has a live
-    /// child (the display still sleeps on its own timer). The daemon persists
-    /// the setting in `state.json` — so it applies with no window open —
-    /// re-evaluates the hold immediately, then broadcasts
-    /// [`DaemonMessage::KeepAwakeStatus`] to every connected client.
+    /// The two-way form of [`ClientMessage::SetKeepAwakeMode`]: `true`
+    /// selects [`KeepAwakeMode::Always`], `false` [`KeepAwakeMode::Off`].
     SetKeepAwake {
         enabled: bool,
+    },
+    /// Choose when the daemon asks the OS not to idle-sleep the machine (the
+    /// display still sleeps on its own timer). The daemon persists the mode
+    /// in `state.json` — so it applies with no window open — re-evaluates the
+    /// hold immediately, then broadcasts [`DaemonMessage::KeepAwakeStatus`]
+    /// to every connected client. An [`KeepAwakeMode::Unknown`] mode is
+    /// refused and changes nothing.
+    SetKeepAwakeMode {
+        mode: KeepAwakeMode,
     },
     /// Retired with LAN pairing: it stays decodable, and the daemon answers it
     /// on every connection with the same `Error` as
@@ -3408,14 +3431,16 @@ pub enum DaemonMessage {
         addresses: Vec<String>,
     },
     /// Current keep-awake state. Broadcast in response to
-    /// [`ClientMessage::SetKeepAwake`] and whenever the hold engages or
-    /// releases as sessions start and stop, and sent once at initial state so
-    /// a freshly-connected client can render the Settings UI without polling.
-    /// `enabled` is the persisted user setting; `active` is true iff the OS
-    /// hold is currently engaged — the setting is on *and* at least one
-    /// session has a live child.
+    /// [`ClientMessage::SetKeepAwakeMode`] and whenever the hold engages or
+    /// releases as sessions change, and sent once at initial state so a
+    /// freshly-connected client can render the Settings UI without polling.
+    /// `mode` is the persisted user setting and `enabled` is `mode` other
+    /// than [`KeepAwakeMode::Off`]; `active` is true iff the OS hold is
+    /// currently engaged — a session meets the mode's condition.
     KeepAwakeStatus {
         enabled: bool,
+        #[serde(default)]
+        mode: KeepAwakeMode,
         active: bool,
     },
     /// Current remote (Tailscale) access status. Sent once at initial state
@@ -6218,6 +6243,41 @@ mod tests {
         let evidence: MergeEvidence =
             serde_json::from_str(r#""vibes""#).expect("parse unknown evidence");
         assert_eq!(evidence, MergeEvidence::Unknown);
+    }
+
+    #[test]
+    fn keep_awake_mode_round_trips_and_absorbs_unknown_values() {
+        for mode in [
+            KeepAwakeMode::Off,
+            KeepAwakeMode::WhenBusy,
+            KeepAwakeMode::Always,
+        ] {
+            let json = serde_json::to_string(&ClientMessage::SetKeepAwakeMode { mode })
+                .expect("serialize");
+            let decoded: ClientMessage = serde_json::from_str(&json).expect("deserialize");
+            assert!(
+                matches!(decoded, ClientMessage::SetKeepAwakeMode { mode: back } if back == mode),
+                "{json} must decode to the mode it carried"
+            );
+        }
+        assert_eq!(
+            serde_json::to_string(&KeepAwakeMode::WhenBusy).expect("serialize"),
+            r#""when_busy""#
+        );
+
+        // A mode from a newer peer must not break the containing message.
+        let status: DaemonMessage = serde_json::from_str(
+            r#"{"type":"keep_awake_status","enabled":true,"mode":"sometimes","active":false}"#,
+        )
+        .expect("parse an unknown mode");
+        assert!(matches!(
+            status,
+            DaemonMessage::KeepAwakeStatus {
+                enabled: true,
+                mode: KeepAwakeMode::Unknown,
+                active: false,
+            }
+        ));
     }
 
     #[test]
