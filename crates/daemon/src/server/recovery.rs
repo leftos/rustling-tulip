@@ -9,7 +9,8 @@ use super::{Hub, StateEvent};
 use crate::orphan::OrphanMeta;
 use crate::paths::Dirs;
 use crate::session::{SessionRecord, SessionRegistry, attach_lifecycle};
-use crate::{history, orphan, osc_title, pty_state, screen, tracer_client};
+use crate::{conversations, history, orphan, osc_title, pty_state, screen, tracer_client};
+use agent_api::ResolvedRows;
 use anyhow::anyhow;
 use protocol::{
     Agent, ClientMessage, DaemonMessage, SessionEnd, SessionMember, SessionMode, SpawnRequest,
@@ -304,8 +305,7 @@ async fn resume_request(hub: &Hub, id: &str) -> anyhow::Result<(SpawnRequest, bo
             .ok_or_else(|| anyhow!("unknown session: {id}"))?;
         abandoned_resume_request(&crate::sync::lock(&rec))?
     };
-    let claude_home = crate::transcripts::claude_home();
-    match rerun_request(hub, id, claude_home.as_deref()).await {
+    match rerun_request(hub, id).await {
         Ok(rerun)
             if rerun.request.resume_conversation.is_some()
                 && pinned_worktrees_exist(&rerun.request.target)
@@ -542,8 +542,7 @@ async fn auto_resume_request(hub: &Hub, id: &str) -> Result<(SpawnRequest, bool)
         }
         (rec.busy_excluded, rec.members.clone())
     };
-    let claude_home = crate::transcripts::claude_home();
-    let rerun = rerun_request(hub, id, claude_home.as_deref())
+    let rerun = rerun_request(hub, id)
         .await
         .map_err(|err| format!("{err:#}"))?;
     if rerun.unpinned {
@@ -672,8 +671,9 @@ async fn session_history_items(hub: &Hub) -> Vec<protocol::SessionHistoryItem> {
     let dirs = hub.dirs.clone();
     let repos = hub.state.with_persisted(|s| s.repos.clone());
     tokio::task::spawn_blocking(move || {
-        let claude_home = crate::transcripts::claude_home();
-        history::history_items(&dirs, &repos, claude_home.as_deref())
+        history::history_items(&dirs, &repos, &|entry| {
+            conversations::lookup_rows(history::recorded_env(entry))
+        })
     })
     .await
     .unwrap_or_else(|err| {
@@ -748,9 +748,9 @@ async fn recover_one(
             repos: &repos,
             workspaces: &workspaces,
         };
-        let claude_home = crate::transcripts::claude_home();
+        let rows = conversations::lookup_rows(history::recorded_env(&entry));
         history::plan_recovery(&entry, &planned_item, &registered, |agent, folder, id| {
-            recovery_conversation_exists(claude_home.as_deref(), agent, folder, id)
+            recovery_conversation_exists(agent, folder, id, &rows)
         })
     })
     .await
@@ -790,19 +790,15 @@ fn recovery_busy_excluded(live: Option<&SessionRecord>, entry: &protocol::Histor
     }
 }
 
-/// Whether `agent` still holds conversation `id` for `folder`: Claude Code's
-/// transcript.
+/// Whether `agent` still holds conversation `id` for `folder`, looked up with
+/// the session's `rows`.
 pub(super) fn recovery_conversation_exists(
-    claude_home: Option<&Path>,
     agent: Agent,
     folder: &str,
     id: &str,
+    rows: &ResolvedRows,
 ) -> bool {
-    match agent {
-        Agent::Claude => {
-            claude_home.is_some_and(|home| crate::transcripts::transcript_exists(home, folder, id))
-        }
-    }
+    conversations::exists(agent_registry::plugin(agent), Path::new(folder), id, rows)
 }
 
 /// After a successful recovery spawn of `history_id` as `new_id`: mark the
@@ -2165,7 +2161,7 @@ mod tests {
             let dir = self
                 .path
                 .join("projects")
-                .join(crate::transcripts::encode_project_dir(folder));
+                .join(agent_claude::encode_project_dir(folder));
             std::fs::create_dir_all(&dir).expect("create the transcript folder");
             std::fs::write(dir.join(format!("{id}.jsonl")), "{}\n").expect("write the transcript");
         }
@@ -2309,5 +2305,48 @@ mod tests {
         assert!(error.contains("`RT_TEST_UNSET_ENV_REF_4C1D`"), "{error}");
         assert!(error.contains("isn't set"), "{error}");
         assert_nothing_registered(&hub, before.as_deref(), &mut events);
+    }
+
+    #[tokio::test]
+    async fn recover_finds_the_conversation_under_the_entrys_own_claude_home() {
+        // The daemon's CLAUDE_CONFIG_DIR points at an empty scratch home.
+        let (_home_lock, _daemon_home) = claude_home_scratch("recover-row-home").await;
+        let (hub, scratch) = spawnless_test_hub("recover-row-home");
+        let folder = scratch.path().join("repo").to_string_lossy().into_owned();
+        let row_home = scratch.path().join("row-home");
+        let project = row_home
+            .join("projects")
+            .join(agent_claude::encode_project_dir(&folder));
+        std::fs::create_dir_all(&project).expect("create the transcript folder");
+        std::fs::write(
+            project.join(format!("{RECOVERY_CONVERSATION}.jsonl")),
+            "{}\n",
+        )
+        .expect("write the transcript");
+        let mut record = history::test_support::record("gone", SessionMode::Interactive);
+        record.agent = Agent::Claude;
+        record.claude_session_id = Some(RECOVERY_CONVERSATION.to_owned());
+        let request = env_spawn(
+            SpawnTarget::Standalone {
+                cwd: Some(folder.clone()),
+                add_dirs: Vec::new(),
+            },
+            SessionMode::Interactive,
+            env(&[("CLAUDE_CONFIG_DIR", &row_home.to_string_lossy())]),
+            None,
+        );
+        record.spawn_config = Some(protocol::SpawnConfig::from_request(&request));
+        let mut entry = history::entry_from_record(&record, SessionEnd::TracerLost, Utc::now());
+        entry.primary_cwd = Some(folder.clone());
+        history::write_if_absent(&hub.dirs, &entry).expect("write history entry");
+
+        let items = session_history_items(&hub).await;
+
+        let item = items
+            .iter()
+            .find(|item| item.entry.session_id == "gone")
+            .expect("the entry is listed");
+        let ids: Vec<&str> = item.candidates.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, [RECOVERY_CONVERSATION]);
     }
 }

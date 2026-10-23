@@ -21,7 +21,7 @@ Built-in [claude-swap](https://github.com/leftos/claude-swap) (`X:\dev\claude-sw
 
 File and line references are to `X:\dev\claude-swap\src\claude_swap\`.
 
-**Claude Code's files** (`paths.py:34-82`): the home is `$CLAUDE_CONFIG_DIR` else `~/.claude`; the live credential is `<home>/.credentials.json`; the global config is `<home>/.config.json` when that legacy file exists, else `($CLAUDE_CONFIG_DIR || $HOME)/.claude.json`. The daemon resolves the home through `transcripts::claude_home` so both agree.
+**Claude Code's files** (`paths.py:34-82`): the home is `$CLAUDE_CONFIG_DIR` else `~/.claude`; the live credential is `<home>/.credentials.json`; the global config is `<home>/.config.json` when that legacy file exists, else `($CLAUDE_CONFIG_DIR || $HOME)/.claude.json`. The daemon resolves the home through `claude_home` in `crates/agents/claude/src/transcripts.rs` so both agree.
 
 **The store** (`paths.py:90-108`): `~/.claude-swap-backup` on Windows and macOS, `$XDG_DATA_HOME/claude-swap` on Linux.
 

@@ -7,12 +7,14 @@
 //! [`HeadlessEvent`]s.
 
 mod providers;
+mod transcripts;
 
 pub use providers::{display_name, provider_for_model};
+pub use transcripts::encode_project_dir;
 
 use agent_api::{
-    Agent, EnvPlan, HeadlessEvent, KeyLookup, Refusal, ResolvedRows, SpawnCheck, SpawnContext,
-    workspace_prelude,
+    Agent, ConversationPlan, ConversationQuery, EnvPlan, FoundConversation, HeadlessEvent,
+    KeyLookup, Refusal, ResolvedRows, SpawnCheck, SpawnContext, workspace_prelude,
 };
 use protocol::{
     AccentToken, AgentCaps, AgentDescriptor, AgentId, AgentTexts, ChipRule, Choice, ChoiceStyle,
@@ -193,6 +195,20 @@ impl Agent for ClaudePlugin {
         keys: &dyn KeyLookup,
     ) -> Result<EnvPlan, Refusal> {
         providers::spawn_env(opts.provider, rows, keys)
+    }
+
+    /// A fresh session starts under an id Claude is handed with
+    /// `--session-id`, so it can be resumed after it ends; a resumed one keeps
+    /// its own.
+    fn conversation_plan(&self, _opts: &ClaudeOptions, resume: Option<&str>) -> ConversationPlan {
+        match resume {
+            Some(id) => ConversationPlan::Resumed(id.to_string()),
+            None => ConversationPlan::Minted(uuid::Uuid::new_v4().to_string()),
+        }
+    }
+
+    fn find_conversations(&self, query: &ConversationQuery<'_>) -> Vec<FoundConversation> {
+        transcripts::find_conversations(query)
     }
 
     fn interactive_args(

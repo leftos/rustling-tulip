@@ -477,20 +477,8 @@ async fn duplicate_request(
     session_id: &str,
     same_checkout: bool,
 ) -> anyhow::Result<SpawnRequest> {
-    let claude_home = crate::transcripts::claude_home();
-    duplicate_request_in(hub, session_id, same_checkout, claude_home.as_deref()).await
-}
-
-/// [`duplicate_request`], looking for the source's transcript under
-/// `claude_home`.
-async fn duplicate_request_in(
-    hub: &Hub,
-    session_id: &str,
-    same_checkout: bool,
-    claude_home: Option<&Path>,
-) -> anyhow::Result<SpawnRequest> {
     if same_checkout {
-        return rerun_request(hub, session_id, claude_home)
+        return rerun_request(hub, session_id)
             .await
             .map(|rerun| rerun.request);
     }
@@ -527,15 +515,12 @@ fn source_config(
 /// The request for a Restart or a Resume of `session_id`, once its child has
 /// exited: its config with every worktree member pinned to the folder it ran
 /// in, as Recover pins them, so the rerun binds the very worktree it left
-/// wherever it sits; and its Claude conversation continued when the
-/// transcript is still under `claude_home` for that pinned folder.
-pub(super) async fn rerun_request(
-    hub: &Hub,
-    session_id: &str,
-    claude_home: Option<&Path>,
-) -> anyhow::Result<Rerun> {
+/// wherever it sits; and its conversation continued while its agent still
+/// holds it for that pinned folder, looked up with the source's own rows.
+pub(super) async fn rerun_request(hub: &Hub, session_id: &str) -> anyhow::Result<Rerun> {
     wait_for_source_exit(hub, session_id).await?;
     let (stored, members) = source_config(hub, session_id)?;
+    let stored_env = stored.extra_env.clone();
     let conversation = hub
         .sessions
         .get(session_id)
@@ -557,11 +542,10 @@ pub(super) async fn rerun_request(
     }
     req.resume_conversation = match conversation {
         Some(c) => {
-            let home = claude_home.map(Path::to_path_buf);
-            // The transcript lookup reads the disk, as Recover's planning does.
+            // The lookup reads the disk, as Recover's planning does.
             tokio::task::spawn_blocking(move || {
-                recovery_conversation_exists(home.as_deref(), c.agent, &c.folder, &c.id)
-                    .then_some(c.id)
+                let rows = crate::conversations::lookup_rows(&stored_env);
+                recovery_conversation_exists(c.agent, &c.folder, &c.id, &rows).then_some(c.id)
             })
             .await?
         }
@@ -1789,7 +1773,7 @@ mod tests {
             None,
         )));
         hub.sessions.insert(source);
-        let request = duplicate_request_in(&hub, "src", true, None)
+        let request = duplicate_request(&hub, "src", true)
             .await
             .expect("a restart reruns the source's config");
         match request.target {
@@ -1824,7 +1808,7 @@ mod tests {
             rec.status = SessionStatus::Stopped;
             rec.pty = None;
         });
-        let err = duplicate_request_in(&hub, "s1", true, None)
+        let err = duplicate_request(&hub, "s1", true)
             .await
             .expect_err("the stopped child has not exited");
         assert_eq!(
@@ -2061,21 +2045,20 @@ mod tests {
             cwd: Some(folder.clone()),
             add_dirs: Vec::new(),
         };
+        let home = scratch.path().join("claude-home");
         let mut source = idle_record("src");
         source.claude_session_id = Some("conv-1".to_owned());
         source.spawn_config = Some(protocol::SpawnConfig::from_request(&env_spawn(
             target,
             SessionMode::Interactive,
-            Vec::new(),
+            vec![("CLAUDE_CONFIG_DIR".to_owned(), home.display().to_string())],
             None,
         )));
         hub.sessions.insert(source);
-        let home = scratch.path().join("claude-home");
         let resumed = |same_checkout| {
             let hub = &hub;
-            let home = home.clone();
             async move {
-                duplicate_request_in(hub, "src", same_checkout, Some(&home))
+                duplicate_request(hub, "src", same_checkout)
                     .await
                     .expect("src can be rerun")
                     .resume_conversation
@@ -2089,7 +2072,7 @@ mod tests {
         );
         let project = home
             .join("projects")
-            .join(crate::transcripts::encode_project_dir(&folder));
+            .join(agent_claude::encode_project_dir(&folder));
         std::fs::create_dir_all(&project).expect("create the transcript folder");
         std::fs::write(project.join("conv-1.jsonl"), "{}\n").expect("write the transcript");
         assert_eq!(resumed(true).await.as_deref(), Some("conv-1"));

@@ -16,13 +16,17 @@
 
 #[cfg(feature = "test-support")]
 pub mod conformance;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_agent;
 
+use chrono::{DateTime, Utc};
 use protocol::{AgentDescriptor, FieldKind, OptionField, OptionValue, OptionValues};
 use protocol::{SessionMember, SessionStatus};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::fmt;
 use std::path::Path;
+use tracing::error;
 
 /// Cross-agent spawn context bundled together so trait signatures stay
 /// readable. Fields are borrowed from the daemon's in-flight spawn so the
@@ -67,6 +71,65 @@ pub enum HeadlessEvent {
         input_tokens: Option<u64>,
         output_tokens: Option<u64>,
     },
+}
+
+/// How an interactive spawn's conversation id is decided, as the plugin plans
+/// it.
+#[derive(Debug, Clone, Default)]
+pub enum ConversationPlan {
+    /// The plugin chose the id the CLI starts its conversation under.
+    Minted(String),
+    /// The CLI continues this existing conversation.
+    Resumed(String),
+    /// The app runs the agent's program with `args` before the spawn and
+    /// reads the new conversation's id from its output with `parse`.
+    PreCreate {
+        args: Vec<String>,
+        parse: fn(&str) -> Option<String>,
+    },
+    /// The app looks the conversation up with
+    /// [`Agent::find_conversations`] once the CLI runs.
+    DiscoverAfterLaunch,
+    /// The spawn records no conversation.
+    #[default]
+    None,
+}
+
+/// What [`Agent::find_conversations`] is asked: the conversations recorded
+/// for `folder`, either the one `known_id` names or those active inside
+/// `window`.
+pub struct ConversationQuery<'a> {
+    /// The folder the session ran in.
+    pub folder: &'a Path,
+    /// The span, both ends included, a conversation must have been active in.
+    pub window: Option<(DateTime<Utc>, DateTime<Utc>)>,
+    /// The conversation the session recorded, when it recorded one.
+    pub known_id: Option<&'a str>,
+    /// The session's environment rows, so a plugin honours a session's own
+    /// home variable.
+    pub rows: &'a ResolvedRows,
+}
+
+/// One conversation an agent recorded for a folder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FoundConversation {
+    /// The conversation id, as the CLI resumes it.
+    pub id: String,
+    /// When the conversation was last written.
+    pub last_active: DateTime<Utc>,
+    /// The conversation's title, tidied for display, when it has one.
+    pub title: Option<String>,
+}
+
+/// Whether `id` is a plain conversation id: non-empty ASCII letters, digits,
+/// `-` and `_` only, so it can become a file-name stem or a CLI argument
+/// without naming a path.
+#[must_use]
+pub fn is_plain_id(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 /// An environment value whose text is never printed: no `Display`, no
@@ -139,12 +202,15 @@ impl ResolvedRows {
         self.0.iter().map(|(k, v)| (k.as_str(), v.as_str()))
     }
 
-    /// The value of the first row named `name`.
+    /// The value of the last row named `name`: the one the child gets when
+    /// the spawn sends a name twice.
     #[must_use]
     pub fn get(&self, name: &str) -> Option<&str> {
-        self.iter()
+        self.0
+            .iter()
+            .rev()
             .find(|(key, _)| key.eq_ignore_ascii_case(name))
-            .map(|(_, value)| value)
+            .map(|(_, value)| value.as_str())
     }
 
     /// Whether a row names `name`.
@@ -255,6 +321,17 @@ pub trait Agent: Send + Sync + 'static {
         keys: &dyn KeyLookup,
     ) -> Result<EnvPlan, Refusal>;
 
+    /// How an interactive spawn's conversation id is decided; `resume` is the
+    /// conversation the spawn continues, when it continues one.
+    fn conversation_plan(&self, opts: &Self::Options, resume: Option<&str>) -> ConversationPlan;
+
+    /// The conversations the agent recorded for `query`'s folder: the one its
+    /// known id names, else those active inside its window, newest first. An
+    /// agent that keeps none finds none.
+    fn find_conversations(&self, _query: &ConversationQuery<'_>) -> Vec<FoundConversation> {
+        Vec::new()
+    }
+
     /// The argv passed to the CLI for an interactive (PTY-attached) session.
     /// Does not include the executable name itself — that is resolved by
     /// [`AgentPlugin::resolve_program`].
@@ -339,6 +416,13 @@ pub trait AgentPlugin: Send + Sync {
         keys: &dyn KeyLookup,
     ) -> Result<EnvPlan, Refusal>;
 
+    /// [`Agent::conversation_plan`] over `opts` decoded; when they do not
+    /// decode, an error is logged and the spawn records no conversation.
+    fn conversation_plan(&self, opts: &OptionValues, resume: Option<&str>) -> ConversationPlan;
+
+    /// See [`Agent::find_conversations`].
+    fn find_conversations(&self, query: &ConversationQuery<'_>) -> Vec<FoundConversation>;
+
     /// [`Agent::interactive_args`] over `opts` decoded.
     fn interactive_args(
         &self,
@@ -407,6 +491,20 @@ impl<A: Agent> AgentPlugin for A {
     ) -> Result<EnvPlan, Refusal> {
         let opts = decode_for_spawn(self, opts)?;
         Agent::spawn_env(self, &opts, rows, keys)
+    }
+
+    fn conversation_plan(&self, opts: &OptionValues, resume: Option<&str>) -> ConversationPlan {
+        match decode_options(self, opts) {
+            Ok(opts) => Agent::conversation_plan(self, &opts, resume),
+            Err(err) => {
+                error!(%err, "spawning without a recorded conversation");
+                ConversationPlan::None
+            }
+        }
+    }
+
+    fn find_conversations(&self, query: &ConversationQuery<'_>) -> Vec<FoundConversation> {
+        Agent::find_conversations(self, query)
     }
 
     fn interactive_args(
@@ -630,82 +728,11 @@ pub fn workspace_prelude(members: &[SessionMember], instruction_files: &[&str]) 
 )]
 mod tests {
     use super::*;
-    use protocol::{
-        AccentToken, AgentCaps, AgentId, AgentTexts, Choice, ChoiceStyle, FieldKind, FieldOverride,
-        FieldRule, OptionField, ShiftEnter, SpawnPlacement,
-    };
-    use std::sync::LazyLock;
-
-    fn field(id: &str, kind: FieldKind, default: OptionValue) -> OptionField {
-        OptionField {
-            id: id.to_string(),
-            label: id.to_string(),
-            help: None,
-            kind,
-            default,
-            settings: true,
-            spawn: SpawnPlacement::Main,
-            locked_when_trusted: false,
-            when: Vec::new(),
-        }
-    }
+    use crate::test_agent::{DESCRIPTOR, TestAgent};
 
     fn text(value: &str) -> OptionValue {
         OptionValue::Text(value.to_string())
     }
-
-    /// A schema with a choice, a toggle, and a text field the toggle hides.
-    static DESCRIPTOR: LazyLock<AgentDescriptor> = LazyLock::new(|| AgentDescriptor {
-        id: AgentId("test-agent".to_string()),
-        label: "Test agent".to_string(),
-        tag: "test".to_string(),
-        accent: AccentToken::Default,
-        shift_enter: ShiftEnter::Lf,
-        caps: AgentCaps {
-            headless: false,
-            resume: false,
-            extra_folders: false,
-            shell_resume: false,
-        },
-        trust_note: None,
-        texts: AgentTexts {
-            shell_resume_label: String::new(),
-            no_conversation: String::new(),
-        },
-        fields: vec![
-            field(
-                "mode",
-                FieldKind::Choice {
-                    choices: ["fast", "slow"]
-                        .map(|value| Choice {
-                            value: value.to_string(),
-                            label: value.to_string(),
-                        })
-                        .to_vec(),
-                    style: ChoiceStyle::Segmented,
-                },
-                text("fast"),
-            ),
-            field("sandbox", FieldKind::Toggle, OptionValue::Bool(false)),
-            OptionField {
-                when: vec![FieldRule {
-                    if_field: "sandbox".to_string(),
-                    equals: OptionValue::Bool(true),
-                    then: FieldOverride {
-                        hidden: Some(true),
-                        placeholder: None,
-                        suggestions: None,
-                    },
-                }],
-                ..field(
-                    "profile",
-                    FieldKind::Text { placeholder: None },
-                    OptionValue::Null,
-                )
-            },
-        ],
-        chips: Vec::new(),
-    });
 
     fn values(pairs: &[(&str, OptionValue)]) -> OptionValues {
         pairs
@@ -714,54 +741,128 @@ mod tests {
             .collect()
     }
 
-    #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
-    struct TestOptions {
-        mode: String,
-        sandbox: bool,
-        profile: Option<String>,
-    }
+    /// An agent that keeps every default the trait offers.
+    struct Bare;
 
-    struct TestAgent;
-
-    impl Agent for TestAgent {
-        type Options = TestOptions;
+    impl Agent for Bare {
+        type Options = crate::test_agent::TestOptions;
 
         fn descriptor(&self) -> &AgentDescriptor {
             &DESCRIPTOR
         }
 
         fn program_env_var(&self) -> &'static str {
-            "RUSTLING_TULIP_TEST_AGENT"
+            "RUSTLING_TULIP_BARE_AGENT"
         }
 
         fn default_program(&self) -> &'static str {
-            "test-agent"
+            "bare-agent"
         }
 
-        fn interactive_args(
+        fn check_request(
             &self,
-            opts: &TestOptions,
-            _ctx: &SpawnContext<'_>,
-            _members: &[SessionMember],
-            _initial_prompt: Option<&str>,
-        ) -> Vec<String> {
-            vec![opts.mode.clone(), opts.sandbox.to_string()]
-        }
-
-        fn check_request(&self, _opts: &TestOptions, _req: &SpawnCheck<'_>) -> Result<(), Refusal> {
+            _opts: &Self::Options,
+            _req: &SpawnCheck<'_>,
+        ) -> Result<(), Refusal> {
             Ok(())
         }
 
         fn spawn_env(
             &self,
-            opts: &TestOptions,
+            _opts: &Self::Options,
             _rows: &ResolvedRows,
             _keys: &dyn KeyLookup,
         ) -> Result<EnvPlan, Refusal> {
-            Ok(EnvPlan {
-                set: vec![("TEST_MODE".to_string(), opts.mode.clone())],
-                remove: Vec::new(),
-            })
+            Ok(EnvPlan::default())
+        }
+
+        fn conversation_plan(
+            &self,
+            _opts: &Self::Options,
+            _resume: Option<&str>,
+        ) -> ConversationPlan {
+            ConversationPlan::None
+        }
+
+        fn interactive_args(
+            &self,
+            _opts: &Self::Options,
+            _ctx: &SpawnContext<'_>,
+            _members: &[SessionMember],
+            _initial_prompt: Option<&str>,
+        ) -> Vec<String> {
+            Vec::new()
+        }
+    }
+
+    #[test]
+    fn find_conversations_defaults_to_none_found() {
+        let plugin: &dyn AgentPlugin = &Bare;
+        let rows = ResolvedRows::default();
+        let query = ConversationQuery {
+            folder: Path::new(r"D:\proj"),
+            window: None,
+            known_id: Some("abc"),
+            rows: &rows,
+        };
+        assert_eq!(plugin.find_conversations(&query), []);
+    }
+
+    #[test]
+    fn adapter_plans_no_conversation_when_options_do_not_decode() {
+        let plugin: &dyn AgentPlugin = &TestAgent {
+            plan: ConversationPlan::Minted("m-1".to_string()),
+            ..TestAgent::default()
+        };
+        let good = values(&[("mode", text("slow")), ("sandbox", OptionValue::Bool(true))]);
+        assert!(
+            matches!(plugin.conversation_plan(&good, None), ConversationPlan::Minted(id) if id == "m-1")
+        );
+        let bad = values(&[("mode", text("slow")), ("sandbox", text("yes"))]);
+        assert!(matches!(
+            plugin.conversation_plan(&bad, Some("r-1")),
+            ConversationPlan::None
+        ));
+    }
+
+    #[test]
+    fn test_agent_answers_the_conversations_it_was_given() {
+        let found = FoundConversation {
+            id: "c-1".to_string(),
+            last_active: chrono::DateTime::UNIX_EPOCH,
+            title: Some("hello".to_string()),
+        };
+        let plugin: &dyn AgentPlugin = &TestAgent {
+            found: vec![found.clone()],
+            ..TestAgent::default()
+        };
+        let rows = ResolvedRows::default();
+        let query = ConversationQuery {
+            folder: Path::new(r"D:\proj"),
+            window: None,
+            known_id: None,
+            rows: &rows,
+        };
+        assert_eq!(plugin.find_conversations(&query), [found]);
+    }
+
+    #[test]
+    fn get_returns_the_last_of_two_same_named_rows() {
+        let rows = ResolvedRows::new(vec![
+            ("CLAUDE_CONFIG_DIR".to_string(), "first".to_string()),
+            ("OTHER".to_string(), "x".to_string()),
+            ("claude_config_dir".to_string(), "last".to_string()),
+        ]);
+        assert_eq!(rows.get("Claude_Config_Dir"), Some("last"));
+        assert!(rows.contains("other"));
+        assert_eq!(rows.get("MISSING"), None);
+    }
+
+    #[test]
+    fn is_plain_id_takes_only_file_name_stems() {
+        assert!(is_plain_id("0f1e2d3c-4b5a_x"));
+        for bad in ["", "..", r"..\x", "a/b", "a b", "a.jsonl"] {
+            assert!(!is_plain_id(bad), "{bad}");
         }
     }
 
@@ -771,13 +872,13 @@ mod tests {
 
     #[test]
     fn passthrough_vars_defaults_to_none() {
-        let plugin: &dyn AgentPlugin = &TestAgent;
+        let plugin: &dyn AgentPlugin = &TestAgent::default();
         assert_eq!(plugin.passthrough_vars(), [] as [&str; 0]);
     }
 
     #[test]
     fn adapter_refuses_check_request_and_spawn_env_when_options_do_not_decode() {
-        let plugin: &dyn AgentPlugin = &TestAgent;
+        let plugin: &dyn AgentPlugin = &TestAgent::default();
         let check = SpawnCheck {
             mode: protocol::SessionMode::Interactive,
             rows: &[],
@@ -862,7 +963,7 @@ mod tests {
 
     #[test]
     fn adapter_refuses_options_that_do_not_decode() {
-        let plugin: &dyn AgentPlugin = &TestAgent;
+        let plugin: &dyn AgentPlugin = &TestAgent::default();
         let good = values(&[
             ("mode", text("slow")),
             ("sandbox", OptionValue::Bool(true)),

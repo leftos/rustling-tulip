@@ -85,6 +85,7 @@ axum-server = { version = "0.8", default-features = false, features = [
 ] }
 
 [dev-dependencies]
+agent-claude = { workspace = true }
 # Mints the test CA and leaf certificates the tailnet listener tests serve.
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 # `test-util` enables the paused clock (`#[tokio::test(start_paused = true)]`)

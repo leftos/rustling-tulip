@@ -10,6 +10,7 @@ mod binary_cache;
 mod branch_fate;
 mod branch_names;
 mod child_env;
+mod conversations;
 mod detach;
 mod env_secrets;
 mod file_fetch;
@@ -48,7 +49,6 @@ mod tailnet_listener;
 mod termstate;
 mod tracer_client;
 mod tracer_log;
-mod transcripts;
 mod user_env;
 mod vscode;
 mod vscode_watch;
@@ -94,10 +94,15 @@ async fn main() -> anyhow::Result<()> {
     };
     init_tracing(&dirs);
     info!(config_dir = %dirs.config.display(), "starting rustling-tulipd");
-    info!(
-        rustling_tulip_claude = %std::env::var("RUSTLING_TULIP_CLAUDE").unwrap_or_else(|_| "(unset)".to_string()),
-        "claude binary override status"
-    );
+    for plugin in agent_registry::all() {
+        let variable = plugin.program_env_var();
+        info!(
+            variable,
+            value = %std::env::var(variable).unwrap_or_else(|_| "(unset)".to_string()),
+            "{} binary override status",
+            plugin.descriptor().id.0
+        );
+    }
 
     // Windows Credential Manager is the store secret environment rows are
     // sealed into. Install it before anything can seal a value; a machine that

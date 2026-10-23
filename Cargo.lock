@@ -33,9 +33,11 @@ dependencies = [
 name = "agent-api"
 version = "0.1.1-alpha"
 dependencies = [
+ "chrono",
  "protocol",
  "serde",
  "serde_json",
+ "tracing",
 ]
 
 [[package]]
@@ -43,10 +45,13 @@ name = "agent-claude"
 version = "0.1.1-alpha"
 dependencies = [
  "agent-api",
+ "chrono",
+ "directories",
  "protocol",
  "serde",
  "serde_json",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -1595,6 +1600,7 @@ name = "daemon"
 version = "0.1.1-alpha"
 dependencies = [
  "agent-api",
+ "agent-claude",
  "agent-registry",
  "alacritty_terminal",
  "anyhow",

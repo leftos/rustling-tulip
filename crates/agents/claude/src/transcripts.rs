@@ -11,6 +11,7 @@ use std::fs::{self, DirEntry, File};
 use std::io::{BufRead, BufReader, ErrorKind};
 use std::path::{Path, PathBuf};
 
+use agent_api::{ConversationQuery, FoundConversation, ResolvedRows, is_plain_id};
 use chrono::{DateTime, Utc};
 use directories::UserDirs;
 use serde_json::Value;
@@ -20,26 +21,54 @@ use tracing::debug;
 const HEAD_SCAN_LINES: usize = 200;
 /// Longest title, in characters, including the trailing ellipsis.
 const TITLE_MAX_CHARS: usize = 80;
+/// The most conversations a window search answers.
+const CANDIDATE_LIMIT: usize = 5;
+/// The variable that moves Claude Code's home.
+const CONFIG_DIR_VAR: &str = "CLAUDE_CONFIG_DIR";
 
-/// One conversation Claude Code recorded for a working directory.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TranscriptCandidate {
-    /// The conversation id: the transcript's file stem, as `claude --resume` takes it.
-    pub id: String,
-    /// The transcript file's modified time.
-    pub last_active: DateTime<Utc>,
-    /// The conversation's summary, else its first user message, tidied for display.
-    pub title: Option<String>,
+/// The conversations Claude Code recorded for `query`'s folder: the known
+/// id's own when the query names one and its transcript is there, else the
+/// window's newest few. A query with neither, or no Claude home, finds none.
+pub(crate) fn find_conversations(query: &ConversationQuery<'_>) -> Vec<FoundConversation> {
+    match claude_home(query.rows) {
+        Some(home) => find_in(&home, query),
+        None => Vec::new(),
+    }
 }
 
-/// Claude Code's home: `$CLAUDE_CONFIG_DIR` when set and non-empty, else `<home>/.claude`.
-#[must_use]
-pub fn claude_home() -> Option<PathBuf> {
+/// [`find_conversations`] under `claude_home`.
+fn find_in(claude_home: &Path, query: &ConversationQuery<'_>) -> Vec<FoundConversation> {
+    let folder = query.folder.to_string_lossy();
+    if let Some(id) = query.known_id {
+        return known_conversation(claude_home, &folder, id)
+            .into_iter()
+            .collect();
+    }
+    match query.window {
+        Some((start, end)) => candidates(claude_home, &folder, start, end, CANDIDATE_LIMIT),
+        None => Vec::new(),
+    }
+}
+
+/// Claude Code's home for a session whose rows are `rows`, as its child sees
+/// it: the last `CLAUDE_CONFIG_DIR` row when the rows name one, else the
+/// daemon's; `<home>/.claude` when that is unset or empty.
+fn claude_home(rows: &ResolvedRows) -> Option<PathBuf> {
     let home = UserDirs::new().map(|dirs| dirs.home_dir().to_path_buf());
-    claude_home_from(std::env::var_os("CLAUDE_CONFIG_DIR"), home)
+    claude_home_from(rows, std::env::var_os(CONFIG_DIR_VAR), home)
 }
 
-fn claude_home_from(config_dir: Option<OsString>, home: Option<PathBuf>) -> Option<PathBuf> {
+fn claude_home_from(
+    rows: &ResolvedRows,
+    env: Option<OsString>,
+    home: Option<PathBuf>,
+) -> Option<PathBuf> {
+    // A row replaces the daemon's variable in the child's environment, even
+    // when it is empty.
+    let config_dir = match rows.get(CONFIG_DIR_VAR) {
+        Some(row) => Some(OsString::from(row)),
+        None => env,
+    };
     match config_dir {
         Some(dir) if !dir.is_empty() => Some(PathBuf::from(dir)),
         _ => home.map(|home| home.join(".claude")),
@@ -69,14 +98,13 @@ pub fn encode_project_dir(cwd: &str) -> String {
 /// transcripts), and only those whose first recorded `cwd` is `cwd` itself:
 /// distinct directories can encode to the same folder name. A missing folder
 /// yields no candidates; unreadable files and malformed lines are skipped.
-#[must_use]
-pub fn candidates(
+fn candidates(
     claude_home: &Path,
     cwd: &str,
     window_start: DateTime<Utc>,
     window_end: DateTime<Utc>,
     limit: usize,
-) -> Vec<TranscriptCandidate> {
+) -> Vec<FoundConversation> {
     let dir = project_dir(claude_home, cwd);
     let entries = match fs::read_dir(&dir) {
         Ok(entries) => entries,
@@ -87,7 +115,7 @@ pub fn candidates(
             return Vec::new();
         }
     };
-    let mut found: Vec<TranscriptCandidate> = entries
+    let mut found: Vec<FoundConversation> = entries
         .filter_map(Result::ok)
         .filter_map(|entry| candidate_from_entry(&entry, cwd, window_start, window_end))
         .collect();
@@ -102,8 +130,7 @@ pub fn candidates(
 
 /// Whether Claude Code holds a transcript `id` for `cwd`. An `id` that is not
 /// a plain file-name stem (a path separator, `..`) is never found.
-#[must_use]
-pub fn transcript_exists(claude_home: &Path, cwd: &str, id: &str) -> bool {
+fn transcript_exists(claude_home: &Path, cwd: &str, id: &str) -> bool {
     is_plain_id(id)
         && project_dir(claude_home, cwd)
             .join(format!("{id}.jsonl"))
@@ -112,15 +139,14 @@ pub fn transcript_exists(claude_home: &Path, cwd: &str, id: &str) -> bool {
 
 /// The transcript `id` recorded for `cwd`, with its modified time and title,
 /// when [`transcript_exists`] finds it.
-#[must_use]
-pub fn known_conversation(claude_home: &Path, cwd: &str, id: &str) -> Option<TranscriptCandidate> {
+fn known_conversation(claude_home: &Path, cwd: &str, id: &str) -> Option<FoundConversation> {
     if !transcript_exists(claude_home, cwd, id) {
         return None;
     }
     let path = project_dir(claude_home, cwd).join(format!("{id}.jsonl"));
     let last_active: DateTime<Utc> = fs::metadata(&path).ok()?.modified().ok()?.into();
     let title = scan_head(&path).and_then(|head| head.summary.or(head.first_user));
-    Some(TranscriptCandidate {
+    Some(FoundConversation {
         id: id.to_owned(),
         last_active,
         title,
@@ -131,19 +157,12 @@ fn project_dir(claude_home: &Path, cwd: &str) -> PathBuf {
     claude_home.join("projects").join(encode_project_dir(cwd))
 }
 
-pub(crate) fn is_plain_id(id: &str) -> bool {
-    !id.is_empty()
-        && id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-}
-
 fn candidate_from_entry(
     entry: &DirEntry,
     cwd: &str,
     window_start: DateTime<Utc>,
     window_end: DateTime<Utc>,
-) -> Option<TranscriptCandidate> {
+) -> Option<FoundConversation> {
     let path = entry.path();
     if path.extension().and_then(OsStr::to_str) != Some("jsonl") {
         return None;
@@ -161,7 +180,7 @@ fn candidate_from_entry(
     if cwd_key(head.cwd.as_deref()?) != cwd_key(cwd) {
         return None;
     }
-    Some(TranscriptCandidate {
+    Some(FoundConversation {
         id,
         last_active,
         title: head.summary.or(head.first_user),
@@ -300,9 +319,10 @@ fn tidy_title(raw: &str) -> Option<String> {
 )]
 mod tests {
     use super::{
-        TranscriptCandidate, candidates, claude_home_from, encode_project_dir, known_conversation,
+        candidates, claude_home_from, encode_project_dir, find_in, known_conversation,
         transcript_exists,
     };
+    use agent_api::{ConversationQuery, FoundConversation, ResolvedRows};
     use chrono::{DateTime, Duration, TimeZone, Utc};
     use serde_json::{Value, json};
     use std::ffi::OsString;
@@ -377,11 +397,11 @@ mod tests {
         json!({"type": "user", "cwd": cwd, "message": {"role": "user", "content": content}})
     }
 
-    fn all(home: &Path, cwd: &str) -> Vec<TranscriptCandidate> {
+    fn all(home: &Path, cwd: &str) -> Vec<FoundConversation> {
         candidates(home, cwd, at(0), at(23), usize::MAX)
     }
 
-    fn ids(found: &[TranscriptCandidate]) -> Vec<&str> {
+    fn ids(found: &[FoundConversation]) -> Vec<&str> {
         found.iter().map(|c| c.id.as_str()).collect()
     }
 
@@ -402,21 +422,57 @@ mod tests {
 
     #[test]
     fn claude_home_prefers_config_dir_then_home() {
+        let no_rows = ResolvedRows::default();
         let home = Some(PathBuf::from("/home/u"));
         assert_eq!(
-            claude_home_from(Some(OsString::from("/cfg")), home.clone()),
+            claude_home_from(&no_rows, Some(OsString::from("/cfg")), home.clone()),
             Some(PathBuf::from("/cfg"))
         );
         assert_eq!(
-            claude_home_from(None, home.clone()),
+            claude_home_from(&no_rows, None, home.clone()),
             Some(Path::new("/home/u").join(".claude"))
         );
         assert_eq!(
-            claude_home_from(Some(OsString::new()), home),
+            claude_home_from(&no_rows, Some(OsString::new()), home),
             Some(Path::new("/home/u").join(".claude")),
             "an empty CLAUDE_CONFIG_DIR counts as unset"
         );
-        assert_eq!(claude_home_from(None, None), None);
+        assert_eq!(claude_home_from(&no_rows, None, None), None);
+    }
+
+    #[test]
+    fn a_session_config_dir_row_beats_the_environment() {
+        let session = Scratch::new("row-home");
+        let daemon = Scratch::new("env-home");
+        session.transcript(CWD, "mine.jsonl", &[user(CWD, "hi")], at(10));
+        daemon.transcript(CWD, "other.jsonl", &[user(CWD, "hi")], at(10));
+        let env = Some(daemon.home().as_os_str().to_owned());
+        let rows = ResolvedRows::new(vec![(
+            "claude_config_dir".to_string(),
+            session.home().display().to_string(),
+        )]);
+        let empty_row = ResolvedRows::new(vec![("CLAUDE_CONFIG_DIR".to_string(), String::new())]);
+
+        let find = |rows: &ResolvedRows, known_id: Option<&str>| {
+            let home = claude_home_from(rows, env.clone(), None).expect("a Claude home");
+            let query = ConversationQuery {
+                folder: Path::new(CWD),
+                window: Some((at(0), at(23))),
+                known_id,
+                rows,
+            };
+            find_in(&home, &query)
+        };
+
+        assert_eq!(ids(&find(&rows, None)), ["mine"]);
+        assert_eq!(ids(&find(&rows, Some("mine"))), ["mine"]);
+        assert_eq!(ids(&find(&rows, Some("other"))), [] as [&str; 0]);
+        assert_eq!(
+            claude_home_from(&empty_row, env.clone(), Some(PathBuf::from("/home/u"))),
+            Some(Path::new("/home/u").join(".claude")),
+            "an empty row hides the daemon's variable from the child, which then uses its default home"
+        );
+        assert_eq!(ids(&find(&ResolvedRows::default(), None)), ["other"]);
     }
 
     #[test]
@@ -618,10 +674,7 @@ mod tests {
     fn missing_project_folder_yields_nothing() {
         let scratch = Scratch::new("missing");
 
-        assert_eq!(
-            all(scratch.home(), CWD),
-            [] as [crate::transcripts::TranscriptCandidate; 0]
-        );
+        assert_eq!(all(scratch.home(), CWD), [] as [FoundConversation; 0]);
         assert!(!transcript_exists(scratch.home(), CWD, "abc"));
     }
 

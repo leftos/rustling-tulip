@@ -30,7 +30,9 @@ use crate::{
     env_secrets, headless, inject, orphan, osc_title, pty_state, screen, spawn_plan, tracer_client,
     user_env, workspace as ws,
 };
-use agent_api::{AgentPlugin, EnvPlan, KeyLookup, ResolvedRows, SpawnCheck, SpawnContext};
+use agent_api::{
+    AgentPlugin, ConversationPlan, EnvPlan, KeyLookup, ResolvedRows, SpawnCheck, SpawnContext,
+};
 use anyhow::{Context as _, anyhow};
 use chrono::Utc;
 use directories::UserDirs;
@@ -832,6 +834,28 @@ fn plain_shell_meta(
     )
 }
 
+/// The conversation id an interactive spawn records and passes its CLI, and
+/// the conversation it resumes, as `backend` plans them: a minted id is
+/// recorded, a resumed one is recorded and resumed, and a plan the daemon
+/// cannot carry out yet records none.
+fn planned_conversation(
+    backend: &dyn AgentPlugin,
+    cfg: &SpawnArgs,
+) -> (Option<String>, Option<String>) {
+    match backend.conversation_plan(&cfg.options, cfg.resume_conversation.as_deref()) {
+        ConversationPlan::Minted(id) => (Some(id), None),
+        ConversationPlan::Resumed(id) => (Some(id.clone()), Some(id)),
+        ConversationPlan::None => (None, None),
+        ConversationPlan::PreCreate { .. } | ConversationPlan::DiscoverAfterLaunch => {
+            warn!(
+                agent = %backend.descriptor().id.0,
+                "conversation plan not supported yet; spawning without a recorded conversation"
+            );
+            (None, None)
+        }
+    }
+}
+
 #[expect(
     clippy::too_many_arguments,
     clippy::too_many_lines,
@@ -855,19 +879,14 @@ async fn spawn_interactive_session(
     let backend = agent_registry::plugin(agent);
     let raw_program = backend.resolve_program();
     let (program, prepend_args) = resolve_agent_program(&raw_program);
-    // Claude gets a known conversation id so the session can be resumed with
-    // `claude --resume <id>` after it ends. A resumed conversation keeps its id.
-    let claude_session_id = (agent == Agent::Claude).then(|| {
-        cfg.resume_conversation
-            .clone()
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
-    });
+    let (claude_session_id, resume_conversation) = planned_conversation(backend, cfg);
     // The argv names the injected settings file, so it is written before the
     // argv is built. Only Claude takes it; a failure leaves this spawn on the
     // heuristic.
     let hook_settings = write_hook_settings(hub, &session_id, agent);
     let common = SpawnContext {
         conversation_id: claude_session_id.as_deref(),
+        resume_conversation: resume_conversation.as_deref(),
         settings_file: hook_settings.as_ref().map(HookSettings::path),
         ..cfg.common()
     };

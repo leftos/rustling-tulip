@@ -75,6 +75,12 @@
     },
     {
       "paths": [
+        "crates/daemon/src/conversations.rs"
+      ],
+      "filter": "package(daemon) & (test(conversations) | test(history) | test(recover) | test(duplicate))"
+    },
+    {
+      "paths": [
         "crates/daemon/**"
       ],
       "filter": "rdeps(daemon)"

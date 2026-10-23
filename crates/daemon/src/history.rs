@@ -8,6 +8,7 @@
 //! sessions are never written: a `claude --print` run has nothing to resume.
 //! Startup prunes entries older than [`HISTORY_RETENTION`].
 
+use crate::conversations;
 use crate::env_secrets::{self, SealOutcome};
 use crate::orphan;
 use crate::paths::{Dirs, normalize_path_key};
@@ -15,7 +16,7 @@ use crate::pty::PtyExit;
 use crate::session::{SessionRecord, SessionRegistry};
 use crate::sync::lock;
 use crate::tracer_log::{self, TracerLogEnd, TracerLogSummary};
-use crate::transcripts;
+use agent_api::ResolvedRows;
 use anyhow::{Context as _, anyhow};
 use chrono::{DateTime, TimeDelta, Utc};
 use protocol::{
@@ -33,8 +34,6 @@ use tracing::{debug, info, warn};
 /// How long an ended session stays in the history.
 pub const HISTORY_RETENTION: TimeDelta = TimeDelta::days(7);
 
-/// Most conversations offered for one history entry.
-const CANDIDATE_LIMIT: usize = 5;
 /// How long after a session's end its conversation may still have been written.
 const CANDIDATE_GRACE: TimeDelta = TimeDelta::minutes(2);
 /// How far before its end a session with no known start is searched from.
@@ -913,34 +912,35 @@ pub fn recorded_env(entry: &HistoryEntry) -> &[(String, String)] {
 
 /// The history as the client lists it: every non-headless entry, newest end
 /// first, with the conversations it may be recovered into and what its folder
-/// is. `claude_home` is `None` when Claude Code's home can't be found, and
-/// then no Claude entry has candidates.
+/// is. `lookup_rows` gives the rows an entry's conversations are looked up
+/// with.
 #[must_use]
 pub fn history_items(
     dirs: &Dirs,
     repos: &[RepoEntry],
-    claude_home: Option<&Path>,
+    lookup_rows: &dyn Fn(&HistoryEntry) -> ResolvedRows,
 ) -> Vec<SessionHistoryItem> {
     let now = Utc::now();
     read_all(dirs)
         .into_iter()
         .filter(|entry| entry.mode != SessionMode::Headless)
-        .map(|entry| history_item(entry, repos, claude_home, now))
+        .map(|entry| {
+            let rows = lookup_rows(&entry);
+            history_item(entry, repos, &rows, now)
+        })
         .collect()
 }
 
 fn history_item(
     entry: HistoryEntry,
     repos: &[RepoEntry],
-    claude_home: Option<&Path>,
+    rows: &ResolvedRows,
     now: DateTime<Utc>,
 ) -> SessionHistoryItem {
     let folder = entry_folder(&entry).map(str::to_owned);
-    let candidates = match (entry.agent, claude_home, folder.as_deref()) {
-        (Agent::Claude, Some(home), Some(folder)) => {
-            conversation_candidates(&entry, home, folder, now)
-        }
-        _ => Vec::new(),
+    let candidates = match folder.as_deref() {
+        Some(folder) => conversation_candidates(&entry, rows, folder, now),
+        None => Vec::new(),
     };
     let folder_is_git_repo = folder
         .as_deref()
@@ -962,17 +962,18 @@ fn history_item(
 /// session ran, up to `now` when its end time is unknown.
 fn conversation_candidates(
     entry: &HistoryEntry,
-    claude_home: &Path,
+    rows: &ResolvedRows,
     folder: &str,
     now: DateTime<Utc>,
 ) -> Vec<ConversationCandidate> {
+    let plugin = agent_registry::plugin(entry.agent);
+    let folder = Path::new(folder);
     let found = if let Some(id) = &entry.claude_session_id {
-        transcripts::known_conversation(claude_home, folder, id)
+        conversations::known(plugin, folder, id, rows)
             .into_iter()
             .collect()
     } else {
-        let (start, end) = candidate_window(entry, now);
-        transcripts::candidates(claude_home, folder, start, end, CANDIDATE_LIMIT)
+        conversations::candidates(plugin, folder, candidate_window(entry, now), rows)
     };
     found
         .into_iter()
@@ -3407,10 +3408,16 @@ mod recovery_tests {
         );
     }
 
+    /// Lookup rows pointing every entry's Claude home at `home`.
+    fn home_rows(home: &Path) -> impl Fn(&HistoryEntry) -> ResolvedRows + use<> {
+        let home = home.display().to_string();
+        move |_| ResolvedRows::new(vec![("CLAUDE_CONFIG_DIR".to_owned(), home.clone())])
+    }
+
     fn write_transcript(home: &Path, cwd: &str, id: &str, at: DateTime<Utc>) {
         let dir = home
             .join("projects")
-            .join(transcripts::encode_project_dir(cwd));
+            .join(agent_claude::encode_project_dir(cwd));
         std::fs::create_dir_all(&dir).expect("create project dir");
         let path = dir.join(format!("{id}.jsonl"));
         let line =
@@ -3494,7 +3501,7 @@ mod recovery_tests {
                 .expect("repo"),
         ];
 
-        let items = history_items(&dirs, &repos, Some(&home));
+        let items = history_items(&dirs, &repos, &home_rows(&home));
 
         let ids: Vec<&str> = items.iter().map(|i| i.entry.session_id.as_str()).collect();
         assert_eq!(ids, ["known", "gone", "shell"], "headless is left out");
@@ -3527,7 +3534,11 @@ mod recovery_tests {
         assert!(items[2].folder_is_git_repo, "a .git file counts");
         assert_eq!(items[2].folder_repo_id, None);
 
-        let no_home = history_items(&dirs, &repos, None);
+        let no_home = history_items(
+            &dirs,
+            &repos,
+            &home_rows(&dirs.config.join("no-claude-home")),
+        );
         assert!(no_home.iter().all(|i| i.candidates.is_empty()));
         let _ = std::fs::remove_dir_all(&dirs.config);
     }
@@ -3544,7 +3555,7 @@ mod recovery_tests {
         write_transcript(&home, folder, "within-a-day", ended - TimeDelta::hours(20));
         write_transcript(&home, folder, "too-old", ended - TimeDelta::hours(25));
 
-        let items = history_items(&dirs, &[], Some(&home));
+        let items = history_items(&dirs, &[], &home_rows(&home));
 
         let ids: Vec<&str> = items[0].candidates.iter().map(|c| c.id.as_str()).collect();
         assert_eq!(ids, ["within-a-day"]);
@@ -3565,7 +3576,7 @@ mod recovery_tests {
             write_transcript(&home, &folder, id, *at);
         }
         write_if_absent(&dirs, e).expect("write entry");
-        let items = history_items(&dirs, &[], Some(&home));
+        let items = history_items(&dirs, &[], &home_rows(&home));
         let _ = std::fs::remove_dir_all(&dirs.config);
         items[0].candidates.iter().map(|c| c.id.clone()).collect()
     }

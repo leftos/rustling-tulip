@@ -19,6 +19,8 @@ workspace = true
 test-support = []
 
 [dependencies]
+chrono = { workspace = true }
 protocol = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+tracing = { workspace = true }

@@ -487,7 +487,7 @@ fn update_conversation_id(record: &mut SessionRecord, details: &HookDetails) {
     let Some(id) = details.session_id.as_deref() else {
         return;
     };
-    if crate::transcripts::is_plain_id(id) && record.claude_session_id.as_deref() != Some(id) {
+    if agent_api::is_plain_id(id) && record.claude_session_id.as_deref() != Some(id) {
         record.claude_session_id = Some(id.to_owned());
     }
 }
@@ -683,7 +683,7 @@ fn elicitation_message(body: &Value) -> String {
 
 /// `text` cut to at most `max` characters, the trailing `…` counted inside
 /// them when it was longer — the same convention as the transcript title's
-/// cut in [`crate::transcripts`].
+/// cut in agent-claude's `transcripts` module.
 fn truncate(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         return text.to_owned();
