@@ -132,8 +132,10 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     // portable-pty's CommandBuilder::as_command() calls env_clear() before
     // applying the builder's env map, so the child receives ZERO inherited
     // vars unless we explicitly add them. Forward this process's env: the
-    // daemon's whole environment (tracer_client::tracer_command never clears
-    // it, and only removes the variables the spawn's provider strips) plus
+    // daemon's whole environment (the daemon never clears it, and only removes
+    // the variables the spawn's provider strips: tracer_client::tracer_invocation
+    // lists the changes, which spawn_detached::environment_block applies on
+    // Windows and tracer_client::tracer_command elsewhere) plus
     // the spawn's extra vars; the passthrough keep-list governs headless
     // sessions only. Skip the tracer-internal log var so it doesn't leak into
     // the child env.

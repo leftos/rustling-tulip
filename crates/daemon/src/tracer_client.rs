@@ -17,9 +17,9 @@ use anyhow::{Context as _, anyhow};
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use interprocess::local_socket::tokio::{Stream, prelude::*};
 use portable_pty::ChildKiller;
+use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt as _, AsyncRead, AsyncWrite, AsyncWriteExt as _, BufReader};
@@ -316,42 +316,89 @@ struct TracerLaunch<'a> {
     owner: &'a Path,
 }
 
-/// The tracer command for `launch`, with its args, env and null stdio, not
-/// yet spawned.
-fn tracer_command(launch: &TracerLaunch<'_>) -> std::process::Command {
+/// The tracer's args and the changes to the daemon's environment it runs
+/// with, shared by both platforms' spawn paths.
+struct TracerInvocation {
+    args: Vec<OsString>,
+    /// Applied before `env_remove`, so a name in both is removed; the owner
+    /// and log variables never appear in `env_remove`.
+    env_set: Vec<(OsString, OsString)>,
+    env_remove: Vec<OsString>,
+}
+
+fn tracer_invocation(launch: &TracerLaunch<'_>) -> TracerInvocation {
     let spec = launch.spec;
-    let mut cmd = std::process::Command::new(launch.tracer);
-    cmd.arg("--session-id")
-        .arg(&spec.session_id)
-        .arg("--pipe-name")
-        .arg(launch.pipe_name)
-        .arg("--cwd")
-        .arg(&spec.cwd)
-        .arg("--cols")
-        .arg(spec.cols.to_string())
-        .arg("--rows")
-        .arg(spec.rows.to_string());
-    for (k, v) in &spec.env {
-        cmd.env(k, v);
-    }
-    // The tracer inherits the daemon's environment, so a variable the spawn
-    // must not pass on is removed rather than left out of `env`.
-    for k in &spec.env_remove {
-        cmd.env_remove(k);
-    }
-    cmd.env(TRACER_OWNER_ENV, launch.owner);
+    let mut args: Vec<OsString> = vec![
+        "--session-id".into(),
+        spec.session_id.clone().into(),
+        "--pipe-name".into(),
+        launch.pipe_name.into(),
+        "--cwd".into(),
+        spec.cwd.clone().into_os_string(),
+        "--cols".into(),
+        spec.cols.to_string().into(),
+        "--rows".into(),
+        spec.rows.to_string().into(),
+    ];
+    // Trailing program-and-args: program first, then its args. portable-pty
+    // expects this shape on the tracer side.
+    args.push(spec.program.clone().into());
+    args.extend(spec.args.iter().map(OsString::from));
+
+    let mut env_set: Vec<(OsString, OsString)> =
+        spec.env.iter().map(|(k, v)| (k.into(), v.into())).collect();
+    env_set.push((TRACER_OWNER_ENV.into(), launch.owner.as_os_str().to_owned()));
     // Per-session tracer log so we can debug spawn issues for things like
     // `.cmd` shims and shebang scripts that CreateProcess handles weirdly.
     // Best-effort: if the log dir can't be created we skip the log — losing
     // logs is not a reason to fail a session spawn.
     if let Some(log_path) = launch.log_path {
-        cmd.env(TRACER_LOG_ENV, log_path);
+        env_set.push((TRACER_LOG_ENV.into(), log_path.as_os_str().to_owned()));
     }
-    // Trailing program-and-args: program first, then its args. portable-pty
-    // expects this shape on the tracer side.
-    cmd.arg(&spec.program);
-    for arg in &spec.args {
-        cmd.arg(arg);
+    // The tracer inherits the daemon's environment, so a variable the spawn
+    // must not pass on is removed rather than left out of `env`. The owner
+    // and log variables take effect after the removals: a removal naming one
+    // of them is dropped here rather than let it drop the variable.
+    let env_remove = spec
+        .env_remove
+        .iter()
+        .filter(|name| {
+            let names_owner = is_env_name(name, TRACER_OWNER_ENV);
+            let names_set_log = launch.log_path.is_some() && is_env_name(name, TRACER_LOG_ENV);
+            !names_owner && !names_set_log
+        })
+        .map(OsString::from)
+        .collect();
+    TracerInvocation {
+        args,
+        env_set,
+        env_remove,
+    }
+}
+
+/// Whether the environment name `name` is `var`: Windows compares
+/// environment names case-insensitively.
+fn is_env_name(name: &str, var: &str) -> bool {
+    if cfg!(windows) {
+        name.eq_ignore_ascii_case(var)
+    } else {
+        name == var
+    }
+}
+
+/// The tracer command for `launch`, with its args, env and null stdio, not
+/// yet spawned.
+#[cfg(any(not(windows), test))]
+fn tracer_command(launch: &TracerLaunch<'_>) -> std::process::Command {
+    use std::process::Stdio;
+    let invocation = tracer_invocation(launch);
+    let mut cmd = std::process::Command::new(launch.tracer);
+    cmd.args(&invocation.args);
+    for (k, v) in &invocation.env_set {
+        cmd.env(k, v);
+    }
+    for k in &invocation.env_remove {
+        cmd.env_remove(k);
     }
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -359,21 +406,23 @@ fn tracer_command(launch: &TracerLaunch<'_>) -> std::process::Command {
     cmd
 }
 
+/// Spawns the tracer through [`crate::spawn_detached`], so it inherits none of
+/// the daemon's handles: a tracer outliving the daemon must not keep the
+/// daemon's listener or client connections open. It runs in a hidden console
+/// of its own (`CREATE_NO_WINDOW`, no `STARTF_USESTDHANDLES`), so its std
+/// handles are that console's, not the daemon's; with
+/// `RUSTLING_TULIP_TRACER_LOG` set it routes its `tracing_subscriber` output
+/// to that file.
 #[cfg(windows)]
 fn spawn_tracer_process(launch: &TracerLaunch<'_>) -> anyhow::Result<u32> {
-    use std::os::windows::process::CommandExt;
-    /// `CREATE_NO_WINDOW` — suppresses the console window that would otherwise
-    /// flash for the tracer process. The tracer's tracing output goes to
-    /// stderr; with `RUSTLING_TULIP_TRACER_LOG` set the tracer routes its
-    /// `tracing_subscriber` output to a file instead.
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
-    let mut cmd = tracer_command(launch);
-    cmd.creation_flags(CREATE_NO_WINDOW);
-    let child = cmd
-        .spawn()
-        .with_context(|| format!("spawning tracer process {}", launch.tracer.display()))?;
-    Ok(child.id())
+    let invocation = tracer_invocation(launch);
+    crate::spawn_detached::spawn_detached(
+        launch.tracer,
+        &invocation.args,
+        &invocation.env_set,
+        &invocation.env_remove,
+    )
+    .with_context(|| format!("spawning tracer process {}", launch.tracer.display()))
 }
 
 #[cfg(not(windows))]
@@ -1078,6 +1127,47 @@ mod tests {
         assert!(
             env.contains(&(OsStr::new("ANTHROPIC_API_KEY"), None)),
             "the inherited variable is removed: {env:?}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn removing_the_owner_and_log_variables_keeps_them_in_the_tracer_environment() {
+        let spec = crate::pty::PtySpawnSpec {
+            session_id: "abc".to_string(),
+            program: "prog".to_string(),
+            args: Vec::new(),
+            cwd: PathBuf::from("cwd"),
+            env: Vec::new(),
+            env_remove: vec![
+                super::TRACER_OWNER_ENV.to_owned(),
+                super::TRACER_LOG_ENV.to_owned(),
+            ],
+            cols: 80,
+            rows: 24,
+        };
+        let owner = PathBuf::from("owner-config");
+        let log = PathBuf::from("tracer-abc.log");
+        let invocation = super::tracer_invocation(&super::TracerLaunch {
+            tracer: Path::new("rt-tracer"),
+            spec: &spec,
+            pipe_name: "pipe",
+            log_path: Some(&log),
+            owner: &owner,
+        });
+        let block = crate::spawn_detached::environment_block(
+            Vec::new(),
+            &invocation.env_set,
+            &invocation.env_remove,
+        )
+        .expect("build the block");
+        let text = String::from_utf16(&block).expect("block is UTF-16");
+        let entries: Vec<&str> = text.split('\0').collect();
+        let owner_entry = format!("{}=owner-config", super::TRACER_OWNER_ENV);
+        let log_entry = format!("{}=tracer-abc.log", super::TRACER_LOG_ENV);
+        assert!(
+            entries.contains(&owner_entry.as_str()) && entries.contains(&log_entry.as_str()),
+            "a removal naming the owner or log variable never drops it: {entries:?}"
         );
     }
 

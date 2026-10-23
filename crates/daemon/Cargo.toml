@@ -99,11 +99,15 @@ windows-native-keyring-store = { version = "1.1", default-features = false }
 # API (`SetThreadExecutionState`) backing the keep-awake hold that stops the
 # host idle-sleeping while a session is live, plus the Registry API
 # (`RegGetValueW`) reading user-scope environment variables for spawn-env
-# references. 0.61 matches the version already pulled transitively by the
-# existing dep graph.
+# references, plus `CreateProcessW` (Threading; Security for its
+# SECURITY_ATTRIBUTES parameters) spawning tracers that inherit none of the
+# daemon's handles. 0.61 matches the version already pulled transitively by
+# the existing dep graph.
 windows = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_Security",
     "Win32_System_Power",
     "Win32_System_Registry",
     "Win32_System_RestartManager",
+    "Win32_System_Threading",
 ] }
