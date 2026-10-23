@@ -160,7 +160,8 @@ pub(crate) fn rearrange_lines(bound: usize, aspect: f32, grid_open: bool) -> Vec
 
 /// The merge section for the menu of `menu_tab`: nothing unless two tabs
 /// or more are selected and `menu_tab` is one of them; disabled rows when
-/// a selected tab is a diff tab, which the daemon cannot merge.
+/// a selected tab has no grid (a diff or viewer tab), which the daemon
+/// cannot merge, under a line naming the first such tab's kind.
 pub(crate) fn merge_lines(
     tabs: &[TabEntry],
     selection: &TabSelection,
@@ -170,11 +171,13 @@ pub(crate) fn merge_lines(
     if selected.len() < 2 || !selection.contains(menu_tab) {
         return Vec::new();
     }
-    let has_diff = selected
-        .iter()
-        .any(|tab| matches!(tab.content, TabContent::Diff { .. }));
+    let unmergeable = selected.iter().find_map(|tab| match tab.content {
+        TabContent::Diff { .. } => Some("Diff tabs can't be merged"),
+        TabContent::Viewer { .. } => Some("Viewer tabs can't be merged"),
+        TabContent::Grid { .. } => None,
+    });
     let row = |selector: &str, label: &str, layout: MergeLayout| {
-        if has_diff {
+        if unmergeable.is_some() {
             MenuLine::inert(selector, label)
         } else {
             MenuLine::row(selector, label, TabAction::Merge(layout))
@@ -193,8 +196,8 @@ pub(crate) fn merge_lines(
             MergeLayout::TileVertical,
         ),
     ];
-    if has_diff {
-        lines.push(MenuLine::Label("Diff tabs can't be merged".to_owned()));
+    if let Some(note) = unmergeable {
+        lines.push(MenuLine::Label(note.to_owned()));
     }
     lines
 }

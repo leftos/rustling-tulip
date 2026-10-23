@@ -103,6 +103,8 @@ mod text_input;
 mod theme;
 mod undo;
 mod undo_view;
+mod viewer_tab;
+mod viewer_tab_view;
 mod viewer_text;
 mod vscode_suggestion;
 mod vscode_suggestion_view;
@@ -226,6 +228,10 @@ pub use crate::stash_view::{
 pub use crate::tabs::TabPill;
 pub use crate::text_input::bind_keys;
 pub use crate::undo::{TabSnapshot, UndoEntry};
+pub use crate::viewer_tab::{
+    MarkdownMode, OPEN_FAILED_TITLE as VIEWER_OPEN_FAILED_TITLE, ViewerLoad, ViewerOrigin,
+    ViewerTab,
+};
 pub use crate::worktrees_manager_view::{WorktreesButton, WorktreesRow};
 
 const PADDING: f32 = 6.0;
@@ -705,8 +711,14 @@ pub struct RootView {
     diff_tabs: HashMap<String, diff_tab_view::DiffSlot>,
     /// The diff requests' ids, and the tab an open waits to activate.
     diff_opens: diff_tab::DiffOpens,
-    /// The tab active after the last tab change, so a diff tab takes the
-    /// keyboard when it becomes active.
+    /// The state of every viewer tab, by tab id.
+    viewer_tabs: HashMap<String, viewer_tab::ViewerTab>,
+    /// The viewer opens out, and the tab one waits to activate.
+    viewer_opens: viewer_tab::ViewerOpens,
+    /// The keyboard of the viewer tab shown.
+    viewer_focus: FocusHandle,
+    /// The tab active after the last tab change, so a diff or viewer tab
+    /// takes the keyboard when it becomes active.
     last_active_tab: Option<String>,
     /// The session a terminal tab focused last, so the source-control
     /// panel keeps its sections while a diff tab is active.
@@ -988,6 +1000,9 @@ impl RootView {
             stash: StashUi::new(cx.focus_handle()),
             diff_tabs: HashMap::new(),
             diff_opens: diff_tab::DiffOpens::default(),
+            viewer_tabs: HashMap::new(),
+            viewer_opens: viewer_tab::ViewerOpens::default(),
+            viewer_focus: cx.focus_handle(),
             last_active_tab: None,
             last_focused_session: None,
             pick_folder,
@@ -1861,11 +1876,13 @@ impl RootView {
     /// closing it focuses the tab's pane), the spawn dialog's Open in
     /// follows the tabs and the active tab is saved. The session the last
     /// terminal tab focused is remembered before a diff tab takes over. A
-    /// diff tab an open waited for is activated, and a diff tab that
-    /// becomes active takes the keyboard.
+    /// diff or viewer tab an open waited for is activated, and a diff or
+    /// viewer tab that becomes active takes the keyboard.
     fn after_tabs_change(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.remember_focused_session();
         self.activate_pending_diff_tab();
+        self.reconcile_viewer_tabs();
+        self.activate_pending_viewer_tab();
         self.reconcile_panes(window, cx);
         self.reconcile_diff_tabs(window, cx);
         self.prune_tab_font_sizes();
@@ -1880,8 +1897,8 @@ impl RootView {
         let active = self.tabs.active_id().map(str::to_owned);
         if active != self.last_active_tab {
             self.last_active_tab = active;
-            if keyboard_free {
-                self.focus_active_diff_tab(window, cx);
+            if keyboard_free && !self.focus_active_diff_tab(window, cx) {
+                self.focus_active_viewer_tab(window);
             }
         }
         // The saved active tab is the local daemon's; a remote host's tab
@@ -2294,9 +2311,9 @@ impl RootView {
         cx.notify();
     }
 
-    /// Folds a message in to the file fetches, the diff tabs and the
-    /// source-control panel's parts; returns whether nothing else is owed
-    /// it.
+    /// Folds a message in to the file fetches, the diff and viewer tabs and
+    /// the source-control panel's parts; returns whether nothing else is
+    /// owed it.
     fn on_panel_message(
         &mut self,
         msg: &DaemonMessage,
@@ -2305,6 +2322,7 @@ impl RootView {
     ) -> bool {
         self.on_fetch_message(msg, window, cx)
             || self.on_diff_message(msg, window, cx)
+            || self.on_viewer_message(msg, window, cx)
             || self.on_sc_message(msg, window, cx)
             || self.on_stash_message(msg, window, cx)
             || self.apply_history(msg, cx)
@@ -2608,6 +2626,8 @@ impl RootView {
         self.history = history::HistoryModel::default();
         self.diff_tabs.clear();
         self.diff_opens = diff_tab::DiffOpens::default();
+        self.viewer_tabs.clear();
+        self.viewer_opens = viewer_tab::ViewerOpens::default();
         self.session_history = recover::SessionHistory::default();
         self.recover_requests.clear();
         self.recover_batches.clear();

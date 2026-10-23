@@ -598,10 +598,10 @@ impl RootView {
         }
     }
 
-    /// Gives the keyboard to the active tab: its focused pane, or a diff
-    /// tab's view.
+    /// Gives the keyboard to the active tab: its focused pane, or a diff or
+    /// viewer tab's body.
     pub(crate) fn focus_active_pane(&self, window: &mut Window, cx: &Context<Self>) {
-        if self.focus_active_diff_tab(window, cx) {
+        if self.focus_active_diff_tab(window, cx) || self.focus_active_viewer_tab(window) {
             return;
         }
         if let Some(pane_id) = self
@@ -859,8 +859,8 @@ impl RootView {
         }
     }
 
-    /// The active tab: its split tree, a notice for a diff or viewer tab, or
-    /// the spawn choices when there is no tab.
+    /// The active tab: its split tree, a diff or viewer tab's body, or the
+    /// spawn choices when there is no tab.
     pub(crate) fn grid_area(&self, cx: &mut Context<Self>) -> Div {
         let content = match self.tabs.active_tab() {
             None => self.no_tab(cx),
@@ -868,9 +868,9 @@ impl RootView {
                 TabContent::Diff { .. } => self
                     .diff_tab_element(&tab.id)
                     .unwrap_or_else(|| muted_note(DIFF_LOADING_TEXT).into_any_element()),
-                TabContent::Viewer { .. } => {
-                    muted_note("This build cannot show file viewer tabs yet.").into_any_element()
-                }
+                TabContent::Viewer { .. } => self
+                    .viewer_tab_element(&tab.id)
+                    .unwrap_or_else(|| div().into_any_element()),
                 TabContent::Grid { grid } => {
                     let name = format!("tab-grid-{}", tab.id);
                     div()

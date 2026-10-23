@@ -84,8 +84,10 @@ impl RootView {
 
     /// The Undo button of entry `id`: its snapshots go back in ascending
     /// index order, and one that was the tab shown takes the keyboard again.
+    /// A closed viewer tab whose file is open again is not put back: the
+    /// open tab shows instead.
     fn press_undo(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(entry) = self.undo.take(id) else {
+        let Some(mut entry) = self.undo.take(id) else {
             return;
         };
         self.schedule_undo_expiry(cx);
@@ -93,6 +95,7 @@ impl RootView {
         // removes it before the restore lands, so only a `RestoreTab` can
         // put it back.
         let live = undo::live_tabs(self.tabs.tabs(), self.tabs.closing());
+        let open_viewers = undo::take_open_viewers(&mut entry, self.tabs.tabs(), &live);
         let known: HashSet<String> = self
             .sidebar
             .sessions()
@@ -116,6 +119,11 @@ impl RootView {
                 // activates it, so a refused restore arms nothing.
                 self.tabs.activate_on_arrival(tab_id, focus);
             }
+        }
+        for tab_id in &open_viewers {
+            // It takes the keyboard even when it is the tab shown already.
+            self.last_active_tab = None;
+            self.tabs.activate(tab_id);
         }
         for msg in messages {
             self.tabs.note_layout_request(&msg);

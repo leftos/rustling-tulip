@@ -4,7 +4,7 @@
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
-use protocol::{ClientMessage, GridNode, TabEntry};
+use protocol::{ClientMessage, GridNode, TabContent, TabEntry};
 
 /// How long an entry stays before it goes by itself.
 pub const UNDO_LIFETIME: Duration = Duration::from_secs(8);
@@ -167,6 +167,51 @@ pub fn restore_messages(
             }
         })
         .collect()
+}
+
+/// Takes out of `entry` every closed viewer tab whose file a tab among
+/// `live_tab_ids` already shows, since putting it back would show the same
+/// file twice. Returns the ids of the open tabs that stand in for a closed
+/// tab that was the tab shown, which show instead.
+pub fn take_open_viewers(
+    entry: &mut UndoEntry,
+    tabs: &[TabEntry],
+    live_tab_ids: &HashSet<String>,
+) -> Vec<String> {
+    let mut open = Vec::new();
+    entry.snapshots.retain(
+        |snapshot| match open_viewer_of(&snapshot.tab, tabs, live_tab_ids) {
+            Some(tab_id) => {
+                if snapshot.restore_active {
+                    open.push(tab_id.to_owned());
+                }
+                false
+            }
+            None => true,
+        },
+    );
+    open
+}
+
+/// The live viewer tab that shows the file of `tab`, a viewer tab that is
+/// gone.
+fn open_viewer_of<'a>(
+    tab: &TabEntry,
+    tabs: &'a [TabEntry],
+    live_tab_ids: &HashSet<String>,
+) -> Option<&'a str> {
+    let TabContent::Viewer { path } = &tab.content else {
+        return None;
+    };
+    if live_tab_ids.contains(&tab.id) {
+        return None;
+    }
+    tabs.iter()
+        .find(|other| {
+            live_tab_ids.contains(&other.id)
+                && matches!(&other.content, TabContent::Viewer { path: open } if open == path)
+        })
+        .map(|other| other.id.as_str())
 }
 
 /// The listed tabs minus the closing ones: a tab whose removal the client

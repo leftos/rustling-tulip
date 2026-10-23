@@ -62,6 +62,7 @@ mod ui_tab_drag;
 mod ui_tabs;
 mod ui_target_switch;
 mod ui_terminal;
+mod ui_viewer_tabs;
 mod ui_vscode_prompt;
 mod ui_workspace_creator;
 mod ui_worktree_cleanup;

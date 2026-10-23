@@ -21,6 +21,7 @@ use crate::tab_menu::{MenuLine, TabAction, merge_lines, rearrange_lines};
 use crate::tabs::{PillClick, bound_pane_count, collect_panes, tab_session_counts};
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::undo;
+use crate::viewer_tab::display_name;
 use crate::{BORDER, DANGER, HOVER_BG, MUTED, RootView, TEXT, UI_TEXT_SIZE, tooltip};
 
 const TAB_BAR_HEIGHT: f32 = 38.0;
@@ -149,8 +150,9 @@ impl RootView {
     }
 
     /// Every line of `menu`: the Grid submenu alone while it is open, else
-    /// rename, the rearrange section, the font section, the close rows and
-    /// the merge section.
+    /// rename (not for a viewer tab, whose pill shows its file's name), the
+    /// rearrange section, the font section, the close rows and the merge
+    /// section.
     fn tab_menu_lines(&self, menu: &TabMenu) -> Vec<MenuLine> {
         let tabs = self.tabs.tabs();
         let Some(tab) = self.tabs.tab(&menu.tab_id) else {
@@ -164,13 +166,18 @@ impl RootView {
         if menu.grid_open && submenu {
             return rearrange;
         }
-        let mut lines = vec![MenuLine::row(
-            "tab-menu-rename",
-            "Rename tab",
-            TabAction::Rename,
-        )];
+        let mut lines = Vec::new();
+        if !matches!(tab.content, TabContent::Viewer { .. }) {
+            lines.push(MenuLine::row(
+                "tab-menu-rename",
+                "Rename tab",
+                TabAction::Rename,
+            ));
+        }
         if !rearrange.is_empty() {
-            lines.push(MenuLine::Separator);
+            if !lines.is_empty() {
+                lines.push(MenuLine::Separator);
+            }
             lines.extend(rearrange);
         }
         if bound >= 3 {
@@ -710,6 +717,12 @@ impl RootView {
             .filter(|_| self.active_tab_drag(cx).is_some())
     }
 
+    /// What `tab_id`'s pill reads while it is not being renamed.
+    #[must_use]
+    pub fn tab_pill_label(&self, tab_id: &str) -> Option<String> {
+        self.tabs.tab(tab_id).map(pill_label)
+    }
+
     /// Whether `tab_id`'s pill shows the no-drop state: a pane drag is under
     /// way and that pill's tab takes no pane, or a sidebar leaf drag is and
     /// that pill's tab takes no leaf.
@@ -1096,11 +1109,13 @@ impl PillLook {
     }
 }
 
-/// A tab's name; a diff tab's is marked Δ.
+/// A tab's name; a diff tab's is marked Δ, and a viewer tab's is its file's
+/// name.
 fn pill_label(tab: &TabEntry) -> String {
-    match tab.content {
+    match &tab.content {
         TabContent::Diff { .. } => format!("Δ {}", tab.name),
-        TabContent::Viewer { .. } | TabContent::Grid { .. } => tab.name.clone(),
+        TabContent::Viewer { path } => display_name(path).to_owned(),
+        TabContent::Grid { .. } => tab.name.clone(),
     }
 }
 
