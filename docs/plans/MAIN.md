@@ -9,6 +9,7 @@
 - [ ] RT-35 FT.2: native download sink for fetched files · release vNext
 - [ ] RT-36 FT.3: fetch a file by clicking a terminal path link in remote mode · release vNext
 - [ ] RT-37 FT.4: "Fetch file…" popup · release vNext
+- [ ] RT-57 Offer to resume the sessions a reboot killed, on the next start · release vNext
 - [ ] RT-184 Let only the client with recent input own a session's terminal size · release vNext
 - [ ] RT-187 Await the tailnet servers after the listener's supervisor panics · release vNext
 - [ ] RT-240 Close tailnet sessions when their listener drops · release vNext
@@ -35,6 +36,7 @@
 
 - [ ] RT-179 Keep keyboard focus when pressing Worktrees Save disables it · release vNext
 - [ ] RT-195 Give the container menu a keyboard route · release vNext
+- [ ] RT-313 Make keep-awake a three-way switch: Off, Keep awake when busy, Keep awake always · release vNext
 - [ ] RT-202 Accept the 1015 and 1016 mouse-report encodings · release vNext
 - [ ] RT-204 Clear the container row focus when the sidebar stops showing the container list · release vNext
 - [ ] RT-205 Re-sync a watched .code-workspace once at daemon start · release vNext
@@ -188,6 +190,7 @@
 - [ ] RT-260 Autostart test: stop writing to the live HKCU Run key
 - [ ] RT-262 Run the ui_ellipsis specs: test-release builds without debug assertions
 - [!] RT-294 Route rt.ps1 native-e2e to the builder through the gate · release vNext
+- [ ] RT-316 Capture the native client in any state: native-shot views for the overlays and empty area, and a drive-and-capture command
 
 ## macOS
 
@@ -219,7 +222,6 @@
 - [ ] RT-53 Agent CLI: let an agent in one session drive other sessions
 - [ ] RT-131 Design a plugin layer on the agent CLI, then move one event-driven feature onto it
 - [ ] RT-54 Agent skill pack: fan work out to worktrees, then review and merge
-- [ ] RT-57 Offer to resume the sessions a reboot killed, on the next start
 - [ ] RT-71 Seed new worktrees: copy listed ignored files, link shared folders, run setup scripts
 - [ ] RT-72 Comment on a diff, then send the comments to an agent as one prompt
 - [ ] RT-73 Hibernate idle finished agents and resume them when opened
@@ -242,3 +244,12 @@
 - [ ] RT-263 Split RootView::on_key_capture under the 100-line limit
 - [ ] RT-279 Stop sending loopback bearer tokens in cleartext
 - [ ] RT-289 Classify a plain shell by its prompt at the cursor, not by output volume
+- [ ] RT-306 Polish from v0.1.0-alpha dogfooding
+  - [ ] RT-307 Draw the spawn dialog's base-branch selection only when the field has focus
+  - [ ] RT-308 Show the focused session's name without its UUID in the status bar
+  - [ ] RT-309 Clear the Spawning session toast once the session's pane is live
+  - [ ] RT-310 Lay out the Quit dialog's buttons in tidy rows
+  - [ ] RT-311 Draw Open in forge disabled on a repo with no origin remote
+  - [ ] RT-314 Drop the doubled wt. prefix from default worktree folders
+  - [ ] RT-315 Keep an activity-rail tooltip from covering the panel its click opened
+- [ ] RT-312 Strip Claude's title spinner glyph from session names
