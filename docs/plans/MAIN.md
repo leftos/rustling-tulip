@@ -11,9 +11,7 @@
 - [ ] RT-240 Close tailnet sessions when their listener drops · release vNext
 - [ ] RT-243 Split tailnet Supervisor::run and carry the real CertFailed reason
 - [ ] RT-258 Remote mode: don't send this PC's remembered folders to a remote host
-- [ ] RT-171 Phase 5a: pane drag-and-drop (P5.1–P5.5) · release vNext
 - [ ] RT-152 P6.3: Host picker from the tailnet's machines, typed-name fallback, boot reconnect · release vNext
-  - [ ] RT-352 P6.3 A2b: Reset the old host's state and the exit dialog on a target switch · release vNext
   - [ ] RT-353 P6.3 B: Tailnet peers, saved hosts and the boot target (model) · release vNext
   - [ ] RT-354 P6.3 C: Host picker view and the Connections button · release vNext
 - [ ] RT-257 P6.2b: typed host path for Add repo and Browse on a remote host · release vNext
@@ -23,7 +21,6 @@
 - [ ] RT-166 TS.3b: device tokens issued only after the owner approves the device on the host PC · release vNext
 - [ ] RT-278 Prove the daemon holds the token before a client reuses, retires or kills it
 - [ ] RT-331 Built-in text and Markdown viewer with Open in default app and an always-external setting · release vNext
-  - [ ] RT-336 RT-331 S3b: Viewer tabs in the native tab model · release vNext
   - [ ] RT-337 RT-331 S4: Text viewer view and link/fetch routing · release vNext
   - [ ] RT-338 RT-331 S5: Markdown core on pulldown-cmark · release vNext
   - [ ] RT-339 RT-331 S6: Markdown view with Source toggle and links · release vNext
@@ -31,6 +28,8 @@
   - [ ] RT-341 RT-331 S8: Viewer docs and task index rows · release vNext
 - [ ] RT-343 Keep name, look and sidebar place when Recover respawns a session
 - [ ] RT-349 Restart conversation discovery for sessions reattached after a daemon restart
+- [/] RT-359 Keep a Claude session's pane as a shell when Claude exits, with a timed close toast · release vNext
+- [ ] RT-360 Make the agent's launch command customizable in Settings: another program, an alias or extra arguments · release vNext
 
 ## Wave 1a — Claude sessions on DeepSeek
 
@@ -268,5 +267,10 @@
 - [ ] RT-332 Hand a session's exit through its lifecycle queue so output never trails the exit
 - [ ] RT-342 Scroll the focused Settings control into view on Tab
 - [ ] RT-318 Show Claude's HTML/SVG mocks in a panel beside its session
+  - [ ] RT-355 Serve pinned three.js, chart and sketch libraries to mock pages
+  - [ ] RT-356 Let show_mock show a page from a file path with its media
+  - [ ] RT-357 Add a mock_screenshot tool so Claude sees its rendered mock
+  - [ ] RT-358 Send picks and notes from a mock page back to Claude
 - [ ] RT-344 Mark files fetched from a remote host with Mark-of-the-Web
 - [ ] RT-347 Make the UI test harness's in_model refuse a selector it does not know
+- [ ] RT-362 Keep a shell-hosted Claude session's kind and conversation when history is rebuilt from tracer logs
