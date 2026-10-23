@@ -1,14 +1,20 @@
 //! Claude (`claude` CLI from `@anthropic-ai/claude-code`) plugin.
 //!
-//! Owns the argv layout for both interactive and headless spawns, the hook
-//! settings file an interactive spawn passes as `--settings`, and the
+//! Owns Claude's descriptor and option schema with the [`ClaudeOptions`] they
+//! decode into, the argv layout for both interactive and headless spawns, the
+//! hook settings file an interactive spawn passes as `--settings`, and the
 //! stream-json parser that turns a headless session's output into
 //! [`HeadlessEvent`]s.
 
-use agent_api::{AgentPlugin, HeadlessEvent, SpawnContext, workspace_prelude};
-use protocol::{AgentOptions, ClaudeProvider, PermissionMode, SessionMember, SessionStatus};
-use serde::Deserialize;
+use agent_api::{Agent, HeadlessEvent, SpawnContext, workspace_prelude};
+use protocol::{
+    AccentToken, AgentCaps, AgentDescriptor, AgentId, AgentTexts, ChipRule, Choice, ChoiceStyle,
+    ClaudeProvider, FieldKind, FieldOverride, FieldRule, OptionField, OptionValue, PermissionMode,
+    SessionMember, SessionStatus, ShiftEnter, SpawnPlacement,
+};
+use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::sync::LazyLock;
 use tracing::debug;
 
 /// The instruction files the workspace prelude names.
@@ -17,12 +23,146 @@ const INSTRUCTION_FILES: &[&str] = &["CLAUDE.md", "AGENTS.md"];
 /// The model a `DeepSeek` spawn passes as `--model` when it names none.
 pub const DEEPSEEK_MODEL: &str = "deepseek-flash";
 
+/// The options a Claude spawn takes, one per field of Claude's descriptor.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaudeOptions {
+    /// Claude's `--permission-mode <value>`; `None` passes none, leaving the
+    /// CLI's default. Ignored (and the flag omitted) on a trusted spawn.
+    pub permission_mode: Option<PermissionMode>,
+    /// The endpoint the CLI talks to.
+    pub provider: ClaudeProvider,
+    /// Claude's `--model <value>`; `None` passes the provider's default model
+    /// (see [`default_model`]), or no flag when it has none.
+    pub model: Option<String>,
+}
+
 pub struct ClaudePlugin;
 
 /// The Claude plugin the registry hands out.
 pub static CLAUDE: ClaudePlugin = ClaudePlugin;
 
-impl AgentPlugin for ClaudePlugin {
+/// Claude's descriptor, built once.
+static DESCRIPTOR: LazyLock<AgentDescriptor> = LazyLock::new(claude_descriptor);
+
+fn claude_descriptor() -> AgentDescriptor {
+    AgentDescriptor {
+        id: AgentId("claude".to_string()),
+        label: "Claude".to_string(),
+        tag: "claude".to_string(),
+        accent: AccentToken::Claude,
+        shift_enter: ShiftEnter::BackslashCr,
+        caps: AgentCaps {
+            headless: true,
+            resume: true,
+            extra_folders: true,
+            shell_resume: true,
+        },
+        trust_note: Some("Trusted launch passes --dangerously-skip-permissions.".to_string()),
+        texts: AgentTexts {
+            shell_resume_label: "Shell running claude --resume".to_string(),
+            no_conversation: "no conversation found".to_string(),
+        },
+        fields: vec![permission_mode_field(), provider_field(), model_field()],
+        chips: vec![ChipRule {
+            field: "provider".to_string(),
+            hide_when: OptionValue::Text("anthropic".to_string()),
+            tip: "Runs on DeepSeek".to_string(),
+        }],
+    }
+}
+
+/// A field shown on Claude's Settings page and in the spawn dialog's main
+/// section, with no help text and no rules.
+fn main_field(id: &str, label: &str, kind: FieldKind, default: OptionValue) -> OptionField {
+    OptionField {
+        id: id.to_string(),
+        label: label.to_string(),
+        help: None,
+        kind,
+        default,
+        settings: true,
+        spawn: SpawnPlacement::Main,
+        locked_when_trusted: false,
+        when: Vec::new(),
+    }
+}
+
+fn choices(pairs: &[(&str, &str)]) -> Vec<Choice> {
+    pairs
+        .iter()
+        .map(|(value, label)| Choice {
+            value: (*value).to_string(),
+            label: (*label).to_string(),
+        })
+        .collect()
+}
+
+/// The permission mode: no value is the CLI's default; each choice is a
+/// [`PermissionMode`]'s serde name.
+fn permission_mode_field() -> OptionField {
+    OptionField {
+        locked_when_trusted: true,
+        ..main_field(
+            "permission_mode",
+            "Permission mode",
+            FieldKind::Choice {
+                choices: choices(&[
+                    ("default", "Default"),
+                    ("accept_edits", "Accept edits"),
+                    ("bypass_permissions", "Bypass permissions"),
+                    ("plan", "Plan"),
+                ]),
+                style: ChoiceStyle::Dropdown,
+            },
+            OptionValue::Null,
+        )
+    }
+}
+
+fn provider_field() -> OptionField {
+    main_field(
+        "provider",
+        "Provider",
+        FieldKind::Choice {
+            choices: choices(&[("anthropic", "Anthropic"), ("deepseek", "DeepSeek")]),
+            style: ChoiceStyle::Segmented,
+        },
+        OptionValue::Text("anthropic".to_string()),
+    )
+}
+
+/// The model: no value passes the provider's default; on `DeepSeek` the
+/// placeholder names its default model and the Anthropic aliases go.
+fn model_field() -> OptionField {
+    OptionField {
+        when: vec![FieldRule {
+            if_field: "provider".to_string(),
+            equals: OptionValue::Text("deepseek".to_string()),
+            then: FieldOverride {
+                hidden: None,
+                placeholder: Some(DEEPSEEK_MODEL.to_string()),
+                suggestions: Some(Vec::new()),
+            },
+        }],
+        ..main_field(
+            "model",
+            "Model",
+            FieldKind::Model {
+                placeholder: None,
+                suggestions: ["opus", "sonnet", "haiku"].map(str::to_string).to_vec(),
+            },
+            OptionValue::Null,
+        )
+    }
+}
+
+impl Agent for ClaudePlugin {
+    type Options = ClaudeOptions;
+
+    fn descriptor(&self) -> &AgentDescriptor {
+        &DESCRIPTOR
+    }
+
     fn program_env_var(&self) -> &'static str {
         "RUSTLING_TULIP_CLAUDE"
     }
@@ -31,18 +171,13 @@ impl AgentPlugin for ClaudePlugin {
         "claude"
     }
 
-    fn supports_headless(&self) -> bool {
-        true
-    }
-
-    fn build_interactive_args(
+    fn interactive_args(
         &self,
-        opts: &AgentOptions,
-        common: &SpawnContext,
+        opts: &ClaudeOptions,
+        common: &SpawnContext<'_>,
         members: &[SessionMember],
         initial_prompt: Option<&str>,
     ) -> Vec<String> {
-        let (permission_mode, provider) = claude_options(opts);
         let mut args: Vec<String> = Vec::new();
         for extra in members.iter().skip(1) {
             args.push("--add-dir".to_string());
@@ -60,7 +195,7 @@ impl AgentPlugin for ClaudePlugin {
             args.push("--append-system-prompt".to_string());
             args.push(prelude);
         }
-        extend_common(&mut args, common, permission_mode, provider);
+        extend_common(&mut args, common, opts);
         // The injected hook settings file rides on `--settings`, ahead of the
         // resume branch so a resumed conversation carries it too, and ahead of
         // `--session-id` so both interactive forms keep it in one position.
@@ -91,14 +226,13 @@ impl AgentPlugin for ClaudePlugin {
         args
     }
 
-    fn build_headless_args(
+    fn headless_args(
         &self,
-        opts: &AgentOptions,
-        common: &SpawnContext,
+        opts: &ClaudeOptions,
+        common: &SpawnContext<'_>,
         members: &[SessionMember],
-        initial_prompt: &str,
-    ) -> Vec<String> {
-        let (permission_mode, provider) = claude_options(opts);
+        prompt: &str,
+    ) -> Option<Vec<String>> {
         let mut args: Vec<String> = vec![
             "--print".to_string(),
             "--output-format".to_string(),
@@ -113,10 +247,10 @@ impl AgentPlugin for ClaudePlugin {
             args.push("--append-system-prompt".to_string());
             args.push(prelude);
         }
-        extend_common(&mut args, common, permission_mode, provider);
+        extend_common(&mut args, common, opts);
         args.push("-p".to_string());
-        args.push(initial_prompt.to_string());
-        args
+        args.push(prompt.to_string());
+        Some(args)
     }
 
     fn parse_headless_line(&self, line: &str) -> Vec<HeadlessEvent> {
@@ -196,34 +330,23 @@ pub fn default_model(provider: ClaudeProvider) -> Option<&'static str> {
     }
 }
 
-/// The permission mode and provider in `opts`.
-fn claude_options(opts: &AgentOptions) -> (Option<PermissionMode>, ClaudeProvider) {
-    match opts {
-        AgentOptions::Claude {
-            permission_mode,
-            provider,
-        } => (*permission_mode, *provider),
-    }
-}
-
 /// Append claude's `--model`, `--permission-mode`, and
 /// `--dangerously-skip-permissions` args. A spawn that names no model on a
 /// provider with a default model (see [`default_model`]) passes
 /// that one. The claude CLI rejects `--permission-mode` together with
 /// `--dangerously-skip-permissions`, so the latter wins when both are set.
-fn extend_common(
-    args: &mut Vec<String>,
-    common: &SpawnContext<'_>,
-    permission_mode: Option<PermissionMode>,
-    provider: ClaudeProvider,
-) {
-    if let Some(model) = common.model.or_else(|| default_model(provider)) {
+fn extend_common(args: &mut Vec<String>, common: &SpawnContext<'_>, opts: &ClaudeOptions) {
+    if let Some(model) = opts
+        .model
+        .as_deref()
+        .or_else(|| default_model(opts.provider))
+    {
         args.push("--model".to_string());
         args.push(model.to_string());
     }
     if common.dangerously_skip_permissions {
         args.push("--dangerously-skip-permissions".to_string());
-    } else if let Some(mode) = permission_mode {
+    } else if let Some(mode) = opts.permission_mode {
         args.push("--permission-mode".to_string());
         args.push(mode.as_cli_arg().to_string());
     }
@@ -367,10 +490,17 @@ mod tests {
             .collect()
     }
 
-    fn common(skip: bool, model: Option<&str>, has_injector: bool) -> SpawnContext<'_> {
+    fn options(permission_mode: Option<PermissionMode>, model: Option<&str>) -> ClaudeOptions {
+        ClaudeOptions {
+            permission_mode,
+            provider: ClaudeProvider::Anthropic,
+            model: model.map(str::to_string),
+        }
+    }
+
+    fn common(skip: bool, has_injector: bool) -> SpawnContext<'static> {
         SpawnContext {
             dangerously_skip_permissions: skip,
-            model,
             has_prompt_injector: has_injector,
             conversation_id: None,
             resume_conversation: None,
@@ -379,17 +509,42 @@ mod tests {
         }
     }
 
+    fn interactive(
+        opts: &ClaudeOptions,
+        common: &SpawnContext<'_>,
+        members: &[SessionMember],
+        prompt: Option<&str>,
+    ) -> Vec<String> {
+        ClaudePlugin.interactive_args(opts, common, members, prompt)
+    }
+
+    fn headless(
+        opts: &ClaudeOptions,
+        common: &SpawnContext<'_>,
+        members: &[SessionMember],
+        prompt: &str,
+    ) -> Vec<String> {
+        ClaudePlugin
+            .headless_args(opts, common, members, prompt)
+            .expect("Claude has a headless mode")
+    }
+
     const RESUME_ID: &str = "85573bb1-c581-489e-baaa-94d5a384744c";
+
+    #[test]
+    fn conformance() {
+        agent_api::conformance::check(&ClaudePlugin);
+    }
 
     #[test]
     fn resume_replaces_session_id_and_drops_the_prompt() {
         let m = members(&["X:/dev/a", "X:/dev/b"]);
-        let opts = AgentOptions::claude(None);
+        let opts = options(None, None);
         let common = SpawnContext {
             resume_conversation: Some(RESUME_ID),
-            ..with_session_id(true, None, false)
+            ..with_session_id(true, false)
         };
-        let args = ClaudePlugin.build_interactive_args(&opts, &common, &m, Some("hello"));
+        let args = interactive(&opts, &common, &m, Some("hello"));
         assert!(!args.contains(&"--session-id".to_string()), "{args:?}");
         assert!(!args.contains(&SESSION_ID.to_string()), "{args:?}");
         assert!(!args.contains(&"-p".to_string()), "{args:?}");
@@ -406,14 +561,14 @@ mod tests {
     #[test]
     fn standalone_add_dirs_follow_member_add_dirs() {
         let m = members(&["X:/dev/a"]);
-        let opts = AgentOptions::claude(None);
+        let opts = options(None, None);
         let extra = vec!["X:/dev/b".to_string(), "X:/dev/c".to_string()];
         let common = SpawnContext {
             add_dirs: &extra,
             resume_conversation: Some(RESUME_ID),
-            ..common(false, None, false)
+            ..common(false, false)
         };
-        let args = ClaudePlugin.build_interactive_args(&opts, &common, &m, None);
+        let args = interactive(&opts, &common, &m, None);
         assert_eq!(
             args,
             vec![
@@ -429,45 +584,30 @@ mod tests {
 
     const SESSION_ID: &str = "0b6f4c7e-1111-4222-8333-944455556666";
 
-    fn with_session_id(skip: bool, model: Option<&str>, has_injector: bool) -> SpawnContext<'_> {
+    fn with_session_id(skip: bool, has_injector: bool) -> SpawnContext<'static> {
         SpawnContext {
             conversation_id: Some(SESSION_ID),
-            ..common(skip, model, has_injector)
+            ..common(skip, has_injector)
         }
     }
 
     #[test]
     fn interactive_args_include_session_id() {
         let m = members(&["X:/dev/a"]);
-        let opts = AgentOptions::claude(None);
-        let args = ClaudePlugin.build_interactive_args(
-            &opts,
-            &with_session_id(false, Some("opus"), false),
-            &m,
-            None,
-        );
+        let opts = options(None, Some("opus"));
+        let args = interactive(&opts, &with_session_id(false, false), &m, None);
         assert_eq!(args, vec!["--model", "opus", "--session-id", SESSION_ID]);
     }
 
     #[test]
     fn interactive_args_with_prompt_include_session_id() {
         let m = members(&["X:/dev/a"]);
-        let opts = AgentOptions::claude(None);
-        let args = ClaudePlugin.build_interactive_args(
-            &opts,
-            &with_session_id(false, None, false),
-            &m,
-            Some("hello"),
-        );
+        let opts = options(None, None);
+        let args = interactive(&opts, &with_session_id(false, false), &m, Some("hello"));
         assert_eq!(args, vec!["--session-id", SESSION_ID, "-p", "hello"]);
 
         // With an injector the prompt stays off the argv; the id does not.
-        let injected = ClaudePlugin.build_interactive_args(
-            &opts,
-            &with_session_id(false, None, true),
-            &m,
-            Some("hello"),
-        );
+        let injected = interactive(&opts, &with_session_id(false, true), &m, Some("hello"));
         assert_eq!(injected, vec!["--session-id", SESSION_ID]);
     }
 
@@ -477,12 +617,12 @@ mod tests {
     #[test]
     fn interactive_args_pass_the_hook_settings_file() {
         let m = members(&["X:/dev/a"]);
-        let opts = AgentOptions::claude(None);
+        let opts = options(None, Some("opus"));
         let common = SpawnContext {
             settings_file: Some(Path::new(HOOK_SETTINGS)),
-            ..with_session_id(false, Some("opus"), false)
+            ..with_session_id(false, false)
         };
-        let args = ClaudePlugin.build_interactive_args(&opts, &common, &m, None);
+        let args = interactive(&opts, &common, &m, None);
         assert_eq!(
             args,
             vec![
@@ -499,13 +639,13 @@ mod tests {
     #[test]
     fn resume_args_pass_the_hook_settings_file() {
         let m = members(&["X:/dev/a"]);
-        let opts = AgentOptions::claude(None);
+        let opts = options(None, None);
         let common = SpawnContext {
             settings_file: Some(Path::new(HOOK_SETTINGS)),
             resume_conversation: Some(RESUME_ID),
-            ..with_session_id(true, None, false)
+            ..with_session_id(true, false)
         };
-        let args = ClaudePlugin.build_interactive_args(&opts, &common, &m, Some("hello"));
+        let args = interactive(&opts, &common, &m, Some("hello"));
         assert_eq!(
             args,
             vec![
@@ -521,12 +661,12 @@ mod tests {
     #[test]
     fn headless_args_take_no_settings() {
         let m = members(&["X:/dev/a"]);
-        let opts = AgentOptions::claude(None);
+        let opts = options(None, None);
         let common = SpawnContext {
             settings_file: Some(Path::new(HOOK_SETTINGS)),
-            ..common(false, None, false)
+            ..common(false, false)
         };
-        let args = ClaudePlugin.build_headless_args(&opts, &common, &m, "hello");
+        let args = headless(&opts, &common, &m, "hello");
         assert!(!args.contains(&"--settings".to_string()), "{args:?}");
         assert!(!args.contains(&HOOK_SETTINGS.to_string()), "{args:?}");
     }
@@ -534,13 +674,8 @@ mod tests {
     #[test]
     fn headless_args_have_no_session_id() {
         let m = members(&["X:/dev/a"]);
-        let opts = AgentOptions::claude(None);
-        let args = ClaudePlugin.build_headless_args(
-            &opts,
-            &with_session_id(false, None, false),
-            &m,
-            "hello",
-        );
+        let opts = options(None, None);
+        let args = headless(&opts, &with_session_id(false, false), &m, "hello");
         assert!(!args.contains(&"--session-id".to_string()), "{args:?}");
         assert!(!args.contains(&SESSION_ID.to_string()), "{args:?}");
     }
@@ -548,52 +683,39 @@ mod tests {
     #[test]
     fn deepseek_spawn_passes_model_deepseek_flash() {
         let m = members(&["X:/dev/a"]);
-        let opts = AgentOptions::Claude {
-            permission_mode: None,
-            provider: protocol::ClaudeProvider::Deepseek,
+        let opts = ClaudeOptions {
+            provider: ClaudeProvider::Deepseek,
+            ..options(None, None)
         };
-        let interactive =
-            ClaudePlugin.build_interactive_args(&opts, &common(false, None, false), &m, None);
+        let interactive_args = interactive(&opts, &common(false, false), &m, None);
         assert!(
-            interactive
+            interactive_args
                 .windows(2)
                 .any(|w| *w == ["--model", "deepseek-flash"]),
-            "{interactive:?}"
+            "{interactive_args:?}"
         );
-        let headless =
-            ClaudePlugin.build_headless_args(&opts, &common(false, None, false), &m, "hi");
+        let headless_args = headless(&opts, &common(false, false), &m, "hi");
         assert!(
-            headless
+            headless_args
                 .windows(2)
                 .any(|w| *w == ["--model", "deepseek-flash"]),
-            "{headless:?}"
+            "{headless_args:?}"
         );
-        let chosen = ClaudePlugin.build_interactive_args(
-            &opts,
-            &common(false, Some("deepseek-pro"), false),
-            &m,
-            None,
-        );
+        let chosen_opts = ClaudeOptions {
+            model: Some("deepseek-pro".to_string()),
+            ..opts
+        };
+        let chosen = interactive(&chosen_opts, &common(false, false), &m, None);
         assert_eq!(chosen, vec!["--model", "deepseek-pro"]);
-        let anthropic = ClaudePlugin.build_interactive_args(
-            &AgentOptions::claude(None),
-            &common(false, None, false),
-            &m,
-            None,
-        );
+        let anthropic = interactive(&options(None, None), &common(false, false), &m, None);
         assert!(!anthropic.contains(&"--model".to_string()), "{anthropic:?}");
     }
 
     #[test]
     fn interactive_single_repo_with_model() {
         let m = members(&["X:/dev/a"]);
-        let opts = AgentOptions::claude(Some(PermissionMode::AcceptEdits));
-        let args = ClaudePlugin.build_interactive_args(
-            &opts,
-            &common(false, Some("opus"), false),
-            &m,
-            Some("hello"),
-        );
+        let opts = options(Some(PermissionMode::AcceptEdits), Some("opus"));
+        let args = interactive(&opts, &common(false, false), &m, Some("hello"));
         assert_eq!(
             args,
             vec![
@@ -610,9 +732,8 @@ mod tests {
     #[test]
     fn interactive_skip_perms_overrides_permission_mode() {
         let m = members(&["X:/dev/a"]);
-        let opts = AgentOptions::claude(Some(PermissionMode::Plan));
-        let args =
-            ClaudePlugin.build_interactive_args(&opts, &common(true, None, false), &m, Some("hi"));
+        let opts = options(Some(PermissionMode::Plan), None);
+        let args = interactive(&opts, &common(true, false), &m, Some("hi"));
         assert!(args.contains(&"--dangerously-skip-permissions".to_string()));
         assert!(!args.contains(&"--permission-mode".to_string()));
     }
@@ -620,9 +741,8 @@ mod tests {
     #[test]
     fn interactive_workspace_emits_add_dir_and_prelude() {
         let m = members(&["X:/dev/a", "X:/dev/b"]);
-        let opts = AgentOptions::claude(None);
-        let args =
-            ClaudePlugin.build_interactive_args(&opts, &common(false, None, false), &m, None);
+        let opts = options(None, None);
+        let args = interactive(&opts, &common(false, false), &m, None);
         // --add-dir for the second member only (first is cwd).
         assert!(args.windows(2).any(|w| w == ["--add-dir", "X:/dev/b"]));
         // Workspace prelude emitted via --append-system-prompt.
@@ -637,13 +757,8 @@ mod tests {
     #[test]
     fn interactive_with_injector_omits_prompt_flag() {
         let m = members(&["X:/dev/a"]);
-        let opts = AgentOptions::claude(None);
-        let args = ClaudePlugin.build_interactive_args(
-            &opts,
-            &common(false, None, true),
-            &m,
-            Some("would-be-prompt"),
-        );
+        let opts = options(None, None);
+        let args = interactive(&opts, &common(false, true), &m, Some("would-be-prompt"));
         assert!(!args.contains(&"-p".to_string()));
         assert!(!args.iter().any(|a| a == "would-be-prompt"));
     }
@@ -651,13 +766,8 @@ mod tests {
     #[test]
     fn headless_args_include_print_and_stream_json() {
         let m = members(&["X:/dev/a"]);
-        let opts = AgentOptions::claude(None);
-        let args = ClaudePlugin.build_headless_args(
-            &opts,
-            &common(false, Some("sonnet"), false),
-            &m,
-            "hello world",
-        );
+        let opts = options(None, Some("sonnet"));
+        let args = headless(&opts, &common(false, false), &m, "hello world");
         assert!(args.starts_with(&[
             "--print".to_string(),
             "--output-format".to_string(),
@@ -671,8 +781,8 @@ mod tests {
     #[test]
     fn headless_workspace_emits_add_dir_and_prelude() {
         let m = members(&["X:/dev/a", "X:/dev/b"]);
-        let opts = AgentOptions::claude(None);
-        let args = ClaudePlugin.build_headless_args(&opts, &common(false, None, false), &m, "go");
+        let opts = options(None, None);
+        let args = headless(&opts, &common(false, false), &m, "go");
         assert!(args.windows(2).any(|w| w == ["--add-dir", "X:/dev/b"]));
         assert!(args.iter().any(|a| a == "--append-system-prompt"));
     }

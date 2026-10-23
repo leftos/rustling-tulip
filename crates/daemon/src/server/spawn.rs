@@ -35,8 +35,9 @@ use anyhow::{Context as _, anyhow};
 use chrono::Utc;
 use directories::UserDirs;
 use protocol::{
-    Agent, AgentOptions, AppearanceOverrides, ClientMessage, DaemonMessage, SessionKind,
-    SessionMember, SessionMetrics, SessionMode, SessionStatus, SpawnRequest, SpawnTarget,
+    Agent, AgentOptions, AppearanceOverrides, ClientMessage, DaemonMessage, OptionValue,
+    OptionValues, SessionKind, SessionMember, SessionMetrics, SessionMode, SessionStatus,
+    SpawnRequest, SpawnTarget,
 };
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -275,6 +276,7 @@ where
         resume_conversation,
     } = req;
     let agent = agent_options.agent();
+    let options = options_from_request(&agent_options, model.as_deref());
     info!(
         ?mode,
         agent = agent.as_label(),
@@ -292,11 +294,8 @@ where
     }
     reject_pin_without_worktree(&target)?;
     let backend = agent_registry::plugin(agent);
-    if mode == SessionMode::Headless && !backend.supports_headless() {
-        return Err(anyhow!(
-            "headless mode is not yet supported for {}; use interactive mode",
-            agent.as_label()
-        ));
+    if mode == SessionMode::Headless && !backend.descriptor().caps.headless {
+        return Err(headless_unsupported(agent));
     }
     // Env references resolve before any git work, so a refusal leaves no
     // worktree behind. `stored_config` keeps the references as sent; only the
@@ -374,8 +373,8 @@ where
     let label = label.unwrap_or(default_label);
     let cfg = SpawnArgs {
         dangerously_skip_permissions,
-        agent_options,
-        model,
+        agent,
+        options,
         env,
         prompt_injector,
         origin,
@@ -510,13 +509,13 @@ pub(super) fn expected_output_subscribers(mode: SessionMode) -> usize {
 }
 
 /// Per-spawn configuration bundled together to keep spawn-fn signatures narrow.
-/// The agent kind is carried inside `agent_options` — call
-/// `cfg.agent_options.agent()` to dispatch through [`agent_registry::plugin`].
 struct SpawnArgs {
     dangerously_skip_permissions: bool,
-    /// Per-agent options. The variant tag doubles as the agent selector.
-    agent_options: AgentOptions,
-    model: Option<String>,
+    /// The agent this spawn runs, dispatched through [`agent_registry::plugin`].
+    agent: Agent,
+    /// The agent's options, keyed by its descriptor's fields (see
+    /// [`options_from_request`]).
+    options: OptionValues,
     /// The child's environment: the keep-list, the resolved rows and the
     /// provider's routing variables. Never stored.
     env: crate::providers::SpawnEnv,
@@ -535,16 +534,15 @@ struct SpawnArgs {
 }
 
 impl SpawnArgs {
-    /// Which agent this spawn targets. Derived from `agent_options`.
+    /// Which agent this spawn targets.
     fn agent(&self) -> Agent {
-        self.agent_options.agent()
+        self.agent
     }
 
     /// Build the borrowed [`SpawnContext`] view plugins consume.
     fn common(&self) -> SpawnContext<'_> {
         SpawnContext {
             dangerously_skip_permissions: self.dangerously_skip_permissions,
-            model: self.model.as_deref(),
             has_prompt_injector: self.prompt_injector.is_some(),
             conversation_id: None,
             resume_conversation: self.resume_conversation.as_deref(),
@@ -553,6 +551,61 @@ impl SpawnArgs {
             // overrides this.
             settings_file: None,
         }
+    }
+}
+
+/// The plugin options a request's `agent_options` and `model` select, keyed
+/// as the agent's descriptor names its fields: the one place a spawn
+/// request's typed options become [`OptionValues`]. An unset permission mode
+/// or model is [`OptionValue::Null`].
+fn options_from_request(agent_options: &AgentOptions, model: Option<&str>) -> OptionValues {
+    let model = model.map_or(OptionValue::Null, |model| {
+        OptionValue::Text(model.to_string())
+    });
+    match agent_options {
+        AgentOptions::Claude {
+            permission_mode,
+            provider,
+        } => {
+            let permission_mode = permission_mode.map_or(OptionValue::Null, |mode| {
+                OptionValue::Text(permission_mode_name(mode).to_string())
+            });
+            OptionValues::from([
+                ("permission_mode".to_string(), permission_mode),
+                (
+                    "provider".to_string(),
+                    OptionValue::Text(provider_name(*provider).to_string()),
+                ),
+                ("model".to_string(), model),
+            ])
+        }
+    }
+}
+
+/// The refusal of a headless spawn for an agent that has no headless mode.
+fn headless_unsupported(agent: Agent) -> anyhow::Error {
+    anyhow!(
+        "headless mode is not yet supported for {}; use interactive mode",
+        agent.as_label()
+    )
+}
+
+/// `mode`'s serde name, the value Claude's `permission_mode` field stores.
+fn permission_mode_name(mode: protocol::PermissionMode) -> &'static str {
+    match mode {
+        protocol::PermissionMode::Default => "default",
+        protocol::PermissionMode::AcceptEdits => "accept_edits",
+        protocol::PermissionMode::BypassPermissions => "bypass_permissions",
+        protocol::PermissionMode::Plan => "plan",
+    }
+}
+
+/// `provider`'s serde name, the value Claude's `provider` field stores.
+fn provider_name(provider: protocol::ClaudeProvider) -> &'static str {
+    match provider {
+        protocol::ClaudeProvider::Anthropic => "anthropic",
+        protocol::ClaudeProvider::Deepseek => "deepseek",
+        protocol::ClaudeProvider::Unknown => "unknown",
     }
 }
 
@@ -811,12 +864,8 @@ async fn spawn_interactive_session(
         settings_file: hook_settings.as_ref().map(HookSettings::path),
         ..cfg.common()
     };
-    let args = backend.build_interactive_args(
-        &cfg.agent_options,
-        &common,
-        &members,
-        initial_prompt.as_deref(),
-    );
+    let args =
+        backend.interactive_args(&cfg.options, &common, &members, initial_prompt.as_deref())?;
 
     let mut final_args = prepend_args;
     final_args.extend(args);
@@ -1156,12 +1205,14 @@ fn spawn_headless_session(
     stored_config: protocol::SpawnConfig,
     busy_excluded: bool,
 ) -> anyhow::Result<protocol::SessionSnapshot> {
-    // The dispatcher already rejects headless mode for backends that don't
-    // support it; if we got here, the backend can build headless args.
+    // The dispatcher already rejects headless mode for an agent whose
+    // descriptor lacks it; an agent that still builds no headless argv
+    // refuses here.
     let backend = agent_registry::plugin(cfg.agent());
-    debug_assert!(backend.supports_headless());
     let last_prompt = Some(prompt.clone());
-    let args = backend.build_headless_args(&cfg.agent_options, &cfg.common(), &members, &prompt);
+    let args = backend
+        .headless_args(&cfg.options, &cfg.common(), &members, &prompt)?
+        .ok_or_else(|| headless_unsupported(cfg.agent()))?;
 
     let initial_cwd = primary_cwd.to_string_lossy().into_owned();
     let spec = headless::HeadlessSpec {
@@ -1834,6 +1885,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn options_from_request_feeds_claude_argv() {
+        let request = AgentOptions::Claude {
+            permission_mode: Some(protocol::PermissionMode::AcceptEdits),
+            provider: protocol::ClaudeProvider::Deepseek,
+        };
+        let options = options_from_request(&request, Some("x"));
+        let text = |value: &str| OptionValue::Text(value.to_string());
+        assert_eq!(
+            options,
+            OptionValues::from([
+                ("model".to_string(), text("x")),
+                ("permission_mode".to_string(), text("accept_edits")),
+                ("provider".to_string(), text("deepseek")),
+            ])
+        );
+        let common = SpawnContext {
+            dangerously_skip_permissions: false,
+            has_prompt_injector: false,
+            conversation_id: None,
+            resume_conversation: None,
+            add_dirs: &[],
+            settings_file: None,
+        };
+        let member = SessionMember {
+            repo_id: "r0".to_string(),
+            repo_name: "repo0".to_string(),
+            branch: "main".to_string(),
+            worktree_path: "X:/dev/a".to_string(),
+        };
+        let args = agent_registry::plugin(Agent::Claude)
+            .interactive_args(&options, &common, &[member], None)
+            .expect("Claude reads the converted options");
+        assert_eq!(args, ["--model", "x", "--permission-mode", "acceptEdits"]);
+    }
+
     /// Run a real interactive Claude spawn for `session_id` in `folder` on
     /// `hub`, which gets as far as the stub tracer and fails there, and answer
     /// the error's whole chain.
@@ -1854,8 +1941,8 @@ mod tests {
         let stored_config = protocol::SpawnConfig::from_request(&request);
         let cfg = SpawnArgs {
             dangerously_skip_permissions: false,
-            agent_options: AgentOptions::claude(None),
-            model: None,
+            agent: Agent::Claude,
+            options: options_from_request(&AgentOptions::claude(None), None),
             env: crate::providers::SpawnEnv::default(),
             prompt_injector: None,
             origin: None,
@@ -1911,8 +1998,8 @@ mod tests {
         let stored_config = protocol::SpawnConfig::from_request(&request);
         let cfg = SpawnArgs {
             dangerously_skip_permissions: false,
-            agent_options: AgentOptions::claude(None),
-            model: None,
+            agent: Agent::Claude,
+            options: options_from_request(&AgentOptions::claude(None), None),
             env: crate::providers::SpawnEnv::default(),
             prompt_injector: Some(protocol::PromptInjector {
                 steps: vec![

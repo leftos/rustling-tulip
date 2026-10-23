@@ -14,8 +14,8 @@ crates/daemon/          binary = rustling-tulipd: WS server, PTY pool, registry,
 crates/tracer/          binary = rt-tracer.exe: per-session ConPTY supervisor that survives daemon restarts
 crates/tracer-protocol/ stable ABI between daemon and tracer (additive-only; see docs/tracer-abi.md)
 crates/daemon-client/   client-side daemon supervision (ensure-running, handshake, config dir, client identity, stop) shared by the clients
-crates/agents/api/      package agent-api: the AgentPlugin trait, SpawnContext, HeadlessEvent, workspace_prelude
-crates/agents/claude/   package agent-claude: the Claude plugin (argv, hook settings document, stream-json parsing, default_model)
+crates/agents/api/      package agent-api: the typed Agent trait (type Options) and its blanket AgentPlugin adapter, SpawnContext, HeadlessEvent, validate, workspace_prelude, and the conformance check (feature test-support)
+crates/agents/claude/   package agent-claude: the Claude plugin (ClaudeOptions and descriptor, argv, hook settings document, stream-json parsing, default_model)
 crates/agents/registry/ package agent-registry: the compiled-in plugin list (plugin(Agent), all())
 crates/tailnet/         Tailscale CLI wrapper (whois, whoami, status, cert) and the owner rule that decides which tailnet peers may connect (docs/plans/remote-access.md)
 apps/native/            binary = rustling-tulip-native (thin main.rs over a lib, rustling_tulip_native): GPUI + alacritty_terminal desktop client (see docs/native-client.md); tests/ui/ (one test binary, a module per spec) drive RootView::with_transport against a scripted fake daemon

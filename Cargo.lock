@@ -34,6 +34,8 @@ name = "agent-api"
 version = "0.1.1-alpha"
 dependencies = [
  "protocol",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -262,7 +262,7 @@ Path to RT-74 (Steadier screen-based status: hysteresis, rule files, agent proce
 
 ## Claude as the first plugin (RT-267)
 
-Branch `feat/agent-plugins` with a draft PR, cut from `main` after RT-266 merges. Each step is one brief of about 100 implementer tool calls and one commit that builds and passes its reached tests, except AP.6a and AP.6b, which land as one commit because the protocol change breaks the daemon until the daemon follows it. Behaviour stays the same through AP.5; AP.6 changes the wire; AP.7 and AP.8 make the client generic; AP.9 moves the fake CLI and turns the seam check on.
+Each step lands on `main` as one brief of about 100 implementer tool calls and one commit that builds and passes its reached tests, except AP.6a and AP.6b, which land as one commit because the protocol change breaks the daemon until the daemon follows it. Behaviour stays the same through AP.5; AP.6 changes the wire; AP.7 and AP.8 make the client generic; AP.9 moves the fake CLI and turns the seam check on.
 
 Every proof runs as `pwsh -NoProfile -File tools/gate.ps1 run … -- cargo nextest run … --cargo-profile test-release`, with the named filter red first where a step adds behaviour.
 
@@ -271,13 +271,13 @@ Every proof runs as `pwsh -NoProfile -File tools/gate.ps1 run … -- cargo nexte
   Files: workspace `Cargo.toml`, the three new crates, `crates/daemon/Cargo.toml`, `agents/mod.rs` (deleted), `agents/claude.rs` (moved), `headless.rs`, `server/spawn.rs` (the former `backend_for` sites), `providers.rs` (moved from `agents/providers.rs`), `tools/test-map.json`. Proof: `-p agent-claude` (the moved argv and stream-json tests), `-p daemon headless`, `-p daemon spawn`.
 
   Landed on main.
-- [ ] **AP.1b The trait's final shape and typed options.** The typed `Agent` trait with `type Options`, the adapter to `AgentPlugin`, `OptionValues` in every signature, `ClaudeOptions { permission_mode, provider, model }`; until AP.6, `spawn_session` converts the request's `AgentOptions` and `model` into `OptionValues` in one place; Claude's descriptor fields; the conformance test.
+- [x] **AP.1b The trait's final shape and typed options.** The typed `Agent` trait with `type Options`, the adapter to `AgentPlugin`, `OptionValues` in every signature, `ClaudeOptions { permission_mode, provider, model }`; until AP.6, `spawn_session` converts the request's `AgentOptions` and `model` into `OptionValues` in one place; Claude's descriptor fields; the conformance test.
 
-  Files: `agent-api` (trait, adapter, `conformance` under `test-support`), `agent-claude` (options, descriptor), `server.rs` (the converter, `SpawnArgs`). Proof: `-p agent-api` (adapter decode, a failed decode refuses), `-p agent-claude conformance`, `-p daemon spawn`.
+  Files: `agent-api` (trait, adapter, `conformance` under `test-support`), `agent-claude` (options, descriptor), `server/spawn.rs` (the converter, `SpawnArgs`). Proof: `-p agent-api` (adapter decode, a failed decode refuses), `-p agent-claude conformance`, `-p daemon spawn`.
 - [ ] **AP.2a Environment behind the seam.** The base keep-list moves to app code and each plugin adds `passthrough_vars`; `providers.rs` moves into `agent-claude` behind `check_request` and `spawn_env`; `user_env.rs` loses its DeepSeek names behind `KeyLookup`; `ResolvedRows` carries the resolved rows.
 
   Files: `providers.rs` (moved), `user_env.rs`, `server.rs` (`spawn_session` pre-checks, `request_provider`, the three spawn fns' env), `agent-claude` env module. Proof: `-p agent-claude providers`, the server DeepSeek tests (`-p daemon deepseek`), a headless child gets `ANTHROPIC_API_KEY` only through Claude's list.
-- [ ] **AP.2b Conversation plans and conversations.** `conversation_plan` replaces `server.rs:4537-4541`; the app's `PreCreate` runner and `DiscoverAfterLaunch` poller, with claim arbitration and the contested store, proven with `TestAgent`; `transcripts.rs` moves into `agent-claude` behind `find_conversations`, taking the session's resolved rows; `workspace_prelude` moves into `agent-api`; `main.rs` logs every plugin's override.
+- [ ] **AP.2b Conversation plans and conversations.** `conversation_plan` replaces `server.rs:4537-4541`; the app's `PreCreate` runner and `DiscoverAfterLaunch` poller, with claim arbitration and the contested store, proven with `TestAgent`; `transcripts.rs` moves into `agent-claude` behind `find_conversations`, taking the session's resolved rows; `main.rs` logs every plugin's override.
 
   Files: `transcripts.rs` (moved), a new `crates/daemon/src/conversations.rs`, `server.rs` (`session_history_items`, `recovery_conversation_exists`), `history.rs` (`conversation_candidates`), `main.rs`. Proof: `-p agent-claude transcripts` (a session's `CLAUDE_CONFIG_DIR` row is honoured), `-p daemon conversations` (a pre-create timeout kills the tree; two sessions in one folder never both claim an id), `-p daemon history`.
 - [ ] **AP.3a Hook plans and mapping.** `hook_plan` replaces `write_hook_settings`'s Claude gate and `build_hook_settings`; `hook_vocabulary` in `agent-api` and Claude's `map_hook_event` take over `map_event`, `details`, `permission_mismatch` and the conversation-id update, leaving `hook_status.rs` with ordering, the pending buffer and `apply_to_record` over a `HookReport`.
@@ -294,7 +294,7 @@ Every proof runs as `pwsh -NoProfile -File tools/gate.ps1 run … -- cargo nexte
 - [ ] **AP.5 History, recovery and import behind the seam.** `plan_recovery` asks the entry's plugin for `recovery_options` and `shell_resume`; `entry_from_tracer_log` offers each log to `import_tracer_run` with the plugin's `import_rev`; `orphan.rs` takes `liveness_tokens`; presets without an agent use `default_agent()`.
 
   Files: `history.rs`, `server.rs` (`recover_one`), `orphan.rs`, `tracer_log.rs`, `presets.rs`, `agent-claude` recovery and import modules. Proof: `-p daemon history`, `-p daemon recover`, `-p agent-claude recovery`, `-p agent-claude import`, `-p daemon orphan`.
-- [ ] **AP.6a The new wire types.** In `protocol`: `AgentId`, `AgentSelection`, `OptionValue(s)`, `AgentDescriptor` and the field types, `Agents`, `AgentSettings`, `SetAgentSettings`, `agent_chips`, `conversation_id`, the new `RecoverAs`, `Option<AgentId>` for shells; the removals listed under Wire protocol, the v18 deserializers among them; the schema validator in `agent-api`; `protocol-version.json` to 25 after the retire-path check.
+- [ ] **AP.6a The new wire types.** In `protocol`: `AgentSelection`, `Agents`, `AgentSettings`, `SetAgentSettings`, `agent_chips`, `conversation_id`, the new `RecoverAs`, `AgentId` replacing the `Agent` enum on the wire, `Option<AgentId>` for shells; the removals listed under Wire protocol, the v18 deserializers among them; `validate` (already in `agent-api`) wired into the daemon; `protocol-version.json` to 25 after the retire-path check.
 
   The brief ends with `-p protocol` and `-p agent-api` green; it lands with AP.6b.
 

@@ -15,5 +15,10 @@ doctest = false
 [lints]
 workspace = true
 
+[features]
+test-support = []
+
 [dependencies]
 protocol = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

@@ -71,6 +71,178 @@ impl ClaudeProvider {
     }
 }
 
+/// The id an agent plugin registers under, such as `"claude"`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct AgentId(pub String);
+
+/// One value of an agent's option: a toggle's state, a choice's or text
+/// field's text, or no value (the field's "CLI default").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum OptionValue {
+    Bool(bool),
+    Text(String),
+    Null,
+}
+
+/// An agent's options, keyed by [`OptionField::id`].
+pub type OptionValues = std::collections::BTreeMap<String, OptionValue>;
+
+/// What an agent plugin tells the app about itself: its names, its look, what
+/// it can do and the option schema its spawns take.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentDescriptor {
+    pub id: AgentId,
+    /// The name people read, such as "Claude".
+    pub label: String,
+    /// The runtime chip's text and the selector part, such as "claude".
+    pub tag: String,
+    pub accent: AccentToken,
+    pub shift_enter: ShiftEnter,
+    pub caps: AgentCaps,
+    /// What a trusted launch passes, for the spawn dialog's note.
+    pub trust_note: Option<String>,
+    pub texts: AgentTexts,
+    pub fields: Vec<OptionField>,
+    pub chips: Vec<ChipRule>,
+}
+
+/// The palette colour an agent's runtime chip uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccentToken {
+    Default,
+    Claude,
+    /// An accent from a newer peer; drawn as [`AccentToken::Default`].
+    #[serde(other)]
+    Unknown,
+}
+
+/// The bytes Shift+Enter sends to an agent's terminal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShiftEnter {
+    /// A backslash then a carriage return.
+    BackslashCr,
+    /// A line feed.
+    Lf,
+    #[serde(other)]
+    Unknown,
+}
+
+/// What an agent can do beyond an interactive spawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each flag is an independent capability the client reads by name"
+)]
+pub struct AgentCaps {
+    pub headless: bool,
+    pub resume: bool,
+    pub extra_folders: bool,
+    pub shell_resume: bool,
+}
+
+/// Agent-specific wording the client shows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentTexts {
+    /// The recover dialog's label for resuming in a shell.
+    pub shell_resume_label: String,
+    /// The recover dialog's note for an entry with no conversation.
+    pub no_conversation: String,
+}
+
+/// One option an agent's spawns take.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OptionField {
+    pub id: String,
+    pub label: String,
+    pub help: Option<String>,
+    pub kind: FieldKind,
+    pub default: OptionValue,
+    /// On the agent's Settings page; its value is the spawn dialog's default.
+    pub settings: bool,
+    pub spawn: SpawnPlacement,
+    pub locked_when_trusted: bool,
+    pub when: Vec<FieldRule>,
+}
+
+/// The kind of value an [`OptionField`] holds and how it is edited.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum FieldKind {
+    Toggle,
+    Choice {
+        choices: Vec<Choice>,
+        style: ChoiceStyle,
+    },
+    Text {
+        placeholder: Option<String>,
+    },
+    Model {
+        placeholder: Option<String>,
+        suggestions: Vec<String>,
+    },
+    /// A kind from a newer peer.
+    #[serde(other)]
+    Unknown,
+}
+
+/// One choice of a [`FieldKind::Choice`] field.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Choice {
+    /// The [`OptionValue::Text`] the choice stores.
+    pub value: String,
+    pub label: String,
+}
+
+/// How a [`FieldKind::Choice`] field is drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChoiceStyle {
+    Segmented,
+    Dropdown,
+    #[serde(other)]
+    Unknown,
+}
+
+/// Where the spawn dialog shows an [`OptionField`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpawnPlacement {
+    Main,
+    Advanced,
+    Hidden,
+    #[serde(other)]
+    Unknown,
+}
+
+/// A change to a field while another field holds a value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FieldRule {
+    pub if_field: String,
+    pub equals: OptionValue,
+    pub then: FieldOverride,
+}
+
+/// What a [`FieldRule`] changes; each `None` leaves the field as it is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FieldOverride {
+    pub hidden: Option<bool>,
+    pub placeholder: Option<String>,
+    pub suggestions: Option<Vec<String>>,
+}
+
+/// A chip a session shows for one of its options, unless the option holds
+/// `hide_when`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChipRule {
+    pub field: String,
+    pub hide_when: OptionValue,
+    pub tip: String,
+}
+
 /// Per-agent configuration carried on [`SpawnRequest`], [`SpawnConfig`], and
 /// [`PresetEntry`]. The discriminant doubles as the agent selector — its
 /// `agent()` accessor returns the matching [`Agent`] variant — so callers do
