@@ -131,6 +131,12 @@ pub struct Hub {
     /// The session ids a recovery or a Resume is spawning for right now, so
     /// the two never start the same session twice.
     pub recovering: RecoveryClaims,
+    /// True while the start-up resume of the sessions the last run lost is
+    /// spawning them; idle exit holds off meanwhile.
+    pub resume_in_flight: Arc<std::sync::atomic::AtomicBool>,
+    /// How many sessions the start-up resume brought back and how many it
+    /// left for Recover, once it has finished.
+    pub start_resume: Arc<std::sync::Mutex<Option<(usize, usize)>>>,
     /// Hook events that arrived for a session id before its spawn inserted
     /// it; applied to the record at insertion (bounded by age and count).
     pub pending_hooks: crate::hook_status::PendingHooks,
@@ -266,6 +272,7 @@ pub async fn run(
     dirs: Dirs,
     orphans: Vec<OrphanMeta>,
     abandoned: Vec<OrphanMeta>,
+    resume_ids: Vec<String>,
 ) -> anyhow::Result<()> {
     let run_start = std::time::Instant::now();
     // A fresh loopback token every start. Remote access is off unless
@@ -341,6 +348,8 @@ pub async fn run(
         keep_awake_enabled: Arc::new(keep_awake_tx),
         keep_awake_status: keep_awake_status_rx,
         recovering: RecoveryClaims::default(),
+        resume_in_flight: Arc::default(),
+        start_resume: Arc::default(),
         pending_hooks: crate::hook_status::PendingHooks::default(),
     };
     start_hub_tasks(&hub, client_count_rx);
@@ -365,6 +374,13 @@ pub async fn run(
         run_elapsed_ms = u64::try_from(run_start.elapsed().as_millis()).unwrap_or(u64::MAX),
         "handshake file written; daemon ready for clients"
     );
+
+    // Resume the sessions the last run lost, now that clients can connect:
+    // spawning them before the bind would hold up the handshake.
+    if !resume_ids.is_empty() {
+        let in_flight = recovery::ResumeInFlight::start(&hub.resume_in_flight);
+        tokio::spawn(recovery::auto_resume(hub.clone(), resume_ids, in_flight));
+    }
 
     // Opt-in tailnet listener: started after the handshake, never awaited.
     start_remote_access(&hub, remote, shutdown_rx.clone()).await;
@@ -737,7 +753,10 @@ fn start_hub_tasks(hub: &Hub, client_count_rx: tokio::sync::watch::Receiver<usiz
         Arc::clone(&hub.sessions),
         crate::idle_exit::Watches::new(client_count_rx, hub.remote_enabled.subscribe()),
         hub.shutdown_tx.clone(),
-        Arc::clone(&hub.preset_cancellations),
+        crate::idle_exit::HoldOffs {
+            preset_jobs: Arc::clone(&hub.preset_cancellations),
+            resume_in_flight: Arc::clone(&hub.resume_in_flight),
+        },
         crate::idle_exit::GRACE_PERIOD,
     );
 }

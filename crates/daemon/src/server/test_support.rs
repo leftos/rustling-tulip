@@ -140,6 +140,8 @@ pub(super) fn build_test_hub(
         keep_awake_enabled: Arc::new(keep_awake_enabled),
         keep_awake_status,
         recovering: RecoveryClaims::default(),
+        resume_in_flight: Arc::default(),
+        start_resume: Arc::default(),
         pending_hooks: crate::hook_status::PendingHooks::default(),
     };
     (hub, scratch, attention_rx)

@@ -12,6 +12,7 @@
 //! - any attached WS client (`Hub::client_count` > 0), local or tailnet;
 //! - any session whose child is (or may be) running — see [`blocks_exit`];
 //! - an in-flight preset launch job, which is about to spawn sessions;
+//! - the start-up resume of the sessions the last run lost, while it runs;
 //! - remote access being switched on in `remote.json`, whatever the tailnet
 //!   listener's own state: the host must be up when Tailscale recovers.
 //!
@@ -26,6 +27,7 @@ use crate::session::{SessionEvent, SessionRegistry};
 use protocol::SessionStatus;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{Mutex as AsyncMutex, broadcast, watch};
@@ -40,6 +42,16 @@ pub const GRACE_PERIOD: Duration = Duration::from_secs(30);
 /// `Hub::preset_cancellations`. A non-empty map means sessions are about to
 /// be spawned, so the watcher holds off even though the registry is idle.
 type PresetJobs = Arc<AsyncMutex<HashMap<String, watch::Sender<bool>>>>;
+
+/// Work that is about to spawn sessions, so the watcher holds off at grace
+/// expiry even though the registry is idle.
+pub(crate) struct HoldOffs {
+    /// In-flight preset launch jobs.
+    pub(crate) preset_jobs: PresetJobs,
+    /// The start-up resume of the sessions the last run lost, while it runs —
+    /// the same flag as `Hub::resume_in_flight`.
+    pub(crate) resume_in_flight: Arc<AtomicBool>,
+}
 
 /// The activity watches the watcher reads beside the session events: the
 /// attached-client count and the persisted remote-access switch.
@@ -68,10 +80,10 @@ pub fn spawn(
     sessions: Arc<SessionRegistry>,
     watches: Watches,
     shutdown_tx: watch::Sender<bool>,
-    preset_jobs: PresetJobs,
+    hold_offs: HoldOffs,
     grace: Duration,
 ) {
-    tokio::spawn(run(sessions, watches, shutdown_tx, preset_jobs, grace));
+    tokio::spawn(run(sessions, watches, shutdown_tx, hold_offs, grace));
 }
 
 /// A session keeps the daemon alive while its child is — or may still be —
@@ -154,7 +166,7 @@ async fn run(
     sessions: Arc<SessionRegistry>,
     mut watches: Watches,
     shutdown_tx: watch::Sender<bool>,
-    preset_jobs: PresetJobs,
+    hold_offs: HoldOffs,
     grace: Duration,
 ) {
     let mut session_events = sessions.subscribe();
@@ -175,8 +187,14 @@ async fn run(
             }
             GraceOutcome::Closed => return,
             GraceOutcome::Expired => {
-                if !preset_jobs.lock().await.is_empty() {
+                if !hold_offs.preset_jobs.lock().await.is_empty() {
                     info!("idle-exit: preset launch still in flight; grace timer restarted");
+                    continue;
+                }
+                if hold_offs.resume_in_flight.load(Ordering::SeqCst) {
+                    info!(
+                        "idle-exit: resume of sessions lost at start still in flight; grace timer restarted"
+                    );
                     continue;
                 }
                 // The preset-lock await above could have raced a spawn.
@@ -273,6 +291,7 @@ mod tests {
         remote_tx: watch::Sender<bool>,
         shutdown_rx: watch::Receiver<bool>,
         preset_jobs: PresetJobs,
+        resume_in_flight: Arc<AtomicBool>,
     }
 
     const GRACE: Duration = Duration::from_secs(30);
@@ -287,11 +306,15 @@ mod tests {
         let (remote_tx, remote_rx) = watch::channel(remote_access);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let preset_jobs: PresetJobs = Arc::new(AsyncMutex::new(HashMap::new()));
+        let resume_in_flight = Arc::new(AtomicBool::new(false));
         spawn(
             Arc::clone(&sessions),
             Watches::new(count_rx, remote_rx),
             shutdown_tx,
-            Arc::clone(&preset_jobs),
+            HoldOffs {
+                preset_jobs: Arc::clone(&preset_jobs),
+                resume_in_flight: Arc::clone(&resume_in_flight),
+            },
             GRACE,
         );
         Harness {
@@ -300,6 +323,7 @@ mod tests {
             remote_tx,
             shutdown_rx,
             preset_jobs,
+            resume_in_flight,
         }
     }
 
@@ -380,6 +404,17 @@ mod tests {
         assert_no_shutdown_for(&mut h, GRACE * 4).await;
         h.preset_jobs.lock().await.remove("job-1");
         // The watcher only re-checks the job map at grace expiry, so allow a
+        // couple of cycles.
+        assert_shutdown_within(&mut h, GRACE * 3).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn resume_in_flight_blocks_exit() {
+        let mut h = start("resume", 0);
+        h.resume_in_flight.store(true, Ordering::SeqCst);
+        assert_no_shutdown_for(&mut h, GRACE * 4).await;
+        h.resume_in_flight.store(false, Ordering::SeqCst);
+        // The watcher only re-checks the flag at grace expiry, so allow a
         // couple of cycles.
         assert_shutdown_within(&mut h, GRACE * 3).await;
     }

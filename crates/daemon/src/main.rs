@@ -159,7 +159,7 @@ async fn main() -> anyhow::Result<()> {
     // is a value nothing can open again, so sweep it from the store and index.
     sweep_unreferenced_secrets(&dirs, &state, chrono::Utc::now());
 
-    let result = server::run(state, dirs, live, dead).await;
+    let result = server::run(state, dirs, live, dead, resume_ids).await;
     info!(?result, "rustling-tulipd main returning");
     result
 }

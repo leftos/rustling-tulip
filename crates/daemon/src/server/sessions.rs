@@ -490,7 +490,9 @@ async fn duplicate_request_in(
     claude_home: Option<&Path>,
 ) -> anyhow::Result<SpawnRequest> {
     if same_checkout {
-        return rerun_request(hub, session_id, claude_home).await;
+        return rerun_request(hub, session_id, claude_home)
+            .await
+            .map(|rerun| rerun.request);
     }
     let (stored, _) = source_config(hub, session_id)?;
     let fresh = match stored.target.suggest_target() {
@@ -527,11 +529,11 @@ fn source_config(
 /// in, as Recover pins them, so the rerun binds the very worktree it left
 /// wherever it sits; and its Claude conversation continued when the
 /// transcript is still under `claude_home` for that pinned folder.
-async fn rerun_request(
+pub(super) async fn rerun_request(
     hub: &Hub,
     session_id: &str,
     claude_home: Option<&Path>,
-) -> anyhow::Result<SpawnRequest> {
+) -> anyhow::Result<Rerun> {
     wait_for_source_exit(hub, session_id).await?;
     let (stored, members) = source_config(hub, session_id)?;
     let conversation = hub
@@ -539,6 +541,7 @@ async fn rerun_request(
         .get(session_id)
         .and_then(|rec| resumable_conversation(&crate::sync::lock(&rec)));
     let mut req = stored.to_duplicate_request(None);
+    let mut unpinned = false;
     if target_uses_worktree(&req.target) {
         let (repos, workspaces) = hub
             .state
@@ -547,8 +550,9 @@ async fn rerun_request(
             repos: &repos,
             workspaces: &workspaces,
         };
-        if let Some(pinned) = crate::history::pin_recorded(&req.target, &members, &registered) {
-            req.target = pinned;
+        match crate::history::pin_recorded(&req.target, &members, &registered) {
+            Some(pinned) => req.target = pinned,
+            None => unpinned = true,
         }
     }
     req.resume_conversation = match conversation {
@@ -568,7 +572,18 @@ async fn rerun_request(
         resume = ?req.resume_conversation,
         "duplicate_session: rerunning in the source's checkout"
     );
-    Ok(req)
+    Ok(Rerun {
+        request: req,
+        unpinned,
+    })
+}
+
+/// A rerun's request, and whether its worktree target kept the recorded
+/// config's unpinned form because some member could not be pinned to the
+/// folder it ran in.
+pub(super) struct Rerun {
+    pub(super) request: SpawnRequest,
+    pub(super) unpinned: bool,
 }
 
 /// How long a rerun or a worktree removal gives a just-killed child to exit:

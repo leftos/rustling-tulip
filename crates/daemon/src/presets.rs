@@ -2500,6 +2500,8 @@ mod tests {
             keep_awake_enabled: Arc::new(keep_awake_enabled),
             keep_awake_status,
             recovering: crate::server::RecoveryClaims::default(),
+            resume_in_flight: Arc::default(),
+            start_resume: Arc::default(),
             pending_hooks: crate::hook_status::PendingHooks::default(),
         };
         (hub, preset_rx, scratch)
