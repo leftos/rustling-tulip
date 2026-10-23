@@ -33,8 +33,8 @@ Briefs 1 and 2 are additive and land on `main` one by one. Briefs 3 to 6 stack i
 
 - [x] **SS.1 Screen model.** `screen.rs` with the grid and region API, fed and resized beside the watchers; no status change. Red first: a cursor-addressed spinner repaint over one row leaves exactly one spinner row in the bottom lines.
 - [x] **SS.2 Claude rules and fixtures.** The rule table and evaluator; fixtures from `docs/spikes/chat-mirror-tui/screens/` and collie's `claude--*.txt` panes (MIT, `X:\dev\_ext\AltanS\collie\web\src\fixtures\panes`). Red first: a fixture-to-state table, including a turn's first seconds with no timer.
-- [ ] **SS.3 Swap the watchers.** Remove `IDLE_AFTER`, the volume windows, the title heartbeat and the silence demotions for Claude sessions; add the screen-driven write behind hysteresis and the hook-stamp recheck. Red first: a hook-reported `Working` with a quiet screen that still shows the spinner stays `Working` past 10 s; an interrupt row demotes after the hysteresis window; a half-drawn frame raises no `Attention`.
-- [ ] **SS.4 Reattach.** Decision 9 in `session.rs` `insert_reattached` and `server/recovery.rs`.
-- [ ] **SS.5 Plain shell running claude.** Decision 10.
-- [ ] **SS.6 e2e.** fake-claude paints Claude-shaped screens (idle box, spinner line, interrupt row, a dialog footer, title glyphs); `apps/native/tests/e2e_live.rs` waits on them; a live Esc spec; RT-221's idle-wait race goes with it.
+- [x] **SS.3 Swap the watchers.** Remove `IDLE_AFTER`, the volume windows, the title heartbeat and the silence demotions for Claude sessions; add the screen-driven write behind hysteresis and the hook-stamp recheck. Red first: a hook-reported `Working` with a quiet screen that still shows the spinner stays `Working` past 10 s; an interrupt row demotes after the hysteresis window; a half-drawn frame raises no `Attention`.
+- [x] **SS.4 Reattach.** Decision 9 in `session.rs` `insert_reattached` and `server/recovery.rs`.
+- [x] **SS.5 Plain shell running claude.** Decision 10.
+- [x] **SS.6 e2e.** fake-claude paints Claude-shaped screens (idle box, spinner line, interrupt row, a dialog footer, title glyphs); `apps/native/tests/e2e_live.rs` waits on them; a live Esc spec; RT-221's idle-wait race goes with it.
 - [ ] **SS.7 Docs.** CLAUDE.md "Status detection" and the orphan-recovery paragraph, `docs/architecture.md` (the status rows and a Task Index row), `docs/plans/hook-status.md` ("Coexisting with the heuristic"), `docs/spikes/chat-mirror-tui.md:111` (stale), README glossary ("screen engine", "hook-driven").
