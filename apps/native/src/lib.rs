@@ -36,6 +36,7 @@ pub mod launch_last;
 mod layout_chooser;
 mod layout_chooser_view;
 mod links;
+mod mock_view;
 mod mouse;
 mod move_panes;
 mod move_panes_view;
@@ -726,6 +727,14 @@ pub struct RootView {
     needs_you_timer: Option<Task<()>>,
     /// How many times that timer has repainted the panel.
     needs_you_repaints: usize,
+    /// Each session's mock panel, by session id.
+    mock_panels: HashMap<String, gpui::Entity<mock_view::MockPanel>>,
+    /// The pane that draws each session's mock panel this frame: the
+    /// active grid's first attached pane showing it.
+    mock_first_pane: HashMap<String, String>,
+    /// `RUSTLING_TULIP_MOCK_DEMO`'s page, until the first session list
+    /// shows it.
+    mock_demo: Option<String>,
 }
 
 impl RootView {
@@ -967,6 +976,9 @@ impl RootView {
             recover_batches: Vec::new(),
             needs_you_timer: None,
             needs_you_repaints: 0,
+            mock_panels: HashMap::new(),
+            mock_first_pane: HashMap::new(),
+            mock_demo: std::env::var("RUSTLING_TULIP_MOCK_DEMO").ok(),
         };
         view.arm_needs_you_repaint(cx);
         view
@@ -2189,8 +2201,8 @@ impl RootView {
         cx.notify();
     }
 
-    /// Folds a message in to the diff tabs and the source-control panel's
-    /// parts; returns whether nothing else is owed it.
+    /// Folds a message in to the diff tabs, the source-control panel's
+    /// parts and the mock panels; returns whether nothing else is owed it.
     fn on_panel_message(
         &mut self,
         msg: &DaemonMessage,
@@ -2201,6 +2213,7 @@ impl RootView {
             || self.on_sc_message(msg, window, cx)
             || self.on_stash_message(msg, window, cx)
             || self.apply_history(msg, cx)
+            || self.on_mock_message(msg, cx)
     }
 
     /// Folds the message into the sidebar, and forgets the remembered
@@ -2556,6 +2569,7 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         self.sessions_loaded = true;
+        self.start_mock_demo(sessions, cx);
         for view in self.pane_views(None) {
             view.update(cx, |pane, _| pane.refresh_sessions(sessions));
         }
@@ -3012,6 +3026,7 @@ impl Render for RootView {
             self.tab_drag = None;
             self.tab_drop = None;
         }
+        self.sync_mock_panels(cx);
         let footer = self.conn.footer(self.sidebar.sessions().len());
         let flyout = self
             .flyout_open

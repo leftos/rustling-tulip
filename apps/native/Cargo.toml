@@ -60,6 +60,8 @@ two-face = { version = "0.5.2", default-features = false, features = ["syntect-f
 [target.'cfg(windows)'.dependencies]
 raw-window-handle = "0.6"
 tauri-winrt-notification = "0.7.3"
+# The mock panel's WebView2 child window (mock_view.rs).
+wry = "0.57.0"
 windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Dwm",

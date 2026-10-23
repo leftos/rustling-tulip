@@ -948,6 +948,92 @@ impl RootView {
             .into_any_element()
     }
 
+    /// `terminal` beside the session's mock panel when this pane is the one
+    /// drawing it, else `terminal` alone.
+    fn with_mock_panel(&self, pane_id: &str, session_id: &str, terminal: AnyElement) -> AnyElement {
+        let Some(panel) = self
+            .mock_panels
+            .get(session_id)
+            .filter(|_| self.mock_first_pane.get(session_id).map(String::as_str) == Some(pane_id))
+        else {
+            return terminal;
+        };
+        let divider = div()
+            .w(px(1.0))
+            .h_full()
+            .bg(gpui::rgb(LINE))
+            .into_any_element();
+        let split = split_box(
+            SplitDirection::Horizontal,
+            0.5,
+            [terminal, divider, panel.clone().into_any_element()],
+        );
+        div()
+            .flex()
+            .flex_1()
+            .min_h(px(0.0))
+            .child(split)
+            .into_any_element()
+    }
+
+    /// Picks the pane that draws each mock panel this frame and hides every
+    /// panel that is off the active grid or under a menu, dialog, overlay
+    /// or drag: the webview paints above all of them.
+    pub(crate) fn sync_mock_panels(&mut self, cx: &mut Context<Self>) {
+        if self.mock_panels.is_empty() {
+            self.mock_first_pane.clear();
+            return;
+        }
+        self.mock_first_pane = self.first_attached_pane_per_session();
+        let covered = self.mock_covered();
+        for (session_id, panel) in &self.mock_panels {
+            let hidden = covered || !self.mock_first_pane.contains_key(session_id);
+            if panel.read(cx).is_hidden() != hidden {
+                panel.update(cx, |panel, _| panel.set_hidden(hidden));
+            }
+        }
+    }
+
+    /// Whether anything is drawn over the panes: the modals, Settings, the
+    /// daemon flyout, the connecting overlay, a context menu, or a pane or
+    /// tab drag.
+    fn mock_covered(&self) -> bool {
+        self.overlay_open()
+            || self.settings_open()
+            || self.flyout_open
+            || self.conn.overlay_text().is_some()
+            || self.menu.is_some()
+            || self.shell_menu.is_some()
+            || self.tab_menu.is_some()
+            || self.container_menu.is_some()
+            || self.sidebar_more_open()
+            || self.sc_picker_open
+            || self.pane_drag.is_some()
+            || self.tab_drag.is_some()
+    }
+
+    /// Each session's first attached pane on the active grid, in drawing
+    /// order.
+    fn first_attached_pane_per_session(&self) -> HashMap<String, String> {
+        let mut first = HashMap::new();
+        let Some(tab) = self.tabs.active_tab() else {
+            return first;
+        };
+        let TabContent::Grid { grid } = &tab.content else {
+            return first;
+        };
+        let mut panes = Vec::new();
+        grid_panes(grid, &mut panes);
+        for (pane_id, session_id) in panes {
+            if self.panes.get(pane_id).is_some_and(|slot| slot.attached) {
+                first
+                    .entry(session_id.to_owned())
+                    .or_insert_with(|| pane_id.to_owned());
+            }
+        }
+        first
+    }
+
     fn render_pane(
         &self,
         tab_id: &str,
@@ -957,12 +1043,15 @@ impl RootView {
     ) -> AnyElement {
         let focused = self.tabs.focused_pane(tab_id).as_deref() == Some(pane_id);
         let body = match (session_id, self.panes.get(pane_id)) {
-            (Some(_), Some(slot)) if slot.attached => div()
-                .flex_1()
-                .min_h(px(0.0))
-                .debug_selector(|| format!("pane-grid-{pane_id}"))
-                .child(slot.view.clone())
-                .into_any_element(),
+            (Some(id), Some(slot)) if slot.attached => {
+                let terminal = div()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .debug_selector(|| format!("pane-grid-{pane_id}"))
+                    .child(slot.view.clone())
+                    .into_any_element();
+                self.with_mock_panel(pane_id, id, terminal)
+            }
             (Some(id), slot) => self.note_body(pane_id, id, slot, cx),
             (None, Some(slot)) => {
                 let handle = slot.view.read(cx).focus_handle();
@@ -1803,6 +1892,25 @@ fn drop_overlay(pane_id: &str, edge: PaneDropEdge, accent: u32) -> AnyElement {
                 .child(ghost_pill(drag::SWAP_BADGE, accent))
         })
         .into_any_element()
+}
+
+/// Every pane of `node` showing a session, as (pane id, session id), first
+/// split before second.
+fn grid_panes<'a>(node: &'a GridNode, out: &mut Vec<(&'a str, &'a str)>) {
+    match node {
+        GridNode::Pane {
+            pane_id,
+            session_id,
+        } => {
+            if let Some(session_id) = session_id {
+                out.push((pane_id, session_id));
+            }
+        }
+        GridNode::Split { first, second, .. } => {
+            grid_panes(first, out);
+            grid_panes(second, out);
+        }
+    }
 }
 
 /// An invisible layer that records where the grid was laid out, for the
