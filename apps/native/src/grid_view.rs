@@ -989,7 +989,7 @@ impl RootView {
         for (session_id, panel) in &self.mock_panels {
             let hidden = covered || !self.mock_first_pane.contains_key(session_id);
             if panel.read(cx).is_hidden() != hidden {
-                panel.update(cx, |panel, _| panel.set_hidden(hidden));
+                panel.update(cx, |panel, cx| panel.set_hidden(hidden, cx));
             }
         }
     }
