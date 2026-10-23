@@ -275,6 +275,19 @@ fn dialog_groups_rows_and_preticks_lost(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn other_only_history_shows_its_rows_without_a_click(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    open_with(&mut h, vec![history_item("s").stopped().build()]);
+
+    assert_eq!(row_ids(&mut h), ["s"], "the only session is listed");
+    assert!(
+        h.bounds("recover-row-s").origin.x >= gpui::px(0.0),
+        "its row is painted without the toggle"
+    );
+}
+
+#[gpui::test]
 fn recover_as_choices_match_folder_flags(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);

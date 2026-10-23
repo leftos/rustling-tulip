@@ -19,11 +19,11 @@ use crate::branch_fate::{DeleteWorktreeConfirm, DialogButton, confirm_messages};
 use crate::buttons::{ButtonKind, ButtonSize, button, field_frame, focus_ring, outlined_button};
 use crate::grid_view::{NO_REPOS_TIP, PANE_PENDING_TIP};
 use crate::launch_last;
-use crate::notice_view::modal_panel;
+use crate::notice_view::{MODAL_RADIUS, drop_shadow, modal_panel};
 use crate::notices::{ActionFailedNotice, ToastKind};
 use crate::open::{OpenJob, VsCodeTarget, copy_path, repo_folder, workspace_vscode_target};
 use crate::open_view::Then;
-use crate::palette::{CHIP, LINE_STRONG, SCRIM};
+use crate::palette::{CHIP, DIALOG_SHADOW, LINE_STRONG, SCRIM, SURFACE};
 use crate::remote_mode::Capabilities;
 use crate::session_actions::{
     ABANDONED_ACTIONS, ActionState, DuplicateTarget, HEADLESS_UNSUPPORTED_TIP, MenuEntry, MenuMode,
@@ -2216,6 +2216,7 @@ impl RootView {
                 .collect();
             keys.insert(1, "new-session");
             selectors.push(format!("exited-{}", pane.id));
+            selectors.push(format!("exited-card-{}", pane.id));
             selectors.extend(keys.iter().map(|key| format!("exited-{key}-{}", pane.id)));
         }
         selectors
@@ -2248,8 +2249,11 @@ impl RootView {
         );
         Some(
             overlay_layer(format!("exited-{pane_id}"))
-                .child(exited_message(session))
-                .child(overlay_buttons(buttons))
+                .child(
+                    overlay_card(format!("exited-card-{pane_id}"))
+                        .child(exited_message(session))
+                        .child(overlay_buttons(buttons)),
+                )
                 .into_any_element(),
         )
     }
@@ -2278,14 +2282,17 @@ impl RootView {
         let mut lines = abandoned_lines(session).into_iter();
         Some(
             overlay_layer(format!("abandoned-{pane_id}"))
-                .children(lines.next())
-                .children(lines.map(|line| {
-                    div()
-                        .max_w(px(DIALOG_WIDTH))
-                        .text_color(gpui::rgb(MUTED))
-                        .child(line)
-                }))
-                .child(overlay_buttons(buttons))
+                .child(
+                    overlay_card(format!("abandoned-card-{pane_id}"))
+                        .children(lines.next())
+                        .children(lines.map(|line| {
+                            div()
+                                .max_w(px(DIALOG_WIDTH))
+                                .text_color(gpui::rgb(MUTED))
+                                .child(line)
+                        }))
+                        .child(overlay_buttons(buttons)),
+                )
                 .into_any_element(),
         )
     }
@@ -2325,6 +2332,7 @@ impl RootView {
             };
             if action_state(session) == ActionState::Abandoned {
                 selectors.push(format!("abandoned-{}", pane.id));
+                selectors.push(format!("abandoned-card-{}", pane.id));
                 selectors.extend(
                     ABANDONED_ACTIONS
                         .iter()
@@ -2375,6 +2383,24 @@ fn overlay_layer(name: String) -> Stateful<Div> {
         .occlude()
         .text_size(px(UI_TEXT_SIZE))
         .text_color(gpui::rgb(TEXT))
+}
+
+/// The card an overlay's message and buttons sit on, centred over the
+/// dimmed terminal: the dialog's surface, edge and shadow.
+fn overlay_card(id: String) -> Div {
+    div()
+        .debug_selector(|| id)
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap(px(10.0))
+        .px(px(24.0))
+        .py(px(16.0))
+        .bg(gpui::rgb(SURFACE))
+        .border_1()
+        .border_color(gpui::rgb(LINE_STRONG))
+        .rounded(px(MODAL_RADIUS))
+        .shadow(vec![drop_shadow(DIALOG_SHADOW, 30.0, 80.0)])
 }
 
 fn overlay_buttons(buttons: Vec<AnyElement>) -> Div {

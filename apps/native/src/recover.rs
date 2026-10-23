@@ -91,6 +91,16 @@ impl Group {
     }
 }
 
+/// Whether the other recent sessions are the only rows there are, so the
+/// dialog opens them rather than showing an empty list behind a toggle.
+fn only_other_rows(groups: &[Group]) -> bool {
+    groups.iter().any(|group| group.kind == GroupKind::Other)
+        && groups
+            .iter()
+            .filter(|group| group.kind != GroupKind::Other)
+            .all(|group| group.rows.is_empty())
+}
+
 /// The history grouped for the dialog: the unknown-time losses, then the
 /// bursts of losses (newest first), then everything else.
 pub fn groups<Tz: TimeZone>(items: &[SessionHistoryItem], now: &DateTime<Tz>) -> Vec<Group>
@@ -536,6 +546,10 @@ pub struct RecoverDialog {
     /// as the user left them and applies the pre-tick rule only to the rest.
     user_set: HashSet<String>,
     other_expanded: bool,
+    /// Whether the user collapsed or expanded the other recent sessions, so
+    /// a refresh leaves them as the user left them rather than reopening
+    /// them by [`Self::new`]'s rule.
+    other_touched: bool,
     focus: Option<Control>,
     in_flight: Option<InFlight>,
     error: Option<String>,
@@ -545,7 +559,8 @@ pub struct RecoverDialog {
 }
 
 impl RecoverDialog {
-    /// The dialog over `items`: the unrecovered losses ticked.
+    /// The dialog over `items`: the unrecovered losses ticked, and the other
+    /// recent sessions open when they are the only rows there are.
     pub fn new<Tz: TimeZone>(
         items: &[SessionHistoryItem],
         names: &Names,
@@ -564,12 +579,14 @@ impl RecoverDialog {
             .map(|item| item.entry.session_id.clone())
             .filter(|id| rows.get(id).is_some_and(Row::enabled))
             .collect();
+        let grouped = groups(items, now);
         let mut dialog = Self {
-            groups: groups(items, now),
+            other_expanded: only_other_rows(&grouped),
+            groups: grouped,
             rows,
             user_set: HashSet::new(),
             ticked,
-            other_expanded: false,
+            other_touched: false,
             focus: None,
             in_flight: None,
             error: None,
@@ -624,7 +641,10 @@ impl RecoverDialog {
             .cloned()
             .collect();
         fresh.ticked = ticked;
-        fresh.other_expanded = self.other_expanded;
+        fresh.other_touched = self.other_touched;
+        if self.other_touched {
+            fresh.other_expanded = self.other_expanded;
+        }
         fresh.in_flight = self.in_flight.take();
         fresh.error = self.error.take();
         fresh.failed_only = self.failed_only;
@@ -745,6 +765,7 @@ impl RecoverDialog {
     /// moves to the toggle.
     pub fn toggle_other(&mut self) {
         self.other_expanded = !self.other_expanded;
+        self.other_touched = true;
         if !self.other_expanded
             && let Some(row) = self.focus.as_ref().and_then(Control::row)
             && !self.visible_rows().contains(&row)
@@ -973,7 +994,12 @@ impl RecoverDialog {
         self.ticked = self.rows.keys().cloned().collect();
         self.user_set = self.rows.keys().cloned().collect();
         self.failed_only = true;
-        self.other_expanded = self.other_expanded || self.has_other();
+        // Showing the failure's rows is a decision a refresh keeps: a failed
+        // row in the other group must not hide behind the toggle.
+        if self.has_other() {
+            self.other_expanded = true;
+            self.other_touched = true;
+        }
         self.focus = self.focus_order().into_iter().next();
     }
 
@@ -1217,7 +1243,10 @@ mod tests {
 
     #[test]
     fn other_sessions_group_collapsed_label() {
+        let mut recovered = lost("a", "2026-09-28T09:35:00Z");
+        recovered.entry.recovered_at = Some(utc("2026-09-28T09:45:00Z"));
         let items = [
+            recovered,
             stopped("s1", "2026-09-28T09:40:00Z"),
             item(
                 "x",
@@ -1231,20 +1260,83 @@ mod tests {
             ),
         ];
         let mut dialog = dialog(&items);
-        assert_eq!(titles(dialog.groups()), ["Other recent sessions [x s1 d]"]);
+        assert_eq!(
+            titles(dialog.groups()),
+            [
+                "1 session lost at 11:35 [a]",
+                "Other recent sessions [x s1 d]",
+            ]
+        );
         let row = dialog.row("x").expect("row");
         assert_eq!(
             (row.label.as_str(), row.place.as_str(), row.ended.as_str()),
             ("label-x", "repo-one", "11:50 · exited (code 0)")
         );
-        assert!(!dialog.other_expanded());
-        assert!(dialog.visible_rows().is_empty(), "collapsed");
+        assert!(!dialog.other_expanded(), "a loss leads, so they stay shut");
+        assert_eq!(dialog.visible_rows(), ["a"], "only the loss is shown");
         assert_eq!(other_toggle_label(3, false), "Show 3 other recent sessions");
         assert_eq!(other_toggle_label(1, false), "Show 1 other recent session");
         dialog.toggle_other();
-        assert_eq!(dialog.visible_rows(), ["x", "s1", "d"]);
+        assert_eq!(dialog.visible_rows(), ["a", "x", "s1", "d"]);
         assert_eq!(other_toggle_label(3, true), "Hide other recent sessions");
         assert_eq!(dialog.ticked_count(), 0, "user ends are listed unticked");
+    }
+
+    #[test]
+    fn other_only_list_opens_expanded() {
+        let items = [
+            stopped("s", "2026-09-28T09:40:00Z"),
+            item(
+                "x",
+                &json!({"type": "exited", "code": 0}),
+                "2026-09-28T09:30:00Z",
+            ),
+        ];
+        let dialog = dialog(&items);
+        assert!(dialog.other_expanded(), "the only rows are the others");
+        assert_eq!(dialog.visible_rows(), ["s", "x"]);
+    }
+
+    #[test]
+    fn mixed_list_keeps_other_collapsed() {
+        let items = [
+            lost("a", "2026-09-28T09:29:00Z"),
+            stopped("s", "2026-09-28T09:40:00Z"),
+        ];
+        let dialog = dialog(&items);
+        assert!(!dialog.other_expanded(), "the losses lead");
+        assert_eq!(dialog.visible_rows(), ["a"]);
+    }
+
+    #[test]
+    fn refresh_keeps_a_user_collapse() {
+        let items = [stopped("s", "2026-09-28T09:40:00Z")];
+        let mut dialog = dialog(&items);
+        assert!(dialog.other_expanded(), "they open as the only rows");
+        dialog.toggle_other();
+        assert!(!dialog.other_expanded());
+        dialog.refresh(&items, &Names::default(), &now());
+        assert!(!dialog.other_expanded(), "the user's collapse stands");
+        assert_eq!(dialog.visible_rows(), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn refresh_after_a_failed_recovery_keeps_failed_other_rows_shown() {
+        let items = [
+            lost("a", "2026-09-28T09:29:00Z"),
+            stopped("s", "2026-09-28T09:40:00Z"),
+        ];
+        let mut dialog = dialog(&items);
+        dialog.toggle("s");
+        let failed = HashMap::from([
+            ("a".to_owned(), "nothing to resume".to_owned()),
+            ("s".to_owned(), "no folder".to_owned()),
+        ]);
+        dialog.keep_only(failed);
+        assert!(dialog.other_expanded(), "the failure shows its rows");
+        dialog.refresh(&items, &Names::default(), &now());
+        assert!(dialog.other_expanded(), "the refresh keeps them shown");
+        assert_eq!(dialog.visible_rows(), ["a", "s"]);
     }
 
     #[test]

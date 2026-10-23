@@ -18,8 +18,8 @@ use crate::fonts::{DEFAULT_FAMILY, UI_FAMILY};
 use crate::grid_view::{ADD_REPO_TIP, NO_REPOS_TIP, SPAWN_TIP};
 use crate::launch_last;
 use crate::palette::{
-    ACCENT, ASKING, CHIP, HOVER, LAUNCHED_TINT, LILAC, LINE, LINE_STRONG, ON_ACCENT, ON_ASKING,
-    RAISED, SUBTLE, TEXT_2, TRANSPARENT,
+    ACCENT, ASKING, CHIP, GROUND, HOVER, LAUNCHED_TINT, LILAC, LINE, LINE_STRONG, ON_ACCENT,
+    ON_ASKING, RAISED, SUBTLE, TEXT_2, TRANSPARENT,
 };
 use crate::preset_launch::LaunchHighlight;
 use crate::remote_mode::{Capabilities, sidebar_no_repos_note};
@@ -102,9 +102,18 @@ impl RootView {
                 .flex_1()
                 .min_w(px(0.0))
                 .h_full()
+                .bg(gpui::rgb(GROUND))
                 .child(self.tab_bar(cx))
                 .child(self.grid_area(cx)),
         )
+    }
+
+    /// The fill the main area paints: the ground, so no window or desktop
+    /// shows through the tab bar's strip, an empty main area, the pane
+    /// gutter or the first-run dialog's backdrop.
+    #[must_use]
+    pub fn main_area_fill(&self) -> u32 {
+        GROUND
     }
 
     fn sidebar_panel(&mut self, width: f32, window: &Window, cx: &mut Context<Self>) -> Div {

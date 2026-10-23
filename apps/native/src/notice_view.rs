@@ -694,7 +694,7 @@ pub(crate) fn toast_frame(id: impl Into<ElementId>) -> Stateful<Div> {
 
 /// A soft shadow of `color` (`0xRRGGBBAA`) cast `drop` px down and blurred
 /// `blur` px.
-fn drop_shadow(color: u32, drop: f32, blur: f32) -> BoxShadow {
+pub(crate) fn drop_shadow(color: u32, drop: f32, blur: f32) -> BoxShadow {
     BoxShadow {
         color: gpui::rgba(color).into(),
         offset: point(px(0.0), px(drop)),
