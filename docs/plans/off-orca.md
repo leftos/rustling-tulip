@@ -4,13 +4,11 @@ The owner runs Orca today and will leave it once rustling-tulip covers three thi
 
 ## Rulings
 
-> **Superseded:** RT-143 re-plans the phone as an iPhone PWA over Tailscale HTTPS ([remote-access.md](./remote-access.md)): Android-first and Flutter are out, the relay and pinned TLS are dropped with pairing codes and mDNS, and Wave 4 is renamed.
-
 - **The bar for leaving Orca:** phone status and reply, the desktop terminals and worktrees, and remote access from another PC. The chat view is wanted but is not on that bar.
-- **Order:** interleaved. Hook status, then the desktop attention feed, then the remote desktop, then the Android MVP, with the small desktop parity waves between them; Phase 5 (drag-and-drop, pop-outs) after the Android MVP.
+- **Order:** interleaved. Hook status, then the desktop attention feed, then the remote desktop, then the iPhone PWA, with the small desktop parity waves between them; Phase 5 (drag-and-drop, pop-outs) after the iPhone PWA.
 - **Chat view:** a mirror over the live terminal session (SV.1), not the stream-peer view switch.
-- **Mobile:** Android first, Flutter over the shared Rust core; the iOS pipeline (MA5) goes to the backlog.
-- **Reach:** Tailscale and the relay, both from the start.
+- **Mobile:** a PWA on the owner's iPhone, served by the daemon over Tailscale HTTPS ([mobile-app.md](./mobile-app.md)); no store app and no iOS build pipeline.
+- **Reach:** Tailscale only ([remote-access.md](./remote-access.md)); no relay, pinned TLS or mDNS.
 - **Progress updates** reach the phone as a silent feed only, never as a push.
 - **Clear and continue** runs only on a click, never on its own.
 
@@ -23,7 +21,7 @@ The waves in Linear team RT, in working order (snapshot: [MAIN.md](./MAIN.md)). 
 | 1a, 1b, 1c | DeepSeek sessions, retiring the Tauri app, busy tracking | |
 | 2 | Daily driver: close the port's gaps (hook status, tabs and panes, forms, repos, containers and presets, Phase 5a drag-and-drop) | RT-84 (AT.1), RT-85 (AT.2) under RT-25 |
 | 3 | Cutover: remote mode over Tailscale, file fetch, installer and `v0.1.0-alpha` | RT-96 (MA3) |
-| 4 | Mobile app (iPhone PWA over Tailscale) | RT-103 (MA4), RT-104 (MA6), RT-105 (MA7), RT-106 (MA.e) under RT-38, re-cut by RT-143 |
+| 4 | Mobile app (iPhone PWA over Tailscale) | RT-104 (MA.b), RT-106 (MA.e) and the PW steps in [mobile-app.md](./mobile-app.md) |
 | 5 | Attention feed on the desktop (`feat/attention-feed`) | RT-87 (AT.3), RT-88 (AT.4), RT-89 (AT.5), RT-90 (AT.7, AT.8), RT-91 (SV.5), RT-92 (SV.6), RT-93 (fleet) |
 | 6 | Remote enhancements | RT-97 (PF.1–PF.3), RT-98 (PF.4), RT-99 (PF.5), RT-100 (PF.8), RT-101 (PF.12), RT-102 (RD.4) |
 | 7 | Pop-out windows (Phase 5b) | |
@@ -33,7 +31,7 @@ The waves in Linear team RT, in working order (snapshot: [MAIN.md](./MAIN.md)). 
 | 12 | Claude accounts and artifacts by account | RT-112 (MA10), RT-113 (AR.1–AR.3), RT-114 (AR.4, AR.5), RT-115 (PF.14) |
 | 13 | ops-tower views: gates, board and dock | (OT) |
 | 14, 15 | Dictation; Linear issue links | |
-| Ideas, Backlog | | RT-117 (MA5 iOS), RT-118 (RD.5), RT-119 (RD.6), RT-120 (RD.7), RT-121 (PF.9), RT-122 (PF.10), RT-123 (PF.11), RT-124 (PF.13), RT-125 (MA.f), RT-126 (MA.g) |
+| Ideas, Backlog | | RT-118 (RD.5), RT-119 (RD.6), RT-120 (RD.7), RT-121 (PF.9), RT-122 (PF.10), RT-123 (PF.11), RT-124 (PF.13), RT-125 (MA.f) |
 
 Build tooling's RT-116 (affected-crate tests per item, the full suite at checkpoints and in CI) shortens every wave.
 
@@ -79,7 +77,7 @@ Goal: Ctrl+click a path in a remote session and the file opens on the machine yo
 - **PF.9 Peek.** Hover (desktop) or tap (phone) shows the lines around `:line` in a popover from a ranged read, without downloading; the phone's default action is a syntax-highlighted viewer with Share and Save.
 - **PF.10 Edit and send back.** A fetched copy is watched; saving it offers "Send back to host", refused if the host file changed since the fetch (hash check), with a diff.
 - **PF.11 Open in VS Code Remote.** When the host is reachable over SSH or a VS Code tunnel, a click can open `code --remote ssh-remote+<host> <path>:<line>` instead of copying; a per-host setting.
-- **PF.12 Upload: paste and drop into a remote session.** Pasting an image (Claude Code's own image paste reads the host's clipboard, so it fails remotely) or dropping a file uploads it into `<worktree>/.tmp/rt-uploads/` on the host and types its path into the prompt. The phone's share sheet and camera do the same.
+- **PF.12 Upload: paste and drop into a remote session.** Pasting an image (Claude Code's own image paste reads the host's clipboard, so it fails remotely) or dropping a file uploads it into `<worktree>/.tmp/rt-uploads/` on the host and types its path into the prompt. The phone's camera and file picker do the same (iOS has no Web Share Target).
 - **PF.13 Fetch the files a message names.** A turn-end card ("3 files edited") offers "Fetch all" as one folder.
 - **PF.14 Extra roots.** Confinement stays (repo roots and worktrees), plus host-approved extra roots (for example `~/.claude` for skills and plans), set on the host only.
 
@@ -120,7 +118,7 @@ Goal: know when you are needed, on whatever screen you are near, without being p
 
 - **AT.3 One event feed on the daemon.** Every stream item is an `AttentionEvent { id, session_id, stream, kind, title, detail, actions, created_at, resolved_at }`, kept in a bounded ring (and a file, so a restart keeps unread state), broadcast to every client and to the push sender. A resolution (answered, cleared, dismissed) is broadcast too, so answering on one device clears it everywhere.
 - **AT.4 Needs You grows into the inbox.** The rail view lists all streams with tabs or filters, unread state, mark-unread (Orca's bell), and the longest wait first inside Needs you.
-- **AT.5 Actionable notifications.** Windows toasts and Android notifications carry buttons: Allow / Deny for a permission, one button per option for a single-choice question (up to 3), inline reply for free text (Android `RemoteInput`, WinRT toast input), "Clear and continue" for a hand-off, "Open" for everything. Multi-choice and multi-question prompts open the chat card instead.
+- **AT.5 Actionable notifications.** Windows toasts carry buttons: Allow / Deny for a permission, one button per option for a single-choice question (up to 3), inline reply for free text (WinRT toast input), "Clear and continue" for a hand-off, "Open" for everything. Multi-choice and multi-question prompts open the chat card instead. The phone's notifications have no buttons (Safari supports no notification actions), so a tap opens the session's prompt sheet.
 - **AT.6 Presence routing.** At the desk (the native client has focus, or input in the last N seconds) → desktop only; desk idle or locked for 3 minutes (Orca's rule) → phone too; a remote desktop client that has focus counts as presence for its machine. Quiet hours per stream.
 - **AT.7 Sound and speech.** A sound per stream (Orca lets you pick files); spoken summaries stay RT-26.
 - **AT.8 Taskbar.** The taskbar icon gets an overlay badge with the Needs-you count and flashes once on a new item.
@@ -146,7 +144,7 @@ Every Claude session can be shown three ways, on every client: **Terminal**, **C
 
 ## 4. Remote desktop client (`RD`)
 
-- **RD.1 Tailscale only.** The daemon's tailnet listener serves its `tailscale cert` TLS over the tailnet (`crates/daemon/src/tailnet_listener.rs`), reachable from anywhere once remote access is on, so the connection picker takes a MagicDNS name. The relay (MA2, `mobile-app.md`) is dropped with the Tailscale-first ruling (`remote-access.md`).
+- **RD.1 Tailscale only.** The daemon's tailnet listener serves its `tailscale cert` TLS over the tailnet (`crates/daemon/src/tailnet_listener.rs`), reachable from anywhere once remote access is on, so the connection picker takes a MagicDNS name. The relay is dropped with the Tailscale-first ruling (`remote-access.md`).
 - **RD.2 Phase 6 as planned** (RT-33, RT-34): shared client core, connection picker, pairing, host profiles, remote mode.
 - **RD.3 Same notifications remotely.** The remote native client is a full attention client (AT.3–AT.8), with presence per machine.
 - **RD.4 Resume without replay.** Reconnect sends each pane's last sequence number; the daemon sends only the missing bytes, so a flaky link does not reload 2 MB of scrollback per pane.
@@ -156,16 +154,13 @@ Every Claude session can be shown three ways, on every client: **Terminal**, **C
 
 ## 5. Mobile app (`MA`, extends `mobile-app.md`)
 
-> **Superseded:** the phone is an iPhone PWA over Tailscale HTTPS, not an Android/Flutter app (RT-143, [remote-access.md](./remote-access.md)); MA.a's Android-first order and Flutter stack, MA.d's FCM push and MA.h's relay are re-cut with that issue.
-
-- **MA.a Android first.** Android builds and sideloads from Windows, with `adb` over Wi-Fi, FCM push, no Apple fee and no macOS CI. Flutter stays so iOS remains possible; MA5 (iOS pipeline) moves to the backlog.
+- **MA.a An iPhone PWA.** The daemon serves the app over its tailnet listener and the owner installs it from Safari to the Home Screen: no store, no Apple Developer account, no macOS CI. Steps PW.1 onward in `mobile-app.md`.
 - **MA.b Home is the attention feed** (AT.3), Needs you first, then hand-offs, then sessions by repo with status and the AT.1 background glyph.
 - **MA.c Session screen** opens in Summary (SV.4), switches to Chat (SV.1) or Terminal (MA8) per session.
-- **MA.d Push with actions** (AT.5) through FCM straight from the daemon; a resolution dismisses the notification on every device.
-- **MA.e Files:** a path tap opens the peek viewer (PF.9); a file tree per worktree; Share/Save; the share sheet sends text, links, images and files into a session (PF.12).
+- **MA.d Web Push** straight from the daemon with the owner's VAPID keys, opening the session on a tap; the Home Screen badge counts Needs you (`mobile-app.md`, Push and Badge).
+- **MA.e Files:** a path tap opens the peek viewer (PF.9); a file tree per worktree; Share/Save; the page's camera and file picker send images and files into a session (PF.12).
 - **MA.f Launch from the phone:** "Launch last again", a preset, or "/nextup in {repo}" in a new session.
-- **MA.g Home-screen widget:** the Needs-you count and the oldest wait.
-- **MA.h Reach:** Tailscale or the relay (RD.1), LAN direct at home.
+- **MA.h Reach:** Tailscale only (RD.1).
 
 ## 6. Claude artifacts across accounts (`AR`)
 
@@ -173,7 +168,7 @@ The owner rotates six Claude logins with claude-swap; an artifact a session publ
 
 - **AR.1 Tag artifact links with their account.** The daemon knows each session's account (RT-39 records which login was active at spawn and at each switch). An artifact URL (`claude.ai/code/artifact/…`, `claude.ai/artifact/…`) on screen or in the transcript's Artifact tool result is tagged with that account; the link's tooltip names it.
 - **AR.2 Desktop: open in the account's Firefox container.** Settings maps each account to a container name; a click opens `ext+container:name=<container>&url=<url>` (the scheme of the "Open external links in a container" Firefox add-on), or the account's Chrome or Edge profile (`--profile-directory`).
-- **AR.3 Phone: one browser profile per account.** The app keeps an in-app web view per account with its own cookie store (Android WebView's multi-profile API); each is logged in once and an artifact link opens in its account's view.
+- **AR.3 Phone: no per-account browser.** The PWA has no in-app web views with their own cookie stores, so an artifact link opens in Safari under whichever login Safari holds; another account's artifact opens through its local copy (AR.4).
 - **AR.4 No login at all: the local copy.** The Artifact tool's input in the transcript names the local HTML file it published; the daemon can serve that file (PF fetch rules plus the scratchpad as an extra root, PF.14) for a read-only view. Pages that use runtime capabilities (shared data, `window.claude`) need the real link.
 - **AR.5 An artifacts list.** Every artifact the sessions published, with its account, session and time, on the desktop and the phone.
 
