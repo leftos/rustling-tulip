@@ -10,7 +10,9 @@ pub(super) use self::hook_settings::{announce_replayed_prompt, remove_hook_setti
 pub(super) use self::worktree::target_uses_worktree;
 
 use self::hook_settings::{HookSettings, write_hook_settings};
-use self::shell::{resolve_agent_program, resolve_shell_program};
+use self::shell::{
+    AgentLaunch, Launch, ShellProgram, plan_launch, resolve_agent_program, resolve_shell_program,
+};
 use self::worktree::{
     SinglePlan, classify_worktree_error, log_fork_point, materialize_single_worktree,
     pinned_branch, preview_single_spawn, reject_pin_without_worktree, single_worktree_target,
@@ -636,6 +638,9 @@ struct NewInteractive {
     claude_session_id: Option<String>,
     started_at: chrono::DateTime<Utc>,
     busy_excluded: bool,
+    /// The label of the shell the agent is typed into, when the PTY child is
+    /// that shell; `None` when the agent is the child.
+    shell_label: Option<String>,
 }
 
 /// The record of a new interactive session.
@@ -681,6 +686,9 @@ fn interactive_record(
         background: false,
         last_assistant_message: None,
         busy_excluded: new.busy_excluded,
+        agent_in_shell: new.shell_label.is_some(),
+        shell_label: new.shell_label,
+        agent_exit_announced: false,
     };
     push_recent_action(&mut record, "session started".to_string());
     record
@@ -746,6 +754,9 @@ fn plain_shell_record(
         background: false,
         last_assistant_message: None,
         busy_excluded: new.busy_excluded,
+        agent_in_shell: false,
+        shell_label: None,
+        agent_exit_announced: false,
     };
     push_recent_action(
         &mut record,
@@ -983,27 +994,77 @@ async fn spawn_interactive_session(
         settings_file: hook_settings.as_ref().map(HookSettings::path),
         ..cfg.common()
     };
-    let args =
-        backend.interactive_args(&cfg.options, &common, &members, initial_prompt.as_deref())?;
-
-    let mut final_args = prepend_args;
-    final_args.extend(args);
-    info!(
-        agent = agent.as_label(),
-        raw = %raw_program,
-        program = %program,
-        argc = final_args.len(),
-        args = ?final_args,
-        "spawn_interactive_session: resolved program"
-    );
+    // An agent whose descriptor says it can run inside a shell is typed into
+    // the user's shell, which stays in the pane once the agent ends.
+    let shell_resume = backend.descriptor().caps.shell_resume;
+    let launch = match shell_resume.then(|| host_shell(hub)).flatten() {
+        Some(shell) => {
+            let mut argv = vec![program.clone()];
+            argv.extend(prepend_args.iter().cloned());
+            argv.extend(backend.interactive_args(&cfg.options, &common, &members, None)?);
+            let cwd = primary_cwd.to_string_lossy();
+            plan_launch(
+                shell_resume,
+                Some(shell),
+                AgentLaunch {
+                    argv: &argv,
+                    cwd: &cwd,
+                    initial_prompt: initial_prompt.as_deref(),
+                    preset: cfg.prompt_injector.clone(),
+                },
+            )
+        }
+        None => Launch::Direct,
+    };
+    let (program, args, env, injectors, shell_label) = match launch {
+        Launch::Direct => {
+            let args = backend.interactive_args(
+                &cfg.options,
+                &common,
+                &members,
+                initial_prompt.as_deref(),
+            )?;
+            let mut final_args = prepend_args;
+            final_args.extend(args);
+            info!(
+                agent = agent.as_label(),
+                raw = %raw_program,
+                program = %program,
+                argc = final_args.len(),
+                args = ?final_args,
+                "spawn_interactive_session: resolved program"
+            );
+            let injectors: Vec<protocol::PromptInjector> =
+                cfg.prompt_injector.clone().into_iter().collect();
+            (program, final_args, cfg.env.set.clone(), injectors, None)
+        }
+        Launch::InShell(launch) => {
+            info!(
+                agent = agent.as_label(),
+                raw = %raw_program,
+                program = %program,
+                shell = %launch.shell.label,
+                "spawn_interactive_session: the agent is typed into the shell"
+            );
+            let env = with_shell_env(cfg.env.set.clone(), launch.shell.extra_env);
+            (
+                launch.shell.program,
+                launch.shell.args,
+                env,
+                launch.injectors,
+                Some(launch.shell.label),
+            )
+        }
+    };
+    let agent_in_shell = shell_label.is_some();
 
     let initial_cwd = primary_cwd.to_string_lossy().into_owned();
     let spec = PtySpawnSpec {
         session_id: session_id.clone(),
         program,
-        args: final_args,
+        args,
         cwd: primary_cwd,
-        env: cfg.env.set.clone(),
+        env,
         env_remove: cfg.env.remove.clone(),
         cols: 120,
         rows: 32,
@@ -1057,6 +1118,7 @@ async fn spawn_interactive_session(
             claude_session_id,
             started_at,
             busy_excluded,
+            shell_label,
         },
         Some(Arc::clone(&pty)),
     );
@@ -1090,25 +1152,45 @@ async fn spawn_interactive_session(
         Some(hub.dirs.clone()),
     );
     let screen: screen::SharedScreen = Arc::new(Mutex::new(screen::Screen::new(cols, rows)));
+    // A shell hosting the agent runs the shell's watcher, which reads input
+    // volume and follows the agent while it runs in the shell.
+    let shell_input = agent_in_shell.then(mpsc::unbounded_channel::<usize>);
     {
         let mut guard = crate::sync::lock(pending.arc());
         guard.scrollback_snapshot_req = Some(snap_tx);
         guard.screen = Some(Arc::clone(&screen));
+        if let Some((in_tx, _)) = &shell_input {
+            guard.input_notifier = Some(in_tx.clone());
+        }
     }
-    pty_state::watch(
-        &hub.sessions,
-        session_id.clone(),
-        pty_state::AgentStreams {
-            output: pty.output.subscribe(),
-            screen,
-        },
-        hub.attention_tx.clone(),
-    );
+    if let Some((_, in_rx)) = shell_input {
+        pty_state::watch_plain_shell(
+            &hub.sessions,
+            session_id.clone(),
+            pty_state::ShellStreams {
+                output: pty.output.subscribe(),
+                input_pulses: in_rx,
+                screen,
+            },
+            hub.attention_tx.clone(),
+            SessionStatus::Idle,
+        );
+    } else {
+        pty_state::watch(
+            &hub.sessions,
+            session_id.clone(),
+            pty_state::AgentStreams {
+                output: pty.output.subscribe(),
+                screen,
+            },
+            hub.attention_tx.clone(),
+        );
+    }
     osc_title::watch(
         &hub.sessions,
         session_id.clone(),
         pty.output.subscribe(),
-        false,
+        agent_in_shell,
     );
     let snap = crate::sync::lock(pending.arc()).snapshot();
     pending.publish_from(cfg.origin.clone());
@@ -1123,10 +1205,47 @@ async fn spawn_interactive_session(
         write_meta_then_sync(hub, &meta);
     }
 
-    if let Some(injector) = cfg.prompt_injector.clone() {
-        inject::run(session_id.clone(), Arc::clone(&pty), injector);
+    if !injectors.is_empty() {
+        // What follows the launch is meant for the agent, so it waits for
+        // the agent to be up in its shell.
+        let agent_up: Option<inject::AgentUp> = agent_in_shell.then(|| {
+            let registry = Arc::clone(&hub.sessions);
+            let id = session_id.clone();
+            Box::new(move || pty_state::agent_up(&registry, &id)) as inject::AgentUp
+        });
+        inject::run_chain(session_id.clone(), Arc::clone(&pty), injectors, agent_up);
     }
     Ok(snap)
+}
+
+/// The user's shell, to host an agent typed into it; `None`, logged, when
+/// none resolves, and the agent is then spawned directly.
+fn host_shell(hub: &Hub) -> Option<ShellProgram> {
+    match resolve_shell_program(&hub.dirs) {
+        Ok(shell) => Some(shell),
+        Err(err) => {
+            warn!(
+                error = %format!("{err:#}"),
+                "no shell to host the agent; spawning the agent directly"
+            );
+            None
+        }
+    }
+}
+
+/// `env` with the shell's own variables set over it.
+fn with_shell_env(
+    mut env: Vec<(String, String)>,
+    shell_env: Vec<(String, String)>,
+) -> Vec<(String, String)> {
+    for (k, v) in shell_env {
+        if let Some(slot) = env.iter_mut().find(|(existing, _)| existing == &k) {
+            slot.1 = v;
+        } else {
+            env.push((k, v));
+        }
+    }
+    env
 }
 
 #[expect(
@@ -1161,14 +1280,7 @@ async fn spawn_plain_shell_session(
         None
     };
     let initial_cwd = primary_cwd.to_string_lossy().into_owned();
-    let mut env = cfg.env.set.clone();
-    for (k, v) in shell.extra_env {
-        if let Some(slot) = env.iter_mut().find(|(existing, _)| existing == &k) {
-            slot.1 = v;
-        } else {
-            env.push((k, v));
-        }
-    }
+    let env = with_shell_env(cfg.env.set.clone(), shell.extra_env);
     let spec = PtySpawnSpec {
         session_id: session_id.clone(),
         program: shell.program,
@@ -1390,6 +1502,9 @@ fn spawn_headless_session(
         background: false,
         last_assistant_message: None,
         busy_excluded,
+        agent_in_shell: false,
+        shell_label: None,
+        agent_exit_announced: false,
     };
     push_recent_action(&mut record, "headless session started".to_string());
     // Held unpublished until the child runs, so a failed spawn is never
@@ -3072,6 +3187,7 @@ mod tests {
                 claude_session_id: None,
                 started_at: Utc::now(),
                 busy_excluded: false,
+                shell_label: None,
             },
             None,
         );
@@ -3141,6 +3257,7 @@ mod tests {
                 claude_session_id: None,
                 started_at: Utc::now(),
                 busy_excluded: false,
+                shell_label: None,
             },
             None,
         );
@@ -3263,6 +3380,7 @@ mod tests {
                 claude_session_id: None,
                 started_at: Utc::now(),
                 busy_excluded: true,
+                shell_label: None,
             },
             None,
         );

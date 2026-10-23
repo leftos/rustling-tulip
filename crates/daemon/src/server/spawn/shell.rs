@@ -216,6 +216,299 @@ pub(super) fn resolve_shell_program(dirs: &Dirs) -> anyhow::Result<ShellProgram>
     }
 }
 
+/// The ceiling of the wait for the shell's prompt before the agent's command
+/// line is typed; the injector types it once the prompt has printed.
+const SHELL_LAUNCH_DELAY_MS: u32 = 2000;
+
+/// The pause between clearing the shell's input line and typing the command,
+/// so a pseudo console does not read the clearing Esc and the first typed
+/// character as one Alt chord.
+const CLEAR_LINE_PAUSE_MS: u32 = 100;
+
+/// The ceiling of the wait for the agent's TUI before the initial prompt is
+/// typed; the injector types it once the TUI has painted.
+const AGENT_PROMPT_DELAY_MS: u32 = 15_000;
+
+/// The command-line syntax of the shell an agent's command line is typed into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ShellFamily {
+    PowerShell,
+    Cmd,
+    Posix,
+}
+
+impl ShellFamily {
+    /// The family of the shell `program` runs, from its file stem: `pwsh` and
+    /// `powershell` are PowerShell, `cmd` is cmd, and `sh`, `bash`, `zsh`,
+    /// `dash` and `ksh` are POSIX sh. `None` for any other shell, and for a
+    /// POSIX shell that Windows runs through WSL (under `System32` or
+    /// `WindowsApps`), which takes Linux paths.
+    pub(super) fn of(program: &str) -> Option<Self> {
+        match program_stem(program).as_str() {
+            "pwsh" | "powershell" => Some(Self::PowerShell),
+            "cmd" => Some(Self::Cmd),
+            "sh" | "bash" | "zsh" | "dash" | "ksh" if !runs_through_wsl(program) => {
+                Some(Self::Posix)
+            }
+            _ => None,
+        }
+    }
+
+    /// The bytes that clear the shell's input line: Esc for PowerShell and
+    /// cmd, Ctrl+U for a POSIX shell's line editor.
+    fn clear_line(self) -> &'static [u8] {
+        match self {
+            Self::PowerShell | Self::Cmd => b"\x1b",
+            Self::Posix => b"\x15",
+        }
+    }
+}
+
+/// `program`'s file stem, lower-cased; empty when it has none.
+fn program_stem(program: &str) -> String {
+    Path::new(program)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default()
+}
+
+/// Whether `program` is a Windows path into the system or app-alias folders,
+/// where a POSIX shell is WSL's.
+fn runs_through_wsl(program: &str) -> bool {
+    let lower = program.to_ascii_lowercase();
+    lower.contains(r"\system32\") || lower.contains(r"\windowsapps\")
+}
+
+/// Whether the agent's arguments pass through a parser that mangles some of
+/// them: Windows PowerShell 5.1 hosting the agent, or cmd running it (the
+/// agent program is `cmd.exe` or a batch file).
+fn legacy_argument_passing(shell_program: &str, argv: &[String]) -> bool {
+    let agent = argv.first().map(String::as_str).unwrap_or_default();
+    let ext = Path::new(agent)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(str::to_ascii_lowercase);
+    program_stem(shell_program) == "powershell"
+        || program_stem(agent) == "cmd"
+        || matches!(ext.as_deref(), Some("cmd" | "bat"))
+}
+
+/// An argument a legacy parser mangles: empty, holding a double quote, or
+/// ending in a backslash.
+fn mangled_by_legacy_parsing(arg: &str) -> bool {
+    arg.is_empty() || arg.contains('"') || arg.ends_with('\\')
+}
+
+/// `argv`, the program first, as one line `family` runs. `None` when cmd
+/// cannot carry an argument: one holding a double quote, a line break, `%`
+/// or `!`.
+pub(super) fn quote_command_line(family: ShellFamily, argv: &[String]) -> Option<String> {
+    match family {
+        ShellFamily::PowerShell => {
+            let quoted: Vec<String> = argv.iter().map(|arg| powershell_quote(arg)).collect();
+            Some(format!("& {}", quoted.join(" ")))
+        }
+        ShellFamily::Cmd => {
+            let quoted: Option<Vec<String>> = argv.iter().map(|arg| cmd_quote(arg)).collect();
+            Some(quoted?.join(" "))
+        }
+        ShellFamily::Posix => {
+            let quoted: Vec<String> = argv.iter().map(|arg| posix_quote(arg)).collect();
+            Some(quoted.join(" "))
+        }
+    }
+}
+
+/// The line that runs `argv` from `cwd` in `family`: a change to `cwd`, then
+/// the command. `None` when cmd cannot quote the folder or an argument.
+fn launch_line(family: ShellFamily, cwd: &str, argv: &[String]) -> Option<String> {
+    let command = quote_command_line(family, argv)?;
+    match family {
+        ShellFamily::PowerShell => Some(format!(
+            "Set-Location -LiteralPath {}; {command}",
+            powershell_quote(cwd)
+        )),
+        ShellFamily::Cmd => {
+            if cmd_refuses(cwd) {
+                return None;
+            }
+            Some(format!("cd /d \"{cwd}\" && {command}"))
+        }
+        ShellFamily::Posix => Some(format!("cd -- {} && {command}", posix_quote(cwd))),
+    }
+}
+
+/// A POSIX sh argument: single-quoted, each single quote closed, escaped and
+/// reopened.
+fn posix_quote(arg: &str) -> String {
+    format!("'{}'", arg.replace('\'', r"'\''"))
+}
+
+/// A PowerShell argument: single-quoted, each single quote (typographic ones
+/// included, which PowerShell also reads as quotes) doubled. An argument
+/// holding a line break is double-quoted instead, its breaks written as
+/// backtick escapes so the typed command stays one line.
+fn powershell_quote(arg: &str) -> String {
+    let mut out = String::with_capacity(arg.len() + 2);
+    if arg.contains(['\n', '\r']) {
+        out.push('"');
+        for ch in arg.chars() {
+            match ch {
+                '\n' => out.push_str("`n"),
+                '\r' => out.push_str("`r"),
+                '`' | '"' | '$' | '\u{201C}' | '\u{201D}' | '\u{201E}' => {
+                    out.push('`');
+                    out.push(ch);
+                }
+                _ => out.push(ch),
+            }
+        }
+        out.push('"');
+    } else {
+        out.push('\'');
+        for ch in arg.chars() {
+            if matches!(ch, '\'' | '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}') {
+                out.push(ch);
+            }
+            out.push(ch);
+        }
+        out.push('\'');
+    }
+    out
+}
+
+/// Whether cmd cannot carry `arg` in a typed line: a double quote or a line
+/// break ends it, and `%` and `!` expand even inside quotes.
+fn cmd_refuses(arg: &str) -> bool {
+    arg.contains(['"', '\n', '\r', '%', '!'])
+}
+
+/// A cmd argument: double-quoted when empty or holding a space or a shell
+/// metacharacter, its trailing backslashes doubled so the closing quote stays
+/// a quote; `None` for one cmd cannot carry (see [`cmd_refuses`]).
+fn cmd_quote(arg: &str) -> Option<String> {
+    if cmd_refuses(arg) {
+        return None;
+    }
+    let special = |ch: char| ch.is_whitespace() || "&|<>^(),;=".contains(ch);
+    if !arg.is_empty() && !arg.contains(special) {
+        return Some(arg.to_owned());
+    }
+    let trailing = arg.len() - arg.trim_end_matches('\\').len();
+    Some(format!("\"{arg}{}\"", "\\".repeat(trailing)))
+}
+
+/// How an agent session's PTY child starts.
+pub(super) enum Launch {
+    /// The agent is the PTY child.
+    Direct,
+    /// The shell is the PTY child and the agent is typed into it.
+    InShell(ShellLaunch),
+}
+
+/// A shell that hosts the agent: the shell the PTY runs, and the injectors,
+/// run one after another, that type the agent's command line into it and
+/// then the initial prompt (or the preset's script) into the agent.
+pub(super) struct ShellLaunch {
+    pub(super) shell: ShellProgram,
+    pub(super) injectors: Vec<protocol::PromptInjector>,
+}
+
+/// The agent a launch starts: its program and arguments without the initial
+/// prompt (`argv`), the folder it starts in, the prompt, and a preset's
+/// script, which carries the prompt itself.
+pub(super) struct AgentLaunch<'a> {
+    pub(super) argv: &'a [String],
+    pub(super) cwd: &'a str,
+    pub(super) initial_prompt: Option<&'a str>,
+    pub(super) preset: Option<protocol::PromptInjector>,
+}
+
+/// Plan how an agent whose descriptor says `shell_resume` starts: inside
+/// `shell` when there is one, its family is known, and it can carry the
+/// agent's folder and arguments as typed, else directly. The initial prompt
+/// is typed only without a preset script.
+pub(super) fn plan_launch(
+    shell_resume: bool,
+    shell: Option<ShellProgram>,
+    agent: AgentLaunch<'_>,
+) -> Launch {
+    let Some(shell) = shell.filter(|_| shell_resume) else {
+        return Launch::Direct;
+    };
+    let Some(family) = ShellFamily::of(&shell.program) else {
+        tracing::warn!(
+            shell = %shell.label,
+            "the agent cannot be typed into this shell; spawning the agent directly"
+        );
+        return Launch::Direct;
+    };
+    let legacy_refused = legacy_argument_passing(&shell.program, agent.argv)
+        && agent.argv.iter().any(|arg| mangled_by_legacy_parsing(arg));
+    let line = launch_line(family, agent.cwd, agent.argv).filter(|_| !legacy_refused);
+    let Some(line) = line else {
+        tracing::warn!(
+            shell = %shell.label,
+            "the agent's command line cannot be typed into this shell; spawning the agent directly"
+        );
+        return Launch::Direct;
+    };
+    let mut injectors = vec![typed_launch(family, line)];
+    if let Some(preset) = agent.preset {
+        injectors.push(preset);
+    } else if let Some(prompt) = agent.initial_prompt.filter(|prompt| !prompt.is_empty()) {
+        injectors.push(typed_prompt(prompt));
+    }
+    Launch::InShell(ShellLaunch { shell, injectors })
+}
+
+/// The injector that types `line` into a `family` shell once its prompt has
+/// printed, clearing whatever the input line already holds first.
+fn typed_launch(family: ShellFamily, line: String) -> protocol::PromptInjector {
+    use base64::Engine as _;
+    protocol::PromptInjector {
+        steps: vec![
+            protocol::InjectorStep::Delay {
+                ms: SHELL_LAUNCH_DELAY_MS,
+            },
+            protocol::InjectorStep::Write {
+                data_b64: base64::engine::general_purpose::STANDARD.encode(family.clear_line()),
+            },
+            protocol::InjectorStep::Delay {
+                ms: CLEAR_LINE_PAUSE_MS,
+            },
+            protocol::InjectorStep::Text {
+                content: line,
+                newline: true,
+            },
+        ],
+        verify_mode_marker: None,
+        startup: protocol::InjectorStartup::ShellPrompt,
+    }
+}
+
+/// The injector that types `prompt` into the agent's TUI once it has painted.
+fn typed_prompt(prompt: &str) -> protocol::PromptInjector {
+    protocol::PromptInjector {
+        steps: vec![
+            protocol::InjectorStep::Delay {
+                ms: AGENT_PROMPT_DELAY_MS,
+            },
+            protocol::InjectorStep::Text {
+                content: prompt.to_owned(),
+                newline: false,
+            },
+            protocol::InjectorStep::Text {
+                content: String::new(),
+                newline: true,
+            },
+        ],
+        verify_mode_marker: None,
+        startup: protocol::InjectorStartup::AgentTui,
+    }
+}
+
 fn shell_label_from_path(path: &str) -> String {
     std::path::Path::new(path)
         .file_stem()
@@ -448,6 +741,367 @@ fn powershell_cwd_prompt_script_minimal() -> String {
 const BASH_INIT_SCRIPT: &str = include_str!("../../../shell-init/bash-init.sh");
 
 const ZSH_INIT_SCRIPT: &str = include_str!("../../../shell-init/zsh-init.zshrc");
+
+#[cfg(test)]
+#[expect(
+    clippy::panic,
+    clippy::expect_used,
+    reason = "tests fail on an unexpected launch shape with panic or expect; failure messages aid debugging"
+)]
+mod launch_tests {
+    use super::{AgentLaunch, Launch, ShellFamily, ShellProgram, plan_launch, quote_command_line};
+    use base64::Engine as _;
+    use protocol::{InjectorStartup, InjectorStep, PromptInjector};
+
+    const CWD: &str = r"C:\work\repo";
+
+    fn strings(items: &[&str]) -> Vec<String> {
+        items.iter().map(|item| (*item).to_owned()).collect()
+    }
+
+    fn shell(program: &str, label: &str) -> ShellProgram {
+        ShellProgram {
+            program: program.to_owned(),
+            args: strings(&["-NoExit"]),
+            label: label.to_owned(),
+            extra_env: vec![("RT_SHELL".to_owned(), "1".to_owned())],
+        }
+    }
+
+    fn agent<'a>(argv: &'a [String], prompt: Option<&'a str>) -> AgentLaunch<'a> {
+        AgentLaunch {
+            argv,
+            cwd: CWD,
+            initial_prompt: prompt,
+            preset: None,
+        }
+    }
+
+    fn texts(injector: &PromptInjector) -> Vec<(&str, bool)> {
+        injector
+            .steps
+            .iter()
+            .filter_map(|step| match step {
+                InjectorStep::Text { content, newline } => Some((content.as_str(), *newline)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The bytes the launch's `Write` steps send before its text.
+    fn writes(injector: &PromptInjector) -> Vec<Vec<u8>> {
+        injector
+            .steps
+            .iter()
+            .filter_map(|step| match step {
+                InjectorStep::Write { data_b64 } => base64::engine::general_purpose::STANDARD
+                    .decode(data_b64)
+                    .ok(),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The typed line of the launch `shell` plans for `argv`, or `None` for
+    /// the direct spawn.
+    fn typed_line(shell: ShellProgram, argv: &[String]) -> Option<String> {
+        match plan_launch(true, Some(shell), agent(argv, None)) {
+            Launch::Direct => None,
+            Launch::InShell(launch) => launch
+                .injectors
+                .first()
+                .and_then(|typed| texts(typed).first().map(|(line, _)| (*line).to_owned())),
+        }
+    }
+
+    #[test]
+    fn powershell_quotes_with_the_call_operator_and_doubled_single_quotes() {
+        let argv = strings(&[r"C:\Program Files\claude.exe", "--model", "it's", ""]);
+        assert_eq!(
+            quote_command_line(ShellFamily::PowerShell, &argv).as_deref(),
+            Some(r"& 'C:\Program Files\claude.exe' '--model' 'it''s' ''")
+        );
+        assert_eq!(
+            quote_command_line(ShellFamily::PowerShell, &strings(&["a\u{2019}b"])).as_deref(),
+            Some("& 'a\u{2019}\u{2019}b'"),
+            "a typographic single quote also ends a single-quoted string, so it is doubled too"
+        );
+        assert_eq!(
+            quote_command_line(
+                ShellFamily::PowerShell,
+                &strings(&["x", "one\ntwo $HOME `\""])
+            )
+            .as_deref(),
+            Some("& 'x' \"one`ntwo `$HOME ```\"\""),
+            "a multi-line argument is one double-quoted line with backtick escapes"
+        );
+        assert_eq!(
+            ShellFamily::of(r"C:\Program Files\PowerShell\7\pwsh.exe"),
+            Some(ShellFamily::PowerShell)
+        );
+        assert_eq!(
+            ShellFamily::of("powershell.exe"),
+            Some(ShellFamily::PowerShell)
+        );
+    }
+
+    #[test]
+    fn cmd_quotes_spaces_and_refuses_a_double_quote() {
+        let argv = strings(&[
+            r"C:\bin\claude.exe",
+            "--add-dir",
+            r"C:\my dir\",
+            "a&b",
+            "plain",
+            "",
+        ]);
+        assert_eq!(
+            quote_command_line(ShellFamily::Cmd, &argv).as_deref(),
+            Some(r#"C:\bin\claude.exe --add-dir "C:\my dir\\" "a&b" plain """#)
+        );
+        assert_eq!(
+            quote_command_line(ShellFamily::Cmd, &strings(&["claude", r#"say "hi""#])),
+            None
+        );
+        assert_eq!(
+            quote_command_line(ShellFamily::Cmd, &strings(&["claude", "one\ntwo"])),
+            None,
+            "cmd ends a typed command at a newline"
+        );
+        assert_eq!(ShellFamily::of("cmd.exe"), Some(ShellFamily::Cmd));
+    }
+
+    #[test]
+    fn cmd_refuses_percent_and_bang() {
+        for arg in ["%PATH%", "50%", "hi!", "!VAR!"] {
+            assert_eq!(
+                quote_command_line(ShellFamily::Cmd, &strings(&["claude", arg])),
+                None,
+                "cmd expands {arg:?} even inside quotes"
+            );
+        }
+        assert!(
+            typed_line(
+                shell("cmd.exe", "cmd"),
+                &strings(&["claude", "--model", "50%"])
+            )
+            .is_none(),
+            "an argument cmd would expand keeps the direct spawn"
+        );
+    }
+
+    #[test]
+    fn posix_quotes_with_single_quotes() {
+        let argv = strings(&["/usr/bin/claude", "--model", "it's", "$HOME"]);
+        assert_eq!(
+            quote_command_line(ShellFamily::Posix, &argv).as_deref(),
+            Some(r"'/usr/bin/claude' '--model' 'it'\''s' '$HOME'")
+        );
+        for known in ["/bin/bash", "zsh", "/bin/sh", "dash", "ksh"] {
+            assert_eq!(ShellFamily::of(known), Some(ShellFamily::Posix), "{known}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_shell_keeps_the_direct_spawn() {
+        for unknown in [
+            "nu",
+            "/usr/bin/fish",
+            "tcsh",
+            r"C:\Windows\System32\bash.exe",
+            r"C:\Windows\System32\wsl.exe",
+        ] {
+            assert_eq!(ShellFamily::of(unknown), None, "{unknown}");
+            assert!(
+                typed_line(shell(unknown, "shell"), &strings(&["claude"])).is_none(),
+                "{unknown} keeps the direct spawn"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_powershell_falls_back_on_empty_quote_or_trailing_backslash() {
+        for arg in ["", r#"say "hi""#, r"C:\dir\"] {
+            let argv = strings(&["claude", "--add-dir", arg]);
+            assert!(
+                typed_line(shell("powershell.exe", "powershell"), &argv).is_none(),
+                "Windows PowerShell mangles {arg:?}"
+            );
+            let through_cmd = strings(&["cmd.exe", "/d", "/c", r"C:\bin\claude.cmd", arg]);
+            assert!(
+                typed_line(shell("pwsh.exe", "pwsh"), &through_cmd).is_none(),
+                "cmd.exe running the agent mangles {arg:?}"
+            );
+            let shim = strings(&[r"C:\bin\claude.cmd", arg]);
+            assert!(
+                typed_line(shell("pwsh.exe", "pwsh"), &shim).is_none(),
+                "a .cmd agent mangles {arg:?}"
+            );
+            assert!(
+                typed_line(shell("pwsh.exe", "pwsh"), &argv).is_some(),
+                "PowerShell 7 passes {arg:?} as it is"
+            );
+        }
+    }
+
+    #[test]
+    fn the_launch_changes_to_the_start_folder_first() {
+        let argv = strings(&[r"C:\bin\claude.exe", "--model", "opus"]);
+        assert_eq!(
+            typed_line(shell("pwsh.exe", "pwsh"), &argv).as_deref(),
+            Some(
+                r"Set-Location -LiteralPath 'C:\work\repo'; & 'C:\bin\claude.exe' '--model' 'opus'"
+            )
+        );
+        assert_eq!(
+            typed_line(shell("cmd.exe", "cmd"), &argv).as_deref(),
+            Some(r#"cd /d "C:\work\repo" && C:\bin\claude.exe --model opus"#)
+        );
+        assert_eq!(
+            typed_line(shell("/bin/bash", "bash"), &argv).as_deref(),
+            Some(r"cd -- 'C:\work\repo' && 'C:\bin\claude.exe' '--model' 'opus'")
+        );
+        let launch = AgentLaunch {
+            argv: &argv,
+            cwd: r"C:\50% off",
+            initial_prompt: None,
+            preset: None,
+        };
+        assert!(
+            matches!(
+                plan_launch(true, Some(shell("cmd.exe", "cmd")), launch),
+                Launch::Direct
+            ),
+            "a folder cmd cannot quote keeps the direct spawn"
+        );
+    }
+
+    #[test]
+    fn the_launch_clears_the_line_first() {
+        let argv = strings(&["claude"]);
+        for (program, label, clear) in [
+            ("pwsh.exe", "pwsh", vec![0x1b_u8]),
+            ("cmd.exe", "cmd", vec![0x1b]),
+            ("/bin/bash", "bash", vec![0x15]),
+        ] {
+            let Launch::InShell(launch) =
+                plan_launch(true, Some(shell(program, label)), agent(&argv, None))
+            else {
+                panic!("{label} hosts the agent");
+            };
+            let typed = launch.injectors.first().expect("the launch injector");
+            assert_eq!(writes(typed), vec![clear], "{label} clears its input line");
+            let clear_at = typed
+                .steps
+                .iter()
+                .position(|step| matches!(step, InjectorStep::Write { .. }));
+            let text_at = typed
+                .steps
+                .iter()
+                .position(|step| matches!(step, InjectorStep::Text { .. }));
+            assert!(clear_at < text_at, "{label} clears before it types");
+        }
+    }
+
+    #[test]
+    fn a_shell_resume_agent_spawns_the_shell_and_types_its_command_line() {
+        let argv = strings(&[
+            r"C:\bin\claude.exe",
+            "--settings",
+            r"C:\cfg dir\hook-settings.json",
+        ]);
+        let Launch::InShell(launch) = plan_launch(
+            true,
+            Some(shell("pwsh.exe", "pwsh")),
+            agent(&argv, Some("fix the bug")),
+        ) else {
+            panic!("a shell-resume agent spawns its shell");
+        };
+        assert_eq!(
+            launch.shell.program, "pwsh.exe",
+            "the PTY child is the shell"
+        );
+        assert_eq!(launch.shell.args, strings(&["-NoExit"]));
+        let [typed, prompt] = launch.injectors.as_slice() else {
+            panic!("two injectors: the command line, then the prompt");
+        };
+        assert_eq!(typed.startup, InjectorStartup::ShellPrompt);
+        assert!(matches!(
+            typed.steps.first(),
+            Some(InjectorStep::Delay { .. })
+        ));
+        assert_eq!(
+            texts(typed),
+            vec![(
+                r"Set-Location -LiteralPath 'C:\work\repo'; & 'C:\bin\claude.exe' '--settings' 'C:\cfg dir\hook-settings.json'",
+                true
+            )]
+        );
+        assert_eq!(prompt.startup, InjectorStartup::AgentTui);
+        assert!(matches!(
+            prompt.steps.first(),
+            Some(InjectorStep::Delay { .. })
+        ));
+        assert_eq!(texts(prompt), vec![("fix the bug", false), ("", true)]);
+
+        let preset = PromptInjector {
+            steps: vec![InjectorStep::Text {
+                content: "from the preset".to_owned(),
+                newline: true,
+            }],
+            verify_mode_marker: None,
+            startup: InjectorStartup::AgentTui,
+        };
+        let Launch::InShell(launch) = plan_launch(
+            true,
+            Some(shell("bash", "bash")),
+            AgentLaunch {
+                argv: &argv,
+                cwd: CWD,
+                initial_prompt: Some("fix the bug"),
+                preset: Some(preset),
+            },
+        ) else {
+            panic!("a shell-resume agent spawns its shell");
+        };
+        let [typed, preset] = launch.injectors.as_slice() else {
+            panic!("a preset's script carries the prompt, after the command line");
+        };
+        assert_eq!(
+            texts(typed),
+            vec![(
+                r"cd -- 'C:\work\repo' && 'C:\bin\claude.exe' '--settings' 'C:\cfg dir\hook-settings.json'",
+                true
+            )]
+        );
+        assert_eq!(texts(preset), vec![("from the preset", true)]);
+    }
+
+    #[test]
+    fn an_agent_without_shell_resume_keeps_the_direct_spawn() {
+        let argv = strings(&["claude", "--model", "opus"]);
+        assert!(matches!(
+            plan_launch(false, Some(shell("pwsh.exe", "pwsh")), agent(&argv, None)),
+            Launch::Direct
+        ));
+        assert!(
+            matches!(plan_launch(true, None, agent(&argv, None)), Launch::Direct),
+            "no shell to type into keeps the direct spawn"
+        );
+        let unquotable = strings(&["claude", r#"say "hi""#]);
+        assert!(
+            matches!(
+                plan_launch(
+                    true,
+                    Some(shell("cmd.exe", "cmd")),
+                    agent(&unquotable, None)
+                ),
+                Launch::Direct
+            ),
+            "a command line cmd cannot quote keeps the direct spawn"
+        );
+    }
+}
 
 #[cfg(all(test, windows))]
 #[expect(

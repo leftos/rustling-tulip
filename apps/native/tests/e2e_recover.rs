@@ -465,6 +465,40 @@ fn wait_scrollback_contains(
     }
 }
 
+/// Waits until fake-claude is up in the session and the session's scrollback,
+/// squeezed, holds `want` squeezed: an interactive Claude session's PTY child
+/// is its shell, and the daemon types the agent's command line into it.
+/// Returns the squeezed scrollback.
+fn wait_typed_command(
+    h: &mut Harness<'_>,
+    client: &LiveClient,
+    session_id: &str,
+    want: &str,
+) -> String {
+    wait_scrollback_contains(h, client, session_id, "[fake-claude] ready");
+    let expected = squeeze(want);
+    let deadline = Instant::now() + HANG_GUARD;
+    let mut attempt = 0;
+    loop {
+        let typed = squeeze(&scrollback(
+            h,
+            client,
+            session_id,
+            &format!("typed-{session_id}-{attempt}"),
+        ));
+        if typed.contains(&expected) {
+            return typed;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out after {HANG_GUARD:?} waiting for the typed command to hold \
+             {expected:?}; the scrollback holds {typed:?}"
+        );
+        attempt += 1;
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 /// Registers `repo` with the daemon and returns its id.
 fn register_repo(
     h: &mut Harness<'_>,
@@ -500,10 +534,12 @@ fn recover_claude_session(
         .claude_session_id
         .clone()
         .expect("a spawned claude session carries its conversation id");
-    let line = wait_spawn_line(h, daemon, &session.id);
-    assert!(
-        line.contains(&format!("\"--session-id\", \"{conversation}\"")),
-        "the spawn passes --session-id {conversation}: {line}"
+    wait_spawn_line(h, daemon, &session.id);
+    wait_typed_command(
+        h,
+        client,
+        &session.id,
+        &format!("--session-id {conversation}"),
     );
     let cwd = &session
         .members
@@ -556,14 +592,11 @@ fn recover_claude_session(
     );
     assert_eq!(git_out(repo, &["branch", "--show-current"]), MOVED_ON);
     assert_eq!(git_out(repo, &["status", "--porcelain"]), status_before);
-    let line = wait_spawn_line(h, daemon, &new_id);
+    wait_spawn_line(h, daemon, &new_id);
+    let typed = wait_typed_command(h, client, &new_id, &format!("--resume {conversation}"));
     assert!(
-        line.contains(&format!("\"--resume\", \"{conversation}\"")),
-        "the recovered spawn passes --resume {conversation}: {line}"
-    );
-    assert!(
-        !line.contains("--session-id"),
-        "the recovered spawn takes no fresh --session-id: {line}"
+        !typed.contains("--session-id"),
+        "the recovered launch takes no fresh --session-id: {typed}"
     );
     h.wait_until("recovered_at on the history entry", HANG_GUARD, |_| {
         history_entry(daemon, &session.id).is_some_and(|entry| entry["recovered_at"].is_string())
@@ -1209,15 +1242,16 @@ fn assert_resumed(h: &mut Harness<'_>, client: &LiveClient, daemon: &LiveDaemon,
             && s.id != old.id
             && s.claude_session_id.as_deref() == Some(old.conversation.as_str())
     });
-    let line = wait_spawn_line(h, daemon, &resumed.id);
-    assert!(
-        line.contains(&format!("\"--resume\", \"{}\"", old.conversation)),
-        "the resumed spawn passes --resume {}: {line}",
-        old.conversation
+    wait_spawn_line(h, daemon, &resumed.id);
+    let typed = wait_typed_command(
+        h,
+        client,
+        &resumed.id,
+        &format!("--resume {}", old.conversation),
     );
     assert!(
-        !line.contains("--session-id"),
-        "the resumed spawn takes no fresh --session-id: {line}"
+        !typed.contains("--session-id"),
+        "the resumed launch takes no fresh --session-id: {typed}"
     );
     let what = format!("a sidebar leaf for {} labelled {:?}", resumed.id, old.label);
     h.wait_until(&what, HANG_GUARD, |h| {

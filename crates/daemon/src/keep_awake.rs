@@ -341,6 +341,9 @@ mod tests {
             background: false,
             last_assistant_message: None,
             busy_excluded: false,
+            agent_in_shell: false,
+            shell_label: None,
+            agent_exit_announced: false,
         }
     }
 

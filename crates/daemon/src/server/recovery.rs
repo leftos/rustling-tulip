@@ -144,6 +144,12 @@ pub(super) async fn reattach_orphans(
     );
 }
 
+/// Whether a reattached session's status runs on the shell's watcher: a plain
+/// shell, or an agent typed into its shell at spawn.
+fn runs_shell_watcher(meta: &OrphanMeta) -> bool {
+    meta.mode == SessionMode::PlainShell || meta.agent_in_shell
+}
+
 /// Reattach a single orphan to its still-running tracer, or route it to the
 /// abandoned bucket if the tracer is unreachable. Runs as its own task so a
 /// slow/dead tracer doesn't serialize the others (see `reattach_orphans`).
@@ -178,9 +184,9 @@ async fn reattach_one(
                         &pty,
                         Some(dirs.clone()),
                     );
-                    // Only a plain shell's classifier reads input volume.
-                    let shell_input = (meta.mode == SessionMode::PlainShell)
-                        .then(mpsc::unbounded_channel::<usize>);
+                    // Only a shell's classifier reads input volume.
+                    let shell_watcher = runs_shell_watcher(&meta);
+                    let shell_input = shell_watcher.then(mpsc::unbounded_channel::<usize>);
                     let screen: screen::SharedScreen = Arc::new(Mutex::new(screen::Screen::new(
                         screen::REATTACH_COLS,
                         screen::REATTACH_ROWS,
@@ -222,7 +228,7 @@ async fn reattach_one(
                         &sessions,
                         meta.session_id.clone(),
                         pty.output.subscribe(),
-                        meta.mode == SessionMode::PlainShell,
+                        shell_watcher,
                     );
                     pending.publish();
                 }
@@ -886,6 +892,43 @@ mod tests {
     use protocol::{SessionMember, SpawnTarget};
     use std::path::PathBuf;
     use tokio::sync::broadcast;
+
+    #[test]
+    fn a_reattached_agent_in_shell_session_runs_the_plain_shell_watcher() {
+        let meta = |mode| {
+            crate::orphan::meta_from_record(
+                "s1".to_owned(),
+                4242,
+                "s1".to_owned(),
+                protocol::SessionKind::Standalone,
+                mode,
+                Vec::new(),
+                Utc::now(),
+                None,
+                Some("claude".to_owned()),
+                protocol::Agent::Claude,
+                None,
+                None,
+                None,
+                Some(4242),
+                Some(r"\\.\pipe\rt-tracer-s1".to_owned()),
+                None,
+                None,
+            )
+            .expect("build meta")
+        };
+        let mut hosted = meta(SessionMode::Interactive);
+        assert!(
+            !runs_shell_watcher(&hosted),
+            "an agent that is the PTY child runs the agent watcher"
+        );
+        hosted.agent_in_shell = true;
+        assert!(
+            runs_shell_watcher(&hosted),
+            "an agent inside its shell runs the shell's watcher"
+        );
+        assert!(runs_shell_watcher(&meta(SessionMode::PlainShell)));
+    }
     #[tokio::test]
     #[expect(clippy::panic, reason = "a wrong reply fails the test loudly")]
     async fn list_env_names_replies_with_names_and_no_values() {

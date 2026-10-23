@@ -8,9 +8,7 @@
 
 use crate::server::Hub;
 use crate::session::{PendingInsert, SessionRecord, push_recent_action};
-use protocol::{
-    AgentOptions, PendingInput, PendingQuestion, SessionMode, SessionStatus, SpawnConfig,
-};
+use protocol::{AgentOptions, PendingInput, PendingQuestion, SessionStatus, SpawnConfig};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -50,6 +48,9 @@ pub struct HookDetails {
     pub permission_mode: Option<String>,
     /// Why a `StopFailure` failed: the payload's `reason`, else its `message`.
     pub failure_detail: Option<String>,
+    /// The payload's `reason`: why a `SessionEnd` ended (`clear` for a
+    /// `/clear`, which keeps the agent running).
+    pub reason: Option<String>,
     /// Whether a subagent's tool call fired the event: its input carries a
     /// non-empty `agent_id`. (`agent_type` alone also marks a main agent run
     /// with `--agent`, so it is not the marker.)
@@ -76,6 +77,7 @@ pub fn details(body: &Value) -> HookDetails {
         failure_detail: text("reason")
             .filter(|reason| !reason.is_empty())
             .or_else(|| text("message")),
+        reason: text("reason"),
         subagent: text("agent_id").is_some_and(|id| !id.is_empty()),
         background_work: reports_background_work(body),
     }
@@ -244,37 +246,54 @@ pub fn apply_signal(
     signal: &HookSignal,
     details: &HookDetails,
 ) {
-    let mut entered_awaiting = false;
-    let mut mismatch = None;
+    let mut applied = Applied::default();
     hub.sessions.update(session_id, |record| {
-        (entered_awaiting, mismatch) = apply_to_record(record, event_time, signal, details);
+        applied = apply_to_record(record, event_time, signal, details);
     });
-    log_mismatch(session_id, mismatch.as_ref());
-    if entered_awaiting {
+    log_mismatch(session_id, applied.mismatch.as_ref());
+    if applied.entered_awaiting {
         crate::pty_state::announce_awaiting_input(session_id, &hub.attention_tx);
     }
+    if applied.agent_exited {
+        hub.sessions.announce_agent_exited(session_id);
+    }
+}
+
+/// What applying one hook event to a record did.
+#[derive(Debug, Default)]
+pub(crate) struct Applied {
+    /// The record entered `AwaitingInput`.
+    pub(crate) entered_awaiting: bool,
+    /// The expected and reported permission modes, when a prompt's differ.
+    pub(crate) mismatch: Option<(String, String)>,
+    /// The agent inside the session's shell ended, and its end is to be
+    /// announced (see [`SessionRecord::end_agent_in_shell`]).
+    pub(crate) agent_exited: bool,
 }
 
 /// Apply one mapped event to `record`: the ordering check, the stamp and the
 /// state writes, as [`apply_signal`] and the pending-event replay both need.
-/// Answers whether the record entered `AwaitingInput`, and the permission
-/// mismatch the event reported.
 pub(crate) fn apply_to_record(
     record: &mut SessionRecord,
     event_time: Option<u128>,
     signal: &HookSignal,
     details: &HookDetails,
-) -> (bool, Option<(String, String)>) {
+) -> Applied {
     let Some(event_time) = event_time else {
-        return (false, None);
+        return Applied::default();
     };
     if record.last_hook_time.is_some_and(|last| event_time <= last) {
-        return (false, None);
+        return Applied::default();
     }
     record.last_hook_time = Some(event_time);
     record.hook_driven = true;
     if matches!(record.status, SessionStatus::Stopped | SessionStatus::Error) {
-        return (false, None);
+        return Applied::default();
+    }
+    // An agent typed into its shell starts a new run: the leaf names it again
+    // and the run's end will be announced.
+    if details.event == "SessionStart" {
+        record.start_agent_in_shell();
     }
     // A shell outlives the CLI whose hooks drive it: once that CLI ends, its
     // hooks stop arriving and the shell classifier owns the status again.
@@ -283,15 +302,27 @@ pub(crate) fn apply_to_record(
     // the record, whose `SHELL_IDLE_AFTER` silence ends a stale `Working`; an
     // `AwaitingInput` ends here, since the agent that asked has ended and no
     // other event would demote it.
-    if details.event == "SessionEnd" && record.mode == SessionMode::PlainShell {
+    // An agent typed into its shell at spawn ends the same way, and its end
+    // is announced once per run. A `/clear` ends only the conversation: the
+    // agent runs on and starts the next one at once.
+    let mut agent_exited = false;
+    if details.event == "SessionEnd"
+        && details.reason.as_deref() != Some("clear")
+        && record.shell_hosted()
+    {
         record.hook_driven = false;
         if record.status == SessionStatus::AwaitingInput {
             crate::pty_state::apply_status(record, SessionStatus::Idle);
             record.pending_input = None;
         }
+        agent_exited = record.end_agent_in_shell();
     }
     if leaves_pending_alone(record, signal, details) {
-        return (false, apply_details(record, details));
+        return Applied {
+            entered_awaiting: false,
+            mismatch: apply_details(record, details),
+            agent_exited,
+        };
     }
     // A subagent works on while the main agent is idle, so its events never
     // promote the session into `Working`.
@@ -308,7 +339,11 @@ pub(crate) fn apply_to_record(
             }
         }
     }
-    (entered_awaiting, apply_details(record, details))
+    Applied {
+        entered_awaiting,
+        mismatch: apply_details(record, details),
+        agent_exited,
+    }
 }
 
 /// Whether an event must leave the record's status and pending input alone,
@@ -420,9 +455,11 @@ impl PendingHooks {
         prune_expired(&mut buffer, Instant::now());
         let events = buffer.remove(&session_id).unwrap_or_default();
         for event in events {
-            let (_, mismatch) =
+            // An agent's end held before its session was published has no
+            // client that saw it start, so it is not announced.
+            let applied =
                 apply_to_record(&mut record, event.event_time, &event.signal, &event.details);
-            log_mismatch(&session_id, mismatch.as_ref());
+            log_mismatch(&session_id, applied.mismatch.as_ref());
         }
         let awaiting =
             record.status == SessionStatus::AwaitingInput && record.pending_input.is_some();
@@ -1024,8 +1061,8 @@ mod tests {
     }
 
     /// Apply `body` to `record` at hook time `time`, as the hook route does.
-    fn apply_body(record: &mut SessionRecord, time: u128, body: &Value) {
-        apply_to_record(record, Some(time), &signal(body), &details(body));
+    fn apply_body(record: &mut SessionRecord, time: u128, body: &Value) -> Applied {
+        apply_to_record(record, Some(time), &signal(body), &details(body))
     }
 
     #[test]
@@ -1174,6 +1211,110 @@ mod tests {
         );
     }
 
+    /// An interactive Claude session whose PTY child is the shell, hook-driven
+    /// mid-turn, its leaf naming the agent.
+    fn agent_in_shell_record() -> SessionRecord {
+        let mut record = crate::history::test_support::record("s1", SessionMode::Interactive);
+        record.agent_in_shell = true;
+        record.shell_label = Some("pwsh".to_owned());
+        record.program_name = Some("claude".to_owned());
+        record.status = SessionStatus::Working;
+        record.last_hook_time = Some(1);
+        record.hook_driven = true;
+        record
+    }
+
+    fn session_end() -> Value {
+        json!({"hook_event_name": "SessionEnd", "reason": "prompt_input_exit"})
+    }
+
+    fn session_start() -> Value {
+        json!({"hook_event_name": "SessionStart", "source": "startup"})
+    }
+
+    #[test]
+    fn session_end_on_an_agent_in_shell_record_leaves_hook_driven_and_announces_once() {
+        let mut record = agent_in_shell_record();
+        record.status = SessionStatus::AwaitingInput;
+        record.pending_input = Some(main_prompt());
+        assert!(
+            apply_body(&mut record, 2, &session_end()).agent_exited,
+            "the agent's end is announced"
+        );
+        assert!(!record.hook_driven, "the shell classifier owns the status");
+        assert_eq!(record.status, SessionStatus::Idle);
+        assert_eq!(record.pending_input, None, "the prompt left with the agent");
+        assert!(
+            !apply_body(&mut record, 3, &session_end()).agent_exited,
+            "a second end of the same run announces nothing"
+        );
+
+        let mut shell = crate::history::test_support::record("s2", SessionMode::PlainShell);
+        shell.hook_driven = true;
+        assert!(
+            !apply_body(&mut shell, 2, &session_end()).agent_exited,
+            "a plain shell's agent was typed by its user"
+        );
+        let mut direct = record_with_open_prompt();
+        assert!(!apply_body(&mut direct, 2, &session_end()).agent_exited);
+        assert!(
+            direct.hook_driven,
+            "an agent that is the PTY child keeps its hooks"
+        );
+    }
+
+    /// `/clear` ends one conversation and starts the next in the same run:
+    /// the agent is still running.
+    #[test]
+    fn a_clear_session_end_is_not_an_agent_exit() {
+        let mut record = agent_in_shell_record();
+        let clear = json!({"hook_event_name": "SessionEnd", "reason": "clear"});
+        assert!(
+            !apply_body(&mut record, 2, &clear).agent_exited,
+            "a cleared conversation announces no exit"
+        );
+        assert!(record.hook_driven, "the agent's hooks still drive it");
+        assert_eq!(record.program_name.as_deref(), Some("claude"));
+        apply_body(
+            &mut record,
+            3,
+            &json!({"hook_event_name": "SessionStart", "source": "clear"}),
+        );
+        assert!(
+            apply_body(&mut record, 4, &session_end()).agent_exited,
+            "the run's real end is announced"
+        );
+    }
+
+    #[test]
+    fn a_new_session_start_rearms_the_announcement() {
+        let mut record = agent_in_shell_record();
+        assert!(apply_body(&mut record, 2, &session_end()).agent_exited);
+        assert!(!apply_body(&mut record, 3, &session_start()).agent_exited);
+        assert!(record.hook_driven, "the new run's hooks drive the session");
+        assert!(
+            apply_body(&mut record, 4, &session_end()).agent_exited,
+            "the next run's end is announced again"
+        );
+    }
+
+    #[test]
+    fn program_name_follows_the_child() {
+        let mut record = agent_in_shell_record();
+        apply_body(&mut record, 2, &session_end());
+        assert_eq!(
+            record.program_name.as_deref(),
+            Some("pwsh"),
+            "the shell is what runs once the agent ended"
+        );
+        apply_body(&mut record, 3, &session_start());
+        assert_eq!(
+            record.program_name.as_deref(),
+            Some("claude"),
+            "the agent runs again"
+        );
+    }
+
     #[test]
     fn an_elicitation_names_the_mcp_server() {
         assert_eq!(
@@ -1221,6 +1362,7 @@ mod tests {
                 last_assistant_message: Some("Done.".to_owned()),
                 permission_mode: Some("plan".to_owned()),
                 failure_detail: Some("overloaded".to_owned()),
+                reason: Some("overloaded".to_owned()),
                 subagent: false,
                 background_work: true,
             }
@@ -1238,6 +1380,7 @@ mod tests {
                 last_assistant_message: None,
                 permission_mode: None,
                 failure_detail: None,
+                reason: None,
                 subagent: false,
                 background_work: false,
             }

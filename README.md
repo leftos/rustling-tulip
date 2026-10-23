@@ -53,6 +53,7 @@ Start with [docs/architecture.md](docs/architecture.md) for how the pieces fit a
 - **Account store**: cswap's folder of saved logins (`~/.claude-swap-backup` on Windows), read and written by both cswap and the daemon.
 - **Active account**: the Claude login in `.credentials.json` that every Anthropic Claude session on the machine uses; a switch changes it for all of them at once.
 - **Agent harness**: a terminal coding-agent CLI the daemon can spawn as a session's runtime (Claude Code today; the ones `docs/plans/agent-harnesses.md` plans return as plugins); its Tier A / B / C says whether its conversation id is chosen before launch, pre-created, or found after launch.
+- **Agent in shell**: a session whose PTY child is the user's shell with the agent typed into it, so the pane stays a shell after the agent exits (`SessionRecord::agent_in_shell`).
 - **Agent page / Agents category**: the Settings modal's `Agents` group row, a label with no page of its own, and the Claude page under it that holds the runtime's spawn defaults, such as Claude's approval mode and provider.
 - **Agent plugin**: a compiled-in crate under `crates/agents/` that implements `agent_api::AgentPlugin` for one agent (spawn argv, hook settings, headless stream parsing); the daemon reaches it through `agent_registry::plugin`, never by naming the agent.
 - **Agent skill pack**: the `rt-*` skills and the `rt-worker` agent under `agent-pack/`, installed into `~/.claude` so an agent can fan work out, review it and merge it.

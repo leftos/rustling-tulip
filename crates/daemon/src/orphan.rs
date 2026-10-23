@@ -174,6 +174,15 @@ pub struct OrphanMeta {
     /// field existed.
     #[serde(default)]
     pub busy_excluded: bool,
+    /// True when the session's PTY child is the shell its agent was typed
+    /// into, so a reattach runs the shell's status watcher. False for
+    /// sidecars written before this field existed.
+    #[serde(default)]
+    pub agent_in_shell: bool,
+    /// The label of the shell such a session runs, which the leaf shows once
+    /// its agent has ended. `None` for every other session.
+    #[serde(default)]
+    pub shell_label: Option<String>,
 }
 
 fn meta_path(dirs: &Dirs, session_id: &str) -> PathBuf {
@@ -550,6 +559,8 @@ pub fn meta_from_record(
         claude_session_id,
         // Mirrored from the record, like the status.
         busy_excluded: false,
+        agent_in_shell: false,
+        shell_label: None,
     })
 }
 
@@ -572,6 +583,9 @@ pub struct RecordMirror {
     pub appearance: AppearanceOverrides,
     pub claude_session_id: Option<String>,
     pub busy_excluded: bool,
+    pub program_name: Option<String>,
+    pub agent_in_shell: bool,
+    pub shell_label: Option<String>,
 }
 
 impl RecordMirror {
@@ -589,6 +603,9 @@ impl RecordMirror {
             && meta.accent_color.is_none()
             && meta.claude_session_id == self.claude_session_id
             && meta.busy_excluded == self.busy_excluded
+            && meta.program_name == self.program_name
+            && meta.agent_in_shell == self.agent_in_shell
+            && meta.shell_label == self.shell_label
     }
 
     fn apply(&self, meta: &mut OrphanMeta) {
@@ -608,6 +625,9 @@ impl RecordMirror {
         meta.appearance = self.appearance.clone();
         meta.claude_session_id.clone_from(&self.claude_session_id);
         meta.busy_excluded = self.busy_excluded;
+        meta.program_name.clone_from(&self.program_name);
+        meta.agent_in_shell = self.agent_in_shell;
+        meta.shell_label.clone_from(&self.shell_label);
     }
 }
 
@@ -855,6 +875,8 @@ mod tests {
             tracer_exe_path: Some(r"C:\cache\rt-tracer-aaaaaaaaaaaaaaaa.exe".to_string()),
             claude_session_id: None,
             busy_excluded: false,
+            agent_in_shell: false,
+            shell_label: None,
         };
         let bytes = serde_json::to_vec(&original).expect("serialize");
         let decoded = load_meta_from_bytes(&bytes).expect("decode");
@@ -999,6 +1021,43 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dirs.config);
     }
 
+    /// A session whose agent runs inside its shell keeps that, the shell's
+    /// name and the program the leaf shows through its sidecar; a sidecar
+    /// written before the fields existed loads as an agent that is the child.
+    #[test]
+    fn agent_in_shell_round_trips_through_the_sidecar() {
+        let dirs = scratch_dirs("agent-in-shell-round-trip");
+        write_meta(&dirs, &s1_meta(None)).expect("write meta");
+        let mut mirror = mirror_for(None);
+        mirror.agent_in_shell = true;
+        mirror.shell_label = Some("pwsh".to_owned());
+        mirror.program_name = Some("pwsh".to_owned());
+        sync_record_fields(&dirs, "s1", &mirror).expect("sync the record");
+        let loaded = load_meta(&dirs, "s1").expect("load meta");
+        assert!(loaded.agent_in_shell, "the flag reached the sidecar");
+        assert_eq!(loaded.shell_label.as_deref(), Some("pwsh"));
+        assert_eq!(
+            loaded.program_name.as_deref(),
+            Some("pwsh"),
+            "the program the leaf shows follows the record"
+        );
+
+        let old = br#"{
+            "on_disk_version": 2,
+            "session_id": "old",
+            "pid": 9001,
+            "label": "legacy",
+            "kind": "single",
+            "mode": "interactive",
+            "members": [],
+            "started_at": "2024-01-01T00:00:00Z"
+        }"#;
+        let old_meta = load_meta_from_bytes(old).expect("parse old meta");
+        assert!(!old_meta.agent_in_shell);
+        assert_eq!(old_meta.shell_label, None);
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
     /// A mirror over the fields `meta_from_record` writes for `s1`, carrying
     /// the given conversation id.
     fn mirror_for(claude_session_id: Option<&str>) -> RecordMirror {
@@ -1015,6 +1074,9 @@ mod tests {
             appearance: AppearanceOverrides::default(),
             claude_session_id: claude_session_id.map(str::to_owned),
             busy_excluded: false,
+            program_name: Some("rt-tracer".to_owned()),
+            agent_in_shell: false,
+            shell_label: None,
         }
     }
 

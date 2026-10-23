@@ -123,6 +123,15 @@ fn wait_status(
     found.expect("the wait just found it")
 }
 
+/// Waits until fake-claude shows its prompt box in `pane`. A Claude session's
+/// PTY child is its shell, which the daemon types the agent into, so a cue
+/// typed before then reaches the shell.
+fn wait_claude_prompt(h: &mut Harness<'_>, pane: &str) {
+    h.wait_for_row(pane, "fake-claude's prompt box", SPAWN, |row| {
+        row.trim_start().starts_with('\u{276f}')
+    });
+}
+
 #[gpui::test]
 #[ignore = "e2e: run via .\\rt.ps1 native-e2e"]
 fn live_connects_and_reports_connected(cx: &mut TestAppContext) {
@@ -254,6 +263,7 @@ fn live_hook_status_reports_working_asking_and_idle(cx: &mut TestAppContext) {
     );
 
     // The spawn paints the idle box, which matches the seeded Idle.
+    wait_claude_prompt(&mut h, &pane);
     let settled = wait_status(&mut h, &client, 0, &id, SessionStatus::Idle);
     assert_eq!(settled.pending_input, None, "nothing is pending at spawn");
 
@@ -327,6 +337,7 @@ fn live_esc_mid_turn_drops_working_to_idle_from_the_screen(cx: &mut TestAppConte
 
     let session = wait_snapshot(&mut h, &client, "the claude session", |_| true);
     let id = session.id.clone();
+    wait_claude_prompt(&mut h, &pane);
     let settled = wait_status(&mut h, &client, 0, &id, SessionStatus::Idle);
     assert_eq!(settled.pending_input, None, "nothing is pending at spawn");
 
@@ -382,6 +393,7 @@ fn live_hook_status_reports_background_beside_idle(cx: &mut TestAppContext) {
 
     // The ready banner is briefly classified `Working`; cue only once the
     // spawn has settled.
+    wait_claude_prompt(&mut h, &pane);
     let settled = wait_status(&mut h, &client, 0, &id, SessionStatus::Idle);
     assert!(
         !settled.background,

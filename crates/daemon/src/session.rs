@@ -55,6 +55,11 @@ pub enum SessionEvent {
         session_id: String,
         reason: protocol::AttentionReason,
     },
+    /// The agent running inside the session's shell ended; see
+    /// [`SessionRecord::end_agent_in_shell`].
+    AgentExited {
+        session_id: String,
+    },
 }
 
 /// Atomic snapshot returned by `attach_lifecycle`'s task when a client requests
@@ -226,9 +231,55 @@ pub struct SessionRecord {
     /// that set a terminal status directly. Runtime-only: a reattached or
     /// rebuilt record starts with it false.
     pub background: bool,
+    /// True when the session's PTY child is the user's shell and its agent
+    /// was typed into it at spawn: the record stays an interactive agent
+    /// session while its status runs on the shell's watcher. Mirrored into
+    /// the sidecar so a reattach picks the same watcher.
+    pub agent_in_shell: bool,
+    /// The label of the shell an [`Self::agent_in_shell`] session runs, the
+    /// leaf's program once the agent has ended. `None` for every other
+    /// session. Mirrored into the sidecar.
+    pub shell_label: Option<String>,
+    /// True once the end of the agent's current run in its shell was
+    /// announced to the clients, so one run announces once; a `SessionStart`
+    /// hook clears it. Runtime-only.
+    pub agent_exit_announced: bool,
 }
 
 impl SessionRecord {
+    /// Whether the session's status runs on the shell's watcher and its
+    /// hooks end with the agent inside the shell: a plain shell, or an agent
+    /// typed into its shell.
+    pub fn shell_hosted(&self) -> bool {
+        self.mode == SessionMode::PlainShell || self.agent_in_shell
+    }
+
+    /// The agent inside this session's shell ended: the leaf names the shell
+    /// again. Answers whether the clients are to be told, which is once per
+    /// agent run and never for a session whose agent is not typed into its
+    /// shell.
+    pub fn end_agent_in_shell(&mut self) -> bool {
+        if !self.agent_in_shell || self.agent_exit_announced {
+            return false;
+        }
+        self.agent_exit_announced = true;
+        if let Some(shell) = &self.shell_label {
+            self.program_name = Some(shell.clone());
+        }
+        true
+    }
+
+    /// A new agent run started inside this session's shell (its
+    /// `SessionStart` hook): the leaf names the agent, and the run's end is
+    /// announced again.
+    pub fn start_agent_in_shell(&mut self) {
+        if !self.agent_in_shell {
+            return;
+        }
+        self.agent_exit_announced = false;
+        self.program_name = Some(self.agent.as_label().to_owned());
+    }
+
     pub fn snapshot(&self) -> SessionSnapshot {
         // Orphan = session still tracked but with no live stdio handle, and
         // not in a terminal state. After the child exits we keep the record
@@ -533,7 +584,19 @@ impl SessionRegistry {
             appearance: guard.appearance.clone(),
             claude_session_id: guard.claude_session_id.clone(),
             busy_excluded: guard.busy_excluded,
+            program_name: guard.program_name.clone(),
+            agent_in_shell: guard.agent_in_shell,
+            shell_label: guard.shell_label.clone(),
         }
+    }
+
+    /// Tell every client that the agent inside session `id`'s shell ended.
+    /// Sent after the update that recorded the end, so it follows that
+    /// update's `SessionUpdated`.
+    pub fn announce_agent_exited(&self, id: &str) {
+        let _ = self.events.send(SessionEvent::AgentExited {
+            session_id: id.to_owned(),
+        });
     }
 
     /// [`Self::update`], its broadcast carrying `origin`. Returns whether
@@ -965,6 +1028,9 @@ impl SessionRegistry {
             background: false,
             last_assistant_message: None,
             busy_excluded: meta.busy_excluded,
+            agent_in_shell: meta.agent_in_shell,
+            shell_label: meta.shell_label.clone(),
+            agent_exit_announced: false,
         };
         push_recent_action(&mut record, "reattached after daemon restart".to_string());
         self.insert(record);
@@ -1040,6 +1106,9 @@ impl SessionRegistry {
             background: false,
             last_assistant_message: None,
             busy_excluded: meta.busy_excluded,
+            agent_in_shell: meta.agent_in_shell,
+            shell_label: meta.shell_label.clone(),
+            agent_exit_announced: false,
         };
         push_recent_action(
             &mut record,
@@ -1092,6 +1161,9 @@ impl SessionRegistry {
             background: false,
             last_assistant_message: None,
             busy_excluded: meta.busy_excluded,
+            agent_in_shell: meta.agent_in_shell,
+            shell_label: meta.shell_label.clone(),
+            agent_exit_announced: false,
         };
         push_recent_action(
             &mut record,
@@ -1168,6 +1240,9 @@ mod tests {
             background: false,
             last_assistant_message: None,
             busy_excluded: false,
+            agent_in_shell: false,
+            shell_label: None,
+            agent_exit_announced: false,
         }
     }
 

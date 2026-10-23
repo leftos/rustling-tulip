@@ -3439,6 +3439,13 @@ pub enum DaemonMessage {
         resumed: u32,
         left_in_recover: u32,
     },
+    /// The agent of session `session_id`, which runs inside the session's
+    /// shell, ended and left the shell in the pane. Sent to every client once
+    /// per agent run: on the agent's `SessionEnd` hook, or once the shell's
+    /// prompt is back on screen when no hook said so.
+    AgentExited {
+        session_id: String,
+    },
     /// Retired with LAN pairing: it stays decodable, and the daemon never
     /// sends it.
     PairingStarted {
@@ -5946,6 +5953,21 @@ mod tests {
                 }
             ),
             "the counts arrive as sent"
+        );
+    }
+
+    #[test]
+    fn agent_exited_round_trips() {
+        let wire = r#"{"type":"agent_exited","session_id":"s1"}"#;
+        let parsed: DaemonMessage = serde_json::from_str(wire).expect("the message decodes");
+        assert_eq!(
+            serde_json::to_value(&parsed).expect("it serializes"),
+            serde_json::json!({"type": "agent_exited", "session_id": "s1"}),
+            "the wire shape is the snake_case tag and the session id"
+        );
+        assert!(
+            matches!(&parsed, DaemonMessage::AgentExited { session_id } if session_id == "s1"),
+            "the session id arrives as sent"
         );
     }
 

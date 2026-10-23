@@ -704,13 +704,16 @@ fn apply_screen_status(
 /// [`apply_watcher_status`] (an `Idle` stays as it is). Refused, like
 /// [`apply_screen_status`], unless the record still holds what `from` read;
 /// answers the record as written, or `None` when refused. It is the only
-/// screen write of `hook_driven`, and it never writes the hook stamp.
+/// screen write of `hook_driven`, and it never writes the hook stamp. An agent
+/// typed into its shell at spawn whose `SessionEnd` never came ends here, and
+/// its end is announced once the update is broadcast.
 fn hand_shell_back(
     registry: &Arc<SessionRegistry>,
     session_id: &str,
     from: StatusRead,
 ) -> Option<StatusRead> {
     let mut after = None;
+    let mut agent_exited = false;
     registry.update_if_changed(session_id, |rec| {
         if moved_since(rec, from) {
             return false;
@@ -719,7 +722,8 @@ fn hand_shell_back(
             rec.status,
             SessionStatus::Working | SessionStatus::AwaitingInput
         );
-        let changed = rec.hook_driven || rec.background || in_turn;
+        agent_exited = rec.end_agent_in_shell();
+        let changed = rec.hook_driven || rec.background || in_turn || agent_exited;
         rec.hook_driven = false;
         rec.background = false;
         if in_turn {
@@ -732,7 +736,28 @@ fn hand_shell_back(
         });
         changed
     });
+    if agent_exited {
+        registry.announce_agent_exited(session_id);
+    }
     after
+}
+
+/// Whether the agent typed into session `session_id`'s shell is up: its hooks
+/// drive the session, or its screen shows the agent with no shell prompt
+/// under it, as the shell's watcher reads it.
+pub fn agent_up(registry: &SessionRegistry, session_id: &str) -> bool {
+    let Some(arc) = registry.get(session_id) else {
+        return false;
+    };
+    let (hooks, screen) = {
+        let record = crate::sync::lock(&arc);
+        (record.hook_driven, record.screen.clone())
+    };
+    hooks
+        || screen.is_some_and(|screen| {
+            let screen = crate::sync::lock(&screen);
+            shows_claude(rules::read_claude(&screen)) && !rules::last_row_is_shell_prompt(&screen)
+        })
 }
 
 /// Spawn a background task that sets a plain shell's status.
@@ -1347,6 +1372,9 @@ mod hysteresis_tests {
             background: false,
             last_assistant_message: None,
             busy_excluded: false,
+            agent_in_shell: false,
+            shell_label: None,
+            agent_exit_announced: false,
         }
     }
 
@@ -2451,6 +2479,42 @@ mod hysteresis_tests {
         let guard = record.lock().expect("record lock");
         assert!(guard.hook_driven, "the leave write released the hooks");
         assert_eq!(guard.status, SessionStatus::Working);
+    }
+
+    /// The `AgentExited` events `events` holds now.
+    fn agent_exits(events: &mut broadcast::Receiver<crate::session::SessionEvent>) -> usize {
+        let mut count = 0;
+        while let Ok(event) = events.try_recv() {
+            if matches!(event, crate::session::SessionEvent::AgentExited { .. }) {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    #[test]
+    fn hand_shell_back_on_an_agent_in_shell_record_announces_once() {
+        let registry = SessionRegistry::new(scratch_dirs("hand-back-announce"));
+        let mut record = hook_record(SessionStatus::Working);
+        record.agent_in_shell = true;
+        record.shell_label = Some("pwsh".to_owned());
+        record.program_name = Some("claude".to_owned());
+        registry.insert(record);
+        let mut events = registry.subscribe();
+        let read = record_status(&registry, SESSION).expect("the session is registered");
+        assert!(hand_shell_back(&registry, SESSION, read).is_some());
+        assert_eq!(agent_exits(&mut events), 1, "the agent's end is announced");
+        {
+            let record = registry.get(SESSION).expect("session registered");
+            let guard = record.lock().expect("record lock");
+            assert_eq!(guard.program_name.as_deref(), Some("pwsh"));
+        }
+
+        // The agent runs again without a `SessionStart` (no hooks) and ends.
+        registry.update(SESSION, |rec| rec.hook_driven = true);
+        let read = record_status(&registry, SESSION).expect("the session is registered");
+        assert!(hand_shell_back(&registry, SESSION, read).is_some());
+        assert_eq!(agent_exits(&mut events), 0, "one run announces once");
     }
 
     #[tokio::test(start_paused = true)]

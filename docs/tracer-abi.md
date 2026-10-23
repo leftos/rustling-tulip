@@ -1,8 +1,6 @@
 # `rt-tracer` ABI — stability contract
 
-`rt-tracer.exe` is a per-session supervisor binary that owns the PTY master
-handle and the `claude` child process. The daemon talks to it over a named
-pipe using the protocol defined in `crates/tracer-protocol`.
+`rt-tracer.exe` is a per-session supervisor binary that owns the PTY master handle and the session's child process (the user's shell, with `claude` typed into it, or `claude` itself when the shell cannot host it). The daemon talks to it over a named pipe using the protocol defined in `crates/tracer-protocol`.
 
 This file documents what changes count as a "bump" and the rollout
 expectations for each. **Treat this as a public stability contract** — every

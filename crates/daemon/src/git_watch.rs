@@ -381,8 +381,8 @@ pub fn start(
                         &mut guard,
                     );
                 }
-                Ok(SessionEvent::Attention { .. }) => {
-                    // Attention events don't change the set of worktrees.
+                Ok(SessionEvent::Attention { .. } | SessionEvent::AgentExited { .. }) => {
+                    // Neither changes the set of worktrees.
                 }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
                     warn!(lagged = n, "git_watch: session event stream lagged");

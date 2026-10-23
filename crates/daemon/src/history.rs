@@ -892,14 +892,18 @@ fn folder_members(cwd: &str, add_dirs: &[String], repos: &[RepoEntry]) -> Vec<Se
         .collect()
 }
 
-/// The folder a history entry is about: the shell's last folder, else where
-/// the session started, else its first member's worktree.
+/// The folder a history entry is about: a plain shell's last folder, else
+/// where the session started, else its first member's worktree. An
+/// interactive session's agent keeps the folder it started in, wherever its
+/// shell later went.
 #[must_use]
 pub fn entry_folder(entry: &HistoryEntry) -> Option<&str> {
-    entry
+    let last = entry
         .current_cwd
         .as_deref()
-        .or(entry.primary_cwd.as_deref())
+        .filter(|_| entry.mode != SessionMode::Interactive);
+    last.or(entry.primary_cwd.as_deref())
+        .or(entry.current_cwd.as_deref())
         .or_else(|| entry.members.first().map(|m| m.worktree_path.as_str()))
         .filter(|folder| !folder.is_empty())
 }
@@ -1633,6 +1637,9 @@ pub(crate) mod test_support {
             background: false,
             last_assistant_message: None,
             busy_excluded: false,
+            agent_in_shell: false,
+            shell_label: None,
+            agent_exit_announced: false,
         }
     }
 
@@ -3335,7 +3342,9 @@ mod recovery_tests {
     }
 
     #[test]
-    fn shell_types_the_resume_command_in_the_last_folder() {
+    fn shell_types_the_resume_command_in_the_start_folder() {
+        // An interactive session's shell followed a `cd`; its conversation
+        // lives under the folder the session started in.
         let mut entry = folder_only(vec![member("", r"D:\yaat")]);
         entry.current_cwd = Some(r"D:\yaat\src".to_owned());
         entry.spawn_config = Some(workspace_config());
@@ -3348,7 +3357,7 @@ mod recovery_tests {
         assert_eq!(
             req.target,
             SpawnTarget::Standalone {
-                cwd: Some(r"D:\yaat\src".to_owned()),
+                cwd: Some(r"D:\yaat".to_owned()),
                 add_dirs: Vec::new(),
             }
         );
@@ -3444,6 +3453,22 @@ mod recovery_tests {
         entry.primary_cwd = Some(folder.to_owned());
         entry.started_at = Some(ended_at - TimeDelta::hours(1));
         entry
+    }
+
+    /// An interactive session's shell follows the user's `cd`; its agent's
+    /// conversation lives under the folder the session started in.
+    #[test]
+    fn an_interactive_entry_recovers_from_its_start_folder_after_a_cd() {
+        let mut entry = history_entry("s", SessionMode::Interactive, r"D:\start", Utc::now());
+        entry.current_cwd = Some(r"D:\elsewhere".to_owned());
+        assert_eq!(entry_folder(&entry), Some(r"D:\start"));
+        let mut shell = history_entry("t", SessionMode::PlainShell, r"D:\start", Utc::now());
+        shell.current_cwd = Some(r"D:\elsewhere".to_owned());
+        assert_eq!(
+            entry_folder(&shell),
+            Some(r"D:\elsewhere"),
+            "a plain shell recovers where it last was"
+        );
     }
 
     #[test]

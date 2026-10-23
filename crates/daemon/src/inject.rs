@@ -98,82 +98,143 @@ const VERIFY_TAIL_BYTES_FOR_LOG: usize = 200;
 /// task will keep writing into a closed channel — the writes are silently
 /// discarded by `PtyHandle::write_input`, so we just log and move on.
 pub fn run(session_id: String, pty: Arc<PtyHandle>, injector: PromptInjector) {
+    run_chain(session_id, pty, vec![injector], None);
+}
+
+/// Answers whether the agent a launch typed into its shell is up.
+pub type AgentUp = Box<dyn Fn() -> bool + Send + Sync>;
+
+/// How often [`wait_for_agent`] asks whether the agent is up.
+const AGENT_UP_POLL: Duration = Duration::from_millis(100);
+
+/// [`run`] for several injectors, one after another in one background task:
+/// each one's startup wait reads only the output printed after the one
+/// before it finished (a shell's prompt, then the agent's TUI it launched).
+/// With `agent_up`, every injector after the first waits for the agent to
+/// be up (see [`wait_for_agent`]); an agent not up within
+/// [`MIN_STARTUP_CAP`] drops the rest of the chain, so nothing meant for the
+/// agent is typed into its shell.
+pub fn run_chain(
+    session_id: String,
+    pty: Arc<PtyHandle>,
+    injectors: Vec<PromptInjector>,
+    agent_up: Option<AgentUp>,
+) {
     // Subscribe BEFORE spawning the runner task so the receiver is hooked
     // up synchronously with the caller's view of the PTY — otherwise a
     // fast-booting child could emit its banner before the spawned task
     // subscribes and we'd miss the startup output we want to track
     // quiescence on.
-    let output_rx = pty.output.subscribe();
+    let mut output_rx = Some(pty.output.subscribe());
     tokio::spawn(async move {
-        let mut output_rx = output_rx;
-        let steps = injector.steps;
-        let verify_marker = injector.verify_mode_marker;
-
-        debug!(
-            session_id = %session_id,
-            steps = steps.len(),
-            verify_marker = ?verify_marker.as_deref(),
-            "injector starting"
-        );
-
-        // Phase 1: startup wait — consume leading Delay as a quiescence-
-        // gated wait, not a literal sleep.
-        let mut cursor = 0;
-        if let Some(InjectorStep::Delay { ms }) = steps.first() {
-            let rule = StartupRule::of(injector.startup);
-            let provided_cap = Duration::from_millis(u64::from(*ms));
-            let cap = provided_cap.max(rule.min_cap);
-            let waited = wait_until_ready_or_timeout(&mut output_rx, cap, &rule).await;
-            info!(
-                session_id = %session_id,
-                startup = ?injector.startup,
-                provided_cap_ms = u64::from(*ms),
-                effective_cap_ms = u64::try_from(cap.as_millis()).unwrap_or(u64::MAX),
-                waited_ms = u64::try_from(waited.as_millis()).unwrap_or(u64::MAX),
-                "injector startup wait done"
-            );
-            cursor = 1;
+        for (index, injector) in injectors.into_iter().enumerate() {
+            if index > 0
+                && let Some(agent_up) = &agent_up
+                && !wait_for_agent(agent_up.as_ref(), MIN_STARTUP_CAP).await
+            {
+                warn!(
+                    session_id = %session_id,
+                    "the agent did not start; the initial prompt was not typed"
+                );
+                return;
+            }
+            let rx = output_rx.take().unwrap_or_else(|| pty.output.subscribe());
+            run_one(&session_id, &pty, rx, injector).await;
         }
-
-        // Locate the prompt boundary: the first `Text { newline: false }`
-        // step after the startup delay. `build_injector` always emits
-        // exactly one such step for the prompt body. Steps from `cursor`
-        // up to (but not including) `pre_input_end` are pre_input;
-        // `pre_input_end` onward is prompt + post_input.
-        let prompt_idx = steps[cursor..]
-            .iter()
-            .position(|s| matches!(s, InjectorStep::Text { newline: false, .. }))
-            .map(|p| p + cursor);
-        let pre_input_end = prompt_idx.unwrap_or(steps.len());
-
-        // Phase 2: pre_input
-        for (offset, step) in steps[cursor..pre_input_end].iter().enumerate() {
-            execute_step(&session_id, &pty, cursor + offset, step).await;
-        }
-
-        // Phase 3: verify the mode marker appeared, retry if not.
-        // Only meaningful when there's an actual prompt boundary AND a
-        // marker — verifying without a prompt boundary would re-send the
-        // entire script.
-        if let (Some(marker), Some(_)) = (verify_marker.as_deref(), prompt_idx) {
-            verify_and_retry(
-                &session_id,
-                &pty,
-                &mut output_rx,
-                marker,
-                &steps[cursor..pre_input_end],
-                cursor,
-            )
-            .await;
-        }
-
-        // Phase 4: prompt + post_input
-        for (offset, step) in steps[pre_input_end..].iter().enumerate() {
-            execute_step(&session_id, &pty, pre_input_end + offset, step).await;
-        }
-
-        debug!(session_id = %session_id, "injector finished");
     });
+}
+
+/// Wait until `agent_up` answers true, asking every [`AGENT_UP_POLL`], for at
+/// most `cap`; answers whether it did.
+async fn wait_for_agent(agent_up: &(dyn Fn() -> bool + Send + Sync), cap: Duration) -> bool {
+    let deadline = Instant::now() + cap;
+    loop {
+        if agent_up() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        sleep(AGENT_UP_POLL).await;
+    }
+}
+
+/// Walk one injector's steps against `pty`, reading its startup from
+/// `output_rx`.
+async fn run_one(
+    session_id: &str,
+    pty: &Arc<PtyHandle>,
+    output_rx: broadcast::Receiver<Vec<u8>>,
+    injector: PromptInjector,
+) {
+    let mut output_rx = output_rx;
+    let steps = injector.steps;
+    let verify_marker = injector.verify_mode_marker;
+
+    debug!(
+        session_id = %session_id,
+        steps = steps.len(),
+        verify_marker = ?verify_marker.as_deref(),
+        "injector starting"
+    );
+
+    // Phase 1: startup wait — consume leading Delay as a quiescence-
+    // gated wait, not a literal sleep.
+    let mut cursor = 0;
+    if let Some(InjectorStep::Delay { ms }) = steps.first() {
+        let rule = StartupRule::of(injector.startup);
+        let provided_cap = Duration::from_millis(u64::from(*ms));
+        let cap = provided_cap.max(rule.min_cap);
+        let waited = wait_until_ready_or_timeout(&mut output_rx, cap, &rule).await;
+        info!(
+            session_id = %session_id,
+            startup = ?injector.startup,
+            provided_cap_ms = u64::from(*ms),
+            effective_cap_ms = u64::try_from(cap.as_millis()).unwrap_or(u64::MAX),
+            waited_ms = u64::try_from(waited.as_millis()).unwrap_or(u64::MAX),
+            "injector startup wait done"
+        );
+        cursor = 1;
+    }
+
+    // Locate the prompt boundary: the first `Text { newline: false }`
+    // step after the startup delay. `build_injector` always emits
+    // exactly one such step for the prompt body. Steps from `cursor`
+    // up to (but not including) `pre_input_end` are pre_input;
+    // `pre_input_end` onward is prompt + post_input.
+    let prompt_idx = steps[cursor..]
+        .iter()
+        .position(|s| matches!(s, InjectorStep::Text { newline: false, .. }))
+        .map(|p| p + cursor);
+    let pre_input_end = prompt_idx.unwrap_or(steps.len());
+
+    // Phase 2: pre_input
+    for (offset, step) in steps[cursor..pre_input_end].iter().enumerate() {
+        execute_step(session_id, pty, cursor + offset, step).await;
+    }
+
+    // Phase 3: verify the mode marker appeared, retry if not.
+    // Only meaningful when there's an actual prompt boundary AND a
+    // marker — verifying without a prompt boundary would re-send the
+    // entire script.
+    if let (Some(marker), Some(_)) = (verify_marker.as_deref(), prompt_idx) {
+        verify_and_retry(
+            session_id,
+            pty,
+            &mut output_rx,
+            marker,
+            &steps[cursor..pre_input_end],
+            cursor,
+        )
+        .await;
+    }
+
+    // Phase 4: prompt + post_input
+    for (offset, step) in steps[pre_input_end..].iter().enumerate() {
+        execute_step(session_id, pty, pre_input_end + offset, step).await;
+    }
+
+    debug!(session_id = %session_id, "injector finished");
 }
 
 async fn execute_step(session_id: &str, pty: &Arc<PtyHandle>, idx: usize, step: &InjectorStep) {
@@ -489,6 +550,35 @@ async fn wait_until_ready_or_timeout(
 mod tests {
     use super::*;
     use tokio::sync::broadcast;
+
+    #[tokio::test(start_paused = true)]
+    async fn the_initial_prompt_waits_for_the_agent_to_start() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let up = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&up);
+        tokio::spawn(async move {
+            sleep(Duration::from_secs(5)).await;
+            flag.store(true, Ordering::SeqCst);
+        });
+        let started = Instant::now();
+        let agent_up = move || up.load(Ordering::SeqCst);
+        assert!(wait_for_agent(&agent_up, MIN_STARTUP_CAP).await);
+        let waited = started.elapsed();
+        assert!(
+            waited >= Duration::from_secs(5) && waited < Duration::from_secs(6),
+            "the prompt is released once the agent is up, not before: {waited:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_agent_start_drops_the_initial_prompt() {
+        let started = Instant::now();
+        assert!(
+            !wait_for_agent(&|| false, MIN_STARTUP_CAP).await,
+            "an agent that never starts never gets its prompt"
+        );
+        assert!(started.elapsed() >= MIN_STARTUP_CAP);
+    }
 
     #[tokio::test(start_paused = true)]
     async fn sufficient_output_then_quiescence_exits_early() {
