@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mobile session screen</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap">
+<style>
+:root {
+  --ground: #111013; --sunken: #0b0a0d; --surface: #161519; --raised: #1b1a1f; --chip: #232129; --hover: #2c2a33;
+  --term: #0c0b0e; --line: #2a2830; --line-strong: #3a3742;
+  --text: #ede9e4; --subtle: #8c8794; --faint: #6e6a77;
+  --accent: #f07a62; --on-accent: #1c100d;
+  --working: #6ca6ff; --asking: #f6bc4e; --on-asking: #2a1b00; --waiting: #4fc89d; --danger: #f26d6d;
+  --ansi-green: #3fb96a; --ansi-red: #ef5c5c; --ansi-blue: #5b9bff; --ansi-dim: #656872;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: #08070a; color: var(--text); font: 14px/1.4 Geist, system-ui, sans-serif; padding: 24px 16px 48px; }
+h1 { font-size: 18px; font-weight: 600; margin: 0 0 4px; }
+.lede { color: var(--subtle); margin: 0 0 20px; max-width: 70ch; }
+.lanes { display: flex; flex-wrap: wrap; gap: 28px; align-items: flex-start; }
+.lane { width: 390px; }
+.lane h2 { font-size: 15px; font-weight: 600; margin: 0 0 2px; }
+.lane .how { color: var(--subtle); font-size: 13px; margin: 0 0 4px; min-height: 54px; }
+.lane .worst { color: var(--faint); font-size: 12.5px; margin: 0 0 12px; min-height: 52px; }
+.lane .worst b { color: var(--asking); font-weight: 500; }
+.pick { margin-top: 12px; width: 100%; padding: 9px; border-radius: 8px; border: 1px solid var(--line-strong); background: var(--raised); color: var(--text); font: inherit; cursor: pointer; }
+.pick:hover { background: var(--hover); }
+
+/* phone */
+.phone { width: 390px; height: 844px; border-radius: 46px; border: 10px solid #1d1c21; background: var(--ground); position: relative; overflow: hidden; display: flex; flex-direction: column; box-shadow: 0 20px 60px #000a; }
+.sb { height: 47px; flex: none; display: flex; justify-content: space-between; align-items: flex-end; padding: 0 28px 6px; font-size: 14px; font-weight: 600; }
+.island { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); width: 112px; height: 32px; border-radius: 20px; background: #000; }
+.hdr { flex: none; display: flex; align-items: center; gap: 8px; padding: 6px 12px 10px; border-bottom: 1px solid var(--line); }
+.hdr .back { color: var(--accent); font-size: 22px; line-height: 1; width: 24px; }
+.hdr .ttl { flex: 1; min-width: 0; }
+.hdr .name { font-weight: 600; font-size: 15px; }
+.hdr .sub { color: var(--subtle); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pill { font-size: 11.5px; font-weight: 600; padding: 3px 8px; border-radius: 999px; background: var(--asking); color: var(--on-asking); }
+.views { flex: none; display: flex; gap: 4px; padding: 6px 12px; }
+.views span { font-size: 12px; padding: 3px 10px; border-radius: 999px; color: var(--subtle); background: var(--surface); }
+.views span.on { background: var(--chip); color: var(--text); }
+
+/* chat */
+.chat { flex: 1 1 auto; min-height: 0; overflow: hidden; padding: 6px 12px 8px; display: flex; flex-direction: column; justify-content: flex-end; gap: 8px; }
+.me { align-self: flex-end; max-width: 82%; background: var(--chip); border-radius: 14px 14px 4px 14px; padding: 8px 11px; }
+.bot { max-width: 94%; color: var(--text); }
+.bot code, .tool code { font: 12px "Geist Mono", ui-monospace, monospace; color: var(--text); background: var(--surface); padding: 0 4px; border-radius: 4px; }
+.tool { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--subtle); padding: 5px 9px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; }
+.tool .ok { color: var(--waiting); }
+.tool .n { margin-left: auto; color: var(--faint); font: 11.5px "Geist Mono", monospace; }
+
+/* live terminal from the status line down */
+.seam { flex: none; display: flex; align-items: center; gap: 8px; padding: 0 12px; color: var(--faint); font-size: 11px; }
+.seam::before, .seam::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+.term { flex: none; background: var(--term); font: 11.5px/1.36 "Geist Mono", ui-monospace, monospace; padding: 8px 10px 8px; white-space: pre; color: #e5e6e8; border-top: 1px solid var(--line); }
+.g { color: var(--ansi-green); } .r { color: var(--ansi-red); } .b { color: var(--ansi-blue); } .d { color: var(--ansi-dim); } .y { color: var(--asking); } .w { color: #fff; font-weight: 500; }
+
+/* dock and composer */
+.dock { flex: none; background: var(--raised); border-top: 1px solid var(--line); padding: 8px 10px; }
+.comp { flex: none; display: flex; align-items: center; gap: 6px; padding: 8px 10px 6px; background: var(--raised); }
+.comp .field { flex: 1; height: 38px; border-radius: 19px; background: var(--surface); border: 1px solid var(--line); color: var(--faint); display: flex; align-items: center; padding: 0 14px; font-size: 14px; }
+.rbtn { width: 38px; height: 38px; flex: none; border-radius: 50%; background: var(--chip); color: var(--text); display: grid; place-items: center; font-size: 13px; font-weight: 600; }
+.rbtn.on { background: var(--accent); color: var(--on-accent); }
+.rbtn.send { background: var(--accent); color: var(--on-accent); font-size: 17px; }
+.home { flex: none; height: 26px; background: var(--raised); display: grid; place-items: center; }
+.home::after { content: ""; width: 134px; height: 5px; border-radius: 3px; background: #fff8; }
+
+.keys { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; }
+.k { height: 40px; border-radius: 8px; background: var(--chip); display: grid; place-items: center; font-size: 13px; font-weight: 500; color: var(--text); }
+.k.mod { color: var(--subtle); font-size: 12px; }
+.k.enter { background: #f07a6224; color: var(--accent); }
+.k.wide3 { grid-column: span 3; }
+.chips { display: flex; gap: 6px; margin-top: 8px; }
+.chips span { font-size: 11.5px; padding: 4px 10px; border-radius: 999px; background: var(--surface); border: 1px solid var(--line); color: var(--subtle); }
+.strip { display: flex; gap: 5px; }
+.strip .k { flex: 1; height: 36px; font-size: 12.5px; }
+.qrow { display: flex; gap: 6px; overflow: hidden; margin-bottom: 7px; }
+.qrow span { flex: none; font-size: 12.5px; padding: 6px 12px; border-radius: 999px; background: var(--surface); border: 1px solid var(--line-strong); white-space: nowrap; }
+.ans { display: flex; flex-direction: column; gap: 6px; }
+.ans .a { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 10px; background: var(--chip); font-size: 14px; }
+.ans .a .num { width: 22px; height: 22px; border-radius: 6px; background: var(--surface); display: grid; place-items: center; font: 12px "Geist Mono", monospace; color: var(--subtle); flex: none; }
+.ans .a.primary { background: var(--accent); color: var(--on-accent); }
+.ans .a.primary .num { background: #0002; color: var(--on-accent); }
+.ans .a .hint { margin-left: auto; font-size: 11.5px; color: var(--faint); }
+.ans .a.primary .hint { color: #1c100d99; }
+.ans .q { font-size: 12.5px; color: var(--subtle); margin: 0 2px 2px; }
+.mini { display: flex; gap: 6px; margin-top: 6px; }
+.mini .k { flex: 1; height: 34px; font-size: 12px; }
+.note { margin-top: 28px; color: var(--faint); font-size: 12.5px; max-width: 80ch; }
+</style>
+</head>
+<body>
+<h1>Session screen: where the keys and quick replies live</h1>
+<p class="lede">Settled already (RT-143, owner ruling): chat down to the agent's status line, the live terminal from the status line down, collie's key layout, collie's quick-response flyouts. Open here: how those two docks sit on the screen. Every lane shows the same moment: Claude asks to edit <code>lib.rs</code>, the phone has taken the PTY's size (last input wins), so Claude's dialog is drawn at the phone's width. Content is a placeholder.</p>
+
+<div class="lanes">
+
+<!-- A -->
+<section class="lane" id="A">
+  <h2>A. Collie as is: docks behind composer buttons</h2>
+  <p class="how">The composer carries <b>Quick</b> and <b>Keys</b> buttons; each opens its dock above the composer and below the terminal, one at a time. Shown with Keys open. At rest only the composer shows.</p>
+  <p class="worst"><b>Worst case:</b> every menu answer is two taps (open Keys, press), and the open tray (about 140px) pushes the chat up and off screen while you drive a long menu.</p>
+  <div class="phone">
+    <div class="island"></div>
+    <div class="sb"><span>9:41</span><span>5G ▮</span></div>
+    <div class="hdr"><span class="back">‹</span><div class="ttl"><div class="name">rustling-tulip</div><div class="sub">main · implementer RT-352</div></div><span class="pill">Needs you</span></div>
+    <div class="chat">
+      <div class="me">Add the reset on a target switch</div>
+      <div class="bot">I'll add <code>reset_for_target</code> and call it from the State arm before the connection is replaced.</div>
+      <div class="tool"><span class="ok">✓</span> Edit <code>sidebar.rs</code><span class="n">+38 −2</span></div>
+      <div class="tool"><span class="ok">✓</span> Bash <code>nextest … clear_</code><span class="n">2 passed</span></div>
+    </div>
+    <div class="seam">live terminal</div>
+<div class="term"><span class="d">╭──────────────────────────────────────────────╮</span>
+<span class="d">│</span> <span class="w">Edit file</span> apps/native/src/lib.rs              <span class="d">│</span>
+<span class="d">│</span> <span class="g">+    self.reset_for_target(window, cx);</span>        <span class="d">│</span>
+<span class="d">│</span> Do you want to make this edit to lib.rs?     <span class="d">│</span>
+<span class="d">│</span> <span class="b">❯ 1. Yes</span>                                     <span class="d">│</span>
+<span class="d">│</span>   2. Yes, allow all edits this session        <span class="d">│</span>
+<span class="d">│</span>   3. No, tell Claude what to do (esc)         <span class="d">│</span>
+<span class="d">╰──────────────────────────────────────────────╯</span></div>
+    <div class="dock">
+      <div class="keys">
+        <div class="k mod">Esc</div><div class="k">⇥</div><div class="k mod">⇧</div><div class="k mod">Ctrl</div><div class="k mod">Alt</div><div class="k">↑</div><div class="k mod">^C</div>
+        <div class="k enter">⏎</div><div class="k wide3">␣</div><div class="k">←</div><div class="k">↓</div><div class="k">→</div>
+      </div>
+      <div class="chips"><span>123</span><span>Presets</span><span>F keys</span></div>
+    </div>
+    <div class="comp"><div class="rbtn">Q</div><div class="rbtn on">⌨</div><div class="field">Message Claude…</div><div class="rbtn">🎙</div></div>
+    <div class="home"></div>
+  </div>
+  <button class="pick" data-lane="A">Pick A</button>
+</section>
+
+<!-- B -->
+<section class="lane" id="B">
+  <h2>B. Always-on strip</h2>
+  <p class="how">One slim row of the keys a menu needs (Esc, ⇥, ↑, ↓, ⏎, ^C) is always above the composer, and the quick replies sit as a scrolling chip row above it. The full tray (modifiers, digits, F keys) still opens from the ⌨ button.</p>
+  <p class="worst"><b>Worst case:</b> about 90px of the screen is spent on keys and chips at all times, even while you only read; ⏎ sits in a row of small keys, so a miss on an arrow can confirm a prompt.</p>
+  <div class="phone">
+    <div class="island"></div>
+    <div class="sb"><span>9:41</span><span>5G ▮</span></div>
+    <div class="hdr"><span class="back">‹</span><div class="ttl"><div class="name">rustling-tulip</div><div class="sub">main · implementer RT-352</div></div><span class="pill">Needs you</span></div>
+    <div class="chat">
+      <div class="me">Add the reset on a target switch</div>
+      <div class="bot">I'll add <code>reset_for_target</code> and call it from the State arm before the connection is replaced.</div>
+      <div class="tool"><span class="ok">✓</span> Edit <code>sidebar.rs</code><span class="n">+38 −2</span></div>
+      <div class="tool"><span class="ok">✓</span> Bash <code>nextest … clear_</code><span class="n">2 passed</span></div>
+    </div>
+    <div class="seam">live terminal</div>
+<div class="term"><span class="d">╭──────────────────────────────────────────────╮</span>
+<span class="d">│</span> <span class="w">Edit file</span> apps/native/src/lib.rs              <span class="d">│</span>
+<span class="d">│</span> <span class="g">+    self.reset_for_target(window, cx);</span>        <span class="d">│</span>
+<span class="d">│</span> Do you want to make this edit to lib.rs?     <span class="d">│</span>
+<span class="d">│</span> <span class="b">❯ 1. Yes</span>                                     <span class="d">│</span>
+<span class="d">│</span>   2. Yes, allow all edits this session        <span class="d">│</span>
+<span class="d">│</span>   3. No, tell Claude what to do (esc)         <span class="d">│</span>
+<span class="d">╰──────────────────────────────────────────────╯</span></div>
+    <div class="dock">
+      <div class="qrow"><span>yes</span><span>no</span><span>continue</span><span>commit and push</span><span>retry</span><span>skip</span></div>
+      <div class="strip"><div class="k mod">Esc</div><div class="k">⇥</div><div class="k">↑</div><div class="k">↓</div><div class="k enter">⏎</div><div class="k mod">^C</div></div>
+    </div>
+    <div class="comp"><div class="rbtn">⌨</div><div class="field">Message Claude…</div><div class="rbtn">🎙</div></div>
+    <div class="home"></div>
+  </div>
+  <button class="pick" data-lane="B">Pick B</button>
+</section>
+
+<!-- C -->
+<section class="lane" id="C">
+  <h2>C. The dock follows the prompt</h2>
+  <p class="how">While a hook reports a pending prompt, the dock shows its options as big buttons; a tap types the option's number (never its label). ↑ ↓ Esc stay under them for anything else. With no prompt pending, the dock falls back to A (Quick and Keys behind buttons).</p>
+  <p class="worst"><b>Worst case:</b> a menu no hook reports (a TUI inside a plain shell, a prompt from a tool Claude runs) gets no buttons and falls back to the keys; if the hook's options and the drawn menu ever disagree, a tap sends the wrong number.</p>
+  <div class="phone">
+    <div class="island"></div>
+    <div class="sb"><span>9:41</span><span>5G ▮</span></div>
+    <div class="hdr"><span class="back">‹</span><div class="ttl"><div class="name">rustling-tulip</div><div class="sub">main · implementer RT-352</div></div><span class="pill">Needs you</span></div>
+    <div class="chat">
+      <div class="me">Add the reset on a target switch</div>
+      <div class="bot">I'll add <code>reset_for_target</code> and call it from the State arm before the connection is replaced.</div>
+      <div class="tool"><span class="ok">✓</span> Edit <code>sidebar.rs</code><span class="n">+38 −2</span></div>
+    </div>
+    <div class="seam">live terminal</div>
+<div class="term"><span class="d">╭──────────────────────────────────────────────╮</span>
+<span class="d">│</span> <span class="w">Edit file</span> apps/native/src/lib.rs              <span class="d">│</span>
+<span class="d">│</span> <span class="g">+    self.reset_for_target(window, cx);</span>        <span class="d">│</span>
+<span class="d">│</span> Do you want to make this edit to lib.rs?     <span class="d">│</span>
+<span class="d">│</span> <span class="b">❯ 1. Yes</span>                                     <span class="d">│</span>
+<span class="d">│</span>   2. Yes, allow all edits this session        <span class="d">│</span>
+<span class="d">│</span>   3. No, tell Claude what to do (esc)         <span class="d">│</span>
+<span class="d">╰──────────────────────────────────────────────╯</span></div>
+    <div class="dock">
+      <div class="ans">
+        <div class="a primary"><span class="num">1</span>Yes</div>
+        <div class="a"><span class="num">2</span>Yes, all edits this session<span class="hint">⇧⇥</span></div>
+        <div class="a"><span class="num">3</span>No, and tell Claude…<span class="hint">esc</span></div>
+      </div>
+      <div class="mini"><div class="k mod">Esc</div><div class="k">↑</div><div class="k">↓</div><div class="k mod">⌨ Keys</div></div>
+    </div>
+    <div class="comp"><div class="rbtn">Q</div><div class="field">Message Claude…</div><div class="rbtn">🎙</div></div>
+    <div class="home"></div>
+  </div>
+  <button class="pick" data-lane="C">Pick C</button>
+</section>
+
+</div>
+
+<p class="note">Annotate anything (spacing, sizes, what the chat shows, what the seam looks like); the lanes differ only in the dock between the terminal and the composer. Next mocks after this one: the chat's look (tool rows, collapsed runs), the quick-reply flyout's contents, and the header's status and view switch.</p>
+
+<script>
+for (const b of document.querySelectorAll(".pick")) {
+  b.addEventListener("click", () => {
+    const lane = b.dataset.lane;
+    const title = document.querySelector(`#${lane} h2`).textContent;
+    const sent = window.herdr && window.herdr.send ? window.herdr.send(`Picked ${title}`, { lane }) : false;
+    b.textContent = sent ? `Picked ${lane} — press Send to agent` : `Picked ${lane} (tell Claude in the terminal)`;
+  });
+}
+</script>
+</body>
+</html>
