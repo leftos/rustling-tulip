@@ -99,6 +99,8 @@ A1 is RT-350, A2a RT-351, A2b RT-352, B RT-353, C RT-354; the orchestrator decis
 - Tailscale seam: `PeerSource` trait object with a system impl that runs `tailnet::Cli::locate().status()` on a one-shot `std::thread` + current-thread tokio runtime (needs a reactor; see OPEN DECISION 6).
 
 #### P6.3 part C: the picker view
+
+The typed-host entry has a Port field beside the name, prefilled with 8787; a saved host keeps the port it was added with, and a listed peer dials 8787 unless a saved host of that name records another (RT-152 decision, since the Remote access page lets a host change its port). Part B's saved-host model stores and round-trips that port.
 - Files (6): apps/native/src/connection_picker_view.rs (new), apps/native/src/lib.rs (field + focus handle + layer in the chain + key routing + `footer_bar` Connections button at :3234 + keep the layer above the first-connect `overlay` at :3200, + `overlay_open` :1222), apps/native/tests/ui/ui_connections.rs (new), apps/native/tests/ui/main.rs (`mod ui_connections;`), apps/native/tests/support/mod.rs (peer-source recorder, switch accessor), tools/test-map.json.
 
   Add apps/native/examples/shot.rs only if a `connections` shot view is wanted (shot.rs:261 builds RootDeps; avoid by using the setter approach).
