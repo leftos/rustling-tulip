@@ -585,6 +585,7 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         | ClientMessage::RetryWorktreeCleanup { .. }
         | ClientMessage::LoadScrollback { .. }) => sessions::handle(hub, m, ctx).await?,
         m @ (ClientMessage::OpenDiffTab { .. }
+        | ClientMessage::OpenViewerTab { .. }
         | ClientMessage::ListTabs
         | ClientMessage::CreateTab { .. }
         | ClientMessage::CloseTab { .. }

@@ -1,4 +1,4 @@
-//! Tabs and pane layouts: the tab and layout messages, diff tabs, and keeping layouts in step with sessions.
+//! Tabs and pane layouts: the tab and layout messages, diff and viewer tabs, and keeping layouts in step with sessions.
 use super::connection::ConnCtx;
 use super::git::repo_path_or_err;
 use super::{Hub, StateEvent, TabEvent};
@@ -49,6 +49,26 @@ pub(super) fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow
                 Err(err) => {
                     let _ = out_tx.send(DaemonMessage::Error {
                         message: format!("open diff tab failed: {err:#}"),
+                        request_id: Some(id),
+                    });
+                }
+            }
+        }
+        ClientMessage::OpenViewerTab { id, path } => {
+            let outcome = open_viewer_tab(hub, client_id, &path);
+            match outcome {
+                Ok(outcome) => {
+                    if let Some(new_tab) = outcome.created {
+                        hub.emit_tab(client_id, TabEvent::Updated(new_tab));
+                    }
+                    let _ = out_tx.send(DaemonMessage::ViewerTabOpened {
+                        id,
+                        tab_id: outcome.tab_id,
+                    });
+                }
+                Err(err) => {
+                    let _ = out_tx.send(DaemonMessage::Error {
+                        message: format!("open viewer tab failed: {err:#}"),
                         request_id: Some(id),
                     });
                 }
@@ -392,10 +412,10 @@ fn moved_event(tab: crate::tabs::MovedTab) -> TabEvent {
     }
 }
 
-struct OpenDiffOutcome {
+struct OpenTabOutcome {
     tab_id: String,
     /// `Some` when a new tab was created (caller should broadcast
-    /// `TabUpdated`); `None` when an existing diff tab matched and we just
+    /// `TabUpdated`); `None` when an existing tab matched and we just
     /// focused it.
     created: Option<TabEntry>,
 }
@@ -409,11 +429,11 @@ fn open_diff_tab(
     path: &str,
     against: Option<&str>,
     worktree_path: Option<&str>,
-) -> anyhow::Result<OpenDiffOutcome> {
+) -> anyhow::Result<OpenTabOutcome> {
     repo_path_or_err(hub, repo_id)?;
     let against_owned = against.map(str::to_string);
     let worktree_path_owned = worktree_path.map(str::to_string);
-    let outcome: anyhow::Result<OpenDiffOutcome> = hub.state.mutate_client_layout(client_id, |tabs| {
+    let outcome: anyhow::Result<OpenTabOutcome> = hub.state.mutate_client_layout(client_id, |tabs| {
         if let Some(existing) = tabs.iter().find(|t| {
             matches!(
                 &t.content,
@@ -425,7 +445,7 @@ fn open_diff_tab(
                 } if r == repo_id && p == path && a.as_deref() == against && w.as_deref() == worktree_path
             )
         }) {
-            return Ok(OpenDiffOutcome {
+            return Ok(OpenTabOutcome {
                 tab_id: existing.id.clone(),
                 created: None,
             });
@@ -444,12 +464,57 @@ fn open_diff_tab(
         };
         let id = new_tab.id.clone();
         tabs.push(new_tab.clone());
-        Ok(OpenDiffOutcome {
+        Ok(OpenTabOutcome {
             tab_id: id,
             created: Some(new_tab),
         })
     })?;
     outcome
+}
+
+/// Find or create a viewer tab keyed on its path. Returns the tab id either
+/// way so the client can activate it.
+fn open_viewer_tab(hub: &Hub, client_id: &str, path: &str) -> anyhow::Result<OpenTabOutcome> {
+    anyhow::ensure!(!path.trim().is_empty(), "the path is empty");
+    let outcome: anyhow::Result<OpenTabOutcome> =
+        hub.state.mutate_client_layout(client_id, |tabs| {
+            if let Some(existing) = tabs
+                .iter()
+                .find(|t| matches!(&t.content, TabContent::Viewer { path: p } if p == path))
+            {
+                return Ok(OpenTabOutcome {
+                    tab_id: existing.id.clone(),
+                    created: None,
+                });
+            }
+            let new_tab = TabEntry {
+                id: uuid::Uuid::new_v4().to_string(),
+                name: viewer_tab_name(path),
+                content: TabContent::Viewer {
+                    path: path.to_string(),
+                },
+                created_at: Utc::now(),
+                picked_layout: None,
+            };
+            let id = new_tab.id.clone();
+            tabs.push(new_tab.clone());
+            Ok(OpenTabOutcome {
+                tab_id: id,
+                created: Some(new_tab),
+            })
+        })?;
+    outcome
+}
+
+/// A viewer tab is named after the file it shows; a path ending in a
+/// separator keeps the whole path as its name.
+fn viewer_tab_name(path: &str) -> String {
+    let basename = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    if basename.is_empty() {
+        path.to_string()
+    } else {
+        basename.to_string()
+    }
 }
 
 fn diff_tab_name(path: &str, against: Option<&str>) -> String {
@@ -751,6 +816,89 @@ mod tests {
             ),
             "{msg:?}"
         );
+    }
+
+    fn open_viewer(id: &str, path: &str) -> ClientMessage {
+        ClientMessage::OpenViewerTab {
+            id: id.to_string(),
+            path: path.to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn opening_the_same_viewer_path_twice_focuses_one_tab() {
+        let (hub, _scratch) = test_hub("open-viewer-twice");
+        let mut events = hub.tab_events.subscribe();
+
+        let first = dispatch_one(&hub, open_viewer("v1", "C:\\notes\\a.md")).await;
+        let (id, tab_id) = match first {
+            DaemonMessage::ViewerTabOpened { id, tab_id } => (id, tab_id),
+            other => unreachable!("the first open answers with its tab id: {other:?}"),
+        };
+        assert_eq!(id, "v1");
+        assert_eq!(
+            take_tab_events(&mut events).len(),
+            1,
+            "the created tab is broadcast once"
+        );
+
+        let second = dispatch_one(&hub, open_viewer("v2", "C:\\notes\\a.md")).await;
+        let (id, focused) = match second {
+            DaemonMessage::ViewerTabOpened { id, tab_id } => (id, tab_id),
+            other => unreachable!("the second open answers with its tab id: {other:?}"),
+        };
+        assert_eq!(id, "v2");
+        assert_eq!(focused, tab_id, "the same path focuses the existing tab");
+        assert!(
+            take_tab_events(&mut events).is_empty(),
+            "focusing broadcasts nothing"
+        );
+
+        let layout = hub.state.client_layout("c1");
+        assert_eq!(layout.len(), 1, "one tab for one path: {layout:?}");
+        assert!(
+            matches!(&layout[0].content, TabContent::Viewer { path } if path == "C:\\notes\\a.md"),
+            "{layout:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_empty_viewer_path_is_refused() {
+        let (hub, _scratch) = test_hub("open-viewer-empty");
+        let msg = dispatch_one(&hub, open_viewer("v1", "  ")).await;
+        assert!(
+            matches!(
+                &msg,
+                DaemonMessage::Error { message, request_id: Some(id) }
+                    if id == "v1" && message == "open viewer tab failed: the path is empty"
+            ),
+            "{msg:?}"
+        );
+        assert!(
+            hub.state.client_layout("c1").is_empty(),
+            "a refused path stores no tab"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_viewer_tab_is_named_after_the_file() {
+        let (hub, _scratch) = test_hub("open-viewer-name");
+        for (request, path, name) in [
+            ("v1", "C:\\notes\\a.md", "a.md"),
+            ("v2", "/home/u/b.txt", "b.txt"),
+        ] {
+            let msg = dispatch_one(&hub, open_viewer(request, path)).await;
+            let tab_id = match msg {
+                DaemonMessage::ViewerTabOpened { tab_id, .. } => tab_id,
+                other => unreachable!("{path} opens a viewer tab: {other:?}"),
+            };
+            let layout = hub.state.client_layout("c1");
+            let tab = layout
+                .iter()
+                .find(|t| t.id == tab_id)
+                .expect("the answered tab is in the layout");
+            assert_eq!(tab.name, name, "{path}");
+        }
     }
 
     /// A cross-tab move extracts from the source before it discovers the

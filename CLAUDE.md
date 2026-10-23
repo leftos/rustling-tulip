@@ -144,7 +144,7 @@ Files the native client fetches from a remote host live in a fourth machine-loca
 
 **Single source of truth for the wire protocol.** All daemon/client messages live in `crates/protocol/src/lib.rs` as tagged enums (`#[serde(tag = "type", rename_all = "snake_case")]`).
 
-When adding a message, update both directions (`ClientMessage` + `DaemonMessage` if it's a request/response) and the matching handler arm in the domain module's `handle` under `crates/daemon/src/server/` plus its variant in `dispatch`'s or-pattern in `crates/daemon/src/server.rs` and the native client's handling (`apps/native/src/net.rs`, `on_daemon_message`). Changes stay additive where they can (see "When to bump" below).
+When adding a message, update both directions (`ClientMessage` + `DaemonMessage` if it's a request/response) and the matching handler arm in the domain module's `handle` under `crates/daemon/src/server/` plus its variant in `dispatch`'s or-pattern in `crates/daemon/src/server.rs` and the native client's handling (`RootView`'s message folds, `on_message` in `apps/native/src/lib.rs`; `net.rs` only forwards). Changes stay additive where they can (see "When to bump" below).
 
 **No backward compatibility before the first release.** The app is unreleased: build as if from scratch. A breaking change to the wire, `state.json`, presets, sidecars or history is simply made, with no migration, legacy decoder, tolerant decode or backup; data that no longer decodes is ignored, and live sessions or history from an older build need not survive an upgrade. The bump rules below still apply to the version number.
 

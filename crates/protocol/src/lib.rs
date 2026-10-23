@@ -1495,17 +1495,18 @@ pub enum RearrangeLayout {
     Unknown,
 }
 
-/// What a tab is rendering. Most tabs hold a grid of panes/splits
-/// (`Grid`); future variants (e.g. `Diff` for Monaco-backed file diffs)
-/// hang off this enum without reshaping the tab list or invalidating
-/// pane-level operations, which only apply to `Grid` tabs.
+/// What a tab is rendering: one of three kinds. `Grid` holds a pane/split
+/// tree of terminal sessions, `Diff` a read-only file diff, and `Viewer` a
+/// read-only file view. The non-grid kinds hang off this enum without
+/// reshaping the tab list or invalidating pane-level operations, which
+/// only apply to `Grid` tabs.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TabContent {
     Grid {
         grid: GridNode,
     },
-    /// A Monaco-backed diff view. Identified by the
+    /// A read-only diff view. Identified by the
     /// (`repo`, `path`, `against`, `worktree_path`) tuple so clicking the
     /// same file in the source-control sidebar twice just focuses the
     /// existing tab instead of opening a duplicate, while two different
@@ -1524,6 +1525,13 @@ pub enum TabContent {
         /// `against`) but different `worktree_path` values are separate tabs.
         #[serde(default)]
         worktree_path: Option<String>,
+    },
+    /// A read-only file view. Identified by `path` alone, so opening the
+    /// same path twice focuses the existing tab. The path is the
+    /// requesting client's own path: the daemon stores it in that client's
+    /// layout and never reads the file itself.
+    Viewer {
+        path: String,
     },
 }
 
@@ -1549,7 +1557,7 @@ impl TabEntry {
     pub fn grid(&self) -> Option<&GridNode> {
         match &self.content {
             TabContent::Grid { grid } => Some(grid),
-            TabContent::Diff { .. } => None,
+            TabContent::Diff { .. } | TabContent::Viewer { .. } => None,
         }
     }
 
@@ -1557,7 +1565,7 @@ impl TabEntry {
     pub fn grid_mut(&mut self) -> Option<&mut GridNode> {
         match &mut self.content {
             TabContent::Grid { grid } => Some(grid),
-            TabContent::Diff { .. } => None,
+            TabContent::Diff { .. } | TabContent::Viewer { .. } => None,
         }
     }
 }
@@ -2572,6 +2580,19 @@ pub enum ClientMessage {
         against: Option<String>,
         #[serde(default)]
         worktree_path: Option<String>,
+    },
+    /// Open (or focus, if one already exists) a viewer tab for the given
+    /// path. The daemon broadcasts a `TabUpdated` when a new tab is
+    /// created, then replies with [`DaemonMessage::ViewerTabOpened`] so the
+    /// requesting client knows which tab id to activate. Only an empty or
+    /// blank path is refused: the path is the client's own, and whether it
+    /// still exists is the view's business.
+    OpenViewerTab {
+        /// Client-assigned request id, echoed back on
+        /// [`DaemonMessage::ViewerTabOpened`] and on a refusal's
+        /// `request_id`.
+        id: String,
+        path: String,
     },
     /// Fetch the OLD and NEW file contents that back a Monaco diff view.
     /// Single round-trip (atomic snapshot) — see
@@ -3601,6 +3622,12 @@ pub enum DaemonMessage {
     /// Response to [`ClientMessage::OpenDiffTab`]. Carries the tab id (new
     /// or pre-existing) so the requesting client can activate it.
     DiffTabOpened {
+        id: String,
+        tab_id: String,
+    },
+    /// Response to [`ClientMessage::OpenViewerTab`]. Carries the tab id (new
+    /// or pre-existing) so the requesting client can activate it.
+    ViewerTabOpened {
         id: String,
         tab_id: String,
     },
@@ -5607,6 +5634,51 @@ mod tests {
             panic!("expected grid variant");
         };
         assert!(matches!(grid, GridNode::Pane { pane_id, .. } if pane_id == "px"));
+    }
+
+    #[test]
+    fn a_viewer_tab_round_trips() {
+        let tab = TabEntry {
+            id: "tab-v".to_string(),
+            name: "a.md".to_string(),
+            content: TabContent::Viewer {
+                path: "C:\\notes\\a.md".to_string(),
+            },
+            created_at: Utc::now(),
+            picked_layout: None,
+        };
+        let json = serde_json::to_string(&tab).expect("serialize");
+        assert!(json.contains(r#""kind":"viewer""#), "{json}");
+        let mut back: TabEntry = serde_json::from_str(&json).expect("round-trips");
+        assert_eq!(back, tab);
+        assert!(back.grid().is_none(), "a viewer tab has no grid");
+        assert!(back.grid_mut().is_none(), "a viewer tab has no grid");
+
+        let open = ClientMessage::OpenViewerTab {
+            id: "open-1".to_string(),
+            path: "C:\\notes\\a.md".to_string(),
+        };
+        let json = serde_json::to_string(&open).expect("serialize");
+        assert!(json.contains(r#""type":"open_viewer_tab""#), "{json}");
+        let back: ClientMessage = serde_json::from_str(&json).expect("round-trips");
+        let ClientMessage::OpenViewerTab { id, path } = back else {
+            panic!("decoded as another message: {json}");
+        };
+        assert_eq!(id, "open-1");
+        assert_eq!(path, "C:\\notes\\a.md");
+
+        let opened = DaemonMessage::ViewerTabOpened {
+            id: "open-1".to_string(),
+            tab_id: "tab-v".to_string(),
+        };
+        let json = serde_json::to_string(&opened).expect("serialize");
+        assert!(json.contains(r#""type":"viewer_tab_opened""#), "{json}");
+        let back: DaemonMessage = serde_json::from_str(&json).expect("round-trips");
+        let DaemonMessage::ViewerTabOpened { id, tab_id } = back else {
+            panic!("decoded as another message: {json}");
+        };
+        assert_eq!(id, "open-1");
+        assert_eq!(tab_id, "tab-v");
     }
 
     #[test]

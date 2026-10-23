@@ -588,6 +588,33 @@ mod tests {
     }
 
     #[test]
+    fn a_viewer_tab_survives_a_state_reload() {
+        let dirs = scratch_dirs("viewer-tab");
+        let state = AppState::load_or_default(&dirs).expect("load state");
+        let tab = TabEntry {
+            id: "v".to_string(),
+            name: "a.md".to_string(),
+            content: TabContent::Viewer {
+                path: "C:\\notes\\a.md".to_string(),
+            },
+            created_at: chrono::Utc::now(),
+            picked_layout: None,
+        };
+        state
+            .set_client_layout(
+                "desktop",
+                Some("desktop-host".to_string()),
+                vec![tab.clone()],
+            )
+            .expect("set layout");
+
+        let reloaded = AppState::load_or_default(&dirs).expect("reload state");
+        assert_eq!(reloaded.client_layout("desktop"), vec![tab]);
+
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
     fn try_mutate_ok_commits_and_writes() {
         let dirs = scratch_dirs("try-ok");
         let state = AppState::load_or_default(&dirs).expect("load state");

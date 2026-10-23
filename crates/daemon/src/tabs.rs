@@ -398,8 +398,9 @@ pub fn clone_tabs_fresh_ids(tabs: &[TabEntry]) -> Vec<TabEntry> {
                 TabContent::Grid { grid } => TabContent::Grid {
                     grid: clone_grid_fresh_pane_ids(grid),
                 },
-                // Diff tabs have no panes/sessions to re-id — copy verbatim.
-                diff @ TabContent::Diff { .. } => diff.clone(),
+                // Diff and viewer tabs have no panes/sessions to re-id —
+                // copy verbatim.
+                other @ (TabContent::Diff { .. } | TabContent::Viewer { .. }) => other.clone(),
             };
             TabEntry {
                 id: new_id(),
@@ -1528,6 +1529,18 @@ mod tests {
                 path: "src/a.rs".to_string(),
                 against: None,
                 worktree_path: None,
+            },
+            created_at: Utc::now(),
+            picked_layout: None,
+        }
+    }
+
+    fn viewer_tab(id: &str) -> TabEntry {
+        TabEntry {
+            id: id.to_string(),
+            name: id.to_string(),
+            content: TabContent::Viewer {
+                path: "C:\\notes\\a.md".to_string(),
             },
             created_at: Utc::now(),
             picked_layout: None,
@@ -3036,6 +3049,24 @@ mod tests {
             pane_swap(("D", "p1"), ("A", "a")),
         ] {
             let err = swap_panes(&mut tabs, &swap).expect_err("a diff tab has no grid");
+            assert!(err.to_string().contains("not a grid tab"), "{err}");
+            assert_eq!(tabs, before);
+        }
+    }
+
+    #[test]
+    fn a_viewer_tab_is_not_a_pane_target() {
+        let mut tabs = vec![
+            picked_tab("A", &bound(&["a"]), RearrangeLayout::Horizontal),
+            viewer_tab("V"),
+        ];
+        let before = tabs.clone();
+
+        for swap in [
+            pane_swap(("A", "a"), ("V", "p1")),
+            pane_swap(("V", "p1"), ("A", "a")),
+        ] {
+            let err = swap_panes(&mut tabs, &swap).expect_err("a viewer tab has no grid");
             assert!(err.to_string().contains("not a grid tab"), "{err}");
             assert_eq!(tabs, before);
         }

@@ -1081,7 +1081,7 @@ impl PillLook {
 fn pill_label(tab: &TabEntry) -> String {
     match tab.content {
         TabContent::Diff { .. } => format!("Δ {}", tab.name),
-        TabContent::Grid { .. } => tab.name.clone(),
+        TabContent::Viewer { .. } | TabContent::Grid { .. } => tab.name.clone(),
     }
 }
 
