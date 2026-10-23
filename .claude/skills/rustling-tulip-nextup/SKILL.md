@@ -23,9 +23,9 @@ linear: rustling-tulip
 - Pull requests: `gh pr list --repo leftos/rustling-tulip --state open --json number,title,baseRefName`. An unplanned PR gets an **add**, "Review and land PR #N", naming its base branch, its files, whether the checks pass and whether it merges cleanly; a bot's dependency bump goes to `Backlog`.
 - Hotspots (two items touching one wait on each other): `crates/protocol/src/lib.rs`, `crates/daemon/src/server.rs` (`dispatch`; a change confined to one `server/<domain>.rs` module conflicts only with items touching that module), and in the native client `apps/native/src/lib.rs` (`RootView`), which every native item mounts into.
 
-## Working mode: ship fast (owner ruling, until the first release)
+## Working mode: ship fast (owner ruling, through Release 2)
 
-The goal is the first release as soon as possible; this overrides the user-level loop where they differ.
+The goal is each release as soon as possible, through Release 2; this overrides the user-level loop where they differ.
 
 - **No questions to the owner:** no `AskUserQuestion`, no interview, no decision round put to the owner, branch verdicts included. Every open decision, behaviour and look included, is the orchestrator's: settle it from the docs and code, record it with **settle** `--by orchestrator`, and keep going. The owner polishes once the release is a working daily driver.
 
