@@ -357,8 +357,133 @@ pub fn set_session_order(
     })
 }
 
+/// Put the session that resumed `old` — `new` — in the place `old` held in
+/// every container's session order, so a resumed session keeps its sidebar
+/// slot instead of moving to the end. A container that did not list `old` is
+/// left alone, and one that already lists `new` drops `old` rather than
+/// naming it twice. Returns the containers whose order changed, with their
+/// new order.
+pub fn replace_session_in_order(
+    state: &AppState,
+    old: &str,
+    new: &str,
+) -> anyhow::Result<Vec<(String, Vec<String>)>> {
+    state.mutate(|s| {
+        let mut changed = Vec::new();
+        for (container_id, ordered) in &mut s.session_order {
+            let Some(position) = ordered.iter().position(|id| id == old) else {
+                continue;
+            };
+            if ordered.iter().any(|id| id == new) {
+                ordered.remove(position);
+            } else {
+                new.clone_into(&mut ordered[position]);
+            }
+            changed.push((container_id.clone(), ordered.clone()));
+        }
+        changed
+    })
+}
+
 fn paths_eq(a: &str, b: &str) -> bool {
     let a = a.replace('\\', "/").to_lowercase();
     let b = b.replace('\\', "/").to_lowercase();
     a == b
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "tests assert preconditions with expect for clearer failures"
+)]
+mod tests {
+    use super::*;
+    use crate::paths::Dirs;
+    use std::collections::HashMap;
+
+    fn scratch_dirs(tag: &str) -> Dirs {
+        let root = std::env::temp_dir().join(format!("rt-registry-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create scratch dir");
+        Dirs {
+            config: root.clone(),
+            state_file: root.join("state.json"),
+            handshake_file: root.join("daemon.json"),
+            remote_config_file: root.join("remote.json"),
+            sessions_dir: root.join("sessions"),
+            worktrees_dir: root.join("worktrees"),
+            binaries_dir: root.join("binaries"),
+            bin_templates: None,
+        }
+    }
+
+    /// A state whose session order is `orders`, keyed by container id.
+    fn state_with_order(tag: &str, orders: &[(&str, &[&str])]) -> AppState {
+        let state = AppState::load_or_default(&scratch_dirs(tag)).expect("load state");
+        let seeded: HashMap<String, Vec<String>> = orders
+            .iter()
+            .map(|(container, ids)| {
+                let ids = ids.iter().map(|id| (*id).to_owned()).collect();
+                ((*container).to_owned(), ids)
+            })
+            .collect();
+        state
+            .mutate(|s| s.session_order = seeded)
+            .expect("seed the orders");
+        state
+    }
+
+    /// `container`'s persisted session order.
+    fn order_of(state: &AppState, container: &str) -> Option<Vec<String>> {
+        state.with_persisted(|s| s.session_order.get(container).cloned())
+    }
+
+    fn ids(list: &[&str]) -> Vec<String> {
+        list.iter().map(|id| (*id).to_owned()).collect()
+    }
+
+    #[test]
+    fn replace_session_in_order_swaps_in_place() {
+        let state = state_with_order("swap", &[("r1", &["a", "lost", "b"])]);
+
+        let changed = replace_session_in_order(&state, "lost", "fresh").expect("swap the id");
+
+        assert_eq!(order_of(&state, "r1"), Some(ids(&["a", "fresh", "b"])));
+        assert_eq!(changed, vec![("r1".to_owned(), ids(&["a", "fresh", "b"]))]);
+    }
+
+    #[test]
+    fn replace_session_in_order_returns_only_changed_containers() {
+        let state = state_with_order(
+            "changed",
+            &[
+                ("r1", &["a", "lost"]),
+                ("r2", &["x", "y"]),
+                ("t1", &["b", "lost"]),
+            ],
+        );
+
+        let mut changed = replace_session_in_order(&state, "lost", "fresh").expect("swap the id");
+        changed.sort_by(|left, right| left.0.cmp(&right.0));
+
+        assert_eq!(
+            changed,
+            vec![
+                ("r1".to_owned(), ids(&["a", "fresh"])),
+                ("t1".to_owned(), ids(&["b", "fresh"])),
+            ],
+            "a container that did not list the old id is not returned"
+        );
+        assert_eq!(order_of(&state, "r2"), Some(ids(&["x", "y"])));
+    }
+
+    #[test]
+    fn replace_session_in_order_leaves_state_alone_when_old_is_absent() {
+        let state = state_with_order("absent", &[("r1", &["a", "b"])]);
+
+        let changed = replace_session_in_order(&state, "gone", "fresh").expect("nothing to swap");
+
+        assert!(changed.is_empty(), "nothing changed");
+        assert_eq!(order_of(&state, "r1"), Some(ids(&["a", "b"])));
+    }
 }

@@ -244,31 +244,101 @@ async fn reattach_one(
 }
 
 /// Resume an abandoned session: read its sidecar (spawn config +
-/// `last_prompt`), spawn a fresh session with the same config and the
-/// captured prompt, then remove the abandoned placeholder from the
-/// registry + delete the on-disk sidecar.
+/// `last_prompt`), spawn a session with the same config — continuing the
+/// session's own Claude conversation when its transcript is still there, else
+/// replaying the captured first prompt — then hand the new session the old
+/// one's name, look and sidebar place, remove the abandoned placeholder from
+/// the registry and delete its on-disk sidecar.
 ///
-/// The new session gets a new id (`spawn_session` generates one), so
-/// the old abandoned record's UI bindings are NOT automatically
-/// transferred. The frontend can listen for the `SessionUpdated`
-/// message and decide whether to swap it into the same tab/pane.
+/// The new session gets a new id (`spawn_session` generates one);
+/// [`finish_resume`] rebinds every pane that pointed at the old id and moves
+/// the id in each container's session order, so the resume lands in the slot
+/// it left.
 pub(super) async fn resume_abandoned(
     hub: &Hub,
     session_id: &str,
     out_tx: &mpsc::UnboundedSender<DaemonMessage>,
 ) -> anyhow::Result<()> {
+    let spawn = move |req: SpawnRequest, busy_excluded: bool| async move {
+        spawn_session(hub, req, None, busy_excluded)
+            .await
+            .map(|snap| snap.id)
+    };
+    resume_abandoned_with(hub, session_id, out_tx, spawn).await
+}
+
+/// [`resume_abandoned`], starting the session with `spawn`, which returns the
+/// new session's id.
+async fn resume_abandoned_with<F, Fut>(
+    hub: &Hub,
+    session_id: &str,
+    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
+    spawn: F,
+) -> anyhow::Result<()>
+where
+    F: Fn(SpawnRequest, bool) -> Fut,
+    Fut: Future<Output = anyhow::Result<String>>,
+{
     let _claim = hub
         .recovering
         .claim(session_id)
         .ok_or_else(|| anyhow!("session {session_id} is {ALREADY_RECOVERING}"))?;
-    let rec = hub
-        .sessions
-        .get(session_id)
-        .ok_or_else(|| anyhow!("unknown session: {session_id}"))?;
-    let (req, busy_excluded) = abandoned_resume_request(&crate::sync::lock(&rec))?;
-    let snap = spawn_session(hub, req, None, busy_excluded).await?;
-    finish_resume(hub, session_id, &snap.id, out_tx);
+    let (req, busy_excluded) = resume_request(hub, session_id).await?;
+    let new_id = spawn(req, busy_excluded).await?;
+    finish_resume(hub, session_id, &new_id, out_tx);
     Ok(())
+}
+
+/// The request that resumes the abandoned session `id`, and the busy
+/// exclusion it keeps: the session's own conversation continued when its
+/// transcript is still there, else a fresh start replaying the first prompt
+/// (what a plain shell always gets). A conversation that can no longer be
+/// resumed never refuses the Resume the user asked for, and neither does a
+/// worktree that is gone (the unpinned request recreates it) or one a live
+/// session holds (the unpinned spawn refuses it, as it always did).
+async fn resume_request(hub: &Hub, id: &str) -> anyhow::Result<(SpawnRequest, bool)> {
+    let (fallback, busy_excluded) = {
+        let rec = hub
+            .sessions
+            .get(id)
+            .ok_or_else(|| anyhow!("unknown session: {id}"))?;
+        abandoned_resume_request(&crate::sync::lock(&rec))?
+    };
+    let claude_home = crate::transcripts::claude_home();
+    match rerun_request(hub, id, claude_home.as_deref()).await {
+        Ok(rerun)
+            if rerun.request.resume_conversation.is_some()
+                && pinned_worktrees_exist(&rerun.request.target)
+                && !pinned_worktree_in_use(hub, id, &rerun.request.target) =>
+        {
+            let mut req = rerun.request;
+            req.initial_prompt = None;
+            Ok((req, busy_excluded))
+        }
+        Ok(_) => Ok((fallback, busy_excluded)),
+        Err(err) => {
+            warn!(session_id = %id, ?err, "resume: no rerun request, starting fresh");
+            Ok((fallback, busy_excluded))
+        }
+    }
+}
+
+/// Whether every worktree path `target` pins still exists as a directory.
+/// A pinned spawn of a folder that is gone refuses ("no longer readable"),
+/// where the unpinned request recreates the worktree the session left.
+fn pinned_worktrees_exist(target: &SpawnTarget) -> bool {
+    match target {
+        SpawnTarget::Single {
+            existing_worktree: Some(path),
+            ..
+        } => Path::new(path).is_dir(),
+        SpawnTarget::Workspace {
+            existing_worktrees, ..
+        } => existing_worktrees
+            .iter()
+            .all(|pin| Path::new(&pin.path).is_dir()),
+        _ => true,
+    }
 }
 
 /// The request that resumes the abandoned `rec`, replaying its first prompt,
@@ -293,10 +363,11 @@ fn abandoned_resume_request(rec: &SessionRecord) -> anyhow::Result<(SpawnRequest
 /// After a successful Resume spawn of the abandoned `old_id` as `new_id`:
 /// rebind any pane that pointed at the abandoned session to the fresh one,
 /// in every client layout, so the resume reattaches to its original slot
-/// instead of orphaning into the sidebar as an unbound session; remove the
-/// abandoned placeholder and its sidecar (if the spawn failed, the
-/// placeholder stays so the user can try again); and mark its history entry
-/// recovered, so it stops counting as a session to recover.
+/// instead of orphaning into the sidebar as an unbound session; give the
+/// fresh session the name, the look and the sidebar place the abandoned one
+/// held; remove the abandoned placeholder and its sidecar (if the spawn
+/// failed, the placeholder stays so the user can try again); and mark its
+/// history entry recovered, so it stops counting as a session to recover.
 fn finish_resume(
     hub: &Hub,
     old_id: &str,
@@ -304,8 +375,49 @@ fn finish_resume(
     out_tx: &mpsc::UnboundedSender<DaemonMessage>,
 ) {
     rebind_session_panes(hub, old_id, new_id);
+    carry_identity(hub, old_id, new_id);
+    keep_session_order(hub, old_id, new_id);
     discard_abandoned(hub, old_id, out_tx);
     mark_history_recovered(hub, old_id);
+}
+
+/// Give the spawned `new_id` the name and the look of the abandoned `old_id`
+/// it resumed, as `RenameSession` and `SetSessionAppearance` set them. An old
+/// record with no user rename, or a new one the registry does not hold,
+/// leaves the new record's own default label.
+fn carry_identity(hub: &Hub, old_id: &str, new_id: &str) {
+    let Some((user_label, appearance)) = hub.sessions.get(old_id).map(|rec| {
+        let rec = crate::sync::lock(&rec);
+        (rec.user_label.clone(), rec.appearance.clone())
+    }) else {
+        return;
+    };
+    hub.sessions.update(new_id, |guard| {
+        guard.user_label.clone_from(&user_label);
+        guard.label = user_label
+            .clone()
+            .unwrap_or_else(|| guard.default_label.clone());
+        guard.appearance.clone_from(&appearance);
+    });
+}
+
+/// Put `new_id` in `old_id`'s place in every container's session order, and
+/// tell the clients, so the resumed session keeps the sidebar slot it held. A
+/// failed save is logged and never fails the resume.
+fn keep_session_order(hub: &Hub, old_id: &str, new_id: &str) {
+    let changed = match crate::registry::replace_session_in_order(&hub.state, old_id, new_id) {
+        Ok(changed) => changed,
+        Err(err) => {
+            warn!(?err, %old_id, %new_id, "finish_resume: state.mutate failed");
+            return;
+        }
+    };
+    for (container_id, ordered_ids) in changed {
+        let _ = hub.state_events.send(StateEvent::SessionsReordered {
+            container_id,
+            ordered_ids,
+        });
+    }
 }
 
 /// Resume, one at a time and with no client, the sessions the last run lost
@@ -765,8 +877,8 @@ mod tests {
     use crate::server::spawn::check_spawn_request_with;
     use crate::server::test_support::{
         MISSING_SECRET_ID, UNSET_REF, deepseek_key, deepseek_options, deepseek_spawn, dispatch_one,
-        env, env_ref_repo_hub, env_spawn, git_init, git_ok, secret_ref, spawnless_test_hub,
-        test_hub,
+        env, env_ref_repo_hub, env_spawn, git_init, git_ok, idle_record, secret_ref,
+        spawnless_test_hub, test_hub,
     };
     use chrono::Utc;
     use protocol::{SessionMember, SpawnTarget};
@@ -936,6 +1048,296 @@ mod tests {
         let (request, _) =
             abandoned_resume_request(&crate::sync::lock(&rec)).expect("lost can resume");
         assert_eq!(request.agent_options, deepseek_options());
+    }
+
+    /// `container`'s persisted session order.
+    fn order_of(hub: &Hub, container: &str) -> Option<Vec<String>> {
+        hub.state
+            .with_persisted(|s| s.session_order.get(container).cloned())
+    }
+
+    /// `list` as owned ids.
+    fn ids(list: &[&str]) -> Vec<String> {
+        list.iter().map(|id| (*id).to_owned()).collect()
+    }
+
+    /// Record the session order `order` for `container`.
+    fn seed_session_order(hub: &Hub, container: &str, order: &[&str]) {
+        let order = ids(order);
+        hub.state
+            .mutate(|s| {
+                s.session_order.insert(container.to_owned(), order);
+            })
+            .expect("seed the session order");
+    }
+
+    /// Give `id` the name and look the user chose for it.
+    fn rename_and_recolour(hub: &Hub, id: &str) {
+        hub.sessions.update(id, |rec| {
+            rec.user_label = Some("mine".to_owned());
+            rec.label = "mine".to_owned();
+            rec.appearance.accent_color = Some("#38bdf8".to_owned());
+        });
+    }
+
+    #[tokio::test]
+    #[expect(clippy::panic, reason = "a wrong spawn fails the test loudly")]
+    async fn resume_abandoned_continues_the_conversation() {
+        let (_home_lock, home) = claude_home_scratch("resume-continues").await;
+        let (hub, scratch) = spawnless_test_hub("resume-continues");
+        let folder = scratch.path().to_string_lossy().into_owned();
+        home.write_transcript(&folder, RECOVERY_CONVERSATION);
+        insert_abandoned_claude(
+            &hub,
+            "lost",
+            standalone(&folder),
+            Some(RECOVERY_CONVERSATION),
+        );
+        hub.sessions.update("lost", |rec| {
+            rec.busy_excluded = true;
+            rec.last_prompt = Some("first".to_owned());
+        });
+        let spawned = Spawned::default();
+        let (out_tx, _out_rx) = mpsc::unbounded_channel();
+
+        resume_abandoned_with(&hub, "lost", &out_tx, recording_spawn(&spawned))
+            .await
+            .expect("the resume spawns");
+
+        {
+            let spawned = crate::sync::lock(&spawned);
+            let [(request, busy_excluded)] = spawned.as_slice() else {
+                panic!("expected one spawn, got {}", spawned.len());
+            };
+            assert_eq!(
+                request.resume_conversation.as_deref(),
+                Some(RECOVERY_CONVERSATION),
+                "a manual Resume continues the session's own conversation"
+            );
+            assert!(
+                request.initial_prompt.is_none(),
+                "no prompt is replayed into a continued conversation"
+            );
+            assert!(*busy_excluded, "the resumed session keeps the flag");
+        }
+        assert!(hub.sessions.get("lost").is_none(), "placeholder removed");
+        let entry = history::read_one(&hub.dirs, "lost").expect("entry kept");
+        assert!(entry.recovered_at.is_some(), "a resume counts as recovery");
+    }
+
+    #[tokio::test]
+    #[expect(clippy::panic, reason = "a wrong spawn fails the test loudly")]
+    async fn resume_abandoned_without_a_transcript_replays_the_first_prompt() {
+        let (_home_lock, _home) = claude_home_scratch("resume-no-transcript").await;
+        let (hub, scratch) = spawnless_test_hub("resume-no-transcript");
+        let folder = scratch.path().to_string_lossy().into_owned();
+        insert_abandoned_claude(
+            &hub,
+            "lost",
+            standalone(&folder),
+            Some(RECOVERY_CONVERSATION),
+        );
+        hub.sessions
+            .update("lost", |rec| rec.last_prompt = Some("first".to_owned()));
+        let spawned = Spawned::default();
+        let (out_tx, _out_rx) = mpsc::unbounded_channel();
+
+        resume_abandoned_with(&hub, "lost", &out_tx, recording_spawn(&spawned))
+            .await
+            .expect("the resume still spawns");
+
+        let spawned = crate::sync::lock(&spawned);
+        let [(request, _)] = spawned.as_slice() else {
+            panic!("expected one spawn, got {}", spawned.len());
+        };
+        assert_eq!(
+            request.resume_conversation, None,
+            "a conversation with no transcript is not continued"
+        );
+        assert_eq!(
+            request.initial_prompt.as_deref(),
+            Some("first"),
+            "the first prompt is replayed, as it was before"
+        );
+    }
+
+    #[tokio::test]
+    #[expect(clippy::panic, reason = "a wrong spawn fails the test loudly")]
+    async fn resume_abandoned_for_a_plain_shell_still_starts_fresh() {
+        let (hub, scratch) = spawnless_test_hub("resume-plain-shell");
+        let folder = scratch.path().to_string_lossy().into_owned();
+        insert_abandoned_claude(&hub, "lost", standalone(&folder), None);
+        hub.sessions.update("lost", |rec| {
+            rec.mode = SessionMode::PlainShell;
+            rec.last_prompt = Some("ls".to_owned());
+        });
+        let spawned = Spawned::default();
+        let (out_tx, _out_rx) = mpsc::unbounded_channel();
+
+        resume_abandoned_with(&hub, "lost", &out_tx, recording_spawn(&spawned))
+            .await
+            .expect("a plain shell resumes too");
+
+        let spawned = crate::sync::lock(&spawned);
+        let [(request, _)] = spawned.as_slice() else {
+            panic!("expected one spawn, got {}", spawned.len());
+        };
+        assert_eq!(
+            request.resume_conversation, None,
+            "a shell has no conversation"
+        );
+        assert_eq!(request.initial_prompt.as_deref(), Some("ls"));
+    }
+
+    #[tokio::test]
+    #[expect(clippy::panic, reason = "a wrong spawn fails the test loudly")]
+    async fn resume_abandoned_with_its_worktree_deleted_starts_fresh() {
+        let (_home_lock, home) = claude_home_scratch("resume-worktree-gone").await;
+        let (hub, scratch, _repo) = env_ref_repo_hub("resume-worktree-gone");
+        let folder = scratch
+            .path()
+            .join("worktree")
+            .to_string_lossy()
+            .into_owned();
+        home.write_transcript(&folder, RECOVERY_CONVERSATION);
+        insert_abandoned_claude(&hub, "lost", worktree_target(), Some(RECOVERY_CONVERSATION));
+        set_member(&hub, "lost", "wt/x", &folder);
+        hub.sessions
+            .update("lost", |rec| rec.last_prompt = Some("first".to_owned()));
+        let spawned = Spawned::default();
+        let (out_tx, _out_rx) = mpsc::unbounded_channel();
+
+        resume_abandoned_with(&hub, "lost", &out_tx, recording_spawn(&spawned))
+            .await
+            .expect("a Resume whose worktree is gone still spawns");
+
+        let spawned = crate::sync::lock(&spawned);
+        let [(request, _)] = spawned.as_slice() else {
+            panic!("expected one spawn, got {}", spawned.len());
+        };
+        assert_eq!(
+            request.resume_conversation, None,
+            "a pinned folder that no longer exists is not pinned"
+        );
+        assert_eq!(
+            request.initial_prompt.as_deref(),
+            Some("first"),
+            "the unpinned request, which recreates the worktree, as before"
+        );
+    }
+
+    #[tokio::test]
+    #[expect(clippy::panic, reason = "a wrong spawn fails the test loudly")]
+    async fn resume_abandoned_whose_worktree_a_live_session_holds_uses_the_unpinned_request() {
+        let (_home_lock, home) = claude_home_scratch("resume-worktree-in-use").await;
+        let (hub, scratch, _repo) = env_ref_repo_hub("resume-worktree-in-use");
+        let folder = scratch
+            .path()
+            .join("worktree")
+            .to_string_lossy()
+            .into_owned();
+        std::fs::create_dir_all(&folder).expect("create the worktree folder");
+        home.write_transcript(&folder, RECOVERY_CONVERSATION);
+        insert_abandoned_claude(&hub, "lost", worktree_target(), Some(RECOVERY_CONVERSATION));
+        set_member(&hub, "lost", "wt/x", &folder);
+        hub.sessions
+            .update("lost", |rec| rec.last_prompt = Some("first".to_owned()));
+        hub.sessions.insert(history::test_support::record(
+            "live",
+            SessionMode::Interactive,
+        ));
+        set_member(&hub, "live", "wt/x", &folder);
+        let spawned = Spawned::default();
+        let (out_tx, _out_rx) = mpsc::unbounded_channel();
+
+        resume_abandoned_with(&hub, "lost", &out_tx, recording_spawn(&spawned))
+            .await
+            .expect("a Resume of a held worktree still spawns");
+
+        let spawned = crate::sync::lock(&spawned);
+        let [(request, _)] = spawned.as_slice() else {
+            panic!("expected one spawn, got {}", spawned.len());
+        };
+        assert_eq!(
+            request.resume_conversation, None,
+            "a worktree a live session holds is not pinned"
+        );
+        assert_eq!(
+            request.initial_prompt.as_deref(),
+            Some("first"),
+            "the unpinned request, whose spawn refuses the held worktree, as before"
+        );
+    }
+
+    #[tokio::test]
+    async fn finish_resume_keeps_user_label_and_appearance() {
+        let (hub, _scratch) = spawnless_test_hub("resume-keeps-identity");
+        insert_abandoned_with_history(&hub, "lost");
+        rename_and_recolour(&hub, "lost");
+        hub.sessions.insert(idle_record("fresh"));
+        let (out_tx, _out_rx) = mpsc::unbounded_channel();
+
+        finish_resume(&hub, "lost", "fresh", &out_tx);
+
+        let rec = hub.sessions.get("fresh").expect("fresh is registered");
+        let rec = crate::sync::lock(&rec);
+        assert_eq!(
+            rec.user_label.as_deref(),
+            Some("mine"),
+            "the resume keeps the name the user gave it"
+        );
+        assert_eq!(rec.label, "mine");
+        assert_eq!(
+            rec.appearance.accent_color.as_deref(),
+            Some("#38bdf8"),
+            "and the look"
+        );
+    }
+
+    #[tokio::test]
+    async fn finish_resume_leaves_the_default_label_when_the_old_had_no_rename() {
+        let (hub, _scratch) = spawnless_test_hub("resume-default-label");
+        insert_abandoned_with_history(&hub, "lost");
+        hub.sessions.insert(idle_record("fresh"));
+        let (out_tx, _out_rx) = mpsc::unbounded_channel();
+
+        finish_resume(&hub, "lost", "fresh", &out_tx);
+
+        let rec = hub.sessions.get("fresh").expect("fresh is registered");
+        let rec = crate::sync::lock(&rec);
+        assert_eq!(rec.user_label, None, "there was no rename to keep");
+        assert_eq!(
+            rec.label, "fresh",
+            "the resumed session's own default label"
+        );
+    }
+
+    #[tokio::test]
+    #[expect(clippy::panic, reason = "a wrong broadcast fails the test loudly")]
+    async fn finish_resume_swaps_the_id_in_session_order() {
+        let (hub, _scratch) = spawnless_test_hub("resume-keeps-place");
+        insert_abandoned_with_history(&hub, "lost");
+        seed_session_order(&hub, "r1", &["a", "lost", "b"]);
+        seed_session_order(&hub, "r2", &["x", "y"]);
+        let mut events = hub.state_events.subscribe();
+        let (out_tx, _out_rx) = mpsc::unbounded_channel();
+
+        finish_resume(&hub, "lost", "fresh", &out_tx);
+
+        assert_eq!(order_of(&hub, "r1"), Some(ids(&["a", "fresh", "b"])));
+        assert_eq!(order_of(&hub, "r2"), Some(ids(&["x", "y"])));
+        let reordered: Vec<StateEvent> = std::iter::from_fn(|| events.try_recv().ok()).collect();
+        let [
+            StateEvent::SessionsReordered {
+                container_id,
+                ordered_ids,
+            },
+        ] = reordered.as_slice()
+        else {
+            panic!("expected one reorder, got {reordered:?}");
+        };
+        assert_eq!(container_id, "r1", "only the container that listed it");
+        assert_eq!(ordered_ids, &["a", "fresh", "b"]);
     }
 
     /// The request `how` recovers `entry` with, resuming `conversation`,
@@ -1116,6 +1518,22 @@ mod tests {
         let spawned = Arc::clone(spawned);
         move |req, busy_excluded| {
             crate::sync::lock(&spawned).push((req, busy_excluded));
+            std::future::ready(Ok("fresh".to_owned()))
+        }
+    }
+
+    /// A stand-in for `spawn_session` that records each request in `spawned`,
+    /// registers the new session `fresh` as a real spawn does, so the
+    /// resume's own updates reach it, and reports its id.
+    fn recording_spawn_registering(
+        hub: &Hub,
+        spawned: &Spawned,
+    ) -> impl Fn(SpawnRequest, bool) -> std::future::Ready<anyhow::Result<String>> {
+        let spawned = Arc::clone(spawned);
+        let hub = hub.clone();
+        move |req, busy_excluded| {
+            crate::sync::lock(&spawned).push((req, busy_excluded));
+            hub.sessions.insert(idle_record("fresh"));
             std::future::ready(Ok("fresh".to_owned()))
         }
     }
@@ -1370,6 +1788,48 @@ mod tests {
         assert!(
             !hub.resume_in_flight.load(Ordering::SeqCst),
             "the hold-off ends"
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_resume_keeps_name_look_and_place() {
+        let (_home_lock, home) = claude_home_scratch("auto-resume-keeps-identity").await;
+        let (hub, scratch) = spawnless_test_hub("auto-resume-keeps-identity");
+        let folder = scratch.path().to_string_lossy().into_owned();
+        home.write_transcript(&folder, RECOVERY_CONVERSATION);
+        insert_abandoned_claude(
+            &hub,
+            "lost",
+            standalone(&folder),
+            Some(RECOVERY_CONVERSATION),
+        );
+        rename_and_recolour(&hub, "lost");
+        seed_session_order(&hub, "r1", &["a", "lost"]);
+        let spawned = Spawned::default();
+        let in_flight = ResumeInFlight::start(&hub.resume_in_flight);
+
+        let counts = auto_resume_with(
+            &hub,
+            vec!["lost".to_owned()],
+            recording_spawn_registering(&hub, &spawned),
+            in_flight,
+        )
+        .await;
+
+        assert_eq!(counts, (1, 0));
+        let rec = hub.sessions.get("fresh").expect("fresh is registered");
+        let rec = crate::sync::lock(&rec);
+        assert_eq!(
+            rec.user_label.as_deref(),
+            Some("mine"),
+            "auto-resume keeps the name the user gave it"
+        );
+        assert_eq!(rec.appearance.accent_color.as_deref(), Some("#38bdf8"));
+        drop(rec);
+        assert_eq!(
+            order_of(&hub, "r1"),
+            Some(ids(&["a", "fresh"])),
+            "and its sidebar place"
         );
     }
 
