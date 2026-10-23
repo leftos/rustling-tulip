@@ -65,7 +65,7 @@ Language id: the daemon's `language_for_path` (`git_inspect.rs:429`) is in the d
 ## 2. THE SETTING
 
 - Field: `GeneralSettings.open_text_externally: bool` (`sidebar.rs:472`), `Default` false, and `#[serde(default)]` on the struct already covers a file that predates it. Saved as `general.open_text_externally` in native-ui.json. Add it to the field list in CLAUDE.md "Where things live on disk" (the `general` entry) and to `docs/native-client.md` Settings.
-- UI: a row on Settings -> General, "Open text files in the external app", as a toggle like `CopyOnSelect` (`SettingsControl::CopyOnSelect`, `settings_view.rs:405,581`; the Tab-order stop list at `settings_controls` `:399`). Add `SettingsControl::OpenTextExternally`, its `toggle_*` method and a spec.
+- UI: a row in a new "Files" section of Settings -> General, between "Sidebar" and "Terminal behavior", "Open text files in the external app", as a toggle like `CopyOnSelect` (`SettingsControl::CopyOnSelect`, `settings_view.rs:405,581`; the Tab-order stop list at `settings_controls` `:399`). Add `SettingsControl::OpenTextExternally`, its `toggle_*` method and a spec.
 - Meaning of "external editor": recommend that ON restores today's behaviour exactly (a link with `:line` goes to VS Code via `-g path:line:col`; a plain path goes to the OS default app), so the viewer is simply bypassed. No new editor-choice semantics in this ticket.
 - The viewer header's overflow menu can later offer "Always open text files in the external app" to flip the setting in place.
 - Gate order in `viewer::decide`: setting ON -> External; else not text / too large -> External; else Viewer.
@@ -124,10 +124,10 @@ Language id: the daemon's `language_for_path` (`git_inspect.rs:429`) is in the d
 
 Order is chosen so each step lands green on its own. Tests: Rust names, red first.
 
-- **S1. `viewer_text.rs` (plain Rust).** Probe/decide core with no GPUI, no I/O except `probe_file`.
+- **S1. `viewer_text.rs` (plain Rust). Landed.** Probe/decide core with no GPUI, no I/O except `probe_file`.
   Files: `apps/native/src/viewer_text.rs`, `lib.rs` mod line, `tools/test-map.json` row.
   Red tests: `a_nul_byte_in_the_head_is_binary`, `utf8_bom_is_stripped`, `utf16_with_bom_decodes`, `invalid_utf8_is_not_text`, `a_file_over_two_mib_is_not_text`, `an_unknown_extension_with_text_is_text`, `every_language_id_has_a_grammar`, `crlf_lf_and_lone_cr_split_lines`, `a_final_newline_adds_no_empty_line`.
-- **S2. The setting and the decision.**
+- **S2. The setting and the decision. Landed.** The row sits in a new "Files" section between "Sidebar" and "Terminal behavior". `.ps1` and `.psm1` map to no language id, since `syntax::LANGUAGES` has no PowerShell grammar. `check` also refuses a head that does not decode (`NotDecodable`), allowing a head cut mid-character.
   Files: `sidebar.rs` (`GeneralSettings.open_text_externally`), `settings_view.rs` (row, `SettingsControl::OpenTextExternally`, stops, toggle), `viewer_text.rs` (`decide`), CLAUDE.md field list.
   Red tests: `open_text_externally_defaults_off`, `a_file_without_the_key_loads_off`, `the_setting_on_sends_a_line_ref_to_vscode_and_a_plain_path_to_the_default_app` (unit, `decide`), `text_goes_to_the_viewer_when_the_setting_is_off`, and UI `ui_settings`: `the_open_text_externally_row_toggles_and_saves`, plus a focus-ring stop check.
 - **S3a. Protocol + daemon.** `TabContent::Viewer { path }`, `OpenViewerTab`, `ViewerTabOpened`, dispatch arm, handler in `server/tabs.rs`, dedupe by path, every `TabContent::` match.

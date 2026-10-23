@@ -103,6 +103,7 @@ mod text_input;
 mod theme;
 mod undo;
 mod undo_view;
+mod viewer_text;
 mod vscode_suggestion;
 mod vscode_suggestion_view;
 mod window_state;

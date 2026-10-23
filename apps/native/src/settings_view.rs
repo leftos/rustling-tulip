@@ -198,6 +198,7 @@ pub(crate) enum SettingsControl {
     KeepAwake,
     SidebarView(SidebarView),
     LeafDensity(LeafDensity),
+    OpenTextExternally,
     CopyOnSelect,
     TitleCount,
     TitleSuffix,
@@ -228,6 +229,7 @@ impl SettingsControl {
             Self::SidebarView(SidebarView::Tabs) => "settings-sidebar-view-tabs",
             Self::LeafDensity(LeafDensity::Comfortable) => "settings-leaf-density-comfortable",
             Self::LeafDensity(LeafDensity::Compact) => "settings-leaf-density-compact",
+            Self::OpenTextExternally => "settings-general-open-text-externally",
             Self::CopyOnSelect => "settings-terminal-copy-on-selection",
             Self::TitleCount => "settings-title-busy-count",
             Self::TitleSuffix => "settings-title-product-suffix",
@@ -488,7 +490,10 @@ impl RootView {
                     .into_iter()
                     .chain(SIDEBAR_VIEW_CHOICES.map(SettingsControl::SidebarView))
                     .chain(LEAF_DENSITY_CHOICES.map(SettingsControl::LeafDensity))
-                    .chain([SettingsControl::CopyOnSelect])
+                    .chain([
+                        SettingsControl::OpenTextExternally,
+                        SettingsControl::CopyOnSelect,
+                    ])
                     .collect()
             }
             SettingsTab::AppTitle => {
@@ -681,6 +686,7 @@ impl RootView {
             SettingsControl::KeepAwake => self.toggle_keep_awake(),
             SettingsControl::SidebarView(view) => self.set_sidebar_view(view, cx),
             SettingsControl::LeafDensity(density) => self.set_leaf_density(density, cx),
+            SettingsControl::OpenTextExternally => self.toggle_open_text_externally(cx),
             SettingsControl::CopyOnSelect => self.toggle_copy_on_select(cx),
             SettingsControl::TitleCount => self.toggle_title_count(window, cx),
             SettingsControl::TitleSuffix => self.toggle_title_suffix(window, cx),
@@ -1390,6 +1396,13 @@ impl RootView {
         cx.notify();
     }
 
+    fn toggle_open_text_externally(&mut self, cx: &mut Context<Self>) {
+        let on = !self.sidebar.ui_state().general.open_text_externally;
+        self.sidebar.set_open_text_externally(on);
+        self.save_ui();
+        cx.notify();
+    }
+
     fn toggle_title_count(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let on = !self.sidebar.ui_state().title.show_count;
         self.sidebar.set_title_show_count(on);
@@ -1986,9 +1999,21 @@ impl RootView {
             "Off: select to highlight, copy explicitly with Ctrl+C \
              (when there's a selection) or Ctrl+Shift+C.",
         ));
+        let open_text = toggle(
+            SettingsControl::OpenTextExternally,
+            ToggleState {
+                checked: self.sidebar.ui_state().general.open_text_externally,
+                enabled: true,
+            },
+            "Open text files in the external app",
+            focused,
+            cx,
+        );
+        let files = section("Files").child(open_text);
         vec![
             power.into_any_element(),
             sidebar.into_any_element(),
+            files.into_any_element(),
             terminal.into_any_element(),
         ]
     }

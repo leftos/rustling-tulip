@@ -317,6 +317,25 @@ fn copy_on_select_setting_saved_and_honoured(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn the_open_text_externally_row_toggles_and_saves(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.keys("ctrl-,");
+    assert!(
+        h.bounds("settings-general-open-text-externally").origin.x >= px(0.0),
+        "the row is drawn"
+    );
+    h.click_on("settings-general-open-text-externally");
+    assert_eq!(
+        saved_ui(&dir)["general"]["open_text_externally"],
+        true,
+        "saved at once"
+    );
+    h.click_on("settings-general-open-text-externally");
+    assert_eq!(saved_ui(&dir)["general"]["open_text_externally"], false);
+}
+
+#[gpui::test]
 fn app_title_preview_follows_toggles(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);
@@ -471,8 +490,15 @@ fn tab_walks_general_controls_and_space_toggles(cx: &mut TestAppContext) {
     h.keys("tab tab tab tab tab");
     assert_eq!(
         settings_focus(&mut h),
-        Some("settings-terminal-copy-on-selection"),
+        Some("settings-general-open-text-externally"),
         "past the two Default view and the two Leaf density choices"
+    );
+    h.keys("space");
+    assert_eq!(saved_ui(&dir)["general"]["open_text_externally"], true);
+    h.keys("tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("settings-terminal-copy-on-selection")
     );
     h.keys("space");
     assert_eq!(saved_ui(&dir)["general"]["copy_on_select"], false);
@@ -491,7 +517,7 @@ fn tab_walks_general_controls_and_space_toggles(cx: &mut TestAppContext) {
         Some("settings-terminal-copy-on-selection"),
         "Shift+Tab walks back"
     );
-    h.keys("shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab");
+    h.keys("shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab");
     assert_eq!(settings_focus(&mut h), Some("list"));
     assert_eq!(shown_tab(&mut h), "General");
 

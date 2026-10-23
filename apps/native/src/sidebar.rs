@@ -478,6 +478,9 @@ pub struct GeneralSettings {
     pub copy_on_select: bool,
     /// How much room each session leaf takes.
     pub leaf_density: LeafDensity,
+    /// Whether text files a link or a fetch opens go to the external app
+    /// instead of the built-in viewer.
+    pub open_text_externally: bool,
 }
 
 impl Default for GeneralSettings {
@@ -485,6 +488,7 @@ impl Default for GeneralSettings {
         Self {
             copy_on_select: true,
             leaf_density: LeafDensity::Comfortable,
+            open_text_externally: false,
         }
     }
 }
@@ -890,6 +894,11 @@ impl SidebarModel {
     /// Whether a terminal selection is copied on release.
     pub fn set_copy_on_select(&mut self, on: bool) {
         self.ui.general.copy_on_select = on;
+    }
+
+    /// Whether text files go to the external app instead of the viewer.
+    pub fn set_open_text_externally(&mut self, on: bool) {
+        self.ui.general.open_text_externally = on;
     }
 
     /// How much room each session leaf takes.
@@ -2965,6 +2974,7 @@ mod tests {
             general: GeneralSettings {
                 copy_on_select: false,
                 leaf_density: LeafDensity::Compact,
+                open_text_externally: true,
             },
             title: TitleSettings {
                 show_count: false,
@@ -3079,6 +3089,28 @@ mod tests {
         let loaded = load_ui_state(&dir.0);
         assert!(loaded.title.show_count, "a group missing a field fills it");
         assert!(!loaded.title.suffix);
+    }
+
+    #[test]
+    fn open_text_externally_defaults_off() {
+        assert!(!GeneralSettings::default().open_text_externally);
+        assert!(!UiState::default().general.open_text_externally);
+    }
+
+    #[test]
+    fn a_file_without_the_key_loads_off() {
+        let dir = TestDir::new("open-text-externally");
+        std::fs::write(
+            dir.0.join(UI_FILE),
+            r#"{ "general": { "copy_on_select": false } }"#,
+        )
+        .expect("write");
+        let loaded = load_ui_state(&dir.0);
+        assert!(
+            !loaded.general.copy_on_select,
+            "the file was read: its copy-on-select is not the default"
+        );
+        assert!(!loaded.general.open_text_externally);
     }
 
     #[test]
