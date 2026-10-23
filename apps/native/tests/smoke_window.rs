@@ -34,13 +34,16 @@ use serde_json::Value;
 use support::live::{LiveDaemon, kill_tree, spawn_shell};
 use tokio_tungstenite::tungstenite::stream::MaybeTlsStream;
 use tokio_tungstenite::tungstenite::{self, Message, WebSocket};
-use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleBitmap, CreateCompatibleDC,
     DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, GetDIBits, ReleaseDC, SelectObject,
 };
 use windows::Win32::Storage::Xps::{PRINT_WINDOW_FLAGS, PW_CLIENTONLY, PrintWindow};
+use windows::Win32::System::Threading::{
+    OpenThread, ResumeThread, SuspendThread, THREAD_SUSPEND_RESUME,
+};
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForWindow, SetProcessDpiAwarenessContext,
 };
@@ -60,8 +63,9 @@ type Socket = WebSocket<MaybeTlsStream<TcpStream>>;
 const OFFSCREEN_ENV: &str = "RUSTLING_TULIP_OFFSCREEN_WINDOW";
 /// `wParam` of a mouse message while the left button is down.
 const MK_LBUTTON: usize = 0x0001;
-/// How long the window gets to paint its sidebar and footer once connected.
-const PAINT_TIMEOUT: Duration = Duration::from_secs(10);
+/// A hang guard on the window's first paint of its sidebar and footer once
+/// connected, not an expected duration.
+const PAINT_TIMEOUT: Duration = Duration::from_secs(120);
 /// The active rail button's accent bar in logical pixels
 /// (`apps/native/src/activity_bar.rs`): its width at the window's left edge,
 /// and its top and bottom on the first button, which sits at the top.
@@ -71,8 +75,9 @@ const RAIL_BAR_BOTTOM: f32 = 38.0;
 /// The gap between two captures that must match for the pane to count as
 /// settled.
 const SETTLE_GAP: Duration = Duration::from_millis(250);
-/// How long the pane gets to draw a command once the shell has echoed it.
-const PANE_TIMEOUT: Duration = Duration::from_secs(5);
+/// A hang guard on the pane drawing a command once the shell has echoed it,
+/// not an expected duration.
+const PANE_TIMEOUT: Duration = Duration::from_secs(120);
 /// The fewest pane pixels, in square logical pixels, that typing
 /// `echo rt-smoke-marker` and its output line must change: several times
 /// the cursor cell a cursor move redraws, a quarter of the ~3,800 pixels the
@@ -90,21 +95,34 @@ const CLIENT_ID_FILE: &str = "client-id-native";
 const CHOOSER_LINE: &str = "first connect for this client";
 /// The line the shell prints for the typed command.
 const MARKER: &str = "rt-smoke-marker";
-const WINDOW_TIMEOUT: Duration = Duration::from_secs(20);
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
-const KEYS_TIMEOUT: Duration = Duration::from_secs(30);
-/// How long the seeded shell gets to print its first prompt.
-const PROMPT_TIMEOUT: Duration = Duration::from_secs(20);
-/// How long the test's socket waits for one reply among the broadcasts.
-const REPLY_TIMEOUT: Duration = Duration::from_secs(20);
-/// How long one typed command gets to show up before it is typed again.
-const ECHO_WAIT: Duration = Duration::from_secs(5);
-/// The pause after each posted key. A letter reaches the pane as the
-/// `WM_CHAR` that translating its key-down posts, which queues behind every
-/// key already posted; the pause lets it arrive before the next key, as it
-/// does from a real keyboard, whose input is read after posted messages.
-/// At 25 ms, letters overtook one another and Enter on a fully loaded CPU.
-const KEY_GAP: Duration = Duration::from_millis(100);
+/// A hang guard on the client's first visible window, not an expected
+/// duration.
+const WINDOW_TIMEOUT: Duration = Duration::from_secs(120);
+/// A hang guard on the client's own log recording its connection, not an
+/// expected duration.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(120);
+/// A hang guard on posted keys reaching the shell and the command they type
+/// landing, not an expected duration.
+const KEYS_TIMEOUT: Duration = Duration::from_secs(120);
+/// A hang guard on the seeded shell printing its first prompt, not an
+/// expected duration.
+const PROMPT_TIMEOUT: Duration = Duration::from_secs(120);
+/// A hang guard on the test's socket waiting for one reply among the
+/// broadcasts, not an expected duration.
+const REPLY_TIMEOUT: Duration = Duration::from_secs(120);
+/// A hang guard on one read from the test's socket, not an expected
+/// duration.
+const SOCKET_TIMEOUT: Duration = Duration::from_secs(120);
+/// The interval between two readings of the shell's scrollback while one
+/// posted key's echo is awaited.
+const ECHO_POLL: Duration = Duration::from_millis(250);
+/// How long the attach probe waits for its posted Space to be echoed before
+/// posting another; a repeated Space is harmless, since cmd ignores leading
+/// blanks.
+const PROBE_WAIT: Duration = Duration::from_secs(1);
+/// How long the client's UI thread stays frozen after the stall spec
+/// suspends it mid-line; the spec's thaw thread resumes it after this.
+const STALL: Duration = Duration::from_secs(5);
 
 /// The client binary, killed with everything under it on drop.
 struct Client(Child);
@@ -118,6 +136,37 @@ impl Drop for Client {
     }
 }
 
+/// The client's UI thread, which drains the window's message queue, suspended
+/// until dropped: a client stalled by load, for as long as the test says.
+struct Frozen(HANDLE);
+
+// SAFETY: a thread handle may be resumed and closed from any thread.
+unsafe impl Send for Frozen {}
+
+impl Frozen {
+    fn ui_thread(hwnd: HWND) -> Self {
+        // SAFETY: a plain query on a live window.
+        let tid = unsafe { GetWindowThreadProcessId(hwnd, None) };
+        // SAFETY: opens the client's UI thread for suspend and resume only.
+        let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, false, tid) }
+            .expect("open the client's UI thread");
+        // SAFETY: suspends a thread of the client this test launched; Drop resumes it.
+        let count = unsafe { SuspendThread(thread) };
+        assert_ne!(count, u32::MAX, "suspend the client's UI thread");
+        Self(thread)
+    }
+}
+
+impl Drop for Frozen {
+    fn drop(&mut self) {
+        // SAFETY: resumes the thread `ui_thread` suspended, then closes its handle.
+        unsafe {
+            ResumeThread(self.0);
+            let _ = CloseHandle(self.0);
+        }
+    }
+}
+
 /// A short-lived socket of the test's own on `daemon`, past its handshake:
 /// the client binary is a separate process with no sender to borrow.
 fn connect(daemon: &LiveDaemon, client_id: &str) -> Socket {
@@ -125,7 +174,7 @@ fn connect(daemon: &LiveDaemon, client_id: &str) -> Socket {
     let url = format!("ws://127.0.0.1:{}/ws", handshake.port);
     let (mut ws, _) = tungstenite::connect(url).expect("open a socket to the daemon");
     if let MaybeTlsStream::Plain(stream) = ws.get_ref() {
-        TcpStream::set_read_timeout(stream, Some(Duration::from_secs(10)))
+        TcpStream::set_read_timeout(stream, Some(SOCKET_TIMEOUT))
             .expect("set the socket's timeout");
     }
     send(
@@ -533,16 +582,30 @@ fn press(hwnd: HWND, vk: VIRTUAL_KEY) {
         wparam,
         isize::try_from(up).expect("key lparam"),
     );
-    std::thread::sleep(KEY_GAP);
 }
 
 /// Types lowercase letters, digits, spaces, dots and hyphens, then Enter.
-fn type_line(hwnd: HWND, text: &str) {
-    for c in text.chars() {
+/// Each posted key waits for the shell to echo it before the next key is
+/// posted: a letter reaches the pane as the `WM_CHAR` that translating its
+/// key-down posts, which queues behind every key-down already posted, while
+/// Space and Enter are sent at the key-down itself, so keys posted without
+/// waiting overtake one another whenever the client stalls.
+fn type_line(
+    hwnd: HWND,
+    shell: &mut Socket,
+    session: &str,
+    text: &str,
+    after_press: &mut dyn FnMut(usize),
+) {
+    let deadline = Instant::now() + KEYS_TIMEOUT;
+    probe_attached(hwnd, shell, session, deadline);
+    let mut expected = String::new();
+    for (index, c) in text.chars().enumerate() {
         assert!(
             c == ' ' || c == '.' || c == '-' || c.is_ascii_alphanumeric(),
             "type_line types letters, digits, spaces, dots and hyphens only, not {c:?}"
         );
+        expected.push(c);
         let vk = match c {
             ' ' => VK_SPACE,
             '.' => VK_OEM_PERIOD,
@@ -552,9 +615,130 @@ fn type_line(hwnd: HWND, text: &str) {
                 VIRTUAL_KEY(u16::from(ascii))
             }
         };
+        if c == ' ' {
+            // A Space is sent at its key-down like Enter; the key after it
+            // proves by its own echo that the blank landed in place.
+            let seen = scrollback(shell, session).len();
+            press(hwnd, vk);
+            after_press(index);
+            wait_for_growth(shell, session, seen, deadline);
+            continue;
+        }
         press(hwnd, vk);
+        after_press(index);
+        wait_for_typed(shell, session, text, expected.trim_end(), deadline);
     }
+    wait_for_typed(shell, session, text, text.trim_end(), deadline);
     press(hwnd, VK_RETURN);
+}
+
+/// Posts a Space until the shell echoes one, which shows the pane has
+/// attached its session: a key posted before that is dropped. A repeated
+/// Space is harmless, since cmd ignores leading blanks.
+fn probe_attached(hwnd: HWND, shell: &mut Socket, session: &str, deadline: Instant) {
+    loop {
+        let seen = scrollback(shell, session).len();
+        press(hwnd, VK_SPACE);
+        let probe = (Instant::now() + PROBE_WAIT).min(deadline);
+        let mut attached = false;
+        while Instant::now() < probe {
+            if scrollback(shell, session).len() > seen {
+                attached = true;
+                break;
+            }
+            std::thread::sleep(ECHO_POLL);
+        }
+        if attached {
+            // The echoes of the probe's Spaces arrive in several frames: the
+            // first key waits for a stream that has stopped changing.
+            wait_for_still(shell, session, deadline);
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no posted Space was echoed within {KEYS_TIMEOUT:?}: the pane never attached its \
+             session"
+        );
+    }
+}
+
+/// Waits until the scrollback length is the same across two consecutive
+/// polls, so a reply written in several frames has landed whole.
+fn wait_for_still(shell: &mut Socket, session: &str, deadline: Instant) {
+    let mut last = scrollback(shell, session).len();
+    loop {
+        assert!(
+            Instant::now() < deadline,
+            "the shell's scrollback never stopped growing within {KEYS_TIMEOUT:?}"
+        );
+        std::thread::sleep(ECHO_POLL);
+        let len = scrollback(shell, session).len();
+        if len == last {
+            return;
+        }
+        last = len;
+    }
+}
+
+/// Waits until `session`'s scrollback has grown past `len` bytes, the echo of
+/// one posted key.
+fn wait_for_growth(shell: &mut Socket, session: &str, len: usize, deadline: Instant) {
+    loop {
+        if scrollback(shell, session).len() > len {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "a posted key was not echoed within {KEYS_TIMEOUT:?}"
+        );
+        std::thread::sleep(ECHO_POLL);
+    }
+}
+
+/// Polls until the shell has echoed the keys typed so far, `expected`, and
+/// fails at once when what the shell has typed is not a prefix of the whole
+/// line: a key that overtook another shows up as text out of order.
+fn wait_for_typed(
+    shell: &mut Socket,
+    session: &str,
+    whole: &str,
+    expected: &str,
+    deadline: Instant,
+) {
+    loop {
+        let typed = typed_so_far(shell, session);
+        assert!(
+            whole.starts_with(&typed),
+            "the shell had {typed:?} typed at its prompt, not a prefix of {whole:?}: the posted \
+             keys reached it out of order"
+        );
+        if typed == expected {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "a posted key was not echoed within {KEYS_TIMEOUT:?}: the shell had {typed:?} typed \
+             at its prompt, not {expected:?}"
+        );
+        std::thread::sleep(ECHO_POLL);
+    }
+}
+
+/// The text the shell has received at its prompt: the last three plain lines
+/// joined with no separator, so a soft wrap between the prompt and the typed
+/// text does not split them, from after the prompt's final `>`.
+fn typed_so_far(shell: &mut Socket, session: &str) -> String {
+    let lines = plain_lines(&scrollback(shell, session));
+    let start = lines.len().saturating_sub(3);
+    let mut tail = String::new();
+    for line in &lines[start..] {
+        tail.push_str(line);
+    }
+    tail.rsplit('>')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_owned()
 }
 
 /// A capture of the window's client area as the compositor renders it, in
@@ -772,22 +956,66 @@ fn smoke_posted_keys_reach_the_shell() {
     // The pane's baseline is taken after the prompt, so the shell's startup
     // output cannot pass for the typed command's redraw.
     wait_for_prompt(&mut shell, &smoke);
-    let deadline = Instant::now() + KEYS_TIMEOUT;
-    // Typed again until it lands: keys posted before the pane has attached
-    // its session are dropped.
-    let before = loop {
-        click_at(hwnd, pane_center(hwnd));
-        let before = wait_pane_settled(hwnd);
-        type_line(hwnd, &format!("echo {MARKER}"));
-        if wait_for_line(&mut shell, &smoke.session, MARKER, ECHO_WAIT) {
-            break before;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "no {MARKER:?} line in the shell's scrollback within {KEYS_TIMEOUT:?}; the posted \
-             keys did not reach the shell"
-        );
-    };
+    click_at(hwnd, pane_center(hwnd));
+    let before = wait_pane_settled(hwnd);
+    type_line(
+        hwnd,
+        &mut shell,
+        &smoke.session,
+        &format!("echo {MARKER}"),
+        &mut |_| {},
+    );
+    assert!(
+        wait_for_line(&mut shell, &smoke.session, MARKER, KEYS_TIMEOUT),
+        "no {MARKER:?} line in the shell's scrollback within {KEYS_TIMEOUT:?}; the posted keys \
+         did not reach the shell"
+    );
     wait_pane_changed(hwnd, &before);
     assert_out_of_the_way(hwnd);
+}
+
+#[test]
+#[ignore = "smoke: run via .\\rt.ps1 native-smoke"]
+fn smoke_keys_posted_while_the_client_stalls_reach_the_shell_in_order() {
+    let smoke = open("smoke-stall");
+    let hwnd = smoke.hwnd;
+    wait_connected(&smoke);
+    wait_painted(hwnd);
+    let mut shell = connect(&smoke.daemon, "rt-smoke-reader");
+    wait_for_prompt(&mut shell, &smoke);
+    click_at(hwnd, pane_center(hwnd));
+    wait_pane_settled(hwnd);
+    // The freeze lands right after the `o` of `echo` and lasts STALL: the
+    // Space that follows waits for the `o`'s echo, so a harness with no
+    // per-key wait queues the Space behind the letters and garbles the
+    // command.
+    let (froze, frozen) = std::sync::mpsc::channel::<Frozen>();
+    let (posted, all_posted) = std::sync::mpsc::channel::<()>();
+    let thaw = std::thread::spawn(move || {
+        let Ok(frozen) = frozen.recv() else {
+            return;
+        };
+        let _ = all_posted.recv_timeout(STALL);
+        drop(frozen);
+    });
+    let mut stall = move |index: usize| {
+        if index == 3 {
+            let _ = froze.send(Frozen::ui_thread(hwnd));
+        }
+    };
+    type_line(
+        hwnd,
+        &mut shell,
+        &smoke.session,
+        &format!("echo {MARKER}"),
+        &mut stall,
+    );
+    drop(stall);
+    let _ = posted.send(());
+    thaw.join().expect("resume the client's UI thread");
+    assert!(
+        wait_for_line(&mut shell, &smoke.session, MARKER, KEYS_TIMEOUT),
+        "no {MARKER:?} line within {KEYS_TIMEOUT:?}: keys posted while the client stalled reached \
+         the shell out of order"
+    );
 }
