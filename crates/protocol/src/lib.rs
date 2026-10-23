@@ -3546,6 +3546,15 @@ pub enum DaemonMessage {
         container_id: String,
         ordered_ids: Vec<String>,
     },
+    /// Broadcast when a session's Claude calls its `show_mock` tool: the
+    /// daemon wrote the page to `path` (an absolute HTML file path), and a
+    /// client shows it in a panel beside that session. A later one for the
+    /// same session replaces the page.
+    MockShown {
+        session_id: String,
+        title: String,
+        path: String,
+    },
     /// Response to [`ClientMessage::ParseVscodeWorkspace`].
     VscodeWorkspaceParsed {
         suggestion: VscodeWorkspaceSuggestion,
