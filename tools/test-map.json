@@ -202,6 +202,12 @@
     },
     {
       "paths": [
+        "apps/native/src/fetch_link.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & test(/^fetch_link::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_file_fetch|ui_remote)::/))"
+    },
+    {
+      "paths": [
         "apps/native/src/file_fetch.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native) & test(/^file_fetch::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_file_fetch)::/))"
@@ -240,7 +246,7 @@
       "paths": [
         "apps/native/src/grid_view.rs"
       ],
-      "filter": "(binary_id(rustling-tulip-native) & test(/^grid_view::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_links|ui_pane_drag|ui_pane_spawn|ui_panes|ui_remote|ui_session_actions|ui_tabs|ui_terminal)::/))"
+      "filter": "(binary_id(rustling-tulip-native) & test(/^grid_view::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_file_fetch|ui_links|ui_pane_drag|ui_pane_spawn|ui_panes|ui_remote|ui_session_actions|ui_tabs|ui_terminal)::/))"
     },
     {
       "paths": [
@@ -594,7 +600,7 @@
       "paths": [
         "apps/native/src/term_view.rs"
       ],
-      "filter": "(binary_id(rustling-tulip-native) & test(/^term_view::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_font_size|ui_links|ui_shell_integration|ui_terminal)::/))"
+      "filter": "(binary_id(rustling-tulip-native) & test(/^term_view::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_file_fetch|ui_font_size|ui_links|ui_shell_integration|ui_terminal)::/))"
     },
     {
       "paths": [

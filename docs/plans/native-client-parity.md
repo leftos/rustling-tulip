@@ -129,7 +129,7 @@ Close behind: the paste and key quirks (native clipboard read, Shift+Enter bytes
 - [x] Copy on select (setting, on by default) — `Terminal.tsx` (native: a saved General setting since P4.2a)
 - [x] **(hard)** OSC 52: program clipboard writes reach the system clipboard and show the "copied" chip; reads answered empty — `components/clipboardProvider.ts`
 - [x] **(hard)** Links: URLs and paths (absolute, UNC, relative, `./`, `../`) with `:line:col`; trims trailing punctuation; stitches wrapped rows including TUI box borders (up to 4 joins within ±64 rows); shorter fallbacks if the path doesn't exist — `utils/terminalLinks.ts`
-- [x] **(hard)** Links underline only while Ctrl/Cmd is held; Ctrl/Cmd-click opens URLs in the browser, paths via cwd/worktree resolution in VS Code `-g` at the line or the default app / file manager; disabled on remote with a toast — `Terminal.tsx`, `lib.rs` `open_terminal_path`
+- [x] **(hard)** Links underline only while Ctrl/Cmd is held; Ctrl/Cmd-click opens URLs in the browser, paths via cwd/worktree resolution in VS Code `-g` at the line or the default app / file manager; on remote a path is fetched from the host and the saved copy opens the same way (native: `fetch_link.rs`, `docs/plans/remote-file-transfer.md` FT.3) — `Terminal.tsx`, `lib.rs` `open_terminal_path`
 - [x] **(hard)** Shell integration (plain shells): OSC 133 A/B/C/D + OSC 633 E; gutter dot per command (ok / fail / unknown, exit code and duration tooltip), 1000-command cap — `components/shellIntegration.ts`
 - [x] Gutter-dot menu: exit and duration, copy command / output / both, re-run (types the command without Enter) — `ShellCommandMenu.tsx`
 - [x] Theme: fixed palette, ANSI colours contrast-adjusted against the background, white caret, blue selection — `utils/terminalTheme.ts`
@@ -194,7 +194,7 @@ The frontend has no search addon, bell handling or title parsing; `terminal_titl
 - [ ] Pair a device: one-time code with countdown and Cancel, and the pairing outcome — `SettingsModal.tsx` `PairDevicePanel`
 - [ ] Start daemon on login (HKCU Run key / LaunchAgent) — `src-tauri/src/autostart.rs` (native: the registration and the startup refresh in P6.5, `daemon_client::autostart`; the toggle arrives with the Remote access panel, P6.4)
 - [ ] Remote host profiles over Tailscale: the host picker from the tailnet's machines, a typed MagicDNS name, the chosen connection saved, and the client verifying the listener's `tailscale cert` TLS itself — no pinned-TLS tunnel, local plaintext bridge, pairing over it or `remote-profiles.json` (`docs/plans/remote-access.md`, P6.1–P6.3)
-- [ ] Remote mode disables local-file actions (add repo, reveal, VS Code, pickers become typed paths, terminal path links) — `utils/remoteMode.ts` (native: disabled with a reason since P6.2a; typed paths are P6.2b, RT-257)
+- [ ] Remote mode disables local-file actions (add repo, reveal, VS Code, pickers become typed paths) — `utils/remoteMode.ts` (native: disabled with a reason since P6.2a; typed paths are P6.2b, RT-257; a terminal path link fetches its file instead, FT.3)
 - [ ] Chosen connection saved; a missing saved host falls back to local — `App.tsx`
 
 ## Misc & shortcuts

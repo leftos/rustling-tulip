@@ -211,10 +211,11 @@ pub enum PaneEvent {
     /// puts it on the clipboard and shows the chip.
     Copied { text: String },
     /// Ctrl+click picked `link`; a path in it resolves against
-    /// `base_dirs`, the session's folders.
+    /// `base_dirs`, the folders of `session`, the pane's session.
     OpenLink {
         link: TerminalLink,
         base_dirs: Vec<String>,
+        session: Option<String>,
     },
     /// A left press on the gutter dot at `index` (top first): the root opens
     /// that command's menu at `at`, in window coordinates.
@@ -1091,6 +1092,7 @@ impl TerminalPane {
                 cx.emit(PaneEvent::OpenLink {
                     link,
                     base_dirs: self.base_dirs.clone(),
+                    session: self.session_id().map(str::to_owned),
                 });
             }
             cx.notify();

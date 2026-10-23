@@ -12,7 +12,7 @@ use crate::support;
 use std::path::{Path, PathBuf};
 
 use gpui::{Modifiers, TestAppContext, point, px};
-use protocol::SessionSnapshot;
+use protocol::{ClientMessage, SessionSnapshot};
 use rustling_tulip_native::ToastKind;
 use serde_json::{Value, json};
 use support::{Fixture, Harness, Opened, TestDir, session};
@@ -119,6 +119,31 @@ fn ctrl_click_on_a_plain_path_opens_the_default_app(cx: &mut TestAppContext) {
     let on = h.cell_center("p1", 9, 0);
     h.click(on, ctrl());
     assert_eq!(h.opened(), [Opened::DefaultApp(file)]);
+}
+
+#[gpui::test]
+fn a_local_path_link_still_opens_locally(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let file = write_file(dir.path(), "docs/notes.md");
+    let cwd = dir.path().to_string_lossy().into_owned();
+    let mut h = attached(
+        cx,
+        &dir,
+        session("s1")
+            .shell(&cwd)
+            .members(&[("r1", "main", &cwd)])
+            .build(),
+    );
+    h.pty("s1", b"wrote docs/notes.md");
+    let on = h.cell_center("p1", 9, 0);
+    h.click(on, ctrl());
+    assert_eq!(h.opened(), [Opened::DefaultApp(file)]);
+    assert!(
+        !h.sent()
+            .iter()
+            .any(|msg| matches!(msg, ClientMessage::FetchFile { .. })),
+        "the local daemon's files open in place, never fetched"
+    );
 }
 
 #[gpui::test]

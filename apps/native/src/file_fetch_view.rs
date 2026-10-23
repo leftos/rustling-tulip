@@ -10,10 +10,13 @@ use gpui::{Context, Window};
 use protocol::{ClientMessage, DaemonMessage};
 
 use crate::RootView;
+use crate::fetch_link;
 use crate::file_fetch::{
-    self, FetchEntry, FetchRequest, WriteOutcome, WriteStep, display_host_path, is_under,
+    self, FetchEntry, FetchRequest, ProbeGroup, WriteOutcome, WriteStep, display_host_path,
+    is_under,
 };
-use crate::notices::ToastKind;
+use crate::links::TerminalLink;
+use crate::notices::{ToastKind, ToastSpec};
 use crate::open::OpenJob;
 use crate::open_view::{COULD_NOT_OPEN, Origin, Route, Then};
 
@@ -46,6 +49,51 @@ impl RootView {
         request: FetchRequest,
         cx: &mut Context<Self>,
     ) -> Option<String> {
+        self.start_fetch(request, None, cx)
+    }
+
+    /// A Ctrl+click on a path link on a remote host: fetches the first of
+    /// the link's readings under `session`'s repos and worktrees that the
+    /// host has, trying them one at a time.
+    pub(crate) fn fetch_path_link(
+        &mut self,
+        link: &TerminalLink,
+        session: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        let mut readings = session
+            .and_then(|id| self.sidebar.session(id))
+            .map(|session| {
+                fetch_link::session_readings(&link.candidates, session, self.sidebar.repos())
+            })
+            .unwrap_or_default();
+        if readings.is_empty() {
+            tracing::warn!(
+                target = %link.target,
+                session = session.unwrap_or("none"),
+                "no repo or worktree of the session holds the terminal path link"
+            );
+            self.push_toast(
+                ToastKind::Warning,
+                &failed_title(file_fetch::file_name(&link.target)),
+                Some("Not inside a repo or worktree of this session.".to_owned()),
+                cx,
+            );
+            return;
+        }
+        let first = readings.remove(0);
+        let group = self.fetches.new_group(readings);
+        self.start_fetch(first, Some(group), cx);
+    }
+
+    /// [`Self::fetch_remote_file`], as one reading of `group`'s link when
+    /// given: its "Fetching" toast is the group's, updated in place.
+    fn start_fetch(
+        &mut self,
+        request: FetchRequest,
+        group: Option<ProbeGroup>,
+        cx: &mut Context<Self>,
+    ) -> Option<String> {
         let name = file_fetch::file_name(&request.rel_path).to_owned();
         let Some(host) = file_fetch::host_folder(self.conn.target()) else {
             tracing::warn!(rel = %request.rel_path, "refusing a file fetch from the local daemon");
@@ -74,10 +122,12 @@ impl RootView {
         let repo_id = request.repo_id.clone();
         let worktree_path = request.worktree_path.clone();
         let rel_path = request.rel_path.clone();
-        let Ok(id) = self
-            .fetches
-            .insert(FetchEntry::new(host.clone(), request, target))
-        else {
+        let toast_key = group.as_ref().map(|group| group.key().to_owned());
+        let mut entry = FetchEntry::new(host.clone(), request, target);
+        if let Some(group) = group {
+            entry = entry.in_group(group);
+        }
+        let Ok(id) = self.fetches.insert(entry) else {
             tracing::info!(rel = %rel_path, "the file is already being fetched");
             self.push_toast(
                 ToastKind::Info,
@@ -94,13 +144,30 @@ impl RootView {
             worktree_path,
             path: rel_path,
         });
-        self.push_toast(
-            ToastKind::Info,
-            &format!("Fetching {name} from {host}"),
-            None,
+        self.push_toast_spec(
+            ToastSpec {
+                kind: ToastKind::Info,
+                title: format!("Fetching {name} from {host}"),
+                detail: None,
+                key: toast_key,
+                sticky: false,
+                actions: Vec::new(),
+            },
             cx,
         );
         Some(id)
+    }
+
+    /// The daemon could not fetch `id`: a reading of a link that never
+    /// started moves on to the link's next reading; anything else fails.
+    fn on_fetch_error(&mut self, id: &str, error: &str, cx: &mut Context<Self>) {
+        match self.fetches.next_reading(id) {
+            Some((next, group)) => {
+                tracing::info!(id, next = %next.rel_path, "a link's reading is not on the host: {error}");
+                self.start_fetch(next, Some(group), cx);
+            }
+            None => self.end_fetch(id, error, false, cx),
+        }
     }
 
     /// Folds in a fetch's reply; returns whether it was one.
@@ -120,7 +187,7 @@ impl RootView {
                 self.on_fetch_chunk(id, *seq, data_b64, cx);
             }
             DaemonMessage::FileFetchDone { id } => self.on_fetch_done(id, cx),
-            DaemonMessage::FileFetchError { id, error } => self.end_fetch(id, error, false, cx),
+            DaemonMessage::FileFetchError { id, error } => self.on_fetch_error(id, error, cx),
             _ => return false,
         }
         true

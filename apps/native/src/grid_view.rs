@@ -495,8 +495,12 @@ impl RootView {
                 }
             }
             PaneEvent::Copied { text } => self.copy_to_clipboard(text, cx),
-            PaneEvent::OpenLink { link, base_dirs } => {
-                self.open_link(link, base_dirs.clone(), window, cx);
+            PaneEvent::OpenLink {
+                link,
+                base_dirs,
+                session,
+            } => {
+                self.open_link(link, base_dirs.clone(), session.as_deref(), window, cx);
             }
             PaneEvent::ShellDotMenu { pane_id, index, at } => {
                 self.open_shell_menu(pane_id, *index, *at, window, cx);

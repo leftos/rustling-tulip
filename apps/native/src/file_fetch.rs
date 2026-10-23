@@ -2,7 +2,7 @@
 //! part file a transfer writes into before it takes the file's place, and the
 //! transfers in flight.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write as _;
 use std::path::{Component, Path, PathBuf};
@@ -379,6 +379,29 @@ pub async fn run_writer(
     WriteOutcome::Aborted
 }
 
+/// The readings of one terminal link, tried one at a time: the ones still to
+/// try after the reading in flight, and the key of the one toast that says
+/// the link is fetching.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProbeGroup {
+    key: String,
+    rest: VecDeque<FetchRequest>,
+}
+
+impl ProbeGroup {
+    /// The key of the group's "Fetching" toast.
+    #[must_use]
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    /// The readings still to try, in order.
+    #[must_use]
+    pub fn remaining(&self) -> &VecDeque<FetchRequest> {
+        &self.rest
+    }
+}
+
 /// A fetch in flight.
 #[derive(Debug)]
 pub struct FetchEntry {
@@ -391,6 +414,8 @@ pub struct FetchEntry {
     writer: Option<UnboundedSender<WriteStep>>,
     /// `Done` went to the writer, whose result now decides how it ends.
     finishing: bool,
+    /// The link's other readings, when this fetch is one of them.
+    group: Option<ProbeGroup>,
 }
 
 /// `target` as the key two fetches collide on: case-insensitive where the
@@ -417,7 +442,21 @@ impl FetchEntry {
             resolved_path: None,
             writer: None,
             finishing: false,
+            group: None,
         }
+    }
+
+    /// This fetch as one reading of `group`'s link.
+    #[must_use]
+    pub fn in_group(mut self, group: ProbeGroup) -> Self {
+        self.group = Some(group);
+        self
+    }
+
+    /// The link's other readings, when this fetch is one of them.
+    #[must_use]
+    pub fn group(&self) -> Option<&ProbeGroup> {
+        self.group.as_ref()
     }
 
     /// Notes that `Done` went to the writer: the fetch now ends by the
@@ -500,6 +539,7 @@ pub struct FetchRegistry {
     /// on a part file.
     launch: String,
     next_id: u64,
+    next_group: u64,
     entries: HashMap<String, FetchEntry>,
 }
 
@@ -511,8 +551,34 @@ impl FetchRegistry {
         Self {
             launch: launch.to_owned(),
             next_id: 0,
+            next_group: 0,
             entries: HashMap::new(),
         }
+    }
+
+    /// A new probe group whose readings after the first are `rest`.
+    pub fn new_group(&mut self, rest: Vec<FetchRequest>) -> ProbeGroup {
+        self.next_group += 1;
+        ProbeGroup {
+            key: format!("fetch-group-{}-{}", self.launch, self.next_group),
+            rest: rest.into(),
+        }
+    }
+
+    /// The fetch `id` failed: when it is a reading of a probe group that
+    /// has not started and readings remain, ends it and returns the next
+    /// reading with the group that follows it. Otherwise leaves it in place
+    /// for its failure to be reported.
+    pub fn next_reading(&mut self, id: &str) -> Option<(FetchRequest, ProbeGroup)> {
+        let entry = self.entries.get_mut(id)?;
+        if entry.size.is_some() {
+            return None;
+        }
+        let group = entry.group.as_mut()?;
+        let next = group.rest.pop_front()?;
+        let group = group.clone();
+        self.entries.remove(id);
+        Some((next, group))
     }
 
     /// Records `entry` under a new id, unless a fetch to the same target
@@ -947,6 +1013,74 @@ mod tests {
             registry.insert(entry("host", "src/a.txt")).is_ok(),
             "the file fetches again once the first fetch ended"
         );
+    }
+
+    fn requests(rels: &[&str]) -> Vec<FetchRequest> {
+        rels.iter().map(|rel| entry("host", rel).request).collect()
+    }
+
+    #[test]
+    fn a_probe_group_advances_on_a_pre_start_error() {
+        let mut registry = FetchRegistry::new("t");
+        let group = registry.new_group(requests(&["b.txt", "c.txt"]));
+        let key = group.key().to_owned();
+        let id = registry
+            .insert(entry("host", "a.txt").in_group(group))
+            .expect("starts");
+
+        let (next, group) = registry
+            .next_reading(&id)
+            .expect("a reading that never started moves on to the next");
+
+        assert_eq!(next.rel_path, "b.txt");
+        assert_eq!(group.key(), key, "the group keeps its toast");
+        assert_eq!(
+            group.remaining().iter().cloned().collect::<Vec<_>>(),
+            requests(&["c.txt"])
+        );
+        assert!(registry.get(&id).is_none(), "the missed reading ends");
+    }
+
+    #[test]
+    fn a_started_fetch_ends_the_group() {
+        let mut registry = FetchRegistry::new("t");
+        let group = registry.new_group(requests(&["b.txt"]));
+        let id = registry
+            .insert(entry("host", "a.txt").in_group(group))
+            .expect("starts");
+        registry
+            .get_mut(&id)
+            .expect("recorded")
+            .on_started(4, r"C:\repo\a.txt".to_owned());
+
+        assert_eq!(
+            registry.next_reading(&id),
+            None,
+            "a reading the host started is the link's file"
+        );
+        assert!(registry.get(&id).is_some(), "its failure is reported");
+    }
+
+    #[test]
+    fn the_last_failed_reading_ends_the_group_with_one_error() {
+        let mut registry = FetchRegistry::new("t");
+        let group = registry.new_group(requests(&["b.txt"]));
+        let id = registry
+            .insert(entry("host", "a.txt").in_group(group))
+            .expect("starts");
+        let (next, group) = registry.next_reading(&id).expect("moves on");
+        let last = registry
+            .insert(
+                FetchEntry::new("host".to_owned(), next, PathBuf::from("b.txt")).in_group(group),
+            )
+            .expect("the next reading starts");
+
+        assert_eq!(registry.next_reading(&last), None, "no reading is left");
+        assert!(
+            registry.get(&last).is_some(),
+            "the last reading stays for its one failure to be reported"
+        );
+        assert!(registry.next_reading("fetch-t-unknown").is_none());
     }
 
     #[test]

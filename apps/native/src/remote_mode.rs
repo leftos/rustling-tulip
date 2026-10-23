@@ -9,9 +9,6 @@ use crate::target::Target;
 /// the toast when one is refused.
 pub const LOCAL_FILES_REASON: &str = "Not available on a remote host: this opens files on this PC";
 
-/// The toast a Ctrl+click on a path link shows on a remote host.
-pub const PATH_LINK_REASON: &str = "Paths on a remote host can't be opened from this PC yet";
-
 /// What the sidebar's empty-registry note says on the local daemon.
 const SIDEBAR_NO_REPOS_NOTE: &str = "No repos or workspaces yet.";
 
@@ -58,8 +55,9 @@ impl Capabilities {
     }
 
     /// Whether the client may open, reveal or pick the daemon's files on
-    /// this PC: Reveal, Open in Explorer and VS Code, path links, Add repo
-    /// and the Browse buttons.
+    /// this PC: Reveal, Open in Explorer and VS Code, Add repo and the
+    /// Browse buttons. A path link on a remote host fetches its file
+    /// instead.
     #[must_use]
     pub fn opens_local_files(self) -> bool {
         self.local_files

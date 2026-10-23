@@ -12,7 +12,6 @@ use crate::links::{LinkKind, TerminalLink, TerminalLinkCandidate};
 use crate::notice_view::modal_panel;
 use crate::notices::{ToastKind, ToastSpec};
 use crate::open::{self, JobOutcome, OpenAction, OpenFailure, OpenJob, Resolution};
-use crate::remote_mode::PATH_LINK_REASON;
 use crate::run_confirm::{RunButton, RunConfirm};
 use crate::session_menu::{backdrop, dialog_button};
 use crate::{MUTED, RootView};
@@ -69,11 +68,13 @@ impl RootView {
     }
 
     /// A pane's Ctrl+click picked `link`; a path in it resolves against
-    /// `base_dirs`, the pane's session's folders.
+    /// `base_dirs`, the folders of `session`, the pane's session. On a
+    /// remote host the path is fetched from `session`'s repos instead.
     pub(crate) fn open_link(
         &mut self,
         link: &TerminalLink,
         base_dirs: Vec<String>,
+        session: Option<&str>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -93,18 +94,9 @@ impl RootView {
                 }
             },
             // A host path is not on this PC; resolving it here could open
-            // a local file of the same name.
+            // a local file of the same name, so it is fetched instead.
             LinkKind::Path if !self.capabilities().opens_local_files() => {
-                tracing::warn!(
-                    "refusing terminal path link {} on a remote host",
-                    link.target
-                );
-                self.push_toast(
-                    ToastKind::Warning,
-                    COULD_NOT_OPEN,
-                    Some(PATH_LINK_REASON.to_owned()),
-                    cx,
-                );
+                self.fetch_path_link(link, session, cx);
             }
             LinkKind::Path => self.resolve_path(link.candidates.clone(), base_dirs, window, cx),
         }

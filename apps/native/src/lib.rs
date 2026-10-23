@@ -25,6 +25,7 @@ pub mod diff_view;
 mod discard_confirm;
 mod drag;
 pub mod ellipsis;
+mod fetch_link;
 pub mod file_fetch;
 mod file_fetch_view;
 mod folder_picker;

@@ -26,7 +26,6 @@ use support::{Fixture, Harness, Opened, TestDir, pane, repo, session, split, tab
 
 const HOST: &str = "box.tail1234.ts.net";
 const LOCAL_FILES: &str = "Not available on a remote host: this opens files on this PC";
-const PATH_LINK: &str = "Paths on a remote host can't be opened from this PC yet";
 const URL: &str = "https://example.com/docs";
 
 /// A connection to `target` open on `port`, welcomed with the fake daemon's
@@ -340,18 +339,42 @@ fn write_file(root: &Path, rel: &str) {
 }
 
 #[gpui::test]
-fn path_link_does_not_open_on_remote(cx: &mut TestAppContext) {
+fn path_link_fetches_instead_of_opening_on_remote(cx: &mut TestAppContext) {
     let dir = TestDir::new();
-    write_file(dir.path(), "docs/notes.md");
-    let cwd = dir.path().to_string_lossy().into_owned();
-    let mut h = attached_remote(cx, &dir, session("s1").shell(&cwd).build());
-    h.pty("s1", b"wrote docs/notes.md");
+    let mut h = attached_remote(cx, &dir, session("s1").worktree("r1").build());
+    h.sent();
+    h.pty("s1", br"wrote C:\wt\x\docs\notes.md");
     let on = h.cell_center("p1", 9, 0);
     h.click(on, Modifiers::secondary_key());
     assert_eq!(h.opened(), [], "a host path never opens on this PC");
+    let fetches: Vec<(String, Option<String>, String)> = h
+        .sent()
+        .into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::FetchFile {
+                repo_id,
+                worktree_path,
+                path,
+                ..
+            } => Some((repo_id, worktree_path, path)),
+            _ => None,
+        })
+        .collect();
     assert_eq!(
-        toasts(&mut h),
-        [("Couldn't open".to_owned(), Some(PATH_LINK.to_owned()))]
+        fetches,
+        [(
+            "r1".to_owned(),
+            Some("C:/wt/x".to_owned()),
+            "docs/notes.md".to_owned()
+        )],
+        "the link's file is fetched from the member's worktree"
+    );
+    assert!(
+        !toasts(&mut h)
+            .iter()
+            .any(|(title, _)| title == "Couldn't open"),
+        "nothing is refused: {:?}",
+        toasts(&mut h)
     );
 }
 
