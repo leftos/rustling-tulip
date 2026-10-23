@@ -6,15 +6,13 @@
 
 ### M1 — Restructure: Claude and shells only (8/8 done)
 
-### M2 — Daily-driver fixes (26/31 done)
-- [ ] RT-281 Take a Claude session's status from hooks and its screen, never from output silence · release vNext
-  - [/] RT-285 SS.3: Replace the silence and volume status with the screen-driven write · release vNext
-  - [ ] RT-286 SS.4: Check a reattached session's restored status against its screen · release vNext
-  - [/] RT-287 SS.5: End a plain shell's claude status when its Claude screen is gone · release vNext
-  - [ ] RT-288 SS.6: Paint Claude-shaped screens in fake-claude and drive the live tier by them · release vNext
+### M2 — Daily-driver fixes (31/31 done)
 
 ### M3 — Cutover and v0.1.0-alpha (2/3 done)
 - [ ] RT-247 Merge feat/remote-mode to main (#201) · release vNext
+
+### No milestone
+- [ ] RT-292 Add hook-driven and screen engine to the README glossary · release vNext
 
 ## Release 2 — Remote mode and the agent seam
 
@@ -75,7 +73,6 @@
 - [ ] RT-193 Make SpawnArgs' hook settings a constructor argument, not a comment-enforced None · release vNext+1
 - [ ] RT-206 Reject a leading hyphen in a hook-reported conversation id · release vNext+1
 - [ ] RT-210 Match Claude Code's hook matcher semantics in the fake CLI · release vNext+1
-- [ ] RT-221 Make the live tier's idle wait robust to fake-claude's Stop timer · release vNext+1
 
 ## Wave 4 — Mobile app (iPhone PWA over Tailscale)
 
@@ -254,3 +251,7 @@
 - [ ] RT-263 Split RootView::on_key_capture under the 100-line limit
 - [ ] RT-279 Stop sending loopback bearer tokens in cleartext
 - [ ] RT-289 Classify a plain shell by its prompt at the cursor, not by output volume
+
+## No project
+
+- [ ] RT-291 Make the daemon's default log filter match its rustling_tulipd targets
