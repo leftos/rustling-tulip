@@ -1,6 +1,6 @@
 # RT-324 map: driving the native client headless
 
-PROTOCOL: 1 overlay: none (`docs/agents/explore.md` absent), read CLAUDE.md; 2 README: skipped, `docs/README.md` does not exist; 3 Task Index: read `docs/architecture.md:68` rows "Run the tests" (:123) and "Look at a UI change" (:126), no row for driving/injecting input; 4 ck: skipped (one-repo question, Task Index rows + CLAUDE.md answered the docs side; not run); 5 design docs: RT-316/RT-42 read from Linear; 6 source: yaat/towercab/delve docs + driver, smoke_window.rs, shot.rs, offscreen.rs, tests/support/mod.rs, gpui-0.2.2 windows events; 7 tree search: done for `debug_selector`, actions, RootView accessors.
+PROTOCOL: 1 overlay: none (`docs/agents/explore.md` absent), read CLAUDE.md; 2 README: skipped, `docs/README.md` does not exist; 3 Task Index: read the `docs/architecture.md` Task index rows "Run the tests" (:123) and "Look at a UI change" (:126), no row for driving/injecting input; 4 ck: skipped (one-repo question, Task Index rows + CLAUDE.md answered the docs side; not run); 5 design docs: RT-316/RT-42 read from Linear; 6 source: yaat/towercab/delve docs + driver, smoke_window.rs, shot.rs, offscreen.rs, tests/support/mod.rs, gpui-0.2.2 windows events; 7 tree search: done for `debug_selector`, actions, RootView accessors.
 
 Root anchored: `X:/dev/rustling-tulip` (branch `main`).
 
@@ -102,7 +102,7 @@ The question took roughly 25 reads/searches beyond the Task Index row and one do
 
 ## MISSING ENTRY POINT
 
-- `docs/README.md` does not exist (CLAUDE.md names `docs/architecture.md` as the index, and the lowercase file exists with a "Task index" section at `docs/architecture.md:68`).
+- `docs/README.md` does not exist (CLAUDE.md names `docs/architecture.md` as the index, and the lowercase file exists with a "Task index" section of `docs/architecture.md`).
 - `docs/agents/explore.md` (repo overlay) does not exist.
 - `docs/DRIVING_CONVENTIONS.md` does not exist (see 5).
 - Glossary: no glossary was found for terms such as "cloaked", "smoke tier", "shot"; not checked beyond the absence of `docs/README.md`.

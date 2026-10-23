@@ -6,6 +6,7 @@
 
 use protocol::{ClientMessage, ContainerRef, GridNode, PaneDropEdge, SplitDirection, TabEntry};
 
+use crate::sidebar::{Container, ContainerKind};
 use crate::tabs::{self, OuterSides, Rect};
 use crate::undo;
 
@@ -28,17 +29,10 @@ pub const EMPTY_PANE_LABEL: &str = "Empty pane";
 
 /// What a drag carries: the item the pointer picked up.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the Container and Leaf payloads are constructed only by tests"
-    )
-)]
 pub enum DragPayload {
     /// A pane, dragged by its header.
     Pane { tab_id: String, pane_id: String },
-    /// A tab's pill.
+    /// A tab's pill, or its container in the sidebar's tabs view.
     Tab(String),
     /// A sidebar container: a repo or a workspace.
     Container(ContainerRef),
@@ -368,7 +362,6 @@ pub fn reorder_tabs(
 /// `target` sends, or none when the order it would set is the one already in
 /// place.
 #[must_use]
-#[cfg_attr(not(test), expect(dead_code, reason = "called only from unit tests"))]
 pub fn reorder_containers(
     containers: &[ContainerRef],
     dragged: &ContainerRef,
@@ -377,6 +370,131 @@ pub fn reorder_containers(
 ) -> Option<ClientMessage> {
     let ordered = reorder(containers, dragged, target, side);
     (ordered != containers).then_some(ClientMessage::ReorderContainers { ordered })
+}
+
+/// The [`ClientMessage::ReorderSessions`] a leaf of `container_id` dropped
+/// `side` of the leaf `target` sends: the container's whole shown order
+/// `session_ids` with the move applied, or none when that order is the one
+/// already in place.
+#[must_use]
+pub fn reorder_sessions(
+    session_ids: &[String],
+    container_id: &str,
+    dragged: &str,
+    target: &str,
+    side: Side,
+) -> Option<ClientMessage> {
+    let ordered = reorder(session_ids, &dragged.to_owned(), &target.to_owned(), side);
+    (ordered != session_ids).then(|| ClientMessage::ReorderSessions {
+        container_id: container_id.to_owned(),
+        ordered_ids: ordered,
+    })
+}
+
+/// A sidebar row a drag can point at: a container's header row, by the
+/// container's key, or a leaf, by its container's key and its session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SidebarRow {
+    Container(String),
+    Leaf {
+        container_key: String,
+        session_id: String,
+    },
+}
+
+/// The manual-order entry of a Repos-view `container`: a workspace's or a
+/// repo's; none for any other kind.
+#[must_use]
+pub fn container_ref(container: &Container) -> Option<ContainerRef> {
+    match container.kind {
+        ContainerKind::Workspace => Some(ContainerRef::Workspace(container.id.clone())),
+        ContainerKind::Repo => Some(ContainerRef::Repo(container.id.clone())),
+        ContainerKind::Shell
+        | ContainerKind::Dir
+        | ContainerKind::Detached
+        | ContainerKind::Tab
+        | ContainerKind::Unbound => None,
+    }
+}
+
+/// What a drag started on `container`'s header carries: a workspace or a
+/// repo container itself, a tab container its tab as the strip's pill does;
+/// SH, DIR, Detached and Unbound containers do not drag.
+#[must_use]
+pub fn container_payload(container: &Container) -> Option<DragPayload> {
+    if container.kind == ContainerKind::Tab {
+        return Some(DragPayload::Tab(container.id.clone()));
+    }
+    container_ref(container).map(DragPayload::Container)
+}
+
+/// What a drag started on the leaf of `session_id` in `container` carries:
+/// leaves of workspace, repo and tab containers drag, the rest do not.
+#[must_use]
+pub fn leaf_payload(container: &Container, session_id: &str) -> Option<DragPayload> {
+    let reorders = matches!(
+        container.kind,
+        ContainerKind::Workspace | ContainerKind::Repo | ContainerKind::Tab
+    );
+    reorders.then(|| DragPayload::Leaf {
+        session_id: session_id.to_owned(),
+        container_id: container.id.clone(),
+    })
+}
+
+/// What a sidebar drop of `payload` at `side` of `row` sends, given the
+/// sidebar's shown `containers`: a workspace or repo container dropped on
+/// another one's header sends every shown workspace and repo in the new
+/// order; a tab dropped on a tab container's header sends the new tab order;
+/// a leaf dropped on another leaf of its own container sends that
+/// container's new session order. Anything else, or a drop that keeps the
+/// order, sends nothing.
+#[must_use]
+pub fn sidebar_reorder(
+    payload: &DragPayload,
+    containers: &[Container],
+    row: &SidebarRow,
+    side: Side,
+) -> Option<ClientMessage> {
+    match (payload, row) {
+        (DragPayload::Container(dragged), SidebarRow::Container(key)) => {
+            let target = containers
+                .iter()
+                .find(|c| &c.key == key)
+                .and_then(container_ref)?;
+            let shown: Vec<ContainerRef> = containers.iter().filter_map(container_ref).collect();
+            reorder_containers(&shown, dragged, &target, side)
+        }
+        (DragPayload::Tab(dragged), SidebarRow::Container(key)) => {
+            let tab_ids: Vec<String> = containers
+                .iter()
+                .filter(|c| c.kind == ContainerKind::Tab)
+                .map(|c| c.id.clone())
+                .collect();
+            let target = containers
+                .iter()
+                .find(|c| &c.key == key && c.kind == ContainerKind::Tab)?;
+            reorder_tabs(&tab_ids, dragged, &target.id, side, None)
+        }
+        (
+            DragPayload::Leaf {
+                session_id,
+                container_id,
+            },
+            SidebarRow::Leaf {
+                container_key,
+                session_id: target,
+            },
+        ) => {
+            let container = containers.iter().find(|c| &c.key == container_key)?;
+            if &container.id != container_id || leaf_payload(container, session_id).is_none() {
+                return None;
+            }
+            let ids: Vec<String> = container.leaves.iter().map(|l| l.id.clone()).collect();
+            reorder_sessions(&ids, container_id, session_id, target, side)
+        }
+        _ => None,
+    }
 }
 
 /// Whether `pane_id` is a pane of `grid`.
@@ -1232,6 +1350,267 @@ mod tests {
         assert!(
             reorder_containers(&containers, r1, r1, Side::After).is_none(),
             "a container dropped on itself sends nothing"
+        );
+    }
+
+    /// The Repos view of workspace `w1`, repos `r1` (sessions `a`, `b`, `c`)
+    /// and `r2` (session `d`), the standalone shell `sh`, the folder shell
+    /// `dir` and the detached session `x`.
+    fn repos_view() -> Vec<Container> {
+        use crate::sidebar::tests::{in_repo, repo, shell, workspace};
+        use protocol::{DaemonMessage, SessionKind};
+        let mut model = crate::sidebar::SidebarModel::default();
+        model.apply(&DaemonMessage::Repos {
+            repos: vec![repo("r1", "D:\\r1"), repo("r2", "D:\\r2")],
+        });
+        model.apply(&DaemonMessage::Workspaces {
+            workspaces: vec![workspace("w1", &[])],
+        });
+        model.apply(&DaemonMessage::Sessions {
+            sessions: vec![
+                in_repo("a", "r1"),
+                in_repo("b", "r1"),
+                in_repo("c", "r1"),
+                in_repo("d", "r2"),
+                shell("sh", Some("C:\\elsewhere"), SessionKind::Standalone),
+                shell("dir", Some("C:\\other\\proj"), SessionKind::Single),
+                in_repo("x", "gone"),
+            ],
+        });
+        model.containers()
+    }
+
+    /// The Tabs view of `t1` (sessions `a`, `b`), `t2` (session `c`) and the
+    /// unbound session `u`.
+    fn tabs_view() -> Vec<Container> {
+        use crate::sidebar::tests::session;
+        use protocol::DaemonMessage;
+        let mut model = crate::sidebar::SidebarModel::default();
+        model.apply(&DaemonMessage::Sessions {
+            sessions: vec![session("a"), session("b"), session("c"), session("u")],
+        });
+        model.tab_containers(&[
+            tab(
+                "t1",
+                &split(H, 0.5, pane("p1", Some("a")), pane("p2", Some("b"))),
+            ),
+            tab("t2", &pane("p3", Some("c"))),
+        ])
+    }
+
+    fn of_kind(containers: &[Container], kind: ContainerKind) -> &Container {
+        containers
+            .iter()
+            .find(|c| c.kind == kind)
+            .expect("a container of that kind")
+    }
+
+    fn header(key: &str) -> SidebarRow {
+        SidebarRow::Container(key.to_owned())
+    }
+
+    fn leaf_row(container_key: &str, session_id: &str) -> SidebarRow {
+        SidebarRow::Leaf {
+            container_key: container_key.to_owned(),
+            session_id: session_id.to_owned(),
+        }
+    }
+
+    fn leaf_drag(session_id: &str, container_id: &str) -> DragPayload {
+        DragPayload::Leaf {
+            session_id: session_id.to_owned(),
+            container_id: container_id.to_owned(),
+        }
+    }
+
+    #[test]
+    fn only_workspace_repo_and_tab_containers_drag() {
+        let repos = repos_view();
+        let payload = |kind| container_payload(of_kind(&repos, kind));
+        assert_eq!(
+            payload(ContainerKind::Workspace),
+            Some(DragPayload::Container(ContainerRef::Workspace(
+                "w1".to_owned()
+            )))
+        );
+        assert_eq!(
+            payload(ContainerKind::Repo),
+            Some(DragPayload::Container(ContainerRef::Repo("r1".to_owned())))
+        );
+        for kind in [
+            ContainerKind::Shell,
+            ContainerKind::Dir,
+            ContainerKind::Detached,
+        ] {
+            assert_eq!(payload(kind), None, "{kind:?} does not drag");
+        }
+
+        let tabs = tabs_view();
+        assert_eq!(
+            container_payload(of_kind(&tabs, ContainerKind::Tab)),
+            Some(DragPayload::Tab("t1".to_owned())),
+            "a tab container drags the strip's own payload"
+        );
+        assert_eq!(
+            container_payload(of_kind(&tabs, ContainerKind::Unbound)),
+            None
+        );
+    }
+
+    #[test]
+    fn only_leaves_of_workspace_repo_and_tab_containers_drag() {
+        let repos = repos_view();
+        assert_eq!(
+            leaf_payload(of_kind(&repos, ContainerKind::Repo), "a"),
+            Some(leaf_drag("a", "r1"))
+        );
+        for kind in [
+            ContainerKind::Shell,
+            ContainerKind::Dir,
+            ContainerKind::Detached,
+        ] {
+            let container = of_kind(&repos, kind);
+            let id = &container.leaves.first().expect("a leaf").id;
+            assert_eq!(leaf_payload(container, id), None, "{kind:?} leaves stay");
+        }
+
+        let tabs = tabs_view();
+        assert_eq!(
+            leaf_payload(of_kind(&tabs, ContainerKind::Tab), "b"),
+            Some(leaf_drag("b", "t1"))
+        );
+        assert_eq!(
+            leaf_payload(of_kind(&tabs, ContainerKind::Unbound), "u"),
+            None
+        );
+    }
+
+    #[test]
+    fn container_drop_sends_every_shown_workspace_and_repo() {
+        let repos = repos_view();
+        let r2 = DragPayload::Container(ContainerRef::Repo("r2".to_owned()));
+
+        let message =
+            sidebar_reorder(&r2, &repos, &header("ws:w1"), Side::Before).expect("a reorder");
+        assert_eq!(
+            wire(&message),
+            json!({
+                "type": "reorder_containers",
+                "ordered": [
+                    {"kind": "repo", "id": "r2"},
+                    {"kind": "workspace", "id": "w1"},
+                    {"kind": "repo", "id": "r1"},
+                ],
+            })
+        );
+
+        let sh = of_kind(&repos, ContainerKind::Shell).key.clone();
+        let detached = of_kind(&repos, ContainerKind::Detached).key.clone();
+        for key in [sh, detached] {
+            assert!(
+                sidebar_reorder(&r2, &repos, &header(&key), Side::Before).is_none(),
+                "{key} takes no drop"
+            );
+        }
+        assert!(
+            sidebar_reorder(&r2, &repos, &header("repo:r2"), Side::After).is_none(),
+            "a container dropped on itself sends nothing"
+        );
+        assert!(
+            sidebar_reorder(&r2, &repos, &header("repo:r1"), Side::After).is_none(),
+            "a drop that keeps the order sends nothing"
+        );
+        assert!(
+            sidebar_reorder(&r2, &repos, &leaf_row("repo:r1", "a"), Side::Before).is_none(),
+            "a container drops on a header only"
+        );
+    }
+
+    #[test]
+    fn tab_container_drop_reorders_the_tabs() {
+        let tabs = tabs_view();
+        let t2 = DragPayload::Tab("t2".to_owned());
+
+        let message =
+            sidebar_reorder(&t2, &tabs, &header("tab:t1"), Side::Before).expect("a reorder");
+        assert_eq!(
+            wire(&message),
+            json!({"type": "reorder_tabs", "ordered_ids": ["t2", "t1"]})
+        );
+
+        let unbound = of_kind(&tabs, ContainerKind::Unbound).key.clone();
+        assert!(sidebar_reorder(&t2, &tabs, &header(&unbound), Side::Before).is_none());
+        assert!(
+            sidebar_reorder(&t2, &repos_view(), &header("repo:r1"), Side::Before).is_none(),
+            "a tab drags onto tab containers only"
+        );
+    }
+
+    #[test]
+    fn leaf_drop_reorders_within_its_container() {
+        let repos = repos_view();
+        let message = sidebar_reorder(
+            &leaf_drag("c", "r1"),
+            &repos,
+            &leaf_row("repo:r1", "a"),
+            Side::Before,
+        )
+        .expect("a reorder");
+        assert_eq!(
+            wire(&message),
+            json!({
+                "type": "reorder_sessions",
+                "container_id": "r1",
+                "ordered_ids": ["c", "a", "b"],
+            }),
+            "the whole shown order of the container"
+        );
+
+        assert!(
+            sidebar_reorder(
+                &leaf_drag("c", "r1"),
+                &repos,
+                &leaf_row("repo:r2", "d"),
+                Side::Before
+            )
+            .is_none(),
+            "a leaf dropped in another container does nothing"
+        );
+        assert!(
+            sidebar_reorder(
+                &leaf_drag("c", "r1"),
+                &repos,
+                &header("repo:r1"),
+                Side::Before
+            )
+            .is_none(),
+            "a leaf drops on leaves only"
+        );
+
+        let tabs = tabs_view();
+        let message = sidebar_reorder(
+            &leaf_drag("b", "t1"),
+            &tabs,
+            &leaf_row("tab:t1", "a"),
+            Side::Before,
+        )
+        .expect("a reorder in a tab container");
+        assert_eq!(
+            wire(&message),
+            json!({"type": "reorder_sessions", "container_id": "t1", "ordered_ids": ["b", "a"]})
+        );
+    }
+
+    #[test]
+    fn reorder_sessions_sends_nothing_when_the_order_stays() {
+        let ids: Vec<String> = ["a", "b"].iter().map(|id| (*id).to_owned()).collect();
+
+        assert!(reorder_sessions(&ids, "r1", "a", "a", Side::After).is_none());
+        assert!(reorder_sessions(&ids, "r1", "a", "b", Side::Before).is_none());
+        let message = reorder_sessions(&ids, "r1", "a", "b", Side::After).expect("a reorder");
+        assert_eq!(
+            wire(&message),
+            json!({"type": "reorder_sessions", "container_id": "r1", "ordered_ids": ["b", "a"]})
         );
     }
 

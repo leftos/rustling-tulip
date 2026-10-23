@@ -746,10 +746,29 @@ impl SidebarModel {
         build_tab_containers(
             tabs,
             &self.sessions,
-            &self.attention,
-            &self.unseen,
+            &TabRollups {
+                session_order: &self.session_order,
+                attention: &self.attention,
+                unseen: &self.unseen,
+            },
             &self.ui.collapsed_containers,
         )
+    }
+
+    /// Takes `ordered` as the manual container order at once, before the
+    /// daemon's broadcast of it arrives; that broadcast writes the same
+    /// order, and one that disagrees replaces it.
+    pub fn reorder_containers_local(&mut self, ordered: &[ContainerRef]) {
+        ordered.clone_into(&mut self.container_order);
+    }
+
+    /// Takes `ordered_ids` as the manual session order of the workspace,
+    /// repo or tab `container_id` at once, before the daemon's broadcast of
+    /// it arrives; that broadcast writes the same order, and one that
+    /// disagrees replaces it.
+    pub fn reorder_sessions_local(&mut self, container_id: &str, ordered_ids: &[String]) {
+        self.session_order
+            .insert(container_id.to_owned(), ordered_ids.to_vec());
     }
 
     /// How the sessions panel groups its sessions.
@@ -1501,24 +1520,38 @@ fn container_key(kind: ContainerKind, id: &str) -> String {
     }
 }
 
+/// The per-session state the tabs view orders and marks its leaves by: each
+/// tab's manual session order, and the sessions that need attention or have
+/// output not yet seen.
+#[derive(Clone, Copy)]
+pub struct TabRollups<'a> {
+    pub session_order: &'a HashMap<String, Vec<String>>,
+    pub attention: &'a HashSet<String>,
+    pub unseen: &'a HashSet<String>,
+}
+
 /// The tabs view: one container per tab in the daemon's order, holding the
-/// listed sessions its panes show, each once, in pane order (a diff tab's is
-/// empty); then Unbound, the sessions no pane shows sorted by label, when
-/// there are any.
+/// listed sessions its panes show, each once, in the tab's manual order from
+/// `session_order` and then pane order (a diff tab's is empty); then
+/// Unbound, the sessions no pane shows sorted by label, when there are any.
 pub fn build_tab_containers(
     tabs: &[TabEntry],
     sessions: &[SessionSnapshot],
-    attention: &HashSet<String>,
-    unseen: &HashSet<String>,
+    rollups: &TabRollups<'_>,
     collapsed: &BTreeSet<String>,
 ) -> Vec<Container> {
+    let TabRollups {
+        session_order,
+        attention,
+        unseen,
+    } = *rollups;
     let by_id: HashMap<&str, &SessionSnapshot> =
         sessions.iter().map(|s| (s.id.as_str(), s)).collect();
     let mut shown: HashSet<&str> = HashSet::new();
     let mut out = Vec::new();
     for tab in tabs {
         let mut seen: HashSet<&str> = HashSet::new();
-        let leaves: Vec<Leaf> = tab
+        let in_pane_order: Vec<&SessionSnapshot> = tab
             .grid()
             .map(collect_panes)
             .unwrap_or_default()
@@ -1526,6 +1559,9 @@ pub fn build_tab_containers(
             .filter_map(|pane| pane.session)
             .filter(|id| seen.insert(id))
             .filter_map(|id| by_id.get(id).copied())
+            .collect();
+        let leaves: Vec<Leaf> = apply_session_order(in_pane_order, session_order.get(&tab.id))
+            .into_iter()
             .map(|s| {
                 shown.insert(s.id.as_str());
                 leaf(s, attention, unseen, true)
@@ -1968,7 +2004,7 @@ pub fn save_ui_state(dir: &Path, state: &UiState) -> anyhow::Result<()> {
     clippy::expect_used,
     reason = "tests assert preconditions with expect; failure messages aid debugging"
 )]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::tabs::tests::{pane, tab};
     use protocol::{AttentionReason, GridNode, PermissionMode, SessionMember, SplitDirection};
@@ -1976,7 +2012,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 
-    fn repo(id: &str, path: &str) -> RepoEntry {
+    pub(crate) fn repo(id: &str, path: &str) -> RepoEntry {
         serde_json::from_value(json!({ "id": id, "name": id, "path": path })).expect("repo fixture")
     }
 
@@ -1998,12 +2034,12 @@ mod tests {
         assert!(model.repos().is_empty(), "a new snapshot replaces the old");
     }
 
-    fn workspace(id: &str, members: &[&str]) -> WorkspaceEntry {
+    pub(crate) fn workspace(id: &str, members: &[&str]) -> WorkspaceEntry {
         serde_json::from_value(json!({ "id": id, "name": id, "member_repo_ids": members }))
             .expect("workspace fixture")
     }
 
-    fn session(id: &str) -> SessionSnapshot {
+    pub(crate) fn session(id: &str) -> SessionSnapshot {
         serde_json::from_value(json!({
             "id": id,
             "label": id,
@@ -2020,7 +2056,7 @@ mod tests {
         .expect("session fixture")
     }
 
-    fn in_repo(id: &str, repo_id: &str) -> SessionSnapshot {
+    pub(crate) fn in_repo(id: &str, repo_id: &str) -> SessionSnapshot {
         let mut s = session(id);
         s.members = vec![SessionMember {
             repo_id: repo_id.to_owned(),
@@ -2031,7 +2067,7 @@ mod tests {
         s
     }
 
-    fn shell(id: &str, cwd: Option<&str>, kind: SessionKind) -> SessionSnapshot {
+    pub(crate) fn shell(id: &str, cwd: Option<&str>, kind: SessionKind) -> SessionSnapshot {
         let mut s = session(id);
         s.mode = SessionMode::PlainShell;
         s.kind = kind;
@@ -2249,8 +2285,11 @@ mod tests {
         let tab_tree = build_tab_containers(
             &tabs,
             &[session("s1")],
-            &HashSet::new(),
-            &HashSet::new(),
+            &TabRollups {
+                session_order: &HashMap::new(),
+                attention: &HashSet::new(),
+                unseen: &HashSet::new(),
+            },
             &BTreeSet::new(),
         );
         let tab_container = tab_tree.first().expect("TAB");
@@ -2633,8 +2672,11 @@ mod tests {
         let tree = build_tab_containers(
             &tabs,
             &[excluded],
-            &attention,
-            &HashSet::new(),
+            &TabRollups {
+                session_order: &HashMap::new(),
+                attention: &attention,
+                unseen: &HashSet::new(),
+            },
             &BTreeSet::new(),
         );
         assert!(
@@ -3516,8 +3558,11 @@ mod tests {
         build_tab_containers(
             tabs,
             sessions,
-            &HashSet::new(),
-            &HashSet::new(),
+            &TabRollups {
+                session_order: &HashMap::new(),
+                attention: &HashSet::new(),
+                unseen: &HashSet::new(),
+            },
             &BTreeSet::new(),
         )
     }
@@ -3635,8 +3680,11 @@ mod tests {
         let tree = build_tab_containers(
             &tabs,
             &[session("s1"), session("s2")],
-            &attention,
-            &HashSet::new(),
+            &TabRollups {
+                session_order: &HashMap::new(),
+                attention: &attention,
+                unseen: &HashSet::new(),
+            },
             &BTreeSet::new(),
         );
         let marks: Vec<(bool, bool)> = tree
@@ -3945,6 +3993,148 @@ mod tests {
         assert_eq!(
             launch_summary(Some(&config)).as_deref(),
             Some("Claude · Interactive · feat/x · accept edits")
+        );
+    }
+
+    /// Repos `r1` and `r2` holding sessions `a`, `b` (in `r1`) and the empty
+    /// workspace `w1`.
+    fn ordered_model() -> SidebarModel {
+        let mut model = SidebarModel::new(UiState::default());
+        model.apply(&DaemonMessage::Repos {
+            repos: vec![repo("r1", "D:\\r1"), repo("r2", "D:\\r2")],
+        });
+        model.apply(&DaemonMessage::Workspaces {
+            workspaces: vec![workspace("w1", &[])],
+        });
+        model.apply(&DaemonMessage::Sessions {
+            sessions: vec![in_repo("a", "r1"), in_repo("b", "r1")],
+        });
+        model
+    }
+
+    fn refs(ids: &[(&str, bool)]) -> Vec<ContainerRef> {
+        ids.iter()
+            .map(|(id, is_repo)| {
+                if *is_repo {
+                    ContainerRef::Repo((*id).to_owned())
+                } else {
+                    ContainerRef::Workspace((*id).to_owned())
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn local_order_of_containers_shows_before_any_echo() {
+        let mut model = ordered_model();
+        assert_eq!(keys(&model.containers()), ["ws:w1", "repo:r1", "repo:r2"]);
+
+        model.reorder_containers_local(&refs(&[("r2", true), ("w1", false), ("r1", true)]));
+        assert_eq!(
+            keys(&model.containers()),
+            ["repo:r2", "ws:w1", "repo:r1"],
+            "the new order shows with no broadcast"
+        );
+
+        model.apply(&DaemonMessage::Sessions {
+            sessions: vec![in_repo("a", "r1"), in_repo("b", "r1")],
+        });
+        model.apply(&DaemonMessage::Repos {
+            repos: vec![repo("r1", "D:\\r1"), repo("r2", "D:\\r2")],
+        });
+        assert_eq!(
+            keys(&model.containers()),
+            ["repo:r2", "ws:w1", "repo:r1"],
+            "unrelated messages leave the local order"
+        );
+    }
+
+    #[test]
+    fn local_order_of_sessions_shows_before_any_echo() {
+        let mut model = ordered_model();
+        assert_eq!(leaf_ids(&model.containers(), "repo:r1"), ["a", "b"]);
+
+        model.reorder_sessions_local("r1", &["b".to_owned(), "a".to_owned()]);
+        assert_eq!(
+            leaf_ids(&model.containers(), "repo:r1"),
+            ["b", "a"],
+            "the new order shows with no broadcast"
+        );
+
+        model.apply(&DaemonMessage::SessionUpdated {
+            session: in_repo("a", "r1"),
+            request_id: None,
+        });
+        assert_eq!(
+            leaf_ids(&model.containers(), "repo:r1"),
+            ["b", "a"],
+            "a session update leaves the local order"
+        );
+    }
+
+    #[test]
+    fn local_order_echo_with_the_same_order_changes_nothing() {
+        let mut model = ordered_model();
+        let ordered = refs(&[("r2", true), ("r1", true), ("w1", false)]);
+        model.reorder_containers_local(&ordered);
+        model.reorder_sessions_local("r1", &["b".to_owned(), "a".to_owned()]);
+        let before = model.containers();
+
+        model.apply(&DaemonMessage::ContainersReordered { ordered });
+        model.apply(&DaemonMessage::SessionsReordered {
+            container_id: "r1".to_owned(),
+            ordered_ids: vec!["b".to_owned(), "a".to_owned()],
+        });
+        assert_eq!(model.containers(), before);
+    }
+
+    #[test]
+    fn local_order_gives_way_to_an_echo_that_disagrees() {
+        let mut model = ordered_model();
+        model.reorder_containers_local(&refs(&[("r2", true), ("r1", true)]));
+        model.reorder_sessions_local("r1", &["b".to_owned(), "a".to_owned()]);
+
+        model.apply(&DaemonMessage::ContainersReordered {
+            ordered: refs(&[("r1", true), ("w1", false)]),
+        });
+        model.apply(&DaemonMessage::SessionsReordered {
+            container_id: "r1".to_owned(),
+            ordered_ids: vec!["a".to_owned(), "b".to_owned()],
+        });
+        let containers = model.containers();
+        assert_eq!(keys(&containers), ["repo:r1", "ws:w1", "repo:r2"]);
+        assert_eq!(leaf_ids(&containers, "repo:r1"), ["a", "b"]);
+    }
+
+    #[test]
+    fn local_order_tab_view_honours_the_session_order() {
+        let mut model = ordered_model();
+        let tabs = [tab(
+            "t1",
+            &crate::tabs::tests::split(
+                SplitDirection::Horizontal,
+                0.5,
+                pane("p1", Some("a")),
+                pane("p2", Some("b")),
+            ),
+        )];
+        assert_eq!(
+            leaf_ids(&model.tab_containers(&tabs), "tab:t1"),
+            ["a", "b"],
+            "pane order without a manual order"
+        );
+
+        model.reorder_sessions_local("t1", &["b".to_owned(), "a".to_owned()]);
+        assert_eq!(leaf_ids(&model.tab_containers(&tabs), "tab:t1"), ["b", "a"]);
+
+        model.apply(&DaemonMessage::SessionsReordered {
+            container_id: "t1".to_owned(),
+            ordered_ids: vec!["a".to_owned(), "b".to_owned()],
+        });
+        assert_eq!(
+            leaf_ids(&model.tab_containers(&tabs), "tab:t1"),
+            ["a", "b"],
+            "the daemon's order applies by tab id"
         );
     }
 }

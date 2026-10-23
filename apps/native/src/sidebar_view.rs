@@ -13,6 +13,7 @@ use crate::assets::{
     SIDEBAR_SHELL_ICON, SIDEBAR_TABS_ICON, SIDEBAR_WORKSPACE_ICON,
 };
 use crate::buttons::{ButtonSize, focus_ring, outlined_button, primary_button};
+use crate::drag::{self, DragPayload, Side, SidebarRow};
 use crate::ellipsis::{ellipsized, truncating};
 use crate::fonts::{self, DEFAULT_FAMILY};
 use crate::grid_view::{ADD_REPO_TIP, NO_REPOS_TIP, SPAWN_TIP};
@@ -43,9 +44,10 @@ use crate::{
     tagged_text, tooltip,
 };
 use gpui::{
-    AnyElement, Bounds, ClickEvent, Context, Corner, Corners, Div, FontWeight, MouseButton,
-    MouseDownEvent, PathBuilder, Pixels, SharedString, Stateful, StyledText, Svg, TextRun, Window,
-    anchored, canvas, deferred, div, font, point, prelude::*, px, svg,
+    AnyElement, App, Bounds, ClickEvent, Context, Corner, Corners, Div, DragMoveEvent, Entity,
+    FontWeight, MouseButton, MouseDownEvent, PathBuilder, Pixels, Point, SharedString, Stateful,
+    StyledText, Svg, TextRun, Window, anchored, canvas, deferred, div, font, point, prelude::*, px,
+    svg,
 };
 use protocol::{Agent, ClientMessage, SessionMode, SessionStatus};
 
@@ -174,6 +176,8 @@ impl RootView {
                 hovered_row: self.hovered_container.as_deref(),
                 detached_stop_all: self.detached_stop_all.armed(),
                 highlighted: &self.launched_highlight,
+                dragged: self.dragged_sidebar_row(cx),
+                drop_mark: self.sidebar_drop_mark(cx),
                 subline_room: width
                     - 2.0 * BODY_INSET_X
                     - LEAF_PAD_LEFT
@@ -681,7 +685,17 @@ fn container_rows(
 ) -> AnyElement {
     let focused = ctx.focused_row == Some(container.key.as_str());
     let hovered = ctx.hovered_row == Some(container.key.as_str());
-    let mut rows = vec![container_row(container, focused, hovered, cx).into_any_element()];
+    let header = SidebarRow::Container(container.key.clone());
+    let payload = drag::container_payload(container);
+    let dragged = payload.is_some() && ctx.dragged == payload;
+    let row = draggable_row(
+        container_row(container, focused, hovered, cx),
+        payload,
+        &header,
+        &container.name,
+        cx,
+    );
+    let mut rows = vec![row.into_any_element()];
     if !container.collapsed {
         if matches!(container.kind, ContainerKind::Dir | ContainerKind::Shell)
             && let Some(path) = container.path.as_deref()
@@ -695,16 +709,255 @@ fn container_rows(
             rows.push(detached_banner(container, ctx.detached_stop_all, cx).into_any_element());
         }
         for leaf in &container.leaves {
-            rows.push(leaf_row(leaf, ctx, window, cx).into_any_element());
+            rows.push(leaf_drag_row(container, leaf, ctx, window, cx).into_any_element());
         }
     }
+    let line = ctx.mark_at(&header).map(|side| {
+        let selector = format!("sidebar-drop-mark-{}", container.key);
+        drop_line(selector, side)
+    });
     div()
         .id(SharedString::from(format!("group-{}", container.key)))
+        .relative()
         .flex()
         .flex_col()
         .flex_none()
+        .when(dragged, |group| group.opacity(DRAGGED_ROW_OPACITY))
         .children(rows)
+        .children(line)
         .into_any_element()
+}
+
+/// How opaque a dragged container's group or leaf stays in its place.
+const DRAGGED_ROW_OPACITY: f32 = 0.4;
+/// The insertion line's thickness.
+const DROP_LINE_HEIGHT: f32 = 2.0;
+/// Where a row's drag ghost sits, right of and below the pointer.
+const ROW_GHOST_NUDGE: Point<Pixels> = Point {
+    x: px(10.0),
+    y: px(14.0),
+};
+
+/// `leaf`'s row in `container`, which drags and takes drops within a
+/// workspace, repo or tab container, with the insertion line when a drop
+/// would land at it.
+fn leaf_drag_row(
+    container: &Container,
+    leaf: &Leaf,
+    ctx: &LeafRows<'_>,
+    window: &Window,
+    cx: &mut Context<RootView>,
+) -> Stateful<Div> {
+    let target = SidebarRow::Leaf {
+        container_key: container.key.clone(),
+        session_id: leaf.id.clone(),
+    };
+    let payload = drag::leaf_payload(container, &leaf.id);
+    let dragged = payload.is_some() && ctx.dragged == payload;
+    let line = ctx.mark_at(&target).map(|side| {
+        let selector = format!("sidebar-drop-mark-{}-{}", container.key, leaf.id);
+        drop_line(selector, side)
+    });
+    let row = leaf_row(leaf, ctx, window, cx);
+    draggable_row(row, payload, &target, &leaf.label, cx)
+        .when(dragged, |row| row.opacity(DRAGGED_ROW_OPACITY))
+        .children(line)
+}
+
+/// `row` as a drag source carrying `payload` and as the drop target
+/// `target`; a row with no payload (SH, DIR, Detached, Unbound and their
+/// leaves) neither drags nor takes drops.
+fn draggable_row(
+    row: Stateful<Div>,
+    payload: Option<DragPayload>,
+    target: &SidebarRow,
+    label: &str,
+    cx: &mut Context<RootView>,
+) -> Stateful<Div> {
+    let Some(payload) = payload else {
+        return row;
+    };
+    let (move_target, drop_target) = (target.clone(), target.clone());
+    row.on_drag_move(
+        cx.listener(move |this, event: &DragMoveEvent<DragPayload>, _, cx| {
+            this.on_sidebar_drag_move(&move_target, event, cx);
+        }),
+    )
+    .on_drop(cx.listener(move |this, payload: &DragPayload, _, cx| {
+        this.on_sidebar_drop(&drop_target, payload, cx);
+    }))
+    .on_drag(payload, row_ghost(label, cx))
+}
+
+/// What starts a sidebar row's drag: it records the dragged row on the root
+/// and builds the label that follows the pointer.
+fn row_ghost(
+    label: &str,
+    cx: &mut Context<RootView>,
+) -> impl Fn(&DragPayload, Point<Pixels>, &mut Window, &mut App) -> Entity<RowGhost> + 'static {
+    let root = cx.entity().downgrade();
+    let label: SharedString = label.to_owned().into();
+    move |payload, offset, _, cx| {
+        let payload = payload.clone();
+        if let Err(err) = root.update(cx, |this, _| this.note_sidebar_drag(payload)) {
+            tracing::warn!(%err, "sidebar drag: the window's root view is gone");
+        }
+        let label = label.clone();
+        cx.new(|_| RowGhost { label, offset })
+    }
+}
+
+/// The accent line at `side` of a row or a container's group, where a
+/// dragged row lands.
+fn drop_line(selector: String, side: Side) -> Div {
+    let line = div()
+        .debug_selector(move || selector)
+        .absolute()
+        .left(px(ROW_PADDING))
+        .right(px(ROW_PADDING))
+        .h(px(DROP_LINE_HEIGHT))
+        .rounded(px(DROP_LINE_HEIGHT / 2.0))
+        .bg(gpui::rgb(ACCENT));
+    match side {
+        Side::Before => line.top(px(-DROP_LINE_HEIGHT / 2.0)),
+        Side::After => line.bottom(px(-DROP_LINE_HEIGHT / 2.0)),
+    }
+}
+
+/// The label of a dragged sidebar row that follows the pointer.
+pub(crate) struct RowGhost {
+    label: SharedString,
+    /// Where the pointer sat in the row when the drag started. gpui draws
+    /// the ghost that far up and left of the pointer; the ghost moves back
+    /// by it.
+    offset: Point<Pixels>,
+}
+
+impl Render for RowGhost {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div().child(
+            div()
+                .debug_selector(|| "sidebar-drag-ghost".to_owned())
+                .absolute()
+                .left(self.offset.x + ROW_GHOST_NUDGE.x)
+                .top(self.offset.y + ROW_GHOST_NUDGE.y)
+                .flex()
+                .items_center()
+                .h(px(26.0))
+                .px(px(10.0))
+                .whitespace_nowrap()
+                .rounded(px(6.0))
+                .bg(gpui::rgb(RAISED))
+                .border_1()
+                .border_color(gpui::rgb(LINE_STRONG))
+                .shadow_lg()
+                .opacity(0.85)
+                .font_family(fonts::ui_family(cx))
+                .text_size(px(11.0))
+                .text_color(gpui::rgb(TEXT))
+                .child(self.label.clone()),
+        )
+    }
+}
+
+impl RootView {
+    /// Records the row a sidebar drag picked up: a tab container's tab as a
+    /// pill drag does, so the pills mark and take it, else the container or
+    /// leaf.
+    fn note_sidebar_drag(&mut self, payload: DragPayload) {
+        match payload {
+            DragPayload::Tab(id) => self.tab_drag = Some(id),
+            other => self.sidebar_drag = Some(other),
+        }
+    }
+
+    /// The sidebar row being dragged, a tab container's tab included, while
+    /// gpui's drag under way is a sidebar row or pill drag.
+    fn dragged_sidebar_row(&self, cx: &App) -> Option<DragPayload> {
+        self.active_sidebar_drag(cx).cloned().or_else(|| {
+            self.active_tab_drag(cx)
+                .map(|id| DragPayload::Tab(id.to_owned()))
+        })
+    }
+
+    /// The sidebar row the insertion line stands at and the side of it,
+    /// while a sidebar row or pill drag is under way and a drop there would
+    /// change the order.
+    #[must_use]
+    pub fn sidebar_drop_mark(&self, cx: &App) -> Option<(SidebarRow, Side)> {
+        self.sidebar_drop
+            .clone()
+            .filter(|_| self.dragged_sidebar_row(cx).is_some())
+    }
+
+    /// Follows a drag over the sidebar row `row`: a drag over its half that
+    /// a drop would turn into a new order marks that side; anything else
+    /// takes the mark off this row. gpui calls this for every move of the
+    /// drag, over the row or not.
+    fn on_sidebar_drag_move(
+        &mut self,
+        row: &SidebarRow,
+        event: &DragMoveEvent<DragPayload>,
+        cx: &mut Context<Self>,
+    ) {
+        let at = event.event.position;
+        let bounds = event.bounds;
+        let target = bounds
+            .contains(&at)
+            .then(|| {
+                let side = drag::side_of(
+                    at.y / px(1.0),
+                    bounds.origin.y / px(1.0),
+                    bounds.size.height / px(1.0),
+                );
+                drag::sidebar_reorder(event.drag(cx), &self.sidebar_containers(), row, side)
+                    .map(|_| (row.clone(), side))
+            })
+            .flatten();
+        let marked_here = self.sidebar_drop.as_ref().is_some_and(|(r, _)| r == row);
+        if target.is_some() && target != self.sidebar_drop {
+            self.sidebar_drop = target;
+            cx.notify();
+        } else if target.is_none() && marked_here {
+            self.sidebar_drop = None;
+            cx.notify();
+        }
+    }
+
+    /// A drop on the sidebar row `row` where the line stands: the new order
+    /// shows at once and goes to the daemon, whose broadcast then agrees. A
+    /// tab reorders the strip as a pill drop does.
+    fn on_sidebar_drop(&mut self, row: &SidebarRow, payload: &DragPayload, cx: &mut Context<Self>) {
+        let mark = self.sidebar_drop.take();
+        self.sidebar_drag = None;
+        self.tab_drag = None;
+        self.tab_drop = None;
+        cx.notify();
+        let Some((target, side)) = mark.filter(|(marked, _)| marked == row) else {
+            return;
+        };
+        match drag::sidebar_reorder(payload, &self.sidebar_containers(), &target, side) {
+            Some(ClientMessage::ReorderTabs { ordered_ids, .. }) => {
+                self.reorder_tabs_by_drop(ordered_ids);
+            }
+            Some(ClientMessage::ReorderContainers { ordered }) => {
+                self.sidebar.reorder_containers_local(&ordered);
+                self.send(ClientMessage::ReorderContainers { ordered });
+            }
+            Some(ClientMessage::ReorderSessions {
+                container_id,
+                ordered_ids,
+            }) => {
+                self.sidebar
+                    .reorder_sessions_local(&container_id, &ordered_ids);
+                self.send(ClientMessage::ReorderSessions {
+                    container_id,
+                    ordered_ids,
+                });
+            }
+            _ => {}
+        }
+    }
 }
 
 /// The folder under an expanded DIR or SH container, with the actions its
@@ -936,9 +1189,21 @@ struct LeafRows<'a> {
     detached_stop_all: bool,
     /// The sessions Select launched marked.
     highlighted: &'a LaunchHighlight,
+    /// What the sidebar row or pill drag under way carries.
+    dragged: Option<DragPayload>,
+    /// The row the insertion line stands at, and the side of it.
+    drop_mark: Option<(SidebarRow, Side)>,
 }
 
 impl LeafRows<'_> {
+    /// The side of `row` the insertion line stands at, when it is there.
+    fn mark_at(&self, row: &SidebarRow) -> Option<Side> {
+        self.drop_mark
+            .as_ref()
+            .filter(|(marked, _)| marked == row)
+            .map(|(_, side)| *side)
+    }
+
     /// Session `id`'s tab pill; `None` until the tab list is in.
     fn pill(&self, id: &str) -> Option<TabPill> {
         self.pills

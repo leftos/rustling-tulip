@@ -51,6 +51,7 @@ mod ui_shell;
 mod ui_shell_integration;
 mod ui_shortcuts;
 mod ui_sidebar;
+mod ui_sidebar_drag;
 mod ui_source_control;
 mod ui_spawn;
 mod ui_spawn_combobox;

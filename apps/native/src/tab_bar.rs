@@ -793,39 +793,34 @@ impl RootView {
                 if target != tab_id {
                     return;
                 }
-                let Some(msg) = drag::reorder_tabs(
-                    &self.tab_ids(),
-                    dragged,
-                    &target,
-                    side,
-                    Some(crate::new_request_id()),
-                ) else {
-                    return;
-                };
-                let ClientMessage::ReorderTabs {
-                    ordered_ids,
-                    request_id,
-                } = &msg
-                else {
-                    return;
-                };
-                if let Some(id) = request_id {
-                    self.tabs.note_reorder(id, ordered_ids);
+                if let Some(ClientMessage::ReorderTabs { ordered_ids, .. }) =
+                    drag::reorder_tabs(&self.tab_ids(), dragged, &target, side, None)
+                {
+                    self.reorder_tabs_by_drop(ordered_ids);
                 }
-                if !self.tabs.reorder_local(ordered_ids) {
-                    if let Some(id) = request_id {
-                        self.tabs.fail_reorder(id);
-                    }
-                    tracing::warn!(
-                        ?ordered_ids,
-                        "pill drop: the new order is not the strip's tabs"
-                    );
-                    return;
-                }
-                self.send(msg);
             }
             _ => {}
         }
+    }
+
+    /// A tab dropped on a pill or on a tab container: the strip takes
+    /// `ordered_ids` at once and sends it with a request id, so a refusal
+    /// puts the strip back.
+    pub(crate) fn reorder_tabs_by_drop(&mut self, ordered_ids: Vec<String>) {
+        let request_id = crate::new_request_id();
+        self.tabs.note_reorder(&request_id, &ordered_ids);
+        if !self.tabs.reorder_local(&ordered_ids) {
+            self.tabs.fail_reorder(&request_id);
+            tracing::warn!(
+                ?ordered_ids,
+                "tab drop: the new order is not the strip's tabs"
+            );
+            return;
+        }
+        self.send(ClientMessage::ReorderTabs {
+            ordered_ids,
+            request_id: Some(request_id),
+        });
     }
 
     /// A click on `tab_id`'s pill. Ctrl toggles the tab in the selection

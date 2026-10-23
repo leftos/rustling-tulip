@@ -191,7 +191,7 @@ pub use crate::diff_tab::{
     BINARY_TEXT, DiffTabBody, DiffTabHeader, EMPTY_TEXT, FINAL_NEWLINE_NOTE, LINE_ENDINGS_NOTE,
     LOADING_TEXT as DIFF_LOADING_TEXT, OPEN_FAILED_TITLE as DIFF_OPEN_FAILED_TITLE, WHITESPACE_TIP,
 };
-pub use crate::drag::Side;
+pub use crate::drag::{Side, SidebarRow};
 pub use crate::footer::LogPaths;
 pub use crate::grid_view::{HeaderChip, HeaderChipKind, PaneHeaderParts};
 pub use crate::history::{
@@ -496,6 +496,14 @@ pub struct RootView {
     /// The tab whose pill a drag picked up, set when gpui starts the drag;
     /// it counts only while gpui still has a drag under way.
     tab_drag: Option<String>,
+    /// The sidebar container or leaf a row drag picked up, set when gpui
+    /// starts the drag; it counts only while gpui still has a drag under
+    /// way. A tab container's drag is a pill drag and sets `tab_drag`.
+    sidebar_drag: Option<DragPayload>,
+    /// The sidebar row a container, tab or leaf drag is over and the side
+    /// of it the dragged row lands on, while a drop there would change the
+    /// order; apart from `tab_drop`, which only pills draw.
+    sidebar_drop: Option<(SidebarRow, Side)>,
     /// Whether the key press under way is an Esc that ended a drag; the
     /// root's key capture then drops it so nothing below sees it.
     escape_ended_drag: bool,
@@ -895,6 +903,8 @@ impl RootView {
             pane_drag_session: None,
             tab_drop: None,
             tab_drag: None,
+            sidebar_drag: None,
+            sidebar_drop: None,
             escape_ended_drag: false,
             _drag_escape: drag_escape,
             sidebar_focus: cx.focus_handle(),
@@ -1951,7 +1961,8 @@ impl RootView {
         }
         let pane_drop = self.pane_drop.take().is_some();
         let tab_drop = self.tab_drop.take().is_some();
-        if pane_drop || tab_drop {
+        let sidebar_drop = self.sidebar_drop.take().is_some();
+        if pane_drop || tab_drop || sidebar_drop {
             cx.notify();
         }
     }
@@ -2003,21 +2014,38 @@ impl RootView {
         self.pane_drag.as_ref().filter(|_| cx.has_active_drag())
     }
 
-    /// Ends a pane or pill drag without a drop: Esc, or for a pane drag the
-    /// loss of its pane or of that pane's session. Any other gpui drag is
-    /// left alone. Returns whether a pane or pill drag was under way.
+    /// The sidebar container or leaf being dragged, while gpui's drag under
+    /// way is a sidebar row drag.
+    pub(crate) fn active_sidebar_drag(&self, cx: &App) -> Option<&DragPayload> {
+        self.sidebar_drag.as_ref().filter(|_| cx.has_active_drag())
+    }
+
+    /// Ends a pane, pill or sidebar row drag without a drop: Esc, or for a
+    /// pane drag the loss of its pane or of that pane's session. Any other
+    /// gpui drag is left alone. Returns whether such a drag was under way.
     fn end_drag(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if self.active_pane_drag(cx).is_none() && self.active_tab_drag(cx).is_none() {
+        if self.active_pane_drag(cx).is_none()
+            && self.active_tab_drag(cx).is_none()
+            && self.active_sidebar_drag(cx).is_none()
+        {
             return false;
         }
         cx.stop_active_drag(window);
+        self.clear_drag_state();
+        cx.notify();
+        true
+    }
+
+    /// Forgets every pane, pill and sidebar row drag and the marks they
+    /// draw.
+    fn clear_drag_state(&mut self) {
         self.pane_drag = None;
         self.pane_drag_session = None;
         self.pane_drop = None;
         self.tab_drag = None;
         self.tab_drop = None;
-        cx.notify();
-        true
+        self.sidebar_drag = None;
+        self.sidebar_drop = None;
     }
 
     /// Ends a pane drag whose dragged pane left its tab, took another
@@ -3092,15 +3120,12 @@ impl Render for RootView {
         // Tab switches and renames made here change the title without a
         // daemon message.
         self.refresh_window_title(window, cx);
-        // A pane or pill drag gpui ended on a release no listener took (a
-        // modal over the window swallows it) leaves nothing behind to
-        // mistake a later drag for it: no payload, no overlay, no mark.
+        // A pane, pill or sidebar row drag gpui ended on a release no
+        // listener took (a modal over the window swallows it) leaves nothing
+        // behind to mistake a later drag for it: no payload, no overlay, no
+        // mark.
         if !cx.has_active_drag() {
-            self.pane_drag = None;
-            self.pane_drag_session = None;
-            self.pane_drop = None;
-            self.tab_drag = None;
-            self.tab_drop = None;
+            self.clear_drag_state();
         }
         let footer = self.conn.footer(self.sidebar.sessions().len());
         let flyout = self

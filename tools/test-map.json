@@ -216,7 +216,7 @@
       "paths": [
         "apps/native/src/drag.rs"
       ],
-      "filter": "(binary_id(rustling-tulip-native) & test(/^drag::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_pane_drag|ui_tab_drag)::/))"
+      "filter": "(binary_id(rustling-tulip-native) & test(/^drag::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_pane_drag|ui_sidebar_drag|ui_tab_drag)::/))"
     },
     {
       "paths": [
@@ -540,13 +540,13 @@
       "paths": [
         "apps/native/src/sidebar.rs"
       ],
-      "filter": "(binary_id(rustling-tulip-native) & test(/^sidebar::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_appearance|ui_font_size|ui_launch_last|ui_preset_wizard|ui_settings|ui_sidebar)::/))"
+      "filter": "(binary_id(rustling-tulip-native) & test(/^sidebar::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_appearance|ui_font_size|ui_launch_last|ui_preset_wizard|ui_settings|ui_sidebar|ui_sidebar_drag)::/))"
     },
     {
       "paths": [
         "apps/native/src/sidebar_view.rs"
       ],
-      "filter": "(binary_id(rustling-tulip-native) & test(/^sidebar_view::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_container_menu|ui_fetch_dialog|ui_keys|ui_launch_last|ui_paint|ui_preset_wizard|ui_remote|ui_repos|ui_sidebar)::/))"
+      "filter": "(binary_id(rustling-tulip-native) & test(/^sidebar_view::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_container_menu|ui_fetch_dialog|ui_keys|ui_launch_last|ui_paint|ui_preset_wizard|ui_remote|ui_repos|ui_sidebar|ui_sidebar_drag)::/))"
     },
     {
       "paths": [
@@ -612,7 +612,7 @@
       "paths": [
         "apps/native/src/tab_bar.rs"
       ],
-      "filter": "(binary_id(rustling-tulip-native) & test(/^tab_bar::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_keys|ui_sidebar|ui_tab_drag|ui_tabs)::/))"
+      "filter": "(binary_id(rustling-tulip-native) & test(/^tab_bar::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_keys|ui_sidebar|ui_sidebar_drag|ui_tab_drag|ui_tabs)::/))"
     },
     {
       "paths": [
@@ -913,6 +913,12 @@
         "apps/native/tests/ui/ui_sidebar.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native::ui) & test(/^(ui_sidebar)::/))"
+    },
+    {
+      "paths": [
+        "apps/native/tests/ui/ui_sidebar_drag.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native::ui) & test(/^(ui_sidebar_drag)::/))"
     },
     {
       "paths": [
