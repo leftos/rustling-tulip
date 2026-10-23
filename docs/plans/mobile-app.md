@@ -17,6 +17,16 @@ A phone client for the daemon, for the user's own use: check on sessions, answer
 - **iOS builds:** cloud macOS CI (GitHub Actions macOS runners or Codemagic) builds, signs and uploads to TestFlight. There is no Mac.
 - **Priority:** after native client Phase 6, which builds the remote client this app reuses.
 
+## Phone screens (PWA)
+
+Owner rulings from the lane mocks under `docs/plans/canvases/` (RT-143); the phone borrows from herdr's collie (`X:\dev\_ext\AltanS\collie`).
+
+- **Home** (`mobile-home`, lane C): collie's grouped list, whose rows never move when their state changes, with a swipeable Needs you tray on top holding one compact card at a time. Yes/no and permission prompts are answered from the tray; anything longer opens the session. The Home Screen badge counts Needs you only.
+- **Session screen** (`mobile-session`, lane C): the conversation renders as chat down to the agent's status line, and everything from the status line down stays the live terminal as drawn. With no prompt pending, Quick and Keys sit behind composer buttons as in collie; a menu no hook reports falls back to the keys.
+- **Chat look** (`mobile-chat`, lane A): collie's stream. Your turns are bubbles and Claude's prose is plain; each tool call is a one-line card (an Edit opens to its diff, a Bash shows its last output lines), and four or more calls in a row fold into one row naming the counts and the newest step.
+- **Prompts** (`mobile-prompts`, lane C): a pending prompt rises as a bottom sheet over the chat, terminal and composer, with the answer buttons (each typing the option's number, never its label), Esc, up and down, and a Terminal toggle that shows Claude's dialog as drawn; a swipe puts it away. The sheet takes over the prompt state the session screen's dock had. An answered prompt becomes a one-line receipt in the chat.
+- **Pairing** (`mobile-pairing`, lane B): the phone asks; a Windows toast on the host PC names the device and its Tailscale login, and Approve shows that request's QR and code, which the phone's scanner (opened by itself) reads. Settings → Remote access keeps a Waiting devices row where a missed toast is found again. A pairing code minted by the daemon from the command line, over SSH, approves a phone with no one at the PC.
+
 ## How it connects
 
 ```text
