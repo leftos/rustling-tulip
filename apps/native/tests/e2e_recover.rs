@@ -1111,3 +1111,183 @@ fn live_recovers_sessions_whose_tracer_died(cx: &mut TestAppContext) {
     recover_claude_session(&mut h, &client, &daemon, &repo_id);
     recover_shell_session(&mut h, &client, &daemon, &repo);
 }
+
+/// A Claude session the reboot is about to kill: its id, the name the user
+/// gave it and the conversation its transcript holds.
+struct LostClaude {
+    id: String,
+    label: String,
+    conversation: String,
+}
+
+/// Waits until `session_id`'s tracer logs its child bound to its kill-on-close
+/// job, so killing the tracer takes the child with it, failing at once when
+/// the log shows the bind cannot happen.
+#[cfg(windows)]
+fn wait_bound(h: &mut Harness<'_>, daemon: &LiveDaemon, session_id: &str) {
+    h.wait_until("the tracer's child bound to its job", HANG_GUARD, |_| {
+        let log = tracer_log(daemon, session_id).unwrap_or_default();
+        let failure = BIND_FAILURES
+            .iter()
+            .find_map(|needle| line_with(&log, needle));
+        assert!(
+            failure.is_none(),
+            "the tracer for {session_id} never bound its child to its job: {}",
+            failure.unwrap_or_default()
+        );
+        line_with(&log, BIND_LINE).is_some()
+    });
+}
+
+/// Spawns an interactive Claude session in place in `repo_id`'s checkout,
+/// waits for its tracer to start it, writes a transcript of its conversation
+/// and renames it `name`. `others` are the sessions spawned before it.
+fn spawn_claude_with_transcript(
+    h: &mut Harness<'_>,
+    client: &LiveClient,
+    daemon: &LiveDaemon,
+    repo_id: &str,
+    name: &str,
+    others: &[LostClaude],
+) -> LostClaude {
+    client.send(spawn_claude_in_place(repo_id));
+    let session = wait_snapshot(h, client, "a new claude session's snapshot", |s| {
+        s.mode == SessionMode::Interactive && others.iter().all(|other| other.id != s.id)
+    });
+    let conversation = session
+        .claude_session_id
+        .clone()
+        .expect("a spawned claude session carries its conversation id");
+    wait_spawn_line(h, daemon, &session.id);
+    #[cfg(windows)]
+    wait_bound(h, daemon, &session.id);
+    let cwd = &session
+        .members
+        .first()
+        .expect("an in-place session has a member")
+        .worktree_path;
+    write_transcript(daemon, cwd, &conversation);
+    client.send(ClientMessage::RenameSession {
+        session_id: session.id.clone(),
+        label: Some(name.to_owned()),
+    });
+    wait_snapshot(h, client, &format!("the session renamed {name:?}"), |s| {
+        s.id == session.id && s.user_label.as_deref() == Some(name)
+    });
+    LostClaude {
+        id: session.id,
+        label: name.to_owned(),
+        conversation,
+    }
+}
+
+/// Spawns a plain shell in `folder` and waits for its tracer to start it;
+/// returns its id.
+fn spawn_started_shell(
+    h: &mut Harness<'_>,
+    client: &LiveClient,
+    daemon: &LiveDaemon,
+    folder: &Path,
+) -> String {
+    client.send(spawn_shell(folder));
+    let shell = wait_snapshot(h, client, "the shell's snapshot", |s| {
+        s.mode == SessionMode::PlainShell
+    });
+    wait_spawn_line(h, daemon, &shell.id);
+    #[cfg(windows)]
+    wait_bound(h, daemon, &shell.id);
+    shell.id
+}
+
+/// Asserts the reboot-killed `old` came back as a new session continuing its
+/// conversation under the name the user gave it, and that the client's
+/// sidebar lists it by that name.
+fn assert_resumed(h: &mut Harness<'_>, client: &LiveClient, daemon: &LiveDaemon, old: &LostClaude) {
+    let what = format!("a new session resuming conversation {}", old.conversation);
+    let resumed = wait_snapshot(h, client, &what, |s| {
+        s.mode == SessionMode::Interactive
+            && s.id != old.id
+            && s.claude_session_id.as_deref() == Some(old.conversation.as_str())
+    });
+    let line = wait_spawn_line(h, daemon, &resumed.id);
+    assert!(
+        line.contains(&format!("\"--resume\", \"{}\"", old.conversation)),
+        "the resumed spawn passes --resume {}: {line}",
+        old.conversation
+    );
+    assert!(
+        !line.contains("--session-id"),
+        "the resumed spawn takes no fresh --session-id: {line}"
+    );
+    let what = format!("a sidebar leaf for {} labelled {:?}", resumed.id, old.label);
+    h.wait_until(&what, HANG_GUARD, |h| {
+        h.root(|root, _| {
+            root.sidebar_containers().iter().any(|container| {
+                container
+                    .leaves
+                    .iter()
+                    .any(|leaf| leaf.id == resumed.id && leaf.label == old.label)
+            })
+        })
+    });
+    let newest = snapshot(client, |s| s.id == resumed.id).expect("the wait above found it");
+    assert_eq!(
+        newest.user_label.as_deref(),
+        Some(old.label.as_str()),
+        "the resumed session keeps the name the user gave the session it resumed"
+    );
+}
+
+#[gpui::test]
+#[ignore = "e2e: run via .\\rt.ps1 native-e2e"]
+fn live_sessions_a_reboot_killed_resume_on_the_next_start(cx: &mut TestAppContext) {
+    require_node();
+    let mut daemon = LiveDaemon::start("reboot-resume");
+    let repo = daemon.git_fixture();
+    let (mut h, client) = Harness::open_live(cx, &daemon);
+    wait_connected(&mut h, &client, &daemon);
+    let repo_id = register_repo(&mut h, &client, &daemon, &repo);
+
+    let first = spawn_claude_with_transcript(&mut h, &client, &daemon, &repo_id, "resume-a", &[]);
+    let second = spawn_claude_with_transcript(
+        &mut h,
+        &client,
+        &daemon,
+        &repo_id,
+        "resume-b",
+        std::slice::from_ref(&first),
+    );
+    let shell_id = spawn_started_shell(&mut h, &client, &daemon, &repo);
+    let lost = [first, second];
+
+    daemon.restart_after_reboot();
+    wait_connected(&mut h, &client, &daemon);
+
+    let mut report = None;
+    h.wait_until("the start-up resume's report", HANG_GUARD, |_| {
+        report = client.find_message(|msg| match msg {
+            DaemonMessage::ResumeReport {
+                resumed,
+                left_in_recover,
+            } => Some((*resumed, *left_in_recover)),
+            _ => None,
+        });
+        report.is_some()
+    });
+    assert_eq!(
+        report,
+        Some((2, 1)),
+        "the report counts both Claude sessions resumed and the shell left in Recover"
+    );
+    for old in &lost {
+        assert_resumed(&mut h, &client, &daemon, old);
+    }
+    wait_tracer_lost(&mut h, &daemon, &shell_id);
+    let respawned = snapshot(&client, |s| {
+        s.mode == SessionMode::PlainShell && s.id != shell_id
+    });
+    assert!(
+        respawned.is_none(),
+        "the lost shell stays in Recover and no shell is spawned for it: {respawned:?}"
+    );
+}

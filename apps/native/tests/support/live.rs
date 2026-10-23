@@ -53,6 +53,25 @@ pub fn target_bin_dir() -> PathBuf {
         .to_path_buf()
 }
 
+/// Starts `rustling-tulipd` from beside the test binary with `envs` set and no
+/// console or standard streams.
+fn spawn_daemon(envs: &[(&'static str, OsString)]) -> Child {
+    let daemon = target_bin_dir().join(format!("rustling-tulipd{}", std::env::consts::EXE_SUFFIX));
+    assert!(
+        daemon.is_file(),
+        "{MISSING_DAEMON} (looked for {})",
+        daemon.display()
+    );
+    let mut command = Command::new(&daemon);
+    command
+        .envs(envs.iter().map(|(key, value)| (*key, value)))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    no_console(&mut command);
+    command.spawn().expect("spawn rustling-tulipd")
+}
+
 /// A shell whose prompt and echo are the same on every run.
 fn test_shell() -> OsString {
     std::env::var_os("ComSpec").unwrap_or_else(|| OsString::from("cmd.exe"))
@@ -78,13 +97,6 @@ impl LiveDaemon {
     /// isolation variables (so a row can override one) and kept in
     /// [`Self::envs`].
     pub fn start_with_env(test: &str, extra: &[(&'static str, OsString)]) -> Self {
-        let daemon =
-            target_bin_dir().join(format!("rustling-tulipd{}", std::env::consts::EXE_SUFFIX));
-        assert!(
-            daemon.is_file(),
-            "{MISSING_DAEMON} (looked for {})",
-            daemon.display()
-        );
         let root = repo_root()
             .join(".tmp")
             .join("native-e2e")
@@ -103,14 +115,7 @@ impl LiveDaemon {
         write_claude_stub(&root.join("fake-bin"));
         let mut envs = isolated_envs(&root, test);
         envs.extend(extra.iter().cloned());
-        let mut command = Command::new(&daemon);
-        command
-            .envs(envs.iter().map(|(key, value)| (*key, value)))
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        no_console(&mut command);
-        let child = command.spawn().expect("spawn rustling-tulipd");
+        let child = spawn_daemon(&envs);
         let mut live = Self {
             root,
             child,
@@ -186,6 +191,31 @@ impl LiveDaemon {
     pub fn kill(&mut self) {
         self.child.kill().expect("kill rustling-tulipd");
         self.child.wait().expect("reap rustling-tulipd");
+    }
+
+    /// Kills the daemon and every tracer it started, as a reboot would, then
+    /// starts a new daemon on the same directories.
+    pub fn restart_after_reboot(&mut self) {
+        self.kill();
+        let binaries = self.binaries_dir();
+        for (pid, _) in processes_under(&binaries) {
+            kill_process(pid);
+        }
+        let deadline = Instant::now() + START_TIMEOUT;
+        loop {
+            let running = processes_under(&binaries);
+            if running.is_empty() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "processes still run from {} {START_TIMEOUT:?} after the kill: {running:?}",
+                binaries.display()
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        self.child = spawn_daemon(&self.envs);
+        self.handshake = self.wait_healthy();
     }
 
     /// The id of the registered repo at `path`, from the daemon's own
