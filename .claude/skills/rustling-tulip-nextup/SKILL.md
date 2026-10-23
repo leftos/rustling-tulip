@@ -51,7 +51,7 @@ The goal is the first release as soon as possible; this overrides the user-level
   - `cargo nextest run -p <crate> --cargo-profile test-release` for each touched crate (heavy); the full suite is `cargo nextest run --workspace --cargo-profile test-release`. Never `--release` for tests: that profile's LTO and single codegen unit make every rebuild take minutes. nextest's own `--profile` is not the build profile.
   - `cargo deny check` when `Cargo.toml` or `Cargo.lock` changed (light)
   - the live tier, `pwsh ./rt.ps1 native-e2e` (heavy), and the OS tier, `pwsh ./rt.ps1 native-smoke` (light), when a wave's verification names them
-- test mode: unstable
+- test mode: stable
 - stable milestone: Release 1 — v0.1.0-alpha: Claude daily driver
 - release step: cutting a versioned release (the first is `v0.1.0-alpha`) from the Linear release pipeline's `vNext`, only after a green full suite (procedure: `docs/release.md`).
 - test map: `tools/test-map.json` (keys `central`, `ignore`, `rows`: source paths to nextest filtersets), read by `rt.ps1 test -Reached`. A landed change's reached tests are `pwsh -NoProfile -File ./rt.ps1 test -Reached -PrintOnly` for the filter (it runs no cargo command; every `rt.ps1` verb that does gates itself), then `pwsh -NoProfile -File tools/gate.ps1 run … -- cargo nextest run --workspace --cargo-profile test-release --no-tests warn -E '<filter>'` so the run routes. A central file or an unmapped file runs the full suite. The live and smoke tiers run through `rt.ps1 native-e2e` and `native-smoke`.

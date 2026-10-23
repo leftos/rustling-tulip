@@ -4,48 +4,48 @@
 
 ## Release 2 — Remote mode and the agent seam
 
-- [ ] RT-267 Move all Claude support behind the agent seam as its first plugin · release vNext+1
-- [ ] RT-96 Remote devices: list connected tailnet devices, block one and drop its connections · release vNext+1
-- [ ] RT-35 FT.2: native download sink for fetched files · release vNext+1
-- [ ] RT-36 FT.3: fetch a file by clicking a terminal path link in remote mode · release vNext+1
-- [ ] RT-37 FT.4: "Fetch file…" popup · release vNext+1
-- [ ] RT-184 Let only the client with recent input own a session's terminal size · release vNext+1
-- [ ] RT-187 Await the tailnet servers after the listener's supervisor panics · release vNext+1
-- [ ] RT-240 Close tailnet sessions when their listener drops · release vNext+1
+- [ ] RT-267 Move all Claude support behind the agent seam as its first plugin · release vNext
+- [ ] RT-96 Remote devices: list connected tailnet devices, block one and drop its connections · release vNext
+- [ ] RT-35 FT.2: native download sink for fetched files · release vNext
+- [ ] RT-36 FT.3: fetch a file by clicking a terminal path link in remote mode · release vNext
+- [ ] RT-37 FT.4: "Fetch file…" popup · release vNext
+- [ ] RT-184 Let only the client with recent input own a session's terminal size · release vNext
+- [ ] RT-187 Await the tailnet servers after the listener's supervisor panics · release vNext
+- [ ] RT-240 Close tailnet sessions when their listener drops · release vNext
 - [ ] RT-243 Split tailnet Supervisor::run and carry the real CertFailed reason
 - [ ] RT-258 Remote mode: don't send this PC's remembered folders to a remote host
-- [ ] RT-171 Phase 5a: pane drag-and-drop (P5.1–P5.5) · release vNext+1
-  - [ ] RT-232 P5.4: Sidebar drag-to-reorder · release vNext+1
-  - [ ] RT-233 P5.5: Drag a leaf onto a pane or a tab pill · release vNext+1
-- [ ] RT-152 P6.3: Host picker from the tailnet's machines, typed-name fallback, boot reconnect · release vNext+1
-- [ ] RT-154 P6.4: Host Settings: Remote access (Tailscale) panel · release vNext+1
-- [ ] RT-257 P6.2b: typed host path for Add repo and Browse on a remote host · release vNext+1
-- [ ] RT-173 Import remote sessions: offer to arrange a remote host's sessions when their count changed · release vNext+1
-- [ ] RT-158 P6.6: Remote tests over a fake Tailscale, hand checklist, and the docs pass · release vNext+1
+- [ ] RT-171 Phase 5a: pane drag-and-drop (P5.1–P5.5) · release vNext
+  - [ ] RT-232 P5.4: Sidebar drag-to-reorder · release vNext
+  - [ ] RT-233 P5.5: Drag a leaf onto a pane or a tab pill · release vNext
+- [ ] RT-152 P6.3: Host picker from the tailnet's machines, typed-name fallback, boot reconnect · release vNext
+- [ ] RT-154 P6.4: Host Settings: Remote access (Tailscale) panel · release vNext
+- [ ] RT-257 P6.2b: typed host path for Add repo and Browse on a remote host · release vNext
+- [ ] RT-173 Import remote sessions: offer to arrange a remote host's sessions when their count changed · release vNext
+- [ ] RT-158 P6.6: Remote tests over a fake Tailscale, hand checklist, and the docs pass · release vNext
 - [ ] RT-244 Preset wizard: typed host paths instead of local pickers in remote mode
-- [ ] RT-166 TS.3b: device tokens issued only after the owner approves the device on the host PC · release vNext+1
+- [ ] RT-166 TS.3b: device tokens issued only after the owner approves the device on the host PC · release vNext
 - [ ] RT-278 Prove the daemon holds the token before a client reuses, retires or kills it
 
 ## Wave 1a — Claude sessions on DeepSeek
 
-- [ ] RT-176 Import a DeepSeek session started with a model alias as DeepSeek · release vNext+1
-- [ ] RT-192 Verify the DeepSeek provider's model and env handling · release vNext+1
+- [ ] RT-176 Import a DeepSeek session started with a model alias as DeepSeek · release vNext
+- [ ] RT-192 Verify the DeepSeek provider's model and env handling · release vNext
 
 ## Wave 2 — Daily driver: close the port's gaps
 
-- [ ] RT-179 Keep keyboard focus when pressing Worktrees Save disables it · release vNext+1
-- [ ] RT-195 Give the container menu a keyboard route · release vNext+1
-- [ ] RT-202 Accept the 1015 and 1016 mouse-report encodings · release vNext+1
-- [ ] RT-204 Clear the container row focus when the sidebar stops showing the container list · release vNext+1
-- [ ] RT-205 Re-sync a watched .code-workspace once at daemon start · release vNext+1
-- [ ] RT-207 Move the .code-workspace folder scan off the connection's dispatch task · release vNext+1
-- [ ] RT-211 Open the trusted-launch dialog through one helper, with a refusal path · release vNext+1
-- [ ] RT-212 Clear the sidebar row hover when the pointer leaves · release vNext+1
-- [ ] RT-223 Test the daemon's branch-name suggestion and its failure routing · release vNext+1
-- [ ] RT-235 Check a VS Code or Explorer target still exists before opening it · release vNext+1
-- [ ] RT-236 Fold the container menu's disabled-tip table into its row definitions · release vNext+1
-- [ ] RT-237 Diagnose the VS Code fallback's dispatch order when two opens are queued · release vNext+1
-- [ ] RT-238 Route a ListPresets failure by request_id · release vNext+1
+- [ ] RT-179 Keep keyboard focus when pressing Worktrees Save disables it · release vNext
+- [ ] RT-195 Give the container menu a keyboard route · release vNext
+- [ ] RT-202 Accept the 1015 and 1016 mouse-report encodings · release vNext
+- [ ] RT-204 Clear the container row focus when the sidebar stops showing the container list · release vNext
+- [ ] RT-205 Re-sync a watched .code-workspace once at daemon start · release vNext
+- [ ] RT-207 Move the .code-workspace folder scan off the connection's dispatch task · release vNext
+- [ ] RT-211 Open the trusted-launch dialog through one helper, with a refusal path · release vNext
+- [ ] RT-212 Clear the sidebar row hover when the pointer leaves · release vNext
+- [ ] RT-223 Test the daemon's branch-name suggestion and its failure routing · release vNext
+- [ ] RT-235 Check a VS Code or Explorer target still exists before opening it · release vNext
+- [ ] RT-236 Fold the container menu's disabled-tip table into its row definitions · release vNext
+- [ ] RT-237 Diagnose the VS Code fallback's dispatch order when two opens are queued · release vNext
+- [ ] RT-238 Route a ListPresets failure by request_id · release vNext
 - [ ] RT-239 Skip touch and broadcast for a MovePane that leaves the grid unchanged
 - [ ] RT-254 Keep preset job events when the broadcast lags
 - [ ] RT-255 Reject or document a preset max_panes_per_tab of 0
@@ -55,12 +55,12 @@
 
 ## Wave 2b — Hook status
 
-- [ ] RT-220 Quote the characters a shell still expands in the hook shim command · release vNext+1
-- [ ] RT-219 Cap the length of hook-derived pending input strings · release vNext+1
-- [ ] RT-85 Flag a session hand-off ready when its orchestrator says to /clear and /nextup · release vNext+1
-- [ ] RT-193 Make SpawnArgs' hook settings a constructor argument, not a comment-enforced None · release vNext+1
-- [ ] RT-206 Reject a leading hyphen in a hook-reported conversation id · release vNext+1
-- [ ] RT-210 Match Claude Code's hook matcher semantics in the fake CLI · release vNext+1
+- [ ] RT-220 Quote the characters a shell still expands in the hook shim command · release vNext
+- [ ] RT-219 Cap the length of hook-derived pending input strings · release vNext
+- [ ] RT-85 Flag a session hand-off ready when its orchestrator says to /clear and /nextup · release vNext
+- [ ] RT-193 Make SpawnArgs' hook settings a constructor argument, not a comment-enforced None · release vNext
+- [ ] RT-206 Reject a leading hyphen in a hook-reported conversation id · release vNext
+- [ ] RT-210 Match Claude Code's hook matcher semantics in the fake CLI · release vNext
 
 ## Wave 4 — Mobile app (iPhone PWA over Tailscale)
 
