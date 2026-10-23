@@ -106,7 +106,13 @@ pub struct AgentStreams {
 /// Each chunk is fed into `streams.screen`; a check then reads the screen
 /// [`CHECK_DEBOUNCE`] after the output pauses, or [`CHECK_MAX_WAIT`] into a
 /// burst. Entering `AwaitingInput` from `Idle` or `Working`, and a spinner
-/// promoting `Idle` to `Working`, publish at once. Every other change (leaving
+/// promoting `Idle` to `Working`, publish without a window, but only from a
+/// settled frame: a check after output paused for [`CHECK_DEBOUNCE`], or two
+/// executed checks in a row that agree. A dialog raises `AwaitingInput` only
+/// on its edge: once the session has entered or been taken off a prompt the
+/// screen still shows, a dialog raises nothing until a check has read
+/// something else (the owner's key leaves the answered dialog painted until
+/// Claude redraws). Every other change (leaving
 /// `AwaitingInput`, `Working` to `Idle`) publishes only after
 /// [`CONFIRM_CHECKS`] agreeing checks at least [`CONFIRM_SPACING`] apart, or on
 /// the first agreeing check [`CONFIRM_CAP`] after the window opened, all read
@@ -115,8 +121,10 @@ pub struct AgentStreams {
 ///
 /// When another writer (a hook event, the owner's key, an exit) changes the
 /// record's status or hook stamp, the screen is left unread for
-/// [`FOREIGN_WRITE_HOLD`], and so it is when the watcher starts, while a
-/// reattached session's replay lands. The write itself is refused unless the
+/// [`FOREIGN_WRITE_HOLD`], and so it is when the watcher starts (while a
+/// reattached session's replay lands), after the output stream lagged, and
+/// when a check finds the grid resized; the screen is read again once the
+/// hold ends, output or not. The write itself is refused unless the
 /// record still holds the status, hook stamp and hook-driven flag the window
 /// read (see [`apply_screen_status`]).
 ///
@@ -137,6 +145,10 @@ pub fn watch(
         attention_tx,
         wake,
         confirm: Confirm::new(Instant::now()),
+        last_output: None,
+        size: None,
+        last_verdict: None,
+        dialog_edge_armed: true,
     };
     tokio::spawn(async move { watcher.run(&mut output).await });
 }
@@ -150,17 +162,33 @@ struct AgentWatcher {
     attention_tx: mpsc::UnboundedSender<AttentionEvent>,
     wake: RecordWake,
     confirm: Confirm,
+    /// When the last chunk of output arrived; a check at least
+    /// [`CHECK_DEBOUNCE`] after it reads a settled frame.
+    last_output: Option<Instant>,
+    /// The grid's size at the last executed check.
+    size: Option<(u16, u16)>,
+    /// The verdict of the last executed check.
+    last_verdict: Option<Verdict>,
+    /// Whether a dialog on screen may raise `AwaitingInput`: false from the
+    /// moment the session enters or leaves a prompt that the screen still
+    /// shows, until a check reads anything other than a dialog. A dialog left
+    /// painted after the owner's key cleared it raises nothing.
+    dialog_edge_armed: bool,
 }
 
-/// When the next check runs, and the gated change it is confirming.
+/// When the next check runs, and the change it is confirming.
 struct Confirm {
     window: Option<Window>,
-    /// The debounced check scheduled by output; `None` when none is pending.
+    /// The next check scheduled by output or by a hold; `None` when none is
+    /// pending.
     check_at: Option<Instant>,
-    /// The first chunk since the last check, which bounds the debounce.
+    /// When the current burst of output began, which bounds the debounce.
     burst_from: Option<Instant>,
     /// Checks before this instant are skipped.
     hold_until: Instant,
+    /// The record and status the last executed check asked to publish at
+    /// once but could not, because output had not settled.
+    candidate: Option<(StatusRead, SessionStatus)>,
 }
 
 /// A gated change being confirmed: the status it would publish, the record
@@ -181,6 +209,7 @@ impl Confirm {
             check_at: None,
             burst_from: None,
             hold_until: start + FOREIGN_WRITE_HOLD,
+            candidate: None,
         }
     }
 
@@ -207,11 +236,13 @@ impl Confirm {
         }
     }
 
-    /// Drop the window and leave the screen unread for
-    /// [`FOREIGN_WRITE_HOLD`] from `now`.
+    /// Drop the window and any candidate, leave the screen unread for
+    /// [`FOREIGN_WRITE_HOLD`] from `now`, and read it once the hold ends.
     fn hold(&mut self, now: Instant) {
         self.window = None;
+        self.candidate = None;
         self.hold_until = now + FOREIGN_WRITE_HOLD;
+        self.check_at = Some(self.hold_until);
     }
 
     /// Count one check that reads `target` against `read`; answers whether
@@ -257,6 +288,7 @@ impl AgentWatcher {
                     Ok(bytes) => {
                         crate::sync::lock(&self.screen).feed(&bytes);
                         let now = Instant::now();
+                        self.last_output = Some(now);
                         if self.confirm.schedule(now) && self.check(now).is_break() {
                             return;
                         }
@@ -264,13 +296,14 @@ impl AgentWatcher {
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         warn!(session_id = %self.session_id, lagged = n, "pty state lagged");
                         crate::sync::lock(&self.screen).reset_parser();
-                        self.confirm.window = None;
+                        self.confirm.hold(Instant::now());
                     }
                     Err(broadcast::error::RecvError::Closed) => return,
                 },
                 event = self.wake.events.recv(), if self.wake.open => {
+                    let before = self.wake.seen;
                     if self.wake.changed(&self.registry, &self.session_id, event) {
-                        self.confirm.hold(Instant::now());
+                        self.foreign_write(before, Instant::now());
                     }
                 },
                 () = sleep_until(next_check.unwrap_or_else(Instant::now)), if next_check.is_some() => {
@@ -286,27 +319,37 @@ impl AgentWatcher {
     /// when the rules allow it. Breaks once the record is gone.
     fn check(&mut self, now: Instant) -> ControlFlow<()> {
         self.confirm.check_at = None;
-        self.confirm.burst_from = None;
+        // Output since the last chunk's debounce: the frame may be half drawn,
+        // and the burst goes on, so the next max-wait counts from here.
+        let settled_at = self.last_output.map(|at| at + CHECK_DEBOUNCE);
+        let quiet = settled_at.is_none_or(|at| now >= at);
+        self.confirm.burst_from = (!quiet).then_some(now);
         if now < self.confirm.hold_until {
+            self.confirm.check_at = Some(self.confirm.hold_until);
             return ControlFlow::Continue(());
         }
         let Some(read) = record_status(&self.registry, &self.session_id) else {
             return ControlFlow::Break(());
         };
+        let before = self.wake.seen;
         if self.wake.note(read) {
             // Another writer changed the record and its broadcast has not
             // arrived yet: the grid predates that change too.
-            self.confirm.hold(now);
+            self.foreign_write(before, now);
             return ControlFlow::Continue(());
         }
         if matches!(read.status, SessionStatus::Stopped | SessionStatus::Error) {
             self.confirm.window = None;
+            self.confirm.candidate = None;
             return ControlFlow::Continue(());
         }
-        // The record lock is released; take the grid's alone.
-        let reading = {
-            let screen = crate::sync::lock(&self.screen);
-            rules::read_claude(&screen)
+        if !quiet {
+            // Read the frame again once it settles, should no output follow.
+            self.confirm.check_at = settled_at;
+        }
+        let Some(reading) = self.read_screen() else {
+            self.confirm.hold(now);
+            return ControlFlow::Continue(());
         };
         debug!(
             session_id = %self.session_id,
@@ -314,19 +357,56 @@ impl AgentWatcher {
             verdict = ?reading.verdict,
             from_title = reading.from_title,
             status = ?read.status,
+            quiet,
             "pty_state screen check"
         );
+        self.last_verdict = Some(reading.verdict);
+        if reading.verdict != Verdict::State(ScreenState::AwaitingInput) {
+            self.dialog_edge_armed = true;
+        }
         let Some(target) = screen_target(reading).filter(|&target| target != read.status) else {
             self.confirm.window = None;
+            self.confirm.candidate = None;
             return ControlFlow::Continue(());
         };
         if publishes_at_once(read.status, target) {
-            self.confirm.window = None;
-            self.publish(read, target);
-        } else if self.confirm.agree(read, target, now) {
-            self.publish(read, target);
+            self.publish_at_once(read, target, quiet);
+        } else {
+            self.confirm.candidate = None;
+            if self.confirm.agree(read, target, now) {
+                self.publish(read, target);
+            }
         }
         ControlFlow::Continue(())
+    }
+
+    /// The screen's reading, or `None` when the grid's size changed since the
+    /// last executed check: the frame under the new size may be half drawn.
+    fn read_screen(&mut self) -> Option<Reading> {
+        let (size, reading) = {
+            let screen = crate::sync::lock(&self.screen);
+            (screen.size(), rules::read_claude(&screen))
+        };
+        let resized = self.size.is_some_and(|last| last != size);
+        self.size = Some(size);
+        (!resized).then_some(reading)
+    }
+
+    /// Publish a change that needs no window, once the frame is settled: read
+    /// after output paused for [`CHECK_DEBOUNCE`], or by two executed checks
+    /// in a row. Entering `AwaitingInput` also needs the dialog edge armed.
+    fn publish_at_once(&mut self, read: StatusRead, target: SessionStatus, quiet: bool) {
+        self.confirm.window = None;
+        if target == SessionStatus::AwaitingInput && !self.dialog_edge_armed {
+            self.confirm.candidate = None;
+            return;
+        }
+        if quiet || self.confirm.candidate == Some((read, target)) {
+            self.confirm.candidate = None;
+            self.publish(read, target);
+        } else {
+            self.confirm.candidate = Some((read, target));
+        }
     }
 
     /// Write `next` over `from`; a write that lands is this watcher's own, so
@@ -340,7 +420,27 @@ impl AgentWatcher {
             &self.attention_tx,
         ) {
             self.wake.seen = Some((next, from.last_hook_time));
+            if next == SessionStatus::AwaitingInput {
+                self.dialog_edge_armed = false;
+            }
         }
+    }
+
+    /// Another writer moved the record from `before` to what the wake last
+    /// saw: hold off the screen. A move off `AwaitingInput` while the screen
+    /// showed the dialog (the owner's key) disarms the dialog edge, since the
+    /// dialog stays painted until Claude redraws.
+    fn foreign_write(&mut self, before: Option<(SessionStatus, Option<u128>)>, now: Instant) {
+        let was_awaiting = before.is_some_and(|(status, _)| status == SessionStatus::AwaitingInput);
+        let still_awaiting = self
+            .wake
+            .seen
+            .is_some_and(|(status, _)| status == SessionStatus::AwaitingInput);
+        let dialog_shown = self.last_verdict == Some(Verdict::State(ScreenState::AwaitingInput));
+        if was_awaiting && !still_awaiting && dialog_shown {
+            self.dialog_edge_armed = false;
+        }
+        self.confirm.hold(now);
     }
 }
 
@@ -1156,6 +1256,8 @@ mod hysteresis_tests {
         /// Keeps the input channel open when the watcher does not read it.
         _input: Option<mpsc::UnboundedReceiver<usize>>,
         attention: mpsc::UnboundedReceiver<super::AttentionEvent>,
+        /// The grid an agent session's watcher feeds and reads.
+        screen: SharedScreen,
     }
 
     const SESSION: &str = "s1";
@@ -1213,7 +1315,7 @@ mod hysteresis_tests {
                 SESSION.to_string(),
                 AgentStreams {
                     output: output_rx,
-                    screen,
+                    screen: Arc::clone(&screen),
                 },
                 attention_tx,
             );
@@ -1225,6 +1327,7 @@ mod hysteresis_tests {
             input,
             _input: unread_input,
             attention: attention_rx,
+            screen,
         }
     }
 
@@ -1714,6 +1817,7 @@ mod hysteresis_tests {
     /// A hook event already on the record but not yet broadcast, landing
     /// inside a window, refuses that window's publish: the next check reads
     /// the moved record and holds off the screen as for a broadcast write.
+    /// The idle box still on screen after the hold opens a fresh window.
     #[tokio::test(start_paused = true)]
     async fn an_unbroadcast_hook_write_during_a_window_refuses_the_publish() {
         let h = start_record(
@@ -1725,11 +1829,19 @@ mod hysteresis_tests {
         h.chunk(idle_frame(&[]));
         advance(ms(100)).await;
         h.set_record_unbroadcast(|record| record.last_hook_time = Some(2));
-        advance(Duration::from_secs(3)).await;
+        // The window's next check, at 190 ms, reads the moved record and holds
+        // until 890 ms.
+        advance(ms(780)).await;
         assert_eq!(
             h.status(),
             SessionStatus::Working,
             "a window published over a hook event its broadcast had not reached"
+        );
+        advance(FOREIGN_WRITE_HOLD + ms(60)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "the idle box after the hold did not demote"
         );
     }
 
@@ -2193,8 +2305,12 @@ mod hysteresis_tests {
         });
         settle().await;
         advance(CHECK_DEBOUNCE + ms(10)).await;
-        h.chunk(permission_frame());
-        advance(ms(100)).await;
+        // Arrow keys move the cursor in the dialog Claude still paints, past
+        // the hold the clear began.
+        for _ in 0..60 {
+            h.chunk(permission_frame());
+            advance(ms(50)).await;
+        }
         assert_eq!(h.attentions(), 0, "a stale dialog raised Attention");
         assert_eq!(
             h.status(),
@@ -2203,6 +2319,43 @@ mod hysteresis_tests {
         );
     }
 
+    /// After the owner's clear, a dialog that goes away (the idle box) and
+    /// comes back (a new prompt) raises `AwaitingInput` again, once.
+    #[tokio::test(start_paused = true)]
+    async fn a_dialog_after_the_box_returns_raises_again() {
+        let mut h = start_record(
+            "dialog-returns",
+            false,
+            hook_record(SessionStatus::AwaitingInput),
+        );
+        h.chunk(permission_frame());
+        pass_hold().await;
+        h.registry.update_if_changed(SESSION, |record| {
+            record.status = SessionStatus::Idle;
+            record.pending_input = None;
+            true
+        });
+        settle().await;
+        for _ in 0..20 {
+            h.chunk(permission_frame());
+            advance(ms(50)).await;
+        }
+        assert_eq!(h.attentions(), 0, "the stale dialog raised Attention");
+        h.chunk(idle_frame(&[]));
+        advance(ms(100)).await;
+        assert_eq!(h.status(), SessionStatus::Idle);
+        h.chunk(permission_frame());
+        advance(ms(100)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::AwaitingInput,
+            "a new dialog after the box did not raise the prompt"
+        );
+        assert_eq!(h.attentions(), 1, "one Attention for the new dialog");
+    }
+
+    /// A newer hook stamp inside a window refuses its publish; the idle box
+    /// still on screen after the hold opens a fresh window that publishes.
     #[tokio::test(start_paused = true)]
     async fn a_newer_hook_stamp_mid_window_cancels_the_publish() {
         let h = start_record(
@@ -2214,11 +2367,87 @@ mod hysteresis_tests {
         h.chunk(idle_frame(&[]));
         advance(ms(100)).await;
         h.set_record(|record| record.last_hook_time = Some(2));
-        advance(Duration::from_secs(3)).await;
+        advance(ms(690)).await;
         assert_eq!(
             h.status(),
             SessionStatus::Working,
             "a window opened before a newer hook event still published"
+        );
+        advance(FOREIGN_WRITE_HOLD + ms(60)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "the idle box after the hold did not demote"
+        );
+    }
+
+    /// A foreign write with the idle box already on screen and no output
+    /// after it: the screen is read once the hold ends.
+    #[tokio::test(start_paused = true)]
+    async fn a_quiet_idle_box_after_a_foreign_write_still_demotes() {
+        let h = start_record(
+            "quiet-after-hold",
+            false,
+            hook_record(SessionStatus::Working),
+        );
+        pass_hold().await;
+        h.chunk(idle_frame(&[SPINNER_ROW]));
+        advance(ms(100)).await;
+        h.chunk(idle_frame(&[]));
+        h.set_record(|record| record.last_hook_time = Some(2));
+        advance(ms(690)).await;
+        assert_eq!(h.status(), SessionStatus::Working, "read inside the hold");
+        advance(FOREIGN_WRITE_HOLD + ms(60)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "a quiet idle box was never read after the hold"
+        );
+    }
+
+    /// A max-wait check under continuous output catches a half-drawn frame
+    /// whose bottom still holds the answered dialog's footer; the next chunk
+    /// paints the spinner over it. That one read raises nothing.
+    #[tokio::test(start_paused = true)]
+    async fn a_half_frame_under_continuous_output_raises_no_attention() {
+        let mut h = start_from("half-frame-burst", false, SessionStatus::Working);
+        pass_hold().await;
+        for tick in 0..20 {
+            // The chunk just before the 150 ms max-wait check.
+            if tick == 7 {
+                h.chunk(permission_frame());
+            } else {
+                h.chunk(idle_frame(&[SPINNER_ROW]));
+            }
+            advance(ms(20)).await;
+        }
+        advance(ms(200)).await;
+        assert_eq!(h.attentions(), 0, "a half frame raised Attention");
+        assert_eq!(h.status(), SessionStatus::Working);
+    }
+
+    /// The grid resized inside a window: the frame under the new size is
+    /// only read after a hold, so nothing publishes until hold and window.
+    #[tokio::test(start_paused = true)]
+    async fn a_resize_holds_before_the_next_read() {
+        let h = start_record("resize-hold", false, hook_record(SessionStatus::Working));
+        pass_hold().await;
+        h.chunk(idle_frame(&[]));
+        advance(ms(100)).await;
+        crate::sync::lock(&h.screen).resize(160, ROWS);
+        // The window's next check, at 190 ms, finds the new size and holds
+        // until 890 ms.
+        advance(ms(780)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Working,
+            "a check read the grid across a resize"
+        );
+        advance(FOREIGN_WRITE_HOLD + ms(60)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "the idle box after the hold did not demote"
         );
     }
 
@@ -2393,10 +2622,11 @@ mod hysteresis_tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_dialog_repainted_every_20ms_is_seen_within_max_wait() {
+    async fn a_dialog_repainted_every_20ms_is_seen_within_two_max_waits() {
         let mut h = start("dialog-burst", false);
         pass_hold().await;
-        for _ in 0..8 {
+        // Checks at one and two max-waits agree: 15 repaints reach 300 ms.
+        for _ in 0..15 {
             h.chunk(permission_frame());
             advance(ms(20)).await;
         }
@@ -2418,13 +2648,14 @@ mod hysteresis_tests {
         for _ in 0..70 {
             h.chunk(idle_frame(&[]));
         }
-        advance(ms(150)).await;
+        // The lag at 200 ms holds the screen until 900 ms.
+        advance(ms(690)).await;
         assert_eq!(
             h.status(),
             SessionStatus::Working,
-            "a window survived a lagged stream"
+            "a write landed inside the lag's hold"
         );
-        advance(ms(350)).await;
+        advance(FOREIGN_WRITE_HOLD + ms(60)).await;
         assert_eq!(
             h.status(),
             SessionStatus::Idle,

@@ -170,8 +170,9 @@ async fn reattach_one(
                         &pty,
                         Some(dirs.clone()),
                     );
-                    let plain_shell = meta.mode == SessionMode::PlainShell;
-                    let (in_tx, in_rx) = mpsc::unbounded_channel::<usize>();
+                    // Only a plain shell's classifier reads input volume.
+                    let shell_input = (meta.mode == SessionMode::PlainShell)
+                        .then(mpsc::unbounded_channel::<usize>);
                     let screen: screen::SharedScreen = Arc::new(Mutex::new(screen::Screen::new(
                         screen::REATTACH_COLS,
                         screen::REATTACH_ROWS,
@@ -179,15 +180,14 @@ async fn reattach_one(
                     let restored = {
                         let mut guard = crate::sync::lock(pending.arc());
                         guard.scrollback_snapshot_req = Some(snap_tx);
-                        // Only a plain shell's classifier reads input volume.
-                        if plain_shell {
-                            guard.input_notifier = Some(in_tx);
+                        if let Some((in_tx, _)) = &shell_input {
+                            guard.input_notifier = Some(in_tx.clone());
                         }
                         guard.screen = Some(Arc::clone(&screen));
                         guard.status
                     };
                     // An agent session's status watcher feeds its own grid.
-                    if plain_shell {
+                    if shell_input.is_some() {
                         screen::watch(
                             Arc::clone(&screen),
                             meta.session_id.clone(),
@@ -195,7 +195,7 @@ async fn reattach_one(
                         );
                     }
                     pty.resize(screen::REATTACH_COLS, screen::REATTACH_ROWS);
-                    if plain_shell {
+                    if let Some((_, in_rx)) = shell_input {
                         pty_state::watch_plain_shell(
                             &sessions,
                             meta.session_id.clone(),

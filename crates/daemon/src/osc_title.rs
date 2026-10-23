@@ -210,11 +210,11 @@ impl Parser {
 }
 
 /// Tracks the most recent terminal title seen on a PTY output stream and
-/// reports when a *new* title appears. The status classifier in
-/// [`crate::pty_state`] uses this as an activity heartbeat: an agent that keeps
-/// repainting its title (spinner glyph, elapsed-time counter, progress text) is
-/// busy even when its raw byte volume dips below the echo budget, so a title
-/// change keeps the pane — or flips it — to `Working`.
+/// reports when a *new* title appears. The plain-shell status classifier in
+/// [`crate::pty_state`] uses this as an activity heartbeat: a shell whose
+/// title repaints (a `cd` that changes the cwd, a program's progress text) is
+/// active even when its raw byte volume stays below the echo budget, so a
+/// title change keeps the pane — or flips it — to `Working`.
 ///
 /// This is intentionally a thin wrapper over the same [`Parser`] the title
 /// watcher uses, so there is a single OSC-parsing implementation. Cwd and other

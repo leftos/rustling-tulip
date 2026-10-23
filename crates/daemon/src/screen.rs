@@ -130,6 +130,13 @@ impl Screen {
         self.rows = size.rows;
     }
 
+    /// The grid's size as `(cols, rows)`, as last set.
+    #[must_use]
+    pub fn size(&self) -> (u16, u16) {
+        let narrow = |n: usize| u16::try_from(n).unwrap_or(u16::MAX);
+        (narrow(self.cols), narrow(self.rows))
+    }
+
     /// Every visible row, top to bottom, with trailing spaces trimmed.
     #[must_use]
     pub fn rows(&self) -> Vec<String> {
