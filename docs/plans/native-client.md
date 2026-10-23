@@ -10,9 +10,9 @@ The rulings the native client's open items need before they are briefed. Each it
 
 ## Phase 5 — windows and drag-and-drop
 
-Pane / tab / session pop-outs as windows of one process, pane drag-and-drop with edge overlays, sidebar and tab drag-to-reorder. The split below goes to the user with its open questions before anything is dispatched. Items run in build order: drag-and-drop first (P5.1–P5.5), then pop-outs (P5.6–P5.11), then docs (P5.12). Each is a plain-Rust model with unit tests under a thin GPUI view, and ticks the parity lines it delivers; parity lines are cited by their opening words and section in [native-client-parity.md](./native-client-parity.md).
+Pane / tab / session pop-outs as windows of one process, pane drag-and-drop with edge overlays, sidebar and tab drag-to-reorder. The split below goes to the user with its open questions before anything is dispatched. Items run in build order: pop-outs (P5.6–P5.11), then docs (P5.12); the drag-and-drop items (P5.1–P5.5) are done. Each is a plain-Rust model with unit tests under a thin GPUI view, and ticks the parity lines it delivers; parity lines are cited by their opening words and section in [native-client-parity.md](./native-client-parity.md).
 
-Drag-and-drop (P5.1–P5.5) is Phase 5a, RT-171 in Wave 2, before the cutover; the pop-outs (P5.6–P5.12) are Phase 5b, RT-32 in Wave 7, after it.
+Phase 5a, drag-and-drop (RT-171, Wave 2), has landed; the pop-outs (P5.6–P5.12) are Phase 5b, RT-32 in Wave 7, after the cutover.
 
 ### What already exists
 
@@ -22,7 +22,7 @@ Drag-and-drop (P5.1–P5.5) is Phase 5a, RT-171 in Wave 2, before the cutover; t
 
   It wraps the whole root for an outer edge, refuses moving a tab's only pane within that tab, and removes a source tab left empty. It also maintains a tab's untouched (picked) layout: a same-tab move clears it, and a cross-tab move rebuilds both untouched tabs (`docs/native-client.md`, "Tab layouts").
 
-  P5.1–P5.5 add drag gestures on top of that placement rather than reimplementing it.
+  The drag gestures sit on top of that placement rather than reimplementing it.
 
 - **Client**: `TabsModel` folds `TabsReordered` (`tabs.rs` `reorder`) and `SidebarModel` folds `ContainersReordered` / `SessionsReordered` and orders by them in both views, the Tabs view's tab containers included (`sidebar.rs` `apply_container_order`, `apply_session_order`). `tabs::pane_rects`, `tabs::pick_balanced_drop_target` (the pane menu's Move to ▸, `pane_menu.rs`), `tabs::size_drivers`, `undo::MOVED_PANE`, `undo::SWAPPED_PANES`, `tabs::outer_edges`, the drag model in `drag.rs` (`docs/native-client.md`, "Drag model"), `RootView::record_undo` and `TabsModel::mark_closing_if_last_pane` exist. Pane drags use GPUI's `on_drag` / `on_drag_move` / `on_drop` (`grid_view.rs`); divider and sidebar-width drags are raw mouse move / up on the root (`lib.rs` `on_drag_move`, `on_drag_end`). A pane's terminal is a `TerminalPane` entity in a `PaneSlot` keyed by pane id (`grid_view.rs`); app shortcuts are the root's `capture_key_down` (`lib.rs`).
 - **Tauri reference** (tag `tauri-last`, `apps/tauri-app/src/`): `components/GridRenderer.tsx` `computeEdge` (outer band 0.12 of the pane on edges touching the grid boundary, the nearer at a corner; centre box 0.35–0.65 swaps; else the nearer axis's half) and `PoppedOutPaneCard`; `components/TabBar.tsx` (before / after by the pill's half, a pane entering a pill activates it, a pane dropped on a pill placed by `pickBalancedDropTarget`); `components/Sidebar.tsx` (container and leaf reorder by the row's half, leaves reorder only inside workspace, repo and tab containers, a bound leaf also carries its first pane); `PaneWindow.tsx`, `TabWindow.tsx`, `SessionWindow.tsx`; `src-tauri/src/lib.rs` `open_pane_window` / `open_tab_window` / `open_session_window` (an open window is focused, 1100×720, min 700×400).
@@ -51,14 +51,6 @@ Read from `~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gpui-0.2.2/src
 - Unseen turns clear "when … a focused pane shows it", and "The unseen set is per window and not saved" (`docs/native-client.md`, Status glyphs). A session focused in a pop-out counts as shown.
 - Protocol: changes stay additive (CLAUDE.md, Architecture invariants).
 - Verification: "UI hand-test (multi-window and drag can't be fully specced)" (the Phase 5 project's verification, now Wave 2's for drag-and-drop and Wave 7's for pop-outs); "a visible result no test can prove lands on green gates and is listed for a hand-test" (the nextup profile, "Agents and gates").
-
-### P5.5 Drag a leaf onto a pane or a tab pill
-
-- **Does**: a leaf dragged over the grid draws the same overlay and drops per Q9: a bound leaf moves its pane (the one in the active tab, else its first binding); an unbound leaf is placed with `SplitPane { new_session_id }` or `ReplacePaneSession`; onto a pill, it goes where `tabs::pane_target_for_session` says in that tab. Parity: "Drag a leaf onto a pane or a tab pill" (Sidebar).
-- **Files**: `drag.rs` (`leaf_drop` mapping); `sidebar_view.rs` (the leaf's payload); `grid_view.rs` and `tab_bar.rs` (accept `Leaf`); `tests/ui/ui_sidebar_drag.rs`.
-- **Core / view**: `leaf_drop` is plain Rust with its tests; the views accept the payload.
-- **Proof**: `drag::tests` red first: `bound_leaf_moves_its_active_tab_pane`, `unbound_leaf_on_a_half_splits_with_the_session`, `unbound_leaf_on_the_centre_replaces`; `--test ui ui_sidebar_drag`: `leaf_dropped_on_a_pane_edge_places_it`, `leaf_dropped_on_a_pill_places_it_in_that_tab`.
-- **Needs**: P5.2, P5.3, P5.4; Q9.
 
 ### P5.6 Pop-out model and a second window
 

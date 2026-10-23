@@ -711,12 +711,16 @@ impl RootView {
     }
 
     /// Whether `tab_id`'s pill shows the no-drop state: a pane drag is under
-    /// way and that pill's tab takes no pane.
+    /// way and that pill's tab takes no pane, or a sidebar leaf drag is and
+    /// that pill's tab takes no leaf.
     #[must_use]
     pub fn pill_no_drop(&self, tab_id: &str, cx: &App) -> bool {
-        self.active_pane_drag(cx).is_some()
+        let pane_refused = self.active_pane_drag(cx).is_some()
             && drag::pill_pane_hover(self.tabs.tabs(), self.tabs.active_id(), tab_id)
-                == drag::PillPaneHover::Inert
+                == drag::PillPaneHover::Inert;
+        let leaf_refused = matches!(self.active_sidebar_drag(cx), Some(DragPayload::Leaf { .. }))
+            && !drag::pill_takes_leaf(&self.tabs, tab_id);
+        pane_refused || leaf_refused
     }
 
     /// Follows a drag over `tab_id`'s pill: a pill dragged over its half
@@ -768,14 +772,17 @@ impl RootView {
     /// A drop on `tab_id`'s pill: a pill dropped where the mark stands takes
     /// the new order at once and sends it; the daemon's echo then agrees.
     /// A pane dropped on another grid tab's pill moves there at that tab's
-    /// balanced drop target. A drop on the pane's own tab's pill, on a diff
-    /// tab's pill, or one that keeps the order, does nothing.
+    /// balanced drop target. A sidebar leaf dropped on a pill goes where
+    /// [`drag::leaf_pill_drop`] says. A drop on the pane's own tab's pill, on
+    /// a diff tab's pill, or one that keeps the order, does nothing.
     fn on_pill_drop(&mut self, tab_id: &str, payload: &DragPayload, cx: &mut Context<Self>) {
         let mark = self.tab_drop.take();
         self.tab_drag = None;
         self.pane_drop = None;
         self.pane_drag = None;
         self.pane_drag_session = None;
+        self.sidebar_drag = None;
+        self.sidebar_drop = None;
         cx.notify();
         match payload {
             DragPayload::Pane {
@@ -799,7 +806,19 @@ impl RootView {
                     self.reorder_tabs_by_drop(ordered_ids);
                 }
             }
-            _ => {}
+            DragPayload::Leaf { session_id, .. } => {
+                let drop = drag::leaf_pill_drop(
+                    &self.tabs,
+                    self.sidebar.sessions(),
+                    session_id,
+                    tab_id,
+                    Some(crate::new_request_id()),
+                );
+                if let Some(drop) = drop {
+                    self.send_leaf_drop(drop, cx);
+                }
+            }
+            DragPayload::Container(_) => {}
         }
     }
 

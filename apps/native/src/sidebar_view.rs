@@ -738,9 +738,9 @@ const ROW_GHOST_NUDGE: Point<Pixels> = Point {
     y: px(14.0),
 };
 
-/// `leaf`'s row in `container`, which drags and takes drops within a
-/// workspace, repo or tab container, with the insertion line when a drop
-/// would land at it.
+/// `leaf`'s row in `container`, which drags in every container (onto a
+/// pane or a tab pill) and reorders only within a workspace, repo or tab
+/// container, with the insertion line when a drop would land at it.
 fn leaf_drag_row(
     container: &Container,
     leaf: &Leaf,
@@ -765,8 +765,9 @@ fn leaf_drag_row(
 }
 
 /// `row` as a drag source carrying `payload` and as the drop target
-/// `target`; a row with no payload (SH, DIR, Detached, Unbound and their
-/// leaves) neither drags nor takes drops.
+/// `target`; a row with no payload (an SH, DIR, Detached or Unbound
+/// container's header) neither drags nor takes drops. Every leaf drags;
+/// only leaves of workspace, repo and tab containers reorder.
 fn draggable_row(
     row: Stateful<Div>,
     payload: Option<DragPayload>,

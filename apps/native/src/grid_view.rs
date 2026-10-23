@@ -17,7 +17,7 @@ use protocol::{
 
 use crate::appearance::{self, PaneFrame, Resolved};
 use crate::diff_tab::LOADING_TEXT as DIFF_LOADING_TEXT;
-use crate::drag::{self, DragPayload, OverlayKind, PaneDrop};
+use crate::drag::{self, DragPayload, LeafDrop, OverlayKind};
 use crate::ellipsis::{ellipsized, truncating};
 use crate::fonts::DEFAULT_FAMILY;
 use crate::palette::{
@@ -1130,29 +1130,58 @@ impl RootView {
         self.pane_drop = None;
         self.pane_drag = None;
         self.pane_drag_session = None;
+        self.sidebar_drag = None;
+        self.sidebar_drop = None;
         let request_id = Some(new_request_id());
         if let Some((_, _, drop)) = self.drop_at(payload, window.mouse_position(), request_id) {
-            self.send_pane_move(&drop, cx);
+            self.send_leaf_drop(drop, cx);
         }
         cx.notify();
     }
 
-    /// The pane of the shown tab under `at` and the drop `payload` makes
-    /// there, when the drop would be accepted: a pane from any tab drops on a
-    /// pane of the shown one.
+    /// Sends what a pane or leaf drop does: a pane move with its undo entry,
+    /// or the request that places an unbound session, with none.
+    pub(crate) fn send_leaf_drop(&mut self, drop: LeafDrop, cx: &mut Context<Self>) {
+        match drop {
+            LeafDrop::Move(drop) => self.send_pane_move(&drop, cx),
+            LeafDrop::Send(message) => {
+                self.tabs.note_layout_request(&message);
+                self.send(message);
+            }
+        }
+    }
+
+    /// The pane of the shown tab under `at`, the edge the drop lands on and
+    /// what the drop of `payload` there does, when it would be accepted: a
+    /// pane from any tab and a sidebar leaf drop on a pane of the shown one.
     fn drop_at(
         &self,
         payload: &DragPayload,
         at: Point<Pixels>,
         request_id: Option<String>,
-    ) -> Option<(String, PaneDropEdge, PaneDrop)> {
+    ) -> Option<(String, PaneDropEdge, LeafDrop)> {
         let tab = self.tabs.active_tab()?;
-        let DragPayload::Pane { .. } = payload else {
+        if !matches!(payload, DragPayload::Pane { .. } | DragPayload::Leaf { .. }) {
             return None;
-        };
+        }
         let rect = grid_rect(self.grid_bounds?);
         let at = (at.x / px(1.0), at.y / px(1.0));
         let (pane_id, edge) = drag::pane_target(tab.grid()?, rect, PANE_GUTTER, at)?;
+        if let DragPayload::Leaf { session_id, .. } = payload {
+            let target = drag::LeafTarget {
+                tab_id: &tab.id,
+                pane_id: &pane_id,
+                edge,
+            };
+            let (edge, drop) = drag::leaf_drop(
+                &self.tabs,
+                self.sidebar.sessions(),
+                session_id,
+                &target,
+                request_id,
+            )?;
+            return Some((pane_id, edge, drop));
+        }
         let drop = drag::pane_drop(
             self.tabs.tabs(),
             payload,
@@ -1161,7 +1190,7 @@ impl RootView {
             edge,
             request_id,
         )?;
-        Some((pane_id, edge, drop))
+        Some((pane_id, edge, LeafDrop::Move(drop)))
     }
 
     /// A left press on a header button, chip or Stop: it disarms what any
@@ -1290,12 +1319,12 @@ impl RootView {
     }
 
     /// The pane the drop overlay is drawn on and the edge it shows, while a
-    /// pane drag is under way.
+    /// pane or a sidebar leaf drag is under way.
     #[must_use]
     pub fn pane_drop_overlay(&self, cx: &App) -> Option<(String, PaneDropEdge)> {
-        self.pane_drop
-            .clone()
-            .filter(|_| self.active_pane_drag(cx).is_some())
+        let dragging = self.active_pane_drag(cx).is_some()
+            || matches!(self.active_sidebar_drag(cx), Some(DragPayload::Leaf { .. }));
+        self.pane_drop.clone().filter(|_| dragging)
     }
 }
 

@@ -1,20 +1,24 @@
-//! Sidebar drag-to-reorder specs: workspace and repo containers reorder by
-//! their header's half and send every shown one in the new order, SH, DIR
-//! and Detached rows neither drag nor take drops, tab containers and pills
-//! drop on each other, leaves reorder within their own container only, the
-//! local order holds until the daemon's broadcast, and Esc cancels.
+//! Sidebar drag specs: workspace and repo containers reorder by their
+//! header's half and send every shown one in the new order, SH, DIR and
+//! Detached container rows neither drag nor take drops, tab containers and
+//! pills drop on each other, leaves reorder within their own container only,
+//! the local order holds until the daemon's broadcast, and Esc cancels. Any
+//! leaf drags onto a pane, where the pane drag's overlay shows where it
+//! lands, or onto a tab pill, which places it in that tab.
 
 use crate::support;
 
-use gpui::{Pixels, Point, TestAppContext, point};
-use protocol::{ClientMessage, ContainerRef, DaemonMessage, SplitDirection};
+use gpui::{Pixels, Point, TestAppContext, point, px};
+use protocol::{
+    ClientMessage, ContainerRef, DaemonMessage, PaneDropEdge, SplitDirection, SplitPlace,
+};
 use rustling_tulip_native::{RootView, Side, SidebarRow};
 use support::{Fixture, Harness, TestDir, pane, repo, session, split, tab, workspace};
 
-/// Workspace `w1`; repos `r1` (sessions `a`, `b`) and `r2` (session `c`);
-/// the standalone shell `sh`, the folder shell `d` and the detached session
-/// `x`. Tab `t1` shows `a` beside `b`; tabs `t2` and `t3` are one empty pane
-/// each.
+/// Workspace `w1` (session `u`, shown in no pane); repos `r1` (sessions
+/// `a`, `b`) and `r2` (session `c`); the standalone shell `sh`, the folder
+/// shell `d` and the detached session `x`. Tab `t1` shows `a` beside `b`;
+/// tabs `t2` and `t3` are one empty pane each.
 fn fixture() -> Fixture {
     Fixture {
         repos: vec![repo("r1", "D:\\r1"), repo("r2", "D:\\r2")],
@@ -26,6 +30,7 @@ fn fixture() -> Fixture {
             session("sh").shell("C:\\elsewhere").build(),
             session("d").dir_shell("C:\\other\\proj").build(),
             session("x").in_repo("gone").build(),
+            session("u").in_workspace("w1").build(),
         ],
         tabs: vec![
             tab(
@@ -126,6 +131,89 @@ fn tab_orders(h: &mut Harness) -> Vec<Vec<String>> {
         .collect()
 }
 
+/// The point `fx` across and `fy` down `pane`'s card.
+fn at(h: &mut Harness, pane: &str, fx: f32, fy: f32) -> Point<Pixels> {
+    let frame = h.bounds(&format!("pane-frame-{pane}"));
+    assert!(frame.origin.x >= px(0.0), "{pane} is on screen");
+    point(
+        frame.origin.x + frame.size.width * fx,
+        frame.origin.y + frame.size.height * fy,
+    )
+}
+
+fn undo_messages(h: &mut Harness) -> Vec<String> {
+    h.root(|root, _| {
+        root.undo_entries()
+            .iter()
+            .map(|entry| entry.message.clone())
+            .collect()
+    })
+}
+
+/// The pane the drop overlay is drawn on, and the edge it shows.
+fn overlay(h: &mut Harness) -> Option<(String, PaneDropEdge)> {
+    h.root(RootView::pane_drop_overlay)
+}
+
+/// The layout requests a leaf drop sends, among what the client sent since
+/// the last call.
+fn placements(h: &mut Harness) -> Vec<ClientMessage> {
+    h.sent()
+        .into_iter()
+        .filter(|msg| {
+            matches!(
+                msg,
+                ClientMessage::SplitPane { .. }
+                    | ClientMessage::ReplacePaneSession { .. }
+                    | ClientMessage::MovePane { .. }
+                    | ClientMessage::SwapPanes { .. }
+                    | ClientMessage::CreateTab { .. }
+            )
+        })
+        .collect()
+}
+
+/// Drags the leaf `leaf` to `to`, checks the overlay shows `shown` there,
+/// and drops it.
+fn drop_leaf(h: &mut Harness, leaf: &str, to: Point<Pixels>, shown: (&str, PaneDropEdge)) {
+    let from = on_row(h, &format!("leaf-{leaf}"), 0.5);
+    h.start_drag(from);
+    assert!(h.dragging(), "{leaf}'s leaf drags");
+    h.drag_to(to);
+    assert_eq!(
+        overlay(h),
+        Some((shown.0.to_owned(), shown.1)),
+        "the overlay shows where {leaf} lands"
+    );
+    h.release(to);
+    assert!(!h.dragging(), "the drop ends the drag");
+    assert_eq!(overlay(h), None, "the overlay goes with the drop");
+}
+
+/// Asserts the only request sent split `p2` of `t1` at `place` of a
+/// `direction` split with `u` in the new pane.
+fn assert_split_p2(h: &mut Harness, direction: SplitDirection, place: SplitPlace) {
+    let sent = placements(h);
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [ClientMessage::SplitPane {
+                tab_id,
+                pane_id,
+                direction: sent_direction,
+                place: sent_place,
+                new_session_id: Some(session),
+                request_id: Some(_),
+            }] if tab_id == "t1"
+                && pane_id == "p2"
+                && *sent_direction == direction
+                && *sent_place == place
+                && session == "u"
+        ),
+        "sent {sent:?}"
+    );
+}
+
 fn header(key: &str) -> SidebarRow {
     SidebarRow::Container(key.to_owned())
 }
@@ -188,7 +276,7 @@ fn container_dropped_before_another_sends_the_full_order(cx: &mut TestAppContext
 }
 
 #[gpui::test]
-fn shell_and_dir_containers_do_not_drag(cx: &mut TestAppContext) {
+fn shell_and_dir_containers_do_not_drag_but_their_leaves_do(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &fixture());
     h.sent();
@@ -198,16 +286,16 @@ fn shell_and_dir_containers_do_not_drag(cx: &mut TestAppContext) {
         "detached".to_owned(),
     ];
 
+    let from = on_row(&mut h, "leaf-d", 0.5);
+    h.start_drag(from);
+    assert!(h.dragging(), "a leaf of a DIR container drags");
+    h.release(from);
     for key in &still {
         let from = on_row(&mut h, &format!("container-{key}"), 0.5);
         h.start_drag(from);
         assert!(!h.dragging(), "{key} does not drag");
         h.release(from);
     }
-    let from = on_row(&mut h, "leaf-d", 0.5);
-    h.start_drag(from);
-    assert!(!h.dragging(), "a leaf of a DIR container does not drag");
-    h.release(from);
 
     for key in &still {
         let from = on_row(&mut h, "container-repo:r1", 0.5);
@@ -324,6 +412,133 @@ fn leaf_dropped_in_another_container_does_nothing(cx: &mut TestAppContext) {
     assert!(reorders(&mut h).is_empty());
     assert_eq!(leaves(&mut h, "repo:r1"), ids(&["a", "b"]));
     assert_eq!(leaves(&mut h, "repo:r2"), ids(&["c"]));
+}
+
+#[gpui::test]
+fn leaf_dropped_on_a_pane_edge_places_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &fixture());
+    h.sent();
+
+    let to = at(&mut h, "p2", 0.1, 0.5);
+    drop_leaf(&mut h, "u", to, ("p2", PaneDropEdge::Left));
+    assert_split_p2(&mut h, SplitDirection::Horizontal, SplitPlace::First);
+    assert!(
+        undo_messages(&mut h).is_empty(),
+        "placing a session records no undo"
+    );
+
+    let to = at(&mut h, "p2", 0.5, 0.5);
+    drop_leaf(&mut h, "u", to, ("p2", PaneDropEdge::Replace));
+    let sent = placements(&mut h);
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [ClientMessage::ReplacePaneSession {
+                tab_id,
+                pane_id,
+                session_id: Some(session),
+            }] if tab_id == "t1" && pane_id == "p2" && session == "u"
+        ),
+        "the centre replaces what the pane shows: sent {sent:?}"
+    );
+
+    let to = at(&mut h, "p2", 0.97, 0.5);
+    drop_leaf(&mut h, "u", to, ("p2", PaneDropEdge::Right));
+    assert_split_p2(&mut h, SplitDirection::Horizontal, SplitPlace::Second);
+    assert_eq!(undo_messages(&mut h), Vec::<String>::new());
+
+    let to = at(&mut h, "p2", 0.8, 0.5);
+    drop_leaf(&mut h, "a", to, ("p2", PaneDropEdge::Right));
+    let sent = placements(&mut h);
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [ClientMessage::MovePane {
+                src_tab_id,
+                src_pane_id,
+                dst_tab_id,
+                dst_pane_id,
+                edge: PaneDropEdge::Right,
+                request_id: Some(_),
+                ..
+            }] if src_tab_id == "t1"
+                && src_pane_id == "p1"
+                && dst_tab_id == "t1"
+                && dst_pane_id == "p2"
+        ),
+        "a bound leaf moves its pane: sent {sent:?}"
+    );
+    assert_eq!(undo_messages(&mut h), ["Moved pane"]);
+}
+
+#[gpui::test]
+fn leaf_dropped_on_a_pill_places_it_in_that_tab(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &fixture());
+    h.sent();
+    let shown = h.root(|root, _| root.active_tab_id().map(str::to_owned));
+    assert_eq!(shown.as_deref(), Some("t1"));
+
+    let from = on_row(&mut h, "leaf-u", 0.5);
+    let to = on_pill(&mut h, "t2", 0.5);
+    h.start_drag(from);
+    h.drag_to(to);
+    assert_eq!(
+        h.root(|root, _| root.active_tab_id().map(str::to_owned)),
+        shown,
+        "a leaf over a pill does not show that tab"
+    );
+    h.release(to);
+
+    let sent = placements(&mut h);
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [ClientMessage::ReplacePaneSession {
+                tab_id,
+                pane_id,
+                session_id: Some(session),
+            }] if tab_id == "t2" && pane_id == "p3" && session == "u"
+        ),
+        "the leaf fills t2's empty pane: sent {sent:?}"
+    );
+    assert!(!h.dragging());
+    assert_eq!(
+        h.root(|root, _| root.active_tab_id().map(str::to_owned)),
+        shown,
+        "the drop does not change the shown tab"
+    );
+    assert_eq!(undo_messages(&mut h), Vec::<String>::new());
+}
+
+#[gpui::test]
+fn a_leaf_released_off_any_target_leaves_no_stale_drag(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &fixture());
+    h.click_on("sidebar-view-tabs");
+    h.sent();
+
+    let from = on_row(&mut h, "leaf-d", 0.5);
+    let off = h.bounds("footer-status").center();
+    h.start_drag(from);
+    assert!(h.dragging(), "d's leaf drags");
+    h.drag_to(off);
+    h.release(off);
+    assert!(!h.dragging(), "the release ends the drag");
+    assert!(placements(&mut h).is_empty(), "nothing takes the drop");
+
+    let from = on_pill(&mut h, "t3", 0.5);
+    let to = on_row(&mut h, "container-tab:t1", 0.2);
+    h.start_drag(from);
+    h.drag_to(to);
+    assert_eq!(
+        mark(&mut h),
+        Some((header("tab:t1"), Side::Before)),
+        "a later pill drag is its own drag, not the leaf's"
+    );
+    h.release(to);
+    assert_eq!(tab_orders(&mut h), [ids(&["t3", "t1", "t2"])]);
 }
 
 #[gpui::test]
