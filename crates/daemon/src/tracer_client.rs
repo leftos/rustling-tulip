@@ -311,7 +311,7 @@ pub const TRACER_LOG_ENV: &str = "RUSTLING_TULIP_TRACER_LOG";
 /// pass them to every session it spawns, marking each as that session's
 /// child: no transcript of its own, and a messaging channel pointing at the
 /// parent. Every PTY spawn removes them.
-const PARENT_SESSION_VARS: [&str; 8] = [
+pub(crate) const PARENT_SESSION_VARS: [&str; 8] = [
     "CLAUDECODE",
     "CLAUDE_CODE_CHILD_SESSION",
     "CLAUDE_CODE_SESSION_ID",
@@ -407,7 +407,7 @@ fn tracer_invocation(launch: &TracerLaunch<'_>) -> TracerInvocation {
 
 /// Whether the environment name `name` is `var`: Windows compares
 /// environment names case-insensitively.
-fn is_env_name(name: &str, var: &str) -> bool {
+pub(crate) fn is_env_name(name: &str, var: &str) -> bool {
     if cfg!(windows) {
         name.eq_ignore_ascii_case(var)
     } else {

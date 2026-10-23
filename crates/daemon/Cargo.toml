@@ -86,6 +86,9 @@ axum-server = { version = "0.8", default-features = false, features = [
 
 [dev-dependencies]
 agent-claude = { workspace = true }
+# `agent_api::test_agent::TestAgent`, the plugin the conversation-plan tests
+# drive.
+agent-api = { workspace = true, features = ["test-support"] }
 # Mints the test CA and leaf certificates the tailnet listener tests serve.
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 # `test-util` enables the paused clock (`#[tokio::test(start_paused = true)]`)
@@ -104,11 +107,13 @@ windows-native-keyring-store = { version = "1.1", default-features = false }
 # (`RegGetValueW`) reading user-scope environment variables for spawn-env
 # references, plus `CreateProcessW` (Threading; Security for its
 # SECURITY_ATTRIBUTES parameters) spawning tracers that inherit none of the
-# daemon's handles. 0.61 matches the version already pulled transitively by
+# daemon's handles, plus the Job Objects API killing a pre-create run's whole
+# process tree. 0.61 matches the version already pulled transitively by
 # the existing dep graph.
 windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security",
+    "Win32_System_JobObjects",
     "Win32_System_Power",
     "Win32_System_Registry",
     "Win32_System_RestartManager",

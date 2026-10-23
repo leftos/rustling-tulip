@@ -3,6 +3,10 @@
 //! plugin answers must be a plain id, since it later becomes a CLI argument
 //! and a path.
 
+#[cfg(windows)]
+mod job;
+pub(crate) mod pre_create;
+
 use std::path::Path;
 
 use agent_api::{AgentPlugin, ConversationQuery, FoundConversation, ResolvedRows, is_plain_id};

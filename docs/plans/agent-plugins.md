@@ -53,7 +53,7 @@ crates/protocol/         the wire half of the schema (AgentId, AgentSelection, A
 Dependency rules:
 
 - `protocol` depends on no agent crate. The schema types are wire types, so they live in `protocol` (CLAUDE.md, "Single source of truth for the wire protocol").
-- `agent-api` depends on `protocol`, `serde`, `serde_json`, `regex` and `anyhow` only: never on `daemon`, `tracer`, `daemon-client` or `apps/native`.
+- `agent-api` depends on `protocol`, `serde`, `serde_json`, `chrono` and `tracing` only: never on `daemon`, `tracer`, `daemon-client` or `apps/native`.
 - An agent crate depends on `agent-api` (which re-exports the protocol types it uses) and its own parsing needs; never on the daemon, the client or another agent crate.
 - `agent-registry` depends on `agent-api` and every agent crate, and holds `REGISTERED: &[&dyn AgentPlugin]`, `plugin(&AgentId)`, `all()`, `descriptors()` and `default_agent()` (the first registered). It is its own crate because the daemon is bin-only (`crates/daemon/Cargo.toml:12-14`) and the native client's live tests need the same list to point each plugin's override at its fake CLI (a dev-dependency of `apps/native`, never a normal one).
 - `daemon` depends on `agent-api` and `agent-registry` only. `apps/native` depends on `protocol` only in its normal build: everything it knows about an agent arrives in the descriptor list.
@@ -134,7 +134,7 @@ The context and result types, all in `agent-api`:
 
 ### What the app runs for a plugin
 
-- **Pre-create.** For `PreCreate`, the app runs the resolved program with `args` in the session's cwd and environment, with its own timeout (today's 5 s, `agents/mod.rs:27`) and a process-tree kill on expiry, then feeds stdout to `parse`. A failure logs and spawns without a recorded conversation.
+- **Pre-create.** For `PreCreate`, the app runs the resolved program with `args` in the session's cwd and environment, with its own timeout (5 s, `PRE_CREATE_TIMEOUT` in `crates/daemon/src/conversations/pre_create.rs`) and a process-tree kill on expiry, then feeds stdout to `parse`. A failure logs and spawns without a recorded conversation.
 - **Discovery.** For `DiscoverAfterLaunch`, the app owns the poller, the claim arbitration across sessions waiting in one folder, a per-agent contested-ids store (`contested/<agent id>.json` in the config dir, entries dropping after 7 days) and a final look when the session ends. The plugin only answers `find_conversations`.
 - **Early hook events.** The hook route buffers the raw body with its `X-RT-Hook-Time` while the session is not yet inserted, and maps it with the session's plugin inside `insert_with_pending`. Today it maps before buffering (`server.rs:694-699`, `hook_status.rs:286-343`); with mapping per agent, the early `SessionStart` arrives before the record that says which agent it is.
 - **Shell resume.** A recovered shell that types an agent's resume command carries that agent as a daemon-internal `hook_agent` on its `SpawnArgs` and record, so the hook route maps its events with that plugin. It is never on the wire `SpawnRequest` and never stored in `SpawnConfig`; the recovery path sets it (`history.rs:1431`, `server.rs:4766-4771`). The shell itself stays a plain shell with no agent.
@@ -284,9 +284,12 @@ Every proof runs as `pwsh -NoProfile -File tools/gate.ps1 run … -- cargo nexte
   Files: `transcripts.rs` (moved), a new `crates/daemon/src/conversations.rs`, `server/recovery.rs` (`session_history_items`, `recovery_conversation_exists`), `history.rs` (`conversation_candidates`), `main.rs`. Proof: `-p agent-claude transcripts` (a session's `CLAUDE_CONFIG_DIR` row is honoured), `-p daemon conversations`, `-p daemon history`.
 
   Landed on main.
-- [ ] **AP.2b-ii Pre-create runner, discover poller and claims.** The app's `PreCreate` runner and `DiscoverAfterLaunch` poller, with claim arbitration and the contested store, proven with `TestAgent`.
+- [x] **AP.2b-ii-a Pre-create runner.** A `PreCreate` plan runs the agent's program for up to 5 s before the interactive spawn, in a kill-on-close job object, and the first plain id on its stdout becomes the session's conversation (`conversations/pre_create.rs`, `conversations/job.rs`, `server/spawn.rs`); proven with `TestAgent`.
 
-  Proof: `-p daemon conversations` (a pre-create timeout kills the tree; two sessions in one folder never both claim an id).
+  Proof: `-p daemon conversations` (a pre-create timeout kills the tree).
+- [ ] **AP.2b-ii-b Discover poller and claims.** The app's `DiscoverAfterLaunch` waiters and poller, claim arbitration, the contested store and a final look, proven with `TestAgent`.
+
+  Proof: `-p daemon conversations` (two sessions in one folder never both claim an id).
 - [ ] **AP.3a Hook plans and mapping.** `hook_plan` replaces `write_hook_settings`'s Claude gate and `build_hook_settings`; `hook_vocabulary` in `agent-api` and Claude's `map_hook_event` take over `map_event`, `details`, `permission_mismatch` and the conversation-id update, leaving `hook_status.rs` with ordering, the pending buffer and `apply_to_record` over a `HookReport`.
 
   Files: `hook_status.rs`, `server.rs` (`write_hook_settings`, `hook_handler`, `HookSettings`), `agent-api` `hook_vocabulary`, `agent-claude` hooks module. Proof: `-p agent-api hook_vocabulary`, `-p agent-claude hooks`, `-p daemon hook_status`, `-p daemon hook`.

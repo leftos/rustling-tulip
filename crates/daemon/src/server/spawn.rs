@@ -20,6 +20,7 @@ use super::connection::ConnCtx;
 use super::git::{active_sessions_using_worktree, worktree_in_use_failure};
 use super::sessions::{request_origin, write_meta_then_sync};
 use super::{Hub, StateEvent};
+use crate::conversations::pre_create::{self, PreCreateSpec};
 use crate::orphan::OrphanMeta;
 use crate::pty::PtySpawnSpec;
 use crate::registry::{
@@ -836,17 +837,41 @@ fn plain_shell_meta(
 
 /// The conversation id an interactive spawn records and passes its CLI, and
 /// the conversation it resumes, as `backend` plans them: a minted id is
-/// recorded, a resumed one is recorded and resumed, and a plan the daemon
-/// cannot carry out yet records none.
-fn planned_conversation(
+/// recorded, a resumed one is recorded and resumed, a pre-created one is
+/// recorded when `program` (with `leading_args`, in `cwd`) printed one, and a
+/// plan the daemon cannot carry out yet records none.
+async fn planned_conversation(
     backend: &dyn AgentPlugin,
     cfg: &SpawnArgs,
+    program: &str,
+    leading_args: &[String],
+    cwd: &Path,
 ) -> (Option<String>, Option<String>) {
     match backend.conversation_plan(&cfg.options, cfg.resume_conversation.as_deref()) {
         ConversationPlan::Minted(id) => (Some(id), None),
         ConversationPlan::Resumed(id) => (Some(id.clone()), Some(id)),
         ConversationPlan::None => (None, None),
-        ConversationPlan::PreCreate { .. } | ConversationPlan::DiscoverAfterLaunch => {
+        ConversationPlan::PreCreate { args, parse } => {
+            let spec = PreCreateSpec {
+                program: program.to_owned(),
+                args: leading_args.iter().cloned().chain(args).collect(),
+                cwd: cwd.to_path_buf(),
+                env_set: cfg.env.set.clone(),
+                env_remove: cfg.env.remove.clone(),
+            };
+            let agent = &backend.descriptor().id.0;
+            let id = pre_create::pre_create(spec, parse).await;
+            if let Some(id) = &id {
+                info!(agent = %agent, id_len = id.len(), "pre-created the conversation");
+            } else {
+                warn!(
+                    agent = %agent,
+                    "pre-create gave no conversation id; spawning without a recorded conversation"
+                );
+            }
+            (id, None)
+        }
+        ConversationPlan::DiscoverAfterLaunch => {
             warn!(
                 agent = %backend.descriptor().id.0,
                 "conversation plan not supported yet; spawning without a recorded conversation"
@@ -879,7 +904,8 @@ async fn spawn_interactive_session(
     let backend = agent_registry::plugin(agent);
     let raw_program = backend.resolve_program();
     let (program, prepend_args) = resolve_agent_program(&raw_program);
-    let (claude_session_id, resume_conversation) = planned_conversation(backend, cfg);
+    let (claude_session_id, resume_conversation) =
+        planned_conversation(backend, cfg, &program, &prepend_args, &primary_cwd).await;
     // The argv names the injected settings file, so it is written before the
     // argv is built. Only Claude takes it; a failure leaves this spawn on the
     // heuristic.
@@ -1799,6 +1825,64 @@ mod tests {
     };
     use protocol::SessionEnd;
     use tokio::sync::broadcast;
+
+    /// The text after `id: ` on the first line that holds it.
+    #[cfg(windows)]
+    fn after_id(text: &str) -> Option<String> {
+        text.lines()
+            .find_map(|line| line.trim().strip_prefix("id: "))
+            .map(|id| id.trim().to_owned())
+    }
+
+    /// The conversation `planned_conversation` plans for a test agent whose
+    /// plan pre-creates it by running `script` in `powershell.exe`.
+    #[cfg(windows)]
+    async fn planned_by_pre_create(script: &str) -> (Option<String>, Option<String>) {
+        let agent = agent_api::test_agent::TestAgent {
+            plan: ConversationPlan::PreCreate {
+                args: vec![
+                    "-NoProfile".to_owned(),
+                    "-Command".to_owned(),
+                    script.to_owned(),
+                ],
+                parse: after_id,
+            },
+            found: Vec::new(),
+        };
+        let cfg = SpawnArgs {
+            dangerously_skip_permissions: false,
+            agent: Agent::Claude,
+            options: [
+                (
+                    "mode".to_owned(),
+                    protocol::OptionValue::Text("m".to_owned()),
+                ),
+                ("sandbox".to_owned(), protocol::OptionValue::Bool(false)),
+            ]
+            .into_iter()
+            .collect(),
+            env: agent_api::EnvPlan::default(),
+            prompt_injector: None,
+            origin: None,
+            resume_conversation: None,
+            add_dirs: Vec::new(),
+        };
+        let scratch = ScratchDir::new("pre-create-plan");
+        planned_conversation(&agent, &cfg, "powershell.exe", &[], scratch.path()).await
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn planned_conversation_passes_a_pre_created_id_as_conversation_id() {
+        let planned = planned_by_pre_create("[Console]::Out.WriteLine('id: pre-1')").await;
+        assert_eq!(planned, (Some("pre-1".to_owned()), None));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_failed_pre_create_spawns_without_a_conversation() {
+        assert_eq!(planned_by_pre_create("exit 3").await, (None, None));
+    }
 
     /// A hub with one `git init`ed repo `r1` and a workspace `w1` holding it.
     fn hub_with_previewable_repo(tag: &str) -> (Hub, ScratchDir) {
