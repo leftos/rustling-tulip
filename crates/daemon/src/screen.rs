@@ -1,6 +1,6 @@
 //! A rendered terminal grid for one PTY session.
 //!
-//! Fed from the same PTY output broadcast the status watchers read, resized
+//! Fed from the PTY output by the session's status watcher, resized
 //! with the PTY, and seeded by the tracer's replay after a reattach, so a
 //! reader sees the frame the user sees rather than a byte tail of superseded
 //! repaints. Reads come from region queries over the visible rows and from
@@ -15,7 +15,6 @@ use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::Config;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::vte::ansi::Processor;
-use tokio::sync::broadcast;
 
 pub mod rules;
 
@@ -243,31 +242,9 @@ fn last_non_empty(rows: &[String], n: usize) -> Vec<String> {
     lines
 }
 
-/// Feeds `screen` from `output` until the broadcast closes.
-pub fn watch(screen: SharedScreen, session_id: String, mut output: broadcast::Receiver<Vec<u8>>) {
-    tokio::spawn(async move {
-        loop {
-            match output.recv().await {
-                Ok(bytes) => crate::sync::lock(&screen).feed(&bytes),
-                Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                    crate::sync::lock(&screen).reset_parser();
-                    tracing::warn!(
-                        session_id = %session_id,
-                        skipped,
-                        "screen: output lagged; grid may be stale until the next repaint"
-                    );
-                }
-                Err(broadcast::error::RecvError::Closed) => return,
-            }
-        }
-    });
-}
-
 #[cfg(test)]
 #[expect(clippy::expect_used, reason = "test assertions")]
 mod tests {
-    use std::time::Duration;
-
     use super::*;
 
     #[test]
@@ -412,24 +389,5 @@ mod tests {
         screen.reset_parser();
         screen.feed(b"\r\nafter");
         assert_eq!(screen.bottom_non_empty_lines(1), ["after"]);
-    }
-
-    #[tokio::test]
-    async fn watch_feeds_the_grid_and_ends_on_close() {
-        let shared: SharedScreen = Arc::new(Mutex::new(Screen::new(20, 4)));
-        let (tx, rx) = broadcast::channel(16);
-        watch(Arc::clone(&shared), "s".to_owned(), rx);
-        tx.send(b"hello".to_vec()).expect("send the output");
-        drop(tx);
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                if crate::sync::lock(&shared).rows()[0] == "hello" {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("the watcher feeds the grid");
     }
 }

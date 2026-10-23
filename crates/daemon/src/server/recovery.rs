@@ -186,23 +186,17 @@ async fn reattach_one(
                         guard.screen = Some(Arc::clone(&screen));
                         guard.status
                     };
-                    // An agent session's status watcher feeds its own grid.
-                    if shell_input.is_some() {
-                        screen::watch(
-                            Arc::clone(&screen),
-                            meta.session_id.clone(),
-                            pty.output.subscribe(),
-                        );
-                    }
                     pty.resize(screen::REATTACH_COLS, screen::REATTACH_ROWS);
                     if let Some((_, in_rx)) = shell_input {
                         pty_state::watch_plain_shell(
                             &sessions,
                             meta.session_id.clone(),
-                            pty_state::WatchStreams {
+                            pty_state::ShellStreams {
                                 output: pty.output.subscribe(),
                                 input_pulses: in_rx,
+                                screen,
                             },
+                            attention_tx.clone(),
                             restored,
                         );
                     } else {

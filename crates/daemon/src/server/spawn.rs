@@ -504,8 +504,7 @@ where
 
 pub(super) fn expected_output_subscribers(mode: SessionMode) -> usize {
     match mode {
-        SessionMode::Interactive => 3,
-        SessionMode::PlainShell => 4,
+        SessionMode::Interactive | SessionMode::PlainShell => 3,
         SessionMode::Headless => 0,
     }
 }
@@ -1028,14 +1027,15 @@ async fn spawn_plain_shell_session(
         guard.input_notifier = Some(in_tx);
         guard.screen = Some(Arc::clone(&screen));
     }
-    screen::watch(screen, session_id.clone(), pty.output.subscribe());
     pty_state::watch_plain_shell(
         &hub.sessions,
         session_id.clone(),
-        pty_state::WatchStreams {
+        pty_state::ShellStreams {
             output: pty.output.subscribe(),
             input_pulses: in_rx,
+            screen,
         },
+        hub.attention_tx.clone(),
         SessionStatus::Idle,
     );
     // Keep `osc_title::watch` so window-title escape sequences (which pwsh
