@@ -1,0 +1,468 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Phone pairing flow</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap">
+<style>
+:root {
+  --ground: #111013; --sunken: #0b0a0d; --surface: #161519; --raised: #1b1a1f; --chip: #232129; --hover: #2c2a33;
+  --term: #0c0b0e; --line: #2a2830; --line-strong: #3a3742;
+  --text: #ede9e4; --subtle: #8c8794; --faint: #6e6a77;
+  --accent: #f07a62; --on-accent: #1c100d;
+  --working: #6ca6ff; --asking: #f6bc4e; --on-asking: #2a1b00; --waiting: #4fc89d; --danger: #f26d6d;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: #08070a; color: var(--text); font: 14px/1.4 Geist, system-ui, sans-serif; padding: 24px 16px 48px; }
+h1 { font-size: 18px; font-weight: 600; margin: 0 0 4px; }
+.lede { color: var(--subtle); margin: 0 0 24px; max-width: 110ch; }
+code { font: 12.5px "Geist Mono", monospace; }
+.lanes { display: flex; flex-direction: column; gap: 44px; }
+.lane h2 { font-size: 15px; font-weight: 600; margin: 0 0 2px; }
+.lane .how { color: var(--subtle); font-size: 13px; margin: 0 0 4px; max-width: 120ch; }
+.lane .worst { color: var(--faint); font-size: 12.5px; margin: 0 0 14px; max-width: 120ch; }
+.lane .worst b { color: var(--asking); font-weight: 500; }
+.board { display: flex; gap: 22px; align-items: flex-start; }
+.step { font-size: 12px; color: var(--subtle); margin: 0 0 8px; min-height: 34px; max-width: 312px; }
+.step b { color: var(--text); font-weight: 600; }
+.pc .step { max-width: 470px; }
+.arrow { align-self: center; color: var(--faint); font-size: 22px; margin: 0 -10px; }
+.pick { margin-top: 16px; width: 390px; padding: 9px; border-radius: 8px; border: 1px solid var(--line-strong); background: var(--raised); color: var(--text); font: inherit; cursor: pointer; }
+.pick:hover { background: var(--hover); }
+
+/* phone, drawn at 80% so a four-frame storyboard fits one row */
+.ph { zoom: 0.8; }
+.phone { width: 390px; height: 844px; border-radius: 46px; border: 10px solid #1d1c21; background: var(--ground); position: relative; overflow: hidden; display: flex; flex-direction: column; box-shadow: 0 20px 60px #000a; }
+.sb { height: 47px; flex: none; display: flex; justify-content: space-between; align-items: flex-end; padding: 0 28px 6px; font-size: 14px; font-weight: 600; }
+.island { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); width: 112px; height: 32px; border-radius: 20px; background: #000; z-index: 2; }
+.home { flex: none; height: 26px; display: grid; place-items: center; }
+.home::after { content: ""; width: 134px; height: 5px; border-radius: 3px; background: #fff8; }
+.app { flex: none; padding: 6px 20px 0; font-size: 13px; color: var(--faint); display: flex; align-items: center; gap: 8px; }
+.app .mk { width: 22px; height: 22px; border-radius: 6px; background: linear-gradient(145deg, #f07a62, #c9503c); display: grid; place-items: center; color: #1c100d; font-size: 10px; font-weight: 600; }
+.body { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 18px 22px 12px; gap: 14px; }
+.body.center { justify-content: center; align-items: center; text-align: center; }
+.body h3 { margin: 0; font-size: 24px; font-weight: 600; letter-spacing: -0.01em; }
+.body .p { color: var(--subtle); font-size: 14.5px; margin: 0; }
+.body .p b { color: var(--text); font-weight: 500; }
+.viewer { position: relative; height: 290px; border-radius: 18px; background: radial-gradient(circle at 50% 45%, #2a2730, #0b0a0d 75%); overflow: hidden; display: grid; place-items: center; flex: none; }
+.viewer .qr { width: 150px; height: 150px; transform: perspective(500px) rotateX(10deg) rotateZ(-4deg); opacity: .92; }
+.viewer::before { content: ""; position: absolute; inset: 40px 70px; border: 3px solid transparent; border-image: linear-gradient(var(--accent), var(--accent)) 1; clip-path: polygon(0 0, 22% 0, 22% 4px, 4px 4px, 4px 22%, 0 22%, 0 78%, 4px 78%, 4px calc(100% - 4px), 22% calc(100% - 4px), 22% 100%, 78% 100%, 78% calc(100% - 4px), calc(100% - 4px) calc(100% - 4px), calc(100% - 4px) 78%, 100% 78%, 100% 22%, calc(100% - 4px) 22%, calc(100% - 4px) 4px, 78% 4px, 78% 0, 100% 0, 100% 100%, 0 100%); }
+.viewer .lbl { position: absolute; bottom: 12px; left: 0; right: 0; text-align: center; font-size: 12.5px; color: #fffc; }
+.or { display: flex; align-items: center; gap: 10px; color: var(--faint); font-size: 12.5px; }
+.or::before, .or::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+.boxes { display: flex; gap: 7px; justify-content: center; }
+.boxes span { width: 42px; height: 52px; border-radius: 10px; background: var(--surface); border: 1px solid var(--line-strong); display: grid; place-items: center; font: 500 22px "Geist Mono", monospace; }
+.boxes span.cur { border-color: var(--accent); box-shadow: 0 0 0 2px #f07a6233; }
+.boxes .gap { width: 8px; background: none; border: 0; }
+.who { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 12px; background: var(--surface); border: 1px solid var(--line); font-size: 13px; color: var(--subtle); text-align: left; }
+.who .ic { width: 32px; height: 32px; border-radius: 8px; background: var(--chip); display: grid; place-items: center; font-size: 15px; flex: none; }
+.who b { color: var(--text); font-weight: 500; display: block; font-size: 14px; }
+.btn { height: 46px; border-radius: 12px; display: grid; place-items: center; font-size: 15px; font-weight: 500; background: var(--chip); color: var(--text); flex: none; width: 100%; }
+.btn.primary { background: var(--accent); color: var(--on-accent); }
+.btn.ghost { background: none; color: var(--subtle); height: 36px; }
+.link { color: var(--accent); font-size: 14px; font-weight: 500; }
+.bigicon { width: 92px; height: 92px; border-radius: 50%; display: grid; place-items: center; font-size: 40px; flex: none; }
+.bigicon.ok { background: #4fc89d22; color: var(--waiting); border: 2px solid #4fc89d66; }
+.bigicon.wait { background: #f6bc4e1c; color: var(--asking); border: 2px dashed #f6bc4e88; }
+.bigicon.work { background: #6ca6ff1c; color: var(--working); border: 2px solid #6ca6ff55; }
+.spin { width: 40px; height: 40px; border-radius: 50%; border: 4px solid #6ca6ff33; border-top-color: var(--working); }
+.mono { font: 500 26px "Geist Mono", monospace; letter-spacing: .12em; }
+.timer { font: 12.5px "Geist Mono", monospace; color: var(--faint); }
+.spacer { flex: 1; }
+.numpad { flex: none; background: #1d1c21; padding: 8px 6px 4px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.numpad span { height: 46px; border-radius: 7px; background: #3a3842; display: grid; place-items: center; font-size: 22px; }
+.numpad span small { display: block; font-size: 8px; letter-spacing: .18em; color: #fffa; margin-top: -4px; }
+.numpad span.k { flex-direction: column; }
+.numpad span.blank { background: none; }
+
+/* outcome when refused */
+.denied { margin-top: 12px; width: 312px; border: 1px dashed var(--line-strong); border-radius: 14px; padding: 12px 14px; background: var(--sunken); }
+.denied .t { font-size: 11.5px; color: var(--faint); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 8px; }
+.denied .r { display: flex; gap: 10px; align-items: flex-start; margin-top: 8px; }
+.denied .x { width: 24px; height: 24px; border-radius: 50%; background: #f26d6d22; color: var(--danger); display: grid; place-items: center; font-size: 13px; flex: none; }
+.denied b { display: block; font-weight: 600; font-size: 13.5px; }
+.denied span { color: var(--subtle); font-size: 12.5px; }
+.denied .act { color: var(--accent); font-weight: 500; }
+
+/* desktop */
+.win { width: 470px; border-radius: 10px; border: 1px solid var(--line-strong); background: var(--ground); overflow: hidden; box-shadow: 0 16px 50px #000a; position: relative; }
+.tb { height: 30px; display: flex; align-items: center; padding: 0 10px; gap: 8px; background: var(--sunken); border-bottom: 1px solid var(--line); font-size: 12px; color: var(--subtle); }
+.tb .ctl { margin-left: auto; letter-spacing: 12px; color: var(--faint); }
+.settings { display: grid; grid-template-columns: 132px 1fr; min-height: 470px; }
+.tabs { background: var(--surface); border-right: 1px solid var(--line); padding: 10px 6px; display: flex; flex-direction: column; gap: 2px; font-size: 12.5px; color: var(--subtle); }
+.tabs span { padding: 5px 8px; border-radius: 6px; display: flex; align-items: center; gap: 6px; }
+.tabs span.on { background: var(--chip); color: var(--text); }
+.tabs span.grp { font-size: 11px; color: var(--faint); padding-top: 10px; }
+.tabs .badge { margin-left: auto; min-width: 16px; height: 16px; border-radius: 8px; background: var(--asking); color: var(--on-asking); font-size: 10.5px; font-weight: 600; display: grid; place-items: center; }
+.pane { padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; font-size: 12.5px; }
+.pane h4 { margin: 0; font-size: 15px; font-weight: 600; }
+.sw { display: flex; align-items: center; gap: 8px; }
+.sw i { width: 30px; height: 17px; border-radius: 9px; background: var(--accent); position: relative; flex: none; }
+.sw i::after { content: ""; position: absolute; right: 2px; top: 2px; width: 13px; height: 13px; border-radius: 50%; background: #fff; }
+.kv { color: var(--subtle); font-size: 12px; }
+.kv code { font-size: 11.5px; color: var(--text); }
+.sub4 { font-size: 11.5px; color: var(--faint); text-transform: uppercase; letter-spacing: .05em; margin-top: 4px; }
+.dev { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.dev .meta { color: var(--faint); font-size: 11.5px; }
+.dev .r { margin-left: auto; font-size: 11.5px; color: var(--subtle); border: 1px solid var(--line-strong); border-radius: 5px; padding: 1px 7px; }
+.pairbox { border: 1px solid #f07a6266; border-radius: 10px; background: var(--raised); padding: 12px; display: grid; grid-template-columns: 132px 1fr; gap: 14px; align-items: center; }
+.pairbox .qr { width: 132px; height: 132px; background: #fff; border-radius: 6px; padding: 6px; }
+.pairbox .mono { font-size: 24px; }
+.pairbox .k { color: var(--subtle); font-size: 12px; }
+.pbtn { display: inline-block; padding: 4px 10px; border-radius: 6px; font-size: 12px; font-weight: 500; background: var(--chip); border: 1px solid var(--line-strong); }
+.pbtn.primary { background: var(--accent); color: var(--on-accent); border-color: transparent; }
+.pbtn.danger { color: var(--danger); }
+.req { border: 1px solid #f6bc4e88; background: #f6bc4e12; border-radius: 10px; padding: 10px; display: flex; flex-direction: column; gap: 10px; }
+.req .hd { display: flex; align-items: center; gap: 8px; }
+.req .hd .meta { color: var(--subtle); font-size: 11.5px; }
+.req .hd .acts { margin-left: auto; display: flex; gap: 6px; }
+.req .open { display: grid; grid-template-columns: 1fr 96px; gap: 12px; align-items: center; border-top: 1px solid #f6bc4e44; padding-top: 10px; }
+.req .open .qr { width: 96px; height: 96px; background: #fff; border-radius: 5px; padding: 4px; }
+.req .open .mono { font-size: 30px; }
+
+/* desktop corner with a Windows toast */
+.corner { width: 470px; height: 168px; border-radius: 10px; border: 1px solid var(--line); background: linear-gradient(135deg, #1a2433, #241a2a); position: relative; overflow: hidden; margin-bottom: 14px; }
+.corner .taskbar { position: absolute; left: 0; right: 0; bottom: 0; height: 26px; background: #0d0d12e6; display: flex; justify-content: flex-end; align-items: center; padding: 0 10px; font-size: 10.5px; color: #fffa; }
+.toast { position: absolute; right: 10px; bottom: 34px; width: 330px; background: #202024; border: 1px solid #3a3a40; border-radius: 8px; padding: 9px 11px; font-size: 12px; box-shadow: 0 8px 26px #000a; }
+.toast .src { color: #fff9; font-size: 11px; display: flex; align-items: center; gap: 6px; }
+.toast .src .mk { width: 14px; height: 14px; border-radius: 4px; background: var(--accent); }
+.toast b { display: block; font-size: 13px; margin: 3px 0 1px; }
+.toast .s { color: #fffb; }
+.toast .acts { display: flex; gap: 6px; margin-top: 8px; }
+.toast .acts span { flex: 1; text-align: center; padding: 5px; border-radius: 4px; background: #34343a; font-size: 12px; }
+.toast .acts span.primary { background: var(--accent); color: var(--on-accent); font-weight: 500; }
+.modalwrap { position: relative; }
+.modalwrap .dim { position: absolute; inset: 30px 0 0 0; background: #000a; }
+.modal { position: absolute; top: 70px; left: 50%; transform: translateX(-50%); width: 360px; background: var(--raised); border: 1px solid var(--line-strong); border-radius: 12px; padding: 14px 16px; box-shadow: 0 20px 60px #000c; display: flex; flex-direction: column; gap: 10px; font-size: 12.5px; }
+.modal h5 { margin: 0; font-size: 15px; font-weight: 600; }
+.modal .row { display: grid; grid-template-columns: 128px 1fr; gap: 14px; align-items: center; }
+.modal .qr { width: 128px; height: 128px; background: #fff; border-radius: 6px; padding: 6px; }
+.modal .acts { display: flex; gap: 8px; justify-content: flex-end; }
+.bgapp { height: 420px; display: grid; grid-template-columns: 120px 1fr; }
+.bgapp .side { background: var(--surface); border-right: 1px solid var(--line); padding: 10px 8px; display: flex; flex-direction: column; gap: 6px; }
+.bgapp .side i { height: 10px; border-radius: 4px; background: var(--chip); display: block; }
+.bgapp .main { background: var(--term); }
+.note { margin-top: 32px; color: var(--faint); font-size: 12.5px; max-width: 110ch; }
+.note p { margin: 0 0 6px; }
+</style>
+</head>
+<body>
+<h1>Pairing a phone: how the PC approves it</h1>
+<p class="lede">Settled already (owner rulings in <code>remote-access.md</code>, TS.3b): a phone on the owner's tailnet, logged in as the host's own Tailscale user, gets its device token only after it presents a one-time approval the host PC shows: a QR code, or the short pairing code beside it, both short-lived and single-use, started from the desktop app on that PC. Open here: who starts it and where the PC shows it. Every lane scans or types inside the installed Home Screen app, never the iPhone's Camera app, which would open the address in Safari instead. Content is a placeholder; codes and names are made up.</p>
+
+<div class="lanes">
+
+<!-- A -->
+<section class="lane" id="A">
+  <h2>A. The PC starts it: QR in Settings, code beside it (collie's way)</h2>
+  <p class="how">At the PC, Settings → Remote access → <b>Pair a phone</b> shows a QR code and a 6-digit code for two minutes. The unpaired phone app opens straight on a scanner with the code boxes under it. Scanning, or typing the code, is the approval; the PC asks nothing more.</p>
+  <p class="worst"><b>Worst case:</b> you must be at the PC and think to open Settings first; a phone that opens unpaired while you are away (Safari cleared its storage) can do nothing until you are back at the desk.</p>
+  <div class="board">
+    <div class="pc">
+      <p class="step"><b>1 · PC.</b> Settings → Remote access → Pair a phone.</p>
+      <div class="win">
+        <div class="tb">rustling-tulip · Settings<span class="ctl">– ▢ ✕</span></div>
+        <div class="settings">
+          <div class="tabs"><span>General</span><span>Notifications</span><span>Spawn defaults</span><span>Worktrees</span><span class="on">Remote access</span><span>Appearance</span><span>App title</span><span class="grp">Agents</span><span>Claude</span></div>
+          <div class="pane">
+            <h4>Remote access</h4>
+            <div class="sw"><i></i>Allow remote access over Tailscale</div>
+            <div class="kv">Serving · <code>https://leftos-pc.tail4e2a.ts.net:8787</code></div>
+            <div class="sub4">Pair a phone</div>
+            <div class="pairbox">
+              <div class="qr" data-seed="7"></div>
+              <div>
+                <div class="k">Scan in the rustling-tulip app on the phone, or type</div>
+                <div class="mono">482 913</div>
+                <div class="timer">expires in 1:52 · one use</div>
+                <div style="margin-top:8px"><span class="pbtn">Cancel</span></div>
+              </div>
+            </div>
+            <div class="sub4">Devices</div>
+            <div class="dev">💻 MacBook Air<span class="meta">· last seen 3d</span><span class="r">Block</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="ph-col">
+      <p class="step"><b>2 · Phone.</b> The app opens unpaired on the scanner.</p>
+      <div class="ph"><div class="phone">
+        <div class="island"></div><div class="sb"><span>9:41</span><span>5G ▮</span></div>
+        <div class="app"><span class="mk">rt</span>rustling-tulip</div>
+        <div class="body">
+          <h3>Pair this iPhone</h3>
+          <p class="p">On your PC open <b>Settings → Remote access → Pair a phone</b>, then point the camera at its code.</p>
+          <div class="viewer"><div class="qr" data-seed="7" style="background:#fff;padding:6px;border-radius:6px"></div><div class="lbl">Scanning…</div></div>
+          <div class="or">or type the code</div>
+          <div class="boxes"><span class="cur"></span><span></span><span></span><i class="gap"></i><span></span><span></span><span></span></div>
+          <div class="spacer"></div>
+          <div class="who"><span class="ic">📱</span><div><b>leftos-iphone</b>Tailscale: you (leftos@)</div></div>
+        </div>
+        <div class="home"></div>
+      </div></div>
+    </div>
+    <div class="ph-col">
+      <p class="step"><b>3 · Phone.</b> Checking the code with the PC, about a second.</p>
+      <div class="ph"><div class="phone">
+        <div class="island"></div><div class="sb"><span>9:41</span><span>5G ▮</span></div>
+        <div class="app"><span class="mk">rt</span>rustling-tulip</div>
+        <div class="body center">
+          <div class="spin"></div>
+          <h3>Checking with LEFTOS-PC</h3>
+          <div class="mono">482 913</div>
+          <p class="p">The PC checks the code, and that this iPhone is signed in to Tailscale as you.</p>
+        </div>
+        <div class="home"></div>
+      </div></div>
+    </div>
+    <div class="ph-col">
+      <p class="step"><b>4 · Phone.</b> Approved: ask for alerts on this tap (iOS needs one).</p>
+      <div class="ph"><div class="phone">
+        <div class="island"></div><div class="sb"><span>9:41</span><span>5G ▮</span></div>
+        <div class="app"><span class="mk">rt</span>rustling-tulip</div>
+        <div class="body center">
+          <div class="bigicon ok">✓</div>
+          <h3>Paired with LEFTOS-PC</h3>
+          <p class="p">This iPhone is listed under Remote access on the PC, where you can block it at any time.</p>
+          <div class="spacer"></div>
+          <div class="btn primary">Turn on notifications</div>
+          <div class="btn ghost">Not now, show sessions</div>
+        </div>
+        <div class="home"></div>
+      </div></div>
+      <div class="denied"><div class="t">Refused instead</div>
+        <div class="r"><span class="x">✕</span><div><b>That code has expired</b><span>Codes last two minutes. Make a new one on the PC. </span><span class="act">Scan again</span></div></div>
+        <div class="r"><span class="x">✕</span><div><b>Not your Tailscale account</b><span>This iPhone is signed in to Tailscale as someone else.</span></div></div>
+      </div>
+    </div>
+  </div>
+  <button class="pick" data-lane="A">Pick A</button>
+</section>
+
+<!-- B -->
+<section class="lane" id="B">
+  <h2>B. The phone asks: a toast on the PC, then the code in a dialog</h2>
+  <p class="how">The unpaired phone sends a request by itself and waits. The PC raises a Windows toast (and the app's own banner) naming the phone and its Tailscale login. <b>Approve</b> opens a dialog in the app with the QR code and the 6-digit code for that one request; the waiting phone switches to its scanner by itself. <b>Deny</b> ends the request and tells the phone.</p>
+  <p class="worst"><b>Worst case:</b> toasts are skipped or missed (Focus Assist, away from the desk, the app minimised), and the phone waits on a screen it cannot act on; Approve still needs the scan, so it is two acts on two devices.</p>
+  <div class="board">
+    <div class="ph-col">
+      <p class="step"><b>1 · Phone.</b> Opens unpaired, asks by itself, waits.</p>
+      <div class="ph"><div class="phone">
+        <div class="island"></div><div class="sb"><span>9:41</span><span>5G ▮</span></div>
+        <div class="app"><span class="mk">rt</span>rustling-tulip</div>
+        <div class="body center">
+          <div class="bigicon wait">⏳</div>
+          <h3>Waiting for LEFTOS-PC</h3>
+          <p class="p">This iPhone asked for access. <b>Approve it on the PC</b>; a notice is showing there now.</p>
+          <div class="who" style="width:100%"><span class="ic">📱</span><div><b>leftos-iphone</b>Tailscale: you (leftos@) · asked 0:08 ago</div></div>
+          <div class="spacer"></div>
+          <div class="btn">Cancel request</div>
+        </div>
+        <div class="home"></div>
+      </div></div>
+    </div>
+    <div class="pc">
+      <p class="step"><b>2 · PC.</b> Toast names the phone; Approve opens the code in the app.</p>
+      <div class="corner">
+        <div class="toast">
+          <div class="src"><span class="mk"></span>rustling-tulip · now</div>
+          <b>An iPhone asks for remote access</b>
+          <div class="s">leftos-iphone · signed in to Tailscale as you</div>
+          <div class="acts"><span class="primary">Approve…</span><span>Deny</span></div>
+        </div>
+        <div class="taskbar">ENG · 9:41</div>
+      </div>
+      <div class="win modalwrap">
+        <div class="tb">rustling-tulip<span class="ctl">– ▢ ✕</span></div>
+        <div class="bgapp"><div class="side"><i></i><i style="width:70%"></i><i></i><i style="width:60%"></i><i></i></div><div class="main"></div></div>
+        <div class="dim"></div>
+        <div class="modal">
+          <h5>Approve leftos-iphone</h5>
+          <div class="kv">The waiting iPhone has opened its scanner.</div>
+          <div class="row">
+            <div class="qr" data-seed="11"></div>
+            <div><div class="kv">or type on the phone</div><div class="mono" style="font-size:24px">735 160</div><div class="timer">expires in 1:58 · this request only</div></div>
+          </div>
+          <div class="acts"><span class="pbtn danger">Deny</span><span class="pbtn">Close</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="ph-col">
+      <p class="step"><b>3 · Phone.</b> Approved on the PC: the scanner opens by itself.</p>
+      <div class="ph"><div class="phone">
+        <div class="island"></div><div class="sb"><span>9:41</span><span>5G ▮</span></div>
+        <div class="app"><span class="mk">rt</span>rustling-tulip</div>
+        <div class="body">
+          <h3>Scan the code on your PC</h3>
+          <p class="p">LEFTOS-PC approved this iPhone and is showing a code. Scan it to finish.</p>
+          <div class="viewer"><div class="qr" data-seed="11" style="background:#fff;padding:6px;border-radius:6px"></div><div class="lbl">Scanning…</div></div>
+          <div class="or">or type the code</div>
+          <div class="boxes"><span>7</span><span>3</span><span class="cur"></span><i class="gap"></i><span></span><span></span><span></span></div>
+          <div class="spacer"></div>
+        </div>
+        <div class="home"></div>
+      </div></div>
+    </div>
+    <div class="ph-col">
+      <p class="step"><b>4 · Phone.</b> Paired; same screen as A.</p>
+      <div class="ph"><div class="phone">
+        <div class="island"></div><div class="sb"><span>9:41</span><span>5G ▮</span></div>
+        <div class="app"><span class="mk">rt</span>rustling-tulip</div>
+        <div class="body center">
+          <div class="bigicon ok">✓</div>
+          <h3>Paired with LEFTOS-PC</h3>
+          <p class="p">This iPhone is listed under Remote access on the PC, where you can block it at any time.</p>
+          <div class="spacer"></div>
+          <div class="btn primary">Turn on notifications</div>
+          <div class="btn ghost">Not now, show sessions</div>
+        </div>
+        <div class="home"></div>
+      </div></div>
+      <div class="denied"><div class="t">Refused instead</div>
+        <div class="r"><span class="x">✕</span><div><b>LEFTOS-PC said no</b><span>The PC denied this request. </span><span class="act">Ask again</span></div></div>
+        <div class="r"><span class="x">✕</span><div><b>No answer in 5 minutes</b><span>The request lapsed. </span><span class="act">Ask again</span></div></div>
+      </div>
+    </div>
+  </div>
+  <button class="pick" data-lane="B">Pick B</button>
+</section>
+
+<!-- C -->
+<section class="lane" id="C">
+  <h2>C. The phone asks: a waiting row in Settings, code first</h2>
+  <p class="how">The unpaired phone sends a request and shows the code boxes at once. On the PC nothing pops up: the Settings gear and the Remote access tab carry a count, and the page lists <b>Waiting devices</b> above the paired ones. <b>Approve</b> on the row opens a large 6-digit code with a small QR beside it; you type the digits on the phone (number pad), or scan.</p>
+  <p class="worst"><b>Worst case:</b> silent: if you do not know to look in Settings, the phone waits until the request lapses; a second unknown request in the list (another device on your account) looks just like yours apart from its name.</p>
+  <div class="board">
+    <div class="ph-col">
+      <p class="step"><b>1 · Phone.</b> Opens unpaired, asks, shows where to look.</p>
+      <div class="ph"><div class="phone">
+        <div class="island"></div><div class="sb"><span>9:41</span><span>5G ▮</span></div>
+        <div class="app"><span class="mk">rt</span>rustling-tulip</div>
+        <div class="body">
+          <h3>Approve this iPhone on your PC</h3>
+          <p class="p">On LEFTOS-PC open <b>Settings → Remote access</b>. Under Waiting devices, approve <b>leftos-iphone</b> and type the code it shows here.</p>
+          <div class="who"><span class="ic">📱</span><div><b>leftos-iphone</b>Tailscale: you (leftos@) · asked 0:14 ago</div></div>
+          <div class="boxes" style="margin-top:10px"><span class="cur"></span><span></span><span></span><i class="gap"></i><span></span><span></span><span></span></div>
+          <div style="text-align:center"><span class="link">Scan the QR instead</span></div>
+          <div class="spacer"></div>
+          <div class="btn">Cancel request</div>
+        </div>
+        <div class="home"></div>
+      </div></div>
+    </div>
+    <div class="pc">
+      <p class="step"><b>2 · PC.</b> Remote access lists the waiting phone; Approve shows its code.</p>
+      <div class="win">
+        <div class="tb">rustling-tulip · Settings<span class="ctl">– ▢ ✕</span></div>
+        <div class="settings">
+          <div class="tabs"><span>General</span><span>Notifications</span><span>Spawn defaults</span><span>Worktrees</span><span class="on">Remote access<i class="badge">1</i></span><span>Appearance</span><span>App title</span><span class="grp">Agents</span><span>Claude</span></div>
+          <div class="pane">
+            <h4>Remote access</h4>
+            <div class="sw"><i></i>Allow remote access over Tailscale</div>
+            <div class="kv">Serving · <code>https://leftos-pc.tail4e2a.ts.net:8787</code></div>
+            <div class="sub4" style="color:var(--asking)">Waiting devices · 1</div>
+            <div class="req">
+              <div class="hd">📱 <div><b>leftos-iphone</b><div class="meta">Tailscale: you (leftos@) · asked 0:14 ago</div></div><div class="acts"><span class="pbtn danger">Deny</span></div></div>
+              <div class="open">
+                <div><div class="kv">Type on the phone</div><div class="mono">482 913</div><div class="timer">expires in 1:47 · this device only</div></div>
+                <div><div class="qr" data-seed="3"></div><div class="kv" style="text-align:center;font-size:11px">or scan</div></div>
+              </div>
+            </div>
+            <div class="sub4">Devices</div>
+            <div class="dev">💻 MacBook Air<span class="meta">· last seen 3d</span><span class="r">Block</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="ph-col">
+      <p class="step"><b>3 · Phone.</b> Type the six digits on the number pad.</p>
+      <div class="ph"><div class="phone">
+        <div class="island"></div><div class="sb"><span>9:41</span><span>5G ▮</span></div>
+        <div class="app"><span class="mk">rt</span>rustling-tulip</div>
+        <div class="body">
+          <h3>Approve this iPhone on your PC</h3>
+          <div class="who"><span class="ic">📱</span><div><b>leftos-iphone</b>Approved on LEFTOS-PC · type its code</div></div>
+          <div class="boxes" style="margin-top:6px"><span>4</span><span>8</span><span>2</span><i class="gap"></i><span>9</span><span class="cur"></span><span></span></div>
+          <div style="text-align:center"><span class="link">Scan the QR instead</span></div>
+          <div class="spacer"></div>
+        </div>
+        <div class="numpad">
+          <span class="k">1</span><span class="k">2<small>ABC</small></span><span class="k">3<small>DEF</small></span>
+          <span class="k">4<small>GHI</small></span><span class="k">5<small>JKL</small></span><span class="k">6<small>MNO</small></span>
+          <span class="k">7<small>PQRS</small></span><span class="k">8<small>TUV</small></span><span class="k">9<small>WXYZ</small></span>
+          <span class="blank"></span><span class="k">0</span><span class="blank">⌫</span>
+        </div>
+        <div class="home" style="background:#1d1c21"></div>
+      </div></div>
+    </div>
+    <div class="ph-col">
+      <p class="step"><b>4 · Phone.</b> Paired; same screen as A.</p>
+      <div class="ph"><div class="phone">
+        <div class="island"></div><div class="sb"><span>9:41</span><span>5G ▮</span></div>
+        <div class="app"><span class="mk">rt</span>rustling-tulip</div>
+        <div class="body center">
+          <div class="bigicon ok">✓</div>
+          <h3>Paired with LEFTOS-PC</h3>
+          <p class="p">This iPhone is listed under Remote access on the PC, where you can block it at any time.</p>
+          <div class="spacer"></div>
+          <div class="btn primary">Turn on notifications</div>
+          <div class="btn ghost">Not now, show sessions</div>
+        </div>
+        <div class="home"></div>
+      </div></div>
+      <div class="denied"><div class="t">Refused instead</div>
+        <div class="r"><span class="x">✕</span><div><b>LEFTOS-PC said no</b><span>The PC denied this request. </span><span class="act">Ask again</span></div></div>
+        <div class="r"><span class="x">✕</span><div><b>Wrong code</b><span>Three wrong tries end the request; the PC shows a new one.</span></div></div>
+      </div>
+    </div>
+  </div>
+  <button class="pick" data-lane="C">Pick C</button>
+</section>
+
+</div>
+
+<div class="note">
+<p>Borrowed from herdr's collie: lane A is collie's pairing as it ships: the host shows a QR code and the code it carries, the phone's form takes the code (filled in by the scan) and the token is stored once, with refusals that each say what to do next ("expired", "no pending", "bad code") and a paired-device list with a two-tap revoke (<code>web/src/components/paired-devices.tsx</code>, <code>web/src/lib/pairing.ts</code>, <code>docs/install.md</code> "Put it on your phone"). Collie mints the code from a terminal verb (<code>collie pair</code>); here the desktop app's Settings does. B and C, where the phone asks first, are not in collie.</p>
+<p>Shared by every lane: the phone's own name comes from <code>tailscale whois</code>, never typed; a refused phone keeps no token; the paired screen asks for notifications on the tap iOS requires. Annotate anything: the code's length and lifetime, the words on the toast, where a Block lives.</p>
+</div>
+
+<script>
+// Draws a made-up QR-looking grid into every .qr element (not a real code).
+function drawQr(el) {
+  let s = Number(el.dataset.seed || 1) * 9301 + 49297;
+  const rnd = () => { s = (s * 9301 + 49297) % 233280; return s / 233280; };
+  const n = 25, cell = 4;
+  const finder = (x, y) => {
+    for (const [fx, fy] of [[0, 0], [n - 7, 0], [0, n - 7]]) {
+      const dx = x - fx, dy = y - fy;
+      if (dx >= 0 && dx < 7 && dy >= 0 && dy < 7) {
+        const ring = Math.max(Math.abs(dx - 3), Math.abs(dy - 3));
+        return ring === 3 || ring <= 1 ? 1 : 0;
+      }
+      if (dx >= -1 && dx < 8 && dy >= -1 && dy < 8) return 0;
+    }
+    return null;
+  };
+  let rects = "";
+  for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) {
+    const f = finder(x, y);
+    const on = f === null ? rnd() < 0.48 : f === 1;
+    if (on) rects += `<rect x="${x * cell}" y="${y * cell}" width="${cell}" height="${cell}"/>`;
+  }
+  el.innerHTML = `<svg viewBox="0 0 ${n * cell} ${n * cell}" width="100%" height="100%" fill="#111" shape-rendering="crispEdges">${rects}</svg>`;
+}
+document.querySelectorAll(".qr").forEach(drawQr);
+
+for (const b of document.querySelectorAll(".pick")) {
+  b.addEventListener("click", () => {
+    const lane = b.dataset.lane;
+    const title = document.querySelector(`#${lane} h2`).textContent;
+    const sent = window.herdr && window.herdr.send ? window.herdr.send(`Picked ${title}`, { lane }) : false;
+    b.textContent = sent ? `Picked ${lane} — press Send to agent` : `Picked ${lane} (tell Claude in the terminal)`;
+  });
+}
+</script>
+</body>
+</html>

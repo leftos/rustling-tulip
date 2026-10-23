@@ -1,0 +1,553 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mobile prompt cards</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap">
+<style>
+:root {
+  --ground: #111013; --sunken: #0b0a0d; --surface: #161519; --raised: #1b1a1f; --chip: #232129; --hover: #2c2a33;
+  --term: #0c0b0e; --line: #2a2830; --line-strong: #3a3742;
+  --text: #ede9e4; --subtle: #8c8794; --faint: #6e6a77;
+  --accent: #f07a62; --on-accent: #1c100d;
+  --working: #6ca6ff; --asking: #f6bc4e; --on-asking: #2a1b00; --waiting: #4fc89d; --danger: #f26d6d;
+  --ansi-green: #3fb96a; --ansi-red: #ef5c5c; --ansi-blue: #5b9bff; --ansi-dim: #656872;
+  --claude: #d77757; --mode: #c792ea; --ask-ground: #221d12; --ask-line: #6b5523;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: #08070a; color: var(--text); font: 14px/1.4 Geist, system-ui, sans-serif; padding: 24px 16px 48px; }
+h1 { font-size: 18px; font-weight: 600; margin: 0 0 4px; }
+.lede { color: var(--subtle); margin: 0 0 20px; max-width: 80ch; }
+.lede code, .note code { font: 12.5px "Geist Mono", monospace; }
+.lanes { display: flex; flex-wrap: wrap; gap: 28px; align-items: flex-start; }
+.lane { width: 390px; }
+.lane h2 { font-size: 15px; font-weight: 600; margin: 0 0 2px; }
+.lane .how { color: var(--subtle); font-size: 13px; margin: 0 0 4px; min-height: 92px; }
+.lane .worst { color: var(--faint); font-size: 12.5px; margin: 0 0 12px; min-height: 70px; }
+.lane .worst b { color: var(--asking); font-weight: 500; }
+.kindlbl { font-size: 12.5px; font-weight: 600; color: var(--subtle); margin: 22px 0 8px; letter-spacing: .02em; }
+.kindlbl:first-of-type { margin-top: 4px; }
+.pick { margin-top: 16px; width: 100%; padding: 9px; border-radius: 8px; border: 1px solid var(--line-strong); background: var(--raised); color: var(--text); font: inherit; cursor: pointer; }
+.pick:hover { background: var(--hover); }
+
+/* phone, cropped below the status bar */
+.phone { width: 390px; height: 740px; border-radius: 22px 22px 46px 46px; border: 10px solid #1d1c21; border-top-width: 6px; background: var(--ground); position: relative; overflow: hidden; display: flex; flex-direction: column; box-shadow: 0 20px 60px #000a; }
+.hdr { flex: none; display: flex; align-items: center; gap: 8px; padding: 8px 12px 10px; border-bottom: 1px solid var(--line); }
+.hdr .back { color: var(--accent); font-size: 22px; line-height: 1; width: 24px; }
+.hdr .ttl { flex: 1; min-width: 0; }
+.hdr .name { font-weight: 600; font-size: 15px; }
+.hdr .sub { color: var(--subtle); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pill { font-size: 11.5px; font-weight: 600; padding: 3px 8px; border-radius: 999px; background: var(--asking); color: var(--on-asking); }
+.pill.work { background: #6ca6ff26; color: var(--working); }
+
+/* chat */
+.chat { flex: 1 1 auto; min-height: 0; overflow: hidden; padding: 6px 12px 8px; display: flex; flex-direction: column; justify-content: flex-end; gap: 8px; font-size: 13.5px; }
+.chat code { font: 11.5px "Geist Mono", ui-monospace, monospace; background: var(--chip); padding: 0 4px; border-radius: 4px; }
+.bot { max-width: 96%; }
+.tc { border: 1px solid var(--line); border-radius: 8px; background: var(--surface); overflow: hidden; }
+.th { display: flex; align-items: center; gap: 7px; padding: 6px 9px; font-size: 12px; min-width: 0; }
+.th .ic { width: 14px; flex: none; text-align: center; color: var(--subtle); font: 12px "Geist Mono", monospace; }
+.th .kind { flex: none; font-weight: 500; }
+.th .subj { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 11px "Geist Mono", monospace; }
+.th .meta { flex: none; font: 11px "Geist Mono", monospace; color: var(--faint); }
+.dir { color: var(--faint); }
+.plus { color: var(--waiting); } .minus { color: var(--danger); }
+
+/* the pending card */
+.pc { border: 1px solid var(--ask-line); background: var(--ask-ground); border-radius: 10px; overflow: hidden; flex: none; }
+.pc .ph { display: flex; align-items: center; gap: 7px; padding: 7px 10px 0; font-size: 12px; }
+.pc .ph .dia { color: var(--asking); font-size: 11px; }
+.pc .ph .kind { font-weight: 600; color: var(--asking); }
+.pc .ph .rt { margin-left: auto; color: var(--faint); font-size: 11.5px; }
+.pc .pb { padding: 5px 10px 9px; display: flex; flex-direction: column; gap: 6px; }
+.pc .desc { color: var(--text); }
+.pc .cmd { font: 11.5px/1.45 "Geist Mono", ui-monospace, monospace; background: var(--term); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; white-space: pre-wrap; word-break: break-all; }
+.pc .q { font-weight: 600; }
+.pc .ol { display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; }
+.pc .ol div { display: flex; gap: 8px; }
+.pc .ol .n { font: 11px "Geist Mono", monospace; color: var(--faint); width: 12px; flex: none; padding-top: 2px; }
+.pc .ol .sm { color: var(--subtle); }
+.plan { font-size: 12.5px; line-height: 1.45; max-height: 150px; overflow: hidden; position: relative; }
+.plan.tall { max-height: 178px; }
+.plan::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 36px; background: linear-gradient(transparent, var(--ask-ground)); }
+.plan h4 { margin: 0 0 3px; font-size: 13px; }
+.plan ul { margin: 0; padding-left: 16px; }
+.plan li { margin: 1px 0; }
+.plan code { font-size: 11px; }
+.more { font-size: 12px; color: var(--accent); }
+.sheet .plan::after { background: linear-gradient(transparent, var(--raised)); }
+
+/* option buttons, as the approved dock draws them */
+.ans { display: flex; flex-direction: column; gap: 6px; }
+.ans .a { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-radius: 10px; background: var(--chip); font-size: 14px; }
+.ans .a .num { width: 22px; height: 22px; border-radius: 6px; background: var(--surface); display: grid; place-items: center; font: 12px "Geist Mono", monospace; color: var(--subtle); flex: none; }
+.ans .a .lbl { display: flex; flex-direction: column; min-width: 0; }
+.ans .a .lbl small { font-size: 11.5px; color: var(--subtle); }
+.ans .a.primary { background: var(--accent); color: var(--on-accent); }
+.ans .a.primary .num { background: #0002; color: var(--on-accent); }
+.ans .a.primary small { color: #1c100da0; }
+.ans .a .hint { margin-left: auto; font-size: 11.5px; color: var(--faint); flex: none; }
+.ans .a.primary .hint { color: #1c100d99; }
+.ans .a.other { background: transparent; border: 1px dashed var(--line-strong); color: var(--subtle); }
+.pc .ans .a { background: #2a2618; }
+.pc .ans .a.primary { background: var(--accent); }
+.pc .ans .a.other { background: transparent; }
+
+/* receipts once answered */
+.rc { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--subtle); padding: 5px 9px; border: 1px solid var(--line); border-radius: 8px; min-width: 0; }
+.rc .ok { color: var(--waiting); flex: none; }
+.rc b { font-weight: 500; color: var(--text); flex: none; }
+.rc .s { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rc .s.mono { font: 11px "Geist Mono", monospace; }
+.rc .chev { color: var(--faint); flex: none; }
+.tc .note { display: flex; gap: 6px; align-items: center; border-top: 1px solid var(--line); padding: 4px 9px 5px 30px; font-size: 11.5px; color: var(--subtle); }
+.tc .note .ok { color: var(--waiting); }
+.sys { align-self: center; max-width: 100%; display: flex; gap: 6px; align-items: center; font-size: 11.5px; color: var(--subtle); border: 1px dashed var(--line-strong); border-radius: 999px; padding: 3px 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sys .ok { color: var(--waiting); }
+.sys .mono { font: 11px "Geist Mono", monospace; overflow: hidden; text-overflow: ellipsis; }
+
+/* live terminal from the status line down */
+.seam { flex: none; display: flex; align-items: center; gap: 8px; padding: 0 12px; color: var(--faint); font-size: 11px; }
+.seam::before, .seam::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+.term { flex: none; background: var(--term); font: 11.5px/1.36 "Geist Mono", ui-monospace, monospace; padding: 8px 10px 8px; white-space: pre; color: #e5e6e8; border-top: 1px solid var(--line); }
+.g { color: var(--ansi-green); } .b { color: var(--ansi-blue); } .d { color: var(--ansi-dim); } .w { color: #fff; font-weight: 500; } .o { color: var(--claude); } .p { color: var(--mode); }
+.inv { background: #2fb3c2; color: #0c0b0e; }
+
+/* dock and composer */
+.dock { flex: none; background: var(--raised); border-top: 1px solid var(--line); padding: 8px 10px; }
+.mini { display: flex; gap: 6px; margin-top: 6px; }
+.dock .mini:first-child { margin-top: 0; }
+.k { height: 34px; flex: 1; border-radius: 8px; background: var(--chip); display: grid; place-items: center; font-size: 12px; font-weight: 500; color: var(--text); }
+.k.mod { color: var(--subtle); }
+.comp { flex: none; display: flex; align-items: center; gap: 6px; padding: 8px 10px 6px; background: var(--raised); }
+.comp.rule { border-top: 1px solid var(--line); }
+.comp .field { flex: 1; height: 38px; border-radius: 19px; background: var(--surface); border: 1px solid var(--line); color: var(--faint); display: flex; align-items: center; padding: 0 14px; font-size: 14px; }
+.rbtn { width: 38px; height: 38px; flex: none; border-radius: 50%; background: var(--chip); color: var(--text); display: grid; place-items: center; font-size: 13px; font-weight: 600; }
+.home { flex: none; height: 26px; background: var(--raised); display: grid; place-items: center; }
+.home::after { content: ""; width: 134px; height: 5px; border-radius: 3px; background: #fff8; }
+
+/* C: bottom sheet */
+.chat.under { justify-content: flex-start; }
+.scrim { position: absolute; inset: 0; background: #00000080; z-index: 2; }
+.me { align-self: flex-end; max-width: 82%; background: var(--chip); border-radius: 14px 14px 4px 14px; padding: 7px 11px; }
+.sheet { position: absolute; left: 0; right: 0; bottom: 0; z-index: 3; background: var(--raised); border-radius: 18px 18px 0 0; border-top: 1px solid var(--line-strong); display: flex; flex-direction: column; box-shadow: 0 -10px 30px #0008; }
+.sheet .grab { width: 38px; height: 5px; border-radius: 3px; background: var(--line-strong); margin: 7px auto 4px; flex: none; }
+.sheet .sh { display: flex; align-items: center; gap: 7px; padding: 2px 14px 6px; font-size: 13px; }
+.sheet .sh .dia { color: var(--asking); font-size: 11px; }
+.sheet .sh .kind { font-weight: 600; color: var(--asking); }
+.sheet .sh .tbtn { margin-left: auto; font-size: 11.5px; color: var(--subtle); border: 1px solid var(--line-strong); border-radius: 6px; padding: 2px 8px; }
+.sheet .sb2 { padding: 0 14px 8px; display: flex; flex-direction: column; gap: 8px; }
+.sheet .cmd { font: 11.5px/1.45 "Geist Mono", ui-monospace, monospace; background: var(--term); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; white-space: pre-wrap; word-break: break-all; }
+.sheet .q { font-weight: 600; }
+.sheet .foot { text-align: center; color: var(--faint); font-size: 11px; padding: 2px 0 0; }
+.note2 { margin-top: 28px; color: var(--faint); font-size: 12.5px; max-width: 90ch; }
+</style>
+</head>
+<body>
+<h1>Session prompts: how a pending prompt shows in the chat, and what it leaves once answered</h1>
+<p class="lede">Settled already (RT-143): chat above the status line, the live terminal from it down (so Claude's own dialog is always drawn there too), and mobile-session lane C, where the dock between the terminal and the composer shows a pending prompt's options as big buttons that type the option's number. Open here: what the chat shows for the prompt the hooks report (<code>pending_input</code>: a permission's tool and summary, a question's options, a plan's text), and what stays after the answer. Each lane shows a permission, an AskUserQuestion with three options and Other, a plan approval, and the chat after all three were answered. Frames start below the status bar. Content is a placeholder.</p>
+
+<div class="lanes">
+
+<!-- ================= A ================= -->
+<section class="lane" id="A">
+  <h2>A. Card in the chat, buttons in the dock</h2>
+  <p class="how">The chat ends in a card that says what is asked in full (the whole command, the question's option notes, the plan as Markdown) and carries no buttons; the dock below the terminal holds the answers, exactly as mobile-session lane C drew it. Answered, the card becomes a one-line receipt a tap reopens.</p>
+  <p class="worst"><b>Worst case:</b> the prompt shows three times (card, terminal dialog, dock buttons); a four-option question's dock takes about 250px and leaves the card under 190px, so a plan card is clamped to "Show whole plan".</p>
+
+  <div class="kindlbl">1 · Permission request</div>
+  <div class="phone">
+    <div class="hdr"><span class="back">‹</span><div class="ttl"><div class="name">rustling-tulip</div><div class="sub">main · history-store</div></div><span class="pill">Needs you</span></div>
+    <div class="chat">
+      <div class="bot">The scratch copy is stale. Clearing it and rerunning the history tests.</div>
+      <div class="pc"><div class="ph"><span class="dia">◆</span><span class="kind">Bash wants to run</span><span class="rt">answer below ↓</span></div>
+        <div class="pb"><div class="desc">Clear the scratch dir and run the history tests</div>
+<div class="cmd">rm -rf .tmp/x &amp;&amp; cargo nextest run -p daemon --cargo-profile test-release history</div></div></div>
+    </div>
+    <div class="seam">live terminal</div>
+<div class="term"><span class="d">╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌</span>
+ Do you want to proceed?
+ <span class="b">❯ 1. Yes</span>
+   2. Yes, and don't ask again for cargo
+      nextest run commands in rustling-tulip
+   3. No, and tell Claude what to do (esc)</div>
+    <div class="dock">
+      <div class="ans">
+        <div class="a primary"><span class="num">1</span>Yes</div>
+        <div class="a"><span class="num">2</span>Yes, don't ask again for cargo nextest</div>
+        <div class="a"><span class="num">3</span>No, and tell Claude…<span class="hint">esc</span></div>
+      </div>
+      <div class="mini"><div class="k mod">Esc</div><div class="k">↑</div><div class="k">↓</div><div class="k mod">⌨ Keys</div></div>
+    </div>
+    <div class="comp"><div class="rbtn">Q</div><div class="field">Message Claude…</div><div class="rbtn">🎙</div></div>
+    <div class="home"></div>
+  </div>
+
+  <div class="kindlbl">2 · AskUserQuestion, three options and Other</div>
+  <div class="phone">
+    <div class="hdr"><span class="back">‹</span><div class="ttl"><div class="name">rustling-tulip</div><div class="sub">main · history-store</div></div><span class="pill">Needs you</span></div>
+    <div class="chat">
+      <div class="bot">Either store works here; your call.</div>
+      <div class="pc"><div class="ph"><span class="dia">◆</span><span class="kind">Question · Store</span><span class="rt">answer below ↓</span></div>
+        <div class="pb"><div class="q">Where should session history live?</div>
+          <div class="ol">
+            <div><span class="n">1</span><span>One JSON file per session <span class="sm">· today's layout</span></span></div>
+            <div><span class="n">2</span><span>One SQLite file <span class="sm">· one write per end</span></span></div>
+            <div><span class="n">3</span><span>Append-only log <span class="sm">· prune rewrites it</span></span></div>
+            <div><span class="n">4</span><span class="sm">Other: type your own answer</span></div>
+          </div></div></div>
+    </div>
+    <div class="seam">live terminal</div>
+<div class="term"> <span class="w">☐ Store</span>
+ Where should session history live?
+ <span class="b">❯ 1. One JSON file per session</span>
+   2. One SQLite file
+   3. Append-only log
+   4. Type something.</div>
+    <div class="dock">
+      <div class="ans">
+        <div class="a primary"><span class="num">1</span>One JSON file per session</div>
+        <div class="a"><span class="num">2</span>One SQLite file</div>
+        <div class="a"><span class="num">3</span>Append-only log</div>
+        <div class="a other"><span class="num">4</span>Other…<span class="hint">types in the composer</span></div>
+      </div>
+      <div class="mini"><div class="k mod">Esc</div><div class="k">↑</div><div class="k">↓</div><div class="k mod">⌨ Keys</div></div>
+    </div>
+    <div class="comp"><div class="rbtn">Q</div><div class="field">Message Claude…</div><div class="rbtn">🎙</div></div>
+    <div class="home"></div>
+  </div>
+
+  <div class="kindlbl">3 · Plan approval</div>
+  <div class="phone">
+    <div class="hdr"><span class="back">‹</span><div class="ttl"><div class="name">rustling-tulip</div><div class="sub">main · history-store</div></div><span class="pill">Needs you</span></div>
+    <div class="chat">
+      <div class="bot">Here's the plan.</div>
+      <div class="pc"><div class="ph"><span class="dia">◆</span><span class="kind">Plan · ready to run</span><span class="rt">answer below ↓</span></div>
+        <div class="pb"><div class="plan"><h4>Session history in one SQLite file</h4><ul>
+          <li>Add <code>history.db</code> beside <code>state.json</code>, one table <code>ended</code></li>
+          <li>Write it on every end path through <code>history::record</code></li>
+          <li>Import <code>history/*.json</code> once at start, then delete them</li>
+          <li>Prune rows older than 7 days at start</li>
+          <li>Tests: <code>history_db_round_trip</code>, <code>prune_keeps_7_days</code></li></ul></div>
+          <div class="more">Show whole plan ⌄</div></div></div>
+    </div>
+    <div class="seam">live terminal</div>
+<div class="term"> Claude has written up a plan and is ready to
+ execute. Would you like to proceed?
+ <span class="b">❯ 1. Yes, and use auto mode</span>
+   2. Yes, manually approve edits
+   3. Tell Claude what to change
+ <span class="d">ctrl+g to edit in nano</span></div>
+    <div class="dock">
+      <div class="ans">
+        <div class="a primary"><span class="num">1</span>Yes, and use auto mode</div>
+        <div class="a"><span class="num">2</span>Yes, manually approve edits</div>
+        <div class="a"><span class="num">3</span>Keep planning: tell Claude…<span class="hint">⌨</span></div>
+      </div>
+      <div class="mini"><div class="k mod">Esc</div><div class="k">↑</div><div class="k">↓</div><div class="k mod">⌨ Keys</div></div>
+    </div>
+    <div class="comp"><div class="rbtn">Q</div><div class="field">Message Claude…</div><div class="rbtn">🎙</div></div>
+    <div class="home"></div>
+  </div>
+
+  <div class="kindlbl">4 · After all three were answered</div>
+  <div class="phone">
+    <div class="hdr"><span class="back">‹</span><div class="ttl"><div class="name">rustling-tulip</div><div class="sub">main · history-store</div></div><span class="pill work">Working</span></div>
+    <div class="chat">
+      <div class="bot">The scratch copy is stale. Clearing it and rerunning the history tests.</div>
+      <div class="rc"><span class="ok">✓</span><b>Allowed Bash</b><span class="s mono">rm -rf .tmp/x &amp;&amp; cargo nextest run -p daemon …</span><span class="chev">›</span></div>
+      <div class="bot">All 14 pass. Either store works here; your call.</div>
+      <div class="rc"><span class="ok">✓</span><b>Store</b><span class="s">One SQLite file</span><span class="chev">›</span></div>
+      <div class="bot">Here's the plan.</div>
+      <div class="rc"><span class="ok">✓</span><b>Approved plan</b><span class="s">Yes, and use auto mode</span><span class="chev">›</span></div>
+      <div class="tc"><div class="th"><span class="ic">✎</span><span class="kind">Write</span><span class="subj"><span class="dir">crates/daemon/src/</span>history_db.rs</span><span class="meta"><span class="plus">+142</span></span></div></div>
+      <div class="bot">Store written. Wiring it into the end paths now.</div>
+    </div>
+    <div class="seam">live terminal</div>
+<div class="term"><span class="o">✻</span> <span class="d">Wiring history::record… (1m 12s · ↓ 6.4k)</span>
+<span class="d">────────────────────────────────────────────────</span>
+<span class="w">❯</span>
+<span class="d">────────────────────────────────────────────────</span>
+  <span class="p">⏵⏵ auto mode on</span><span class="d"> · </span><span class="inv">1 shell</span><span class="d"> · ↓ to manage</span></div>
+    <div class="comp rule"><div class="rbtn">Q</div><div class="rbtn">⌨</div><div class="field">Message Claude…</div><div class="rbtn">🎙</div></div>
+    <div class="home"></div>
+  </div>
+  <button class="pick" data-lane="A">Pick A</button>
+</section>
+
+<!-- ================= B ================= -->
+<section class="lane" id="B">
+  <h2>B. Buttons on the card, keys-only dock</h2>
+  <p class="how">The pending tool call's own card opens into the prompt: what is asked, then its options as buttons that type the option's number. The dock keeps only Esc, ↑, ↓ and Keys. Answered, the card shrinks back to its tool row with a note of the answer. This revises mobile-session lane C, whose dock held the buttons.</p>
+  <p class="worst"><b>Worst case:</b> the buttons scroll with the chat, so a scroll back to reread takes them off screen; a card left in history must refuse a late tap once its prompt is gone.</p>
+
+  <div class="kindlbl">1 · Permission request</div>
+  <div class="phone">
+    <div class="hdr"><span class="back">‹</span><div class="ttl"><div class="name">rustling-tulip</div><div class="sub">main · history-store</div></div><span class="pill">Needs you</span></div>
+    <div class="chat">
+      <div class="bot">Found the failing case: the fixture keeps an old copy under <code>.tmp/x</code>.</div>
+      <div class="tc"><div class="th"><span class="ic">≡</span><span class="kind">Read</span><span class="subj"><span class="dir">crates/daemon/src/</span>history.rs</span><span class="meta">88 lines</span></div></div>
+      <div class="bot">The scratch copy is stale. Clearing it and rerunning the history tests.</div>
+      <div class="pc"><div class="ph"><span class="dia">◆</span><span class="kind">Bash wants to run</span></div>
+        <div class="pb"><div class="desc">Clear the scratch dir and run the history tests</div>
+<div class="cmd">rm -rf .tmp/x &amp;&amp; cargo nextest run -p daemon --cargo-profile test-release history</div>
+          <div class="ans">
+            <div class="a primary"><span class="num">1</span>Yes</div>
+            <div class="a"><span class="num">2</span>Yes, don't ask again for cargo nextest</div>
+            <div class="a"><span class="num">3</span>No, and tell Claude…<span class="hint">esc</span></div>
+          </div></div></div>
+    </div>
+    <div class="seam">live terminal</div>
+<div class="term"><span class="d">╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌</span>
+ Do you want to proceed?
+ <span class="b">❯ 1. Yes</span>
+   2. Yes, and don't ask again for cargo
+      nextest run commands in rustling-tulip
+   3. No, and tell Claude what to do (esc)</div>
+    <div class="dock"><div class="mini"><div class="k mod">Esc</div><div class="k">↑</div><div class="k">↓</div><div class="k mod">⌨ Keys</div></div></div>
+    <div class="comp"><div class="rbtn">Q</div><div class="field">Message Claude…</div><div class="rbtn">🎙</div></div>
+    <div class="home"></div>
+  </div>
+
+  <div class="kindlbl">2 · AskUserQuestion, three options and Other</div>
+  <div class="phone">
+    <div class="hdr"><span class="back">‹</span><div class="ttl"><div class="name">rustling-tulip</div><div class="sub">main · history-store</div></div><span class="pill">Needs you</span></div>
+    <div class="chat">
+      <div class="bot">Either store works here; your call.</div>
+      <div class="pc"><div class="ph"><span class="dia">◆</span><span class="kind">Question · Store</span></div>
+        <div class="pb"><div class="q">Where should session history live?</div>
+          <div class="ans">
+            <div class="a primary"><span class="num">1</span><span class="lbl">One JSON file per session<small>today's layout</small></span></div>
+            <div class="a"><span class="num">2</span><span class="lbl">One SQLite file<small>one write per end</small></span></div>
+            <div class="a"><span class="num">3</span><span class="lbl">Append-only log<small>prune rewrites it</small></span></div>
+            <div class="a other"><span class="num">4</span>Other…<span class="hint">types in the composer</span></div>
+          </div></div></div>
+    </div>
+    <div class="seam">live terminal</div>
+<div class="term"> <span class="w">☐ Store</span>
+ Where should session history live?
+ <span class="b">❯ 1. One JSON file per session</span>
+   2. One SQLite file
+   3. Append-only log
+   4. Type something.</div>
+    <div class="dock"><div class="mini"><div class="k mod">Esc</div><div class="k">↑</div><div class="k">↓</div><div class="k mod">⌨ Keys</div></div></div>
+    <div class="comp"><div class="rbtn">Q</div><div class="field">Message Claude…</div><div class="rbtn">🎙</div></div>
+    <div class="home"></div>
+  </div>
+
+  <div class="kindlbl">3 · Plan approval</div>
+  <div class="phone">
+    <div class="hdr"><span class="back">‹</span><div class="ttl"><div class="name">rustling-tulip</div><div class="sub">main · history-store</div></div><span class="pill">Needs you</span></div>
+    <div class="chat">
+      <div class="bot">Here's the plan.</div>
+      <div class="pc"><div class="ph"><span class="dia">◆</span><span class="kind">Plan · ready to run</span></div>
+        <div class="pb"><div class="plan tall"><h4>Session history in one SQLite file</h4><ul>
+          <li>Add <code>history.db</code> beside <code>state.json</code>, one table <code>ended</code></li>
+          <li>Write it on every end path through <code>history::record</code></li>
+          <li>Import <code>history/*.json</code> once at start, then delete them</li>
+          <li>Prune rows older than 7 days at start</li>
+          <li>Tests: <code>history_db_round_trip</code>, <code>prune_keeps_7_days</code></li></ul></div>
+          <div class="more">Show whole plan ⌄</div>
+          <div class="ans">
+            <div class="a primary"><span class="num">1</span>Yes, and use auto mode</div>
+            <div class="a"><span class="num">2</span>Yes, manually approve edits</div>
+            <div class="a"><span class="num">3</span>Keep planning: tell Claude…<span class="hint">⌨</span></div>
+          </div></div></div>
+    </div>
+    <div class="seam">live terminal</div>
+<div class="term"> Claude has written up a plan and is ready to
+ execute. Would you like to proceed?
+ <span class="b">❯ 1. Yes, and use auto mode</span>
+   2. Yes, manually approve edits
+   3. Tell Claude what to change
+ <span class="d">ctrl+g to edit in nano</span></div>
+    <div class="dock"><div class="mini"><div class="k mod">Esc</div><div class="k">↑</div><div class="k">↓</div><div class="k mod">⌨ Keys</div></div></div>
+    <div class="comp"><div class="rbtn">Q</div><div class="field">Message Claude…</div><div class="rbtn">🎙</div></div>
+    <div class="home"></div>
+  </div>
+
+  <div class="kindlbl">4 · After all three were answered</div>
+  <div class="phone">
+    <div class="hdr"><span class="back">‹</span><div class="ttl"><div class="name">rustling-tulip</div><div class="sub">main · history-store</div></div><span class="pill work">Working</span></div>
+    <div class="chat">
+      <div class="bot">The scratch copy is stale. Clearing it and rerunning the history tests.</div>
+      <div class="tc"><div class="th"><span class="ic">$</span><span class="kind">Bash</span><span class="subj">rm -rf .tmp/x &amp;&amp; cargo nextest run -p daemon …</span><span class="meta">14 passed</span></div><div class="note"><span class="ok">✓</span>Allowed · Yes</div></div>
+      <div class="bot">All 14 pass. Either store works here; your call.</div>
+      <div class="tc"><div class="th"><span class="ic">?</span><span class="kind">Store</span><span class="subj" style="font-family:Geist,sans-serif;font-size:12px">Where should session history live?</span></div><div class="note"><span class="ok">✓</span>One SQLite file</div></div>
+      <div class="bot">Here's the plan.</div>
+      <div class="tc"><div class="th"><span class="ic">▤</span><span class="kind">Plan</span><span class="subj" style="font-family:Geist,sans-serif;font-size:12px">Session history in one SQLite file</span><span class="meta">›</span></div><div class="note"><span class="ok">✓</span>Approved · Yes, and use auto mode</div></div>
+      <div class="tc"><div class="th"><span class="ic">✎</span><span class="kind">Write</span><span class="subj"><span class="dir">crates/daemon/src/</span>history_db.rs</span><span class="meta"><span class="plus">+142</span></span></div></div>
+    </div>
+    <div class="seam">live terminal</div>
+<div class="term"><span class="o">✻</span> <span class="d">Wiring history::record… (1m 12s · ↓ 6.4k)</span>
+<span class="d">────────────────────────────────────────────────</span>
+<span class="w">❯</span>
+<span class="d">────────────────────────────────────────────────</span>
+  <span class="p">⏵⏵ auto mode on</span><span class="d"> · </span><span class="inv">1 shell</span><span class="d"> · ↓ to manage</span></div>
+    <div class="comp rule"><div class="rbtn">Q</div><div class="rbtn">⌨</div><div class="field">Message Claude…</div><div class="rbtn">🎙</div></div>
+    <div class="home"></div>
+  </div>
+  <button class="pick" data-lane="B">Pick B</button>
+</section>
+
+<!-- ================= C ================= -->
+<section class="lane" id="C">
+  <h2>C. A bottom sheet over the chat</h2>
+  <p class="how">The prompt rises as a sheet over the chat, the terminal and the composer: what is asked, the answers as buttons that type the option's number, Esc ↑ ↓ under them, and a Terminal toggle that shows Claude's dialog as drawn. A swipe down puts it away behind a "Needs you" bar. Answered, a quiet line stays in the chat.</p>
+  <p class="worst"><b>Worst case:</b> while open it hides the live terminal and most of the chat you may need to decide; a second prompt arriving swaps the sheet's content under your thumb.</p>
+
+  <div class="kindlbl">1 · Permission request</div>
+  <div class="phone">
+    <div class="hdr"><span class="back">‹</span><div class="ttl"><div class="name">rustling-tulip</div><div class="sub">main · history-store</div></div><span class="pill">Needs you</span></div>
+    <div class="chat under">
+      <div class="me">The history tests fail on a fresh checkout. Fix it.</div>
+      <div class="bot">Found the failing case: the fixture keeps an old copy under <code>.tmp/x</code>.</div>
+      <div class="tc"><div class="th"><span class="ic">≡</span><span class="kind">Read</span><span class="subj"><span class="dir">crates/daemon/src/</span>history.rs</span><span class="meta">88 lines</span></div></div>
+      <div class="bot">The scratch copy is stale. Clearing it and rerunning the history tests.</div>
+      <div class="tc"><div class="th"><span class="ic">$</span><span class="kind">Bash</span><span class="subj">rm -rf .tmp/x &amp;&amp; cargo nextest run …</span><span class="meta" style="color:var(--asking)">waiting</span></div></div>
+    </div>
+    <div class="seam">live terminal</div>
+<div class="term"><span class="d">╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌</span>
+ Do you want to proceed?
+ <span class="b">❯ 1. Yes</span>
+   2. Yes, and don't ask again for cargo
+      nextest run commands in rustling-tulip
+   3. No, and tell Claude what to do (esc)</div>
+    <div class="comp rule"><div class="rbtn">Q</div><div class="field">Message Claude…</div><div class="rbtn">🎙</div></div>
+    <div class="home"></div>
+    <div class="scrim"></div>
+    <div class="sheet">
+      <div class="grab"></div>
+      <div class="sh"><span class="dia">◆</span><span class="kind">Bash wants to run</span><span class="tbtn">▭ Terminal</span></div>
+      <div class="sb2"><div>Clear the scratch dir and run the history tests</div>
+<div class="cmd">rm -rf .tmp/x &amp;&amp; cargo nextest run -p daemon --cargo-profile test-release history</div>
+        <div class="ans">
+          <div class="a primary"><span class="num">1</span>Yes</div>
+          <div class="a"><span class="num">2</span>Yes, don't ask again for cargo nextest</div>
+          <div class="a"><span class="num">3</span>No, and tell Claude…<span class="hint">esc</span></div>
+        </div>
+        <div class="mini"><div class="k mod">Esc</div><div class="k">↑</div><div class="k">↓</div><div class="k mod">⌨ Keys</div></div>
+        <div class="foot">Swipe down to put it away</div></div>
+      <div class="home"></div>
+    </div>
+  </div>
+
+  <div class="kindlbl">2 · AskUserQuestion, three options and Other</div>
+  <div class="phone">
+    <div class="hdr"><span class="back">‹</span><div class="ttl"><div class="name">rustling-tulip</div><div class="sub">main · history-store</div></div><span class="pill">Needs you</span></div>
+    <div class="chat under">
+      <div class="me">Move session history out of the JSON files.</div>
+      <div class="bot">Looking at how history is written today.</div>
+      <div class="tc"><div class="th"><span class="ic">≡</span><span class="kind">Read</span><span class="subj"><span class="dir">crates/daemon/src/</span>history.rs</span><span class="meta">88 lines</span></div></div>
+      <div class="bot">All 14 pass.</div>
+      <div class="bot">Either store works here; your call.</div>
+    </div>
+    <div class="seam">live terminal</div>
+<div class="term"> <span class="w">☐ Store</span>
+ Where should session history live?
+ <span class="b">❯ 1. One JSON file per session</span>
+   2. One SQLite file
+   3. Append-only log
+   4. Type something.</div>
+    <div class="comp rule"><div class="rbtn">Q</div><div class="field">Message Claude…</div><div class="rbtn">🎙</div></div>
+    <div class="home"></div>
+    <div class="scrim"></div>
+    <div class="sheet">
+      <div class="grab"></div>
+      <div class="sh"><span class="dia">◆</span><span class="kind">Question · Store</span><span class="tbtn">▭ Terminal</span></div>
+      <div class="sb2"><div class="q">Where should session history live?</div>
+        <div class="ans">
+          <div class="a primary"><span class="num">1</span><span class="lbl">One JSON file per session<small>today's layout</small></span></div>
+          <div class="a"><span class="num">2</span><span class="lbl">One SQLite file<small>one write per end</small></span></div>
+          <div class="a"><span class="num">3</span><span class="lbl">Append-only log<small>prune rewrites it</small></span></div>
+          <div class="a other"><span class="num">4</span>Other…<span class="hint">types in the composer</span></div>
+        </div>
+        <div class="mini"><div class="k mod">Esc</div><div class="k">↑</div><div class="k">↓</div><div class="k mod">⌨ Keys</div></div>
+        <div class="foot">Swipe down to put it away</div></div>
+      <div class="home"></div>
+    </div>
+  </div>
+
+  <div class="kindlbl">3 · Plan approval</div>
+  <div class="phone">
+    <div class="hdr"><span class="back">‹</span><div class="ttl"><div class="name">rustling-tulip</div><div class="sub">main · history-store</div></div><span class="pill">Needs you</span></div>
+    <div class="chat under">
+      <div class="sys"><span class="ok">✓</span>Store · One SQLite file</div>
+      <div class="bot">SQLite it is. Planning the move.</div>
+      <div class="tc"><div class="th"><span class="ic">⌕</span><span class="kind">Grep</span><span class="subj">history::record</span><span class="meta">6 files</span></div></div>
+      <div class="bot">Here's the plan.</div>
+    </div>
+    <div class="seam">live terminal</div>
+<div class="term"> Claude has written up a plan and is ready to
+ execute. Would you like to proceed?
+ <span class="b">❯ 1. Yes, and use auto mode</span>
+   2. Yes, manually approve edits
+   3. Tell Claude what to change
+ <span class="d">ctrl+g to edit in nano</span></div>
+    <div class="comp rule"><div class="rbtn">Q</div><div class="field">Message Claude…</div><div class="rbtn">🎙</div></div>
+    <div class="home"></div>
+    <div class="scrim"></div>
+    <div class="sheet">
+      <div class="grab"></div>
+      <div class="sh"><span class="dia">◆</span><span class="kind">Plan · ready to run</span><span class="tbtn">▭ Terminal</span></div>
+      <div class="sb2"><div class="plan tall"><h4>Session history in one SQLite file</h4><ul>
+          <li>Add <code>history.db</code> beside <code>state.json</code>, one table <code>ended</code></li>
+          <li>Write it on every end path through <code>history::record</code></li>
+          <li>Import <code>history/*.json</code> once at start, then delete them</li>
+          <li>Prune rows older than 7 days at start</li>
+          <li>Tests: <code>history_db_round_trip</code>, <code>prune_keeps_7_days</code></li></ul></div>
+        <div class="more">Show whole plan ⌄</div>
+        <div class="ans">
+          <div class="a primary"><span class="num">1</span>Yes, and use auto mode</div>
+          <div class="a"><span class="num">2</span>Yes, manually approve edits</div>
+          <div class="a"><span class="num">3</span>Keep planning: tell Claude…<span class="hint">⌨</span></div>
+        </div>
+        <div class="mini"><div class="k mod">Esc</div><div class="k">↑</div><div class="k">↓</div><div class="k mod">⌨ Keys</div></div>
+        <div class="foot">Swipe down to put it away</div></div>
+      <div class="home"></div>
+    </div>
+  </div>
+
+  <div class="kindlbl">4 · After all three were answered</div>
+  <div class="phone">
+    <div class="hdr"><span class="back">‹</span><div class="ttl"><div class="name">rustling-tulip</div><div class="sub">main · history-store</div></div><span class="pill work">Working</span></div>
+    <div class="chat">
+      <div class="bot">The scratch copy is stale. Clearing it and rerunning the history tests.</div>
+      <div class="tc"><div class="th"><span class="ic">$</span><span class="kind">Bash</span><span class="subj">rm -rf .tmp/x &amp;&amp; cargo nextest run -p daemon …</span><span class="meta">14 passed</span></div></div>
+      <div class="sys"><span class="ok">✓</span>Allowed Bash · <span class="mono">rm -rf .tmp/x &amp;&amp; cargo…</span></div>
+      <div class="bot">All 14 pass. Either store works here; your call.</div>
+      <div class="sys"><span class="ok">✓</span>Store · One SQLite file</div>
+      <div class="bot">Here's the plan.</div>
+      <div class="sys"><span class="ok">✓</span>Approved plan · auto mode</div>
+      <div class="tc"><div class="th"><span class="ic">✎</span><span class="kind">Write</span><span class="subj"><span class="dir">crates/daemon/src/</span>history_db.rs</span><span class="meta"><span class="plus">+142</span></span></div></div>
+    </div>
+    <div class="seam">live terminal</div>
+<div class="term"><span class="o">✻</span> <span class="d">Wiring history::record… (1m 12s · ↓ 6.4k)</span>
+<span class="d">────────────────────────────────────────────────</span>
+<span class="w">❯</span>
+<span class="d">────────────────────────────────────────────────</span>
+  <span class="p">⏵⏵ auto mode on</span><span class="d"> · </span><span class="inv">1 shell</span><span class="d"> · ↓ to manage</span></div>
+    <div class="comp rule"><div class="rbtn">Q</div><div class="rbtn">⌨</div><div class="field">Message Claude…</div><div class="rbtn">🎙</div></div>
+    <div class="home"></div>
+  </div>
+  <button class="pick" data-lane="C">Pick C</button>
+</section>
+
+</div>
+
+<p class="note2">Every button types the option's number, never its label, and "Other…" types the Other row's number and then sends what you write in the composer into Claude's "Type something" field. The hooks name a permission's tool and summary but not Claude's option wording, so the permission and plan buttons take their labels from the dialog Claude draws. Annotate anything: the receipt wording, what a tap on a receipt reopens, whether a plan opens in full.</p>
+
+<script>
+for (const b of document.querySelectorAll(".pick")) {
+  b.addEventListener("click", () => {
+    const lane = b.dataset.lane;
+    const title = document.querySelector(`#${lane} h2`).textContent;
+    const sent = window.herdr && window.herdr.send ? window.herdr.send(`Picked ${title}`, { lane }) : false;
+    b.textContent = sent ? `Picked ${lane} — press Send to agent` : `Picked ${lane} (tell Claude in the terminal)`;
+  });
+}
+</script>
+</body>
+</html>

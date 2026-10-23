@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mobile chat look</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap">
+<style>
+:root {
+  --ground: #111013; --sunken: #0b0a0d; --surface: #161519; --raised: #1b1a1f; --chip: #232129; --hover: #2c2a33;
+  --term: #0c0b0e; --line: #2a2830; --line-strong: #3a3742;
+  --text: #ede9e4; --subtle: #8c8794; --faint: #6e6a77;
+  --accent: #f07a62; --on-accent: #1c100d;
+  --working: #6ca6ff; --asking: #f6bc4e; --on-asking: #2a1b00; --waiting: #4fc89d; --danger: #f26d6d;
+  --ansi-green: #3fb96a; --ansi-red: #ef5c5c; --ansi-blue: #5b9bff; --ansi-dim: #656872;
+  --claude: #d77757; --mode: #c792ea;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: #08070a; color: var(--text); font: 14px/1.4 Geist, system-ui, sans-serif; padding: 24px 16px 48px; }
+h1 { font-size: 18px; font-weight: 600; margin: 0 0 4px; }
+.lede { color: var(--subtle); margin: 0 0 20px; max-width: 76ch; }
+.lede code { font: 12.5px "Geist Mono", monospace; }
+.lanes { display: flex; flex-wrap: wrap; gap: 28px; align-items: flex-start; }
+.lane { width: 390px; }
+.lane h2 { font-size: 15px; font-weight: 600; margin: 0 0 2px; }
+.lane .how { color: var(--subtle); font-size: 13px; margin: 0 0 4px; min-height: 92px; }
+.lane .worst { color: var(--faint); font-size: 12.5px; margin: 0 0 12px; min-height: 52px; }
+.lane .worst b { color: var(--asking); font-weight: 500; }
+.pick { margin-top: 12px; width: 100%; padding: 9px; border-radius: 8px; border: 1px solid var(--line-strong); background: var(--raised); color: var(--text); font: inherit; cursor: pointer; }
+.pick:hover { background: var(--hover); }
+
+/* phone */
+.phone { width: 390px; height: 844px; border-radius: 46px; border: 10px solid #1d1c21; background: var(--ground); position: relative; overflow: hidden; display: flex; flex-direction: column; box-shadow: 0 20px 60px #000a; }
+.sb { height: 47px; flex: none; display: flex; justify-content: space-between; align-items: flex-end; padding: 0 28px 6px; font-size: 14px; font-weight: 600; }
+.island { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); width: 112px; height: 32px; border-radius: 20px; background: #000; }
+.hdr { flex: none; display: flex; align-items: center; gap: 8px; padding: 6px 12px 10px; border-bottom: 1px solid var(--line); }
+.hdr .back { color: var(--accent); font-size: 22px; line-height: 1; width: 24px; }
+.hdr .ttl { flex: 1; min-width: 0; }
+.hdr .name { font-weight: 600; font-size: 15px; }
+.hdr .sub { color: var(--subtle); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pill { font-size: 11.5px; font-weight: 600; padding: 3px 8px; border-radius: 999px; background: #6ca6ff26; color: var(--working); }
+
+/* chat column, shared */
+.chat { flex: 1 1 auto; min-height: 0; overflow: hidden; padding: 6px 12px 8px; display: flex; flex-direction: column; justify-content: flex-end; gap: 8px; font-size: 13.5px; }
+.chat code { font: 11.5px "Geist Mono", ui-monospace, monospace; color: var(--text); background: var(--chip); padding: 0 4px; border-radius: 4px; }
+.mono { font-family: "Geist Mono", ui-monospace, monospace; }
+.dir { color: var(--faint); }
+.plus { color: var(--waiting); } .minus { color: var(--danger); }
+.tapped { outline: 1.5px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
+
+/* diff and output blocks, shared */
+.diff { background: var(--term); font: 10.5px/1.5 "Geist Mono", ui-monospace, monospace; white-space: pre; padding: 4px 0; overflow: hidden; }
+.diff div { padding: 0 9px; }
+.diff .hk { color: var(--ansi-blue); }
+.diff .ad { background: #3fb96a1c; color: #a5e3ba; }
+.diff .rm { background: #ef5c5c1c; color: #f2a7a7; }
+.diff .cx { color: #b9b6bd; }
+.out { background: var(--term); font: 10.5px/1.5 "Geist Mono", ui-monospace, monospace; white-space: pre; padding: 4px 9px; color: #cfd0d4; overflow: hidden; }
+
+/* A: collie-like cards and bubbles */
+.me { align-self: flex-end; max-width: 82%; background: var(--chip); border-radius: 14px 14px 4px 14px; padding: 7px 11px; }
+.bot { max-width: 96%; }
+.tc { border: 1px solid var(--line); border-radius: 8px; background: var(--surface); overflow: hidden; }
+.th { display: flex; align-items: center; gap: 7px; padding: 6px 9px; font-size: 12px; min-width: 0; }
+.th .ic { width: 14px; flex: none; text-align: center; color: var(--subtle); font: 12px "Geist Mono", monospace; }
+.th .kind { flex: none; font-weight: 500; }
+.th .subj { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 11px "Geist Mono", monospace; }
+.th .meta { flex: none; font: 11px "Geist Mono", monospace; color: var(--faint); }
+.th .chev { flex: none; color: var(--faint); }
+.tc .diff, .tc .out { border-top: 1px solid var(--line); }
+.fold { border: 1px solid var(--line); border-radius: 8px; padding: 6px 9px; font-size: 12px; color: var(--subtle); display: flex; flex-direction: column; gap: 1px; }
+.fold .l1 { display: flex; gap: 6px; align-items: center; font-weight: 500; }
+.fold .l2 { padding-left: 14px; color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fold .l2 .mono { font-size: 11px; }
+
+/* B: transcript */
+.tx { gap: 9px; }
+.tx-me { display: flex; gap: 8px; background: #24222a; border-radius: 4px; padding: 6px 9px; }
+.tx-me::before { content: "❯"; color: var(--subtle); font-family: "Geist Mono", monospace; flex: none; }
+.tx-p { display: flex; gap: 8px; }
+.tx-p::before { content: "●"; color: #fff; flex: none; font-size: 9px; line-height: 19px; }
+.tx-t { font: 11.5px/1.5 "Geist Mono", ui-monospace, monospace; }
+.tx-t .h { display: flex; gap: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tx-t .h::before { content: "●"; color: var(--ansi-green); flex: none; font-size: 9px; line-height: 17px; }
+.tx-t .h b { font-weight: 500; color: #fff; }
+.tx-t .r { color: var(--subtle); padding-left: 17px; white-space: pre; }
+.tx-t .diff { margin: 3px 0 0 17px; border-left: 2px solid var(--line-strong); }
+.tx-fold { font: 11.5px/1.5 "Geist Mono", ui-monospace, monospace; color: var(--subtle); display: flex; gap: 8px; }
+.tx-fold::before { content: "▸"; color: var(--faint); flex: none; width: 9px; }
+
+/* C: cards per turn */
+.cc { gap: 10px; }
+.you { align-self: flex-end; max-width: 86%; background: #f07a6214; border: 1px solid #f07a6240; border-radius: 12px; padding: 6px 11px 8px; }
+.cap { font-size: 10.5px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; color: var(--faint); margin-bottom: 2px; display: flex; gap: 6px; }
+.you .cap { color: var(--accent); }
+.turn { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+.turn .body { padding: 7px 11px 9px; display: flex; flex-direction: column; gap: 6px; }
+.steps { border-top: 1px solid var(--line); background: var(--raised); }
+.steps .sh { display: flex; align-items: center; gap: 6px; padding: 6px 11px; font-size: 11.5px; color: var(--subtle); font-weight: 500; }
+.steps .sh .live { margin-left: auto; color: var(--working); font-weight: 400; }
+.step { display: flex; align-items: center; gap: 7px; padding: 5px 11px; font-size: 12px; border-top: 1px solid var(--line); min-width: 0; }
+.step .ic { width: 14px; flex: none; text-align: center; color: var(--subtle); font: 12px "Geist Mono", monospace; }
+.step .subj { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 11px "Geist Mono", monospace; }
+.step .meta { flex: none; font: 11px "Geist Mono", monospace; color: var(--faint); }
+.step.more { color: var(--subtle); font-size: 11.5px; }
+.chipok { flex: none; font-size: 10.5px; padding: 1px 6px; border-radius: 999px; background: #4fc89d22; color: var(--waiting); }
+
+/* live terminal from the status line down */
+.seam { flex: none; display: flex; align-items: center; gap: 8px; padding: 0 12px; color: var(--faint); font-size: 11px; }
+.seam::before, .seam::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+.term { flex: none; background: var(--term); font: 11.5px/1.36 "Geist Mono", ui-monospace, monospace; padding: 8px 10px 8px; white-space: pre; color: #e5e6e8; border-top: 1px solid var(--line); }
+.g { color: var(--ansi-green); } .b { color: var(--ansi-blue); } .d { color: var(--ansi-dim); } .w { color: #fff; font-weight: 500; } .o { color: var(--claude); } .p { color: var(--mode); }
+.inv { background: #2fb3c2; color: #0c0b0e; }
+
+/* composer */
+.comp { flex: none; display: flex; align-items: center; gap: 6px; padding: 8px 10px 6px; background: var(--raised); border-top: 1px solid var(--line); }
+.comp .field { flex: 1; height: 38px; border-radius: 19px; background: var(--surface); border: 1px solid var(--line); color: var(--faint); display: flex; align-items: center; padding: 0 14px; font-size: 14px; }
+.rbtn { width: 38px; height: 38px; flex: none; border-radius: 50%; background: var(--chip); color: var(--text); display: grid; place-items: center; font-size: 13px; font-weight: 600; }
+.home { flex: none; height: 26px; background: var(--raised); display: grid; place-items: center; }
+.home::after { content: ""; width: 134px; height: 5px; border-radius: 3px; background: #fff8; }
+.note { margin-top: 28px; color: var(--faint); font-size: 12.5px; max-width: 86ch; }
+</style>
+</head>
+<body>
+<h1>Session chat: how the conversation above the status line looks</h1>
+<p class="lede">Settled already (RT-143): chat down to the agent's status line, the live terminal from the status line down as drawn, and the dock that follows the prompt (mobile-session lane C; no prompt is pending here, so Quick and Keys sit behind the composer's Q and ⌨). Open here: the chat's own look. Every lane shows the same moment: a user turn, prose, a run of 12 reads and searches, a Read, an Edit (tapped open to its diff), a Bash with its output, and Claude still working, with an Explore subagent and a background shell below the seam. Content is a placeholder.</p>
+
+<div class="lanes">
+
+<!-- A -->
+<section class="lane" id="A">
+  <h2>A. Collie's stream: bubbles and one-line tool cards</h2>
+  <p class="how">Your turns are bubbles, Claude's prose is plain text, and every tool call is a one-line card (icon, kind, path, result). Edit cards carry +/− counts and open to the diff; Bash cards show their output's last lines. Four or more calls in a row fold into one row naming the counts and the newest step.</p>
+  <p class="worst"><b>Worst case:</b> a turn of edits and commands that never reaches four in a row stays a stack of cards, so a busy turn still pushes the prose off screen.</p>
+  <div class="phone">
+    <div class="island"></div>
+    <div class="sb"><span>9:41</span><span>5G ▮</span></div>
+    <div class="hdr"><span class="back">‹</span><div class="ttl"><div class="name">rustling-tulip</div><div class="sub">main · implementer RT-352</div></div><span class="pill">Working</span></div>
+    <div class="chat">
+      <div class="me">The sidebar keeps the old leaf after a target switch. Fix it and run the tests.</div>
+      <div class="bot">Let me see how the State arm swaps the connection.</div>
+      <div class="fold"><div class="l1">› 9 reads, 3 searches</div><div class="l2">Read <span class="mono">apps/native/src/net.rs</span></div></div>
+      <div class="bot">Found it: <code>on_state</code> swaps the connection but never clears <code>selected</code>. Adding a reset.</div>
+      <div class="tc"><div class="th"><span class="ic">≡</span><span class="kind">Read</span><span class="subj"><span class="dir">apps/native/src/</span>sidebar.rs</span><span class="meta">62 lines</span></div></div>
+      <div class="tc tapped"><div class="th"><span class="ic">✎</span><span class="kind">Edit</span><span class="subj"><span class="dir">apps/native/src/</span>sidebar.rs</span><span class="meta"><span class="plus">+38</span> <span class="minus">−2</span></span><span class="chev">⌄</span></div>
+<div class="diff"><div class="hk">@@ -412,6 +412,12 @@ fn on_state</div><div class="cx">     let conn = Connection::new(state);</div><div class="rm">-    self.conn = conn;</div><div class="ad">+    self.reset_for_target(window, cx);</div><div class="ad">+    self.conn = conn;</div><div class="ad">+fn reset_for_target(&amp;mut self, …) {</div></div></div>
+      <div class="tc"><div class="th"><span class="ic">$</span><span class="kind">Bash</span><span class="subj">cargo nextest run -p rustling-tulip-native ui_sidebar</span></div>
+<div class="out"><span class="g">PASS</span> ui_sidebar::clears_selection_on_switch
+2 tests run: 2 passed, 0 skipped</div></div>
+      <div class="bot">Both pass. Checking for other callers next.</div>
+    </div>
+    <div class="seam">live terminal</div>
+<div class="term"><span class="o">✻</span> <span class="d">Checking other callers… (41s · ↓ 3.1k tokens)</span>
+<span class="d">────────────────────────────────────────────────</span>
+<span class="w">❯</span>
+<span class="d">────────────────────────────────────────────────</span>
+  <span class="p">⏵⏵ accept edits on</span><span class="d"> · </span><span class="inv">1 shell</span><span class="d"> · ↓ to manage</span>
+  <span class="d">◯ Explore  Find target-switch callers  12s</span></div>
+    <div class="comp"><div class="rbtn">Q</div><div class="rbtn">⌨</div><div class="field">Message Claude…</div><div class="rbtn">🎙</div></div>
+    <div class="home"></div>
+  </div>
+  <button class="pick" data-lane="A">Pick A</button>
+</section>
+
+<!-- B -->
+<section class="lane" id="B">
+  <h2>B. Transcript: Claude Code's own shapes</h2>
+  <p class="how">No bubbles: your turn is a shaded <span class="mono">❯</span> band, Claude's prose follows a <span class="mono">●</span>, and tool calls are monospace <span class="mono">Tool(subject)</span> lines with a <span class="mono">⎿</span> result line, as the terminal draws them. Runs fold to one line ("12 tool calls · Read 9 files…"); a tap opens a call in place.</p>
+  <p class="worst"><b>Worst case:</b> it looks like the terminal under it, so the seam between history and live screen is easy to miss; long commands and paths wrap at about 48 columns.</p>
+  <div class="phone">
+    <div class="island"></div>
+    <div class="sb"><span>9:41</span><span>5G ▮</span></div>
+    <div class="hdr"><span class="back">‹</span><div class="ttl"><div class="name">rustling-tulip</div><div class="sub">main · implementer RT-352</div></div><span class="pill">Working</span></div>
+    <div class="chat tx">
+      <div class="tx-me">The sidebar keeps the old leaf after a target switch. Fix it and run the tests.</div>
+      <div class="tx-p">Let me see how the State arm swaps the connection.</div>
+      <div class="tx-fold">12 tool calls · Read 9 files, searched 3 patterns</div>
+      <div class="tx-p"><span>Found it: <code>on_state</code> swaps the connection but never clears <code>selected</code>. Adding a reset.</span></div>
+      <div class="tx-t"><div class="h"><span><b>Read</b>(apps/native/src/sidebar.rs)</span></div><div class="r">⎿ Read 62 lines</div></div>
+      <div class="tx-t tapped"><div class="h"><span><b>Edit</b>(apps/native/src/sidebar.rs) ▾</span></div><div class="r">⎿ <span class="plus">38 added</span>, <span class="minus">2 removed</span></div>
+<div class="diff"><div class="cx">412  let conn = Connection::new(state);</div><div class="rm">413 -    self.conn = conn;</div><div class="ad">413 +    self.reset_for_target(window, cx);</div><div class="ad">414 +    self.conn = conn;</div><div class="ad">415 +fn reset_for_target(&amp;mut self, …) {</div></div></div>
+      <div class="tx-t"><div class="h"><span><b>Bash</b>(cargo nextest run -p rustling-tulip-native…)</span></div><div class="r">⎿ <span class="g">PASS</span> ui_sidebar::clears_selection_on_switch
+  2 tests run: 2 passed, 0 skipped</div></div>
+      <div class="tx-p">Both pass. Checking for other callers next.</div>
+    </div>
+    <div class="seam">live terminal</div>
+<div class="term"><span class="o">✻</span> <span class="d">Checking other callers… (41s · ↓ 3.1k tokens)</span>
+<span class="d">────────────────────────────────────────────────</span>
+<span class="w">❯</span>
+<span class="d">────────────────────────────────────────────────</span>
+  <span class="p">⏵⏵ accept edits on</span><span class="d"> · </span><span class="inv">1 shell</span><span class="d"> · ↓ to manage</span>
+  <span class="d">◯ Explore  Find target-switch callers  12s</span></div>
+    <div class="comp"><div class="rbtn">Q</div><div class="rbtn">⌨</div><div class="field">Message Claude…</div><div class="rbtn">🎙</div></div>
+    <div class="home"></div>
+  </div>
+  <button class="pick" data-lane="B">Pick B</button>
+</section>
+
+<!-- C -->
+<section class="lane" id="C">
+  <h2>C. Cards per turn: steps under the message</h2>
+  <p class="how">Each of Claude's turns is one card: all its prose on top, then a Steps tray holding its tool calls, the earlier ones folded into one row and the newest three shown. Your turns are coral-washed cards. A tap opens a step in the tray.</p>
+  <p class="worst"><b>Worst case:</b> prose and steps are split, so you can't see which edit came after which sentence; a long live turn grows one tall card whose newest step sits at its bottom.</p>
+  <div class="phone">
+    <div class="island"></div>
+    <div class="sb"><span>9:41</span><span>5G ▮</span></div>
+    <div class="hdr"><span class="back">‹</span><div class="ttl"><div class="name">rustling-tulip</div><div class="sub">main · implementer RT-352</div></div><span class="pill">Working</span></div>
+    <div class="chat cc">
+      <div class="you"><div class="cap">You · 10:41</div>The sidebar keeps the old leaf after a target switch. Fix it and run the tests.</div>
+      <div class="turn">
+        <div class="body">
+          <div class="cap">Claude · 10:41</div>
+          <div>Let me see how the State arm swaps the connection.</div>
+          <div>Found it: <code>on_state</code> swaps the connection but never clears <code>selected</code>. Adding a reset.</div>
+          <div>Both pass. Checking for other callers next.</div>
+        </div>
+        <div class="steps">
+          <div class="sh">Steps · 15<span class="live">● working</span></div>
+          <div class="step more">› 12 earlier · 9 reads, 3 searches</div>
+          <div class="step"><span class="ic">≡</span>Read<span class="subj"><span class="dir">apps/native/src/</span>sidebar.rs</span><span class="meta">62 lines</span></div>
+          <div class="step tapped"><span class="ic">✎</span>Edit<span class="subj"><span class="dir">apps/native/src/</span>sidebar.rs</span><span class="meta"><span class="plus">+38</span> <span class="minus">−2</span></span></div>
+<div class="diff"><div class="hk">@@ -412,6 +412,12 @@ fn on_state</div><div class="cx">     let conn = Connection::new(state);</div><div class="rm">-    self.conn = conn;</div><div class="ad">+    self.reset_for_target(window, cx);</div><div class="ad">+    self.conn = conn;</div></div>
+          <div class="step"><span class="ic">$</span>Bash<span class="subj">cargo nextest run … ui_sidebar</span><span class="chipok">2 passed</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="seam">live terminal</div>
+<div class="term"><span class="o">✻</span> <span class="d">Checking other callers… (41s · ↓ 3.1k tokens)</span>
+<span class="d">────────────────────────────────────────────────</span>
+<span class="w">❯</span>
+<span class="d">────────────────────────────────────────────────</span>
+  <span class="p">⏵⏵ accept edits on</span><span class="d"> · </span><span class="inv">1 shell</span><span class="d"> · ↓ to manage</span>
+  <span class="d">◯ Explore  Find target-switch callers  12s</span></div>
+    <div class="comp"><div class="rbtn">Q</div><div class="rbtn">⌨</div><div class="field">Message Claude…</div><div class="rbtn">🎙</div></div>
+    <div class="home"></div>
+  </div>
+  <button class="pick" data-lane="C">Pick C</button>
+</section>
+
+</div>
+
+<p class="note">The lanes differ only above the seam; the seam, the live terminal (status line, input box, mode line with the background-shell count, the Explore subagent row) and the composer are the same in all three. The coral outline marks the one call tapped open by hand in each lane. Annotate anything: the fold threshold, which calls open by default, how much Bash output shows, the user turn's colour.</p>
+
+<script>
+for (const b of document.querySelectorAll(".pick")) {
+  b.addEventListener("click", () => {
+    const lane = b.dataset.lane;
+    const title = document.querySelector(`#${lane} h2`).textContent;
+    const sent = window.herdr && window.herdr.send ? window.herdr.send(`Picked ${title}`, { lane }) : false;
+    b.textContent = sent ? `Picked ${lane} — press Send to agent` : `Picked ${lane} (tell Claude in the terminal)`;
+  });
+}
+</script>
+</body>
+</html>

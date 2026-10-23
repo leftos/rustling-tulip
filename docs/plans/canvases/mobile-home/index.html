@@ -1,0 +1,389 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mobile home feed</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap">
+<style>
+:root {
+  --ground: #111013; --sunken: #0b0a0d; --surface: #161519; --raised: #1b1a1f; --chip: #232129; --hover: #2c2a33;
+  --term: #0c0b0e; --line: #2a2830; --line-strong: #3a3742;
+  --text: #ede9e4; --subtle: #8c8794; --faint: #6e6a77;
+  --accent: #f07a62; --on-accent: #1c100d;
+  --working: #6ca6ff; --asking: #f6bc4e; --on-asking: #2a1b00; --waiting: #4fc89d; --danger: #f26d6d;
+  --idle: #6e6a77;
+  --ansi-green: #3fb96a; --ansi-red: #ef5c5c; --ansi-blue: #5b9bff; --ansi-dim: #656872;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: #08070a; color: var(--text); font: 14px/1.4 Geist, system-ui, sans-serif; padding: 24px 16px 48px; }
+h1 { font-size: 18px; font-weight: 600; margin: 0 0 4px; }
+.lede { color: var(--subtle); margin: 0 0 20px; max-width: 78ch; }
+.lede code, .note code { font: 12.5px "Geist Mono", monospace; }
+.lanes { display: flex; flex-wrap: wrap; gap: 28px; align-items: flex-start; }
+.lane { width: 390px; }
+.lane h2 { font-size: 15px; font-weight: 600; margin: 0 0 2px; }
+.lane .how { color: var(--subtle); font-size: 13px; margin: 0 0 4px; min-height: 92px; }
+.lane .worst { color: var(--faint); font-size: 12.5px; margin: 0 0 10px; min-height: 72px; }
+.lane .worst b { color: var(--asking); font-weight: 500; }
+.badgeline { display: flex; align-items: center; gap: 10px; margin: 0 0 12px; font-size: 12px; color: var(--faint); }
+.appicon { position: relative; width: 34px; height: 34px; border-radius: 9px; background: linear-gradient(145deg, #f07a62, #c9503c); display: grid; place-items: center; font: 600 12px Geist, sans-serif; color: #1c100d; flex: none; }
+.appicon i { position: absolute; top: -6px; right: -7px; min-width: 18px; height: 18px; border-radius: 9px; background: #ff3b30; color: #fff; font: 600 11px/18px Geist, sans-serif; text-align: center; font-style: normal; padding: 0 4px; }
+.pick { margin-top: 12px; width: 100%; padding: 9px; border-radius: 8px; border: 1px solid var(--line-strong); background: var(--raised); color: var(--text); font: inherit; cursor: pointer; }
+.pick:hover { background: var(--hover); }
+
+/* phone */
+.phone { width: 390px; height: 844px; border-radius: 46px; border: 10px solid #1d1c21; background: var(--ground); position: relative; overflow: hidden; display: flex; flex-direction: column; box-shadow: 0 20px 60px #000a; }
+.sb { height: 47px; flex: none; display: flex; justify-content: space-between; align-items: flex-end; padding: 0 28px 6px; font-size: 14px; font-weight: 600; }
+.island { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); width: 112px; height: 32px; border-radius: 20px; background: #000; z-index: 2; }
+.home { flex: none; height: 26px; background: var(--ground); display: grid; place-items: center; }
+.home::after { content: ""; width: 134px; height: 5px; border-radius: 3px; background: #fff8; }
+
+/* home header */
+.top { flex: none; display: flex; align-items: center; gap: 10px; padding: 4px 16px 10px; }
+.top .ttl { flex: 1; min-width: 0; }
+.top .big { font-size: 24px; font-weight: 600; letter-spacing: -0.01em; line-height: 1.15; }
+.top .host { color: var(--subtle); font-size: 12px; display: flex; align-items: center; gap: 6px; }
+.top .host::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--waiting); }
+.gear { width: 34px; height: 34px; border-radius: 50%; background: var(--surface); display: grid; place-items: center; color: var(--subtle); font-size: 16px; }
+.scroll { flex: 1 1 auto; min-height: 0; overflow: hidden; padding: 0 12px 10px; display: flex; flex-direction: column; gap: 14px; position: relative; }
+.scroll.fade::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 36px; background: linear-gradient(transparent, var(--ground)); pointer-events: none; }
+
+/* status marks */
+.dot { width: 9px; height: 9px; border-radius: 50%; flex: none; display: inline-block; }
+.dot.ask { background: var(--asking); } .dot.work { background: var(--working); } .dot.fin { background: var(--waiting); } .dot.idle { background: var(--idle); }
+.unseen { width: 7px; height: 7px; border-radius: 2px; background: var(--waiting); flex: none; }
+
+/* summary line (collie) */
+.summary { display: flex; align-items: center; gap: 8px; min-height: 40px; padding: 0 12px; border-radius: 10px; background: var(--surface); border: 1px solid var(--line); font-size: 13px; }
+.summary .ask { color: var(--asking); font-weight: 600; }
+.summary .rest { color: var(--subtle); }
+.summary .go { margin-left: auto; color: var(--asking); font-size: 16px; }
+
+/* grouped list */
+.group { display: flex; flex-direction: column; gap: 6px; }
+.gh { display: flex; align-items: center; gap: 7px; padding: 0 4px; font-size: 13.5px; font-weight: 600; }
+.gh .kind { font-size: 11px; font-weight: 500; color: var(--faint); border: 1px solid var(--line-strong); border-radius: 4px; padding: 0 5px; }
+.gh .counts { margin-left: auto; display: flex; gap: 8px; font-size: 11.5px; font-weight: 500; color: var(--subtle); }
+.gh .counts span { display: inline-flex; align-items: center; gap: 4px; }
+.gh .counts .dot { width: 7px; height: 7px; }
+.list { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--surface); }
+.row { display: flex; align-items: center; gap: 10px; padding: 7px 12px; min-height: 48px; border-top: 1px solid var(--line); }
+.row:first-child { border-top: 0; }
+.row.wash { background: #f6bc4e1c; }
+.row.fwash { background: #4fc89d14; }
+.row .t { flex: 1; min-width: 0; }
+.row .n { font-size: 14px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.row .s { font-size: 12px; color: var(--subtle); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.row .s b { font-weight: 500; color: var(--asking); }
+.row .s .fw { color: var(--waiting); font-weight: 500; }
+.row .when { font: 11.5px "Geist Mono", monospace; color: var(--faint); flex: none; }
+.row .chev { color: var(--faint); flex: none; }
+
+/* attention feed */
+.sec { display: flex; align-items: center; gap: 7px; padding: 0 4px; font-size: 12px; font-weight: 600; color: var(--subtle); text-transform: uppercase; letter-spacing: 0.04em; }
+.sec .c { color: var(--faint); font-weight: 500; }
+.sec.ask { color: var(--asking); }
+.sec .fold { margin-left: auto; text-transform: none; letter-spacing: 0; font-weight: 500; color: var(--faint); }
+.card { background: var(--raised); border: 1px solid var(--line-strong); border-radius: 14px; padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 8px; }
+.card.askc { border-color: #f6bc4e66; }
+.card .meta { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--subtle); }
+.card .meta .when { margin-left: auto; font: 11.5px "Geist Mono", monospace; color: var(--faint); }
+.card .meta .open { color: var(--accent); font-weight: 500; }
+.card .who { font-size: 14.5px; font-weight: 600; }
+.card .q { font-size: 13.5px; }
+.card .q code, .tray code { font: 12px "Geist Mono", monospace; background: var(--surface); border-radius: 4px; padding: 0 4px; }
+.diff { font: 11.5px/1.4 "Geist Mono", monospace; background: var(--term); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; color: var(--ansi-green); white-space: pre; overflow: hidden; }
+.ans { display: flex; flex-direction: column; gap: 5px; }
+.ans .a { display: flex; align-items: center; gap: 9px; padding: 7px 10px; min-height: 36px; border-radius: 9px; background: var(--chip); font-size: 13.5px; }
+.ans .a .num { width: 20px; height: 20px; border-radius: 5px; background: var(--surface); display: grid; place-items: center; font: 11.5px "Geist Mono", monospace; color: var(--subtle); flex: none; }
+.ans .a.primary { background: var(--accent); color: var(--on-accent); }
+.ans .a.primary .num { background: #0002; color: var(--on-accent); }
+.ans .a .hint { margin-left: auto; font-size: 11px; color: var(--faint); }
+.ans2 { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }
+.ans2 .a { display: flex; align-items: center; gap: 8px; padding: 6px 9px; min-height: 38px; border-radius: 9px; background: var(--chip); font-size: 13px; line-height: 1.2; }
+.ans2 .a .num { width: 20px; height: 20px; border-radius: 5px; background: var(--surface); display: grid; place-items: center; font: 11.5px "Geist Mono", monospace; color: var(--subtle); flex: none; }
+.ans2 .a.other { color: var(--subtle); }
+.fincard { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 9px 12px; display: flex; gap: 10px; align-items: flex-start; }
+.fincard .t { flex: 1; min-width: 0; }
+.fincard .n { font-size: 14px; font-weight: 500; }
+.fincard .s { font-size: 12.5px; color: var(--subtle); }
+.fincard .when { font: 11.5px "Geist Mono", monospace; color: var(--faint); }
+.fincard .unseen { margin-top: 6px; }
+.scroll.tight { gap: 9px; }
+.scroll > * { flex-shrink: 0; }
+.folded { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-radius: 10px; background: var(--surface); border: 1px solid var(--line); color: var(--subtle); font-size: 13px; }
+.folded .chev { margin-left: auto; color: var(--faint); }
+
+/* hybrid tray */
+.tray { display: flex; flex-direction: column; gap: 7px; }
+.trayhead { display: flex; align-items: center; gap: 7px; padding: 0 4px; font-size: 12px; font-weight: 600; color: var(--asking); text-transform: uppercase; letter-spacing: 0.04em; }
+.trayhead .pg { margin-left: auto; display: flex; gap: 5px; }
+.trayhead .pg i { width: 6px; height: 6px; border-radius: 50%; background: var(--line-strong); }
+.trayhead .pg i.on { background: var(--asking); }
+.carousel { display: flex; gap: 8px; margin-right: -12px; overflow: hidden; }
+.carousel .card { flex: none; width: 322px; }
+.carousel .card.peek { width: 60px; padding: 10px 0 0 10px; opacity: .7; }
+.btnrow { display: flex; gap: 5px; }
+.btnrow .b { flex: 1; min-height: 36px; border-radius: 9px; background: var(--chip); display: flex; align-items: center; justify-content: center; gap: 6px; font-size: 13px; font-weight: 500; white-space: nowrap; }
+.btnrow .b .num { font: 11px "Geist Mono", monospace; color: var(--subtle); }
+.btnrow .b.primary { background: var(--accent); color: var(--on-accent); }
+.btnrow .b.primary .num { color: #1c100d99; }
+
+/* empty states */
+.empties { display: flex; gap: 14px; margin-top: 14px; }
+.empties figure { margin: 0; }
+.empties figcaption { font-size: 12px; color: var(--faint); margin-bottom: 6px; }
+.small { zoom: 0.48; }
+.small .phone { box-shadow: none; }
+.emptybody { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; padding: 0 36px; text-align: center; }
+.emptybody .ico { width: 84px; height: 84px; border-radius: 50%; background: var(--surface); border: 2px solid var(--line-strong); display: grid; place-items: center; font-size: 40px; color: var(--waiting); }
+.emptybody .ico.muted { color: var(--faint); }
+.emptybody .big { font-size: 30px; font-weight: 600; }
+.emptybody .sub { font-size: 23px; color: var(--subtle); line-height: 1.35; }
+.bigsum { font-size: 22px !important; min-height: 70px !important; padding: 0 20px !important; }
+.bigrow .n { font-size: 24px !important; } .bigrow .s { font-size: 20px !important; } .bigrow { min-height: 80px !important; }
+.bigrow .dot { width: 14px; height: 14px; }
+.biggh { font-size: 22px !important; }
+.note { margin-top: 28px; color: var(--faint); font-size: 12.5px; max-width: 90ch; }
+.note p { margin: 0 0 6px; }
+</style>
+</head>
+<body>
+<h1>Phone home: what the app shows when no session is open</h1>
+<p class="lede">The screen the PWA opens to, and the one a tap on its Home Screen icon lands on. Same moment in every lane: nine sessions on LEFTOS-PC across two repos (<code>rustling-tulip</code>, <code>yaat</code>) and one workspace (<code>harness</code> = claude-config + gate). Two need you (a permission prompt and an AskUserQuestion), one finished while you were away, three working, three idle. The Home Screen badge counts Needs you only, so it reads 2 in every lane. A tap on any session opens the session screen already settled (the dock follows the prompt). Statuses and words are the desktop's: Working, Needs you, Finished, Idle. Content is a placeholder.</p>
+
+<div class="lanes">
+
+<!-- A -->
+<section class="lane" id="A">
+  <h2>A. Collie's list: grouped by repo, rows never move</h2>
+  <p class="how">One group per repo or workspace, in the sidebar's order, each row in its fixed place. Urgency is a mark, not a position: an amber wash on the row, a dot and count on its heading, and one summary line on top that counts what needs you and jumps to the first. Every answer happens in the session screen.</p>
+  <p class="worst"><b>Worst case:</b> with twenty sessions the second Needs you row sits three groups down, off screen; answering anything is always two taps and a screen change (open the row, press in the dock).</p>
+  <div class="badgeline"><span class="appicon">rt<i>2</i></span>Home Screen icon: Needs you only</div>
+  <div class="phone">
+    <div class="island"></div>
+    <div class="sb"><span>9:41</span><span>5G ▮</span></div>
+    <div class="top"><div class="ttl"><div class="big">Sessions</div><div class="host">LEFTOS-PC · connected</div></div><div class="gear">⚙</div></div>
+    <div class="scroll">
+      <div class="summary"><span class="dot ask"></span><span class="ask">2 need you</span><span class="rest">· 1 finished · 3 working · 3 idle</span><span class="go">›</span></div>
+
+      <div class="group">
+        <div class="gh"><span class="dot ask"></span>rustling-tulip<span class="counts"><span><i class="dot ask"></i>1</span><span><i class="dot work"></i>1</span><span><i class="dot fin"></i>1</span><span><i class="dot idle"></i>1</span></span></div>
+        <div class="list">
+          <div class="row wash"><span class="dot ask"></span><div class="t"><div class="n">implementer RT-352</div><div class="s"><b>Needs you</b> · Edit lib.rs? · main</div></div><span class="when">2m</span></div>
+          <div class="row"><span class="dot work"></span><div class="t"><div class="n">PWA service worker</div><div class="s">Working · feat/pwa-shell</div></div><span class="when">4m</span></div>
+          <div class="row fwash"><span class="dot fin"></span><div class="t"><div class="n">scrollback trim</div><div class="s"><span class="fw">Finished</span> · fix/scrollback-trim</div></div><span class="unseen"></span><span class="when">12m</span></div>
+          <div class="row"><span class="dot idle"></span><div class="t"><div class="n">pwsh</div><div class="s">Idle · main</div></div><span class="when">1h</span></div>
+        </div>
+      </div>
+
+      <div class="group">
+        <div class="gh"><span class="dot ask"></span>yaat<span class="counts"><span><i class="dot ask"></i>1</span><span><i class="dot work"></i>1</span><span><i class="dot idle"></i>1</span></span></div>
+        <div class="list">
+          <div class="row wash"><span class="dot ask"></span><div class="t"><div class="n">replay e2e for #412</div><div class="s"><b>Needs you</b> · Which runway config…? · main</div></div><span class="when">6m</span></div>
+          <div class="row"><span class="dot work"></span><div class="t"><div class="n">ATIS voice</div><div class="s">Working · feat/atis-voice</div></div><span class="when">18m</span></div>
+          <div class="row"><span class="dot idle"></span><div class="t"><div class="n">triage</div><div class="s">Idle · main</div></div><span class="when">2h</span></div>
+        </div>
+      </div>
+
+      <div class="group">
+        <div class="gh">harness<span class="kind">workspace</span><span class="counts"><span><i class="dot work"></i>1</span><span><i class="dot idle"></i>1</span></span></div>
+        <div class="list">
+          <div class="row"><span class="dot work"></span><div class="t"><div class="n">gate routing</div><div class="s">Working · wt.gate-routing</div></div><span class="when">1m</span></div>
+          <div class="row"><span class="dot idle"></span><div class="t"><div class="n">claude-config</div><div class="s">Idle · main</div></div><span class="when">3h</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="home"></div>
+  </div>
+  <div class="empties">
+    <figure><figcaption>Nothing needs you</figcaption><div class="small"><div class="phone">
+      <div class="island"></div><div class="sb"><span>9:41</span><span>5G ▮</span></div>
+      <div class="top"><div class="ttl"><div class="big">Sessions</div><div class="host">LEFTOS-PC · connected</div></div><div class="gear">⚙</div></div>
+      <div class="scroll">
+        <div class="summary bigsum"><span class="dot fin" style="width:14px;height:14px"></span><span style="color:var(--waiting);font-weight:600">All clear</span><span class="rest">· 3 working</span></div>
+        <div class="group"><div class="gh biggh">rustling-tulip</div><div class="list">
+          <div class="row bigrow"><span class="dot work"></span><div class="t"><div class="n">implementer RT-352</div><div class="s">Working · main</div></div></div>
+          <div class="row bigrow"><span class="dot idle"></span><div class="t"><div class="n">scrollback trim</div><div class="s">Idle · fix/scrollback-trim</div></div></div>
+          <div class="row bigrow"><span class="dot work"></span><div class="t"><div class="n">PWA service worker</div><div class="s">Working · feat/pwa-shell</div></div></div>
+        </div></div>
+        <div class="group"><div class="gh biggh">yaat</div><div class="list">
+          <div class="row bigrow"><span class="dot idle"></span><div class="t"><div class="n">replay e2e for #412</div><div class="s">Idle · main</div></div></div>
+          <div class="row bigrow"><span class="dot work"></span><div class="t"><div class="n">ATIS voice</div><div class="s">Working · feat/atis-voice</div></div></div>
+        </div></div>
+      </div><div class="home"></div></div></div></figure>
+    <figure><figcaption>No sessions on the host</figcaption><div class="small"><div class="phone">
+      <div class="island"></div><div class="sb"><span>9:41</span><span>5G ▮</span></div>
+      <div class="top"><div class="ttl"><div class="big">Sessions</div><div class="host">LEFTOS-PC · connected</div></div><div class="gear">⚙</div></div>
+      <div class="emptybody"><div class="ico muted">∅</div><div class="big">No sessions</div><div class="sub">Nothing is running on LEFTOS-PC. Start one from the desktop app.</div></div>
+      <div class="home"></div></div></div></figure>
+  </div>
+  <button class="pick" data-lane="A">Pick A</button>
+</section>
+
+<!-- B -->
+<section class="lane" id="B">
+  <h2>B. Attention feed: answer from the card</h2>
+  <p class="how">Sorted by what needs you: Needs you cards on top, each with the prompt's summary (the file and diff line, or the question) and its options as buttons; a tap types the option's number, as the session dock does. Then Finished with Claude's last line, then Working, then Idle folded.</p>
+  <p class="worst"><b>Worst case:</b> you answer from a summary without the terminal in sight, and a status change reorders the feed, so a card can slide under your thumb as you reach for it (needs a freeze while touching); two prompts fill the first screen.</p>
+  <div class="badgeline"><span class="appicon">rt<i>2</i></span>Home Screen icon: Needs you only</div>
+  <div class="phone">
+    <div class="island"></div>
+    <div class="sb"><span>9:41</span><span>5G ▮</span></div>
+    <div class="top"><div class="ttl"><div class="big">Sessions</div><div class="host">LEFTOS-PC · connected</div></div><div class="gear">⚙</div></div>
+    <div class="scroll fade tight">
+      <div class="sec ask"><span class="dot ask"></span>Needs you <span class="c">2</span></div>
+      <div class="card askc">
+        <div class="meta"><span>rustling-tulip · main</span><span class="when">2m</span></div>
+        <div class="who">implementer RT-352</div>
+        <div class="q">Edit <code>apps/native/src/lib.rs</code>?</div>
+        <div class="diff">+    self.reset_for_target(window, cx);</div>
+        <div class="ans">
+          <div class="a primary"><span class="num">1</span>Yes</div>
+          <div class="a"><span class="num">2</span>Yes, all edits this session</div>
+          <div class="a"><span class="num">3</span>No, and tell Claude…<span class="hint">opens</span></div>
+        </div>
+      </div>
+      <div class="card askc">
+        <div class="meta"><span>yaat · main</span><span class="when">6m</span></div>
+        <div class="who">replay e2e for #412</div>
+        <div class="q">Which runway config should the KSFO replay use?</div>
+        <div class="ans2">
+          <div class="a"><span class="num">1</span>28L/28R, west flow</div>
+          <div class="a"><span class="num">2</span>1L/1R, SE flow</div>
+          <div class="a"><span class="num">3</span>Both, one run each</div>
+          <div class="a other"><span class="num">4</span>Type an answer…</div>
+        </div>
+      </div>
+      <div class="sec"><span class="dot fin"></span>Finished <span class="c">1</span></div>
+      <div class="fincard"><span class="unseen"></span><div class="t"><div class="n">scrollback trim <span class="when">· 12m</span></div><div class="s">rustling-tulip · “The ring now trims at 1.5 MB; 14 tests pass.”</div></div></div>
+      <div class="sec"><span class="dot work"></span>Working <span class="c">3</span></div>
+      <div class="list">
+        <div class="row"><span class="dot work"></span><div class="t"><div class="n">gate routing</div><div class="s">harness · wt.gate-routing</div></div><span class="when">1m</span></div>
+        <div class="row"><span class="dot work"></span><div class="t"><div class="n">PWA service worker</div><div class="s">rustling-tulip · feat/pwa-shell</div></div><span class="when">4m</span></div>
+        <div class="row"><span class="dot work"></span><div class="t"><div class="n">ATIS voice</div><div class="s">yaat · feat/atis-voice</div></div><span class="when">18m</span></div>
+      </div>
+      <div class="folded"><span class="dot idle"></span>Idle 3<span class="chev">›</span></div>
+    </div>
+    <div class="home"></div>
+  </div>
+  <div class="empties">
+    <figure><figcaption>Nothing needs you</figcaption><div class="small"><div class="phone">
+      <div class="island"></div><div class="sb"><span>9:41</span><span>5G ▮</span></div>
+      <div class="top"><div class="ttl"><div class="big">Sessions</div><div class="host">LEFTOS-PC · connected</div></div><div class="gear">⚙</div></div>
+      <div class="scroll">
+        <div class="summary bigsum"><span class="dot fin" style="width:14px;height:14px"></span><span style="color:var(--waiting);font-weight:600">Nothing needs you</span></div>
+        <div class="sec biggh"><span class="dot work"></span>Working 3</div>
+        <div class="list">
+          <div class="row bigrow"><span class="dot work"></span><div class="t"><div class="n">implementer RT-352</div><div class="s">rustling-tulip · main</div></div></div>
+          <div class="row bigrow"><span class="dot work"></span><div class="t"><div class="n">PWA service worker</div><div class="s">rustling-tulip · feat/pwa-shell</div></div></div>
+          <div class="row bigrow"><span class="dot work"></span><div class="t"><div class="n">ATIS voice</div><div class="s">yaat · feat/atis-voice</div></div></div>
+        </div>
+        <div class="folded bigsum"><span class="dot idle" style="width:14px;height:14px"></span>Idle 6<span class="chev">›</span></div>
+      </div><div class="home"></div></div></div></figure>
+    <figure><figcaption>No sessions on the host</figcaption><div class="small"><div class="phone">
+      <div class="island"></div><div class="sb"><span>9:41</span><span>5G ▮</span></div>
+      <div class="top"><div class="ttl"><div class="big">Sessions</div><div class="host">LEFTOS-PC · connected</div></div><div class="gear">⚙</div></div>
+      <div class="emptybody"><div class="ico muted">∅</div><div class="big">No sessions</div><div class="sub">Nothing is running on LEFTOS-PC. Start one from the desktop app.</div></div>
+      <div class="home"></div></div></div></figure>
+  </div>
+  <button class="pick" data-lane="B">Pick B</button>
+</section>
+
+<!-- C -->
+<section class="lane" id="C">
+  <h2>C. Hybrid: a Needs you tray over collie's list</h2>
+  <p class="how">A's grouped list, rows fixed in place, with a tray on top while anything needs you: one compact prompt card at a time, swiped sideways through the rest, with the options as a row of short buttons. A question whose options do not fit in one row shows Open instead. The tray goes away when nothing needs you.</p>
+  <p class="worst"><b>Worst case:</b> the tray spends about 170px whenever something waits; option labels are cut to a word or two, and an AskUserQuestion with long options always costs the trip into the session.</p>
+  <div class="badgeline"><span class="appicon">rt<i>2</i></span>Home Screen icon: Needs you only</div>
+  <div class="phone">
+    <div class="island"></div>
+    <div class="sb"><span>9:41</span><span>5G ▮</span></div>
+    <div class="top"><div class="ttl"><div class="big">Sessions</div><div class="host">LEFTOS-PC · connected</div></div><div class="gear">⚙</div></div>
+    <div class="scroll fade">
+      <div class="tray">
+        <div class="trayhead"><span class="dot ask"></span>Needs you · 1 of 2<span class="pg"><i class="on"></i><i></i></span></div>
+        <div class="carousel">
+          <div class="card askc">
+            <div class="meta"><span><b style="color:var(--text);font-weight:600">implementer RT-352</b> · rustling-tulip</span><span class="when">2m</span></div>
+            <div class="q">Edit <code>apps/native/src/lib.rs</code>? <span style="color:var(--ansi-green);font:11.5px 'Geist Mono',monospace">+1 line</span></div>
+            <div class="btnrow"><div class="b primary"><span class="num">1</span>Yes</div><div class="b"><span class="num">2</span>All edits</div><div class="b"><span class="num">3</span>No…</div></div>
+          </div>
+          <div class="card askc peek"><div class="meta"><span>yaat</span></div><div class="q">Which…</div></div>
+        </div>
+      </div>
+
+      <div class="group">
+        <div class="gh"><span class="dot ask"></span>rustling-tulip<span class="counts"><span><i class="dot ask"></i>1</span><span><i class="dot work"></i>1</span><span><i class="dot fin"></i>1</span><span><i class="dot idle"></i>1</span></span></div>
+        <div class="list">
+          <div class="row wash"><span class="dot ask"></span><div class="t"><div class="n">implementer RT-352</div><div class="s"><b>Needs you</b> · Edit lib.rs? · main</div></div><span class="when">2m</span></div>
+          <div class="row"><span class="dot work"></span><div class="t"><div class="n">PWA service worker</div><div class="s">Working · feat/pwa-shell</div></div><span class="when">4m</span></div>
+          <div class="row fwash"><span class="dot fin"></span><div class="t"><div class="n">scrollback trim</div><div class="s"><span class="fw">Finished</span> · fix/scrollback-trim</div></div><span class="unseen"></span><span class="when">12m</span></div>
+          <div class="row"><span class="dot idle"></span><div class="t"><div class="n">pwsh</div><div class="s">Idle · main</div></div><span class="when">1h</span></div>
+        </div>
+      </div>
+
+      <div class="group">
+        <div class="gh"><span class="dot ask"></span>yaat<span class="counts"><span><i class="dot ask"></i>1</span><span><i class="dot work"></i>1</span><span><i class="dot idle"></i>1</span></span></div>
+        <div class="list">
+          <div class="row wash"><span class="dot ask"></span><div class="t"><div class="n">replay e2e for #412</div><div class="s"><b>Needs you</b> · Which runway config…? · main</div></div><span class="when">6m</span></div>
+          <div class="row"><span class="dot work"></span><div class="t"><div class="n">ATIS voice</div><div class="s">Working · feat/atis-voice</div></div><span class="when">18m</span></div>
+          <div class="row"><span class="dot idle"></span><div class="t"><div class="n">triage</div><div class="s">Idle · main</div></div><span class="when">2h</span></div>
+        </div>
+      </div>
+
+      <div class="group">
+        <div class="gh">harness<span class="kind">workspace</span><span class="counts"><span><i class="dot work"></i>1</span><span><i class="dot idle"></i>1</span></span></div>
+        <div class="list">
+          <div class="row"><span class="dot work"></span><div class="t"><div class="n">gate routing</div><div class="s">Working · wt.gate-routing</div></div><span class="when">1m</span></div>
+          <div class="row"><span class="dot idle"></span><div class="t"><div class="n">claude-config</div><div class="s">Idle · main</div></div><span class="when">3h</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="home"></div>
+  </div>
+  <div class="empties">
+    <figure><figcaption>Nothing needs you (no tray)</figcaption><div class="small"><div class="phone">
+      <div class="island"></div><div class="sb"><span>9:41</span><span>5G ▮</span></div>
+      <div class="top"><div class="ttl"><div class="big">Sessions</div><div class="host">LEFTOS-PC · connected</div></div><div class="gear">⚙</div></div>
+      <div class="scroll">
+        <div class="group"><div class="gh biggh">rustling-tulip</div><div class="list">
+          <div class="row bigrow"><span class="dot work"></span><div class="t"><div class="n">implementer RT-352</div><div class="s">Working · main</div></div></div>
+          <div class="row bigrow"><span class="dot idle"></span><div class="t"><div class="n">scrollback trim</div><div class="s">Idle · fix/scrollback-trim</div></div></div>
+          <div class="row bigrow"><span class="dot work"></span><div class="t"><div class="n">PWA service worker</div><div class="s">Working · feat/pwa-shell</div></div></div>
+        </div></div>
+        <div class="group"><div class="gh biggh">yaat</div><div class="list">
+          <div class="row bigrow"><span class="dot idle"></span><div class="t"><div class="n">replay e2e for #412</div><div class="s">Idle · main</div></div></div>
+          <div class="row bigrow"><span class="dot work"></span><div class="t"><div class="n">ATIS voice</div><div class="s">Working · feat/atis-voice</div></div></div>
+        </div></div>
+      </div><div class="home"></div></div></div></figure>
+    <figure><figcaption>No sessions on the host</figcaption><div class="small"><div class="phone">
+      <div class="island"></div><div class="sb"><span>9:41</span><span>5G ▮</span></div>
+      <div class="top"><div class="ttl"><div class="big">Sessions</div><div class="host">LEFTOS-PC · connected</div></div><div class="gear">⚙</div></div>
+      <div class="emptybody"><div class="ico muted">∅</div><div class="big">No sessions</div><div class="sub">Nothing is running on LEFTOS-PC. Start one from the desktop app.</div></div>
+      <div class="home"></div></div></div></figure>
+  </div>
+  <button class="pick" data-lane="C">Pick C</button>
+</section>
+
+</div>
+
+<div class="note">
+<p>Borrowed from herdr's collie: A's grouped list, rows that never move, the row wash, the lit heading with its counts, the one summary line that jumps to the first urgent row, and the Finished square for a session you have not opened since it ended (<code>web/src/components/agent-list.tsx</code>, <code>web/src/lib/triage.ts</code>, ADR 0063 and 0066). The badge counting Needs you and not Finished is collie's ADR 0066 rule 7. B's sorted feed is what collie built first and removed (ADR 0063: "a pane's row never moves when its state changes"); it is drawn here because answering from the card is the thing collie never offered.</p>
+<p>Annotate anything: the row's second line, what a Finished card quotes, the header, where Settings and the host switcher live.</p>
+</div>
+
+<script>
+for (const b of document.querySelectorAll(".pick")) {
+  b.addEventListener("click", () => {
+    const lane = b.dataset.lane;
+    const title = document.querySelector(`#${lane} h2`).textContent;
+    const sent = window.herdr && window.herdr.send ? window.herdr.send(`Picked ${title}`, { lane }) : false;
+    b.textContent = sent ? `Picked ${lane} — press Send to agent` : `Picked ${lane} (tell Claude in the terminal)`;
+  });
+}
+</script>
+</body>
+</html>
