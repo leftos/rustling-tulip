@@ -1174,6 +1174,17 @@ impl<'a> Harness<'a> {
         self.cx.run_until_parked();
     }
 
+    /// Delivers every one of `events` before the view settles, as a burst
+    /// the network thread queued faster than background work runs.
+    pub fn events_together(&mut self, events: Vec<NetEvent>) {
+        for event in events {
+            self.events
+                .unbounded_send(event)
+                .expect("the root view listens");
+        }
+        self.cx.run_until_parked();
+    }
+
     /// Delivers `msg` from the daemon and lets the view settle.
     pub fn send(&mut self, msg: DaemonMessage) {
         self.event(NetEvent::Message(Box::new(msg)));

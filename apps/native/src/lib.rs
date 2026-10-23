@@ -25,6 +25,8 @@ pub mod diff_view;
 mod discard_confirm;
 mod drag;
 pub mod ellipsis;
+pub mod file_fetch;
+mod file_fetch_view;
 mod folder_picker;
 pub mod fonts;
 mod footer;
@@ -726,6 +728,13 @@ pub struct RootView {
     needs_you_timer: Option<Task<()>>,
     /// How many times that timer has repainted the panel.
     needs_you_repaints: usize,
+    /// The files being fetched from a remote host.
+    fetches: file_fetch::FetchRegistry,
+    /// Where the open the run confirm asks about came from.
+    run_confirm_origin: open_view::Origin,
+    /// The folder fetched files are saved under, or why it could not be
+    /// resolved.
+    remote_files_root: Result<PathBuf, String>,
 }
 
 impl RootView {
@@ -967,6 +976,12 @@ impl RootView {
             recover_batches: Vec::new(),
             needs_you_timer: None,
             needs_you_repaints: 0,
+            fetches: file_fetch::FetchRegistry::new(&format!(
+                "{:x}",
+                uuid::Uuid::new_v4().as_u64_pair().0
+            )),
+            run_confirm_origin: open_view::Origin::Link,
+            remote_files_root: daemon_client::remote_files_dir().map_err(|err| format!("{err:#}")),
         };
         view.arm_needs_you_repaint(cx);
         view
@@ -2149,6 +2164,10 @@ impl RootView {
                 if conn.target() != self.conn.target() {
                     self.handshake = None;
                 }
+                // A fetch streams over the connection it was asked on.
+                if !conn.is_open() || conn.target() != self.conn.target() {
+                    self.end_fetches_on_disconnect(cx);
+                }
                 self.conn = conn;
                 self.sync_spawn_provider_support(cx);
             }
@@ -2189,15 +2208,17 @@ impl RootView {
         cx.notify();
     }
 
-    /// Folds a message in to the diff tabs and the source-control panel's
-    /// parts; returns whether nothing else is owed it.
+    /// Folds a message in to the file fetches, the diff tabs and the
+    /// source-control panel's parts; returns whether nothing else is owed
+    /// it.
     fn on_panel_message(
         &mut self,
         msg: &DaemonMessage,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        self.on_diff_message(msg, window, cx)
+        self.on_fetch_message(msg, window, cx)
+            || self.on_diff_message(msg, window, cx)
             || self.on_sc_message(msg, window, cx)
             || self.on_stash_message(msg, window, cx)
             || self.apply_history(msg, cx)

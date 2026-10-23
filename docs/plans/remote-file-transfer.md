@@ -8,9 +8,9 @@ Prior art: herdr-gpui's SSH remote file links, which fetch, watch and upload sav
 
 ## Status
 
-Blocked on native-client Phase 6 (connection picker, pinned-TLS tunnel; see [native-client.md](./native-client.md)): the native client can't connect remotely until then.
+The native client's remote mode has landed; only the host picker (RT-152) and production device-token wiring remain before it can connect to a real host.
 
-The daemon and protocol half (FT.1) has landed.
+The daemon and protocol half (FT.1) and the native download sink (FT.2) have landed; no UI trigger calls the sink yet.
 
 ## Rulings
 
@@ -43,6 +43,6 @@ The daemon and protocol half (FT.1) has landed.
 ## Items
 
 - [x] **FT.1 Daemon + protocol:** the `FetchFile` / `CancelFetch` messages, the path-confinement helper, and chunked streaming with backpressure. Tests cover: a `..` escape, an absolute path outside the root, a symlink escape (skipped when the OS denies symlink creation), a directory, a missing file, an empty file, a file larger than one chunk that reassembles byte-exact, and cancel mid-stream.
-- [ ] **FT.2 Native download sink:** the per-host download folder, `.part` writes and rename, and the open hand-off with the `:line` rule. `FileFetchStarted.resolved_path` is the daemon's canonical path, so on Windows it starts with `\\?\`; strip that before showing it. Needs Phase 6.
+- [x] **FT.2 Native download sink:** the per-host download folder, `.part` writes and rename, and the open hand-off with the `:line` rule. `FileFetchStarted.resolved_path` is the daemon's canonical path, so on Windows it starts with `\\?\`; strip that before showing it. Needs Phase 6. Landed.
 - [ ] **FT.3 Link-click trigger:** in remote mode, clicking a terminal path link sends `FetchFile` with candidate readings, and the saved file opens on the remote client. Needs FT.2; uses whatever gesture opens a link locally (a plain click once the "links underlined, plain click" item lands).
 - [ ] **FT.4 "Fetch file…" popup:** the path input scoped to the focused session's repo or worktree, with progress, cancel, and inline errors. Needs FT.2.

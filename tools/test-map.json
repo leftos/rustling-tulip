@@ -35,7 +35,7 @@
       "paths": [
         "apps/native/src/target.rs"
       ],
-      "filter": "(binary_id(rustling-tulip-native) & test(/^(connection|footer|net|remote_mode|target)::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_quit|ui_remote)::/))"
+      "filter": "(binary_id(rustling-tulip-native) & test(/^(connection|file_fetch|footer|net|remote_mode|target)::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_file_fetch|ui_quit|ui_remote)::/))"
     },
     {
       "paths": [
@@ -202,6 +202,24 @@
     },
     {
       "paths": [
+        "apps/native/src/file_fetch.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & test(/^file_fetch::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_file_fetch)::/))"
+    },
+    {
+      "paths": [
+        "apps/native/src/file_fetch_view.rs"
+      ],
+      "filter": "binary_id(rustling-tulip-native::ui) & test(/^(ui_file_fetch|ui_links|ui_remote)::/)"
+    },
+    {
+      "paths": [
+        "apps/native/tests/ui/ui_file_fetch.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native::ui) & test(/^(ui_file_fetch)::/))"
+    },
+    {
+      "paths": [
         "apps/native/src/folder_picker.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native) & test(/^folder_picker::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_preset_wizard|ui_repos|ui_workspace_creator)::/))"
@@ -324,7 +342,7 @@
       "paths": [
         "apps/native/src/open_view.rs"
       ],
-      "filter": "(binary_id(rustling-tulip-native) & test(/^open_view::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_container_menu|ui_keys|ui_links|ui_remote)::/))"
+      "filter": "(binary_id(rustling-tulip-native) & test(/^open_view::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_container_menu|ui_file_fetch|ui_keys|ui_links|ui_remote)::/))"
     },
     {
       "paths": [

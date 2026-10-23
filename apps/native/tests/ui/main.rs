@@ -23,6 +23,7 @@ mod ui_delete_worktree;
 mod ui_diff_tab;
 mod ui_diff_view;
 mod ui_ellipsis;
+mod ui_file_fetch;
 mod ui_font_size;
 mod ui_history;
 mod ui_keys;

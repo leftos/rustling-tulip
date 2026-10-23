@@ -29,6 +29,30 @@ pub(crate) enum Then {
     SayVsCodeMissing,
 }
 
+/// Where an open came from, which decides the route it and its follow-ups
+/// (the run confirm, the VS Code-missing fallback) take.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Origin {
+    /// A link, a menu or a button: refused on a remote host unless a URL.
+    Link,
+    /// A file fetched from the remote host onto this PC.
+    Fetched,
+}
+
+/// How an open goes: what follows it and where it came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Route {
+    pub(crate) then: Then,
+    pub(crate) origin: Origin,
+}
+
+impl Route {
+    const LINK: Self = Self {
+        then: Then::Nothing,
+        origin: Origin::Link,
+    };
+}
+
 impl RootView {
     /// The run confirm's title and detail while it is open.
     #[must_use]
@@ -132,7 +156,7 @@ impl RootView {
                 self.dispatch_open(job, Then::Nothing, window, cx);
             }
             Resolution::Open(OpenAction::DefaultApp(path)) => {
-                self.open_in_default_app(path, Then::Nothing, window, cx);
+                self.open_in_default_app(path, Route::LINK, window, cx);
             }
             Resolution::NotFound(err) => {
                 tracing::warn!("no file found for terminal link {first}: {err}");
@@ -169,7 +193,7 @@ impl RootView {
     fn open_in_default_app(
         &mut self,
         path: PathBuf,
-        then: Then,
+        route: Route,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -177,13 +201,35 @@ impl RootView {
             path,
             confirmed: false,
         };
-        self.dispatch_open(job, then, window, cx);
+        self.open_by(job, route, window, cx);
+    }
+
+    /// Opens `job` by the route its origin takes: a link's through the
+    /// remote host's refusal, a fetched file's through the check that it
+    /// is one.
+    fn open_by(&mut self, job: OpenJob, route: Route, window: &mut Window, cx: &mut Context<Self>) {
+        match route.origin {
+            Origin::Link => self.dispatch_open(job, route.then, window, cx),
+            Origin::Fetched => self.open_fetched_job(job, route.then, window, cx),
+        }
     }
 
     /// A background check found that the link's file `path` runs code:
     /// opens the run confirm for it, unless the confirm or another dialog is
     /// already up, when the request is dropped and a toast says why.
     pub fn ask_to_run(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.ask_to_run_from(path, Origin::Link, window, cx);
+    }
+
+    /// [`Self::ask_to_run`] for an open from `origin`, which the confirm's
+    /// answer keeps.
+    fn ask_to_run_from(
+        &mut self,
+        path: PathBuf,
+        origin: Origin,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.run_confirm.is_some() || self.modal_open() {
             tracing::info!(
                 path = %path.display(),
@@ -199,6 +245,7 @@ impl RootView {
         }
         tracing::info!(path = %path.display(), "terminal link runs code; asking first");
         self.run_confirm = Some(RunConfirm::new(path));
+        self.run_confirm_origin = origin;
         self.run_focus.focus(window);
         cx.notify();
     }
@@ -240,6 +287,23 @@ impl RootView {
             );
             return;
         }
+        let route = Route {
+            then,
+            origin: Origin::Link,
+        };
+        self.run_open(job, route, window, cx);
+    }
+
+    /// Hands `job` to the opener on a background thread and reports how it
+    /// went, with no check of where the connection is; its follow-ups keep
+    /// `route`'s origin.
+    pub(crate) fn run_open(
+        &mut self,
+        job: OpenJob,
+        route: Route,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let opener = Arc::clone(&self.opener);
         let run = {
             let job = job.clone();
@@ -250,7 +314,7 @@ impl RootView {
             let result = run.await;
             // Fails only when the view is gone, leaving nowhere to report.
             this.update_in(cx, |root, window, cx| {
-                root.after_open(job, then, result, window, cx);
+                root.after_open(job, route, result, window, cx);
             })
             .ok();
         })
@@ -260,15 +324,21 @@ impl RootView {
     fn after_open(
         &mut self,
         job: OpenJob,
-        then: Then,
+        route: Route,
         result: Result<JobOutcome, OpenFailure>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let fallback = Route {
+            then: Then::SayVsCodeMissing,
+            origin: route.origin,
+        };
         match (result, job) {
-            (Ok(JobOutcome::AskFirst(path)), _) => self.ask_to_run(path, window, cx),
+            (Ok(JobOutcome::AskFirst(path)), _) => {
+                self.ask_to_run_from(path, route.origin, window, cx);
+            }
             (Ok(JobOutcome::Opened), OpenJob::DefaultApp { path, .. })
-                if then == Then::SayVsCodeMissing =>
+                if route.then == Then::SayVsCodeMissing =>
             {
                 self.push_toast_spec(
                     ToastSpec {
@@ -285,19 +355,19 @@ impl RootView {
             (Ok(JobOutcome::Opened), _) => {}
             (Err(OpenFailure::VsCodeNotFound), OpenJob::VsCode { path, .. }) => {
                 tracing::warn!(path = %path.display(), "VS Code not found; opening the file in its default app");
-                self.open_in_default_app(path, Then::SayVsCodeMissing, window, cx);
+                self.open_in_default_app(path, fallback, window, cx);
             }
             (Err(OpenFailure::VsCodeNotFound), OpenJob::VsCodeFolder(paths)) => {
                 if let Some(path) = paths.first() {
                     tracing::warn!(path = %path.display(), "VS Code not found; opening the folder in the file manager");
-                    self.open_in_default_app(path.clone(), Then::SayVsCodeMissing, window, cx);
+                    self.open_in_default_app(path.clone(), fallback, window, cx);
                 } else {
                     tracing::warn!("VS Code not found and the job names no folder");
                 }
             }
             (Err(OpenFailure::VsCodeNotFound), OpenJob::VsCodeWorkspace(path)) => {
                 tracing::warn!(path = %path.display(), "VS Code not found; opening the workspace file in its default app");
-                self.open_in_default_app(path, Then::SayVsCodeMissing, window, cx);
+                self.open_in_default_app(path, fallback, window, cx);
             }
             (Err(OpenFailure::VsCodeNotFound), job) => {
                 tracing::warn!(?job, "VS Code not found for a job that does not use it");
@@ -315,17 +385,19 @@ impl RootView {
         };
         let path = confirm.path().to_path_buf();
         tracing::info!(?button, path = %path.display(), "run confirm answered");
+        let route = Route {
+            then: Then::Nothing,
+            origin: self.run_confirm_origin,
+        };
         match button {
             RunButton::Cancel => {}
-            RunButton::Reveal => {
-                self.dispatch_open(OpenJob::Reveal(path), Then::Nothing, window, cx);
-            }
+            RunButton::Reveal => self.open_by(OpenJob::Reveal(path), route, window, cx),
             RunButton::Run => {
                 let job = OpenJob::DefaultApp {
                     path,
                     confirmed: true,
                 };
-                self.dispatch_open(job, Then::Nothing, window, cx);
+                self.open_by(job, route, window, cx);
             }
         }
         self.after_notice_closed(window, cx);
