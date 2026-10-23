@@ -8,7 +8,7 @@ A reboot kills every `rt-tracer.exe` and the daemon with them. On the next start
 
 ## Rulings
 
-- Ruling (user, 2026-09-28): prompt on start ("Resume all", "Choose…", "Dismiss"); a dismissed prompt leaves the sessions in Recover. Never resume without asking.
+- Ruling (user, 2026-10-23, replacing the 2026-09-28 "prompt on start, never resume without asking"): sessions a reboot killed resume automatically on the next start, with no prompt; sessions should resume as much as possible. A session that cannot be resumed on its own (no conversation found, or known only by its folder) stays in Recover. The prompt design below (`ResumeOffer`, `AnswerResumeOffer`, RB.5 and RB.6's prompt UI, Q3 and the "Resume all" / "Choose…" / "Dismiss" buttons) predates this ruling and needs a design pass before its steps are briefed.
 - How to tell a reboot from a user Stop: the sessions whose tracers were lost with no end recorded.
 
 ## Design
