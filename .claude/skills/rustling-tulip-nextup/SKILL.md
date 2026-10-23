@@ -31,6 +31,7 @@ The goal is each release as soon as possible, through Release 2; this overrides 
 
 - **Per item:** the implementer's gates are `cargo fmt --all --check`, `cargo clippy` on the touched crates, and the item's own new or changed tests by name. No reached tests, no full suite, no load-burn, no `--slot critical`.
 - **Review:** one `code-review` pass per item. Only real bugs in the item's own change go back (one fix round); every other finding (hardening, style, coverage, behaviour not asked for) is dropped, not booked. Nits ride the next change touching their file.
+- **Releases:** once a milestone set with the owner is complete (every item of `vHotfix`, or of `vNext`, Done), the orchestrator cuts and publishes its release by `docs/release.md` without asking. The installer's hand test (sign-out, uninstall) stays the owner's, listed in the checkpoint.
 - **Full suite:** only at milestones: the end of a Release 1 milestone (or a wave), a push, a feature-branch merge and the release step. A red milestone run becomes the next item.
 - **Commits:** prek runs only hygiene and `cargo fmt --check` at commit; clippy runs at pre-push, so a commit is cheap and items commit often.
 - **Mocks:** only for a big visual choice (a new view or layout). Small looks are decided by the orchestrator from the existing palette and shown as a `native-shot` at landing.
