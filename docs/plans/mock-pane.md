@@ -40,3 +40,17 @@ Answer: yes. The whole loop works live on Windows with a real Claude Code sessio
 ## Recommendation
 
 Build it for real on the owned-popup route, as its own outcome: the daemon replays the last page per session on connect, the panel hides under toasts, Close and session removal tear it down, every Claude spawn path gets the tool, and `cargo deny` passes with `wry`. Then two-way picks through wry's IPC handler as the next step, since choosing between mock lanes is what the user does with them.
+
+## Rulings after the spike
+
+- **HTML is the medium; no drawing tools.** Claude draws by writing one HTML/CSS/SVG/canvas page per `show_mock` call. A set of drawing primitives (`draw_rect`, `draw_text`, …) would be a weaker SVG: a round trip per shape, no layout engine, no fonts or CSS, no interaction. A mock that must match the GPUI client pixel for pixel is a `.\rt.ps1 native-shot` of the real client, not a panel page.
+- **Pages load from an app scheme, not `file://`.** The spike loads `sessions/<id>/mock.html` as a `file://` URL (`apps/native/src/mock_view.rs`, `file_url`). Chromium refuses ES-module imports and `fetch` from `file://` pages, which three.js and most current libraries need. The panel serves the page, its folder and the bundled libraries over a wry custom protocol (or WebView2's virtual-host folder mapping) instead. Which of the two to use is open.
+
+## Follow-ups
+
+Each is a sub-issue of RT-318, after the base build above.
+
+- [ ] RT-355 **Bundled libraries.** The app ships a small pinned set of libraries and serves them to mock pages from the app scheme (for example `rt-lib://three/<version>/three.module.js`): three.js for 3D, one chart library (d3 or a smaller one) for data, and rough.js for sketch-style wireframes. The tool description lists each by name and URL, and replaces "no external files" with "no network; use the bundled libraries". The panel blocks network requests, so a page cannot pull a CDN copy. Confirm WebGL renders in the owned popup first; the spike did not try it.
+- [ ] RT-356 **`show_mock` from a path.** The tool also takes `path` in place of `html`: a page already on disk (the `.tmp/mocks/<name>/index.html` review copies the global mock workflow writes), shown with its relative images, clips and models. Paths are limited to the session's working folders (its worktrees and `--add-dir` folders); anything else is refused with the reason. A reload on a later call re-reads the file, so Claude can edit the page and call again.
+- [ ] RT-357 **`mock_screenshot`.** A second tool returns a PNG of the panel's rendered page, so Claude checks its own output (a blank canvas, a broken layout, overflow) before the user looks, as `render-svg` and `native-shot` let it today. WebView2's `ICoreWebView2::CapturePreview` captures the page; whether wry 0.57 exposes the `ICoreWebView2` it holds is unchecked. The capture travels client → daemon → MCP server, so it needs a request/reply path the spike's one-way `MockShown` does not have; the two-way picks work needs the same path, so the two share it.
+- [ ] RT-358 **Two-way picks.** The page posts a pick or note through wry's IPC handler; the client sends it to the daemon, and Claude reads it (a tool result, or a message typed into the session). Booked from the recommendation above.
