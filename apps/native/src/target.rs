@@ -55,7 +55,87 @@ impl TailnetHost {
     }
 }
 
+/// Why a typed host name was refused: its `Display` is the message the
+/// picker shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostNameError {
+    /// Nothing was typed, or only a dot.
+    Empty,
+    /// A single label: the listener's certificate is for the full
+    /// `MagicDNS` name.
+    BareLabel,
+    /// A `:` asked for a port.
+    Port,
+    /// An address literal, in brackets or not.
+    Address,
+    /// Anything else a host name is not.
+    NotAHostName,
+}
+
+impl std::fmt::Display for HostNameError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Empty => "Type a host name.",
+            Self::BareLabel => "Use the full name, for example box.tail1234.ts.net.",
+            Self::Port => "Put the port in the Port field, not in the name.",
+            Self::Address => "Use the host's name, not its address.",
+            Self::NotAHostName => "That is not a host name: use letters, digits, hyphens and dots.",
+        })
+    }
+}
+
+/// Whether every label of `name` is digits: an IPv4 address, not a name.
+fn is_ipv4_literal(name: &str) -> bool {
+    name.split('.')
+        .all(|label| !label.is_empty() && label.bytes().all(|b| b.is_ascii_digit()))
+}
+
 impl Target {
+    /// The tailnet host a user typed: one trailing dot trimmed, then checked
+    /// as an ASCII `MagicDNS` name lower-cased label by label; `port`
+    /// defaults to [`DEFAULT_TAILNET_PORT`].
+    ///
+    /// Surrounding whitespace is not trimmed: a name with whitespace anywhere
+    /// is refused, as is one carrying a userinfo, a path, a query, a
+    /// fragment, a port, a percent escape, an address literal (bracketed, an
+    /// IPv4 literal or bare IPv6) or a single label.
+    pub fn parse_tailnet(name: &str, port: Option<u16>) -> Result<Self, HostNameError> {
+        let name = name.strip_suffix('.').unwrap_or(name);
+        if name.trim().is_empty() {
+            return Err(HostNameError::Empty);
+        }
+        if !name.is_ascii() {
+            return Err(HostNameError::NotAHostName);
+        }
+        let name = name.to_ascii_lowercase();
+        if name.contains('[') || name.contains(']') || is_ipv4_literal(&name) {
+            return Err(HostNameError::Address);
+        }
+        if name.matches(':').count() >= 2 {
+            return Err(HostNameError::Address);
+        }
+        if name.contains(':') {
+            return Err(HostNameError::Port);
+        }
+        let labels: Vec<&str> = name.split('.').collect();
+        let labelled = labels.iter().all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        });
+        if name.len() > 253 || !labelled {
+            return Err(HostNameError::NotAHostName);
+        }
+        if labels.len() < 2 {
+            return Err(HostNameError::BareLabel);
+        }
+        Ok(Self::tailnet(&name, port))
+    }
+
     /// A tailnet host by its `MagicDNS` name, with its trailing dot trimmed and
     /// lower-cased; `port` defaults to [`DEFAULT_TAILNET_PORT`].
     #[must_use]
@@ -98,7 +178,46 @@ impl Target {
 
 #[cfg(test)]
 mod tests {
+    #![expect(
+        clippy::panic,
+        reason = "a name accepted or refused against the spec fails it with what happened"
+    )]
+
     use super::{DEFAULT_TAILNET_PORT, TailnetHost, Target};
+
+    const EMPTY: &str = "Type a host name.";
+    const BARE: &str = "Use the full name, for example box.tail1234.ts.net.";
+    const PORT: &str = "Put the port in the Port field, not in the name.";
+    const ADDRESS: &str = "Use the host's name, not its address.";
+    const GENERIC: &str = "That is not a host name: use letters, digits, hyphens and dots.";
+
+    /// The target `name` was accepted as.
+    fn parsed(name: &str, port: Option<u16>) -> Target {
+        let Ok(target) = Target::parse_tailnet(name, port) else {
+            panic!("{name:?} was refused");
+        };
+        target
+    }
+
+    /// The message `name` was refused with.
+    fn refusal(name: &str) -> String {
+        let Err(err) = Target::parse_tailnet(name, None) else {
+            panic!("{name:?} was accepted");
+        };
+        err.to_string()
+    }
+
+    /// A valid four-label name whose last label is `last` characters: 253
+    /// characters when `last` is 61, one too many when it is 62.
+    fn long_name(last: usize) -> String {
+        format!(
+            "{}.{}.{}.{}",
+            "a".repeat(63),
+            "b".repeat(63),
+            "c".repeat(63),
+            "d".repeat(last)
+        )
+    }
 
     /// The URL a target's tailnet host is dialled at.
     fn url(target: &Target) -> Option<String> {
@@ -145,5 +264,123 @@ mod tests {
             url(&Target::tailnet("box.tail1234.ts.net", None)),
             Some("wss://box.tail1234.ts.net:8787/ws".to_owned())
         );
+    }
+
+    #[test]
+    fn parse_tailnet_accepts_a_magicdns_name() {
+        let target = parsed("box.tail1234.ts.net", None);
+        assert_eq!(target, Target::tailnet("box.tail1234.ts.net", None));
+        assert_eq!(
+            url(&target),
+            Some("wss://box.tail1234.ts.net:8787/ws".to_owned())
+        );
+        assert_eq!(
+            parsed("box.tail1234.ts.net", Some(9443)),
+            Target::tailnet("box.tail1234.ts.net", Some(9443))
+        );
+    }
+
+    #[test]
+    fn parse_tailnet_trims_one_trailing_dot_and_lowercases() {
+        let target = parsed("Box.Tail1234.TS.net.", Some(9443));
+        assert_eq!(
+            target.tailnet_host().map(TailnetHost::name),
+            Some("box.tail1234.ts.net")
+        );
+        assert_eq!(target, Target::tailnet("box.tail1234.ts.net", Some(9443)));
+    }
+
+    #[test]
+    fn parse_tailnet_refuses_userinfo() {
+        assert_eq!(refusal("user@box.tail1234.ts.net"), GENERIC);
+        assert_eq!(refusal("box.tail1234.ts.net@evil.example"), GENERIC);
+        assert_eq!(refusal("user@box"), GENERIC);
+    }
+
+    #[test]
+    fn parse_tailnet_refuses_path_query_and_fragment() {
+        for name in [
+            "box.tail1234.ts.net/ws",
+            "box.tail1234.ts.net?x=1",
+            "box.tail1234.ts.net#frag",
+            "box/ws",
+            "box?x=1",
+            "box#frag",
+        ] {
+            assert_eq!(refusal(name), GENERIC, "{name}");
+        }
+    }
+
+    #[test]
+    fn parse_tailnet_refuses_a_port() {
+        assert_eq!(refusal("box.tail1234.ts.net:8787"), PORT);
+        assert_eq!(refusal("box.tail1234.ts.net:443"), PORT);
+    }
+
+    #[test]
+    fn parse_tailnet_refuses_whitespace_and_percent() {
+        for name in [
+            " box.tail1234.ts.net",
+            "box.tail1234.ts.net ",
+            "box .tail1234.ts.net",
+            "box.tail1234.ts.net%20",
+            "box.tail1234.ts.net%",
+            "box ",
+            "box%20",
+        ] {
+            assert_eq!(refusal(name), GENERIC, "{name:?}");
+        }
+        assert_eq!(refusal("   "), EMPTY, "whitespace alone is nothing typed");
+    }
+
+    #[test]
+    fn parse_tailnet_refuses_non_ascii() {
+        assert_eq!(refusal("\u{212A}ox.tail1234.ts.net"), GENERIC);
+        assert_eq!(refusal("box.tail1234.ts.né"), GENERIC);
+    }
+
+    #[test]
+    fn parse_tailnet_refuses_bare_ipv6_as_an_address() {
+        assert_eq!(refusal("::1"), ADDRESS);
+        assert_eq!(refusal("fe80::1"), ADDRESS);
+        assert_eq!(refusal("2001:db8::1"), ADDRESS);
+    }
+
+    #[test]
+    fn parse_tailnet_refuses_empty_and_empty_labels() {
+        assert_eq!(refusal(""), EMPTY);
+        assert_eq!(refusal("."), EMPTY);
+        assert_eq!(refusal("box..tail1234.ts.net"), GENERIC);
+        assert_eq!(refusal(".box.tail1234.ts.net"), GENERIC);
+    }
+
+    #[test]
+    fn parse_tailnet_refuses_bad_label_edges() {
+        assert_eq!(refusal("-box.tail1234.ts.net"), GENERIC);
+        assert_eq!(refusal("box-.tail1234.ts.net"), GENERIC);
+        assert_eq!(
+            refusal(&format!("{}.tail1234.ts.net", "a".repeat(64))),
+            GENERIC
+        );
+        assert_eq!(refusal(&long_name(62)), GENERIC);
+        assert!(
+            Target::parse_tailnet(&format!("{}.tail1234.ts.net", "a".repeat(63)), None).is_ok()
+        );
+        assert!(Target::parse_tailnet(&long_name(61), None).is_ok());
+    }
+
+    #[test]
+    fn parse_tailnet_refuses_ip_literals() {
+        for name in ["1.2.3.4", "10.0.0.1", "192.168.1.10", "[::1]", "[fe80::1]"] {
+            assert_eq!(refusal(name), ADDRESS, "{name}");
+        }
+    }
+
+    #[test]
+    fn parse_tailnet_refuses_a_bare_label() {
+        assert_eq!(refusal("box"), BARE);
+        assert_eq!(refusal("localhost"), BARE);
+        assert_eq!(refusal("box."), BARE);
+        assert_eq!(refusal("Box"), BARE);
     }
 }
