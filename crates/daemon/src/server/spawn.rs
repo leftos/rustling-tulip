@@ -504,7 +504,8 @@ where
 
 pub(super) fn expected_output_subscribers(mode: SessionMode) -> usize {
     match mode {
-        SessionMode::Interactive | SessionMode::PlainShell => 4,
+        SessionMode::Interactive => 3,
+        SessionMode::PlainShell => 4,
         SessionMode::Headless => 0,
     }
 }
@@ -870,24 +871,20 @@ async fn spawn_interactive_session(
         &pty,
         Some(hub.dirs.clone()),
     );
-    let (in_tx, in_rx) = mpsc::unbounded_channel::<usize>();
     let screen: screen::SharedScreen = Arc::new(Mutex::new(screen::Screen::new(cols, rows)));
     {
         let mut guard = crate::sync::lock(pending.arc());
         guard.scrollback_snapshot_req = Some(snap_tx);
-        guard.input_notifier = Some(in_tx);
         guard.screen = Some(Arc::clone(&screen));
     }
-    screen::watch(screen, session_id.clone(), pty.output.subscribe());
     pty_state::watch(
         &hub.sessions,
         session_id.clone(),
-        pty_state::WatchStreams {
+        pty_state::AgentStreams {
             output: pty.output.subscribe(),
-            input_pulses: in_rx,
+            screen,
         },
         hub.attention_tx.clone(),
-        SessionStatus::Idle,
     );
     osc_title::watch(
         &hub.sessions,

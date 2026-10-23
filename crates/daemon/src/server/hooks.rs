@@ -124,7 +124,7 @@ mod tests {
         hook_request, idle_record, snapshot_of, test_hub, test_hub_with_attention,
     };
     use protocol::{AttentionReason, SessionMode, SessionStatus};
-    use tokio::sync::{broadcast, mpsc};
+    use tokio::sync::broadcast;
     use tower::ServiceExt as _;
     #[tokio::test]
     async fn hook_route_requires_a_bearer_token() {
@@ -310,23 +310,24 @@ mod tests {
     }
 
     /// One `Attention` per entry into `AwaitingInput`, on the real hook path:
-    /// classifier output matching the same prompt raises no second event, and
-    /// an event for a session already waiting raises none.
+    /// the question dialog the screen then shows raises no second event, past
+    /// the hook's hold and a whole confirmation window, and an event for a
+    /// session already waiting raises none.
     #[tokio::test(start_paused = true)]
     async fn hook_awaiting_input_raises_one_attention() {
         let (hub, _scratch, mut attention) = test_hub_with_attention("hook-attention");
         hub.sessions.insert(idle_record("s1"));
         let (output, output_rx) = broadcast::channel(16);
-        let (_input, input_rx) = mpsc::unbounded_channel();
+        let screen: crate::screen::SharedScreen =
+            std::sync::Arc::new(std::sync::Mutex::new(crate::screen::Screen::new(140, 40)));
         pty_state::watch(
             &hub.sessions,
             "s1".to_owned(),
-            pty_state::WatchStreams {
+            pty_state::AgentStreams {
                 output: output_rx,
-                input_pulses: input_rx,
+                screen,
             },
             hub.attention_tx.clone(),
-            SessionStatus::Idle,
         );
         let question = concat!(
             r#"{"hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","#,
@@ -349,11 +350,24 @@ mod tests {
             ),
             "the hook transition raises attention"
         );
-        output
-            .send(b"\x1b[2K\rDo you want to proceed? 1. Yes 2. No ".to_vec())
-            .expect("watcher still subscribed");
-        for _ in 0..8 {
-            tokio::task::yield_now().await;
+        // The `AskUserQuestion` dialog of `screen/fixtures/c31-ask-q1.txt`.
+        let dialog = [
+            "\x1b[H\x1b[2J  Which function should be added to calc.py next?",
+            "",
+            "  ❯ 1. sub",
+            "    2. div",
+            "",
+            "  Enter to select · Tab/Arrow keys to navigate · Esc to cancel",
+        ]
+        .join("\r\n");
+        for _ in 0..2 {
+            output
+                .send(dialog.clone().into_bytes())
+                .expect("watcher still subscribed");
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            for _ in 0..8 {
+                tokio::task::yield_now().await;
+            }
         }
         crate::hook_status::apply_signal(
             &hub,
@@ -364,7 +378,7 @@ mod tests {
         );
         assert!(
             attention.try_recv().is_err(),
-            "classifier output and a repeat event raise no second event"
+            "the dialog on screen and a repeat event raise no second event"
         );
     }
 

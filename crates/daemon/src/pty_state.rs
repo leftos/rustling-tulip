@@ -1,23 +1,31 @@
-//! Heuristic status detection for PTY-driven sessions.
+//! Status detection for PTY-driven sessions.
 //!
-//! Watches the PTY output stream and infers `idle / working / awaiting_input`
-//! by combining:
-//! - regex matches against known Claude Code TUI prompt patterns
-//! - an output-vs-input byte-volume comparison: genuine model/command output
-//!   outpaces keystroke echo and promotes to `working`
-//! - a terminal-title heartbeat: an agent that keeps repainting its title
-//!   (spinner glyph, elapsed-time counter, progress text) is busy even when its
-//!   byte volume dips below the echo budget, so a title change counts as
-//!   activity (see [`crate::osc_title::TitleActivity`])
+//! An interactive agent session's status comes from its hooks and from its
+//! screen. [`watch`] feeds the session's grid and, once output settles, reads
+//! it with [`crate::screen::rules::read_claude`]. What the screen shows is
+//! published behind hysteresis, a hold after any other writer's change, and a
+//! guard that refuses the write once the record has moved since the read. A
+//! quiet screen is never read as idle on its own: a spinner still on screen
+//! keeps a turn `Working` however long the PTY is silent.
+//!
+//! A plain shell ([`watch_plain_shell`]) keeps a heuristic classifier:
+//! - an output-vs-input byte-volume comparison: command output outpaces
+//!   keystroke echo and promotes to `working`
+//! - a terminal-title heartbeat: a title change counts as activity (see
+//!   [`crate::osc_title::TitleActivity`])
 //! - an idle timeout with hysteresis: promotion to `working` happens on the
 //!   first qualifying chunk, but demotion back to `idle` waits for
-//!   [`IDLE_AFTER`] of silence, so a TUI element that repaints once a second
-//!   (elapsed-time counter, slow spinner) holds `working` instead of flapping
+//!   [`IDLE_AFTER`] of silence
+//! - while hooks drive it, a prompt regex over its byte tail decides whether
+//!   a hook-reported `AwaitingInput` is still on screen
 
 use crate::osc_title::TitleActivity;
+use crate::screen::SharedScreen;
+use crate::screen::rules::{self, Reading, ScreenState, Verdict};
 use crate::session::{SessionEvent, SessionRecord, SessionRegistry, push_recent_action};
 use protocol::{AttentionReason, SessionStatus};
 use std::collections::VecDeque;
+use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast;
@@ -25,213 +33,378 @@ use tokio::sync::mpsc;
 use tokio::time::{Instant, sleep_until};
 use tracing::{debug, warn};
 
-/// Silence required before a `Working` / `AwaitingInput` session settles back
-/// to `Idle`. Deliberately asymmetric with promotion (which is immediate): the
-/// slowest thing Claude's TUI repaints while busy is the elapsed-time counter
-/// at 1 Hz, and an 800 ms timeout sat inside that gap, so the dot flickered
-/// blue / grey once a second. 2.5 s clears a 1 Hz cadence with room for
-/// scheduler jitter while still reading as "idle" promptly once the model
-/// really stops.
+/// Silence required before a plain shell's `Working` / `AwaitingInput`
+/// settles back to `Idle`. Deliberately asymmetric with promotion (which is
+/// immediate): a TUI element repainting once a second (an elapsed-time
+/// counter) must hold `working` instead of flapping. 2.5 s clears a 1 Hz
+/// cadence with room for scheduler jitter while still reading as "idle"
+/// promptly once the command really stops.
 const IDLE_AFTER: Duration = Duration::from_millis(2500);
 const SCROLLBACK_BYTES: usize = 8 * 1024;
 
 /// Sliding window used to compare input vs output byte volume. Chosen to be
 /// long enough to smooth out inter-keystroke timing for slow typists, short
-/// enough that the dot reacts to model output within a fraction of a second.
+/// enough that the dot reacts to command output within a fraction of a second.
 const VOLUME_WINDOW: Duration = Duration::from_millis(750);
-
-/// Output bytes per input byte that we still consider "echo / TUI redraw"
-/// rather than model output. One keystroke in Claude's input box can
-/// emit cursor moves, color resets, and a full line redraw — easily a few
-/// hundred bytes. Picked generously so a fast typist never trips Working;
-/// the model's streaming output dwarfs this budget within one window.
-const ECHO_BUDGET_PER_INPUT_BYTE: u64 = 1024;
-
-/// Minimum excess (output above echo budget) before we flip to Working.
-/// Stops a stray cursor-position report or title escape from blipping the
-/// dot blue between keystrokes.
-const MIN_WORKING_EXCESS: u64 = 192;
 
 /// Shells echo commands and prompts, but a real command's output should
 /// outpace that echo quickly. PowerShell's `PSReadLine` drives this — one
 /// keystroke can repaint the current line with syntax-highlighted colors,
 /// emitting cursor-position escapes, color resets, and the redrawn line
-/// (easily 60–200 bytes per char). Keep this looser than the agent TUI
-/// budget for `ls`-class commands but generous enough that typing doesn't
-/// flap the status dot.
+/// (easily 60–200 bytes per char). Keep this loose enough for `ls`-class
+/// commands but generous enough that typing doesn't flap the status dot.
 const SHELL_ECHO_BUDGET_PER_INPUT_BYTE: u64 = 64;
 const SHELL_MIN_WORKING_OUTPUT: u64 = 320;
 const SHELL_MIN_WORKING_EXCESS: u64 = 256;
+
+/// Quiet time after a chunk of output before the agent watcher reads the
+/// screen, so a repaint split across chunks is read whole.
+const CHECK_DEBOUNCE: Duration = Duration::from_millis(40);
+
+/// The longest a check waits behind continuous output: a waiting dialog's
+/// tool marker blinks every frame, which would otherwise defer it forever.
+const CHECK_MAX_WAIT: Duration = Duration::from_millis(150);
+
+/// The least time between two checks that both count toward a gated change.
+const CONFIRM_SPACING: Duration = Duration::from_millis(150);
+
+/// Agreeing checks a gated change needs before it publishes.
+const CONFIRM_CHECKS: u8 = 3;
+
+/// A gated change publishes on its first agreeing check this long after its
+/// first one, however many have counted.
+const CONFIRM_CAP: Duration = Duration::from_millis(700);
+
+/// How long the agent watcher leaves the screen unread after another writer
+/// changes the status or the hook stamp, and after it starts: the grid may
+/// still show the frame from before the change.
+const FOREIGN_WRITE_HOLD: Duration = Duration::from_millis(700);
 
 pub struct AttentionEvent {
     pub session_id: String,
     pub reason: AttentionReason,
 }
 
-/// The PTY streams a status watcher reads: the session's output broadcast and
-/// the byte counts of the user input forwarded to it.
+/// The PTY streams a plain shell's status watcher reads: the session's output
+/// broadcast and the byte counts of the user input forwarded to it.
 pub struct WatchStreams {
     pub output: broadcast::Receiver<Vec<u8>>,
     pub input_pulses: mpsc::UnboundedReceiver<usize>,
 }
 
-/// Spawn a background task that watches the given PTY broadcast for a session
-/// and updates its status.
+/// What an agent session's status watcher reads: the session's output
+/// broadcast, and the grid it feeds that output into and reads the status
+/// from.
+pub struct AgentStreams {
+    pub output: broadcast::Receiver<Vec<u8>>,
+    pub screen: SharedScreen,
+}
+
+/// Spawn a background task that feeds an agent session's grid from its PTY
+/// output and sets the session's status from what the grid shows.
 ///
-/// `attention_tx` receives one event each time the session transitions into
-/// `AwaitingInput` (used by the server to forward `DaemonMessage::Attention`
-/// to clients).
+/// Each chunk is fed into `streams.screen`; a check then reads the screen
+/// [`CHECK_DEBOUNCE`] after the output pauses, or [`CHECK_MAX_WAIT`] into a
+/// burst. Entering `AwaitingInput` from `Idle` or `Working`, and a spinner
+/// promoting `Idle` to `Working`, publish at once. Every other change (leaving
+/// `AwaitingInput`, `Working` to `Idle`) publishes only after
+/// [`CONFIRM_CHECKS`] agreeing checks at least [`CONFIRM_SPACING`] apart, or on
+/// the first agreeing check [`CONFIRM_CAP`] after the window opened, all read
+/// against the same record. A reading taken from the title alone, an overlay,
+/// or a screen no rule matches never writes and breaks any open window.
 ///
-/// `input_pulses` carries the byte count of each user input chunk forwarded
-/// to the PTY. The watcher maintains a sliding window of recent input and
-/// output volume; output that fits inside an "echo budget" proportional to
-/// input volume keeps the session in its current state (typing into claude
-/// echoes back via the PTY but should not flip the dot to Working). Output
-/// that exceeds the budget — i.e. genuine model streaming — promotes to
-/// Working as before.
+/// When another writer (a hook event, the owner's key, an exit) changes the
+/// record's status or hook stamp, the screen is left unread for
+/// [`FOREIGN_WRITE_HOLD`], and so it is when the watcher starts, while a
+/// reattached session's replay lands. The write itself is refused unless the
+/// record still holds the status, hook stamp and hook-driven flag the window
+/// read (see [`apply_screen_status`]).
 ///
-/// A terminal-title change in the output stream also counts as activity, so an
-/// agent whose spinner/elapsed-time title keeps repainting stays Working even
-/// when the redraw is too small to clear the echo budget.
-///
-/// `initial` is the status the session's record already carries: a reattached
-/// session comes back `Idle` or `AwaitingInput`, since
-/// `SessionRegistry::insert_reattached` restores those two and stamps any
-/// other stored status `Idle` at the restart. The watcher has to start there:
-/// seeded `Idle`, a record restored `AwaitingInput` would never arm the idle
-/// timer that reclassifies it, so the restored status would stick until the
-/// agent's next byte.
+/// `attention_tx` receives one event each time the screen moves the session
+/// into `AwaitingInput`.
 pub fn watch(
     registry: &Arc<SessionRegistry>,
     session_id: String,
-    streams: WatchStreams,
+    streams: AgentStreams,
     attention_tx: mpsc::UnboundedSender<AttentionEvent>,
-    initial: SessionStatus,
 ) {
-    let registry = Arc::clone(registry);
-    let WatchStreams {
-        mut output,
-        mut input_pulses,
-    } = streams;
-    let mut wake = RecordWake::new(&registry, &session_id);
-    tokio::spawn(async move {
-        let mut state = State::seed(initial);
-        let mut last_output = Instant::now();
-        // The idle timer fires once per stretch of silence: a hook-reported
-        // `AwaitingInput` whose prompt still matches holds without rearming,
-        // and the next output or hook-reported status starts a new stretch.
-        let mut idle_checked = false;
-        let mut scrollback: Vec<u8> = Vec::with_capacity(SCROLLBACK_BYTES);
-        let mut in_window: VecDeque<(Instant, u32)> = VecDeque::new();
-        let mut out_window: VecDeque<(Instant, u32)> = VecDeque::new();
-        let mut title_activity = TitleActivity::new();
+    let AgentStreams { mut output, screen } = streams;
+    let wake = RecordWake::new(registry, &session_id);
+    let mut watcher = AgentWatcher {
+        registry: Arc::clone(registry),
+        session_id,
+        screen,
+        attention_tx,
+        wake,
+        confirm: Confirm::new(Instant::now()),
+    };
+    tokio::spawn(async move { watcher.run(&mut output).await });
+}
 
+/// One agent session's status watcher: its inputs, and the state of the
+/// check it has scheduled and the change it is confirming.
+struct AgentWatcher {
+    registry: Arc<SessionRegistry>,
+    session_id: String,
+    screen: SharedScreen,
+    attention_tx: mpsc::UnboundedSender<AttentionEvent>,
+    wake: RecordWake,
+    confirm: Confirm,
+}
+
+/// When the next check runs, and the gated change it is confirming.
+struct Confirm {
+    window: Option<Window>,
+    /// The debounced check scheduled by output; `None` when none is pending.
+    check_at: Option<Instant>,
+    /// The first chunk since the last check, which bounds the debounce.
+    burst_from: Option<Instant>,
+    /// Checks before this instant are skipped.
+    hold_until: Instant,
+}
+
+/// A gated change being confirmed: the status it would publish, the record
+/// it was read against, and its agreeing checks so far.
+struct Window {
+    target: SessionStatus,
+    from: StatusRead,
+    agreeing: u8,
+    opened: Instant,
+    /// When the last check that counted ran.
+    counted: Instant,
+}
+
+impl Confirm {
+    fn new(start: Instant) -> Self {
+        Self {
+            window: None,
+            check_at: None,
+            burst_from: None,
+            hold_until: start + FOREIGN_WRITE_HOLD,
+        }
+    }
+
+    /// Schedule the check a chunk of output asks for; answers whether it is
+    /// already due, which happens once a burst has run past
+    /// [`CHECK_MAX_WAIT`].
+    fn schedule(&mut self, now: Instant) -> bool {
+        let burst_from = *self.burst_from.get_or_insert(now);
+        let at = (now + CHECK_DEBOUNCE).min(burst_from + CHECK_MAX_WAIT);
+        self.check_at = Some(at);
+        at <= now
+    }
+
+    /// The next check due: the debounced one, or the window's next
+    /// confirmation, whichever comes first.
+    fn next_check(&self) -> Option<Instant> {
+        let confirm = self
+            .window
+            .as_ref()
+            .map(|window| window.counted + CONFIRM_SPACING);
+        match (self.check_at, confirm) {
+            (Some(at), Some(confirm)) => Some(at.min(confirm)),
+            (at, confirm) => at.or(confirm),
+        }
+    }
+
+    /// Drop the window and leave the screen unread for
+    /// [`FOREIGN_WRITE_HOLD`] from `now`.
+    fn hold(&mut self, now: Instant) {
+        self.window = None;
+        self.hold_until = now + FOREIGN_WRITE_HOLD;
+    }
+
+    /// Count one check that reads `target` against `read`; answers whether
+    /// the gated change publishes now. A check that disagrees with the open
+    /// window, or reads a record that moved, opens a new one.
+    fn agree(&mut self, read: StatusRead, target: SessionStatus, now: Instant) -> bool {
+        let due = match self.window.as_mut() {
+            Some(window) if window.target == target && window.from == read => {
+                if now >= window.counted + CONFIRM_SPACING {
+                    window.agreeing += 1;
+                    window.counted = now;
+                }
+                window.agreeing >= CONFIRM_CHECKS || now >= window.opened + CONFIRM_CAP
+            }
+            _ => {
+                self.window = Some(Window {
+                    target,
+                    from: read,
+                    agreeing: 1,
+                    opened: now,
+                    counted: now,
+                });
+                false
+            }
+        };
+        if due {
+            self.window = None;
+        }
+        due
+    }
+}
+
+impl AgentWatcher {
+    async fn run(&mut self, output: &mut broadcast::Receiver<Vec<u8>>) {
         loop {
-            let next_idle_check = last_output + IDLE_AFTER;
-            // In arm order: a pending hook status re-arms the deadline before
-            // a stale deadline can fire.
+            let next_check = self.confirm.next_check();
+            // In arm order: output is fed before a due check reads the grid,
+            // and a check already due runs inline, since this biased select
+            // would otherwise starve the timer arm under continuous output.
             tokio::select! {
                 biased;
                 msg = output.recv() => match msg {
                     Ok(bytes) => {
+                        crate::sync::lock(&self.screen).feed(&bytes);
                         let now = Instant::now();
-                        last_output = now;
-                        idle_checked = false;
-                        // Drain any input pulses that landed in our channel before
-                        // (or alongside) this output chunk so the echo budget is
-                        // computed against the right input volume. Without this,
-                        // tokio::select polling can resolve the output arm before
-                        // the input arm for a near-simultaneous keystroke, leaving
-                        // in_sum at zero when we classify a TUI redraw caused by
-                        // that keystroke.
-                        while let Ok(n) = input_pulses.try_recv() {
-                            push_window(&mut in_window, now, n);
-                        }
-                        append_scrollback(&mut scrollback, &bytes);
-                        push_window(&mut out_window, now, bytes.len());
-                        trim_window(&mut in_window, now);
-                        trim_window(&mut out_window, now);
-
-                        let in_sum = window_sum(&in_window);
-                        let out_sum = window_sum(&out_window);
-                        let budget = in_sum.saturating_mul(ECHO_BUDGET_PER_INPUT_BYTE);
-                        let exceeds_echo = out_sum > budget.saturating_add(MIN_WORKING_EXCESS);
-                        // A repainted terminal title (spinner / elapsed time) is
-                        // activity in its own right, even when the redraw is too
-                        // small to clear the echo budget.
-                        let title_changed = title_activity.feed(&bytes);
-                        let active = exceeds_echo || title_changed;
-
-                        debug!(
-                            session_id = %session_id,
-                            in_sum,
-                            out_sum,
-                            budget,
-                            exceeds_echo,
-                            title_changed,
-                            current = ?state,
-                            "pty_state volume tick"
-                        );
-
-                        let read = record_status(&registry, &session_id);
-                        if read.is_some_and(|read| read.hook_driven) {
-                            // Hooks own every promotion while they are live.
-                            // The windows and the title activity above keep
-                            // feeding the two demotions the idle timer runs.
-                            debug!(
-                                session_id = %session_id,
-                                "hook-driven: classifier output ignored"
-                            );
-                        } else if let Some(read) = read {
-                            let new_state = classify(&scrollback, state, active);
-                            on_transition(
-                                &registry,
-                                &session_id,
-                                &mut state,
-                                new_state,
-                                read,
-                                &attention_tx,
-                            );
+                        if self.confirm.schedule(now) && self.check(now).is_break() {
+                            return;
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
-                        warn!(session_id = %session_id, lagged = n, "pty state lagged");
+                        warn!(session_id = %self.session_id, lagged = n, "pty state lagged");
+                        crate::sync::lock(&self.screen).reset_parser();
+                        self.confirm.window = None;
                     }
-                    Err(broadcast::error::RecvError::Closed) => break,
+                    Err(broadcast::error::RecvError::Closed) => return,
                 },
-                pulse = input_pulses.recv() => {
-                    // `None` means the sender was dropped because the session
-                    // is going away; the output stream's `Closed` arm will end
-                    // this task shortly, so we just keep looping in the meantime.
-                    if let Some(n) = pulse {
-                        let now = Instant::now();
-                        push_window(&mut in_window, now, n);
-                        trim_window(&mut in_window, now);
-                        // Input alone never flips state. The next output chunk
-                        // will reclassify with this volume in scope.
+                event = self.wake.events.recv(), if self.wake.open => {
+                    if self.wake.changed(&self.registry, &self.session_id, event) {
+                        self.confirm.hold(Instant::now());
                     }
                 },
-                event = wake.events.recv(), if wake.open => {
-                    if wake.changed(&registry, &session_id, event) {
-                        last_output = Instant::now();
-                        idle_checked = false;
-                    }
-                },
-                () = sleep_until(next_idle_check),
-                    if !idle_checked && agent_idle_due(&registry, &session_id) => {
-                    // A hook status on the record whose broadcast is still on
-                    // its way starts a new stretch instead of meeting the old
-                    // deadline.
-                    if wake.reread(&registry, &session_id) {
-                        last_output = Instant::now();
-                    } else {
-                        idle_checked = true;
-                        on_idle(&registry, &session_id, &scrollback, &mut state, &attention_tx);
+                () = sleep_until(next_check.unwrap_or_else(Instant::now)), if next_check.is_some() => {
+                    if self.check(Instant::now()).is_break() {
+                        return;
                     }
                 }
             }
         }
+    }
+
+    /// Read the record, then the screen, and publish what the screen shows
+    /// when the rules allow it. Breaks once the record is gone.
+    fn check(&mut self, now: Instant) -> ControlFlow<()> {
+        self.confirm.check_at = None;
+        self.confirm.burst_from = None;
+        if now < self.confirm.hold_until {
+            return ControlFlow::Continue(());
+        }
+        let Some(read) = record_status(&self.registry, &self.session_id) else {
+            return ControlFlow::Break(());
+        };
+        if self.wake.note(read) {
+            // Another writer changed the record and its broadcast has not
+            // arrived yet: the grid predates that change too.
+            self.confirm.hold(now);
+            return ControlFlow::Continue(());
+        }
+        if matches!(read.status, SessionStatus::Stopped | SessionStatus::Error) {
+            self.confirm.window = None;
+            return ControlFlow::Continue(());
+        }
+        // The record lock is released; take the grid's alone.
+        let reading = {
+            let screen = crate::sync::lock(&self.screen);
+            rules::read_claude(&screen)
+        };
+        debug!(
+            session_id = %self.session_id,
+            rule = ?reading.rule,
+            verdict = ?reading.verdict,
+            from_title = reading.from_title,
+            status = ?read.status,
+            "pty_state screen check"
+        );
+        let Some(target) = screen_target(reading).filter(|&target| target != read.status) else {
+            self.confirm.window = None;
+            return ControlFlow::Continue(());
+        };
+        if publishes_at_once(read.status, target) {
+            self.confirm.window = None;
+            self.publish(read, target);
+        } else if self.confirm.agree(read, target, now) {
+            self.publish(read, target);
+        }
+        ControlFlow::Continue(())
+    }
+
+    /// Write `next` over `from`; a write that lands is this watcher's own, so
+    /// its broadcast starts no hold.
+    fn publish(&mut self, from: StatusRead, next: SessionStatus) {
+        if apply_screen_status(
+            &self.registry,
+            &self.session_id,
+            from,
+            next,
+            &self.attention_tx,
+        ) {
+            self.wake.seen = Some((next, from.last_hook_time));
+        }
+    }
+}
+
+/// The status a screen reading asks for, or `None` when it asks for none: an
+/// overlay, an unmatched screen, or a state read from the title alone, which
+/// never writes.
+fn screen_target(reading: Reading) -> Option<SessionStatus> {
+    match reading.verdict {
+        Verdict::State(_) if reading.from_title => None,
+        Verdict::State(ScreenState::Working) => Some(SessionStatus::Working),
+        Verdict::State(ScreenState::AwaitingInput) => Some(SessionStatus::AwaitingInput),
+        Verdict::State(ScreenState::Idle) => Some(SessionStatus::Idle),
+        Verdict::Keep | Verdict::NoMatch => None,
+    }
+}
+
+/// Whether the screen's change from `from` to `to` publishes on one check:
+/// a spinner promoting `Idle`, and a dialog raising `AwaitingInput`. Every
+/// other change waits for its window.
+fn publishes_at_once(from: SessionStatus, to: SessionStatus) -> bool {
+    matches!(
+        (from, to),
+        (SessionStatus::Idle, SessionStatus::Working)
+            | (
+                SessionStatus::Idle | SessionStatus::Working,
+                SessionStatus::AwaitingInput
+            )
+    )
+}
+
+/// Write the status the screen shows, refused unless the record still holds
+/// the status, hook stamp and hook-driven flag of `from` and is not stopped
+/// or failed; answers whether it wrote.
+///
+/// A hook event, the owner's key or an exit that landed after `from` was read
+/// wins. A refused write neither broadcasts nor touches the sidecar. A write
+/// that lands goes through [`apply_watcher_status`], so it clears
+/// `background` and, leaving `AwaitingInput`, the pending prompt; it never
+/// writes `hook_driven` or the hook stamp. On entry to `AwaitingInput` the
+/// one [`AttentionEvent`] is sent after the registry update returns.
+fn apply_screen_status(
+    registry: &Arc<SessionRegistry>,
+    session_id: &str,
+    from: StatusRead,
+    next: SessionStatus,
+    attention_tx: &mpsc::UnboundedSender<AttentionEvent>,
+) -> bool {
+    let mut wrote = false;
+    let mut entered_awaiting = false;
+    registry.update_if_changed(session_id, |rec| {
+        let moved = rec.status != from.status
+            || rec.last_hook_time != from.last_hook_time
+            || rec.hook_driven != from.hook_driven;
+        if moved || matches!(rec.status, SessionStatus::Stopped | SessionStatus::Error) {
+            return false;
+        }
+        entered_awaiting = apply_watcher_status(rec, next);
+        wrote = rec.status == next;
+        wrote
     });
+    if entered_awaiting {
+        announce_awaiting_input(session_id, attention_tx);
+    }
+    wrote
 }
 
 /// Spawn a background task that infers `idle / working` for a plain shell.
@@ -279,10 +452,11 @@ pub fn watch_plain_shell(
                         let now = Instant::now();
                         last_output = now;
                         idle_checked = false;
-                        // See watcher in `watch` for the rationale — drain
-                        // pending input pulses before classifying so a fast
-                        // typist's keystroke doesn't race ahead of its own
-                        // echo into the Working state.
+                        // Drain any input pulses that landed in our channel
+                        // before (or alongside) this output chunk so the echo
+                        // budget is computed against the right input volume:
+                        // a fast typist's keystroke must not race ahead of its
+                        // own echo into the Working state.
                         while let Ok(n) = input_pulses.try_recv() {
                             push_window(&mut in_window, now, n);
                         }
@@ -344,7 +518,9 @@ pub fn watch_plain_shell(
                 },
                 () = sleep_until(next_idle_check),
                     if !idle_checked && plain_shell_idle_due(&registry, &session_id, state) => {
-                    // See `watch`: a change not yet broadcast restarts the stretch.
+                    // A hook status on the record whose broadcast is still on
+                    // its way starts a new stretch instead of meeting the old
+                    // deadline.
                     if wake.reread(&registry, &session_id) {
                         last_output = Instant::now();
                     } else {
@@ -429,31 +605,14 @@ fn shell_output_is_working(input_bytes: u64, output_bytes: u64) -> bool {
     output_bytes >= SHELL_MIN_WORKING_OUTPUT && output_bytes > budget
 }
 
+/// A plain shell classifier's own view of its status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
     Idle,
     Working,
-    AwaitingInput,
 }
 
 impl State {
-    /// The agent watcher's starting point for a record already carrying
-    /// `status`. Only `AwaitingInput` and `Working` are states the watcher
-    /// acts on: after [`IDLE_AFTER`] of silence it reclassifies both against
-    /// the scrollback, so `AwaitingInput` holds while the prompt is on screen
-    /// and anything else settles to `Idle`. Every other stored status starts
-    /// at `Idle`.
-    fn seed(status: SessionStatus) -> Self {
-        match status {
-            SessionStatus::AwaitingInput => Self::AwaitingInput,
-            SessionStatus::Working => Self::Working,
-            SessionStatus::Spawning
-            | SessionStatus::Idle
-            | SessionStatus::Stopped
-            | SessionStatus::Error => Self::Idle,
-        }
-    }
-
     /// The plain-shell watcher's starting point for a record already carrying
     /// `status`. The shell classifier only moves between `Idle` and `Working`,
     /// so every other stored status starts at `Idle`; a hook-reported
@@ -475,7 +634,6 @@ impl From<State> for SessionStatus {
         match s {
             State::Idle => SessionStatus::Idle,
             State::Working => SessionStatus::Working,
-            State::AwaitingInput => SessionStatus::AwaitingInput,
         }
     }
 }
@@ -502,10 +660,10 @@ fn prompt_on_screen(scrollback: &[u8]) -> bool {
     matches_prompt(&recent[tail_start..])
 }
 
-/// The record fields a classifier read before deciding a transition, and the
-/// write re-checks under the record lock: a hook event or a hook-driven change
-/// that landed in between wins over the classifier.
-#[derive(Clone, Copy, Debug)]
+/// The record fields a watcher read before deciding a transition, and the
+/// write re-checks under the record lock: a hook event or another writer's
+/// change that landed in between wins over the watcher.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct StatusRead {
     status: SessionStatus,
     hook_driven: bool,
@@ -524,9 +682,10 @@ fn record_status(registry: &Arc<SessionRegistry>, session_id: &str) -> Option<St
     })
 }
 
-/// The registry's session events, read for one session: a hook event changes
-/// the record's status or hook stamp without any PTY byte, and the watcher has
-/// to restart its idle deadline from that change.
+/// The registry's session events, read for one session: a hook event or
+/// another writer changes the record's status or hook stamp without any PTY
+/// byte, and the watcher has to react to that change (a plain shell restarts
+/// its idle deadline; an agent session holds off reading its screen).
 struct RecordWake {
     events: broadcast::Receiver<SessionEvent>,
     /// False once the registry's event stream has closed.
@@ -584,17 +743,14 @@ impl RecordWake {
         self.seen = mark;
         changed
     }
-}
 
-/// Whether the agent watcher's idle tick is due: the record reports `Working`
-/// or `AwaitingInput`, the two statuses a silence can end.
-fn agent_idle_due(registry: &Arc<SessionRegistry>, session_id: &str) -> bool {
-    record_status(registry, session_id).is_some_and(|read| {
-        matches!(
-            read.status,
-            SessionStatus::Working | SessionStatus::AwaitingInput
-        )
-    })
+    /// [`Self::reread`] over a read the caller has already taken.
+    fn note(&mut self, read: StatusRead) -> bool {
+        let mark = Some((read.status, read.last_hook_time));
+        let changed = mark != self.seen;
+        self.seen = mark;
+        changed
+    }
 }
 
 /// Whether a plain shell's idle tick is due: the classifier's own `Working`,
@@ -609,21 +765,6 @@ fn plain_shell_idle_due(registry: &Arc<SessionRegistry>, session_id: &str, state
         ),
         Some(read) => state == State::Working || read.status == SessionStatus::Working,
         None => state == State::Working,
-    }
-}
-
-fn classify(scrollback: &[u8], current: State, active: bool) -> State {
-    if prompt_on_screen(scrollback) {
-        State::AwaitingInput
-    } else if active {
-        // Genuine output beyond the echo budget, or a terminal-title repaint —
-        // either way the session is doing something.
-        State::Working
-    } else {
-        // No activity this tick — keep current state. When current is already
-        // Working from a prior tick the IDLE_AFTER timer demotes us to Idle
-        // once the PTY actually goes quiet.
-        current
     }
 }
 
@@ -714,62 +855,14 @@ fn strip_ansi(input: &[u8]) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// Run the idle timer's transition once a silence has lasted [`IDLE_AFTER`].
-///
-/// A hook-driven session is demoted without the classifier: `Working` to
-/// `Idle` because silence during hook-reported work means the turn was
-/// interrupted (an Esc interrupt fires no closing hook), and `AwaitingInput`
-/// to `Idle` once its prompt has left the screen, because a prompt dismissed
-/// from another client fires no hook either. An `AwaitingInput` whose prompt
-/// still matches holds. A session without hooks keeps the classifier's own
-/// reclassification.
-fn on_idle(
-    registry: &Arc<SessionRegistry>,
-    session_id: &str,
-    scrollback: &[u8],
-    state: &mut State,
-    attention_tx: &mpsc::UnboundedSender<AttentionEvent>,
-) {
-    match record_status(registry, session_id) {
-        Some(read) if read.hook_driven => {
-            let demote = match read.status {
-                SessionStatus::Working => true,
-                SessionStatus::AwaitingInput => !prompt_on_screen(scrollback),
-                _ => false,
-            };
-            if demote {
-                *state = State::Idle;
-                demote_after_silence(registry, session_id, read.status, read.last_hook_time);
-            }
-        }
-        Some(read) => {
-            let new_state = classify(scrollback, State::Idle, false);
-            on_transition(registry, session_id, state, new_state, read, attention_tx);
-        }
-        None => {}
-    }
-}
-
-/// Demote `session_id` from `expected` to `Idle`, clearing the prompt it was
-/// waiting on.
+/// Demote a plain shell from `expected` to `Idle` after a silence, clearing
+/// the prompt it was waiting on, and clear `hook_driven` so the shell's own
+/// classifier runs again.
 ///
 /// The update checks `expected` and the hook ordering stamp again under the
 /// record lock: a promotion that landed since the caller read the record wins,
 /// and a status that left and returned through a newer hook event (an ABA) is
 /// not demoted at the old deadline.
-fn demote_after_silence(
-    registry: &Arc<SessionRegistry>,
-    session_id: &str,
-    expected: SessionStatus,
-    epoch: Option<u128>,
-) {
-    registry.update(session_id, |rec| {
-        demote_if_unchanged(rec, expected, epoch);
-    });
-}
-
-/// [`demote_after_silence`] for a plain shell, which also clears
-/// `hook_driven` so the shell's own classifier runs again.
 fn demote_plain_shell_after_silence(
     registry: &Arc<SessionRegistry>,
     session_id: &str,
@@ -799,46 +892,6 @@ fn demote_if_unchanged(
         rec.pending_input = None;
     }
     true
-}
-
-/// The status transition path the PTY watcher uses.
-///
-/// Other paths write a status directly on the record — `SendInput`'s
-/// owner-key clear, stop, park and the exit watcher; this is the one that
-/// carries the `"awaiting input"` action and the single [`AttentionEvent`] on
-/// entry.
-///
-/// `read` is the snapshot the classifier decided from. The update re-checks
-/// the hook ordering stamp and the hook-driven flag under the lock, so a hook
-/// event that landed after the classifier's read wins and its status is not
-/// overwritten by the classifier's write. An unchanged status is a no-op. On
-/// entry to `AwaitingInput` the record gains an `"awaiting input"` action and
-/// one [`AttentionEvent`], sent after the registry update returns so a slow
-/// consumer never holds the record lock. The write goes through
-/// [`SessionRegistry::update`], which stamps `status_since` and syncs the
-/// sidecar.
-fn transition(
-    registry: &Arc<SessionRegistry>,
-    session_id: &str,
-    next: SessionStatus,
-    read: StatusRead,
-    attention_tx: &mpsc::UnboundedSender<AttentionEvent>,
-) {
-    // An unchanged status is not a transition: skip the update so nothing is
-    // mirrored to the sidecar or broadcast.
-    if read.status == next {
-        return;
-    }
-    let mut entered_awaiting = false;
-    registry.update(session_id, |rec| {
-        if rec.last_hook_time != read.last_hook_time || rec.hook_driven != read.hook_driven {
-            return;
-        }
-        entered_awaiting = apply_watcher_status(rec, next);
-    });
-    if entered_awaiting {
-        announce_awaiting_input(session_id, attention_tx);
-    }
 }
 
 /// Apply `next` to `record` when it is a real change.
@@ -874,27 +927,6 @@ pub fn announce_awaiting_input(
     });
 }
 
-fn on_transition(
-    registry: &Arc<SessionRegistry>,
-    session_id: &str,
-    current: &mut State,
-    next: State,
-    read: StatusRead,
-    attention_tx: &mpsc::UnboundedSender<AttentionEvent>,
-) {
-    if next == *current {
-        return;
-    }
-    *current = next;
-    transition(
-        registry,
-        session_id,
-        SessionStatus::from(next),
-        read,
-        attention_tx,
-    );
-}
-
 fn on_plain_shell_transition(
     registry: &Arc<SessionRegistry>,
     session_id: &str,
@@ -928,30 +960,7 @@ fn apply_watcher_status(record: &mut SessionRecord, next: SessionStatus) -> bool
 
 #[cfg(test)]
 mod tests {
-    use super::{State, classify, matches_prompt, shell_output_is_working};
-
-    #[test]
-    fn active_signal_promotes_idle_to_working() {
-        // A title heartbeat with no qualifying byte volume still flips Idle to
-        // Working via the `active` argument.
-        assert_eq!(classify(b"", State::Idle, true), State::Working);
-    }
-
-    #[test]
-    fn no_activity_keeps_current_state() {
-        assert_eq!(classify(b"", State::Idle, false), State::Idle);
-        assert_eq!(classify(b"", State::Working, false), State::Working);
-    }
-
-    #[test]
-    fn prompt_match_beats_activity() {
-        // Even while the title is repainting (active == true), a detected
-        // permission prompt must win so the dot reflects AwaitingInput.
-        assert_eq!(
-            classify(b"Do you want to proceed?", State::Working, true),
-            State::AwaitingInput
-        );
-    }
+    use super::{matches_prompt, prompt_on_screen, shell_output_is_working};
 
     #[test]
     fn prompt_tail_starts_on_a_char_boundary() {
@@ -962,7 +971,7 @@ mod tests {
         screen.extend_from_slice("❯".as_bytes());
         screen.resize(4096, b'a');
         assert_eq!(screen.len(), 4096);
-        assert_eq!(classify(&screen, State::Idle, false), State::Idle);
+        assert!(!prompt_on_screen(&screen));
     }
 
     #[test]
@@ -1064,16 +1073,17 @@ mod tests {
 )]
 mod hysteresis_tests {
     use super::{
-        IDLE_AFTER, State, WatchStreams, on_plain_shell_transition, on_transition, record_status,
-        watch, watch_plain_shell,
+        AgentStreams, CHECK_DEBOUNCE, FOREIGN_WRITE_HOLD, IDLE_AFTER, State, WatchStreams,
+        apply_screen_status, on_plain_shell_transition, record_status, watch, watch_plain_shell,
     };
     use crate::paths::Dirs;
+    use crate::screen::{Screen, SharedScreen};
     use crate::session::{SessionRecord, SessionRegistry};
     use chrono::Utc;
     use protocol::{
         Agent, AppearanceOverrides, SessionKind, SessionMetrics, SessionMode, SessionStatus,
     };
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
     use tokio::sync::{broadcast, mpsc};
 
@@ -1143,10 +1153,16 @@ mod hysteresis_tests {
         registry: Arc<SessionRegistry>,
         output: broadcast::Sender<Vec<u8>>,
         input: mpsc::UnboundedSender<usize>,
-        _attention: mpsc::UnboundedReceiver<super::AttentionEvent>,
+        /// Keeps the input channel open when the watcher does not read it.
+        _input: Option<mpsc::UnboundedReceiver<usize>>,
+        attention: mpsc::UnboundedReceiver<super::AttentionEvent>,
     }
 
     const SESSION: &str = "s1";
+
+    /// The grid the harness feeds: wide enough for the fixture rows.
+    const COLS: u16 = 140;
+    const ROWS: u16 = 40;
 
     fn start(tag: &str, plain_shell: bool) -> Harness {
         start_from(tag, plain_shell, SessionStatus::Idle)
@@ -1163,13 +1179,24 @@ mod hysteresis_tests {
     /// Start a watcher over `record` as the session's spawn or reattach left
     /// it.
     fn start_record(tag: &str, plain_shell: bool, record: SessionRecord) -> Harness {
+        start_in(scratch_dirs(tag), plain_shell, record)
+    }
+
+    /// [`start_record`] over a registry in `dirs`, so a test can put a
+    /// sidecar there first. An agent session's record carries the grid its
+    /// watcher feeds.
+    fn start_in(dirs: Dirs, plain_shell: bool, mut record: SessionRecord) -> Harness {
         let initial = record.status;
-        let registry = SessionRegistry::new(scratch_dirs(tag));
+        let screen: SharedScreen = Arc::new(Mutex::new(Screen::new(COLS, ROWS)));
+        if !plain_shell {
+            record.screen = Some(Arc::clone(&screen));
+        }
+        let registry = SessionRegistry::new(dirs);
         registry.insert(record);
         let (output, output_rx) = broadcast::channel(64);
         let (input, input_rx) = mpsc::unbounded_channel();
         let (attention_tx, attention_rx) = mpsc::unbounded_channel();
-        if plain_shell {
+        let unread_input = if plain_shell {
             watch_plain_shell(
                 &registry,
                 SESSION.to_string(),
@@ -1179,23 +1206,25 @@ mod hysteresis_tests {
                 },
                 initial,
             );
+            None
         } else {
             watch(
                 &registry,
                 SESSION.to_string(),
-                WatchStreams {
+                AgentStreams {
                     output: output_rx,
-                    input_pulses: input_rx,
+                    screen,
                 },
                 attention_tx,
-                initial,
             );
-        }
+            Some(input_rx)
+        };
         Harness {
             registry,
             output,
             input,
-            _attention: attention_rx,
+            _input: unread_input,
+            attention: attention_rx,
         }
     }
 
@@ -1233,6 +1262,25 @@ mod hysteresis_tests {
         fn set_record(&self, f: impl FnOnce(&mut SessionRecord)) {
             self.registry.update(SESSION, f);
         }
+
+        /// Send one chunk of PTY output.
+        fn chunk(&self, bytes: Vec<u8>) {
+            self.output.send(bytes).expect("watcher still subscribed");
+        }
+
+        /// How many `Attention` events the watcher raised since the last call.
+        fn attentions(&mut self) -> usize {
+            let mut count = 0;
+            while self.attention.try_recv().is_ok() {
+                count += 1;
+            }
+            count
+        }
+
+        fn background(&self) -> bool {
+            let rec = self.registry.get(SESSION).expect("session registered");
+            rec.lock().expect("record lock").background
+        }
     }
 
     /// Let the spawned watcher task run until it has nothing left to poll,
@@ -1241,6 +1289,182 @@ mod hysteresis_tests {
         for _ in 0..8 {
             tokio::task::yield_now().await;
         }
+    }
+
+    /// Move the paused clock on by `by`, firing every timer due on the way,
+    /// then let the watcher run.
+    async fn advance(by: Duration) {
+        tokio::time::sleep(by).await;
+        settle().await;
+    }
+
+    /// Move the paused clock past the hold the watcher starts with, or the
+    /// one a foreign write began.
+    async fn pass_hold() {
+        settle().await;
+        advance(FOREIGN_WRITE_HOLD + Duration::from_millis(1)).await;
+    }
+
+    fn ms(n: u64) -> Duration {
+        Duration::from_millis(n)
+    }
+
+    /// A full repaint: home, clear, then `rows` top to bottom.
+    fn frame(rows: &[&str]) -> Vec<u8> {
+        format!("\x1b[H\x1b[2J{}", rows.join("\r\n")).into_bytes()
+    }
+
+    /// A solid rule as wide as the fixtures' prompt box.
+    fn rule() -> String {
+        "─".repeat(134)
+    }
+
+    /// The status rows under the idle prompt box of `v03-ready.txt`.
+    const READY_FOOTER: [&str; 2] = [
+        concat!(
+            "  sub: 5h  33% (4h07m) · 7d  84% / F   0% (5d16h)  |  ds: $  17.40  |  X: 252G free",
+            "  |  Opus 5.5  |  master  |  C:\\Users\\lefto\\AppD…"
+        ),
+        "  ⏵⏵ auto mode on (shift+tab to cycle) · ← 2 agents",
+    ];
+
+    /// The spinner row of `v71-agents-running.txt`.
+    const SPINNER_ROW: &str = "· Cooking… (21s · ↓ 1.1k tokens)";
+
+    /// The row an Esc interrupt paints above the prompt box.
+    const INTERRUPT_ROW: &str = "  ⎿  Interrupted · What should Claude do instead?";
+
+    /// The spinner a turn keeps up while its `Stop` hooks run
+    /// (`claude--v2302-turn-ending-stop-hooks--w119.txt`).
+    const STOP_HOOKS_ROW: &str = "✢ Simmering… (running Stop hooks… 0/2 · 5s · ↓ 621 tokens)";
+
+    /// The same spinner while `PreToolUse` hooks run.
+    const PRE_TOOL_HOOKS_ROW: &str = "✢ Simmering… (running PreToolUse hooks… · 5s · ↓ 621 tokens)";
+
+    /// The prompt box of `v03-ready.txt` with `above` over it and `footer`
+    /// under it.
+    fn box_frame(above: &[&str], footer: &[&str]) -> Vec<u8> {
+        let rule = rule();
+        let mut rows: Vec<&str> = above.to_vec();
+        rows.extend([
+            rule.as_str(),
+            "❯ Try \"fix typecheck errors\"",
+            rule.as_str(),
+        ]);
+        rows.extend(footer);
+        frame(&rows)
+    }
+
+    /// The idle prompt box of `v03-ready.txt` with `above` over it.
+    fn idle_frame(above: &[&str]) -> Vec<u8> {
+        box_frame(above, &READY_FOOTER)
+    }
+
+    /// The Bash permission dialog of `c23-perm-bash.txt`.
+    fn permission_frame() -> Vec<u8> {
+        let rule = "─".repeat(135);
+        let dashes = "╌".repeat(135);
+        frame(&[
+            "$ … Print the product of 6 and 7",
+            "    Bash(python -c \"print(6*7)\")",
+            "",
+            rule.as_str(),
+            " Bash command",
+            " Print the product of 6 and 7",
+            dashes.as_str(),
+            " python -c \"print(6*7)\"",
+            dashes.as_str(),
+            " This command requires approval",
+            "",
+            " Do you want to proceed?",
+            " ❯ 1. Yes",
+            "   2. Yes, and don’t ask again for: python *",
+            "   3. Yes, and switch to auto mode · auto mode handles these prompts for you",
+            "   4. No",
+            "",
+            " Esc to cancel · Tab to amend",
+        ])
+    }
+
+    /// The `AskUserQuestion` dialog of `c31-ask-q1.txt`.
+    fn question_frame() -> Vec<u8> {
+        let rule = format!("  {}", "─".repeat(133));
+        frame(&[
+            "• …",
+            rule.as_str(),
+            "  ──",
+            "  ←  ☐ Next fn  ☐ Tests  ☐ Style  ✔ Submit  →",
+            "",
+            "  Which function should be added to calc.py next?",
+            "",
+            "  ❯ 1. sub",
+            "       Subtraction: returns a - b.",
+            "    2. div",
+            "       Division: returns a / b, which needs a decision on division by zero.",
+            "    3. pow",
+            "       Exponentiation: returns a ** b.",
+            "    4. Type something.",
+            rule.as_str(),
+            "  ──",
+            "    5. Chat about this",
+            "",
+            "  Enter to select · Tab/Arrow keys to navigate · Esc to cancel",
+        ])
+    }
+
+    /// The detailed-transcript overlay of `v96-ctrl-o.txt`.
+    fn transcript_overlay_frame() -> Vec<u8> {
+        let rule = "─".repeat(135);
+        frame(&[
+            "  The plant world sorts fruit quite differently from the kitchen.",
+            "",
+            "✻ Brewed for 26s · done 5:34 PM",
+            "",
+            rule.as_str(),
+            concat!(
+                "  Showing detailed transcript · ctrl+o to toggle · ↑↓ scroll",
+                " · v to open in notepad · ? for shortcuts          verbose"
+            ),
+        ])
+    }
+
+    /// A finished turn with a background shell still running
+    /// (`claude--idle-background-shell.txt`).
+    fn background_shell_frame() -> Vec<u8> {
+        box_frame(
+            &["● ok", "", "✻ Churned for 6s · done 8:01 PM"],
+            &["  ⏵⏵ bypass permissions on · 1 shell · ← for agents · ↓ to manage"],
+        )
+    }
+
+    /// An idle box over launched subagents, with their panel under it
+    /// (`claude--v2302-working-agents-panel--w119.txt`).
+    fn subagent_panel_frame() -> Vec<u8> {
+        box_frame(
+            &[
+                "● 2 background agents launched (↓ to manage)",
+                "   ├ Write 150 animals list A",
+                "   └ Write 150 animals list B",
+                "",
+                "● Running 2 agents…",
+            ],
+            &[
+                "  ⏸ manual mode on · ← 11 agents",
+                "",
+                "  ● main",
+                "  ◯ general-purpose  Write 150 animals list A                   3s · ↑ 188 tokens",
+                "  ◯ general-purpose  Write 150 animals list B                    1s · ↑ 50 tokens",
+            ],
+        )
+    }
+
+    /// A record whose hooks report `status` at hook stamp 1.
+    fn hook_record(status: SessionStatus) -> SessionRecord {
+        let mut record = test_record(SESSION);
+        record.status = status;
+        record.hook_driven = true;
+        record.last_hook_time = Some(1);
+        record
     }
 
     async fn assert_heartbeat_holds_working(h: &Harness) {
@@ -1262,23 +1486,23 @@ mod hysteresis_tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn once_a_second_repaint_does_not_flicker_agent_session() {
-        let h = start("agent", false);
-        assert_heartbeat_holds_working(&h).await;
-    }
-
-    #[tokio::test(start_paused = true)]
     async fn once_a_second_repaint_does_not_flicker_plain_shell() {
         let h = start("shell", true);
         assert_heartbeat_holds_working(&h).await;
     }
 
     #[tokio::test(start_paused = true)]
-    async fn promotion_is_immediate() {
+    async fn a_spinner_promotes_idle_after_one_debounce() {
         let h = start("promote", false);
-        assert_eq!(h.status(), SessionStatus::Idle);
-        h.heartbeat(0);
-        settle().await;
+        pass_hold().await;
+        h.chunk(idle_frame(&[SPINNER_ROW]));
+        advance(CHECK_DEBOUNCE * 3 / 4).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "read before the output settled"
+        );
+        advance(ms(15)).await;
         assert_eq!(h.status(), SessionStatus::Working);
     }
 
@@ -1297,93 +1521,75 @@ mod hysteresis_tests {
         assert_eq!(State::seed_plain_shell(SessionStatus::Idle), State::Idle);
     }
 
-    /// A session reattached `AwaitingInput` has to settle back to `Idle` once
-    /// the PTY goes quiet: a watcher started `Idle` never arms the idle timer
-    /// for it, so the restored status would stick until the agent's next byte.
+    /// A session reattached `AwaitingInput` keeps it while its screen matches
+    /// no rule, however long the PTY is quiet, and leaves it once the idle
+    /// box has shown for the whole window.
     #[tokio::test(start_paused = true)]
-    async fn restored_awaiting_input_demotes_after_silence() {
+    async fn a_restored_prompt_holds_on_an_unmatched_screen_and_demotes_on_the_idle_box() {
         let h = start_from("restored-awaiting", false, SessionStatus::AwaitingInput);
+        pass_hold().await;
+        h.chunk(frame(&["PS C:\\> "]));
+        advance(Duration::from_secs(10)).await;
         assert_eq!(
             h.status(),
             SessionStatus::AwaitingInput,
-            "the restored status is the watcher's seed"
+            "a screen no rule matches moved the restored prompt"
         );
-        // A redraw below the echo budget that matches no prompt either: only
-        // the idle timer can move this session.
-        h.output
-            .send(b"\x1b[2K\r$ ".to_vec())
-            .expect("watcher still subscribed");
-        settle().await;
+        h.chunk(idle_frame(&[]));
+        advance(ms(299)).await;
         assert_eq!(
             h.status(),
             SessionStatus::AwaitingInput,
-            "a small redraw leaves it waiting"
+            "the idle box demoted before the window closed"
         );
-        tokio::time::sleep(IDLE_AFTER + Duration::from_millis(50)).await;
-        settle().await;
+        advance(ms(401)).await;
         assert_eq!(
             h.status(),
             SessionStatus::Idle,
-            "silence past IDLE_AFTER demotes it"
+            "the idle box demotes after the window"
         );
     }
 
-    /// While hooks own the status, output the classifier would read as work
-    /// must not promote a hook-reported `AwaitingInput`.
+    /// A hook-reported prompt holds while its dialog repaints, and while a
+    /// spinner shows `PreToolUse` hooks running.
     #[tokio::test(start_paused = true)]
-    async fn hook_awaiting_input_survives_working_output() {
-        let h = start_from("hook-survives-output", false, SessionStatus::AwaitingInput);
-        h.set_record(|record| record.hook_driven = true);
-        for tick in 0..3 {
-            h.heartbeat(tick);
-            settle().await;
-            assert_eq!(
-                h.status(),
-                SessionStatus::AwaitingInput,
-                "tick {tick}: classifier output promoted a hook-reported prompt"
-            );
-            tokio::time::sleep(HEARTBEAT / 4).await;
+    async fn hook_awaiting_input_holds_through_dialog_repaints_and_running_hooks() {
+        let h = start_record(
+            "hook-survives-output",
+            false,
+            hook_record(SessionStatus::AwaitingInput),
+        );
+        pass_hold().await;
+        for _ in 0..50 {
+            h.chunk(permission_frame());
+            advance(ms(20)).await;
         }
-    }
-
-    /// Hook-reported work with no further PTY output is an interrupted turn:
-    /// the silence demotion still ends it.
-    #[tokio::test(start_paused = true)]
-    async fn hook_working_demotes_to_idle_after_silence() {
-        let h = start("hook-working-silence", false);
-        h.set_record(|record| {
-            record.hook_driven = true;
-            record.status = SessionStatus::Working;
-        });
-        tokio::time::sleep(IDLE_AFTER + Duration::from_millis(50)).await;
-        settle().await;
         assert_eq!(
             h.status(),
-            SessionStatus::Idle,
-            "silence demotes hook-reported work"
+            SessionStatus::AwaitingInput,
+            "dialog repaints moved a hook-reported prompt"
+        );
+        h.chunk(idle_frame(&[PRE_TOOL_HOOKS_ROW]));
+        advance(Duration::from_secs(10)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::AwaitingInput,
+            "the running hooks' spinner moved a hook-reported prompt"
         );
     }
 
-    /// An `Idle` whose turn ended with background work still running is not
-    /// demoted or cleared by PTY silence: only a status change ends it.
+    /// A finished turn with a background shell still running keeps `Idle` and
+    /// the background flag, however long the PTY is quiet.
     #[tokio::test(start_paused = true)]
-    async fn idle_with_background_survives_silence() {
-        let h = start("hook-idle-background", false);
-        h.set_record(|record| {
-            record.hook_driven = true;
-            record.status = SessionStatus::Idle;
-            record.background = true;
-        });
-        h.heartbeat(0);
-        settle().await;
-        tokio::time::sleep(IDLE_AFTER + Duration::from_millis(50)).await;
-        settle().await;
+    async fn a_turn_end_with_a_background_shell_keeps_idle_and_background() {
+        let mut record = hook_record(SessionStatus::Idle);
+        record.background = true;
+        let h = start_record("hook-idle-background", false, record);
+        pass_hold().await;
+        h.chunk(background_shell_frame());
+        advance(Duration::from_secs(10)).await;
         assert_eq!(h.status(), SessionStatus::Idle);
-        let rec = h.registry.get(SESSION).expect("session registered");
-        assert!(
-            rec.lock().expect("record lock").background,
-            "silence leaves the background flag set"
-        );
+        assert!(h.background(), "the screen cleared the background flag");
     }
 
     /// While hooks own a plain shell, output the shell classifier would read
@@ -1447,12 +1653,6 @@ mod hysteresis_tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn hook_working_set_after_start_demotes_after_silence() {
-        let h = start("hook-working-late", false);
-        assert_hook_working_set_after_start_demotes(&h).await;
-    }
-
-    #[tokio::test(start_paused = true)]
     async fn hook_working_set_after_start_demotes_after_silence_plain_shell() {
         let h = start("shell-hook-working-late", true);
         assert_hook_working_set_after_start_demotes(&h).await;
@@ -1511,10 +1711,26 @@ mod hysteresis_tests {
         );
     }
 
+    /// A hook event already on the record but not yet broadcast, landing
+    /// inside a window, refuses that window's publish: the next check reads
+    /// the moved record and holds off the screen as for a broadcast write.
     #[tokio::test(start_paused = true)]
-    async fn a_hook_status_written_before_its_broadcast_is_not_demoted_at_once() {
-        let h = start("hook-unbroadcast", false);
-        assert_unbroadcast_hook_status_waits(&h).await;
+    async fn an_unbroadcast_hook_write_during_a_window_refuses_the_publish() {
+        let h = start_record(
+            "hook-unbroadcast",
+            false,
+            hook_record(SessionStatus::Working),
+        );
+        pass_hold().await;
+        h.chunk(idle_frame(&[]));
+        advance(ms(100)).await;
+        h.set_record_unbroadcast(|record| record.last_hook_time = Some(2));
+        advance(Duration::from_secs(3)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Working,
+            "a window published over a hook event its broadcast had not reached"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -1523,10 +1739,31 @@ mod hysteresis_tests {
         assert_unbroadcast_hook_status_waits(&h).await;
     }
 
+    /// A hook-reported turn after a long idle, while the grid still shows the
+    /// idle box: that stale frame does not demote before the window, and the
+    /// spinner the turn paints inside the window cancels it.
     #[tokio::test(start_paused = true)]
-    async fn hook_working_after_a_long_idle_is_not_demoted_at_once() {
+    async fn a_stale_idle_box_waits_for_the_window_and_a_spinner_cancels_it() {
         let h = start("hook-working-long-idle", false);
-        assert_hook_working_after_long_idle_waits(&h).await;
+        h.chunk(idle_frame(&[]));
+        advance(Duration::from_secs(10)).await;
+        assert_eq!(h.status(), SessionStatus::Idle, "idle from the start");
+        set_hook_working(&h, 1);
+        pass_hold().await;
+        h.chunk(idle_frame(&[]));
+        advance(ms(100)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Working,
+            "a stale idle box demoted the fresh hook-reported turn at once"
+        );
+        h.chunk(idle_frame(&[SPINNER_ROW]));
+        advance(Duration::from_secs(1)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Working,
+            "the turn's spinner did not cancel the window"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -1657,75 +1894,64 @@ mod hysteresis_tests {
         assert_eq!(h.status(), SessionStatus::Working);
     }
 
-    /// A hook-reported prompt whose text has left the screen is dismissed:
-    /// the same silence demotes it.
+    /// A hook-reported prompt dismissed without a hook (from another client)
+    /// leaves the idle box on screen: it demotes once the window closes.
     #[tokio::test(start_paused = true)]
-    async fn hook_awaiting_input_demotes_once_the_prompt_is_gone() {
-        let h = start("hook-prompt-gone", false);
-        h.set_record(|record| {
-            record.hook_driven = true;
-            record.status = SessionStatus::AwaitingInput;
-        });
-        h.output
-            .send(b"\x1b[2K\r$ ".to_vec())
-            .expect("watcher still subscribed");
-        settle().await;
+    async fn hook_awaiting_input_demotes_on_the_idle_box_after_the_window() {
+        let h = start_record(
+            "hook-prompt-gone",
+            false,
+            hook_record(SessionStatus::AwaitingInput),
+        );
+        pass_hold().await;
+        h.chunk(idle_frame(&[]));
+        advance(ms(299)).await;
         assert_eq!(
             h.status(),
             SessionStatus::AwaitingInput,
-            "a small redraw leaves it waiting"
+            "the idle box demoted before the window closed"
         );
-        tokio::time::sleep(IDLE_AFTER + Duration::from_millis(50)).await;
-        settle().await;
+        advance(ms(401)).await;
         assert_eq!(
             h.status(),
             SessionStatus::Idle,
-            "silence with no prompt demotes it"
+            "the idle box demotes after the window"
         );
     }
 
-    /// A hook-reported prompt still on screen holds past `IDLE_AFTER`: the
-    /// demotion reads the screen, not the silence alone.
+    /// A hook-reported prompt holds while its permission dialog shows.
     #[tokio::test(start_paused = true)]
-    async fn hook_awaiting_input_holds_while_the_prompt_matches() {
-        let h = start("hook-prompt-holds", false);
-        h.set_record(|record| {
-            record.hook_driven = true;
-            record.status = SessionStatus::AwaitingInput;
-        });
-        h.output
-            .send(b"\x1b[2K\rDo you want to proceed? 1. Yes 2. No ".to_vec())
-            .expect("watcher still subscribed");
-        settle().await;
-        tokio::time::sleep(IDLE_AFTER + Duration::from_millis(50)).await;
-        settle().await;
+    async fn hook_awaiting_input_holds_while_the_permission_dialog_shows() {
+        let h = start_record(
+            "hook-prompt-holds",
+            false,
+            hook_record(SessionStatus::AwaitingInput),
+        );
+        pass_hold().await;
+        h.chunk(permission_frame());
+        advance(Duration::from_secs(10)).await;
         assert_eq!(
             h.status(),
             SessionStatus::AwaitingInput,
-            "a prompt on screen holds the demotion"
+            "the permission dialog on screen did not hold the prompt"
         );
     }
 
-    /// A real `AskUserQuestion` screen carries markers outside ASCII: the
-    /// `❯` cursor with numbered options must hold the demotion as surely as
-    /// the ASCII "Do you want to" wording does.
+    /// A hook-reported prompt holds while its `AskUserQuestion` dialog shows.
     #[tokio::test(start_paused = true)]
-    async fn hook_awaiting_input_holds_on_a_chevron_question() {
-        let h = start("hook-chevron-holds", false);
-        h.set_record(|record| {
-            record.hook_driven = true;
-            record.status = SessionStatus::AwaitingInput;
-        });
-        h.output
-            .send("\x1b[2K\r❯ 1. Yes  2. No ".as_bytes().to_vec())
-            .expect("watcher still subscribed");
-        settle().await;
-        tokio::time::sleep(IDLE_AFTER + Duration::from_millis(50)).await;
-        settle().await;
+    async fn hook_awaiting_input_holds_while_the_question_dialog_shows() {
+        let h = start_record(
+            "hook-chevron-holds",
+            false,
+            hook_record(SessionStatus::AwaitingInput),
+        );
+        pass_hold().await;
+        h.chunk(question_frame());
+        advance(Duration::from_secs(10)).await;
         assert_eq!(
             h.status(),
             SessionStatus::AwaitingInput,
-            "a chevron question on screen holds the demotion"
+            "the question dialog on screen did not hold the prompt"
         );
     }
 
@@ -1747,15 +1973,16 @@ mod hysteresis_tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_restored_prompt_is_cleared_when_the_classifier_leaves_awaiting_input() {
+    async fn a_restored_prompt_is_cleared_when_the_screen_leaves_awaiting_input() {
         let h = start_record("restored-prompt-cleared", false, restored_prompt_record());
-        h.output
-            .send(b"\x1b[2K\r$ ".to_vec())
-            .expect("watcher still subscribed");
-        settle().await;
-        tokio::time::sleep(IDLE_AFTER + Duration::from_millis(50)).await;
-        settle().await;
-        assert_eq!(h.status(), SessionStatus::Idle, "silence ends the wait");
+        pass_hold().await;
+        h.chunk(idle_frame(&[]));
+        advance(ms(700)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "the idle box ends the wait"
+        );
         assert_eq!(pending_input(&h), None, "the prompt left with the wait");
     }
 
@@ -1772,24 +1999,33 @@ mod hysteresis_tests {
         assert_eq!(pending_input(&h), None, "the prompt left with the wait");
     }
 
-    /// A session with no hook events keeps the heuristic's own classifier:
-    /// it still promotes on activity and demotes on silence.
+    /// A session with no hook events follows its screen alone: a heartbeat
+    /// title moves nothing, a spinner leaves its prompt after the window, and
+    /// the idle box then ends the turn after its own.
     #[tokio::test(start_paused = true)]
-    async fn hook_awaiting_input_is_not_demoted_without_hooks() {
-        let h = start_from("heuristic-intact", false, SessionStatus::AwaitingInput);
+    async fn a_session_without_hooks_follows_its_screen() {
+        let h = start_from("screen-only", false, SessionStatus::AwaitingInput);
+        pass_hold().await;
         h.heartbeat(0);
-        settle().await;
+        advance(Duration::from_secs(10)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::AwaitingInput,
+            "a title heartbeat moved a session without hooks"
+        );
+        h.chunk(idle_frame(&[SPINNER_ROW]));
+        advance(ms(700)).await;
         assert_eq!(
             h.status(),
             SessionStatus::Working,
-            "the classifier still promotes on output"
+            "the spinner leaves the prompt"
         );
-        tokio::time::sleep(IDLE_AFTER + Duration::from_millis(50)).await;
-        settle().await;
+        h.chunk(idle_frame(&[]));
+        advance(ms(700)).await;
         assert_eq!(
             h.status(),
             SessionStatus::Idle,
-            "the classifier still demotes on silence"
+            "the idle box ends the turn"
         );
     }
 
@@ -1799,7 +2035,7 @@ mod hysteresis_tests {
         record.lock().expect("record lock").status
     }
 
-    /// A hook event that lands between the classifier's read of the record
+    /// A hook event that lands between the screen check's read of the record
     /// and its write must keep the hook's status: the write is refused because
     /// the hook-driven flag or the hook stamp moved since that read.
     #[test]
@@ -1808,27 +2044,53 @@ mod hysteresis_tests {
         registry.insert(test_record(SESSION));
         let read = record_status(&registry, SESSION).expect("the session is registered");
         assert!(!read.hook_driven, "the read saw no hooks");
-        // A hook event lands after the read and before the classifier writes.
+        // A hook event lands after the read and before the screen writes.
         registry.update(SESSION, |record| {
             record.status = SessionStatus::AwaitingInput;
             record.hook_driven = true;
             record.last_hook_time = Some(7);
         });
-        let mut state = State::Idle;
-        let (attention, _receiver) = mpsc::unbounded_channel();
-        on_transition(
-            &registry,
-            SESSION,
-            &mut state,
-            State::Working,
-            read,
-            &attention,
-        );
+        let (attention, mut receiver) = mpsc::unbounded_channel();
+        let wrote =
+            apply_screen_status(&registry, SESSION, read, SessionStatus::Working, &attention);
+        assert!(!wrote, "the guard let a stale read write");
         assert_eq!(
             status_in(&registry),
             SessionStatus::AwaitingInput,
-            "the classifier overwrote a hook prompt that landed after its read"
+            "the screen overwrote a hook prompt that landed after its read"
         );
+        assert!(
+            receiver.try_recv().is_err(),
+            "a refused write raised Attention"
+        );
+    }
+
+    /// A status another writer moved since the read (an exit, the owner's
+    /// key) is never overwritten, and the refused write is not broadcast.
+    #[test]
+    fn a_status_moved_since_the_read_refuses_the_screen_write() {
+        let registry = SessionRegistry::new(scratch_dirs("status-moved"));
+        let mut record = test_record(SESSION);
+        record.status = SessionStatus::Working;
+        registry.insert(record);
+        let read = record_status(&registry, SESSION).expect("the session is registered");
+        for moved in [SessionStatus::Stopped, SessionStatus::AwaitingInput] {
+            registry.update(SESSION, |record| record.status = moved);
+            let mut events = registry.subscribe();
+            let (attention, _receiver) = mpsc::unbounded_channel();
+            let wrote =
+                apply_screen_status(&registry, SESSION, read, SessionStatus::Idle, &attention);
+            assert!(!wrote, "the guard let a write over {moved:?} land");
+            assert_eq!(
+                status_in(&registry),
+                moved,
+                "the screen overwrote {moved:?}"
+            );
+            assert!(
+                events.try_recv().is_err(),
+                "a refused write over {moved:?} was broadcast"
+            );
+        }
     }
 
     /// The plain shell's write carries no stamp check at all: a hook event
@@ -1853,23 +2115,347 @@ mod hysteresis_tests {
         );
     }
 
-    /// The guard refuses only a stale read: a transition taken with the record
+    /// The guard refuses only a stale read: a write taken with the record
     /// unchanged since the read still lands.
     #[test]
     fn a_write_after_the_read_still_applies_without_a_hook() {
         let registry = SessionRegistry::new(scratch_dirs("classifier-write"));
         registry.insert(test_record(SESSION));
         let read = record_status(&registry, SESSION).expect("the session is registered");
-        let mut state = State::Idle;
         let (attention, _receiver) = mpsc::unbounded_channel();
-        on_transition(
-            &registry,
-            SESSION,
-            &mut state,
-            State::Working,
-            read,
-            &attention,
-        );
+        let wrote =
+            apply_screen_status(&registry, SESSION, read, SessionStatus::Working, &attention);
+        assert!(wrote);
         assert_eq!(status_in(&registry), SessionStatus::Working);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_quiet_screen_with_the_spinner_keeps_hook_working() {
+        let h = start_record("quiet-spinner", false, hook_record(SessionStatus::Working));
+        pass_hold().await;
+        h.chunk(idle_frame(&[SPINNER_ROW]));
+        advance(Duration::from_secs(10)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Working,
+            "a quiet screen still showing the spinner demoted hook-reported work"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_interrupt_row_demotes_working_after_the_window() {
+        let h = start_record("interrupt-row", false, hook_record(SessionStatus::Working));
+        pass_hold().await;
+        h.chunk(idle_frame(&[INTERRUPT_ROW]));
+        advance(ms(299)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Working,
+            "the interrupt row demoted before the window closed"
+        );
+        advance(ms(401)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "the interrupt row demotes once the window closes"
+        );
+    }
+
+    /// The first half of a repaint still shows the dialog the turn already
+    /// answered; the second half paints the spinner over it.
+    #[tokio::test(start_paused = true)]
+    async fn a_half_drawn_frame_raises_no_attention() {
+        let mut h = start_from("half-drawn", false, SessionStatus::Working);
+        pass_hold().await;
+        h.chunk(permission_frame());
+        advance(CHECK_DEBOUNCE / 2).await;
+        h.chunk(idle_frame(&[SPINNER_ROW]));
+        advance(Duration::from_secs(1)).await;
+        assert_eq!(h.attentions(), 0, "a half-drawn frame raised Attention");
+        assert_eq!(h.status(), SessionStatus::Working);
+    }
+
+    /// The owner's key clears the prompt at once; the dialog still on the
+    /// grid, repainted before Claude redraws, must not raise it again.
+    #[tokio::test(start_paused = true)]
+    async fn an_owner_key_clear_holds_off_a_stale_dialog() {
+        let mut h = start_record(
+            "owner-key-hold",
+            false,
+            hook_record(SessionStatus::AwaitingInput),
+        );
+        h.chunk(permission_frame());
+        pass_hold().await;
+        h.registry.update_if_changed(SESSION, |record| {
+            record.status = SessionStatus::Idle;
+            record.pending_input = None;
+            true
+        });
+        settle().await;
+        advance(CHECK_DEBOUNCE + ms(10)).await;
+        h.chunk(permission_frame());
+        advance(ms(100)).await;
+        assert_eq!(h.attentions(), 0, "a stale dialog raised Attention");
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "a stale dialog undid the owner's clear"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_newer_hook_stamp_mid_window_cancels_the_publish() {
+        let h = start_record(
+            "stamp-mid-window",
+            false,
+            hook_record(SessionStatus::Working),
+        );
+        pass_hold().await;
+        h.chunk(idle_frame(&[]));
+        advance(ms(100)).await;
+        h.set_record(|record| record.last_hook_time = Some(2));
+        advance(Duration::from_secs(3)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Working,
+            "a window opened before a newer hook event still published"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_exit_mid_window_writes_nothing() {
+        let h = start_record(
+            "exit-mid-window",
+            false,
+            hook_record(SessionStatus::Working),
+        );
+        pass_hold().await;
+        h.chunk(idle_frame(&[]));
+        advance(ms(100)).await;
+        h.set_record(|record| record.status = SessionStatus::Stopped);
+        let mut events = h.registry.subscribe();
+        pass_hold().await;
+        h.chunk(idle_frame(&[]));
+        advance(Duration::from_secs(3)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Stopped,
+            "the screen revived a stopped session"
+        );
+        assert!(
+            events.try_recv().is_err(),
+            "the watcher broadcast an update for a stopped session"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_detailed_transcript_overlay_holds_working_and_restarts_the_count() {
+        let h = start_record(
+            "transcript-overlay",
+            false,
+            hook_record(SessionStatus::Working),
+        );
+        pass_hold().await;
+        h.chunk(transcript_overlay_frame());
+        advance(Duration::from_secs(10)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Working,
+            "the overlay demoted hook-reported work"
+        );
+        // A window the overlay breaks counts again from its next check.
+        h.chunk(idle_frame(&[]));
+        advance(ms(200)).await;
+        h.chunk(transcript_overlay_frame());
+        advance(ms(60)).await;
+        h.chunk(idle_frame(&[]));
+        advance(ms(200)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Working,
+            "the window kept its count across the overlay"
+        );
+        advance(ms(240)).await;
+        assert_eq!(h.status(), SessionStatus::Idle, "the new window publishes");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_non_hook_dialog_raises_one_attention() {
+        let mut h = start("dialog-attention", false);
+        pass_hold().await;
+        h.chunk(permission_frame());
+        advance(ms(50)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::AwaitingInput,
+            "the dialog raises the prompt at once"
+        );
+        assert_eq!(h.attentions(), 1, "one Attention on entry");
+        for _ in 0..20 {
+            h.chunk(permission_frame());
+            advance(ms(20)).await;
+        }
+        assert_eq!(
+            h.attentions(),
+            0,
+            "repaints of the same dialog raised Attention"
+        );
+        // The `PermissionRequest` hook for the same prompt: hook_status
+        // raises Attention only when `apply_status` enters the prompt.
+        h.set_record(|record| {
+            record.hook_driven = true;
+            record.last_hook_time = Some(1);
+            record.pending_input = Some(protocol::PendingInput::Permission {
+                tool_name: "Bash".to_owned(),
+                summary: "python -c \"print(6*7)\"".to_owned(),
+            });
+            assert!(
+                !super::apply_status(record, SessionStatus::AwaitingInput),
+                "the hook found the prompt already raised"
+            );
+        });
+        advance(Duration::from_secs(1)).await;
+        assert_eq!(
+            h.attentions(),
+            0,
+            "the hook's prompt raised a second Attention"
+        );
+        assert_eq!(h.status(), SessionStatus::AwaitingInput);
+        assert!(pending_input(&h).is_some(), "the hook's prompt is pending");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stop_hooks_running_keep_idle_and_background() {
+        let mut record = hook_record(SessionStatus::Idle);
+        record.background = true;
+        let h = start_record("stop-hooks", false, record);
+        pass_hold().await;
+        h.chunk(idle_frame(&[STOP_HOOKS_ROW]));
+        advance(Duration::from_secs(10)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "the Stop hooks' spinner promoted"
+        );
+        assert!(h.background(), "the Stop hooks' spinner cleared background");
+        h.chunk(idle_frame(&[SPINNER_ROW]));
+        advance(ms(50)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Working,
+            "a turn's spinner promotes at once"
+        );
+        assert!(!h.background(), "the promotion clears background");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn subagent_rows_and_a_working_title_keep_idle() {
+        let h = start("subagent-rows", false);
+        pass_hold().await;
+        h.chunk(subagent_panel_frame());
+        advance(Duration::from_secs(2)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "subagent rows read as a turn"
+        );
+        let mut titled = "\x1b]0;◐ Fixing tests\x07".as_bytes().to_vec();
+        titled.extend(idle_frame(&[]));
+        h.chunk(titled);
+        advance(Duration::from_secs(2)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "a working title over the idle box promoted"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_screen_demotion_updates_the_sidecar() {
+        let dirs = scratch_dirs("screen-sidecar");
+        crate::history::test_support::write_meta_for(&dirs, SESSION);
+        let h = start_in(dirs.clone(), false, hook_record(SessionStatus::Working));
+        pass_hold().await;
+        h.chunk(idle_frame(&[]));
+        advance(ms(700)).await;
+        assert_eq!(h.status(), SessionStatus::Idle);
+        let since = {
+            let rec = h.registry.get(SESSION).expect("session registered");
+            rec.lock().expect("record lock").status_since
+        };
+        let meta = crate::orphan::load_meta(&dirs, SESSION).expect("load meta");
+        assert_eq!(
+            meta.status,
+            Some(SessionStatus::Idle),
+            "the sidecar kept the old status"
+        );
+        assert_eq!(meta.status_since, since, "the sidecar kept the old stamp");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_dialog_repainted_every_20ms_is_seen_within_max_wait() {
+        let mut h = start("dialog-burst", false);
+        pass_hold().await;
+        for _ in 0..8 {
+            h.chunk(permission_frame());
+            advance(ms(20)).await;
+        }
+        assert_eq!(
+            h.status(),
+            SessionStatus::AwaitingInput,
+            "continuous repaints held the check past its longest wait"
+        );
+        assert_eq!(h.attentions(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_overflowing_broadcast_restarts_the_window() {
+        let h = start_record("lagged", false, hook_record(SessionStatus::Working));
+        pass_hold().await;
+        h.chunk(idle_frame(&[]));
+        advance(ms(200)).await;
+        // More chunks than the broadcast holds, with no yield: the watcher lags.
+        for _ in 0..70 {
+            h.chunk(idle_frame(&[]));
+        }
+        advance(ms(150)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Working,
+            "a window survived a lagged stream"
+        );
+        advance(ms(350)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "the window after the lag publishes"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_restored_prompt_does_not_leave_on_its_first_spinner_chunk() {
+        let h = start_record("restored-spinner", false, restored_prompt_record());
+        h.chunk(idle_frame(&[SPINNER_ROW]));
+        advance(ms(100)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::AwaitingInput,
+            "the replayed spinner left the restored prompt at once"
+        );
+        pass_hold().await;
+        h.chunk(idle_frame(&[SPINNER_ROW]));
+        advance(ms(100)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::AwaitingInput,
+            "the spinner left the prompt without the window"
+        );
+        advance(ms(600)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Working,
+            "the spinner leaves after the window"
+        );
+        assert_eq!(pending_input(&h), None, "the prompt left with the wait");
     }
 }

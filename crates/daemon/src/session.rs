@@ -157,7 +157,7 @@ pub struct SessionRecord {
     /// be surfaced via `SessionSnapshot::last_prompt` and replayed by the
     /// abandoned-resume handler.
     pub last_prompt: Option<String>,
-    /// Notifier feeding user-input byte counts into `pty_state::watch` so
+    /// Notifier feeding user-input byte counts into `pty_state::watch_plain_shell` so
     /// the status watcher can distinguish echo from genuine model output.
     /// `Some` for PTY sessions whose status watcher is running; `None`
     /// for headless, orphaned, or stopped sessions. Cleared by the exit

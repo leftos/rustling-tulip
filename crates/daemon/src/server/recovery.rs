@@ -170,6 +170,7 @@ async fn reattach_one(
                         &pty,
                         Some(dirs.clone()),
                     );
+                    let plain_shell = meta.mode == SessionMode::PlainShell;
                     let (in_tx, in_rx) = mpsc::unbounded_channel::<usize>();
                     let screen: screen::SharedScreen = Arc::new(Mutex::new(screen::Screen::new(
                         screen::REATTACH_COLS,
@@ -178,13 +179,23 @@ async fn reattach_one(
                     let restored = {
                         let mut guard = crate::sync::lock(pending.arc());
                         guard.scrollback_snapshot_req = Some(snap_tx);
-                        guard.input_notifier = Some(in_tx);
+                        // Only a plain shell's classifier reads input volume.
+                        if plain_shell {
+                            guard.input_notifier = Some(in_tx);
+                        }
                         guard.screen = Some(Arc::clone(&screen));
                         guard.status
                     };
-                    screen::watch(screen, meta.session_id.clone(), pty.output.subscribe());
+                    // An agent session's status watcher feeds its own grid.
+                    if plain_shell {
+                        screen::watch(
+                            Arc::clone(&screen),
+                            meta.session_id.clone(),
+                            pty.output.subscribe(),
+                        );
+                    }
                     pty.resize(screen::REATTACH_COLS, screen::REATTACH_ROWS);
-                    if meta.mode == SessionMode::PlainShell {
+                    if plain_shell {
                         pty_state::watch_plain_shell(
                             &sessions,
                             meta.session_id.clone(),
@@ -198,12 +209,11 @@ async fn reattach_one(
                         pty_state::watch(
                             &sessions,
                             meta.session_id.clone(),
-                            pty_state::WatchStreams {
+                            pty_state::AgentStreams {
                                 output: pty.output.subscribe(),
-                                input_pulses: in_rx,
+                                screen,
                             },
                             attention_tx.clone(),
-                            restored,
                         );
                     }
                     osc_title::watch(

@@ -17,10 +17,6 @@ use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::vte::ansi::Processor;
 use tokio::sync::broadcast;
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the screen rules are read by the tests only")
-)]
 pub mod rules;
 
 /// The character a TUI draws a horizontal rule with.
@@ -76,10 +72,6 @@ impl EventListener for TitleListener {
 }
 
 /// The rendered grid of one PTY session, without scrollback history.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "read through the screen's readers, not the field")
-)]
 pub struct Screen {
     term: Term<TitleListener>,
     parser: Processor,
@@ -88,10 +80,6 @@ pub struct Screen {
     title: Arc<Mutex<Option<String>>>,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the region readers are read by the tests only")
-)]
 impl Screen {
     /// A blank grid `cols` by `rows`; a zero dimension becomes one.
     #[must_use]
@@ -175,6 +163,10 @@ impl Screen {
     }
 
     /// The rows below the last rule row, trailing empty rows dropped.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "no screen rule reads this region yet")
+    )]
     #[must_use]
     pub fn after_last_horizontal_rule(&self) -> Vec<String> {
         let rows = self.rows();
