@@ -6,17 +6,12 @@
 
 - [/] RT-267 Move all Claude support behind the agent seam as its first plugin · release vNext
 - [ ] RT-96 Remote devices: list connected tailnet devices, block one and drop its connections · release vNext
-- [ ] RT-37 FT.4: "Fetch file…" popup · release vNext
-- [ ] RT-57 Offer to resume the sessions a reboot killed, on the next start · release vNext
-  - [/] RT-321 RT-57 S4: Tell the client which sessions resumed at start and which stay in Recover · release vNext
-  - [ ] RT-323 RT-57 S5: Live-test reboot resume and rewrite its design docs · release vNext
 - [ ] RT-184 Let only the client with recent input own a session's terminal size · release vNext
 - [ ] RT-187 Await the tailnet servers after the listener's supervisor panics · release vNext
 - [ ] RT-240 Close tailnet sessions when their listener drops · release vNext
 - [ ] RT-243 Split tailnet Supervisor::run and carry the real CertFailed reason
 - [ ] RT-258 Remote mode: don't send this PC's remembered folders to a remote host
 - [ ] RT-171 Phase 5a: pane drag-and-drop (P5.1–P5.5) · release vNext
-  - [ ] RT-232 P5.4: Sidebar drag-to-reorder · release vNext
   - [ ] RT-233 P5.5: Drag a leaf onto a pane or a tab pill · release vNext
 - [ ] RT-152 P6.3: Host picker from the tailnet's machines, typed-name fallback, boot reconnect · release vNext
 - [ ] RT-257 P6.2b: typed host path for Add repo and Browse on a remote host · release vNext
@@ -26,8 +21,6 @@
 - [ ] RT-166 TS.3b: device tokens issued only after the owner approves the device on the host PC · release vNext
 - [ ] RT-278 Prove the daemon holds the token before a client reuses, retires or kills it
 - [ ] RT-331 Built-in text and Markdown viewer with Open in default app and an always-external setting · release vNext
-  - [ ] RT-333 RT-331 S1: Text probe: size cap, binary sniff, encoding, viewable decision · release vNext
-  - [ ] RT-334 RT-331 S2: Open text externally setting and the open decision · release vNext
   - [ ] RT-335 RT-331 S3a: Viewer tab kind in the protocol and daemon tab store · release vNext
   - [ ] RT-336 RT-331 S3b: Viewer tabs in the native tab model · release vNext
   - [ ] RT-337 RT-331 S4: Text viewer view and link/fetch routing · release vNext
@@ -207,6 +200,7 @@
   - [ ] RT-329 RT-324 S5: stdio MCP server over the driver endpoint · release vNext
   - [ ] RT-330 RT-324 S6: Live no-focus check, DRIVING_CONVENTIONS and task index for driving · release vNext
 - [ ] RT-346 Make rt.ps1 test -Validate fast: it ran 652 s through the gate
+- [ ] RT-348 Update tokio past RUSTSEC-2026-0386 so cargo deny passes
 
 ## macOS
 
@@ -273,3 +267,4 @@
 - [ ] RT-342 Scroll the focused Settings control into view on Tab
 - [ ] RT-318 Show Claude's HTML/SVG mocks in a panel beside its session
 - [ ] RT-344 Mark files fetched from a remote host with Mark-of-the-Web
+- [ ] RT-347 Make the UI test harness's in_model refuse a selector it does not know
