@@ -3408,6 +3408,16 @@ pub enum DaemonMessage {
         port: u16,
         state: RemoteState,
     },
+    /// How the daemon's start-up resume went: `resumed` sessions came back
+    /// continuing their own conversation, and `left_in_recover` stayed for
+    /// Recover because they could not be resumed. Sent at most once to each
+    /// client in a daemon run: at initial state when the resume has already
+    /// finished, or when it finishes for a client that connected while it
+    /// ran. A start with nothing to resume sends none.
+    ResumeReport {
+        resumed: u32,
+        left_in_recover: u32,
+    },
     /// Retired with LAN pairing: it stays decodable, and the daemon never
     /// sends it.
     PairingStarted {
@@ -5843,6 +5853,27 @@ mod tests {
                 "port": 8787,
                 "state": {"kind": "other_windows_user"}
             })
+        );
+    }
+
+    #[test]
+    fn resume_report_round_trips() {
+        let wire = r#"{"type":"resume_report","resumed":2,"left_in_recover":1}"#;
+        let parsed: DaemonMessage = serde_json::from_str(wire).expect("the message decodes");
+        assert_eq!(
+            serde_json::to_value(&parsed).expect("it serializes"),
+            serde_json::json!({"type": "resume_report", "resumed": 2, "left_in_recover": 1}),
+            "the wire shape is the snake_case tag and the two counts"
+        );
+        assert!(
+            matches!(
+                parsed,
+                DaemonMessage::ResumeReport {
+                    resumed: 2,
+                    left_in_recover: 1
+                }
+            ),
+            "the counts arrive as sent"
         );
     }
 

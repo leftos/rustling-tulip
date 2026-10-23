@@ -142,6 +142,7 @@ pub(super) fn build_test_hub(
         recovering: RecoveryClaims::default(),
         resume_in_flight: Arc::default(),
         start_resume: Arc::default(),
+        resume_reported: Arc::default(),
         pending_hooks: crate::hook_status::PendingHooks::default(),
     };
     (hub, scratch, attention_rx)

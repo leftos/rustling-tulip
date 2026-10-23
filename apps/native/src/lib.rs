@@ -2328,6 +2328,9 @@ impl RootView {
         if self.fold_tabs_and_drop_stale_menus(&msg, window, cx) {
             return;
         }
+        if self.on_resume_report(&msg, cx) {
+            return;
+        }
         match msg {
             DaemonMessage::Welcome { .. } => self.on_welcome(window, cx),
             DaemonMessage::Error {
@@ -2394,10 +2397,7 @@ impl RootView {
                 members,
             } => self.on_discard_preview(&session_id, &members, cx),
             DaemonMessage::ShutdownAck {} => self.on_shutdown_ack(cx),
-            DaemonMessage::Repos { repos } => {
-                self.prune_source_control(&repos);
-                self.on_containers_changed(cx);
-            }
+            DaemonMessage::Repos { repos } => self.on_repos(&repos, cx),
             DaemonMessage::Workspaces { workspaces } => self.on_workspaces(&workspaces, window, cx),
             DaemonMessage::KeepAwakeStatus { enabled, active } => {
                 self.set_keep_awake(Some(settings_view::KeepAwake { enabled, active }));
@@ -2405,6 +2405,27 @@ impl RootView {
             msg @ DaemonMessage::RemoteStatus { .. } => self.on_remote_status(msg, cx),
             _ => {}
         }
+    }
+
+    /// A fresh repo list from the daemon: the source-control panel drops the
+    /// repos that are gone, and the sidebar's containers re-render.
+    fn on_repos(&mut self, repos: &[RepoEntry], cx: &mut Context<Self>) {
+        self.prune_source_control(repos);
+        self.on_containers_changed(cx);
+    }
+
+    /// Shows the daemon's start-up resume report as one toast; a later report
+    /// replaces it in place. Returns whether `msg` was that report.
+    fn on_resume_report(&mut self, msg: &DaemonMessage, cx: &mut Context<Self>) -> bool {
+        let DaemonMessage::ResumeReport {
+            resumed,
+            left_in_recover,
+        } = msg
+        else {
+            return false;
+        };
+        self.push_toast_spec(notices::resume_report_toast(*resumed, *left_in_recover), cx);
+        true
     }
 
     /// A daemon `Error`: the launch-last wait it answers ends here, so the

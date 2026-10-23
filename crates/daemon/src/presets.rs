@@ -2502,6 +2502,7 @@ mod tests {
             recovering: crate::server::RecoveryClaims::default(),
             resume_in_flight: Arc::default(),
             start_resume: Arc::default(),
+            resume_reported: Arc::default(),
             pending_hooks: crate::hook_status::PendingHooks::default(),
         };
         (hub, preset_rx, scratch)

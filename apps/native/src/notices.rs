@@ -58,6 +58,41 @@ pub fn toast_action_selector(toast_id: u64, action: &str) -> String {
     format!("toast-action-{toast_id}-{action}")
 }
 
+/// The toast for [`protocol::DaemonMessage::ResumeReport`]: `resumed`
+/// sessions came back after the restart, `left` stayed for Recover. A report
+/// that resumed nothing is a warning, since the sessions the last run lost
+/// are still waiting.
+#[must_use]
+pub fn resume_report_toast(resumed: u32, left: u32) -> ToastSpec {
+    let detail = match left {
+        0 => None,
+        1 => Some("1 stays in Recover".to_owned()),
+        n => Some(format!("{n} stay in Recover")),
+    };
+    let (kind, title) = match resumed {
+        0 => (
+            ToastKind::Warning,
+            "No sessions resumed after restart".to_owned(),
+        ),
+        1 => (
+            ToastKind::Info,
+            "Resumed 1 session after restart".to_owned(),
+        ),
+        n => (
+            ToastKind::Info,
+            format!("Resumed {n} sessions after restart"),
+        ),
+    };
+    ToastSpec {
+        kind,
+        title,
+        detail,
+        key: Some("resume-report".to_owned()),
+        sticky: false,
+        actions: Vec::new(),
+    }
+}
+
 /// A toast to show: what it reports, and what it does when a toast of the
 /// same key is already on screen.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -551,6 +586,37 @@ mod tests {
             sticky: true,
             ..spec(ToastKind::Info, title)
         }
+    }
+
+    #[test]
+    fn resume_report_toast_plural_with_left() {
+        let toast = resume_report_toast(2, 1);
+        assert_eq!(toast.kind, ToastKind::Info);
+        assert_eq!(toast.title, "Resumed 2 sessions after restart");
+        assert_eq!(toast.detail.as_deref(), Some("1 stays in Recover"));
+        assert_eq!(
+            toast.key.as_deref(),
+            Some("resume-report"),
+            "a later report updates this toast in place"
+        );
+        assert!(!toast.sticky, "it goes by itself");
+        assert!(toast.actions.is_empty(), "it offers no action");
+    }
+
+    #[test]
+    fn resume_report_toast_singular_without_left() {
+        let toast = resume_report_toast(1, 0);
+        assert_eq!(toast.kind, ToastKind::Info);
+        assert_eq!(toast.title, "Resumed 1 session after restart");
+        assert_eq!(toast.detail, None, "nothing stayed in Recover");
+    }
+
+    #[test]
+    fn resume_report_toast_nothing_resumed_is_a_warning() {
+        let toast = resume_report_toast(0, 3);
+        assert_eq!(toast.kind, ToastKind::Warning);
+        assert_eq!(toast.title, "No sessions resumed after restart");
+        assert_eq!(toast.detail.as_deref(), Some("3 stay in Recover"));
     }
 
     #[test]

@@ -224,6 +224,27 @@ pub(super) fn push_initial_state(
         state: remote.snapshot.state.clone(),
     });
     drop(remote);
+    send_resume_report(hub, out_tx, client_id);
+}
+
+/// Tells `client_id` how the start-up resume went, when there is something to
+/// report and this client id has not heard it yet. The initial-state push and
+/// a state stream that lagged past the broadcast both come through here, so
+/// the one-shot report survives either way.
+pub(super) fn send_resume_report(
+    hub: &Hub,
+    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
+    client_id: &str,
+) {
+    if let Some((resumed, left_in_recover)) = *crate::sync::lock(&hub.start_resume)
+        && (resumed > 0 || left_in_recover > 0)
+        && hub.claim_resume_report(client_id)
+    {
+        let _ = out_tx.send(DaemonMessage::ResumeReport {
+            resumed: u32::try_from(resumed).unwrap_or(u32::MAX),
+            left_in_recover: u32::try_from(left_in_recover).unwrap_or(u32::MAX),
+        });
+    }
 }
 
 #[cfg(test)]
@@ -238,6 +259,57 @@ mod tests {
     use crate::tailnet_listener::AuthorizedPeer;
     use protocol::PROTOCOL_VERSION;
     use std::net::Ipv4Addr;
+
+    /// Every `ResumeReport` an initial-state push put on the wire, draining
+    /// `out_rx`.
+    fn resume_reports(out_rx: &mut mpsc::UnboundedReceiver<DaemonMessage>) -> Vec<(u32, u32)> {
+        let mut reports = Vec::new();
+        while let Ok(message) = out_rx.try_recv() {
+            if let DaemonMessage::ResumeReport {
+                resumed,
+                left_in_recover,
+            } = message
+            {
+                reports.push((resumed, left_in_recover));
+            }
+        }
+        reports
+    }
+
+    #[test]
+    fn a_client_connecting_after_the_resume_gets_the_report_once() {
+        let (hub, _scratch) = test_hub("resume-report-connect");
+        *crate::sync::lock(&hub.start_resume) = Some((2, 1));
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+
+        push_initial_state(&hub, &out_tx, "c1", false);
+        assert_eq!(
+            resume_reports(&mut out_rx),
+            [(2, 1)],
+            "a client connecting after the resume hears how it went"
+        );
+
+        push_initial_state(&hub, &out_tx, "c1", false);
+        assert_eq!(
+            resume_reports(&mut out_rx),
+            [],
+            "the same client id is told once per daemon run"
+        );
+    }
+
+    #[test]
+    fn a_clean_start_sends_no_report() {
+        let (hub, _scratch) = test_hub("resume-report-clean");
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+
+        push_initial_state(&hub, &out_tx, "c1", false);
+
+        assert_eq!(
+            resume_reports(&mut out_rx),
+            [],
+            "nothing was resumed, so there is nothing to report"
+        );
+    }
     #[test]
     fn welcome_carries_the_daemon_features_and_the_negotiated_version() {
         let welcome = welcome_message(22);

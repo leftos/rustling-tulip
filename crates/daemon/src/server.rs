@@ -137,6 +137,9 @@ pub struct Hub {
     /// How many sessions the start-up resume brought back and how many it
     /// left for Recover, once it has finished.
     pub start_resume: Arc<std::sync::Mutex<Option<(usize, usize)>>>,
+    /// The client ids already told how the start-up resume went, so each is
+    /// told once per daemon run whichever path reaches it first.
+    pub resume_reported: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     /// Hook events that arrived for a session id before its spawn inserted
     /// it; applied to the record at insertion (bounded by age and count).
     pub pending_hooks: crate::hook_status::PendingHooks,
@@ -150,6 +153,13 @@ impl Hub {
             client_id: client_id.to_string(),
             event,
         });
+    }
+
+    /// Whether `client_id` has not yet been told this run's resume report;
+    /// marks it told when it had not. The first path to reach a client — the
+    /// initial-state push or the broadcast — is the one that sends.
+    pub(crate) fn claim_resume_report(&self, client_id: &str) -> bool {
+        crate::sync::lock(&self.resume_reported).insert(client_id.to_owned())
     }
 }
 
@@ -208,6 +218,14 @@ pub enum StateEvent {
         enabled: bool,
         port: u16,
         state: protocol::RemoteState,
+    },
+    /// Broadcast by the start-up resume when it finishes, so a client that
+    /// connected while it ran learns how it went. Mirrors
+    /// [`protocol::DaemonMessage::ResumeReport`]; the initial-state push
+    /// serves a client that connects after it.
+    ResumeReport {
+        resumed: u32,
+        left_in_recover: u32,
     },
     /// The whole session history, broadcast after it changes.
     SessionHistory(Vec<protocol::SessionHistoryItem>),
@@ -350,6 +368,7 @@ pub async fn run(
         recovering: RecoveryClaims::default(),
         resume_in_flight: Arc::default(),
         start_resume: Arc::default(),
+        resume_reported: Arc::default(),
         pending_hooks: crate::hook_status::PendingHooks::default(),
     };
     start_hub_tasks(&hub, client_count_rx);

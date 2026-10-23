@@ -336,7 +336,7 @@
       "paths": [
         "apps/native/src/notices.rs"
       ],
-      "filter": "(binary_id(rustling-tulip-native) & test(/^notices::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_preset_wizard|ui_spawn)::/))"
+      "filter": "(binary_id(rustling-tulip-native) & test(/^notices::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_preset_wizard|ui_resume_report|ui_spawn)::/))"
     },
     {
       "paths": [
@@ -835,6 +835,12 @@
         "apps/native/tests/ui/ui_repos.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native::ui) & test(/^(ui_repos)::/))"
+    },
+    {
+      "paths": [
+        "apps/native/tests/ui/ui_resume_report.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native::ui) & test(/^(ui_resume_report)::/))"
     },
     {
       "paths": [

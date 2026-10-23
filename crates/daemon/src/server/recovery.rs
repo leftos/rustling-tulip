@@ -490,6 +490,12 @@ where
     }
     info!(resumed, left, "auto-resume at start finished");
     *crate::sync::lock(&hub.start_resume) = Some((resumed, left));
+    if resumed > 0 || left > 0 {
+        let _ = hub.state_events.send(StateEvent::ResumeReport {
+            resumed: u32::try_from(resumed).unwrap_or(u32::MAX),
+            left_in_recover: u32::try_from(left).unwrap_or(u32::MAX),
+        });
+    }
     (resumed, left)
 }
 
@@ -1788,6 +1794,40 @@ mod tests {
         assert!(
             !hub.resume_in_flight.load(Ordering::SeqCst),
             "the hold-off ends"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_resume_broadcasts_its_report_when_it_finishes() {
+        let (_home_lock, home) = claude_home_scratch("resume-report-broadcast").await;
+        let (hub, scratch) = spawnless_test_hub("resume-report-broadcast");
+        let folder = scratch.path().to_string_lossy().into_owned();
+        home.write_transcript(&folder, RECOVERY_CONVERSATION);
+        insert_abandoned_claude(
+            &hub,
+            "lost",
+            standalone(&folder),
+            Some(RECOVERY_CONVERSATION),
+        );
+        let mut events = hub.state_events.subscribe();
+        let spawned = Spawned::default();
+
+        let counts = auto_resume_recording(&hub, &["lost"], &spawned).await;
+
+        assert_eq!(counts, (1, 0));
+        let reports: Vec<(u32, u32)> = std::iter::from_fn(|| events.try_recv().ok())
+            .filter_map(|event| match event {
+                StateEvent::ResumeReport {
+                    resumed,
+                    left_in_recover,
+                } => Some((resumed, left_in_recover)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            reports,
+            [(1, 0)],
+            "a client connected while the resume ran hears how it went"
         );
     }
 

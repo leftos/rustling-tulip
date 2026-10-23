@@ -1,5 +1,5 @@
 //! One client WebSocket connection: its id and auth kind, the client count, the event forwarders, the send pump and the receive loop.
-use super::handshake::{handshake, push_initial_state};
+use super::handshake::{handshake, push_initial_state, send_resume_report};
 use super::sessions::spawn_session_forwarder;
 use super::tabs::ensure_client_layout;
 use super::{Hub, PresetEvent, ScopedTabEvent, StateEvent, TabEvent, dispatch};
@@ -131,7 +131,12 @@ pub(super) async fn client_session(hub: Hub, socket: WebSocket, auth: AuthKind) 
         client_id.clone(),
     );
     let preset_event_task = spawn_preset_forwarder(hub.preset_events.subscribe(), out_tx.clone());
-    let state_event_task = spawn_state_forwarder(hub.state_events.subscribe(), out_tx.clone());
+    let state_event_task = spawn_state_forwarder(
+        &hub,
+        hub.state_events.subscribe(),
+        out_tx.clone(),
+        client_id.clone(),
+    );
 
     // Send initial state snapshots: this client's layout, or the first-connect
     // chooser when it has none yet.
@@ -222,10 +227,16 @@ fn spawn_tab_forwarder(
     })
 }
 
+/// Forwards this connection's share of the registry's state events. The
+/// start-up resume's report reaches a client at most once per daemon run: a
+/// connection whose client id the initial-state push already told drops it.
 fn spawn_state_forwarder(
+    hub: &Hub,
     mut rx: broadcast::Receiver<StateEvent>,
     out_tx: mpsc::UnboundedSender<DaemonMessage>,
+    client_id: String,
 ) -> tokio::task::JoinHandle<()> {
+    let hub = hub.clone();
     tokio::spawn(async move {
         loop {
             match rx.recv().await {
@@ -288,6 +299,17 @@ fn spawn_state_forwarder(
                         state,
                     });
                 }
+                Ok(StateEvent::ResumeReport {
+                    resumed,
+                    left_in_recover,
+                }) => {
+                    if hub.claim_resume_report(&client_id) {
+                        let _ = out_tx.send(DaemonMessage::ResumeReport {
+                            resumed,
+                            left_in_recover,
+                        });
+                    }
+                }
                 Ok(StateEvent::SessionHistory(items)) => {
                     let _ = out_tx.send(DaemonMessage::SessionHistory {
                         request_id: None,
@@ -296,6 +318,9 @@ fn spawn_state_forwarder(
                 }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
                     warn!(lagged = n, "client state event stream lagged");
+                    // The report is sent once and no later event repeats it,
+                    // so a stream that lagged past it asks for it again here.
+                    send_resume_report(&hub, &out_tx, &client_id);
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
             }
@@ -587,5 +612,92 @@ mod tests {
             "the forwarder keeps draining its new subscription"
         );
         forwarder.abort();
+    }
+
+    #[tokio::test]
+    async fn a_lagged_state_stream_still_delivers_the_report() {
+        let (hub, _scratch) = test_hub("lagged-state-forwarder");
+        *crate::sync::lock(&hub.start_resume) = Some((2, 1));
+        let (out_tx, mut rx) = mpsc::unbounded_channel();
+        let forwarder =
+            spawn_state_forwarder(&hub, hub.state_events.subscribe(), out_tx, "c1".to_owned());
+
+        // The report is the oldest event, so a stream that overflows the
+        // broadcast buffer skips exactly it. One more event than production's
+        // capacity outruns the smaller channel the test hub builds
+        // (test_support gives it room for 16).
+        let _ = hub.state_events.send(StateEvent::ResumeReport {
+            resumed: 2,
+            left_in_recover: 1,
+        });
+        for _ in 0..=crate::server::STATE_EVENT_CAPACITY {
+            let _ = hub.state_events.send(StateEvent::Repos(Vec::new()));
+        }
+
+        let first = next_message(&mut rx).await;
+        assert!(
+            matches!(
+                first,
+                DaemonMessage::ResumeReport {
+                    resumed: 2,
+                    left_in_recover: 1
+                }
+            ),
+            "the lagged stream still hears the report, got {first:?}"
+        );
+        forwarder.abort();
+        let mut reports = 1;
+        while let Ok(message) = rx.try_recv() {
+            if matches!(message, DaemonMessage::ResumeReport { .. }) {
+                reports += 1;
+            }
+        }
+        assert_eq!(reports, 1, "and hears it once");
+    }
+
+    #[tokio::test]
+    async fn the_forwarder_tells_each_client_once() {
+        let (hub, _scratch) = test_hub("resume-report-once");
+        // c1 heard it at its initial state.
+        assert!(hub.claim_resume_report("c1"));
+        let (out_tx, mut rx) = mpsc::unbounded_channel();
+        let told =
+            spawn_state_forwarder(&hub, hub.state_events.subscribe(), out_tx, "c1".to_owned());
+
+        let _ = hub.state_events.send(StateEvent::ResumeReport {
+            resumed: 2,
+            left_in_recover: 1,
+        });
+        let _ = hub.state_events.send(StateEvent::Repos(Vec::new()));
+        let first = next_message(&mut rx).await;
+        assert!(
+            matches!(first, DaemonMessage::Repos { .. }),
+            "a client the initial push told gets no second report, got {first:?}"
+        );
+        told.abort();
+
+        let (out_tx, mut rx) = mpsc::unbounded_channel();
+        let told =
+            spawn_state_forwarder(&hub, hub.state_events.subscribe(), out_tx, "c2".to_owned());
+
+        let _ = hub.state_events.send(StateEvent::ResumeReport {
+            resumed: 2,
+            left_in_recover: 1,
+        });
+        let _ = hub.state_events.send(StateEvent::Repos(Vec::new()));
+        let first = next_message(&mut rx).await;
+        assert!(
+            matches!(
+                first,
+                DaemonMessage::ResumeReport {
+                    resumed: 2,
+                    left_in_recover: 1
+                }
+            ),
+            "an untold client hears it, got {first:?}"
+        );
+        let second = next_message(&mut rx).await;
+        assert!(matches!(second, DaemonMessage::Repos { .. }));
+        told.abort();
     }
 }
