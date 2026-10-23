@@ -72,7 +72,7 @@ pub trait Agent: Send + Sync + 'static {
     fn descriptor(&self) -> &AgentDescriptor;
     fn program_env_var(&self) -> &'static str;
     fn default_program(&self) -> &'static str;
-    fn passthrough_vars(&self) -> &'static [&'static str];
+    fn passthrough_vars(&self) -> &'static [&'static str] { &[] }
     fn liveness_tokens(&self) -> &'static [&'static str];
     fn check_request(&self, opts: &Self::Options, req: &SpawnCheck<'_>) -> Result<(), Refusal>;
     fn spawn_env(&self, opts: &Self::Options, rows: &ResolvedRows, keys: &dyn KeyLookup) -> Result<EnvPlan, Refusal>;
@@ -101,8 +101,8 @@ Methods with an obvious "does nothing" answer (`passthrough_vars`, `hook_plan`, 
 |---|---|---|---|
 | Identity and display | `descriptor` | Sends it to clients in `Agents`; validates options against its schema; logs with its id | `Agent::as_label` (`protocol/src/lib.rs:36`), `agent_name` (`history.rs:1093`), the client's label, accent and chip tables (Client rendering) |
 | Binary | `program_env_var`, `default_program` | Reads the override, then runs `resolve_agent_program`; `main.rs` logs every plugin's override | `AgentBackend::resolve_program` (`agents/mod.rs:221`), `claude.rs:18-24`, `main.rs:96-97` |
-| Environment | `passthrough_vars`, `spawn_env` | The app's base keep-list (`PATH`, `HOME`, `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`, `TEMP`, `TMP`, `TERM`, `LANG`, `LC_ALL`) plus the plugin's own variables, then the plugin's routing `set` and `remove`; `keys` is the app's `user_env` lookup, read at each spawn and never stored | `passthrough_env` (`providers.rs:292-310`, whose `ANTHROPIC_API_KEY` and `CLAUDE_CONFIG_DIR` become Claude's), `providers::spawn_env` (`server.rs:3742`), the DeepSeek table (`providers.rs:43-82`) |
-| Request validation | `check_request` | Runs in `spawn_session` after the app's schema validation, before rows are sealed and before git work | `providers::check_request` (`server.rs:3686-3687`), `request_provider` (`server.rs:7750-7770`) |
+| Environment | `passthrough_vars`, `spawn_env` | The app's base keep-list (`PATH`, `HOME`, `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`, `TEMP`, `TMP`, `TERM`, `LANG`, `LC_ALL`) plus the plugin's own variables, then the plugin's routing `set` and `remove`; `keys` is the app's `user_env` lookup, read at each spawn and never stored | the daemon's former `passthrough_env`, whose `ANTHROPIC_API_KEY` and `CLAUDE_CONFIG_DIR` became Claude's, and `providers::spawn_env`; the keep-list now lives in `crates/daemon/src/child_env.rs` and the DeepSeek table in `crates/agents/claude/src/providers.rs` |
+| Request validation | `check_request` | Runs in `spawn_session` after the app's schema validation, before rows are sealed and before git work | the daemon's former `providers::check_request` and `request_provider`; the plain-shell refusal stays app code in `check_plain_shell_options` (`crates/daemon/src/server/spawn.rs`) |
 | Conversation id | `conversation_plan` | Acts on the plan (below); records the id as `conversation_id` and passes it in `SpawnContext` | `server.rs:4537-4541` |
 | Hooks | `hook_plan` | Writes `HookPlan::files` into `sessions/<id>/` (owning cleanup and discard), appends `HookPlan::args` with each `{file:name}` replaced by the written path; a failed write runs without hooks | `write_hook_settings` (`server.rs:4391-4432`, its Claude gate at 4392), `build_hook_settings` (`claude.rs:220-273`) |
 | Spawn argv | `interactive_args`, `headless_args` | Builds the PTY or piped spawn; `None` from `headless_args` means "no headless" | `build_interactive_args` / `build_headless_args` (`agents/mod.rs:186-205`), `server.rs:3728-3734`, `standalone_supports` (`server.rs:6042`) |
@@ -127,7 +127,7 @@ The context and result types, all in `agent-api`:
 - `ConversationQuery`: the folder, a time window, a known id when one is recorded, the resolved rows. `FoundConversation { id, last_active, title }`.
 - `HookReport`: status, pending-input update, a new conversation id, the turn's last message, a failure line, a permission mismatch to warn about, and `agent_ended` (today's `SessionEnd` special case for a plain shell, `hook_status.rs:252-258`).
 - `HeadlessEvent`: `Status`, `RecentAction`, `Metrics { cost_usd, input_tokens, output_tokens }`, `ConversationId(String)`.
-- `ReadySignal { min_output_bytes, quiet_for }` (Claude's 1024 bytes and 1.5 s). `ImportedRun<O> { program_name, extra_dirs, options: O, trusted }`. `EnvPlan { set, remove }` (today's `SpawnEnv`). `Refusal { title, detail, hint }` (today's `SpawnFailure`).
+- `ReadySignal { min_output_bytes, quiet_for }` (Claude's 1024 bytes and 1.5 s). `ImportedRun<O> { program_name, extra_dirs, options: O, trusted }`. `EnvPlan { set, remove }`. `Refusal { title, detail, hint }` (today's `SpawnFailure`).
 - `hook_vocabulary`: a helper mapping Claude Code's hook event names and payload fields (`SessionStart`, `PreToolUse` with `AskUserQuestion` / `ExitPlanMode`, `Notification`, `Stop`, …) to a `HookReport`, so any agent whose hooks speak that vocabulary (Claude; Codex's `-c` hooks; the DeepSeek Harness bridge in `agent-harnesses.md`) calls it instead of copying it.
 
 `workspace_prelude` (`agents/mod.rs:271-295`) moves into `agent-api` as a helper that takes the instruction-file names to mention, so "CLAUDE.md" is passed by the plugin.
@@ -268,15 +268,17 @@ Every proof runs as `pwsh -NoProfile -File tools/gate.ps1 run … -- cargo nexte
 
 - [x] **AP.1a Stand up the crates and the registry, Claude moved in unchanged.** New `crates/agents/api` (package `agent-api`) with `AgentPlugin` and the context types; new `crates/agents/claude` (package `agent-claude`) holding `agents/claude.rs` and its tests; new `crates/agents/registry` (package `agent-registry`); the daemon looks plugins up through the registry instead of `backend_for`; `headless.rs` applies `HeadlessEvent`s instead of passing the registry into the parser.
 
-  Files: workspace `Cargo.toml`, the three new crates, `crates/daemon/Cargo.toml`, `agents/mod.rs` (deleted), `agents/claude.rs` (moved), `headless.rs`, `server/spawn.rs` (the former `backend_for` sites), `providers.rs` (moved from `agents/providers.rs`), `tools/test-map.json`. Proof: `-p agent-claude` (the moved argv and stream-json tests), `-p daemon headless`, `-p daemon spawn`.
+  Files: workspace `Cargo.toml`, the three new crates, `crates/daemon/Cargo.toml`, `agents/mod.rs` (deleted), `agents/claude.rs` (moved), `headless.rs`, `server/spawn.rs` (the former `backend_for` sites), `providers.rs`, `tools/test-map.json`. Proof: `-p agent-claude` (the moved argv and stream-json tests), `-p daemon headless`, `-p daemon spawn`.
 
   Landed on main.
 - [x] **AP.1b The trait's final shape and typed options.** The typed `Agent` trait with `type Options`, the adapter to `AgentPlugin`, `OptionValues` in every signature, `ClaudeOptions { permission_mode, provider, model }`; until AP.6, `spawn_session` converts the request's `AgentOptions` and `model` into `OptionValues` in one place; Claude's descriptor fields; the conformance test.
 
   Files: `agent-api` (trait, adapter, `conformance` under `test-support`), `agent-claude` (options, descriptor), `server/spawn.rs` (the converter, `SpawnArgs`). Proof: `-p agent-api` (adapter decode, a failed decode refuses), `-p agent-claude conformance`, `-p daemon spawn`.
-- [ ] **AP.2a Environment behind the seam.** The base keep-list moves to app code and each plugin adds `passthrough_vars`; `providers.rs` moves into `agent-claude` behind `check_request` and `spawn_env`; `user_env.rs` loses its DeepSeek names behind `KeyLookup`; `ResolvedRows` carries the resolved rows.
+- [x] **AP.2a Environment behind the seam.** The base keep-list moves to app code and each plugin adds `passthrough_vars`; `providers.rs` moves into `agent-claude` behind `check_request` and `spawn_env`; `Secret` and `Origin` move to `agent-api` (`user_env.rs` re-exports them) and the app's lookup is passed to the plugin as `KeyLookup`; `ResolvedRows` carries the resolved rows.
 
-  Files: `providers.rs` (moved), `user_env.rs`, `server.rs` (`spawn_session` pre-checks, `request_provider`, the three spawn fns' env), `agent-claude` env module. Proof: `-p agent-claude providers`, the server DeepSeek tests (`-p daemon deepseek`), a headless child gets `ANTHROPIC_API_KEY` only through Claude's list.
+  Files: `providers.rs` (moved to `crates/agents/claude/src/`), `child_env.rs` (new), `user_env.rs`, `server/spawn.rs` (`spawn_session` pre-checks, the three spawn fns' env). Proof: `-p agent-claude providers`, the server DeepSeek tests (`-p daemon deepseek`), a headless child gets `ANTHROPIC_API_KEY` only through Claude's list.
+
+  Landed on main.
 - [ ] **AP.2b Conversation plans and conversations.** `conversation_plan` replaces `server.rs:4537-4541`; the app's `PreCreate` runner and `DiscoverAfterLaunch` poller, with claim arbitration and the contested store, proven with `TestAgent`; `transcripts.rs` moves into `agent-claude` behind `find_conversations`, taking the session's resolved rows; `main.rs` logs every plugin's override.
 
   Files: `transcripts.rs` (moved), a new `crates/daemon/src/conversations.rs`, `server.rs` (`session_history_items`, `recovery_conversation_exists`), `history.rs` (`conversation_candidates`), `main.rs`. Proof: `-p agent-claude transcripts` (a session's `CLAUDE_CONFIG_DIR` row is honoured), `-p daemon conversations` (a pre-create timeout kills the tree; two sessions in one folder never both claim an id), `-p daemon history`.

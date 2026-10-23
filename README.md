@@ -102,6 +102,7 @@ Start with [docs/architecture.md](docs/architecture.md) for how the pieces fit a
 - **Hook-driven**: a session whose status is set by Claude Code's hook events, turned on by its first mapped hook event that passes the ordering check; the screen engine still reads its exits and dialogs, and a plain shell leaves it when its prompt returns.
 - **HS.1, SA.1, DB.1, SS.1, DF.1, FT.1, DI.1**: step ids in the subplans `hook-status.md`, `spoken-alerts.md` (SA alerts, DB Dashboard), `subagent-streams.md`, `dispatch-follow.md`, `remote-file-transfer.md` and `dictation.md` under `docs/plans/`.
 - **Hysteresis (status)**: holding a status change until several checks agree, so a half-drawn screen does not flip a session's status and back; a planned idea for the screen-based status (RT-74).
+- **Keep-list**: the variables every spawned child gets from the daemon's environment whatever its agent (`PATH`, `HOME`, `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`, `TEMP`, `TMP`, `TERM`, `LANG`, `LC_ALL`, with `TERM` set to `xterm-256color`), composed in `crates/daemon/src/child_env.rs`; only a headless child starts from it alone.
 - **Landed**: an issue's state once its commit is on `main` (or on its feature branch), waiting for the owner's acknowledgement, which moves it to Done.
 - **Last message**: the `last_assistant_message` a `Stop` hook reports, trimmed and capped at 8 KiB on the session record, off the wire.
 - **Last-launch summary**: the muted second line of a repo's or workspace's container row in the native sidebar, naming the stored spawn config's agent, run mode, target, model, authority (or `trusted`) and env-row count, absent parts omitted; the row's tooltip reads `Last launch: <summary>`; see `docs/native-client.md` ("Repos and the no-repos states").
@@ -116,6 +117,7 @@ Start with [docs/architecture.md](docs/architecture.md) for how the pieces fit a
 - **Outer band**: the strip along a pane's side that touches the grid's boundary (12% of the pane); a pane drop there splits the whole tab's root instead of that pane (`OuterLeft` and the other `PaneDropEdge` outer edges); see `docs/native-client.md` ("Drag model").
 - **P1.1, P4.4b, …**: native client item ids, as phase number and item number (a letter for a split item); the open ones' rulings are in `docs/plans/native-client.md`.
 - **Parity checklist**: `docs/plans/native-client-parity.md`, every user-visible Tauri feature with its source file (paths on the `tauri-last` tag); the native client reaches parity when it is all ticked.
+- **Passthrough variables**: the extra daemon-environment variables an agent plugin asks to reach its child beside the keep-list (`Agent::passthrough_vars`; Claude's are `ANTHROPIC_API_KEY` and `CLAUDE_CONFIG_DIR`).
 - **Peer identity**: the tailnet peer's whois identity (node, user and stable id) attached to a connection that arrives on the tailnet listener.
 - **Pending create**: the native client's ordered queue of request ids for tabs it asked to create and will make active on arrival; a refusing `Error` or a new `Welcome` removes ids from it.
 - **Pending input**: what a hook-reported `AwaitingInput` is waiting on (a question, a permission or a plan approval), on the session record and snapshot as `pending_input` and in `meta.json` beside `status`, restored by a reattach only with `AwaitingInput`; see `docs/plans/hook-status.md`.
@@ -127,7 +129,7 @@ Start with [docs/architecture.md](docs/architecture.md) for how the pieces fit a
 - **Preset wizard**: the native client's modal that walks a preset's prompt source and variables before launching it; see `docs/native-client.md`.
 - **Progress update**: an attention-feed item for a stop while work continues, or a summary of work in progress; shown in the feed, never pushed to the phone.
 - **Prompt source**: where a preset launch takes its prompts from: a prompts file, a folder of `.md` files, inline text or GitHub issue ranges, limited to the sources the preset allows.
-- **Provider table**: the daemon's built-in, not user-editable list of the environment variables each non-Anthropic provider sets, removes and locks (`crates/daemon/src/providers.rs`).
+- **Provider table**: the daemon's built-in, not user-editable list of the environment variables each non-Anthropic provider sets, removes and locks (`crates/agents/claude/src/providers.rs`, in the Claude plugin).
 - **Quarantine**: an account whose refresh token was rejected (`invalid_grant`), skipped until it is logged in again.
 - **Re-ask**: the native client resending a queued in-place spawn, unchanged, when its checkout prompt's turn comes, so the daemon answers with current numbers instead of the stale prompt being shown.
 - **Reached tests**: the tests a change's diff reaches through the test map, as one nextest filterset; `.\rt.ps1 test -Reached` runs them, and a central or unmapped file reaches the full suite instead.

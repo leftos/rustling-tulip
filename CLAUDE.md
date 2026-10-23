@@ -15,7 +15,7 @@ crates/tracer/          binary = rt-tracer.exe: per-session ConPTY supervisor th
 crates/tracer-protocol/ stable ABI between daemon and tracer (additive-only; see docs/tracer-abi.md)
 crates/daemon-client/   client-side daemon supervision (ensure-running, handshake, config dir, client identity, stop) shared by the clients
 crates/agents/api/      package agent-api: the typed Agent trait (type Options) and its blanket AgentPlugin adapter, SpawnContext, HeadlessEvent, validate, workspace_prelude, and the conformance check (feature test-support)
-crates/agents/claude/   package agent-claude: the Claude plugin (ClaudeOptions and descriptor, argv, hook settings document, stream-json parsing, default_model)
+crates/agents/claude/   package agent-claude: the Claude plugin (ClaudeOptions and descriptor, argv, hook settings document, stream-json parsing, default_model, the DeepSeek provider table)
 crates/agents/registry/ package agent-registry: the compiled-in plugin list (plugin(Agent), all())
 crates/tailnet/         Tailscale CLI wrapper (whois, whoami, status, cert) and the owner rule that decides which tailnet peers may connect (docs/plans/remote-access.md)
 apps/native/            binary = rustling-tulip-native (thin main.rs over a lib, rustling_tulip_native): GPUI + alacritty_terminal desktop client (see docs/native-client.md); tests/ui/ (one test binary, a module per spec) drive RootView::with_transport against a scripted fake daemon
@@ -106,7 +106,7 @@ The `tools/e2e/fake-claude/` shim (`fake-claude.cmd` + `index.mjs`) replaces the
 |---|---|---|
 | `RUSTLING_TULIP_CLAUDE` | Path to `claude` binary | `claude` (PATH lookup) |
 | `RUSTLING_TULIP_TAILSCALE` | Path to the `tailscale` CLI that `crates/tailnet` runs | `%ProgramFiles%\Tailscale\tailscale.exe`, else `tailscale` (PATH lookup) |
-| `DEEPSEEK_API_KEY` | DeepSeek key; the daemon reads it at each DeepSeek-provider Claude spawn (process environment, then the Windows user scope, `crates/daemon/src/user_env.rs`) and passes it to the child only as `ANTHROPIC_AUTH_TOKEN`; never stored | unset (the spawn is refused) |
+| `DEEPSEEK_API_KEY` | DeepSeek key; the Claude plugin's spawn environment reads it at each DeepSeek-provider Claude spawn through the daemon's key lookup (process environment, then the Windows user scope, `crates/daemon/src/user_env.rs`; table in `crates/agents/claude/src/providers.rs`) and passes it to the child only as `ANTHROPIC_AUTH_TOKEN`; never stored | unset (the spawn is refused) |
 | `RUSTLING_TULIP_SHELL` | Shell used for plain-shell sessions | auto-detect |
 | `RUSTLING_TULIP_CONFIG_DIR` | Config dir override (useful for e2e test isolation) | `%APPDATA%\leftos\rustling-tulip\config\` |
 | `RUSTLING_TULIP_WORKTREES_DIR` | Worktrees root override | `%LOCALAPPDATA%\leftos\rustling-tulip\data\worktrees\` |

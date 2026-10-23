@@ -11,7 +11,6 @@
 use crate::env_secrets::{self, SealOutcome};
 use crate::orphan;
 use crate::paths::{Dirs, normalize_path_key};
-use crate::providers;
 use crate::pty::PtyExit;
 use crate::session::{SessionRecord, SessionRegistry};
 use crate::sync::lock;
@@ -811,7 +810,10 @@ fn entry_from_tracer_log(
 
 /// The provider an imported session that ran `model` was on.
 fn imported_provider(model: Option<&str>) -> ClaudeProvider {
-    model.map_or(ClaudeProvider::Anthropic, providers::provider_for_model)
+    model.map_or(
+        ClaudeProvider::Anthropic,
+        agent_registry::provider_for_model,
+    )
 }
 
 /// The value of the last `--model <m>` or `--model=<m>` in `args`.
@@ -1151,7 +1153,7 @@ fn shell_allowed(provider: ClaudeProvider) -> Result<(), String> {
     if provider.is_anthropic() {
         return Ok(());
     }
-    Err(match providers::display_name(provider) {
+    Err(match agent_registry::display_name(provider) {
         Some(name) => format!("{name} sessions recover as Claude."),
         None => "Sessions on this Claude provider recover as Claude.".to_owned(),
     })

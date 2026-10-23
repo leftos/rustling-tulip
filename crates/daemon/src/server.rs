@@ -24,7 +24,7 @@ mod spawn;
 pub(crate) use self::spawn::spawn_session;
 #[expect(
     unused_imports,
-    reason = "doc comments in history.rs and agents/providers.rs name these at their crate::server path"
+    reason = "doc comments in history.rs name these at their crate::server path"
 )]
 pub(crate) use self::spawn::{render_shell_resume, resolve_env_refs};
 

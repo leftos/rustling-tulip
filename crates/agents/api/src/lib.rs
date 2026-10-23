@@ -69,6 +69,143 @@ pub enum HeadlessEvent {
     },
 }
 
+/// An environment value whose text is never printed: no `Display`, no
+/// `Serialize`, and a `Debug` that shows `Secret(<redacted>)`.
+pub struct Secret(String);
+
+impl Secret {
+    /// Wrap a value so it redacts its text wherever it is printed.
+    #[must_use]
+    pub fn new(value: String) -> Self {
+        Self(value)
+    }
+
+    /// The value's text, for the one place that needs it: the environment a
+    /// child process is spawned with.
+    #[must_use]
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for Secret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Secret(<redacted>)")
+    }
+}
+
+/// Where a resolved value came from, so a log line can say so without the
+/// value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    /// The daemon's own process environment.
+    Process,
+    /// The user's persistent environment (`HKCU\Environment` on Windows).
+    UserScope,
+    /// The machine's environment (`HKLM\...\Session Manager\Environment` on
+    /// Windows).
+    SystemScope,
+}
+
+/// The app's lookup of a named variable the way the user set it, read at
+/// each spawn and never stored. Any `Fn(&str) -> Option<(Secret, Origin)>`
+/// is one.
+pub trait KeyLookup {
+    /// `name`'s value and where it came from, or `None` when it is unset.
+    fn key(&self, name: &str) -> Option<(Secret, Origin)>;
+}
+
+impl<F: Fn(&str) -> Option<(Secret, Origin)>> KeyLookup for F {
+    fn key(&self, name: &str) -> Option<(Secret, Origin)> {
+        self(name)
+    }
+}
+
+/// A spawn's environment rows after the app resolved their `${env:}` and
+/// `${secret:}` references: values included, never stored. Names match
+/// case-insensitively, as Windows environment names do.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct ResolvedRows(Vec<(String, String)>);
+
+impl ResolvedRows {
+    /// The rows, in the order the spawn sent them.
+    #[must_use]
+    pub fn new(rows: Vec<(String, String)>) -> Self {
+        Self(rows)
+    }
+
+    /// Every row as `(name, value)`, in order.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.0.iter().map(|(k, v)| (k.as_str(), v.as_str()))
+    }
+
+    /// The value of the first row named `name`.
+    #[must_use]
+    pub fn get(&self, name: &str) -> Option<&str> {
+        self.iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value)
+    }
+
+    /// Whether a row names `name`.
+    #[must_use]
+    pub fn contains(&self, name: &str) -> bool {
+        self.get(name).is_some()
+    }
+}
+
+/// Shows the row names only: the values hold resolved secrets.
+impl fmt::Debug for ResolvedRows {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list()
+            .entries(self.0.iter().map(|(k, _)| k))
+            .finish()
+    }
+}
+
+/// What a plugin checks about a spawn request before anything is sealed,
+/// written or checked out.
+pub struct SpawnCheck<'a> {
+    /// The session's mode.
+    pub mode: protocol::SessionMode,
+    /// The request's environment rows as sent, references unresolved; only
+    /// their names may be read.
+    pub rows: &'a [(String, String)],
+    /// The app's lookup, for a key whose presence the plugin requires.
+    pub keys: &'a dyn KeyLookup,
+}
+
+/// A plugin refused a spawn: the modal the user sees, naming variables and
+/// never a value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refusal {
+    pub title: String,
+    pub detail: String,
+    pub hint: Option<String>,
+}
+
+/// The plugin's part of a spawn's environment: `set` goes on top of the
+/// app's keep-list and the resolved rows, and every name in `remove` is
+/// taken away from the child.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct EnvPlan {
+    /// Variables the child gets, in order, each name once.
+    pub set: Vec<(String, String)>,
+    /// Variables the child must not get, even when the daemon has them.
+    pub remove: Vec<String>,
+}
+
+/// Shows the variable names only: `set` holds resolved secrets and keys.
+impl fmt::Debug for EnvPlan {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let set_keys: Vec<&str> = self.set.iter().map(|(k, _)| k.as_str()).collect();
+        f.debug_struct("EnvPlan")
+            .field("set_keys", &set_keys)
+            .field("remove", &self.remove)
+            .finish()
+    }
+}
+
 /// Implemented once per supported CLI, over the agent's own typed options.
 /// The daemon never calls it directly: it reaches every agent through the
 /// [`AgentPlugin`] this crate implements for it, so the daemon doesn't need
@@ -90,6 +227,33 @@ pub trait Agent: Send + Sync + 'static {
     /// Fallback executable name when [`Self::program_env_var`] is unset.
     /// This is the name looked up on `PATH`.
     fn default_program(&self) -> &'static str;
+
+    /// Variables of the daemon's environment the agent's child gets on top
+    /// of the app's keep-list, each when the daemon has it.
+    fn passthrough_vars(&self) -> &'static [&'static str] {
+        &[]
+    }
+
+    /// Refuse a spawn request before anything is sealed, written or checked
+    /// out. Reads the rows' names only.
+    ///
+    /// # Errors
+    ///
+    /// The refusal the user sees, naming a variable and never a value.
+    fn check_request(&self, opts: &Self::Options, req: &SpawnCheck<'_>) -> Result<(), Refusal>;
+
+    /// The agent's part of the child's environment for a spawn whose
+    /// resolved rows are `rows`, reading any key it needs through `keys`.
+    ///
+    /// # Errors
+    ///
+    /// The refusal the user sees, naming a variable and never a value.
+    fn spawn_env(
+        &self,
+        opts: &Self::Options,
+        rows: &ResolvedRows,
+        keys: &dyn KeyLookup,
+    ) -> Result<EnvPlan, Refusal>;
 
     /// The argv passed to the CLI for an interactive (PTY-attached) session.
     /// Does not include the executable name itself — that is resolved by
@@ -151,6 +315,30 @@ pub trait AgentPlugin: Send + Sync {
     /// See [`Agent::default_program`].
     fn default_program(&self) -> &'static str;
 
+    /// See [`Agent::passthrough_vars`].
+    fn passthrough_vars(&self) -> &'static [&'static str];
+
+    /// [`Agent::check_request`] over `opts` decoded.
+    ///
+    /// # Errors
+    ///
+    /// The agent's refusal, or one naming the agent when `opts` do not
+    /// decode.
+    fn check_request(&self, opts: &OptionValues, req: &SpawnCheck<'_>) -> Result<(), Refusal>;
+
+    /// [`Agent::spawn_env`] over `opts` decoded.
+    ///
+    /// # Errors
+    ///
+    /// The agent's refusal, or one naming the agent when `opts` do not
+    /// decode.
+    fn spawn_env(
+        &self,
+        opts: &OptionValues,
+        rows: &ResolvedRows,
+        keys: &dyn KeyLookup,
+    ) -> Result<EnvPlan, Refusal>;
+
     /// [`Agent::interactive_args`] over `opts` decoded.
     fn interactive_args(
         &self,
@@ -200,6 +388,25 @@ impl<A: Agent> AgentPlugin for A {
 
     fn default_program(&self) -> &'static str {
         Agent::default_program(self)
+    }
+
+    fn passthrough_vars(&self) -> &'static [&'static str] {
+        Agent::passthrough_vars(self)
+    }
+
+    fn check_request(&self, opts: &OptionValues, req: &SpawnCheck<'_>) -> Result<(), Refusal> {
+        let opts = decode_for_spawn(self, opts)?;
+        Agent::check_request(self, &opts, req)
+    }
+
+    fn spawn_env(
+        &self,
+        opts: &OptionValues,
+        rows: &ResolvedRows,
+        keys: &dyn KeyLookup,
+    ) -> Result<EnvPlan, Refusal> {
+        let opts = decode_for_spawn(self, opts)?;
+        Agent::spawn_env(self, &opts, rows, keys)
     }
 
     fn interactive_args(
@@ -254,6 +461,19 @@ fn decode_options<A: Agent>(agent: &A, values: &OptionValues) -> Result<A::Optio
                 Agent::descriptor(agent).label
             ),
         })
+}
+
+/// `values` as `agent`'s typed options, or the refusal of a spawn naming the
+/// agent when they do not decode.
+fn decode_for_spawn<A: Agent>(agent: &A, values: &OptionValues) -> Result<A::Options, Refusal> {
+    decode_options(agent, values).map_err(|err| Refusal {
+        title: format!(
+            "Couldn't start the {} session",
+            Agent::descriptor(agent).label
+        ),
+        detail: err.to_string(),
+        hint: None,
+    })
 }
 
 /// An agent refused a call: the spawn's options did not decode into the
@@ -526,6 +746,62 @@ mod tests {
             _initial_prompt: Option<&str>,
         ) -> Vec<String> {
             vec![opts.mode.clone(), opts.sandbox.to_string()]
+        }
+
+        fn check_request(&self, _opts: &TestOptions, _req: &SpawnCheck<'_>) -> Result<(), Refusal> {
+            Ok(())
+        }
+
+        fn spawn_env(
+            &self,
+            opts: &TestOptions,
+            _rows: &ResolvedRows,
+            _keys: &dyn KeyLookup,
+        ) -> Result<EnvPlan, Refusal> {
+            Ok(EnvPlan {
+                set: vec![("TEST_MODE".to_string(), opts.mode.clone())],
+                remove: Vec::new(),
+            })
+        }
+    }
+
+    fn no_key(_name: &str) -> Option<(Secret, Origin)> {
+        None
+    }
+
+    #[test]
+    fn passthrough_vars_defaults_to_none() {
+        let plugin: &dyn AgentPlugin = &TestAgent;
+        assert_eq!(plugin.passthrough_vars(), [] as [&str; 0]);
+    }
+
+    #[test]
+    fn adapter_refuses_check_request_and_spawn_env_when_options_do_not_decode() {
+        let plugin: &dyn AgentPlugin = &TestAgent;
+        let check = SpawnCheck {
+            mode: protocol::SessionMode::Interactive,
+            rows: &[],
+            keys: &no_key,
+        };
+        let rows = ResolvedRows::new(Vec::new());
+        let good = values(&[("mode", text("slow")), ("sandbox", OptionValue::Bool(true))]);
+        assert_eq!(plugin.check_request(&good, &check), Ok(()));
+        let plan = plugin
+            .spawn_env(&good, &rows, &no_key)
+            .expect("decoded options build a plan");
+        assert_eq!(plan.set, [("TEST_MODE".to_string(), "slow".to_string())]);
+        let bad = values(&[("mode", text("slow")), ("sandbox", text("yes"))]);
+        for refusal in [
+            plugin
+                .check_request(&bad, &check)
+                .expect_err("options that do not decode refuse the check"),
+            plugin
+                .spawn_env(&bad, &rows, &no_key)
+                .expect_err("options that do not decode refuse the environment"),
+        ] {
+            assert_eq!(refusal.title, "Couldn't start the Test agent session");
+            assert!(refusal.detail.contains("Test agent"), "{}", refusal.detail);
+            assert_eq!(refusal.hint, None);
         }
     }
 

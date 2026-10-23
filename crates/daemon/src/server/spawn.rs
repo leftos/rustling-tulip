@@ -30,7 +30,7 @@ use crate::{
     env_secrets, headless, inject, orphan, osc_title, pty_state, screen, spawn_plan, tracer_client,
     user_env, workspace as ws,
 };
-use agent_api::SpawnContext;
+use agent_api::{AgentPlugin, EnvPlan, KeyLookup, ResolvedRows, SpawnCheck, SpawnContext};
 use anyhow::{Context as _, anyhow};
 use chrono::Utc;
 use directories::UserDirs;
@@ -237,21 +237,21 @@ async fn spawn_session_with<R>(
     resolve: R,
 ) -> anyhow::Result<protocol::SessionSnapshot>
 where
-    R: Fn(&str) -> Option<(user_env::Secret, user_env::Origin)>,
+    R: KeyLookup,
 {
     // Phase-level timing for the spawn pipeline so we can tell at a glance
     // whether a slow spawn was the git worktree setup, the PTY/child boot,
     // or something on the registry side. Logged at info so users debugging
     // perceived slowness can read them without flipping log filters.
     let t_total = std::time::Instant::now();
-    // A plain shell asking for a provider, a provider this daemon doesn't
-    // know, or a row setting one of the provider's locked variables or a
-    // variable it removes from the child refuses
-    // before the rows are sealed and before any git work, so a refused spawn
-    // writes nothing to the credential store and checks nothing out.
-    let provider = request_provider(&req);
-    crate::providers::check_request(req.mode, provider, &req.extra_env)?;
+    // A plain shell carrying agent options, or a request the agent's plugin
+    // refuses, refuses before the rows are sealed and before any git work,
+    // so a refused spawn writes nothing to the credential store and checks
+    // nothing out.
     check_plain_shell_options(&req)?;
+    let options = options_from_request(&req.agent_options, req.model.as_deref());
+    let backend = agent_registry::plugin(req.agent_options.agent());
+    check_with_plugin(&req, backend, &options, &resolve)?;
     // A secret row's literal moves into the credential store and becomes a
     // `${secret:<id>}` reference before anything captures the request, so the
     // session record, the sidecar, `state.json`, the `Repos`/`Workspaces`
@@ -268,7 +268,7 @@ where
         initial_prompt,
         dangerously_skip_permissions,
         agent_options,
-        model,
+        model: _,
         extra_env,
         secret_env_keys: _,
         prompt_injector,
@@ -276,7 +276,6 @@ where
         resume_conversation,
     } = req;
     let agent = agent_options.agent();
-    let options = options_from_request(&agent_options, model.as_deref());
     info!(
         ?mode,
         agent = agent.as_label(),
@@ -293,18 +292,25 @@ where
         ));
     }
     reject_pin_without_worktree(&target)?;
-    let backend = agent_registry::plugin(agent);
     if mode == SessionMode::Headless && !backend.descriptor().caps.headless {
         return Err(headless_unsupported(agent));
     }
     // Env references resolve before any git work, so a refusal leaves no
     // worktree behind. `stored_config` keeps the references as sent; only the
     // child's environment gets their values.
-    let extra_env = resolve_env_refs(&extra_env, &resolve)?;
-    // The provider's routing variables and key join the child's environment
+    let rows = ResolvedRows::new(resolve_env_refs(&extra_env, |name| resolve.key(name))?);
+    // The plugin's routing variables and key join the child's environment
     // here, after `stored_config` was captured, so they are never stored; a
     // missing key refuses before any git work.
-    let env = crate::providers::spawn_env(provider, &extra_env, &resolve)?;
+    let plan = backend
+        .spawn_env(&options, &rows, &resolve)
+        .map_err(spawn_plan::SpawnFailure::from)?;
+    let env = EnvPlan {
+        set: crate::child_env::compose(backend.passthrough_vars(), &rows, &plan, |name| {
+            std::env::var(name).ok()
+        }),
+        remove: plan.remove,
+    };
 
     let t_resolve = std::time::Instant::now();
     let mut standalone_add_dirs = Vec::new();
@@ -516,9 +522,10 @@ struct SpawnArgs {
     /// The agent's options, keyed by its descriptor's fields (see
     /// [`options_from_request`]).
     options: OptionValues,
-    /// The child's environment: the keep-list, the resolved rows and the
-    /// provider's routing variables. Never stored.
-    env: crate::providers::SpawnEnv,
+    /// The child's environment: the keep-list, the agent's passthrough
+    /// variables, the resolved rows and the agent's routing variables (see
+    /// [`crate::child_env::compose`]). Never stored.
+    env: EnvPlan,
     /// Scripted PTY input driven post-spawn for interactive sessions. When
     /// `Some`, the interactive spawn path omits the prompt CLI flag — the
     /// injector is responsible for delivering the prompt. Ignored by the
@@ -1662,9 +1669,9 @@ pub(crate) fn resolve_env_refs(
 
 /// Everything the daemon can check about a spawn request before it does work
 /// it can't undo, on the mode, its agent options (see
-/// [`check_plain_shell_options`]), the provider (`Anthropic` when its options
-/// name none) and the env rows the request will spawn with: see
-/// [`check_env_rows_with`]. The dispatcher runs it before a checkout
+/// [`check_plain_shell_options`]), what its agent's plugin refuses and the
+/// env rows the request will spawn with: see [`check_env_rows_with`]. The
+/// dispatcher runs it before a checkout
 /// confirm, and recovery on the planned request before it registers a repo;
 /// `spawn_session` seals and resolves again for the child.
 pub(super) fn check_spawn_request(request: &SpawnRequest) -> Result<(), spawn_plan::SpawnFailure> {
@@ -1678,18 +1685,12 @@ pub(super) fn check_spawn_request_with(
     resolve: impl Fn(&str) -> Option<(user_env::Secret, user_env::Origin)>,
 ) -> Result<(), spawn_plan::SpawnFailure> {
     check_plain_shell_options(request)?;
-    check_env_rows_with(
-        &request.extra_env,
-        &request.secret_env_keys,
-        request.mode,
-        request_provider(request),
-        resolve,
-    )
+    check_env_rows_with(request, resolve)
 }
 
 /// A plain shell takes no agent options: a request carrying a model, a
-/// permission mode or `dangerously_skip_permissions` is refused before any
-/// git work or capture.
+/// permission mode, `dangerously_skip_permissions` or a provider other than
+/// Anthropic is refused before any git work or capture.
 fn check_plain_shell_options(request: &SpawnRequest) -> Result<(), spawn_plan::SpawnFailure> {
     if request.mode != SessionMode::PlainShell {
         return Ok(());
@@ -1706,6 +1707,12 @@ fn check_plain_shell_options(request: &SpawnRequest) -> Result<(), spawn_plan::S
         "Plain shell sessions do not accept a permission mode."
     } else if request.dangerously_skip_permissions {
         "Plain shell sessions do not accept dangerously_skip_permissions."
+    } else if request
+        .agent_options
+        .claude_provider()
+        .is_some_and(|provider| !provider.is_anthropic())
+    {
+        "Plain shell sessions do not accept a Claude provider."
     } else {
         return Ok(());
     };
@@ -1716,26 +1723,41 @@ fn check_plain_shell_options(request: &SpawnRequest) -> Result<(), spawn_plan::S
     })
 }
 
-/// The Claude provider `request` spawns on: its options', else Anthropic.
-fn request_provider(request: &SpawnRequest) -> protocol::ClaudeProvider {
-    request.agent_options.claude_provider().unwrap_or_default()
+/// The refusal `backend`, the plugin of `request`'s agent, makes of the
+/// request decoded as `options`, reading any key it requires through `keys`.
+/// A plain shell runs no agent, so its plugin is never asked.
+fn check_with_plugin(
+    request: &SpawnRequest,
+    backend: &dyn AgentPlugin,
+    options: &OptionValues,
+    keys: &dyn KeyLookup,
+) -> Result<(), spawn_plan::SpawnFailure> {
+    if request.mode == SessionMode::PlainShell {
+        return Ok(());
+    }
+    let check = SpawnCheck {
+        mode: request.mode,
+        rows: &request.extra_env,
+        keys,
+    };
+    backend
+        .check_request(options, &check)
+        .map_err(spawn_plan::SpawnFailure::from)
 }
 
-/// The checks behind [`check_spawn_request`]: the request must pass
-/// [`crate::providers::check_request`], every secret row must be
-/// sealable (see [`env_secrets::check_sealable`]), every reference
-/// resolvable through `resolve`, and the provider's key set.
+/// The checks behind [`check_spawn_request`]: the request must pass its
+/// agent plugin's check (see [`check_with_plugin`]), every secret row must
+/// be sealable (see [`env_secrets::check_sealable`]), and every reference
+/// resolvable through `resolve`.
 fn check_env_rows_with(
-    rows: &[(String, String)],
-    secret_keys: &[String],
-    mode: SessionMode,
-    provider: protocol::ClaudeProvider,
+    request: &SpawnRequest,
     resolve: impl Fn(&str) -> Option<(user_env::Secret, user_env::Origin)>,
 ) -> Result<(), spawn_plan::SpawnFailure> {
-    crate::providers::check_request(mode, provider, rows)?;
-    env_secrets::check_sealable(rows, secret_keys)?;
-    resolve_env_refs(rows, &resolve)?;
-    crate::providers::check_key(provider, &resolve)?;
+    let options = options_from_request(&request.agent_options, request.model.as_deref());
+    let backend = agent_registry::plugin(request.agent_options.agent());
+    check_with_plugin(request, backend, &options, &resolve)?;
+    env_secrets::check_sealable(&request.extra_env, &request.secret_env_keys)?;
+    resolve_env_refs(&request.extra_env, &resolve)?;
     Ok(())
 }
 
@@ -1753,7 +1775,7 @@ mod tests {
     use crate::server::test_support::{
         DEEPSEEK_KEY_SENTINEL, MISSING_SECRET_ID, ScratchDir, UNSET_REF, deepseek_key,
         deepseek_spawn, dispatch_one, env, env_ref_repo_hub, env_spawn, git_init, git_ok,
-        hook_settings_file, hook_test_hub, idle_record, lookup_a, repo_entry, secret_ref,
+        hook_settings_file, hook_test_hub, idle_record, lookup_a, no_key, repo_entry, secret_ref,
         spawnless_test_hub, test_hub, workspace_entry,
     };
     use protocol::SessionEnd;
@@ -1943,7 +1965,7 @@ mod tests {
             dangerously_skip_permissions: false,
             agent: Agent::Claude,
             options: options_from_request(&AgentOptions::claude(None), None),
-            env: crate::providers::SpawnEnv::default(),
+            env: agent_api::EnvPlan::default(),
             prompt_injector: None,
             origin: None,
             resume_conversation: None,
@@ -2000,7 +2022,7 @@ mod tests {
             dangerously_skip_permissions: false,
             agent: Agent::Claude,
             options: options_from_request(&AgentOptions::claude(None), None),
-            env: crate::providers::SpawnEnv::default(),
+            env: agent_api::EnvPlan::default(),
             prompt_injector: Some(protocol::PromptInjector {
                 steps: vec![
                     protocol::InjectorStep::Delay { ms: 2000 },
@@ -2415,7 +2437,7 @@ mod tests {
             Vec::new(),
             Some("rq-ds"),
         );
-        let err = spawn_session_with(&hub, req, None, false, |_| None)
+        let err = spawn_session_with(&hub, req, None, false, no_key)
             .await
             .expect_err("a missing key refuses");
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
@@ -2529,7 +2551,7 @@ mod tests {
             None,
         );
         // No key anywhere: the shell refusal comes first, not the key's.
-        let err = spawn_session_with(&hub, req, None, false, |_| None)
+        let err = spawn_session_with(&hub, req, None, false, no_key)
             .await
             .expect_err("a plain shell refuses a provider");
         let text = format!("{err:#}");
@@ -2578,39 +2600,26 @@ mod tests {
 
     #[test]
     fn the_env_row_pre_check_refuses_a_deepseek_spawn_without_its_key() {
-        let failure = check_env_rows_with(
-            &[],
-            &[],
+        let deepseek = deepseek_spawn(
+            single_target(true, None),
             SessionMode::Interactive,
-            protocol::ClaudeProvider::Deepseek,
-            |_| None,
-        )
-        .expect_err("a missing key refuses");
+            Vec::new(),
+            None,
+        );
+        let anthropic = env_spawn(
+            single_target(true, None),
+            SessionMode::Interactive,
+            Vec::new(),
+            None,
+        );
+        let failure = check_env_rows_with(&deepseek, |_| None).expect_err("a missing key refuses");
         assert!(
             failure.detail.contains("`DEEPSEEK_API_KEY`"),
             "{}",
             failure.detail
         );
-        assert!(
-            check_env_rows_with(
-                &[],
-                &[],
-                SessionMode::Interactive,
-                protocol::ClaudeProvider::Deepseek,
-                deepseek_key,
-            )
-            .is_ok()
-        );
-        assert!(
-            check_env_rows_with(
-                &[],
-                &[],
-                SessionMode::Interactive,
-                protocol::ClaudeProvider::Anthropic,
-                |_| None,
-            )
-            .is_ok()
-        );
+        assert!(check_env_rows_with(&deepseek, deepseek_key).is_ok());
+        assert!(check_env_rows_with(&anthropic, |_| None).is_ok());
     }
 
     #[tokio::test]
@@ -2704,7 +2713,7 @@ mod tests {
     /// A value no stored copy of a sealed row may ever hold.
     const SECRET_SENTINEL: &str = "rt-secret-sentinel-3d8f1a";
 
-    /// `key`'s value in a child env built by `providers::spawn_env`.
+    /// `key`'s value in a child env the spawn composed.
     fn child_value(child: &[(String, String)], key: &str) -> Option<String> {
         child.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone())
     }

@@ -9,6 +9,7 @@
 mod binary_cache;
 mod branch_fate;
 mod branch_names;
+mod child_env;
 mod detach;
 mod env_secrets;
 mod file_fetch;
@@ -28,7 +29,6 @@ mod orphan;
 mod osc_title;
 mod paths;
 mod presets;
-mod providers;
 mod pty;
 mod pty_state;
 mod registry;

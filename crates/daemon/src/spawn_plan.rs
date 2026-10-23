@@ -22,6 +22,17 @@ pub struct SpawnFailure {
     pub hint: Option<String>,
 }
 
+/// A plugin's refusal is shown as any other spawn failure.
+impl From<agent_api::Refusal> for SpawnFailure {
+    fn from(refusal: agent_api::Refusal) -> Self {
+        Self {
+            title: refusal.title,
+            detail: refusal.detail,
+            hint: refusal.hint,
+        }
+    }
+}
+
 /// Resolve the ref a *new* branch should be created from.
 ///
 /// Priority: explicit caller value → the repo's persisted default → lazy

@@ -1,25 +1,26 @@
 //! The provider table: the environment a Claude session gets for the service
 //! its `claude` CLI talks to.
 //!
-//! Anthropic has no entry: its spawns get the daemon's keep-list plus the
-//! spawn's own rows, as they always have. A non-Anthropic provider sets its
-//! routing variables, removes the variables that would point the CLI at
-//! another endpoint or credential, and reads its key at each spawn. The
-//! routing variables and the key are built here, after the stored config was
-//! captured, so they never reach `meta.json`, history, `state.json` or the
-//! wire.
+//! Anthropic has no entry: its spawns get the app's keep-list, Claude's
+//! passthrough variables and the spawn's own rows, as they always have. A
+//! non-Anthropic provider sets its routing variables, removes the variables
+//! that would point the CLI at another endpoint or credential, and reads its
+//! key at each spawn. The routing variables and the key are built after the
+//! stored config was captured, so they never reach `meta.json`, history,
+//! `state.json` or the wire.
 
-use protocol::{ClaudeProvider, SessionMode};
+use agent_api::{EnvPlan, KeyLookup, Refusal, ResolvedRows, SpawnCheck};
+use protocol::ClaudeProvider;
 use tracing::debug;
 
-use crate::spawn_plan::SpawnFailure;
-use crate::user_env::{Origin, Secret};
+use crate::DEEPSEEK_MODEL;
 
 /// One non-Anthropic provider's routing.
 struct ProviderEntry {
     /// The provider's name as the user reads it.
     display: &'static str,
-    /// The variable the provider's key is read from (see [`crate::user_env`]).
+    /// The variable the provider's key is read from (through the app's
+    /// [`KeyLookup`]).
     key_var: &'static str,
     /// The variable the key is passed to the child under.
     token_var: &'static str,
@@ -37,8 +38,6 @@ struct ProviderEntry {
     /// case-insensitively, so the importer can tell its sessions by `--model`.
     model_prefix: &'static str,
 }
-
-const DEEPSEEK_MODEL: &str = "deepseek-flash";
 
 const DEEPSEEK: ProviderEntry = ProviderEntry {
     display: "DeepSeek",
@@ -78,30 +77,9 @@ const DEEPSEEK: ProviderEntry = ProviderEntry {
 /// Every non-Anthropic provider with its table entry.
 const TABLE: [(ClaudeProvider, &ProviderEntry); 1] = [(ClaudeProvider::Deepseek, &DEEPSEEK)];
 
-/// The environment a spawn's child gets: `set` on top of what it inherits,
-/// with every name in `remove` taken away.
-#[derive(Clone, Default, PartialEq, Eq)]
-pub struct SpawnEnv {
-    /// Variables the child gets, in order, each name once.
-    pub set: Vec<(String, String)>,
-    /// Variables the child must not get, even when the daemon has them.
-    pub remove: Vec<String>,
-}
-
-/// Shows the variable names only: `set` holds resolved secrets and keys.
-impl std::fmt::Debug for SpawnEnv {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let set_keys: Vec<&str> = self.set.iter().map(|(k, _)| k.as_str()).collect();
-        f.debug_struct("SpawnEnv")
-            .field("set_keys", &set_keys)
-            .field("remove", &self.remove)
-            .finish()
-    }
-}
-
 /// The table entry for `provider`: none for Anthropic, a refusal for a
 /// provider this daemon does not know.
-fn entry(provider: ClaudeProvider) -> Result<Option<&'static ProviderEntry>, SpawnFailure> {
+fn entry(provider: ClaudeProvider) -> Result<Option<&'static ProviderEntry>, Refusal> {
     if provider.is_anthropic() {
         return Ok(None);
     }
@@ -109,7 +87,7 @@ fn entry(provider: ClaudeProvider) -> Result<Option<&'static ProviderEntry>, Spa
         .iter()
         .find(|(listed, _)| *listed == provider)
         .map(|(_, entry)| Some(*entry))
-        .ok_or_else(|| SpawnFailure {
+        .ok_or_else(|| Refusal {
             title: "Couldn't start the Claude session".to_owned(),
             detail: "This daemon does not know the requested Claude provider.".to_owned(),
             hint: None,
@@ -146,39 +124,35 @@ fn named(list: &[&'static str], key: &str) -> Option<&'static str> {
         .copied()
 }
 
-/// Refuse a spawn request before anything is written or checked out: a plain
-/// shell asking for a non-Anthropic provider, an unknown provider, or an
-/// environment row setting one of the provider's locked or removed
-/// variables. Reads the rows' keys only, so it may run before the rows are
-/// sealed.
-pub fn check_request(
-    mode: SessionMode,
-    provider: ClaudeProvider,
-    rows: &[(String, String)],
-) -> Result<(), SpawnFailure> {
-    if mode == SessionMode::PlainShell && !provider.is_anthropic() {
-        return Err(SpawnFailure {
-            title: "Couldn't start the shell session".to_owned(),
-            detail: "Plain shell sessions do not accept a Claude provider.".to_owned(),
-            hint: None,
-        });
+/// Refuse a spawn request on `provider` before anything is written or
+/// checked out: an unknown provider, an environment row setting one of the
+/// provider's locked or removed variables, then a key `req.keys` cannot
+/// find. Reads the rows' names only, so it may run before the rows are
+/// sealed, and drops the key when it finds it.
+pub(crate) fn check_request(provider: ClaudeProvider, req: &SpawnCheck<'_>) -> Result<(), Refusal> {
+    check_rows(provider, req.rows.iter().map(|(key, _)| key.as_str()))?;
+    match entry(provider)? {
+        Some(entry) if req.keys.key(entry.key_var).is_none() => Err(missing_key(entry)),
+        _ => Ok(()),
     }
-    check_rows(provider, rows)
 }
 
-/// Refuse an unknown `provider`, or a row setting one of its locked
-/// variables or a variable it removes from the child. Names the variable,
-/// never a row's value.
-fn check_rows(provider: ClaudeProvider, rows: &[(String, String)]) -> Result<(), SpawnFailure> {
+/// Refuse an unknown `provider`, or a row named in `names` setting one of
+/// its locked variables or a variable it removes from the child. Names the
+/// variable, never a row's value.
+fn check_rows<'r>(
+    provider: ClaudeProvider,
+    names: impl IntoIterator<Item = &'r str>,
+) -> Result<(), Refusal> {
     let Some(entry) = entry(provider)? else {
         return Ok(());
     };
-    let refusal = |detail: String| SpawnFailure {
+    let refusal = |detail: String| Refusal {
         title: format!("Couldn't start the {} session", entry.display),
         detail,
         hint: None,
     };
-    for (key, _) in rows {
+    for key in names {
         if let Some(locked) = named(entry.locked, key) {
             return Err(refusal(format!(
                 "`{locked}` is set by the {} provider; remove it from the environment rows.",
@@ -195,31 +169,27 @@ fn check_rows(provider: ClaudeProvider, rows: &[(String, String)]) -> Result<(),
     Ok(())
 }
 
-/// The environment for a Claude spawn on `provider` whose rows, already
-/// resolved, are `extra_env`.
+/// Claude's part of the environment for a spawn on `provider` whose rows,
+/// already resolved, are `rows`.
 ///
-/// Anthropic: the keep-list, then the rows, as [`merged_env`] builds it. A
-/// table provider: the keep-list, then its tuning defaults, then the rows,
-/// then its locked variables with the key read through `resolve`, with its
-/// removed variables dropped from `set` and listed in `remove`.
+/// Anthropic: nothing; the app's keep-list, Claude's passthrough variables
+/// and the rows are the whole environment. A table provider: its tuning
+/// defaults a row does not name (so a row overrides a default), then its
+/// fixed routing variables, then its key read through `keys` under the
+/// token variable; its removed variables are listed in `remove`.
 ///
 /// Refuses an unknown provider, a row setting a locked or removed variable,
-/// and a key `resolve` cannot find, naming the variable and never a value.
-/// A removed variable can still reach `set` from the keep-list, so it is
-/// dropped there.
-pub fn spawn_env(
+/// and a key `keys` cannot find, naming the variable and never a value.
+pub(crate) fn spawn_env(
     provider: ClaudeProvider,
-    extra_env: &[(String, String)],
-    resolve: impl FnOnce(&str) -> Option<(Secret, Origin)>,
-) -> Result<SpawnEnv, SpawnFailure> {
-    check_rows(provider, extra_env)?;
+    rows: &ResolvedRows,
+    keys: &dyn KeyLookup,
+) -> Result<EnvPlan, Refusal> {
+    check_rows(provider, rows.iter().map(|(key, _)| key))?;
     let Some(entry) = entry(provider)? else {
-        return Ok(SpawnEnv {
-            set: merged_env(extra_env),
-            remove: Vec::new(),
-        });
+        return Ok(EnvPlan::default());
     };
-    let Some((key, origin)) = resolve(entry.key_var) else {
+    let Some((key, origin)) = keys.key(entry.key_var) else {
         return Err(missing_key(entry));
     };
     debug!(
@@ -228,41 +198,24 @@ pub fn spawn_env(
         ?origin,
         "provider key resolved"
     );
-    let pairs = |list: &[(&str, &str)]| -> Vec<(String, String)> {
-        list.iter()
-            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
-            .collect()
-    };
-    let mut set = passthrough_env();
-    overlay(&mut set, pairs(entry.tuning));
-    overlay(&mut set, extra_env.iter().cloned());
-    overlay(&mut set, pairs(entry.fixed));
-    overlay(
-        &mut set,
-        [(entry.token_var.to_owned(), key.expose().to_owned())],
-    );
-    set.retain(|(k, _)| named(entry.remove, k).is_none());
-    Ok(SpawnEnv {
+    let pair = |(k, v): &(&str, &str)| ((*k).to_owned(), (*v).to_owned());
+    let mut set: Vec<(String, String)> = entry
+        .tuning
+        .iter()
+        .filter(|(name, _)| !rows.contains(name))
+        .map(pair)
+        .collect();
+    set.extend(entry.fixed.iter().map(pair));
+    set.push((entry.token_var.to_owned(), key.expose().to_owned()));
+    Ok(EnvPlan {
         set,
         remove: entry.remove.iter().map(|name| (*name).to_owned()).collect(),
     })
 }
 
-/// Refuse a spawn on `provider` whose key `resolve` cannot find, without
-/// holding on to the key when it can.
-pub fn check_key(
-    provider: ClaudeProvider,
-    resolve: impl FnOnce(&str) -> Option<(Secret, Origin)>,
-) -> Result<(), SpawnFailure> {
-    match entry(provider)? {
-        Some(entry) if resolve(entry.key_var).is_none() => Err(missing_key(entry)),
-        _ => Ok(()),
-    }
-}
-
 /// The refusal naming `entry`'s key variable, never a value.
-fn missing_key(entry: &ProviderEntry) -> SpawnFailure {
-    SpawnFailure {
+fn missing_key(entry: &ProviderEntry) -> Refusal {
+    Refusal {
         title: format!("Couldn't start the {} session", entry.display),
         detail: format!(
             "`{}` isn't set in the daemon's environment, your user environment or the system environment.",
@@ -275,55 +228,6 @@ fn missing_key(entry: &ProviderEntry) -> SpawnFailure {
     }
 }
 
-/// The daemon's keep-list: the variables a headless child (which starts from
-/// an empty environment) needs to run.
-fn passthrough_env() -> Vec<(String, String)> {
-    let keep = [
-        "PATH",
-        "HOME",
-        "USERPROFILE",
-        "APPDATA",
-        "LOCALAPPDATA",
-        "TEMP",
-        "TMP",
-        "TERM",
-        "LANG",
-        "LC_ALL",
-        "ANTHROPIC_API_KEY",
-        "CLAUDE_CONFIG_DIR",
-    ];
-    let mut out = Vec::new();
-    for k in keep {
-        if let Ok(v) = std::env::var(k) {
-            out.push((k.to_string(), v));
-        }
-    }
-    out.push(("TERM".to_string(), "xterm-256color".to_string()));
-    out
-}
-
-/// Put each of `pairs` into `env`, replacing the value of a name already
-/// there, so each name appears once.
-fn overlay(env: &mut Vec<(String, String)>, pairs: impl IntoIterator<Item = (String, String)>) {
-    for (k, v) in pairs {
-        if let Some(slot) = env.iter_mut().find(|(existing, _)| *existing == k) {
-            slot.1 = v;
-        } else {
-            env.push((k, v));
-        }
-    }
-}
-
-/// The daemon's keep-list plus the spawn's `extra_env` keys, with
-/// `extra_env` overriding the keep-list on key collision. `extra` holds
-/// values already resolved by `server::resolve_env_refs`, so env references
-/// never reach here.
-fn merged_env(extra: &[(String, String)]) -> Vec<(String, String)> {
-    let mut out = passthrough_env();
-    overlay(&mut out, extra.iter().cloned());
-    out
-}
-
 #[cfg(test)]
 #[expect(
     clippy::expect_used,
@@ -331,6 +235,8 @@ fn merged_env(extra: &[(String, String)]) -> Vec<(String, String)> {
 )]
 mod tests {
     use super::*;
+    use agent_api::{Origin, Secret};
+    use protocol::SessionMode;
 
     /// A key value no output may ever show.
     const KEY_SENTINEL: &str = "sk-deepseek-sentinel-5e17c2";
@@ -347,14 +253,57 @@ mod tests {
             .then(|| (Secret::new(KEY_SENTINEL.to_owned()), Origin::UserScope))
     }
 
-    fn value<'a>(env: &'a SpawnEnv, key: &str) -> Option<&'a str> {
+    fn names(rows: &[(String, String)]) -> impl Iterator<Item = &str> {
+        rows.iter().map(|(key, _)| key.as_str())
+    }
+
+    /// [`check_request`] on an interactive spawn whose rows are `extra`.
+    fn check(provider: ClaudeProvider, extra: &[(String, String)]) -> Result<(), Refusal> {
+        check_request(
+            provider,
+            &SpawnCheck {
+                mode: SessionMode::Interactive,
+                rows: extra,
+                keys: &with_key,
+            },
+        )
+    }
+
+    /// The plan [`spawn_env`] builds for `extra`, composed over the rows as
+    /// the app composes it (the rows, then the plan's `set`, without the
+    /// plan's `remove` names) but without the app's keep-list.
+    fn child_env(
+        provider: ClaudeProvider,
+        extra: &[(String, String)],
+        keys: impl Fn(&str) -> Option<(Secret, Origin)>,
+    ) -> Result<EnvPlan, Refusal> {
+        let plan = spawn_env(provider, &ResolvedRows::new(extra.to_vec()), &keys)?;
+        let mut set = extra.to_vec();
+        for (k, v) in plan.set {
+            if let Some(slot) = set
+                .iter_mut()
+                .find(|(existing, _)| existing.eq_ignore_ascii_case(&k))
+            {
+                slot.1 = v;
+            } else {
+                set.push((k, v));
+            }
+        }
+        set.retain(|(k, _)| !plan.remove.iter().any(|r| r.eq_ignore_ascii_case(k)));
+        Ok(EnvPlan {
+            set,
+            remove: plan.remove,
+        })
+    }
+
+    fn value<'a>(env: &'a EnvPlan, key: &str) -> Option<&'a str> {
         env.set
             .iter()
             .find(|(k, _)| k == key)
             .map(|(_, v)| v.as_str())
     }
 
-    fn failure_text(failure: &SpawnFailure) -> String {
+    fn failure_text(failure: &Refusal) -> String {
         format!(
             "{} {} {}",
             failure.title,
@@ -370,15 +319,22 @@ mod tests {
             ("RT_ROW", "1"),
             ("ANTHROPIC_BASE_URL", "u"),
         ]);
-        let env = spawn_env(ClaudeProvider::Anthropic, &extra, |_| None).expect("anthropic builds");
-        assert_eq!(env.set, merged_env(&extra));
+        let plan = spawn_env(
+            ClaudeProvider::Anthropic,
+            &ResolvedRows::new(extra.clone()),
+            &|_: &str| None,
+        )
+        .expect("anthropic builds");
+        assert_eq!(plan, EnvPlan::default());
+        let env = child_env(ClaudeProvider::Anthropic, &extra, |_| None).expect("anthropic builds");
+        assert_eq!(env.set, extra);
         assert!(env.remove.is_empty(), "{env:?}");
     }
 
     #[test]
     fn deepseek_sets_routing_and_removes_anthropic_api_key() {
         let extra = rows(&[("RT_ROW", "1")]);
-        let env = spawn_env(ClaudeProvider::Deepseek, &extra, with_key).expect("deepseek builds");
+        let env = child_env(ClaudeProvider::Deepseek, &extra, with_key).expect("deepseek builds");
         for (key, expected) in DEEPSEEK.fixed.iter().chain(DEEPSEEK.tuning) {
             assert_eq!(value(&env, key), Some(*expected), "{key}");
         }
@@ -401,7 +357,7 @@ mod tests {
 
     #[test]
     fn extra_env_overrides_tuning_default() {
-        let env = spawn_env(
+        let env = child_env(
             ClaudeProvider::Deepseek,
             &rows(&[("ANTHROPIC_MODEL", "deepseek-pro")]),
             with_key,
@@ -433,7 +389,7 @@ mod tests {
                 .collect();
             for key in [(*locked).to_owned(), locked.to_ascii_lowercase(), mixed] {
                 let extra = rows(&[(key.as_str(), "row-value")]);
-                let failure = spawn_env(ClaudeProvider::Deepseek, &extra, with_key)
+                let failure = child_env(ClaudeProvider::Deepseek, &extra, with_key)
                     .expect_err("a locked row refuses");
                 assert!(
                     failure.detail.contains(&format!("`{locked}`")),
@@ -443,11 +399,11 @@ mod tests {
                 assert!(failure.detail.contains("DeepSeek"), "{}", failure.detail);
                 assert!(!failure_text(&failure).contains("row-value"));
                 assert!(
-                    check_rows(ClaudeProvider::Deepseek, &extra).is_err(),
+                    check_rows(ClaudeProvider::Deepseek, names(&extra)).is_err(),
                     "{key}"
                 );
                 assert!(
-                    spawn_env(ClaudeProvider::Anthropic, &extra, |_| None).is_ok(),
+                    child_env(ClaudeProvider::Anthropic, &extra, |_| None).is_ok(),
                     "an Anthropic spawn keeps today's rows: {key}"
                 );
             }
@@ -459,7 +415,7 @@ mod tests {
         for removed in DEEPSEEK.remove {
             for key in [(*removed).to_owned(), removed.to_ascii_lowercase()] {
                 let extra = rows(&[(key.as_str(), "row-value-sentinel")]);
-                let failure = check_rows(ClaudeProvider::Deepseek, &extra)
+                let failure = check_rows(ClaudeProvider::Deepseek, names(&extra))
                     .expect_err("a removed row refuses");
                 assert_eq!(
                     failure.title, "Couldn't start the DeepSeek session",
@@ -483,12 +439,11 @@ mod tests {
                     "{key}"
                 );
                 assert!(
-                    spawn_env(ClaudeProvider::Deepseek, &extra, with_key).is_err(),
+                    child_env(ClaudeProvider::Deepseek, &extra, with_key).is_err(),
                     "{key}"
                 );
                 assert!(
-                    check_request(SessionMode::Interactive, ClaudeProvider::Anthropic, &extra)
-                        .is_ok(),
+                    check(ClaudeProvider::Anthropic, &extra).is_ok(),
                     "an Anthropic spawn keeps today's rows: {key}"
                 );
             }
@@ -516,7 +471,7 @@ mod tests {
     #[test]
     fn missing_key_refuses_naming_the_variable_not_a_value() {
         let extra = rows(&[("RT_ROW", "row-sentinel-value")]);
-        let failure = spawn_env(ClaudeProvider::Deepseek, &extra, |_| None)
+        let failure = child_env(ClaudeProvider::Deepseek, &extra, |_| None)
             .expect_err("a missing key refuses");
         let text = failure_text(&failure);
         assert_eq!(failure.title, "Couldn't start the DeepSeek session");
@@ -527,19 +482,19 @@ mod tests {
 
     #[test]
     fn unknown_provider_refuses() {
-        let failure = spawn_env(ClaudeProvider::Unknown, &[], with_key)
+        let failure = child_env(ClaudeProvider::Unknown, &[], with_key)
             .expect_err("an unknown provider refuses");
         assert!(
             failure.detail.contains("Claude provider"),
             "{}",
             failure.detail
         );
-        assert!(check_rows(ClaudeProvider::Unknown, &[]).is_err());
+        assert!(check_rows(ClaudeProvider::Unknown, names(&[])).is_err());
     }
 
     #[test]
     fn debug_of_deepseek_spawn_env_holds_no_key_text() {
-        let env = spawn_env(ClaudeProvider::Deepseek, &[], with_key).expect("deepseek builds");
+        let env = child_env(ClaudeProvider::Deepseek, &[], with_key).expect("deepseek builds");
         assert_eq!(value(&env, "ANTHROPIC_AUTH_TOKEN"), Some(KEY_SENTINEL));
         let shown = format!("{env:?}");
         assert!(shown.contains("ANTHROPIC_AUTH_TOKEN"), "{shown}");

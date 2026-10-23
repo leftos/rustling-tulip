@@ -14,47 +14,11 @@
 //! variables that are set, by name only, for the spawn dialog to offer.
 
 use std::collections::HashMap;
-use std::fmt;
 
 use protocol::{EnvName, EnvScope};
 use tracing::warn;
 
-/// An environment value whose text is never printed: no `Display`, no
-/// `Serialize`, and a `Debug` that shows `Secret(<redacted>)`.
-pub struct Secret(String);
-
-impl Secret {
-    /// Wrap a value read from somewhere other than the environment — the
-    /// secret store — so it redacts its text wherever it is printed.
-    pub(crate) fn new(value: String) -> Self {
-        Self(value)
-    }
-
-    /// The value's text, for the one place that needs it: the environment a
-    /// child process is spawned with.
-    pub fn expose(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Debug for Secret {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("Secret(<redacted>)")
-    }
-}
-
-/// Where a resolved value came from, so a log line can say so without the
-/// value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Origin {
-    /// The daemon's own process environment.
-    Process,
-    /// The user's persistent environment (`HKCU\Environment` on Windows).
-    UserScope,
-    /// The machine's environment (`HKLM\...\Session Manager\Environment` on
-    /// Windows).
-    SystemScope,
-}
+pub use agent_api::{Origin, Secret};
 
 /// Look `name` up in the daemon's environment, then the user scope, then the
 /// system scope. An empty value counts as unset in every scope.
@@ -110,14 +74,14 @@ pub fn resolve_with(
     system_scope: impl FnOnce(&str) -> Option<String>,
 ) -> Option<(Secret, Origin)> {
     if let Some(value) = process(name).filter(|v| !v.is_empty()) {
-        return Some((Secret(value), Origin::Process));
+        return Some((Secret::new(value), Origin::Process));
     }
     if let Some(value) = user_scope(name).filter(|v| !v.is_empty()) {
-        return Some((Secret(value), Origin::UserScope));
+        return Some((Secret::new(value), Origin::UserScope));
     }
     system_scope(name)
         .filter(|v| !v.is_empty())
-        .map(|value| (Secret(value), Origin::SystemScope))
+        .map(|value| (Secret::new(value), Origin::SystemScope))
 }
 
 /// Every variable set to a non-empty value in the daemon's environment, the
@@ -575,7 +539,7 @@ mod tests {
     fn names_merge_scopes_case_insensitively_and_sort() {
         let listed = names_with(
             &vars(&[("PATH", "p"), ("zeta", "z")]),
-            &vars(&[("Path", "u"), ("DEEPSEEK_API_KEY", "sk-user")]),
+            &vars(&[("Path", "u"), ("RT_EXAMPLE_KEY", "sk-user")]),
             &vars(&[("path", "s"), ("Alpha", "a"), ("ZETA", "z")]),
         );
         assert_eq!(
@@ -586,12 +550,12 @@ mod tests {
                     scopes: vec![EnvScope::System],
                 },
                 EnvName {
-                    name: "DEEPSEEK_API_KEY".to_owned(),
-                    scopes: vec![EnvScope::User],
-                },
-                EnvName {
                     name: "PATH".to_owned(),
                     scopes: vec![EnvScope::Process, EnvScope::User, EnvScope::System],
+                },
+                EnvName {
+                    name: "RT_EXAMPLE_KEY".to_owned(),
+                    scopes: vec![EnvScope::User],
                 },
                 EnvName {
                     name: "zeta".to_owned(),
@@ -619,7 +583,7 @@ mod tests {
 
     #[test]
     fn debug_never_prints_the_value() {
-        let secret = Secret("sk-ant-hunter2".to_owned());
+        let secret = Secret::new("sk-ant-hunter2".to_owned());
         let shown = format!("{secret:?}");
         assert!(!shown.contains("hunter2"), "{shown}");
         assert_eq!(shown, "Secret(<redacted>)");

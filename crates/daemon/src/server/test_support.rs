@@ -573,6 +573,11 @@ pub(super) fn deepseek_options() -> AgentOptions {
     }
 }
 
+/// A lookup that knows no variable.
+pub(super) fn no_key(_name: &str) -> Option<(user_env::Secret, user_env::Origin)> {
+    None
+}
+
 /// A lookup that knows `DEEPSEEK_API_KEY` only.
 pub(super) fn deepseek_key(name: &str) -> Option<(user_env::Secret, user_env::Origin)> {
     (name == "DEEPSEEK_API_KEY").then(|| {

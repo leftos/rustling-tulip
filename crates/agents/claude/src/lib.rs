@@ -6,7 +6,14 @@
 //! stream-json parser that turns a headless session's output into
 //! [`HeadlessEvent`]s.
 
-use agent_api::{Agent, HeadlessEvent, SpawnContext, workspace_prelude};
+mod providers;
+
+pub use providers::{display_name, provider_for_model};
+
+use agent_api::{
+    Agent, EnvPlan, HeadlessEvent, KeyLookup, Refusal, ResolvedRows, SpawnCheck, SpawnContext,
+    workspace_prelude,
+};
 use protocol::{
     AccentToken, AgentCaps, AgentDescriptor, AgentId, AgentTexts, ChipRule, Choice, ChoiceStyle,
     ClaudeProvider, FieldKind, FieldOverride, FieldRule, OptionField, OptionValue, PermissionMode,
@@ -169,6 +176,23 @@ impl Agent for ClaudePlugin {
 
     fn default_program(&self) -> &'static str {
         "claude"
+    }
+
+    fn passthrough_vars(&self) -> &'static [&'static str] {
+        &["ANTHROPIC_API_KEY", "CLAUDE_CONFIG_DIR"]
+    }
+
+    fn check_request(&self, opts: &ClaudeOptions, req: &SpawnCheck<'_>) -> Result<(), Refusal> {
+        providers::check_request(opts.provider, req)
+    }
+
+    fn spawn_env(
+        &self,
+        opts: &ClaudeOptions,
+        rows: &ResolvedRows,
+        keys: &dyn KeyLookup,
+    ) -> Result<EnvPlan, Refusal> {
+        providers::spawn_env(opts.provider, rows, keys)
     }
 
     fn interactive_args(

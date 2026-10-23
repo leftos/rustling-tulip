@@ -69,6 +69,12 @@
     },
     {
       "paths": [
+        "crates/daemon/src/child_env.rs"
+      ],
+      "filter": "package(daemon) & test(child_env)"
+    },
+    {
+      "paths": [
         "crates/daemon/**"
       ],
       "filter": "rdeps(daemon)"
