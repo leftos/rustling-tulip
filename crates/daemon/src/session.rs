@@ -962,7 +962,10 @@ impl SessionRegistry {
     /// The status comes from the sidecar when the session was waiting for
     /// input or sitting idle when the daemon went away, so it comes back that
     /// way with the stamp it had. Every other stored status is one the
-    /// reattach has no evidence for, and starts at `Idle` stamped now.
+    /// reattach has no evidence for, and starts at `Idle` stamped now. The
+    /// status watcher then checks either against the replayed screen once its
+    /// startup hold ends ([`crate::pty_state::watch`]): a spinner promotes it
+    /// to `Working`, and an idle box clears a restored `AwaitingInput`.
     ///
     /// Returns a [`PendingInsert`] so the caller can patch
     /// `scrollback_snapshot_req` (produced by [`attach_lifecycle`]) onto the

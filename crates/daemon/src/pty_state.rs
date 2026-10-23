@@ -1760,6 +1760,108 @@ mod hysteresis_tests {
         );
     }
 
+    /// A replay that lands during the startup hold promotes the seeded `Idle`
+    /// to `Working` once the hold ends.
+    #[tokio::test(start_paused = true)]
+    async fn a_reattach_replay_with_the_spinner_restores_working() {
+        let mut h = start_from("reattach-spinner", false, SessionStatus::Idle);
+        settle().await;
+        h.chunk(idle_frame(&[SPINNER_ROW]));
+        advance(FOREIGN_WRITE_HOLD.saturating_sub(ms(10))).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "the replay was read during the hold"
+        );
+        advance(ms(20)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Working,
+            "the replayed spinner did not restore Working"
+        );
+        assert_eq!(h.attentions(), 0, "the replay raised Attention");
+    }
+
+    /// A replay of the idle box clears a restored `AwaitingInput` once the
+    /// leave window closes, dropping the pending prompt with it.
+    #[tokio::test(start_paused = true)]
+    async fn a_reattach_replay_of_the_idle_box_clears_the_restored_prompt() {
+        let mut h = start_record("reattach-answered", false, restored_prompt_record());
+        settle().await;
+        h.chunk(idle_frame(&[]));
+        advance(FOREIGN_WRITE_HOLD.saturating_sub(ms(10))).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::AwaitingInput,
+            "the replay was read during the hold"
+        );
+        advance(ms(20)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::AwaitingInput,
+            "the idle box cleared the prompt before the window closed"
+        );
+        advance(ms(800)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "the idle box did not clear the restored prompt"
+        );
+        assert_eq!(pending_input(&h), None, "the prompt left with the wait");
+        assert_eq!(h.attentions(), 0, "the replay raised Attention");
+    }
+
+    /// A replay of the dialog the session was waiting on keeps the restored
+    /// prompt, and raises no second Attention.
+    #[tokio::test(start_paused = true)]
+    async fn a_reattach_replay_of_the_open_dialog_keeps_the_restored_prompt() {
+        let mut h = start_record("reattach-dialog", false, restored_prompt_record());
+        settle().await;
+        h.chunk(permission_frame());
+        advance(FOREIGN_WRITE_HOLD.saturating_sub(ms(10))).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::AwaitingInput,
+            "the replay was read during the hold"
+        );
+        advance(Duration::from_secs(10)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::AwaitingInput,
+            "the replayed dialog moved the restored prompt"
+        );
+        assert!(
+            pending_input(&h).is_some(),
+            "the replayed dialog dropped the pending prompt"
+        );
+        assert_eq!(
+            h.attentions(),
+            0,
+            "the replayed dialog raised Attention again"
+        );
+    }
+
+    /// A replay no rule matches leaves a restored `AwaitingInput` as it was.
+    #[tokio::test(start_paused = true)]
+    async fn a_reattach_replay_no_rule_matches_keeps_the_restored_status() {
+        let mut h = start_from("reattach-unmatched", false, SessionStatus::AwaitingInput);
+        settle().await;
+        h.chunk(frame(&["PS C:\\> "]));
+        advance(FOREIGN_WRITE_HOLD.saturating_sub(ms(10))).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::AwaitingInput,
+            "the replay was read during the hold"
+        );
+        advance(Duration::from_secs(10)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::AwaitingInput,
+            "a screen no rule matches moved the restored prompt"
+        );
+        assert_eq!(h.attentions(), 0, "the replay raised Attention");
+    }
+
     /// A hook-reported prompt holds while its dialog repaints, and while a
     /// spinner shows `PreToolUse` hooks running.
     #[tokio::test(start_paused = true)]
