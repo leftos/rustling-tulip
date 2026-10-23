@@ -3070,6 +3070,7 @@ mod tests {
             session_id: "source",
             request_id: None,
             carry_busy_excluded: false,
+            same_checkout: false,
         };
         duplicate_session(&hub, ask, 1, &out_tx).await;
         assert_eq!(

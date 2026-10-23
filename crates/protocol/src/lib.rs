@@ -2086,6 +2086,9 @@ pub enum ClientMessage {
     /// source's branch, so the clone gets its own checkout instead of
     /// competing for the directory the source holds. In-place duplicates keep
     /// the source's branch. See [`SpawnConfig::to_duplicate_request`].
+    ///
+    /// A Duplicate gets that fresh branch; a Restart or a Resume sets
+    /// `same_checkout` and reruns on the source's own branch and worktree.
     DuplicateSession {
         session_id: String,
         /// Echoed on the requester's [`DaemonMessage::SessionUpdated`] for
@@ -2097,6 +2100,11 @@ pub enum ClientMessage {
         /// (and absent) for a Duplicate, which starts counted.
         #[serde(default)]
         carry_busy_excluded: bool,
+        /// Rerun in the source's own checkout (same branch and worktree)
+        /// instead of a fresh branch: Restart of an exited session and Resume
+        /// of a parked one, whose source no longer holds the checkout.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        same_checkout: bool,
     },
     /// Fetch the persisted [`SpawnConfig`] for a session so the spawn
     /// dialog can pre-fill all fields with the source's values. Replied
@@ -6109,6 +6117,7 @@ mod tests {
             session_id: "s1".to_string(),
             request_id: Some("req-2".to_string()),
             carry_busy_excluded: false,
+            same_checkout: false,
         };
         let json = serde_json::to_string(&msg).expect("serialize");
         assert!(json.contains(r#""request_id":"req-2""#), "{json}");
@@ -6909,6 +6918,42 @@ mod tests {
                 }
             ),
             "{carried:?}"
+        );
+    }
+
+    #[test]
+    fn duplicate_session_same_checkout_round_trips_and_defaults_false() {
+        let msg = ClientMessage::DuplicateSession {
+            session_id: "s1".to_string(),
+            request_id: None,
+            carry_busy_excluded: true,
+            same_checkout: true,
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert!(json.contains(r#""same_checkout":true"#), "{json}");
+        let decoded: ClientMessage = serde_json::from_str(&json).expect("deserialize");
+        assert!(
+            matches!(
+                &decoded,
+                ClientMessage::DuplicateSession {
+                    same_checkout: true,
+                    ..
+                }
+            ),
+            "{decoded:?}"
+        );
+        let old: ClientMessage =
+            serde_json::from_str(r#"{"type":"duplicate_session","session_id":"s1"}"#)
+                .expect("a message without same_checkout decodes");
+        assert!(
+            matches!(
+                &old,
+                ClientMessage::DuplicateSession {
+                    same_checkout: false,
+                    ..
+                }
+            ),
+            "{old:?}"
         );
     }
 

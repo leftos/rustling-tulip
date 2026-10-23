@@ -1042,7 +1042,7 @@ fn entry_members(entry: &HistoryEntry, folder: &str, repos: &[RepoEntry]) -> Vec
 /// or `None` when some member can't be: a Single with other than one member
 /// or whose repo is no longer registered, or a workspace that is gone or
 /// whose members no longer match.
-fn pin_recorded(
+pub(crate) fn pin_recorded(
     target: &SpawnTarget,
     members: &[SessionMember],
     registered: &Registered<'_>,
@@ -1477,6 +1477,19 @@ pub(crate) mod test_support {
         )
         .expect("build meta");
         crate::orphan::write_meta(dirs, &meta).expect("write meta");
+    }
+
+    /// Wait for `id`'s sidecar to be gone, an exit watcher's last step;
+    /// returns whether it went. A passing run returns at once, so the bound
+    /// is only a hang guard.
+    pub async fn sidecar_gone(dirs: &Dirs, id: &str) -> bool {
+        for _ in 0..6000 {
+            if crate::orphan::load_meta(dirs, id).is_err() {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        crate::orphan::load_meta(dirs, id).is_err()
     }
 
     /// Wait up to five seconds for `session_id`'s history entry to appear.

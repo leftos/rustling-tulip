@@ -377,8 +377,8 @@ pub(crate) fn orphan_banner_text(session: &SessionSnapshot) -> String {
 }
 
 /// Whether `session` just exited on its own: it stopped with its child's
-/// exit code straight from a live status. A Stop reports stopped without a
-/// code first, so the code that follows it compares against stopped.
+/// exit code straight from a live status. A Stop reports stopped with no
+/// code at all, so it never reads as a self-exit.
 /// Parked, abandoned and headless sessions are kept whatever their exit.
 pub(crate) fn self_exited(prev: Option<SessionStatus>, session: &SessionSnapshot) -> bool {
     prev.is_some_and(|prev| !matches!(prev, SessionStatus::Stopped | SessionStatus::Error))
@@ -389,20 +389,20 @@ pub(crate) fn self_exited(prev: Option<SessionStatus>, session: &SessionSnapshot
         && session.mode != SessionMode::Headless
 }
 
-fn exit_code(session: &SessionSnapshot) -> String {
+/// The pane header's note for an exited session; `stopped` when it has no
+/// exit code, as after a user's Stop.
+pub(crate) fn exit_code_label(session: &SessionSnapshot) -> String {
     session
         .exit_code
-        .map_or_else(|| "?".to_owned(), |code| code.to_string())
-}
-
-/// The pane header's note for an exited session.
-pub(crate) fn exit_code_label(session: &SessionSnapshot) -> String {
-    format!("exit code {}", exit_code(session))
+        .map_or_else(|| "stopped".to_owned(), |code| format!("exit code {code}"))
 }
 
 /// The stopped-pane overlay's message.
 pub(crate) fn exited_message(session: &SessionSnapshot) -> String {
-    format!("Session exited (code {})", exit_code(session))
+    session.exit_code.map_or_else(
+        || "Session stopped".to_owned(),
+        |code| format!("Session exited (code {code})"),
+    )
 }
 
 /// The actions a session offers, by its state; the worktree variants only
@@ -801,7 +801,8 @@ impl Duplicates {
     /// Records a duplicate of `session_id` to `target` under `request_id`
     /// and returns the request to send; `None` for a restart while one of
     /// the session is on the way. A restart or resume keeps the session's
-    /// "Don't count as busy"; a copy starts counted.
+    /// "Don't count as busy" and its checkout; a copy starts counted, on a
+    /// fresh branch.
     pub(crate) fn request(
         &mut self,
         session_id: &str,
@@ -823,6 +824,7 @@ impl Duplicates {
             session_id: session_id.to_owned(),
             request_id: Some(request_id),
             carry_busy_excluded: restart,
+            same_checkout: restart,
         })
     }
 
@@ -1016,6 +1018,26 @@ mod tests {
             );
         }
         assert!(carries_busy_exclusion(DuplicateTarget::Restart));
+    }
+
+    #[test]
+    fn restart_request_keeps_the_checkout() {
+        let same_checkout = |target: DuplicateTarget| {
+            let mut dups = Duplicates::default();
+            match dups.request("s1", "req-1".to_owned(), target) {
+                Some(ClientMessage::DuplicateSession { same_checkout, .. }) => same_checkout,
+                other => panic!("expected a DuplicateSession, got {other:?}"),
+            }
+        };
+        assert!(
+            same_checkout(DuplicateTarget::Restart),
+            "Restart and Resume rerun in the source's checkout"
+        );
+        assert!(
+            !same_checkout(DuplicateTarget::NewTab),
+            "a copy gets a fresh branch"
+        );
+        assert!(!same_checkout(DuplicateTarget::Tab("t2".to_owned())));
     }
 
     #[test]
@@ -1268,7 +1290,8 @@ mod tests {
     fn actions_exit_code_texts() {
         let mut s = session("stopped");
         assert!(pane_shows_exit(&s));
-        assert_eq!(exit_code_label(&s), "exit code ?");
+        assert_eq!(exit_code_label(&s), "stopped");
+        assert_eq!(exited_message(&s), "Session stopped");
         s.exit_code = Some(3);
         assert_eq!(exit_code_label(&s), "exit code 3");
         assert_eq!(exited_message(&s), "Session exited (code 3)");

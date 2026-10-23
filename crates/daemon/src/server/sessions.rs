@@ -1,7 +1,7 @@
 //! Live sessions: listing, duplicating, renaming and restyling them, their input and scrollback, the per-connection session event stream, and stopping, parking and discarding them.
 use super::connection::{ConnCtx, PtyForwarders};
 use super::git::{blocked_discard_message, probe_locking_processes, retry_worktree_cleanup};
-use super::recovery::record_end;
+use super::recovery::{mark_history_recovered, record_end, recovery_conversation_exists};
 use super::spawn::{remove_hook_settings, send_spawn_failure, spawn_session, target_uses_worktree};
 use super::tabs::close_session_panes;
 use super::{Hub, StateEvent};
@@ -15,8 +15,8 @@ use crate::{branch_fate, branch_names, orphan};
 use anyhow::{Context as _, anyhow};
 use base64::Engine as _;
 use protocol::{
-    AppearanceOverrides, AttentionReason, BranchCleanup, ClientMessage, DaemonMessage,
-    MemberBranchFate, SessionEnd, SessionMember, SessionStatus, SpawnRequest, SpawnTarget,
+    AppearanceOverrides, BranchCleanup, ClientMessage, DaemonMessage, MemberBranchFate, SessionEnd,
+    SessionMember, SessionStatus, SpawnRequest, SpawnTarget,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -46,11 +46,13 @@ pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> 
             session_id,
             request_id,
             carry_busy_excluded,
+            same_checkout,
         } => {
             let ask = DuplicateAsk {
                 session_id: &session_id,
                 request_id,
                 carry_busy_excluded,
+                same_checkout,
             };
             duplicate_session(hub, ask, connection, out_tx).await;
         }
@@ -198,11 +200,6 @@ pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> 
             cleanup: _,
         } => {
             stop_session(hub, &session_id).await?;
-            // Surface a one-shot Attention so connected clients can prompt.
-            let _ = out_tx.send(DaemonMessage::Attention {
-                session_id,
-                reason: AttentionReason::Stopped,
-            });
         }
         ClientMessage::ParkSession { session_id } => {
             park_session(hub, &session_id).await;
@@ -421,10 +418,12 @@ pub(super) struct DuplicateAsk<'a> {
     pub(super) session_id: &'a str,
     pub(super) request_id: Option<String>,
     pub(super) carry_busy_excluded: bool,
+    pub(super) same_checkout: bool,
 }
 
 /// Spawns a copy of the asked session from its stored config, carrying its
-/// busy exclusion when asked to. The copy's first broadcast carries
+/// busy exclusion when asked to, in the source's own checkout when asked
+/// to. The copy's first broadcast carries
 /// `request_id` on connection `connection`; a failure answers the requester
 /// directly, carrying it too.
 pub(super) async fn duplicate_session(
@@ -437,9 +436,10 @@ pub(super) async fn duplicate_session(
         session_id,
         request_id,
         carry_busy_excluded,
+        same_checkout,
     } = ask;
     let busy_excluded = carried_busy_excluded(&hub.sessions, session_id, carry_busy_excluded);
-    let req = match duplicate_request(hub, session_id).await {
+    let req = match duplicate_request(hub, session_id, same_checkout).await {
         Ok(req) => req,
         Err(err) => {
             let _ = out_tx.send(DaemonMessage::Error {
@@ -450,8 +450,10 @@ pub(super) async fn duplicate_session(
         }
     };
     let origin = request_origin(connection, request_id.clone());
-    if let Err(err) = spawn_session(hub, req, origin, busy_excluded).await {
-        send_spawn_failure(out_tx, &err, request_id.as_deref());
+    let resumed = req.resume_conversation.is_some();
+    match spawn_session(hub, req, origin, busy_excluded).await {
+        Ok(_) => finish_rerun(hub, session_id, resumed),
+        Err(err) => send_spawn_failure(out_tx, &err, request_id.as_deref()),
     }
 }
 
@@ -477,18 +479,31 @@ pub(super) fn request_origin(connection: u64, request_id: Option<String>) -> Opt
 
 /// The request that duplicates `session_id`. A worktree duplicate runs on
 /// its own branch: the source still holds its checkout, and a name the
-/// daemon picks can't attach a leftover the user was never shown.
-async fn duplicate_request(hub: &Hub, session_id: &str) -> anyhow::Result<SpawnRequest> {
-    let stored = hub
-        .sessions
-        .get(session_id)
-        .map(|rec| crate::sync::lock(&rec).spawn_config.clone())
-        .ok_or_else(|| anyhow!("unknown session: {session_id}"))?;
-    let Some(stored) = stored else {
-        return Err(anyhow!(
-            "session {session_id} has no stored spawn config; cannot duplicate"
-        ));
-    };
+/// daemon picks can't attach a leftover the user was never shown. With
+/// `same_checkout` (a Restart or a Resume, whose source no longer holds the
+/// checkout) it reruns on the source's branch, reusing its worktree, and
+/// continues the source's Claude conversation while its transcript exists.
+async fn duplicate_request(
+    hub: &Hub,
+    session_id: &str,
+    same_checkout: bool,
+) -> anyhow::Result<SpawnRequest> {
+    let claude_home = crate::transcripts::claude_home();
+    duplicate_request_in(hub, session_id, same_checkout, claude_home.as_deref()).await
+}
+
+/// [`duplicate_request`], looking for the source's transcript under
+/// `claude_home`.
+async fn duplicate_request_in(
+    hub: &Hub,
+    session_id: &str,
+    same_checkout: bool,
+    claude_home: Option<&Path>,
+) -> anyhow::Result<SpawnRequest> {
+    if same_checkout {
+        return rerun_request(hub, session_id, claude_home).await;
+    }
+    let (stored, _) = source_config(hub, session_id)?;
     let fresh = match stored.target.suggest_target() {
         Some(target) if target_uses_worktree(&stored.target) => {
             Some(branch_names::suggest(&hub.state, &hub.state.worktrees_dir(), &target).await?)
@@ -497,6 +512,151 @@ async fn duplicate_request(hub: &Hub, session_id: &str) -> anyhow::Result<SpawnR
     };
     info!(source = %session_id, ?fresh, "duplicate_session: spawning");
     Ok(stored.to_duplicate_request(fresh))
+}
+
+/// `session_id`'s stored spawn config and its recorded members.
+fn source_config(
+    hub: &Hub,
+    session_id: &str,
+) -> anyhow::Result<(protocol::SpawnConfig, Vec<SessionMember>)> {
+    let (stored, members) = hub
+        .sessions
+        .get(session_id)
+        .map(|rec| {
+            let rec = crate::sync::lock(&rec);
+            (rec.spawn_config.clone(), rec.members.clone())
+        })
+        .ok_or_else(|| anyhow!("unknown session: {session_id}"))?;
+    let stored = stored.ok_or_else(|| {
+        anyhow!("session {session_id} has no stored spawn config; cannot duplicate")
+    })?;
+    Ok((stored, members))
+}
+
+/// The request for a Restart or a Resume of `session_id`, once its child has
+/// exited: its config with every worktree member pinned to the folder it ran
+/// in, as Recover pins them, so the rerun binds the very worktree it left
+/// wherever it sits; and its Claude conversation continued when the
+/// transcript is still under `claude_home` for that pinned folder.
+async fn rerun_request(
+    hub: &Hub,
+    session_id: &str,
+    claude_home: Option<&Path>,
+) -> anyhow::Result<SpawnRequest> {
+    wait_for_source_exit(hub, session_id).await?;
+    let (stored, members) = source_config(hub, session_id)?;
+    let conversation = hub
+        .sessions
+        .get(session_id)
+        .and_then(|rec| resumable_conversation(&crate::sync::lock(&rec)));
+    let mut req = stored.to_duplicate_request(None);
+    if target_uses_worktree(&req.target) {
+        let (repos, workspaces) = hub
+            .state
+            .with_persisted(|s| (s.repos.clone(), s.workspaces.clone()));
+        let registered = crate::history::Registered {
+            repos: &repos,
+            workspaces: &workspaces,
+        };
+        if let Some(pinned) = crate::history::pin_recorded(&req.target, &members, &registered) {
+            req.target = pinned;
+        }
+    }
+    req.resume_conversation = match conversation {
+        Some(c) => {
+            let home = claude_home.map(Path::to_path_buf);
+            // The transcript lookup reads the disk, as Recover's planning does.
+            tokio::task::spawn_blocking(move || {
+                recovery_conversation_exists(home.as_deref(), c.agent, &c.folder, &c.id)
+                    .then_some(c.id)
+            })
+            .await?
+        }
+        None => None,
+    };
+    info!(
+        source = %session_id,
+        resume = ?req.resume_conversation,
+        "duplicate_session: rerunning in the source's checkout"
+    );
+    Ok(req)
+}
+
+/// How long a rerun or a worktree removal gives a just-killed child to exit:
+/// a Stop's kill is fire-and-forget and the actual `TerminateProcess` hop
+/// runs through the tracer pipe asynchronously.
+const KILL_GRACE: Duration = Duration::from_millis(250);
+
+/// Wait up to [`KILL_GRACE`] for `session_id`'s child to have exited, so a
+/// rerun never binds the worktree (and resumes the conversation) while the
+/// old child may still write to it. A Stop marks the session stopped before
+/// its kill lands, so the status alone doesn't say the child is gone.
+async fn wait_for_source_exit(hub: &Hub, session_id: &str) -> anyhow::Result<()> {
+    let mut events = hub.sessions.subscribe();
+    let exited = || {
+        hub.sessions
+            .get(session_id)
+            .is_none_or(|rec| child_gone(&crate::sync::lock(&rec)))
+    };
+    let wait = async {
+        while !exited() {
+            match events.recv().await {
+                Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Closed) => return false,
+            }
+        }
+        true
+    };
+    if tokio::time::timeout(KILL_GRACE, wait)
+        .await
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+    info!(source = %session_id, "duplicate_session: the source's child is still exiting");
+    Err(anyhow!(
+        "The session is still stopping; try Restart again in a moment."
+    ))
+}
+
+/// Whether `rec`'s PTY child has exited: it holds no pty, and its exit
+/// watcher has run (it drops the scrollback request, which a Stop leaves).
+/// A headless record keeps no such trace, so it never waits.
+fn child_gone(rec: &crate::session::SessionRecord) -> bool {
+    rec.pty.is_none() && rec.scrollback_snapshot_req.is_none()
+}
+
+/// After a rerun of `source_id` spawned: one that continues the source's
+/// conversation marks its history entry recovered, as Recover does, so
+/// Recover never resumes that conversation a second time.
+fn finish_rerun(hub: &Hub, source_id: &str, resumed: bool) {
+    if resumed {
+        mark_history_recovered(hub, source_id);
+    }
+}
+
+/// The Claude conversation a rerun of a session could continue.
+struct SourceConversation {
+    agent: protocol::Agent,
+    folder: String,
+    id: String,
+}
+
+/// `rec`'s conversation: an interactive session's Claude conversation id, if
+/// it has one, in its launch folder (its first member's worktree, which a
+/// rerun pins, else its standalone folder), where Claude files the
+/// transcript.
+fn resumable_conversation(rec: &crate::session::SessionRecord) -> Option<SourceConversation> {
+    if rec.mode != protocol::SessionMode::Interactive {
+        return None;
+    }
+    let id = rec.claude_session_id.clone()?;
+    let folder = crate::history::primary_cwd(rec).filter(|folder| !folder.is_empty())?;
+    Some(SourceConversation {
+        agent: rec.agent,
+        folder,
+        id,
+    })
 }
 
 /// What connection `connection` receives for a registry event. A
@@ -922,7 +1082,7 @@ async fn discard_session(
         .iter()
         .any(|a| a.remove_worktree && has_per_session_worktree);
     if wants_removal {
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        tokio::time::sleep(KILL_GRACE).await;
     }
 
     // Track each removed member's immediate parent so we can prune the
@@ -1017,7 +1177,7 @@ pub(super) async fn stop_session(hub: &Hub, session_id: &str) -> anyhow::Result<
     record_end(hub, session_id, SessionEnd::StoppedByUser);
     // Mark the session stopped BEFORE killing the child.
     //
-    // The child's own exit watcher (`session::attach_lifecycle`) also marks it
+    // The child's own exit watcher (`session::watch_exit`) also marks it
     // stopped, but *with* an exit code — and a client reads a
     // running-to-stopped transition carrying an exit code as a self-exit,
     // which for a worktree-less session means auto-discard. Killing first
@@ -1091,8 +1251,9 @@ mod tests {
     use crate::server::dispatch;
     use crate::server::recovery::discard_abandoned;
     use crate::server::test_support::{
-        appearance_registry, deepseek_options, deepseek_spawn, dispatch_all, idle_record,
-        next_message, only_update, snapshot_of, spawnless_test_hub, test_hub, wait_until,
+        appearance_registry, deepseek_options, deepseek_spawn, dispatch_all, env_spawn,
+        idle_record, next_message, only_update, repo_entry, snapshot_of, spawnless_test_hub,
+        test_hub, wait_until,
     };
     use chrono::Utc;
     use protocol::{Agent, SessionKind, SessionMode};
@@ -1535,6 +1696,163 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stop_session_sends_no_attention() {
+        use crate::history::test_support::{fake_pty, insert_live, record};
+        use crate::pty::PtyExit;
+        let (hub, _scratch) = test_hub("stop-no-attention");
+        let (pty, exit_tx) = fake_pty();
+        insert_live(
+            &hub.sessions,
+            &hub.dirs,
+            record("s1", SessionMode::Interactive),
+            &pty,
+        );
+        let mut events = hub.sessions.subscribe();
+        let sent = dispatch_all(
+            &hub,
+            ClientMessage::StopSession {
+                session_id: "s1".to_owned(),
+                cleanup: Vec::new(),
+            },
+        )
+        .await;
+        assert!(
+            !sent
+                .iter()
+                .any(|msg| matches!(msg, DaemonMessage::Attention { .. })),
+            "a user stop asks for no attention: {sent:?}"
+        );
+        exit_tx
+            .send(PtyExit::Code(1))
+            .expect("deliver the kill's exit");
+        // The watcher's update, attention and sidecar delete run in one poll
+        // with no await between them, so on this current-thread runtime any
+        // attention has gone out once the update shows.
+        let watcher_ran = || {
+            hub.sessions
+                .get("s1")
+                .is_some_and(|rec| crate::sync::lock(&rec).scrollback_snapshot_req.is_none())
+        };
+        assert!(wait_until(watcher_ran).await, "the exit watcher ran");
+        while let Ok(event) = events.try_recv() {
+            assert!(
+                !matches!(event, SessionEvent::Attention { .. }),
+                "the kill's exit asks for no attention: {event:?}"
+            );
+        }
+        let snapshot = snapshot_of(&hub, "s1");
+        assert_eq!(snapshot.status, SessionStatus::Stopped);
+        assert_eq!(snapshot.exit_code, None);
+    }
+
+    #[tokio::test]
+    #[expect(clippy::panic, reason = "a wrong target shape fails the test loudly")]
+    async fn restart_duplicate_pins_the_source_worktree() {
+        let (hub, scratch) = spawnless_test_hub("restart-pin");
+        hub.state
+            .mutate(|s| {
+                s.repos
+                    .push(repo_entry("r1", "r1", &scratch.path().join("repo")));
+            })
+            .expect("register repo");
+        let elsewhere = scratch
+            .path()
+            .join("old-root")
+            .join("wt.silly-gecko")
+            .join("r1")
+            .to_string_lossy()
+            .into_owned();
+        let target = SpawnTarget::Single {
+            repo_id: "r1".to_owned(),
+            branch_name: "wt/silly-gecko".to_owned(),
+            base_branch: Some("main".to_owned()),
+            use_worktree: true,
+            checkout_strategy: None,
+            worktree_reuse: protocol::WorktreeReusePolicy::Reuse,
+            existing_worktree: None,
+        };
+        let mut source = idle_record("src");
+        source.members = vec![SessionMember {
+            repo_id: "r1".to_owned(),
+            repo_name: "r1".to_owned(),
+            branch: "wt/silly-gecko".to_owned(),
+            worktree_path: elsewhere.clone(),
+        }];
+        source.spawn_config = Some(protocol::SpawnConfig::from_request(&env_spawn(
+            target,
+            SessionMode::Interactive,
+            Vec::new(),
+            None,
+        )));
+        hub.sessions.insert(source);
+        let request = duplicate_request_in(&hub, "src", true, None)
+            .await
+            .expect("a restart reruns the source's config");
+        match request.target {
+            SpawnTarget::Single {
+                branch_name,
+                existing_worktree,
+                ..
+            } => {
+                assert_eq!(branch_name, "wt/silly-gecko");
+                assert_eq!(
+                    existing_worktree.as_deref(),
+                    Some(elsewhere.as_str()),
+                    "pinned to the folder the source ran in"
+                );
+            }
+            other => panic!("expected a single target, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn restart_refuses_while_the_stopped_child_is_still_dying() {
+        use crate::history::test_support::{fake_pty, insert_live, record};
+        let (hub, _scratch) = test_hub("restart-still-stopping");
+        let (pty, _exit_tx) = fake_pty();
+        insert_live(
+            &hub.sessions,
+            &hub.dirs,
+            record("s1", SessionMode::Interactive),
+            &pty,
+        );
+        hub.sessions.update("s1", |rec| {
+            rec.status = SessionStatus::Stopped;
+            rec.pty = None;
+        });
+        let err = duplicate_request_in(&hub, "s1", true, None)
+            .await
+            .expect_err("the stopped child has not exited");
+        assert_eq!(
+            err.to_string(),
+            "The session is still stopping; try Restart again in a moment."
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rerun_that_resumes_marks_the_source_recovered() {
+        let (hub, _scratch) = test_hub("rerun-marks-recovered");
+        hub.sessions.insert(idle_record("src"));
+        record_end(&hub, "src", SessionEnd::StoppedByUser);
+        let recovered = || {
+            history::read_one(&hub.dirs, "src")
+                .expect("the source's history entry")
+                .recovered_at
+        };
+        finish_rerun(&hub, "src", false);
+        assert_eq!(
+            recovered(),
+            None,
+            "a fresh conversation leaves Recover alone"
+        );
+        finish_rerun(&hub, "src", true);
+        assert!(
+            recovered().is_some(),
+            "Recover must not resume it a second time"
+        );
+    }
+
+    #[tokio::test]
     async fn tracer_lost_after_user_stop_does_not_abandon() {
         use crate::history::test_support::{fake_pty, insert_live, record, write_meta_for};
         use crate::pty::PtyExit;
@@ -1549,12 +1867,12 @@ mod tests {
         write_meta_for(&hub.dirs, "s1");
         stop_session(&hub, "s1").await.expect("stop");
         exit_tx.send(PtyExit::TracerLost).expect("report the loss");
-        // Only the exit watcher's non-abandoned path sets an exit code, so
-        // this waits for the watcher to have run.
+        // Only the exit watcher drops the scrollback request (a stop leaves
+        // it), so this waits for the watcher to have run.
         let watcher_ran = || {
             hub.sessions
                 .get("s1")
-                .is_some_and(|rec| crate::sync::lock(&rec).exit_code == Some(-1))
+                .is_some_and(|rec| crate::sync::lock(&rec).scrollback_snapshot_req.is_none())
         };
         assert!(
             wait_until(watcher_ran).await,
@@ -1684,10 +2002,94 @@ mod tests {
             None,
         )));
         hub.sessions.insert(source);
-        let request = duplicate_request(&hub, "source")
+        let request = duplicate_request(&hub, "source", false)
             .await
             .expect("source can be duplicated");
         assert_eq!(request.agent_options, deepseek_options());
+    }
+
+    #[tokio::test]
+    #[expect(clippy::panic, reason = "a wrong target shape fails the test loudly")]
+    async fn restart_duplicate_keeps_the_source_branch() {
+        let (hub, _scratch) = spawnless_test_hub("restart-same-checkout");
+        let target = SpawnTarget::Single {
+            repo_id: "r1".to_owned(),
+            branch_name: "wt/silly-gecko".to_owned(),
+            base_branch: Some("main".to_owned()),
+            use_worktree: true,
+            checkout_strategy: None,
+            worktree_reuse: protocol::WorktreeReusePolicy::Reuse,
+            existing_worktree: None,
+        };
+        let mut source = idle_record("src");
+        source.spawn_config = Some(protocol::SpawnConfig::from_request(&env_spawn(
+            target,
+            SessionMode::Interactive,
+            Vec::new(),
+            None,
+        )));
+        hub.sessions.insert(source);
+        let request = duplicate_request(&hub, "src", true)
+            .await
+            .expect("a restart reruns the source's config");
+        match request.target {
+            SpawnTarget::Single {
+                branch_name,
+                worktree_reuse,
+                use_worktree,
+                ..
+            } => {
+                assert_eq!(branch_name, "wt/silly-gecko", "the source's branch");
+                assert_eq!(worktree_reuse, protocol::WorktreeReusePolicy::Reuse);
+                assert!(use_worktree);
+            }
+            other => panic!("expected a single target, got {other:?}"),
+        }
+    }
+
+    /// A Restart or Resume of a Claude session continues its conversation
+    /// while the transcript exists; a Duplicate never does.
+    #[tokio::test]
+    async fn restart_duplicate_resumes_the_conversation_while_its_transcript_exists() {
+        let (hub, scratch) = spawnless_test_hub("restart-resume");
+        let folder = scratch.path().join("work").to_string_lossy().into_owned();
+        let target = SpawnTarget::Standalone {
+            cwd: Some(folder.clone()),
+            add_dirs: Vec::new(),
+        };
+        let mut source = idle_record("src");
+        source.claude_session_id = Some("conv-1".to_owned());
+        source.spawn_config = Some(protocol::SpawnConfig::from_request(&env_spawn(
+            target,
+            SessionMode::Interactive,
+            Vec::new(),
+            None,
+        )));
+        hub.sessions.insert(source);
+        let home = scratch.path().join("claude-home");
+        let resumed = |same_checkout| {
+            let hub = &hub;
+            let home = home.clone();
+            async move {
+                duplicate_request_in(hub, "src", same_checkout, Some(&home))
+                    .await
+                    .expect("src can be rerun")
+                    .resume_conversation
+            }
+        };
+
+        assert_eq!(
+            resumed(true).await,
+            None,
+            "no transcript: a fresh conversation"
+        );
+        let project = home
+            .join("projects")
+            .join(crate::transcripts::encode_project_dir(&folder));
+        std::fs::create_dir_all(&project).expect("create the transcript folder");
+        std::fs::write(project.join("conv-1.jsonl"), "{}\n").expect("write the transcript");
+        assert_eq!(resumed(true).await.as_deref(), Some("conv-1"));
+        assert_eq!(resumed(false).await, None, "a Duplicate starts fresh");
     }
 
     fn accent(color: &str) -> AppearanceOverrides {

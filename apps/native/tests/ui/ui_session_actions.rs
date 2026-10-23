@@ -310,6 +310,45 @@ fn exited_session_shows_exit_code_and_overlay(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn restart_sends_same_checkout(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        sessions: vec![
+            session("s1").worktree("r1").exited(0).build(),
+            session("s2").worktree("r1").build(),
+        ],
+        tabs: vec![tab("t1", &pane("p1", Some("s1")))],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.sent();
+
+    h.click_on("exited-restart-p1");
+    let sent = h.sent();
+    assert!(
+        matches!(sent.as_slice(), [ClientMessage::DuplicateSession {
+            session_id,
+            carry_busy_excluded: true,
+            same_checkout: true,
+            ..
+        }] if session_id == "s1"),
+        "Restart reruns in the session's own checkout: sent {sent:?}"
+    );
+
+    open_duplicate(&mut h, "leaf-s2");
+    h.click_on("duplicate-new-tab");
+    let sent = h.sent();
+    assert!(
+        matches!(sent.as_slice(), [ClientMessage::DuplicateSession {
+            session_id,
+            same_checkout: false,
+            ..
+        }] if session_id == "s2"),
+        "a Duplicate gets a fresh branch: sent {sent:?}"
+    );
+}
+
+#[gpui::test]
 fn restart_duplicates_then_replaces_pane_and_discards_old(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = single(cx, &dir, session("s1").exited(0).build());

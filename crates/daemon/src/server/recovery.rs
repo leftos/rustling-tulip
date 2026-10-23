@@ -463,7 +463,7 @@ fn recovery_busy_excluded(live: Option<&SessionRecord>, entry: &protocol::Histor
 
 /// Whether `agent` still holds conversation `id` for `folder`: Claude Code's
 /// transcript.
-fn recovery_conversation_exists(
+pub(super) fn recovery_conversation_exists(
     claude_home: Option<&Path>,
     agent: Agent,
     folder: &str,
@@ -500,7 +500,7 @@ fn finish_recovery(
 
 /// Stamp the history entry for `session_id` recovered now, logging a failure
 /// instead of returning it: the recovery itself already succeeded.
-fn mark_history_recovered(hub: &Hub, session_id: &str) {
+pub(super) fn mark_history_recovered(hub: &Hub, session_id: &str) {
     if let Err(err) = history::mark_recovered(&hub.dirs, session_id, chrono::Utc::now()) {
         warn!(?err, history_id = %session_id, "failed to mark history entry recovered");
     }

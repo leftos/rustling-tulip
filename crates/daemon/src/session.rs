@@ -831,7 +831,8 @@ pub fn attach_lifecycle(
 /// A tracer lost while the session still holds its pty leaves the session
 /// abandoned instead: no exit code, sidecar kept for Resume, and an `Error`
 /// attention. A session the user already stopped or parked has released its
-/// pty, so its lost tracer ends it like any exit.
+/// pty, so its lost tracer ends it like any exit, and any exit after such a
+/// stop is the kill's: it sets no exit code and asks for no attention.
 async fn watch_exit(
     registry: Arc<SessionRegistry>,
     session_id: String,
@@ -853,8 +854,12 @@ async fn watch_exit(
         history::record_session_end(&registry, dirs, &session_id, history::end_for_exit(exit));
     }
     let mut abandoned = false;
+    let mut user_stopped = false;
     registry.update(&session_id, |rec| {
         abandoned = matches!(exit, PtyExit::TracerLost) && rec.pty.is_some();
+        // A Stop or a Park claims the session (stopped, pty taken) before the
+        // kill, so this exit is the kill's: no code of its own, no attention.
+        user_stopped = rec.pty.is_none() && rec.status == SessionStatus::Stopped;
         rec.status = SessionStatus::Stopped;
         // A stopped session has nothing left waiting on it.
         rec.pending_input = None;
@@ -867,7 +872,9 @@ async fn watch_exit(
             rec.is_abandoned = true;
             push_recent_action(rec, "abandoned: tracer lost".to_string());
         } else {
-            rec.exit_code = Some(code);
+            if !user_stopped {
+                rec.exit_code = Some(code);
+            }
             push_recent_action(rec, format!("exited with code {code}"));
         }
     });
@@ -875,7 +882,9 @@ async fn watch_exit(
         registry.fan_out_attention(session_id.clone(), protocol::AttentionReason::Error);
         return;
     }
-    registry.fan_out_attention(session_id.clone(), protocol::AttentionReason::Stopped);
+    if !user_stopped {
+        registry.fan_out_attention(session_id.clone(), protocol::AttentionReason::Stopped);
+    }
     registry.delete_sidecar(&session_id);
 }
 
@@ -1543,6 +1552,77 @@ mod tests {
         assert_eq!(record.status, SessionStatus::Stopped);
         assert_eq!(record.pending_input, None, "the prompt left with the exit");
         assert!(!record.background, "no background work outlives the exit");
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    /// A Stop claims the session (status stopped, pty taken) before the
+    /// kill; the child's exit that follows is the kill's, so it sets no exit
+    /// code and asks for no attention.
+    #[tokio::test]
+    async fn a_user_stop_sends_no_attention_and_no_exit_code() {
+        use crate::history::test_support::{
+            fake_pty, insert_live, record, scratch_dirs, sidecar_gone, write_meta_for,
+        };
+        use crate::pty::PtyExit;
+
+        let dirs = scratch_dirs("user-stop-quiet");
+        let registry = SessionRegistry::new(dirs.clone());
+        let (pty, exit_tx) = fake_pty();
+        insert_live(
+            &registry,
+            &dirs,
+            record("s1", SessionMode::Interactive),
+            &pty,
+        );
+        write_meta_for(&dirs, "s1");
+        let mut events = registry.subscribe();
+        registry.update("s1", |rec| {
+            rec.status = SessionStatus::Stopped;
+            rec.pty = None;
+        });
+
+        exit_tx.send(PtyExit::Code(1)).expect("report the exit");
+        assert!(sidecar_gone(&dirs, "s1").await, "the watcher ran");
+
+        assert!(
+            !drained_attention(&mut events).contains(&protocol::AttentionReason::Stopped),
+            "a user stop asks for no attention"
+        );
+        let rec = registry.get("s1").expect("the session is still listed");
+        assert_eq!(crate::sync::lock(&rec).exit_code, None);
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    /// A child that exits on its own still reports its code and asks for
+    /// attention.
+    #[tokio::test]
+    async fn a_self_exit_still_reports_its_code() {
+        use crate::history::test_support::{
+            fake_pty, insert_live, record, scratch_dirs, sidecar_gone, write_meta_for,
+        };
+        use crate::pty::PtyExit;
+
+        let dirs = scratch_dirs("self-exit-reports");
+        let registry = SessionRegistry::new(dirs.clone());
+        let (pty, exit_tx) = fake_pty();
+        insert_live(
+            &registry,
+            &dirs,
+            record("s1", SessionMode::Interactive),
+            &pty,
+        );
+        write_meta_for(&dirs, "s1");
+        let mut events = registry.subscribe();
+
+        exit_tx.send(PtyExit::Code(1)).expect("report the exit");
+        assert!(sidecar_gone(&dirs, "s1").await, "the watcher ran");
+
+        assert!(
+            drained_attention(&mut events).contains(&protocol::AttentionReason::Stopped),
+            "a self-exit asks for attention"
+        );
+        let rec = registry.get("s1").expect("the session is still listed");
+        assert_eq!(crate::sync::lock(&rec).exit_code, Some(1));
         let _ = std::fs::remove_dir_all(&dirs.config);
     }
 

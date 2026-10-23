@@ -184,23 +184,37 @@ pub fn spawn(
                 child.wait().await.ok().and_then(|s| s.code())
             }
         };
-        registry_for_exit.update(&session_for_exit, |rec| {
-            rec.status = SessionStatus::Stopped;
-            rec.exit_code = exit;
-            push_recent_action(
-                rec,
-                format!(
-                    "exited with code {}",
-                    exit.map_or_else(|| "?".into(), |c| c.to_string())
-                ),
-            );
-        });
-        registry_for_exit
-            .fan_out_attention(session_for_exit.clone(), protocol::AttentionReason::Stopped);
-        registry_for_exit.delete_sidecar(&session_for_exit);
+        record_exit(&registry_for_exit, &session_for_exit, exit);
     });
 
     Ok(handle)
+}
+
+/// Mark `session_id` stopped once its child exited with `exit`, then drop
+/// its sidecar. A Stop claims the session (stopped, handle taken) before the
+/// kill, so an exit after it is the kill's: no code of its own and no
+/// attention. A child that exits on its own records its code and asks for
+/// attention.
+fn record_exit(registry: &SessionRegistry, session_id: &str, exit: Option<i32>) {
+    let mut user_stopped = false;
+    registry.update(session_id, |rec| {
+        user_stopped = rec.headless.is_none() && rec.status == SessionStatus::Stopped;
+        rec.status = SessionStatus::Stopped;
+        if !user_stopped {
+            rec.exit_code = exit;
+        }
+        push_recent_action(
+            rec,
+            format!(
+                "exited with code {}",
+                exit.map_or_else(|| "?".into(), |c| c.to_string())
+            ),
+        );
+    });
+    if !user_stopped {
+        registry.fan_out_attention(session_id.to_owned(), protocol::AttentionReason::Stopped);
+    }
+    registry.delete_sidecar(session_id);
 }
 
 // stream-json parsing lives in `crate::agents::claude`. Other agents'
@@ -275,6 +289,93 @@ mod tests {
             env: Vec::new(),
             agent: Agent::Claude,
         }
+    }
+
+    /// Whether `events` held a `Stopped` attention, draining it.
+    fn stopped_attention(
+        events: &mut tokio::sync::broadcast::Receiver<crate::session::SessionEvent>,
+    ) -> bool {
+        let mut seen = false;
+        while let Ok(event) = events.try_recv() {
+            if let crate::session::SessionEvent::Attention {
+                reason: protocol::AttentionReason::Stopped,
+                ..
+            } = event
+            {
+                seen = true;
+            }
+        }
+        seen
+    }
+
+    /// A Stop claims a headless session (stopped, handle taken) before the
+    /// kill, so the killed child's exit sets no code and asks for no
+    /// attention.
+    #[tokio::test]
+    async fn a_user_stop_of_a_headless_session_sends_no_attention_and_no_exit_code() {
+        use crate::history::test_support::{record, sidecar_gone, write_meta_for};
+        let dirs = scratch_dirs();
+        let registry = SessionRegistry::new(dirs.clone());
+        let mut rec = record("h1", protocol::SessionMode::Headless);
+        rec.status = SessionStatus::Stopped;
+        registry.insert(rec);
+        write_meta_for(&dirs, "h1");
+        let mut events = registry.subscribe();
+        let handle = spawn(
+            &long_lived_spec(),
+            &registry,
+            "h1".to_string(),
+            dirs.clone(),
+        )
+        .expect("spawn long-lived headless child");
+
+        tokio::time::timeout(HANG_GUARD, handle.kill())
+            .await
+            .expect("kill returns");
+        assert!(sidecar_gone(&dirs, "h1").await, "the exit waiter ran");
+
+        assert!(
+            !stopped_attention(&mut events),
+            "a user stop asks for no attention"
+        );
+        let rec = registry.get("h1").expect("still listed");
+        assert_eq!(crate::sync::lock(&rec).exit_code, None);
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    /// A headless child that exits on its own reports its code and asks
+    /// for attention.
+    #[tokio::test]
+    async fn a_headless_self_exit_still_reports_its_code() {
+        use crate::history::test_support::{record, sidecar_gone, write_meta_for};
+        let dirs = scratch_dirs();
+        let registry = SessionRegistry::new(dirs.clone());
+        registry.insert(record("h2", protocol::SessionMode::Headless));
+        write_meta_for(&dirs, "h2");
+        let mut events = registry.subscribe();
+        let (program, args) = if cfg!(windows) {
+            ("cmd", vec!["/c", "exit", "3"])
+        } else {
+            ("sh", vec!["-c", "exit 3"])
+        };
+        let spec = HeadlessSpec {
+            program: program.to_owned(),
+            args: args.into_iter().map(str::to_owned).collect(),
+            cwd: std::env::temp_dir(),
+            env: Vec::new(),
+            agent: Agent::Claude,
+        };
+        let _handle =
+            spawn(&spec, &registry, "h2".to_string(), dirs.clone()).expect("spawn headless child");
+
+        assert!(sidecar_gone(&dirs, "h2").await, "the exit waiter ran");
+        assert!(
+            stopped_attention(&mut events),
+            "a self-exit asks for attention"
+        );
+        let rec = registry.get("h2").expect("still listed");
+        assert_eq!(crate::sync::lock(&rec).exit_code, Some(3));
+        let _ = std::fs::remove_dir_all(&dirs.config);
     }
 
     /// Regression: the exit waiter used to hold a mutex around the `Child`
