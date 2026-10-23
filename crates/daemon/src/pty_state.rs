@@ -10,8 +10,9 @@
 //!
 //! A plain shell ([`watch_plain_shell`]) runs the same screen check while
 //! `claude` runs in it: while hooks drive it, or once its screen has shown
-//! Claude for a whole confirmation window. Once Claude's screen has been gone
-//! for a whole window, the shell is handed back to its heuristic classifier:
+//! Claude for a whole confirmation window. Once the shell's prompt has been
+//! back on the grid's last row for a whole window, the shell is handed back
+//! to its heuristic classifier:
 //! - an output-vs-input byte-volume comparison: command output outpaces
 //!   keystroke echo and promotes to `working`
 //! - a terminal-title heartbeat: a title change counts as activity (see
@@ -397,7 +398,7 @@ impl ScreenWatch {
             Ok(found) => found,
             Err(checked) => return checked,
         };
-        let Some(reading) = self.read_screen() else {
+        let Some((reading, prompt)) = self.read_screen() else {
             self.confirm.hold(now);
             return Checked::Done;
         };
@@ -406,6 +407,7 @@ impl ScreenWatch {
             rule = ?reading.rule,
             verdict = ?reading.verdict,
             from_title = reading.from_title,
+            prompt,
             status = ?read.status,
             ?mode,
             quiet,
@@ -416,8 +418,17 @@ impl ScreenWatch {
             self.dialog_edge_armed = true;
         }
         match mode {
-            Mode::Shell => self.watch_for_claude(read, reading, now),
-            Mode::ShellClaude if !shows_claude(reading) => self.watch_for_claude_end(read, now),
+            Mode::Shell => {
+                self.watch_for_claude(read, shows_claude(reading) && !prompt, quiet, now)
+            }
+            Mode::ShellClaude if prompt => self.watch_for_claude_end(read, now),
+            Mode::ShellClaude if !shows_claude(reading) => {
+                // A Claude screen no rule knows, or Claude's title alone, with
+                // the shell's prompt not back: claude may still run. Nothing
+                // writes, and any open window waits for the next check.
+                self.confirm.candidate = None;
+                Checked::Done
+            }
             Mode::Agent | Mode::ShellClaude => {
                 self.follow_screen(read, reading, quiet, now);
                 Checked::Done
@@ -465,16 +476,21 @@ impl ScreenWatch {
         Ok((read, quiet))
     }
 
-    /// The screen's reading, or `None` when the grid's size changed since the
-    /// last executed check: the frame under the new size may be half drawn.
-    fn read_screen(&mut self) -> Option<Reading> {
-        let (size, reading) = {
+    /// The screen's reading, and whether its last non-empty row is a shell's
+    /// prompt; `None` when the grid's size changed since the last executed
+    /// check: the frame under the new size may be half drawn.
+    fn read_screen(&mut self) -> Option<(Reading, bool)> {
+        let (size, reading, prompt) = {
             let screen = crate::sync::lock(&self.screen);
-            (screen.size(), rules::read_claude(&screen))
+            (
+                screen.size(),
+                rules::read_claude(&screen),
+                rules::last_row_is_shell_prompt(&screen),
+            )
         };
         let resized = self.size.is_some_and(|last| last != size);
         self.size = Some(size);
-        (!resized).then_some(reading)
+        (!resized).then_some((reading, prompt))
     }
 
     /// Publish the status the screen shows, at once or after its window.
@@ -494,11 +510,22 @@ impl ScreenWatch {
         }
     }
 
-    /// In a shell not running `claude`, count a check that shows Claude's
-    /// screen; answers [`Checked::ClaudeShown`] once a whole window has.
-    fn watch_for_claude(&mut self, read: StatusRead, reading: Reading, now: Instant) -> Checked {
+    /// In a shell not running `claude`, count a settled check whose screen
+    /// shows Claude with no shell prompt under it (`shown`); answers
+    /// [`Checked::ClaudeShown`] once a whole window has. A check inside a
+    /// burst of output neither counts nor breaks the window.
+    fn watch_for_claude(
+        &mut self,
+        read: StatusRead,
+        shown: bool,
+        quiet: bool,
+        now: Instant,
+    ) -> Checked {
+        if !quiet {
+            return Checked::Done;
+        }
         self.confirm.candidate = None;
-        if !shows_claude(reading) {
+        if !shown {
             self.confirm.window = None;
             return Checked::Done;
         }
@@ -509,8 +536,8 @@ impl ScreenWatch {
         }
     }
 
-    /// In a shell running `claude`, count a check whose screen no longer shows
-    /// Claude; once a whole window has, hand the shell back to its classifier
+    /// In a shell running `claude`, count a check whose last row is the
+    /// shell's prompt; once a whole window has, hand the shell back to its classifier
     /// (see [`hand_shell_back`]) and answer [`Checked::ClaudeEnded`]. A write
     /// that lands is this watcher's own, so its broadcast starts no hold.
     fn watch_for_claude_end(&mut self, read: StatusRead, now: Instant) -> Checked {
@@ -672,8 +699,9 @@ fn apply_screen_status(
 }
 
 /// Hand a shell whose `claude` has ended back to its own classifier: clear
-/// `hook_driven`, and end a `Working` or `AwaitingInput` turn at `Idle`
-/// through [`apply_watcher_status`] (an `Idle` stays as it is). Refused, like
+/// `hook_driven` and `background` (claude's background tasks ended with it),
+/// and end a `Working` or `AwaitingInput` turn at `Idle` through
+/// [`apply_watcher_status`] (an `Idle` stays as it is). Refused, like
 /// [`apply_screen_status`], unless the record still holds what `from` read;
 /// answers the record as written, or `None` when refused. It is the only
 /// screen write of `hook_driven`, and it never writes the hook stamp.
@@ -691,8 +719,9 @@ fn hand_shell_back(
             rec.status,
             SessionStatus::Working | SessionStatus::AwaitingInput
         );
-        let changed = rec.hook_driven || in_turn;
+        let changed = rec.hook_driven || rec.background || in_turn;
         rec.hook_driven = false;
+        rec.background = false;
         if in_turn {
             apply_watcher_status(rec, SessionStatus::Idle);
         }
@@ -712,18 +741,26 @@ fn hand_shell_back(
 /// `claude` runs in the shell (hooks drive it, or its screen showed Claude for
 /// a whole window without them), it runs the agent watcher's screen check
 /// (see [`watch`]), and `attention_tx` receives one event each time the screen
-/// moves the session into `AwaitingInput`. Once a screen with no Claude rule
-/// (or only Claude's title) has lasted a whole window, `claude` has ended:
-/// the shell is handed back to its classifier (see [`hand_shell_back`]).
+/// moves the session into `AwaitingInput`. Once the grid's last non-empty row
+/// has been the shell's prompt for a whole window, `claude` has ended (its
+/// last frame stays painted above the prompt): the shell is handed back to
+/// its classifier (see [`hand_shell_back`]). A screen no Claude rule matches,
+/// or Claude's title alone, with no prompt back, keeps `claude` running.
+/// Without hooks, the shell enters that mode once settled output (read after
+/// [`CHECK_DEBOUNCE`] of quiet, never inside a burst) has shown Claude's
+/// screen, with no shell prompt under it, for a whole window.
 ///
 /// A shell not running `claude` keeps its classifier: command output sets the
 /// status to `Working`, while echoed input and prompt redraws leave it
 /// `Idle`, and [`SHELL_IDLE_AFTER`] of silence ends a `Working`. `initial` is
 /// the status the session's record already carries; the classifier only
 /// moves between `Idle` and `Working`, so any other stored status seeds
-/// `Idle` (see [`State::seed_plain_shell`]). When hooks start or stop driving
-/// the shell, the classifier's state is seeded again from the record and the
-/// screen is held off for [`FOREIGN_WRITE_HOLD`].
+/// `Idle` (see [`State::seed_plain_shell`]). Output during the watcher's
+/// starting [`FOREIGN_WRITE_HOLD`] (a reattached session's replay) only feeds
+/// the grid. When hooks start or stop driving the shell, the classifier's
+/// state is seeded again from the record and the screen is held off for
+/// [`FOREIGN_WRITE_HOLD`]; on every return to the classifier, its volume
+/// windows, title and silence start afresh.
 pub fn watch_plain_shell(
     registry: &Arc<SessionRegistry>,
     session_id: String,
@@ -736,8 +773,10 @@ pub fn watch_plain_shell(
         input_pulses,
         screen,
     } = streams;
+    let watch = ScreenWatch::new(registry, session_id, screen, attention_tx);
     let mut watcher = ShellWatcher {
-        watch: ScreenWatch::new(registry, session_id, screen, attention_tx),
+        replay_until: watch.confirm.hold_until,
+        watch,
         input_pulses,
         state: State::seed_plain_shell(initial),
         quiet_from: Instant::now(),
@@ -754,6 +793,9 @@ pub fn watch_plain_shell(
 /// runs in the shell, and the classifier it runs otherwise.
 struct ShellWatcher {
     watch: ScreenWatch,
+    /// The end of the watcher's starting hold: output before it is a
+    /// reattached session's replay, not shell activity.
+    replay_until: Instant,
     input_pulses: mpsc::UnboundedReceiver<usize>,
     /// The classifier's own view of the status.
     state: State,
@@ -843,9 +885,15 @@ impl ShellWatcher {
 
     /// Feed one chunk into the grid and the volume windows, run the classifier
     /// on it while `claude` is not running, and run the screen check if it is
-    /// due. Breaks once the record is gone.
+    /// due. A replay chunk only feeds the grid. Breaks once the record is gone.
     fn on_output(&mut self, bytes: &[u8], mode: Mode) -> ControlFlow<()> {
         let now = Instant::now();
+        if now < self.replay_until {
+            // The title the replay leaves is the one later chunks compare to.
+            self.title_activity.feed(bytes);
+            self.watch.feed(bytes, now);
+            return ControlFlow::Continue(());
+        }
         self.quiet_from = now;
         self.idle_checked = false;
         // Drain any input pulses that landed in our channel before (or
@@ -912,8 +960,7 @@ impl ShellWatcher {
             Checked::ClaudeEnded => {
                 self.claude_on_screen = false;
                 self.reseed();
-                self.quiet_from = now;
-                self.idle_checked = false;
+                self.start_shell_mode(now);
             }
         }
         ControlFlow::Continue(())
@@ -935,6 +982,19 @@ impl ShellWatcher {
     fn hooks_flipped(&mut self, now: Instant) {
         self.watch.confirm.hold(now);
         self.reseed();
+        if self.mode() == Mode::Shell {
+            self.start_shell_mode(now);
+        }
+    }
+
+    /// The classifier takes the shell back: the volume, the title and the
+    /// silence it saw while `claude` ran are not the shell's activity.
+    fn start_shell_mode(&mut self, now: Instant) {
+        self.in_window.clear();
+        self.out_window.clear();
+        self.title_activity = TitleActivity::new();
+        self.quiet_from = now;
+        self.idle_checked = false;
     }
 
     /// Seed the classifier from the record the wake last saw.
@@ -1214,7 +1274,8 @@ mod tests {
 mod hysteresis_tests {
     use super::{
         AgentStreams, CHECK_DEBOUNCE, FOREIGN_WRITE_HOLD, SHELL_IDLE_AFTER, ShellStreams, State,
-        apply_screen_status, on_plain_shell_transition, record_status, watch, watch_plain_shell,
+        apply_screen_status, hand_shell_back, on_plain_shell_transition, record_status, watch,
+        watch_plain_shell,
     };
     use crate::paths::Dirs;
     use crate::screen::{Screen, SharedScreen};
@@ -1292,8 +1353,9 @@ mod hysteresis_tests {
     struct Harness {
         registry: Arc<SessionRegistry>,
         output: broadcast::Sender<Vec<u8>>,
-        /// Keeps a plain shell watcher's input channel open.
-        _input_tx: mpsc::UnboundedSender<usize>,
+        /// A plain shell watcher's input pulses; holding it keeps the channel
+        /// open.
+        input: mpsc::UnboundedSender<usize>,
         /// Keeps the input channel open when the watcher does not read it.
         _input: Option<mpsc::UnboundedReceiver<usize>>,
         attention: mpsc::UnboundedReceiver<super::AttentionEvent>,
@@ -1364,7 +1426,7 @@ mod hysteresis_tests {
         Harness {
             registry,
             output,
-            _input_tx: input,
+            input,
             _input: unread_input,
             attention: attention_rx,
             screen,
@@ -1635,6 +1697,7 @@ mod hysteresis_tests {
     #[tokio::test(start_paused = true)]
     async fn once_a_second_repaint_does_not_flicker_plain_shell() {
         let h = start("shell", true);
+        pass_hold().await;
         assert_heartbeat_holds_working(&h).await;
     }
 
@@ -1926,7 +1989,7 @@ mod hysteresis_tests {
     #[tokio::test(start_paused = true)]
     async fn plain_shell_classifier_runs_again_after_hook_driven_clears() {
         let h = start("shell-hook-release-promote", true);
-        settle().await;
+        pass_hold().await;
         set_hook_working(&h, 1);
         settle().await;
         h.set_record(|record| {
@@ -1948,6 +2011,7 @@ mod hysteresis_tests {
     #[tokio::test(start_paused = true)]
     async fn non_hook_plain_shell_promotes_on_its_own_output() {
         let h = start("shell-promote", true);
+        pass_hold().await;
         assert_eq!(h.status(), SessionStatus::Idle);
         h.heartbeat(0);
         settle().await;
@@ -2143,6 +2207,210 @@ mod hysteresis_tests {
         assert!(!h.hook_driven(), "a working title kept the hooks");
     }
 
+    /// The prompt row a shell prints under the last frame of a `claude` that
+    /// was killed: nothing erases that frame.
+    const PROMPT_ROW: &[u8] = b"\r\nPS C:\\work> ";
+
+    /// A command run under whatever the grid shows: its output rows, then the
+    /// prompt back.
+    fn command_run() -> Vec<u8> {
+        let rows: Vec<String> = (0..12)
+            .map(|n| format!("-a---          10/22/2026  9:{n:02} AM           {n}042 file{n}.txt"))
+            .collect();
+        format!("\r\n{}\r\nPS C:\\work> ", rows.join("\r\n")).into_bytes()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_killed_claude_leaves_its_frame_but_the_prompt_ends_claude_mode() {
+        let h = start_record(
+            "shell-killed-frame",
+            true,
+            hook_record(SessionStatus::Working),
+        );
+        pass_hold().await;
+        h.chunk(idle_frame(&[SPINNER_ROW]));
+        advance(ms(100)).await;
+        h.chunk(PROMPT_ROW.to_vec());
+        advance(ms(299)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Working,
+            "the prompt row demoted before the window closed"
+        );
+        assert!(h.hook_driven(), "hooks released before the window closed");
+        advance(ms(401)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "claude's end leaves the turn"
+        );
+        assert!(
+            !h.hook_driven(),
+            "the prompt under claude's frame kept claude mode"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_unknown_claude_screen_keeps_claude_mode() {
+        let mut record = hook_record(SessionStatus::AwaitingInput);
+        record.pending_input = Some(protocol::PendingInput::Permission {
+            tool_name: "Bash".to_owned(),
+            summary: "cargo build".to_owned(),
+        });
+        let h = start_record("shell-unknown-screen", true, record);
+        pass_hold().await;
+        h.chunk(frame(&[
+            "  Opening the external editor…",
+            "",
+            "  Save and close the editor to continue",
+        ]));
+        advance(Duration::from_secs(3)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::AwaitingInput,
+            "a screen no rule matches ended claude"
+        );
+        assert!(
+            h.hook_driven(),
+            "a screen no rule matches released the hooks"
+        );
+        assert!(
+            pending_input(&h).is_some(),
+            "the pending prompt was dropped"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_leftover_box_after_exit_does_not_reenter_claude_mode() {
+        let h = start_record("shell-leftover-box", true, hook_record(SessionStatus::Idle));
+        pass_hold().await;
+        h.chunk(idle_frame(&[]));
+        advance(ms(100)).await;
+        h.chunk(PROMPT_ROW.to_vec());
+        advance(ms(700)).await;
+        assert!(!h.hook_driven(), "the prompt ends claude mode");
+        for run in 0..2 {
+            h.chunk(command_run());
+            settle().await;
+            assert_eq!(
+                h.status(),
+                SessionStatus::Working,
+                "run {run}: the classifier did not promote on command output"
+            );
+            advance(SHELL_IDLE_AFTER + ms(500)).await;
+            assert_eq!(
+                h.status(),
+                SessionStatus::Idle,
+                "run {run}: the classifier's idle tick did not end the command"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_reattached_shell_at_a_dialog_raises_no_second_attention() {
+        let mut h = start_record("shell-reattach-dialog", true, restored_prompt_record());
+        let mut replay = shell_output();
+        replay.extend(permission_frame());
+        h.chunk(replay);
+        advance(Duration::from_secs(3)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::AwaitingInput,
+            "the replay moved the restored prompt"
+        );
+        assert!(
+            pending_input(&h).is_some(),
+            "the replay dropped the pending prompt"
+        );
+        assert_eq!(
+            h.attentions(),
+            0,
+            "the replayed dialog raised Attention again"
+        );
+    }
+
+    /// A hook event already on the record but not yet broadcast, landing
+    /// between the leave window's last read and its write, refuses the write.
+    #[test]
+    fn a_hook_landing_before_the_leave_write_keeps_hook_driven() {
+        let registry = SessionRegistry::new(scratch_dirs("leave-race"));
+        registry.insert(hook_record(SessionStatus::Working));
+        let read = record_status(&registry, SESSION).expect("the session is registered");
+        {
+            let record = registry.get(SESSION).expect("session registered");
+            record.lock().expect("record lock").last_hook_time = Some(2);
+        }
+        assert_eq!(
+            hand_shell_back(&registry, SESSION, read),
+            None,
+            "the leave write landed over a newer hook event"
+        );
+        let record = registry.get(SESSION).expect("session registered");
+        let guard = record.lock().expect("record lock");
+        assert!(guard.hook_driven, "the leave write released the hooks");
+        assert_eq!(guard.status, SessionStatus::Working);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn leaving_claude_mode_clears_background() {
+        let mut record = hook_record(SessionStatus::Idle);
+        record.background = true;
+        let h = start_record("shell-leave-background", true, record);
+        pass_hold().await;
+        h.chunk(shell_prompt_frame());
+        advance(ms(700)).await;
+        assert!(!h.hook_driven(), "the prompt ends claude mode");
+        assert_eq!(h.status(), SessionStatus::Idle);
+        assert!(!h.background(), "claude's background tasks outlived it");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_keystroke_echo_just_after_leaving_claude_mode_stays_idle() {
+        let h = start_record(
+            "shell-leave-keystroke",
+            true,
+            hook_record(SessionStatus::Working),
+        );
+        pass_hold().await;
+        h.chunk(idle_frame(&[SPINNER_ROW]));
+        advance(ms(50)).await;
+        h.chunk(PROMPT_ROW.to_vec());
+        advance(ms(400)).await;
+        assert!(!h.hook_driven(), "the prompt ends claude mode");
+        assert_eq!(h.status(), SessionStatus::Idle);
+        h.input.send(1).expect("watcher still subscribed");
+        h.chunk(b"d".to_vec());
+        settle().await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "a keystroke echo read claude's last frames as command output"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_shell_spots_claude_only_once_its_output_settles() {
+        let mut h = start("shell-settled-entry", true);
+        pass_hold().await;
+        for _ in 0..40 {
+            h.chunk(permission_frame());
+            advance(ms(20)).await;
+        }
+        assert_ne!(
+            h.status(),
+            SessionStatus::AwaitingInput,
+            "a check inside a burst spotted Claude"
+        );
+        assert_eq!(h.attentions(), 0);
+        advance(Duration::from_secs(1)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::AwaitingInput,
+            "the settled dialog did not raise the prompt"
+        );
+        assert_eq!(h.attentions(), 1, "one Attention on entry");
+    }
+
     /// A hook-reported prompt dismissed without a hook (from another client)
     /// leaves the idle box on screen: it demotes once the window closes.
     #[tokio::test(start_paused = true)]
@@ -2242,6 +2510,7 @@ mod hysteresis_tests {
             true,
             restored_prompt_record(),
         );
+        pass_hold().await;
         h.heartbeat(0);
         settle().await;
         assert_eq!(h.status(), SessionStatus::Working, "shell output promotes");

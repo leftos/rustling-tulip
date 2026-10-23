@@ -268,6 +268,52 @@ pub fn read_claude(screen: &Screen) -> Reading {
     }
 }
 
+/// A shell's prompt row, each pattern with whether it is the POSIX form,
+/// which a row holding one of Claude's box glyphs never matches: PowerShell's
+/// `PS <path>>`, cmd's `<drive>:\<path>>`, and a POSIX shell's row ending in
+/// `$`, `#` or `%`.
+const SHELL_PROMPTS: [(&str, bool); 3] = [
+    (r"^PS [^>]*>$", false),
+    (r"^[A-Za-z]:\\[^>]*>$", false),
+    (r"^\S.*[$#%]$", true),
+];
+
+/// [`SHELL_PROMPTS`] compiled once; a pattern that does not compile is left
+/// out.
+static COMPILED_PROMPTS: LazyLock<Vec<(Regex, bool)>> = LazyLock::new(|| {
+    SHELL_PROMPTS
+        .iter()
+        .filter_map(|&(pattern, posix)| match Regex::new(pattern) {
+            Ok(regex) => Some((regex, posix)),
+            Err(error) => {
+                tracing::error!(
+                    pattern = pattern,
+                    %error,
+                    "screen rules: a shell prompt pattern did not compile; it is skipped"
+                );
+                None
+            }
+        })
+        .collect()
+});
+
+/// Whether the last non-empty row of the grid is a shell's prompt: the shell
+/// is back at its own prompt, whatever an ended program left painted above.
+#[must_use]
+pub fn last_row_is_shell_prompt(screen: &Screen) -> bool {
+    screen
+        .bottom_non_empty_lines(1)
+        .first()
+        .is_some_and(|row| is_shell_prompt(row.trim_end()))
+}
+
+fn is_shell_prompt(row: &str) -> bool {
+    let box_glyph = row.contains(['│', '─', '❯']);
+    COMPILED_PROMPTS
+        .iter()
+        .any(|(regex, posix)| !(*posix && box_glyph) && regex.is_match(row))
+}
+
 /// The regions read so far, so each one is read once per evaluation.
 #[derive(Default)]
 struct RegionLines {
@@ -742,6 +788,40 @@ mod tests {
             CLAUDE_RULES.len(),
             "every rule compiled, none skipped"
         );
+        assert_eq!(
+            COMPILED_PROMPTS.len(),
+            SHELL_PROMPTS.len(),
+            "every shell prompt pattern compiled, none skipped"
+        );
+    }
+
+    #[test]
+    fn shell_prompt_examples_and_non_examples() {
+        let last_row_is_prompt = |row: &str| {
+            let mut screen = Screen::new(80, 5);
+            screen.feed(format!("some output\r\n{row}").as_bytes());
+            last_row_is_shell_prompt(&screen)
+        };
+        let prompts = [
+            r"PS C:\work>",
+            r"PS C:\Users\me\src\rt>",
+            r"C:\work>",
+            "me@box:~/rt$",
+            "root@box:/#",
+        ];
+        for row in prompts {
+            assert!(last_row_is_prompt(row), "read as no prompt: {row:?}");
+        }
+        let others = [
+            "❯",
+            "  ⏵⏵ auto mode on · 1 shell",
+            "  ctx:  11%  |  ds: $  17.40  |  Opus 5.5",
+            "· Cooking… (21s · ↓ 1.1k tokens)",
+            "",
+        ];
+        for row in others {
+            assert!(!last_row_is_prompt(row), "read as a prompt: {row:?}");
+        }
     }
 
     #[test]
