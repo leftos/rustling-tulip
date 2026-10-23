@@ -17,7 +17,7 @@ use protocol::{
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::{broadcast, mpsc, oneshot};
-use tracing::warn;
+use tracing::error;
 use uuid::Uuid;
 
 /// In-memory cap on a session's `recent_actions`, matching the tail the
@@ -720,20 +720,26 @@ pub fn attach_lifecycle(
     dirs: Option<Dirs>,
 ) -> ScrollbackSnapshotReq {
     let (snap_tx, mut snap_rx) = mpsc::unbounded_channel::<oneshot::Sender<ScrollbackSnapshot>>();
-    let mut output = pty.output.subscribe();
+    let output = pty.take_lifecycle_output();
     let session_for_task = session_id.clone();
     let dirs_for_task = dirs.clone();
     tokio::spawn(async move {
+        let Some(mut output) = output else {
+            error!(
+                session_id = %session_for_task,
+                "pty lifecycle output already taken; the session's output reaches no client"
+            );
+            return;
+        };
         // Tracks whether snap_rx is still open. When all senders drop the
         // record's `scrollback_snapshot_req` (typically on session exit), the
         // receiver's `recv()` would return None on every poll — without the
         // guard the select! arm would spin.
         let mut snap_open = true;
         // One sender per client snapshot. This task is the only reader of the
-        // session's output broadcast that clients depend on: it forwards each
-        // chunk here, then persists it, so a client sees every chunk after
-        // its snapshot in order. Dropped with the task, which closes every
-        // client's `live`.
+        // session's lossless output queue: it forwards each chunk here, then
+        // persists it, so a client sees every chunk after its snapshot in
+        // order. Dropped with the task, which closes every client's `live`.
         let mut clients: Vec<mpsc::UnboundedSender<Vec<u8>>> = Vec::new();
         // Sticky bracketed-paste (DEC 2004) state, seeded from disk so it
         // survives across daemon restarts even when the scrollback ring has
@@ -749,65 +755,33 @@ pub fn attach_lifecycle(
             tokio::select! {
                 msg = output.recv() => {
                     match msg {
-                        Ok(bytes) => deliver_chunk(
+                        Some(bytes) => deliver_chunk(
                             &bytes,
                             &mut clients,
                             dirs_for_task.as_ref(),
                             &session_for_task,
                             &mut bp_tracker,
                         ),
-                        Err(broadcast::error::RecvError::Lagged(n)) => {
-                            warn!(session_id = %session_for_task, lagged = n, "pty output lagged");
-                        }
-                        Err(broadcast::error::RecvError::Closed) => break,
+                        None => break,
                     }
                 }
                 req = snap_rx.recv(), if snap_open => {
                     match req {
                         Some(reply) => {
-                            // Drain what the broadcast already holds before
-                            // the file read. A snapshot reads the whole file,
-                            // and without this the queue grows on every one
-                            // until the receiver lags. Each drained chunk goes
-                            // the output arm's way, so clients already
-                            // attached get it as well as the file.
-                            loop {
-                                match output.try_recv() {
-                                    Ok(bytes) => deliver_chunk(
-                                        &bytes,
-                                        &mut clients,
-                                        dirs_for_task.as_ref(),
-                                        &session_for_task,
-                                        &mut bp_tracker,
-                                    ),
-                                    Err(
-                                        broadcast::error::TryRecvError::Empty
-                                        | broadcast::error::TryRecvError::Closed,
-                                    ) => break,
-                                    Err(broadcast::error::TryRecvError::Lagged(n)) => {
-                                        warn!(
-                                            session_id = %session_for_task,
-                                            lagged = n,
-                                            "pty output lagged during snapshot drain"
-                                        );
-                                    }
-                                }
-                            }
                             let (data, truncated) = build_replay_snapshot(
                                 dirs_for_task.as_ref(),
                                 &session_for_task,
                                 bp_tracker.enabled(),
                             );
                             // Exact by construction: only this task writes
-                            // the scrollback file, so `data` holds every chunk
-                            // it has read and none it has not. The client's
-                            // sender joins `clients` before the task reads the
-                            // next one, so every chunk still queued on this
-                            // task's receiver (sent during the file read)
-                            // reaches scrollback, `live` and every other
-                            // client together in the output arm. A receiver
-                            // subscribed here instead would start at the
-                            // broadcast's tail and miss the queued ones.
+                            // the scrollback file, between two chunks, so
+                            // `data` holds every chunk it has read and none it
+                            // has not. The client's sender joins `clients`
+                            // before the task reads the next one, and the
+                            // output queue is lossless, so every chunk still
+                            // queued (sent during the file read) reaches
+                            // scrollback, `live` and every other client
+                            // together in the output arm.
                             let (tx, live) = mpsc::unbounded_channel::<Vec<u8>>();
                             clients.push(tx);
                             let _ = reply.send(ScrollbackSnapshot { data, truncated, live });
@@ -1126,6 +1100,7 @@ impl SessionRegistry {
 )]
 mod tests {
     use super::*;
+    use crate::pty::PtyOutput;
 
     /// Scratch config dir for the replay-snapshot tests.
     fn scratch_dirs(tag: &str) -> Dirs {
@@ -2123,26 +2098,27 @@ mod tests {
         }
     }
 
-    /// A live session whose output broadcast the test feeds, wired to
+    /// A live session whose output the test feeds, wired to
     /// `attach_lifecycle` the way a spawn is.
     struct FedSession {
         dirs: Dirs,
         _registry: Arc<SessionRegistry>,
         _pty: Arc<PtyHandle>,
         _exit_tx: oneshot::Sender<PtyExit>,
-        output: broadcast::Sender<Vec<u8>>,
+        output: PtyOutput,
         snap_tx: ScrollbackSnapshotReq,
     }
 
     fn fed_session(tag: &str) -> FedSession {
         let dirs = scratch_dirs(tag);
         let registry = SessionRegistry::new(dirs.clone());
-        let (output, _) = broadcast::channel::<Vec<u8>>(256);
+        let (output, lifecycle_output) = PtyOutput::channel(256);
         let (input_tx, _) = mpsc::unbounded_channel();
         let (resize_tx, _) = mpsc::unbounded_channel();
         let (exit_tx, exit_rx) = oneshot::channel();
         let pty = Arc::new(PtyHandle::from_parts(crate::pty::PtyHandleParts {
             output: output.clone(),
+            lifecycle_output,
             input_tx,
             resize_tx,
             exit_rx,
@@ -2180,7 +2156,7 @@ mod tests {
     }
 
     impl NumberedSender {
-        fn start(output: &broadcast::Sender<Vec<u8>>) -> Self {
+        fn start(output: &PtyOutput) -> Self {
             use std::sync::atomic::{AtomicBool, Ordering};
             use std::time::{Duration, Instant};
             let stop = Arc::new(AtomicBool::new(false));
@@ -2190,7 +2166,7 @@ mod tests {
                 std::thread::spawn(move || {
                     let mut seq: u64 = 0;
                     while !stop.load(Ordering::Relaxed) {
-                        let _ = output.send(format!("<{seq}>").into_bytes());
+                        output.blocking_send(format!("<{seq}>").into_bytes());
                         seq += 1;
                         let started = Instant::now();
                         while started.elapsed() < Duration::from_micros(1000) {
@@ -2295,8 +2271,158 @@ mod tests {
         );
     }
 
+    /// An attached client gets every chunk the session sends while its
+    /// lifecycle task is held, however many: the task is the only path from
+    /// the PTY to clients, and nothing re-sends what it skips. The test runs
+    /// on a current-thread runtime, so the lifecycle task runs only when the
+    /// test awaits; sending twice the broadcast's capacity, where a send waits
+    /// only on a full lifecycle queue, holds it the way a busy worker or a
+    /// starved thread does in the daemon.
+    #[tokio::test]
+    async fn an_attached_client_gets_every_chunk_sent_while_the_lifecycle_task_is_held() {
+        // Twice the 256 chunks `fed_session`'s broadcast holds.
+        const SENT: u64 = 512;
+        let session = fed_session("held-lifecycle");
+        let mut attached = take_snapshot(&session.snap_tx)
+            .await
+            .expect("a first snapshot")
+            .live;
+
+        for seq in 0..SENT {
+            session.output.send(format!("<{seq}>").into_bytes()).await;
+        }
+
+        let mut first_wrong = None;
+        for expected in 0..SENT {
+            let chunk = tokio::time::timeout(std::time::Duration::from_secs(60), attached.recv())
+                .await
+                .ok()
+                .flatten();
+            let got = chunk.as_deref().and_then(last_seq);
+            if got != Some(expected) {
+                first_wrong = Some((expected, got));
+                break;
+            }
+        }
+        let _ = std::fs::remove_dir_all(&session.dirs.config);
+        assert_eq!(
+            first_wrong, None,
+            "(expected chunk, chunk received) at the first chunk the attached client missed of {SENT} sent while its lifecycle task was held"
+        );
+    }
+
+    /// A full lifecycle queue makes the reader wait instead of dropping a
+    /// chunk: with the lifecycle task held, `LIFECYCLE_OUTPUT_CAPACITY` sends
+    /// complete at once and the next one does not, then completes once the
+    /// task runs, and the attached client gets every chunk in order. Each send
+    /// is polled once by hand, outside tokio's cooperative budget, so the
+    /// current-thread runtime never runs the lifecycle task in between.
+    #[tokio::test]
+    async fn a_full_lifecycle_queue_makes_the_reader_wait() {
+        use crate::pty::LIFECYCLE_OUTPUT_CAPACITY;
+        use std::future::Future;
+        use std::task::{Context, Waker};
+        let session = fed_session("full-lifecycle-queue");
+        let mut attached = take_snapshot(&session.snap_tx)
+            .await
+            .expect("a first snapshot")
+            .live;
+        let capacity = u64::try_from(LIFECYCLE_OUTPUT_CAPACITY).expect("the capacity fits u64");
+        let mut cx = Context::from_waker(Waker::noop());
+
+        let mut held_sends = 0_u64;
+        for seq in 0..capacity {
+            let send = std::pin::pin!(tokio::task::unconstrained(
+                session.output.send(format!("<{seq}>").into_bytes())
+            ));
+            if send.poll(&mut cx).is_pending() {
+                break;
+            }
+            held_sends += 1;
+        }
+        let mut next = Box::pin(tokio::task::unconstrained(
+            session.output.send(format!("<{capacity}>").into_bytes()),
+        ));
+        let next_waited = next.as_mut().poll(&mut cx).is_pending();
+        let next_completed = !next_waited
+            || tokio::time::timeout(std::time::Duration::from_secs(60), next)
+                .await
+                .is_ok();
+
+        let mut first_wrong = None;
+        for expected in 0..=capacity {
+            let chunk = tokio::time::timeout(std::time::Duration::from_secs(60), attached.recv())
+                .await
+                .ok()
+                .flatten();
+            let got = chunk.as_deref().and_then(last_seq);
+            if got != Some(expected) {
+                first_wrong = Some((expected, got));
+                break;
+            }
+        }
+        let _ = std::fs::remove_dir_all(&session.dirs.config);
+        assert_eq!(
+            held_sends, capacity,
+            "sends that completed at once while the lifecycle task was held"
+        );
+        assert!(
+            next_waited,
+            "the send past a full lifecycle queue completed without waiting"
+        );
+        assert!(
+            next_completed,
+            "the waiting send did not complete within 60 s once the lifecycle task ran"
+        );
+        assert_eq!(
+            first_wrong, None,
+            "(expected chunk, chunk received) at the first chunk the attached client missed"
+        );
+    }
+
+    /// A snapshot is answered while output arrives faster than the lifecycle
+    /// task persists it: a client attaching to a busy session gets its
+    /// scrollback and its live feed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_snapshot_is_answered_while_output_arrives_faster_than_it_is_persisted() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let session = fed_session("flooded");
+        let stop = Arc::new(AtomicBool::new(false));
+        let flood = {
+            let stop = Arc::clone(&stop);
+            let output = session.output.clone();
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    output.blocking_send(b"x".to_vec());
+                    let sent = std::time::Instant::now();
+                    while sent.elapsed() < std::time::Duration::from_micros(100) {
+                        std::hint::spin_loop();
+                    }
+                }
+            })
+        };
+        let flowing = async {
+            let mut attached = take_snapshot(&session.snap_tx).await?.live;
+            tokio::time::timeout(std::time::Duration::from_secs(60), attached.recv())
+                .await
+                .map_err(|_| "no live chunk within 60 s".to_owned())?
+                .ok_or("the live receiver closed")?;
+            Ok::<_, String>(attached)
+        }
+        .await;
+        let snap = match flowing {
+            Ok(_attached) => take_snapshot(&session.snap_tx).await,
+            Err(err) => Err(format!("before the flood was flowing: {err}")),
+        };
+        stop.store(true, Ordering::Relaxed);
+        let flood_ok = flood.join().is_ok();
+        let _ = std::fs::remove_dir_all(&session.dirs.config);
+        assert!(flood_ok, "the flood thread panicked");
+        assert!(snap.is_ok(), "{:?}", snap.err());
+    }
+
     /// A client's live receiver ends once the session's output ends: the
-    /// lifecycle task stops on the closed broadcast and drops the client's
+    /// lifecycle task stops on the closed output queue and drops the client's
     /// sender with it, so the per-client forwarder finishes.
     #[tokio::test]
     async fn a_client_live_receiver_closes_when_the_session_output_ends() {

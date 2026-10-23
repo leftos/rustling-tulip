@@ -504,7 +504,7 @@ where
 
 pub(super) fn expected_output_subscribers(mode: SessionMode) -> usize {
     match mode {
-        SessionMode::Interactive | SessionMode::PlainShell => 3,
+        SessionMode::Interactive | SessionMode::PlainShell => 2,
         SessionMode::Headless => 0,
     }
 }

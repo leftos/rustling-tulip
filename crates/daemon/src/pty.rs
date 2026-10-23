@@ -14,6 +14,12 @@ use tracing::{debug, warn};
 
 const MAX_PTY_INPUT_CHUNK_BYTES: usize = 2048;
 
+/// Chunks the lifecycle queue holds. Bounded so a slow lifecycle task makes
+/// the reader wait; the tracer's own 4 MB ring absorbs what it can't hand
+/// over. It also bounds how far output can trail the exit, which reaches
+/// `watch_exit` on its own channel.
+pub const LIFECYCLE_OUTPUT_CAPACITY: usize = 256;
+
 /// How a PTY session's process ended, as its tracer connection saw it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PtyExit {
@@ -70,11 +76,70 @@ impl std::fmt::Debug for PtySpawnSpec {
     }
 }
 
+/// The sending side of a PTY session's output. Every chunk goes to two
+/// places: a bounded queue read only by the session's lifecycle task
+/// (`session::attach_lifecycle`), which feeds clients and scrollback and so
+/// must never skip a chunk (a full queue makes the sender wait), and a
+/// bounded broadcast for the watchers (status, title, injector), which may
+/// lag and skip.
+#[derive(Clone)]
+pub struct PtyOutput {
+    lifecycle: mpsc::Sender<Vec<u8>>,
+    watchers: broadcast::Sender<Vec<u8>>,
+}
+
+impl PtyOutput {
+    /// A new output whose watcher broadcast holds `capacity` chunks, and the
+    /// receiver of its lifecycle queue, which goes into [`PtyHandleParts`].
+    #[must_use]
+    pub fn channel(capacity: usize) -> (Self, mpsc::Receiver<Vec<u8>>) {
+        let (lifecycle, lifecycle_rx) = mpsc::channel(LIFECYCLE_OUTPUT_CAPACITY);
+        let (watchers, _) = broadcast::channel(capacity);
+        (
+            Self {
+                lifecycle,
+                watchers,
+            },
+            lifecycle_rx,
+        )
+    }
+
+    /// Sends one chunk to the lifecycle queue, waiting while it is full, then
+    /// to the watchers. Neither having no receiver is an error: a session
+    /// nobody reads drops its output.
+    pub async fn send(&self, bytes: Vec<u8>) {
+        let _ = self.lifecycle.send(bytes.clone()).await;
+        let _ = self.watchers.send(bytes);
+    }
+
+    /// [`Self::send`] from a thread outside the runtime, for tests that feed
+    /// a session from a plain thread.
+    #[cfg(test)]
+    pub fn blocking_send(&self, bytes: Vec<u8>) {
+        let _ = self.lifecycle.blocking_send(bytes.clone());
+        let _ = self.watchers.send(bytes);
+    }
+
+    /// A watcher's receiver, starting at the next chunk sent.
+    #[must_use]
+    pub fn subscribe(&self) -> broadcast::Receiver<Vec<u8>> {
+        self.watchers.subscribe()
+    }
+
+    /// How many watchers are subscribed; the lifecycle queue is not counted.
+    #[must_use]
+    pub fn receiver_count(&self) -> usize {
+        self.watchers.receiver_count()
+    }
+}
+
 /// All the channel ends needed to construct a [`PtyHandle`]. The tracer-client
 /// path builds one of these from pipe IO; legacy direct-PTY code paths would
 /// build one from `portable_pty` if they existed (they don't, post-C.3).
 pub struct PtyHandleParts {
-    pub output: broadcast::Sender<Vec<u8>>,
+    pub output: PtyOutput,
+    /// The receiver [`PtyOutput::channel`] returned with `output`.
+    pub lifecycle_output: mpsc::Receiver<Vec<u8>>,
     pub input_tx: mpsc::UnboundedSender<Vec<u8>>,
     pub resize_tx: mpsc::UnboundedSender<(u16, u16)>,
     pub exit_rx: oneshot::Receiver<PtyExit>,
@@ -87,8 +152,12 @@ pub struct PtyHandleParts {
 }
 
 pub struct PtyHandle {
-    /// Broadcast of raw output bytes from the child. Re-subscribe per-client.
-    pub output: broadcast::Sender<Vec<u8>>,
+    /// Raw output bytes from the child. Watchers subscribe to it; the
+    /// lifecycle task takes its lossless queue with
+    /// [`Self::take_lifecycle_output`].
+    pub output: PtyOutput,
+    /// The lifecycle task's lossless output queue, taken once.
+    lifecycle_output: Mutex<Option<mpsc::Receiver<Vec<u8>>>>,
     input_tx: mpsc::UnboundedSender<Vec<u8>>,
     resize_tx: mpsc::UnboundedSender<(u16, u16)>,
     /// Receives the child's exit status once.
@@ -104,6 +173,7 @@ impl PtyHandle {
     pub fn from_parts(parts: PtyHandleParts) -> Self {
         Self {
             output: parts.output,
+            lifecycle_output: Mutex::new(Some(parts.lifecycle_output)),
             input_tx: parts.input_tx,
             resize_tx: parts.resize_tx,
             exit_rx: Mutex::new(Some(parts.exit_rx)),
@@ -149,6 +219,12 @@ impl PtyHandle {
 
     pub fn take_exit(&self) -> Option<oneshot::Receiver<PtyExit>> {
         self.exit_rx.lock().ok().and_then(|mut g| g.take())
+    }
+
+    /// The lifecycle task's output queue: every chunk, in order, none
+    /// skipped. `None` once taken.
+    pub fn take_lifecycle_output(&self) -> Option<mpsc::Receiver<Vec<u8>>> {
+        self.lifecycle_output.lock().ok().and_then(|mut g| g.take())
     }
 
     pub fn kill(&self) {
@@ -207,12 +283,13 @@ mod tests {
 
     #[test]
     fn write_input_splits_large_payloads_into_bounded_chunks() {
-        let (output, _) = broadcast::channel(1);
+        let (output, lifecycle_output) = PtyOutput::channel(1);
         let (input_tx, mut input_rx) = mpsc::unbounded_channel();
         let (resize_tx, _) = mpsc::unbounded_channel();
         let (_exit_tx, exit_rx) = oneshot::channel();
         let handle = PtyHandle::from_parts(PtyHandleParts {
             output,
+            lifecycle_output,
             input_tx,
             resize_tx,
             exit_rx,
@@ -236,12 +313,13 @@ mod tests {
 
     #[test]
     fn write_input_keeps_small_payloads_as_single_writes() {
-        let (output, _) = broadcast::channel(1);
+        let (output, lifecycle_output) = PtyOutput::channel(1);
         let (input_tx, mut input_rx) = mpsc::unbounded_channel();
         let (resize_tx, _) = mpsc::unbounded_channel();
         let (_exit_tx, exit_rx) = oneshot::channel();
         let handle = PtyHandle::from_parts(PtyHandleParts {
             output,
+            lifecycle_output,
             input_tx,
             resize_tx,
             exit_rx,

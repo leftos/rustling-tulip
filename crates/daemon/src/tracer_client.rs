@@ -12,7 +12,7 @@
 
 use crate::binary_cache;
 use crate::paths::Dirs;
-use crate::pty::{PtyExit, PtyHandle, PtyHandleParts, PtySpawnSpec};
+use crate::pty::{PtyExit, PtyHandle, PtyHandleParts, PtyOutput, PtySpawnSpec};
 use anyhow::{Context as _, anyhow};
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use interprocess::local_socket::tokio::{Stream, prelude::*};
@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt as _, AsyncRead, AsyncWrite, AsyncWriteExt as _, BufReader};
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot};
 use tracer_protocol::{
     InboundTracerResponse, SUPPORTED_TRACER_VERSIONS, TRACER_VERSION, TracerHello, TracerRequest,
     TracerResponse, TracerWelcome, negotiate,
@@ -628,21 +628,20 @@ where
     );
 
     // Wire the four daemon-facing channels.
-    let (output_tx, _) = broadcast::channel::<Vec<u8>>(OUTPUT_BROADCAST_CAPACITY);
+    let (output_tx, lifecycle_output) = PtyOutput::channel(OUTPUT_BROADCAST_CAPACITY);
     let (input_tx, input_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let (resize_tx, resize_rx) = mpsc::unbounded_channel::<(u16, u16)>();
     let (stop_tx, stop_rx) = mpsc::unbounded_channel::<()>();
     let (exit_tx, exit_rx) = oneshot::channel::<PtyExit>();
 
-    // Reader task: parse TracerResponse frames, route to output broadcast +
+    // Reader task: parse TracerResponse frames, route to the session output +
     // exit oneshot. On stream EOF or read error, the exit is `TracerLost`.
     //
-    // Critical: yield until every startup subscriber has called
-    // `output_tx.subscribe()` before starting the pipe read loop. Otherwise
-    // the first Output frame (the tracer's ring snapshot containing shell
-    // startup bytes) can be consumed by an early watcher before
-    // `attach_lifecycle` has subscribed, leaving scrollback empty and the
-    // terminal blank until the child writes more output.
+    // Yield until every startup watcher has called `output_tx.subscribe()`
+    // before starting the pipe read loop, so the first Output frame (the
+    // tracer's ring snapshot containing shell startup bytes) reaches every
+    // watcher. The lifecycle task needs no wait: its queue holds every chunk
+    // from the start, whenever `attach_lifecycle` takes it.
     let output_for_reader = output_tx.clone();
     let session_id_for_reader = session_id.clone();
     tokio::spawn(async move {
@@ -686,6 +685,7 @@ where
 
     let handle = Arc::new(PtyHandle::from_parts(PtyHandleParts {
         output: output_tx,
+        lifecycle_output,
         input_tx,
         resize_tx,
         exit_rx,
@@ -700,11 +700,7 @@ where
 
 /// Pump tracer frames until the tracer reports the child's exit
 /// ([`PtyExit::Code`]) or the pipe ends without one ([`PtyExit::TracerLost`]).
-async fn read_loop<R>(
-    mut reader: R,
-    output_tx: broadcast::Sender<Vec<u8>>,
-    session_id: &str,
-) -> PtyExit
+async fn read_loop<R>(mut reader: R, output_tx: PtyOutput, session_id: &str) -> PtyExit
 where
     R: tokio::io::AsyncBufRead + Unpin,
 {
@@ -732,9 +728,7 @@ where
         match parsed {
             InboundTracerResponse::Known(TracerResponse::Output { data_b64 }) => {
                 match B64.decode(&data_b64) {
-                    Ok(bytes) => {
-                        let _ = output_tx.send(bytes);
-                    }
+                    Ok(bytes) => output_tx.send(bytes).await,
                     Err(err) => warn!(?err, "tracer_client: bad base64 in Output"),
                 }
             }
@@ -981,23 +975,24 @@ mod tests {
         use crate::history::test_support::{
             insert_live, record, scratch_dirs, wait_for_entry, write_meta_for,
         };
-        use crate::pty::{PtyHandle, PtyHandleParts};
+        use crate::pty::{PtyHandle, PtyHandleParts, PtyOutput};
         use crate::session::SessionRegistry;
         use protocol::SessionMode;
         use std::sync::Arc;
-        use tokio::sync::{broadcast, mpsc, oneshot};
+        use tokio::sync::{mpsc, oneshot};
 
         let dirs = scratch_dirs(tag);
         write_meta_for(&dirs, tag);
         let registry = SessionRegistry::new(dirs.clone());
         let events = registry.subscribe();
-        let (output, _) = broadcast::channel(16);
+        let (output, lifecycle_output) = PtyOutput::channel(16);
         let (input_tx, _input_rx) = mpsc::unbounded_channel();
         let (resize_tx, _resize_rx) = mpsc::unbounded_channel();
         let (stop_tx, _stop_rx) = mpsc::unbounded_channel();
         let (exit_tx, exit_rx) = oneshot::channel();
         let pty = Arc::new(PtyHandle::from_parts(PtyHandleParts {
             output: output.clone(),
+            lifecycle_output,
             input_tx,
             resize_tx,
             exit_rx,

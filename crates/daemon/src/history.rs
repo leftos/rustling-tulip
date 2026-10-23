@@ -1504,7 +1504,7 @@ fn shell_request(entry: &HistoryEntry, folder: &str, conversation: Option<&str>)
 )]
 pub(crate) mod test_support {
     use crate::paths::Dirs;
-    use crate::pty::{PtyExit, PtyHandle, PtyHandleParts};
+    use crate::pty::{PtyExit, PtyHandle, PtyHandleParts, PtyOutput};
     use crate::session::{SessionRecord, SessionRegistry, attach_lifecycle};
     use chrono::Utc;
     use portable_pty::ChildKiller;
@@ -1514,7 +1514,7 @@ pub(crate) mod test_support {
     };
     use std::sync::Arc;
     use std::time::Duration;
-    use tokio::sync::{broadcast, mpsc, oneshot};
+    use tokio::sync::{mpsc, oneshot};
 
     #[derive(Debug)]
     struct NoopKiller;
@@ -1532,12 +1532,13 @@ pub(crate) mod test_support {
     /// A PTY handle with no process behind it: kills do nothing, and the
     /// returned sender plays the tracer reporting how the session ended.
     pub fn fake_pty() -> (Arc<PtyHandle>, oneshot::Sender<PtyExit>) {
-        let (output, _) = broadcast::channel(16);
+        let (output, lifecycle_output) = PtyOutput::channel(16);
         let (input_tx, _) = mpsc::unbounded_channel();
         let (resize_tx, _) = mpsc::unbounded_channel();
         let (exit_tx, exit_rx) = oneshot::channel();
         let handle = PtyHandle::from_parts(PtyHandleParts {
             output,
+            lifecycle_output,
             input_tx,
             resize_tx,
             exit_rx,
