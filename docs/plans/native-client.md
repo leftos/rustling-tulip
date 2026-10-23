@@ -144,5 +144,4 @@ Answered (user): Q1–Q13 (a) and Q14 (b); Q8, Q12 and Q14 were confirmed again 
 
 - Connection picker and host profiles over the tailnet listener (`remote-access.md`), built on the shared client-core crate the mobile app also uses (MA1 in [mobile-app.md](./mobile-app.md)).
 - Autostart: `remote.rs` and `autostart.rs` are recovered from the `tauri-last` tag.
-- Remote file transfer's client half ([remote-file-transfer.md](./remote-file-transfer.md), FT.2–FT.4).
 - Cutover: the installer ships the native client, and on uninstall deletes the daemon's `rustling-tulip-daemon` login `Run` value; update CLAUDE.md.

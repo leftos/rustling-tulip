@@ -383,6 +383,7 @@ impl RootView {
         let blocked = self.exit.is_some()
             || self.spawn_dialog.is_some()
             || self.shell_dialog.is_some()
+            || self.fetch_dialog.is_some()
             || self.appearance_editor.is_some()
             || self.delete_dialog.is_some()
             || self.run_confirm.is_some()

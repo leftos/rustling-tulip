@@ -87,23 +87,45 @@ impl RootView {
     }
 
     /// [`Self::fetch_remote_file`], as one reading of `group`'s link when
-    /// given: its "Fetching" toast is the group's, updated in place.
+    /// given: its "Fetching" toast is the group's, updated in place. A
+    /// refusal is a toast.
     fn start_fetch(
         &mut self,
         request: FetchRequest,
         group: Option<ProbeGroup>,
         cx: &mut Context<Self>,
     ) -> Option<String> {
+        match self.try_start_fetch(request, group, false, cx) {
+            Ok(id) => Some(id),
+            Err(refusal) => {
+                self.push_toast(refusal.kind, &refusal.title, refusal.detail, cx);
+                None
+            }
+        }
+    }
+
+    /// Asks the host for `request`'s file and returns the fetch's id. A
+    /// fetch for the Fetch file… dialog (`popup`) pushes no "Fetching"
+    /// toast, since the dialog shows its progress.
+    ///
+    /// # Errors
+    /// The [`Refusal`] when the fetch is refused: the local daemon, a
+    /// refused path or download folder, the same file already fetching.
+    pub(crate) fn try_start_fetch(
+        &mut self,
+        request: FetchRequest,
+        group: Option<ProbeGroup>,
+        popup: bool,
+        cx: &mut Context<Self>,
+    ) -> Result<String, Refusal> {
         let name = file_fetch::file_name(&request.rel_path).to_owned();
         let Some(host) = file_fetch::host_folder(self.conn.target()) else {
             tracing::warn!(rel = %request.rel_path, "refusing a file fetch from the local daemon");
-            self.push_toast(
-                ToastKind::Warning,
-                &failed_title(&name),
-                Some("Files are fetched only from a remote host.".to_owned()),
-                cx,
-            );
-            return None;
+            return Err(Refusal {
+                kind: ToastKind::Warning,
+                title: failed_title(&name),
+                detail: Some("Files are fetched only from a remote host.".to_owned()),
+            });
         };
         let target = match &self.remote_files_root {
             Ok(root) => {
@@ -115,8 +137,11 @@ impl RootView {
             Ok(target) => target,
             Err(reason) => {
                 tracing::warn!(rel = %request.rel_path, "refusing a file fetch: {reason}");
-                self.push_toast(ToastKind::Error, &failed_title(&name), Some(reason), cx);
-                return None;
+                return Err(Refusal {
+                    kind: ToastKind::Error,
+                    title: failed_title(&name),
+                    detail: Some(reason),
+                });
             }
         };
         let repo_id = request.repo_id.clone();
@@ -127,46 +152,85 @@ impl RootView {
         if let Some(group) = group {
             entry = entry.in_group(group);
         }
+        if popup {
+            entry = entry.for_popup();
+        }
         let Ok(id) = self.fetches.insert(entry) else {
             tracing::info!(rel = %rel_path, "the file is already being fetched");
-            self.push_toast(
-                ToastKind::Info,
-                &format!("Already fetching {name}"),
-                None,
-                cx,
-            );
-            return None;
+            return Err(Refusal {
+                kind: ToastKind::Info,
+                title: format!("Already fetching {name}"),
+                detail: None,
+            });
         };
-        tracing::info!(%id, %host, rel = %rel_path, "fetching a file");
+        tracing::info!(%id, %host, rel = %rel_path, popup, "fetching a file");
         self.send(ClientMessage::FetchFile {
             id: id.clone(),
             repo_id,
             worktree_path,
             path: rel_path,
         });
-        self.push_toast_spec(
-            ToastSpec {
-                kind: ToastKind::Info,
-                title: format!("Fetching {name} from {host}"),
-                detail: None,
-                key: toast_key,
-                sticky: false,
-                actions: Vec::new(),
-            },
-            cx,
-        );
-        Some(id)
+        if !popup {
+            self.push_toast_spec(
+                ToastSpec {
+                    kind: ToastKind::Info,
+                    title: format!("Fetching {name} from {host}"),
+                    detail: None,
+                    key: toast_key,
+                    sticky: false,
+                    actions: Vec::new(),
+                },
+                cx,
+            );
+        }
+        Ok(id)
+    }
+
+    /// The user cancelled the fetch `id`: the daemon is told to stop and
+    /// the writer deletes the part file, with no toast. Returns `false`,
+    /// leaving it running, once its last chunk reached the writer, which
+    /// then saves it.
+    pub(crate) fn cancel_fetch(&mut self, id: &str) -> bool {
+        if self.fetches.get(id).is_some_and(FetchEntry::is_finishing) {
+            tracing::info!(id, "a finishing fetch is not cancelled");
+            return false;
+        }
+        let Some(entry) = self.fetches.remove(id) else {
+            return true;
+        };
+        tracing::info!(id, rel = %entry.request().rel_path, "cancelled a file fetch");
+        abort_writer(id, &entry);
+        self.send(ClientMessage::CancelFetch { id: id.to_owned() });
+        true
+    }
+
+    /// Redraws the Fetch file… dialog when the fetch `id` is the one it
+    /// shows the progress of.
+    fn redraw_popup_progress(&self, id: &str, cx: &mut Context<Self>) {
+        if self
+            .fetches
+            .get(id)
+            .is_some_and(FetchEntry::reports_to_popup)
+        {
+            cx.notify();
+        }
     }
 
     /// The daemon could not fetch `id`: a reading of a link that never
     /// started moves on to the link's next reading; anything else fails.
-    fn on_fetch_error(&mut self, id: &str, error: &str, cx: &mut Context<Self>) {
+    fn on_fetch_error(
+        &mut self,
+        id: &str,
+        error: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match self.fetches.next_reading(id) {
             Some((next, group)) => {
                 tracing::info!(id, next = %next.rel_path, "a link's reading is not on the host: {error}");
                 self.start_fetch(next, Some(group), cx);
             }
-            None => self.end_fetch(id, error, false, cx),
+            None => self.end_fetch(id, error, false, window, cx),
         }
     }
 
@@ -182,12 +246,21 @@ impl RootView {
                 id,
                 resolved_path,
                 size,
-            } => self.on_fetch_started(id, resolved_path, *size, window, cx),
-            DaemonMessage::FileChunk { id, seq, data_b64 } => {
-                self.on_fetch_chunk(id, *seq, data_b64, cx);
+            } => {
+                self.on_fetch_started(id, resolved_path, *size, window, cx);
+                self.redraw_popup_progress(id, cx);
             }
-            DaemonMessage::FileFetchDone { id } => self.on_fetch_done(id, cx),
-            DaemonMessage::FileFetchError { id, error } => self.on_fetch_error(id, error, cx),
+            DaemonMessage::FileChunk { id, seq, data_b64 } => {
+                self.on_fetch_chunk(id, *seq, data_b64, window, cx);
+                self.redraw_popup_progress(id, cx);
+            }
+            DaemonMessage::FileFetchDone { id } => {
+                self.on_fetch_done(id, window, cx);
+                self.redraw_popup_progress(id, cx);
+            }
+            DaemonMessage::FileFetchError { id, error } => {
+                self.on_fetch_error(id, error, window, cx);
+            }
             _ => return false,
         }
         true
@@ -207,7 +280,7 @@ impl RootView {
             return;
         };
         if entry.writer().is_some() {
-            self.end_fetch(id, "the transfer started twice", true, cx);
+            self.end_fetch(id, "the transfer started twice", true, window, cx);
             return;
         }
         entry.on_started(size, resolved_path.to_owned());
@@ -232,7 +305,14 @@ impl RootView {
         .detach();
     }
 
-    fn on_fetch_chunk(&mut self, id: &str, seq: u64, data_b64: &str, cx: &mut Context<Self>) {
+    fn on_fetch_chunk(
+        &mut self,
+        id: &str,
+        seq: u64,
+        data_b64: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(entry) = self.fetches.get_mut(id) else {
             tracing::debug!(id, seq, "a chunk for a fetch the client no longer follows");
             return;
@@ -240,18 +320,15 @@ impl RootView {
         let data = match base64::engine::general_purpose::STANDARD.decode(data_b64) {
             Ok(data) => data,
             Err(err) => {
-                self.end_fetch(
-                    id,
-                    &format!("chunk {seq} is not valid base64: {err}"),
-                    true,
-                    cx,
-                );
+                let reason = format!("chunk {seq} is not valid base64: {err}");
+                self.end_fetch(id, &reason, true, window, cx);
                 return;
             }
         };
         entry.on_chunk(data.len() as u64);
         let Some(writer) = entry.writer() else {
-            self.end_fetch(id, "a chunk arrived before the transfer started", true, cx);
+            let reason = "a chunk arrived before the transfer started";
+            self.end_fetch(id, reason, true, window, cx);
             return;
         };
         if writer
@@ -262,13 +339,14 @@ impl RootView {
         }
     }
 
-    fn on_fetch_done(&mut self, id: &str, cx: &mut Context<Self>) {
+    fn on_fetch_done(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(entry) = self.fetches.get_mut(id) else {
             tracing::debug!(id, "a fetch the client no longer follows is done");
             return;
         };
         let Some(writer) = entry.writer() else {
-            self.end_fetch(id, "the transfer ended before it started", false, cx);
+            let reason = "the transfer ended before it started";
+            self.end_fetch(id, reason, false, window, cx);
             return;
         };
         if writer.unbounded_send(WriteStep::Done).is_err() {
@@ -289,6 +367,11 @@ impl RootView {
         match outcome {
             WriteOutcome::Saved(path) => {
                 tracing::info!(id, path = %path.display(), "fetched a file");
+                // The dialog closes first, so a run confirm the open asks
+                // for is not refused as a dialog over a dialog.
+                if self.fetch_dialog_follows(id) {
+                    self.close_fetch_dialog(window, cx);
+                }
                 let Some(entry) = self.fetches.remove(id) else {
                     return;
                 };
@@ -296,15 +379,22 @@ impl RootView {
                     self.open_fetched(path, entry.request(), window, cx);
                 }
             }
-            WriteOutcome::Failed(reason) => self.end_fetch(id, &reason, true, cx),
+            WriteOutcome::Failed(reason) => self.end_fetch(id, &reason, true, window, cx),
             WriteOutcome::Aborted => {}
         }
     }
 
     /// Ends the fetch `id` as failed for `reason`: its writer deletes the
-    /// part file, the daemon is told to stop when `cancel` is set, and a
-    /// toast says why.
-    fn end_fetch(&mut self, id: &str, reason: &str, cancel: bool, cx: &mut Context<Self>) {
+    /// part file, the daemon is told to stop when `cancel` is set, and the
+    /// Fetch file… dialog showing it, else a toast, says why.
+    fn end_fetch(
+        &mut self,
+        id: &str,
+        reason: &str,
+        cancel: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(entry) = self.fetches.remove(id) else {
             tracing::debug!(id, "a fetch the client no longer follows failed: {reason}");
             return;
@@ -314,22 +404,36 @@ impl RootView {
         if cancel {
             self.send(ClientMessage::CancelFetch { id: id.to_owned() });
         }
+        let detail = failure_detail(&entry, reason);
+        if entry.reports_to_popup() && self.fetch_dialog_follows(id) {
+            self.fail_fetch_dialog(detail, window, cx);
+            return;
+        }
         self.push_toast(
             ToastKind::Error,
             &failed_title(entry.file_name()),
-            Some(failure_detail(&entry, reason)),
+            Some(detail),
             cx,
         );
     }
 
     /// The connection closed or moved to another daemon: every fetch still
     /// receiving ends, its part file deleted; one whose `Done` reached its
-    /// writer ends by the writer's result.
-    pub(crate) fn end_fetches_on_disconnect(&mut self, cx: &mut Context<Self>) {
+    /// writer ends by the writer's result. The Fetch file… dialog's own
+    /// fetch says so in the dialog, which the connection overlay closes.
+    pub(crate) fn end_fetches_on_disconnect(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         for (id, entry) in self.fetches.take_unfinished() {
             let reason = format!("The connection to {} closed.", entry.host());
             tracing::warn!(%id, rel = %entry.request().rel_path, "fetching a file failed: {reason}");
             abort_writer(&id, &entry);
+            if entry.reports_to_popup() && self.fetch_dialog_follows(&id) {
+                self.fail_fetch_dialog(failure_detail(&entry, &reason), window, cx);
+                continue;
+            }
             self.push_toast(
                 ToastKind::Error,
                 &failed_title(entry.file_name()),
@@ -396,6 +500,21 @@ impl RootView {
         self.remote_files_root
             .as_ref()
             .is_ok_and(|root| is_under(root, path))
+    }
+}
+
+/// Why a fetch was not started, as the toast that says so.
+#[derive(Debug)]
+pub(crate) struct Refusal {
+    kind: ToastKind,
+    title: String,
+    detail: Option<String>,
+}
+
+impl Refusal {
+    /// The refusal as one line, for the Fetch file… dialog.
+    pub(crate) fn message(&self) -> &str {
+        self.detail.as_deref().unwrap_or(&self.title)
     }
 }
 

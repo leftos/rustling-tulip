@@ -127,12 +127,14 @@ Start with [docs/architecture.md](docs/architecture.md) for how the pieces fit a
 - **Preset**: a named launch recipe the daemon stores for a repo or workspace: the prompt sources it allows, its variables and its target tabs, launched through the preset wizard.
 - **Preset job**: one preset launch the native client started, named by a client-made job id; the client's registry follows it through the daemon's progress messages and shows one toast for it.
 - **Preset wizard**: the native client's modal that walks a preset's prompt source and variables before launching it; see `docs/native-client.md`.
+- **Probe group**: the readings of one terminal path link, sent as fetches one at a time; a reading the host rejects before the transfer starts moves on to the next. See `docs/native-client.md` ("Fetched files").
 - **Progress update**: an attention-feed item for a stop while work continues, or a summary of work in progress; shown in the feed, never pushed to the phone.
 - **Prompt source**: where a preset launch takes its prompts from: a prompts file, a folder of `.md` files, inline text or GitHub issue ranges, limited to the sources the preset allows.
 - **Provider table**: the daemon's built-in, not user-editable list of the environment variables each non-Anthropic provider sets, removes and locks (`crates/agents/claude/src/providers.rs`, in the Claude plugin).
 - **Quarantine**: an account whose refresh token was rejected (`invalid_grant`), skipped until it is logged in again.
 - **Re-ask**: the native client resending a queued in-place spawn, unchanged, when its checkout prompt's turn comes, so the daemon answers with current numbers instead of the stale prompt being shown.
 - **Reached tests**: the tests a change's diff reaches through the test map, as one nextest filterset; `.\rt.ps1 test -Reached` runs them, and a central or unmapped file reaches the full suite instead.
+- **Reading**: one way to take a terminal path link's path as a file under a repo or worktree of the pane's session; a link has one reading per candidate. See `docs/native-client.md` ("Fetched files").
 - **Recovery**: respawning a session from its history entry: a Claude entry with `claude --resume <conversation id>`, as a Claude session or as a shell that types the command.
 - **Relay**: the planned `crates/relay` service on a small VPS that joins a daemon's outbound connection to the phone's, forwarding bytes it cannot read; the pinned TLS runs end to end through it.
 - **Remote mode**: the native client connected to a tailnet host (`Target::Tailnet`) instead of the local daemon; local-file actions are disabled with a reason, Stop and the daemon's files are hidden, and quitting only disconnects. See `docs/native-client.md`.

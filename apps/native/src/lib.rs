@@ -25,6 +25,8 @@ pub mod diff_view;
 mod discard_confirm;
 mod drag;
 pub mod ellipsis;
+mod fetch_dialog;
+mod fetch_dialog_view;
 mod fetch_link;
 pub mod file_fetch;
 mod file_fetch_view;
@@ -138,6 +140,7 @@ use crate::changes_view::ChangesUi;
 use crate::connection::{DotKind, Footer};
 use crate::copied::Copied;
 use crate::drag::DragPayload;
+use crate::fetch_dialog_view::FetchDialog;
 use crate::footer::{CountSpan, StopConfirm, flyout_rows, log_paths, status_counts};
 use crate::grid_view::{PaneSlot, RetryGate, divider_ratio};
 use crate::needs_you_view::moves_needs_you;
@@ -640,6 +643,11 @@ pub struct RootView {
     /// Numbers the Shell… dialogs, so a folder picker's answer reaches only
     /// the dialog that asked for it.
     shell_generation: u64,
+    /// The Fetch file… dialog, while open.
+    fetch_dialog: Option<FetchDialog>,
+    /// The Fetch file… dialog's keyboard focus when its path field has it
+    /// not.
+    fetch_focus: FocusHandle,
     /// Quick-shell folders waiting for the spawn they came with to land.
     quick_shell_saves: PendingQuickShell,
     /// Branch names the daemon suggested, per repo or workspace.
@@ -944,6 +952,8 @@ impl RootView {
             spawn_focus: cx.focus_handle(),
             shell_dialog: None,
             shell_focus: cx.focus_handle(),
+            fetch_dialog: None,
+            fetch_focus: cx.focus_handle(),
             shell_generation: 0,
             quick_shell_saves: PendingQuickShell::default(),
             branch_cache: BranchCache::default(),
@@ -1194,13 +1204,14 @@ impl RootView {
     }
 
     /// Whether a dialog, modal or menu is drawn over the panes and holds the
-    /// keyboard: the Settings modal, the spawn, Shell…, delete-worktree,
-    /// repo/workspace Remove, discard, stash drop, run, recover, Manage
-    /// worktrees, layout chooser, cleanup-failed, exit and pane dialogs and
-    /// menus, or a modal notice.
+    /// keyboard: the Settings modal, the spawn, Shell…, Fetch file…,
+    /// delete-worktree, repo/workspace Remove, discard, stash drop, run,
+    /// recover, Manage worktrees, layout chooser, cleanup-failed, exit and
+    /// pane dialogs and menus, or a modal notice.
     fn overlay_open(&self) -> bool {
         self.spawn_dialog.is_some()
             || self.shell_dialog.is_some()
+            || self.fetch_dialog.is_some()
             || self.appearance_editor.is_some()
             || self.worktrees_manager.is_some()
             || self.recover.is_some()
@@ -2198,7 +2209,7 @@ impl RootView {
                 // A fetch streams over the connection it was asked on, and
                 // the remote access status is that connection's daemon's.
                 if !conn.is_open() || conn.target() != self.conn.target() {
-                    self.end_fetches_on_disconnect(cx);
+                    self.end_fetches_on_disconnect(window, cx);
                     self.set_remote_status(None, cx);
                 }
                 self.conn = conn;
@@ -2224,6 +2235,7 @@ impl RootView {
             self.close_flyout();
             self.close_spawn_dialog(window, cx);
             self.close_shell_dialog(window, cx);
+            self.close_fetch_dialog(window, cx);
             self.close_workspace_creator(window, cx);
             self.close_preset_wizard(window, cx);
             self.vscode_suggestions.clear();
@@ -2522,6 +2534,7 @@ impl RootView {
         self.launch_last.clear();
         self.close_spawn_dialog(window, cx);
         self.close_shell_dialog(window, cx);
+        self.close_fetch_dialog(window, cx);
         self.close_workspace_creator(window, cx);
         self.close_preset_wizard(window, cx);
         self.reset_preset_launches(cx);
@@ -2720,8 +2733,8 @@ impl RootView {
             }
             return;
         }
-        if self.shell_dialog.is_some() {
-            if self.on_shell_dialog_key(ks, window, cx) {
+        if let Some(taken) = self.on_path_dialog_key(ks, window, cx) {
+            if taken {
                 cx.stop_propagation();
             }
             return;
@@ -3136,6 +3149,7 @@ impl Render for RootView {
             .children(self.chip_layer())
             .children(self.spawn_dialog_layers(cx))
             .children(self.shell_dialog_layer(cx))
+            .children(self.fetch_dialog_layer(cx))
             .children(self.appearance_editor_layer(window, cx))
             .children(self.settings_layer(window, cx))
             .children(self.worktrees_manager_layer(window, cx))

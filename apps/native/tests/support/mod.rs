@@ -1565,6 +1565,12 @@ impl<'a> Harness<'a> {
         self.click_on("sidebar-more-shell-dialog");
     }
 
+    /// Opens the Fetch file… dialog through the sessions toolbar's ⋯ menu.
+    pub fn open_fetch_dialog_from_more(&mut self) {
+        self.click_on("sidebar-more");
+        self.click_on("sidebar-more-fetch-file");
+    }
+
     /// A right-button press and release on the element tagged `selector`.
     pub fn right_click_on(&mut self, selector: &str) {
         let at = self.center(selector);

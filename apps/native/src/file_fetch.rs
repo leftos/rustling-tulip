@@ -416,6 +416,9 @@ pub struct FetchEntry {
     finishing: bool,
     /// The link's other readings, when this fetch is one of them.
     group: Option<ProbeGroup>,
+    /// Started from the Fetch file… dialog, which shows its progress and
+    /// errors in place of toasts.
+    popup: bool,
 }
 
 /// `target` as the key two fetches collide on: case-insensitive where the
@@ -443,7 +446,28 @@ impl FetchEntry {
             writer: None,
             finishing: false,
             group: None,
+            popup: false,
         }
+    }
+
+    /// This fetch as the Fetch file… dialog's, which reports how it goes.
+    #[must_use]
+    pub fn for_popup(mut self) -> Self {
+        self.popup = true;
+        self
+    }
+
+    /// Whether the Fetch file… dialog reports how this fetch goes.
+    #[must_use]
+    pub fn reports_to_popup(&self) -> bool {
+        self.popup
+    }
+
+    /// Whether `Done` went to the writer, whose result now decides how the
+    /// fetch ends.
+    #[must_use]
+    pub fn is_finishing(&self) -> bool {
+        self.finishing
     }
 
     /// This fetch as one reading of `group`'s link.
@@ -926,6 +950,19 @@ mod tests {
         };
         let target = download_path(Path::new("root"), host, "repo", rel).expect("a valid path");
         FetchEntry::new(host.to_owned(), request, target)
+    }
+
+    #[test]
+    fn a_popup_entry_reports_to_the_popup() {
+        assert!(!entry("host", "a.txt").reports_to_popup());
+        let mut registry = FetchRegistry::new("t");
+        let id = registry
+            .insert(entry("host", "a.txt").for_popup())
+            .expect("starts");
+        assert!(
+            registry.get(&id).expect("recorded").reports_to_popup(),
+            "the flag survives the registry"
+        );
     }
 
     #[test]

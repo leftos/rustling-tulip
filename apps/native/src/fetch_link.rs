@@ -52,6 +52,50 @@ pub fn roots(members: &[SessionMember], cwd: Option<&str>, repos: &[RepoEntry]) 
         .collect()
 }
 
+/// The index of the root in `roots` holding `cwd`, the deepest one when
+/// roots nest; `None` when no root holds it or there is no `cwd`.
+#[must_use]
+pub(crate) fn root_holding(roots: &[Root], cwd: Option<&str>) -> Option<usize> {
+    let cwd = HostPath::parse(cwd?)?;
+    roots
+        .iter()
+        .enumerate()
+        .filter_map(|(index, root)| {
+            let path = HostPath::parse(&root.path)?;
+            path.holds(&cwd).then_some((path.segments.len(), index))
+        })
+        .max_by_key(|(depth, index)| (*depth, std::cmp::Reverse(*index)))
+        .map(|(_, index)| index)
+}
+
+/// What a typed path is against a root on the host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RootStrip {
+    /// A relative path, left as typed.
+    NotAbsolute,
+    /// An absolute path strictly below the root: the rest of it, `/`
+    /// separated, with `.` and `..` resolved.
+    Inside(String),
+    /// An absolute path that is the root itself or not below it.
+    Outside,
+}
+
+/// `text` against `root_path`: an absolute host path below the root loses
+/// the root; see [`RootStrip`].
+#[must_use]
+pub(crate) fn strip_root(root_path: &str, text: &str) -> RootStrip {
+    if split_anchor(&unify(text)).is_none() {
+        return RootStrip::NotAbsolute;
+    }
+    let inside = HostPath::parse(root_path)
+        .zip(HostPath::parse(text))
+        .and_then(|(root, path)| root.relative(&path));
+    match inside {
+        Some(rel) => RootStrip::Inside(rel),
+        None => RootStrip::Outside,
+    }
+}
+
 /// The fetches to try for a link's `candidates` (longest first): each
 /// candidate in turn, against each of `roots`. A relative candidate is read
 /// against `cwd` first, then against each root; `.` and `..` are resolved as
@@ -224,7 +268,7 @@ mod tests {
     use protocol::{RepoEntry, SessionMember};
     use serde_json::json;
 
-    use super::{Root, readings, roots};
+    use super::{Root, RootStrip, readings, root_holding, roots, strip_root};
     use crate::file_fetch::FetchRequest;
     use crate::links::TerminalLinkCandidate;
 
@@ -457,5 +501,55 @@ mod tests {
         assert_eq!(roots(&[], None, &repos), []);
         assert_eq!(readings(&[plain("C:/repos/app/a.rs")], None, &[]), []);
         assert_eq!(readings(&[plain("a.rs")], Some("C:/repos/app"), &[]), []);
+    }
+
+    #[test]
+    fn root_holding_picks_the_deepest_root_containing_the_cwd() {
+        let all = [
+            root("outer", "C:/repos"),
+            root("app", r"C:\repos\app"),
+            root("other", "C:/repos/other"),
+        ];
+        assert_eq!(root_holding(&all, Some("c:/REPOS/app/src")), Some(1));
+        assert_eq!(root_holding(&all, Some("C:/repos/third")), Some(0));
+        assert_eq!(
+            root_holding(&all, Some(r"\\?\C:\repos\other")),
+            Some(2),
+            "a cwd at the root's own folder is in it"
+        );
+    }
+
+    #[test]
+    fn root_holding_is_none_when_no_root_holds_the_cwd() {
+        let all = [root("a", "C:/wt/a"), root("home", "/home/me/repo")];
+        assert_eq!(root_holding(&all, Some("C:/elsewhere")), None);
+        assert_eq!(root_holding(&all, Some("/Home/me/repo")), None);
+        assert_eq!(root_holding(&all, Some("relative/dir")), None);
+        assert_eq!(root_holding(&all, None), None);
+        assert_eq!(root_holding(&[], Some("C:/wt/a")), None);
+    }
+
+    #[test]
+    fn strip_root_reports_inside_outside_and_relative() {
+        assert_eq!(
+            strip_root("C:/wt/x", r"\\?\c:\WT\x\src\.\a.rs"),
+            RootStrip::Inside("src/a.rs".to_owned())
+        );
+        assert_eq!(
+            strip_root("/home/me/repo", "/home/me/repo/sub/../b.rs"),
+            RootStrip::Inside("b.rs".to_owned())
+        );
+        assert_eq!(strip_root("C:/wt/x", "C:/wt/x"), RootStrip::Outside);
+        assert_eq!(strip_root("C:/wt/x", "C:/wt/y/a.rs"), RootStrip::Outside);
+        assert_eq!(
+            strip_root("C:/wt/x", "C:/wt/x/../y/a.rs"),
+            RootStrip::Outside
+        );
+        assert_eq!(
+            strip_root("/home/me/repo", "/Home/me/repo/a.rs"),
+            RootStrip::Outside
+        );
+        assert_eq!(strip_root("C:/wt/x", "src/a.rs"), RootStrip::NotAbsolute);
+        assert_eq!(strip_root("C:/wt/x", r"src\a.rs"), RootStrip::NotAbsolute);
     }
 }

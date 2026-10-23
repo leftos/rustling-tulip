@@ -479,6 +479,7 @@ impl RootView {
         if self.spawn_dialog.is_some()
             || self.exit.is_some()
             || self.shell_dialog.is_some()
+            || self.fetch_dialog.is_some()
             || (self.appearance_editor.is_some() && !handoff)
             || (self.worktrees_manager.is_some() && !handoff)
             || self.recover.is_some()

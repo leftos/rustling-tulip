@@ -257,6 +257,7 @@ impl RootView {
                     this.open_shell_dialog(window, cx);
                 },
             ));
+            let fetch_file = self.more_fetch_file_row(cx);
             let add_repo = self.more_add_repo_row(cx);
             let add_workspace = if self.sidebar.repos().len() < 2 {
                 div()
@@ -303,6 +304,7 @@ impl RootView {
                 }),
             )
             .child(shell)
+            .children(fetch_file)
             .child(add_repo)
             .child(add_workspace);
             let frame = if let Some(row) = resume {
@@ -357,6 +359,23 @@ impl RootView {
         self.sidebar.repos_loaded()
             && self.sidebar.repos().is_empty()
             && self.sidebar.workspaces().is_empty()
+    }
+
+    /// The ⋯ menu's Fetch file… row: only on a remote host, whose files are
+    /// not on this PC, and with a pane focused, whose session's repos the
+    /// dialog fetches from.
+    fn more_fetch_file_row(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+        if self.capabilities().opens_local_files() || self.focused_session().is_none() {
+            return None;
+        }
+        Some(
+            menu_item(MORE_FETCH_ROW, "Fetch file…", false).on_click(cx.listener(
+                |this, _: &ClickEvent, window, cx| {
+                    this.close_more_menu(window, cx);
+                    this.open_fetch_dialog(window, cx);
+                },
+            )),
+        )
     }
 
     /// The ⋯ menu's Add repo… row, drawn as [`Self::add_repo_gate`] says.
@@ -470,6 +489,9 @@ pub(crate) enum MoreMenu {
 const MORE_BUTTON: &str = "sidebar-more";
 /// The ⋯ menu's row that opens the shell folder dialog.
 const MORE_SHELL_ROW: &str = "sidebar-more-shell-dialog";
+/// The ⋯ menu's row that opens the Fetch file… dialog, on a remote host
+/// with a pane focused.
+const MORE_FETCH_ROW: &str = "sidebar-more-fetch-file";
 /// The ⋯ menu's row that picks a folder to register as a repo.
 const MORE_ADD_REPO_ROW: &str = "sidebar-more-add-repo";
 /// The ⋯ menu's row that opens the workspace creator.

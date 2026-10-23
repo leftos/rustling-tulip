@@ -338,6 +338,7 @@ impl RootView {
             || self.exit.is_some()
             || self.spawn_dialog.is_some()
             || self.shell_dialog.is_some()
+            || self.fetch_dialog.is_some()
             || self.delete_dialog.is_some()
             || self.notices.has_modal()
             || self.conn.overlay().is_some();

@@ -798,7 +798,7 @@ fn is_bare_drive(value: &str) -> bool {
 }
 
 /// The path and its `:line:column` suffix, if it has one.
-fn split_path_position(value: &str) -> TerminalLinkCandidate {
+pub(crate) fn split_path_position(value: &str) -> TerminalLinkCandidate {
     let Some(captures) = LINE_COLUMN_SUFFIX.captures(value) else {
         return TerminalLinkCandidate {
             path: value.to_owned(),

@@ -164,6 +164,7 @@ impl RootView {
         self.close_delete_dialog(window, cx);
         self.close_spawn_dialog(window, cx);
         self.close_shell_dialog(window, cx);
+        self.close_fetch_dialog(window, cx);
         self.close_appearance_editor(window, cx);
         self.close_flyout();
         self.exit = Some(ExitView {
