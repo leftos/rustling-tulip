@@ -35,6 +35,11 @@ fn open_on(target: Target, port: u16) -> Connection {
     conn
 }
 
+/// [`HOST`] as a target to open on.
+fn remote_target() -> Target {
+    Target::tailnet(HOST, None)
+}
+
 /// A request for `rel` in the repo `r1`'s worktree.
 fn request(rel: &str, line: Option<u32>, column: Option<u32>) -> FetchRequest {
     FetchRequest {
@@ -88,8 +93,7 @@ fn on_remote_with<'a>(
     dir: &TestDir,
     s: SessionSnapshot,
 ) -> (Harness<'a>, PathBuf) {
-    let mut h = Harness::with(cx, dir, &Fixture::single(s));
-    h.set_connection(open_on(Target::tailnet(HOST, None), 8787));
+    let mut h = Harness::on_target(cx, dir, remote_target(), &Fixture::single(s));
     let root = dir.path().join("remote-files");
     let set = root.clone();
     h.root_update(move |view, _, _| view.set_remote_files_root(set));

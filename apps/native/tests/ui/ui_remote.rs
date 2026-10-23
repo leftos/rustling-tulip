@@ -48,6 +48,11 @@ fn local() -> Connection {
     open_on(Target::Local, 4242)
 }
 
+/// [`HOST`] as a target to open on.
+fn remote_target() -> Target {
+    Target::tailnet(HOST, None)
+}
+
 /// Whether the model shows what `selector` tags and it was painted; gpui
 /// keeps an element's bounds after it leaves, so a spec asks before the
 /// element was ever drawn.
@@ -102,11 +107,8 @@ fn container_tip(h: &mut Harness<'_>, selector: &str) -> Option<String> {
 #[gpui::test]
 fn reveal_disabled_on_remote(cx: &mut TestAppContext) {
     let dir = TestDir::new();
-    let mut h = Harness::with(
-        cx,
-        &dir,
-        &Fixture::single(session("s1").worktree("r1").build()),
-    );
+    let fixture = Fixture::single(session("s1").worktree("r1").build());
+    let mut h = Harness::with(cx, &dir, &fixture);
 
     h.right_click_on("leaf-s1");
     assert_eq!(
@@ -121,6 +123,7 @@ fn reveal_disabled_on_remote(cx: &mut TestAppContext) {
     h.keys("escape");
 
     h.set_connection(remote());
+    h.load(&fixture);
     h.right_click_on("leaf-s1");
     assert_eq!(
         h.root(|root, _| root.menu_row_label("session-menu-reveal")),
@@ -154,6 +157,7 @@ fn container_open_rows_disabled_on_remote_copy_path_enabled(cx: &mut TestAppCont
     h.keys("escape");
 
     h.set_connection(remote());
+    h.load(&fixture);
     h.right_click_on("container-repo:r1");
     for selector in open_rows {
         assert_eq!(
@@ -188,8 +192,7 @@ fn container_open_rows_disabled_on_remote_copy_path_enabled(cx: &mut TestAppCont
 #[gpui::test]
 fn add_repo_disabled_on_remote(cx: &mut TestAppContext) {
     let dir = TestDir::new();
-    let mut h = Harness::with(cx, &dir, &Fixture::default());
-    h.set_connection(remote());
+    let mut h = Harness::on_target(cx, &dir, remote_target(), &Fixture::default());
     h.set_picked_folder(Some("D:/work/repo"));
     assert!(
         drawn(&mut h, "sidebar-add-repo"),
@@ -224,8 +227,11 @@ fn add_repo_disabled_on_remote(cx: &mut TestAppContext) {
 
 /// No repo registered, `s1` in pane `p1`, on a remote host.
 fn remote_without_repos<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
-    let mut h = with_repos(cx, dir, Vec::new());
-    h.set_connection(remote());
+    let mut fixture = Fixture::single(session("s1").build());
+    fixture.repos = Vec::new();
+    let mut h = Harness::on_target(cx, dir, remote_target(), &fixture);
+    h.answer_scrollback("s1", b"");
+    h.sent();
     h
 }
 
@@ -239,8 +245,7 @@ fn sidebar_add_repo_drawn_disabled_on_remote(cx: &mut TestAppContext) {
 #[gpui::test]
 fn empty_pane_add_repo_drawn_disabled_on_remote(cx: &mut TestAppContext) {
     let dir = TestDir::new();
-    let mut h = Harness::with(cx, &dir, &Fixture::default());
-    h.set_connection(remote());
+    let mut h = Harness::on_target(cx, &dir, remote_target(), &Fixture::default());
     assert!(tooltip_on(&mut h, "empty-add-repo", LOCAL_FILES));
 }
 
@@ -324,8 +329,10 @@ fn attached_remote<'a>(
     dir: &TestDir,
     s: SessionSnapshot,
 ) -> Harness<'a> {
+    let fixture = Fixture::single(s.clone());
     let mut h = attached(cx, dir, s);
     h.set_connection(remote());
+    h.load(&fixture);
     h
 }
 
@@ -421,8 +428,7 @@ fn quit_does_not_shut_down_remote_daemon(cx: &mut TestAppContext) {
         tabs: vec![tab("t1", &pane("p1", Some("s1")))],
         ..Fixture::default()
     };
-    let mut h = Harness::with(cx, &dir, &fixture);
-    h.set_connection(remote());
+    let mut h = Harness::on_target(cx, &dir, remote_target(), &fixture);
     h.commands();
 
     let closed = h.cx.simulate_close();
@@ -483,7 +489,8 @@ fn connecting(target: Target) -> Connection {
 #[gpui::test]
 fn footer_pill_and_overlay_name_the_remote_host(cx: &mut TestAppContext) {
     let dir = TestDir::new();
-    let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
+    let fixture = Fixture::single(session("s1").build());
+    let mut h = Harness::with(cx, &dir, &fixture);
     assert!(shows(&mut h, "daemon-pill", "daemon · 1 session · :4242"));
     h.set_connection(connecting(Target::Local));
     assert!(
@@ -492,6 +499,7 @@ fn footer_pill_and_overlay_name_the_remote_host(cx: &mut TestAppContext) {
     );
 
     h.set_connection(remote());
+    h.load(&fixture);
     assert!(shows(&mut h, "daemon-pill", "box · 1 session"));
 
     h.set_connection(connecting(Target::tailnet(HOST, None)));
@@ -903,11 +911,9 @@ fn type_text(h: &mut Harness<'_>, text: &str) {
 /// An empty registry on a remote host, then `r1` and its session `s1`
 /// loaded from the host.
 fn remote_with_r1<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
-    let mut h = Harness::with(cx, dir, &Fixture::default());
-    h.set_connection(remote());
     let mut fixture = Fixture::single(session("s1").in_repo("r1").build());
     fixture.repos = vec![repo("r1", "D:/src/r1")];
-    h.load(&fixture);
+    let mut h = Harness::on_target(cx, dir, remote_target(), &fixture);
     h.sent();
     h
 }
@@ -1005,8 +1011,7 @@ fn shell_spawns(sent: &[ClientMessage]) -> Vec<SpawnRequest> {
 fn quick_shell_sends_no_cwd_on_remote(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     remember_quick_shell(&dir, "C:\\work");
-    let mut h = Harness::with(cx, &dir, &Fixture::default());
-    h.set_connection(remote());
+    let mut h = Harness::on_target(cx, &dir, remote_target(), &Fixture::default());
     h.sent();
 
     h.click_on("sidebar-add-shell");
@@ -1028,9 +1033,7 @@ fn quick_shell_sends_no_cwd_on_remote(cx: &mut TestAppContext) {
 fn empty_pane_shell_here_sends_no_cwd_on_remote(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     remember_quick_shell(&dir, "C:\\work");
-    let mut h = Harness::with(cx, &dir, &Fixture::default());
-    h.set_connection(remote());
-    h.load(&Fixture {
+    let fixture = Fixture {
         sessions: vec![session("s1").build()],
         tabs: vec![tab(
             "t1",
@@ -1041,7 +1044,8 @@ fn empty_pane_shell_here_sends_no_cwd_on_remote(cx: &mut TestAppContext) {
             ),
         )],
         ..Fixture::default()
-    });
+    };
+    let mut h = Harness::on_target(cx, &dir, remote_target(), &fixture);
     h.sent();
 
     h.click_on("empty-pane-shell-p2");

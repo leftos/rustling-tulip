@@ -65,6 +65,12 @@ fn opened<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
     h
 }
 
+/// Delivers the page's fixture again: a spec that switches the target does
+/// not count on the rows outliving the switch.
+fn reload(h: &mut Harness<'_>) {
+    h.load(&Fixture::single(session("s1").build()));
+}
+
 /// Settings open on the Remote access page.
 fn open_page(h: &mut Harness<'_>) {
     h.keys("ctrl-,");
@@ -298,6 +304,7 @@ fn page_is_hidden_while_the_target_is_remote(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);
     h.set_connection(remote());
+    reload(&mut h);
     h.keys("ctrl-,");
     let has_page = |h: &mut Harness<'_>| {
         let rows = h.root(|root, _| root.settings_tab_rows());
@@ -318,13 +325,16 @@ fn page_is_hidden_while_the_target_is_remote(cx: &mut TestAppContext) {
     );
 
     h.set_connection(local());
+    reload(&mut h);
     assert_eq!(has_page(&mut h), (true, true));
     h.click_on(TAB);
     assert_eq!(shown_tab(&mut h), "Remote access");
     h.set_connection(remote());
+    reload(&mut h);
     assert_eq!(shown_tab(&mut h), "General", "the shown page falls back");
     assert_eq!(has_page(&mut h), (false, false));
     h.set_connection(local());
+    reload(&mut h);
     assert_eq!(has_page(&mut h), (true, true), "the row comes back");
 }
 
@@ -403,6 +413,7 @@ fn autostart_toggle_calls_the_seam_and_shows_a_failure(cx: &mut TestAppContext) 
     assert!(painted(&mut h, "settings-remote-autostart-error"));
 
     h.set_connection(remote());
+    reload(&mut h);
     assert_eq!(shown_tab(&mut h), "General");
     assert!(
         !h.root(|root, _| root.settings_tab_labels())

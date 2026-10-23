@@ -25,7 +25,10 @@ use protocol::{
 use rustling_tulip_native::{
     Activity, Clock, Connection, ContainerKind, FileFilter, FilePicker, FolderPicker,
     HandshakeInfo, NetCommand, NetDeps, NetEvent, Notifier, NotifyState, OpenFailure, Opener,
-    QuitFn, RootDeps, RootView, ScPanel, bind_keys, remote_access::Autostart, spawn_net,
+    QuitFn, RootDeps, RootView, ScPanel, bind_keys,
+    remote_access::Autostart,
+    spawn_net,
+    target::{TailnetHost, Target},
 };
 use serde_json::{Value, json};
 
@@ -49,13 +52,18 @@ pub fn welcome(protocol_version: u32) -> DaemonMessage {
     }
 }
 
-/// A connection open on the fake daemon's port, welcomed with `features`.
-fn connected(features: Vec<String>) -> Connection {
-    let mut conn = Connection::new();
+/// A connection to `target` open on `port`, welcomed with `features`.
+fn connected_to(target: Target, port: u16, features: Vec<String>) -> Connection {
+    let mut conn = Connection::for_target(target);
     conn.on_connecting();
-    conn.on_socket_open(4242);
+    conn.on_socket_open(port);
     conn.on_welcome(PROTOCOL, features);
     conn
+}
+
+/// A connection open on the fake daemon's port, welcomed with `features`.
+fn connected(features: Vec<String>) -> Connection {
+    connected_to(Target::Local, 4242, features)
 }
 
 /// Whether the rail's side of the window shows what `selector` tags: the
@@ -1180,6 +1188,32 @@ impl<'a> Harness<'a> {
         harness
     }
 
+    /// Opens the window, connects it to `target` and only then delivers
+    /// `fixture`, so a spec on a remote host never counts on the local
+    /// daemon's rows outliving a target switch. Only the local daemon
+    /// reports a handshake; a tailnet host never does.
+    pub fn on_target(
+        cx: &'a mut TestAppContext,
+        dir: &TestDir,
+        target: Target,
+        fixture: &Fixture,
+    ) -> Self {
+        let port = target.tailnet_host().map_or(4242, TailnetHost::port);
+        let local = target.is_local();
+        let mut harness = Self::open(cx, dir);
+        harness.event(NetEvent::State(connected_to(
+            target,
+            port,
+            daemon_features(),
+        )));
+        if local {
+            harness.report_handshake();
+        }
+        harness.welcome_messages();
+        harness.load(fixture);
+        harness
+    }
+
     /// Reports the connection as an older daemon's, whose `Welcome` lists
     /// none of [`daemon_features`].
     pub fn welcome_without_features(&mut self) {
@@ -1194,14 +1228,25 @@ impl<'a> Harness<'a> {
 
     fn connect(&mut self) {
         self.event(NetEvent::State(connected(daemon_features())));
+        self.report_handshake();
+        self.welcome_messages();
+    }
+
+    /// The `daemon.json` handshake the local daemon reports, and no tailnet
+    /// host does.
+    fn report_handshake(&mut self) {
         self.event(NetEvent::Handshake(HandshakeInfo {
             port: 4242,
             pid: 1,
             protocol_version: PROTOCOL,
         }));
+    }
+
+    /// What the client sends on a connection's `Welcome`: every connection
+    /// asks for the session history, which the specs that care about it ask
+    /// for themselves.
+    fn welcome_messages(&mut self) {
         self.send(welcome(PROTOCOL));
-        // Every connection asks for the session history; the specs that
-        // care about it send a Welcome of their own.
         self.drain();
         self.outbox
             .unread

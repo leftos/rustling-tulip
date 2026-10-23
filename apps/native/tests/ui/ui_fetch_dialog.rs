@@ -20,22 +20,17 @@ use std::path::{Path, PathBuf};
 use base64::Engine as _;
 use gpui::{Modifiers, TestAppContext, point, px};
 use protocol::{ClientMessage, DaemonMessage, SessionSnapshot};
+use rustling_tulip_native::RootView;
 use rustling_tulip_native::file_fetch::FetchRequest;
 use rustling_tulip_native::target::Target;
-use rustling_tulip_native::{Connection, RootView};
 use support::{Fixture, Harness, Opened, TestDir, session};
 
 const HOST: &str = "box.tail1234.ts.net";
 const ROW: &str = "sidebar-more-fetch-file";
 
-/// A connection to `target` open on `port`, welcomed with the fake daemon's
-/// features.
-fn open_on(target: Target, port: u16) -> Connection {
-    let mut conn = Connection::for_target(target);
-    conn.on_connecting();
-    conn.on_socket_open(port);
-    conn.on_welcome(support::PROTOCOL, support::daemon_features());
-    conn
+/// [`HOST`] as a target to open on.
+fn remote_target() -> Target {
+    Target::tailnet(HOST, None)
 }
 
 /// A harness over `fixture` on the remote host [`HOST`], its downloads
@@ -45,8 +40,7 @@ fn remote_fixture<'a>(
     dir: &TestDir,
     fixture: &Fixture,
 ) -> (Harness<'a>, PathBuf) {
-    let mut h = Harness::with(cx, dir, fixture);
-    h.set_connection(open_on(Target::tailnet(HOST, None), 8787));
+    let mut h = Harness::on_target(cx, dir, remote_target(), fixture);
     let root = dir.path().join("remote-files");
     let set = root.clone();
     h.root_update(move |view, _, _| view.set_remote_files_root(set));
