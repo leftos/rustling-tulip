@@ -306,6 +306,22 @@ pub const TRACER_OWNER_ENV: &str = "RUSTLING_TULIP_TRACER_OWNER";
 /// Env var naming the tracer's per-session log file (see [`tracer_log_path`]).
 pub const TRACER_LOG_ENV: &str = "RUSTLING_TULIP_TRACER_LOG";
 
+/// The variables a running Claude Code session sets for its own children.
+/// A daemon started from inside one (a terminal in a Claude session) would
+/// pass them to every session it spawns, marking each as that session's
+/// child: no transcript of its own, and a messaging channel pointing at the
+/// parent. Every PTY spawn removes them.
+const PARENT_SESSION_VARS: [&str; 8] = [
+    "CLAUDECODE",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_CODE_SESSION_ATTENDED",
+    "CLAUDE_PID",
+];
+
 /// What a spawned tracer runs from and is told at spawn.
 struct TracerLaunch<'a> {
     tracer: &'a Path,
@@ -359,7 +375,7 @@ fn tracer_invocation(launch: &TracerLaunch<'_>) -> TracerInvocation {
     // must not pass on is removed rather than left out of `env`. The owner
     // and log variables take effect after the removals: a removal naming one
     // of them is dropped here rather than let it drop the variable.
-    let env_remove = spec
+    let mut env_remove: Vec<OsString> = spec
         .env_remove
         .iter()
         .filter(|name| {
@@ -369,6 +385,19 @@ fn tracer_invocation(launch: &TracerLaunch<'_>) -> TracerInvocation {
         })
         .map(OsString::from)
         .collect();
+    // A parent Claude session's markers are removed too, unless the spawn sets
+    // one on purpose: `env_set` is applied before `env_remove`, so a name in
+    // both would be dropped.
+    for name in PARENT_SESSION_VARS {
+        let set_by_spawn = spec.env.iter().any(|(key, _)| is_env_name(key, name));
+        let already_removed = spec
+            .env_remove
+            .iter()
+            .any(|removed| is_env_name(removed, name));
+        if !set_by_spawn && !already_removed {
+            env_remove.push(OsString::from(name));
+        }
+    }
     TracerInvocation {
         args,
         env_set,
@@ -1128,6 +1157,80 @@ mod tests {
             env.contains(&(OsStr::new("ANTHROPIC_API_KEY"), None)),
             "the inherited variable is removed: {env:?}"
         );
+    }
+
+    #[test]
+    fn tracer_removes_parent_claude_session_variables() {
+        use std::ffi::OsStr;
+        let spec = crate::pty::PtySpawnSpec {
+            session_id: "abc".to_string(),
+            program: "prog".to_string(),
+            args: Vec::new(),
+            cwd: PathBuf::from("cwd"),
+            env: Vec::new(),
+            env_remove: Vec::new(),
+            cols: 80,
+            rows: 24,
+        };
+        let owner = PathBuf::from("owner-config");
+        let cmd = super::tracer_command(&super::TracerLaunch {
+            tracer: Path::new("rt-tracer"),
+            spec: &spec,
+            pipe_name: "pipe",
+            log_path: None,
+            owner: &owner,
+        });
+        let env: Vec<(&OsStr, Option<&OsStr>)> = cmd.get_envs().collect();
+        for name in super::PARENT_SESSION_VARS {
+            assert!(
+                env.contains(&(OsStr::new(name), None)),
+                "{name} is removed from the tracer's environment: {env:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_spawn_that_sets_a_parent_session_variable_keeps_it() {
+        use std::ffi::OsStr;
+        let spec = crate::pty::PtySpawnSpec {
+            session_id: "abc".to_string(),
+            program: "prog".to_string(),
+            args: Vec::new(),
+            cwd: PathBuf::from("cwd"),
+            env: vec![("CLAUDE_CODE_ENTRYPOINT".to_owned(), "sdk-ts".to_owned())],
+            env_remove: Vec::new(),
+            cols: 80,
+            rows: 24,
+        };
+        let owner = PathBuf::from("owner-config");
+        let cmd = super::tracer_command(&super::TracerLaunch {
+            tracer: Path::new("rt-tracer"),
+            spec: &spec,
+            pipe_name: "pipe",
+            log_path: None,
+            owner: &owner,
+        });
+        let env: Vec<(&OsStr, Option<&OsStr>)> = cmd.get_envs().collect();
+        assert!(
+            env.contains(&(
+                OsStr::new("CLAUDE_CODE_ENTRYPOINT"),
+                Some(OsStr::new("sdk-ts"))
+            )),
+            "a variable the spawn sets keeps its value: {env:?}"
+        );
+        assert!(
+            !env.contains(&(OsStr::new("CLAUDE_CODE_ENTRYPOINT"), None)),
+            "a variable the spawn sets is not removed: {env:?}"
+        );
+        for name in super::PARENT_SESSION_VARS {
+            if name == "CLAUDE_CODE_ENTRYPOINT" {
+                continue;
+            }
+            assert!(
+                env.contains(&(OsStr::new(name), None)),
+                "{name} is still removed: {env:?}"
+            );
+        }
     }
 
     #[cfg(windows)]
