@@ -7,6 +7,9 @@ members = [
     "crates/daemon",
     "crates/daemon-client",
     "crates/tailnet",
+    "crates/agents/api",
+    "crates/agents/claude",
+    "crates/agents/registry",
     "apps/native",
 ]
 
@@ -34,6 +37,9 @@ protocol = { path = "crates/protocol" }
 tracer-protocol = { path = "crates/tracer-protocol" }
 daemon-client = { path = "crates/daemon-client" }
 tailnet = { path = "crates/tailnet" }
+agent-api = { path = "crates/agents/api" }
+agent-claude = { path = "crates/agents/claude" }
+agent-registry = { path = "crates/agents/registry" }
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }

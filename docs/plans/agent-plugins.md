@@ -266,9 +266,11 @@ Branch `feat/agent-plugins` with a draft PR, cut from `main` after RT-266 merges
 
 Every proof runs as `pwsh -NoProfile -File tools/gate.ps1 run … -- cargo nextest run … --cargo-profile test-release`, with the named filter red first where a step adds behaviour.
 
-- [ ] **AP.1a Stand up the crates and the registry, Claude moved in unchanged.** New `crates/agents/api` (package `agent-api`) with `AgentPlugin` and the context types; new `crates/agents/claude` (package `agent-claude`) holding `agents/claude.rs` and its tests; new `crates/agents/registry` (package `agent-registry`); the daemon looks plugins up through the registry instead of `backend_for`; `headless.rs` applies `HeadlessEvent`s instead of passing the registry into the parser.
+- [x] **AP.1a Stand up the crates and the registry, Claude moved in unchanged.** New `crates/agents/api` (package `agent-api`) with `AgentPlugin` and the context types; new `crates/agents/claude` (package `agent-claude`) holding `agents/claude.rs` and its tests; new `crates/agents/registry` (package `agent-registry`); the daemon looks plugins up through the registry instead of `backend_for`; `headless.rs` applies `HeadlessEvent`s instead of passing the registry into the parser.
 
-  Files: workspace `Cargo.toml`, the three new crates, `crates/daemon/Cargo.toml`, `agents/mod.rs` (deleted), `agents/claude.rs` (moved), `headless.rs`, `server.rs` (the three `backend_for` sites), `tools/test-map.json`. Proof: `-p agent-claude` (the moved argv and stream-json tests), `-p daemon headless`, `-p daemon spawn`.
+  Files: workspace `Cargo.toml`, the three new crates, `crates/daemon/Cargo.toml`, `agents/mod.rs` (deleted), `agents/claude.rs` (moved), `headless.rs`, `server/spawn.rs` (the former `backend_for` sites), `providers.rs` (moved from `agents/providers.rs`), `tools/test-map.json`. Proof: `-p agent-claude` (the moved argv and stream-json tests), `-p daemon headless`, `-p daemon spawn`.
+
+  Landed on main.
 - [ ] **AP.1b The trait's final shape and typed options.** The typed `Agent` trait with `type Options`, the adapter to `AgentPlugin`, `OptionValues` in every signature, `ClaudeOptions { permission_mode, provider, model }`; until AP.6, `spawn_session` converts the request's `AgentOptions` and `model` into `OptionValues` in one place; Claude's descriptor fields; the conformance test.
 
   Files: `agent-api` (trait, adapter, `conformance` under `test-support`), `agent-claude` (options, descriptor), `server.rs` (the converter, `SpawnArgs`). Proof: `-p agent-api` (adapter decode, a failed decode refuses), `-p agent-claude conformance`, `-p daemon spawn`.

@@ -168,7 +168,16 @@ pub(super) fn write_hook_settings(
     let dir = hub.dirs.sessions_dir.join(session_id);
     let path = dir.join(HOOK_SETTINGS_FILE);
     let created_dir = !dir.exists();
-    let settings = crate::agents::build_hook_settings(&tracer_exe, session_id, &hub.dirs.config);
+    let Some(settings) =
+        agent_registry::plugin(agent).hook_settings_file(&tracer_exe, session_id, &hub.dirs.config)
+    else {
+        warn!(
+            %session_id,
+            agent = agent.as_label(),
+            "the agent's plugin has no hook settings file; spawning without hooks"
+        );
+        return None;
+    };
     let written = std::fs::create_dir_all(&dir)
         .map_err(anyhow::Error::from)
         .and_then(|()| orphan::write_atomic(&path, settings.as_bytes()));

@@ -81,6 +81,12 @@
     },
     {
       "paths": [
+        "crates/agents/**"
+      ],
+      "filter": "rdeps(agent-api)"
+    },
+    {
+      "paths": [
         "apps/native/src/main.rs",
         "apps/native/tests/ui/exe_subsystem.rs"
       ],

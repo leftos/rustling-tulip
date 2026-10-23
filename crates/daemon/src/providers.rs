@@ -33,8 +33,6 @@ struct ProviderEntry {
     remove: &'static [&'static str],
     /// Defaults an environment row overrides.
     tuning: &'static [(&'static str, &'static str)],
-    /// The model passed as `--model` when the spawn names none.
-    default_model: &'static str,
     /// The start of every model name the provider serves, matched
     /// case-insensitively, so the importer can tell its sessions by `--model`.
     model_prefix: &'static str,
@@ -74,7 +72,6 @@ const DEEPSEEK: ProviderEntry = ProviderEntry {
         ("CLAUDE_CODE_MAX_CONTEXT_TOKENS", "1000000"),
         ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1"),
     ],
-    default_model: DEEPSEEK_MODEL,
     model_prefix: "deepseek",
 };
 
@@ -117,15 +114,6 @@ fn entry(provider: ClaudeProvider) -> Result<Option<&'static ProviderEntry>, Spa
             detail: "This daemon does not know the requested Claude provider.".to_owned(),
             hint: None,
         })
-}
-
-/// The model a spawn on `provider` passes as `--model` when it names none.
-#[must_use]
-pub fn default_model(provider: ClaudeProvider) -> Option<&'static str> {
-    entry(provider)
-        .ok()
-        .flatten()
-        .map(|entry| entry.default_model)
 }
 
 /// The name the user reads for `provider`: none for Anthropic and for a
@@ -547,7 +535,6 @@ mod tests {
             failure.detail
         );
         assert!(check_rows(ClaudeProvider::Unknown, &[]).is_err());
-        assert_eq!(default_model(ClaudeProvider::Unknown), None);
     }
 
     #[test]

@@ -6,7 +6,6 @@
 // the console so a failing test still prints.
 #![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
 
-mod agents;
 mod binary_cache;
 mod branch_fate;
 mod branch_names;
@@ -29,6 +28,7 @@ mod orphan;
 mod osc_title;
 mod paths;
 mod presets;
+mod providers;
 mod pty;
 mod pty_state;
 mod registry;

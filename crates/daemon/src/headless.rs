@@ -1,13 +1,15 @@
 //! Headless (`--print` / structured-JSON) driver.
 //!
-//! Generic over the agent: each [`crate::agents::AgentBackend`] owns its own
-//! line parser via [`crate::agents::AgentBackend::handle_headless_line`].
-//! `headless::spawn` wires stdout into that parser and stderr into
-//! `recent_actions`; the rest is agent-agnostic.
+//! Generic over the agent: each [`agent_api::AgentPlugin`] owns its own
+//! line parser via [`agent_api::AgentPlugin::parse_headless_line`].
+//! `headless::spawn` wires stdout into that parser, applies the events it
+//! yields to the session's record, and wires stderr into `recent_actions`;
+//! the rest is agent-agnostic.
 
 use crate::paths::Dirs;
 use crate::scrollback;
-use crate::session::{SessionRegistry, push_recent_action};
+use crate::session::{SessionRecord, SessionRegistry, push_recent_action};
+use agent_api::HeadlessEvent;
 use anyhow::{Context as _, anyhow};
 use protocol::{Agent, SessionStatus};
 use std::path::PathBuf;
@@ -34,7 +36,7 @@ pub struct HeadlessSpec {
     pub args: Vec<String>,
     pub cwd: PathBuf,
     pub env: Vec<(String, String)>,
-    /// Agent kind. Drives which backend's `handle_headless_line` parses
+    /// Agent kind. Drives which plugin's `parse_headless_line` parses
     /// stdout — claude's stream-json.
     pub agent: Agent,
 }
@@ -125,7 +127,7 @@ pub fn spawn(
     let registry_for_stdout = Arc::clone(registry);
     let session_for_stdout = session_id.clone();
     let dirs_for_stdout = dirs;
-    let backend = crate::agents::backend_for(spec.agent);
+    let plugin = agent_registry::plugin(spec.agent);
     tokio::spawn(async move {
         let mut reader = BufReader::new(stdout).lines();
         loop {
@@ -137,7 +139,14 @@ pub fn spawn(
                     let mut chunk = line.clone().into_bytes();
                     chunk.push(b'\n');
                     scrollback::append(&dirs_for_stdout, &session_for_stdout, &chunk);
-                    backend.handle_headless_line(&registry_for_stdout, &session_for_stdout, &line);
+                    let events = plugin.parse_headless_line(&line);
+                    if !events.is_empty() {
+                        registry_for_stdout.update(&session_for_stdout, |rec| {
+                            for event in events {
+                                apply_headless_event(rec, event);
+                            }
+                        });
+                    }
                 }
                 Ok(None) => break,
                 Err(err) => {
@@ -217,8 +226,28 @@ fn record_exit(registry: &SessionRegistry, session_id: &str, exit: Option<i32>) 
     registry.delete_sidecar(session_id);
 }
 
-// stream-json parsing lives in `crate::agents::claude`. Other agents'
-// headless parsers will live in their own backend modules.
+/// Apply one event a plugin read from its headless output to `rec`.
+fn apply_headless_event(rec: &mut SessionRecord, event: HeadlessEvent) {
+    match event {
+        HeadlessEvent::Status(status) => rec.status = status,
+        HeadlessEvent::RecentAction(action) => push_recent_action(rec, action),
+        HeadlessEvent::Metrics {
+            cost_usd,
+            input_tokens,
+            output_tokens,
+        } => {
+            if let Some(cost) = cost_usd {
+                rec.metrics.cost_usd = cost;
+            }
+            if let Some(tokens) = input_tokens {
+                rec.metrics.input_tokens = tokens;
+            }
+            if let Some(tokens) = output_tokens {
+                rec.metrics.output_tokens = tokens;
+            }
+        }
+    }
+}
 
 #[cfg(test)]
 #[expect(

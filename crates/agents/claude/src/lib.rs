@@ -1,20 +1,28 @@
-//! Claude (`claude` CLI from `@anthropic-ai/claude-code`) backend.
+//! Claude (`claude` CLI from `@anthropic-ai/claude-code`) plugin.
 //!
-//! Owns the argv layout for both interactive and headless spawns, plus the
-//! stream-json parser that drives [`SessionMetrics`] and `recent_actions`
-//! updates while a headless session is running.
+//! Owns the argv layout for both interactive and headless spawns, the hook
+//! settings file an interactive spawn passes as `--settings`, and the
+//! stream-json parser that turns a headless session's output into
+//! [`HeadlessEvent`]s.
 
-use super::{AgentBackend, CommonSpawnFields, workspace_prelude};
-use crate::agents::providers;
-use crate::session::{SessionRegistry, push_recent_action};
+use agent_api::{AgentPlugin, HeadlessEvent, SpawnContext, workspace_prelude};
 use protocol::{AgentOptions, ClaudeProvider, PermissionMode, SessionMember, SessionStatus};
 use serde::Deserialize;
 use std::path::Path;
 use tracing::debug;
 
-pub struct ClaudeBackend;
+/// The instruction files the workspace prelude names.
+const INSTRUCTION_FILES: &[&str] = &["CLAUDE.md", "AGENTS.md"];
 
-impl AgentBackend for ClaudeBackend {
+/// The model a `DeepSeek` spawn passes as `--model` when it names none.
+pub const DEEPSEEK_MODEL: &str = "deepseek-flash";
+
+pub struct ClaudePlugin;
+
+/// The Claude plugin the registry hands out.
+pub static CLAUDE: ClaudePlugin = ClaudePlugin;
+
+impl AgentPlugin for ClaudePlugin {
     fn program_env_var(&self) -> &'static str {
         "RUSTLING_TULIP_CLAUDE"
     }
@@ -30,7 +38,7 @@ impl AgentBackend for ClaudeBackend {
     fn build_interactive_args(
         &self,
         opts: &AgentOptions,
-        common: &CommonSpawnFields,
+        common: &SpawnContext,
         members: &[SessionMember],
         initial_prompt: Option<&str>,
     ) -> Vec<String> {
@@ -48,7 +56,7 @@ impl AgentBackend for ClaudeBackend {
         // invisible to the user but the model sees it. Only emitted for 2+
         // member sessions (where the worktree-vs-original-path mismatch
         // actually matters).
-        if let Some(prelude) = workspace_prelude(members) {
+        if let Some(prelude) = workspace_prelude(members, INSTRUCTION_FILES) {
             args.push("--append-system-prompt".to_string());
             args.push(prelude);
         }
@@ -56,7 +64,7 @@ impl AgentBackend for ClaudeBackend {
         // The injected hook settings file rides on `--settings`, ahead of the
         // resume branch so a resumed conversation carries it too, and ahead of
         // `--session-id` so both interactive forms keep it in one position.
-        if let Some(settings) = common.hook_settings {
+        if let Some(settings) = common.settings_file {
             args.push("--settings".to_string());
             args.push(settings.to_string_lossy().into_owned());
         }
@@ -67,7 +75,7 @@ impl AgentBackend for ClaudeBackend {
             args.push(id.to_string());
             return args;
         }
-        if let Some(id) = common.claude_session_id {
+        if let Some(id) = common.conversation_id {
             args.push("--session-id".to_string());
             args.push(id.to_string());
         }
@@ -86,7 +94,7 @@ impl AgentBackend for ClaudeBackend {
     fn build_headless_args(
         &self,
         opts: &AgentOptions,
-        common: &CommonSpawnFields,
+        common: &SpawnContext,
         members: &[SessionMember],
         initial_prompt: &str,
     ) -> Vec<String> {
@@ -101,7 +109,7 @@ impl AgentBackend for ClaudeBackend {
             args.push("--add-dir".to_string());
             args.push(extra.worktree_path.clone());
         }
-        if let Some(prelude) = workspace_prelude(members) {
+        if let Some(prelude) = workspace_prelude(members, INSTRUCTION_FILES) {
             args.push("--append-system-prompt".to_string());
             args.push(prelude);
         }
@@ -111,56 +119,80 @@ impl AgentBackend for ClaudeBackend {
         args
     }
 
-    fn handle_headless_line(&self, registry: &SessionRegistry, session_id: &str, raw_line: &str) {
-        let parsed = match serde_json::from_str::<StreamEvent>(raw_line) {
-            Ok(p) => p,
+    fn parse_headless_line(&self, line: &str) -> Vec<HeadlessEvent> {
+        match serde_json::from_str::<StreamEvent>(line) {
+            Ok(event) => headless_events(event),
             Err(err) => {
-                debug!(?err, line = raw_line, "unrecognized stream-json event");
-                return;
+                debug!(?err, line, "unrecognized stream-json event");
+                Vec::new()
             }
-        };
-        registry.update(session_id, |rec| match parsed {
-            StreamEvent::System { subtype, .. } => {
-                rec.status = SessionStatus::Working;
-                push_recent_action(rec, format!("system: {subtype}"));
+        }
+    }
+
+    fn hook_settings_file(
+        &self,
+        tracer_exe: &Path,
+        session_id: &str,
+        config_dir: &Path,
+    ) -> Option<String> {
+        Some(build_hook_settings(tracer_exe, session_id, config_dir))
+    }
+}
+
+/// The session changes one parsed stream-json event makes, in order.
+fn headless_events(event: StreamEvent) -> Vec<HeadlessEvent> {
+    match event {
+        StreamEvent::System { subtype } => vec![
+            HeadlessEvent::Status(SessionStatus::Working),
+            HeadlessEvent::RecentAction(format!("system: {subtype}")),
+        ],
+        StreamEvent::Assistant { message } => message
+            .and_then(|m| m.content)
+            .into_iter()
+            .flatten()
+            .filter_map(block_action)
+            .map(HeadlessEvent::RecentAction)
+            .collect(),
+        StreamEvent::Result {
+            total_cost_usd,
+            usage,
+            subtype,
+        } => vec![
+            HeadlessEvent::Metrics {
+                cost_usd: total_cost_usd,
+                input_tokens: usage.as_ref().map(|u| u.input_tokens.unwrap_or(0)),
+                output_tokens: usage.as_ref().map(|u| u.output_tokens.unwrap_or(0)),
+            },
+            HeadlessEvent::Status(SessionStatus::Stopped),
+            HeadlessEvent::RecentAction(format!("result: {subtype}")),
+        ],
+        StreamEvent::User {} | StreamEvent::Other => Vec::new(),
+    }
+}
+
+/// The recent action one assistant content block records, if any: a tool
+/// call's name, or the first 120 characters of non-blank text.
+fn block_action(block: ContentBlock) -> Option<String> {
+    match block {
+        ContentBlock::ToolUse { name } => Some(format!("tool: {name}")),
+        ContentBlock::Text { text } => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                return None;
             }
-            StreamEvent::Assistant { message } => {
-                if let Some(content) = message.and_then(|m| m.content) {
-                    for block in content {
-                        match block {
-                            ContentBlock::ToolUse { name, .. } => {
-                                push_recent_action(rec, format!("tool: {name}"));
-                            }
-                            ContentBlock::Text { text } => {
-                                let trimmed = text.trim();
-                                if !trimmed.is_empty() {
-                                    let snippet = trimmed.chars().take(120).collect::<String>();
-                                    push_recent_action(rec, format!("assistant: {snippet}"));
-                                }
-                            }
-                            ContentBlock::Other => {}
-                        }
-                    }
-                }
-            }
-            StreamEvent::Result {
-                total_cost_usd,
-                usage,
-                subtype,
-                ..
-            } => {
-                if let Some(cost) = total_cost_usd {
-                    rec.metrics.cost_usd = cost;
-                }
-                if let Some(u) = usage {
-                    rec.metrics.input_tokens = u.input_tokens.unwrap_or(0);
-                    rec.metrics.output_tokens = u.output_tokens.unwrap_or(0);
-                }
-                rec.status = SessionStatus::Stopped;
-                push_recent_action(rec, format!("result: {subtype}"));
-            }
-            StreamEvent::User {} | StreamEvent::Other => {}
-        });
+            let snippet = trimmed.chars().take(120).collect::<String>();
+            Some(format!("assistant: {snippet}"))
+        }
+        ContentBlock::Other => None,
+    }
+}
+
+/// The model a spawn on `provider` passes as `--model` when it names none.
+#[must_use]
+pub fn default_model(provider: ClaudeProvider) -> Option<&'static str> {
+    match provider {
+        ClaudeProvider::Deepseek => Some(DEEPSEEK_MODEL),
+        ClaudeProvider::Anthropic | ClaudeProvider::Unknown => None,
     }
 }
 
@@ -176,16 +208,16 @@ fn claude_options(opts: &AgentOptions) -> (Option<PermissionMode>, ClaudeProvide
 
 /// Append claude's `--model`, `--permission-mode`, and
 /// `--dangerously-skip-permissions` args. A spawn that names no model on a
-/// provider with a default model (see [`providers::default_model`]) passes
+/// provider with a default model (see [`default_model`]) passes
 /// that one. The claude CLI rejects `--permission-mode` together with
 /// `--dangerously-skip-permissions`, so the latter wins when both are set.
 fn extend_common(
     args: &mut Vec<String>,
-    common: &CommonSpawnFields<'_>,
+    common: &SpawnContext<'_>,
     permission_mode: Option<PermissionMode>,
     provider: ClaudeProvider,
 ) {
-    if let Some(model) = common.model.or_else(|| providers::default_model(provider)) {
+    if let Some(model) = common.model.or_else(|| default_model(provider)) {
         args.push("--model".to_string());
         args.push(model.to_string());
     }
@@ -205,18 +237,12 @@ fn extend_common(
 /// Every event of the design's table gets one command hook in exec form
 /// (`command` plus `args`, never a shell string) running the session's cached
 /// tracer's `hook` shim, marked `async` so a hook never blocks the agent's
-/// turn. `tracer_exe` is the cached `rt-tracer.exe` the tracer itself runs from
-/// (see [`crate::tracer_client::cached_tracer_exe`]), which stays valid for the
-/// session's lifetime, and `config_dir` is the daemon's config dir, where the
-/// shim reads `daemon.json` for the current port and auth token.
-///
-/// `pub(crate)` so the plain-shell recovery path writes the same file for a
-/// shell session.
-pub(crate) fn build_hook_settings(
-    tracer_exe: &Path,
-    session_id: &str,
-    config_dir: &Path,
-) -> String {
+/// turn. `tracer_exe` is the cached `rt-tracer.exe` the tracer itself runs from,
+/// which stays valid for the session's lifetime, and `config_dir` is the
+/// daemon's config dir, where the shim reads `daemon.json` for the current port
+/// and auth token.
+#[must_use]
+pub fn build_hook_settings(tracer_exe: &Path, session_id: &str, config_dir: &Path) -> String {
     let command = tracer_exe.to_string_lossy().into_owned();
     let config_dir = config_dir.to_string_lossy().into_owned();
     let hook = serde_json::json!({
@@ -341,15 +367,15 @@ mod tests {
             .collect()
     }
 
-    fn common(skip: bool, model: Option<&str>, has_injector: bool) -> CommonSpawnFields<'_> {
-        CommonSpawnFields {
+    fn common(skip: bool, model: Option<&str>, has_injector: bool) -> SpawnContext<'_> {
+        SpawnContext {
             dangerously_skip_permissions: skip,
             model,
             has_prompt_injector: has_injector,
-            claude_session_id: None,
+            conversation_id: None,
             resume_conversation: None,
             add_dirs: &[],
-            hook_settings: None,
+            settings_file: None,
         }
     }
 
@@ -359,11 +385,11 @@ mod tests {
     fn resume_replaces_session_id_and_drops_the_prompt() {
         let m = members(&["X:/dev/a", "X:/dev/b"]);
         let opts = AgentOptions::claude(None);
-        let common = CommonSpawnFields {
+        let common = SpawnContext {
             resume_conversation: Some(RESUME_ID),
             ..with_session_id(true, None, false)
         };
-        let args = ClaudeBackend.build_interactive_args(&opts, &common, &m, Some("hello"));
+        let args = ClaudePlugin.build_interactive_args(&opts, &common, &m, Some("hello"));
         assert!(!args.contains(&"--session-id".to_string()), "{args:?}");
         assert!(!args.contains(&SESSION_ID.to_string()), "{args:?}");
         assert!(!args.contains(&"-p".to_string()), "{args:?}");
@@ -382,12 +408,12 @@ mod tests {
         let m = members(&["X:/dev/a"]);
         let opts = AgentOptions::claude(None);
         let extra = vec!["X:/dev/b".to_string(), "X:/dev/c".to_string()];
-        let common = CommonSpawnFields {
+        let common = SpawnContext {
             add_dirs: &extra,
             resume_conversation: Some(RESUME_ID),
             ..common(false, None, false)
         };
-        let args = ClaudeBackend.build_interactive_args(&opts, &common, &m, None);
+        let args = ClaudePlugin.build_interactive_args(&opts, &common, &m, None);
         assert_eq!(
             args,
             vec![
@@ -403,13 +429,9 @@ mod tests {
 
     const SESSION_ID: &str = "0b6f4c7e-1111-4222-8333-944455556666";
 
-    fn with_session_id(
-        skip: bool,
-        model: Option<&str>,
-        has_injector: bool,
-    ) -> CommonSpawnFields<'_> {
-        CommonSpawnFields {
-            claude_session_id: Some(SESSION_ID),
+    fn with_session_id(skip: bool, model: Option<&str>, has_injector: bool) -> SpawnContext<'_> {
+        SpawnContext {
+            conversation_id: Some(SESSION_ID),
             ..common(skip, model, has_injector)
         }
     }
@@ -418,7 +440,7 @@ mod tests {
     fn interactive_args_include_session_id() {
         let m = members(&["X:/dev/a"]);
         let opts = AgentOptions::claude(None);
-        let args = ClaudeBackend.build_interactive_args(
+        let args = ClaudePlugin.build_interactive_args(
             &opts,
             &with_session_id(false, Some("opus"), false),
             &m,
@@ -431,7 +453,7 @@ mod tests {
     fn interactive_args_with_prompt_include_session_id() {
         let m = members(&["X:/dev/a"]);
         let opts = AgentOptions::claude(None);
-        let args = ClaudeBackend.build_interactive_args(
+        let args = ClaudePlugin.build_interactive_args(
             &opts,
             &with_session_id(false, None, false),
             &m,
@@ -440,7 +462,7 @@ mod tests {
         assert_eq!(args, vec!["--session-id", SESSION_ID, "-p", "hello"]);
 
         // With an injector the prompt stays off the argv; the id does not.
-        let injected = ClaudeBackend.build_interactive_args(
+        let injected = ClaudePlugin.build_interactive_args(
             &opts,
             &with_session_id(false, None, true),
             &m,
@@ -456,11 +478,11 @@ mod tests {
     fn interactive_args_pass_the_hook_settings_file() {
         let m = members(&["X:/dev/a"]);
         let opts = AgentOptions::claude(None);
-        let common = CommonSpawnFields {
-            hook_settings: Some(Path::new(HOOK_SETTINGS)),
+        let common = SpawnContext {
+            settings_file: Some(Path::new(HOOK_SETTINGS)),
             ..with_session_id(false, Some("opus"), false)
         };
-        let args = ClaudeBackend.build_interactive_args(&opts, &common, &m, None);
+        let args = ClaudePlugin.build_interactive_args(&opts, &common, &m, None);
         assert_eq!(
             args,
             vec![
@@ -478,12 +500,12 @@ mod tests {
     fn resume_args_pass_the_hook_settings_file() {
         let m = members(&["X:/dev/a"]);
         let opts = AgentOptions::claude(None);
-        let common = CommonSpawnFields {
-            hook_settings: Some(Path::new(HOOK_SETTINGS)),
+        let common = SpawnContext {
+            settings_file: Some(Path::new(HOOK_SETTINGS)),
             resume_conversation: Some(RESUME_ID),
             ..with_session_id(true, None, false)
         };
-        let args = ClaudeBackend.build_interactive_args(&opts, &common, &m, Some("hello"));
+        let args = ClaudePlugin.build_interactive_args(&opts, &common, &m, Some("hello"));
         assert_eq!(
             args,
             vec![
@@ -500,11 +522,11 @@ mod tests {
     fn headless_args_take_no_settings() {
         let m = members(&["X:/dev/a"]);
         let opts = AgentOptions::claude(None);
-        let common = CommonSpawnFields {
-            hook_settings: Some(Path::new(HOOK_SETTINGS)),
+        let common = SpawnContext {
+            settings_file: Some(Path::new(HOOK_SETTINGS)),
             ..common(false, None, false)
         };
-        let args = ClaudeBackend.build_headless_args(&opts, &common, &m, "hello");
+        let args = ClaudePlugin.build_headless_args(&opts, &common, &m, "hello");
         assert!(!args.contains(&"--settings".to_string()), "{args:?}");
         assert!(!args.contains(&HOOK_SETTINGS.to_string()), "{args:?}");
     }
@@ -513,7 +535,7 @@ mod tests {
     fn headless_args_have_no_session_id() {
         let m = members(&["X:/dev/a"]);
         let opts = AgentOptions::claude(None);
-        let args = ClaudeBackend.build_headless_args(
+        let args = ClaudePlugin.build_headless_args(
             &opts,
             &with_session_id(false, None, false),
             &m,
@@ -531,7 +553,7 @@ mod tests {
             provider: protocol::ClaudeProvider::Deepseek,
         };
         let interactive =
-            ClaudeBackend.build_interactive_args(&opts, &common(false, None, false), &m, None);
+            ClaudePlugin.build_interactive_args(&opts, &common(false, None, false), &m, None);
         assert!(
             interactive
                 .windows(2)
@@ -539,21 +561,21 @@ mod tests {
             "{interactive:?}"
         );
         let headless =
-            ClaudeBackend.build_headless_args(&opts, &common(false, None, false), &m, "hi");
+            ClaudePlugin.build_headless_args(&opts, &common(false, None, false), &m, "hi");
         assert!(
             headless
                 .windows(2)
                 .any(|w| *w == ["--model", "deepseek-flash"]),
             "{headless:?}"
         );
-        let chosen = ClaudeBackend.build_interactive_args(
+        let chosen = ClaudePlugin.build_interactive_args(
             &opts,
             &common(false, Some("deepseek-pro"), false),
             &m,
             None,
         );
         assert_eq!(chosen, vec!["--model", "deepseek-pro"]);
-        let anthropic = ClaudeBackend.build_interactive_args(
+        let anthropic = ClaudePlugin.build_interactive_args(
             &AgentOptions::claude(None),
             &common(false, None, false),
             &m,
@@ -566,7 +588,7 @@ mod tests {
     fn interactive_single_repo_with_model() {
         let m = members(&["X:/dev/a"]);
         let opts = AgentOptions::claude(Some(PermissionMode::AcceptEdits));
-        let args = ClaudeBackend.build_interactive_args(
+        let args = ClaudePlugin.build_interactive_args(
             &opts,
             &common(false, Some("opus"), false),
             &m,
@@ -590,7 +612,7 @@ mod tests {
         let m = members(&["X:/dev/a"]);
         let opts = AgentOptions::claude(Some(PermissionMode::Plan));
         let args =
-            ClaudeBackend.build_interactive_args(&opts, &common(true, None, false), &m, Some("hi"));
+            ClaudePlugin.build_interactive_args(&opts, &common(true, None, false), &m, Some("hi"));
         assert!(args.contains(&"--dangerously-skip-permissions".to_string()));
         assert!(!args.contains(&"--permission-mode".to_string()));
     }
@@ -600,7 +622,7 @@ mod tests {
         let m = members(&["X:/dev/a", "X:/dev/b"]);
         let opts = AgentOptions::claude(None);
         let args =
-            ClaudeBackend.build_interactive_args(&opts, &common(false, None, false), &m, None);
+            ClaudePlugin.build_interactive_args(&opts, &common(false, None, false), &m, None);
         // --add-dir for the second member only (first is cwd).
         assert!(args.windows(2).any(|w| w == ["--add-dir", "X:/dev/b"]));
         // Workspace prelude emitted via --append-system-prompt.
@@ -616,7 +638,7 @@ mod tests {
     fn interactive_with_injector_omits_prompt_flag() {
         let m = members(&["X:/dev/a"]);
         let opts = AgentOptions::claude(None);
-        let args = ClaudeBackend.build_interactive_args(
+        let args = ClaudePlugin.build_interactive_args(
             &opts,
             &common(false, None, true),
             &m,
@@ -630,7 +652,7 @@ mod tests {
     fn headless_args_include_print_and_stream_json() {
         let m = members(&["X:/dev/a"]);
         let opts = AgentOptions::claude(None);
-        let args = ClaudeBackend.build_headless_args(
+        let args = ClaudePlugin.build_headless_args(
             &opts,
             &common(false, Some("sonnet"), false),
             &m,
@@ -650,7 +672,7 @@ mod tests {
     fn headless_workspace_emits_add_dir_and_prelude() {
         let m = members(&["X:/dev/a", "X:/dev/b"]);
         let opts = AgentOptions::claude(None);
-        let args = ClaudeBackend.build_headless_args(&opts, &common(false, None, false), &m, "go");
+        let args = ClaudePlugin.build_headless_args(&opts, &common(false, None, false), &m, "go");
         assert!(args.windows(2).any(|w| w == ["--add-dir", "X:/dev/b"]));
         assert!(args.iter().any(|a| a == "--append-system-prompt"));
     }
@@ -773,5 +795,103 @@ mod tests {
             ["hooks"],
             "every other settings key must keep the user's value"
         );
+    }
+
+    #[test]
+    fn default_model_names_deepseek_flash_for_deepseek_only() {
+        assert_eq!(
+            default_model(ClaudeProvider::Deepseek),
+            Some("deepseek-flash")
+        );
+        assert_eq!(default_model(ClaudeProvider::Anthropic), None);
+        assert_eq!(default_model(ClaudeProvider::Unknown), None);
+    }
+
+    mod headless {
+        use super::super::*;
+
+        fn parse(line: &str) -> Vec<HeadlessEvent> {
+            ClaudePlugin.parse_headless_line(line)
+        }
+
+        #[test]
+        fn system_line_sets_working_and_records_the_subtype() {
+            assert_eq!(
+                parse(r#"{"type":"system","subtype":"init","session_id":"s1"}"#),
+                vec![
+                    HeadlessEvent::Status(SessionStatus::Working),
+                    HeadlessEvent::RecentAction("system: init".to_string()),
+                ]
+            );
+        }
+
+        #[test]
+        fn assistant_line_records_each_block_in_order() {
+            let long = format!("{}{}", "a".repeat(120), "b".repeat(10));
+            let line = serde_json::json!({
+                "type": "assistant",
+                "message": {"content": [
+                    {"type": "text", "text": format!("  {long}  ")},
+                    {"type": "text", "text": "   "},
+                    {"type": "tool_use", "id": "t1", "name": "Read", "input": {}},
+                    {"type": "thinking", "thinking": "hmm"},
+                ]},
+            })
+            .to_string();
+            assert_eq!(
+                parse(&line),
+                vec![
+                    HeadlessEvent::RecentAction(format!("assistant: {}", "a".repeat(120))),
+                    HeadlessEvent::RecentAction("tool: Read".to_string()),
+                ]
+            );
+        }
+
+        #[test]
+        fn result_line_with_usage_reports_cost_and_tokens() {
+            let line = r#"{"type":"result","subtype":"success","total_cost_usd":0.25,
+                "usage":{"input_tokens":1200,"output_tokens":340}}"#;
+            assert_eq!(
+                parse(line),
+                vec![
+                    HeadlessEvent::Metrics {
+                        cost_usd: Some(0.25),
+                        input_tokens: Some(1200),
+                        output_tokens: Some(340),
+                    },
+                    HeadlessEvent::Status(SessionStatus::Stopped),
+                    HeadlessEvent::RecentAction("result: success".to_string()),
+                ]
+            );
+        }
+
+        #[test]
+        fn result_line_without_usage_reports_no_tokens() {
+            assert_eq!(
+                parse(r#"{"type":"result","subtype":"error_max_turns","total_cost_usd":0.5}"#),
+                vec![
+                    HeadlessEvent::Metrics {
+                        cost_usd: Some(0.5),
+                        input_tokens: None,
+                        output_tokens: None,
+                    },
+                    HeadlessEvent::Status(SessionStatus::Stopped),
+                    HeadlessEvent::RecentAction("result: error_max_turns".to_string()),
+                ]
+            );
+        }
+
+        #[test]
+        fn user_line_yields_nothing() {
+            assert_eq!(
+                parse(r#"{"type":"user","message":{"content":[]}}"#),
+                Vec::new()
+            );
+        }
+
+        #[test]
+        fn garbage_yields_nothing() {
+            assert_eq!(parse("not json at all"), Vec::new());
+        }
     }
 }

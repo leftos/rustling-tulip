@@ -6,4 +6,4 @@ A deterministic stand-in for the `claude` CLI the daemon spawns, so tests get a 
 
 `fake-claude.cmd` (Windows) and `fake-claude.sh` (POSIX) are shims that run `index.mjs` under `node`, forwarding every argument.
 
-Wire it in by setting `RUSTLING_TULIP_CLAUDE` to the shim's path; the daemon resolves the CLI from that variable at spawn time (`crates/daemon/src/agents/`). Node must be on `PATH`.
+Wire it in by setting `RUSTLING_TULIP_CLAUDE` to the shim's path; the daemon resolves the CLI from that variable at spawn time (`crates/agents/claude/src/lib.rs`). Node must be on `PATH`.

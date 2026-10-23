@@ -30,6 +30,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "agent-api"
+version = "0.1.1-alpha"
+dependencies = [
+ "protocol",
+]
+
+[[package]]
+name = "agent-claude"
+version = "0.1.1-alpha"
+dependencies = [
+ "agent-api",
+ "protocol",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "agent-registry"
+version = "0.1.1-alpha"
+dependencies = [
+ "agent-api",
+ "agent-claude",
+ "protocol",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1565,6 +1592,8 @@ checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 name = "daemon"
 version = "0.1.1-alpha"
 dependencies = [
+ "agent-api",
+ "agent-registry",
  "alacritty_terminal",
  "anyhow",
  "axum",

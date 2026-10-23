@@ -20,7 +20,6 @@ use super::connection::ConnCtx;
 use super::git::{active_sessions_using_worktree, worktree_in_use_failure};
 use super::sessions::{request_origin, write_meta_then_sync};
 use super::{Hub, StateEvent};
-use crate::agents::CommonSpawnFields;
 use crate::orphan::OrphanMeta;
 use crate::pty::PtySpawnSpec;
 use crate::registry::{
@@ -31,6 +30,7 @@ use crate::{
     env_secrets, headless, inject, orphan, osc_title, pty_state, screen, spawn_plan, tracer_client,
     user_env, workspace as ws,
 };
+use agent_api::SpawnContext;
 use anyhow::{Context as _, anyhow};
 use chrono::Utc;
 use directories::UserDirs;
@@ -249,7 +249,7 @@ where
     // before the rows are sealed and before any git work, so a refused spawn
     // writes nothing to the credential store and checks nothing out.
     let provider = request_provider(&req);
-    crate::agents::providers::check_request(req.mode, provider, &req.extra_env)?;
+    crate::providers::check_request(req.mode, provider, &req.extra_env)?;
     check_plain_shell_options(&req)?;
     // A secret row's literal moves into the credential store and becomes a
     // `${secret:<id>}` reference before anything captures the request, so the
@@ -291,7 +291,7 @@ where
         ));
     }
     reject_pin_without_worktree(&target)?;
-    let backend = crate::agents::backend_for(agent);
+    let backend = agent_registry::plugin(agent);
     if mode == SessionMode::Headless && !backend.supports_headless() {
         return Err(anyhow!(
             "headless mode is not yet supported for {}; use interactive mode",
@@ -305,7 +305,7 @@ where
     // The provider's routing variables and key join the child's environment
     // here, after `stored_config` was captured, so they are never stored; a
     // missing key refuses before any git work.
-    let env = crate::agents::providers::spawn_env(provider, &extra_env, &resolve)?;
+    let env = crate::providers::spawn_env(provider, &extra_env, &resolve)?;
 
     let t_resolve = std::time::Instant::now();
     let mut standalone_add_dirs = Vec::new();
@@ -511,7 +511,7 @@ pub(super) fn expected_output_subscribers(mode: SessionMode) -> usize {
 
 /// Per-spawn configuration bundled together to keep spawn-fn signatures narrow.
 /// The agent kind is carried inside `agent_options` — call
-/// `cfg.agent_options.agent()` to dispatch through [`crate::agents::backend_for`].
+/// `cfg.agent_options.agent()` to dispatch through [`agent_registry::plugin`].
 struct SpawnArgs {
     dangerously_skip_permissions: bool,
     /// Per-agent options. The variant tag doubles as the agent selector.
@@ -519,7 +519,7 @@ struct SpawnArgs {
     model: Option<String>,
     /// The child's environment: the keep-list, the resolved rows and the
     /// provider's routing variables. Never stored.
-    env: crate::agents::providers::SpawnEnv,
+    env: crate::providers::SpawnEnv,
     /// Scripted PTY input driven post-spawn for interactive sessions. When
     /// `Some`, the interactive spawn path omits the prompt CLI flag — the
     /// injector is responsible for delivering the prompt. Ignored by the
@@ -540,18 +540,18 @@ impl SpawnArgs {
         self.agent_options.agent()
     }
 
-    /// Build the borrowed [`CommonSpawnFields`] view backends consume.
-    fn common(&self) -> CommonSpawnFields<'_> {
-        CommonSpawnFields {
+    /// Build the borrowed [`SpawnContext`] view plugins consume.
+    fn common(&self) -> SpawnContext<'_> {
+        SpawnContext {
             dangerously_skip_permissions: self.dangerously_skip_permissions,
             model: self.model.as_deref(),
             has_prompt_injector: self.prompt_injector.is_some(),
-            claude_session_id: None,
+            conversation_id: None,
             resume_conversation: self.resume_conversation.as_deref(),
             add_dirs: &self.add_dirs,
             // Only `spawn_interactive_session` writes a settings file and
             // overrides this.
-            hook_settings: None,
+            settings_file: None,
         }
     }
 }
@@ -792,7 +792,7 @@ async fn spawn_interactive_session(
 ) -> anyhow::Result<protocol::SessionSnapshot> {
     let last_prompt = initial_prompt.clone();
     let agent = cfg.agent();
-    let backend = crate::agents::backend_for(agent);
+    let backend = agent_registry::plugin(agent);
     let raw_program = backend.resolve_program();
     let (program, prepend_args) = resolve_agent_program(&raw_program);
     // Claude gets a known conversation id so the session can be resumed with
@@ -806,9 +806,9 @@ async fn spawn_interactive_session(
     // argv is built. Only Claude takes it; a failure leaves this spawn on the
     // heuristic.
     let hook_settings = write_hook_settings(hub, &session_id, agent);
-    let common = CommonSpawnFields {
-        claude_session_id: claude_session_id.as_deref(),
-        hook_settings: hook_settings.as_ref().map(HookSettings::path),
+    let common = SpawnContext {
+        conversation_id: claude_session_id.as_deref(),
+        settings_file: hook_settings.as_ref().map(HookSettings::path),
         ..cfg.common()
     };
     let args = backend.build_interactive_args(
@@ -1158,7 +1158,7 @@ fn spawn_headless_session(
 ) -> anyhow::Result<protocol::SessionSnapshot> {
     // The dispatcher already rejects headless mode for backends that don't
     // support it; if we got here, the backend can build headless args.
-    let backend = crate::agents::backend_for(cfg.agent());
+    let backend = agent_registry::plugin(cfg.agent());
     debug_assert!(backend.supports_headless());
     let last_prompt = Some(prompt.clone());
     let args = backend.build_headless_args(&cfg.agent_options, &cfg.common(), &members, &prompt);
@@ -1671,7 +1671,7 @@ fn request_provider(request: &SpawnRequest) -> protocol::ClaudeProvider {
 }
 
 /// The checks behind [`check_spawn_request`]: the request must pass
-/// [`crate::agents::providers::check_request`], every secret row must be
+/// [`crate::providers::check_request`], every secret row must be
 /// sealable (see [`env_secrets::check_sealable`]), every reference
 /// resolvable through `resolve`, and the provider's key set.
 fn check_env_rows_with(
@@ -1681,10 +1681,10 @@ fn check_env_rows_with(
     provider: protocol::ClaudeProvider,
     resolve: impl Fn(&str) -> Option<(user_env::Secret, user_env::Origin)>,
 ) -> Result<(), spawn_plan::SpawnFailure> {
-    crate::agents::providers::check_request(mode, provider, rows)?;
+    crate::providers::check_request(mode, provider, rows)?;
     env_secrets::check_sealable(rows, secret_keys)?;
     resolve_env_refs(rows, &resolve)?;
-    crate::agents::providers::check_key(provider, &resolve)?;
+    crate::providers::check_key(provider, &resolve)?;
     Ok(())
 }
 
@@ -1856,7 +1856,7 @@ mod tests {
             dangerously_skip_permissions: false,
             agent_options: AgentOptions::claude(None),
             model: None,
-            env: crate::agents::providers::SpawnEnv::default(),
+            env: crate::providers::SpawnEnv::default(),
             prompt_injector: None,
             origin: None,
             resume_conversation: None,
@@ -1913,7 +1913,7 @@ mod tests {
             dangerously_skip_permissions: false,
             agent_options: AgentOptions::claude(None),
             model: None,
-            env: crate::agents::providers::SpawnEnv::default(),
+            env: crate::providers::SpawnEnv::default(),
             prompt_injector: Some(protocol::PromptInjector {
                 steps: vec![
                     protocol::InjectorStep::Delay { ms: 2000 },
@@ -3389,8 +3389,8 @@ mod tests {
         reject_pin_without_worktree(&target).expect_err("pin + in-place must not be accepted");
     }
 
-    // Per-agent argv builders + workspace-prelude tests live in the
-    // `crate::agents` submodules now.
+    // Per-agent argv builders + workspace-prelude tests live in the agent
+    // crates under `crates/agents/`.
 
     mod worktree_layout {
         use super::*;

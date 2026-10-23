@@ -8,10 +8,10 @@
 //! sessions are never written: a `claude --print` run has nothing to resume.
 //! Startup prunes entries older than [`HISTORY_RETENTION`].
 
-use crate::agents::providers;
 use crate::env_secrets::{self, SealOutcome};
 use crate::orphan;
 use crate::paths::{Dirs, normalize_path_key};
+use crate::providers;
 use crate::pty::PtyExit;
 use crate::session::{SessionRecord, SessionRegistry};
 use crate::sync::lock;

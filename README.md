@@ -9,6 +9,9 @@ crates/
   protocol/     - shared message types (daemon <-> client)
   daemon/       - long-lived background daemon (WS server, PTY pool, registry)
   daemon-client/ - client-side daemon supervision shared by the clients
+  agents/api/   - the agent plugin trait and its context types
+  agents/claude/ - the Claude plugin (argv, hook settings, stream-json parsing)
+  agents/registry/ - the compiled-in list of agent plugins
 apps/
   native/       - native desktop client (GPUI + alacritty_terminal)
 tools/
@@ -51,6 +54,7 @@ Start with [docs/architecture.md](docs/architecture.md) for how the pieces fit a
 - **Active account**: the Claude login in `.credentials.json` that every Anthropic Claude session on the machine uses; a switch changes it for all of them at once.
 - **Agent harness**: a terminal coding-agent CLI the daemon can spawn as a session's runtime (Claude Code today; the ones `docs/plans/agent-harnesses.md` plans return as plugins); its Tier A / B / C says whether its conversation id is chosen before launch, pre-created, or found after launch.
 - **Agent page / Agents category**: the Settings modal's `Agents` group row, a label with no page of its own, and the Claude page under it that holds the runtime's spawn defaults, such as Claude's approval mode and provider.
+- **Agent plugin**: a compiled-in crate under `crates/agents/` that implements `agent_api::AgentPlugin` for one agent (spawn argv, hook settings, headless stream parsing); the daemon reaches it through `agent_registry::plugin`, never by naming the agent.
 - **Agent skill pack**: the `rt-*` skills and the `rt-worker` agent under `agent-pack/`, installed into `~/.claude` so an agent can fan work out, review it and merge it.
 - **Attention feed**: the daemon's one stream of items that want the user (Needs you, Hand-off ready, Progress, Done, Fleet), shared by every client and the phone push, resolved everywhere at once; planned (RT-87, `docs/plans/off-orca.md`).
 - **Auth kind**: how a connection authenticates, `Local` (loopback, checked against the `daemon.json` token) or `Tailnet` (the admitted peer's identity, with the presented value read as its device token); it also decides which host-only messages the connection may send (`AuthKind` in `crates/daemon/src/server/connection.rs`).
@@ -121,7 +125,7 @@ Start with [docs/architecture.md](docs/architecture.md) for how the pieces fit a
 - **Preset wizard**: the native client's modal that walks a preset's prompt source and variables before launching it; see `docs/native-client.md`.
 - **Progress update**: an attention-feed item for a stop while work continues, or a summary of work in progress; shown in the feed, never pushed to the phone.
 - **Prompt source**: where a preset launch takes its prompts from: a prompts file, a folder of `.md` files, inline text or GitHub issue ranges, limited to the sources the preset allows.
-- **Provider table**: the daemon's built-in, not user-editable list of the environment variables each non-Anthropic provider sets, removes and locks (`crates/daemon/src/agents/providers.rs`).
+- **Provider table**: the daemon's built-in, not user-editable list of the environment variables each non-Anthropic provider sets, removes and locks (`crates/daemon/src/providers.rs`).
 - **Quarantine**: an account whose refresh token was rejected (`invalid_grant`), skipped until it is logged in again.
 - **Re-ask**: the native client resending a queued in-place spawn, unchanged, when its checkout prompt's turn comes, so the daemon answers with current numbers instead of the stale prompt being shown.
 - **Reached tests**: the tests a change's diff reaches through the test map, as one nextest filterset; `.\rt.ps1 test -Reached` runs them, and a central or unmapped file reaches the full suite instead.

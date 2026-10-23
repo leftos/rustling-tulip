@@ -20,6 +20,8 @@ workspace = true
 protocol = { workspace = true }
 tracer-protocol = { workspace = true }
 tailnet = { workspace = true }
+agent-api = { workspace = true }
+agent-registry = { workspace = true }
 
 serde = { workspace = true }
 serde_json = { workspace = true }
