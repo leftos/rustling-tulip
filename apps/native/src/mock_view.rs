@@ -3,6 +3,12 @@
 //!
 //! The child window paints above every GPUI layer, so the view holding the
 //! panel hides it whenever something is drawn over the panes.
+//!
+//! Building the webview runs a nested Win32 message pump, and creating,
+//! focusing away from or destroying the child sends messages to the GPUI
+//! window. Each of those runs in a foreground task holding no GPUI borrow,
+//! never inside a frame or an event handler, where the re-entered window
+//! procedure would find GPUI's state borrowed.
 
 use std::path::{Path, PathBuf};
 
@@ -30,18 +36,26 @@ pub(crate) struct MockPanel {
     path: PathBuf,
     /// `WebView2`'s user-data folder; `None` leaves wry's default.
     data_dir: Option<PathBuf>,
-    /// Dropped before the context it was built with.
+    /// Shared with the tasks that call it outside a frame.
     #[cfg(windows)]
-    webview: Option<wry::WebView>,
+    webview: Option<std::rc::Rc<wry::WebView>>,
+    /// Lent to the build task while it runs.
     #[cfg(windows)]
     web_context: Option<wry::WebContext>,
-    /// A page load failed; the next frame tries it again.
+    /// The URL the webview last tried to load; a frame whose page differs
+    /// (the page changed during the build) loads it.
     #[cfg(windows)]
-    pending_reload: bool,
-    /// The webview build was tried, so a failed one is not retried every
-    /// frame.
+    loaded_url: Option<String>,
+    /// The webview build was scheduled, so a failed one is not retried
+    /// every frame.
     #[cfg(windows)]
     build_tried: bool,
+    /// The visibility last sent to the webview.
+    #[cfg(windows)]
+    shown: bool,
+    /// The body's bounds at the last frame.
+    #[cfg(windows)]
+    bounds: Bounds<Pixels>,
     hidden: bool,
 }
 
@@ -64,9 +78,13 @@ impl MockPanel {
             #[cfg(windows)]
             web_context: None,
             #[cfg(windows)]
-            pending_reload: false,
+            loaded_url: None,
             #[cfg(windows)]
             build_tried: false,
+            #[cfg(windows)]
+            shown: false,
+            #[cfg(windows)]
+            bounds: Bounds::default(),
             hidden: false,
         }
     }
@@ -85,71 +103,74 @@ impl MockPanel {
     }
 
     /// Hides the webview while something is drawn over it, handing the
-    /// keyboard back to the window; the next frame shows it again.
-    pub(crate) fn set_hidden(&mut self, hidden: bool) {
+    /// keyboard back to the window, or shows it again.
+    pub(crate) fn set_hidden(&mut self, hidden: bool, cx: &mut Context<Self>) {
         self.hidden = hidden;
         #[cfg(windows)]
-        if hidden && let Some(webview) = &self.webview {
-            hide(webview);
+        self.sync_visibility(cx);
+        #[cfg(not(windows))]
+        let _ = cx;
+    }
+
+    /// Hides and destroys the webview after the current frame; the panel
+    /// is being closed.
+    pub(crate) fn release(&mut self, cx: &mut Context<Self>) {
+        #[cfg(windows)]
+        if let Some(webview) = self.webview.take() {
+            let context = self.web_context.take();
+            cx.spawn(async move |_, _| {
+                hide(&webview);
+                drop(webview);
+                drop(context);
+            })
+            .detach();
         }
+        #[cfg(not(windows))]
+        let _ = cx;
+    }
+
+    /// Gives the keyboard back to the window after the current event.
+    fn focus_parent_later(&self, cx: &mut Context<Self>) {
+        #[cfg(windows)]
+        if let Some(webview) = self.webview.clone() {
+            cx.spawn(async move |_, _| {
+                if let Err(err) = webview.focus_parent() {
+                    tracing::debug!("mock panel: returning focus to the window failed: {err}");
+                }
+            })
+            .detach();
+        }
+        #[cfg(not(windows))]
+        let _ = cx;
     }
 }
 
+/// What the build task needs, taken out of the panel so the build holds
+/// no GPUI borrow.
 #[cfg(windows)]
-impl MockPanel {
-    fn load_current(&mut self) {
-        let Some(webview) = &self.webview else {
-            return;
-        };
-        self.pending_reload = false;
-        if let Err(err) = webview.load_url(&file_url(&self.path)) {
-            tracing::warn!(
-                "mock panel for session {}: loading {} failed: {err}",
-                self.session_id,
-                self.path.display()
-            );
-            self.pending_reload = true;
-        }
-    }
+struct BuildJob {
+    session_id: String,
+    url: String,
+    rect: wry::Rect,
+    parent: ParentWindow,
+    context: wry::WebContext,
+}
 
-    /// Builds the webview on the first frame with a real window, then fits
-    /// it to `bounds` every frame.
-    fn place(&mut self, bounds: Bounds<Pixels>, window: &Window) {
-        let rect = logical_rect(bounds);
-        if self.webview.is_none() && !self.build_tried {
-            self.build_tried = true;
-            self.webview = self.build(rect, window);
-        }
-        if self.pending_reload {
-            self.load_current();
-        }
-        let Some(webview) = &self.webview else {
-            return;
-        };
-        if let Err(err) = webview.set_bounds(rect) {
-            tracing::debug!("mock panel: setting the webview's bounds failed: {err}");
-        }
-        if let Err(err) = webview.set_visible(!self.hidden) {
-            tracing::debug!("mock panel: setting the webview's visibility failed: {err}");
-        }
-    }
-
-    fn build(&mut self, rect: wry::Rect, window: &Window) -> Option<wry::WebView> {
-        let parent = ParentWindow::of(window)?;
-        let data_dir = self.data_dir.clone();
-        let context = self
-            .web_context
-            .get_or_insert_with(|| wry::WebContext::new(data_dir));
-        let built = wry::WebViewBuilder::new_with_web_context(context)
-            .with_url(file_url(&self.path))
-            .with_bounds(rect)
-            .build_as_child(&parent);
-        match built {
+#[cfg(windows)]
+impl BuildJob {
+    /// Builds the webview; `build_as_child` pumps messages until `WebView2`'s
+    /// environment and controller exist.
+    fn run(mut self) -> (wry::WebContext, String, Option<wry::WebView>) {
+        let built = wry::WebViewBuilder::new_with_web_context(&mut self.context)
+            .with_url(self.url.as_str())
+            .with_bounds(self.rect)
+            .build_as_child(&self.parent);
+        let webview = match built {
             Ok(webview) => {
                 tracing::info!(
                     "mock panel for session {}: webview built for {}",
                     self.session_id,
-                    self.path.display()
+                    self.url
                 );
                 Some(webview)
             }
@@ -160,24 +181,119 @@ impl MockPanel {
                 );
                 None
             }
-        }
-    }
-
-    fn focus_parent(&self) {
-        if let Some(webview) = &self.webview
-            && let Err(err) = webview.focus_parent()
-        {
-            tracing::debug!("mock panel: returning focus to the window failed: {err}");
-        }
+        };
+        (self.context, self.url, webview)
     }
 }
 
 #[cfg(windows)]
-impl Drop for MockPanel {
-    fn drop(&mut self) {
-        if let Some(webview) = self.webview.take() {
-            hide(&webview);
+impl MockPanel {
+    fn load_current(&mut self) {
+        let Some(webview) = &self.webview else {
+            return;
+        };
+        let url = file_url(&self.path);
+        if let Err(err) = webview.load_url(&url) {
+            tracing::warn!(
+                "mock panel for session {}: loading {url} failed: {err}",
+                self.session_id
+            );
         }
+        // A failed load is not retried every frame; the next `show` tries again.
+        self.loaded_url = Some(url);
+    }
+
+    /// Records the body's bounds each frame, schedules the build on the
+    /// first frame with a real window, and fits a built webview to the
+    /// bounds.
+    fn place(&mut self, bounds: Bounds<Pixels>, window: &Window, cx: &mut Context<Self>) {
+        self.bounds = bounds;
+        if self.webview.is_none() && !self.build_tried {
+            self.build_tried = true;
+            if let Some(parent) = ParentWindow::of(window) {
+                Self::schedule_build(parent, cx);
+            }
+        }
+        if self.webview.is_some() && self.loaded_url.as_deref() != Some(&file_url(&self.path)) {
+            self.load_current();
+        }
+        let Some(webview) = &self.webview else {
+            return;
+        };
+        if let Err(err) = webview.set_bounds(logical_rect(bounds)) {
+            tracing::debug!("mock panel: setting the webview's bounds failed: {err}");
+        }
+        self.sync_visibility(cx);
+    }
+
+    fn schedule_build(parent: ParentWindow, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let job = this.update(cx, |panel, _| panel.build_job(parent));
+            let Ok(job) = job else {
+                tracing::debug!("mock panel: closed before its webview was built");
+                return;
+            };
+            let built = job.run();
+            if let Err(err) = this.update(cx, |panel, cx| panel.finish_build(built, cx)) {
+                tracing::debug!("mock panel: closed while its webview was built: {err}");
+            }
+        })
+        .detach();
+    }
+
+    fn build_job(&mut self, parent: ParentWindow) -> BuildJob {
+        let data_dir = self.data_dir.clone();
+        BuildJob {
+            session_id: self.session_id.clone(),
+            url: file_url(&self.path),
+            rect: logical_rect(self.bounds),
+            parent,
+            context: self
+                .web_context
+                .take()
+                .unwrap_or_else(|| wry::WebContext::new(data_dir)),
+        }
+    }
+
+    fn finish_build(
+        &mut self,
+        (context, url, webview): (wry::WebContext, String, Option<wry::WebView>),
+        cx: &mut Context<Self>,
+    ) {
+        self.web_context = Some(context);
+        let Some(webview) = webview else {
+            return;
+        };
+        self.webview = Some(std::rc::Rc::new(webview));
+        // Built visible; a hide asked for during the build goes out now.
+        self.shown = true;
+        self.loaded_url = Some(url);
+        self.sync_visibility(cx);
+        cx.notify();
+    }
+
+    /// Sends a change of visibility to the webview after the current
+    /// frame: hiding gives the keyboard back to the window, which sends
+    /// it a focus message.
+    fn sync_visibility(&mut self, cx: &mut Context<Self>) {
+        let visible = !self.hidden;
+        let Some(webview) = self.webview.clone() else {
+            return;
+        };
+        if self.shown == visible {
+            return;
+        }
+        self.shown = visible;
+        cx.spawn(async move |_, _| {
+            if visible {
+                if let Err(err) = webview.set_visible(true) {
+                    tracing::warn!("mock panel: showing the webview failed: {err}");
+                }
+            } else {
+                hide(&webview);
+            }
+        })
+        .detach();
     }
 }
 
@@ -206,10 +322,10 @@ fn logical_rect(bounds: Bounds<Pixels>) -> wry::Rect {
     }
 }
 
-/// The GPUI window's Win32 handle, owned so the webview can be built from
-/// it without borrowing the window.
+/// The GPUI window's raw HWND, taken during a frame and handed to the
+/// build task, which builds the webview from it without the window.
 #[cfg(windows)]
-struct ParentWindow(raw_window_handle::Win32WindowHandle);
+struct ParentWindow(std::num::NonZeroIsize);
 
 #[cfg(windows)]
 impl ParentWindow {
@@ -224,7 +340,7 @@ impl ParentWindow {
         }
         // `Window::window_handle` is gpui's own handle; the raw one is the trait's.
         match HasWindowHandle::window_handle(window).map(|handle| handle.as_raw()) {
-            Ok(RawWindowHandle::Win32(handle)) => Some(Self(handle)),
+            Ok(RawWindowHandle::Win32(handle)) => Some(Self(handle.hwnd)),
             other => {
                 tracing::warn!("mock panel: the window has no Win32 handle ({other:?})");
                 None
@@ -238,9 +354,11 @@ impl raw_window_handle::HasWindowHandle for ParentWindow {
     fn window_handle(
         &self,
     ) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
-        let raw = raw_window_handle::RawWindowHandle::Win32(self.0);
-        // SAFETY: the handle is the live GPUI window's, read this frame, and
-        // the borrow ends with the `build_as_child` call that takes it.
+        let handle = raw_window_handle::Win32WindowHandle::new(self.0);
+        let raw = raw_window_handle::RawWindowHandle::Win32(handle);
+        // SAFETY: the HWND is the GPUI window's, which lives as long as the
+        // app's only window; the borrow ends with the `build_as_child` call
+        // that takes it.
         Ok(unsafe { raw_window_handle::WindowHandle::borrow_raw(raw) })
     }
 }
@@ -289,7 +407,7 @@ impl Render for MockPanel {
     }
 }
 
-/// The panel's body: places the webview over its bounds every frame and
+/// The panel's body: records its bounds for the webview every frame and
 /// blocks the mouse from what is drawn behind it.
 struct MockBody {
     panel: Entity<MockPanel>,
@@ -341,7 +459,7 @@ impl Element for MockBody {
     ) -> Self::PrepaintState {
         #[cfg(windows)]
         self.panel
-            .update(cx, |panel, _| panel.place(bounds, window));
+            .update(cx, |panel, cx| panel.place(bounds, window, cx));
         #[cfg(not(windows))]
         let _ = cx;
         window.insert_hitbox(bounds, HitboxBehavior::BlockMouse);
@@ -360,10 +478,7 @@ impl Element for MockBody {
         let panel = self.panel.clone();
         window.on_mouse_event(move |event: &MouseDownEvent, phase, _, cx| {
             if phase == DispatchPhase::Capture && !bounds.contains(&event.position) {
-                #[cfg(windows)]
-                panel.read(cx).focus_parent();
-                #[cfg(not(windows))]
-                let _ = (&panel, cx);
+                panel.update(cx, |panel, cx| panel.focus_parent_later(cx));
             }
         });
     }
@@ -372,6 +487,7 @@ impl Element for MockBody {
 /// The `file://` URL of an absolute path: forward slashes, and every byte
 /// outside the unreserved set, `/` and `:` percent-encoded.
 pub(crate) fn file_url(path: &Path) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let text = path.to_string_lossy().replace('\\', "/");
     let mut url = String::from(if text.starts_with('/') {
         "file://"
@@ -382,7 +498,6 @@ pub(crate) fn file_url(path: &Path) -> String {
         if byte.is_ascii_alphanumeric() || b"-._~/:".contains(&byte) {
             url.push(char::from(byte));
         } else {
-            const HEX: &[u8; 16] = b"0123456789ABCDEF";
             url.push('%');
             url.push(char::from(HEX[usize::from(byte >> 4)]));
             url.push(char::from(HEX[usize::from(byte & 0x0f)]));
@@ -413,7 +528,9 @@ impl RootView {
                 &panel,
                 move |this, _, event: &MockPanelEvent, cx| match event {
                     MockPanelEvent::Close => {
-                        this.mock_panels.remove(&key);
+                        if let Some(panel) = this.mock_panels.remove(&key) {
+                            panel.update(cx, MockPanel::release);
+                        }
                         cx.notify();
                     }
                 },
