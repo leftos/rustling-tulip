@@ -1563,7 +1563,7 @@ checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 
 [[package]]
 name = "daemon"
-version = "0.1.0-alpha"
+version = "0.1.1-alpha"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -1606,7 +1606,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-client"
-version = "0.1.0-alpha"
+version = "0.1.1-alpha"
 dependencies = [
  "anyhow",
  "directories",
@@ -4657,7 +4657,7 @@ dependencies = [
 
 [[package]]
 name = "protocol"
-version = "0.1.0-alpha"
+version = "0.1.1-alpha"
 dependencies = [
  "chrono",
  "serde",
@@ -5274,7 +5274,7 @@ dependencies = [
 
 [[package]]
 name = "rustling-tulip-native"
-version = "0.1.0-alpha"
+version = "0.1.1-alpha"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -6239,7 +6239,7 @@ dependencies = [
 
 [[package]]
 name = "tailnet"
-version = "0.1.0-alpha"
+version = "0.1.1-alpha"
 dependencies = [
  "serde",
  "serde_json",
@@ -6683,7 +6683,7 @@ checksum = "8df9b6e13f2d32c91b9bd719c00d1958837bc7dec474d94952798cc8e69eeec3"
 
 [[package]]
 name = "tracer"
-version = "0.1.0-alpha"
+version = "0.1.1-alpha"
 dependencies = [
  "anyhow",
  "base64",
@@ -6703,7 +6703,7 @@ dependencies = [
 
 [[package]]
 name = "tracer-protocol"
-version = "0.1.0-alpha"
+version = "0.1.1-alpha"
 dependencies = [
  "hmac",
  "serde",
