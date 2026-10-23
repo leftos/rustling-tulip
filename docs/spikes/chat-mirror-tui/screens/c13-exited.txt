@@ -1,0 +1,7 @@
+PS C:\Users\lefto\AppData\Local\Temp\claude\X--dev-rustling-tulip\2d069daa-1f0f-43ac-84d8-a6a2a11ed017\scratchpad\lab\cui> cui --settin
+gs "C:\Users\lefto\AppData\Local\Temp\claude\X--dev-rustling-tulip\2d069daa-1f0f-43ac-84d8-a6a2a11ed017\scratchpad\lab\tools\hooks-cui.
+json" --session-id b4a120fa-153b-48f3-a0a6-329467b0adc8
+
+Resume this session with:
+claude --resume b4a120fa-153b-48f3-a0a6-329467b0adc8
+PS C:\Users\lefto\AppData\Local\Temp\claude\X--dev-rustling-tulip\2d069daa-1f0f-43ac-84d8-a6a2a11ed017\scratchpad\lab\cui>

@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chat mirror choices</title>
+<style>
+:root{--ground:#111013;--surface:#1B1A1F;--raised:#232129;--chip:#2A2830;--line:#3A3742;--text:#EDE9E4;--muted:#A7A2AD;--faint:#8C8794;--coral:#F07A62;--amber:#F6BC4E;--blue:#6CA6FF;--green:#4FC89D}
+*{box-sizing:border-box}
+body{margin:0;background:var(--ground);color:var(--text);font:14px/1.45 'Schibsted Grotesk','Segoe UI Variable','Segoe UI',system-ui,sans-serif;padding:24px 16px}
+h1{font-size:20px;margin:0 0 4px}
+.lead{color:var(--muted);margin:0 0 24px;max-width:900px}
+section{margin:0 0 36px}
+h2{font-size:16px;margin:0 0 4px}
+.q{color:var(--muted);margin:0 0 14px;max-width:1000px}
+.lanes{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:14px}
+.lane{background:var(--surface);border:1px solid var(--line);border-radius:14px;overflow:hidden;display:flex;flex-direction:column}
+.lane>header{padding:10px 14px;background:var(--raised);border-bottom:1px solid var(--line);font-weight:600}
+.lane>header small{display:block;font-weight:400;color:var(--muted)}
+.chat{padding:12px 14px;display:flex;flex-direction:column;gap:8px;flex:1}
+.u{align-self:flex-end;background:var(--chip);border-radius:10px;padding:6px 10px;max-width:80%}
+.a{color:var(--text)}
+.tool{font:12px/1.4 'Cascadia Mono',Consolas,monospace;color:var(--muted);border:1px solid var(--line);border-radius:8px;padding:5px 8px}
+.tool b{color:var(--green);font-weight:400}
+.sys{align-self:center;color:var(--faint);font-size:12px;border:1px dashed var(--line);border-radius:999px;padding:2px 10px}
+.card{border:1px solid var(--amber);border-radius:10px;padding:10px;background:#2A2416}
+.card .t{font-weight:600;margin-bottom:6px}
+.card code{font:12px 'Cascadia Mono',Consolas,monospace;background:var(--ground);padding:2px 6px;border-radius:5px;display:block;margin-bottom:8px}
+.opt{display:flex;gap:8px;align-items:center;border:1px solid var(--line);border-radius:8px;padding:5px 8px;margin-top:5px;font-size:13px}
+.opt kbd{font:11px 'Cascadia Mono',monospace;border:1px solid var(--line);border-radius:4px;padding:0 5px;color:var(--muted)}
+.opt.primary{border-color:var(--coral)}
+.btns{display:flex;gap:6px;flex-wrap:wrap}
+.btn{border:1px solid var(--line);border-radius:8px;padding:4px 10px;font-size:13px}
+.btn.primary{border-color:var(--coral);color:var(--coral)}
+.btn.danger{border-color:#c0584a;color:#e88}
+.composer{border-top:1px solid var(--line);padding:10px 14px;background:var(--raised)}
+.box{border:1px solid var(--line);border-radius:10px;padding:8px 10px;color:var(--text);min-height:36px}
+.box.off{opacity:.45}
+.hint{color:var(--faint);font-size:12px;margin-top:5px}
+.stream{border-left:2px solid var(--blue);padding-left:8px}
+.stream .cur{display:inline-block;width:7px;height:14px;background:var(--blue);vertical-align:-2px}
+.ph{color:var(--muted);font-style:italic}
+.ghost{color:var(--faint)}
+.notice{border:1px solid var(--blue);border-radius:10px;padding:8px 10px;background:#18202E}
+.tag{font-size:11px;color:var(--faint)}
+</style>
+</head>
+<body>
+<h1>Chat mirror: three calls</h1>
+<p class="lead">From the TUI spike (docs/spikes/chat-mirror-tui.md). Each lane is one way the chat could behave; the terminal of the same session stays open beside it.</p>
+
+<section id="q1">
+<h2>1 · The composer while the terminal shows a permission dialog</h2>
+<p class="q">Typing into the PTY while a dialog is up drops the text and the Enter approves the tool. Claude is waiting on <code>python -c "print(456)"</code>; the user types "use python3 instead" in the chat.</p>
+<div class="lanes">
+ <div class="lane"><header>A · Composer locked<small>The card must be answered first</small></header>
+  <div class="chat"><div class="u">Run the calc check</div><div class="tool"><b>$</b> python -c "print(456)" · waiting</div>
+   <div class="card"><div class="t">Bash command needs approval</div><code>python -c "print(456)"</code><div class="btns"><span class="btn primary">Yes</span><span class="btn">Always: python *</span><span class="btn danger">No</span></div></div></div>
+  <div class="composer"><div class="box off">Answer the card above to send a message</div></div></div>
+ <div class="lane"><header>B · Message becomes the answer's note<small>Sent as Tab-amend, or as "No" with the note</small></header>
+  <div class="chat"><div class="u">Run the calc check</div><div class="tool"><b>$</b> python -c "print(456)" · waiting</div>
+   <div class="card"><div class="t">Bash command needs approval</div><code>python -c "print(456)"</code><div class="btns"><span class="btn primary">Yes</span><span class="btn">Always: python *</span><span class="btn danger">No</span></div></div></div>
+  <div class="composer"><div class="box">use python3 instead</div><div class="btns" style="margin-top:6px"><span class="btn primary">Yes, and tell Claude this</span><span class="btn danger">No, and tell Claude this</span></div></div></div>
+ <div class="lane"><header>C · Message waits for the dialog<small>Held by the daemon, typed once the dialog closes</small></header>
+  <div class="chat"><div class="u">Run the calc check</div><div class="tool"><b>$</b> python -c "print(456)" · waiting</div>
+   <div class="card"><div class="t">Bash command needs approval</div><code>python -c "print(456)"</code><div class="btns"><span class="btn primary">Yes</span><span class="btn">Always: python *</span><span class="btn danger">No</span></div></div>
+   <div class="u ghost">use python3 instead <span class="tag">· waiting for the card</span></div></div>
+  <div class="composer"><div class="box"></div><div class="hint">1 message waits until the card is answered</div></div></div>
+</div></section>
+
+<section id="q2">
+<h2>2 · A long answer while Claude is still writing it</h2>
+<p class="q">The terminal shows only the spinner until the whole message is done (~25 s for 40 lines). The MessageDisplay hook gives each line as it is written.</p>
+<div class="lanes">
+ <div class="lane"><header>A · Stream lines as they come<small>Chat runs ahead of the terminal</small></header>
+  <div class="chat"><div class="u">40 fruit facts, one line each</div><div class="a stream">1. Bananas are berries, botanically speaking.<br>2. Strawberries are not true berries.<br>3. Tomatoes are fruits, botanically speaking.<br>4. Apples float: a quarter of their volume is air. <span class="cur"></span></div><div class="tag">writing · 4 lines</div></div>
+  <div class="composer"><div class="box"></div></div></div>
+ <div class="lane"><header>B · Match the terminal<small>A placeholder, the full answer at the end</small></header>
+  <div class="chat"><div class="u">40 fruit facts, one line each</div><div class="a ph">Writing… 17s · ↓ 1.2k tokens</div></div>
+  <div class="composer"><div class="box"></div></div></div>
+</div></section>
+
+<section id="q3">
+<h2>3 · Turns nobody typed, and the Heads up notice</h2>
+<p class="q">A subagent's hand-back, a finished background shell and a <code>!</code> command each start a turn on their own; the side checker can raise a Heads up notice above the box.</p>
+<div class="lanes">
+ <div class="lane"><header>A · Quiet system rows, notice pinned over the composer</header>
+  <div class="chat"><div class="a">Both agents are running; I'll report when they finish.</div><div class="sys">Agent "Summarize README.md" finished · 11s</div><div class="a">The README agent is done: it describes a tiny calculator.</div><div class="sys">Background command finished · exit 0</div><div class="a">All three jobs are finished.</div></div>
+  <div class="composer"><div class="notice"><b>✦ Heads up</b> · One of the notes says a nightly cleanup task wipes the X: drive.<div class="btns" style="margin-top:6px"><span class="btn">Learn more</span><span class="btn">Knew this already</span><span class="btn">Dismiss</span></div></div><div class="box" style="margin-top:8px"></div></div></div>
+ <div class="lane"><header>B · Shown as messages, notice inline in the chat</header>
+  <div class="chat"><div class="a">Both agents are running; I'll report when they finish.</div><div class="u" style="background:#1E2433">🤖 Summarize README.md: README.md describes "calc", a tiny calculator.</div><div class="a">The README agent is done: it describes a tiny calculator.</div><div class="u" style="background:#1E2433">⚙ Background command "Sleep 45 s" completed (exit 0)</div><div class="a">All three jobs are finished.</div><div class="notice"><b>✦ Heads up</b> · One of the notes says a nightly cleanup task wipes the X: drive.<div class="btns" style="margin-top:6px"><span class="btn">Learn more</span><span class="btn">Knew this already</span><span class="btn">Dismiss</span></div></div></div>
+  <div class="composer"><div class="box"></div></div></div>
+</div></section>
+</body>
+</html>

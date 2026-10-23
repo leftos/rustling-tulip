@@ -1,0 +1,10 @@
+17:42:27.935 done | ✳ add-div-with-zero-test
+17:42:28.907 working | ◐ add-div-with-zero-test
+17:42:29.731 working | ◑ add-div-with-zero-test
+17:42:30.561 working | ◐ add-div-with-zero-test
+17:42:31.664 working | ◑ add-div-with-zero-test
+17:42:32.488 working | ◐ add-div-with-zero-test
+17:42:33.602 working | ◑ add-div-with-zero-test
+17:42:34.426 working | ◐ add-div-with-zero-test
+17:42:35.012 blocked | ✳ add-div-with-zero-test
+17:42:43.118 done | ✳ add-div-with-zero-test

@@ -1,0 +1,74 @@
+│  10. Lemon juice is about 5 to 6 percent citric acid.                                                                               │
+│  11. Durian is banned on Singapore's public transit because of its smell.                                                           │
+│  12. One pomegranate can hold hundreds of seeds.                                                                                    │
+│  13. Watermelon is about 92 percent water.                                                                                          │
+│  14. A grape cut almost in half can make plasma in a microwave.                                                                     │
+│  15. A fig is an inverted cluster of flowers.                                                                                       │
+│  16. A coconut is a drupe, not a true nut.                                                                                          │
+│  17. Peaches and almonds are close relatives in the genus Prunus.                                                                   │
+│  18. The mango is India's national fruit.                                                                                           │
+│  19. The cashew nut grows from the bottom of a fruit called the cashew apple.                                                       │
+│  20. Bananas are slightly radioactive because of potassium-40.                                                                      │
+│  21. Anthocyanins give blueberries their blue color.                                                                                │
+│  22. In English, the color orange was named after the fruit.                                                                        │
+│  23. Most bananas sold worldwide are the Cavendish variety.                                                                         │
+│  24. Jackfruit is the largest tree-borne fruit and can weigh over 50 kg.                                                            │
+│  25. Apples belong to the rose family.                                                                                              │
+│  26. Pears are picked unripe and ripen off the tree.                                                                                │
+│  27. Papaya contains papain, an enzyme used to tenderize meat.                                                                      │
+│  28. Pineapple contains bromelain, an enzyme that breaks down protein.                                                              │
+│  29. Grapefruit interacts with many medications.                                                                                    │
+│  30. People have grown dates for more than 6,000 years.                                                                             │
+│  31. Olives are fruits.                                                                                                             │
+│  32. Prunes are dried plums.                                                                                                        │
+│  33. Bell peppers are fruits, botanically speaking.                                                                                 │
+│  34. Seedless watermelons are triploid hybrids.                                                                                     │
+│  35. Miracle fruit makes sour foods taste sweet.                                                                                    │
+│  36. Star fruit can be dangerous for people with kidney disease.                                                                    │
+│  37. Cucumbers are fruits, botanically speaking.                                                                                    │
+│  38. Apple seeds contain amygdalin, which can release cyanide when digested.                                                        │
+│  39. Clementines are a cross between a mandarin and a sweet orange.                                                                 │
+│  40. Bananas give off ethylene gas, which speeds up ripening in nearby fruit.                                                       │
+│                                                                                                                                     │
+│  Botanically, many foods we call vegetables are fruits.                                                                             │
+│                                                                                                                                     │
+╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+──── Worked for 24s ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────…
+
+
+  Run this exact Bash command: python -c "print(123)"
+
+[$ 1 ran]
+
+╭─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                                                     │
+│  It printed 123.                                                                                                                    │
+│                                                                                                                                     │
+╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+──── Churned for 8s ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────…
+
+
+  Think briefly, then run this exact Bash command: python -c "print(456)"
+
+[$ 1 stopped ⏸]
+──── Crunched for 6s ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────…
+
+
+  Use AskUserQuestion once: one single-choice question "Pick a color" with options red, green.
+
+
+• ⏸
+
+● User declined to answer questions
+  ⎿  · Pick a color (red / green)
+──── Crunched for 3s ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────…
+
+  2 tasks (0 done, 2 open)
+  ◻ check div
+  ◻ write docs
+                                                                                                                     ● high · /effort
+────────────────────────────────────────────────────────────────────────────────────────────────────────────── add-div-with-zero-test ─
+❯
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ctx:  13%  |  sub: 5h  39% (3h35m) · 7d  86% / F   0% (5d16h)  |  ds: $  17.40  |  X: 252G free  |  Opus 5.5  |  master*  |  C:\Us…
+  ⏸ manual mode on · ← 2 agents

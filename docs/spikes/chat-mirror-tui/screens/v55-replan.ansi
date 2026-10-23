@@ -1,0 +1,74 @@
+
+[0m[38;2;153;153;153m  ⎿  /plan to preview[0m
+[0m[38;2;177;185;249m▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔[0m
+
+  [0m[38;2;72;150;140m───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+   [0m[1m[38;2;177;185;249mReady to code?[0m 
+     
+   Here is Claude's plan:
+  [0m[38;2;80;80;80m╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌[0m
+   [0m[1m[3m[4mAdd div to calc.py[0m
+
+   1. [0m[1mContext: [0madd a plain [0m[38;2;177;185;249mdiv(a, b) [0mto [0m[38;2;177;185;249mcalc.py [0m(the user asked for it, keep it simple) along with two tests: a basic division and
+      division by zero.
+   2. [0m[1mcalc.py:[0m add [0m[38;2;177;185;249mdef div(a, b): return a / b[0m after [0m[38;2;177;185;249mmul[0m, with two blank lines between them and no type hints. Division by zero
+      raises Python's own [0m[38;2;177;185;249mZeroDivisionError[0m.
+   3. [0m[1mtest_calc.py (new):[0m [0m[38;2;177;185;249mimport pytest [0mand [0m[38;2;177;185;249mfrom calc import div[0m, then two tests: [0m[38;2;177;185;249mtest_div[0m, which asserts [0m[38;2;177;185;249mdiv(6, 3) == 2[0m, and
+      [0m[38;2;177;185;249mtest_div_by_zero_raises[0m, which uses [0m[38;2;177;185;249mwith pytest.raises(ZeroDivisionError): div(1, 0)[0m.
+   4. [0m[1mVerify:[0m run [0m[38;2;177;185;249mpython -m pytest test_calc.py -q[0m. Both tests should pass. Then break [0m[38;2;177;185;249mdiv[0m to show each test can fail, and put the
+      code back with the inverse Edit.
+   5. [0m[1mNo commit[0m unless the user asks. [0m[38;2;177;185;249mnotes.txt[0m stays as it is.
+  [0m[38;2;80;80;80m╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌[0m
+
+
+     
+     
+
+
+
+  
+  
+
+  
+  
+
+  
+
+
+
+
+
+
+
+
+
+
+     
+     
+     
+     
+     
+     
+     
+     
+     
+  
+     
+ 
+     
+
+
+
+
+
+
+
+  [0m[38;2;72;150;140m───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+   [0m[38;2;153;153;153mClaude has written up a plan and is ready to execute. Would you like to proceed?[0m
+
+   [0m[38;2;177;185;249m❯ [0m[38;2;153;153;153m1. [0m[38;2;177;185;249mYes, and use auto mode[0m
+     [0m[38;2;153;153;153m2. [0mYes, manually approve edits
+     [0m[38;2;153;153;153m3. Tell Claude what to change[0m
+        [0m[38;2;153;153;153mshift+tab to approve with this feedback[0m
+
+   [0m[38;2;153;153;153mctrl+g to edit in Notepad · ~\.claude\plans\effervescent-dazzling-locket.md[0m

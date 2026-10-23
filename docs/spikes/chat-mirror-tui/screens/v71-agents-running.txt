@@ -1,0 +1,74 @@
+       6 def test_div():
+       7     assert div(6, 3) == 2
+       8
+       9
+      10 def test_div_by_zero_raises():
+     … +2 lines
+
+❯ when you finish, also tell me how many lines calc.py has
+
+  Ran 1 shell command
+
+❯ and a second queued message
+
+  Ran 1 shell command
+
+● Now break div to confirm both tests can fail.
+
+● Update(calc.py)
+  ⎿  Added 1 line, removed 1 line
+       7
+       8
+       9  def div(a, b):
+      10 -    return a / b
+      10 +    return a * b
+      11
+
+  Ran 1 shell command
+
+● Both tests fail as expected. Now I'll undo the change with the inverse edit and check it.
+
+● Update(calc.py)
+  ⎿  Added 1 line, removed 1 line
+       7
+       8
+       9  def div(a, b):
+      10 -    return a * b
+      10 +    return a / b
+      11
+
+  Read 1 file, ran 3 shell commands
+⏺ I added div(a, b) to calc.py and wrote two tests in a new test_calc.py. Both tests pass. calc.py now has 11 lines.
+
+  - Tests: test_div checks div(6, 3) == 2, and test_div_by_zero_raises checks for ZeroDivisionError.
+  - pytest: it isn't installed here,
+  - Nothing committed: the run left an untracked .tmp/ folder.
+
+  Your second queued message didn't ask for anything, so I took no action on it.
+
+✻ Baked for 1m 18s · done 5:27 PM · 1 shell still running
+
+❯ Do three things in parallel in one message: (a) start a background Bash command with run_in_background: python -c "import time;
+  time.sleep(45); print(42)"; (b) launch two general-purpose subagents in parallel, one to count the lines of every .py file here and
+  one to summarize README.md, each told to reply in one sentence; (c) create two tasks with TaskCreate: "check div" and "write docs".
+  Then wait for the agents and the background command and report.
+
+  Ran 1 shell command
+
+● 2 background agents launched (↓ to manage)
+   ├ Count lines in .py files
+   └ Summarize README.md
+
+· Cooking… (21s · ↓ 1.1k tokens)
+  ⎿  ◻ check div
+     ◻ write docs
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────── add-div-function-tests ─
+❯
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ctx:  11%  |  sub: 5h  36% (3h50m) · 7d  85% / F   0% (5d16h)  |  ds: $  17.40  |  X: 252G free  |  Opus 5.5  |  master*  |  C:\Us…
+  ⏵⏵ auto mode on · 1 shell · ← 2 agents
+
+  ● main
+  ◯ general-purpose  Count lines in .py files                                                                     5s · ↓ 61.1k tokens
+  ◯ general-purpose  Summarize README.md                                                                          5s · ↓ 61.1k tokens
