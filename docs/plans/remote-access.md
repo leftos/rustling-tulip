@@ -56,7 +56,7 @@ Hotspot items (touching `crates/protocol/src/lib.rs` or `crates/daemon/src/serve
 | P6.2a | Remote-mode rules: local-file actions disabled with a reason, quit only disconnects, Stop, handshake and `daemon.log` hidden, Reconnect label, the capability table. Landed on main (RT-151) | no | P6.1 |
 | P6.2b | The typed host path in place of the pickers on a remote host (RT-257) | no | P6.2a |
 | P6.3 | Host picker from the tailnet's machines, a typed-name fallback, boot reconnect | no | P6.1, P6.2a |
-| P6.4 | Host Settings: Remote access (Tailscale) panel | no | TS.4 |
+| P6.4 | Host Settings: Remote access (Tailscale) panel. Landed on main (RT-154) | no | TS.4 |
 | P6.5 | Autostart: start the daemon on login | no | none |
 | P6.6 | Remote tests over a fake Tailscale, the hand checklist, and the docs pass | no | all of the above |
 | P6.7 | Cutover: installer (no firewall rule, per RT-157) | no | P6.5 |

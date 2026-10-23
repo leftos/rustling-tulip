@@ -25,7 +25,7 @@ use protocol::{
 use rustling_tulip_native::{
     Activity, Clock, Connection, ContainerKind, FileFilter, FilePicker, FolderPicker,
     HandshakeInfo, NetCommand, NetDeps, NetEvent, Notifier, NotifyState, OpenFailure, Opener,
-    QuitFn, RootDeps, RootView, ScPanel, bind_keys, spawn_net,
+    QuitFn, RootDeps, RootView, ScPanel, bind_keys, remote_access::Autostart, spawn_net,
 };
 use serde_json::{Value, json};
 
@@ -676,6 +676,8 @@ pub struct Harness<'a> {
     notifier: Arc<NotifyRecorder>,
     /// What the folder picker answers, and how often it was asked.
     picker: Rc<PickRecorder>,
+    /// The login launch the Remote access page reads and switches.
+    autostart: Arc<AutostartRecorder>,
 }
 
 /// A folder picker that answers with the folder a spec set, as the test
@@ -879,6 +881,57 @@ impl Notifier for NotifyRecorder {
     }
 }
 
+/// A login launch that never touches the registry: it starts off, records
+/// each switch the client asks for, and fails the next one with the error a
+/// spec queued.
+#[derive(Default)]
+pub struct AutostartRecorder {
+    enabled: Mutex<bool>,
+    sets: Mutex<Vec<bool>>,
+    next_failure: Mutex<Option<String>>,
+}
+
+impl AutostartRecorder {
+    /// Every switch the client asked for, in order.
+    pub fn sets(&self) -> Vec<bool> {
+        self.sets
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Makes the next switch fail with `error`, leaving the launch as it is.
+    pub fn fail_next_set(&self, error: &str) {
+        *self
+            .next_failure
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(error.to_owned());
+    }
+}
+
+impl Autostart for AutostartRecorder {
+    fn get(&self) -> Result<bool, String> {
+        Ok(*self.enabled.lock().unwrap_or_else(PoisonError::into_inner))
+    }
+
+    fn set(&self, enabled: bool) -> Result<(), String> {
+        self.sets
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(enabled);
+        if let Some(error) = self
+            .next_failure
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+        {
+            return Err(error);
+        }
+        *self.enabled.lock().unwrap_or_else(PoisonError::into_inner) = enabled;
+        Ok(())
+    }
+}
+
 /// What the client sent, drained from its channel: the messages
 /// [`Harness::sent`] has not returned yet, the other commands
 /// [`Harness::commands`] has not, and the ids of its `LoadScrollback`
@@ -915,6 +968,7 @@ impl<'a> Harness<'a> {
         let opener = Arc::new(OpenRecorder::default());
         let notifier = Arc::new(NotifyRecorder::default());
         let picker = Rc::new(PickRecorder::default());
+        let autostart = Arc::new(AutostartRecorder::default());
         let deps = RootDeps {
             tx,
             events: rx,
@@ -927,6 +981,7 @@ impl<'a> Harness<'a> {
             notify: notifier.clone(),
             pick_folder: PickRecorder::picker(&picker),
             pick_file: PickRecorder::file_picker(&picker),
+            autostart: autostart.clone(),
         };
         let (root, cx) =
             cx.add_window_view(move |window, cx| RootView::with_transport(deps, window, cx));
@@ -942,6 +997,7 @@ impl<'a> Harness<'a> {
             opener,
             notifier,
             picker,
+            autostart,
         };
         harness.connect();
         harness
@@ -960,6 +1016,7 @@ impl<'a> Harness<'a> {
         let opener = Arc::new(OpenRecorder::default());
         let notifier = Arc::new(NotifyRecorder::default());
         let picker = Rc::new(PickRecorder::default());
+        let autostart = Arc::new(AutostartRecorder::default());
         let deps = RootDeps {
             tx,
             events: rx,
@@ -972,6 +1029,7 @@ impl<'a> Harness<'a> {
             notify: notifier.clone(),
             pick_folder: PickRecorder::picker(&picker),
             pick_file: PickRecorder::file_picker(&picker),
+            autostart: autostart.clone(),
         };
         let (root, cx) =
             cx.add_window_view(move |window, cx| RootView::with_transport(deps, window, cx));
@@ -987,12 +1045,18 @@ impl<'a> Harness<'a> {
             opener,
             notifier,
             picker,
+            autostart,
         }
     }
 
     /// How many times the view asked the app to quit.
     pub fn quit_requests(&self) -> usize {
         self.quits.get()
+    }
+
+    /// The login launch the Remote access page reads and switches.
+    pub fn autostart(&self) -> &AutostartRecorder {
+        &self.autostart
     }
 
     /// Makes every VS Code job report VS Code missing, so its caller falls

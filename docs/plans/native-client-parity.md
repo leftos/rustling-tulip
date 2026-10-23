@@ -190,9 +190,9 @@ The frontend has no search addon, bell handling or title parsing; `terminal_titl
 > **Superseded:** the LAN discovery, host LAN panel and pairing/connection-code rows below describe the Tauri client and are retired by the Tailscale-first ruling (`docs/plans/remote-access.md`); the live scope is the "Remote host profiles over Tailscale" row.
 
 - [ ] Connection picker: this machine, saved hosts (select / forget), LAN discovery (2.5s mDNS) then pairing code, or paste a connection code — `ConnectionPicker.tsx`
-- [ ] Host LAN panel: enable, port, advertised address, cert fingerprint, connection code with Copy — `SettingsModal.tsx` `LanPanel`
-- [ ] Pair a device: one-time code with countdown and Cancel, and the pairing outcome — `SettingsModal.tsx` `PairDevicePanel`
-- [ ] Start daemon on login (HKCU Run key / LaunchAgent) — `src-tauri/src/autostart.rs` (native: the registration and the startup refresh in P6.5, `daemon_client::autostart`; the toggle arrives with the Remote access panel, P6.4)
+- [x] Host LAN panel: enable, port, advertised address, cert fingerprint, connection code with Copy — `SettingsModal.tsx` `LanPanel` (superseded by the Remote access (Tailscale) panel in `settings_view.rs`: switch, status, address, port; no fingerprint or connection code)
+- [x] Pair a device: one-time code with countdown and Cancel, and the pairing outcome — `SettingsModal.tsx` `PairDevicePanel` (retired: no pairing over Tailscale, `docs/plans/remote-access.md`)
+- [x] Start daemon on login (HKCU Run key / LaunchAgent) — `src-tauri/src/autostart.rs` (native: the registration and the startup refresh in P6.5, `daemon_client::autostart`; the toggle is `Start the daemon when I log in` in Settings → Remote access, `settings_view.rs`)
 - [ ] Remote host profiles over Tailscale: the host picker from the tailnet's machines, a typed MagicDNS name, the chosen connection saved, and the client verifying the listener's `tailscale cert` TLS itself — no pinned-TLS tunnel, local plaintext bridge, pairing over it or `remote-profiles.json` (`docs/plans/remote-access.md`, P6.1–P6.3)
 - [ ] Remote mode disables local-file actions (add repo, reveal, VS Code, pickers become typed paths) — `utils/remoteMode.ts` (native: disabled with a reason since P6.2a; typed paths are P6.2b, RT-257; a terminal path link fetches its file instead, FT.3)
 - [ ] Chosen connection saved; a missing saved host falls back to local — `App.tsx`

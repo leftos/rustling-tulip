@@ -134,7 +134,11 @@ A pill reorder applies locally at once and carries a `request_id`; the client re
 
 ## Settings
 
-The Settings modal's tab list reads General, Notifications, Spawn defaults, Worktrees, Appearance and App title, then a non-selectable `Agents` group row and the Claude page. The group row is a label only: no page, click, hover or keyboard stop.
+The Settings modal's tab list reads General, Notifications, Spawn defaults, Worktrees, Remote access, Appearance and App title, then a non-selectable `Agents` group row and the Claude page. The group row is a label only: no page, click, hover or keyboard stop.
+
+Remote access (Tailscale) is absent from the list while the client's target is a remote host, and Settings falls back to General. It lets the user's other devices on their tailnet connect to this PC's sessions: a switch `Allow remote access over Tailscale` mirrors the daemon's last `RemoteStatus` and sends `ConfigureRemote` on toggle, with a status line per `RemoteState`, `Address: https://{name}:{port}` and the certificate's expiry while serving, a Port field with Apply (1-65535, inline error), and hints that changing the port or the PC's Tailscale name changes the iPhone app's address and that the daemon keeps running while remote access is on.
+
+`Start the daemon when I log in` registers the HKCU Run value (a LaunchAgent on macOS) through `daemon_client::autostart`, behind the `Autostart` seam in `remote_access.rs` (`RootDeps.autostart`). The controls are inert until the first `RemoteStatus` arrives, and a new connection forgets it.
 
 Spawn defaults holds "Trusted launch by default"; the Claude page holds "Claude approval mode" and "Claude provider".
 

@@ -40,6 +40,7 @@ mod ui_preset_wizard;
 mod ui_quit;
 mod ui_recover;
 mod ui_remote;
+mod ui_remote_access;
 mod ui_repo_remove;
 mod ui_repos;
 mod ui_session_actions;

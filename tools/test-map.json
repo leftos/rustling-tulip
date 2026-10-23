@@ -29,7 +29,7 @@
       "paths": [
         "apps/native/src/remote_mode.rs"
       ],
-      "filter": "(binary_id(rustling-tulip-native) & test(/^remote_mode::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_remote)::/))"
+      "filter": "(binary_id(rustling-tulip-native) & test(/^remote_mode::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_remote|ui_remote_access)::/))"
     },
     {
       "paths": [
@@ -42,6 +42,12 @@
         "apps/native/tests/ui/ui_remote.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native::ui) & test(/^(ui_remote)::/))"
+    },
+    {
+      "paths": [
+        "apps/native/tests/ui/ui_remote_access.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native::ui) & test(/^(ui_remote_access)::/))"
     },
     {
       "paths": [
@@ -418,6 +424,12 @@
     },
     {
       "paths": [
+        "apps/native/src/remote_access.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & test(/^remote_access::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_remote_access)::/))"
+    },
+    {
+      "paths": [
         "apps/native/src/repo_add.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native) & test(/^repo_add::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_repos)::/))"
@@ -474,7 +486,7 @@
       "paths": [
         "apps/native/src/settings_view.rs"
       ],
-      "filter": "(binary_id(rustling-tulip-native) & test(/^settings_view::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_appearance_editor|ui_keys|ui_notifications|ui_remote|ui_settings|ui_worktrees)::/))"
+      "filter": "(binary_id(rustling-tulip-native) & test(/^settings_view::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_appearance_editor|ui_keys|ui_notifications|ui_remote|ui_remote_access|ui_settings|ui_worktrees)::/))"
     },
     {
       "paths": [

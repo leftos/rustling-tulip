@@ -7,14 +7,17 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gpui::{
     AnyElement, App, ClickEvent, Context, Div, Entity, EntityId, FocusHandle, Focusable as _,
-    FontWeight, Keystroke, MouseButton, MouseDownEvent, Stateful, Subscription, Window, div,
-    prelude::*, px,
+    FontWeight, Keystroke, MouseButton, MouseDownEvent, SharedString, Stateful, Subscription,
+    Window, div, prelude::*, px,
 };
-use protocol::{ClaudeProvider, ClientMessage, FEATURE_CLAUDE_PROVIDER, PermissionMode};
+use protocol::{
+    ClaudeProvider, ClientMessage, DaemonMessage, FEATURE_CLAUDE_PROVIDER, PermissionMode,
+    RemoteState,
+};
 
 use crate::appearance;
 use crate::appearance_stops::{AppearanceStop, after_lost};
@@ -23,6 +26,11 @@ use crate::buttons::{field_frame, focus_ring};
 use crate::mouse::CopyOnSelect;
 use crate::notify::{NotifyState, WINDOWS_NOTIFICATION_SETTINGS};
 use crate::palette::{CHIP, HOVER, LINE, RAISED, SUBTLE, TEXT_2, TRANSPARENT};
+use crate::remote_access::{
+    PortError, RemoteStatusView, address, apply_port_message, autostart_failure_line,
+    autostart_read_failure_line, cert_line, controls_enabled, parse_port, state_line,
+    toggle_message,
+};
 use crate::section::section;
 use crate::session_menu::{backdrop, dialog_button};
 use crate::sidebar::{LeafDensity, NotifySkip, SidebarView};
@@ -68,6 +76,15 @@ const NOT_CONNECTED: &str = "(daemon not connected)";
 const PROVIDER_LOCKED: &str =
     "Trusted launch keeps the provider choice in effect; this lock only stops editing it here.";
 const WORKTREES_HINT: &str = "Per-session git worktrees land under this directory. Changes take effect for new sessions only — sessions already spawned keep their existing worktree paths.";
+const REMOTE_INTRO: &str = "Lets your other devices on your tailnet connect to this PC's sessions over HTTPS. Only devices signed in to your own Tailscale account can connect.";
+const REMOTE_PORT_HINT: &str = "Changing the port or this PC's Tailscale name changes the address the iPhone app is installed at.";
+const REMOTE_RUN_HINT: &str =
+    "While remote access is on, the daemon keeps running when no window is open.";
+const AUTOSTART_HINT: &str = "So remote access works before you open this app.";
+/// The port field's placeholder: the daemon's default port.
+const DEFAULT_PORT_TEXT: &str = "8787";
+/// The port field's width.
+const PORT_FIELD_WIDTH: f32 = 96.0;
 
 /// A tab of the Settings modal, in the order the list shows them.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -77,17 +94,19 @@ pub(crate) enum SettingsTab {
     Notifications,
     SpawnDefaults,
     Worktrees,
+    RemoteAccess,
     Appearance,
     AppTitle,
     Claude,
 }
 
 impl SettingsTab {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 8] = [
         Self::General,
         Self::Notifications,
         Self::SpawnDefaults,
         Self::Worktrees,
+        Self::RemoteAccess,
         Self::Appearance,
         Self::AppTitle,
         Self::Claude,
@@ -99,6 +118,7 @@ impl SettingsTab {
             Self::Notifications => "Notifications",
             Self::SpawnDefaults => "Spawn defaults",
             Self::Worktrees => "Worktrees",
+            Self::RemoteAccess => "Remote access",
             Self::Appearance => "Appearance",
             Self::AppTitle => "App title",
             Self::Claude => "Claude",
@@ -111,21 +131,23 @@ impl SettingsTab {
             Self::Notifications => "settings-tab-notifications",
             Self::SpawnDefaults => "settings-tab-spawn-defaults",
             Self::Worktrees => "settings-tab-worktrees",
+            Self::RemoteAccess => "settings-tab-remote-access",
             Self::Appearance => "settings-tab-appearance",
             Self::AppTitle => "settings-tab-app-title",
             Self::Claude => "settings-tab-claude",
         }
     }
 
-    /// The tab above (`down` false) or below this one, stopping at the ends.
-    fn step(self, down: bool) -> Self {
-        let at = Self::ALL.iter().position(|tab| *tab == self).unwrap_or(0);
+    /// The tab above (`down` false) or below this one among `tabs`, the
+    /// list as it is drawn, stopping at the ends.
+    fn step(self, tabs: &[Self], down: bool) -> Self {
+        let at = tabs.iter().position(|tab| *tab == self).unwrap_or(0);
         let next = if down {
-            (at + 1).min(Self::ALL.len() - 1)
+            (at + 1).min(tabs.len().saturating_sub(1))
         } else {
             at.saturating_sub(1)
         };
-        Self::ALL[next]
+        tabs.get(next).copied().unwrap_or_default()
     }
 }
 
@@ -148,11 +170,12 @@ impl SettingsRow {
 
 /// The tab list's rows, in order. A group row is drawn between the tabs
 /// and never reached by the keyboard.
-const ROWS: [SettingsRow; 8] = [
+const ROWS: [SettingsRow; 9] = [
     SettingsRow::Tab(SettingsTab::General),
     SettingsRow::Tab(SettingsTab::Notifications),
     SettingsRow::Tab(SettingsTab::SpawnDefaults),
     SettingsRow::Tab(SettingsTab::Worktrees),
+    SettingsRow::Tab(SettingsTab::RemoteAccess),
     SettingsRow::Tab(SettingsTab::Appearance),
     SettingsRow::Tab(SettingsTab::AppTitle),
     SettingsRow::Group("Agents"),
@@ -190,6 +213,10 @@ pub(crate) enum SettingsControl {
     WorktreesSave,
     WorktreesReset,
     WorktreesManage,
+    RemoteToggle,
+    RemotePort,
+    RemotePortApply,
+    RemoteAutostart,
     Appearance(AppearanceStop),
 }
 
@@ -230,6 +257,10 @@ impl SettingsControl {
             Self::WorktreesSave => "settings-worktrees-root-save",
             Self::WorktreesReset => "settings-worktrees-root-reset",
             Self::WorktreesManage => "settings-worktrees-open-manager",
+            Self::RemoteToggle => "settings-remote-toggle",
+            Self::RemotePort => "settings-remote-port-input",
+            Self::RemotePortApply => "settings-remote-port-apply",
+            Self::RemoteAutostart => "settings-remote-autostart-toggle",
             Self::Appearance(stop) => stop.selector(),
         }
     }
@@ -254,6 +285,20 @@ pub(crate) struct WorktreesTab {
     awaiting: u32,
     /// The daemon echoed the last save.
     saved: bool,
+    _subscriptions: Vec<Subscription>,
+}
+
+/// The Remote access page's port field and this PC's login launch, as the
+/// page last read it.
+pub(crate) struct RemoteAccessTab {
+    input: Entity<TextInput>,
+    focus: FocusHandle,
+    /// The field's text, kept as it changes.
+    draft: String,
+    /// Whether the daemon starts on login, or why that could not be read.
+    autostart: Result<bool, String>,
+    /// Why the last switch of the login launch failed.
+    autostart_error: Option<String>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -332,13 +377,52 @@ impl RootView {
     /// The Settings tabs' labels, in the list's order.
     #[must_use]
     pub fn settings_tab_labels(&self) -> Vec<&'static str> {
-        SettingsTab::ALL.iter().map(|tab| tab.label()).collect()
+        self.settings_tabs()
+            .into_iter()
+            .map(SettingsTab::label)
+            .collect()
     }
 
     /// Every label the Settings tab list draws, group rows included.
     #[must_use]
     pub fn settings_tab_rows(&self) -> Vec<&'static str> {
-        ROWS.iter().copied().map(SettingsRow::label).collect()
+        self.settings_rows()
+            .into_iter()
+            .map(SettingsRow::label)
+            .collect()
+    }
+
+    /// Whether the connection target offers `tab`: Remote access configures
+    /// this PC's daemon, so it is offered only where the client manages it.
+    fn offers_settings_tab(&self, tab: SettingsTab) -> bool {
+        tab != SettingsTab::RemoteAccess || self.capabilities().manages_daemon()
+    }
+
+    /// The tabs the list shows on this target, in order.
+    fn settings_tabs(&self) -> Vec<SettingsTab> {
+        SettingsTab::ALL
+            .into_iter()
+            .filter(|tab| self.offers_settings_tab(*tab))
+            .collect()
+    }
+
+    /// The rows the tab list draws on this target, in order.
+    fn settings_rows(&self) -> Vec<SettingsRow> {
+        ROWS.into_iter()
+            .filter(|row| match row {
+                SettingsRow::Group(_) => true,
+                SettingsRow::Tab(tab) => self.offers_settings_tab(*tab),
+            })
+            .collect()
+    }
+
+    /// After the connection target changed: a shown tab the new target
+    /// does not offer gives way to General.
+    pub(crate) fn follow_settings_target(&mut self) {
+        if !self.offers_settings_tab(self.settings_tab) {
+            self.settings_tab = SettingsTab::General;
+            self.settings_control = None;
+        }
     }
 
     /// The label of the Settings tab shown.
@@ -434,6 +518,7 @@ impl RootView {
                 controls.push(SettingsControl::WorktreesManage);
                 controls
             }
+            SettingsTab::RemoteAccess => self.remote_access_controls(),
             SettingsTab::Appearance => self
                 .appearance_stops(false, cx)
                 .into_iter()
@@ -490,6 +575,7 @@ impl RootView {
         self.settings_control.filter(|control| {
             let has_keyboard = match control {
                 SettingsControl::WorktreesPath => self.worktrees_path_focused(window),
+                SettingsControl::RemotePort => self.remote_port_focused(window),
                 SettingsControl::Appearance(stop) if stop.is_field() => {
                     self.appearance_field_has_keyboard(*stop, window, cx)
                 }
@@ -521,14 +607,29 @@ impl RootView {
         }
     }
 
-    /// Gives the keyboard to `control`: the path field takes it itself,
-    /// every other control through the modal's focus.
+    /// Gives the keyboard to `control`: a text field takes it itself, every
+    /// other control through the modal's focus.
     pub(crate) fn focus_settings_control(&mut self, control: SettingsControl, window: &mut Window) {
         self.settings_control = Some(control);
-        match (&self.worktrees_tab, control) {
-            (Some(tab), SettingsControl::WorktreesPath) => tab.focus.focus(window),
-            _ => self.appearance_focus.focus(window),
+        let field = match control {
+            SettingsControl::WorktreesPath => self.worktrees_tab.as_ref().map(|tab| &tab.focus),
+            SettingsControl::RemotePort => self.remote_access_tab.as_ref().map(|tab| &tab.focus),
+            _ => None,
+        };
+        match field {
+            Some(focus) => focus.focus(window),
+            None => self.appearance_focus.focus(window),
         }
+    }
+
+    /// Whether the Remote access page's port field has the keyboard.
+    pub(crate) fn remote_port_focused(&self, window: &Window) -> bool {
+        self.settings_open()
+            && self.settings_tab == SettingsTab::RemoteAccess
+            && self
+                .remote_access_tab
+                .as_ref()
+                .is_some_and(|tab| tab.focus.is_focused(window))
     }
 
     /// Whether the Worktrees tab's path field has the keyboard.
@@ -592,11 +693,14 @@ impl RootView {
             SettingsControl::SpawnProvider(provider) => {
                 self.set_spawn_claude_provider(provider, cx);
             }
-            SettingsControl::WorktreesPath => {}
+            SettingsControl::WorktreesPath | SettingsControl::RemotePort => {}
             SettingsControl::WorktreesBrowse => self.browse_worktrees_root(cx),
             SettingsControl::WorktreesSave => self.save_worktrees_root(),
             SettingsControl::WorktreesReset => self.reset_worktrees_root(cx),
             SettingsControl::WorktreesManage => self.open_worktrees_manager(window, cx),
+            SettingsControl::RemoteToggle => self.toggle_remote_access(),
+            SettingsControl::RemotePortApply => self.apply_remote_port(),
+            SettingsControl::RemoteAutostart => self.toggle_autostart(),
             SettingsControl::Appearance(stop) => {
                 self.press_appearance_stop(stop, window, cx);
                 self.keep_keyboard_after_press(stop, window, cx);
@@ -823,6 +927,255 @@ impl RootView {
         self.worktrees_tab = None;
     }
 
+    /// The daemon's last `RemoteStatus`, or `None` when this connection has
+    /// not reported one. A port field that is empty or still shows the old
+    /// port takes the new one.
+    pub(crate) fn set_remote_status(
+        &mut self,
+        status: Option<RemoteStatusView>,
+        cx: &mut Context<Self>,
+    ) {
+        let old = self.remote_status.as_ref().map(|status| status.port);
+        let new = status.as_ref().map(|status| status.port);
+        self.remote_status = status;
+        if let Some(tab) = &mut self.remote_access_tab {
+            let untouched = tab.draft.trim().is_empty() || parse_port(&tab.draft).ok() == old;
+            if untouched && old != new {
+                tab.draft = new.map_or_else(String::new, |port| port.to_string());
+                let text = tab.draft.clone();
+                tab.input.update(cx, |input, cx| input.set_text(text, cx));
+            }
+        }
+        cx.notify();
+    }
+
+    /// The daemon's `RemoteStatus`; any other message is left alone.
+    pub(crate) fn on_remote_status(&mut self, msg: DaemonMessage, cx: &mut Context<Self>) {
+        if let DaemonMessage::RemoteStatus {
+            enabled,
+            port,
+            state,
+        } = msg
+        {
+            let status = RemoteStatusView {
+                enabled,
+                port,
+                state,
+            };
+            self.set_remote_status(Some(status), cx);
+        }
+    }
+
+    /// The Remote access page's line on what remote access is doing.
+    #[must_use]
+    pub fn remote_status_line(&self) -> String {
+        self.remote_status.as_ref().map_or_else(
+            || NOT_CONNECTED.to_owned(),
+            |status| state_line(&status.state, status.port),
+        )
+    }
+
+    /// The remote access switch: whether it is ticked, and whether it can
+    /// be pressed.
+    #[must_use]
+    pub fn remote_toggle(&self) -> (bool, bool) {
+        let status = self.remote_status.as_ref();
+        (
+            status.is_some_and(|status| status.enabled),
+            controls_enabled(status),
+        )
+    }
+
+    /// The address other devices reach this PC at, while it serves.
+    #[must_use]
+    pub fn remote_address(&self) -> Option<String> {
+        self.remote_status
+            .as_ref()
+            .and_then(|status| address(&status.state))
+    }
+
+    /// How long the serving certificate has left, while its expiry is known.
+    fn remote_cert_line(&self) -> Option<String> {
+        let Some(RemoteStatusView {
+            state: RemoteState::Serving {
+                cert_expires_at, ..
+            },
+            ..
+        }) = &self.remote_status
+        else {
+            return None;
+        };
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .inspect_err(|err| tracing::warn!("settings: the clock reads before 1970: {err}"))
+            .ok()?;
+        cert_line(*cert_expires_at, now.as_secs())
+    }
+
+    /// The Remote access page's port field, while the page has been shown.
+    #[must_use]
+    pub fn remote_port(&self) -> Option<String> {
+        self.remote_access_tab.as_ref().map(|tab| tab.draft.clone())
+    }
+
+    /// What Apply sends: the field's port with the switch as it is, once
+    /// the daemon has reported and only for a valid port other than its own.
+    fn remote_apply_message(&self) -> Option<ClientMessage> {
+        let status = self.remote_status.as_ref()?;
+        let tab = self.remote_access_tab.as_ref()?;
+        apply_port_message(status, &tab.draft)
+    }
+
+    /// Whether the port's Apply can be pressed.
+    #[must_use]
+    pub fn remote_port_apply(&self) -> bool {
+        self.remote_apply_message().is_some()
+    }
+
+    /// Why the port field's text is no port, while it holds some.
+    #[must_use]
+    pub fn remote_port_error(&self) -> Option<String> {
+        let draft = &self.remote_access_tab.as_ref()?.draft;
+        if draft.trim().is_empty() {
+            return None;
+        }
+        parse_port(draft)
+            .err()
+            .map(|err: PortError| err.to_string())
+    }
+
+    /// Whether the daemon starts on login, as the page last read it; `None`
+    /// before the page was shown or when the read failed.
+    #[must_use]
+    pub fn remote_autostart(&self) -> Option<bool> {
+        self.remote_access_tab
+            .as_ref()
+            .and_then(|tab| tab.autostart.as_ref().ok().copied())
+    }
+
+    /// The line under the login-launch toggle: why its last switch, or its
+    /// read, failed.
+    #[must_use]
+    pub fn remote_autostart_line(&self) -> Option<String> {
+        let tab = self.remote_access_tab.as_ref()?;
+        match (&tab.autostart_error, &tab.autostart) {
+            (Some(error), _) => Some(error.clone()),
+            (None, Err(error)) => Some(autostart_read_failure_line(error)),
+            (None, Ok(_)) => None,
+        }
+    }
+
+    /// The Remote access page's controls in drawing order: the switch and
+    /// the port once the daemon has reported, Apply for a changed valid
+    /// port, and the login launch once it was read.
+    fn remote_access_controls(&self) -> Vec<SettingsControl> {
+        let mut controls = Vec::new();
+        if controls_enabled(self.remote_status.as_ref()) {
+            controls.extend([SettingsControl::RemoteToggle, SettingsControl::RemotePort]);
+        }
+        if self.remote_port_apply() {
+            controls.push(SettingsControl::RemotePortApply);
+        }
+        if self.remote_autostart().is_some() {
+            controls.push(SettingsControl::RemoteAutostart);
+        }
+        controls
+    }
+
+    /// The page afresh: the port field holding the daemon's port, and the
+    /// login launch read now.
+    fn new_remote_access_tab(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> RemoteAccessTab {
+        let draft = self
+            .remote_status
+            .as_ref()
+            .map_or_else(String::new, |status| status.port.to_string());
+        let input = cx.new(|cx| TextInput::new(draft.clone(), DEFAULT_PORT_TEXT.to_owned(), cx));
+        let focus = input.read(cx).focus_handle(cx);
+        let keys = cx.subscribe_in(
+            &input,
+            window,
+            |this, _, event: &TextInputEvent, window, cx| match event {
+                TextInputEvent::Submit => {
+                    this.apply_remote_port();
+                    cx.notify();
+                }
+                TextInputEvent::Cancel => this.close_appearance_editor(window, cx),
+            },
+        );
+        let edits = cx.subscribe_in(&input, window, |this, input, _: &TextChanged, _, cx| {
+            let text = input.read(cx).text().to_owned();
+            if let Some(tab) = &mut this.remote_access_tab {
+                tab.draft = text;
+            }
+            cx.notify();
+        });
+        RemoteAccessTab {
+            input,
+            focus,
+            draft,
+            autostart: self.read_autostart(),
+            autostart_error: None,
+            _subscriptions: vec![keys, edits],
+        }
+    }
+
+    /// Whether the daemon starts on login; a failed read is logged.
+    fn read_autostart(&self) -> Result<bool, String> {
+        self.autostart
+            .get()
+            .inspect_err(|err| tracing::warn!("settings: reading the login launch failed: {err}"))
+    }
+
+    fn toggle_remote_access(&self) {
+        if let Some(status) = &self.remote_status {
+            tracing::info!(
+                enabled = !status.enabled,
+                "settings: switching remote access"
+            );
+            self.send(toggle_message(status));
+        }
+    }
+
+    fn apply_remote_port(&self) {
+        if let Some(message) = self.remote_apply_message() {
+            tracing::info!("settings: applying the remote access port");
+            self.send(message);
+        }
+    }
+
+    /// Switches the login launch and reads it back; a failed switch leaves
+    /// it as it was and says why under the toggle.
+    fn toggle_autostart(&mut self) {
+        let Some(Ok(on)) = self
+            .remote_access_tab
+            .as_ref()
+            .map(|tab| tab.autostart.clone())
+        else {
+            return;
+        };
+        let switched = self.autostart.set(!on);
+        let read = switched.is_ok().then(|| self.read_autostart());
+        let Some(tab) = &mut self.remote_access_tab else {
+            return;
+        };
+        match switched {
+            Ok(()) => {
+                tab.autostart_error = None;
+                if let Some(read) = read {
+                    tab.autostart = read;
+                }
+            }
+            Err(error) => {
+                tracing::warn!("settings: switching the login launch failed: {error}");
+                tab.autostart_error = Some(autostart_failure_line(&error));
+            }
+        }
+    }
+
     /// The title last set on the window; empty until the first is.
     #[must_use]
     pub fn window_title(&self) -> &str {
@@ -853,6 +1206,9 @@ impl RootView {
         }
         if tab == SettingsTab::Worktrees {
             self.worktrees_tab = Some(self.new_worktrees_tab(window, cx));
+        }
+        if tab == SettingsTab::RemoteAccess {
+            self.remote_access_tab = Some(self.new_remote_access_tab(window, cx));
         }
         self.settings_tabs_focus.focus(window);
         cx.notify();
@@ -972,7 +1328,9 @@ impl RootView {
             }
             _ if typing => false,
             ("up" | "down", false) if on_list => {
-                let tab = self.settings_tab.step(keystroke.key == "down");
+                let tab = self
+                    .settings_tab
+                    .step(&self.settings_tabs(), keystroke.key == "down");
                 self.select_settings_tab(tab, window, cx);
                 true
             }
@@ -996,7 +1354,9 @@ impl RootView {
     /// Whether a text field in the Settings modal or the appearance editor
     /// has the keyboard, so keys other than Tab are its.
     pub(crate) fn settings_typing(&self, window: &Window, cx: &App) -> bool {
-        self.worktrees_path_focused(window) || self.appearance_field_focused(window, cx)
+        self.worktrees_path_focused(window)
+            || self.remote_port_focused(window)
+            || self.appearance_field_focused(window, cx)
     }
 
     /// The daemon's keep-awake state, or `None` when this connection has
@@ -1141,9 +1501,9 @@ impl RootView {
     /// only: no id, no click, no hover and no ring.
     fn settings_tab_list(&self, window: &Window, cx: &mut Context<Self>) -> Stateful<Div> {
         let list_focused = self.settings_tabs_focus.is_focused(window);
-        let tabs: Vec<AnyElement> = ROWS
-            .iter()
-            .copied()
+        let tabs: Vec<AnyElement> = self
+            .settings_rows()
+            .into_iter()
             .map(|row| match row {
                 SettingsRow::Group(label) => group_row(label).into_any_element(),
                 SettingsRow::Tab(tab) => self
@@ -1223,6 +1583,7 @@ impl RootView {
             SettingsTab::SpawnDefaults => self.spawn_defaults_tab(focused, cx),
             SettingsTab::Claude => self.claude_tab(focused, cx),
             SettingsTab::Worktrees => self.worktrees_tab_content(focused, cx),
+            SettingsTab::RemoteAccess => self.remote_access_tab_content(focused, cx),
         }
     }
 
@@ -1299,6 +1660,125 @@ impl RootView {
             .child(active)
             .child(buttons);
         vec![section.into_any_element()]
+    }
+
+    /// The Remote access page: the switch and what remote access is doing,
+    /// the address while serving, the port, and this PC's login launch.
+    fn remote_access_tab_content(
+        &self,
+        focused: Option<SettingsControl>,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let Some(tab) = &self.remote_access_tab else {
+            return Vec::new();
+        };
+        let (checked, enabled) = self.remote_toggle();
+        let switch = toggle(
+            SettingsControl::RemoteToggle,
+            ToggleState { checked, enabled },
+            "Allow remote access over Tailscale",
+            focused,
+            cx,
+        );
+        let status = div()
+            .debug_selector(|| "settings-remote-status".to_owned())
+            .text_color(gpui::rgb(TEXT_2))
+            .child(self.remote_status_line());
+        let address = self.remote_address().map(|url| {
+            div()
+                .debug_selector(|| "settings-remote-address".to_owned())
+                .child(format!("Address: {url}"))
+        });
+        let cert = self
+            .remote_cert_line()
+            .map(|line| hint(line).debug_selector(|| "settings-remote-cert".to_owned()));
+        let port_error = self
+            .remote_port_error()
+            .map(|error| hint(error).debug_selector(|| "settings-remote-port-error".to_owned()));
+        let section = section("Remote access (Tailscale)")
+            .child(hint(REMOTE_INTRO))
+            .child(switch)
+            .child(status)
+            .children(address)
+            .children(cert)
+            .child(self.remote_port_row(tab, enabled, focused, cx))
+            .children(port_error)
+            .child(hint(REMOTE_PORT_HINT))
+            .child(hint(REMOTE_RUN_HINT))
+            .children(self.autostart_rows(tab, focused, cx));
+        vec![section.into_any_element()]
+    }
+
+    /// The port field and its Apply; before the daemon reports, the field
+    /// is a dimmed placeholder that takes no keys.
+    fn remote_port_row(
+        &self,
+        tab: &RemoteAccessTab,
+        enabled: bool,
+        focused: Option<SettingsControl>,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let port = SettingsControl::RemotePort;
+        let frame = field_frame(focused == Some(port))
+            .debug_selector(|| port.selector().to_owned())
+            .w(px(PORT_FIELD_WIDTH));
+        let field = if enabled {
+            frame
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                        this.press_settings_control(port, window, cx);
+                    }),
+                )
+                .child(tab.input.clone())
+        } else {
+            frame
+                .opacity(DISABLED_OPACITY)
+                .text_color(gpui::rgb(SUBTLE))
+                .child(DEFAULT_PORT_TEXT)
+        };
+        let apply = settings_button(
+            SettingsControl::RemotePortApply,
+            "Apply",
+            self.remote_port_apply(),
+            focused,
+            cx,
+        );
+        div()
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .child("Port")
+            .child(field)
+            .child(apply)
+    }
+
+    /// The login-launch toggle, its hint, and why its last switch or read
+    /// failed; the toggle is inert while the launch could not be read.
+    fn autostart_rows(
+        &self,
+        tab: &RemoteAccessTab,
+        focused: Option<SettingsControl>,
+        cx: &mut Context<Self>,
+    ) -> Vec<Div> {
+        let state = ToggleState {
+            checked: tab.autostart.as_ref().is_ok_and(|on| *on),
+            enabled: tab.autostart.is_ok(),
+        };
+        let launch = toggle(
+            SettingsControl::RemoteAutostart,
+            state,
+            "Start the daemon when I log in",
+            focused,
+            cx,
+        );
+        let error = self
+            .remote_autostart_line()
+            .map(|line| hint(line).debug_selector(|| "settings-remote-autostart-error".to_owned()));
+        [launch, hint(AUTOSTART_HINT)]
+            .into_iter()
+            .chain(error)
+            .collect()
     }
 
     /// The Spawn defaults tab: trusted launch, which locks every agent row
@@ -1582,11 +2062,11 @@ fn group_row(label: &'static str) -> Div {
 }
 
 /// A quiet line under or beside a control.
-fn hint(text: &'static str) -> Div {
+fn hint(text: impl Into<SharedString>) -> Div {
     div()
         .text_size(px(HINT_SIZE))
         .text_color(gpui::rgb(SUBTLE))
-        .child(text)
+        .child(text.into())
 }
 
 /// A click handler that presses `control`.

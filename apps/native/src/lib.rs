@@ -63,6 +63,7 @@ mod quit;
 mod quit_view;
 mod recover;
 mod recover_view;
+pub mod remote_access;
 pub(crate) mod remote_mode;
 mod repo_add;
 mod repo_remove;
@@ -321,6 +322,9 @@ pub struct RootDeps {
     /// Asks for a file: the workspace creator's `.code-workspace` Browse and
     /// the preset wizard's file pickers.
     pub pick_file: FilePicker,
+    /// Reads and switches whether this PC starts the daemon at login: the
+    /// Remote access page's toggle.
+    pub autostart: Arc<dyn remote_access::Autostart>,
 }
 
 /// Opens the client's window on a live daemon connection, focusing
@@ -545,6 +549,12 @@ pub struct RootView {
     settings_control: Option<settings_view::SettingsControl>,
     /// The daemon's keep-awake state as this connection last heard it.
     keep_awake: Option<settings_view::KeepAwake>,
+    /// The daemon's remote access status as this connection last heard it.
+    remote_status: Option<remote_access::RemoteStatusView>,
+    /// The Remote access page's port field and login launch, once shown.
+    remote_access_tab: Option<settings_view::RemoteAccessTab>,
+    /// Reads and switches whether this PC starts the daemon at login.
+    autostart: Arc<dyn remote_access::Autostart>,
     /// The title last set on the window.
     window_title: String,
     /// The title waiting out its debounce, if it differs from the one set.
@@ -775,6 +785,7 @@ impl RootView {
             },
             pick_folder: folder_picker::system_folder_picker(window),
             pick_file: folder_picker::system_file_picker(window),
+            autostart: Arc::new(remote_access::SystemAutostart),
         };
         let root = Self::with_transport(deps, window, cx);
         // The cloaked window neither restores nor saves its place.
@@ -846,6 +857,7 @@ impl RootView {
             notify,
             pick_folder,
             pick_file,
+            autostart,
         } = deps;
         Self::watch_window(window, cx);
         Self::watch_close_request(window, cx);
@@ -899,6 +911,9 @@ impl RootView {
             settings_tabs_focus: cx.focus_handle(),
             settings_control: None,
             keep_awake: None,
+            remote_status: None,
+            remote_access_tab: None,
+            autostart,
             window_title: String::new(),
             title_pending: None,
             title_timer: None,
@@ -2180,11 +2195,14 @@ impl RootView {
                 if conn.target() != self.conn.target() {
                     self.handshake = None;
                 }
-                // A fetch streams over the connection it was asked on.
+                // A fetch streams over the connection it was asked on, and
+                // the remote access status is that connection's daemon's.
                 if !conn.is_open() || conn.target() != self.conn.target() {
                     self.end_fetches_on_disconnect(cx);
+                    self.set_remote_status(None, cx);
                 }
                 self.conn = conn;
+                self.follow_settings_target();
                 self.sync_spawn_provider_support(cx);
             }
             NetEvent::Handshake(info) => self.handshake = Some(info),
@@ -2380,12 +2398,11 @@ impl RootView {
                 self.prune_source_control(&repos);
                 self.on_containers_changed(cx);
             }
-            DaemonMessage::Workspaces { workspaces } => {
-                self.on_workspaces(&workspaces, window, cx);
-            }
+            DaemonMessage::Workspaces { workspaces } => self.on_workspaces(&workspaces, window, cx),
             DaemonMessage::KeepAwakeStatus { enabled, active } => {
                 self.set_keep_awake(Some(settings_view::KeepAwake { enabled, active }));
             }
+            msg @ DaemonMessage::RemoteStatus { .. } => self.on_remote_status(msg, cx),
             _ => {}
         }
     }
@@ -2474,6 +2491,7 @@ impl RootView {
     /// menu and notice of the old one closed.
     fn on_welcome(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.set_keep_awake(None);
+        self.set_remote_status(None, cx);
         self.reset_panes(cx);
         self.pending_appearance.clear();
         self.container_sends.clear();

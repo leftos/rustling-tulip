@@ -16,11 +16,12 @@ use protocol::{ClientMessage, DaemonMessage, SplitDirection, TabEntry};
 use rustling_tulip_native::{SidebarView, fonts};
 use support::{Fixture, Harness, TestDir, pane, session, split, tab};
 
-const TAB_SELECTORS: [&str; 7] = [
+const TAB_SELECTORS: [&str; 8] = [
     "settings-tab-general",
     "settings-tab-notifications",
     "settings-tab-spawn-defaults",
     "settings-tab-worktrees",
+    "settings-tab-remote-access",
     "settings-tab-appearance",
     "settings-tab-app-title",
     "settings-tab-claude",
@@ -109,6 +110,7 @@ fn settings_opens_on_general_with_tab_order(cx: &mut TestAppContext) {
             "Notifications",
             "Spawn defaults",
             "Worktrees",
+            "Remote access",
             "Appearance",
             "App title",
             "Agents",
@@ -122,6 +124,7 @@ fn settings_opens_on_general_with_tab_order(cx: &mut TestAppContext) {
             "Notifications",
             "Spawn defaults",
             "Worktrees",
+            "Remote access",
             "Appearance",
             "App title",
             "Claude"
@@ -193,7 +196,7 @@ fn down_moves_to_next_tab(cx: &mut TestAppContext) {
     assert_eq!(settings_focus(&mut h), Some("list"), "it opens on the list");
     h.keys("down");
     assert_eq!(shown_tab(&mut h), "Notifications");
-    h.keys("down down down down");
+    h.keys("down down down down down");
     assert_eq!(shown_tab(&mut h), "App title");
     h.keys("down");
     assert_eq!(
@@ -492,7 +495,7 @@ fn tab_walks_general_controls_and_space_toggles(cx: &mut TestAppContext) {
     assert_eq!(settings_focus(&mut h), Some("list"));
     assert_eq!(shown_tab(&mut h), "General");
 
-    h.keys("down down down down down");
+    h.keys("down down down down down down");
     assert_eq!(shown_tab(&mut h), "App title");
     h.keys("tab");
     assert_eq!(settings_focus(&mut h), Some("settings-title-busy-count"));
@@ -852,7 +855,7 @@ fn agents_group_row_is_not_selectable(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);
     h.keys("ctrl-,");
-    h.keys("down down down down down");
+    h.keys("down down down down down down");
     assert_eq!(shown_tab(&mut h), "App title");
     h.keys("down");
     assert_eq!(shown_tab(&mut h), "Claude", "Down skips the group row");

@@ -36,7 +36,7 @@ use rustling_tulip_native::offscreen::show_cloaked;
 use rustling_tulip_native::{
     Activity, Assets, Clock, Connection, FileFilter, FilePicker, FolderPicker, HandshakeInfo,
     NATIVE_PROTOCOL_VERSIONS, NetCommand, NetEvent, Notifier, NotifyState, OpenFailure, Opener,
-    RAIL_ITEM_HEIGHT, RAIL_WIDTH, RootDeps, RootView, bind_keys,
+    RAIL_ITEM_HEIGHT, RAIL_WIDTH, RootDeps, RootView, bind_keys, remote_access::Autostart,
 };
 use serde_json::{Value, json};
 
@@ -270,6 +270,7 @@ fn deps(
         notify: Arc::new(NoNotifier),
         pick_folder,
         pick_file,
+        autostart: Arc::new(NoAutostart),
     }
 }
 
@@ -410,6 +411,19 @@ impl Notifier for NoNotifier {
 
     fn state(&self) -> NotifyState {
         NotifyState::On
+    }
+}
+
+/// A login launch that is off and never touches the registry.
+struct NoAutostart;
+
+impl Autostart for NoAutostart {
+    fn get(&self) -> Result<bool, String> {
+        Ok(false)
+    }
+
+    fn set(&self, _enabled: bool) -> Result<(), String> {
+        Ok(())
     }
 }
 
