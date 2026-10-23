@@ -737,7 +737,7 @@ impl RootView {
             return;
         }
         self.focus_pane_in(tab_id, pane_id, window, cx);
-        let cwd = self.sidebar.quick_shell_dir().map(str::to_owned);
+        let cwd = self.quick_shell_default().map(str::to_owned);
         let open_in = OpenIn::Pane(PaneAim {
             tab_id: tab_id.to_owned(),
             pane_id: pane_id.to_owned(),

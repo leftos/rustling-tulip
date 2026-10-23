@@ -212,7 +212,7 @@ impl RootView {
             .px(px(10.0))
             .pb(px(8.0))
             .child(add_session(self.has_repos(), cx))
-            .child(add_shell(self.sidebar.quick_shell_dir(), cx))
+            .child(add_shell(self.quick_shell_default(), cx))
             .child(self.more_button(window, cx))
     }
 

@@ -85,10 +85,18 @@ impl RootView {
             .is_some_and(|dialog| dialog.form.remembered())
     }
 
-    /// "+ Shell": a plain shell in the remembered folder, else in the
-    /// daemon's own default, in the tab on screen.
+    /// The remembered quick-shell folder, a folder of this PC: only the
+    /// local daemon is offered it.
+    pub(crate) fn quick_shell_default(&self) -> Option<&str> {
+        self.sidebar
+            .quick_shell_dir()
+            .filter(|_| self.capabilities().opens_local_files())
+    }
+
+    /// "+ Shell": a plain shell in the remembered folder, else (and always
+    /// on a remote host) in the daemon's own default, in the tab on screen.
     pub(crate) fn quick_shell(&mut self, cx: &mut Context<Self>) {
-        let cwd = self.sidebar.quick_shell_dir().map(str::to_owned);
+        let cwd = self.quick_shell_default().map(str::to_owned);
         let open_in = self.open_in_active_tab();
         self.spawn(standalone_shell_request(cwd), open_in, cx);
     }
@@ -114,10 +122,14 @@ impl RootView {
         if blocked {
             return;
         }
-        let remembered = self.sidebar.quick_shell_dir().map(str::to_owned);
+        let remembered = self.quick_shell_default().map(str::to_owned);
         let folder = remembered.clone().unwrap_or_default();
         self.shell_generation += 1;
-        let form = ShellForm::new(self.shell_generation, remembered.as_deref());
+        let form = if self.capabilities().opens_local_files() {
+            ShellForm::new(self.shell_generation, remembered.as_deref())
+        } else {
+            ShellForm::without_default(self.shell_generation)
+        };
         let folder_input = cx.new(|cx| TextInput::new(folder, FOLDER_PLACEHOLDER, cx));
         let subscriptions = Self::watch_shell_field(&folder_input, window, cx);
         self.renaming = None;
@@ -425,7 +437,10 @@ impl RootView {
             .track_focus(&self.shell_focus)
             .child(header)
             .child(field)
-            .child(save_default_row(form, focus, cx))
+            .children(
+                form.offers_default()
+                    .then(|| save_default_row(form, focus, cx)),
+            )
             .children(clear)
             .child(footer(&folder, focus, cx));
         Some(backdrop("shell-dialog", panel))

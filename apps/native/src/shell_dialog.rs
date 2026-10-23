@@ -52,11 +52,23 @@ pub(crate) struct ShellForm {
     generation: u64,
     /// The field's text when Browse was pressed, while its picker is open.
     browsing: Option<String>,
-    /// A folder was remembered for "+ Shell" when the dialog opened.
-    remembered: bool,
+    quick_shell: QuickShellDefault,
     save_default: bool,
     focus: ShellControl,
     submitted: bool,
+}
+
+/// What the dialog offers about the folder "+ Shell" opens in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QuickShellDefault {
+    /// Neither to remember the folder nor to forget one: a folder of this PC
+    /// means nothing to a remote host's daemon.
+    NotOffered,
+    /// To remember the folder; none was remembered when the dialog opened.
+    Unset,
+    /// To remember the folder, or to forget the one remembered when the
+    /// dialog opened.
+    Remembered,
 }
 
 /// What a submit asks for: the folder to open in, and whether to remember it
@@ -75,10 +87,23 @@ impl ShellForm {
         Self {
             generation,
             browsing: None,
-            remembered: remembered.is_some(),
+            quick_shell: if remembered.is_some() {
+                QuickShellDefault::Remembered
+            } else {
+                QuickShellDefault::Unset
+            },
             save_default: true,
             focus: ShellControl::Folder,
             submitted: false,
+        }
+    }
+
+    /// The dialog numbered `generation` on a remote host: it neither
+    /// remembers its folder for "+ Shell" nor offers to forget one.
+    pub(crate) fn without_default(generation: u64) -> Self {
+        Self {
+            quick_shell: QuickShellDefault::NotOffered,
+            ..Self::new(generation, None)
         }
     }
 
@@ -87,9 +112,15 @@ impl ShellForm {
         self.generation
     }
 
-    /// Whether a folder is remembered for "+ Shell".
+    /// Whether a folder is remembered for "+ Shell" and the dialog offers
+    /// to forget it.
     pub(crate) fn remembered(&self) -> bool {
-        self.remembered
+        self.quick_shell == QuickShellDefault::Remembered
+    }
+
+    /// Whether the "Use as quick shell default" checkbox is offered.
+    pub(crate) fn offers_default(&self) -> bool {
+        self.quick_shell != QuickShellDefault::NotOffered
     }
 
     /// Whether the folder picker is open on this dialog, which disables
@@ -134,7 +165,7 @@ impl ShellForm {
 
     /// Whether Open shell would remember the folder for the quick shell.
     pub(crate) fn save_default(&self) -> bool {
-        self.save_default
+        self.offers_default() && self.save_default
     }
 
     pub(crate) fn toggle_save_default(&mut self) {
@@ -160,16 +191,19 @@ impl ShellForm {
     }
 
     /// The focusable controls, in the order they are drawn; Open shell joins
-    /// them only while it can go, the clear link only while there is a
-    /// folder to clear, and Browse only while `browse` (a picker on this PC
-    /// can answer for the daemon).
+    /// them only while it can go, the checkbox only while the dialog offers
+    /// a quick-shell default, the clear link only while there is a folder
+    /// to clear, and Browse only while `browse` (a picker on this PC can
+    /// answer for the daemon).
     pub(crate) fn controls(&self, folder: &str, browse: bool) -> Vec<ShellControl> {
         let mut ring = vec![ShellControl::Close, ShellControl::Folder];
         if browse {
             ring.push(ShellControl::Browse);
         }
-        ring.push(ShellControl::SaveDefault);
-        if self.remembered {
+        if self.offers_default() {
+            ring.push(ShellControl::SaveDefault);
+        }
+        if self.remembered() {
             ring.push(ShellControl::ClearDefault);
         }
         ring.push(ShellControl::Cancel);
@@ -221,7 +255,7 @@ impl ShellForm {
         self.submitted = true;
         Some(ShellSubmission {
             folder,
-            save_default: self.save_default,
+            save_default: self.save_default(),
         })
     }
 }

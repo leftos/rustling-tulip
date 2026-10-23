@@ -411,25 +411,22 @@ impl RootView {
         cx.notify();
     }
 
-    /// Asks the file or folder picker for `pick`; the answer fills it when
-    /// the wizard is still open. A path goes as picked: the daemon reads it
-    /// on its own host.
+    /// Asks this PC's file or folder picker for `pick` through
+    /// [`RootView::pick_local`], so none opens on a remote host and an
+    /// answer that lands after a switch to one is dropped; the answer fills
+    /// `pick` when the wizard is still open. A path goes as picked.
     fn pick_for_preset(&mut self, pick: Pick, cx: &mut Context<Self>) {
         let Some(dialog) = &self.preset_wizard else {
             return;
         };
         let start = dialog.wizard.pick_start(&pick);
-        let picked = match dialog.wizard.pick_filter(&pick) {
-            Some(filter) => (self.pick_file)(cx, start, filter),
-            None => (self.pick_folder)(cx, start),
+        let picker = match dialog.wizard.pick_filter(&pick) {
+            Some(filter) => crate::Pick::File(filter),
+            None => crate::Pick::Folder,
         };
-        cx.spawn(async move |this, cx| {
-            let picked = picked.await;
-            // Fails only when the view is gone, and its window with it.
-            this.update(cx, |this, cx| this.finish_preset_pick(pick, picked, cx))
-                .ok();
-        })
-        .detach();
+        self.pick_local(picker, start, cx, move |this, picked, cx| {
+            this.finish_preset_pick(pick, picked, cx);
+        });
     }
 
     fn finish_preset_pick(&mut self, pick: Pick, picked: Option<PathBuf>, cx: &mut Context<Self>) {
@@ -450,9 +447,10 @@ impl RootView {
                 .text_color(gpui::rgb(MUTED))
                 .child(text)
         });
+        let pick_refusal = self.capabilities().local_files_refusal();
         let body = match wizard.stage() {
-            Stage::Source => source_body(dialog, cx),
-            Stage::Variables => variables_body(dialog, cx),
+            Stage::Source => source_body(dialog, pick_refusal, cx),
+            Stage::Variables => variables_body(dialog, pick_refusal, cx),
             Stage::Preview => preview_body(dialog),
         };
         let panel = modal_panel("preset-wizard-panel")
@@ -784,13 +782,20 @@ fn radio_row(selector: &'static str, picked: bool, label: String) -> Stateful<Di
 /// What a row's button does to the root view.
 type ViewAction = Box<dyn Fn(&mut RootView, &mut Context<RootView>)>;
 
+/// A path row's Pick… button: the pick a press asks for, and why the button
+/// is disabled (its tooltip) when it is.
+struct PickButton {
+    pick: Pick,
+    refusal: Option<&'static str>,
+}
+
 /// A read-only path with its Pick… button, and Clear when `clear` is
 /// given and the path is set.
 fn path_row(
     selector: &str,
     path: Option<&str>,
     placeholder: &str,
-    on_pick: impl Fn(&mut RootView, &mut Context<RootView>) + 'static,
+    button: PickButton,
     on_clear: Option<ViewAction>,
     cx: &mut Context<RootView>,
 ) -> Div {
@@ -807,14 +812,21 @@ fn path_row(
         .border_color(gpui::rgb(BORDER))
         .text_color(gpui::rgb(if path.is_some() { TEXT } else { MUTED }))
         .child(path.unwrap_or(placeholder).to_owned());
-    let pick = dialog_button(
+    let PickButton { pick, refusal } = button;
+    let pick_enabled = refusal.is_none();
+    let pick_button = dialog_button(
         &format!("{selector}-pick"),
         PICK_LABEL.to_owned(),
         false,
         false,
-        true,
+        pick_enabled,
     )
-    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| on_pick(this, cx)));
+    .when_some(refusal, |button, tip| button.tooltip(tooltip(tip)))
+    .when(pick_enabled, |button| {
+        button.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+            this.pick_for_preset(pick.clone(), cx);
+        }))
+    });
     let clear = on_clear.filter(|_| path.is_some()).map(|on_clear| {
         dialog_button(
             &format!("{selector}-clear"),
@@ -830,12 +842,17 @@ fn path_row(
         .items_center()
         .gap(px(6.0))
         .child(shown)
-        .child(pick)
+        .child(pick_button)
         .children(clear)
 }
 
-/// The Source stage: the allowed sources, then the picked one's field.
-fn source_body(dialog: &PresetWizardDialog, cx: &mut Context<RootView>) -> Div {
+/// The Source stage: the allowed sources, then the picked one's field; its
+/// Pick… is disabled with `pick_refusal` as its tooltip when one is given.
+fn source_body(
+    dialog: &PresetWizardDialog,
+    pick_refusal: Option<&'static str>,
+    cx: &mut Context<RootView>,
+) -> Div {
     let wizard = &dialog.wizard;
     let picked = wizard.source_kind();
     let radios: Vec<Stateful<Div>> = wizard
@@ -854,8 +871,8 @@ fn source_body(dialog: &PresetWizardDialog, cx: &mut Context<RootView>) -> Div {
         })
         .collect();
     let field = match picked {
-        SourceKind::File => file_field(wizard, cx),
-        SourceKind::Folder => folder_field(wizard, cx),
+        SourceKind::File => file_field(wizard, pick_refusal, cx),
+        SourceKind::Folder => folder_field(wizard, pick_refusal, cx),
         SourceKind::Inline => div()
             .flex()
             .flex_col()
@@ -876,12 +893,19 @@ fn source_body(dialog: &PresetWizardDialog, cx: &mut Context<RootView>) -> Div {
         .child(field)
 }
 
-fn file_field(wizard: &PresetWizard, cx: &mut Context<RootView>) -> Div {
+fn file_field(
+    wizard: &PresetWizard,
+    pick_refusal: Option<&'static str>,
+    cx: &mut Context<RootView>,
+) -> Div {
     let row = path_row(
         "preset-source-file",
         wizard.file_path(),
         FILE_PLACEHOLDER,
-        |this, cx| this.pick_for_preset(Pick::SourceFile, cx),
+        PickButton {
+            pick: Pick::SourceFile,
+            refusal: pick_refusal,
+        },
         None,
         cx,
     );
@@ -893,7 +917,11 @@ fn file_field(wizard: &PresetWizard, cx: &mut Context<RootView>) -> Div {
         .child(row)
 }
 
-fn folder_field(wizard: &PresetWizard, cx: &mut Context<RootView>) -> Div {
+fn folder_field(
+    wizard: &PresetWizard,
+    pick_refusal: Option<&'static str>,
+    cx: &mut Context<RootView>,
+) -> Div {
     let note = wizard
         .entry()
         .prompt_sources
@@ -908,7 +936,10 @@ fn folder_field(wizard: &PresetWizard, cx: &mut Context<RootView>) -> Div {
         "preset-source-folder",
         wizard.folder_path(),
         FOLDER_PLACEHOLDER,
-        |this, cx| this.pick_for_preset(Pick::SourceFolder, cx),
+        PickButton {
+            pick: Pick::SourceFolder,
+            refusal: pick_refusal,
+        },
         None,
         cx,
     );
@@ -946,13 +977,18 @@ fn issues_field(dialog: &PresetWizardDialog) -> Div {
         .child(line)
 }
 
-/// The Variables stage: one field per prompted variable.
-fn variables_body(dialog: &PresetWizardDialog, cx: &mut Context<RootView>) -> Div {
+/// The Variables stage: one field per prompted variable; a path field's
+/// Pick… is disabled with `pick_refusal` as its tooltip when one is given.
+fn variables_body(
+    dialog: &PresetWizardDialog,
+    pick_refusal: Option<&'static str>,
+    cx: &mut Context<RootView>,
+) -> Div {
     let wizard = &dialog.wizard;
     let fields: Vec<Div> = wizard
         .prompted_variables()
         .into_iter()
-        .map(|variable| variable_field(dialog, variable, cx))
+        .map(|variable| variable_field(dialog, variable, pick_refusal, cx))
         .collect();
     div().flex().flex_col().gap(px(8.0)).children(fields)
 }
@@ -960,6 +996,7 @@ fn variables_body(dialog: &PresetWizardDialog, cx: &mut Context<RootView>) -> Di
 fn variable_field(
     dialog: &PresetWizardDialog,
     variable: &PresetVariable,
+    pick_refusal: Option<&'static str>,
     cx: &mut Context<RootView>,
 ) -> Div {
     let wizard = &dialog.wizard;
@@ -972,7 +1009,10 @@ fn variable_field(
             &selector,
             path,
             &variable_placeholder(variable),
-            move |this, cx| this.pick_for_preset(pick.clone(), cx),
+            PickButton {
+                pick,
+                refusal: pick_refusal,
+            },
             Some(Box::new(move |this, cx| {
                 this.with_preset_wizard(cx, |wizard| wizard.set_value(&name, String::new()));
             })),

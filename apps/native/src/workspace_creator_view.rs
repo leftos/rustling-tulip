@@ -94,8 +94,9 @@ impl RootView {
         });
         let handle = input.read(cx).focus_handle(cx);
         let focus = cx.on_focus(&handle, window, |this, _, cx| {
+            let browse = this.capabilities().opens_local_files();
             if let Some(dialog) = &mut this.workspace_creator {
-                dialog.creator.set_focus(CreatorControl::Name);
+                dialog.creator.set_focus(CreatorControl::Name, browse);
             }
             cx.notify();
         });
@@ -150,6 +151,7 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let browse = self.capabilities().opens_local_files();
         if let Some(dialog) = &mut self.workspace_creator {
             match control {
                 CreatorControl::FromRepos => dialog.creator.set_mode(CreatorMode::FromRepos),
@@ -157,7 +159,7 @@ impl RootView {
                 CreatorControl::Name
                 | CreatorControl::Browse
                 | CreatorControl::Cancel
-                | CreatorControl::Create => dialog.creator.set_focus(control),
+                | CreatorControl::Create => dialog.creator.set_focus(control, browse),
             }
         }
         match control {

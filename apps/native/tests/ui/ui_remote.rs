@@ -5,6 +5,7 @@
 
 #![expect(
     clippy::expect_used,
+    clippy::panic,
     reason = "a spec fails with the message of the precondition it lost"
 )]
 
@@ -14,10 +15,14 @@ use std::path::Path;
 use std::time::Duration;
 
 use gpui::{Modifiers, TestAppContext, px};
-use protocol::{ClientMessage, DaemonMessage, SessionSnapshot, WorktreeCleanupFailure};
+use protocol::{
+    ClientMessage, DaemonMessage, PresetEntry, PresetTarget, SessionSnapshot, SpawnRequest,
+    SpawnTarget, SplitDirection, WorktreeCleanupFailure,
+};
 use rustling_tulip_native::target::Target;
 use rustling_tulip_native::{Connection, NetCommand, RootView};
-use support::{Fixture, Harness, Opened, TestDir, pane, repo, session, tab};
+use serde_json::json;
+use support::{Fixture, Harness, Opened, TestDir, pane, repo, session, split, tab};
 
 const HOST: &str = "box.tail1234.ts.net";
 const LOCAL_FILES: &str = "Not available on a remote host: this opens files on this PC";
@@ -724,8 +729,8 @@ fn shell_browse_leaves_the_tab_ring_on_remote(cx: &mut TestAppContext) {
     h.keys("tab");
     assert_eq!(
         shell_focus(&mut h),
-        Some("shell-save-default"),
-        "Tab skips Browse on a remote host"
+        Some("shell-cancel"),
+        "Tab skips Browse and the quick-shell default on a remote host"
     );
     h.keys("shift-tab");
     assert_eq!(
@@ -863,5 +868,232 @@ fn no_repos_dialog_keys_reach_no_add_repo_on_remote(cx: &mut TestAppContext) {
     assert!(
         h.root(|root, _| root.spawn_dialog_no_repos()),
         "the dialog stays for Esc or Cancel"
+    );
+}
+
+/// Types `text` into the field that has the keyboard, one key per char.
+fn type_text(h: &mut Harness<'_>, text: &str) {
+    let keys: Vec<String> = text.chars().map(|c| c.to_string()).collect();
+    h.keys(&keys.join(" "));
+}
+
+/// An empty registry on a remote host, then `r1` and its session `s1`
+/// loaded from the host.
+fn remote_with_r1<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let mut h = Harness::with(cx, dir, &Fixture::default());
+    h.set_connection(remote());
+    let mut fixture = Fixture::single(session("s1").in_repo("r1").build());
+    fixture.repos = vec![repo("r1", "D:/src/r1")];
+    h.load(&fixture);
+    h.sent();
+    h
+}
+
+/// A preset of `r1` with `sources` and `variables`, as the wizard's specs
+/// build one.
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "each spec builds its JSON inline at the call"
+)]
+fn preset(sources: serde_json::Value, variables: serde_json::Value) -> PresetEntry {
+    serde_json::from_value(json!({
+        "id": "triage", "name": "Triage", "source_repo_id": "r1",
+        "prompt_sources": sources, "variables": variables,
+        "prompt_template": "{prompt}", "branch_template": "tmp/{index}",
+        "tab_grouping": {"kind": "none"},
+        "injector": {"startup_delay_ms": 0, "pre_input": [], "post_input": []}
+    }))
+    .expect("preset fixture")
+}
+
+/// Opens r1's menu, answers it with `entry` and presses its row.
+fn open_preset_wizard(h: &mut Harness<'_>, entry: PresetEntry) {
+    h.right_click_on("container-repo:r1");
+    h.send(DaemonMessage::Presets {
+        target: PresetTarget::Repo {
+            repo_id: "r1".to_owned(),
+        },
+        entries: vec![entry],
+    });
+    h.click_on("container-menu-launch-preset-0");
+    assert!(
+        h.root(|root, _| root.preset_wizard_open()),
+        "the wizard opened"
+    );
+}
+
+#[gpui::test]
+fn preset_wizard_browse_opens_no_picker_on_remote(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = remote_with_r1(cx, &dir);
+    h.set_picked_file(Some("E:/prompts/bugs.md"));
+    h.set_picked_folder(Some("E:/prompts"));
+
+    let sources = json!([{"kind": "file"}, {"kind": "folder", "relative_path": "docs/prompts"}]);
+    open_preset_wizard(&mut h, preset(sources, json!([])));
+    assert!(tooltip_on(&mut h, "preset-source-file-pick", LOCAL_FILES));
+    h.click_on("preset-source-file-pick");
+    h.click_on("preset-source-kind-folder");
+    assert!(tooltip_on(&mut h, "preset-source-folder-pick", LOCAL_FILES));
+    h.click_on("preset-source-folder-pick");
+    h.click_on("preset-cancel");
+
+    let variables = json!([
+        {"name": "log", "label": "Log file", "kind": {"kind": "file_path", "extensions": ["log"]},
+         "prompt_at_launch": true}
+    ]);
+    open_preset_wizard(&mut h, preset(json!([{"kind": "inline"}]), variables));
+    h.click_on("preset-source-inline-text");
+    type_text(&mut h, "fix");
+    h.click_on("preset-next");
+    assert!(tooltip_on(&mut h, "preset-variable-log-pick", LOCAL_FILES));
+    h.click_on("preset-variable-log-pick");
+
+    assert_eq!(h.file_asks(), 0, "no file picker opens on this PC");
+    assert_eq!(h.folder_asks(), 0, "no folder picker opens on this PC");
+}
+
+/// Seeds `native-ui.json` with `folder` remembered for "+ Shell".
+fn remember_quick_shell(dir: &TestDir, folder: &str) {
+    std::fs::write(
+        dir.path().join("native-ui.json"),
+        json!({ "quick_shell_dir": folder }).to_string(),
+    )
+    .expect("seed native-ui.json");
+}
+
+/// The quick-shell folder `native-ui.json` remembers on disk.
+fn remembered_quick_shell(dir: &TestDir) -> Option<String> {
+    let text = std::fs::read_to_string(dir.path().join("native-ui.json")).expect("a saved layout");
+    let ui: serde_json::Value = serde_json::from_str(&text).expect("native-ui.json is JSON");
+    ui["quick_shell_dir"].as_str().map(str::to_owned)
+}
+
+fn shell_spawns(sent: &[ClientMessage]) -> Vec<SpawnRequest> {
+    sent.iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::SpawnSession(request) => Some(request.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[gpui::test]
+fn quick_shell_sends_no_cwd_on_remote(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    remember_quick_shell(&dir, "C:\\work");
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    h.set_connection(remote());
+    h.sent();
+
+    h.click_on("sidebar-add-shell");
+    let targets: Vec<SpawnTarget> = shell_spawns(&h.sent())
+        .into_iter()
+        .map(|request| request.target)
+        .collect();
+    assert_eq!(
+        targets,
+        [SpawnTarget::Standalone {
+            cwd: None,
+            add_dirs: Vec::new(),
+        }],
+        "this PC's folder is not the host's: the host's daemon picks its default"
+    );
+}
+
+#[gpui::test]
+fn empty_pane_shell_here_sends_no_cwd_on_remote(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    remember_quick_shell(&dir, "C:\\work");
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    h.set_connection(remote());
+    h.load(&Fixture {
+        sessions: vec![session("s1").build()],
+        tabs: vec![tab(
+            "t1",
+            &split(
+                SplitDirection::Horizontal,
+                pane("p1", Some("s1")),
+                pane("p2", None),
+            ),
+        )],
+        ..Fixture::default()
+    });
+    h.sent();
+
+    h.click_on("empty-pane-shell-p2");
+    let targets: Vec<SpawnTarget> = shell_spawns(&h.sent())
+        .into_iter()
+        .map(|request| request.target)
+        .collect();
+    assert_eq!(
+        targets,
+        [SpawnTarget::Standalone {
+            cwd: None,
+            add_dirs: Vec::new(),
+        }],
+        "this PC's folder is not the host's: the host's daemon picks its default"
+    );
+}
+
+#[gpui::test]
+fn quick_shell_tooltip_names_no_local_folder_on_remote(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    remember_quick_shell(&dir, "C:\\work");
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    h.set_connection(remote());
+    assert!(tooltip_on(
+        &mut h,
+        "sidebar-add-shell",
+        "Open a standalone shell in your home folder"
+    ));
+}
+
+#[gpui::test]
+fn shell_dialog_leaves_the_remembered_folder_on_remote(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    remember_quick_shell(&dir, "C:\\work");
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    h.set_connection(remote());
+    h.sent();
+
+    h.open_shell_dialog_from_more();
+    assert_eq!(
+        h.root(RootView::shell_dialog_folder).as_deref(),
+        Some(""),
+        "the field does not start at this PC's folder"
+    );
+    assert!(
+        !h.root(|root, _| root.shell_dialog_saves_default()),
+        "the dialog offers no quick-shell default"
+    );
+    assert!(
+        !h.root(|root, _| root.shell_dialog_clears_default()),
+        "nor to clear one"
+    );
+    assert!(!drawn(&mut h, "shell-save-default"));
+    assert!(!drawn(&mut h, "shell-clear-default"));
+
+    type_text(&mut h, "D:/host");
+    h.click_on("shell-submit");
+    let request = match shell_spawns(&h.sent()).as_slice() {
+        [request] => request.clone(),
+        other => panic!("expected one SpawnSession, sent {other:?}"),
+    };
+    assert_eq!(
+        request.target,
+        SpawnTarget::Standalone {
+            cwd: Some("D:/host".to_owned()),
+            add_dirs: Vec::new(),
+        }
+    );
+    h.send(DaemonMessage::SessionUpdated {
+        session: session("new").shell("D:/host").build(),
+        request_id: request.request_id.clone(),
+    });
+    assert_eq!(
+        remembered_quick_shell(&dir).as_deref(),
+        Some("C:\\work"),
+        "a shell on the host leaves this PC's quick-shell folder alone"
     );
 }

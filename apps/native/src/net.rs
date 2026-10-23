@@ -349,12 +349,16 @@ impl Net {
 
     /// A tailnet host: never a local daemon step. Without a device token for
     /// the host no socket is opened (the `daemon.json` token never leaves
-    /// this machine); with one, dial its listener over TLS and pump it.
+    /// this machine) and, as after the daemon's `AuthFailed`, nothing is
+    /// retried until a command (a target switch or a reconnect); with one,
+    /// dial its listener over TLS and pump it.
     async fn attempt_tailnet(&mut self, host: &TailnetHost) -> Next {
         let Some(token) = (self.deps.token_for)(host.name()) else {
             let reason = format!("no device token for {}", host.name());
-            warn!(%reason, "not connecting to the tailnet host");
-            return self.failed(reason);
+            warn!(%reason, "not connecting to the tailnet host; waiting for a target switch or a reconnect");
+            self.conn.on_auth_failed(reason);
+            self.emit_state();
+            return Next::Wait(None);
         };
         let config = match self.tls_config() {
             Ok(config) => config,
@@ -1149,6 +1153,25 @@ mod tests {
         )
     }
 
+    /// The next state event, up to [`BACKSTOP`].
+    fn next_state(events: &mut UnboundedReceiver<NetEvent>) -> Option<Connection> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("build a test runtime");
+        runtime.block_on(async {
+            let found = async {
+                while let Some(event) = events.next().await {
+                    if let NetEvent::State(conn) = event {
+                        return Some(conn);
+                    }
+                }
+                None
+            };
+            tokio::time::timeout(BACKSTOP, found).await.ok().flatten()
+        })
+    }
+
     /// The network thread on `deps`, connecting to `target` first.
     fn run_net(
         deps: NetDeps,
@@ -1248,7 +1271,7 @@ mod tests {
         assert!(
             saw_state(&mut view_rx, |conn| matches!(
                 conn.state(),
-                State::Error { .. }
+                State::AuthFailed { .. }
             )),
             "the host without a token did not fail"
         );
@@ -1260,7 +1283,7 @@ mod tests {
         assert_eq!(
             next_hello(&seen).as_deref(),
             Some(DEVICE_TOKEN),
-            "SwitchTarget during the backoff did not dial the new host"
+            "SwitchTarget while waiting did not dial the new host"
         );
         assert!(
             saw_state(&mut view_rx, |conn| conn.is_open()
@@ -1299,15 +1322,31 @@ mod tests {
             tailnet_deps(&ca, None),
             Target::tailnet(TLS_HOST, Some(port)),
         );
-        let names_host = |conn: &Connection| matches!(conn.state(), State::Error { reason } if reason.contains(TLS_HOST));
+        let names_host = |conn: &Connection| match conn.state() {
+            State::AuthFailed { reason } | State::Error { reason } => reason.contains(TLS_HOST),
+            _ => false,
+        };
 
         assert!(
             saw_state(&mut view_rx, names_host),
-            "no Error naming the host"
+            "no failure naming the host"
+        );
+        // A retry on the backoff would have reported again well within
+        // this; the passing run always waits it out.
+        std::thread::sleep(crate::connection::backoff_delay(0) * 4);
+        view_tx
+            .unbounded_send(NetCommand::Restart)
+            .expect("net thread is running");
+        assert!(
+            next_state(&mut view_rx).is_some_and(|conn| matches!(conn.state(), State::Connecting)),
+            "the missing token was retried without a command"
         );
         assert!(
-            saw_state(&mut view_rx, names_host),
-            "the missing token was not retried after the backoff"
+            next_state(&mut view_rx).is_some_and(|conn| matches!(
+                conn.state(),
+                State::AuthFailed { reason } if reason.contains(TLS_HOST)
+            )),
+            "Reconnect did not end at the missing token again, as an auth failure"
         );
         assert_eq!(
             seen.try_recv().ok(),

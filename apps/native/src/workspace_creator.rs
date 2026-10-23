@@ -189,9 +189,11 @@ impl WorkspaceCreator {
         self.focus
     }
 
-    /// Moves the keyboard to `control` when the creator draws it.
-    pub(crate) fn set_focus(&mut self, control: CreatorControl) {
-        if self.controls(true).contains(&control) {
+    /// Moves the keyboard to `control` when the creator draws it: the ring
+    /// of [`Self::controls`] with `browse`, so Browse is never focused
+    /// where no picker answers.
+    pub(crate) fn set_focus(&mut self, control: CreatorControl, browse: bool) {
+        if self.controls(browse).contains(&control) {
             self.focus = control;
         }
     }
@@ -535,7 +537,7 @@ mod tests {
 
         creator.begin_parse("C:/work/team.code-workspace".to_owned());
         assert!(creator.parsed(suggestion("team", 2)));
-        creator.set_focus(CreatorControl::Browse);
+        creator.set_focus(CreatorControl::Browse, true);
         creator.move_focus(true, true);
         assert_eq!(
             creator.focus(),
@@ -570,6 +572,24 @@ mod tests {
             creator.focus(),
             CreatorControl::Browse,
             "where a picker answers, Browse is a stop"
+        );
+    }
+
+    #[test]
+    fn browse_is_never_focused_where_no_picker_answers() {
+        let mut creator = WorkspaceCreator::default();
+        creator.set_mode(CreatorMode::FromVscode);
+        creator.set_focus(CreatorControl::Browse, false);
+        assert_eq!(
+            creator.focus(),
+            CreatorControl::FromVscode,
+            "Browse is not drawn in the ring, so the focus stays"
+        );
+        creator.move_focus(true, false);
+        assert_eq!(
+            creator.focus(),
+            CreatorControl::Cancel,
+            "Tab continues from the real focus"
         );
     }
 
