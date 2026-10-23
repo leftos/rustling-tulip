@@ -1065,8 +1065,9 @@ impl SessionRegistry {
         self.insert_pending(record)
     }
 
-    /// Reattach a sidecar whose recorded pid is no longer alive: the previous
-    /// daemon crashed mid-session. Surfaced to clients with
+    /// Reattach a sidecar whose recorded pid is no longer alive: a daemon
+    /// crash, a reboot or a killed process tree ended the session while no
+    /// daemon watched it. Surfaced to clients with
     /// `is_abandoned = true` so the sidebar can offer Resume.
     pub fn insert_abandoned(&self, meta: &OrphanMeta) {
         let (default_label, user_label, label) = resolve_labels_from_meta(meta);
@@ -1111,7 +1112,8 @@ impl SessionRegistry {
         };
         push_recent_action(
             &mut record,
-            "abandoned: daemon crashed before this session finished".to_string(),
+            "abandoned: a daemon crash, a reboot or a killed process tree ended this session"
+                .to_string(),
         );
         self.insert(record);
     }

@@ -29,7 +29,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 use tokio::sync::watch;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// How long an ended session stays in the history.
 pub const HISTORY_RETENTION: TimeDelta = TimeDelta::days(7);
@@ -63,6 +63,9 @@ const SHELL_STEMS: [&str; 6] = ["pwsh", "powershell", "cmd", "bash", "zsh", "sh"
 /// The branch name a recovered repo or workspace spawn asks for when its
 /// session recorded none. Its folders are pinned, so nothing checks it out.
 const PINNED_BRANCH_FALLBACK: &str = "HEAD";
+/// The exit code Windows gives a console child it ends at shutdown or logoff
+/// (`0xC000013A`, `STATUS_CONTROL_C_EXIT`).
+const STATUS_CONTROL_C_EXIT: i32 = -1_073_741_510;
 
 /// Bumped after every history write, so the server can broadcast the new list.
 static CHANGES: LazyLock<watch::Sender<u64>> = LazyLock::new(|| watch::channel(0).0);
@@ -94,10 +97,15 @@ pub fn end_for_exit(exit: PtyExit) -> SessionEnd {
 /// The folder a session started in: its first member's worktree, or a
 /// standalone shell's requested directory.
 pub(crate) fn primary_cwd(rec: &SessionRecord) -> Option<String> {
-    if let Some(first) = rec.members.first() {
+    start_folder(&rec.members, rec.spawn_config.as_ref())
+}
+
+/// The folder a session with `members` and `config` started in.
+fn start_folder(members: &[SessionMember], config: Option<&SpawnConfig>) -> Option<String> {
+    if let Some(first) = members.first() {
         return Some(first.worktree_path.clone());
     }
-    match rec.spawn_config.as_ref().map(|cfg| &cfg.target) {
+    match config.map(|cfg| &cfg.target) {
         Some(SpawnTarget::Standalone { cwd, .. }) => cwd
             .as_deref()
             .map(str::trim)
@@ -140,6 +148,173 @@ pub fn entry_from_record(
         // The provider rides in the spawn config.
         provider: ClaudeProvider::Anthropic,
     }
+}
+
+/// Build the history entry for the session a dead `meta.json` sidecar
+/// describes, ended for `end` at `ended_at`. A `TracerLost` end read at start
+/// has no recorded time, so its `ended_at` is a guess and `end_time_known` is
+/// false; any other end comes with the time its tracer log gives.
+#[must_use]
+pub fn entry_from_meta(
+    meta: &orphan::OrphanMeta,
+    end: SessionEnd,
+    ended_at: DateTime<Utc>,
+) -> HistoryEntry {
+    HistoryEntry {
+        session_id: meta.session_id.clone(),
+        label: meta.label.clone(),
+        kind: meta.kind.clone(),
+        mode: meta.mode,
+        agent: meta.agent.unwrap_or_default(),
+        spawn_config: meta.spawn_config.clone(),
+        members: meta.members.clone(),
+        workspace_id: meta.workspace_id.clone(),
+        primary_cwd: start_folder(&meta.members, meta.spawn_config.as_ref()),
+        current_cwd: meta.current_cwd.clone(),
+        program_name: meta.program_name.clone(),
+        started_at: Some(meta.started_at),
+        ended_at,
+        end,
+        claude_session_id: meta.claude_session_id.clone(),
+        source: HistorySource::Record,
+        recovered_at: None,
+        skip_permissions: None,
+        model: None,
+        end_time_known: !matches!(end, SessionEnd::TracerLost),
+        import_rev: 0,
+        busy_excluded: meta.busy_excluded,
+        // The provider rides in the spawn config.
+        provider: ClaudeProvider::Anthropic,
+    }
+}
+
+/// Record an end for every dead, non-headless sidecar that has no history
+/// entry yet: a session the daemon never saw end, because a reboot, a killed
+/// process tree or a daemon crash took it. A tracer log that says the session
+/// exited or was stopped gives that end and its time, except an exit with
+/// [`STATUS_CONTROL_C_EXIT`], which counts as lost. A lost session is written
+/// as `TracerLost`, ended at the later of its sidecar's `status_since` and its
+/// tracer log's last line, else at its sidecar's modified time, else `now`.
+/// An existing entry is kept untouched, and a session that ended more than
+/// [`HISTORY_RETENTION`] before `now` is not written, since the prune would
+/// delete it in the same start.
+///
+/// Returns the ids written as `TracerLost`: the sessions lost with no end.
+pub fn record_lost_at_start(
+    dirs: &Dirs,
+    dead: &[orphan::OrphanMeta],
+    now: DateTime<Utc>,
+) -> Vec<String> {
+    let mut lost = Vec::new();
+    for meta in dead.iter().filter(|m| m.mode != SessionMode::Headless) {
+        let entry = lost_entry(dirs, meta, now);
+        if now - entry.ended_at > HISTORY_RETENTION {
+            debug!(
+                session_id = %meta.session_id,
+                ended_at = %entry.ended_at,
+                "session ended before the history retention; not recorded"
+            );
+            continue;
+        }
+        match write_if_absent(dirs, &entry) {
+            Ok(true) if entry.end == SessionEnd::TracerLost => lost.push(entry.session_id),
+            Ok(_) => {}
+            Err(err) => warn!(
+                ?err,
+                session_id = %meta.session_id,
+                path = %entry_path(dirs, &meta.session_id).display(),
+                "failed to record a session lost with no end"
+            ),
+        }
+    }
+    lost
+}
+
+/// The entry [`record_lost_at_start`] writes for `meta`.
+fn lost_entry(dirs: &Dirs, meta: &orphan::OrphanMeta, now: DateTime<Utc>) -> HistoryEntry {
+    let log = session_tracer_log(dirs, &meta.session_id);
+    if let Some(summary) = &log
+        && !is_lost(summary.end)
+    {
+        return entry_from_meta(meta, end_from_log(summary.end), summary.last_line_at);
+    }
+    // A tracer logs only lifecycle lines, so its last line can be days older
+    // than the loss; the sidecar's status stamp is rewritten on every change.
+    let last_seen = [meta.status_since, log.map(|summary| summary.last_line_at)]
+        .into_iter()
+        .flatten()
+        .max();
+    let ended_at = last_seen
+        .or_else(|| sidecar_modified(dirs, &meta.session_id))
+        .unwrap_or(now);
+    entry_from_meta(meta, SessionEnd::TracerLost, ended_at)
+}
+
+/// Whether a tracer log's end means the session was lost rather than ended:
+/// no end line, or the exit Windows forces on a console child at shutdown.
+fn is_lost(end: TracerLogEnd) -> bool {
+    matches!(
+        end,
+        TracerLogEnd::Lost
+            | TracerLogEnd::Exited {
+                code: STATUS_CONTROL_C_EXIT
+            }
+    )
+}
+
+/// Rewrite the start-up loss entry of the abandoned session `session_id` as
+/// `StoppedByUser`, keeping every other field: the user dismissed it, so it no
+/// longer counts as a session lost with no end. Only an unrecovered
+/// `TracerLost` entry [`record_lost_at_start`] wrote (its end time unknown) is
+/// rewritten. Returns whether this call rewrote it.
+///
+/// # Errors
+///
+/// The entry could not be written back.
+pub fn dismiss_start_up_loss(dirs: &Dirs, session_id: &str) -> anyhow::Result<bool> {
+    let _guard = lock(&WRITE_LOCK);
+    let Some(mut entry) = read_one(dirs, session_id) else {
+        return Ok(false);
+    };
+    let start_up_loss = entry.end == SessionEnd::TracerLost
+        && !entry.end_time_known
+        && entry.source == HistorySource::Record
+        && entry.recovered_at.is_none();
+    if !start_up_loss {
+        return Ok(false);
+    }
+    entry.end = SessionEnd::StoppedByUser;
+    write_entry(dirs, &entry)?;
+    Ok(true)
+}
+
+/// The summary of `logs/tracer-<id>.log`, when it exists and has a starting
+/// line.
+fn session_tracer_log(dirs: &Dirs, session_id: &str) -> Option<TracerLogSummary> {
+    let path = dirs
+        .config
+        .join("logs")
+        .join(format!("tracer-{session_id}.log"));
+    match std::fs::read(&path) {
+        Ok(bytes) => tracer_log::parse_tracer_log(&String::from_utf8_lossy(&bytes)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => {
+            warn!(?err, path = %path.display(), "failed to read tracer log");
+            None
+        }
+    }
+}
+
+/// When `sessions/<id>/meta.json` was last written.
+fn sidecar_modified(dirs: &Dirs, session_id: &str) -> Option<DateTime<Utc>> {
+    let path = dirs.sessions_dir.join(session_id).join("meta.json");
+    std::fs::metadata(&path)
+        .and_then(|meta| meta.modified())
+        .map(DateTime::<Utc>::from)
+        .map_err(
+            |err| warn!(?err, path = %path.display(), "failed to read the sidecar's modified time"),
+        )
+        .ok()
 }
 
 /// Write `entry` unless the session already has one. Returns `Ok(true)` when
@@ -1510,7 +1685,8 @@ pub(crate) mod test_support {
 #[cfg(test)]
 #[expect(clippy::expect_used, reason = "tests fail loudly on setup errors")]
 mod tests {
-    use super::test_support::{record, scratch_dirs};
+    use super::import_tests::{PWSH_LOG, STOP_LOG, YAAT_LOG, set_mtime, ts, write_log};
+    use super::test_support::{record, scratch_dirs, write_meta_for};
     use super::*;
     use crate::session::SessionRegistry;
 
@@ -1645,6 +1821,172 @@ mod tests {
         assert_eq!(read_one(&dirs, ""), None);
         let _ = std::fs::remove_dir_all(&dirs.config);
     }
+
+    /// A dead sidecar for `id` on disk, carrying a conversation id.
+    fn dead_meta(dirs: &Dirs, id: &str) -> orphan::OrphanMeta {
+        write_meta_for(dirs, id);
+        let mut meta = orphan::load_meta(dirs, id).expect("load meta");
+        meta.claude_session_id = Some(format!("conv-{id}"));
+        meta
+    }
+
+    /// The start every lost-at-start test runs at: a day after its logs.
+    fn now() -> DateTime<Utc> {
+        ts("2026-09-28T00:00:00Z")
+    }
+
+    fn entry_bytes(dirs: &Dirs, id: &str) -> Vec<u8> {
+        std::fs::read(dirs.history_dir().join(format!("{id}.json"))).expect("read entry")
+    }
+
+    #[test]
+    fn lost_at_start_writes_tracer_lost_without_entry() {
+        let dirs = scratch_dirs("lost-writes");
+        let meta = dead_meta(&dirs, "lost");
+        write_log(&dirs, "tracer-lost.log", &YAAT_LOG);
+        let ids = record_lost_at_start(&dirs, &[meta], now());
+        assert_eq!(ids, vec!["lost".to_owned()]);
+        let written = read_one(&dirs, "lost").expect("entry written");
+        assert_eq!(written.end, SessionEnd::TracerLost);
+        assert!(!written.end_time_known, "the time of a lost end is a guess");
+        assert_eq!(written.claude_session_id.as_deref(), Some("conv-lost"));
+        assert_eq!(written.source, HistorySource::Record);
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn lost_at_start_keeps_existing_entry() {
+        let dirs = scratch_dirs("lost-keeps");
+        let meta = dead_meta(&dirs, "kept");
+        write_if_absent(&dirs, &entry("kept", SessionEnd::StoppedByUser, Utc::now()))
+            .expect("pre-write");
+        let before = entry_bytes(&dirs, "kept");
+        let ids = record_lost_at_start(&dirs, &[meta], now());
+        assert!(ids.is_empty(), "a session with an entry is not offered");
+        assert_eq!(entry_bytes(&dirs, "kept"), before);
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn lost_at_start_skips_headless() {
+        let dirs = scratch_dirs("lost-headless");
+        let mut meta = dead_meta(&dirs, "headless");
+        meta.mode = SessionMode::Headless;
+        let ids = record_lost_at_start(&dirs, &[meta], now());
+        assert_eq!(ids, Vec::<String>::new());
+        assert_eq!(read_one(&dirs, "headless"), None);
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn lost_at_start_end_time_from_tracer_log_else_sidecar() {
+        let dirs = scratch_dirs("lost-end-time");
+        let logged = dead_meta(&dirs, "logged");
+        write_log(&dirs, "tracer-logged.log", &YAAT_LOG);
+        let unlogged = dead_meta(&dirs, "unlogged");
+        let sidecar_time = ts("2026-09-27T12:00:00Z");
+        set_mtime(
+            &dirs.sessions_dir.join("unlogged").join("meta.json"),
+            sidecar_time,
+        );
+        let ids = record_lost_at_start(&dirs, &[logged, unlogged], now());
+        assert_eq!(ids, vec!["logged".to_owned(), "unlogged".to_owned()]);
+        let from_log = read_one(&dirs, "logged").expect("logged entry");
+        assert_eq!(from_log.ended_at, ts("2026-09-27T11:09:41.982317Z"));
+        assert!(!from_log.end_time_known);
+        let from_sidecar = read_one(&dirs, "unlogged").expect("unlogged entry");
+        assert_eq!(from_sidecar.ended_at, sidecar_time);
+        assert!(!from_sidecar.end_time_known);
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn lost_at_start_records_exited_or_stopped_from_tracer_log() {
+        let dirs = scratch_dirs("lost-true-end");
+        let exited = dead_meta(&dirs, "exited");
+        write_log(&dirs, "tracer-exited.log", &PWSH_LOG);
+        let stopped = dead_meta(&dirs, "stopped");
+        write_log(&dirs, "tracer-stopped.log", &STOP_LOG);
+        let ids = record_lost_at_start(&dirs, &[exited, stopped], now());
+        assert!(
+            ids.is_empty(),
+            "a session that ended on its own is not offered"
+        );
+        let exited = read_one(&dirs, "exited").expect("exited entry");
+        assert_eq!(exited.end, SessionEnd::Exited { code: 0 });
+        assert_eq!(exited.ended_at, ts("2026-09-27T08:05:00Z"));
+        assert!(exited.end_time_known);
+        let stopped = read_one(&dirs, "stopped").expect("stopped entry");
+        assert_eq!(stopped.end, SessionEnd::StoppedByUser);
+        assert_eq!(stopped.ended_at, ts("2026-09-26T05:09:44.845855Z"));
+        assert!(stopped.end_time_known);
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn lost_at_start_twice_writes_once() {
+        let dirs = scratch_dirs("lost-twice");
+        let meta = dead_meta(&dirs, "twice");
+        let first = record_lost_at_start(&dirs, std::slice::from_ref(&meta), now());
+        assert_eq!(first, vec!["twice".to_owned()]);
+        let before = entry_bytes(&dirs, "twice");
+        let second = record_lost_at_start(&dirs, &[meta], now());
+        assert!(second.is_empty(), "a second start offers nothing");
+        assert_eq!(entry_bytes(&dirs, "twice"), before);
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn lost_at_start_end_time_is_the_later_of_status_since_and_log() {
+        let dirs = scratch_dirs("lost-later-time");
+        let mut status_later = dead_meta(&dirs, "status-later");
+        status_later.status_since = Some(ts("2026-09-27T15:00:00Z"));
+        write_log(&dirs, "tracer-status-later.log", &YAAT_LOG);
+        let mut log_later = dead_meta(&dirs, "log-later");
+        log_later.status_since = Some(ts("2026-09-27T09:00:00Z"));
+        write_log(&dirs, "tracer-log-later.log", &YAAT_LOG);
+        let ids = record_lost_at_start(&dirs, &[status_later, log_later], now());
+        assert_eq!(ids, vec!["status-later".to_owned(), "log-later".to_owned()]);
+        let from_status = read_one(&dirs, "status-later").expect("status-later entry");
+        assert_eq!(from_status.ended_at, ts("2026-09-27T15:00:00Z"));
+        let from_log = read_one(&dirs, "log-later").expect("log-later entry");
+        assert_eq!(from_log.ended_at, ts("2026-09-27T11:09:41.982317Z"));
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn lost_at_start_skips_a_loss_older_than_retention() {
+        let dirs = scratch_dirs("lost-too-old");
+        let meta = dead_meta(&dirs, "old");
+        write_log(&dirs, "tracer-old.log", &YAAT_LOG);
+        let later = ts("2026-09-27T11:09:41.982317Z") + HISTORY_RETENTION + TimeDelta::minutes(1);
+        let ids = record_lost_at_start(&dirs, &[meta], later);
+        assert_eq!(ids, Vec::<String>::new());
+        assert_eq!(read_one(&dirs, "old"), None);
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn lost_at_start_counts_a_shutdown_exit_as_lost() {
+        let dirs = scratch_dirs("lost-shutdown-exit");
+        let meta = dead_meta(&dirs, "shutdown");
+        write_log(
+            &dirs,
+            "tracer-shutdown.log",
+            &[
+                YAAT_LOG[0],
+                YAAT_LOG[1],
+                r"2026-09-27T11:10:00.000000Z  INFO rt_tracer::supervisor: supervisor: child exited; shutting down exit_code=-1073741510",
+            ],
+        );
+        let ids = record_lost_at_start(&dirs, &[meta], now());
+        assert_eq!(ids, vec!["shutdown".to_owned()]);
+        let written = read_one(&dirs, "shutdown").expect("shutdown entry");
+        assert_eq!(written.end, SessionEnd::TracerLost);
+        assert!(!written.end_time_known);
+        assert_eq!(written.ended_at, ts("2026-09-27T11:10:00Z"));
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
 }
 
 #[cfg(test)]
@@ -1657,25 +1999,25 @@ mod import_tests {
     use std::time::SystemTime;
 
     const YAAT_ID: &str = "f6216fc2-54b1-497c-a257-7c297f7d9859";
-    const YAAT_LOG: [&str; 3] = [
+    pub(super) const YAAT_LOG: [&str; 3] = [
         r"2026-09-27T11:09:41.935397Z  INFO rt_tracer: rt-tracer starting session_id=f6216fc2-54b1-497c-a257-7c297f7d9859 cwd=D:\yaat cols=120 rows=32 argc=6",
         r#"2026-09-27T11:09:41.940609Z  INFO rt_tracer::supervisor: supervisor: about to spawn child program=C:\Users\lefto\.local\bin\claude.exe argc=5 args=["--add-dir", "D:\\yaat-server", "--append-system-prompt", "Workspace member paths for this session:\n  yaat         ->  D:\\yaat\n  yaat-server  ->  D:\\yaat-server\n", "--dangerously-skip-permissions"] cwd=D:\yaat"#,
         r"2026-09-27T11:09:41.982317Z  INFO rt_tracer::supervisor: supervisor: client connected iteration=1 session_id=f6216fc2-54b1-497c-a257-7c297f7d9859",
     ];
     const STOP_ID: &str = "22b5a96d-8d81-40e3-a594-498fc639c7cc";
-    const STOP_LOG: [&str; 3] = [
+    pub(super) const STOP_LOG: [&str; 3] = [
         r"2026-09-26T03:53:21.116126Z  INFO rt_tracer: rt-tracer starting session_id=22b5a96d-8d81-40e3-a594-498fc639c7cc cwd=D:\rustling-tulip cols=120 rows=32 argc=2",
         r#"2026-09-26T03:53:21.120000Z  INFO rt_tracer::supervisor: supervisor: about to spawn child program=C:\Users\lefto\.local\bin\claude.exe argc=1 args=["--dangerously-skip-permissions"] cwd=D:\rustling-tulip"#,
         r"2026-09-26T05:09:44.845855Z  INFO rt_tracer::supervisor: supervisor: Stop request received",
     ];
     const PWSH_ID: &str = "0b8f4c1e-1111-4222-8333-944455556666";
-    const PWSH_LOG: [&str; 3] = [
+    pub(super) const PWSH_LOG: [&str; 3] = [
         r"2026-09-27T08:00:00.000000Z  INFO rt_tracer: rt-tracer starting session_id=0b8f4c1e-1111-4222-8333-944455556666 cwd=D:\ cols=120 rows=32 argc=4",
         r#"2026-09-27T08:00:00.010000Z  INFO rt_tracer::supervisor: supervisor: about to spawn child program=pwsh.exe argc=3 args=["-NoExit", "-Command", "$global:__rt_original_prompt = $function:prompt; function global:prompt { \"PS $($PWD.Path)> \" }"] cwd=D:\"#,
         r"2026-09-27T08:05:00.000000Z  INFO rt_tracer::supervisor: supervisor: child exited; shutting down exit_code=0",
     ];
 
-    fn ts(stamp: &str) -> DateTime<Utc> {
+    pub(super) fn ts(stamp: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(stamp)
             .expect("valid timestamp")
             .with_timezone(&Utc)
@@ -1691,7 +2033,7 @@ mod import_tests {
             .expect("workspace fixture")
     }
 
-    fn write_log(dirs: &Dirs, name: &str, lines: &[&str]) -> PathBuf {
+    pub(super) fn write_log(dirs: &Dirs, name: &str, lines: &[&str]) -> PathBuf {
         let logs = dirs.config.join("logs");
         std::fs::create_dir_all(&logs).expect("create logs dir");
         let path = logs.join(name);
@@ -1699,7 +2041,7 @@ mod import_tests {
         path
     }
 
-    fn set_mtime(path: &Path, at: DateTime<Utc>) {
+    pub(super) fn set_mtime(path: &Path, at: DateTime<Utc>) {
         File::options()
             .write(true)
             .open(path)

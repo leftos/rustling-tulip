@@ -121,7 +121,8 @@ pub struct OrphanMeta {
     /// Most recent `recent_actions` from the live session, bounded to a
     /// small set that fits in ~1 KB. Synced on every registry update so
     /// the abandoned-bucket UI can show "what was this session doing
-    /// right before the daemon crashed?". Empty for sidecars written
+    /// right before a daemon crash, a reboot or a killed process tree ended
+    /// it?". Empty for sidecars written
     /// before B.1.
     #[serde(default)]
     pub recent_actions_tail: Vec<String>,

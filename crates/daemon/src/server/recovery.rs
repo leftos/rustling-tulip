@@ -23,7 +23,7 @@ pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> 
             resume_abandoned(hub, &session_id, out_tx).await?;
         }
         ClientMessage::DiscardAbandoned { session_id } => {
-            discard_abandoned(hub, &session_id, out_tx);
+            dismiss_abandoned(hub, &session_id, out_tx);
         }
         ClientMessage::ResumeAllAbandoned => {
             resume_all_abandoned(hub, out_tx).await;
@@ -82,7 +82,8 @@ impl Drop for RecoveryClaim {
 const ALREADY_RECOVERING: &str = "already being recovered";
 
 /// Reattach orphan sessions (alive but detached) and abandoned sessions
-/// (dead, daemon crashed mid-run) before any clients connect so the
+/// (dead: a daemon crash, a reboot or a killed process tree ended them)
+/// before any clients connect so the
 /// initial state snapshot already includes them.
 ///
 /// Post-C.3: orphans whose sidecar carries `tracer_pid` + `tracer_pipe` get
@@ -506,6 +507,16 @@ pub(super) fn mark_history_recovered(hub: &Hub, session_id: &str) {
     }
 }
 
+/// The user's Dismiss of an abandoned session: its start-up loss entry
+/// becomes `StoppedByUser`, so it stops counting as a session to recover, and
+/// the session is discarded.
+fn dismiss_abandoned(hub: &Hub, session_id: &str, out_tx: &mpsc::UnboundedSender<DaemonMessage>) {
+    if let Err(err) = history::dismiss_start_up_loss(&hub.dirs, session_id) {
+        warn!(?err, %session_id, "failed to record the dismissed session as stopped");
+    }
+    discard_abandoned(hub, session_id, out_tx);
+}
+
 /// Remove an abandoned session from the registry + delete its sidecar.
 /// Used both as the cleanup step after a successful Resume and as the
 /// user-initiated "Dismiss" action for sessions they don't want to
@@ -629,6 +640,24 @@ mod tests {
         let entry = history::read_one(&hub.dirs, "lost").expect("entry kept");
         assert!(entry.recovered_at.is_some(), "marked recovered");
         assert_eq!(entry.end, SessionEnd::TracerLost, "no second end written");
+    }
+
+    #[tokio::test]
+    async fn dismissing_a_start_up_loss_records_stopped_by_user() {
+        let (hub, _scratch) = spawnless_test_hub("dismiss-start-up-loss");
+        crate::history::test_support::write_meta_for(&hub.dirs, "lost");
+        let meta = orphan::load_meta(&hub.dirs, "lost").expect("load meta");
+        let ids = history::record_lost_at_start(&hub.dirs, std::slice::from_ref(&meta), Utc::now());
+        assert_eq!(ids, vec!["lost".to_owned()]);
+        let lost = history::read_one(&hub.dirs, "lost").expect("start-up entry");
+        hub.sessions.insert_abandoned(&meta);
+        let (out_tx, _out_rx) = mpsc::unbounded_channel();
+        dismiss_abandoned(&hub, "lost", &out_tx);
+        assert!(hub.sessions.get("lost").is_none(), "dismissed");
+        let entry = history::read_one(&hub.dirs, "lost").expect("entry kept");
+        assert_eq!(entry.end, SessionEnd::StoppedByUser);
+        assert_eq!(entry.ended_at, lost.ended_at, "the loss time is kept");
+        assert_eq!(entry.recovered_at, None);
     }
 
     #[tokio::test]

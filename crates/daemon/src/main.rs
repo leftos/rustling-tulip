@@ -130,11 +130,11 @@ async fn main() -> anyhow::Result<()> {
     let processes = running_processes();
     sweep_binary_cache(&dirs, &live, &dead, &processes);
     reap_orphan_tracers(&dirs, &live, &dead, &processes);
-    // Pre-B.2: dead sidecars were unconditionally deleted, losing recovery
-    // context. Now we keep them — they become "abandoned" sessions the user
-    // can Resume (replay spawn config + last_prompt against a fresh process)
-    // or Discard from the sidebar. The sidecar stays on disk until one of
-    // those handlers consumes it.
+    // A dead sidecar is a session that died while no daemon watched it: a
+    // daemon crash, a reboot or a killed process tree. It is kept as an
+    // "abandoned" session the user can Resume (replay spawn config +
+    // last_prompt against a fresh process) or Discard from the sidebar. The
+    // sidecar stays on disk until one of those handlers consumes it.
 
     // Persisted tabs reference session ids that may no longer be valid. After
     // orphan recovery, clear panes that point at dead sessions and drop tabs
@@ -146,6 +146,11 @@ async fn main() -> anyhow::Result<()> {
     // a Resume swaps the abandoned session out for the freshly-spawned one
     // without the user losing their layout.
     prune_stale_tabs(&state, &live, &dead);
+    let resume_ids = history::record_lost_at_start(&dirs, &dead, chrono::Utc::now());
+    info!(
+        count = resume_ids.len(),
+        "sessions lost with no end recorded at start"
+    );
     import_tracer_logs(&dirs, &state, &live, &dead);
     prune_and_seal_history(&dirs, chrono::Utc::now());
 
