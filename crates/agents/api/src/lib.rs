@@ -3,7 +3,7 @@
 //! Each agent CLI the daemon knows how to spawn is an [`Agent`]: it describes
 //! itself and its option schema with an [`AgentDescriptor`], builds the CLI's
 //! argv from its typed options and a [`SpawnContext`], names the CLI's
-//! executable, writes the hook settings file its interactive spawns pass, and
+//! executable, plans the hook files and argv its interactive spawns carry, and
 //! turns the CLI's headless output into [`HeadlessEvent`]s the daemon applies
 //! to the session.
 //!
@@ -48,12 +48,49 @@ pub struct SpawnContext<'a> {
     /// adds them after the extra members' worktrees; headless spawns ignore
     /// them.
     pub add_dirs: &'a [String],
-    /// The settings file the plugin passes its CLI on an interactive spawn,
-    /// fresh or resumed: the file the daemon wrote for the session from
-    /// [`Agent::hook_settings_file`]. `None` for a spawn whose file could not
-    /// be written, which stays on the terminal heuristic. Headless spawns
-    /// never carry it.
-    pub settings_file: Option<&'a Path>,
+    /// The argv the plugin's hooks add on an interactive spawn, fresh or
+    /// resumed: [`Agent::hook_plan`]'s args with each `{file:<name>}` replaced
+    /// by the path the daemon wrote for it. Empty for a spawn whose hook
+    /// files could not be written, which stays on the terminal heuristic.
+    /// Headless spawns never carry it.
+    pub hook_args: &'a [String],
+}
+
+/// What a plugin builds its hook command from: the cached `rt-tracer.exe`
+/// whose `hook` shim the hooks run, the session they report for, and the
+/// daemon's config dir, where the shim reads the daemon's port and auth token.
+pub struct HookShim<'a> {
+    /// The cached tracer the session's spawn runs, so the hook command and the
+    /// supervisor cannot disagree about which copy runs the shim.
+    pub tracer_exe: &'a Path,
+    /// The session the hooks report for.
+    pub session_id: &'a str,
+    /// The daemon's config dir.
+    pub config_dir: &'a Path,
+}
+
+/// One file of a [`HookPlan`], written into the session's own
+/// `sessions/<id>/` directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HookFile {
+    /// The file's name inside the session directory: a plain `.json` file
+    /// name, never a path.
+    pub name: String,
+    /// What the file holds.
+    pub contents: String,
+}
+
+/// What a plugin's hooks need: the files the daemon writes into the session's
+/// own directory, and the argv it appends to the spawn with each
+/// `{file:<name>}` replaced by the written file's path. An empty plan means
+/// the agent gets no hooks.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HookPlan {
+    /// The files to write, in order.
+    pub files: Vec<HookFile>,
+    /// The argv to append, each `{file:<name>}` a placeholder for one of
+    /// [`Self::files`].
+    pub args: Vec<String>,
 }
 
 /// One change a plugin read from a line of its CLI's headless output, for the
@@ -362,18 +399,12 @@ pub trait Agent: Send + Sync + 'static {
         Vec::new()
     }
 
-    /// The contents of the hook settings file an interactive spawn of this
-    /// CLI passes, or `None` for a CLI that takes none. `tracer_exe` is the
-    /// cached tracer whose `hook` shim the hooks run, `session_id` the
-    /// session they report for, and `config_dir` the daemon's config dir,
-    /// where the shim reads the daemon's port and auth token.
-    fn hook_settings_file(
-        &self,
-        _tracer_exe: &Path,
-        _session_id: &str,
-        _config_dir: &Path,
-    ) -> Option<String> {
-        None
+    /// The hook files and argv an interactive spawn of this CLI carries, or an
+    /// empty plan for a CLI that takes none. The daemon writes the plan's
+    /// files into the session's own directory and appends the plan's args to
+    /// the spawn with each `{file:<name>}` replaced by the written path.
+    fn hook_plan(&self, _opts: &Self::Options, _trusted: bool, _shim: &HookShim<'_>) -> HookPlan {
+        HookPlan::default()
     }
 }
 
@@ -445,13 +476,17 @@ pub trait AgentPlugin: Send + Sync {
     /// See [`Agent::parse_headless_line`].
     fn parse_headless_line(&self, line: &str) -> Vec<HeadlessEvent>;
 
-    /// See [`Agent::hook_settings_file`].
-    fn hook_settings_file(
+    /// [`Agent::hook_plan`] over `opts` decoded.
+    ///
+    /// # Errors
+    ///
+    /// One naming the agent when `opts` do not decode.
+    fn hook_plan(
         &self,
-        tracer_exe: &Path,
-        session_id: &str,
-        config_dir: &Path,
-    ) -> Option<String>;
+        opts: &OptionValues,
+        trusted: bool,
+        shim: &HookShim<'_>,
+    ) -> Result<HookPlan, AgentError>;
 
     /// Resolve the executable path (the env-var override, or the default).
     /// Concrete `which`/shim resolution lives in the daemon's
@@ -539,13 +574,14 @@ impl<A: Agent> AgentPlugin for A {
         Agent::parse_headless_line(self, line)
     }
 
-    fn hook_settings_file(
+    fn hook_plan(
         &self,
-        tracer_exe: &Path,
-        session_id: &str,
-        config_dir: &Path,
-    ) -> Option<String> {
-        Agent::hook_settings_file(self, tracer_exe, session_id, config_dir)
+        opts: &OptionValues,
+        trusted: bool,
+        shim: &HookShim<'_>,
+    ) -> Result<HookPlan, AgentError> {
+        let opts = decode_options(self, opts)?;
+        Ok(Agent::hook_plan(self, &opts, trusted, shim))
     }
 }
 
@@ -909,8 +945,27 @@ mod tests {
             conversation_id: None,
             resume_conversation: None,
             add_dirs: &[],
-            settings_file: None,
+            hook_args: &[],
         }
+    }
+
+    #[test]
+    fn a_plugin_without_hooks_plans_nothing() {
+        let plugin: &dyn AgentPlugin = &TestAgent::default();
+        let good = values(&[
+            ("mode", text("slow")),
+            ("sandbox", OptionValue::Bool(true)),
+            ("profile", OptionValue::Null),
+        ]);
+        let shim = HookShim {
+            tracer_exe: Path::new("C:/rt/binaries/rt-tracer.exe"),
+            session_id: "s-1",
+            config_dir: Path::new("C:/rt/config"),
+        };
+        assert_eq!(
+            plugin.hook_plan(&good, false, &shim),
+            Ok(HookPlan::default())
+        );
     }
 
     #[test]

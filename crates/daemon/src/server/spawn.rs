@@ -562,9 +562,9 @@ impl SpawnArgs {
             conversation_id: None,
             resume_conversation: self.resume_conversation.as_deref(),
             add_dirs: &self.add_dirs,
-            // Only `spawn_interactive_session` writes a settings file and
-            // overrides this.
-            settings_file: None,
+            // Only `spawn_interactive_session` writes hook files and overrides
+            // this.
+            hook_args: &[],
         }
     }
 }
@@ -984,14 +984,20 @@ async fn spawn_interactive_session(
         &stored_config.extra_env,
     )
     .await;
-    // The argv names the injected settings file, so it is written before the
-    // argv is built. Only Claude takes it; a failure leaves this spawn on the
-    // heuristic.
-    let hook_settings = write_hook_settings(hub, &session_id, agent);
+    // The argv names the hook files, so they are written before the argv is
+    // built. A plugin without hooks plans none; a failure leaves this spawn on
+    // the heuristic.
+    let hook_settings = write_hook_settings(
+        hub,
+        &session_id,
+        agent,
+        &cfg.options,
+        cfg.dangerously_skip_permissions,
+    );
     let common = SpawnContext {
         conversation_id: claude_session_id.as_deref(),
         resume_conversation: resume_conversation.as_deref(),
-        settings_file: hook_settings.as_ref().map(HookSettings::path),
+        hook_args: hook_settings.as_ref().map_or(&[], HookSettings::args),
         ..cfg.common()
     };
     // An agent whose descriptor says it can run inside a shell is typed into
@@ -1275,7 +1281,13 @@ async fn spawn_plain_shell_session(
         .as_ref()
         .is_some_and(|injector| injector.startup == protocol::InjectorStartup::ShellPrompt)
     {
-        write_hook_settings(hub, &session_id, cfg.agent())
+        write_hook_settings(
+            hub,
+            &session_id,
+            cfg.agent(),
+            &cfg.options,
+            cfg.dangerously_skip_permissions,
+        )
     } else {
         None
     };
@@ -1413,7 +1425,7 @@ async fn spawn_plain_shell_session(
     // the hook settings file this spawn wrote, or the hookless form when it
     // wrote none.
     if let Some(mut injector) = cfg.prompt_injector.clone() {
-        let settings = hook_settings.as_ref().map(HookSettings::path);
+        let settings = hook_settings.as_ref().and_then(HookSettings::path);
         for step in &mut injector.steps {
             if let protocol::InjectorStep::Text { content, .. } = step {
                 *content = render_shell_resume(content, settings);
@@ -2345,7 +2357,7 @@ mod tests {
             conversation_id: None,
             resume_conversation: None,
             add_dirs: &[],
-            settings_file: None,
+            hook_args: &[],
         };
         let member = SessionMember {
             repo_id: "r0".to_string(),
@@ -2473,6 +2485,17 @@ mod tests {
         )
     }
 
+    /// Claude's options as a spawn request sends them.
+    fn claude_options() -> protocol::OptionValues {
+        options_from_request(
+            &protocol::AgentOptions::Claude {
+                permission_mode: None,
+                provider: protocol::ClaudeProvider::Anthropic,
+            },
+            None,
+        )
+    }
+
     #[tokio::test]
     async fn a_failed_tracer_spawn_removes_its_hook_settings() {
         let (hub, scratch) = hook_test_hub("hook-settings-cleanup");
@@ -2484,7 +2507,7 @@ mod tests {
         // The writer itself works on this hub: it answers `Some` and leaves the
         // file on disk. Discarding the probe first keeps the assertions after
         // the spawn about what the spawn wrote, not about the probe.
-        let probe = write_hook_settings(&hub, session_id, Agent::Claude)
+        let probe = write_hook_settings(&hub, session_id, Agent::Claude, &claude_options(), false)
             .expect("this hub resolves a cached tracer");
         assert!(file.exists(), "the writer wrote the settings file");
         probe.discard(session_id);
@@ -2506,8 +2529,8 @@ mod tests {
         // A file already at the id is gone afterwards only if the spawn itself
         // rewrote and then removed it — a spawn that skipped the writer would
         // leave the marker behind. The dir pre-existed, so this spawn keeps it.
-        let marker =
-            write_hook_settings(&hub, session_id, Agent::Claude).expect("writes the marker file");
+        let marker = write_hook_settings(&hub, session_id, Agent::Claude, &claude_options(), false)
+            .expect("writes the marker file");
         assert!(file.exists(), "the marker is there before the second spawn");
         let error = failing_interactive_claude_spawn(&hub, &folder, session_id).await;
         assert!(error.contains("spawning claude via tracer"), "{error}");
