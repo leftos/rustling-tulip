@@ -267,7 +267,7 @@ pub(super) async fn shutdown_all(hub: &Hub) {
 const SCROLLBACK_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Atomic `LoadScrollback`: pull the scrollback bytes AND the
-/// `broadcast::Receiver` positioned at the next un-persisted PTY chunk from
+/// live receiver that starts at the next un-persisted PTY chunk from
 /// `attach_lifecycle`'s task, spawn a per-client forwarder using that receiver
 /// (so future PTY bytes for this session reach this WS client), and finally
 /// reply with the Scrollback frame. Doing all three in one handler closes the
@@ -333,8 +333,9 @@ async fn load_scrollback_and_attach_forwarder(
 }
 
 /// Queues the snapshot's `Scrollback` reply, then starts the per-client
-/// forwarder for its live receiver. The receiver was subscribed when the
-/// snapshot was taken, so output produced meanwhile waits in it; and since
+/// forwarder for its live receiver. The lifecycle task has been sending every
+/// chunk after the snapshot into it, so output produced meanwhile waits in it;
+/// and since
 /// `out_tx` is a FIFO, the reply reaches the client before any `PtyOutput`
 /// from the new forwarder.
 async fn reply_then_forward(
@@ -368,28 +369,16 @@ async fn reply_then_forward(
     let out = out_tx.clone();
     let sid = session_id.to_string();
     let handle = tokio::spawn(async move {
-        loop {
-            match live.recv().await {
-                Ok(bytes) => {
-                    let data_b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-                    if out
-                        .send(DaemonMessage::PtyOutput {
-                            session_id: sid.clone(),
-                            data_b64,
-                        })
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-                Err(broadcast::error::RecvError::Lagged(n)) => {
-                    warn!(
-                        session_id = %sid,
-                        lagged = n,
-                        "per-client pty forwarder lagged"
-                    );
-                }
-                Err(broadcast::error::RecvError::Closed) => break,
+        while let Some(bytes) = live.recv().await {
+            let data_b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+            if out
+                .send(DaemonMessage::PtyOutput {
+                    session_id: sid.clone(),
+                    data_b64,
+                })
+                .is_err()
+            {
+                break;
             }
         }
     });
@@ -1264,7 +1253,7 @@ mod tests {
     /// forwarder spawned before the reply is queued gets the chance to win.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn scrollback_reply_precedes_live_output_and_echoes_the_request_id() {
-        let (live_tx, live) = broadcast::channel(8);
+        let (live_tx, live) = mpsc::unbounded_channel();
         live_tx.send(b"after".to_vec()).unwrap();
         let snap = ScrollbackSnapshot {
             data: b"history".to_vec(),
