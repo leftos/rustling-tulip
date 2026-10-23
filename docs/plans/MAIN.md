@@ -12,8 +12,10 @@
 - [ ] RT-243 Split tailnet Supervisor::run and carry the real CertFailed reason
 - [ ] RT-258 Remote mode: don't send this PC's remembered folders to a remote host
 - [ ] RT-171 Phase 5a: pane drag-and-drop (P5.1–P5.5) · release vNext
-  - [ ] RT-233 P5.5: Drag a leaf onto a pane or a tab pill · release vNext
 - [ ] RT-152 P6.3: Host picker from the tailnet's machines, typed-name fallback, boot reconnect · release vNext
+  - [ ] RT-352 P6.3 A2b: Reset the old host's state and the exit dialog on a target switch · release vNext
+  - [ ] RT-353 P6.3 B: Tailnet peers, saved hosts and the boot target (model) · release vNext
+  - [ ] RT-354 P6.3 C: Host picker view and the Connections button · release vNext
 - [ ] RT-257 P6.2b: typed host path for Add repo and Browse on a remote host · release vNext
 - [ ] RT-173 Import remote sessions: offer to arrange a remote host's sessions when their count changed · release vNext
 - [ ] RT-158 P6.6: Remote tests over a fake Tailscale, hand checklist, and the docs pass · release vNext
@@ -21,7 +23,6 @@
 - [ ] RT-166 TS.3b: device tokens issued only after the owner approves the device on the host PC · release vNext
 - [ ] RT-278 Prove the daemon holds the token before a client reuses, retires or kills it
 - [ ] RT-331 Built-in text and Markdown viewer with Open in default app and an always-external setting · release vNext
-  - [ ] RT-335 RT-331 S3a: Viewer tab kind in the protocol and daemon tab store · release vNext
   - [ ] RT-336 RT-331 S3b: Viewer tabs in the native tab model · release vNext
   - [ ] RT-337 RT-331 S4: Text viewer view and link/fetch routing · release vNext
   - [ ] RT-338 RT-331 S5: Markdown core on pulldown-cmark · release vNext
@@ -29,6 +30,7 @@
   - [ ] RT-340 RT-331 S7: Viewer line selection, find and reload · release vNext
   - [ ] RT-341 RT-331 S8: Viewer docs and task index rows · release vNext
 - [ ] RT-343 Keep name, look and sidebar place when Recover respawns a session
+- [ ] RT-349 Restart conversation discovery for sessions reattached after a daemon restart
 
 ## Wave 1a — Claude sessions on DeepSeek
 
@@ -204,10 +206,10 @@
 
 ## macOS
 
-- [!] RT-46 Verify macOS support M0–M3 on real Mac hardware
-- [ ] RT-82 DI.6: macOS dictation through SFSpeechRecognizer and right Option
-- [ ] RT-47 M4: macOS packaging, signing and notarization
-- [ ] RT-246 Compile-check the macOS and Linux autostart modules, and decide --detach for the LaunchAgent
+- [!] RT-46 Verify macOS support M0–M3 on real Mac hardware · release vNext
+- [ ] RT-82 DI.6: macOS dictation through SFSpeechRecognizer and right Option · release vNext
+- [ ] RT-47 M4: macOS packaging, signing and notarization · release vNext
+- [ ] RT-246 Compile-check the macOS and Linux autostart modules, and decide --detach for the LaunchAgent · release vNext
 
 ## Agent CLIs
 
