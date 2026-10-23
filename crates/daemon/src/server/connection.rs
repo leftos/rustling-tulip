@@ -247,6 +247,17 @@ fn spawn_state_forwarder(
                         ordered_ids,
                     });
                 }
+                Ok(StateEvent::MockShown {
+                    session_id,
+                    title,
+                    path,
+                }) => {
+                    let _ = out_tx.send(DaemonMessage::MockShown {
+                        session_id,
+                        title,
+                        path,
+                    });
+                }
                 Ok(StateEvent::RepoStatus {
                     repo_id,
                     worktree_path,

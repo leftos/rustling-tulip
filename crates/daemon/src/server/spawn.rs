@@ -552,6 +552,7 @@ impl SpawnArgs {
             // Only `spawn_interactive_session` writes a settings file and
             // overrides this.
             hook_settings: None,
+            mcp_config: None,
         }
     }
 }
@@ -809,6 +810,7 @@ async fn spawn_interactive_session(
     let common = CommonSpawnFields {
         claude_session_id: claude_session_id.as_deref(),
         hook_settings: hook_settings.as_ref().map(HookSettings::path),
+        mcp_config: hook_settings.as_ref().and_then(HookSettings::mcp_config),
         ..cfg.common()
     };
     let args = backend.build_interactive_args(

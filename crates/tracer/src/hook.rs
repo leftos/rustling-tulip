@@ -67,17 +67,17 @@ enum Proof {
     NoResponse,
 }
 
-/// The `hook` subcommand's arguments.
-struct Args {
-    session_id: String,
-    config_dir: PathBuf,
+/// The `hook` and `mcp` subcommands' arguments.
+pub(crate) struct Args {
+    pub(crate) session_id: String,
+    pub(crate) config_dir: PathBuf,
 }
 
 impl Args {
     /// Parses `--session <id> --config-dir <dir>`. Anything else, a missing
     /// argument, or a session id outside `[A-Za-z0-9_-]` is `None`, which the
     /// caller turns into a silent exit 0.
-    fn parse(argv: &[OsString]) -> Option<Self> {
+    pub(crate) fn parse(argv: &[OsString]) -> Option<Self> {
         let mut session_id: Option<String> = None;
         let mut config_dir: Option<PathBuf> = None;
         let mut rest = argv.iter();
@@ -123,7 +123,7 @@ fn is_safe_token(token: &str) -> bool {
 /// The port changes on every daemon start and a tracer-backed session outlives
 /// the daemon, so the shim reads both per call rather than taking them from
 /// the spawn.
-struct Daemon {
+pub(crate) struct Daemon {
     port: u16,
     token: String,
 }
@@ -203,7 +203,7 @@ fn arm_read(stream: &TcpStream, deadline: Instant) -> bool {
 }
 
 /// The daemon's handshake, read fresh on every call.
-fn read_daemon(config_dir: &Path) -> Option<Daemon> {
+pub(crate) fn read_daemon(config_dir: &Path) -> Option<Daemon> {
     let text = std::fs::read_to_string(config_dir.join("daemon.json")).ok()?;
     let value: serde_json::Value = serde_json::from_str(&text).ok()?;
     let port = u16::try_from(value.get("port")?.as_u64()?).ok()?;
@@ -380,7 +380,32 @@ fn post(
     started_nanos: u128,
     deadline: Instant,
 ) -> Outcome {
-    if !is_safe_session_id(session_id) || !is_safe_token(&daemon.token) {
+    if !is_safe_session_id(session_id) {
+        return Outcome::Skipped;
+    }
+    post_json(
+        daemon,
+        &format!("/hook/{session_id}"),
+        &format!("X-RT-Hook-Time: {started_nanos}\r\n"),
+        body,
+        deadline,
+    )
+}
+
+/// POSTs `body` verbatim as JSON to the daemon's `route`, once the listener
+/// has proved on the same connection that it holds the daemon token.
+///
+/// `extra_headers` is zero or more complete `Name: value\r\n` lines the caller
+/// builds from values it trusts. A route that is not a visible-ASCII path, or
+/// an unsafe token, sends nothing.
+pub(crate) fn post_json(
+    daemon: &Daemon,
+    route: &str,
+    extra_headers: &str,
+    body: &[u8],
+    deadline: Instant,
+) -> Outcome {
+    if !route.starts_with('/') || !is_safe_token(route) || !is_safe_token(&daemon.token) {
         return Outcome::Skipped;
     }
     let mut challenge = [0u8; 32];
@@ -402,10 +427,10 @@ fn post(
     }
     let mut writer = &stream;
     let request = format!(
-        "POST /hook/{session_id} HTTP/1.1\r\n\
+        "POST {route} HTTP/1.1\r\n\
          Host: 127.0.0.1:{port}\r\n\
          Authorization: Bearer {token}\r\n\
-         X-RT-Hook-Time: {started_nanos}\r\n\
+         {extra_headers}\
          Content-Type: application/json\r\n\
          Content-Length: {length}\r\n\
          Connection: close\r\n\

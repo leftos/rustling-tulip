@@ -15,6 +15,7 @@ use tracing::info;
 mod hook;
 #[cfg(windows)]
 mod job_object;
+mod mcp;
 mod ring;
 mod supervisor;
 
@@ -62,6 +63,12 @@ fn main() -> anyhow::Result<()> {
     // here, at the earliest point the process can take one.
     if std::env::args_os().nth(1).is_some_and(|arg| arg == "hook") {
         hook::run_from_env(hook::unix_nanos());
+        return Ok(());
+    }
+    // `rt-tracer mcp` is the stdio MCP server an agent session's injected
+    // `--mcp-config` runs (see `mcp`): plain synchronous std, no runtime.
+    if std::env::args_os().nth(1).is_some_and(|arg| arg == "mcp") {
+        mcp::run_from_env();
         return Ok(());
     }
 

@@ -14,6 +14,7 @@ mod git;
 mod tabs;
 
 mod hooks;
+mod mock;
 mod recovery;
 mod settings;
 pub(crate) use self::recovery::RecoveryClaims;
@@ -31,6 +32,7 @@ pub(crate) use self::spawn::{render_shell_resume, resolve_env_refs};
 use self::connection::{AuthKind, ConnCtx, cancel_fetch, client_session, start_fetch};
 use self::git::repo_target_or_err;
 use self::hooks::{hook_handler, presented_bearer, proof_handler};
+use self::mock::mock_handler;
 use self::recovery::{reattach_orphans, start_history_broadcaster};
 use self::remote::{
     configure_remote, host_only_refusal, remove_retired_lan_files, start_remote_access,
@@ -160,6 +162,12 @@ pub enum StateEvent {
     SessionsReordered {
         container_id: String,
         ordered_ids: Vec<String>,
+    },
+    /// An agent's `show_mock` page, written to `path` for `session_id`.
+    MockShown {
+        session_id: String,
+        title: String,
+        path: String,
     },
     /// Broadcast after a successful stage/unstage/commit/discard so every
     /// connected source-control sidebar refreshes without each window having
@@ -404,6 +412,7 @@ fn build_loopback_router(hub: Hub) -> Router {
         .route("/shutdown", post(shutdown_handler))
         .route("/proof", get(proof_handler))
         .route("/hook/{session_id}", post(hook_handler))
+        .route("/mock/{session_id}", post(mock_handler))
         .with_state(hub)
 }
 

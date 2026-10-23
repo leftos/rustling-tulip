@@ -44,6 +44,8 @@ pub struct CommonSpawnFields<'a> {
     /// whose file could not be written, which stays on the terminal
     /// heuristic. Headless spawns never carry it.
     pub hook_settings: Option<&'a Path>,
+    /// The file the Claude backend passes as `--mcp-config` on an interactive spawn; `None` when none was written.
+    pub mcp_config: Option<&'a Path>,
 }
 
 /// Implemented once per supported CLI. Methods are designed so the caller

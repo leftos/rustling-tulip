@@ -60,6 +60,12 @@ impl AgentBackend for ClaudeBackend {
             args.push("--settings".to_string());
             args.push(settings.to_string_lossy().into_owned());
         }
+        // `--mcp-config` is variadic, so only flags may follow it: everything
+        // pushed after this point is one.
+        if let Some(config) = common.mcp_config {
+            args.push("--mcp-config".into());
+            args.push(config.to_string_lossy().into_owned());
+        }
         // A resumed conversation keeps its own id and history, so it takes
         // neither a fresh `--session-id` nor a kickoff prompt.
         if let Some(id) = common.resume_conversation {
@@ -350,6 +356,7 @@ mod tests {
             resume_conversation: None,
             add_dirs: &[],
             hook_settings: None,
+            mcp_config: None,
         }
     }
 
@@ -494,6 +501,28 @@ mod tests {
                 RESUME_ID,
             ]
         );
+    }
+
+    const MCP_CONFIG: &str = "X:/rt/sessions/0b6f4c7e-1111-4222-8333-944455556666/mcp-config.json";
+
+    #[test]
+    fn interactive_args_carry_the_mcp_config_after_settings() {
+        let m = members(&["X:/dev/a"]);
+        let opts = AgentOptions::claude(None);
+        let fresh = CommonSpawnFields {
+            hook_settings: Some(Path::new(HOOK_SETTINGS)),
+            mcp_config: Some(Path::new(MCP_CONFIG)),
+            ..with_session_id(false, None, false)
+        };
+        let resumed = CommonSpawnFields {
+            resume_conversation: Some(RESUME_ID),
+            ..fresh
+        };
+        let expected = ["--settings", HOOK_SETTINGS, "--mcp-config", MCP_CONFIG];
+        for common in [&fresh, &resumed] {
+            let args = ClaudeBackend.build_interactive_args(&opts, common, &m, None);
+            assert!(args.windows(4).any(|window| window == expected), "{args:?}");
+        }
     }
 
     #[test]

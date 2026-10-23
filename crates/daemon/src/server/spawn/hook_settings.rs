@@ -19,12 +19,20 @@ pub(super) struct HookSettings {
     /// True when writing the file created `sessions/<id>/`; a spawn that then
     /// fails removes only a directory it made.
     created_dir: bool,
+    /// The `--mcp-config` file beside the settings file, `None` when its write
+    /// failed.
+    mcp_config: Option<PathBuf>,
 }
 
 impl HookSettings {
     /// The file the spawn passes as `--settings`.
     pub(super) fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// The file the spawn passes as `--mcp-config`, when it was written.
+    pub(super) fn mcp_config(&self) -> Option<&Path> {
+        self.mcp_config.as_deref()
     }
 
     /// Remove what this spawn wrote after the tracer spawn that would have run
@@ -41,6 +49,9 @@ impl HookSettings {
                 error = %format!("{err:#}"),
                 "removing the hook settings file of a failed spawn failed"
             ),
+        }
+        if let Some(dir) = self.path.parent() {
+            remove_session_extras(dir, session_id);
         }
         if self.created_dir {
             remove_session_dir_if_empty(&self.path, session_id);
@@ -67,6 +78,25 @@ fn remove_session_dir_if_empty(path: &Path, session_id: &str) {
     }
 }
 
+/// Remove the `--mcp-config` file and the last `show_mock` page from a
+/// session's directory, best-effort, so the directory removal that follows can
+/// succeed. A file that is not there is not an error.
+fn remove_session_extras(dir: &Path, session_id: &str) {
+    for name in [MCP_CONFIG_FILE, MOCK_PAGE_FILE] {
+        let path = dir.join(name);
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => warn!(
+                %session_id,
+                path = %path.display(),
+                error = %format!("{err:#}"),
+                "removing a session's mcp config or mock page failed"
+            ),
+        }
+    }
+}
+
 /// Remove a gracefully stopped session's hook settings file, then its session
 /// directory when that file was all it still held. A natural exit keeps the
 /// file (see [`write_hook_settings`]); a session that never got hooks — one
@@ -86,6 +116,7 @@ pub(in crate::server) fn remove_hook_settings(hub: &Hub, session_id: &str) {
     let Some(dir) = path.parent() else {
         return;
     };
+    remove_session_extras(dir, session_id);
     match std::fs::remove_dir(dir) {
         Ok(()) => {}
         Err(err)
@@ -125,6 +156,50 @@ pub(crate) fn render_shell_resume(content: &str, settings: Option<&Path>) -> Str
 /// The file name a spawn's injected Claude hook settings land under, inside the
 /// session's own directory.
 const HOOK_SETTINGS_FILE: &str = "hook-settings.json";
+
+/// The file name of a spawn's `--mcp-config`, beside its hook settings.
+const MCP_CONFIG_FILE: &str = "mcp-config.json";
+
+/// The file name the `/mock` route writes a session's `show_mock` page under.
+const MOCK_PAGE_FILE: &str = "mock.html";
+
+/// The contents of the `--mcp-config` file: one stdio server, the session's
+/// cached tracer's `mcp` subcommand.
+fn build_mcp_config(tracer_exe: &Path, session_id: &str, config_dir: &Path) -> String {
+    serde_json::json!({
+        "mcpServers": {
+            "rustling-tulip": {
+                "type": "stdio",
+                "command": tracer_exe.to_string_lossy(),
+                "args": [
+                    "mcp",
+                    "--session",
+                    session_id,
+                    "--config-dir",
+                    config_dir.to_string_lossy(),
+                ],
+            },
+        },
+    })
+    .to_string()
+}
+
+/// Write `dir`'s `--mcp-config` file, or `None` with a `warn!` when the write
+/// fails: the spawn continues without the MCP server.
+fn write_mcp_config(hub: &Hub, dir: &Path, tracer_exe: &Path, session_id: &str) -> Option<PathBuf> {
+    let path = dir.join(MCP_CONFIG_FILE);
+    let config = build_mcp_config(tracer_exe, session_id, &hub.dirs.config);
+    if let Err(err) = orphan::write_atomic(&path, config.as_bytes()) {
+        warn!(
+            %session_id,
+            path = %path.display(),
+            error = %format!("{err:#}"),
+            "writing the mcp config file failed; spawning without it"
+        );
+        return None;
+    }
+    Some(path)
+}
 
 /// `session_id`'s injected hook settings file, which a Claude spawn passes as
 /// `--settings` and the hook shim reads.
@@ -186,10 +261,12 @@ pub(super) fn write_hook_settings(
         }
         return None;
     }
+    let mcp_config = write_mcp_config(hub, &dir, &tracer_exe, session_id);
     Some(HookSettings {
         path,
         tracer_exe,
         created_dir,
+        mcp_config,
     })
 }
 
