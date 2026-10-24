@@ -70,7 +70,7 @@ Hotspot items (touching `crates/protocol/src/lib.rs` or `crates/daemon/src/serve
 | P6.3 | Host picker from the tailnet's machines, a typed-name fallback, boot reconnect | no | P6.1, P6.2a |
 | P6.4 | Host Settings: Remote access (Tailscale) panel. Landed on main (RT-154) | no | TS.4 |
 | P6.5 | Autostart: start the daemon on login | no | none |
-| P6.6 | Remote tests over a fake Tailscale, the hand checklist, and the docs pass. Part A landed (RT-158): the `e2e-loopback-peers` seam, the `tools/e2e/fake-tailscale/` shim and the smoke spec `remote_listener_comes_up_for_the_fake_tailnet`; parts B to D are open | no | all of the above |
+| P6.6 | Remote tests over a fake Tailscale, the hand checklist, and the docs pass. Part A landed (RT-158): the `e2e-loopback-peers` seam, the `tools/e2e/fake-tailscale/` shim and the smoke spec `remote_listener_comes_up_for_the_fake_tailnet`; the hand checklist is [docs/remote-hand-checklist.md](../remote-hand-checklist.md) (part C); parts B and D are open | no | all of the above |
 | P6.7 | Cutover: installer (no firewall rule, per RT-157) | no | P6.5 |
 
 File fetch (RT-35 to RT-37) follows P6.1 to P6.3; a host's download folder is keyed by its MagicDNS name, lower-cased.
@@ -121,4 +121,4 @@ File sets: `apps/native/src/lib.rs` (RootView hotspot, central in the test map, 
 
 From Tailscale's docs (kb/1080 CLI, kb/1153 enabling HTTPS, kb/1084 sharing, the tags and identity docs, kb/1033 addresses) and source (`apitype.go`, `tailcfg.go`, `ipn/ipnlocal/cert.go`), checked when this design was written: `whois --json` returns `{Node, UserProfile, CapMap}`, never nil on success; `Node.User` does not reflect a tagged node's identity; a shared node appears as its sharer; HTTPS certificates must be enabled in the admin console and are 90-day Let's Encrypt certificates that `tailscale cert` renews below `--min-validity`; machine names are published in CT logs; a node's IP is stable while it stays registered.
 
-Not yet verified: whether `tailscale cert` runs unelevated for the Windows user who owns Tailscale, how fast a removed device's live TCP connection dies, and the exact IPv4 range text in Tailscale's docs.
+The facts not yet verified on a real tailnet are steps of the [hand checklist](../remote-hand-checklist.md) (sections 2, 7 and 8).
