@@ -13,5 +13,5 @@ retries = 0
 slow-timeout = { period = "60s" }
 
 [[profile.default.overrides]]
-filter = "binary_id(rustling-tulip-native::e2e_live) | binary_id(rustling-tulip-native::e2e_recover) | binary_id(rustling-tulip-native::smoke_window)"
+filter = "binary_id(rustling-tulip-native::e2e_live) | binary_id(rustling-tulip-native::e2e_recover) | binary_id(rustling-tulip-native::e2e_remote) |binary_id(rustling-tulip-native::smoke_window)"
 test-group = "serial-live"

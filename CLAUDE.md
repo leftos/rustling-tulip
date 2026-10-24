@@ -20,6 +20,7 @@ crates/agents/registry/ package agent-registry: the compiled-in plugin list (plu
 crates/tailnet/         Tailscale CLI wrapper (whois, whoami, status, cert) and the owner rule that decides which tailnet peers may connect (docs/plans/remote-access.md)
 apps/native/            binary = rustling-tulip-native (thin main.rs over a lib, rustling_tulip_native; depends on crates/tailnet for the host picker's peer scan): GPUI + alacritty_terminal desktop client (see docs/native-client.md); tests/ui/ (one test binary, a module per spec) drive RootView::with_transport against a scripted fake daemon
 tools/e2e/fake-claude/  fake-claude CLI shim used by the native e2e tier
+tools/e2e/fake-tailscale/ fake `tailscale` CLI shim (whoami, whois, status, cert from a JSON state file) used by the live tier's remote specs
 docs/architecture.md    components, what the product does, and a task index: which files to read, in order, for each kind of change
 docs/native-client.md   the native client's settled design decisions
 docs/env-secrets.md     how secret env rows are sealed into Credential Manager, and what is and isn't protected
@@ -35,7 +36,7 @@ PowerShell on Windows is the primary dev environment. `rt.ps1` in the repo root 
 # Convenience wrapper (recommended)
 .\rt.ps1                  # build daemon + tracer, then run the native client (same as `launch` / `native`)
 .\rt.ps1 build            # build only: daemon, tracer and native client, then sweep target/ output older than 14 days (cargo-sweep)
-.\rt.ps1 build -Release   # same, release profile (-Release also applies to launch, restart, native, native-e2e, native-smoke, native-shot)
+.\rt.ps1 build -Release   # same, release profile (-Release also applies to launch, restart, native, native-smoke, native-shot; native-e2e refuses it, since its test-only daemon must stay in target\test-release)
 .\rt.ps1 setup            # install/check Windows build prerequisites via winget (Git, Node.js, Rust, C++ Build Tools), plus cargo-sweep and cargo-nextest
 .\rt.ps1 stop             # kill any running daemon and tracers; remove the stale handshake
 .\rt.ps1 restart          # build daemon + tracer, stop the daemon (sessions survive in their tracers), run the native client
@@ -47,7 +48,7 @@ PowerShell on Windows is the primary dev environment. `rt.ps1` in the repo root 
 .\rt.ps1 fmt              # cargo fmt --all
 .\rt.ps1 clean            # cargo clean
 .\rt.ps1 native           # build daemon + tracer, then run the native client (extra args: a session id to focus)
-.\rt.ps1 native-e2e       # native client specs against a real daemon isolated under .tmp/ (fake-claude needs node)
+.\rt.ps1 native-e2e       # native client specs (e2e_live, e2e_recover, e2e_remote) against a real daemon, built with the e2e-loopback-peers feature, isolated under .tmp/ (fake-claude and fake-tailscale need node)
 .\rt.ps1 native-smoke     # launch the native client exe in a cloaked, never-focused window; check it connects and takes keys
 .\rt.ps1 native-shot main # PNG of the client window over a fake daemon (views: main, main-compact, source-control, diff, settings, settings-claude, spawn, viewer, viewer-md) in .tmp\shots\
 .\rt.ps1 installer        # release build, then the NSIS installer at target\installer\rustling-tulip-<version>-setup.exe (needs NSIS 3; tools/installer/README.md)
@@ -75,10 +76,10 @@ cargo nextest run -p protocol --cargo-profile test-release
 
 # Native client UI specs: in-process GPUI (test-support), fake daemon, no real window or input
 cargo nextest run -p rustling-tulip-native --cargo-profile test-release --test ui ui_terminal   # one ui binary; the filter picks a spec module (ui_sidebar, ui_tabs, …)
-# e2e_live.rs, e2e_recover.rs and smoke_window.rs are #[ignore]d here; run them through rt.ps1 native-e2e / native-smoke
+# e2e_live.rs, e2e_recover.rs, e2e_remote.rs and smoke_window.rs are #[ignore]d here; run them through rt.ps1 native-e2e / native-smoke
 ```
 
-Tests run with cargo-nextest although the full suite measured 1.41x slower than `cargo test`, because the daemon's git-fixture tests (RT-70) dominate it. `.config/nextest.toml` sets fail-fast off, no retries, a 60 s slow-timeout and a `serial-live` test group that runs `e2e_live`, `e2e_recover` and `smoke_window` one at a time. The protocol, tracer-protocol and daemon-client crates set `doctest = false`.
+Tests run with cargo-nextest although the full suite measured 1.41x slower than `cargo test`, because the daemon's git-fixture tests (RT-70) dominate it. `.config/nextest.toml` sets fail-fast off, no retries, a 60 s slow-timeout and a `serial-live` test group that runs `e2e_live`, `e2e_recover`, `e2e_remote` and `smoke_window` one at a time. The protocol, tracer-protocol and daemon-client crates set `doctest = false`.
 
 The repo is in `test mode: stable`: every landed change's last gate runs the full suite (`cargo nextest run --workspace --cargo-profile test-release`). The **test map**, `tools/test-map.json` (keys `central`, `ignore`, `rows` of source paths to nextest filtersets), still drives `.\rt.ps1 test -Reached` for a quick run while iterating.
 
@@ -101,12 +102,16 @@ The native client has three test tiers:
 - **UI specs** — `cargo nextest run -p rustling-tulip-native --cargo-profile test-release --test ui` (filter by module: `ui_terminal`, `ui_sidebar`, `ui_tabs`, `ui_session_actions`, …): in-process GPUI against a scripted fake daemon; no real window, input or daemon.
 
   Every spec file is a module of the one `tests/ui/main.rs` binary (a new spec is `tests/ui/ui_<name>.rs` plus its `mod` line there), since linking and starting a binary per file cost more than the tests themselves; the crate's lib has `doctest = false`.
-- **Live e2e** — `.\rt.ps1 native-e2e`: builds daemon + tracer in test-release and runs `tests/e2e_live.rs` and `tests/e2e_recover.rs` under `nextest --run-ignored only` against a real daemon isolated under `.tmp/`. Needs `node` for the fake-claude shim.
+- **Live e2e** — `.\rt.ps1 native-e2e`: builds daemon + tracer in test-release and runs `tests/e2e_live.rs`, `tests/e2e_recover.rs` and `tests/e2e_remote.rs` under `nextest --run-ignored only` against a real daemon isolated under `.tmp/`. Needs `node` for the fake-claude and fake-tailscale shims.
+
+  The daemon it runs is built with the off-by-default `e2e-loopback-peers` Cargo feature, which makes the tailnet listener admit loopback peers (judged by the real owner rule) and logs a startup warning "built with e2e-loopback-peers: the tailnet listener admits loopback peers; never ship this build"; only `native-e2e` builds with it, and the installer build refuses it. Every live daemon gets `RUSTLING_TULIP_TAILSCALE` (the fake-tailscale shim) and `RUSTLING_TULIP_TAILNET_DIR` (`<root>/tailnet`), so no spec reaches the real Tailscale or the real certificate dir.
 - **OS smoke** — `.\rt.ps1 native-smoke`: builds daemon + tracer in test-release and launches the native client exe in a cloaked window that never takes focus, under `nextest --run-ignored only` (`tests/smoke_window.rs`) and checks it connects and that posted keys reach the shell.
 
 To look at a UI change, run `.\rt.ps1 native-shot <view>` (`main`, `main-compact` for the sidebar's Compact leaves, `source-control`, `diff`, `settings`, `settings-claude`, `spawn`, `viewer`, `viewer-md`): it writes a PNG of the real client window over a scripted fake daemon (`apps/native/examples/shot.rs`) to `.tmp\shots\` and prints its path; Read the PNG, and show the user before and after shots for any visual choice.
 
 The `tools/e2e/fake-claude/` shim (`fake-claude.cmd` + `index.mjs`) replaces the real CLI in the e2e tier. It is wired in via the `RUSTLING_TULIP_CLAUDE` environment variable — the daemon path-resolves the CLI binary from that var at spawn time.
+
+The `tools/e2e/fake-tailscale/` shim (`fake-tailscale.cmd`, `.sh` and `index.mjs`, see its README) answers `whoami`, `whois`, `status` and `cert` from the JSON state file named by `RUSTLING_TULIP_FAKE_TAILSCALE_STATE`; it is wired in through `RUSTLING_TULIP_TAILSCALE`.
 
 ## Environment variables
 

@@ -16,6 +16,7 @@ apps/
   native/       - native desktop client (GPUI + alacritty_terminal)
 tools/
   e2e/fake-claude/ - fake `claude` CLI shim for the native e2e tier
+  e2e/fake-tailscale/ - fake `tailscale` CLI shim for the native e2e tier's remote specs
 docs/
   architecture.md - components, what the product does, task index
   native-client.md - the native client's design decisions

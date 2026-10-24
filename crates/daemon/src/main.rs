@@ -103,6 +103,10 @@ async fn main() -> anyhow::Result<()> {
     };
     init_tracing(&dirs);
     info!(config_dir = %dirs.config.display(), "starting rustling-tulipd");
+    #[cfg(feature = "e2e-loopback-peers")]
+    tracing::warn!(
+        "built with e2e-loopback-peers: the tailnet listener admits loopback peers; never ship this build"
+    );
     for plugin in agent_registry::all() {
         let variable = plugin.program_env_var();
         info!(

@@ -313,7 +313,7 @@ impl TailnetListener {
         let wiring = Wiring {
             api: Arc::new(tailnet::Cli::locate()),
             serve: Arc::new(TlsServe { router }),
-            policy: PeerPolicy::PRODUCTION,
+            policy: shipped_policy(),
         };
         let options = ListenerOptions {
             port,
@@ -1323,8 +1323,8 @@ impl AuthorizedPeer {
 }
 
 /// Which peer addresses are tailnet ones, and the owner rule. The listener
-/// serves with [`PeerPolicy::PRODUCTION`]; only tests pass another, through
-/// the private [`TailnetListener::start_with`].
+/// serves with [`shipped_policy`]; only tests pass another, through the
+/// private [`TailnetListener::start_with`].
 #[derive(Clone, Copy)]
 struct PeerPolicy {
     in_range: fn(IpAddr) -> bool,
@@ -1336,6 +1336,41 @@ impl PeerPolicy {
         in_range: tailnet::in_tailscale_range,
         authorize: tailnet::authorize,
     };
+}
+
+/// The policy [`TailnetListener::start`] serves with: [`PeerPolicy::PRODUCTION`],
+/// or [`loopback_policy`] in a build with the `e2e-loopback-peers` feature.
+#[cfg(not(feature = "e2e-loopback-peers"))]
+fn shipped_policy() -> PeerPolicy {
+    PeerPolicy::PRODUCTION
+}
+
+/// The policy [`TailnetListener::start`] serves with: [`PeerPolicy::PRODUCTION`],
+/// or [`loopback_policy`] in a build with the `e2e-loopback-peers` feature.
+#[cfg(feature = "e2e-loopback-peers")]
+fn shipped_policy() -> PeerPolicy {
+    loopback_policy()
+}
+
+/// The tailnet address the loopback test peer stands for.
+#[cfg(any(test, feature = "e2e-loopback-peers"))]
+const PEER_TAILNET_IP: IpAddr = IpAddr::V4(std::net::Ipv4Addr::new(100, 101, 102, 103));
+
+/// Admits loopback peers, the only ones a test can make, and judges each by
+/// the real owner rule as if it came from [`PEER_TAILNET_IP`].
+#[cfg(any(test, feature = "e2e-loopback-peers"))]
+fn loopback_policy() -> PeerPolicy {
+    PeerPolicy {
+        in_range: |ip: IpAddr| ip.is_loopback(),
+        authorize: |ip: IpAddr, peer: &WhoIs, host: &WhoIs| {
+            let ip = if ip.is_loopback() {
+                PEER_TAILNET_IP
+            } else {
+                ip
+            };
+            (PeerPolicy::PRODUCTION.authorize)(ip, peer, host)
+        },
+    }
 }
 
 /// What the owner rule decided about a peer IP.
@@ -2267,9 +2302,6 @@ mod tests {
         }
     }
 
-    /// The tailnet address the loopback test peer stands for.
-    const PEER_TAILNET_IP: IpAddr = IpAddr::V4(Ipv4Addr::new(100, 101, 102, 103));
-
     /// The owner's laptop as `whois` describes it: the host's user, untagged,
     /// at [`PEER_TAILNET_IP`].
     fn peer_whois() -> WhoIs {
@@ -2288,22 +2320,6 @@ mod tests {
                 id: 2,
                 login_name: "owner@example.com".to_owned(),
                 display_name: "Owner".to_owned(),
-            },
-        }
-    }
-
-    /// Admits loopback peers, the only ones a test can make, and judges each
-    /// by the real owner rule as if it came from [`PEER_TAILNET_IP`].
-    fn loopback_policy() -> PeerPolicy {
-        PeerPolicy {
-            in_range: |ip: IpAddr| ip.is_loopback(),
-            authorize: |ip: IpAddr, peer: &WhoIs, host: &WhoIs| {
-                let ip = if ip.is_loopback() {
-                    PEER_TAILNET_IP
-                } else {
-                    ip
-                };
-                tailnet::authorize(ip, peer, host)
             },
         }
     }
@@ -3753,6 +3769,45 @@ mod tests {
             "127.0.0.1 is outside Tailscale's ranges: dropped before the TLS handshake"
         );
         assert_eq!(fake.whois_addrs(), [], "whois is never asked");
+        shutdown.send_replace(true);
+    }
+
+    #[cfg(not(feature = "e2e-loopback-peers"))]
+    #[tokio::test]
+    async fn the_shipped_policy_refuses_loopback_peers() {
+        let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
+        let (_listener, shutdown, addr) = serving_tls(&fake, shipped_policy()).await;
+        assert_eq!(
+            hello_reply(addr, &fake.ca).await.len(),
+            0,
+            "the shipped listener drops a loopback peer before the TLS handshake"
+        );
+        assert_eq!(fake.whois_addrs(), [], "whois is never asked");
+        shutdown.send_replace(true);
+    }
+
+    #[cfg(feature = "e2e-loopback-peers")]
+    #[tokio::test]
+    async fn the_e2e_build_admits_loopback_peers_through_the_owner_rule() {
+        let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
+        let (_listener, shutdown, addr) = serving_tls(&fake, shipped_policy()).await;
+        let mut handshake = tls_connect(addr, &fake.ca).await;
+        let response = http_get(&mut handshake.stream, "/peer").await;
+        assert!(
+            response.starts_with("HTTP/1.1 200"),
+            "the owner's loopback peer reaches the router: {response}"
+        );
+
+        let stranger_ip = IpAddr::from([127, 0, 0, 20]);
+        let mut stranger = peer_whois();
+        stranger.node.user = 3;
+        fake.set_whois_for(stranger_ip, Ok(stranger));
+        assert_eq!(
+            hello_reply_from(stranger_ip, addr, &fake.ca).await.len(),
+            0,
+            "another user's loopback peer is still refused by the owner rule"
+        );
+        assert_eq!(fake.whois_calls_for(stranger_ip), 1, "whois was asked");
         shutdown.send_replace(true);
     }
 

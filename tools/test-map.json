@@ -1187,6 +1187,12 @@
     },
     {
       "paths": [
+        "apps/native/tests/e2e_remote.rs"
+      ],
+      "filter": "binary_id(rustling-tulip-native::e2e_remote)"
+    },
+    {
+      "paths": [
         "apps/native/tests/smoke_window.rs"
       ],
       "filter": "binary_id(rustling-tulip-native::smoke_window)"

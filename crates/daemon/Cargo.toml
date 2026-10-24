@@ -16,6 +16,12 @@ path = "src/main.rs"
 [lints]
 workspace = true
 
+[features]
+# Test builds only (`rt.ps1 native-e2e`): the tailnet listener admits loopback
+# peers and judges each by the owner rule as the test peer's tailnet address,
+# so the live e2e tier can reach it from this machine. Never in a shipped build.
+e2e-loopback-peers = []
+
 [dependencies]
 protocol = { workspace = true }
 tracer-protocol = { workspace = true }

@@ -40,11 +40,13 @@
       native     Build the daemon and tracer, then run the native client.
                  Extra arguments go to the client (an optional session id
                  to focus, or to place in the active tab).
-      native-e2e Build the daemon and tracer, then run the native client's
-                 end-to-end specs (`e2e_live`, `e2e_recover`, under
-                 nextest `--run-ignored only`, test-release profile)
-                 against a real daemon isolated under `.tmp\native-e2e\`.
-                 The fake-claude spec needs `node` on PATH.
+      native-e2e Build the daemon (with the `e2e-loopback-peers` feature)
+                 and tracer, then run the native client's end-to-end specs
+                 (`e2e_live`, `e2e_recover`, `e2e_remote`, under nextest
+                 `--run-ignored only`, test-release profile) against a real
+                 daemon isolated under `.tmp\native-e2e\`. The fake-claude
+                 and fake-tailscale specs need `node` on PATH. Refuses
+                 -Release: the test-only daemon stays in test-release.
       native-smoke
                  Build the daemon and tracer, then run the native client's
                  OS smoke specs (`smoke_window`, `--run-ignored only`): the
@@ -70,9 +72,9 @@
     The subcommand to run (positional). When omitted, defaults to `launch`.
 
 .PARAMETER Release
-    Applies to `build`, `launch`, `restart`, `native`, `native-e2e`,
-    `native-smoke` and `native-shot`. Selects the release profile instead
-    of debug.
+    Applies to `build`, `launch`, `restart`, `native`, `native-smoke` and
+    `native-shot`. Selects the release profile instead of debug.
+    `native-e2e` refuses it: its daemon is a test-only build.
 
 .PARAMETER Out
     Applies to `native-shot`: the PNG to write, instead of the second
@@ -615,10 +617,11 @@ function Invoke-Installer {
     $nsiScript = Join-Path $ScriptDir 'tools/installer/rustling-tulip.nsi'
 
     Write-Host "==> Building daemon + tracer + native client (release, $version)..." -ForegroundColor Cyan
-    Invoke-Gated -Slot heavy -Name build-release -Command @(
+    $releaseArgs = @(
         'cargo', 'build', '--manifest-path', $ManifestPath, '--release',
         '-p', 'daemon', '-p', 'tracer', '-p', 'rustling-tulip-native'
     )
+    Invoke-Gated -Slot heavy -Name build-release -Command $releaseArgs
     Test-CargoExitOk 'cargo build --release -p daemon -p tracer -p rustling-tulip-native'
 
     if (-not (Test-Path $installerDir)) {
@@ -903,11 +906,14 @@ function Invoke-Clean {
     Test-CargoExitOk 'cargo clean'
 }
 
-function Build-DaemonAndTracer([string]$CargoProfile) {
+# -Features names daemon Cargo features to build with; only native-e2e passes
+# any (e2e-loopback-peers), so every other verb builds the shipped daemon.
+function Build-DaemonAndTracer([string]$CargoProfile, [string[]]$Features = @()) {
     Assert-Tooling
     $buildArgs = @('build', '--manifest-path', $ManifestPath, '-p', 'daemon', '-p', 'tracer')
     if ($CargoProfile) { $buildArgs += @('--profile', $CargoProfile) }
     elseif ($Release) { $buildArgs += '--release' }
+    if ($Features) { $buildArgs += @('--features', (($Features | ForEach-Object { "daemon/$_" }) -join ',')) }
     Write-Host '==> Building daemon + tracer...' -ForegroundColor Cyan
     Invoke-Gated -Slot heavy -Name build-daemon -Command (@('cargo') + $buildArgs)
     Test-CargoExitOk 'cargo build -p daemon -p tracer'
@@ -949,7 +955,7 @@ function Invoke-Native {
 # client window. The build and the specs run as one gate call, re-entering
 # this script under the gate: gated separately, the build and the specs could
 # run on different machines, leaving the specs without the daemon binary.
-function Invoke-NativeSpecFile([string]$Verb, [string[]]$TestFiles, [string]$Slot, [string]$Name) {
+function Invoke-NativeSpecFile([string]$Verb, [string[]]$TestFiles, [string]$Slot, [string]$Name, [string[]]$DaemonFeatures = @()) {
     Assert-Nextest
     if (-not $env:GATE_SLOT_HELD) {
         $reentry = @('pwsh', '-NoProfile', '-File', $PSCommandPath, $Verb)
@@ -958,7 +964,7 @@ function Invoke-NativeSpecFile([string]$Verb, [string[]]$TestFiles, [string]$Slo
         exit $LASTEXITCODE
     }
     $cargoProfile = if ($Release) { 'release' } else { 'test-release' }
-    Build-DaemonAndTracer $cargoProfile
+    Build-DaemonAndTracer $cargoProfile -Features $DaemonFeatures
     $targets = @($TestFiles | ForEach-Object { '--test'; $_ })
     $names = $TestFiles -join ', '
     Write-Host "==> Running native specs: $names ($cargoProfile)..." -ForegroundColor Cyan
@@ -970,7 +976,17 @@ function Invoke-NativeSpecFile([string]$Verb, [string[]]$TestFiles, [string]$Slo
     Test-CargoExitOk "cargo nextest run -p rustling-tulip-native ($names)"
 }
 
-function Invoke-NativeE2e { Invoke-NativeSpecFile -Verb native-e2e -TestFiles @('e2e_live', 'e2e_recover') -Slot heavy -Name e2e }
+# The e2e daemon admits loopback peers on its tailnet listener (the
+# e2e-loopback-peers feature), so e2e_remote can dial it from this machine.
+# That build lands only in target\test-release, which the client's daemon
+# lookup never searches; -Release would put it in target\release, which it
+# does, so it is refused before anything builds.
+function Invoke-NativeE2e {
+    if ($Release) {
+        throw 'native-e2e builds a test-only daemon (e2e-loopback-peers); it runs in the test-release profile only, so drop -Release.'
+    }
+    Invoke-NativeSpecFile -Verb native-e2e -TestFiles @('e2e_live', 'e2e_recover', 'e2e_remote') -Slot heavy -Name e2e -DaemonFeatures @('e2e-loopback-peers')
+}
 
 function Invoke-NativeSmoke { Invoke-NativeSpecFile -Verb native-smoke -TestFiles 'smoke_window' -Slot light -Name smoke }
 
@@ -1037,8 +1053,10 @@ Commands:
   native     `cargo build -p daemon -p tracer`, then `cargo run -p
              rustling-tulip-native`. Extra args are passed on (an
              optional session id to focus, or to place in the active tab).
-  native-e2e Build daemon + tracer, then run the native client's
-             end-to-end specs against an isolated daemon (needs `node`).
+  native-e2e Build daemon (with e2e-loopback-peers) + tracer, then run
+             the native client's end-to-end specs (e2e_live, e2e_recover,
+             e2e_remote) against an isolated daemon (needs `node`).
+             Test-release only: refuses -Release.
   native-smoke
              Build daemon + tracer, then run the native client's OS smoke
              specs in a cloaked window that never takes focus; checks it
@@ -1064,7 +1082,8 @@ or protocol.
 
 Flags:
   -Release           Use the release profile (build, launch, restart,
-                     native, native-e2e, native-smoke, native-shot).
+                     native, native-smoke, native-shot). native-e2e
+                     refuses it: its daemon is a test-only build.
   -Out <path>        The PNG native-shot writes.
   -Reached           test: only the tests the change reaches.
   -Base <ref>        test -Reached: the ref to diff against (default:

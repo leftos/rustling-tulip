@@ -13,10 +13,16 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use daemon_client::device_tokens::MemoryTokens;
 use futures::StreamExt as _;
 use futures::channel::mpsc::{UnboundedSender, unbounded};
 use gpui::{Modifiers, TestAppContext};
 use protocol::{ClientMessage, DaemonHandshake, DaemonMessage};
+use rcgen::{
+    BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
+    KeyUsagePurpose,
+};
+use rustling_tulip_native::target::Target;
 use rustling_tulip_native::{
     Connection, NetCommand, NetDeps, NetEvent, RootDeps, RootView, bind_keys, spawn_net,
 };
@@ -85,6 +91,9 @@ pub struct LiveDaemon {
     child: Child,
     envs: Vec<(&'static str, OsString)>,
     handshake: DaemonHandshake,
+    /// The DER of the test CA behind the fake `tailscale cert`'s leaf, for a
+    /// daemon from [`Self::start_remote`].
+    tailnet_ca: Option<Vec<u8>>,
 }
 
 impl LiveDaemon {
@@ -97,22 +106,48 @@ impl LiveDaemon {
     /// isolation variables (so a row can override one) and kept in
     /// [`Self::envs`].
     pub fn start_with_env(test: &str, extra: &[(&'static str, OsString)]) -> Self {
-        let root = repo_root()
-            .join(".tmp")
-            .join("native-e2e")
-            .join(format!("{test}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        for sub in [
-            "config",
-            "binaries",
-            "worktrees",
-            "ui",
-            "claude-home",
-            "fake-bin",
-        ] {
-            std::fs::create_dir_all(root.join(sub)).expect("create the test's scratch dirs");
-        }
-        write_claude_stub(&root.join("fake-bin"));
+        Self::spawn_in(scratch_root(test), test, extra, None)
+    }
+
+    /// [`Self::start`] for remote access: the daemon's `tailscale` is
+    /// `tools/e2e/fake-tailscale`, answering as the host [`REMOTE_HOST`]
+    /// whose owner every peer is, and its `cert` hands out a leaf for
+    /// [`REMOTE_HOST`] signed by a test CA that [`Self::tailnet_tls`] trusts.
+    /// Remote access stays off until a client sends `ConfigureRemote`; the
+    /// daemon needs the `e2e-loopback-peers` build to admit a loopback dial.
+    pub fn start_remote(test: &str) -> Self {
+        let root = scratch_root(test);
+        let fake = root.join("fake-tailscale");
+        std::fs::create_dir_all(&fake).expect("create the fake tailscale's dir");
+        let ca = TestCa::new();
+        let (cert_pem, key_pem) = ca.leaf();
+        let cert_file = fake.join("leaf.crt");
+        let key_file = fake.join("leaf.key");
+        std::fs::write(&cert_file, cert_pem).expect("write the test leaf");
+        std::fs::write(&key_file, key_pem).expect("write the test leaf's key");
+        let state = json!({
+            "user_id": OWNER_USER_ID,
+            "cert_file": cert_file,
+            "key_file": key_file,
+        });
+        let state_file = fake.join("state.json");
+        std::fs::write(&state_file, state.to_string()).expect("write the fake tailscale's state");
+        Self::spawn_in(
+            root,
+            test,
+            &[(FAKE_TAILSCALE_STATE_ENV, state_file.into_os_string())],
+            Some(ca.der),
+        )
+    }
+
+    /// Starts the daemon over `root`, made by [`scratch_root`], and waits for
+    /// its handshake and `/health`.
+    fn spawn_in(
+        root: PathBuf,
+        test: &str,
+        extra: &[(&'static str, OsString)],
+        tailnet_ca: Option<Vec<u8>>,
+    ) -> Self {
         let mut envs = isolated_envs(&root, test);
         envs.extend(extra.iter().cloned());
         let child = spawn_daemon(&envs);
@@ -127,6 +162,7 @@ impl LiveDaemon {
                 pid: 0,
                 supported_versions: Vec::new(),
             },
+            tailnet_ca,
         };
         live.handshake = live.wait_healthy();
         live
@@ -174,6 +210,32 @@ impl LiveDaemon {
     /// run from copies here named `<name>-<hash>.exe`.
     pub fn binaries_dir(&self) -> PathBuf {
         self.root.join("binaries")
+    }
+
+    /// The daemon's `RUSTLING_TULIP_TAILNET_DIR`, where `tailscale cert`
+    /// writes the listener's certificate.
+    pub fn tailnet_dir(&self) -> PathBuf {
+        self.root.join("tailnet")
+    }
+
+    /// A TLS client config whose only root is the test CA of a daemon from
+    /// [`Self::start_remote`], for a tailnet dial to it.
+    pub fn tailnet_tls(&self) -> Arc<rustls::ClientConfig> {
+        let der = self
+            .tailnet_ca
+            .clone()
+            .expect("only a daemon from start_remote has a tailnet test CA");
+        let mut roots = rustls::RootCertStore::empty();
+        roots
+            .add(rustls::pki_types::CertificateDer::from(der))
+            .expect("the test CA is a usable root");
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let config = rustls::ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .expect("the ring provider supports the default TLS versions")
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        Arc::new(config)
     }
 
     /// The variables that isolate a process to this daemon, to set on a
@@ -314,16 +376,93 @@ fn path_with_stub(root: &Path) -> OsString {
     std::env::join_paths(dirs).expect("PATH entries hold no separator")
 }
 
+/// The `MagicDNS` name the fake tailscale gives the host, without its trailing
+/// dot: the name its certificate is for and a tailnet client dials.
+pub const REMOTE_HOST: &str = "localhost";
+/// The owner's Tailscale user id in the fake tailnet.
+const OWNER_USER_ID: i64 = 2;
+/// The variable naming the fake tailscale's state file.
+const FAKE_TAILSCALE_STATE_ENV: &str = "RUSTLING_TULIP_FAKE_TAILSCALE_STATE";
+
+/// `<repo>/.tmp/native-e2e/<test>-<pid>/`, emptied, with the daemon's
+/// directories and the `claude` stub made.
+fn scratch_root(test: &str) -> PathBuf {
+    let root = repo_root()
+        .join(".tmp")
+        .join("native-e2e")
+        .join(format!("{test}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    for sub in [
+        "config",
+        "binaries",
+        "worktrees",
+        "tailnet",
+        "ui",
+        "claude-home",
+        "fake-bin",
+    ] {
+        std::fs::create_dir_all(root.join(sub)).expect("create the test's scratch dirs");
+    }
+    write_claude_stub(&root.join("fake-bin"));
+    root
+}
+
+/// A test certificate authority for the fake `tailscale cert`'s leaf.
+struct TestCa {
+    der: Vec<u8>,
+    issuer: Issuer<'static, KeyPair>,
+}
+
+impl TestCa {
+    fn new() -> Self {
+        let mut params = CertificateParams::new(Vec::<String>::new()).expect("CA params");
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        params
+            .distinguished_name
+            .push(DnType::CommonName, "rustling-tulip e2e test CA");
+        params.key_usages = vec![
+            KeyUsagePurpose::KeyCertSign,
+            KeyUsagePurpose::DigitalSignature,
+        ];
+        let key = KeyPair::generate().expect("CA key");
+        let cert = params.self_signed(&key).expect("self-signed CA");
+        Self {
+            der: cert.der().to_vec(),
+            issuer: Issuer::new(params, key),
+        }
+    }
+
+    /// A leaf for [`REMOTE_HOST`] signed by this CA, and its key, as PEM.
+    /// rcgen's default validity runs to the year 4096, so the daemon never
+    /// finds it near expiry.
+    fn leaf(&self) -> (String, String) {
+        let mut params = CertificateParams::new(vec![REMOTE_HOST.to_owned()]).expect("leaf params");
+        params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+        let key = KeyPair::generate().expect("leaf key");
+        let cert = params
+            .signed_by(&key, &self.issuer)
+            .expect("leaf signed by the CA");
+        (cert.pem(), key.serialize_pem())
+    }
+}
+
+/// A loopback port nothing listens on right now.
+pub fn free_port() -> u16 {
+    std::net::TcpListener::bind(("127.0.0.1", 0))
+        .and_then(|listener| listener.local_addr())
+        .expect("bind a free loopback port")
+        .port()
+}
+
 fn isolated_envs(root: &Path, test: &str) -> Vec<(&'static str, OsString)> {
-    let fake_claude = repo_root()
-        .join("tools")
-        .join("e2e")
-        .join("fake-claude")
-        .join(if cfg!(windows) {
-            "fake-claude.cmd"
-        } else {
-            "fake-claude.sh"
-        });
+    let e2e_tools = repo_root().join("tools").join("e2e");
+    let (fake_claude, fake_tailscale) = if cfg!(windows) {
+        ("fake-claude.cmd", "fake-tailscale.cmd")
+    } else {
+        ("fake-claude.sh", "fake-tailscale.sh")
+    };
+    let fake_claude = e2e_tools.join("fake-claude").join(fake_claude);
+    let fake_tailscale = e2e_tools.join("fake-tailscale").join(fake_tailscale);
     vec![
         (
             "RUSTLING_TULIP_CONFIG_DIR",
@@ -344,6 +483,13 @@ fn isolated_envs(root: &Path, test: &str) -> Vec<(&'static str, OsString)> {
         ("RUSTLING_TULIP_SHELL", test_shell()),
         ("RUSTLING_TULIP_SHELL_INTEGRATION", OsString::from("0")),
         ("RUSTLING_TULIP_CLAUDE", fake_claude.into_os_string()),
+        // The tailnet listener's CLI and certificate dir: never the user's
+        // Tailscale or their real certificate, even with remote access off.
+        ("RUSTLING_TULIP_TAILSCALE", fake_tailscale.into_os_string()),
+        (
+            "RUSTLING_TULIP_TAILNET_DIR",
+            root.join("tailnet").into_os_string(),
+        ),
         // Claude Code's home, for the daemon's transcript lookups and the
         // sessions it spawns: never the user's `~/.claude`.
         (
@@ -684,13 +830,32 @@ impl<'a> Harness<'a> {
     /// through its isolated handshake. The fake-daemon half of the harness
     /// ([`Self::send`], [`Self::sent`]) does nothing here.
     pub fn open_live(cx: &'a mut TestAppContext, daemon: &LiveDaemon) -> (Self, LiveClient) {
+        Self::open_live_on(
+            cx,
+            daemon,
+            Target::Local,
+            None,
+            Arc::new(MemoryTokens::default()),
+        )
+    }
+
+    /// [`Self::open_live`] on `target`: a tailnet dial trusts only `tls`'s
+    /// roots (`None` for the OS store) and holds the device tokens in
+    /// `tokens`, which the view's pairing flow shares.
+    pub fn open_live_on(
+        cx: &'a mut TestAppContext,
+        daemon: &LiveDaemon,
+        target: Target,
+        tls: Option<Arc<rustls::ClientConfig>>,
+        tokens: Arc<MemoryTokens>,
+    ) -> (Self, LiveClient) {
         cx.update(bind_keys);
         let (tx, net_commands) = unbounded();
         let (net_events, from_net) = unbounded();
         let (to_view, view_events) = unbounded();
         spawn_net(
-            live_deps(&daemon.config_dir()),
-            rustling_tulip_native::target::Target::Local,
+            live_deps(&daemon.config_dir(), tls, tokens.clone()),
+            target,
             net_commands,
             net_events,
         );
@@ -708,7 +873,6 @@ impl<'a> Harness<'a> {
         let notifier = Arc::new(NotifyRecorder::default());
         let picker = std::rc::Rc::new(PickRecorder::default());
         let autostart = Arc::new(super::AutostartRecorder::default());
-        let tokens = Arc::new(daemon_client::device_tokens::MemoryTokens::default());
         let deps = RootDeps {
             tx: tx.clone(),
             events: view_events,
@@ -822,8 +986,13 @@ impl<'a> Harness<'a> {
 }
 
 /// Network deps for the daemon under `config`: its handshake as written,
-/// an identity kept beside it, and a stop that kills only its pid.
-fn live_deps(config: &Path) -> NetDeps {
+/// an identity kept beside it, a stop that kills only its pid, and the
+/// tailnet dial's `tls` and device `tokens`.
+fn live_deps(
+    config: &Path,
+    tls: Option<Arc<rustls::ClientConfig>>,
+    tokens: Arc<MemoryTokens>,
+) -> NetDeps {
     let identity = daemon_client::client_identity_in(config, CLIENT_ID_FILE)
         .expect("create the live client's identity");
     let ensure_dir = config.to_path_buf();
@@ -838,8 +1007,8 @@ fn live_deps(config: &Path) -> NetDeps {
             let dir = stop_dir.clone();
             Box::pin(async move { daemon_client::stop_in(&dir).await })
         }),
-        tokens: std::sync::Arc::new(daemon_client::device_tokens::MemoryTokens::default()),
-        tls: None,
+        tokens,
+        tls,
     }
 }
 
