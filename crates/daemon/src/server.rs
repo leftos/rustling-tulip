@@ -14,6 +14,7 @@ mod git;
 mod tabs;
 
 mod hooks;
+mod pairing;
 mod recovery;
 mod settings;
 pub(crate) use self::recovery::RecoveryClaims;
@@ -145,23 +146,13 @@ pub struct Hub {
     pub pending_hooks: crate::hook_status::PendingHooks,
     /// The approved tailnet devices, one record each holding only the hex
     /// SHA-256 of its token (`config/devices.json`).
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "read by the device pairing handlers RT-166 D3 adds"
-        )
-    )]
     pub devices: Arc<std::sync::Mutex<crate::devices::DeviceStore>>,
     /// The pending pairing requests and CLI codes, in memory only.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "read by the device pairing handlers RT-166 D3 adds"
-        )
-    )]
     pub pairing: Arc<std::sync::Mutex<crate::devices::PairingBook>>,
+    /// Each waiting pairing request's connection, by request id: how a
+    /// decision reaches the device that asked. Locked only after
+    /// [`Hub::pairing`] when both are held.
+    pub pairing_waiters: pairing::PairingWaiters,
 }
 
 impl Hub {
@@ -251,6 +242,10 @@ pub enum StateEvent {
     },
     /// The whole session history, broadcast after it changes.
     SessionHistory(Vec<protocol::SessionHistoryItem>),
+    /// The waiting pairing requests, broadcast whenever the list changes.
+    /// Mirrors [`protocol::DaemonMessage::PendingDevices`]; only loopback
+    /// connections forward it.
+    PendingDevices(Vec<protocol::PendingDevice>),
 }
 
 #[derive(Debug, Clone)]
@@ -396,6 +391,7 @@ pub async fn run(
             &crate::paths::devices_file(&dirs),
         ))),
         pairing: Arc::new(std::sync::Mutex::new(crate::devices::PairingBook::new())),
+        pairing_waiters: pairing::PairingWaiters::default(),
     };
     start_hub_tasks(&hub, client_count_rx);
 
@@ -546,7 +542,7 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         return Ok(());
     }
     match msg {
-        ClientMessage::DevicePairRequest
+        m @ (ClientMessage::DevicePairRequest
         | ClientMessage::DevicePairCancel
         | ClientMessage::DevicePairRedeem { .. }
         | ClientMessage::ListPendingDevices
@@ -554,12 +550,7 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         | ClientMessage::DenyDevice { .. }
         | ClientMessage::MintDevicePairCode
         | ClientMessage::ListDevices
-        | ClientMessage::RevokeDevice { .. } => {
-            let _ = out_tx.send(DaemonMessage::Error {
-                message: remote::PAIRING_NOT_READY.to_owned(),
-                request_id: None,
-            });
-        }
+        | ClientMessage::RevokeDevice { .. }) => pairing::handle(hub, m, ctx),
         ClientMessage::Hello { .. } | ClientMessage::Attach { session_id: _ } => {
             // Hello: already consumed by handshake; ignore subsequent ones.
             // Attach: no-op — PTY forwarders are started by LoadScrollback

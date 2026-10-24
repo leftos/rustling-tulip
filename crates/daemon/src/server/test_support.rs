@@ -147,6 +147,7 @@ pub(super) fn build_test_hub(
         pending_hooks: crate::hook_status::PendingHooks::default(),
         devices: Arc::new(std::sync::Mutex::new(devices)),
         pairing: Arc::new(std::sync::Mutex::new(crate::devices::PairingBook::new())),
+        pairing_waiters: super::pairing::PairingWaiters::default(),
     };
     (hub, scratch, attention_rx)
 }
@@ -470,6 +471,88 @@ pub(super) fn hook_request(
     builder
         .body(Body::from(body.to_owned()))
         .expect("build hook request")
+}
+
+/// A WebSocket client connection to a scratch router.
+pub(super) type WsClient = tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>;
+
+/// Serve `app` on a scratch loopback listener and open a WebSocket client
+/// to `url`'s path on it; `url`'s authority is what the upgrade's `Host`
+/// carries. The serving task lives until the test's runtime ends.
+async fn scratch_ws_client(app: axum::Router, url: impl FnOnce(u16) -> String) -> WsClient {
+    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .await
+        .expect("bind a scratch listener");
+    let addr = listener.local_addr().expect("the bound address");
+    tokio::spawn(async move { axum::serve(listener, app).await });
+    let tcp = tokio::net::TcpStream::connect(addr)
+        .await
+        .expect("connect to the scratch listener");
+    let (client, _) = tokio_tungstenite::client_async(url(addr.port()), tcp)
+        .await
+        .expect("the WebSocket upgrade succeeds");
+    client
+}
+
+/// A tailnet `/ws` connection the listener's acceptor admitted as `peer`,
+/// served over plain ws on a scratch listener.
+pub(super) async fn tailnet_ws_client(hub: &Hub, peer: tailnet::PeerIdentity) -> WsClient {
+    let names = super::remote::name_slot();
+    super::remote::set_serving_name(&names, Some("host.tail1234.ts.net".to_owned()));
+    let app = super::remote::build_tailnet_router(hub.clone(), names, 8787).layer(axum::Extension(
+        crate::tailnet_listener::AuthorizedPeer::for_tests(peer),
+    ));
+    scratch_ws_client(app, |_| "ws://host.tail1234.ts.net:8787/ws".to_owned()).await
+}
+
+/// A loopback `/ws` connection, served on a scratch listener.
+pub(super) async fn loopback_ws_client(hub: &Hub) -> WsClient {
+    let app = super::build_loopback_router(hub.clone());
+    scratch_ws_client(app, |port| format!("ws://127.0.0.1:{port}/ws")).await
+}
+
+/// Send `msg` as one text frame.
+pub(super) async fn ws_send(client: &mut WsClient, msg: &ClientMessage) {
+    use futures::SinkExt as _;
+    let json = serde_json::to_string(msg).expect("serialize a client message");
+    client
+        .send(tokio_tungstenite::tungstenite::Message::text(json))
+        .await
+        .expect("send a frame");
+}
+
+/// The next daemon message on `client`, or `None` once the daemon closed
+/// the connection. No hang guard: the caller sets one.
+pub(super) async fn ws_frame(client: &mut WsClient) -> Option<DaemonMessage> {
+    use futures::StreamExt as _;
+    use tokio_tungstenite::tungstenite::Message;
+    loop {
+        match client.next().await {
+            None | Some(Err(_) | Ok(Message::Close(_))) => return None,
+            Some(Ok(Message::Text(text))) => {
+                return Some(serde_json::from_str(text.as_str()).expect("a daemon message"));
+            }
+            Some(Ok(_)) => {}
+        }
+    }
+}
+
+/// [`ws_frame`] under a hang guard far past any passing run.
+pub(super) async fn ws_next(client: &mut WsClient) -> Option<DaemonMessage> {
+    tokio::time::timeout(Duration::from_secs(120), ws_frame(client))
+        .await
+        .expect("the daemon answers or closes the connection")
+}
+
+/// A current-version `Hello` carrying `auth_token` and `client_name`.
+pub(super) fn hello(auth_token: &str, client_name: Option<&str>) -> ClientMessage {
+    ClientMessage::Hello {
+        protocol_version: protocol::PROTOCOL_VERSION,
+        protocol_versions: vec![protocol::PROTOCOL_VERSION],
+        auth_token: auth_token.to_owned(),
+        client_id: Some("test-client".to_owned()),
+        client_name: client_name.map(str::to_owned),
+    }
 }
 
 /// The owner's laptop as `tailscale whois` describes it.

@@ -7,10 +7,9 @@ use futures::StreamExt as _;
 use protocol::{
     ClientMessage, ClonableLayout, DaemonMessage, InboundClientMessage, SUPPORTED_PROTOCOL_VERSIONS,
 };
-use sha2::{Digest as _, Sha256};
 use std::time::Duration;
 use tokio::sync::mpsc;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// Outcome of a successful handshake: the negotiated protocol version plus the
 /// client's self-reported identity (used to key its per-client tab layout).
@@ -21,6 +20,21 @@ pub(super) struct Handshake {
     /// connection then falls back to the shared legacy layout.
     pub(super) client_id: Option<String>,
     pub(super) client_name: Option<String>,
+    /// The tailnet device presented no valid token: the connection may only
+    /// pair, and gets no state.
+    pub(super) pairing: bool,
+}
+
+/// What a `Hello`'s token earns on its listener.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum HelloAuth {
+    /// The token is the daemon's own (loopback) or an approved device's
+    /// (tailnet): the connection is served.
+    Served,
+    /// A tailnet device without a valid token: the connection may only pair.
+    Pairing,
+    /// Refused with this reason, which never echoes the presented value.
+    Refused(&'static str),
 }
 
 pub const TAILNET_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -69,7 +83,11 @@ async fn read_hello(
     else {
         return Err(anyhow!("first message must be Hello"));
     };
-    check_hello_auth(hub, auth, &auth_token)?;
+    let pairing = match check_hello_auth(hub, auth, &auth_token) {
+        HelloAuth::Served => false,
+        HelloAuth::Pairing => true,
+        HelloAuth::Refused(reason) => return Err(anyhow!(reason)),
+    };
     let negotiated =
         negotiate_protocol_version(protocol_version, &protocol_versions).ok_or_else(|| {
             anyhow!(
@@ -89,41 +107,54 @@ async fn read_hello(
         negotiated_version: negotiated,
         client_id,
         client_name,
+        pairing,
     })
 }
 
-/// Decide whether the value in `Hello.auth_token` may connect on this
-/// listener. This is the single allow/deny point for a tailnet device token.
-fn check_hello_auth(hub: &Hub, auth: &AuthKind, presented: &str) -> anyhow::Result<()> {
+/// Decide what the value in `Hello.auth_token` earns on this listener. This
+/// is the single allow/deny point for a tailnet device token.
+///
+/// Loopback takes only the daemon's own token. A tailnet connection never
+/// compares against that token: an approved, unrevoked device's token bound to
+/// this node is served, and anything else (no token, an unknown one, another
+/// node's, a revoked one, the daemon's, or a store that could not be read)
+/// may only pair.
+fn check_hello_auth(hub: &Hub, auth: &AuthKind, presented: &str) -> HelloAuth {
     match auth {
         AuthKind::Local => {
             if crate::secret::constant_time_eq(presented.as_bytes(), hub.auth_token.as_bytes()) {
-                Ok(())
+                HelloAuth::Served
             } else {
-                Err(anyhow!("invalid auth token"))
+                HelloAuth::Refused("invalid auth token")
             }
         }
         AuthKind::Tailnet(peer) => {
-            if authorize_device(peer, presented) {
-                Ok(())
+            if authorize_device(hub, peer, presented) {
+                HelloAuth::Served
             } else {
-                Err(anyhow!("device not approved"))
+                HelloAuth::Pairing
             }
         }
     }
 }
 
-/// Whether `peer` may connect with `presented_token`.
-///
-/// The device-approval flow stores a SHA-256 digest per approved device and
-/// this check hashes the presented value and compares it in constant time.
-/// No device is approved yet, so every token is refused; the presented value
-/// is never logged, stored or echoed.
-fn authorize_device(peer: &tailnet::PeerIdentity, presented_token: &str) -> bool {
+/// Whether `peer` holds an approved device token, stamping the device as seen
+/// when it does. The store compares digests in constant time; the presented
+/// value is never logged, stored or echoed. A failed stamp is logged and
+/// still serves the device.
+fn authorize_device(hub: &Hub, peer: &tailnet::PeerIdentity, presented_token: &str) -> bool {
     debug!(device = %peer.name, "tailnet device token presented");
-    let presented = Sha256::digest(presented_token.as_bytes());
-    let approved: Option<[u8; 32]> = None;
-    approved.is_some_and(|stored| crate::secret::constant_time_eq(&presented, &stored))
+    let mut devices = crate::sync::lock(&hub.devices);
+    let Some(device_id) = devices
+        .verify(&peer.stable_id, presented_token)
+        .map(|record| record.id.clone())
+    else {
+        return false;
+    };
+    if let Err(err) = devices.touch(&device_id, chrono::Utc::now()) {
+        warn!(%device_id, ?err, "could not stamp the device as last seen");
+    }
+    true
 }
 
 /// The capabilities this daemon lists in `Welcome.features` (`protocol::FEATURE_*`).
@@ -132,6 +163,7 @@ fn authorize_device(peer: &tailnet::PeerIdentity, presented_token: &str) -> bool
 const DAEMON_FEATURES: &[&str] = &[
     protocol::FEATURE_CLAUDE_PROVIDER,
     protocol::FEATURE_AGENT_COMMANDS,
+    protocol::FEATURE_DEVICE_PAIRING,
 ];
 
 /// The `Welcome` answering an accepted `Hello`: the negotiated version, every
@@ -431,29 +463,130 @@ mod tests {
     fn tailnet_hello_never_accepts_the_daemon_token() {
         let (hub, _scratch) = test_hub("tailnet-hello");
         let auth = AuthKind::Tailnet(test_peer());
-        let err = check_hello_auth(&hub, &auth, "test-token")
-            .expect_err("the daemon token is not a device token");
-        assert_eq!(err.to_string(), "device not approved");
+        let verdict = check_hello_auth(&hub, &auth, "test-token");
+        assert_eq!(
+            verdict,
+            HelloAuth::Pairing,
+            "the daemon token is not a device token"
+        );
+        let printed = format!("{verdict:?}");
         assert!(
-            !err.to_string().contains("test-token"),
-            "the reason never echoes the presented value"
+            !printed.contains("test-token"),
+            "the verdict never echoes the presented value: {printed}"
         );
         assert!(
-            !err.to_string().contains("invalid auth token"),
-            "a tailnet refusal is never the loopback reason"
+            !printed.contains("invalid auth token"),
+            "a tailnet verdict is never the loopback reason: {printed}"
         );
-        let err = check_hello_auth(&hub, &auth, "any-other-value")
-            .expect_err("no device is approved yet");
-        assert_eq!(err.to_string(), "device not approved");
+        assert_eq!(
+            check_hello_auth(&hub, &auth, "any-other-value"),
+            HelloAuth::Pairing,
+            "an unknown token may only pair"
+        );
+        assert_eq!(
+            check_hello_auth(&hub, &auth, ""),
+            HelloAuth::Pairing,
+            "no token may only pair"
+        );
     }
 
     #[test]
     fn local_hello_still_accepts_the_daemon_token() {
         let (hub, _scratch) = test_hub("local-hello");
-        assert!(check_hello_auth(&hub, &AuthKind::Local, "test-token").is_ok());
-        let err = check_hello_auth(&hub, &AuthKind::Local, "wrong")
-            .expect_err("a wrong loopback token is refused");
-        assert_eq!(err.to_string(), "invalid auth token");
+        assert_eq!(
+            check_hello_auth(&hub, &AuthKind::Local, "test-token"),
+            HelloAuth::Served
+        );
+        assert_eq!(
+            check_hello_auth(&hub, &AuthKind::Local, "wrong"),
+            HelloAuth::Refused("invalid auth token"),
+            "a wrong loopback token is refused"
+        );
+    }
+
+    /// Issue a device token for `peer` straight into the hub's store.
+    fn issue_token(hub: &Hub, peer: &tailnet::PeerIdentity) -> (String, String) {
+        crate::sync::lock(&hub.devices)
+            .issue(peer, chrono::Utc::now())
+            .expect("issue a device token")
+    }
+
+    fn other_peer() -> tailnet::PeerIdentity {
+        tailnet::PeerIdentity {
+            stable_id: "nOtherNode".to_owned(),
+            name: "tablet.tail1234.ts.net".to_owned(),
+            user_id: 2,
+            login: "owner@example.com".to_owned(),
+        }
+    }
+
+    #[test]
+    fn tailnet_hello_with_an_issued_token_is_served() {
+        let (hub, _scratch) = test_hub("tailnet-hello-issued");
+        let (device_id, token) = issue_token(&hub, &test_peer());
+        let auth = AuthKind::Tailnet(test_peer());
+        assert_eq!(check_hello_auth(&hub, &auth, &token), HelloAuth::Served);
+        let devices = crate::sync::lock(&hub.devices);
+        let record = devices
+            .list()
+            .iter()
+            .find(|record| record.id == device_id)
+            .expect("the device's record");
+        assert!(
+            record.last_seen.is_some(),
+            "a served Hello stamps last_seen"
+        );
+    }
+
+    #[test]
+    fn tailnet_hello_with_another_devices_token_enters_pairing() {
+        let (hub, _scratch) = test_hub("tailnet-hello-other");
+        let (_, token) = issue_token(&hub, &other_peer());
+        let auth = AuthKind::Tailnet(test_peer());
+        assert_eq!(
+            check_hello_auth(&hub, &auth, &token),
+            HelloAuth::Pairing,
+            "a token copied to another node only pairs"
+        );
+    }
+
+    #[test]
+    fn tailnet_hello_with_a_revoked_token_enters_pairing() {
+        let (hub, _scratch) = test_hub("tailnet-hello-revoked");
+        let (device_id, token) = issue_token(&hub, &test_peer());
+        assert!(
+            crate::sync::lock(&hub.devices)
+                .revoke(&device_id)
+                .expect("revoke the device"),
+            "the record exists"
+        );
+        let auth = AuthKind::Tailnet(test_peer());
+        assert_eq!(check_hello_auth(&hub, &auth, &token), HelloAuth::Pairing);
+    }
+
+    #[test]
+    fn local_hello_refuses_a_device_token() {
+        let (hub, _scratch) = test_hub("local-hello-device-token");
+        let (_, token) = issue_token(&hub, &test_peer());
+        let verdict = check_hello_auth(&hub, &AuthKind::Local, &token);
+        assert_eq!(verdict, HelloAuth::Refused("invalid auth token"));
+        assert!(
+            !format!("{verdict:?}").contains(&token),
+            "the refusal never echoes the token"
+        );
+    }
+
+    #[test]
+    fn welcome_advertises_device_pairing() {
+        let welcome = welcome_message(22);
+        assert!(
+            matches!(
+                &welcome,
+                DaemonMessage::Welcome { features, .. }
+                    if features.iter().any(|f| f == protocol::FEATURE_DEVICE_PAIRING)
+            ),
+            "{welcome:?}"
+        );
     }
 
     /// Serve the tailnet router on a scratch listener and open one tailnet

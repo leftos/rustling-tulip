@@ -2575,6 +2575,7 @@ mod tests {
             pending_hooks: crate::hook_status::PendingHooks::default(),
             devices: Arc::new(std::sync::Mutex::new(devices)),
             pairing: Arc::new(std::sync::Mutex::new(crate::devices::PairingBook::new())),
+            pairing_waiters: Arc::default(),
         };
         (hub, preset_rx, scratch)
     }

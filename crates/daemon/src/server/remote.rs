@@ -414,12 +414,17 @@ pub(super) async fn configure_remote(
         shown.enabled == enabled && shown.port == remote.port && slot.is_some() == enabled;
     if unchanged {
         rebroadcast_remote(hub);
-        return Ok(());
+    } else {
+        crate::remote_config::save(&hub.dirs, remote)?;
+        hub.remote_enabled.send_replace(enabled);
+        apply_remote_config(hub, &mut slot, remote, hub.shutdown_tx.subscribe());
+        info!(enabled, port = remote.port, "remote access configured");
     }
-    crate::remote_config::save(&hub.dirs, remote)?;
-    hub.remote_enabled.send_replace(enabled);
-    apply_remote_config(hub, &mut slot, remote, hub.shutdown_tx.subscribe());
-    info!(enabled, port = remote.port, "remote access configured");
+    // With remote access off no device can be waiting: every request and
+    // code goes, and every waiting device is told and closed.
+    if !enabled {
+        super::pairing::drop_all(hub);
+    }
     Ok(())
 }
 
@@ -427,10 +432,6 @@ pub(super) async fn configure_remote(
 /// `CancelPairing`: the messages stay decodable, and nothing else happens.
 pub(super) const LAN_RETIRED: &str = "LAN access and pairing codes are retired; remote access runs over \
                            Tailscale (turn it on with ConfigureRemote).";
-
-/// The `Error` every device-pairing message gets for now: the wire is in
-/// place, the handlers are not, and nothing is honoured yet.
-pub(super) const PAIRING_NOT_READY: &str = "device pairing is not available yet";
 
 /// The reason `msg` is host-only and refused on a tailnet connection, if it
 /// is. Checked before the match so no side effect can run first; a message
@@ -839,71 +840,152 @@ mod tests {
         assert!(!lan_file.exists(), "a retired message writes no lan.json");
     }
 
-    #[tokio::test]
-    async fn device_approval_messages_are_refused_on_a_tailnet_connection() {
-        let (hub, _scratch) = test_hub("device-approval-tailnet");
-        let tailnet = AuthKind::Tailnet(test_peer());
-        for msg in [
+    /// The six host-only device messages, aimed at `request_id` and
+    /// `device_id`.
+    fn approval_messages(request_id: &str, device_id: &str) -> [ClientMessage; 6] {
+        [
             ClientMessage::ListPendingDevices,
             ClientMessage::ApproveDevice {
-                request_id: "r1".to_owned(),
+                request_id: request_id.to_owned(),
             },
             ClientMessage::DenyDevice {
-                request_id: "r1".to_owned(),
+                request_id: request_id.to_owned(),
             },
             ClientMessage::MintDevicePairCode,
             ClientMessage::ListDevices,
             ClientMessage::RevokeDevice {
-                device_id: "d1".to_owned(),
+                device_id: device_id.to_owned(),
             },
-        ] {
-            let reply = dispatch_one_as(&hub, msg.clone(), &tailnet).await;
-            assert!(
-                matches!(
-                    &reply,
-                    DaemonMessage::Error { message, .. } if message == "device approval is local-only"
-                ),
-                "{msg:?}: {reply:?}"
-            );
-        }
+        ]
     }
 
-    #[tokio::test]
-    async fn device_pair_messages_are_not_ready_yet() {
-        let (hub, _scratch) = test_hub("device-pair-not-ready");
-        let local = AuthKind::Local;
-        for msg in [
+    /// The three messages only an unpaired device's pairing loop honours.
+    fn pair_messages() -> [ClientMessage; 3] {
+        [
             ClientMessage::DevicePairRequest,
             ClientMessage::DevicePairCancel,
             ClientMessage::DevicePairRedeem {
                 request_id: "r1".to_owned(),
                 code: protocol::Secret("123456".to_owned()),
             },
-            ClientMessage::ListPendingDevices,
-            ClientMessage::ApproveDevice {
-                request_id: "r1".to_owned(),
-            },
-            ClientMessage::DenyDevice {
-                request_id: "r1".to_owned(),
-            },
-            ClientMessage::MintDevicePairCode,
-            ClientMessage::ListDevices,
-            ClientMessage::RevokeDevice {
-                device_id: "d1".to_owned(),
-            },
-        ] {
-            let reply = dispatch_one_as(&hub, msg.clone(), &local).await;
+        ]
+    }
+
+    /// Every message the pairing module's own handler sends for `msg` on a
+    /// connection of `auth`, past `dispatch` and its host-only check.
+    fn pairing_handler_replies(
+        hub: &Hub,
+        msg: ClientMessage,
+        auth: &AuthKind,
+    ) -> Vec<DaemonMessage> {
+        use crate::server::connection::{ConnCtx, FetchRegistry, PtyForwarders};
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        let (file_tx, _file_rx) = mpsc::channel(1);
+        let pty_forwarders: PtyForwarders =
+            Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+        let fetches: FetchRegistry =
+            Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+        let ctx = ConnCtx {
+            out_tx: &out_tx,
+            file_tx: &file_tx,
+            pty_forwarders: &pty_forwarders,
+            fetches: &fetches,
+            client_id: "c1",
+            client_name: None,
+            connection: 1,
+            auth,
+        };
+        crate::server::pairing::handle(hub, msg, &ctx);
+        let mut sent = Vec::new();
+        while let Ok(message) = out_rx.try_recv() {
+            sent.push(message);
+        }
+        sent
+    }
+
+    #[tokio::test]
+    async fn device_approval_messages_are_refused_on_a_tailnet_connection() {
+        let (hub, _scratch) = test_hub("device-approval-tailnet");
+        // A real request and a real device, so a refusal that leaked through
+        // would show in the book or the store.
+        let request_id = crate::sync::lock(&hub.pairing)
+            .request(&test_peer(), std::time::Instant::now(), chrono::Utc::now())
+            .expect("request a pairing")
+            .id;
+        let (device_id, _) = crate::sync::lock(&hub.devices)
+            .issue(&test_peer(), chrono::Utc::now())
+            .expect("issue a device token");
+        let tailnet = AuthKind::Tailnet(test_peer());
+        for msg in approval_messages(&request_id, &device_id) {
+            let reply = dispatch_one_as(&hub, msg.clone(), &tailnet).await;
             assert!(
                 matches!(
                     &reply,
-                    DaemonMessage::Error {
-                        message,
-                        request_id: None
-                    } if message == PAIRING_NOT_READY
+                    DaemonMessage::Error { message, .. } if message == "device approval is local-only"
+                ),
+                "through dispatch, {msg:?}: {reply:?}"
+            );
+            let replies = pairing_handler_replies(&hub, msg.clone(), &tailnet);
+            assert!(
+                matches!(
+                    replies.as_slice(),
+                    [DaemonMessage::Error { message, .. }]
+                        if message == crate::server::pairing::LOCAL_ONLY
+                ),
+                "through the handler's own check, {msg:?}: {replies:?}"
+            );
+        }
+        let pending = crate::sync::lock(&hub.pairing).pending();
+        assert_eq!(
+            pending.len(),
+            1,
+            "the request is neither denied nor dropped"
+        );
+        assert!(!pending[0].approved, "and not approved");
+        let devices = crate::sync::lock(&hub.devices);
+        assert!(!devices.list()[0].revoked, "the device is not revoked");
+    }
+
+    #[tokio::test]
+    async fn pair_messages_on_a_served_connection_say_already_paired() {
+        let (hub, _scratch) = test_hub("device-pair-served");
+        let tailnet = AuthKind::Tailnet(test_peer());
+        for msg in pair_messages() {
+            let reply = dispatch_one_as(&hub, msg.clone(), &tailnet).await;
+            assert!(
+                matches!(
+                    &reply,
+                    DaemonMessage::Error { message, request_id: None }
+                        if message == crate::server::pairing::ALREADY_PAIRED
                 ),
                 "{msg:?}: {reply:?}"
             );
         }
+        assert!(
+            crate::sync::lock(&hub.pairing).pending().is_empty(),
+            "a served connection never opens a request"
+        );
+    }
+
+    #[tokio::test]
+    async fn pair_messages_on_a_loopback_connection_say_tailnet_only() {
+        let (hub, _scratch) = test_hub("device-pair-loopback");
+        let local = AuthKind::Local;
+        for msg in pair_messages() {
+            let reply = dispatch_one_as(&hub, msg.clone(), &local).await;
+            assert!(
+                matches!(
+                    &reply,
+                    DaemonMessage::Error { message, request_id: None }
+                        if message == crate::server::pairing::TAILNET_ONLY
+                ),
+                "{msg:?}: {reply:?}"
+            );
+        }
+        assert!(
+            crate::sync::lock(&hub.pairing).pending().is_empty(),
+            "a loopback connection never opens a request"
+        );
     }
 
     #[tokio::test]

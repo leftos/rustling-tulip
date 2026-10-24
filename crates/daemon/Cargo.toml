@@ -97,6 +97,10 @@ rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"]
 # `test-util` enables the paused clock (`#[tokio::test(start_paused = true)]`)
 # used by the idle-exit watcher tests to fast-forward through grace periods.
 tokio = { workspace = true, features = ["test-util"] }
+# The WebSocket client the device pairing tests drive the tailnet and loopback
+# routers with, over plain ws on a scratch listener. Already in the lock
+# through axum's `ws` feature.
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }
 
 [target.'cfg(windows)'.dependencies]
 # Windows Credential Manager as the `keyring-core` store. Default features off

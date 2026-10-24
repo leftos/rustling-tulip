@@ -1,5 +1,6 @@
 //! One client WebSocket connection: its id and auth kind, the client count, the event forwarders, the send pump and the receive loop.
 use super::handshake::{handshake, push_initial_state, send_resume_report};
+use super::pairing::pairing_session;
 use super::sessions::spawn_session_forwarder;
 use super::tabs::ensure_client_layout;
 use super::{Hub, PresetEvent, ScopedTabEvent, StateEvent, TabEvent, dispatch};
@@ -51,8 +52,10 @@ pub(super) enum AuthKind {
 
 pub(super) async fn client_session(hub: Hub, socket: WebSocket, auth: AuthKind) {
     // RAII-tracked so `git_watch` can pause its refreshers when no UI is
-    // listening. Dropped on normal return and on panic.
-    let _client_guard = ClientCountGuard::new(Arc::clone(&hub.client_count));
+    // listening. Dropped on normal return and on panic, and as soon as the
+    // handshake puts the connection in pairing mode: a device that may only
+    // pair is no UI.
+    let client_guard = ClientCountGuard::new(Arc::clone(&hub.client_count));
     let (sender, mut receiver) = socket.split();
 
     // Each outgoing message goes through this channel so PTY/event tasks can
@@ -77,6 +80,18 @@ pub(super) async fn client_session(hub: Hub, socket: WebSocket, auth: AuthKind) 
             return;
         }
     };
+    // An unpaired tailnet device gets the pairing loop and nothing else: no
+    // layout, no forwarder, no initial state.
+    if handshake.pairing
+        && let AuthKind::Tailnet(peer) = &auth
+    {
+        drop(client_guard);
+        pairing_session(&hub, &mut receiver, &out_tx, peer).await;
+        drop(file_tx);
+        drop(out_tx);
+        let _ = send_task.await;
+        return;
+    }
     // Effective per-client layout key: the client's id, or the shared legacy
     // key for connections that don't send one. Same value drives the tab-event
     // filter, push_initial_state, and every tab handler in `dispatch`.
@@ -136,6 +151,7 @@ pub(super) async fn client_session(hub: Hub, socket: WebSocket, auth: AuthKind) 
         hub.state_events.subscribe(),
         out_tx.clone(),
         client_id.clone(),
+        matches!(auth, AuthKind::Local),
     );
 
     // Send initial state snapshots: this client's layout, or the first-connect
@@ -230,11 +246,13 @@ fn spawn_tab_forwarder(
 /// Forwards this connection's share of the registry's state events. The
 /// start-up resume's report reaches a client at most once per daemon run: a
 /// connection whose client id the initial-state push already told drops it.
+/// The waiting pairing requests reach only a loopback connection (`local`).
 fn spawn_state_forwarder(
     hub: &Hub,
     mut rx: broadcast::Receiver<StateEvent>,
     out_tx: mpsc::UnboundedSender<DaemonMessage>,
     client_id: String,
+    local: bool,
 ) -> tokio::task::JoinHandle<()> {
     let hub = hub.clone();
     tokio::spawn(async move {
@@ -322,6 +340,11 @@ fn spawn_state_forwarder(
                         request_id: None,
                         items,
                     });
+                }
+                Ok(StateEvent::PendingDevices(requests)) => {
+                    if local {
+                        let _ = out_tx.send(DaemonMessage::PendingDevices { requests });
+                    }
                 }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
                     warn!(lagged = n, "client state event stream lagged");
@@ -626,8 +649,13 @@ mod tests {
         let (hub, _scratch) = test_hub("lagged-state-forwarder");
         *crate::sync::lock(&hub.start_resume) = Some((2, 1));
         let (out_tx, mut rx) = mpsc::unbounded_channel();
-        let forwarder =
-            spawn_state_forwarder(&hub, hub.state_events.subscribe(), out_tx, "c1".to_owned());
+        let forwarder = spawn_state_forwarder(
+            &hub,
+            hub.state_events.subscribe(),
+            out_tx,
+            "c1".to_owned(),
+            true,
+        );
 
         // The report is the oldest event, so a stream that overflows the
         // broadcast buffer skips exactly it. One more event than production's
@@ -668,8 +696,13 @@ mod tests {
         // c1 heard it at its initial state.
         assert!(hub.claim_resume_report("c1"));
         let (out_tx, mut rx) = mpsc::unbounded_channel();
-        let told =
-            spawn_state_forwarder(&hub, hub.state_events.subscribe(), out_tx, "c1".to_owned());
+        let told = spawn_state_forwarder(
+            &hub,
+            hub.state_events.subscribe(),
+            out_tx,
+            "c1".to_owned(),
+            true,
+        );
 
         let _ = hub.state_events.send(StateEvent::ResumeReport {
             resumed: 2,
@@ -684,8 +717,13 @@ mod tests {
         told.abort();
 
         let (out_tx, mut rx) = mpsc::unbounded_channel();
-        let told =
-            spawn_state_forwarder(&hub, hub.state_events.subscribe(), out_tx, "c2".to_owned());
+        let told = spawn_state_forwarder(
+            &hub,
+            hub.state_events.subscribe(),
+            out_tx,
+            "c2".to_owned(),
+            true,
+        );
 
         let _ = hub.state_events.send(StateEvent::ResumeReport {
             resumed: 2,
