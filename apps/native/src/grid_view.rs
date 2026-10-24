@@ -787,7 +787,9 @@ impl RootView {
                 tip: gate.tip,
                 enabled: gate.enabled,
             };
-            buttons.push(bordered_button(add, cx, |this, _, cx| this.add_repo(cx)));
+            buttons.push(bordered_button(add, cx, |this, window, cx| {
+                this.add_repo(window, cx);
+            }));
         }
         spawn_choices("No tab open", buttons)
             .when(!has_repos, |note| {

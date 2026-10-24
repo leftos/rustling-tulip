@@ -37,6 +37,8 @@ mod footer;
 mod grid_view;
 mod history;
 mod history_view;
+mod host_path_prompt;
+mod host_path_prompt_view;
 mod keys;
 pub mod launch_last;
 mod layout_chooser;
@@ -147,6 +149,7 @@ use crate::drag::DragPayload;
 use crate::fetch_dialog_view::FetchDialog;
 use crate::footer::{CountSpan, StopConfirm, flyout_rows, log_paths, status_counts};
 use crate::grid_view::{PaneSlot, RetryGate, divider_ratio};
+use crate::host_path_prompt_view::HostPathDialog;
 use crate::needs_you_view::moves_needs_you;
 use crate::notice_view::MODAL_RADIUS;
 use crate::notices::Notices;
@@ -664,6 +667,10 @@ pub struct RootView {
     /// The Fetch file… dialog's keyboard focus when its path field has it
     /// not.
     fetch_focus: FocusHandle,
+    /// The Add repo prompt on a remote host, while open.
+    host_path_prompt: Option<HostPathDialog>,
+    /// The Add repo prompt's keyboard focus when its path field has it not.
+    host_path_focus: FocusHandle,
     /// Quick-shell folders waiting for the spawn they came with to land.
     quick_shell_saves: PendingQuickShell,
     /// Branch names the daemon suggested, per repo or workspace.
@@ -987,6 +994,8 @@ impl RootView {
             shell_focus: cx.focus_handle(),
             fetch_dialog: None,
             fetch_focus: cx.focus_handle(),
+            host_path_prompt: None,
+            host_path_focus: cx.focus_handle(),
             shell_generation: 0,
             quick_shell_saves: PendingQuickShell::default(),
             branch_cache: BranchCache::default(),
@@ -1248,6 +1257,7 @@ impl RootView {
         self.spawn_dialog.is_some()
             || self.shell_dialog.is_some()
             || self.fetch_dialog.is_some()
+            || self.host_path_prompt.is_some()
             || self.appearance_editor.is_some()
             || self.worktrees_manager.is_some()
             || self.recover.is_some()
@@ -2695,6 +2705,7 @@ impl RootView {
         self.close_spawn_dialog(window, cx);
         self.close_shell_dialog(window, cx);
         self.close_fetch_dialog(window, cx);
+        self.close_host_path_prompt(window, cx);
         self.close_workspace_creator(window, cx);
         self.close_preset_wizard(window, cx);
         self.reset_preset_launches(cx);
@@ -2886,8 +2897,8 @@ impl RootView {
             cx.stop_propagation();
             return;
         }
-        if self.spawn_dialog.is_some() {
-            if self.on_spawn_dialog_key(ks, window, cx) {
+        if let Some(taken) = self.on_add_repo_dialogs_key(ks, window, cx) {
+            if taken {
                 cx.stop_propagation();
             }
             return;
@@ -3306,6 +3317,7 @@ impl Render for RootView {
             .children(self.spawn_dialog_layers(cx))
             .children(self.shell_dialog_layer(cx))
             .children(self.fetch_dialog_layer(cx))
+            .children(self.host_path_prompt_layer(cx))
             .children(self.appearance_editor_layer(window, cx))
             .children(self.settings_layer(window, cx))
             .children(self.worktrees_manager_layer(window, cx))

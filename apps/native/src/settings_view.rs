@@ -1697,9 +1697,19 @@ impl RootView {
                 focused,
                 cx,
             ));
+        // Save creates a missing folder on the host, so a typo is not refused.
+        let host_hint = self.conn.target().short_name().map(|host| {
+            crate::tagged_text(
+                "settings-worktrees-host-hint",
+                format!("Created on {host} if it does not exist."),
+            )
+            .text_size(px(HINT_SIZE))
+            .text_color(gpui::rgb(SUBTLE))
+        });
         let section = section("Worktrees root")
             .child(hint(WORKTREES_HINT))
             .child(path_row)
+            .children(host_hint)
             .child(active)
             .child(buttons);
         vec![section.into_any_element()]

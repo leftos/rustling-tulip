@@ -308,6 +308,18 @@
     },
     {
       "paths": [
+        "apps/native/src/host_path_prompt.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & test(/^host_path_prompt::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_remote)::/))"
+    },
+    {
+      "paths": [
+        "apps/native/src/host_path_prompt_view.rs"
+      ],
+      "filter": "binary_id(rustling-tulip-native::ui) & test(/^(ui_remote|ui_spawn)::/)"
+    },
+    {
+      "paths": [
         "apps/native/src/keys.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native) & test(/^keys::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_shortcuts|ui_terminal)::/))"
@@ -473,7 +485,7 @@
       "paths": [
         "apps/native/src/repo_add.rs"
       ],
-      "filter": "(binary_id(rustling-tulip-native) & test(/^repo_add::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_repos)::/))"
+      "filter": "(binary_id(rustling-tulip-native) & test(/^(repo_add|host_path_prompt)::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_repos|ui_remote|ui_workspace_creator)::/))"
     },
     {
       "paths": [

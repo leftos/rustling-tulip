@@ -229,13 +229,13 @@ impl HostPath {
 }
 
 /// `text` without Windows' verbatim prefix, `\` read as `/`.
-fn unify(text: &str) -> String {
+pub(crate) fn unify(text: &str) -> String {
     crate::file_fetch::display_host_path(text).replace('\\', "/")
 }
 
 /// An absolute path's anchor (`//` for a network path, `C:` for a drive,
 /// `/` on Unix) and the rest of it; `None` for a relative path.
-fn split_anchor(unified: &str) -> Option<(&str, &str)> {
+pub(crate) fn split_anchor(unified: &str) -> Option<(&str, &str)> {
     if let Some(rest) = unified.strip_prefix("//") {
         return Some(("//", rest));
     }

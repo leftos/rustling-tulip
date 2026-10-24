@@ -1032,7 +1032,7 @@ impl RootView {
         if matches!(self.spawn_dialog, Some(SpawnModal::NoRepos(_))) {
             match key {
                 "escape" => self.close_spawn_dialog(window, cx),
-                "enter" | "space" => self.add_repo(cx),
+                "enter" | "space" => self.add_repo(window, cx),
                 _ => {}
             }
             return true;
@@ -1251,7 +1251,9 @@ impl RootView {
             .child("Add repo")
             .tooltip(tooltip(gate.tip))
             .when(gate.enabled, |add| {
-                add.on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.add_repo(cx)))
+                add.on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                    this.add_repo(window, cx);
+                }))
             });
         let body = div()
             .debug_selector(|| "spawn-no-repos".to_owned())

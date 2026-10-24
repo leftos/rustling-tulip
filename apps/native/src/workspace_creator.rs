@@ -20,8 +20,27 @@ pub(crate) const NAME_PLACEHOLDER: &str = "e.g. yaat-stack";
 pub(crate) const PARSE_FAILED: &str = "Failed to parse workspace file.";
 /// The label of the From-repos members field.
 pub(crate) const MEMBERS_LABEL: &str = "Members (pick at least 2)";
-/// The From-repos note while no repo is registered.
-pub(crate) const NO_REPOS_NOTE: &str = "No repos registered yet.";
+/// The From-repos note while no repo is registered on the local daemon.
+const NO_REPOS_NOTE: &str = "No repos registered yet.";
+
+/// The From-repos note while no repo is registered: on a remote host it
+/// names `host`, as the sidebar's note does.
+pub(crate) fn no_repos_note(host: Option<&str>) -> String {
+    match host {
+        Some(host) => format!("No repos on {host} yet."),
+        None => NO_REPOS_NOTE.to_owned(),
+    }
+}
+
+/// The label of the typed `.code-workspace` field on a remote host.
+pub(crate) fn file_field_label(host: &str) -> String {
+    format!("Workspace file on {host}")
+}
+
+/// The typed `.code-workspace` field's placeholder on a remote host.
+pub(crate) fn file_field_placeholder(host: &str) -> String {
+    format!("Full path on {host}")
+}
 /// The VS Code file field's label.
 pub(crate) const FILE_LABEL: &str = "VS Code workspace file";
 /// What the file field shows while no file is chosen.
@@ -64,6 +83,8 @@ pub(crate) enum CreatorControl {
     FromVscode,
     Name,
     Browse,
+    /// The typed `.code-workspace` path, in Browse's place on a remote host.
+    File,
     Cancel,
     Create,
 }
@@ -75,6 +96,7 @@ impl CreatorControl {
             Self::FromVscode => CreatorMode::FromVscode.selector(),
             Self::Name => "workspace-creator-name",
             Self::Browse => "workspace-creator-browse",
+            Self::File => "workspace-creator-file-input",
             Self::Cancel => "workspace-creator-cancel",
             Self::Create => "workspace-creator-create",
         }
@@ -200,15 +222,17 @@ impl WorkspaceCreator {
 
     /// The keyboard stops on screen, in reading and Tab order; Browse is
     /// one only with `browse`, while this PC's file picker can answer for
-    /// the daemon.
+    /// the daemon, and the typed file field takes its place without.
     pub(crate) fn controls(&self, browse: bool) -> Vec<CreatorControl> {
         let mut controls = vec![CreatorControl::FromRepos, CreatorControl::FromVscode];
         match self.mode {
             CreatorMode::FromRepos => controls.push(CreatorControl::Name),
             CreatorMode::FromVscode => {
-                if browse {
-                    controls.push(CreatorControl::Browse);
-                }
+                controls.push(if browse {
+                    CreatorControl::Browse
+                } else {
+                    CreatorControl::File
+                });
                 if self.suggestion.is_some() {
                     controls.push(CreatorControl::Name);
                 }
@@ -376,6 +400,17 @@ impl WorkspaceCreator {
         self.suggestion = None;
         self.error = Some(message.unwrap_or(PARSE_FAILED).to_owned());
         true
+    }
+
+    /// A typed file path the string rules refused: `message` shows inline
+    /// until the next edit, and nothing is parsed.
+    pub(crate) fn refuse_file(&mut self, message: String) {
+        self.error = Some(message);
+    }
+
+    /// The typed file path was edited, which clears the message under it.
+    pub(crate) fn file_edited(&mut self) {
+        self.error = None;
     }
 
     /// The daemon refused the Create: the error shows inline and the typed
@@ -555,6 +590,7 @@ mod tests {
             [
                 CreatorControl::FromRepos,
                 CreatorControl::FromVscode,
+                CreatorControl::File,
                 CreatorControl::Cancel,
                 CreatorControl::Create,
             ]
@@ -562,8 +598,8 @@ mod tests {
         creator.move_focus(true, false);
         assert_eq!(
             creator.focus(),
-            CreatorControl::Cancel,
-            "Tab steps over Browse"
+            CreatorControl::File,
+            "Tab reaches the typed file field in Browse's place"
         );
         creator.move_focus(false, false);
         assert_eq!(creator.focus(), CreatorControl::FromVscode, "and back");
@@ -588,7 +624,7 @@ mod tests {
         creator.move_focus(true, false);
         assert_eq!(
             creator.focus(),
-            CreatorControl::Cancel,
+            CreatorControl::File,
             "Tab continues from the real focus"
         );
     }

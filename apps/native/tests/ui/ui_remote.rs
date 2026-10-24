@@ -189,38 +189,70 @@ fn container_open_rows_disabled_on_remote_copy_path_enabled(cx: &mut TestAppCont
     );
 }
 
+fn prompt_open(h: &mut Harness<'_>) -> bool {
+    h.root(|root, _| root.host_path_prompt_open())
+}
+
+fn prompt_error(h: &mut Harness<'_>) -> Option<String> {
+    h.root(|root, _| root.host_path_prompt_error())
+}
+
+/// Whether an `AddRepo` went out among `sent`.
+fn sent_add_repo(sent: &[ClientMessage]) -> bool {
+    sent.iter()
+        .any(|msg| matches!(msg, ClientMessage::AddRepo { .. }))
+}
+
 #[gpui::test]
-fn add_repo_disabled_on_remote(cx: &mut TestAppContext) {
+fn add_repo_on_remote_opens_the_host_path_prompt(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::on_target(cx, &dir, remote_target(), &Fixture::default());
     h.set_picked_folder(Some("D:/work/repo"));
-    assert!(
-        drawn(&mut h, "sidebar-add-repo"),
-        "the note keeps its button"
-    );
-    assert!(drawn(&mut h, "empty-add-repo"));
+    assert!(!prompt_open(&mut h));
 
     h.click_on("sidebar-add-repo");
+    assert!(prompt_open(&mut h), "the sidebar note's button opens it");
+    assert_eq!(
+        h.root(|root, _| root.host_path_prompt_title()).as_deref(),
+        Some("Add a repo on box")
+    );
+    assert!(drawn(&mut h, "host-path-input"));
+    h.keys("escape");
+    assert!(!prompt_open(&mut h));
+
     h.click_on("empty-add-repo");
+    assert!(prompt_open(&mut h), "the empty pane's button opens it");
+    h.keys("escape");
+
     h.click_on("sidebar-more");
     h.click_on("sidebar-more-add-repo");
+    assert!(prompt_open(&mut h), "the ⋯ menu's row opens it");
+    assert!(
+        !h.root(|root, _| root.sidebar_more_open()),
+        "and closes the menu"
+    );
     h.keys("escape");
+
     // A tab's pane takes the keys, so the shortcut opens the dialog.
     h.load(&Fixture::single(session("s1").build()));
     h.keys("ctrl-shift-n");
-    assert!(
-        drawn(&mut h, "spawn-add-repo"),
-        "the no-repos dialog keeps its button"
-    );
+    assert!(h.root(|root, _| root.spawn_dialog_no_repos()));
     h.click_on("spawn-add-repo");
+    assert!(prompt_open(&mut h), "the no-repos dialog's button opens it");
+    h.keys("escape");
+    assert!(!prompt_open(&mut h), "Esc closes the prompt first");
+    assert!(
+        h.root(|root, _| root.spawn_dialog_no_repos()),
+        "the no-repos dialog stays under it"
+    );
     h.keys("enter");
+    assert!(prompt_open(&mut h), "Enter on the no-repos dialog opens it");
+    h.keys("escape");
 
     assert_eq!(h.folder_asks(), 0, "no folder picker opens on this PC");
     let sent = h.sent();
     assert!(
-        !sent
-            .iter()
-            .any(|msg| matches!(msg, ClientMessage::AddRepo { .. })),
+        !sent_add_repo(&sent),
         "nothing is registered: sent {sent:?}"
     );
 }
@@ -236,39 +268,133 @@ fn remote_without_repos<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harnes
 }
 
 #[gpui::test]
-fn sidebar_add_repo_drawn_disabled_on_remote(cx: &mut TestAppContext) {
+fn closing_the_host_path_prompt_returns_focus_to_the_spawn_dialog(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = remote_without_repos(cx, &dir);
-    assert!(tooltip_on(&mut h, "sidebar-add-repo", LOCAL_FILES));
+    let at = h.cell_center("p1", 0, 0);
+    h.click(at, Modifiers::none());
+    h.keys("ctrl-shift-n");
+    assert!(h.root(|root, _| root.spawn_dialog_no_repos()));
+    h.keys("enter");
+    assert!(prompt_open(&mut h));
+    h.keys("escape");
+    assert!(!prompt_open(&mut h));
+    assert!(h.root(|root, _| root.spawn_dialog_no_repos()));
+    let root = h.root.clone();
+    let (dialog, pane) = h.cx.update(|window, cx| {
+        let root = root.read(cx);
+        (
+            root.spawn_dialog_holds_keyboard(window),
+            root.pane_holds_keyboard("p1", window, cx),
+        )
+    });
+    assert!(dialog, "the no-repos dialog takes the keyboard back");
+    assert!(!pane, "the pane under the dialog does not");
 }
 
 #[gpui::test]
-fn empty_pane_add_repo_drawn_disabled_on_remote(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    let mut h = Harness::on_target(cx, &dir, remote_target(), &Fixture::default());
-    assert!(tooltip_on(&mut h, "empty-add-repo", LOCAL_FILES));
-}
-
-#[gpui::test]
-fn more_menu_add_repo_drawn_disabled_on_remote(cx: &mut TestAppContext) {
+fn add_repo_prompt_sends_add_repo_with_the_typed_path(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = remote_without_repos(cx, &dir);
-    h.click_on("sidebar-more");
-    assert!(tooltip_on(&mut h, "sidebar-more-add-repo", LOCAL_FILES));
-    h.click_on("sidebar-more-add-repo");
+    h.click_on("sidebar-add-repo");
+    type_text(&mut h, "/srv/app/");
+    h.keys("enter");
+    assert!(!prompt_open(&mut h), "Add closes the prompt");
+    let sent = h.sent();
     assert!(
-        h.root(|root, _| root.sidebar_more_open()),
-        "the disabled row takes no press, so the menu stays open"
+        sent.iter().any(|msg| matches!(
+            msg,
+            ClientMessage::AddRepo { path, name: Some(name) }
+                if path == "/srv/app/" && name == "app"
+        )),
+        "the typed path goes out, named by its last segment: sent {sent:?}"
+    );
+
+    h.click_on("sidebar-add-repo");
+    type_text(&mut h, "/srv/web");
+    h.keys("tab tab");
+    assert_eq!(
+        h.root(|root, _| root.host_path_prompt_focus()).as_deref(),
+        Some("host-path-add")
+    );
+    h.keys("enter");
+    assert!(!prompt_open(&mut h));
+    let sent = h.sent();
+    assert!(
+        sent.iter().any(|msg| matches!(
+            msg,
+            ClientMessage::AddRepo { path, .. } if path == "/srv/web"
+        )),
+        "Add pressed from the keyboard sends too: sent {sent:?}"
     );
 }
 
 #[gpui::test]
-fn spawn_dialog_add_repo_drawn_disabled_on_remote(cx: &mut TestAppContext) {
+fn add_repo_prompt_refuses_a_relative_path_inline(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = remote_without_repos(cx, &dir);
-    h.keys("ctrl-shift-n");
-    assert!(h.root(|root, _| root.spawn_dialog_no_repos()));
-    assert!(tooltip_on(&mut h, "spawn-add-repo", LOCAL_FILES));
+    h.click_on("sidebar-add-repo");
+    type_text(&mut h, "srv/app");
+    h.keys("enter");
+    assert!(prompt_open(&mut h), "the prompt stays");
+    assert_eq!(
+        prompt_error(&mut h).as_deref(),
+        Some("Use a full path on box, starting with a drive letter, \\\\server or /.")
+    );
+    assert!(drawn(&mut h, "host-path-error"));
+    assert!(!sent_add_repo(&h.sent()), "nothing is registered");
+
+    type_text(&mut h, "x");
+    assert_eq!(prompt_error(&mut h), None, "an edit clears the refusal");
+
+    h.click_on("host-path-add");
+    assert_eq!(
+        prompt_error(&mut h).as_deref(),
+        Some("Use a full path on box, starting with a drive letter, \\\\server or /."),
+        "a click on Add checks the path too"
+    );
+}
+
+#[gpui::test]
+fn add_repo_prompt_escape_closes(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = remote_without_repos(cx, &dir);
+    h.click_on("sidebar-add-repo");
+    type_text(&mut h, "/srv/app");
+    h.keys("escape");
+    assert!(!prompt_open(&mut h));
+    assert!(!sent_add_repo(&h.sent()), "nothing is registered");
+
+    h.click_on("sidebar-add-repo");
+    assert_eq!(
+        h.root(RootView::host_path_prompt_text).as_deref(),
+        Some(""),
+        "a reopened prompt starts empty"
+    );
+    h.click_on("host-path-cancel");
+    assert!(!prompt_open(&mut h), "Cancel closes it too");
+}
+
+#[gpui::test]
+fn add_repo_on_remote_writes_no_last_repo_dir(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let ui = dir.path().join("native-ui.json");
+    std::fs::write(&ui, r#"{"last_repo_dir":"C:/src"}"#).expect("seed the last repo folder");
+    let mut h = remote_without_repos(cx, &dir);
+    h.click_on("sidebar-add-repo");
+    assert_eq!(
+        h.root(RootView::host_path_prompt_text).as_deref(),
+        Some(""),
+        "this PC's folder is not offered on the host"
+    );
+    type_text(&mut h, "/srv/app");
+    h.keys("enter");
+    assert!(sent_add_repo(&h.sent()));
+    let saved = std::fs::read_to_string(&ui).unwrap_or_default();
+    assert!(
+        !saved.contains("/srv"),
+        "a host path is never remembered: {saved}"
+    );
 }
 
 #[gpui::test]
@@ -735,14 +861,127 @@ fn worktrees_root_browse_disabled_on_remote(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn workspace_file_browse_disabled_on_remote(cx: &mut TestAppContext) {
+fn workspace_file_browse_not_drawn_on_remote(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = remote_with_repos(cx, &dir, two_repos());
     h.set_picked_file(Some("D:/work/team.code-workspace"));
     vscode_creator(&mut h);
-    assert!(tooltip_on(&mut h, "workspace-creator-browse", LOCAL_FILES));
-    h.click_on("workspace-creator-browse");
+    assert!(
+        !h.in_model("workspace-creator-browse"),
+        "the typed field takes Browse's place"
+    );
+    assert!(drawn(&mut h, "workspace-creator-file-input"));
     assert_eq!(h.file_asks(), 0, "no file picker opens on this PC");
+}
+
+#[gpui::test]
+fn workspace_creator_on_remote_takes_a_typed_workspace_file(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let ui = dir.path().join("native-ui.json");
+    std::fs::write(&ui, r#"{"last_vscode_dir":"D:/vs"}"#).expect("seed the picker folder");
+    let mut h = remote_with_repos(cx, &dir, two_repos());
+    vscode_creator(&mut h);
+    assert!(shows(
+        &mut h,
+        "workspace-creator-file-label",
+        "Workspace file on box"
+    ));
+    assert_eq!(
+        h.root(RootView::workspace_creator_file_text).as_deref(),
+        Some(""),
+        "this PC's remembered folder is not offered on the host"
+    );
+    h.keys("tab");
+    type_text(&mut h, "/srv/team.code-workspace");
+    h.keys("enter");
+    let sent = h.sent();
+    assert!(
+        sent.iter().any(|msg| matches!(
+            msg,
+            ClientMessage::ParseVscodeWorkspace { path } if path == "/srv/team.code-workspace"
+        )),
+        "the typed file is parsed on the host: sent {sent:?}"
+    );
+    assert!(h.root(|root, _| root.workspace_creator_parsing()));
+    let saved = std::fs::read_to_string(&ui).unwrap_or_default();
+    assert!(
+        !saved.contains("/srv"),
+        "a host path is never remembered: {saved}"
+    );
+}
+
+#[gpui::test]
+fn workspace_creator_refuses_a_path_without_code_workspace(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = remote_with_repos(cx, &dir, two_repos());
+    vscode_creator(&mut h);
+    h.keys("tab");
+    type_text(&mut h, "/srv/team.json");
+    h.keys("enter");
+    assert_eq!(
+        h.root(|root, _| root.workspace_creator_error()).as_deref(),
+        Some("Type the path of a .code-workspace file.")
+    );
+    let sent = h.sent();
+    assert!(
+        !sent
+            .iter()
+            .any(|msg| matches!(msg, ClientMessage::ParseVscodeWorkspace { .. })),
+        "nothing is parsed: sent {sent:?}"
+    );
+    assert!(!h.root(|root, _| root.workspace_creator_parsing()));
+
+    type_text(&mut h, "x");
+    assert_eq!(
+        h.root(|root, _| root.workspace_creator_error()),
+        None,
+        "an edit clears the refusal"
+    );
+}
+
+#[gpui::test]
+fn workspace_creator_no_repos_note_names_the_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = remote_with_repos(cx, &dir, two_repos());
+    h.click_on("sidebar-more");
+    h.click_on("sidebar-more-add-workspace");
+    h.send(DaemonMessage::Repos { repos: Vec::new() });
+    assert!(shows(
+        &mut h,
+        "workspace-creator-no-repos",
+        "No repos on box yet."
+    ));
+}
+
+#[gpui::test]
+fn worktrees_root_on_remote_says_it_is_created_on_the_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = with_repos(cx, &dir, Vec::new());
+    worktrees_tab(&mut h);
+    assert!(
+        !shows(
+            &mut h,
+            "settings-worktrees-host-hint",
+            "Created on box if it does not exist."
+        ),
+        "no host hint on the local daemon"
+    );
+    h.keys("escape");
+
+    reload_on_remote(&mut h, Vec::new());
+    worktrees_tab(&mut h);
+    assert!(shows(
+        &mut h,
+        "settings-worktrees-host-hint",
+        "Created on box if it does not exist."
+    ));
+    h.click_on("settings-worktrees-root-input");
+    type_text(&mut h, "x");
+    assert_eq!(
+        h.root(|root, _| root.worktrees_path()).as_deref(),
+        Some("x"),
+        "the field stays enabled"
+    );
 }
 
 #[gpui::test]
@@ -855,14 +1094,14 @@ fn workspace_file_browse_leaves_the_tab_ring_on_remote(cx: &mut TestAppContext) 
     h.keys("tab");
     assert_eq!(
         creator_focus(&mut h).as_deref(),
-        Some("workspace-creator-cancel"),
-        "Tab skips Browse on a remote host"
+        Some("workspace-creator-file-input"),
+        "Tab reaches the typed file field in Browse's place on a remote host"
     );
     h.keys("shift-tab");
     assert_eq!(
         creator_focus(&mut h).as_deref(),
         Some("workspace-creator-tab-vscode"),
-        "and so does Shift+Tab"
+        "and Shift+Tab goes back to the tab"
     );
 }
 
@@ -901,7 +1140,7 @@ fn cleanup_open_folder_leaves_the_tab_ring_on_remote(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn no_repos_dialog_keys_reach_no_add_repo_on_remote(cx: &mut TestAppContext) {
+fn no_repos_dialog_keys_open_the_host_path_prompt_on_remote(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = with_repos(cx, &dir, Vec::new());
     h.keys("ctrl-shift-n");
@@ -916,15 +1155,18 @@ fn no_repos_dialog_keys_reach_no_add_repo_on_remote(cx: &mut TestAppContext) {
     reload_on_remote(&mut h, Vec::new());
     h.keys("ctrl-shift-n");
     assert!(h.root(|root, _| root.spawn_dialog_no_repos()));
-    h.keys("enter space");
-    assert_eq!(
-        h.folder_asks(),
-        1,
-        "on a remote host Enter and Space press nothing"
+    h.keys("space");
+    assert!(
+        prompt_open(&mut h),
+        "Space presses Add repo on a remote host"
     );
+    h.keys("escape");
+    h.keys("enter");
+    assert!(prompt_open(&mut h), "and so does Enter");
+    assert_eq!(h.folder_asks(), 1, "no folder picker opens on this PC");
     assert!(
         h.root(|root, _| root.spawn_dialog_no_repos()),
-        "the dialog stays for Esc or Cancel"
+        "the dialog stays under the prompt"
     );
 }
 

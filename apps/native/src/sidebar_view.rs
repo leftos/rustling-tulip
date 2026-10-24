@@ -391,7 +391,7 @@ impl RootView {
         menu_item(MORE_ADD_REPO_ROW, "Add repo…", false).on_click(cx.listener(
             |this, _: &ClickEvent, window, cx| {
                 this.close_more_menu(window, cx);
-                this.add_repo(cx);
+                this.add_repo(window, cx);
             },
         ))
     }
@@ -402,9 +402,15 @@ impl RootView {
     }
 
     /// Add repo: the picker opens at the folder the last added repo sits
-    /// in, and the folder picked is registered with the daemon. A cancel
-    /// sends nothing; a refusal comes back as the daemon's error toast.
-    pub(crate) fn add_repo(&mut self, cx: &mut Context<Self>) {
+    /// in, and the folder picked is registered with the daemon. On a remote
+    /// host, whose folders this PC's picker cannot show, the prompt for a
+    /// typed host path opens instead. A cancel sends nothing; a refusal
+    /// comes back as the daemon's error toast.
+    pub(crate) fn add_repo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.capabilities().opens_local_files() {
+            self.open_host_path_prompt(window, cx);
+            return;
+        }
         let start = self.sidebar.last_repo_dir().map(PathBuf::from);
         self.pick_local(Pick::Folder, start, cx, |this, picked, _| {
             this.finish_add_repo(picked);
@@ -417,7 +423,9 @@ impl RootView {
         let Some(add) = RepoAdd::from_pick(picked) else {
             return;
         };
-        if self.sidebar.set_last_repo_dir(&add.last_dir) {
+        if let Some(last_dir) = &add.last_dir
+            && self.sidebar.set_last_repo_dir(last_dir)
+        {
             self.save_ui();
         }
         tracing::info!("adding repo {} as {}", add.path, add.name);
@@ -458,9 +466,14 @@ impl RootView {
     }
 }
 
+/// What an Add repo control says on a remote host, where it opens the
+/// prompt for a typed host path.
+pub(crate) const ADD_HOST_REPO_TIP: &str =
+    "Type the path of a folder on the host to register as a repo";
+
 /// Whether an Add repo control takes a press, and its tooltip. Add repo
-/// opens this PC's folder picker, so where `caps` opens no local files it
-/// is disabled with the reason.
+/// opens this PC's folder picker where `caps` opens local files, and the
+/// prompt for a typed host path elsewhere.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct AddRepoGate {
     pub(crate) enabled: bool,
@@ -469,16 +482,12 @@ pub(crate) struct AddRepoGate {
 
 impl AddRepoGate {
     pub(crate) fn for_caps(caps: Capabilities) -> Self {
-        match caps.local_files_refusal() {
-            Some(reason) => Self {
-                enabled: false,
-                tip: reason,
-            },
-            None => Self {
-                enabled: true,
-                tip: ADD_REPO_TIP,
-            },
-        }
+        let tip = if caps.opens_local_files() {
+            ADD_REPO_TIP
+        } else {
+            ADD_HOST_REPO_TIP
+        };
+        Self { enabled: true, tip }
     }
 }
 
@@ -533,7 +542,9 @@ fn no_repos_note(gate: AddRepoGate, target: &Target, cx: &mut Context<RootView>)
             tagged_text("sidebar-no-repos-note", sidebar_no_repos_note(target))
                 .text_color(gpui::rgb(MUTED)),
         )
-        .child(bordered_button(add, cx, |this, _, cx| this.add_repo(cx)))
+        .child(bordered_button(add, cx, |this, window, cx| {
+            this.add_repo(window, cx);
+        }))
 }
 /// The ⋯ button's side, in px.
 const MORE_BUTTON_SIZE: f32 = 30.0;
@@ -2151,16 +2162,16 @@ impl RootView {
 
 #[cfg(test)]
 mod tests {
-    use super::{AddRepoGate, chip_texts, seen_idle};
+    use super::{ADD_HOST_REPO_TIP, AddRepoGate, chip_texts, seen_idle};
     use crate::grid_view::ADD_REPO_TIP;
-    use crate::remote_mode::{Capabilities, LOCAL_FILES_REASON};
+    use crate::remote_mode::Capabilities;
     use crate::sidebar::{Leaf, LeafState};
     use crate::tabs::TabPill;
     use crate::target::Target;
     use protocol::{Agent, ClaudeProvider, SessionMode, SessionStatus};
 
     #[test]
-    fn add_repo_is_offered_only_where_this_pcs_picker_answers() {
+    fn add_repo_is_offered_on_every_host() {
         assert_eq!(
             AddRepoGate::for_caps(Capabilities::for_target(&Target::Local)),
             AddRepoGate {
@@ -2172,9 +2183,10 @@ mod tests {
         assert_eq!(
             AddRepoGate::for_caps(Capabilities::for_target(&remote)),
             AddRepoGate {
-                enabled: false,
-                tip: LOCAL_FILES_REASON,
-            }
+                enabled: true,
+                tip: ADD_HOST_REPO_TIP,
+            },
+            "a remote host takes a typed path"
         );
     }
 

@@ -11,20 +11,30 @@ use gpui::{
 use protocol::{ClientMessage, RepoEntry, VscodeWorkspaceSuggestion, WorkspaceEntry};
 
 use crate::notice_view::modal_panel;
+use crate::repo_add::host_workspace_file;
 use crate::session_menu::{backdrop, dialog_button};
 use crate::spawn_view::checkbox_row;
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
 use crate::workspace_creator::{
-    CreatorControl, CreatorMode, FILE_LABEL, MEMBERS_LABEL, NAME_PLACEHOLDER, NO_FILE,
-    NO_REPOS_NOTE, PARSING, Settled, TITLE, WORKSPACE_NAME_LABEL, WorkspaceCreator,
+    CreatorControl, CreatorMode, FILE_LABEL, MEMBERS_LABEL, NAME_PLACEHOLDER, NO_FILE, PARSING,
+    Settled, TITLE, WORKSPACE_NAME_LABEL, WorkspaceCreator, file_field_label,
+    file_field_placeholder, no_repos_note,
 };
-use crate::{BORDER, DANGER, MUTED, Pick, RootView, TEXT, tooltip};
+use crate::{BORDER, DANGER, MUTED, Pick, RootView, TEXT, tagged_text};
 
-/// The open creator: its model and the name field's input entity.
+/// The open creator: its model, the name field's input entity and, on a
+/// remote host, the typed `.code-workspace` field with the host's name.
 pub(crate) struct WorkspaceCreatorDialog {
     creator: WorkspaceCreator,
     name_input: Entity<TextInput>,
+    file_field: Option<FileField>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// The typed `.code-workspace` path on a remote host, in Browse's place.
+struct FileField {
+    host: String,
+    input: Entity<TextInput>,
 }
 
 impl RootView {
@@ -53,10 +63,24 @@ impl RootView {
         self.renaming = None;
         self.close_flyout();
         let name_input = cx.new(|cx| TextInput::new(String::new(), NAME_PLACEHOLDER, cx));
-        let subscriptions = Self::watch_workspace_name(&name_input, window, cx);
+        let mut subscriptions = Self::watch_workspace_name(&name_input, window, cx);
+        // No remembered folder is offered: this PC's folders mean nothing
+        // on the host.
+        let file_field = self.conn.target().short_name().map(|host| {
+            let placeholder = file_field_placeholder(host);
+            let input = cx.new(|cx| TextInput::new(String::new(), placeholder, cx));
+            FileField {
+                host: host.to_owned(),
+                input,
+            }
+        });
+        if let Some(field) = &file_field {
+            subscriptions.extend(Self::watch_workspace_file(&field.input, window, cx));
+        }
         self.workspace_creator = Some(WorkspaceCreatorDialog {
             creator: WorkspaceCreator::default(),
             name_input,
+            file_field,
             _subscriptions: subscriptions,
         });
         self.apply_workspace_creator_focus(window, cx);
@@ -101,6 +125,66 @@ impl RootView {
             cx.notify();
         });
         vec![keys, edits, focus]
+    }
+
+    /// The typed file field: Enter parses (through the field's own event),
+    /// Esc closes, an edit clears the message under it and a click in the
+    /// field moves the focus there.
+    fn watch_workspace_file(
+        input: &Entity<TextInput>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<Subscription> {
+        let keys = cx.subscribe_in(
+            input,
+            window,
+            |this, _, event: &TextInputEvent, window, cx| match event {
+                TextInputEvent::Submit => this.submit_workspace_file(cx),
+                TextInputEvent::Cancel => this.close_workspace_creator(window, cx),
+            },
+        );
+        let edits = cx.subscribe_in(input, window, |this, _, _: &TextChanged, _, cx| {
+            if let Some(dialog) = &mut this.workspace_creator {
+                dialog.creator.file_edited();
+            }
+            cx.notify();
+        });
+        let handle = input.read(cx).focus_handle(cx);
+        let focus = cx.on_focus(&handle, window, |this, _, cx| {
+            let browse = this.capabilities().opens_local_files();
+            if let Some(dialog) = &mut this.workspace_creator {
+                dialog.creator.set_focus(CreatorControl::File, browse);
+            }
+            cx.notify();
+        });
+        vec![keys, edits, focus]
+    }
+
+    /// The typed file field's Enter: a path the string rules pass is parsed
+    /// by the host's daemon, as a picked file is, and never remembered; one
+    /// they refuse says why inline.
+    fn submit_workspace_file(&mut self, cx: &mut Context<Self>) {
+        let Some(dialog) = &mut self.workspace_creator else {
+            return;
+        };
+        let Some(field) = &dialog.file_field else {
+            return;
+        };
+        if dialog.creator.parsing() {
+            return;
+        }
+        let text = field.input.read(cx).text().to_owned();
+        match host_workspace_file(&text) {
+            Ok(path) => {
+                dialog.creator.begin_parse(path.clone());
+                self.send(ClientMessage::ParseVscodeWorkspace { path });
+            }
+            Err(problem) => {
+                let message = problem.message(&field.host);
+                dialog.creator.refuse_file(message);
+            }
+        }
+        cx.notify();
     }
 
     /// A key while the creator is open; returns whether it was the creator's
@@ -158,12 +242,16 @@ impl RootView {
                 CreatorControl::FromVscode => dialog.creator.set_mode(CreatorMode::FromVscode),
                 CreatorControl::Name
                 | CreatorControl::Browse
+                | CreatorControl::File
                 | CreatorControl::Cancel
                 | CreatorControl::Create => dialog.creator.set_focus(control, browse),
             }
         }
         match control {
-            CreatorControl::FromRepos | CreatorControl::FromVscode | CreatorControl::Name => {
+            CreatorControl::FromRepos
+            | CreatorControl::FromVscode
+            | CreatorControl::Name
+            | CreatorControl::File => {
                 self.apply_workspace_creator_focus(window, cx);
             }
             CreatorControl::Browse => self.browse_workspace_file(cx),
@@ -345,22 +433,28 @@ impl RootView {
         let Some(dialog) = &self.workspace_creator else {
             return;
         };
-        if dialog.creator.focus() == CreatorControl::Name {
-            dialog.name_input.read(cx).focus_handle(cx).focus(window);
-        } else {
-            self.workspace_creator_focus.focus(window);
+        let file_input = dialog.file_field.as_ref().map(|field| &field.input);
+        match (dialog.creator.focus(), file_input) {
+            (CreatorControl::Name, _) => dialog.name_input.read(cx).focus_handle(cx).focus(window),
+            (CreatorControl::File, Some(input)) => input.read(cx).focus_handle(cx).focus(window),
+            _ => self.workspace_creator_focus.focus(window),
         }
         cx.notify();
     }
 
-    /// Whether the name field holds the keyboard.
+    /// Whether the name field or the typed file field holds the keyboard.
     fn workspace_name_focused(&self, window: &Window, cx: &Context<Self>) -> bool {
         self.workspace_creator.as_ref().is_some_and(|dialog| {
-            dialog
-                .name_input
-                .read(cx)
-                .focus_handle(cx)
-                .is_focused(window)
+            let file_focused = dialog
+                .file_field
+                .as_ref()
+                .is_some_and(|field| field.input.read(cx).focus_handle(cx).is_focused(window));
+            file_focused
+                || dialog
+                    .name_input
+                    .read(cx)
+                    .focus_handle(cx)
+                    .is_focused(window)
         })
     }
 
@@ -376,12 +470,10 @@ impl RootView {
             .children(CreatorMode::ALL.map(|mode| workspace_tab(mode, creator.mode(), cx)));
         let body = match creator.mode() {
             CreatorMode::FromRepos => {
-                repos_body(dialog, self.sidebar.repos(), focus, cx).into_any_element()
+                let note = no_repos_note(self.conn.target().short_name());
+                repos_body(dialog, self.sidebar.repos(), focus, note, cx).into_any_element()
             }
-            CreatorMode::FromVscode => {
-                vscode_body(dialog, focus, self.capabilities().local_files_refusal(), cx)
-                    .into_any_element()
-            }
+            CreatorMode::FromVscode => vscode_body(dialog, focus, cx).into_any_element(),
         };
         let error = creator.error().map(|message| {
             div()
@@ -492,6 +584,14 @@ impl RootView {
             .and_then(|dialog| dialog.creator.file().map(str::to_owned))
     }
 
+    /// The typed `.code-workspace` field's text, while the creator is open
+    /// on a remote host.
+    #[must_use]
+    pub fn workspace_creator_file_text(&self, cx: &App) -> Option<String> {
+        let field = self.workspace_creator.as_ref()?.file_field.as_ref()?;
+        Some(field.input.read(cx).text().to_owned())
+    }
+
     /// Whether a parse is in flight.
     #[must_use]
     pub fn workspace_creator_parsing(&self) -> bool {
@@ -548,10 +648,16 @@ impl RootView {
             CreatorControl::Name.selector().to_owned(),
             "Name".to_owned(),
         ));
-        controls.push((
-            CreatorControl::Browse.selector().to_owned(),
-            "Browse…".to_owned(),
-        ));
+        controls.push(match &dialog.file_field {
+            None => (
+                CreatorControl::Browse.selector().to_owned(),
+                "Browse…".to_owned(),
+            ),
+            Some(field) => (
+                CreatorControl::File.selector().to_owned(),
+                file_field_label(&field.host),
+            ),
+        });
         controls.push((
             "workspace-creator-file".to_owned(),
             dialog.creator.file().unwrap_or(NO_FILE).to_owned(),
@@ -612,6 +718,7 @@ fn repos_body(
     dialog: &WorkspaceCreatorDialog,
     repos: &[RepoEntry],
     focus: CreatorControl,
+    no_repos: String,
     cx: &mut Context<RootView>,
 ) -> Div {
     let rows = dialog.creator.member_rows(repos);
@@ -624,10 +731,7 @@ fn repos_body(
         .child(div().text_color(gpui::rgb(MUTED)).child(MEMBERS_LABEL))
         .when(rows.is_empty(), |body| {
             body.child(
-                div()
-                    .debug_selector(|| "workspace-creator-no-repos".to_owned())
-                    .text_color(gpui::rgb(MUTED))
-                    .child(NO_REPOS_NOTE),
+                tagged_text("workspace-creator-no-repos", no_repos).text_color(gpui::rgb(MUTED)),
             )
         })
         .children(rows.into_iter().map(|(selector, name, checked)| {
@@ -641,31 +745,19 @@ fn repos_body(
         }))
 }
 
-/// The From-VS-Code body: Browse, the parse's state, and the parsed file's
-/// name field and folder rows. Browse is disabled with `browse_refusal` as
-/// its tooltip when one is given.
+/// The From-VS-Code body: Browse, or on a remote host the typed file field
+/// in its place, the parse's state, and the parsed file's name field and
+/// folder rows.
 fn vscode_body(
     dialog: &WorkspaceCreatorDialog,
     focus: CreatorControl,
-    browse_refusal: Option<&'static str>,
     cx: &mut Context<RootView>,
 ) -> Div {
     let creator = &dialog.creator;
-    let file = creator.file().unwrap_or(NO_FILE);
-    let browse_enabled = !creator.parsing() && browse_refusal.is_none();
-    let browse = dialog_button(
-        CreatorControl::Browse.selector(),
-        "Browse…".to_owned(),
-        false,
-        focus == CreatorControl::Browse,
-        browse_enabled,
-    )
-    .when_some(browse_refusal, |button, tip| button.tooltip(tooltip(tip)))
-    .when(browse_enabled, |button| {
-        button.on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-            this.press_workspace_control(CreatorControl::Browse, window, cx);
-        }))
-    });
+    let chooser = match &dialog.file_field {
+        Some(field) => file_field(field, focus, cx),
+        None => browse_row(creator, focus, cx),
+    };
     let parsed = creator.suggestion().map(|_| {
         let rows = creator.folder_rows();
         div()
@@ -698,6 +790,42 @@ fn vscode_body(
         .flex()
         .flex_col()
         .gap(px(6.0))
+        .child(chooser)
+        .when(creator.parsing(), |body| {
+            body.child(
+                div()
+                    .debug_selector(|| "workspace-creator-parsing".to_owned())
+                    .text_color(gpui::rgb(MUTED))
+                    .child(PARSING),
+            )
+        })
+        .children(parsed)
+}
+
+/// On this PC: the file field's label, the picked file and Browse.
+fn browse_row(
+    creator: &WorkspaceCreator,
+    focus: CreatorControl,
+    cx: &mut Context<RootView>,
+) -> Div {
+    let file = creator.file().unwrap_or(NO_FILE);
+    let browse_enabled = !creator.parsing();
+    let browse = dialog_button(
+        CreatorControl::Browse.selector(),
+        "Browse…".to_owned(),
+        false,
+        focus == CreatorControl::Browse,
+        browse_enabled,
+    )
+    .when(browse_enabled, |button| {
+        button.on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+            this.press_workspace_control(CreatorControl::Browse, window, cx);
+        }))
+    });
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(6.0))
         .child(div().text_color(gpui::rgb(MUTED)).child(FILE_LABEL))
         .child(
             div()
@@ -712,15 +840,40 @@ fn vscode_body(
                 )
                 .child(browse),
         )
-        .when(creator.parsing(), |body| {
-            body.child(
-                div()
-                    .debug_selector(|| "workspace-creator-parsing".to_owned())
-                    .text_color(gpui::rgb(MUTED))
-                    .child(PARSING),
+}
+
+/// On a remote host: the typed `.code-workspace` path, labelled with the
+/// host; Enter parses it.
+fn file_field(field: &FileField, focus: CreatorControl, cx: &mut Context<RootView>) -> Div {
+    let input = div()
+        .id(CreatorControl::File.selector())
+        .debug_selector(|| CreatorControl::File.selector().to_owned())
+        .flex()
+        .px(px(6.0))
+        .py(px(3.0))
+        .rounded(px(4.0))
+        .border_1()
+        .border_color(gpui::rgb(if focus == CreatorControl::File {
+            TEXT
+        } else {
+            BORDER
+        }))
+        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+            this.press_workspace_control(CreatorControl::File, window, cx);
+        }))
+        .child(field.input.clone());
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(6.0))
+        .child(
+            tagged_text(
+                "workspace-creator-file-label",
+                file_field_label(&field.host),
             )
-        })
-        .children(parsed)
+            .text_color(gpui::rgb(MUTED)),
+        )
+        .child(input)
 }
 
 /// The name field in its box.
