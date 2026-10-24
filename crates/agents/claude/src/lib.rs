@@ -9,6 +9,7 @@
 
 mod hooks;
 mod providers;
+mod rules;
 mod transcripts;
 
 pub use providers::{display_name, provider_for_model};
@@ -16,8 +17,8 @@ pub use transcripts::encode_project_dir;
 
 use agent_api::{
     Agent, AgentError, ConversationPlan, ConversationQuery, EnvPlan, FoundConversation,
-    HeadlessEvent, HookPlan, HookReport, HookShim, KeyLookup, Refusal, ResolvedRows, SpawnCheck,
-    SpawnContext, workspace_prelude,
+    HeadlessEvent, HookPlan, HookReport, HookShim, KeyLookup, ReadySignal, Refusal, ResolvedRows,
+    ScreenRules, SpawnCheck, SpawnContext, workspace_prelude,
 };
 use protocol::{
     AccentToken, AgentCaps, AgentDescriptor, AgentId, AgentTexts, ChipRule, Choice, ChoiceStyle,
@@ -360,6 +361,22 @@ impl Agent for ClaudePlugin {
             Some(path) => format!("claude --settings \"{path}\" --resume {conversation_id}"),
             None => format!("claude --resume {conversation_id}"),
         }))
+    }
+
+    /// Claude's rule table, which the daemon reads a session's rendered screen
+    /// with.
+    fn screen_rules(&self) -> &ScreenRules {
+        rules::screen_rules()
+    }
+
+    /// The banner tuning the daemon's startup heuristic was measured against.
+    fn ready_signal(&self) -> ReadySignal {
+        rules::READY_SIGNAL
+    }
+
+    /// Claude reads a file a prompt names with `@` in front of its path.
+    fn file_reference(&self, repo_relative: &str) -> String {
+        rules::file_reference(repo_relative)
     }
 }
 

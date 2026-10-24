@@ -1,7 +1,7 @@
 //! The check every agent crate runs in one test, so an agent's option schema
 //! and its typed options cannot drift apart.
 
-use crate::{Agent, decode_options, validate};
+use crate::{Agent, LineMatcher, ScreenRegion, ScreenVerdict, decode_options, validate};
 use protocol::{AgentDescriptor, FieldKind, OptionValue, OptionValues};
 
 /// Check that `agent`'s option schema and its [`Agent::Options`] agree.
@@ -34,6 +34,54 @@ pub fn check<A: Agent>(agent: &A) {
             panic!("{case}: the schema refuses the re-serialized {reserialized:?}: {err}");
         }
         check_shell_resume(agent, &case, &options);
+    }
+    check_screen_rules(agent);
+}
+
+/// Every screen rule a plugin hands the daemon is named, ordered and readable:
+/// a non-empty unique name, priorities in non-increasing order, and no
+/// placeholder left in the parts the daemon evaluates.
+#[expect(
+    clippy::panic,
+    reason = "a conformance failure must fail the calling test"
+)]
+fn check_screen_rules<A: Agent>(agent: &A) {
+    let mut names: Vec<&str> = Vec::new();
+    let mut last_priority: Option<u16> = None;
+    for (index, rule) in agent.screen_rules().rules.iter().enumerate() {
+        assert!(!rule.name.is_empty(), "screen rule {index} has no name");
+        assert!(
+            !names.contains(&rule.name.as_str()),
+            "screen rule {:?} is named twice",
+            rule.name
+        );
+        names.push(&rule.name);
+        if let Some(previous) = last_priority
+            && rule.priority > previous
+        {
+            panic!(
+                "screen rule {:?} (priority {}) follows priority {previous}; priorities must not rise",
+                rule.name, rule.priority
+            );
+        }
+        last_priority = Some(rule.priority);
+        let unknown_matcher = matches!(rule.matcher, LineMatcher::Unknown)
+            || rule.not.iter().any(|m| matches!(m, LineMatcher::Unknown));
+        assert!(
+            !unknown_matcher,
+            "screen rule {:?} matches an unknown kind",
+            rule.name
+        );
+        assert!(
+            !matches!(rule.region, ScreenRegion::Unknown),
+            "screen rule {:?} reads an unknown region",
+            rule.name
+        );
+        assert!(
+            !matches!(rule.verdict, ScreenVerdict::Unknown),
+            "screen rule {:?} gives an unknown verdict",
+            rule.name
+        );
     }
 }
 

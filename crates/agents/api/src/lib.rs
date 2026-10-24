@@ -17,8 +17,13 @@
 #[cfg(feature = "test-support")]
 pub mod conformance;
 pub mod hook_vocabulary;
+pub mod screen_rules;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_agent;
+
+pub use screen_rules::{
+    LineMatcher, ReadySignal, ScreenRegion, ScreenRule, ScreenRules, ScreenVerdict,
+};
 
 use chrono::{DateTime, Utc};
 use protocol::{AgentDescriptor, FieldKind, OptionField, OptionValue, OptionValues};
@@ -28,6 +33,10 @@ use serde::de::DeserializeOwned;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use tracing::error;
+
+/// The rule set of a plugin that reads no screen: every reading is no match,
+/// so its sessions are read by their hooks alone.
+static EMPTY_SCREEN_RULES: ScreenRules = ScreenRules { rules: Vec::new() };
 
 /// Cross-agent spawn context bundled together so trait signatures stay
 /// readable. Fields are borrowed from the daemon's in-flight spawn so the
@@ -494,6 +503,26 @@ pub trait Agent: Send + Sync + 'static {
     ) -> Result<Option<String>, AgentError> {
         Ok(None)
     }
+
+    /// The rules the daemon reads this agent's rendered screen with, to tell
+    /// whether a session is working, waits for an answer or is idle. A plugin
+    /// that hands over none is read by its hooks alone.
+    fn screen_rules(&self) -> &ScreenRules {
+        &EMPTY_SCREEN_RULES
+    }
+
+    /// How much output the daemon must see and how long it must then stay
+    /// quiet before this agent's TUI counts as up, so a prompt can be typed
+    /// into it.
+    fn ready_signal(&self) -> ReadySignal {
+        ReadySignal::default()
+    }
+
+    /// How a prompt names the repo-relative file `repo_relative` so this agent
+    /// reads it. Defaults to the bare path.
+    fn file_reference(&self, repo_relative: &str) -> String {
+        repo_relative.to_owned()
+    }
 }
 
 /// An [`Agent`] as the registry holds it: object-safe, taking the spawn's
@@ -600,6 +629,15 @@ pub trait AgentPlugin: Send + Sync {
         conversation_id: &str,
         hook_files: &[PathBuf],
     ) -> Result<Option<String>, AgentError>;
+
+    /// See [`Agent::screen_rules`].
+    fn screen_rules(&self) -> &ScreenRules;
+
+    /// See [`Agent::ready_signal`].
+    fn ready_signal(&self) -> ReadySignal;
+
+    /// See [`Agent::file_reference`].
+    fn file_reference(&self, repo_relative: &str) -> String;
 
     /// Resolve the executable path (the env-var override, or the default).
     /// Concrete `which`/shim resolution lives in the daemon's
@@ -725,6 +763,18 @@ impl<A: Agent> AgentPlugin for A {
     ) -> Result<Option<String>, AgentError> {
         let opts = decode_options(self, opts)?;
         Agent::shell_resume(self, &opts, conversation_id, hook_files)
+    }
+
+    fn screen_rules(&self) -> &ScreenRules {
+        Agent::screen_rules(self)
+    }
+
+    fn ready_signal(&self) -> ReadySignal {
+        Agent::ready_signal(self)
+    }
+
+    fn file_reference(&self, repo_relative: &str) -> String {
+        Agent::file_reference(self, repo_relative)
     }
 }
 
