@@ -3,7 +3,10 @@ use super::connection::ConnCtx;
 use super::git::active_sessions_using_worktree;
 use super::sessions::rerun_request;
 use super::settings::{env_names, register_repo};
-use super::spawn::{check_spawn_request, expected_output_subscribers, spawn_session};
+use super::spawn::{
+    SpawnExtras, check_spawn_request, expected_output_subscribers, spawn_session,
+    spawn_session_with_extras,
+};
 use super::tabs::rebind_session_panes;
 use super::{Hub, StateEvent};
 use crate::orphan::OrphanMeta;
@@ -779,7 +782,11 @@ async fn recover_one(
         let current = crate::git::current_branch(Path::new(folder)).await;
         plan.name_branch(history::branch_or_placeholder(current));
     }
-    let snapshot = spawn_session(hub, plan.request, None, busy_excluded)
+    let extras = SpawnExtras {
+        hook_agent: plan.hook_agent,
+        resume_conversation: plan.resume_conversation,
+    };
+    let snapshot = spawn_session_with_extras(hub, plan.request, None, busy_excluded, extras)
         .await
         .map_err(|err| format!("{err:#}"))?;
     finish_recovery(hub, &item.history_id, &snapshot.id, out_tx);
@@ -928,6 +935,65 @@ mod tests {
             "an agent inside its shell runs the shell's watcher"
         );
         assert!(runs_shell_watcher(&meta(SessionMode::PlainShell)));
+    }
+
+    /// A recovered shell reattached after a restart still maps its hooks with
+    /// the agent it typed its resume into; a shell without one maps none.
+    #[tokio::test]
+    async fn a_reattached_recovered_shell_maps_hooks_with_its_hook_agent() {
+        use crate::history::test_support::fake_pty;
+        use crate::server::build_loopback_router;
+        use crate::server::test_support::{hook_request, snapshot_of};
+        use tower::ServiceExt as _;
+        let (hub, _scratch) = test_hub("reattached-shell-hook-agent");
+        let mut exits = Vec::new();
+        for (id, hook_agent) in [("hooked", Some(Agent::Claude)), ("bare", None)] {
+            let mut meta = crate::orphan::meta_from_record(
+                id.to_owned(),
+                4242,
+                id.to_owned(),
+                protocol::SessionKind::Standalone,
+                SessionMode::PlainShell,
+                Vec::new(),
+                Utc::now(),
+                None,
+                Some("pwsh".to_owned()),
+                Agent::Claude,
+                None,
+                None,
+                None,
+                Some(4242),
+                Some(format!(r"\\.\pipe\rt-tracer-{id}")),
+                None,
+                None,
+            )
+            .expect("build meta");
+            meta.hook_agent = hook_agent;
+            let (pty, exit_tx) = fake_pty();
+            exits.push(exit_tx);
+            hub.sessions.insert_reattached(&meta, pty).publish();
+            let response = build_loopback_router(hub.clone())
+                .oneshot(hook_request(
+                    id,
+                    Some("test-token"),
+                    Some("100"),
+                    r#"{"hook_event_name":"UserPromptSubmit"}"#,
+                ))
+                .await
+                .expect("router answers");
+            assert_eq!(response.status(), axum::http::StatusCode::NO_CONTENT);
+        }
+        assert_eq!(
+            snapshot_of(&hub, "hooked").status,
+            protocol::SessionStatus::Working,
+            "the hook agent's plugin mapped the prompt"
+        );
+        assert_eq!(
+            snapshot_of(&hub, "bare").status,
+            protocol::SessionStatus::Idle,
+            "a shell without a hook agent maps nothing"
+        );
+        drop(exits);
     }
     #[tokio::test]
     #[expect(clippy::panic, reason = "a wrong reply fails the test loudly")]

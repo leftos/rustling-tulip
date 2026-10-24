@@ -5,11 +5,10 @@ mod shell;
 mod worktree;
 #[cfg(test)]
 pub(super) use self::hook_settings::hook_settings_path;
-pub(crate) use self::hook_settings::render_shell_resume;
 pub(super) use self::hook_settings::{announce_replayed_prompt, remove_hook_settings};
 pub(super) use self::worktree::target_uses_worktree;
 
-use self::hook_settings::{HookSettings, write_hook_settings};
+use self::hook_settings::{HookSettings, write_hook_files, write_hook_settings};
 use self::shell::{
     AgentLaunch, Launch, ShellProgram, TypedCommand, choose_agent_command, plan_launch,
     resolve_agent_program, resolve_shell_program,
@@ -32,7 +31,9 @@ use crate::registry::{
     persist_last_agent, persist_repo_last_spawn_config, persist_workspace_last_spawn_config,
 };
 use crate::session::SessionRegistry;
-use crate::session::{SessionRecord, UpdateOrigin, attach_lifecycle, new_id, push_recent_action};
+use crate::session::{
+    SessionRecord, UpdateOrigin, attach_lifecycle, default_agent, new_id, push_recent_action,
+};
 use crate::{
     env_secrets, headless, inject, orphan, osc_title, pty_state, screen, spawn_plan, tracer_client,
     user_env, workspace as ws,
@@ -226,11 +227,48 @@ pub(crate) async fn spawn_session(
     origin: Option<UpdateOrigin>,
     busy_excluded: bool,
 ) -> anyhow::Result<protocol::SessionSnapshot> {
-    spawn_session_with(hub, req, origin, busy_excluded, user_env::resolve).await
+    spawn_session_with_extras(hub, req, origin, busy_excluded, SpawnExtras::default()).await
 }
 
-/// [`spawn_session`] with the variable lookup `resolve` in place of
-/// [`user_env::resolve`]: it resolves the rows' env references and the
+/// [`spawn_session`] carrying the daemon-internal `extras` a recovery sets.
+pub(crate) async fn spawn_session_with_extras(
+    hub: &Hub,
+    req: SpawnRequest,
+    origin: Option<UpdateOrigin>,
+    busy_excluded: bool,
+    extras: SpawnExtras,
+) -> anyhow::Result<protocol::SessionSnapshot> {
+    // Boxed so the callers' futures stay small: the spawn pipeline's own
+    // future is large.
+    Box::pin(spawn_session_with(
+        hub,
+        req,
+        origin,
+        busy_excluded,
+        extras,
+        user_env::resolve,
+    ))
+    .await
+}
+
+/// What a spawn takes beside its request that never travels on the wire
+/// `SpawnRequest` and is never stored in `SpawnConfig`: a recovered shell's
+/// hook agent and the conversation it resumes in it. A recovery sets them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct SpawnExtras {
+    /// The agent whose plugin writes a recovered shell's hook files, builds
+    /// its resume command and maps its hook events.
+    pub(crate) hook_agent: Option<Agent>,
+    /// The conversation a recovered shell resumes in its hook agent.
+    pub(crate) resume_conversation: Option<String>,
+}
+
+/// The longest a recovered shell waits for its prompt before typing its
+/// resume command; it types sooner once the prompt has printed.
+const SHELL_RESUME_DELAY_MS: u32 = 2000;
+
+/// [`spawn_session_with_extras`] with the variable lookup `resolve` in place
+/// of [`user_env::resolve`]: it resolves the rows' env references and the
 /// provider's key.
 #[expect(
     clippy::too_many_lines,
@@ -243,6 +281,7 @@ async fn spawn_session_with<R>(
     mut req: SpawnRequest,
     origin: Option<UpdateOrigin>,
     busy_excluded: bool,
+    extras: SpawnExtras,
     resolve: R,
 ) -> anyhow::Result<protocol::SessionSnapshot>
 where
@@ -395,6 +434,7 @@ where
         origin,
         resume_conversation,
         add_dirs: standalone_add_dirs,
+        extras,
     };
 
     // Record last-used agent per targeted repo. Best-effort: a state.json
@@ -547,6 +587,9 @@ struct SpawnArgs {
     resume_conversation: Option<String>,
     /// A standalone target's extra `--add-dir` directories.
     add_dirs: Vec<String>,
+    /// What a recovery sets beside the request (see [`SpawnExtras`]); only
+    /// the plain-shell path reads it.
+    extras: SpawnExtras,
 }
 
 impl SpawnArgs {
@@ -693,6 +736,7 @@ fn interactive_record(
         agent_in_shell: new.shell_label.is_some(),
         shell_label: new.shell_label,
         agent_exit_announced: false,
+        hook_agent: None,
     };
     push_recent_action(&mut record, "session started".to_string());
     record
@@ -710,6 +754,8 @@ struct NewPlainShell {
     stored_config: protocol::SpawnConfig,
     started_at: chrono::DateTime<Utc>,
     busy_excluded: bool,
+    /// The agent a recovered shell's hook events are mapped with.
+    hook_agent: Option<Agent>,
 }
 
 /// The record of a new plain-shell session.
@@ -735,8 +781,9 @@ fn plain_shell_record(
         headless: None,
         workspace_id: new.workspace_id,
         // Plain-shell sessions have no agent CLI in the picture; the record
-        // still needs an agent, so it carries the default one.
-        agent: Agent::Claude,
+        // still needs an agent, so it carries the default one. A recovered
+        // shell's hooks map with its `hook_agent` instead.
+        agent: default_agent(),
         terminal_title: None,
         program_name: Some(new.shell_label.clone()),
         current_cwd: Some(new.cwd),
@@ -761,6 +808,7 @@ fn plain_shell_record(
         agent_in_shell: false,
         shell_label: None,
         agent_exit_announced: false,
+        hook_agent: new.hook_agent,
     };
     push_recent_action(
         &mut record,
@@ -841,7 +889,7 @@ fn plain_shell_meta(
         started_at,
         workspace_id,
         program_name,
-        Agent::Claude,
+        default_agent(),
         stored_config,
         // Plain shells never carry a kickoff prompt.
         None,
@@ -1290,25 +1338,24 @@ async fn spawn_plain_shell_session(
     busy_excluded: bool,
 ) -> anyhow::Result<protocol::SessionSnapshot> {
     let shell = resolve_shell_program(&hub.dirs)?;
-    // A recovered shell gets the same injected hooks an interactive Claude
-    // spawn does, so the CLI's reports drive its status. The file is written
-    // after the last fallible setup step and before the spawn, and the
-    // command the injector types names it.
-    let hook_settings = if cfg
-        .prompt_injector
-        .as_ref()
-        .is_some_and(|injector| injector.startup == protocol::InjectorStartup::ShellPrompt)
-    {
-        write_hook_settings(
+    // A recovered shell gets its hook agent's injected hooks, so the CLI's
+    // reports drive its status. The files are written after the last
+    // fallible setup step and before the spawn, and the resume command the
+    // plugin builds from them is typed once the shell is up.
+    let resume = match (&cfg.extras.hook_agent, &cfg.extras.resume_conversation) {
+        (Some(agent), Some(conversation)) => prepare_shell_resume(
             hub,
             &session_id,
-            cfg.agent(),
-            &cfg.options,
-            cfg.dangerously_skip_permissions,
-        )
-    } else {
-        None
+            cfg,
+            agent_registry::plugin(*agent),
+            conversation,
+        )?,
+        _ => ShellResume::default(),
     };
+    let ShellResume {
+        hook_settings,
+        injector: resume_injector,
+    } = resume;
     let initial_cwd = primary_cwd.to_string_lossy().into_owned();
     let env = with_shell_env(cfg.env.set.clone(), shell.extra_env);
     let spec = PtySpawnSpec {
@@ -1370,6 +1417,7 @@ async fn spawn_plain_shell_session(
             stored_config: stored_config.clone(),
             started_at,
             busy_excluded,
+            hook_agent: cfg.extras.hook_agent,
         },
         Some(Arc::clone(&pty)),
     );
@@ -1436,19 +1484,13 @@ async fn spawn_plain_shell_session(
     {
         meta.status = Some(snap.status);
         meta.status_since = snap.status_since;
+        meta.hook_agent = cfg.extras.hook_agent;
         write_meta_then_sync(hub, &meta);
     }
 
-    // A recovered shell types its resume command through an injector, naming
-    // the hook settings file this spawn wrote, or the hookless form when it
-    // wrote none.
-    if let Some(mut injector) = cfg.prompt_injector.clone() {
-        let settings = hook_settings.as_ref().and_then(HookSettings::path);
-        for step in &mut injector.steps {
-            if let protocol::InjectorStep::Text { content, .. } = step {
-                *content = render_shell_resume(content, settings);
-            }
-        }
+    // A recovered shell types the resume command its hook agent's plugin
+    // built; any other plain shell runs the injector its request carried.
+    if let Some(injector) = resume_injector.or_else(|| cfg.prompt_injector.clone()) {
         inject::run(session_id.clone(), Arc::clone(&pty), injector);
     }
     Ok(snap)
@@ -1480,6 +1522,75 @@ fn headless_spec(
         env: cfg.env.set.clone(),
         agent: cfg.agent(),
     })
+}
+
+/// What a recovered shell's spawn prepared before its tracer starts: the
+/// hook files it wrote and the injector that types its resume command.
+#[derive(Default)]
+struct ShellResume {
+    hook_settings: Option<HookSettings>,
+    injector: Option<protocol::PromptInjector>,
+}
+
+/// Write `plugin`'s hook files for the recovered shell `session_id`, then ask
+/// `plugin` for the command that resumes `conversation_id` with them, typed
+/// once the shell's prompt is up. A plugin with no command gets a bare shell
+/// and keeps no hook files; a plugin's refusal refuses the spawn and removes
+/// the files.
+fn prepare_shell_resume(
+    hub: &Hub,
+    session_id: &str,
+    cfg: &SpawnArgs,
+    plugin: &dyn AgentPlugin,
+    conversation_id: &str,
+) -> anyhow::Result<ShellResume> {
+    let hook_settings = write_hook_files(
+        hub,
+        session_id,
+        plugin,
+        &cfg.options,
+        cfg.dangerously_skip_permissions,
+    );
+    let files = hook_settings.as_ref().map_or(&[][..], HookSettings::files);
+    match plugin.shell_resume(&cfg.options, conversation_id, files) {
+        Ok(Some(command)) => Ok(ShellResume {
+            hook_settings,
+            injector: Some(shell_resume_injector(command)),
+        }),
+        Ok(None) => {
+            if let Some(settings) = hook_settings {
+                settings.discard(session_id);
+            }
+            Ok(ShellResume::default())
+        }
+        Err(err) => {
+            if let Some(settings) = hook_settings {
+                settings.discard(session_id);
+            }
+            Err(anyhow!(
+                "{} cannot resume conversation {conversation_id} in a shell: {err}",
+                plugin.descriptor().label
+            ))
+        }
+    }
+}
+
+/// The injector that types a recovered shell's resume `command` once its
+/// prompt has printed, or after [`SHELL_RESUME_DELAY_MS`].
+fn shell_resume_injector(command: String) -> protocol::PromptInjector {
+    protocol::PromptInjector {
+        steps: vec![
+            protocol::InjectorStep::Delay {
+                ms: SHELL_RESUME_DELAY_MS,
+            },
+            protocol::InjectorStep::Text {
+                content: command,
+                newline: true,
+            },
+        ],
+        verify_mode_marker: None,
+        startup: protocol::InjectorStartup::ShellPrompt,
+    }
 }
 
 #[expect(
@@ -1549,6 +1660,7 @@ fn spawn_headless_session(
         agent_in_shell: false,
         shell_label: None,
         agent_exit_announced: false,
+        hook_agent: None,
     };
     push_recent_action(&mut record, "headless session started".to_string());
     // Held unpublished until the child runs, so a failed spawn is never
@@ -2086,6 +2198,7 @@ mod tests {
             origin: None,
             resume_conversation: None,
             add_dirs: Vec::new(),
+            extras: SpawnExtras::default(),
         }
     }
 
@@ -2430,6 +2543,7 @@ mod tests {
             origin: None,
             resume_conversation: None,
             add_dirs: Vec::new(),
+            extras: SpawnExtras::default(),
         };
         format!(
             "{:#}",
@@ -2505,6 +2619,7 @@ mod tests {
             origin: None,
             resume_conversation: None,
             add_dirs: Vec::new(),
+            extras: SpawnExtras::default(),
         };
         let backend = agent_registry::plugin(Agent::Claude);
 
@@ -2553,13 +2668,23 @@ mod tests {
         assert!(!stored.contains("--launch-extra-marker"), "{stored}");
     }
 
-    /// The command `history::shell_request` puts on a recovery's injector,
-    /// before the spawn renders its settings slot.
-    fn shell_resume_command(conversation: &str) -> String {
-        format!(
-            "claude --settings {} --resume {conversation}",
-            history::HOOK_SETTINGS_SLOT
-        )
+    /// The spawn arguments of a recovered shell that resumes Claude
+    /// conversation `abc-123`.
+    fn shell_resume_spawn_args() -> SpawnArgs {
+        SpawnArgs {
+            dangerously_skip_permissions: false,
+            agent: Agent::Claude,
+            options: options_from_request(&AgentOptions::claude(None), None),
+            env: agent_api::EnvPlan::default(),
+            prompt_injector: None,
+            origin: None,
+            resume_conversation: None,
+            add_dirs: Vec::new(),
+            extras: SpawnExtras {
+                hook_agent: Some(Agent::Claude),
+                resume_conversation: Some("abc-123".to_owned()),
+            },
+        }
     }
 
     /// Run a real plain-shell recovery spawn for `session_id` in `folder` on
@@ -2580,26 +2705,6 @@ mod tests {
             None,
         );
         let stored_config = protocol::SpawnConfig::from_request(&request);
-        let cfg = SpawnArgs {
-            dangerously_skip_permissions: false,
-            agent: Agent::Claude,
-            options: options_from_request(&AgentOptions::claude(None), None),
-            env: agent_api::EnvPlan::default(),
-            prompt_injector: Some(protocol::PromptInjector {
-                steps: vec![
-                    protocol::InjectorStep::Delay { ms: 2000 },
-                    protocol::InjectorStep::Text {
-                        content: shell_resume_command("abc-123"),
-                        newline: true,
-                    },
-                ],
-                verify_mode_marker: None,
-                startup: protocol::InjectorStartup::ShellPrompt,
-            }),
-            origin: None,
-            resume_conversation: None,
-            add_dirs: Vec::new(),
-        };
         format!(
             "{:#}",
             spawn_plain_shell_session(
@@ -2610,7 +2715,7 @@ mod tests {
                 Vec::new(),
                 None,
                 folder.to_path_buf(),
-                &cfg,
+                &shell_resume_spawn_args(),
                 stored_config,
                 false,
             )
@@ -2679,34 +2784,203 @@ mod tests {
         );
     }
 
-    #[test]
-    fn render_shell_resume_quotes_a_path_with_spaces() {
-        let path = Path::new(r"C:\Users\Some Name\config\sessions\s1\hook-settings.json");
-        assert_eq!(
-            render_shell_resume(&shell_resume_command("abc-123"), Some(path)),
-            r#"claude --settings "C:\Users\Some Name\config\sessions\s1\hook-settings.json" --resume abc-123"#
-        );
+    /// A plugin that writes Claude's hook files and answers a shell resume
+    /// as scripted: `Ok(true)` a command naming every hook file it was
+    /// handed (refusing when one is missing on disk), `Ok(false)` none, and
+    /// `Err` a refusal.
+    struct ScriptedResume {
+        answer: Result<bool, String>,
     }
 
-    #[test]
-    fn render_shell_resume_drops_the_clause_without_settings() {
-        assert_eq!(
-            render_shell_resume(&shell_resume_command("abc-123"), None),
-            "claude --resume abc-123"
-        );
+    impl agent_api::Agent for ScriptedResume {
+        type Options = serde_json::Value;
+
+        fn descriptor(&self) -> &protocol::AgentDescriptor {
+            &agent_api::test_agent::DESCRIPTOR
+        }
+
+        fn program_env_var(&self) -> &'static str {
+            "RUSTLING_TULIP_SCRIPTED_RESUME"
+        }
+
+        fn default_program(&self) -> &'static str {
+            "scripted-resume"
+        }
+
+        fn check_request(
+            &self,
+            _opts: &serde_json::Value,
+            _req: &SpawnCheck<'_>,
+        ) -> Result<(), agent_api::Refusal> {
+            Ok(())
+        }
+
+        fn spawn_env(
+            &self,
+            _opts: &serde_json::Value,
+            _rows: &ResolvedRows,
+            _keys: &dyn KeyLookup,
+        ) -> Result<EnvPlan, agent_api::Refusal> {
+            Ok(EnvPlan::default())
+        }
+
+        fn conversation_plan(
+            &self,
+            _opts: &serde_json::Value,
+            _resume: Option<&str>,
+        ) -> ConversationPlan {
+            ConversationPlan::None
+        }
+
+        fn interactive_args(
+            &self,
+            _opts: &serde_json::Value,
+            _ctx: &SpawnContext<'_>,
+            _members: &[SessionMember],
+            _initial_prompt: Option<&str>,
+        ) -> Vec<String> {
+            Vec::new()
+        }
+
+        fn hook_plan(
+            &self,
+            _opts: &serde_json::Value,
+            trusted: bool,
+            shim: &agent_api::HookShim<'_>,
+        ) -> agent_api::HookPlan {
+            agent_registry::plugin(Agent::Claude)
+                .hook_plan(&claude_options(), trusted, shim)
+                .expect("Claude's default options decode")
+        }
+
+        fn shell_resume(
+            &self,
+            _opts: &serde_json::Value,
+            conversation_id: &str,
+            hook_files: &[PathBuf],
+        ) -> Result<Option<String>, agent_api::AgentError> {
+            match &self.answer {
+                Ok(true) if hook_files.iter().all(|file| file.exists()) => {
+                    let files: Vec<String> = hook_files
+                        .iter()
+                        .map(|file| file.display().to_string())
+                        .collect();
+                    Ok(Some(format!(
+                        "scripted --hooks {} --resume {conversation_id}",
+                        files.join(",")
+                    )))
+                }
+                Ok(true) => Err(agent_api::AgentError::new("a hook file is missing")),
+                Ok(false) => Ok(None),
+                Err(message) => Err(agent_api::AgentError::new(message.clone())),
+            }
+        }
     }
 
-    #[test]
-    fn render_shell_resume_drops_the_clause_for_an_unquotable_path() {
-        let path = Path::new("C:\\odd\"name\\hook-settings.json");
+    /// The injector that types `command` into a recovered shell.
+    fn typed(command: String) -> Vec<protocol::InjectorStep> {
+        vec![
+            protocol::InjectorStep::Delay {
+                ms: SHELL_RESUME_DELAY_MS,
+            },
+            protocol::InjectorStep::Text {
+                content: command,
+                newline: true,
+            },
+        ]
+    }
+
+    #[tokio::test]
+    async fn shell_resume_types_the_plugins_command_after_writing_the_hook_files() {
+        let (hub, _scratch) = hook_test_hub("shell-resume-command");
+        let file = hook_settings_file(&hub, "s1");
+        let resume = prepare_shell_resume(
+            &hub,
+            "s1",
+            &shell_resume_spawn_args(),
+            &ScriptedResume { answer: Ok(true) },
+            "abc-123",
+        )
+        .expect("the plugin answers a command");
+        assert!(file.exists(), "the hook file is written");
+        let settings = resume.hook_settings.as_ref().expect("hooks were written");
+        assert_eq!(settings.files(), std::slice::from_ref(&file));
+        let injector = resume.injector.expect("a command to type");
+        assert_eq!(injector.startup, protocol::InjectorStartup::ShellPrompt);
         assert_eq!(
-            render_shell_resume(&shell_resume_command("abc-123"), Some(path)),
-            "claude --resume abc-123"
+            injector.steps,
+            typed(format!(
+                "scripted --hooks {} --resume abc-123",
+                file.display()
+            ))
+        );
+
+        // Claude's own command names the same file, quoted.
+        let resume = prepare_shell_resume(
+            &hub,
+            "s2",
+            &shell_resume_spawn_args(),
+            agent_registry::plugin(Agent::Claude),
+            "abc-123",
+        )
+        .expect("Claude answers a command");
+        let file = hook_settings_file(&hub, "s2");
+        assert_eq!(
+            resume.injector.expect("a command to type").steps,
+            typed(format!(
+                "claude --settings \"{}\" --resume abc-123",
+                file.display()
+            ))
         );
     }
 
     #[tokio::test]
-    async fn render_shell_resume_removes_the_settings_of_a_failed_plain_shell_spawn() {
+    async fn shell_resume_err_refuses_the_spawn_and_removes_the_hook_files() {
+        let (hub, _scratch) = hook_test_hub("shell-resume-refused");
+        let error = prepare_shell_resume(
+            &hub,
+            "s1",
+            &shell_resume_spawn_args(),
+            &ScriptedResume {
+                answer: Err("Scripted will not resume here".to_owned()),
+            },
+            "abc-123",
+        )
+        .err()
+        .expect("the plugin's refusal refuses the spawn");
+        assert!(
+            format!("{error:#}").contains("Scripted will not resume here"),
+            "{error:#}"
+        );
+        assert!(
+            !hook_settings_file(&hub, "s1").exists(),
+            "the refused spawn removed the hook file it wrote"
+        );
+        assert!(
+            !hub.dirs.sessions_dir.join("s1").exists(),
+            "and the session dir it created"
+        );
+    }
+
+    #[tokio::test]
+    async fn shell_resume_none_spawns_a_bare_shell() {
+        let (hub, _scratch) = hook_test_hub("shell-resume-none");
+        let resume = prepare_shell_resume(
+            &hub,
+            "s1",
+            &shell_resume_spawn_args(),
+            &ScriptedResume { answer: Ok(false) },
+            "abc-123",
+        )
+        .expect("no command is not a refusal");
+        assert!(resume.injector.is_none(), "nothing is typed");
+        assert!(resume.hook_settings.is_none(), "a bare shell gets no hooks");
+        assert!(!hook_settings_file(&hub, "s1").exists());
+        assert!(!hub.dirs.sessions_dir.join("s1").exists());
+    }
+
+    #[tokio::test]
+    async fn a_failed_plain_shell_tracer_spawn_removes_its_hook_settings() {
         let (hub, scratch) = hook_test_hub("shell-hook-settings-cleanup");
         let folder = scratch.path().join("folder");
         std::fs::create_dir_all(&folder).expect("create folder");
@@ -3010,7 +3284,7 @@ mod tests {
             Vec::new(),
             Some("rq-ds"),
         );
-        let err = spawn_session_with(&hub, req, None, false, no_key)
+        let err = spawn_session_with(&hub, req, None, false, SpawnExtras::default(), no_key)
             .await
             .expect_err("a missing key refuses");
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
@@ -3060,7 +3334,7 @@ mod tests {
         );
         let _ = child_env_probe::take();
         // The spawnless hub fails at the tracer, after the spec is built.
-        spawn_session_with(&hub, req, None, false, deepseek_key)
+        spawn_session_with(&hub, req, None, false, SpawnExtras::default(), deepseek_key)
             .await
             .expect_err("no tracer can start");
         let child = child_env_probe::take().expect("a spawn spec's env was built");
@@ -3091,7 +3365,7 @@ mod tests {
         let req = deepseek_spawn(in_place_main(), SessionMode::Interactive, Vec::new(), None);
         let _ = child_env_probe::take_both();
         // The spawnless hub fails at the tracer, after the spec is built.
-        spawn_session_with(&hub, req, None, false, deepseek_key)
+        spawn_session_with(&hub, req, None, false, SpawnExtras::default(), deepseek_key)
             .await
             .expect_err("no tracer can start");
         let (child, removed) = child_env_probe::take_both().expect("a spawn spec was built");
@@ -3124,7 +3398,7 @@ mod tests {
             None,
         );
         // No key anywhere: the shell refusal comes first, not the key's.
-        let err = spawn_session_with(&hub, req, None, false, no_key)
+        let err = spawn_session_with(&hub, req, None, false, SpawnExtras::default(), no_key)
             .await
             .expect_err("a plain shell refuses a provider");
         let text = format!("{err:#}");
@@ -3233,7 +3507,7 @@ mod tests {
             rows.clone(),
             None,
         );
-        let err = spawn_session_with(&hub, req, None, false, deepseek_key)
+        let err = spawn_session_with(&hub, req, None, false, SpawnExtras::default(), deepseek_key)
             .await
             .expect_err("the row refuses");
         let failure = err
@@ -3448,6 +3722,7 @@ mod tests {
                 stored_config: standalone_config(SessionMode::PlainShell),
                 started_at: Utc::now(),
                 busy_excluded: false,
+                hook_agent: None,
             },
             None,
         );
@@ -3497,6 +3772,7 @@ mod tests {
                 stored_config: protocol::SpawnConfig::from_request(&request),
                 started_at: Utc::now(),
                 busy_excluded: true,
+                hook_agent: None,
             },
             None,
         );

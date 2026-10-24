@@ -26,7 +26,7 @@ use protocol::{PendingInput, SessionMember, SessionStatus};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tracing::error;
 
 /// Cross-agent spawn context bundled together so trait signatures stay
@@ -476,6 +476,24 @@ pub trait Agent: Send + Sync + 'static {
     ) -> Option<HookReport> {
         None
     }
+
+    /// The command a recovered shell types to resume conversation
+    /// `conversation_id` in the agent, after the shell's spawn wrote the hook
+    /// files `hook_files` from [`Self::hook_plan`] (empty when it wrote
+    /// none), or `None` for an agent that cannot be resumed from a shell.
+    ///
+    /// # Errors
+    ///
+    /// The agent refuses to resume this conversation from a shell; the spawn
+    /// is refused with the message.
+    fn shell_resume(
+        &self,
+        _opts: &Self::Options,
+        _conversation_id: &str,
+        _hook_files: &[PathBuf],
+    ) -> Result<Option<String>, AgentError> {
+        Ok(None)
+    }
 }
 
 /// An [`Agent`] as the registry holds it: object-safe, taking the spawn's
@@ -569,6 +587,19 @@ pub trait AgentPlugin: Send + Sync {
         spawn: Option<&OptionValues>,
         trusted: bool,
     ) -> Option<HookReport>;
+
+    /// [`Agent::shell_resume`] over `opts` decoded.
+    ///
+    /// # Errors
+    ///
+    /// The agent's refusal, or one naming the agent when `opts` do not
+    /// decode.
+    fn shell_resume(
+        &self,
+        opts: &OptionValues,
+        conversation_id: &str,
+        hook_files: &[PathBuf],
+    ) -> Result<Option<String>, AgentError>;
 
     /// Resolve the executable path (the env-var override, or the default).
     /// Concrete `which`/shim resolution lives in the daemon's
@@ -685,6 +716,16 @@ impl<A: Agent> AgentPlugin for A {
         });
         Agent::map_hook_event(self, body, opts.as_ref(), trusted)
     }
+
+    fn shell_resume(
+        &self,
+        opts: &OptionValues,
+        conversation_id: &str,
+        hook_files: &[PathBuf],
+    ) -> Result<Option<String>, AgentError> {
+        let opts = decode_options(self, opts)?;
+        Agent::shell_resume(self, &opts, conversation_id, hook_files)
+    }
 }
 
 /// `values` as `agent`'s typed options.
@@ -713,10 +754,20 @@ fn decode_for_spawn<A: Agent>(agent: &A, values: &OptionValues) -> Result<A::Opt
 }
 
 /// An agent refused a call: the spawn's options did not decode into the
-/// agent's options. The message names the agent.
+/// agent's options, or the agent itself refused. The message names the agent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentError {
     message: String,
+}
+
+impl AgentError {
+    /// An agent's own refusal, shown as `message`, which names the agent.
+    #[must_use]
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
 }
 
 impl fmt::Display for AgentError {
@@ -1002,6 +1053,19 @@ mod tests {
 
     fn no_key(_name: &str) -> Option<(Secret, Origin)> {
         None
+    }
+
+    #[test]
+    fn shell_resume_defaults_to_none() {
+        let plugin: &dyn AgentPlugin = &TestAgent::default();
+        let good = values(&[("mode", text("slow")), ("sandbox", OptionValue::Bool(true))]);
+        let files = [std::path::PathBuf::from("C:/rt/sessions/s-1/hooks.json")];
+        assert_eq!(plugin.shell_resume(&good, "c-1", &files), Ok(None));
+        let bad = values(&[("mode", text("slow")), ("sandbox", text("yes"))]);
+        let err = plugin
+            .shell_resume(&bad, "c-1", &files)
+            .expect_err("options that do not decode refuse the resume");
+        assert!(err.to_string().contains("Test agent"), "{err}");
     }
 
     #[test]

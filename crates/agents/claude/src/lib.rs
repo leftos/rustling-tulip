@@ -3,8 +3,9 @@
 //! Owns Claude's descriptor and option schema with the [`ClaudeOptions`] they
 //! decode into, the argv layout for both interactive and headless spawns, the
 //! hook plan whose settings document an interactive spawn passes as
-//! `--settings`, and the stream-json parser that turns a headless session's
-//! output into [`HeadlessEvent`]s.
+//! `--settings`, the resume command a recovered shell types, and the
+//! stream-json parser that turns a headless session's output into
+//! [`HeadlessEvent`]s.
 
 mod hooks;
 mod providers;
@@ -14,9 +15,9 @@ pub use providers::{display_name, provider_for_model};
 pub use transcripts::encode_project_dir;
 
 use agent_api::{
-    Agent, ConversationPlan, ConversationQuery, EnvPlan, FoundConversation, HeadlessEvent,
-    HookPlan, HookReport, HookShim, KeyLookup, Refusal, ResolvedRows, SpawnCheck, SpawnContext,
-    workspace_prelude,
+    Agent, AgentError, ConversationPlan, ConversationQuery, EnvPlan, FoundConversation,
+    HeadlessEvent, HookPlan, HookReport, HookShim, KeyLookup, Refusal, ResolvedRows, SpawnCheck,
+    SpawnContext, workspace_prelude,
 };
 use protocol::{
     AccentToken, AgentCaps, AgentDescriptor, AgentId, AgentTexts, ChipRule, Choice, ChoiceStyle,
@@ -24,6 +25,7 @@ use protocol::{
     SessionMember, SessionStatus, ShiftEnter, SpawnPlacement,
 };
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::sync::LazyLock;
 use tracing::debug;
 
@@ -338,6 +340,27 @@ impl Agent for ClaudePlugin {
     ) -> Option<HookReport> {
         hooks::map_hook_event(body, spawn, trusted)
     }
+
+    /// `claude --settings "<path>" --resume <id>`, naming the hook settings
+    /// file the shell's spawn wrote. The path is always double-quoted, since
+    /// the config dir can hold spaces; a path holding a double quote cannot be
+    /// quoted for cmd and POSIX shells at once, so it, like a spawn that wrote
+    /// no file, resumes without the settings.
+    fn shell_resume(
+        &self,
+        _opts: &ClaudeOptions,
+        conversation_id: &str,
+        hook_files: &[PathBuf],
+    ) -> Result<Option<String>, AgentError> {
+        let settings = hook_files
+            .first()
+            .map(|path| path.to_string_lossy())
+            .filter(|path| !path.contains('"'));
+        Ok(Some(match settings {
+            Some(path) => format!("claude --settings \"{path}\" --resume {conversation_id}"),
+            None => format!("claude --resume {conversation_id}"),
+        }))
+    }
 }
 
 /// The session changes one parsed stream-json event makes, in order.
@@ -537,6 +560,41 @@ mod tests {
     #[test]
     fn conformance() {
         agent_api::conformance::check(&ClaudePlugin);
+    }
+
+    fn shell_resume(hook_files: &[std::path::PathBuf]) -> Option<String> {
+        ClaudePlugin
+            .shell_resume(&ClaudeOptions::default(), "abc-123", hook_files)
+            .expect("Claude resumes in a shell")
+    }
+
+    #[test]
+    fn shell_resume_quotes_a_settings_path_with_spaces() {
+        let path =
+            std::path::PathBuf::from(r"C:\Users\Some Name\config\sessions\s1\hook-settings.json");
+        assert_eq!(
+            shell_resume(&[path]).as_deref(),
+            Some(
+                r#"claude --settings "C:\Users\Some Name\config\sessions\s1\hook-settings.json" --resume abc-123"#
+            )
+        );
+    }
+
+    #[test]
+    fn shell_resume_without_hook_files_is_a_bare_resume() {
+        assert_eq!(
+            shell_resume(&[]).as_deref(),
+            Some("claude --resume abc-123")
+        );
+    }
+
+    #[test]
+    fn shell_resume_drops_the_settings_for_an_unquotable_path() {
+        let path = std::path::PathBuf::from("C:\\odd\"name\\hook-settings.json");
+        assert_eq!(
+            shell_resume(&[path]).as_deref(),
+            Some("claude --resume abc-123")
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! WebSocket server, message dispatch, and session orchestration glue.
 
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 
 mod remote;
 pub(crate) use self::remote::RemoteSlot;
@@ -21,12 +21,12 @@ pub(crate) use self::recovery::RecoveryClaims;
 mod sessions;
 
 mod spawn;
-pub(crate) use self::spawn::spawn_session;
 #[expect(
     unused_imports,
     reason = "doc comments in history.rs name these at their crate::server path"
 )]
-pub(crate) use self::spawn::{render_shell_resume, resolve_env_refs};
+pub(crate) use self::spawn::resolve_env_refs;
+pub(crate) use self::spawn::{options_from_request, spawn_session};
 
 use self::connection::{AuthKind, ConnCtx, cancel_fetch, client_session, start_fetch};
 use self::git::repo_target_or_err;

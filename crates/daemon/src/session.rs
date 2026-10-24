@@ -244,9 +244,31 @@ pub struct SessionRecord {
     /// announced to the clients, so one run announces once; a `SessionStart`
     /// hook clears it. Runtime-only.
     pub agent_exit_announced: bool,
+    /// The agent whose plugin maps a plain shell's hook events: the agent a
+    /// recovered shell typed its resume command into. `None` for every other
+    /// session, since an agent session maps with [`Self::agent`]; a plain
+    /// shell without one maps no hook event. Mirrored into the sidecar.
+    pub hook_agent: Option<Agent>,
+}
+
+/// The agent a record or sidecar names for a session that runs none: a plain
+/// shell, the recovered shell among them.
+pub fn default_agent() -> Agent {
+    Agent::default()
 }
 
 impl SessionRecord {
+    /// The agent whose plugin maps this session's hook events: its own agent,
+    /// or a plain shell's [`Self::hook_agent`], so `None` for a plain shell
+    /// without one.
+    pub fn hook_plugin_agent(&self) -> Option<Agent> {
+        if self.mode == SessionMode::PlainShell {
+            self.hook_agent
+        } else {
+            Some(self.agent)
+        }
+    }
+
     /// Whether the session's status runs on the shell's watcher and its
     /// hooks end with the agent inside the shell: a plain shell, or an agent
     /// typed into its shell.
@@ -1031,6 +1053,7 @@ impl SessionRegistry {
             agent_in_shell: meta.agent_in_shell,
             shell_label: meta.shell_label.clone(),
             agent_exit_announced: false,
+            hook_agent: meta.hook_agent,
         };
         push_recent_action(&mut record, "reattached after daemon restart".to_string());
         self.insert(record);
@@ -1109,6 +1132,7 @@ impl SessionRegistry {
             agent_in_shell: meta.agent_in_shell,
             shell_label: meta.shell_label.clone(),
             agent_exit_announced: false,
+            hook_agent: meta.hook_agent,
         };
         push_recent_action(
             &mut record,
@@ -1164,6 +1188,7 @@ impl SessionRegistry {
             agent_in_shell: meta.agent_in_shell,
             shell_label: meta.shell_label.clone(),
             agent_exit_announced: false,
+            hook_agent: meta.hook_agent,
         };
         push_recent_action(
             &mut record,
@@ -1243,6 +1268,7 @@ mod tests {
             agent_in_shell: false,
             shell_label: None,
             agent_exit_announced: false,
+            hook_agent: None,
         }
     }
 
@@ -1875,6 +1901,44 @@ mod tests {
         let (pty, _exit_tx) = fake_pty();
         registry.insert_reattached(&excluded_meta(), pty).publish();
         assert_keeps_busy_excluded(&registry);
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    /// A recovered shell reloaded from its sidecar, through every insert a
+    /// restart uses, keeps the agent its hooks map with.
+    #[tokio::test]
+    async fn a_reloaded_shell_sidecar_keeps_its_hook_agent() {
+        use crate::history::test_support::{fake_pty, scratch_dirs};
+        let dirs = scratch_dirs("reloaded-shell-hook-agent");
+        let mut meta = standalone_meta();
+        meta.mode = SessionMode::PlainShell;
+        meta.hook_agent = Some(Agent::Claude);
+        let hook_agent_of = |registry: &SessionRegistry| {
+            let arc = registry.get("s1").expect("the inserted session");
+            let record = lock(&arc);
+            (record.hook_agent, record.hook_plugin_agent())
+        };
+        let expected = (Some(Agent::Claude), Some(Agent::Claude));
+
+        let orphan = SessionRegistry::new(dirs.clone());
+        orphan.insert_orphan(&meta);
+        assert_eq!(hook_agent_of(&orphan), expected, "orphan insert");
+        let abandoned = SessionRegistry::new(dirs.clone());
+        abandoned.insert_abandoned(&meta);
+        assert_eq!(hook_agent_of(&abandoned), expected, "abandoned insert");
+        let reattached = SessionRegistry::new(dirs.clone());
+        let (pty, _exit_tx) = fake_pty();
+        reattached.insert_reattached(&meta, pty).publish();
+        assert_eq!(hook_agent_of(&reattached), expected, "reattached insert");
+
+        meta.hook_agent = None;
+        let without = SessionRegistry::new(dirs.clone());
+        without.insert_orphan(&meta);
+        assert_eq!(
+            hook_agent_of(&without),
+            (None, None),
+            "a shell sidecar without one maps no hook event"
+        );
         let _ = std::fs::remove_dir_all(&dirs.config);
     }
 

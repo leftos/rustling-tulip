@@ -1,11 +1,10 @@
-//! The hook files an interactive spawn's plugin plans — for Claude, the
-//! `--settings` document it passes — with writing, discarding and naming them,
-//! and the shell resume line that carries them.
+//! The hook files a spawn's plugin plans — for Claude, the `--settings`
+//! document it passes — with writing, discarding and naming them.
 
 use crate::paths::Dirs;
 use crate::server::Hub;
-use crate::{history, orphan, pty_state, tracer_client};
-use agent_api::{HookFile, HookPlan, HookShim};
+use crate::{orphan, pty_state, tracer_client};
+use agent_api::{AgentPlugin, HookFile, HookPlan, HookShim};
 use protocol::{Agent, OptionValues};
 use std::path::{Component, Path, PathBuf};
 use tracing::warn;
@@ -14,11 +13,9 @@ use tracing::warn;
 /// interactive Claude session or a plain-shell recovery — and what it made on
 /// disk.
 pub(super) struct HookSettings {
-    /// The first file the plan named, which the shell resume line's settings
-    /// clause points at; `None` for a plan that writes no file.
-    path: Option<PathBuf>,
-    /// The plan's other files, written after the first.
-    rest: Vec<PathBuf>,
+    /// Every file the plan named, as written, in the plan's order; empty for
+    /// a plan that writes no file.
+    files: Vec<PathBuf>,
     /// The args the plan carries, each `{file:<name>}` replaced by the file's
     /// path: what the spawn appends to its argv.
     args: Vec<String>,
@@ -32,10 +29,10 @@ pub(super) struct HookSettings {
 }
 
 impl HookSettings {
-    /// The first file written, or `None` for a plan that writes no file: an
-    /// agent whose hooks are argv alone.
-    pub(super) fn path(&self) -> Option<&Path> {
-        self.path.as_deref()
+    /// Every file written, in the plan's order; empty for an agent whose
+    /// hooks are argv alone. What a recovered shell's resume command names.
+    pub(super) fn files(&self) -> &[PathBuf] {
+        &self.files
     }
 
     /// The argv these hooks add to the spawn.
@@ -49,11 +46,11 @@ impl HookSettings {
     /// orphan scan to skip forever.
     pub(super) fn discard(self, session_id: &str) {
         let dir = self
-            .path
-            .as_deref()
-            .and_then(Path::parent)
+            .files
+            .first()
+            .and_then(|path| path.parent())
             .map(Path::to_path_buf);
-        for path in self.path.into_iter().chain(self.rest) {
+        for path in self.files {
             match std::fs::remove_file(&path) {
                 Ok(()) => {}
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
@@ -124,26 +121,6 @@ pub(in crate::server) fn remove_hook_settings(hub: &Hub, session_id: &str) {
     }
 }
 
-/// Render a recovered shell's typed command for `settings`: the settings
-/// clause names the quoted path when the spawn wrote a file, and is dropped
-/// entirely otherwise.
-///
-/// The path is always double-quoted, since the config dir can hold spaces. A
-/// path holding a double quote cannot be quoted for cmd and POSIX shells at
-/// once, so it renders the hookless form a missing file does: the shell parses
-/// the command either way.
-pub(crate) fn render_shell_resume(content: &str, settings: Option<&Path>) -> String {
-    match settings {
-        Some(path) if !path.to_string_lossy().contains('"') => content.replace(
-            history::HOOK_SETTINGS_SLOT,
-            &format!("\"{}\"", path.display()),
-        ),
-        Some(_) | None => {
-            content.replace(&format!("--settings {} ", history::HOOK_SETTINGS_SLOT), "")
-        }
-    }
-}
-
 /// The file name a spawn's injected Claude hook settings land under, inside the
 /// session's own directory.
 const HOOK_SETTINGS_FILE: &str = "hook-settings.json";
@@ -164,7 +141,7 @@ pub(in crate::server) fn hook_settings_path(dirs: &Dirs, session_id: &str) -> Pa
 /// write turns hooks off for this spawn with a `warn!` and never refuses it: a
 /// session without them falls back to the terminal heuristic. The files are
 /// written eagerly, before whatever names them (an interactive spawn's argv, a
-/// recovery's typed command), into the session's own `sessions/<id>/`,
+/// recovered shell's resume command), into the session's own `sessions/<id>/`,
 /// creating that directory before `meta.json`'s writer would. A graceful stop
 /// deletes the sidecar and this file, and the directory itself when that
 /// leaves it empty; a natural exit keeps the file. A spawn that then fails
@@ -173,6 +150,23 @@ pub(super) fn write_hook_settings(
     hub: &Hub,
     session_id: &str,
     agent: Agent,
+    options: &OptionValues,
+    trusted: bool,
+) -> Option<HookSettings> {
+    write_hook_files(
+        hub,
+        session_id,
+        agent_registry::plugin(agent),
+        options,
+        trusted,
+    )
+}
+
+/// [`write_hook_settings`] with `plugin`'s hook plan.
+pub(super) fn write_hook_files(
+    hub: &Hub,
+    session_id: &str,
+    plugin: &dyn AgentPlugin,
     options: &OptionValues,
     trusted: bool,
 ) -> Option<HookSettings> {
@@ -192,12 +186,12 @@ pub(super) fn write_hook_settings(
         session_id,
         config_dir: &hub.dirs.config,
     };
-    let plan = match agent_registry::plugin(agent).hook_plan(options, trusted, &shim) {
+    let plan = match plugin.hook_plan(options, trusted, &shim) {
         Ok(plan) => plan,
         Err(err) => {
             warn!(
                 %session_id,
-                agent = agent.as_label(),
+                agent = %plugin.descriptor().label,
                 error = %format!("{err:#}"),
                 "the agent's hook plan could not be read; spawning without hooks"
             );
@@ -284,14 +278,8 @@ fn write_plan(
         .iter()
         .map(|arg| substitute(arg, &plan.files, &paths))
         .collect();
-    let path = if paths.is_empty() {
-        None
-    } else {
-        Some(paths.remove(0))
-    };
     Ok(HookSettings {
-        path,
-        rest: paths,
+        files: paths,
         args,
         tracer_exe,
         created_dir,
@@ -451,7 +439,7 @@ mod tests {
             "the args pass through with no placeholder to replace"
         );
         assert!(
-            settings.path().is_none(),
+            settings.files().is_empty(),
             "an args-only plan writes no settings file"
         );
         assert_eq!(
@@ -497,8 +485,8 @@ mod tests {
         assert!(settings.created_dir, "the session dir did not exist before");
         let file = hook_settings_file(&hub, "claude-session");
         assert_eq!(
-            settings.path(),
-            Some(file.as_path()),
+            settings.files(),
+            std::slice::from_ref(&file),
             "the spawn passes the file under its literal name"
         );
         let cached = crate::tracer_client::cached_tracer_exe(&hub.dirs).expect("resolves");

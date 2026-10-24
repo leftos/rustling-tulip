@@ -1,7 +1,5 @@
 //! The HTTP `/hook` route: Claude Code hook reports, their bearer check and event time.
 use super::Hub;
-use super::spawn::options_from_request;
-use agent_api::HookReport;
 use axum::body::{Body, Bytes};
 use axum::extract::{Path as AxumPath, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -19,14 +17,17 @@ const HOOK_BODY_LIMIT: usize = 1 << 20;
 /// the body holds and whether or not the session exists, since the shim
 /// ignores it and a rejected event must never hold up the agent.
 ///
-/// An event for a session id the registry does not hold yet is held in
-/// [`crate::hook_status::PendingHooks`] and applied when the spawn inserts the
-/// record: the tracer starts the child, whose hooks fire at once, before the
-/// daemon has inserted the record.
+/// The session's hook plugin maps the body (see
+/// [`crate::hook_status::PendingHooks::map_for_record`]). An event for a
+/// session id the registry does not hold yet is held raw in
+/// [`crate::hook_status::PendingHooks`], then mapped and applied when the
+/// spawn inserts the record: the tracer starts the child, whose hooks fire at
+/// once, before the daemon has inserted the record, and only the record says
+/// which plugin maps them.
 ///
 /// The body is read at most 1 MiB; a larger or unreadable body is treated as
-/// empty. A body that is not JSON, or an event the mapping does not know,
-/// changes nothing and does not order the session.
+/// empty. A body that is not a JSON object, or an event the mapping does not
+/// know, changes nothing and does not order the session.
 ///
 /// Async hooks finish out of order, so the event is applied only when its
 /// `X-RT-Hook-Time` (nanoseconds since the epoch) is strictly newer than the
@@ -47,49 +48,26 @@ pub(super) async fn hook_handler(
     let body = axum::body::to_bytes(body, HOOK_BODY_LIMIT)
         .await
         .unwrap_or_else(|_| Bytes::new());
-    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&body) else {
-        return StatusCode::NO_CONTENT.into_response();
-    };
-    let (report, known) = map_report(&hub, &session_id, &value);
-    let Some(report) = report else {
-        return StatusCode::NO_CONTENT.into_response();
+    let value = match serde_json::from_slice::<serde_json::Value>(&body) {
+        Ok(value) if value.is_object() => value,
+        _ => return StatusCode::NO_CONTENT.into_response(),
     };
     let event_time = hook_time(&headers);
-    if !known {
+    let Some(record) = hub.sessions.get(&session_id) else {
         // A spawn may have started the child — whose hooks fire from its
         // argv — before its record is inserted. Hold the event for the
         // insertion instead of dropping it on the floor.
         hub.pending_hooks
-            .defer(&hub, &session_id, event_time, &report);
+            .defer(&hub, &session_id, event_time, value, body.len());
         return StatusCode::NO_CONTENT.into_response();
+    };
+    let report = hub
+        .pending_hooks
+        .map_for_record(&crate::sync::lock(&record), &value);
+    if let Some(report) = report {
+        crate::hook_status::apply_signal(&hub, &session_id, event_time, &report);
     }
-    crate::hook_status::apply_signal(&hub, &session_id, event_time, &report);
     StatusCode::NO_CONTENT.into_response()
-}
-
-/// The report the session's agent maps `body` to, and whether the registry
-/// holds the session.
-///
-/// A held session's plugin maps it with the options and trust its spawn
-/// recorded (none for a record without a spawn config). An event for a
-/// session not inserted yet is mapped by the default agent's plugin with no
-/// options, untrusted.
-fn map_report(hub: &Hub, session_id: &str, body: &serde_json::Value) -> (Option<HookReport>, bool) {
-    let Some(record) = hub.sessions.get(session_id) else {
-        let plugin = agent_registry::plugin(protocol::Agent::default());
-        return (plugin.map_hook_event(body, None, false), false);
-    };
-    let (agent, options, trusted) = {
-        let record = crate::sync::lock(&record);
-        let spawn = record.spawn_config.as_ref();
-        (
-            record.agent,
-            spawn.map(|spawn| options_from_request(&spawn.agent_options, spawn.model.as_deref())),
-            spawn.is_some_and(|spawn| spawn.dangerously_skip_permissions),
-        )
-    };
-    let plugin = agent_registry::plugin(agent);
-    (plugin.map_hook_event(body, options.as_ref(), trusted), true)
 }
 
 /// `GET /proof` — the daemon proves to the hook shim that it holds this run's
@@ -654,7 +632,7 @@ mod tests {
 
     /// The report Claude's plugin maps `event` to, for a session with no
     /// spawn options.
-    fn report(event: &serde_json::Value) -> HookReport {
+    fn report(event: &serde_json::Value) -> agent_api::HookReport {
         agent_registry::plugin(protocol::Agent::Claude)
             .map_hook_event(event, None, false)
             .expect("the body maps to a report")

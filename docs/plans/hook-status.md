@@ -141,7 +141,7 @@ Additive only; `supported` does not change.
 
 Every interactive Claude spawn writes its own settings file under its own rt session id, whether it starts fresh, resumes (`--resume`, which keeps the conversation id), is duplicated (`duplicate_session` builds a new spawn) or is recovered through `RecoverSessions`.
 
-A recovery into a plain shell builds its injector in `history.rs` with a `{rt-hook-settings}` slot; the spawn (`server/spawn.rs::spawn_plain_shell_session`) writes the shell session's settings file, since only it knows the rt session id, and its injector types `claude --settings <path> --resume <id>`, or drops the clause when it wrote no file.
+A recovery into a plain shell carries the agent and conversation id (`RecoveryPlan.hook_agent`, `resume_conversation`) to the spawn (`server/spawn.rs::spawn_plain_shell_session`), which writes the shell session's settings file, since only it knows the rt session id, then asks the agent's plugin for the command (`Agent::shell_resume`). Claude's types `claude --settings <path> --resume <id>`, or drops the clause when no file was written.
 
 A tracer-reattached session keeps its original settings; its shim finds the new daemon through `daemon.json`. Events fired while no daemon runs are lost; the session shows what its screen reads until the next event.
 
@@ -219,9 +219,9 @@ Settled (orchestrator, technical): Q1 (a) async command hooks through the tracer
 - [x] **HS.7 Conversation id and last message.** `hook_vocabulary.rs` maps it and `hook_status.rs` / `session.rs` apply it: a `SessionStart` reporting a different `session_id` updates `claude_session_id` (validated by `agent_api::is_plain_id`, no source gate), and the id is mirrored into the sidecar through `orphan::RecordMirror`, so a restart keeps it;
 
   `Stop` stores `last_assistant_message` trimmed and capped at 8 KiB on the record, off the wire; `StopFailure` adds a `recent_actions` line; a `permission_mode` mismatch on `UserPromptSubmit` against the spawn's `--permission-mode` logs a `warn!`. Proof: record tests after each event, a sidecar round-trip through `SessionRegistry::update`, a `RecordMirror::matches` test on the id alone, and a `history.rs` test that an ended session's entry carries the hook-updated id — each also confirmed to fail against its deliberate mutation.
-- [x] **HS.8 Shell recovery path.** `history.rs`'s `shell_request` carries `claude --settings {rt-hook-settings} --resume <id>` on the shell-recovery injector (`HOOK_SETTINGS_SLOT`), since the rt session id exists only once the spawn mints it.
+- [x] **HS.8 Shell recovery path.** `history.rs`'s `shell_request` carries no command: the recovery plan names the hook agent and the conversation, since the rt session id exists only once the spawn mints it.
 
-  `server/spawn.rs::spawn_plain_shell_session` writes `sessions/<id>/hook-settings.json` through `write_hook_settings`, spawns through `tracer_client::spawn_with_tracer` on the same cached tracer the file names, and renders the slot through `render_shell_resume`: the quoted path when the file was written, and the clause dropped — `claude --resume <id>` — when it was not or the path holds a double quote.
+  `server/spawn.rs::spawn_plain_shell_session` writes `sessions/<id>/hook-settings.json` through `write_hook_settings`, spawns through `tracer_client::spawn_with_tracer` on the same cached tracer the file names, and types the plugin's `shell_resume` command: for Claude the quoted path when the file was written, and the clause dropped — `claude --resume <id>` — when it was not or the path holds a double quote.
 
   A failed spawn discards the file and the `sessions/<id>/` dir it created; a natural exit leaves the file for the graceful stop that removes the whole dir.
 

@@ -29,7 +29,7 @@ use tokio::sync::{Mutex as AsyncMutex, broadcast, mpsc};
 
 /// A scratch directory for a hub's config, state and worktrees, removed
 /// when the test ends.
-pub(super) struct ScratchDir {
+pub(crate) struct ScratchDir {
     path: PathBuf,
 }
 
@@ -56,7 +56,7 @@ impl Drop for ScratchDir {
 }
 
 /// A hub over a scratch config dir with no repos registered.
-pub(super) fn test_hub(tag: &str) -> (Hub, ScratchDir) {
+pub(crate) fn test_hub(tag: &str) -> (Hub, ScratchDir) {
     test_hub_in(ScratchDir::new(tag), None)
 }
 
@@ -271,6 +271,7 @@ pub(super) fn idle_record(id: &str) -> SessionRecord {
         agent_in_shell: false,
         shell_label: None,
         agent_exit_announced: false,
+        hook_agent: None,
     }
 }
 

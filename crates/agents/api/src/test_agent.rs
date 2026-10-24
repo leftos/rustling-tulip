@@ -2,12 +2,13 @@
 //! a plugin through it.
 
 use crate::{
-    Agent, ConversationPlan, ConversationQuery, EnvPlan, FoundConversation, KeyLookup, Refusal,
-    ResolvedRows, SpawnCheck, SpawnContext,
+    Agent, ConversationPlan, ConversationQuery, EnvPlan, FoundConversation, HookReport, KeyLookup,
+    PendingUpdate, Refusal, ResolvedRows, SpawnCheck, SpawnContext,
 };
 use protocol::{
     AccentToken, AgentCaps, AgentDescriptor, AgentId, AgentTexts, Choice, ChoiceStyle, FieldKind,
-    FieldOverride, FieldRule, OptionField, OptionValue, SessionMember, ShiftEnter, SpawnPlacement,
+    FieldOverride, FieldRule, OptionField, OptionValue, SessionMember, SessionStatus, ShiftEnter,
+    SpawnPlacement,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -101,8 +102,9 @@ type Script = HashMap<String, Vec<FoundConversation>>;
 /// one, and ignores the window. Clones share one script, so a test holding a
 /// clone can make a conversation appear while the daemon holds the agent.
 /// After [`TestAgent::set_panics`], `find_conversations` panics instead.
-/// Its interactive argv is its `mode` and `sandbox` options, and its
-/// environment sets `TEST_MODE` to its `mode`.
+/// Its interactive argv is its `mode` and `sandbox` options, its
+/// environment sets `TEST_MODE` to its `mode`, and it maps a hook body
+/// naming a `test_status` (see its `map_hook_event`).
 #[derive(Debug, Clone, Default)]
 pub struct TestAgent {
     pub plan: ConversationPlan,
@@ -180,6 +182,38 @@ impl Agent for TestAgent {
         _initial_prompt: Option<&str>,
     ) -> Vec<String> {
         vec![opts.mode.clone(), opts.sandbox.to_string()]
+    }
+
+    /// A body whose `test_status` is `working`, `idle` or `awaiting_input`
+    /// maps to that status, its last message naming the spawn's `mode`
+    /// (`none` without options) and trust: `"<mode> trusted=<trusted>"`.
+    /// Any other body maps to nothing.
+    fn map_hook_event(
+        &self,
+        body: &serde_json::Value,
+        spawn: Option<&TestOptions>,
+        trusted: bool,
+    ) -> Option<HookReport> {
+        let status = match body.get("test_status")?.as_str()? {
+            "working" => SessionStatus::Working,
+            "idle" => SessionStatus::Idle,
+            "awaiting_input" => SessionStatus::AwaitingInput,
+            _ => return None,
+        };
+        let mode = spawn.map_or("none", |opts| opts.mode.as_str());
+        Some(HookReport {
+            status: Some(status),
+            pending: PendingUpdate::Clear,
+            conversation_id: None,
+            last_message: Some(format!("{mode} trusted={trusted}")),
+            failure: None,
+            permission_mismatch: None,
+            agent_ended: false,
+            agent_started: false,
+            subagent: false,
+            background: None,
+            weak_idle: false,
+        })
     }
 
     fn find_conversations(&self, query: &ConversationQuery<'_>) -> Vec<FoundConversation> {

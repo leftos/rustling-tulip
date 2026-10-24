@@ -21,9 +21,9 @@ use anyhow::{Context as _, anyhow};
 use chrono::{DateTime, TimeDelta, Utc};
 use protocol::{
     Agent, AgentOptions, ClaudeProvider, ConversationCandidate, HistoryEntry, HistorySource,
-    InjectorStartup, InjectorStep, PinnedMemberWorktree, PromptInjector, RecoverAs, RecoverItem,
-    RepoEntry, SessionEnd, SessionHistoryItem, SessionKind, SessionMember, SessionMode,
-    SpawnConfig, SpawnRequest, SpawnTarget, WorkspaceEntry, WorktreeReusePolicy,
+    PinnedMemberWorktree, RecoverAs, RecoverItem, RepoEntry, SessionEnd, SessionHistoryItem,
+    SessionKind, SessionMember, SessionMode, SpawnConfig, SpawnRequest, SpawnTarget,
+    WorkspaceEntry, WorktreeReusePolicy,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -38,15 +38,6 @@ pub const HISTORY_RETENTION: TimeDelta = TimeDelta::days(7);
 const CANDIDATE_GRACE: TimeDelta = TimeDelta::minutes(2);
 /// How far before its end a session with no known start is searched from.
 const UNKNOWN_START_LOOKBACK: TimeDelta = TimeDelta::days(1);
-/// The longest a recovered shell waits for its prompt before typing
-/// `claude --settings <path> --resume <id>`; it types sooner once the prompt
-/// has printed.
-const SHELL_RESUME_DELAY_MS: u32 = 2000;
-/// The `--settings` path slot a recovered shell's typed command carries until
-/// its spawn, which mints the session id the file lives under, replaces it
-/// with the quoted path (see [`crate::server::render_shell_resume`]). Braces
-/// cannot occur in a validated conversation id.
-pub(crate) const HOOK_SETTINGS_SLOT: &str = "{rt-hook-settings}";
 /// The tracer-log importer's revision, stamped on every entry it writes. An
 /// unrecovered import from [`UPGRADABLE_IMPORT_REV`] is upgraded in place,
 /// and one from before it is read again from its log.
@@ -1008,11 +999,18 @@ fn candidate_window(entry: &HistoryEntry, now: DateTime<Utc>) -> (DateTime<Utc>,
 }
 
 /// What recovering one history entry does: register `register_repo` first
-/// when set, then spawn `request`.
+/// when set, then spawn `request`. A shell that resumes a conversation also
+/// carries the agent it resumes in, `hook_agent`, and the conversation,
+/// which the spawn takes beside the request and never on it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecoveryPlan {
     pub request: SpawnRequest,
     pub register_repo: Option<String>,
+    /// The agent a recovered shell resumes its conversation in, whose hooks
+    /// map its events; `None` for every other plan.
+    pub hook_agent: Option<Agent>,
+    /// The conversation a recovered shell resumes in `hook_agent`.
+    pub resume_conversation: Option<String>,
 }
 
 impl RecoveryPlan {
@@ -1116,6 +1114,8 @@ pub fn plan_recovery(
         RecoverAs::Claude => RecoveryPlan {
             request: claude_request(entry, folder, required_conversation(item)?, registered),
             register_repo: None,
+            hook_agent: None,
+            resume_conversation: None,
         },
         RecoverAs::RegisterRepoThenClaude { path } => {
             if normalize_path_key(path) != normalize_path_key(folder) {
@@ -1142,11 +1142,17 @@ pub fn plan_recovery(
             RecoveryPlan {
                 request: folder_claude(entry, target, conversation),
                 register_repo: Some(path.clone()),
+                hook_agent: None,
+                resume_conversation: None,
             }
         }
         RecoverAs::Shell => RecoveryPlan {
-            request: shell_request(entry, folder, item.conversation_id.as_deref()),
+            request: shell_request(entry, folder),
             register_repo: None,
+            // A shell with no conversation to resume is a bare shell, and
+            // gets no hooks.
+            hook_agent: item.conversation_id.as_ref().map(|_| entry.agent),
+            resume_conversation: item.conversation_id.clone(),
         },
         RecoverAs::Unknown => {
             return Err("unsupported recovery kind".to_owned());
@@ -1467,24 +1473,10 @@ fn recovered_claude_flags(entry: &HistoryEntry) -> ClaudeFlags {
     }
 }
 
-/// A plain shell in `folder` that types `claude --settings <path> --resume
-/// <id>` once it is up, when a conversation was chosen, carrying the env rows
-/// `entry` recorded. The spawn renders [`HOOK_SETTINGS_SLOT`] with the
-/// settings file it wrote, or drops the clause when it wrote none.
-fn shell_request(entry: &HistoryEntry, folder: &str, conversation: Option<&str>) -> SpawnRequest {
-    let prompt_injector = conversation.map(|id| PromptInjector {
-        steps: vec![
-            InjectorStep::Delay {
-                ms: SHELL_RESUME_DELAY_MS,
-            },
-            InjectorStep::Text {
-                content: format!("claude --settings {HOOK_SETTINGS_SLOT} --resume {id}"),
-                newline: true,
-            },
-        ],
-        verify_mode_marker: None,
-        startup: InjectorStartup::ShellPrompt,
-    });
+/// A plain shell in `folder` carrying the env rows `entry` recorded. The
+/// resume command a chosen conversation adds is the spawn's to build, from
+/// the plan's hook agent and conversation.
+fn shell_request(entry: &HistoryEntry, folder: &str) -> SpawnRequest {
     SpawnRequest {
         label: None,
         target: SpawnTarget::Standalone {
@@ -1498,7 +1490,7 @@ fn shell_request(entry: &HistoryEntry, folder: &str, conversation: Option<&str>)
         model: None,
         extra_env: recorded_env(entry).to_vec(),
         secret_env_keys: Vec::new(),
-        prompt_injector,
+        prompt_injector: None,
         request_id: None,
         resume_conversation: None,
     }
@@ -1640,6 +1632,7 @@ pub(crate) mod test_support {
             agent_in_shell: false,
             shell_label: None,
             agent_exit_announced: false,
+            hook_agent: None,
         }
     }
 
@@ -3352,9 +3345,8 @@ mod recovery_tests {
         entry.current_cwd = Some(r"D:\yaat\src".to_owned());
         entry.spawn_config = Some(workspace_config());
 
-        let req = plan(&entry, &item(RecoverAs::Shell, Some(CONV)))
-            .expect("plan")
-            .request;
+        let plan = plan(&entry, &item(RecoverAs::Shell, Some(CONV))).expect("plan");
+        let req = &plan.request;
 
         assert_eq!(req.mode, SessionMode::PlainShell);
         assert_eq!(
@@ -3365,18 +3357,12 @@ mod recovery_tests {
             }
         );
         assert_eq!(req.resume_conversation, None);
-        let injector = req.prompt_injector.expect("injector");
-        assert_eq!(injector.startup, InjectorStartup::ShellPrompt);
         assert_eq!(
-            injector.steps,
-            [
-                InjectorStep::Delay { ms: 2000 },
-                InjectorStep::Text {
-                    content: format!("claude --settings {HOOK_SETTINGS_SLOT} --resume {CONV}"),
-                    newline: true,
-                },
-            ]
+            req.prompt_injector, None,
+            "the spawn types the plugin's command"
         );
+        assert_eq!(plan.hook_agent, Some(Agent::Claude));
+        assert_eq!(plan.resume_conversation.as_deref(), Some(CONV));
     }
 
     #[test]
@@ -3407,11 +3393,11 @@ mod recovery_tests {
     #[test]
     fn shell_without_a_conversation_is_a_bare_shell() {
         let entry = folder_only(vec![member("", r"D:\yaat")]);
-        let req = plan(&entry, &item(RecoverAs::Shell, None))
-            .expect("plan")
-            .request;
-        assert_eq!(req.mode, SessionMode::PlainShell);
-        assert_eq!(req.prompt_injector, None);
+        let plan = plan(&entry, &item(RecoverAs::Shell, None)).expect("plan");
+        assert_eq!(plan.request.mode, SessionMode::PlainShell);
+        assert_eq!(plan.request.prompt_injector, None);
+        assert_eq!(plan.hook_agent, None, "a bare shell gets no hooks");
+        assert_eq!(plan.resume_conversation, None);
     }
 
     #[test]

@@ -8,9 +8,10 @@
 //! arrive before their session is inserted, and writes them to the record.
 
 use crate::server::Hub;
+use crate::server::options_from_request;
 use crate::session::{PendingInsert, SessionRecord, push_recent_action};
-use agent_api::{HookReport, PendingUpdate};
-use protocol::SessionStatus;
+use agent_api::{AgentPlugin, HookReport, PendingUpdate};
+use protocol::{Agent, SessionStatus};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -28,6 +29,16 @@ const PENDING_HOOK_MAX_PER_SESSION: usize = 32;
 
 /// Most session ids whose early events are held at once.
 const PENDING_HOOK_MAX_SESSIONS: usize = 64;
+
+/// Most body bytes held for one session id; an event larger than this alone
+/// is never held.
+const PENDING_HOOK_MAX_BYTES_PER_SESSION: usize = 256 * 1024;
+
+/// Most body bytes held across every session id.
+const PENDING_HOOK_MAX_BYTES: usize = 8 * 1024 * 1024;
+
+/// The plugin that maps an agent's hook events.
+pub type PluginLookup = fn(Agent) -> &'static dyn AgentPlugin;
 
 /// `text` cut to at most `max_bytes` UTF-8 bytes on a character boundary,
 /// ending in `…`, which counts inside the cap. Text within the cap is
@@ -205,96 +216,229 @@ fn log_mismatch(session_id: &str, mismatch: Option<&(String, String)>) {
     }
 }
 
-/// One hook event that arrived before its session was inserted.
+/// One hook event that arrived before its session was inserted: its raw
+/// body, mapped by the session's plugin once the record exists.
 #[derive(Debug, Clone)]
 struct PendingHook {
     at: Instant,
+    /// Arrival order across every session, which decides the oldest session
+    /// to evict; two arrivals can share one `Instant`.
+    seq: u64,
     event_time: Option<u128>,
-    report: HookReport,
+    body: serde_json::Value,
+    /// The body's length in bytes as it arrived.
+    len: usize,
+}
+
+/// The held events by session id, and the arrival counter.
+#[derive(Default)]
+struct Held {
+    sessions: HashMap<String, Vec<PendingHook>>,
+    next_seq: u64,
 }
 
 /// Hook events that arrived for a session id the registry did not hold yet,
-/// i.e. a spawn in flight. Bounded by [`PENDING_HOOK_TTL`] and the two count
-/// caps; an event is applied to its record when the spawn inserts it and
-/// dropped when it expires or a cap evicts it.
-#[derive(Clone, Default)]
-pub struct PendingHooks(Arc<std::sync::Mutex<HashMap<String, Vec<PendingHook>>>>);
+/// i.e. a spawn in flight, held as raw bodies: which plugin maps them is
+/// known only once the record exists. Bounded by [`PENDING_HOOK_TTL`], the
+/// count caps and the byte caps; an event is mapped and applied when the
+/// spawn inserts its record, and dropped when it expires or a cap evicts it.
+#[derive(Clone)]
+pub struct PendingHooks {
+    held: Arc<std::sync::Mutex<Held>>,
+    plugins: PluginLookup,
+}
+
+impl Default for PendingHooks {
+    fn default() -> Self {
+        Self::with_plugins(agent_registry::plugin)
+    }
+}
 
 impl PendingHooks {
-    /// Hold an event for `session_id` until its spawn inserts the session.
+    /// An empty buffer whose events are mapped by the plugin `plugins`
+    /// answers for a record's hook agent.
+    #[must_use]
+    pub fn with_plugins(plugins: PluginLookup) -> Self {
+        Self {
+            held: Arc::default(),
+            plugins,
+        }
+    }
+
+    /// The report `record`'s hook plugin maps `body` to, with the options
+    /// and trust its spawn recorded (none for a record without a spawn
+    /// config). A plain shell maps with its hook agent, so one without a hook
+    /// agent maps nothing.
+    pub(crate) fn map_for_record(
+        &self,
+        record: &SessionRecord,
+        body: &serde_json::Value,
+    ) -> Option<HookReport> {
+        let agent = record.hook_plugin_agent()?;
+        let spawn = record.spawn_config.as_ref();
+        let options =
+            spawn.map(|spawn| options_from_request(&spawn.agent_options, spawn.model.as_deref()));
+        let trusted = spawn.is_some_and(|spawn| spawn.dangerously_skip_permissions);
+        (self.plugins)(agent).map_hook_event(body, options.as_ref(), trusted)
+    }
+
+    /// Hold the raw event `body`, `len` bytes long, for `session_id` until
+    /// its spawn inserts the session.
     ///
     /// The buffer lock is also the insert's lock: an event either lands in
-    /// the buffer before the insert takes it (and is replayed into the
-    /// record), or this call finds the session registered and applies the
-    /// event directly. Neither order can drop it.
+    /// the buffer before the insert takes it (and is mapped and replayed into
+    /// the record), or this call finds the session registered and maps and
+    /// applies the event directly. Neither order can drop it.
     pub fn defer(
         &self,
         hub: &Hub,
         session_id: &str,
         event_time: Option<u128>,
-        report: &HookReport,
+        body: serde_json::Value,
+        len: usize,
     ) {
-        let mut buffer = crate::sync::lock(&self.0);
+        let mut held = crate::sync::lock(&self.held);
         let now = Instant::now();
-        prune_expired(&mut buffer, now);
-        if hub.sessions.get(session_id).is_some() {
-            drop(buffer);
-            apply_signal(hub, session_id, event_time, report);
+        prune_expired(&mut held.sessions, now);
+        if let Some(record) = hub.sessions.get(session_id) {
+            drop(held);
+            let report = self.map_for_record(&crate::sync::lock(&record), &body);
+            if let Some(report) = report {
+                apply_signal(hub, session_id, event_time, &report);
+            }
             return;
         }
-        if !buffer.contains_key(session_id) && buffer.len() >= PENDING_HOOK_MAX_SESSIONS {
-            let oldest = buffer
-                .iter()
-                .min_by_key(|(_, events)| events.last().map(|event| event.at))
-                .map(|(id, _)| id.clone());
-            if let Some(oldest) = oldest {
-                buffer.remove(&oldest);
-            }
+        if len > PENDING_HOOK_MAX_BYTES_PER_SESSION {
+            debug!(
+                session_id,
+                len, "hook event larger than the held-event cap dropped"
+            );
+            return;
         }
-        let events = buffer.entry(session_id.to_owned()).or_default();
-        if events.len() >= PENDING_HOOK_MAX_PER_SESSION {
-            events.remove(0);
-        }
-        events.push(PendingHook {
-            at: now,
-            event_time,
-            report: report.clone(),
-        });
+        let seq = held.next_seq;
+        held.next_seq += 1;
+        hold(
+            &mut held.sessions,
+            session_id,
+            PendingHook {
+                at: now,
+                seq,
+                event_time,
+                body,
+                len,
+            },
+        );
         debug!(session_id, "hook event held until its session is inserted");
     }
 
-    /// Insert `record` with every held event for its id already applied,
-    /// under the buffer lock so a concurrent [`Self::defer`] cannot land
-    /// between the take and the insert. Answers whether the record still holds
-    /// an `AwaitingInput` prompt after the whole replay, so the caller raises
-    /// its one `Attention` after publishing the session: a later event in the
-    /// buffer may have cleared the prompt an earlier one set.
+    /// Insert `record` with every held event for its id mapped by its hook
+    /// plugin and applied, under the buffer lock so a concurrent
+    /// [`Self::defer`] cannot land between the take and the insert. Answers
+    /// whether the record still holds an `AwaitingInput` prompt after the
+    /// whole replay, so the caller raises its one `Attention` after
+    /// publishing the session: a later event in the buffer may have cleared
+    /// the prompt an earlier one set.
     pub fn insert_with_pending<'a>(
         &self,
         hub: &'a Hub,
         mut record: SessionRecord,
     ) -> (PendingInsert<'a>, bool) {
         let session_id = record.id.clone();
-        let mut buffer = crate::sync::lock(&self.0);
-        prune_expired(&mut buffer, Instant::now());
-        let events = buffer.remove(&session_id).unwrap_or_default();
+        let mut held = crate::sync::lock(&self.held);
+        prune_expired(&mut held.sessions, Instant::now());
+        let events = held.sessions.remove(&session_id).unwrap_or_default();
         for event in events {
+            let Some(report) = self.map_for_record(&record, &event.body) else {
+                continue;
+            };
             // An agent's end held before its session was published has no
             // client that saw it start, so it is not announced.
-            let applied = apply_to_record(&mut record, event.event_time, &event.report);
+            let applied = apply_to_record(&mut record, event.event_time, &report);
             log_mismatch(&session_id, applied.mismatch.as_ref());
         }
         let awaiting =
             record.status == SessionStatus::AwaitingInput && record.pending_input.is_some();
         (hub.sessions.insert_pending(record), awaiting)
     }
+
+    /// The hook times of the events held for `session_id`, oldest first.
+    #[cfg(test)]
+    pub(crate) fn held_times(&self, session_id: &str) -> Vec<Option<u128>> {
+        crate::sync::lock(&self.held)
+            .sessions
+            .get(session_id)
+            .map(|events| events.iter().map(|event| event.event_time).collect())
+            .unwrap_or_default()
+    }
+}
+
+/// Add `event` to `session_id`'s held events, first evicting what the caps
+/// make room for: the oldest session at the session cap, the session's
+/// oldest events at its count and byte caps, then the oldest other sessions
+/// at the total byte cap. `event` itself fits the per-session byte cap.
+fn hold(sessions: &mut HashMap<String, Vec<PendingHook>>, session_id: &str, event: PendingHook) {
+    if !sessions.contains_key(session_id) && sessions.len() >= PENDING_HOOK_MAX_SESSIONS {
+        evict_oldest_session(sessions, session_id);
+    }
+    if let Some(events) = sessions.get_mut(session_id) {
+        while !events.is_empty()
+            && (events.len() >= PENDING_HOOK_MAX_PER_SESSION
+                || held_bytes(events) + event.len > PENDING_HOOK_MAX_BYTES_PER_SESSION)
+        {
+            events.remove(0);
+        }
+    }
+    while sessions
+        .values()
+        .map(|events| held_bytes(events))
+        .sum::<usize>()
+        + event.len
+        > PENDING_HOOK_MAX_BYTES
+    {
+        if !evict_oldest_session(sessions, session_id) {
+            break;
+        }
+    }
+    sessions
+        .entry(session_id.to_owned())
+        .or_default()
+        .push(event);
+}
+
+/// The body bytes `events` hold.
+fn held_bytes(events: &[PendingHook]) -> usize {
+    events.iter().map(|event| event.len).sum()
+}
+
+/// Drop the session other than `keep` whose newest held event arrived first,
+/// answering whether there was one.
+fn evict_oldest_session(sessions: &mut HashMap<String, Vec<PendingHook>>, keep: &str) -> bool {
+    let oldest = sessions
+        .iter()
+        .filter(|(id, _)| id.as_str() != keep)
+        .min_by_key(|(_, events)| events.last().map(|event| event.seq))
+        .map(|(id, _)| id.clone());
+    let Some(oldest) = oldest else {
+        return false;
+    };
+    sessions.remove(&oldest);
+    debug!(session_id = %oldest, "held hook events evicted to make room");
+    true
 }
 
 /// Drop held events older than [`PENDING_HOOK_TTL`], and the ids left with
 /// none.
-fn prune_expired(buffer: &mut HashMap<String, Vec<PendingHook>>, now: Instant) {
-    buffer.retain(|_, events| {
+fn prune_expired(sessions: &mut HashMap<String, Vec<PendingHook>>, now: Instant) {
+    sessions.retain(|session_id, events| {
+        let before = events.len();
         events.retain(|event| now.saturating_duration_since(event.at) < PENDING_HOOK_TTL);
+        let expired = before - events.len();
+        if expired > 0 {
+            debug!(
+                session_id,
+                expired, "held hook events expired before their session was inserted"
+            );
+        }
         !events.is_empty()
     });
 }
@@ -761,6 +905,166 @@ mod tests {
             assert!(record.background, "{event}");
             assert_eq!(record.last_hook_time, Some(2), "{event} still stamps");
         }
+    }
+
+    /// The one plugin the early-event tests map every agent's events with.
+    static TEST_AGENT: std::sync::LazyLock<agent_api::test_agent::TestAgent> =
+        std::sync::LazyLock::new(agent_api::test_agent::TestAgent::default);
+
+    fn test_agent_plugin(_agent: Agent) -> &'static dyn agent_api::AgentPlugin {
+        &*TEST_AGENT
+    }
+
+    /// A hub whose hook events are mapped by the test agent's plugin.
+    fn test_agent_hub(tag: &str) -> (Hub, crate::server::test_support::ScratchDir) {
+        let (mut hub, scratch) = crate::server::test_support::test_hub(tag);
+        hub.pending_hooks = PendingHooks::with_plugins(test_agent_plugin);
+        (hub, scratch)
+    }
+
+    /// A `SessionStart` only the test agent's plugin maps: Claude's knows no
+    /// `test_status`.
+    fn test_session_start(status: &str) -> Value {
+        json!({"test_event": "SessionStart", "test_status": status})
+    }
+
+    /// Hold `body`, `len` bytes long, for `session_id` at hook time `time`,
+    /// as the hook route does for a session not inserted yet.
+    fn hold(hub: &Hub, session_id: &str, time: u128, body: Value, len: usize) {
+        hub.pending_hooks
+            .defer(hub, session_id, Some(time), body, len);
+    }
+
+    /// Insert `record` with its held events applied and answer what the
+    /// inserted record holds: its status, last hook time and last message.
+    fn insert(hub: &Hub, record: SessionRecord) -> (SessionStatus, Option<u128>, Option<String>) {
+        let (pending, _awaiting) = hub.pending_hooks.insert_with_pending(hub, record);
+        let seen = {
+            let record = crate::sync::lock(pending.arc());
+            (
+                record.status,
+                record.last_hook_time,
+                record.last_assistant_message.clone(),
+            )
+        };
+        pending.publish();
+        seen
+    }
+
+    #[tokio::test]
+    async fn an_early_session_start_is_held_then_mapped_by_the_records_plugin() {
+        let (hub, _scratch) = test_agent_hub("early-test-agent");
+        let body = test_session_start("working");
+        assert!(
+            agent_registry::plugin(Agent::Claude)
+                .map_hook_event(&body, None, false)
+                .is_none(),
+            "only the test agent maps this body"
+        );
+        hold(&hub, "s1", 5, body, 64);
+        assert!(hub.sessions.get("s1").is_none(), "not inserted yet");
+        assert_eq!(hub.pending_hooks.held_times("s1"), [Some(5)]);
+        let (status, time, message) = insert(
+            &hub,
+            crate::history::test_support::record("s1", SessionMode::Interactive),
+        );
+        assert_eq!(status, SessionStatus::Working);
+        assert_eq!(time, Some(5));
+        assert_eq!(
+            message.as_deref(),
+            Some("none trusted=false"),
+            "the record's plugin mapped the held body"
+        );
+        assert_eq!(hub.pending_hooks.held_times("s1"), [], "the drain took it");
+    }
+
+    #[tokio::test]
+    async fn an_early_event_for_a_plain_shell_maps_with_its_hook_agent() {
+        let (hub, _scratch) = test_agent_hub("early-shell-hook-agent");
+        hold(&hub, "s1", 5, test_session_start("working"), 64);
+        let mut record = crate::history::test_support::record("s1", SessionMode::PlainShell);
+        record.hook_agent = Some(Agent::Claude);
+        let (status, time, message) = insert(&hub, record);
+        assert_eq!(status, SessionStatus::Working);
+        assert_eq!(time, Some(5));
+        assert_eq!(message.as_deref(), Some("none trusted=false"));
+    }
+
+    #[tokio::test]
+    async fn a_plain_shell_without_a_hook_agent_maps_nothing() {
+        let (hub, _scratch) = test_agent_hub("early-shell-no-hook-agent");
+        hold(&hub, "s1", 5, test_session_start("working"), 64);
+        let (status, time, message) = insert(
+            &hub,
+            crate::history::test_support::record("s1", SessionMode::PlainShell),
+        );
+        assert_eq!((status, time, message), (SessionStatus::Idle, None, None));
+        // An event that finds the shell inserted maps nothing either.
+        hold(&hub, "s1", 6, test_session_start("working"), 64);
+        let shell = hub.sessions.get("s1").expect("the shell is inserted");
+        let shell = crate::sync::lock(&shell);
+        assert_eq!(shell.status, SessionStatus::Idle);
+        assert_eq!(shell.last_hook_time, None);
+        assert!(!shell.hook_driven);
+    }
+
+    #[tokio::test]
+    async fn held_events_are_capped_by_bytes_per_session() {
+        let (hub, _scratch) = test_agent_hub("early-byte-cap");
+        let third = PENDING_HOOK_MAX_BYTES_PER_SESSION / 3 + 1;
+        for time in 1..=3 {
+            hold(&hub, "s1", time, test_session_start("working"), third);
+        }
+        assert_eq!(
+            hub.pending_hooks.held_times("s1"),
+            [Some(2), Some(3)],
+            "the oldest event made room for the third"
+        );
+        hold(
+            &hub,
+            "s2",
+            1,
+            test_session_start("working"),
+            PENDING_HOOK_MAX_BYTES_PER_SESSION + 1,
+        );
+        assert_eq!(
+            hub.pending_hooks.held_times("s2"),
+            [],
+            "an event over the whole cap is never held"
+        );
+        for time in 1..=33 {
+            hold(&hub, "s3", time, test_session_start("working"), 1);
+        }
+        let held = hub.pending_hooks.held_times("s3");
+        assert_eq!(held.len(), PENDING_HOOK_MAX_PER_SESSION);
+        assert_eq!(held.first(), Some(&Some(2)), "the count cap still holds");
+    }
+
+    #[tokio::test]
+    async fn held_events_evict_the_oldest_session_at_the_total_cap() {
+        let (hub, _scratch) = test_agent_hub("early-total-cap");
+        let per = PENDING_HOOK_MAX_BYTES_PER_SESSION;
+        let full = PENDING_HOOK_MAX_BYTES / per;
+        for i in 0..full {
+            hold(
+                &hub,
+                &format!("s{i}"),
+                1,
+                test_session_start("working"),
+                per,
+            );
+        }
+        for i in 0..full {
+            assert_eq!(hub.pending_hooks.held_times(&format!("s{i}")), [Some(1)]);
+        }
+        hold(&hub, "late", 1, test_session_start("working"), per);
+        assert_eq!(
+            hub.pending_hooks.held_times("s0"),
+            [],
+            "the oldest session made room"
+        );
+        assert_eq!(hub.pending_hooks.held_times("s1"), [Some(1)]);
+        assert_eq!(hub.pending_hooks.held_times("late"), [Some(1)]);
     }
 
     #[test]

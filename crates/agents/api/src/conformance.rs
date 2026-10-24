@@ -9,7 +9,8 @@ use protocol::{AgentDescriptor, FieldKind, OptionValue, OptionValues};
 /// Each case (the empty map, every field's default, every choice of every
 /// choice field, and the value each `when` rule tests for) is validated
 /// against the descriptor, decoded into the agent's options, serialized back
-/// into option values, and validated again.
+/// into option values, and validated again; a shell resume command the
+/// agent answers for those options must name the conversation it resumes.
 ///
 /// # Panics
 ///
@@ -32,6 +33,22 @@ pub fn check<A: Agent>(agent: &A) {
         if let Err(err) = validate(descriptor, &reserialized) {
             panic!("{case}: the schema refuses the re-serialized {reserialized:?}: {err}");
         }
+        check_shell_resume(agent, &case, &options);
+    }
+}
+
+/// A shell resume command, when the agent answers one, resumes the
+/// conversation it was asked for.
+#[expect(
+    clippy::panic,
+    reason = "a conformance failure must fail the calling test"
+)]
+fn check_shell_resume<A: Agent>(agent: &A, case: &str, options: &A::Options) {
+    const ID: &str = "conformance-conversation";
+    if let Ok(Some(command)) = agent.shell_resume(options, ID, &[])
+        && !command.contains(ID)
+    {
+        panic!("{case}: the shell resume command {command:?} does not name the conversation");
     }
 }
 

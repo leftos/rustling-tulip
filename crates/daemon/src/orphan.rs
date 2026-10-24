@@ -82,8 +82,9 @@ pub struct OrphanMeta {
     /// `claude`/`node` heuristic when it is `None`.
     #[serde(default)]
     pub program_name: Option<String>,
-    /// Which CLI spawned this session. `None` for metas written before this
-    /// field existed; reattach defaults to `Agent::Claude` in that case.
+    /// Which CLI spawned this session; a plain shell carries the default
+    /// agent. `None` for metas written before this field existed; reattach
+    /// uses the default agent in that case.
     #[serde(default)]
     pub agent: Option<Agent>,
     /// Latest OSC-emitted window title. Stored alongside the canonical label
@@ -183,6 +184,12 @@ pub struct OrphanMeta {
     /// its agent has ended. `None` for every other session.
     #[serde(default)]
     pub shell_label: Option<String>,
+    /// The agent whose plugin maps a recovered shell's hook events (see
+    /// [`crate::session::SessionRecord::hook_agent`]), set at spawn. `None`
+    /// for every other session and for sidecars written before this field
+    /// existed: such a shell maps no hook event.
+    #[serde(default)]
+    pub hook_agent: Option<Agent>,
 }
 
 fn meta_path(dirs: &Dirs, session_id: &str) -> PathBuf {
@@ -561,6 +568,8 @@ pub fn meta_from_record(
         busy_excluded: false,
         agent_in_shell: false,
         shell_label: None,
+        // A recovered shell's spawn sets it on the meta this returns.
+        hook_agent: None,
     })
 }
 
@@ -877,6 +886,7 @@ mod tests {
             busy_excluded: false,
             agent_in_shell: false,
             shell_label: None,
+            hook_agent: None,
         };
         let bytes = serde_json::to_vec(&original).expect("serialize");
         let decoded = load_meta_from_bytes(&bytes).expect("decode");
@@ -1055,6 +1065,33 @@ mod tests {
         let old_meta = load_meta_from_bytes(old).expect("parse old meta");
         assert!(!old_meta.agent_in_shell);
         assert_eq!(old_meta.shell_label, None);
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    /// A recovered shell's hook agent survives the sidecar; a sidecar
+    /// without the field loads as a shell with no hook agent.
+    #[test]
+    fn hook_agent_round_trips_through_the_sidecar() {
+        let dirs = scratch_dirs("hook-agent-round-trip");
+        let mut meta = s1_meta(None);
+        meta.mode = SessionMode::PlainShell;
+        meta.hook_agent = Some(Agent::Claude);
+        write_meta(&dirs, &meta).expect("write meta");
+        let loaded = load_meta(&dirs, "s1").expect("load meta");
+        assert_eq!(loaded.hook_agent, Some(Agent::Claude));
+
+        let old = br#"{
+            "on_disk_version": 2,
+            "session_id": "old",
+            "pid": 9001,
+            "label": "legacy",
+            "kind": "single",
+            "mode": "plain_shell",
+            "members": [],
+            "started_at": "2024-01-01T00:00:00Z"
+        }"#;
+        let old_meta = load_meta_from_bytes(old).expect("parse old meta");
+        assert_eq!(old_meta.hook_agent, None);
         let _ = std::fs::remove_dir_all(&dirs.config);
     }
 
