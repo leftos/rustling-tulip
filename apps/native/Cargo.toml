@@ -81,6 +81,11 @@ windows = { version = "0.61", features = [
 ] }
 
 [dev-dependencies]
+# The agent options model's conformance check against `validate`, over the
+# test agent's descriptor.
+agent-api = { workspace = true, features = ["test-support"] }
+# The fake daemon sends the daemon's own agent descriptors.
+agent-registry = { workspace = true }
 gpui = { version = "0.2.2", features = ["test-support"] }
 png = "0.18"
 sha2 = "0.10"

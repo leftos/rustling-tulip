@@ -5334,6 +5334,8 @@ dependencies = [
 name = "rustling-tulip-native"
 version = "0.1.1-alpha"
 dependencies = [
+ "agent-api",
+ "agent-registry",
  "alacritty_terminal",
  "anyhow",
  "base64",

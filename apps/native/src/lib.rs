@@ -6,6 +6,7 @@
 //! over their own transport with [`RootView::with_transport`].
 
 mod activity_bar;
+mod agent_options;
 pub mod appearance;
 mod appearance_stops;
 mod appearance_view;
@@ -597,6 +598,10 @@ pub struct RootView {
     remote_access_tab: Option<settings_view::RemoteAccessTab>,
     /// Each agent's launch command as this connection last heard it.
     agent_commands: Option<HashMap<protocol::AgentId, protocol::AgentCommandEntry>>,
+    /// The daemon's agents, in its order, as this connection last heard them.
+    agents: Vec<protocol::AgentDescriptor>,
+    /// Each agent's Settings page values as this connection last heard them.
+    agent_settings: std::collections::BTreeMap<protocol::AgentId, protocol::OptionValues>,
     /// The Claude page's launch-command fields, once shown.
     claude_tab: Option<settings_view::ClaudeTab>,
     /// Reads and switches whether this PC starts the daemon at login.
@@ -1014,6 +1019,8 @@ impl RootView {
             remote_status: None,
             remote_access_tab: None,
             agent_commands: None,
+            agents: Vec::new(),
+            agent_settings: std::collections::BTreeMap::new(),
             claude_tab: None,
             autostart,
             window_title: String::new(),
@@ -2357,6 +2364,7 @@ impl RootView {
                 if !conn.is_open() {
                     self.set_keep_awake(None);
                     self.forget_agent_commands();
+                    self.forget_agents();
                     self.launch_last.clear();
                 }
                 // The handshake is the old target's daemon's.
@@ -2577,7 +2585,7 @@ impl RootView {
             msg @ DaemonMessage::KeepAwakeStatus { .. } => self.on_keep_awake_status(&msg),
             msg @ DaemonMessage::RemoteStatus { .. } => self.on_remote_status(msg, cx),
             msg @ DaemonMessage::AgentCommands { .. } => self.on_agent_commands(msg, cx),
-            _ => {}
+            other => self.on_agents(other),
         }
     }
 
@@ -2786,6 +2794,7 @@ impl RootView {
     fn reset_for_new_daemon(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.set_keep_awake(None);
         self.forget_agent_commands();
+        self.forget_agents();
         self.claude_tab = None;
         self.set_remote_status(None, cx);
         self.reset_panes(cx);

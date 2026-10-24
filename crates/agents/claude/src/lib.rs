@@ -88,8 +88,9 @@ fn claude_descriptor() -> AgentDescriptor {
     }
 }
 
-/// A field shown on Claude's Settings page and in the spawn dialog's main
-/// section, with no help text and no rules.
+/// A field shown on Claude's Settings page and placed in the spawn dialog's
+/// Main section, with no help text and no rules; a field placed elsewhere
+/// sets its own `spawn`.
 fn main_field(id: &str, label: &str, kind: FieldKind, default: OptionValue) -> OptionField {
     OptionField {
         id: id.to_string(),
@@ -114,10 +115,11 @@ fn choices(pairs: &[(&str, &str)]) -> Vec<Choice> {
         .collect()
 }
 
-/// The permission mode: no value is the CLI's default; each choice is a
-/// [`PermissionMode`]'s serde name.
+/// The permission mode, in the spawn dialog's Advanced section: no value is
+/// the CLI's default; each choice is a [`PermissionMode`]'s serde name.
 fn permission_mode_field() -> OptionField {
     OptionField {
+        spawn: SpawnPlacement::Advanced,
         locked_when_trusted: true,
         ..main_field(
             "permission_mode",
@@ -148,10 +150,12 @@ fn provider_field() -> OptionField {
     )
 }
 
-/// The model: no value passes the provider's default; on `DeepSeek` the
-/// placeholder names its default model and the Anthropic aliases go.
+/// The model, in the spawn dialog's Advanced section: no value passes the
+/// provider's default; on `DeepSeek` the placeholder names its default model
+/// and the Anthropic aliases go.
 fn model_field() -> OptionField {
     OptionField {
+        spawn: SpawnPlacement::Advanced,
         when: vec![FieldRule {
             if_field: "provider".to_string(),
             equals: OptionValue::Text("deepseek".to_string()),

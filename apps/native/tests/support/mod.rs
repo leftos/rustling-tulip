@@ -2,7 +2,7 @@
 //! window, fed daemon messages, read back through the commands it sends.
 
 use std::cell::Cell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1308,11 +1308,19 @@ impl<'a> Harness<'a> {
         }));
     }
 
-    /// What the client sends on a connection's `Welcome`: every connection
-    /// asks for the session history, which the specs that care about it ask
-    /// for themselves.
+    /// What the daemon sends first on a connection, in its order: `Welcome`,
+    /// the agents' descriptors and their Settings values (none set). What
+    /// the client sends on `Welcome` is drained: every connection asks for
+    /// the session history, which the specs that care about it ask for
+    /// themselves.
     fn welcome_messages(&mut self) {
         self.send(welcome(PROTOCOL));
+        self.send(DaemonMessage::Agents {
+            agents: agent_registry::descriptors(),
+        });
+        self.send(DaemonMessage::AgentSettings {
+            settings: BTreeMap::new(),
+        });
         self.drain();
         self.outbox
             .unread
