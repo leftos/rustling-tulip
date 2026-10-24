@@ -157,6 +157,71 @@ pub(crate) fn read_file(path: &Path) -> Result<ViewerText, ReadFailure> {
     Ok(ViewerText::new(text, viewer_text::language_for_path(path)))
 }
 
+/// The whole lines selected in the Source view: from the line a press began
+/// on, the anchor, to the line it reached, the head, either way round.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct LineSelection {
+    /// The anchor and the head, counted from zero; `None` when nothing is
+    /// selected.
+    ends: Option<(usize, usize)>,
+}
+
+impl LineSelection {
+    /// The lines selected, counted from zero, end exclusive.
+    pub(crate) fn range(&self) -> Option<Range<usize>> {
+        let (anchor, head) = self.ends?;
+        Some(anchor.min(head)..anchor.max(head) + 1)
+    }
+
+    /// Selects `line` alone and anchors there.
+    pub(crate) fn click(&mut self, line: usize) {
+        self.ends = Some((line, line));
+    }
+
+    /// Moves the head to `line`, keeping the anchor; with nothing selected
+    /// `line` is selected alone.
+    pub(crate) fn extend(&mut self, line: usize) {
+        match &mut self.ends {
+            Some((_, head)) => *head = line,
+            None => self.click(line),
+        }
+    }
+
+    /// Selects every one of `len` lines; none when there are none.
+    pub(crate) fn select_all(&mut self, len: usize) {
+        self.ends = len.checked_sub(1).map(|last| (0, last));
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.ends = None;
+    }
+
+    /// Keeps the selection inside a text of `len` lines: ends past its last
+    /// line move onto it, and with no line nothing stays selected.
+    pub(crate) fn clamp(&mut self, len: usize) {
+        let Some(last) = len.checked_sub(1) else {
+            self.clear();
+            return;
+        };
+        if let Some((anchor, head)) = &mut self.ends {
+            *anchor = (*anchor).min(last);
+            *head = (*head).min(last);
+        }
+    }
+
+    /// The selected lines of `text` joined with `\n`, without gutter
+    /// numbers and with no trailing newline, whatever the file's line
+    /// endings; `None` when no line of it is selected.
+    pub(crate) fn text(&self, text: &ViewerText) -> Option<String> {
+        let lines: Vec<&str> = self
+            .range()?
+            .filter(|index| *index < text.line_count())
+            .map(|index| text.line(index))
+            .collect();
+        (!lines.is_empty()).then(|| lines.join("\n"))
+    }
+}
+
 /// How far past the rendered view's edges its list lays out blocks, in px.
 const MD_OVERDRAW: f32 = 400.0;
 
@@ -318,6 +383,11 @@ pub struct ViewerTab {
     /// The rendered document of the text read and its block list, once
     /// parsed.
     md: Option<(Arc<MdDoc>, ListState)>,
+    /// The lines selected in the Source view.
+    selection: LineSelection,
+    /// Whether a left press on a row is held, so a move over the rows
+    /// extends the selection.
+    selecting: bool,
 }
 
 impl Drop for ViewerTab {
@@ -350,6 +420,8 @@ impl ViewerTab {
             markdown,
             markdown_too_large: false,
             md: None,
+            selection: LineSelection::default(),
+            selecting: false,
         }
     }
 
@@ -399,16 +471,91 @@ impl ViewerTab {
         self.load = match result {
             Ok(text) => {
                 self.apply_render_cap(text.text().len());
+                self.selection.clamp(text.line_count());
                 self.text = Some(Arc::new(text));
                 self.jump_pending.set(self.line_target.is_some());
                 ViewerLoad::Loaded
             }
-            Err(ReadFailure::NotText(NotText::TooLarge)) => ViewerLoad::TooLarge,
-            Err(ReadFailure::NotText(NotText::Binary)) => ViewerLoad::Binary,
-            Err(ReadFailure::NotText(NotText::NotDecodable)) => ViewerLoad::NotDecodable,
-            Err(ReadFailure::Unreadable) => ViewerLoad::Missing,
+            Err(failure) => {
+                self.selection.clear();
+                match failure {
+                    ReadFailure::NotText(NotText::TooLarge) => ViewerLoad::TooLarge,
+                    ReadFailure::NotText(NotText::Binary) => ViewerLoad::Binary,
+                    ReadFailure::NotText(NotText::NotDecodable) => ViewerLoad::NotDecodable,
+                    ReadFailure::Unreadable => ViewerLoad::Missing,
+                }
+            }
         };
         true
+    }
+
+    /// Whether the text read shows as numbered lines, where lines can be
+    /// selected: a loaded file that is not a rendered Markdown document.
+    fn shows_source(&self) -> bool {
+        self.text.is_some() && self.markdown != Some(MarkdownMode::Rendered)
+    }
+
+    /// A left press on row `line`: it selects that line, or with `extend`
+    /// (Shift held) runs the selection from the anchor to it, and a drag
+    /// from here extends it.
+    pub(crate) fn press_line(&mut self, line: usize, extend: bool) {
+        if !self.shows_source() || line >= self.line_count() {
+            return;
+        }
+        if extend {
+            self.selection.extend(line);
+        } else {
+            self.selection.click(line);
+        }
+        self.selecting = true;
+    }
+
+    /// The pointer moved over row `line` with the left button `held`;
+    /// returns whether the selection changed, which only a drag begun on a
+    /// row does.
+    pub(crate) fn drag_over_line(&mut self, line: usize, held: bool) -> bool {
+        if !held {
+            self.selecting = false;
+        }
+        if !self.selecting || line >= self.line_count() {
+            return false;
+        }
+        let before = self.selection;
+        self.selection.extend(line);
+        self.selection != before
+    }
+
+    /// The left button was released: a drag ends.
+    pub(crate) fn release_lines(&mut self) {
+        self.selecting = false;
+    }
+
+    /// Selects every line; returns whether the Source view shows any.
+    pub(crate) fn select_all_lines(&mut self) -> bool {
+        if !self.shows_source() {
+            return false;
+        }
+        self.selection.select_all(self.line_count());
+        true
+    }
+
+    /// Clears the selection; returns whether a line was selected.
+    pub(crate) fn clear_selection(&mut self) -> bool {
+        let had = self.selection.range().is_some();
+        self.selection.clear();
+        had
+    }
+
+    /// The selected lines, counted from zero, end exclusive; `None` when
+    /// none is.
+    #[must_use]
+    pub fn selected_lines(&self) -> Option<Range<usize>> {
+        self.selection.range()
+    }
+
+    /// The selected lines as the clipboard takes them; `None` when none is.
+    pub(crate) fn selected_text(&self) -> Option<String> {
+        self.selection.text(self.text.as_deref()?)
     }
 
     /// A Markdown text of `len` bytes over the render cap shows as source,
@@ -537,6 +684,10 @@ impl ViewerTab {
             return false;
         }
         self.markdown = Some(mode);
+        if mode == MarkdownMode::Rendered {
+            self.selection.clear();
+            self.selecting = false;
+        }
         true
     }
 
@@ -876,5 +1027,122 @@ mod tests {
         assert!(!at_cap.markdown_too_large());
         assert!(at_cap.set_markdown(MarkdownMode::Source));
         assert_eq!(at_cap.markdown(), Some(MarkdownMode::Source));
+    }
+
+    #[test]
+    fn a_click_selects_one_line() {
+        let mut selection = LineSelection::default();
+        assert_eq!(selection.range(), None, "nothing is selected at first");
+        selection.click(3);
+        assert_eq!(selection.range(), Some(3..4));
+        selection.click(1);
+        assert_eq!(selection.range(), Some(1..2), "a second click starts over");
+    }
+
+    #[test]
+    fn a_shift_click_extends_from_the_anchor_either_way() {
+        let mut selection = LineSelection::default();
+        selection.click(4);
+        selection.extend(7);
+        assert_eq!(selection.range(), Some(4..8), "down from the anchor");
+        selection.extend(1);
+        assert_eq!(
+            selection.range(),
+            Some(1..5),
+            "up from the anchor, which stays put"
+        );
+
+        let mut fresh = LineSelection::default();
+        fresh.extend(2);
+        assert_eq!(
+            fresh.range(),
+            Some(2..3),
+            "with no anchor the line becomes it"
+        );
+    }
+
+    #[test]
+    fn a_drag_extends_to_the_row_under_the_pointer() {
+        let mut selection = LineSelection::default();
+        selection.click(5);
+        for row in [6, 7, 8] {
+            selection.extend(row);
+        }
+        assert_eq!(selection.range(), Some(5..9));
+        for row in [7, 6, 5, 4, 3] {
+            selection.extend(row);
+        }
+        assert_eq!(
+            selection.range(),
+            Some(3..6),
+            "dragging back past the anchor"
+        );
+        selection.extend(5);
+        assert_eq!(selection.range(), Some(5..6), "back on the anchor's row");
+    }
+
+    #[test]
+    fn select_all_covers_every_line() {
+        let mut selection = LineSelection::default();
+        selection.select_all(4);
+        assert_eq!(selection.range(), Some(0..4));
+        selection.select_all(0);
+        assert_eq!(selection.range(), None, "an empty text has no line");
+    }
+
+    #[test]
+    fn the_selection_clamps_when_the_text_shrinks() {
+        let mut selection = LineSelection::default();
+        selection.click(2);
+        selection.extend(9);
+        selection.clamp(5);
+        assert_eq!(selection.range(), Some(2..5), "cut at the last line");
+        selection.clamp(10);
+        assert_eq!(selection.range(), Some(2..5), "growing adds nothing");
+
+        let mut past = LineSelection::default();
+        past.click(7);
+        past.extend(8);
+        past.clamp(3);
+        assert_eq!(
+            past.range(),
+            Some(2..3),
+            "wholly past the end: the last line"
+        );
+        past.clamp(0);
+        assert_eq!(past.range(), None, "no line left");
+    }
+
+    #[test]
+    fn the_selected_text_joins_lines_with_newlines_without_a_trailing_one() {
+        let read = text("one\r\ntwo\nthree\rfour\n");
+        let mut selection = LineSelection::default();
+        assert_eq!(selection.text(&read), None, "nothing selected");
+        selection.click(0);
+        selection.extend(2);
+        assert_eq!(selection.text(&read).as_deref(), Some("one\ntwo\nthree"));
+        selection.select_all(read.line_count());
+        assert_eq!(
+            selection.text(&read).as_deref(),
+            Some("one\ntwo\nthree\nfour")
+        );
+        selection.click(1);
+        assert_eq!(selection.text(&read).as_deref(), Some("two"));
+    }
+
+    #[test]
+    fn clear_empties_the_selection() {
+        let mut selection = LineSelection::default();
+        selection.click(1);
+        selection.extend(3);
+        selection.clear();
+        assert_eq!(selection.range(), None);
+        assert_eq!(selection.text(&text("a\nb\nc\nd\n")), None);
+        selection.extend(2);
+        assert_eq!(
+            selection.range(),
+            Some(2..3),
+            "a cleared selection has no anchor"
+        );
     }
 }

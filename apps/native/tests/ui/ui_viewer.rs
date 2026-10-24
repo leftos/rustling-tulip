@@ -20,7 +20,7 @@ use gpui::{Modifiers, TestAppContext};
 use protocol::{ClientMessage, DaemonMessage, SessionSnapshot, TabEntry};
 use rustling_tulip_native::file_fetch::FetchRequest;
 use rustling_tulip_native::target::Target;
-use rustling_tulip_native::{ViewerLoad, ViewerOrigin};
+use rustling_tulip_native::{ViewerLoad, ViewerOrigin, ViewerTab};
 use serde_json::json;
 use support::{Fixture, Harness, Opened, TestDir, session};
 
@@ -518,4 +518,150 @@ fn copy_path_copies_the_full_path(cx: &mut TestAppContext) {
     assert_eq!(h.clipboard(), Some(file.to_string_lossy().into_owned()));
     h.click_on("viewer-copy-all-v1");
     assert_eq!(h.clipboard().as_deref(), Some("alpha\nbeta\n"));
+}
+
+/// Five lines, the second ending in CRLF.
+const FIVE_LINES: &[u8] = b"one\ntwo\r\nthree\nfour\nfive\n";
+
+/// A local harness whose tab `v1` views a file of [`FIVE_LINES`], shown.
+fn five_lines<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let file = write_file(dir.path(), "src/five.txt", FIVE_LINES);
+    let mut h = showing(cx, dir, &file);
+    assert!(drawn(&mut h, "viewer-line-v1-5"), "the file is shown");
+    h
+}
+
+/// Viewer tab `v1`'s selected lines, counted from zero.
+fn selected(h: &mut Harness<'_>) -> Option<std::ops::Range<usize>> {
+    h.root(|root, _| root.viewer_tab("v1").and_then(ViewerTab::selected_lines))
+}
+
+#[gpui::test]
+fn a_click_on_a_gutter_number_selects_the_line(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = five_lines(cx, &dir);
+    assert_eq!(selected(&mut h), None, "nothing is selected at first");
+    h.click_on("viewer-line-v1-2");
+    assert_eq!(selected(&mut h), Some(1..2));
+    h.click_on("viewer-line-v1-4");
+    assert_eq!(selected(&mut h), Some(3..4), "a plain click starts over");
+}
+
+#[gpui::test]
+fn a_click_on_a_lines_text_selects_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = five_lines(cx, &dir);
+    h.click_on("viewer-text-v1-3");
+    assert_eq!(selected(&mut h), Some(2..3));
+}
+
+#[gpui::test]
+fn a_shift_click_selects_the_line_range(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = five_lines(cx, &dir);
+    h.click_on("viewer-line-v1-2");
+    let fourth = h.center("viewer-text-v1-4");
+    h.click(fourth, Modifiers::shift());
+    assert_eq!(selected(&mut h), Some(1..4), "down from the anchor");
+    let first = h.center("viewer-line-v1-1");
+    h.click(first, Modifiers::shift());
+    assert_eq!(selected(&mut h), Some(0..2), "up from the same anchor");
+}
+
+#[gpui::test]
+fn a_drag_over_rows_selects_them(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = five_lines(cx, &dir);
+    let from = h.center("viewer-line-v1-2");
+    let to = h.center("viewer-text-v1-4");
+    h.drag(from, to, [Modifiers::none(), Modifiers::none()]);
+    assert_eq!(selected(&mut h), Some(1..4));
+}
+
+#[gpui::test]
+fn a_drag_released_off_the_rows_ends_the_selection_drag(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = five_lines(cx, &dir);
+    let third = h.center("viewer-line-v1-3");
+    let header = h.center("viewer-copy-path-v1");
+    h.drag(third, header, [Modifiers::none(), Modifiers::none()]);
+    let before = selected(&mut h);
+    assert!(before.is_some(), "the press on line 3 selected it");
+    let fifth = h.center("viewer-text-v1-5");
+    h.drag(header, fifth, [Modifiers::none(), Modifiers::none()]);
+    assert_eq!(
+        selected(&mut h),
+        before,
+        "a drag begun on the header does not extend the released selection"
+    );
+}
+
+#[gpui::test]
+fn a_drag_past_the_last_visible_row_selects_up_to_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = five_lines(cx, &dir);
+    let second = h.center("viewer-line-v1-2");
+    let fifth = h.bounds("viewer-text-v1-5");
+    let below = gpui::point(fifth.center().x, fifth.bottom() + fifth.size.height * 3.0);
+    h.drag(second, below, [Modifiers::none(), Modifiers::none()]);
+    assert_eq!(
+        selected(&mut h),
+        Some(1..5),
+        "the drag below the last row stops at it"
+    );
+}
+
+#[gpui::test]
+fn ctrl_c_copies_the_selected_lines_joined_with_newlines(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = five_lines(cx, &dir);
+    h.set_clipboard("before");
+    h.click_on("viewer-line-v1-2");
+    let third = h.center("viewer-line-v1-3");
+    h.click(third, Modifiers::shift());
+    h.keys("ctrl-c");
+    assert_eq!(
+        h.clipboard().as_deref(),
+        Some("two\nthree"),
+        "no gutter numbers, no CR, no trailing newline"
+    );
+}
+
+#[gpui::test]
+fn ctrl_c_with_no_selection_copies_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = five_lines(cx, &dir);
+    h.set_clipboard("before");
+    h.keys("ctrl-c");
+    assert_eq!(h.clipboard().as_deref(), Some("before"));
+}
+
+#[gpui::test]
+fn ctrl_a_then_ctrl_c_copies_the_whole_file(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = five_lines(cx, &dir);
+    h.keys("ctrl-a");
+    assert_eq!(selected(&mut h), Some(0..5));
+    h.keys("ctrl-c");
+    assert_eq!(
+        h.clipboard().as_deref(),
+        Some("one\ntwo\nthree\nfour\nfive")
+    );
+}
+
+#[gpui::test]
+fn escape_clears_the_selection(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = five_lines(cx, &dir);
+    h.click_on("viewer-line-v1-2");
+    assert_eq!(selected(&mut h), Some(1..2));
+    h.keys("escape");
+    assert_eq!(selected(&mut h), None);
+    h.set_clipboard("before");
+    h.keys("ctrl-c");
+    assert_eq!(
+        h.clipboard().as_deref(),
+        Some("before"),
+        "nothing left to copy"
+    );
 }

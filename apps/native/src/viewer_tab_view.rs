@@ -10,8 +10,10 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use gpui::{
-    AnyElement, ClickEvent, Context, Div, ElementId, HighlightStyle, Hsla, ScrollStrategy,
-    SharedString, Stateful, StyledText, Window, div, prelude::*, px, relative, uniform_list,
+    AnyElement, App, ClickEvent, Context, Div, ElementId, FocusHandle, HighlightStyle, Hsla,
+    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollStrategy,
+    SharedString, Stateful, StyledText, WeakEntity, Window, div, prelude::*, px, relative,
+    uniform_list,
 };
 use protocol::{ClientMessage, DaemonMessage, TabContent};
 
@@ -22,7 +24,7 @@ use crate::fonts;
 use crate::notices::ToastKind;
 use crate::open::OpenJob;
 use crate::open_view::{Origin, Route, Then};
-use crate::palette::{LINE, SUBTLE, SURFACE};
+use crate::palette::{INPUT_SELECTION, LINE, SUBTLE, SURFACE};
 use crate::remote_mode::LOCAL_FILES_REASON;
 use crate::syntax::{self, Highlighted, TokenClass};
 use crate::viewer_md_view::markdown_toggle;
@@ -97,9 +99,15 @@ struct Rows {
     spans: Option<Arc<Highlighted>>,
     /// The row the line target names, drawn highlighted.
     target: Option<usize>,
+    /// The rows selected, drawn tinted.
+    selected: Option<Range<usize>>,
     line_height: f32,
     gutter_width: f32,
     colors: [Hsla; 6],
+    /// The root view, which a press or a drag on a row updates.
+    root: WeakEntity<RootView>,
+    /// The viewer body's focus, which a press on a row takes.
+    focus: FocusHandle,
 }
 
 impl Rows {
@@ -114,6 +122,11 @@ impl Rows {
     fn row(&self, index: usize) -> Div {
         let number = index + 1;
         let selector = format!("viewer-line-{}-{number}", self.tab_id);
+        let text_selector = format!("viewer-text-{}-{number}", self.tab_id);
+        let selected = self
+            .selected
+            .as_ref()
+            .is_some_and(|range| range.contains(&index));
         let line = self.text.line(index);
         let highlights: Vec<(Range<usize>, HighlightStyle)> = self
             .spans
@@ -137,9 +150,11 @@ impl Rows {
             .flex()
             .flex_row()
             .items_center()
-            .when(self.target == Some(index), |row| {
+            .when(self.target == Some(index) && !selected, |row| {
                 row.bg(gpui::rgb(HOVER_BG))
             })
+            .when(selected, |row| row.bg(gpui::rgba(INPUT_SELECTION)))
+            .on_mouse_down(MouseButton::Left, self.on_press(index))
             .child(
                 div()
                     .debug_selector(move || selector)
@@ -153,6 +168,7 @@ impl Rows {
             )
             .child(
                 div()
+                    .debug_selector(move || text_selector)
                     .flex_1()
                     .min_w(px(0.0))
                     .pl(px(TEXT_PAD_LEFT))
@@ -160,6 +176,20 @@ impl Rows {
                     .whitespace_nowrap()
                     .child(StyledText::new(line.to_owned()).with_highlights(highlights)),
             )
+    }
+
+    /// A left press on row `index`: the body takes the keyboard and the row
+    /// is selected, or with Shift the run from the anchor to it.
+    fn on_press(&self, index: usize) -> impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static {
+        let (root, focus, tab_id) = (self.root.clone(), self.focus.clone(), self.tab_id.clone());
+        move |event, window, cx| {
+            focus.focus(window);
+            // Fails only when the view is gone, and the tab with it.
+            root.update(cx, |root, cx| {
+                root.press_viewer_line(&tab_id, index, event.modifiers.shift, cx);
+            })
+            .ok();
+        }
     }
 
     fn style(&self, class: TokenClass) -> HighlightStyle {
@@ -406,6 +436,93 @@ impl RootView {
             && self.viewer_focus.is_focused(window)
     }
 
+    /// A left press on line `line` of tab `tab_id`, with Shift when
+    /// `extend`.
+    fn press_viewer_line(
+        &mut self,
+        tab_id: &str,
+        line: usize,
+        extend: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(tab) = self.viewer_tabs.get_mut(tab_id) {
+            tab.press_line(line, extend);
+            cx.notify();
+        }
+    }
+
+    /// The pointer moved over tab `tab_id`'s body: a drag begun on a row
+    /// extends the selection to the row level with the pointer, kept to the
+    /// rows in view, so a drag past the list's edge stops at its edge row.
+    fn drag_viewer_to(&mut self, tab_id: &str, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        let row_height = self.viewer_line_height();
+        let Some(tab) = self.viewer_tabs.get_mut(tab_id) else {
+            return;
+        };
+        let held = event.pressed_button == Some(MouseButton::Left);
+        if !held {
+            tab.release_lines();
+            return;
+        }
+        let (bounds, offset) = {
+            let state = tab.scroll().0.borrow();
+            (state.base_handle.bounds(), state.base_handle.offset())
+        };
+        let row = drag_row(
+            (event.position.y - bounds.origin.y) / px(1.0),
+            -offset.y / px(1.0),
+            row_height,
+            bounds.size.height / px(1.0),
+            tab.line_count(),
+        );
+        if row.is_some_and(|row| tab.drag_over_line(row, held)) {
+            cx.notify();
+        }
+    }
+
+    /// The left button came up: a drag on tab `tab_id`'s rows ends,
+    /// wherever it was released.
+    fn release_viewer_lines(&mut self, tab_id: &str) {
+        if let Some(tab) = self.viewer_tabs.get_mut(tab_id) {
+            tab.release_lines();
+        }
+    }
+
+    /// A viewer line's height, in px, from the terminal font's size.
+    fn viewer_line_height(&self) -> f32 {
+        (self.sidebar.ui_state().terminal_font.size * LINE_HEIGHT_RATIO).round()
+    }
+
+    /// The Source view's keys on tab `tab_id`: Ctrl+C copies the selected
+    /// lines, and nothing when none is; Ctrl+A selects every line; Esc
+    /// clears the selection.
+    fn on_viewer_key(&mut self, tab_id: &str, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        let Some(tab) = self.viewer_tabs.get_mut(tab_id) else {
+            return;
+        };
+        let modifiers = event.keystroke.modifiers;
+        let ctrl_only = modifiers.control && !modifiers.shift && !modifiers.alt;
+        match event.keystroke.key.as_str() {
+            "c" if ctrl_only => {
+                if let Some(text) = tab.selected_text() {
+                    self.copy_to_clipboard(&text, cx);
+                }
+                cx.stop_propagation();
+            }
+            "a" if ctrl_only => {
+                if tab.select_all_lines() {
+                    cx.notify();
+                }
+                cx.stop_propagation();
+            }
+            "escape" if !modifiers.modified() && tab.clear_selection() => {
+                cx.notify();
+                cx.stop_propagation();
+            }
+            _ => {}
+        }
+    }
+
     /// A header button of tab `tab_id` was pressed.
     fn press_viewer_button(
         &mut self,
@@ -471,18 +588,40 @@ impl RootView {
                 .text_color(gpui::rgb(MUTED))
                 .child(note)
         });
+        let root = cx.entity().downgrade();
         let lines = tab.text().map(|text| match tab.markdown() {
             Some(MarkdownMode::Rendered) => match tab.markdown_doc() {
                 Some((doc, blocks)) => self.viewer_markdown(tab_id, doc, blocks),
                 // The document is being parsed.
                 None => div().flex_1(),
             },
-            Some(MarkdownMode::Source) | None => self.viewer_lines(tab_id, tab, text),
+            Some(MarkdownMode::Source) | None => self.viewer_lines(tab_id, tab, text, root),
         });
+        let (key_tab, move_tab) = (tab_id.to_owned(), tab_id.to_owned());
+        let (up_tab, up_out_tab) = (tab_id.to_owned(), tab_id.to_owned());
         Some(
             div()
                 .debug_selector(move || body)
                 .track_focus(&self.viewer_focus)
+                .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                    this.on_viewer_key(&key_tab, event, cx);
+                }))
+                .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
+                    this.drag_viewer_to(&move_tab, event, cx);
+                }))
+                // Capture, so a child that stops the release cannot keep the
+                // drag going; a release off the body ends it too.
+                .capture_any_mouse_up(cx.listener(move |this, event: &MouseUpEvent, _, _| {
+                    if event.button == MouseButton::Left {
+                        this.release_viewer_lines(&up_tab);
+                    }
+                }))
+                .on_mouse_up_out(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseUpEvent, _, _| {
+                        this.release_viewer_lines(&up_out_tab);
+                    }),
+                )
                 .flex()
                 .flex_col()
                 .flex_1()
@@ -497,8 +636,15 @@ impl RootView {
     }
 
     /// The file's lines in the terminal font, each under its line number,
-    /// scrolled to the line an open asked for.
-    fn viewer_lines(&self, tab_id: &str, tab: &ViewerTab, text: &Arc<ViewerText>) -> Div {
+    /// scrolled to the line an open asked for; a press or a drag on them
+    /// updates `root`'s selection.
+    fn viewer_lines(
+        &self,
+        tab_id: &str,
+        tab: &ViewerTab,
+        text: &Arc<ViewerText>,
+        root: WeakEntity<RootView>,
+    ) -> Div {
         let font = &self.sidebar.ui_state().terminal_font;
         let family = SharedString::from(
             font.family
@@ -516,9 +662,12 @@ impl RootView {
             text: Arc::clone(text),
             spans: tab.spans().cloned(),
             target: tab.jump_row(),
-            line_height: (font.size * LINE_HEIGHT_RATIO).round(),
+            selected: tab.selected_lines(),
+            line_height: self.viewer_line_height(),
             gutter_width,
             colors: TokenClass::ALL.map(|class| Hsla::from(gpui::rgb(class.color()))),
+            root,
+            focus: self.viewer_focus.clone(),
         };
         if let Some(row) = tab.take_jump() {
             tab.scroll()
@@ -538,6 +687,30 @@ impl RootView {
             .text_size(px(font.size))
             .child(list)
     }
+}
+
+/// The row a drag reaches with the pointer `y` px below the line list's top,
+/// the list scrolled `scrolled` px down, its rows `row_height` px tall in a
+/// `viewport` px tall list of `count` rows: the row level with the pointer,
+/// kept to the first and last rows in view; `None` with no row.
+fn drag_row(y: f32, scrolled: f32, row_height: f32, viewport: f32, count: usize) -> Option<usize> {
+    let last_row = count.checked_sub(1)?;
+    if row_height <= 0.0 {
+        return None;
+    }
+    let first_in_view = (scrolled / row_height).floor().max(0.0);
+    let last_in_view = ((scrolled + viewport) / row_height).ceil() - 1.0;
+    let row = ((y + scrolled) / row_height)
+        .floor()
+        .min(last_in_view)
+        .max(first_in_view);
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the row is floored and at least zero; past the text it is cut to the last row"
+    )]
+    let row = row as usize;
+    Some(row.min(last_row))
 }
 
 /// The header: the file's name whole and its folder dimmed, then the open
