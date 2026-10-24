@@ -39,6 +39,7 @@ use tailnet::{Denied, PeerIdentity, TailnetError, WhoIs};
 use tokio::sync::{OnceCell, Semaphore, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 use tower::Layer as _;
 
 /// Consecutive transient `whoami` failures after which Tailscale counts as
@@ -264,9 +265,13 @@ struct Wiring<A, S> {
 }
 
 /// The running listener: a supervisor task that owns the servers, and the
-/// watches it publishes. Dropping it stops the supervisor and every server.
+/// watches it publishes. Dropping it stops the supervisor and every server,
+/// and ends every connection a server accepted.
 pub struct TailnetListener {
     status: watch::Receiver<ListenerStatus>,
+    /// The root of every server's life: cancelled by [`Drop`] itself, so the
+    /// connections the servers accepted are told before the drop returns.
+    life: CancellationToken,
     /// The supervisor task. [`TailnetListener::stopped`] waits on it in
     /// place rather than taking it, so a `stopped()` dropped before it
     /// returns still leaves the handle here for [`Drop`] to abort.
@@ -362,10 +367,12 @@ impl TailnetListener {
         let cert_done_at_exit = Arc::new(AtomicBool::new(false));
         #[cfg(test)]
         let panic_supervisor = Arc::new(AtomicBool::new(false));
+        let life = CancellationToken::new();
         let supervisor = Supervisor {
             api,
             serve,
             acceptor,
+            life: life.clone(),
             host,
             options,
             status: status_tx,
@@ -389,6 +396,7 @@ impl TailnetListener {
         let supervisor = tokio::spawn(supervisor.run(shutdown));
         Self {
             status,
+            life,
             supervisor,
             cert_state,
             #[cfg(test)]
@@ -400,6 +408,13 @@ impl TailnetListener {
             #[cfg(test)]
             panic_supervisor,
         }
+    }
+
+    /// A life under this listener's root, standing in for a server's: it
+    /// ends when the listener is dropped.
+    #[cfg(test)]
+    pub(crate) fn server_life_for_tests(&self) -> CancellationToken {
+        self.life.child_token()
     }
 
     #[cfg(test)]
@@ -453,9 +468,11 @@ impl TailnetListener {
 }
 
 impl Drop for TailnetListener {
-    /// Stop the supervisor; dropping it drops every [`Server`], which shuts
-    /// each one down, and its `AbortOnDrop`, which ends the cert task.
+    /// End every connection the servers accepted, here and now, then stop
+    /// the supervisor; dropping it drops every [`Server`], which shuts each
+    /// one down, and its `AbortOnDrop`, which ends the cert task.
     fn drop(&mut self) {
+        self.life.cancel();
         self.supervisor.abort();
     }
 }
@@ -775,16 +792,20 @@ impl<A: TailnetApi> CertWorker<A> {
     }
 }
 
-/// One address's server. Dropping it shuts the server down, so a server
-/// never outlives its supervisor.
+/// One address's server. Dropping it ends every connection it accepted and
+/// shuts the server down, so neither outlives its supervisor.
 struct Server {
     local: SocketAddr,
     handle: Handle<SocketAddr>,
     task: JoinHandle<()>,
+    /// Handed to every connection this server accepts; a child of the
+    /// listener's root.
+    life: CancellationToken,
 }
 
 impl Drop for Server {
     fn drop(&mut self) {
+        self.life.cancel();
         self.handle.shutdown();
     }
 }
@@ -821,6 +842,8 @@ struct Supervisor<A, S> {
     serve: Arc<S>,
     /// The gate every server's connections pass, shared by all of them.
     acceptor: TailnetAcceptor<A>,
+    /// The listener's root life; each server's life is a child of it.
+    life: CancellationToken,
     /// The last `whoami` answer while Tailscale is up, for the acceptor's
     /// owner rule; `None` before one and after Tailscale went down.
     host: watch::Sender<Option<WhoIs>>,
@@ -1171,8 +1194,12 @@ impl<A: TailnetApi, S: Serve<A>> Supervisor<A, S> {
         let serve = Arc::clone(&self.serve);
         let task_handle = handle.clone();
         let tls = tls.clone();
-        let acceptor = self.acceptor.clone();
+        let life = self.life.child_token();
+        let acceptor = self.acceptor.serving_until(life.clone());
+        let ended = life.clone().drop_guard();
         let task = tokio::spawn(async move {
+            // A server that ends on its own ends its connections too.
+            let _ended = ended;
             if let Err(err) = serve.serve(listener, task_handle, tls, acceptor).await {
                 tracing::warn!(addr = %local, %err, "tailnet server stopped with an error");
             }
@@ -1181,12 +1208,15 @@ impl<A: TailnetApi, S: Serve<A>> Supervisor<A, S> {
             local,
             handle,
             task,
+            life,
         })
     }
 
-    /// Shut `server` down, letting its connections drain for the grace
-    /// period, and wait until it has released its address.
+    /// End every connection `server` accepted, shut it down, letting its
+    /// HTTP connections drain for the grace period, and wait until it has
+    /// released its address.
     async fn stop(&self, mut server: Server) {
+        server.life.cancel();
         server
             .handle
             .graceful_shutdown(Some(self.options.shutdown_grace));
@@ -1259,20 +1289,35 @@ const WHOIS_CONCURRENCY: usize = 4;
 /// The tailnet device a connection came from, on every request the tailnet
 /// listener serves. Only this module makes one, and only for a connection
 /// the owner rule admitted, so a handler that finds it can trust it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AuthorizedPeer(PeerIdentity);
+#[derive(Debug, Clone)]
+pub struct AuthorizedPeer {
+    identity: PeerIdentity,
+    server_life: CancellationToken,
+}
 
 impl AuthorizedPeer {
     /// The device's identity from `tailscale whois`.
     #[must_use]
     pub fn identity(&self) -> &PeerIdentity {
-        &self.0
+        &self.identity
     }
 
-    /// A peer a test attaches directly, standing in for the acceptor.
+    /// Cancelled when the server (bound address) that accepted the
+    /// connection ends, by a stop, the listener's drop or the supervisor's
+    /// end, so nothing the connection became outlives it.
+    #[must_use]
+    pub fn server_life(&self) -> &CancellationToken {
+        &self.server_life
+    }
+
+    /// A peer a test attaches directly, standing in for the acceptor of a
+    /// server whose end `server_life` stands for.
     #[cfg(test)]
-    pub(crate) fn for_tests(identity: PeerIdentity) -> Self {
-        Self(identity)
+    pub(crate) fn for_tests(identity: PeerIdentity, server_life: CancellationToken) -> Self {
+        Self {
+            identity,
+            server_life,
+        }
     }
 }
 
@@ -1378,12 +1423,16 @@ impl<V> TtlMap<V> {
 /// it, and so its verdict cache.
 pub struct TailnetAcceptor<A> {
     gate: Arc<Gate<A>>,
+    /// The life of the server this acceptor admits for, handed to every
+    /// connection it admits inside its [`AuthorizedPeer`].
+    server_life: CancellationToken,
 }
 
 impl<A> Clone for TailnetAcceptor<A> {
     fn clone(&self) -> Self {
         Self {
             gate: Arc::clone(&self.gate),
+            server_life: self.server_life.clone(),
         }
     }
 }
@@ -1466,6 +1515,16 @@ impl<A: TailnetApi> TailnetAcceptor<A> {
         };
         Self {
             gate: Arc::new(gate),
+            server_life: CancellationToken::new(),
+        }
+    }
+
+    /// This acceptor's gate, admitting for the server whose life is
+    /// `server_life`.
+    fn serving_until(&self, server_life: CancellationToken) -> Self {
+        Self {
+            gate: Arc::clone(&self.gate),
+            server_life,
         }
     }
 }
@@ -1630,12 +1689,17 @@ impl<A: TailnetApi, S: Send + 'static> Accept<tokio::net::TcpStream, S> for Tail
 
     fn accept(&self, stream: tokio::net::TcpStream, service: S) -> Self::Future {
         let gate = Arc::clone(&self.gate);
+        let server_life = self.server_life.clone();
         Box::pin(async move {
             let peer = stream.peer_addr().inspect_err(|err| {
                 tracing::debug!(%err, "tailnet listener: the accepted socket has no peer address; connection dropped");
             })?;
             let identity = gate.admit(peer).await?;
-            let service = axum::Extension(AuthorizedPeer(identity)).layer(service);
+            let authorized = AuthorizedPeer {
+                identity,
+                server_life,
+            };
+            let service = axum::Extension(authorized).layer(service);
             Ok((stream, service))
         })
     }
@@ -3821,6 +3885,123 @@ mod tests {
         assert!(
             response.ends_with(&expected),
             "the handler sees the fake's whois identity: {response}"
+        );
+        shutdown.send_replace(true);
+    }
+
+    /// The server lives the requests to `/life` carried, in order.
+    type Lives = Arc<Mutex<Vec<CancellationToken>>>;
+
+    /// TLS serving with one route, `/life`, that records the server life its
+    /// request's [`AuthorizedPeer`] carries, standing in for a session.
+    fn life_serve() -> (Arc<TlsServe>, Lives) {
+        let lives: Lives = Arc::default();
+        let seen = Arc::clone(&lives);
+        let record = move |axum::Extension(peer): axum::Extension<AuthorizedPeer>| {
+            let seen = Arc::clone(&seen);
+            async move {
+                seen.lock()
+                    .expect("lives lock")
+                    .push(peer.server_life().clone());
+                "recorded"
+            }
+        };
+        let router = axum::Router::new().route("/life", axum::routing::get(record));
+        (Arc::new(TlsServe { router }), lives)
+    }
+
+    /// Serve [`life_serve`] with [`quick_options`] and make one request: the
+    /// listener, its shutdown sender, and the life of the server that
+    /// answered.
+    async fn serving_session(
+        fake: &Arc<FakeTailnet>,
+    ) -> (TailnetListener, watch::Sender<bool>, CancellationToken) {
+        let (serve, lives) = life_serve();
+        let (listener, shutdown) = start(fake, &serve, quick_options());
+        let addr = serving_addrs(&wait_for_status(&listener, is_serving).await)[0];
+        let mut handshake = tls_connect(addr, &fake.ca).await;
+        let response = http_get(&mut handshake.stream, "/life").await;
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        let life = lives
+            .lock()
+            .expect("lives lock")
+            .pop()
+            .expect("the request recorded its server's life");
+        assert!(!life.is_cancelled(), "the server is still serving");
+        (listener, shutdown, life)
+    }
+
+    /// Wait until `life` is cancelled, failing at a guard far past any
+    /// passing run.
+    async fn wait_for_end(life: &CancellationToken) {
+        let ended = tokio::time::timeout(Duration::from_secs(120), life.cancelled()).await;
+        assert!(ended.is_ok(), "the server's life was never cancelled");
+    }
+
+    #[tokio::test]
+    async fn a_session_ends_when_the_listener_is_dropped() {
+        let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
+        let (listener, shutdown, life) = serving_session(&fake).await;
+        drop(listener);
+        assert!(
+            life.is_cancelled(),
+            "cancelled by the drop itself, before anything awaits"
+        );
+        drop(shutdown);
+    }
+
+    #[tokio::test]
+    async fn a_session_ends_when_its_server_stops_for_tailscale_down() {
+        let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
+        let (listener, shutdown, life) = serving_session(&fake).await;
+        fake.set_whoami(Err(TailnetError::NotRunning));
+        wait_for_end(&life).await;
+        assert_eq!(
+            *listener.status().borrow(),
+            ListenerStatus::TailscaleDown(TailnetError::NotRunning),
+            "the server stopped because Tailscale went down"
+        );
+        shutdown.send_replace(true);
+    }
+
+    #[tokio::test]
+    async fn a_session_ends_when_the_host_becomes_tagged() {
+        let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
+        let (listener, shutdown, life) = serving_session(&fake).await;
+        let mut tagged = whoami_with(&["127.0.0.1/32"]);
+        tagged.node.tags = vec!["tag:server".to_owned()];
+        fake.set_whoami(Ok(tagged));
+        wait_for_end(&life).await;
+        assert_eq!(
+            wait_for_status(&listener, |s| *s == ListenerStatus::HostTagged).await,
+            ListenerStatus::HostTagged
+        );
+        shutdown.send_replace(true);
+    }
+
+    #[tokio::test]
+    async fn a_session_ends_when_the_supervisor_panics() {
+        let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
+        let (listener, shutdown, life) = serving_session(&fake).await;
+        listener.panic_supervisor.store(true, Ordering::SeqCst);
+        wait_for_end(&life).await;
+        drop(shutdown);
+    }
+
+    #[tokio::test]
+    async fn a_session_survives_a_certificate_reload() {
+        let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
+        let (listener, shutdown, life) = serving_session(&fake).await;
+        let second = fake.ca.leaf();
+        fake.set_cert(CertScript::leaf(&second));
+        wait_until("the reload", || listener.reloads() >= 1).await;
+        assert!(
+            is_serving(&listener.status().borrow()),
+            "still serving after the reload"
+        );
+        assert!(
+            !life.is_cancelled(),
+            "a reload keeps the server, and so its sessions"
         );
         shutdown.send_replace(true);
     }

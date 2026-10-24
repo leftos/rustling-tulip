@@ -1,5 +1,5 @@
 //! Remote access over the tailnet: its switch, listener, router and serving name, remote status, and LAN refusals.
-use super::connection::{AuthKind, client_session};
+use super::connection::{AuthKind, client_session_until};
 use super::{Hub, StateEvent};
 use crate::paths::Dirs;
 use crate::tailnet_listener::{AuthorizedPeer, ListenerStatus, TailnetListener};
@@ -293,8 +293,16 @@ async fn tailnet_ws_handler(
         warn!("tailnet /ws upgrade refused: Host/Origin does not name this host");
         return StatusCode::FORBIDDEN.into_response();
     }
-    let peer = peer.identity().clone();
-    ws.on_upgrade(move |socket| client_session(state.hub, socket, AuthKind::Tailnet(peer)))
+    let identity = peer.identity().clone();
+    let server_life = peer.server_life().clone();
+    ws.on_upgrade(move |socket| {
+        client_session_until(
+            state.hub,
+            socket,
+            AuthKind::Tailnet(identity),
+            Some(server_life),
+        )
+    })
 }
 
 /// Whether the tailnet listener should start: remote access on and a usable
@@ -412,18 +420,22 @@ pub(super) async fn configure_remote(
     };
     let unchanged =
         shown.enabled == enabled && shown.port == remote.port && slot.is_some() == enabled;
+    // With remote access off no device can be waiting: every request and
+    // code goes, and every waiting device is told and closed. Told before
+    // the listener is dropped, so the decision is queued ahead of the close.
     if unchanged {
+        if !enabled {
+            super::pairing::drop_all(hub);
+        }
         rebroadcast_remote(hub);
     } else {
         crate::remote_config::save(&hub.dirs, remote)?;
         hub.remote_enabled.send_replace(enabled);
+        if !enabled {
+            super::pairing::drop_all(hub);
+        }
         apply_remote_config(hub, &mut slot, remote, hub.shutdown_tx.subscribe());
         info!(enabled, port = remote.port, "remote access configured");
-    }
-    // With remote access off no device can be waiting: every request and
-    // code goes, and every waiting device is told and closed.
-    if !enabled {
-        super::pairing::drop_all(hub);
     }
     Ok(())
 }
@@ -463,8 +475,9 @@ mod tests {
     use crate::server::build_loopback_router;
     use crate::server::handshake::push_initial_state;
     use crate::server::test_support::{
-        ScratchDir, dispatch_all, dispatch_one_as, hook_request, idle_record, test_hub,
-        test_hub_in, test_peer,
+        ScratchDir, WsClient, dispatch_all, dispatch_one_as, hello, hook_request, idle_record,
+        loopback_ws_client, tailnet_ws_client_under, test_hub, test_hub_in, test_peer, ws_next,
+        ws_send,
     };
     use axum::body::Body;
     use axum::http::{Method, Request};
@@ -1387,6 +1400,102 @@ mod tests {
             hub.remote_status.borrow().snapshot.state,
             protocol::RemoteState::Off
         );
+    }
+
+    /// A life under the hub's own listener, as a connection it accepted
+    /// carries: it ends when that listener is dropped.
+    async fn listener_life(hub: &Hub) -> tokio_util::sync::CancellationToken {
+        hub.tailnet
+            .lock()
+            .await
+            .as_ref()
+            .expect("remote access on starts a listener")
+            .server_life_for_tests()
+    }
+
+    /// Read `client` until a message `stop` accepts.
+    async fn read_until(client: &mut WsClient, stop: impl Fn(&DaemonMessage) -> bool) {
+        loop {
+            let message = ws_next(client)
+                .await
+                .expect("a message before the connection closes");
+            if stop(&message) {
+                return;
+            }
+        }
+    }
+
+    fn configure(enabled: bool) -> ClientMessage {
+        ClientMessage::ConfigureRemote {
+            enabled,
+            port: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn waiting_pairing_device_is_told_expired_when_remote_turns_off() {
+        let scratch = ScratchDir::new("remote-off-pairing-expired");
+        let _env = FakeTailscaleEnv::new(scratch.path()).await;
+        let (hub, _scratch) = test_hub_in(scratch, None);
+        dispatch_all(&hub, configure(true)).await;
+        let life = listener_life(&hub).await;
+        let mut device = tailnet_ws_client_under(&hub, test_peer(), life).await;
+        ws_send(&mut device, &hello("", None)).await;
+        let welcome = ws_next(&mut device).await;
+        assert!(
+            matches!(welcome, Some(DaemonMessage::Welcome { .. })),
+            "{welcome:?}"
+        );
+        let refused = ws_next(&mut device).await;
+        assert!(
+            matches!(refused, Some(DaemonMessage::DevicePairFailed { .. })),
+            "{refused:?}"
+        );
+        ws_send(&mut device, &ClientMessage::DevicePairRequest).await;
+        let request_id = match ws_next(&mut device).await {
+            Some(DaemonMessage::DevicePairPending { request_id, .. }) => Some(request_id),
+            _ => None,
+        }
+        .expect("the request is pending");
+
+        dispatch_all(&hub, configure(false)).await;
+        let told = ws_next(&mut device).await;
+        assert!(
+            matches!(&told, Some(DaemonMessage::DevicePairDecided { request_id: id, outcome })
+                if *id == request_id && *outcome == protocol::DevicePairOutcome::Expired),
+            "the device is told its request expired: {told:?}"
+        );
+        assert!(ws_next(&mut device).await.is_none(), "then it is closed");
+    }
+
+    #[tokio::test]
+    async fn loopback_session_survives_remote_access_turning_off() {
+        let scratch = ScratchDir::new("loopback-survives-remote-off");
+        let _env = FakeTailscaleEnv::new(scratch.path()).await;
+        let (hub, _scratch) = test_hub_in(scratch, None);
+        dispatch_all(&hub, configure(true)).await;
+        let life = listener_life(&hub).await;
+        let mut local = loopback_ws_client(&hub).await;
+        ws_send(&mut local, &hello("test-token", None)).await;
+        read_until(&mut local, |m| {
+            matches!(m, DaemonMessage::RemoteStatus { .. })
+        })
+        .await;
+
+        dispatch_all(&hub, configure(false)).await;
+        assert!(
+            life.is_cancelled(),
+            "turning remote off dropped the listener"
+        );
+
+        let request = ClientMessage::ListEnvNames {
+            request_id: Some("after-off".to_owned()),
+        };
+        ws_send(&mut local, &request).await;
+        read_until(&mut local, |m| {
+            matches!(m, DaemonMessage::EnvNames { request_id: Some(id), .. } if id == "after-off")
+        })
+        .await;
     }
 
     #[tokio::test]

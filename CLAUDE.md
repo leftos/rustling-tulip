@@ -270,7 +270,7 @@ The refresher tracks two flags — `status` and `stash` — and only invokes `gi
 - All binary payloads (PTY input/output, scrollback) cross the wire as `data_b64`. Don't add raw-bytes fields.
 - The `Hello` message must be the first thing a client sends after WS upgrade. New clients send both `protocol_version` (scalar back-compat) and `protocol_versions: Vec<u32>`. The daemon picks the highest mutually supported version from its `SUPPORTED_PROTOCOL_VERSIONS` const and echoes it in `Welcome.protocol_version`. An empty intersection or token mismatch closes the connection.
 
-  `Hello.auth_token` is the daemon's `daemon.json` token on a loopback connection; on a tailnet connection the daemon never compares it to that token, and the value is the device's own token. A tailnet connection has 10 s to send `Hello`; the loopback listener keeps the un-timed handshake.
+  `Hello.auth_token` is the daemon's `daemon.json` token on a loopback connection; on a tailnet connection the daemon never compares it to that token, and the value is the device's own token. A tailnet connection has 10 s to send `Hello`; the loopback listener keeps the un-timed handshake. A tailnet connection also gets a WebSocket Close when the listener server that accepted it ends (remote access turned off or its port changed, among others); loopback connections never do.
 
   A tailnet `Hello` whose token is not a valid device token (none, unknown, another node's, revoked, the daemon's own, or an unreadable store) is not an `AuthFailed`: it gets `Welcome`, then `DevicePairFailed { reason: "device not approved" }`, and stays open as a pairing connection.
 

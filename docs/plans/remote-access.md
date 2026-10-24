@@ -17,7 +17,7 @@ Design for Wave 3's remote desktop (Linear RT-33, RT-34 and their sub-issues). R
 - "The owner" is a device logged in as the host node's own Tailscale user (numeric `UserID`, never the display login), untagged, not shared in, and not the host itself.
 - The listener binds the host's own tailnet addresses only (v4 and v6), on the port `remote.json` configures (default 8787), rebinding when they change.
 - Shutdown and turning remote access off are refused from tailnet connections: host-only.
-- Revocation is a block list in rustling-tulip: Settings lists the tailnet devices that have connected, and blocking one drops its live connections at once (RT-96, rewritten).
+- Revocation is a block list in rustling-tulip: Settings lists the tailnet devices that have connected, and blocking one drops its live connections at once (RT-96, rewritten; it reuses the per-connection cancellation token a tailnet connection already watches for its listener server ending).
 - There is no LAN listener, `/pair` or mDNS: the daemon binds loopback and, with remote access on, the host's own tailnet addresses. The six wire variants (`ConfigureLan`, `StartPairing`, `CancelPairing`, `LanStatus`, `PairingStarted`, `PairingEnded`) stay decodable and inert.
 - Placement: the daemon side (TS.1 to TS.5) lands on `main`, behind a `remote.json` switch that is off by default; the native client's remote mode (P6.1 to P6.4 and the tests) lands on `main` too. The installer and the docs pass follow.
 - The native client dials TLS itself inside `net.rs`; there is no loopback bridge.

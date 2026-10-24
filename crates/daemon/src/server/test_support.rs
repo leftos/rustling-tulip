@@ -508,12 +508,28 @@ async fn scratch_ws_client(app: axum::Router, url: impl FnOnce(u16) -> String) -
 }
 
 /// A tailnet `/ws` connection the listener's acceptor admitted as `peer`,
-/// served over plain ws on a scratch listener.
-pub(super) async fn tailnet_ws_client(hub: &Hub, peer: tailnet::PeerIdentity) -> WsClient {
+/// served over plain ws on a scratch listener, and the token of the listener
+/// server it was accepted under: cancelling it stands for that server ending.
+pub(super) async fn tailnet_ws_client(
+    hub: &Hub,
+    peer: tailnet::PeerIdentity,
+) -> (WsClient, tokio_util::sync::CancellationToken) {
+    let server_life = tokio_util::sync::CancellationToken::new();
+    let client = tailnet_ws_client_under(hub, peer, server_life.clone()).await;
+    (client, server_life)
+}
+
+/// [`tailnet_ws_client`] accepted under `server_life`, such as one from
+/// the hub's own listener.
+pub(super) async fn tailnet_ws_client_under(
+    hub: &Hub,
+    peer: tailnet::PeerIdentity,
+    server_life: tokio_util::sync::CancellationToken,
+) -> WsClient {
     let names = super::remote::name_slot();
     super::remote::set_serving_name(&names, Some("host.tail1234.ts.net".to_owned()));
     let app = super::remote::build_tailnet_router(hub.clone(), names, 8787).layer(axum::Extension(
-        crate::tailnet_listener::AuthorizedPeer::for_tests(peer),
+        crate::tailnet_listener::AuthorizedPeer::for_tests(peer, server_life),
     ));
     scratch_ws_client(app, |_| "ws://host.tail1234.ts.net:8787/ws".to_owned()).await
 }

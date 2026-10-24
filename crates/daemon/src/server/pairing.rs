@@ -23,6 +23,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 /// Each waiting request's connection, by request id.
@@ -85,6 +86,8 @@ enum Event {
     Tick,
     /// The shutdown watch moved; `true` when its sender is gone.
     Shutdown(bool),
+    /// The listener server that accepted the connection ended.
+    ServerEnded,
 }
 
 /// The state of one pairing connection.
@@ -110,13 +113,15 @@ struct PairingConn<'a> {
 /// and [`ClientMessage::DevicePairRedeem`] until the request ends.
 ///
 /// Without a request the connection closes [`Hub::tailnet_handshake_timeout`]
-/// after its `Welcome`; with one it lives while the request waits. Whatever
-/// ends it, its own request goes from the book.
+/// after its `Welcome`; with one it lives while the request waits. It closes
+/// at once when its `life` is cancelled (the listener server that accepted it
+/// ended). Whatever ends it, its own request goes from the book.
 pub(super) async fn pairing_session(
     hub: &Hub,
     receiver: &mut futures::stream::SplitStream<WebSocket>,
     out_tx: &mpsc::UnboundedSender<DaemonMessage>,
     peer: &tailnet::PeerIdentity,
+    life: &CancellationToken,
 ) {
     info!(device = %peer.name, login = %peer.login, "tailnet device without a valid token; pairing only");
     let _ = out_tx.send(DaemonMessage::DevicePairFailed {
@@ -138,7 +143,11 @@ pub(super) async fn pairing_session(
     let mut tick = tokio::time::interval(TICK);
     let mut shutdown_rx = hub.shutdown_tx.subscribe();
     loop {
+        // Biased so a server that ended wins over a frame ready at the same
+        // time: nothing the device sends is acted on after its server ended.
         let event = tokio::select! {
+            biased;
+            () = life.cancelled() => Event::ServerEnded,
             () = &mut idle, if conn.own.is_none() => Event::Idle,
             frame = receiver.next() => Event::Frame(frame),
             Some(msg) = waiter_rx.recv() => Event::Waiter(Box::new(msg)),
@@ -148,6 +157,15 @@ pub(super) async fn pairing_session(
         let flow = match event {
             Event::Idle => {
                 info!(device = %peer.name, "pairing connection closed: no request before the deadline");
+                Flow::Close
+            }
+            Event::ServerEnded => {
+                info!(device = %peer.name, "pairing connection closed: its listener server ended");
+                // A decision already sent to this connection (remote access
+                // turning off expires every request) still reaches the device.
+                while let Ok(msg) = waiter_rx.try_recv() {
+                    let _ = out_tx.send(msg);
+                }
                 Flow::Close
             }
             Event::Frame(frame) => conn.on_frame(frame),
@@ -698,8 +716,18 @@ mod tests {
         peer: tailnet::PeerIdentity,
         client_name: Option<&str>,
     ) -> WsClient {
+        pairing_client_and_server(hub, peer, client_name).await.0
+    }
+
+    /// [`pairing_client_named`], and the token of the listener server the
+    /// connection was accepted under.
+    async fn pairing_client_and_server(
+        hub: &Hub,
+        peer: tailnet::PeerIdentity,
+        client_name: Option<&str>,
+    ) -> (WsClient, tokio_util::sync::CancellationToken) {
         remote_on(hub);
-        let mut client = tailnet_ws_client(hub, peer).await;
+        let (mut client, server_life) = tailnet_ws_client(hub, peer).await;
         ws_send(&mut client, &hello("", client_name)).await;
         let welcome = next(&mut client).await;
         assert!(
@@ -708,7 +736,7 @@ mod tests {
             "{welcome:?}"
         );
         assert_failed(&next(&mut client).await, DEVICE_NOT_APPROVED);
-        client
+        (client, server_life)
     }
 
     /// Remote access on, as it is whenever a tailnet connection exists: the
@@ -965,7 +993,7 @@ mod tests {
     async fn token_issued_over_pairing_then_hello_is_served() {
         let (hub, _scratch) = test_hub("pairing-then-served");
         let (_, token) = pair(&hub, test_peer()).await;
-        let mut client = tailnet_ws_client(&hub, test_peer()).await;
+        let (mut client, _server_life) = tailnet_ws_client(&hub, test_peer()).await;
         ws_send(&mut client, &hello(&token, None)).await;
         assert!(matches!(
             next(&mut client).await,
@@ -1125,6 +1153,38 @@ mod tests {
         })
         .await;
         assert!(emptied.is_ok(), "the list empties when the device goes");
+        assert!(pending_ids(&hub).is_empty(), "the request {id} is gone");
+        assert!(
+            crate::sync::lock(&hub.pairing_waiters).is_empty(),
+            "and its waiter"
+        );
+    }
+
+    /// Remote access stays on, so the close cannot come from the tick's
+    /// remote-off check, and the idle deadline is far past the guard, so it
+    /// cannot come from there either: only the server's end closes it.
+    #[tokio::test]
+    async fn pairing_connection_ends_when_its_server_token_is_cancelled() {
+        let (mut hub, _scratch) = test_hub("pairing-server-ended");
+        hub.tailnet_handshake_timeout = Duration::from_secs(600);
+        let (mut client, server_life) = pairing_client_and_server(&hub, test_peer(), None).await;
+        server_life.cancel();
+        assert_closed(&mut client).await;
+        assert!(*hub.remote_enabled.borrow(), "remote access stayed on");
+    }
+
+    #[tokio::test]
+    async fn a_pairing_request_of_a_closed_connection_leaves_the_book() {
+        let (hub, _scratch) = test_hub("pairing-server-ended-request");
+        let (mut client, server_life) = pairing_client_and_server(&hub, test_peer(), None).await;
+        let id = ask(&mut client).await;
+        assert_eq!(
+            pending_ids(&hub),
+            std::slice::from_ref(&id),
+            "the request is in the book"
+        );
+        server_life.cancel();
+        assert_closed(&mut client).await;
         assert!(pending_ids(&hub).is_empty(), "the request {id} is gone");
         assert!(
             crate::sync::lock(&hub.pairing_waiters).is_empty(),
@@ -1413,7 +1473,7 @@ mod tests {
         .await;
 
         let (_, token) = pair(&hub, other_peer()).await;
-        let mut served = tailnet_ws_client(&hub, other_peer()).await;
+        let (mut served, _server_life) = tailnet_ws_client(&hub, other_peer()).await;
         ws_send(&mut served, &hello(&token, None)).await;
         read_until(&mut served, |m| {
             matches!(m, DaemonMessage::RemoteStatus { .. })

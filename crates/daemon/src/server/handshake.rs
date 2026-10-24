@@ -9,6 +9,7 @@ use protocol::{
 };
 use std::time::Duration;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 /// Outcome of a successful handshake: the negotiated protocol version plus the
@@ -41,21 +42,30 @@ pub const TAILNET_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Read and check the mandatory `Hello`. A tailnet connection gets
 /// [`Hub::tailnet_handshake_timeout`] to send it; the loopback listener keeps
-/// an un-timed handshake.
+/// an un-timed handshake. `Ok(None)` when the connection's `life` is
+/// cancelled first: the listener server that accepted it ended.
 pub(super) async fn handshake(
     hub: &Hub,
     auth: &AuthKind,
+    life: &CancellationToken,
     receiver: &mut futures::stream::SplitStream<WebSocket>,
     out_tx: &mpsc::UnboundedSender<DaemonMessage>,
-) -> anyhow::Result<Handshake> {
-    match auth {
-        AuthKind::Local => read_hello(hub, auth, receiver, out_tx).await,
-        AuthKind::Tailnet(_) => tokio::time::timeout(
-            hub.tailnet_handshake_timeout,
-            read_hello(hub, auth, receiver, out_tx),
-        )
-        .await
-        .map_err(|_| anyhow!("tailnet handshake timed out before Hello"))?,
+) -> anyhow::Result<Option<Handshake>> {
+    let hello = async {
+        match auth {
+            AuthKind::Local => read_hello(hub, auth, receiver, out_tx).await,
+            AuthKind::Tailnet(_) => tokio::time::timeout(
+                hub.tailnet_handshake_timeout,
+                read_hello(hub, auth, receiver, out_tx),
+            )
+            .await
+            .map_err(|_| anyhow!("tailnet handshake timed out before Hello"))?,
+        }
+    };
+    tokio::select! {
+        biased;
+        () = life.cancelled() => Ok(None),
+        hello = hello => hello.map(Some),
     }
 }
 
@@ -633,8 +643,9 @@ mod tests {
 
         let names = name_slot();
         set_serving_name(&names, Some("host.tail1234.ts.net".to_owned()));
-        let app = build_tailnet_router(hub.clone(), names, 8787)
-            .layer(axum::Extension(AuthorizedPeer::for_tests(test_peer())));
+        let app = build_tailnet_router(hub.clone(), names, 8787).layer(axum::Extension(
+            AuthorizedPeer::for_tests(test_peer(), tokio_util::sync::CancellationToken::new()),
+        ));
         let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
             .expect("bind a scratch listener");

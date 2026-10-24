@@ -50,7 +50,30 @@ pub(super) enum AuthKind {
     Tailnet(tailnet::PeerIdentity),
 }
 
+/// How long a connection whose listener server ended may take to finish the
+/// closing handshake before its socket is dropped.
+const SERVER_ENDED_CLOSE_LIMIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// A loopback connection: [`client_session_until`] with no server life, so
+/// nothing but the peer or the daemon's shutdown ends it.
 pub(super) async fn client_session(hub: Hub, socket: WebSocket, auth: AuthKind) {
+    client_session_until(hub, socket, auth, None).await;
+}
+
+/// Serve one connection until the peer closes it, the daemon shuts down, or
+/// `server_life` (the life of the tailnet listener server that accepted it,
+/// `None` on loopback) is cancelled. A connection whose server ended is sent
+/// `Close` without what was still queued for it, and tears down as a
+/// peer-closed one does.
+pub(super) async fn client_session_until(
+    hub: Hub,
+    socket: WebSocket,
+    auth: AuthKind,
+    server_life: Option<CancellationToken>,
+) {
+    // This connection's own life: a child of its server's, and never
+    // cancelled on loopback.
+    let life = server_life.map_or_else(CancellationToken::new, |server| server.child_token());
     // RAII-tracked so `git_watch` can pause its refreshers when no UI is
     // listening. Dropped on normal return and on panic, and as soon as the
     // handshake puts the connection in pairing mode: a device that may only
@@ -65,11 +88,16 @@ pub(super) async fn client_session(hub: Hub, socket: WebSocket, auth: AuthKind) 
     // the file read instead of buffering the whole file in memory.
     let (file_tx, file_rx) = mpsc::channel::<DaemonMessage>(4);
 
-    let send_task = tokio::spawn(send_pump(sender, out_rx, file_rx));
+    let send_task = tokio::spawn(send_pump(sender, out_rx, file_rx, life.clone()));
 
     // Mandatory handshake.
-    let handshake = match handshake(&hub, &auth, &mut receiver, &out_tx).await {
-        Ok(v) => v,
+    let handshake = match handshake(&hub, &auth, &life, &mut receiver, &out_tx).await {
+        Ok(Some(v)) => v,
+        Ok(None) => {
+            info!("client_session: the listener server ended during the handshake; closing");
+            end_served(send_task, &mut receiver, &life).await;
+            return;
+        }
         Err(err) => {
             warn!(?err, "client handshake failed");
             let _ = out_tx.send(DaemonMessage::AuthFailed {
@@ -86,14 +114,18 @@ pub(super) async fn client_session(hub: Hub, socket: WebSocket, auth: AuthKind) 
         && let AuthKind::Tailnet(peer) = &auth
     {
         drop(client_guard);
-        pairing_session(&hub, &mut receiver, &out_tx, peer).await;
+        pairing_session(&hub, &mut receiver, &out_tx, peer, &life).await;
         drop(file_tx);
         drop(out_tx);
         // The device may still be sending when its session ends; a proper
-        // close keeps the last reply from being lost to a reset.
-        if let Ok(sender) = send_task.await {
-            close_gracefully(sender, &mut receiver, hub.tailnet_handshake_timeout).await;
-        }
+        // close keeps the last reply from being lost to a reset. What was
+        // already queued for it (a decision, a refusal) goes first, even
+        // when its server ended.
+        let limit = hub.tailnet_handshake_timeout;
+        end_within(send_task, limit, &life, async |(sender, queued)| {
+            send_queued_then_close(sender, queued, &mut receiver).await;
+        })
+        .await;
         return;
     }
     // Effective per-client layout key: the client's id, or the shared legacy
@@ -172,29 +204,116 @@ pub(super) async fn client_session(hub: Hub, socket: WebSocket, auth: AuthKind) 
         connection,
         auth: &auth,
     };
-    recv_loop(&hub, &mut receiver, &ctx).await;
+    recv_loop(&hub, &mut receiver, &ctx, &life).await;
 
     info!("client_session: recv_loop returned; tearing down");
-    {
-        let mut forwarders = pty_forwarders.lock().await;
-        for (_, handle) in forwarders.drain() {
-            handle.abort();
-        }
-    }
-    {
-        let mut fetches = fetches.lock().await;
-        for (_, token) in fetches.drain() {
-            token.cancel();
-        }
-    }
+    stop_transfers(&pty_forwarders, &fetches).await;
     drop(file_tx);
     drop(out_tx);
     event_task.abort();
     tab_event_task.abort();
     preset_event_task.abort();
     state_event_task.abort();
-    let _ = send_task.await;
+    end_served(send_task, &mut receiver, &life).await;
     info!("client_session: returning");
+}
+
+/// What the send pump hands back when it ends: the sink and the queue.
+type PumpEnd = (Sink, mpsc::UnboundedReceiver<DaemonMessage>);
+
+/// End a served (or still handshaking) connection: once its server ended,
+/// with `Close` within [`SERVER_ENDED_CLOSE_LIMIT`] and whatever is still
+/// queued dropped; otherwise once the pump has drained, dropping the socket.
+async fn end_served(
+    send_task: tokio::task::JoinHandle<PumpEnd>,
+    receiver: &mut futures::stream::SplitStream<WebSocket>,
+    life: &CancellationToken,
+) {
+    if !life.is_cancelled() {
+        let _ = send_task.await;
+        return;
+    }
+    end_within(
+        send_task,
+        SERVER_ENDED_CLOSE_LIMIT,
+        life,
+        async |(sender, _queued)| {
+            close_gracefully(sender, receiver).await;
+        },
+    )
+    .await;
+}
+
+/// Abort every PTY forwarder and cancel every file fetch of a connection
+/// that is going.
+async fn stop_transfers(pty_forwarders: &PtyForwarders, fetches: &FetchRegistry) {
+    for (_, handle) in pty_forwarders.lock().await.drain() {
+        handle.abort();
+    }
+    for (_, token) in fetches.lock().await.drain() {
+        token.cancel();
+    }
+}
+
+/// Wait for the send pump to hand back what it holds, then run `close` on
+/// it, all within `limit`, cut short to [`SERVER_ENDED_CLOSE_LIMIT`] once
+/// `life` is cancelled. Past the deadline the pump is aborted and whatever
+/// it or `close` held (the socket) is dropped.
+async fn end_within<S>(
+    send_task: tokio::task::JoinHandle<S>,
+    limit: std::time::Duration,
+    life: &CancellationToken,
+    close: impl AsyncFnOnce(S),
+) {
+    let abort = send_task.abort_handle();
+    let finish = async move {
+        if let Ok(held) = send_task.await {
+            close(held).await;
+        }
+    };
+    let server_ended = async {
+        life.cancelled().await;
+        tokio::time::sleep(SERVER_ENDED_CLOSE_LIMIT).await;
+    };
+    let finished = tokio::select! {
+        biased;
+        () = finish => true,
+        () = tokio::time::sleep(limit) => false,
+        () = server_ended => false,
+    };
+    if !finished {
+        abort.abort();
+        debug!("the connection did not finish closing in time; dropping the socket");
+    }
+}
+
+/// The sink of a connection's WebSocket.
+type Sink = futures::stream::SplitSink<WebSocket, Message>;
+
+/// Send `msg` as one text frame; `false` once the socket has failed.
+async fn send_message(sender: &mut Sink, msg: &DaemonMessage) -> bool {
+    match serde_json::to_string(msg) {
+        Ok(json) => sender.send(Message::Text(json.into())).await.is_ok(),
+        Err(err) => {
+            error!(?err, "serializing daemon msg");
+            true
+        }
+    }
+}
+
+/// Send what is still `queued` for a pairing connection, then close it with
+/// the closing handshake.
+async fn send_queued_then_close(
+    mut sender: Sink,
+    mut queued: mpsc::UnboundedReceiver<DaemonMessage>,
+    receiver: &mut futures::stream::SplitStream<WebSocket>,
+) {
+    while let Ok(msg) = queued.try_recv() {
+        if !send_message(&mut sender, &msg).await {
+            return;
+        }
+    }
+    close_gracefully(sender, receiver).await;
 }
 
 /// Forwards tab-layout events for `client_id` to the connection's `out_tx`. A
@@ -443,18 +562,21 @@ pub(super) struct ConnCtx<'a> {
 
 /// Drain a connection's outbound queues into its WebSocket. Control and PTY
 /// traffic on `out_rx` always goes before file-transfer messages on
-/// `file_rx`. Ends when `out_rx` closes or the socket fails; `file_rx`
-/// closing only retires its own arm. Hands the sink back, so a caller can
-/// still close the socket properly.
+/// `file_rx`. Ends when `out_rx` closes, the socket fails, or `life` is
+/// cancelled; `file_rx` closing only retires its own arm. Hands the sink
+/// back, so a caller can still close the socket properly, with `out_rx` and
+/// whatever is still queued on it, for the caller to send or drop.
 async fn send_pump(
-    mut sender: futures::stream::SplitSink<WebSocket, Message>,
+    mut sender: Sink,
     mut out_rx: mpsc::UnboundedReceiver<DaemonMessage>,
     mut file_rx: mpsc::Receiver<DaemonMessage>,
-) -> futures::stream::SplitSink<WebSocket, Message> {
+    life: CancellationToken,
+) -> (Sink, mpsc::UnboundedReceiver<DaemonMessage>) {
     let mut file_open = true;
     loop {
         let msg = tokio::select! {
             biased;
+            () = life.cancelled() => break,
             msg = out_rx.recv() => match msg {
                 Some(msg) => msg,
                 None => break,
@@ -467,43 +589,30 @@ async fn send_pump(
                 msg
             }
         };
-        let json = match serde_json::to_string(&msg) {
-            Ok(s) => s,
-            Err(err) => {
-                error!(?err, "serializing daemon msg");
-                continue;
-            }
-        };
-        if sender.send(Message::Text(json.into())).await.is_err() {
+        if !send_message(&mut sender, &msg).await {
             break;
         }
     }
-    sender
+    (sender, out_rx)
 }
 
 /// End a connection with the WebSocket closing handshake once everything
 /// queued for it is on the wire: send `Close`, then read and discard what the
-/// peer still sends until its `Close` or the end of the stream, for at most
-/// `limit`. Dropping a socket that still holds unread frames resets it, and
-/// the reset can destroy replies the peer has not read yet.
+/// peer still sends until its `Close` or the end of the stream. The caller
+/// bounds it ([`end_within`]). Dropping a socket that still holds unread
+/// frames resets it, and the reset can destroy replies the peer has not read
+/// yet.
 async fn close_gracefully(
-    mut sender: futures::stream::SplitSink<WebSocket, Message>,
+    mut sender: Sink,
     receiver: &mut futures::stream::SplitStream<WebSocket>,
-    limit: std::time::Duration,
 ) {
     if sender.send(Message::Close(None)).await.is_err() {
         return;
     }
-    let drained = tokio::time::timeout(limit, async {
-        while let Some(Ok(message)) = receiver.next().await {
-            if matches!(message, Message::Close(_)) {
-                break;
-            }
+    while let Some(Ok(message)) = receiver.next().await {
+        if matches!(message, Message::Close(_)) {
+            break;
         }
-    })
-    .await;
-    if drained.is_err() {
-        debug!("the peer did not finish the closing handshake in time; dropping the socket");
     }
 }
 
@@ -556,14 +665,16 @@ pub(super) async fn cancel_fetch(fetches: &FetchRegistry, id: &str) {
     }
 }
 
-/// Run the WebSocket receive loop until the peer closes or the daemon-wide
-/// shutdown flag flips. Honoring `shutdown_tx` here is what lets axum's
-/// graceful-shutdown future resolve after a [`ClientMessage::Shutdown`] —
-/// otherwise every `recv()` blocks forever and the daemon hangs.
+/// Run the WebSocket receive loop until the peer closes, the daemon-wide
+/// shutdown flag flips, or the connection's `life` is cancelled. Honoring
+/// `shutdown_tx` here is what lets axum's graceful-shutdown future resolve
+/// after a [`ClientMessage::Shutdown`] — otherwise every `recv()` blocks
+/// forever and the daemon hangs.
 async fn recv_loop(
     hub: &Hub,
     receiver: &mut futures::stream::SplitStream<WebSocket>,
     ctx: &ConnCtx<'_>,
+    life: &CancellationToken,
 ) {
     let out_tx = ctx.out_tx;
     let mut shutdown_rx = hub.shutdown_tx.subscribe();
@@ -579,6 +690,10 @@ async fn recv_loop(
                     info!("recv_loop: observed daemon shutdown signal; exiting");
                     break;
                 }
+            }
+            () = life.cancelled() => {
+                info!("recv_loop: the tailnet listener server that accepted this connection ended; closing");
+                break;
             }
             next = receiver.next() => {
                 let Some(Ok(msg)) = next else {
@@ -628,7 +743,112 @@ async fn recv_loop(
 )]
 mod tests {
     use super::*;
-    use crate::server::test_support::{next_message, test_hub};
+    use crate::server::test_support::{
+        WsClient, hello, next_message, tailnet_ws_client, test_hub, test_peer, ws_next, ws_send,
+    };
+    use std::time::Duration;
+
+    /// Read `client` until the daemon ends the connection: whether a `Close`
+    /// frame came before the end. Fails at a guard far past any passing run.
+    async fn closed_with_a_close_frame(client: &mut WsClient) -> bool {
+        use tokio_tungstenite::tungstenite::Message as WsMessage;
+        let ended = tokio::time::timeout(Duration::from_secs(120), async {
+            loop {
+                match client.next().await {
+                    Some(Ok(WsMessage::Close(_))) => return true,
+                    None | Some(Err(_)) => return false,
+                    Some(Ok(_)) => {}
+                }
+            }
+        })
+        .await;
+        ended.expect("the daemon ends the connection")
+    }
+
+    /// Read `client` until a message `stop` accepts, failing if the
+    /// connection ends first or a pairing refusal comes.
+    async fn read_until(client: &mut WsClient, stop: impl Fn(&DaemonMessage) -> bool) {
+        loop {
+            let message = ws_next(client)
+                .await
+                .expect("a message before the connection closes");
+            assert!(
+                !matches!(message, DaemonMessage::DevicePairFailed { .. }),
+                "the connection was not served: {message:?}"
+            );
+            if stop(&message) {
+                return;
+            }
+        }
+    }
+
+    fn is_remote_status(message: &DaemonMessage) -> bool {
+        matches!(message, DaemonMessage::RemoteStatus { .. })
+    }
+
+    #[tokio::test]
+    async fn served_tailnet_session_ends_when_its_server_token_is_cancelled() {
+        let (hub, _scratch) = test_hub("served-server-ended");
+        let (_, token) = crate::sync::lock(&hub.devices)
+            .issue(&test_peer(), chrono::Utc::now())
+            .expect("issue a device token");
+        let (mut client, server_life) = tailnet_ws_client(&hub, test_peer()).await;
+        ws_send(&mut client, &hello(&token, None)).await;
+        read_until(&mut client, is_remote_status).await;
+
+        server_life.cancel();
+        assert!(
+            closed_with_a_close_frame(&mut client).await,
+            "the daemon sends Close before it ends the connection"
+        );
+    }
+
+    /// The handshake deadline is far past the guard, so only the server's end
+    /// can close the connection.
+    #[tokio::test]
+    async fn a_connection_still_in_its_handshake_ends_with_its_server() {
+        let (mut hub, _scratch) = test_hub("handshake-server-ended");
+        hub.tailnet_handshake_timeout = Duration::from_secs(600);
+        let (mut client, server_life) = tailnet_ws_client(&hub, test_peer()).await;
+
+        server_life.cancel();
+        assert!(
+            closed_with_a_close_frame(&mut client).await,
+            "the daemon sends Close before it ends the connection"
+        );
+    }
+
+    /// No in-test socket can be made to block the pump's `send` reliably (the
+    /// loopback buffers absorb what a test can queue), so this proves the
+    /// bound on the connection's end with a send pump that never hands its
+    /// sink back, as one stuck on a peer that stopped reading would.
+    #[tokio::test(start_paused = true)]
+    async fn a_peer_that_stops_reading_is_dropped_within_the_close_limit() {
+        let life = CancellationToken::new();
+        life.cancel();
+        let (held_tx, held_rx) = tokio::sync::oneshot::channel::<()>();
+        let stuck = tokio::spawn(async move {
+            let _held = held_tx;
+            std::future::pending::<()>().await;
+        });
+        let began = tokio::time::Instant::now();
+        let ended = tokio::time::timeout(
+            Duration::from_secs(120),
+            end_within(stuck, Duration::from_secs(600), &life, async |()| {}),
+        )
+        .await;
+        assert!(ended.is_ok(), "the end waited on the stuck pump");
+        assert!(
+            began.elapsed() <= SERVER_ENDED_CLOSE_LIMIT,
+            "ended within the close limit: {:?}",
+            began.elapsed()
+        );
+        let aborted = tokio::time::timeout(Duration::from_secs(120), held_rx).await;
+        assert!(
+            matches!(aborted, Ok(Err(_))),
+            "the stuck pump was aborted, dropping what it held"
+        );
+    }
 
     #[tokio::test]
     async fn a_lagged_tab_forwarder_resyncs_with_the_tab_list() {
