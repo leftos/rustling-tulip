@@ -107,9 +107,9 @@ Methods with an obvious "does nothing" answer (`passthrough_vars`, `hook_plan`, 
 | Hooks | `hook_plan` | Writes `HookPlan::files` into `sessions/<id>/` (owning cleanup and discard), appends `HookPlan::args` with each `{file:name}` replaced by the written path; a failed write runs without hooks | the Claude gate in `write_hook_settings` (`crates/daemon/src/server/spawn/hook_settings.rs`) and `build_hook_settings` |
 | Spawn argv | `interactive_args`, `headless_args` | Builds the PTY or piped spawn; `None` from `headless_args` means "no headless" | `build_interactive_args` / `build_headless_args` (`agents/mod.rs:186-205`), `server.rs:3728-3734`, `standalone_supports` (`server.rs:6042`) |
 | Hook mapping | `map_hook_event` | The hook route buffers or applies the result generically (ordering, pending buffer, `apply_status`) | the mapping lives in `agent_api::hook_vocabulary` (`map`, `details`) and Claude's `map_hook_event` (`crates/agents/claude/src/hooks.rs`); the daemon keeps `apply_signal`, `apply_to_record` and `apply_details` over a `HookReport` (`crates/daemon/src/hook_status.rs`) |
-| Screen status | `screen_rules` | Passed to `pty_state::watch` in place of `matches_prompt` | `pty_state.rs:540-556` |
-| Startup | `ready_signal` | `inject.rs` waits on it before an injector's first keystrokes | the Claude-banner tuning in `inject.rs:4-23`, `44-58`, `86-89` |
-| Prompt files | `file_reference` | The preset renderer formats a prompt file's path with it | `@<repo-relative-path>` in `presets.rs:459` |
+| Screen status | `screen_rules` | Passed to `screen/rules.rs` (`CompiledRules::compile`), which every status watcher reads the screen with | the Claude rule table in `screen/rules.rs` (`read_claude`) and the byte-tail `matches_prompt` in `pty_state.rs` (both gone) |
+| Startup | `ready_signal` | `inject.rs` waits on it before an injector's first keystrokes (AP.4c; the trait method exists, `inject.rs` still holds the constants; the 3 s floor and the 15 s cap stay daemon constants) | the Claude-banner tuning in `inject.rs` (`STARTUP_*`) |
+| Prompt files | `file_reference` | The preset renderer formats a prompt file's path with it | `@<repo-relative-path>` in `presets.rs` |
 | Headless | `parse_headless_line` | The headless reader applies each `HeadlessEvent` | `handle_headless_line` (`claude.rs:114-165`), `headless.rs:128-140` |
 | Conversations | `find_conversations` | Recover's candidates, the existence check before a recovery spawn, and the discovery poller for `DiscoverAfterLaunch` | the daemon's former `transcripts.rs` (now `crates/agents/claude/src/transcripts.rs`), `conversation_candidates` (`history.rs`), `recovery_conversation_exists` (`server/recovery.rs`) |
 | Resume options | `recovery_options` | The options a recovered run spawns with | `recovered_claude_flags` (`history.rs:1361-1402`) |
@@ -127,7 +127,7 @@ The context and result types, all in `agent-api`:
 - `ConversationQuery`: the folder, a time window, a known id when one is recorded, the resolved rows. `FoundConversation { id, last_active, title }`.
 - `HookReport`: `status`, `pending` (a `PendingUpdate`: `Clear`, `Set` or `KeepOr`), `conversation_id`, `last_message`, `failure` (the recent-actions line a failed turn leaves), `permission_mismatch` (to warn about), `agent_ended` (a `SessionEnd` that is not a `/clear`, which a plain shell hosting the agent acts on), `agent_started`, `subagent`, `background: Option<bool>` and `weak_idle`. `map_hook_event` takes the event body, the spawn's decoded options (`None` when the session has no record yet) and the trusted flag, and returns `None` for an event that says nothing.
 - `HeadlessEvent`: `Status`, `RecentAction`, `Metrics { cost_usd, input_tokens, output_tokens }`, `ConversationId(String)`.
-- `ReadySignal { min_output_bytes, quiet_for }` (Claude's 1024 bytes and 1.5 s). `ImportedRun<O> { program_name, extra_dirs, options: O, trusted }`. `EnvPlan { set, remove }`. `Refusal { title, detail, hint }` (today's `SpawnFailure`).
+- `ReadySignal { min_output_bytes, quiet_for }` (the default is Claude's 1024 bytes and 1.5 s; the 3 s floor and the 15 s cap stay daemon constants in `inject.rs`). `ScreenRules { rules }` is described under "Status rules"; `file_reference(repo_relative)` returns the prompt text naming a file (default the bare path, Claude's `@<path>`). `ImportedRun<O> { program_name, extra_dirs, options: O, trusted }`. `EnvPlan { set, remove }`. `Refusal { title, detail, hint }` (today's `SpawnFailure`).
 - `hook_vocabulary`: a helper mapping Claude Code's hook event names and payload fields (`SessionStart`, `PreToolUse` with `AskUserQuestion` / `ExitPlanMode`, `Notification`, `Stop`, …) to a `HookReport`, so any agent whose hooks speak that vocabulary (Claude; Codex's `-c` hooks; the DeepSeek Harness bridge in `agent-harnesses.md`) calls it instead of copying it.
 
 `workspace_prelude` (`agents/mod.rs:271-295`) moves into `agent-api` as a helper that takes the instruction-file names to mention, so "CLAUDE.md" is passed by the plugin.
@@ -241,24 +241,20 @@ What it replaces (inventory group 8, Claude rows, after RT-266 has removed the C
 
 ## Status rules
 
-`pty_state.rs` keeps the classifier, the volume window, the title heartbeat, `IDLE_AFTER` and the hook-driven demotions. `watch` takes `&ScreenRules` from the session's plugin, and `prompt_on_screen` evaluates those rules over the stripped 2 KiB tail instead of calling `matches_prompt`.
+`pty_state.rs` keeps the hysteresis, the confirmation windows, the plain-shell classifier and the hook-driven demotions; what a screen shows is read by rules the session's plugin hands over. The rule table is data and the evaluator is the daemon's, because `regex` and the terminal grid (`Screen`) are daemon dependencies, never a plugin's.
 
-`ScreenRules` is data, defined in `agent-api` and deriving `Deserialize` from the start:
+`ScreenRules { rules: Vec<ScreenRule> }` is defined in `crates/agents/api/src/screen_rules.rs` and derives `Serialize` and `Deserialize`. A `ScreenRule` is `{ name, priority, region, matcher, not, verdict }`:
 
-```rust
-pub struct ScreenRules { pub prompts: Vec<PromptRule> }
-pub enum PromptRule {
-    Contains(String),
-    AllOf(Vec<String>),
-    NumberedChoiceWithCursor { cursors: Vec<String> },
-    Regex(String),            // compiled once per rule set; `regex` is already a daemon dependency
-    #[serde(other)] Unknown,
-}
-```
+- `region` is a `ScreenRegion`: the last N non-empty rows (`BottomNonEmpty`), the rows between the prompt box's two rules (`PromptBoxBody`), the last N non-empty rows above the prompt box (`AbovePromptBox`) or the OSC title (`Title`).
+- `matcher` is a `LineMatcher`: `Contains` (a literal substring of a row) or `Regex` (matched per row). `not` is a list of matchers that veto the rule when any hits the same region.
+- `verdict` is a `ScreenVerdict`: `Working`, `AwaitingInput`, `Idle`, or `Keep` (an overlay is open, so the status stays as it is).
+- Every enum carries an `Unknown` variant that absorbs a value a newer plugin sends. The daemon drops a rule with an unknown region, matcher, guard or verdict with a warning, and one whose pattern does not compile with an error, so the rest of the table still reads.
 
-Claude's rules are a constant in `agent-claude` that reproduces `matches_prompt` exactly: `Do you want to`, `Choose an option`, `Press 1`, `(y/n)`, all of `│` and `AskUserQuestion`, and a `1.` / `2.` pair with a `❯` or `>>>` cursor. The timing constants (`IDLE_AFTER`, the echo budgets) stay app-wide; moving them into the rules waits for an agent that needs different ones.
+`screen/rules.rs` compiles a table once (`CompiledRules::compile`, rules sorted by descending priority) and reads a `Screen` with it (`CompiledRules::read`): the first rule whose matcher hits its region and none of whose `not` guards does decides the reading, else there is no match. `rules_for(agent)` caches one compiled set per agent. Every status watcher, a reattach and `agent_up` use the rules of the record's own agent; a plain shell uses `default_agent()`'s.
 
-Path to RT-74 (Steadier screen-based status: hysteresis, rule files, agent process detection): because the rules are already a serde type, RT-74 can load a plugin's rules from a versioned data file with a user override without touching the trait; the built-in constant becomes the fallback. RT-74's design is not made here. RT-264 edits `matches_prompt` directly; it lands before AP.4, which carries its result over as data.
+Claude's table is a constant in `agent-claude` (`crates/agents/claude/src/rules.rs`, 16 rules) beside its `ReadySignal` and `file_reference`; the conformance test checks every plugin's table. The screen fixture tests stay in the daemon, since they need `Screen`; `-p agent-claude rules` holds the data-shape tests. The timing constants (`IDLE_AFTER`, the echo budgets, the confirmation windows) stay app-wide; moving them into the rules waits for an agent that needs different ones.
+
+Path to RT-74 (Steadier screen-based status: hysteresis, rule files, agent process detection): because the rules are already a serde type, RT-74 can load a plugin's rules from a versioned data file with a user override without touching the trait; the built-in constant becomes the fallback. RT-74's design is not made here.
 
 ## Claude as the first plugin (RT-267)
 
@@ -301,9 +297,13 @@ Every proof runs as `pwsh -NoProfile -File tools/gate.ps1 run … -- cargo nexte
   Files: `hook_status.rs` (`PendingHooks`), `server/hooks.rs` (`hook_handler`), `server/spawn.rs` (`spawn_plain_shell_session`, `prepare_shell_resume`), `session.rs`, `orphan.rs`, `history.rs` (`shell_request`), `agent-claude` `lib.rs` (`shell_resume`).
 
   Proof: an early `SessionStart` held, then applied with the right plugin (`-p daemon hook_status`); the recovered-shell command test (`-p daemon shell_resume`); `.\rt.ps1 native-e2e` for `live_hook_status_reports_working_asking_and_idle` and the recovered-shell path in `e2e_recover.rs`.
-- [ ] **AP.4 Screen rules, startup and file references.** `ScreenRules` with `Regex`; `pty_state::watch` takes the plugin's rules; Claude's constant reproduces `matches_prompt` (after RT-264); `inject.rs` waits on `ready_signal`; `presets.rs` formats prompt files with `file_reference`.
+- [ ] **AP.4 Screen rules, startup and file references.** Split in sub-items:
+  - [x] **AP.4a Screen rules and the ready signal on the seam.** `ScreenRules` with `Regex` in `agent-api`; the `Agent` and `AgentPlugin` traits gain defaulted `screen_rules`, `ready_signal` and `file_reference`; Claude's plugin carries its 16 rules, 1024 B / 1.5 s and `@<path>`; the daemon's `screen/rules.rs` evaluates any plugin's table (`CompiledRules`, `rules_for`) and `read_claude` is gone.
+  - [x] **AP.4b Watchers take the plugin's rules.** `pty_state::watch`, `watch_plain_shell` and `agent_up` read through `rules_for`, with `server/spawn.rs` and `server/recovery.rs` starting each watcher with the record's agent; a plain shell uses `default_agent()`'s rules.
+  - [ ] **AP.4c `inject.rs` waits on `ready_signal`.** The `STARTUP_*` banner constants give way to the plugin's signal; the 3 s floor and the 15 s cap stay daemon constants.
+  - [x] **AP.4d Preset prompt files use `file_reference`.** A folder preset names its prompt files with the preset's plugin `file_reference` (`presets.rs`, `resolve_folder_prompts`).
 
-  Files: `pty_state.rs`, `server.rs` (watcher calls at reattach and spawn), `inject.rs`, `presets.rs`, `agent-claude` rules module. Proof: the `matches_prompt` cases move to `-p agent-claude rules` unchanged; `-p daemon pty_state` against a test rule set with a `Regex` rule; a serde round trip of Claude's rules; `-p daemon inject`; `-p daemon presets`.
+  Files: `agent-api` `screen_rules.rs` and `lib.rs`, `agent-claude` `rules.rs`, `screen/rules.rs`, `pty_state.rs`, `server/spawn.rs`, `server/recovery.rs`, `inject.rs`, `presets.rs`. Proof: the screen fixture tests stay in the daemon because they need `Screen` (`-p daemon screen`, `-p daemon pty_state`); `-p agent-claude rules` holds the data-shape tests and the serde round trip of Claude's rules; `-p agent-claude conformance` checks every plugin's table; `-p daemon inject`; `-p daemon presets`.
 - [ ] **AP.5 History, recovery and import behind the seam.** `plan_recovery` asks the entry's plugin for `recovery_options` and `shell_resume`; `entry_from_tracer_log` offers each log to `import_tracer_run` with the plugin's `import_rev`; `orphan.rs` takes `liveness_tokens`; presets without an agent use `default_agent()`.
 
   Files: `history.rs`, `server.rs` (`recover_one`), `orphan.rs`, `tracer_log.rs`, `presets.rs`, `agent-claude` recovery and import modules. Proof: `-p daemon history`, `-p daemon recover`, `-p agent-claude recovery`, `-p agent-claude import`, `-p daemon orphan`.

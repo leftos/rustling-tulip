@@ -10,7 +10,7 @@ The code map behind this design: `.tmp/map-rt281.md` at the time of planning (ev
 
 ## What the code does today
 
-- `crates/daemon/src/pty_state.rs` demotes `Working` to `Idle` after `IDLE_AFTER` (2.5 s) of PTY silence, even for a hook-driven session, and `AwaitingInput` to `Idle` once `matches_prompt` stops matching the last 2 KiB of an ANSI-stripped byte tail. A session without hook reports is classified by an output/input byte-volume comparison and a terminal-title heartbeat (`osc_title.rs` `TitleActivity`).
+- `crates/daemon/src/pty_state.rs` demotes `Working` to `Idle` after `IDLE_AFTER` (2.5 s) of PTY silence, even for a hook-driven session, and `AwaitingInput` to `Idle` once the plugin's screen-rule table stops matching a prompt on the rendered screen. A session without hook reports is classified by an output/input byte-volume comparison and a terminal-title heartbeat (`osc_title.rs` `TitleActivity`).
 - The daemon has no screen model: no terminal emulator in `crates/daemon` or `crates/tracer`. `alacritty_terminal` is in the lockfile only through `apps/native`.
 - Claude Code fires no hook on an Esc interrupt, mid-tool or mid-text (`docs/spikes/hook-status.md` Q4, `docs/spikes/background-tasks.md` case 5); the silence demotion is today's only exit from a stale `Working`.
 
