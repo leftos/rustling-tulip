@@ -1,6 +1,8 @@
-//! Program resolution for spawns: the agent CLI (through npm shims on Windows) and the user's shell, with its prompt-integration scripts and init files.
+//! Program resolution for spawns: the agent CLI (through npm shims on Windows, and the user's launch command) and the user's shell, with its prompt-integration scripts and init files.
 
 use crate::paths::Dirs;
+use crate::state::AgentCommand;
+use agent_api::AgentPlugin;
 use anyhow::Context as _;
 use std::path::{Path, PathBuf};
 
@@ -282,9 +284,10 @@ fn runs_through_wsl(program: &str) -> bool {
 
 /// Whether the agent's arguments pass through a parser that mangles some of
 /// them: Windows PowerShell 5.1 hosting the agent, or cmd running it (the
-/// agent program is `cmd.exe` or a batch file).
-fn legacy_argument_passing(shell_program: &str, argv: &[String]) -> bool {
-    let agent = argv.first().map(String::as_str).unwrap_or_default();
+/// resolved agent program is `cmd.exe` or a batch file). `agent` is `None`
+/// for a program word typed verbatim, which is not a path to inspect.
+fn legacy_argument_passing(shell_program: &str, agent: Option<&str>) -> bool {
+    let agent = agent.unwrap_or_default();
     let ext = Path::new(agent)
         .extension()
         .and_then(|ext| ext.to_str())
@@ -304,26 +307,48 @@ fn mangled_by_legacy_parsing(arg: &str) -> bool {
 /// cannot carry an argument: one holding a double quote, a line break, `%`
 /// or `!`.
 pub(super) fn quote_command_line(family: ShellFamily, argv: &[String]) -> Option<String> {
+    let quoted = quote_args(family, argv)?;
     match family {
-        ShellFamily::PowerShell => {
-            let quoted: Vec<String> = argv.iter().map(|arg| powershell_quote(arg)).collect();
-            Some(format!("& {}", quoted.join(" ")))
-        }
-        ShellFamily::Cmd => {
-            let quoted: Option<Vec<String>> = argv.iter().map(|arg| cmd_quote(arg)).collect();
-            Some(quoted?.join(" "))
-        }
-        ShellFamily::Posix => {
-            let quoted: Vec<String> = argv.iter().map(|arg| posix_quote(arg)).collect();
-            Some(quoted.join(" "))
-        }
+        ShellFamily::PowerShell => Some(format!("& {quoted}")),
+        ShellFamily::Cmd | ShellFamily::Posix => Some(quoted),
     }
 }
 
-/// The line that runs `argv` from `cwd` in `family`: a change to `cwd`, then
-/// the command. `None` when cmd cannot quote the folder or an argument.
-fn launch_line(family: ShellFamily, cwd: &str, argv: &[String]) -> Option<String> {
-    let command = quote_command_line(family, argv)?;
+/// `args`, each quoted for `family`, joined by spaces. `None` when cmd cannot
+/// carry one (see [`cmd_refuses`]).
+fn quote_args(family: ShellFamily, args: &[String]) -> Option<String> {
+    let quoted: Option<Vec<String>> = match family {
+        ShellFamily::PowerShell => Some(args.iter().map(|arg| powershell_quote(arg)).collect()),
+        ShellFamily::Cmd => args.iter().map(|arg| cmd_quote(arg)).collect(),
+        ShellFamily::Posix => Some(args.iter().map(|arg| posix_quote(arg)).collect()),
+    };
+    Some(quoted?.join(" "))
+}
+
+/// The agent's command as `family` types it: `argv` quoted (see
+/// [`quote_command_line`]), or the user's program word bare followed by
+/// `argv` quoted, then the user's extra arguments verbatim. `None` when cmd
+/// cannot carry an argument, or the extras hold `%` or `!`, which cmd expands.
+fn typed_command(family: ShellFamily, argv: &[String], typed: TypedCommand<'_>) -> Option<String> {
+    let extra = typed.extra.trim();
+    if matches!(family, ShellFamily::Cmd) && extra.contains(['%', '!']) {
+        return None;
+    }
+    let mut line = match typed.program_word {
+        None => quote_command_line(family, argv)?,
+        Some(word) if argv.is_empty() => word.to_owned(),
+        Some(word) => format!("{word} {}", quote_args(family, argv)?),
+    };
+    if !extra.is_empty() {
+        line.push(' ');
+        line.push_str(extra);
+    }
+    Some(line)
+}
+
+/// The line that runs `command` from `cwd` in `family`: a change to `cwd`,
+/// then the command. `None` when cmd cannot quote the folder.
+fn launch_line(family: ShellFamily, cwd: &str, command: &str) -> Option<String> {
     match family {
         ShellFamily::PowerShell => Some(format!(
             "Set-Location -LiteralPath {}; {command}",
@@ -416,13 +441,94 @@ pub(super) struct ShellLaunch {
 }
 
 /// The agent a launch starts: its program and arguments without the initial
-/// prompt (`argv`), the folder it starts in, the prompt, and a preset's
-/// script, which carries the prompt itself.
+/// prompt (`argv`; the arguments alone when `typed` carries a program word),
+/// what the user's launch command adds, the folder it starts in, the prompt,
+/// and a preset's script, which carries the prompt itself.
 pub(super) struct AgentLaunch<'a> {
     pub(super) argv: &'a [String],
+    pub(super) typed: TypedCommand<'a>,
     pub(super) cwd: &'a str,
     pub(super) initial_prompt: Option<&'a str>,
     pub(super) preset: Option<protocol::PromptInjector>,
+}
+
+/// What the user's launch command adds to a typed agent line.
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct TypedCommand<'a> {
+    /// The program word, typed bare in place of the resolved program so an
+    /// alias or function from the shell's profile resolves; `None` types the
+    /// resolved program, quoted, as `argv`'s first element.
+    pub(super) program_word: Option<&'a str>,
+    /// Extra arguments typed verbatim after the agent's own; blank for none.
+    pub(super) extra: &'a str,
+}
+
+/// The program and extra arguments an interactive spawn launches its agent
+/// with, chosen by [`choose_agent_command`].
+#[derive(Debug)]
+pub(super) struct AgentCommandChoice {
+    /// The program, before [`resolve_agent_program`]: the agent's environment
+    /// variable, else the setting's program, else the plugin's default.
+    pub(super) program: String,
+    /// Whether the typed shell form types [`Self::program`] verbatim: a
+    /// program from the setting that names no existing file.
+    pub(super) typed_verbatim: bool,
+    /// The extra arguments split by POSIX shell-word rules, for the direct
+    /// spawn.
+    pub(super) extra_args: Vec<String>,
+    /// The extra arguments as stored, trimmed, for the typed shell form.
+    pub(super) extra_text: String,
+}
+
+impl AgentCommandChoice {
+    /// The direct spawn's arguments: the resolver's leading `prepend`, the
+    /// plugin's own `plugin_args`, then the extra arguments.
+    pub(super) fn direct_args(
+        &self,
+        prepend: Vec<String>,
+        plugin_args: Vec<String>,
+    ) -> Vec<String> {
+        let mut args = prepend;
+        args.extend(plugin_args);
+        args.extend(self.extra_args.iter().cloned());
+        args
+    }
+}
+
+/// Choose the program and extra arguments `plugin`'s interactive spawn uses:
+/// the plugin's environment variable (read through `env`) wins over the
+/// stored `setting`'s program, which wins over the plugin's default. The
+/// extra arguments apply whichever program wins.
+///
+/// # Errors
+///
+/// The extra arguments do not split (an unclosed quote), which refuses the
+/// spawn with an error naming the setting.
+pub(super) fn choose_agent_command(
+    plugin: &dyn AgentPlugin,
+    setting: &AgentCommand,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> anyhow::Result<AgentCommandChoice> {
+    let extra_args = shell_words::split(&setting.args).map_err(|err| {
+        anyhow::anyhow!(
+            "The {} launch command's extra arguments cannot be split: {err}. Fix them in Settings.",
+            plugin.descriptor().label
+        )
+    })?;
+    let set_program = setting.program.trim();
+    let (program, typed_verbatim) = if let Some(path) = env(plugin.program_env_var()) {
+        (path, false)
+    } else if set_program.is_empty() {
+        (plugin.default_program().to_owned(), false)
+    } else {
+        (set_program.to_owned(), !Path::new(set_program).is_file())
+    };
+    Ok(AgentCommandChoice {
+        program,
+        typed_verbatim,
+        extra_args,
+        extra_text: setting.args.trim().to_owned(),
+    })
 }
 
 /// Plan how an agent whose descriptor says `shell_resume` starts: inside
@@ -444,9 +550,15 @@ pub(super) fn plan_launch(
         );
         return Launch::Direct;
     };
-    let legacy_refused = legacy_argument_passing(&shell.program, agent.argv)
+    let resolved_program = match agent.typed.program_word {
+        Some(_) => None,
+        None => agent.argv.first().map(String::as_str),
+    };
+    let legacy_refused = legacy_argument_passing(&shell.program, resolved_program)
         && agent.argv.iter().any(|arg| mangled_by_legacy_parsing(arg));
-    let line = launch_line(family, agent.cwd, agent.argv).filter(|_| !legacy_refused);
+    let line = typed_command(family, agent.argv, agent.typed)
+        .and_then(|command| launch_line(family, agent.cwd, &command))
+        .filter(|_| !legacy_refused);
     let Some(line) = line else {
         tracing::warn!(
             shell = %shell.label,
@@ -749,7 +861,10 @@ const ZSH_INIT_SCRIPT: &str = include_str!("../../../shell-init/zsh-init.zshrc")
     reason = "tests fail on an unexpected launch shape with panic or expect; failure messages aid debugging"
 )]
 mod launch_tests {
-    use super::{AgentLaunch, Launch, ShellFamily, ShellProgram, plan_launch, quote_command_line};
+    use super::{
+        AgentLaunch, Launch, ShellFamily, ShellProgram, TypedCommand, plan_launch,
+        quote_command_line,
+    };
     use base64::Engine as _;
     use protocol::{InjectorStartup, InjectorStep, PromptInjector};
 
@@ -771,9 +886,142 @@ mod launch_tests {
     fn agent<'a>(argv: &'a [String], prompt: Option<&'a str>) -> AgentLaunch<'a> {
         AgentLaunch {
             argv,
+            typed: TypedCommand::default(),
             cwd: CWD,
             initial_prompt: prompt,
             preset: None,
+        }
+    }
+
+    /// The typed line of the launch `shell` plans for `argv` with the user's
+    /// launch command `typed`, or `None` for the direct spawn.
+    fn typed_line_with(
+        shell: ShellProgram,
+        argv: &[String],
+        typed: TypedCommand<'_>,
+    ) -> Option<String> {
+        let launch = AgentLaunch {
+            typed,
+            ..agent(argv, None)
+        };
+        match plan_launch(true, Some(shell), launch) {
+            Launch::Direct => None,
+            Launch::InShell(launch) => launch
+                .injectors
+                .first()
+                .and_then(|typed| texts(typed).first().map(|(line, _)| (*line).to_owned())),
+        }
+    }
+
+    #[test]
+    fn a_launch_command_types_its_program_word_bare_and_its_extras_verbatim() {
+        let plugin_args = strings(&["--model", "opus", "it's"]);
+        let typed = TypedCommand {
+            program_word: Some("cl"),
+            extra: r#" --debug "a b" "#,
+        };
+        assert_eq!(
+            typed_line_with(shell("pwsh.exe", "pwsh"), &plugin_args, typed).as_deref(),
+            Some(
+                r#"Set-Location -LiteralPath 'C:\work\repo'; cl '--model' 'opus' 'it''s' --debug "a b""#
+            ),
+            "PowerShell types the word without the call operator, so an alias or function resolves"
+        );
+        assert_eq!(
+            typed_line_with(shell("cmd.exe", "cmd"), &plugin_args, typed).as_deref(),
+            Some(r#"cd /d "C:\work\repo" && cl --model opus it's --debug "a b""#),
+            "cmd types a double quote in the extras as it is"
+        );
+        assert_eq!(
+            typed_line_with(shell("/bin/bash", "bash"), &plugin_args, typed).as_deref(),
+            Some(r#"cd -- 'C:\work\repo' && cl '--model' 'opus' 'it'\''s' --debug "a b""#),
+            "bash expands an alias only from an unquoted first word"
+        );
+        assert_eq!(
+            typed_line_with(
+                shell("powershell.exe", "powershell"),
+                &strings(&["--model", "opus"]),
+                typed
+            )
+            .as_deref(),
+            Some(r#"Set-Location -LiteralPath 'C:\work\repo'; cl '--model' 'opus' --debug "a b""#),
+            "the legacy check reads the plugin args, not the verbatim word or the extras"
+        );
+    }
+
+    #[test]
+    fn a_blank_launch_command_keeps_the_fully_quoted_line() {
+        let argv = strings(&[r"C:\bin\claude.exe", "--model", "opus"]);
+        for blank in ["", "   "] {
+            let typed = TypedCommand {
+                program_word: None,
+                extra: blank,
+            };
+            assert_eq!(
+                typed_line_with(shell("pwsh.exe", "pwsh"), &argv, typed).as_deref(),
+                Some(
+                    r"Set-Location -LiteralPath 'C:\work\repo'; & 'C:\bin\claude.exe' '--model' 'opus'"
+                )
+            );
+            assert_eq!(
+                typed_line_with(shell("cmd.exe", "cmd"), &argv, typed).as_deref(),
+                Some(r#"cd /d "C:\work\repo" && C:\bin\claude.exe --model opus"#)
+            );
+            assert_eq!(
+                typed_line_with(shell("/bin/bash", "bash"), &argv, typed).as_deref(),
+                Some(r"cd -- 'C:\work\repo' && 'C:\bin\claude.exe' '--model' 'opus'")
+            );
+        }
+    }
+
+    #[test]
+    fn a_resolved_launch_program_stays_quoted_with_the_extras_after() {
+        // A program from RUSTLING_TULIP_CLAUDE, or a setting naming an
+        // existing file, is resolved to a path and quoted like the default.
+        let argv = strings(&[r"C:\my tools\claude.exe", "--model", "opus"]);
+        let typed = TypedCommand {
+            program_word: None,
+            extra: "--debug",
+        };
+        assert_eq!(
+            typed_line_with(shell("pwsh.exe", "pwsh"), &argv, typed).as_deref(),
+            Some(
+                r"Set-Location -LiteralPath 'C:\work\repo'; & 'C:\my tools\claude.exe' '--model' 'opus' --debug"
+            )
+        );
+        assert_eq!(
+            typed_line_with(shell("cmd.exe", "cmd"), &argv, typed).as_deref(),
+            Some(r#"cd /d "C:\work\repo" && "C:\my tools\claude.exe" --model opus --debug"#)
+        );
+        assert_eq!(
+            typed_line_with(shell("/bin/bash", "bash"), &argv, typed).as_deref(),
+            Some(r"cd -- 'C:\work\repo' && 'C:\my tools\claude.exe' '--model' 'opus' --debug")
+        );
+    }
+
+    #[test]
+    fn cmd_falls_back_to_the_direct_launch_on_percent_or_bang_in_the_extras() {
+        let plugin_args = strings(&["--model", "opus"]);
+        for extra in ["--name %USERNAME%", "--say hi!"] {
+            for program_word in [Some("cl"), None] {
+                let argv = if program_word.is_some() {
+                    plugin_args.clone()
+                } else {
+                    strings(&[r"C:\bin\claude.exe", "--model", "opus"])
+                };
+                let typed = TypedCommand {
+                    program_word,
+                    extra,
+                };
+                assert!(
+                    typed_line_with(shell("cmd.exe", "cmd"), &argv, typed).is_none(),
+                    "cmd would expand {extra:?}"
+                );
+                assert!(
+                    typed_line_with(shell("pwsh.exe", "pwsh"), &argv, typed).is_some(),
+                    "PowerShell types {extra:?} as it is"
+                );
+            }
         }
     }
 
@@ -963,6 +1211,7 @@ mod launch_tests {
         );
         let launch = AgentLaunch {
             argv: &argv,
+            typed: TypedCommand::default(),
             cwd: r"C:\50% off",
             initial_prompt: None,
             preset: None,
@@ -1057,6 +1306,7 @@ mod launch_tests {
             Some(shell("bash", "bash")),
             AgentLaunch {
                 argv: &argv,
+                typed: TypedCommand::default(),
                 cwd: CWD,
                 initial_prompt: Some("fix the bug"),
                 preset: Some(preset),
@@ -1099,6 +1349,110 @@ mod launch_tests {
                 Launch::Direct
             ),
             "a command line cmd cannot quote keeps the direct spawn"
+        );
+    }
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "tests assert preconditions with expect; failure messages aid debugging"
+)]
+mod launch_command_tests {
+    use super::choose_agent_command;
+    use crate::state::AgentCommand;
+    use protocol::Agent;
+
+    fn command(program: &str, args: &str) -> AgentCommand {
+        AgentCommand {
+            program: program.to_owned(),
+            args: args.to_owned(),
+        }
+    }
+
+    fn no_env(_name: &str) -> Option<String> {
+        None
+    }
+
+    fn claude_env(name: &str) -> Option<String> {
+        (name == "RUSTLING_TULIP_CLAUDE").then(|| r"C:\fake\claude.exe".to_owned())
+    }
+
+    #[test]
+    fn launch_command_env_beats_the_setting() {
+        let plugin = agent_registry::plugin(Agent::Claude);
+        let chosen = choose_agent_command(plugin, &command("cl", "--debug"), &claude_env)
+            .expect("the command splits");
+        assert_eq!(chosen.program, r"C:\fake\claude.exe");
+        assert!(!chosen.typed_verbatim, "the variable's path is quoted");
+        assert_eq!(
+            chosen.extra_args,
+            ["--debug"],
+            "the variable locks only the program"
+        );
+        assert_eq!(chosen.extra_text, "--debug");
+    }
+
+    #[test]
+    fn launch_command_setting_beats_the_default() {
+        let plugin = agent_registry::plugin(Agent::Claude);
+        let chosen = choose_agent_command(plugin, &command("  cl  ", ""), &no_env)
+            .expect("the command splits");
+        assert_eq!(chosen.program, "cl");
+        assert!(chosen.typed_verbatim, "a name is typed as it is");
+        assert_eq!(chosen.extra_args, [] as [&str; 0]);
+
+        let blank = choose_agent_command(plugin, &command(" ", " "), &no_env)
+            .expect("a blank command splits");
+        assert_eq!(blank.program, "claude", "blank is the plugin's own program");
+        assert!(!blank.typed_verbatim);
+        assert_eq!(blank.extra_args, [] as [&str; 0]);
+        assert_eq!(blank.extra_text, "");
+    }
+
+    #[test]
+    fn launch_command_naming_an_existing_file_is_not_typed_verbatim() {
+        let dir = std::env::temp_dir().join(format!("rt-launch-command-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create the scratch dir");
+        let file = dir.join("my claude.exe");
+        std::fs::write(&file, b"").expect("write the program file");
+        let path = file.to_string_lossy().into_owned();
+
+        let plugin = agent_registry::plugin(Agent::Claude);
+        let chosen =
+            choose_agent_command(plugin, &command(&path, ""), &no_env).expect("the command splits");
+        assert_eq!(chosen.program, path);
+        assert!(!chosen.typed_verbatim, "a path is not an alias");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn launch_command_extras_follow_the_plugin_argv() {
+        let plugin = agent_registry::plugin(Agent::Claude);
+        let chosen = choose_agent_command(plugin, &command("", r#"--debug "a b" 'c d'"#), &no_env)
+            .expect("the command splits");
+        let argv = chosen.direct_args(
+            vec!["/d".to_owned(), "/c".to_owned()],
+            vec!["--model".to_owned(), "opus".to_owned()],
+        );
+        assert_eq!(
+            argv,
+            ["/d", "/c", "--model", "opus", "--debug", "a b", "c d"]
+        );
+    }
+
+    #[test]
+    fn launch_command_split_failure_refuses_the_spawn() {
+        let plugin = agent_registry::plugin(Agent::Claude);
+        let err = choose_agent_command(plugin, &command("", "--debug \"open"), &no_env)
+            .err()
+            .map(|err| err.to_string());
+        assert_eq!(
+            err.as_deref(),
+            Some(
+                "The Claude launch command's extra arguments cannot be split: missing closing quote. Fix them in Settings."
+            )
         );
     }
 }

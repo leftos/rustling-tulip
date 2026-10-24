@@ -11,7 +11,8 @@ pub(super) use self::worktree::target_uses_worktree;
 
 use self::hook_settings::{HookSettings, write_hook_settings};
 use self::shell::{
-    AgentLaunch, Launch, ShellProgram, plan_launch, resolve_agent_program, resolve_shell_program,
+    AgentLaunch, Launch, ShellProgram, TypedCommand, choose_agent_command, plan_launch,
+    resolve_agent_program, resolve_shell_program,
 };
 use self::worktree::{
     SinglePlan, classify_worktree_error, log_fork_point, materialize_single_worktree,
@@ -976,7 +977,12 @@ async fn spawn_interactive_session(
     let last_prompt = initial_prompt.clone();
     let agent = cfg.agent();
     let backend = agent_registry::plugin(agent);
-    let raw_program = backend.resolve_program();
+    // The host's launch command is read now, never from the session's stored
+    // config, so Restart and Resume use the current one.
+    let command = choose_agent_command(backend, &hub.state.agent_command(agent), &|name| {
+        std::env::var(name).ok()
+    })?;
+    let raw_program = command.program.clone();
     let (program, prepend_args) = resolve_agent_program(&raw_program);
     let (claude_session_id, resume_conversation, discover) = planned_conversation(
         backend,
@@ -1008,8 +1014,13 @@ async fn spawn_interactive_session(
     let shell_resume = backend.descriptor().caps.shell_resume;
     let launch = match shell_resume.then(|| host_shell(hub)).flatten() {
         Some(shell) => {
-            let mut argv = vec![program.clone()];
-            argv.extend(prepend_args.iter().cloned());
+            // A program word typed verbatim stands alone: the resolver's
+            // leading arguments belong to the resolved program only.
+            let mut argv = Vec::new();
+            if !command.typed_verbatim {
+                argv.push(program.clone());
+                argv.extend(prepend_args.iter().cloned());
+            }
             argv.extend(backend.interactive_args(&cfg.options, &common, &members, None)?);
             let cwd = primary_cwd.to_string_lossy();
             plan_launch(
@@ -1017,6 +1028,10 @@ async fn spawn_interactive_session(
                 Some(shell),
                 AgentLaunch {
                     argv: &argv,
+                    typed: TypedCommand {
+                        program_word: command.typed_verbatim.then_some(raw_program.as_str()),
+                        extra: &command.extra_text,
+                    },
                     cwd: &cwd,
                     initial_prompt: initial_prompt.as_deref(),
                     preset: cfg.prompt_injector.clone(),
@@ -1033,12 +1048,12 @@ async fn spawn_interactive_session(
                 &members,
                 initial_prompt.as_deref(),
             )?;
-            let mut final_args = prepend_args;
-            final_args.extend(args);
+            let final_args = command.direct_args(prepend_args, args);
             info!(
                 agent = agent.as_label(),
                 raw = %raw_program,
                 program = %program,
+                extra_argc = command.extra_args.len(),
                 argc = final_args.len(),
                 args = ?final_args,
                 "spawn_interactive_session: resolved program"
@@ -1439,6 +1454,34 @@ async fn spawn_plain_shell_session(
     Ok(snap)
 }
 
+/// A headless run's child: the plugin's own program and arguments. The host's
+/// launch command never applies, since extra arguments could break the
+/// stream-json parse.
+///
+/// # Errors
+///
+/// The options do not decode, or the agent builds no headless argv (the
+/// dispatcher already rejects headless mode for an agent whose descriptor
+/// lacks it).
+fn headless_spec(
+    cfg: &SpawnArgs,
+    members: &[SessionMember],
+    prompt: &str,
+    primary_cwd: PathBuf,
+) -> anyhow::Result<headless::HeadlessSpec> {
+    let backend = agent_registry::plugin(cfg.agent());
+    let args = backend
+        .headless_args(&cfg.options, &cfg.common(), members, prompt)?
+        .ok_or_else(|| headless_unsupported(cfg.agent()))?;
+    Ok(headless::HeadlessSpec {
+        program: backend.resolve_program(),
+        args,
+        cwd: primary_cwd,
+        env: cfg.env.set.clone(),
+        agent: cfg.agent(),
+    })
+}
+
 #[expect(
     clippy::too_many_arguments,
     clippy::needless_pass_by_value,
@@ -1458,23 +1501,9 @@ fn spawn_headless_session(
     stored_config: protocol::SpawnConfig,
     busy_excluded: bool,
 ) -> anyhow::Result<protocol::SessionSnapshot> {
-    // The dispatcher already rejects headless mode for an agent whose
-    // descriptor lacks it; an agent that still builds no headless argv
-    // refuses here.
-    let backend = agent_registry::plugin(cfg.agent());
     let last_prompt = Some(prompt.clone());
-    let args = backend
-        .headless_args(&cfg.options, &cfg.common(), &members, &prompt)?
-        .ok_or_else(|| headless_unsupported(cfg.agent()))?;
-
     let initial_cwd = primary_cwd.to_string_lossy().into_owned();
-    let spec = headless::HeadlessSpec {
-        program: backend.resolve_program(),
-        args,
-        cwd: primary_cwd,
-        env: cfg.env.set.clone(),
-        agent: cfg.agent(),
-    };
+    let spec = headless_spec(cfg, &members, &prompt, primary_cwd)?;
     #[cfg(test)]
     super::child_env_probe::record(&spec.env, &[]);
 
@@ -2420,6 +2449,108 @@ mod tests {
             .await
             .expect_err("the stub tracer is not a runnable executable")
         )
+    }
+
+    #[tokio::test]
+    async fn an_unsplittable_launch_command_refuses_the_interactive_spawn() {
+        let (hub, scratch) = spawnless_test_hub("launch-command-split");
+        let folder = scratch.path().join("work");
+        std::fs::create_dir_all(&folder).expect("create the folder");
+        // Stored past the save check, as an older or hand-edited state.json can.
+        hub.state
+            .mutate(|s| {
+                s.agent_commands.insert(
+                    Agent::Claude,
+                    crate::state::AgentCommand {
+                        program: String::new(),
+                        args: "--debug 'open".to_owned(),
+                    },
+                );
+            })
+            .expect("store the command");
+        let session_id = "launch-command-split-session";
+
+        let error = failing_interactive_claude_spawn(&hub, &folder, session_id).await;
+
+        assert!(
+            error.contains(
+                "The Claude launch command's extra arguments cannot be split: missing closing quote. Fix them in Settings."
+            ),
+            "{error}"
+        );
+        assert!(
+            !hub.dirs.sessions_dir.join(session_id).exists(),
+            "the refused spawn wrote nothing"
+        );
+    }
+
+    #[test]
+    fn a_headless_launch_ignores_the_launch_command() {
+        let (hub, _scratch) = test_hub("launch-command-headless");
+        hub.state
+            .set_agent_command(
+                Agent::Claude,
+                crate::state::AgentCommand {
+                    program: "my-claude".to_owned(),
+                    args: "--debug".to_owned(),
+                },
+            )
+            .expect("store the command");
+        let cfg = SpawnArgs {
+            dangerously_skip_permissions: false,
+            agent: Agent::Claude,
+            options: options_from_request(&AgentOptions::claude(None), None),
+            env: agent_api::EnvPlan::default(),
+            prompt_injector: None,
+            origin: None,
+            resume_conversation: None,
+            add_dirs: Vec::new(),
+        };
+        let backend = agent_registry::plugin(Agent::Claude);
+
+        let spec = headless_spec(&cfg, &[], "hello", PathBuf::from("C:/work"))
+            .expect("Claude has a headless mode");
+
+        assert_eq!(spec.program, backend.resolve_program());
+        let own = backend
+            .headless_args(&cfg.options, &cfg.common(), &[], "hello")
+            .expect("the options decode")
+            .expect("Claude has a headless mode");
+        assert_eq!(spec.args, own, "only the plugin's own arguments");
+    }
+
+    #[tokio::test]
+    async fn a_stored_launch_command_is_not_captured_in_the_spawn_config() {
+        let (hub, _scratch, _repo) = env_ref_repo_hub("launch-command-config");
+        hub.state
+            .set_agent_command(
+                Agent::Claude,
+                crate::state::AgentCommand {
+                    program: "my-claude-wrapper".to_owned(),
+                    args: "--launch-extra-marker".to_owned(),
+                },
+            )
+            .expect("store the command");
+        let mut target = single_target(false, None);
+        if let SpawnTarget::Single { branch_name, .. } = &mut target {
+            "main".clone_into(branch_name);
+        }
+        spawn_session(
+            &hub,
+            env_spawn(target, SessionMode::Interactive, Vec::new(), None),
+            None,
+            false,
+        )
+        .await
+        .expect_err("no tracer can start");
+
+        let stored = hub
+            .state
+            .with_persisted(|s| s.repos[0].last_spawn_config.clone())
+            .expect("last spawn config stored");
+        let stored = serde_json::to_string(&stored).expect("encode the spawn config");
+        assert!(!stored.contains("my-claude-wrapper"), "{stored}");
+        assert!(!stored.contains("--launch-extra-marker"), "{stored}");
     }
 
     /// The command `history::shell_request` puts on a recovery's injector,

@@ -185,6 +185,30 @@ impl Agent for ClaudePlugin {
         &["ANTHROPIC_API_KEY", "CLAUDE_CONFIG_DIR"]
     }
 
+    /// Every flag the interactive and headless argv carry, plus the other
+    /// ways of picking a conversation, which would break the session's
+    /// conversation-id tracking.
+    fn reserved_args(&self) -> &'static [&'static str] {
+        &[
+            "--settings",
+            "--resume",
+            "--session-id",
+            "--model",
+            "--permission-mode",
+            "--dangerously-skip-permissions",
+            "--add-dir",
+            "--append-system-prompt",
+            "-p",
+            "--print",
+            "--output-format",
+            "--verbose",
+            "-r",
+            "--continue",
+            "-c",
+            "--fork-session",
+        ]
+    }
+
     fn check_request(&self, opts: &ClaudeOptions, req: &SpawnCheck<'_>) -> Result<(), Refusal> {
         providers::check_request(opts.provider, req)
     }
@@ -513,6 +537,94 @@ mod tests {
     #[test]
     fn conformance() {
         agent_api::conformance::check(&ClaudePlugin);
+    }
+
+    #[test]
+    fn claude_reserved_args_list() {
+        assert_eq!(
+            Agent::reserved_args(&ClaudePlugin),
+            [
+                "--settings",
+                "--resume",
+                "--session-id",
+                "--model",
+                "--permission-mode",
+                "--dangerously-skip-permissions",
+                "--add-dir",
+                "--append-system-prompt",
+                "-p",
+                "--print",
+                "--output-format",
+                "--verbose",
+                "-r",
+                "--continue",
+                "-c",
+                "--fork-session",
+            ]
+        );
+    }
+
+    /// Every flag-shaped token in `args`.
+    fn flags(args: &[String]) -> Vec<String> {
+        args.iter()
+            .filter(|arg| arg.starts_with('-'))
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn every_flag_claude_emits_is_reserved() {
+        let m = members(&["X:/dev/a", "X:/dev/b"]);
+        let extra = vec!["X:/dev/c".to_string()];
+        let shim = HookShim {
+            tracer_exe: std::path::Path::new("X:/rt/rt-tracer.exe"),
+            session_id: SESSION_ID,
+            config_dir: std::path::Path::new("X:/rt"),
+        };
+        let hook_args =
+            Agent::hook_plan(&ClaudePlugin, &ClaudeOptions::default(), false, &shim).args;
+        let mut emitted = Vec::new();
+        for skip in [false, true] {
+            let opts = options(Some(PermissionMode::Plan), Some("opus"));
+            let fresh = SpawnContext {
+                add_dirs: &extra,
+                hook_args: &hook_args,
+                ..with_session_id(skip, false)
+            };
+            emitted.extend(flags(&interactive(&opts, &fresh, &m, Some("hello"))));
+            let resumed = SpawnContext {
+                resume_conversation: Some(RESUME_ID),
+                ..fresh
+            };
+            emitted.extend(flags(&interactive(&opts, &resumed, &m, None)));
+            emitted.extend(flags(&headless(&opts, &fresh, &m, "hello")));
+        }
+        let reserved = Agent::reserved_args(&ClaudePlugin);
+        for flag in [
+            "--settings",
+            "--resume",
+            "--session-id",
+            "--model",
+            "--permission-mode",
+            "--dangerously-skip-permissions",
+            "--add-dir",
+            "--append-system-prompt",
+            "-p",
+            "--print",
+            "--output-format",
+            "--verbose",
+        ] {
+            assert!(
+                emitted.iter().any(|f| f == flag),
+                "{flag} is emitted by some spawn: {emitted:?}"
+            );
+        }
+        for flag in &emitted {
+            assert!(
+                reserved.contains(&flag.as_str()),
+                "{flag} is emitted but not reserved"
+            );
+        }
     }
 
     #[test]

@@ -292,6 +292,9 @@ fn spawn_state_forwarder(
                         active,
                     });
                 }
+                Ok(StateEvent::AgentCommands(commands)) => {
+                    let _ = out_tx.send(DaemonMessage::AgentCommands { commands });
+                }
                 Ok(StateEvent::RemoteStatus {
                     enabled,
                     port,

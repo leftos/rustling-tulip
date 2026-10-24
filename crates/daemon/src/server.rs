@@ -210,6 +210,9 @@ pub enum StateEvent {
         mode: protocol::KeepAwakeMode,
         active: bool,
     },
+    /// Broadcast after every [`ClientMessage::SetAgentCommand`] that is
+    /// saved. Mirrors [`protocol::DaemonMessage::AgentCommands`].
+    AgentCommands(Vec<protocol::AgentCommandEntry>),
     /// Broadcast on every remote-access status change: a
     /// [`ClientMessage::ConfigureRemote`] or the tailnet listener's own state
     /// moving. Mirrors [`protocol::DaemonMessage::RemoteStatus`]; it carries
@@ -544,6 +547,7 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         | ClientMessage::CancelPairing
         | ClientMessage::SetKeepAwake { .. }
         | ClientMessage::SetKeepAwakeMode { .. }
+        | ClientMessage::SetAgentCommand { .. }
         | ClientMessage::InspectWorktreesRoot
         | ClientMessage::DeleteWorktreeAt { .. }) => settings::handle(hub, m, ctx).await?,
         m @ (ClientMessage::PreviewWorkspaceSpawn { .. }

@@ -387,6 +387,13 @@ pub trait Agent: Send + Sync + 'static {
         &[]
     }
 
+    /// The flags the plugin's own argv carries, interactive or headless. A
+    /// user's extra launch argument may not name one: the daemon refuses it
+    /// when the launch command is saved.
+    fn reserved_args(&self) -> &'static [&'static str] {
+        &[]
+    }
+
     /// Refuse a spawn request before anything is sealed, written or checked
     /// out. Reads the rows' names only.
     ///
@@ -489,6 +496,9 @@ pub trait AgentPlugin: Send + Sync {
     /// See [`Agent::passthrough_vars`].
     fn passthrough_vars(&self) -> &'static [&'static str];
 
+    /// See [`Agent::reserved_args`].
+    fn reserved_args(&self) -> &'static [&'static str];
+
     /// [`Agent::check_request`] over `opts` decoded.
     ///
     /// # Errors
@@ -583,6 +593,10 @@ impl<A: Agent> AgentPlugin for A {
 
     fn passthrough_vars(&self) -> &'static [&'static str] {
         Agent::passthrough_vars(self)
+    }
+
+    fn reserved_args(&self) -> &'static [&'static str] {
+        Agent::reserved_args(self)
     }
 
     fn check_request(&self, opts: &OptionValues, req: &SpawnCheck<'_>) -> Result<(), Refusal> {
@@ -994,6 +1008,12 @@ mod tests {
     fn passthrough_vars_defaults_to_none() {
         let plugin: &dyn AgentPlugin = &TestAgent::default();
         assert_eq!(plugin.passthrough_vars(), [] as [&str; 0]);
+    }
+
+    #[test]
+    fn reserved_args_defaults_to_none() {
+        let plugin: &dyn AgentPlugin = &TestAgent::default();
+        assert_eq!(plugin.reserved_args(), [] as [&str; 0]);
     }
 
     #[test]

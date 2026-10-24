@@ -129,7 +129,10 @@ fn authorize_device(peer: &tailnet::PeerIdentity, presented_token: &str) -> bool
 /// The capabilities this daemon lists in `Welcome.features` (`protocol::FEATURE_*`).
 /// A feature joins only once the daemon fully honours it, since a client that
 /// sees it listed offers the capability to the user.
-const DAEMON_FEATURES: &[&str] = &[protocol::FEATURE_CLAUDE_PROVIDER];
+const DAEMON_FEATURES: &[&str] = &[
+    protocol::FEATURE_CLAUDE_PROVIDER,
+    protocol::FEATURE_AGENT_COMMANDS,
+];
 
 /// The `Welcome` answering an accepted `Hello`: the negotiated version, every
 /// version this daemon speaks, and [`DAEMON_FEATURES`].
@@ -215,6 +218,11 @@ pub(super) fn push_initial_state(
         mode: keep_awake.mode,
         active: keep_awake.active,
     });
+    let _ = out_tx.send(DaemonMessage::AgentCommands {
+        commands: super::settings::agent_command_entries(&hub.state, &|name| {
+            std::env::var(name).ok()
+        }),
+    });
     // Held across the send: every RemoteStatus broadcast is published under
     // the watch's write lock, so none can reach the state forwarder between
     // this read and the send, and the client never ends on an older status.
@@ -299,6 +307,39 @@ mod tests {
     }
 
     #[test]
+    fn initial_state_sends_the_agent_commands() {
+        let (hub, _scratch) = test_hub("agent-commands-initial");
+        hub.state
+            .set_agent_command(
+                protocol::Agent::Claude,
+                crate::state::AgentCommand {
+                    program: "cl".to_owned(),
+                    args: "--debug".to_owned(),
+                },
+            )
+            .expect("store a command");
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+
+        push_initial_state(&hub, &out_tx, "c1", false);
+
+        let mut sent = Vec::new();
+        while let Ok(message) = out_rx.try_recv() {
+            if let DaemonMessage::AgentCommands { commands } = message {
+                sent.push(commands);
+            }
+        }
+        assert_eq!(sent.len(), 1, "one AgentCommands at initial state");
+        assert!(
+            sent[0]
+                .iter()
+                .any(|entry| entry.agent == protocol::Agent::Claude
+                    && entry.program == "cl"
+                    && entry.args == "--debug"),
+            "{sent:?}"
+        );
+    }
+
+    #[test]
     fn a_clean_start_sends_no_report() {
         let (hub, _scratch) = test_hub("resume-report-clean");
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
@@ -320,6 +361,19 @@ mod tests {
                 DaemonMessage::Welcome { protocol_version: 22, supported_versions, features }
                     if supported_versions == SUPPORTED_PROTOCOL_VERSIONS
                         && features == DAEMON_FEATURES
+            ),
+            "{welcome:?}"
+        );
+    }
+
+    #[test]
+    fn welcome_lists_agent_commands() {
+        let welcome = welcome_message(22);
+        assert!(
+            matches!(
+                &welcome,
+                DaemonMessage::Welcome { features, .. }
+                    if features.iter().any(|f| f == "agent_commands")
             ),
             "{welcome:?}"
         );

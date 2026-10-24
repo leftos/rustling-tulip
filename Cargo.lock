@@ -1623,6 +1623,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "shell-words",
  "sysinfo 0.32.1",
  "tailnet",
  "thiserror 2.0.18",

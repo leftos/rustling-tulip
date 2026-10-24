@@ -16,6 +16,12 @@ include!(concat!(env!("OUT_DIR"), "/protocol_version.rs"));
 /// only when the connected daemon lists it.
 pub const FEATURE_CLAUDE_PROVIDER: &str = "claude_provider";
 
+/// `Welcome.features` entry: the daemon keeps a per-agent launch command
+/// ([`ClientMessage::SetAgentCommand`], [`DaemonMessage::AgentCommands`]). A
+/// client offers the launch-command rows only when the connected daemon lists
+/// it.
+pub const FEATURE_AGENT_COMMANDS: &str = "agent_commands";
+
 fn default_true() -> bool {
     true
 }
@@ -135,6 +141,24 @@ pub enum KeepAwakeMode {
     /// A mode from a newer peer; a daemon refuses it in a request.
     #[serde(other)]
     Unknown,
+}
+
+/// One agent's launch command as the host stores it: blank fields mean the
+/// plugin's own program and no extra arguments.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentCommandEntry {
+    pub agent: Agent,
+    /// The program that replaces the agent's own; blank for the default.
+    #[serde(default)]
+    pub program: String,
+    /// Extra arguments after the agent's own argv, as the user typed them.
+    #[serde(default)]
+    pub args: String,
+    /// The environment variable that overrides the program on this host
+    /// (such as `RUSTLING_TULIP_CLAUDE`), when it is set; the program field
+    /// then has no effect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program_env: Option<String>,
 }
 
 /// The bytes Shift+Enter sends to an agent's terminal.
@@ -2731,6 +2755,19 @@ pub enum ClientMessage {
     SetKeepAwakeMode {
         mode: KeepAwakeMode,
     },
+    /// Set the command the host launches `agent` with for interactive spawns:
+    /// `program` replaces the agent's own and `args` follow its argv; a blank
+    /// pair restores the default. The daemon persists it in `state.json`,
+    /// then broadcasts [`DaemonMessage::AgentCommands`]. A control character,
+    /// an unclosed quote in `args` or a flag the agent sets itself is refused
+    /// with an `Error` and changes nothing.
+    SetAgentCommand {
+        agent: Agent,
+        #[serde(default)]
+        program: String,
+        #[serde(default)]
+        args: String,
+    },
     /// Retired with LAN pairing: it stays decodable, and the daemon answers it
     /// on every connection with the same `Error` as
     /// [`ClientMessage::ConfigureLan`].
@@ -3442,6 +3479,12 @@ pub enum DaemonMessage {
         #[serde(default)]
         mode: KeepAwakeMode,
         active: bool,
+    },
+    /// Every registered agent's launch command, blank when unset. Sent once
+    /// at initial state and broadcast after every
+    /// [`ClientMessage::SetAgentCommand`].
+    AgentCommands {
+        commands: Vec<AgentCommandEntry>,
     },
     /// Current remote (Tailscale) access status. Sent once at initial state
     /// and broadcast on every change: a [`ClientMessage::ConfigureRemote`],
@@ -6243,6 +6286,73 @@ mod tests {
         let evidence: MergeEvidence =
             serde_json::from_str(r#""vibes""#).expect("parse unknown evidence");
         assert_eq!(evidence, MergeEvidence::Unknown);
+    }
+
+    #[test]
+    fn agent_command_messages_round_trip() {
+        let set = ClientMessage::SetAgentCommand {
+            agent: Agent::Claude,
+            program: "claude-wrapper".to_owned(),
+            args: "--debug \"a b\"".to_owned(),
+        };
+        let json = serde_json::to_value(&set).expect("serialize");
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "type": "set_agent_command",
+                "agent": "claude",
+                "program": "claude-wrapper",
+                "args": "--debug \"a b\"",
+            })
+        );
+        let back: ClientMessage = serde_json::from_value(json).expect("deserialize");
+        assert!(
+            matches!(
+                &back,
+                ClientMessage::SetAgentCommand { agent: Agent::Claude, program, args }
+                    if program == "claude-wrapper" && args == "--debug \"a b\""
+            ),
+            "{back:?}"
+        );
+
+        let commands = DaemonMessage::AgentCommands {
+            commands: vec![
+                AgentCommandEntry {
+                    agent: Agent::Claude,
+                    program: "cl".to_owned(),
+                    args: "--debug".to_owned(),
+                    program_env: Some("RUSTLING_TULIP_CLAUDE".to_owned()),
+                },
+                AgentCommandEntry {
+                    agent: Agent::Claude,
+                    program: String::new(),
+                    args: String::new(),
+                    program_env: None,
+                },
+            ],
+        };
+        let json = serde_json::to_value(&commands).expect("serialize");
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "type": "agent_commands",
+                "commands": [
+                    {"agent": "claude", "program": "cl", "args": "--debug", "program_env": "RUSTLING_TULIP_CLAUDE"},
+                    {"agent": "claude", "program": "", "args": ""},
+                ],
+            })
+        );
+        let back: DaemonMessage = serde_json::from_value(json).expect("deserialize");
+        let DaemonMessage::AgentCommands { commands: back } = back else {
+            panic!("expected AgentCommands, got {back:?}");
+        };
+        assert_eq!(back.len(), 2);
+        assert_eq!(
+            back[0].program_env.as_deref(),
+            Some("RUSTLING_TULIP_CLAUDE")
+        );
+        assert_eq!(back[1].program_env, None);
+        assert_eq!(FEATURE_AGENT_COMMANDS, "agent_commands");
     }
 
     #[test]

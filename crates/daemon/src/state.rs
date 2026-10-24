@@ -9,7 +9,7 @@
 use crate::env_secrets::{self, SealOutcome};
 use crate::paths::{Dirs, simplify_path};
 use anyhow::Context as _;
-use protocol::{ContainerRef, KeepAwakeMode, RepoEntry, TabEntry, WorkspaceEntry};
+use protocol::{Agent, ContainerRef, KeepAwakeMode, RepoEntry, TabEntry, WorkspaceEntry};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -73,6 +73,33 @@ pub struct PersistedState {
     /// field get [`KeepAwakeMode::WhenBusy`].
     #[serde(default)]
     pub keep_awake_mode: KeepAwakeMode,
+    /// Host setting: the command each agent's interactive spawns launch,
+    /// keyed by the agent's serde name. Holds only agents whose command is
+    /// set; an absent agent launches its plugin's own program. Read at spawn
+    /// through [`AppState::agent_command`], never copied into a session's
+    /// spawn config, so Restart and Resume use the current command.
+    #[serde(default)]
+    pub agent_commands: HashMap<Agent, AgentCommand>,
+}
+
+/// One agent's stored launch command, both fields as the user typed them.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentCommand {
+    /// The program that replaces the plugin's own; blank for the default.
+    #[serde(default)]
+    pub program: String,
+    /// Extra arguments after the plugin's argv, split by POSIX shell-word
+    /// rules at spawn (typed verbatim in the shell form).
+    #[serde(default)]
+    pub args: String,
+}
+
+impl AgentCommand {
+    /// Whether both fields are blank (whitespace only), so the agent launches
+    /// as if nothing were set.
+    pub fn is_blank(&self) -> bool {
+        self.program.trim().is_empty() && self.args.trim().is_empty()
+    }
 }
 
 #[derive(Debug)]
@@ -241,6 +268,23 @@ impl AppState {
     pub fn set_keep_awake_mode(&self, mode: KeepAwakeMode) -> anyhow::Result<()> {
         self.mutate(|s| {
             s.keep_awake_mode = mode;
+        })
+    }
+
+    /// The launch command `agent`'s interactive spawns use: blank when none is
+    /// set. Every spawn path reads it here, at spawn time.
+    pub fn agent_command(&self, agent: Agent) -> AgentCommand {
+        self.with_persisted(|s| s.agent_commands.get(&agent).cloned().unwrap_or_default())
+    }
+
+    /// Persist `agent`'s launch command; a blank pair removes its entry.
+    pub fn set_agent_command(&self, agent: Agent, command: AgentCommand) -> anyhow::Result<()> {
+        self.mutate(|s| {
+            if command.is_blank() {
+                s.agent_commands.remove(&agent);
+            } else {
+                s.agent_commands.insert(agent, command);
+            }
         })
     }
 
@@ -536,6 +580,65 @@ mod tests {
             "stored as keep_awake_mode"
         );
         assert!(!text.contains("\"keep_awake\""), "the boolean key is gone");
+
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn agent_commands_default_empty_round_trip_and_blank_removes() {
+        let json = r#"{"repos": [], "workspaces": []}"#;
+        let old: PersistedState = serde_json::from_str(json).expect("parse old state");
+        assert!(
+            old.agent_commands.is_empty(),
+            "a state.json without the setting has no launch commands"
+        );
+
+        let dirs = scratch_dirs("agentcommands");
+        let state = AppState::load_or_default(&dirs).expect("load state");
+        assert_eq!(state.agent_command(Agent::Claude), AgentCommand::default());
+        let set = AgentCommand {
+            program: "claude-wrapper".to_owned(),
+            args: "--debug \"a b\"".to_owned(),
+        };
+        state
+            .set_agent_command(Agent::Claude, set.clone())
+            .expect("persist the command");
+        assert_eq!(state.agent_command(Agent::Claude), set);
+
+        let reloaded = AppState::load_or_default(&dirs).expect("reload state");
+        assert_eq!(
+            reloaded.agent_command(Agent::Claude),
+            set,
+            "the command survives a reload"
+        );
+        let text = std::fs::read_to_string(&dirs.state_file).expect("read state.json");
+        let stored: serde_json::Value = serde_json::from_str(&text).expect("parse state.json");
+        assert_eq!(
+            stored["agent_commands"],
+            serde_json::json!({"claude": {"program": "claude-wrapper", "args": "--debug \"a b\""}}),
+            "keyed by the agent's serde name"
+        );
+
+        reloaded
+            .set_agent_command(
+                Agent::Claude,
+                AgentCommand {
+                    program: "  ".to_owned(),
+                    args: String::new(),
+                },
+            )
+            .expect("clear the command");
+        assert_eq!(
+            reloaded.agent_command(Agent::Claude),
+            AgentCommand::default()
+        );
+        let text = std::fs::read_to_string(&dirs.state_file).expect("read state.json");
+        let stored: serde_json::Value = serde_json::from_str(&text).expect("parse state.json");
+        assert_eq!(
+            stored["agent_commands"],
+            serde_json::json!({}),
+            "a blank pair removes the agent's entry"
+        );
 
         let _ = std::fs::remove_dir_all(&dirs.config);
     }

@@ -50,6 +50,9 @@ portable-pty = "0.9"
 interprocess = { version = "2", features = ["tokio"] }
 sysinfo = { version = "0.32", default-features = false, features = ["system"] }
 which = "8.0"
+# POSIX shell-word splitting of an agent's extra launch arguments (refused on
+# save, and refusing the spawn, when a quote is unclosed).
+shell-words = "1.1"
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace", "cors"] }
 notify = "8"

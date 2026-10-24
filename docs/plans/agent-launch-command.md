@@ -24,5 +24,7 @@ The program is `RUSTLING_TULIP_CLAUDE` or `claude` (`resolve_program`, `crates/a
 
 ## Parts
 
-- [ ] **A. Daemon and protocol**: `agent_commands` in `state.rs`, the messages and handler, `reserved_args` on the seam, the program and extra arguments at every interactive spawn form (direct and RT-359's typed shell form). Lands after RT-313 (same files) and RT-359 part A (the typed shell form).
+- [x] **A. Daemon and protocol**: `agent_commands` in `state.rs`, the messages and handler, `reserved_args` on the seam, the program and extra arguments at every interactive spawn form (direct and RT-359's typed shell form). Lands after RT-313 (same files) and RT-359 part A (the typed shell form).
+
+  Settled in the code: `AgentCommands` lists every agent, blank when unset, with `program_env` naming an overriding variable; the feature is `agent_commands`. Claude reserves 16 flags (decision 4's 12 plus `-r`, `--continue`, `-c`, `--fork-session`). Extra arguments with an unclosed quote are refused on save, and a spawn whose stored extras cannot be split is refused pointing at Settings. The typed shell form is `<program word bare> <plugin args quoted> <extras verbatim>`, PowerShell without `&` for a bare word; an env var, a blank setting or a setting naming an existing file keeps the quoted absolute path with the extras applied, and cmd with `%` or `!` in the extras spawns directly. Recover's shell form is unchanged until AP.3b.
 - [ ] **B. Native Settings rows**: the Launch command section on the Claude page and the `AgentCommands` arm. Lands after part A.

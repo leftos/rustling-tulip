@@ -1,4 +1,4 @@
-//! Repos, workspaces and host settings: the registry and settings messages, VS Code workspace scans, and keep-awake.
+//! Repos, workspaces and host settings: the registry and settings messages, VS Code workspace scans, keep-awake, and the agents' launch commands.
 use super::connection::ConnCtx;
 use super::remote::LAN_RETIRED;
 use super::{Hub, StateEvent};
@@ -7,10 +7,13 @@ use crate::registry::{
     set_workspace_worktree_default, upsert_workspace,
 };
 use crate::session::SessionRegistry;
-use crate::state::AppState;
+use crate::state::{AgentCommand, AppState};
 use crate::{user_env, vscode};
-use anyhow::anyhow;
-use protocol::{ClientMessage, DaemonMessage, KeepAwakeMode, VscodeWorkspaceSuggestion};
+use anyhow::{anyhow, bail};
+use protocol::{
+    Agent, AgentCommandEntry, ClientMessage, DaemonMessage, KeepAwakeMode,
+    VscodeWorkspaceSuggestion,
+};
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, info, warn};
@@ -143,6 +146,11 @@ pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> 
             set_keep_awake_mode(hub, mode)?;
         }
         ClientMessage::SetKeepAwakeMode { mode } => set_keep_awake_mode(hub, mode)?,
+        ClientMessage::SetAgentCommand {
+            agent,
+            program,
+            args,
+        } => set_agent_command(hub, agent, AgentCommand { program, args })?,
         ClientMessage::InspectWorktreesRoot => {
             let root = hub.state.worktrees_dir();
             let is_override = hub.state.worktrees_root_is_override();
@@ -184,6 +192,68 @@ fn set_keep_awake_mode(hub: &Hub, mode: KeepAwakeMode) -> anyhow::Result<()> {
     hub.keep_awake_mode.send_replace(mode);
     info!(?mode, "keep-awake mode changed");
     Ok(())
+}
+
+/// Check `command` against `agent`'s reserved flags, persist it (a blank pair
+/// removes the agent's entry) and broadcast every agent's command.
+fn set_agent_command(hub: &Hub, agent: Agent, command: AgentCommand) -> anyhow::Result<()> {
+    check_agent_command(agent_registry::plugin(agent).reserved_args(), &command)?;
+    hub.state.set_agent_command(agent, command)?;
+    info!(agent = agent.as_label(), "agent launch command changed");
+    let commands = agent_command_entries(&hub.state, &|name| std::env::var(name).ok());
+    let _ = hub.state_events.send(StateEvent::AgentCommands(commands));
+    Ok(())
+}
+
+/// Refuse a launch command a field of which holds a control character, whose
+/// extra arguments do not split, or one of whose extra arguments names a flag
+/// in `reserved`: the flag itself, or a long flag followed by `=`.
+fn check_agent_command(reserved: &[&str], command: &AgentCommand) -> anyhow::Result<()> {
+    for (field, text) in [
+        ("Program", &command.program),
+        ("Extra arguments", &command.args),
+    ] {
+        if text.chars().any(char::is_control) {
+            bail!(
+                "The launch command's {field} cannot contain a newline or other control character."
+            );
+        }
+    }
+    let tokens = shell_words::split(&command.args)
+        .map_err(|_| anyhow!("The extra arguments have an unclosed quote."))?;
+    for token in &tokens {
+        for flag in reserved {
+            let with_value = flag.starts_with("--")
+                && token
+                    .strip_prefix(flag)
+                    .is_some_and(|rest| rest.starts_with('='));
+            if token == flag || with_value {
+                bail!("{flag} is set by rustling-tulip; remove it from the extra arguments.");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Every registered agent's launch command, blank when unset, each naming
+/// the environment variable that overrides its program when `env` has it.
+pub(super) fn agent_command_entries(
+    state: &AppState,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Vec<AgentCommandEntry> {
+    Agent::all()
+        .iter()
+        .map(|&agent| {
+            let command = state.agent_command(agent);
+            let variable = agent_registry::plugin(agent).program_env_var();
+            AgentCommandEntry {
+                agent,
+                program: command.program,
+                args: command.args,
+                program_env: env(variable).map(|_| variable.to_owned()),
+            }
+        })
+        .collect()
 }
 
 /// Wire up the keep-awake watcher: seed its mode watch from persisted state,
@@ -517,6 +587,167 @@ mod tests {
             .await
             .expect("the watcher broadcasts the new mode");
         assert_eq!(broadcast, KeepAwakeMode::Always);
+    }
+
+    fn set_command(program: &str, args: &str) -> ClientMessage {
+        ClientMessage::SetAgentCommand {
+            agent: protocol::Agent::Claude,
+            program: program.to_owned(),
+            args: args.to_owned(),
+        }
+    }
+
+    /// Dispatch `msg`, expect it refused with `want`, and check nothing was
+    /// stored.
+    async fn assert_agent_command_refused(hub: &Hub, msg: ClientMessage, want: &str) {
+        let err = dispatch_err(hub, msg).await;
+        assert_eq!(err.as_deref(), Some(want));
+        assert!(
+            hub.state.with_persisted(|s| s.agent_commands.is_empty()),
+            "a refused command is not stored"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_agent_command_refuses_control_characters_in_either_field() {
+        let (hub, _scratch) = test_hub("agent-command-control");
+        for bad in ["claude\nrm", "claude\r", "cl\u{7}aude", "a\tb"] {
+            assert_agent_command_refused(
+                &hub,
+                set_command(bad, ""),
+                "The launch command's Program cannot contain a newline or other control character.",
+            )
+            .await;
+            assert_agent_command_refused(
+                &hub,
+                set_command("", bad),
+                "The launch command's Extra arguments cannot contain a newline or other control character.",
+            )
+            .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn set_agent_command_refuses_an_unclosed_quote() {
+        let (hub, _scratch) = test_hub("agent-command-quote");
+        for bad in ["--debug \"a b", "'x", "--name \"it's\" 'y"] {
+            assert_agent_command_refused(
+                &hub,
+                set_command("", bad),
+                "The extra arguments have an unclosed quote.",
+            )
+            .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn set_agent_command_refuses_every_reserved_flag() {
+        let (hub, _scratch) = test_hub("agent-command-reserved");
+        let reserved = agent_registry::plugin(protocol::Agent::Claude).reserved_args();
+        assert!(!reserved.is_empty(), "Claude reserves its own flags");
+        for flag in reserved {
+            let want =
+                format!("{flag} is set by rustling-tulip; remove it from the extra arguments.");
+            assert_agent_command_refused(
+                &hub,
+                set_command("", &format!("--debug {flag} x")),
+                &want,
+            )
+            .await;
+            assert_agent_command_refused(&hub, set_command("", &format!("'{flag}'")), &want).await;
+            if flag.starts_with("--") {
+                assert_agent_command_refused(
+                    &hub,
+                    set_command("", &format!("{flag}=value")),
+                    &want,
+                )
+                .await;
+            }
+        }
+        assert_eq!(
+            dispatch_err(&hub, set_command("", "--debug --models=x -pr")).await,
+            None,
+            "a flag that only starts like a reserved one is allowed"
+        );
+    }
+
+    /// The next agent-commands broadcast on the state stream.
+    async fn next_agent_commands(
+        rx: &mut broadcast::Receiver<StateEvent>,
+    ) -> Vec<protocol::AgentCommandEntry> {
+        loop {
+            let evt = rx.recv().await.expect("the state broadcast stays open");
+            if let StateEvent::AgentCommands(commands) = evt {
+                return commands;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn set_agent_command_persists_broadcasts_and_a_blank_pair_clears_it() {
+        let (hub, _scratch) = test_hub("agent-command-save");
+        let mut events = hub.state_events.subscribe();
+        let wait = std::time::Duration::from_secs(5);
+
+        let sent = dispatch_err(&hub, set_command("claude-wrapper", "--debug \"a b\"")).await;
+        assert_eq!(sent, None, "a valid command is accepted");
+        let reloaded = AppState::load_or_default(&hub.dirs).expect("reload state");
+        assert_eq!(
+            reloaded.agent_command(protocol::Agent::Claude),
+            crate::state::AgentCommand {
+                program: "claude-wrapper".to_owned(),
+                args: "--debug \"a b\"".to_owned(),
+            },
+            "the command reached state.json"
+        );
+        let broadcast = tokio::time::timeout(wait, next_agent_commands(&mut events))
+            .await
+            .expect("the change is broadcast");
+        assert_eq!(broadcast.len(), 1, "one entry per registered agent");
+        let entry = &broadcast[0];
+        assert_eq!(entry.agent, protocol::Agent::Claude);
+        assert_eq!(entry.program, "claude-wrapper");
+        assert_eq!(entry.args, "--debug \"a b\"");
+
+        let sent = dispatch_err(&hub, set_command(" ", "")).await;
+        assert_eq!(sent, None, "a blank pair is accepted");
+        assert!(
+            hub.state.with_persisted(|s| s.agent_commands.is_empty()),
+            "a blank pair removes the entry"
+        );
+        let broadcast = tokio::time::timeout(wait, next_agent_commands(&mut events))
+            .await
+            .expect("the clear is broadcast");
+        assert!(
+            broadcast
+                .iter()
+                .all(|entry| entry.program.is_empty() && entry.args.is_empty()),
+            "{broadcast:?}"
+        );
+    }
+
+    #[test]
+    fn agent_command_entries_name_the_overriding_variable() {
+        let (hub, _scratch) = test_hub("agent-command-env");
+        let unset = agent_command_entries(&hub.state, &|_| None);
+        assert!(
+            unset.iter().all(|entry| entry.program_env.is_none()),
+            "{unset:?}"
+        );
+        assert_eq!(
+            unset.len(),
+            protocol::Agent::all().len(),
+            "every agent is listed"
+        );
+
+        let set = agent_command_entries(&hub.state, &|name| {
+            (name == "RUSTLING_TULIP_CLAUDE").then(|| r"C:\fake\claude.exe".to_owned())
+        });
+        let claude = set
+            .iter()
+            .find(|entry| entry.agent == protocol::Agent::Claude)
+            .expect("Claude is listed");
+        assert_eq!(claude.program_env.as_deref(), Some("RUSTLING_TULIP_CLAUDE"));
     }
 
     #[tokio::test]
