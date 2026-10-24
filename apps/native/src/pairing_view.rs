@@ -297,11 +297,21 @@ impl RootView {
         if shown {
             self.pairing.button = None;
             self.pairing.approving = false;
-            if self.pairing_dialog().is_some() {
+            if self.pairing_dialog().is_some() && !self.device_block_confirm_open() {
                 self.pairing.focus.focus(window);
             }
         }
         self.sync_pairing(window, cx);
+    }
+
+    /// Hands the keyboard to the approval dialog, if it shows; returns
+    /// whether it does.
+    pub(crate) fn focus_pairing_dialog(&self, window: &mut Window) -> bool {
+        let open = self.pairing_dialog().is_some();
+        if open {
+            self.pairing.focus.focus(window);
+        }
+        open
     }
 
     /// The Waiting devices rows as drawn: each line and its countdown, or
@@ -401,7 +411,10 @@ impl RootView {
         self.pairing.model.open_dialog(request_id);
         self.pairing.button = None;
         self.pairing.approving = false;
-        self.pairing.focus.focus(window);
+        // A block confirm open above keeps the keyboard until it closes.
+        if !self.device_block_confirm_open() {
+            self.pairing.focus.focus(window);
+        }
         self.sync_pairing(window, cx);
     }
 
@@ -463,7 +476,7 @@ impl RootView {
         if !open {
             self.pairing.approving = false;
         }
-        if closed {
+        if closed && !self.focus_device_block_confirm(window) {
             self.after_notice_closed(window, cx);
         }
         self.arm_pairing_tick(window, cx);

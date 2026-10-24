@@ -25,6 +25,8 @@ mod connection_picker_view;
 mod copied;
 mod device_pairing;
 mod device_pairing_view;
+mod devices;
+mod devices_view;
 pub mod diff_model;
 mod diff_tab;
 mod diff_tab_view;
@@ -816,6 +818,8 @@ pub struct RootView {
     recover_focus: FocusHandle,
     /// The devices waiting for remote access and the approval dialog.
     pairing: pairing_view::PairingView,
+    /// The approved devices and the block confirm.
+    devices: devices_view::DevicesView,
     /// This PC's own pairing with a tailnet host that does not know it.
     device_pairing: device_pairing_view::DevicePairingView,
     /// The device tokens this PC holds per tailnet host.
@@ -1125,6 +1129,7 @@ impl RootView {
                 cx.focus_handle(),
                 Self::forward_pairing_actions(window, cx),
             ),
+            devices: devices_view::DevicesView::new(cx.focus_handle()),
             device_pairing: device_pairing_view::DevicePairingView::new(cx.focus_handle()),
             tokens,
             recover_timer: None,
@@ -2367,7 +2372,8 @@ impl RootView {
             | NetEvent::ShutdownFailed
             | NetEvent::Paired
             | NetEvent::PairingLost
-            | NetEvent::TokenSaveFailed => false,
+            | NetEvent::TokenSaveFailed
+            | NetEvent::PairRequestSent => false,
         };
         let pairing_input = device_pairing_view::PairingInput::of(&event);
         match event {
@@ -2409,7 +2415,10 @@ impl RootView {
             }
             NetEvent::ShutdownSent => self.on_shutdown_sent(),
             NetEvent::ShutdownFailed => self.on_shutdown_failed(window, cx),
-            NetEvent::Paired | NetEvent::PairingLost | NetEvent::TokenSaveFailed => {}
+            NetEvent::Paired
+            | NetEvent::PairingLost
+            | NetEvent::TokenSaveFailed
+            | NetEvent::PairRequestSent => {}
         }
         // The overlay covers the footer; a flyout left open under it would
         // reappear (possibly armed) when the overlay goes.
@@ -2430,6 +2439,7 @@ impl RootView {
             self.reset_undo(cx);
             self.close_recover_on_overlay(window, cx);
             self.reset_pairing(window, cx);
+            self.reset_devices(window, cx);
         }
         if let Some(input) = pairing_input {
             self.on_device_pairing_input(input, window, cx);
@@ -2731,6 +2741,7 @@ impl RootView {
         self.on_worktrees_message(msg, cx);
         self.on_recover_message(msg, window, cx);
         self.on_pairing_message(msg, window, cx);
+        self.on_devices_message(msg, window, cx);
         self.on_preset_message(msg, cx);
         self.on_preset_launch_message(msg, window, cx);
         if let DaemonMessage::SpawnConfigReply { session_id, config } = msg {
@@ -2744,7 +2755,9 @@ impl RootView {
     fn on_welcome(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.reset_for_new_daemon(window, cx);
         self.reset_recover(window, cx);
+        self.reset_devices(window, cx);
         self.ask_pending_devices();
+        self.ask_devices();
         self.awaiting_initial_sessions = true;
     }
 
@@ -2795,6 +2808,7 @@ impl RootView {
         self.recover_batches.clear();
         self.close_recover_on_overlay(window, cx);
         self.reset_pairing(window, cx);
+        self.reset_devices(window, cx);
         self.close_device_pairing(window, cx);
         self.branch_cache = BranchCache::default();
         self.end_drag(window, cx);
@@ -3054,7 +3068,7 @@ impl RootView {
             }
             return;
         }
-        if self.on_pairing_key(ks, window, cx) || self.on_recover_key(ks, window, cx) {
+        if self.on_device_dialogs_key(ks, window, cx) || self.on_recover_key(ks, window, cx) {
             cx.stop_propagation();
             return;
         }
@@ -3468,6 +3482,7 @@ impl Render for RootView {
             .children(self.worktrees_manager_layer(window, cx))
             .children(self.recover_layer(window, cx))
             .children(self.pairing_layer(cx))
+            .children(self.device_block_layer(cx))
             .children(self.pane_close_layer(cx))
             .children(self.move_panes_layer(cx))
             .children(delete_under)

@@ -1598,6 +1598,7 @@ impl RootView {
         }
         if tab == SettingsTab::RemoteAccess {
             self.remote_access_tab = Some(self.new_remote_access_tab(window, cx));
+            self.on_devices_page_selected();
         }
         // The Claude page keeps its fields and the apply they wait on until
         // Settings closes, so selecting it again loses nothing.
@@ -2157,6 +2158,7 @@ impl RootView {
             .children(address)
             .children(cert)
             .children(self.waiting_devices_section(cx))
+            .children(self.devices_section(cx))
             .child(self.remote_port_row(tab, enabled, focused, cx))
             .children(port_error)
             .child(hint(REMOTE_PORT_HINT))

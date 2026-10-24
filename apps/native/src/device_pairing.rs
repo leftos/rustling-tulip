@@ -67,6 +67,8 @@ impl DeviceButton {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum EndReason {
     Denied,
+    /// The host refused the request as soon as it went out.
+    NotAccepted,
     Expired,
     Superseded,
     Unknown,
@@ -79,7 +81,10 @@ enum EndReason {
 #[derive(Clone)]
 enum Phase {
     Intro,
-    Asking,
+    /// The request is asked for; `sent` once it is on the host's socket.
+    Asking {
+        sent: bool,
+    },
     Waiting {
         deadline: Instant,
     },
@@ -125,7 +130,7 @@ impl DevicePairing {
     pub(crate) fn kind(&self) -> PhaseKind {
         match self.phase {
             Phase::Intro => PhaseKind::Intro,
-            Phase::Asking => PhaseKind::Asking,
+            Phase::Asking { .. } => PhaseKind::Asking,
             Phase::Waiting { .. } => PhaseKind::Waiting,
             Phase::CodeEntry { .. } => PhaseKind::CodeEntry,
             Phase::Ended(_) => PhaseKind::Ended,
@@ -144,7 +149,7 @@ impl DevicePairing {
                 format!("{host} no longer accepts this PC's pairing.")
             }
             Phase::Intro => format!("{host} does not know this PC."),
-            Phase::Asking => format!("Asking {host}…"),
+            Phase::Asking { .. } => format!("Asking {host}…"),
             Phase::Waiting { .. } => format!("Approve this PC on {host}."),
             Phase::CodeEntry { .. } => format!("Type the code {host} shows."),
             Phase::Ended(reason) => self.end_line(reason),
@@ -155,6 +160,7 @@ impl DevicePairing {
         let host = &self.host;
         match reason {
             EndReason::Denied => format!("{host} turned this PC down."),
+            EndReason::NotAccepted => format!("{host} did not accept this PC's request."),
             EndReason::Expired => "The request expired.".to_owned(),
             EndReason::Superseded => "A newer request from this PC replaced this one.".to_owned(),
             EndReason::Unknown => "The request ended.".to_owned(),
@@ -177,7 +183,7 @@ impl DevicePairing {
             Phase::CodeEntry { deadline, .. } => {
                 Some(format!("code expires in {}", left(*deadline)))
             }
-            Phase::Intro | Phase::Asking | Phase::Ended(_) => None,
+            Phase::Intro | Phase::Asking { .. } | Phase::Ended(_) => None,
         }
     }
 
@@ -200,7 +206,7 @@ impl DevicePairing {
     pub(crate) fn buttons(&self) -> &'static [DeviceButton] {
         match self.phase {
             Phase::Intro => &[DeviceButton::Ask, DeviceButton::Close],
-            Phase::Asking | Phase::Waiting { .. } => &[DeviceButton::Cancel],
+            Phase::Asking { .. } | Phase::Waiting { .. } => &[DeviceButton::Cancel],
             Phase::CodeEntry { .. } => &[DeviceButton::Pair, DeviceButton::Cancel],
             Phase::Ended(_) => &[DeviceButton::AskAgain, DeviceButton::Close],
         }
@@ -217,7 +223,7 @@ impl DevicePairing {
             Phase::Intro => Some(DeviceButton::Ask),
             Phase::Ended(_) => Some(DeviceButton::AskAgain),
             Phase::CodeEntry { .. } if self.can_pair() => Some(DeviceButton::Pair),
-            Phase::Asking | Phase::Waiting { .. } | Phase::CodeEntry { .. } => None,
+            Phase::Asking { .. } | Phase::Waiting { .. } | Phase::CodeEntry { .. } => None,
         }
     }
 
@@ -225,14 +231,14 @@ impl DevicePairing {
     pub(crate) fn cancels_request(&self) -> bool {
         matches!(
             self.phase,
-            Phase::Asking | Phase::Waiting { .. } | Phase::CodeEntry { .. }
+            Phase::Asking { .. } | Phase::Waiting { .. } | Phase::CodeEntry { .. }
         )
     }
 
     /// Ask to pair, or Ask again: returns whether a request goes out.
     pub(crate) fn ask(&mut self) -> bool {
         if matches!(self.phase, Phase::Intro | Phase::Ended(_)) {
-            self.phase = Phase::Asking;
+            self.phase = Phase::Asking { sent: false };
             true
         } else {
             false
@@ -240,14 +246,15 @@ impl DevicePairing {
     }
 
     /// Folds in a pairing message from the host, at `now`. The "not
-    /// approved" signal is the pairing connection itself and changes
-    /// nothing.
+    /// approved" signal ends the request only once it is on the host's
+    /// socket ([`Self::on_request_sent`]); before that it is the pairing
+    /// connection's greeting and changes nothing.
     pub(crate) fn on_message(&mut self, msg: &DaemonMessage, now: Instant) {
         match msg {
             DaemonMessage::DevicePairPending {
                 expires_in_secs, ..
             } => {
-                if matches!(self.phase, Phase::Asking | Phase::Waiting { .. }) {
+                if matches!(self.phase, Phase::Asking { .. } | Phase::Waiting { .. }) {
                     let deadline = now + Duration::from_secs(*expires_in_secs);
                     self.phase = Phase::Waiting { deadline };
                 }
@@ -255,6 +262,11 @@ impl DevicePairing {
             DaemonMessage::DevicePairDecided { outcome, .. } => self.on_decided(*outcome, now),
             DaemonMessage::DevicePairFailed { reason } if reason != DEVICE_NOT_APPROVED => {
                 self.on_failed(reason);
+            }
+            DaemonMessage::DevicePairFailed { .. } => {
+                if matches!(self.phase, Phase::Asking { sent: true }) {
+                    self.phase = Phase::Ended(EndReason::NotAccepted);
+                }
             }
             _ => {}
         }
@@ -294,10 +306,18 @@ impl DevicePairing {
     fn on_failed(&mut self, reason: &str) {
         match &mut self.phase {
             Phase::CodeEntry { refusal, .. } => *refusal = Some(reason.to_owned()),
-            Phase::Asking | Phase::Waiting { .. } => {
+            Phase::Asking { .. } | Phase::Waiting { .. } => {
                 self.phase = Phase::Ended(EndReason::Failed(reason.to_owned()));
             }
             Phase::Intro | Phase::Ended(_) => {}
+        }
+    }
+
+    /// The request is on the host's socket: a "not approved" from now on
+    /// is the host refusing it, not the redial's greeting.
+    pub(crate) fn on_request_sent(&mut self) {
+        if let Phase::Asking { sent } = &mut self.phase {
+            *sent = true;
         }
     }
 
@@ -627,6 +647,70 @@ mod tests {
         entry.on_message(&signal, now);
         assert_eq!(entry.kind(), PhaseKind::CodeEntry);
         assert_eq!(entry.refusal(), None);
+    }
+
+    #[test]
+    fn not_approved_after_the_request_went_out_ends_as_not_accepted() {
+        let now = Instant::now();
+        let mut pairing = DevicePairing::new(HOST, false);
+        assert!(pairing.ask());
+        pairing.on_request_sent();
+        pairing.on_message(&failed(DEVICE_NOT_APPROVED), now);
+        assert_eq!(pairing.kind(), PhaseKind::Ended);
+        assert_eq!(
+            pairing.line(),
+            "box.tail1234.ts.net did not accept this PC's request."
+        );
+        assert_eq!(
+            pairing.buttons(),
+            [DeviceButton::AskAgain, DeviceButton::Close]
+        );
+
+        assert!(pairing.ask(), "Ask again");
+        pairing.on_message(&failed(DEVICE_NOT_APPROVED), now);
+        assert_eq!(
+            pairing.kind(),
+            PhaseKind::Asking,
+            "a fresh ask is not sent until the net thread says so"
+        );
+    }
+
+    #[test]
+    fn not_approved_before_the_request_went_out_changes_nothing() {
+        let now = Instant::now();
+        let mut pairing = DevicePairing::new(HOST, false);
+        assert!(pairing.ask());
+        pairing.on_message(&failed(DEVICE_NOT_APPROVED), now);
+        assert_eq!(pairing.kind(), PhaseKind::Asking, "the redial's greeting");
+        assert_eq!(pairing.line(), "Asking box.tail1234.ts.net…");
+    }
+
+    #[test]
+    fn not_approved_outside_asking_changes_nothing() {
+        let now = Instant::now();
+        let signal = failed(DEVICE_NOT_APPROVED);
+
+        let mut intro = DevicePairing::new(HOST, false);
+        intro.on_request_sent();
+        intro.on_message(&signal, now);
+        assert_eq!(intro.kind(), PhaseKind::Intro);
+
+        let mut pairing = waiting(now);
+        pairing.on_request_sent();
+        pairing.on_message(&signal, now);
+        assert_eq!(pairing.kind(), PhaseKind::Waiting);
+
+        let mut entry = code_entry(now);
+        entry.on_request_sent();
+        entry.on_message(&signal, now);
+        assert_eq!(entry.kind(), PhaseKind::CodeEntry);
+        assert_eq!(entry.refusal(), None);
+
+        let mut ended = waiting(now);
+        ended.on_message(&decided(DevicePairOutcome::Denied), now);
+        ended.on_request_sent();
+        ended.on_message(&signal, now);
+        assert_eq!(ended.line(), "box.tail1234.ts.net turned this PC down.");
     }
 
     #[test]

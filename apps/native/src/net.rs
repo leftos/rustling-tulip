@@ -227,6 +227,10 @@ pub enum NetEvent {
     /// The tailnet host issued this device a token but storing it failed, so
     /// it is lost (the host shows it once): pair again. No redial follows.
     TokenSaveFailed,
+    /// `DevicePairRequest` is written to the pairing socket. On a redial it
+    /// follows the fresh connection's own "not approved", so a refusal after
+    /// it answers the request.
+    PairRequestSent,
 }
 
 /// Spawns the network thread on the production [`NetDeps`] holding the
@@ -611,7 +615,10 @@ impl Net {
         self.request_live = true;
         self.request_id = None;
         match send(ws, &ClientMessage::DevicePairRequest).await {
-            Ok(()) => Step::Continue,
+            Ok(()) => {
+                self.emit(NetEvent::PairRequestSent);
+                Step::Continue
+            }
             Err(err) => Step::Close(format!("sending the pairing request: {err:#}")),
         }
     }
@@ -762,10 +769,7 @@ impl Net {
     async fn on_live_command(&mut self, command: Option<NetCommand>, ws: &mut Socket) -> Step {
         match command {
             None => Step::Leave(Next::Quit),
-            Some(NetCommand::Send(msg)) => match send(ws, &msg).await {
-                Ok(()) => Step::Continue,
-                Err(err) => Step::Close(format!("{err:#}")),
-            },
+            Some(NetCommand::Send(msg)) => self.send_message(&msg, ws).await,
             Some(NetCommand::Restart) => match self.restart() {
                 RestartAction::SendShutdown => {
                     info!("restart: asking the daemon to shut down");
@@ -794,6 +798,23 @@ impl Net {
                 | NetCommand::PairRedeem { .. }
                 | NetCommand::PairCancel),
             ) => self.on_live_pair_command(command, ws).await,
+        }
+    }
+
+    /// Sends `msg`, unless the connection is a pairing one and `msg` is not
+    /// a pairing step: the host answers anything else there with its "not
+    /// approved", which must not be mistaken for the request's refusal.
+    async fn send_message(&mut self, msg: &ClientMessage, ws: &mut Socket) -> Step {
+        if self.not_approved() && !is_pairing_message(msg) {
+            debug!(
+                message = type_tag(msg).as_str(),
+                "a pairing connection sends only pairing messages; dropped"
+            );
+            return Step::Continue;
+        }
+        match send(ws, msg).await {
+            Ok(()) => Step::Continue,
+            Err(err) => Step::Close(format!("{err:#}")),
         }
     }
 
@@ -1037,6 +1058,25 @@ fn drop_pair_command(command: &NetCommand, state: &State) {
         ?state,
         "not a pairing connection; dropping the pairing command"
     );
+}
+
+/// Whether `msg` is a pairing step, the only messages a pairing connection
+/// sends.
+fn is_pairing_message(msg: &ClientMessage) -> bool {
+    matches!(
+        msg,
+        ClientMessage::DevicePairRequest
+            | ClientMessage::DevicePairCancel
+            | ClientMessage::DevicePairRedeem { .. }
+    )
+}
+
+/// `msg`'s wire type tag, for a log line.
+fn type_tag(msg: &ClientMessage) -> String {
+    match serde_json::to_value(msg) {
+        Ok(value) => value["type"].as_str().unwrap_or("untagged").to_owned(),
+        Err(err) => format!("unencodable ({err})"),
+    }
 }
 
 /// Whether `msg` is the daemon saying this device is not approved.
@@ -2713,6 +2753,51 @@ mod tests {
     }
 
     #[test]
+    fn a_redial_reports_its_refusal_before_the_request_went_out() {
+        let ca = TestCa::new();
+        let (port, seen) =
+            tls_daemon_scripted(&ca, vec![Answer::NotApprovedThenClose, Answer::Pairing]);
+        let (view_tx, mut view_rx, net) = run_net(
+            tailnet_deps(&ca, None),
+            Target::tailnet(TLS_HOST, Some(port)),
+        );
+        assert!(
+            saw_state(&mut view_rx, |conn| is_not_approved(conn, false)),
+            "never reached not approved"
+        );
+        assert!(
+            seen_until(&seen, |event| *event == Seen::Closed).is_some(),
+            "the daemon's idle close never landed"
+        );
+        assert!(
+            next_state(&mut view_rx).is_some_and(|conn| is_not_approved(&conn, false)),
+            "the idle close was not handled"
+        );
+
+        send_command(&view_tx, NetCommand::PairRequest);
+        let refused = std::cell::Cell::new(false);
+        let sent = saw(&mut view_rx, |event| {
+            if is_message(
+                event,
+                |msg| matches!(msg, DaemonMessage::DevicePairFailed { reason } if reason == DEVICE_NOT_APPROVED),
+            ) {
+                refused.set(true);
+            }
+            matches!(event, NetEvent::PairRequestSent)
+        });
+        assert!(sent, "the redial's request was never reported sent");
+        assert!(
+            refused.get(),
+            "the redial's refusal did not come before the request went out"
+        );
+        assert!(
+            saw(&mut view_rx, |event| is_message(event, is_approved)),
+            "the request on the redial was not answered"
+        );
+        stop_net(view_tx, net);
+    }
+
+    #[test]
     fn a_cancel_before_not_approved_on_the_redial_sends_no_request() {
         let ca = TestCa::new();
         let (port, seen) = tls_daemon_scripted(
@@ -2752,23 +2837,52 @@ mod tests {
             saw_state(&mut view_rx, |conn| is_not_approved(conn, false)),
             "the redial never reached not approved"
         );
+        // A pairing connection sends only pairing messages, so the marker is
+        // one of them.
         send_command(
             &view_tx,
-            NetCommand::Send(Box::new(ClientMessage::ListRepos)),
+            NetCommand::Send(Box::new(ClientMessage::DevicePairCancel)),
         );
 
-        let marker = Seen::Message("list_repos".to_owned());
-        let mut markers = 0;
-        let log = seen_until(&seen, |event| {
-            markers += usize::from(*event == marker);
-            markers == 2
-        })
-        .expect("the markers never arrived");
+        let marker = Seen::Message("device_pair_cancel".to_owned());
+        let log = seen_until(&seen, |event| *event == marker).expect("the marker never arrived");
         assert!(
-            !log.iter().any(
-                |event| matches!(event, Seen::Message(kind) if kind.starts_with("device_pair"))
-            ),
+            !log.iter()
+                .any(|event| *event == Seen::Message("device_pair_request".to_owned())),
             "a cancelled request was still sent: {log:?}"
+        );
+        stop_net(view_tx, net);
+    }
+
+    #[test]
+    fn a_pairing_connection_does_not_send_non_pairing_messages() {
+        let ca = TestCa::new();
+        let (port, seen) = tls_daemon_answering(&ca, Answer::NotApproved);
+        let (view_tx, mut view_rx, net) = run_net(
+            tailnet_deps(&ca, None),
+            Target::tailnet(TLS_HOST, Some(port)),
+        );
+        assert!(
+            saw_state(&mut view_rx, |conn| is_not_approved(conn, false)),
+            "never reached not approved"
+        );
+        send_command(
+            &view_tx,
+            NetCommand::Send(Box::new(ClientMessage::Resize {
+                session_id: "s1".to_owned(),
+                cols: 80,
+                rows: 24,
+                claim: false,
+            })),
+        );
+        send_command(&view_tx, NetCommand::PairRequest);
+
+        let request = Seen::Message("device_pair_request".to_owned());
+        let log = seen_until(&seen, |event| *event == request).expect("the request never arrived");
+        assert!(
+            !log.iter()
+                .any(|event| *event == Seen::Message("resize".to_owned())),
+            "a pairing connection sent a Resize: {log:?}"
         );
         stop_net(view_tx, net);
     }
@@ -2786,12 +2900,14 @@ mod tests {
         // The second request goes unanswered, so no new id ever arrives.
         send_command(&view_tx, NetCommand::PairRequest);
         redeem(&view_tx, WRONG_CODE);
+        // A pairing connection sends only pairing messages, so the marker is
+        // one of them.
         send_command(
             &view_tx,
-            NetCommand::Send(Box::new(ClientMessage::ListRepos)),
+            NetCommand::Send(Box::new(ClientMessage::DevicePairCancel)),
         );
 
-        let marker = Seen::Message("list_repos".to_owned());
+        let marker = Seen::Message("device_pair_cancel".to_owned());
         let log = seen_until(&seen, |event| *event == marker).expect("the marker never arrived");
         let requests = log
             .iter()

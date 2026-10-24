@@ -10,7 +10,9 @@ use crate::support;
 
 use chrono::{TimeDelta, Utc};
 use gpui::{TestAppContext, px};
-use protocol::{ClientMessage, DaemonMessage, PendingDevice, RemoteState};
+use protocol::{
+    ClientMessage, DaemonMessage, DeviceInfo, FEATURE_DEVICE_BLOCK, PendingDevice, RemoteState,
+};
 use rustling_tulip_native::Connection;
 use rustling_tulip_native::remote_access::state_line;
 use rustling_tulip_native::target::Target;
@@ -615,4 +617,270 @@ fn autostart_toggle_calls_the_seam_and_shows_a_failure(cx: &mut TestAppContext) 
         "the toggle leaves with its page"
     );
     assert_eq!(h.autostart().sets(), [true, false]);
+}
+
+const DEVICES: &str = "settings-devices";
+const CONFIRM_CANCEL: &str = "device-block-confirm-cancel";
+const CONFIRM_BLOCK: &str = "device-block-confirm-block";
+
+/// The window reconnects to this PC's daemon, whose `Welcome` lists
+/// `device_block`; returns what the client sent on it.
+fn with_device_block(h: &mut Harness<'_>) -> Vec<ClientMessage> {
+    let mut conn = Connection::for_target(Target::Local);
+    conn.on_connecting();
+    conn.on_socket_open(4242);
+    conn.on_welcome(support::PROTOCOL, vec![FEATURE_DEVICE_BLOCK.to_owned()]);
+    h.set_connection(conn);
+    h.send_welcome(support::PROTOCOL);
+    reload(h);
+    h.sent()
+}
+
+fn lists_devices(sent: &[ClientMessage]) -> usize {
+    sent.iter()
+        .filter(|msg| matches!(msg, ClientMessage::ListDevices))
+        .count()
+}
+
+/// An approved device `id` named `name` with `connected` live connections,
+/// last seen `seen_secs_ago` (never when none).
+fn device(id: &str, name: &str, connected: u32, seen_secs_ago: Option<i64>) -> DeviceInfo {
+    DeviceInfo {
+        device_id: id.to_owned(),
+        name: name.to_owned(),
+        login: "alice@example.com".to_owned(),
+        created_at: Utc::now() - TimeDelta::days(30),
+        last_seen: seen_secs_ago.map(|secs| Utc::now() - TimeDelta::seconds(secs)),
+        revoked: false,
+        connected,
+    }
+}
+
+fn blocked_device(id: &str, name: &str) -> DeviceInfo {
+    DeviceInfo {
+        revoked: true,
+        ..device(id, name, 0, Some(60))
+    }
+}
+
+/// The daemon's device list, as it sends it.
+fn fold_devices(h: &mut Harness<'_>, devices: Vec<DeviceInfo>) {
+    h.send(DaemonMessage::Devices { devices });
+}
+
+/// The Devices rows as drawn: name, login, and status or tag.
+fn device_rows(h: &mut Harness<'_>) -> Vec<(String, String, String)> {
+    h.root(|root, _| root.device_rows())
+}
+
+/// The block confirm's title and focused button, while it shows.
+fn block_confirm(h: &mut Harness<'_>) -> Option<(String, &'static str)> {
+    h.root(|root, _| root.device_block_confirm())
+}
+
+/// The Remote access page open on a daemon that blocks devices, listing
+/// `devices`, with what was sent drained.
+fn devices_page(h: &mut Harness<'_>, devices: Vec<DeviceInfo>) {
+    with_device_block(h);
+    open_page(h);
+    fold_devices(h, devices);
+    h.sent();
+}
+
+#[gpui::test]
+fn devices_section_lists_approved_devices(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    devices_page(
+        &mut h,
+        vec![
+            blocked_device("b1", "laptop"),
+            device("s1", "tablet", 0, Some(7_200)),
+            device("c1", "phone", 1, Some(5)),
+        ],
+    );
+    let login = "alice@example.com".to_owned();
+    assert_eq!(
+        device_rows(&mut h),
+        [
+            ("phone".to_owned(), login.clone(), "Connected".to_owned()),
+            (
+                "tablet".to_owned(),
+                login.clone(),
+                "Last seen 2h ago".to_owned()
+            ),
+            ("laptop".to_owned(), login, "Blocked".to_owned()),
+        ]
+    );
+    assert!(painted(&mut h, DEVICES));
+    assert!(painted(&mut h, "settings-device-block-c1"));
+    assert!(painted(&mut h, "settings-device-block-s1"));
+    assert!(painted(&mut h, "settings-device-blocked-b1"));
+    assert!(painted(&mut h, "settings-device-forget-b1"));
+    assert!(!painted(&mut h, "settings-device-block-b1"));
+    assert!(!painted(&mut h, "settings-device-forget-c1"));
+    let y = |h: &mut Harness<'_>, id: &str| h.bounds(&format!("settings-device-{id}")).origin.y;
+    let (c1, s1, b1) = (y(&mut h, "c1"), y(&mut h, "s1"), y(&mut h, "b1"));
+    assert!(
+        c1 < s1 && s1 < b1,
+        "connected, then last seen, then blocked"
+    );
+}
+
+#[gpui::test]
+fn opening_the_remote_access_page_asks_for_devices(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    let sent = with_device_block(&mut h);
+    assert_eq!(lists_devices(&sent), 1, "asked on Welcome: {sent:?}");
+    h.keys("ctrl-,");
+    h.sent();
+    h.click_on(TAB);
+    let sent = h.sent();
+    assert_eq!(lists_devices(&sent), 1, "asked on the page: {sent:?}");
+    fold_devices(&mut h, Vec::new());
+    assert!(painted(&mut h, DEVICES));
+    assert_eq!(device_rows(&mut h), []);
+    assert!(painted(&mut h, "settings-devices-empty"));
+}
+
+#[gpui::test]
+fn block_opens_confirm_and_confirming_sends_revoke_device(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    devices_page(&mut h, vec![device("d1", "phone", 1, Some(5))]);
+    h.click_on("settings-device-block-d1");
+    assert_eq!(
+        block_confirm(&mut h),
+        Some(("Block phone?".to_owned(), CONFIRM_CANCEL))
+    );
+    assert!(h.sent().is_empty(), "opening the confirm blocks nothing");
+    h.click_on(CONFIRM_BLOCK);
+    let sent = h.sent();
+    assert!(
+        matches!(sent.as_slice(), [ClientMessage::RevokeDevice { device_id }] if device_id == "d1"),
+        "{sent:?}"
+    );
+    assert_eq!(block_confirm(&mut h), None);
+}
+
+#[gpui::test]
+fn cancel_closes_the_confirm_and_sends_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    devices_page(&mut h, vec![device("d1", "phone", 0, None)]);
+    h.click_on("settings-device-block-d1");
+    assert!(block_confirm(&mut h).is_some());
+    h.click_on(CONFIRM_CANCEL);
+    assert_eq!(block_confirm(&mut h), None);
+    assert!(h.sent().is_empty(), "{:?}", h.sent());
+}
+
+#[gpui::test]
+fn escape_cancels_the_block_confirm(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    devices_page(&mut h, vec![device("d1", "phone", 0, None)]);
+    h.click_on("settings-device-block-d1");
+    h.keys("tab");
+    assert_eq!(
+        block_confirm(&mut h),
+        Some(("Block phone?".to_owned(), CONFIRM_BLOCK))
+    );
+    h.keys("shift-tab");
+    assert_eq!(
+        block_confirm(&mut h),
+        Some(("Block phone?".to_owned(), CONFIRM_CANCEL))
+    );
+    h.keys("escape");
+    assert_eq!(block_confirm(&mut h), None);
+    assert!(h.sent().is_empty());
+    assert!(
+        h.root(|root, _| root.settings_open()),
+        "Esc closed only the confirm"
+    );
+    assert_eq!(shown_tab(&mut h), "Remote access");
+
+    h.click_on("settings-device-block-d1");
+    h.keys("tab enter");
+    let sent = h.sent();
+    assert!(
+        matches!(sent.as_slice(), [ClientMessage::RevokeDevice { device_id }] if device_id == "d1"),
+        "Enter presses the focused Block: {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn forget_sends_forget_device(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    devices_page(&mut h, vec![blocked_device("b1", "phone")]);
+    h.click_on("settings-device-forget-b1");
+    let sent = h.sent();
+    assert!(
+        matches!(sent.as_slice(), [ClientMessage::ForgetDevice { device_id }] if device_id == "b1"),
+        "{sent:?}"
+    );
+    assert_eq!(block_confirm(&mut h), None, "Forget asks nothing");
+}
+
+#[gpui::test]
+fn blocked_device_row_shows_the_blocked_tag_after_the_reply(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    devices_page(&mut h, vec![device("d1", "phone", 1, Some(5))]);
+    assert!(!painted(&mut h, "settings-device-blocked-d1"));
+    h.click_on("settings-device-block-d1");
+    h.click_on(CONFIRM_BLOCK);
+    h.sent();
+    fold_devices(&mut h, vec![blocked_device("d1", "phone")]);
+    assert_eq!(
+        device_rows(&mut h),
+        [(
+            "phone".to_owned(),
+            "alice@example.com".to_owned(),
+            "Blocked".to_owned()
+        )]
+    );
+    assert!(painted(&mut h, "settings-device-blocked-d1"));
+    assert!(painted(&mut h, "settings-device-forget-d1"));
+}
+
+#[gpui::test]
+fn block_confirm_keeps_keys_over_an_approval_dialog_opened_beneath_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    devices_page(&mut h, vec![device("d1", "phone", 1, Some(5))]);
+    fold(&mut h, &[request("r1", false)]);
+    h.click_on("settings-device-block-d1");
+    h.activate_pairing_toast(Some("approve:r1"));
+    assert!(
+        h.root(|root, _| root.pairing_dialog_open()),
+        "the toast opens the approval dialog beneath the confirm"
+    );
+    h.sent();
+    h.keys("tab enter");
+    let sent = h.sent();
+    assert!(
+        matches!(sent.as_slice(), [ClientMessage::RevokeDevice { device_id }] if device_id == "d1"),
+        "the confirm on top took the keys, and nothing was approved: {sent:?}"
+    );
+    assert_eq!(block_confirm(&mut h), None);
+    let root = h.root.clone();
+    assert!(
+        h.cx.update(|window, cx| root.read(cx).pairing_has_focus(window)),
+        "the approval dialog, now on top, has the keyboard"
+    );
+}
+
+#[gpui::test]
+fn devices_section_hidden_without_the_device_block_feature(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    open_page(&mut h);
+    let sent = h.sent();
+    assert_eq!(lists_devices(&sent), 0, "an older daemon: {sent:?}");
+    fold_devices(&mut h, vec![device("d1", "phone", 0, None)]);
+    assert!(!painted(&mut h, DEVICES));
+    assert!(!painted(&mut h, "settings-device-d1"));
 }

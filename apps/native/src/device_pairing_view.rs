@@ -38,6 +38,8 @@ pub(crate) enum PairingInput {
     Paired,
     Lost,
     TokenSaveFailed,
+    /// The request is on the host's socket.
+    RequestSent,
 }
 
 impl PairingInput {
@@ -55,6 +57,7 @@ impl PairingInput {
             NetEvent::Paired => Some(Self::Paired),
             NetEvent::PairingLost => Some(Self::Lost),
             NetEvent::TokenSaveFailed => Some(Self::TokenSaveFailed),
+            NetEvent::PairRequestSent => Some(Self::RequestSent),
             NetEvent::Handshake(_) | NetEvent::ShutdownSent | NetEvent::ShutdownFailed => None,
         }
     }
@@ -322,6 +325,11 @@ impl RootView {
             PairingInput::Lost => {
                 if let Some(dialog) = &mut self.device_pairing.dialog {
                     dialog.model.on_lost();
+                }
+            }
+            PairingInput::RequestSent => {
+                if let Some(dialog) = &mut self.device_pairing.dialog {
+                    dialog.model.on_request_sent();
                 }
             }
             PairingInput::TokenSaveFailed => {

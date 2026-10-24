@@ -236,6 +236,18 @@
     },
     {
       "paths": [
+        "apps/native/src/devices.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & test(/^devices::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_remote_access)::/))"
+    },
+    {
+      "paths": [
+        "apps/native/src/devices_view.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native::ui) & test(/^(ui_remote_access)::/))"
+    },
+    {
+      "paths": [
         "apps/native/src/diff_model.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native) & test(/^diff_model::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_diff_tab|ui_diff_view)::/))"
