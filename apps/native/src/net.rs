@@ -4,6 +4,7 @@
 //! the delay [`Connection`] sets. GPUI runs its own executor, so the view and
 //! this thread talk over unbounded futures channels.
 
+use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -14,7 +15,9 @@ use daemon_client::ClientIdentity;
 use daemon_client::device_tokens::{CredentialManagerTokens, DeviceTokenStore, MemoryTokens};
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender};
 use futures::{SinkExt as _, StreamExt as _};
-use protocol::{ClientMessage, DaemonHandshake, DaemonMessage, InboundDaemonMessage};
+use protocol::{
+    ClientMessage, DaemonHandshake, DaemonMessage, DevicePairOutcome, InboundDaemonMessage,
+};
 use rustls::pki_types::CertificateDer;
 use rustls::{ClientConfig, RootCertStore};
 use tokio::net::TcpStream;
@@ -142,6 +145,41 @@ pub enum NetCommand {
     /// Connect to this daemon instead, now: drop the live socket and start
     /// the connection over on it.
     SwitchTarget(Target),
+    /// Ask the tailnet host to pair this device: `DevicePairRequest` on the
+    /// pairing socket, or, when the host closed it, a redial with an empty
+    /// token that sends the request once the host answers "not approved".
+    /// Acts only while the connection is [`State::NotApproved`].
+    PairRequest,
+    /// Redeem the code the owner read on the host for the pending request.
+    /// With no pairing socket the request is gone: nothing is sent and
+    /// [`NetEvent::PairingLost`] follows. Acts only while
+    /// [`State::NotApproved`]; `code` never prints in `{:?}`.
+    PairRedeem { code: String },
+    /// Withdraw the pairing request: `DevicePairCancel` on the pairing
+    /// socket, and no request on the next redial.
+    PairCancel,
+}
+
+impl fmt::Debug for NetCommand {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Send(msg) => f.debug_tuple("Send").field(msg).finish(),
+            Self::Restart => f.write_str("Restart"),
+            Self::Stop => f.write_str("Stop"),
+            Self::Shutdown { before, drain } => f
+                .debug_struct("Shutdown")
+                .field("before", before)
+                .field("drain", drain)
+                .finish(),
+            Self::SwitchTarget(target) => f.debug_tuple("SwitchTarget").field(target).finish(),
+            Self::PairRequest => f.write_str("PairRequest"),
+            Self::PairRedeem { .. } => f
+                .debug_struct("PairRedeem")
+                .field("code", &format_args!("<redacted>"))
+                .finish(),
+            Self::PairCancel => f.write_str("PairCancel"),
+        }
+    }
 }
 
 /// The running daemon's handshake without its auth token.
@@ -179,6 +217,16 @@ pub enum NetEvent {
     /// A [`NetCommand::Shutdown`] arrived with no live socket, so nothing
     /// of it was sent.
     ShutdownFailed,
+    /// The tailnet host issued this device a token and it is stored; the
+    /// host is being redialled with it.
+    Paired,
+    /// The pairing request is gone with its socket (the socket closed while
+    /// it was pending, or a code came with no socket): it must be asked
+    /// again.
+    PairingLost,
+    /// The tailnet host issued this device a token but storing it failed, so
+    /// it is lost (the host shows it once): pair again. No redial follows.
+    TokenSaveFailed,
 }
 
 /// Spawns the network thread on the production [`NetDeps`], connecting to
@@ -275,6 +323,16 @@ struct Net {
     /// A tailnet `Welcome` held back until the next frame says whether the
     /// connection is served or a pairing one.
     held_welcome: Option<Box<DaemonMessage>>,
+    /// A [`NetCommand::PairRequest`] that found no pairing socket: the
+    /// redial sends `DevicePairRequest` once the host answers "not
+    /// approved". A target switch, a restart or a cancel clears it.
+    pair_on_connect: bool,
+    /// Whether a pairing request sent on the current socket is still
+    /// waiting on it: its close then loses the request.
+    request_live: bool,
+    /// The id of the pairing request the current socket's host reported
+    /// pending, which a redeem names.
+    request_id: Option<String>,
 }
 
 impl Net {
@@ -299,6 +357,9 @@ impl Net {
             watchdog: Watchdog::new(SystemTime::now()),
             had_token: false,
             held_welcome: None,
+            pair_on_connect: false,
+            request_live: false,
+            request_id: None,
         }
     }
 
@@ -328,7 +389,26 @@ impl Net {
         info!(%reason, "daemon connection closed");
         let delay = self.conn.on_closed(reason);
         self.emit_state();
+        self.request_id = None;
+        if std::mem::take(&mut self.request_live) {
+            info!("the pairing request was lost with its socket");
+            self.emit(NetEvent::PairingLost);
+        }
         Next::Wait(delay)
+    }
+
+    /// Whether the connection is a pairing one: the only state the pairing
+    /// commands act in.
+    fn not_approved(&self) -> bool {
+        matches!(self.conn.state(), State::NotApproved { .. })
+    }
+
+    /// Forget every pairing step in flight, as a target switch or a restart
+    /// does.
+    fn forget_pairing(&mut self) {
+        self.pair_on_connect = false;
+        self.request_live = false;
+        self.request_id = None;
     }
 
     /// One connection attempt on the current target. A command that arrives
@@ -477,6 +557,8 @@ impl Net {
     /// Pump the open socket both ways until it closes or a command leaves it.
     async fn pump(&mut self, mut ws: Socket, auth_token: String) -> Next {
         self.held_welcome = None;
+        self.request_live = false;
+        self.request_id = None;
         if let Err(err) = send(&mut ws, &self.hello(auth_token)).await {
             return self.closed(format!("sending Hello: {err:#}"));
         }
@@ -501,11 +583,34 @@ impl Net {
             if !matches!(self.conn.state(), State::Connecting) {
                 welcome_deadline = None;
             }
+            let step = self.request_on_connect(&mut ws, step).await;
             match step {
                 Step::Continue => {}
                 Step::Close(reason) => return self.closed(reason),
                 Step::Leave(next) => return next,
             }
+        }
+    }
+
+    /// Once a redial asked for by [`NetCommand::PairRequest`] reaches "not
+    /// approved", send the request it was made for.
+    async fn request_on_connect(&mut self, ws: &mut Socket, step: Step) -> Step {
+        if !matches!(step, Step::Continue) || !self.pair_on_connect || !self.not_approved() {
+            return step;
+        }
+        self.pair_on_connect = false;
+        self.send_pair_request(ws).await
+    }
+
+    async fn send_pair_request(&mut self, ws: &mut Socket) -> Step {
+        info!(daemon = ?self.conn.target(), "asking the tailnet host to pair this device");
+        // Live before the send, so a failed send's close reports it lost; the
+        // old request's id names nothing once this one replaces it.
+        self.request_live = true;
+        self.request_id = None;
+        match send(ws, &ClientMessage::DevicePairRequest).await {
+            Ok(()) => Step::Continue,
+            Err(err) => Step::Close(format!("sending the pairing request: {err:#}")),
         }
     }
 
@@ -521,7 +626,7 @@ impl Net {
         };
         *probe_deadline = None;
         match InboundDaemonMessage::from_json_str(text.as_str()) {
-            Ok(InboundDaemonMessage::Known(msg)) => self.on_daemon_message(msg),
+            Ok(InboundDaemonMessage::Known(msg)) => return self.on_daemon_message(msg),
             Ok(InboundDaemonMessage::Unknown { type_tag, .. }) => {
                 warn!("unknown or undecodable daemon message type: {type_tag}");
                 self.release_welcome();
@@ -534,21 +639,74 @@ impl Net {
     /// On a tailnet host, `Welcome` is held until the next frame: a
     /// `DevicePairFailed` "device not approved" makes the connection a
     /// pairing one (the `Welcome` never reaches the view, so it never shows
-    /// as open), and any other frame releases the `Welcome` first.
-    fn on_daemon_message(&mut self, msg: Box<DaemonMessage>) {
+    /// as open), and any other frame releases the `Welcome` first. A
+    /// `DeviceToken` is stored here and never reaches the view.
+    fn on_daemon_message(&mut self, msg: Box<DaemonMessage>) -> Step {
+        if let DaemonMessage::DeviceToken { token, .. } = &*msg {
+            return self.land_token(&token.0);
+        }
+        self.note_pairing_step(&msg);
         if self.held_welcome.is_some() {
             if is_not_approved(&msg) {
                 self.held_welcome = None;
                 self.on_not_approved();
                 self.emit(NetEvent::Message(msg));
-                return;
+                return Step::Continue;
             }
             self.release_welcome();
         } else if self.holds_welcome(&msg) {
             self.held_welcome = Some(msg);
-            return;
+            return Step::Continue;
         }
         self.apply(msg);
+        Step::Continue
+    }
+
+    /// Track the pairing request through the host's answers: its id once
+    /// pending, and its end on any outcome but approved (the host closes the
+    /// socket next, and the view already has the outcome).
+    fn note_pairing_step(&mut self, msg: &DaemonMessage) {
+        match msg {
+            DaemonMessage::DevicePairPending { request_id, .. } => {
+                self.request_id = Some(request_id.clone());
+            }
+            DaemonMessage::DevicePairDecided { outcome, .. }
+                if *outcome != DevicePairOutcome::Approved =>
+            {
+                self.request_live = false;
+            }
+            _ => {}
+        }
+    }
+
+    /// Store the device token the host issued and redial it at once with the
+    /// token. A failed write loses the token (the host shows it once): it is
+    /// reported and nothing redials.
+    fn land_token(&mut self, token: &str) -> Step {
+        self.request_live = false;
+        self.request_id = None;
+        let Target::Tailnet(host) = self.conn.target().clone() else {
+            warn!("the local daemon sent a device token; ignored");
+            return Step::Continue;
+        };
+        match self.deps.tokens.set(host.name(), token) {
+            Ok(()) => {
+                info!(
+                    host = host.name(),
+                    "paired with the tailnet host; reconnecting with the device token"
+                );
+                self.emit(NetEvent::Paired);
+                Step::Leave(Next::Connect)
+            }
+            Err(err) => {
+                warn!(
+                    host = host.name(),
+                    "saving the device token failed; the token is lost, pair again: {err:#}"
+                );
+                self.emit(NetEvent::TokenSaveFailed);
+                Step::Continue
+            }
+        }
     }
 
     /// Whether `msg` is a `Welcome` to hold back: a tailnet host's first.
@@ -606,7 +764,7 @@ impl Net {
                 Ok(()) => Step::Continue,
                 Err(err) => Step::Close(format!("{err:#}")),
             },
-            Some(NetCommand::Restart) => match self.conn.restart() {
+            Some(NetCommand::Restart) => match self.restart() {
                 RestartAction::SendShutdown => {
                     info!("restart: asking the daemon to shut down");
                     match send(ws, &ClientMessage::Shutdown { drain: false }).await {
@@ -629,11 +787,110 @@ impl Net {
                 self.switch_target(target);
                 Step::Leave(Next::Connect)
             }
+            Some(
+                command @ (NetCommand::PairRequest
+                | NetCommand::PairRedeem { .. }
+                | NetCommand::PairCancel),
+            ) => self.on_live_pair_command(command, ws).await,
         }
+    }
+
+    /// A pairing command while a socket is open.
+    async fn on_live_pair_command(&mut self, command: NetCommand, ws: &mut Socket) -> Step {
+        // Before the state check: a redial's socket can be open and not yet
+        // answered when the cancel comes, and the request must not follow.
+        if matches!(command, NetCommand::PairCancel) {
+            return self.cancel_on_socket(&command, ws).await;
+        }
+        if !self.not_approved() {
+            drop_pair_command(&command, self.conn.state());
+            return Step::Continue;
+        }
+        match command {
+            NetCommand::PairRequest => self.send_pair_request(ws).await,
+            NetCommand::PairRedeem { code } => self.redeem_on_socket(code, ws).await,
+            _ => Step::Continue,
+        }
+    }
+
+    /// Withdraw the pairing request: no request on the redial, and
+    /// `DevicePairCancel` when one is waiting on this socket.
+    async fn cancel_on_socket(&mut self, command: &NetCommand, ws: &mut Socket) -> Step {
+        let live = self.request_live;
+        if !live && !self.pair_on_connect {
+            drop_pair_command(command, self.conn.state());
+            return Step::Continue;
+        }
+        info!(on_the_socket = live, "cancelling the pairing request");
+        self.forget_pairing();
+        if !live {
+            return Step::Continue;
+        }
+        match send(ws, &ClientMessage::DevicePairCancel).await {
+            Ok(()) => Step::Continue,
+            Err(err) => Step::Close(format!("sending the pairing cancel: {err:#}")),
+        }
+    }
+
+    /// Redeem `code` for the request pending on this socket; with none
+    /// pending nothing is sent.
+    async fn redeem_on_socket(&mut self, code: String, ws: &mut Socket) -> Step {
+        let Some(request_id) = self.request_id.clone() else {
+            debug!("no pending pairing request on this socket; dropping PairRedeem");
+            return Step::Continue;
+        };
+        info!(%request_id, "redeeming the pairing code");
+        let msg = ClientMessage::DevicePairRedeem {
+            request_id,
+            code: protocol::Secret(code),
+        };
+        match send(ws, &msg).await {
+            Ok(()) => Step::Continue,
+            Err(err) => Step::Close(format!("sending the pairing code: {err:#}")),
+        }
+    }
+
+    /// A pairing command while no socket is open.
+    fn on_offline_pair_command(&mut self, command: &NetCommand) -> Option<Next> {
+        if matches!(command, NetCommand::PairCancel) && self.pair_on_connect {
+            info!("cancelling the pairing request before the redial asked");
+            self.pair_on_connect = false;
+            return None;
+        }
+        if !self.not_approved() {
+            drop_pair_command(command, self.conn.state());
+            return None;
+        }
+        match command {
+            NetCommand::PairRequest => {
+                info!(daemon = ?self.conn.target(), "the pairing socket is gone; redialling to ask");
+                self.pair_on_connect = true;
+                Some(Next::Connect)
+            }
+            NetCommand::PairRedeem { .. } => {
+                debug!(
+                    ?command,
+                    "no pairing socket, so its request is gone; dropped"
+                );
+                self.emit(NetEvent::PairingLost);
+                None
+            }
+            _ => {
+                debug!(?command, "no pairing socket; nothing to cancel");
+                None
+            }
+        }
+    }
+
+    /// [`Connection::restart`], forgetting the pairing steps in flight.
+    fn restart(&mut self) -> RestartAction {
+        self.forget_pairing();
+        self.conn.restart()
     }
 
     fn switch_target(&mut self, target: Target) {
         info!(daemon = ?target, "switching the daemon target; connecting from scratch");
+        self.forget_pairing();
         self.conn.switch_target(target);
         self.emit_state();
     }
@@ -743,7 +1000,7 @@ impl Net {
             }
             Some(NetCommand::Restart) => {
                 // With no live socket every restart is a fresh connect.
-                let _ = self.conn.restart();
+                let _ = self.restart();
                 info!("restart: connecting from scratch");
                 self.emit_state();
                 Some(Next::Connect)
@@ -762,8 +1019,22 @@ impl Net {
                 self.emit(NetEvent::ShutdownFailed);
                 None
             }
+            Some(
+                command @ (NetCommand::PairRequest
+                | NetCommand::PairRedeem { .. }
+                | NetCommand::PairCancel),
+            ) => self.on_offline_pair_command(&command),
         }
     }
+}
+
+/// A pairing command outside a pairing connection does nothing.
+fn drop_pair_command(command: &NetCommand, state: &State) {
+    debug!(
+        ?command,
+        ?state,
+        "not a pairing connection; dropping the pairing command"
+    );
 }
 
 /// Whether `msg` is the daemon saying this device is not approved.
@@ -801,13 +1072,14 @@ mod tests {
     };
     use crate::connection::{Connection, State};
     use crate::target::Target;
-    use daemon_client::device_tokens::MemoryTokens;
+    use daemon_client::device_tokens::{DeviceTokenStore, MemoryTokens};
     use futures::StreamExt as _;
     use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
     use protocol::ClientMessage;
     use protocol::DEVICE_NOT_APPROVED;
     use protocol::DaemonHandshake;
     use protocol::DaemonMessage;
+    use protocol::DevicePairOutcome;
     use rcgen::{
         BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer,
         KeyPair, KeyUsagePurpose,
@@ -815,9 +1087,9 @@ mod tests {
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
     use std::cell::Cell;
     use std::net::{TcpListener, TcpStream};
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
     use std::sync::mpsc;
+    use std::sync::{Arc, Mutex, PoisonError};
     use std::thread::JoinHandle;
     use std::time::{Duration, Instant};
     use tokio_tungstenite::tungstenite;
@@ -1101,6 +1373,8 @@ mod tests {
         TlsFailed,
         /// A `Hello` carrying this auth token.
         Hello(String),
+        /// A `DevicePairRedeem` for this request with this code.
+        Redeem { request_id: String, code: String },
         /// Any other client message, by its type tag.
         Message(String),
         /// An upgraded connection closed.
@@ -1118,7 +1392,61 @@ mod tests {
         /// As `NotApproved`, then the daemon closes the socket, as its idle
         /// timer does.
         NotApprovedThenClose,
+        /// As `NotApproved`, then the pairing steps: a `DevicePairRequest`
+        /// gets `DevicePairPending` and at once `DevicePairDecided`
+        /// approved; a redeem of [`GOOD_CODE`] gets `DeviceToken`
+        /// [`ISSUED_TOKEN`] and the close, any other code "That code is not
+        /// right." on the open socket; a cancel closes it.
+        Pairing,
+        /// As `Pairing`, but the daemon closes the socket right after its
+        /// `DevicePairPending`, dropping the request.
+        PairingThenDrop,
+        /// As `Pairing`, but only the socket's first request is answered;
+        /// later ones are only recorded.
+        PairingOnce,
+        /// `Hello` gets no answer until the client's next `ListRepos`, which
+        /// is answered with `Welcome` and "device not approved": a test
+        /// marker that holds the connection between socket open and "not
+        /// approved".
+        NotApprovedOnMarker,
     }
+
+    impl Answer {
+        /// Whether this daemon answers the pairing steps.
+        fn pairs(self) -> bool {
+            matches!(
+                self,
+                Self::Pairing | Self::PairingThenDrop | Self::PairingOnce
+            )
+        }
+    }
+
+    /// Send `Welcome`, then "device not approved".
+    fn send_not_approved<S: std::io::Read + std::io::Write>(ws: &mut tungstenite::WebSocket<S>) {
+        let welcome = DaemonMessage::Welcome {
+            protocol_version: 23,
+            supported_versions: vec![23],
+            features: Vec::new(),
+        };
+        let refusal = DaemonMessage::DevicePairFailed {
+            reason: DEVICE_NOT_APPROVED.to_owned(),
+        };
+        if send_daemon_message(ws, &welcome) {
+            let _ = send_daemon_message(ws, &refusal);
+        }
+    }
+
+    /// The token the fake daemon issues for [`GOOD_CODE`]; a `Hello`
+    /// carrying it is served whatever the daemon's [`Answer`].
+    const ISSUED_TOKEN: &str = "issued-device-token";
+    /// The code the fake daemon accepts.
+    const GOOD_CODE: &str = "135790";
+    /// A code the fake daemon refuses.
+    const WRONG_CODE: &str = "246810";
+    /// The id of the fake daemon's pairing request.
+    const REQUEST_ID: &str = "request-1";
+    /// The fake daemon's refusal of a wrong code.
+    const WRONG_CODE_REASON: &str = "That code is not right.";
 
     /// A loopback TLS WebSocket daemon whose certificate for [`TLS_HOST`] is
     /// signed by `ca`. It serves each `Hello` ([`Answer::Served`]) and
@@ -1129,6 +1457,12 @@ mod tests {
 
     /// [`tls_daemon`], answering each `Hello` as `answer` says.
     fn tls_daemon_answering(ca: &TestCa, answer: Answer) -> (u16, mpsc::Receiver<Seen>) {
+        tls_daemon_scripted(ca, vec![answer])
+    }
+
+    /// [`tls_daemon`], answering on its n-th connection as `answers[n]` says
+    /// and on every connection past the list as its last entry says.
+    fn tls_daemon_scripted(ca: &TestCa, answers: Vec<Answer>) -> (u16, mpsc::Receiver<Seen>) {
         let (cert, key) = ca.leaf();
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         let config = rustls::ServerConfig::builder_with_provider(provider)
@@ -1142,11 +1476,12 @@ mod tests {
         let port = listener.local_addr().expect("listener address").port();
         let (seen_tx, seen) = mpsc::channel();
         std::thread::spawn(move || {
-            for stream in listener.incoming() {
+            for (index, stream) in listener.incoming().enumerate() {
                 let Ok(stream) = stream else { return };
                 if seen_tx.send(Seen::Accepted).is_err() {
                     return;
                 }
+                let answer = answers[index.min(answers.len() - 1)];
                 let config = Arc::clone(&config);
                 let seen_tx = seen_tx.clone();
                 std::thread::spawn(move || serve_tls(stream, config, &seen_tx, answer));
@@ -1194,6 +1529,10 @@ mod tests {
             let _ = seen.send(Seen::TlsFailed);
             return;
         };
+        // An `Answer::NotApprovedOnMarker` Hello not answered yet.
+        let mut held_hello = false;
+        // Whether this socket asked to pair before.
+        let mut asked = false;
         loop {
             let text = match ws.read() {
                 Ok(tungstenite::Message::Text(text)) => text,
@@ -1206,34 +1545,120 @@ mod tests {
             let value: serde_json::Value =
                 serde_json::from_str(text.as_str()).expect("a JSON client message");
             let kind = value["type"].as_str().expect("a typed message").to_owned();
-            if kind != "hello" {
-                let _ = seen.send(Seen::Message(kind));
-                continue;
-            }
-            let token = value["auth_token"].as_str().expect("Hello's token");
-            let _ = seen.send(Seen::Hello(token.to_owned()));
-            let welcome = DaemonMessage::Welcome {
-                protocol_version: 23,
-                supported_versions: vec![23],
-                features: Vec::new(),
-            };
-            let next = match answer {
-                Answer::Served => DaemonMessage::Repos { repos: Vec::new() },
-                Answer::NotApproved | Answer::NotApprovedThenClose => {
-                    DaemonMessage::DevicePairFailed {
-                        reason: DEVICE_NOT_APPROVED.to_owned(),
-                    }
+            let keep_open = match kind.as_str() {
+                "hello" if matches!(answer, Answer::NotApprovedOnMarker) => {
+                    let token = value["auth_token"].as_str().expect("Hello's token");
+                    let _ = seen.send(Seen::Hello(token.to_owned()));
+                    held_hello = true;
+                    true
+                }
+                "list_repos" if held_hello => {
+                    let _ = seen.send(Seen::Message(kind));
+                    held_hello = false;
+                    send_not_approved(&mut ws);
+                    true
+                }
+                "device_pair_request" if matches!(answer, Answer::PairingOnce) && asked => {
+                    let _ = seen.send(Seen::Message(kind));
+                    true
+                }
+                "hello" => answer_hello(&mut ws, &value, seen, answer),
+                "device_pair_request" if answer.pairs() => {
+                    asked = true;
+                    answer_pairing(&mut ws, &value, seen, answer)
+                }
+                "device_pair_request" | "device_pair_redeem" | "device_pair_cancel"
+                    if answer.pairs() =>
+                {
+                    answer_pairing(&mut ws, &value, seen, answer)
+                }
+                _ => {
+                    let _ = seen.send(Seen::Message(kind));
+                    true
                 }
             };
-            if !send_daemon_message(&mut ws, &welcome) || !send_daemon_message(&mut ws, &next) {
-                let _ = seen.send(Seen::Closed);
-                return;
-            }
-            if matches!(answer, Answer::NotApprovedThenClose) {
+            if !keep_open {
                 // The read loop reports the close once the client answers it.
                 let _ = ws.close(None);
             }
         }
+    }
+
+    /// Answer a `Hello` as `answer` says; false when the daemon closes the
+    /// socket after it. A failed send shows as the next read's close.
+    fn answer_hello<S: std::io::Read + std::io::Write>(
+        ws: &mut tungstenite::WebSocket<S>,
+        hello: &serde_json::Value,
+        seen: &mpsc::Sender<Seen>,
+        answer: Answer,
+    ) -> bool {
+        let token = hello["auth_token"].as_str().expect("Hello's token");
+        let _ = seen.send(Seen::Hello(token.to_owned()));
+        let welcome = DaemonMessage::Welcome {
+            protocol_version: 23,
+            supported_versions: vec![23],
+            features: Vec::new(),
+        };
+        let served = matches!(answer, Answer::Served) || token == ISSUED_TOKEN;
+        let next = if served {
+            DaemonMessage::Repos { repos: Vec::new() }
+        } else {
+            DaemonMessage::DevicePairFailed {
+                reason: DEVICE_NOT_APPROVED.to_owned(),
+            }
+        };
+        if send_daemon_message(ws, &welcome) {
+            let _ = send_daemon_message(ws, &next);
+        }
+        served || !matches!(answer, Answer::NotApprovedThenClose)
+    }
+
+    /// Answer one pairing step as `answer` says; false when the daemon
+    /// closes the socket after it.
+    fn answer_pairing<S: std::io::Read + std::io::Write>(
+        ws: &mut tungstenite::WebSocket<S>,
+        msg: &serde_json::Value,
+        seen: &mpsc::Sender<Seen>,
+        answer: Answer,
+    ) -> bool {
+        let kind = msg["type"].as_str().expect("a typed message");
+        if kind == "device_pair_redeem" {
+            let code = msg["code"].as_str().expect("the redeem's code").to_owned();
+            let request_id = msg["request_id"].as_str().expect("the redeem's request id");
+            let _ = seen.send(Seen::Redeem {
+                request_id: request_id.to_owned(),
+                code: code.clone(),
+            });
+            if code == GOOD_CODE {
+                let token = DaemonMessage::DeviceToken {
+                    device_id: "device-1".to_owned(),
+                    token: protocol::Secret(ISSUED_TOKEN.to_owned()),
+                };
+                let _ = send_daemon_message(ws, &token);
+                return false;
+            }
+            let refusal = DaemonMessage::DevicePairFailed {
+                reason: WRONG_CODE_REASON.to_owned(),
+            };
+            let _ = send_daemon_message(ws, &refusal);
+            return true;
+        }
+        let _ = seen.send(Seen::Message(kind.to_owned()));
+        if kind == "device_pair_cancel" {
+            return false;
+        }
+        let pending = DaemonMessage::DevicePairPending {
+            request_id: REQUEST_ID.to_owned(),
+            expires_in_secs: 300,
+        };
+        if !send_daemon_message(ws, &pending) || matches!(answer, Answer::PairingThenDrop) {
+            return false;
+        }
+        let approved = DaemonMessage::DevicePairDecided {
+            request_id: REQUEST_ID.to_owned(),
+            outcome: protocol::DevicePairOutcome::Approved,
+        };
+        send_daemon_message(ws, &approved)
     }
 
     /// What `seen` reports, up to and including the first event `done`
@@ -1830,6 +2255,550 @@ mod tests {
             saw_state(&mut view_rx, |conn| conn.is_open()
                 && conn.target() == &switched),
             "the new host never opened"
+        );
+        stop_net(view_tx, net);
+    }
+
+    /// A device token store that reads nothing and fails every write.
+    struct FailingTokens;
+
+    impl DeviceTokenStore for FailingTokens {
+        fn get(&self, _host: &str) -> anyhow::Result<Option<String>> {
+            Ok(None)
+        }
+
+        fn set(&self, _host: &str, _token: &str) -> anyhow::Result<()> {
+            Err(anyhow::anyhow!("Credential Manager refused the write"))
+        }
+
+        fn delete(&self, _host: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn send_command(view_tx: &UnboundedSender<NetCommand>, command: NetCommand) {
+        view_tx
+            .unbounded_send(command)
+            .expect("net thread is running");
+    }
+
+    /// Whether `event` forwards a daemon message `want` accepts.
+    fn is_message(event: &NetEvent, want: impl Fn(&DaemonMessage) -> bool) -> bool {
+        matches!(event, NetEvent::Message(msg) if want(msg))
+    }
+
+    fn is_approved(msg: &DaemonMessage) -> bool {
+        matches!(
+            msg,
+            DaemonMessage::DevicePairDecided {
+                outcome: DevicePairOutcome::Approved,
+                ..
+            }
+        )
+    }
+
+    /// Wait for the pairing connection, ask to pair and wait for the
+    /// approval, as a user does before typing the code.
+    fn ask_and_get_approved(
+        view_tx: &UnboundedSender<NetCommand>,
+        view_rx: &mut UnboundedReceiver<NetEvent>,
+    ) {
+        assert!(
+            saw_state(view_rx, |conn| is_not_approved(conn, false)),
+            "never reached not approved"
+        );
+        send_command(view_tx, NetCommand::PairRequest);
+        assert!(
+            saw(view_rx, |event| is_message(event, is_approved)),
+            "the approval never reached the view"
+        );
+    }
+
+    fn redeem(view_tx: &UnboundedSender<NetCommand>, code: &str) {
+        send_command(
+            view_tx,
+            NetCommand::PairRedeem {
+                code: code.to_owned(),
+            },
+        );
+    }
+
+    #[test]
+    fn pair_request_sends_device_pair_request_on_the_live_socket() {
+        let ca = TestCa::new();
+        let (port, seen) = tls_daemon_answering(&ca, Answer::Pairing);
+        let (view_tx, mut view_rx, net) = run_net(
+            tailnet_deps(&ca, None),
+            Target::tailnet(TLS_HOST, Some(port)),
+        );
+        assert!(
+            saw_state(&mut view_rx, |conn| is_not_approved(conn, false)),
+            "never reached not approved"
+        );
+
+        send_command(&view_tx, NetCommand::PairRequest);
+        let log = seen_until(&seen, |event| {
+            *event == Seen::Message("device_pair_request".to_owned())
+        })
+        .expect("the daemon never got the pairing request");
+        let hellos = log
+            .iter()
+            .filter(|event| matches!(event, Seen::Hello(_)))
+            .count();
+        assert_eq!(hellos, 1, "the request must ride the open socket: {log:?}");
+        assert!(
+            saw(&mut view_rx, |event| is_message(event, |msg| matches!(
+                msg,
+                DaemonMessage::DevicePairPending { request_id, .. } if request_id == REQUEST_ID
+            ))),
+            "the daemon's pending answer was not forwarded"
+        );
+        stop_net(view_tx, net);
+    }
+
+    #[test]
+    fn pair_after_idle_close_redials_then_requests() {
+        let ca = TestCa::new();
+        let (port, seen) =
+            tls_daemon_scripted(&ca, vec![Answer::NotApprovedThenClose, Answer::Pairing]);
+        let (view_tx, mut view_rx, net) = run_net(
+            tailnet_deps(&ca, None),
+            Target::tailnet(TLS_HOST, Some(port)),
+        );
+        assert!(
+            saw_state(&mut view_rx, |conn| is_not_approved(conn, false)),
+            "never reached not approved"
+        );
+        assert!(
+            seen_until(&seen, |event| *event == Seen::Closed).is_some(),
+            "the daemon's idle close never landed"
+        );
+        assert!(
+            next_state(&mut view_rx).is_some_and(|conn| is_not_approved(&conn, false)),
+            "the idle close was not handled"
+        );
+
+        send_command(&view_tx, NetCommand::PairRequest);
+        assert_eq!(
+            next_hello(&seen).as_deref(),
+            Some(""),
+            "a request with the pairing socket gone must redial the host"
+        );
+        assert!(
+            seen_until(&seen, |event| {
+                *event == Seen::Message("device_pair_request".to_owned())
+            })
+            .is_some(),
+            "the redialled socket never carried the request"
+        );
+        assert!(
+            saw(&mut view_rx, |event| is_message(event, is_approved)),
+            "the redialled socket's approval never reached the view"
+        );
+        stop_net(view_tx, net);
+    }
+
+    #[test]
+    fn device_token_is_stored_for_the_host_and_next_hello_carries_it() {
+        let ca = TestCa::new();
+        let (port, seen) = tls_daemon_answering(&ca, Answer::Pairing);
+        let target = Target::tailnet(TLS_HOST, Some(port));
+        let store = Arc::new(MemoryTokens::default());
+        let deps = NetDeps {
+            tokens: store.clone(),
+            ..tailnet_deps(&ca, None)
+        };
+        let (view_tx, mut view_rx, net) = run_net(deps, target.clone());
+        ask_and_get_approved(&view_tx, &mut view_rx);
+
+        redeem(&view_tx, GOOD_CODE);
+        assert!(
+            saw(&mut view_rx, |event| matches!(event, NetEvent::Paired)),
+            "a landed token did not report the pairing"
+        );
+        assert_eq!(
+            store.get(TLS_HOST).expect("reads").as_deref(),
+            Some(ISSUED_TOKEN),
+            "the issued token was not stored for the host"
+        );
+        assert_eq!(next_hello(&seen).as_deref(), Some(""), "the pairing Hello");
+        assert_eq!(
+            next_hello(&seen).as_deref(),
+            Some(ISSUED_TOKEN),
+            "the reconnect's Hello must carry the issued token"
+        );
+        assert!(
+            saw_state(&mut view_rx, |conn| conn.is_open()
+                && conn.target() == &target),
+            "the paired host never opened"
+        );
+        stop_net(view_tx, net);
+    }
+
+    #[test]
+    fn token_is_never_forwarded_to_the_view() {
+        let ca = TestCa::new();
+        let (port, _seen) = tls_daemon_answering(&ca, Answer::Pairing);
+        let (view_tx, mut view_rx, net) = run_net(
+            tailnet_deps(&ca, None),
+            Target::tailnet(TLS_HOST, Some(port)),
+        );
+        ask_and_get_approved(&view_tx, &mut view_rx);
+        let forwarded = Cell::new(false);
+
+        redeem(&view_tx, GOOD_CODE);
+        let opened = saw(&mut view_rx, |event| {
+            let token = is_message(event, |msg| {
+                matches!(msg, DaemonMessage::DeviceToken { .. })
+            });
+            forwarded.set(forwarded.get() || token);
+            matches!(event, NetEvent::State(conn) if conn.is_open())
+        });
+        assert!(opened, "the paired host never opened");
+        assert!(!forwarded.get(), "the device token reached the view");
+        stop_net(view_tx, net);
+    }
+
+    #[test]
+    fn failed_token_save_reports_and_does_not_reconnect_silently() {
+        let ca = TestCa::new();
+        let (port, seen) = tls_daemon_answering(&ca, Answer::Pairing);
+        let deps = NetDeps {
+            tokens: Arc::new(FailingTokens),
+            ..tailnet_deps(&ca, None)
+        };
+        let (view_tx, mut view_rx, net) = run_net(deps, Target::tailnet(TLS_HOST, Some(port)));
+        ask_and_get_approved(&view_tx, &mut view_rx);
+        let paired = Cell::new(false);
+
+        redeem(&view_tx, GOOD_CODE);
+        let reported = saw(&mut view_rx, |event| {
+            paired.set(paired.get() || matches!(event, NetEvent::Paired));
+            matches!(event, NetEvent::TokenSaveFailed)
+        });
+        assert!(reported, "a failed token save was not reported");
+        assert!(!paired.get(), "a token that was not saved reported paired");
+        assert!(
+            seen_until(&seen, |event| *event == Seen::Closed).is_some(),
+            "the daemon never closed after issuing the token"
+        );
+        assert!(
+            next_state(&mut view_rx).is_some_and(|conn| is_not_approved(&conn, false)),
+            "the close after a failed save must leave the host not approved"
+        );
+        wait_out_a_reconnect();
+        assert_eq!(
+            seen.try_recv().ok(),
+            None,
+            "the host was dialled again after the token was lost"
+        );
+        stop_net(view_tx, net);
+    }
+
+    #[test]
+    fn redeem_wrong_code_keeps_the_socket() {
+        let ca = TestCa::new();
+        let (port, seen) = tls_daemon_answering(&ca, Answer::Pairing);
+        let (view_tx, mut view_rx, net) = run_net(
+            tailnet_deps(&ca, None),
+            Target::tailnet(TLS_HOST, Some(port)),
+        );
+        ask_and_get_approved(&view_tx, &mut view_rx);
+
+        redeem(&view_tx, WRONG_CODE);
+        assert!(
+            saw(&mut view_rx, |event| is_message(event, |msg| matches!(
+                msg,
+                DaemonMessage::DevicePairFailed { reason } if reason == WRONG_CODE_REASON
+            ))),
+            "the refusal of the wrong code was not forwarded"
+        );
+        redeem(&view_tx, GOOD_CODE);
+        assert!(
+            saw(&mut view_rx, |event| matches!(event, NetEvent::Paired)),
+            "the right code after a wrong one did not pair"
+        );
+        let good = Seen::Redeem {
+            request_id: REQUEST_ID.to_owned(),
+            code: GOOD_CODE.to_owned(),
+        };
+        let log =
+            seen_until(&seen, |event| *event == good).expect("the second redeem never arrived");
+        let after_first_hello: Vec<&Seen> = log
+            .iter()
+            .skip_while(|event| !matches!(event, Seen::Hello(_)))
+            .skip(1)
+            .collect();
+        assert!(
+            !after_first_hello
+                .iter()
+                .any(|event| matches!(event, Seen::Hello(_) | Seen::Closed)),
+            "both redeems must ride the one pairing socket: {log:?}"
+        );
+        assert!(
+            log.contains(&Seen::Redeem {
+                request_id: REQUEST_ID.to_owned(),
+                code: WRONG_CODE.to_owned(),
+            }),
+            "the wrong code was not redeemed for the pending request: {log:?}"
+        );
+        stop_net(view_tx, net);
+    }
+
+    #[test]
+    fn a_socket_drop_with_a_pending_request_reports_pairing_lost() {
+        let ca = TestCa::new();
+        let (port, _seen) = tls_daemon_answering(&ca, Answer::PairingThenDrop);
+        let (view_tx, mut view_rx, net) = run_net(
+            tailnet_deps(&ca, None),
+            Target::tailnet(TLS_HOST, Some(port)),
+        );
+        assert!(
+            saw_state(&mut view_rx, |conn| is_not_approved(conn, false)),
+            "never reached not approved"
+        );
+
+        send_command(&view_tx, NetCommand::PairRequest);
+        assert!(
+            saw(&mut view_rx, |event| matches!(event, NetEvent::PairingLost)),
+            "a drop with the request pending did not report it lost"
+        );
+        stop_net(view_tx, net);
+    }
+
+    #[test]
+    fn pair_commands_outside_not_approved_do_nothing() {
+        let ca = TestCa::new();
+        let (port, seen) = tls_daemon(&ca);
+        let (view_tx, mut view_rx, net) = run_net(
+            tailnet_deps(&ca, Some(DEVICE_TOKEN)),
+            Target::tailnet(TLS_HOST, Some(port)),
+        );
+        assert!(saw_state(&mut view_rx, Connection::is_open), "never opened");
+
+        send_command(&view_tx, NetCommand::PairRequest);
+        redeem(&view_tx, GOOD_CODE);
+        send_command(&view_tx, NetCommand::PairCancel);
+        send_command(
+            &view_tx,
+            NetCommand::Send(Box::new(ClientMessage::ListRepos)),
+        );
+
+        let marker = Seen::Message("list_repos".to_owned());
+        let log = seen_until(&seen, |event| *event == marker).expect("the marker never arrived");
+        let sent: Vec<&Seen> = log
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    Seen::Message(_) | Seen::Redeem { .. } | Seen::Hello(_)
+                )
+            })
+            .collect();
+        assert_eq!(
+            sent,
+            vec![&Seen::Hello(DEVICE_TOKEN.to_owned()), &marker],
+            "a pairing command reached a serving host or redialled it"
+        );
+        while let Ok(event) = view_rx.try_recv() {
+            assert!(
+                !matches!(
+                    event,
+                    NetEvent::PairingLost | NetEvent::Paired | NetEvent::TokenSaveFailed
+                ),
+                "a dropped pairing command reported a pairing event"
+            );
+        }
+        stop_net(view_tx, net);
+    }
+
+    /// A log sink the tests read back.
+    #[derive(Clone, Default)]
+    struct CapturedLog(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedLog {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl CapturedLog {
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap_or_else(PoisonError::into_inner))
+                .into_owned()
+        }
+    }
+
+    #[test]
+    fn the_redeem_code_never_appears_in_debug_or_logs() {
+        let shown = format!(
+            "{:?}",
+            NetCommand::PairRedeem {
+                code: WRONG_CODE.to_owned()
+            }
+        );
+        assert!(!shown.contains(WRONG_CODE), "{shown}");
+        assert!(shown.contains("PairRedeem"), "{shown}");
+
+        let ca = TestCa::new();
+        let (port, seen) = tls_daemon_answering(&ca, Answer::Pairing);
+        let deps = tailnet_deps(&ca, None);
+        let log = CapturedLog::default();
+        let writer = log.clone();
+        let (view_tx, commands) = unbounded();
+        let (events, mut view_rx) = unbounded();
+        let net = std::thread::spawn(move || {
+            let subscriber = tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::TRACE)
+                .with_ansi(false)
+                .with_writer(move || writer.clone())
+                .finish();
+            tracing::subscriber::with_default(subscriber, || {
+                run_thread(
+                    commands,
+                    events,
+                    deps,
+                    Target::tailnet(TLS_HOST, Some(port)),
+                    WELCOME_TIMEOUT,
+                );
+            });
+        });
+        ask_and_get_approved(&view_tx, &mut view_rx);
+
+        // On the live socket: sent, refused, the socket kept.
+        redeem(&view_tx, WRONG_CODE);
+        assert!(
+            seen_until(&seen, |event| matches!(event, Seen::Redeem { .. })).is_some(),
+            "the redeem never reached the daemon"
+        );
+        assert!(
+            saw(&mut view_rx, |event| is_message(event, |msg| matches!(
+                msg,
+                DaemonMessage::DevicePairFailed { .. }
+            ))),
+            "the refusal never reached the view"
+        );
+        // With the socket gone: dropped and reported lost.
+        send_command(&view_tx, NetCommand::PairCancel);
+        assert!(
+            next_state(&mut view_rx).is_some_and(|conn| is_not_approved(&conn, false)),
+            "the cancel's close was not handled"
+        );
+        redeem(&view_tx, WRONG_CODE);
+        assert!(
+            saw(&mut view_rx, |event| matches!(event, NetEvent::PairingLost)),
+            "a redeem with no socket was not reported lost"
+        );
+        stop_net(view_tx, net);
+
+        let text = log.text();
+        assert!(
+            text.contains("PairRedeem"),
+            "the dropped redeem was not logged by name: {text}"
+        );
+        assert!(
+            !text.contains(WRONG_CODE),
+            "the code reached the log: {text}"
+        );
+    }
+
+    #[test]
+    fn a_cancel_before_not_approved_on_the_redial_sends_no_request() {
+        let ca = TestCa::new();
+        let (port, seen) = tls_daemon_scripted(
+            &ca,
+            vec![Answer::NotApprovedThenClose, Answer::NotApprovedOnMarker],
+        );
+        let (view_tx, mut view_rx, net) = run_net(
+            tailnet_deps(&ca, None),
+            Target::tailnet(TLS_HOST, Some(port)),
+        );
+        assert!(
+            saw_state(&mut view_rx, |conn| is_not_approved(conn, false)),
+            "never reached not approved"
+        );
+        assert!(
+            seen_until(&seen, |event| *event == Seen::Closed).is_some(),
+            "the daemon's idle close never landed"
+        );
+        assert!(
+            next_state(&mut view_rx).is_some_and(|conn| is_not_approved(&conn, false)),
+            "the idle close was not handled"
+        );
+
+        send_command(&view_tx, NetCommand::PairRequest);
+        assert_eq!(
+            next_hello(&seen).as_deref(),
+            Some(""),
+            "the request did not redial"
+        );
+        // The redial's socket is open and its host has not answered yet.
+        send_command(&view_tx, NetCommand::PairCancel);
+        send_command(
+            &view_tx,
+            NetCommand::Send(Box::new(ClientMessage::ListRepos)),
+        );
+        assert!(
+            saw_state(&mut view_rx, |conn| is_not_approved(conn, false)),
+            "the redial never reached not approved"
+        );
+        send_command(
+            &view_tx,
+            NetCommand::Send(Box::new(ClientMessage::ListRepos)),
+        );
+
+        let marker = Seen::Message("list_repos".to_owned());
+        let mut markers = 0;
+        let log = seen_until(&seen, |event| {
+            markers += usize::from(*event == marker);
+            markers == 2
+        })
+        .expect("the markers never arrived");
+        assert!(
+            !log.iter().any(
+                |event| matches!(event, Seen::Message(kind) if kind.starts_with("device_pair"))
+            ),
+            "a cancelled request was still sent: {log:?}"
+        );
+        stop_net(view_tx, net);
+    }
+
+    #[test]
+    fn a_new_request_forgets_the_old_request_id() {
+        let ca = TestCa::new();
+        let (port, seen) = tls_daemon_answering(&ca, Answer::PairingOnce);
+        let (view_tx, mut view_rx, net) = run_net(
+            tailnet_deps(&ca, None),
+            Target::tailnet(TLS_HOST, Some(port)),
+        );
+        ask_and_get_approved(&view_tx, &mut view_rx);
+
+        // The second request goes unanswered, so no new id ever arrives.
+        send_command(&view_tx, NetCommand::PairRequest);
+        redeem(&view_tx, WRONG_CODE);
+        send_command(
+            &view_tx,
+            NetCommand::Send(Box::new(ClientMessage::ListRepos)),
+        );
+
+        let marker = Seen::Message("list_repos".to_owned());
+        let log = seen_until(&seen, |event| *event == marker).expect("the marker never arrived");
+        let requests = log
+            .iter()
+            .filter(|event| **event == Seen::Message("device_pair_request".to_owned()))
+            .count();
+        assert_eq!(requests, 2, "both requests reach the host: {log:?}");
+        assert!(
+            !log.iter().any(|event| matches!(event, Seen::Redeem { .. })),
+            "a redeem named the replaced request: {log:?}"
         );
         stop_net(view_tx, net);
     }

@@ -82,6 +82,9 @@ fn commands(h: &mut Harness<'_>) -> Vec<String> {
             NetCommand::Stop => "stop".to_owned(),
             NetCommand::Send(msg) => format!("send {msg:?}"),
             NetCommand::SwitchTarget(target) => format!("switch target {target:?}"),
+            command @ (NetCommand::PairRequest
+            | NetCommand::PairRedeem { .. }
+            | NetCommand::PairCancel) => format!("{command:?}"),
         })
         .collect()
 }

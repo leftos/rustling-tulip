@@ -2310,7 +2310,12 @@ impl RootView {
                     | DaemonMessage::SessionUpdated { .. }
                     | DaemonMessage::SessionRemoved { .. }
             ),
-            NetEvent::Handshake(_) | NetEvent::ShutdownSent | NetEvent::ShutdownFailed => false,
+            NetEvent::Handshake(_)
+            | NetEvent::ShutdownSent
+            | NetEvent::ShutdownFailed
+            | NetEvent::Paired
+            | NetEvent::PairingLost
+            | NetEvent::TokenSaveFailed => false,
         };
         match event {
             NetEvent::State(conn) => {
@@ -2351,6 +2356,7 @@ impl RootView {
             }
             NetEvent::ShutdownSent => self.on_shutdown_sent(),
             NetEvent::ShutdownFailed => self.on_shutdown_failed(window, cx),
+            NetEvent::Paired | NetEvent::PairingLost | NetEvent::TokenSaveFailed => {}
         }
         // The overlay covers the footer; a flyout left open under it would
         // reappear (possibly armed) when the overlay goes.
