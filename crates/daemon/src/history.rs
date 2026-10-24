@@ -1719,7 +1719,10 @@ mod tests {
             "source": "clear",
             "session_id": "new-conv",
         });
-        crate::hook_status::apply_details(&mut rec, &crate::hook_status::details(&body));
+        let report = agent_registry::plugin(protocol::Agent::Claude)
+            .map_hook_event(&body, None, false)
+            .expect("a start is mapped");
+        crate::hook_status::apply_details(&mut rec, &report);
         assert_eq!(
             rec.claude_session_id.as_deref(),
             Some("new-conv"),

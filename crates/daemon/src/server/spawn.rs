@@ -573,7 +573,10 @@ impl SpawnArgs {
 /// as the agent's descriptor names its fields: the one place a spawn
 /// request's typed options become [`OptionValues`]. An unset permission mode
 /// or model is [`OptionValue::Null`].
-fn options_from_request(agent_options: &AgentOptions, model: Option<&str>) -> OptionValues {
+pub(crate) fn options_from_request(
+    agent_options: &AgentOptions,
+    model: Option<&str>,
+) -> OptionValues {
     let model = model.map_or(OptionValue::Null, |model| {
         OptionValue::Text(model.to_string())
     });

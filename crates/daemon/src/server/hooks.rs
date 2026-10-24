@@ -1,5 +1,7 @@
 //! The HTTP `/hook` route: Claude Code hook reports, their bearer check and event time.
 use super::Hub;
+use super::spawn::options_from_request;
+use agent_api::HookReport;
 use axum::body::{Body, Bytes};
 use axum::extract::{Path as AxumPath, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -48,21 +50,46 @@ pub(super) async fn hook_handler(
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(&body) else {
         return StatusCode::NO_CONTENT.into_response();
     };
-    let Some(signal) = crate::hook_status::map_event(&value) else {
+    let (report, known) = map_report(&hub, &session_id, &value);
+    let Some(report) = report else {
         return StatusCode::NO_CONTENT.into_response();
     };
     let event_time = hook_time(&headers);
-    let details = crate::hook_status::details(&value);
-    if hub.sessions.get(&session_id).is_none() {
+    if !known {
         // A spawn may have started the child — whose hooks fire from its
         // argv — before its record is inserted. Hold the event for the
         // insertion instead of dropping it on the floor.
         hub.pending_hooks
-            .defer(&hub, &session_id, event_time, &signal, &details);
+            .defer(&hub, &session_id, event_time, &report);
         return StatusCode::NO_CONTENT.into_response();
     }
-    crate::hook_status::apply_signal(&hub, &session_id, event_time, &signal, &details);
+    crate::hook_status::apply_signal(&hub, &session_id, event_time, &report);
     StatusCode::NO_CONTENT.into_response()
+}
+
+/// The report the session's agent maps `body` to, and whether the registry
+/// holds the session.
+///
+/// A held session's plugin maps it with the options and trust its spawn
+/// recorded (none for a record without a spawn config). An event for a
+/// session not inserted yet is mapped by the default agent's plugin with no
+/// options, untrusted.
+fn map_report(hub: &Hub, session_id: &str, body: &serde_json::Value) -> (Option<HookReport>, bool) {
+    let Some(record) = hub.sessions.get(session_id) else {
+        let plugin = agent_registry::plugin(protocol::Agent::default());
+        return (plugin.map_hook_event(body, None, false), false);
+    };
+    let (agent, options, trusted) = {
+        let record = crate::sync::lock(&record);
+        let spawn = record.spawn_config.as_ref();
+        (
+            record.agent,
+            spawn.map(|spawn| options_from_request(&spawn.agent_options, spawn.model.as_deref())),
+            spawn.is_some_and(|spawn| spawn.dangerously_skip_permissions),
+        )
+    };
+    let plugin = agent_registry::plugin(agent);
+    (plugin.map_hook_event(body, options.as_ref(), trusted), true)
 }
 
 /// `GET /proof` — the daemon proves to the hook shim that it holds this run's
@@ -335,14 +362,8 @@ mod tests {
             r#""options":[{"label":"A"},{"label":"B"}],"multiSelect":false}]}}"#,
         );
         let event: serde_json::Value = serde_json::from_str(question).expect("parse hook body");
-        let signal = crate::hook_status::map_event(&event).expect("a question is mapped");
-        crate::hook_status::apply_signal(
-            &hub,
-            "s1",
-            Some(100),
-            &signal,
-            &crate::hook_status::details(&event),
-        );
+        let signal = report(&event);
+        crate::hook_status::apply_signal(&hub, "s1", Some(100), &signal);
         assert!(
             matches!(
                 attention.try_recv().map(|event| event.reason),
@@ -369,13 +390,7 @@ mod tests {
                 tokio::task::yield_now().await;
             }
         }
-        crate::hook_status::apply_signal(
-            &hub,
-            "s1",
-            Some(200),
-            &signal,
-            &crate::hook_status::details(&event),
-        );
+        crate::hook_status::apply_signal(&hub, "s1", Some(200), &signal);
         assert!(
             attention.try_recv().is_err(),
             "the dialog on screen and a repeat event raise no second event"
@@ -634,14 +649,15 @@ mod tests {
     /// Apply the hook `body` to `s1` at `event_time`, as the route does.
     fn apply_hook(hub: &Hub, body: &str, event_time: u128) {
         let event: serde_json::Value = serde_json::from_str(body).expect("parse hook body");
-        let signal = crate::hook_status::map_event(&event).expect("the body maps to a signal");
-        crate::hook_status::apply_signal(
-            hub,
-            "s1",
-            Some(event_time),
-            &signal,
-            &crate::hook_status::details(&event),
-        );
+        crate::hook_status::apply_signal(hub, "s1", Some(event_time), &report(&event));
+    }
+
+    /// The report Claude's plugin maps `event` to, for a session with no
+    /// spawn options.
+    fn report(event: &serde_json::Value) -> HookReport {
+        agent_registry::plugin(protocol::Agent::Claude)
+            .map_hook_event(event, None, false)
+            .expect("the body maps to a report")
     }
 
     /// Whether `id`'s record is driven by hook reports.
@@ -668,14 +684,7 @@ mod tests {
         hub.sessions.insert(idle_record("agent"));
         let apply = |id: &str, body: &str, event_time: u128| {
             let event: serde_json::Value = serde_json::from_str(body).expect("parse hook body");
-            let signal = crate::hook_status::map_event(&event).expect("the body maps to a signal");
-            crate::hook_status::apply_signal(
-                &hub,
-                id,
-                Some(event_time),
-                &signal,
-                &crate::hook_status::details(&event),
-            );
+            crate::hook_status::apply_signal(&hub, id, Some(event_time), &report(&event));
         };
 
         for id in ["shell", "agent"] {

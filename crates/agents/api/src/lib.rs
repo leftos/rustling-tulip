@@ -16,12 +16,13 @@
 
 #[cfg(feature = "test-support")]
 pub mod conformance;
+pub mod hook_vocabulary;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_agent;
 
 use chrono::{DateTime, Utc};
 use protocol::{AgentDescriptor, FieldKind, OptionField, OptionValue, OptionValues};
-use protocol::{SessionMember, SessionStatus};
+use protocol::{PendingInput, SessionMember, SessionStatus};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::fmt;
@@ -91,6 +92,55 @@ pub struct HookPlan {
     /// The argv to append, each `{file:<name>}` a placeholder for one of
     /// [`Self::files`].
     pub args: Vec<String>,
+}
+
+/// How a hook event changes a session's pending input.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PendingUpdate {
+    /// Drop what is pending.
+    Clear,
+    /// Replace what is pending.
+    Set(PendingInput),
+    /// Keep what is pending; when nothing is pending, use this.
+    KeepOr(PendingInput),
+}
+
+/// What one hook event says about its session, as [`Agent::map_hook_event`]
+/// reads it. The daemon orders it against the session's other events and
+/// applies it to the record.
+#[derive(Debug, Clone, PartialEq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each flag is an independent fact one event reports, not states of one machine"
+)]
+pub struct HookReport {
+    /// The status the event implies, or `None` when it says nothing about
+    /// the status.
+    pub status: Option<SessionStatus>,
+    /// How the event changes what the session is waiting for.
+    pub pending: PendingUpdate,
+    /// The conversation the session moved to (a new conversation's start, or
+    /// a resumed one's own id).
+    pub conversation_id: Option<String>,
+    /// The assistant message the turn ended with, untrimmed and uncapped.
+    pub last_message: Option<String>,
+    /// The recent-actions line a failed turn leaves.
+    pub failure: Option<String>,
+    /// The spawn's permission mode and the one the agent reported, when they
+    /// differ.
+    pub permission_mismatch: Option<(String, String)>,
+    /// The agent ended (a `/clear` ends only its conversation).
+    pub agent_ended: bool,
+    /// The agent started a new run.
+    pub agent_started: bool,
+    /// A subagent fired the event, not the main agent.
+    pub subagent: bool,
+    /// Whether work runs on beside an idle turn, when the main agent's turn
+    /// end says so.
+    pub background: Option<bool>,
+    /// An idle the agent reports while it may still be waiting on a prompt,
+    /// which leaves a pending prompt alone.
+    pub weak_idle: bool,
 }
 
 /// One change a plugin read from a line of its CLI's headless output, for the
@@ -406,6 +456,19 @@ pub trait Agent: Send + Sync + 'static {
     fn hook_plan(&self, _opts: &Self::Options, _trusted: bool, _shim: &HookShim<'_>) -> HookPlan {
         HookPlan::default()
     }
+
+    /// What one hook payload says about its session, or `None` for a payload
+    /// the agent does not know. `spawn` is the session's spawn options, when
+    /// the session has a record that carries them, and `trusted` whether it
+    /// was spawned trusted.
+    fn map_hook_event(
+        &self,
+        _body: &serde_json::Value,
+        _spawn: Option<&Self::Options>,
+        _trusted: bool,
+    ) -> Option<HookReport> {
+        None
+    }
 }
 
 /// An [`Agent`] as the registry holds it: object-safe, taking the spawn's
@@ -487,6 +550,15 @@ pub trait AgentPlugin: Send + Sync {
         trusted: bool,
         shim: &HookShim<'_>,
     ) -> Result<HookPlan, AgentError>;
+
+    /// [`Agent::map_hook_event`] over `spawn` decoded; when they do not
+    /// decode, an error is logged and the payload is mapped with no options.
+    fn map_hook_event(
+        &self,
+        body: &serde_json::Value,
+        spawn: Option<&OptionValues>,
+        trusted: bool,
+    ) -> Option<HookReport>;
 
     /// Resolve the executable path (the env-var override, or the default).
     /// Concrete `which`/shim resolution lives in the daemon's
@@ -582,6 +654,22 @@ impl<A: Agent> AgentPlugin for A {
     ) -> Result<HookPlan, AgentError> {
         let opts = decode_options(self, opts)?;
         Ok(Agent::hook_plan(self, &opts, trusted, shim))
+    }
+
+    fn map_hook_event(
+        &self,
+        body: &serde_json::Value,
+        spawn: Option<&OptionValues>,
+        trusted: bool,
+    ) -> Option<HookReport> {
+        let opts = spawn.and_then(|values| match decode_options(self, values) {
+            Ok(opts) => Some(opts),
+            Err(err) => {
+                error!(%err, "mapping a hook event without the spawn's options");
+                None
+            }
+        });
+        Agent::map_hook_event(self, body, opts.as_ref(), trusted)
     }
 }
 

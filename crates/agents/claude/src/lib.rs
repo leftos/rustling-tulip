@@ -15,7 +15,7 @@ pub use transcripts::encode_project_dir;
 
 use agent_api::{
     Agent, ConversationPlan, ConversationQuery, EnvPlan, FoundConversation, HeadlessEvent,
-    HookPlan, HookShim, KeyLookup, Refusal, ResolvedRows, SpawnCheck, SpawnContext,
+    HookPlan, HookReport, HookShim, KeyLookup, Refusal, ResolvedRows, SpawnCheck, SpawnContext,
     workspace_prelude,
 };
 use protocol::{
@@ -304,6 +304,15 @@ impl Agent for ClaudePlugin {
 
     fn hook_plan(&self, _opts: &ClaudeOptions, _trusted: bool, shim: &HookShim<'_>) -> HookPlan {
         hooks::hook_plan(shim)
+    }
+
+    fn map_hook_event(
+        &self,
+        body: &serde_json::Value,
+        spawn: Option<&ClaudeOptions>,
+        trusted: bool,
+    ) -> Option<HookReport> {
+        hooks::map_hook_event(body, spawn, trusted)
     }
 }
 
