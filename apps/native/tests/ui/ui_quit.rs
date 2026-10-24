@@ -843,7 +843,7 @@ fn exit_dialog_survives_welcome(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = asking(cx, &dir);
 
-    h.send(support::welcome(1));
+    h.send_welcome(1);
     assert!(exit_open(&mut h), "a reconnect leaves the dialog open");
 
     h.set_connection(closed_conn());
@@ -867,7 +867,7 @@ fn exit_dialog_survives_welcome(cx: &mut TestAppContext) {
     assert!(commands(&mut h).is_empty(), "a disabled stop sends nothing");
 
     h.set_connection(open_conn());
-    h.send(support::welcome(1));
+    h.send_welcome(1);
     assert!(exit_open(&mut h));
     assert!(exit_buttons(&mut h).iter().all(|(_, _, enabled)| *enabled));
 }

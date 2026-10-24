@@ -1,10 +1,6 @@
 //! One agent's spawn options: the agent's descriptor and the values its
 //! fields hold, read the way the daemon's `validate` reads them, and the
 //! fields the spawn dialog draws from them.
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the model's only callers are its unit tests")
-)]
 
 use std::collections::BTreeMap;
 
@@ -68,7 +64,8 @@ pub(crate) struct FieldView {
     /// [`SpawnPlacement::Main`] or [`SpawnPlacement::Advanced`].
     pub placement: SpawnPlacement,
     pub editor: FieldEditor,
-    /// The value the spawn runs with.
+    /// The value the field shows: the one the spawn runs with, or for a
+    /// field a trusted launch locks, the one kept for an untrusted launch.
     pub value: OptionValue,
     /// Whether the field cannot be changed: a field locked on a trusted
     /// launch while the launch is trusted, or a kind this client does not
@@ -124,6 +121,19 @@ impl AgentOptions {
         }
     }
 
+    /// Field `id` holds what it holds in `from`, set or not: a re-seed
+    /// keeps the fields the user set.
+    pub(crate) fn keep_field(&mut self, id: &str, from: &Self) {
+        match from.values.get(id) {
+            Some(value) => {
+                self.values.insert(id.to_owned(), value.clone());
+            }
+            None => {
+                self.values.remove(id);
+            }
+        }
+    }
+
     fn has_field(&self, id: &str) -> bool {
         self.descriptor.fields.iter().any(|field| field.id == id)
     }
@@ -146,10 +156,12 @@ impl AgentOptions {
     }
 
     /// The fields the spawn dialog draws: the Main and Advanced fields no
-    /// `when` rule hides, in the descriptor's order.
+    /// `when` rule hides, in the descriptor's order. A field a trusted
+    /// launch locks shows the value it keeps for an untrusted one.
     #[must_use]
     pub(crate) fn fields(&self, trusted: bool) -> Vec<FieldView> {
         let resolved = self.resolved(trusted);
+        let kept = self.resolved(false);
         self.descriptor
             .fields
             .iter()
@@ -161,7 +173,7 @@ impl AgentOptions {
                 help: field.help.clone(),
                 placement: field.spawn,
                 editor: editor(field, &resolved),
-                value: resolved
+                value: kept
                     .get(&field.id)
                     .cloned()
                     .unwrap_or_else(|| field.default.clone()),
@@ -169,6 +181,21 @@ impl AgentOptions {
                     || (trusted && field.locked_when_trusted),
             })
             .collect()
+    }
+
+    /// Whether an Advanced field the dialog draws holds a value other than
+    /// its default, so the dialog opens its Advanced section on it.
+    #[must_use]
+    pub(crate) fn advanced_set(&self) -> bool {
+        self.descriptor
+            .fields
+            .iter()
+            .filter(|field| field.spawn == SpawnPlacement::Advanced)
+            .any(|field| {
+                self.fields(false)
+                    .iter()
+                    .any(|view| view.id == field.id && view.value != field.default)
+            })
     }
 
     /// The values a spawn sends: only the fields whose value differs from
@@ -486,6 +513,11 @@ mod tests {
             field(&trusted, "permission_mode").disabled,
             "a trusted launch locks the permission mode"
         );
+        assert_eq!(
+            field(&trusted, "permission_mode").value,
+            text("plan"),
+            "a locked field shows the value it keeps"
+        );
         assert!(
             !field(&trusted, "model").disabled,
             "a field not locked when trusted stays open"
@@ -655,6 +687,21 @@ mod tests {
             "the stored value goes back untouched"
         );
         assert!(agent_api::validate(&descriptor, &wire).is_ok());
+    }
+
+    #[test]
+    fn an_advanced_value_off_its_default_is_reported() {
+        let mut options = AgentOptions::new(claude(), None);
+        assert!(!options.advanced_set(), "every field at its default");
+        options.set("provider", text("deepseek"));
+        assert!(!options.advanced_set(), "provider is a Main field");
+        options.set("model", text("   "));
+        assert!(!options.advanced_set(), "a blank model is no value");
+        options.set("model", text("opus"));
+        assert!(options.advanced_set());
+        options.set("model", OptionValue::Null);
+        options.set("permission_mode", text("plan"));
+        assert!(options.advanced_set());
     }
 
     #[test]

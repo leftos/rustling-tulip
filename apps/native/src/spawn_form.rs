@@ -1,23 +1,25 @@
-//! The spawn dialog's form: target, runtime, Open in, worktree new or
-//! existing, branch and base branch, trusted launch, the Advanced section (model, the agent's approval or sandbox
-//! options, extra environment variables), the "Share this worktree?"
+//! The spawn dialog's form: target, runtime and the agent's Main fields,
+//! Open in, worktree new or existing, branch and base branch, trusted
+//! launch, the Advanced section (the agent's Advanced fields, extra
+//! environment variables), the "Share this worktree?"
 //! confirm and the keyboard focus ring. `spawn_view` renders it and forwards
 //! input; the daemon requests it needs come back as messages.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::{Duration, Instant};
 
 use protocol::env_rows::{self, Reference, is_secret_key};
 use protocol::{
-    AgentId, AgentSelection, ClientMessage, DaemonMessage, EnvName, EnvScope, MemberSpawnPreview,
-    PinnedMemberWorktree, RepoEntry, RootWorktreeEntry, RootWorktreeStatus, SessionMode,
-    SessionSnapshot, SpawnConfig, SpawnRequest, SpawnTarget, SuggestTarget, TabEntry,
-    WorkspaceEntry, WorktreeInfo, WorktreeLaunchTarget, WorktreeReusePolicy,
+    AgentDescriptor, AgentId, AgentSelection, ClientMessage, DaemonMessage, EnvName, EnvScope,
+    MemberSpawnPreview, OptionValue, OptionValues, PinnedMemberWorktree, RepoEntry,
+    RootWorktreeEntry, RootWorktreeStatus, SessionMode, SessionSnapshot, SpawnConfig,
+    SpawnPlacement, SpawnRequest, SpawnTarget, SuggestTarget, TabEntry, WorkspaceEntry,
+    WorktreeInfo, WorktreeLaunchTarget, WorktreeReusePolicy,
 };
 
-use crate::claude_compat::{self, ClaudeChoice, ClaudeProvider, PermissionMode};
+use crate::agent_options::{AgentOptions, FieldEditor, FieldView};
 use crate::combobox::{ComboRow, Combobox};
-use crate::sidebar::{SpawnDefaults, known_provider};
+use crate::sidebar::SpawnDefaults;
 use crate::spawn_preview::{Preview, PreviewKey, ReuseChoice};
 use crate::spawns::OpenIn;
 
@@ -102,18 +104,6 @@ pub(crate) enum Runtime {
 }
 
 impl Runtime {
-    /// The runtimes the dialog offers: Claude, then a plain shell.
-    pub(crate) fn all() -> [Self; 2] {
-        [Self::Agent(claude_compat::claude_id()), Self::PlainShell]
-    }
-
-    pub(crate) fn label(&self) -> &str {
-        match self {
-            Self::Agent(agent) => &agent.0,
-            Self::PlainShell => "Plain shell",
-        }
-    }
-
     fn selector_part(&self) -> &str {
         match self {
             Self::Agent(agent) => &agent.0,
@@ -122,84 +112,28 @@ impl Runtime {
     }
 }
 
-/// The model aliases offered as chips while the runtime is claude.
-pub(crate) const MODEL_ALIASES: [&str; 3] = ["opus", "sonnet", "haiku"];
-
-/// The model field's placeholder: the CLI picks its own model.
-const MODEL_PLACEHOLDER: &str = "CLI default";
-/// The model field's placeholder while Claude is routed to `DeepSeek`.
-const DEEPSEEK_MODEL_PLACEHOLDER: &str = "deepseek-flash";
-
-/// The providers a Claude spawn can pick, Anthropic first.
-pub(crate) const PROVIDER_CHOICES: [ClaudeProvider; 2] =
-    [ClaudeProvider::Anthropic, ClaudeProvider::Deepseek];
-
-/// A provider's label in the dialog, in Settings and in every other place
-/// the client names one. The client's one `ClaudeProvider` -> name table: a
-/// provider added later is named here and nowhere else.
-pub(crate) fn provider_label(provider: ClaudeProvider) -> &'static str {
-    match provider {
-        ClaudeProvider::Anthropic => "Anthropic",
-        ClaudeProvider::Deepseek => "DeepSeek",
-        ClaudeProvider::Unknown => "Unknown",
-    }
+/// The agent field `id`'s selector: `spawn-opt-` and the id with `_` as
+/// `-`. A field's controls add their own part after it.
+pub(crate) fn field_selector(id: &str) -> String {
+    format!("spawn-opt-{}", id.replace('_', "-"))
 }
 
-/// The provider's part of a selector's element id.
-fn provider_part(provider: ClaudeProvider) -> String {
-    provider_label(provider).to_lowercase()
-}
-
-/// The provider a stored spawn ran Claude on, when it was a Claude agent
-/// spawn: one with no provider field ran on
-/// Anthropic, and one this client does not know reads as Anthropic.
-/// `None` for a plain shell or no stored spawn.
-fn stored_claude_provider(config: Option<&SpawnConfig>) -> Option<ClaudeProvider> {
-    config
-        .filter(|c| c.mode != SessionMode::PlainShell)
-        .and_then(|c| c.agent.as_ref())
-        .filter(|selection| claude_compat::is_claude(&selection.agent))
-        .map(|selection| known_provider(claude_compat::from_selection(selection).provider))
-}
-
-/// The agent a stored spawn names; Claude for a plain shell, which names
-/// none.
-fn config_agent(config: &SpawnConfig) -> AgentId {
+/// The agent a stored spawn names; `None` for a plain shell.
+fn config_agent(config: &SpawnConfig) -> Option<AgentId> {
     config
         .agent
         .as_ref()
-        .map_or_else(claude_compat::claude_id, |selection| {
-            selection.agent.clone()
-        })
+        .map(|selection| selection.agent.clone())
 }
 
-/// Claude's approval modes, the CLI default first.
-pub(crate) const APPROVAL_CHOICES: [Option<PermissionMode>; 5] = [
-    None,
-    Some(PermissionMode::Default),
-    Some(PermissionMode::AcceptEdits),
-    Some(PermissionMode::BypassPermissions),
-    Some(PermissionMode::Plan),
-];
-
-pub(crate) fn approval_label(mode: Option<PermissionMode>) -> &'static str {
-    match mode {
-        None => "CLI default",
-        Some(PermissionMode::Default) => "default",
-        Some(PermissionMode::AcceptEdits) => "accept edits",
-        Some(PermissionMode::BypassPermissions) => "bypass permissions",
-        Some(PermissionMode::Plan) => "plan",
-    }
-}
-
-fn approval_part(mode: Option<PermissionMode>) -> &'static str {
-    match mode {
-        None => "cli-default",
-        Some(PermissionMode::Default) => "default",
-        Some(PermissionMode::AcceptEdits) => "accept-edits",
-        Some(PermissionMode::BypassPermissions) => "bypass-permissions",
-        Some(PermissionMode::Plan) => "plan",
-    }
+/// The options a stored agent spawn of `agent` ran with; `None` for a
+/// plain shell or a spawn of another agent.
+fn stored_options<'a>(config: &'a SpawnConfig, agent: &AgentId) -> Option<&'a OptionValues> {
+    config
+        .agent
+        .as_ref()
+        .filter(|selection| config.mode != SessionMode::PlainShell && &selection.agent == agent)
+        .map(|selection| &selection.options)
 }
 
 /// One extra environment variable, as typed, and how its value is kept.
@@ -449,7 +383,6 @@ pub(crate) enum Control {
     Close,
     Target(Target),
     Runtime(Runtime),
-    Provider(ClaudeProvider),
     OpenIn(OpenChoice),
     Trusted,
     UseWorktree,
@@ -459,9 +392,21 @@ pub(crate) enum Control {
     Random,
     Base,
     AdvancedToggle,
-    Model,
-    ModelChip(&'static str),
-    Approval(Option<PermissionMode>),
+    /// One choice of an agent's choice field: the field's id and the
+    /// choice's selector part.
+    FieldChoice {
+        field: String,
+        choice: String,
+    },
+    /// An agent's toggle field.
+    FieldToggle(String),
+    /// An agent's text or model field.
+    FieldText(String),
+    /// One of a model field's suggestions.
+    FieldSuggestion {
+        field: String,
+        value: String,
+    },
     EnvKey(usize),
     EnvValue(usize),
     /// A secret row's Show / Hide button beside its masked value.
@@ -487,7 +432,6 @@ impl Control {
             Self::Close => "spawn-close".to_owned(),
             Self::Target(target) => format!("spawn-target-{}", target.selector_part()),
             Self::Runtime(runtime) => format!("spawn-agent-{}", runtime.selector_part()),
-            Self::Provider(provider) => format!("spawn-provider-{}", provider_part(*provider)),
             Self::OpenIn(OpenChoice::CurrentTab) => "spawn-placement-current-tab".to_owned(),
             Self::OpenIn(OpenChoice::NewTab) => "spawn-placement-new-tab".to_owned(),
             Self::OpenIn(OpenChoice::Tab(id)) => format!("spawn-placement-tab-{id}"),
@@ -513,9 +457,11 @@ impl Control {
     fn advanced_selector(&self) -> String {
         match self {
             Self::AdvancedToggle => "spawn-advanced".to_owned(),
-            Self::Model => "spawn-model".to_owned(),
-            Self::ModelChip(alias) => format!("spawn-model-{alias}"),
-            Self::Approval(mode) => format!("spawn-approval-{}", approval_part(*mode)),
+            Self::FieldChoice { field, choice } => format!("{}-{choice}", field_selector(field)),
+            Self::FieldToggle(field) | Self::FieldText(field) => field_selector(field),
+            Self::FieldSuggestion { field, value } => {
+                format!("{}-{}", field_selector(field), value.replace('_', "-"))
+            }
             Self::EnvKey(index) => format!("spawn-env-key-{index}"),
             Self::EnvValue(index) => format!("spawn-env-value-{index}"),
             Self::EnvReveal(index) => format!("spawn-env-value-{index}-reveal"),
@@ -795,10 +741,11 @@ fn same_key(a: &str, b: &str) -> bool {
     }
 }
 
-/// The runtime, and whether the user has chosen it.
+/// The runtime, and whether the user has chosen it. With no agent, as
+/// before the daemon lists one, the runtime is a plain shell.
 #[derive(Debug, Clone)]
 struct RuntimeChoice {
-    agent: AgentId,
+    agent: Option<AgentId>,
     plain_shell: bool,
     touched: Touched,
 }
@@ -808,8 +755,8 @@ struct RuntimeChoice {
 #[derive(Debug, Default)]
 struct Advanced {
     open: bool,
-    model: String,
-    permission_mode: Option<PermissionMode>,
+    /// The user opened or closed it, so it no longer follows the values.
+    chosen: bool,
     env: Vec<EnvRow>,
 }
 
@@ -821,13 +768,12 @@ struct Touched {
     shell_or_agent: bool,
 }
 
-/// The Claude provider: the one picked, the saved default it falls back to,
-/// and whether the user (or a duplicate's source) chose it.
-#[derive(Debug, Clone, Copy)]
-struct ProviderChoice {
-    chosen: ClaudeProvider,
-    default: ClaudeProvider,
-    touched: bool,
+/// One agent's options in the dialog, and the fields the user or a
+/// duplicate's source set, which a target switch leaves.
+#[derive(Debug)]
+struct AgentChoice {
+    options: AgentOptions,
+    touched: BTreeSet<String>,
 }
 
 /// The branch name field.
@@ -885,7 +831,12 @@ pub(crate) struct SpawnForm {
     /// the dialog.
     tab_lock: Option<String>,
     runtime: RuntimeChoice,
-    provider: ProviderChoice,
+    /// The daemon's agents, in its order.
+    agents: Vec<AgentDescriptor>,
+    /// Each agent's Settings page values.
+    agent_settings: BTreeMap<AgentId, OptionValues>,
+    /// Each listed agent's options, kept across runtime switches.
+    options: BTreeMap<AgentId, AgentChoice>,
     tabs: TabChoices,
     open_in: OpenChoice,
     trusted: bool,
@@ -936,8 +887,13 @@ pub(crate) struct FormInputs<'a> {
     /// The session in the focused pane.
     pub focused: Option<&'a SessionSnapshot>,
     pub tabs: TabChoices,
-    /// The saved Spawn defaults every field is seeded from.
+    /// The saved Spawn defaults the trusted launch is seeded from.
     pub spawn_defaults: SpawnDefaults,
+    /// The daemon's agents, in its order: the runtimes besides a plain
+    /// shell.
+    pub agents: &'a [AgentDescriptor],
+    /// Each agent's Settings page values, its options' first seed.
+    pub agent_settings: &'a BTreeMap<AgentId, OptionValues>,
     /// The target the dialog is held on, and the worktree it is pinned to.
     pub lock: Option<Lock>,
 }
@@ -1002,15 +958,13 @@ impl SpawnForm {
             locked,
             tab_lock: None,
             runtime: RuntimeChoice {
-                agent: claude_compat::claude_id(),
+                agent: None,
                 plain_shell: false,
                 touched: Touched::default(),
             },
-            provider: ProviderChoice {
-                chosen: known_provider(defaults.claude_provider),
-                default: known_provider(defaults.claude_provider),
-                touched: false,
-            },
+            agents: inputs.agents.to_vec(),
+            agent_settings: inputs.agent_settings.clone(),
+            options: BTreeMap::new(),
             tabs: inputs.tabs,
             open_in,
             trusted: defaults.trusted,
@@ -1028,10 +982,7 @@ impl SpawnForm {
             refs: Refs::default(),
             existing: Existing::default(),
             preview: Preview::default(),
-            advanced: Advanced {
-                permission_mode: defaults.permission_mode,
-                ..Advanced::default()
-            },
+            advanced: Advanced::default(),
             focus: Control::Branch,
             share: None,
             share_confirmed,
@@ -1120,8 +1071,10 @@ impl SpawnForm {
         cache: &BranchCache,
         now: Instant,
     ) -> Vec<ClientMessage> {
+        let source = config_agent(config);
+        let agent = self.listed_agent(source.clone());
         self.runtime = RuntimeChoice {
-            agent: config_agent(config),
+            agent: agent.clone(),
             plain_shell: config.mode == SessionMode::PlainShell,
             touched: Touched {
                 agent: true,
@@ -1129,21 +1082,21 @@ impl SpawnForm {
             },
         };
         self.trusted = config.dangerously_skip_permissions;
-        let choice = config
-            .agent
-            .as_ref()
-            .map(claude_compat::from_selection)
-            .unwrap_or_default();
-        let options_set = self.apply_agent_options(&choice);
-        self.apply_source_provider(config);
-        self.advanced.model = choice.model.unwrap_or_default();
+        match (agent, &source) {
+            (Some(agent), Some(source)) if &agent == source => {
+                self.apply_source_options(config, &agent);
+            }
+            (Some(agent), Some(_)) => self.reset_options(&agent),
+            // A plain shell ran no agent: every agent keeps the target's
+            // values.
+            (_, None) | (None, Some(_)) => {}
+        }
         self.advanced.env = config
             .extra_env
             .iter()
             .map(|(key, value)| EnvRow::prefilled(key, value))
             .collect();
-        self.advanced.open =
-            options_set || !self.advanced.model.is_empty() || !self.advanced.env.is_empty();
+        self.follow_advanced();
         if Target::from_spawn(&config.target).as_ref() == Some(&self.target) {
             self.apply_branch_fields(&config.target, cache, now)
         } else {
@@ -1151,22 +1104,77 @@ impl SpawnForm {
         }
     }
 
-    /// The provider a Claude agent source ran on, chosen
-    /// over the last spawn and the default. A plain shell carries Anthropic
-    /// options without having picked a provider, so it leaves the choice
-    /// to them.
-    fn apply_source_provider(&mut self, config: &SpawnConfig) {
-        if let Some(provider) = stored_claude_provider(Some(config)) {
-            self.provider.chosen = provider;
-            self.provider.touched = true;
-        }
+    /// The options the source's `agent` ran with, seeded over the target's
+    /// last spawn and the Settings values; the fields the source set count
+    /// as set. A plain shell source ran no agent, so it leaves them.
+    fn apply_source_options(&mut self, config: &SpawnConfig, agent: &AgentId) {
+        let Some(stored) = stored_options(config, agent) else {
+            return;
+        };
+        let Some(choice) = self.options.get_mut(agent) else {
+            return;
+        };
+        choice.options.seed(stored);
+        choice.touched.extend(stored.keys().cloned());
     }
 
-    /// The source agent's own approval options, replacing the defaults';
-    /// returns whether the source set any of them.
-    fn apply_agent_options(&mut self, choice: &ClaudeChoice) -> bool {
-        self.advanced.permission_mode = choice.permission_mode;
-        choice.permission_mode.is_some()
+    /// `agent`'s options back to its Settings values, every field held
+    /// there, for a source whose own agent the daemon does not list.
+    fn reset_options(&mut self, agent: &AgentId) {
+        let Some(descriptor) = self.agents.iter().find(|d| &d.id == agent) else {
+            return;
+        };
+        let options = AgentOptions::new(descriptor.clone(), self.agent_settings.get(agent));
+        let touched = descriptor
+            .fields
+            .iter()
+            .map(|field| field.id.clone())
+            .collect();
+        self.options
+            .insert(agent.clone(), AgentChoice { options, touched });
+    }
+
+    /// Advanced opens on the chosen agent's Advanced values or the env
+    /// rows, until the user opens or closes it.
+    fn follow_advanced(&mut self) {
+        if self.advanced.chosen {
+            return;
+        }
+        let agent_set = self
+            .chosen_agent()
+            .is_some_and(|choice| choice.options.advanced_set());
+        self.advanced.open = agent_set || !self.advanced.env.is_empty();
+    }
+
+    /// `agent` when the daemon lists it, else the first agent it lists.
+    fn listed_agent(&self, agent: Option<AgentId>) -> Option<AgentId> {
+        agent
+            .filter(|agent| self.agents.iter().any(|d| &d.id == agent))
+            .or_else(|| self.agents.first().map(|d| d.id.clone()))
+    }
+
+    /// Each agent field the user or a duplicate's source has not set,
+    /// afresh: its Settings value, then the target's last spawn of the
+    /// agent.
+    fn reseed_options(&mut self, last: Option<&SpawnConfig>) {
+        for descriptor in &self.agents {
+            let mut options =
+                AgentOptions::new(descriptor.clone(), self.agent_settings.get(&descriptor.id));
+            if let Some(stored) = last.and_then(|config| stored_options(config, &descriptor.id)) {
+                options.seed(stored);
+            }
+            let touched = match self.options.remove(&descriptor.id) {
+                Some(old) => {
+                    for id in &old.touched {
+                        options.keep_field(id, &old.options);
+                    }
+                    old.touched
+                }
+                None => BTreeSet::new(),
+            };
+            self.options
+                .insert(descriptor.id.clone(), AgentChoice { options, touched });
+        }
     }
 
     /// The source's worktree toggle and base, held against the branch lists
@@ -1322,12 +1330,9 @@ impl SpawnForm {
                 )
             }
         };
-        let agent = config
-            .map(config_agent)
-            .or(fallback)
-            .unwrap_or_else(claude_compat::claude_id);
+        let agent = self.listed_agent(config.and_then(config_agent).or(fallback));
         let plain_shell = is_plain_shell(config);
-        let last_provider = stored_claude_provider(config);
+        let last = config.cloned();
         let touched = self.runtime.touched;
         if !touched.agent {
             self.runtime.agent = agent;
@@ -1335,9 +1340,8 @@ impl SpawnForm {
         if !touched.shell_or_agent {
             self.runtime.plain_shell = plain_shell;
         }
-        if !self.provider.touched {
-            self.provider.chosen = last_provider.unwrap_or(self.provider.default);
-        }
+        self.reseed_options(last.as_ref());
+        self.follow_advanced();
     }
 
     fn repo(&self, id: &str) -> Option<&RepoEntry> {
@@ -1961,17 +1965,43 @@ impl SpawnForm {
     }
 
     pub(crate) fn runtime(&self) -> Runtime {
-        if self.runtime.plain_shell {
-            Runtime::PlainShell
-        } else {
-            Runtime::Agent(self.runtime.agent.clone())
+        match &self.runtime.agent {
+            Some(agent) if !self.runtime.plain_shell => Runtime::Agent(agent.clone()),
+            _ => Runtime::PlainShell,
+        }
+    }
+
+    /// Whether the session runs a plain shell: chosen, or no agent listed.
+    fn plain_shell(&self) -> bool {
+        self.runtime() == Runtime::PlainShell
+    }
+
+    /// The runtimes the dialog offers: the daemon's agents in its order,
+    /// then a plain shell.
+    pub(crate) fn runtimes(&self) -> Vec<Runtime> {
+        self.agents
+            .iter()
+            .map(|descriptor| Runtime::Agent(descriptor.id.clone()))
+            .chain([Runtime::PlainShell])
+            .collect()
+    }
+
+    /// A runtime's label: its agent's tag, or "Plain shell".
+    pub(crate) fn runtime_label(&self, runtime: &Runtime) -> String {
+        match runtime {
+            Runtime::Agent(agent) => self
+                .agents
+                .iter()
+                .find(|descriptor| &descriptor.id == agent)
+                .map_or_else(|| agent.0.clone(), |descriptor| descriptor.tag.clone()),
+            Runtime::PlainShell => "Plain shell".to_owned(),
         }
     }
 
     fn select_runtime(&mut self, runtime: Runtime) {
         match runtime {
             Runtime::Agent(agent) => {
-                self.runtime.agent = agent;
+                self.runtime.agent = Some(agent);
                 self.runtime.touched.agent = true;
                 if self.runtime.plain_shell {
                     self.runtime.plain_shell = false;
@@ -1990,50 +2020,103 @@ impl SpawnForm {
         self.advanced.open
     }
 
-    pub(crate) fn model(&self) -> &str {
-        &self.advanced.model
-    }
-
-    /// The user typed in the model field.
-    pub(crate) fn edit_model(&mut self, text: &str) {
-        text.clone_into(&mut self.advanced.model);
-    }
-
-    /// Whether the model field shows (not for a plain shell).
-    pub(crate) fn model_shown(&self) -> bool {
-        !self.runtime.plain_shell
-    }
-
-    /// Whether the alias chips show: Claude on Anthropic only, since an
-    /// alias names an Anthropic model.
-    pub(crate) fn model_chips_shown(&self) -> bool {
-        self.model_shown()
-            && claude_compat::is_claude(&self.runtime.agent)
-            && self.provider() != ClaudeProvider::Deepseek
-    }
-
-    /// The model field's placeholder: `DeepSeek`'s model while Claude is
-    /// routed there, else the CLI default.
-    pub(crate) fn model_placeholder(&self) -> &'static str {
-        if self.provider_shown() && self.provider() == ClaudeProvider::Deepseek {
-            DEEPSEEK_MODEL_PLACEHOLDER
-        } else {
-            MODEL_PLACEHOLDER
+    /// The chosen agent's options; `None` for a plain shell.
+    fn chosen_agent(&self) -> Option<&AgentChoice> {
+        match self.runtime() {
+            Runtime::Agent(agent) => self.options.get(&agent),
+            Runtime::PlainShell => None,
         }
     }
 
-    /// Whether the Provider row shows: Claude, not a plain shell.
-    pub(crate) fn provider_shown(&self) -> bool {
-        claude_compat::is_claude(&self.runtime.agent) && !self.runtime.plain_shell
+    /// The chosen agent's fields as the dialog draws them; none for a plain
+    /// shell.
+    pub(crate) fn option_fields(&self) -> Vec<FieldView> {
+        self.chosen_agent()
+            .map(|choice| choice.options.fields(self.trusted()))
+            .unwrap_or_default()
     }
 
-    /// The provider a Claude spawn goes to.
-    pub(crate) fn provider(&self) -> ClaudeProvider {
-        self.provider.chosen
+    /// The value the chosen agent's field `id` shows; `None` when no such
+    /// field shows.
+    pub(crate) fn option_value(&self, id: &str) -> Option<OptionValue> {
+        self.option_fields()
+            .into_iter()
+            .find(|field| field.id == id)
+            .map(|field| field.value)
     }
 
-    pub(crate) fn permission_mode(&self) -> Option<PermissionMode> {
-        self.advanced.permission_mode
+    /// The user typed `text` in the agent's text or model field `id`.
+    pub(crate) fn edit_option_text(&mut self, id: &str, text: &str) {
+        self.set_option(id, OptionValue::Text(text.to_owned()));
+    }
+
+    /// Sets the chosen agent's field `id` to `value`, unless the field does
+    /// not show or is disabled.
+    fn set_option(&mut self, id: &str, value: OptionValue) {
+        let open = self
+            .option_fields()
+            .iter()
+            .any(|field| field.id == id && !field.disabled);
+        let Runtime::Agent(agent) = self.runtime() else {
+            return;
+        };
+        if let Some(choice) = self.options.get_mut(&agent).filter(|_| open) {
+            choice.options.set(id, value);
+            choice.touched.insert(id.to_owned());
+        }
+    }
+
+    /// Picks the choice whose selector part is `selector` in field `id`.
+    fn choose_option(&mut self, id: &str, selector: &str) {
+        let value = self
+            .option_fields()
+            .into_iter()
+            .find(|field| field.id == id)
+            .and_then(|field| match field.editor {
+                FieldEditor::Choice { choices, .. } => choices
+                    .into_iter()
+                    .find(|choice| choice.selector == selector)
+                    .map(|choice| choice.value),
+                _ => None,
+            });
+        if let Some(value) = value {
+            self.set_option(id, value);
+        }
+    }
+
+    /// Flips the toggle field `id`.
+    fn toggle_option(&mut self, id: &str) {
+        let on = self.option_value(id) == Some(OptionValue::Bool(true));
+        self.set_option(id, OptionValue::Bool(!on));
+    }
+
+    /// The chosen choice of each choice field and each toggle that is on.
+    pub(crate) fn chosen_options(&self) -> Vec<Control> {
+        self.option_fields()
+            .into_iter()
+            .filter_map(|field| match field.editor {
+                FieldEditor::Choice { choices, .. } => choices
+                    .into_iter()
+                    .find(|choice| choice.value == field.value)
+                    .map(|choice| Control::FieldChoice {
+                        field: field.id,
+                        choice: choice.selector,
+                    }),
+                FieldEditor::Toggle => (field.value == OptionValue::Bool(true))
+                    .then_some(Control::FieldToggle(field.id)),
+                FieldEditor::Text { .. } | FieldEditor::Model { .. } | FieldEditor::Unknown => None,
+            })
+            .collect()
+    }
+
+    /// The controls of the agent fields placed at `placement` that can be
+    /// changed, in the order they are drawn.
+    fn field_controls(&self, placement: SpawnPlacement) -> Vec<Control> {
+        self.option_fields()
+            .iter()
+            .filter(|field| field.placement == placement && !field.disabled)
+            .flat_map(controls_of)
+            .collect()
     }
 
     pub(crate) fn env_rows(&self) -> &[EnvRow] {
@@ -2217,22 +2300,22 @@ impl SpawnForm {
 
     /// Whether the trusted-launch checkbox shows (not for a plain shell).
     pub(crate) fn trusted_shown(&self) -> bool {
-        !self.runtime.plain_shell
+        !self.plain_shell()
     }
 
     pub(crate) fn trusted(&self) -> bool {
         self.trusted && self.trusted_shown()
     }
 
-    /// The flag a trusted launch passes the agent: Claude's, the one agent
-    /// the dialog offers.
-    pub(crate) fn trusted_flag() -> &'static str {
-        "--dangerously-skip-permissions"
-    }
-
-    /// The trusted-launch warning's text before "Uses <flag>.".
-    pub(crate) fn trusted_detail() -> &'static str {
-        "Claude approval prompts are bypassed for this session."
+    /// The trusted-launch row's detail: the chosen agent's trust note.
+    pub(crate) fn trusted_detail(&self) -> Option<&str> {
+        let Runtime::Agent(agent) = self.runtime() else {
+            return None;
+        };
+        self.agents
+            .iter()
+            .find(|descriptor| descriptor.id == agent)
+            .and_then(|descriptor| descriptor.trust_note.as_deref())
     }
 
     pub(crate) fn is_workspace(&self) -> bool {
@@ -2393,10 +2476,8 @@ impl SpawnForm {
         if !self.locked {
             ring.extend(self.targets().into_iter().map(Control::Target));
         }
-        ring.extend(Runtime::all().into_iter().map(Control::Runtime));
-        if self.provider_shown() {
-            ring.extend(PROVIDER_CHOICES.map(Control::Provider));
-        }
+        ring.extend(self.runtimes().into_iter().map(Control::Runtime));
+        ring.extend(self.field_controls(SpawnPlacement::Main));
         if self.tab_lock.is_none() {
             if self.tabs.current.is_some() {
                 ring.push(Control::OpenIn(OpenChoice::CurrentTab));
@@ -2434,13 +2515,7 @@ impl SpawnForm {
         if !self.advanced.open {
             return ring;
         }
-        if self.model_shown() {
-            ring.push(Control::Model);
-        }
-        if self.model_chips_shown() {
-            ring.extend(MODEL_ALIASES.map(Control::ModelChip));
-        }
-        ring.extend(self.agent_option_controls());
+        ring.extend(self.field_controls(SpawnPlacement::Advanced));
         for index in 0..self.advanced.env.len() {
             ring.extend(self.env_row_controls(index));
         }
@@ -2471,18 +2546,6 @@ impl SpawnForm {
         }
         controls.push(Control::EnvRemove(index));
         controls
-    }
-
-    /// The agent's own options; those trusted launch overrides are
-    /// disabled, and so out of the ring, while it is on.
-    fn agent_option_controls(&self) -> Vec<Control> {
-        if self.runtime.plain_shell {
-            return Vec::new();
-        }
-        if self.trusted() || !claude_compat::is_claude(&self.runtime.agent) {
-            return Vec::new();
-        }
-        APPROVAL_CHOICES.map(Control::Approval).to_vec()
     }
 
     /// The worktree and branch controls: a repo's checkbox leads, a
@@ -2597,13 +2660,13 @@ impl SpawnForm {
             Control::Branch
             | Control::Base
             | Control::Target(_)
-            | Control::Model
+            | Control::FieldText(_)
             | Control::EnvKey(_)
             | Control::EnvValue(_) => Vec::new(),
-            Control::Provider(_)
+            Control::FieldChoice { .. }
+            | Control::FieldToggle(_)
+            | Control::FieldSuggestion { .. }
             | Control::AdvancedToggle
-            | Control::ModelChip(_)
-            | Control::Approval(_)
             | Control::EnvReveal(_)
             | Control::EnvSecret(_)
             | Control::EnvReplace(_)
@@ -2616,18 +2679,19 @@ impl SpawnForm {
         Outcome::Stay(messages)
     }
 
-    /// A press on a provider or Advanced control. The options
-    /// trusted launch overrides do not change while it is on.
+    /// A press on an agent field's or an Advanced control. A field trusted
+    /// launch locks does not change while it is on.
     fn press_option(&mut self, control: &Control) {
-        let locked = self.trusted();
         match control {
-            Control::Provider(provider) => {
-                self.provider.chosen = *provider;
-                self.provider.touched = true;
+            Control::FieldChoice { field, choice } => self.choose_option(field, choice),
+            Control::FieldToggle(field) => self.toggle_option(field),
+            Control::FieldSuggestion { field, value } => {
+                self.set_option(field, OptionValue::Text(value.clone()));
             }
-            Control::AdvancedToggle => self.advanced.open = !self.advanced.open,
-            Control::ModelChip(alias) => (*alias).clone_into(&mut self.advanced.model),
-            Control::Approval(mode) if !locked => self.advanced.permission_mode = *mode,
+            Control::AdvancedToggle => {
+                self.advanced.open = !self.advanced.open;
+                self.advanced.chosen = true;
+            }
             Control::EnvAdd => {
                 self.advanced.env.push(EnvRow::default());
                 self.focus = Control::EnvKey(self.advanced.env.len() - 1);
@@ -2727,7 +2791,7 @@ impl SpawnForm {
     /// The spawn the form describes, where it opens, and the worktree
     /// default to save when the checkbox differs from it.
     pub(crate) fn build_request(&self) -> (SpawnRequest, OpenIn, Option<ClientMessage>) {
-        let mode = if self.runtime.plain_shell {
+        let mode = if self.plain_shell() {
             SessionMode::PlainShell
         } else {
             SessionMode::Interactive
@@ -2748,32 +2812,18 @@ impl SpawnForm {
         (request, self.placement(), self.worktree_default_change())
     }
 
-    /// The agent and its options; `None` for a plain shell. A trusted
-    /// launch sends no approval mode; a provider goes only where the
-    /// Provider row shows.
+    /// The agent and the options it sends; `None` for a plain shell. A
+    /// trusted launch sends none of the fields it locks.
     fn agent_selection(&self) -> Option<AgentSelection> {
-        if self.runtime.plain_shell {
+        let Runtime::Agent(agent) = self.runtime() else {
             return None;
-        }
-        let choice = ClaudeChoice {
-            provider: if self.provider_shown() {
-                self.provider()
-            } else {
-                ClaudeProvider::Anthropic
-            },
-            permission_mode: self.advanced.permission_mode.filter(|_| !self.trusted()),
-            model: self.wire_model(),
         };
-        Some(AgentSelection {
-            agent: self.runtime.agent.clone(),
-            options: claude_compat::to_options(&choice),
-        })
-    }
-
-    /// The trimmed model, or `None` for the CLI default and a plain shell.
-    fn wire_model(&self) -> Option<String> {
-        let model = self.advanced.model.trim();
-        (!self.runtime.plain_shell && !model.is_empty()).then(|| model.to_owned())
+        let options = self
+            .options
+            .get(&agent)?
+            .options
+            .wire_values(self.trusted());
+        Some(AgentSelection { agent, options })
     }
 
     /// The env rows with a key, in order: the key trimmed, the value as
@@ -2895,6 +2945,30 @@ pub(crate) fn initial_target(
     from_session
         .or_else(|| workspaces.first().map(|w| Target::Workspace(w.id.clone())))
         .or_else(|| repos.first().map(|r| Target::Repo(r.id.clone())))
+}
+
+/// `field`'s controls in Tab order: each choice, the toggle, or the text
+/// field and its suggestions; none for a kind this client does not know.
+fn controls_of(field: &FieldView) -> Vec<Control> {
+    match &field.editor {
+        FieldEditor::Toggle => vec![Control::FieldToggle(field.id.clone())],
+        FieldEditor::Choice { choices, .. } => choices
+            .iter()
+            .map(|choice| Control::FieldChoice {
+                field: field.id.clone(),
+                choice: choice.selector.clone(),
+            })
+            .collect(),
+        FieldEditor::Text { .. } => vec![Control::FieldText(field.id.clone())],
+        FieldEditor::Model { suggestions, .. } => [Control::FieldText(field.id.clone())]
+            .into_iter()
+            .chain(suggestions.iter().map(|value| Control::FieldSuggestion {
+                field: field.id.clone(),
+                value: value.clone(),
+            }))
+            .collect(),
+        FieldEditor::Unknown => Vec::new(),
+    }
 }
 
 fn is_plain_shell(config: Option<&SpawnConfig>) -> bool {
@@ -3025,20 +3099,49 @@ mod tests {
         .expect("spawn config fixture")
     }
 
+    fn claude_id() -> AgentId {
+        AgentId("claude".to_owned())
+    }
+
+    fn text(value: &str) -> OptionValue {
+        OptionValue::Text(value.to_owned())
+    }
+
+    /// The text option `id` that `request` carries.
+    fn option_of(request: &SpawnRequest, id: &str) -> Option<String> {
+        match request.agent.as_ref()?.options.get(id)? {
+            OptionValue::Text(value) => Some(value.clone()),
+            _ => None,
+        }
+    }
+
     /// The Claude permission mode `request` carries.
-    fn mode_of(request: &SpawnRequest) -> Option<PermissionMode> {
-        request
-            .agent
-            .as_ref()
-            .and_then(|selection| claude_compat::from_selection(selection).permission_mode)
+    fn mode_of(request: &SpawnRequest) -> Option<String> {
+        option_of(request, "permission_mode")
     }
 
     /// The Claude model `request` carries.
     fn model_of(request: &SpawnRequest) -> Option<String> {
-        request
-            .agent
-            .as_ref()
-            .and_then(|selection| claude_compat::from_selection(selection).model)
+        option_of(request, "model")
+    }
+
+    /// The control of choice `choice` (its selector part) of field `field`.
+    fn choice(field: &str, choice: &str) -> Control {
+        Control::FieldChoice {
+            field: field.to_owned(),
+            choice: choice.to_owned(),
+        }
+    }
+
+    /// Claude's Settings values `pairs`.
+    fn claude_settings(pairs: &[(&str, &str)]) -> BTreeMap<AgentId, OptionValues> {
+        BTreeMap::from([(
+            claude_id(),
+            pairs
+                .iter()
+                .map(|(id, value)| ((*id).to_owned(), text(value)))
+                .collect(),
+        )])
     }
 
     fn session_in(repo_id: Option<&str>, workspace_id: Option<&str>) -> SessionSnapshot {
@@ -3073,6 +3176,8 @@ mod tests {
         focused: Option<SessionSnapshot>,
         tabs: TabChoices,
         spawn_defaults: SpawnDefaults,
+        agents: Vec<AgentDescriptor>,
+        agent_settings: BTreeMap<AgentId, OptionValues>,
         lock: Option<Lock>,
     }
 
@@ -3084,8 +3189,16 @@ mod tests {
                 focused: None,
                 tabs: tabs(Some("t1"), &[]),
                 spawn_defaults: SpawnDefaults::default(),
+                agents: agent_registry::descriptors(),
+                agent_settings: BTreeMap::new(),
                 lock: None,
             }
+        }
+
+        /// The agents' Settings values the dialog opens over.
+        fn settings(mut self, settings: BTreeMap<AgentId, OptionValues>) -> Self {
+            self.agent_settings = settings;
+            self
         }
 
         /// The saved Spawn defaults the dialog opens over.
@@ -3102,6 +3215,8 @@ mod tests {
                     focused: self.focused.as_ref(),
                     tabs: self.tabs.clone(),
                     spawn_defaults: self.spawn_defaults,
+                    agents: &self.agents,
+                    agent_settings: &self.agent_settings,
                     lock: self.lock.clone(),
                 },
                 cache,
@@ -3119,8 +3234,7 @@ mod tests {
     fn all_defaults() -> SpawnDefaults {
         SpawnDefaults {
             trusted: true,
-            permission_mode: Some(PermissionMode::Plan),
-            claude_provider: ClaudeProvider::Anthropic,
+            ..SpawnDefaults::default()
         }
     }
 
@@ -3198,19 +3312,13 @@ mod tests {
     fn runtime_defaults_to_last_spawn_then_last_agent_then_claude() {
         let mut from_config = repo("r1");
         from_config.last_spawn_config = Some(config("claude", "plain_shell"));
-        from_config.last_agent = Some(claude_compat::claude_id());
+        from_config.last_agent = Some(claude_id());
         assert_eq!(open_repo(from_config).runtime(), Runtime::PlainShell);
 
         let mut from_agent = repo("r1");
-        from_agent.last_agent = Some(claude_compat::claude_id());
-        assert_eq!(
-            open_repo(from_agent).runtime(),
-            Runtime::Agent(claude_compat::claude_id())
-        );
-        assert_eq!(
-            open_repo(repo("r1")).runtime(),
-            Runtime::Agent(claude_compat::claude_id())
-        );
+        from_agent.last_agent = Some(claude_id());
+        assert_eq!(open_repo(from_agent).runtime(), Runtime::Agent(claude_id()));
+        assert_eq!(open_repo(repo("r1")).runtime(), Runtime::Agent(claude_id()));
 
         let mut shell = repo("r1");
         shell.last_spawn_config = Some(config("claude", "plain_shell"));
@@ -3219,7 +3327,7 @@ mod tests {
         headless.last_spawn_config = Some(config("claude", "headless"));
         assert_eq!(
             open_repo(headless).runtime(),
-            Runtime::Agent(claude_compat::claude_id()),
+            Runtime::Agent(claude_id()),
             "a stored headless config seeds an interactive agent"
         );
     }
@@ -3233,24 +3341,18 @@ mod tests {
         let mut form = Setup::repos(vec![repo("r1"), shell, shell_too])
             .open(&mut BranchCache::default())
             .0;
-        press(
-            &mut form,
-            &Control::Runtime(Runtime::Agent(claude_compat::claude_id())),
-        );
+        press(&mut form, &Control::Runtime(Runtime::Agent(claude_id())));
         press(&mut form, &Control::Target(Target::Repo("r2".to_owned())));
         assert_eq!(
             form.runtime(),
             Runtime::PlainShell,
             "the untouched run mode still follows r2"
         );
-        press(
-            &mut form,
-            &Control::Runtime(Runtime::Agent(claude_compat::claude_id())),
-        );
+        press(&mut form, &Control::Runtime(Runtime::Agent(claude_id())));
         press(&mut form, &Control::Target(Target::Repo("r3".to_owned())));
         assert_eq!(
             form.runtime(),
-            Runtime::Agent(claude_compat::claude_id()),
+            Runtime::Agent(claude_id()),
             "both touched now"
         );
     }
@@ -3264,10 +3366,7 @@ mod tests {
         press(&mut form, &Control::Runtime(Runtime::PlainShell));
         assert!(!form.trusted_shown());
         assert!(!form.controls().contains(&Control::Trusted));
-        press(
-            &mut form,
-            &Control::Runtime(Runtime::Agent(claude_compat::claude_id())),
-        );
+        press(&mut form, &Control::Runtime(Runtime::Agent(claude_id())));
         assert!(!form.trusted(), "cleared, not just hidden");
         press(&mut form, &Control::Trusted);
         press(&mut form, &Control::Runtime(Runtime::PlainShell));
@@ -3282,13 +3381,21 @@ mod tests {
         let mut cache = BranchCache::default();
         let (form, _) = Setup::repos(vec![repo("r1")])
             .defaults(all_defaults())
+            .settings(claude_settings(&[("permission_mode", "plan")]))
             .open(&mut cache);
         assert!(form.trusted(), "trusted launch pre-filled");
-        assert_eq!(form.permission_mode(), Some(PermissionMode::Plan));
+        assert_eq!(
+            form.option_value("permission_mode"),
+            Some(text("plan")),
+            "a locked field shows the value it keeps for later"
+        );
 
         let (plain, _) = Setup::repos(vec![repo("r2")]).open(&mut cache);
         assert!(!plain.trusted(), "off when no default is saved");
-        assert_eq!(plain.permission_mode(), None);
+        assert_eq!(
+            plain.option_value("permission_mode"),
+            Some(OptionValue::Null)
+        );
     }
 
     #[test]
@@ -3297,16 +3404,16 @@ mod tests {
             .defaults(all_defaults())
             .open(&mut BranchCache::default());
         press(&mut form, &Control::Trusted);
-        press(
-            &mut form,
-            &Control::Approval(Some(PermissionMode::AcceptEdits)),
+        press(&mut form, &choice("permission_mode", "accept-edits"));
+        assert_eq!(
+            form.option_value("permission_mode"),
+            Some(text("accept_edits"))
         );
-        assert_eq!(form.permission_mode(), Some(PermissionMode::AcceptEdits));
 
         press(&mut form, &Control::Target(Target::Repo("r2".to_owned())));
         assert_eq!(
-            form.permission_mode(),
-            Some(PermissionMode::AcceptEdits),
+            form.option_value("permission_mode"),
+            Some(text("accept_edits")),
             "the user's approval choice survives the switch"
         );
         assert!(!form.trusted(), "trusted stays as the user left it");
@@ -3332,14 +3439,15 @@ mod tests {
     }
 
     #[test]
-    fn trusted_flag_label_names_claude_flag() {
-        let form = open_repo(repo("r1"));
-        assert_eq!(SpawnForm::trusted_flag(), "--dangerously-skip-permissions");
+    fn the_trusted_detail_is_the_agents_trust_note() {
+        let mut form = open_repo(repo("r1"));
         assert_eq!(
-            SpawnForm::trusted_detail(),
-            "Claude approval prompts are bypassed for this session."
+            form.trusted_detail(),
+            Some("Trusted launch passes --dangerously-skip-permissions.")
         );
         assert!(!form.trusted(), "trusted launch starts off");
+        press(&mut form, &Control::Runtime(Runtime::PlainShell));
+        assert_eq!(form.trusted_detail(), None, "a plain shell has no agent");
     }
 
     #[test]
@@ -3470,6 +3578,8 @@ mod tests {
                 focused: None,
                 tabs: TabChoices::default(),
                 spawn_defaults: SpawnDefaults::default(),
+                agents: &agent_registry::descriptors(),
+                agent_settings: &BTreeMap::new(),
                 lock: None,
             },
             &mut BranchCache::default(),
@@ -3596,6 +3706,8 @@ mod tests {
             focused: None,
             tabs: tabs(Some("t1"), &[]),
             spawn_defaults: SpawnDefaults::default(),
+            agents: agent_registry::descriptors(),
+            agent_settings: BTreeMap::new(),
             lock: None,
         };
         let (mut form, sent) = setup.open(&mut BranchCache::default());
@@ -3636,6 +3748,8 @@ mod tests {
             focused: None,
             tabs: tabs(None, &[]),
             spawn_defaults: SpawnDefaults::default(),
+            agents: agent_registry::descriptors(),
+            agent_settings: BTreeMap::new(),
             lock: None,
         };
         let mut form = setup.open(&mut BranchCache::default()).0;
@@ -3780,10 +3894,10 @@ mod tests {
             [
                 Control::Close,
                 Control::Target(Target::Repo("r1".to_owned())),
-                Control::Runtime(Runtime::Agent(claude_compat::claude_id())),
+                Control::Runtime(Runtime::Agent(claude_id())),
                 Control::Runtime(Runtime::PlainShell),
-                Control::Provider(ClaudeProvider::Anthropic),
-                Control::Provider(ClaudeProvider::Deepseek),
+                choice("provider", "anthropic"),
+                choice("provider", "deepseek"),
                 Control::OpenIn(OpenChoice::CurrentTab),
                 Control::OpenIn(OpenChoice::NewTab),
                 Control::UseWorktree,
@@ -3827,9 +3941,9 @@ mod tests {
     #[test]
     fn plain_shell_clears_to_interactive_and_sends_no_agent_extras() {
         let mut form = ready_form();
-        form.edit_model("opus");
+        form.edit_option_text("model", "opus");
         press(&mut form, &Control::AdvancedToggle);
-        press(&mut form, &Control::Approval(Some(PermissionMode::Plan)));
+        press(&mut form, &choice("permission_mode", "plan"));
         press(&mut form, &Control::EnvAdd);
         form.edit_env_key(0, "FOO");
         form.edit_env_value(0, "1");
@@ -3838,7 +3952,9 @@ mod tests {
         assert!(
             !ring.iter().any(|c| matches!(
                 c,
-                Control::Model | Control::ModelChip(_) | Control::Approval(_)
+                Control::FieldText(_)
+                    | Control::FieldSuggestion { .. }
+                    | Control::FieldChoice { .. }
             )),
             "no agent controls for a plain shell: {ring:?}"
         );
@@ -3849,10 +3965,7 @@ mod tests {
         assert_eq!(request.agent, None);
         assert_eq!(request.extra_env, env(&[("FOO", "1")]));
 
-        press(
-            &mut form,
-            &Control::Runtime(Runtime::Agent(claude_compat::claude_id())),
-        );
+        press(&mut form, &Control::Runtime(Runtime::Agent(claude_id())));
         assert_eq!(
             request_of(&form).mode,
             SessionMode::Interactive,
@@ -3864,34 +3977,35 @@ mod tests {
     fn trusted_suppresses_permission_mode() {
         let mut form = ready_form();
         press(&mut form, &Control::AdvancedToggle);
-        press(
-            &mut form,
-            &Control::Approval(Some(PermissionMode::AcceptEdits)),
-        );
-        let accept = Some(PermissionMode::AcceptEdits);
+        press(&mut form, &choice("permission_mode", "accept-edits"));
+        let accept = Some("accept_edits".to_owned());
         assert_eq!(mode_of(&request_of(&form)), accept);
         press(&mut form, &Control::Trusted);
         assert_eq!(mode_of(&request_of(&form)), None);
-        assert!(!form.controls().contains(&Control::Approval(None)));
-        assert_eq!(
-            form.permission_mode(),
-            Some(PermissionMode::AcceptEdits),
-            "kept for later"
+        assert!(
+            !form
+                .controls()
+                .contains(&choice("permission_mode", "cli-default"))
         );
+        press(&mut form, &choice("permission_mode", "plan"));
         press(&mut form, &Control::Trusted);
-        assert_eq!(mode_of(&request_of(&form)), accept);
+        assert_eq!(
+            mode_of(&request_of(&form)),
+            accept,
+            "kept for later, and a press while locked changes nothing"
+        );
     }
 
     #[test]
     fn model_trimmed_and_empty_is_none() {
         let mut form = ready_form();
         assert_eq!(model_of(&request_of(&form)), None);
-        form.edit_model("  claude-opus-4  ");
+        form.edit_option_text("model", "  claude-opus-4  ");
         assert_eq!(
             model_of(&request_of(&form)).as_deref(),
             Some("claude-opus-4")
         );
-        form.edit_model("   ");
+        form.edit_option_text("model", "   ");
         assert_eq!(model_of(&request_of(&form)), None);
     }
 
@@ -3900,23 +4014,30 @@ mod tests {
         let mut form = ready_form();
         press(&mut form, &Control::AdvancedToggle);
         let ring = form.controls();
-        for alias in MODEL_ALIASES {
-            assert!(ring.contains(&Control::ModelChip(alias)), "{alias} chip");
+        let chip = |alias: &str| Control::FieldSuggestion {
+            field: "model".to_owned(),
+            value: alias.to_owned(),
+        };
+        for alias in ["opus", "sonnet", "haiku"] {
+            assert!(ring.contains(&chip(alias)), "{alias} chip");
         }
-        form.edit_model("something");
-        press(&mut form, &Control::ModelChip("haiku"));
-        assert_eq!(form.model(), "haiku");
+        form.edit_option_text("model", "something");
+        press(&mut form, &chip("haiku"));
+        assert_eq!(form.option_value("model"), Some(text("haiku")));
         assert_eq!(model_of(&request_of(&form)).as_deref(), Some("haiku"));
-        press(&mut form, &Control::Provider(ClaudeProvider::Deepseek));
+        press(&mut form, &choice("provider", "deepseek"));
         assert!(
             !form
                 .controls()
                 .iter()
-                .any(|c| matches!(c, Control::ModelChip(_))),
+                .any(|c| matches!(c, Control::FieldSuggestion { .. })),
             "claude aliases only on Anthropic"
         );
-        assert!(form.controls().contains(&Control::Model));
-        assert_eq!(form.model(), "haiku");
+        assert!(
+            form.controls()
+                .contains(&Control::FieldText("model".to_owned()))
+        );
+        assert_eq!(form.option_value("model"), Some(text("haiku")));
     }
 
     #[test]
@@ -4393,20 +4514,17 @@ mod tests {
     fn runtime_switch_keeps_advanced_values() {
         let mut form = ready_form();
         press(&mut form, &Control::AdvancedToggle);
-        form.edit_model("m");
-        press(&mut form, &Control::Approval(Some(PermissionMode::Plan)));
+        form.edit_option_text("model", "m");
+        press(&mut form, &choice("permission_mode", "plan"));
         press(&mut form, &Control::EnvAdd);
         form.edit_env_key(0, "A");
         form.edit_env_value(0, "1");
         press(&mut form, &Control::Runtime(Runtime::PlainShell));
 
-        press(
-            &mut form,
-            &Control::Runtime(Runtime::Agent(claude_compat::claude_id())),
-        );
+        press(&mut form, &Control::Runtime(Runtime::Agent(claude_id())));
         let request = request_of(&form);
         assert_eq!(model_of(&request).as_deref(), Some("m"));
-        assert_eq!(mode_of(&request), Some(PermissionMode::Plan));
+        assert_eq!(mode_of(&request).as_deref(), Some("plan"));
         assert_eq!(request.extra_env, env(&[("A", "1")]));
     }
 
@@ -4418,8 +4536,11 @@ mod tests {
         assert!(collapsed.contains(&Control::AdvancedToggle));
         assert!(!collapsed.iter().any(|c| matches!(
             c,
-            Control::Model | Control::ModelChip(_) | Control::Approval(_) | Control::EnvAdd
-        )));
+            Control::FieldText(_)
+                | Control::FieldSuggestion { .. }
+                | Control::FieldChoice { .. }
+                | Control::EnvAdd
+        ) && !matches!(c, Control::FieldChoice { field, .. } if field == "provider")));
         press(&mut form, &Control::AdvancedToggle);
         assert!(form.advanced_open());
         let ring = form.controls();
@@ -4431,15 +4552,24 @@ mod tests {
             ring[at..],
             [
                 Control::AdvancedToggle,
-                Control::Model,
-                Control::ModelChip("opus"),
-                Control::ModelChip("sonnet"),
-                Control::ModelChip("haiku"),
-                Control::Approval(None),
-                Control::Approval(Some(PermissionMode::Default)),
-                Control::Approval(Some(PermissionMode::AcceptEdits)),
-                Control::Approval(Some(PermissionMode::BypassPermissions)),
-                Control::Approval(Some(PermissionMode::Plan)),
+                choice("permission_mode", "cli-default"),
+                choice("permission_mode", "default"),
+                choice("permission_mode", "accept-edits"),
+                choice("permission_mode", "bypass-permissions"),
+                choice("permission_mode", "plan"),
+                Control::FieldText("model".to_owned()),
+                Control::FieldSuggestion {
+                    field: "model".to_owned(),
+                    value: "opus".to_owned(),
+                },
+                Control::FieldSuggestion {
+                    field: "model".to_owned(),
+                    value: "sonnet".to_owned(),
+                },
+                Control::FieldSuggestion {
+                    field: "model".to_owned(),
+                    value: "haiku".to_owned(),
+                },
                 Control::EnvAdd,
                 Control::Cancel,
                 Control::Submit,
@@ -4503,6 +4633,8 @@ mod tests {
             focused: None,
             tabs: TabChoices::default(),
             spawn_defaults: SpawnDefaults::default(),
+            agents: agent_registry::descriptors(),
+            agent_settings: BTreeMap::new(),
             lock: None,
         }
         .open(&mut BranchCache::default())
@@ -4562,6 +4694,8 @@ mod tests {
                     focused: None,
                     tabs: TabChoices::default(),
                     spawn_defaults: SpawnDefaults::default(),
+                    agents: &agent_registry::descriptors(),
+                    agent_settings: &BTreeMap::new(),
                     lock: unknown.lock.clone(),
                 },
                 &mut BranchCache::default(),
@@ -4702,9 +4836,12 @@ mod tests {
         (form, sent)
     }
 
-    /// A dialog held on `r1`, over every Spawn default set.
+    /// A dialog held on `r1`, over every Spawn default set and a Claude
+    /// permission mode in its Settings.
     fn duplicate_setup(r1: RepoEntry) -> Setup {
-        let mut setup = Setup::repos(vec![r1, repo("r2")]).defaults(all_defaults());
+        let mut setup = Setup::repos(vec![r1, repo("r2")])
+            .defaults(all_defaults())
+            .settings(claude_settings(&[("permission_mode", "plan")]));
         setup.lock = Some(Lock::for_target(Target::Repo("r1".to_owned())));
         setup
     }
@@ -4716,11 +4853,15 @@ mod tests {
     }
 
     #[test]
-    fn a_duplicate_prefill_beats_the_spawn_defaults() {
+    fn a_duplicate_prefill_beats_the_agent_settings() {
         let claude = duplicated(stored_config(&json!({})));
         assert!(!claude.trusted(), "the source was not trusted");
-        assert_eq!(claude.permission_mode(), None, "the source had no mode");
-        assert_eq!(claude.runtime(), Runtime::Agent(claude_compat::claude_id()));
+        assert_eq!(
+            claude.option_value("permission_mode"),
+            Some(OptionValue::Null),
+            "the source had no mode"
+        );
+        assert_eq!(claude.runtime(), Runtime::Agent(claude_id()));
         assert!(
             !claude.advanced_open(),
             "the approval-mode default is not the source's own setting"
@@ -4734,7 +4875,7 @@ mod tests {
         );
         let (request, _, _) = planned.build_request();
         assert!(!request.dangerously_skip_permissions);
-        assert_eq!(mode_of(&request), Some(PermissionMode::Plan));
+        assert_eq!(mode_of(&request).as_deref(), Some("plan"));
     }
 
     #[test]
@@ -4745,9 +4886,9 @@ mod tests {
             "agent": { "agent": "claude", "options": { "model": "sonnet" } },
             "extra_env": [["API_TOKEN", "${env:API_TOKEN}"], ["LEVEL", "3"]],
         })));
-        assert_eq!(form.runtime(), Runtime::Agent(claude_compat::claude_id()));
+        assert_eq!(form.runtime(), Runtime::Agent(claude_id()));
         assert!(form.trusted());
-        assert_eq!(form.model(), "sonnet");
+        assert_eq!(form.option_value("model"), Some(text("sonnet")));
         assert!(form.advanced_open(), "the prefilled Advanced values show");
         assert_eq!(
             form.env_rows(),
@@ -4947,26 +5088,26 @@ mod tests {
         .expect("spawn config fixture")
     }
 
-    fn provider_defaults(provider: ClaudeProvider) -> SpawnDefaults {
-        SpawnDefaults {
-            claude_provider: provider,
-            ..SpawnDefaults::default()
-        }
+    /// Claude's provider in its Settings.
+    fn provider_setting(provider: &str) -> BTreeMap<AgentId, OptionValues> {
+        claude_settings(&[("provider", provider)])
     }
 
-    /// The provider the form's spawn request carries.
-    fn sent_provider(form: &SpawnForm) -> Option<ClaudeProvider> {
-        form.build_request()
-            .0
-            .agent
-            .as_ref()
-            .map(|selection| claude_compat::from_selection(selection).provider)
+    /// The provider the form's spawn request carries; `None` for the
+    /// default, which is not sent, and for a plain shell.
+    fn sent_provider(form: &SpawnForm) -> Option<String> {
+        option_of(&form.build_request().0, "provider")
+    }
+
+    /// The provider the form shows.
+    fn provider_of(form: &SpawnForm) -> Option<OptionValue> {
+        form.option_value("provider")
     }
 
     fn provider_stops(form: &SpawnForm) -> Vec<Control> {
         form.controls()
             .into_iter()
-            .filter(|control| matches!(control, Control::Provider(_)))
+            .filter(|control| matches!(control, Control::FieldChoice { field, .. } if field == "provider"))
             .collect()
     }
 
@@ -4975,17 +5116,16 @@ mod tests {
         let form = duplicated(stored_config(&json!({
             "agent": { "agent": "claude", "options": { "permission_mode": null, "provider": "deepseek" } },
         })));
-        assert_eq!(form.provider(), ClaudeProvider::Deepseek);
-        assert_eq!(sent_provider(&form), Some(ClaudeProvider::Deepseek));
+        assert_eq!(provider_of(&form), Some(text("deepseek")));
+        assert_eq!(sent_provider(&form).as_deref(), Some("deepseek"));
 
         let mut r1 = repo("r1");
         r1.last_spawn_config = Some(deepseek_config("interactive"));
-        let mut setup = duplicate_setup(r1);
-        setup.spawn_defaults = provider_defaults(ClaudeProvider::Deepseek);
+        let setup = duplicate_setup(r1).settings(provider_setting("deepseek"));
         let anthropic = duplicate_on(&setup, stored_config(&json!({}))).0;
         assert_eq!(
-            anthropic.provider(),
-            ClaudeProvider::Anthropic,
+            provider_of(&anthropic),
+            Some(text("anthropic")),
             "an Anthropic source beats the last spawn and the default"
         );
     }
@@ -4993,12 +5133,11 @@ mod tests {
     #[test]
     fn the_default_seeds_the_form() {
         let form = Setup::repos(vec![repo("r1")])
-            .defaults(provider_defaults(ClaudeProvider::Deepseek))
+            .settings(provider_setting("deepseek"))
             .open(&mut BranchCache::default())
             .0;
-        assert_eq!(form.provider(), ClaudeProvider::Deepseek);
-        assert_eq!(sent_provider(&form), Some(ClaudeProvider::Deepseek));
-        assert!(form.provider_shown());
+        assert_eq!(provider_of(&form), Some(text("deepseek")));
+        assert_eq!(sent_provider(&form).as_deref(), Some("deepseek"));
         let ring = form.controls();
         let after_runtime = ring
             .iter()
@@ -5006,82 +5145,150 @@ mod tests {
             .map(|at| at + 1);
         assert_eq!(
             ring.iter()
-                .position(|c| *c == Control::Provider(ClaudeProvider::Anthropic)),
+                .position(|c| *c == choice("provider", "anthropic")),
             after_runtime,
             "the row's stops follow the runtime line"
         );
         assert_eq!(
             provider_stops(&form),
-            PROVIDER_CHOICES.map(Control::Provider)
+            [
+                choice("provider", "anthropic"),
+                choice("provider", "deepseek")
+            ]
         );
 
         let unset = open_repo(repo("r1"));
-        assert_eq!(unset.provider(), ClaudeProvider::Anthropic);
+        assert_eq!(provider_of(&unset), Some(text("anthropic")));
         let unknown = Setup::repos(vec![repo("r1")])
-            .defaults(provider_defaults(ClaudeProvider::Unknown))
+            .settings(provider_setting("bedrock"))
             .open(&mut BranchCache::default())
             .0;
         assert_eq!(
-            unknown.provider(),
-            ClaudeProvider::Anthropic,
+            provider_of(&unknown),
+            Some(text("anthropic")),
             "an unknown default seeds Anthropic"
         );
     }
 
     #[test]
-    fn the_last_spawn_provider_beats_the_default() {
+    fn the_last_spawn_value_beats_the_agent_setting() {
         let mut r1 = repo("r1");
-        r1.last_spawn_config = Some(deepseek_config("interactive"));
-        assert_eq!(open_repo(r1.clone()).provider(), ClaudeProvider::Deepseek);
-
-        let mut form = Setup::repos(vec![repo("r0"), r1])
+        let mut last = deepseek_config("interactive");
+        if let Some(selection) = &mut last.agent {
+            selection
+                .options
+                .insert("permission_mode".to_owned(), text("accept_edits"));
+        }
+        r1.last_spawn_config = Some(last);
+        let settings = claude_settings(&[("permission_mode", "plan")]);
+        let form = Setup::repos(vec![r1.clone()])
+            .settings(settings.clone())
             .open(&mut BranchCache::default())
             .0;
-        assert_eq!(form.provider(), ClaudeProvider::Anthropic);
+        assert_eq!(provider_of(&form), Some(text("deepseek")));
+        assert_eq!(
+            form.option_value("permission_mode"),
+            Some(text("accept_edits")),
+            "every field of the agent follows its last spawn"
+        );
+
+        let mut form = Setup::repos(vec![repo("r0"), r1])
+            .settings(settings)
+            .open(&mut BranchCache::default())
+            .0;
+        assert_eq!(provider_of(&form), Some(text("anthropic")));
+        assert_eq!(form.option_value("permission_mode"), Some(text("plan")));
         press(&mut form, &Control::Target(Target::Repo("r1".to_owned())));
         assert_eq!(
-            form.provider(),
-            ClaudeProvider::Deepseek,
+            provider_of(&form),
+            Some(text("deepseek")),
             "a target switch follows the new target's last spawn"
         );
-        press(&mut form, &Control::Provider(ClaudeProvider::Anthropic));
+        press(&mut form, &choice("provider", "anthropic"));
         press(&mut form, &Control::Target(Target::Repo("r0".to_owned())));
         press(&mut form, &Control::Target(Target::Repo("r1".to_owned())));
         assert_eq!(
-            form.provider(),
-            ClaudeProvider::Anthropic,
+            provider_of(&form),
+            Some(text("anthropic")),
             "a chosen provider holds across target switches"
         );
     }
 
-    /// The provider a dialog over `last` opens on, with a `DeepSeek` default.
-    fn seeded_over_deepseek_default(last: SpawnConfig) -> ClaudeProvider {
+    /// The provider a dialog over `last` opens on, with a `DeepSeek`
+    /// Settings value.
+    fn seeded_over_deepseek_default(last: SpawnConfig) -> Option<OptionValue> {
         let mut r1 = repo("r1");
         r1.last_spawn_config = Some(last);
-        Setup::repos(vec![r1])
-            .defaults(provider_defaults(ClaudeProvider::Deepseek))
+        let mut form = Setup::repos(vec![r1])
+            .settings(provider_setting("deepseek"))
             .open(&mut BranchCache::default())
-            .0
-            .provider()
+            .0;
+        press(&mut form, &Control::Runtime(Runtime::Agent(claude_id())));
+        provider_of(&form)
+    }
+
+    #[test]
+    fn a_plain_shell_duplicate_keeps_the_targets_last_spawn_values() {
+        let mut r1 = repo("r1");
+        let mut last = deepseek_config("interactive");
+        if let Some(selection) = &mut last.agent {
+            selection
+                .options
+                .insert("permission_mode".to_owned(), text("accept_edits"));
+        }
+        r1.last_spawn_config = Some(last);
+        let mut form = duplicate_on(
+            &duplicate_setup(r1),
+            stored_config(&json!({ "mode": "plain_shell", "agent": null })),
+        )
+        .0;
+        press(&mut form, &Control::Runtime(Runtime::Agent(claude_id())));
+        assert_eq!(provider_of(&form), Some(text("deepseek")));
+        assert_eq!(
+            form.option_value("permission_mode"),
+            Some(text("accept_edits")),
+            "the last spawn's value, not the Settings value"
+        );
+    }
+
+    #[test]
+    fn a_target_switch_reseeds_the_fields_the_user_did_not_set() {
+        let mut r1 = repo("r1");
+        let mut last = deepseek_config("interactive");
+        if let Some(selection) = &mut last.agent {
+            selection
+                .options
+                .insert("permission_mode".to_owned(), text("plan"));
+        }
+        r1.last_spawn_config = Some(last);
+        let mut form = Setup::repos(vec![repo("r0"), r1])
+            .open(&mut BranchCache::default())
+            .0;
+        press(&mut form, &Control::AdvancedToggle);
+        form.edit_option_text("model", "mine");
+        press(&mut form, &Control::Target(Target::Repo("r1".to_owned())));
+        assert_eq!(provider_of(&form), Some(text("deepseek")));
+        assert_eq!(form.option_value("permission_mode"), Some(text("plan")));
+        assert_eq!(
+            form.option_value("model"),
+            Some(text("mine")),
+            "the typed model stays"
+        );
     }
 
     #[test]
     fn a_plain_shell_duplicate_does_not_pin_the_provider() {
-        let mut setup = duplicate_setup(repo("r1"));
-        setup.spawn_defaults = provider_defaults(ClaudeProvider::Deepseek);
+        let setup = duplicate_setup(repo("r1")).settings(provider_setting("deepseek"));
         let mut form = duplicate_on(
             &setup,
             stored_config(&json!({ "mode": "plain_shell", "agent": null })),
         )
         .0;
         assert_eq!(form.runtime(), Runtime::PlainShell);
-        press(
-            &mut form,
-            &Control::Runtime(Runtime::Agent(claude_compat::claude_id())),
-        );
+        press(&mut form, &Control::Runtime(Runtime::Agent(claude_id())));
         assert_eq!(
-            form.provider(),
-            ClaudeProvider::Deepseek,
+            provider_of(&form),
+            Some(text("deepseek")),
             "a plain shell's Anthropic options do not pin the provider"
         );
     }
@@ -5090,25 +5297,22 @@ mod tests {
     fn a_last_anthropic_spawn_beats_a_deepseek_default() {
         assert_eq!(
             seeded_over_deepseek_default(config("claude", "interactive")),
-            ClaudeProvider::Anthropic,
+            Some(text("anthropic")),
             "a Claude last spawn with no provider field went to Anthropic"
         );
         let mut unknown = config("claude", "interactive");
         unknown.agent = Some(AgentSelection {
-            agent: claude_compat::claude_id(),
-            options: protocol::OptionValues::from([(
-                "provider".to_owned(),
-                protocol::OptionValue::Text("bedrock".to_owned()),
-            )]),
+            agent: claude_id(),
+            options: OptionValues::from([("provider".to_owned(), text("bedrock"))]),
         });
         assert_eq!(
             seeded_over_deepseek_default(unknown),
-            ClaudeProvider::Anthropic,
+            Some(text("anthropic")),
             "an unknown last provider counts as Anthropic"
         );
         assert_eq!(
             seeded_over_deepseek_default(config("claude", "plain_shell")),
-            ClaudeProvider::Deepseek,
+            Some(text("deepseek")),
             "a plain-shell last spawn leaves the default"
         );
     }
@@ -5116,52 +5320,61 @@ mod tests {
     #[test]
     fn a_plain_shell_sends_no_provider() {
         let mut form = Setup::repos(vec![repo("r1")])
-            .defaults(provider_defaults(ClaudeProvider::Deepseek))
+            .settings(provider_setting("deepseek"))
             .open(&mut BranchCache::default())
             .0;
         press(&mut form, &Control::Runtime(Runtime::PlainShell));
-        assert!(!form.provider_shown(), "a plain shell hides the row");
+        assert_eq!(provider_of(&form), None, "a plain shell hides the row");
         assert_eq!(provider_stops(&form), Vec::<Control>::new());
         assert_eq!(
             sent_provider(&form),
             None,
             "a plain shell carries no agent options"
         );
-        press(
-            &mut form,
-            &Control::Runtime(Runtime::Agent(claude_compat::claude_id())),
-        );
-        assert_eq!(sent_provider(&form), Some(ClaudeProvider::Deepseek));
+        press(&mut form, &Control::Runtime(Runtime::Agent(claude_id())));
+        assert_eq!(sent_provider(&form).as_deref(), Some("deepseek"));
     }
 
     #[test]
     fn switching_claude_shell_claude_keeps_the_choice() {
         let mut form = open_repo(repo("r1"));
-        press(&mut form, &Control::Provider(ClaudeProvider::Deepseek));
+        press(&mut form, &choice("provider", "deepseek"));
         press(&mut form, &Control::Runtime(Runtime::PlainShell));
-        press(
-            &mut form,
-            &Control::Runtime(Runtime::Agent(claude_compat::claude_id())),
-        );
-        assert_eq!(form.provider(), ClaudeProvider::Deepseek);
-        assert_eq!(sent_provider(&form), Some(ClaudeProvider::Deepseek));
+        press(&mut form, &Control::Runtime(Runtime::Agent(claude_id())));
+        assert_eq!(provider_of(&form), Some(text("deepseek")));
+        assert_eq!(sent_provider(&form).as_deref(), Some("deepseek"));
     }
 
     #[test]
     fn deepseek_hides_the_alias_chips_and_sets_the_placeholder() {
+        let model = |form: &SpawnForm| {
+            form.option_fields()
+                .into_iter()
+                .find(|field| field.id == "model")
+                .map(|field| field.editor)
+        };
         let mut form = open_repo(repo("r1"));
         press(&mut form, &Control::AdvancedToggle);
-        assert!(form.model_chips_shown());
-        assert_eq!(form.model_placeholder(), "CLI default");
-        press(&mut form, &Control::Provider(ClaudeProvider::Deepseek));
-        assert!(!form.model_chips_shown());
-        assert!(!form.controls().contains(&Control::ModelChip("opus")));
-        assert_eq!(form.model_placeholder(), "deepseek-flash");
-        press(&mut form, &Control::Runtime(Runtime::PlainShell));
         assert_eq!(
-            form.model_placeholder(),
-            "CLI default",
-            "a plain shell's model is not DeepSeek's"
+            model(&form),
+            Some(FieldEditor::Model {
+                placeholder: Some("CLI default".to_owned()),
+                suggestions: ["opus", "sonnet", "haiku"].map(str::to_owned).to_vec(),
+            })
         );
+        press(&mut form, &choice("provider", "deepseek"));
+        assert_eq!(
+            model(&form),
+            Some(FieldEditor::Model {
+                placeholder: Some("deepseek-flash".to_owned()),
+                suggestions: Vec::new(),
+            })
+        );
+        assert!(!form.controls().contains(&Control::FieldSuggestion {
+            field: "model".to_owned(),
+            value: "opus".to_owned(),
+        }));
+        press(&mut form, &Control::Runtime(Runtime::PlainShell));
+        assert_eq!(model(&form), None, "a plain shell has no model field");
     }
 }

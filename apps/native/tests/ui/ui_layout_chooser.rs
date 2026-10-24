@@ -218,7 +218,7 @@ fn welcome_closes_it_and_the_next_request_reopens_it(cx: &mut TestAppContext) {
         chooser_open(&mut h),
         "it stays under the connecting overlay"
     );
-    h.send(support::welcome(support::PROTOCOL));
+    h.send_welcome(support::PROTOCOL);
     assert!(!chooser_open(&mut h));
     h.send(init_required(1, Vec::new()));
     assert!(chooser_open(&mut h));

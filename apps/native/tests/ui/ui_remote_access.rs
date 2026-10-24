@@ -485,7 +485,7 @@ fn a_new_connection_forgets_the_remote_status(cx: &mut TestAppContext) {
     let mut h = opened(cx, &dir);
     h.send(status(false, 8787, RemoteState::Off));
     assert_eq!(status_line(&mut h), "Remote access is off.");
-    h.send(support::welcome(support::PROTOCOL));
+    h.send_welcome(support::PROTOCOL);
     assert_eq!(status_line(&mut h), NOT_CONNECTED);
     assert_eq!(toggle(&mut h), (false, false));
 }

@@ -23,7 +23,10 @@ use crate::appearance;
 use crate::appearance_stops::{AppearanceStop, after_lost};
 use crate::appearance_view::{Level, close_footer};
 use crate::buttons::{field_frame, focus_ring};
-use crate::claude_compat::{self, ClaudeProvider, PermissionMode};
+use crate::claude_compat::{
+    self, APPROVAL_CHOICES, CLAUDE_LOCKED, ClaudeProvider, PROVIDER_CHOICES, PermissionMode,
+    approval_label, provider_label,
+};
 use crate::mouse::CopyOnSelect;
 use crate::notify::{NotifyState, WINDOWS_NOTIFICATION_SETTINGS};
 use crate::palette::{CHIP, HOVER, LINE, RAISED, SUBTLE, TEXT_2, TRANSPARENT};
@@ -35,9 +38,8 @@ use crate::remote_access::{
 use crate::section::section;
 use crate::session_menu::{backdrop, dialog_button};
 use crate::sidebar::{LeafDensity, NotifySkip, SidebarView};
-use crate::spawn_form::{APPROVAL_CHOICES, PROVIDER_CHOICES, approval_label, provider_label};
 use crate::spawn_view::{
-    CLAUDE_LOCKED, DISABLED_OPACITY, Look, checkbox_row, choice_button, close_button, dialog_card,
+    DISABLED_OPACITY, Look, checkbox_row, choice_button, close_button, dialog_card,
     dialog_title_bar, field, segmented,
 };
 use crate::tabs::tab_session_counts;

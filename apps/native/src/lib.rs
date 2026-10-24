@@ -7,6 +7,7 @@
 
 mod activity_bar;
 mod agent_options;
+mod agent_options_view;
 pub mod appearance;
 mod appearance_stops;
 mod appearance_view;

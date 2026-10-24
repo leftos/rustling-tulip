@@ -154,7 +154,7 @@ fn placements(sent: Vec<ClientMessage>) -> Vec<String> {
 }
 
 fn welcome(h: &mut Harness<'_>) {
-    h.send(support::welcome(PROTOCOL));
+    h.send_welcome(PROTOCOL);
 }
 
 fn asks_history(sent: &[ClientMessage]) -> bool {

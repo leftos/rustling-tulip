@@ -635,7 +635,7 @@ fn background_survives_a_reattach(cx: &mut TestAppContext) {
 
     // A new connection resets every pane to a fresh terminal, and the lists
     // that follow attach it again on another one.
-    h.send(support::welcome(HARNESS_PROTOCOL));
+    h.send_welcome(HARNESS_PROTOCOL);
     assert_eq!(
         terminal_colors(&mut h, "p1"),
         (PAPER, PAPER_FOREGROUND),

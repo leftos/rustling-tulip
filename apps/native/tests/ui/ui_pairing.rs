@@ -70,7 +70,7 @@ fn reconnect(h: &mut Harness<'_>, target: Target, features: Vec<String>) -> Vec<
     conn.on_socket_open(port);
     conn.on_welcome(support::PROTOCOL, features);
     h.set_connection(conn);
-    h.send(support::welcome(support::PROTOCOL));
+    h.send_welcome(support::PROTOCOL);
     h.sent()
 }
 

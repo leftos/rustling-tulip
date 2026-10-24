@@ -453,7 +453,7 @@ fn the_forge_button_is_disabled_with_each_tooltip(cx: &mut TestAppContext) {
     assert_eq!(forge.url, None);
     assert_eq!(forge.tooltip, "origin isn't on GitHub, GitLab or Bitbucket");
 
-    h.send(support::welcome(1));
+    h.send_welcome(1);
     let (_, remotes) = split_reads(h.sent());
     assert_eq!(
         remotes.len(),

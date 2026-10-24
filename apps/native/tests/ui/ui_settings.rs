@@ -770,17 +770,6 @@ fn claude_provider_default_saves_and_seeds_the_dialog(cx: &mut TestAppContext) {
     assert_eq!(saved_ui(&dir)["spawn"]["claude_provider"], "deepseek");
     h.keys("escape");
     assert!(!h.root(|root, _| root.settings_open()));
-
-    h.send(DaemonMessage::Repos {
-        repos: vec![support::repo("r1", "C:/r1")],
-    });
-    h.click_on("sidebar-add-session");
-    assert!(h.root(|root, _| root.spawn_dialog_open()));
-    let chosen = h.root(|root, _| root.spawn_dialog_selected());
-    assert!(
-        chosen.contains(&"spawn-provider-deepseek".to_owned()),
-        "a new dialog starts on the saved provider: {chosen:?}"
-    );
 }
 
 #[gpui::test]

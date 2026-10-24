@@ -240,7 +240,7 @@ fn welcome_clears_the_queue(cx: &mut TestAppContext) {
     fail(&mut h, "s1", "one", vec![failure("a", vec![])]);
     fail(&mut h, "s2", "two", vec![failure("b", vec![])]);
 
-    h.send(support::welcome(PROTOCOL));
+    h.send_welcome(PROTOCOL);
 
     assert!(!h.in_model("cleanup-failed"));
 }

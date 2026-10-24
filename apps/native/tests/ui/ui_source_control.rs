@@ -634,7 +634,7 @@ fn welcome_reseeds(cx: &mut TestAppContext) {
     h.send(status("r1", None, &[], &["a.rs"]));
     h.sent();
 
-    h.send(support::welcome(1));
+    h.send_welcome(1);
     assert_eq!(
         status_requests(&mut h),
         [main_tree("r1"), main_tree("r2")],

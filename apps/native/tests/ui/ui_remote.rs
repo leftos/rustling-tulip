@@ -1449,7 +1449,7 @@ fn init_layouts(sent: &[ClientMessage]) -> Vec<&ClientMessage> {
 /// followed by the client's tab list.
 fn reconnect_with(h: &mut Harness<'_>, n: usize) {
     let fixture = with_sessions(n);
-    h.send(support::welcome(support::PROTOCOL));
+    h.send_welcome(support::PROTOCOL);
     h.send(DaemonMessage::Sessions {
         sessions: fixture.sessions,
     });
@@ -1677,7 +1677,7 @@ fn no_offer_when_the_chooser_is_due(cx: &mut TestAppContext) {
     seed_host_count(&dir, 1);
     let mut h = Harness::open(cx, &dir);
     h.event(NetEvent::State(remote()));
-    h.send(support::welcome(support::PROTOCOL));
+    h.send_welcome(support::PROTOCOL);
     h.send(DaemonMessage::Sessions {
         sessions: with_sessions(3).sessions,
     });

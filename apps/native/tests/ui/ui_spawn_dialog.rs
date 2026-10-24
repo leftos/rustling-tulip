@@ -435,15 +435,18 @@ fn dialog_opens_with_saved_spawn_defaults(cx: &mut TestAppContext) {
     std::fs::write(
         dir.path().join("native-ui.json"),
         serde_json::json!({
-            "spawn": {
-                "trusted": true,
-                "permission_mode": "plan"
-            }
+            "spawn": { "trusted": true }
         })
         .to_string(),
     )
     .expect("seed native-ui.json");
     let mut h = Harness::with(cx, &dir, &fixture());
+    h.send(DaemonMessage::AgentSettings {
+        settings: serde_json::from_value(
+            serde_json::json!({ "claude": { "permission_mode": "plan" } }),
+        )
+        .expect("agent settings"),
+    });
     open(&mut h);
     let chosen = selected(&mut h);
     assert!(
@@ -451,8 +454,8 @@ fn dialog_opens_with_saved_spawn_defaults(cx: &mut TestAppContext) {
         "trusted launch pre-filled: {chosen:?}"
     );
     assert!(
-        chosen.contains(&"spawn-approval-plan".to_owned()),
-        "Claude approval pre-filled: {chosen:?}"
+        chosen.contains(&"spawn-opt-permission-mode-plan".to_owned()),
+        "the agent's Settings value pre-filled: {chosen:?}"
     );
 
     suggest(&mut h, "r1", "wt/brave-fox");
@@ -514,12 +517,13 @@ fn advanced_opens_and_sends_model_approval_and_env(cx: &mut TestAppContext) {
     open(&mut h);
     suggest(&mut h, "r1", "wt/brave-fox");
     h.click_on("spawn-advanced");
-    h.click_on("spawn-model-sonnet");
+    h.click_on("spawn-opt-model-sonnet");
     assert_eq!(
-        h.root(RootView::spawn_dialog_model).as_deref(),
+        h.root(|root, cx| root.spawn_dialog_option_text("model", cx))
+            .as_deref(),
         Some("sonnet")
     );
-    h.click_on("spawn-approval-accept-edits");
+    h.click_on("spawn-opt-permission-mode-accept-edits");
     h.click_on("spawn-env-add");
     assert_eq!(focus(&mut h).as_deref(), Some("spawn-env-key-0"));
     h.keys("F O O tab b a r");
@@ -562,15 +566,15 @@ fn provider_row_shows_for_claude_only_and_sends_deepseek(cx: &mut TestAppContext
     show_whole_dialog(&mut h);
     open(&mut h);
     suggest(&mut h, "r1", "wt/brave-fox");
-    assert!(drawn(&mut h, "spawn-provider-anthropic"));
-    assert!(selected(&mut h).contains(&"spawn-provider-anthropic".to_owned()));
+    assert!(drawn(&mut h, "spawn-opt-provider-anthropic"));
+    assert!(selected(&mut h).contains(&"spawn-opt-provider-anthropic".to_owned()));
     let with_row = runtime_to_open_in(&mut h);
     let shell = "spawn-agent-plain-shell";
     h.click_on(shell);
     let chosen = selected(&mut h);
     assert!(
         chosen.contains(&shell.to_owned())
-            && !chosen.iter().any(|s| s.starts_with("spawn-provider-")),
+            && !chosen.iter().any(|s| s.starts_with("spawn-opt-provider-")),
         "{shell} hides the row: {chosen:?}"
     );
     assert!(
@@ -578,9 +582,9 @@ fn provider_row_shows_for_claude_only_and_sends_deepseek(cx: &mut TestAppContext
         "{shell} takes the row out of the layout"
     );
     h.click_on("spawn-agent-claude");
-    tab_to(&mut h, "tab", "spawn-provider-deepseek", 6);
+    tab_to(&mut h, "tab", "spawn-opt-provider-deepseek", 6);
     h.keys("space");
-    assert!(selected(&mut h).contains(&"spawn-provider-deepseek".to_owned()));
+    assert!(selected(&mut h).contains(&"spawn-opt-provider-deepseek".to_owned()));
     h.click_on("spawn-submit");
     let request = the_spawn(&h.sent());
     assert_eq!(wire_provider(&request).as_deref(), Some("deepseek"));
@@ -605,7 +609,7 @@ fn a_fresh_dialog_follows_the_last_spawn_provider(cx: &mut TestAppContext) {
     open(&mut h);
     suggest(&mut h, "r1", "wt/brave-fox");
     assert!(
-        selected(&mut h).contains(&"spawn-provider-deepseek".to_owned()),
+        selected(&mut h).contains(&"spawn-opt-provider-deepseek".to_owned()),
         "r1's last spawn went to DeepSeek"
     );
     h.click_on("spawn-submit");

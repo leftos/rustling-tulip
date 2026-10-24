@@ -601,7 +601,7 @@ fn failed_restart_clears_pending_and_allows_retry(cx: &mut TestAppContext) {
 
     h.click_on("exited-restart-p1");
     duplicate_request(&h.sent(), "s1");
-    h.send(support::welcome(1));
+    h.send_welcome(1);
     assert!(!pending(&mut h, "s1"), "a reconnect forgets every restart");
 }
 
@@ -734,7 +734,7 @@ fn exit_update_between_welcome_and_sessions_list_is_not_discarded(cx: &mut TestA
     let dir = TestDir::new();
     let mut h = single(cx, &dir, session("s1").status("working").build());
 
-    h.send(support::welcome(1));
+    h.send_welcome(1);
     h.send(updated(session("s1").exited(0).build(), None));
 
     assert!(
@@ -1072,7 +1072,8 @@ fn shift_duplicate_reply_opens_the_locked_prefilled_dialog(cx: &mut TestAppConte
     ));
     assert!(h.root(|root, _| root.spawn_dialog_open()));
     assert_eq!(
-        h.root(RootView::spawn_dialog_model).as_deref(),
+        h.root(|root, cx| root.spawn_dialog_option_text("model", cx))
+            .as_deref(),
         Some("claude-sonnet-9")
     );
     assert_ne!(
@@ -1092,7 +1093,7 @@ fn shift_duplicate_reply_opens_the_locked_prefilled_dialog(cx: &mut TestAppConte
     for chosen in [
         "spawn-target-repo-r1",
         "spawn-placement-tab-t2",
-        "spawn-approval-plan",
+        "spawn-opt-permission-mode-plan",
     ] {
         assert!(
             selected.contains(&chosen.to_owned()),
@@ -1129,11 +1130,12 @@ fn shift_duplicate_of_a_deepseek_source_prefills_deepseek(cx: &mut TestAppContex
     assert!(h.root(|root, _| root.spawn_dialog_open()));
     let selected = dialog_selected(&mut h);
     assert!(
-        selected.contains(&"spawn-provider-deepseek".to_owned()),
+        selected.contains(&"spawn-opt-provider-deepseek".to_owned()),
         "the source's provider is picked: {selected:?}"
     );
     assert_eq!(
-        h.root(RootView::spawn_dialog_model).as_deref(),
+        h.root(|root, cx| root.spawn_dialog_option_text("model", cx))
+            .as_deref(),
         Some("deepseek-flash")
     );
 }
@@ -1156,7 +1158,11 @@ fn shift_duplicate_with_no_stored_config_opens_defaults_on_the_source_repo(
             "{chosen} in {selected:?}"
         );
     }
-    assert_eq!(h.root(RootView::spawn_dialog_model).as_deref(), Some(""));
+    assert_eq!(
+        h.root(|root, cx| root.spawn_dialog_option_text("model", cx))
+            .as_deref(),
+        Some("")
+    );
     assert!(painted(&mut h, "spawn-target-repo-r2"));
     assert!(
         !painted(&mut h, "spawn-target-repo-r1"),

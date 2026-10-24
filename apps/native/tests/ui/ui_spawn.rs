@@ -775,7 +775,7 @@ fn modals_close_on_reconnect(cx: &mut TestAppContext) {
     h.send(failed("Worktree in use", None));
     assert!(action_failed(&mut h).is_some());
     assert!(checkout_focus(&mut h).is_some());
-    h.send(support::welcome(1));
+    h.send_welcome(1);
     assert_eq!(action_failed(&mut h), None);
     assert_eq!(checkout_focus(&mut h), None);
     h.send(updated(session("s2").build(), Some(&id)));
@@ -949,7 +949,7 @@ fn reconnect_clears_queued_prompts(cx: &mut TestAppContext) {
     h.keys("escape");
     assert_eq!(requested(h.sent()), [(b.clone(), None)], "B is asked again");
 
-    h.send(support::welcome(1));
+    h.send_welcome(1);
     assert_eq!(checkout_focus(&mut h), None, "nothing is shown");
     assert_eq!(checkout_title(&mut h), None);
     let after = h.sent();

@@ -14,12 +14,11 @@ use std::path::Path;
 use std::sync::LazyLock;
 
 use crate::appearance::{self, AppColors, AppLevel, Resolved};
-use crate::claude_compat::{self, ClaudeProvider, PermissionMode};
+use crate::claude_compat::{self, ClaudeProvider, PermissionMode, approval_label};
 use crate::connection_picker::SavedHost;
 use crate::fonts::{self, FontSettings};
 use crate::launch_last;
 use crate::source_control::{Part, ScKey, ScUiState};
-use crate::spawn_form::approval_label;
 use crate::tabs::collect_panes;
 use crate::window_state::WindowState;
 

@@ -1631,7 +1631,7 @@ fn folder_scans_run_once_per_distinct_path_and_welcome_clears_them(cx: &mut Test
         "a second list rescans nothing"
     );
 
-    h.send(support::welcome(support::PROTOCOL));
+    h.send_welcome(support::PROTOCOL);
     h.sent();
     h.send(DaemonMessage::Sessions {
         sessions: fixture.sessions.clone(),

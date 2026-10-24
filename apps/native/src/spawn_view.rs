@@ -12,11 +12,12 @@ use gpui::{
     Stateful, Subscription, Task, Window, canvas, deferred, div, point, prelude::*, px, relative,
     svg,
 };
-use protocol::DaemonMessage;
+use protocol::{DaemonMessage, OptionValue, SpawnPlacement};
 
+use crate::agent_options::{FieldEditor, FieldView};
+use crate::agent_options_view;
 use crate::assets::{SIDEBAR_CHEVRON_DOWN_ICON, SIDEBAR_CHEVRON_RIGHT_ICON};
 use crate::buttons::{ButtonKind, ButtonSize, button, field_frame, focus_ring};
-use crate::claude_compat;
 use crate::combobox::{ComboRow, list_placement};
 use crate::notice_view::{MODAL_RADIUS, modal_panel};
 use crate::palette::{
@@ -26,9 +27,8 @@ use crate::palette::{
 use crate::remote_mode::spawn_no_repos_note;
 use crate::session_menu::{backdrop, dialog_button};
 use crate::spawn_form::{
-    APPROVAL_CHOICES, Control, EnvRow, EnvRowNote, FormInputs, ListField, Lock, MODEL_ALIASES,
-    OpenChoice, Outcome, PROVIDER_CHOICES, Prefill, Runtime, ShareButton, SpawnForm, TabChoices,
-    Target, WorktreeMode, approval_label, provider_label,
+    Control, EnvRow, EnvRowNote, FormInputs, ListField, Lock, OpenChoice, Outcome, Prefill,
+    ShareButton, SpawnForm, TabChoices, Target, WorktreeMode,
 };
 use crate::spawn_preview::{
     CollisionNotice, RECREATE_LABEL, REUSE_NOTE, ReuseChoice, Tone, collision_notice, member_row,
@@ -84,7 +84,8 @@ const RANDOM_TIP: &str = "Generate a random worktree branch name";
 const SUGGESTING: &str = "Picking a name no existing branch uses…";
 const FETCH_FAILED: &str = "Couldn't reach the remote — comparing against the last fetched refs.";
 const CURRENT_TAB_DISABLED: &str = "The current tab cannot host terminal panes";
-pub(crate) const CLAUDE_LOCKED: &str = "Ignored while trusted launch is on. Claude will run without --permission-mode. The chosen value is preserved for when you toggle trusted launch off.";
+/// The trusted-launch warning's text under its title.
+const TRUSTED_WARNING: &str = "Approval prompts are bypassed for this session.";
 const NO_ENV: &str = "No extra env vars.";
 const ENV_VALUE_PLACEHOLDER: &str = "value";
 const REMOVE_ENV_TIP: &str = "Remove env var";
@@ -135,7 +136,8 @@ pub(crate) struct SpawnDialog {
     aim: Option<PaneAim>,
     branch_input: Entity<TextInput>,
     base_input: Entity<TextInput>,
-    model_input: Entity<TextInput>,
+    /// One field per text or model field of the chosen agent, in order.
+    option_inputs: Vec<OptionInput>,
     /// One pair of fields per env row of the form, in order.
     env_inputs: Vec<EnvInputs>,
     _subscriptions: Vec<Subscription>,
@@ -188,7 +190,11 @@ impl SpawnDialog {
         match control {
             Control::Branch => Some(&self.branch_input),
             Control::Base => Some(&self.base_input),
-            Control::Model => Some(&self.model_input),
+            Control::FieldText(id) => self
+                .option_inputs
+                .iter()
+                .find(|input| &input.field == id)
+                .map(|input| &input.input),
             Control::EnvKey(index) => self.env_inputs.get(*index).map(|row| &row.key),
             Control::EnvValue(index) => self.env_inputs.get(*index).map(|row| &row.value),
             _ => None,
@@ -196,8 +202,9 @@ impl SpawnDialog {
     }
 
     fn inputs(&self) -> impl Iterator<Item = &Entity<TextInput>> {
-        [&self.branch_input, &self.base_input, &self.model_input]
+        [&self.branch_input, &self.base_input]
             .into_iter()
+            .chain(self.option_inputs.iter().map(|input| &input.input))
             .chain(
                 self.env_inputs
                     .iter()
@@ -213,26 +220,52 @@ struct EnvInputs {
     _subscriptions: Vec<Subscription>,
 }
 
+/// The text field of one of the chosen agent's text or model fields, and
+/// what watches it. It keeps the text as typed; the form reads it trimmed.
+pub(crate) struct OptionInput {
+    /// The agent field's id.
+    pub(crate) field: String,
+    pub(crate) input: Entity<TextInput>,
+    _subscriptions: Vec<Subscription>,
+}
+
 /// Which text field an event came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Field {
     Branch,
     Base,
-    Model,
+    /// An agent's text or model field, by its id.
+    Option(String),
     EnvKey(usize),
     EnvValue(usize),
 }
 
 impl Field {
-    fn control(self) -> Control {
+    fn control(&self) -> Control {
         match self {
             Self::Branch => Control::Branch,
             Self::Base => Control::Base,
-            Self::Model => Control::Model,
-            Self::EnvKey(index) => Control::EnvKey(index),
-            Self::EnvValue(index) => Control::EnvValue(index),
+            Self::Option(id) => Control::FieldText(id.clone()),
+            Self::EnvKey(index) => Control::EnvKey(*index),
+            Self::EnvValue(index) => Control::EnvValue(*index),
         }
     }
+}
+
+/// The text and placeholder a text or model field's input shows; `None`
+/// for a field of another kind.
+fn text_field(field: &FieldView) -> Option<(String, String)> {
+    let placeholder = match &field.editor {
+        FieldEditor::Text { placeholder } | FieldEditor::Model { placeholder, .. } => {
+            placeholder.clone().unwrap_or_default()
+        }
+        FieldEditor::Toggle | FieldEditor::Choice { .. } | FieldEditor::Unknown => return None,
+    };
+    let text = match &field.value {
+        OptionValue::Text(text) => text.clone(),
+        OptionValue::Bool(_) | OptionValue::Null => String::new(),
+    };
+    Some((text, placeholder))
 }
 
 /// How a button looks.
@@ -294,10 +327,7 @@ impl RootView {
             Control::Runtime(form.runtime()),
             Control::OpenIn(form.open_in().clone()),
         ];
-        chosen.extend(
-            form.provider_shown()
-                .then(|| Control::Provider(form.provider())),
-        );
+        chosen.extend(form.chosen_options());
         chosen.extend(form.trusted().then_some(Control::Trusted));
         chosen.extend(form.use_worktree().then_some(Control::UseWorktree));
         chosen.extend(form.use_worktree().then_some(Control::Mode(form.mode())));
@@ -305,7 +335,6 @@ impl RootView {
             form.existing_selected()
                 .map(|key| Control::Existing(key.to_owned())),
         );
-        chosen.extend(agent_options_chosen(form));
         chosen.extend(
             (0..form.env_rows().len())
                 .filter(|&index| form.env_secret_shown(index) && form.env_rows()[index].secret)
@@ -371,11 +400,23 @@ impl RootView {
             .collect()
     }
 
-    /// The text of the model field, while the dialog is open.
+    /// The text of the chosen agent's text or model field `field`, as
+    /// typed, while the dialog shows it.
     #[must_use]
-    pub fn spawn_dialog_model(&self, cx: &gpui::App) -> Option<String> {
+    pub fn spawn_dialog_option_text(&self, field: &str, cx: &gpui::App) -> Option<String> {
         let dialog = self.form_dialog()?;
-        Some(dialog.model_input.read(cx).text().to_owned())
+        dialog
+            .option_inputs
+            .iter()
+            .find(|input| input.field == field)
+            .map(|input| input.input.read(cx).text().to_owned())
+    }
+
+    /// The trusted-launch row's detail, the chosen agent's trust note,
+    /// while the dialog is open.
+    #[must_use]
+    pub fn spawn_dialog_trust_note(&self) -> Option<String> {
+        self.form_dialog()?.form.trusted_detail().map(str::to_owned)
     }
 
     /// The key and value fields of every env row, while the dialog is open.
@@ -528,6 +569,8 @@ impl RootView {
             focused: focused.as_deref().and_then(|id| self.sidebar.session(id)),
             tabs: TabChoices::from_tabs(self.tabs.tabs(), self.tabs.active_id()),
             spawn_defaults: self.sidebar.ui_state().spawn,
+            agents: &self.agents,
+            agent_settings: &self.agent_settings,
             lock,
         };
         let now = (self.now)();
@@ -544,17 +587,14 @@ impl RootView {
         self.close_more_menu(window, cx);
         let branch_input = cx.new(|cx| TextInput::new(form.branch().to_owned(), "", cx));
         let base_input = cx.new(|cx| TextInput::new(form.base().to_owned(), "", cx));
-        let model_input =
-            cx.new(|cx| TextInput::new(form.model().to_owned(), form.model_placeholder(), cx));
         let mut subscriptions = Self::watch_field(&branch_input, Field::Branch, window, cx);
         subscriptions.extend(Self::watch_field(&base_input, Field::Base, window, cx));
-        subscriptions.extend(Self::watch_field(&model_input, Field::Model, window, cx));
         self.spawn_dialog = Some(SpawnModal::Form(Box::new(SpawnDialog {
             form,
             aim,
             branch_input,
             base_input,
-            model_input,
+            option_inputs: Vec::new(),
             env_inputs: Vec::new(),
             _subscriptions: subscriptions,
             timer: None,
@@ -565,6 +605,7 @@ impl RootView {
             list_anchor: None,
         })));
         self.sync_env_inputs(window, cx);
+        self.sync_option_inputs(window, cx);
         self.send_all(messages);
         self.after_spawn_change(cx);
         self.apply_spawn_focus(window, cx);
@@ -645,6 +686,47 @@ impl RootView {
         }
     }
 
+    /// The chosen agent's text and model fields changed (another runtime,
+    /// a field a rule hides or shows): their inputs are made afresh, each
+    /// holding the form's value.
+    fn sync_option_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(SpawnModal::Form(dialog)) = &self.spawn_dialog else {
+            return;
+        };
+        let fields: Vec<(String, String, String)> = dialog
+            .form
+            .option_fields()
+            .iter()
+            .filter_map(|field| {
+                text_field(field).map(|(text, hint)| (field.id.clone(), text, hint))
+            })
+            .collect();
+        let same = fields.len() == dialog.option_inputs.len()
+            && fields
+                .iter()
+                .zip(&dialog.option_inputs)
+                .all(|((id, _, _), input)| *id == input.field);
+        if same {
+            return;
+        }
+        let inputs = fields
+            .into_iter()
+            .map(|(id, text, placeholder)| {
+                let input = cx.new(|cx| TextInput::new(text, placeholder, cx));
+                let subscriptions =
+                    Self::watch_field(&input, Field::Option(id.clone()), window, cx);
+                OptionInput {
+                    field: id,
+                    input,
+                    _subscriptions: subscriptions,
+                }
+            })
+            .collect();
+        if let Some(SpawnModal::Form(dialog)) = &mut self.spawn_dialog {
+            dialog.option_inputs = inputs;
+        }
+    }
+
     /// Enter submits, Esc closes, an edit
     /// reaches the form and a click in the field moves the form's focus
     /// there. In a field with a branch list, Enter and Esc go to the list
@@ -673,16 +755,17 @@ impl RootView {
                 }
             },
         );
+        let edited = field.clone();
         let edits = cx.subscribe_in(input, window, move |this, input, _: &TextChanged, _, cx| {
             let text = input.read(cx).text().to_owned();
             if let Some(SpawnModal::Form(dialog)) = &mut this.spawn_dialog {
                 let form = &mut dialog.form;
-                match field {
+                match &edited {
                     Field::Branch => form.edit_branch(&text, &mut this.branch_cache),
                     Field::Base => form.edit_base(&text),
-                    Field::Model => form.edit_model(&text),
-                    Field::EnvKey(index) => form.edit_env_key(index, &text),
-                    Field::EnvValue(index) => form.edit_env_value(index, &text),
+                    Field::Option(id) => form.edit_option_text(id, &text),
+                    Field::EnvKey(index) => form.edit_env_key(*index, &text),
+                    Field::EnvValue(index) => form.edit_env_value(*index, &text),
                 }
                 if let Some(list) = list {
                     form.list_edited(list);
@@ -845,6 +928,7 @@ impl RootView {
             Outcome::Stay(messages) => {
                 self.send_all(messages);
                 self.sync_env_inputs(window, cx);
+                self.sync_option_inputs(window, cx);
                 self.after_spawn_change(cx);
                 self.apply_spawn_focus(window, cx);
             }
@@ -892,13 +976,25 @@ impl RootView {
         let placeholders = (form.branch_placeholder(now), form.default_base());
         sync_field(&dialog.branch_input, &branch, placeholders.0, cx);
         sync_field(&dialog.base_input, &base, placeholders.1, cx);
-        let model = form.model().to_owned();
-        sync_field(
-            &dialog.model_input,
-            &model,
-            form.model_placeholder().to_owned(),
-            cx,
-        );
+        let fields = form.option_fields();
+        for option in &dialog.option_inputs {
+            let Some(field) = fields.iter().find(|field| field.id == option.field) else {
+                continue;
+            };
+            let Some((value, placeholder)) = text_field(field) else {
+                continue;
+            };
+            // A field a trusted launch locks takes no typing.
+            let read_only = field.disabled;
+            option
+                .input
+                .update(cx, |input, cx| input.set_read_only(read_only, cx));
+            // The form reads the text trimmed: typed text it agrees with
+            // stays as typed.
+            let typed = option.input.read(cx).text().to_owned();
+            let text = if typed.trim() == value { typed } else { value };
+            sync_field(&option.input, &text, placeholder, cx);
+        }
         for (index, (row, inputs)) in form.env_rows().iter().zip(&dialog.env_inputs).enumerate() {
             sync_field(
                 &inputs.value,
@@ -1151,7 +1247,13 @@ impl RootView {
         let placement = group()
             .child(target_field(form, &focus, cx))
             .child(runtime_field(form, &focus, cx))
-            .children(provider_field(form, &focus, cx))
+            .children(agent_options_view::rows(
+                form,
+                &dialog.option_inputs,
+                SpawnPlacement::Main,
+                &focus,
+                cx,
+            ))
             .child(open_in_field(form, &focus, cx));
         let run = divided()
             .children(trusted_rows(form, &focus, cx))
@@ -1448,12 +1550,12 @@ pub(crate) fn segmented(buttons: Vec<AnyElement>) -> Div {
         .children(buttons)
 }
 
-fn muted(text: impl Into<SharedString>) -> Div {
+pub(crate) fn muted(text: impl Into<SharedString>) -> Div {
     div().text_color(gpui::rgb(MUTED)).child(text.into())
 }
 
 /// A note under a checkbox's or a radio's label.
-fn note(text: impl Into<SharedString>) -> Div {
+pub(crate) fn note(text: impl Into<SharedString>) -> Div {
     div()
         .text_size(px(NOTE_SIZE))
         .text_color(gpui::rgb(SUBTLE))
@@ -1554,7 +1656,7 @@ pub(crate) fn checkbox_row(
 }
 
 /// A checkbox's or a radio's label: its text, and a note under it.
-fn check_label(text: impl Into<SharedString>, under: Option<Div>) -> Div {
+pub(crate) fn check_label(text: impl Into<SharedString>, under: Option<Div>) -> Div {
     div()
         .flex()
         .flex_col()
@@ -1627,7 +1729,7 @@ fn spawn_button(
 
 /// `element` with the reveal marker while it is the focused control of the
 /// scrolling body.
-fn reveal_when_focused(
+pub(crate) fn reveal_when_focused(
     element: Stateful<Div>,
     control: &Control,
     focused: bool,
@@ -1641,7 +1743,7 @@ fn reveal_when_focused(
 }
 
 /// The listener that presses `control`.
-fn press_control(
+pub(crate) fn press_control(
     control: &Control,
     cx: &mut Context<RootView>,
 ) -> impl Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static {
@@ -1652,7 +1754,7 @@ fn press_control(
 }
 
 /// A dialog control's choice button, revealed into view when focused.
-fn option_button(
+pub(crate) fn option_button(
     control: &Control,
     label: impl IntoElement,
     look: Look,
@@ -1734,36 +1836,16 @@ fn target_field(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) -
 }
 
 fn runtime_field(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) -> Div {
-    let buttons = Runtime::all()
+    let buttons = form
+        .runtimes()
         .into_iter()
         .map(|runtime| {
             let selected = runtime == form.runtime();
-            let label = runtime.label().to_owned();
+            let label = form.runtime_label(&runtime);
             choice(&Control::Runtime(runtime), label, selected, focus, cx)
         })
         .collect();
     field("Runtime").child(segmented(buttons))
-}
-
-/// The Provider row under Runtime, for Claude only.
-fn provider_field(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) -> Option<Div> {
-    if !form.provider_shown() {
-        return None;
-    }
-    let buttons = PROVIDER_CHOICES
-        .into_iter()
-        .map(|provider| {
-            let control = Control::Provider(provider);
-            let look = Look {
-                selected: provider == form.provider(),
-                focused: focus == &control,
-                enabled: true,
-            };
-            option_button(&control, provider_label(provider), look, cx).into_any_element()
-        })
-        .collect();
-    let row = div().id("spawn-provider").flex().child(segmented(buttons));
-    Some(field("Provider").child(row))
 }
 
 fn open_in_field(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) -> Div {
@@ -1843,8 +1925,10 @@ fn trusted_rows(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) -
     if !form.trusted_shown() {
         return Vec::new();
     }
-    let flag = SpawnForm::trusted_flag();
-    let label = check_label("Trusted launch", Some(note(flag)));
+    let label = check_label(
+        "Trusted launch",
+        form.trusted_detail().map(|detail| note(detail.to_owned())),
+    );
     let mut rows = vec![checkbox(
         &Control::Trusted,
         form.trusted(),
@@ -1861,7 +1945,7 @@ fn trusted_rows(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) -
                     .font_weight(FontWeight::SEMIBOLD)
                     .child("Trusted launch"),
             )
-            .child(format!("{} Uses {flag}.", SpawnForm::trusted_detail()));
+            .child(TRUSTED_WARNING);
         rows.push(warning.into_any_element());
     }
     rows
@@ -1876,7 +1960,7 @@ fn worktree_checkbox(form: &SpawnForm, focus: &Control, cx: &mut Context<RootVie
     } else {
         (
             "Create a worktree",
-            "Unchecked: run claude in the repo's main directory",
+            "Unchecked: run the agent in the repo's main directory",
         )
     };
     let label = check_label(text, Some(note(unchecked)));
@@ -1934,7 +2018,7 @@ fn existing_field(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>)
 }
 
 /// A text field in a box, tagged with its control's selector.
-fn input_box(
+pub(crate) fn input_box(
     control: &Control,
     input: &Entity<TextInput>,
     focus: &Control,
@@ -2281,18 +2365,8 @@ fn preview_table(form: &SpawnForm) -> AnyElement {
         .into_any_element()
 }
 
-/// The chosen approval option, for the runtime on show.
-fn agent_options_chosen(form: &SpawnForm) -> Vec<Control> {
-    match form.runtime() {
-        Runtime::Agent(agent) if claude_compat::is_claude(&agent) => {
-            vec![Control::Approval(form.permission_mode())]
-        }
-        Runtime::Agent(_) | Runtime::PlainShell => Vec::new(),
-    }
-}
-
-/// The Advanced toggle, and while open the model, the agent's options and
-/// the env rows.
+/// The Advanced toggle, and while open the agent's Advanced fields and the
+/// env rows.
 fn advanced_section(dialog: &SpawnDialog, focus: &Control, cx: &mut Context<RootView>) -> Div {
     let form = &dialog.form;
     let open = form.advanced_open();
@@ -2336,97 +2410,14 @@ fn advanced_section(dialog: &SpawnDialog, focus: &Control, cx: &mut Context<Root
         return section;
     }
     section
-        .children(model_field(dialog, focus, cx))
-        .children(agent_option_rows(form, focus, cx))
+        .children(agent_options_view::rows(
+            form,
+            &dialog.option_inputs,
+            SpawnPlacement::Advanced,
+            focus,
+            cx,
+        ))
         .child(env_field(dialog, focus, cx))
-}
-
-/// The model field, and for claude the alias chips.
-fn model_field(
-    dialog: &SpawnDialog,
-    focus: &Control,
-    cx: &mut Context<RootView>,
-) -> Option<AnyElement> {
-    let form = &dialog.form;
-    if !form.model_shown() {
-        return None;
-    }
-    let input = input_box(&Control::Model, &dialog.model_input, focus, cx);
-    let chips: Vec<AnyElement> = if form.model_chips_shown() {
-        MODEL_ALIASES
-            .into_iter()
-            .map(|alias| {
-                let selected = form.model().trim() == alias;
-                choice(&Control::ModelChip(alias), alias, selected, focus, cx)
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
-    let row = div()
-        .flex()
-        .gap(px(8.0))
-        .child(input)
-        .when(!chips.is_empty(), |row| {
-            row.child(div().flex().flex_none().child(segmented(chips)))
-        });
-    Some(field("Model").child(row).into_any_element())
-}
-
-/// Claude's approval mode; nothing for a plain shell.
-fn agent_option_rows(
-    form: &SpawnForm,
-    focus: &Control,
-    cx: &mut Context<RootView>,
-) -> Vec<AnyElement> {
-    let locked = form.trusted();
-    let note = |text: &'static str| locked.then_some(text);
-    match form.runtime() {
-        Runtime::Agent(agent) if claude_compat::is_claude(&agent) => {
-            let chosen = form.permission_mode();
-            let choices = APPROVAL_CHOICES.map(|mode| {
-                (
-                    Control::Approval(mode),
-                    approval_label(mode),
-                    mode == chosen,
-                )
-            });
-            vec![option_field(
-                "Claude approval mode",
-                &choices,
-                note(CLAUDE_LOCKED),
-                focus,
-                cx,
-            )]
-        }
-        Runtime::Agent(_) | Runtime::PlainShell => Vec::new(),
-    }
-}
-
-/// A labelled row of choices; with a note it is disabled and the note
-/// says why.
-fn option_field(
-    label: &'static str,
-    choices: &[(Control, &'static str, bool)],
-    locked_note: Option<&'static str>,
-    focus: &Control,
-    cx: &mut Context<RootView>,
-) -> AnyElement {
-    let buttons = choices
-        .iter()
-        .map(|(control, text, selected)| {
-            let look = Look {
-                selected: *selected,
-                focused: focus == control,
-                enabled: locked_note.is_none(),
-            };
-            option_button(control, *text, look, cx).into_any_element()
-        })
-        .collect();
-    field(label)
-        .child(segmented(buttons))
-        .children(locked_note.map(muted))
-        .into_any_element()
 }
 
 /// The env rows, each with its problem, and `+ Add env var`.

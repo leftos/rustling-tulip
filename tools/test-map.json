@@ -130,7 +130,13 @@
       "paths": [
         "apps/native/src/agent_options.rs"
       ],
-      "filter": "(binary_id(rustling-tulip-native) & test(/^agent_options::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_agent_options)::/))"
+      "filter": "(binary_id(rustling-tulip-native) & test(/^agent_options::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_agent_options|ui_session_actions|ui_spawn_dialog)::/))"
+    },
+    {
+      "paths": [
+        "apps/native/src/agent_options_view.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native::ui) & test(/^(ui_agent_options|ui_spawn_dialog|ui_session_actions)::/))"
     },
     {
       "paths": [
@@ -641,7 +647,7 @@
       "paths": [
         "apps/native/src/spawn_form.rs"
       ],
-      "filter": "(binary_id(rustling-tulip-native) & test(/^spawn_form::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_container_menu|ui_keys|ui_launch_last|ui_pane_spawn|ui_spawn|ui_spawn_combobox|ui_spawn_dialog)::/))"
+      "filter": "(binary_id(rustling-tulip-native) & test(/^spawn_form::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_agent_options|ui_container_menu|ui_keys|ui_launch_last|ui_pane_spawn|ui_session_actions|ui_spawn|ui_spawn_combobox|ui_spawn_dialog)::/))"
     },
     {
       "paths": [
@@ -653,7 +659,7 @@
       "paths": [
         "apps/native/src/spawn_view.rs"
       ],
-      "filter": "(binary_id(rustling-tulip-native) & test(/^spawn_view::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_container_menu|ui_keys|ui_launch_last|ui_remote|ui_spawn|ui_spawn_combobox|ui_spawn_dialog|ui_spawn_preview)::/))"
+      "filter": "(binary_id(rustling-tulip-native) & test(/^spawn_view::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_agent_options|ui_container_menu|ui_keys|ui_launch_last|ui_remote|ui_session_actions|ui_spawn|ui_spawn_combobox|ui_spawn_dialog|ui_spawn_preview)::/))"
     },
     {
       "paths": [

@@ -56,6 +56,43 @@ pub struct ClaudeChoice {
     pub model: Option<String>,
 }
 
+/// The providers a Claude spawn can pick, Anthropic first.
+pub(crate) const PROVIDER_CHOICES: [ClaudeProvider; 2] =
+    [ClaudeProvider::Anthropic, ClaudeProvider::Deepseek];
+
+/// A provider's label in Settings and in every other place the client
+/// names one. The client's one `ClaudeProvider` -> name table: a provider
+/// added later is named here and nowhere else.
+pub(crate) fn provider_label(provider: ClaudeProvider) -> &'static str {
+    match provider {
+        ClaudeProvider::Anthropic => "Anthropic",
+        ClaudeProvider::Deepseek => "DeepSeek",
+        ClaudeProvider::Unknown => "Unknown",
+    }
+}
+
+/// Claude's approval modes, the CLI default first.
+pub(crate) const APPROVAL_CHOICES: [Option<PermissionMode>; 5] = [
+    None,
+    Some(PermissionMode::Default),
+    Some(PermissionMode::AcceptEdits),
+    Some(PermissionMode::BypassPermissions),
+    Some(PermissionMode::Plan),
+];
+
+pub(crate) fn approval_label(mode: Option<PermissionMode>) -> &'static str {
+    match mode {
+        None => "CLI default",
+        Some(PermissionMode::Default) => "default",
+        Some(PermissionMode::AcceptEdits) => "accept edits",
+        Some(PermissionMode::BypassPermissions) => "bypass permissions",
+        Some(PermissionMode::Plan) => "plan",
+    }
+}
+
+/// The note under Claude's approval choices while trusted launch is on.
+pub(crate) const CLAUDE_LOCKED: &str = "Ignored while trusted launch is on. Claude will run without --permission-mode. The chosen value is preserved for when you toggle trusted launch off.";
+
 /// The id the Claude plugin registers under.
 #[must_use]
 pub fn claude_id() -> AgentId {
@@ -87,6 +124,7 @@ pub fn from_options(options: &OptionValues) -> ClaudeChoice {
 }
 
 /// `choice` as option values, leaving out each key that holds its default.
+#[cfg(test)]
 #[must_use]
 pub fn to_options(choice: &ClaudeChoice) -> OptionValues {
     let mut options = OptionValues::new();
@@ -127,6 +165,7 @@ fn parse<T: for<'de> Deserialize<'de>>(value: &str) -> Option<T> {
     serde_json::from_value(serde_json::Value::String(value.to_owned())).ok()
 }
 
+#[cfg(test)]
 fn serde_name<T: Serialize>(value: &T) -> Option<String> {
     match serde_json::to_value(value) {
         Ok(serde_json::Value::String(name)) => Some(name),

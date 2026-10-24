@@ -659,6 +659,6 @@ fn manager_closes_on_welcome(cx: &mut TestAppContext) {
     );
     h.keys("enter");
     assert!(manager_open(&mut h), "Enter reopens it");
-    h.send(support::welcome(PROTOCOL));
+    h.send_welcome(PROTOCOL);
     assert!(!manager_open(&mut h));
 }

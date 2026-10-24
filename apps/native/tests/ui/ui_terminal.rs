@@ -1050,7 +1050,7 @@ fn a_reconnect_does_not_claim(cx: &mut TestAppContext) {
 
     // A new connection resets the pane, which paints without its session
     // and so without the shell's gutter, before the lists attach it again.
-    h.send(support::welcome(1));
+    h.send_welcome(1);
     h.sent();
     h.load(&fixture);
     h.answer_scrollback("s1", b"");

@@ -1314,17 +1314,24 @@ impl<'a> Harness<'a> {
     /// the session history, which the specs that care about it ask for
     /// themselves.
     fn welcome_messages(&mut self) {
-        self.send(welcome(PROTOCOL));
+        self.send_welcome(PROTOCOL);
+        self.drain();
+        self.outbox
+            .unread
+            .retain(|msg| !matches!(msg, ClientMessage::ListSessionHistory { .. }));
+    }
+
+    /// Sends what the daemon sends first on a connection speaking
+    /// `protocol_version`: `Welcome`, then the agents' descriptors and their
+    /// Settings values (none set), as after a reconnect.
+    pub fn send_welcome(&mut self, protocol_version: u32) {
+        self.send(welcome(protocol_version));
         self.send(DaemonMessage::Agents {
             agents: agent_registry::descriptors(),
         });
         self.send(DaemonMessage::AgentSettings {
             settings: BTreeMap::new(),
         });
-        self.drain();
-        self.outbox
-            .unread
-            .retain(|msg| !matches!(msg, ClientMessage::ListSessionHistory { .. }));
     }
 
     pub fn load(&mut self, fixture: &Fixture) {

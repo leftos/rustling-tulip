@@ -334,7 +334,7 @@ fn a_new_welcome_closes_the_wizard(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &two_repos());
     open_wizard(&mut h, preset(all_sources(), json!([])));
-    h.send(support::welcome(PROTOCOL));
+    h.send_welcome(PROTOCOL);
     assert!(
         !h.root(|root, _| root.preset_wizard_open()),
         "a new connection closes the wizard"
@@ -1003,7 +1003,7 @@ fn completed_job_replaces_the_sticky_toast(cx: &mut TestAppContext) {
     let key = shown[0].key.clone().unwrap_or_default();
     assert_eq!(h.root(|root, _| root.preset_launch_progress(&key)), None);
 
-    h.send(support::welcome(PROTOCOL));
+    h.send_welcome(PROTOCOL);
     let kept = toasts(&mut h);
     assert_eq!(
         kept.len(),
@@ -1263,7 +1263,7 @@ fn welcome_keeps_finished_job_toasts_and_drops_running_ones(cx: &mut TestAppCont
     let running = launch_three(&mut h);
     assert_eq!(toasts(&mut h).len(), 2);
 
-    h.send(support::welcome(PROTOCOL));
+    h.send_welcome(PROTOCOL);
     h.load(&two_repos());
     h.send(session_update("s2", "idle"));
     let keys: Vec<Option<String>> = toasts(&mut h).into_iter().map(|toast| toast.key).collect();
@@ -1287,7 +1287,7 @@ fn welcome_clears_the_highlight(cx: &mut TestAppContext) {
     let job_id = finished_job_of_four(&mut h);
     press(&mut h, &job_id, "select");
     assert_eq!(leaf_fill(&mut h, "s2"), Some(LAUNCHED_TINT));
-    h.send(support::welcome(PROTOCOL));
+    h.send_welcome(PROTOCOL);
     h.load(&two_repos());
     h.send(session_update("s2", "idle"));
     assert_eq!(leaf_fill(&mut h, "s2"), None);
