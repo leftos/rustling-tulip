@@ -21,7 +21,7 @@ Close behind: the paste and key quirks (native clipboard read, Shift+Enter bytes
 - [x] Standby-resume watchdog: a 30s tick arriving >90s late probes liveness with `list_repos` (3s) and forces a reconnect if the socket is half-open — `App.tsx`
 - [x] Full-screen "Starting/Connecting to daemon…" overlay with spinner and "Restart daemon", until the first connect — `App.tsx` `ConnectingOverlay`
 - [x] Footer status pill: state dot, "N sessions", ":port", reason tooltip — `components/DaemonFooter.tsx`
-- [ ] Footer pill remote-host chip (with the connection picker, Phase 6) — `components/DaemonFooter.tsx` (native: the pill names the remote host since P6.2a; the picker is P6.3)
+- [x] Footer pill remote-host chip (with the connection picker, Phase 6) — `components/DaemonFooter.tsx` (native: the pill names the remote host since P6.2a; the Connections button beside it opens the host picker since P6.3)
 - [x] Footer troubleshooting flyout: state, port, pid, protocol, session count, reason, copy handshake path; Esc / outside click closes — `DaemonFooter.tsx`
 - [x] Open daemon.log / app.log in the default app; reveal the config dir (native: daemon.log and native.log) — `DaemonFooter.tsx`, `lib.rs` `daemon_paths`
 - [x] Restart daemon (graceful `shutdown` then respawn; forced fresh connect in auth-failed/stopped) — `App.tsx` `onRestartDaemon`
@@ -193,9 +193,9 @@ The frontend has no search addon, bell handling or title parsing; `terminal_titl
 - [x] Host LAN panel: enable, port, advertised address, cert fingerprint, connection code with Copy — `SettingsModal.tsx` `LanPanel` (superseded by the Remote access (Tailscale) panel in `settings_view.rs`: switch, status, address, port; no fingerprint or connection code)
 - [x] Pair a device: one-time code with countdown and Cancel, and the pairing outcome — `SettingsModal.tsx` `PairDevicePanel` (retired: no pairing over Tailscale, `docs/plans/remote-access.md`)
 - [x] Start daemon on login (HKCU Run key / LaunchAgent) — `src-tauri/src/autostart.rs` (native: the registration and the startup refresh in P6.5, `daemon_client::autostart`; the toggle is `Start the daemon when I log in` in Settings → Remote access, `settings_view.rs`)
-- [ ] Remote host profiles over Tailscale: the host picker from the tailnet's machines, a typed MagicDNS name, the chosen connection saved, and the client verifying the listener's `tailscale cert` TLS itself — no pinned-TLS tunnel, local plaintext bridge, pairing over it or `remote-profiles.json` (`docs/plans/remote-access.md`, P6.1–P6.3)
+- [x] Remote host profiles over Tailscale: the host picker from the tailnet's machines, a typed MagicDNS name, the chosen connection saved, and the client verifying the listener's `tailscale cert` TLS itself — no pinned-TLS tunnel, local plaintext bridge, pairing over it or `remote-profiles.json` (`docs/plans/remote-access.md`, P6.1–P6.3)
 - [x] Remote mode disables local-file actions (add repo, reveal, VS Code, pickers become typed paths) — `utils/remoteMode.ts` (native: disabled with a reason since P6.2a; Add repo, the workspace creator's file and the worktrees root are typed host paths since P6.2b, RT-257; a terminal path link fetches its file instead, FT.3, and the ⋯ menu's Fetch file… popup fetches a typed path, FT.4)
-- [ ] Chosen connection saved; a missing saved host falls back to local — `App.tsx`
+- [x] Chosen connection saved; a missing saved host falls back to local — `App.tsx`
 
 ## Misc & shortcuts
 
