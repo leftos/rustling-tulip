@@ -356,6 +356,12 @@
     },
     {
       "paths": [
+        "apps/native/src/html_media.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & test(/^html_media::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_file_fetch)::/))"
+    },
+    {
+      "paths": [
         "apps/native/src/keys.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native) & test(/^keys::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_shortcuts|ui_terminal)::/))"

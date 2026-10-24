@@ -44,6 +44,7 @@ mod history;
 mod history_view;
 mod host_path_prompt;
 mod host_path_prompt_view;
+mod html_media;
 mod keys;
 pub mod launch_last;
 mod layout_chooser;

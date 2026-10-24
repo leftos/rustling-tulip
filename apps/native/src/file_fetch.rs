@@ -136,7 +136,7 @@ pub fn file_name(rel: &str) -> &str {
 
 /// `rel`'s segments made safe; refuses an empty path, a leading separator,
 /// a drive prefix, and an empty, `.` or `..` segment.
-fn rel_segments(rel: &str) -> Result<Vec<String>, String> {
+pub(crate) fn rel_segments(rel: &str) -> Result<Vec<String>, String> {
     if rel.is_empty() {
         return Err("the path is empty".to_owned());
     }
