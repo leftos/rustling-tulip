@@ -2840,16 +2840,26 @@ impl RootView {
     /// A key for what is drawn on top: Esc ending a drag, then the
     /// Connections picker (above every other layer, the first-connect
     /// overlay included), then the cleanup-failed dialog. Returns whether
-    /// one of them took it.
+    /// the key goes no further down the chain; it stops propagating only
+    /// when one of them took it, so typing in the picker's fields still
+    /// reaches them.
     fn on_top_layer_key(
         &mut self,
         ks: &Keystroke,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        self.take_drag_escape()
-            || self.on_connection_picker_key(ks, window, cx)
-            || self.on_cleanup_failed_key(ks, window, cx)
+        let taken = if self.take_drag_escape() {
+            Some(true)
+        } else if let Some(taken) = self.on_connection_picker_key(ks, window, cx) {
+            Some(taken)
+        } else {
+            self.on_cleanup_failed_key(ks, window, cx).then_some(true)
+        };
+        if taken == Some(true) {
+            cx.stop_propagation();
+        }
+        taken.is_some()
     }
 
     /// Keys the root takes before the panes see them. An Esc that ended a
@@ -2872,7 +2882,6 @@ impl RootView {
     ) {
         let ks = &event.keystroke;
         if self.on_top_layer_key(ks, window, cx) {
-            cx.stop_propagation();
             return;
         }
         if self.on_exit_key(ks, window, cx) {

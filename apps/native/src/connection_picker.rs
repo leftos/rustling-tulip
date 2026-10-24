@@ -269,12 +269,13 @@ impl ConnectionPicker {
         self.scan == Scan::Pending
     }
 
-    /// Saves `host` after the others, unless a host of its name is saved.
+    /// Saves `host` after the others; a host of its name already saved
+    /// takes its port, in its place.
     pub fn remember(&mut self, host: SavedHost) {
-        if self.saved.iter().any(|saved| saved.name == host.name) {
-            return;
+        match self.saved.iter_mut().find(|saved| saved.name == host.name) {
+            Some(saved) => saved.port = host.port,
+            None => self.saved.push(host),
         }
-        self.saved.push(host);
     }
 
     /// Forgets the saved host `name`. Returns whether it was `current`, so
@@ -598,7 +599,7 @@ mod tests {
     }
 
     #[test]
-    fn remember_adds_a_host_once() {
+    fn remember_adds_a_host_once_and_updates_its_port() {
         let mut picker = ConnectionPicker::new(vec![saved("a.tail1234.ts.net", 8787)]);
         picker.remember(saved("b.tail1234.ts.net", 9443));
         assert_eq!(
@@ -610,15 +611,24 @@ mod tests {
             "a new host goes last"
         );
 
-        picker.remember(saved("b.tail1234.ts.net", 8787));
-        picker.remember(saved("a.tail1234.ts.net", 1234));
+        picker.remember(saved("b.tail1234.ts.net", 9443));
         assert_eq!(
             picker.saved(),
             [
                 saved("a.tail1234.ts.net", 8787),
                 saved("b.tail1234.ts.net", 9443)
             ],
-            "a saved name keeps its first port"
+            "the same name and port changes nothing"
+        );
+
+        picker.remember(saved("a.tail1234.ts.net", 1234));
+        assert_eq!(
+            picker.saved(),
+            [
+                saved("a.tail1234.ts.net", 1234),
+                saved("b.tail1234.ts.net", 9443)
+            ],
+            "a saved name takes the new port, in its place"
         );
     }
 

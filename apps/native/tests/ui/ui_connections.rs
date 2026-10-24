@@ -15,6 +15,7 @@ use crate::support;
 use std::sync::Arc;
 
 use gpui::{TestAppContext, px};
+use protocol::{DaemonMessage, WorktreeCleanupFailure};
 use rustling_tulip_native::connection_picker::PeerSource;
 use rustling_tulip_native::target::Target;
 use rustling_tulip_native::{NetCommand, RootView};
@@ -389,4 +390,77 @@ fn picking_the_current_target_sends_nothing(cx: &mut TestAppContext) {
 
     assert!(!is_open(&mut h), "the picker closes");
     assert_eq!(switches(&mut h), [] as [Target; 0]);
+}
+
+#[gpui::test]
+fn typed_known_host_on_a_new_port_updates_the_saved_port(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &json!({ "saved_hosts": [{ "name": HOST, "port": 8787 }] }),
+    );
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    open_picker(&mut h, tailnet_with(&[]));
+    h.commands();
+
+    // This PC, the saved host, its Forget, then Name.
+    h.keys("tab tab tab");
+    assert_eq!(focus(&mut h).as_deref(), Some("connections-name"));
+    type_text(&mut h, HOST);
+    h.keys("tab");
+    type_text(&mut h, "9443");
+    h.keys("enter");
+
+    assert_eq!(switches(&mut h), [Target::tailnet(HOST, Some(9443))]);
+    let ui = saved_ui(&dir);
+    assert_eq!(ui["saved_hosts"], json!([{ "name": HOST, "port": 9443 }]));
+    assert_eq!(ui["last_target"], json!({ "name": HOST, "port": 9443 }));
+}
+
+#[gpui::test]
+fn typing_in_the_picker_does_not_reach_the_layers_below(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    open_picker(&mut h, tailnet_with(&[]));
+    h.keys("tab");
+    assert_eq!(focus(&mut h).as_deref(), Some("connections-name"));
+
+    h.keys("ctrl-,");
+
+    assert!(
+        !h.root(|root, _| root.settings_open()),
+        "Settings stays closed behind the picker"
+    );
+    assert!(is_open(&mut h));
+}
+
+#[gpui::test]
+fn a_notice_under_the_picker_does_not_take_its_keys(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    h.send(DaemonMessage::WorktreeCleanupFailed {
+        session_id: "s1".to_owned(),
+        session_label: "feat/x".to_owned(),
+        failures: vec![WorktreeCleanupFailure {
+            member_path: "C:/wts/wt.feat-x/a".to_owned(),
+            repo_path: "C:/src/a".to_owned(),
+            reason: "fs::remove_dir_all: access denied".to_owned(),
+            locking_processes: Vec::new(),
+        }],
+    });
+    assert!(h.root(|root, _| root.cleanup_failed_open()));
+    h.root_update(|root, window, cx| {
+        root.set_peer_source(Arc::new(tailnet_with(&[])));
+        root.open_connection_picker(window, cx);
+    });
+    h.keys("tab");
+    assert_eq!(focus(&mut h).as_deref(), Some("connections-name"));
+
+    h.keys("space");
+
+    assert!(
+        h.root(|root, _| root.cleanup_failed_open()),
+        "Space in the Name field does not press the hidden dialog's Ignore"
+    );
+    assert!(is_open(&mut h));
 }

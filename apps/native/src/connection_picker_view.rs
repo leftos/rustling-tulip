@@ -235,19 +235,18 @@ impl RootView {
         vec![keys, edits, focus]
     }
 
-    /// A key while the picker is open; returns whether it was the
-    /// picker's (every key but typing in a field is). Esc closes, Tab and
+    /// A key while the picker is open: whether it was the picker's (every
+    /// key but typing in a field is), and `None` while it is closed. While
+    /// it is open no key reaches a layer under it. Esc closes, Tab and
     /// Shift+Tab move the focus, Enter or Space press the focused control.
     pub(crate) fn on_connection_picker_key(
         &mut self,
         keystroke: &Keystroke,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> bool {
-        let Some(focused) = self.connection_picker.as_ref().map(|dialog| dialog.focus) else {
-            return false;
-        };
-        match keystroke.key.as_str() {
+    ) -> Option<bool> {
+        let focused = self.connection_picker.as_ref()?.focus;
+        Some(match keystroke.key.as_str() {
             "escape" => {
                 self.close_connection_picker(window, cx);
                 true
@@ -263,7 +262,7 @@ impl RootView {
                 true
             }
             _ => true,
-        }
+        })
     }
 
     /// Steps the focus to the next control, or the previous one, wrapping.
