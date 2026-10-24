@@ -1084,7 +1084,10 @@ impl RootView {
             session_history: recover::SessionHistory::default(),
             recover: None,
             recover_focus: cx.focus_handle(),
-            pairing: pairing_view::PairingView::new(cx.focus_handle()),
+            pairing: pairing_view::PairingView::new(
+                cx.focus_handle(),
+                Self::forward_pairing_actions(window, cx),
+            ),
             recover_timer: None,
             recover_requests: HashMap::new(),
             recover_batches: Vec::new(),
@@ -2675,6 +2678,7 @@ impl RootView {
         self.on_cleanup_failed_message(msg, window, cx);
         self.on_worktrees_message(msg, cx);
         self.on_recover_message(msg, window, cx);
+        self.on_pairing_message(msg, window, cx);
         self.on_preset_message(msg, cx);
         self.on_preset_launch_message(msg, window, cx);
         if let DaemonMessage::SpawnConfigReply { session_id, config } = msg {
@@ -2688,6 +2692,7 @@ impl RootView {
     fn on_welcome(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.reset_for_new_daemon(window, cx);
         self.reset_recover(window, cx);
+        self.ask_pending_devices();
         self.awaiting_initial_sessions = true;
     }
 

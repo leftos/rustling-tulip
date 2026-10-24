@@ -1198,6 +1198,21 @@ impl<'a> Harness<'a> {
             .clone()
     }
 
+    /// Every pairing toast the client raised, in order, once the view has
+    /// settled.
+    pub fn pairing_toasts(&mut self) -> Vec<PairingToast> {
+        self.cx.run_until_parked();
+        self.notifier.pairing_toasts()
+    }
+
+    /// Presses the last pairing toast as [`NotifyRecorder::activate`] does,
+    /// then lets the view settle.
+    pub fn activate_pairing_toast(&mut self, arg: Option<&str>) {
+        self.cx.run_until_parked();
+        self.notifier.activate(arg);
+        self.cx.run_until_parked();
+    }
+
     /// Reports `state` as Windows' toast setting from now on.
     pub fn set_notify_state(&self, state: NotifyState) {
         *self

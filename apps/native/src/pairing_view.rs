@@ -3,21 +3,26 @@
 //! code, its keys and the one-second tick that keeps its countdowns moving.
 //! The model is [`crate::pairing`].
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
+use futures::StreamExt as _;
+use futures::channel::mpsc::{UnboundedSender, unbounded};
 use gpui::{
     AnyElement, Bounds, ClickEvent, Context, Div, FocusHandle, FontWeight, Keystroke, Pixels,
     SharedString, Stateful, Task, Window, canvas, div, point, prelude::*, px,
 };
-use protocol::{PendingDevice, Secret};
+use protocol::{ClientMessage, DaemonMessage, FEATURE_DEVICE_PAIRING, PendingDevice, Secret};
 
 use crate::activity_bar::badge_text;
 use crate::buttons::{ButtonKind, ButtonSize, button, focus_ring};
 use crate::fonts::DEFAULT_FAMILY;
 use crate::notice_view::modal_panel;
+use crate::notify::PairingActionSink;
 use crate::pairing::{
-    DialogPhase, DialogView, PairingState, QrMatrix, WaitingRow, approve_message, deny_message,
+    DialogPhase, DialogView, PairingAction, PairingState, PairingToast, QrMatrix, WaitingRow,
+    approve_message, deny_message,
 };
 use crate::palette::{ASKING, ON_ASKING};
 use crate::session_menu::backdrop;
@@ -61,10 +66,12 @@ pub(crate) struct PairingView {
     /// The countdowns as last drawn, so a tick redraws only on a change.
     drawn: Vec<String>,
     tick: Option<Task<()>>,
+    /// Where a pressed pairing toast hands its action, from any thread.
+    actions: UnboundedSender<PairingAction>,
 }
 
 impl PairingView {
-    pub(crate) fn new(focus: FocusHandle) -> Self {
+    pub(crate) fn new(focus: FocusHandle, actions: UnboundedSender<PairingAction>) -> Self {
         Self {
             model: PairingState::new(),
             focus,
@@ -73,6 +80,7 @@ impl PairingView {
             approving: false,
             drawn: Vec::new(),
             tick: None,
+            actions,
         }
     }
 }
@@ -122,10 +130,140 @@ impl PairingButton {
 }
 
 impl RootView {
+    /// The channel a pressed pairing toast's action travels on, and the
+    /// task that hands each action to [`Self::on_pairing_action`] until the
+    /// view is gone.
+    pub(crate) fn forward_pairing_actions(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> UnboundedSender<PairingAction> {
+        let (actions, mut pressed) = unbounded();
+        cx.spawn_in(window, async move |this, cx| {
+            while let Some(action) = pressed.next().await {
+                if this
+                    .update_in(cx, |view, window, cx| {
+                        view.on_pairing_action(action, window, cx);
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+        actions
+    }
+
+    /// A pairing toast was pressed. Approve… brings the window forward and,
+    /// unless a dialog is already open, opens the request's dialog as the
+    /// row's Approve… does; Deny declines
+    /// the request; a press on the body only brings the window forward. A
+    /// request the client no longer lists opens and sends nothing.
+    fn on_pairing_action(
+        &mut self,
+        action: PairingAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        tracing::info!(?action, "pairing: a toast was pressed");
+        match action {
+            PairingAction::Approve { request_id } => {
+                window.activate_window();
+                // An open dialog (a code on screen, or an approval on its
+                // way) is never replaced from a toast.
+                let waiting = self
+                    .pairing_row(&request_id)
+                    .is_some_and(|row| !row.approved);
+                if waiting && self.pairing_dialog().is_none() {
+                    self.open_pairing_dialog(&request_id, window, cx);
+                }
+            }
+            PairingAction::Deny { request_id } => {
+                if self.pairing_row(&request_id).is_some() {
+                    self.deny_pairing(&request_id, window, cx);
+                }
+            }
+            PairingAction::Open => window.activate_window(),
+        }
+    }
+
+    /// The waiting row of `request_id`, while the client lists it.
+    fn pairing_row(&self, request_id: &str) -> Option<WaitingRow> {
+        self.pairing
+            .model
+            .rows(Utc::now())
+            .into_iter()
+            .find(|row| row.request_id == request_id)
+    }
+
+    /// Asks this PC's daemon for its waiting list, when it pairs devices;
+    /// a tailnet host's list is not this client's to approve.
+    pub(crate) fn ask_pending_devices(&self) {
+        if self.conn.target().is_local() && self.conn.supports(FEATURE_DEVICE_PAIRING) {
+            self.send(ClientMessage::ListPendingDevices);
+        }
+    }
+
+    /// Folds in the daemon's waiting list or a code it minted; any other
+    /// message is not the pairing model's.
+    pub(crate) fn on_pairing_message(
+        &mut self,
+        msg: &DaemonMessage,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match msg {
+            DaemonMessage::PendingDevices { requests } => {
+                let fresh = self.fold_pending_devices(requests, window, cx);
+                self.raise_pairing_toasts(requests, &fresh, cx);
+            }
+            DaemonMessage::DevicePairCode {
+                request_id,
+                code,
+                expires_in_secs,
+            } => {
+                self.fold_device_code(request_id.as_deref(), code, *expires_in_secs, window, cx);
+            }
+            _ => {}
+        }
+    }
+
+    /// Raises the toast of each request in `fresh`, off the UI thread, while
+    /// the connection is to this PC's daemon.
+    fn raise_pairing_toasts(
+        &self,
+        requests: &[PendingDevice],
+        fresh: &[String],
+        cx: &mut Context<Self>,
+    ) {
+        if !self.conn.target().is_local() {
+            return;
+        }
+        for request in requests.iter().filter(|r| fresh.contains(&r.request_id)) {
+            let toast = PairingToast::for_request(request);
+            let notifier = self.notifications.notifier.clone();
+            let sink = self.pairing_sink();
+            cx.background_executor()
+                .spawn(async move { notifier.notify_pairing(&toast, sink) })
+                .detach();
+        }
+    }
+
+    /// Hands a pressed toast's action to the window, from whichever thread
+    /// the OS raises it on.
+    fn pairing_sink(&self) -> PairingActionSink {
+        let actions = self.pairing.actions.clone();
+        Arc::new(move |action: PairingAction| {
+            if let Err(err) = actions.unbounded_send(action) {
+                tracing::warn!("a pairing toast was pressed after its window closed: {err}");
+            }
+        })
+    }
+
     /// Folds in the daemon's waiting list: rows come and go, and a dialog
     /// whose request left the list closes. Returns the requests that raise
     /// a toast, each once.
-    pub fn fold_pending_devices(
+    pub(crate) fn fold_pending_devices(
         &mut self,
         requests: &[PendingDevice],
         window: &mut Window,
@@ -142,16 +280,16 @@ impl RootView {
     }
 
     /// Folds in a code the daemon minted, `expires_in_secs` from now: the
-    /// dialog of `request_id` opens on it. Returns whether the dialog shows
-    /// it; a CLI-minted code names no request and shows nothing.
-    pub fn fold_device_code(
+    /// dialog of `request_id` opens on it. A CLI-minted code names no
+    /// request and shows nothing.
+    pub(crate) fn fold_device_code(
         &mut self,
         request_id: Option<&str>,
         code: &Secret,
         expires_in_secs: u64,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> bool {
+    ) {
         let shown = self
             .pairing
             .model
@@ -164,7 +302,6 @@ impl RootView {
             }
         }
         self.sync_pairing(window, cx);
-        shown
     }
 
     /// The Waiting devices rows as drawn: each line and its countdown, or

@@ -11,7 +11,9 @@ Design for Wave 3's remote desktop (Linear RT-33, RT-34 and their sub-issues). R
 
   The native client's views of that request live in `apps/native/src/pairing_view.rs` over the model in `pairing.rs`. Settings → Remote access shows a `Waiting devices · {n}` section (name and Tailscale login, a `m:ss left` countdown, Approve… and Deny; an approved row reads `Approved · waiting for the device` with only Deny), and the Remote access tab carries an amber count badge (`99+` cap, approved requests included).
 
-  Approve… opens an approval dialog that sends nothing until Approve is pressed, then shows the QR code, the code as `735 160` and `expires in m:ss · this request only`, and closes by itself when the code runs out. Disconnecting or switching target closes it and forgets the waiting requests. The views are built and spec-tested; the fold of the daemon's messages into them and the toast are wired in N3, so nothing in the running app opens them yet.
+  Approve… opens an approval dialog that sends nothing until Approve is pressed, then shows the QR code, the code as `735 160` and `expires in m:ss · this request only`, and closes by itself when the code runs out. Disconnecting or switching target closes it and forgets the waiting requests.
+
+  On each connect to this PC's daemon whose `Welcome` lists `device_pairing` the client asks `ListPendingDevices` (never on a tailnet host), and the daemon's `PendingDevices` and `DevicePairCode` feed the rows, the badge and the dialog. Each new unapproved request raises a Windows toast, "A device asks for remote access", with Approve… and Deny (`notify.rs`, raised from `pairing_view.rs`): Approve… brings the window forward and opens the dialog without opening Settings, Deny sends `DenyDevice`.
 - "The owner" is a device logged in as the host node's own Tailscale user (numeric `UserID`, never the display login), untagged, not shared in, and not the host itself.
 - The listener binds the host's own tailnet addresses only (v4 and v6), on the port `remote.json` configures (default 8787), rebinding when they change.
 - Shutdown and turning remote access off are refused from tailnet connections: host-only.

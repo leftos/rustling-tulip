@@ -1,7 +1,8 @@
 //! Device approval dialog specs: the Confirm phase a row's Approve… opens,
 //! its Approve sending `ApproveDevice`, the code phase with its QR code,
 //! grouped code and countdown, Deny and Close, the dialog closing with its
-//! request or its code, and its keys.
+//! request or its code, and its keys; the toast a waiting request raises
+//! and its buttons, and the waiting list asked for at connect.
 
 use std::time::Duration;
 
@@ -9,7 +10,9 @@ use crate::support;
 
 use chrono::{TimeDelta, Utc};
 use gpui::{TestAppContext, px};
-use protocol::{ClientMessage, PendingDevice, Secret};
+use protocol::{ClientMessage, DaemonMessage, FEATURE_DEVICE_PAIRING, PendingDevice, Secret};
+use rustling_tulip_native::Connection;
+use rustling_tulip_native::target::Target;
 use support::{Fixture, Harness, TestDir, session};
 
 const TAB: &str = "settings-tab-remote-access";
@@ -40,14 +43,41 @@ fn opened<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
     h
 }
 
+/// The daemon's waiting list, as it sends it.
 fn fold(h: &mut Harness<'_>, requests: &[PendingDevice]) {
-    h.root_update(|root, window, cx| root.fold_pending_devices(requests, window, cx));
+    h.send(DaemonMessage::PendingDevices {
+        requests: requests.to_vec(),
+    });
 }
 
-/// Folds in the code `735160`, minted for `request_id`, good for `secs`.
+/// The daemon sends the code `735160`, minted for `request_id`, good for
+/// `secs`; returns whether the dialog shows it.
 fn fold_code(h: &mut Harness<'_>, request_id: Option<&str>, secs: u64) -> bool {
-    let code = Secret("735160".to_owned());
-    h.root_update(|root, window, cx| root.fold_device_code(request_id, &code, secs, window, cx))
+    h.send(DaemonMessage::DevicePairCode {
+        request_id: request_id.map(str::to_owned),
+        code: Secret("735160".to_owned()),
+        expires_in_secs: secs,
+    });
+    texts(h).iter().any(|text| text == "735 160")
+}
+
+/// The window reconnects to `target`, whose `Welcome` lists `features`;
+/// returns what the client sent on it.
+fn reconnect(h: &mut Harness<'_>, target: Target, features: Vec<String>) -> Vec<ClientMessage> {
+    let port = if target.is_local() { 4242 } else { 8787 };
+    let mut conn = Connection::for_target(target);
+    conn.on_connecting();
+    conn.on_socket_open(port);
+    conn.on_welcome(support::PROTOCOL, features);
+    h.set_connection(conn);
+    h.send(support::welcome(support::PROTOCOL));
+    h.sent()
+}
+
+fn lists_pending(sent: &[ClientMessage]) -> usize {
+    sent.iter()
+        .filter(|msg| matches!(msg, ClientMessage::ListPendingDevices))
+        .count()
 }
 
 /// Settings open on the Remote access page with request `r1` waiting, its
@@ -352,4 +382,114 @@ fn tab_cycles_the_buttons_and_enter_waits_for_focus(cx: &mut TestAppContext) {
     h.keys("tab tab enter");
     assert!(h.sent().is_empty(), "Close sends nothing");
     assert!(!dialog_open(&mut h));
+}
+
+#[gpui::test]
+fn pending_device_raises_one_toast(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    fold(&mut h, &[request("r1")]);
+    let toasts = h.pairing_toasts();
+    assert_eq!(toasts.len(), 1, "{toasts:?}");
+    assert_eq!(toasts[0].request_id, "r1");
+    assert_eq!(toasts[0].title, "A device asks for remote access");
+    assert_eq!(
+        toasts[0].body,
+        "phone · signed in to Tailscale as alice@example.com"
+    );
+}
+
+#[gpui::test]
+fn toast_not_raised_twice_for_one_request(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    fold(&mut h, &[request("r1")]);
+    fold(&mut h, &[request("r1")]);
+    assert_eq!(h.pairing_toasts().len(), 1, "the same list raises nothing");
+    fold(&mut h, &[request("r1"), request("r2")]);
+    let ids: Vec<String> = h
+        .pairing_toasts()
+        .into_iter()
+        .map(|toast| toast.request_id)
+        .collect();
+    assert_eq!(ids, ["r1", "r2"], "only the new request raises one");
+}
+
+#[gpui::test]
+fn toast_approve_opens_the_dialog(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    fold(&mut h, &[request("r1")]);
+    h.sent();
+    h.activate_pairing_toast(Some("approve:r1"));
+    assert!(dialog_open(&mut h), "the toast's Approve… opens the dialog");
+    assert_eq!(buttons(&mut h), CONFIRM_BUTTONS, "in its Confirm phase");
+    assert!(h.sent().is_empty(), "the toast never approves");
+    assert!(
+        !h.root(|root, _| root.settings_open()),
+        "Settings stays shut"
+    );
+
+    h.click_on(CLOSE);
+    fold(&mut h, &[]);
+    h.activate_pairing_toast(Some("approve:r1"));
+    assert!(!dialog_open(&mut h), "a request gone opens nothing");
+}
+
+#[gpui::test]
+fn toast_approve_keeps_an_open_code_dialog(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    fold(&mut h, &[request("r1"), request("r2")]);
+    h.activate_pairing_toast(Some("approve:r1"));
+    h.click_on(APPROVE);
+    assert!(sent_only(&mut h, approves("r1")), "ApproveDevice r1 alone");
+    assert!(fold_code(&mut h, Some("r1"), 120), "r1's code shows");
+
+    h.activate_pairing_toast(Some("approve:r2"));
+    assert!(
+        texts(&mut h).iter().any(|t| t == "735 160"),
+        "r1's code stays on screen"
+    );
+    assert_eq!(buttons(&mut h), CODE_BUTTONS, "still the code phase");
+    assert!(h.sent().is_empty());
+}
+
+#[gpui::test]
+fn toast_deny_sends_deny_device(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    fold(&mut h, &[request("r1")]);
+    h.sent();
+    h.activate_pairing_toast(Some("deny:r1"));
+    assert!(sent_only(&mut h, denies("r1")), "DenyDevice r1 alone");
+
+    fold(&mut h, &[]);
+    h.activate_pairing_toast(Some("deny:r1"));
+    assert!(h.sent().is_empty(), "a request gone sends nothing");
+}
+
+#[gpui::test]
+fn list_pending_devices_is_sent_on_connect(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    let pairing = vec![FEATURE_DEVICE_PAIRING.to_owned()];
+    let sent = reconnect(&mut h, Target::Local, pairing.clone());
+    assert_eq!(lists_pending(&sent), 1, "{sent:?}");
+
+    let sent = reconnect(&mut h, Target::Local, support::daemon_features());
+    assert_eq!(lists_pending(&sent), 0, "an older daemon: {sent:?}");
+
+    let host = Target::tailnet("box.tail1234.ts.net", None);
+    let sent = reconnect(&mut h, host, pairing);
+    assert_eq!(lists_pending(&sent), 0, "a tailnet host: {sent:?}");
+}
+
+#[gpui::test]
+fn a_cli_code_opens_no_dialog(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    assert!(!fold_code(&mut h, None, 120));
+    assert!(!dialog_open(&mut h));
+    assert!(h.sent().is_empty());
 }

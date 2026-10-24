@@ -141,8 +141,11 @@ fn request(id: &str, approved: bool) -> PendingDevice {
     }
 }
 
+/// The daemon's waiting list, as it sends it.
 fn fold(h: &mut Harness<'_>, requests: &[PendingDevice]) {
-    h.root_update(|root, window, cx| root.fold_pending_devices(requests, window, cx));
+    h.send(DaemonMessage::PendingDevices {
+        requests: requests.to_vec(),
+    });
 }
 
 /// The Waiting devices rows as drawn: each line and its countdown or state.
