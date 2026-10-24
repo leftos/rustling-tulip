@@ -7,6 +7,14 @@
 //! [`handle`]; a decision reaches the waiting device through its entry in
 //! [`Hub::pairing_waiters`]. When both locks are held, [`Hub::pairing`] is
 //! taken first.
+//!
+//! [`Hub::live_devices`] is taken before [`Hub::devices`] whenever both are
+//! held: a handshake verifies a device token and registers its connection
+//! under the live registry's lock, and a block or a forget changes the store
+//! and cuts that device's connections under it. An approval checks the store
+//! for a block while it holds [`Hub::pairing`], so `pairing` comes before
+//! `devices` too; nothing takes `pairing` or `live_devices` while holding
+//! `devices`.
 use super::connection::{AuthKind, ConnCtx};
 use super::{Hub, StateEvent};
 use crate::devices::{
@@ -38,6 +46,9 @@ pub(super) const TAILNET_ONLY: &str = "device pairing is for tailnet devices";
 
 /// The answer to an approval message on any connection but loopback.
 pub(super) const LOCAL_ONLY: &str = "device approval is local-only";
+
+/// What the owner hears when approving a request from a blocked device.
+const DEVICE_BLOCKED: &str = "this device is blocked; forget it before approving it again";
 
 /// What the device hears when its token could not be stored.
 const SAVE_FAILED: &str = "could not save the device; ask again";
@@ -268,6 +279,11 @@ impl PairingConn<'_> {
             self.fail(TOO_MANY_REQUESTS);
             return Flow::Close;
         }
+        if crate::sync::lock(&self.hub.devices).is_blocked(&self.peer.stable_id) {
+            info!(device = %self.peer.name, "a blocked device asked to pair; refused");
+            self.fail(DEVICE_NOT_APPROVED);
+            return Flow::Stay;
+        }
         let mut book = crate::sync::lock(&self.hub.pairing);
         let requested = match book.request(self.peer, Instant::now(), Utc::now()) {
             Ok(requested) => requested,
@@ -387,6 +403,13 @@ impl PairingConn<'_> {
             self.fail(err.to_string());
             return Flow::Stay;
         }
+        // Checked before the redeem, so a blocked device uses up neither the
+        // owner's code nor its request.
+        if crate::sync::lock(&self.hub.devices).is_blocked(&self.peer.stable_id) {
+            info!(device = %self.peer.name, "a blocked device redeemed a code; refused");
+            self.fail(DEVICE_NOT_APPROVED);
+            return Flow::Close;
+        }
         match self.redeem_own(request_id, code) {
             Ok(()) => self.issue_token(),
             Err(Refusal::CodeLapsed) => {
@@ -445,8 +468,26 @@ impl PairingConn<'_> {
         result
     }
 
+    /// Issue the device its token. A record the issue replaced loses its
+    /// served connections under [`Hub::live_devices`], so none stays served
+    /// under an id the owner can no longer block.
     fn issue_token(&self) -> Flow {
-        let issued = crate::sync::lock(&self.hub.devices).issue(self.peer, Utc::now());
+        let mut live = self.hub.live_devices.lock();
+        let mut devices = crate::sync::lock(&self.hub.devices);
+        let replaced = devices
+            .list()
+            .iter()
+            .find(|record| record.stable_id == self.peer.stable_id)
+            .map(|record| record.id.clone());
+        let issued = devices.issue(self.peer, Utc::now());
+        drop(devices);
+        if issued.is_ok()
+            && let Some(replaced) = &replaced
+        {
+            let cut = live.cut(replaced);
+            info!(device = %self.peer.name, %replaced, cut, "device paired again; the replaced record's connections were cut");
+        }
+        drop(live);
         match issued {
             Ok((device_id, token)) => {
                 info!(device = %self.peer.name, %device_id, "device paired; token issued");
@@ -454,6 +495,10 @@ impl PairingConn<'_> {
                     device_id,
                     token: Secret(token),
                 });
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                info!(device = %self.peer.name, "a blocked device redeemed a code; no token issued");
+                self.fail(DEVICE_NOT_APPROVED);
             }
             Err(err) => {
                 warn!(?err, device = %self.peer.name, "could not save the paired device");
@@ -529,24 +574,83 @@ pub(super) fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) {
             });
         }
         ClientMessage::ListDevices => send_devices(hub, out_tx),
-        ClientMessage::RevokeDevice { device_id } => {
-            let revoked = crate::sync::lock(&hub.devices).revoke(&device_id);
-            match revoked {
-                Ok(found) => {
-                    info!(%device_id, found, "pairing: device revoked");
-                    send_devices(hub, out_tx);
-                }
-                Err(err) => refuse(out_tx, err.to_string()),
-            }
-        }
+        ClientMessage::RevokeDevice { device_id } => match block_device(hub, &device_id) {
+            Ok(_) => send_devices(hub, out_tx),
+            Err(err) => refuse(out_tx, err.to_string()),
+        },
+        ClientMessage::ForgetDevice { device_id } => match forget_device(hub, &device_id) {
+            Ok(_) => send_devices(hub, out_tx),
+            Err(err) => refuse(out_tx, err.to_string()),
+        },
         _ => debug!("pairing: dispatch routed a message this module does not handle"),
     }
+}
+
+/// Block `device_id`: set its flag, then cut every served connection it has,
+/// both under [`Hub::live_devices`], the lock a handshake verifies and
+/// registers under, so none of its connections verifies before the flag and
+/// registers after the cut. Returns whether a record matched.
+///
+/// # Errors
+///
+/// The flag could not be written (the store is corrupt or the write
+/// failed); the device's connections are cut all the same, since the owner
+/// asked for them to go.
+pub(super) fn block_device(hub: &Hub, device_id: &str) -> std::io::Result<bool> {
+    let mut live = hub.live_devices.lock();
+    let revoked = crate::sync::lock(&hub.devices).revoke(device_id);
+    let cut = live.cut(device_id);
+    drop(live);
+    match &revoked {
+        Ok(found) => info!(%device_id, found, cut, "pairing: device blocked"),
+        Err(err) => warn!(
+            %device_id,
+            ?err,
+            cut,
+            "pairing: could not save the block; the device's connections were cut and the block holds until the daemon restarts"
+        ),
+    }
+    revoked
+}
+
+/// Forget `device_id`: remove its record, then cut every served connection
+/// it has, under [`Hub::live_devices`] as [`block_device`] does. Returns
+/// whether a record matched; an unknown id changes nothing.
+///
+/// # Errors
+///
+/// The record could not be removed (the store is corrupt or the write
+/// failed); the device's connections are cut all the same.
+fn forget_device(hub: &Hub, device_id: &str) -> std::io::Result<bool> {
+    let mut live = hub.live_devices.lock();
+    let forgotten = crate::sync::lock(&hub.devices).forget(device_id);
+    let cut = live.cut(device_id);
+    drop(live);
+    match &forgotten {
+        Ok(found) => info!(%device_id, found, cut, "pairing: device forgotten"),
+        Err(err) => warn!(
+            %device_id,
+            ?err,
+            cut,
+            "pairing: could not save forgetting the device; its connections were cut and it stays forgotten until the daemon restarts"
+        ),
+    }
+    forgotten
 }
 
 /// Approve `request_id`: the code goes to the approving connection only, and
 /// the waiting device hears it was approved.
 fn approve(hub: &Hub, out_tx: &mpsc::UnboundedSender<DaemonMessage>, request_id: &str) {
     let mut book = crate::sync::lock(&hub.pairing);
+    let blocked = book
+        .stable_id_of(request_id)
+        .is_some_and(|stable_id| crate::sync::lock(&hub.devices).is_blocked(stable_id));
+    if blocked {
+        drop(book);
+        info!(%request_id, "pairing: approval of a blocked device's request refused");
+        refuse(out_tx, DEVICE_BLOCKED);
+        return;
+    }
     match book.approve(request_id, Instant::now()) {
         Ok(code) => {
             info!(%request_id, "pairing request approved");
@@ -634,8 +738,10 @@ fn broadcast_pending(hub: &Hub, book: &PairingBook) {
     broadcast_views(hub, book.pending());
 }
 
-/// Reply with every approved device; no token or hash ever leaves the store.
+/// Reply with every approved device and its live connection count; no
+/// token, hash or address ever leaves the store.
 fn send_devices(hub: &Hub, out_tx: &mpsc::UnboundedSender<DaemonMessage>) {
+    let live = hub.live_devices.lock();
     let devices = crate::sync::lock(&hub.devices)
         .list()
         .iter()
@@ -646,8 +752,10 @@ fn send_devices(hub: &Hub, out_tx: &mpsc::UnboundedSender<DaemonMessage>) {
             created_at: record.created_at,
             last_seen: record.last_seen,
             revoked: record.revoked,
+            connected: live.connected(&record.id),
         })
         .collect();
+    drop(live);
     let _ = out_tx.send(DaemonMessage::Devices { devices });
 }
 
@@ -660,8 +768,9 @@ fn send_devices(hub: &Hub, out_tx: &mpsc::UnboundedSender<DaemonMessage>) {
 mod tests {
     use super::*;
     use crate::server::test_support::{
-        WsClient, dispatch_all, dispatch_one, env_spawn, hello, loopback_ws_client,
-        spawnless_test_hub, tailnet_ws_client, test_hub, test_peer, ws_frame, ws_next, ws_send,
+        WsClient, dispatch_all, dispatch_one, dispatch_one_as, env_spawn, hello,
+        loopback_ws_client, spawnless_test_hub, tailnet_ws_client, test_hub, test_peer, ws_frame,
+        ws_next, ws_send,
     };
 
     fn other_peer() -> tailnet::PeerIdentity {
@@ -1460,6 +1569,340 @@ mod tests {
         assert_closed(&mut client).await;
         assert!(pending_ids(&hub).is_empty(), "the book is empty");
         assert!(crate::sync::lock(&hub.pairing_waiters).is_empty());
+    }
+
+    /// Issue `peer` a token straight into the store; returns its device id
+    /// and token.
+    fn issue(hub: &Hub, peer: &tailnet::PeerIdentity) -> (String, String) {
+        crate::sync::lock(&hub.devices)
+            .issue(peer, Utc::now())
+            .expect("issue a device token")
+    }
+
+    /// A served tailnet connection as `peer` presenting `token`, past its
+    /// initial state.
+    async fn served_client(
+        hub: &Hub,
+        peer: tailnet::PeerIdentity,
+        token: &str,
+    ) -> (WsClient, tokio_util::sync::CancellationToken) {
+        remote_on(hub);
+        let (mut client, server_life) = tailnet_ws_client(hub, peer).await;
+        ws_send(&mut client, &hello(token, None)).await;
+        read_until(&mut client, |m| {
+            matches!(m, DaemonMessage::RemoteStatus { .. })
+        })
+        .await;
+        (client, server_life)
+    }
+
+    /// A loopback connection past its initial state.
+    async fn local_client(hub: &Hub) -> WsClient {
+        let mut local = loopback_ws_client(hub).await;
+        ws_send(&mut local, &hello("test-token", None)).await;
+        read_until(&mut local, |m| {
+            matches!(m, DaemonMessage::RemoteStatus { .. })
+        })
+        .await;
+        local
+    }
+
+    /// Read `client` until the daemon ends the connection.
+    async fn ends(client: &mut WsClient) {
+        while ws_next(client).await.is_some() {}
+    }
+
+    fn revoke(device_id: &str) -> ClientMessage {
+        ClientMessage::RevokeDevice {
+            device_id: device_id.to_owned(),
+        }
+    }
+
+    #[tokio::test]
+    async fn revoking_closes_every_connection_of_the_device_but_not_other_devices() {
+        let (hub, _scratch) = test_hub("revoke-every-connection");
+        let (phone_id, phone_token) = issue(&hub, &test_peer());
+        let (tablet_id, tablet_token) = issue(&hub, &other_peer());
+        let (mut first, _first_life) = served_client(&hub, test_peer(), &phone_token).await;
+        let (mut second, _second_life) = served_client(&hub, test_peer(), &phone_token).await;
+        let (mut tablet, _tablet_life) = served_client(&hub, other_peer(), &tablet_token).await;
+        assert_eq!(hub.live_devices.lock().connected(&phone_id), 2);
+
+        let reply = dispatch_one(&hub, revoke(&phone_id)).await;
+        assert!(matches!(reply, DaemonMessage::Devices { .. }), "{reply:?}");
+        ends(&mut first).await;
+        ends(&mut second).await;
+        assert_eq!(hub.live_devices.lock().connected(&phone_id), 0);
+        assert_eq!(
+            hub.live_devices.lock().connected(&tablet_id),
+            1,
+            "the other device stays registered"
+        );
+        ws_send(&mut tablet, &ClientMessage::ListDevices).await;
+        let answer = read_until(&mut tablet, |m| matches!(m, DaemonMessage::Error { .. })).await;
+        assert!(
+            !answer
+                .iter()
+                .any(|m| matches!(m, DaemonMessage::Devices { .. })),
+            "the other device's connection is still served and still refused the list: {answer:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn revoke_does_not_touch_a_loopback_connection() {
+        let (hub, _scratch) = test_hub("revoke-loopback");
+        let mut local = local_client(&hub).await;
+        let (device_id, token) = issue(&hub, &test_peer());
+        let (mut device, _life) = served_client(&hub, test_peer(), &token).await;
+
+        ws_send(&mut local, &revoke(&device_id)).await;
+        read_until(&mut local, |m| matches!(m, DaemonMessage::Devices { .. })).await;
+        ends(&mut device).await;
+        ws_send(&mut local, &ClientMessage::ListDevices).await;
+        read_until(&mut local, |m| matches!(m, DaemonMessage::Devices { .. })).await;
+    }
+
+    #[tokio::test]
+    async fn a_failed_flag_write_still_closes_the_devices_connections() {
+        let (hub, _scratch) = test_hub("revoke-write-fails");
+        let (device_id, token) = issue(&hub, &test_peer());
+        let (mut device, _life) = served_client(&hub, test_peer(), &token).await;
+        // A directory where devices.json was: the rename onto it fails.
+        let file = crate::paths::devices_file(&hub.dirs);
+        std::fs::remove_file(&file).expect("remove devices.json");
+        std::fs::create_dir(&file).expect("put a directory in its place");
+
+        let reply = dispatch_one(&hub, revoke(&device_id)).await;
+        assert!(matches!(reply, DaemonMessage::Error { .. }), "{reply:?}");
+        ends(&mut device).await;
+        assert_eq!(hub.live_devices.lock().connected(&device_id), 0);
+
+        let (mut again, _again_life) = tailnet_ws_client(&hub, test_peer()).await;
+        ws_send(&mut again, &hello(&token, None)).await;
+        let welcome = next(&mut again).await;
+        assert!(
+            matches!(welcome, DaemonMessage::Welcome { .. }),
+            "{welcome:?}"
+        );
+        assert_failed(&next(&mut again).await, DEVICE_NOT_APPROVED);
+    }
+
+    #[tokio::test]
+    async fn a_re_paired_device_cannot_keep_its_old_connection() {
+        let (hub, _scratch) = test_hub("re-paired-old-connection");
+        let (old_id, old_token) = issue(&hub, &test_peer());
+        let (mut old, _old_life) = served_client(&hub, test_peer(), &old_token).await;
+
+        let (new_id, _) = pair(&hub, test_peer()).await;
+        assert_ne!(new_id, old_id, "the re-pair replaced the record");
+        devices_of(&dispatch_one(&hub, revoke(&new_id)).await);
+        ends(&mut old).await;
+        assert_eq!(hub.live_devices.lock().connected(&old_id), 0);
+        assert_eq!(hub.live_devices.lock().connected(&new_id), 0);
+    }
+
+    #[tokio::test]
+    async fn a_blocked_device_redeem_leaves_the_cli_code_live() {
+        let (hub, _scratch) = test_hub("blocked-redeem-code-live");
+        let (mut blocked, request_id, _) = blocked_while_waiting(&hub).await;
+        let DaemonMessage::DevicePairCode { code, .. } =
+            dispatch_one(&hub, ClientMessage::MintDevicePairCode).await
+        else {
+            panic!("want a CLI DevicePairCode");
+        };
+        redeem(&mut blocked, &request_id, &code.0).await;
+        assert_failed(&next(&mut blocked).await, DEVICE_NOT_APPROVED);
+
+        let mut tablet = pairing_client(&hub, other_peer()).await;
+        let tablet_request = ask(&mut tablet).await;
+        redeem(&mut tablet, &tablet_request, &code.0).await;
+        let issued = next(&mut tablet).await;
+        assert!(
+            matches!(issued, DaemonMessage::DeviceToken { .. }),
+            "the owner's code still works for another device: {issued:?}"
+        );
+    }
+
+    fn forget(device_id: &str) -> ClientMessage {
+        ClientMessage::ForgetDevice {
+            device_id: device_id.to_owned(),
+        }
+    }
+
+    fn devices_of(reply: &DaemonMessage) -> Vec<protocol::DeviceInfo> {
+        match reply {
+            DaemonMessage::Devices { devices } => devices.clone(),
+            other => panic!("want Devices, got {other:?}"),
+        }
+    }
+
+    fn device<'a>(devices: &'a [protocol::DeviceInfo], id: &str) -> &'a protocol::DeviceInfo {
+        devices
+            .iter()
+            .find(|info| info.device_id == id)
+            .expect("the device is listed")
+    }
+
+    fn assert_local_only(reply: &DaemonMessage) {
+        assert!(
+            matches!(reply, DaemonMessage::Error { message, .. } if message == LOCAL_ONLY),
+            "{reply:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_devices_reports_connected_count() {
+        let (hub, _scratch) = test_hub("list-connected");
+        let (phone_id, phone_token) = issue(&hub, &test_peer());
+        let (tablet_id, _) = issue(&hub, &other_peer());
+        let (_first, _first_life) = served_client(&hub, test_peer(), &phone_token).await;
+        let (_second, _second_life) = served_client(&hub, test_peer(), &phone_token).await;
+
+        let reply = dispatch_one(&hub, ClientMessage::ListDevices).await;
+        let devices = devices_of(&reply);
+        assert_eq!(device(&devices, &phone_id).connected, 2);
+        assert_eq!(device(&devices, &tablet_id).connected, 0);
+        let json = serde_json::to_string(&reply).expect("serialize the reply");
+        assert!(!json.contains(&phone_token), "no token in the list");
+        for record in crate::sync::lock(&hub.devices).list() {
+            assert!(!json.contains(&record.token_sha256), "no hash in the list");
+        }
+
+        let blocked = devices_of(&dispatch_one(&hub, revoke(&phone_id)).await);
+        let phone = device(&blocked, &phone_id);
+        assert!(phone.revoked);
+        assert_eq!(phone.connected, 0, "the block's reply counts what is left");
+    }
+
+    #[tokio::test]
+    async fn list_devices_answers_loopback_only() {
+        let (hub, _scratch) = test_hub("list-loopback-only");
+        issue(&hub, &test_peer());
+        let tailnet = AuthKind::Tailnet(test_peer());
+        assert_local_only(&dispatch_one_as(&hub, ClientMessage::ListDevices, &tailnet).await);
+        let devices = devices_of(&dispatch_one(&hub, ClientMessage::ListDevices).await);
+        assert_eq!(devices.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn revoke_unknown_device_changes_nothing() {
+        let (hub, _scratch) = test_hub("revoke-unknown");
+        issue(&hub, &test_peer());
+        let file = crate::paths::devices_file(&hub.dirs);
+        let text = std::fs::read_to_string(&file).expect("read devices.json");
+        let before = devices_of(&dispatch_one(&hub, ClientMessage::ListDevices).await);
+
+        let after = devices_of(&dispatch_one(&hub, revoke("no-such-device")).await);
+        assert_eq!(after, before, "the list is unchanged");
+        assert!(!after[0].revoked);
+        assert_eq!(
+            std::fs::read_to_string(&file).expect("read devices.json"),
+            text,
+            "nothing was written"
+        );
+    }
+
+    #[tokio::test]
+    async fn forget_removes_the_record_and_closes_its_connections() {
+        let (hub, _scratch) = test_hub("forget-device");
+        let (phone_id, phone_token) = issue(&hub, &test_peer());
+        let (tablet_id, _) = issue(&hub, &other_peer());
+        let (mut phone, _life) = served_client(&hub, test_peer(), &phone_token).await;
+
+        let devices = devices_of(&dispatch_one(&hub, forget(&phone_id)).await);
+        assert_eq!(
+            devices
+                .iter()
+                .map(|info| info.device_id.as_str())
+                .collect::<Vec<_>>(),
+            [tablet_id.as_str()],
+            "only the other device is left"
+        );
+        ends(&mut phone).await;
+        assert_eq!(hub.live_devices.lock().connected(&phone_id), 0);
+        assert!(
+            crate::sync::lock(&hub.devices)
+                .verify(&test_peer().stable_id, &phone_token)
+                .is_none(),
+            "the forgotten token no longer verifies"
+        );
+
+        let again = devices_of(&dispatch_one(&hub, forget(&phone_id)).await);
+        assert_eq!(again, devices, "an unknown id changes nothing");
+    }
+
+    #[tokio::test]
+    async fn forget_is_refused_on_a_tailnet_connection() {
+        let (hub, _scratch) = test_hub("forget-tailnet");
+        let (device_id, _) = issue(&hub, &test_peer());
+        let tailnet = AuthKind::Tailnet(test_peer());
+        assert_local_only(&dispatch_one_as(&hub, forget(&device_id), &tailnet).await);
+        assert_eq!(
+            crate::sync::lock(&hub.devices).list().len(),
+            1,
+            "the record stays"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_blocked_device_request_is_refused() {
+        let (hub, _scratch) = test_hub("blocked-request");
+        let (device_id, _) = issue(&hub, &test_peer());
+        devices_of(&dispatch_one(&hub, revoke(&device_id)).await);
+
+        let mut client = pairing_client(&hub, test_peer()).await;
+        ws_send(&mut client, &ClientMessage::DevicePairRequest).await;
+        assert_failed(&next(&mut client).await, DEVICE_NOT_APPROVED);
+        assert!(pending_ids(&hub).is_empty(), "no request reaches the owner");
+    }
+
+    /// A device whose request was waiting when the owner blocked it.
+    async fn blocked_while_waiting(hub: &Hub) -> (WsClient, String, String) {
+        let (device_id, _) = issue(hub, &test_peer());
+        let mut client = pairing_client(hub, test_peer()).await;
+        let request_id = ask(&mut client).await;
+        devices_of(&dispatch_one(hub, revoke(&device_id)).await);
+        (client, request_id, device_id)
+    }
+
+    fn assert_still_blocked(hub: &Hub, device_id: &str) {
+        let devices = crate::sync::lock(&hub.devices);
+        assert_eq!(devices.list().len(), 1, "no new record");
+        assert!(
+            devices
+                .list()
+                .iter()
+                .any(|record| record.id == device_id && record.revoked),
+            "the block holds"
+        );
+    }
+
+    #[tokio::test]
+    async fn redeem_of_a_cli_code_for_a_blocked_device_is_refused() {
+        let (hub, _scratch) = test_hub("blocked-cli-redeem");
+        let (mut client, request_id, device_id) = blocked_while_waiting(&hub).await;
+        let DaemonMessage::DevicePairCode { code, .. } =
+            dispatch_one(&hub, ClientMessage::MintDevicePairCode).await
+        else {
+            panic!("want a CLI DevicePairCode");
+        };
+
+        redeem(&mut client, &request_id, &code.0).await;
+        assert_failed(&next(&mut client).await, DEVICE_NOT_APPROVED);
+        assert_closed(&mut client).await;
+        assert_still_blocked(&hub, &device_id);
+    }
+
+    #[tokio::test]
+    async fn approve_of_a_blocked_device_is_refused() {
+        let (hub, _scratch) = test_hub("blocked-approve");
+        let (_client, request_id, device_id) = blocked_while_waiting(&hub).await;
+
+        assert_eq!(
+            approve_from_loopback_err(&hub, &request_id).await,
+            DEVICE_BLOCKED
+        );
+        assert_still_blocked(&hub, &device_id);
     }
 
     #[tokio::test]

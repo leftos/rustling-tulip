@@ -65,6 +65,7 @@ Start with [docs/architecture.md](docs/architecture.md) for how the pieces fit a
 - **Background state**: a session whose turn ended while its subagents, background shells or a scheduled wakeup still run; it never counts as finished (RT-84).
 - **Baseline**: the conversations an agent already held for a folder, taken just before a `DiscoverAfterLaunch` session's program starts; only a conversation outside it can be that session's.
 - **Binding window**: whichever of an account's usage windows (5-hour, 7-day, per-model) is fullest; its percentage decides auto-switch.
+- **Blocked (device)**: a `devices.json` record with `revoked: true`, refused at every pairing path until the owner forgets it (`ForgetDevice`).
 - **Boot target**: the `Target` the native client starts on: `native-ui.json`'s `last_target` when it names a saved host (dialled on the port it was saved with, the local daemon never started), else this PC; `connection_picker::resolve_boot_target`, `docs/native-client.md`.
 - **Brief**: a worker's instructions: tree root, files, the change, and a proving command.
 - **Busy-excluded**: a per-session daemon flag (`busy_excluded` on the snapshot, sidecar and history entry) marking a session the user does not want counted as busy; set by `SetSessionBusyExcluded`, optionally carried to a duplicate and kept through reattach and recovery.

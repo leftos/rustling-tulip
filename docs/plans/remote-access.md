@@ -19,7 +19,7 @@ Design for Wave 3's remote desktop (Linear RT-33, RT-34 and their sub-issues). R
 - "The owner" is a device logged in as the host node's own Tailscale user (numeric `UserID`, never the display login), untagged, not shared in, and not the host itself.
 - The listener binds the host's own tailnet addresses only (v4 and v6), on the port `remote.json` configures (default 8787), rebinding when they change.
 - Shutdown and turning remote access off are refused from tailnet connections: host-only.
-- Revocation is a block list in rustling-tulip: Settings lists the tailnet devices that have connected, and blocking one drops its live connections at once (RT-96, rewritten; it reuses the per-connection cancellation token a tailnet connection already watches for its listener server ending).
+- Revocation is a block list in rustling-tulip: Settings lists the approved tailnet devices (each with its `last_seen` and a `connected` count), and blocking one drops its live connections at once and refuses it at every pairing path until the owner forgets it (RT-96). The daemon half landed (RT-393); the native model (RT-391) and the Settings section (RT-392) are open.
 - There is no LAN listener, `/pair` or mDNS: the daemon binds loopback and, with remote access on, the host's own tailnet addresses. The six wire variants (`ConfigureLan`, `StartPairing`, `CancelPairing`, `LanStatus`, `PairingStarted`, `PairingEnded`) stay decodable and inert.
 - Placement: the daemon side (TS.1 to TS.5) lands on `main`, behind a `remote.json` switch that is off by default; the native client's remote mode (P6.1 to P6.4 and the tests) lands on `main` too. The installer and the docs pass follow.
 - The native client dials TLS itself inside `net.rs`; there is no loopback bridge.
@@ -63,7 +63,7 @@ Hotspot items (touching `crates/protocol/src/lib.rs` or `crates/daemon/src/serve
 | TS.3b | Device tokens: a whois-authorized device without a token waits as a pending request; the token is issued once it presents the one-time approval the host PC shows (a QR code to scan, or the pairing code beside it for a device with no camera), started from a local (loopback) client; tokens are stored hashed and checked in `Hello` | yes | TS.3, TS.4 |
 | TS.4 | `ConfigureRemote` / `RemoteStatus` messages: every state (not installed, not running, other Windows user, not connected, HTTPS disabled, host tagged, serving with name, port and cert expiry). Landed, 48c9ef9 | yes | TS.3 |
 | TS.5 | Retire the LAN listener, `/pair` and mDNS; the six variants inert. Landed, 7d4556e | yes | TS.3 |
-| RT-96 | Remote devices: list the tailnet devices that connected, block one and drop its connections | yes | TS.4, P6.4 |
+| RT-96 | Remote devices: list the approved tailnet devices, block one and drop its connections. Daemon half landed (RT-393); native model (RT-391) and Settings section (RT-392) open | yes | TS.4, P6.4 (landed) |
 | P6.1 | Transport seam: `Target::{Local, Tailnet(host)}` in `net.rs` over public-CA TLS. Landed on main | no | TS.1 |
 | P6.2a | Remote-mode rules: local-file actions disabled with a reason, quit only disconnects, Stop, handshake and `daemon.log` hidden, Reconnect label, the capability table. Landed on main (RT-151) | no | P6.1 |
 | P6.2b | The typed host path in place of the pickers on a remote host. Landed on main (RT-257) | no | P6.2a |

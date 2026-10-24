@@ -1,6 +1,8 @@
 //! The WebSocket handshake: reading and authorising `Hello`, negotiating the protocol version, `Welcome`, and the initial state push.
 use super::Hub;
 use super::connection::AuthKind;
+use super::live_devices::LiveConnection;
+use crate::devices::DeviceId;
 use anyhow::{Context as _, anyhow};
 use axum::extract::ws::{Message, WebSocket};
 use futures::StreamExt as _;
@@ -24,14 +26,23 @@ pub(super) struct Handshake {
     /// The tailnet device presented no valid token: the connection may only
     /// pair, and gets no state.
     pub(super) pairing: bool,
+    /// The approved device a served tailnet connection is; `None` on
+    /// loopback and for a pairing connection.
+    pub(super) device: Option<DeviceId>,
+    /// That device's registration in [`Hub::live_devices`], made under the
+    /// same lock as its token's verify; the connection holds it until it
+    /// ends.
+    pub(super) live: Option<LiveConnection>,
 }
 
 /// What a `Hello`'s token earns on its listener.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum HelloAuth {
-    /// The token is the daemon's own (loopback) or an approved device's
-    /// (tailnet): the connection is served.
-    Served,
+    /// The daemon's own token on loopback: the connection is served.
+    Local,
+    /// An approved device's token on tailnet: the connection is served as
+    /// that device, registered live from the verify on.
+    Device(LiveConnection),
     /// A tailnet device without a valid token: the connection may only pair.
     Pairing,
     /// Refused with this reason, which never echoes the presented value.
@@ -53,10 +64,10 @@ pub(super) async fn handshake(
 ) -> anyhow::Result<Option<Handshake>> {
     let hello = async {
         match auth {
-            AuthKind::Local => read_hello(hub, auth, receiver, out_tx).await,
+            AuthKind::Local => read_hello(hub, auth, life, receiver, out_tx).await,
             AuthKind::Tailnet(_) => tokio::time::timeout(
                 hub.tailnet_handshake_timeout,
-                read_hello(hub, auth, receiver, out_tx),
+                read_hello(hub, auth, life, receiver, out_tx),
             )
             .await
             .map_err(|_| anyhow!("tailnet handshake timed out before Hello"))?,
@@ -72,6 +83,7 @@ pub(super) async fn handshake(
 async fn read_hello(
     hub: &Hub,
     auth: &AuthKind,
+    life: &CancellationToken,
     receiver: &mut futures::stream::SplitStream<WebSocket>,
     out_tx: &mpsc::UnboundedSender<DaemonMessage>,
 ) -> anyhow::Result<Handshake> {
@@ -93,9 +105,10 @@ async fn read_hello(
     else {
         return Err(anyhow!("first message must be Hello"));
     };
-    let pairing = match check_hello_auth(hub, auth, &auth_token) {
-        HelloAuth::Served => false,
-        HelloAuth::Pairing => true,
+    let (pairing, live) = match check_hello_auth(hub, auth, &auth_token, life) {
+        HelloAuth::Local => (false, None),
+        HelloAuth::Device(live) => (false, Some(live)),
+        HelloAuth::Pairing => (true, None),
         HelloAuth::Refused(reason) => return Err(anyhow!(reason)),
     };
     let negotiated =
@@ -118,6 +131,8 @@ async fn read_hello(
         client_id,
         client_name,
         pairing,
+        device: live.as_ref().map(|live| live.device_id().to_owned()),
+        live,
     })
 }
 
@@ -128,43 +143,54 @@ async fn read_hello(
 /// compares against that token: an approved, unrevoked device's token bound to
 /// this node is served, and anything else (no token, an unknown one, another
 /// node's, a revoked one, the daemon's, or a store that could not be read)
-/// may only pair.
-fn check_hello_auth(hub: &Hub, auth: &AuthKind, presented: &str) -> HelloAuth {
+/// may only pair. A served device's connection is registered under `life`.
+fn check_hello_auth(
+    hub: &Hub,
+    auth: &AuthKind,
+    presented: &str,
+    life: &CancellationToken,
+) -> HelloAuth {
     match auth {
         AuthKind::Local => {
             if crate::secret::constant_time_eq(presented.as_bytes(), hub.auth_token.as_bytes()) {
-                HelloAuth::Served
+                HelloAuth::Local
             } else {
                 HelloAuth::Refused("invalid auth token")
             }
         }
-        AuthKind::Tailnet(peer) => {
-            if authorize_device(hub, peer, presented) {
-                HelloAuth::Served
-            } else {
-                HelloAuth::Pairing
-            }
-        }
+        AuthKind::Tailnet(peer) => match authorize_device(hub, peer, presented, life) {
+            Some(live) => HelloAuth::Device(live),
+            None => HelloAuth::Pairing,
+        },
     }
 }
 
-/// Whether `peer` holds an approved device token, stamping the device as seen
-/// when it does. The store compares digests in constant time; the presented
-/// value is never logged, stored or echoed. A failed stamp is logged and
-/// still serves the device.
-fn authorize_device(hub: &Hub, peer: &tailnet::PeerIdentity, presented_token: &str) -> bool {
+/// Verify `peer`'s device token and, when it holds, stamp the device as seen
+/// and register the connection `life` ends under the verified device id.
+///
+/// The verify and the registration happen under one hold of
+/// [`Hub::live_devices`], the lock a block holds while it sets the flag and
+/// cuts the device's connections, so no connection verifies before a block
+/// and registers after its cut. The store compares digests in constant time;
+/// the presented value is never logged, stored or echoed. A failed stamp is
+/// logged and still serves the device.
+fn authorize_device(
+    hub: &Hub,
+    peer: &tailnet::PeerIdentity,
+    presented_token: &str,
+    life: &CancellationToken,
+) -> Option<LiveConnection> {
     debug!(device = %peer.name, "tailnet device token presented");
+    let mut live = hub.live_devices.lock();
     let mut devices = crate::sync::lock(&hub.devices);
-    let Some(device_id) = devices
+    let device_id = devices
         .verify(&peer.stable_id, presented_token)
-        .map(|record| record.id.clone())
-    else {
-        return false;
-    };
+        .map(|record| record.id.clone())?;
     if let Err(err) = devices.touch(&device_id, chrono::Utc::now()) {
         warn!(%device_id, ?err, "could not stamp the device as last seen");
     }
-    true
+    drop(devices);
+    Some(live.register(&device_id, life.clone()))
 }
 
 /// The capabilities this daemon lists in `Welcome.features` (`protocol::FEATURE_*`).
@@ -173,6 +199,7 @@ fn authorize_device(hub: &Hub, peer: &tailnet::PeerIdentity, presented_token: &s
 const DAEMON_FEATURES: &[&str] = &[
     protocol::FEATURE_AGENT_COMMANDS,
     protocol::FEATURE_DEVICE_PAIRING,
+    protocol::FEATURE_DEVICE_BLOCK,
 ];
 
 /// The `Welcome` answering an accepted `Hello`: the negotiated version, every
@@ -504,7 +531,7 @@ mod tests {
     fn tailnet_hello_never_accepts_the_daemon_token() {
         let (hub, _scratch) = test_hub("tailnet-hello");
         let auth = AuthKind::Tailnet(test_peer());
-        let verdict = check_hello_auth(&hub, &auth, "test-token");
+        let verdict = hello_verdict(&hub, &auth, "test-token");
         assert_eq!(
             verdict,
             HelloAuth::Pairing,
@@ -520,12 +547,12 @@ mod tests {
             "a tailnet verdict is never the loopback reason: {printed}"
         );
         assert_eq!(
-            check_hello_auth(&hub, &auth, "any-other-value"),
+            hello_verdict(&hub, &auth, "any-other-value"),
             HelloAuth::Pairing,
             "an unknown token may only pair"
         );
         assert_eq!(
-            check_hello_auth(&hub, &auth, ""),
+            hello_verdict(&hub, &auth, ""),
             HelloAuth::Pairing,
             "no token may only pair"
         );
@@ -535,11 +562,11 @@ mod tests {
     fn local_hello_still_accepts_the_daemon_token() {
         let (hub, _scratch) = test_hub("local-hello");
         assert_eq!(
-            check_hello_auth(&hub, &AuthKind::Local, "test-token"),
-            HelloAuth::Served
+            hello_verdict(&hub, &AuthKind::Local, "test-token"),
+            HelloAuth::Local
         );
         assert_eq!(
-            check_hello_auth(&hub, &AuthKind::Local, "wrong"),
+            hello_verdict(&hub, &AuthKind::Local, "wrong"),
             HelloAuth::Refused("invalid auth token"),
             "a wrong loopback token is refused"
         );
@@ -561,12 +588,79 @@ mod tests {
         }
     }
 
+    /// What `presented` earns on `auth`, for a connection nothing ends.
+    fn hello_verdict(hub: &Hub, auth: &AuthKind, presented: &str) -> HelloAuth {
+        check_hello_auth(hub, auth, presented, &CancellationToken::new())
+    }
+
+    /// The owner blocks the device while its handshake has taken the live
+    /// registry and waits on the store: the block waits for the handshake's
+    /// verify and registration, then cuts that connection, and a handshake
+    /// after the block lands in pairing.
+    #[test]
+    fn a_revoked_device_cannot_register_a_connection_that_races_the_revoke() {
+        let (hub, _scratch) = test_hub("race-revoke");
+        let (device_id, token) = issue_token(&hub, &test_peer());
+        let life = CancellationToken::new();
+
+        let store = crate::sync::lock(&hub.devices);
+        let connecting = {
+            let (hub, token, life) = (hub.clone(), token.clone(), life.clone());
+            std::thread::spawn(move || {
+                check_hello_auth(&hub, &AuthKind::Tailnet(test_peer()), &token, &life)
+            })
+        };
+        let started = std::time::Instant::now();
+        while !hub.live_devices.is_locked() {
+            assert!(
+                started.elapsed() < Duration::from_secs(120),
+                "the handshake takes the live registry before the store"
+            );
+            std::thread::yield_now();
+        }
+        let blocking = {
+            let (hub, device_id) = (hub.clone(), device_id.clone());
+            std::thread::spawn(move || crate::server::pairing::block_device(&hub, &device_id))
+        };
+        drop(store);
+
+        let verdict = connecting.join().expect("the handshake thread");
+        let blocked = blocking.join().expect("the block thread");
+        assert!(blocked.expect("the flag is written"), "the record exists");
+        assert!(
+            matches!(&verdict, HelloAuth::Device(_)),
+            "the token verified before the flag: {verdict:?}"
+        );
+        assert!(
+            life.is_cancelled(),
+            "the block cut the connection that verified before it"
+        );
+        assert_eq!(hub.live_devices.lock().connected(&device_id), 0);
+        drop(verdict);
+        assert_eq!(
+            hello_verdict(&hub, &AuthKind::Tailnet(test_peer()), &token),
+            HelloAuth::Pairing,
+            "a handshake after the block only pairs"
+        );
+    }
+
     #[test]
     fn tailnet_hello_with_an_issued_token_is_served() {
         let (hub, _scratch) = test_hub("tailnet-hello-issued");
         let (device_id, token) = issue_token(&hub, &test_peer());
         let auth = AuthKind::Tailnet(test_peer());
-        assert_eq!(check_hello_auth(&hub, &auth, &token), HelloAuth::Served);
+        let verdict = hello_verdict(&hub, &auth, &token);
+        assert!(
+            matches!(&verdict, HelloAuth::Device(live) if live.device_id() == device_id),
+            "{verdict:?}"
+        );
+        assert_eq!(
+            hub.live_devices.lock().connected(&device_id),
+            1,
+            "a served Hello registers the connection under its device"
+        );
+        drop(verdict);
+        assert_eq!(hub.live_devices.lock().connected(&device_id), 0);
         let devices = crate::sync::lock(&hub.devices);
         let record = devices
             .list()
@@ -585,7 +679,7 @@ mod tests {
         let (_, token) = issue_token(&hub, &other_peer());
         let auth = AuthKind::Tailnet(test_peer());
         assert_eq!(
-            check_hello_auth(&hub, &auth, &token),
+            hello_verdict(&hub, &auth, &token),
             HelloAuth::Pairing,
             "a token copied to another node only pairs"
         );
@@ -602,14 +696,14 @@ mod tests {
             "the record exists"
         );
         let auth = AuthKind::Tailnet(test_peer());
-        assert_eq!(check_hello_auth(&hub, &auth, &token), HelloAuth::Pairing);
+        assert_eq!(hello_verdict(&hub, &auth, &token), HelloAuth::Pairing);
     }
 
     #[test]
     fn local_hello_refuses_a_device_token() {
         let (hub, _scratch) = test_hub("local-hello-device-token");
         let (_, token) = issue_token(&hub, &test_peer());
-        let verdict = check_hello_auth(&hub, &AuthKind::Local, &token);
+        let verdict = hello_verdict(&hub, &AuthKind::Local, &token);
         assert_eq!(verdict, HelloAuth::Refused("invalid auth token"));
         assert!(
             !format!("{verdict:?}").contains(&token),
@@ -625,6 +719,19 @@ mod tests {
                 &welcome,
                 DaemonMessage::Welcome { features, .. }
                     if features.iter().any(|f| f == protocol::FEATURE_DEVICE_PAIRING)
+            ),
+            "{welcome:?}"
+        );
+    }
+
+    #[test]
+    fn welcome_lists_device_block() {
+        let welcome = welcome_message(22);
+        assert!(
+            matches!(
+                &welcome,
+                DaemonMessage::Welcome { features, .. }
+                    if features.iter().any(|f| f == protocol::FEATURE_DEVICE_BLOCK)
             ),
             "{welcome:?}"
         );

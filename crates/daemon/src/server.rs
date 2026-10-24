@@ -14,6 +14,7 @@ mod git;
 mod tabs;
 
 mod hooks;
+pub(crate) mod live_devices;
 mod pairing;
 mod recovery;
 mod settings;
@@ -153,6 +154,10 @@ pub struct Hub {
     /// decision reaches the device that asked. Locked only after
     /// [`Hub::pairing`] when both are held.
     pub pairing_waiters: pairing::PairingWaiters,
+    /// Each approved device's served tailnet connections, so a block or a
+    /// forget cuts them at once. Locked before [`Hub::devices`] when both
+    /// are held.
+    pub live_devices: live_devices::LiveDevices,
 }
 
 impl Hub {
@@ -396,6 +401,7 @@ pub async fn run(
         ))),
         pairing: Arc::new(std::sync::Mutex::new(crate::devices::PairingBook::new())),
         pairing_waiters: pairing::PairingWaiters::default(),
+        live_devices: live_devices::LiveDevices::default(),
     };
     start_hub_tasks(&hub, client_count_rx);
 
@@ -554,7 +560,8 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         | ClientMessage::DenyDevice { .. }
         | ClientMessage::MintDevicePairCode
         | ClientMessage::ListDevices
-        | ClientMessage::RevokeDevice { .. }) => pairing::handle(hub, m, ctx),
+        | ClientMessage::RevokeDevice { .. }
+        | ClientMessage::ForgetDevice { .. }) => pairing::handle(hub, m, ctx),
         ClientMessage::Hello { .. } | ClientMessage::Attach { session_id: _ } => {
             // Hello: already consumed by handshake; ignore subsequent ones.
             // Attach: no-op — PTY forwarders are started by LoadScrollback

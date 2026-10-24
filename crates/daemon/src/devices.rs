@@ -174,21 +174,29 @@ impl DeviceStore {
 
     /// Issue a fresh token bound to `peer` and store only its hash.
     ///
-    /// A device that already has a record has it replaced — new id, new token,
-    /// unrevoked — so one device holds one token and the old token stops
-    /// verifying at once. Returns the record id and the plaintext token; the
-    /// store keeps neither the token nor any copy of it.
+    /// A device that already has an unblocked record has it replaced — new
+    /// id, new token — so one device holds one token and the old token stops
+    /// verifying at once. A blocked device gets nothing until its record is
+    /// forgotten. Returns the record id and the plaintext token; the store
+    /// keeps neither the token nor any copy of it.
     ///
     /// # Errors
     ///
-    /// The store is corrupt (the file is left as it is) or writing it failed;
-    /// the store is then unchanged.
+    /// [`io::ErrorKind::PermissionDenied`] when the device is blocked; the
+    /// store is corrupt (the file is left as it is) or writing it failed. The
+    /// store is then unchanged.
     pub fn issue(
         &mut self,
         peer: &PeerIdentity,
         now: DateTime<Utc>,
     ) -> io::Result<(String, String)> {
         self.refuse_if_corrupt()?;
+        if self.is_blocked(&peer.stable_id) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "the device is blocked; forget it before it pairs again",
+            ));
+        }
         let token = crate::secret::generate_device_token();
         let id = uuid::Uuid::new_v4().to_string();
         let mut next: Vec<DeviceRecord> = self
@@ -255,23 +263,56 @@ impl DeviceStore {
         Ok(true)
     }
 
-    /// Block a device: its token stops verifying and its record stays, so a
-    /// later request from it is still recognisable as a blocked device.
+    /// Block a device: its token stops verifying and its record stays, so the
+    /// device is refused a new token ([`DeviceStore::issue`],
+    /// [`DeviceStore::is_blocked`]) until the owner forgets it.
     ///
     /// Returns whether a record matched.
     ///
     /// # Errors
     ///
     /// The store is corrupt (the file is left as it is) or writing it failed.
+    /// A failed write still blocks the device in memory, so the block holds
+    /// until the daemon restarts.
     pub fn revoke(&mut self, device_id: &str) -> io::Result<bool> {
         self.refuse_if_corrupt()?;
-        let mut next = self.devices.clone();
-        let Some(record) = next.iter_mut().find(|record| record.id == device_id) else {
+        let Some(record) = self
+            .devices
+            .iter_mut()
+            .find(|record| record.id == device_id)
+        else {
             return Ok(false);
         };
         record.revoked = true;
-        write_file(&self.path, &next)?;
-        self.devices = next;
+        write_file(&self.path, &self.devices)?;
+        Ok(true)
+    }
+
+    /// Whether the device with `stable_id` has a blocked record.
+    #[must_use]
+    pub fn is_blocked(&self, stable_id: &str) -> bool {
+        self.devices
+            .iter()
+            .any(|record| record.stable_id == stable_id && record.revoked)
+    }
+
+    /// Forget a device: its record goes, block included, so its token stops
+    /// verifying and the device may ask to pair again.
+    ///
+    /// Returns whether a record matched; an unknown id writes nothing.
+    ///
+    /// # Errors
+    ///
+    /// The store is corrupt (the file is left as it is) or writing it failed.
+    /// A failed write still removes the record in memory, so the device stays
+    /// forgotten until the daemon restarts.
+    pub fn forget(&mut self, device_id: &str) -> io::Result<bool> {
+        self.refuse_if_corrupt()?;
+        if !self.devices.iter().any(|record| record.id == device_id) {
+            return Ok(false);
+        }
+        self.devices.retain(|record| record.id != device_id);
+        write_file(&self.path, &self.devices)?;
         Ok(true)
     }
 
@@ -316,6 +357,9 @@ fn digest_hex(token: &str) -> String {
 
 /// Identifies one waiting pairing request.
 pub type RequestId = String;
+
+/// Identifies one approved device's record ([`DeviceRecord::id`]).
+pub type DeviceId = String;
 
 /// What [`PairingBook::request`] produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -672,6 +716,15 @@ impl PairingBook {
             .collect()
     }
 
+    /// The device a waiting request `id` came from, by its `StableNodeID`.
+    #[must_use]
+    pub fn stable_id_of(&self, id: &str) -> Option<&str> {
+        self.requests
+            .iter()
+            .find(|request| request.id == id)
+            .map(|request| request.stable_id.as_str())
+    }
+
     fn take_for(&mut self, stable_id: &str) -> Option<RequestId> {
         let index = self
             .requests
@@ -838,6 +891,30 @@ mod tests {
             "the new token verifies"
         );
         assert_eq!(store.list().len(), 1, "one device holds one record");
+    }
+
+    #[test]
+    fn issue_refuses_a_revoked_device() {
+        let scratch = Scratch::new("issue-blocked");
+        let mut store = scratch.store();
+        let (id, token) = store.issue(&phone(), Utc::now()).expect("first issue");
+        assert!(store.revoke(&id).expect("revoke"), "the record exists");
+        let text = scratch.text();
+
+        let refused = store
+            .issue(&phone(), Utc::now())
+            .expect_err("a blocked device gets no new token");
+        assert_eq!(refused.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(store.list().len(), 1, "the blocked record stays");
+        assert!(store.list()[0].revoked, "and stays blocked");
+        assert!(store.verify("node-a", &token).is_none());
+        assert_eq!(scratch.text(), text, "nothing was written");
+
+        assert!(store.forget(&id).expect("forget"), "the record exists");
+        let (_, fresh) = store
+            .issue(&phone(), Utc::now())
+            .expect("a forgotten device pairs again");
+        assert!(store.verify("node-a", &fresh).is_some());
     }
 
     #[test]

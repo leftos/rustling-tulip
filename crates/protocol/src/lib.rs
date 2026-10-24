@@ -24,6 +24,13 @@ pub const FEATURE_AGENT_COMMANDS: &str = "agent_commands";
 /// offers the pairing flow only when the connected daemon lists it.
 pub const FEATURE_DEVICE_PAIRING: &str = "device_pairing";
 
+/// `Welcome.features` entry: blocking a device ([`ClientMessage::RevokeDevice`])
+/// or forgetting it ([`ClientMessage::ForgetDevice`]) ends its live tailnet
+/// connections at once, a block holds until the device is forgotten, and
+/// [`DeviceInfo::connected`] counts each device's live connections. A client
+/// offers Block only when the connected daemon lists it.
+pub const FEATURE_DEVICE_BLOCK: &str = "device_block";
+
 /// The [`DaemonMessage::DevicePairFailed`] reason a tailnet connection gets
 /// right after `Welcome` when its `Hello` carried no valid device token: the
 /// connection stays open as a pairing connection. The daemon also answers it
@@ -1989,6 +1996,10 @@ pub struct DeviceInfo {
     pub last_seen: Option<DateTime<Utc>>,
     /// Whether the device is blocked.
     pub revoked: bool,
+    /// How many served tailnet connections the device has open as the
+    /// reply is sent; absent means 0.
+    #[serde(default)]
+    pub connected: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -2626,8 +2637,17 @@ pub enum ClientMessage {
     /// The owner lists the approved devices. Answered with
     /// [`DaemonMessage::Devices`]. Host-only.
     ListDevices,
-    /// The owner blocks the approved device `device_id`. Host-only.
+    /// The owner blocks the approved device `device_id`: its live tailnet
+    /// connections end, and it cannot pair again until it is forgotten.
+    /// Answered with [`DaemonMessage::Devices`]. Host-only.
     RevokeDevice {
+        device_id: String,
+    },
+    /// The owner forgets the device `device_id`: its live tailnet
+    /// connections end and its record goes, block included, so it may ask
+    /// to pair again. Answered with [`DaemonMessage::Devices`]; an unknown id
+    /// changes nothing. Host-only.
+    ForgetDevice {
         device_id: String,
     },
     /// Scan the current worktrees root and report every `wt.<branch>/`
@@ -4229,6 +4249,9 @@ mod tests {
             ClientMessage::RevokeDevice {
                 device_id: "d1".to_owned(),
             },
+            ClientMessage::ForgetDevice {
+                device_id: "d1".to_owned(),
+            },
         ];
         for msg in client_messages {
             let json = serde_json::to_string(&msg).expect("serializes");
@@ -4250,7 +4273,7 @@ mod tests {
             r#"{"type":"device_pair_failed","reason":"no"}"#,
             r#"{"type":"pending_devices","requests":[{"request_id":"r1","name":"phone","login":"o@example.com","asked_at":"2026-10-23T10:00:00Z","approved":false}]}"#,
             r#"{"type":"device_pair_code","request_id":null,"code":"123456","expires_in_secs":120}"#,
-            r#"{"type":"devices","devices":[{"device_id":"d1","name":"phone","login":"o@example.com","created_at":"2026-10-23T10:00:00Z","last_seen":null,"revoked":false}]}"#,
+            r#"{"type":"devices","devices":[{"device_id":"d1","name":"phone","login":"o@example.com","created_at":"2026-10-23T10:00:00Z","last_seen":null,"revoked":false,"connected":2}]}"#,
         ] {
             let value: serde_json::Value = serde_json::from_str(json).expect("valid JSON");
             let msg: DaemonMessage = serde_json::from_str(json).expect("a device message decodes");
@@ -4260,6 +4283,17 @@ mod tests {
                 "{json} round-trips"
             );
         }
+    }
+
+    #[test]
+    fn device_info_connected_defaults_to_zero() {
+        let info: DeviceInfo = serde_json::from_str(
+            r#"{"device_id":"d1","name":"phone","login":"o@example.com","created_at":"2026-10-23T10:00:00Z","last_seen":null,"revoked":true}"#,
+        )
+        .expect("a device without the count decodes");
+        assert_eq!(info.connected, 0);
+        assert!(info.revoked);
+        assert_eq!(FEATURE_DEVICE_BLOCK, "device_block");
     }
 
     #[test]

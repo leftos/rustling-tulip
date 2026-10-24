@@ -149,6 +149,7 @@ pub(super) fn build_test_hub(
         devices: Arc::new(std::sync::Mutex::new(devices)),
         pairing: Arc::new(std::sync::Mutex::new(crate::devices::PairingBook::new())),
         pairing_waiters: super::pairing::PairingWaiters::default(),
+        live_devices: super::live_devices::LiveDevices::default(),
     };
     (hub, scratch, attention_rx)
 }

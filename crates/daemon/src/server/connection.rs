@@ -1,5 +1,6 @@
 //! One client WebSocket connection: its id and auth kind, the client count, the event forwarders, the send pump and the receive loop.
 use super::handshake::{handshake, push_initial_state, send_resume_report};
+use super::live_devices::LiveConnection;
 use super::pairing::pairing_session;
 use super::sessions::spawn_session_forwarder;
 use super::tabs::ensure_client_layout;
@@ -91,7 +92,7 @@ pub(super) async fn client_session_until(
     let send_task = tokio::spawn(send_pump(sender, out_rx, file_rx, life.clone()));
 
     // Mandatory handshake.
-    let handshake = match handshake(&hub, &auth, &life, &mut receiver, &out_tx).await {
+    let mut handshake = match handshake(&hub, &auth, &life, &mut receiver, &out_tx).await {
         Ok(Some(v)) => v,
         Ok(None) => {
             info!("client_session: the listener server ended during the handshake; closing");
@@ -127,6 +128,13 @@ pub(super) async fn client_session_until(
         })
         .await;
         return;
+    }
+    // An approved device's connection was registered in the handshake, before
+    // anything but `Welcome` went out; it stays registered, so a block can cut
+    // it, until this function returns on any path.
+    let live = handshake.live.take();
+    if let Some(device) = &handshake.device {
+        info!(%device, "client_session: serving an approved tailnet device");
     }
     // Effective per-client layout key: the client's id, or the shared legacy
     // key for connections that don't send one. Same value drives the tab-event
@@ -204,7 +212,7 @@ pub(super) async fn client_session_until(
         connection,
         auth: &auth,
     };
-    recv_loop(&hub, &mut receiver, &ctx, &life).await;
+    recv_loop(&hub, &mut receiver, &ctx, &life, live.as_ref()).await;
 
     info!("client_session: recv_loop returned; tearing down");
     stop_transfers(&pty_forwarders, &fetches).await;
@@ -675,6 +683,7 @@ async fn recv_loop(
     receiver: &mut futures::stream::SplitStream<WebSocket>,
     ctx: &ConnCtx<'_>,
     life: &CancellationToken,
+    live: Option<&LiveConnection>,
 ) {
     let out_tx = ctx.out_tx;
     let mut shutdown_rx = hub.shutdown_tx.subscribe();
@@ -692,7 +701,11 @@ async fn recv_loop(
                 }
             }
             () = life.cancelled() => {
-                info!("recv_loop: the tailnet listener server that accepted this connection ended; closing");
+                if live.is_some_and(LiveConnection::is_cut) {
+                    info!("recv_loop: the device was blocked, forgotten or paired again; closing");
+                } else {
+                    info!("recv_loop: the tailnet listener server that accepted this connection ended; closing");
+                }
                 break;
             }
             next = receiver.next() => {
@@ -801,6 +814,31 @@ mod tests {
             closed_with_a_close_frame(&mut client).await,
             "the daemon sends Close before it ends the connection"
         );
+    }
+
+    #[tokio::test]
+    async fn revoking_a_device_closes_its_served_tailnet_connection() {
+        let (hub, _scratch) = test_hub("served-device-revoked");
+        let (device_id, token) = crate::sync::lock(&hub.devices)
+            .issue(&test_peer(), chrono::Utc::now())
+            .expect("issue a device token");
+        let (mut client, _server_life) = tailnet_ws_client(&hub, test_peer()).await;
+        ws_send(&mut client, &hello(&token, None)).await;
+        read_until(&mut client, is_remote_status).await;
+
+        let reply = crate::server::test_support::dispatch_one(
+            &hub,
+            protocol::ClientMessage::RevokeDevice {
+                device_id: device_id.clone(),
+            },
+        )
+        .await;
+        assert!(matches!(reply, DaemonMessage::Devices { .. }), "{reply:?}");
+        assert!(
+            closed_with_a_close_frame(&mut client).await,
+            "the daemon sends Close before it ends the blocked device's connection"
+        );
+        assert_eq!(hub.live_devices.lock().connected(&device_id), 0);
     }
 
     /// The handshake deadline is far past the guard, so only the server's end

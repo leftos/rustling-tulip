@@ -460,7 +460,8 @@ pub(super) fn host_only_refusal(msg: &ClientMessage, auth: &AuthKind) -> Option<
         | ClientMessage::DenyDevice { .. }
         | ClientMessage::MintDevicePairCode
         | ClientMessage::ListDevices
-        | ClientMessage::RevokeDevice { .. } => Some("device approval is local-only"),
+        | ClientMessage::RevokeDevice { .. }
+        | ClientMessage::ForgetDevice { .. } => Some("device approval is local-only"),
         _ => None,
     }
 }
@@ -853,9 +854,9 @@ mod tests {
         assert!(!lan_file.exists(), "a retired message writes no lan.json");
     }
 
-    /// The six host-only device messages, aimed at `request_id` and
+    /// The seven host-only device messages, aimed at `request_id` and
     /// `device_id`.
-    fn approval_messages(request_id: &str, device_id: &str) -> [ClientMessage; 6] {
+    fn approval_messages(request_id: &str, device_id: &str) -> [ClientMessage; 7] {
         [
             ClientMessage::ListPendingDevices,
             ClientMessage::ApproveDevice {
@@ -867,6 +868,9 @@ mod tests {
             ClientMessage::MintDevicePairCode,
             ClientMessage::ListDevices,
             ClientMessage::RevokeDevice {
+                device_id: device_id.to_owned(),
+            },
+            ClientMessage::ForgetDevice {
                 device_id: device_id.to_owned(),
             },
         ]
