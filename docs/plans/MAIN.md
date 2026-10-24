@@ -6,7 +6,8 @@
 
 - [/] RT-267 Move all Claude support behind the agent seam as its first plugin · release vNext
 - [ ] RT-96 Remote devices: list connected tailnet devices, block one and drop its connections · release vNext
-- [ ] RT-187 Await the tailnet servers after the listener's supervisor panics · release vNext
+  - [ ] RT-391 RT-96 b: Native devices model and the Devices fold · release vNext
+  - [ ] RT-392 RT-96 c: Devices section in Settings > Remote access with Block and Forget · release vNext
 - [ ] RT-243 Split tailnet Supervisor::run and carry the real CertFailed reason
 - [ ] RT-258 Remote mode: don't send this PC's remembered folders to a remote host
 - [ ] RT-158 P6.6: Remote tests over a fake Tailscale, hand checklist, and the docs pass · release vNext
@@ -14,7 +15,6 @@
 - [ ] RT-278 Prove the daemon holds the token before a client reuses, retires or kills it
 - [ ] RT-331 Built-in text and Markdown viewer with Open in default app and an always-external setting · release vNext
   - [ ] RT-340 RT-331 S7: Viewer line selection, find and reload · release vNext
-    - [ ] RT-388 RT-340 S7b: Viewer find bar · release vNext
     - [ ] RT-389 RT-340 S7c: Reload a viewer tab on activation · release vNext
   - [ ] RT-341 RT-331 S8: Viewer docs and task index rows · release vNext
 - [ ] RT-343 Keep name, look and sidebar place when Recover respawns a session
@@ -22,7 +22,7 @@
 - [ ] RT-375 Copy only the text when a terminal selection crosses a TUI's box borders · release vNext+1
 - [ ] RT-378 Close a failed handshake gracefully so AuthFailed is never lost to a reset
 - [ ] RT-386 Map a recovered shell's hook events with its recovered agent options and trust
-- [ ] RT-390 Count a window resize as presence when claiming a session's size
+- [/] RT-394 Fetch an HTML page's relative media with it when opening a remote link · release vNext
 
 ## Wave 1a — Claude sessions on DeepSeek
 
@@ -51,6 +51,8 @@
 - [ ] RT-256 Name the failing script variable in PresetScriptsError
 - [ ] RT-259 Preset wizard: say so when Esc closes it while its scripts still run
 - [ ] RT-261 Preset launch: Stop all misses sessions whose snapshot hasn't arrived yet
+- [ ] RT-396 Filter the repos and workspaces view between all tracked and active only · release vNext+1
+- [ ] RT-397 Design sidebar display settings: density, sessions under repos, subagent tree depth, sort · release vNext+1
 
 ## Wave 2b — Hook status
 
@@ -272,6 +274,7 @@
   - [ ] RT-356 Let show_mock show a page from a file path with its media
   - [ ] RT-357 Add a mock_screenshot tool so Claude sees its rendered mock
   - [ ] RT-358 Send picks and notes from a mock page back to Claude
+  - [ ] RT-395 Show a remote session's mock locally with its files fetched on demand, discarded when the pane closes
 - [ ] RT-344 Mark files fetched from a remote host with Mark-of-the-Web
 - [ ] RT-347 Make the UI test harness's in_model refuse a selector it does not know
 - [ ] RT-362 Keep a shell-hosted Claude session's kind and conversation when history is rebuilt from tracer logs
