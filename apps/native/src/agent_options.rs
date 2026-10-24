@@ -235,21 +235,52 @@ impl crate::RootView {
     }
 
     /// Keeps the daemon's agents or their Settings values: each message
-    /// replaces what the last one of its kind said. Any other message is
-    /// one the root view does not fold, and is dropped.
+    /// replaces what the last one of its kind said, and a Settings broadcast
+    /// answers the Claude page's pending change. Any other message is one
+    /// the root view does not fold, and is dropped.
     pub(crate) fn on_agents(&mut self, msg: protocol::DaemonMessage) {
         match msg {
             protocol::DaemonMessage::Agents { agents } => self.agents = agents,
-            protocol::DaemonMessage::AgentSettings { settings } => self.agent_settings = settings,
+            protocol::DaemonMessage::AgentSettings { settings } => {
+                self.agent_settings = settings;
+                self.agent_settings_received = true;
+                self.claude_settings_pending = None;
+            }
             _ => {}
         }
     }
 
-    /// Forgets the daemon's agents and their Settings values, as a
-    /// disconnect does.
+    /// Forgets the daemon's agents, their Settings values and the Claude
+    /// page's pending change, as a disconnect does.
     pub(crate) fn forget_agents(&mut self) {
         self.agents.clear();
         self.agent_settings.clear();
+        self.agent_settings_received = false;
+        self.claude_settings_pending = None;
+    }
+
+    /// Whether this connection has heard the agents' Settings values.
+    pub(crate) fn agent_settings_received(&self) -> bool {
+        self.agent_settings_received
+    }
+
+    /// Claude's Settings values with `key` set to `value`, built on the
+    /// Claude page's pending change, else on the daemon's last broadcast;
+    /// kept as the pending change until the next broadcast.
+    pub(crate) fn merge_claude_setting(
+        &mut self,
+        key: &str,
+        value: protocol::OptionValue,
+    ) -> OptionValues {
+        let mut options = self.claude_settings_pending.take().unwrap_or_else(|| {
+            self.agent_settings
+                .get(&crate::claude_compat::claude_id())
+                .cloned()
+                .unwrap_or_default()
+        });
+        options.insert(key.to_owned(), value);
+        self.claude_settings_pending = Some(options.clone());
+        options
     }
 }
 

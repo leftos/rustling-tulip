@@ -14,7 +14,7 @@ use std::path::Path;
 use std::sync::LazyLock;
 
 use crate::appearance::{self, AppColors, AppLevel, Resolved};
-use crate::claude_compat::{self, ClaudeProvider, PermissionMode, approval_label};
+use crate::claude_compat::{self, approval_label};
 use crate::connection_picker::SavedHost;
 use crate::fonts::{self, FontSettings};
 use crate::launch_last;
@@ -463,28 +463,6 @@ fn valid_saved_hosts<'de, D: Deserializer<'de>>(
 pub struct SpawnDefaults {
     /// New Claude sessions bypass approval prompts.
     pub trusted: bool,
-    /// Claude's `--permission-mode` pre-fill.
-    pub permission_mode: Option<PermissionMode>,
-    /// The endpoint a Claude spawn pre-selects; a provider this client does
-    /// not know loads as Anthropic.
-    #[serde(deserialize_with = "deserialize_known_provider")]
-    pub claude_provider: ClaudeProvider,
-}
-
-/// `provider`, with one this client does not know read as Anthropic, so
-/// nothing pre-selects a provider the dialog cannot show.
-pub(crate) fn known_provider(provider: ClaudeProvider) -> ClaudeProvider {
-    match provider {
-        ClaudeProvider::Unknown => ClaudeProvider::Anthropic,
-        known => known,
-    }
-}
-
-/// A stored provider, read through [`known_provider`].
-fn deserialize_known_provider<'de, D: Deserializer<'de>>(
-    deserializer: D,
-) -> Result<ClaudeProvider, D::Error> {
-    ClaudeProvider::deserialize(deserializer).map(known_provider)
 }
 
 /// Which OS notifications fire. Keys this build does not know, such as
@@ -1063,16 +1041,6 @@ impl SidebarModel {
     /// Whether a spawn dialog opens with trusted launch on.
     pub fn set_spawn_trusted(&mut self, on: bool) {
         self.ui.spawn.trusted = on;
-    }
-
-    /// The approval mode a spawn dialog opens with for Claude.
-    pub fn set_spawn_permission_mode(&mut self, mode: Option<PermissionMode>) {
-        self.ui.spawn.permission_mode = mode;
-    }
-
-    /// The provider a spawn dialog opens with for Claude.
-    pub fn set_spawn_claude_provider(&mut self, provider: ClaudeProvider) {
-        self.ui.spawn.claude_provider = provider;
     }
 
     /// Records the main window's place; returns whether it changed.
@@ -2120,6 +2088,7 @@ pub fn save_ui_state(dir: &Path, state: &UiState) -> anyhow::Result<()> {
 )]
 pub(crate) mod tests {
     use super::*;
+    use crate::claude_compat::PermissionMode;
     use crate::tabs::tests::{pane, tab};
     use protocol::{AttentionReason, GridNode, SessionMember, SplitDirection};
     use serde_json::json;
@@ -3209,11 +3178,7 @@ pub(crate) mod tests {
                 finished: false,
                 skip_when: NotifySkip::Never,
             },
-            spawn: SpawnDefaults {
-                trusted: true,
-                permission_mode: Some(PermissionMode::Plan),
-                claude_provider: ClaudeProvider::Deepseek,
-            },
+            spawn: SpawnDefaults { trusted: true },
             last_target: None,
             saved_hosts: Vec::new(),
             host_session_counts: BTreeMap::new(),
@@ -3372,11 +3337,7 @@ pub(crate) mod tests {
     #[test]
     fn spawn_defaults_round_trip_and_default_off() {
         let dir = TestDir::new("spawn-defaults");
-        let defaults = SpawnDefaults {
-            trusted: true,
-            permission_mode: Some(PermissionMode::AcceptEdits),
-            claude_provider: ClaudeProvider::Anthropic,
-        };
+        let defaults = SpawnDefaults { trusted: true };
         let state = UiState {
             spawn: defaults,
             ..UiState::default()
@@ -3384,9 +3345,19 @@ pub(crate) mod tests {
         save_ui_state(&dir.0, &state).expect("save");
         assert_eq!(load_ui_state(&dir.0).spawn, defaults, "round trips");
 
+        std::fs::write(
+            dir.0.join(UI_FILE),
+            r#"{ "spawn": { "trusted": true, "permission_mode": "plan", "claude_provider": "deepseek" } }"#,
+        )
+        .expect("write");
+        assert_eq!(
+            load_ui_state(&dir.0).spawn,
+            defaults,
+            "the retired Claude keys load ignored"
+        );
+
         let off = SpawnDefaults::default();
         assert!(!off.trusted);
-        assert_eq!(off.permission_mode, None);
 
         std::fs::write(dir.0.join(UI_FILE), r#"{ "sidebar_collapsed": true }"#).expect("write");
         assert_eq!(
@@ -3400,52 +3371,7 @@ pub(crate) mod tests {
     fn spawn_defaults_setters_write_each_field() {
         let mut model = SidebarModel::new(UiState::default());
         model.set_spawn_trusted(true);
-        model.set_spawn_permission_mode(Some(PermissionMode::Plan));
-        model.set_spawn_claude_provider(ClaudeProvider::Deepseek);
-        assert_eq!(
-            model.ui_state().spawn,
-            SpawnDefaults {
-                trusted: true,
-                permission_mode: Some(PermissionMode::Plan),
-                claude_provider: ClaudeProvider::Deepseek,
-            }
-        );
-    }
-
-    #[test]
-    fn an_unknown_provider_loads_as_anthropic() {
-        let dir = TestDir::new("spawn-provider");
-        let deepseek = UiState {
-            spawn: SpawnDefaults {
-                claude_provider: ClaudeProvider::Deepseek,
-                ..SpawnDefaults::default()
-            },
-            ..UiState::default()
-        };
-        save_ui_state(&dir.0, &deepseek).expect("save");
-        assert_eq!(
-            load_ui_state(&dir.0).spawn.claude_provider,
-            ClaudeProvider::Deepseek,
-            "round trips"
-        );
-
-        std::fs::write(
-            dir.0.join(UI_FILE),
-            r#"{ "spawn": { "claude_provider": "bedrock" } }"#,
-        )
-        .expect("write");
-        assert_eq!(
-            load_ui_state(&dir.0).spawn.claude_provider,
-            ClaudeProvider::Anthropic,
-            "a provider this client does not know loads as Anthropic"
-        );
-
-        std::fs::write(dir.0.join(UI_FILE), r#"{ "spawn": { "trusted": true } }"#).expect("write");
-        assert_eq!(
-            load_ui_state(&dir.0).spawn.claude_provider,
-            ClaudeProvider::Anthropic,
-            "a file saved before the provider existed loads Anthropic"
-        );
+        assert_eq!(model.ui_state().spawn, SpawnDefaults { trusted: true });
     }
 
     #[test]

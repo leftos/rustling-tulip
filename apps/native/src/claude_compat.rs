@@ -8,9 +8,9 @@ use protocol::{AgentId, AgentSelection, OptionValue, OptionValues};
 use serde::{Deserialize, Serialize};
 
 /// The option key of Claude's permission mode.
-const PERMISSION_MODE_KEY: &str = "permission_mode";
+pub(crate) const PERMISSION_MODE_KEY: &str = "permission_mode";
 /// The option key of Claude's provider.
-const PROVIDER_KEY: &str = "provider";
+pub(crate) const PROVIDER_KEY: &str = "provider";
 /// The option key of Claude's model.
 const MODEL_KEY: &str = "model";
 
@@ -88,6 +88,29 @@ pub(crate) fn approval_label(mode: Option<PermissionMode>) -> &'static str {
         Some(PermissionMode::BypassPermissions) => "bypass permissions",
         Some(PermissionMode::Plan) => "plan",
     }
+}
+
+/// `mode` as Claude's `permission_mode` option value: no value for the CLI
+/// default.
+pub(crate) fn permission_mode_value(mode: Option<PermissionMode>) -> OptionValue {
+    let name = match mode {
+        None => return OptionValue::Null,
+        Some(PermissionMode::Default) => "default",
+        Some(PermissionMode::AcceptEdits) => "accept_edits",
+        Some(PermissionMode::BypassPermissions) => "bypass_permissions",
+        Some(PermissionMode::Plan) => "plan",
+    };
+    OptionValue::Text(name.to_owned())
+}
+
+/// `provider` as Claude's `provider` option value.
+pub(crate) fn provider_value(provider: ClaudeProvider) -> OptionValue {
+    let name = match provider {
+        ClaudeProvider::Anthropic => "anthropic",
+        ClaudeProvider::Deepseek => "deepseek",
+        ClaudeProvider::Unknown => "unknown",
+    };
+    OptionValue::Text(name.to_owned())
 }
 
 /// The note under Claude's approval choices while trusted launch is on.
@@ -176,10 +199,24 @@ fn serde_name<T: Serialize>(value: &T) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ClaudeChoice, ClaudeProvider, PROVIDER_KEY, PermissionMode, claude_id, from_options,
-        from_selection, is_claude, selection,
+        APPROVAL_CHOICES, ClaudeChoice, ClaudeProvider, PERMISSION_MODE_KEY, PROVIDER_CHOICES,
+        PROVIDER_KEY, PermissionMode, claude_id, from_options, from_selection, is_claude,
+        permission_mode_value, provider_value, selection,
     };
     use protocol::{OptionValue, OptionValues};
+
+    #[test]
+    fn option_values_read_back_as_their_choice() {
+        for mode in APPROVAL_CHOICES {
+            let options =
+                OptionValues::from([(PERMISSION_MODE_KEY.to_owned(), permission_mode_value(mode))]);
+            assert_eq!(from_options(&options).permission_mode, mode);
+        }
+        for provider in PROVIDER_CHOICES {
+            let options = OptionValues::from([(PROVIDER_KEY.to_owned(), provider_value(provider))]);
+            assert_eq!(from_options(&options).provider, provider);
+        }
+    }
 
     #[test]
     fn to_options_then_from_selection_round_trips() {

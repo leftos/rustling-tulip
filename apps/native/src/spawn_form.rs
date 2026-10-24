@@ -3232,10 +3232,7 @@ mod tests {
 
     /// Every default on, so a case can tell the dialog read them.
     fn all_defaults() -> SpawnDefaults {
-        SpawnDefaults {
-            trusted: true,
-            ..SpawnDefaults::default()
-        }
+        SpawnDefaults { trusted: true }
     }
 
     fn press(form: &mut SpawnForm, control: &Control) -> Outcome {

@@ -13,13 +13,13 @@ use std::time::Duration;
 
 use gpui::{Modifiers, Point, TestAppContext, point, px};
 use protocol::{
-    AgentCommandEntry, AgentId, ClientMessage, DaemonMessage, KeepAwakeMode, SplitDirection,
-    TabEntry,
+    AgentCommandEntry, AgentId, ClientMessage, DaemonMessage, KeepAwakeMode, OptionValue,
+    OptionValues, SplitDirection, TabEntry,
 };
 use rustling_tulip_native::{
     Connection, LaunchCommandRow, NATIVE_PROTOCOL_VERSIONS, NetEvent, SidebarView, fonts,
 };
-use support::{Fixture, Harness, TestDir, pane, session, split, tab};
+use support::{Fixture, Harness, TestDir, pane, repo, session, split, tab};
 
 const TAB_SELECTORS: [&str; 8] = [
     "settings-tab-general",
@@ -93,6 +93,55 @@ fn shown_tab(h: &mut Harness<'_>) -> &'static str {
 fn saved_ui(dir: &TestDir) -> serde_json::Value {
     let text = std::fs::read_to_string(dir.path().join("native-ui.json")).expect("a saved layout");
     serde_json::from_str(&text).expect("native-ui.json is JSON")
+}
+
+/// Whether `native-ui.json`, if it was written at all, holds `spawn.<key>`.
+fn saves_spawn_key(dir: &TestDir, key: &str) -> bool {
+    std::fs::read_to_string(dir.path().join("native-ui.json")).is_ok_and(|text| {
+        let saved: serde_json::Value = serde_json::from_str(&text).expect("native-ui.json is JSON");
+        saved["spawn"].get(key).is_some()
+    })
+}
+
+fn claude() -> AgentId {
+    AgentId("claude".to_owned())
+}
+
+fn text(value: &str) -> OptionValue {
+    OptionValue::Text(value.to_owned())
+}
+
+fn options(pairs: &[(&str, OptionValue)]) -> OptionValues {
+    pairs
+        .iter()
+        .map(|(key, value)| ((*key).to_owned(), value.clone()))
+        .collect()
+}
+
+/// The `SetAgentSettings` messages the client sent since the last look.
+fn sent_agent_settings(h: &mut Harness<'_>) -> Vec<(AgentId, OptionValues)> {
+    h.sent()
+        .into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::SetAgentSettings { agent, options } => Some((agent, options)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The daemon broadcasts `options` as Claude's Settings values.
+fn broadcast_claude(h: &mut Harness<'_>, options: OptionValues) {
+    h.send(DaemonMessage::AgentSettings {
+        settings: std::collections::BTreeMap::from([(claude(), options)]),
+    });
+}
+
+fn approval_choice(h: &mut Harness<'_>) -> &'static str {
+    h.root(|root, _| root.settings_approval_choice())
+}
+
+fn provider_choice(h: &mut Harness<'_>) -> &'static str {
+    h.root(|root, _| root.settings_provider_choice())
 }
 
 /// A point in pane `p1`'s cell (`col`, 0), `dx` pixels off its centre.
@@ -669,20 +718,33 @@ fn spawn_defaults_tab_shows_choices_and_saves(cx: &mut TestAppContext) {
             "{selector} is painted"
         );
     }
+    h.sent();
     h.click_on("settings-spawn-approval-accept-edits");
+    let accept_edits = options(&[("permission_mode", text("accept_edits"))]);
     assert_eq!(
-        saved_ui(&dir)["spawn"]["permission_mode"],
-        "accept_edits",
-        "saved at once"
+        sent_agent_settings(&mut h),
+        vec![(claude(), accept_edits.clone())],
+        "sent to the daemon at once"
     );
+    assert_eq!(
+        approval_choice(&mut h),
+        "CLI default",
+        "the row waits for the daemon's broadcast"
+    );
+    broadcast_claude(&mut h, accept_edits);
+    assert_eq!(approval_choice(&mut h), "accept edits");
 
     h.click_on("settings-tab-spawn-defaults");
     h.click_on("settings-spawn-trusted");
     assert_eq!(saved_ui(&dir)["spawn"]["trusted"], true);
+    assert!(
+        !saves_spawn_key(&dir, "permission_mode"),
+        "native-ui.json holds no approval mode"
+    );
     assert_eq!(
-        saved_ui(&dir)["spawn"]["permission_mode"],
-        "accept_edits",
-        "the values stay saved while trusted locks the rows"
+        approval_choice(&mut h),
+        "accept edits",
+        "the value stays while trusted locks the rows"
     );
 }
 
@@ -701,10 +763,16 @@ fn spawn_defaults_trusted_disables_choices_and_leaves_ring(cx: &mut TestAppConte
         "trusted launch is the page's only control"
     );
 
+    broadcast_claude(&mut h, options(&[("permission_mode", text("plan"))]));
     h.click_on("settings-spawn-trusted");
     assert_eq!(saved_ui(&dir)["spawn"]["trusted"], true);
 
     h.click_on("settings-tab-claude");
+    assert_eq!(
+        approval_choice(&mut h),
+        "plan",
+        "the locked row keeps showing the daemon's value"
+    );
     assert!(
         h.bounds("settings-spawn-approval-locked").origin.x >= px(0.0),
         "the approval row says why it is dead"
@@ -719,20 +787,22 @@ fn spawn_defaults_trusted_disables_choices_and_leaves_ring(cx: &mut TestAppConte
          this lock only stops editing it here.",
         "the provider note says the choice stays in effect"
     );
+    h.sent();
     h.click_on("settings-spawn-approval-accept-edits");
     assert!(
         h.bounds("settings-spawn-approval-accept-edits").origin.x >= px(0.0),
         "the disabled choice is still painted"
     );
-    assert!(
-        saved_ui(&dir)["spawn"]["permission_mode"].is_null(),
-        "a click on it saves nothing"
+    assert_eq!(
+        sent_agent_settings(&mut h),
+        Vec::new(),
+        "a click on it sends nothing"
     );
     h.click_on("settings-spawn-provider-deepseek");
     assert_eq!(
-        saved_ui(&dir)["spawn"]["claude_provider"],
-        "anthropic",
-        "a click on the locked provider saves nothing"
+        sent_agent_settings(&mut h),
+        Vec::new(),
+        "a click on the locked provider sends nothing"
     );
     h.click_on("settings-tab-claude");
     assert_eq!(settings_focus(&mut h), Some("list"));
@@ -747,10 +817,14 @@ fn spawn_defaults_trusted_disables_choices_and_leaves_ring(cx: &mut TestAppConte
     h.click_on("settings-spawn-trusted");
     assert_eq!(saved_ui(&dir)["spawn"]["trusted"], false);
     h.click_on("settings-tab-claude");
+    h.sent();
     h.click_on("settings-spawn-approval-accept-edits");
     assert_eq!(
-        saved_ui(&dir)["spawn"]["permission_mode"],
-        "accept_edits",
+        sent_agent_settings(&mut h),
+        vec![(
+            claude(),
+            options(&[("permission_mode", text("accept_edits"))])
+        )],
         "the choice works again"
     );
 }
@@ -758,18 +832,207 @@ fn spawn_defaults_trusted_disables_choices_and_leaves_ring(cx: &mut TestAppConte
 #[gpui::test]
 fn claude_provider_default_saves_and_seeds_the_dialog(cx: &mut TestAppContext) {
     let dir = TestDir::new();
+    let mut fixture = Fixture::single(session("s1").in_repo("r1").build());
+    fixture.repos = vec![repo("r1", "C:/r1")];
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-claude");
+    h.sent();
+    tab_to(&mut h, "settings-spawn-provider-deepseek");
+    h.keys("enter");
+    let deepseek = options(&[("provider", text("deepseek"))]);
+    assert_eq!(
+        sent_agent_settings(&mut h),
+        vec![(claude(), deepseek.clone())]
+    );
+    assert_eq!(
+        provider_choice(&mut h),
+        "Anthropic",
+        "the row waits for the daemon's broadcast"
+    );
+    broadcast_claude(&mut h, deepseek);
+    assert_eq!(provider_choice(&mut h), "DeepSeek");
+    h.click_on("settings-spawn-provider-anthropic");
+    let anthropic = options(&[("provider", text("anthropic"))]);
+    assert_eq!(
+        sent_agent_settings(&mut h),
+        vec![(claude(), anthropic.clone())]
+    );
+    broadcast_claude(&mut h, anthropic);
+    assert_eq!(provider_choice(&mut h), "Anthropic");
+    h.click_on("settings-spawn-provider-deepseek");
+    let deepseek = options(&[("provider", text("deepseek"))]);
+    assert_eq!(
+        sent_agent_settings(&mut h),
+        vec![(claude(), deepseek.clone())]
+    );
+    broadcast_claude(&mut h, deepseek);
+    assert_eq!(provider_choice(&mut h), "DeepSeek");
+    h.keys("escape");
+    assert!(!h.root(|root, _| root.settings_open()));
+
+    h.click_on("sidebar-add-session");
+    assert!(h.root(|root, _| root.spawn_dialog_open()));
+    let chosen = h.root(|root, _| root.spawn_dialog_selected());
+    assert!(
+        chosen.contains(&"spawn-opt-provider-deepseek".to_owned()),
+        "the daemon's value seeds the dialog: {chosen:?}"
+    );
+    assert!(
+        !saves_spawn_key(&dir, "claude_provider"),
+        "native-ui.json holds no provider"
+    );
+}
+
+#[gpui::test]
+fn a_settings_row_keeps_the_other_claude_settings(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    broadcast_claude(&mut h, options(&[("provider", text("deepseek"))]));
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-claude");
+    h.sent();
+    h.click_on("settings-spawn-approval-plan");
+    let plan = options(&[
+        ("permission_mode", text("plan")),
+        ("provider", text("deepseek")),
+    ]);
+    assert_eq!(
+        sent_agent_settings(&mut h),
+        vec![(claude(), plan.clone())],
+        "the provider rides along with the changed mode"
+    );
+    broadcast_claude(&mut h, plan);
+    assert_eq!(approval_choice(&mut h), "plan");
+    h.click_on("settings-spawn-approval-cli-default");
+    assert_eq!(
+        sent_agent_settings(&mut h),
+        vec![(
+            claude(),
+            options(&[
+                ("permission_mode", OptionValue::Null),
+                ("provider", text("deepseek")),
+            ])
+        )],
+        "CLI default is sent as no value"
+    );
+}
+
+#[gpui::test]
+fn two_quick_settings_clicks_keep_both_keys(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
     let mut h = opened(cx, &dir);
     h.keys("ctrl-,");
     h.click_on("settings-tab-claude");
-    tab_to(&mut h, "settings-spawn-provider-deepseek");
-    h.keys("enter");
-    assert_eq!(saved_ui(&dir)["spawn"]["claude_provider"], "deepseek");
-    h.click_on("settings-spawn-provider-anthropic");
-    assert_eq!(saved_ui(&dir)["spawn"]["claude_provider"], "anthropic");
+    h.sent();
+    h.click_on("settings-spawn-approval-plan");
     h.click_on("settings-spawn-provider-deepseek");
-    assert_eq!(saved_ui(&dir)["spawn"]["claude_provider"], "deepseek");
-    h.keys("escape");
-    assert!(!h.root(|root, _| root.settings_open()));
+    let plan = options(&[("permission_mode", text("plan"))]);
+    let both = options(&[
+        ("permission_mode", text("plan")),
+        ("provider", text("deepseek")),
+    ]);
+    assert_eq!(
+        sent_agent_settings(&mut h),
+        vec![(claude(), plan), (claude(), both.clone())],
+        "the second click keeps the first one's key before any broadcast"
+    );
+    assert_eq!(
+        approval_choice(&mut h),
+        "CLI default",
+        "the rows still wait for the daemon"
+    );
+    broadcast_claude(&mut h, both);
+    h.click_on("settings-spawn-approval-default");
+    assert_eq!(
+        sent_agent_settings(&mut h),
+        vec![(
+            claude(),
+            options(&[
+                ("permission_mode", text("default")),
+                ("provider", text("deepseek")),
+            ])
+        )],
+        "a broadcast starts the next change from the daemon's map"
+    );
+}
+
+/// A connection to the daemon that has said `Welcome`.
+fn welcomed() -> Connection {
+    let mut conn = Connection::new();
+    conn.on_connecting();
+    conn.on_socket_open(4242);
+    let version = NATIVE_PROTOCOL_VERSIONS.first().copied().unwrap_or(1);
+    conn.on_welcome(version, support::daemon_features());
+    conn
+}
+
+#[gpui::test]
+fn the_claude_rows_are_disabled_while_disconnected(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-claude");
+    let mut dropped = welcomed();
+    dropped.on_closed("the daemon went away".to_owned());
+    h.event(NetEvent::State(dropped));
+    assert!(h.root(|root, _| root.settings_open()));
+    h.sent();
+    h.click_on("settings-spawn-approval-plan");
+    h.click_on("settings-spawn-provider-deepseek");
+    assert_eq!(
+        sent_agent_settings(&mut h),
+        Vec::new(),
+        "a click while disconnected sends nothing"
+    );
+    h.keys("tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("list"),
+        "the Claude rows left the ring"
+    );
+}
+
+#[gpui::test]
+fn the_claude_rows_wait_for_agent_settings(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-claude");
+    let mut dropped = welcomed();
+    dropped.on_closed("the daemon went away".to_owned());
+    h.event(NetEvent::State(dropped));
+    h.event(NetEvent::State(welcomed()));
+    h.send(DaemonMessage::Agents {
+        agents: agent_registry::descriptors(),
+    });
+    h.sent();
+    h.click_on("settings-spawn-approval-plan");
+    assert_eq!(
+        sent_agent_settings(&mut h),
+        Vec::new(),
+        "a click before this connection's AgentSettings sends nothing"
+    );
+    h.keys("tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("list"),
+        "the Claude rows are out of the ring"
+    );
+
+    broadcast_claude(&mut h, options(&[("provider", text("deepseek"))]));
+    h.click_on("settings-spawn-approval-plan");
+    assert_eq!(
+        sent_agent_settings(&mut h),
+        vec![(
+            claude(),
+            options(&[
+                ("permission_mode", text("plan")),
+                ("provider", text("deepseek")),
+            ])
+        )],
+        "the rows take clicks once the stored values arrived"
+    );
 }
 
 #[gpui::test]
@@ -805,8 +1068,15 @@ fn tab_walks_spawn_default_choices(cx: &mut TestAppContext) {
         settings_focus(&mut h),
         Some("settings-spawn-approval-accept-edits")
     );
+    h.sent();
     h.keys("space");
-    assert_eq!(saved_ui(&dir)["spawn"]["permission_mode"], "accept_edits");
+    let accept_edits = options(&[("permission_mode", text("accept_edits"))]);
+    assert_eq!(
+        sent_agent_settings(&mut h),
+        vec![(claude(), accept_edits.clone())]
+    );
+    broadcast_claude(&mut h, accept_edits);
+    assert_eq!(approval_choice(&mut h), "accept edits");
     h.keys("tab");
     assert_eq!(
         settings_focus(&mut h),

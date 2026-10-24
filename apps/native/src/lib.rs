@@ -605,6 +605,11 @@ pub struct RootView {
     agents: Vec<protocol::AgentDescriptor>,
     /// Each agent's Settings page values as this connection last heard them.
     agent_settings: std::collections::BTreeMap<protocol::AgentId, protocol::OptionValues>,
+    /// Whether this connection has heard the agents' Settings values.
+    agent_settings_received: bool,
+    /// Claude's Settings values as the Claude page last sent them, until
+    /// the daemon's next broadcast answers.
+    claude_settings_pending: Option<protocol::OptionValues>,
     /// The Claude page's launch-command fields, once shown.
     claude_tab: Option<settings_view::ClaudeTab>,
     /// Reads and switches whether this PC starts the daemon at login.
@@ -1025,6 +1030,8 @@ impl RootView {
             agent_commands: None,
             agents: Vec::new(),
             agent_settings: std::collections::BTreeMap::new(),
+            agent_settings_received: false,
+            claude_settings_pending: None,
             claude_tab: None,
             autostart,
             window_title: String::new(),

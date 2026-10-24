@@ -445,15 +445,41 @@ impl RootView {
         provider_label(self.shown_default_provider())
     }
 
+    /// The label of the "Claude approval mode" choice shown selected.
+    #[must_use]
+    pub fn settings_approval_choice(&self) -> &'static str {
+        approval_label(self.shown_permission_mode())
+    }
+
     /// The note under the Claude page's locked provider row, as it draws it.
     #[must_use]
     pub fn settings_provider_locked_note(&self) -> &'static str {
         PROVIDER_LOCKED
     }
 
-    /// The "Claude provider" choice shown selected: the saved default.
+    /// The "Claude provider" choice shown selected: the daemon's Claude
+    /// Settings value, with none or one this client does not know read as
+    /// Anthropic.
     fn shown_default_provider(&self) -> ClaudeProvider {
-        self.sidebar.ui_state().spawn.claude_provider
+        match self.claude_settings_choice().provider {
+            ClaudeProvider::Unknown => ClaudeProvider::Anthropic,
+            known => known,
+        }
+    }
+
+    /// The "Claude approval mode" choice shown selected: the daemon's Claude
+    /// Settings value, with none or one this client does not know read as
+    /// the CLI default.
+    fn shown_permission_mode(&self) -> Option<PermissionMode> {
+        self.claude_settings_choice().permission_mode
+    }
+
+    /// Claude's Settings values as the daemon last broadcast them.
+    fn claude_settings_choice(&self) -> claude_compat::ClaudeChoice {
+        self.agent_settings()
+            .get(&claude_compat::claude_id())
+            .map(claude_compat::from_options)
+            .unwrap_or_default()
     }
 
     /// The Settings tabs' labels, in the list's order.
@@ -617,12 +643,13 @@ impl RootView {
     }
 
     /// The Claude page's controls in drawing order. Trusted launch locks
-    /// the approval and provider choices, never the launch command; the
+    /// the approval and provider choices, never the launch command, and
+    /// they are out while [`Self::claude_rows_live`] says no; the
     /// launch rows leave until the daemon reported its command.
     /// A Program row an environment variable sets is out of the ring.
     fn claude_controls(&self) -> Vec<SettingsControl> {
         let mut controls = Vec::new();
-        if !self.sidebar.ui_state().spawn.trusted {
+        if !self.sidebar.ui_state().spawn.trusted && self.claude_rows_live() {
             controls.extend(APPROVAL_CHOICES.map(SettingsControl::SpawnApproval));
             controls.extend(PROVIDER_CHOICES.map(SettingsControl::SpawnProvider));
         }
@@ -1048,10 +1075,8 @@ impl RootView {
             SettingsControl::NotifyFinished => self.toggle_finished_notification(cx),
             SettingsControl::NotifySkip(skip) => self.set_notify_skip(skip, cx),
             SettingsControl::SpawnTrusted => self.toggle_spawn_trusted(cx),
-            SettingsControl::SpawnApproval(mode) => self.set_spawn_permission_mode(mode, cx),
-            SettingsControl::SpawnProvider(provider) => {
-                self.set_spawn_claude_provider(provider, cx);
-            }
+            SettingsControl::SpawnApproval(mode) => self.set_spawn_permission_mode(mode),
+            SettingsControl::SpawnProvider(provider) => self.set_spawn_claude_provider(provider),
             SettingsControl::WorktreesPath
             | SettingsControl::RemotePort
             | SettingsControl::AgentProgram
@@ -1642,17 +1667,51 @@ impl RootView {
         cx.notify();
     }
 
-    fn set_spawn_permission_mode(&mut self, mode: Option<PermissionMode>, cx: &mut Context<Self>) {
-        self.sidebar.set_spawn_permission_mode(mode);
-        self.save_ui();
-        cx.notify();
+    /// Asks the daemon to make `mode` Claude's approval mode Setting; the
+    /// row shows it when the daemon's broadcast arrives.
+    fn set_spawn_permission_mode(&mut self, mode: Option<PermissionMode>) {
+        tracing::info!(?mode, "settings: setting Claude's approval mode");
+        self.set_claude_setting(
+            claude_compat::PERMISSION_MODE_KEY,
+            claude_compat::permission_mode_value(mode),
+        );
     }
 
-    /// Saves the provider a Claude spawn pre-selects.
-    fn set_spawn_claude_provider(&mut self, provider: ClaudeProvider, cx: &mut Context<Self>) {
-        self.sidebar.set_spawn_claude_provider(provider);
-        self.save_ui();
-        cx.notify();
+    /// Asks the daemon to make `provider` Claude's provider Setting; the row
+    /// shows it when the daemon's broadcast arrives.
+    fn set_spawn_claude_provider(&mut self, provider: ClaudeProvider) {
+        tracing::info!(?provider, "settings: setting Claude's provider");
+        self.set_claude_setting(
+            claude_compat::PROVIDER_KEY,
+            claude_compat::provider_value(provider),
+        );
+    }
+
+    /// Sends Claude's Settings values with `key` set to `value`, on top of
+    /// any change still waiting for the daemon's broadcast. Nothing is sent
+    /// while the Claude rows are disabled.
+    fn set_claude_setting(&mut self, key: &str, value: protocol::OptionValue) {
+        if !self.claude_rows_live() {
+            tracing::info!(key, "settings: Claude's rows are disabled; nothing sent");
+            return;
+        }
+        let options = self.merge_claude_setting(key, value);
+        self.send(ClientMessage::SetAgentSettings {
+            agent: claude_compat::claude_id(),
+            options,
+        });
+    }
+
+    /// Whether the approval and provider rows take input: connected, this
+    /// connection has heard the agents' Settings values, and the daemon
+    /// lists Claude.
+    fn claude_rows_live(&self) -> bool {
+        self.conn.is_open()
+            && self.agent_settings_received()
+            && self
+                .agents()
+                .iter()
+                .any(|agent| claude_compat::is_claude(&agent.id))
     }
 
     /// Opens Windows' notification settings on a background thread; a
@@ -2212,22 +2271,31 @@ impl RootView {
         focused: Option<SettingsControl>,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        let spawn = self.sidebar.ui_state().spawn;
-        let locked = spawn.trusted;
+        let lock = if self.sidebar.ui_state().spawn.trusted {
+            RowLock::Locked {
+                note: CLAUDE_LOCKED,
+                selector: "settings-spawn-approval-locked",
+            }
+        } else if self.claude_rows_live() {
+            RowLock::Live
+        } else {
+            RowLock::Disabled
+        };
+        let shown = self.shown_permission_mode();
         let approval = choice_row(
             "Claude approval mode",
             &APPROVAL_CHOICES.map(|mode| {
                 (
                     SettingsControl::SpawnApproval(mode),
                     approval_label(mode),
-                    mode == spawn.permission_mode,
+                    mode == shown,
                 )
             }),
-            locked.then_some((CLAUDE_LOCKED, "settings-spawn-approval-locked")),
+            lock,
             focused,
             cx,
         );
-        let provider = provider_row(self.shown_default_provider(), locked, focused, cx);
+        let provider = provider_row(self.shown_default_provider(), lock, focused, cx);
         let section = section("Claude").child(approval).child(provider);
         let mut sections = vec![section.into_any_element()];
         sections.extend(self.launch_command_section(focused, cx));
@@ -2367,7 +2435,13 @@ impl RootView {
                 choice == skip_when,
             )
         });
-        let skip_row = choice_row("Skip notifications when", &skips, None, focused, cx);
+        let skip_row = choice_row(
+            "Skip notifications when",
+            &skips,
+            RowLock::Live,
+            focused,
+            cx,
+        );
         let section = section("Notifications")
             .child(windows)
             .child(hint(
@@ -2396,7 +2470,14 @@ impl RootView {
         });
         let status_selector = "settings-keep-awake-status";
         let status_text = self.keep_awake_status();
-        let locked = selected.is_none().then_some((status_text, status_selector));
+        let locked = if selected.is_none() {
+            RowLock::Locked {
+                note: status_text,
+                selector: status_selector,
+            }
+        } else {
+            RowLock::Live
+        };
         let status =
             selected.map(|_| hint(status_text).debug_selector(move || status_selector.to_owned()));
         let power = section("Power")
@@ -2429,8 +2510,20 @@ impl RootView {
             )
         });
         let sidebar = section("Sidebar")
-            .child(choice_row("Default view", &choices, None, focused, cx))
-            .child(choice_row("Leaf density", &densities, None, focused, cx));
+            .child(choice_row(
+                "Default view",
+                &choices,
+                RowLock::Live,
+                focused,
+                cx,
+            ))
+            .child(choice_row(
+                "Leaf density",
+                &densities,
+                RowLock::Live,
+                focused,
+                cx,
+            ));
         let copy = toggle(
             SettingsControl::CopyOnSelect,
             ToggleState {
@@ -2606,14 +2699,16 @@ fn toggle(
     }
 }
 
-/// The "Claude provider" row; trusted launch locks it.
+/// The "Claude provider" row, taking input only while `lock` is
+/// [`RowLock::Live`]; under trusted launch's lock it carries its own note.
 fn provider_row(
     chosen: ClaudeProvider,
-    locked: bool,
+    lock: RowLock,
     focused: Option<SettingsControl>,
     cx: &mut Context<RootView>,
 ) -> AnyElement {
-    let enabled = !locked;
+    let enabled = matches!(lock, RowLock::Live);
+    let locked = matches!(lock, RowLock::Locked { .. });
     let buttons = PROVIDER_CHOICES
         .into_iter()
         .map(|provider| {
@@ -2690,23 +2785,38 @@ fn disabled_launch_row(
     field(label).child(frame)
 }
 
+/// Whether a choice row takes input, and the note that says why not.
+#[derive(Clone, Copy)]
+enum RowLock {
+    /// The choices take clicks and keys.
+    Live,
+    /// The choices are dimmed and inert, with no note.
+    Disabled,
+    /// The choices are dimmed and inert; the note and its selector say why.
+    Locked {
+        note: &'static str,
+        selector: &'static str,
+    },
+}
+
 /// A labelled row of segmented choices, laid out as the spawn dialog's;
-/// with a locked note the choices are dimmed, inert and out of the ring,
-/// and the note and its selector say why.
+/// unless `lock` is [`RowLock::Live`] the choices are dimmed, inert and out
+/// of the ring.
 fn choice_row(
     label: &'static str,
     choices: &[(SettingsControl, &'static str, bool)],
-    locked_note: Option<(&'static str, &'static str)>,
+    lock: RowLock,
     focused: Option<SettingsControl>,
     cx: &mut Context<RootView>,
 ) -> AnyElement {
+    let enabled = matches!(lock, RowLock::Live);
     let buttons = choices
         .iter()
         .map(|(control, text, selected)| {
             let look = Look {
                 selected: *selected,
                 focused: focused == Some(*control),
-                enabled: locked_note.is_none(),
+                enabled,
             };
             choice_button(
                 control.selector().to_owned(),
@@ -2717,8 +2827,12 @@ fn choice_row(
             .into_any_element()
         })
         .collect();
-    let note =
-        locked_note.map(|(text, selector)| hint(text).debug_selector(move || selector.to_owned()));
+    let note = match lock {
+        RowLock::Locked { note, selector } => {
+            Some(hint(note).debug_selector(move || selector.to_owned()))
+        }
+        RowLock::Live | RowLock::Disabled => None,
+    };
     field(label)
         .child(div().flex().child(segmented(buttons)))
         .children(note)

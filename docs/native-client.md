@@ -182,9 +182,11 @@ A request is asked for only on a connect to this PC's daemon whose `Welcome` lis
 
 `Start the daemon when I log in` registers the HKCU Run value (a LaunchAgent on macOS) through `daemon_client::autostart`, behind the `Autostart` seam in `remote_access.rs` (`RootDeps.autostart`). The controls are inert until the first `RemoteStatus` arrives, and a new connection forgets it.
 
-Spawn defaults holds "Trusted launch by default"; the Claude page holds "Claude approval mode" and "Claude provider".
+Spawn defaults holds "Trusted launch by default", the only Settings value saved in `native-ui.json`'s `spawn`; the Claude page holds "Claude approval mode" and "Claude provider".
 
-While trusted launch is on, every agent row is locked and carries a note; the provider note says the choice stays in effect. The launch rows below stay reachable in the Tab ring.
+Those two rows read the connected daemon's `AgentSettings` for `claude` and change it with `SetAgentSettings` (the current map merged with the changed key), so the setting follows the connected daemon, not this machine. A row changes only when the daemon's broadcast arrives; two quick changes are merged so neither is lost. While disconnected, before this connection's agent settings arrive, or when the daemon lists no `claude` agent, both rows are dimmed, ignore clicks and are skipped by Tab. Each change logs `settings: setting Claude's approval mode` or `settings: setting Claude's provider` in `native.log`.
+
+While trusted launch is on, the approval row is disabled and shows the stored value. The launch rows below stay reachable in the Tab ring.
 
 The Claude page's "Launch command" section (after "Claude") has a Program field (placeholder `claude`) and an Extra arguments field. Enter in either sends both, trimmed, as `SetAgentCommand`; both empty clears the command. There is no Apply button. `Saved` shows after the daemon's echo, only while both fields still match what was stored. Notes say the command is used for new sessions, Restart and Resume and not for headless runs, and that extra arguments follow POSIX shell rules (quote a Windows path or double its backslashes; in cmd a doskey macro is not expanded, so set Program to a `.cmd` file).
 
