@@ -434,6 +434,29 @@ fn a_heading_anchor_scrolls(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_rendered_markdown_reload_keeps_its_top_row(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let file = write_file(dir.path(), "docs/long.md", &long_document());
+    let mut h = showing(cx, &dir, &[&file]);
+    assert!(drawn(&mut h, "viewer-md-v1"));
+    follow(&mut h, "v1", "#target");
+    assert_eq!(top_row(&mut h, "v1"), Some(201));
+
+    h.click_on("tab-t1");
+    let longer = [long_document(), "more\n\n".repeat(10)].concat();
+    fs::write(&file, &longer).expect("grow the file");
+    h.click_on("tab-v1");
+
+    assert_eq!(
+        h.root(|root, _| root.viewer_tab("v1").map(ViewerTab::line_count)),
+        Some(longer.lines().count()),
+        "the file is read again"
+    );
+    assert_eq!(top_row(&mut h, "v1"), Some(201), "the top row stays");
+    assert!(drawn(&mut h, "viewer-md-block-v1-201"), "the heading shows");
+}
+
+#[gpui::test]
 fn an_unknown_anchor_does_nothing(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let file = write_file(dir.path(), "docs/long.md", &long_document());

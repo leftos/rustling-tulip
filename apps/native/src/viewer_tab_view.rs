@@ -384,6 +384,42 @@ impl RootView {
         .detach();
     }
 
+    /// The active tab became a viewer tab: its file is statted on the
+    /// background executor and, when its modified time or size changed
+    /// since the last read, read again in place.
+    pub(crate) fn reload_active_viewer(&mut self, cx: &mut Context<Self>) {
+        let Some(tab_id) = self.tabs.active_id().map(str::to_owned) else {
+            return;
+        };
+        let Some(tab) = self.viewer_tabs.get(&tab_id) else {
+            return;
+        };
+        if !tab.can_reload() {
+            return;
+        }
+        let path = PathBuf::from(tab.path());
+        let stat_path = path.clone();
+        let work = cx
+            .background_executor()
+            .spawn(async move { viewer_tab::file_stamp(&stat_path) });
+        cx.spawn(async move |this, cx| {
+            let now = work.await;
+            // Fails only when the view is gone, and the tab with it.
+            this.update(cx, |root, cx| {
+                let read = root
+                    .viewer_tabs
+                    .get_mut(&tab_id)
+                    .filter(|tab| tab.needs_reload(now))
+                    .and_then(|tab| tab.begin_reload(now));
+                if let Some(read) = read {
+                    Self::read_viewer_file(tab_id, path, read, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn finish_viewer_read(
         &mut self,
         tab_id: &str,

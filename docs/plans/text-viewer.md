@@ -145,7 +145,7 @@ Order is chosen so each step lands green on its own. Tests: Rust names, red firs
 - **S7. Selection, find, reload.** Split into S7a (selection), S7b (find) and S7c (reload).
   - **S7a. Line selection and copy. Landed.** `LineSelection` and `ViewerTab::selected_lines` in `viewer_tab.rs`, handlers in `viewer_tab_view.rs` (`RootView::viewer_line_height`), debug selector `viewer-text-<tab>-<n>`; Source view only.
   - **S7b. Find. Landed.** `viewer_find.rs` (`find_matches`, `FindState`, the match tints), the find bar and keys in `viewer_tab_view.rs`, find state on `ViewerTab`; Source view only.
-  - **S7c. Reload.** mtime/size reload on activation.
+  - **S7c. Reload. Landed.** mtime/size reload on tab activation in `viewer_tab.rs` (`ViewerTab::needs_reload`, `begin_reload`), `RootView::reload_active_viewer` in `viewer_tab_view.rs`; scroll, selection and find kept.
   Red tests: `find_matches_are_case_insensitive_by_default`, `next_wraps_at_the_last_match`, `a_shift_click_selects_the_line_range`, `ctrl_c_copies_the_selected_lines_joined_with_newlines`, `an_activation_with_a_changed_mtime_reloads_and_keeps_the_scroll`.
 - **S8. Docs.** `docs/native-client.md` new "Text and Markdown viewer" section (and the Links bullet, `native-client.md:149`, which currently says a plain path opens the OS default handler); `docs/architecture.md` Task Index row (below); `docs/plans/native-client-parity.md` tick; `docs/plans/remote-file-transfer.md` Rulings "Viewing" (`:18`) note; CLAUDE.md field list; test-map rows. Fold small doc edits into each step's own commit and do S8 only for what is left.
 

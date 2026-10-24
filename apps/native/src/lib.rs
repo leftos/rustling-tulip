@@ -2004,6 +2004,7 @@ impl RootView {
             if keyboard_free && !self.focus_active_diff_tab(window, cx) {
                 self.focus_active_viewer_tab(window);
             }
+            self.reload_active_viewer(cx);
         }
         // The saved active tab is the local daemon's; a remote host's tab
         // ids are neither remembered nor saved.

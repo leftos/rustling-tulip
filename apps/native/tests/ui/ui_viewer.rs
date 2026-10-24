@@ -16,7 +16,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
-use gpui::{Modifiers, TestAppContext};
+use gpui::{Modifiers, ScrollStrategy, TestAppContext, px};
 use protocol::{ClientMessage, DaemonMessage, SessionSnapshot, TabEntry};
 use rustling_tulip_native::file_fetch::FetchRequest;
 use rustling_tulip_native::target::Target;
@@ -959,4 +959,164 @@ fn escape_clears_the_selection(cx: &mut TestAppContext) {
         Some("before"),
         "nothing left to copy"
     );
+}
+
+/// Scrolls viewer tab `v1`'s lines so row `row` is centred.
+fn scroll_to_row(h: &mut Harness<'_>, row: usize) {
+    h.root_update(move |root, _, cx| {
+        let tab = root.viewer_tab("v1").expect("tab v1");
+        tab.scroll()
+            .scroll_to_item_strict(row, ScrollStrategy::Center);
+        cx.notify();
+    });
+}
+
+/// How far viewer tab `v1`'s lines are scrolled down, in px.
+fn scroll_top(h: &mut Harness<'_>) -> f32 {
+    h.cx.run_until_parked();
+    h.root(|root, _| {
+        let tab = root.viewer_tab("v1").expect("tab v1");
+        -tab.scroll().0.borrow().base_handle.offset().y / px(1.0)
+    })
+}
+
+/// Viewer tab `v1`'s line count.
+fn line_count(h: &mut Harness<'_>) -> Option<usize> {
+    h.cx.run_until_parked();
+    h.root(|root, _| root.viewer_tab("v1").map(ViewerTab::line_count))
+}
+
+/// Viewer tab `v1`'s text, as Copy all copies it.
+fn copied_all(h: &mut Harness<'_>) -> Option<String> {
+    h.click_on("viewer-copy-all-v1");
+    h.clipboard()
+}
+
+#[gpui::test]
+fn an_activation_with_a_changed_mtime_reloads_and_keeps_the_scroll(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let file = write_file(dir.path(), "src/long.rs", numbered_lines(300).as_bytes());
+    let mut h = showing(cx, &dir, &file);
+    scroll_to_row(&mut h, 150);
+    let top = scroll_top(&mut h);
+    assert!(top > 0.0, "scrolled down the file");
+    assert!(drawn(&mut h, "viewer-line-v1-151"));
+
+    h.click_on("tab-t1");
+    fs::write(&file, numbered_lines(301)).expect("grow the file");
+    h.click_on("tab-v1");
+
+    assert_eq!(line_count(&mut h), Some(301), "the file is read again");
+    assert!(
+        (scroll_top(&mut h) - top).abs() < 0.5,
+        "the scroll stays at {top}"
+    );
+    assert!(drawn(&mut h, "viewer-line-v1-151"));
+    scroll_to_row(&mut h, 300);
+    assert!(drawn(&mut h, "viewer-line-v1-301"), "the new line draws");
+}
+
+#[gpui::test]
+fn an_activation_with_an_unchanged_file_reads_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let file = write_file(dir.path(), "docs/notes.txt", b"first\n");
+    let mut h = showing(cx, &dir, &file);
+    let modified = fs::metadata(&file)
+        .and_then(|meta| meta.modified())
+        .expect("the file's mtime");
+    let set_modified = |at| {
+        fs::File::options()
+            .write(true)
+            .open(&file)
+            .and_then(|handle| handle.set_modified(at))
+            .expect("set the file's mtime");
+    };
+
+    h.click_on("tab-t1");
+    fs::write(&file, b"other\n").expect("rewrite the file at the same size");
+    set_modified(modified);
+    h.click_on("tab-v1");
+    assert_eq!(
+        copied_all(&mut h).as_deref(),
+        Some("first\n"),
+        "the same mtime and size read nothing"
+    );
+
+    h.click_on("tab-t1");
+    set_modified(modified + std::time::Duration::from_secs(2));
+    h.click_on("tab-v1");
+    assert_eq!(
+        copied_all(&mut h).as_deref(),
+        Some("other\n"),
+        "a newer mtime reads it"
+    );
+}
+
+#[gpui::test]
+fn a_file_deleted_before_activation_shows_the_last_read_banner(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let file = write_file(dir.path(), "docs/notes.txt", b"first\nsecond\n");
+    let mut h = showing(cx, &dir, &file);
+    assert!(drawn(&mut h, "viewer-line-v1-2"));
+
+    h.click_on("tab-t1");
+    fs::remove_file(&file).expect("delete the file");
+    h.click_on("tab-v1");
+
+    assert_eq!(
+        shown(&mut h),
+        Some((ViewerOrigin::Link, ViewerLoad::Missing, None))
+    );
+    assert_eq!(
+        h.root(|root, _| root.viewer_tab("v1").and_then(ViewerTab::note)),
+        Some("The file is gone or cannot be read. Showing the last read.")
+    );
+    assert!(drawn(&mut h, "viewer-banner-v1"));
+    assert!(drawn(&mut h, "viewer-line-v1-2"), "the last read stays");
+    assert_eq!(copied_all(&mut h).as_deref(), Some("first\nsecond\n"));
+}
+
+#[gpui::test]
+fn a_not_available_tab_does_not_reload_on_activation(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let file = write_file(dir.path(), "docs/notes.txt", b"local\n");
+    let mut fixture = Fixture::single(session("s1").worktree("r1").build());
+    fixture.tabs.push(viewer_tab("v1", &file));
+    let mut h = Harness::on_target(cx, &dir, Target::tailnet(HOST, None), &fixture);
+    h.click_on("tab-v1");
+    h.click_on("tab-t1");
+    fs::write(&file, b"local\nchanged\n").expect("change the file");
+    h.click_on("tab-v1");
+
+    assert_eq!(
+        shown(&mut h),
+        Some((ViewerOrigin::NotAvailable, ViewerLoad::NotAvailable, None))
+    );
+    assert_eq!(line_count(&mut h), Some(0));
+    assert!(!drawn(&mut h, "viewer-line-v1-1"), "nothing is read");
+    assert!(drawn(&mut h, "viewer-banner-v1"));
+}
+
+#[gpui::test]
+fn a_reopen_still_rereads_once(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let file = write_file(dir.path(), "docs/notes.txt", b"first\n");
+    let mut h = showing(cx, &dir, &file);
+    assert_eq!(line_count(&mut h), Some(1));
+
+    h.click_on("tab-t1");
+    fs::write(&file, b"first\nsecond\n").expect("change the file");
+    reopen(&mut h, &file, None);
+
+    assert_eq!(
+        shown(&mut h),
+        Some((ViewerOrigin::Link, ViewerLoad::Loaded, None))
+    );
+    assert_eq!(line_count(&mut h), Some(2));
+    assert!(drawn(&mut h, "viewer-line-v1-2"), "the new line shows");
+    assert_eq!(
+        h.root(|root, _| root.viewer_tab("v1").and_then(ViewerTab::note)),
+        None
+    );
+    assert_eq!(copied_all(&mut h).as_deref(), Some("first\nsecond\n"));
 }

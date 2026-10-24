@@ -10,9 +10,11 @@ use std::ops::Range;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
-use gpui::{Entity, ListAlignment, ListState, Subscription, UniformListScrollHandle, px};
+use gpui::{
+    Entity, ListAlignment, ListOffset, ListState, Subscription, UniformListScrollHandle, px,
+};
 
 use crate::diff_tab::{PENDING_ACTIVATE_TTL, split_path};
 use crate::file_fetch::is_under;
@@ -70,6 +72,38 @@ pub(crate) const NOT_DECODABLE_BANNER: &str =
     "This file is neither UTF-8 nor UTF-16 with a byte order mark, so the viewer does not show it.";
 /// The banner of a file that is gone or cannot be read.
 pub(crate) const MISSING_BANNER: &str = "The file is gone or cannot be read.";
+/// The banner of a file that is gone or cannot be read, over the lines of
+/// its last read.
+pub(crate) const MISSING_LAST_READ_BANNER: &str =
+    "The file is gone or cannot be read. Showing the last read.";
+
+/// What a reload compares to tell whether a file changed: its modified time
+/// and its size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FileStamp {
+    pub(crate) modified: Option<SystemTime>,
+    pub(crate) len: u64,
+}
+
+impl FileStamp {
+    fn of(metadata: &std::fs::Metadata) -> Self {
+        Self {
+            modified: metadata.modified().ok(),
+            len: metadata.len(),
+        }
+    }
+}
+
+/// The stamp of the file at `path`; `None` when it cannot be statted.
+pub(crate) fn file_stamp(path: &Path) -> Option<FileStamp> {
+    match std::fs::metadata(path) {
+        Ok(metadata) => Some(FileStamp::of(&metadata)),
+        Err(err) => {
+            tracing::debug!(path = %path.display(), "the viewer could not stat the file: {err}");
+            None
+        }
+    }
+}
 
 /// Why a viewer tab's file read shows no text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,13 +113,14 @@ pub(crate) enum ReadFailure {
     Unreadable,
 }
 
-/// A viewer tab's file as read: its text, each line's byte range in it, and
-/// the language it is coloured as.
+/// A viewer tab's file as read: its text, each line's byte range in it, the
+/// language it is coloured as, and the file's stamp when it was read.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct ViewerText {
     text: String,
     lines: Vec<Range<usize>>,
     language: Option<&'static str>,
+    stamp: Option<FileStamp>,
 }
 
 impl ViewerText {
@@ -102,7 +137,15 @@ impl ViewerText {
             text,
             lines,
             language,
+            stamp: None,
         }
+    }
+
+    /// The text, read from a file stamped `stamp`.
+    #[must_use]
+    pub(crate) fn with_stamp(mut self, stamp: FileStamp) -> Self {
+        self.stamp = Some(stamp);
+        self
     }
 
     /// The whole text, as decoded.
@@ -156,12 +199,13 @@ pub(crate) fn read_file(path: &Path) -> Result<ViewerText, ReadFailure> {
         tracing::warn!(path = %path.display(), "the viewer could not read the file: {err}");
         ReadFailure::Unreadable
     };
-    if std::fs::metadata(path).map_err(unreadable)?.len() > viewer_text::MAX_VIEW_BYTES {
+    let stamp = FileStamp::of(&std::fs::metadata(path).map_err(unreadable)?);
+    if stamp.len > viewer_text::MAX_VIEW_BYTES {
         return Err(ReadFailure::NotText(NotText::TooLarge));
     }
     let bytes = std::fs::read(path).map_err(unreadable)?;
     let text = viewer_text::decode(&bytes).map_err(ReadFailure::NotText)?;
-    Ok(ViewerText::new(text, viewer_text::language_for_path(path)))
+    Ok(ViewerText::new(text, viewer_text::language_for_path(path)).with_stamp(stamp))
 }
 
 /// The whole lines selected in the Source view: from the line a press began
@@ -424,6 +468,20 @@ pub struct ViewerTab {
     find_bar: Option<FindBar>,
     /// Whether the find bar is open.
     find_open: bool,
+    /// The file's stamp at the last read that landed text; `None` before
+    /// one, or when the last read found no text.
+    last_stamp: Option<FileStamp>,
+    /// The reload in flight, which keeps the text shown until it lands;
+    /// `None` when no reload is.
+    reload: Option<Reload>,
+}
+
+/// A reload in flight: its read's number and the stamp of the stat that
+/// began it.
+#[derive(Debug, Clone, Copy)]
+struct Reload {
+    read: u64,
+    stamp: Option<FileStamp>,
 }
 
 impl Drop for ViewerTab {
@@ -461,6 +519,8 @@ impl ViewerTab {
             find: FindState::default(),
             find_bar: None,
             find_open: false,
+            last_stamp: None,
+            reload: None,
         }
     }
 
@@ -473,6 +533,36 @@ impl ViewerTab {
         let read = NEXT_READ.fetch_add(1, Ordering::Relaxed);
         self.read = Some(read);
         self.load = ViewerLoad::Loading;
+        Some(read)
+    }
+
+    /// Whether the tab may read its file again in place: its read ended, it
+    /// reads at all, and no reload is in flight.
+    pub(crate) fn can_reload(&self) -> bool {
+        let ended = !matches!(
+            self.load,
+            ViewerLoad::Unread | ViewerLoad::Loading | ViewerLoad::NotAvailable
+        );
+        ended && self.reload.is_none()
+    }
+
+    /// Whether the file, stamped `now` (`None` when it cannot be statted),
+    /// changed since the tab last read it, and the tab may read it again.
+    pub(crate) fn needs_reload(&self, now: Option<FileStamp>) -> bool {
+        self.can_reload() && now != self.last_stamp
+    }
+
+    /// Starts reading the file, stamped `now` by the stat that found it
+    /// changed, again in place: returns the read's number, or `None` when
+    /// the tab may not reload. The text shown stays the tab's read, so its
+    /// colours and parse in flight still land, and it stays shown with the
+    /// rendered document, the selection and find until the reload lands.
+    pub(crate) fn begin_reload(&mut self, now: Option<FileStamp>) -> Option<u64> {
+        if !self.can_reload() {
+            return None;
+        }
+        let read = NEXT_READ.fetch_add(1, Ordering::Relaxed);
+        self.reload = Some(Reload { read, stamp: now });
         Some(read)
     }
 
@@ -492,36 +582,45 @@ impl ViewerTab {
                 self.text = None;
                 self.spans = None;
                 self.md = None;
+                self.reload = None;
                 self.load = ViewerLoad::Unread;
             }
         }
     }
 
     /// Read `read` ended with `result`; returns whether it landed, which
-    /// only the tab's read in flight does.
+    /// only the tab's read in flight does, an open's or a reload's.
+    ///
+    /// A reload's text becomes the tab's read. A reload that fails to read
+    /// keeps the last read's lines under the Missing banner, still the
+    /// tab's read; one that finds no text drops them for its banner and
+    /// keeps the stamp it was begun with, so the same file is not read
+    /// again.
     pub(crate) fn finish_read(
         &mut self,
         read: u64,
         result: Result<ViewerText, ReadFailure>,
     ) -> bool {
-        if self.load != ViewerLoad::Loading || self.read != Some(read) {
+        let reload = self.reload.filter(|reload| reload.read == read);
+        let open = self.load == ViewerLoad::Loading && self.read == Some(read);
+        if reload.is_none() && !open {
             return false;
         }
+        self.reload = None;
+        self.last_stamp = match &result {
+            Ok(text) => text.stamp,
+            Err(ReadFailure::NotText(_)) => reload.and_then(|reload| reload.stamp),
+            Err(ReadFailure::Unreadable) => None,
+        };
         self.load = match result {
             Ok(text) => {
-                self.apply_render_cap(text.text().len());
-                self.selection.clamp(text.line_count());
-                self.text = Some(Arc::new(text));
-                if let Some(read) = &self.text
-                    && !self.find.query().is_empty()
-                {
-                    self.find.rerun(read.lines());
-                }
-                self.jump_pending.set(self.line_target.is_some());
+                self.read = Some(read);
+                self.land_text(text, reload.is_some());
                 ViewerLoad::Loaded
             }
+            Err(ReadFailure::Unreadable) if reload.is_some() => ViewerLoad::Missing,
             Err(failure) => {
-                self.selection.clear();
+                self.drop_text();
                 match failure {
                     ReadFailure::NotText(NotText::TooLarge) => ViewerLoad::TooLarge,
                     ReadFailure::NotText(NotText::Binary) => ViewerLoad::Binary,
@@ -531,6 +630,39 @@ impl ViewerTab {
             }
         };
         true
+    }
+
+    /// `text` landed: the selection is clamped to it and find re-runs on it.
+    /// An open's text scrolls to the line target; a reload's leaves the
+    /// scroll and recolours from scratch.
+    fn land_text(&mut self, text: ViewerText, reload: bool) {
+        self.apply_render_cap(text.text().len());
+        self.selection.clamp(text.line_count());
+        self.text = Some(Arc::new(text));
+        if let Some(read) = &self.text
+            && !self.find.query().is_empty()
+        {
+            self.find.rerun(read.lines());
+        }
+        if !reload {
+            self.jump_pending.set(self.line_target.is_some());
+            return;
+        }
+        self.highlight_cancel.store(true, Ordering::Relaxed);
+        self.highlight_cancel = Arc::new(AtomicBool::new(false));
+        self.spans = None;
+        if self.markdown_too_large {
+            self.md = None;
+        }
+    }
+
+    /// No text shows: the lines, their colours, the rendered document and
+    /// the selection go.
+    fn drop_text(&mut self) {
+        self.text = None;
+        self.spans = None;
+        self.md = None;
+        self.selection.clear();
     }
 
     /// Whether the text read shows as numbered lines, where lines can be
@@ -710,9 +842,9 @@ impl ViewerTab {
     }
 
     /// Highlighting of read `read` landed with `spans`; kept while that read
-    /// is still the one shown.
+    /// is still the one shown, under the Missing banner too.
     pub(crate) fn finish_highlight(&mut self, read: u64, spans: Arc<Highlighted>) -> bool {
-        if self.read != Some(read) || self.load != ViewerLoad::Loaded {
+        if self.read != Some(read) || self.text.is_none() {
             return false;
         }
         self.spans = Some(spans);
@@ -725,7 +857,8 @@ impl ViewerTab {
     }
 
     /// The line list's scroll.
-    pub(crate) fn scroll(&self) -> &UniformListScrollHandle {
+    #[must_use]
+    pub fn scroll(&self) -> &UniformListScrollHandle {
         &self.scroll
     }
 
@@ -818,19 +951,33 @@ impl ViewerTab {
         true
     }
 
-    /// Whether the text read is a Markdown document the rendered view can
-    /// show.
+    /// Whether the text shown, loaded or the last read under the Missing
+    /// banner, is a Markdown document the rendered view can show.
     pub(crate) fn renders_markdown(&self) -> bool {
-        self.markdown.is_some() && !self.markdown_too_large && self.load == ViewerLoad::Loaded
+        self.markdown.is_some() && !self.markdown_too_large && self.text.is_some()
     }
 
     /// The parse of read `read` landed as `doc`; kept, with a fresh block
-    /// list, while that read is still the one shown.
+    /// list, while that read is still the one shown. A document that
+    /// replaces another, a reload's, keeps its top row, clamped to the new
+    /// rows.
     pub(crate) fn finish_markdown(&mut self, read: u64, doc: Arc<MdDoc>) -> bool {
         if self.read != Some(read) || !self.renders_markdown() {
             return false;
         }
         let list = ListState::new(doc.row_count(), ListAlignment::Top, px(MD_OVERDRAW));
+        if let Some((_, old)) = &self.md {
+            let top = old.logical_scroll_top();
+            let last = doc.row_count().saturating_sub(1);
+            list.scroll_to(if top.item_ix <= last {
+                top
+            } else {
+                ListOffset {
+                    item_ix: last,
+                    offset_in_item: px(0.0),
+                }
+            });
+        }
         self.md = Some((doc, list));
         true
     }
@@ -848,6 +995,7 @@ impl ViewerTab {
             ViewerLoad::TooLarge => Some(TOO_LARGE_BANNER),
             ViewerLoad::Binary => Some(BINARY_BANNER),
             ViewerLoad::NotDecodable => Some(NOT_DECODABLE_BANNER),
+            ViewerLoad::Missing if self.text.is_some() => Some(MISSING_LAST_READ_BANNER),
             ViewerLoad::Missing => Some(MISSING_BANNER),
             ViewerLoad::NotAvailable => Some(LOCAL_FILES_REASON),
         }
@@ -1270,6 +1418,281 @@ mod tests {
             selection.range(),
             Some(2..3),
             "a cleared selection has no anchor"
+        );
+    }
+
+    /// A plain text file, where lines select and find works.
+    const PLAIN: &str = r"C:\notes\a.txt";
+
+    /// A file modified `secs` seconds after the epoch, `len` bytes long.
+    fn stamp(secs: u64, len: u64) -> FileStamp {
+        FileStamp {
+            modified: Some(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs)),
+            len,
+        }
+    }
+
+    /// A tab of [`PLAIN`] whose file read landed as `text_read`, stamped
+    /// `at`.
+    fn plain_at(text_read: &str, at: FileStamp) -> ViewerTab {
+        let mut tab = ViewerTab::new(PLAIN.to_owned(), ViewerOrigin::Link, MarkdownMode::Rendered);
+        let run = tab.begin_read().expect("an unread tab reads");
+        assert!(tab.finish_read(run, Ok(text(text_read).with_stamp(at))));
+        tab
+    }
+
+    #[test]
+    fn an_unchanged_stamp_does_not_reload() {
+        let mut tab = plain_at("a\n", stamp(10, 2));
+        assert!(!tab.needs_reload(Some(stamp(10, 2))));
+        let run = tab.begin_reload(None).expect("a loaded tab reloads");
+        assert!(tab.finish_read(run, Ok(text("a\n").with_stamp(stamp(10, 2)))));
+        assert!(
+            !tab.needs_reload(Some(stamp(10, 2))),
+            "a reload's stamp is the last read"
+        );
+    }
+
+    #[test]
+    fn a_changed_mtime_or_size_reloads() {
+        let tab = plain_at("a\n", stamp(10, 2));
+        assert!(tab.needs_reload(Some(stamp(11, 2))), "a newer mtime");
+        assert!(tab.needs_reload(Some(stamp(9, 2))), "an older mtime");
+        assert!(tab.needs_reload(Some(stamp(10, 3))), "another size");
+        assert!(tab.needs_reload(None), "the file is gone");
+    }
+
+    #[test]
+    fn an_unread_or_loading_tab_is_not_reloaded() {
+        let mut tab = ViewerTab::new(PLAIN.to_owned(), ViewerOrigin::Link, MarkdownMode::Rendered);
+        assert!(!tab.needs_reload(Some(stamp(10, 2))), "unread");
+        assert!(!tab.needs_reload(None), "unread");
+        assert_eq!(tab.begin_reload(None), None);
+        assert_eq!(tab.load(), ViewerLoad::Unread);
+
+        tab.begin_read().expect("an unread tab reads");
+        assert!(!tab.needs_reload(Some(stamp(10, 2))), "loading");
+        assert_eq!(tab.begin_reload(None), None);
+        assert_eq!(tab.load(), ViewerLoad::Loading);
+    }
+
+    #[test]
+    fn a_not_available_tab_is_never_reloaded() {
+        let mut tab = ViewerTab::new(
+            PLAIN.to_owned(),
+            ViewerOrigin::NotAvailable,
+            MarkdownMode::Rendered,
+        );
+        assert!(!tab.needs_reload(Some(stamp(10, 2))));
+        assert!(!tab.needs_reload(None));
+        assert_eq!(tab.begin_reload(None), None);
+        assert_eq!(tab.load(), ViewerLoad::NotAvailable);
+    }
+
+    #[test]
+    fn a_failed_reload_keeps_the_lines_under_the_last_read_banner() {
+        let mut tab = plain_at("a\nb\nc\n", stamp(10, 6));
+        tab.press_line(1, false);
+        tab.release_lines();
+        let run = tab.begin_reload(None).expect("a loaded tab reloads");
+        assert!(!tab.needs_reload(None), "not while a reload is in flight");
+        assert_eq!(tab.begin_reload(None), None, "one reload at a time");
+        assert_eq!(tab.line_count(), 3, "the old lines show while it reads");
+        assert_eq!(tab.load(), ViewerLoad::Loaded);
+
+        assert!(tab.finish_read(run, Err(ReadFailure::Unreadable)));
+        assert_eq!(tab.load(), ViewerLoad::Missing);
+        assert_eq!(tab.note(), Some(MISSING_LAST_READ_BANNER));
+        assert_eq!(
+            MISSING_LAST_READ_BANNER,
+            "The file is gone or cannot be read. Showing the last read."
+        );
+        assert_eq!(tab.line_count(), 3, "the last read stays");
+        assert_eq!(tab.selected_lines(), Some(1..2), "and its selection");
+        assert!(!tab.needs_reload(None), "still gone: nothing to read");
+        assert!(
+            tab.needs_reload(Some(stamp(10, 6))),
+            "back, even as it was: read it"
+        );
+    }
+
+    #[test]
+    fn a_reload_past_the_cap_replaces_the_lines_with_the_banner() {
+        let mut tab = plain_at("a\nb\n", stamp(10, 4));
+        tab.press_line(0, false);
+        tab.release_lines();
+        let run = tab.begin_reload(None).expect("a loaded tab reloads");
+        assert!(tab.finish_read(run, Err(ReadFailure::NotText(NotText::TooLarge))));
+        assert_eq!(tab.load(), ViewerLoad::TooLarge);
+        assert_eq!(tab.note(), Some(TOO_LARGE_BANNER));
+        assert_eq!(tab.line_count(), 0, "no stale lines under the banner");
+        assert!(tab.text().is_none());
+        assert_eq!(tab.selected_lines(), None);
+    }
+
+    #[test]
+    fn a_reload_that_lands_clamps_the_selection_and_reruns_find() {
+        let mut tab = plain_at("a\nneedle\nc\nneedle\n", stamp(10, 18));
+        assert!(tab.open_find());
+        assert_eq!(tab.set_find_query("needle", 0), Some(1));
+        assert_eq!(tab.find_label().as_deref(), Some("1 of 2"));
+        tab.press_line(3, false);
+        tab.release_lines();
+
+        let run = tab.begin_reload(None).expect("a loaded tab reloads");
+        assert!(tab.finish_read(run, Ok(text("needle\nb\n").with_stamp(stamp(11, 9)))));
+        assert_eq!(tab.load(), ViewerLoad::Loaded);
+        assert_eq!(tab.line_count(), 2);
+        assert_eq!(
+            tab.selected_lines(),
+            Some(1..2),
+            "clamped onto the last line"
+        );
+        assert_eq!(
+            tab.find_label().as_deref(),
+            Some("1 of 1"),
+            "the query kept"
+        );
+        assert!(
+            !tab.needs_reload(Some(stamp(11, 9))),
+            "the new stamp is the last read"
+        );
+    }
+
+    #[test]
+    fn a_reload_does_not_jump_to_the_line_target() {
+        let mut tab = ViewerTab::new(PLAIN.to_owned(), ViewerOrigin::Link, MarkdownMode::Rendered);
+        tab.set_line_target(Some(2));
+        let run = tab.begin_read().expect("an unread tab reads");
+        assert!(tab.finish_read(run, Ok(text("a\nb\nc\n").with_stamp(stamp(10, 6)))));
+        assert_eq!(tab.take_jump(), Some(1), "the open scrolls to its line");
+
+        let run = tab.begin_reload(None).expect("a loaded tab reloads");
+        assert!(tab.finish_read(run, Ok(text("a\nb\nc\nd\n").with_stamp(stamp(11, 8)))));
+        assert_eq!(tab.take_jump(), None, "a reload leaves the scroll");
+        assert_eq!(tab.line_target(), Some(2));
+    }
+
+    #[test]
+    fn a_stale_reload_result_is_dropped() {
+        let mut tab = plain_at("a\n", stamp(10, 2));
+        let overtaken = tab.begin_reload(None).expect("a loaded tab reloads");
+        tab.reread();
+        let fresh = tab.begin_read().expect("the re-open reads");
+        assert!(
+            !tab.finish_read(overtaken, Ok(text("old\nold\n"))),
+            "the reload a re-open overtook"
+        );
+        assert_eq!(tab.load(), ViewerLoad::Loading);
+        assert!(tab.finish_read(fresh, Ok(text("new\n").with_stamp(stamp(12, 4)))));
+        assert_eq!(tab.line_count(), 1);
+
+        let run = tab.begin_reload(None).expect("a loaded tab reloads");
+        assert!(tab.finish_read(run, Ok(text("x\ny\n").with_stamp(stamp(13, 4)))));
+        assert!(
+            !tab.finish_read(run, Ok(text("x\ny\nz\n"))),
+            "a reload lands once"
+        );
+        assert_eq!(tab.line_count(), 2);
+    }
+
+    #[test]
+    fn a_missing_file_that_returns_reloads() {
+        let mut tab = ViewerTab::new(PLAIN.to_owned(), ViewerOrigin::Link, MarkdownMode::Rendered);
+        let run = tab.begin_read().expect("an unread tab reads");
+        assert!(tab.finish_read(run, Err(ReadFailure::Unreadable)));
+        assert_eq!(
+            tab.note(),
+            Some(MISSING_BANNER),
+            "nothing was read: no last read to show"
+        );
+        assert!(!tab.needs_reload(None), "still gone");
+        assert!(tab.needs_reload(Some(stamp(10, 5))), "it came back");
+
+        let run = tab.begin_reload(None).expect("a missing tab reloads");
+        assert!(tab.finish_read(run, Ok(text("back\n").with_stamp(stamp(10, 5)))));
+        assert_eq!(tab.load(), ViewerLoad::Loaded);
+        assert_eq!(tab.note(), None);
+        assert_eq!(tab.line_count(), 1);
+    }
+
+    #[test]
+    fn a_binary_file_is_not_read_again_while_unchanged() {
+        let mut tab = plain_at("a\n", stamp(10, 2));
+        let binary = stamp(11, 9);
+        assert!(tab.needs_reload(Some(binary)));
+        let run = tab
+            .begin_reload(Some(binary))
+            .expect("a loaded tab reloads");
+        assert!(tab.finish_read(run, Err(ReadFailure::NotText(NotText::Binary))));
+        assert_eq!(tab.load(), ViewerLoad::Binary);
+        assert!(
+            !tab.needs_reload(Some(binary)),
+            "the same binary file is not read again"
+        );
+        assert!(tab.needs_reload(Some(stamp(12, 9))), "a change is read");
+        assert!(tab.needs_reload(None), "and so is its going");
+    }
+
+    #[test]
+    fn a_failed_reload_keeps_the_old_texts_colours_landing() {
+        let mut tab = ViewerTab::new(PLAIN.to_owned(), ViewerOrigin::Link, MarkdownMode::Rendered);
+        let shown = tab.begin_read().expect("an unread tab reads");
+        assert!(tab.finish_read(shown, Ok(text("a\nb\n").with_stamp(stamp(10, 4)))));
+        let reload = tab.begin_reload(None).expect("a loaded tab reloads");
+        assert!(tab.finish_read(reload, Err(ReadFailure::Unreadable)));
+        assert!(
+            tab.finish_highlight(shown, Arc::new(Vec::new())),
+            "the shown text's colours land after the failed reload"
+        );
+        assert!(tab.spans().is_some());
+
+        let mut md = ViewerTab::new(NOTES.to_owned(), ViewerOrigin::Link, MarkdownMode::Rendered);
+        let shown = md.begin_read().expect("an unread tab reads");
+        assert!(md.finish_read(shown, Ok(text("# A\n").with_stamp(stamp(10, 4)))));
+        let reload = md.begin_reload(None).expect("a loaded tab reloads");
+        assert!(md.finish_read(reload, Err(ReadFailure::Unreadable)));
+        assert!(
+            md.finish_markdown(shown, md_doc("# A\n")),
+            "the shown text's parse lands after the failed reload"
+        );
+        assert!(md.markdown_doc().is_some(), "the rendered tab is not blank");
+    }
+
+    /// The rendered document of `text`.
+    fn md_doc(text: &str) -> Arc<MdDoc> {
+        Arc::new(crate::viewer_md_view::prepare(
+            text,
+            Path::new(r"C:\notes"),
+            &AtomicBool::new(false),
+        ))
+    }
+
+    #[test]
+    fn a_rendered_reload_keeps_the_scroll_made_during_the_reload() {
+        let doc = "# A\n\npara\n\n".repeat(20);
+        let mut tab = ViewerTab::new(NOTES.to_owned(), ViewerOrigin::Link, MarkdownMode::Rendered);
+        let run = tab.begin_read().expect("an unread tab reads");
+        assert!(tab.finish_read(run, Ok(text(&doc).with_stamp(stamp(10, 4)))));
+        assert!(tab.finish_markdown(run, md_doc(&doc)));
+
+        let longer = [doc.as_str(), "more\n"].concat();
+        let reload = tab.begin_reload(None).expect("a loaded tab reloads");
+        let top = ListOffset {
+            item_ix: 7,
+            offset_in_item: px(0.0),
+        };
+        tab.markdown_doc()
+            .expect("the old document shows during the reload")
+            .1
+            .scroll_to(top);
+        assert!(tab.finish_read(reload, Ok(text(&longer).with_stamp(stamp(11, 5)))));
+        assert!(tab.finish_markdown(reload, md_doc(&longer)));
+        let (_, list) = tab.markdown_doc().expect("the new document");
+        assert_eq!(
+            list.logical_scroll_top().item_ix,
+            7,
+            "the scroll made while it read stays"
         );
     }
 }
