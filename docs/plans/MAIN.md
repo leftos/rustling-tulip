@@ -24,9 +24,9 @@
   - [ ] RT-341 RT-331 S8: Viewer docs and task index rows · release vNext
 - [ ] RT-343 Keep name, look and sidebar place when Recover respawns a session
 - [ ] RT-349 Restart conversation discovery for sessions reattached after a daemon restart
-- [/] RT-360 Make the agent's launch command customizable in Settings: another program, an alias or extra arguments · release vNext
 - [ ] RT-374 Pair the desktop client with a remote host: device token store and pairing screen · release vNext
 - [ ] RT-375 Copy only the text when a terminal selection crosses a TUI's box borders · release vNext+1
+- [ ] RT-378 Close a failed handshake gracefully so AuthFailed is never lost to a reset
 
 ## Wave 1a — Claude sessions on DeepSeek
 
@@ -280,3 +280,7 @@
 - [ ] RT-362 Keep a shell-hosted Claude session's kind and conversation when history is rebuilt from tracer logs
 - [ ] RT-372 Clear the Worktrees field's pending apply when the daemon refuses it
 - [ ] RT-373 Check the Shell dialog's typed folder by the host's path rules on a remote host
+
+## No project
+
+- [ ] RT-377 Draw no selection in an unfocused Settings text field
