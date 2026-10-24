@@ -12,13 +12,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
-use gpui::{ListAlignment, ListState, UniformListScrollHandle, px};
+use gpui::{Entity, ListAlignment, ListState, Subscription, UniformListScrollHandle, px};
 
 use crate::diff_tab::{PENDING_ACTIVATE_TTL, split_path};
 use crate::file_fetch::is_under;
 use crate::md_blocks;
 use crate::remote_mode::LOCAL_FILES_REASON;
 use crate::syntax::Highlighted;
+use crate::text_input::TextInput;
+use crate::viewer_find::FindState;
 use crate::viewer_md_view::MdDoc;
 use crate::viewer_text::{self, NotText};
 
@@ -125,6 +127,11 @@ impl ViewerText {
         self.language
     }
 
+    /// Every line, without its terminator.
+    pub(crate) fn lines(&self) -> impl Iterator<Item = &str> {
+        (0..self.lines.len()).map(|index| self.line(index))
+    }
+
     /// The lines joined with `\n`, so the highlighter splits them as the
     /// viewer does.
     pub(crate) fn joined(&self) -> String {
@@ -219,6 +226,28 @@ impl LineSelection {
             .map(|index| text.line(index))
             .collect();
         (!lines.is_empty()).then(|| lines.join("\n"))
+    }
+}
+
+/// A tab's find bar, made the first time it opens: its query field and the
+/// subscriptions to the field's events.
+pub(crate) struct FindBar {
+    pub(crate) input: Entity<TextInput>,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl FindBar {
+    pub(crate) fn new(input: Entity<TextInput>, subscriptions: Vec<Subscription>) -> Self {
+        Self {
+            input,
+            _subscriptions: subscriptions,
+        }
+    }
+}
+
+impl std::fmt::Debug for FindBar {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FindBar").finish_non_exhaustive()
     }
 }
 
@@ -388,6 +417,13 @@ pub struct ViewerTab {
     /// Whether a left press on a row is held, so a move over the rows
     /// extends the selection.
     selecting: bool,
+    /// Find in the Source view: the query, its matches and the one the bar
+    /// is on.
+    find: FindState,
+    /// The find bar, once it opened on this tab.
+    find_bar: Option<FindBar>,
+    /// Whether the find bar is open.
+    find_open: bool,
 }
 
 impl Drop for ViewerTab {
@@ -422,6 +458,9 @@ impl ViewerTab {
             md: None,
             selection: LineSelection::default(),
             selecting: false,
+            find: FindState::default(),
+            find_bar: None,
+            find_open: false,
         }
     }
 
@@ -473,6 +512,11 @@ impl ViewerTab {
                 self.apply_render_cap(text.text().len());
                 self.selection.clamp(text.line_count());
                 self.text = Some(Arc::new(text));
+                if let Some(read) = &self.text
+                    && !self.find.query().is_empty()
+                {
+                    self.find.rerun(read.lines());
+                }
                 self.jump_pending.set(self.line_target.is_some());
                 ViewerLoad::Loaded
             }
@@ -551,6 +595,88 @@ impl ViewerTab {
     #[must_use]
     pub fn selected_lines(&self) -> Option<Range<usize>> {
         self.selection.range()
+    }
+
+    /// The find bar's count, "n of m", blank for an empty query; `None`
+    /// while the bar does not show.
+    #[must_use]
+    pub fn find_label(&self) -> Option<String> {
+        self.find_shows().then(|| self.find.label())
+    }
+
+    /// Whether the find bar shows: open, over the Source view.
+    #[must_use]
+    pub fn find_shows(&self) -> bool {
+        self.find_open && self.shows_source()
+    }
+
+    /// Ctrl+F: the find bar opens; a rendered Markdown tab shows its source,
+    /// where find works, its saved default left as it is. Returns whether
+    /// the bar shows, which it never does on a tab with no text.
+    pub(crate) fn open_find(&mut self) -> bool {
+        if self.text.is_none() {
+            return false;
+        }
+        if self.markdown == Some(MarkdownMode::Rendered) {
+            self.markdown = Some(MarkdownMode::Source);
+        }
+        self.find_open = true;
+        true
+    }
+
+    /// Closes the find bar; returns whether it was open.
+    pub(crate) fn close_find(&mut self) -> bool {
+        std::mem::replace(&mut self.find_open, false)
+    }
+
+    pub(crate) fn find(&self) -> &FindState {
+        &self.find
+    }
+
+    pub(crate) fn find_bar(&self) -> Option<&FindBar> {
+        self.find_bar.as_ref()
+    }
+
+    pub(crate) fn set_find_bar(&mut self, bar: FindBar) {
+        self.find_bar = Some(bar);
+    }
+
+    /// The query became `query`, with line `top` the top one in view;
+    /// returns the line of the match the bar is on now.
+    pub(crate) fn set_find_query(&mut self, query: &str, top: usize) -> Option<usize> {
+        if !self.find_shows() {
+            return None;
+        }
+        let text = self.text.as_ref()?;
+        self.find.set_query(query, text.lines(), top);
+        self.find.current_match().map(|found| found.line)
+    }
+
+    /// Case counts, or stops counting, with line `top` the top one in view;
+    /// returns the line of the match the bar is on now.
+    pub(crate) fn toggle_find_case(&mut self, top: usize) -> Option<usize> {
+        if !self.find_shows() {
+            return None;
+        }
+        let text = self.text.as_ref()?;
+        let case_sensitive = !self.find.case_sensitive();
+        self.find
+            .set_case_sensitive(case_sensitive, text.lines(), top);
+        self.find.current_match().map(|found| found.line)
+    }
+
+    /// Moves the bar to the next match, or the previous one when not
+    /// `forward`, wrapping; returns its line.
+    pub(crate) fn step_find(&mut self, forward: bool) -> Option<usize> {
+        if !self.find_shows() {
+            return None;
+        }
+        let found = if forward {
+            self.find.next()
+        } else {
+            self.find.prev()
+        };
+        found.map(|found| found.line)
     }
 
     /// The selected lines as the clipboard takes them; `None` when none is.
@@ -687,6 +813,7 @@ impl ViewerTab {
         if mode == MarkdownMode::Rendered {
             self.selection.clear();
             self.selecting = false;
+            self.find_open = false;
         }
         true
     }

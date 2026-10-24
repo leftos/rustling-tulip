@@ -683,7 +683,13 @@ impl RootView {
 
     /// Shows tab `tab_id` as `mode` and saves it as the mode new Markdown
     /// tabs open in; other open tabs keep theirs.
-    fn set_viewer_markdown(&mut self, tab_id: &str, mode: MarkdownMode, cx: &mut Context<Self>) {
+    fn set_viewer_markdown(
+        &mut self,
+        tab_id: &str,
+        mode: MarkdownMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let took = self
             .viewer_tabs
             .get_mut(tab_id)
@@ -691,6 +697,7 @@ impl RootView {
         if !took {
             return;
         }
+        self.return_stranded_find_focus(tab_id, window, cx);
         self.sidebar
             .set_viewer_markdown_rendered(mode == MarkdownMode::Rendered);
         self.save_ui();
@@ -845,8 +852,8 @@ pub(crate) fn markdown_toggle(
             return button.tooltip(tooltip(TOO_LARGE_TO_RENDER));
         }
         let tab_id = tab_id.to_owned();
-        button.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-            this.set_viewer_markdown(&tab_id, mode, cx);
+        button.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+            this.set_viewer_markdown(&tab_id, mode, window, cx);
         }))
     });
     Some(div().flex().flex_none().gap(px(4.0)).children(buttons))

@@ -10,27 +10,29 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use gpui::{
-    AnyElement, App, ClickEvent, Context, Div, ElementId, FocusHandle, HighlightStyle, Hsla,
-    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollStrategy,
-    SharedString, Stateful, StyledText, WeakEntity, Window, div, prelude::*, px, relative,
-    uniform_list,
+    AnyElement, App, ClickEvent, Context, Div, ElementId, Entity, FocusHandle, Focusable,
+    HighlightStyle, Hsla, KeyDownEvent, Keystroke, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, ScrollStrategy, SharedString, Stateful, StyledText, Subscription,
+    UniformListScrollHandle, WeakEntity, Window, div, prelude::*, px, relative, uniform_list,
 };
 use protocol::{ClientMessage, DaemonMessage, TabContent};
 
-use crate::buttons::{ButtonSize, outlined_button};
+use crate::buttons::{ButtonSize, outlined_button, primary_button};
 use crate::diff_tab::split_path;
 use crate::ellipsis::ellipsized;
 use crate::fonts;
 use crate::notices::ToastKind;
 use crate::open::OpenJob;
 use crate::open_view::{Origin, Route, Then};
-use crate::palette::{INPUT_SELECTION, LINE, SUBTLE, SURFACE};
+use crate::palette::{ACCENT, INPUT_SELECTION, LINE, LINE_STRONG, SUBTLE, SURFACE};
 use crate::remote_mode::LOCAL_FILES_REASON;
 use crate::syntax::{self, Highlighted, TokenClass};
+use crate::text_input::{TextChanged, TextInput, TextInputEvent};
+use crate::viewer_find::{self, Match, Segment, Tint};
 use crate::viewer_md_view::markdown_toggle;
 use crate::viewer_tab::{
-    self, Activation, MarkdownMode, OPEN_FAILED_TITLE, ReadFailure, ViewerOrigin, ViewerTab,
-    ViewerText,
+    self, Activation, FindBar, MarkdownMode, OPEN_FAILED_TITLE, ReadFailure, ViewerOrigin,
+    ViewerTab, ViewerText,
 };
 use crate::{HOVER_BG, MUTED, RootView, TEXT, UI_TEXT_SIZE, tooltip};
 
@@ -54,6 +56,54 @@ const TEXT_PAD_LEFT: f32 = 8.0;
 /// The header's file name and folder, as their ellipsis probe ids.
 const PATH_NAME: &str = "viewer-path-name";
 const PATH_FOLDER: &str = "viewer-path-folder";
+/// A find match's tint: the accent, lighter than a selected row's
+/// [`INPUT_SELECTION`], so a match on a selected row still shows.
+const FIND_MATCH_BG: u32 = (ACCENT << 8) | 0x40;
+/// The tint of the match the find bar is on: the accent, stronger.
+const FIND_CURRENT_BG: u32 = (ACCENT << 8) | 0xa6;
+/// The find bar's height, its query field's width and the room its count
+/// keeps, in px.
+const FIND_BAR_HEIGHT: f32 = 38.0;
+const FIND_FIELD_WIDTH: f32 = 260.0;
+const FIND_COUNT_WIDTH: f32 = 64.0;
+const FIND_PLACEHOLDER: &str = "Find";
+
+/// A find bar button's action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FindAction {
+    Prev,
+    Next,
+    MatchCase,
+}
+
+impl FindAction {
+    const ALL: [Self; 3] = [Self::Prev, Self::Next, Self::MatchCase];
+
+    fn selector(self, tab_id: &str) -> String {
+        let name = match self {
+            Self::Prev => "prev",
+            Self::Next => "next",
+            Self::MatchCase => "case",
+        };
+        format!("viewer-find-{name}-{tab_id}")
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Prev => "Previous",
+            Self::Next => "Next",
+            Self::MatchCase => "Match case",
+        }
+    }
+
+    fn tooltip(self) -> &'static str {
+        match self {
+            Self::Prev => "Previous match (Shift+Enter)",
+            Self::Next => "Next match (Enter)",
+            Self::MatchCase => "Match case",
+        }
+    }
+}
 
 /// A header button's action.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,6 +151,10 @@ struct Rows {
     target: Option<usize>,
     /// The rows selected, drawn tinted.
     selected: Option<Range<usize>>,
+    /// The find matches, sorted by line, while the find bar shows.
+    matches: Option<Arc<[Match]>>,
+    /// The match the find bar is on.
+    current: Option<Match>,
     line_height: f32,
     gutter_width: f32,
     colors: [Hsla; 6],
@@ -128,22 +182,58 @@ impl Rows {
             .as_ref()
             .is_some_and(|range| range.contains(&index));
         let line = self.text.line(index);
-        let highlights: Vec<(Range<usize>, HighlightStyle)> = self
+        let fits = |span: &Range<usize>| {
+            span.end <= line.len()
+                && line.is_char_boundary(span.start)
+                && line.is_char_boundary(span.end)
+        };
+        let syntax: Vec<(Range<usize>, TokenClass)> = self
             .spans
             .as_ref()
             .and_then(|spans| spans.get(index))
             .map(|spans| {
                 spans
                     .iter()
-                    .filter(|(span, _)| {
-                        span.end <= line.len()
-                            && line.is_char_boundary(span.start)
-                            && line.is_char_boundary(span.end)
-                    })
-                    .map(|(span, class)| (span.clone(), self.style(*class)))
+                    .filter(|(span, _)| fits(span))
+                    .cloned()
                     .collect()
             })
             .unwrap_or_default();
+        let found: Vec<Range<usize>> = self
+            .matches
+            .as_deref()
+            .map(|matches| {
+                viewer_find::on_line(matches, index)
+                    .iter()
+                    .map(|found| found.range.clone())
+                    .filter(fits)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let current = self
+            .current
+            .as_ref()
+            .filter(|found| found.line == index)
+            .map(|found| found.range.clone())
+            .filter(fits);
+        let highlights: Vec<(Range<usize>, HighlightStyle)> =
+            if found.is_empty() && current.is_none() {
+                syntax
+                    .into_iter()
+                    .filter_map(|(range, class)| {
+                        self.segment_style(&Segment {
+                            range,
+                            syntax: Some(class),
+                            tint: Tint::None,
+                        })
+                    })
+                    .collect()
+            } else {
+                viewer_find::merge_segments(line.len(), &syntax, &found, current.as_ref())
+                    .iter()
+                    .filter_map(|segment| self.segment_style(segment))
+                    .collect()
+            };
         div()
             .w_full()
             .h(px(self.line_height))
@@ -192,11 +282,26 @@ impl Rows {
         }
     }
 
-    fn style(&self, class: TokenClass) -> HighlightStyle {
-        HighlightStyle {
-            color: Some(self.colors[class.index()]),
-            ..HighlightStyle::default()
+    /// How a segment of a line is drawn: its syntax colour and its find
+    /// tint; `None` for a plain one.
+    fn segment_style(
+        &self,
+        segment: &Segment<TokenClass>,
+    ) -> Option<(Range<usize>, HighlightStyle)> {
+        let background = match segment.tint {
+            Tint::None => None,
+            Tint::Match => Some(FIND_MATCH_BG),
+            Tint::Current => Some(FIND_CURRENT_BG),
+        };
+        if segment.syntax.is_none() && background.is_none() {
+            return None;
         }
+        let style = HighlightStyle {
+            color: segment.syntax.map(|class| self.colors[class.index()]),
+            background_color: background.map(|tint| Hsla::from(gpui::rgba(tint))),
+            ..HighlightStyle::default()
+        };
+        Some((segment.range.clone(), style))
     }
 }
 
@@ -364,6 +469,7 @@ impl RootView {
                     // Re-opening the active tab focuses it again too.
                     self.last_active_tab = None;
                     self.activate_viewer(&activation);
+                    self.return_stranded_find_focus(&activation.tab_id, window, cx);
                     self.after_tabs_change(window, cx);
                 }
                 true
@@ -436,6 +542,166 @@ impl RootView {
             && self.viewer_focus.is_focused(window)
     }
 
+    /// Whether viewer tab `tab_id`'s find field holds the keyboard.
+    #[must_use]
+    pub fn viewer_find_focused(&self, tab_id: &str, window: &Window, cx: &App) -> bool {
+        self.viewer_tabs
+            .get(tab_id)
+            .and_then(ViewerTab::find_bar)
+            .is_some_and(|bar| bar.input.read(cx).focus_handle(cx).is_focused(window))
+    }
+
+    /// Gives the keyboard back to tab `tab_id` when its find field holds it
+    /// but the bar no longer shows.
+    pub(crate) fn return_stranded_find_focus(&self, tab_id: &str, window: &mut Window, cx: &App) {
+        let stranded = self.viewer_tabs.get(tab_id).is_some_and(|tab| {
+            !tab.find_shows()
+                && tab
+                    .find_bar()
+                    .is_some_and(|bar| bar.input.read(cx).focus_handle(cx).is_focused(window))
+        });
+        if stranded {
+            self.viewer_focus.focus(window);
+        }
+    }
+
+    /// Ctrl+F on tab `tab_id`: the find bar shows, made the first time, and
+    /// its field takes the keyboard; a rendered Markdown tab shows its
+    /// source first. A tab with no text has no find.
+    fn open_viewer_find(&mut self, tab_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.viewer_tabs.get_mut(tab_id) else {
+            return;
+        };
+        if !tab.open_find() {
+            return;
+        }
+        if tab.find_bar().is_none() {
+            let input = cx.new(|cx| TextInput::new(String::new(), FIND_PLACEHOLDER, cx));
+            let subscriptions = Self::watch_viewer_find(tab_id, &input, window, cx);
+            tab.set_find_bar(FindBar::new(input, subscriptions));
+        }
+        if let Some(bar) = tab.find_bar() {
+            bar.input.read(cx).focus_handle(cx).focus(window);
+        }
+        cx.notify();
+    }
+
+    /// Enter in the find field goes to the next match, Esc closes the bar,
+    /// and every edit searches again.
+    fn watch_viewer_find(
+        tab_id: &str,
+        input: &Entity<TextInput>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<Subscription> {
+        let (key_tab, edit_tab) = (tab_id.to_owned(), tab_id.to_owned());
+        let keys = cx.subscribe_in(
+            input,
+            window,
+            move |this, _, event: &TextInputEvent, window, cx| match event {
+                TextInputEvent::Submit => this.step_viewer_find(&key_tab, true, cx),
+                TextInputEvent::Cancel => this.close_viewer_find(&key_tab, window, cx),
+            },
+        );
+        let edits = cx.subscribe_in(input, window, move |this, input, _: &TextChanged, _, cx| {
+            let query = input.read(cx).text().to_owned();
+            this.search_viewer(&edit_tab, &query, cx);
+        });
+        vec![keys, edits]
+    }
+
+    /// The find query of tab `tab_id` became `query`: the bar goes to the
+    /// first match at or after the top line in view, scrolled to.
+    fn search_viewer(&mut self, tab_id: &str, query: &str, cx: &mut Context<Self>) {
+        let row_height = self.viewer_line_height();
+        let Some(tab) = self.viewer_tabs.get_mut(tab_id) else {
+            return;
+        };
+        let line = tab.set_find_query(query, top_line(tab.scroll(), row_height));
+        scroll_to_match(tab, line, row_height);
+        cx.notify();
+    }
+
+    /// The case toggle of tab `tab_id`'s find bar was pressed.
+    fn toggle_viewer_find_case(&mut self, tab_id: &str, cx: &mut Context<Self>) {
+        let row_height = self.viewer_line_height();
+        let Some(tab) = self.viewer_tabs.get_mut(tab_id) else {
+            return;
+        };
+        let line = tab.toggle_find_case(top_line(tab.scroll(), row_height));
+        scroll_to_match(tab, line, row_height);
+        cx.notify();
+    }
+
+    /// Tab `tab_id`'s find bar goes to the next match, or the previous one
+    /// when not `forward`, scrolled to.
+    fn step_viewer_find(&mut self, tab_id: &str, forward: bool, cx: &mut Context<Self>) {
+        let row_height = self.viewer_line_height();
+        let Some(tab) = self.viewer_tabs.get_mut(tab_id) else {
+            return;
+        };
+        let line = tab.step_find(forward);
+        scroll_to_match(tab, line, row_height);
+        cx.notify();
+    }
+
+    /// Closes tab `tab_id`'s find bar and gives the keyboard back to the
+    /// tab.
+    fn close_viewer_find(&mut self, tab_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self
+            .viewer_tabs
+            .get_mut(tab_id)
+            .is_some_and(ViewerTab::close_find)
+        {
+            self.viewer_focus.focus(window);
+            cx.notify();
+        }
+    }
+
+    /// A find bar button of tab `tab_id` was pressed.
+    fn press_viewer_find_button(
+        &mut self,
+        tab_id: &str,
+        action: FindAction,
+        cx: &mut Context<Self>,
+    ) {
+        match action {
+            FindAction::Prev => self.step_viewer_find(tab_id, false, cx),
+            FindAction::Next => self.step_viewer_find(tab_id, true, cx),
+            FindAction::MatchCase => self.toggle_viewer_find_case(tab_id, cx),
+        }
+    }
+
+    /// The find keys on tab `tab_id`: Ctrl+F opens the bar or gives it the
+    /// keyboard again; while it is open F3 and Enter go to the next match,
+    /// with Shift the previous one (a plain Enter in the field comes as its
+    /// submit). Returns whether the key was find's.
+    fn on_viewer_find_key(
+        &mut self,
+        tab_id: &str,
+        ks: &Keystroke,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let mods = ks.modifiers;
+        let ctrl_only = mods.control && !mods.shift && !mods.alt && !mods.platform;
+        let shift_or_none = !mods.control && !mods.alt && !mods.platform;
+        let open = self
+            .viewer_tabs
+            .get(tab_id)
+            .is_some_and(ViewerTab::find_shows);
+        let body_has_keys = self.viewer_focus.is_focused(window);
+        match ks.key.as_str() {
+            "f" if ctrl_only => self.open_viewer_find(tab_id, window, cx),
+            "f3" if open && shift_or_none => self.step_viewer_find(tab_id, !mods.shift, cx),
+            "enter" if open && shift_or_none && (mods.shift || body_has_keys) => {
+                self.step_viewer_find(tab_id, !mods.shift, cx);
+            }
+            _ => return false,
+        }
+        true
+    }
+
     /// A left press on line `line` of tab `tab_id`, with Shift when
     /// `extend`.
     fn press_viewer_line(
@@ -493,10 +759,21 @@ impl RootView {
         (self.sidebar.ui_state().terminal_font.size * LINE_HEIGHT_RATIO).round()
     }
 
-    /// The Source view's keys on tab `tab_id`: Ctrl+C copies the selected
-    /// lines, and nothing when none is; Ctrl+A selects every line; Esc
-    /// clears the selection.
-    fn on_viewer_key(&mut self, tab_id: &str, event: &KeyDownEvent, cx: &mut Context<Self>) {
+    /// The Source view's keys on tab `tab_id`: find's keys, then Ctrl+C
+    /// copies the selected lines, and nothing when none is; Ctrl+A selects
+    /// every line; Esc clears the selection, or with none closes the find
+    /// bar.
+    fn on_viewer_key(
+        &mut self,
+        tab_id: &str,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.on_viewer_find_key(tab_id, &event.keystroke, window, cx) {
+            cx.stop_propagation();
+            return;
+        }
         let Some(tab) = self.viewer_tabs.get_mut(tab_id) else {
             return;
         };
@@ -515,7 +792,7 @@ impl RootView {
                 }
                 cx.stop_propagation();
             }
-            "escape" if !modifiers.modified() && tab.clear_selection() => {
+            "escape" if !modifiers.modified() && (tab.clear_selection() || tab.close_find()) => {
                 cx.notify();
                 cx.stop_propagation();
             }
@@ -603,8 +880,8 @@ impl RootView {
             div()
                 .debug_selector(move || body)
                 .track_focus(&self.viewer_focus)
-                .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
-                    this.on_viewer_key(&key_tab, event, cx);
+                .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                    this.on_viewer_key(&key_tab, event, window, cx);
                 }))
                 .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
                     this.drag_viewer_to(&move_tab, event, cx);
@@ -629,6 +906,7 @@ impl RootView {
                 .text_size(px(UI_TEXT_SIZE))
                 .text_color(gpui::rgb(TEXT))
                 .child(viewer_header(tab_id, tab, cx))
+                .children(viewer_find_bar(tab_id, tab, cx))
                 .children(banner)
                 .children(lines)
                 .into_any_element(),
@@ -657,12 +935,15 @@ impl RootView {
             reason = "a line number's digit count is tiny"
         )]
         let gutter_width = digits as f32 * GUTTER_TEXT_SIZE * DIGIT_WIDTH_RATIO + GUTTER_PAD;
+        let find = tab.find_shows().then(|| tab.find());
         let rows = Rows {
             tab_id: tab_id.to_owned(),
             text: Arc::clone(text),
             spans: tab.spans().cloned(),
             target: tab.jump_row(),
             selected: tab.selected_lines(),
+            matches: find.map(|find| Arc::clone(find.matches())),
+            current: find.and_then(|find| find.current_match().cloned()),
             line_height: self.viewer_line_height(),
             gutter_width,
             colors: TokenClass::ALL.map(|class| Hsla::from(gpui::rgb(class.color()))),
@@ -711,6 +992,124 @@ fn drag_row(y: f32, scrolled: f32, row_height: f32, viewport: f32, count: usize)
     )]
     let row = row as usize;
     Some(row.min(last_row))
+}
+
+/// The top line in view of a line list scrolled by `scroll`, its rows
+/// `row_height` px tall.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "the row is floored and at least zero"
+)]
+fn top_line(scroll: &UniformListScrollHandle, row_height: f32) -> usize {
+    if row_height <= 0.0 {
+        return 0;
+    }
+    let scrolled = -scroll.0.borrow().base_handle.offset().y / px(1.0);
+    (scrolled / row_height).floor().max(0.0) as usize
+}
+
+/// Scrolls `tab`'s lines, `row_height` px tall, to put the match on `line`,
+/// if any, in the middle, unless it is already wholly in view.
+fn scroll_to_match(tab: &ViewerTab, line: Option<usize>, row_height: f32) {
+    if let Some(line) = line
+        && !row_in_view(tab.scroll(), row_height, line)
+    {
+        tab.scroll()
+            .scroll_to_item_strict(line, ScrollStrategy::Center);
+    }
+}
+
+/// Whether row `line`, its rows `row_height` px tall, lies wholly in view
+/// in a line list scrolled by `scroll`; never before the list is laid out.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "a row's offset in px stays far below f32's exact range"
+)]
+fn row_in_view(scroll: &UniformListScrollHandle, row_height: f32, line: usize) -> bool {
+    let (offset, height) = {
+        let state = scroll.0.borrow();
+        (
+            state.base_handle.offset(),
+            state.base_handle.bounds().size.height,
+        )
+    };
+    let top = -offset.y / px(1.0);
+    let row_top = line as f32 * row_height;
+    row_height > 0.0 && row_top >= top && row_top + row_height <= top + height / px(1.0)
+}
+
+/// The find bar under the header while it shows: the query field, the
+/// count, the previous and next buttons and the case toggle.
+fn viewer_find_bar(tab_id: &str, tab: &ViewerTab, cx: &mut Context<RootView>) -> Option<Div> {
+    if !tab.find_shows() {
+        return None;
+    }
+    let input = tab.find_bar()?.input.clone();
+    let find = tab.find();
+    let case_on = find.case_sensitive();
+    let buttons = FindAction::ALL.map(|action| find_button(tab_id, action, case_on, cx));
+    let (bar, count) = (
+        format!("viewer-find-{tab_id}"),
+        format!("viewer-find-count-{tab_id}"),
+    );
+    Some(
+        div()
+            .debug_selector(move || bar)
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(8.0))
+            .h(px(FIND_BAR_HEIGHT))
+            .pl(px(HEADER_PAD_LEFT))
+            .pr(px(HEADER_PAD_RIGHT))
+            .bg(gpui::rgb(SURFACE))
+            .border_b_1()
+            .border_color(gpui::rgb(LINE))
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(FIND_FIELD_WIDTH))
+                    .px(px(6.0))
+                    .py(px(3.0))
+                    .rounded(px(4.0))
+                    .border_1()
+                    .border_color(gpui::rgb(LINE_STRONG))
+                    .child(input),
+            )
+            .child(
+                div()
+                    .debug_selector(move || count)
+                    .flex_none()
+                    .min_w(px(FIND_COUNT_WIDTH))
+                    .text_color(gpui::rgb(MUTED))
+                    .child(find.label()),
+            )
+            .children(buttons),
+    )
+}
+
+/// A find bar button; the case toggle is filled while case counts.
+fn find_button(
+    tab_id: &str,
+    action: FindAction,
+    case_on: bool,
+    cx: &mut Context<RootView>,
+) -> Stateful<Div> {
+    let selector = action.selector(tab_id);
+    let button = if action == FindAction::MatchCase && case_on {
+        primary_button(&selector, ButtonSize::Compact, true)
+    } else {
+        outlined_button(&selector, ButtonSize::Compact, true)
+    };
+    let tab_id = tab_id.to_owned();
+    button
+        .flex_none()
+        .child(action.label())
+        .tooltip(tooltip(action.tooltip()))
+        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+            this.press_viewer_find_button(&tab_id, action, cx);
+        }))
 }
 
 /// The header: the file's name whole and its folder dimmed, then the open

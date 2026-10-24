@@ -20,7 +20,7 @@ use gpui::{Modifiers, TestAppContext};
 use protocol::{ClientMessage, DaemonMessage, SessionSnapshot, TabEntry};
 use rustling_tulip_native::file_fetch::FetchRequest;
 use rustling_tulip_native::target::Target;
-use rustling_tulip_native::{ViewerLoad, ViewerOrigin, ViewerTab};
+use rustling_tulip_native::{MarkdownMode, ViewerLoad, ViewerOrigin, ViewerTab};
 use serde_json::json;
 use support::{Fixture, Harness, Opened, TestDir, session};
 
@@ -647,6 +647,301 @@ fn ctrl_a_then_ctrl_c_copies_the_whole_file(cx: &mut TestAppContext) {
         h.clipboard().as_deref(),
         Some("one\ntwo\nthree\nfour\nfive")
     );
+}
+
+/// 300 lines of Rust, `needle` on lines 3 and 250 and `Needle` on line 120.
+fn needles() -> String {
+    (1..=300)
+        .map(|n| match n {
+            3 | 250 => format!("let needle_{n} = {n};\n"),
+            120 => "// Needle\n".to_owned(),
+            _ => format!("let line_{n} = {n};\n"),
+        })
+        .collect::<Vec<_>>()
+        .concat()
+}
+
+/// A local harness whose tab `v1` views a file of [`needles`], shown.
+fn needles_shown<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let file = write_file(dir.path(), "src/needles.rs", needles().as_bytes());
+    let mut h = showing(cx, dir, &file);
+    assert!(drawn(&mut h, "viewer-line-v1-1"), "the file is shown");
+    h
+}
+
+/// Viewer tab `v1`'s find count; `None` while its find bar does not show.
+fn find_label(h: &mut Harness<'_>) -> Option<String> {
+    h.cx.run_until_parked();
+    h.root(|root, _| root.viewer_tab("v1").and_then(ViewerTab::find_label))
+}
+
+/// Whether viewer tab `v1`'s find field has the keyboard.
+fn find_focused(h: &mut Harness<'_>) -> bool {
+    h.cx.run_until_parked();
+    let root = h.root.clone();
+    h.cx.update(|window, cx| root.read(cx).viewer_find_focused("v1", window, cx))
+}
+
+/// Whether viewer tab `v1`'s body has the keyboard.
+fn tab_focused(h: &mut Harness<'_>) -> bool {
+    h.cx.run_until_parked();
+    let root = h.root.clone();
+    h.cx.update(|window, cx| root.read(cx).viewer_tab_focused("v1", window))
+}
+
+/// Opens tab `v1`'s find bar and types `query` into it.
+fn find(h: &mut Harness<'_>, query: &str) {
+    h.keys("ctrl-f");
+    h.cx.simulate_input(query);
+}
+
+#[gpui::test]
+fn ctrl_f_opens_the_find_bar_and_focuses_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = five_lines(cx, &dir);
+    assert_eq!(find_label(&mut h), None, "no find bar at first");
+    h.keys("ctrl-f");
+    assert!(drawn(&mut h, "viewer-find-v1"));
+    assert_eq!(
+        find_label(&mut h).as_deref(),
+        Some(""),
+        "no query, no count"
+    );
+    assert!(find_focused(&mut h), "the query field has the keyboard");
+    h.click_on("viewer-line-v1-2");
+    assert!(!find_focused(&mut h), "a press on a row takes it back");
+    h.keys("ctrl-f");
+    assert!(find_focused(&mut h), "Ctrl+F gives it the keyboard again");
+}
+
+#[gpui::test]
+fn typing_in_the_find_bar_counts_matches(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = needles_shown(cx, &dir);
+    find(&mut h, "needle");
+    assert_eq!(find_label(&mut h).as_deref(), Some("1 of 3"));
+    assert!(drawn(&mut h, "viewer-find-count-v1"));
+    h.cx.simulate_input("_2");
+    assert_eq!(find_label(&mut h).as_deref(), Some("1 of 1"));
+    h.cx.simulate_input("x");
+    assert_eq!(find_label(&mut h).as_deref(), Some("0 of 0"));
+    h.keys("ctrl-a backspace");
+    assert_eq!(find_label(&mut h).as_deref(), Some(""), "an empty query");
+}
+
+#[gpui::test]
+fn enter_goes_to_the_next_match_and_scrolls_to_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = needles_shown(cx, &dir);
+    find(&mut h, "needle");
+    assert_eq!(find_label(&mut h).as_deref(), Some("1 of 3"));
+    h.keys("enter");
+    assert_eq!(find_label(&mut h).as_deref(), Some("2 of 3"));
+    assert!(drawn(&mut h, "viewer-line-v1-120"), "scrolled to the match");
+    h.keys("enter");
+    assert_eq!(find_label(&mut h).as_deref(), Some("3 of 3"));
+    assert!(drawn(&mut h, "viewer-line-v1-250"), "scrolled to the match");
+    h.keys("enter");
+    assert_eq!(find_label(&mut h).as_deref(), Some("1 of 3"), "it wraps");
+}
+
+#[gpui::test]
+fn shift_enter_goes_to_the_previous_match(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = needles_shown(cx, &dir);
+    find(&mut h, "needle");
+    h.keys("shift-enter");
+    assert_eq!(
+        find_label(&mut h).as_deref(),
+        Some("3 of 3"),
+        "before the first is the last"
+    );
+    assert!(drawn(&mut h, "viewer-line-v1-250"), "scrolled to the match");
+    h.keys("shift-enter");
+    assert_eq!(find_label(&mut h).as_deref(), Some("2 of 3"));
+    assert!(drawn(&mut h, "viewer-line-v1-120"), "scrolled to the match");
+}
+
+#[gpui::test]
+fn f3_and_shift_f3_step_through_matches(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = needles_shown(cx, &dir);
+    find(&mut h, "needle");
+    h.keys("f3");
+    assert_eq!(find_label(&mut h).as_deref(), Some("2 of 3"));
+    h.keys("shift-f3");
+    assert_eq!(find_label(&mut h).as_deref(), Some("1 of 3"));
+
+    h.click_on("viewer-line-v1-3");
+    assert!(!find_focused(&mut h), "the body has the keyboard");
+    h.keys("f3");
+    assert_eq!(
+        find_label(&mut h).as_deref(),
+        Some("2 of 3"),
+        "F3 from the body"
+    );
+    h.keys("enter");
+    assert_eq!(
+        find_label(&mut h).as_deref(),
+        Some("3 of 3"),
+        "Enter from the body"
+    );
+    h.set_clipboard("before");
+    h.keys("ctrl-c");
+    assert_eq!(
+        h.clipboard().as_deref(),
+        Some("let needle_3 = 3;"),
+        "Ctrl+C from the body still copies the selection"
+    );
+}
+
+#[gpui::test]
+fn escape_closes_the_find_bar_and_returns_the_keyboard_to_the_tab(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = needles_shown(cx, &dir);
+    find(&mut h, "needle");
+    assert!(find_focused(&mut h));
+    h.keys("escape");
+    assert_eq!(find_label(&mut h), None, "the bar is closed");
+    assert!(tab_focused(&mut h), "the tab has the keyboard");
+    h.keys("ctrl-f");
+    assert_eq!(
+        find_label(&mut h).as_deref(),
+        Some("1 of 3"),
+        "the query is kept"
+    );
+}
+
+#[gpui::test]
+fn the_case_toggle_makes_find_case_sensitive(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = needles_shown(cx, &dir);
+    find(&mut h, "needle");
+    assert_eq!(find_label(&mut h).as_deref(), Some("1 of 3"), "Needle too");
+    h.click_on("viewer-find-case-v1");
+    assert_eq!(find_label(&mut h).as_deref(), Some("1 of 2"));
+    h.click_on("viewer-find-case-v1");
+    assert_eq!(find_label(&mut h).as_deref(), Some("1 of 3"));
+}
+
+#[gpui::test]
+fn ctrl_f_on_a_rendered_markdown_tab_switches_to_source_and_opens_find(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let ui = dir.path().join("native-ui.json");
+    fs::write(&ui, json!({ "viewer_markdown_rendered": true }).to_string())
+        .expect("seed native-ui.json");
+    let file = write_file(dir.path(), "docs/notes.md", b"# Notes\n\nfind me\n");
+    let mut h = showing(cx, &dir, &file);
+    let mode =
+        |h: &mut Harness<'_>| h.root(|root, _| root.viewer_tab("v1").and_then(ViewerTab::markdown));
+    assert_eq!(mode(&mut h), Some(MarkdownMode::Rendered));
+    assert!(drawn(&mut h, "viewer-md-block-v1-0"), "rendered");
+
+    h.keys("ctrl-f");
+    assert_eq!(mode(&mut h), Some(MarkdownMode::Source));
+    assert!(drawn(&mut h, "viewer-line-v1-3"), "the source shows");
+    assert!(find_focused(&mut h));
+    h.cx.simulate_input("find");
+    assert_eq!(find_label(&mut h).as_deref(), Some("1 of 1"));
+    let saved: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&ui).expect("native-ui.json"))
+            .expect("native-ui.json is JSON");
+    assert_eq!(
+        saved["viewer_markdown_rendered"],
+        json!(true),
+        "the saved default is untouched"
+    );
+}
+
+#[gpui::test]
+fn find_is_off_on_a_tab_with_no_text(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let gone = dir.path().join("gone.txt");
+    let mut h = showing(cx, &dir, &gone);
+    assert_eq!(
+        h.root(|root, _| root.viewer_tab("v1").map(ViewerTab::load)),
+        Some(ViewerLoad::Missing)
+    );
+    h.keys("ctrl-f");
+    assert_eq!(find_label(&mut h), None);
+    assert!(!drawn(&mut h, "viewer-find-v1"));
+    assert!(tab_focused(&mut h), "the tab keeps the keyboard");
+}
+
+#[gpui::test]
+fn switching_to_rendered_with_the_bar_open_returns_the_keyboard_to_the_tab(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let file = write_file(dir.path(), "docs/notes.md", b"# Notes\n\nfind me\n");
+    let mut h = showing(cx, &dir, &file);
+    find(&mut h, "find");
+    assert!(find_focused(&mut h));
+    h.click_on("viewer-md-rendered-v1");
+    assert_eq!(find_label(&mut h), None, "the bar goes with the source");
+    assert!(tab_focused(&mut h), "the tab has the keyboard");
+    h.click_on("viewer-md-source-v1");
+    h.keys("ctrl-a");
+    assert_eq!(selected(&mut h), Some(0..3), "Ctrl+A reaches the tab");
+}
+
+/// Opens `file` again from this client, at `line`; the daemon names `v1`.
+fn reopen(h: &mut Harness<'_>, file: &Path, line: Option<u32>) {
+    let path = file.to_string_lossy().into_owned();
+    h.root_update(move |view, _, _| view.open_viewer(&path, line));
+    let id = one_open(h, file);
+    h.send(DaemonMessage::ViewerTabOpened {
+        id,
+        tab_id: "v1".to_owned(),
+    });
+}
+
+#[gpui::test]
+fn a_reread_with_the_bar_open_returns_the_keyboard_to_the_tab(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let file = write_file(dir.path(), "src/needles.rs", needles().as_bytes());
+    let mut h = showing(cx, &dir, &file);
+    find(&mut h, "needle");
+    assert!(find_focused(&mut h));
+    reopen(&mut h, &file, None);
+    assert!(tab_focused(&mut h), "the tab has the keyboard");
+    assert!(!find_focused(&mut h));
+    assert_eq!(
+        find_label(&mut h).as_deref(),
+        Some("1 of 3"),
+        "the bar is back with its query once the file is read"
+    );
+}
+
+#[gpui::test]
+fn typing_keeps_the_current_match_when_it_still_matches(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let every_line = (1..=300)
+        .map(|n| format!("needle {n}\n"))
+        .collect::<Vec<_>>()
+        .concat();
+    let file = write_file(dir.path(), "src/all.txt", every_line.as_bytes());
+    let mut h = showing(cx, &dir, &file);
+    reopen(&mut h, &file, Some(200));
+    assert!(
+        drawn(&mut h, "viewer-line-v1-200"),
+        "scrolled down the file"
+    );
+    h.keys("ctrl-f");
+    h.cx.simulate_input("n");
+    let first = find_label(&mut h).expect("the bar shows");
+    assert_ne!(
+        first, "1 of 300",
+        "the current match is in view, not at the top"
+    );
+    for letter in ["e", "e", "d"] {
+        h.cx.simulate_input(letter);
+        assert_eq!(
+            find_label(&mut h).as_deref(),
+            Some(first.as_str()),
+            "typing {letter} keeps the current match"
+        );
+    }
 }
 
 #[gpui::test]

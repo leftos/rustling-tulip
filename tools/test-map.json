@@ -743,6 +743,12 @@
     },
     {
       "paths": [
+        "apps/native/src/viewer_find.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & test(/^viewer_find::/)) | (binary_id(rustling-tulip-native::ui) & test(/^ui_viewer::/))"
+    },
+    {
+      "paths": [
         "apps/native/src/viewer_tab.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native) & test(/^viewer_tab::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_viewer|ui_viewer_md|ui_viewer_tabs)::/))"

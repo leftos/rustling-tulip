@@ -1,8 +1,4 @@
-PROTOCOL: 1 overlay: none (docs/agents/explore.md absent), read CLAUDE.md; 2 README: skipped, docs/README.md does not exist; 3 Task Index: done (docs/architecture.md:69-129; no row for "what a path link opens in", nearest rows are "remote host" l.93 and RT-35's "Fetch a file" row); 4 ck: skipped, the ck tools were deferred and the Task Index plus native-client.md answered the where-to-look question; 5 design docs: done (docs/plans/remote-file-transfer.md); 6 source: done; 7 tree search: done for markdown crates, text-selection and tab-model fan-out.
-
 # RT-331 plan: built-in text and Markdown viewer (rustling-tulip native client)
-
-Anchored at X:/dev/rustling-tulip, branch main. While this ran, RT-35 landed on main as 88daeed4 ("save files fetched from a remote host and open them here"). So `Origin`, `Route`, `run_open`, `open_by`, `open_fetched_job`, `file_fetch.rs` and `file_fetch_view.rs` are on main now. The worktree X:/dev/rustling-tulip.wt/rt35-ft2 is the same commit and can be dropped.
 
 ## ANSWER IN SHORT
 
@@ -148,7 +144,7 @@ Order is chosen so each step lands green on its own. Tests: Rust names, red firs
   Red tests (UI): `a_markdown_file_opens_rendered`, `the_source_toggle_shows_the_text_and_saves` (S6a); `an_https_link_click_opens_the_browser_job`, `a_relative_md_link_opens_another_viewer_tab`, `a_file_scheme_link_toasts_and_opens_nothing`, `a_heading_anchor_scrolls` (S6b).
 - **S7. Selection, find, reload.** Split into S7a (selection), S7b (find) and S7c (reload).
   - **S7a. Line selection and copy. Landed.** `LineSelection` and `ViewerTab::selected_lines` in `viewer_tab.rs`, handlers in `viewer_tab_view.rs` (`RootView::viewer_line_height`), debug selector `viewer-text-<tab>-<n>`; Source view only.
-  - **S7b. Find.** `viewer_find.rs` (`find_matches`).
+  - **S7b. Find. Landed.** `viewer_find.rs` (`find_matches`, `FindState`, the match tints), the find bar and keys in `viewer_tab_view.rs`, find state on `ViewerTab`; Source view only.
   - **S7c. Reload.** mtime/size reload on activation.
   Red tests: `find_matches_are_case_insensitive_by_default`, `next_wraps_at_the_last_match`, `a_shift_click_selects_the_line_range`, `ctrl_c_copies_the_selected_lines_joined_with_newlines`, `an_activation_with_a_changed_mtime_reloads_and_keeps_the_scroll`.
 - **S8. Docs.** `docs/native-client.md` new "Text and Markdown viewer" section (and the Links bullet, `native-client.md:149`, which currently says a plain path opens the OS default handler); `docs/architecture.md` Task Index row (below); `docs/plans/native-client-parity.md` tick; `docs/plans/remote-file-transfer.md` Rulings "Viewing" (`:18`) note; CLAUDE.md field list; test-map rows. Fold small doc edits into each step's own commit and do S8 only for what is left.
@@ -196,17 +192,3 @@ The answer took about 25 reads and searches beyond the Task Index row and `nativ
 | Change what a path link, a fetched file or an "open" button opens in (default app, VS Code, built-in viewer) | `docs/native-client.md` (Links, Fetched files, Text and Markdown viewer) -> `apps/native/src/links.rs` (candidates) -> `apps/native/src/open.rs` (`resolve_link`, `OpenAction`, `OpenJob`, `Opener`, `runs_code`) -> `apps/native/src/open_view.rs` (`open_link`, `after_resolve`, `dispatch_open`, `run_open`, `open_by`, `Origin`, `Route`) -> `apps/native/src/file_fetch_view.rs` (`open_fetched`, `open_fetched_job`, `is_fetched_copy`) -> `apps/native/src/remote_mode.rs` -> `apps/native/src/viewer_text.rs` (`decide`) -> `apps/native/src/sidebar.rs` (`GeneralSettings`) -> `apps/native/src/settings_view.rs` -> `apps/native/tests/ui/ui_viewer.rs`, `ui_remote.rs`, `ui_file_fetch.rs`, `tests/support/mod.rs` (`OpenRecorder`) |
 
 A second row would help: "Add a tab kind" -> `crates/protocol/src/lib.rs` (`TabContent`, `TabEntry`) -> `crates/daemon/src/tabs.rs`, `server/tabs.rs` -> `apps/native/src/diff_tab_view.rs` (`reconcile_diff_tabs`, the model to copy) -> `grid_view.rs` (`grid_area`) -> `tab_bar.rs`.
-
-## MISSING ENTRY POINT
-
-- `docs/README.md` does not exist (also `docs/agents/explore.md`). CLAUDE.md "Project shape" plays the index role.
-- No glossary. Project-sense terms used in code and docs with no entry: "fetched copy" (a file under the `remote-files` root), `Origin` / `Route` (open_view.rs), "remote client" vs "host" (defined only in `docs/plans/remote-file-transfer.md`), "reconcile" (diff tabs).
-- `docs/architecture.md` has a Task Index (l.69), so that part is fine.
-
-## UNVERIFIED (said so where it matters)
-
-- `gpui::InteractiveText` and a variable-height `list` in GPUI 0.2.2.
-- pulldown-cmark's size and deny result.
-- How the daemon's 20 `TabContent::` sites behave (counted, not read).
-- RT-325 and RT-324 contents.
-- Whether the diff view handles long lines by clipping or scrolling.
