@@ -12,8 +12,12 @@ use crate::support;
 use std::time::Duration;
 
 use gpui::{Modifiers, Point, TestAppContext, point, px};
-use protocol::{ClientMessage, DaemonMessage, KeepAwakeMode, SplitDirection, TabEntry};
-use rustling_tulip_native::{SidebarView, fonts};
+use protocol::{
+    Agent, AgentCommandEntry, ClientMessage, DaemonMessage, KeepAwakeMode, SplitDirection, TabEntry,
+};
+use rustling_tulip_native::{
+    Connection, LaunchCommandRow, NATIVE_PROTOCOL_VERSIONS, NetEvent, SidebarView, fonts,
+};
 use support::{Fixture, Harness, TestDir, pane, session, split, tab};
 
 const TAB_SELECTORS: [&str; 8] = [
@@ -858,6 +862,7 @@ fn tab_walks_spawn_default_choices(cx: &mut TestAppContext) {
         "the page's one control is done"
     );
 
+    h.send(agent_commands("", "", None));
     h.click_on("settings-tab-claude");
     h.keys("tab");
     assert_eq!(
@@ -894,16 +899,535 @@ fn tab_walks_spawn_default_choices(cx: &mut TestAppContext) {
         Some("settings-spawn-provider-deepseek")
     );
     h.keys("tab");
+    assert_eq!(settings_focus(&mut h), Some("settings-agent-program"));
+    h.keys("tab");
+    assert_eq!(settings_focus(&mut h), Some("settings-agent-args"));
+    h.keys("tab");
     assert_eq!(
         settings_focus(&mut h),
         Some("list"),
-        "the provider is the page's last row"
+        "Extra arguments is the page's last row"
     );
     h.keys("shift-tab");
     assert_eq!(
         settings_focus(&mut h),
-        Some("settings-spawn-provider-deepseek"),
+        Some("settings-agent-args"),
         "Shift+Tab walks back"
+    );
+}
+
+const PROGRAM_REFUSAL: &str =
+    "The launch command's Program cannot contain a newline or other control character.";
+const UNCLOSED_QUOTE: &str = "The extra arguments have an unclosed quote.";
+const RESERVED_FLAG: &str =
+    "--settings is set by rustling-tulip; remove it from the extra arguments.";
+const ARGS_CONTROL: &str =
+    "The launch command's Extra arguments cannot contain a newline or other control character.";
+
+/// The daemon's launch commands: Claude's `program` and `args`, and the
+/// variable that overrides the program on the host.
+fn agent_commands(program: &str, args: &str, program_env: Option<&str>) -> DaemonMessage {
+    DaemonMessage::AgentCommands {
+        commands: vec![AgentCommandEntry {
+            agent: Agent::Claude,
+            program: program.to_owned(),
+            args: args.to_owned(),
+            program_env: program_env.map(str::to_owned),
+        }],
+    }
+}
+
+/// The harness with the daemon's launch command `stored`, on the Claude
+/// page, nothing sent yet.
+fn claude_page<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+    stored: DaemonMessage,
+) -> Harness<'a> {
+    let mut h = opened(cx, dir);
+    h.send(stored);
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-claude");
+    h.sent();
+    h
+}
+
+/// The `(program, args)` of every launch command the client sent.
+fn launch_sets(sent: &[ClientMessage]) -> Vec<(String, String)> {
+    sent.iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::SetAgentCommand {
+                agent: Agent::Claude,
+                program,
+                args,
+            } => Some((program.clone(), args.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Types `text`, a space as the space key.
+fn type_line(h: &mut Harness<'_>, text: &str) {
+    let keys: Vec<String> = text
+        .chars()
+        .map(|c| {
+            if c == ' ' {
+                "space".to_owned()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect();
+    h.keys(&keys.join(" "));
+}
+
+fn launch_fields(h: &mut Harness<'_>) -> (Option<String>, Option<String>) {
+    h.root(|root, _| (root.launch_program(), root.launch_args()))
+}
+
+fn refusal(h: &mut Harness<'_>) -> Option<(LaunchCommandRow, String)> {
+    h.root(|root, _| root.launch_command_refusal())
+}
+
+fn toast_titles(h: &mut Harness<'_>) -> Vec<String> {
+    h.root(|root, _| {
+        root.toasts()
+            .iter()
+            .map(|toast| toast.title.clone())
+            .collect()
+    })
+}
+
+fn refuse(h: &mut Harness<'_>, message: &str) {
+    h.send(DaemonMessage::Error {
+        message: message.to_owned(),
+        request_id: None,
+    });
+}
+
+fn drawn(h: &mut Harness<'_>, selector: &str) -> bool {
+    h.bounds(selector).origin.x >= px(0.0)
+}
+
+#[gpui::test]
+fn launch_command_rows_hidden_until_agent_commands_arrive(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-claude");
+    assert!(
+        !drawn(&mut h, "settings-agent-program"),
+        "no Program row yet"
+    );
+    assert!(
+        !drawn(&mut h, "settings-agent-args"),
+        "no Extra arguments row yet"
+    );
+    tab_to(&mut h, "settings-spawn-provider-deepseek");
+    h.keys("tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("list"),
+        "the ring holds no launch rows before the daemon reports"
+    );
+
+    h.send(agent_commands("wrapper", "verbose", None));
+    assert!(drawn(&mut h, "settings-agent-program"));
+    assert!(drawn(&mut h, "settings-agent-args"));
+    assert_eq!(
+        launch_fields(&mut h),
+        (Some("wrapper".to_owned()), Some("verbose".to_owned())),
+        "the untouched rows take the daemon's command"
+    );
+}
+
+#[gpui::test]
+fn launch_command_rows_disabled_without_the_feature(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.welcome_without_features();
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-claude");
+    assert_eq!(
+        h.root(|root, _| root.settings_launch_command_tip()),
+        Some("Restart the daemon to set the launch command: .\\rt.ps1 restart")
+    );
+    assert!(
+        drawn(&mut h, "settings-agent-program"),
+        "Program is painted, dimmed"
+    );
+    assert!(
+        drawn(&mut h, "settings-agent-args"),
+        "Extra arguments is painted, dimmed"
+    );
+    h.click_on("settings-agent-args");
+    type_line(&mut h, "verbose");
+    h.keys("enter");
+    assert_eq!(
+        launch_sets(&h.sent()),
+        Vec::<(String, String)>::new(),
+        "nothing is sent"
+    );
+    h.click_on("settings-spawn-approval-plan");
+    h.keys("tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("list"),
+        "Tab skips the disabled launch rows"
+    );
+
+    h.welcome_with_features();
+    assert_eq!(h.root(|root, _| root.settings_launch_command_tip()), None);
+}
+
+#[gpui::test]
+fn enter_in_program_sends_both_drafts_trimmed(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = claude_page(cx, &dir, agent_commands("", "", None));
+    h.click_on("settings-agent-program");
+    type_line(&mut h, " wrapper ");
+    h.click_on("settings-agent-args");
+    type_line(&mut h, " verbose ");
+    assert_eq!(
+        launch_sets(&h.sent()),
+        Vec::<(String, String)>::new(),
+        "typing sends nothing"
+    );
+    h.click_on("settings-agent-program");
+    h.keys("enter");
+    assert_eq!(
+        launch_sets(&h.sent()),
+        [("wrapper".to_owned(), "verbose".to_owned())]
+    );
+}
+
+#[gpui::test]
+fn enter_in_args_sends_both_drafts(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = claude_page(cx, &dir, agent_commands("wrapper", "", None));
+    h.click_on("settings-agent-args");
+    type_line(&mut h, "verbose");
+    h.keys("enter");
+    assert_eq!(
+        launch_sets(&h.sent()),
+        [("wrapper".to_owned(), "verbose".to_owned())],
+        "the untyped Program rides along"
+    );
+}
+
+#[gpui::test]
+fn clearing_both_rows_sends_a_blank_pair(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = claude_page(cx, &dir, agent_commands("wrapper", "verbose", None));
+    h.click_on("settings-agent-program");
+    h.keys("ctrl-a backspace");
+    h.click_on("settings-agent-args");
+    h.keys("ctrl-a backspace");
+    h.keys("enter");
+    assert_eq!(
+        launch_sets(&h.sent()),
+        [(String::new(), String::new())],
+        "Enter on empty rows clears the command"
+    );
+    h.send(agent_commands("", "", None));
+    assert!(h.root(|root, _| root.launch_saved()));
+    assert_eq!(
+        launch_fields(&mut h),
+        (Some(String::new()), Some(String::new()))
+    );
+}
+
+#[gpui::test]
+fn saved_shows_after_the_echo(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = claude_page(cx, &dir, agent_commands("", "", None));
+    h.click_on("settings-agent-program");
+    type_line(&mut h, "wrapper");
+    h.keys("enter");
+    assert_eq!(launch_sets(&h.sent()).len(), 1);
+    assert!(
+        !h.root(|root, _| root.launch_saved()),
+        "not Saved before the echo"
+    );
+    h.send(agent_commands("wrapper", "", None));
+    assert!(h.root(|root, _| root.launch_saved()));
+    assert!(drawn(&mut h, "settings-agent-saved"));
+    type_line(&mut h, "x");
+    assert!(
+        !h.root(|root, _| root.launch_saved()),
+        "an edit since the save hides Saved"
+    );
+}
+
+#[gpui::test]
+fn program_refusal_shows_under_program_and_skips_the_toast(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = claude_page(cx, &dir, agent_commands("", "", None));
+    h.click_on("settings-agent-program");
+    type_line(&mut h, "wrapper");
+    h.keys("enter");
+    refuse(&mut h, PROGRAM_REFUSAL);
+    assert_eq!(
+        refusal(&mut h),
+        Some((LaunchCommandRow::Program, PROGRAM_REFUSAL.to_owned()))
+    );
+    assert!(drawn(&mut h, "settings-agent-program-error"));
+    assert_eq!(
+        toast_titles(&mut h),
+        Vec::<String>::new(),
+        "the refusal raises no toast"
+    );
+    assert!(!h.root(|root, _| root.launch_saved()));
+
+    refuse(&mut h, PROGRAM_REFUSAL);
+    assert_eq!(
+        toast_titles(&mut h).len(),
+        1,
+        "the claimed refusal ended the apply, so the next one toasts"
+    );
+}
+
+#[gpui::test]
+fn args_refusal_shows_under_extra_arguments(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = claude_page(cx, &dir, agent_commands("", "", None));
+    h.click_on("settings-agent-args");
+    for text in [UNCLOSED_QUOTE, RESERVED_FLAG, ARGS_CONTROL] {
+        h.keys("enter");
+        refuse(&mut h, text);
+        assert_eq!(
+            refusal(&mut h),
+            Some((LaunchCommandRow::Args, text.to_owned())),
+            "{text}"
+        );
+    }
+    assert!(drawn(&mut h, "settings-agent-args-error"));
+    assert_eq!(toast_titles(&mut h), Vec::<String>::new());
+}
+
+#[gpui::test]
+fn refusal_clears_on_the_next_edit(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = claude_page(cx, &dir, agent_commands("", "", None));
+    h.click_on("settings-agent-args");
+    type_line(&mut h, "open");
+    h.keys("enter");
+    refuse(&mut h, UNCLOSED_QUOTE);
+    assert!(refusal(&mut h).is_some());
+    type_line(&mut h, "x");
+    assert_eq!(refusal(&mut h), None, "the edit clears the refusal");
+}
+
+#[gpui::test]
+fn unrelated_error_while_pending_still_toasts(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = claude_page(cx, &dir, agent_commands("", "", None));
+    h.click_on("settings-agent-program");
+    type_line(&mut h, "wrapper");
+    h.keys("enter");
+    refuse(&mut h, "worktree delete failed");
+    assert_eq!(
+        refusal(&mut h),
+        None,
+        "another refusal is not the launch command's"
+    );
+    assert_eq!(toast_titles(&mut h).len(), 1, "it toasts as before");
+    refuse(&mut h, PROGRAM_REFUSAL);
+    assert_eq!(
+        refusal(&mut h),
+        None,
+        "the other error ended the apply, so nothing waits to claim this one"
+    );
+    assert_eq!(toast_titles(&mut h).len(), 2);
+}
+
+#[gpui::test]
+fn reselecting_the_claude_tab_keeps_drafts_and_pending_apply(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = claude_page(cx, &dir, agent_commands("", "", None));
+    h.click_on("settings-agent-program");
+    type_line(&mut h, "wrapper");
+    h.keys("enter");
+    h.click_on("settings-agent-args");
+    type_line(&mut h, "verbose");
+    h.click_on("settings-tab-claude");
+    h.keys("up down");
+    assert_eq!(shown_tab(&mut h), "Claude");
+    assert_eq!(
+        launch_fields(&mut h),
+        (Some("wrapper".to_owned()), Some("verbose".to_owned())),
+        "the drafts survive selecting the tab again"
+    );
+    refuse(&mut h, PROGRAM_REFUSAL);
+    assert_eq!(
+        refusal(&mut h),
+        Some((LaunchCommandRow::Program, PROGRAM_REFUSAL.to_owned())),
+        "the apply still waits for its answer"
+    );
+    assert_eq!(toast_titles(&mut h), Vec::<String>::new());
+}
+
+#[gpui::test]
+fn refusal_after_switching_tabs_shows_on_return(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = claude_page(cx, &dir, agent_commands("", "", None));
+    h.click_on("settings-agent-program");
+    type_line(&mut h, "wrapper");
+    h.keys("enter");
+    h.click_on("settings-tab-general");
+    refuse(&mut h, PROGRAM_REFUSAL);
+    assert_eq!(toast_titles(&mut h), Vec::<String>::new());
+    h.click_on("settings-tab-claude");
+    assert_eq!(
+        refusal(&mut h),
+        Some((LaunchCommandRow::Program, PROGRAM_REFUSAL.to_owned())),
+        "the refusal waits on the Claude page"
+    );
+    assert!(drawn(&mut h, "settings-agent-program-error"));
+}
+
+#[gpui::test]
+fn a_failed_apply_with_another_error_does_not_count_the_next_broadcast(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = claude_page(cx, &dir, agent_commands("", "", None));
+    h.click_on("settings-agent-program");
+    type_line(&mut h, "wrapper");
+    h.keys("enter");
+    refuse(&mut h, "worktree delete failed");
+    assert_eq!(toast_titles(&mut h).len(), 1);
+    h.click_on("settings-agent-program");
+    h.keys("ctrl-a backspace");
+    h.send(agent_commands("", "", None));
+    assert!(
+        !h.root(|root, _| root.launch_saved()),
+        "another client's broadcast is no echo of the failed apply"
+    );
+}
+
+#[gpui::test]
+fn disconnect_hides_the_launch_rows_without_the_restart_tip(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = claude_page(cx, &dir, agent_commands("wrapper", "", None));
+    // A connection that was open drops: no overlay, so Settings stays.
+    let mut dropped = Connection::new();
+    dropped.on_connecting();
+    dropped.on_socket_open(4242);
+    let version = NATIVE_PROTOCOL_VERSIONS.first().copied().unwrap_or(1);
+    dropped.on_welcome(version, support::daemon_features());
+    dropped.on_closed("the daemon went away".to_owned());
+    h.event(NetEvent::State(dropped));
+    assert!(h.root(|root, _| root.settings_open()));
+    assert_eq!(
+        h.root(|root, _| root.settings_launch_command_tip()),
+        None,
+        "a lost connection is no older daemon"
+    );
+    h.click_on("settings-spawn-approval-plan");
+    h.keys("tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("list"),
+        "no launch rows in the ring"
+    );
+}
+
+#[gpui::test]
+fn typing_after_enter_survives_the_echo(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = claude_page(cx, &dir, agent_commands("", "", None));
+    h.click_on("settings-agent-program");
+    type_line(&mut h, "wrapper");
+    h.keys("enter");
+    type_line(&mut h, "x");
+    h.send(agent_commands("wrapper", "", None));
+    assert_eq!(
+        launch_fields(&mut h).0.as_deref(),
+        Some("wrapperx"),
+        "the echo keeps what was typed after Enter"
+    );
+    assert!(!h.root(|root, _| root.launch_saved()));
+}
+
+#[gpui::test]
+fn broadcast_updates_an_untouched_row_only(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = claude_page(cx, &dir, agent_commands("", "", None));
+    h.click_on("settings-agent-program");
+    type_line(&mut h, "mine");
+    h.send(agent_commands("theirs", "verbose", None));
+    assert_eq!(
+        launch_fields(&mut h),
+        (Some("mine".to_owned()), Some("verbose".to_owned())),
+        "another client's change fills only the untouched row"
+    );
+}
+
+#[gpui::test]
+fn program_env_locks_the_program_row_and_names_the_variable(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let stored = agent_commands("wrapper", "", Some("RUSTLING_TULIP_CLAUDE"));
+    let mut h = claude_page(cx, &dir, stored);
+    assert!(h.root(|root, _| root.launch_program_read_only()));
+    assert_eq!(
+        h.root(|root, _| root.launch_program_env_note()).as_deref(),
+        Some("Set by RUSTLING_TULIP_CLAUDE")
+    );
+    assert!(drawn(&mut h, "settings-agent-program-env"));
+    h.click_on("settings-agent-program");
+    type_line(&mut h, "x");
+    assert_eq!(
+        launch_fields(&mut h).0.as_deref(),
+        Some("wrapper"),
+        "the read-only row takes no typing"
+    );
+    tab_to(&mut h, "settings-spawn-provider-deepseek");
+    h.keys("tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("settings-agent-args"),
+        "Tab skips the read-only Program row"
+    );
+    type_line(&mut h, "verbose");
+    h.keys("enter");
+    assert_eq!(
+        launch_sets(&h.sent()),
+        [("wrapper".to_owned(), "verbose".to_owned())],
+        "Extra arguments still applies"
+    );
+    h.send(agent_commands("wrapper", "verbose", None));
+    assert!(
+        !h.root(|root, _| root.launch_program_read_only()),
+        "the row unlocks once the variable is gone"
+    );
+}
+
+#[gpui::test]
+fn trusted_launch_leaves_the_launch_rows_in_the_ring(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.send(agent_commands("", "", None));
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-spawn-defaults");
+    h.click_on("settings-spawn-trusted");
+    assert_eq!(saved_ui(&dir)["spawn"]["trusted"], true);
+    h.click_on("settings-tab-claude");
+    h.keys("tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("settings-agent-program"),
+        "the locked Claude rows leave the ring; the launch rows stay"
+    );
+    h.keys("tab");
+    assert_eq!(settings_focus(&mut h), Some("settings-agent-args"));
+    h.keys("tab");
+    assert_eq!(settings_focus(&mut h), Some("list"));
+    h.keys("tab");
+    type_line(&mut h, "wrapper");
+    h.keys("enter");
+    assert_eq!(
+        launch_sets(&h.sent()),
+        [("wrapper".to_owned(), String::new())],
+        "the launch rows still apply under trusted launch"
     );
 }
 

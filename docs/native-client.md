@@ -168,7 +168,15 @@ Remote access (Tailscale) is absent from the list while the client's target is a
 
 Spawn defaults holds "Trusted launch by default"; the Claude page holds "Claude approval mode" and "Claude provider".
 
-While trusted launch is on, every agent row is locked and carries a note; the provider note says the choice stays in effect.
+While trusted launch is on, every agent row is locked and carries a note; the provider note says the choice stays in effect. The launch rows below stay reachable in the Tab ring.
+
+The Claude page's "Launch command" section (after "Claude") has a Program field (placeholder `claude`) and an Extra arguments field. Enter in either sends both, trimmed, as `SetAgentCommand`; both empty clears the command. There is no Apply button. `Saved` shows after the daemon's echo, only while both fields still match what was stored. Notes say the command is used for new sessions, Restart and Resume and not for headless runs, and that extra arguments follow POSIX shell rules (quote a Windows path or double its backslashes; in cmd a doskey macro is not expanded, so set Program to a `.cmd` file).
+
+While an apply waits, the daemon's launch-command refusal shows under Program (when its text starts "The launch command's Program") or under Extra arguments (the other refusals) instead of a toast. It clears on the next edit and shows again on return if another Settings tab was open. Any other daemon error during an apply ends it and still toasts.
+
+With `RUSTLING_TULIP_CLAUDE` set on the host (the variable's name comes from the daemon's `program_env`), Program is read-only, out of the Tab ring, and says "Set by RUSTLING_TULIP_CLAUDE". A daemon without the `agent_commands` feature shows both rows dimmed with the tooltip "Restart the daemon to set the launch command: .\rt.ps1 restart". Before `AgentCommands` arrives, or while disconnected, the section is not drawn.
+
+Drafts follow another client's `AgentCommands` only while untouched; text typed after Enter survives the echo, and re-selecting the Claude tab keeps drafts and a pending apply. Selectors: `settings-agent-program`, `settings-agent-args`, `settings-agent-saved`, `settings-agent-program-error`, `settings-agent-args-error`, `settings-agent-program-env`.
 
 ## Terminal
 

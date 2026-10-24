@@ -39,7 +39,10 @@ pub const PROTOCOL: u32 = 1;
 /// The features the fake daemon lists in its `Welcome`, as a current daemon
 /// does.
 pub fn daemon_features() -> Vec<String> {
-    vec![protocol::FEATURE_CLAUDE_PROVIDER.to_owned()]
+    vec![
+        protocol::FEATURE_CLAUDE_PROVIDER.to_owned(),
+        protocol::FEATURE_AGENT_COMMANDS.to_owned(),
+    ]
 }
 
 /// The fake daemon's `Welcome` on `protocol_version`, listing

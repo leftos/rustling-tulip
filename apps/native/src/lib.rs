@@ -221,6 +221,7 @@ pub use crate::open::{OpenFailure, Opener};
 pub use crate::preset_wizard::{LaunchButton, NextButton};
 pub use crate::quit_view::QuitFn;
 pub use crate::recover_view::RecoverRow;
+pub use crate::settings_view::LaunchCommandRow;
 pub use crate::shell_marks::{ShellDot, ShellStatus};
 pub use crate::sidebar::{
     Activity, Container, ContainerKind, DEFAULT_WIDTH as SIDEBAR_DEFAULT_WIDTH, DETACHED_BANNER,
@@ -578,6 +579,10 @@ pub struct RootView {
     remote_status: Option<remote_access::RemoteStatusView>,
     /// The Remote access page's port field and login launch, once shown.
     remote_access_tab: Option<settings_view::RemoteAccessTab>,
+    /// Each agent's launch command as this connection last heard it.
+    agent_commands: Option<HashMap<protocol::Agent, protocol::AgentCommandEntry>>,
+    /// The Claude page's launch-command fields, once shown.
+    claude_tab: Option<settings_view::ClaudeTab>,
     /// Reads and switches whether this PC starts the daemon at login.
     autostart: Arc<dyn remote_access::Autostart>,
     /// The title last set on the window.
@@ -970,6 +975,8 @@ impl RootView {
             keep_awake: None,
             remote_status: None,
             remote_access_tab: None,
+            agent_commands: None,
+            claude_tab: None,
             autostart,
             window_title: String::new(),
             title_pending: None,
@@ -2290,6 +2297,7 @@ impl RootView {
                 }
                 if !conn.is_open() {
                     self.set_keep_awake(None);
+                    self.forget_agent_commands();
                     self.launch_last.clear();
                 }
                 // The handshake is the old target's daemon's.
@@ -2431,10 +2439,7 @@ impl RootView {
         if self.fold_tabs_and_drop_stale_menus(&msg, window, cx) {
             return;
         }
-        if self.on_resume_report(&msg, cx) {
-            return;
-        }
-        if self.on_agent_exited(&msg, cx) {
+        if self.on_resume_report(&msg, cx) || self.on_agent_exited(&msg, cx) {
             return;
         }
         match msg {
@@ -2507,6 +2512,7 @@ impl RootView {
             DaemonMessage::Workspaces { workspaces } => self.on_workspaces(&workspaces, window, cx),
             msg @ DaemonMessage::KeepAwakeStatus { .. } => self.on_keep_awake_status(&msg),
             msg @ DaemonMessage::RemoteStatus { .. } => self.on_remote_status(msg, cx),
+            msg @ DaemonMessage::AgentCommands { .. } => self.on_agent_commands(msg, cx),
             _ => {}
         }
     }
@@ -2575,9 +2581,10 @@ impl RootView {
     }
 
     /// A daemon refusal: an unrouted one (`None`) while the workspace creator
-    /// waits fails a pending create or parse inline there, and raises no
-    /// toast. A routed refusal (`Some`) answers its own request and takes the
-    /// generic path, as every other refusal does.
+    /// waits fails a pending create or parse inline there, and one of the
+    /// launch-command refusals while an apply of it waits shows under its
+    /// row; neither raises a toast. A routed refusal (`Some`) answers its own
+    /// request and takes the generic path, as every other refusal does.
     fn on_refusal(
         &mut self,
         message: String,
@@ -2586,7 +2593,9 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         let inline = request_id.is_none()
-            && (self.on_creator_error(&message, cx) || self.on_preset_list_error(&message, cx));
+            && (self.on_agent_command_error(&message, cx)
+                || self.on_creator_error(&message, cx)
+                || self.on_preset_list_error(&message, cx));
         self.repo_remove.disarm();
         if !inline {
             self.on_daemon_error(message, request_id, window, cx);
@@ -2707,6 +2716,8 @@ impl RootView {
     /// old connection closed.
     fn reset_for_new_daemon(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.set_keep_awake(None);
+        self.forget_agent_commands();
+        self.claude_tab = None;
         self.set_remote_status(None, cx);
         self.reset_panes(cx);
         self.pending_appearance.clear();

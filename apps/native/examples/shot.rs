@@ -30,7 +30,10 @@ use gpui::{
     App, AppContext as _, Application, AsyncApp, Bounds, Keystroke, Window, WindowBounds,
     WindowHandle, WindowOptions, px, size,
 };
-use protocol::{ClientMessage, DaemonMessage, GridNode, SessionSnapshot, SplitDirection};
+use protocol::{
+    Agent, AgentCommandEntry, ClientMessage, DaemonMessage, GridNode, SessionSnapshot,
+    SplitDirection,
+};
 use rustling_tulip_native::fonts;
 use rustling_tulip_native::offscreen::show_cloaked;
 use rustling_tulip_native::{
@@ -46,6 +49,9 @@ const WINDOW_SIZE: (u16, u16) = (1000, 640);
 const LOAD_WAIT: Duration = Duration::from_millis(1500);
 /// How long the view gets to answer the input that reaches it.
 const DRIVE_WAIT: Duration = Duration::from_millis(1000);
+/// How many Downs on the Settings tab list reach the Claude tab: every tab
+/// this PC offers sits above it.
+const CLAUDE_TAB_DOWNS: usize = 7;
 /// The port and pid the fake handshake reports.
 const FAKE_PORT: u16 = 4242;
 const FAKE_PID: u32 = 1;
@@ -100,16 +106,18 @@ enum View {
     SourceControl,
     Diff,
     Settings,
+    SettingsClaude,
     Spawn,
 }
 
 impl View {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::Main,
         Self::MainCompact,
         Self::SourceControl,
         Self::Diff,
         Self::Settings,
+        Self::SettingsClaude,
         Self::Spawn,
     ];
 
@@ -120,6 +128,7 @@ impl View {
             Self::SourceControl => "source-control",
             Self::Diff => "diff",
             Self::Settings => "settings",
+            Self::SettingsClaude => "settings-claude",
             Self::Spawn => "spawn",
         }
     }
@@ -143,6 +152,7 @@ impl View {
             Self::SourceControl => root.activity() == Activity::SourceControl,
             Self::Diff => root.active_tab_id() == Some(DIFF_TAB),
             Self::Settings => root.settings_open(),
+            Self::SettingsClaude => root.settings_open() && root.settings_tab() == "Claude",
             Self::Spawn => root.spawn_dialog_open(),
         }
     }
@@ -351,6 +361,15 @@ fn drive(view: View, address: usize, window: &mut Window, cx: &mut App) -> Resul
         }
         View::Diff => press("ctrl-3", window, cx),
         View::Settings => press("ctrl-,", window, cx),
+        // Settings opens with the keyboard on its tab list, where Down
+        // walks the tabs to the last, Claude.
+        View::SettingsClaude => {
+            press("ctrl-,", window, cx)?;
+            for _ in 0..CLAUDE_TAB_DOWNS {
+                press("down", window, cx)?;
+            }
+            Ok(())
+        }
         View::Spawn => press("ctrl-shift-n", window, cx),
     }
 }
@@ -721,7 +740,10 @@ impl FakeDaemon {
         let mut conn = Connection::new();
         conn.on_connecting();
         conn.on_socket_open(FAKE_PORT);
-        let features = vec![protocol::FEATURE_CLAUDE_PROVIDER.to_owned()];
+        let features = vec![
+            protocol::FEATURE_CLAUDE_PROVIDER.to_owned(),
+            protocol::FEATURE_AGENT_COMMANDS.to_owned(),
+        ];
         conn.on_welcome(version, features.clone());
         self.event(NetEvent::State(conn))?;
         self.event(NetEvent::Handshake(HandshakeInfo {
@@ -741,6 +763,14 @@ impl FakeDaemon {
         })?;
         self.send(fixture.tabs.clone())?;
         self.send(fixture.keep_awake.clone())?;
+        self.send(DaemonMessage::AgentCommands {
+            commands: vec![AgentCommandEntry {
+                agent: Agent::Claude,
+                program: "claude".to_owned(),
+                args: "--verbose".to_owned(),
+                program_env: None,
+            }],
+        })?;
         self.finish_review_turn(fixture)?;
         self.send(fixture.attention.clone())
     }

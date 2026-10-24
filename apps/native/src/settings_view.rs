@@ -15,8 +15,8 @@ use gpui::{
     Window, div, prelude::*, px,
 };
 use protocol::{
-    ClaudeProvider, ClientMessage, DaemonMessage, FEATURE_CLAUDE_PROVIDER, KeepAwakeMode,
-    PermissionMode, RemoteState,
+    Agent, AgentCommandEntry, ClaudeProvider, ClientMessage, DaemonMessage, FEATURE_AGENT_COMMANDS,
+    FEATURE_CLAUDE_PROVIDER, KeepAwakeMode, PermissionMode, RemoteState,
 };
 
 use crate::appearance;
@@ -85,6 +85,21 @@ const AUTOSTART_HINT: &str = "So remote access works before you open this app.";
 const DEFAULT_PORT_TEXT: &str = "8787";
 /// The port field's width.
 const PORT_FIELD_WIDTH: f32 = 96.0;
+/// Why the Claude page's launch-command rows are disabled on a daemon that
+/// does not store a launch command.
+const LAUNCH_COMMAND_UNSUPPORTED_TIP: &str =
+    "Restart the daemon to set the launch command: .\\rt.ps1 restart";
+const LAUNCH_PROGRAM_PLACEHOLDER: &str = "claude";
+const LAUNCH_ARGS_PLACEHOLDER: &str = "Extra arguments";
+const LAUNCH_USE_HINT: &str = "Used for new sessions, Restart and Resume; not for headless runs.";
+const LAUNCH_QUOTING_HINT: &str = "Extra arguments follow POSIX shell rules: quote a Windows path or double its backslashes. In cmd, a doskey macro is not expanded; set Program to a .cmd file instead.";
+/// The start of every daemon refusal of a launch command that names its
+/// field, and the start of those naming Program.
+const LAUNCH_REFUSAL_PREFIX: &str = "The launch command's ";
+const LAUNCH_PROGRAM_REFUSAL_PREFIX: &str = "The launch command's Program";
+const LAUNCH_UNCLOSED_QUOTE: &str = "The extra arguments have an unclosed quote.";
+const LAUNCH_RESERVED_FLAG_SUFFIX: &str =
+    " is set by rustling-tulip; remove it from the extra arguments.";
 
 /// A tab of the Settings modal, in the order the list shows them.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -225,6 +240,8 @@ pub(crate) enum SettingsControl {
     RemotePort,
     RemotePortApply,
     RemoteAutostart,
+    AgentProgram,
+    AgentArgs,
     Appearance(AppearanceStop),
 }
 
@@ -275,6 +292,8 @@ impl SettingsControl {
             Self::RemotePort => "settings-remote-port-input",
             Self::RemotePortApply => "settings-remote-port-apply",
             Self::RemoteAutostart => "settings-remote-autostart-toggle",
+            Self::AgentProgram => "settings-agent-program",
+            Self::AgentArgs => "settings-agent-args",
             Self::Appearance(stop) => stop.selector(),
         }
     }
@@ -314,6 +333,61 @@ pub(crate) struct RemoteAccessTab {
     /// Why the last switch of the login launch failed.
     autostart_error: Option<String>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// A row of the Claude page's Launch command section.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaunchCommandRow {
+    Program,
+    Args,
+}
+
+/// The row a daemon refusal of a launch command belongs under, or `None`
+/// when `message` is no launch-command refusal.
+fn launch_refusal_row(message: &str) -> Option<LaunchCommandRow> {
+    if message.starts_with(LAUNCH_PROGRAM_REFUSAL_PREFIX) {
+        Some(LaunchCommandRow::Program)
+    } else if message.starts_with(LAUNCH_REFUSAL_PREFIX)
+        || message == LAUNCH_UNCLOSED_QUOTE
+        || message.ends_with(LAUNCH_RESERVED_FLAG_SUFFIX)
+    {
+        Some(LaunchCommandRow::Args)
+    } else {
+        None
+    }
+}
+
+/// The Claude page's launch-command fields and the apply they wait to hear
+/// back.
+pub(crate) struct ClaudeTab {
+    program: Entity<TextInput>,
+    program_focus: FocusHandle,
+    args: Entity<TextInput>,
+    args_focus: FocusHandle,
+    /// The fields' texts, kept as they change.
+    program_draft: String,
+    args_draft: String,
+    /// How many applies still owe the daemon's echo or refusal.
+    awaiting: u32,
+    /// The `(program, args)` the last apply sent.
+    sent: Option<(String, String)>,
+    /// The daemon echoed the last apply.
+    saved: bool,
+    /// The daemon's refusal of the last apply, under the row it names.
+    refusal: Option<(LaunchCommandRow, String)>,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl ClaudeTab {
+    /// Puts `text` in `row`'s field and draft.
+    fn fill(&mut self, row: LaunchCommandRow, text: String, cx: &mut Context<RootView>) {
+        let (draft, input) = match row {
+            LaunchCommandRow::Program => (&mut self.program_draft, &self.program),
+            LaunchCommandRow::Args => (&mut self.args_draft, &self.args),
+        };
+        draft.clone_from(&text);
+        input.update(cx, |input, cx| input.set_text(text, cx));
+    }
 }
 
 /// The daemon's keep-awake mode and whether it holds the machine awake now.
@@ -555,20 +629,269 @@ impl RootView {
         }
     }
 
-    /// The Claude page's controls in drawing order, while trusted launch
-    /// has not locked them; the provider choices leave while the daemon
-    /// cannot route to another provider.
+    /// The Claude page's controls in drawing order. Trusted launch locks
+    /// the approval and provider choices, never the launch command; the
+    /// provider choices leave while the daemon cannot route to another
+    /// provider, and the launch rows until the daemon reported its command.
+    /// A Program row an environment variable sets is out of the ring.
     fn claude_controls(&self) -> Vec<SettingsControl> {
-        if self.sidebar.ui_state().spawn.trusted {
-            return Vec::new();
+        let mut controls = Vec::new();
+        if !self.sidebar.ui_state().spawn.trusted {
+            controls.extend(APPROVAL_CHOICES.map(SettingsControl::SpawnApproval));
+            if self.claude_provider_supported() {
+                controls.extend(PROVIDER_CHOICES.map(SettingsControl::SpawnProvider));
+            }
         }
-        let mut controls = APPROVAL_CHOICES
-            .map(SettingsControl::SpawnApproval)
-            .to_vec();
-        if self.claude_provider_supported() {
-            controls.extend(PROVIDER_CHOICES.map(SettingsControl::SpawnProvider));
+        if self.launch_rows_live() {
+            if !self.launch_program_read_only() {
+                controls.push(SettingsControl::AgentProgram);
+            }
+            controls.push(SettingsControl::AgentArgs);
         }
         controls
+    }
+
+    /// Whether the connected daemon stores a launch command.
+    fn launch_command_supported(&self) -> bool {
+        self.conn.supports(FEATURE_AGENT_COMMANDS)
+    }
+
+    /// Claude's launch command as the daemon last reported it.
+    fn claude_command(&self) -> Option<&AgentCommandEntry> {
+        self.agent_commands.as_ref()?.get(&Agent::Claude)
+    }
+
+    /// Whether the connected daemon's Welcome leaves the launch command out:
+    /// an older daemon. A connection that is not open says nothing either
+    /// way.
+    fn launch_command_unsupported(&self) -> bool {
+        self.conn.is_open() && !self.launch_command_supported()
+    }
+
+    /// Whether the launch-command rows take input: the daemon stores a
+    /// launch command and has reported Claude's.
+    fn launch_rows_live(&self) -> bool {
+        self.launch_command_supported() && self.claude_command().is_some()
+    }
+
+    /// The Program field's text, while the Claude page has been shown.
+    #[must_use]
+    pub fn launch_program(&self) -> Option<String> {
+        self.claude_tab
+            .as_ref()
+            .map(|tab| tab.program_draft.clone())
+    }
+
+    /// The Extra arguments field's text, while the Claude page has been
+    /// shown.
+    #[must_use]
+    pub fn launch_args(&self) -> Option<String> {
+        self.claude_tab.as_ref().map(|tab| tab.args_draft.clone())
+    }
+
+    /// The daemon's refusal of the last apply and the row it shows under.
+    #[must_use]
+    pub fn launch_command_refusal(&self) -> Option<(LaunchCommandRow, String)> {
+        self.claude_tab.as_ref()?.refusal.clone()
+    }
+
+    /// Whether the launch command's Saved note shows: the daemon echoed
+    /// the last apply, and both fields still read as it stored them.
+    #[must_use]
+    pub fn launch_saved(&self) -> bool {
+        let (Some(tab), Some(stored)) = (&self.claude_tab, self.claude_command()) else {
+            return false;
+        };
+        tab.saved
+            && tab.awaiting == 0
+            && tab.program_draft.trim() == stored.program
+            && tab.args_draft.trim() == stored.args
+    }
+
+    /// Whether the Program row is read-only: an environment variable on the
+    /// host sets the program.
+    #[must_use]
+    pub fn launch_program_read_only(&self) -> bool {
+        self.claude_command()
+            .is_some_and(|entry| entry.program_env.is_some())
+    }
+
+    /// The note under a read-only Program row naming the variable.
+    #[must_use]
+    pub fn launch_program_env_note(&self) -> Option<String> {
+        let env = self.claude_command()?.program_env.as_ref()?;
+        Some(format!("Set by {env}"))
+    }
+
+    /// Why the launch-command rows are disabled, while Settings is open
+    /// and they are.
+    #[must_use]
+    pub fn settings_launch_command_tip(&self) -> Option<&'static str> {
+        (self.settings_open() && self.launch_command_unsupported())
+            .then_some(LAUNCH_COMMAND_UNSUPPORTED_TIP)
+    }
+
+    /// The Claude page's fields afresh, holding the daemon's command.
+    fn new_claude_tab(&self, window: &mut Window, cx: &mut Context<Self>) -> ClaudeTab {
+        let (program_draft, args_draft) = self
+            .claude_command()
+            .map_or_else(Default::default, |entry| {
+                (entry.program.clone(), entry.args.clone())
+            });
+        let read_only = self.launch_program_read_only();
+        let program = cx.new(|cx| {
+            let mut input = TextInput::new(program_draft.clone(), LAUNCH_PROGRAM_PLACEHOLDER, cx);
+            input.set_read_only(read_only, cx);
+            input
+        });
+        let args = cx.new(|cx| TextInput::new(args_draft.clone(), LAUNCH_ARGS_PLACEHOLDER, cx));
+        let program_focus = program.read(cx).focus_handle(cx);
+        let args_focus = args.read(cx).focus_handle(cx);
+        let mut subscriptions = Vec::new();
+        for (input, row) in [
+            (&program, LaunchCommandRow::Program),
+            (&args, LaunchCommandRow::Args),
+        ] {
+            subscriptions.push(cx.subscribe_in(
+                input,
+                window,
+                |this, _, event: &TextInputEvent, window, cx| match event {
+                    TextInputEvent::Submit => {
+                        this.apply_launch_command();
+                        cx.notify();
+                    }
+                    TextInputEvent::Cancel => this.close_appearance_editor(window, cx),
+                },
+            ));
+            subscriptions.push(cx.subscribe_in(
+                input,
+                window,
+                move |this, input, _: &TextChanged, _, cx| {
+                    let text = input.read(cx).text().to_owned();
+                    if let Some(tab) = &mut this.claude_tab {
+                        match row {
+                            LaunchCommandRow::Program => tab.program_draft = text,
+                            LaunchCommandRow::Args => tab.args_draft = text,
+                        }
+                        tab.refusal = None;
+                    }
+                    cx.notify();
+                },
+            ));
+        }
+        ClaudeTab {
+            program,
+            program_focus,
+            args,
+            args_focus,
+            program_draft,
+            args_draft,
+            awaiting: 0,
+            sent: None,
+            saved: false,
+            refusal: None,
+            _subscriptions: subscriptions,
+        }
+    }
+
+    /// Enter in either launch-command row: both fields, trimmed, as
+    /// Claude's command; two empty fields clear it. Nothing is sent before
+    /// the daemon reported its command.
+    fn apply_launch_command(&mut self) {
+        if !self.launch_rows_live() {
+            return;
+        }
+        let Some(tab) = &mut self.claude_tab else {
+            return;
+        };
+        let program = tab.program_draft.trim().to_owned();
+        let args = tab.args_draft.trim().to_owned();
+        tab.awaiting += 1;
+        tab.sent = Some((program.clone(), args.clone()));
+        tab.saved = false;
+        tab.refusal = None;
+        tracing::info!(%program, %args, "settings: applying Claude's launch command");
+        self.send(ClientMessage::SetAgentCommand {
+            agent: Agent::Claude,
+            program,
+            args,
+        });
+    }
+
+    /// The daemon's launch commands. Each echo answers one of the page's
+    /// applies, and the one answering the last puts the command the daemon
+    /// stored in each field that still reads as that apply sent it, and
+    /// shows Saved when both do. An echo answering none is another client's
+    /// change: it fills a field only while that field still reads as the
+    /// daemon left it.
+    pub(crate) fn on_agent_commands(&mut self, msg: DaemonMessage, cx: &mut Context<Self>) {
+        let DaemonMessage::AgentCommands { commands } = msg else {
+            return;
+        };
+        let previous = self.claude_command().cloned();
+        self.agent_commands = Some(
+            commands
+                .into_iter()
+                .map(|entry| (entry.agent, entry))
+                .collect(),
+        );
+        let stored = self.claude_command().cloned();
+        let read_only = self.launch_program_read_only();
+        if let Some(tab) = &mut self.claude_tab {
+            tab.program
+                .update(cx, |input, cx| input.set_read_only(read_only, cx));
+            let mine = tab.awaiting > 0;
+            tab.awaiting = tab.awaiting.saturating_sub(1);
+            let settles = mine && tab.awaiting == 0;
+            let (old_program, old_args) =
+                previous.map_or_else(Default::default, |entry| (entry.program, entry.args));
+            let (program, args) =
+                stored.map_or_else(Default::default, |entry| (entry.program, entry.args));
+            let (sent_program, sent_args) = if settles {
+                tab.sent.take().unwrap_or_default()
+            } else {
+                Default::default()
+            };
+            let program_as_sent = settles && tab.program_draft.trim() == sent_program;
+            let args_as_sent = settles && tab.args_draft.trim() == sent_args;
+            tab.saved = program_as_sent && args_as_sent;
+            if program_as_sent || (!mine && tab.program_draft == old_program) {
+                tab.fill(LaunchCommandRow::Program, program, cx);
+            }
+            if args_as_sent || (!mine && tab.args_draft == old_args) {
+                tab.fill(LaunchCommandRow::Args, args, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// An unrouted daemon refusal while Settings is open and a
+    /// launch-command apply waits: any refusal ends the apply, and one of
+    /// the launch-command refusals shows under the row it names. Returns
+    /// whether it took `message`; any other refusal is left to toast.
+    pub(crate) fn on_agent_command_error(&mut self, message: &str, cx: &mut Context<Self>) -> bool {
+        if !self.settings_open() {
+            return false;
+        }
+        let Some(tab) = &mut self.claude_tab else {
+            return false;
+        };
+        if tab.awaiting == 0 {
+            return false;
+        }
+        tab.awaiting -= 1;
+        tab.saved = false;
+        cx.notify();
+        let Some(row) = launch_refusal_row(message) else {
+            return false;
+        };
+        tab.refusal = Some((row, message.to_owned()));
+        true
+    }
+
+    /// Forgets the daemon's launch commands, as a disconnect does.
+    pub(crate) fn forget_agent_commands(&mut self) {
+        self.agent_commands = None;
     }
 
     /// Whether the connected daemon routes Claude to a chosen provider.
@@ -604,6 +927,8 @@ impl RootView {
             let has_keyboard = match control {
                 SettingsControl::WorktreesPath => self.worktrees_path_focused(window),
                 SettingsControl::RemotePort => self.remote_port_focused(window),
+                SettingsControl::AgentProgram => self.launch_program_focused(window),
+                SettingsControl::AgentArgs => self.launch_args_focused(window),
                 SettingsControl::Appearance(stop) if stop.is_field() => {
                     self.appearance_field_has_keyboard(*stop, window, cx)
                 }
@@ -642,6 +967,8 @@ impl RootView {
         let field = match control {
             SettingsControl::WorktreesPath => self.worktrees_tab.as_ref().map(|tab| &tab.focus),
             SettingsControl::RemotePort => self.remote_access_tab.as_ref().map(|tab| &tab.focus),
+            SettingsControl::AgentProgram => self.claude_tab.as_ref().map(|tab| &tab.program_focus),
+            SettingsControl::AgentArgs => self.claude_tab.as_ref().map(|tab| &tab.args_focus),
             _ => None,
         };
         match field {
@@ -658,6 +985,28 @@ impl RootView {
                 .remote_access_tab
                 .as_ref()
                 .is_some_and(|tab| tab.focus.is_focused(window))
+    }
+
+    /// Whether the Claude page's Program field has the keyboard.
+    fn launch_program_focused(&self, window: &Window) -> bool {
+        self.claude_page_shown()
+            && self
+                .claude_tab
+                .as_ref()
+                .is_some_and(|tab| tab.program_focus.is_focused(window))
+    }
+
+    /// Whether the Claude page's Extra arguments field has the keyboard.
+    fn launch_args_focused(&self, window: &Window) -> bool {
+        self.claude_page_shown()
+            && self
+                .claude_tab
+                .as_ref()
+                .is_some_and(|tab| tab.args_focus.is_focused(window))
+    }
+
+    fn claude_page_shown(&self) -> bool {
+        self.settings_open() && self.settings_tab == SettingsTab::Claude
     }
 
     /// Whether the Worktrees tab's path field has the keyboard.
@@ -722,7 +1071,10 @@ impl RootView {
             SettingsControl::SpawnProvider(provider) => {
                 self.set_spawn_claude_provider(provider, cx);
             }
-            SettingsControl::WorktreesPath | SettingsControl::RemotePort => {}
+            SettingsControl::WorktreesPath
+            | SettingsControl::RemotePort
+            | SettingsControl::AgentProgram
+            | SettingsControl::AgentArgs => {}
             SettingsControl::WorktreesBrowse => self.browse_worktrees_root(cx),
             SettingsControl::WorktreesSave => self.save_worktrees_root(),
             SettingsControl::WorktreesReset => self.reset_worktrees_root(cx),
@@ -1239,6 +1591,11 @@ impl RootView {
         if tab == SettingsTab::RemoteAccess {
             self.remote_access_tab = Some(self.new_remote_access_tab(window, cx));
         }
+        // The Claude page keeps its fields and the apply they wait on until
+        // Settings closes, so selecting it again loses nothing.
+        if tab == SettingsTab::Claude && self.claude_tab.is_none() {
+            self.claude_tab = Some(self.new_claude_tab(window, cx));
+        }
         self.settings_tabs_focus.focus(window);
         cx.notify();
     }
@@ -1385,6 +1742,8 @@ impl RootView {
     pub(crate) fn settings_typing(&self, window: &Window, cx: &App) -> bool {
         self.worktrees_path_focused(window)
             || self.remote_port_focused(window)
+            || self.launch_program_focused(window)
+            || self.launch_args_focused(window)
             || self.appearance_field_focused(window, cx)
     }
 
@@ -1891,7 +2250,77 @@ impl RootView {
             cx,
         );
         let section = section("Claude").child(approval).child(provider);
-        vec![section.into_any_element()]
+        let mut sections = vec![section.into_any_element()];
+        sections.extend(self.launch_command_section(focused, cx));
+        sections
+    }
+
+    /// The Claude page's Launch command section: the Program and Extra
+    /// arguments rows and their notes. On a daemon that stores no launch
+    /// command the rows are dimmed and inert; while not connected, and
+    /// before a capable daemon reported its command, there is no section.
+    fn launch_command_section(
+        &self,
+        focused: Option<SettingsControl>,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if !self.launch_rows_live() && !self.launch_command_unsupported() {
+            return None;
+        }
+        let section = section("Launch command");
+        let section = if self.launch_rows_live() {
+            let tab = self.claude_tab.as_ref()?;
+            let refusal = |row| {
+                tab.refusal
+                    .as_ref()
+                    .filter(|(at, _)| *at == row)
+                    .map(|(_, text)| text.clone())
+            };
+            let program_error = refusal(LaunchCommandRow::Program).map(|text| {
+                hint(text).debug_selector(|| "settings-agent-program-error".to_owned())
+            });
+            let args_error = refusal(LaunchCommandRow::Args)
+                .map(|text| hint(text).debug_selector(|| "settings-agent-args-error".to_owned()));
+            let env_note = self
+                .launch_program_env_note()
+                .map(|note| hint(note).debug_selector(|| "settings-agent-program-env".to_owned()));
+            let program = launch_field(
+                SettingsControl::AgentProgram,
+                &tab.program,
+                !self.launch_program_read_only(),
+                focused,
+                cx,
+            );
+            let args = launch_field(SettingsControl::AgentArgs, &tab.args, true, focused, cx);
+            let saved = self
+                .launch_saved()
+                .then(|| hint("Saved").debug_selector(|| "settings-agent-saved".to_owned()));
+            section
+                .child(
+                    field("Program")
+                        .child(program)
+                        .children(env_note)
+                        .children(program_error),
+                )
+                .child(field("Extra arguments").child(args).children(args_error))
+                .children(saved)
+        } else {
+            section
+                .child(disabled_launch_row(
+                    "Program",
+                    SettingsControl::AgentProgram,
+                    LAUNCH_PROGRAM_PLACEHOLDER,
+                ))
+                .child(disabled_launch_row(
+                    "Extra arguments",
+                    SettingsControl::AgentArgs,
+                    LAUNCH_ARGS_PLACEHOLDER,
+                ))
+        };
+        let section = section
+            .child(hint(LAUNCH_USE_HINT))
+            .child(hint(LAUNCH_QUOTING_HINT));
+        Some(section.into_any_element())
     }
 
     fn notifications_tab(
@@ -2244,6 +2673,49 @@ fn provider_row(
         row
     };
     row.into_any_element()
+}
+
+/// A launch-command field's frame round `input`; a click gives it the
+/// keyboard unless the field is read-only.
+fn launch_field(
+    control: SettingsControl,
+    input: &Entity<TextInput>,
+    editable: bool,
+    focused: Option<SettingsControl>,
+    cx: &mut Context<RootView>,
+) -> Div {
+    let frame = field_frame(focused == Some(control))
+        .debug_selector(|| control.selector().to_owned())
+        .child(input.clone());
+    if editable {
+        frame.on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                this.press_settings_control(control, window, cx);
+            }),
+        )
+    } else {
+        frame
+    }
+}
+
+/// A launch-command row on a daemon that stores no launch command: a dimmed
+/// field showing `placeholder` that takes no keys, and a tooltip saying how
+/// to get it.
+fn disabled_launch_row(
+    label: &'static str,
+    control: SettingsControl,
+    placeholder: &'static str,
+) -> Div {
+    let selector = control.selector();
+    let frame = field_frame(false)
+        .id(selector)
+        .debug_selector(|| selector.to_owned())
+        .opacity(DISABLED_OPACITY)
+        .text_color(gpui::rgb(SUBTLE))
+        .tooltip(tooltip(LAUNCH_COMMAND_UNSUPPORTED_TIP))
+        .child(placeholder);
+    field(label).child(frame)
 }
 
 /// A labelled row of segmented choices, laid out as the spawn dialog's;
