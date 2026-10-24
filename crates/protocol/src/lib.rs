@@ -11,11 +11,6 @@ pub mod env_rows;
 
 include!(concat!(env!("OUT_DIR"), "/protocol_version.rs"));
 
-/// `Welcome.features` entry: the daemon can spawn a Claude session against a
-/// chosen provider (`ClaudeProvider`). A client offers the provider choice
-/// only when the connected daemon lists it.
-pub const FEATURE_CLAUDE_PROVIDER: &str = "claude_provider";
-
 /// `Welcome.features` entry: the daemon keeps a per-agent launch command
 /// ([`ClientMessage::SetAgentCommand`], [`DaemonMessage::AgentCommands`]). A
 /// client offers the launch-command rows only when the connected daemon lists
@@ -39,61 +34,30 @@ fn default_true() -> bool {
     true
 }
 
-/// Which CLI the daemon spawns for a given session.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default, Hash)]
-#[serde(rename_all = "snake_case")]
-pub enum Agent {
-    #[default]
-    Claude,
-}
-
-impl Agent {
-    /// Lowercase tag for UI badges and log messages.
-    #[must_use]
-    pub fn as_label(self) -> &'static str {
-        match self {
-            Self::Claude => "claude",
-        }
-    }
-
-    /// All agents the daemon knows how to spawn. Used by callers that need to
-    /// iterate (e.g. orphan liveness checks that match the executable name
-    /// against every known agent's program name).
-    #[must_use]
-    pub fn all() -> &'static [Self] {
-        &[Self::Claude]
-    }
-}
-
-/// Which Anthropic-compatible endpoint a Claude Code session talks to. The
-/// provider chooses the child's routing environment at spawn; the credential
-/// it selects is never stored here.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ClaudeProvider {
-    /// Anthropic's own API (the default).
-    #[default]
-    Anthropic,
-    /// `DeepSeek`'s Anthropic-compatible endpoint.
-    Deepseek,
-    /// A provider from a newer daemon or client.
-    #[serde(other)]
-    Unknown,
-}
-
-impl ClaudeProvider {
-    /// True for [`ClaudeProvider::Anthropic`], the value serde omits on the way
-    /// out so an Anthropic spawn is byte-identical to a pre-provider one.
-    #[must_use]
-    pub fn is_anthropic(&self) -> bool {
-        matches!(self, Self::Anthropic)
-    }
-}
-
 /// The id an agent plugin registers under, such as `"claude"`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct AgentId(pub String);
+
+/// The agent a spawn runs and the options it runs with. A plain shell has
+/// none.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentSelection {
+    pub agent: AgentId,
+    /// Values keyed by the agent's [`OptionField::id`]s.
+    pub options: OptionValues,
+}
+
+/// A chip a session shows for one of its agent's options, evaluated by the
+/// daemon from the descriptor's [`ChipRule`]s.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionChip {
+    /// The chip's text: the label of the choice the option holds, else the
+    /// option's value.
+    pub text: String,
+    /// The chip's tooltip.
+    pub tip: Option<String>,
+}
 
 /// One value of an agent's option: a toggle's state, a choice's or text
 /// field's text, or no value (the field's "CLI default").
@@ -160,7 +124,7 @@ pub enum KeepAwakeMode {
 /// plugin's own program and no extra arguments.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentCommandEntry {
-    pub agent: Agent,
+    pub agent: AgentId,
     /// The program that replaces the agent's own; blank for the default.
     #[serde(default)]
     pub program: String,
@@ -296,62 +260,6 @@ pub struct ChipRule {
     pub field: String,
     pub hide_when: OptionValue,
     pub tip: String,
-}
-
-/// Per-agent configuration carried on [`SpawnRequest`], [`SpawnConfig`], and
-/// [`PresetEntry`]. The discriminant doubles as the agent selector — its
-/// `agent()` accessor returns the matching [`Agent`] variant — so callers do
-/// not need to thread `Agent` separately. Adding a new agent means adding a
-/// variant here and an [`Agent`] variant; the wire shape stays the same.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum AgentOptions {
-    Claude {
-        /// Claude's `--permission-mode <value>` flag. Ignored (and the flag
-        /// omitted) when [`SpawnRequest::dangerously_skip_permissions`] is true.
-        #[serde(default)]
-        permission_mode: Option<PermissionMode>,
-        /// The endpoint the CLI talks to. Skipped on the wire when
-        /// [`ClaudeProvider::Anthropic`], so an Anthropic spawn serializes
-        /// exactly as it did before this field existed.
-        #[serde(default, skip_serializing_if = "ClaudeProvider::is_anthropic")]
-        provider: ClaudeProvider,
-    },
-}
-
-impl AgentOptions {
-    /// Which [`Agent`] this variant selects. Derived from the variant tag.
-    #[must_use]
-    pub fn agent(&self) -> Agent {
-        match self {
-            Self::Claude { .. } => Agent::Claude,
-        }
-    }
-
-    /// Constructs [`AgentOptions::Claude`] with `permission_mode`. The
-    /// provider is [`ClaudeProvider::Anthropic`]; a `DeepSeek` spawn names its
-    /// provider on the variant directly.
-    #[must_use]
-    pub fn claude(permission_mode: Option<PermissionMode>) -> Self {
-        Self::Claude {
-            permission_mode,
-            provider: ClaudeProvider::Anthropic,
-        }
-    }
-
-    /// The Claude provider this variant carries.
-    #[must_use]
-    pub fn claude_provider(&self) -> Option<ClaudeProvider> {
-        match self {
-            Self::Claude { provider, .. } => Some(*provider),
-        }
-    }
-}
-
-impl Default for AgentOptions {
-    fn default() -> Self {
-        Self::claude(None)
-    }
 }
 
 /// The `daemon.json` discovery file written by the daemon on startup.
@@ -504,7 +412,7 @@ pub struct RepoEntry {
     /// that have never been launched (or were last touched before this field
     /// existed, hence the serde default).
     #[serde(default)]
-    pub last_agent: Option<Agent>,
+    pub last_agent: Option<AgentId>,
     /// Full spawn config captured from the last successful single-repo spawn
     /// against this repo. Drives "Launch last again" (double-click on the
     /// sidebar row, or the matching context-menu submenu). `None` for repos
@@ -675,9 +583,12 @@ pub struct SessionSnapshot {
     /// under their workspace node in the sidebar tree.
     #[serde(default)]
     pub workspace_id: Option<String>,
-    /// Which CLI is driving this session. Daemon always populates this so the
-    /// UI can label the session.
-    pub agent: Agent,
+    /// The agent driving this session; `None` for a plain shell.
+    pub agent: Option<AgentId>,
+    /// The chips the session's agent options show, evaluated by the daemon.
+    /// Empty for a plain shell and for options that show none.
+    #[serde(default)]
+    pub agent_chips: Vec<SessionChip>,
     /// Window title last emitted by the agent via OSC 0/1/2 escape sequences.
     /// Distinct from `label` so clients can preserve explicit user labels and
     /// still expose dynamic terminal titles when no user override is set.
@@ -728,13 +639,12 @@ pub struct SessionSnapshot {
     /// worktrees are currently in active use.
     #[serde(default)]
     pub worktree_paths: Vec<String>,
-    /// Claude's conversation id: the one the daemon passed as `--session-id`
-    /// when it spawned this session, or one the agent's own `SessionStart`
-    /// hook reported after a `/clear` or fork started a new conversation.
-    /// `None` for shells, headless runs, other agents, and sessions spawned
-    /// before the daemon recorded it.
+    /// The agent's conversation id: the one the daemon chose for the spawn,
+    /// or one the agent's own hooks reported after it started a new
+    /// conversation. `None` for shells, headless runs, and sessions whose
+    /// conversation is not known.
     #[serde(default)]
-    pub claude_session_id: Option<String>,
+    pub conversation_id: Option<String>,
     /// True when the user asked that this session not count as busy (a dev
     /// server, a watcher): clients leave it out of their busy counts and
     /// attention highlight. It still raises notifications. Set via
@@ -742,11 +652,6 @@ pub struct SessionSnapshot {
     /// session recovery, not by Duplicate.
     #[serde(default)]
     pub busy_excluded: bool,
-    /// The endpoint this session's `claude` CLI talks to, derived from the
-    /// session's spawn config. [`ClaudeProvider::Anthropic`] when the session
-    /// has no stored spawn config or is not a Claude session.
-    #[serde(default)]
-    pub claude_provider: ClaudeProvider,
     /// What the session is waiting for while its status is
     /// [`SessionStatus::AwaitingInput`], as reported by the agent CLI's own
     /// hooks. `None` when nothing describes it: a session the hooks never
@@ -848,7 +753,8 @@ pub struct HistoryEntry {
     pub label: String,
     pub kind: SessionKind,
     pub mode: SessionMode,
-    pub agent: Agent,
+    /// The agent the session ran; `None` for a plain shell.
+    pub agent: Option<AgentId>,
     /// The config this session was spawned with. Its `extra_env` carries
     /// references, never secret values; a secret row's literal was sealed into
     /// a `${secret:<id>}` reference at spawn.
@@ -870,19 +776,12 @@ pub struct HistoryEntry {
     pub started_at: Option<DateTime<Utc>>,
     pub ended_at: DateTime<Utc>,
     pub end: SessionEnd,
+    /// The agent's conversation the session ran, when known.
     #[serde(default)]
-    pub claude_session_id: Option<String>,
+    pub conversation_id: Option<String>,
     pub source: HistorySource,
     #[serde(default)]
     pub recovered_at: Option<DateTime<Utc>>,
-    /// Whether the session ran with permission prompts skipped, when known
-    /// without a `spawn_config` (an imported tracer log). `None` when the
-    /// `spawn_config` carries it or nothing recorded it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub skip_permissions: Option<bool>,
-    /// The model the session ran, when known without a `spawn_config`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
     /// False when an imported session's end time could not be found and
     /// `ended_at` is only the tracer log's last write, a sort key. Absent
     /// (every recorded entry) means true.
@@ -896,24 +795,15 @@ pub struct HistoryEntry {
     /// recovered session keeps it. Absent means false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub busy_excluded: bool,
-    /// The Claude provider an imported session ran on, inferred from the
-    /// `--model` its tracer log recorded. A recorded entry leaves it
-    /// Anthropic: its provider is its `spawn_config`'s (see
-    /// [`HistoryEntry::claude_provider`]). Skipped when Anthropic.
-    #[serde(default, skip_serializing_if = "ClaudeProvider::is_anthropic")]
-    pub provider: ClaudeProvider,
-}
-
-impl HistoryEntry {
-    /// The Claude provider the session ran on: its spawn config's when that
-    /// holds Claude's options, else [`HistoryEntry::provider`].
-    #[must_use]
-    pub fn claude_provider(&self) -> ClaudeProvider {
-        self.spawn_config
-            .as_ref()
-            .and_then(|config| config.agent_options.claude_provider())
-            .unwrap_or(self.provider)
-    }
+    /// The agent options an imported session ran with, read from its tracer
+    /// log. `None` for a recorded entry: its options are its `spawn_config`'s.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options: Option<OptionValues>,
+    /// True when an imported session ran with permission prompts skipped,
+    /// read from its tracer log. A recorded entry leaves it false: its
+    /// `spawn_config` carries the flag.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub trusted: bool,
 }
 
 /// One workspace member bound to a specific worktree directory that already
@@ -1029,45 +919,17 @@ pub enum CheckoutStrategy {
     Unknown,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum PermissionMode {
-    Default,
-    AcceptEdits,
-    BypassPermissions,
-    Plan,
-}
-
-impl PermissionMode {
-    /// CLI flag value as expected by `claude --permission-mode <X>`.
-    #[must_use]
-    pub fn as_cli_arg(self) -> &'static str {
-        match self {
-            Self::Default => "default",
-            Self::AcceptEdits => "acceptEdits",
-            Self::BypassPermissions => "bypassPermissions",
-            Self::Plan => "plan",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SpawnRequest {
     pub label: Option<String>,
     pub target: SpawnTarget,
     pub mode: SessionMode,
     pub initial_prompt: Option<String>,
-    /// For `agent == Claude`: corresponds to claude's
-    /// `--dangerously-skip-permissions`.
+    /// A trusted launch: the agent runs with its permission prompts skipped
+    /// (Claude's `--dangerously-skip-permissions`).
     pub dangerously_skip_permissions: bool,
-    /// Per-agent options. The variant tag doubles as the agent selector —
-    /// `agent_options.agent()` yields the [`Agent`] kind that drives executable
-    /// resolution. Each variant carries only the fields that apply to that
-    /// agent's CLI.
-    pub agent_options: AgentOptions,
-    /// Optional model override. When `None`, the CLI's default applies.
-    /// Sent as `--model <id>` to claude.
-    pub model: Option<String>,
+    /// The agent to run and its options; `None` exactly for a plain shell.
+    pub agent: Option<AgentSelection>,
     /// Extra environment variables merged on top of the daemon's keep-list;
     /// later entries override the keep-list on key collision. A value written
     /// exactly `${env:NAME}` is an env reference: the daemon reads `NAME` from
@@ -1113,14 +975,6 @@ pub struct SpawnRequest {
     pub resume_conversation: Option<String>,
 }
 
-impl SpawnRequest {
-    /// Convenience accessor — the agent kind selected by `agent_options`.
-    #[must_use]
-    pub fn agent(&self) -> Agent {
-        self.agent_options.agent()
-    }
-}
-
 /// Subset of [`SpawnRequest`] that fully describes "what kind of session
 /// this was launched as", minus identifiers and one-shot kickoff fields.
 /// Daemon persists this on each session record + orphan sidecar so a
@@ -1130,62 +984,19 @@ impl SpawnRequest {
 /// - `label`: a duplicate auto-generates a fresh `<repo>:<branch>` label.
 /// - `initial_prompt`: kickoff messages are one-shot, not part of identity.
 /// - `prompt_injector`: same — injectors deliver kickoff content.
-///
-/// Decoding accepts both the current shape (with `agent_options`) and the
-/// legacy v18 shape (with flat `agent` / `permission_mode`).
-/// Serialization always emits the current shape, so `state.json` entries
-/// rewritten by the daemon are upgraded transparently.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SpawnConfig {
     pub target: SpawnTarget,
     pub mode: SessionMode,
     pub dangerously_skip_permissions: bool,
-    pub agent_options: AgentOptions,
-    pub model: Option<String>,
+    /// See [`SpawnRequest::agent`].
+    pub agent: Option<AgentSelection>,
     /// Extra environment variables for the child, as captured at spawn. Values
     /// are literals or references (see [`SpawnRequest::extra_env`]); a secret
     /// literal was sealed into a `${secret:<id>}` reference before this config
     /// was built, so a stored or echoed config carries no secret values.
     #[serde(default)]
     pub extra_env: Vec<(String, String)>,
-}
-
-impl<'de> Deserialize<'de> for SpawnConfig {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        struct Helper {
-            target: SpawnTarget,
-            mode: SessionMode,
-            dangerously_skip_permissions: bool,
-            model: Option<String>,
-            #[serde(default)]
-            extra_env: Vec<(String, String)>,
-            #[serde(default)]
-            agent_options: Option<AgentOptions>,
-            #[serde(default)]
-            agent: Option<Agent>,
-            #[serde(default)]
-            permission_mode: Option<PermissionMode>,
-        }
-        let helper = Helper::deserialize(deserializer)?;
-        let agent_options =
-            helper
-                .agent_options
-                .unwrap_or_else(|| match helper.agent.unwrap_or_default() {
-                    Agent::Claude => AgentOptions::claude(helper.permission_mode),
-                });
-        Ok(Self {
-            target: helper.target,
-            mode: helper.mode,
-            dangerously_skip_permissions: helper.dangerously_skip_permissions,
-            agent_options,
-            model: helper.model,
-            extra_env: helper.extra_env,
-        })
-    }
 }
 
 impl SpawnTarget {
@@ -1246,8 +1057,7 @@ impl SpawnConfig {
             target: req.target.clone().with_one_shot_answers_cleared(),
             mode: req.mode,
             dangerously_skip_permissions: req.dangerously_skip_permissions,
-            agent_options: req.agent_options.clone(),
-            model: req.model.clone(),
+            agent: req.agent.clone(),
             extra_env: req.extra_env.clone(),
         }
     }
@@ -1264,8 +1074,7 @@ impl SpawnConfig {
             mode: self.mode,
             initial_prompt: None,
             dangerously_skip_permissions: self.dangerously_skip_permissions,
-            agent_options: self.agent_options.clone(),
-            model: self.model.clone(),
+            agent: self.agent.clone(),
             extra_env: self.extra_env.clone(),
             secret_env_keys: Vec::new(),
             prompt_injector: None,
@@ -1322,12 +1131,6 @@ impl SpawnConfig {
             | SpawnTarget::Standalone { .. } => {}
         }
         req
-    }
-
-    /// Convenience accessor — the agent kind selected by `agent_options`.
-    #[must_use]
-    pub fn agent(&self) -> Agent {
-        self.agent_options.agent()
     }
 }
 
@@ -2000,12 +1803,7 @@ pub enum TabGroupingConfig {
 /// Preset definition. Lives on disk in a repo's `.rustling-tulip/presets.json`
 /// (as a JSON array of these); the daemon parses + ships to clients via the
 /// [`DaemonMessage::Presets`] response.
-///
-/// Decoding accepts both the current shape (with `agent_options`) and the
-/// legacy v18 shape (with flat `agent` / `permission_mode`).
-/// Serialization always emits the current shape, so files re-saved by the
-/// daemon are upgraded transparently. See the manual `Deserialize` impl below.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PresetEntry {
     /// Stable id within a repo (author-chosen). Used by `LaunchPreset` to
     /// reference this preset.
@@ -2040,92 +1838,16 @@ pub struct PresetEntry {
     pub default_use_worktree: Option<bool>,
     #[serde(default)]
     pub dangerously_skip_permissions: bool,
+    /// The agent the preset's sessions run and its options; `None` runs the
+    /// daemon's default agent with its default options.
     #[serde(default)]
-    pub model: Option<String>,
-    /// Per-agent options. See [`AgentOptions`].
-    pub agent_options: AgentOptions,
+    pub agent: Option<AgentSelection>,
     pub tab_grouping: TabGroupingConfig,
     pub injector: InjectorTemplate,
     /// Pause between successive session spawns. Default 3000ms matches
     /// yaat's pacing; the value avoids overlapping git worktree adds.
     #[serde(default = "default_stagger_ms")]
     pub stagger_ms: u32,
-}
-
-impl<'de> Deserialize<'de> for PresetEntry {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        // Helper holds every field accepted on the wire, including the legacy
-        // flat fields (`agent` / `permission_mode`) that
-        // pre-v19 preset files may carry. After decode we normalize into the
-        // canonical `agent_options` shape.
-        #[derive(Deserialize)]
-        struct Helper {
-            id: String,
-            name: String,
-            #[serde(default)]
-            description: Option<String>,
-            #[serde(default)]
-            source_repo_id: String,
-            prompt_sources: Vec<PresetPromptSource>,
-            prompt_template: String,
-            #[serde(default)]
-            context_footer_lines: Vec<FooterLine>,
-            #[serde(default)]
-            variables: Vec<PresetVariable>,
-            branch_template: String,
-            #[serde(default)]
-            session_label_template: Option<String>,
-            #[serde(default)]
-            default_use_worktree: Option<bool>,
-            #[serde(default)]
-            dangerously_skip_permissions: bool,
-            #[serde(default)]
-            model: Option<String>,
-            // Canonical (v19+) shape.
-            #[serde(default)]
-            agent_options: Option<AgentOptions>,
-            // Legacy (≤v18) flat fields. Read-only; ignored when
-            // `agent_options` is present.
-            #[serde(default)]
-            agent: Option<Agent>,
-            #[serde(default)]
-            permission_mode: Option<PermissionMode>,
-            tab_grouping: TabGroupingConfig,
-            injector: InjectorTemplate,
-            #[serde(default = "default_stagger_ms")]
-            stagger_ms: u32,
-        }
-
-        let helper = Helper::deserialize(deserializer)?;
-        let agent_options =
-            helper
-                .agent_options
-                .unwrap_or_else(|| match helper.agent.unwrap_or_default() {
-                    Agent::Claude => AgentOptions::claude(helper.permission_mode),
-                });
-        Ok(Self {
-            id: helper.id,
-            name: helper.name,
-            description: helper.description,
-            source_repo_id: helper.source_repo_id,
-            prompt_sources: helper.prompt_sources,
-            prompt_template: helper.prompt_template,
-            context_footer_lines: helper.context_footer_lines,
-            variables: helper.variables,
-            branch_template: helper.branch_template,
-            session_label_template: helper.session_label_template,
-            default_use_worktree: helper.default_use_worktree,
-            dangerously_skip_permissions: helper.dangerously_skip_permissions,
-            model: helper.model,
-            agent_options,
-            tab_grouping: helper.tab_grouping,
-            injector: helper.injector,
-            stagger_ms: helper.stagger_ms,
-        })
-    }
 }
 
 fn default_stagger_ms() -> u32 {
@@ -2842,11 +2564,20 @@ pub enum ClientMessage {
     /// an unclosed quote in `args` or a flag the agent sets itself is refused
     /// with an `Error` and changes nothing.
     SetAgentCommand {
-        agent: Agent,
+        agent: AgentId,
         #[serde(default)]
         program: String,
         #[serde(default)]
         args: String,
+    },
+    /// Set the values `agent`'s Settings page holds, which clients use as the
+    /// spawn dialog's defaults. The daemon validates them against the agent's
+    /// option schema, persists them in `state.json`, then broadcasts
+    /// [`DaemonMessage::AgentSettings`]. An unknown agent or a value the
+    /// schema refuses is answered with an `Error` and changes nothing.
+    SetAgentSettings {
+        agent: AgentId,
+        options: OptionValues,
     },
     /// Retired with LAN pairing: it stays decodable, and the daemon answers it
     /// on every connection with the same `Error` as
@@ -3207,7 +2938,7 @@ pub enum ClientMessage {
 pub struct RecoverItem {
     /// The ended session's id: its history entry's `session_id`.
     pub history_id: String,
-    /// The Claude conversation to resume, when one was chosen. `None`
+    /// The agent's conversation to resume, when one was chosen. `None`
     /// recovers as a fresh run.
     #[serde(default)]
     pub conversation_id: Option<String>,
@@ -3218,12 +2949,17 @@ pub struct RecoverItem {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RecoverAs {
-    /// Claude resuming the conversation, in the session's own target.
-    Claude,
-    /// Register `path` as a repo, then Claude resuming the conversation there.
-    RegisterRepoThenClaude { path: String },
-    /// A plain shell in the session's folder, typing `claude --resume <id>`
-    /// when a conversation was chosen.
+    /// The session's agent resuming the conversation, in the session's own
+    /// target.
+    Agent,
+    /// Register `path` as a repo, then the agent resuming the conversation
+    /// there.
+    RegisterRepoThenAgent { path: String },
+    /// A plain shell in the session's folder that types the agent's resume
+    /// command for the chosen conversation; offered when the agent can
+    /// resume in a shell.
+    ShellResume,
+    /// A plain shell in the session's folder, with nothing typed.
     Shell,
     /// A kind from a newer client. The item fails with an error.
     #[serde(other)]
@@ -3235,7 +2971,7 @@ pub enum RecoverAs {
 pub struct SessionHistoryItem {
     pub entry: HistoryEntry,
     /// Conversations that may be the session's, newest first. Just the one
-    /// when the entry knows its `claude_session_id`.
+    /// when the entry knows its `conversation_id`.
     pub candidates: Vec<ConversationCandidate>,
     /// Whether the entry's folder is a git repo, registered or not.
     pub folder_is_git_repo: bool,
@@ -3244,10 +2980,10 @@ pub struct SessionHistoryItem {
     pub folder_repo_id: Option<String>,
 }
 
-/// A Claude conversation a history entry may be recovered into.
+/// An agent conversation a history entry may be recovered into.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConversationCandidate {
-    /// The conversation id `claude --resume` takes.
+    /// The conversation id the agent's resume takes.
     pub id: String,
     /// When the conversation's transcript was last written.
     pub last_active: DateTime<Utc>,
@@ -3601,6 +3337,17 @@ pub enum DaemonMessage {
     /// [`ClientMessage::SetAgentCommand`].
     AgentCommands {
         commands: Vec<AgentCommandEntry>,
+    },
+    /// Every registered agent's descriptor, in the daemon's order. Sent once
+    /// per connection, after `Welcome` and before `Sessions`.
+    Agents {
+        agents: Vec<AgentDescriptor>,
+    },
+    /// Every agent's Settings page values, keyed by agent. Sent after
+    /// [`DaemonMessage::Agents`] at initial state and broadcast after every
+    /// [`ClientMessage::SetAgentSettings`].
+    AgentSettings {
+        settings: std::collections::BTreeMap<AgentId, OptionValues>,
     },
     /// Current remote (Tailscale) access status. Sent once at initial state
     /// and broadcast on every change: a [`ClientMessage::ConfigureRemote`],
@@ -5106,8 +4853,10 @@ mod tests {
             session_label_template: Some("bug-{index}: {slug}".to_string()),
             default_use_worktree: Some(true),
             dangerously_skip_permissions: true,
-            model: None,
-            agent_options: AgentOptions::claude(None),
+            agent: Some(AgentSelection {
+                agent: claude_id(),
+                options: OptionValues::new(),
+            }),
             tab_grouping: TabGroupingConfig::NewTab {
                 layout: TabLayout::BalancedHorizontal,
                 max_panes_per_tab: Some(6),
@@ -5396,7 +5145,7 @@ mod tests {
         assert_eq!(preset.variables, Vec::<PresetVariable>::new());
         assert_eq!(preset.context_footer_lines, Vec::<FooterLine>::new());
         assert_eq!(preset.default_use_worktree, None);
-        assert_eq!(preset.agent_options, AgentOptions::claude(None));
+        assert_eq!(preset.agent, None);
     }
 
     #[test]
@@ -5415,8 +5164,7 @@ mod tests {
             mode: SessionMode::Interactive,
             initial_prompt: None,
             dangerously_skip_permissions: true,
-            agent_options: AgentOptions::claude(None),
-            model: None,
+            agent: Some(deepseek_selection()),
             extra_env: vec![],
             prompt_injector: Some(PromptInjector {
                 steps: vec![
@@ -5465,8 +5213,7 @@ mod tests {
             mode: SessionMode::PlainShell,
             initial_prompt: None,
             dangerously_skip_permissions: false,
-            agent_options: AgentOptions::claude(None),
-            model: None,
+            agent: None,
             extra_env: vec![],
             secret_env_keys: Vec::new(),
             prompt_injector: None,
@@ -5480,8 +5227,8 @@ mod tests {
         assert!(json.contains(r#""mode":"plain_shell""#));
     }
 
-    /// A Claude spawn request whose only varying option is the provider.
-    fn claude_spawn_request(provider: ClaudeProvider) -> SpawnRequest {
+    /// An interactive Claude spawn request on `DeepSeek`.
+    fn claude_spawn_request() -> SpawnRequest {
         SpawnRequest {
             label: None,
             target: SpawnTarget::Single {
@@ -5496,11 +5243,7 @@ mod tests {
             mode: SessionMode::Interactive,
             initial_prompt: None,
             dangerously_skip_permissions: false,
-            agent_options: AgentOptions::Claude {
-                permission_mode: None,
-                provider,
-            },
-            model: None,
+            agent: Some(deepseek_selection()),
             extra_env: vec![],
             secret_env_keys: Vec::new(),
             prompt_injector: None,
@@ -5510,56 +5253,22 @@ mod tests {
     }
 
     #[test]
-    fn an_anthropic_spawn_request_has_no_provider_key() {
-        let req = claude_spawn_request(ClaudeProvider::Anthropic);
-        let json = serde_json::to_string(&req).expect("serialize");
-        assert!(!json.contains(r#""provider""#), "{json}");
-    }
-
-    #[test]
-    fn a_deepseek_spawn_request_round_trips() {
-        let req = claude_spawn_request(ClaudeProvider::Deepseek);
-        let json = serde_json::to_string(&req).expect("serialize");
-        assert!(json.contains(r#""provider":"deepseek""#), "{json}");
-        let back: SpawnRequest = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(back, req);
-        assert_eq!(
-            back.agent_options.claude_provider(),
-            Some(ClaudeProvider::Deepseek)
-        );
-    }
-
-    #[test]
-    fn an_unknown_provider_decodes_as_unknown() {
-        let options: AgentOptions =
-            serde_json::from_str(r#"{"kind":"claude","provider":"mistral"}"#).expect("decode");
-        assert_eq!(options.claude_provider(), Some(ClaudeProvider::Unknown));
-    }
-
-    #[test]
-    fn clone_and_duplicate_keep_the_provider() {
-        let req = claude_spawn_request(ClaudeProvider::Deepseek);
+    fn clone_and_duplicate_keep_the_agent_selection() {
+        let req = claude_spawn_request();
         let config = SpawnConfig::from_request(&req);
-        assert_eq!(
-            config.agent_options.claude_provider(),
-            Some(ClaudeProvider::Deepseek)
-        );
-        assert_eq!(
-            config.to_clone_request().agent_options.claude_provider(),
-            Some(ClaudeProvider::Deepseek)
-        );
+        assert_eq!(config.agent, Some(deepseek_selection()));
+        assert_eq!(config.to_clone_request().agent, Some(deepseek_selection()));
         assert_eq!(
             config
                 .to_duplicate_request(Some("wt/brave-lynx".to_string()))
-                .agent_options
-                .claude_provider(),
-            Some(ClaudeProvider::Deepseek)
+                .agent,
+            Some(deepseek_selection())
         );
     }
 
     #[test]
     fn a_captured_config_drops_the_one_shot_answers() {
-        let mut req = claude_spawn_request(ClaudeProvider::Anthropic);
+        let mut req = claude_spawn_request();
         let SpawnTarget::Single {
             checkout_strategy,
             worktree_reuse,
@@ -5596,8 +5305,10 @@ mod tests {
             target,
             mode: SessionMode::PlainShell,
             dangerously_skip_permissions: true,
-            agent_options: AgentOptions::claude(None),
-            model: Some("sonnet-4".to_string()),
+            agent: Some(AgentSelection {
+                agent: claude_id(),
+                options: option_values(&[("model", text("sonnet-4"))]),
+            }),
             extra_env: vec![("RT_TEST".to_string(), "1".to_string())],
         }
     }
@@ -5649,7 +5360,7 @@ mod tests {
         // Everything that isn't the branch or the collision policy is the
         // verbatim clone.
         assert_eq!(req.mode, config.mode);
-        assert_eq!(req.model, config.model);
+        assert_eq!(req.agent, config.agent);
         assert_eq!(req.extra_env, config.extra_env);
         assert!(req.dangerously_skip_permissions);
         assert_eq!(req.label, None);
@@ -6372,19 +6083,19 @@ mod tests {
         let welcome = DaemonMessage::Welcome {
             protocol_version: 23,
             supported_versions: vec![23, 22],
-            features: vec![FEATURE_CLAUDE_PROVIDER.to_owned(), "later".to_owned()],
+            features: vec![FEATURE_AGENT_COMMANDS.to_owned(), "later".to_owned()],
         };
         let json = serde_json::to_value(&welcome).expect("encode welcome");
         assert_eq!(
             json["features"],
-            serde_json::json!(["claude_provider", "later"])
+            serde_json::json!(["agent_commands", "later"])
         );
         let back: DaemonMessage = serde_json::from_value(json).expect("decode welcome");
         assert!(
             matches!(
                 &back,
                 DaemonMessage::Welcome { protocol_version: 23, features, .. }
-                    if features == &["claude_provider", "later"]
+                    if features == &["agent_commands", "later"]
             ),
             "{back:?}"
         );
@@ -6479,25 +6190,6 @@ mod tests {
     }
 
     #[test]
-    fn preset_entry_decodes_without_agent() {
-        // User-edited `.rustling-tulip/presets.json` files may lack any agent
-        // information at all (pre-v17). With no `agent_options`, no flat
-        // `agent`, and no `permission_mode`, the legacy fallback chooses the
-        // default Claude variant with no permission mode.
-        let legacy = r#"{
-            "id": "smoke",
-            "name": "Smoke",
-            "prompt_sources": [{"kind":"inline"}],
-            "prompt_template": "{prompt}",
-            "branch_template": "tmp/{index}",
-            "tab_grouping": {"kind":"none"},
-            "injector": {"startup_delay_ms": 0, "pre_input": [], "post_input": []}
-        }"#;
-        let preset: PresetEntry = serde_json::from_str(legacy).expect("parse legacy preset");
-        assert_eq!(preset.agent_options, AgentOptions::claude(None));
-    }
-
-    #[test]
     fn cleanup_action_without_branch_defaults_to_auto() {
         // Every shipped client predates the field; their discards must keep
         // meaning "reap the branch if it looks merged".
@@ -6560,7 +6252,7 @@ mod tests {
     #[test]
     fn agent_command_messages_round_trip() {
         let set = ClientMessage::SetAgentCommand {
-            agent: Agent::Claude,
+            agent: claude_id(),
             program: "claude-wrapper".to_owned(),
             args: "--debug \"a b\"".to_owned(),
         };
@@ -6578,8 +6270,10 @@ mod tests {
         assert!(
             matches!(
                 &back,
-                ClientMessage::SetAgentCommand { agent: Agent::Claude, program, args }
-                    if program == "claude-wrapper" && args == "--debug \"a b\""
+                ClientMessage::SetAgentCommand { agent, program, args }
+                    if agent == &claude_id()
+                        && program == "claude-wrapper"
+                        && args == "--debug \"a b\""
             ),
             "{back:?}"
         );
@@ -6587,13 +6281,13 @@ mod tests {
         let commands = DaemonMessage::AgentCommands {
             commands: vec![
                 AgentCommandEntry {
-                    agent: Agent::Claude,
+                    agent: claude_id(),
                     program: "cl".to_owned(),
                     args: "--debug".to_owned(),
                     program_env: Some("RUSTLING_TULIP_CLAUDE".to_owned()),
                 },
                 AgentCommandEntry {
-                    agent: Agent::Claude,
+                    agent: claude_id(),
                     program: String::new(),
                     args: String::new(),
                     program_env: None,
@@ -6817,8 +6511,7 @@ mod tests {
             mode: SessionMode::Interactive,
             initial_prompt: None,
             dangerously_skip_permissions: false,
-            agent_options: AgentOptions::claude(None),
-            model: None,
+            agent: Some(deepseek_selection()),
             extra_env: vec![],
             secret_env_keys: Vec::new(),
             prompt_injector: None,
@@ -7380,7 +7073,8 @@ mod tests {
         assert_eq!(entry.source, HistorySource::Record);
         assert_eq!(entry.spawn_config, None);
         assert_eq!(entry.started_at, None);
-        assert_eq!(entry.claude_session_id, None);
+        assert_eq!(entry.conversation_id, None);
+        assert_eq!(entry.agent, Some(claude_id()));
         assert_eq!(entry.recovered_at, None);
     }
 
@@ -7411,12 +7105,12 @@ mod tests {
                 "spawn_config":{"target":{"kind":"workspace","workspace_id":"ws1","branch_name":"main","base_branch":null,
                                           "use_worktree":false,"worktree_reuse":"reuse","existing_worktrees":[]},
                                 "mode":"interactive","dangerously_skip_permissions":true,
-                                "agent_options":{"kind":"claude","permission_mode":null},"model":null,"extra_env":[]},
+                                "agent":{"agent":"claude","options":{"permission_mode":null}},"extra_env":[]},
                 "members":[{"repo_id":"repo-yaat","repo_name":"yaat","branch":"main","worktree_path":"D:\\yaat"}],
                 "workspace_id":"ws1",
                 "primary_cwd":"D:\\yaat","current_cwd":null,"program_name":"claude",
                 "started_at":"2026-09-27T11:09:41Z","ended_at":"2026-09-27T18:29:06Z",
-                "end":{"type":"tracer_lost"},"claude_session_id":null,"source":"tracer_log","recovered_at":null,
+                "end":{"type":"tracer_lost"},"conversation_id":null,"source":"tracer_log","recovered_at":null,
                 "end_time_known":true,"import_rev":1},
        "candidates":[{"id":"85573bb1-c581-489e-baaa-94d5a384744c","last_active":"2026-09-27T18:27:37Z","title":"Fix the …"}],
        "folder_is_git_repo":true,"folder_repo_id":"repo-yaat"}
@@ -7442,31 +7136,10 @@ mod tests {
         assert_eq!(item.folder_repo_id.as_deref(), Some("repo-yaat"));
     }
 
-    #[test]
-    fn history_entry_round_trips_recorded_flags_and_defaults_them_when_absent() {
-        let entry: HistoryEntry = assert_round_trip(
-            r#"{"session_id":"s1","label":"","kind":"standalone","mode":"interactive","agent":"claude",
-                "spawn_config":null,"members":[],"workspace_id":null,"primary_cwd":"D:\\proj",
-                "current_cwd":null,"program_name":"claude","started_at":null,
-                "ended_at":"2026-09-27T18:29:06Z","end":{"type":"tracer_lost"},
-                "claude_session_id":null,"source":"tracer_log","recovered_at":null,
-                "skip_permissions":true,"model":"opus","end_time_known":true,"import_rev":0}"#,
-        );
-        assert_eq!(entry.skip_permissions, Some(true));
-        assert_eq!(entry.model.as_deref(), Some("opus"));
-
-        let msg: DaemonMessage = assert_round_trip(SESSION_HISTORY_JSON);
-        let DaemonMessage::SessionHistory { items, .. } = msg else {
-            panic!("decoded as another message");
-        };
-        assert_eq!(items[0].entry.skip_permissions, None);
-        assert_eq!(items[0].entry.model, None);
-    }
-
     const IMPORTED_ENTRY_PREFIX: &str = r#"{"session_id":"s1","label":"","kind":"standalone","mode":"plain_shell",
-        "agent":"claude","spawn_config":null,"members":[],"workspace_id":null,"primary_cwd":"D:\\",
+        "agent":null,"spawn_config":null,"members":[],"workspace_id":null,"primary_cwd":"D:\\",
         "current_cwd":"D:\\","program_name":"pwsh","started_at":"2026-09-27T10:31:00Z",
-        "ended_at":"2026-09-27T10:31:05Z","end":{"type":"tracer_lost"},"claude_session_id":null,
+        "ended_at":"2026-09-27T10:31:05Z","end":{"type":"tracer_lost"},"conversation_id":null,
         "source":"tracer_log","recovered_at":null"#;
 
     #[test]
@@ -7506,9 +7179,10 @@ mod tests {
     #[test]
     fn recover_sessions_matches_the_wire_contract() {
         let json = r#"{"type":"recover_sessions","request_id":"r2","items":[
-          {"history_id":"h1","conversation_id":null,"how":{"type":"claude"}},
-          {"history_id":"h2","conversation_id":"85573bb1","how":{"type":"register_repo_then_claude","path":"D:\\foo"}},
-          {"history_id":"h3","conversation_id":"85573bb1","how":{"type":"shell"}}
+          {"history_id":"h1","conversation_id":null,"how":{"type":"agent"}},
+          {"history_id":"h2","conversation_id":"85573bb1","how":{"type":"register_repo_then_agent","path":"D:\\foo"}},
+          {"history_id":"h3","conversation_id":"85573bb1","how":{"type":"shell_resume"}},
+          {"history_id":"h4","conversation_id":null,"how":{"type":"shell"}}
         ]}"#;
         let msg: ClientMessage = assert_round_trip(json);
         let ClientMessage::RecoverSessions { request_id, items } = msg else {
@@ -7519,10 +7193,11 @@ mod tests {
         assert_eq!(
             hows,
             [
-                RecoverAs::Claude,
-                RecoverAs::RegisterRepoThenClaude {
+                RecoverAs::Agent,
+                RecoverAs::RegisterRepoThenAgent {
                     path: r"D:\foo".to_owned()
                 },
+                RecoverAs::ShellResume,
                 RecoverAs::Shell,
             ]
         );
@@ -7571,7 +7246,7 @@ mod tests {
         let req: SpawnRequest = serde_json::from_str(
             r#"{"label":null,"target":{"kind":"standalone","cwd":"D:\\x"},"mode":"interactive",
                 "initial_prompt":null,"dangerously_skip_permissions":false,
-                "agent_options":{"kind":"claude"},"model":null}"#,
+                "agent":{"agent":"claude","options":{}}}"#,
         )
         .expect("decode a request from an older client");
         assert_eq!(req.resume_conversation, None);
@@ -7691,23 +7366,6 @@ mod tests {
             ),
             "{old:?}"
         );
-    }
-
-    #[test]
-    fn history_entry_provider_defaults_to_anthropic_and_round_trips_deepseek() {
-        let old = format!("{IMPORTED_ENTRY_PREFIX}}}");
-        let entry: HistoryEntry = serde_json::from_str(&old).expect("decode an older entry");
-        assert_eq!(entry.provider, ClaudeProvider::Anthropic);
-        assert_eq!(entry.claude_provider(), ClaudeProvider::Anthropic);
-        let encoded = serde_json::to_value(&entry).expect("encode");
-        assert!(encoded.get("provider").is_none(), "{encoded}");
-
-        let json = format!(
-            r#"{IMPORTED_ENTRY_PREFIX},"end_time_known":true,"import_rev":2,"provider":"deepseek"}}"#
-        );
-        let entry: HistoryEntry = assert_round_trip(&json);
-        assert_eq!(entry.provider, ClaudeProvider::Deepseek);
-        assert_eq!(entry.claude_provider(), ClaudeProvider::Deepseek);
     }
 
     #[test]
@@ -7845,7 +7503,7 @@ mod tests {
     fn secret_env_keys_defaults_empty_and_is_not_serialized_when_empty() {
         // A client that predates the field sends no `secret_env_keys`.
         let req: SpawnRequest = serde_json::from_str(
-            r#"{"label":null,"target":{"kind":"single","repo_id":"r1","branch_name":"main","base_branch":null,"use_worktree":false},"mode":"interactive","initial_prompt":null,"dangerously_skip_permissions":false,"agent_options":{"kind":"claude"},"model":null}"#,
+            r#"{"label":null,"target":{"kind":"single","repo_id":"r1","branch_name":"main","base_branch":null,"use_worktree":false},"mode":"interactive","initial_prompt":null,"dangerously_skip_permissions":false,"agent":{"agent":"claude","options":{}}}"#,
         )
         .expect("a request without secret_env_keys decodes");
         assert!(req.secret_env_keys.is_empty(), "{req:?}");
@@ -7863,5 +7521,332 @@ mod tests {
         };
         let json = serde_json::to_string(&req).expect("encode");
         assert!(json.contains(r#""secret_env_keys":["GH_PAT"]"#), "{json}");
+    }
+
+    fn claude_id() -> AgentId {
+        AgentId("claude".to_owned())
+    }
+
+    fn option_values(pairs: &[(&str, OptionValue)]) -> OptionValues {
+        pairs
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), value.clone()))
+            .collect()
+    }
+
+    fn text(value: &str) -> OptionValue {
+        OptionValue::Text(value.to_owned())
+    }
+
+    /// Claude on `DeepSeek`, one of each kind of value.
+    fn deepseek_selection() -> AgentSelection {
+        AgentSelection {
+            agent: claude_id(),
+            options: option_values(&[
+                ("provider", text("deepseek")),
+                ("model", OptionValue::Null),
+                ("sandbox", OptionValue::Bool(true)),
+            ]),
+        }
+    }
+
+    #[test]
+    fn agent_selection_round_trips() {
+        let selection = deepseek_selection();
+        let json = serde_json::to_value(&selection).expect("encode");
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "agent": "claude",
+                "options": {"model": null, "provider": "deepseek", "sandbox": true},
+            })
+        );
+        let back: AgentSelection = serde_json::from_value(json).expect("decode");
+        assert_eq!(back, selection);
+    }
+
+    #[test]
+    fn spawn_request_without_an_agent_is_a_plain_shell() {
+        let req: SpawnRequest = serde_json::from_str(
+            r#"{"label":null,"target":{"kind":"standalone","cwd":"D:\\x"},"mode":"plain_shell",
+                "initial_prompt":null,"dangerously_skip_permissions":false}"#,
+        )
+        .expect("a request naming no agent decodes");
+        assert_eq!(req.agent, None);
+        let json = serde_json::to_value(&req).expect("encode");
+        assert_eq!(json["agent"], serde_json::Value::Null, "{json}");
+        let config = SpawnConfig::from_request(&req);
+        assert_eq!(config.agent, None);
+        assert_eq!(config.to_clone_request().agent, None);
+
+        let agent_req = SpawnRequest {
+            agent: Some(deepseek_selection()),
+            ..req
+        };
+        let json = serde_json::to_string(&agent_req).expect("encode");
+        let back: SpawnRequest = serde_json::from_str(&json).expect("decode");
+        assert_eq!(back, agent_req);
+    }
+
+    fn sample_descriptor() -> AgentDescriptor {
+        AgentDescriptor {
+            id: claude_id(),
+            label: "Claude".to_owned(),
+            tag: "claude".to_owned(),
+            accent: AccentToken::Claude,
+            shift_enter: ShiftEnter::BackslashCr,
+            caps: AgentCaps {
+                headless: true,
+                resume: true,
+                extra_folders: true,
+                shell_resume: true,
+            },
+            trust_note: Some("Trusted launch skips prompts.".to_owned()),
+            texts: AgentTexts {
+                shell_resume_label: "Shell running claude --resume".to_owned(),
+                no_conversation: "no conversation found".to_owned(),
+            },
+            fields: vec![OptionField {
+                id: "provider".to_owned(),
+                label: "Provider".to_owned(),
+                help: None,
+                kind: FieldKind::Choice {
+                    choices: vec![
+                        Choice {
+                            value: "anthropic".to_owned(),
+                            label: "Anthropic".to_owned(),
+                        },
+                        Choice {
+                            value: "deepseek".to_owned(),
+                            label: "DeepSeek".to_owned(),
+                        },
+                    ],
+                    style: ChoiceStyle::Segmented,
+                },
+                default: text("anthropic"),
+                settings: true,
+                spawn: SpawnPlacement::Main,
+                locked_when_trusted: false,
+                when: vec![FieldRule {
+                    if_field: "sandbox".to_owned(),
+                    equals: OptionValue::Bool(true),
+                    then: FieldOverride {
+                        hidden: Some(true),
+                        placeholder: None,
+                        suggestions: None,
+                    },
+                }],
+            }],
+            chips: vec![ChipRule {
+                field: "provider".to_owned(),
+                hide_when: text("anthropic"),
+                tip: "Runs on DeepSeek".to_owned(),
+            }],
+        }
+    }
+
+    #[test]
+    fn agents_message_round_trips_a_descriptor() {
+        let msg = DaemonMessage::Agents {
+            agents: vec![sample_descriptor()],
+        };
+        let json = serde_json::to_value(&msg).expect("encode");
+        assert_eq!(json["type"], "agents");
+        assert_eq!(json["agents"][0]["id"], "claude");
+        assert_eq!(json["agents"][0]["fields"][0]["kind"]["kind"], "choice");
+        let text = serde_json::to_string(&json).expect("encode text");
+        let InboundDaemonMessage::Known(back) =
+            InboundDaemonMessage::from_json_str(&text).expect("parse")
+        else {
+            panic!("agents parsed as unknown");
+        };
+        let DaemonMessage::Agents { agents } = *back else {
+            panic!("decoded as another message: {back:?}");
+        };
+        assert_eq!(agents, vec![sample_descriptor()]);
+    }
+
+    #[test]
+    fn agent_settings_message_round_trips_a_btreemap_keyed_by_agent_id() {
+        let settings = std::collections::BTreeMap::from([
+            (
+                claude_id(),
+                option_values(&[("provider", text("deepseek"))]),
+            ),
+            (AgentId("aider".to_owned()), OptionValues::new()),
+        ]);
+        let json = serde_json::to_value(DaemonMessage::AgentSettings {
+            settings: settings.clone(),
+        })
+        .expect("encode");
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "type": "agent_settings",
+                "settings": {"aider": {}, "claude": {"provider": "deepseek"}},
+            })
+        );
+        let back: DaemonMessage = serde_json::from_value(json).expect("decode");
+        let DaemonMessage::AgentSettings { settings: back } = back else {
+            panic!("decoded as another message: {back:?}");
+        };
+        assert_eq!(back, settings);
+    }
+
+    #[test]
+    fn set_agent_settings_round_trips() {
+        let msg: ClientMessage = assert_round_trip(
+            r#"{"type":"set_agent_settings","agent":"claude","options":{"permission_mode":"plan","model":null}}"#,
+        );
+        let ClientMessage::SetAgentSettings { agent, options } = msg else {
+            panic!("decoded as another message: {msg:?}");
+        };
+        assert_eq!(agent, claude_id());
+        assert_eq!(
+            options,
+            option_values(&[
+                ("permission_mode", text("plan")),
+                ("model", OptionValue::Null)
+            ])
+        );
+    }
+
+    #[test]
+    fn session_snapshot_carries_agent_chips_and_conversation_id() {
+        let snapshot: SessionSnapshot =
+            serde_json::from_str(SNAPSHOT_WITHOUT_STATUS_SINCE).expect("decode");
+        let chips = vec![
+            SessionChip {
+                text: "DeepSeek".to_owned(),
+                tip: Some("Runs on DeepSeek".to_owned()),
+            },
+            SessionChip {
+                text: "plan".to_owned(),
+                tip: None,
+            },
+        ];
+        let json = serde_json::to_value(SessionSnapshot {
+            agent_chips: chips.clone(),
+            conversation_id: Some("c-1".to_owned()),
+            ..snapshot
+        })
+        .expect("encode");
+        assert_eq!(
+            json["agent_chips"],
+            serde_json::json!([
+                {"text": "DeepSeek", "tip": "Runs on DeepSeek"},
+                {"text": "plan", "tip": null},
+            ])
+        );
+        assert_eq!(json["conversation_id"], "c-1");
+        assert!(json.get("claude_session_id").is_none(), "{json}");
+        assert!(json.get("claude_provider").is_none(), "{json}");
+        let back: SessionSnapshot = serde_json::from_value(json).expect("decode");
+        assert_eq!(back.agent_chips, chips);
+        assert_eq!(back.conversation_id.as_deref(), Some("c-1"));
+        assert_eq!(back.agent, Some(claude_id()));
+    }
+
+    #[test]
+    fn session_snapshot_defaults_agent_chips_to_empty() {
+        let snapshot: SessionSnapshot =
+            serde_json::from_str(SNAPSHOT_WITHOUT_STATUS_SINCE).expect("decode");
+        assert!(snapshot.agent_chips.is_empty(), "{snapshot:?}");
+        assert_eq!(snapshot.conversation_id, None);
+
+        let shell = SNAPSHOT_WITHOUT_STATUS_SINCE.replace(r#""agent":"claude""#, r#""agent":null"#);
+        let shell: SessionSnapshot = serde_json::from_str(&shell).expect("decode a shell");
+        assert_eq!(shell.agent, None);
+    }
+
+    #[test]
+    fn recover_as_matches_the_new_wire_contract() {
+        let cases = [
+            (RecoverAs::Agent, serde_json::json!({"type": "agent"})),
+            (
+                RecoverAs::RegisterRepoThenAgent {
+                    path: r"D:\foo".to_owned(),
+                },
+                serde_json::json!({"type": "register_repo_then_agent", "path": r"D:\foo"}),
+            ),
+            (
+                RecoverAs::ShellResume,
+                serde_json::json!({"type": "shell_resume"}),
+            ),
+            (RecoverAs::Shell, serde_json::json!({"type": "shell"})),
+        ];
+        for (how, json) in cases {
+            assert_eq!(serde_json::to_value(&how).expect("encode"), json);
+            let back: RecoverAs = serde_json::from_value(json).expect("decode");
+            assert_eq!(back, how);
+        }
+        for old in [
+            r#"{"type":"claude"}"#,
+            r#"{"type":"register_repo_then_claude","path":"D:\\foo"}"#,
+        ] {
+            let how: RecoverAs = serde_json::from_str(old).expect("decode");
+            assert_eq!(how, RecoverAs::Unknown, "{old}");
+        }
+    }
+
+    #[test]
+    fn descriptor_unknown_kinds_decode() {
+        let kind: FieldKind =
+            serde_json::from_str(r#"{"kind":"slider","min":0}"#).expect("decode a field kind");
+        assert_eq!(kind, FieldKind::Unknown);
+        let style: ChoiceStyle = serde_json::from_str(r#""radio""#).expect("decode a style");
+        assert_eq!(style, ChoiceStyle::Unknown);
+        let placement: SpawnPlacement =
+            serde_json::from_str(r#""sidebar""#).expect("decode a placement");
+        assert_eq!(placement, SpawnPlacement::Unknown);
+        let accent: AccentToken = serde_json::from_str(r#""neon""#).expect("decode an accent");
+        assert_eq!(accent, AccentToken::Unknown);
+        let shift_enter: ShiftEnter =
+            serde_json::from_str(r#""ctrl_j""#).expect("decode a shift-enter");
+        assert_eq!(shift_enter, ShiftEnter::Unknown);
+    }
+
+    #[test]
+    fn option_value_untagged_round_trips() {
+        for (json, value) in [
+            ("true", OptionValue::Bool(true)),
+            ("false", OptionValue::Bool(false)),
+            (r#""plan""#, text("plan")),
+            (r#""""#, text("")),
+            ("null", OptionValue::Null),
+        ] {
+            let decoded: OptionValue = serde_json::from_str(json).expect("decode");
+            assert_eq!(decoded, value, "{json}");
+            assert_eq!(serde_json::to_string(&value).expect("encode"), json);
+        }
+        let values: OptionValues =
+            assert_round_trip(r#"{"model":null,"provider":"deepseek","sandbox":false}"#);
+        assert_eq!(values.get("sandbox"), Some(&OptionValue::Bool(false)));
+    }
+
+    #[test]
+    fn history_entry_round_trips_import_options_and_trust() {
+        let json = format!(
+            r#"{IMPORTED_ENTRY_PREFIX},"end_time_known":true,"import_rev":3,
+                "options":{{"model":"deepseek-flash","provider":"deepseek"}},"trusted":true}}"#
+        );
+        let entry: HistoryEntry = assert_round_trip(&json);
+        assert_eq!(
+            entry.options,
+            Some(option_values(&[
+                ("model", text("deepseek-flash")),
+                ("provider", text("deepseek")),
+            ]))
+        );
+        assert!(entry.trusted);
+        assert_eq!(entry.agent, None);
+
+        let bare: HistoryEntry =
+            serde_json::from_str(&format!("{IMPORTED_ENTRY_PREFIX}}}")).expect("decode");
+        assert_eq!(bare.options, None);
+        assert!(!bare.trusted);
+        let encoded = serde_json::to_value(&bare).expect("encode");
+        assert!(encoded.get("options").is_none(), "{encoded}");
+        assert!(encoded.get("trusted").is_none(), "{encoded}");
     }
 }

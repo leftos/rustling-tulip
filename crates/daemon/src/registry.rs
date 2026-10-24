@@ -4,7 +4,9 @@ use crate::git;
 use crate::paths::simplify_path;
 use crate::state::{AppState, PersistedState};
 use anyhow::{Context as _, anyhow};
-use protocol::{Agent, AppearanceOverrides, ContainerRef, RepoEntry, SpawnConfig, WorkspaceEntry};
+use protocol::{
+    AgentId, AppearanceOverrides, ContainerRef, RepoEntry, SpawnConfig, WorkspaceEntry,
+};
 use std::path::Path;
 use uuid::Uuid;
 
@@ -165,10 +167,10 @@ pub fn ensure_default_branch(
 /// Record which agent was last spawned against a given repo. Drives the
 /// spawn-dialog default so repeated launches don't force the user to re-pick.
 /// Silently no-ops if `repo_id` does not match any registered repo.
-pub fn persist_last_agent(state: &AppState, repo_id: &str, agent: Agent) -> anyhow::Result<()> {
+pub fn persist_last_agent(state: &AppState, repo_id: &str, agent: &AgentId) -> anyhow::Result<()> {
     state.mutate(|s| {
         if let Some(repo) = s.repos.iter_mut().find(|r| r.id == repo_id) {
-            repo.last_agent = Some(agent);
+            repo.last_agent = Some(agent.clone());
         }
     })
 }

@@ -15,8 +15,8 @@ use std::time::Duration;
 
 use gpui::{TestAppContext, px};
 use protocol::{
-    AgentOptions, CheckoutStrategy, ClientMessage, DaemonMessage, SessionMode, SessionSnapshot,
-    SpawnRequest, SpawnTarget, SplitDirection, WorktreeReusePolicy,
+    CheckoutStrategy, ClientMessage, DaemonMessage, SessionMode, SessionSnapshot, SpawnRequest,
+    SpawnTarget, SplitDirection, WorktreeReusePolicy,
 };
 use rustling_tulip_native::{OpenIn, TOAST_LIFETIME, ToastKind, ToastSpec};
 use support::{Fixture, Harness, TestDir, pane, session, split, tab};
@@ -42,8 +42,10 @@ fn request(use_worktree: bool) -> SpawnRequest {
         mode: SessionMode::Interactive,
         initial_prompt: None,
         dangerously_skip_permissions: false,
-        agent_options: AgentOptions::claude(None),
-        model: None,
+        agent: Some(
+            serde_json::from_value(serde_json::json!({ "agent": "claude", "options": {} }))
+                .expect("agent selection"),
+        ),
         extra_env: Vec::new(),
         secret_env_keys: Vec::new(),
         prompt_injector: None,

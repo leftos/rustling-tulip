@@ -134,7 +134,7 @@ fn build_hook_settings(tracer_exe: &Path, session_id: &str, config_dir: &Path) -
 )]
 mod tests {
     use super::*;
-    use protocol::PermissionMode;
+    use crate::options::PermissionMode;
     use serde_json::{Value, json};
 
     /// A spawn's options and whether it was trusted.

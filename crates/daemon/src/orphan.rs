@@ -15,7 +15,7 @@ use crate::paths::Dirs;
 use anyhow::{Context as _, anyhow};
 use chrono::{DateTime, Utc};
 use protocol::{
-    Agent, AppearanceOverrides, PendingInput, SessionKind, SessionMember, SessionMode,
+    AgentId, AppearanceOverrides, PendingInput, SessionKind, SessionMember, SessionMode,
     SessionStatus, SpawnConfig,
 };
 use serde::{Deserialize, Serialize};
@@ -82,11 +82,10 @@ pub struct OrphanMeta {
     /// `claude`/`node` heuristic when it is `None`.
     #[serde(default)]
     pub program_name: Option<String>,
-    /// Which CLI spawned this session; a plain shell carries the default
-    /// agent. `None` for metas written before this field existed; reattach
-    /// uses the default agent in that case.
+    /// Which agent this session runs; `None` for a plain shell. Reattach
+    /// uses the default agent for a shell's record.
     #[serde(default)]
-    pub agent: Option<Agent>,
+    pub agent: Option<AgentId>,
     /// Latest OSC-emitted window title. Stored alongside the canonical label
     /// so a daemon restart reattaches the orphan with the same annotation it
     /// had. `None` for metas written before this field existed; the OSC
@@ -165,11 +164,11 @@ pub struct OrphanMeta {
     /// known-in-use paths in its retain set.
     #[serde(default)]
     pub tracer_exe_path: Option<String>,
-    /// The Claude conversation id passed as `--session-id` at spawn. `None`
-    /// for shells, headless runs, other agents, and sidecars written before
-    /// this field existed.
+    /// The agent conversation the session runs, as its plugin planned or
+    /// discovered it. `None` for shells, headless runs and sessions whose
+    /// conversation is not known yet.
     #[serde(default)]
-    pub claude_session_id: Option<String>,
+    pub conversation_id: Option<String>,
     /// True when the user asked that this session not count as busy, so a
     /// reattached session keeps it. False for sidecars written before this
     /// field existed.
@@ -189,7 +188,7 @@ pub struct OrphanMeta {
     /// for every other session and for sidecars written before this field
     /// existed: such a shell maps no hook event.
     #[serde(default)]
-    pub hook_agent: Option<Agent>,
+    pub hook_agent: Option<AgentId>,
 }
 
 fn meta_path(dirs: &Dirs, session_id: &str) -> PathBuf {
@@ -415,8 +414,12 @@ pub fn is_session_alive(meta: &OrphanMeta) -> bool {
     if let Some(tracer_pid) = meta.tracer_pid {
         return pid_matches(tracer_pid, Some("rt-tracer"), &[]);
     }
-    let agent = meta.agent.unwrap_or_else(agent_registry::default_agent);
-    let fallback = agent_registry::plugin(agent).liveness_tokens();
+    let agent = meta
+        .agent
+        .clone()
+        .unwrap_or_else(agent_registry::default_agent);
+    let fallback =
+        agent_registry::plugin(&agent).map_or(&[][..], |plugin| plugin.liveness_tokens());
     pid_matches(meta.pid, meta.program_name.as_deref(), fallback)
 }
 
@@ -525,14 +528,14 @@ pub fn meta_from_record(
     started_at: DateTime<Utc>,
     workspace_id: Option<String>,
     program_name: Option<String>,
-    agent: Agent,
+    agent: Option<AgentId>,
     spawn_config: Option<SpawnConfig>,
     last_prompt: Option<String>,
     current_cwd: Option<String>,
     tracer_pid: Option<u32>,
     tracer_pipe: Option<String>,
     tracer_exe_path: Option<String>,
-    claude_session_id: Option<String>,
+    conversation_id: Option<String>,
 ) -> anyhow::Result<OrphanMeta> {
     if pid == 0 {
         return Err(anyhow!("refusing to write orphan meta with pid=0"));
@@ -553,7 +556,7 @@ pub fn meta_from_record(
         started_at,
         workspace_id,
         program_name,
-        agent: Some(agent),
+        agent,
         terminal_title: None,
         current_cwd,
         accent_color: None,
@@ -569,7 +572,7 @@ pub fn meta_from_record(
         tracer_pid,
         tracer_pipe,
         tracer_exe_path,
-        claude_session_id,
+        conversation_id,
         // Mirrored from the record, like the status.
         busy_excluded: false,
         agent_in_shell: false,
@@ -596,7 +599,7 @@ pub struct RecordMirror {
     pub user_label: Option<String>,
     pub label: String,
     pub appearance: AppearanceOverrides,
-    pub claude_session_id: Option<String>,
+    pub conversation_id: Option<String>,
     pub busy_excluded: bool,
     pub program_name: Option<String>,
     pub agent_in_shell: bool,
@@ -616,7 +619,7 @@ impl RecordMirror {
             && meta.label == self.label
             && meta.appearance == self.appearance
             && meta.accent_color.is_none()
-            && meta.claude_session_id == self.claude_session_id
+            && meta.conversation_id == self.conversation_id
             && meta.busy_excluded == self.busy_excluded
             && meta.program_name == self.program_name
             && meta.agent_in_shell == self.agent_in_shell
@@ -638,7 +641,7 @@ impl RecordMirror {
         // record was built, so it is dropped from every rewrite.
         meta.accent_color = None;
         meta.appearance = self.appearance.clone();
-        meta.claude_session_id.clone_from(&self.claude_session_id);
+        meta.conversation_id.clone_from(&self.conversation_id);
         meta.busy_excluded = self.busy_excluded;
         meta.program_name.clone_from(&self.program_name);
         meta.agent_in_shell = self.agent_in_shell;
@@ -712,7 +715,9 @@ mod tests {
     /// a recorded program token is matched as before.
     #[test]
     fn name_matches_falls_back_to_the_agents_liveness_tokens() {
-        let tokens = agent_registry::plugin(Agent::Claude).liveness_tokens();
+        let tokens = agent_registry::plugin(&agent_registry::default_agent())
+            .expect("Claude is registered")
+            .liveness_tokens();
         assert!(name_matches("node.exe", None, tokens));
         assert!(!name_matches("pwsh.exe", None, tokens));
         assert!(name_matches("rt-tracer.exe", Some("RT-Tracer"), tokens));
@@ -831,7 +836,7 @@ mod tests {
             since,
             None,
             None,
-            Agent::Claude,
+            Some(agent_registry::default_agent()),
             None,
             None,
             None,
@@ -882,7 +887,7 @@ mod tests {
             started_at: chrono::DateTime::from_timestamp(0, 0).unwrap(),
             workspace_id: None,
             program_name: Some("rt-tracer".to_string()),
-            agent: Some(Agent::Claude),
+            agent: Some(agent_registry::default_agent()),
             terminal_title: None,
             current_cwd: Some(r"C:\work\repo".to_string()),
             accent_color: Some("#2f81f7".to_string()),
@@ -899,7 +904,7 @@ mod tests {
             tracer_pid: Some(1234),
             tracer_pipe: Some(r"\\.\pipe\rt-tracer-s1".to_string()),
             tracer_exe_path: Some(r"C:\cache\rt-tracer-aaaaaaaaaaaaaaaa.exe".to_string()),
-            claude_session_id: None,
+            conversation_id: None,
             busy_excluded: false,
             agent_in_shell: false,
             shell_label: None,
@@ -1000,7 +1005,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_session_id_round_trips_and_defaults_on_old_meta() {
+    fn conversation_id_round_trips_and_defaults_on_old_meta() {
         let dirs = scratch_dirs("claude-session-id");
         let meta = meta_from_record(
             "s-claude".to_string(),
@@ -1012,7 +1017,7 @@ mod tests {
             chrono::DateTime::from_timestamp(0, 0).unwrap(),
             None,
             Some("rt-tracer".to_string()),
-            Agent::Claude,
+            Some(agent_registry::default_agent()),
             None,
             None,
             None,
@@ -1025,7 +1030,7 @@ mod tests {
         write_meta(&dirs, &meta).expect("write meta");
         let loaded = load_meta(&dirs, "s-claude").expect("load meta");
         assert_eq!(
-            loaded.claude_session_id.as_deref(),
+            loaded.conversation_id.as_deref(),
             Some("0b6f4c7e-1111-4222-8333-944455556666")
         );
 
@@ -1044,7 +1049,7 @@ mod tests {
             "tracer_pipe": "\\\\.\\pipe\\rt-tracer-old"
         }"#;
         let old_meta = load_meta_from_bytes(old).expect("parse old meta");
-        assert_eq!(old_meta.claude_session_id, None);
+        assert_eq!(old_meta.conversation_id, None);
         let _ = std::fs::remove_dir_all(&dirs.config);
     }
 
@@ -1092,10 +1097,10 @@ mod tests {
         let dirs = scratch_dirs("hook-agent-round-trip");
         let mut meta = s1_meta(None);
         meta.mode = SessionMode::PlainShell;
-        meta.hook_agent = Some(Agent::Claude);
+        meta.hook_agent = Some(agent_registry::default_agent());
         write_meta(&dirs, &meta).expect("write meta");
         let loaded = load_meta(&dirs, "s1").expect("load meta");
-        assert_eq!(loaded.hook_agent, Some(Agent::Claude));
+        assert_eq!(loaded.hook_agent, Some(agent_registry::default_agent()));
 
         let old = br#"{
             "on_disk_version": 2,
@@ -1114,7 +1119,7 @@ mod tests {
 
     /// A mirror over the fields `meta_from_record` writes for `s1`, carrying
     /// the given conversation id.
-    fn mirror_for(claude_session_id: Option<&str>) -> RecordMirror {
+    fn mirror_for(conversation_id: Option<&str>) -> RecordMirror {
         RecordMirror {
             recent_actions_tail: Vec::new(),
             status: SessionStatus::Idle,
@@ -1126,7 +1131,7 @@ mod tests {
             user_label: None,
             label: "s1".to_owned(),
             appearance: AppearanceOverrides::default(),
-            claude_session_id: claude_session_id.map(str::to_owned),
+            conversation_id: conversation_id.map(str::to_owned),
             busy_excluded: false,
             program_name: Some("rt-tracer".to_owned()),
             agent_in_shell: false,
@@ -1135,8 +1140,8 @@ mod tests {
     }
 
     /// The spawn-time sidecar `meta_from_record` writes for `s1`, carrying
-    /// `claude_session_id`.
-    fn s1_meta(claude_session_id: Option<&str>) -> OrphanMeta {
+    /// `conversation_id`.
+    fn s1_meta(conversation_id: Option<&str>) -> OrphanMeta {
         meta_from_record(
             "s1".to_string(),
             4242,
@@ -1147,14 +1152,14 @@ mod tests {
             chrono::DateTime::from_timestamp(0, 0).unwrap(),
             None,
             Some("rt-tracer".to_string()),
-            Agent::Claude,
+            Some(agent_registry::default_agent()),
             None,
             None,
             None,
             Some(4242),
             Some(r"\\.\pipe\rt-tracer-s1".to_string()),
             None,
-            claude_session_id.map(str::to_owned),
+            conversation_id.map(str::to_owned),
         )
         .expect("build meta")
     }
@@ -1198,13 +1203,13 @@ mod tests {
         let mut meta = s1_meta(Some("old-conv"));
         mirror.apply(&mut meta);
         // Every other field now mirrors; only the id differs.
-        meta.claude_session_id = Some("old-conv".to_owned());
+        meta.conversation_id = Some("old-conv".to_owned());
         assert!(
             !mirror.matches(&meta),
             "a different conversation id is not a match"
         );
         mirror.apply(&mut meta);
-        assert_eq!(meta.claude_session_id.as_deref(), Some("new-conv"));
+        assert_eq!(meta.conversation_id.as_deref(), Some("new-conv"));
     }
 
     #[test]
@@ -1218,7 +1223,7 @@ mod tests {
         assert_eq!(
             load_meta(&dirs, "s1")
                 .expect("load meta")
-                .claude_session_id
+                .conversation_id
                 .as_deref(),
             Some("new-conv"),
             "a /clear's conversation survives a reattach"
@@ -1242,9 +1247,12 @@ mod tests {
     #[test]
     fn a_deepseek_spawn_config_survives_the_sidecar() {
         let dirs = scratch_dirs("deepseek-provider");
-        let options = protocol::AgentOptions::Claude {
-            permission_mode: None,
-            provider: protocol::ClaudeProvider::Deepseek,
+        let options = protocol::AgentSelection {
+            agent: agent_registry::default_agent(),
+            options: protocol::OptionValues::from([(
+                "provider".to_owned(),
+                protocol::OptionValue::Text("deepseek".to_owned()),
+            )]),
         };
         let config = SpawnConfig {
             target: protocol::SpawnTarget::Standalone {
@@ -1253,8 +1261,7 @@ mod tests {
             },
             mode: SessionMode::Interactive,
             dangerously_skip_permissions: false,
-            agent_options: options.clone(),
-            model: None,
+            agent: Some(options.clone()),
             extra_env: Vec::new(),
         };
         let meta = meta_from_record(
@@ -1267,7 +1274,7 @@ mod tests {
             chrono::DateTime::from_timestamp(0, 0).unwrap(),
             None,
             Some("rt-tracer".to_string()),
-            Agent::Claude,
+            Some(agent_registry::default_agent()),
             Some(config),
             None,
             None,
@@ -1280,8 +1287,8 @@ mod tests {
         write_meta(&dirs, &meta).expect("write meta");
         let loaded = load_meta(&dirs, "s-deepseek").expect("load meta");
         assert_eq!(
-            loaded.spawn_config.map(|config| config.agent_options),
-            Some(options),
+            loaded.spawn_config.map(|config| config.agent),
+            Some(Some(options)),
             "a reattached session keeps its provider"
         );
         let _ = std::fs::remove_dir_all(&dirs.config);

@@ -197,7 +197,7 @@ pub(crate) fn recent_history_ids(entries: &[HistoryEntry], now: DateTime<Utc>) -
     entries
         .iter()
         .filter(|entry| now - entry.ended_at <= HISTORY_RETENTION)
-        .filter_map(|entry| entry.claude_session_id.clone())
+        .filter_map(|entry| entry.conversation_id.clone())
         .collect()
 }
 
@@ -219,10 +219,10 @@ pub(crate) fn claim(
     }
     let mut claimed = false;
     registry.update_if_changed(session_id, |rec| {
-        if rec.claude_session_id.is_some() {
+        if rec.conversation_id.is_some() {
             return false;
         }
-        rec.claude_session_id = Some(id.to_owned());
+        rec.conversation_id = Some(id.to_owned());
         claimed = true;
         true
     });
@@ -238,7 +238,7 @@ pub(crate) fn claim(
 fn has_no_id(registry: &SessionRegistry, session_id: &str) -> bool {
     registry
         .get(session_id)
-        .is_some_and(|rec| lock(&rec).claude_session_id.is_none())
+        .is_some_and(|rec| lock(&rec).conversation_id.is_none())
 }
 
 /// Who runs a [`pass`].
@@ -275,7 +275,7 @@ pub(crate) fn pass(
         held: registry
             .snapshots()
             .into_iter()
-            .filter_map(|snap| snap.claude_session_id)
+            .filter_map(|snap| snap.conversation_id)
             .collect(),
         recent: recent_history_ids(&history::read_all(dirs), now),
         contested: contested::read(dirs, &waiter.agent, now),
@@ -358,7 +358,7 @@ fn stop_reason(registry: &SessionRegistry, session_id: &str) -> Option<&'static 
     let rec = lock(&rec);
     if matches!(rec.status, SessionStatus::Stopped | SessionStatus::Error) {
         Some("the session ended")
-    } else if rec.claude_session_id.is_some() {
+    } else if rec.conversation_id.is_some() {
         Some("the session has a conversation id")
     } else {
         None
@@ -526,7 +526,7 @@ mod tests {
         history::record_session_end(&registry, &dirs, "s1", SessionEnd::Exited { code: 0 });
 
         let entry = history::read_one(&dirs, "s1").expect("the history entry");
-        assert_eq!(entry.claude_session_id, None);
+        assert_eq!(entry.conversation_id, None);
         assert!(registry.discovery().waiter("s1").is_none(), "deregistered");
     }
 
@@ -686,7 +686,7 @@ mod tests {
 
     fn conversation_of(registry: &SessionRegistry, session_id: &str) -> Option<String> {
         let rec = registry.get(session_id).expect("the record");
-        lock(&rec).claude_session_id.clone()
+        lock(&rec).conversation_id.clone()
     }
 
     #[test]
@@ -723,7 +723,7 @@ mod tests {
         let (registry, dirs) = registry_with("discovery-held", &["s1", "done"]);
         registry.update("done", |rec| {
             rec.status = SessionStatus::Stopped;
-            rec.claude_session_id = Some("c-held".to_owned());
+            rec.conversation_id = Some("c-held".to_owned());
         });
         let agent = leaked_agent();
         let folder = r"D:\held";
@@ -741,7 +741,7 @@ mod tests {
         let (registry, dirs) = registry_with("discovery-history", &["s1"]);
         let now = Utc::now();
         let mut ended = test_support::record("ended", SessionMode::Interactive);
-        ended.claude_session_id = Some("c-hist".to_owned());
+        ended.conversation_id = Some("c-hist".to_owned());
         let entry = history::entry_from_record(
             &ended,
             SessionEnd::Exited { code: 0 },
@@ -758,7 +758,7 @@ mod tests {
         assert_eq!(conversation_of(&registry, "s1"), None);
 
         let mut old = entry.clone();
-        old.claude_session_id = Some("c-old".to_owned());
+        old.conversation_id = Some("c-old".to_owned());
         old.ended_at = now - TimeDelta::days(8);
         assert_eq!(recent_history_ids(&[entry, old], now), ids(&["c-hist"]));
     }
@@ -803,7 +803,7 @@ mod tests {
         let folder = r"D:\poll-hook";
         let poller = start(&registry, dirs, waiter(agent, "s1", folder, &[], launch()));
         registry.update("s1", |rec| {
-            rec.claude_session_id = Some("from-hook".to_owned());
+            rec.conversation_id = Some("from-hook".to_owned());
         });
         agent.set_found(folder, vec![found("c-other", Utc::now())]);
 
@@ -861,7 +861,7 @@ mod tests {
         history::record_session_end(&registry, &dirs, "s1", SessionEnd::Exited { code: 0 });
 
         let entry = history::read_one(&dirs, "s1").expect("the history entry");
-        assert_eq!(entry.claude_session_id.as_deref(), Some("c-late"));
+        assert_eq!(entry.conversation_id.as_deref(), Some("c-late"));
         assert_eq!(conversation_of(&registry, "s1").as_deref(), Some("c-late"));
     }
 
@@ -880,14 +880,14 @@ mod tests {
 
         assert!(registry.discovery().waiter("s1").is_none());
         let entry = history::read_one(&dirs, "s1").expect("the history entry");
-        assert_eq!(entry.claude_session_id, None);
+        assert_eq!(entry.conversation_id, None);
     }
 
     #[test]
     fn claim_loses_to_a_hook_that_set_the_id_first() {
         let (registry, _dirs) = registry_with("discovery-hook-first", &["s1"]);
         registry.update("s1", |rec| {
-            rec.claude_session_id = Some("from-hook".to_owned());
+            rec.conversation_id = Some("from-hook".to_owned());
         });
         let s1 = waiter(leaked_agent(), "s1", r"D:\hook", &[], launch());
         registry.discovery().register(s1);

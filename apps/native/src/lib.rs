@@ -13,6 +13,7 @@ mod assets;
 mod branch_fate;
 mod buttons;
 mod changes_view;
+mod claude_compat;
 mod cleanup_failed;
 mod cleanup_failed_view;
 mod combobox;
@@ -588,7 +589,7 @@ pub struct RootView {
     /// The Remote access page's port field and login launch, once shown.
     remote_access_tab: Option<settings_view::RemoteAccessTab>,
     /// Each agent's launch command as this connection last heard it.
-    agent_commands: Option<HashMap<protocol::Agent, protocol::AgentCommandEntry>>,
+    agent_commands: Option<HashMap<protocol::AgentId, protocol::AgentCommandEntry>>,
     /// The Claude page's launch-command fields, once shown.
     claude_tab: Option<settings_view::ClaudeTab>,
     /// Reads and switches whether this PC starts the daemon at login.
@@ -2343,7 +2344,6 @@ impl RootView {
                 }
                 self.conn = conn;
                 self.follow_settings_target();
-                self.sync_spawn_provider_support(cx);
             }
             NetEvent::Handshake(info) => self.handshake = Some(info),
             NetEvent::Message(msg) => {

@@ -648,7 +648,8 @@ impl LiveClient {
 
 /// A standalone plain shell in `cwd`.
 pub fn spawn_shell(cwd: &Path) -> ClientMessage {
-    spawn_message(&json!({ "kind": "standalone", "cwd": cwd }), "plain_shell")
+    let target = json!({ "kind": "standalone", "cwd": cwd });
+    spawn_message(&target, "plain_shell", &Value::Null)
 }
 
 /// An interactive claude session on `main`, in place in `repo_id`'s checkout.
@@ -660,10 +661,12 @@ pub fn spawn_claude_in_place(repo_id: &str) -> ClientMessage {
         "base_branch": null,
         "use_worktree": false,
     });
-    spawn_message(&target, "interactive")
+    let claude = json!({ "agent": "claude", "options": {} });
+    spawn_message(&target, "interactive", &claude)
 }
 
-fn spawn_message(target: &Value, mode: &str) -> ClientMessage {
+/// A spawn of `mode` on `target` running `agent` (null for a plain shell).
+fn spawn_message(target: &Value, mode: &str, agent: &Value) -> ClientMessage {
     serde_json::from_value(json!({
         "type": "spawn_session",
         "label": null,
@@ -671,8 +674,7 @@ fn spawn_message(target: &Value, mode: &str) -> ClientMessage {
         "mode": mode,
         "initial_prompt": null,
         "dangerously_skip_permissions": false,
-        "agent_options": { "kind": "claude" },
-        "model": null,
+        "agent": agent,
     }))
     .expect("spawn request fixture")
 }

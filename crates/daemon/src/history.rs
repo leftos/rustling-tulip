@@ -10,10 +10,10 @@
 
 use crate::conversations;
 use crate::env_secrets::{self, SealOutcome};
+use crate::hook_status::PluginLookup;
 use crate::orphan;
 use crate::paths::{Dirs, normalize_path_key};
 use crate::pty::PtyExit;
-use crate::server::{options_from_request, request_parts_from_options};
 use crate::session::{SessionRecord, SessionRegistry};
 use crate::sync::lock;
 use crate::tracer_log::{self, TracerLogEnd, TracerLogSummary};
@@ -21,10 +21,10 @@ use agent_api::{RecoveredRun, ResolvedRows, TracerRun};
 use anyhow::{Context as _, anyhow};
 use chrono::{DateTime, TimeDelta, Utc};
 use protocol::{
-    Agent, AgentOptions, ClaudeProvider, ConversationCandidate, HistoryEntry, HistorySource,
-    OptionValues, PinnedMemberWorktree, RecoverAs, RecoverItem, RepoEntry, SessionEnd,
-    SessionHistoryItem, SessionKind, SessionMember, SessionMode, SpawnConfig, SpawnRequest,
-    SpawnTarget, WorkspaceEntry, WorktreeReusePolicy,
+    AgentId, AgentSelection, ConversationCandidate, HistoryEntry, HistorySource, OptionValues,
+    PinnedMemberWorktree, RecoverAs, RecoverItem, RepoEntry, SessionEnd, SessionHistoryItem,
+    SessionKind, SessionMember, SessionMode, SpawnConfig, SpawnRequest, SpawnTarget,
+    WorkspaceEntry, WorktreeReusePolicy,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -40,8 +40,9 @@ const CANDIDATE_GRACE: TimeDelta = TimeDelta::minutes(2);
 /// How far before its end a session with no known start is searched from.
 const UNKNOWN_START_LOOKBACK: TimeDelta = TimeDelta::days(1);
 /// The tracer-log importer's revision for a plain-shell import. An agent's
-/// import is stamped with its plugin's `import_rev`.
-pub const IMPORT_REV: u32 = 2;
+/// import is stamped with its plugin's `import_rev`; an older import is
+/// imported again from its tracer log.
+pub const SHELL_IMPORT_REV: u32 = 3;
 /// Program file stems an imported plain-shell session may have run.
 const SHELL_STEMS: [&str; 6] = ["pwsh", "powershell", "cmd", "bash", "zsh", "sh"];
 /// The branch name a recovered repo or workspace spawn asks for when its
@@ -111,7 +112,7 @@ pub fn entry_from_record(
         label: rec.label.clone(),
         kind: rec.kind.clone(),
         mode: rec.mode,
-        agent: rec.agent,
+        agent: rec.wire_agent(),
         spawn_config: rec.spawn_config.clone(),
         members: rec.members.clone(),
         workspace_id: rec.workspace_id.clone(),
@@ -121,16 +122,15 @@ pub fn entry_from_record(
         started_at: Some(rec.started_at),
         ended_at,
         end,
-        claude_session_id: rec.claude_session_id.clone(),
+        conversation_id: rec.conversation_id.clone(),
         source: HistorySource::Record,
         recovered_at: None,
-        skip_permissions: None,
-        model: None,
         end_time_known: true,
         import_rev: 0,
         busy_excluded: rec.busy_excluded,
-        // The provider rides in the spawn config.
-        provider: ClaudeProvider::Anthropic,
+        // The options and the trusted flag ride in the spawn config.
+        options: None,
+        trusted: false,
     }
 }
 
@@ -149,7 +149,7 @@ pub fn entry_from_meta(
         label: meta.label.clone(),
         kind: meta.kind.clone(),
         mode: meta.mode,
-        agent: meta.agent.unwrap_or_else(agent_registry::default_agent),
+        agent: meta.agent.clone(),
         spawn_config: meta.spawn_config.clone(),
         members: meta.members.clone(),
         workspace_id: meta.workspace_id.clone(),
@@ -159,16 +159,15 @@ pub fn entry_from_meta(
         started_at: Some(meta.started_at),
         ended_at,
         end,
-        claude_session_id: meta.claude_session_id.clone(),
+        conversation_id: meta.conversation_id.clone(),
         source: HistorySource::Record,
         recovered_at: None,
-        skip_permissions: None,
-        model: None,
         end_time_known: !matches!(end, SessionEnd::TracerLost),
         import_rev: 0,
         busy_excluded: meta.busy_excluded,
-        // The provider rides in the spawn config.
-        provider: ClaudeProvider::Anthropic,
+        // The options and the trusted flag ride in the spawn config.
+        options: None,
+        trusted: false,
     }
 }
 
@@ -494,20 +493,13 @@ pub fn mark_recovered(dirs: &Dirs, session_id: &str, at: DateTime<Utc>) -> anyho
     write_entry(dirs, &entry)
 }
 
-/// Delete entries that ended more than `max_age` before `now`, and upgrade
-/// every surviving import [`upgrade_import`] can bring up to its plugin's
-/// import revision,
-/// in the same pass so an entry about to be deleted is never rewritten.
-/// Returns how many were deleted. Unparseable files are left alone.
+/// Delete entries that ended more than `max_age` before `now`. Returns how
+/// many were deleted. Unparseable files are left alone.
 pub fn prune(dirs: &Dirs, now: DateTime<Utc>, max_age: TimeDelta) -> usize {
     let _guard = lock(&WRITE_LOCK);
     let mut removed = 0;
-    let mut upgraded = 0;
-    for (path, mut entry) in scan(dirs).entries {
+    for (path, entry) in scan(dirs).entries {
         if now - entry.ended_at <= max_age {
-            if upgrade_import(&mut entry) && write_upgraded(dirs, &path, &entry) {
-                upgraded += 1;
-            }
             continue;
         }
         match std::fs::remove_file(&path) {
@@ -520,26 +512,7 @@ pub fn prune(dirs: &Dirs, now: DateTime<Utc>, max_age: TimeDelta) -> usize {
     if removed > 0 {
         info!(removed, "pruned old session history entries");
     }
-    if upgraded > 0 {
-        info!(upgraded, "upgraded imported history entries");
-    }
     removed
-}
-
-/// Write the upgraded `entry` back to `path`, warning when that fails.
-/// Returns whether it was written.
-fn write_upgraded(dirs: &Dirs, path: &Path, entry: &HistoryEntry) -> bool {
-    match write_entry_to(dirs, path, entry) {
-        Ok(()) => true,
-        Err(err) => {
-            warn!(
-                ?err,
-                session_id = %entry.session_id,
-                "failed to upgrade an imported history entry"
-            );
-            false
-        }
-    }
 }
 
 /// The registered repos and workspaces an imported session is matched against.
@@ -552,9 +525,8 @@ pub struct Registered<'a> {
 /// their `<config>/logs/tracer-<id>.log` files modified within
 /// [`HISTORY_RETENTION`] of `now`. A session in `skip` (a live or abandoned
 /// sidecar) is left alone, and so is one already in the history unless it is
-/// an unrecovered import its plugin neither stamps as current nor upgrades
-/// in place, which is imported again; [`prune`] upgrades an upgradable one
-/// in place, log or no log. A log naming no program or one that is neither
+/// an unrecovered import from before its importer's revision, which is
+/// imported again. A log naming no program or one that is neither
 /// an agent's nor a known shell is skipped. A session with no end line in the daemon logs gets
 /// the log's modified time as `ended_at` and `end_time_known: false`. Returns
 /// how many entries were written.
@@ -611,46 +583,35 @@ pub fn import_tracer_logs(
     imported
 }
 
-/// Upgrade `entry` in memory, without its tracer log, when it is an
-/// unrecovered import its plugin's `upgrade_import` upgrades in place: its
-/// provider and model become the upgraded options' and its revision the
-/// plugin's `import_rev`; every other field is kept. Returns whether it
-/// changed.
-fn upgrade_import(entry: &mut HistoryEntry) -> bool {
-    if entry.source != HistorySource::TracerLog || entry.recovered_at.is_some() {
-        return false;
-    }
-    let plugin = agent_registry::plugin(entry.agent);
-    let Some(upgraded) = plugin.upgrade_import(entry.import_rev, &import_options(entry)) else {
-        return false;
-    };
-    (entry.provider, entry.model) = import_parts(&upgraded);
-    entry.import_rev = plugin.import_rev();
-    true
-}
-
 /// Whether the importer may write the history file at `path`: there is none,
-/// or it holds an unrecovered import from before its plugin's `import_rev`
-/// that the plugin cannot upgrade in place. A recorded entry, a recovered
-/// one, a current or upgradable import and an unreadable file are kept.
+/// or it holds an unrecovered import from before its importer's revision
+/// (its plugin's `import_rev`, or [`SHELL_IMPORT_REV`] for a plain shell). A
+/// recorded entry, a recovered one, a current import, an import naming an
+/// agent this daemon has no plugin for and an unreadable file are kept.
 fn is_importable(path: &Path) -> bool {
     if !path.exists() {
         return true;
     }
     match read_entry(path) {
         Ok(existing) => {
-            let plugin = agent_registry::plugin(existing.agent);
             existing.source == HistorySource::TracerLog
                 && existing.recovered_at.is_none()
-                && existing.import_rev < plugin.import_rev()
-                && plugin
-                    .upgrade_import(existing.import_rev, &import_options(&existing))
-                    .is_none()
+                && current_import_rev(&existing).is_some_and(|rev| existing.import_rev < rev)
         }
         Err(err) => {
             warn!(?err, "keeping unreadable session history file");
             false
         }
+    }
+}
+
+/// The importer revision an import of `entry`'s agent is stamped with now:
+/// its plugin's `import_rev`, or [`SHELL_IMPORT_REV`] for a plain shell.
+/// `None` when no plugin is registered for its agent.
+fn current_import_rev(entry: &HistoryEntry) -> Option<u32> {
+    match &entry.agent {
+        None => Some(SHELL_IMPORT_REV),
+        Some(agent) => agent_registry::plugin(agent).map(agent_api::AgentPlugin::import_rev),
     }
 }
 
@@ -737,7 +698,7 @@ fn end_from_log(end: TracerLogEnd) -> SessionEnd {
 /// Recovery runs the agent in the same folders, under the matched workspace
 /// or repo with each member pinned to its folder, else with the same extra
 /// folders. A run no plugin recognises is a plain shell when its program is
-/// one, under the default agent.
+/// one, with no agent.
 fn entry_from_tracer_log(
     id: &str,
     summary: &TracerLogSummary,
@@ -750,7 +711,7 @@ fn entry_from_tracer_log(
         label: String::new(),
         kind: SessionKind::Standalone,
         mode: SessionMode::PlainShell,
-        agent: agent_registry::default_agent(),
+        agent: None,
         spawn_config: None,
         members: Vec::new(),
         workspace_id: None,
@@ -760,41 +721,37 @@ fn entry_from_tracer_log(
         started_at: Some(summary.started_at),
         ended_at: end.at,
         end: end_from_log(summary.end),
-        claude_session_id: None,
+        conversation_id: None,
         source: HistorySource::TracerLog,
         recovered_at: None,
-        skip_permissions: None,
-        model: None,
         end_time_known: end.known,
-        import_rev: IMPORT_REV,
+        import_rev: SHELL_IMPORT_REV,
         // A tracer log does not record the flag; an imported session counts.
         busy_excluded: false,
-        provider: ClaudeProvider::Anthropic,
+        options: None,
+        trusted: false,
     };
     let run = TracerRun {
         program: &summary.program,
         args: &summary.args,
         cwd: &summary.cwd,
     };
-    for agent in Agent::all() {
-        let plugin = agent_registry::plugin(*agent);
+    for plugin in agent_registry::all() {
         let Some(imported) = plugin.import_tracer_run(&run) else {
             continue;
         };
         let (kind, workspace_id) = match_target(&cwd, &imported.extra_dirs, registered);
-        let (provider, model) = import_parts(&imported.options);
         return Some(HistoryEntry {
             kind,
             mode: SessionMode::Interactive,
-            agent: *agent,
+            agent: Some(plugin.descriptor().id.clone()),
             members: folder_members(&cwd, &imported.extra_dirs, registered.repos),
             workspace_id,
             current_cwd: None,
             program_name: Some(imported.program_name),
-            skip_permissions: Some(imported.trusted),
-            model,
             import_rev: plugin.import_rev(),
-            provider,
+            options: Some(imported.options),
+            trusted: imported.trusted,
             ..shell
         });
     }
@@ -805,22 +762,6 @@ fn entry_from_tracer_log(
             program_name: Some(stem),
             ..shell
         })
-}
-
-/// The plugin options an import `entry` recorded: no permission mode, its
-/// provider and its model.
-fn import_options(entry: &HistoryEntry) -> OptionValues {
-    let agent_options = AgentOptions::Claude {
-        permission_mode: None,
-        provider: entry.provider,
-    };
-    options_from_request(&agent_options, entry.model.as_deref())
-}
-
-/// The provider and model an import's plugin options select.
-fn import_parts(options: &OptionValues) -> (ClaudeProvider, Option<String>) {
-    let (AgentOptions::Claude { provider, .. }, model) = request_parts_from_options(options);
-    (provider, model)
 }
 
 fn repo_at<'a>(repos: &'a [RepoEntry], path: &str) -> Option<&'a RepoEntry> {
@@ -963,9 +904,17 @@ fn conversation_candidates(
     folder: &str,
     now: DateTime<Utc>,
 ) -> Vec<ConversationCandidate> {
-    let plugin = agent_registry::plugin(entry.agent);
+    let agent = recovery_agent(entry);
+    let Some(plugin) = agent_registry::plugin(&agent) else {
+        warn!(
+            session_id = %entry.session_id,
+            "no agent plugin `{}` is registered; the session has no conversation candidates",
+            agent.0
+        );
+        return Vec::new();
+    };
     let folder = Path::new(folder);
-    let found = if let Some(id) = &entry.claude_session_id {
+    let found = if let Some(id) = &entry.conversation_id {
         conversations::known(plugin, folder, id, rows)
             .into_iter()
             .collect()
@@ -1007,7 +956,7 @@ pub struct RecoveryPlan {
     pub register_repo: Option<String>,
     /// The agent a recovered shell resumes its conversation in, whose hooks
     /// map its events; `None` for every other plan.
-    pub hook_agent: Option<Agent>,
+    pub hook_agent: Option<AgentId>,
     /// The conversation a recovered shell resumes in `hook_agent`.
     pub resume_conversation: Option<String>,
 }
@@ -1079,15 +1028,17 @@ pub fn branch_or_placeholder(current: anyhow::Result<Option<String>>) -> String 
 /// Plan how `item` recovers `entry`. A session goes back under the repo or
 /// workspace in `registered` it ran in, with every member pinned to the
 /// folder it ran in, so recovery never checks out a branch or creates a
-/// worktree. A Claude session recovers as Claude (or a shell, when it ran on
-/// Anthropic). `conversation_exists(agent, folder, id)` says whether `agent` still holds
-/// conversation `id` for `folder`. The error is the message the client shows
-/// for the item.
+/// worktree. An agent session recovers as its agent, or as a shell that
+/// resumes its conversation when the agent's plugin can build that command,
+/// or as a bare shell. `conversation_exists(agent, folder, id)` says whether
+/// `agent` still holds conversation `id` for `folder`; `plugins` finds an
+/// agent's plugin. The error is the message the client shows for the item.
 pub fn plan_recovery(
     entry: &HistoryEntry,
     item: &RecoverItem,
     registered: &Registered<'_>,
-    conversation_exists: impl Fn(Agent, &str, &str) -> bool,
+    plugins: PluginLookup,
+    conversation_exists: impl Fn(&AgentId, &str, &str) -> bool,
 ) -> Result<RecoveryPlan, String> {
     if entry.recovered_at.is_some() {
         return Err("already recovered".to_owned());
@@ -1095,34 +1046,33 @@ pub fn plan_recovery(
     if entry.mode == SessionMode::Headless {
         return Err("a headless session can't be recovered".to_owned());
     }
-    if item.how == RecoverAs::Unknown {
-        return Err("unsupported recovery kind".to_owned());
-    }
     let folder = entry_folder(entry).unwrap_or_default();
-    let spawn = recovered_spawn(entry, item)?;
-    if let Some(id) = &item.conversation_id
-        && !conversation_exists(entry.agent, folder, id)
-    {
-        return Err(format!("conversation {id} not found for {folder}"));
-    }
     let plan = match &item.how {
-        RecoverAs::Claude => RecoveryPlan {
-            request: claude_request(
-                entry,
-                folder,
-                required_conversation(item)?,
-                registered,
-                spawn,
-            ),
+        RecoverAs::Unknown => return Err("unsupported recovery kind".to_owned()),
+        // A bare shell runs no agent and resumes nothing, so it gets no
+        // hooks.
+        RecoverAs::Shell => RecoveryPlan {
+            request: shell_request(entry, folder),
             register_repo: None,
             hook_agent: None,
             resume_conversation: None,
         },
-        RecoverAs::RegisterRepoThenClaude { path } => {
+        RecoverAs::Agent => {
+            let spawn = recovered_spawn(entry, item, plugins)?;
+            let conversation = existing_conversation(item, &spawn, folder, &conversation_exists)?;
+            RecoveryPlan {
+                request: agent_request(entry, folder, conversation, registered, spawn),
+                register_repo: None,
+                hook_agent: None,
+                resume_conversation: None,
+            }
+        }
+        RecoverAs::RegisterRepoThenAgent { path } => {
             if normalize_path_key(path) != normalize_path_key(folder) {
                 return Err(format!("{path} is not the session's folder {folder}"));
             }
-            let conversation = required_conversation(item)?;
+            let spawn = recovered_spawn(entry, item, plugins)?;
+            let conversation = existing_conversation(item, &spawn, folder, &conversation_exists)?;
             let add_dirs: Vec<String> = entry
                 .members
                 .iter()
@@ -1141,80 +1091,114 @@ pub fn plan_recovery(
                 }
             };
             RecoveryPlan {
-                request: folder_claude(entry, target, conversation, spawn),
+                request: folder_agent(entry, target, conversation, spawn),
                 register_repo: Some(path.clone()),
                 hook_agent: None,
                 resume_conversation: None,
             }
         }
-        RecoverAs::Shell => RecoveryPlan {
-            request: shell_request(entry, folder),
-            register_repo: None,
-            // A shell with no conversation to resume is a bare shell, and
-            // gets no hooks.
-            hook_agent: item.conversation_id.as_ref().map(|_| entry.agent),
-            resume_conversation: item.conversation_id.clone(),
-        },
-        RecoverAs::Unknown => {
-            return Err("unsupported recovery kind".to_owned());
+        RecoverAs::ShellResume => {
+            let spawn = recovered_spawn(entry, item, plugins)?;
+            let conversation = existing_conversation(item, &spawn, folder, &conversation_exists)?;
+            RecoveryPlan {
+                request: shell_request(entry, folder),
+                register_repo: None,
+                hook_agent: Some(spawn.selection.agent),
+                resume_conversation: Some(conversation.to_owned()),
+            }
         }
     };
     Ok(plan)
 }
 
-/// The options and trust a recovery of an entry spawns with.
+/// The conversation `item` resumes, once `conversation_exists` says
+/// `spawn`'s agent still holds it for `folder`.
+fn existing_conversation<'a>(
+    item: &'a RecoverItem,
+    spawn: &RecoveredSpawn,
+    folder: &str,
+    conversation_exists: &impl Fn(&AgentId, &str, &str) -> bool,
+) -> Result<&'a str, String> {
+    let id = required_conversation(item)?;
+    if !conversation_exists(&spawn.selection.agent, folder, id) {
+        return Err(format!("conversation {id} not found for {folder}"));
+    }
+    Ok(id)
+}
+
+/// The agent and options a recovery of an entry spawns with, and its trust.
 struct RecoveredSpawn {
-    agent_options: AgentOptions,
-    model: Option<String>,
+    selection: AgentSelection,
     dangerously_skip_permissions: bool,
 }
 
-/// What every recovery of `entry` spawns with: the options its plugin's
-/// `recovery_options` gives for what the entry recorded. A shell recovery is
-/// first offered to the plugin's `shell_resume` (with the chosen
-/// conversation, or `""` when there is none), and its refusal is the error.
-fn recovered_spawn(entry: &HistoryEntry, item: &RecoverItem) -> Result<RecoveredSpawn, String> {
-    let plugin = agent_registry::plugin(entry.agent);
+/// The agent a recovery of `entry` runs: the one it ran, or the default agent
+/// for a plain shell, whose user may have run that agent in it.
+fn recovery_agent(entry: &HistoryEntry) -> AgentId {
+    entry
+        .agent
+        .clone()
+        .unwrap_or_else(agent_registry::default_agent)
+}
+
+/// What an agent recovery of `entry` spawns with: the options its plugin's
+/// `recovery_options` gives for what the entry recorded. A shell that resumes
+/// the conversation is planned only when the plugin can type that command
+/// into a shell (`caps.shell_resume`) and its `shell_resume` builds one; its
+/// refusal is the error.
+fn recovered_spawn(
+    entry: &HistoryEntry,
+    item: &RecoverItem,
+    plugins: PluginLookup,
+) -> Result<RecoveredSpawn, String> {
+    let agent = recovery_agent(entry);
+    let plugin =
+        plugins(&agent).ok_or_else(|| format!("no agent plugin `{}` is registered", agent.0))?;
     let (recorded, trusted) = recorded_options(entry);
     let options = plugin
         .recovery_options(&RecoveredRun {
-            recorded: Some(&recorded),
+            recorded: recorded.as_ref(),
             trusted,
         })
         .map_err(|err| err.to_string())?;
-    if item.how == RecoverAs::Shell {
-        let conversation = item.conversation_id.as_deref().unwrap_or("");
-        plugin
-            .shell_resume(&options, conversation, &[])
-            .map_err(|err| err.to_string())?;
+    if item.how == RecoverAs::ShellResume {
+        let descriptor = plugin.descriptor();
+        let conversation = required_conversation(item)?;
+        let command = if descriptor.caps.shell_resume {
+            plugin
+                .shell_resume(&options, conversation, &[])
+                .map_err(|err| err.to_string())?
+        } else {
+            None
+        };
+        if command.is_none() {
+            return Err(format!(
+                "{} cannot resume a conversation in a shell",
+                descriptor.label
+            ));
+        }
     }
-    let (agent_options, model) = request_parts_from_options(&options);
     Ok(RecoveredSpawn {
-        agent_options,
-        model,
+        selection: AgentSelection { agent, options },
         dangerously_skip_permissions: trusted,
     })
 }
 
-/// The options `entry` recorded and whether it ran trusted. A spawn config
-/// that is not a plain shell's gives its options, model and skip flag. A
-/// plain shell's config, whose options and flags never reached the agent, or
-/// no config gives no permission mode, the entry's provider
-/// ([`HistoryEntry::claude_provider`]) and the model and skip flag the entry
-/// recorded.
-fn recorded_options(entry: &HistoryEntry) -> (OptionValues, bool) {
+/// The options `entry` recorded and whether it ran trusted. An agent spawn
+/// config gives its selection's options and its skip flag. A plain shell's
+/// config, whose flags never reached an agent, or no config gives the options
+/// and trust an import read from its tracer log, `None` when it read none.
+fn recorded_options(entry: &HistoryEntry) -> (Option<OptionValues>, bool) {
     if let Some(config) = &entry.spawn_config
         && config.mode != SessionMode::PlainShell
     {
-        let options = options_from_request(&config.agent_options, config.model.as_deref());
+        let options = config
+            .agent
+            .as_ref()
+            .map(|selection| selection.options.clone());
         return (options, config.dangerously_skip_permissions);
     }
-    let agent_options = AgentOptions::Claude {
-        permission_mode: None,
-        provider: entry.claude_provider(),
-    };
-    let options = options_from_request(&agent_options, entry.model.as_deref());
-    (options, entry.skip_permissions.unwrap_or(false))
+    (entry.options.clone(), entry.trusted)
 }
 
 fn required_conversation(item: &RecoverItem) -> Result<&str, String> {
@@ -1223,11 +1207,11 @@ fn required_conversation(item: &RecoverItem) -> Result<&str, String> {
         .ok_or_else(|| "no conversation to resume".to_owned())
 }
 
-/// Claude resuming `conversation` where the session ran: its own spawn config
-/// when it has one, with every repo member pinned to its recorded folder;
-/// else the registered workspace or repo its folders are, pinned the same
-/// way; else its folder with its other members as `--add-dir`s.
-fn claude_request(
+/// The agent resuming `conversation` where the session ran: its own spawn
+/// config when it has one, with every repo member pinned to its recorded
+/// folder; else the registered workspace or repo its folders are, pinned the
+/// same way; else its folder with its other members as `--add-dir`s.
+fn agent_request(
     entry: &HistoryEntry,
     folder: &str,
     conversation: &str,
@@ -1237,12 +1221,11 @@ fn claude_request(
     let Some(config) = &entry.spawn_config else {
         let members = entry_members(entry, folder, registered.repos);
         let target = folder_target(entry, &members, registered);
-        return folder_claude(entry, target, conversation, spawn);
+        return folder_agent(entry, target, conversation, spawn);
     };
     let mut request = recorded_request(entry, config, folder, registered);
-    request.agent_options = spawn.agent_options;
+    request.agent = Some(spawn.selection);
     request.dangerously_skip_permissions = spawn.dangerously_skip_permissions;
-    request.model = spawn.model;
     request.mode = SessionMode::Interactive;
     request.resume_conversation = Some(conversation.to_owned());
     request
@@ -1456,9 +1439,9 @@ fn pinned_single(repo_id: String, path: &str, branch_name: String) -> SpawnTarge
     }
 }
 
-/// Claude resuming `conversation` in `target` with `spawn`'s options and the
-/// env rows `entry`'s spawn recorded.
-fn folder_claude(
+/// The agent resuming `conversation` in `target` with `spawn`'s options and
+/// the env rows `entry`'s spawn recorded.
+fn folder_agent(
     entry: &HistoryEntry,
     target: SpawnTarget,
     conversation: &str,
@@ -1470,8 +1453,7 @@ fn folder_claude(
         mode: SessionMode::Interactive,
         initial_prompt: None,
         dangerously_skip_permissions: spawn.dangerously_skip_permissions,
-        agent_options: spawn.agent_options,
-        model: spawn.model,
+        agent: Some(spawn.selection),
         extra_env: recorded_env(entry).to_vec(),
         secret_env_keys: Vec::new(),
         prompt_injector: None,
@@ -1493,8 +1475,7 @@ fn shell_request(entry: &HistoryEntry, folder: &str) -> SpawnRequest {
         mode: SessionMode::PlainShell,
         initial_prompt: None,
         dangerously_skip_permissions: false,
-        agent_options: AgentOptions::claude(None),
-        model: None,
+        agent: None,
         extra_env: recorded_env(entry).to_vec(),
         secret_env_keys: Vec::new(),
         prompt_injector: None,
@@ -1518,8 +1499,7 @@ pub(crate) mod test_support {
     use chrono::Utc;
     use portable_pty::ChildKiller;
     use protocol::{
-        Agent, AppearanceOverrides, HistoryEntry, SessionKind, SessionMetrics, SessionMode,
-        SessionStatus,
+        AppearanceOverrides, HistoryEntry, SessionKind, SessionMetrics, SessionMode, SessionStatus,
     };
     use std::sync::Arc;
     use std::time::Duration;
@@ -1615,7 +1595,7 @@ pub(crate) mod test_support {
             pty: None,
             headless: None,
             workspace_id: None,
-            agent: Agent::default(),
+            agent: agent_registry::default_agent(),
             terminal_title: None,
             program_name: None,
             current_cwd: None,
@@ -1629,7 +1609,7 @@ pub(crate) mod test_support {
             screen: None,
             scrollback_snapshot_req: None,
             spawn_origin: None,
-            claude_session_id: None,
+            conversation_id: None,
             pending_input: None,
             last_hook_time: None,
             hook_driven: false,
@@ -1655,7 +1635,7 @@ pub(crate) mod test_support {
             Utc::now(),
             None,
             None,
-            Agent::Claude,
+            Some(agent_registry::default_agent()),
             None,
             None,
             None,
@@ -1708,9 +1688,9 @@ mod tests {
         entry_from_record(&record(id, SessionMode::Interactive), end, ended_at)
     }
 
-    /// A sidecar that names no agent ends as the default agent's session.
+    /// A sidecar that names no agent ends as an entry that names none.
     #[test]
-    fn history_entry_from_meta_without_an_agent_uses_the_default_agent() {
+    fn history_entry_from_meta_without_an_agent_names_none() {
         let mut meta = crate::orphan::meta_from_record(
             "s-no-agent".to_string(),
             1,
@@ -1721,7 +1701,7 @@ mod tests {
             Utc::now(),
             None,
             None,
-            Agent::Claude,
+            Some(agent_registry::default_agent()),
             None,
             None,
             None,
@@ -1733,7 +1713,7 @@ mod tests {
         .expect("build meta");
         meta.agent = None;
         let entry = entry_from_meta(&meta, SessionEnd::TracerLost, Utc::now());
-        assert_eq!(entry.agent, agent_registry::default_agent());
+        assert_eq!(entry.agent, None);
     }
 
     /// The hook path moves the record to a `/clear`'s conversation, and the
@@ -1741,24 +1721,25 @@ mod tests {
     #[test]
     fn entry_from_record_carries_the_hook_updated_conversation_id() {
         let mut rec = record("s1", SessionMode::Interactive);
-        rec.claude_session_id = Some("old-conv".to_owned());
+        rec.conversation_id = Some("old-conv".to_owned());
         let body = serde_json::json!({
             "hook_event_name": "SessionStart",
             "source": "clear",
             "session_id": "new-conv",
         });
-        let report = agent_registry::plugin(protocol::Agent::Claude)
+        let report = agent_registry::plugin(&agent_registry::default_agent())
+            .expect("Claude is registered")
             .map_hook_event(&body, None, false)
             .expect("a start is mapped");
         crate::hook_status::apply_details(&mut rec, &report);
         assert_eq!(
-            rec.claude_session_id.as_deref(),
+            rec.conversation_id.as_deref(),
             Some("new-conv"),
             "the hook path moves the record"
         );
         let entry = entry_from_record(&rec, SessionEnd::TracerLost, Utc::now());
         assert_eq!(
-            entry.claude_session_id.as_deref(),
+            entry.conversation_id.as_deref(),
             Some("new-conv"),
             "the ended session keeps the conversation it really was in"
         );
@@ -1871,7 +1852,7 @@ mod tests {
     fn dead_meta(dirs: &Dirs, id: &str) -> orphan::OrphanMeta {
         write_meta_for(dirs, id);
         let mut meta = orphan::load_meta(dirs, id).expect("load meta");
-        meta.claude_session_id = Some(format!("conv-{id}"));
+        meta.conversation_id = Some(format!("conv-{id}"));
         meta
     }
 
@@ -1894,7 +1875,7 @@ mod tests {
         let written = read_one(&dirs, "lost").expect("entry written");
         assert_eq!(written.end, SessionEnd::TracerLost);
         assert!(!written.end_time_known, "the time of a lost end is a guess");
-        assert_eq!(written.claude_session_id.as_deref(), Some("conv-lost"));
+        assert_eq!(written.conversation_id.as_deref(), Some("conv-lost"));
         assert_eq!(written.source, HistorySource::Record);
         let _ = std::fs::remove_dir_all(&dirs.config);
     }
@@ -2039,6 +2020,7 @@ mod tests {
 mod import_tests {
     use super::test_support::scratch_dirs;
     use super::*;
+    use protocol::OptionValue;
     use serde_json::json;
     use std::fs::File;
     use std::time::SystemTime;
@@ -2145,7 +2127,7 @@ mod import_tests {
             [("r-yaat", r"D:\yaat"), ("r-srv", r"D:\yaat-server")]
         );
         assert_eq!(entry.mode, SessionMode::Interactive);
-        assert_eq!(entry.agent, Agent::Claude);
+        assert_eq!(entry.agent, Some(agent_registry::default_agent()));
         assert_eq!(entry.program_name.as_deref(), Some("claude"));
         assert_eq!(entry.primary_cwd.as_deref(), Some(r"D:\yaat"));
         assert_eq!(entry.current_cwd, None);
@@ -2153,10 +2135,26 @@ mod import_tests {
         assert_eq!(entry.end, SessionEnd::TracerLost);
         assert_eq!(entry.source, HistorySource::TracerLog);
         assert_eq!(entry.label, "");
-        assert_eq!(entry.claude_session_id, None);
-        assert_eq!(entry.skip_permissions, Some(true));
-        assert_eq!(entry.model, None);
+        assert_eq!(entry.conversation_id, None);
+        assert!(entry.trusted);
+        assert_eq!(option_of(&entry, "model"), Some(&OptionValue::Null));
         let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    /// The revision Claude's importer stamps an import with.
+    fn claude_import_rev() -> u32 {
+        agent_registry::plugin(&agent_registry::default_agent())
+            .expect("Claude is registered")
+            .import_rev()
+    }
+
+    /// The value an import recorded for its agent's option `key`.
+    fn option_of<'a>(entry: &'a HistoryEntry, key: &str) -> Option<&'a OptionValue> {
+        entry.options.as_ref()?.get(key)
+    }
+
+    fn text(value: &str) -> OptionValue {
+        OptionValue::Text(value.to_owned())
     }
 
     fn claude_log(id: &str, args: &str) -> [String; 2] {
@@ -2177,20 +2175,20 @@ mod import_tests {
             (
                 "aaaaaaaa-0000-4000-8000-000000000001",
                 r#"["--model", "opus"]"#,
-                Some(false),
-                Some("opus"),
+                false,
+                text("opus"),
             ),
             (
                 "aaaaaaaa-0000-4000-8000-000000000002",
                 r#"["--model=sonnet", "--dangerously-skip-permissions"]"#,
-                Some(true),
-                Some("sonnet"),
+                true,
+                text("sonnet"),
             ),
             (
                 "aaaaaaaa-0000-4000-8000-000000000003",
                 "[]",
-                Some(false),
-                None,
+                false,
+                OptionValue::Null,
             ),
         ];
         for (id, args, _, _) in &cases {
@@ -2203,8 +2201,8 @@ mod import_tests {
 
         for (id, _, skip, model) in cases {
             let entry = only(&dirs, id);
-            assert_eq!(entry.skip_permissions, skip, "{id}");
-            assert_eq!(entry.model.as_deref(), model, "{id}");
+            assert_eq!(entry.trusted, skip, "{id}");
+            assert_eq!(option_of(&entry, "model"), Some(&model), "{id}");
         }
         let _ = std::fs::remove_dir_all(&dirs.config);
     }
@@ -2278,8 +2276,8 @@ mod import_tests {
         assert_eq!(entry.members, [] as [protocol::SessionMember; 0]);
         assert_eq!(entry.spawn_config, None);
         assert_eq!(entry.end, SessionEnd::Exited { code: 0 });
-        assert_eq!(entry.skip_permissions, None);
-        assert_eq!(entry.model, None);
+        assert!(!entry.trusted);
+        assert_eq!(entry.options, None);
         let _ = std::fs::remove_dir_all(&dirs.config);
     }
 
@@ -2291,16 +2289,13 @@ mod import_tests {
         assert_eq!(import(&dirs, &[], &[]), 1);
 
         let entry = only(&dirs, YAAT_ID);
-        assert_eq!(entry.agent, Agent::Claude);
-        assert_eq!(
-            entry.import_rev,
-            agent_registry::plugin(entry.agent).import_rev()
-        );
+        assert_eq!(entry.agent, Some(agent_registry::default_agent()));
+        assert_eq!(entry.import_rev, claude_import_rev());
         let _ = std::fs::remove_dir_all(&dirs.config);
     }
 
     #[test]
-    fn a_shell_import_names_the_default_agent() {
+    fn a_shell_import_names_no_agent() {
         let dirs = scratch_dirs("import-shell-agent");
         write_log(&dirs, &format!("tracer-{PWSH_ID}.log"), &PWSH_LOG);
 
@@ -2308,8 +2303,63 @@ mod import_tests {
 
         let entry = only(&dirs, PWSH_ID);
         assert_eq!(entry.mode, SessionMode::PlainShell);
-        assert_eq!(entry.agent, agent_registry::default_agent());
-        assert_eq!(entry.import_rev, IMPORT_REV);
+        assert_eq!(entry.agent, None);
+        assert_eq!(entry.import_rev, SHELL_IMPORT_REV);
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn shell_import_rev_is_3() {
+        assert_eq!(SHELL_IMPORT_REV, 3);
+    }
+
+    #[test]
+    fn an_import_keeps_its_options_and_trust() {
+        let dirs = scratch_dirs("import-keeps-options");
+        let id = "aaaaaaaa-0000-4000-8000-0000000000b7";
+        let lines = claude_log(
+            id,
+            r#"["--model=sonnet", "--dangerously-skip-permissions"]"#,
+        );
+        let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+        write_log(&dirs, &format!("tracer-{id}.log"), &lines);
+
+        assert_eq!(import(&dirs, &[], &[]), 1);
+
+        let entry = only(&dirs, id);
+        assert_eq!(entry.spawn_config, None, "an import stays config-less");
+        assert!(entry.trusted);
+        assert_eq!(option_of(&entry, "model"), Some(&text("sonnet")));
+        assert_eq!(option_of(&entry, "provider"), Some(&text("anthropic")));
+        let item = RecoverItem {
+            history_id: id.to_owned(),
+            conversation_id: Some("85573bb1-c581-489e-baaa-94d5a384744c".to_owned()),
+            how: RecoverAs::Agent,
+        };
+        let registered = Registered {
+            repos: &[],
+            workspaces: &[],
+        };
+        let request = plan_recovery(
+            &entry,
+            &item,
+            &registered,
+            agent_registry::plugin,
+            |_, _, _| true,
+        )
+        .expect("plan")
+        .request;
+        assert!(
+            request.dangerously_skip_permissions,
+            "the trust is replayed"
+        );
+        assert_eq!(
+            request
+                .agent
+                .and_then(|selection| selection.options.get("model").cloned()),
+            Some(text("sonnet")),
+            "the options are replayed"
+        );
         let _ = std::fs::remove_dir_all(&dirs.config);
     }
 
@@ -2338,7 +2388,7 @@ mod import_tests {
         let entry = only(&dirs, YAAT_ID);
         assert_eq!(entry.ended_at, ts("2026-09-27T18:29:06Z"));
         assert!(entry.end_time_known, "a daemon-log end line is a known end");
-        assert_eq!(entry.import_rev, IMPORT_REV);
+        assert_eq!(entry.import_rev, claude_import_rev());
         let _ = std::fs::remove_dir_all(&dirs.config);
     }
 
@@ -2381,47 +2431,12 @@ mod import_tests {
         assert_eq!(import(&dirs, &[], &[]), 1);
 
         let entry = only(&dirs, YAAT_ID);
-        assert_eq!(entry.import_rev, IMPORT_REV);
+        assert_eq!(entry.import_rev, claude_import_rev());
         assert_eq!(
             entry.label, "",
             "the importer's entry replaced the stale one"
         );
         assert!(!entry.end_time_known);
-        let _ = std::fs::remove_dir_all(&dirs.config);
-    }
-
-    #[test]
-    fn an_import_from_revision_1_is_upgraded_in_place() {
-        let dirs = scratch_dirs("upgrade-rev1");
-        // YAAT's log is still there; STOP's is gone.
-        write_log(&dirs, &format!("tracer-{YAAT_ID}.log"), &YAAT_LOG);
-        let mut written = Vec::new();
-        for id in [YAAT_ID, STOP_ID] {
-            let mut entry = imported(id, 1, "rev1");
-            entry.end_time_known = true;
-            entry.model = Some("deepseek-flash".to_owned());
-            write_if_absent(&dirs, &entry).expect("write a revision 1 import");
-            written.push(entry);
-        }
-
-        assert_eq!(import(&dirs, &[], &[]), 0, "nothing is read again");
-        prune(&dirs, Utc::now(), HISTORY_RETENTION);
-
-        for before in written {
-            let id = before.session_id.clone();
-            let entry = only(&dirs, &id);
-            assert_eq!(entry.provider, ClaudeProvider::Deepseek, "{id}");
-            assert_eq!(entry.import_rev, IMPORT_REV, "{id}");
-            assert_eq!(
-                HistoryEntry {
-                    provider: before.provider,
-                    import_rev: before.import_rev,
-                    ..entry
-                },
-                before,
-                "every other field is kept: {id}"
-            );
-        }
         let _ = std::fs::remove_dir_all(&dirs.config);
     }
 
@@ -2442,25 +2457,38 @@ mod import_tests {
         assert_eq!(import(&dirs, &[], &[]), 2);
 
         let entry = only(&dirs, deepseek);
-        assert_eq!(entry.provider, ClaudeProvider::Deepseek);
-        assert_eq!(only(&dirs, anthropic).provider, ClaudeProvider::Anthropic);
+        assert_eq!(option_of(&entry, "provider"), Some(&text("deepseek")));
+        assert_eq!(
+            option_of(&only(&dirs, anthropic), "provider"),
+            Some(&text("anthropic"))
+        );
         let item = RecoverItem {
             history_id: deepseek.to_owned(),
             conversation_id: Some("85573bb1-c581-489e-baaa-94d5a384744c".to_owned()),
-            how: RecoverAs::Claude,
+            how: RecoverAs::Agent,
         };
         let registered = Registered {
             repos: &[],
             workspaces: &[],
         };
-        let request = plan_recovery(&entry, &item, &registered, |_, _, _| true)
-            .expect("plan")
-            .request;
+        let request = plan_recovery(
+            &entry,
+            &item,
+            &registered,
+            agent_registry::plugin,
+            |_, _, _| true,
+        )
+        .expect("plan")
+        .request;
+        let options = request.agent.map(|selection| selection.options);
         assert_eq!(
-            request.agent_options.claude_provider(),
-            Some(ClaudeProvider::Deepseek)
+            options.as_ref().and_then(|options| options.get("provider")),
+            Some(&text("deepseek"))
         );
-        assert_eq!(request.model.as_deref(), Some("deepseek-flash"));
+        assert_eq!(
+            options.as_ref().and_then(|options| options.get("model")),
+            Some(&text("deepseek-flash"))
+        );
         let _ = std::fs::remove_dir_all(&dirs.config);
     }
 
@@ -2478,7 +2506,7 @@ mod import_tests {
             e.label = "recorded".to_owned();
             e
         };
-        let current = imported(STOP_ID, IMPORT_REV, "current");
+        let current = imported(STOP_ID, claude_import_rev(), "current");
         for (id, e) in [
             (YAAT_ID, &recovered),
             (PWSH_ID, &recorded),
@@ -2577,9 +2605,12 @@ mod import_tests {
 mod recovery_tests {
     use super::test_support::{record, scratch_dirs};
     use super::*;
-    use protocol::{SpawnConfig, WorktreeReusePolicy};
+    use agent_api::AgentPlugin;
+    use agent_api::test_agent::{TestAgent, TestOptions};
+    use protocol::{AgentDescriptor, SpawnConfig, WorktreeReusePolicy};
     use serde_json::json;
     use std::fs::File;
+    use std::sync::LazyLock;
     use std::time::SystemTime;
 
     const CONV: &str = "85573bb1-c581-489e-baaa-94d5a384744c";
@@ -2616,9 +2647,51 @@ mod recovery_tests {
             },
             mode: SessionMode::Interactive,
             dangerously_skip_permissions: true,
-            agent_options: AgentOptions::claude(None),
-            model: Some("opus".to_owned()),
+            agent: Some(claude(&[("model", "opus")])),
             extra_env: Vec::new(),
+        }
+    }
+
+    /// Claude with the text options `options`, every other field at its
+    /// default, as a spawn stores them.
+    fn claude(options: &[(&str, &str)]) -> AgentSelection {
+        AgentSelection {
+            agent: agent_registry::default_agent(),
+            options: crate::server::test_support::validated_claude(&raw_options(options)),
+        }
+    }
+
+    /// The text options `options`, as named.
+    fn raw_options(options: &[(&str, &str)]) -> OptionValues {
+        options
+            .iter()
+            .map(|(key, value)| {
+                (
+                    (*key).to_owned(),
+                    protocol::OptionValue::Text((*value).to_owned()),
+                )
+            })
+            .collect()
+    }
+
+    /// The agent a request selects.
+    fn selected_agent(request: &SpawnRequest) -> Option<AgentId> {
+        request
+            .agent
+            .as_ref()
+            .map(|selection| selection.agent.clone())
+    }
+
+    /// The option `key` a request selects.
+    fn option(request: &SpawnRequest, key: &str) -> Option<protocol::OptionValue> {
+        request.agent.as_ref()?.options.get(key).cloned()
+    }
+
+    /// The model a request selects, when it names one.
+    fn model_of(request: &SpawnRequest) -> Option<&str> {
+        match request.agent.as_ref()?.options.get("model")? {
+            protocol::OptionValue::Text(model) => Some(model),
+            _ => None,
         }
     }
 
@@ -2653,7 +2726,13 @@ mod recovery_tests {
         workspaces: &[WorkspaceEntry],
     ) -> Result<RecoveryPlan, String> {
         let registered = Registered { repos, workspaces };
-        plan_recovery(entry, item, &registered, |_, _, _| true)
+        plan_recovery(
+            entry,
+            item,
+            &registered,
+            agent_registry::plugin,
+            |_, _, _| true,
+        )
     }
 
     fn repo(id: &str, path: &str) -> RepoEntry {
@@ -2712,7 +2791,7 @@ mod recovery_tests {
     fn recovered_entry_is_refused() {
         let mut entry = folder_only(vec![member("", r"D:\yaat")]);
         entry.recovered_at = Some(Utc::now());
-        for how in [RecoverAs::Claude, RecoverAs::Shell] {
+        for how in [RecoverAs::Agent, RecoverAs::ShellResume, RecoverAs::Shell] {
             assert_eq!(
                 plan(&entry, &item(how, Some(CONV))),
                 Err("already recovered".to_owned())
@@ -2726,15 +2805,16 @@ mod recovery_tests {
         let asked = std::cell::RefCell::new(Vec::new());
         let result = plan_recovery(
             &entry,
-            &item(RecoverAs::Shell, Some("gone")),
+            &item(RecoverAs::ShellResume, Some("gone")),
             &Registered {
                 repos: &[],
                 workspaces: &[],
             },
+            agent_registry::plugin,
             |agent, folder, id| {
                 asked
                     .borrow_mut()
-                    .push((agent, folder.to_owned(), id.to_owned()));
+                    .push((agent.clone(), folder.to_owned(), id.to_owned()));
                 false
             },
         );
@@ -2744,7 +2824,11 @@ mod recovery_tests {
         );
         assert_eq!(
             *asked.borrow(),
-            [(Agent::Claude, r"D:\yaat".to_owned(), "gone".to_owned())]
+            [(
+                agent_registry::default_agent(),
+                r"D:\yaat".to_owned(),
+                "gone".to_owned()
+            )]
         );
     }
 
@@ -2752,10 +2836,10 @@ mod recovery_tests {
     fn claude_needs_a_conversation() {
         let entry = folder_only(vec![member("", r"D:\yaat")]);
         assert_eq!(
-            plan(&entry, &item(RecoverAs::Claude, None)),
+            plan(&entry, &item(RecoverAs::Agent, None)),
             Err("no conversation to resume".to_owned())
         );
-        let register = RecoverAs::RegisterRepoThenClaude {
+        let register = RecoverAs::RegisterRepoThenAgent {
             path: r"D:\yaat".to_owned(),
         };
         assert_eq!(
@@ -2775,7 +2859,7 @@ mod recovery_tests {
 
         let plan = plan_in(
             &entry,
-            &item(RecoverAs::Claude, Some(CONV)),
+            &item(RecoverAs::Agent, Some(CONV)),
             &repos,
             &workspaces,
         )
@@ -2806,9 +2890,9 @@ mod recovery_tests {
         assert_every_member_pinned(&req.target, 2);
         assert_eq!(req.resume_conversation.as_deref(), Some(CONV));
         assert_eq!(req.mode, SessionMode::Interactive);
-        assert_eq!(req.agent(), Agent::Claude);
+        assert_eq!(selected_agent(&req), Some(agent_registry::default_agent()));
         assert!(req.dangerously_skip_permissions);
-        assert_eq!(req.model.as_deref(), Some("opus"));
+        assert_eq!(model_of(&req), Some("opus"));
         assert_eq!(req.initial_prompt, None);
         assert_eq!(req.prompt_injector, None);
     }
@@ -2820,27 +2904,25 @@ mod recovery_tests {
         config.mode = SessionMode::PlainShell;
         entry.spawn_config = Some(config);
 
-        let req = plan(&entry, &item(RecoverAs::Claude, Some(CONV)))
+        let req = plan(&entry, &item(RecoverAs::Agent, Some(CONV)))
             .expect("plan")
             .request;
 
         assert_eq!(req.mode, SessionMode::Interactive);
-        assert_eq!(req.agent(), Agent::Claude);
+        assert_eq!(selected_agent(&req), Some(agent_registry::default_agent()));
         assert_eq!(req.resume_conversation.as_deref(), Some(CONV));
     }
 
-    fn deepseek_options() -> AgentOptions {
-        AgentOptions::Claude {
-            permission_mode: Some(protocol::PermissionMode::Plan),
-            provider: ClaudeProvider::Deepseek,
-        }
+    /// Claude on `DeepSeek` in plan mode.
+    fn deepseek_options() -> [(&'static str, &'static str); 2] {
+        [("permission_mode", "plan"), ("provider", "deepseek")]
     }
 
     /// A recorded `DeepSeek` entry: a workspace config on `DeepSeek`.
     fn recorded_deepseek(members: Vec<SessionMember>) -> HistoryEntry {
         let mut entry = folder_only(members);
         let mut config = workspace_config();
-        config.agent_options = deepseek_options();
+        config.agent = Some(claude(&deepseek_options()));
         entry.spawn_config = Some(config);
         entry
     }
@@ -2848,9 +2930,18 @@ mod recovery_tests {
     /// An imported `DeepSeek` entry: no config, the provider its `--model` named.
     fn imported_deepseek(members: Vec<SessionMember>) -> HistoryEntry {
         let mut entry = folder_only(members);
-        entry.provider = ClaudeProvider::Deepseek;
-        entry.model = Some("deepseek-flash".to_owned());
+        entry.options =
+            Some(claude(&[("provider", "deepseek"), ("model", "deepseek-flash")]).options);
         entry
+    }
+
+    /// What [`option`] answers for a text value.
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "compared with what `option` answers"
+    )]
+    fn text(value: &str) -> Option<protocol::OptionValue> {
+        Some(protocol::OptionValue::Text(value.to_owned()))
     }
 
     #[test]
@@ -2862,30 +2953,31 @@ mod recovery_tests {
         ];
         let recorded = plan_in(
             &recorded_deepseek(members.clone()),
-            &item(RecoverAs::Claude, Some(CONV)),
+            &item(RecoverAs::Agent, Some(CONV)),
             &repos,
             &workspaces,
         )
         .expect("plan")
         .request;
-        assert_eq!(recorded.agent_options, deepseek_options());
+        assert_eq!(option(&recorded, "provider"), text("deepseek"));
+        assert_eq!(option(&recorded, "permission_mode"), text("plan"));
 
         for registry in [(repos.as_slice(), workspaces.as_slice()), (&[], &[])] {
             let imported = plan_in(
                 &imported_deepseek(members.clone()),
-                &item(RecoverAs::Claude, Some(CONV)),
+                &item(RecoverAs::Agent, Some(CONV)),
                 registry.0,
                 registry.1,
             )
             .expect("plan")
             .request;
             assert_eq!(
-                imported.agent_options.claude_provider(),
-                Some(ClaudeProvider::Deepseek),
+                option(&imported, "provider"),
+                text("deepseek"),
                 "{:?}",
                 imported.target
             );
-            assert_eq!(imported.model.as_deref(), Some("deepseek-flash"));
+            assert_eq!(model_of(&imported), Some("deepseek-flash"));
         }
     }
 
@@ -2896,102 +2988,67 @@ mod recovery_tests {
             recorded_deepseek(members.clone()),
             imported_deepseek(members.clone()),
         ] {
+            assert_eq!(
+                plan(&entry, &item(RecoverAs::ShellResume, Some(CONV))),
+                Err("DeepSeek sessions recover as Claude.".to_owned()),
+                "{:?}",
+                entry.spawn_config
+            );
+            // A bare shell runs no agent, so no provider refuses it.
             for conversation in [Some(CONV), None] {
-                assert_eq!(
-                    plan(&entry, &item(RecoverAs::Shell, conversation)),
-                    Err("DeepSeek sessions recover as Claude.".to_owned()),
+                assert!(
+                    plan(&entry, &item(RecoverAs::Shell, conversation)).is_ok(),
                     "{conversation:?} {:?}",
                     entry.spawn_config
                 );
             }
         }
         let anthropic = folder_only(members);
-        assert!(plan(&anthropic, &item(RecoverAs::Shell, Some(CONV))).is_ok());
+        assert!(plan(&anthropic, &item(RecoverAs::ShellResume, Some(CONV))).is_ok());
         assert!(plan(&anthropic, &item(RecoverAs::Shell, None)).is_ok());
     }
 
     #[test]
     fn shell_recovery_of_an_unknown_provider_entry_is_refused() {
         let mut entry = folder_only(vec![member("", r"D:\yaat")]);
-        entry.provider = ClaudeProvider::Unknown;
-        for conversation in [Some(CONV), None] {
-            assert_eq!(
-                plan(&entry, &item(RecoverAs::Shell, conversation)),
-                Err("Sessions on this Claude provider recover as Claude.".to_owned()),
-                "{conversation:?}"
-            );
-        }
+        entry.options = Some(raw_options(&[("provider", "unknown")]));
+        assert_eq!(
+            plan(&entry, &item(RecoverAs::ShellResume, Some(CONV))),
+            Err("Sessions on this Claude provider recover as Claude.".to_owned())
+        );
     }
 
     #[test]
     fn plan_recovery_refuses_a_shell_through_the_plugins_shell_resume() {
         let entry = imported_deepseek(vec![member("", r"D:\yaat")]);
-        let options = crate::server::options_from_request(
-            &AgentOptions::Claude {
-                permission_mode: None,
-                provider: ClaudeProvider::Deepseek,
-            },
-            Some("deepseek-flash"),
-        );
-        let refusal = agent_registry::plugin(entry.agent)
+        let options = claude(&[("provider", "deepseek"), ("model", "deepseek-flash")]).options;
+        let refusal = agent_registry::plugin(&agent_registry::default_agent())
+            .expect("Claude is registered")
             .shell_resume(&options, "", &[])
             .expect_err("the plugin refuses a DeepSeek shell");
         let registered = Registered {
             repos: &[],
             workspaces: &[],
         };
-        for conversation in [Some(CONV), None] {
-            // The refusal comes before the conversation check, so a missing
-            // conversation does not hide it.
-            assert_eq!(
-                plan_recovery(
-                    &entry,
-                    &item(RecoverAs::Shell, conversation),
-                    &registered,
-                    |_, _, _| false
-                ),
-                Err(refusal.to_string()),
-                "{conversation:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn a_plain_shell_config_on_deepseek_keeps_its_provider_and_refuses_shell_recovery() {
-        let mut entry = folder_only(vec![member("", r"D:\foo")]);
-        let mut config = workspace_config();
-        config.mode = SessionMode::PlainShell;
-        config.agent_options = deepseek_options();
-        entry.spawn_config = Some(config);
-        for how in claude_paths() {
-            let request = plan(&entry, &item(how.clone(), Some(CONV)))
-                .expect("plan")
-                .request;
-            assert_eq!(
-                request.agent_options,
-                AgentOptions::Claude {
-                    permission_mode: None,
-                    provider: ClaudeProvider::Deepseek,
-                },
-                "{how:?}"
-            );
-            assert!(!request.dangerously_skip_permissions, "{how:?}");
-            assert_eq!(request.model, None, "{how:?}");
-        }
-        for conversation in [Some(CONV), None] {
-            assert_eq!(
-                plan(&entry, &item(RecoverAs::Shell, conversation)),
-                Err("DeepSeek sessions recover as Claude.".to_owned()),
-                "{conversation:?}"
-            );
-        }
+        // The refusal comes before the conversation's existence check, so a
+        // missing conversation does not hide it.
+        assert_eq!(
+            plan_recovery(
+                &entry,
+                &item(RecoverAs::ShellResume, Some(CONV)),
+                &registered,
+                agent_registry::plugin,
+                |_, _, _| false
+            ),
+            Err(refusal.to_string())
+        );
     }
 
     /// The two Claude recoveries of an entry known by its folder `D:\foo`.
     fn claude_paths() -> [RecoverAs; 2] {
         [
-            RecoverAs::Claude,
-            RecoverAs::RegisterRepoThenClaude {
+            RecoverAs::Agent,
+            RecoverAs::RegisterRepoThenAgent {
                 path: r"D:\foo".to_owned(),
             },
         ]
@@ -3002,15 +3059,15 @@ mod recovery_tests {
         let mut entry = folder_only(vec![member("", r"D:\foo")]);
         let mut config = workspace_config();
         config.mode = SessionMode::PlainShell;
-        assert!(config.dangerously_skip_permissions && config.model.is_some());
+        assert!(config.dangerously_skip_permissions && config.agent.is_some());
         entry.spawn_config = Some(config);
         for how in claude_paths() {
             let request = plan(&entry, &item(how.clone(), Some(CONV)))
                 .expect("plan")
                 .request;
-            assert_eq!(request.agent_options, AgentOptions::claude(None), "{how:?}");
+            assert_eq!(option(&request, "provider"), text("anthropic"), "{how:?}");
             assert!(!request.dangerously_skip_permissions, "{how:?}");
-            assert_eq!(request.model, None, "{how:?}");
+            assert_eq!(model_of(&request), None, "{how:?}");
         }
     }
 
@@ -3018,44 +3075,227 @@ mod recovery_tests {
     fn a_deepseek_claude_config_keeps_its_flags_through_every_claude_path() {
         let mut entry = recorded_deepseek(vec![member("", r"D:\foo")]);
         if let Some(config) = entry.spawn_config.as_mut() {
-            config.model = Some("deepseek-pro".to_owned());
+            config.agent = Some(claude(&[
+                ("permission_mode", "plan"),
+                ("provider", "deepseek"),
+                ("model", "deepseek-pro"),
+            ]));
             config.dangerously_skip_permissions = true;
         }
         for how in claude_paths() {
             let request = plan(&entry, &item(how.clone(), Some(CONV)))
                 .expect("plan")
                 .request;
-            assert_eq!(request.agent_options, deepseek_options(), "{how:?}");
+            assert_eq!(option(&request, "provider"), text("deepseek"), "{how:?}");
+            assert_eq!(option(&request, "permission_mode"), text("plan"), "{how:?}");
             assert!(request.dangerously_skip_permissions, "{how:?}");
-            assert_eq!(request.model.as_deref(), Some("deepseek-pro"), "{how:?}");
+            assert_eq!(model_of(&request), Some("deepseek-pro"), "{how:?}");
         }
     }
 
     #[test]
     fn register_repo_then_claude_keeps_the_provider_of_a_config() {
-        let register = RecoverAs::RegisterRepoThenClaude {
+        let register = RecoverAs::RegisterRepoThenAgent {
             path: r"D:\foo".to_owned(),
         };
         let members = vec![member("", r"D:\foo")];
         let mut entry = recorded_deepseek(members.clone());
         if let Some(config) = entry.spawn_config.as_mut() {
-            config.model = Some("deepseek-pro".to_owned());
+            config.agent = Some(claude(&[
+                ("permission_mode", "plan"),
+                ("provider", "deepseek"),
+                ("model", "deepseek-pro"),
+            ]));
             config.dangerously_skip_permissions = true;
         }
         let recorded = plan(&entry, &item(register.clone(), Some(CONV)))
             .expect("plan")
             .request;
-        assert_eq!(recorded.agent_options, deepseek_options());
-        assert_eq!(recorded.model.as_deref(), Some("deepseek-pro"));
+        assert_eq!(option(&recorded, "provider"), text("deepseek"));
+        assert_eq!(option(&recorded, "permission_mode"), text("plan"));
+        assert_eq!(model_of(&recorded), Some("deepseek-pro"));
         assert!(recorded.dangerously_skip_permissions);
 
         let imported = plan(&imported_deepseek(members), &item(register, Some(CONV)))
             .expect("plan")
             .request;
+        assert_eq!(option(&imported, "provider"), text("deepseek"));
+    }
+
+    /// [`TestAgent`]'s schema with `caps.shell_resume` on.
+    static SHELL_RESUME_CAP: LazyLock<AgentDescriptor> = LazyLock::new(|| {
+        let mut descriptor = agent_api::test_agent::DESCRIPTOR.clone();
+        descriptor.caps.shell_resume = true;
+        descriptor
+    });
+
+    /// The test agent with `descriptor` in place of its own, whose
+    /// `shell_resume` answers `resume_command`.
+    struct ShellResumeAgent {
+        inner: TestAgent,
+        descriptor: &'static LazyLock<AgentDescriptor>,
+        resume_command: Option<&'static str>,
+    }
+
+    impl ShellResumeAgent {
+        fn new(
+            descriptor: &'static LazyLock<AgentDescriptor>,
+            resume_command: Option<&'static str>,
+        ) -> Self {
+            Self {
+                inner: TestAgent::new(agent_api::ConversationPlan::None),
+                descriptor,
+                resume_command,
+            }
+        }
+    }
+
+    impl agent_api::Agent for ShellResumeAgent {
+        type Options = TestOptions;
+
+        fn descriptor(&self) -> &AgentDescriptor {
+            LazyLock::force(self.descriptor)
+        }
+
+        fn program_env_var(&self) -> &'static str {
+            agent_api::Agent::program_env_var(&self.inner)
+        }
+
+        fn default_program(&self) -> &'static str {
+            agent_api::Agent::default_program(&self.inner)
+        }
+
+        fn liveness_tokens(&self) -> &'static [&'static str] {
+            agent_api::Agent::liveness_tokens(&self.inner)
+        }
+
+        fn recovery_options(&self, run: &agent_api::RecoveredRun<'_>) -> TestOptions {
+            agent_api::Agent::recovery_options(&self.inner, run)
+        }
+
+        fn shell_resume(
+            &self,
+            _opts: &TestOptions,
+            _conversation_id: &str,
+            _hook_files: &[std::path::PathBuf],
+        ) -> Result<Option<String>, agent_api::AgentError> {
+            Ok(self.resume_command.map(str::to_owned))
+        }
+
+        fn check_request(
+            &self,
+            opts: &TestOptions,
+            req: &agent_api::SpawnCheck<'_>,
+        ) -> Result<(), agent_api::Refusal> {
+            agent_api::Agent::check_request(&self.inner, opts, req)
+        }
+
+        fn spawn_env(
+            &self,
+            opts: &TestOptions,
+            rows: &agent_api::ResolvedRows,
+            keys: &dyn agent_api::KeyLookup,
+        ) -> Result<agent_api::EnvPlan, agent_api::Refusal> {
+            agent_api::Agent::spawn_env(&self.inner, opts, rows, keys)
+        }
+
+        fn conversation_plan(
+            &self,
+            opts: &TestOptions,
+            resume: Option<&str>,
+        ) -> agent_api::ConversationPlan {
+            agent_api::Agent::conversation_plan(&self.inner, opts, resume)
+        }
+
+        fn interactive_args(
+            &self,
+            opts: &TestOptions,
+            ctx: &agent_api::SpawnContext<'_>,
+            members: &[SessionMember],
+            initial_prompt: Option<&str>,
+        ) -> Vec<String> {
+            agent_api::Agent::interactive_args(&self.inner, opts, ctx, members, initial_prompt)
+        }
+    }
+
+    static TEST_AGENT: LazyLock<TestAgent> =
+        LazyLock::new(|| TestAgent::new(agent_api::ConversationPlan::None));
+
+    /// Claims `caps.shell_resume` while its `shell_resume` builds no command.
+    static SHELL_RESUME_NONE: LazyLock<ShellResumeAgent> =
+        LazyLock::new(|| ShellResumeAgent::new(&SHELL_RESUME_CAP, None));
+
+    /// Lacks `caps.shell_resume` while its `shell_resume` builds a command.
+    static SHELL_RESUME_WITHOUT_CAP: LazyLock<ShellResumeAgent> = LazyLock::new(|| {
+        ShellResumeAgent::new(
+            &agent_api::test_agent::DESCRIPTOR,
+            Some("test-agent --resume"),
+        )
+    });
+
+    #[expect(clippy::unnecessary_wraps, reason = "a PluginLookup answers an Option")]
+    fn test_agent_plugin(_agent: &AgentId) -> Option<&'static dyn AgentPlugin> {
+        Some(&*TEST_AGENT)
+    }
+
+    #[expect(clippy::unnecessary_wraps, reason = "a PluginLookup answers an Option")]
+    fn shell_resume_none_plugin(_agent: &AgentId) -> Option<&'static dyn AgentPlugin> {
+        Some(&*SHELL_RESUME_NONE)
+    }
+
+    #[expect(clippy::unnecessary_wraps, reason = "a PluginLookup answers an Option")]
+    fn shell_resume_without_cap_plugin(_agent: &AgentId) -> Option<&'static dyn AgentPlugin> {
+        Some(&*SHELL_RESUME_WITHOUT_CAP)
+    }
+
+    /// A folder entry the test agent ran.
+    fn test_agent_entry() -> HistoryEntry {
+        let mut entry = folder_only(vec![member("", r"D:\foo")]);
+        entry.agent = Some(agent_api::test_agent::DESCRIPTOR.id.clone());
+        entry
+    }
+
+    fn plan_with(plugins: PluginLookup, how: RecoverAs) -> Result<RecoveryPlan, String> {
+        let registered = Registered {
+            repos: &[],
+            workspaces: &[],
+        };
+        plan_recovery(
+            &test_agent_entry(),
+            &item(how, Some(CONV)),
+            &registered,
+            plugins,
+            |_, _, _| true,
+        )
+    }
+
+    #[test]
+    fn plan_recovery_offers_shell_resume_only_with_the_cap() {
         assert_eq!(
-            imported.agent_options.claude_provider(),
-            Some(ClaudeProvider::Deepseek)
+            plan_with(shell_resume_without_cap_plugin, RecoverAs::ShellResume),
+            Err("Test agent cannot resume a conversation in a shell".to_owned()),
+            "an agent without the cap is refused although its shell_resume builds a command"
         );
+        assert!(
+            plan_with(test_agent_plugin, RecoverAs::Shell).is_ok(),
+            "a bare shell needs no cap"
+        );
+        let claude = plan(
+            &folder_only(vec![member("", r"D:\foo")]),
+            &item(RecoverAs::ShellResume, Some(CONV)),
+        )
+        .expect("Claude has the cap");
+        assert_eq!(claude.hook_agent, Some(agent_registry::default_agent()));
+        assert_eq!(claude.resume_conversation.as_deref(), Some(CONV));
+    }
+
+    #[test]
+    fn shell_resume_none_refuses_the_shell_resume_recovery() {
+        assert_eq!(
+            plan_with(shell_resume_none_plugin, RecoverAs::ShellResume),
+            Err("Test agent cannot resume a conversation in a shell".to_owned())
+        );
+        assert!(plan_with(shell_resume_none_plugin, RecoverAs::Shell).is_ok());
     }
 
     const SINGLE_FOLDER: &str = r"C:\wt\repo";
@@ -3073,8 +3313,7 @@ mod recovery_tests {
             },
             mode: SessionMode::Interactive,
             dangerously_skip_permissions: false,
-            agent_options: AgentOptions::claude(None),
-            model: None,
+            agent: Some(claude(&[])),
             extra_env: Vec::new(),
         }
     }
@@ -3083,7 +3322,7 @@ mod recovery_tests {
     fn claude_recovery_of_a_removed_single_repo_entry_runs_standalone() {
         let mut entry = folder_only(vec![member("r1", SINGLE_FOLDER)]);
         entry.spawn_config = Some(single_config());
-        let recover = item(RecoverAs::Claude, Some(CONV));
+        let recover = item(RecoverAs::Agent, Some(CONV));
 
         let removed = plan(&entry, &recover).expect("plan").request;
         assert_eq!(
@@ -3093,7 +3332,10 @@ mod recovery_tests {
                 add_dirs: Vec::new(),
             }
         );
-        assert_eq!(removed.agent(), Agent::Claude);
+        assert_eq!(
+            selected_agent(&removed),
+            Some(agent_registry::default_agent())
+        );
         assert_eq!(removed.resume_conversation.as_deref(), Some(CONV));
 
         let registered = plan_in(&entry, &recover, &[repo("r1", r"D:\repo")], &[])
@@ -3109,14 +3351,15 @@ mod recovery_tests {
 
     #[test]
     fn a_headless_entry_is_refused() {
-        let register = RecoverAs::RegisterRepoThenClaude {
+        let register = RecoverAs::RegisterRepoThenAgent {
             path: SINGLE_FOLDER.to_owned(),
         };
         let mut entry = folder_only(vec![member("r1", SINGLE_FOLDER)]);
         entry.mode = SessionMode::Headless;
         for how in [
-            RecoverAs::Claude,
+            RecoverAs::Agent,
             register,
+            RecoverAs::ShellResume,
             RecoverAs::Shell,
             RecoverAs::Unknown,
         ] {
@@ -3144,7 +3387,7 @@ mod recovery_tests {
         repos.push(repo("r-new", r"D:\new"));
         let grown = [workspace("ws1", &["r-yaat", "r-srv", "r-new"])];
 
-        let req = plan_in(&entry, &item(RecoverAs::Claude, Some(CONV)), &repos, &grown)
+        let req = plan_in(&entry, &item(RecoverAs::Agent, Some(CONV)), &repos, &grown)
             .expect("plan")
             .request;
 
@@ -3155,11 +3398,7 @@ mod recovery_tests {
                 add_dirs: vec![r"C:\wt\yaat-server".to_owned()],
             }
         );
-        assert_eq!(
-            req.model.as_deref(),
-            Some("opus"),
-            "the config's flags stay"
-        );
+        assert_eq!(model_of(&req), Some("opus"), "the config's flags stay");
     }
 
     #[test]
@@ -3179,7 +3418,7 @@ mod recovery_tests {
 
         let req = plan_in(
             &entry,
-            &item(RecoverAs::Claude, Some(CONV)),
+            &item(RecoverAs::Agent, Some(CONV)),
             &[repo("r1", r"D:\repo")],
             &[],
         )
@@ -3221,7 +3460,7 @@ mod recovery_tests {
         for entry in [named, matched] {
             let req = plan_in(
                 &entry,
-                &item(RecoverAs::Claude, Some(CONV)),
+                &item(RecoverAs::Agent, Some(CONV)),
                 &repos,
                 &workspaces,
             )
@@ -3261,7 +3500,7 @@ mod recovery_tests {
         let entry = folder_only(vec![imported("", r"D:\foo")]);
         let repos = [repo("r-foo", "d:/FOO/")];
 
-        let req = plan_in(&entry, &item(RecoverAs::Claude, Some(CONV)), &repos, &[])
+        let req = plan_in(&entry, &item(RecoverAs::Agent, Some(CONV)), &repos, &[])
             .expect("plan")
             .request;
 
@@ -3291,8 +3530,7 @@ mod recovery_tests {
         // has both.
         let repos = [repo("r-yaat", r"D:\yaat")];
 
-        let plan =
-            plan_in(&entry, &item(RecoverAs::Claude, Some(CONV)), &repos, &[]).expect("plan");
+        let plan = plan_in(&entry, &item(RecoverAs::Agent, Some(CONV)), &repos, &[]).expect("plan");
 
         assert_eq!(plan.register_repo, None);
         assert_eq!(
@@ -3303,7 +3541,10 @@ mod recovery_tests {
             }
         );
         assert_eq!(plan.request.mode, SessionMode::Interactive);
-        assert_eq!(plan.request.agent(), Agent::Claude);
+        assert_eq!(
+            selected_agent(&plan.request),
+            Some(agent_registry::default_agent())
+        );
         assert_eq!(plan.request.resume_conversation.as_deref(), Some(CONV));
         assert!(!plan.request.dangerously_skip_permissions);
     }
@@ -3311,17 +3552,17 @@ mod recovery_tests {
     #[test]
     fn folder_only_and_register_paths_replay_the_recorded_flags() {
         let mut entry = folder_only(vec![member("", r"D:\foo")]);
-        entry.skip_permissions = Some(true);
-        entry.model = Some("opus".to_owned());
-        let register = RecoverAs::RegisterRepoThenClaude {
+        entry.trusted = true;
+        entry.options = Some(claude(&[("model", "opus")]).options);
+        let register = RecoverAs::RegisterRepoThenAgent {
             path: r"D:\foo".to_owned(),
         };
-        for how in [RecoverAs::Claude, register] {
+        for how in [RecoverAs::Agent, register] {
             let req = plan(&entry, &item(how.clone(), Some(CONV)))
                 .expect("plan")
                 .request;
             assert!(req.dangerously_skip_permissions, "{how:?}");
-            assert_eq!(req.model.as_deref(), Some("opus"), "{how:?}");
+            assert_eq!(model_of(&req), Some("opus"), "{how:?}");
         }
     }
 
@@ -3330,7 +3571,7 @@ mod recovery_tests {
         let mut entry = folder_only(Vec::new());
         entry.primary_cwd = Some(r"D:\scratch".to_owned());
 
-        let req = plan(&entry, &item(RecoverAs::Claude, Some(CONV)))
+        let req = plan(&entry, &item(RecoverAs::Agent, Some(CONV)))
             .expect("plan")
             .request;
 
@@ -3346,7 +3587,7 @@ mod recovery_tests {
     #[test]
     fn register_repo_then_claude_registers_the_folder_and_resumes_there() {
         let entry = folder_only(vec![member("", r"D:\foo"), member("", r"D:\bar")]);
-        let how = RecoverAs::RegisterRepoThenClaude {
+        let how = RecoverAs::RegisterRepoThenAgent {
             path: "d:/FOO/".to_owned(),
         };
 
@@ -3369,7 +3610,7 @@ mod recovery_tests {
         let mut config = workspace_config();
         config.extra_env = recorded_env_rows();
         entry.spawn_config = Some(config);
-        let how = RecoverAs::RegisterRepoThenClaude {
+        let how = RecoverAs::RegisterRepoThenAgent {
             path: "d:/FOO/".to_owned(),
         };
 
@@ -3381,7 +3622,7 @@ mod recovery_tests {
     #[test]
     fn register_repo_then_claude_runs_pinned_in_the_new_repo() {
         let entry = folder_only(vec![imported("", r"D:\foo")]);
-        let how = RecoverAs::RegisterRepoThenClaude {
+        let how = RecoverAs::RegisterRepoThenAgent {
             path: r"D:\foo".to_owned(),
         };
 
@@ -3421,7 +3662,7 @@ mod recovery_tests {
         ]);
         let mut named = plan_in(
             &entry,
-            &item(RecoverAs::Claude, Some(CONV)),
+            &item(RecoverAs::Agent, Some(CONV)),
             &repos,
             &workspaces,
         )
@@ -3440,20 +3681,20 @@ mod recovery_tests {
         recorded.members[0].branch = "feat/x".to_owned();
         let kept = plan_in(
             &recorded,
-            &item(RecoverAs::Claude, Some(CONV)),
+            &item(RecoverAs::Agent, Some(CONV)),
             &repos,
             &workspaces,
         )
         .expect("plan");
         assert_eq!(kept.placeholder_branch_folder(), None);
-        let standalone = plan(&entry, &item(RecoverAs::Claude, Some(CONV))).expect("plan");
+        let standalone = plan(&entry, &item(RecoverAs::Agent, Some(CONV))).expect("plan");
         assert_eq!(standalone.placeholder_branch_folder(), None);
     }
 
     #[test]
     fn register_repo_then_claude_refuses_another_folder() {
         let entry = folder_only(vec![member("", r"D:\foo")]);
-        let how = RecoverAs::RegisterRepoThenClaude {
+        let how = RecoverAs::RegisterRepoThenAgent {
             path: r"D:\elsewhere".to_owned(),
         };
         assert_eq!(
@@ -3470,7 +3711,7 @@ mod recovery_tests {
         entry.current_cwd = Some(r"D:\yaat\src".to_owned());
         entry.spawn_config = Some(workspace_config());
 
-        let plan = plan(&entry, &item(RecoverAs::Shell, Some(CONV))).expect("plan");
+        let plan = plan(&entry, &item(RecoverAs::ShellResume, Some(CONV))).expect("plan");
         let req = &plan.request;
 
         assert_eq!(req.mode, SessionMode::PlainShell);
@@ -3486,7 +3727,7 @@ mod recovery_tests {
             req.prompt_injector, None,
             "the spawn types the plugin's command"
         );
-        assert_eq!(plan.hook_agent, Some(Agent::Claude));
+        assert_eq!(plan.hook_agent, Some(agent_registry::default_agent()));
         assert_eq!(plan.resume_conversation.as_deref(), Some(CONV));
     }
 
@@ -3497,7 +3738,7 @@ mod recovery_tests {
         config.extra_env = recorded_env_rows();
         entry.spawn_config = Some(config);
 
-        let req = plan(&entry, &item(RecoverAs::Shell, Some(CONV)))
+        let req = plan(&entry, &item(RecoverAs::ShellResume, Some(CONV)))
             .expect("plan")
             .request;
 
@@ -3508,11 +3749,69 @@ mod recovery_tests {
     fn a_recovery_without_a_spawn_config_has_no_env_rows() {
         let entry = folder_only(vec![member("", r"D:\yaat")]);
 
-        let req = plan(&entry, &item(RecoverAs::Shell, Some(CONV)))
+        let req = plan(&entry, &item(RecoverAs::ShellResume, Some(CONV)))
             .expect("plan")
             .request;
 
         assert!(req.extra_env.is_empty(), "{:?}", req.extra_env);
+    }
+
+    #[test]
+    fn a_shell_entry_recovers_through_the_default_agent() {
+        let mut entry = folder_only(vec![member("", r"D:\yaat")]);
+        entry.mode = SessionMode::PlainShell;
+        entry.agent = None;
+
+        let resumed = plan(&entry, &item(RecoverAs::ShellResume, Some(CONV))).expect("plan");
+        assert_eq!(resumed.hook_agent, Some(agent_registry::default_agent()));
+        assert_eq!(resumed.resume_conversation.as_deref(), Some(CONV));
+
+        let agent = plan(&entry, &item(RecoverAs::Agent, Some(CONV)))
+            .expect("plan")
+            .request;
+        assert_eq!(
+            selected_agent(&agent),
+            Some(agent_registry::default_agent())
+        );
+        assert_eq!(agent.mode, SessionMode::Interactive);
+    }
+
+    #[test]
+    fn sidecar_and_history_round_trip_conversation_id() {
+        let dirs = scratch_dirs("conversation-id-round-trip");
+        let mut rec = record("s-conv", SessionMode::Interactive);
+        rec.conversation_id = Some(CONV.to_owned());
+        let meta = crate::orphan::meta_from_record(
+            rec.id.clone(),
+            1,
+            rec.label.clone(),
+            SessionKind::Standalone,
+            SessionMode::Interactive,
+            Vec::new(),
+            Utc::now(),
+            None,
+            None,
+            rec.wire_agent(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            rec.conversation_id.clone(),
+        )
+        .expect("build meta");
+        crate::orphan::write_meta(&dirs, &meta).expect("write meta");
+        let loaded = crate::orphan::load_meta(&dirs, "s-conv").expect("load meta");
+        assert_eq!(loaded.conversation_id.as_deref(), Some(CONV));
+
+        let ended = entry_from_meta(&loaded, SessionEnd::TracerLost, Utc::now());
+        write_if_absent(&dirs, &ended).expect("write the entry");
+        let read = read_one(&dirs, "s-conv").expect("read the entry");
+        assert_eq!(read.conversation_id.as_deref(), Some(CONV));
+        let from_record = entry_from_record(&rec, SessionEnd::TracerLost, Utc::now());
+        assert_eq!(from_record.conversation_id.as_deref(), Some(CONV));
+        let _ = std::fs::remove_dir_all(&dirs.config);
     }
 
     #[test]
@@ -3604,7 +3903,7 @@ mod recovery_tests {
         let ended = DateTime::from_timestamp(Utc::now().timestamp() - 600, 0).expect("time");
 
         let mut known = history_entry("known", SessionMode::Interactive, &git_dir, ended);
-        known.claude_session_id = Some("conv-known".to_owned());
+        known.conversation_id = Some("conv-known".to_owned());
         write_transcript(&home, &git_dir, "conv-known", ended - TimeDelta::days(3));
         write_transcript(&home, &git_dir, "conv-other", ended);
         let mut gone = history_entry(
@@ -3613,7 +3912,7 @@ mod recovery_tests {
             &git_dir,
             ended - TimeDelta::seconds(1),
         );
-        gone.claude_session_id = Some("conv-missing".to_owned());
+        gone.conversation_id = Some("conv-missing".to_owned());
         let mut shell = history_entry(
             "shell",
             SessionMode::PlainShell,

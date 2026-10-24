@@ -10,9 +10,9 @@ use crate::support;
 
 use gpui::{Modifiers, TestAppContext, point, px};
 use protocol::{
-    AgentOptions, AttentionReason, ClaudeProvider, ClientMessage, DaemonMessage, PermissionMode,
-    SessionMode, SessionSnapshot, SpawnConfig, SpawnTarget, SplitDirection, VscodeWorkspaceFolder,
-    VscodeWorkspaceSuggestion, WorktreeReusePolicy,
+    AttentionReason, ClientMessage, DaemonMessage, SessionMode, SessionSnapshot, SpawnConfig,
+    SpawnTarget, SplitDirection, VscodeWorkspaceFolder, VscodeWorkspaceSuggestion,
+    WorktreeReusePolicy,
 };
 use rustling_tulip_native::{DETACHED_BANNER, SidebarView, TabPill, resume_all_label};
 use support::{Fixture, Harness, TestDir, pane, repo, session, split, tab, workspace};
@@ -1030,7 +1030,7 @@ fn with_deepseek(fixture: &mut Fixture) {
     fixture.sessions.push(
         session("deep")
             .in_repo("r1")
-            .claude_provider(ClaudeProvider::Deepseek)
+            .agent_chips(serde_json::json!([{ "text": "DeepSeek", "tip": "Runs on DeepSeek" }]))
             .build(),
     );
 }
@@ -1069,7 +1069,7 @@ fn a_leaf_hover_names_its_provider(cx: &mut TestAppContext) {
 
     assert_eq!(
         h.root(|root, _| root.leaf_hover("deep")).as_deref(),
-        Some("deep\nProvider: DeepSeek")
+        Some("deep\nRuns on DeepSeek")
     );
     assert_eq!(
         h.root(|root, _| root.leaf_hover("short")).as_deref(),
@@ -1169,8 +1169,7 @@ fn summary_config(target: SpawnTarget) -> SpawnConfig {
         target,
         mode: SessionMode::Interactive,
         dangerously_skip_permissions: false,
-        agent_options: AgentOptions::claude(Some(PermissionMode::AcceptEdits)),
-        model: Some("opus".to_owned()),
+        agent: Some(serde_json::from_value(serde_json::json!({ "agent": "claude", "options": { "permission_mode": "accept_edits", "model": "opus" } })).expect("agent selection")),
         extra_env: vec![
             ("A".to_owned(), "1".to_owned()),
             ("B".to_owned(), "2".to_owned()),

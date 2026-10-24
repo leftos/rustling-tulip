@@ -15,8 +15,8 @@ use std::collections::HashSet;
 
 use gpui::TestAppContext;
 use protocol::{
-    ClaudeProvider, ClientMessage, DaemonMessage, RecoverAs, RecoverItem, RecoverItemResult,
-    SessionHistoryItem, SplitDirection,
+    ClientMessage, DaemonMessage, RecoverAs, RecoverItem, RecoverItemResult, SessionHistoryItem,
+    SplitDirection,
 };
 use rustling_tulip_native::RecoverRow;
 use serde_json::json;
@@ -353,7 +353,9 @@ fn a_deepseek_entry_offers_recover_as_claude_only(cx: &mut TestAppContext) {
         ..Fixture::default()
     });
     let on_deepseek = |mut item: SessionHistoryItem| {
-        item.entry.provider = ClaudeProvider::Deepseek;
+        item.entry.options = Some(
+            serde_json::from_value(serde_json::json!({ "provider": "deepseek" })).expect("options"),
+        );
         item
     };
     open_with(
@@ -471,12 +473,12 @@ fn recover_sends_one_recover_sessions_with_chosen_items(cx: &mut TestAppContext)
             RecoverItem {
                 history_id: "a".to_owned(),
                 conversation_id: Some("y".to_owned()),
-                how: RecoverAs::Claude,
+                how: RecoverAs::Agent,
             },
             RecoverItem {
                 history_id: "b".to_owned(),
                 conversation_id: Some("c-b".to_owned()),
-                how: RecoverAs::Claude,
+                how: RecoverAs::Agent,
             },
             RecoverItem {
                 history_id: "sh".to_owned(),

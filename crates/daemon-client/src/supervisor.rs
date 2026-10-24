@@ -814,18 +814,18 @@ mod tests {
 
     #[test]
     fn native_client_retires_daemon_that_speaks_only_an_older_version() {
-        let daemon = handshake(23, &[23]);
+        let daemon = handshake(24, &[24]);
         assert_eq!(
-            action_for(protocol_kind(&daemon, &[24])),
+            action_for(protocol_kind(&daemon, &[25])),
             Action::RetireThenSpawn
         );
     }
 
     #[test]
-    fn native_client_reuses_daemon_speaking_24() {
-        let daemon = handshake(24, &[24]);
-        assert!(protocol_compatible(&daemon, &[24]));
-        assert_eq!(action_for(protocol_kind(&daemon, &[24])), Action::Reuse);
+    fn native_client_reuses_daemon_speaking_25() {
+        let daemon = handshake(25, &[25]);
+        assert!(protocol_compatible(&daemon, &[25]));
+        assert_eq!(action_for(protocol_kind(&daemon, &[25])), Action::Reuse);
     }
 
     #[test]

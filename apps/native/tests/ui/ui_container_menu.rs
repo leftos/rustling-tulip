@@ -9,8 +9,8 @@ use std::path::PathBuf;
 
 use gpui::{TestAppContext, px};
 use protocol::{
-    AgentOptions, ClientMessage, DaemonMessage, PresetEntry, PresetTarget, SessionMode,
-    SpawnConfig, SpawnTarget, WorkspaceEntry, WorktreeReusePolicy,
+    ClientMessage, DaemonMessage, PresetEntry, PresetTarget, SessionMode, SpawnConfig, SpawnTarget,
+    WorkspaceEntry, WorktreeReusePolicy,
 };
 use rustling_tulip_native::ToastKind;
 use serde_json::json;
@@ -113,8 +113,10 @@ fn launch_last_row_is_disabled_for_a_headless_config(cx: &mut TestAppContext) {
         },
         mode: SessionMode::Headless,
         dangerously_skip_permissions: false,
-        agent_options: AgentOptions::claude(None),
-        model: None,
+        agent: Some(
+            serde_json::from_value(serde_json::json!({ "agent": "claude", "options": {} }))
+                .expect("agent selection"),
+        ),
         extra_env: Vec::new(),
     });
     let mut h = Harness::with(cx, &dir, &fixture);

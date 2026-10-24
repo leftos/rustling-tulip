@@ -161,7 +161,6 @@ fn authorize_device(hub: &Hub, peer: &tailnet::PeerIdentity, presented_token: &s
 /// A feature joins only once the daemon fully honours it, since a client that
 /// sees it listed offers the capability to the user.
 const DAEMON_FEATURES: &[&str] = &[
-    protocol::FEATURE_CLAUDE_PROVIDER,
     protocol::FEATURE_AGENT_COMMANDS,
     protocol::FEATURE_DEVICE_PAIRING,
 ];
@@ -206,6 +205,14 @@ pub(super) fn push_initial_state(
             s.container_order.clone(),
             s.session_order.clone(),
         )
+    });
+    // The agents and their settings come first: the repos' last spawn
+    // configs and the sessions name agents.
+    let _ = out_tx.send(DaemonMessage::Agents {
+        agents: agent_registry::descriptors(),
+    });
+    let _ = out_tx.send(DaemonMessage::AgentSettings {
+        settings: hub.state.agent_settings(),
     });
     let _ = out_tx.send(DaemonMessage::Repos { repos });
     let _ = out_tx.send(DaemonMessage::Workspaces { workspaces });
@@ -343,7 +350,7 @@ mod tests {
         let (hub, _scratch) = test_hub("agent-commands-initial");
         hub.state
             .set_agent_command(
-                protocol::Agent::Claude,
+                &agent_registry::default_agent(),
                 crate::state::AgentCommand {
                     program: "cl".to_owned(),
                     args: "--debug".to_owned(),
@@ -364,11 +371,48 @@ mod tests {
         assert!(
             sent[0]
                 .iter()
-                .any(|entry| entry.agent == protocol::Agent::Claude
+                .any(|entry| entry.agent == agent_registry::default_agent()
                     && entry.program == "cl"
                     && entry.args == "--debug"),
             "{sent:?}"
         );
+    }
+
+    #[test]
+    fn initial_state_sends_agents_and_settings_before_repos_and_sessions() {
+        let (hub, _scratch) = test_hub("agents-initial");
+        let claude = agent_registry::default_agent();
+        let options = protocol::OptionValues::from([(
+            "provider".to_owned(),
+            protocol::OptionValue::Text("deepseek".to_owned()),
+        )]);
+        hub.state
+            .set_agent_settings(&claude, options.clone())
+            .expect("store settings");
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+
+        push_initial_state(&hub, &out_tx, "c1", false);
+
+        let mut kinds = Vec::new();
+        while let Ok(message) = out_rx.try_recv() {
+            match message {
+                DaemonMessage::Agents { agents } => {
+                    assert_eq!(agents, agent_registry::descriptors());
+                    kinds.push("agents");
+                }
+                DaemonMessage::AgentSettings { settings } => {
+                    assert_eq!(
+                        settings,
+                        std::collections::BTreeMap::from([(claude.clone(), options.clone())])
+                    );
+                    kinds.push("agent_settings");
+                }
+                DaemonMessage::Repos { .. } => kinds.push("repos"),
+                DaemonMessage::Sessions { .. } => kinds.push("sessions"),
+                _ => {}
+            }
+        }
+        assert_eq!(kinds, ["agents", "agent_settings", "repos", "sessions"]);
     }
 
     #[test]
@@ -406,19 +450,6 @@ mod tests {
                 &welcome,
                 DaemonMessage::Welcome { features, .. }
                     if features.iter().any(|f| f == "agent_commands")
-            ),
-            "{welcome:?}"
-        );
-    }
-
-    #[test]
-    fn welcome_lists_claude_provider() {
-        let welcome = welcome_message(22);
-        assert!(
-            matches!(
-                &welcome,
-                DaemonMessage::Welcome { features, .. }
-                    if features.iter().any(|f| f == "claude_provider")
             ),
             "{welcome:?}"
         );

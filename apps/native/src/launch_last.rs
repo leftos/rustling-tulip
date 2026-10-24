@@ -229,7 +229,7 @@ mod tests {
     )]
 
     use super::*;
-    use protocol::{AgentOptions, AppearanceOverrides, SessionMode, WorktreeReusePolicy};
+    use protocol::{AppearanceOverrides, SessionMode, WorktreeReusePolicy};
 
     fn single(repo_id: &str, use_worktree: bool) -> SpawnTarget {
         SpawnTarget::Single {
@@ -259,8 +259,9 @@ mod tests {
             target,
             mode: SessionMode::Interactive,
             dangerously_skip_permissions: false,
-            agent_options: AgentOptions::claude(None),
-            model: None,
+            agent: Some(crate::claude_compat::selection(
+                &crate::claude_compat::ClaudeChoice::default(),
+            )),
             extra_env: Vec::new(),
         }
     }

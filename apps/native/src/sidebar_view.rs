@@ -13,6 +13,7 @@ use crate::assets::{
     SIDEBAR_SHELL_ICON, SIDEBAR_TABS_ICON, SIDEBAR_WORKSPACE_ICON,
 };
 use crate::buttons::{ButtonSize, focus_ring, outlined_button, primary_button};
+use crate::claude_compat;
 use crate::drag::{self, DragPayload, Side, SidebarRow};
 use crate::ellipsis::{ellipsized, truncating};
 use crate::fonts::{self, DEFAULT_FAMILY};
@@ -32,9 +33,9 @@ use crate::session_menu::{
     menu_separator,
 };
 use crate::sidebar::{
-    Activity, Container, ContainerKind, DETACHED_BANNER, Leaf, LeafDensity, SidebarView, can_attach,
+    Activity, Container, ContainerKind, DETACHED_BANNER, Leaf, LeafDensity, SidebarView,
+    can_attach, chip_tip,
 };
-use crate::spawn_form::{provider_chip_text, provider_chip_tip};
 use crate::spawn_view::SpawnEntry;
 use crate::status_glyph::{GlyphSize, glyph, glyph_view};
 use crate::tabs::{TabPill, tab_pills};
@@ -49,7 +50,7 @@ use gpui::{
     StyledText, Svg, TextRun, Window, anchored, canvas, deferred, div, font, point, prelude::*, px,
     svg,
 };
-use protocol::{Agent, ClientMessage, SessionMode, SessionStatus};
+use protocol::{ClientMessage, SessionMode, SessionStatus};
 
 pub(crate) const ROW_HEIGHT: f32 = 22.0;
 pub(crate) const ROW_PADDING: f32 = 8.0;
@@ -1370,8 +1371,12 @@ fn leaf_chips(
         .map(|pill| leaf_pill(&pill, &leaf.id, attachable, size, cx))
         .into_iter()
         .collect();
-    if let Some(provider) = leaf.provider {
-        let name = format!("leaf-provider-{}", leaf.id);
+    for (index, agent_chip) in leaf.chips.iter().enumerate() {
+        let name = if index == 0 {
+            format!("leaf-provider-{}", leaf.id)
+        } else {
+            format!("leaf-provider-{}-{index}", leaf.id)
+        };
         let selector = name.clone();
         chips.push(
             chip(
@@ -1383,8 +1388,8 @@ fn leaf_chips(
             .bg(gpui::rgb(CHIP))
             .border_color(gpui::rgba(TRANSPARENT))
             .text_color(gpui::rgb(TEXT_2))
-            .tooltip(tooltip(provider_chip_tip(provider)))
-            .child(chip_text(&name, provider_chip_text(provider).to_owned()))
+            .tooltip(tooltip(chip_tip(agent_chip).to_owned()))
+            .child(chip_text(&name, agent_chip.text.clone()))
             .into_any_element(),
         );
     }
@@ -1407,10 +1412,7 @@ fn leaf_chips(
 fn chip_texts(leaf: &Leaf, pill: Option<&TabPill>) -> Vec<String> {
     pill.map(pill_text)
         .into_iter()
-        .chain(
-            leaf.provider
-                .map(|provider| provider_chip_text(provider).to_owned()),
-        )
+        .chain(leaf.chips.iter().map(|agent_chip| agent_chip.text.clone()))
         .chain(leaf.state.tag().map(|(text, _)| text))
         .collect()
 }
@@ -1970,8 +1972,9 @@ fn runtime_color(leaf: &Leaf) -> u32 {
     if leaf.mode == SessionMode::PlainShell {
         return SUBTLE;
     }
-    match leaf.agent {
-        Agent::Claude => ACCENT,
+    match &leaf.agent {
+        Some(agent) if claude_compat::is_claude(agent) => ACCENT,
+        _ => SUBTLE,
     }
 }
 
@@ -2168,7 +2171,7 @@ mod tests {
     use crate::sidebar::{Leaf, LeafState};
     use crate::tabs::TabPill;
     use crate::target::Target;
-    use protocol::{Agent, ClaudeProvider, SessionMode, SessionStatus};
+    use protocol::{AgentId, SessionChip, SessionMode, SessionStatus};
 
     #[test]
     fn add_repo_is_offered_on_every_host() {
@@ -2190,17 +2193,23 @@ mod tests {
         );
     }
 
-    /// A Claude leaf in `main`, tagged `orphan`, on `provider`.
-    fn leaf(provider: Option<ClaudeProvider>) -> Leaf {
+    /// A Claude leaf in `main`, tagged `orphan`, showing `chip`.
+    fn leaf(chip: Option<&str>) -> Leaf {
         Leaf {
             id: "s1".to_owned(),
             status: SessionStatus::Idle,
             mode: SessionMode::Interactive,
-            agent: Agent::Claude,
+            agent: Some(AgentId("claude".to_owned())),
             label: "s1".to_owned(),
             subline: Some("main".to_owned()),
             runtime: Some("claude".to_owned()),
-            provider,
+            chips: chip
+                .map(|text| SessionChip {
+                    text: text.to_owned(),
+                    tip: None,
+                })
+                .into_iter()
+                .collect(),
             attention: false,
             busy_excluded: false,
             unseen: false,
@@ -2233,10 +2242,7 @@ mod tests {
     #[test]
     fn the_subline_measures_the_provider_chip_among_the_others() {
         assert_eq!(
-            chip_texts(
-                &leaf(Some(ClaudeProvider::Deepseek)),
-                Some(&TabPill::Unbound)
-            ),
+            chip_texts(&leaf(Some("DeepSeek")), Some(&TabPill::Unbound)),
             ["unbound", "DeepSeek", "orphan"]
         );
         assert_eq!(

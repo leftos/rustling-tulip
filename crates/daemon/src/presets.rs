@@ -15,10 +15,11 @@ use std::time::Duration;
 use anyhow::{Context as _, anyhow};
 use chrono::Utc;
 use protocol::{
-    FooterLine, GridNode, InjectorStartup, InjectorStep, InjectorTemplate, LaunchPresetSource,
-    PresetEntry, PresetLaunchJobSnapshot, PresetLaunchJobStatus, PresetTarget, PresetVariable,
-    PresetVariableKind, PromptInjector, RepoEntry, ScriptCommandPreview, SessionMode, SpawnRequest,
-    SpawnTarget, SplitDirection, TabEntry, TabGroupingConfig, TabLayout,
+    AgentId, AgentSelection, FooterLine, GridNode, InjectorStartup, InjectorStep, InjectorTemplate,
+    LaunchPresetSource, OptionValues, PresetEntry, PresetLaunchJobSnapshot, PresetLaunchJobStatus,
+    PresetTarget, PresetVariable, PresetVariableKind, PromptInjector, RepoEntry,
+    ScriptCommandPreview, SessionMode, SpawnRequest, SpawnTarget, SplitDirection, TabEntry,
+    TabGroupingConfig, TabLayout,
 };
 use regex::Regex;
 use tokio::process::Command;
@@ -183,7 +184,9 @@ pub async fn preview_prompts(
     let repo = find_repo(hub, &preset.source_repo_id)
         .with_context(|| format!("preset's source repo missing: {}", preset.source_repo_id))?;
     let repo_path = PathBuf::from(&repo.path);
-    let plugin = agent_registry::plugin(preset.agent_options.agent());
+    let agent = preset_agent(&preset);
+    let plugin = agent_registry::plugin(&agent)
+        .ok_or_else(|| anyhow!("no agent plugin `{}` is registered", agent.0))?;
     let raw = resolve_prompts(&repo_path, source, plugin)
         .await
         .map_err(|f| anyhow!(f.error))?;
@@ -231,6 +234,16 @@ async fn load_repo_presets(repo_path: &Path, repo_id: &str) -> anyhow::Result<Ve
         entry.source_repo_id = repo_id.to_string();
     }
     Ok(entries)
+}
+
+/// The agent `preset` launches: the one it names, else the default agent.
+fn preset_agent(preset: &PresetEntry) -> AgentId {
+    preset
+        .agent
+        .as_ref()
+        .map_or_else(agent_registry::default_agent, |selection| {
+            selection.agent.clone()
+        })
 }
 
 fn find_repo(hub: &Hub, repo_id: &str) -> anyhow::Result<RepoEntry> {
@@ -1085,7 +1098,10 @@ async fn build_plan(hub: &Hub, args: &LaunchArgs) -> Result<LaunchPlan, LaunchFa
     let repo = find_repo(hub, &preset.source_repo_id)
         .map_err(|e| LaunchFailure::new(format!("preset's source repo missing: {e}")))?;
     let repo_path = PathBuf::from(&repo.path);
-    let plugin = agent_registry::plugin(preset.agent_options.agent());
+    let agent = preset_agent(&preset);
+    let plugin = agent_registry::plugin(&agent).ok_or_else(|| {
+        LaunchFailure::new(format!("no agent plugin `{}` is registered", agent.0))
+    })?;
     let raw_prompts = resolve_prompts(&repo_path, &args.source, plugin).await?;
     if raw_prompts.is_empty() {
         return Err(LaunchFailure::new("no prompts to launch"));
@@ -1518,8 +1534,7 @@ async fn spawn_one(
         mode: SessionMode::Interactive,
         initial_prompt: None,
         dangerously_skip_permissions: plan.preset.dangerously_skip_permissions,
-        agent_options: plan.preset.agent_options.clone(),
-        model: plan.preset.model.clone(),
+        agent: Some(preset_selection(&plan.preset)),
         extra_env: Vec::new(),
         secret_env_keys: Vec::new(),
         prompt_injector: Some(injector),
@@ -1531,6 +1546,15 @@ async fn spawn_one(
             .with_partials(session_ids, &plan.tab_state.tab_ids)
     })?;
     Ok(snapshot.id)
+}
+
+/// The agent `preset`'s sessions run: its own, or the default agent with its
+/// options' defaults when it names none.
+fn preset_selection(preset: &PresetEntry) -> AgentSelection {
+    preset.agent.clone().unwrap_or_else(|| AgentSelection {
+        agent: agent_registry::default_agent(),
+        options: OptionValues::default(),
+    })
 }
 
 fn attach_to_tab(
@@ -1971,6 +1995,28 @@ mod tests {
             injector.steps[3],
             InjectorStep::Text { newline: true, .. }
         ));
+    }
+
+    #[test]
+    fn a_preset_without_an_agent_runs_the_default_agent() {
+        let mut preset = test_launch_plan(1, 0).preset;
+        preset.agent = None;
+        assert_eq!(
+            preset_selection(&preset),
+            AgentSelection {
+                agent: agent_registry::default_agent(),
+                options: OptionValues::new(),
+            }
+        );
+        let named = AgentSelection {
+            agent: protocol::AgentId("other".to_owned()),
+            options: OptionValues::from([(
+                "provider".to_owned(),
+                protocol::OptionValue::Text("deepseek".to_owned()),
+            )]),
+        };
+        preset.agent = Some(named.clone());
+        assert_eq!(preset_selection(&preset), named, "a named agent is kept");
     }
 
     #[test]
@@ -2486,7 +2532,8 @@ mod tests {
     #[tokio::test]
     async fn folder_prompts_keep_the_at_prefix_for_claude() {
         let (_scratch, repo, folder) = folder_fixture();
-        let claude = agent_registry::plugin(protocol::Agent::Claude);
+        let claude =
+            agent_registry::plugin(&agent_registry::default_agent()).expect("Claude is registered");
         let prompts = resolve_folder_prompts(&repo, &folder.to_string_lossy(), claude)
             .await
             .expect("resolve folder prompts");
@@ -2504,7 +2551,8 @@ mod tests {
         std::fs::create_dir_all(&repo).expect("create repo");
         std::fs::create_dir_all(&folder).expect("create outside");
         std::fs::write(folder.join("a.md"), "a").expect("write a.md");
-        let claude = agent_registry::plugin(protocol::Agent::Claude);
+        let claude =
+            agent_registry::plugin(&agent_registry::default_agent()).expect("Claude is registered");
         let prompts = resolve_folder_prompts(&repo, &folder.to_string_lossy(), claude)
             .await
             .expect("resolve folder prompts");
@@ -2608,8 +2656,7 @@ mod tests {
                 session_label_template: Some("session {index}".to_string()),
                 default_use_worktree: Some(false),
                 dangerously_skip_permissions: false,
-                model: None,
-                agent_options: protocol::AgentOptions::claude(None),
+                agent: None,
                 tab_grouping: TabGroupingConfig::None,
                 injector: InjectorTemplate {
                     startup_delay_ms: 0,

@@ -545,7 +545,7 @@ pub(super) async fn rerun_request(hub: &Hub, session_id: &str) -> anyhow::Result
             // The lookup reads the disk, as Recover's planning does.
             tokio::task::spawn_blocking(move || {
                 let rows = crate::conversations::lookup_rows(&stored_env);
-                recovery_conversation_exists(c.agent, &c.folder, &c.id, &rows).then_some(c.id)
+                recovery_conversation_exists(&c.agent, &c.folder, &c.id, &rows).then_some(c.id)
             })
             .await?
         }
@@ -625,7 +625,7 @@ fn finish_rerun(hub: &Hub, source_id: &str, resumed: bool) {
 
 /// The Claude conversation a rerun of a session could continue.
 struct SourceConversation {
-    agent: protocol::Agent,
+    agent: protocol::AgentId,
     folder: String,
     id: String,
 }
@@ -638,10 +638,10 @@ fn resumable_conversation(rec: &crate::session::SessionRecord) -> Option<SourceC
     if rec.mode != protocol::SessionMode::Interactive {
         return None;
     }
-    let id = rec.claude_session_id.clone()?;
+    let id = rec.conversation_id.clone()?;
     let folder = crate::history::primary_cwd(rec).filter(|folder| !folder.is_empty())?;
     Some(SourceConversation {
-        agent: rec.agent,
+        agent: rec.agent.clone(),
         folder,
         id,
     })
@@ -1245,7 +1245,7 @@ mod tests {
         test_hub, wait_until,
     };
     use chrono::Utc;
-    use protocol::{Agent, SessionKind, SessionMode};
+    use protocol::{SessionKind, SessionMode};
     use std::collections::HashMap;
     use tokio::sync::Mutex as AsyncMutex;
     /// Output the PTY produced after the snapshot waits in its live receiver;
@@ -1464,7 +1464,7 @@ mod tests {
             Utc::now(),
             None,
             None,
-            Agent::Claude,
+            Some(agent_registry::default_agent()),
             None,
             None,
             None,
@@ -1523,7 +1523,7 @@ mod tests {
             Utc::now(),
             None,
             None,
-            Agent::Claude,
+            Some(agent_registry::default_agent()),
             None,
             None,
             None,
@@ -1994,7 +1994,10 @@ mod tests {
         let request = duplicate_request(&hub, "source", false)
             .await
             .expect("source can be duplicated");
-        assert_eq!(request.agent_options, deepseek_options());
+        assert_eq!(
+            request.agent.map(|selection| selection.options),
+            Some(deepseek_options())
+        );
     }
 
     #[tokio::test]
@@ -2048,7 +2051,7 @@ mod tests {
         };
         let home = scratch.path().join("claude-home");
         let mut source = idle_record("src");
-        source.claude_session_id = Some("conv-1".to_owned());
+        source.conversation_id = Some("conv-1".to_owned());
         source.spawn_config = Some(protocol::SpawnConfig::from_request(&env_spawn(
             target,
             SessionMode::Interactive,

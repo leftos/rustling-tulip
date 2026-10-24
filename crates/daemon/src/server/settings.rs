@@ -11,7 +11,7 @@ use crate::state::{AgentCommand, AppState};
 use crate::{user_env, vscode};
 use anyhow::{anyhow, bail};
 use protocol::{
-    Agent, AgentCommandEntry, ClientMessage, DaemonMessage, KeepAwakeMode,
+    AgentCommandEntry, AgentId, ClientMessage, DaemonMessage, KeepAwakeMode, OptionValues,
     VscodeWorkspaceSuggestion,
 };
 use std::sync::Arc;
@@ -150,7 +150,10 @@ pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> 
             agent,
             program,
             args,
-        } => set_agent_command(hub, agent, AgentCommand { program, args })?,
+        } => set_agent_command(hub, &agent, AgentCommand { program, args })?,
+        ClientMessage::SetAgentSettings { agent, options } => {
+            set_agent_settings(hub, &agent, &options)?;
+        }
         ClientMessage::InspectWorktreesRoot => {
             let root = hub.state.worktrees_dir();
             let is_override = hub.state.worktrees_root_is_override();
@@ -196,12 +199,30 @@ fn set_keep_awake_mode(hub: &Hub, mode: KeepAwakeMode) -> anyhow::Result<()> {
 
 /// Check `command` against `agent`'s reserved flags, persist it (a blank pair
 /// removes the agent's entry) and broadcast every agent's command.
-fn set_agent_command(hub: &Hub, agent: Agent, command: AgentCommand) -> anyhow::Result<()> {
-    check_agent_command(agent_registry::plugin(agent).reserved_args(), &command)?;
+fn set_agent_command(hub: &Hub, agent: &AgentId, command: AgentCommand) -> anyhow::Result<()> {
+    let plugin = agent_registry::plugin(agent)
+        .ok_or_else(|| anyhow!("no agent plugin `{}` is registered", agent.0))?;
+    check_agent_command(plugin.reserved_args(), &command)?;
     hub.state.set_agent_command(agent, command)?;
-    info!(agent = agent.as_label(), "agent launch command changed");
+    info!(agent = agent.0.as_str(), "agent launch command changed");
     let commands = agent_command_entries(&hub.state, &|name| std::env::var(name).ok());
     let _ = hub.state_events.send(StateEvent::AgentCommands(commands));
+    Ok(())
+}
+
+/// Validate `options` against `agent`'s option schema, persist them as the
+/// agent's settings and broadcast every agent's settings. An unknown agent or
+/// a value the schema refuses answers an error and changes nothing.
+fn set_agent_settings(hub: &Hub, agent: &AgentId, options: &OptionValues) -> anyhow::Result<()> {
+    let plugin = agent_registry::plugin(agent)
+        .ok_or_else(|| anyhow!("This daemon has no agent `{}`.", agent.0))?;
+    let options = agent_api::validate(plugin.descriptor(), options)
+        .map_err(|err| anyhow!("{}", err.message))?;
+    hub.state.set_agent_settings(agent, options)?;
+    info!(agent = agent.0.as_str(), "agent settings changed");
+    let _ = hub
+        .state_events
+        .send(StateEvent::AgentSettings(hub.state.agent_settings()));
     Ok(())
 }
 
@@ -241,11 +262,12 @@ pub(super) fn agent_command_entries(
     state: &AppState,
     env: &dyn Fn(&str) -> Option<String>,
 ) -> Vec<AgentCommandEntry> {
-    Agent::all()
+    agent_registry::all()
         .iter()
-        .map(|&agent| {
-            let command = state.agent_command(agent);
-            let variable = agent_registry::plugin(agent).program_env_var();
+        .map(|plugin| {
+            let agent = plugin.descriptor().id.clone();
+            let command = state.agent_command(&agent);
+            let variable = plugin.program_env_var();
             AgentCommandEntry {
                 agent,
                 program: command.program,
@@ -591,7 +613,7 @@ mod tests {
 
     fn set_command(program: &str, args: &str) -> ClientMessage {
         ClientMessage::SetAgentCommand {
-            agent: protocol::Agent::Claude,
+            agent: agent_registry::default_agent(),
             program: program.to_owned(),
             args: args.to_owned(),
         }
@@ -643,7 +665,9 @@ mod tests {
     #[tokio::test]
     async fn set_agent_command_refuses_every_reserved_flag() {
         let (hub, _scratch) = test_hub("agent-command-reserved");
-        let reserved = agent_registry::plugin(protocol::Agent::Claude).reserved_args();
+        let reserved = agent_registry::plugin(&agent_registry::default_agent())
+            .expect("Claude is registered")
+            .reserved_args();
         assert!(!reserved.is_empty(), "Claude reserves its own flags");
         for flag in reserved {
             let want =
@@ -683,6 +707,83 @@ mod tests {
         }
     }
 
+    /// The next agent settings broadcast on `rx`.
+    async fn next_agent_settings(
+        rx: &mut tokio::sync::broadcast::Receiver<StateEvent>,
+    ) -> std::collections::BTreeMap<protocol::AgentId, protocol::OptionValues> {
+        loop {
+            let evt = rx.recv().await.expect("the state broadcast stays open");
+            if let StateEvent::AgentSettings(settings) = evt {
+                return settings;
+            }
+        }
+    }
+
+    fn set_settings(agent: &str, options: &[(&str, protocol::OptionValue)]) -> ClientMessage {
+        ClientMessage::SetAgentSettings {
+            agent: protocol::AgentId(agent.to_owned()),
+            options: options
+                .iter()
+                .map(|(key, value)| ((*key).to_owned(), value.clone()))
+                .collect(),
+        }
+    }
+
+    fn text(value: &str) -> protocol::OptionValue {
+        protocol::OptionValue::Text(value.to_owned())
+    }
+
+    #[tokio::test]
+    async fn set_agent_settings_validates_persists_and_broadcasts() {
+        let (hub, _scratch) = test_hub("agent-settings-save");
+        let mut events = hub.state_events.subscribe();
+        let wait = std::time::Duration::from_secs(5);
+        let claude = agent_registry::default_agent();
+
+        let sent = dispatch_err(
+            &hub,
+            set_settings(&claude.0, &[("provider", text("deepseek"))]),
+        )
+        .await;
+        assert_eq!(sent, None, "valid settings are accepted");
+        let validated = protocol::OptionValues::from([
+            ("permission_mode".to_owned(), protocol::OptionValue::Null),
+            ("provider".to_owned(), text("deepseek")),
+            ("model".to_owned(), protocol::OptionValue::Null),
+        ]);
+        let expected = std::collections::BTreeMap::from([(claude.clone(), validated)]);
+        let reloaded = AppState::load_or_default(&hub.dirs).expect("reload state");
+        assert_eq!(
+            reloaded.agent_settings(),
+            expected,
+            "the validated settings reached state.json"
+        );
+        let broadcast = tokio::time::timeout(wait, next_agent_settings(&mut events))
+            .await
+            .expect("the change is broadcast");
+        assert_eq!(broadcast, expected);
+    }
+
+    #[tokio::test]
+    async fn set_agent_settings_refuses_an_unknown_agent_and_changes_nothing() {
+        let (hub, _scratch) = test_hub("agent-settings-refused");
+        let claude = agent_registry::default_agent();
+        let sent = dispatch_err(&hub, set_settings("nope", &[])).await;
+        assert_eq!(sent.as_deref(), Some("This daemon has no agent `nope`."));
+        let sent = dispatch_err(&hub, set_settings(&claude.0, &[("x", text("1"))])).await;
+        assert_eq!(
+            sent.as_deref(),
+            Some("Claude has no option `x`"),
+            "an unknown option is refused naming it"
+        );
+        assert!(hub.state.agent_settings().is_empty(), "nothing was stored");
+        let reloaded = AppState::load_or_default(&hub.dirs).expect("reload state");
+        assert!(
+            reloaded.agent_settings().is_empty(),
+            "nothing reached state.json"
+        );
+    }
+
     #[tokio::test]
     async fn set_agent_command_persists_broadcasts_and_a_blank_pair_clears_it() {
         let (hub, _scratch) = test_hub("agent-command-save");
@@ -693,7 +794,7 @@ mod tests {
         assert_eq!(sent, None, "a valid command is accepted");
         let reloaded = AppState::load_or_default(&hub.dirs).expect("reload state");
         assert_eq!(
-            reloaded.agent_command(protocol::Agent::Claude),
+            reloaded.agent_command(&agent_registry::default_agent()),
             crate::state::AgentCommand {
                 program: "claude-wrapper".to_owned(),
                 args: "--debug \"a b\"".to_owned(),
@@ -705,7 +806,7 @@ mod tests {
             .expect("the change is broadcast");
         assert_eq!(broadcast.len(), 1, "one entry per registered agent");
         let entry = &broadcast[0];
-        assert_eq!(entry.agent, protocol::Agent::Claude);
+        assert_eq!(entry.agent, agent_registry::default_agent());
         assert_eq!(entry.program, "claude-wrapper");
         assert_eq!(entry.args, "--debug \"a b\"");
 
@@ -736,7 +837,7 @@ mod tests {
         );
         assert_eq!(
             unset.len(),
-            protocol::Agent::all().len(),
+            agent_registry::all().len(),
             "every agent is listed"
         );
 
@@ -745,7 +846,7 @@ mod tests {
         });
         let claude = set
             .iter()
-            .find(|entry| entry.agent == protocol::Agent::Claude)
+            .find(|entry| entry.agent == agent_registry::default_agent())
             .expect("Claude is listed");
         assert_eq!(claude.program_env.as_deref(), Some("RUSTLING_TULIP_CLAUDE"));
     }

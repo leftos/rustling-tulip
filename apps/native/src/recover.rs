@@ -14,6 +14,7 @@ use protocol::{
     RecoverItemResult, SessionEnd, SessionHistoryItem, SessionMode,
 };
 
+use crate::claude_compat;
 use crate::spawn_form::human_relative_time;
 
 /// Unexpected ends this close to the previous one in a burst join it.
@@ -271,7 +272,7 @@ pub fn conversation_label(candidate: &ConversationCandidate, now: DateTime<Utc>)
 
 /// The conversation a row starts on: the session's own, else the newest.
 fn default_conversation(item: &SessionHistoryItem) -> Option<usize> {
-    let known = item.entry.claude_session_id.as_deref();
+    let known = item.entry.conversation_id.as_deref();
     if let Some(index) = item
         .candidates
         .iter()
@@ -309,7 +310,7 @@ fn recover_options(item: &SessionHistoryItem, names: &Names) -> (Vec<RecoverOpti
     if !chooses_how(entry) {
         let options = if has_candidate {
             vec![RecoverOption {
-                how: RecoverAs::Claude,
+                how: RecoverAs::Agent,
                 label: "Claude session".to_owned(),
                 resumes: true,
             }]
@@ -333,10 +334,15 @@ fn recover_options(item: &SessionHistoryItem, names: &Names) -> (Vec<RecoverOpti
     let mut options = folder_claude_options(item, names);
     // A shell typing `claude --resume` would resume the conversation on
     // Anthropic, so an entry on any other provider recovers as Claude only.
-    if !entry.claude_provider().is_anthropic() {
+    let provider = entry
+        .options
+        .as_ref()
+        .map(|options| claude_compat::from_options(options).provider)
+        .unwrap_or_default();
+    if !provider.is_anthropic() {
         if options.is_empty() {
             options.push(RecoverOption {
-                how: RecoverAs::Claude,
+                how: RecoverAs::Agent,
                 label: "Claude session".to_owned(),
                 resumes: true,
             });
@@ -349,7 +355,7 @@ fn recover_options(item: &SessionHistoryItem, names: &Names) -> (Vec<RecoverOpti
         options.len()
     };
     options.push(RecoverOption {
-        how: RecoverAs::Shell,
+        how: RecoverAs::ShellResume,
         label: "Shell running claude --resume".to_owned(),
         resumes: true,
     });
@@ -368,13 +374,13 @@ fn folder_claude_options(item: &SessionHistoryItem, names: &Names) -> Vec<Recove
             .cloned()
             .unwrap_or_else(|| last_segment(path).to_owned());
         vec![RecoverOption {
-            how: RecoverAs::Claude,
+            how: RecoverAs::Agent,
             label: format!("Claude session in {repo}"),
             resumes: true,
         }]
     } else if item.folder_is_git_repo && !path.is_empty() {
         vec![RecoverOption {
-            how: RecoverAs::RegisterRepoThenClaude {
+            how: RecoverAs::RegisterRepoThenAgent {
                 path: path.to_owned(),
             },
             label: format!("Register {path} as a repo, then Claude session"),
@@ -1059,7 +1065,9 @@ fn step(index: usize, len: usize, forward: bool) -> usize {
 mod tests {
     use super::*;
     use chrono::FixedOffset;
-    use protocol::{AgentOptions, ClaudeProvider, SpawnConfig, SpawnTarget, WorktreeReusePolicy};
+    use protocol::{
+        AgentSelection, OptionValue, OptionValues, SpawnConfig, SpawnTarget, WorktreeReusePolicy,
+    };
     use serde_json::json;
 
     /// 2026-09-28 12:00 at UTC+2.
@@ -1086,8 +1094,10 @@ mod tests {
             },
             mode: SessionMode::Interactive,
             dangerously_skip_permissions: false,
-            agent_options: AgentOptions::claude(None),
-            model: None,
+            agent: Some(AgentSelection {
+                agent: protocol::AgentId("claude".to_owned()),
+                options: OptionValues::new(),
+            }),
             extra_env: Vec::new(),
         }
     }
@@ -1102,7 +1112,7 @@ mod tests {
                 "members": [{"repo_id": "r1", "repo_name": "repo-one", "branch": "main", "worktree_path": "D:\\wt"}],
                 "workspace_id": null, "primary_cwd": "D:\\wt", "current_cwd": null,
                 "program_name": "claude", "started_at": null, "ended_at": ended, "end": end,
-                "claude_session_id": null, "source": "record", "recovered_at": null
+                "conversation_id": null, "source": "record", "recovered_at": null
             },
             "candidates": [{"id": format!("c-{id}"), "last_active": ended, "title": "Fix it"}],
             "folder_is_git_repo": true, "folder_repo_id": null
@@ -1425,17 +1435,20 @@ mod tests {
         let mut git = lost("u", "2026-09-28T09:00:00Z");
         git.entry.spawn_config = None;
         git.entry.current_cwd = Some("D:\\proj".to_owned());
-        git.entry.provider = ClaudeProvider::Unknown;
+        git.entry.options = Some(OptionValues::from([(
+            "provider".to_owned(),
+            OptionValue::Text("bedrock".to_owned()),
+        )]));
         let mut plain = git.clone();
         plain.folder_is_git_repo = false;
         for (item, only) in [
             (
                 &git,
-                RecoverAs::RegisterRepoThenClaude {
+                RecoverAs::RegisterRepoThenAgent {
                     path: "D:\\proj".to_owned(),
                 },
             ),
-            (&plain, RecoverAs::Claude),
+            (&plain, RecoverAs::Agent),
         ] {
             let (options, default) = recover_options(item, &Names::default());
             let hows: Vec<RecoverAs> = options.iter().map(|o| o.how.clone()).collect();
@@ -1466,7 +1479,7 @@ mod tests {
                     "Claude session in proj".to_owned(),
                     "Shell running claude --resume".to_owned()
                 ],
-                Some(RecoverAs::Claude)
+                Some(RecoverAs::Agent)
             ),
             "registered: Claude first and chosen"
         );
@@ -1478,7 +1491,7 @@ mod tests {
                     "Register D:\\proj as a repo, then Claude session".to_owned(),
                     "Shell running claude --resume".to_owned()
                 ],
-                Some(RecoverAs::Shell)
+                Some(RecoverAs::ShellResume)
             ),
             "an unregistered git folder: register offered, shell chosen"
         );
@@ -1489,7 +1502,7 @@ mod tests {
             options(&plain, &names),
             (
                 vec!["Shell running claude --resume".to_owned()],
-                Some(RecoverAs::Shell)
+                Some(RecoverAs::ShellResume)
             )
         );
 
@@ -1497,7 +1510,7 @@ mod tests {
         let dialog = dialog(std::slice::from_ref(&claude));
         let row = dialog.row("c").expect("row");
         assert!(!row.shows_recover_as, "a Claude session recovers as itself");
-        assert_eq!(row.chosen().map(|o| o.how.clone()), Some(RecoverAs::Claude));
+        assert_eq!(row.chosen().map(|o| o.how.clone()), Some(RecoverAs::Agent));
     }
 
     #[test]
@@ -1523,6 +1536,44 @@ mod tests {
         );
     }
 
+    /// The one item a ticked dialog over `entries` sends.
+    fn sent_items(entries: &[SessionHistoryItem]) -> Vec<RecoverItem> {
+        let mut dialog = dialog(entries);
+        let msg = dialog
+            .recover_message("q1", Instant::now())
+            .expect("a request");
+        let ClientMessage::RecoverSessions { items, .. } = msg else {
+            panic!("expected recover_sessions");
+        };
+        items
+    }
+
+    #[test]
+    fn a_shell_entry_with_a_conversation_recovers_as_shell_resume() {
+        let mut entry = shell("sr", "2026-09-28T09:00:00Z");
+        entry.candidates = vec![candidate("conv", "2026-09-28T08:00:00Z", Some("Fix it"))];
+        assert_eq!(
+            sent_items(&[entry]),
+            [RecoverItem {
+                history_id: "sr".to_owned(),
+                conversation_id: Some("conv".to_owned()),
+                how: RecoverAs::ShellResume,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_bare_shell_entry_recovers_as_shell() {
+        assert_eq!(
+            sent_items(&[shell("sh", "2026-09-28T09:00:00Z")]),
+            [RecoverItem {
+                history_id: "sh".to_owned(),
+                conversation_id: None,
+                how: RecoverAs::Shell,
+            }]
+        );
+    }
+
     #[test]
     fn default_conversation_known_else_newest() {
         let mut known = lost("k", "2026-09-28T09:00:00Z");
@@ -1530,10 +1581,10 @@ mod tests {
             candidate("new", "2026-09-28T09:00:00Z", Some("Newest")),
             candidate("mine", "2026-09-28T08:00:00Z", None),
         ];
-        known.entry.claude_session_id = Some("mine".to_owned());
+        known.entry.conversation_id = Some("mine".to_owned());
         let mut unknown = known.clone();
         unknown.entry.session_id = "u".to_owned();
-        unknown.entry.claude_session_id = None;
+        unknown.entry.conversation_id = None;
         unknown.candidates.reverse();
         let mut dialog = dialog(&[known, unknown]);
 
@@ -1798,7 +1849,7 @@ mod tests {
             [RecoverItem {
                 history_id: "c".to_owned(),
                 conversation_id: Some("c-c".to_owned()),
-                how: RecoverAs::Claude,
+                how: RecoverAs::Agent,
             }]
         );
     }

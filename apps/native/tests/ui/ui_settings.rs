@@ -13,7 +13,8 @@ use std::time::Duration;
 
 use gpui::{Modifiers, Point, TestAppContext, point, px};
 use protocol::{
-    Agent, AgentCommandEntry, ClientMessage, DaemonMessage, KeepAwakeMode, SplitDirection, TabEntry,
+    AgentCommandEntry, AgentId, ClientMessage, DaemonMessage, KeepAwakeMode, SplitDirection,
+    TabEntry,
 };
 use rustling_tulip_native::{
     Connection, LaunchCommandRow, NATIVE_PROTOCOL_VERSIONS, NetEvent, SidebarView, fonts,
@@ -755,65 +756,6 @@ fn spawn_defaults_trusted_disables_choices_and_leaves_ring(cx: &mut TestAppConte
 }
 
 #[gpui::test]
-fn claude_provider_default_is_disabled_without_the_feature(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    std::fs::write(
-        dir.path().join("native-ui.json"),
-        serde_json::json!({ "spawn": { "claude_provider": "deepseek" } }).to_string(),
-    )
-    .expect("seed native-ui.json");
-    let mut h = opened(cx, &dir);
-    h.welcome_without_features();
-    h.keys("ctrl-,");
-    h.click_on("settings-tab-claude");
-    assert_eq!(
-        h.root(|root, _| root.settings_provider_tip()),
-        Some("Restart the daemon to use DeepSeek: .\\rt.ps1 restart")
-    );
-    assert_eq!(
-        h.root(|root, _| root.settings_provider_choice()),
-        "Anthropic",
-        "the disabled row shows Anthropic over a saved DeepSeek default"
-    );
-    for selector in [
-        "settings-spawn-provider-anthropic",
-        "settings-spawn-provider-deepseek",
-    ] {
-        assert!(
-            h.bounds(selector).origin.x >= px(0.0),
-            "{selector} is still painted, dimmed"
-        );
-    }
-    h.click_on("settings-spawn-provider-anthropic");
-    assert_eq!(
-        saved_ui(&dir)["spawn"]["claude_provider"],
-        "deepseek",
-        "a click on the disabled choice saves nothing"
-    );
-    h.click_on("settings-spawn-approval-plan");
-    assert_eq!(settings_focus(&mut h), Some("settings-spawn-approval-plan"));
-    h.keys("tab");
-    assert_eq!(
-        settings_focus(&mut h),
-        Some("list"),
-        "Tab skips the disabled provider row and leaves the page"
-    );
-    assert_eq!(
-        saved_ui(&dir)["spawn"]["claude_provider"],
-        "deepseek",
-        "the saved default is kept"
-    );
-
-    h.welcome_with_features();
-    assert_eq!(h.root(|root, _| root.settings_provider_tip()), None);
-    assert_eq!(
-        h.root(|root, _| root.settings_provider_choice()),
-        "DeepSeek",
-        "the saved default shows again once a capable daemon connects"
-    );
-}
-
-#[gpui::test]
 fn claude_provider_default_saves_and_seeds_the_dialog(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);
@@ -838,11 +780,6 @@ fn claude_provider_default_saves_and_seeds_the_dialog(cx: &mut TestAppContext) {
     assert!(
         chosen.contains(&"spawn-provider-deepseek".to_owned()),
         "a new dialog starts on the saved provider: {chosen:?}"
-    );
-    assert_eq!(
-        h.root(|root, _| root.spawn_dialog_provider_tip()),
-        None,
-        "the fake daemon routes providers"
     );
 }
 
@@ -929,7 +866,7 @@ const ARGS_CONTROL: &str =
 fn agent_commands(program: &str, args: &str, program_env: Option<&str>) -> DaemonMessage {
     DaemonMessage::AgentCommands {
         commands: vec![AgentCommandEntry {
-            agent: Agent::Claude,
+            agent: AgentId("claude".to_owned()),
             program: program.to_owned(),
             args: args.to_owned(),
             program_env: program_env.map(str::to_owned),
@@ -957,10 +894,10 @@ fn launch_sets(sent: &[ClientMessage]) -> Vec<(String, String)> {
     sent.iter()
         .filter_map(|msg| match msg {
             ClientMessage::SetAgentCommand {
-                agent: Agent::Claude,
+                agent,
                 program,
                 args,
-            } => Some((program.clone(), args.clone())),
+            } if agent.0 == "claude" => Some((program.clone(), args.clone())),
             _ => None,
         })
         .collect()
@@ -1068,7 +1005,7 @@ fn launch_command_rows_disabled_without_the_feature(cx: &mut TestAppContext) {
         Vec::<(String, String)>::new(),
         "nothing is sent"
     );
-    h.click_on("settings-spawn-approval-plan");
+    h.click_on("settings-spawn-provider-deepseek");
     h.keys("tab");
     assert_eq!(
         settings_focus(&mut h),
@@ -1322,7 +1259,7 @@ fn disconnect_hides_the_launch_rows_without_the_restart_tip(cx: &mut TestAppCont
         None,
         "a lost connection is no older daemon"
     );
-    h.click_on("settings-spawn-approval-plan");
+    h.click_on("settings-spawn-provider-deepseek");
     h.keys("tab");
     assert_eq!(
         settings_focus(&mut h),

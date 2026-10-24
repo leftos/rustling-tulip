@@ -1,18 +1,14 @@
 //! Reading a Claude session back from the tracer log of a run the app did
-//! not record, and upgrading an older import of one.
+//! not record.
 
+use crate::options::ClaudeProvider;
 use crate::{ClaudeOptions, provider_for_model};
 use agent_api::{ImportedRun, TracerRun};
-use protocol::ClaudeProvider;
 use std::path::Path;
 
-/// The import revision: revision 2 reads the provider from the run's model.
-pub(crate) const IMPORT_REV: u32 = 2;
-
-/// The one revision upgraded in place to [`IMPORT_REV`]: revision 1 lacks
-/// only the provider, which its model gives.
-const UPGRADABLE_IMPORT_REV: u32 = 1;
-const _: () = assert!(IMPORT_REV == UPGRADABLE_IMPORT_REV + 1);
+/// The import revision: revision 3 stores the run's options and trust on the
+/// history entry, so every older import is read again from its tracer log.
+pub(crate) const IMPORT_REV: u32 = 3;
 
 /// The Claude run `run` describes: its program's file stem starts with
 /// `claude`. Its `--add-dir`s are its extra folders, its last `--model` its
@@ -35,15 +31,6 @@ pub(crate) fn import_tracer_run(run: &TracerRun<'_>) -> Option<ImportedRun<Claud
             .args
             .iter()
             .any(|arg| arg == "--dangerously-skip-permissions"),
-    })
-}
-
-/// `options` of a revision 1 import with the provider read from its model;
-/// `None` for any other revision.
-pub(crate) fn upgrade_import(from_rev: u32, options: &ClaudeOptions) -> Option<ClaudeOptions> {
-    (from_rev == UPGRADABLE_IMPORT_REV).then(|| ClaudeOptions {
-        provider: imported_provider(options.model.as_deref()),
-        ..options.clone()
     })
 }
 
@@ -88,9 +75,9 @@ fn model_arg(args: &[String]) -> Option<String> {
     reason = "tests assert preconditions with expect; failure messages aid debugging"
 )]
 mod tests {
+    use crate::options::ClaudeProvider;
     use crate::{ClaudeOptions, ClaudePlugin};
     use agent_api::{Agent, ImportedRun, TracerRun};
-    use protocol::ClaudeProvider;
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|arg| (*arg).to_string()).collect()
@@ -181,43 +168,8 @@ mod tests {
     }
 
     #[test]
-    fn import_rev_is_2() {
-        assert_eq!(ClaudePlugin.import_rev(), 2);
-    }
-
-    #[test]
-    fn upgrade_import_from_rev_1_reads_the_provider() {
-        let deepseek = ClaudeOptions {
-            model: Some("deepseek-flash".to_string()),
-            ..ClaudeOptions::default()
-        };
-        assert_eq!(
-            ClaudePlugin.upgrade_import(1, &deepseek),
-            Some(ClaudeOptions {
-                provider: ClaudeProvider::Deepseek,
-                ..deepseek
-            })
-        );
-        let unnamed = ClaudeOptions {
-            provider: ClaudeProvider::Deepseek,
-            ..ClaudeOptions::default()
-        };
-        assert_eq!(
-            ClaudePlugin.upgrade_import(1, &unnamed),
-            Some(ClaudeOptions::default()),
-            "no model is Anthropic"
-        );
-    }
-
-    #[test]
-    fn upgrade_import_from_other_revs_is_none() {
-        let opts = ClaudeOptions {
-            model: Some("deepseek-flash".to_string()),
-            ..ClaudeOptions::default()
-        };
-        for rev in [0, 2, 3] {
-            assert_eq!(ClaudePlugin.upgrade_import(rev, &opts), None, "rev {rev}");
-        }
+    fn import_rev_is_3() {
+        assert_eq!(ClaudePlugin.import_rev(), 3);
     }
 
     #[test]

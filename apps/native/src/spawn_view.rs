@@ -12,10 +12,11 @@ use gpui::{
     Stateful, Subscription, Task, Window, canvas, deferred, div, point, prelude::*, px, relative,
     svg,
 };
-use protocol::{Agent, DaemonMessage};
+use protocol::DaemonMessage;
 
 use crate::assets::{SIDEBAR_CHEVRON_DOWN_ICON, SIDEBAR_CHEVRON_RIGHT_ICON};
 use crate::buttons::{ButtonKind, ButtonSize, button, field_frame, focus_ring};
+use crate::claude_compat;
 use crate::combobox::{ComboRow, list_placement};
 use crate::notice_view::{MODAL_RADIUS, modal_panel};
 use crate::palette::{
@@ -391,13 +392,6 @@ impl RootView {
         )
     }
 
-    /// Why the Provider row is disabled, while the dialog is open and it
-    /// is.
-    #[must_use]
-    pub fn spawn_dialog_provider_tip(&self) -> Option<&'static str> {
-        self.form_dialog()?.form.provider_tip()
-    }
-
     /// The note env row `index` shows about where its value is kept, while
     /// the dialog is open and the row has one.
     #[must_use]
@@ -535,7 +529,6 @@ impl RootView {
             tabs: TabChoices::from_tabs(self.tabs.tabs(), self.tabs.active_id()),
             spawn_defaults: self.sidebar.ui_state().spawn,
             lock,
-            claude_provider_supported: self.conn.supports(protocol::FEATURE_CLAUDE_PROVIDER),
         };
         let now = (self.now)();
         let Some((mut form, mut messages)) = SpawnForm::open(inputs, &mut self.branch_cache, now)
@@ -876,19 +869,6 @@ impl RootView {
                 self.spawn(submission.request, open_in, cx);
             }
         }
-    }
-
-    /// Tells the open dialog whether the daemon now connected routes Claude
-    /// to a chosen provider; called on every connection change, so a
-    /// dialog that outlives a daemon restart never sends a provider the new
-    /// daemon would ignore.
-    pub(crate) fn sync_spawn_provider_support(&mut self, cx: &mut Context<Self>) {
-        let supported = self.conn.supports(protocol::FEATURE_CLAUDE_PROVIDER);
-        let Some(SpawnModal::Form(dialog)) = &mut self.spawn_dialog else {
-            return;
-        };
-        dialog.form.set_provider_supported(supported);
-        self.after_spawn_change(cx);
     }
 
     /// The fields follow the form, a timer waits out a suggestion, and the
@@ -1754,24 +1734,18 @@ fn target_field(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) -
 }
 
 fn runtime_field(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) -> Div {
-    let buttons = Runtime::ALL
+    let buttons = Runtime::all()
         .into_iter()
         .map(|runtime| {
             let selected = runtime == form.runtime();
-            choice(
-                &Control::Runtime(runtime),
-                runtime.label(),
-                selected,
-                focus,
-                cx,
-            )
+            let label = runtime.label().to_owned();
+            choice(&Control::Runtime(runtime), label, selected, focus, cx)
         })
         .collect();
     field("Runtime").child(segmented(buttons))
 }
 
-/// The Provider row under Runtime, for Claude only; disabled, with a
-/// tooltip saying why, while the daemon cannot route to another provider.
+/// The Provider row under Runtime, for Claude only.
 fn provider_field(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) -> Option<Div> {
     if !form.provider_shown() {
         return None;
@@ -1783,16 +1757,12 @@ fn provider_field(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>)
             let look = Look {
                 selected: provider == form.provider(),
                 focused: focus == &control,
-                enabled: form.provider_enabled(),
+                enabled: true,
             };
             option_button(&control, provider_label(provider), look, cx).into_any_element()
         })
         .collect();
     let row = div().id("spawn-provider").flex().child(segmented(buttons));
-    let row = match form.provider_tip() {
-        Some(tip) => row.tooltip(tooltip(tip)),
-        None => row,
-    };
     Some(field("Provider").child(row))
 }
 
@@ -1873,7 +1843,7 @@ fn trusted_rows(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) -
     if !form.trusted_shown() {
         return Vec::new();
     }
-    let flag = form.trusted_flag();
+    let flag = SpawnForm::trusted_flag();
     let label = check_label("Trusted launch", Some(note(flag)));
     let mut rows = vec![checkbox(
         &Control::Trusted,
@@ -1891,7 +1861,7 @@ fn trusted_rows(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) -
                     .font_weight(FontWeight::SEMIBOLD)
                     .child("Trusted launch"),
             )
-            .child(format!("{} Uses {flag}.", form.trusted_detail()));
+            .child(format!("{} Uses {flag}.", SpawnForm::trusted_detail()));
         rows.push(warning.into_any_element());
     }
     rows
@@ -2314,8 +2284,10 @@ fn preview_table(form: &SpawnForm) -> AnyElement {
 /// The chosen approval option, for the runtime on show.
 fn agent_options_chosen(form: &SpawnForm) -> Vec<Control> {
     match form.runtime() {
-        Runtime::Agent(Agent::Claude) => vec![Control::Approval(form.permission_mode())],
-        Runtime::PlainShell => Vec::new(),
+        Runtime::Agent(agent) if claude_compat::is_claude(&agent) => {
+            vec![Control::Approval(form.permission_mode())]
+        }
+        Runtime::Agent(_) | Runtime::PlainShell => Vec::new(),
     }
 }
 
@@ -2410,7 +2382,7 @@ fn agent_option_rows(
     let locked = form.trusted();
     let note = |text: &'static str| locked.then_some(text);
     match form.runtime() {
-        Runtime::Agent(Agent::Claude) => {
+        Runtime::Agent(agent) if claude_compat::is_claude(&agent) => {
             let chosen = form.permission_mode();
             let choices = APPROVAL_CHOICES.map(|mode| {
                 (
@@ -2427,7 +2399,7 @@ fn agent_option_rows(
                 cx,
             )]
         }
-        Runtime::PlainShell => Vec::new(),
+        Runtime::Agent(_) | Runtime::PlainShell => Vec::new(),
     }
 }
 

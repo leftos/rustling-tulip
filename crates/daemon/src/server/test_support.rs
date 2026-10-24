@@ -17,8 +17,9 @@ use axum::body::Body;
 use axum::http::Request;
 use chrono::Utc;
 use protocol::{
-    Agent, AgentOptions, AppearanceOverrides, ClientMessage, DaemonMessage, SessionKind,
-    SessionMetrics, SessionMode, SessionStatus, SpawnRequest, SpawnTarget, TabContent, TabEntry,
+    AgentSelection, AppearanceOverrides, ClientMessage, DaemonMessage, OptionValue, OptionValues,
+    SessionKind, SessionMetrics, SessionMode, SessionStatus, SpawnRequest, SpawnTarget, TabContent,
+    TabEntry,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -251,7 +252,7 @@ pub(super) fn idle_record(id: &str) -> SessionRecord {
         pty: None,
         headless: None,
         workspace_id: None,
-        agent: Agent::default(),
+        agent: agent_registry::default_agent(),
         terminal_title: None,
         program_name: None,
         current_cwd: None,
@@ -265,7 +266,7 @@ pub(super) fn idle_record(id: &str) -> SessionRecord {
         screen: None,
         scrollback_snapshot_req: None,
         spawn_origin: None,
-        claude_session_id: None,
+        conversation_id: None,
         pending_input: None,
         last_hook_time: None,
         hook_driven: false,
@@ -652,8 +653,10 @@ pub(super) fn env_spawn(
         mode,
         initial_prompt: None,
         dangerously_skip_permissions: false,
-        agent_options: AgentOptions::claude(None),
-        model: None,
+        agent: (mode != SessionMode::PlainShell).then(|| AgentSelection {
+            agent: agent_registry::default_agent(),
+            options: validated_claude(&OptionValues::new()),
+        }),
         extra_env,
         secret_env_keys: Vec::new(),
         prompt_injector: None,
@@ -667,12 +670,20 @@ pub(super) const UNSET_REF: &str = "${env:RT_TEST_UNSET_ENV_REF_4C1D}";
 /// A `DEEPSEEK_API_KEY` value no stored file or reply may hold.
 pub(super) const DEEPSEEK_KEY_SENTINEL: &str = "sk-deepseek-sentinel-a41c9e";
 
+/// Claude's options as a spawn stores them: `options` with every other
+/// field's default, as its schema validates them.
+pub(crate) fn validated_claude(options: &OptionValues) -> OptionValues {
+    let claude =
+        agent_registry::plugin(&agent_registry::default_agent()).expect("Claude is registered");
+    agent_api::validate(claude.descriptor(), options).expect("valid Claude options")
+}
+
 /// Claude options on the `DeepSeek` provider.
-pub(super) fn deepseek_options() -> AgentOptions {
-    AgentOptions::Claude {
-        permission_mode: None,
-        provider: protocol::ClaudeProvider::Deepseek,
-    }
+pub(super) fn deepseek_options() -> OptionValues {
+    validated_claude(&OptionValues::from([(
+        "provider".to_owned(),
+        OptionValue::Text("deepseek".to_owned()),
+    )]))
 }
 
 /// A lookup that knows no variable.
@@ -697,7 +708,10 @@ pub(super) fn deepseek_spawn(
     request_id: Option<&str>,
 ) -> SpawnRequest {
     SpawnRequest {
-        agent_options: deepseek_options(),
+        agent: Some(AgentSelection {
+            agent: agent_registry::default_agent(),
+            options: deepseek_options(),
+        }),
         ..env_spawn(target, mode, extra_env, request_id)
     }
 }

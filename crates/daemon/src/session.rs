@@ -12,13 +12,13 @@ use crate::sync::{lock, read, write};
 use crate::termstate::{self, BracketedPasteTracker};
 use chrono::{DateTime, Utc};
 use protocol::{
-    Agent, AppearanceOverrides, PendingInput, SessionKind, SessionMember, SessionMetrics,
+    AgentId, AppearanceOverrides, PendingInput, SessionKind, SessionMember, SessionMetrics,
     SessionMode, SessionSnapshot, SessionStatus, SpawnConfig,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::{broadcast, mpsc, oneshot};
-use tracing::error;
+use tracing::{error, warn};
 use uuid::Uuid;
 
 /// In-memory cap on a session's `recent_actions`, matching the tail the
@@ -116,9 +116,11 @@ pub struct SessionRecord {
     /// Workspace this session belongs to (`Some` iff `kind == Workspace`).
     /// Used by clients to group sessions in the sidebar tree.
     pub workspace_id: Option<String>,
-    /// Which CLI is driving this session. Surfaced to clients via the
-    /// `SessionSnapshot.agent` field.
-    pub agent: Agent,
+    /// Which agent is driving this session; a plain shell carries the
+    /// default agent, so its status watcher keeps that agent's rules.
+    /// Surfaced to clients via the `SessionSnapshot.agent` field, `None`
+    /// there for a plain shell.
+    pub agent: AgentId,
     /// Latest window title emitted by the agent/shell via OSC 0/1/2. Kept
     /// separate from `label` so explicit app renames can still win and the UI
     /// can filter transient shell titles like `C:\WINDOWS\system32\cmd.exe`.
@@ -187,12 +189,12 @@ pub struct SessionRecord {
     /// so a connection that lagged past its spawn reply gets it again after
     /// the resync list.
     pub spawn_origin: Option<UpdateOrigin>,
-    /// Claude's conversation id: the one passed as `--session-id` at spawn,
-    /// moved by the agent's own `SessionStart` hook when a `/clear` or fork
-    /// starts a new conversation. `None` for shells, headless runs, other
-    /// agents, and sessions whose sidecar predates the field; a hook-reported
-    /// id can fill it in.
-    pub claude_session_id: Option<String>,
+    /// The agent's conversation id: the one its plugin planned at spawn (or
+    /// discovery found), moved by the agent's own `SessionStart` hook when a
+    /// `/clear` or fork starts a new conversation. `None` for shells,
+    /// headless runs and sessions whose conversation is not known yet; a
+    /// hook-reported id can fill it in.
+    pub conversation_id: Option<String>,
     /// True when the user asked that this session not count as busy. Set by
     /// `SetSessionBusyExcluded`, mirrored into the sidecar and copied into the
     /// session's history entry, so reattach, Resume and recovery keep it.
@@ -248,12 +250,12 @@ pub struct SessionRecord {
     /// recovered shell typed its resume command into. `None` for every other
     /// session, since an agent session maps with [`Self::agent`]; a plain
     /// shell without one maps no hook event. Mirrored into the sidecar.
-    pub hook_agent: Option<Agent>,
+    pub hook_agent: Option<AgentId>,
 }
 
-/// The agent a record or sidecar names for a session that runs none: a plain
-/// shell, the recovered shell among them.
-pub fn default_agent() -> Agent {
+/// The agent a record names for a session that runs none: a plain shell, the
+/// recovered shell among them.
+pub fn default_agent() -> AgentId {
     agent_registry::default_agent()
 }
 
@@ -261,12 +263,18 @@ impl SessionRecord {
     /// The agent whose plugin maps this session's hook events: its own agent,
     /// or a plain shell's [`Self::hook_agent`], so `None` for a plain shell
     /// without one.
-    pub fn hook_plugin_agent(&self) -> Option<Agent> {
+    pub fn hook_plugin_agent(&self) -> Option<AgentId> {
         if self.mode == SessionMode::PlainShell {
-            self.hook_agent
+            self.hook_agent.clone()
         } else {
-            Some(self.agent)
+            Some(self.agent.clone())
         }
+    }
+
+    /// The agent the wire and the sidecar name for this session: `None` for
+    /// a plain shell, which runs none.
+    pub fn wire_agent(&self) -> Option<AgentId> {
+        (self.mode != SessionMode::PlainShell).then(|| self.agent.clone())
     }
 
     /// Whether the session's status runs on the shell's watcher and its
@@ -299,7 +307,15 @@ impl SessionRecord {
             return;
         }
         self.agent_exit_announced = false;
-        self.program_name = Some(self.agent.as_label().to_owned());
+        if let Some(plugin) = agent_registry::plugin(&self.agent) {
+            self.program_name = Some(plugin.descriptor().tag.clone());
+        } else {
+            warn!(
+                session_id = %self.id,
+                "no agent plugin `{}` is registered; the leaf keeps its program name",
+                self.agent.0
+            );
+        }
     }
 
     pub fn snapshot(&self) -> SessionSnapshot {
@@ -326,13 +342,12 @@ impl SessionRecord {
             .spawn_config
             .as_ref()
             .is_some_and(|cfg| cfg.dangerously_skip_permissions);
-        // A record with no stored spawn config (an orphan reattached from a
-        // pre-provider sidecar, or a plain shell) reports Anthropic.
-        let claude_provider = self
-            .spawn_config
-            .as_ref()
-            .and_then(|cfg| cfg.agent_options.claude_provider())
-            .unwrap_or_default();
+        let agent = self.wire_agent();
+        let agent_chips = if agent.is_some() {
+            self.agent_chips()
+        } else {
+            Vec::new()
+        };
         SessionSnapshot {
             id: self.id.clone(),
             label: self.label.clone(),
@@ -350,7 +365,8 @@ impl SessionRecord {
             is_abandoned: self.is_abandoned,
             last_prompt: self.last_prompt.clone(),
             workspace_id: self.workspace_id.clone(),
-            agent: self.agent,
+            agent,
+            agent_chips,
             terminal_title: self.terminal_title.clone(),
             program_name: self.program_name.clone(),
             current_cwd: self.current_cwd.clone(),
@@ -359,12 +375,31 @@ impl SessionRecord {
             has_per_session_worktree,
             is_inactive: self.is_inactive,
             worktree_paths: self.worktree_paths.clone(),
-            claude_session_id: self.claude_session_id.clone(),
+            conversation_id: self.conversation_id.clone(),
             busy_excluded: self.busy_excluded,
-            claude_provider,
             pending_input: self.pending_input.clone(),
             background: self.background,
         }
+    }
+
+    /// The chips the agent's descriptor shows for the options this session
+    /// was spawned with (none recorded reads as no options).
+    fn agent_chips(&self) -> Vec<protocol::SessionChip> {
+        let Some(plugin) = agent_registry::plugin(&self.agent) else {
+            warn!(
+                session_id = %self.id,
+                "no agent plugin `{}` is registered; the session shows no chips",
+                self.agent.0
+            );
+            return Vec::new();
+        };
+        let empty = protocol::OptionValues::new();
+        let options = self
+            .spawn_config
+            .as_ref()
+            .and_then(|cfg| cfg.agent.as_ref())
+            .map_or(&empty, |selection| &selection.options);
+        agent_api::session_chips(plugin.descriptor(), options)
     }
 }
 
@@ -604,7 +639,7 @@ impl SessionRegistry {
             user_label: guard.user_label.clone(),
             label: guard.label.clone(),
             appearance: guard.appearance.clone(),
-            claude_session_id: guard.claude_session_id.clone(),
+            conversation_id: guard.conversation_id.clone(),
             busy_excluded: guard.busy_excluded,
             program_name: guard.program_name.clone(),
             agent_in_shell: guard.agent_in_shell,
@@ -1029,7 +1064,7 @@ impl SessionRegistry {
             pty: None,
             headless: None,
             workspace_id: meta.workspace_id.clone(),
-            agent: meta.agent.unwrap_or_else(default_agent),
+            agent: meta.agent.clone().unwrap_or_else(default_agent),
             terminal_title: meta.terminal_title.clone(),
             program_name: meta.program_name.clone(),
             current_cwd: meta.current_cwd.clone(),
@@ -1043,7 +1078,7 @@ impl SessionRegistry {
             screen: None,
             scrollback_snapshot_req: None,
             spawn_origin: None,
-            claude_session_id: meta.claude_session_id.clone(),
+            conversation_id: meta.conversation_id.clone(),
             pending_input: None,
             last_hook_time: None,
             hook_driven: false,
@@ -1053,7 +1088,7 @@ impl SessionRegistry {
             agent_in_shell: meta.agent_in_shell,
             shell_label: meta.shell_label.clone(),
             agent_exit_announced: false,
-            hook_agent: meta.hook_agent,
+            hook_agent: meta.hook_agent.clone(),
         };
         push_recent_action(&mut record, "reattached after daemon restart".to_string());
         self.insert(record);
@@ -1108,7 +1143,7 @@ impl SessionRegistry {
             pty: Some(pty),
             headless: None,
             workspace_id: meta.workspace_id.clone(),
-            agent: meta.agent.unwrap_or_else(default_agent),
+            agent: meta.agent.clone().unwrap_or_else(default_agent),
             terminal_title: meta.terminal_title.clone(),
             program_name: meta.program_name.clone(),
             current_cwd: meta.current_cwd.clone(),
@@ -1122,7 +1157,7 @@ impl SessionRegistry {
             screen: None,
             scrollback_snapshot_req: None,
             spawn_origin: None,
-            claude_session_id: meta.claude_session_id.clone(),
+            conversation_id: meta.conversation_id.clone(),
             pending_input,
             last_hook_time: None,
             hook_driven: false,
@@ -1132,7 +1167,7 @@ impl SessionRegistry {
             agent_in_shell: meta.agent_in_shell,
             shell_label: meta.shell_label.clone(),
             agent_exit_announced: false,
-            hook_agent: meta.hook_agent,
+            hook_agent: meta.hook_agent.clone(),
         };
         push_recent_action(
             &mut record,
@@ -1164,7 +1199,7 @@ impl SessionRegistry {
             pty: None,
             headless: None,
             workspace_id: meta.workspace_id.clone(),
-            agent: meta.agent.unwrap_or_else(default_agent),
+            agent: meta.agent.clone().unwrap_or_else(default_agent),
             terminal_title: meta.terminal_title.clone(),
             program_name: meta.program_name.clone(),
             current_cwd: meta.current_cwd.clone(),
@@ -1178,7 +1213,7 @@ impl SessionRegistry {
             screen: None,
             scrollback_snapshot_req: None,
             spawn_origin: None,
-            claude_session_id: meta.claude_session_id.clone(),
+            conversation_id: meta.conversation_id.clone(),
             pending_input: None,
             last_hook_time: None,
             hook_driven: false,
@@ -1188,7 +1223,7 @@ impl SessionRegistry {
             agent_in_shell: meta.agent_in_shell,
             shell_label: meta.shell_label.clone(),
             agent_exit_announced: false,
-            hook_agent: meta.hook_agent,
+            hook_agent: meta.hook_agent.clone(),
         };
         push_recent_action(
             &mut record,
@@ -1244,7 +1279,7 @@ mod tests {
             pty: None,
             headless: None,
             workspace_id: None,
-            agent: Agent::default(),
+            agent: agent_registry::default_agent(),
             terminal_title: None,
             program_name: None,
             current_cwd: None,
@@ -1258,7 +1293,7 @@ mod tests {
             screen: None,
             scrollback_snapshot_req: None,
             spawn_origin: None,
-            claude_session_id: None,
+            conversation_id: None,
             pending_input: None,
             last_hook_time: None,
             hook_driven: false,
@@ -1272,35 +1307,58 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_deepseek_spawn_config_snapshots_its_provider() {
-        let mut rec = record("s1");
-        rec.spawn_config = Some(SpawnConfig {
+    /// A stored config whose agent is Claude on the `DeepSeek` provider.
+    fn deepseek_config(mode: SessionMode) -> SpawnConfig {
+        SpawnConfig {
             target: protocol::SpawnTarget::Standalone {
                 cwd: None,
                 add_dirs: Vec::new(),
             },
-            mode: SessionMode::Interactive,
+            mode,
             dangerously_skip_permissions: false,
-            agent_options: protocol::AgentOptions::Claude {
-                permission_mode: None,
-                provider: protocol::ClaudeProvider::Deepseek,
-            },
-            model: None,
+            agent: Some(protocol::AgentSelection {
+                agent: agent_registry::default_agent(),
+                options: protocol::OptionValues::from([(
+                    "provider".to_owned(),
+                    protocol::OptionValue::Text("deepseek".to_owned()),
+                )]),
+            }),
             extra_env: Vec::new(),
-        });
-        assert_eq!(
-            rec.snapshot().claude_provider,
-            protocol::ClaudeProvider::Deepseek
+        }
+    }
+
+    #[test]
+    fn a_deepseek_snapshot_carries_the_provider_chip() {
+        let mut rec = record("s1");
+        rec.spawn_config = Some(deepseek_config(SessionMode::Interactive));
+        let snapshot = rec.snapshot();
+        assert_eq!(snapshot.agent, Some(agent_registry::default_agent()));
+        let texts: Vec<&str> = snapshot
+            .agent_chips
+            .iter()
+            .map(|chip| chip.text.as_str())
+            .collect();
+        assert_eq!(texts, ["DeepSeek"], "the chip shows the choice's label");
+        assert!(
+            snapshot.agent_chips.iter().all(|chip| chip.tip.is_some()),
+            "{:?}",
+            snapshot.agent_chips
         );
     }
 
     #[test]
-    fn a_record_without_a_spawn_config_snapshots_anthropic() {
-        assert_eq!(
-            record("s1").snapshot().claude_provider,
-            protocol::ClaudeProvider::Anthropic
-        );
+    fn a_record_without_a_spawn_config_shows_no_provider_chip() {
+        assert_eq!(record("s1").snapshot().agent_chips, []);
+    }
+
+    #[test]
+    fn a_shell_snapshot_has_no_agent_and_no_chips() {
+        let mut rec = record("s1");
+        rec.mode = SessionMode::PlainShell;
+        rec.spawn_config = Some(deepseek_config(SessionMode::PlainShell));
+        let snapshot = rec.snapshot();
+        assert_eq!(snapshot.agent, None);
+        assert_eq!(snapshot.agent_chips, []);
     }
 
     #[test]
@@ -1476,7 +1534,7 @@ mod tests {
             Utc::now(),
             None,
             None,
-            Agent::Claude,
+            Some(agent_registry::default_agent()),
             None,
             None,
             None,
@@ -1823,7 +1881,7 @@ mod tests {
             Utc::now(),
             None,
             None,
-            Agent::Claude,
+            Some(agent_registry::default_agent()),
             None,
             None,
             None,
@@ -1912,13 +1970,16 @@ mod tests {
         let dirs = scratch_dirs("reloaded-shell-hook-agent");
         let mut meta = standalone_meta();
         meta.mode = SessionMode::PlainShell;
-        meta.hook_agent = Some(Agent::Claude);
+        meta.hook_agent = Some(agent_registry::default_agent());
         let hook_agent_of = |registry: &SessionRegistry| {
             let arc = registry.get("s1").expect("the inserted session");
             let record = lock(&arc);
-            (record.hook_agent, record.hook_plugin_agent())
+            (record.hook_agent.clone(), record.hook_plugin_agent())
         };
-        let expected = (Some(Agent::Claude), Some(Agent::Claude));
+        let expected = (
+            Some(agent_registry::default_agent()),
+            Some(agent_registry::default_agent()),
+        );
 
         let orphan = SessionRegistry::new(dirs.clone());
         orphan.insert_orphan(&meta);

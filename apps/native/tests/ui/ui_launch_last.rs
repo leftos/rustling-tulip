@@ -15,8 +15,8 @@ use gpui::{
     Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, Pixels, Point, TestAppContext, px,
 };
 use protocol::{
-    AgentOptions, ClientMessage, DaemonMessage, PermissionMode, SessionMode, SessionSnapshot,
-    SpawnConfig, SpawnTarget, SplitDirection, SuggestTarget, TabEntry, WorktreeReusePolicy,
+    ClientMessage, DaemonMessage, SessionMode, SessionSnapshot, SpawnConfig, SpawnTarget,
+    SplitDirection, SuggestTarget, TabEntry, WorktreeReusePolicy,
 };
 use rustling_tulip_native::launch_last;
 use rustling_tulip_native::{RootView, ToastKind};
@@ -104,8 +104,7 @@ fn config(target: SpawnTarget) -> SpawnConfig {
         target,
         mode: SessionMode::Interactive,
         dangerously_skip_permissions: false,
-        agent_options: AgentOptions::claude(Some(PermissionMode::AcceptEdits)),
-        model: Some("opus".to_owned()),
+        agent: Some(serde_json::from_value(serde_json::json!({ "agent": "claude", "options": { "permission_mode": "accept_edits", "model": "opus" } })).expect("agent selection")),
         extra_env: vec![("A".to_owned(), "1".to_owned())],
     }
 }
@@ -213,8 +212,7 @@ fn launch_last_double_click_replays_into_current_tab(cx: &mut TestAppContext) {
         "the target replays verbatim"
     );
     assert_eq!(request.mode, expected.mode);
-    assert_eq!(request.agent_options, expected.agent_options);
-    assert_eq!(request.model, expected.model);
+    assert_eq!(request.agent, expected.agent);
     assert_eq!(request.extra_env, expected.extra_env);
     assert_eq!(request.label, None, "a replay names no label");
     assert_eq!(request.initial_prompt, None, "and carries no prompt");

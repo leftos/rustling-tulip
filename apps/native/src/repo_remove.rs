@@ -282,8 +282,11 @@ pub(crate) fn live_owned_sessions(
         .map(|session| RepoRemoveSession {
             id: session.id.clone(),
             label: crate::sidebar::display_label(session),
-            agent: (session.mode != SessionMode::PlainShell)
-                .then(|| session.agent.as_label().to_owned()),
+            agent: session
+                .agent
+                .as_ref()
+                .filter(|_| session.mode != SessionMode::PlainShell)
+                .map(|agent| agent.0.clone()),
         })
         .collect();
     listed.sort_by_cached_key(|session| session.label.to_lowercase());
@@ -297,7 +300,7 @@ pub(crate) fn live_owned_sessions(
 )]
 mod tests {
     use super::*;
-    use protocol::{Agent, DaemonMessage, RepoEntry, SessionKind, WorkspaceEntry};
+    use protocol::{DaemonMessage, RepoEntry, SessionKind, WorkspaceEntry};
     use serde_json::json;
 
     fn repo(id: &str) -> RepoEntry {
@@ -487,7 +490,7 @@ mod tests {
         let model = model(&["r1"], &[]);
         let mut s = in_repo("s1", "r1");
         s.label = "feature work".to_owned();
-        s.agent = Agent::Claude;
+        s.agent = Some(crate::claude_compat::claude_id());
         let level = Level::Repo("r1".to_owned());
         let listed = live_owned_sessions(&level, &[s], &model);
         assert_eq!(

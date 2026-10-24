@@ -251,6 +251,10 @@ fn spawn_tab_forwarder(
 /// start-up resume's report reaches a client at most once per daemon run: a
 /// connection whose client id the initial-state push already told drops it.
 /// The waiting pairing requests reach only a loopback connection (`local`).
+#[expect(
+    clippy::too_many_lines,
+    reason = "one arm per state event; each arm only forwards its message"
+)]
 fn spawn_state_forwarder(
     hub: &Hub,
     mut rx: broadcast::Receiver<StateEvent>,
@@ -316,6 +320,9 @@ fn spawn_state_forwarder(
                 }
                 Ok(StateEvent::AgentCommands(commands)) => {
                     let _ = out_tx.send(DaemonMessage::AgentCommands { commands });
+                }
+                Ok(StateEvent::AgentSettings(settings)) => {
+                    let _ = out_tx.send(DaemonMessage::AgentSettings { settings });
                 }
                 Ok(StateEvent::RemoteStatus {
                     enabled,

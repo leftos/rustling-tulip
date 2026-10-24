@@ -1066,8 +1066,7 @@ fn shift_duplicate_reply_opens_the_locked_prefilled_dialog(cx: &mut TestAppConte
                 "base_branch": "origin/dev", "use_worktree": true },
             "mode": "interactive",
             "dangerously_skip_permissions": false,
-            "agent_options": { "kind": "claude", "permission_mode": "plan" },
-            "model": "claude-sonnet-9",
+            "agent": { "agent": "claude", "options": { "permission_mode": "plan", "model": "claude-sonnet-9" } },
             "extra_env": [["LEVEL", "3"]],
         })),
     ));
@@ -1124,8 +1123,7 @@ fn shift_duplicate_of_a_deepseek_source_prefills_deepseek(cx: &mut TestAppContex
                 "base_branch": "origin/dev", "use_worktree": true },
             "mode": "interactive",
             "dangerously_skip_permissions": false,
-            "agent_options": { "kind": "claude", "provider": "deepseek" },
-            "model": "deepseek-flash",
+            "agent": { "agent": "claude", "options": { "provider": "deepseek", "model": "deepseek-flash" } },
         })),
     ));
     assert!(h.root(|root, _| root.spawn_dialog_open()));

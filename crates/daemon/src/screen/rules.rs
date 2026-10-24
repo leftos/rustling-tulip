@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
 
 use agent_api::{LineMatcher, ScreenRegion, ScreenRule, ScreenRules, ScreenVerdict};
-use protocol::Agent;
+use protocol::AgentId;
 use regex::Regex;
 
 use super::Screen;
@@ -110,17 +110,25 @@ impl CompiledRules {
 }
 
 /// Each agent's compiled rules, compiled on first use.
-static BY_AGENT: LazyLock<Mutex<HashMap<Agent, Arc<CompiledRules>>>> =
+static BY_AGENT: LazyLock<Mutex<HashMap<AgentId, Arc<CompiledRules>>>> =
     LazyLock::new(Mutex::default);
 
 /// The compiled screen rules of `agent`'s plugin, compiled once per agent.
+/// An agent with no registered plugin gets no rules.
 #[must_use]
-pub fn rules_for(agent: Agent) -> Arc<CompiledRules> {
+pub fn rules_for(agent: &AgentId) -> Arc<CompiledRules> {
     let mut cache = crate::sync::lock(&BY_AGENT);
-    let rules = cache.entry(agent).or_insert_with(|| {
-        Arc::new(CompiledRules::compile(
-            agent_registry::plugin(agent).screen_rules(),
-        ))
+    let rules = cache.entry(agent.clone()).or_insert_with(|| {
+        let compiled = if let Some(plugin) = agent_registry::plugin(agent) {
+            CompiledRules::compile(plugin.screen_rules())
+        } else {
+            tracing::warn!(
+                "no agent plugin `{}` is registered; its screen has no rules",
+                agent.0
+            );
+            CompiledRules::compile(&ScreenRules::default())
+        };
+        Arc::new(compiled)
     });
     Arc::clone(rules)
 }
@@ -325,17 +333,17 @@ mod tests {
 
     /// The state the screen shows by Claude's rules.
     fn read_claude(screen: &Screen) -> Reading {
-        rules_for(Agent::Claude).read(screen)
+        rules_for(&agent_registry::default_agent()).read(screen)
     }
 
     /// Claude's rule table as its plugin hands it over.
     fn claude_table() -> &'static ScreenRules {
-        agent_registry::plugin(Agent::Claude).screen_rules()
+        agent_api::AgentPlugin::screen_rules(&agent_claude::CLAUDE)
     }
 
     /// The regex Claude's compiled rules hold for the line rule `name`.
     fn line_rule(name: &str) -> Regex {
-        rules_for(Agent::Claude)
+        rules_for(&agent_registry::default_agent())
             .rules
             .iter()
             .find(|rule| &*rule.name == name)
@@ -811,7 +819,7 @@ mod tests {
     #[test]
     fn every_pattern_compiles() {
         assert_eq!(
-            rules_for(Agent::Claude).rules.len(),
+            rules_for(&agent_registry::default_agent()).rules.len(),
             claude_table().rules.len(),
             "every rule compiled, none skipped"
         );

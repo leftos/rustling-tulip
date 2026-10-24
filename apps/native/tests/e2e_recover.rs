@@ -531,7 +531,7 @@ fn recover_claude_session(
         s.mode == SessionMode::Interactive
     });
     let conversation = session
-        .claude_session_id
+        .conversation_id
         .clone()
         .expect("a spawned claude session carries its conversation id");
     wait_spawn_line(h, daemon, &session.id);
@@ -568,7 +568,7 @@ fn recover_claude_session(
     let recover_item = RecoverItem {
         history_id: session.id.clone(),
         conversation_id: Some(conversation.clone()),
-        how: RecoverAs::Claude,
+        how: RecoverAs::Agent,
     };
     let results = recover(h, client, "recover-claude", recover_item.clone());
     let new_id = recovered_session(&results, &session.id);
@@ -631,7 +631,7 @@ fn recover_shell_session(
         RecoverItem {
             history_id: session.id.clone(),
             conversation_id: Some(SHELL_CONVERSATION.to_owned()),
-            how: RecoverAs::Shell,
+            how: RecoverAs::ShellResume,
         },
     );
     let new_id = recovered_session(&results, &session.id);
@@ -673,13 +673,9 @@ fn recover_shell_session(
     }
 }
 
-/// An interactive spawn of the agent `agent_options` selects, in place in
+/// An interactive spawn of the agent selection `agent`, in place in
 /// `repo_id`'s checkout, with `extra_env` rows on it.
-fn spawn_agent_in_place(
-    repo_id: &str,
-    agent_options: &Value,
-    extra_env: &[(&str, &str)],
-) -> ClientMessage {
+fn spawn_agent_in_place(repo_id: &str, agent: &Value, extra_env: &[(&str, &str)]) -> ClientMessage {
     serde_json::from_value(json!({
         "type": "spawn_session",
         "label": null,
@@ -693,8 +689,7 @@ fn spawn_agent_in_place(
         "mode": "interactive",
         "initial_prompt": null,
         "dangerously_skip_permissions": false,
-        "agent_options": agent_options,
-        "model": null,
+        "agent": agent,
         "extra_env": extra_env,
     }))
     .expect("spawn request fixture")
@@ -915,14 +910,14 @@ fn recover_sealed_session(
     let ask = format!("/env {SECRET_KEY}");
     client.send(spawn_agent_in_place(
         repo_id,
-        &json!({ "kind": "claude" }),
+        &json!({ "agent": "claude", "options": {} }),
         &[(SECRET_KEY, sentinel)],
     ));
     let session = wait_snapshot(h, client, "the claude session's snapshot", |s| {
         s.mode == SessionMode::Interactive
     });
     let conversation = session
-        .claude_session_id
+        .conversation_id
         .clone()
         .expect("a spawned claude session carries its conversation id");
     let cwd = &session
@@ -944,7 +939,7 @@ fn recover_sealed_session(
         RecoverItem {
             history_id: session.id.clone(),
             conversation_id: Some(conversation),
-            how: RecoverAs::Claude,
+            how: RecoverAs::Agent,
         },
     );
     let new_id = recovered_session(&results, &session.id);
@@ -1044,14 +1039,14 @@ fn recover_deepseek_session(
 ) -> String {
     client.send(spawn_agent_in_place(
         repo_id,
-        &json!({ "kind": "claude", "provider": "deepseek" }),
+        &json!({ "agent": "claude", "options": { "provider": "deepseek" } }),
         &[],
     ));
     let session = wait_snapshot(h, client, "the deepseek session's snapshot", |s| {
         s.mode == SessionMode::Interactive
     });
     let conversation = session
-        .claude_session_id
+        .conversation_id
         .clone()
         .expect("a spawned claude session carries its conversation id");
     let cwd = &session
@@ -1071,7 +1066,7 @@ fn recover_deepseek_session(
         RecoverItem {
             history_id: session.id.clone(),
             conversation_id: Some(conversation),
-            how: RecoverAs::Claude,
+            how: RecoverAs::Agent,
         },
     );
     let new_id = recovered_session(&results, &session.id);
@@ -1188,7 +1183,7 @@ fn spawn_claude_with_transcript(
         s.mode == SessionMode::Interactive && others.iter().all(|other| other.id != s.id)
     });
     let conversation = session
-        .claude_session_id
+        .conversation_id
         .clone()
         .expect("a spawned claude session carries its conversation id");
     wait_spawn_line(h, daemon, &session.id);
@@ -1240,7 +1235,7 @@ fn assert_resumed(h: &mut Harness<'_>, client: &LiveClient, daemon: &LiveDaemon,
     let resumed = wait_snapshot(h, client, &what, |s| {
         s.mode == SessionMode::Interactive
             && s.id != old.id
-            && s.claude_session_id.as_deref() == Some(old.conversation.as_str())
+            && s.conversation_id.as_deref() == Some(old.conversation.as_str())
     });
     wait_spawn_line(h, daemon, &resumed.id);
     let typed = wait_typed_command(

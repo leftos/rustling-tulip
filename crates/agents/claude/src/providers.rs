@@ -10,10 +10,10 @@
 //! `state.json` or the wire.
 
 use agent_api::{EnvPlan, KeyLookup, Refusal, ResolvedRows, SpawnCheck};
-use protocol::ClaudeProvider;
 use tracing::debug;
 
 use crate::DEEPSEEK_MODEL;
+use crate::options::ClaudeProvider;
 
 /// One non-Anthropic provider's routing.
 struct ProviderEntry {

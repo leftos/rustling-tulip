@@ -9,9 +9,11 @@
 use crate::env_secrets::{self, SealOutcome};
 use crate::paths::{Dirs, simplify_path};
 use anyhow::Context as _;
-use protocol::{Agent, ContainerRef, KeepAwakeMode, RepoEntry, TabEntry, WorkspaceEntry};
+use protocol::{
+    AgentId, ContainerRef, KeepAwakeMode, OptionValues, RepoEntry, TabEntry, WorkspaceEntry,
+};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -74,12 +76,17 @@ pub struct PersistedState {
     #[serde(default)]
     pub keep_awake_mode: KeepAwakeMode,
     /// Host setting: the command each agent's interactive spawns launch,
-    /// keyed by the agent's serde name. Holds only agents whose command is
-    /// set; an absent agent launches its plugin's own program. Read at spawn
-    /// through [`AppState::agent_command`], never copied into a session's
-    /// spawn config, so Restart and Resume use the current command.
+    /// keyed by the agent's id. Holds only agents whose command is set; an
+    /// absent agent launches its plugin's own program. Read at spawn through
+    /// [`AppState::agent_command`], never copied into a session's spawn
+    /// config, so Restart and Resume use the current command.
     #[serde(default)]
-    pub agent_commands: HashMap<Agent, AgentCommand>,
+    pub agent_commands: HashMap<AgentId, AgentCommand>,
+    /// Host setting: each agent's Settings page values, validated against
+    /// its option schema, keyed by the agent's id. A client prefills its
+    /// spawn dialog from them; a spawn never reads them.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub agent_settings: BTreeMap<AgentId, OptionValues>,
 }
 
 /// One agent's stored launch command, both fields as the user typed them.
@@ -273,18 +280,30 @@ impl AppState {
 
     /// The launch command `agent`'s interactive spawns use: blank when none is
     /// set. Every spawn path reads it here, at spawn time.
-    pub fn agent_command(&self, agent: Agent) -> AgentCommand {
-        self.with_persisted(|s| s.agent_commands.get(&agent).cloned().unwrap_or_default())
+    pub fn agent_command(&self, agent: &AgentId) -> AgentCommand {
+        self.with_persisted(|s| s.agent_commands.get(agent).cloned().unwrap_or_default())
     }
 
     /// Persist `agent`'s launch command; a blank pair removes its entry.
-    pub fn set_agent_command(&self, agent: Agent, command: AgentCommand) -> anyhow::Result<()> {
+    pub fn set_agent_command(&self, agent: &AgentId, command: AgentCommand) -> anyhow::Result<()> {
         self.mutate(|s| {
             if command.is_blank() {
-                s.agent_commands.remove(&agent);
+                s.agent_commands.remove(agent);
             } else {
-                s.agent_commands.insert(agent, command);
+                s.agent_commands.insert(agent.clone(), command);
             }
+        })
+    }
+
+    /// Every agent's stored Settings page values.
+    pub fn agent_settings(&self) -> BTreeMap<AgentId, OptionValues> {
+        self.with_persisted(|s| s.agent_settings.clone())
+    }
+
+    /// Persist `agent`'s Settings page values, already validated.
+    pub fn set_agent_settings(&self, agent: &AgentId, options: OptionValues) -> anyhow::Result<()> {
+        self.mutate(|s| {
+            s.agent_settings.insert(agent.clone(), options);
         })
     }
 
@@ -595,19 +614,22 @@ mod tests {
 
         let dirs = scratch_dirs("agentcommands");
         let state = AppState::load_or_default(&dirs).expect("load state");
-        assert_eq!(state.agent_command(Agent::Claude), AgentCommand::default());
+        assert_eq!(
+            state.agent_command(&agent_registry::default_agent()),
+            AgentCommand::default()
+        );
         let set = AgentCommand {
             program: "claude-wrapper".to_owned(),
             args: "--debug \"a b\"".to_owned(),
         };
         state
-            .set_agent_command(Agent::Claude, set.clone())
+            .set_agent_command(&agent_registry::default_agent(), set.clone())
             .expect("persist the command");
-        assert_eq!(state.agent_command(Agent::Claude), set);
+        assert_eq!(state.agent_command(&agent_registry::default_agent()), set);
 
         let reloaded = AppState::load_or_default(&dirs).expect("reload state");
         assert_eq!(
-            reloaded.agent_command(Agent::Claude),
+            reloaded.agent_command(&agent_registry::default_agent()),
             set,
             "the command survives a reload"
         );
@@ -621,7 +643,7 @@ mod tests {
 
         reloaded
             .set_agent_command(
-                Agent::Claude,
+                &agent_registry::default_agent(),
                 AgentCommand {
                     program: "  ".to_owned(),
                     args: String::new(),
@@ -629,7 +651,7 @@ mod tests {
             )
             .expect("clear the command");
         assert_eq!(
-            reloaded.agent_command(Agent::Claude),
+            reloaded.agent_command(&agent_registry::default_agent()),
             AgentCommand::default()
         );
         let text = std::fs::read_to_string(&dirs.state_file).expect("read state.json");
@@ -638,6 +660,45 @@ mod tests {
             stored["agent_commands"],
             serde_json::json!({}),
             "a blank pair removes the agent's entry"
+        );
+
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn agent_settings_round_trip_and_are_omitted_when_empty() {
+        let dirs = scratch_dirs("agentsettings");
+        let state = AppState::load_or_default(&dirs).expect("load state");
+        assert!(state.agent_settings().is_empty(), "a fresh state has none");
+        state
+            .set_keep_awake_mode(KeepAwakeMode::Always)
+            .expect("persist something else");
+        let text = std::fs::read_to_string(&dirs.state_file).expect("read state.json");
+        assert!(
+            !text.contains("\"agent_settings\""),
+            "empty settings are omitted from state.json"
+        );
+
+        let agent = agent_registry::default_agent();
+        let options = OptionValues::from([(
+            "provider".to_owned(),
+            protocol::OptionValue::Text("deepseek".to_owned()),
+        )]);
+        state
+            .set_agent_settings(&agent, options.clone())
+            .expect("persist the settings");
+        let reloaded = AppState::load_or_default(&dirs).expect("reload state");
+        assert_eq!(
+            reloaded.agent_settings(),
+            BTreeMap::from([(agent.clone(), options.clone())]),
+            "the settings survive a reload"
+        );
+        let text = std::fs::read_to_string(&dirs.state_file).expect("read state.json");
+        let stored: serde_json::Value = serde_json::from_str(&text).expect("parse state.json");
+        assert_eq!(
+            stored["agent_settings"],
+            serde_json::json!({ "claude": { "provider": "deepseek" } }),
+            "stored keyed by agent id"
         );
 
         let _ = std::fs::remove_dir_all(&dirs.config);

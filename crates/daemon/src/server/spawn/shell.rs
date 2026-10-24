@@ -1361,7 +1361,6 @@ mod launch_tests {
 mod launch_command_tests {
     use super::choose_agent_command;
     use crate::state::AgentCommand;
-    use protocol::Agent;
 
     fn command(program: &str, args: &str) -> AgentCommand {
         AgentCommand {
@@ -1380,7 +1379,8 @@ mod launch_command_tests {
 
     #[test]
     fn launch_command_env_beats_the_setting() {
-        let plugin = agent_registry::plugin(Agent::Claude);
+        let plugin =
+            agent_registry::plugin(&agent_registry::default_agent()).expect("Claude is registered");
         let chosen = choose_agent_command(plugin, &command("cl", "--debug"), &claude_env)
             .expect("the command splits");
         assert_eq!(chosen.program, r"C:\fake\claude.exe");
@@ -1395,7 +1395,8 @@ mod launch_command_tests {
 
     #[test]
     fn launch_command_setting_beats_the_default() {
-        let plugin = agent_registry::plugin(Agent::Claude);
+        let plugin =
+            agent_registry::plugin(&agent_registry::default_agent()).expect("Claude is registered");
         let chosen = choose_agent_command(plugin, &command("  cl  ", ""), &no_env)
             .expect("the command splits");
         assert_eq!(chosen.program, "cl");
@@ -1418,7 +1419,8 @@ mod launch_command_tests {
         std::fs::write(&file, b"").expect("write the program file");
         let path = file.to_string_lossy().into_owned();
 
-        let plugin = agent_registry::plugin(Agent::Claude);
+        let plugin =
+            agent_registry::plugin(&agent_registry::default_agent()).expect("Claude is registered");
         let chosen =
             choose_agent_command(plugin, &command(&path, ""), &no_env).expect("the command splits");
         assert_eq!(chosen.program, path);
@@ -1429,7 +1431,8 @@ mod launch_command_tests {
 
     #[test]
     fn launch_command_extras_follow_the_plugin_argv() {
-        let plugin = agent_registry::plugin(Agent::Claude);
+        let plugin =
+            agent_registry::plugin(&agent_registry::default_agent()).expect("Claude is registered");
         let chosen = choose_agent_command(plugin, &command("", r#"--debug "a b" 'c d'"#), &no_env)
             .expect("the command splits");
         let argv = chosen.direct_args(
@@ -1444,7 +1447,8 @@ mod launch_command_tests {
 
     #[test]
     fn launch_command_split_failure_refuses_the_spawn() {
-        let plugin = agent_registry::plugin(Agent::Claude);
+        let plugin =
+            agent_registry::plugin(&agent_registry::default_agent()).expect("Claude is registered");
         let err = choose_agent_command(plugin, &command("", "--debug \"open"), &no_env)
             .err()
             .map(|err| err.to_string());

@@ -11,7 +11,7 @@ use crate::scrollback;
 use crate::session::{SessionRecord, SessionRegistry, push_recent_action};
 use agent_api::HeadlessEvent;
 use anyhow::{Context as _, anyhow};
-use protocol::{Agent, SessionStatus};
+use protocol::{AgentId, SessionStatus};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -38,7 +38,7 @@ pub struct HeadlessSpec {
     pub env: Vec<(String, String)>,
     /// Agent kind. Drives which plugin's `parse_headless_line` parses
     /// stdout — claude's stream-json.
-    pub agent: Agent,
+    pub agent: AgentId,
 }
 
 /// Shows the env's keys only: its values can hold resolved secrets.
@@ -94,6 +94,8 @@ pub fn spawn(
     session_id: String,
     dirs: Dirs,
 ) -> anyhow::Result<Arc<HeadlessHandle>> {
+    let plugin = agent_registry::plugin(&spec.agent)
+        .ok_or_else(|| anyhow::anyhow!("no agent plugin `{}` is registered", spec.agent.0))?;
     let mut cmd = Command::new(&spec.program);
     cmd.args(&spec.args)
         .current_dir(&spec.cwd)
@@ -127,7 +129,6 @@ pub fn spawn(
     let registry_for_stdout = Arc::clone(registry);
     let session_for_stdout = session_id.clone();
     let dirs_for_stdout = dirs;
-    let plugin = agent_registry::plugin(spec.agent);
     tokio::spawn(async move {
         let mut reader = BufReader::new(stdout).lines();
         loop {
@@ -267,7 +268,7 @@ mod tests {
             args: Vec::new(),
             cwd: PathBuf::from("."),
             env: vec![("ANTHROPIC_API_KEY".to_owned(), "sk-ant-hunter2".to_owned())],
-            agent: Agent::Claude,
+            agent: agent_registry::default_agent(),
         };
         let shown = format!("{spec:?}");
         assert!(shown.contains("ANTHROPIC_API_KEY"), "{shown}");
@@ -316,7 +317,7 @@ mod tests {
             args,
             cwd: std::env::temp_dir(),
             env: Vec::new(),
-            agent: Agent::Claude,
+            agent: agent_registry::default_agent(),
         }
     }
 
@@ -392,7 +393,7 @@ mod tests {
             args: args.into_iter().map(str::to_owned).collect(),
             cwd: std::env::temp_dir(),
             env: Vec::new(),
-            agent: Agent::Claude,
+            agent: agent_registry::default_agent(),
         };
         let _handle =
             spawn(&spec, &registry, "h2".to_string(), dirs.clone()).expect("spawn headless child");
@@ -479,7 +480,7 @@ mod tests {
             },
             cwd: std::env::temp_dir(),
             env: Vec::new(),
-            agent: Agent::Claude,
+            agent: agent_registry::default_agent(),
         };
         let handle = spawn(&spec, &registry, "headless-idempotent".to_string(), dirs)
             .expect("spawn short-lived headless child");

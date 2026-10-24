@@ -486,7 +486,7 @@ fn is_in_place(request: &SpawnRequest) -> bool {
 mod tests {
     use super::*;
     use crate::tabs::tests::{model_with, pane, session, tab, updated, wire};
-    use protocol::{AgentOptions, SessionMode, WorktreeReusePolicy};
+    use protocol::{SessionMode, WorktreeReusePolicy};
 
     fn request(use_worktree: bool) -> SpawnRequest {
         SpawnRequest {
@@ -503,8 +503,9 @@ mod tests {
             mode: SessionMode::Interactive,
             initial_prompt: None,
             dangerously_skip_permissions: false,
-            agent_options: AgentOptions::claude(None),
-            model: None,
+            agent: Some(crate::claude_compat::selection(
+                &crate::claude_compat::ClaudeChoice::default(),
+            )),
             extra_env: Vec::new(),
             secret_env_keys: Vec::new(),
             prompt_injector: None,

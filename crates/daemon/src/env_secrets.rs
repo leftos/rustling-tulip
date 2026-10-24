@@ -878,8 +878,10 @@ mod tests {
             },
             mode: protocol::SessionMode::Interactive,
             dangerously_skip_permissions: false,
-            agent_options: protocol::AgentOptions::claude(None),
-            model: None,
+            agent: Some(protocol::AgentSelection {
+                agent: agent_registry::default_agent(),
+                options: protocol::OptionValues::new(),
+            }),
             extra_env: rows
                 .iter()
                 .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))

@@ -675,7 +675,7 @@ mod tests {
 
     #[test]
     fn claude_ready_signal_keeps_the_agent_tui_rule() {
-        let ready = agent_registry::plugin(protocol::Agent::Claude).ready_signal();
+        let ready = agent_api::AgentPlugin::ready_signal(&agent_claude::CLAUDE);
         let rule = StartupRule::of(InjectorStartup::AgentTui, ready);
         assert_eq!(
             rule,

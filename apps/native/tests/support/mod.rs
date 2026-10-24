@@ -19,8 +19,8 @@ use gpui::{
     px,
 };
 use protocol::{
-    ClaudeProvider, ClientMessage, DaemonMessage, GridNode, RepoEntry, SessionSnapshot,
-    SplitDirection, TabEntry, WorkspaceEntry,
+    ClientMessage, DaemonMessage, GridNode, RepoEntry, SessionSnapshot, SplitDirection, TabEntry,
+    WorkspaceEntry,
 };
 use rustling_tulip_native::{
     Activity, Clock, Connection, ContainerKind, FileFilter, FilePicker, FolderPicker,
@@ -39,10 +39,7 @@ pub const PROTOCOL: u32 = 1;
 /// The features the fake daemon lists in its `Welcome`, as a current daemon
 /// does.
 pub fn daemon_features() -> Vec<String> {
-    vec![
-        protocol::FEATURE_CLAUDE_PROVIDER.to_owned(),
-        protocol::FEATURE_AGENT_COMMANDS.to_owned(),
-    ]
+    vec![protocol::FEATURE_AGENT_COMMANDS.to_owned()]
 }
 
 /// The fake daemon's `Welcome` on `protocol_version`, listing
@@ -486,10 +483,10 @@ impl SessionBuilder {
         self.set("elevated_authority", json!(true))
     }
 
-    /// Routed to `provider`'s endpoint, as the daemon derives it from the
-    /// session's spawn config.
-    pub fn claude_provider(self, provider: ClaudeProvider) -> Self {
-        self.set("claude_provider", json!(provider))
+    /// Showing `chips`, as the daemon evaluates them from the session's
+    /// agent options.
+    pub fn agent_chips(self, chips: Value) -> Self {
+        self.set("agent_chips", chips)
     }
 
     pub fn terminal_title(self, title: &str) -> Self {
@@ -530,13 +527,12 @@ pub fn history_item(id: &str) -> HistoryItemBuilder {
                     "use_worktree": false, "worktree_reuse": "reuse"
                 },
                 "mode": "interactive", "dangerously_skip_permissions": false,
-                "agent_options": {"kind": "claude", "permission_mode": null},
-                "model": null, "extra_env": []
+                "agent": { "agent": "claude", "options": { "permission_mode": null } }, "extra_env": []
             },
             "members": [{"repo_id": "r1", "repo_name": "r1", "branch": "main", "worktree_path": "D:\\r1"}],
             "workspace_id": null, "primary_cwd": "D:\\r1", "current_cwd": null,
             "program_name": "claude", "started_at": null, "ended_at": ended,
-            "end": {"type": "tracer_lost"}, "claude_session_id": null, "source": "record",
+            "end": {"type": "tracer_lost"}, "conversation_id": null, "source": "record",
             "recovered_at": null
         },
         "candidates": [{"id": format!("c-{id}"), "last_active": ended, "title": format!("Chat {id}")}],

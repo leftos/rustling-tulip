@@ -8,10 +8,9 @@
 //! arrive before their session is inserted, and writes them to the record.
 
 use crate::server::Hub;
-use crate::server::options_from_request;
 use crate::session::{PendingInsert, SessionRecord, push_recent_action};
 use agent_api::{AgentPlugin, HookReport, PendingUpdate};
-use protocol::{Agent, SessionStatus};
+use protocol::{AgentId, SessionStatus};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -37,8 +36,9 @@ const PENDING_HOOK_MAX_BYTES_PER_SESSION: usize = 256 * 1024;
 /// Most body bytes held across every session id.
 const PENDING_HOOK_MAX_BYTES: usize = 8 * 1024 * 1024;
 
-/// The plugin that maps an agent's hook events.
-pub type PluginLookup = fn(Agent) -> &'static dyn AgentPlugin;
+/// The plugin that maps an agent's hook events; `None` when no plugin is
+/// registered for the agent.
+pub type PluginLookup = fn(&AgentId) -> Option<&'static dyn AgentPlugin>;
 
 /// `text` cut to at most `max_bytes` UTF-8 bytes on a character boundary,
 /// ending in `…`, which counts inside the cap. Text within the cap is
@@ -275,11 +275,20 @@ impl PendingHooks {
         body: &serde_json::Value,
     ) -> Option<HookReport> {
         let agent = record.hook_plugin_agent()?;
+        let Some(plugin) = (self.plugins)(&agent) else {
+            warn!(
+                session_id = %record.id,
+                "no agent plugin `{}` is registered; its hook event is not mapped",
+                agent.0
+            );
+            return None;
+        };
         let spawn = record.spawn_config.as_ref();
-        let options =
-            spawn.map(|spawn| options_from_request(&spawn.agent_options, spawn.model.as_deref()));
+        let options = spawn
+            .and_then(|spawn| spawn.agent.as_ref())
+            .map(|selection| &selection.options);
         let trusted = spawn.is_some_and(|spawn| spawn.dangerously_skip_permissions);
-        (self.plugins)(agent).map_hook_event(body, options.as_ref(), trusted)
+        plugin.map_hook_event(body, options, trusted)
     }
 
     /// Hold the raw event `body`, `len` bytes long, for `session_id` until
@@ -471,8 +480,8 @@ pub(crate) fn apply_details(
 /// not a plain id is refused, since it later becomes `claude --resume <id>`
 /// and a transcript path.
 fn update_conversation_id(record: &mut SessionRecord, id: &str) {
-    if agent_api::is_plain_id(id) && record.claude_session_id.as_deref() != Some(id) {
-        record.claude_session_id = Some(id.to_owned());
+    if agent_api::is_plain_id(id) && record.conversation_id.as_deref() != Some(id) {
+        record.conversation_id = Some(id.to_owned());
     }
 }
 
@@ -493,13 +502,14 @@ fn store_last_message(record: &mut SessionRecord, message: &str) {
 )]
 mod tests {
     use super::*;
-    use protocol::{Agent, PendingInput, SessionMode};
+    use protocol::{PendingInput, SessionMode};
     use serde_json::{Value, json};
 
     /// The report Claude's plugin maps `body` to, for a session with no
     /// spawn options.
     fn report(body: &Value) -> HookReport {
-        agent_registry::plugin(Agent::Claude)
+        agent_registry::plugin(&agent_registry::default_agent())
+            .expect("Claude is registered")
             .map_hook_event(body, None, false)
             .expect("the payload maps to a report")
     }
@@ -911,8 +921,11 @@ mod tests {
     static TEST_AGENT: std::sync::LazyLock<agent_api::test_agent::TestAgent> =
         std::sync::LazyLock::new(agent_api::test_agent::TestAgent::default);
 
-    fn test_agent_plugin(_agent: Agent) -> &'static dyn agent_api::AgentPlugin {
-        &*TEST_AGENT
+    #[expect(clippy::unnecessary_wraps, reason = "a PluginLookup answers an Option")]
+    fn test_agent_plugin(
+        _agent: &protocol::AgentId,
+    ) -> Option<&'static dyn agent_api::AgentPlugin> {
+        Some(&*TEST_AGENT)
     }
 
     /// A hub whose hook events are mapped by the test agent's plugin.
@@ -956,7 +969,8 @@ mod tests {
         let (hub, _scratch) = test_agent_hub("early-test-agent");
         let body = test_session_start("working");
         assert!(
-            agent_registry::plugin(Agent::Claude)
+            agent_registry::plugin(&agent_registry::default_agent())
+                .expect("Claude is registered")
                 .map_hook_event(&body, None, false)
                 .is_none(),
             "only the test agent maps this body"
@@ -983,7 +997,7 @@ mod tests {
         let (hub, _scratch) = test_agent_hub("early-shell-hook-agent");
         hold(&hub, "s1", 5, test_session_start("working"), 64);
         let mut record = crate::history::test_support::record("s1", SessionMode::PlainShell);
-        record.hook_agent = Some(Agent::Claude);
+        record.hook_agent = Some(agent_registry::default_agent());
         let (status, time, message) = insert(&hub, record);
         assert_eq!(status, SessionStatus::Working);
         assert_eq!(time, Some(5));

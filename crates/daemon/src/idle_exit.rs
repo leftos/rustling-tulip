@@ -222,9 +222,7 @@ mod tests {
     use crate::paths::Dirs;
     use crate::session::SessionRecord;
     use chrono::Utc;
-    use protocol::{
-        Agent, AppearanceOverrides, SessionKind, SessionMetrics, SessionMode, SessionStatus,
-    };
+    use protocol::{AppearanceOverrides, SessionKind, SessionMetrics, SessionMode, SessionStatus};
     use tokio::time::timeout;
 
     fn scratch_dirs(tag: &str) -> Dirs {
@@ -261,7 +259,7 @@ mod tests {
             pty: None,
             headless: None,
             workspace_id: None,
-            agent: Agent::default(),
+            agent: agent_registry::default_agent(),
             terminal_title: None,
             program_name: None,
             current_cwd: None,
@@ -275,7 +273,7 @@ mod tests {
             screen: None,
             scrollback_snapshot_req: None,
             spawn_origin: None,
-            claude_session_id: None,
+            conversation_id: None,
             pending_input: None,
             last_hook_time: None,
             hook_driven: false,

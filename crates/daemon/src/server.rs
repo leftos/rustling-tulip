@@ -27,7 +27,7 @@ mod spawn;
     reason = "doc comments in history.rs name these at their crate::server path"
 )]
 pub(crate) use self::spawn::resolve_env_refs;
-pub(crate) use self::spawn::{options_from_request, request_parts_from_options, spawn_session};
+pub(crate) use self::spawn::spawn_session;
 
 use self::connection::{AuthKind, ConnCtx, cancel_fetch, client_session, start_fetch};
 use self::git::repo_target_or_err;
@@ -223,6 +223,10 @@ pub enum StateEvent {
     /// Broadcast after every [`ClientMessage::SetAgentCommand`] that is
     /// saved. Mirrors [`protocol::DaemonMessage::AgentCommands`].
     AgentCommands(Vec<protocol::AgentCommandEntry>),
+    /// Broadcast after every [`ClientMessage::SetAgentSettings`] that is
+    /// saved: every agent's stored settings. Mirrors
+    /// [`protocol::DaemonMessage::AgentSettings`].
+    AgentSettings(std::collections::BTreeMap<protocol::AgentId, protocol::OptionValues>),
     /// Broadcast on every remote-access status change: a
     /// [`ClientMessage::ConfigureRemote`] or the tailnet listener's own state
     /// moving. Mirrors [`protocol::DaemonMessage::RemoteStatus`]; it carries
@@ -576,6 +580,7 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         | ClientMessage::SetKeepAwake { .. }
         | ClientMessage::SetKeepAwakeMode { .. }
         | ClientMessage::SetAgentCommand { .. }
+        | ClientMessage::SetAgentSettings { .. }
         | ClientMessage::InspectWorktreesRoot
         | ClientMessage::DeleteWorktreeAt { .. }) => settings::handle(hub, m, ctx).await?,
         m @ (ClientMessage::PreviewWorkspaceSpawn { .. }

@@ -26,7 +26,7 @@ pub use screen_rules::{
 };
 
 use chrono::{DateTime, Utc};
-use protocol::{AgentDescriptor, FieldKind, OptionField, OptionValue, OptionValues};
+use protocol::{AgentDescriptor, FieldKind, OptionField, OptionValue, OptionValues, SessionChip};
 use protocol::{PendingInput, SessionMember, SessionStatus};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -462,8 +462,7 @@ pub trait Agent: Send + Sync + 'static {
     fn recovery_options(&self, run: &RecoveredRun<'_>) -> Self::Options;
 
     /// The revision of this agent's tracer-log import; an older import of
-    /// this agent is read again, or upgraded in place by
-    /// [`Self::upgrade_import`].
+    /// this agent is read again.
     fn import_rev(&self) -> u32 {
         0
     }
@@ -471,13 +470,6 @@ pub trait Agent: Send + Sync + 'static {
     /// The run `run` describes when it is this agent's, or `None` for a run
     /// of another program.
     fn import_tracer_run(&self, _run: &TracerRun<'_>) -> Option<ImportedRun<Self::Options>> {
-        None
-    }
-
-    /// The options of an import from revision `from_rev`, brought up to
-    /// [`Self::import_rev`] without its tracer log, or `None` when that
-    /// revision cannot be upgraded in place.
-    fn upgrade_import(&self, _from_rev: u32, _options: &Self::Options) -> Option<Self::Options> {
         None
     }
 
@@ -642,10 +634,6 @@ pub trait AgentPlugin: Send + Sync {
     /// [`Agent::import_tracer_run`] with the run's options as option values.
     fn import_tracer_run(&self, run: &TracerRun<'_>) -> Option<ImportedRun<OptionValues>>;
 
-    /// [`Agent::upgrade_import`] over `options` decoded; `None` when they do
-    /// not decode.
-    fn upgrade_import(&self, from_rev: u32, options: &OptionValues) -> Option<OptionValues>;
-
     /// [`Agent::check_request`] over `opts` decoded.
     ///
     /// # Errors
@@ -797,16 +785,6 @@ impl<A: Agent> AgentPlugin for A {
                 None
             }
         }
-    }
-
-    fn upgrade_import(&self, from_rev: u32, options: &OptionValues) -> Option<OptionValues> {
-        let options = decode_options(self, options)
-            .map_err(|err| error!(%err, "not upgrading an import whose options do not decode"))
-            .ok()?;
-        let upgraded = Agent::upgrade_import(self, from_rev, &options)?;
-        encode_options(self, &upgraded)
-            .map_err(|err| error!(%err, "not upgrading an import whose options do not serialize"))
-            .ok()
     }
 
     fn check_request(&self, opts: &OptionValues, req: &SpawnCheck<'_>) -> Result<(), Refusal> {
@@ -1070,6 +1048,53 @@ fn is_hidden(field: &OptionField, values: &OptionValues) -> bool {
     field.when.iter().any(|rule| {
         rule.then.hidden == Some(true) && values.get(&rule.if_field) == Some(&rule.equals)
     })
+}
+
+/// The chips a session whose agent options hold `options` shows: one per
+/// chip rule of `descriptor` whose field holds a value other than no value
+/// and the rule's `hide_when`. A chip's text is the label of the choice the
+/// field holds, else the value itself; its tip is the rule's.
+#[must_use]
+pub fn session_chips(descriptor: &AgentDescriptor, options: &OptionValues) -> Vec<SessionChip> {
+    descriptor
+        .chips
+        .iter()
+        .filter_map(|rule| {
+            let value = options.get(&rule.field)?;
+            if *value == rule.hide_when {
+                return None;
+            }
+            let raw = match value {
+                OptionValue::Bool(flag) => flag.to_string(),
+                OptionValue::Text(text) => text.clone(),
+                OptionValue::Null => return None,
+            };
+            Some(SessionChip {
+                text: choice_label(descriptor, &rule.field, value).unwrap_or(raw),
+                tip: Some(rule.tip.clone()),
+            })
+        })
+        .collect()
+}
+
+/// The label of the choice `value` is, when `field_id` names a choice field
+/// of `descriptor` that offers it.
+fn choice_label(
+    descriptor: &AgentDescriptor,
+    field_id: &str,
+    value: &OptionValue,
+) -> Option<String> {
+    let field = descriptor
+        .fields
+        .iter()
+        .find(|field| field.id == field_id)?;
+    match (&field.kind, value) {
+        (FieldKind::Choice { choices, .. }, OptionValue::Text(text)) => choices
+            .iter()
+            .find(|choice| &choice.value == text)
+            .map(|choice| choice.label.clone()),
+        _ => None,
+    }
 }
 
 /// `value` as an error message names it.
@@ -1342,15 +1367,6 @@ mod tests {
     }
 
     #[test]
-    fn upgrade_import_defaults_to_none() {
-        let plugin: &dyn AgentPlugin = &TestAgent::default();
-        let good = values(&[("mode", text("slow")), ("sandbox", OptionValue::Bool(true))]);
-        for rev in [0, 1, 2] {
-            assert_eq!(plugin.upgrade_import(rev, &good), None, "rev {rev}");
-        }
-    }
-
-    #[test]
     fn liveness_tokens_reach_the_adapter() {
         let plugin: &dyn AgentPlugin = &TestAgent::default();
         assert_eq!(plugin.liveness_tokens(), [] as [&str; 0]);
@@ -1472,6 +1488,93 @@ mod tests {
         let err = validate(&DESCRIPTOR, &values(&[("sandbox", text("yes"))]))
             .expect_err("a toggle takes only a bool");
         assert_eq!(err.field, "sandbox");
+    }
+
+    /// A descriptor with a provider choice and a profile text field, each
+    /// with a chip rule.
+    fn chip_descriptor() -> AgentDescriptor {
+        let choice = |value: &str, label: &str| protocol::Choice {
+            value: value.to_string(),
+            label: label.to_string(),
+        };
+        let mut provider = DESCRIPTOR.fields[0].clone();
+        provider.id = "provider".to_string();
+        provider.kind = FieldKind::Choice {
+            choices: vec![
+                choice("anthropic", "Anthropic"),
+                choice("deepseek", "DeepSeek"),
+            ],
+            style: protocol::ChoiceStyle::Segmented,
+        };
+        let mut profile = DESCRIPTOR.fields[0].clone();
+        profile.id = "profile".to_string();
+        profile.kind = FieldKind::Text { placeholder: None };
+        let rule = |field: &str, hide_when: OptionValue, tip: &str| protocol::ChipRule {
+            field: field.to_string(),
+            hide_when,
+            tip: tip.to_string(),
+        };
+        AgentDescriptor {
+            fields: vec![provider, profile],
+            chips: vec![
+                rule("provider", text("anthropic"), "Runs on another provider"),
+                rule("profile", text(""), "Profile"),
+            ],
+            ..DESCRIPTOR.clone()
+        }
+    }
+
+    #[test]
+    fn session_chips_show_the_choice_label_and_tip() {
+        assert_eq!(
+            session_chips(
+                &chip_descriptor(),
+                &values(&[("provider", text("deepseek"))])
+            ),
+            vec![SessionChip {
+                text: "DeepSeek".to_string(),
+                tip: Some("Runs on another provider".to_string()),
+            }]
+        );
+    }
+
+    #[test]
+    fn session_chips_hide_a_value_in_hide_when() {
+        let descriptor = chip_descriptor();
+        for options in [
+            values(&[("provider", text("anthropic")), ("profile", text(""))]),
+            values(&[
+                ("provider", OptionValue::Null),
+                ("profile", OptionValue::Null),
+            ]),
+            OptionValues::new(),
+        ] {
+            assert_eq!(
+                session_chips(&descriptor, &options),
+                Vec::<SessionChip>::new(),
+                "{options:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn session_chips_fall_back_to_the_raw_value() {
+        assert_eq!(
+            session_chips(
+                &chip_descriptor(),
+                &values(&[("provider", text("mistral")), ("profile", text("work"))])
+            ),
+            vec![
+                SessionChip {
+                    text: "mistral".to_string(),
+                    tip: Some("Runs on another provider".to_string()),
+                },
+                SessionChip {
+                    text: "work".to_string(),
+                    tip: Some("Profile".to_string()),
+                },
+            ]
+        );
     }
 
     #[test]

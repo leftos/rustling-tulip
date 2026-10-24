@@ -5,7 +5,7 @@ use crate::paths::Dirs;
 use crate::server::Hub;
 use crate::{orphan, pty_state, tracer_client};
 use agent_api::{AgentPlugin, HookFile, HookPlan, HookShim};
-use protocol::{Agent, OptionValues};
+use protocol::{AgentId, OptionValues};
 use std::path::{Component, Path, PathBuf};
 use tracing::warn;
 
@@ -149,17 +149,19 @@ pub(in crate::server) fn hook_settings_path(dirs: &Dirs, session_id: &str) -> Pa
 pub(super) fn write_hook_settings(
     hub: &Hub,
     session_id: &str,
-    agent: Agent,
+    agent: &AgentId,
     options: &OptionValues,
     trusted: bool,
 ) -> Option<HookSettings> {
-    write_hook_files(
-        hub,
-        session_id,
-        agent_registry::plugin(agent),
-        options,
-        trusted,
-    )
+    let Some(plugin) = agent_registry::plugin(agent) else {
+        warn!(
+            %session_id,
+            "no agent plugin `{}` is registered; the session gets no hook files",
+            agent.0
+        );
+        return None;
+    };
+    write_hook_files(hub, session_id, plugin, options, trusted)
 }
 
 /// [`write_hook_settings`] with `plugin`'s hook plan.
@@ -333,13 +335,14 @@ mod tests {
 
     /// Claude's options as a spawn request names them.
     fn claude_options() -> OptionValues {
-        crate::server::spawn::options_from_request(
-            &protocol::AgentOptions::Claude {
-                permission_mode: None,
-                provider: protocol::ClaudeProvider::Anthropic,
-            },
-            None,
-        )
+        OptionValues::from([
+            ("permission_mode".to_owned(), protocol::OptionValue::Null),
+            (
+                "provider".to_owned(),
+                protocol::OptionValue::Text("anthropic".to_owned()),
+            ),
+            ("model".to_owned(), protocol::OptionValue::Null),
+        ])
     }
 
     #[test]
@@ -455,8 +458,14 @@ mod tests {
     fn hook_settings_are_off_without_a_cached_tracer() {
         let (hub, _scratch) = spawnless_test_hub("hook-settings-no-tracer");
         assert!(
-            write_hook_settings(&hub, "no-tracer", Agent::Claude, &claude_options(), false)
-                .is_none(),
+            write_hook_settings(
+                &hub,
+                "no-tracer",
+                &agent_registry::default_agent(),
+                &claude_options(),
+                false
+            )
+            .is_none(),
             "hooks are off when the cached tracer cannot be resolved"
         );
         let file = hook_settings_file(&hub, "no-tracer");
@@ -477,7 +486,7 @@ mod tests {
         let settings = write_hook_settings(
             &hub,
             "claude-session",
-            Agent::Claude,
+            &agent_registry::default_agent(),
             &claude_options(),
             false,
         )
@@ -524,9 +533,14 @@ mod tests {
         let (hub, _scratch) = hook_test_hub("hook-settings-keep-dir");
         let dir = hub.dirs.sessions_dir.join("pre-made");
         std::fs::create_dir_all(&dir).expect("pre-create the session dir");
-        let settings =
-            write_hook_settings(&hub, "pre-made", Agent::Claude, &claude_options(), false)
-                .expect("writes");
+        let settings = write_hook_settings(
+            &hub,
+            "pre-made",
+            &agent_registry::default_agent(),
+            &claude_options(),
+            false,
+        )
+        .expect("writes");
         assert!(!settings.created_dir, "the dir was already there");
         assert!(hook_settings_file(&hub, "pre-made").exists());
         settings.discard("pre-made");

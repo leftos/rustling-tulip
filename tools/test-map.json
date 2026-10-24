@@ -164,6 +164,12 @@
     },
     {
       "paths": [
+        "apps/native/src/claude_compat.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & test(/^claude_compat::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_recover|ui_settings|ui_sidebar|ui_spawn_dialog)::/))"
+    },
+    {
+      "paths": [
         "apps/native/src/cleanup_failed.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native) & test(/^cleanup_failed::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_remote|ui_worktree_cleanup)::/))"

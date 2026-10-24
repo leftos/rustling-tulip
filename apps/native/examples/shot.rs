@@ -33,8 +33,7 @@ use gpui::{
     WindowHandle, WindowOptions, px, size,
 };
 use protocol::{
-    Agent, AgentCommandEntry, ClientMessage, DaemonMessage, GridNode, SessionSnapshot,
-    SplitDirection,
+    AgentCommandEntry, ClientMessage, DaemonMessage, GridNode, SessionSnapshot, SplitDirection,
 };
 use rustling_tulip_native::fonts;
 use rustling_tulip_native::offscreen::show_cloaked;
@@ -815,10 +814,7 @@ impl FakeDaemon {
         let mut conn = Connection::new();
         conn.on_connecting();
         conn.on_socket_open(FAKE_PORT);
-        let features = vec![
-            protocol::FEATURE_CLAUDE_PROVIDER.to_owned(),
-            protocol::FEATURE_AGENT_COMMANDS.to_owned(),
-        ];
+        let features = vec![protocol::FEATURE_AGENT_COMMANDS.to_owned()];
         conn.on_welcome(version, features.clone());
         self.event(NetEvent::State(conn))?;
         self.event(NetEvent::Handshake(HandshakeInfo {
@@ -840,7 +836,7 @@ impl FakeDaemon {
         self.send(fixture.keep_awake.clone())?;
         self.send(DaemonMessage::AgentCommands {
             commands: vec![AgentCommandEntry {
-                agent: Agent::Claude,
+                agent: protocol::AgentId("claude".to_owned()),
                 program: "claude".to_owned(),
                 args: "--verbose".to_owned(),
                 program_env: None,

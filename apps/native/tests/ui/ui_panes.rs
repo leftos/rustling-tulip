@@ -10,8 +10,8 @@ use crate::support;
 
 use gpui::{Modifiers, TestAppContext, px};
 use protocol::{
-    ClaudeProvider, ClientMessage, DaemonMessage, GridNode, PaneDropEdge, RearrangeLayout,
-    SessionSnapshot, SplitDirection, TabEntry,
+    ClientMessage, DaemonMessage, GridNode, PaneDropEdge, RearrangeLayout, SessionSnapshot,
+    SplitDirection, TabEntry,
 };
 use rustling_tulip_native::appearance::{BUILTIN_ACCENT, PaneFrame};
 use rustling_tulip_native::palette::{LINE, RAISED, SURFACE};
@@ -401,14 +401,10 @@ fn deepseek_chip_follows_the_runtime_chip(cx: &mut TestAppContext) {
     let fixture = Fixture {
         sessions: vec![
             session("s1")
-                .claude_provider(ClaudeProvider::Deepseek)
+                .agent_chips(serde_json::json!([{ "text": "DeepSeek", "tip": DEEPSEEK_TIP }]))
                 .build(),
             session("s2").build(),
-            session("s3")
-                .shell("D:/x")
-                .program_name("pwsh")
-                .claude_provider(ClaudeProvider::Deepseek)
-                .build(),
+            session("s3").shell("D:/x").program_name("pwsh").build(),
         ],
         tabs: vec![tab("t1", &grid_of(&["s1", "s2", "s3"]))],
         ..Fixture::default()
@@ -453,7 +449,9 @@ fn unknown_provider_shows_a_question_chip(cx: &mut TestAppContext) {
     let fixture = Fixture {
         sessions: vec![
             session("s1")
-                .claude_provider(ClaudeProvider::Unknown)
+                .agent_chips(
+                    serde_json::json!([{ "text": "provider?", "tip": UNKNOWN_PROVIDER_TIP }]),
+                )
                 .build(),
         ],
         tabs: vec![tab("t1", &grid_of(&["s1"]))],

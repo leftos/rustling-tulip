@@ -413,7 +413,7 @@ mod tests {
         Connection, DotKind, RESUME_GAP, RestartAction, State, TICK, Watchdog, backoff_delay,
     };
     use crate::target::Target;
-    use protocol::FEATURE_CLAUDE_PROVIDER;
+    use protocol::FEATURE_AGENT_COMMANDS;
     use std::time::{Duration, SystemTime};
 
     const HALF_SECOND: Duration = Duration::from_millis(500);
@@ -823,7 +823,7 @@ mod tests {
         conn.on_socket_open(51418);
         conn.on_welcome(
             20,
-            vec![FEATURE_CLAUDE_PROVIDER.to_owned(), "later".to_owned()],
+            vec![FEATURE_AGENT_COMMANDS.to_owned(), "later".to_owned()],
         );
     }
 
@@ -831,23 +831,23 @@ mod tests {
     fn features_come_with_welcome() {
         let mut conn = Connection::new();
         assert!(
-            !conn.supports(FEATURE_CLAUDE_PROVIDER),
+            !conn.supports(FEATURE_AGENT_COMMANDS),
             "none before Welcome"
         );
         conn.on_connecting();
         conn.on_socket_open(51418);
         assert!(
-            !conn.supports(FEATURE_CLAUDE_PROVIDER),
+            !conn.supports(FEATURE_AGENT_COMMANDS),
             "none before Welcome"
         );
         welcome(&mut conn);
-        assert!(conn.supports(FEATURE_CLAUDE_PROVIDER));
+        assert!(conn.supports(FEATURE_AGENT_COMMANDS));
         assert!(conn.supports("later"), "unknown features are kept");
         assert!(!conn.supports("unlisted"));
 
         let bare = open(20);
         assert!(
-            !bare.supports(FEATURE_CLAUDE_PROVIDER),
+            !bare.supports(FEATURE_AGENT_COMMANDS),
             "an older daemon lists none"
         );
     }
@@ -857,23 +857,23 @@ mod tests {
         let mut conn = Connection::new();
         welcome(&mut conn);
         conn.on_closed("dropped".to_owned());
-        assert!(!conn.supports(FEATURE_CLAUDE_PROVIDER), "cleared on close");
+        assert!(!conn.supports(FEATURE_AGENT_COMMANDS), "cleared on close");
 
         welcome(&mut conn);
         conn.on_error("no binary".to_owned());
-        assert!(!conn.supports(FEATURE_CLAUDE_PROVIDER), "cleared on error");
+        assert!(!conn.supports(FEATURE_AGENT_COMMANDS), "cleared on error");
 
         welcome(&mut conn);
         conn.on_connecting();
         assert!(
-            !conn.supports(FEATURE_CLAUDE_PROVIDER),
+            !conn.supports(FEATURE_AGENT_COMMANDS),
             "cleared on reconnect"
         );
 
         welcome(&mut conn);
         conn.on_auth_failed("bad token".to_owned());
         assert!(
-            !conn.supports(FEATURE_CLAUDE_PROVIDER),
+            !conn.supports(FEATURE_AGENT_COMMANDS),
             "cleared on auth failure"
         );
         assert_eq!(conn.restart(), RestartAction::FreshConnect);
@@ -882,7 +882,7 @@ mod tests {
         conn.stop();
         assert_eq!(conn.restart(), RestartAction::FreshConnect);
         assert!(
-            !conn.supports(FEATURE_CLAUDE_PROVIDER),
+            !conn.supports(FEATURE_AGENT_COMMANDS),
             "cleared on a fresh connect"
         );
     }

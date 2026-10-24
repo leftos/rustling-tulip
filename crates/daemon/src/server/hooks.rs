@@ -331,7 +331,7 @@ mod tests {
             pty_state::AgentStreams {
                 output: output_rx,
                 screen,
-                rules: crate::screen::rules::rules_for(protocol::Agent::default()),
+                rules: crate::screen::rules::rules_for(&agent_registry::default_agent()),
             },
             hub.attention_tx.clone(),
         );
@@ -634,7 +634,8 @@ mod tests {
     /// The report Claude's plugin maps `event` to, for a session with no
     /// spawn options.
     fn report(event: &serde_json::Value) -> agent_api::HookReport {
-        agent_registry::plugin(protocol::Agent::Claude)
+        agent_registry::plugin(&agent_registry::default_agent())
+            .expect("Claude is registered")
             .map_hook_event(event, None, false)
             .expect("the body maps to a report")
     }
@@ -700,7 +701,7 @@ mod tests {
     /// `id`'s conversation id, read under its record lock.
     fn conversation_id_of(hub: &Hub, id: &str) -> Option<String> {
         let rec = hub.sessions.get(id).expect("session is in the registry");
-        crate::sync::lock(&rec).claude_session_id.clone()
+        crate::sync::lock(&rec).conversation_id.clone()
     }
 
     /// The last assistant message `id`'s record holds.
@@ -722,7 +723,7 @@ mod tests {
         let (hub, _scratch) = test_hub("hook-session-start-clear");
         hub.sessions.insert(idle_record("s1"));
         hub.sessions.update("s1", |rec| {
-            rec.claude_session_id = Some("old-conv".to_owned());
+            rec.conversation_id = Some("old-conv".to_owned());
         });
         apply_hook(
             &hub,
@@ -743,7 +744,7 @@ mod tests {
         let (hub, _scratch) = test_hub("hook-session-start-resume-same");
         hub.sessions.insert(idle_record("s1"));
         hub.sessions.update("s1", |rec| {
-            rec.claude_session_id = Some("same-conv".to_owned());
+            rec.conversation_id = Some("same-conv".to_owned());
         });
         apply_hook(
             &hub,
@@ -764,7 +765,7 @@ mod tests {
         let (hub, _scratch) = test_hub("hook-session-start-resume-new");
         hub.sessions.insert(idle_record("s1"));
         hub.sessions.update("s1", |rec| {
-            rec.claude_session_id = Some("old-conv".to_owned());
+            rec.conversation_id = Some("old-conv".to_owned());
         });
         apply_hook(
             &hub,
@@ -854,7 +855,7 @@ mod tests {
         );
         let meta = crate::orphan::load_meta(&hub.dirs, "s1").expect("load meta");
         assert_eq!(
-            meta.claude_session_id.as_deref(),
+            meta.conversation_id.as_deref(),
             Some("new-conv"),
             "the hook's id is mirrored into the sidecar"
         );
@@ -868,7 +869,7 @@ mod tests {
         hub.sessions.insert(idle_record("s1"));
         hub.sessions.update("s1", |rec| {
             rec.status = SessionStatus::Stopped;
-            rec.claude_session_id = Some("old-conv".to_owned());
+            rec.conversation_id = Some("old-conv".to_owned());
             rec.last_assistant_message = Some("kept".to_owned());
         });
         apply_hook(
@@ -896,7 +897,7 @@ mod tests {
         hub.sessions.insert(idle_record("s1"));
         hub.sessions.update("s1", |rec| {
             rec.last_hook_time = Some(100);
-            rec.claude_session_id = Some("old-conv".to_owned());
+            rec.conversation_id = Some("old-conv".to_owned());
             rec.last_assistant_message = Some("kept".to_owned());
         });
         apply_hook(
@@ -928,7 +929,7 @@ mod tests {
         let (hub, _scratch) = test_hub("hook-plain-id");
         hub.sessions.insert(idle_record("s1"));
         hub.sessions.update("s1", |rec| {
-            rec.claude_session_id = Some("old-conv".to_owned());
+            rec.conversation_id = Some("old-conv".to_owned());
         });
         for (index, id) in ["../x", r"C:\conversations\x", "a/b"].iter().enumerate() {
             let body = serde_json::json!({
@@ -987,7 +988,7 @@ mod tests {
         let (hub, _scratch) = test_hub("hook-history-id");
         hub.sessions.insert(idle_record("s1"));
         hub.sessions.update("s1", |rec| {
-            rec.claude_session_id = Some("old-conv".to_owned());
+            rec.conversation_id = Some("old-conv".to_owned());
         });
         apply_hook(
             &hub,
@@ -1001,6 +1002,6 @@ mod tests {
             protocol::SessionEnd::TracerLost,
             chrono::Utc::now(),
         );
-        assert_eq!(entry.claude_session_id.as_deref(), Some("new-conv"));
+        assert_eq!(entry.conversation_id.as_deref(), Some("new-conv"));
     }
 }

@@ -393,8 +393,10 @@ mod tests {
             },
             mode: protocol::SessionMode::Interactive,
             dangerously_skip_permissions: false,
-            agent_options: protocol::AgentOptions::default(),
-            model: None,
+            agent: Some(protocol::AgentSelection {
+                agent: agent_registry::default_agent(),
+                options: protocol::OptionValues::new(),
+            }),
             extra_env: Vec::new(),
         };
         assert_eq!(

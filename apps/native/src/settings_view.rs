@@ -15,14 +15,15 @@ use gpui::{
     Window, div, prelude::*, px,
 };
 use protocol::{
-    Agent, AgentCommandEntry, ClaudeProvider, ClientMessage, DaemonMessage, FEATURE_AGENT_COMMANDS,
-    FEATURE_CLAUDE_PROVIDER, KeepAwakeMode, PermissionMode, RemoteState,
+    AgentCommandEntry, ClientMessage, DaemonMessage, FEATURE_AGENT_COMMANDS, KeepAwakeMode,
+    RemoteState,
 };
 
 use crate::appearance;
 use crate::appearance_stops::{AppearanceStop, after_lost};
 use crate::appearance_view::{Level, close_footer};
 use crate::buttons::{field_frame, focus_ring};
+use crate::claude_compat::{self, ClaudeProvider, PermissionMode};
 use crate::mouse::CopyOnSelect;
 use crate::notify::{NotifyState, WINDOWS_NOTIFICATION_SETTINGS};
 use crate::palette::{CHIP, HOVER, LINE, RAISED, SUBTLE, TEXT_2, TRANSPARENT};
@@ -34,9 +35,7 @@ use crate::remote_access::{
 use crate::section::section;
 use crate::session_menu::{backdrop, dialog_button};
 use crate::sidebar::{LeafDensity, NotifySkip, SidebarView};
-use crate::spawn_form::{
-    APPROVAL_CHOICES, PROVIDER_CHOICES, PROVIDER_UNSUPPORTED_TIP, approval_label, provider_label,
-};
+use crate::spawn_form::{APPROVAL_CHOICES, PROVIDER_CHOICES, approval_label, provider_label};
 use crate::spawn_view::{
     CLAUDE_LOCKED, DISABLED_OPACITY, Look, checkbox_row, choice_button, close_button, dialog_card,
     dialog_title_bar, field, segmented,
@@ -438,14 +437,6 @@ impl RootView {
             .is_some_and(|editor| editor.level == Level::App)
     }
 
-    /// Why the Claude page's "Claude provider" row is disabled, while
-    /// Settings is open and it is.
-    #[must_use]
-    pub fn settings_provider_tip(&self) -> Option<&'static str> {
-        (self.settings_open() && !self.claude_provider_supported())
-            .then_some(PROVIDER_UNSUPPORTED_TIP)
-    }
-
     /// The label of the "Claude provider" choice shown selected.
     #[must_use]
     pub fn settings_provider_choice(&self) -> &'static str {
@@ -458,15 +449,9 @@ impl RootView {
         PROVIDER_LOCKED
     }
 
-    /// The "Claude provider" choice shown selected: the saved default, or
-    /// Anthropic while the daemon cannot route elsewhere, as the spawn
-    /// dialog shows. The saved default is kept for a capable daemon.
+    /// The "Claude provider" choice shown selected: the saved default.
     fn shown_default_provider(&self) -> ClaudeProvider {
-        if self.claude_provider_supported() {
-            self.sidebar.ui_state().spawn.claude_provider
-        } else {
-            ClaudeProvider::Anthropic
-        }
+        self.sidebar.ui_state().spawn.claude_provider
     }
 
     /// The Settings tabs' labels, in the list's order.
@@ -631,16 +616,13 @@ impl RootView {
 
     /// The Claude page's controls in drawing order. Trusted launch locks
     /// the approval and provider choices, never the launch command; the
-    /// provider choices leave while the daemon cannot route to another
-    /// provider, and the launch rows until the daemon reported its command.
+    /// launch rows leave until the daemon reported its command.
     /// A Program row an environment variable sets is out of the ring.
     fn claude_controls(&self) -> Vec<SettingsControl> {
         let mut controls = Vec::new();
         if !self.sidebar.ui_state().spawn.trusted {
             controls.extend(APPROVAL_CHOICES.map(SettingsControl::SpawnApproval));
-            if self.claude_provider_supported() {
-                controls.extend(PROVIDER_CHOICES.map(SettingsControl::SpawnProvider));
-            }
+            controls.extend(PROVIDER_CHOICES.map(SettingsControl::SpawnProvider));
         }
         if self.launch_rows_live() {
             if !self.launch_program_read_only() {
@@ -658,7 +640,9 @@ impl RootView {
 
     /// Claude's launch command as the daemon last reported it.
     fn claude_command(&self) -> Option<&AgentCommandEntry> {
-        self.agent_commands.as_ref()?.get(&Agent::Claude)
+        self.agent_commands
+            .as_ref()?
+            .get(&claude_compat::claude_id())
     }
 
     /// Whether the connected daemon's Welcome leaves the launch command out:
@@ -812,7 +796,7 @@ impl RootView {
         tab.refusal = None;
         tracing::info!(%program, %args, "settings: applying Claude's launch command");
         self.send(ClientMessage::SetAgentCommand {
-            agent: Agent::Claude,
+            agent: claude_compat::claude_id(),
             program,
             args,
         });
@@ -832,7 +816,7 @@ impl RootView {
         self.agent_commands = Some(
             commands
                 .into_iter()
-                .map(|entry| (entry.agent, entry))
+                .map(|entry| (entry.agent.clone(), entry))
                 .collect(),
         );
         let stored = self.claude_command().cloned();
@@ -892,11 +876,6 @@ impl RootView {
     /// Forgets the daemon's launch commands, as a disconnect does.
     pub(crate) fn forget_agent_commands(&mut self) {
         self.agent_commands = None;
-    }
-
-    /// Whether the connected daemon routes Claude to a chosen provider.
-    fn claude_provider_supported(&self) -> bool {
-        self.conn.supports(FEATURE_CLAUDE_PROVIDER)
     }
 
     /// The control holding the keyboard, if one does; none while Settings
@@ -1667,12 +1646,8 @@ impl RootView {
         cx.notify();
     }
 
-    /// Saves the provider a Claude spawn pre-selects; nothing while the
-    /// daemon cannot route to another provider.
+    /// Saves the provider a Claude spawn pre-selects.
     fn set_spawn_claude_provider(&mut self, provider: ClaudeProvider, cx: &mut Context<Self>) {
-        if !self.claude_provider_supported() {
-            return;
-        }
         self.sidebar.set_spawn_claude_provider(provider);
         self.save_ui();
         cx.notify();
@@ -2250,13 +2225,7 @@ impl RootView {
             focused,
             cx,
         );
-        let provider = provider_row(
-            self.shown_default_provider(),
-            self.claude_provider_supported(),
-            locked,
-            focused,
-            cx,
-        );
+        let provider = provider_row(self.shown_default_provider(), locked, focused, cx);
         let section = section("Claude").child(approval).child(provider);
         let mut sections = vec![section.into_any_element()];
         sections.extend(self.launch_command_section(focused, cx));
@@ -2635,16 +2604,14 @@ fn toggle(
     }
 }
 
-/// The "Claude provider" row; without daemon support its choices are dimmed,
-/// inert and out of the ring, and a tooltip says how to get it.
+/// The "Claude provider" row; trusted launch locks it.
 fn provider_row(
     chosen: ClaudeProvider,
-    supported: bool,
     locked: bool,
     focused: Option<SettingsControl>,
     cx: &mut Context<RootView>,
 ) -> AnyElement {
-    let enabled = supported && !locked;
+    let enabled = !locked;
     let buttons = PROVIDER_CHOICES
         .into_iter()
         .map(|provider| {
@@ -2667,11 +2634,6 @@ fn provider_row(
         .id("settings-spawn-provider")
         .flex()
         .child(segmented(buttons));
-    let row = if supported {
-        row
-    } else {
-        row.tooltip(tooltip(PROVIDER_UNSUPPORTED_TIP))
-    };
     let row = field("Claude provider").child(row);
     let row = if locked {
         row.child(

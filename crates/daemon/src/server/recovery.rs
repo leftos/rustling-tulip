@@ -17,7 +17,7 @@ use crate::{conversations, history, orphan, osc_title, pty_state, screen, tracer
 use agent_api::ResolvedRows;
 use anyhow::anyhow;
 use protocol::{
-    Agent, ClientMessage, DaemonMessage, SessionEnd, SessionMember, SessionMode, SpawnRequest,
+    AgentId, ClientMessage, DaemonMessage, SessionEnd, SessionMember, SessionMode, SpawnRequest,
     SpawnTarget,
 };
 use std::path::Path;
@@ -202,7 +202,7 @@ async fn reattach_one(
                             guard.input_notifier = Some(in_tx.clone());
                         }
                         guard.screen = Some(Arc::clone(&screen));
-                        (guard.status, guard.agent)
+                        (guard.status, guard.agent.clone())
                     };
                     pty.resize(screen::REATTACH_COLS, screen::REATTACH_ROWS);
                     if let Some((_, in_rx)) = shell_input {
@@ -213,7 +213,7 @@ async fn reattach_one(
                                 output: pty.output.subscribe(),
                                 input_pulses: in_rx,
                                 screen,
-                                rules: rules_for(agent),
+                                rules: rules_for(&agent),
                             },
                             attention_tx.clone(),
                             restored,
@@ -225,7 +225,7 @@ async fn reattach_one(
                             pty_state::AgentStreams {
                                 output: pty.output.subscribe(),
                                 screen,
-                                rules: rules_for(agent),
+                                rules: rules_for(&agent),
                             },
                             attention_tx.clone(),
                         );
@@ -629,13 +629,13 @@ fn auto_resume_refusal(rec: &SessionRecord) -> Option<&'static str> {
     if rec.mode != SessionMode::Interactive {
         return Some("not an interactive session");
     }
-    if !agent_registry::plugin(rec.agent).descriptor().caps.resume {
+    if !agent_registry::plugin(&rec.agent).is_some_and(|plugin| plugin.descriptor().caps.resume) {
         return Some("the agent cannot resume");
     }
     if rec.spawn_config.is_none() {
         return Some("no stored spawn config");
     }
-    if rec.claude_session_id.is_none() {
+    if rec.conversation_id.is_none() {
         return Some("no recorded conversation");
     }
     None
@@ -761,9 +761,13 @@ async fn recover_one(
             workspaces: &workspaces,
         };
         let rows = conversations::lookup_rows(history::recorded_env(&entry));
-        history::plan_recovery(&entry, &planned_item, &registered, |agent, folder, id| {
-            recovery_conversation_exists(agent, folder, id, &rows)
-        })
+        history::plan_recovery(
+            &entry,
+            &planned_item,
+            &registered,
+            agent_registry::plugin,
+            |agent, folder, id| recovery_conversation_exists(agent, folder, id, &rows),
+        )
     })
     .await
     .map_err(|err| format!("planning the recovery failed: {err}"))??;
@@ -809,12 +813,19 @@ fn recovery_busy_excluded(live: Option<&SessionRecord>, entry: &protocol::Histor
 /// Whether `agent` still holds conversation `id` for `folder`, looked up with
 /// the session's `rows`.
 pub(super) fn recovery_conversation_exists(
-    agent: Agent,
+    agent: &AgentId,
     folder: &str,
     id: &str,
     rows: &ResolvedRows,
 ) -> bool {
-    conversations::exists(agent_registry::plugin(agent), Path::new(folder), id, rows)
+    let Some(plugin) = agent_registry::plugin(agent) else {
+        warn!(
+            "no agent plugin `{}` is registered; its conversation is taken as gone",
+            agent.0
+        );
+        return false;
+    };
+    conversations::exists(plugin, Path::new(folder), id, rows)
 }
 
 /// After a successful recovery spawn of `history_id` as `new_id`: mark the
@@ -916,7 +927,7 @@ mod tests {
                 Utc::now(),
                 None,
                 Some("claude".to_owned()),
-                protocol::Agent::Claude,
+                Some(agent_registry::default_agent()),
                 None,
                 None,
                 None,
@@ -950,7 +961,10 @@ mod tests {
         use tower::ServiceExt as _;
         let (hub, _scratch) = test_hub("reattached-shell-hook-agent");
         let mut exits = Vec::new();
-        for (id, hook_agent) in [("hooked", Some(Agent::Claude)), ("bare", None)] {
+        for (id, hook_agent) in [
+            ("hooked", Some(agent_registry::default_agent())),
+            ("bare", None),
+        ] {
             let mut meta = crate::orphan::meta_from_record(
                 id.to_owned(),
                 4242,
@@ -961,7 +975,7 @@ mod tests {
                 Utc::now(),
                 None,
                 Some("pwsh".to_owned()),
-                Agent::Claude,
+                Some(agent_registry::default_agent()),
                 None,
                 None,
                 None,
@@ -1161,7 +1175,10 @@ mod tests {
         let rec = hub.sessions.get("lost").expect("lost is registered");
         let (request, _) =
             abandoned_resume_request(&crate::sync::lock(&rec)).expect("lost can resume");
-        assert_eq!(request.agent_options, deepseek_options());
+        assert_eq!(
+            request.agent.map(|selection| selection.options),
+            Some(deepseek_options())
+        );
     }
 
     /// `container`'s persisted session order.
@@ -1470,9 +1487,15 @@ mod tests {
             repos: &[],
             workspaces: &[],
         };
-        history::plan_recovery(entry, &item, &registered, |_, _, _| true)
-            .expect("the recovery plans")
-            .request
+        history::plan_recovery(
+            entry,
+            &item,
+            &registered,
+            agent_registry::plugin,
+            |_, _, _| true,
+        )
+        .expect("the recovery plans")
+        .request
     }
 
     #[test]
@@ -1497,12 +1520,12 @@ mod tests {
             None,
         )));
         let mut imported = anthropic.clone();
-        imported.provider = protocol::ClaudeProvider::Deepseek;
-        let register = protocol::RecoverAs::RegisterRepoThenClaude {
+        imported.options = Some(deepseek_options());
+        let register = protocol::RecoverAs::RegisterRepoThenAgent {
             path: folder.to_owned(),
         };
         for entry in [&recorded, &imported] {
-            for how in [protocol::RecoverAs::Claude, register.clone()] {
+            for how in [protocol::RecoverAs::Agent, register.clone()] {
                 let request = planned_recovery(entry, how.clone(), Some(RECOVERY_CONVERSATION));
                 let failure = check_spawn_request_with(&request, |_| None)
                     .expect_err("a DeepSeek recovery needs the key");
@@ -1519,7 +1542,12 @@ mod tests {
         // A shell recovery spawns a plain shell with no provider, so it needs
         // no key.
         for conversation in [Some(RECOVERY_CONVERSATION), None] {
-            let shell = planned_recovery(&anthropic, protocol::RecoverAs::Shell, conversation);
+            let how = if conversation.is_some() {
+                protocol::RecoverAs::ShellResume
+            } else {
+                protocol::RecoverAs::Shell
+            };
+            let shell = planned_recovery(&anthropic, how, conversation);
             assert_eq!(shell.mode, SessionMode::PlainShell);
             assert!(
                 check_spawn_request_with(&shell, |_| None).is_ok(),
@@ -1846,9 +1874,9 @@ mod tests {
             None,
         ));
         hub.sessions.update(id, |rec| {
-            rec.agent = Agent::Claude;
+            rec.agent = agent_registry::default_agent();
             rec.spawn_config = Some(stored);
-            rec.claude_session_id = conversation.map(str::to_owned);
+            rec.conversation_id = conversation.map(str::to_owned);
         });
     }
 
@@ -2110,7 +2138,7 @@ mod tests {
                 items: vec![protocol::RecoverItem {
                     history_id: "lost".to_owned(),
                     conversation_id: None,
-                    how: protocol::RecoverAs::Claude,
+                    how: protocol::RecoverAs::Agent,
                 }],
             },
         )
@@ -2163,7 +2191,7 @@ mod tests {
         let items = ["missing", "done", "done"]
             .into_iter()
             .zip([
-                protocol::RecoverAs::Claude,
+                protocol::RecoverAs::Agent,
                 protocol::RecoverAs::Shell,
                 protocol::RecoverAs::Unknown,
             ])
@@ -2298,7 +2326,7 @@ mod tests {
     /// [`RECOVERY_CONVERSATION`] for there.
     fn unregistered_claude_entry(hub: &Hub, id: &str, folder: &str, row: (&str, String)) {
         let mut record = history::test_support::record(id, SessionMode::Interactive);
-        record.agent = Agent::Claude;
+        record.agent = agent_registry::default_agent();
         record.members = vec![SessionMember {
             repo_id: "r1".to_owned(),
             repo_name: "r1".to_owned(),
@@ -2321,7 +2349,7 @@ mod tests {
         history::write_if_absent(&hub.dirs, &entry).expect("write history entry");
     }
 
-    /// Recover `id` as `RegisterRepoThenClaude` — the recovery that registers a
+    /// Recover `id` as `RegisterRepoThenAgent` — the recovery that registers a
     /// repo — and return the item's error.
     #[expect(clippy::panic, reason = "a wrong reply fails the test loudly")]
     async fn recover_registering(hub: &Hub, id: &str, folder: &str) -> String {
@@ -2332,7 +2360,7 @@ mod tests {
                 items: vec![protocol::RecoverItem {
                     history_id: id.to_owned(),
                     conversation_id: Some(RECOVERY_CONVERSATION.to_owned()),
-                    how: protocol::RecoverAs::RegisterRepoThenClaude {
+                    how: protocol::RecoverAs::RegisterRepoThenAgent {
                         path: folder.to_owned(),
                     },
                 }],
@@ -2436,8 +2464,8 @@ mod tests {
         )
         .expect("write the transcript");
         let mut record = history::test_support::record("gone", SessionMode::Interactive);
-        record.agent = Agent::Claude;
-        record.claude_session_id = Some(RECOVERY_CONVERSATION.to_owned());
+        record.agent = agent_registry::default_agent();
+        record.conversation_id = Some(RECOVERY_CONVERSATION.to_owned());
         let request = env_spawn(
             SpawnTarget::Standalone {
                 cwd: Some(folder.clone()),

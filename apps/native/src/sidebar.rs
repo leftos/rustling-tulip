@@ -3,9 +3,9 @@
 //! layout. Plain Rust, so every rule is unit-tested; `sidebar_view` renders it.
 
 use protocol::{
-    Agent, AgentOptions, AppearanceOverrides, ClaudeProvider, ContainerRef, DaemonMessage,
-    PermissionMode, RepoEntry, SessionKind, SessionMode, SessionSnapshot, SessionStatus,
-    SpawnConfig, SpawnTarget, TabEntry, WorkspaceEntry,
+    AgentId, AppearanceOverrides, ContainerRef, DaemonMessage, RepoEntry, SessionChip, SessionKind,
+    SessionMode, SessionSnapshot, SessionStatus, SpawnConfig, SpawnTarget, TabEntry,
+    WorkspaceEntry,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use std::cmp::Ordering;
@@ -14,11 +14,12 @@ use std::path::Path;
 use std::sync::LazyLock;
 
 use crate::appearance::{self, AppColors, AppLevel, Resolved};
+use crate::claude_compat::{self, ClaudeProvider, PermissionMode};
 use crate::connection_picker::SavedHost;
 use crate::fonts::{self, FontSettings};
 use crate::launch_last;
 use crate::source_control::{Part, ScKey, ScUiState};
-use crate::spawn_form::{approval_label, provider_hover_name};
+use crate::spawn_form::approval_label;
 use crate::tabs::collect_panes;
 use crate::window_state::WindowState;
 
@@ -104,16 +105,16 @@ pub struct Leaf {
     pub id: String,
     pub status: SessionStatus,
     pub mode: SessionMode,
-    pub agent: Agent,
+    /// The agent driving the session; `None` for a plain shell.
+    pub agent: Option<AgentId>,
     pub label: String,
     /// The line under the label: the branch, the members' repos and
     /// branches, or a shell's folder.
     pub subline: Option<String>,
     pub runtime: Option<String>,
-    /// A Claude session's non-Anthropic endpoint, or `None` when there is
-    /// nothing to say: an Anthropic session, or one that is not Claude at
-    /// all.
-    pub provider: Option<ClaudeProvider>,
+    /// The chips the daemon evaluated from the session's agent options;
+    /// empty when there is nothing to say.
+    pub chips: Vec<SessionChip>,
     /// The session is in the attention set; Needs You reads this raw value,
     /// the `!` badge reads [`Leaf::shows_attention`].
     pub attention: bool,
@@ -1520,11 +1521,11 @@ fn leaf(
         id: s.id.clone(),
         status: s.status,
         mode: s.mode,
-        agent: s.agent,
+        agent: s.agent.clone(),
         label: display_label(s),
         subline: subline(s, HOME.as_deref(), tabs_view),
         runtime: runtime_label(s),
-        provider: chip_provider(s),
+        chips: s.agent_chips.clone(),
         attention: attention.contains(&s.id),
         busy_excluded: s.busy_excluded,
         unseen: unseen.contains(&s.id),
@@ -1541,7 +1542,12 @@ fn leaf(
 #[must_use]
 pub fn launch_summary(config: Option<&SpawnConfig>) -> Option<String> {
     let config = config?;
-    let mut parts = vec![agent_summary_label(&config.agent_options, config.mode)];
+    let choice = config
+        .agent
+        .as_ref()
+        .map(claude_compat::from_selection)
+        .unwrap_or_default();
+    let mut parts = vec![agent_summary_label(config)];
     match config.mode {
         SessionMode::Interactive => parts.push("Interactive".to_owned()),
         SessionMode::Headless => parts.push("Headless".to_owned()),
@@ -1571,15 +1577,15 @@ pub fn launch_summary(config: Option<&SpawnConfig>) -> Option<String> {
         }
         SpawnTarget::Standalone { .. } => "standalone".to_owned(),
     });
-    if let Some(model) = config.model.as_deref().filter(|model| !model.is_empty()) {
-        parts.push(model.to_owned());
+    if let Some(model) = choice.model.filter(|model| !model.is_empty()) {
+        parts.push(model);
     }
     if config.dangerously_skip_permissions {
         parts.push("trusted".to_owned());
     } else if config.mode != SessionMode::PlainShell
-        && let Some(authority) = authority_label(&config.agent_options)
+        && let Some(mode) = choice.permission_mode
     {
-        parts.push(authority.to_owned());
+        parts.push(approval_label(Some(mode)).to_owned());
     }
     if !config.extra_env.is_empty() {
         parts.push(format!("{} env", config.extra_env.len()));
@@ -1589,23 +1595,11 @@ pub fn launch_summary(config: Option<&SpawnConfig>) -> Option<String> {
 
 /// The agent's name in a launch summary; a plain-shell config names the
 /// shell.
-fn agent_summary_label(options: &AgentOptions, mode: SessionMode) -> String {
-    if mode == SessionMode::PlainShell {
-        return "Shell".to_owned();
-    }
-    match options {
-        AgentOptions::Claude { .. } => "Claude",
-    }
-    .to_owned()
-}
-
-/// The agent's own authority setting, as the spawn form labels it; `None`
-/// when the config leaves it to the CLI.
-fn authority_label(options: &AgentOptions) -> Option<&'static str> {
-    match options {
-        AgentOptions::Claude {
-            permission_mode, ..
-        } => permission_mode.map(|mode| approval_label(Some(mode))),
+fn agent_summary_label(config: &SpawnConfig) -> String {
+    match &config.agent {
+        _ if config.mode == SessionMode::PlainShell => "Shell".to_owned(),
+        Some(selection) if !claude_compat::is_claude(&selection.agent) => selection.agent.0.clone(),
+        _ => "Claude".to_owned(),
     }
 }
 
@@ -1902,16 +1896,21 @@ pub fn label_tooltip(s: &SessionSnapshot) -> String {
     lines.join("\n")
 }
 
-/// A leaf's hover text: [`label_tooltip`], then the endpoint line when the
-/// session is routed somewhere other than Anthropic. Only the leaf carries
-/// it, since its pane header already shows a provider chip saying the same.
+/// A leaf's hover text: [`label_tooltip`], then a line per agent chip, its
+/// tip (else its text). Only the leaf carries them, since its pane header
+/// already shows the chips saying the same.
 pub fn leaf_tooltip(s: &SessionSnapshot) -> String {
     let mut text = label_tooltip(s);
-    if let Some(provider) = chip_provider(s) {
-        text.push_str("\nProvider: ");
-        text.push_str(provider_hover_name(provider));
+    for chip in &s.agent_chips {
+        text.push('\n');
+        text.push_str(chip_tip(chip));
     }
     text
+}
+
+/// What an agent chip says on hover: its tip, else its text.
+pub fn chip_tip(chip: &SessionChip) -> &str {
+    chip.tip.as_deref().unwrap_or(&chip.text)
 }
 
 /// The line under a leaf's label: a plain shell's folder with `home` shown
@@ -1969,19 +1968,12 @@ pub fn runtime_label(s: &SessionSnapshot) -> Option<String> {
     s.program_name
         .clone()
         .filter(|p| !p.is_empty())
-        .or_else(|| (s.mode != SessionMode::PlainShell).then(|| s.agent.as_label().to_owned()))
-}
-
-/// The endpoint a session is routed to when a chip should say so: its
-/// Claude provider on any non-Anthropic endpoint, and `None` for an
-/// Anthropic session or a plain shell, whatever its provider field reads. Both the
-/// pane header and the leaf go through this, so the two cannot disagree.
-#[must_use]
-pub fn chip_provider(s: &SessionSnapshot) -> Option<ClaudeProvider> {
-    if s.agent != Agent::Claude || s.mode == SessionMode::PlainShell {
-        return None;
-    }
-    (!s.claude_provider.is_anthropic()).then_some(s.claude_provider)
+        .or_else(|| {
+            s.agent
+                .as_ref()
+                .filter(|_| s.mode != SessionMode::PlainShell)
+                .map(|agent| agent.0.clone())
+        })
 }
 
 /// Whether a leaf click may attach the terminal to the session: only
@@ -2130,7 +2122,7 @@ pub fn save_ui_state(dir: &Path, state: &UiState) -> anyhow::Result<()> {
 pub(crate) mod tests {
     use super::*;
     use crate::tabs::tests::{pane, tab};
-    use protocol::{AttentionReason, GridNode, PermissionMode, SessionMember, SplitDirection};
+    use protocol::{AttentionReason, GridNode, SessionMember, SplitDirection};
     use serde_json::json;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
@@ -2676,46 +2668,51 @@ pub(crate) mod tests {
         );
     }
 
+    /// The chip the daemon evaluates for a `DeepSeek` Claude session.
+    fn deepseek_chip() -> SessionChip {
+        SessionChip {
+            text: "DeepSeek".to_owned(),
+            tip: Some("Runs on DeepSeek".to_owned()),
+        }
+    }
+
     #[test]
-    fn a_deepseek_claude_leaf_carries_its_provider() {
+    fn a_leaf_shows_the_snapshots_agent_chips() {
         let mut s = session("id");
-        s.claude_provider = ClaudeProvider::Deepseek;
+        s.agent_chips = vec![deepseek_chip()];
         let listed = leaf(&s, &HashSet::new(), &HashSet::new(), false);
-        assert_eq!(listed.provider, Some(ClaudeProvider::Deepseek));
-        assert_eq!(listed.tooltip, "id\nProvider: DeepSeek");
+        assert_eq!(listed.chips, [deepseek_chip()]);
+        assert_eq!(listed.tooltip, "id\nRuns on DeepSeek");
         assert_eq!(
             label_tooltip(&s),
             "id",
             "the pane header says it in its chip, not in the title tip"
         );
+
+        let sh = shell("sh", Some("D:/src/app"), SessionKind::Standalone);
+        let listed = leaf(&sh, &HashSet::new(), &HashSet::new(), false);
+        assert_eq!(listed.chips, [], "a shell shows none");
     }
 
     #[test]
     fn an_anthropic_claude_leaf_has_no_provider() {
         let s = session("id");
-        assert_eq!(s.claude_provider, ClaudeProvider::Anthropic);
+        assert_eq!(s.agent_chips, []);
         let listed = leaf(&s, &HashSet::new(), &HashSet::new(), false);
-        assert_eq!(listed.provider, None);
+        assert_eq!(listed.chips, []);
         assert_eq!(listed.tooltip, "id", "no line is added");
         assert_eq!(leaf_tooltip(&s), label_tooltip(&s));
     }
 
     #[test]
-    fn an_unknown_provider_is_named_unknown() {
+    fn a_chip_without_a_tip_hovers_as_its_text() {
         let mut s = session("id");
-        s.claude_provider = ClaudeProvider::Unknown;
+        s.agent_chips = vec![SessionChip {
+            text: "mistral".to_owned(),
+            tip: None,
+        }];
         let listed = leaf(&s, &HashSet::new(), &HashSet::new(), false);
-        assert_eq!(listed.provider, Some(ClaudeProvider::Unknown));
-        assert_eq!(listed.tooltip, "id\nProvider: unknown");
-    }
-
-    #[test]
-    fn a_plain_shell_carries_no_provider() {
-        let mut sh = shell("sh", Some("D:/src/app"), SessionKind::Standalone);
-        sh.claude_provider = ClaudeProvider::Deepseek;
-        let listed = leaf(&sh, &HashSet::new(), &HashSet::new(), false);
-        assert_eq!(listed.provider, None, "a plain shell says no provider");
-        assert!(!listed.tooltip.contains("Provider:"));
+        assert_eq!(listed.tooltip, "id\nmistral");
     }
 
     #[test]
@@ -2733,7 +2730,7 @@ pub(crate) mod tests {
     #[test]
     fn runtime_tag_is_agent_or_program() {
         let mut agent = session("a");
-        agent.agent = protocol::Agent::Claude;
+        agent.agent = Some(claude_compat::claude_id());
         agent.program_name = Some("node".to_owned());
         assert_eq!(runtime_label(&agent).as_deref(), Some("node"));
         let mut sh = shell("s", None, SessionKind::Standalone);
@@ -2745,7 +2742,7 @@ pub(crate) mod tests {
     #[test]
     fn runtime_label_follows_program_name_for_an_agent_session() {
         let mut agent = session("a");
-        agent.agent = protocol::Agent::Claude;
+        agent.agent = Some(claude_compat::claude_id());
         agent.program_name = Some("pwsh".to_owned());
         assert_eq!(
             runtime_label(&agent).as_deref(),
@@ -4150,8 +4147,8 @@ pub(crate) mod tests {
             target,
             mode,
             dangerously_skip_permissions: false,
-            agent_options: AgentOptions::claude(None),
-            model: None,
+            agent: (mode != SessionMode::PlainShell)
+                .then(|| claude_compat::selection(&claude_compat::ClaudeChoice::default())),
             extra_env: Vec::new(),
         }
     }
@@ -4174,8 +4171,11 @@ pub(crate) mod tests {
             single_target("feat/x", Some("main"), true),
             SessionMode::Interactive,
         );
-        config.agent_options = AgentOptions::claude(Some(PermissionMode::AcceptEdits));
-        config.model = Some("opus".to_owned());
+        config.agent = Some(claude_compat::selection(&claude_compat::ClaudeChoice {
+            permission_mode: Some(PermissionMode::AcceptEdits),
+            model: Some("opus".to_owned()),
+            ..Default::default()
+        }));
         config.extra_env = vec![
             ("A".to_owned(), "1".to_owned()),
             ("B".to_owned(), "2".to_owned()),
@@ -4257,7 +4257,10 @@ pub(crate) mod tests {
             },
             SessionMode::Interactive,
         );
-        workspace_config.model = Some("sonnet".to_owned());
+        workspace_config.agent = Some(claude_compat::selection(&claude_compat::ClaudeChoice {
+            model: Some("sonnet".to_owned()),
+            ..Default::default()
+        }));
         let mut launched = workspace("w1", &["r1"]);
         launched.last_spawn_config = Some(workspace_config.clone());
         model.apply(&DaemonMessage::Workspaces {
@@ -4326,7 +4329,10 @@ pub(crate) mod tests {
             single_target("feat/x", Some("main"), false),
             SessionMode::Interactive,
         );
-        config.agent_options = AgentOptions::claude(Some(PermissionMode::AcceptEdits));
+        config.agent = Some(claude_compat::selection(&claude_compat::ClaudeChoice {
+            permission_mode: Some(PermissionMode::AcceptEdits),
+            ..Default::default()
+        }));
         config.dangerously_skip_permissions = true;
         assert_eq!(
             launch_summary(Some(&config)).as_deref(),
@@ -4340,7 +4346,10 @@ pub(crate) mod tests {
             single_target("feat/x", Some("main"), false),
             SessionMode::Interactive,
         );
-        config.agent_options = AgentOptions::claude(Some(PermissionMode::AcceptEdits));
+        config.agent = Some(claude_compat::selection(&claude_compat::ClaudeChoice {
+            permission_mode: Some(PermissionMode::AcceptEdits),
+            ..Default::default()
+        }));
         assert_eq!(
             launch_summary(Some(&config)).as_deref(),
             Some("Claude · Interactive · feat/x · accept edits")

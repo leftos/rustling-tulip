@@ -14,8 +14,8 @@ use crate::support;
 
 use gpui::{Modifiers, TestAppContext, point, px};
 use protocol::{
-    AgentOptions, ClientMessage, DaemonMessage, EnvName, EnvScope, PermissionMode,
-    RootWorktreeStatus, SpawnRequest, SpawnTarget, SuggestTarget, WorktreeInfo,
+    ClientMessage, DaemonMessage, EnvName, EnvScope, RootWorktreeStatus, SpawnRequest, SpawnTarget,
+    SuggestTarget, WorktreeInfo,
 };
 use rustling_tulip_native::RootView;
 use support::{Fixture, Harness, TestDir, repo, session};
@@ -525,10 +525,14 @@ fn advanced_opens_and_sends_model_approval_and_env(cx: &mut TestAppContext) {
     h.keys("F O O tab b a r");
     h.click_on("spawn-submit");
     let request = the_spawn(&h.sent());
-    assert_eq!(request.model.as_deref(), Some("sonnet"));
     assert_eq!(
-        request.agent_options,
-        AgentOptions::claude(Some(PermissionMode::AcceptEdits))
+        request.agent.map(|selection| selection.options),
+        Some(
+            serde_json::from_value(
+                serde_json::json!({ "model": "sonnet", "permission_mode": "accept_edits" })
+            )
+            .expect("options")
+        )
     );
     assert_eq!(request.extra_env, [("FOO".to_owned(), "bar".to_owned())]);
 }
@@ -536,7 +540,8 @@ fn advanced_opens_and_sends_model_approval_and_env(cx: &mut TestAppContext) {
 /// The provider `request` names on the wire; `None` when it names none
 /// (Anthropic is skipped, a plain shell has no provider).
 fn wire_provider(request: &SpawnRequest) -> Option<String> {
-    let options = serde_json::to_value(&request.agent_options).expect("agent options encode");
+    let options = serde_json::to_value(request.agent.as_ref().map(|selection| &selection.options))
+        .expect("agent options encode");
     options
         .get("provider")
         .and_then(|value| value.as_str())
@@ -550,12 +555,6 @@ fn runtime_to_open_in(h: &mut Harness<'_>) -> gpui::Pixels {
     h.bounds("spawn-placement-current-tab").top() - h.bounds("spawn-agent-claude").top()
 }
 
-const PROVIDER_TIP: &str = "Restart the daemon to use DeepSeek: .\\rt.ps1 restart";
-
-fn provider_tip(h: &mut Harness<'_>) -> Option<&'static str> {
-    h.root(|root, _| root.spawn_dialog_provider_tip())
-}
-
 #[gpui::test]
 fn provider_row_shows_for_claude_only_and_sends_deepseek(cx: &mut TestAppContext) {
     let dir = TestDir::new();
@@ -565,11 +564,6 @@ fn provider_row_shows_for_claude_only_and_sends_deepseek(cx: &mut TestAppContext
     suggest(&mut h, "r1", "wt/brave-fox");
     assert!(drawn(&mut h, "spawn-provider-anthropic"));
     assert!(selected(&mut h).contains(&"spawn-provider-anthropic".to_owned()));
-    assert_eq!(
-        provider_tip(&mut h),
-        None,
-        "the fake daemon routes providers"
-    );
     let with_row = runtime_to_open_in(&mut h);
     let shell = "spawn-agent-plain-shell";
     h.click_on(shell);
@@ -593,94 +587,6 @@ fn provider_row_shows_for_claude_only_and_sends_deepseek(cx: &mut TestAppContext
 }
 
 #[gpui::test]
-fn provider_row_is_disabled_without_the_feature(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    std::fs::write(
-        dir.path().join("native-ui.json"),
-        serde_json::json!({ "spawn": { "claude_provider": "deepseek" } }).to_string(),
-    )
-    .expect("seed native-ui.json");
-    let mut h = Harness::with(cx, &dir, &fixture());
-    h.welcome_without_features();
-    show_whole_dialog(&mut h);
-    open(&mut h);
-    suggest(&mut h, "r1", "wt/brave-fox");
-    assert!(drawn(&mut h, "spawn-provider-deepseek"), "the row shows");
-    let chosen = selected(&mut h);
-    assert!(
-        chosen.contains(&"spawn-provider-anthropic".to_owned())
-            && !chosen.contains(&"spawn-provider-deepseek".to_owned()),
-        "Anthropic, whatever the default says: {chosen:?}"
-    );
-    assert_eq!(provider_tip(&mut h), Some(PROVIDER_TIP));
-    h.click_on("spawn-provider-deepseek");
-    assert!(
-        !selected(&mut h).contains(&"spawn-provider-deepseek".to_owned()),
-        "a click on the disabled choice does nothing"
-    );
-    h.click_on("spawn-agent-plain-shell");
-    h.keys("tab");
-    assert_eq!(
-        focus(&mut h).as_deref(),
-        Some("spawn-placement-current-tab"),
-        "no provider stop between the runtime line and Open in"
-    );
-    h.click_on("spawn-agent-claude");
-    h.keys("tab tab");
-    assert_eq!(
-        focus(&mut h).as_deref(),
-        Some("spawn-placement-current-tab"),
-        "the disabled row is out of the ring"
-    );
-    h.click_on("spawn-submit");
-    let request = the_spawn(&h.sent());
-    assert_eq!(wire_provider(&request), None, "no provider is sent");
-}
-
-#[gpui::test]
-fn a_reconnect_to_a_daemon_without_the_feature_sends_anthropic(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    let mut h = Harness::with(cx, &dir, &fixture());
-    show_whole_dialog(&mut h);
-    open(&mut h);
-    suggest(&mut h, "r1", "wt/brave-fox");
-    h.click_on("spawn-provider-deepseek");
-    assert!(selected(&mut h).contains(&"spawn-provider-deepseek".to_owned()));
-
-    h.welcome_without_features();
-    assert!(is_open(&mut h), "the dialog survives the reconnect");
-    assert_eq!(provider_tip(&mut h), Some(PROVIDER_TIP));
-    let chosen = selected(&mut h);
-    assert!(
-        chosen.contains(&"spawn-provider-anthropic".to_owned()),
-        "the row falls back to Anthropic: {chosen:?}"
-    );
-    h.click_on("spawn-submit");
-    let request = the_spawn(&h.sent());
-    assert_eq!(wire_provider(&request), None, "no provider is sent");
-}
-
-#[gpui::test]
-fn a_reconnect_to_a_capable_daemon_enables_the_row(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    let mut h = Harness::with(cx, &dir, &fixture());
-    h.welcome_without_features();
-    show_whole_dialog(&mut h);
-    open(&mut h);
-    suggest(&mut h, "r1", "wt/brave-fox");
-    assert_eq!(provider_tip(&mut h), Some(PROVIDER_TIP));
-
-    h.welcome_with_features();
-    assert!(is_open(&mut h), "the dialog survives the reconnect");
-    assert_eq!(provider_tip(&mut h), None, "the row is enabled");
-    h.click_on("spawn-provider-deepseek");
-    assert!(selected(&mut h).contains(&"spawn-provider-deepseek".to_owned()));
-    h.click_on("spawn-submit");
-    let request = the_spawn(&h.sent());
-    assert_eq!(wire_provider(&request).as_deref(), Some("deepseek"));
-}
-
-#[gpui::test]
 fn a_fresh_dialog_follows_the_last_spawn_provider(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut fixture = fixture();
@@ -690,8 +596,7 @@ fn a_fresh_dialog_follows_the_last_spawn_provider(cx: &mut TestAppContext) {
                 "base_branch": null, "use_worktree": true },
             "mode": "interactive",
             "dangerously_skip_permissions": false,
-            "agent_options": { "kind": "claude", "provider": "deepseek" },
-            "model": null,
+            "agent": { "agent": "claude", "options": { "provider": "deepseek" } },
         }))
         .expect("spawn config fixture"),
     );
@@ -788,8 +693,7 @@ fn open_sealed_duplicate(h: &mut Harness<'_>) {
             "base_branch": "origin/dev", "use_worktree": true },
         "mode": "interactive",
         "dangerously_skip_permissions": false,
-        "agent_options": { "kind": "claude", "permission_mode": null },
-        "model": null,
+        "agent": { "agent": "claude", "options": { "permission_mode": null } },
         "extra_env": [["API_TOKEN", SEALED]],
     });
     h.send(DaemonMessage::SpawnConfigReply {

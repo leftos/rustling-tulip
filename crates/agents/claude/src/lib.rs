@@ -9,6 +9,7 @@
 
 mod hooks;
 mod import;
+pub mod options;
 mod providers;
 mod rules;
 mod transcripts;
@@ -22,10 +23,11 @@ use agent_api::{
     RecoveredRun, Refusal, ResolvedRows, ScreenRules, SpawnCheck, SpawnContext, TracerRun,
     workspace_prelude,
 };
+use options::{ClaudeProvider, PermissionMode};
 use protocol::{
     AccentToken, AgentCaps, AgentDescriptor, AgentId, AgentTexts, ChipRule, Choice, ChoiceStyle,
-    ClaudeProvider, FieldKind, FieldOverride, FieldRule, OptionField, OptionValue, PermissionMode,
-    SessionMember, SessionStatus, ShiftEnter, SpawnPlacement,
+    FieldKind, FieldOverride, FieldRule, OptionField, OptionValue, SessionMember, SessionStatus,
+    ShiftEnter, SpawnPlacement,
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -202,17 +204,14 @@ impl Agent for ClaudePlugin {
         run.recorded_as().unwrap_or_default()
     }
 
-    /// Revision 2 reads the provider from the run's `--model`.
+    /// Revision 3 keeps the run's options and trust on the history entry
+    /// itself, so older imports are read again from their tracer logs.
     fn import_rev(&self) -> u32 {
         import::IMPORT_REV
     }
 
     fn import_tracer_run(&self, run: &TracerRun<'_>) -> Option<ImportedRun<ClaudeOptions>> {
         import::import_tracer_run(run)
-    }
-
-    fn upgrade_import(&self, from_rev: u32, options: &ClaudeOptions) -> Option<ClaudeOptions> {
-        import::upgrade_import(from_rev, options)
     }
 
     /// Every flag the interactive and headless argv carry, plus the other

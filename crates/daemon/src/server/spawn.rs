@@ -46,9 +46,8 @@ use anyhow::{Context as _, anyhow};
 use chrono::Utc;
 use directories::UserDirs;
 use protocol::{
-    Agent, AgentOptions, AppearanceOverrides, ClaudeProvider, ClientMessage, DaemonMessage,
-    OptionValue, OptionValues, PermissionMode, SessionKind, SessionMember, SessionMetrics,
-    SessionMode, SessionStatus, SpawnRequest, SpawnTarget,
+    AgentId, AppearanceOverrides, ClientMessage, DaemonMessage, OptionValues, SessionKind,
+    SessionMember, SessionMetrics, SessionMode, SessionStatus, SpawnRequest, SpawnTarget,
 };
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -259,7 +258,7 @@ pub(crate) async fn spawn_session_with_extras(
 pub(crate) struct SpawnExtras {
     /// The agent whose plugin writes a recovered shell's hook files, builds
     /// its resume command and maps its hook events.
-    pub(crate) hook_agent: Option<Agent>,
+    pub(crate) hook_agent: Option<AgentId>,
     /// The conversation a recovered shell resumes in its hook agent.
     pub(crate) resume_conversation: Option<String>,
 }
@@ -298,8 +297,12 @@ where
     // so a refused spawn writes nothing to the credential store and checks
     // nothing out.
     check_plain_shell_options(&req)?;
-    let options = options_from_request(&req.agent_options, req.model.as_deref());
-    let backend = agent_registry::plugin(req.agent_options.agent());
+    let (agent, backend, options) = request_agent(&req)?;
+    // The validated options carry every field's default, so the stored
+    // config replays what the session ran with.
+    if let Some(selection) = req.agent.as_mut() {
+        selection.options.clone_from(&options);
+    }
     check_with_plugin(&req, backend, &options, &resolve)?;
     // A secret row's literal moves into the credential store and becomes a
     // `${secret:<id>}` reference before anything captures the request, so the
@@ -316,18 +319,16 @@ where
         mode,
         initial_prompt,
         dangerously_skip_permissions,
-        agent_options,
-        model: _,
+        agent: _,
         extra_env,
         secret_env_keys: _,
         prompt_injector,
         request_id: _,
         resume_conversation,
     } = req;
-    let agent = agent_options.agent();
     info!(
         ?mode,
-        agent = agent.as_label(),
+        agent = agent.0.as_str(),
         target_kind = match &target {
             SpawnTarget::Single { .. } => "single",
             SpawnTarget::Workspace { .. } => "workspace",
@@ -335,14 +336,14 @@ where
         },
         "spawn_session: begin"
     );
-    if matches!(&target, SpawnTarget::Standalone { .. }) && !standalone_supports(mode, agent) {
+    if matches!(&target, SpawnTarget::Standalone { .. }) && !standalone_supports(mode) {
         return Err(anyhow!(
             "standalone targets only support plain_shell and interactive sessions"
         ));
     }
     reject_pin_without_worktree(&target)?;
     if mode == SessionMode::Headless && !backend.descriptor().caps.headless {
-        return Err(headless_unsupported(agent));
+        return Err(headless_unsupported(backend));
     }
     // Env references resolve before any git work, so a refusal leaves no
     // worktree behind. `stored_config` keeps the references as sent; only the
@@ -429,6 +430,7 @@ where
     let cfg = SpawnArgs {
         dangerously_skip_permissions,
         agent,
+        backend,
         options,
         env,
         prompt_injector,
@@ -443,8 +445,8 @@ where
     let mut repos_changed = false;
     let mut workspaces_changed = false;
     for member in &members {
-        if let Err(err) = persist_last_agent(&hub.state, &member.repo_id, agent) {
-            warn!(?err, repo_id = %member.repo_id, agent = agent.as_label(), "persist_last_agent failed");
+        if let Err(err) = persist_last_agent(&hub.state, &member.repo_id, &cfg.agent) {
+            warn!(?err, repo_id = %member.repo_id, agent = cfg.agent.0.as_str(), "persist_last_agent failed");
         } else {
             repos_changed = true;
         }
@@ -567,10 +569,12 @@ pub(super) fn expected_output_subscribers(mode: SessionMode) -> usize {
 /// Per-spawn configuration bundled together to keep spawn-fn signatures narrow.
 struct SpawnArgs {
     dangerously_skip_permissions: bool,
-    /// The agent this spawn runs, dispatched through [`agent_registry::plugin`].
-    agent: Agent,
-    /// The agent's options, keyed by its descriptor's fields (see
-    /// [`options_from_request`]).
+    /// The agent this spawn runs; a plain shell's is the default agent.
+    agent: AgentId,
+    /// `agent`'s plugin, as [`agent_registry::plugin`] found it.
+    backend: &'static dyn AgentPlugin,
+    /// The agent's options as [`agent_api::validate`] answered them, keyed by
+    /// its descriptor's fields.
     options: OptionValues,
     /// The child's environment: the keep-list, the agent's passthrough
     /// variables, the resolved rows and the agent's routing variables (see
@@ -594,11 +598,6 @@ struct SpawnArgs {
 }
 
 impl SpawnArgs {
-    /// Which agent this spawn targets.
-    fn agent(&self) -> Agent {
-        self.agent
-    }
-
     /// Build the borrowed [`SpawnContext`] view plugins consume.
     fn common(&self) -> SpawnContext<'_> {
         SpawnContext {
@@ -614,96 +613,46 @@ impl SpawnArgs {
     }
 }
 
-/// The plugin options a request's `agent_options` and `model` select, keyed
-/// as the agent's descriptor names its fields: the one place a spawn
-/// request's typed options become [`OptionValues`]. An unset permission mode
-/// or model is [`OptionValue::Null`].
-pub(crate) fn options_from_request(
-    agent_options: &AgentOptions,
-    model: Option<&str>,
-) -> OptionValues {
-    let model = model.map_or(OptionValue::Null, |model| {
-        OptionValue::Text(model.to_string())
-    });
-    match agent_options {
-        AgentOptions::Claude {
-            permission_mode,
-            provider,
-        } => {
-            let permission_mode = permission_mode.map_or(OptionValue::Null, |mode| {
-                OptionValue::Text(permission_mode_name(mode).to_string())
-            });
-            OptionValues::from([
-                ("permission_mode".to_string(), permission_mode),
-                (
-                    "provider".to_string(),
-                    OptionValue::Text(provider_name(*provider).to_string()),
-                ),
-                ("model".to_string(), model),
-            ])
-        }
-    }
+/// The agent `request` runs, its plugin, and its options as the plugin's
+/// schema validates them: every field's value, its default where the request
+/// names none. A plain shell runs no agent; it is planned with the default
+/// agent's defaults, as its environment always was. Refuses an agent session
+/// that names no agent, an agent this daemon has no plugin for, and options
+/// the agent's schema refuses.
+fn request_agent(
+    request: &SpawnRequest,
+) -> Result<(AgentId, &'static dyn AgentPlugin, OptionValues), spawn_plan::SpawnFailure> {
+    let (agent, values) = match &request.agent {
+        Some(selection) => (selection.agent.clone(), selection.options.clone()),
+        None if request.mode == SessionMode::PlainShell => (default_agent(), OptionValues::new()),
+        None => return Err(agent_refusal("An agent session needs an agent.".to_owned())),
+    };
+    let Some(backend) = agent_registry::plugin(&agent) else {
+        return Err(agent_refusal(format!(
+            "This daemon has no agent `{}`.",
+            agent.0
+        )));
+    };
+    let options = agent_api::validate(backend.descriptor(), &values)
+        .map_err(|err| agent_refusal(err.message))?;
+    Ok((agent, backend, options))
 }
 
-/// The request options and model `options` select: the inverse of
-/// [`options_from_request`], for the history paths that still build a
-/// request's typed options from plugin options. A provider that is missing
-/// or not one this daemon names is [`ClaudeProvider::Unknown`]; a permission
-/// mode or model that is missing, null or unrecognised is `None`.
-pub(crate) fn request_parts_from_options(options: &OptionValues) -> (AgentOptions, Option<String>) {
-    let text = |key: &str| match options.get(key) {
-        Some(OptionValue::Text(value)) => Some(value.as_str()),
-        _ => None,
-    };
-    let permission_mode = text("permission_mode").and_then(|name| {
-        [
-            PermissionMode::Default,
-            PermissionMode::AcceptEdits,
-            PermissionMode::BypassPermissions,
-            PermissionMode::Plan,
-        ]
-        .into_iter()
-        .find(|mode| permission_mode_name(*mode) == name)
-    });
-    let provider = text("provider")
-        .and_then(|name| {
-            [ClaudeProvider::Anthropic, ClaudeProvider::Deepseek]
-                .into_iter()
-                .find(|provider| provider_name(*provider) == name)
-        })
-        .unwrap_or(ClaudeProvider::Unknown);
-    let agent_options = AgentOptions::Claude {
-        permission_mode,
-        provider,
-    };
-    (agent_options, text("model").map(str::to_owned))
+/// The refusal of a spawn whose agent selection is wrong, before any work.
+fn agent_refusal(detail: String) -> spawn_plan::SpawnFailure {
+    spawn_plan::SpawnFailure {
+        title: "Couldn't start the session".to_owned(),
+        detail,
+        hint: None,
+    }
 }
 
 /// The refusal of a headless spawn for an agent that has no headless mode.
-fn headless_unsupported(agent: Agent) -> anyhow::Error {
+fn headless_unsupported(backend: &dyn AgentPlugin) -> anyhow::Error {
     anyhow!(
         "headless mode is not yet supported for {}; use interactive mode",
-        agent.as_label()
+        backend.descriptor().tag
     )
-}
-
-/// `mode`'s serde name, the value Claude's `permission_mode` field stores.
-fn permission_mode_name(mode: protocol::PermissionMode) -> &'static str {
-    match mode {
-        protocol::PermissionMode::Default => "default",
-        protocol::PermissionMode::AcceptEdits => "accept_edits",
-        protocol::PermissionMode::BypassPermissions => "bypass_permissions",
-        protocol::PermissionMode::Plan => "plan",
-    }
-}
-
-/// `provider`'s serde name, the value Claude's `provider` field stores.
-fn provider_name(provider: protocol::ClaudeProvider) -> &'static str {
-    match provider {
-        protocol::ClaudeProvider::Anthropic => "anthropic",
-        protocol::ClaudeProvider::Deepseek => "deepseek",
-        protocol::ClaudeProvider::Unknown => "unknown",
-    }
 }
 
 /// What a new interactive session's record takes from its spawn.
@@ -713,11 +662,13 @@ struct NewInteractive {
     kind: SessionKind,
     members: Vec<SessionMember>,
     workspace_id: Option<String>,
-    agent: Agent,
+    agent: AgentId,
+    /// The leaf's program name: the agent descriptor's tag.
+    program_name: String,
     cwd: String,
     stored_config: protocol::SpawnConfig,
     last_prompt: Option<String>,
-    claude_session_id: Option<String>,
+    conversation_id: Option<String>,
     started_at: chrono::DateTime<Utc>,
     busy_excluded: bool,
     /// The label of the shell the agent is typed into, when the PTY child is
@@ -750,7 +701,7 @@ fn interactive_record(
         workspace_id: new.workspace_id,
         agent: new.agent,
         terminal_title: None,
-        program_name: Some(new.agent.as_label().to_string()),
+        program_name: Some(new.program_name),
         current_cwd: Some(new.cwd),
         appearance: AppearanceOverrides::default(),
         spawn_config: Some(new.stored_config),
@@ -761,7 +712,7 @@ fn interactive_record(
         screen: None,
         scrollback_snapshot_req: None,
         spawn_origin: None,
-        claude_session_id: new.claude_session_id,
+        conversation_id: new.conversation_id,
         pending_input: None,
         last_hook_time: None,
         hook_driven: false,
@@ -790,7 +741,7 @@ struct NewPlainShell {
     started_at: chrono::DateTime<Utc>,
     busy_excluded: bool,
     /// The agent a recovered shell's hook events are mapped with.
-    hook_agent: Option<Agent>,
+    hook_agent: Option<AgentId>,
 }
 
 /// The record of a new plain-shell session.
@@ -833,7 +784,7 @@ fn plain_shell_record(
         screen: None,
         scrollback_snapshot_req: None,
         spawn_origin: None,
-        claude_session_id: None,
+        conversation_id: None,
         pending_input: None,
         last_hook_time: None,
         hook_driven: false,
@@ -880,14 +831,14 @@ fn interactive_meta(
         record.started_at,
         record.workspace_id.clone(),
         record.program_name.clone(),
-        record.agent,
+        Some(record.agent.clone()),
         record.spawn_config.clone(),
         record.last_prompt.clone(),
         record.current_cwd.clone(),
         Some(tracer.pid),
         Some(tracer.pipe),
         Some(tracer.exe_path),
-        record.claude_session_id.clone(),
+        record.conversation_id.clone(),
     )
 }
 
@@ -924,7 +875,8 @@ fn plain_shell_meta(
         started_at,
         workspace_id,
         program_name,
-        default_agent(),
+        // A plain shell runs no agent.
+        None,
         stored_config,
         // Plain shells never carry a kickoff prompt.
         None,
@@ -1058,16 +1010,16 @@ async fn spawn_interactive_session(
     busy_excluded: bool,
 ) -> anyhow::Result<protocol::SessionSnapshot> {
     let last_prompt = initial_prompt.clone();
-    let agent = cfg.agent();
-    let backend = agent_registry::plugin(agent);
+    let agent = cfg.agent.clone();
+    let backend = cfg.backend;
     // The host's launch command is read now, never from the session's stored
     // config, so Restart and Resume use the current one.
-    let command = choose_agent_command(backend, &hub.state.agent_command(agent), &|name| {
+    let command = choose_agent_command(backend, &hub.state.agent_command(&agent), &|name| {
         std::env::var(name).ok()
     })?;
     let raw_program = command.program.clone();
     let (program, prepend_args) = resolve_agent_program(&raw_program);
-    let (claude_session_id, resume_conversation, discover) = planned_conversation(
+    let (conversation_id, resume_conversation, discover) = planned_conversation(
         backend,
         cfg,
         &program,
@@ -1082,12 +1034,12 @@ async fn spawn_interactive_session(
     let hook_settings = write_hook_settings(
         hub,
         &session_id,
-        agent,
+        &agent,
         &cfg.options,
         cfg.dangerously_skip_permissions,
     );
     let common = SpawnContext {
-        conversation_id: claude_session_id.as_deref(),
+        conversation_id: conversation_id.as_deref(),
         resume_conversation: resume_conversation.as_deref(),
         hook_args: hook_settings.as_ref().map_or(&[], HookSettings::args),
         ..cfg.common()
@@ -1133,7 +1085,7 @@ async fn spawn_interactive_session(
             )?;
             let final_args = command.direct_args(prepend_args, args);
             info!(
-                agent = agent.as_label(),
+                agent = agent.0.as_str(),
                 raw = %raw_program,
                 program = %program,
                 extra_argc = command.extra_args.len(),
@@ -1147,7 +1099,7 @@ async fn spawn_interactive_session(
         }
         Launch::InShell(launch) => {
             info!(
-                agent = agent.as_label(),
+                agent = agent.0.as_str(),
                 raw = %raw_program,
                 program = %program,
                 shell = %launch.shell.label,
@@ -1201,7 +1153,7 @@ async fn spawn_interactive_session(
             if let Some(settings) = hook_settings {
                 settings.discard(&session_id);
             }
-            return Err(err.context(format!("spawning {} via tracer", agent.as_label())));
+            return Err(err.context(format!("spawning {} via tracer", agent.0)));
         }
     };
     let pty = tracer_spawn.handle;
@@ -1218,11 +1170,12 @@ async fn spawn_interactive_session(
             kind,
             members,
             workspace_id,
-            agent,
+            agent: agent.clone(),
+            program_name: backend.descriptor().tag.clone(),
             cwd: initial_cwd,
             stored_config,
             last_prompt,
-            claude_session_id,
+            conversation_id,
             started_at,
             busy_excluded,
             shell_label,
@@ -1278,7 +1231,7 @@ async fn spawn_interactive_session(
                 output: pty.output.subscribe(),
                 input_pulses: in_rx,
                 screen,
-                rules: rules_for(agent),
+                rules: rules_for(&agent),
             },
             hub.attention_tx.clone(),
             SessionStatus::Idle,
@@ -1290,7 +1243,7 @@ async fn spawn_interactive_session(
             pty_state::AgentStreams {
                 output: pty.output.subscribe(),
                 screen,
-                rules: rules_for(agent),
+                rules: rules_for(&agent),
             },
             hub.attention_tx.clone(),
         );
@@ -1327,7 +1280,7 @@ async fn spawn_interactive_session(
             Arc::clone(&pty),
             injectors,
             agent_up,
-            agent_registry::plugin(agent).ready_signal(),
+            backend.ready_signal(),
         );
     }
     Ok(snap)
@@ -1390,7 +1343,8 @@ async fn spawn_plain_shell_session(
             hub,
             &session_id,
             cfg,
-            agent_registry::plugin(*agent),
+            agent_registry::plugin(agent)
+                .ok_or_else(|| anyhow!("no agent plugin `{}` is registered", agent.0))?,
             conversation,
         )?,
         _ => ShellResume::default(),
@@ -1460,7 +1414,7 @@ async fn spawn_plain_shell_session(
             stored_config: stored_config.clone(),
             started_at,
             busy_excluded,
-            hook_agent: cfg.extras.hook_agent,
+            hook_agent: cfg.extras.hook_agent.clone(),
         },
         Some(Arc::clone(&pty)),
     );
@@ -1489,7 +1443,7 @@ async fn spawn_plain_shell_session(
             output: pty.output.subscribe(),
             input_pulses: in_rx,
             screen,
-            rules: rules_for(default_agent()),
+            rules: rules_for(&default_agent()),
         },
         hub.attention_tx.clone(),
         SessionStatus::Idle,
@@ -1528,7 +1482,7 @@ async fn spawn_plain_shell_session(
     {
         meta.status = Some(snap.status);
         meta.status_since = snap.status_since;
-        meta.hook_agent = cfg.extras.hook_agent;
+        meta.hook_agent.clone_from(&cfg.extras.hook_agent);
         write_meta_then_sync(hub, &meta);
     }
 
@@ -1561,16 +1515,16 @@ fn headless_spec(
     prompt: &str,
     primary_cwd: PathBuf,
 ) -> anyhow::Result<headless::HeadlessSpec> {
-    let backend = agent_registry::plugin(cfg.agent());
+    let backend = cfg.backend;
     let args = backend
         .headless_args(&cfg.options, &cfg.common(), members, prompt)?
-        .ok_or_else(|| headless_unsupported(cfg.agent()))?;
+        .ok_or_else(|| headless_unsupported(backend))?;
     Ok(headless::HeadlessSpec {
         program: backend.resolve_program(),
         args,
         cwd: primary_cwd,
         env: cfg.env.set.clone(),
-        agent: cfg.agent(),
+        agent: cfg.agent.clone(),
     })
 }
 
@@ -1686,9 +1640,9 @@ fn spawn_headless_session(
         pty: None,
         headless: None,
         workspace_id: workspace_id.clone(),
-        agent: cfg.agent(),
+        agent: cfg.agent.clone(),
         terminal_title: None,
-        program_name: Some(cfg.agent().as_label().to_string()),
+        program_name: Some(cfg.backend.descriptor().tag.clone()),
         current_cwd: Some(initial_cwd.clone()),
         appearance: AppearanceOverrides::default(),
         spawn_config: Some(stored_config.clone()),
@@ -1700,7 +1654,7 @@ fn spawn_headless_session(
         screen: None,
         scrollback_snapshot_req: None,
         spawn_origin: None,
-        claude_session_id: None,
+        conversation_id: None,
         pending_input: None,
         last_hook_time: None,
         hook_driven: false,
@@ -1720,7 +1674,7 @@ fn spawn_headless_session(
         Ok(handle) => handle,
         Err(err) => {
             pending.discard();
-            return Err(err.context(format!("spawning headless {}", cfg.agent().as_label())));
+            return Err(err.context(format!("spawning headless {}", cfg.agent.0)));
         }
     };
     let snap = {
@@ -1742,7 +1696,7 @@ fn spawn_headless_session(
             workspace_id,
             // Same as interactive: the child is a node shim on Windows.
             None,
-            cfg.agent(),
+            Some(cfg.agent.clone()),
             Some(stored_config),
             last_prompt,
             Some(initial_cwd),
@@ -1915,13 +1869,12 @@ fn spawn_standalone_shell(cwd: Option<&str>) -> anyhow::Result<SpawnResolution> 
     Ok((SessionKind::Standalone, Vec::new(), cwd, label, None))
 }
 
-/// Whether a standalone (no repo) target can run `mode` for `agent`: a plain
-/// shell, or any agent interactively in the folder, with no worktree.
+/// Whether a standalone (no repo) target can run `mode`: a plain shell, or
+/// any registered agent interactively in the folder, with no worktree.
 /// Headless sessions still need a repo or workspace.
-fn standalone_supports(mode: SessionMode, agent: Agent) -> bool {
+fn standalone_supports(mode: SessionMode) -> bool {
     match mode {
-        SessionMode::PlainShell => true,
-        SessionMode::Interactive => matches!(agent, Agent::Claude),
+        SessionMode::PlainShell | SessionMode::Interactive => true,
         SessionMode::Headless => false,
     }
 }
@@ -2128,31 +2081,16 @@ pub(super) fn check_spawn_request_with(
     check_env_rows_with(request, resolve)
 }
 
-/// A plain shell takes no agent options: a request carrying a model, a
-/// permission mode, `dangerously_skip_permissions` or a provider other than
-/// Anthropic is refused before any git work or capture.
+/// A plain shell runs no agent: a request naming one, or carrying
+/// `dangerously_skip_permissions`, is refused before any git work or capture.
 fn check_plain_shell_options(request: &SpawnRequest) -> Result<(), spawn_plan::SpawnFailure> {
     if request.mode != SessionMode::PlainShell {
         return Ok(());
     }
-    let detail = if request.model.is_some() {
-        "Plain shell sessions do not accept a model."
-    } else if matches!(
-        &request.agent_options,
-        AgentOptions::Claude {
-            permission_mode: Some(_),
-            ..
-        }
-    ) {
-        "Plain shell sessions do not accept a permission mode."
+    let detail = if request.agent.is_some() {
+        "A plain shell runs no agent."
     } else if request.dangerously_skip_permissions {
         "Plain shell sessions do not accept dangerously_skip_permissions."
-    } else if request
-        .agent_options
-        .claude_provider()
-        .is_some_and(|provider| !provider.is_anthropic())
-    {
-        "Plain shell sessions do not accept a Claude provider."
     } else {
         return Ok(());
     };
@@ -2193,8 +2131,7 @@ fn check_env_rows_with(
     request: &SpawnRequest,
     resolve: impl Fn(&str) -> Option<(user_env::Secret, user_env::Origin)>,
 ) -> Result<(), spawn_plan::SpawnFailure> {
-    let options = options_from_request(&request.agent_options, request.model.as_deref());
-    let backend = agent_registry::plugin(request.agent_options.agent());
+    let (_, backend, options) = request_agent(request)?;
     check_with_plugin(request, backend, &options, &resolve)?;
     env_secrets::check_sealable(&request.extra_env, &request.secret_env_keys)?;
     resolve_env_refs(&request.extra_env, &resolve)?;
@@ -2233,7 +2170,10 @@ mod tests {
     fn test_agent_spawn_args() -> SpawnArgs {
         SpawnArgs {
             dangerously_skip_permissions: false,
-            agent: Agent::Claude,
+            agent: agent_api::test_agent::DESCRIPTOR.id.clone(),
+            backend: Box::leak(Box::new(agent_api::test_agent::TestAgent::new(
+                ConversationPlan::None,
+            ))),
             options: [
                 (
                     "mode".to_owned(),
@@ -2347,7 +2287,7 @@ mod tests {
 
         let rec = registry.get("s1").expect("the record");
         assert_eq!(
-            crate::sync::lock(&rec).claude_session_id.as_deref(),
+            crate::sync::lock(&rec).conversation_id.as_deref(),
             Some("c-start")
         );
     }
@@ -2388,7 +2328,7 @@ mod tests {
             .expect("the exit watcher listens");
 
         let entry = history::test_support::wait_for_entry(&dirs, "s1").await;
-        assert_eq!(entry.claude_session_id.as_deref(), Some("c-quick"));
+        assert_eq!(entry.conversation_id.as_deref(), Some("c-quick"));
     }
 
     #[cfg(windows)]
@@ -2530,72 +2470,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn options_from_request_feeds_claude_argv() {
-        let request = AgentOptions::Claude {
-            permission_mode: Some(protocol::PermissionMode::AcceptEdits),
-            provider: protocol::ClaudeProvider::Deepseek,
-        };
-        let options = options_from_request(&request, Some("x"));
-        let text = |value: &str| OptionValue::Text(value.to_string());
-        assert_eq!(
-            options,
-            OptionValues::from([
-                ("model".to_string(), text("x")),
-                ("permission_mode".to_string(), text("accept_edits")),
-                ("provider".to_string(), text("deepseek")),
-            ])
-        );
-        let common = SpawnContext {
-            dangerously_skip_permissions: false,
-            has_prompt_injector: false,
-            conversation_id: None,
-            resume_conversation: None,
-            add_dirs: &[],
-            hook_args: &[],
-        };
-        let member = SessionMember {
-            repo_id: "r0".to_string(),
-            repo_name: "repo0".to_string(),
-            branch: "main".to_string(),
-            worktree_path: "X:/dev/a".to_string(),
-        };
-        let args = agent_registry::plugin(Agent::Claude)
-            .interactive_args(&options, &common, &[member], None)
-            .expect("Claude reads the converted options");
-        assert_eq!(args, ["--model", "x", "--permission-mode", "acceptEdits"]);
-    }
-
-    #[test]
-    fn request_parts_round_trip_options_from_request() {
-        let modes = [
-            None,
-            Some(PermissionMode::Default),
-            Some(PermissionMode::AcceptEdits),
-            Some(PermissionMode::BypassPermissions),
-            Some(PermissionMode::Plan),
-        ];
-        let providers = [
-            ClaudeProvider::Anthropic,
-            ClaudeProvider::Deepseek,
-            ClaudeProvider::Unknown,
-        ];
-        for permission_mode in modes {
-            for provider in providers {
-                for model in [None, Some("deepseek-pro")] {
-                    let request = AgentOptions::Claude {
-                        permission_mode,
-                        provider,
-                    };
-                    assert_eq!(
-                        request_parts_from_options(&options_from_request(&request, model)),
-                        (request, model.map(str::to_owned)),
-                    );
-                }
-            }
-        }
-    }
-
     /// Run a real interactive Claude spawn for `session_id` in `folder` on
     /// `hub`, which gets as far as the stub tracer and fails there, and answer
     /// the error's whole chain.
@@ -2616,8 +2490,9 @@ mod tests {
         let stored_config = protocol::SpawnConfig::from_request(&request);
         let cfg = SpawnArgs {
             dangerously_skip_permissions: false,
-            agent: Agent::Claude,
-            options: options_from_request(&AgentOptions::claude(None), None),
+            agent: agent_registry::default_agent(),
+            backend: claude_backend(),
+            options: claude_options(),
             env: agent_api::EnvPlan::default(),
             prompt_injector: None,
             origin: None,
@@ -2654,7 +2529,7 @@ mod tests {
         hub.state
             .mutate(|s| {
                 s.agent_commands.insert(
-                    Agent::Claude,
+                    agent_registry::default_agent(),
                     crate::state::AgentCommand {
                         program: String::new(),
                         args: "--debug 'open".to_owned(),
@@ -2683,7 +2558,7 @@ mod tests {
         let (hub, _scratch) = test_hub("launch-command-headless");
         hub.state
             .set_agent_command(
-                Agent::Claude,
+                &agent_registry::default_agent(),
                 crate::state::AgentCommand {
                     program: "my-claude".to_owned(),
                     args: "--debug".to_owned(),
@@ -2692,8 +2567,9 @@ mod tests {
             .expect("store the command");
         let cfg = SpawnArgs {
             dangerously_skip_permissions: false,
-            agent: Agent::Claude,
-            options: options_from_request(&AgentOptions::claude(None), None),
+            agent: agent_registry::default_agent(),
+            backend: claude_backend(),
+            options: claude_options(),
             env: agent_api::EnvPlan::default(),
             prompt_injector: None,
             origin: None,
@@ -2701,7 +2577,8 @@ mod tests {
             add_dirs: Vec::new(),
             extras: SpawnExtras::default(),
         };
-        let backend = agent_registry::plugin(Agent::Claude);
+        let backend =
+            agent_registry::plugin(&agent_registry::default_agent()).expect("Claude is registered");
 
         let spec = headless_spec(&cfg, &[], "hello", PathBuf::from("C:/work"))
             .expect("Claude has a headless mode");
@@ -2719,7 +2596,7 @@ mod tests {
         let (hub, _scratch, _repo) = env_ref_repo_hub("launch-command-config");
         hub.state
             .set_agent_command(
-                Agent::Claude,
+                &agent_registry::default_agent(),
                 crate::state::AgentCommand {
                     program: "my-claude-wrapper".to_owned(),
                     args: "--launch-extra-marker".to_owned(),
@@ -2753,15 +2630,16 @@ mod tests {
     fn shell_resume_spawn_args() -> SpawnArgs {
         SpawnArgs {
             dangerously_skip_permissions: false,
-            agent: Agent::Claude,
-            options: options_from_request(&AgentOptions::claude(None), None),
+            agent: agent_registry::default_agent(),
+            backend: claude_backend(),
+            options: claude_options(),
             env: agent_api::EnvPlan::default(),
             prompt_injector: None,
             origin: None,
             resume_conversation: None,
             add_dirs: Vec::new(),
             extras: SpawnExtras {
-                hook_agent: Some(Agent::Claude),
+                hook_agent: Some(agent_registry::default_agent()),
                 resume_conversation: Some("abc-123".to_owned()),
             },
         }
@@ -2806,13 +2684,27 @@ mod tests {
 
     /// Claude's options as a spawn request sends them.
     fn claude_options() -> protocol::OptionValues {
-        options_from_request(
-            &protocol::AgentOptions::Claude {
-                permission_mode: None,
-                provider: protocol::ClaudeProvider::Anthropic,
-            },
-            None,
-        )
+        OptionValues::from([
+            ("permission_mode".to_owned(), protocol::OptionValue::Null),
+            (
+                "provider".to_owned(),
+                protocol::OptionValue::Text("anthropic".to_owned()),
+            ),
+            ("model".to_owned(), protocol::OptionValue::Null),
+        ])
+    }
+
+    /// Claude's plugin.
+    fn claude_backend() -> &'static dyn AgentPlugin {
+        agent_registry::plugin(&agent_registry::default_agent()).expect("Claude is registered")
+    }
+
+    /// Claude with its default options.
+    fn claude_selection() -> protocol::AgentSelection {
+        protocol::AgentSelection {
+            agent: agent_registry::default_agent(),
+            options: OptionValues::new(),
+        }
     }
 
     #[tokio::test]
@@ -2826,8 +2718,14 @@ mod tests {
         // The writer itself works on this hub: it answers `Some` and leaves the
         // file on disk. Discarding the probe first keeps the assertions after
         // the spawn about what the spawn wrote, not about the probe.
-        let probe = write_hook_settings(&hub, session_id, Agent::Claude, &claude_options(), false)
-            .expect("this hub resolves a cached tracer");
+        let probe = write_hook_settings(
+            &hub,
+            session_id,
+            &agent_registry::default_agent(),
+            &claude_options(),
+            false,
+        )
+        .expect("this hub resolves a cached tracer");
         assert!(file.exists(), "the writer wrote the settings file");
         probe.discard(session_id);
         assert!(!file.exists(), "the probe is removed");
@@ -2848,8 +2746,14 @@ mod tests {
         // A file already at the id is gone afterwards only if the spawn itself
         // rewrote and then removed it — a spawn that skipped the writer would
         // leave the marker behind. The dir pre-existed, so this spawn keeps it.
-        let marker = write_hook_settings(&hub, session_id, Agent::Claude, &claude_options(), false)
-            .expect("writes the marker file");
+        let marker = write_hook_settings(
+            &hub,
+            session_id,
+            &agent_registry::default_agent(),
+            &claude_options(),
+            false,
+        )
+        .expect("writes the marker file");
         assert!(file.exists(), "the marker is there before the second spawn");
         let error = failing_interactive_claude_spawn(&hub, &folder, session_id).await;
         assert!(error.contains("spawning claude via tracer"), "{error}");
@@ -2936,7 +2840,8 @@ mod tests {
             trusted: bool,
             shim: &agent_api::HookShim<'_>,
         ) -> agent_api::HookPlan {
-            agent_registry::plugin(Agent::Claude)
+            agent_registry::plugin(&agent_registry::default_agent())
+                .expect("Claude is registered")
                 .hook_plan(&claude_options(), trusted, shim)
                 .expect("Claude's default options decode")
         }
@@ -3008,7 +2913,7 @@ mod tests {
             &hub,
             "s2",
             &shell_resume_spawn_args(),
-            agent_registry::plugin(Agent::Claude),
+            agent_registry::plugin(&agent_registry::default_agent()).expect("Claude is registered"),
             "abc-123",
         )
         .expect("Claude answers a command");
@@ -3224,7 +3129,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_worktree_plain_shell_request_with_a_permission_mode_is_refused_before_git_work() {
+    async fn a_plain_shell_with_an_agent_refuses() {
         let (hub, _scratch, repo) = env_ref_repo_hub("shell-permission-mode");
         let mut req = env_spawn(
             single_target(true, None),
@@ -3232,17 +3137,14 @@ mod tests {
             Vec::new(),
             Some("rq-pm"),
         );
-        req.agent_options = AgentOptions::claude(Some(protocol::PermissionMode::Plan));
+        req.agent = Some(claude_selection());
         // Straight into `spawn_session`, the path every replay (duplicate,
         // resume, recover) takes, past the dispatcher's own early check.
         let err = spawn_session(&hub, req, None, false)
             .await
-            .expect_err("a plain shell refuses a permission mode");
+            .expect_err("a plain shell refuses an agent");
         let text = format!("{err:#}");
-        assert!(
-            text.contains("Plain shell sessions do not accept a permission mode"),
-            "{text}"
-        );
+        assert!(text.contains("A plain shell runs no agent."), "{text}");
         let worktrees = git_ok(&repo, &["worktree", "list", "--porcelain"]);
         assert_eq!(
             worktrees
@@ -3265,21 +3167,18 @@ mod tests {
     }
 
     #[test]
-    fn a_plain_shell_request_with_a_model_is_refused_by_the_pre_check() {
+    fn a_plain_shell_request_with_an_agent_is_refused_by_the_pre_check() {
         let mut req = env_spawn(
             single_target(true, None),
             SessionMode::PlainShell,
             Vec::new(),
             Some("rq-md"),
         );
-        req.model = Some("claude-sonnet-4-5".to_owned());
+        req.agent = Some(claude_selection());
         let failure =
-            check_spawn_request_with(&req, |_| None).expect_err("the pre-check refuses a model");
+            check_spawn_request_with(&req, |_| None).expect_err("the pre-check refuses an agent");
         assert_eq!(failure.title, "Couldn't start the shell session");
-        assert_eq!(
-            failure.detail,
-            "Plain shell sessions do not accept a model."
-        );
+        assert_eq!(failure.detail, "A plain shell runs no agent.");
         assert!(failure.hint.is_none(), "{:?}", failure.hint);
     }
 
@@ -3410,6 +3309,81 @@ mod tests {
         assert!(hub.sessions.snapshots().is_empty(), "nothing was spawned");
     }
 
+    /// The refusal of an interactive spawn in place whose agent is `agent`,
+    /// after checking it stored and spawned nothing.
+    async fn agent_refusal_of(tag: &str, agent: Option<protocol::AgentSelection>) -> String {
+        let (hub, _scratch, _repo) = env_ref_repo_hub(tag);
+        let mut req = env_spawn(in_place_main(), SessionMode::Interactive, Vec::new(), None);
+        req.agent = agent;
+        let err = spawn_session(&hub, req, None, false)
+            .await
+            .expect_err("the agent selection is refused");
+        assert!(
+            hub.state
+                .with_persisted(|s| s.repos[0].last_spawn_config.clone())
+                .is_none(),
+            "no last spawn config was stored"
+        );
+        assert!(hub.sessions.snapshots().is_empty(), "nothing was spawned");
+        format!("{err:#}")
+    }
+
+    #[tokio::test]
+    async fn a_spawn_with_a_bad_option_refuses_naming_the_field() {
+        let mut selection = claude_selection();
+        selection
+            .options
+            .insert("x".to_owned(), protocol::OptionValue::Text("1".to_owned()));
+        let text = agent_refusal_of("spawn-bad-option", Some(selection)).await;
+        assert!(text.contains("Claude has no option `x`"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_spawn_naming_an_unknown_agent_refuses() {
+        let selection = protocol::AgentSelection {
+            agent: AgentId("nope".to_owned()),
+            options: OptionValues::new(),
+        };
+        let text = agent_refusal_of("spawn-unknown-agent", Some(selection)).await;
+        assert!(text.contains("This daemon has no agent `nope`."), "{text}");
+    }
+
+    #[tokio::test]
+    async fn an_agent_session_without_an_agent_refuses() {
+        let text = agent_refusal_of("spawn-no-agent", None).await;
+        assert!(text.contains("An agent session needs an agent."), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_spawn_stores_the_validated_defaults() {
+        let (hub, _scratch, _repo) = env_ref_repo_hub("spawn-stores-defaults");
+        let mut req = env_spawn(in_place_main(), SessionMode::Interactive, Vec::new(), None);
+        req.agent = Some(claude_selection());
+        // The spawnless hub fails at the tracer, after the config is stored.
+        spawn_session_with(
+            &hub,
+            req,
+            None,
+            false,
+            SpawnExtras::default(),
+            crate::server::test_support::no_key,
+        )
+        .await
+        .expect_err("no tracer can start");
+        let stored = hub
+            .state
+            .with_persisted(|s| s.repos[0].last_spawn_config.clone())
+            .expect("last spawn config stored");
+        assert_eq!(
+            stored.agent,
+            Some(protocol::AgentSelection {
+                agent: agent_registry::default_agent(),
+                options: claude_options(),
+            }),
+            "every field's default is stored"
+        );
+    }
+
     #[tokio::test]
     async fn the_stored_config_of_a_deepseek_spawn_holds_only_the_users_rows() {
         let (hub, _scratch, _repo) = env_ref_repo_hub("deepseek-stored");
@@ -3439,8 +3413,10 @@ mod tests {
             .expect("last spawn config stored");
         assert_eq!(stored.extra_env, extra, "only the user's rows are stored");
         assert_eq!(
-            stored.agent_options.claude_provider(),
-            Some(protocol::ClaudeProvider::Deepseek)
+            stored
+                .agent
+                .and_then(|selection| selection.options.get("provider").cloned()),
+            Some(protocol::OptionValue::Text("deepseek".to_owned()))
         );
         let state = std::fs::read_to_string(&hub.dirs.state_file).expect("state.json written");
         assert!(!state.contains(DEEPSEEK_KEY_SENTINEL), "{state}");
@@ -3488,12 +3464,9 @@ mod tests {
         // No key anywhere: the shell refusal comes first, not the key's.
         let err = spawn_session_with(&hub, req, None, false, SpawnExtras::default(), no_key)
             .await
-            .expect_err("a plain shell refuses a provider");
+            .expect_err("a plain shell refuses an agent");
         let text = format!("{err:#}");
-        assert!(
-            text.contains("Plain shell sessions do not accept a Claude provider"),
-            "{text}"
-        );
+        assert!(text.contains("A plain shell runs no agent."), "{text}");
         assert!(!text.contains("DEEPSEEK_API_KEY"), "{text}");
         let worktrees = git_ok(&repo, &["worktree", "list", "--porcelain"]);
         assert_eq!(
@@ -3525,10 +3498,7 @@ mod tests {
         else {
             panic!("the pre-check refuses, got {reply:?}");
         };
-        assert!(
-            detail.contains("do not accept a Claude provider"),
-            "{detail}"
-        );
+        assert!(detail.contains("A plain shell runs no agent."), "{detail}");
         assert_eq!(request_id.as_deref(), Some("rq-sh"));
         assert!(hub.sessions.snapshots().is_empty(), "nothing was spawned");
     }
@@ -3699,11 +3669,12 @@ mod tests {
                 kind: SessionKind::Standalone,
                 members: Vec::new(),
                 workspace_id: None,
-                agent: Agent::Claude,
+                agent: agent_registry::default_agent(),
+                program_name: claude_backend().descriptor().tag.clone(),
                 cwd: hub.dirs.config.to_string_lossy().into_owned(),
                 stored_config: stored.clone(),
                 last_prompt: None,
-                claude_session_id: None,
+                conversation_id: None,
                 started_at: Utc::now(),
                 busy_excluded: false,
                 shell_label: None,
@@ -3769,11 +3740,12 @@ mod tests {
                 kind: SessionKind::Standalone,
                 members: Vec::new(),
                 workspace_id: None,
-                agent: Agent::Claude,
+                agent: agent_registry::default_agent(),
+                program_name: claude_backend().descriptor().tag.clone(),
                 cwd: "C:\\work".to_owned(),
                 stored_config: standalone_config(SessionMode::Interactive),
                 last_prompt: None,
-                claude_session_id: None,
+                conversation_id: None,
                 started_at: Utc::now(),
                 busy_excluded: false,
                 shell_label: None,
@@ -3894,11 +3866,12 @@ mod tests {
                 kind: SessionKind::Standalone,
                 members: Vec::new(),
                 workspace_id: None,
-                agent: Agent::Claude,
+                agent: agent_registry::default_agent(),
+                program_name: claude_backend().descriptor().tag.clone(),
                 cwd: hub.dirs.config.to_string_lossy().into_owned(),
                 stored_config: protocol::SpawnConfig::from_request(&request),
                 last_prompt: None,
-                claude_session_id: None,
+                conversation_id: None,
                 started_at: Utc::now(),
                 busy_excluded: true,
                 shell_label: None,
@@ -4256,7 +4229,7 @@ mod tests {
     #[tokio::test]
     async fn standalone_target_refuses_headless() {
         let (hub, _scratch) = spawnless_test_hub("standalone-agents");
-        for (mode, agent_options) in [(SessionMode::Headless, AgentOptions::claude(None))] {
+        for (mode, agent) in [(SessionMode::Headless, Some(claude_selection()))] {
             let req = SpawnRequest {
                 label: None,
                 target: SpawnTarget::Standalone {
@@ -4266,8 +4239,7 @@ mod tests {
                 mode,
                 initial_prompt: Some("x".to_owned()),
                 dangerously_skip_permissions: false,
-                agent_options,
-                model: None,
+                agent,
                 extra_env: Vec::new(),
                 secret_env_keys: Vec::new(),
                 prompt_injector: None,
@@ -4282,18 +4254,16 @@ mod tests {
                 "{err:#}"
             );
         }
-        for &agent in Agent::all() {
-            assert!(standalone_supports(SessionMode::Interactive, agent));
-            assert!(standalone_supports(SessionMode::PlainShell, agent));
-            assert!(!standalone_supports(SessionMode::Headless, agent));
-        }
+        assert!(standalone_supports(SessionMode::Interactive));
+        assert!(standalone_supports(SessionMode::PlainShell));
+        assert!(!standalone_supports(SessionMode::Headless));
     }
 
-    /// Where an interactive `agent_options` spawn in `folder` stops on the
+    /// Where an interactive spawn of `agent` in `folder` stops on the
     /// spawnless hub, as the error's whole chain.
     async fn standalone_agent_spawn_error(
         hub: &Hub,
-        agent_options: AgentOptions,
+        agent: protocol::AgentSelection,
         folder: &Path,
     ) -> String {
         let mut req = env_spawn(
@@ -4305,7 +4275,7 @@ mod tests {
             Vec::new(),
             None,
         );
-        req.agent_options = agent_options;
+        req.agent = Some(agent);
         let err = spawn_session(hub, req, None, false)
             .await
             .expect_err("the spawnless hub launches nothing");
@@ -4330,7 +4300,7 @@ mod tests {
         let (hub, scratch) = spawnless_test_hub("standalone-claude");
         let folder = scratch.path().join("plain-claude");
         std::fs::create_dir_all(&folder).expect("create folder");
-        let error = standalone_agent_spawn_error(&hub, AgentOptions::claude(None), &folder).await;
+        let error = standalone_agent_spawn_error(&hub, claude_selection(), &folder).await;
         assert!(error.contains("spawning claude via tracer"), "{error}");
         assert_standalone_agent_runs_in(&folder);
         assert!(hub.sessions.snapshots().is_empty(), "nothing was spawned");
@@ -4340,7 +4310,7 @@ mod tests {
     async fn standalone_claude_in_a_missing_folder_fails_with_folder_not_found() {
         let (hub, scratch) = spawnless_test_hub("standalone-claude-missing");
         let folder = scratch.path().join("gone");
-        let error = standalone_agent_spawn_error(&hub, AgentOptions::claude(None), &folder).await;
+        let error = standalone_agent_spawn_error(&hub, claude_selection(), &folder).await;
         assert!(error.contains("reading the standalone folder"), "{error}");
         assert!(error.contains(&*folder.to_string_lossy()), "{error}");
     }

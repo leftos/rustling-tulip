@@ -973,7 +973,7 @@ mod tests {
         ));
         let first = next(&mut client).await;
         assert!(
-            matches!(first, DaemonMessage::Repos { .. }),
+            matches!(first, DaemonMessage::Agents { .. }),
             "a paired device gets its state, got {first:?}"
         );
     }

@@ -17,8 +17,7 @@ use std::path::PathBuf;
 
 use gpui::{Modifiers, TestAppContext, point, px};
 use protocol::{
-    AgentOptions, ClientMessage, DaemonMessage, SessionMode, SpawnRequest, SpawnTarget,
-    SplitDirection,
+    ClientMessage, DaemonMessage, SessionMode, SpawnRequest, SpawnTarget, SplitDirection,
 };
 use rustling_tulip_native::RootView;
 use support::{Fixture, Harness, TestDir, pane, session, split, tab};
@@ -129,11 +128,10 @@ fn quick_shell_spawns_standalone_in_home_when_no_default(cx: &mut TestAppContext
         "no remembered folder: the daemon picks the home directory"
     );
     assert_eq!(request.mode, SessionMode::PlainShell);
-    assert_eq!(request.agent_options, AgentOptions::claude(None));
+    assert_eq!(request.agent, None);
     assert_eq!(request.label, None);
     assert_eq!(request.initial_prompt, None);
     assert!(!request.dangerously_skip_permissions);
-    assert_eq!(request.model, None);
     assert_eq!(
         request.extra_env,
         [] as [(std::string::String, std::string::String); 0]

@@ -762,11 +762,15 @@ pub fn agent_up(registry: &SessionRegistry, session_id: &str) -> bool {
     };
     let (hooks, screen, agent) = {
         let record = crate::sync::lock(&arc);
-        (record.hook_driven, record.screen.clone(), record.agent)
+        (
+            record.hook_driven,
+            record.screen.clone(),
+            record.agent.clone(),
+        )
     };
     hooks
         || screen.is_some_and(|screen| {
-            let rules = rules::rules_for(agent);
+            let rules = rules::rules_for(&agent);
             let screen = crate::sync::lock(&screen);
             shows_agent(&rules.read(&screen)) && !rules::last_row_is_shell_prompt(&screen)
         })
@@ -1322,9 +1326,7 @@ mod hysteresis_tests {
     use crate::session::{SessionRecord, SessionRegistry};
     use agent_api::{LineMatcher, ScreenRegion, ScreenRule, ScreenRules, ScreenVerdict};
     use chrono::Utc;
-    use protocol::{
-        Agent, AppearanceOverrides, SessionKind, SessionMetrics, SessionMode, SessionStatus,
-    };
+    use protocol::{AppearanceOverrides, SessionKind, SessionMetrics, SessionMode, SessionStatus};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
     use tokio::sync::{broadcast, mpsc};
@@ -1367,7 +1369,7 @@ mod hysteresis_tests {
             pty: None,
             headless: None,
             workspace_id: None,
-            agent: Agent::default(),
+            agent: agent_registry::default_agent(),
             terminal_title: None,
             program_name: None,
             current_cwd: None,
@@ -1381,7 +1383,7 @@ mod hysteresis_tests {
             screen: None,
             scrollback_snapshot_req: None,
             spawn_origin: None,
-            claude_session_id: None,
+            conversation_id: None,
             pending_input: None,
             last_hook_time: None,
             hook_driven: false,
@@ -1429,7 +1431,7 @@ mod hysteresis_tests {
     /// Start a watcher over `record` as the session's spawn or reattach left
     /// it.
     fn start_record(tag: &str, plain_shell: bool, record: SessionRecord) -> Harness {
-        let rules = rules_for(record.agent);
+        let rules = rules_for(&record.agent);
         start_in(scratch_dirs(tag), plain_shell, record, rules)
     }
 
@@ -3278,7 +3280,7 @@ mod hysteresis_tests {
             dirs.clone(),
             false,
             hook_record(SessionStatus::Working),
-            rules_for(Agent::default()),
+            rules_for(&agent_registry::default_agent()),
         );
         pass_hold().await;
         h.chunk(idle_frame(&[]));
