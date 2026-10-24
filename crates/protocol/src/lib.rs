@@ -22,6 +22,13 @@ pub const FEATURE_CLAUDE_PROVIDER: &str = "claude_provider";
 /// it.
 pub const FEATURE_AGENT_COMMANDS: &str = "agent_commands";
 
+/// `Welcome.features` entry: the daemon pairs tailnet devices — an unpaired
+/// device asks ([`ClientMessage::DevicePairRequest`]), the owner's local
+/// client approves ([`ClientMessage::ApproveDevice`]), and the device redeems
+/// a one-time code for its token ([`DaemonMessage::DeviceToken`]). A client
+/// offers the pairing flow only when the connected daemon lists it.
+pub const FEATURE_DEVICE_PAIRING: &str = "device_pairing";
+
 fn default_true() -> bool {
     true
 }
@@ -2190,6 +2197,73 @@ pub enum EnvScope {
 }
 
 // ---------------------------------------------------------------------------
+// Device pairing
+// ---------------------------------------------------------------------------
+
+/// A secret that never prints in `{:?}`.
+///
+/// Serialized as a bare JSON string, so a code or token field stays a plain
+/// string on the wire. `Debug` prints `Secret(<redacted>)`, so a message
+/// carrying one can be logged with `{:?}` without leaking it.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Secret(pub String);
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Secret(<redacted>)")
+    }
+}
+
+/// How a device's pairing request ended, carried by
+/// [`DaemonMessage::DevicePairDecided`]. Serialized as a `snake_case` string
+/// with a catch-all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DevicePairOutcome {
+    /// The owner approved the request.
+    Approved,
+    /// The owner declined the request.
+    Denied,
+    /// The request lapsed before the owner decided it.
+    Expired,
+    /// The same device asked again, which replaced this request.
+    Superseded,
+    #[serde(other)]
+    Unknown,
+}
+
+/// One waiting pairing request, as [`DaemonMessage::PendingDevices`] lists it
+/// for the owner's local client. It carries no code.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingDevice {
+    pub request_id: String,
+    /// The node's `MagicDNS` name, from the connection's `whois` identity.
+    pub name: String,
+    /// The Tailscale login, from the connection's `whois` identity.
+    pub login: String,
+    /// When the device asked.
+    pub asked_at: DateTime<Utc>,
+    /// Whether the owner has approved it and its code is out.
+    pub approved: bool,
+}
+
+/// One approved device, as [`DaemonMessage::Devices`] lists it for the
+/// owner's local client. It carries no token.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceInfo {
+    pub device_id: String,
+    pub name: String,
+    pub login: String,
+    /// When the device's token was issued.
+    pub created_at: DateTime<Utc>,
+    /// When the device last presented its token, if it has since.
+    pub last_seen: Option<DateTime<Utc>>,
+    /// Whether the device is blocked.
+    pub revoked: bool,
+}
+
+// ---------------------------------------------------------------------------
 // Client -> Daemon
 // ---------------------------------------------------------------------------
 
@@ -2776,6 +2850,42 @@ pub enum ClientMessage {
     /// on every connection with the same `Error` as
     /// [`ClientMessage::ConfigureLan`].
     CancelPairing,
+    /// An unpaired tailnet device asks the owner to approve it. The daemon
+    /// answers with [`DaemonMessage::DevicePairPending`] carrying the request
+    /// id. The device's identity comes from the connection's `whois` peer,
+    /// never from this message.
+    DevicePairRequest,
+    /// An unpaired device cancels its own waiting request.
+    DevicePairCancel,
+    /// An unpaired device redeems the one-time code the owner approved for
+    /// its request `request_id`; the daemon answers with
+    /// [`DaemonMessage::DeviceToken`] once. `code` never prints in `{:?}`.
+    DevicePairRedeem {
+        request_id: String,
+        code: Secret,
+    },
+    /// The owner's local client asks for the waiting requests. Answered with
+    /// [`DaemonMessage::PendingDevices`]. Host-only.
+    ListPendingDevices,
+    /// The owner approves the waiting request `request_id`, which mints that
+    /// request's one-time code ([`DaemonMessage::DevicePairCode`]). Host-only.
+    ApproveDevice {
+        request_id: String,
+    },
+    /// The owner declines the waiting request `request_id`. Host-only.
+    DenyDevice {
+        request_id: String,
+    },
+    /// Mint a one-time code for a device nobody is at the PC to approve, for
+    /// `rustling-tulipd pair` to print. Host-only.
+    MintDevicePairCode,
+    /// The owner lists the approved devices. Answered with
+    /// [`DaemonMessage::Devices`]. Host-only.
+    ListDevices,
+    /// The owner blocks the approved device `device_id`. Host-only.
+    RevokeDevice {
+        device_id: String,
+    },
     /// Scan the current worktrees root and report every `wt.<branch>/`
     /// group found under it, cross-referenced against the live and
     /// abandoned session registries. Daemon replies with
@@ -3955,6 +4065,44 @@ pub enum DaemonMessage {
         #[serde(default)]
         request_id: Option<String>,
     },
+    /// The asking device's pairing request is waiting for the owner, sent to
+    /// that device with its request id.
+    DevicePairPending {
+        request_id: String,
+        /// How long the request stays open for approval.
+        expires_in_secs: u64,
+    },
+    /// How a device's pairing request ended, sent to the asking device.
+    DevicePairDecided {
+        request_id: String,
+        outcome: DevicePairOutcome,
+    },
+    /// The issued token, sent once to the device that redeemed its code.
+    /// `token` never prints in `{:?}`.
+    DeviceToken {
+        device_id: String,
+        token: Secret,
+    },
+    /// A pairing step on the asking device failed; nothing was issued.
+    DevicePairFailed {
+        reason: String,
+    },
+    /// The waiting pairing requests, sent to the owner's local client.
+    PendingDevices {
+        requests: Vec<PendingDevice>,
+    },
+    /// The one-time code for a request the owner approved, or for a
+    /// CLI-minted code when `request_id` is `None`; sent to the owner's local
+    /// client. `code` never prints in `{:?}`.
+    DevicePairCode {
+        request_id: Option<String>,
+        code: Secret,
+        expires_in_secs: u64,
+    },
+    /// Every approved device, sent to the owner's local client.
+    Devices {
+        devices: Vec<DeviceInfo>,
+    },
 }
 
 /// Parse-time wrapper around [`ClientMessage`] that captures unknown message
@@ -4298,6 +4446,121 @@ mod tests {
                 "{json} round-trips"
             );
         }
+    }
+
+    #[test]
+    fn device_pair_messages_round_trip() {
+        let client_messages = [
+            ClientMessage::DevicePairRequest,
+            ClientMessage::DevicePairCancel,
+            ClientMessage::DevicePairRedeem {
+                request_id: "r1".to_owned(),
+                code: Secret("123456".to_owned()),
+            },
+            ClientMessage::ListPendingDevices,
+            ClientMessage::ApproveDevice {
+                request_id: "r1".to_owned(),
+            },
+            ClientMessage::DenyDevice {
+                request_id: "r1".to_owned(),
+            },
+            ClientMessage::MintDevicePairCode,
+            ClientMessage::ListDevices,
+            ClientMessage::RevokeDevice {
+                device_id: "d1".to_owned(),
+            },
+        ];
+        for msg in client_messages {
+            let json = serde_json::to_string(&msg).expect("serializes");
+            let decoded = InboundClientMessage::from_json_str(&json).expect("decodes");
+            let InboundClientMessage::Known(back) = decoded else {
+                panic!("{json} decodes as a known message");
+            };
+            assert_eq!(
+                serde_json::to_value(&back).expect("serializes"),
+                serde_json::to_value(&msg).expect("serializes"),
+                "{json} round-trips"
+            );
+        }
+
+        for json in [
+            r#"{"type":"device_pair_pending","request_id":"r1","expires_in_secs":300}"#,
+            r#"{"type":"device_pair_decided","request_id":"r1","outcome":"approved"}"#,
+            r#"{"type":"device_token","device_id":"d1","token":"tok"}"#,
+            r#"{"type":"device_pair_failed","reason":"no"}"#,
+            r#"{"type":"pending_devices","requests":[{"request_id":"r1","name":"phone","login":"o@example.com","asked_at":"2026-10-23T10:00:00Z","approved":false}]}"#,
+            r#"{"type":"device_pair_code","request_id":null,"code":"123456","expires_in_secs":120}"#,
+            r#"{"type":"devices","devices":[{"device_id":"d1","name":"phone","login":"o@example.com","created_at":"2026-10-23T10:00:00Z","last_seen":null,"revoked":false}]}"#,
+        ] {
+            let value: serde_json::Value = serde_json::from_str(json).expect("valid JSON");
+            let msg: DaemonMessage = serde_json::from_str(json).expect("a device message decodes");
+            assert_eq!(
+                serde_json::to_value(&msg).expect("serializes"),
+                value,
+                "{json} round-trips"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_device_pair_outcome_decodes_as_unknown() {
+        let msg: DaemonMessage = serde_json::from_str(
+            r#"{"type":"device_pair_decided","request_id":"r1","outcome":"teleported"}"#,
+        )
+        .expect("an outcome a newer daemon invented still decodes");
+        assert!(
+            matches!(
+                msg,
+                DaemonMessage::DevicePairDecided {
+                    outcome: DevicePairOutcome::Unknown,
+                    ..
+                }
+            ),
+            "{msg:?}"
+        );
+    }
+
+    #[test]
+    fn secret_debug_does_not_print_the_value() {
+        let redeem = ClientMessage::DevicePairRedeem {
+            request_id: "r1".to_owned(),
+            code: Secret("246810".to_owned()),
+        };
+        let printed = format!("{redeem:?}");
+        assert!(
+            !printed.contains("246810"),
+            "the code does not print: {printed}"
+        );
+        assert!(printed.contains("<redacted>"), "{printed}");
+
+        let token = DaemonMessage::DeviceToken {
+            device_id: "d1".to_owned(),
+            token: Secret("tok-abcdef".to_owned()),
+        };
+        let printed = format!("{token:?}");
+        assert!(
+            !printed.contains("tok-abcdef"),
+            "the token does not print: {printed}"
+        );
+        assert!(printed.contains("<redacted>"), "{printed}");
+    }
+
+    #[test]
+    fn secret_serializes_as_a_bare_string() {
+        let json = r#"{"type":"device_pair_redeem","request_id":"r","code":"123456"}"#;
+        let decoded: ClientMessage =
+            serde_json::from_str(json).expect("a bare code string decodes");
+        let ClientMessage::DevicePairRedeem { request_id, code } = decoded else {
+            panic!("{json} decodes as a redeem");
+        };
+        assert_eq!(request_id, "r");
+        assert_eq!(code.0, "123456", "the code survives the wire unchanged");
+        assert_eq!(
+            serde_json::to_string(&ClientMessage::DevicePairRedeem { request_id, code })
+                .expect("serializes"),
+            json,
+            "and re-encodes as the same bare string"
+        );
     }
 
     #[test]

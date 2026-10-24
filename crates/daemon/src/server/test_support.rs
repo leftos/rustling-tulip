@@ -118,6 +118,7 @@ pub(super) fn build_test_hub(
         mode: protocol::KeepAwakeMode::default(),
         active: false,
     });
+    let devices = crate::devices::DeviceStore::load(&crate::paths::devices_file(&dirs));
     let hub = Hub {
         state,
         sessions,
@@ -144,6 +145,8 @@ pub(super) fn build_test_hub(
         start_resume: Arc::default(),
         resume_reported: Arc::default(),
         pending_hooks: crate::hook_status::PendingHooks::default(),
+        devices: Arc::new(std::sync::Mutex::new(devices)),
+        pairing: Arc::new(std::sync::Mutex::new(crate::devices::PairingBook::new())),
     };
     (hub, scratch, attention_rx)
 }

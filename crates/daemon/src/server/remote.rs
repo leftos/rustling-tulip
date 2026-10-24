@@ -428,6 +428,10 @@ pub(super) async fn configure_remote(
 pub(super) const LAN_RETIRED: &str = "LAN access and pairing codes are retired; remote access runs over \
                            Tailscale (turn it on with ConfigureRemote).";
 
+/// The `Error` every device-pairing message gets for now: the wire is in
+/// place, the handlers are not, and nothing is honoured yet.
+pub(super) const PAIRING_NOT_READY: &str = "device pairing is not available yet";
+
 /// The reason `msg` is host-only and refused on a tailnet connection, if it
 /// is. Checked before the match so no side effect can run first; a message
 /// that manages the host joins this set here.
@@ -438,6 +442,12 @@ pub(super) fn host_only_refusal(msg: &ClientMessage, auth: &AuthKind) -> Option<
     match msg {
         ClientMessage::Shutdown { .. } => Some("shutdown is local-only"),
         ClientMessage::ConfigureRemote { .. } => Some("remote access is local-only"),
+        ClientMessage::ListPendingDevices
+        | ClientMessage::ApproveDevice { .. }
+        | ClientMessage::DenyDevice { .. }
+        | ClientMessage::MintDevicePairCode
+        | ClientMessage::ListDevices
+        | ClientMessage::RevokeDevice { .. } => Some("device approval is local-only"),
         _ => None,
     }
 }
@@ -827,6 +837,84 @@ mod tests {
         }
         assert!(LAN_RETIRED.contains("Tailscale"), "{LAN_RETIRED}");
         assert!(!lan_file.exists(), "a retired message writes no lan.json");
+    }
+
+    #[tokio::test]
+    async fn device_approval_messages_are_refused_on_a_tailnet_connection() {
+        let (hub, _scratch) = test_hub("device-approval-tailnet");
+        let tailnet = AuthKind::Tailnet(test_peer());
+        for msg in [
+            ClientMessage::ListPendingDevices,
+            ClientMessage::ApproveDevice {
+                request_id: "r1".to_owned(),
+            },
+            ClientMessage::DenyDevice {
+                request_id: "r1".to_owned(),
+            },
+            ClientMessage::MintDevicePairCode,
+            ClientMessage::ListDevices,
+            ClientMessage::RevokeDevice {
+                device_id: "d1".to_owned(),
+            },
+        ] {
+            let reply = dispatch_one_as(&hub, msg.clone(), &tailnet).await;
+            assert!(
+                matches!(
+                    &reply,
+                    DaemonMessage::Error { message, .. } if message == "device approval is local-only"
+                ),
+                "{msg:?}: {reply:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn device_pair_messages_are_not_ready_yet() {
+        let (hub, _scratch) = test_hub("device-pair-not-ready");
+        let local = AuthKind::Local;
+        for msg in [
+            ClientMessage::DevicePairRequest,
+            ClientMessage::DevicePairCancel,
+            ClientMessage::DevicePairRedeem {
+                request_id: "r1".to_owned(),
+                code: protocol::Secret("123456".to_owned()),
+            },
+            ClientMessage::ListPendingDevices,
+            ClientMessage::ApproveDevice {
+                request_id: "r1".to_owned(),
+            },
+            ClientMessage::DenyDevice {
+                request_id: "r1".to_owned(),
+            },
+            ClientMessage::MintDevicePairCode,
+            ClientMessage::ListDevices,
+            ClientMessage::RevokeDevice {
+                device_id: "d1".to_owned(),
+            },
+        ] {
+            let reply = dispatch_one_as(&hub, msg.clone(), &local).await;
+            assert!(
+                matches!(
+                    &reply,
+                    DaemonMessage::Error {
+                        message,
+                        request_id: None
+                    } if message == PAIRING_NOT_READY
+                ),
+                "{msg:?}: {reply:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn hub_builds_with_a_device_store() {
+        let (hub, _scratch) = test_hub("device-store");
+        let devices = hub.devices.lock().expect("lock the device store");
+        assert!(!devices.is_corrupt(), "a fresh hub has a usable store");
+        assert!(devices.list().is_empty(), "no device is approved yet");
+        drop(devices);
+        let book = hub.pairing.lock().expect("lock the pairing book");
+        assert!(book.pending().is_empty(), "nothing waits for approval");
     }
 
     #[tokio::test]
