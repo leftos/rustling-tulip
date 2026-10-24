@@ -212,6 +212,18 @@
     },
     {
       "paths": [
+        "apps/native/src/device_pairing.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & test(/^device_pairing::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_device_pairing)::/))"
+    },
+    {
+      "paths": [
+        "apps/native/src/device_pairing_view.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native::ui) & test(/^(ui_device_pairing)::/))"
+    },
+    {
+      "paths": [
         "apps/native/src/diff_model.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native) & test(/^diff_model::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_diff_tab|ui_diff_view)::/))"
@@ -842,6 +854,12 @@
         "apps/native/tests/ui/ui_delete_worktree.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native::ui) & test(/^(ui_delete_worktree)::/))"
+    },
+    {
+      "paths": [
+        "apps/native/tests/ui/ui_device_pairing.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native::ui) & test(/^(ui_device_pairing)::/))"
     },
     {
       "paths": [

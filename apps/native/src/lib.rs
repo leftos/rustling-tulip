@@ -21,6 +21,8 @@ mod connection;
 pub mod connection_picker;
 mod connection_picker_view;
 mod copied;
+mod device_pairing;
+mod device_pairing_view;
 pub mod diff_model;
 mod diff_tab;
 mod diff_tab_view;
@@ -125,6 +127,7 @@ mod worktrees_manager;
 mod worktrees_manager_view;
 
 use alacritty_terminal::vte::ansi::CursorShape;
+use daemon_client::device_tokens::DeviceTokenStore;
 use futures::StreamExt as _;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use futures::future::LocalBoxFuture;
@@ -352,6 +355,10 @@ pub struct RootDeps {
     /// Reads and switches whether this PC starts the daemon at login: the
     /// Remote access page's toggle.
     pub autostart: Arc<dyn remote_access::Autostart>,
+    /// The device tokens this PC holds per tailnet host: the same store the
+    /// network thread dials with. The host picker reads it for its "Not
+    /// paired" tags and Forget deletes from it.
+    pub tokens: Arc<dyn DeviceTokenStore>,
 }
 
 /// Opens the client's window on a live daemon connection, focusing
@@ -796,6 +803,10 @@ pub struct RootView {
     recover_focus: FocusHandle,
     /// The devices waiting for remote access and the approval dialog.
     pairing: pairing_view::PairingView,
+    /// This PC's own pairing with a tailnet host that does not know it.
+    device_pairing: device_pairing_view::DevicePairingView,
+    /// The device tokens this PC holds per tailnet host.
+    tokens: Arc<dyn DeviceTokenStore>,
     /// Ends the wait for a recovery that goes unanswered.
     recover_timer: Option<Task<()>>,
     /// The recoveries this connection sent and has had no answer to, by
@@ -839,7 +850,13 @@ impl RootView {
             .map_or_else(UiState::default, load_ui_state);
         let (out_tx, out_rx) = unbounded();
         let (in_tx, in_rx) = unbounded();
-        net::spawn(connection_picker::resolve_boot_target(&ui), out_rx, in_tx);
+        let tokens = net::device_token_store();
+        net::spawn(
+            connection_picker::resolve_boot_target(&ui),
+            Arc::clone(&tokens),
+            out_rx,
+            in_tx,
+        );
         let deps = RootDeps {
             tx: out_tx,
             events: in_rx,
@@ -859,6 +876,7 @@ impl RootView {
             pick_folder: folder_picker::system_folder_picker(window),
             pick_file: folder_picker::system_file_picker(window),
             autostart: Arc::new(remote_access::SystemAutostart),
+            tokens,
         };
         let root = Self::with_transport(deps, window, cx);
         // The cloaked window neither restores nor saves its place.
@@ -937,6 +955,7 @@ impl RootView {
             pick_folder,
             pick_file,
             autostart,
+            tokens,
         } = deps;
         Self::watch_window(window, cx);
         Self::watch_close_request(window, cx);
@@ -1088,6 +1107,8 @@ impl RootView {
                 cx.focus_handle(),
                 Self::forward_pairing_actions(window, cx),
             ),
+            device_pairing: device_pairing_view::DevicePairingView::new(cx.focus_handle()),
+            tokens,
             recover_timer: None,
             recover_requests: HashMap::new(),
             recover_batches: Vec::new(),
@@ -1309,6 +1330,7 @@ impl RootView {
             || self.worktrees_manager.is_some()
             || self.recover.is_some()
             || self.pairing_dialog_open()
+            || self.device_pairing_open()
             || self.delete_dialog.is_some()
             || self.repo_remove.dialog().is_some()
             || self.workspace_creator.is_some()
@@ -2287,6 +2309,7 @@ impl RootView {
     /// flyout never shows its port, pid or protocol; the next ensure brings
     /// the new one.
     fn restart(&mut self) {
+        self.pair_on_not_approved();
         self.command(NetCommand::Restart);
         self.handshake = None;
         self.close_flyout();
@@ -2322,6 +2345,7 @@ impl RootView {
             | NetEvent::PairingLost
             | NetEvent::TokenSaveFailed => false,
         };
+        let pairing_input = device_pairing_view::PairingInput::of(&event);
         match event {
             NetEvent::State(conn) => {
                 // Everything the old target's daemon sent goes before the
@@ -2381,6 +2405,9 @@ impl RootView {
             self.reset_undo(cx);
             self.close_recover_on_overlay(window, cx);
             self.reset_pairing(window, cx);
+        }
+        if let Some(input) = pairing_input {
+            self.on_device_pairing_input(input, window, cx);
         }
         if exit_relevant {
             self.after_exit_event(window, cx);
@@ -2743,6 +2770,7 @@ impl RootView {
         self.recover_batches.clear();
         self.close_recover_on_overlay(window, cx);
         self.reset_pairing(window, cx);
+        self.close_device_pairing(window, cx);
         self.branch_cache = BranchCache::default();
         self.end_drag(window, cx);
         self.clear_drag_state();
@@ -2905,6 +2933,8 @@ impl RootView {
         let taken = if self.take_drag_escape() {
             Some(true)
         } else if let Some(taken) = self.on_connection_picker_key(ks, window, cx) {
+            Some(taken)
+        } else if let Some(taken) = self.on_device_pairing_key(ks, window, cx) {
             Some(taken)
         } else {
             self.on_cleanup_failed_key(ks, window, cx).then_some(true)
@@ -3432,6 +3462,7 @@ impl Render for RootView {
             .children(delete_over)
             .children(self.cleanup_failed_layer(window, cx))
             .children(overlay)
+            .children(self.device_pairing_layer(cx))
             .children(self.connection_picker_layer(cx))
     }
 }
@@ -3507,8 +3538,12 @@ impl RootView {
             .child(status_dot(footer.dot, "footer-dot"))
             .child(tagged_text("daemon-pill", text))
             .tooltip(tooltip(footer.tooltip.clone()))
-            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                this.toggle_flyout();
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                if this.device_pairing_offered() {
+                    this.open_device_pairing(window, cx);
+                } else {
+                    this.toggle_flyout();
+                }
                 cx.notify();
             }));
         div()

@@ -328,6 +328,7 @@ fn deps(
         pick_folder,
         pick_file,
         autostart: Arc::new(NoAutostart),
+        tokens: Arc::new(daemon_client::device_tokens::MemoryTokens::default()),
     }
 }
 

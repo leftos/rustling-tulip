@@ -456,6 +456,7 @@ fn boot_on_a_saved_host_starts_on_that_target(cx: &mut TestAppContext) {
         pick_folder,
         pick_file,
         autostart: Arc::new(AutostartRecorder::default()),
+        tokens: Arc::new(daemon_client::device_tokens::MemoryTokens::default()),
     };
 
     let (root, cx) =

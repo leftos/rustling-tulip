@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use chrono::{DateTime, Utc};
+use daemon_client::device_tokens::MemoryTokens;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use gpui::{
     App, Bounds, Entity, InputHandler, KeyDownEvent, Keystroke, Modifiers, MouseButton,
@@ -685,6 +686,8 @@ pub struct Harness<'a> {
     picker: Rc<PickRecorder>,
     /// The login launch the Remote access page reads and switches.
     autostart: Arc<AutostartRecorder>,
+    /// The device tokens the client holds per tailnet host.
+    tokens: Arc<MemoryTokens>,
 }
 
 /// A folder picker that answers with the folder a spec set, as the test
@@ -1014,6 +1017,7 @@ impl<'a> Harness<'a> {
         let notifier = Arc::new(NotifyRecorder::default());
         let picker = Rc::new(PickRecorder::default());
         let autostart = Arc::new(AutostartRecorder::default());
+        let tokens = Arc::new(MemoryTokens::default());
         let deps = RootDeps {
             tx,
             events: rx,
@@ -1027,6 +1031,7 @@ impl<'a> Harness<'a> {
             pick_folder: PickRecorder::picker(&picker),
             pick_file: PickRecorder::file_picker(&picker),
             autostart: autostart.clone(),
+            tokens: tokens.clone(),
         };
         let (root, cx) =
             cx.add_window_view(move |window, cx| RootView::with_transport(deps, window, cx));
@@ -1043,6 +1048,7 @@ impl<'a> Harness<'a> {
             notifier,
             picker,
             autostart,
+            tokens,
         };
         harness.connect();
         harness
@@ -1062,6 +1068,7 @@ impl<'a> Harness<'a> {
         let notifier = Arc::new(NotifyRecorder::default());
         let picker = Rc::new(PickRecorder::default());
         let autostart = Arc::new(AutostartRecorder::default());
+        let tokens = Arc::new(MemoryTokens::default());
         let deps = RootDeps {
             tx,
             events: rx,
@@ -1075,6 +1082,7 @@ impl<'a> Harness<'a> {
             pick_folder: PickRecorder::picker(&picker),
             pick_file: PickRecorder::file_picker(&picker),
             autostart: autostart.clone(),
+            tokens: tokens.clone(),
         };
         let (root, cx) =
             cx.add_window_view(move |window, cx| RootView::with_transport(deps, window, cx));
@@ -1091,7 +1099,13 @@ impl<'a> Harness<'a> {
             notifier,
             picker,
             autostart,
+            tokens,
         }
+    }
+
+    /// The device tokens the client holds per tailnet host.
+    pub fn tokens(&self) -> &MemoryTokens {
+        &self.tokens
     }
 
     /// How many times the view asked the app to quit.

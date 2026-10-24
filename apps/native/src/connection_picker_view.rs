@@ -4,6 +4,7 @@
 //! a pick goes to the network thread as [`NetCommand::SwitchTarget`], and
 //! the reset for the new target runs when its state comes back.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use gpui::{
@@ -17,6 +18,7 @@ use crate::connection_picker::{
 };
 use crate::net::NetCommand;
 use crate::notice_view::modal_panel;
+use crate::notices::ToastKind;
 use crate::palette::{BORDER, DANGER, DANGER_BG, MUTED, TEXT};
 use crate::session_menu::{backdrop, dialog_button};
 use crate::target::{DEFAULT_TAILNET_PORT, Target};
@@ -74,9 +76,12 @@ fn control_ring(rows: &[Row]) -> Vec<PickerControl> {
 }
 
 /// The open picker: its model, the Add a host fields, the focus, the typed
-/// host's refusal and the Tailscale scan in flight.
+/// host's refusal, the saved hosts this PC holds no device token for and the
+/// Tailscale scan in flight.
 pub(crate) struct ConnectionPickerDialog {
     picker: ConnectionPicker,
+    /// The saved hosts with no device token, read once as the picker opened.
+    not_paired: HashSet<String>,
     name_input: Entity<TextInput>,
     port_input: Entity<TextInput>,
     focus: PickerControl,
@@ -106,6 +111,41 @@ impl RootView {
                 let current = row.target == *self.conn.target();
                 (row.label, current)
             })
+            .collect()
+    }
+
+    /// The rows tagged "Not paired": saved hosts this PC holds no device
+    /// token for, in row order.
+    #[must_use]
+    pub fn connection_picker_not_paired(&self) -> Vec<String> {
+        let Some(dialog) = &self.connection_picker else {
+            return Vec::new();
+        };
+        dialog
+            .picker
+            .rows()
+            .into_iter()
+            .filter(|row| row.kind == RowKind::Saved && dialog.not_paired.contains(&row.label))
+            .map(|row| row.label)
+            .collect()
+    }
+
+    /// The saved hosts this PC holds no device token for. A host whose
+    /// token cannot be read is left untagged.
+    fn hosts_not_paired(&self, saved: &[SavedHost]) -> HashSet<String> {
+        saved
+            .iter()
+            .filter(|host| match self.tokens.get(&host.name) {
+                Ok(token) => token.is_none(),
+                Err(err) => {
+                    tracing::warn!(
+                        host = host.name.as_str(),
+                        "reading the host's device token for the picker: {err:#}"
+                    );
+                    false
+                }
+            })
+            .map(|host| host.name.clone())
             .collect()
     }
 
@@ -143,7 +183,9 @@ impl RootView {
         if self.connection_picker.is_some() {
             return;
         }
-        let picker = ConnectionPicker::new(self.sidebar.ui_state().saved_hosts.clone());
+        let saved = self.sidebar.ui_state().saved_hosts.clone();
+        let not_paired = self.hosts_not_paired(&saved);
+        let picker = ConnectionPicker::new(saved);
         let current = picker
             .rows()
             .iter()
@@ -163,6 +205,7 @@ impl RootView {
         self.close_flyout();
         self.connection_picker = Some(ConnectionPickerDialog {
             picker,
+            not_paired,
             name_input,
             port_input,
             focus: PickerControl::Row(current),
@@ -336,9 +379,12 @@ impl RootView {
 
     /// Closes the picker and, unless `target` is the current one, sends the
     /// switch and saves it as the boot target, a tailnet host also among the
-    /// saved hosts.
+    /// saved hosts. The current host, while it does not know this PC, opens
+    /// the pairing dialog instead.
     fn switch_to_target(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
-        if target != *self.conn.target() {
+        let current = target == *self.conn.target();
+        let pair_current = current && self.device_pairing_offered();
+        if !current {
             let host = target.tailnet_host().map(|host| SavedHost {
                 name: host.name().to_owned(),
                 port: host.port(),
@@ -347,15 +393,22 @@ impl RootView {
                 dialog.picker.remember(host.clone());
                 self.sidebar.set_saved_hosts(dialog.picker.saved().to_vec());
             }
+            if host.is_some() {
+                self.pair_on_not_approved();
+            }
             self.sidebar.set_last_target(host);
             self.save_ui();
             self.command(NetCommand::SwitchTarget(target));
         }
         self.close_connection_picker(window, cx);
+        if pair_current {
+            self.open_device_pairing(window, cx);
+        }
     }
 
-    /// Forget on the saved host at row `index`; forgetting the current host
-    /// switches to this PC. The picker stays open.
+    /// Forget on the saved host at row `index`, its device token deleted
+    /// with it; forgetting the current host switches to this PC. The picker
+    /// stays open.
     fn forget_connection_row(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         let current = self.conn.target().clone();
         let Some(dialog) = &mut self.connection_picker else {
@@ -374,7 +427,21 @@ impl RootView {
             self.command(NetCommand::SwitchTarget(Target::Local));
         }
         self.save_ui();
+        self.forget_device_token(&row.label, cx);
         self.apply_connection_picker_focus(window, cx);
+    }
+
+    /// Deletes `host`'s device token; a failed delete says so in a toast.
+    fn forget_device_token(&mut self, host: &str, cx: &mut Context<Self>) {
+        if let Err(err) = self.tokens.delete(host) {
+            tracing::warn!(host, "deleting the forgotten host's device token: {err:#}");
+            self.push_toast(
+                ToastKind::Error,
+                "Couldn't forget this host's device token",
+                Some(err.to_string()),
+                cx,
+            );
+        }
     }
 
     /// The keyboard goes where the picker's focus is: a field, else the
@@ -407,14 +474,18 @@ impl RootView {
         let rows = dialog.picker.rows();
         let focus = dialog.focus;
         let current = self.conn.target();
-        let list =
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(4.0))
-                .children(rows.iter().enumerate().map(|(index, row)| {
-                    row_line(index, row, row.target == *current, focus, &rows, cx)
-                }));
+        let list = div()
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .children(rows.iter().enumerate().map(|(index, row)| {
+                let tags = RowTags {
+                    current: row.target == *current,
+                    not_paired: row.kind == RowKind::Saved
+                        && dialog.not_paired.contains(&row.label),
+                };
+                row_line(index, row, tags, focus, &rows, cx)
+            }));
         let scan = self.connection_picker_scan_text().map(|text| {
             let failed = !dialog.picker.scan_pending();
             div()
@@ -455,23 +526,42 @@ fn picker_button(
     }))
 }
 
-/// One row: its button, a muted "Current" tag on the current target, and a
-/// saved host's Forget button.
+/// The muted tags a row carries.
+#[derive(Debug, Clone, Copy)]
+struct RowTags {
+    /// The row is the current target.
+    current: bool,
+    /// A saved host this PC holds no device token for.
+    not_paired: bool,
+}
+
+/// One row: its button, a muted "Not paired" tag on a saved host this PC
+/// holds no device token for, a muted "Current" tag on the current target,
+/// and a saved host's Forget button.
 fn row_line(
     index: usize,
     row: &Row,
-    current: bool,
+    tags: RowTags,
     focus: PickerControl,
     rows: &[Row],
     cx: &mut Context<RootView>,
 ) -> Div {
     let pick = picker_button(PickerControl::Row(index), &row.label, focus, rows, cx).flex_1();
+    let not_paired_selector = format!("connections-not-paired-{}", row.label);
     div()
         .flex()
         .items_center()
         .gap(px(6.0))
         .child(pick)
-        .when(current, |line| {
+        .when(tags.not_paired, |line| {
+            line.child(
+                div()
+                    .debug_selector(|| not_paired_selector)
+                    .text_color(gpui::rgb(MUTED))
+                    .child("Not paired"),
+            )
+        })
+        .when(tags.current, |line| {
             line.child(div().text_color(gpui::rgb(MUTED)).child("Current"))
         })
         .when(row.kind == RowKind::Saved, |line| {

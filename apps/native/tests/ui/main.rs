@@ -22,6 +22,7 @@ mod ui_commit;
 mod ui_connections;
 mod ui_container_menu;
 mod ui_delete_worktree;
+mod ui_device_pairing;
 mod ui_diff_tab;
 mod ui_diff_view;
 mod ui_ellipsis;

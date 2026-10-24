@@ -277,7 +277,7 @@ fn groups(code: &str) -> String {
 }
 
 /// `secs` as `m:ss`.
-fn mmss(secs: u64) -> String {
+pub(crate) fn mmss(secs: u64) -> String {
     format!("{}:{:02}", secs / 60, secs % 60)
 }
 

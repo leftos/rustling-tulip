@@ -89,9 +89,9 @@ fn tls_config_trusting(certs: Vec<CertificateDer<'static>>) -> Result<Arc<Client
 
 impl NetDeps {
     /// The daemon under the config dir, reused when compatible, with this
-    /// client's identity.
+    /// client's identity and the device tokens in `tokens`.
     #[must_use]
-    pub fn production() -> Self {
+    pub fn production(tokens: Arc<dyn DeviceTokenStore>) -> Self {
         let identity = daemon_client::client_identity(CLIENT_ID_FILE)
             .inspect_err(|err| {
                 warn!("loading the client identity, connecting without one: {err:#}");
@@ -101,7 +101,7 @@ impl NetDeps {
             ensure: Box::new(ensure_daemon),
             identity,
             stop: Box::new(|| Box::pin(daemon_client::stop())),
-            tokens: device_token_store(),
+            tokens,
             tls: None,
         }
     }
@@ -109,7 +109,7 @@ impl NetDeps {
 
 /// Windows Credential Manager's device tokens; an empty in-memory store when
 /// it cannot be opened, so every tailnet host is dialled without a token.
-fn device_token_store() -> Arc<dyn DeviceTokenStore> {
+pub(crate) fn device_token_store() -> Arc<dyn DeviceTokenStore> {
     match CredentialManagerTokens::open() {
         Ok(store) => Arc::new(store),
         Err(err) => {
@@ -229,14 +229,16 @@ pub enum NetEvent {
     TokenSaveFailed,
 }
 
-/// Spawns the network thread on the production [`NetDeps`], connecting to
-/// `target` first. It runs until the view drops its command sender.
+/// Spawns the network thread on the production [`NetDeps`] holding the
+/// device tokens in `tokens`, connecting to `target` first. It runs until the
+/// view drops its command sender.
 pub fn spawn(
     target: Target,
+    tokens: Arc<dyn DeviceTokenStore>,
     commands: UnboundedReceiver<NetCommand>,
     events: UnboundedSender<NetEvent>,
 ) {
-    spawn_with(NetDeps::production(), target, commands, events);
+    spawn_with(NetDeps::production(tokens), target, commands, events);
 }
 
 /// Spawns the network thread on `deps`, connecting to `target` first: a
