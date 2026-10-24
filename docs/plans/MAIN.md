@@ -12,9 +12,7 @@
 - [ ] RT-243 Split tailnet Supervisor::run and carry the real CertFailed reason
 - [ ] RT-258 Remote mode: don't send this PC's remembered folders to a remote host
 - [ ] RT-152 P6.3: Host picker from the tailnet's machines, typed-name fallback, boot reconnect · release vNext
-  - [ ] RT-353 P6.3 B: Tailnet peers, saved hosts and the boot target (model) · release vNext
   - [ ] RT-354 P6.3 C: Host picker view and the Connections button · release vNext
-- [ ] RT-257 P6.2b: typed host path for Add repo and Browse on a remote host · release vNext
 - [ ] RT-173 Import remote sessions: offer to arrange a remote host's sessions when their count changed · release vNext
 - [ ] RT-158 P6.6: Remote tests over a fake Tailscale, hand checklist, and the docs pass · release vNext
 - [ ] RT-244 Preset wizard: typed host paths instead of local pickers in remote mode
@@ -28,8 +26,7 @@
   - [ ] RT-341 RT-331 S8: Viewer docs and task index rows · release vNext
 - [ ] RT-343 Keep name, look and sidebar place when Recover respawns a session
 - [ ] RT-349 Restart conversation discovery for sessions reattached after a daemon restart
-- [/] RT-359 Keep a Claude session's pane as a shell when Claude exits, with a timed close toast · release vNext
-- [ ] RT-360 Make the agent's launch command customizable in Settings: another program, an alias or extra arguments · release vNext
+- [/] RT-360 Make the agent's launch command customizable in Settings: another program, an alias or extra arguments · release vNext
 
 ## Wave 1a — Claude sessions on DeepSeek
 
@@ -40,7 +37,6 @@
 
 - [ ] RT-179 Keep keyboard focus when pressing Worktrees Save disables it · release vNext
 - [ ] RT-195 Give the container menu a keyboard route · release vNext
-- [ ] RT-313 Make keep-awake a three-way switch: Off, Keep awake when busy, Keep awake always · release vNext
 - [ ] RT-202 Accept the 1015 and 1016 mouse-report encodings · release vNext
 - [ ] RT-204 Clear the container row focus when the sidebar stops showing the container list · release vNext
 - [ ] RT-205 Re-sync a watched .code-workspace once at daemon start · release vNext
@@ -70,9 +66,15 @@
 
 ## Wave 4 — Mobile app (iPhone PWA over Tailscale)
 
-- [ ] RT-106 Phone files: open a tapped path in a viewer, browse a worktree, share into a session
-- [ ] RT-104 MA6: Phone home with the attention feed and sessions; reply, answer prompts, stop and resume
-- [ ] RT-143 Re-plan the mobile app as an iPhone PWA over Tailscale
+- [ ] RT-363 iPhone PWA MVP: install, pair, Home, session screen, push and badge
+  - [ ] RT-364 PW.1: Serve the PWA shell from the tailnet listener
+  - [ ] RT-365 PW.3: Pair the PWA with a device token
+  - [ ] RT-366 PW.5: Phone session screen: live rows, composer, Quick and Keys, prompt sheet
+  - [ ] RT-367 PW.6: Web Push with the owner's VAPID keys
+  - [ ] RT-368 PW.7: Home Screen badge with the Needs you count
+  - [ ] RT-369 PW.8: Install guide and hand checklist on the iPhone
+  - [ ] RT-370 PW.2: Protocol types for the PWA and its connection
+  - [ ] RT-104 PW.4: Phone Home: grouped list and Needs you tray; answer prompts, stop and resume
 
 ## Wave 5 — Attention feed on the desktop
 
@@ -102,10 +104,11 @@
 ## Wave 8 — Chat mirror and phone session views
 
 - [ ] RT-51 Chat mirror: a Claude session as a chat over its live terminal, with interactive cards
+- [ ] RT-106 PW.12: Phone files: viewer with Share and Save, worktree tree, send photos and files into a session
 - [ ] RT-107 Running-work strip: subagents, background shells and wakeups over the chat
 - [ ] RT-110 Chat composer: slash commands, @ file mentions, image attach, quick replies
-- [ ] RT-108 MA8: Phone terminal with a key bar
-- [ ] RT-109 MA9: Phone chat view over the chat mirror
+- [ ] RT-108 PW.9: Phone terminal: xterm.js with collie's key bar
+- [ ] RT-109 PW.10: Phone chat above the status line over the chat mirror
 - [ ] RT-142 Phone: tap a Linear identifier to see its card
 - [ ] RT-185 Render stretchtext replies as expandable text in the chat mirror
 
@@ -130,7 +133,7 @@
 
 - [ ] RT-66 Amend the accounts plan to take ops-tower's claude-accounts crate instead of porting cswap
 - [ ] RT-39 Built-in claude-swap: several Claude logins, usage polling and switching
-- [ ] RT-112 MA10: Accounts screen on the phone
+- [ ] RT-112 PW.13: Accounts screen on the phone
 - [ ] RT-113 Open Claude artifact links in the account that published them
 - [ ] RT-115 Host-approved extra roots for file fetch
 - [ ] RT-114 Artifacts list, with read-only local copies served by the daemon
@@ -151,7 +154,7 @@
   - [ ] RT-79 DI.7: Document dictation in native-client.md
 - [ ] RT-80 DI.4: Hold spoken alerts while dictating, and count the box as presence
 - [ ] RT-81 DI.5: Check that dictation in remote mode reaches the remote session
-- [ ] RT-83 MA11: Dictation in the mobile app
+- [ ] RT-83 PW.14: Dictation on the phone through the keyboard's dictation key
 
 ## Wave 15 — Linear issue links
 
@@ -274,3 +277,5 @@
 - [ ] RT-344 Mark files fetched from a remote host with Mark-of-the-Web
 - [ ] RT-347 Make the UI test harness's in_model refuse a selector it does not know
 - [ ] RT-362 Keep a shell-hosted Claude session's kind and conversation when history is rebuilt from tracer logs
+- [ ] RT-372 Clear the Worktrees field's pending apply when the daemon refuses it
+- [ ] RT-373 Check the Shell dialog's typed folder by the host's path rules on a remote host
