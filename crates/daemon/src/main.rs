@@ -10,9 +10,9 @@ mod binary_cache;
 mod branch_fate;
 mod branch_names;
 mod child_env;
+mod cli_pair;
 mod conversations;
 mod detach;
-#[expect(dead_code, reason = "wired by RT-166 D2/D3")]
 mod devices;
 mod env_secrets;
 mod file_fetch;
@@ -76,6 +76,13 @@ const INSTANCE_LOCK_WAIT: Duration = Duration::from_secs(5);
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let dirs = paths::Dirs::ensure()?;
+    // `rustling-tulipd pair` prints a one-time device pairing code from the
+    // running daemon's loopback listener and exits: no instance lock, no log
+    // rotation and no binary-cache sweep, so it is safe beside a live daemon.
+    if cli_pair::requested(std::env::args_os().skip(1)) {
+        cli_pair::attach_parent_console();
+        return cli_pair::run(&dirs.handshake_file, &mut std::io::stdout().lock()).await;
+    }
     // The login `Run` entry runs the installed exe with `--detach`: hand over
     // to a cached copy and exit, without taking the instance lock, the log or
     // the binary-cache sweep from a daemon that may already serve this config

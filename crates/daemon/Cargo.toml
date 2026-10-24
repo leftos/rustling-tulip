@@ -35,6 +35,13 @@ chrono = { workspace = true }
 directories = { workspace = true }
 
 axum = { version = "0.8", features = ["ws"] }
+# The WebSocket client the `pair` subcommand and the device pairing tests
+# drive the daemon's loopback router with, over plain ws (no TLS). Already in
+# the lock through axum's `ws` feature.
+tokio-tungstenite = { version = "0.29", default-features = false, features = [
+    "handshake",
+    "connect",
+] }
 # The terminal emulator behind the per-session screen: the same crate and
 # version the native client renders with, so the daemon reads the grid the
 # client shows.
@@ -97,10 +104,6 @@ rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"]
 # `test-util` enables the paused clock (`#[tokio::test(start_paused = true)]`)
 # used by the idle-exit watcher tests to fast-forward through grace periods.
 tokio = { workspace = true, features = ["test-util"] }
-# The WebSocket client the device pairing tests drive the tailnet and loopback
-# routers with, over plain ws on a scratch listener. Already in the lock
-# through axum's `ws` feature.
-tokio-tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }
 
 [target.'cfg(windows)'.dependencies]
 # Windows Credential Manager as the `keyring-core` store. Default features off
@@ -115,11 +118,15 @@ windows-native-keyring-store = { version = "1.1", default-features = false }
 # references, plus `CreateProcessW` (Threading; Security for its
 # SECURITY_ATTRIBUTES parameters) spawning tracers that inherit none of the
 # daemon's handles, plus the Job Objects API killing a pre-create run's whole
-# process tree. 0.61 matches the version already pulled transitively by
+# process tree, plus the Console API (`AttachConsole`, `GetStdHandle`,
+# `SetStdHandle`) and `CreateFileW` giving the `pair` subcommand the parent's
+# console. 0.61 matches the version already pulled transitively by
 # the existing dep graph.
 windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
     "Win32_System_JobObjects",
     "Win32_System_Power",
     "Win32_System_Registry",

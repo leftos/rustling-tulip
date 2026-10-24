@@ -34,7 +34,7 @@ pub(crate) struct ScratchDir {
 }
 
 impl ScratchDir {
-    pub(super) fn new(tag: &str) -> Self {
+    pub(crate) fn new(tag: &str) -> Self {
         let path = std::env::temp_dir().join(format!(
             "rt-server-{tag}-{}-{}",
             std::process::id(),
@@ -44,7 +44,7 @@ impl ScratchDir {
         Self { path }
     }
 
-    pub(super) fn path(&self) -> &Path {
+    pub(crate) fn path(&self) -> &Path {
         &self.path
     }
 }
@@ -476,19 +476,31 @@ pub(super) fn hook_request(
 /// A WebSocket client connection to a scratch router.
 pub(super) type WsClient = tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>;
 
-/// Serve `app` on a scratch loopback listener and open a WebSocket client
-/// to `url`'s path on it; `url`'s authority is what the upgrade's `Host`
-/// carries. The serving task lives until the test's runtime ends.
-async fn scratch_ws_client(app: axum::Router, url: impl FnOnce(u16) -> String) -> WsClient {
+/// Serve `app` on a scratch loopback listener and return the bound port. The
+/// serving task lives until the test's runtime ends.
+async fn scratch_listener(app: axum::Router) -> u16 {
     let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
         .await
         .expect("bind a scratch listener");
     let addr = listener.local_addr().expect("the bound address");
     tokio::spawn(async move { axum::serve(listener, app).await });
-    let tcp = tokio::net::TcpStream::connect(addr)
+    addr.port()
+}
+
+/// Serve `hub`'s loopback router on a scratch listener and return its port.
+pub(crate) async fn serve_loopback(hub: &Hub) -> u16 {
+    scratch_listener(super::build_loopback_router(hub.clone())).await
+}
+
+/// Serve `app` on a scratch loopback listener and open a WebSocket client
+/// to `url`'s path on it; `url`'s authority is what the upgrade's `Host`
+/// carries. The serving task lives until the test's runtime ends.
+async fn scratch_ws_client(app: axum::Router, url: impl FnOnce(u16) -> String) -> WsClient {
+    let port = scratch_listener(app).await;
+    let tcp = tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
         .await
         .expect("connect to the scratch listener");
-    let (client, _) = tokio_tungstenite::client_async(url(addr.port()), tcp)
+    let (client, _) = tokio_tungstenite::client_async(url(port), tcp)
         .await
         .expect("the WebSocket upgrade succeeds");
     client

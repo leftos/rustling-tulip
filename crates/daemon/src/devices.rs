@@ -166,6 +166,7 @@ impl DeviceStore {
     }
 
     /// Whether the file could not be read or decoded.
+    #[cfg(test)]
     #[must_use]
     pub fn is_corrupt(&self) -> bool {
         self.corrupt
@@ -278,16 +279,6 @@ impl DeviceStore {
     #[must_use]
     pub fn list(&self) -> &[DeviceRecord] {
         &self.devices
-    }
-
-    /// Write the current records through a temp file and a rename.
-    ///
-    /// # Errors
-    ///
-    /// The store is corrupt (the file is left as it is) or the write failed.
-    pub fn save(&self) -> io::Result<()> {
-        self.refuse_if_corrupt()?;
-        write_file(&self.path, &self.devices)
     }
 
     fn refuse_if_corrupt(&self) -> io::Result<()> {
@@ -520,12 +511,6 @@ impl PairingBook {
             }
             None => false,
         }
-    }
-
-    /// Drop `stable_id`'s request, if any. Called when the device's pending
-    /// connection goes away.
-    pub fn cancel_for(&mut self, stable_id: &str) {
-        drop(self.take_for(stable_id));
     }
 
     /// Redeem `code` for request `id` on behalf of the device `stable_id`.
@@ -1098,22 +1083,6 @@ mod tests {
             Err(PairError::Expired)
         );
         assert!(book.pending().is_empty(), "the lapsed request is dropped");
-    }
-
-    #[test]
-    fn cancel_for_drops_the_devices_request() {
-        let mut book = PairingBook::new();
-        let now = Instant::now();
-        let request = book
-            .request(&phone(), now, Utc::now())
-            .expect("request a pairing");
-        book.cancel_for("node-a");
-        assert!(book.pending().is_empty(), "the request is gone");
-        assert_eq!(
-            book.approve(&request.id, now),
-            Err(PairError::Unknown),
-            "a cancelled request cannot be approved"
-        );
     }
 
     #[test]

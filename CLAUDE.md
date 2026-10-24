@@ -88,6 +88,8 @@ Every cargo command `rt.ps1` runs goes through the repo's gate wrapper, `pwsh -N
 
 Nothing calls `gate.exe` directly. The wrapper hands the call to the installed gate.exe (installed from the gate repo with `pwsh tools/install.ps1`), or runs the command directly on a machine without one.
 
+`rustling-tulipd pair` prints a one-time device pairing code from the running daemon (it needs the daemon already running, reads `daemon.json` and takes no instance lock; `crates/daemon/src/cli_pair.rs`); the owner types the code on a device whose pairing request is waiting.
+
 The native client auto-spawns the daemon on first connect via `daemon_client::ensure_running` (`crates/daemon-client`), passing the protocol versions it speaks. The daemon writes `port` + `auth_token` + `pid` + `supported_versions` to `daemon.json` in the config dir below; clients read that to connect.
 
 A daemon sharing none of the client's versions is retired and replaced. The native client speaks only the current version, and the daemon's `supported` (`protocol-version.json`) lists only the current version too.
