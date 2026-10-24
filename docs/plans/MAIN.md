@@ -11,13 +11,12 @@
 - [ ] RT-240 Close tailnet sessions when their listener drops · release vNext
 - [ ] RT-243 Split tailnet Supervisor::run and carry the real CertFailed reason
 - [ ] RT-258 Remote mode: don't send this PC's remembered folders to a remote host
-- [ ] RT-173 Import remote sessions: offer to arrange a remote host's sessions when their count changed · release vNext
 - [ ] RT-158 P6.6: Remote tests over a fake Tailscale, hand checklist, and the docs pass · release vNext
 - [ ] RT-244 Preset wizard: typed host paths instead of local pickers in remote mode
 - [/] RT-166 TS.3b: device tokens issued only after the owner approves the device on the host PC · release vNext
 - [ ] RT-278 Prove the daemon holds the token before a client reuses, retires or kills it
 - [ ] RT-331 Built-in text and Markdown viewer with Open in default app and an always-external setting · release vNext
-  - [ ] RT-337 RT-331 S4: Text viewer view and link/fetch routing · release vNext
+  - [/] RT-337 RT-331 S4: Text viewer view and link/fetch routing · release vNext
   - [ ] RT-338 RT-331 S5: Markdown core on pulldown-cmark · release vNext
   - [ ] RT-339 RT-331 S6: Markdown view with Source toggle and links · release vNext
   - [ ] RT-340 RT-331 S7: Viewer line selection, find and reload · release vNext
@@ -280,6 +279,7 @@
 - [ ] RT-362 Keep a shell-hosted Claude session's kind and conversation when history is rebuilt from tracer logs
 - [ ] RT-372 Clear the Worktrees field's pending apply when the daemon refuses it
 - [ ] RT-373 Check the Shell dialog's typed folder by the host's path rules on a remote host
+- [ ] RT-379 Make toast buttons pressed from Action Center reach the native client
 
 ## No project
 
