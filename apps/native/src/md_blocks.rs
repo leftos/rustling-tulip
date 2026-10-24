@@ -2,14 +2,6 @@
 //! headings give, and inline spans with their style flags and link targets.
 //! Plain Rust: no GPUI and no I/O.
 
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the Markdown view wires these in the step that renders them"
-    )
-)]
-
 use crate::open::validate_http_url;
 
 use std::ops::Range;

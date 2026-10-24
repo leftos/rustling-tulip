@@ -8,8 +8,9 @@
 //!
 //! Views: `main` (the default: the sidebar and a split tab), `main-compact`
 //! (the same window with the sidebar's leaves one line each),
-//! `source-control`, `diff`, `settings`, `spawn` and `viewer` (a viewer tab
-//! over a small Rust file, scrolled to a line). The PNG goes to
+//! `source-control`, `diff`, `settings`, `spawn`, `viewer` (a viewer tab
+//! over a small Rust file, scrolled to a line) and `viewer-md` (a viewer tab
+//! over a Markdown file, rendered). The PNG goes to
 //! `.tmp/shots/<view>.png` under the repo root unless `<out.png>` is given;
 //! the window's layout file is kept beside it in `.ui/` and cleared on every
 //! run.
@@ -81,6 +82,8 @@ const VIEWER_TAB: &str = "t-viewer";
 /// The file the `viewer` shot views, and the line its open asks for.
 const VIEWER_FILE: &str = "footer.rs";
 const VIEWER_LINE: u32 = 30;
+/// The file the `viewer-md` shot views.
+const VIEWER_MD_FILE: &str = "README.md";
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -115,10 +118,11 @@ enum View {
     SettingsClaude,
     Spawn,
     Viewer,
+    ViewerMd,
 }
 
 impl View {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
         Self::Main,
         Self::MainCompact,
         Self::SourceControl,
@@ -127,6 +131,7 @@ impl View {
         Self::SettingsClaude,
         Self::Spawn,
         Self::Viewer,
+        Self::ViewerMd,
     ];
 
     fn name(self) -> &'static str {
@@ -139,6 +144,7 @@ impl View {
             Self::SettingsClaude => "settings-claude",
             Self::Spawn => "spawn",
             Self::Viewer => "viewer",
+            Self::ViewerMd => "viewer-md",
         }
     }
 
@@ -163,7 +169,7 @@ impl View {
             Self::Settings => root.settings_open(),
             Self::SettingsClaude => root.settings_open() && root.settings_tab() == "Claude",
             Self::Spawn => root.spawn_dialog_open(),
-            Self::Viewer => {
+            Self::Viewer | Self::ViewerMd => {
                 root.active_tab_id() == Some(VIEWER_TAB)
                     && root
                         .viewer_tab(VIEWER_TAB)
@@ -212,9 +218,20 @@ impl Shot {
         {
             return Err(err).with_context(|| format!("clearing {}", saved.display()));
         }
-        if self.view == View::Viewer {
+        let sample_text = match self.view {
+            View::Viewer => Some(FOOTER_OLD),
+            View::ViewerMd => Some(README_MD),
+            View::Main
+            | View::MainCompact
+            | View::SourceControl
+            | View::Diff
+            | View::Settings
+            | View::SettingsClaude
+            | View::Spawn => None,
+        };
+        if let Some(text) = sample_text {
             let sample = self.viewer_sample();
-            return std::fs::write(&sample, FOOTER_OLD)
+            return std::fs::write(&sample, text)
                 .with_context(|| format!("writing {}", sample.display()));
         }
         if self.view != View::MainCompact {
@@ -225,9 +242,15 @@ impl Shot {
         std::fs::write(&saved, layout).with_context(|| format!("writing {}", saved.display()))
     }
 
-    /// The file the `viewer` shot's tab views, beside the layout file.
+    /// The file the `viewer` or `viewer-md` shot's tab views, beside the
+    /// layout file.
     fn viewer_sample(&self) -> PathBuf {
-        self.ui_dir.join(VIEWER_FILE)
+        let file = if self.view == View::ViewerMd {
+            VIEWER_MD_FILE
+        } else {
+            VIEWER_FILE
+        };
+        self.ui_dir.join(file)
     }
 }
 
@@ -412,6 +435,15 @@ fn drive(
                 .context("the window has no root view")?;
             let path = sample.to_string_lossy().into_owned();
             root.update(cx, |root, _| root.open_viewer(&path, Some(VIEWER_LINE)));
+            Ok(())
+        }
+        View::ViewerMd => {
+            let root = window
+                .root::<RootView>()
+                .flatten()
+                .context("the window has no root view")?;
+            let path = sample.to_string_lossy().into_owned();
+            root.update(cx, |root, _| root.open_viewer(&path, None));
             Ok(())
         }
     }
@@ -1012,12 +1044,16 @@ fn file_snapshot(msg: &ClientMessage) -> Result<DaemonMessage> {
     })
 }
 
-/// The daemon's answer to the `viewer` shot's `OpenViewerTab` `id` of
-/// `path`: the new tab, then the open's reply naming it.
+/// The daemon's answer to a viewer shot's `OpenViewerTab` `id` of `path`:
+/// the new tab, then the open's reply naming it.
 fn viewer_opened(id: &str, path: &str) -> Result<Vec<DaemonMessage>> {
+    let name = Path::new(path)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .with_context(|| format!("the viewer path {path} has no file name"))?;
     let tab = serde_json::from_value(json!({
         "id": VIEWER_TAB,
-        "name": VIEWER_FILE,
+        "name": name,
         "content": { "kind": "viewer", "path": path },
         "created_at": "2026-01-01T00:00:00Z",
     }))
@@ -1106,6 +1142,43 @@ const SHELL_SCREEN: &[&str] = &[
 ];
 
 /// The footer before the Petal session's edits.
+/// The Markdown file the `viewer-md` shot renders: one block of each kind.
+const README_MD: &str = "# Rustling Tulip
+
+A native client for many parallel **Claude** sessions, with *worktrees*, \
+`git` status and ~~no~~ a [Markdown viewer](https://example.com).
+
+## Getting started
+
+1. Install the prerequisites with `.\\rt.ps1 setup`.
+2. Build and run the client:
+   - `.\\rt.ps1 build`
+   - `.\\rt.ps1 native`
+3. Open a `.md` file from a terminal link.
+
+- [x] Headings, lists and quotes
+- [ ] Link clicks
+
+> The daemon owns every PTY; the client is just a client.
+
+```rust
+fn main() -> anyhow::Result<()> {
+    let count = 3; // sessions
+    println!(\"{count} sessions\");
+    Ok(())
+}
+```
+
+| Tier | Runs | Needs |
+|:-----|:----:|------:|
+| UI specs | in process | nothing |
+| Live e2e | real daemon | node |
+
+---
+
+![the main window](docs/main.png)
+";
+
 const FOOTER_OLD: &str = r"//! The footer: the connection pill, the status text and the log flyout.
 
 use gpui::{Div, SharedString, div, prelude::*, px};

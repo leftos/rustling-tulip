@@ -25,8 +25,10 @@ use crate::open_view::{Origin, Route, Then};
 use crate::palette::{LINE, SUBTLE, SURFACE};
 use crate::remote_mode::LOCAL_FILES_REASON;
 use crate::syntax::{self, Highlighted, TokenClass};
+use crate::viewer_md_view::markdown_toggle;
 use crate::viewer_tab::{
-    self, Activation, OPEN_FAILED_TITLE, ReadFailure, ViewerOrigin, ViewerTab, ViewerText,
+    self, Activation, MarkdownMode, OPEN_FAILED_TITLE, ReadFailure, ViewerOrigin, ViewerTab,
+    ViewerText,
 };
 use crate::{HOVER_BG, MUTED, RootView, TEXT, UI_TEXT_SIZE, tooltip};
 
@@ -205,11 +207,16 @@ impl RootView {
             .retain(|tab_id, _| paths.iter().any(|(id, _)| id == tab_id));
         let opens_local_files = self.capabilities().opens_local_files();
         let download_root = self.remote_files_root.as_ref().ok().map(PathBuf::as_path);
+        let markdown_default = if self.sidebar.ui_state().viewer_markdown_rendered {
+            MarkdownMode::Rendered
+        } else {
+            MarkdownMode::Source
+        };
         for (tab_id, path) in paths {
             self.viewer_tabs.entry(tab_id).or_insert_with(|| {
                 let origin =
                     viewer_tab::derive_origin(Path::new(&path), download_root, opens_local_files);
-                ViewerTab::new(path, origin)
+                ViewerTab::new(path, origin, markdown_default)
             });
         }
         let reads: Vec<(String, PathBuf, u64)> = self
@@ -258,6 +265,7 @@ impl RootView {
             return;
         }
         self.highlight_viewer(tab_id, read, cx);
+        self.parse_viewer_markdown(tab_id, read, cx);
         cx.notify();
     }
 
@@ -463,7 +471,14 @@ impl RootView {
                 .text_color(gpui::rgb(MUTED))
                 .child(note)
         });
-        let lines = tab.text().map(|text| self.viewer_lines(tab_id, tab, text));
+        let lines = tab.text().map(|text| match tab.markdown() {
+            Some(MarkdownMode::Rendered) => match tab.markdown_doc() {
+                Some((doc, blocks)) => self.viewer_markdown(tab_id, doc, blocks),
+                // The document is being parsed.
+                None => div().flex_1(),
+            },
+            Some(MarkdownMode::Source) | None => self.viewer_lines(tab_id, tab, text),
+        });
         Some(
             div()
                 .debug_selector(move || body)
@@ -551,6 +566,7 @@ fn viewer_header(tab_id: &str, tab: &ViewerTab, cx: &mut Context<RootView>) -> D
         .border_color(gpui::rgb(LINE))
         .child(path_box(tab.path()))
         .child(div().flex_1())
+        .children(markdown_toggle(tab_id, tab, cx))
         .children(buttons)
 }
 

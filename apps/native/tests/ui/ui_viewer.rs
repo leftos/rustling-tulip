@@ -177,7 +177,10 @@ fn a_plain_path_link_opens_a_viewer_tab_not_the_default_app(cx: &mut TestAppCont
         Some((ViewerOrigin::Link, ViewerLoad::Loaded, None))
     );
     assert!(drawn(&mut h, "viewer-v1"));
-    assert!(drawn(&mut h, "viewer-line-v1-1"), "the file's text shows");
+    assert!(
+        drawn(&mut h, "viewer-md-block-v1-0"),
+        "the file shows, rendered"
+    );
     assert!(!drawn(&mut h, "viewer-banner-v1"));
 }
 

@@ -110,6 +110,7 @@ mod text_input;
 mod theme;
 mod undo;
 mod undo_view;
+mod viewer_md_view;
 mod viewer_tab;
 mod viewer_tab_view;
 mod viewer_text;

@@ -314,6 +314,10 @@ pub enum Activity {
 }
 
 /// The persisted sidebar layout.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each flag is a saved toggle of its own, set and read separately"
+)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UiState {
@@ -367,6 +371,9 @@ pub struct UiState {
     /// Whether the diff tabs colour code by the file's language.
     #[serde(default = "highlight_by_default")]
     pub diff_highlight: bool,
+    /// Whether a Markdown file opens in the viewer rendered, not as source.
+    #[serde(default = "rendered_by_default")]
+    pub viewer_markdown_rendered: bool,
     /// The main window's place when it last moved; `None` until it has.
     #[serde(default)]
     pub window: Option<WindowState>,
@@ -590,6 +597,12 @@ fn highlight_by_default() -> bool {
     true
 }
 
+/// A layout saved before the viewer's Markdown toggle existed renders
+/// Markdown.
+fn rendered_by_default() -> bool {
+    true
+}
+
 impl Default for UiState {
     fn default() -> Self {
         Self {
@@ -610,6 +623,7 @@ impl Default for UiState {
             recent_colors: Vec::new(),
             diff_include_whitespace: true,
             diff_highlight: true,
+            viewer_markdown_rendered: true,
             window: None,
             general: GeneralSettings::default(),
             title: TitleSettings::default(),
@@ -984,6 +998,11 @@ impl SidebarModel {
     /// Whether the diff tabs colour code by the file's language.
     pub fn set_diff_highlight(&mut self, highlight: bool) {
         self.ui.diff_highlight = highlight;
+    }
+
+    /// Whether a Markdown file opens in the viewer rendered, not as source.
+    pub fn set_viewer_markdown_rendered(&mut self, rendered: bool) {
+        self.ui.viewer_markdown_rendered = rendered;
     }
 
     /// Whether a terminal selection is copied on release.
@@ -3178,6 +3197,7 @@ pub(crate) mod tests {
             recent_colors: vec!["#abcdef".to_owned()],
             diff_include_whitespace: false,
             diff_highlight: false,
+            viewer_markdown_rendered: false,
             window: None,
             general: GeneralSettings {
                 copy_on_select: false,
@@ -3445,6 +3465,23 @@ pub(crate) mod tests {
         let loaded = load_ui_state(&dir.0);
         assert!(loaded.title.show_count, "a group missing a field fills it");
         assert!(!loaded.title.suffix);
+    }
+
+    #[test]
+    fn viewer_markdown_rendered_defaults_on() {
+        assert!(UiState::default().viewer_markdown_rendered);
+    }
+
+    #[test]
+    fn a_file_without_the_key_loads_rendered() {
+        let dir = TestDir::new("viewer-markdown-rendered");
+        std::fs::write(dir.0.join(UI_FILE), r#"{ "diff_highlight": false }"#).expect("write");
+        let loaded = load_ui_state(&dir.0);
+        assert!(
+            !loaded.diff_highlight,
+            "the file was read: its highlight toggle is not the default"
+        );
+        assert!(loaded.viewer_markdown_rendered);
     }
 
     #[test]

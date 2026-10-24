@@ -12,12 +12,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
-use gpui::UniformListScrollHandle;
+use gpui::{ListAlignment, ListState, UniformListScrollHandle, px};
 
 use crate::diff_tab::{PENDING_ACTIVATE_TTL, split_path};
 use crate::file_fetch::is_under;
+use crate::md_blocks;
 use crate::remote_mode::LOCAL_FILES_REASON;
 use crate::syntax::Highlighted;
+use crate::viewer_md_view::MdDoc;
 use crate::viewer_text::{self, NotText};
 
 /// The toast an `OpenViewerTab` the daemon refused raises.
@@ -154,6 +156,9 @@ pub(crate) fn read_file(path: &Path) -> Result<ViewerText, ReadFailure> {
     let text = viewer_text::decode(&bytes).map_err(ReadFailure::NotText)?;
     Ok(ViewerText::new(text, viewer_text::language_for_path(path)))
 }
+
+/// How far past the rendered view's edges its list lays out blocks, in px.
+const MD_OVERDRAW: f32 = 400.0;
 
 /// The next read's number; one counter for every tab, so a read of a closed
 /// tab never lands on a later tab of the same id.
@@ -307,6 +312,12 @@ pub struct ViewerTab {
     line_target: Option<u32>,
     /// How a Markdown file shows; `None` for any other file.
     markdown: Option<MarkdownMode>,
+    /// Whether the text read is over the render cap, so it shows as source
+    /// only.
+    markdown_too_large: bool,
+    /// The rendered document of the text read and its block list, once
+    /// parsed.
+    md: Option<(Arc<MdDoc>, ListState)>,
 }
 
 impl Drop for ViewerTab {
@@ -317,12 +328,14 @@ impl Drop for ViewerTab {
 }
 
 impl ViewerTab {
-    pub(crate) fn new(path: String, origin: ViewerOrigin) -> Self {
+    /// A tab of `path`; a Markdown file starts in `markdown_default`, the
+    /// saved default.
+    pub(crate) fn new(path: String, origin: ViewerOrigin, markdown_default: MarkdownMode) -> Self {
         let load = match origin {
             ViewerOrigin::Fetched | ViewerOrigin::Link => ViewerLoad::Unread,
             ViewerOrigin::NotAvailable => ViewerLoad::NotAvailable,
         };
-        let markdown = is_markdown(&path).then_some(MarkdownMode::Rendered);
+        let markdown = is_markdown(&path).then_some(markdown_default);
         Self {
             path,
             origin,
@@ -335,6 +348,8 @@ impl ViewerTab {
             jump_pending: Cell::new(false),
             line_target: None,
             markdown,
+            markdown_too_large: false,
+            md: None,
         }
     }
 
@@ -365,6 +380,7 @@ impl ViewerTab {
                 self.highlight_cancel = Arc::new(AtomicBool::new(false));
                 self.text = None;
                 self.spans = None;
+                self.md = None;
                 self.load = ViewerLoad::Unread;
             }
         }
@@ -382,6 +398,7 @@ impl ViewerTab {
         }
         self.load = match result {
             Ok(text) => {
+                self.apply_render_cap(text.text().len());
                 self.text = Some(Arc::new(text));
                 self.jump_pending.set(self.line_target.is_some());
                 ViewerLoad::Loaded
@@ -392,6 +409,15 @@ impl ViewerTab {
             Err(ReadFailure::Unreadable) => ViewerLoad::Missing,
         };
         true
+    }
+
+    /// A Markdown text of `len` bytes over the render cap shows as source,
+    /// and its mode is locked there.
+    fn apply_render_cap(&mut self, len: usize) {
+        self.markdown_too_large = self.markdown.is_some() && !md_blocks::renders(len);
+        if self.markdown_too_large {
+            self.markdown = Some(MarkdownMode::Source);
+        }
     }
 
     /// The text read, once it landed.
@@ -478,11 +504,16 @@ impl ViewerTab {
         self.line_target
     }
 
-    /// An open asked for `line`: a line moves the target, none leaves it.
+    /// An open asked for `line`: a line moves the target, none leaves it. A
+    /// Markdown tab asked for a line shows its source, where lines are; the
+    /// saved default is left as it is.
     pub(crate) fn set_line_target(&mut self, line: Option<u32>) {
         if line.is_some() {
             self.line_target = line;
             self.jump_pending.set(true);
+            if self.markdown.is_some() {
+                self.markdown = Some(MarkdownMode::Source);
+            }
         }
     }
 
@@ -490,6 +521,45 @@ impl ViewerTab {
     #[must_use]
     pub fn markdown(&self) -> Option<MarkdownMode> {
         self.markdown
+    }
+
+    /// Whether the text read is over the render cap, so the mode stays
+    /// [`MarkdownMode::Source`].
+    #[must_use]
+    pub fn markdown_too_large(&self) -> bool {
+        self.markdown_too_large
+    }
+
+    /// Shows a Markdown file as `mode`; returns whether it took, which it
+    /// does not for another file or a text over the render cap.
+    pub(crate) fn set_markdown(&mut self, mode: MarkdownMode) -> bool {
+        if self.markdown.is_none() || self.markdown_too_large {
+            return false;
+        }
+        self.markdown = Some(mode);
+        true
+    }
+
+    /// Whether the text read is a Markdown document the rendered view can
+    /// show.
+    pub(crate) fn renders_markdown(&self) -> bool {
+        self.markdown.is_some() && !self.markdown_too_large && self.load == ViewerLoad::Loaded
+    }
+
+    /// The parse of read `read` landed as `doc`; kept, with a fresh block
+    /// list, while that read is still the one shown.
+    pub(crate) fn finish_markdown(&mut self, read: u64, doc: Arc<MdDoc>) -> bool {
+        if self.read != Some(read) || !self.renders_markdown() {
+            return false;
+        }
+        let list = ListState::new(doc.row_count(), ListAlignment::Top, px(MD_OVERDRAW));
+        self.md = Some((doc, list));
+        true
+    }
+
+    /// The rendered document and its block list, once parsed.
+    pub(crate) fn markdown_doc(&self) -> Option<&(Arc<MdDoc>, ListState)> {
+        self.md.as_ref()
     }
 
     /// The banner that says why no text shows, when none can.
@@ -533,6 +603,7 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
+    use crate::md_blocks::RENDER_CAP;
     use crate::remote_mode::LOCAL_FILES_REASON;
 
     const NOTES: &str = r"C:\notes\a.md";
@@ -568,7 +639,7 @@ mod tests {
     fn a_second_open_moves_the_target_line() {
         let mut opens = ViewerOpens::default();
         let now = Instant::now();
-        let mut tab = ViewerTab::new(NOTES.to_owned(), ViewerOrigin::Link);
+        let mut tab = ViewerTab::new(NOTES.to_owned(), ViewerOrigin::Link, MarkdownMode::Rendered);
         assert_eq!(tab.line_target(), None);
         let first = opens.open_id(Some(10));
         let second = opens.open_id(Some(42));
@@ -635,11 +706,15 @@ mod tests {
             ViewerOrigin::NotAvailable
         );
 
-        let local = ViewerTab::new(NOTES.to_owned(), ViewerOrigin::Link);
+        let local = ViewerTab::new(NOTES.to_owned(), ViewerOrigin::Link, MarkdownMode::Rendered);
         assert_eq!(local.load(), ViewerLoad::Unread);
         assert_eq!(local.note(), None);
         assert_eq!(local.name(), "a.md");
-        let remote = ViewerTab::new(NOTES.to_owned(), ViewerOrigin::NotAvailable);
+        let remote = ViewerTab::new(
+            NOTES.to_owned(),
+            ViewerOrigin::NotAvailable,
+            MarkdownMode::Rendered,
+        );
         assert_eq!(remote.load(), ViewerLoad::NotAvailable, "it reads nothing");
         assert_eq!(remote.note(), Some(LOCAL_FILES_REASON));
         assert_eq!(remote.name(), "a.md");
@@ -651,7 +726,7 @@ mod tests {
 
     /// A tab of [`NOTES`] whose file read landed as `text`.
     fn loaded(text_read: &str) -> ViewerTab {
-        let mut tab = ViewerTab::new(NOTES.to_owned(), ViewerOrigin::Link);
+        let mut tab = ViewerTab::new(NOTES.to_owned(), ViewerOrigin::Link, MarkdownMode::Rendered);
         let run = tab.begin_read().expect("an unread tab reads");
         assert!(tab.finish_read(run, Ok(text(text_read))));
         tab
@@ -659,11 +734,12 @@ mod tests {
 
     #[test]
     fn an_unread_tab_loads_once_and_a_stale_result_is_dropped() {
-        let mut closed = ViewerTab::new(NOTES.to_owned(), ViewerOrigin::Link);
+        let mut closed =
+            ViewerTab::new(NOTES.to_owned(), ViewerOrigin::Link, MarkdownMode::Rendered);
         let stale = closed.begin_read().expect("an unread tab reads");
         drop(closed);
 
-        let mut tab = ViewerTab::new(NOTES.to_owned(), ViewerOrigin::Link);
+        let mut tab = ViewerTab::new(NOTES.to_owned(), ViewerOrigin::Link, MarkdownMode::Rendered);
         let run = tab
             .begin_read()
             .expect("the tab of the same path reads too");
@@ -702,14 +778,19 @@ mod tests {
         empty.set_line_target(Some(5));
         assert_eq!(empty.jump_row(), None, "an empty file has no line");
 
-        let mut unread = ViewerTab::new(NOTES.to_owned(), ViewerOrigin::Link);
+        let mut unread =
+            ViewerTab::new(NOTES.to_owned(), ViewerOrigin::Link, MarkdownMode::Rendered);
         unread.set_line_target(Some(5));
         assert_eq!(unread.jump_row(), None, "nothing is read yet");
     }
 
     #[test]
     fn a_not_available_tab_never_reads() {
-        let mut tab = ViewerTab::new(NOTES.to_owned(), ViewerOrigin::NotAvailable);
+        let mut tab = ViewerTab::new(
+            NOTES.to_owned(),
+            ViewerOrigin::NotAvailable,
+            MarkdownMode::Rendered,
+        );
         assert_eq!(tab.begin_read(), None);
         assert_eq!(tab.load(), ViewerLoad::NotAvailable);
         assert!(!tab.finish_read(1, Ok(text("x\n"))), "no read lands");
@@ -737,7 +818,8 @@ mod tests {
             ),
             (ReadFailure::Unreadable, ViewerLoad::Missing, MISSING_BANNER),
         ] {
-            let mut tab = ViewerTab::new(NOTES.to_owned(), ViewerOrigin::Link);
+            let mut tab =
+                ViewerTab::new(NOTES.to_owned(), ViewerOrigin::Link, MarkdownMode::Rendered);
             let run = tab.begin_read().expect("an unread tab reads");
             assert!(tab.finish_read(run, Err(failure)));
             assert_eq!(tab.load(), load);
@@ -748,9 +830,51 @@ mod tests {
 
     #[test]
     fn a_path_ending_in_a_separator_is_named_by_the_whole_path() {
-        let tab = ViewerTab::new(r"C:\notes\".to_owned(), ViewerOrigin::Link);
+        let tab = ViewerTab::new(
+            r"C:\notes\".to_owned(),
+            ViewerOrigin::Link,
+            MarkdownMode::Rendered,
+        );
         assert_eq!(tab.name(), r"C:\notes\");
         assert_eq!(display_name("C:/notes/"), "C:/notes/");
         assert_eq!(display_name(NOTES), "a.md");
+    }
+
+    #[test]
+    fn a_markdown_tab_follows_the_saved_default() {
+        let rendered = ViewerTab::new(NOTES.to_owned(), ViewerOrigin::Link, MarkdownMode::Rendered);
+        assert_eq!(rendered.markdown(), Some(MarkdownMode::Rendered));
+        let source = ViewerTab::new(NOTES.to_owned(), ViewerOrigin::Link, MarkdownMode::Source);
+        assert_eq!(source.markdown(), Some(MarkdownMode::Source));
+        let upper = ViewerTab::new(
+            r"C:\notes\README.MARKDOWN".to_owned(),
+            ViewerOrigin::Link,
+            MarkdownMode::Source,
+        );
+        assert_eq!(upper.markdown(), Some(MarkdownMode::Source));
+        let plain = ViewerTab::new(
+            r"C:\notes\a.txt".to_owned(),
+            ViewerOrigin::Link,
+            MarkdownMode::Rendered,
+        );
+        assert_eq!(plain.markdown(), None, "only a Markdown file has a mode");
+    }
+
+    #[test]
+    fn a_document_over_the_render_cap_opens_as_source() {
+        let mut big = loaded(&"a".repeat(RENDER_CAP + 1));
+        assert_eq!(big.markdown(), Some(MarkdownMode::Source));
+        assert!(big.markdown_too_large());
+        assert!(
+            !big.set_markdown(MarkdownMode::Rendered),
+            "the toggle is off"
+        );
+        assert_eq!(big.markdown(), Some(MarkdownMode::Source));
+
+        let mut at_cap = loaded(&"a".repeat(RENDER_CAP));
+        assert_eq!(at_cap.markdown(), Some(MarkdownMode::Rendered));
+        assert!(!at_cap.markdown_too_large());
+        assert!(at_cap.set_markdown(MarkdownMode::Source));
+        assert_eq!(at_cap.markdown(), Some(MarkdownMode::Source));
     }
 }

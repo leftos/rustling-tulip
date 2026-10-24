@@ -721,13 +721,19 @@
       "paths": [
         "apps/native/src/viewer_tab.rs"
       ],
-      "filter": "(binary_id(rustling-tulip-native) & test(/^viewer_tab::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_viewer|ui_viewer_tabs)::/))"
+      "filter": "(binary_id(rustling-tulip-native) & test(/^viewer_tab::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_viewer|ui_viewer_md|ui_viewer_tabs)::/))"
     },
     {
       "paths": [
         "apps/native/src/viewer_tab_view.rs"
       ],
-      "filter": "(binary_id(rustling-tulip-native::ui) & test(/^(ui_viewer|ui_viewer_tabs)::/))"
+      "filter": "(binary_id(rustling-tulip-native::ui) & test(/^(ui_viewer|ui_viewer_md|ui_viewer_tabs)::/))"
+    },
+    {
+      "paths": [
+        "apps/native/src/viewer_md_view.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & test(/^viewer_md_view::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_viewer|ui_viewer_md)::/))"
     },
     {
       "paths": [
@@ -739,7 +745,7 @@
       "paths": [
         "apps/native/src/md_blocks.rs"
       ],
-      "filter": "package(rustling-tulip-native) & test(/^md_blocks::/)"
+      "filter": "(binary_id(rustling-tulip-native) & test(/^md_blocks::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_viewer_md)::/))"
     },
     {
       "paths": [
@@ -1064,6 +1070,12 @@
         "apps/native/tests/ui/ui_viewer.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native::ui) & test(/^(ui_viewer)::/))"
+    },
+    {
+      "paths": [
+        "apps/native/tests/ui/ui_viewer_md.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native::ui) & test(/^(ui_viewer_md)::/))"
     },
     {
       "paths": [
