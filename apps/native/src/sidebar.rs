@@ -1206,6 +1206,17 @@ impl SidebarModel {
         self.ui.last_vscode_dir = Some(dir.to_owned());
         true
     }
+
+    /// Records the tailnet host the client boots onto next; `None` is this
+    /// PC.
+    pub fn set_last_target(&mut self, host: Option<SavedHost>) {
+        self.ui.last_target = host;
+    }
+
+    /// Replaces the tailnet hosts the host picker offers.
+    pub fn set_saved_hosts(&mut self, hosts: Vec<SavedHost>) {
+        self.ui.saved_hosts = hosts;
+    }
 }
 
 /// The sidebar width kept between the minimum and the window width less the

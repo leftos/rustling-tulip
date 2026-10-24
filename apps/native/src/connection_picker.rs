@@ -63,7 +63,7 @@ fn normalised_name(name: &str) -> String {
 
 /// Where the picker's peer list comes from: `tailscale status --json` in
 /// the product, a fake in tests.
-pub trait PeerSource {
+pub trait PeerSource: Send + Sync {
     /// The tailnet as this node sees it. Blocks until the answer is in.
     ///
     /// # Errors
@@ -261,6 +261,20 @@ impl ConnectionPicker {
             );
         }
         rows
+    }
+
+    /// Whether the scan has not answered yet.
+    #[must_use]
+    pub fn scan_pending(&self) -> bool {
+        self.scan == Scan::Pending
+    }
+
+    /// Saves `host` after the others, unless a host of its name is saved.
+    pub fn remember(&mut self, host: SavedHost) {
+        if self.saved.iter().any(|saved| saved.name == host.name) {
+            return;
+        }
+        self.saved.push(host);
     }
 
     /// Forgets the saved host `name`. Returns whether it was `current`, so
@@ -581,6 +595,31 @@ mod tests {
             "the current host was forgotten under another spelling of its name"
         );
         assert_eq!(picker.saved(), [] as [SavedHost; 0]);
+    }
+
+    #[test]
+    fn remember_adds_a_host_once() {
+        let mut picker = ConnectionPicker::new(vec![saved("a.tail1234.ts.net", 8787)]);
+        picker.remember(saved("b.tail1234.ts.net", 9443));
+        assert_eq!(
+            picker.saved(),
+            [
+                saved("a.tail1234.ts.net", 8787),
+                saved("b.tail1234.ts.net", 9443)
+            ],
+            "a new host goes last"
+        );
+
+        picker.remember(saved("b.tail1234.ts.net", 8787));
+        picker.remember(saved("a.tail1234.ts.net", 1234));
+        assert_eq!(
+            picker.saved(),
+            [
+                saved("a.tail1234.ts.net", 8787),
+                saved("b.tail1234.ts.net", 9443)
+            ],
+            "a saved name keeps its first port"
+        );
     }
 
     #[test]

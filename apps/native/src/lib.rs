@@ -18,6 +18,7 @@ mod cleanup_failed_view;
 mod combobox;
 mod connection;
 pub mod connection_picker;
+mod connection_picker_view;
 mod copied;
 pub mod diff_model;
 mod diff_tab;
@@ -144,6 +145,8 @@ use crate::appearance::AppearanceChange;
 use crate::appearance_view::AppearanceEditor;
 use crate::changes_view::ChangesUi;
 use crate::connection::{DotKind, Footer};
+use crate::connection_picker::{PeerSource, SystemPeers};
+use crate::connection_picker_view::ConnectionPickerDialog;
 use crate::copied::Copied;
 use crate::drag::DragPayload;
 use crate::fetch_dialog_view::FetchDialog;
@@ -667,6 +670,12 @@ pub struct RootView {
     /// The Fetch file… dialog's keyboard focus when its path field has it
     /// not.
     fetch_focus: FocusHandle,
+    /// The Connections picker, while open.
+    connection_picker: Option<ConnectionPickerDialog>,
+    /// The Connections picker's keyboard focus when its fields have it not.
+    connection_picker_focus: FocusHandle,
+    /// The Tailscale the Connections picker scans for peers.
+    peer_source: Arc<dyn PeerSource + Send + Sync>,
     /// The Add repo prompt on a remote host, while open.
     host_path_prompt: Option<HostPathDialog>,
     /// The Add repo prompt's keyboard focus when its path field has it not.
@@ -994,6 +1003,9 @@ impl RootView {
             shell_focus: cx.focus_handle(),
             fetch_dialog: None,
             fetch_focus: cx.focus_handle(),
+            connection_picker: None,
+            connection_picker_focus: cx.focus_handle(),
+            peer_source: Arc::new(SystemPeers),
             host_path_prompt: None,
             host_path_focus: cx.focus_handle(),
             shell_generation: 0,
@@ -1277,6 +1289,7 @@ impl RootView {
             || self.pane_ui.close.is_some()
             || self.pane_ui.move_panes.is_some()
             || self.pane_ui.menu.is_some()
+            || self.connection_picker.is_some()
     }
 
     /// Whether a pane of the tab on screen shows `session_id` with nothing
@@ -2824,6 +2837,21 @@ impl RootView {
         self.scan_unseen_cwd_paths();
     }
 
+    /// A key for what is drawn on top: Esc ending a drag, then the
+    /// Connections picker (above every other layer, the first-connect
+    /// overlay included), then the cleanup-failed dialog. Returns whether
+    /// one of them took it.
+    fn on_top_layer_key(
+        &mut self,
+        ks: &Keystroke,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.take_drag_escape()
+            || self.on_connection_picker_key(ks, window, cx)
+            || self.on_cleanup_failed_key(ks, window, cx)
+    }
+
     /// Keys the root takes before the panes see them. An Esc that ended a
     /// pane or pill drag ([`Self::intercept_drag_escape`]) goes no further.
     /// The worktree
@@ -2843,7 +2871,7 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         let ks = &event.keystroke;
-        if self.take_drag_escape() || self.on_cleanup_failed_key(ks, window, cx) {
+        if self.on_top_layer_key(ks, window, cx) {
             cx.stop_propagation();
             return;
         }
@@ -3340,6 +3368,7 @@ impl Render for RootView {
             .children(delete_over)
             .children(self.cleanup_failed_layer(window, cx))
             .children(overlay)
+            .children(self.connection_picker_layer(cx))
     }
 }
 
@@ -3371,9 +3400,28 @@ fn drag_handle(id: impl Into<ElementId>, vertical_line: bool, active: bool) -> S
 }
 
 impl RootView {
-    /// The bottom bar: the daemon pill, the status counts, then the
-    /// attached session's status, right-aligned and the first to truncate.
+    /// The bottom bar: the Connections button, the daemon pill, the status
+    /// counts, then the attached session's status, right-aligned and the
+    /// first to truncate.
     fn footer_bar(&self, footer: &Footer, cx: &mut Context<Self>) -> Div {
+        let connections = div()
+            .id("footer-connections")
+            .debug_selector(|| "footer-connections".to_owned())
+            .flex()
+            .flex_none()
+            .items_center()
+            .h(px(FOOTER_PILL_HEIGHT))
+            .px(px(9.0))
+            .rounded(px(FOOTER_PILL_HEIGHT / 2.0))
+            .border_1()
+            .border_color(gpui::rgb(LINE_STRONG))
+            .text_size(px(FOOTER_PILL_TEXT_SIZE))
+            .cursor_pointer()
+            .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
+            .child("Connections")
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                this.open_connection_picker(window, cx);
+            }));
         let text = footer.pill();
         let counts = status_counts(self.sidebar.sessions(), |id| self.sidebar.is_unseen(id));
         let pill = div()
@@ -3411,6 +3459,7 @@ impl RootView {
             .border_color(gpui::rgb(BORDER))
             .text_size(px(FOOTER_TEXT_SIZE))
             .text_color(gpui::rgb(TEXT_2))
+            .child(connections)
             .child(pill)
             .children(counts.spans().into_iter().map(footer_count))
             .child(
@@ -3568,7 +3617,8 @@ fn flyout_backdrop(cx: &mut Context<RootView>) -> Stateful<Div> {
         }))
 }
 
-/// The full-window card shown until the first connect, with a restart link.
+/// The full-window card shown until the first connect, with a restart link
+/// and a Connections link, since the card covers the footer's button.
 fn connecting_overlay(
     text: String,
     restart_label: &'static str,
@@ -3586,6 +3636,23 @@ fn connecting_overlay(
             this.restart();
             cx.notify();
         }));
+    let connections = div()
+        .id("overlay-connections")
+        .debug_selector(|| "overlay-connections".to_owned())
+        .text_size(px(UI_TEXT_SIZE))
+        .text_color(gpui::rgb(MUTED))
+        .cursor_pointer()
+        .hover(|style| style.text_color(gpui::rgb(TEXT)))
+        .child("Connections")
+        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+            this.open_connection_picker(window, cx);
+        }));
+    let links = div()
+        .flex()
+        .items_center()
+        .gap(px(16.0))
+        .child(restart)
+        .child(connections);
     let card = div()
         .flex()
         .flex_col()
@@ -3600,7 +3667,7 @@ fn connecting_overlay(
         .rounded(px(MODAL_RADIUS))
         .child(status_dot(dot, "overlay-dot"))
         .child(tagged_text("connecting-overlay", text).text_color(gpui::rgb(TEXT)))
-        .child(restart);
+        .child(links);
     div()
         .id("connecting-overlay")
         .absolute()
