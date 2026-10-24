@@ -59,6 +59,7 @@ pub mod offscreen;
 mod open;
 mod open_view;
 mod pairing;
+mod pairing_view;
 pub mod palette;
 mod pane_close;
 mod pane_close_view;
@@ -791,6 +792,8 @@ pub struct RootView {
     recover: Option<recover::RecoverDialog>,
     /// The Recover dialog's keyboard focus.
     recover_focus: FocusHandle,
+    /// The devices waiting for remote access and the approval dialog.
+    pairing: pairing_view::PairingView,
     /// Ends the wait for a recovery that goes unanswered.
     recover_timer: Option<Task<()>>,
     /// The recoveries this connection sent and has had no answer to, by
@@ -1079,6 +1082,7 @@ impl RootView {
             session_history: recover::SessionHistory::default(),
             recover: None,
             recover_focus: cx.focus_handle(),
+            pairing: pairing_view::PairingView::new(cx.focus_handle()),
             recover_timer: None,
             recover_requests: HashMap::new(),
             recover_batches: Vec::new(),
@@ -1299,6 +1303,7 @@ impl RootView {
             || self.appearance_editor.is_some()
             || self.worktrees_manager.is_some()
             || self.recover.is_some()
+            || self.pairing_dialog_open()
             || self.delete_dialog.is_some()
             || self.repo_remove.dialog().is_some()
             || self.workspace_creator.is_some()
@@ -2365,6 +2370,7 @@ impl RootView {
             self.reset_notices(window, cx);
             self.reset_undo(cx);
             self.close_recover_on_overlay(window, cx);
+            self.reset_pairing(window, cx);
         }
         if exit_relevant {
             self.after_exit_event(window, cx);
@@ -2724,6 +2730,7 @@ impl RootView {
         self.recover_requests.clear();
         self.recover_batches.clear();
         self.close_recover_on_overlay(window, cx);
+        self.reset_pairing(window, cx);
         self.branch_cache = BranchCache::default();
         self.end_drag(window, cx);
         self.clear_drag_state();
@@ -2980,7 +2987,7 @@ impl RootView {
             }
             return;
         }
-        if self.on_recover_key(ks, window, cx) {
+        if self.on_pairing_key(ks, window, cx) || self.on_recover_key(ks, window, cx) {
             cx.stop_propagation();
             return;
         }
@@ -3393,6 +3400,7 @@ impl Render for RootView {
             .children(self.settings_layer(window, cx))
             .children(self.worktrees_manager_layer(window, cx))
             .children(self.recover_layer(window, cx))
+            .children(self.pairing_layer(cx))
             .children(self.pane_close_layer(cx))
             .children(self.move_panes_layer(cx))
             .children(delete_under)

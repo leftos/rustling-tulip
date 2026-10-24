@@ -8,6 +8,10 @@ Design for Wave 3's remote desktop (Linear RT-33, RT-34 and their sub-issues). R
 - A connecting device is authorized by `tailscale whois` **plus a per-device token** stored on the device. No pairing codes. A device without a token (a new device, or the PWA after Safari evicts its storage) asks for one, and the token is issued only once the owner **approves that device on the host PC**: whois alone never mints a token, so another program or Windows account on an owner device cannot get one unseen.
 
   Approval is a **QR code** the host PC shows, which the device scans (the iPhone PWA with its camera), with a short **pairing code** beside it that a device with no camera types instead; the QR code and the code are one-time, short-lived and good only for a whois-authorized device. A wiped phone is approved again.
+
+  The native client's views of that request live in `apps/native/src/pairing_view.rs` over the model in `pairing.rs`. Settings → Remote access shows a `Waiting devices · {n}` section (name and Tailscale login, a `m:ss left` countdown, Approve… and Deny; an approved row reads `Approved · waiting for the device` with only Deny), and the Remote access tab carries an amber count badge (`99+` cap, approved requests included).
+
+  Approve… opens an approval dialog that sends nothing until Approve is pressed, then shows the QR code, the code as `735 160` and `expires in m:ss · this request only`, and closes by itself when the code runs out. Disconnecting or switching target closes it and forgets the waiting requests. The views are built and spec-tested; the fold of the daemon's messages into them and the toast are wired in N3, so nothing in the running app opens them yet.
 - "The owner" is a device logged in as the host node's own Tailscale user (numeric `UserID`, never the display login), untagged, not shared in, and not the host itself.
 - The listener binds the host's own tailnet addresses only (v4 and v6), on the port `remote.json` configures (default 8787), rebinding when they change.
 - Shutdown and turning remote access off are refused from tailnet connections: host-only.

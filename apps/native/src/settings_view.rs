@@ -1571,6 +1571,7 @@ impl RootView {
             self.settings_tab = SettingsTab::General;
             self.settings_control = None;
             self.settings_tabs_focus.focus(window);
+            self.arm_pairing_tick(window, cx);
         }
     }
 
@@ -1582,6 +1583,7 @@ impl RootView {
     ) {
         self.settings_tab = tab;
         self.settings_control = None;
+        self.arm_pairing_tick(window, cx);
         if tab == SettingsTab::Notifications {
             self.read_notify_state(window, cx);
         }
@@ -1969,6 +1971,11 @@ impl RootView {
                 this.select_settings_tab(tab, window, cx);
             }))
             .child(tab.label())
+            .children(if tab == SettingsTab::RemoteAccess {
+                self.remote_access_tab_badge()
+            } else {
+                None
+            })
     }
 
     fn settings_content(&self, window: &Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
@@ -2113,6 +2120,7 @@ impl RootView {
             .child(status)
             .children(address)
             .children(cert)
+            .children(self.waiting_devices_section(cx))
             .child(self.remote_port_row(tab, enabled, focused, cx))
             .children(port_error)
             .child(hint(REMOTE_PORT_HINT))

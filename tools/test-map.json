@@ -447,6 +447,12 @@
     },
     {
       "paths": [
+        "apps/native/src/pairing_view.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & test(/^pairing_view::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_pairing|ui_remote_access)::/))"
+    },
+    {
+      "paths": [
         "apps/native/src/preset_launch.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native) & test(/^(preset_launch|preset_wizard)::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_container_menu|ui_preset_wizard)::/))"
@@ -920,6 +926,12 @@
         "apps/native/tests/ui/ui_paint.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native::ui) & test(/^(ui_paint)::/))"
+    },
+    {
+      "paths": [
+        "apps/native/tests/ui/ui_pairing.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native::ui) & test(/^(ui_pairing)::/))"
     },
     {
       "paths": [

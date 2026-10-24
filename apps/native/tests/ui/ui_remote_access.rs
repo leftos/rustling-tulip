@@ -1,12 +1,16 @@
 //! Remote access page specs: the Settings tab after Worktrees, its switch
 //! and port sending `ConfigureRemote`, its lines following the daemon's
 //! `RemoteStatus`, its login-launch toggle over the autostart seam, its Tab
-//! ring, and its absence while the target is a remote host.
+//! ring, its Waiting devices rows with the tab's badge, and its absence
+//! while the target is a remote host.
+
+use std::time::Duration;
 
 use crate::support;
 
+use chrono::{TimeDelta, Utc};
 use gpui::{TestAppContext, px};
-use protocol::{ClientMessage, DaemonMessage, RemoteState};
+use protocol::{ClientMessage, DaemonMessage, PendingDevice, RemoteState};
 use rustling_tulip_native::Connection;
 use rustling_tulip_native::remote_access::state_line;
 use rustling_tulip_native::target::Target;
@@ -124,6 +128,190 @@ fn toggle(h: &mut Harness<'_>) -> (bool, bool) {
 /// after it leaves, so a spec asks before the element was first drawn.
 fn painted(h: &mut Harness<'_>, selector: &str) -> bool {
     h.bounds(selector).origin.x >= px(0.0)
+}
+
+/// A request from `phone` that asked 14 seconds ago.
+fn request(id: &str, approved: bool) -> PendingDevice {
+    PendingDevice {
+        request_id: id.to_owned(),
+        name: "phone".to_owned(),
+        login: "alice@example.com".to_owned(),
+        asked_at: Utc::now() - TimeDelta::seconds(14),
+        approved,
+    }
+}
+
+fn fold(h: &mut Harness<'_>, requests: &[PendingDevice]) {
+    h.root_update(|root, window, cx| root.fold_pending_devices(requests, window, cx));
+}
+
+/// The Waiting devices rows as drawn: each line and its countdown or state.
+fn waiting_rows(h: &mut Harness<'_>) -> Vec<(String, String)> {
+    h.root(|root, _| root.pairing_rows())
+}
+
+/// The seconds an `m:ss left` countdown reads.
+fn countdown_secs(text: &str) -> u64 {
+    let clock = text.strip_suffix(" left").expect("an m:ss left countdown");
+    let (minutes, seconds) = clock.split_once(':').expect("m:ss");
+    assert_eq!(seconds.len(), 2, "{text}");
+    minutes.parse::<u64>().expect("minutes") * 60 + seconds.parse::<u64>().expect("seconds")
+}
+
+#[gpui::test]
+fn waiting_devices_row_lists_the_waiting_request(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    open_page(&mut h);
+    fold(&mut h, &[request("r1", false)]);
+    let rows = waiting_rows(&mut h);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, "phone · alice@example.com");
+    let left = countdown_secs(&rows[0].1);
+    assert!(left > 0 && left <= 286, "asked 14 s ago: {}", rows[0].1);
+    assert_eq!(
+        h.root(|root, _| root.pairing_heading()),
+        Some("Waiting devices · 1".to_owned())
+    );
+    assert!(painted(&mut h, "settings-waiting-devices"));
+    assert!(painted(&mut h, "settings-waiting-row-r1"));
+    assert!(painted(&mut h, "settings-waiting-approve-r1"));
+    assert!(painted(&mut h, "settings-waiting-deny-r1"));
+    let row = h.bounds("settings-waiting-row-r1").origin.y;
+    let port = h.bounds(PORT).origin.y;
+    assert!(row < port, "the section sits above the port row");
+}
+
+#[gpui::test]
+fn waiting_devices_section_hidden_without_requests(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    open_page(&mut h);
+    assert_eq!(waiting_rows(&mut h), []);
+    assert_eq!(h.root(|root, _| root.pairing_heading()), None);
+    assert!(!painted(&mut h, "settings-waiting-devices"));
+}
+
+#[gpui::test]
+fn approved_row_waits_for_the_device_without_approve(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    open_page(&mut h);
+    fold(&mut h, &[request("r1", true)]);
+    assert_eq!(
+        waiting_rows(&mut h),
+        [(
+            "phone · alice@example.com".to_owned(),
+            "Approved · waiting for the device".to_owned()
+        )]
+    );
+    assert!(painted(&mut h, "settings-waiting-deny-r1"));
+    assert!(!painted(&mut h, "settings-waiting-approve-r1"));
+}
+
+#[gpui::test]
+fn row_approve_opens_the_confirm_dialog_and_sends_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    open_page(&mut h);
+    fold(&mut h, &[request("r1", false)]);
+    h.sent();
+    h.click_on("settings-waiting-approve-r1");
+    assert!(h.root(|root, _| root.pairing_dialog_open()));
+    assert_eq!(
+        h.root(|root, _| root.pairing_dialog_texts()).first(),
+        Some(&"Approve phone".to_owned())
+    );
+    assert_eq!(
+        h.root(|root, _| root.pairing_dialog_buttons()),
+        ["Approve", "Deny", "Close"]
+    );
+    assert!(h.sent().is_empty(), "opening the dialog approves nothing");
+}
+
+#[gpui::test]
+fn row_deny_sends_deny_device(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    open_page(&mut h);
+    fold(&mut h, &[request("r1", false)]);
+    h.sent();
+    h.click_on("settings-waiting-deny-r1");
+    let sent = h.sent();
+    assert!(
+        matches!(sent.as_slice(), [ClientMessage::DenyDevice { request_id }] if request_id == "r1"),
+        "{sent:?}"
+    );
+    assert!(!h.root(|root, _| root.pairing_dialog_open()));
+}
+
+#[gpui::test]
+fn no_tick_runs_while_the_remote_access_page_is_hidden(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    let armed = |h: &mut Harness<'_>| h.root(|root, _| root.pairing_tick_armed());
+    let second = Duration::from_secs(1);
+    fold(&mut h, &[request("r1", false)]);
+    assert!(!armed(&mut h), "Settings closed");
+    h.keys("ctrl-,");
+    assert!(!armed(&mut h), "Settings on General");
+    h.click_on(TAB);
+    assert!(armed(&mut h), "the page counts down");
+    h.click_on("settings-tab-general");
+    h.advance(second);
+    assert!(!armed(&mut h), "another page");
+    h.click_on(TAB);
+    assert!(armed(&mut h), "back on the page");
+    h.keys("escape");
+    assert!(!h.root(|root, _| root.settings_open()));
+    h.advance(second);
+    assert!(!armed(&mut h), "Settings closed again");
+    open_page(&mut h);
+    assert!(armed(&mut h));
+    fold(&mut h, &[request("r1", true)]);
+    h.advance(second);
+    assert!(!armed(&mut h), "an approved row has no countdown");
+}
+
+#[gpui::test]
+fn waiting_count_badges_the_remote_access_tab(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.keys("ctrl-,");
+    assert_eq!(h.root(|root, _| root.pairing_badge()), None);
+    assert!(!painted(&mut h, "settings-tab-remote-access-badge"));
+    fold(&mut h, &[request("r1", false), request("r2", true)]);
+    assert_eq!(
+        h.root(|root, _| root.pairing_badge()),
+        Some("2".to_owned()),
+        "approved requests count"
+    );
+    assert!(painted(&mut h, "settings-tab-remote-access-badge"));
+    fold(&mut h, &[request("r2", true)]);
+    assert_eq!(h.root(|root, _| root.pairing_badge()), Some("1".to_owned()));
+    fold(&mut h, &[]);
+    assert_eq!(h.root(|root, _| root.pairing_badge()), None);
+}
+
+#[gpui::test]
+fn waiting_requests_are_forgotten_on_a_remote_target(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    open_page(&mut h);
+    fold(&mut h, &[request("r1", false)]);
+    h.click_on("settings-waiting-approve-r1");
+    assert!(h.root(|root, _| root.pairing_dialog_open()));
+    h.set_connection(remote());
+    reload(&mut h);
+    assert_eq!(waiting_rows(&mut h), [], "the rows are forgotten");
+    assert_eq!(h.root(|root, _| root.pairing_badge()), None);
+    assert!(!h.root(|root, _| root.pairing_dialog_open()));
+    h.keys("ctrl-,");
+    assert!(
+        !h.root(|root, _| root.settings_tab_labels())
+            .contains(&"Remote access"),
+        "the page and its rows are hidden"
+    );
 }
 
 #[gpui::test]
