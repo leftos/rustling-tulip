@@ -17,7 +17,7 @@ The daemon and protocol half (FT.1), the native download sink (FT.2) and the lin
 - **Client:** native client only.
 - **Viewing:** the remote client saves the file to a per-host download folder, then opens it the way a local link click does: in the built-in text viewer when the file is viewable, else `code -g path:line:col` when the link has a line, otherwise the OS default handler.
 - **Scope:** only paths inside a registered repo root or one of its session worktrees. The daemon canonicalizes the path and rejects `..` segments, absolute paths that land elsewhere, and symlinks that point outside.
-- **Size:** no cap. The file streams in chunks so PTY traffic on the same socket keeps flowing.
+- **Size:** no cap on a fetched file; only a page's media batch has caps (FT.5). The file streams in chunks so PTY traffic on the same socket keeps flowing.
 
 ## Design
 
@@ -46,3 +46,4 @@ The daemon and protocol half (FT.1), the native download sink (FT.2) and the lin
 - [x] **FT.2 Native download sink:** the per-host download folder, `.part` writes and rename, and the open hand-off with the `:line` rule. `FileFetchStarted.resolved_path` is the daemon's canonical path, so on Windows it starts with `\\?\`; strip that before showing it. Needs Phase 6. Landed.
 - [x] **FT.3 Link-click trigger:** in remote mode, clicking a terminal path link sends `FetchFile` with candidate readings, and the saved file opens on the remote client. Needs FT.2; uses whatever gesture opens a link locally (a plain click once the "links underlined, plain click" item lands). Landed.
 - [x] **FT.4 "Fetch file…" popup:** the path input scoped to the focused session's repo or worktree, with progress, cancel, and inline errors. Needs FT.2. Landed.
+- [x] **FT.5 Page media:** a fetched `.html` or `.htm` that opens when done also fetches the relative media it names (and one level of a linked stylesheet) before it opens, at most 4 at a time, under caps of 200 references, 25 MiB a file and 256 MiB a batch, with one progress toast for the batch. Needs FT.2. Landed (RT-394).

@@ -2,11 +2,6 @@
 //! paths to fetch with it: a page's images, clips, scripts, stylesheets and
 //! fonts, read with a small scanner rather than a full HTML parser.
 
-#![expect(
-    dead_code,
-    reason = "the media fetch batch uses this module next; the caps stay unused in the tests"
-)]
-
 use std::collections::HashSet;
 
 use crate::file_fetch::file_name;

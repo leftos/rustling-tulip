@@ -2,7 +2,7 @@
 //! part file a transfer writes into before it takes the file's place, and the
 //! transfers in flight.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write as _;
 use std::path::{Component, Path, PathBuf};
@@ -10,6 +10,9 @@ use std::path::{Component, Path, PathBuf};
 use futures::StreamExt as _;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender};
 
+use crate::html_media::{
+    MAX_MEDIA_BATCH_BYTES, MAX_MEDIA_FILE_BYTES, MAX_MEDIA_PER_PAGE, MEDIA_FETCHES_IN_FLIGHT,
+};
 use crate::open::OpenJob;
 use crate::target::Target;
 
@@ -402,6 +405,150 @@ impl ProbeGroup {
     }
 }
 
+/// How one media fetch of a page's batch ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaEnd {
+    /// Saved, or already being fetched by another batch.
+    Landed,
+    /// The host or the writer failed it, or it was cancelled.
+    Failed,
+    /// Over a size cap.
+    Skipped,
+}
+
+/// The media a saved HTML page names, fetched before the page opens: the
+/// paths still to start, the fetches in flight, and how the ended ones went.
+#[derive(Debug)]
+pub struct MediaBatch {
+    /// Where the page is saved.
+    saved: PathBuf,
+    /// Whether the page's own media are known; until then it cannot finish.
+    scanned: bool,
+    queue: VecDeque<String>,
+    /// Every path the batch has queued, the page's own among them.
+    seen: HashSet<String>,
+    /// The paths the page itself names; only a stylesheet among them is
+    /// read for media of its own.
+    from_page: HashSet<String>,
+    /// How many paths entered the queue, for the count cap.
+    entered: usize,
+    /// Every reference found, skipped ones included.
+    found: usize,
+    in_flight: usize,
+    landed: usize,
+    failed: usize,
+    skipped: usize,
+    bytes_started: u64,
+    /// The batch's byte cap was hit: every path added from then on is
+    /// skipped.
+    capped: bool,
+}
+
+impl MediaBatch {
+    fn new(page_rel: &str, saved: PathBuf) -> Self {
+        Self {
+            saved,
+            scanned: false,
+            queue: VecDeque::new(),
+            seen: HashSet::from([page_rel.replace('\\', "/")]),
+            from_page: HashSet::new(),
+            entered: 0,
+            found: 0,
+            in_flight: 0,
+            landed: 0,
+            failed: 0,
+            skipped: 0,
+            bytes_started: 0,
+            capped: false,
+        }
+    }
+
+    /// Queues the paths in `paths` the batch has not seen, up to the count
+    /// cap and while the byte cap is not hit (the rest are skipped), and
+    /// counts `skipped` references more.
+    fn add(&mut self, paths: Vec<String>, skipped: usize) {
+        self.found += skipped;
+        self.skipped += skipped;
+        for path in paths {
+            if !self.seen.insert(path.clone()) {
+                continue;
+            }
+            self.found += 1;
+            if !self.capped && self.entered < MAX_MEDIA_PER_PAGE {
+                self.entered += 1;
+                self.queue.push_back(path);
+            } else {
+                self.skipped += 1;
+            }
+        }
+    }
+
+    /// The queued paths to start now, keeping at most
+    /// [`MEDIA_FETCHES_IN_FLIGHT`] in flight.
+    fn next(&mut self) -> Vec<String> {
+        let room = MEDIA_FETCHES_IN_FLIGHT.saturating_sub(self.in_flight);
+        let started: Vec<String> = self.queue.drain(..room.min(self.queue.len())).collect();
+        self.in_flight += started.len();
+        started
+    }
+
+    /// Whether a started child of `size` bytes fits the caps; one that
+    /// would pass the batch's byte cap also skips every path not started.
+    fn admit(&mut self, size: u64) -> bool {
+        if size > MAX_MEDIA_FILE_BYTES {
+            return false;
+        }
+        if self.bytes_started.saturating_add(size) > MAX_MEDIA_BATCH_BYTES {
+            self.capped = true;
+            self.skipped += self.queue.len();
+            self.queue.clear();
+            return false;
+        }
+        self.bytes_started += size;
+        true
+    }
+
+    fn end(&mut self, how: MediaEnd) {
+        self.in_flight = self.in_flight.saturating_sub(1);
+        match how {
+            MediaEnd::Landed => self.landed += 1,
+            MediaEnd::Failed => self.failed += 1,
+            MediaEnd::Skipped => self.skipped += 1,
+        }
+    }
+
+    /// Whether every reference has ended and the page can open.
+    #[must_use]
+    pub fn is_finished(&self) -> bool {
+        self.scanned && self.queue.is_empty() && self.in_flight == 0
+    }
+
+    /// Where the page is saved.
+    #[must_use]
+    pub fn saved(&self) -> &Path {
+        &self.saved
+    }
+
+    /// How many references have ended: landed, failed or skipped.
+    #[must_use]
+    pub fn ended(&self) -> usize {
+        self.landed + self.failed + self.skipped
+    }
+
+    /// How many references the page and its stylesheets name, skipped ones
+    /// included.
+    #[must_use]
+    pub fn total(&self) -> usize {
+        self.found
+    }
+
+    /// How many references failed or were skipped.
+    #[must_use]
+    pub fn missed(&self) -> usize {
+        self.failed + self.skipped
+    }
+}
+
 /// A fetch in flight.
 #[derive(Debug)]
 pub struct FetchEntry {
@@ -419,6 +566,13 @@ pub struct FetchEntry {
     /// Started from the Fetch file… dialog, which shows its progress and
     /// errors in place of toasts.
     popup: bool,
+    /// The id of the page whose media this fetch is one of.
+    parent: Option<String>,
+    /// The page's media, once the page is saved and waits on them.
+    batch: Option<MediaBatch>,
+    /// The connection closed while this fetch was finishing: it still
+    /// saves, but nothing more is asked of the host for it.
+    connection_lost: bool,
 }
 
 /// `target` as the key two fetches collide on: case-insensitive where the
@@ -447,7 +601,34 @@ impl FetchEntry {
             finishing: false,
             group: None,
             popup: false,
+            parent: None,
+            batch: None,
+            connection_lost: false,
         }
+    }
+
+    /// Whether the connection closed while this fetch was finishing.
+    #[must_use]
+    pub fn connection_lost(&self) -> bool {
+        self.connection_lost
+    }
+
+    /// The id of the page whose media this fetch is one of.
+    #[must_use]
+    pub fn parent(&self) -> Option<&str> {
+        self.parent.as_deref()
+    }
+
+    /// The page's media batch, while the saved page waits on them.
+    #[must_use]
+    pub fn batch(&self) -> Option<&MediaBatch> {
+        self.batch.as_ref()
+    }
+
+    /// The page saved at `saved` waits on its media, which are not yet
+    /// known.
+    pub fn await_media(&mut self, saved: PathBuf) {
+        self.batch = Some(MediaBatch::new(&self.request.rel_path, saved));
     }
 
     /// This fetch as the Fetch file… dialog's, which reports how it goes.
@@ -634,12 +815,123 @@ impl FetchRegistry {
         self.entries.remove(id)
     }
 
-    /// Ends every fetch that is not finishing; a finishing one ends by its
-    /// writer's result.
+    /// Ends every fetch that is not finishing, and every saved page waiting
+    /// on its media; a finishing one ends by its writer's result, marked as
+    /// having lost its connection.
     pub fn take_unfinished(&mut self) -> Vec<(String, FetchEntry)> {
+        let ended = self
+            .entries
+            .extract_if(|_, entry| !entry.finishing || entry.batch.is_some())
+            .collect();
+        for entry in self.entries.values_mut() {
+            entry.connection_lost = true;
+        }
+        ended
+    }
+
+    fn batch_mut(&mut self, page_id: &str) -> Option<&mut MediaBatch> {
+        self.entries.get_mut(page_id)?.batch.as_mut()
+    }
+
+    /// The page `page_id`'s own scan found `media` and skipped `skipped`
+    /// references: queues them, and lets the batch finish.
+    pub fn page_scanned(&mut self, page_id: &str, media: Vec<String>, skipped: usize) {
+        if let Some(batch) = self.batch_mut(page_id) {
+            batch.from_page.extend(media.iter().cloned());
+            batch.add(media, skipped);
+            batch.scanned = true;
+        }
+    }
+
+    /// Whether the page `page_id` itself names `rel`, rather than one of
+    /// its stylesheets.
+    #[must_use]
+    pub fn named_by_page(&self, page_id: &str, rel: &str) -> bool {
         self.entries
-            .extract_if(|_, entry| !entry.finishing)
+            .get(page_id)
+            .and_then(FetchEntry::batch)
+            .is_some_and(|batch| batch.from_page.contains(rel))
+    }
+
+    /// Queues a stylesheet's `media` for the page `page_id`, each path once
+    /// per batch, and counts `skipped` references more.
+    pub fn add_media(&mut self, page_id: &str, media: Vec<String>, skipped: usize) {
+        if let Some(batch) = self.batch_mut(page_id) {
+            batch.add(media, skipped);
+        }
+    }
+
+    /// The requests of the page `page_id`'s media to start now: the page's
+    /// repo and worktree, never opened.
+    pub fn next_children(&mut self, page_id: &str) -> Vec<FetchRequest> {
+        let Some(entry) = self.entries.get_mut(page_id) else {
+            return Vec::new();
+        };
+        let Some(batch) = entry.batch.as_mut() else {
+            return Vec::new();
+        };
+        let page = &entry.request;
+        batch
+            .next()
+            .into_iter()
+            .map(|rel_path| FetchRequest {
+                repo_id: page.repo_id.clone(),
+                repo_name: page.repo_name.clone(),
+                worktree_path: page.worktree_path.clone(),
+                rel_path,
+                line: None,
+                column: None,
+                open_when_done: false,
+            })
             .collect()
+    }
+
+    /// Records a fetch of `request` from `host` into `target` as a child of
+    /// the page `page_id`. A file another fetch is already writing counts
+    /// as landed for this batch, and gives `None`.
+    pub fn insert_child(
+        &mut self,
+        page_id: &str,
+        host: String,
+        request: FetchRequest,
+        target: PathBuf,
+    ) -> Option<String> {
+        let mut entry = FetchEntry::new(host, request, target);
+        entry.parent = Some(page_id.to_owned());
+        let inserted = self.insert(entry).ok();
+        if inserted.is_none() {
+            self.child_ended(page_id, MediaEnd::Landed);
+        }
+        inserted
+    }
+
+    /// Whether a child of the page `page_id` that started at `size` bytes
+    /// fits the batch's caps; a page no longer waiting admits it.
+    pub fn admit_child(&mut self, page_id: &str, size: u64) -> bool {
+        self.batch_mut(page_id)
+            .is_none_or(|batch| batch.admit(size))
+    }
+
+    /// A child of the page `page_id` ended `how`.
+    pub fn child_ended(&mut self, page_id: &str, how: MediaEnd) {
+        if let Some(batch) = self.batch_mut(page_id) {
+            batch.end(how);
+        }
+    }
+
+    /// Ends the page `page_id` once every one of its media has ended.
+    pub fn take_finished_batch(&mut self, page_id: &str) -> Option<FetchEntry> {
+        let finished = self
+            .entries
+            .get(page_id)?
+            .batch
+            .as_ref()
+            .is_some_and(MediaBatch::is_finished);
+        if finished {
+            self.entries.remove(page_id)
+        } else {
+            None
+        }
     }
 }
 
@@ -657,9 +949,11 @@ mod tests {
     use futures::channel::mpsc::unbounded;
 
     use super::{
-        FetchEntry, FetchRegistry, FetchRequest, WriteOutcome, WriteStep, display_host_path,
-        download_path, host_folder, is_under, part_path, run_writer, sanitize_segment,
+        FetchEntry, FetchRegistry, FetchRequest, MediaBatch, MediaEnd, WriteOutcome, WriteStep,
+        display_host_path, download_path, host_folder, is_under, part_path, run_writer,
+        sanitize_segment,
     };
+    use crate::html_media::{MAX_MEDIA_FILE_BYTES, MAX_MEDIA_PER_PAGE};
     use crate::target::Target;
 
     /// A fresh folder under the system temp dir, removed on drop.
@@ -1132,6 +1426,246 @@ mod tests {
         fetch.on_chunk(3);
 
         assert_eq!((fetch.bytes_received(), fetch.size()), (7, Some(10)));
+    }
+
+    const PAGE: &str = "docs/page.html";
+
+    /// A saved page `PAGE` whose scan found `media` and skipped `skipped`;
+    /// returns its id.
+    fn scanned_page(registry: &mut FetchRegistry, media: &[&str], skipped: usize) -> String {
+        let id = registry.insert(entry("host", PAGE)).expect("starts");
+        let page = registry.get_mut(&id).expect("recorded");
+        page.mark_finishing();
+        page.await_media(PathBuf::from("root").join(PAGE));
+        let media = media.iter().map(|&rel| rel.to_owned()).collect();
+        registry.page_scanned(&id, media, skipped);
+        id
+    }
+
+    fn rels(requests: &[FetchRequest]) -> Vec<&str> {
+        requests
+            .iter()
+            .map(|request| request.rel_path.as_str())
+            .collect()
+    }
+
+    fn batch<'a>(registry: &'a FetchRegistry, id: &str) -> &'a MediaBatch {
+        registry
+            .get(id)
+            .and_then(FetchEntry::batch)
+            .expect("the page waits on its media")
+    }
+
+    /// Starts every child the batch lets start, admitting each at `size`
+    /// and ending it as admitted or skipped, until none is left; returns
+    /// how many started.
+    fn run_children(registry: &mut FetchRegistry, id: &str, size: u64) -> usize {
+        let mut started = 0;
+        loop {
+            let children = registry.next_children(id);
+            if children.is_empty() {
+                return started;
+            }
+            for _ in &children {
+                started += 1;
+                let end = if registry.admit_child(id, size) {
+                    MediaEnd::Landed
+                } else {
+                    MediaEnd::Skipped
+                };
+                registry.child_ended(id, end);
+            }
+        }
+    }
+
+    #[test]
+    fn a_batch_starts_at_most_four_children() {
+        let mut registry = FetchRegistry::new("t");
+        let id = scanned_page(
+            &mut registry,
+            &["a.png", "b.png", "c.png", "d.png", "e.png", "f.png"],
+            0,
+        );
+
+        let first = registry.next_children(&id);
+        assert_eq!(rels(&first), ["a.png", "b.png", "c.png", "d.png"]);
+        assert!(
+            first.iter().all(|child| !child.open_when_done
+                && child.repo_id == "r1"
+                && child.line.is_none()),
+            "a child is the page's repo and never opens: {first:?}"
+        );
+        assert!(registry.next_children(&id).is_empty(), "four are in flight");
+
+        let child = first[0].clone();
+        let target = download_path(Path::new("root"), "host", "repo", &child.rel_path)
+            .expect("a valid path");
+        let child_id = registry
+            .insert_child(&id, "host".to_owned(), child, target)
+            .expect("the child starts");
+        assert_eq!(
+            registry.get(&child_id).and_then(FetchEntry::parent),
+            Some(id.as_str())
+        );
+
+        registry.child_ended(&id, MediaEnd::Landed);
+        assert_eq!(rels(&registry.next_children(&id)), ["e.png"]);
+    }
+
+    #[test]
+    fn a_batch_finishes_when_every_child_ends() {
+        let mut registry = FetchRegistry::new("t");
+        let waiting = registry.insert(entry("host", PAGE)).expect("starts");
+        registry
+            .get_mut(&waiting)
+            .expect("recorded")
+            .await_media(PathBuf::from("page.html"));
+        assert!(
+            registry.take_finished_batch(&waiting).is_none(),
+            "a page not yet scanned waits"
+        );
+
+        let mut registry = FetchRegistry::new("t");
+        let id = scanned_page(&mut registry, &["a.png", "b.png"], 0);
+        assert_eq!(registry.next_children(&id).len(), 2);
+        assert!(registry.take_finished_batch(&id).is_none());
+        registry.child_ended(&id, MediaEnd::Landed);
+        assert!(
+            registry.take_finished_batch(&id).is_none(),
+            "one is in flight"
+        );
+        registry.child_ended(&id, MediaEnd::Failed);
+
+        let page = registry
+            .take_finished_batch(&id)
+            .expect("every child ended");
+        let done = page.batch().expect("the page's batch");
+        assert_eq!((done.ended(), done.total(), done.missed()), (2, 2, 1));
+        assert_eq!(done.saved(), Path::new("root").join(PAGE));
+        assert!(registry.get(&id).is_none(), "the page's fetch ended");
+    }
+
+    #[test]
+    fn a_shared_child_counts_as_done() {
+        let mut registry = FetchRegistry::new("t");
+        registry
+            .insert(entry("host", "docs/x.png"))
+            .expect("another page's batch fetches it");
+        let id = scanned_page(&mut registry, &["docs/x.png"], 0);
+
+        let [child] = registry.next_children(&id).try_into().expect("one child");
+        let target = download_path(Path::new("root"), "host", "repo", &child.rel_path)
+            .expect("a valid path");
+        assert_eq!(
+            registry.insert_child(&id, "host".to_owned(), child, target),
+            None,
+            "the file is already fetching"
+        );
+
+        let page = registry
+            .take_finished_batch(&id)
+            .expect("the shared child counts as done");
+        let done = page.batch().expect("the page's batch");
+        assert_eq!((done.ended(), done.missed()), (1, 0));
+    }
+
+    #[test]
+    fn references_past_the_count_cap_are_skipped() {
+        let names: Vec<String> = (0..MAX_MEDIA_PER_PAGE + 5)
+            .map(|n| format!("img/{n}.png"))
+            .collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let mut registry = FetchRegistry::new("t");
+        let id = scanned_page(&mut registry, &refs, 2);
+
+        let counts = batch(&registry, &id);
+        assert_eq!(counts.total(), MAX_MEDIA_PER_PAGE + 7);
+        assert_eq!((counts.ended(), counts.missed()), (7, 7));
+
+        assert_eq!(run_children(&mut registry, &id, 1), MAX_MEDIA_PER_PAGE);
+        let page = registry.take_finished_batch(&id).expect("finished");
+        assert_eq!(page.batch().expect("the batch").missed(), 7);
+    }
+
+    #[test]
+    fn a_child_over_the_size_cap_is_skipped() {
+        let mut registry = FetchRegistry::new("t");
+        let id = scanned_page(&mut registry, &["big.mp4", "fits.mp4"], 0);
+        assert_eq!(registry.next_children(&id).len(), 2);
+
+        assert!(!registry.admit_child(&id, MAX_MEDIA_FILE_BYTES + 1));
+        registry.child_ended(&id, MediaEnd::Skipped);
+        assert!(registry.admit_child(&id, MAX_MEDIA_FILE_BYTES));
+        registry.child_ended(&id, MediaEnd::Landed);
+
+        let page = registry.take_finished_batch(&id).expect("finished");
+        let done = page.batch().expect("the batch");
+        assert_eq!((done.ended(), done.missed()), (2, 1));
+    }
+
+    #[test]
+    fn the_batch_byte_cap_skips_the_rest() {
+        let names: Vec<String> = (0..16).map(|n| format!("{n}.mp4")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let mut registry = FetchRegistry::new("t");
+        let id = scanned_page(&mut registry, &refs, 0);
+
+        let started = run_children(&mut registry, &id, MAX_MEDIA_FILE_BYTES);
+
+        assert_eq!(
+            started, 12,
+            "ten fit in the batch, the two then in flight are cancelled and the rest never start"
+        );
+        let page = registry.take_finished_batch(&id).expect("finished");
+        let done = page.batch().expect("the batch");
+        assert_eq!((done.ended(), done.total(), done.missed()), (16, 16, 6));
+    }
+
+    #[test]
+    fn a_capped_batch_skips_media_a_later_stylesheet_names() {
+        let names: Vec<String> = (0..11).map(|n| format!("{n}.mp4")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let mut registry = FetchRegistry::new("t");
+        let id = scanned_page(&mut registry, &refs, 0);
+        assert_eq!(
+            run_children(&mut registry, &id, MAX_MEDIA_FILE_BYTES),
+            11,
+            "the eleventh passes the batch's byte cap"
+        );
+
+        registry.add_media(&id, vec!["late.png".to_owned()], 0);
+
+        assert!(
+            registry.next_children(&id).is_empty(),
+            "a full batch starts nothing more"
+        );
+        let page = registry.take_finished_batch(&id).expect("finished");
+        let done = page.batch().expect("the batch");
+        assert_eq!((done.total(), done.missed()), (12, 2));
+    }
+
+    #[test]
+    fn a_stylesheets_media_are_queued_once() {
+        let mut registry = FetchRegistry::new("t");
+        let id = scanned_page(&mut registry, &["docs/site.css", "docs/bg.png"], 0);
+        assert_eq!(registry.next_children(&id).len(), 2);
+
+        registry.add_media(
+            &id,
+            vec![
+                "docs/bg.png".to_owned(),
+                "docs/font.woff2".to_owned(),
+                PAGE.to_owned(),
+            ],
+            1,
+        );
+        assert_eq!(rels(&registry.next_children(&id)), ["docs/font.woff2"]);
+        registry.add_media(&id, vec!["docs/font.woff2".to_owned()], 0);
+        assert!(
+            registry.next_children(&id).is_empty(),
+            "a file is fetched once per batch"
+        );
+        assert_eq!(batch(&registry, &id).total(), 4);
     }
 
     #[test]

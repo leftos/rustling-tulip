@@ -572,6 +572,531 @@ fn a_second_click_on_a_fetching_file_says_already_fetching(cx: &mut TestAppConte
     assert_eq!(titled(&mut h, "Already fetching notes.txt"), 1);
 }
 
+/// What the fake host has at a path, for [`serve`].
+#[derive(Clone, Copy)]
+enum Remote<'a> {
+    /// A file with these bytes.
+    File(&'a [u8]),
+    /// No file: the daemon's "does not exist" error.
+    Missing,
+    /// A file of this size whose transfer starts and sends nothing more.
+    Sized(u64),
+}
+
+/// What [`serve`] was asked for: the `FetchFile` paths in the order sent,
+/// and the paths of the fetches the client cancelled.
+#[derive(Default)]
+struct Served {
+    asked: Vec<String>,
+    cancelled: Vec<String>,
+}
+
+/// Answers every `FetchFile` the client sends from `files` (a path not
+/// listed is missing), until it sends no more.
+fn serve(h: &mut Harness<'_>, files: &[(&str, Remote<'_>)]) -> Served {
+    let mut served = Served::default();
+    let mut paths: Vec<(String, String)> = Vec::new();
+    loop {
+        let sent = h.sent();
+        if sent.is_empty() {
+            return served;
+        }
+        for msg in sent {
+            match msg {
+                ClientMessage::FetchFile { id, path, .. } => {
+                    let remote = files
+                        .iter()
+                        .find(|(rel, _)| *rel == path)
+                        .map_or(Remote::Missing, |(_, remote)| *remote);
+                    match remote {
+                        Remote::File(bytes) => {
+                            let (first, second) = bytes.split_at(bytes.len() / 2);
+                            stream(h, &id, first, second);
+                        }
+                        Remote::Missing => h.send(missing(&id, &path)),
+                        Remote::Sized(size) => h.send(started(&id, size)),
+                    }
+                    served.asked.push(path.clone());
+                    paths.push((id, path));
+                }
+                ClientMessage::CancelFetch { id } => {
+                    let (_, path) = paths
+                        .iter()
+                        .find(|(asked, _)| *asked == id)
+                        .expect("a cancel names a fetch that was sent");
+                    served.cancelled.push(path.clone());
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Starts fetching the page `rel` and streams `html` as its contents;
+/// returns the page's fetch id.
+fn fetch_page(h: &mut Harness<'_>, rel: &str, html: &str) -> String {
+    let id = start(h, request(rel, None, None));
+    let (first, second) = html.as_bytes().split_at(html.len() / 2);
+    stream(h, &id, first, second);
+    id
+}
+
+/// Where `rel` of the repo `repo` lands under the download root `root`.
+fn landed(root: &Path, rel: &str) -> PathBuf {
+    rel.split('/')
+        .fold(root.join(HOST).join("repo"), |path, segment| {
+            path.join(segment)
+        })
+}
+
+/// The summary toast of a page whose media partly failed.
+fn summary(page: &str, missed: usize, total: usize) -> (String, Option<String>) {
+    (
+        format!("Some of {page}'s media didn't load"),
+        Some(format!("{missed} of {total} files failed or were skipped.")),
+    )
+}
+
+/// The toasts whose title starts with `prefix`.
+fn titled_like(h: &mut Harness<'_>, prefix: &str) -> Vec<(String, Option<String>)> {
+    toasts(h)
+        .into_iter()
+        .filter(|(title, _)| title.starts_with(prefix))
+        .collect()
+}
+
+#[gpui::test]
+fn an_html_page_fetches_its_relative_media_beside_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, root) = on_remote(cx, &dir);
+
+    fetch_page(
+        &mut h,
+        "docs/a/page.html",
+        r#"<img src="img/x.png"><video src="../clips/c.mp4"></video>"#,
+    );
+    let served = serve(
+        &mut h,
+        &[
+            ("docs/a/img/x.png", Remote::File(b"png bytes")),
+            ("docs/clips/c.mp4", Remote::File(b"mp4 bytes")),
+        ],
+    );
+
+    assert_eq!(served.asked, ["docs/a/img/x.png", "docs/clips/c.mp4"]);
+    assert_eq!(
+        fs::read(landed(&root, "docs/a/img/x.png")).expect("the image is saved"),
+        b"png bytes"
+    );
+    assert_eq!(
+        fs::read(landed(&root, "docs/clips/c.mp4")).expect("the clip is saved"),
+        b"mp4 bytes"
+    );
+    assert_eq!(names_in(&landed(&root, "docs/a/img")), ["x.png"]);
+    assert_eq!(
+        h.opened(),
+        [Opened::DefaultApp(landed(&root, "docs/a/page.html"))]
+    );
+    assert!(
+        titled_like(&mut h, "Some of").is_empty(),
+        "nothing failed: {:?}",
+        toasts(&mut h)
+    );
+}
+
+#[gpui::test]
+fn the_page_opens_only_after_its_media_land(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, root) = on_remote(cx, &dir);
+
+    fetch_page(&mut h, "docs/a/page.html", r#"<img src="x.png">"#);
+    let sent = fetches_sent(&mut h);
+    let [(image, _, path)] = sent.as_slice() else {
+        panic!("one media fetch is sent, got {sent:?}");
+    };
+    assert_eq!(path, "docs/a/x.png");
+    assert!(h.opened().is_empty(), "the page waits for its image");
+
+    stream(&mut h, image, b"pn", b"g");
+
+    assert_eq!(
+        h.opened(),
+        [Opened::DefaultApp(landed(&root, "docs/a/page.html"))]
+    );
+}
+
+#[gpui::test]
+fn missing_media_show_one_summary_toast_and_the_page_still_opens(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, root) = on_remote(cx, &dir);
+
+    fetch_page(
+        &mut h,
+        "docs/a/page.html",
+        r#"<img src="a.png"><img src="b.png"><img src="c.png">"#,
+    );
+    serve(&mut h, &[("docs/a/a.png", Remote::File(b"a"))]);
+
+    assert_eq!(
+        h.opened(),
+        [Opened::DefaultApp(landed(&root, "docs/a/page.html"))]
+    );
+    assert_eq!(titled_like(&mut h, "Some of"), [summary("page.html", 2, 3)]);
+    assert!(
+        titled_like(&mut h, "Couldn't").is_empty(),
+        "no toast per missing file: {:?}",
+        toasts(&mut h)
+    );
+}
+
+#[gpui::test]
+fn a_reference_outside_the_root_is_not_requested(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, root) = on_remote(cx, &dir);
+
+    fetch_page(
+        &mut h,
+        "index.html",
+        r#"<img src="../up.png"><img src="ok.png">"#,
+    );
+    let served = serve(&mut h, &[("ok.png", Remote::File(b"ok"))]);
+
+    assert_eq!(served.asked, ["ok.png"]);
+    assert_eq!(
+        h.opened(),
+        [Opened::DefaultApp(landed(&root, "index.html"))]
+    );
+    assert_eq!(
+        titled_like(&mut h, "Some of"),
+        [summary("index.html", 1, 2)]
+    );
+}
+
+#[gpui::test]
+fn a_media_file_over_the_size_cap_is_cancelled(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, root) = on_remote(cx, &dir);
+
+    fetch_page(
+        &mut h,
+        "docs/a/page.html",
+        r#"<video src="media/big.mp4"></video><img src="media/small.png">"#,
+    );
+    let served = serve(
+        &mut h,
+        &[
+            ("docs/a/media/big.mp4", Remote::Sized(25 * 1024 * 1024 + 1)),
+            ("docs/a/media/small.png", Remote::File(b"small")),
+        ],
+    );
+
+    assert_eq!(served.cancelled, ["docs/a/media/big.mp4"]);
+    assert_eq!(
+        names_in(&landed(&root, "docs/a/media")),
+        ["small.png"],
+        "the big file left no part file"
+    );
+    assert_eq!(
+        h.opened(),
+        [Opened::DefaultApp(landed(&root, "docs/a/page.html"))]
+    );
+    assert_eq!(titled_like(&mut h, "Some of"), [summary("page.html", 1, 2)]);
+}
+
+#[gpui::test]
+fn a_stylesheet_page_follows_its_css_urls_one_level(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, root) = on_remote(cx, &dir);
+
+    fetch_page(
+        &mut h,
+        "docs/a/page.html",
+        r#"<link rel="stylesheet" href="css/site.css"><img src="img/bg.png">"#,
+    );
+    let site = br#"@import "more.css";
+        body { background: url(../img/bg.png) }
+        @font-face { src: url("../fonts/f.woff2") }"#;
+    let served = serve(
+        &mut h,
+        &[
+            ("docs/a/css/site.css", Remote::File(site)),
+            ("docs/a/img/bg.png", Remote::File(b"bg")),
+            (
+                "docs/a/css/more.css",
+                Remote::File(b".x { background: url(deep.png) }"),
+            ),
+            ("docs/a/fonts/f.woff2", Remote::File(b"font")),
+        ],
+    );
+
+    let mut asked = served.asked;
+    asked.sort();
+    assert_eq!(
+        asked,
+        [
+            "docs/a/css/more.css",
+            "docs/a/css/site.css",
+            "docs/a/fonts/f.woff2",
+            "docs/a/img/bg.png"
+        ],
+        "each file once, and the imported sheet is not read"
+    );
+    assert_eq!(
+        fs::read(landed(&root, "docs/a/fonts/f.woff2")).expect("the font is saved"),
+        b"font"
+    );
+    assert_eq!(
+        h.opened(),
+        [Opened::DefaultApp(landed(&root, "docs/a/page.html"))]
+    );
+    assert_eq!(
+        titled_like(&mut h, "Some of"),
+        [],
+        "nothing failed or was skipped"
+    );
+}
+
+#[gpui::test]
+fn a_media_file_two_pages_share_does_not_fail_the_second_page(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, root) = on_remote(cx, &dir);
+
+    fetch_page(&mut h, "docs/a/one.html", r#"<img src="shared.png">"#);
+    let first = one_shared(&mut h);
+    fetch_page(&mut h, "docs/a/two.html", r#"<img src="shared.png">"#);
+
+    assert!(
+        fetches_sent(&mut h).is_empty(),
+        "the shared file is not asked for twice"
+    );
+    assert!(
+        h.opened()
+            .contains(&Opened::DefaultApp(landed(&root, "docs/a/two.html"))),
+        "the second page counts the shared file as done"
+    );
+
+    stream(&mut h, &first, b"sha", b"red");
+
+    assert!(
+        h.opened()
+            .contains(&Opened::DefaultApp(landed(&root, "docs/a/one.html"))),
+        "the first page opens once its fetch lands"
+    );
+    assert!(
+        titled_like(&mut h, "Some of").is_empty(),
+        "nothing failed: {:?}",
+        toasts(&mut h)
+    );
+}
+
+/// The one media fetch sent since the last look, for `docs/a/shared.png`;
+/// returns its id.
+fn one_shared(h: &mut Harness<'_>) -> String {
+    let sent = fetches_sent(h);
+    let [(id, _, path)] = sent.as_slice() else {
+        panic!("one media fetch is sent, got {sent:?}");
+    };
+    assert_eq!(path, "docs/a/shared.png");
+    id.clone()
+}
+
+#[gpui::test]
+fn a_second_click_on_a_page_whose_media_is_fetching_says_already_fetching(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, _) = on_remote(cx, &dir);
+
+    fetch_page(&mut h, "docs/a/page.html", r#"<img src="x.png">"#);
+    assert_eq!(fetches_sent(&mut h).len(), 1, "the image is fetching");
+
+    let again = h.root_update(|view, _, cx| {
+        view.fetch_remote_file(request("docs/a/page.html", None, None), cx)
+    });
+
+    assert_eq!(again, None, "the page does not fetch again");
+    assert!(h.sent().is_empty(), "nothing more is sent");
+    assert_eq!(titled(&mut h, "Already fetching page.html"), 1);
+}
+
+#[gpui::test]
+fn a_disconnect_during_media_fetch_leaves_no_part_files_and_does_not_open_the_page(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let (mut h, root) = on_remote(cx, &dir);
+
+    fetch_page(
+        &mut h,
+        "docs/a/page.html",
+        r#"<img src="img/a.png"><img src="img/b.png">"#,
+    );
+    let sent = fetches_sent(&mut h);
+    let [(a, _, _), (b, _, _)] = sent.as_slice() else {
+        panic!("two media fetches are sent, got {sent:?}");
+    };
+    for id in [a, b] {
+        h.send(started(id, 10));
+        h.send(chunk(id, 0, b"half"));
+    }
+    let images = landed(&root, "docs/a/img");
+    assert_eq!(names_in(&images).len(), 2, "both part files are written");
+
+    h.lose_connection();
+
+    assert!(
+        names_in(&images).is_empty(),
+        "the part files are deleted: {:?}",
+        names_in(&images)
+    );
+    assert!(h.opened().is_empty(), "the page does not open");
+    assert_eq!(
+        titled_like(&mut h, "Couldn't"),
+        [(
+            "Couldn't fetch page.html's media".to_owned(),
+            Some("The connection was lost.".to_owned())
+        )],
+        "one toast for the batch"
+    );
+    assert!(
+        landed(&root, "docs/a/page.html").exists(),
+        "the page itself stays"
+    );
+    assert_eq!(
+        toasts(&mut h)
+            .iter()
+            .filter(|(title, _)| title.contains("page.html"))
+            .count(),
+        1,
+        "the batch's toast replaces its progress toast: {:?}",
+        toasts(&mut h)
+    );
+}
+
+#[gpui::test]
+fn a_page_saved_after_a_disconnect_opens_without_fetching_media(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, root) = on_remote(cx, &dir);
+
+    let id = start(&mut h, request("docs/a/page.html", None, None));
+    let html = br#"<img src="x.png">"#;
+    h.send(started(
+        &id,
+        u64::try_from(html.len()).expect("a small file"),
+    ));
+    h.send(chunk(&id, 0, html));
+    h.events_together(vec![
+        NetEvent::Message(Box::new(DaemonMessage::FileFetchDone { id: id.clone() })),
+        NetEvent::State(Connection::new()),
+    ]);
+
+    assert!(
+        fetches_sent(&mut h).is_empty(),
+        "no media is asked of a lost connection"
+    );
+    assert_eq!(
+        h.opened(),
+        [Opened::DefaultApp(landed(&root, "docs/a/page.html"))]
+    );
+    assert_eq!(
+        titled_like(&mut h, "Couldn't"),
+        [(
+            "Couldn't fetch page.html's media".to_owned(),
+            Some("The connection was lost.".to_owned())
+        )]
+    );
+}
+
+#[gpui::test]
+fn the_progress_toast_does_not_outlive_the_batch(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, _) = on_remote(cx, &dir);
+
+    fetch_page(&mut h, "docs/a/one.html", r#"<img src="a.png">"#);
+    serve(&mut h, &[("docs/a/a.png", Remote::File(b"a"))]);
+    fetch_page(&mut h, "docs/a/two.html", r#"<img src="b.png">"#);
+    serve(&mut h, &[]);
+
+    assert_eq!(
+        titled_like(&mut h, "Fetching"),
+        [],
+        "no progress toast is left"
+    );
+    assert_eq!(
+        titled_like(&mut h, "Fetched"),
+        [("Fetched one.html and its media".to_owned(), None)]
+    );
+    assert_eq!(titled_like(&mut h, "Some of"), [summary("two.html", 1, 1)]);
+}
+
+#[gpui::test]
+fn a_non_html_file_scans_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, root) = on_remote(cx, &dir);
+
+    fetch_page(&mut h, "docs/a/notes.txt", r#"<img src="x.png">"#);
+
+    assert!(fetches_sent(&mut h).is_empty(), "nothing more is asked for");
+    assert_eq!(
+        h.opened(),
+        [Opened::DefaultApp(landed(&root, "docs/a/notes.txt"))]
+    );
+}
+
+#[gpui::test]
+fn a_page_with_no_relative_media_opens_at_once(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, root) = on_remote(cx, &dir);
+
+    fetch_page(
+        &mut h,
+        "docs/a/page.html",
+        r#"<img src="https://x.test/a.png"><img src="data:image/gif;base64,R0lG">"#,
+    );
+
+    assert!(fetches_sent(&mut h).is_empty(), "nothing more is asked for");
+    assert_eq!(
+        h.opened(),
+        [Opened::DefaultApp(landed(&root, "docs/a/page.html"))]
+    );
+    assert_eq!(
+        titled_like(&mut h, "Some of"),
+        [],
+        "nothing failed or was skipped"
+    );
+}
+
+#[gpui::test]
+fn the_fetching_toast_counts_the_media(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, root) = on_remote(cx, &dir);
+
+    fetch_page(
+        &mut h,
+        "docs/a/page.html",
+        r#"<img src="a.png"><img src="b.png">"#,
+    );
+    let sent = fetches_sent(&mut h);
+    let [(a, _, _), (b, _, _)] = sent.as_slice() else {
+        panic!("two media fetches are sent, got {sent:?}");
+    };
+    assert_eq!(
+        titled_like(&mut h, "Fetching page.html"),
+        [("Fetching page.html and its media (0 of 2)".to_owned(), None)],
+        "the page's toast is updated in place"
+    );
+
+    stream(&mut h, a, b"a", b"a");
+    assert_eq!(
+        titled_like(&mut h, "Fetching page.html"),
+        [("Fetching page.html and its media (1 of 2)".to_owned(), None)]
+    );
+
+    stream(&mut h, b, b"b", b"b");
+    assert_eq!(
+        h.opened(),
+        [Opened::DefaultApp(landed(&root, "docs/a/page.html"))]
+    );
+}
+
 #[gpui::test]
 fn the_local_daemon_fetches_nothing(cx: &mut TestAppContext) {
     let dir = TestDir::new();

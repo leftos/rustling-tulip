@@ -12,9 +12,10 @@ use protocol::{ClientMessage, DaemonMessage};
 use crate::RootView;
 use crate::fetch_link;
 use crate::file_fetch::{
-    self, FetchEntry, FetchRequest, ProbeGroup, WriteOutcome, WriteStep, display_host_path,
-    is_under,
+    self, FetchEntry, FetchRequest, MediaEnd, ProbeGroup, WriteOutcome, WriteStep,
+    display_host_path, is_under,
 };
+use crate::html_media;
 use crate::links::TerminalLink;
 use crate::notices::{ToastKind, ToastSpec};
 use crate::open::{OpenAction, OpenJob};
@@ -124,35 +125,10 @@ impl RootView {
         cx: &mut Context<Self>,
     ) -> Result<String, Refusal> {
         let name = file_fetch::file_name(&request.rel_path).to_owned();
-        let Some(host) = file_fetch::host_folder(self.conn.target()) else {
-            tracing::warn!(rel = %request.rel_path, "refusing a file fetch from the local daemon");
-            return Err(Refusal {
-                kind: ToastKind::Warning,
-                title: failed_title(&name),
-                detail: Some("Files are fetched only from a remote host.".to_owned()),
-            });
-        };
-        let target = match &self.remote_files_root {
-            Ok(root) => {
-                file_fetch::download_path(root, &host, &request.repo_name, &request.rel_path)
-            }
-            Err(err) => Err(format!("No folder for fetched files: {err}")),
-        };
-        let target = match target {
-            Ok(target) => target,
-            Err(reason) => {
-                tracing::warn!(rel = %request.rel_path, "refusing a file fetch: {reason}");
-                return Err(Refusal {
-                    kind: ToastKind::Error,
-                    title: failed_title(&name),
-                    detail: Some(reason),
-                });
-            }
-        };
+        let (host, target) = self.fetch_target(&request)?;
         let repo_id = request.repo_id.clone();
         let worktree_path = request.worktree_path.clone();
         let rel_path = request.rel_path.clone();
-        let toast_key = group.as_ref().map(|group| group.key().to_owned());
         let mut entry = FetchEntry::new(host.clone(), request, target);
         if let Some(group) = group {
             entry = entry.in_group(group);
@@ -181,7 +157,10 @@ impl RootView {
                     kind: ToastKind::Info,
                     title: format!("Fetching {name} from {host}"),
                     detail: None,
-                    key: toast_key,
+                    key: Some(fetching_toast_key(
+                        &id,
+                        self.fetches.get(&id).and_then(FetchEntry::group),
+                    )),
                     sticky: false,
                     actions: Vec::new(),
                 },
@@ -189,6 +168,274 @@ impl RootView {
             );
         }
         Ok(id)
+    }
+
+    /// The download folder of this host and where `request`'s file lands in
+    /// it.
+    ///
+    /// # Errors
+    /// The [`Refusal`] for the local daemon, a refused path or a missing
+    /// download folder.
+    fn fetch_target(&self, request: &FetchRequest) -> Result<(String, PathBuf), Refusal> {
+        let name = file_fetch::file_name(&request.rel_path);
+        let Some(host) = file_fetch::host_folder(self.conn.target()) else {
+            tracing::warn!(rel = %request.rel_path, "refusing a file fetch from the local daemon");
+            return Err(Refusal {
+                kind: ToastKind::Warning,
+                title: failed_title(name),
+                detail: Some("Files are fetched only from a remote host.".to_owned()),
+            });
+        };
+        let target = match &self.remote_files_root {
+            Ok(root) => {
+                file_fetch::download_path(root, &host, &request.repo_name, &request.rel_path)
+            }
+            Err(err) => Err(format!("No folder for fetched files: {err}")),
+        };
+        match target {
+            Ok(target) => Ok((host, target)),
+            Err(reason) => {
+                tracing::warn!(rel = %request.rel_path, "refusing a file fetch: {reason}");
+                Err(Refusal {
+                    kind: ToastKind::Error,
+                    title: failed_title(name),
+                    detail: Some(reason),
+                })
+            }
+        }
+    }
+
+    /// Starts the media fetch `request` for the page `page_id`, quietly: a
+    /// refused path fails it, and a file already fetching counts as landed.
+    fn start_child(&mut self, page_id: &str, request: FetchRequest) {
+        let (host, target) = match self.fetch_target(&request) {
+            Ok(found) => found,
+            Err(refusal) => {
+                tracing::warn!(
+                    page = page_id,
+                    rel = %request.rel_path,
+                    "a page's media file is refused: {}",
+                    refusal.message()
+                );
+                self.fetches.child_ended(page_id, MediaEnd::Failed);
+                return;
+            }
+        };
+        let repo_id = request.repo_id.clone();
+        let worktree_path = request.worktree_path.clone();
+        let rel_path = request.rel_path.clone();
+        let Some(id) = self.fetches.insert_child(page_id, host, request, target) else {
+            tracing::info!(page = page_id, rel = %rel_path, "a page's media file is already fetching");
+            return;
+        };
+        tracing::info!(%id, page = page_id, rel = %rel_path, "fetching a page's media file");
+        self.send(ClientMessage::FetchFile {
+            id,
+            repo_id,
+            worktree_path,
+            path: rel_path,
+        });
+    }
+
+    /// Starts the page `page_id`'s next media fetches; opens the page once
+    /// every one has ended, else updates its "Fetching" toast's count.
+    fn pump_batch(&mut self, page_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self
+            .fetches
+            .get(page_id)
+            .is_some_and(FetchEntry::connection_lost)
+        {
+            tracing::debug!(page = page_id, "no media are fetched on a lost connection");
+            return;
+        }
+        loop {
+            let children = self.fetches.next_children(page_id);
+            if children.is_empty() {
+                break;
+            }
+            for request in children {
+                self.start_child(page_id, request);
+            }
+        }
+        if let Some(page) = self.fetches.take_finished_batch(page_id) {
+            self.finish_batch(page_id, &page, window, cx);
+            return;
+        }
+        let Some(page) = self.fetches.get(page_id) else {
+            return;
+        };
+        let Some(batch) = page.batch() else {
+            return;
+        };
+        let spec = ToastSpec {
+            kind: ToastKind::Info,
+            title: format!(
+                "Fetching {} and its media ({} of {})",
+                page.file_name(),
+                batch.ended(),
+                batch.total()
+            ),
+            detail: None,
+            key: Some(fetching_toast_key(page_id, page.group())),
+            sticky: false,
+            actions: Vec::new(),
+        };
+        self.push_toast_spec(spec, cx);
+    }
+
+    /// Every media fetch of `page` ended: one toast says how many failed or
+    /// were skipped, if any did, and the page opens.
+    fn finish_batch(
+        &mut self,
+        page_id: &str,
+        page: &FetchEntry,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(batch) = page.batch() else {
+            return;
+        };
+        tracing::info!(
+            page = page_id,
+            total = batch.total(),
+            missed = batch.missed(),
+            "a page's media fetches ended"
+        );
+        if batch.missed() > 0 {
+            self.push_page_toast(
+                page_id,
+                page,
+                ToastKind::Warning,
+                format!("Some of {}'s media didn't load", page.file_name()),
+                Some(format!(
+                    "{} of {} files failed or were skipped.",
+                    batch.missed(),
+                    batch.total()
+                )),
+                cx,
+            );
+        } else {
+            self.push_page_toast(
+                page_id,
+                page,
+                ToastKind::Info,
+                format!("Fetched {} and its media", page.file_name()),
+                None,
+                cx,
+            );
+        }
+        self.open_fetched(batch.saved().to_path_buf(), page.request(), window, cx);
+    }
+
+    /// Shows a toast about the page `page_id` in place of its "Fetching"
+    /// toast.
+    fn push_page_toast(
+        &mut self,
+        page_id: &str,
+        page: &FetchEntry,
+        kind: ToastKind,
+        title: String,
+        detail: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let spec = ToastSpec {
+            kind,
+            title,
+            detail,
+            key: Some(fetching_toast_key(page_id, page.group())),
+            sticky: false,
+            actions: Vec::new(),
+        };
+        self.push_toast_spec(spec, cx);
+    }
+
+    /// The page `id`, saved at `path` after its connection closed, opens
+    /// without its media, and a toast says so.
+    fn open_page_without_media(
+        &mut self,
+        id: &str,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(page) = self.fetches.remove(id) else {
+            return;
+        };
+        tracing::warn!(
+            id,
+            "a page saved after its connection closed opens without its media"
+        );
+        self.push_page_toast(
+            id,
+            &page,
+            ToastKind::Warning,
+            lost_media_title(page.file_name()),
+            Some(LOST_MEDIA_DETAIL.to_owned()),
+            cx,
+        );
+        self.open_fetched(path, page.request(), window, cx);
+    }
+
+    /// The page `id` is saved at `path`: it waits while its media are read
+    /// off the UI thread, then fetches them.
+    fn scan_saved_page(
+        &mut self,
+        id: &str,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(page) = self.fetches.get_mut(id) else {
+            return;
+        };
+        page.await_media(path.clone());
+        let rel = page.request().rel_path.clone();
+        let read = cx
+            .background_executor()
+            .spawn(async move { read_media(&path, &rel, html_media::page_media) });
+        let id = id.to_owned();
+        cx.spawn_in(window, async move |this, cx| {
+            let (media, skipped) = read.await;
+            // Fails only when the view is gone, leaving nowhere to report.
+            this.update_in(cx, |root, window, cx| {
+                root.fetches.page_scanned(&id, media, skipped);
+                root.pump_batch(&id, window, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// A media file of the page `page_id` is saved at `path`: a stylesheet
+    /// the page names is read for its own media first.
+    fn after_child_saved(
+        &mut self,
+        page_id: String,
+        rel: &str,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !(html_media::is_stylesheet(rel) && self.fetches.named_by_page(&page_id, rel)) {
+            self.fetches.child_ended(&page_id, MediaEnd::Landed);
+            self.pump_batch(&page_id, window, cx);
+            return;
+        }
+        let rel = rel.to_owned();
+        let read = cx
+            .background_executor()
+            .spawn(async move { read_media(&path, &rel, html_media::stylesheet_media) });
+        cx.spawn_in(window, async move |this, cx| {
+            let (media, skipped) = read.await;
+            // Fails only when the view is gone, leaving nowhere to report.
+            this.update_in(cx, |root, window, cx| {
+                root.fetches.add_media(&page_id, media, skipped);
+                root.fetches.child_ended(&page_id, MediaEnd::Landed);
+                root.pump_batch(&page_id, window, cx);
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// The user cancelled the fetch `id`: the daemon is told to stop and
@@ -288,6 +535,18 @@ impl RootView {
             self.end_fetch(id, "the transfer started twice", true, window, cx);
             return;
         }
+        if let Some(page_id) = entry.parent().map(str::to_owned)
+            && !self.fetches.admit_child(&page_id, size)
+        {
+            tracing::info!(id, size, page = %page_id, "a page's media file is over a size cap; cancelling it");
+            self.cancel_fetch(id);
+            self.fetches.child_ended(&page_id, MediaEnd::Skipped);
+            self.pump_batch(&page_id, window, cx);
+            return;
+        }
+        let Some(entry) = self.fetches.get_mut(id) else {
+            return;
+        };
         entry.on_started(size, resolved_path.to_owned());
         let (writer, steps) = unbounded();
         entry.set_writer(writer);
@@ -377,10 +636,29 @@ impl RootView {
                 if self.fetch_dialog_follows(id) {
                     self.close_fetch_dialog(window, cx);
                 }
+                let waits_on_media = self.fetches.get(id).is_some_and(|entry| {
+                    entry.request().open_when_done
+                        && html_media::is_html_page(&entry.request().rel_path)
+                });
+                if waits_on_media {
+                    if self
+                        .fetches
+                        .get(id)
+                        .is_some_and(FetchEntry::connection_lost)
+                    {
+                        self.open_page_without_media(id, path, window, cx);
+                    } else {
+                        self.scan_saved_page(id, path, window, cx);
+                    }
+                    return;
+                }
                 let Some(entry) = self.fetches.remove(id) else {
                     return;
                 };
-                if entry.request().open_when_done {
+                if let Some(page_id) = entry.parent() {
+                    let rel = &entry.request().rel_path;
+                    self.after_child_saved(page_id.to_owned(), rel, path, window, cx);
+                } else if entry.request().open_when_done {
                     self.open_fetched(path, entry.request(), window, cx);
                 }
             }
@@ -409,6 +687,11 @@ impl RootView {
         if cancel {
             self.send(ClientMessage::CancelFetch { id: id.to_owned() });
         }
+        if let Some(page_id) = entry.parent() {
+            self.fetches.child_ended(page_id, MediaEnd::Failed);
+            self.pump_batch(page_id, window, cx);
+            return;
+        }
         let detail = failure_detail(&entry, reason);
         if entry.reports_to_popup() && self.fetch_dialog_follows(id) {
             self.fail_fetch_dialog(detail, window, cx);
@@ -425,7 +708,9 @@ impl RootView {
     /// The connection closed or moved to another daemon: every fetch still
     /// receiving ends, its part file deleted; one whose `Done` reached its
     /// writer ends by the writer's result. The Fetch file… dialog's own
-    /// fetch says so in the dialog, which the connection overlay closes.
+    /// fetch says so in the dialog, which the connection overlay closes. A
+    /// saved page waiting on its media does not open, and one toast says so
+    /// for the page and its media fetches.
     pub(crate) fn end_fetches_on_disconnect(
         &mut self,
         window: &mut Window,
@@ -435,6 +720,20 @@ impl RootView {
             let reason = format!("The connection to {} closed.", entry.host());
             tracing::warn!(%id, rel = %entry.request().rel_path, "fetching a file failed: {reason}");
             abort_writer(&id, &entry);
+            if entry.parent().is_some() {
+                continue;
+            }
+            if entry.batch().is_some() {
+                self.push_page_toast(
+                    &id,
+                    &entry,
+                    ToastKind::Error,
+                    lost_media_title(entry.file_name()),
+                    Some(LOST_MEDIA_DETAIL.to_owned()),
+                    cx,
+                );
+                continue;
+            }
             if entry.reports_to_popup() && self.fetch_dialog_follows(&id) {
                 self.fail_fetch_dialog(failure_detail(&entry, &reason), window, cx);
                 continue;
@@ -544,6 +843,38 @@ impl Refusal {
     /// The refusal as one line, for the Fetch file… dialog.
     pub(crate) fn message(&self) -> &str {
         self.detail.as_deref().unwrap_or(&self.title)
+    }
+}
+
+/// The key of the "Fetching" toast of the fetch `id`: its link's `group`'s,
+/// else its own id.
+fn fetching_toast_key(id: &str, group: Option<&ProbeGroup>) -> String {
+    group.map_or_else(|| id.to_owned(), |group| group.key().to_owned())
+}
+
+/// The detail of the toast about a page whose media the lost connection
+/// stopped.
+const LOST_MEDIA_DETAIL: &str = "The connection was lost.";
+
+/// The title of the toast about a page whose media the lost connection
+/// stopped.
+fn lost_media_title(page_name: &str) -> String {
+    format!("Couldn't fetch {page_name}'s media")
+}
+
+/// The media the saved file at `path` (repo-relative `rel`) names, by
+/// `scan`; a file that cannot be read names none.
+fn read_media(
+    path: &Path,
+    rel: &str,
+    scan: fn(&str, &str) -> (Vec<String>, usize),
+) -> (Vec<String>, usize) {
+    match std::fs::read(path) {
+        Ok(bytes) => scan(rel, &String::from_utf8_lossy(&bytes)),
+        Err(err) => {
+            tracing::warn!(path = %path.display(), "could not read a fetched file for its media: {err}");
+            (Vec::new(), 0)
+        }
     }
 }
 
