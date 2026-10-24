@@ -20,6 +20,11 @@ use crate::notices::{ToastKind, ToastSpec};
 use crate::open::{OpenAction, OpenJob};
 use crate::open_view::{COULD_NOT_OPEN, Origin, Route, Then};
 
+/// The detail of the toast refusing a fetched file's open of a path outside
+/// the folder for fetched files.
+pub(crate) const OUTSIDE_FETCH_FOLDER: &str =
+    "Only files in the folder for fetched files open here.";
+
 /// The title of the toast about a fetch that failed.
 fn failed_title(file_name: &str) -> String {
     format!("Couldn't fetch {file_name}")
@@ -491,7 +496,7 @@ impl RootView {
             self.push_toast(
                 ToastKind::Error,
                 COULD_NOT_OPEN,
-                Some("Only files in the folder for fetched files open here.".to_owned()),
+                Some(OUTSIDE_FETCH_FOLDER.to_owned()),
                 cx,
             );
             return;
@@ -504,7 +509,7 @@ impl RootView {
     }
 
     /// Whether `path` is under the folder fetched files are saved in.
-    fn is_fetched_copy(&self, path: &Path) -> bool {
+    pub(crate) fn is_fetched_copy(&self, path: &Path) -> bool {
         self.remote_files_root
             .as_ref()
             .is_ok_and(|root| is_under(root, path))

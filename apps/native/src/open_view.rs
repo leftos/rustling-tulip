@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use gpui::{AnyElement, ClickEvent, Context, FontWeight, Keystroke, Window, div, prelude::*, px};
 
+use crate::file_fetch_view::OUTSIDE_FETCH_FOLDER;
 use crate::links::{LinkKind, TerminalLink, TerminalLinkCandidate};
 use crate::notice_view::modal_panel;
 use crate::notices::{ToastKind, ToastSpec};
@@ -28,9 +29,7 @@ const TOO_LARGE_FOR_VIEWER: &str = "Too large for the viewer, opened externally"
 /// cap) a decode of the whole file, so bytes past the probe's head that are
 /// not text send it out too.
 fn viewer_verdict(action: &OpenAction) -> std::io::Result<Verdict> {
-    let path = match action {
-        OpenAction::VsCode { path, .. } | OpenAction::DefaultApp(path) => path,
-    };
+    let path = action_path(action);
     let probe = viewer_text::probe_file(path)?;
     let verdict = viewer_text::decide(false, action, &probe);
     if !matches!(verdict, Verdict::Viewer { .. }) {
@@ -41,6 +40,13 @@ fn viewer_verdict(action: &OpenAction) -> std::io::Result<Verdict> {
         Ok(_) => verdict,
         Err(not_text) => Verdict::External(Some(not_text)),
     })
+}
+
+/// The file `action` opens.
+fn action_path(action: &OpenAction) -> &Path {
+    match action {
+        OpenAction::VsCode { path, .. } | OpenAction::DefaultApp(path) => path,
+    }
 }
 
 /// What happens once an open went through.
@@ -122,16 +128,20 @@ impl RootView {
             LinkKind::Path if !self.capabilities().opens_local_files() => {
                 self.fetch_path_link(link, session, cx);
             }
-            LinkKind::Path => self.resolve_path(link.candidates.clone(), base_dirs, window, cx),
+            LinkKind::Path => {
+                let candidates = link.candidates.clone();
+                self.resolve_path(candidates, base_dirs, Origin::Link, window, cx);
+            }
         }
     }
 
     /// Checks the path's readings on a background thread, then opens the
-    /// first that exists.
-    fn resolve_path(
+    /// first that exists by `origin`'s route.
+    pub(crate) fn resolve_path(
         &mut self,
         candidates: Vec<TerminalLinkCandidate>,
         base_dirs: Vec<String>,
+        origin: Origin,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -148,26 +158,42 @@ impl RootView {
             let resolution = resolve.await;
             // Fails only when the view is gone, leaving nowhere to report.
             this.update_in(cx, |root, window, cx| {
-                root.after_resolve(resolution, &first, window, cx);
+                root.after_resolve(resolution, &first, origin, window, cx);
             })
             .ok();
         })
         .detach();
     }
 
+    /// Opens the file a link resolved to by `origin`'s route; a link from a
+    /// fetched file opens only a file in the folder for fetched files.
     fn after_resolve(
         &mut self,
         resolution: Resolution,
         first: &str,
+        origin: Origin,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         match resolution {
             Resolution::Open(action) => {
-                self.open_text_or_external(action, Origin::Link, window, cx);
+                if origin == Origin::Fetched && !self.is_fetched_copy(action_path(&action)) {
+                    tracing::warn!(
+                        ?action,
+                        "refusing a fetched file's link outside the download folder"
+                    );
+                    self.push_toast(
+                        ToastKind::Error,
+                        COULD_NOT_OPEN,
+                        Some(OUTSIDE_FETCH_FOLDER.to_owned()),
+                        cx,
+                    );
+                    return;
+                }
+                self.open_text_or_external(action, origin, window, cx);
             }
             Resolution::NotFound(err) => {
-                tracing::warn!("no file found for terminal link {first}: {err}");
+                tracing::warn!("no file found for link {first}: {err}");
                 self.push_toast(
                     ToastKind::Error,
                     COULD_NOT_OPEN,
@@ -177,7 +203,7 @@ impl RootView {
             }
             Resolution::Refused { host } => {
                 tracing::warn!(
-                    "terminal link {first} is on network host {host}, which is neither mapped nor listed"
+                    "link {first} is on network host {host}, which is neither mapped nor listed"
                 );
                 self.push_toast_spec(
                     ToastSpec {

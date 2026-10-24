@@ -1,5 +1,5 @@
-//! The Markdown view's block model: a document's blocks, the anchors its
-//! headings give, and inline spans with their style flags and link targets.
+//! The Markdown view's block model: a document's blocks, each heading with
+//! its unique slug, and inline spans with their style flags and link targets.
 //! Plain Rust: no GPUI and no I/O.
 
 use crate::open::validate_http_url;
@@ -22,18 +22,6 @@ pub const MAX_NESTING: usize = 64;
 pub(crate) struct Document {
     /// The document's blocks, in order.
     pub(crate) blocks: Vec<Block>,
-    /// One entry per heading, in order.
-    pub(crate) anchors: Vec<Anchor>,
-}
-
-/// A heading's anchor.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Anchor {
-    /// The heading's GitHub-style slug, unique within the document.
-    pub(crate) slug: String,
-    /// The index in [`Document::blocks`] of the top-level block holding the
-    /// heading: the heading's own index, or the quote or list around it.
-    pub(crate) block_index: usize,
 }
 
 /// A block-level element.
@@ -128,13 +116,13 @@ pub(crate) enum LinkTarget {
         path: PathBuf,
         anchor: Option<String>,
     },
-    /// A `#heading` anchor, matched against [`Document::anchors`].
+    /// A `#heading` anchor, matched against the headings' slugs.
     Anchor(String),
     /// A target the viewer never opens.
     Refused,
 }
 
-/// Parses `text`, a Markdown file's contents, into its blocks and anchors.
+/// Parses `text`, a Markdown file's contents, into its blocks.
 ///
 /// `file_dir` is the folder the file was read from: a relative link's path is
 /// resolved against it.
@@ -362,7 +350,6 @@ struct Builder<'a> {
     code: Option<(Option<String>, String)>,
     heading: Option<u8>,
     slugs: Vec<String>,
-    anchors: Vec<Anchor>,
     nesting: usize,
     skipped: u32,
 }
@@ -387,7 +374,6 @@ impl<'a> Builder<'a> {
             code: None,
             heading: None,
             slugs: Vec::new(),
-            anchors: Vec::new(),
             nesting: 0,
             skipped: 0,
         }
@@ -400,10 +386,7 @@ impl<'a> Builder<'a> {
             Some(Frame::Blocks { blocks, .. }) => blocks,
             Some(Frame::List { .. } | Frame::Table(_)) | None => Vec::new(),
         };
-        Document {
-            blocks,
-            anchors: self.anchors,
-        }
+        Document { blocks }
     }
 
     /// Folds one parser event into the document being built.
@@ -681,26 +664,13 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Closes a heading, with its unique slug and its anchor.
+    /// Closes a heading, with its unique slug.
     fn end_heading(&mut self) {
         let level = self.heading.take().unwrap_or(1);
         let spans = std::mem::take(&mut self.spans);
         let text: String = spans.iter().map(|span| span.text.as_str()).collect();
         let slug = self.unique_slug(&text);
-        let block_index = self.root_index();
-        self.anchors.push(Anchor {
-            slug: slug.clone(),
-            block_index,
-        });
         self.push_block(Block::Heading { level, slug, spans });
-    }
-
-    /// The index in the root's blocks of the block being filled.
-    fn root_index(&self) -> usize {
-        match self.stack.first() {
-            Some(Frame::Blocks { blocks, .. }) => blocks.len(),
-            Some(Frame::List { .. } | Frame::Table(_)) | None => 0,
-        }
     }
 
     /// `text`'s slug, with `-1`, `-2`, … appended until it is unique.
@@ -1038,13 +1008,7 @@ mod tests {
     #[test]
     fn an_anchor_names_its_heading_slug() {
         let doc = parse_doc("# Intro\n\nBody\n");
-        assert_eq!(
-            doc.anchors,
-            vec![Anchor {
-                slug: "intro".to_owned(),
-                block_index: 0
-            }]
-        );
+        assert_eq!(heading_at(&doc.blocks, 0), (1, "intro".to_owned()));
         assert_eq!(
             classify_link("#intro", docs_dir()),
             LinkTarget::Anchor("intro".to_owned())
@@ -1397,18 +1361,11 @@ mod tests {
     #[test]
     fn duplicate_headings_get_suffixed_slugs() {
         let doc = parse_doc("# Same\n\n# Same\n\n# Same\n");
-        let slugs: Vec<&str> = doc
-            .anchors
-            .iter()
-            .map(|anchor| anchor.slug.as_str())
+        let slugs: Vec<String> = (0..3)
+            .map(|index| heading_at(&doc.blocks, index).1)
             .collect();
         assert_eq!(slugs, vec!["same", "same-1", "same-2"]);
-        let indices: Vec<usize> = doc
-            .anchors
-            .iter()
-            .map(|anchor| anchor.block_index)
-            .collect();
-        assert_eq!(indices, vec![0, 1, 2]);
+        assert_eq!(doc.blocks.len(), 3, "one block per heading");
     }
 
     #[test]
@@ -1433,7 +1390,6 @@ mod tests {
         for text in ["", "\n\n", "  \n\n   \n"] {
             let doc = parse_doc(text);
             assert!(doc.blocks.is_empty(), "{text:?} -> {:?}", doc.blocks);
-            assert!(doc.anchors.is_empty(), "{text:?}");
         }
     }
 

@@ -5,28 +5,36 @@
 //! Rendered | Source toggle, which switches the clicked tab and saves the
 //! default new tabs open in.
 
+use std::collections::HashMap;
 use std::ops::Range;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
 use gpui::{
     AnyElement, ClickEvent, Context, Div, ElementId, FontStyle, FontWeight, HighlightStyle, Hsla,
-    InteractiveText, ListState, SharedString, StrikethroughStyle, StyledText, UnderlineStyle, div,
-    list, prelude::*, px,
+    InteractiveText, ListOffset, ListState, SharedString, StrikethroughStyle, StyledText,
+    UnderlineStyle, Window, div, list, prelude::*, px,
 };
 
 use crate::buttons::{ButtonSize, outlined_button, primary_button};
 use crate::fonts;
-use crate::md_blocks::{self, Align, Block, Span};
+use crate::links::TerminalLinkCandidate;
+use crate::md_blocks::{self, Align, Block, LinkTarget, Span};
+use crate::notices::ToastKind;
+use crate::open::OpenJob;
+use crate::open_view::{COULD_NOT_OPEN, Origin, Then};
 use crate::palette::{ACCENT, CHIP, LINE, LINE_STRONG, PERIWINKLE, SUBTLE, SUNKEN, SURFACE};
 use crate::syntax::{self, Highlighted, LineSpans, TokenClass};
-use crate::viewer_tab::{MarkdownMode, ViewerLoad, ViewerTab};
+use crate::viewer_tab::{MarkdownMode, ViewerLoad, ViewerOrigin, ViewerTab};
 use crate::{RootView, UI_TEXT_SIZE, tooltip};
 
 /// The tooltip of the toggle a document over the render cap disables.
 pub(crate) const TOO_LARGE_TO_RENDER: &str = "Too large to render as Markdown";
+
+/// The detail of the toast a refused link raises.
+const REFUSED_LINK: &str = "Only http and https links open from a Markdown file.";
 
 /// The room left and right of the rows, and above the first.
 const BODY_PAD_X: f32 = 24.0;
@@ -63,6 +71,8 @@ pub(crate) struct MdDoc {
     /// Per top-level block, the index of its first row: the row a heading's
     /// anchor scrolls to. Every block has at least one row.
     first_row_of_block: Vec<usize>,
+    /// Per heading slug, the heading's own row.
+    anchor_rows: HashMap<String, usize>,
 }
 
 impl MdDoc {
@@ -70,6 +80,32 @@ impl MdDoc {
     pub(crate) fn row_count(&self) -> usize {
         self.rows.len()
     }
+
+    /// The row heading anchor `slug` scrolls to, when a heading has it.
+    pub(crate) fn anchor_row(&self, slug: &str) -> Option<usize> {
+        self.anchor_rows.get(slug).copied()
+    }
+}
+
+/// Each linked span's byte range in [`inline_text`]'s string, with its target.
+/// An empty span has nothing to click.
+pub(crate) fn link_ranges(spans: &[Span]) -> Vec<(Range<usize>, LinkTarget)> {
+    let (_, ranges) = inline_text(spans);
+    ranges
+        .into_iter()
+        .zip(spans)
+        .filter(|(range, _)| !range.is_empty())
+        .filter_map(|(range, span)| span.link.clone().map(|target| (range, target)))
+        .collect()
+}
+
+/// The folder of the file at `path`; a viewer tab's path is absolute, so it
+/// always has one.
+fn file_dir(path: &str) -> PathBuf {
+    Path::new(path)
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_default()
 }
 
 /// One drawn row: how many quotes and list levels it sits in, the room
@@ -130,30 +166,34 @@ struct Place {
 /// code blocks whose language has a grammar within the highlighter's time
 /// limit for the whole document; `cancel` stops the colouring.
 pub(crate) fn prepare(text: &str, file_dir: &Path, cancel: &AtomicBool) -> MdDoc {
-    let doc = md_blocks::parse(text, file_dir);
+    let md_blocks::Document { blocks } = md_blocks::parse(text, file_dir);
     let mut flat = Flattener {
         rows: Vec::new(),
+        anchor_rows: HashMap::new(),
         deadline: Instant::now() + syntax::TIME_LIMIT,
         cancel,
     };
-    let mut first_row_of_block = Vec::with_capacity(doc.blocks.len());
+    let mut first_row_of_block = Vec::with_capacity(blocks.len());
     let top = Place {
         quote: 0,
         indent: 0,
     };
-    for block in doc.blocks {
+    for block in blocks {
         first_row_of_block.push(flat.rows.len());
         flat.block(block, top, BLOCK_GAP);
     }
     MdDoc {
         rows: flat.rows,
         first_row_of_block,
+        anchor_rows: flat.anchor_rows,
     }
 }
 
 /// Turns blocks into rows, in the order they are drawn.
 struct Flattener<'a> {
     rows: Vec<Row>,
+    /// Per heading slug, the heading's row; the first heading wins a slug.
+    anchor_rows: HashMap<String, usize>,
     deadline: Instant,
     cancel: &'a AtomicBool,
 }
@@ -172,7 +212,8 @@ impl Flattener<'_> {
     fn block(&mut self, block: Block, at: Place, gap: f32) {
         let first = self.rows.len();
         match block {
-            Block::Heading { level, spans, .. } => {
+            Block::Heading { level, slug, spans } => {
+                self.anchor_rows.entry(slug).or_insert(self.rows.len());
                 self.push(at, RowKind::Heading { level, spans }, gap);
             }
             Block::Paragraph(spans) => self.push(at, RowKind::Text(spans), gap),
@@ -439,6 +480,7 @@ impl Painter {
     /// cells of one table row apart.
     fn inline(&self, spans: &[Span], ix: usize, part: usize) -> AnyElement {
         let (text, ranges) = inline_text(spans);
+        let links = link_ranges(spans);
         let highlights: Vec<(Range<usize>, HighlightStyle)> = ranges
             .into_iter()
             .zip(spans)
@@ -449,8 +491,26 @@ impl Painter {
             "md-text-{}-{ix}-{part}",
             self.tab_id
         )));
-        InteractiveText::new(id, StyledText::new(text).with_highlights(highlights))
-            .into_any_element()
+        let text = InteractiveText::new(id, StyledText::new(text).with_highlights(highlights));
+        if links.is_empty() {
+            return text.into_any_element();
+        }
+        let (bounds, targets): (Vec<Range<usize>>, Vec<LinkTarget>) = links.into_iter().unzip();
+        let tab_id = self.tab_id.clone();
+        text.on_click(bounds, move |index, window, cx| {
+            let Some(target) = targets.get(index).cloned() else {
+                tracing::debug!(index, "a Markdown link click outside every link");
+                return;
+            };
+            let Some(Some(root)) = window.root::<RootView>() else {
+                tracing::debug!("a Markdown link click in a window without the root view");
+                return;
+            };
+            root.update(cx, |root, cx| {
+                root.follow_md_link(&tab_id, target, window, cx);
+            });
+        })
+        .into_any_element()
     }
 
     fn item(&self, marker: &Marker, spans: &[Span], ix: usize) -> Div {
@@ -598,11 +658,7 @@ impl RootView {
             return;
         };
         let text = Arc::clone(text);
-        // A viewer tab's path is absolute, so it always has a folder.
-        let file_dir = Path::new(tab.path())
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_default();
+        let file_dir = file_dir(tab.path());
         let cancel = tab.highlight_cancel();
         let work = cx
             .background_executor()
@@ -639,6 +695,100 @@ impl RootView {
             .set_viewer_markdown_rendered(mode == MarkdownMode::Rendered);
         self.save_ui();
         cx.notify();
+    }
+
+    /// Follows `href`, a link target as Markdown tab `tab_id`'s file writes
+    /// it, as a click on the link does.
+    pub fn follow_md_href(
+        &mut self,
+        tab_id: &str,
+        href: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.viewer_tabs.get(tab_id) else {
+            return;
+        };
+        let target = md_blocks::classify_link(href, &file_dir(tab.path()));
+        self.follow_md_link(tab_id, target, window, cx);
+    }
+
+    /// A link to `target` in Markdown tab `tab_id` was clicked: a URL opens
+    /// in the browser; a file, resolved on this PC against the tab file's
+    /// folder and without its `#fragment`, opens by the route the tab's file
+    /// came by (from a fetched copy, only a file in the folder for fetched
+    /// files); a heading anchor scrolls to its heading; a refused target
+    /// says so.
+    /// A tab whose file is not on this PC follows no link.
+    pub(crate) fn follow_md_link(
+        &mut self,
+        tab_id: &str,
+        target: LinkTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.viewer_tabs.get(tab_id) else {
+            return;
+        };
+        let origin = match tab.origin() {
+            ViewerOrigin::Link => Origin::Link,
+            ViewerOrigin::Fetched => Origin::Fetched,
+            ViewerOrigin::NotAvailable => return,
+        };
+        let folder = file_dir(tab.path());
+        match target {
+            LinkTarget::Url(url) => {
+                self.dispatch_open(OpenJob::Url(url), Then::Nothing, window, cx);
+            }
+            LinkTarget::File { path, .. } => {
+                let candidate = TerminalLinkCandidate {
+                    path: path.to_string_lossy().into_owned(),
+                    line: None,
+                    column: None,
+                };
+                let base_dirs = vec![folder.to_string_lossy().into_owned()];
+                self.resolve_path(vec![candidate], base_dirs, origin, window, cx);
+            }
+            LinkTarget::Anchor(slug) => self.scroll_to_md_anchor(tab_id, &slug, cx),
+            LinkTarget::Refused => {
+                tracing::warn!(tab_id, "refusing a Markdown link that is not http or https");
+                self.push_toast(
+                    ToastKind::Error,
+                    COULD_NOT_OPEN,
+                    Some(REFUSED_LINK.to_owned()),
+                    cx,
+                );
+            }
+        }
+    }
+
+    /// Scrolls Markdown tab `tab_id` so heading anchor `slug`'s row is at the
+    /// top; a slug no heading has does nothing.
+    fn scroll_to_md_anchor(&self, tab_id: &str, slug: &str, cx: &mut Context<Self>) {
+        let Some((doc, rows)) = self
+            .viewer_tabs
+            .get(tab_id)
+            .and_then(ViewerTab::markdown_doc)
+        else {
+            tracing::debug!(tab_id, slug, "an anchor link before the document is parsed");
+            return;
+        };
+        let Some(row) = doc.anchor_row(slug) else {
+            tracing::debug!(tab_id, slug, "no heading has this anchor");
+            return;
+        };
+        rows.scroll_to(ListOffset {
+            item_ix: row,
+            offset_in_item: px(0.0),
+        });
+        cx.notify();
+    }
+
+    /// The row at the top of tab `tab_id`'s rendered Markdown, once parsed.
+    #[must_use]
+    pub fn viewer_markdown_top_row(&self, tab_id: &str) -> Option<usize> {
+        let (_, rows) = self.viewer_tabs.get(tab_id)?.markdown_doc()?;
+        Some(rows.logical_scroll_top().item_ix)
     }
 
     /// The rendered document `doc` of tab `tab_id`, a list item per row.
@@ -738,6 +888,50 @@ mod tests {
             .position(|span| span.strong)
             .expect("a strong span");
         assert_eq!(&text[ranges[strong].clone()], "naïve");
+    }
+
+    #[test]
+    fn link_spans_become_click_ranges() {
+        let spans = spans_of("plain [web](https://example.com/page) and [doc](other.md)\n");
+        let (text, _) = inline_text(&spans);
+        let links = link_ranges(&spans);
+        let [(web, web_target), (doc, doc_target)] = links.as_slice() else {
+            panic!("two link ranges, got {links:?}");
+        };
+        assert_eq!(&text[web.clone()], "web");
+        assert_eq!(
+            *web_target,
+            LinkTarget::Url("https://example.com/page".to_owned())
+        );
+        assert_eq!(&text[doc.clone()], "doc");
+        assert_eq!(
+            *doc_target,
+            LinkTarget::File {
+                path: Path::new("notes").join("other.md"),
+                anchor: None,
+            }
+        );
+    }
+
+    #[test]
+    fn anchor_slugs_map_to_their_heading_row() {
+        let text = "# First\n\n```\na\nb\n```\n\n- x\n- y\n\n## Second\n\npara\n";
+        let doc = prepare(text, Path::new("notes"), &AtomicBool::new(false));
+        // heading 1 row; code 2; list 2; the second heading is block 3, row 5.
+        assert_eq!(doc.anchor_row("first"), Some(0));
+        assert_eq!(doc.anchor_row("second"), Some(5));
+        assert_eq!(doc.anchor_row("missing"), None);
+    }
+
+    #[test]
+    fn a_nested_heading_anchor_maps_to_its_own_row() {
+        let text = "# Top\n\n- a\n- b\n\n  ## Inner\n\n> q\n>\n> ## Quoted\n";
+        let doc = prepare(text, Path::new("notes"), &AtomicBool::new(false));
+        // Top row 0; items a, b at 1, 2, the heading in b at 3; the quote's
+        // paragraph at 4, its heading at 5.
+        assert_eq!(doc.first_row_of_block, vec![0, 1, 4]);
+        assert_eq!(doc.anchor_row("inner"), Some(3));
+        assert_eq!(doc.anchor_row("quoted"), Some(5));
     }
 
     #[test]

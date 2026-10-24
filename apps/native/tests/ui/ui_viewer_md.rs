@@ -2,7 +2,9 @@
 //! time; the header's Rendered | Source toggle, shown once the text loads,
 //! switches the clicked tab and saves the default new tabs open in; a file
 //! over the render cap opens as source with the toggle disabled; a link with
-//! a line opens as source at the line; other files have no toggle.
+//! a line opens as source at the line; other files have no toggle; a link
+//! opens a URL in the browser, a file through the viewer's routing, scrolls
+//! to a heading, or is refused with a toast.
 
 #![expect(
     clippy::expect_used,
@@ -18,9 +20,10 @@ use std::time::Duration;
 
 use gpui::{Modifiers, TestAppContext};
 use protocol::{ClientMessage, DaemonMessage, TabEntry};
-use rustling_tulip_native::{MarkdownMode, ViewerLoad, ViewerTab};
+use rustling_tulip_native::target::Target;
+use rustling_tulip_native::{MarkdownMode, ViewerLoad, ViewerOrigin, ViewerTab};
 use serde_json::{Value, json};
-use support::{Fixture, Harness, TestDir, session};
+use support::{Fixture, Harness, Opened, TestDir, session};
 
 /// A Markdown file with one block of each kind the view draws.
 const SAMPLE: &str = "# Title\n\nSome *text* with `code` and a [link](https://example.com).\n\n\
@@ -297,4 +300,231 @@ fn a_non_markdown_file_has_no_toggle(cx: &mut TestAppContext) {
     assert!(!drawn(&mut h, "viewer-md-rendered-v1"));
     assert!(!drawn(&mut h, "viewer-md-source-v1"));
     assert!(!drawn(&mut h, "viewer-md-v1"));
+}
+
+const HOST: &str = "box.tail1234.ts.net";
+
+/// Every toast's title and detail, oldest first.
+fn toasts(h: &mut Harness<'_>) -> Vec<(String, Option<String>)> {
+    h.root(|root, _| {
+        root.toasts()
+            .iter()
+            .map(|toast| (toast.title.clone(), toast.detail.clone()))
+            .collect()
+    })
+}
+
+/// Clicks a link to `href` in viewer tab `tab_id`'s rendered Markdown.
+fn follow(h: &mut Harness<'_>, tab_id: &str, href: &str) {
+    let tab_id = tab_id.to_owned();
+    let href = href.to_owned();
+    h.root_update(move |root, window, cx| root.follow_md_href(&tab_id, &href, window, cx));
+}
+
+/// The `OpenViewerTab`s sent since the last look, as `(id, path)`.
+fn opens_sent(h: &mut Harness<'_>) -> Vec<(String, String)> {
+    h.sent()
+        .into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::OpenViewerTab { id, path } => Some((id, path)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// `path` as a resolved link names it: canonical, without the verbatim
+/// prefix.
+fn canonical(path: &Path) -> PathBuf {
+    let resolved = fs::canonicalize(path).expect("canonicalize the file");
+    let text = resolved.to_string_lossy();
+    PathBuf::from(text.strip_prefix(r"\\?\").unwrap_or(&text))
+}
+
+/// The row at the top of viewer tab `tab_id`'s rendered Markdown.
+fn top_row(h: &mut Harness<'_>, tab_id: &str) -> Option<usize> {
+    h.cx.run_until_parked();
+    h.root(|root, _| root.viewer_markdown_top_row(tab_id))
+}
+
+#[gpui::test]
+fn an_https_link_click_opens_the_browser_job(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let file = write_file(dir.path(), "docs/notes.md", SAMPLE);
+    let mut h = showing(cx, &dir, &[&file]);
+    assert!(drawn(&mut h, "viewer-md-v1"));
+
+    follow(&mut h, "v1", "https://example.com/page");
+    assert_eq!(
+        h.opened(),
+        [Opened::Url("https://example.com/page".to_owned())]
+    );
+    assert_eq!(toasts(&mut h), []);
+}
+
+#[gpui::test]
+fn a_relative_md_link_opens_another_viewer_tab(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let file = write_file(dir.path(), "docs/notes.md", "[other](other.md#part)\n");
+    let other = write_file(dir.path(), "docs/other.md", "# Other\n");
+    let mut h = showing(cx, &dir, &[&file]);
+    assert!(drawn(&mut h, "viewer-md-v1"));
+
+    follow(&mut h, "v1", "other.md#part");
+    let opens = opens_sent(&mut h);
+    let [(id, path)] = opens.as_slice() else {
+        panic!("one OpenViewerTab is sent, got {opens:?}");
+    };
+    assert_eq!(Path::new(path), canonical(&other), "the anchor is dropped");
+    assert_eq!(h.opened(), [], "nothing goes out");
+
+    h.send(DaemonMessage::TabUpdated {
+        tab: viewer_tab("v2", Path::new(path)),
+    });
+    h.send(DaemonMessage::ViewerTabOpened {
+        id: id.clone(),
+        tab_id: "v2".to_owned(),
+    });
+    h.cx.run_until_parked();
+    assert_eq!(mode(&mut h, "v2"), Some(MarkdownMode::Rendered));
+    assert!(drawn(&mut h, "viewer-md-v2"), "the second tab shows");
+}
+
+#[gpui::test]
+fn a_file_scheme_link_toasts_and_opens_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let file = write_file(dir.path(), "docs/notes.md", SAMPLE);
+    let mut h = showing(cx, &dir, &[&file]);
+    assert!(drawn(&mut h, "viewer-md-v1"));
+
+    follow(&mut h, "v1", "file:///C:/notes/other.md");
+    assert_eq!(
+        toasts(&mut h),
+        [(
+            "Couldn't open".to_owned(),
+            Some("Only http and https links open from a Markdown file.".to_owned())
+        )]
+    );
+    assert_eq!(h.opened(), []);
+    assert_eq!(opens_sent(&mut h), []);
+}
+
+/// A document whose heading `Target` sits at row 201, with as many rows
+/// again below it.
+fn long_document() -> String {
+    [
+        "# Top\n\n",
+        &"para\n\n".repeat(200),
+        "## Target\n\n",
+        &"para\n\n".repeat(200),
+    ]
+    .concat()
+}
+
+#[gpui::test]
+fn a_heading_anchor_scrolls(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let file = write_file(dir.path(), "docs/long.md", &long_document());
+    let mut h = showing(cx, &dir, &[&file]);
+    assert!(drawn(&mut h, "viewer-md-v1"));
+    assert_eq!(top_row(&mut h, "v1"), Some(0));
+
+    follow(&mut h, "v1", "#target");
+    assert_eq!(top_row(&mut h, "v1"), Some(201));
+    assert!(drawn(&mut h, "viewer-md-block-v1-201"), "the heading shows");
+}
+
+#[gpui::test]
+fn an_unknown_anchor_does_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let file = write_file(dir.path(), "docs/long.md", &long_document());
+    let mut h = showing(cx, &dir, &[&file]);
+    assert!(drawn(&mut h, "viewer-md-v1"));
+
+    follow(&mut h, "v1", "#nowhere");
+    assert_eq!(top_row(&mut h, "v1"), Some(0));
+    assert_eq!(toasts(&mut h), []);
+    assert_eq!(h.opened(), []);
+}
+
+/// A harness on the remote host [`HOST`] whose tab `v1` shows a fetched
+/// copy of `notes.md` holding `text`, under the download root `<dir>/remote-files`;
+/// returns the copy's path.
+fn fetched<'a>(cx: &'a mut TestAppContext, dir: &TestDir, text: &str) -> (Harness<'a>, PathBuf) {
+    let fixture = Fixture::single(session("s1").worktree("r1").build());
+    let mut h = Harness::on_target(cx, dir, Target::tailnet(HOST, None), &fixture);
+    let root = dir.path().join("remote-files");
+    let set = root.clone();
+    h.root_update(move |view, _, _| view.set_remote_files_root(set));
+    let copy = write_file(&root, &[HOST, "/repo/docs/notes.md"].concat(), text);
+    h.send(DaemonMessage::TabUpdated {
+        tab: viewer_tab("v1", &copy),
+    });
+    h.click_on("tab-v1");
+    h.sent();
+    assert_eq!(
+        h.root(|root, _| root.viewer_tab("v1").map(ViewerTab::origin)),
+        Some(ViewerOrigin::Fetched)
+    );
+    assert!(drawn(&mut h, "viewer-md-v1"));
+    (h, copy)
+}
+
+#[gpui::test]
+fn a_fetched_tab_opens_a_fetched_sibling_externally(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, copy) = fetched(cx, &dir, "![diagram](diagram.png)\n");
+    let folder = copy.parent().expect("the copy has a folder");
+    fs::write(folder.join("diagram.png"), b"\x89PNG\r\n\x1a\n\0\0binary").expect("write the image");
+
+    follow(&mut h, "v1", "diagram.png");
+    assert_eq!(toasts(&mut h), [], "no refusal");
+    let opened = h.opened();
+    let [Opened::DefaultApp(path)] = opened.as_slice() else {
+        panic!("the image goes to its default app, got {opened:?}");
+    };
+    assert_eq!(
+        path.file_name().and_then(|name| name.to_str()),
+        Some("diagram.png")
+    );
+    assert_eq!(opens_sent(&mut h), [], "no viewer tab opens");
+}
+
+#[gpui::test]
+fn a_fetched_tab_refuses_a_link_outside_the_fetch_folder(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    write_file(dir.path(), "outside.md", "# Mine\n");
+    let (mut h, _) = fetched(cx, &dir, SAMPLE);
+
+    // From remote-files/<host>/repo/docs, four levels up is the test folder.
+    follow(&mut h, "v1", "../../../../outside.md");
+    assert_eq!(
+        toasts(&mut h),
+        [(
+            "Couldn't open".to_owned(),
+            Some("Only files in the folder for fetched files open here.".to_owned())
+        )]
+    );
+    assert_eq!(h.opened(), []);
+    assert_eq!(opens_sent(&mut h), [], "no viewer tab opens");
+}
+
+#[gpui::test]
+fn a_link_on_a_fetched_copy_with_no_sibling_toasts_no_file_found(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, copy) = fetched(cx, &dir, SAMPLE);
+
+    follow(&mut h, "v1", "missing.md");
+    let missing = copy
+        .parent()
+        .expect("the copy has a folder")
+        .join("missing.md");
+    assert_eq!(
+        toasts(&mut h),
+        [(
+            "Couldn't open".to_owned(),
+            Some(format!("No file found for {}", missing.display()))
+        )]
+    );
+    assert_eq!(h.opened(), []);
+    assert_eq!(opens_sent(&mut h), [], "no viewer tab opens");
 }
