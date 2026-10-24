@@ -3,7 +3,7 @@
 //! At spawn time the daemon writes `<sessions_dir>/<id>/meta.json` recording
 //! the OS pid plus enough state to rebuild a [`SessionRecord`] without a live
 //! PTY/headless handle. On startup the daemon walks the sessions dir, drops
-//! stale entries whose pid no longer points at a `claude` process, and
+//! stale entries whose pid no longer points at the session's program, and
 //! reattaches the survivors so they appear in the dashboard with their
 //! scrollback intact (PTY stream is gone, but state and history are not).
 //!
@@ -413,12 +413,14 @@ pub fn delete_session_dir(dirs: &Dirs, session_id: &str) -> anyhow::Result<()> {
 /// Pre-C.3 sidecars use the legacy `pid` + `program_name` path.
 pub fn is_session_alive(meta: &OrphanMeta) -> bool {
     if let Some(tracer_pid) = meta.tracer_pid {
-        return pid_matches(tracer_pid, Some("rt-tracer"));
+        return pid_matches(tracer_pid, Some("rt-tracer"), &[]);
     }
-    pid_matches(meta.pid, meta.program_name.as_deref())
+    let agent = meta.agent.unwrap_or_else(agent_registry::default_agent);
+    let fallback = agent_registry::plugin(agent).liveness_tokens();
+    pid_matches(meta.pid, meta.program_name.as_deref(), fallback)
 }
 
-fn pid_matches(pid: u32, program_token: Option<&str>) -> bool {
+fn pid_matches(pid: u32, program_token: Option<&str>, fallback: &[&str]) -> bool {
     let mut sys =
         System::new_with_specifics(RefreshKind::new().with_processes(ProcessRefreshKind::new()));
     let pid = sysinfo::Pid::from_u32(pid);
@@ -431,12 +433,16 @@ fn pid_matches(pid: u32, program_token: Option<&str>) -> bool {
         return false;
     };
     let name = process.name().to_string_lossy().to_lowercase();
+    name_matches(&name, program_token, fallback)
+}
+
+/// Whether the lowercase process `name` is the program a sidecar recorded:
+/// it contains `program_token`, or, for the very oldest sidecars that named
+/// none, any of the agent's `fallback` liveness tokens.
+fn name_matches(name: &str, program_token: Option<&str>, fallback: &[&str]) -> bool {
     match program_token {
         Some(token) => name.contains(&token.to_lowercase()),
-        // Legacy fallback for the very oldest sidecars (pre plain-shell
-        // support): `claude` (Unix) or `claude.exe` / `node.exe` shim on
-        // Windows. The TUI is a Node script invoked via a shim; allow either.
-        None => name.contains("claude") || name.contains("node"),
+        None => fallback.iter().any(|token| name.contains(token)),
     }
 }
 
@@ -700,6 +706,17 @@ mod tests {
             binaries_dir: root.join("binaries"),
             bin_templates: None,
         }
+    }
+
+    /// A sidecar naming no program matches on its agent's liveness tokens;
+    /// a recorded program token is matched as before.
+    #[test]
+    fn name_matches_falls_back_to_the_agents_liveness_tokens() {
+        let tokens = agent_registry::plugin(Agent::Claude).liveness_tokens();
+        assert!(name_matches("node.exe", None, tokens));
+        assert!(!name_matches("pwsh.exe", None, tokens));
+        assert!(name_matches("rt-tracer.exe", Some("RT-Tracer"), tokens));
+        assert!(!name_matches("node.exe", Some("rt-tracer"), tokens));
     }
 
     fn write_sidecar(dirs: &Dirs, session_id: &str, bytes: &[u8]) -> PathBuf {

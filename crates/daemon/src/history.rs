@@ -149,7 +149,7 @@ pub fn entry_from_meta(
         label: meta.label.clone(),
         kind: meta.kind.clone(),
         mode: meta.mode,
-        agent: meta.agent.unwrap_or_default(),
+        agent: meta.agent.unwrap_or_else(agent_registry::default_agent),
         spawn_config: meta.spawn_config.clone(),
         members: meta.members.clone(),
         workspace_id: meta.workspace_id.clone(),
@@ -1706,6 +1706,34 @@ mod tests {
 
     fn entry(id: &str, end: SessionEnd, ended_at: DateTime<Utc>) -> HistoryEntry {
         entry_from_record(&record(id, SessionMode::Interactive), end, ended_at)
+    }
+
+    /// A sidecar that names no agent ends as the default agent's session.
+    #[test]
+    fn history_entry_from_meta_without_an_agent_uses_the_default_agent() {
+        let mut meta = crate::orphan::meta_from_record(
+            "s-no-agent".to_string(),
+            1,
+            "s-no-agent".to_string(),
+            SessionKind::Standalone,
+            SessionMode::Interactive,
+            Vec::new(),
+            Utc::now(),
+            None,
+            None,
+            Agent::Claude,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("build meta");
+        meta.agent = None;
+        let entry = entry_from_meta(&meta, SessionEnd::TracerLost, Utc::now());
+        assert_eq!(entry.agent, agent_registry::default_agent());
     }
 
     /// The hook path moves the record to a `/clear`'s conversation, and the

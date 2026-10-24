@@ -254,7 +254,7 @@ pub struct SessionRecord {
 /// The agent a record or sidecar names for a session that runs none: a plain
 /// shell, the recovered shell among them.
 pub fn default_agent() -> Agent {
-    Agent::default()
+    agent_registry::default_agent()
 }
 
 impl SessionRecord {
@@ -1029,7 +1029,7 @@ impl SessionRegistry {
             pty: None,
             headless: None,
             workspace_id: meta.workspace_id.clone(),
-            agent: meta.agent.unwrap_or_default(),
+            agent: meta.agent.unwrap_or_else(default_agent),
             terminal_title: meta.terminal_title.clone(),
             program_name: meta.program_name.clone(),
             current_cwd: meta.current_cwd.clone(),
@@ -1108,7 +1108,7 @@ impl SessionRegistry {
             pty: Some(pty),
             headless: None,
             workspace_id: meta.workspace_id.clone(),
-            agent: meta.agent.unwrap_or_default(),
+            agent: meta.agent.unwrap_or_else(default_agent),
             terminal_title: meta.terminal_title.clone(),
             program_name: meta.program_name.clone(),
             current_cwd: meta.current_cwd.clone(),
@@ -1164,7 +1164,7 @@ impl SessionRegistry {
             pty: None,
             headless: None,
             workspace_id: meta.workspace_id.clone(),
-            agent: meta.agent.unwrap_or_default(),
+            agent: meta.agent.unwrap_or_else(default_agent),
             terminal_title: meta.terminal_title.clone(),
             program_name: meta.program_name.clone(),
             current_cwd: meta.current_cwd.clone(),
