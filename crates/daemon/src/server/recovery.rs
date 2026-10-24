@@ -629,8 +629,8 @@ fn auto_resume_refusal(rec: &SessionRecord) -> Option<&'static str> {
     if rec.mode != SessionMode::Interactive {
         return Some("not an interactive session");
     }
-    if !matches!(rec.agent, Agent::Claude) {
-        return Some("not a Claude session");
+    if !agent_registry::plugin(rec.agent).descriptor().caps.resume {
+        return Some("the agent cannot resume");
     }
     if rec.spawn_config.is_none() {
         return Some("no stored spawn config");

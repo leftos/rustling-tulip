@@ -13,17 +13,18 @@ use crate::env_secrets::{self, SealOutcome};
 use crate::orphan;
 use crate::paths::{Dirs, normalize_path_key};
 use crate::pty::PtyExit;
+use crate::server::{options_from_request, request_parts_from_options};
 use crate::session::{SessionRecord, SessionRegistry};
 use crate::sync::lock;
 use crate::tracer_log::{self, TracerLogEnd, TracerLogSummary};
-use agent_api::ResolvedRows;
+use agent_api::{RecoveredRun, ResolvedRows, TracerRun};
 use anyhow::{Context as _, anyhow};
 use chrono::{DateTime, TimeDelta, Utc};
 use protocol::{
     Agent, AgentOptions, ClaudeProvider, ConversationCandidate, HistoryEntry, HistorySource,
-    PinnedMemberWorktree, RecoverAs, RecoverItem, RepoEntry, SessionEnd, SessionHistoryItem,
-    SessionKind, SessionMember, SessionMode, SpawnConfig, SpawnRequest, SpawnTarget,
-    WorkspaceEntry, WorktreeReusePolicy,
+    OptionValues, PinnedMemberWorktree, RecoverAs, RecoverItem, RepoEntry, SessionEnd,
+    SessionHistoryItem, SessionKind, SessionMember, SessionMode, SpawnConfig, SpawnRequest,
+    SpawnTarget, WorkspaceEntry, WorktreeReusePolicy,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -38,15 +39,9 @@ pub const HISTORY_RETENTION: TimeDelta = TimeDelta::days(7);
 const CANDIDATE_GRACE: TimeDelta = TimeDelta::minutes(2);
 /// How far before its end a session with no known start is searched from.
 const UNKNOWN_START_LOOKBACK: TimeDelta = TimeDelta::days(1);
-/// The tracer-log importer's revision, stamped on every entry it writes. An
-/// unrecovered import from [`UPGRADABLE_IMPORT_REV`] is upgraded in place,
-/// and one from before it is read again from its log.
+/// The tracer-log importer's revision for a plain-shell import. An agent's
+/// import is stamped with its plugin's `import_rev`.
 pub const IMPORT_REV: u32 = 2;
-/// The one import revision upgraded in place to [`IMPORT_REV`]: revision 1
-/// lacks only the provider, which its model gives. A future `IMPORT_REV`
-/// bump must decide its own upgrade, or let older imports be read again.
-const UPGRADABLE_IMPORT_REV: u32 = 1;
-const _: () = assert!(IMPORT_REV == UPGRADABLE_IMPORT_REV + 1);
 /// Program file stems an imported plain-shell session may have run.
 const SHELL_STEMS: [&str; 6] = ["pwsh", "powershell", "cmd", "bash", "zsh", "sh"];
 /// The branch name a recovered repo or workspace spawn asks for when its
@@ -500,7 +495,8 @@ pub fn mark_recovered(dirs: &Dirs, session_id: &str, at: DateTime<Utc>) -> anyho
 }
 
 /// Delete entries that ended more than `max_age` before `now`, and upgrade
-/// every surviving import [`upgrade_import`] can bring up to [`IMPORT_REV`],
+/// every surviving import [`upgrade_import`] can bring up to its plugin's
+/// import revision,
 /// in the same pass so an entry about to be deleted is never rewritten.
 /// Returns how many were deleted. Unparseable files are left alone.
 pub fn prune(dirs: &Dirs, now: DateTime<Utc>, max_age: TimeDelta) -> usize {
@@ -556,10 +552,10 @@ pub struct Registered<'a> {
 /// their `<config>/logs/tracer-<id>.log` files modified within
 /// [`HISTORY_RETENTION`] of `now`. A session in `skip` (a live or abandoned
 /// sidecar) is left alone, and so is one already in the history unless it is
-/// an unrecovered import from before [`UPGRADABLE_IMPORT_REV`], which is
-/// imported again; [`prune`] upgrades one from that revision in place, log
-/// or no log. A log naming no program or one that is neither Claude nor a
-/// known shell is skipped. A session with no end line in the daemon logs gets
+/// an unrecovered import its plugin neither stamps as current nor upgrades
+/// in place, which is imported again; [`prune`] upgrades an upgradable one
+/// in place, log or no log. A log naming no program or one that is neither
+/// an agent's nor a known shell is skipped. A session with no end line in the daemon logs gets
 /// the log's modified time as `ended_at` and `end_time_known: false`. Returns
 /// how many entries were written.
 pub fn import_tracer_logs(
@@ -615,34 +611,41 @@ pub fn import_tracer_logs(
     imported
 }
 
-/// Upgrade `entry` in memory when it is an unrecovered import from
-/// [`UPGRADABLE_IMPORT_REV`], without its tracer log: its provider is read
-/// from its recorded model and every other field is kept. Returns whether it
+/// Upgrade `entry` in memory, without its tracer log, when it is an
+/// unrecovered import its plugin's `upgrade_import` upgrades in place: its
+/// provider and model become the upgraded options' and its revision the
+/// plugin's `import_rev`; every other field is kept. Returns whether it
 /// changed.
 fn upgrade_import(entry: &mut HistoryEntry) -> bool {
-    let upgradable = entry.source == HistorySource::TracerLog
-        && entry.recovered_at.is_none()
-        && entry.import_rev == UPGRADABLE_IMPORT_REV;
-    if upgradable {
-        entry.provider = imported_provider(entry.model.as_deref());
-        entry.import_rev = UPGRADABLE_IMPORT_REV + 1;
+    if entry.source != HistorySource::TracerLog || entry.recovered_at.is_some() {
+        return false;
     }
-    upgradable
+    let plugin = agent_registry::plugin(entry.agent);
+    let Some(upgraded) = plugin.upgrade_import(entry.import_rev, &import_options(entry)) else {
+        return false;
+    };
+    (entry.provider, entry.model) = import_parts(&upgraded);
+    entry.import_rev = plugin.import_rev();
+    true
 }
 
 /// Whether the importer may write the history file at `path`: there is none,
-/// or it holds an unrecovered import from before [`UPGRADABLE_IMPORT_REV`].
-/// A recorded entry, a recovered one, a later import and an unreadable file
-/// are kept.
+/// or it holds an unrecovered import from before its plugin's `import_rev`
+/// that the plugin cannot upgrade in place. A recorded entry, a recovered
+/// one, a current or upgradable import and an unreadable file are kept.
 fn is_importable(path: &Path) -> bool {
     if !path.exists() {
         return true;
     }
     match read_entry(path) {
         Ok(existing) => {
+            let plugin = agent_registry::plugin(existing.agent);
             existing.source == HistorySource::TracerLog
-                && existing.import_rev < UPGRADABLE_IMPORT_REV
                 && existing.recovered_at.is_none()
+                && existing.import_rev < plugin.import_rev()
+                && plugin
+                    .upgrade_import(existing.import_rev, &import_options(&existing))
+                    .is_none()
         }
         Err(err) => {
             warn!(?err, "keeping unreadable session history file");
@@ -717,14 +720,6 @@ fn program_stem(program: &str) -> Option<String> {
     (!stem.is_empty()).then_some(stem)
 }
 
-/// Every `--add-dir <path>` value in `args`, in order.
-fn add_dir_args(args: &[String]) -> Vec<String> {
-    args.windows(2)
-        .filter(|pair| pair[0] == "--add-dir")
-        .map(|pair| pair[1].clone())
-        .collect()
-}
-
 fn end_from_log(end: TracerLogEnd) -> SessionEnd {
     match end {
         TracerLogEnd::StoppedByUser => SessionEnd::StoppedByUser,
@@ -733,95 +728,99 @@ fn end_from_log(end: TracerLogEnd) -> SessionEnd {
     }
 }
 
-/// The history entry a tracer log describes. A Claude session's provider is
-/// the one whose table names its `--model`, else Anthropic. Claude sessions are matched to
-/// the workspace (cwd its first member, `--add-dir`s its other members) or
-/// the repo (cwd its path, no `--add-dir`) they ran in, but never get a
-/// `spawn_config`: the log doesn't say how the session was spawned. Recovery
-/// runs Claude in the same folders, under the matched workspace or repo with
-/// each member pinned to its folder, else with the same `--add-dir`s.
+/// The history entry a tracer log describes. The run is offered to every
+/// agent's plugin in order, and the first that recognises it gives the
+/// entry's program name, extra folders, options and trust. Such a session is
+/// matched to the workspace (cwd its first member, extra folders its other
+/// members) or the repo (cwd its path, no extra folder) it ran in, but never
+/// gets a `spawn_config`: the log doesn't say how the session was spawned.
+/// Recovery runs the agent in the same folders, under the matched workspace
+/// or repo with each member pinned to its folder, else with the same extra
+/// folders. A run no plugin recognises is a plain shell when its program is
+/// one, under the default agent.
 fn entry_from_tracer_log(
     id: &str,
     summary: &TracerLogSummary,
     end: ImportEnd,
     registered: &Registered<'_>,
 ) -> Option<HistoryEntry> {
-    let stem = program_stem(&summary.program)?;
-    let is_claude = stem.starts_with("claude");
-    if !is_claude && !SHELL_STEMS.contains(&stem.as_str()) {
-        return None;
-    }
     let cwd = summary.cwd.clone();
-    let (mode, program_name, kind, workspace_id, members) = if is_claude {
-        let add_dirs = add_dir_args(&summary.args);
-        let (kind, workspace_id) = match_target(&cwd, &add_dirs, registered);
-        let members = folder_members(&cwd, &add_dirs, registered.repos);
-        let name = "claude".to_owned();
-        (SessionMode::Interactive, name, kind, workspace_id, members)
-    } else {
-        let kind = SessionKind::Standalone;
-        (SessionMode::PlainShell, stem, kind, None, Vec::new())
-    };
-    let model = if is_claude {
-        model_arg(&summary.args)
-    } else {
-        None
-    };
-    let provider = imported_provider(model.as_deref());
-    Some(HistoryEntry {
+    let shell = HistoryEntry {
         session_id: id.to_owned(),
         label: String::new(),
-        kind,
-        mode,
-        agent: Agent::Claude,
+        kind: SessionKind::Standalone,
+        mode: SessionMode::PlainShell,
+        agent: agent_registry::default_agent(),
         spawn_config: None,
-        members,
-        workspace_id,
+        members: Vec::new(),
+        workspace_id: None,
         primary_cwd: Some(cwd.clone()),
-        current_cwd: (!is_claude).then_some(cwd),
-        program_name: Some(program_name),
+        current_cwd: Some(cwd.clone()),
+        program_name: None,
         started_at: Some(summary.started_at),
         ended_at: end.at,
         end: end_from_log(summary.end),
         claude_session_id: None,
         source: HistorySource::TracerLog,
         recovered_at: None,
-        skip_permissions: is_claude.then(|| {
-            summary
-                .args
-                .iter()
-                .any(|a| a == "--dangerously-skip-permissions")
-        }),
-        model,
+        skip_permissions: None,
+        model: None,
         end_time_known: end.known,
         import_rev: IMPORT_REV,
         // A tracer log does not record the flag; an imported session counts.
         busy_excluded: false,
-        provider,
-    })
-}
-
-/// The provider an imported session that ran `model` was on.
-fn imported_provider(model: Option<&str>) -> ClaudeProvider {
-    model.map_or(
-        ClaudeProvider::Anthropic,
-        agent_registry::provider_for_model,
-    )
-}
-
-/// The value of the last `--model <m>` or `--model=<m>` in `args`.
-fn model_arg(args: &[String]) -> Option<String> {
-    let mut model = None;
-    for (i, arg) in args.iter().enumerate() {
-        if let Some(value) = arg.strip_prefix("--model=") {
-            model = Some(value.to_owned());
-        } else if arg == "--model"
-            && let Some(value) = args.get(i + 1)
-        {
-            model = Some(value.clone());
-        }
+        provider: ClaudeProvider::Anthropic,
+    };
+    let run = TracerRun {
+        program: &summary.program,
+        args: &summary.args,
+        cwd: &summary.cwd,
+    };
+    for agent in Agent::all() {
+        let plugin = agent_registry::plugin(*agent);
+        let Some(imported) = plugin.import_tracer_run(&run) else {
+            continue;
+        };
+        let (kind, workspace_id) = match_target(&cwd, &imported.extra_dirs, registered);
+        let (provider, model) = import_parts(&imported.options);
+        return Some(HistoryEntry {
+            kind,
+            mode: SessionMode::Interactive,
+            agent: *agent,
+            members: folder_members(&cwd, &imported.extra_dirs, registered.repos),
+            workspace_id,
+            current_cwd: None,
+            program_name: Some(imported.program_name),
+            skip_permissions: Some(imported.trusted),
+            model,
+            import_rev: plugin.import_rev(),
+            provider,
+            ..shell
+        });
     }
-    model.filter(|m| !m.is_empty())
+    let stem = program_stem(&summary.program)?;
+    SHELL_STEMS
+        .contains(&stem.as_str())
+        .then_some(HistoryEntry {
+            program_name: Some(stem),
+            ..shell
+        })
+}
+
+/// The plugin options an import `entry` recorded: no permission mode, its
+/// provider and its model.
+fn import_options(entry: &HistoryEntry) -> OptionValues {
+    let agent_options = AgentOptions::Claude {
+        permission_mode: None,
+        provider: entry.provider,
+    };
+    options_from_request(&agent_options, entry.model.as_deref())
+}
+
+/// The provider and model an import's plugin options select.
+fn import_parts(options: &OptionValues) -> (ClaudeProvider, Option<String>) {
+    let (AgentOptions::Claude { provider, .. }, model) = request_parts_from_options(options);
+    (provider, model)
 }
 
 fn repo_at<'a>(repos: &'a [RepoEntry], path: &str) -> Option<&'a RepoEntry> {
@@ -1100,19 +1099,21 @@ pub fn plan_recovery(
         return Err("unsupported recovery kind".to_owned());
     }
     let folder = entry_folder(entry).unwrap_or_default();
-    // A shell would type `claude` without the provider's routing, running on
-    // Anthropic, so a session on another provider recovers as Claude only.
-    if item.how == RecoverAs::Shell {
-        shell_allowed(entry.claude_provider())?;
-    }
+    let spawn = recovered_spawn(entry, item)?;
     if let Some(id) = &item.conversation_id
-        && !conversation_exists(Agent::Claude, folder, id)
+        && !conversation_exists(entry.agent, folder, id)
     {
         return Err(format!("conversation {id} not found for {folder}"));
     }
     let plan = match &item.how {
         RecoverAs::Claude => RecoveryPlan {
-            request: claude_request(entry, folder, required_conversation(item)?, registered),
+            request: claude_request(
+                entry,
+                folder,
+                required_conversation(item)?,
+                registered,
+                spawn,
+            ),
             register_repo: None,
             hook_agent: None,
             resume_conversation: None,
@@ -1140,7 +1141,7 @@ pub fn plan_recovery(
                 }
             };
             RecoveryPlan {
-                request: folder_claude(entry, target, conversation),
+                request: folder_claude(entry, target, conversation, spawn),
                 register_repo: Some(path.clone()),
                 hook_agent: None,
                 resume_conversation: None,
@@ -1161,16 +1162,59 @@ pub fn plan_recovery(
     Ok(plan)
 }
 
-/// Refuse a shell recovery of a session that ran on a provider other than
-/// Anthropic, naming the provider when this daemon knows it.
-fn shell_allowed(provider: ClaudeProvider) -> Result<(), String> {
-    if provider.is_anthropic() {
-        return Ok(());
+/// The options and trust a recovery of an entry spawns with.
+struct RecoveredSpawn {
+    agent_options: AgentOptions,
+    model: Option<String>,
+    dangerously_skip_permissions: bool,
+}
+
+/// What every recovery of `entry` spawns with: the options its plugin's
+/// `recovery_options` gives for what the entry recorded. A shell recovery is
+/// first offered to the plugin's `shell_resume` (with the chosen
+/// conversation, or `""` when there is none), and its refusal is the error.
+fn recovered_spawn(entry: &HistoryEntry, item: &RecoverItem) -> Result<RecoveredSpawn, String> {
+    let plugin = agent_registry::plugin(entry.agent);
+    let (recorded, trusted) = recorded_options(entry);
+    let options = plugin
+        .recovery_options(&RecoveredRun {
+            recorded: Some(&recorded),
+            trusted,
+        })
+        .map_err(|err| err.to_string())?;
+    if item.how == RecoverAs::Shell {
+        let conversation = item.conversation_id.as_deref().unwrap_or("");
+        plugin
+            .shell_resume(&options, conversation, &[])
+            .map_err(|err| err.to_string())?;
     }
-    Err(match agent_registry::display_name(provider) {
-        Some(name) => format!("{name} sessions recover as Claude."),
-        None => "Sessions on this Claude provider recover as Claude.".to_owned(),
+    let (agent_options, model) = request_parts_from_options(&options);
+    Ok(RecoveredSpawn {
+        agent_options,
+        model,
+        dangerously_skip_permissions: trusted,
     })
+}
+
+/// The options `entry` recorded and whether it ran trusted. A spawn config
+/// that is not a plain shell's gives its options, model and skip flag. A
+/// plain shell's config, whose options and flags never reached the agent, or
+/// no config gives no permission mode, the entry's provider
+/// ([`HistoryEntry::claude_provider`]) and the model and skip flag the entry
+/// recorded.
+fn recorded_options(entry: &HistoryEntry) -> (OptionValues, bool) {
+    if let Some(config) = &entry.spawn_config
+        && config.mode != SessionMode::PlainShell
+    {
+        let options = options_from_request(&config.agent_options, config.model.as_deref());
+        return (options, config.dangerously_skip_permissions);
+    }
+    let agent_options = AgentOptions::Claude {
+        permission_mode: None,
+        provider: entry.claude_provider(),
+    };
+    let options = options_from_request(&agent_options, entry.model.as_deref());
+    (options, entry.skip_permissions.unwrap_or(false))
 }
 
 fn required_conversation(item: &RecoverItem) -> Result<&str, String> {
@@ -1188,17 +1232,17 @@ fn claude_request(
     folder: &str,
     conversation: &str,
     registered: &Registered<'_>,
+    spawn: RecoveredSpawn,
 ) -> SpawnRequest {
     let Some(config) = &entry.spawn_config else {
         let members = entry_members(entry, folder, registered.repos);
         let target = folder_target(entry, &members, registered);
-        return folder_claude(entry, target, conversation);
+        return folder_claude(entry, target, conversation, spawn);
     };
     let mut request = recorded_request(entry, config, folder, registered);
-    let flags = recovered_claude_flags(entry);
-    request.agent_options = flags.agent_options;
-    request.dangerously_skip_permissions = flags.dangerously_skip_permissions;
-    request.model = flags.model;
+    request.agent_options = spawn.agent_options;
+    request.dangerously_skip_permissions = spawn.dangerously_skip_permissions;
+    request.model = spawn.model;
     request.mode = SessionMode::Interactive;
     request.resume_conversation = Some(conversation.to_owned());
     request
@@ -1412,64 +1456,27 @@ fn pinned_single(repo_id: String, path: &str, branch_name: String) -> SpawnTarge
     }
 }
 
-/// Claude resuming `conversation` in `target`, with the flags
-/// [`recovered_claude_flags`] gives `entry` and the env rows its spawn
-/// recorded.
-fn folder_claude(entry: &HistoryEntry, target: SpawnTarget, conversation: &str) -> SpawnRequest {
-    let flags = recovered_claude_flags(entry);
+/// Claude resuming `conversation` in `target` with `spawn`'s options and the
+/// env rows `entry`'s spawn recorded.
+fn folder_claude(
+    entry: &HistoryEntry,
+    target: SpawnTarget,
+    conversation: &str,
+    spawn: RecoveredSpawn,
+) -> SpawnRequest {
     SpawnRequest {
         label: None,
         target,
         mode: SessionMode::Interactive,
         initial_prompt: None,
-        dangerously_skip_permissions: flags.dangerously_skip_permissions,
-        agent_options: flags.agent_options,
-        model: flags.model,
+        dangerously_skip_permissions: spawn.dangerously_skip_permissions,
+        agent_options: spawn.agent_options,
+        model: spawn.model,
         extra_env: recorded_env(entry).to_vec(),
         secret_env_keys: Vec::new(),
         prompt_injector: None,
         request_id: None,
         resume_conversation: Some(conversation.to_owned()),
-    }
-}
-
-/// The Claude options and flags a recovered Claude session spawns with.
-struct ClaudeFlags {
-    agent_options: AgentOptions,
-    dangerously_skip_permissions: bool,
-    model: Option<String>,
-}
-
-/// The options and flags every recovery of `entry` as Claude spawns with, on
-/// the entry's provider ([`HistoryEntry::claude_provider`]). A spawn config
-/// that is not a plain shell's gives its model and skip flag, and its
-/// permission mode when its options are Claude's. A plain shell's config,
-/// whose options and flags never reached `claude`, or no config gives no
-/// permission mode and the model and skip flag the entry recorded.
-fn recovered_claude_flags(entry: &HistoryEntry) -> ClaudeFlags {
-    let provider = entry.claude_provider();
-    if let Some(config) = &entry.spawn_config
-        && config.mode != SessionMode::PlainShell
-    {
-        let AgentOptions::Claude {
-            permission_mode, ..
-        } = config.agent_options;
-        return ClaudeFlags {
-            agent_options: AgentOptions::Claude {
-                permission_mode,
-                provider,
-            },
-            dangerously_skip_permissions: config.dangerously_skip_permissions,
-            model: config.model.clone(),
-        };
-    }
-    ClaudeFlags {
-        agent_options: AgentOptions::Claude {
-            permission_mode: None,
-            provider,
-        },
-        dangerously_skip_permissions: entry.skip_permissions.unwrap_or(false),
-        model: entry.model.clone(),
     }
 }
 
@@ -2249,6 +2256,36 @@ mod import_tests {
     }
 
     #[test]
+    fn an_import_is_stamped_with_the_plugins_import_rev() {
+        let dirs = scratch_dirs("import-plugin-rev");
+        write_log(&dirs, &format!("tracer-{YAAT_ID}.log"), &YAAT_LOG);
+
+        assert_eq!(import(&dirs, &[], &[]), 1);
+
+        let entry = only(&dirs, YAAT_ID);
+        assert_eq!(entry.agent, Agent::Claude);
+        assert_eq!(
+            entry.import_rev,
+            agent_registry::plugin(entry.agent).import_rev()
+        );
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn a_shell_import_names_the_default_agent() {
+        let dirs = scratch_dirs("import-shell-agent");
+        write_log(&dirs, &format!("tracer-{PWSH_ID}.log"), &PWSH_LOG);
+
+        assert_eq!(import(&dirs, &[], &[]), 1);
+
+        let entry = only(&dirs, PWSH_ID);
+        assert_eq!(entry.mode, SessionMode::PlainShell);
+        assert_eq!(entry.agent, agent_registry::default_agent());
+        assert_eq!(entry.import_rev, IMPORT_REV);
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
     fn end_time_comes_from_the_daemon_logs_before_the_mtime() {
         let dirs = scratch_dirs("import-end-time");
         let log = write_log(&dirs, &format!("tracer-{YAAT_ID}.log"), &YAAT_LOG);
@@ -2496,7 +2533,7 @@ mod import_tests {
     }
 
     #[test]
-    fn program_stems_and_add_dirs_are_read_from_any_path_form() {
+    fn program_stems_are_read_from_any_path_form() {
         assert_eq!(
             program_stem(r"C:\Users\x\.local\bin\claude.exe").as_deref(),
             Some("claude")
@@ -2504,10 +2541,6 @@ mod import_tests {
         assert_eq!(program_stem("/usr/bin/bash").as_deref(), Some("bash"));
         assert_eq!(program_stem("PWSH.EXE").as_deref(), Some("pwsh"));
         assert_eq!(program_stem(""), None);
-        let args: Vec<String> = ["--add-dir", "a", "-x", "--add-dir", "b", "--add-dir"]
-            .map(str::to_owned)
-            .into();
-        assert_eq!(add_dir_args(&args), ["a", "b"]);
     }
 }
 
@@ -2857,6 +2890,70 @@ mod recovery_tests {
             assert_eq!(
                 plan(&entry, &item(RecoverAs::Shell, conversation)),
                 Err("Sessions on this Claude provider recover as Claude.".to_owned()),
+                "{conversation:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn plan_recovery_refuses_a_shell_through_the_plugins_shell_resume() {
+        let entry = imported_deepseek(vec![member("", r"D:\yaat")]);
+        let options = crate::server::options_from_request(
+            &AgentOptions::Claude {
+                permission_mode: None,
+                provider: ClaudeProvider::Deepseek,
+            },
+            Some("deepseek-flash"),
+        );
+        let refusal = agent_registry::plugin(entry.agent)
+            .shell_resume(&options, "", &[])
+            .expect_err("the plugin refuses a DeepSeek shell");
+        let registered = Registered {
+            repos: &[],
+            workspaces: &[],
+        };
+        for conversation in [Some(CONV), None] {
+            // The refusal comes before the conversation check, so a missing
+            // conversation does not hide it.
+            assert_eq!(
+                plan_recovery(
+                    &entry,
+                    &item(RecoverAs::Shell, conversation),
+                    &registered,
+                    |_, _, _| false
+                ),
+                Err(refusal.to_string()),
+                "{conversation:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_plain_shell_config_on_deepseek_keeps_its_provider_and_refuses_shell_recovery() {
+        let mut entry = folder_only(vec![member("", r"D:\foo")]);
+        let mut config = workspace_config();
+        config.mode = SessionMode::PlainShell;
+        config.agent_options = deepseek_options();
+        entry.spawn_config = Some(config);
+        for how in claude_paths() {
+            let request = plan(&entry, &item(how.clone(), Some(CONV)))
+                .expect("plan")
+                .request;
+            assert_eq!(
+                request.agent_options,
+                AgentOptions::Claude {
+                    permission_mode: None,
+                    provider: ClaudeProvider::Deepseek,
+                },
+                "{how:?}"
+            );
+            assert!(!request.dangerously_skip_permissions, "{how:?}");
+            assert_eq!(request.model, None, "{how:?}");
+        }
+        for conversation in [Some(CONV), None] {
+            assert_eq!(
+                plan(&entry, &item(RecoverAs::Shell, conversation)),
+                Err("DeepSeek sessions recover as Claude.".to_owned()),
                 "{conversation:?}"
             );
         }

@@ -3,10 +3,6 @@
 use agent_api::AgentPlugin;
 use protocol::Agent;
 
-/// Claude's provider table, for the daemon's history import, which reads it
-/// directly rather than through a plugin method.
-pub use agent_claude::{display_name, provider_for_model};
-
 /// Every registered plugin, one per [`Agent`] variant.
 static ALL: [&dyn AgentPlugin; 1] = [&agent_claude::CLAUDE];
 

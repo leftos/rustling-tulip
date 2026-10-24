@@ -140,6 +140,16 @@ mod tests {
     }
 
     #[test]
+    fn import_ignores_a_dangling_add_dir() {
+        let run = import(
+            "claude",
+            &["--add-dir", "a", "-x", "--add-dir", "b", "--add-dir"],
+        )
+        .expect("claude imports");
+        assert_eq!(run.extra_dirs, args(&["a", "b"]));
+    }
+
+    #[test]
     fn import_reads_model_equals_form() {
         let run = import(
             "/usr/bin/Claude-Code",

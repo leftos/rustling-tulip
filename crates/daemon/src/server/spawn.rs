@@ -46,9 +46,9 @@ use anyhow::{Context as _, anyhow};
 use chrono::Utc;
 use directories::UserDirs;
 use protocol::{
-    Agent, AgentOptions, AppearanceOverrides, ClientMessage, DaemonMessage, OptionValue,
-    OptionValues, SessionKind, SessionMember, SessionMetrics, SessionMode, SessionStatus,
-    SpawnRequest, SpawnTarget,
+    Agent, AgentOptions, AppearanceOverrides, ClaudeProvider, ClientMessage, DaemonMessage,
+    OptionValue, OptionValues, PermissionMode, SessionKind, SessionMember, SessionMetrics,
+    SessionMode, SessionStatus, SpawnRequest, SpawnTarget,
 };
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -643,6 +643,40 @@ pub(crate) fn options_from_request(
             ])
         }
     }
+}
+
+/// The request options and model `options` select: the inverse of
+/// [`options_from_request`], for the history paths that still build a
+/// request's typed options from plugin options. A provider that is missing
+/// or not one this daemon names is [`ClaudeProvider::Unknown`]; a permission
+/// mode or model that is missing, null or unrecognised is `None`.
+pub(crate) fn request_parts_from_options(options: &OptionValues) -> (AgentOptions, Option<String>) {
+    let text = |key: &str| match options.get(key) {
+        Some(OptionValue::Text(value)) => Some(value.as_str()),
+        _ => None,
+    };
+    let permission_mode = text("permission_mode").and_then(|name| {
+        [
+            PermissionMode::Default,
+            PermissionMode::AcceptEdits,
+            PermissionMode::BypassPermissions,
+            PermissionMode::Plan,
+        ]
+        .into_iter()
+        .find(|mode| permission_mode_name(*mode) == name)
+    });
+    let provider = text("provider")
+        .and_then(|name| {
+            [ClaudeProvider::Anthropic, ClaudeProvider::Deepseek]
+                .into_iter()
+                .find(|provider| provider_name(*provider) == name)
+        })
+        .unwrap_or(ClaudeProvider::Unknown);
+    let agent_options = AgentOptions::Claude {
+        permission_mode,
+        provider,
+    };
+    (agent_options, text("model").map(str::to_owned))
 }
 
 /// The refusal of a headless spawn for an agent that has no headless mode.
@@ -2530,6 +2564,36 @@ mod tests {
             .interactive_args(&options, &common, &[member], None)
             .expect("Claude reads the converted options");
         assert_eq!(args, ["--model", "x", "--permission-mode", "acceptEdits"]);
+    }
+
+    #[test]
+    fn request_parts_round_trip_options_from_request() {
+        let modes = [
+            None,
+            Some(PermissionMode::Default),
+            Some(PermissionMode::AcceptEdits),
+            Some(PermissionMode::BypassPermissions),
+            Some(PermissionMode::Plan),
+        ];
+        let providers = [
+            ClaudeProvider::Anthropic,
+            ClaudeProvider::Deepseek,
+            ClaudeProvider::Unknown,
+        ];
+        for permission_mode in modes {
+            for provider in providers {
+                for model in [None, Some("deepseek-pro")] {
+                    let request = AgentOptions::Claude {
+                        permission_mode,
+                        provider,
+                    };
+                    assert_eq!(
+                        request_parts_from_options(&options_from_request(&request, model)),
+                        (request, model.map(str::to_owned)),
+                    );
+                }
+            }
+        }
     }
 
     /// Run a real interactive Claude spawn for `session_id` in `folder` on

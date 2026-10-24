@@ -26,7 +26,7 @@ mod spawn;
     reason = "doc comments in history.rs name these at their crate::server path"
 )]
 pub(crate) use self::spawn::resolve_env_refs;
-pub(crate) use self::spawn::{options_from_request, spawn_session};
+pub(crate) use self::spawn::{options_from_request, request_parts_from_options, spawn_session};
 
 use self::connection::{AuthKind, ConnCtx, cancel_fetch, client_session, start_fetch};
 use self::git::repo_target_or_err;
