@@ -29,6 +29,12 @@ pub const FEATURE_AGENT_COMMANDS: &str = "agent_commands";
 /// offers the pairing flow only when the connected daemon lists it.
 pub const FEATURE_DEVICE_PAIRING: &str = "device_pairing";
 
+/// The [`DaemonMessage::DevicePairFailed`] reason a tailnet connection gets
+/// right after `Welcome` when its `Hello` carried no valid device token: the
+/// connection stays open as a pairing connection. The daemon also answers it
+/// to anything such a connection sends but its own pairing steps.
+pub const DEVICE_NOT_APPROVED: &str = "device not approved";
+
 fn default_true() -> bool {
     true
 }

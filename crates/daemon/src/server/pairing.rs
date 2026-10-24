@@ -15,7 +15,10 @@ use crate::devices::{
 use axum::extract::ws::{Message, WebSocket};
 use chrono::Utc;
 use futures::StreamExt as _;
-use protocol::{ClientMessage, DaemonMessage, DevicePairOutcome, InboundClientMessage, Secret};
+use protocol::{
+    ClientMessage, DEVICE_NOT_APPROVED, DaemonMessage, DevicePairOutcome, InboundClientMessage,
+    Secret,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -25,10 +28,6 @@ use tracing::{debug, info, warn};
 /// Each waiting request's connection, by request id.
 pub type PairingWaiters =
     Arc<std::sync::Mutex<HashMap<RequestId, mpsc::UnboundedSender<DaemonMessage>>>>;
-
-/// What an unpaired device hears at connect and for anything but its own
-/// pairing steps.
-pub(super) const NOT_APPROVED: &str = "device not approved";
 
 /// The answer to a pairing step on a served tailnet connection.
 pub(super) const ALREADY_PAIRED: &str = "this device is already paired";
@@ -121,7 +120,7 @@ pub(super) async fn pairing_session(
 ) {
     info!(device = %peer.name, login = %peer.login, "tailnet device without a valid token; pairing only");
     let _ = out_tx.send(DaemonMessage::DevicePairFailed {
-        reason: NOT_APPROVED.to_owned(),
+        reason: DEVICE_NOT_APPROVED.to_owned(),
     });
     let (waiter_tx, mut waiter_rx) = mpsc::unbounded_channel();
     let mut conn = PairingConn {
@@ -230,7 +229,7 @@ impl PairingConn<'_> {
                 if matches!(self.stray(), Flow::Close) {
                     return Flow::Close;
                 }
-                self.fail(NOT_APPROVED);
+                self.fail(DEVICE_NOT_APPROVED);
                 Flow::Stay
             }
         }
@@ -708,7 +707,7 @@ mod tests {
                 if features.iter().any(|f| f == protocol::FEATURE_DEVICE_PAIRING)),
             "{welcome:?}"
         );
-        assert_failed(&next(&mut client).await, NOT_APPROVED);
+        assert_failed(&next(&mut client).await, DEVICE_NOT_APPROVED);
         client
     }
 
@@ -877,7 +876,7 @@ mod tests {
             hello("test-token", None),
         ] {
             ws_send(&mut client, &msg).await;
-            assert_failed(&next(&mut client).await, NOT_APPROVED);
+            assert_failed(&next(&mut client).await, DEVICE_NOT_APPROVED);
         }
         assert!(hub.sessions.snapshots().is_empty(), "nothing was spawned");
         assert!(
@@ -1307,7 +1306,7 @@ mod tests {
         let mut client = pairing_client(&hub, test_peer()).await;
         for _ in 0..MAX_STRAY_FRAMES - 2 {
             ws_send(&mut client, &ClientMessage::ListSessions).await;
-            assert_failed(&next(&mut client).await, NOT_APPROVED);
+            assert_failed(&next(&mut client).await, DEVICE_NOT_APPROVED);
         }
         send_raw(&mut client, r#"{"type":"no_such_message"}"#).await;
         send_raw(&mut client, "not json").await;

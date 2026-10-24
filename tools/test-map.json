@@ -97,6 +97,12 @@
     },
     {
       "paths": [
+        "crates/daemon-client/src/device_tokens.rs"
+      ],
+      "filter": "(package(daemon-client) & test(/^device_tokens::/)) | (binary_id(rustling-tulip-native) & test(/^(connection|net)::/))"
+    },
+    {
+      "paths": [
         "crates/tailnet/**"
       ],
       "filter": "rdeps(tailnet)"

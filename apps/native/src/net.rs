@@ -11,6 +11,7 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::{Context as _, Result};
 use daemon_client::ClientIdentity;
+use daemon_client::device_tokens::{CredentialManagerTokens, DeviceTokenStore, MemoryTokens};
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender};
 use futures::{SinkExt as _, StreamExt as _};
 use protocol::{ClientMessage, DaemonHandshake, DaemonMessage, InboundDaemonMessage};
@@ -37,9 +38,6 @@ pub const NATIVE_PROTOCOL_VERSIONS: &[u32] = protocol::SUPPORTED_PROTOCOL_VERSIO
 /// A pending force-stop of the daemon.
 pub type StopFuture = Pin<Box<dyn Future<Output = Result<()>>>>;
 
-/// Looks up the device token this client holds for a tailnet host.
-pub type TokenFor = Box<dyn Fn(&str) -> Option<String> + Send>;
-
 /// How the network thread reaches its daemon.
 pub struct NetDeps {
     /// Starts an `ensure_running`: the daemon step of each connection
@@ -49,9 +47,10 @@ pub struct NetDeps {
     pub identity: Option<ClientIdentity>,
     /// Force-stops the daemon, for [`NetCommand::Stop`].
     pub stop: Box<dyn Fn() -> StopFuture + Send>,
-    /// The device token this client holds for a tailnet host, sent in its
-    /// `Hello`; `None` when it holds none, and then no socket is opened.
-    pub token_for: TokenFor,
+    /// The device tokens this client holds per tailnet host. The host's token
+    /// goes in its `Hello`; with none held (or the store unreadable) the
+    /// `Hello` carries an empty token, and the host answers "not approved".
+    pub tokens: Arc<dyn DeviceTokenStore>,
     /// The TLS client config a tailnet dial uses. `None`, the production
     /// value, builds one from the OS certificate store on first use; only
     /// tests set it, to trust a test CA.
@@ -99,8 +98,20 @@ impl NetDeps {
             ensure: Box::new(ensure_daemon),
             identity,
             stop: Box::new(|| Box::pin(daemon_client::stop())),
-            token_for: Box::new(|_| None),
+            tokens: device_token_store(),
             tls: None,
+        }
+    }
+}
+
+/// Windows Credential Manager's device tokens; an empty in-memory store when
+/// it cannot be opened, so every tailnet host is dialled without a token.
+fn device_token_store() -> Arc<dyn DeviceTokenStore> {
+    match CredentialManagerTokens::open() {
+        Ok(store) => Arc::new(store),
+        Err(err) => {
+            warn!("opening the device token store, holding no device tokens: {err:#}");
+            Arc::new(MemoryTokens::default())
         }
     }
 }
@@ -258,6 +269,12 @@ struct Net {
     welcome_timeout: Duration,
     ticker: Interval,
     watchdog: Watchdog,
+    /// Whether the tailnet `Hello` on the current socket carried a stored
+    /// device token.
+    had_token: bool,
+    /// A tailnet `Welcome` held back until the next frame says whether the
+    /// connection is served or a pairing one.
+    held_welcome: Option<Box<DaemonMessage>>,
 }
 
 impl Net {
@@ -280,6 +297,8 @@ impl Net {
             welcome_timeout,
             ticker,
             watchdog: Watchdog::new(SystemTime::now()),
+            had_token: false,
+            held_welcome: None,
         }
     }
 
@@ -353,19 +372,14 @@ impl Net {
         self.pump(ws, handshake.auth_token).await
     }
 
-    /// A tailnet host: never a local daemon step. Without a device token for
-    /// the host no socket is opened (the `daemon.json` token never leaves
-    /// this machine) and, as after the daemon's `AuthFailed`, nothing is
-    /// retried until a command (a target switch or a reconnect); with one,
-    /// dial its listener over TLS and pump it.
+    /// A tailnet host: never a local daemon step. Dial its listener over TLS
+    /// and pump it with the device token held for the host, or an empty one
+    /// when none is held (the `daemon.json` token never leaves this machine):
+    /// the host then answers "not approved" and the socket stays open as a
+    /// pairing connection.
     async fn attempt_tailnet(&mut self, host: &TailnetHost) -> Next {
-        let Some(token) = (self.deps.token_for)(host.name()) else {
-            let reason = format!("no device token for {}", host.name());
-            warn!(%reason, "not connecting to the tailnet host; waiting for a target switch or a reconnect");
-            self.conn.on_auth_failed(reason);
-            self.emit_state();
-            return Next::Wait(None);
-        };
+        let token = self.device_token(host);
+        self.had_token = token.is_some();
         let config = match self.tls_config() {
             Ok(config) => config,
             Err(err) => {
@@ -389,7 +403,23 @@ impl Net {
             Err(next) => return next,
         };
         self.conn.on_socket_open(host.port());
-        self.pump(ws, token).await
+        // An empty token is how an unpaired device asks the host to pair.
+        self.pump(ws, token.unwrap_or_default()).await
+    }
+
+    /// The device token held for `host`; `None` when none is held or the
+    /// store cannot be read.
+    fn device_token(&self, host: &TailnetHost) -> Option<String> {
+        match self.deps.tokens.get(host.name()) {
+            Ok(token) => token,
+            Err(err) => {
+                warn!(
+                    host = host.name(),
+                    "reading the device token failed; dialling without one: {err:#}"
+                );
+                None
+            }
+        }
     }
 
     /// The attempt failed before a socket opened: show `reason` and wait the
@@ -446,6 +476,7 @@ impl Net {
 
     /// Pump the open socket both ways until it closes or a command leaves it.
     async fn pump(&mut self, mut ws: Socket, auth_token: String) -> Next {
+        self.held_welcome = None;
         if let Err(err) = send(&mut ws, &self.hello(auth_token)).await {
             return self.closed(format!("sending Hello: {err:#}"));
         }
@@ -465,7 +496,8 @@ impl Net {
                     Step::Close("no welcome from daemon".to_owned())
                 }
             };
-            // Welcome or AuthFailed moves the machine out of Connecting.
+            // Welcome (on a tailnet host, the frame after it), AuthFailed or
+            // not approved moves the machine out of Connecting.
             if !matches!(self.conn.state(), State::Connecting) {
                 welcome_deadline = None;
             }
@@ -492,13 +524,61 @@ impl Net {
             Ok(InboundDaemonMessage::Known(msg)) => self.on_daemon_message(msg),
             Ok(InboundDaemonMessage::Unknown { type_tag, .. }) => {
                 warn!("unknown or undecodable daemon message type: {type_tag}");
+                self.release_welcome();
             }
             Err(err) => error!("undecodable daemon message: {err}"),
         }
         Step::Continue
     }
 
+    /// On a tailnet host, `Welcome` is held until the next frame: a
+    /// `DevicePairFailed` "device not approved" makes the connection a
+    /// pairing one (the `Welcome` never reaches the view, so it never shows
+    /// as open), and any other frame releases the `Welcome` first.
     fn on_daemon_message(&mut self, msg: Box<DaemonMessage>) {
+        if self.held_welcome.is_some() {
+            if is_not_approved(&msg) {
+                self.held_welcome = None;
+                self.on_not_approved();
+                self.emit(NetEvent::Message(msg));
+                return;
+            }
+            self.release_welcome();
+        } else if self.holds_welcome(&msg) {
+            self.held_welcome = Some(msg);
+            return;
+        }
+        self.apply(msg);
+    }
+
+    /// Whether `msg` is a `Welcome` to hold back: a tailnet host's first.
+    fn holds_welcome(&self, msg: &DaemonMessage) -> bool {
+        matches!(msg, DaemonMessage::Welcome { .. })
+            && !self.conn.target().is_local()
+            && matches!(self.conn.state(), State::Connecting)
+    }
+
+    /// Handle the held `Welcome`, if any, as if it had just arrived.
+    fn release_welcome(&mut self) {
+        if let Some(welcome) = self.held_welcome.take() {
+            self.apply(welcome);
+        }
+    }
+
+    /// The tailnet host has not approved this device: report it, keep the
+    /// socket for the pairing steps, and never reconnect on its close.
+    fn on_not_approved(&mut self) {
+        info!(
+            daemon = ?self.conn.target(),
+            had_token = self.had_token,
+            "the tailnet host has not approved this device; keeping the pairing connection"
+        );
+        self.conn
+            .on_not_approved(protocol::DEVICE_NOT_APPROVED.to_owned(), self.had_token);
+        self.emit_state();
+    }
+
+    fn apply(&mut self, msg: Box<DaemonMessage>) {
         match &*msg {
             DaemonMessage::Welcome {
                 protocol_version,
@@ -686,6 +766,14 @@ impl Net {
     }
 }
 
+/// Whether `msg` is the daemon saying this device is not approved.
+fn is_not_approved(msg: &DaemonMessage) -> bool {
+    matches!(
+        msg,
+        DaemonMessage::DevicePairFailed { reason } if reason == protocol::DEVICE_NOT_APPROVED
+    )
+}
+
 async fn send(ws: &mut Socket, msg: &ClientMessage) -> Result<()> {
     let text = serde_json::to_string(msg).context("encoding a client message")?;
     ws.send(Message::Text(text.into()))
@@ -713,9 +801,11 @@ mod tests {
     };
     use crate::connection::{Connection, State};
     use crate::target::Target;
+    use daemon_client::device_tokens::MemoryTokens;
     use futures::StreamExt as _;
     use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
     use protocol::ClientMessage;
+    use protocol::DEVICE_NOT_APPROVED;
     use protocol::DaemonHandshake;
     use protocol::DaemonMessage;
     use rcgen::{
@@ -723,6 +813,7 @@ mod tests {
         KeyPair, KeyUsagePurpose,
     };
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+    use std::cell::Cell;
     use std::net::{TcpListener, TcpStream};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
@@ -742,7 +833,7 @@ mod tests {
             ensure: Box::new(ensure),
             identity: None,
             stop: Box::new(|| Box::pin(async { Ok(()) })),
-            token_for: Box::new(|_| None),
+            tokens: Arc::new(MemoryTokens::default()),
             tls: None,
         }
     }
@@ -1016,10 +1107,28 @@ mod tests {
         Closed,
     }
 
+    /// How the fake TLS daemon answers a `Hello`, whatever its token.
+    #[derive(Debug, Clone, Copy)]
+    enum Answer {
+        /// `Welcome`, then `Repos`, as a daemon serving a paired device does.
+        Served,
+        /// `Welcome`, then `DevicePairFailed` "device not approved", keeping
+        /// the socket open as a pairing connection.
+        NotApproved,
+        /// As `NotApproved`, then the daemon closes the socket, as its idle
+        /// timer does.
+        NotApprovedThenClose,
+    }
+
     /// A loopback TLS WebSocket daemon whose certificate for [`TLS_HOST`] is
-    /// signed by `ca`. It answers each `Hello` with `Welcome` and reports
-    /// what it sees on the returned receiver.
+    /// signed by `ca`. It serves each `Hello` ([`Answer::Served`]) and
+    /// reports what it sees on the returned receiver.
     fn tls_daemon(ca: &TestCa) -> (u16, mpsc::Receiver<Seen>) {
+        tls_daemon_answering(ca, Answer::Served)
+    }
+
+    /// [`tls_daemon`], answering each `Hello` as `answer` says.
+    fn tls_daemon_answering(ca: &TestCa, answer: Answer) -> (u16, mpsc::Receiver<Seen>) {
         let (cert, key) = ca.leaf();
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         let config = rustls::ServerConfig::builder_with_provider(provider)
@@ -1040,14 +1149,28 @@ mod tests {
                 }
                 let config = Arc::clone(&config);
                 let seen_tx = seen_tx.clone();
-                std::thread::spawn(move || serve_tls(stream, config, &seen_tx));
+                std::thread::spawn(move || serve_tls(stream, config, &seen_tx, answer));
             }
         });
         (port, seen)
     }
 
+    /// Send `msg` on the fake daemon's socket; false when the socket is gone.
+    fn send_daemon_message<S: std::io::Read + std::io::Write>(
+        ws: &mut tungstenite::WebSocket<S>,
+        msg: &DaemonMessage,
+    ) -> bool {
+        let text = serde_json::to_string(msg).expect("encode a daemon message");
+        ws.send(tungstenite::Message::Text(text.into())).is_ok()
+    }
+
     /// One fake-daemon connection: TLS, the upgrade, then each message.
-    fn serve_tls(stream: TcpStream, config: Arc<rustls::ServerConfig>, seen: &mpsc::Sender<Seen>) {
+    fn serve_tls(
+        stream: TcpStream,
+        config: Arc<rustls::ServerConfig>,
+        seen: &mpsc::Sender<Seen>,
+        answer: Answer,
+    ) {
         let conn = rustls::ServerConnection::new(config).expect("a TLS server connection");
         let header = |request: &Request, name: &str| {
             request
@@ -1094,10 +1217,21 @@ mod tests {
                 supported_versions: vec![23],
                 features: Vec::new(),
             };
-            let welcome = serde_json::to_string(&welcome).expect("encode Welcome");
-            if ws.send(tungstenite::Message::Text(welcome.into())).is_err() {
+            let next = match answer {
+                Answer::Served => DaemonMessage::Repos { repos: Vec::new() },
+                Answer::NotApproved | Answer::NotApprovedThenClose => {
+                    DaemonMessage::DevicePairFailed {
+                        reason: DEVICE_NOT_APPROVED.to_owned(),
+                    }
+                }
+            };
+            if !send_daemon_message(&mut ws, &welcome) || !send_daemon_message(&mut ws, &next) {
                 let _ = seen.send(Seen::Closed);
                 return;
+            }
+            if matches!(answer, Answer::NotApprovedThenClose) {
+                // The read loop reports the close once the client answers it.
+                let _ = ws.close(None);
             }
         }
     }
@@ -1221,7 +1355,9 @@ mod tests {
                 TAILNET_STOPS.fetch_add(1, Ordering::SeqCst);
                 Box::pin(async { Ok(()) })
             }),
-            token_for: Box::new(move |host| token.filter(|_| host == TLS_HOST).map(str::to_owned)),
+            tokens: Arc::new(token.map_or_else(MemoryTokens::default, |token| {
+                MemoryTokens::with(TLS_HOST, token)
+            })),
             tls: Some(ca.client_config()),
         }
     }
@@ -1299,17 +1435,26 @@ mod tests {
     #[test]
     fn switch_target_while_waiting_reconnects() {
         let ca = TestCa::new();
+        let (pairing_port, pairing) = tls_daemon_answering(&ca, Answer::NotApprovedThenClose);
         let (port, seen) = tls_daemon(&ca);
         let (view_tx, mut view_rx, net) = run_net(
             tailnet_deps(&ca, Some(DEVICE_TOKEN)),
-            Target::tailnet("elsewhere.tail1234.ts.net", None),
+            Target::tailnet(TLS_HOST, Some(pairing_port)),
         );
         assert!(
             saw_state(&mut view_rx, |conn| matches!(
                 conn.state(),
-                State::AuthFailed { .. }
+                State::NotApproved { .. }
             )),
-            "the host without a token did not fail"
+            "the host that does not approve this device never said so"
+        );
+        assert!(
+            seen_until(&pairing, |event| *event == Seen::Closed).is_some(),
+            "the pairing host never closed its socket"
+        );
+        assert!(
+            next_state(&mut view_rx).is_some_and(|conn| is_not_approved(&conn, true)),
+            "the close was not handled, so the switch would not land while waiting"
         );
 
         let switched = Target::tailnet(TLS_HOST, Some(port));
@@ -1350,44 +1495,183 @@ mod tests {
         stop_net(view_tx, net);
     }
 
+    /// True when `conn` is not approved, with `had_token` and the daemon's
+    /// reason.
+    fn is_not_approved(conn: &Connection, had_token: bool) -> bool {
+        matches!(
+            conn.state(),
+            State::NotApproved { reason, had_token: held }
+                if reason == DEVICE_NOT_APPROVED && *held == had_token
+        )
+    }
+
+    /// Long enough for a reconnect on the backoff to have dialled again; the
+    /// passing run always waits it out.
+    fn wait_out_a_reconnect() {
+        std::thread::sleep(crate::connection::backoff_delay(0) * 4);
+    }
+
     #[test]
-    fn tailnet_target_without_token_fails_closed_without_hello() {
+    fn untokened_tailnet_pick_dials_with_an_empty_token() {
         let ca = TestCa::new();
-        let (port, seen) = tls_daemon(&ca);
+        let (port, seen) = tls_daemon_answering(&ca, Answer::NotApproved);
         let (view_tx, mut view_rx, net) = run_net(
             tailnet_deps(&ca, None),
             Target::tailnet(TLS_HOST, Some(port)),
         );
-        let names_host = |conn: &Connection| match conn.state() {
-            State::AuthFailed { reason } | State::Error { reason } => reason.contains(TLS_HOST),
-            _ => false,
-        };
 
-        assert!(
-            saw_state(&mut view_rx, names_host),
-            "no failure naming the host"
-        );
-        // A retry on the backoff would have reported again well within
-        // this; the passing run always waits it out.
-        std::thread::sleep(crate::connection::backoff_delay(0) * 4);
-        view_tx
-            .unbounded_send(NetCommand::Restart)
-            .expect("net thread is running");
-        assert!(
-            next_state(&mut view_rx).is_some_and(|conn| matches!(conn.state(), State::Connecting)),
-            "the missing token was retried without a command"
+        assert_eq!(
+            next_hello(&seen).as_deref(),
+            Some(""),
+            "a host without a device token must be dialled with an empty one"
         );
         assert!(
-            next_state(&mut view_rx).is_some_and(|conn| matches!(
-                conn.state(),
-                State::AuthFailed { reason } if reason.contains(TLS_HOST)
+            saw_state(&mut view_rx, |conn| is_not_approved(conn, false)),
+            "the empty token did not end at not approved, without a token"
+        );
+        stop_net(view_tx, net);
+    }
+
+    #[test]
+    fn a_stale_token_reports_not_approved_with_had_token() {
+        let ca = TestCa::new();
+        let (port, seen) = tls_daemon_answering(&ca, Answer::NotApproved);
+        let (view_tx, mut view_rx, net) = run_net(
+            tailnet_deps(&ca, Some(DEVICE_TOKEN)),
+            Target::tailnet(TLS_HOST, Some(port)),
+        );
+
+        assert_eq!(
+            next_hello(&seen).as_deref(),
+            Some(DEVICE_TOKEN),
+            "the stored token goes in Hello"
+        );
+        assert!(
+            saw_state(&mut view_rx, |conn| is_not_approved(conn, true)),
+            "the stale token did not end at not approved, with a token"
+        );
+        assert!(
+            saw(&mut view_rx, |event| matches!(
+                event,
+                NetEvent::Message(msg)
+                    if matches!(&**msg, DaemonMessage::DevicePairFailed { .. })
             )),
-            "Reconnect did not end at the missing token again, as an auth failure"
+            "the daemon's refusal was not forwarded"
         );
+        stop_net(view_tx, net);
+    }
+
+    #[test]
+    fn not_approved_welcome_never_reports_open() {
+        let ca = TestCa::new();
+        let (port, _seen) = tls_daemon_answering(&ca, Answer::NotApproved);
+        let (view_tx, mut view_rx, net) = run_net(
+            tailnet_deps(&ca, None),
+            Target::tailnet(TLS_HOST, Some(port)),
+        );
+        let opened = Cell::new(false);
+        let welcomed = Cell::new(false);
+
+        let reached = saw(&mut view_rx, |event| match event {
+            NetEvent::State(conn) => {
+                opened.set(opened.get() || conn.is_open());
+                is_not_approved(conn, false)
+            }
+            NetEvent::Message(msg) => {
+                let welcome = matches!(&**msg, DaemonMessage::Welcome { .. });
+                welcomed.set(welcomed.get() || welcome);
+                false
+            }
+            _ => false,
+        });
+        assert!(reached, "never reached not approved");
+        assert!(!opened.get(), "a pairing connection reported Open");
+        assert!(
+            !welcomed.get(),
+            "the pairing connection's Welcome reached the view"
+        );
+        stop_net(view_tx, net);
+    }
+
+    #[test]
+    fn not_approved_does_not_reconnect() {
+        let ca = TestCa::new();
+        let (port, seen) = tls_daemon_answering(&ca, Answer::NotApprovedThenClose);
+        let (view_tx, mut view_rx, net) = run_net(
+            tailnet_deps(&ca, None),
+            Target::tailnet(TLS_HOST, Some(port)),
+        );
+        assert!(
+            next_hello(&seen).is_some(),
+            "the first attempt sent no Hello"
+        );
+        assert!(
+            saw_state(&mut view_rx, |conn| is_not_approved(conn, false)),
+            "never reached not approved"
+        );
+        assert!(
+            seen_until(&seen, |event| *event == Seen::Closed).is_some(),
+            "the daemon's close never landed"
+        );
+        assert!(
+            next_state(&mut view_rx).is_some_and(|conn| is_not_approved(&conn, false)),
+            "the close must keep the not-approved state"
+        );
+
+        wait_out_a_reconnect();
         assert_eq!(
             seen.try_recv().ok(),
             None,
-            "a socket was opened without a device token"
+            "a not-approved host was dialled again without a command"
+        );
+        view_tx
+            .unbounded_send(NetCommand::Restart)
+            .expect("net thread is running");
+        assert_eq!(
+            next_hello(&seen).as_deref(),
+            Some(""),
+            "Reconnect did not dial the host again"
+        );
+        stop_net(view_tx, net);
+    }
+
+    #[test]
+    fn a_served_tailnet_connection_still_opens_after_welcome_hold_back() {
+        let ca = TestCa::new();
+        let (port, seen) = tls_daemon(&ca);
+        let target = Target::tailnet(TLS_HOST, Some(port));
+        let (view_tx, mut view_rx, net) =
+            run_net(tailnet_deps(&ca, Some(DEVICE_TOKEN)), target.clone());
+        assert!(
+            next_hello(&seen).is_some(),
+            "the first attempt sent no Hello"
+        );
+        let opened = Cell::new(false);
+        let welcomed = Cell::new(false);
+
+        let reached = saw(&mut view_rx, |event| match event {
+            NetEvent::State(conn) => {
+                opened.set(opened.get() || (conn.is_open() && conn.target() == &target));
+                false
+            }
+            NetEvent::Message(msg) => match &**msg {
+                DaemonMessage::Welcome { .. } => {
+                    welcomed.set(true);
+                    false
+                }
+                DaemonMessage::Repos { .. } => true,
+                _ => false,
+            },
+            _ => false,
+        });
+        assert!(reached, "the frame after Welcome never reached the view");
+        assert!(
+            opened.get(),
+            "the served host never opened before its Repos"
+        );
+        assert!(
+            welcomed.get(),
+            "the held Welcome never reached the view before the next frame"
         );
         stop_net(view_tx, net);
     }

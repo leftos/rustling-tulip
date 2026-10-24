@@ -11,6 +11,7 @@
 //! so a client and the daemon it spawns agree on where each file lives.
 
 pub mod autostart;
+pub mod device_tokens;
 mod supervisor;
 
 pub use supervisor::ensure_running;

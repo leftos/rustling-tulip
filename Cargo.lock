@@ -1649,6 +1649,7 @@ version = "0.1.1-alpha"
 dependencies = [
  "anyhow",
  "directories",
+ "keyring-core",
  "protocol",
  "reqwest",
  "serde",
@@ -1658,6 +1659,7 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+ "windows-native-keyring-store",
  "winreg 0.56.0",
 ]
 

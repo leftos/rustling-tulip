@@ -38,6 +38,12 @@ pub enum State {
     Closed { reason: String },
     /// The daemon rejected the auth token. Terminal until a Restart.
     AuthFailed { reason: String },
+    /// The tailnet host has not approved this device: its daemon answered
+    /// `Hello` with `Welcome`, then `DevicePairFailed { reason }`, and keeps
+    /// the socket open as a pairing connection. `had_token` says whether the
+    /// `Hello` carried a stored device token (one the host no longer
+    /// accepts) or none. Terminal until a Restart or a target switch.
+    NotApproved { reason: String, had_token: bool },
     /// `ensure_running` or the handshake file failed.
     Error { reason: String },
 }
@@ -210,11 +216,27 @@ impl Connection {
         self.state = State::AuthFailed { reason };
     }
 
+    /// The tailnet host has not approved this device (see
+    /// [`State::NotApproved`]). Never counts as a connect.
+    pub fn on_not_approved(&mut self, reason: String, had_token: bool) {
+        self.state = State::NotApproved { reason, had_token };
+    }
+
+    /// Whether the daemon refused this client (auth failed, or not
+    /// approved): nothing reconnects until a Restart or a target switch.
+    fn refused(&self) -> bool {
+        matches!(
+            self.state,
+            State::AuthFailed { .. } | State::NotApproved { .. }
+        )
+    }
+
     /// The socket closed (or never opened). Returns the delay before the next
-    /// attempt, or `None` when no reconnect is due (stopped, auth failed).
+    /// attempt, or `None` when no reconnect is due (stopped, auth failed, not
+    /// approved).
     pub fn on_closed(&mut self, reason: String) -> Option<Duration> {
         self.socket_live = false;
-        if matches!(self.state, State::AuthFailed { .. }) {
+        if self.refused() {
             return None;
         }
         self.state = State::Closed { reason };
@@ -225,7 +247,7 @@ impl Connection {
     /// before the next attempt, as [`Connection::on_closed`] does.
     pub fn on_error(&mut self, reason: String) -> Option<Duration> {
         self.socket_live = false;
-        if matches!(self.state, State::AuthFailed { .. }) {
+        if self.refused() {
             return None;
         }
         self.state = State::Error { reason };
@@ -247,7 +269,7 @@ impl Connection {
     /// remote host Restart is always a fresh connect (Reconnect now): the
     /// host's daemon is never shut down from here.
     pub fn restart(&mut self) -> RestartAction {
-        let dead = matches!(self.state, State::AuthFailed { .. } | State::Error { .. });
+        let dead = self.refused() || matches!(self.state, State::Error { .. });
         if dead || self.stop_requested || !self.socket_live || !self.target.is_local() {
             self.stop_requested = false;
             self.state = State::Connecting;
@@ -270,9 +292,10 @@ impl Connection {
     #[must_use]
     pub fn reason(&self) -> Option<&str> {
         match &self.state {
-            State::Closed { reason } | State::AuthFailed { reason } | State::Error { reason } => {
-                Some(reason)
-            }
+            State::Closed { reason }
+            | State::AuthFailed { reason }
+            | State::NotApproved { reason, .. }
+            | State::Error { reason } => Some(reason),
             State::Init | State::Connecting | State::Open { .. } => None,
         }
     }
@@ -286,6 +309,7 @@ impl Connection {
             State::Connecting => ("connecting…", DotKind::Pending),
             State::Closed { .. } => ("disconnected", DotKind::Idle),
             State::AuthFailed { .. } => ("auth failed", DotKind::Err),
+            State::NotApproved { .. } => ("not paired", DotKind::Err),
             State::Error { .. } => ("error", DotKind::Err),
         };
         (label.to_owned(), dot)
@@ -332,6 +356,7 @@ impl Connection {
         };
         Some(match self.state {
             State::Closed { .. } => format!("{host} dropped — reconnecting…"),
+            State::NotApproved { .. } => format!("Pair with {host}"),
             _ => format!("Connecting to {host}…"),
         })
     }
@@ -347,6 +372,7 @@ impl Connection {
         }
         match self.state {
             State::AuthFailed { .. } | State::Error { .. } => None,
+            State::NotApproved { .. } => Some("Not paired"),
             _ if self.stop_requested => Some("Waiting for daemon…"),
             State::Init => Some("Starting daemon…"),
             State::Connecting => Some("Connecting to daemon…"),
@@ -618,6 +644,51 @@ mod tests {
         assert_eq!(
             local.overlay_text().as_deref(),
             Some("Connecting to daemon…")
+        );
+    }
+
+    /// A tailnet connection whose daemon said this device is not approved.
+    fn not_approved(had_token: bool) -> Connection {
+        let mut conn = remote();
+        conn.on_connecting();
+        conn.on_socket_open(8787);
+        conn.on_not_approved(protocol::DEVICE_NOT_APPROVED.to_owned(), had_token);
+        conn
+    }
+
+    #[test]
+    fn not_approved_footer_says_not_paired() {
+        let conn = not_approved(false);
+        let footer = conn.footer(0);
+        assert_eq!(footer.label, "not paired");
+        assert_eq!(footer.dot, DotKind::Err);
+        assert_eq!(footer.pill(), "box · not paired");
+        assert_eq!(footer.tooltip, "not paired — device not approved");
+        assert!(!conn.is_open(), "a pairing connection is not open");
+    }
+
+    #[test]
+    fn not_approved_overlay_names_the_host() {
+        let mut conn = not_approved(true);
+        assert_eq!(conn.overlay_text().as_deref(), Some("Pair with box"));
+        assert_eq!(
+            conn.on_closed("daemon closed the connection".to_owned()),
+            None,
+            "the pairing socket's close schedules no reconnect"
+        );
+        assert_eq!(conn.on_error("later".to_owned()), None);
+        assert_eq!(
+            conn.overlay_text().as_deref(),
+            Some("Pair with box"),
+            "the close keeps the not-approved state"
+        );
+        assert_eq!(conn.restart(), RestartAction::FreshConnect);
+        assert_eq!(conn.state(), &State::Connecting);
+
+        assert_eq!(
+            open_remote().overlay_text(),
+            None,
+            "a served host shows no overlay"
         );
     }
 

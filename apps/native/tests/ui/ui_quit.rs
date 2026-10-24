@@ -746,7 +746,7 @@ fn shutdown_does_not_reconnect_after_close(cx: &mut TestAppContext) {
         }),
         identity: None,
         stop: Box::new(|| Box::pin(async { Ok(()) })),
-        token_for: Box::new(|_| None),
+        tokens: std::sync::Arc::new(daemon_client::device_tokens::MemoryTokens::default()),
         tls: None,
     };
     let mut h = Harness::open_on_net(cx, &dir, net);

@@ -27,6 +27,13 @@ uuid = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 sha2 = "0.10"
 sysinfo = { version = "0.32", default-features = false, features = ["system"] }
+# Cross-platform credential-store API. `src/device_tokens.rs` files the device
+# tokens remote hosts issue under Windows Credential Manager; the platform store
+# itself is `windows-native-keyring-store` below.
+keyring-core = "1.0"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.56"
+# Windows Credential Manager as the `keyring-core` store. Default features off
+# drops its regex-backed credential search: tokens are looked up by host only.
+windows-native-keyring-store = { version = "1.1", default-features = false }
