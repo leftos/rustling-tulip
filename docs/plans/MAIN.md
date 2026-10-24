@@ -13,16 +13,11 @@
 - [ ] RT-158 P6.6: Remote tests over a fake Tailscale, hand checklist, and the docs pass · release vNext
 - [ ] RT-244 Preset wizard: typed host paths instead of local pickers in remote mode
 - [ ] RT-278 Prove the daemon holds the token before a client reuses, retires or kills it
-- [ ] RT-331 Built-in text and Markdown viewer with Open in default app and an always-external setting · release vNext
-  - [ ] RT-340 RT-331 S7: Viewer line selection, find and reload · release vNext
-    - [ ] RT-389 RT-340 S7c: Reload a viewer tab on activation · release vNext
-  - [ ] RT-341 RT-331 S8: Viewer docs and task index rows · release vNext
 - [ ] RT-343 Keep name, look and sidebar place when Recover respawns a session
 - [ ] RT-349 Restart conversation discovery for sessions reattached after a daemon restart
 - [ ] RT-375 Copy only the text when a terminal selection crosses a TUI's box borders · release vNext+1
 - [ ] RT-378 Close a failed handshake gracefully so AuthFailed is never lost to a reset
 - [ ] RT-386 Map a recovered shell's hook events with its recovered agent options and trust
-- [/] RT-394 Fetch an HTML page's relative media with it when opening a remote link · release vNext
 
 ## Wave 1a — Claude sessions on DeepSeek
 
