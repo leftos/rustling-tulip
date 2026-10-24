@@ -959,6 +959,13 @@ pub struct RecoveryPlan {
     pub hook_agent: Option<AgentId>,
     /// The conversation a recovered shell resumes in `hook_agent`.
     pub resume_conversation: Option<String>,
+    /// The options of the selection a recovered shell resumes in
+    /// `hook_agent`, which its hook plan and resume command take; empty for
+    /// every other plan.
+    pub hook_options: OptionValues,
+    /// Whether the run a recovered shell resumes in `hook_agent` was trusted;
+    /// false for every other plan.
+    pub hook_trusted: bool,
 }
 
 impl RecoveryPlan {
@@ -1056,6 +1063,8 @@ pub fn plan_recovery(
             register_repo: None,
             hook_agent: None,
             resume_conversation: None,
+            hook_options: OptionValues::new(),
+            hook_trusted: false,
         },
         RecoverAs::Agent => {
             let spawn = recovered_spawn(entry, item, plugins)?;
@@ -1065,6 +1074,8 @@ pub fn plan_recovery(
                 register_repo: None,
                 hook_agent: None,
                 resume_conversation: None,
+                hook_options: OptionValues::new(),
+                hook_trusted: false,
             }
         }
         RecoverAs::RegisterRepoThenAgent { path } => {
@@ -1095,6 +1106,8 @@ pub fn plan_recovery(
                 register_repo: Some(path.clone()),
                 hook_agent: None,
                 resume_conversation: None,
+                hook_options: OptionValues::new(),
+                hook_trusted: false,
             }
         }
         RecoverAs::ShellResume => {
@@ -1105,6 +1118,8 @@ pub fn plan_recovery(
                 register_repo: None,
                 hook_agent: Some(spawn.selection.agent),
                 resume_conversation: Some(conversation.to_owned()),
+                hook_options: spawn.selection.options,
+                hook_trusted: spawn.dangerously_skip_permissions,
             }
         }
     };
@@ -3296,6 +3311,65 @@ mod recovery_tests {
             Err("Test agent cannot resume a conversation in a shell".to_owned())
         );
         assert!(plan_with(shell_resume_none_plugin, RecoverAs::Shell).is_ok());
+    }
+
+    /// Claims `caps.shell_resume` and builds a command.
+    static SHELL_RESUME_SOME: LazyLock<ShellResumeAgent> =
+        LazyLock::new(|| ShellResumeAgent::new(&SHELL_RESUME_CAP, Some("test-agent --resume")));
+
+    #[expect(clippy::unnecessary_wraps, reason = "a PluginLookup answers an Option")]
+    fn shell_resume_some_plugin(_agent: &AgentId) -> Option<&'static dyn AgentPlugin> {
+        Some(&*SHELL_RESUME_SOME)
+    }
+
+    #[test]
+    fn plan_recovery_shell_resume_carries_the_recovered_options() {
+        let mut entry = test_agent_entry();
+        let recorded = OptionValues::from([
+            (
+                "mode".to_owned(),
+                protocol::OptionValue::Text("recovered-mode".to_owned()),
+            ),
+            ("sandbox".to_owned(), protocol::OptionValue::Bool(true)),
+        ]);
+        entry.options = Some(recorded.clone());
+        entry.trusted = true;
+        let plugin: &dyn AgentPlugin = &*SHELL_RESUME_SOME;
+        let expected = plugin
+            .recovery_options(&RecoveredRun {
+                recorded: Some(&recorded),
+                trusted: true,
+            })
+            .expect("the recorded options decode");
+        assert_eq!(expected.get("mode").cloned(), text("recovered-mode"));
+        let registered = Registered {
+            repos: &[],
+            workspaces: &[],
+        };
+
+        let plan = plan_recovery(
+            &entry,
+            &item(RecoverAs::ShellResume, Some(CONV)),
+            &registered,
+            shell_resume_some_plugin,
+            |_, _, _| true,
+        )
+        .expect("plan");
+
+        assert_eq!(plan.hook_options, expected);
+        assert!(plan.hook_trusted, "the recovered run's trust is carried");
+        for how in [RecoverAs::Shell, RecoverAs::Agent] {
+            let other = plan_recovery(
+                &entry,
+                &item(how.clone(), Some(CONV)),
+                &registered,
+                shell_resume_some_plugin,
+                |_, _, _| true,
+            )
+            .expect("plan");
+            assert!(other.hook_options.is_empty(), "{how:?}");
+            assert!(!other.hook_trusted, "{how:?}");
+        }
     }
 
     const SINGLE_FOLDER: &str = r"C:\wt\repo";

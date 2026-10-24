@@ -792,6 +792,8 @@ async fn recover_one(
     let extras = SpawnExtras {
         hook_agent: plan.hook_agent,
         resume_conversation: plan.resume_conversation,
+        hook_options: plan.hook_options,
+        hook_trusted: plan.hook_trusted,
     };
     let snapshot = spawn_session_with_extras(hub, plan.request, None, busy_excluded, extras)
         .await

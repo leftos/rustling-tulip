@@ -253,7 +253,8 @@ pub(crate) async fn spawn_session_with_extras(
 
 /// What a spawn takes beside its request that never travels on the wire
 /// `SpawnRequest` and is never stored in `SpawnConfig`: a recovered shell's
-/// hook agent and the conversation it resumes in it. A recovery sets them.
+/// hook agent, the conversation it resumes in it and the options and trust
+/// it resumes with. A recovery sets them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct SpawnExtras {
     /// The agent whose plugin writes a recovered shell's hook files, builds
@@ -261,6 +262,12 @@ pub(crate) struct SpawnExtras {
     pub(crate) hook_agent: Option<AgentId>,
     /// The conversation a recovered shell resumes in its hook agent.
     pub(crate) resume_conversation: Option<String>,
+    /// The recovered selection's options, which the hook agent's hook plan
+    /// and resume command take in place of the plain shell's own.
+    pub(crate) hook_options: OptionValues,
+    /// Whether the recovered run was trusted, which the hook agent's hook
+    /// plan takes in place of the plain shell's own flag.
+    pub(crate) hook_trusted: bool,
 }
 
 /// The longest a recovered shell waits for its prompt before typing its
@@ -1538,9 +1545,10 @@ struct ShellResume {
 
 /// Write `plugin`'s hook files for the recovered shell `session_id`, then ask
 /// `plugin` for the command that resumes `conversation_id` with them, typed
-/// once the shell's prompt is up. A plugin with no command gets a bare shell
-/// and keeps no hook files; a plugin's refusal refuses the spawn and removes
-/// the files.
+/// once the shell's prompt is up. Both take the recovered selection's options
+/// and trust from `cfg.extras`, never the plain shell's own. A plugin with no
+/// command gets a bare shell and keeps no hook files; a plugin's refusal
+/// refuses the spawn and removes the files.
 fn prepare_shell_resume(
     hub: &Hub,
     session_id: &str,
@@ -1548,15 +1556,10 @@ fn prepare_shell_resume(
     plugin: &dyn AgentPlugin,
     conversation_id: &str,
 ) -> anyhow::Result<ShellResume> {
-    let hook_settings = write_hook_files(
-        hub,
-        session_id,
-        plugin,
-        &cfg.options,
-        cfg.dangerously_skip_permissions,
-    );
+    let options = &cfg.extras.hook_options;
+    let hook_settings = write_hook_files(hub, session_id, plugin, options, cfg.extras.hook_trusted);
     let files = hook_settings.as_ref().map_or(&[][..], HookSettings::files);
-    match plugin.shell_resume(&cfg.options, conversation_id, files) {
+    match plugin.shell_resume(options, conversation_id, files) {
         Ok(Some(command)) => Ok(ShellResume {
             hook_settings,
             injector: Some(shell_resume_injector(command)),
@@ -2641,6 +2644,8 @@ mod tests {
             extras: SpawnExtras {
                 hook_agent: Some(agent_registry::default_agent()),
                 resume_conversation: Some("abc-123".to_owned()),
+                hook_options: claude_options(),
+                hook_trusted: false,
             },
         }
     }
@@ -2970,6 +2975,163 @@ mod tests {
         assert!(resume.hook_settings.is_none(), "a bare shell gets no hooks");
         assert!(!hook_settings_file(&hub, "s1").exists());
         assert!(!hub.dirs.sessions_dir.join("s1").exists());
+    }
+
+    /// A plugin whose hook file records the options and trust its hook plan
+    /// was handed, and whose resume command names the options it was handed.
+    struct EchoOptions;
+
+    impl agent_api::Agent for EchoOptions {
+        type Options = serde_json::Value;
+
+        fn descriptor(&self) -> &protocol::AgentDescriptor {
+            &agent_api::test_agent::DESCRIPTOR
+        }
+
+        fn program_env_var(&self) -> &'static str {
+            "RUSTLING_TULIP_ECHO_OPTIONS"
+        }
+
+        fn default_program(&self) -> &'static str {
+            "echo-options"
+        }
+
+        fn liveness_tokens(&self) -> &'static [&'static str] {
+            &[]
+        }
+
+        fn recovery_options(&self, run: &agent_api::RecoveredRun<'_>) -> serde_json::Value {
+            run.recorded_as().unwrap_or_default()
+        }
+
+        fn check_request(
+            &self,
+            _opts: &serde_json::Value,
+            _req: &SpawnCheck<'_>,
+        ) -> Result<(), agent_api::Refusal> {
+            Ok(())
+        }
+
+        fn spawn_env(
+            &self,
+            _opts: &serde_json::Value,
+            _rows: &ResolvedRows,
+            _keys: &dyn KeyLookup,
+        ) -> Result<EnvPlan, agent_api::Refusal> {
+            Ok(EnvPlan::default())
+        }
+
+        fn conversation_plan(
+            &self,
+            _opts: &serde_json::Value,
+            _resume: Option<&str>,
+        ) -> ConversationPlan {
+            ConversationPlan::None
+        }
+
+        fn interactive_args(
+            &self,
+            _opts: &serde_json::Value,
+            _ctx: &SpawnContext<'_>,
+            _members: &[SessionMember],
+            _initial_prompt: Option<&str>,
+        ) -> Vec<String> {
+            Vec::new()
+        }
+
+        fn hook_plan(
+            &self,
+            opts: &serde_json::Value,
+            trusted: bool,
+            _shim: &agent_api::HookShim<'_>,
+        ) -> agent_api::HookPlan {
+            agent_api::HookPlan {
+                files: vec![agent_api::HookFile {
+                    name: "echo.json".to_owned(),
+                    contents: serde_json::json!({ "options": opts, "trusted": trusted })
+                        .to_string(),
+                }],
+                args: Vec::new(),
+            }
+        }
+
+        fn shell_resume(
+            &self,
+            opts: &serde_json::Value,
+            conversation_id: &str,
+            _hook_files: &[PathBuf],
+        ) -> Result<Option<String>, agent_api::AgentError> {
+            Ok(Some(format!("echo {opts} --resume {conversation_id}")))
+        }
+    }
+
+    /// A recovered shell's spawn arguments whose own options are empty and
+    /// untrusted, resuming with `hook_options` and `hook_trusted`.
+    fn echo_resume_spawn_args(hook_options: OptionValues, hook_trusted: bool) -> SpawnArgs {
+        let mut cfg = shell_resume_spawn_args();
+        cfg.options = OptionValues::new();
+        cfg.dangerously_skip_permissions = false;
+        cfg.extras.hook_options = hook_options;
+        cfg.extras.hook_trusted = hook_trusted;
+        cfg
+    }
+
+    /// The hook file `resume` wrote, read back as JSON.
+    fn echoed_hook_file(resume: &ShellResume) -> serde_json::Value {
+        let settings = resume.hook_settings.as_ref().expect("hooks were written");
+        assert_eq!(settings.files().len(), 1, "{:?}", settings.files());
+        let file = settings.files().first().expect("one hook file");
+        let text = std::fs::read_to_string(file).expect("read the hook file");
+        serde_json::from_str(&text).expect("the hook file is JSON")
+    }
+
+    #[tokio::test]
+    async fn shell_resume_passes_the_recovered_options_not_the_shells_defaults() {
+        let (hub, _scratch) = hook_test_hub("shell-resume-recovered-options");
+        let recovered = OptionValues::from([(
+            "mode".to_owned(),
+            protocol::OptionValue::Text("recovered-marker".to_owned()),
+        )]);
+        let resume = prepare_shell_resume(
+            &hub,
+            "s1",
+            &echo_resume_spawn_args(recovered, false),
+            &EchoOptions,
+            "abc-123",
+        )
+        .expect("the plugin answers a command");
+
+        assert_eq!(
+            echoed_hook_file(&resume)["options"],
+            serde_json::json!({ "mode": "recovered-marker" }),
+            "the hook plan gets the recovered options"
+        );
+        assert_eq!(
+            resume.injector.expect("a command to type").steps,
+            typed(r#"echo {"mode":"recovered-marker"} --resume abc-123"#.to_owned()),
+            "the resume command gets the recovered options"
+        );
+    }
+
+    #[tokio::test]
+    async fn shell_resume_hook_plan_gets_the_recovered_trust() {
+        let (hub, _scratch) = hook_test_hub("shell-resume-recovered-trust");
+        for trusted in [true, false] {
+            let session_id = format!("s-{trusted}");
+            let resume = prepare_shell_resume(
+                &hub,
+                &session_id,
+                &echo_resume_spawn_args(OptionValues::new(), trusted),
+                &EchoOptions,
+                "abc-123",
+            )
+            .expect("the plugin answers a command");
+            assert_eq!(
+                echoed_hook_file(&resume)["trusted"],
+                serde_json::Value::Bool(trusted),
+                "the plain shell is untrusted; the hook plan gets the recovered run's trust"
+            );
+        }
     }
 
     #[tokio::test]
