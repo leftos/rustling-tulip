@@ -1244,10 +1244,10 @@ async fn spawn_interactive_session(
                 output: pty.output.subscribe(),
                 input_pulses: in_rx,
                 screen,
+                rules: rules_for(agent),
             },
             hub.attention_tx.clone(),
             SessionStatus::Idle,
-            rules_for(agent),
         );
     } else {
         pty_state::watch(
@@ -1256,9 +1256,9 @@ async fn spawn_interactive_session(
             pty_state::AgentStreams {
                 output: pty.output.subscribe(),
                 screen,
+                rules: rules_for(agent),
             },
             hub.attention_tx.clone(),
-            rules_for(agent),
         );
     }
     osc_title::watch(
@@ -1288,7 +1288,13 @@ async fn spawn_interactive_session(
             let id = session_id.clone();
             Box::new(move || pty_state::agent_up(&registry, &id)) as inject::AgentUp
         });
-        inject::run_chain(session_id.clone(), Arc::clone(&pty), injectors, agent_up);
+        inject::run_chain(
+            session_id.clone(),
+            Arc::clone(&pty),
+            injectors,
+            agent_up,
+            agent_registry::plugin(agent).ready_signal(),
+        );
     }
     Ok(snap)
 }
@@ -1449,10 +1455,10 @@ async fn spawn_plain_shell_session(
             output: pty.output.subscribe(),
             input_pulses: in_rx,
             screen,
+            rules: rules_for(default_agent()),
         },
         hub.attention_tx.clone(),
         SessionStatus::Idle,
-        rules_for(default_agent()),
     );
     // Keep `osc_title::watch` so window-title escape sequences (which pwsh
     // emits by default) are recorded as `terminal_title` annotations; the
@@ -1495,7 +1501,13 @@ async fn spawn_plain_shell_session(
     // A recovered shell types the resume command its hook agent's plugin
     // built; any other plain shell runs the injector its request carried.
     if let Some(injector) = resume_injector.or_else(|| cfg.prompt_injector.clone()) {
-        inject::run(session_id.clone(), Arc::clone(&pty), injector);
+        // A shell-prompt step reads no agent readiness, so the default stands in.
+        inject::run(
+            session_id.clone(),
+            Arc::clone(&pty),
+            injector,
+            agent_api::ReadySignal::default(),
+        );
     }
     Ok(snap)
 }

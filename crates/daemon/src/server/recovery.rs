@@ -213,10 +213,10 @@ async fn reattach_one(
                                 output: pty.output.subscribe(),
                                 input_pulses: in_rx,
                                 screen,
+                                rules: rules_for(agent),
                             },
                             attention_tx.clone(),
                             restored,
-                            rules_for(agent),
                         );
                     } else {
                         pty_state::watch(
@@ -225,9 +225,9 @@ async fn reattach_one(
                             pty_state::AgentStreams {
                                 output: pty.output.subscribe(),
                                 screen,
+                                rules: rules_for(agent),
                             },
                             attention_tx.clone(),
-                            rules_for(agent),
                         );
                     }
                     osc_title::watch(

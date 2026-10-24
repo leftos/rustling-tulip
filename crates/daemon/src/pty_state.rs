@@ -88,20 +88,22 @@ pub struct AttentionEvent {
 }
 
 /// What a plain shell's status watcher reads: the session's output broadcast,
-/// the byte counts of the user input forwarded to it, and the grid it feeds
-/// that output into and reads Claude's screen from.
+/// the byte counts of the user input forwarded to it, the grid it feeds that
+/// output into and reads the agent's screen from, and the agent's rules.
 pub struct ShellStreams {
     pub output: broadcast::Receiver<Vec<u8>>,
     pub input_pulses: mpsc::UnboundedReceiver<usize>,
     pub screen: SharedScreen,
+    pub rules: Arc<CompiledRules>,
 }
 
 /// What an agent session's status watcher reads: the session's output
-/// broadcast, and the grid it feeds that output into and reads the status
-/// from.
+/// broadcast, the grid it feeds that output into and reads the status from,
+/// and the agent's rules.
 pub struct AgentStreams {
     pub output: broadcast::Receiver<Vec<u8>>,
     pub screen: SharedScreen,
+    pub rules: Arc<CompiledRules>,
 }
 
 /// Spawn a background task that feeds an agent session's grid from its PTY
@@ -133,15 +135,19 @@ pub struct AgentStreams {
 /// read (see [`apply_screen_status`]).
 ///
 /// `attention_tx` receives one event each time the screen moves the session
-/// into `AwaitingInput`. `rules` are the screen rules of the session's agent.
+/// into `AwaitingInput`. `streams.rules` are the screen rules of the session's
+/// agent.
 pub fn watch(
     registry: &Arc<SessionRegistry>,
     session_id: String,
     streams: AgentStreams,
     attention_tx: mpsc::UnboundedSender<AttentionEvent>,
-    rules: Arc<CompiledRules>,
 ) {
-    let AgentStreams { mut output, screen } = streams;
+    let AgentStreams {
+        mut output,
+        screen,
+        rules,
+    } = streams;
     let mut watcher = ScreenWatch::new(registry, session_id, screen, attention_tx, rules);
     tokio::spawn(async move { watcher.run_agent(&mut output).await });
 }
@@ -791,20 +797,20 @@ pub fn agent_up(registry: &SessionRegistry, session_id: &str) -> bool {
 /// the grid. When hooks start or stop driving the shell, the classifier's
 /// state is seeded again from the record and the screen is held off for
 /// [`FOREIGN_WRITE_HOLD`]; on every return to the classifier, its volume
-/// windows, title and silence start afresh. `rules` are the screen rules the
-/// check reads the screen with: those of the session's agent.
+/// windows, title and silence start afresh. `streams.rules` are the screen
+/// rules the check reads the screen with: those of the session's agent.
 pub fn watch_plain_shell(
     registry: &Arc<SessionRegistry>,
     session_id: String,
     streams: ShellStreams,
     attention_tx: mpsc::UnboundedSender<AttentionEvent>,
     initial: SessionStatus,
-    rules: Arc<CompiledRules>,
 ) {
     let ShellStreams {
         mut output,
         input_pulses,
         screen,
+        rules,
     } = streams;
     let watch = ScreenWatch::new(registry, session_id, screen, attention_tx, rules);
     let mut watcher = ShellWatcher {
@@ -1452,10 +1458,10 @@ mod hysteresis_tests {
                     output: output_rx,
                     input_pulses: input_rx,
                     screen: Arc::clone(&screen),
+                    rules,
                 },
                 attention_tx,
                 initial,
-                rules,
             );
             None
         } else {
@@ -1465,9 +1471,9 @@ mod hysteresis_tests {
                 AgentStreams {
                     output: output_rx,
                     screen: Arc::clone(&screen),
+                    rules,
                 },
                 attention_tx,
-                rules,
             );
             Some(input_rx)
         };

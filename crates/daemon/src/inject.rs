@@ -10,9 +10,10 @@
 //!    with PTY-output-quiescence-based early exit. We proceed as soon as
 //!    the agent's TUI has finished its initial paint rather than always
 //!    waiting the full ceiling, but only after we've seen enough output to
-//!    be confident the TUI has actually started painting (Claude's banner
-//!    is ~2 KB; sub-1 KB means it hasn't started yet, so quiescence is
-//!    meaningless). An injector whose `startup` is
+//!    be confident the TUI has actually started painting. How much output
+//!    that takes and how long the stream must then stay quiet comes from
+//!    the agent's plugin ([`agent_api::ReadySignal`]): Claude's banner is
+//!    1024 bytes, then 1.5 s of silence. An injector whose `startup` is
 //!    [`InjectorStartup::ShellPrompt`] waits for a shell prompt instead:
 //!    a short quiet period once the shell has printed anything, capped at
 //!    the step's own delay (see [`StartupRule`]).
@@ -28,6 +29,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use agent_api::ReadySignal;
 use base64::Engine as _;
 use protocol::{InjectorStartup, InjectorStep, PromptInjector};
 use tokio::sync::broadcast;
@@ -42,20 +44,6 @@ use crate::pty::PtyHandle;
 /// silence gaps in the 500–1500 ms range that would otherwise trip early
 /// exit on a TUI whose keystroke handler isn't yet bound.
 const STARTUP_MIN_WAIT: Duration = Duration::from_secs(3);
-
-/// Quiescence threshold: how long the PTY output stream must be silent
-/// before we declare the TUI "ready for input". Raised from the original
-/// 500 ms to demand sustained silence — Claude's banner can stream in
-/// bursts with sub-second pauses that fooled the old threshold.
-const STARTUP_QUIET_FOR: Duration = Duration::from_millis(1500);
-
-/// Minimum cumulative PTY output bytes seen before quiescence is allowed
-/// to fire. Claude's startup banner is ~2 KB; if we've seen less than 1 KB
-/// and the stream goes quiet, it almost certainly means Claude hasn't
-/// started painting yet (not that it's finished). Without this gate the
-/// quiescence heuristic exits before the input handler is bound and the
-/// pre-input keystrokes are dropped.
-const STARTUP_MIN_OUTPUT_BYTES: usize = 1024;
 
 /// Lower bound on the caller-provided startup cap. The cap is a safety
 /// ceiling, not a target — the early-exit heuristic still wins on a
@@ -97,8 +85,8 @@ const VERIFY_TAIL_BYTES_FOR_LOG: usize = 200;
 /// immediately. If the PTY is dropped or the child exits mid-script the
 /// task will keep writing into a closed channel — the writes are silently
 /// discarded by `PtyHandle::write_input`, so we just log and move on.
-pub fn run(session_id: String, pty: Arc<PtyHandle>, injector: PromptInjector) {
-    run_chain(session_id, pty, vec![injector], None);
+pub fn run(session_id: String, pty: Arc<PtyHandle>, injector: PromptInjector, ready: ReadySignal) {
+    run_chain(session_id, pty, vec![injector], None, ready);
 }
 
 /// Answers whether the agent a launch typed into its shell is up.
@@ -113,12 +101,14 @@ const AGENT_UP_POLL: Duration = Duration::from_millis(100);
 /// With `agent_up`, every injector after the first waits for the agent to
 /// be up (see [`wait_for_agent`]); an agent not up within
 /// [`MIN_STARTUP_CAP`] drops the rest of the chain, so nothing meant for the
-/// agent is typed into its shell.
+/// agent is typed into its shell. `ready` is the spawned agent's plugin ready
+/// signal, which decides when its TUI counts as up.
 pub fn run_chain(
     session_id: String,
     pty: Arc<PtyHandle>,
     injectors: Vec<PromptInjector>,
     agent_up: Option<AgentUp>,
+    ready: ReadySignal,
 ) {
     // Subscribe BEFORE spawning the runner task so the receiver is hooked
     // up synchronously with the caller's view of the PTY — otherwise a
@@ -139,7 +129,7 @@ pub fn run_chain(
                 return;
             }
             let rx = output_rx.take().unwrap_or_else(|| pty.output.subscribe());
-            run_one(&session_id, &pty, rx, injector).await;
+            run_one(&session_id, &pty, rx, injector, ready).await;
         }
     });
 }
@@ -166,6 +156,7 @@ async fn run_one(
     pty: &Arc<PtyHandle>,
     output_rx: broadcast::Receiver<Vec<u8>>,
     injector: PromptInjector,
+    ready: ReadySignal,
 ) {
     let mut output_rx = output_rx;
     let steps = injector.steps;
@@ -182,7 +173,7 @@ async fn run_one(
     // gated wait, not a literal sleep.
     let mut cursor = 0;
     if let Some(InjectorStep::Delay { ms }) = steps.first() {
-        let rule = StartupRule::of(injector.startup);
+        let rule = StartupRule::of(injector.startup, ready);
         let provided_cap = Duration::from_millis(u64::from(*ms));
         let cap = provided_cap.max(rule.min_cap);
         let waited = wait_until_ready_or_timeout(&mut output_rx, cap, &rule).await;
@@ -466,13 +457,16 @@ struct StartupRule {
 }
 
 impl StartupRule {
-    /// An agent's TUI, which paints a banner of about 2 KB in bursts.
-    const AGENT_TUI: Self = Self {
-        min_wait: STARTUP_MIN_WAIT,
-        quiet_for: STARTUP_QUIET_FOR,
-        min_bytes: STARTUP_MIN_OUTPUT_BYTES,
-        min_cap: MIN_STARTUP_CAP,
-    };
+    /// An agent's TUI: its plugin says how much output must print and how
+    /// long the stream must then stay quiet before the TUI takes a keystroke.
+    fn agent_tui(ready: ReadySignal) -> Self {
+        Self {
+            min_wait: STARTUP_MIN_WAIT,
+            quiet_for: ready.quiet_for,
+            min_bytes: ready.min_output_bytes,
+            min_cap: MIN_STARTUP_CAP,
+        }
+    }
 
     /// A shell, whose prompt prints in one short burst. The byte gate skips
     /// a lone terminal query (the pseudo console's 4-byte `ESC[6n`), which comes before
@@ -484,10 +478,10 @@ impl StartupRule {
         min_cap: Duration::ZERO,
     };
 
-    fn of(startup: InjectorStartup) -> Self {
+    fn of(startup: InjectorStartup, ready: ReadySignal) -> Self {
         match startup {
             InjectorStartup::ShellPrompt => Self::SHELL_PROMPT,
-            InjectorStartup::AgentTui | InjectorStartup::Unknown => Self::AGENT_TUI,
+            InjectorStartup::AgentTui | InjectorStartup::Unknown => Self::agent_tui(ready),
         }
     }
 }
@@ -582,13 +576,14 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn sufficient_output_then_quiescence_exits_early() {
-        // 1500 bytes (above MIN_OUTPUT_BYTES) arrive immediately, then
+        // 1500 bytes (above the plugin's byte gate) arrive immediately, then
         // silence. We should exit at STARTUP_MIN_WAIT (the floor), well
         // before the cap. The paused clock makes the wake instant exact.
         let (tx, mut rx) = broadcast::channel::<Vec<u8>>(16);
         assert!(tx.send(vec![b'.'; 1500]).is_ok());
         let cap = Duration::from_secs(20);
-        let waited = wait_until_ready_or_timeout(&mut rx, cap, &StartupRule::AGENT_TUI).await;
+        let rule = StartupRule::of(InjectorStartup::AgentTui, ReadySignal::default());
+        let waited = wait_until_ready_or_timeout(&mut rx, cap, &rule).await;
         assert_eq!(
             waited, STARTUP_MIN_WAIT,
             "should exit at the floor once quiet and the byte gate are met; waited {waited:?}"
@@ -596,29 +591,56 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn agent_tui_startup_uses_the_plugins_ready_signal() {
+        // A plugin whose TUI counts as up after 10 bytes and 200 ms of
+        // silence: 10 bytes arrive and never reach Claude's 1024-byte gate,
+        // so the 3 s floor ends the wait. Claude's own numbers would block
+        // on the byte gate and run to the cap.
+        let (tx, mut rx) = broadcast::channel::<Vec<u8>>(16);
+        assert!(tx.send(vec![b'.'; 10]).is_ok());
+        let ready = ReadySignal {
+            min_output_bytes: 10,
+            quiet_for: Duration::from_millis(200),
+        };
+        let rule = StartupRule::of(InjectorStartup::AgentTui, ready);
+        let cap = Duration::from_secs(20);
+        let waited = wait_until_ready_or_timeout(&mut rx, cap, &rule).await;
+        assert!(
+            waited < cap,
+            "the plugin's byte gate is met, so the cap never fires; waited {waited:?}"
+        );
+        assert_eq!(
+            waited, STARTUP_MIN_WAIT,
+            "the floor alone ends the wait once quiet and the byte gate are met; waited {waited:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn min_output_bytes_blocks_early_exit() {
-        // Only 200 bytes seen (below MIN_OUTPUT_BYTES). Without this
-        // gate, the silence + floor would trigger early exit; with it,
+        // Only 200 bytes seen (below the plugin's 1024-byte gate). Without
+        // this gate, the silence + floor would trigger early exit; with it,
         // we must hit the cap. Cap chosen low so the test is fast.
         let (tx, mut rx) = broadcast::channel::<Vec<u8>>(16);
         assert!(tx.send(vec![b'.'; 200]).is_ok());
         let cap = Duration::from_millis(500);
-        let waited = wait_until_ready_or_timeout(&mut rx, cap, &StartupRule::AGENT_TUI).await;
+        let rule = StartupRule::of(InjectorStartup::AgentTui, ReadySignal::default());
+        let waited = wait_until_ready_or_timeout(&mut rx, cap, &rule).await;
         // With a sub-floor cap and insufficient bytes, the deadline is
         // the only wake left: exactly the cap, never an early exit.
         assert_eq!(
             waited, cap,
-            "should hit cap when output is below MIN_OUTPUT_BYTES; waited {waited:?}"
+            "should hit cap when output is below the byte gate; waited {waited:?}"
         );
     }
 
     #[tokio::test(start_paused = true)]
     async fn no_output_hits_cap() {
-        // No output at all: total_bytes stays at 0 forever, MIN_OUTPUT_BYTES
-        // gate blocks quiescence exit, we hit the cap.
+        // No output at all: total_bytes stays at 0 forever, the byte gate
+        // blocks quiescence exit, we hit the cap.
         let (_tx, mut rx) = broadcast::channel::<Vec<u8>>(16);
         let cap = Duration::from_millis(500);
-        let waited = wait_until_ready_or_timeout(&mut rx, cap, &StartupRule::AGENT_TUI).await;
+        let rule = StartupRule::of(InjectorStartup::AgentTui, ReadySignal::default());
+        let waited = wait_until_ready_or_timeout(&mut rx, cap, &rule).await;
         assert_eq!(
             waited, cap,
             "should hit cap with no output; waited {waited:?}"
@@ -642,7 +664,8 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
         });
-        let waited = wait_until_ready_or_timeout(&mut rx, cap, &StartupRule::AGENT_TUI).await;
+        let rule = StartupRule::of(InjectorStartup::AgentTui, ReadySignal::default());
+        let waited = wait_until_ready_or_timeout(&mut rx, cap, &rule).await;
         producer.abort();
         assert_eq!(
             waited, cap,
@@ -651,8 +674,9 @@ mod tests {
     }
 
     #[test]
-    fn default_and_unknown_startup_keep_the_agent_tui_rule() {
-        let rule = StartupRule::of(InjectorStartup::default());
+    fn claude_ready_signal_keeps_the_agent_tui_rule() {
+        let ready = agent_registry::plugin(protocol::Agent::Claude).ready_signal();
+        let rule = StartupRule::of(InjectorStartup::AgentTui, ready);
         assert_eq!(
             rule,
             StartupRule {
@@ -662,12 +686,12 @@ mod tests {
                 min_cap: Duration::from_secs(15),
             }
         );
-        assert_eq!(StartupRule::of(InjectorStartup::Unknown), rule);
+        assert_eq!(StartupRule::of(InjectorStartup::Unknown, ready), rule);
     }
 
     #[test]
     fn shell_prompt_rule_keeps_the_steps_own_cap() {
-        let rule = StartupRule::of(InjectorStartup::ShellPrompt);
+        let rule = StartupRule::of(InjectorStartup::ShellPrompt, ReadySignal::default());
         let cap = Duration::from_millis(2000);
         assert_eq!(cap.max(rule.min_cap), cap);
         assert_eq!(rule.min_wait, Duration::ZERO);
