@@ -89,7 +89,11 @@ pub(super) async fn client_session(hub: Hub, socket: WebSocket, auth: AuthKind) 
         pairing_session(&hub, &mut receiver, &out_tx, peer).await;
         drop(file_tx);
         drop(out_tx);
-        let _ = send_task.await;
+        // The device may still be sending when its session ends; a proper
+        // close keeps the last reply from being lost to a reset.
+        if let Ok(sender) = send_task.await {
+            close_gracefully(sender, &mut receiver, hub.tailnet_handshake_timeout).await;
+        }
         return;
     }
     // Effective per-client layout key: the client's id, or the shared legacy
@@ -433,12 +437,13 @@ pub(super) struct ConnCtx<'a> {
 /// Drain a connection's outbound queues into its WebSocket. Control and PTY
 /// traffic on `out_rx` always goes before file-transfer messages on
 /// `file_rx`. Ends when `out_rx` closes or the socket fails; `file_rx`
-/// closing only retires its own arm.
+/// closing only retires its own arm. Hands the sink back, so a caller can
+/// still close the socket properly.
 async fn send_pump(
     mut sender: futures::stream::SplitSink<WebSocket, Message>,
     mut out_rx: mpsc::UnboundedReceiver<DaemonMessage>,
     mut file_rx: mpsc::Receiver<DaemonMessage>,
-) {
+) -> futures::stream::SplitSink<WebSocket, Message> {
     let mut file_open = true;
     loop {
         let msg = tokio::select! {
@@ -465,6 +470,33 @@ async fn send_pump(
         if sender.send(Message::Text(json.into())).await.is_err() {
             break;
         }
+    }
+    sender
+}
+
+/// End a connection with the WebSocket closing handshake once everything
+/// queued for it is on the wire: send `Close`, then read and discard what the
+/// peer still sends until its `Close` or the end of the stream, for at most
+/// `limit`. Dropping a socket that still holds unread frames resets it, and
+/// the reset can destroy replies the peer has not read yet.
+async fn close_gracefully(
+    mut sender: futures::stream::SplitSink<WebSocket, Message>,
+    receiver: &mut futures::stream::SplitStream<WebSocket>,
+    limit: std::time::Duration,
+) {
+    if sender.send(Message::Close(None)).await.is_err() {
+        return;
+    }
+    let drained = tokio::time::timeout(limit, async {
+        while let Some(Ok(message)) = receiver.next().await {
+            if matches!(message, Message::Close(_)) {
+                break;
+            }
+        }
+    })
+    .await;
+    if drained.is_err() {
+        debug!("the peer did not finish the closing handshake in time; dropping the socket");
     }
 }
 
