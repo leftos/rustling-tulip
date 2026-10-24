@@ -45,6 +45,7 @@ pub mod launch_last;
 mod layout_chooser;
 mod layout_chooser_view;
 mod links;
+mod md_blocks;
 mod mouse;
 mod move_panes;
 mod move_panes_view;

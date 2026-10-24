@@ -725,6 +725,12 @@
     },
     {
       "paths": [
+        "apps/native/src/md_blocks.rs"
+      ],
+      "filter": "package(rustling-tulip-native) & test(/^md_blocks::/)"
+    },
+    {
+      "paths": [
         "apps/native/src/window_state.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native) & test(/^window_state::/))"

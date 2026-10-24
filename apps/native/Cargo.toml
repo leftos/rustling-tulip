@@ -57,6 +57,8 @@ regex = "1.11"
 similar = "3.2.0"
 # The text viewer's UTF-16 decoding; a UTF-16 file is text only with a BOM.
 encoding_rs = "0.8"
+# The Markdown view's block model: the event parser only, no HTML renderer.
+pulldown-cmark = { version = "0.13", default-features = false }
 syntect = { version = "5.3.0", default-features = false, features = ["parsing", "regex-fancy"] }
 two-face = { version = "0.5.2", default-features = false, features = ["syntect-fancy"] }
 qrcodegen = "1.8"
