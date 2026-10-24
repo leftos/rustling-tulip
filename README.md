@@ -194,6 +194,7 @@ Start with [docs/architecture.md](docs/architecture.md) for how the pieces fit a
 - **Unseen turn**: an agent session whose turn ended while this client wasn't showing it focused; it shows the waiting ring until focused.
 - **Untouched (picked) layout**: a tab whose layout type was last chosen by a pick (Rearrange or the first-connect chooser) and has not been hand-resized (a divider drag) or hand-arranged since; the daemon rebuilds that type as panes come and go, a pick of the automatic grid also remembers the pane area's aspect and follows it when the window is resized (that re-fit keeps the tab's empty panes, where a fixed pick just keeps its count), and the per-client flag is `TabEntry.picked_layout`; see `docs/native-client.md` ("Tab layouts").
 - **Waiter**: a `DiscoverAfterLaunch` session registered at spawn, with its baseline and launch time, until discovery claims a conversation for it or its final look runs.
+- **Waiting devices**: the owner's list of tailnet devices whose pairing request awaits approval, in Settings → Remote access; its model is `apps/native/src/pairing.rs`.
 - **Warm-up gate**: auto-switch making no decision until every usable account has been polled since it started.
 - **Wave**: a release-sized bundle of plan items that share owning files, so one implementer reads those files once and one review covers the bundle; each wave is a Linear project whose content names its files, review and verification.
 - **Worker**: a subagent or rustling-tulip session running one brief in one worktree.

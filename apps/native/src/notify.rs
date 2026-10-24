@@ -9,6 +9,7 @@ use gpui::Context;
 use protocol::{AttentionReason, DaemonMessage, SessionMode, SessionSnapshot, SessionStatus};
 
 use crate::RootView;
+use crate::pairing::{PairingAction, PairingToast};
 use crate::sidebar::{NotifySkip, display_label};
 use crate::window_title::PRODUCT_NAME;
 
@@ -47,11 +48,21 @@ impl NotifyState {
     }
 }
 
+/// How a press on a pairing toast reaches the app: the action is handed to
+/// this sink on whichever thread the OS raises it from.
+pub type PairingActionSink = Arc<dyn Fn(PairingAction) + Send + Sync>;
+
 /// Shows OS notifications.
 pub trait Notifier: Send + Sync {
     /// Shows a toast titled `title` with `body`. Called off the UI thread;
     /// a failure is logged, never returned.
     fn notify(&self, title: &str, body: &str);
+
+    /// Raises the pairing toast for `toast`, its buttons handing what was
+    /// pressed to `on_action`. Called off the UI thread; a failure is logged,
+    /// never returned. A notifier that raises no pairing toast leaves this
+    /// as it is.
+    fn notify_pairing(&self, _toast: &PairingToast, _on_action: PairingActionSink) {}
 
     /// Whether Windows lets this app's toasts show.
     fn state(&self) -> NotifyState;
@@ -70,6 +81,28 @@ impl Notifier for SystemNotifier {
             .text1(body);
         if let Err(err) = toast.show() {
             tracing::warn!("notification {title:?} was not shown: {err}");
+        }
+    }
+
+    fn notify_pairing(&self, toast: &PairingToast, on_action: PairingActionSink) {
+        use tauri_winrt_notification::Toast;
+        let raised = Toast::new(Toast::POWERSHELL_APP_ID)
+            .title(&toast.title)
+            .text1(&toast.body)
+            .add_button("Approve…", &PairingAction::approve_arg(&toast.request_id))
+            .add_button("Deny", &PairingAction::deny_arg(&toast.request_id))
+            .on_activated(move |arg| {
+                if let Some(action) = PairingAction::from_activation(arg.as_deref()) {
+                    on_action(action);
+                }
+                Ok(())
+            })
+            .show();
+        if let Err(err) = raised {
+            tracing::warn!(
+                "pairing notification {} was not shown: {err}",
+                toast.request_id
+            );
         }
     }
 
@@ -101,6 +134,13 @@ impl Notifier for SystemNotifier {
         tracing::debug!("no OS notifications on this platform: {title:?}");
     }
 
+    fn notify_pairing(&self, toast: &PairingToast, _on_action: PairingActionSink) {
+        tracing::debug!(
+            "no OS notifications on this platform: pairing {}",
+            toast.request_id
+        );
+    }
+
     fn state(&self) -> NotifyState {
         NotifyState::Unknown
     }
@@ -113,6 +153,13 @@ pub struct SilentNotifier;
 impl Notifier for SilentNotifier {
     fn notify(&self, title: &str, _: &str) {
         tracing::debug!("offscreen window: notification {title:?} not shown");
+    }
+
+    fn notify_pairing(&self, toast: &PairingToast, _on_action: PairingActionSink) {
+        tracing::debug!(
+            "offscreen window: pairing notification {} not shown",
+            toast.request_id
+        );
     }
 
     fn state(&self) -> NotifyState {
@@ -339,6 +386,28 @@ mod tests {
             !finished(Some(&asking), &idle),
             "an answer is no turn's end"
         );
+    }
+
+    #[test]
+    fn silent_notifier_raises_no_pairing_toast() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let pressed = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&pressed);
+        let sink: PairingActionSink = Arc::new(move |_action| {
+            counter.fetch_add(1, Ordering::SeqCst);
+        });
+        let toast = PairingToast {
+            request_id: "r1".to_owned(),
+            title: "A device asks for remote access".to_owned(),
+            body: "phone · signed in to Tailscale as alice@example.com".to_owned(),
+        };
+        SilentNotifier.notify_pairing(&toast, sink);
+        assert_eq!(
+            pressed.load(Ordering::SeqCst),
+            0,
+            "nothing is raised, so nothing is pressed"
+        );
+        assert_eq!(SilentNotifier.state(), NotifyState::Unknown);
     }
 
     #[test]

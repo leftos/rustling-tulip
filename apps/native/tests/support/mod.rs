@@ -25,7 +25,7 @@ use protocol::{
 use rustling_tulip_native::{
     Activity, Clock, Connection, ContainerKind, FileFilter, FilePicker, FolderPicker,
     HandshakeInfo, NetCommand, NetDeps, NetEvent, Notifier, NotifyState, OpenFailure, Opener,
-    QuitFn, RootDeps, RootView, ScPanel, bind_keys,
+    PairingAction, PairingActionSink, PairingToast, QuitFn, RootDeps, RootView, ScPanel, bind_keys,
     remote_access::Autostart,
     spawn_net,
     target::{TailnetHost, Target},
@@ -864,9 +864,12 @@ impl Opener for OpenRecorder {
 
 /// A notifier that only records the notifications it was asked to show, as
 /// a spec must never show a real toast, and reports the Windows state a
-/// spec set (on until set).
+/// spec set (on until set). It records the pairing toasts too, and keeps the
+/// last one's action sink, so a spec can press its buttons itself.
 pub struct NotifyRecorder {
     shown: Mutex<Vec<(String, String)>>,
+    pairing: Mutex<Vec<PairingToast>>,
+    action: Mutex<Option<PairingActionSink>>,
     state: Mutex<NotifyState>,
 }
 
@@ -874,7 +877,34 @@ impl Default for NotifyRecorder {
     fn default() -> Self {
         Self {
             shown: Mutex::new(Vec::new()),
+            pairing: Mutex::new(Vec::new()),
+            action: Mutex::new(None),
             state: Mutex::new(NotifyState::On),
+        }
+    }
+}
+
+impl NotifyRecorder {
+    /// Every pairing toast the client raised, in order.
+    #[must_use]
+    pub fn pairing_toasts(&self) -> Vec<PairingToast> {
+        self.pairing
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Presses the last pairing toast: with a button's argument, or with
+    /// `None` for a press on the toast body.
+    pub fn activate(&self, arg: Option<&str>) {
+        let action = PairingAction::from_activation(arg);
+        let sink = self
+            .action
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        if let (Some(sink), Some(action)) = (sink, action) {
+            sink(action);
         }
     }
 }
@@ -885,6 +915,14 @@ impl Notifier for NotifyRecorder {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .push((title.to_owned(), body.to_owned()));
+    }
+
+    fn notify_pairing(&self, toast: &PairingToast, on_action: PairingActionSink) {
+        self.pairing
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(toast.clone());
+        *self.action.lock().unwrap_or_else(PoisonError::into_inner) = Some(on_action);
     }
 
     fn state(&self) -> NotifyState {

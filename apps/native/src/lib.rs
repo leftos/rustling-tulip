@@ -57,6 +57,7 @@ mod notify;
 pub mod offscreen;
 mod open;
 mod open_view;
+mod pairing;
 pub mod palette;
 mod pane_close;
 mod pane_close_view;
@@ -216,8 +217,12 @@ pub use crate::notices::{
     ActionFailedNotice, CheckoutChoice, CheckoutPrompt, TOAST_LIFETIME, Toast, ToastAction,
     ToastKind, ToastSpec, toast_action_selector,
 };
-pub use crate::notify::{Notifier, NotifyState};
+pub use crate::notify::{Notifier, NotifyState, PairingActionSink};
 pub use crate::open::{OpenFailure, Opener};
+pub use crate::pairing::{
+    DialogPhase, DialogView, PairingAction, PairingState, PairingToast, QrMatrix, WaitingRow,
+    approve_message, deny_message,
+};
 pub use crate::preset_wizard::{LaunchButton, NextButton};
 pub use crate::quit_view::QuitFn;
 pub use crate::recover_view::RecoverRow;

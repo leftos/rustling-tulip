@@ -435,6 +435,12 @@
     },
     {
       "paths": [
+        "apps/native/src/pairing.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & test(/^pairing::/))"
+    },
+    {
+      "paths": [
         "apps/native/src/preset_launch.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native) & test(/^(preset_launch|preset_wizard)::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_container_menu|ui_preset_wizard)::/))"
