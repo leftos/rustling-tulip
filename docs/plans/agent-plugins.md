@@ -229,15 +229,15 @@ Where it mounts:
 
 - Spawn dialog: `Runtime::Agent(AgentId)` lists the descriptors in daemon order, then Plain shell; the Main and Advanced sections render the agent's fields, starting from the agent's settings; Run mode offers Headless only when `caps.headless`; the trusted note reads `trust_note`. Duplicate and launch-last prefill an `AgentSelection` as stored.
 - Settings: one page per descriptor under the existing non-selectable `Agents` group row, holding the fields with `settings: true`, read from `AgentSettings` and written with `SetAgentSettings`.
-- Chips and labels: pane headers and leaves draw `agent_chips`; the runtime chip text is `tag` and its colour `accent`; Shift+Enter sends the bytes `shift_enter` names.
+- Chips and labels: pane headers and leaves draw `agent_chips`; the runtime chip text is `program_name`, else `tag`, else the agent id, and it wears the accent only when `accent` is Claude and the text is the tag itself; Shift+Enter sends the bytes `shift_enter` names.
 - Recover dialog: offers the kinds `caps` allows, named by `label` and `texts`.
 
 What it replaces (inventory group 8, Claude rows, after RT-266 has removed the Codex and Cursor ones):
 
 - `spawn_form.rs`: `Runtime::ALL` (106-111); `MODEL_ALIASES`, `DEEPSEEK_MODEL_PLACEHOLDER`, `PROVIDER_CHOICES`, `PROVIDER_UNSUPPORTED_TIP`, `provider_label` and the chip helpers, `stored_claude_provider`, `APPROVAL_CHOICES`, `approval_label` (153-271); `model_chips_shown`, `provider_shown` and the `Agent::Claude` checks (2190-2211); the per-agent control ring (2720) and the `agent_options()` builder (3014-3040).
 - `spawn_view.rs`: the Claude Advanced section and the provider row (2470-2530). `settings_view.rs`: `SettingsTab::Claude`, its page and its provider row (91, 1396-1426, 1789-1830).
-- `sidebar.rs`: `SpawnDefaults`' Claude fields (approval mode and provider) and their stored-value parsing (389-433), `agent_summary_label` / `authority_label` (1444-1470), `chip_provider` (1818-1827). `sidebar_view.rs`: `runtime_color` (1606-1615). `grid_view.rs`: the provider chip.
-- `term_input.rs`: `shift_enter` (45-51). `recover.rs`: the Claude recovery options, labels and provider gate (350-418, 391, 475). `connection.rs`: the `FEATURE_CLAUDE_PROVIDER` checks. `shell_dialog.rs`: `AgentOptions::claude(None)` (241). `quit.rs`: "owns your claude sessions" (18).
+- Gone from the client: `SpawnDefaults`' Claude fields, `chip_provider`, `runtime_color`'s agent table, the provider chip, the `FEATURE_CLAUDE_PROVIDER` checks and `shell_dialog.rs`' `AgentOptions::claude`; the launch summary is built from the descriptor (`summary_fields`).
+- `term_input.rs`: `shift_enter` (45-51). `recover.rs`: the Claude recovery options, labels and provider gate (350-418, 391, 475). `quit.rs`: "owns your claude sessions" (18).
 
 ## Status rules
 

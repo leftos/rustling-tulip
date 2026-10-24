@@ -11,8 +11,8 @@ use gpui::{
     relative,
 };
 use protocol::{
-    ClientMessage, GridNode, PaneDropEdge, SessionMember, SessionMode, SessionSnapshot,
-    SessionStatus, SplitDirection, SplitPlace, TabContent, TabEntry,
+    AgentDescriptor, ClientMessage, GridNode, PaneDropEdge, SessionMember, SessionMode,
+    SessionSnapshot, SessionStatus, SplitDirection, SplitPlace, TabContent, TabEntry,
 };
 
 use crate::appearance::{self, PaneFrame, Resolved};
@@ -25,7 +25,9 @@ use crate::palette::{
 };
 use crate::session_menu::{BorderedButton, bordered_button};
 use crate::shell_dialog::standalone_shell_request;
-use crate::sidebar::{can_attach, chip_tip, display_label, label_tooltip, runtime_label};
+use crate::sidebar::{
+    can_attach, chip_tip, display_label, label_tooltip, runtime_accent, runtime_label,
+};
 use crate::spawn_view::{DISABLED_OPACITY, SpawnEntry};
 use crate::spawns::{OpenIn, PaneAim};
 use crate::status_glyph::{GlyphSize, glyph, glyph_view};
@@ -1076,7 +1078,9 @@ impl RootView {
     ) -> Stateful<Div> {
         let parts = session_id
             .and_then(|id| self.sidebar.session(id))
-            .map(|session| header_parts(session, self.sidebar.is_unseen(&session.id)));
+            .map(|session| {
+                header_parts(session, self.sidebar.is_unseen(&session.id), &self.agents)
+            });
         let menu_ids = (tab_id.to_owned(), pane_id.to_owned());
         let menu_session = session_id.map(str::to_owned);
         let name = format!("pane-header-{pane_id}");
@@ -1358,7 +1362,7 @@ impl RootView {
     #[must_use]
     pub fn pane_header_parts(&self, pane_id: &str) -> Option<PaneHeaderParts> {
         self.active_pane_session(pane_id)
-            .map(|session| header_parts(session, self.sidebar.is_unseen(&session.id)))
+            .map(|session| header_parts(session, self.sidebar.is_unseen(&session.id), &self.agents))
     }
 
     /// The body of a pane showing `session_id` before its terminal attaches:
@@ -1452,12 +1456,14 @@ impl HeaderChipKind {
     }
 }
 
-/// One chip in a pane header: its text and hover text.
+/// One chip in a pane header: its text, its hover text, and whether it wears
+/// its agent's accent colour.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeaderChip {
     pub kind: HeaderChipKind,
     pub text: String,
     pub tip: String,
+    pub accent: bool,
 }
 
 impl HeaderChip {
@@ -1466,15 +1472,28 @@ impl HeaderChip {
             kind,
             text: text.into(),
             tip: tip.into(),
+            accent: false,
         }
+    }
+
+    /// The chip drawn in its agent's accent colour.
+    #[must_use]
+    fn accented(mut self, accent: bool) -> Self {
+        self.accent = accent;
+        self
     }
 }
 
-fn header_parts(session: &SessionSnapshot, unseen: bool) -> PaneHeaderParts {
-    let mut chips: Vec<HeaderChip> = runtime_label(session)
+fn header_parts(
+    session: &SessionSnapshot,
+    unseen: bool,
+    agents: &[AgentDescriptor],
+) -> PaneHeaderParts {
+    let mut chips: Vec<HeaderChip> = runtime_label(session, agents)
         .map(|runtime| {
             let tip = format!("Running {runtime}");
-            HeaderChip::new(HeaderChipKind::Runtime, runtime, tip)
+            let accent = runtime_accent(session, Some(&runtime), agents);
+            HeaderChip::new(HeaderChipKind::Runtime, runtime, tip).accented(accent)
         })
         .into_iter()
         .collect();
@@ -1633,14 +1652,14 @@ fn header_chip(pane_id: &str, chip: &HeaderChip, cx: &mut Context<RootView>) -> 
     };
     let text = chip.text.clone();
     match chip.kind {
-        HeaderChipKind::Runtime => match text.as_str() {
-            "claude" => base
-                .bg(gpui::Rgba {
-                    a: RUNTIME_WASH_ALPHA,
-                    ..gpui::rgb(ACCENT)
-                })
-                .text_color(gpui::rgb(ACCENT)),
-            _ => base,
+        HeaderChipKind::Runtime => if chip.accent {
+            base.bg(gpui::Rgba {
+                a: RUNTIME_WASH_ALPHA,
+                ..gpui::rgb(ACCENT)
+            })
+            .text_color(gpui::rgb(ACCENT))
+        } else {
+            base
         }
         .child(text),
         HeaderChipKind::Branch => branch_chip(&name, base, text),
@@ -1975,7 +1994,7 @@ fn bounds_probe(cx: &mut Context<RootView>) -> impl IntoElement {
 )]
 mod tests {
     use super::{HeaderChip, HeaderChipKind, RetryGate, header_parts, status_label};
-    use protocol::{SessionMode, SessionSnapshot, SessionStatus};
+    use protocol::{AgentDescriptor, AgentId, SessionMode, SessionSnapshot, SessionStatus};
     use serde_json::json;
 
     const DEEPSEEK_PROVIDER_TIP: &str = "Runs on DeepSeek";
@@ -2067,14 +2086,31 @@ mod tests {
         HeaderChip::new(kind, text, tip)
     }
 
+    /// A runtime chip wearing its agent's accent.
+    fn runtime(text: &str) -> HeaderChip {
+        chip(HeaderChipKind::Runtime, text, &format!("Running {text}")).accented(true)
+    }
+
+    /// The registry's Claude descriptor, as the daemon sends it.
+    fn claude_descriptor() -> AgentDescriptor {
+        agent_registry::descriptors()
+            .into_iter()
+            .find(|descriptor| descriptor.id == AgentId("claude".to_owned()))
+            .expect("the registry has Claude")
+    }
+
     #[test]
     fn a_deepseek_claude_session_shows_a_chip_after_the_runtime_one() {
         let deepseek = json!([{ "text": "DeepSeek", "tip": DEEPSEEK_PROVIDER_TIP }]);
-        let parts = header_parts(&session_with("claude", &deepseek), false);
+        let parts = header_parts(
+            &session_with("claude", &deepseek),
+            false,
+            &[claude_descriptor()],
+        );
         assert_eq!(
             parts.chips,
             [
-                chip(HeaderChipKind::Runtime, "claude", "Running claude"),
+                runtime("claude"),
                 chip(HeaderChipKind::Provider, "DeepSeek", DEEPSEEK_PROVIDER_TIP),
             ]
         );
@@ -2082,11 +2118,12 @@ mod tests {
 
     #[test]
     fn an_anthropic_claude_session_shows_no_provider_chip() {
-        let parts = header_parts(&session_with("claude", &json!([])), false);
-        assert_eq!(
-            parts.chips,
-            [chip(HeaderChipKind::Runtime, "claude", "Running claude")]
+        let parts = header_parts(
+            &session_with("claude", &json!([])),
+            false,
+            &[claude_descriptor()],
         );
+        assert_eq!(parts.chips, [runtime("claude")]);
     }
 
     #[test]
@@ -2094,11 +2131,12 @@ mod tests {
         let parts = header_parts(
             &session_with("claude", &json!([{ "text": "mistral", "tip": null }])),
             false,
+            &[claude_descriptor()],
         );
         assert_eq!(
             parts.chips,
             [
-                chip(HeaderChipKind::Runtime, "claude", "Running claude"),
+                runtime("claude"),
                 chip(HeaderChipKind::Provider, "mistral", "mistral"),
             ]
         );
@@ -2110,9 +2148,9 @@ mod tests {
         shell.mode = SessionMode::PlainShell;
         shell.program_name = Some("pwsh".to_owned());
         assert_eq!(
-            header_parts(&shell, false).chips,
+            header_parts(&shell, false, &[claude_descriptor()]).chips,
             [chip(HeaderChipKind::Runtime, "pwsh", "Running pwsh")],
-            "a plain shell says no provider"
+            "a plain shell says no provider and wears no accent"
         );
     }
 }

@@ -3,9 +3,9 @@
 //! layout. Plain Rust, so every rule is unit-tested; `sidebar_view` renders it.
 
 use protocol::{
-    AgentId, AppearanceOverrides, ContainerRef, DaemonMessage, RepoEntry, SessionChip, SessionKind,
-    SessionMode, SessionSnapshot, SessionStatus, SpawnConfig, SpawnTarget, TabEntry,
-    WorkspaceEntry,
+    AccentToken, AgentDescriptor, AgentId, AppearanceOverrides, ContainerRef, DaemonMessage,
+    RepoEntry, SessionChip, SessionKind, SessionMode, SessionSnapshot, SessionStatus, SpawnConfig,
+    SpawnTarget, TabEntry, WorkspaceEntry,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use std::cmp::Ordering;
@@ -13,8 +13,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::sync::LazyLock;
 
+use crate::agent_options::{AgentOptions, descriptor_for};
 use crate::appearance::{self, AppColors, AppLevel, Resolved};
-use crate::claude_compat::{self, approval_label};
 use crate::connection_picker::SavedHost;
 use crate::fonts::{self, FontSettings};
 use crate::launch_last;
@@ -111,6 +111,9 @@ pub struct Leaf {
     /// branches, or a shell's folder.
     pub subline: Option<String>,
     pub runtime: Option<String>,
+    /// The runtime tag wears its agent's accent colour: the agent's
+    /// descriptor asks for one and the tag names the agent itself.
+    pub accent: bool,
     /// The chips the daemon evaluated from the session's agent options;
     /// empty when there is nothing to say.
     pub chips: Vec<SessionChip>,
@@ -280,6 +283,8 @@ pub struct TreeInputs<'a> {
     pub repos: &'a [RepoEntry],
     pub workspaces: &'a [WorkspaceEntry],
     pub sessions: &'a [SessionSnapshot],
+    /// The daemon's agents, in its order; empty while disconnected.
+    pub agents: &'a [AgentDescriptor],
     pub container_order: &'a [ContainerRef],
     /// Manual session order per container id.
     pub session_order: &'a HashMap<String, Vec<String>>,
@@ -456,8 +461,9 @@ fn valid_saved_hosts<'de, D: Deserializer<'de>>(
         .collect())
 }
 
-/// What the spawn dialog pre-fills from the Spawn defaults tab; every
-/// field off is the `claude` CLI's own default.
+/// What the spawn dialog pre-fills from the client's Spawn defaults: only
+/// whether new agent sessions launch trusted. The agents' own option
+/// defaults are the daemon's agent settings.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SpawnDefaults {
@@ -622,6 +628,9 @@ pub struct SidebarModel {
     repos_loaded: bool,
     workspaces: Vec<WorkspaceEntry>,
     sessions: Vec<SessionSnapshot>,
+    /// The daemon's agents, in its order, as the connection last sent them;
+    /// empty while disconnected.
+    agents: Vec<AgentDescriptor>,
     container_order: Vec<ContainerRef>,
     session_order: HashMap<String, Vec<String>>,
     attention: HashSet<String>,
@@ -647,6 +656,11 @@ impl SidebarModel {
     pub fn clear_daemon_state(&mut self) {
         let ui = std::mem::take(&mut self.ui);
         *self = Self::new(ui);
+    }
+
+    /// Keeps the daemon's agents, in its order, as a connection sends them.
+    pub fn set_agents(&mut self, agents: Vec<AgentDescriptor>) {
+        self.agents = agents;
     }
 
     /// Fold a daemon message into the model; messages it does not track are
@@ -801,6 +815,7 @@ impl SidebarModel {
             repos: &self.repos,
             workspaces: &self.workspaces,
             sessions: &self.sessions,
+            agents: &self.agents,
             container_order: &self.container_order,
             session_order: &self.session_order,
             attention: &self.attention,
@@ -814,6 +829,7 @@ impl SidebarModel {
         build_tab_containers(
             tabs,
             &self.sessions,
+            &self.agents,
             &TabRollups {
                 session_order: &self.session_order,
                 attention: &self.attention,
@@ -1438,7 +1454,7 @@ fn container(
     sessions.sort_by(|a, b| cmp_ci(&a.label, &b.label));
     let leaves: Vec<Leaf> = apply_session_order(sessions, inputs.session_order.get(id))
         .into_iter()
-        .map(|s| leaf(s, inputs.attention, inputs.unseen, false))
+        .map(|s| leaf(s, inputs.attention, inputs.unseen, false, inputs.agents))
         .collect();
     let key = container_key(kind, id);
     let summary = match kind {
@@ -1446,12 +1462,12 @@ fn container(
             .repos
             .iter()
             .find(|r| r.id == id)
-            .and_then(|r| launch_summary(r.last_spawn_config.as_ref())),
+            .and_then(|r| launch_summary(r.last_spawn_config.as_ref(), inputs.agents)),
         ContainerKind::Workspace => inputs
             .workspaces
             .iter()
             .find(|w| w.id == id)
-            .and_then(|w| launch_summary(w.last_spawn_config.as_ref())),
+            .and_then(|w| launch_summary(w.last_spawn_config.as_ref(), inputs.agents)),
         ContainerKind::Shell
         | ContainerKind::Dir
         | ContainerKind::Detached
@@ -1483,7 +1499,9 @@ fn leaf(
     attention: &HashSet<String>,
     unseen: &HashSet<String>,
     tabs_view: bool,
+    agents: &[AgentDescriptor],
 ) -> Leaf {
+    let runtime = runtime_label(s, agents);
     Leaf {
         id: s.id.clone(),
         status: s.status,
@@ -1491,7 +1509,8 @@ fn leaf(
         agent: s.agent.clone(),
         label: display_label(s),
         subline: subline(s, HOME.as_deref(), tabs_view),
-        runtime: runtime_label(s),
+        accent: runtime_accent(s, runtime.as_deref(), agents),
+        runtime,
         chips: s.agent_chips.clone(),
         attention: attention.contains(&s.id),
         busy_excluded: s.busy_excluded,
@@ -1504,17 +1523,14 @@ fn leaf(
 }
 
 /// One line naming a container's last launch: the agent and run mode, the
-/// target, the model, the agent's authority setting, `trusted`, and the env
-/// rows it carried. Parts that are absent are left out; no config, no line.
+/// target, each field the launch set away from its default in the agent's
+/// order (a choice's label, a typed value, a toggle's label), `trusted`, and
+/// the env rows it carried. Parts that are absent are left out; no config,
+/// no line.
 #[must_use]
-pub fn launch_summary(config: Option<&SpawnConfig>) -> Option<String> {
+pub fn launch_summary(config: Option<&SpawnConfig>, agents: &[AgentDescriptor]) -> Option<String> {
     let config = config?;
-    let choice = config
-        .agent
-        .as_ref()
-        .map(claude_compat::from_selection)
-        .unwrap_or_default();
-    let mut parts = vec![agent_summary_label(config)];
+    let mut parts: Vec<String> = agent_summary_label(config, agents).into_iter().collect();
     match config.mode {
         SessionMode::Interactive => parts.push("Interactive".to_owned()),
         SessionMode::Headless => parts.push("Headless".to_owned()),
@@ -1544,15 +1560,15 @@ pub fn launch_summary(config: Option<&SpawnConfig>) -> Option<String> {
         }
         SpawnTarget::Standalone { .. } => "standalone".to_owned(),
     });
-    if let Some(model) = choice.model.filter(|model| !model.is_empty()) {
-        parts.push(model);
+    if config.mode != SessionMode::PlainShell
+        && let Some(selection) = &config.agent
+        && let Some(descriptor) = descriptor_for(agents, &selection.agent)
+    {
+        let options = AgentOptions::new(descriptor.clone(), Some(&selection.options));
+        parts.extend(options.summary_fields(config.dangerously_skip_permissions));
     }
     if config.dangerously_skip_permissions {
         parts.push("trusted".to_owned());
-    } else if config.mode != SessionMode::PlainShell
-        && let Some(mode) = choice.permission_mode
-    {
-        parts.push(approval_label(Some(mode)).to_owned());
     }
     if !config.extra_env.is_empty() {
         parts.push(format!("{} env", config.extra_env.len()));
@@ -1560,13 +1576,19 @@ pub fn launch_summary(config: Option<&SpawnConfig>) -> Option<String> {
     Some(parts.join(" · "))
 }
 
-/// The agent's name in a launch summary; a plain-shell config names the
-/// shell.
-fn agent_summary_label(config: &SpawnConfig) -> String {
+/// The agent's name in a launch summary: a plain-shell config names the
+/// shell, an agent session its descriptor's label, and a launch that names
+/// no agent the default descriptor's. `None` only when nothing names it.
+fn agent_summary_label(config: &SpawnConfig, agents: &[AgentDescriptor]) -> Option<String> {
+    if config.mode == SessionMode::PlainShell {
+        return Some("Shell".to_owned());
+    }
     match &config.agent {
-        _ if config.mode == SessionMode::PlainShell => "Shell".to_owned(),
-        Some(selection) if !claude_compat::is_claude(&selection.agent) => selection.agent.0.clone(),
-        _ => "Claude".to_owned(),
+        Some(selection) => Some(descriptor_for(agents, &selection.agent).map_or_else(
+            || selection.agent.0.clone(),
+            |descriptor| descriptor.label.clone(),
+        )),
+        None => agents.first().map(|descriptor| descriptor.label.clone()),
     }
 }
 
@@ -1620,6 +1642,7 @@ pub struct TabRollups<'a> {
 pub fn build_tab_containers(
     tabs: &[TabEntry],
     sessions: &[SessionSnapshot],
+    agents: &[AgentDescriptor],
     rollups: &TabRollups<'_>,
     collapsed: &BTreeSet<String>,
 ) -> Vec<Container> {
@@ -1647,7 +1670,7 @@ pub fn build_tab_containers(
             .into_iter()
             .map(|s| {
                 shown.insert(s.id.as_str());
-                leaf(s, attention, unseen, true)
+                leaf(s, attention, unseen, true, agents)
             })
             .collect();
         out.push(tab_view_container(
@@ -1666,7 +1689,7 @@ pub fn build_tab_containers(
         unbound.sort_by(|a, b| cmp_ci(&a.label, &b.label));
         let leaves = unbound
             .into_iter()
-            .map(|s| leaf(s, attention, unseen, true))
+            .map(|s| leaf(s, attention, unseen, true, agents))
             .collect();
         out.push(tab_view_container(
             ContainerKind::Unbound,
@@ -1841,7 +1864,7 @@ pub fn display_label(s: &SessionSnapshot) -> String {
         .or_else(cwd_leaf)
         .or_else(|| title().map(str::to_owned))
         .or_else(|| non_empty(Some(&s.label)).map(str::to_owned))
-        .or_else(|| runtime_label(s))
+        .or_else(|| runtime_label(s, &[]))
         .unwrap_or_else(|| s.id.clone())
 }
 
@@ -1929,9 +1952,10 @@ fn home_as_tilde(path: &str, home: Option<&str>) -> String {
 }
 
 /// The runtime tag: the program the pane runs — the session's
-/// `program_name` when the daemon knows one, else the agent for an agent
-/// session — and nothing for a plain shell with no known program.
-pub fn runtime_label(s: &SessionSnapshot) -> Option<String> {
+/// `program_name` when the daemon knows one, else the agent's tag for an
+/// agent session (its id when no descriptor is at hand) — and nothing for a
+/// plain shell with no known program.
+pub fn runtime_label(s: &SessionSnapshot, agents: &[AgentDescriptor]) -> Option<String> {
     s.program_name
         .clone()
         .filter(|p| !p.is_empty())
@@ -1939,8 +1963,28 @@ pub fn runtime_label(s: &SessionSnapshot) -> Option<String> {
             s.agent
                 .as_ref()
                 .filter(|_| s.mode != SessionMode::PlainShell)
-                .map(|agent| agent.0.clone())
+                .map(|agent| {
+                    descriptor_for(agents, agent)
+                        .map_or_else(|| agent.0.clone(), |descriptor| descriptor.tag.clone())
+                })
         })
+}
+
+/// Whether a session's runtime tag wears its agent's accent: the agent's
+/// descriptor asks for one and the tag names the agent itself, so the plain
+/// tag of a shell the agent left behind stays plain.
+#[must_use]
+pub(crate) fn runtime_accent(
+    s: &SessionSnapshot,
+    runtime: Option<&str>,
+    agents: &[AgentDescriptor],
+) -> bool {
+    let Some(agent) = &s.agent else {
+        return false;
+    };
+    descriptor_for(agents, agent).is_some_and(|descriptor| {
+        descriptor.accent == AccentToken::Claude && runtime == Some(descriptor.tag.as_str())
+    })
 }
 
 /// Whether a leaf click may attach the terminal to the session: only
@@ -2088,9 +2132,11 @@ pub fn save_ui_state(dir: &Path, state: &UiState) -> anyhow::Result<()> {
 )]
 pub(crate) mod tests {
     use super::*;
-    use crate::claude_compat::PermissionMode;
+    use crate::claude_compat::{self, PermissionMode};
     use crate::tabs::tests::{pane, tab};
-    use protocol::{AttentionReason, GridNode, SessionMember, SplitDirection};
+    use protocol::{
+        AgentSelection, AttentionReason, GridNode, OptionValue, SessionMember, SplitDirection,
+    };
     use serde_json::json;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
@@ -2225,6 +2271,7 @@ pub(crate) mod tests {
                 repos: &self.repos,
                 workspaces: &self.workspaces,
                 sessions: &self.sessions,
+                agents: &[],
                 container_order: &self.container_order,
                 session_order: &self.session_order,
                 attention: &HashSet::new(),
@@ -2407,6 +2454,7 @@ pub(crate) mod tests {
         let tab_tree = build_tab_containers(
             &tabs,
             &[session("s1")],
+            &[],
             &TabRollups {
                 session_order: &HashMap::new(),
                 attention: &HashSet::new(),
@@ -2648,7 +2696,7 @@ pub(crate) mod tests {
     fn a_leaf_shows_the_snapshots_agent_chips() {
         let mut s = session("id");
         s.agent_chips = vec![deepseek_chip()];
-        let listed = leaf(&s, &HashSet::new(), &HashSet::new(), false);
+        let listed = leaf(&s, &HashSet::new(), &HashSet::new(), false, &[]);
         assert_eq!(listed.chips, [deepseek_chip()]);
         assert_eq!(listed.tooltip, "id\nRuns on DeepSeek");
         assert_eq!(
@@ -2658,7 +2706,7 @@ pub(crate) mod tests {
         );
 
         let sh = shell("sh", Some("D:/src/app"), SessionKind::Standalone);
-        let listed = leaf(&sh, &HashSet::new(), &HashSet::new(), false);
+        let listed = leaf(&sh, &HashSet::new(), &HashSet::new(), false, &[]);
         assert_eq!(listed.chips, [], "a shell shows none");
     }
 
@@ -2666,7 +2714,7 @@ pub(crate) mod tests {
     fn an_anthropic_claude_leaf_has_no_provider() {
         let s = session("id");
         assert_eq!(s.agent_chips, []);
-        let listed = leaf(&s, &HashSet::new(), &HashSet::new(), false);
+        let listed = leaf(&s, &HashSet::new(), &HashSet::new(), false, &[]);
         assert_eq!(listed.chips, []);
         assert_eq!(listed.tooltip, "id", "no line is added");
         assert_eq!(leaf_tooltip(&s), label_tooltip(&s));
@@ -2679,7 +2727,7 @@ pub(crate) mod tests {
             text: "mistral".to_owned(),
             tip: None,
         }];
-        let listed = leaf(&s, &HashSet::new(), &HashSet::new(), false);
+        let listed = leaf(&s, &HashSet::new(), &HashSet::new(), false, &[]);
         assert_eq!(listed.tooltip, "id\nmistral");
     }
 
@@ -2700,11 +2748,11 @@ pub(crate) mod tests {
         let mut agent = session("a");
         agent.agent = Some(claude_compat::claude_id());
         agent.program_name = Some("node".to_owned());
-        assert_eq!(runtime_label(&agent).as_deref(), Some("node"));
+        assert_eq!(runtime_label(&agent, &[]).as_deref(), Some("node"));
         let mut sh = shell("s", None, SessionKind::Standalone);
-        assert_eq!(runtime_label(&sh), None);
+        assert_eq!(runtime_label(&sh, &[]), None);
         sh.program_name = Some("pwsh".to_owned());
-        assert_eq!(runtime_label(&sh).as_deref(), Some("pwsh"));
+        assert_eq!(runtime_label(&sh, &[]).as_deref(), Some("pwsh"));
     }
 
     #[test]
@@ -2713,21 +2761,74 @@ pub(crate) mod tests {
         agent.agent = Some(claude_compat::claude_id());
         agent.program_name = Some("pwsh".to_owned());
         assert_eq!(
-            runtime_label(&agent).as_deref(),
+            runtime_label(&agent, &[claude_descriptor()]).as_deref(),
             Some("pwsh"),
             "the shell Claude left behind"
         );
         agent.program_name = None;
         assert_eq!(
-            runtime_label(&agent).as_deref(),
+            runtime_label(&agent, &[claude_descriptor()]).as_deref(),
             Some("claude"),
             "no known program: the agent"
         );
         let mut sh = shell("s", None, SessionKind::Standalone);
         sh.program_name = Some("pwsh".to_owned());
-        assert_eq!(runtime_label(&sh).as_deref(), Some("pwsh"));
+        assert_eq!(runtime_label(&sh, &[]).as_deref(), Some("pwsh"));
         let programless = shell("s2", None, SessionKind::Standalone);
-        assert_eq!(runtime_label(&programless), None, "a shell with no program");
+        assert_eq!(
+            runtime_label(&programless, &[]),
+            None,
+            "a shell with no program"
+        );
+    }
+
+    #[test]
+    fn runtime_label_falls_back_to_the_descriptor_tag() {
+        let mut agent = session("a");
+        agent.agent = Some(AgentId("test-agent".to_owned()));
+        assert_eq!(
+            runtime_label(&agent, &[test_descriptor()]).as_deref(),
+            Some("test"),
+            "the descriptor's tag names the runtime"
+        );
+        assert_eq!(
+            runtime_label(&agent, &[]).as_deref(),
+            Some("test-agent"),
+            "no descriptor at hand: the agent id"
+        );
+    }
+
+    #[test]
+    fn accent_follows_the_descriptor_not_the_text() {
+        let mut agent = session("a");
+        agent.agent = Some(AgentId("test-agent".to_owned()));
+        let mut accented = test_descriptor();
+        accented.accent = AccentToken::Claude;
+        let listed = leaf(&agent, &HashSet::new(), &HashSet::new(), false, &[accented]);
+        assert!(listed.accent, "a descriptor asking for the accent wears it");
+        assert_eq!(listed.runtime.as_deref(), Some("test"), "the tag names it");
+        let listed = leaf(
+            &agent,
+            &HashSet::new(),
+            &HashSet::new(),
+            false,
+            &[test_descriptor()],
+        );
+        assert!(!listed.accent, "a default accent stays plain");
+        let mut left = session("a");
+        left.agent = Some(claude_compat::claude_id());
+        left.program_name = Some("pwsh".to_owned());
+        let listed = leaf(
+            &left,
+            &HashSet::new(),
+            &HashSet::new(),
+            false,
+            &[claude_descriptor()],
+        );
+        assert!(
+            !listed.accent,
+            "the shell Claude left behind keeps the plain tag"
+        );
     }
 
     fn model_with(sessions: Vec<SessionSnapshot>) -> SidebarModel {
@@ -2822,6 +2923,7 @@ pub(crate) mod tests {
         let tree = build_tab_containers(
             &tabs,
             &[excluded],
+            &[],
             &TabRollups {
                 session_order: &HashMap::new(),
                 attention: &attention,
@@ -3586,14 +3688,14 @@ pub(crate) mod tests {
     fn compact_hover_adds_the_subline_except_on_a_shell() {
         let mut s = in_repo("s1", "r1");
         s.members[0].branch = "feat/x".to_owned();
-        let agent = leaf(&s, &HashSet::new(), &HashSet::new(), false);
+        let agent = leaf(&s, &HashSet::new(), &HashSet::new(), false, &[]);
         assert_eq!(agent.hover(LeafDensity::Comfortable), agent.tooltip);
         assert_eq!(
             agent.hover(LeafDensity::Compact),
             format!("{}\nfeat/x", agent.tooltip)
         );
         let sh = shell("sh", Some("D:/work"), SessionKind::Standalone);
-        let sh = leaf(&sh, &HashSet::new(), &HashSet::new(), false);
+        let sh = leaf(&sh, &HashSet::new(), &HashSet::new(), false, &[]);
         assert_eq!(sh.hover(LeafDensity::Compact), sh.tooltip, "Cwd: says it");
     }
 
@@ -3831,6 +3933,7 @@ pub(crate) mod tests {
         build_tab_containers(
             tabs,
             sessions,
+            &[],
             &TabRollups {
                 session_order: &HashMap::new(),
                 attention: &HashSet::new(),
@@ -3953,6 +4056,7 @@ pub(crate) mod tests {
         let tree = build_tab_containers(
             &tabs,
             &[session("s1"), session("s2")],
+            &[],
             &TabRollups {
                 session_order: &HashMap::new(),
                 attention: &attention,
@@ -4078,6 +4182,30 @@ pub(crate) mod tests {
         }
     }
 
+    /// The registry's Claude descriptor, as the daemon sends it.
+    fn claude_descriptor() -> AgentDescriptor {
+        agent_registry::descriptors()
+            .into_iter()
+            .find(|descriptor| descriptor.id == claude_compat::claude_id())
+            .expect("the registry has Claude")
+    }
+
+    /// The test agent's descriptor: label `Test agent`, tag `test`, no accent.
+    fn test_descriptor() -> AgentDescriptor {
+        agent_api::test_agent::DESCRIPTOR.clone()
+    }
+
+    /// A test-agent selection holding `options`.
+    fn test_selection(options: &[(&str, OptionValue)]) -> AgentSelection {
+        AgentSelection {
+            agent: AgentId("test-agent".to_owned()),
+            options: options
+                .iter()
+                .map(|(key, value)| ((*key).to_owned(), value.clone()))
+                .collect(),
+        }
+    }
+
     fn single_target(branch: &str, base: Option<&str>, use_worktree: bool) -> SpawnTarget {
         SpawnTarget::Single {
             repo_id: "r1".to_owned(),
@@ -4106,8 +4234,8 @@ pub(crate) mod tests {
             ("B".to_owned(), "2".to_owned()),
         ];
         assert_eq!(
-            launch_summary(Some(&config)).as_deref(),
-            Some("Claude · Interactive · new worktree from main · opus · accept edits · 2 env")
+            launch_summary(Some(&config), &[claude_descriptor()]).as_deref(),
+            Some("Claude · Interactive · new worktree from main · Accept edits · opus · 2 env")
         );
     }
 
@@ -4118,7 +4246,7 @@ pub(crate) mod tests {
             SessionMode::Interactive,
         );
         assert_eq!(
-            launch_summary(Some(&config)).as_deref(),
+            launch_summary(Some(&config), &[claude_descriptor()]).as_deref(),
             Some("Claude · Interactive · feat/x"),
             "no base, model, authority or env is invented"
         );
@@ -4134,14 +4262,14 @@ pub(crate) mod tests {
             SessionMode::PlainShell,
         );
         assert_eq!(
-            launch_summary(Some(&config)).as_deref(),
+            launch_summary(Some(&config), &[]).as_deref(),
             Some("Shell · standalone")
         );
     }
 
     #[test]
     fn launch_summary_is_none_without_a_config() {
-        assert_eq!(launch_summary(None), None);
+        assert_eq!(launch_summary(None, &[]), None);
     }
 
     #[test]
@@ -4260,7 +4388,7 @@ pub(crate) mod tests {
         }));
         config.dangerously_skip_permissions = true;
         assert_eq!(
-            launch_summary(Some(&config)).as_deref(),
+            launch_summary(Some(&config), &[claude_descriptor()]).as_deref(),
             Some("Claude · Interactive · feat/x · trusted")
         );
     }
@@ -4276,8 +4404,71 @@ pub(crate) mod tests {
             ..Default::default()
         }));
         assert_eq!(
-            launch_summary(Some(&config)).as_deref(),
-            Some("Claude · Interactive · feat/x · accept edits")
+            launch_summary(Some(&config), &[claude_descriptor()]).as_deref(),
+            Some("Claude · Interactive · feat/x · Accept edits")
+        );
+    }
+
+    #[test]
+    fn launch_summary_names_the_descriptor_label() {
+        let mut config = spawn_config(
+            single_target("feat/x", None, false),
+            SessionMode::Interactive,
+        );
+        config.agent = Some(test_selection(&[]));
+        assert_eq!(
+            launch_summary(Some(&config), &[test_descriptor()]).as_deref(),
+            Some("Test agent · Interactive · feat/x"),
+            "the descriptor's label, not the agent id"
+        );
+    }
+
+    #[test]
+    fn launch_summary_falls_back_to_the_agent_id() {
+        let mut config = spawn_config(
+            single_target("feat/x", None, false),
+            SessionMode::Interactive,
+        );
+        config.agent = Some(test_selection(&[]));
+        assert_eq!(
+            launch_summary(Some(&config), &[]).as_deref(),
+            Some("test-agent · Interactive · feat/x"),
+            "no descriptor at hand: the id"
+        );
+    }
+
+    #[test]
+    fn launch_summary_shows_the_provider_choice_label() {
+        let mut config = spawn_config(
+            single_target("feat/x", None, false),
+            SessionMode::Interactive,
+        );
+        config.agent = Some(claude_compat::selection(&claude_compat::ClaudeChoice {
+            provider: claude_compat::ClaudeProvider::Deepseek,
+            ..Default::default()
+        }));
+        assert_eq!(
+            launch_summary(Some(&config), &[claude_descriptor()]).as_deref(),
+            Some("Claude · Interactive · feat/x · DeepSeek"),
+            "the descriptor's choice label, not the stored value"
+        );
+    }
+
+    #[test]
+    fn launch_summary_lists_non_default_fields_in_descriptor_order() {
+        let mut config = spawn_config(
+            single_target("feat/x", None, false),
+            SessionMode::Interactive,
+        );
+        config.agent = Some(test_selection(&[
+            ("profile", OptionValue::Text("work".to_owned())),
+            ("sandbox", OptionValue::Bool(true)),
+            ("mode", OptionValue::Text("slow".to_owned())),
+        ]));
+        assert_eq!(
+            launch_summary(Some(&config), &[test_descriptor()]).as_deref(),
+            Some("Test agent · Interactive · feat/x · slow · sandbox · work"),
+            "the descriptor's order: the choice, then the toggle, then the text"
         );
     }
 

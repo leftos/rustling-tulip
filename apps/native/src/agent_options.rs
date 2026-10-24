@@ -73,6 +73,15 @@ pub(crate) struct FieldView {
     pub disabled: bool,
 }
 
+/// The descriptor `agents` lists for `id`, when it lists one.
+#[must_use]
+pub(crate) fn descriptor_for<'a>(
+    agents: &'a [AgentDescriptor],
+    id: &AgentId,
+) -> Option<&'a AgentDescriptor> {
+    agents.iter().find(|descriptor| descriptor.id == *id)
+}
+
 impl AgentOptions {
     /// The options of a spawn of `descriptor`'s agent before anything is
     /// chosen: each field's value in `settings` (the agent's Settings page
@@ -217,6 +226,37 @@ impl AgentOptions {
             })
             .collect()
     }
+
+    /// The launch summary's parts for the fields set away from their
+    /// defaults, in the descriptor's order: a choice field its choice's
+    /// label, a text or model field its value, a toggle that is on its own
+    /// label. A kind this build does not know adds nothing, and a trusted
+    /// launch locks its fields back to their defaults.
+    #[must_use]
+    pub(crate) fn summary_fields(&self, trusted: bool) -> Vec<String> {
+        let resolved = self.resolved(trusted);
+        self.descriptor
+            .fields
+            .iter()
+            .filter_map(|field| {
+                let value = resolved.get(&field.id)?;
+                if *value == field.default {
+                    return None;
+                }
+                match (&field.kind, value) {
+                    (FieldKind::Choice { choices, .. }, OptionValue::Text(text)) => choices
+                        .iter()
+                        .find(|choice| choice.value == *text)
+                        .map(|choice| choice.label.clone()),
+                    (FieldKind::Text { .. } | FieldKind::Model { .. }, OptionValue::Text(text)) => {
+                        Some(text.clone())
+                    }
+                    (FieldKind::Toggle, OptionValue::Bool(true)) => Some(field.label.clone()),
+                    _ => None,
+                }
+            })
+            .collect()
+    }
 }
 
 impl crate::RootView {
@@ -240,7 +280,10 @@ impl crate::RootView {
     /// the root view does not fold, and is dropped.
     pub(crate) fn on_agents(&mut self, msg: protocol::DaemonMessage) {
         match msg {
-            protocol::DaemonMessage::Agents { agents } => self.agents = agents,
+            protocol::DaemonMessage::Agents { agents } => {
+                self.sidebar.set_agents(agents.clone());
+                self.agents = agents;
+            }
             protocol::DaemonMessage::AgentSettings { settings } => {
                 self.agent_settings = settings;
                 self.agent_settings_received = true;
@@ -254,6 +297,7 @@ impl crate::RootView {
     /// page's pending change, as a disconnect does.
     pub(crate) fn forget_agents(&mut self) {
         self.agents.clear();
+        self.sidebar.set_agents(Vec::new());
         self.agent_settings.clear();
         self.agent_settings_received = false;
         self.claude_settings_pending = None;

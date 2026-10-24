@@ -252,11 +252,16 @@ fn chip(kind: HeaderChipKind, text: &str, tip: &str) -> HeaderChip {
         kind,
         text: text.to_owned(),
         tip: tip.to_owned(),
+        accent: false,
     }
 }
 
+/// A runtime chip wearing its agent's accent.
 fn runtime(name: &str) -> HeaderChip {
-    chip(HeaderChipKind::Runtime, name, &format!("Running {name}"))
+    HeaderChip {
+        accent: true,
+        ..chip(HeaderChipKind::Runtime, name, &format!("Running {name}"))
+    }
 }
 
 /// The height of `selector`'s element, in logical pixels.
@@ -426,7 +431,7 @@ fn deepseek_chip_follows_the_runtime_chip(cx: &mut TestAppContext) {
     assert_eq!(header_of(&mut h, "p2").chips, [runtime("claude")]);
     assert_eq!(
         header_of(&mut h, "p3").chips,
-        [runtime("pwsh")],
+        [chip(HeaderChipKind::Runtime, "pwsh", "Running pwsh")],
         "a plain shell says no provider, whatever the snapshot reports"
     );
 
@@ -528,7 +533,11 @@ fn repo_and_shell_headers_are_one_row(cx: &mut TestAppContext) {
 
     let header = header_of(&mut h, "p1");
     assert_eq!(header.title, "scratch");
-    assert_eq!(header.chips, [runtime("pwsh")]);
+    assert_eq!(
+        header.chips,
+        [chip(HeaderChipKind::Runtime, "pwsh", "Running pwsh")],
+        "a shell's program tag wears no agent accent"
+    );
     assert_eq!(
         header_of(&mut h, "p2").chips,
         [

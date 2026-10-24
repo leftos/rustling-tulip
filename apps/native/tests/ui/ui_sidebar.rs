@@ -1162,7 +1162,7 @@ fn repo_container_draws_its_icon_tag_count_and_attention_badge(cx: &mut TestAppC
 }
 
 const FULL_SUMMARY: &str =
-    "Claude · Interactive · new worktree from main · opus · accept edits · 2 env";
+    "Claude · Interactive · new worktree from main · Accept edits · opus · 2 env";
 
 fn summary_config(target: SpawnTarget) -> SpawnConfig {
     SpawnConfig {

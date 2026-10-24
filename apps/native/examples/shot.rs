@@ -828,6 +828,9 @@ impl FakeDaemon {
             supported_versions: vec![version],
             features,
         })?;
+        self.send(DaemonMessage::Agents {
+            agents: agent_registry::descriptors(),
+        })?;
         self.send(fixture.repos.clone())?;
         self.send(fixture.workspaces.clone())?;
         self.send(DaemonMessage::Sessions {

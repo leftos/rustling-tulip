@@ -13,7 +13,6 @@ use crate::assets::{
     SIDEBAR_SHELL_ICON, SIDEBAR_TABS_ICON, SIDEBAR_WORKSPACE_ICON,
 };
 use crate::buttons::{ButtonSize, focus_ring, outlined_button, primary_button};
-use crate::claude_compat;
 use crate::drag::{self, DragPayload, Side, SidebarRow};
 use crate::ellipsis::{ellipsized, truncating};
 use crate::fonts::{self, DEFAULT_FAMILY};
@@ -50,7 +49,7 @@ use gpui::{
     StyledText, Svg, TextRun, Window, anchored, canvas, deferred, div, font, point, prelude::*, px,
     svg,
 };
-use protocol::{ClientMessage, SessionMode, SessionStatus};
+use protocol::{ClientMessage, SessionStatus};
 
 pub(crate) const ROW_HEIGHT: f32 = 22.0;
 pub(crate) const ROW_PADDING: f32 = 8.0;
@@ -1966,16 +1965,10 @@ fn paint_busy_excluded(bounds: Bounds<Pixels>, window: &mut Window) {
     }
 }
 
-/// The runtime tag's colour: the agent's, or [`SUBTLE`] for a shell's
-/// program.
+/// The runtime tag's colour: the agent's accent, or [`SUBTLE`] for a shell's
+/// program and a tag that is not the agent itself.
 fn runtime_color(leaf: &Leaf) -> u32 {
-    if leaf.mode == SessionMode::PlainShell {
-        return SUBTLE;
-    }
-    match &leaf.agent {
-        Some(agent) if claude_compat::is_claude(agent) => ACCENT,
-        _ => SUBTLE,
-    }
+    if leaf.accent { ACCENT } else { SUBTLE }
 }
 
 /// A Comfortable leaf's subline, with the chips at its end when they fit
@@ -2203,6 +2196,7 @@ mod tests {
             label: "s1".to_owned(),
             subline: Some("main".to_owned()),
             runtime: Some("claude".to_owned()),
+            accent: false,
             chips: chip
                 .map(|text| SessionChip {
                     text: text.to_owned(),

@@ -1,10 +1,10 @@
 //! The Claude agent's id, provider and permission-mode values as the client
-//! reads and writes them in an [`AgentSelection`]'s options.
+//! reads and writes them in a selection's options.
 //!
 //! Temporary: it holds copies of the Claude plugin's option types until the
 //! client builds its agent controls from the daemon's `Agents` descriptors.
 
-use protocol::{AgentId, AgentSelection, OptionValue, OptionValues};
+use protocol::{AgentId, OptionValue, OptionValues};
 use serde::{Deserialize, Serialize};
 
 /// The option key of Claude's permission mode.
@@ -128,12 +128,6 @@ pub fn is_claude(agent: &AgentId) -> bool {
     agent.0 == "claude"
 }
 
-/// The Claude options `selection` holds; a key it lacks reads as its default.
-#[must_use]
-pub fn from_selection(selection: &AgentSelection) -> ClaudeChoice {
-    from_options(&selection.options)
-}
-
 /// The Claude options in `options`; a key it lacks reads as its default.
 #[must_use]
 pub fn from_options(options: &OptionValues) -> ClaudeChoice {
@@ -170,8 +164,8 @@ pub fn to_options(choice: &ClaudeChoice) -> OptionValues {
 /// A Claude selection running with `choice`.
 #[cfg(test)]
 #[must_use]
-pub fn selection(choice: &ClaudeChoice) -> AgentSelection {
-    AgentSelection {
+pub fn selection(choice: &ClaudeChoice) -> protocol::AgentSelection {
+    protocol::AgentSelection {
         agent: claude_id(),
         options: to_options(choice),
     }
@@ -199,9 +193,8 @@ fn serde_name<T: Serialize>(value: &T) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        APPROVAL_CHOICES, ClaudeChoice, ClaudeProvider, PERMISSION_MODE_KEY, PROVIDER_CHOICES,
-        PROVIDER_KEY, PermissionMode, claude_id, from_options, from_selection, is_claude,
-        permission_mode_value, provider_value, selection,
+        APPROVAL_CHOICES, ClaudeProvider, PERMISSION_MODE_KEY, PROVIDER_CHOICES, PROVIDER_KEY,
+        from_options, permission_mode_value, provider_value,
     };
     use protocol::{OptionValue, OptionValues};
 
@@ -216,23 +209,6 @@ mod tests {
             let options = OptionValues::from([(PROVIDER_KEY.to_owned(), provider_value(provider))]);
             assert_eq!(from_options(&options).provider, provider);
         }
-    }
-
-    #[test]
-    fn to_options_then_from_selection_round_trips() {
-        let choice = ClaudeChoice {
-            provider: ClaudeProvider::Deepseek,
-            permission_mode: Some(PermissionMode::AcceptEdits),
-            model: Some("deepseek-chat".to_owned()),
-        };
-        let chosen = selection(&choice);
-        assert!(is_claude(&chosen.agent));
-        assert_eq!(chosen.agent, claude_id());
-        assert_eq!(
-            chosen.options.get(PROVIDER_KEY),
-            Some(&OptionValue::Text("deepseek".to_owned()))
-        );
-        assert_eq!(from_selection(&chosen), choice);
     }
 
     #[test]

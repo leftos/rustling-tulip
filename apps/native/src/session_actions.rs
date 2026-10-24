@@ -368,7 +368,7 @@ pub(crate) fn abandoned_lines(session: &SessionSnapshot) -> Vec<String> {
 
 /// The banner over an orphan's pane, naming what still runs under it.
 pub(crate) fn orphan_banner_text(session: &SessionSnapshot) -> String {
-    let runtime = runtime_label(session).unwrap_or_else(|| "shell".to_owned());
+    let runtime = runtime_label(session, &[]).unwrap_or_else(|| "shell".to_owned());
     format!(
         "PTY stream lost across daemon restart. The underlying {runtime} process is still \
          running, but live input/output is not available. Use Stop to kill the recorded PID and \
