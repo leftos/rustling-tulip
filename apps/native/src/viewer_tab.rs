@@ -1,15 +1,24 @@
 //! The viewer tabs' state, without the UI: the `OpenViewerTab` requests
 //! this client sent and the tab one of them waits to activate, and per tab
 //! its path, where its file comes from, its load state, the line an open
-//! asked for and its Markdown mode. The root view renders it.
+//! asked for and its Markdown mode, and the file as read. The root view
+//! renders it.
 
+use std::cell::Cell;
 use std::collections::HashMap;
+use std::ops::Range;
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
+
+use gpui::UniformListScrollHandle;
 
 use crate::diff_tab::{PENDING_ACTIVATE_TTL, split_path};
 use crate::file_fetch::is_under;
 use crate::remote_mode::LOCAL_FILES_REASON;
+use crate::syntax::Highlighted;
+use crate::viewer_text::{self, NotText};
 
 /// The toast an `OpenViewerTab` the daemon refused raises.
 pub const OPEN_FAILED_TITLE: &str = "Couldn't open the file";
@@ -32,9 +41,123 @@ pub enum ViewerOrigin {
 pub enum ViewerLoad {
     /// Not read yet.
     Unread,
+    /// Being read on the background executor.
+    Loading,
+    /// Read, and its lines are shown.
+    Loaded,
+    /// Over the viewer's size cap.
+    TooLarge,
+    /// A NUL byte near its start: not text.
+    Binary,
+    /// Neither UTF-8 nor UTF-16 with a byte order mark.
+    NotDecodable,
+    /// Gone, or it could not be read.
+    Missing,
     /// Never read: the file is not available on this connection.
     NotAvailable,
 }
+
+/// The banner of a file over the viewer's size cap.
+pub(crate) const TOO_LARGE_BANNER: &str = "This file is over 2 MiB, too large for the viewer.";
+/// The banner of a binary file.
+pub(crate) const BINARY_BANNER: &str = "This file is binary, so the viewer does not show it.";
+/// The banner of a file that is not UTF-8 or UTF-16 with a byte order mark.
+pub(crate) const NOT_DECODABLE_BANNER: &str =
+    "This file is neither UTF-8 nor UTF-16 with a byte order mark, so the viewer does not show it.";
+/// The banner of a file that is gone or cannot be read.
+pub(crate) const MISSING_BANNER: &str = "The file is gone or cannot be read.";
+
+/// Why a viewer tab's file read shows no text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReadFailure {
+    NotText(NotText),
+    /// Gone, or the read failed.
+    Unreadable,
+}
+
+/// A viewer tab's file as read: its text, each line's byte range in it, and
+/// the language it is coloured as.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct ViewerText {
+    text: String,
+    lines: Vec<Range<usize>>,
+    language: Option<&'static str>,
+}
+
+impl ViewerText {
+    pub(crate) fn new(text: String, language: Option<&'static str>) -> Self {
+        let base = text.as_ptr() as usize;
+        let lines = viewer_text::split_lines(&text)
+            .into_iter()
+            .map(|line| {
+                let start = line.as_ptr() as usize - base;
+                start..start + line.len()
+            })
+            .collect();
+        Self {
+            text,
+            lines,
+            language,
+        }
+    }
+
+    /// The whole text, as decoded.
+    pub(crate) fn text(&self) -> &str {
+        &self.text
+    }
+
+    pub(crate) fn line_count(&self) -> usize {
+        self.lines.len()
+    }
+
+    /// Line `index`, counted from zero, without its terminator.
+    pub(crate) fn line(&self, index: usize) -> &str {
+        self.lines
+            .get(index)
+            .and_then(|range| self.text.get(range.clone()))
+            .unwrap_or_default()
+    }
+
+    /// The language id the text is coloured as, if any.
+    pub(crate) fn language(&self) -> Option<&'static str> {
+        self.language
+    }
+
+    /// The lines joined with `\n`, so the highlighter splits them as the
+    /// viewer does.
+    pub(crate) fn joined(&self) -> String {
+        let mut joined = String::with_capacity(self.text.len());
+        for index in 0..self.lines.len() {
+            if index > 0 {
+                joined.push('\n');
+            }
+            joined.push_str(self.line(index));
+        }
+        joined
+    }
+}
+
+/// Reads and decodes the file at `path` for the viewer.
+///
+/// # Errors
+/// [`ReadFailure::NotText`] for a file over the cap, binary or not
+/// decodable; [`ReadFailure::Unreadable`] when it is gone or the read fails.
+pub(crate) fn read_file(path: &Path) -> Result<ViewerText, ReadFailure> {
+    let unreadable = |err: std::io::Error| {
+        tracing::warn!(path = %path.display(), "the viewer could not read the file: {err}");
+        ReadFailure::Unreadable
+    };
+    if std::fs::metadata(path).map_err(unreadable)?.len() > viewer_text::MAX_VIEW_BYTES {
+        return Err(ReadFailure::NotText(NotText::TooLarge));
+    }
+    let bytes = std::fs::read(path).map_err(unreadable)?;
+    let text = viewer_text::decode(&bytes).map_err(ReadFailure::NotText)?;
+    Ok(ViewerText::new(text, viewer_text::language_for_path(path)))
+}
+
+/// The next read's number; one counter for every tab, so a read of a closed
+/// tab never lands on a later tab of the same id.
+static NEXT_READ: AtomicU64 = AtomicU64::new(1);
 
 /// How a Markdown file shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -167,10 +290,30 @@ pub struct ViewerTab {
     path: String,
     origin: ViewerOrigin,
     load: ViewerLoad,
+    /// The number of the read in flight or landed; `None` before the first.
+    read: Option<u64>,
+    /// The file's text, once read.
+    text: Option<Arc<ViewerText>>,
+    /// The text's syntax classes, once highlighted; `None` leaves it
+    /// uncoloured.
+    spans: Option<Arc<Highlighted>>,
+    /// Set to stop the highlighting run in flight.
+    highlight_cancel: Arc<AtomicBool>,
+    /// The line list's scroll.
+    scroll: UniformListScrollHandle,
+    /// Whether the line target still waits to be scrolled to.
+    jump_pending: Cell<bool>,
     /// The line the last open asked for.
     line_target: Option<u32>,
     /// How a Markdown file shows; `None` for any other file.
     markdown: Option<MarkdownMode>,
+}
+
+impl Drop for ViewerTab {
+    /// A closed tab stops its highlighting.
+    fn drop(&mut self) {
+        self.highlight_cancel.store(true, Ordering::Relaxed);
+    }
 }
 
 impl ViewerTab {
@@ -184,9 +327,127 @@ impl ViewerTab {
             path,
             origin,
             load,
+            read: None,
+            text: None,
+            spans: None,
+            highlight_cancel: Arc::new(AtomicBool::new(false)),
+            scroll: UniformListScrollHandle::new(),
+            jump_pending: Cell::new(false),
             line_target: None,
             markdown,
         }
+    }
+
+    /// Starts reading an unread tab's file: returns the read's number, or
+    /// `None` when the tab is read, being read or never reads.
+    pub(crate) fn begin_read(&mut self) -> Option<u64> {
+        if self.load != ViewerLoad::Unread {
+            return None;
+        }
+        let read = NEXT_READ.fetch_add(1, Ordering::Relaxed);
+        self.read = Some(read);
+        self.load = ViewerLoad::Loading;
+        Some(read)
+    }
+
+    /// An open named this tab again: a tab whose read ended goes back to
+    /// unread, dropping its text, its colours and the highlighting in
+    /// flight, so the file is read anew.
+    pub(crate) fn reread(&mut self) {
+        match self.load {
+            ViewerLoad::Unread | ViewerLoad::Loading | ViewerLoad::NotAvailable => {}
+            ViewerLoad::Loaded
+            | ViewerLoad::TooLarge
+            | ViewerLoad::Binary
+            | ViewerLoad::NotDecodable
+            | ViewerLoad::Missing => {
+                self.highlight_cancel.store(true, Ordering::Relaxed);
+                self.highlight_cancel = Arc::new(AtomicBool::new(false));
+                self.text = None;
+                self.spans = None;
+                self.load = ViewerLoad::Unread;
+            }
+        }
+    }
+
+    /// Read `read` ended with `result`; returns whether it landed, which
+    /// only the tab's read in flight does.
+    pub(crate) fn finish_read(
+        &mut self,
+        read: u64,
+        result: Result<ViewerText, ReadFailure>,
+    ) -> bool {
+        if self.load != ViewerLoad::Loading || self.read != Some(read) {
+            return false;
+        }
+        self.load = match result {
+            Ok(text) => {
+                self.text = Some(Arc::new(text));
+                self.jump_pending.set(self.line_target.is_some());
+                ViewerLoad::Loaded
+            }
+            Err(ReadFailure::NotText(NotText::TooLarge)) => ViewerLoad::TooLarge,
+            Err(ReadFailure::NotText(NotText::Binary)) => ViewerLoad::Binary,
+            Err(ReadFailure::NotText(NotText::NotDecodable)) => ViewerLoad::NotDecodable,
+            Err(ReadFailure::Unreadable) => ViewerLoad::Missing,
+        };
+        true
+    }
+
+    /// The text read, once it landed.
+    pub(crate) fn text(&self) -> Option<&Arc<ViewerText>> {
+        self.text.as_ref()
+    }
+
+    /// How many lines the text read has; none before it landed.
+    #[must_use]
+    pub fn line_count(&self) -> usize {
+        self.text.as_ref().map_or(0, |text| text.line_count())
+    }
+
+    /// The flag that stops this tab's highlighting.
+    pub(crate) fn highlight_cancel(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.highlight_cancel)
+    }
+
+    /// Highlighting of read `read` landed with `spans`; kept while that read
+    /// is still the one shown.
+    pub(crate) fn finish_highlight(&mut self, read: u64, spans: Arc<Highlighted>) -> bool {
+        if self.read != Some(read) || self.load != ViewerLoad::Loaded {
+            return false;
+        }
+        self.spans = Some(spans);
+        true
+    }
+
+    /// The text's syntax classes, once highlighted.
+    pub(crate) fn spans(&self) -> Option<&Arc<Highlighted>> {
+        self.spans.as_ref()
+    }
+
+    /// The line list's scroll.
+    pub(crate) fn scroll(&self) -> &UniformListScrollHandle {
+        &self.scroll
+    }
+
+    /// The row the line target names, counted from zero and clamped to the
+    /// text read; `None` with no target or no line.
+    #[must_use]
+    pub fn jump_row(&self) -> Option<usize> {
+        let line = usize::try_from(self.line_target?).ok()?;
+        let last = self.line_count().checked_sub(1)?;
+        Some(line.saturating_sub(1).min(last))
+    }
+
+    /// The row to scroll to once, when an open asked for a line not yet
+    /// scrolled to.
+    pub(crate) fn take_jump(&self) -> Option<usize> {
+        if !self.jump_pending.get() {
+            return None;
+        }
+        let row = self.jump_row()?;
+        self.jump_pending.set(false);
+        Some(row)
     }
 
     /// The file's path on this PC.
@@ -221,6 +482,7 @@ impl ViewerTab {
     pub(crate) fn set_line_target(&mut self, line: Option<u32>) {
         if line.is_some() {
             self.line_target = line;
+            self.jump_pending.set(true);
         }
     }
 
@@ -230,11 +492,15 @@ impl ViewerTab {
         self.markdown
     }
 
-    /// The line under the file name when the file is not read.
+    /// The banner that says why no text shows, when none can.
     #[must_use]
     pub fn note(&self) -> Option<&'static str> {
         match self.load {
-            ViewerLoad::Unread => None,
+            ViewerLoad::Unread | ViewerLoad::Loading | ViewerLoad::Loaded => None,
+            ViewerLoad::TooLarge => Some(TOO_LARGE_BANNER),
+            ViewerLoad::Binary => Some(BINARY_BANNER),
+            ViewerLoad::NotDecodable => Some(NOT_DECODABLE_BANNER),
+            ViewerLoad::Missing => Some(MISSING_BANNER),
             ViewerLoad::NotAvailable => Some(LOCAL_FILES_REASON),
         }
     }
@@ -258,6 +524,10 @@ fn is_markdown(path: &str) -> bool {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "tests assert preconditions with expect; failure messages aid debugging"
+)]
 mod tests {
     use std::path::Path;
     use std::time::Instant;
@@ -373,6 +643,107 @@ mod tests {
         assert_eq!(remote.load(), ViewerLoad::NotAvailable, "it reads nothing");
         assert_eq!(remote.note(), Some(LOCAL_FILES_REASON));
         assert_eq!(remote.name(), "a.md");
+    }
+
+    fn text(text: &str) -> ViewerText {
+        ViewerText::new(text.to_owned(), None)
+    }
+
+    /// A tab of [`NOTES`] whose file read landed as `text`.
+    fn loaded(text_read: &str) -> ViewerTab {
+        let mut tab = ViewerTab::new(NOTES.to_owned(), ViewerOrigin::Link);
+        let run = tab.begin_read().expect("an unread tab reads");
+        assert!(tab.finish_read(run, Ok(text(text_read))));
+        tab
+    }
+
+    #[test]
+    fn an_unread_tab_loads_once_and_a_stale_result_is_dropped() {
+        let mut closed = ViewerTab::new(NOTES.to_owned(), ViewerOrigin::Link);
+        let stale = closed.begin_read().expect("an unread tab reads");
+        drop(closed);
+
+        let mut tab = ViewerTab::new(NOTES.to_owned(), ViewerOrigin::Link);
+        let run = tab
+            .begin_read()
+            .expect("the tab of the same path reads too");
+        assert_eq!(tab.load(), ViewerLoad::Loading);
+        assert_eq!(tab.begin_read(), None, "a tab reads its file once");
+
+        assert!(
+            !tab.finish_read(stale, Ok(text("old\n"))),
+            "the closed tab's read does not land on the new one"
+        );
+        assert_eq!(tab.load(), ViewerLoad::Loading);
+
+        assert!(tab.finish_read(run, Ok(text("a\nb\n"))));
+        assert_eq!(tab.load(), ViewerLoad::Loaded);
+        assert_eq!(tab.line_count(), 2);
+        assert_eq!(tab.note(), None);
+        assert!(
+            !tab.finish_read(run, Ok(text("again\n"))),
+            "a read lands once"
+        );
+        assert_eq!(tab.line_count(), 2);
+    }
+
+    #[test]
+    fn a_line_target_is_clamped_to_the_file() {
+        let mut tab = loaded("a\nb\nc\n");
+        assert_eq!(tab.jump_row(), None, "no line asked for");
+        tab.set_line_target(Some(2));
+        assert_eq!(tab.jump_row(), Some(1), "line 2 is row 1");
+        tab.set_line_target(Some(99));
+        assert_eq!(tab.jump_row(), Some(2), "past the end is the last line");
+        tab.set_line_target(Some(0));
+        assert_eq!(tab.jump_row(), Some(0), "line 0 is the first line");
+
+        let mut empty = loaded("");
+        empty.set_line_target(Some(5));
+        assert_eq!(empty.jump_row(), None, "an empty file has no line");
+
+        let mut unread = ViewerTab::new(NOTES.to_owned(), ViewerOrigin::Link);
+        unread.set_line_target(Some(5));
+        assert_eq!(unread.jump_row(), None, "nothing is read yet");
+    }
+
+    #[test]
+    fn a_not_available_tab_never_reads() {
+        let mut tab = ViewerTab::new(NOTES.to_owned(), ViewerOrigin::NotAvailable);
+        assert_eq!(tab.begin_read(), None);
+        assert_eq!(tab.load(), ViewerLoad::NotAvailable);
+        assert!(!tab.finish_read(1, Ok(text("x\n"))), "no read lands");
+        assert_eq!(tab.load(), ViewerLoad::NotAvailable);
+        assert_eq!(tab.note(), Some(LOCAL_FILES_REASON));
+    }
+
+    #[test]
+    fn each_not_text_reason_has_its_banner() {
+        for (failure, load, banner) in [
+            (
+                ReadFailure::NotText(NotText::TooLarge),
+                ViewerLoad::TooLarge,
+                TOO_LARGE_BANNER,
+            ),
+            (
+                ReadFailure::NotText(NotText::Binary),
+                ViewerLoad::Binary,
+                BINARY_BANNER,
+            ),
+            (
+                ReadFailure::NotText(NotText::NotDecodable),
+                ViewerLoad::NotDecodable,
+                NOT_DECODABLE_BANNER,
+            ),
+            (ReadFailure::Unreadable, ViewerLoad::Missing, MISSING_BANNER),
+        ] {
+            let mut tab = ViewerTab::new(NOTES.to_owned(), ViewerOrigin::Link);
+            let run = tab.begin_read().expect("an unread tab reads");
+            assert!(tab.finish_read(run, Err(failure)));
+            assert_eq!(tab.load(), load);
+            assert_eq!(tab.note(), Some(banner), "{load:?}");
+            assert_eq!(tab.line_count(), 0, "{load:?} shows no lines");
+        }
     }
 
     #[test]

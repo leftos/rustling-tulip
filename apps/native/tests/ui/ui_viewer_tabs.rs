@@ -1,4 +1,4 @@
-//! Viewer tab specs: the pill, the placeholder body on a remote host, an
+//! Viewer tab specs: the pill, the body's note on a remote host, an
 //! open the daemon answers in either order, a refused open, the merge menu,
 //! undoing the close of a file that is open again, and a target switch.
 
@@ -119,7 +119,9 @@ fn remote() -> Connection {
 #[gpui::test]
 fn a_viewer_tab_shows_its_file_name_on_the_pill(cx: &mut TestAppContext) {
     let dir = TestDir::new();
-    let fixture = with_tabs(&[viewer_tab_named("v1", PATH, "renamed")]);
+    let file = dir.path().join("a.md");
+    std::fs::write(&file, "# A\n").expect("write the viewed file");
+    let fixture = with_tabs(&[viewer_tab_named("v1", &file.to_string_lossy(), "renamed")]);
     let mut h = Harness::with(cx, &dir, &fixture);
     assert_eq!(
         h.root(|root, _| root.tab_pill_label("v1")).as_deref(),
@@ -132,17 +134,14 @@ fn a_viewer_tab_shows_its_file_name_on_the_pill(cx: &mut TestAppContext) {
     );
 
     h.click_on("tab-v1");
+    assert!(drawn(&mut h, "viewer-v1"), "the body names the file");
     assert!(
-        drawn(&mut h, "viewer-placeholder-v1"),
-        "the body names the file"
-    );
-    assert!(
-        !drawn(&mut h, "viewer-note-v1"),
+        !drawn(&mut h, "viewer-banner-v1"),
         "a file of this PC has no note"
     );
     assert_eq!(
         shown(&mut h, "v1"),
-        Some((ViewerOrigin::Link, ViewerLoad::Unread, None, None))
+        Some((ViewerOrigin::Link, ViewerLoad::Loaded, None, None))
     );
 }
 
@@ -165,9 +164,9 @@ fn a_restored_viewer_tab_on_a_remote_host_reads_nothing(cx: &mut TestAppContext)
             None
         ))
     );
-    assert!(drawn(&mut h, "viewer-placeholder-v1"));
+    assert!(drawn(&mut h, "viewer-v1"));
     assert!(
-        drawn(&mut h, "viewer-note-v1"),
+        drawn(&mut h, "viewer-banner-v1"),
         "the remote-host note shows"
     );
 }

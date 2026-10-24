@@ -20,8 +20,14 @@ use support::{Fixture, Harness, Opened, TestDir, session};
 const URL: &str = "https://example.com/docs";
 
 /// `s` alone in pane `p1`, its scrollback answered, the pane focused and
-/// everything sent so far drained.
+/// everything sent so far drained. Text files open externally, as these
+/// specs pin the external route; `ui_viewer` covers the viewer's.
 fn attached<'a>(cx: &'a mut TestAppContext, dir: &TestDir, s: SessionSnapshot) -> Harness<'a> {
+    std::fs::write(
+        dir.path().join("native-ui.json"),
+        json!({ "general": { "open_text_externally": true } }).to_string(),
+    )
+    .expect("seed native-ui.json");
     let id = s.id.clone();
     let mut h = Harness::with(cx, dir, &Fixture::single(s));
     h.answer_scrollback(&id, b"");

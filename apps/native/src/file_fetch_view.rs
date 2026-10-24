@@ -17,7 +17,7 @@ use crate::file_fetch::{
 };
 use crate::links::TerminalLink;
 use crate::notices::{ToastKind, ToastSpec};
-use crate::open::OpenJob;
+use crate::open::{OpenAction, OpenJob};
 use crate::open_view::{COULD_NOT_OPEN, Origin, Route, Then};
 
 /// The title of the toast about a fetch that failed.
@@ -37,7 +37,7 @@ fn failure_detail(entry: &FetchEntry, reason: &str) -> String {
 impl RootView {
     /// Saves fetched files under `root` instead of the data folder.
     pub fn set_remote_files_root(&mut self, root: PathBuf) {
-        self.remote_files_root = Ok(root);
+        self.remote_files_root = Ok(absolute_root(root));
     }
 
     /// Asks the remote host for `request`'s file, saved under this host's
@@ -443,7 +443,8 @@ impl RootView {
         }
     }
 
-    /// Opens the fetched copy at `path` the way `request` asked.
+    /// Opens the fetched copy at `path` the way `request` asked: a text
+    /// file in the viewer at its line, anything else by the `:line` rule.
     fn open_fetched(
         &mut self,
         path: PathBuf,
@@ -451,8 +452,15 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let job = file_fetch::open_job(path, request.line, request.column);
-        self.open_fetched_job(job, Then::Nothing, window, cx);
+        let action = match request.line {
+            Some(line) => OpenAction::VsCode {
+                path,
+                line,
+                column: request.column,
+            },
+            None => OpenAction::DefaultApp(path),
+        };
+        self.open_text_or_external(action, Origin::Fetched, window, cx);
     }
 
     /// Opens `job`, which a fetch started, without the remote host's refusal
@@ -503,6 +511,22 @@ impl RootView {
     }
 }
 
+/// The download root `root` made absolute against the current folder, so
+/// it compares with a viewer tab's absolute path; kept as given, with a
+/// warning, when that fails.
+pub(crate) fn absolute_root(root: PathBuf) -> PathBuf {
+    match std::path::absolute(&root) {
+        Ok(absolute) => absolute,
+        Err(err) => {
+            tracing::warn!(
+                root = %root.display(),
+                "the download root could not be made absolute, so it is used as given: {err}"
+            );
+            root
+        }
+    }
+}
+
 /// Why a fetch was not started, as the toast that says so.
 #[derive(Debug)]
 pub(crate) struct Refusal {
@@ -524,5 +548,27 @@ fn abort_writer(id: &str, entry: &FetchEntry) {
         && writer.unbounded_send(WriteStep::Abort).is_err()
     {
         tracing::debug!(id, "the fetch's writer already ended");
+    }
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "tests assert preconditions with expect; failure messages aid debugging"
+)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::absolute_root;
+
+    #[test]
+    fn a_relative_remote_files_root_is_made_absolute() {
+        let cwd = std::env::current_dir().expect("the test has a current folder");
+        let root = absolute_root(PathBuf::from("downloads"));
+        assert!(root.is_absolute(), "{}", root.display());
+        assert_eq!(root, cwd.join("downloads"));
+
+        let absolute = cwd.join("elsewhere");
+        assert_eq!(absolute_root(absolute.clone()), absolute, "kept as given");
     }
 }

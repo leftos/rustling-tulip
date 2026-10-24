@@ -1088,7 +1088,9 @@ impl RootView {
                 uuid::Uuid::new_v4().as_u64_pair().0
             )),
             run_confirm_origin: open_view::Origin::Link,
-            remote_files_root: daemon_client::remote_files_dir().map_err(|err| format!("{err:#}")),
+            remote_files_root: daemon_client::remote_files_dir()
+                .map(file_fetch_view::absolute_root)
+                .map_err(|err| format!("{err:#}")),
         };
         view.arm_needs_you_repaint(cx);
         view
@@ -1938,7 +1940,7 @@ impl RootView {
     fn after_tabs_change(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.remember_focused_session();
         self.activate_pending_diff_tab();
-        self.reconcile_viewer_tabs();
+        self.reconcile_viewer_tabs(cx);
         self.activate_pending_viewer_tab();
         self.reconcile_panes(window, cx);
         self.reconcile_diff_tabs(window, cx);

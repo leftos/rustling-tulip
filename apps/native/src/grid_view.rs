@@ -872,7 +872,7 @@ impl RootView {
                     .diff_tab_element(&tab.id)
                     .unwrap_or_else(|| muted_note(DIFF_LOADING_TEXT).into_any_element()),
                 TabContent::Viewer { .. } => self
-                    .viewer_tab_element(&tab.id)
+                    .viewer_tab_element(&tab.id, cx)
                     .unwrap_or_else(|| div().into_any_element()),
                 TabContent::Grid { grid } => {
                     let name = format!("tab-grid-{}", tab.id);

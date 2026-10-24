@@ -14,10 +14,34 @@ use crate::notices::{ToastKind, ToastSpec};
 use crate::open::{self, JobOutcome, OpenAction, OpenFailure, OpenJob, Resolution};
 use crate::run_confirm::{RunButton, RunConfirm};
 use crate::session_menu::{backdrop, dialog_button};
-use crate::{MUTED, RootView};
+use crate::viewer_text::{self, NotText, Verdict};
+use crate::{MUTED, RootView, file_fetch};
 
 /// The title of every toast about a link that did not open.
 pub(crate) const COULD_NOT_OPEN: &str = "Couldn't open";
+
+/// The toast of a file over the viewer's size cap, sent out instead.
+const TOO_LARGE_FOR_VIEWER: &str = "Too large for the viewer, opened externally";
+
+/// Where `action`'s file goes, checked off the UI thread: the probe's
+/// decision, and for a file the probe sends to the viewer (so within its
+/// cap) a decode of the whole file, so bytes past the probe's head that are
+/// not text send it out too.
+fn viewer_verdict(action: &OpenAction) -> std::io::Result<Verdict> {
+    let path = match action {
+        OpenAction::VsCode { path, .. } | OpenAction::DefaultApp(path) => path,
+    };
+    let probe = viewer_text::probe_file(path)?;
+    let verdict = viewer_text::decide(false, action, &probe);
+    if !matches!(verdict, Verdict::Viewer { .. }) {
+        return Ok(verdict);
+    }
+    let bytes = std::fs::read(path)?;
+    Ok(match viewer_text::decode(&bytes) {
+        Ok(_) => verdict,
+        Err(not_text) => Verdict::External(Some(not_text)),
+    })
+}
 
 /// What happens once an open went through.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -139,16 +163,8 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         match resolution {
-            Resolution::Open(OpenAction::VsCode { path, line, column }) => {
-                let job = OpenJob::VsCode {
-                    path,
-                    line,
-                    column: column.unwrap_or(1),
-                };
-                self.dispatch_open(job, Then::Nothing, window, cx);
-            }
-            Resolution::Open(OpenAction::DefaultApp(path)) => {
-                self.open_in_default_app(path, Route::LINK, window, cx);
+            Resolution::Open(action) => {
+                self.open_text_or_external(action, Origin::Link, window, cx);
             }
             Resolution::NotFound(err) => {
                 tracing::warn!("no file found for terminal link {first}: {err}");
@@ -180,6 +196,96 @@ impl RootView {
         }
     }
 
+    /// Opens `action`'s file, which came from `origin`: a text file in the
+    /// viewer, checked on a background thread, anything else by today's
+    /// route. With the setting that sends text out on, nothing is checked
+    /// and every file takes today's route.
+    pub(crate) fn open_text_or_external(
+        &mut self,
+        action: OpenAction,
+        origin: Origin,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.sidebar.ui_state().general.open_text_externally {
+            self.open_external(action, origin, window, cx);
+            return;
+        }
+        let probed = action.clone();
+        let verdict = cx
+            .background_executor()
+            .spawn(async move { viewer_verdict(&probed) });
+        cx.spawn_in(window, async move |this, cx| {
+            let verdict = verdict.await;
+            // Fails only when the view is gone, leaving nowhere to open.
+            this.update_in(cx, |root, window, cx| {
+                root.after_probe(action, origin, verdict, window, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn after_probe(
+        &mut self,
+        action: OpenAction,
+        origin: Origin,
+        verdict: std::io::Result<Verdict>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let verdict = match verdict {
+            Ok(verdict) => verdict,
+            Err(err) => {
+                tracing::warn!(?action, "could not check the file for the viewer: {err}");
+                self.open_external(action, origin, window, cx);
+                return;
+            }
+        };
+        match verdict {
+            Verdict::Viewer { path, line } => self.open_viewer(&path.to_string_lossy(), line),
+            Verdict::External(reason) => {
+                tracing::debug!(?action, ?reason, "the file opens outside the viewer");
+                if reason == Some(NotText::TooLarge) {
+                    self.push_toast(ToastKind::Info, TOO_LARGE_FOR_VIEWER, None, cx);
+                }
+                self.open_external(action, origin, window, cx);
+            }
+        }
+    }
+
+    /// Opens `action` the way a file from `origin` opened before the
+    /// viewer: a line in VS Code, otherwise the default app.
+    fn open_external(
+        &mut self,
+        action: OpenAction,
+        origin: Origin,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match (origin, action) {
+            (Origin::Link, OpenAction::VsCode { path, line, column }) => {
+                let job = OpenJob::VsCode {
+                    path,
+                    line,
+                    column: column.unwrap_or(1),
+                };
+                self.dispatch_open(job, Then::Nothing, window, cx);
+            }
+            (Origin::Link, OpenAction::DefaultApp(path)) => {
+                self.open_in_default_app(path, Route::LINK, window, cx);
+            }
+            (Origin::Fetched, OpenAction::VsCode { path, line, column }) => {
+                let job = file_fetch::open_job(path, Some(line), column);
+                self.open_fetched_job(job, Then::Nothing, window, cx);
+            }
+            (Origin::Fetched, OpenAction::DefaultApp(path)) => {
+                let job = file_fetch::open_job(path, None, None);
+                self.open_fetched_job(job, Then::Nothing, window, cx);
+            }
+        }
+    }
+
     /// Sends `path` to its default app; a file that runs code comes back
     /// from the background check unopened, and the user is asked first.
     fn open_in_default_app(
@@ -199,7 +305,13 @@ impl RootView {
     /// Opens `job` by the route its origin takes: a link's through the
     /// remote host's refusal, a fetched file's through the check that it
     /// is one.
-    fn open_by(&mut self, job: OpenJob, route: Route, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_by(
+        &mut self,
+        job: OpenJob,
+        route: Route,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match route.origin {
             Origin::Link => self.dispatch_open(job, route.then, window, cx),
             Origin::Fetched => self.open_fetched_job(job, route.then, window, cx),

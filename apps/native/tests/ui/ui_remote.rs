@@ -511,6 +511,12 @@ fn path_link_fetches_instead_of_opening_on_remote(cx: &mut TestAppContext) {
 fn run_confirm_opened_on_local_opens_nothing_after_switch_to_remote(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     write_file(dir.path(), "tools/run.bat");
+    // The script opens externally, as this spec pins that route.
+    std::fs::write(
+        dir.path().join("native-ui.json"),
+        r#"{ "general": { "open_text_externally": true } }"#,
+    )
+    .expect("seed native-ui.json");
     let cwd = dir.path().to_string_lossy().into_owned();
     let mut h = attached(cx, &dir, session("s1").shell(&cwd).build());
     h.pty("s1", b"run tools/run.bat");

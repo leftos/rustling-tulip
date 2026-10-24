@@ -8,7 +8,8 @@
 //!
 //! Views: `main` (the default: the sidebar and a split tab), `main-compact`
 //! (the same window with the sidebar's leaves one line each),
-//! `source-control`, `diff`, `settings` and `spawn`. The PNG goes to
+//! `source-control`, `diff`, `settings`, `spawn` and `viewer` (a viewer tab
+//! over a small Rust file, scrolled to a line). The PNG goes to
 //! `.tmp/shots/<view>.png` under the repo root unless `<out.png>` is given;
 //! the window's layout file is kept beside it in `.ui/` and cleared on every
 //! run.
@@ -39,7 +40,8 @@ use rustling_tulip_native::offscreen::show_cloaked;
 use rustling_tulip_native::{
     Activity, Assets, Clock, Connection, FileFilter, FilePicker, FolderPicker, HandshakeInfo,
     NATIVE_PROTOCOL_VERSIONS, NetCommand, NetEvent, Notifier, NotifyState, OpenFailure, Opener,
-    RAIL_ITEM_HEIGHT, RAIL_WIDTH, RootDeps, RootView, bind_keys, remote_access::Autostart,
+    RAIL_ITEM_HEIGHT, RAIL_WIDTH, RootDeps, RootView, ViewerLoad, bind_keys,
+    remote_access::Autostart,
 };
 use serde_json::{Value, json};
 
@@ -75,6 +77,10 @@ const RECOVER_TREE: &str = r"D:\worktrees\wt.feat-recover-keys\rustling-tulip";
 const PETAL_BRANCH: &str = "feat/petal-footer";
 const DIFF_TAB: &str = "t-diff";
 const DIFF_PATH: &str = "apps/native/src/footer.rs";
+const VIEWER_TAB: &str = "t-viewer";
+/// The file the `viewer` shot views, and the line its open asks for.
+const VIEWER_FILE: &str = "footer.rs";
+const VIEWER_LINE: u32 = 30;
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -108,10 +114,11 @@ enum View {
     Settings,
     SettingsClaude,
     Spawn,
+    Viewer,
 }
 
 impl View {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 8] = [
         Self::Main,
         Self::MainCompact,
         Self::SourceControl,
@@ -119,6 +126,7 @@ impl View {
         Self::Settings,
         Self::SettingsClaude,
         Self::Spawn,
+        Self::Viewer,
     ];
 
     fn name(self) -> &'static str {
@@ -130,6 +138,7 @@ impl View {
             Self::Settings => "settings",
             Self::SettingsClaude => "settings-claude",
             Self::Spawn => "spawn",
+            Self::Viewer => "viewer",
         }
     }
 
@@ -154,6 +163,12 @@ impl View {
             Self::Settings => root.settings_open(),
             Self::SettingsClaude => root.settings_open() && root.settings_tab() == "Claude",
             Self::Spawn => root.spawn_dialog_open(),
+            Self::Viewer => {
+                root.active_tab_id() == Some(VIEWER_TAB)
+                    && root
+                        .viewer_tab(VIEWER_TAB)
+                        .is_some_and(|tab| tab.load() == ViewerLoad::Loaded)
+            }
         }
     }
 }
@@ -197,12 +212,22 @@ impl Shot {
         {
             return Err(err).with_context(|| format!("clearing {}", saved.display()));
         }
+        if self.view == View::Viewer {
+            let sample = self.viewer_sample();
+            return std::fs::write(&sample, FOOTER_OLD)
+                .with_context(|| format!("writing {}", sample.display()));
+        }
         if self.view != View::MainCompact {
             return Ok(());
         }
         let layout = serde_json::to_vec_pretty(&compact_ui_state())
             .with_context(|| format!("serializing the layout for {}", saved.display()))?;
         std::fs::write(&saved, layout).with_context(|| format!("writing {}", saved.display()))
+    }
+
+    /// The file the `viewer` shot's tab views, beside the layout file.
+    fn viewer_sample(&self) -> PathBuf {
+        self.ui_dir.join(VIEWER_FILE)
     }
 }
 
@@ -315,9 +340,10 @@ async fn drive_and_capture(
     failure: &Mutex<Option<anyhow::Error>>,
 ) -> Result<()> {
     let view = shot.view;
+    let sample = shot.viewer_sample();
     cx.background_executor().timer(LOAD_WAIT).await;
     cx.update_window(handle.into(), |_, window, cx| {
-        drive(view, address, window, cx)
+        drive(view, address, &sample, window, cx)
     })??;
     cx.background_executor().timer(DRIVE_WAIT).await;
     let reached = handle.update(cx, |root, _, _| view.reached(root))?;
@@ -346,8 +372,16 @@ async fn drive_and_capture(
 }
 
 /// Sends the input that opens `view`: a keystroke dispatched in the window,
-/// or, where no key opens it, a click posted to the window at `address`.
-fn drive(view: View, address: usize, window: &mut Window, cx: &mut App) -> Result<()> {
+/// or, where no key opens it, a click posted to the window at `address`;
+/// the `viewer` view opens a viewer tab of `sample` at a line, as a link
+/// does.
+fn drive(
+    view: View,
+    address: usize,
+    sample: &Path,
+    window: &mut Window,
+    cx: &mut App,
+) -> Result<()> {
     match view {
         View::Main | View::MainCompact => Ok(()),
         View::SourceControl => {
@@ -371,6 +405,15 @@ fn drive(view: View, address: usize, window: &mut Window, cx: &mut App) -> Resul
             Ok(())
         }
         View::Spawn => press("ctrl-shift-n", window, cx),
+        View::Viewer => {
+            let root = window
+                .root::<RootView>()
+                .flatten()
+                .context("the window has no root view")?;
+            let path = sample.to_string_lossy().into_owned();
+            root.update(cx, |root, _| root.open_viewer(&path, Some(VIEWER_LINE)));
+            Ok(())
+        }
     }
 }
 
@@ -833,6 +876,7 @@ impl FakeDaemon {
             ))?,
             ClientMessage::GetFileSnapshot { .. } => file_snapshot(msg)?,
             ClientMessage::ListBranches { repo_id } => parse_message(branches(repo_id))?,
+            ClientMessage::OpenViewerTab { id, path } => return viewer_opened(id, path),
             ClientMessage::SuggestBranchName { target, request_id } => {
                 DaemonMessage::BranchNameSuggestion {
                     target: target.clone(),
@@ -966,6 +1010,25 @@ fn file_snapshot(msg: &ClientMessage) -> Result<DaemonMessage> {
         unavailable: None,
         worktree_path: worktree_path.clone(),
     })
+}
+
+/// The daemon's answer to the `viewer` shot's `OpenViewerTab` `id` of
+/// `path`: the new tab, then the open's reply naming it.
+fn viewer_opened(id: &str, path: &str) -> Result<Vec<DaemonMessage>> {
+    let tab = serde_json::from_value(json!({
+        "id": VIEWER_TAB,
+        "name": VIEWER_FILE,
+        "content": { "kind": "viewer", "path": path },
+        "created_at": "2026-01-01T00:00:00Z",
+    }))
+    .context("the viewer tab fixture")?;
+    Ok(vec![
+        DaemonMessage::TabUpdated { tab },
+        DaemonMessage::ViewerTabOpened {
+            id: id.to_owned(),
+            tab_id: VIEWER_TAB.to_owned(),
+        },
+    ])
 }
 
 /// The screen a session's scrollback replays.

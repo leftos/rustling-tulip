@@ -2,14 +2,6 @@
 //! the viewer or the app the OS picks. Plain Rust: no GPUI, and no I/O
 //! besides [`probe_file`].
 
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the open path wires these in the step that adds the viewer tab"
-    )
-)]
-
 use crate::open::OpenAction;
 
 use std::io::Read;
@@ -231,18 +223,14 @@ pub(crate) fn language_for_path(path: &Path) -> Option<&'static str> {
 /// Where an opened file goes: the viewer, or out to an external app.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Verdict {
-    /// The built-in viewer, at the line and column the link named.
-    Viewer {
-        path: PathBuf,
-        line: Option<u32>,
-        column: Option<u32>,
-    },
+    /// The built-in viewer, at the line the link named.
+    Viewer { path: PathBuf, line: Option<u32> },
     /// The external app; why the file is not text, when it is not.
     External(Option<NotText>),
 }
 
 /// Where `action` sends `probe`'s file: the external app when the setting
-/// is on or the file is not text, else the viewer at its line and column.
+/// is on or the file is not text, else the viewer at its line.
 #[must_use]
 pub(crate) fn decide(open_text_externally: bool, action: &OpenAction, probe: &Probe) -> Verdict {
     if open_text_externally {
@@ -251,11 +239,11 @@ pub(crate) fn decide(open_text_externally: bool, action: &OpenAction, probe: &Pr
     if let Err(not_text) = check(probe) {
         return Verdict::External(Some(not_text));
     }
-    let (path, line, column) = match action {
-        OpenAction::VsCode { path, line, column } => (path.clone(), Some(*line), *column),
-        OpenAction::DefaultApp(path) => (path.clone(), None, None),
+    let (path, line) = match action {
+        OpenAction::VsCode { path, line, .. } => (path.clone(), Some(*line)),
+        OpenAction::DefaultApp(path) => (path.clone(), None),
     };
-    Verdict::Viewer { path, line, column }
+    Verdict::Viewer { path, line }
 }
 
 #[cfg(test)]
@@ -306,7 +294,6 @@ mod tests {
             Verdict::Viewer {
                 path: std::path::PathBuf::from("C:/src/main.rs"),
                 line: Some(7),
-                column: Some(3),
             }
         );
     }
@@ -339,7 +326,6 @@ mod tests {
             Verdict::Viewer {
                 path: std::path::PathBuf::from("C:/src/cafe.txt"),
                 line: None,
-                column: None,
             }
         );
     }

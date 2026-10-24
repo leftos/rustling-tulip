@@ -40,6 +40,13 @@ fn remote_fixture<'a>(
     dir: &TestDir,
     fixture: &Fixture,
 ) -> (Harness<'a>, PathBuf) {
+    // Text files open externally, as these specs pin the external route;
+    // `ui_viewer` covers the viewer's.
+    std::fs::write(
+        dir.path().join("native-ui.json"),
+        r#"{ "general": { "open_text_externally": true } }"#,
+    )
+    .expect("seed native-ui.json");
     let mut h = Harness::on_target(cx, dir, remote_target(), fixture);
     let root = dir.path().join("remote-files");
     let set = root.clone();

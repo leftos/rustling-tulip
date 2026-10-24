@@ -15,7 +15,7 @@ The daemon and protocol half (FT.1), the native download sink (FT.2) and the lin
 ## Rulings
 
 - **Client:** native client only.
-- **Viewing:** the remote client saves the file to a per-host download folder, then opens it the way a local link click does: `code -g path:line:col` when the link has a line, otherwise the OS default handler.
+- **Viewing:** the remote client saves the file to a per-host download folder, then opens it the way a local link click does: in the built-in text viewer when the file is viewable, else `code -g path:line:col` when the link has a line, otherwise the OS default handler.
 - **Scope:** only paths inside a registered repo root or one of its session worktrees. The daemon canonicalizes the path and rejects `..` segments, absolute paths that land elsewhere, and symlinks that point outside.
 - **Size:** no cap. The file streams in chunks so PTY traffic on the same socket keeps flowing.
 

@@ -87,12 +87,18 @@ fn on_remote<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> (Harness<'a>, Pat
     on_remote_with(cx, dir, session("s1").worktree("r1").build())
 }
 
-/// [`on_remote`] with `s` alone in pane `p1`.
+/// [`on_remote`] with `s` alone in pane `p1`. Text files open externally,
+/// as these specs pin the external route; `ui_viewer` covers the viewer's.
 fn on_remote_with<'a>(
     cx: &'a mut TestAppContext,
     dir: &TestDir,
     s: SessionSnapshot,
 ) -> (Harness<'a>, PathBuf) {
+    fs::write(
+        dir.path().join("native-ui.json"),
+        serde_json::json!({ "general": { "open_text_externally": true } }).to_string(),
+    )
+    .expect("seed native-ui.json");
     let mut h = Harness::on_target(cx, dir, remote_target(), &Fixture::single(s));
     let root = dir.path().join("remote-files");
     let set = root.clone();
