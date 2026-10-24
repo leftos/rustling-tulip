@@ -18,6 +18,12 @@ pub fn plugin(agent: Agent) -> &'static dyn AgentPlugin {
     }
 }
 
+/// The agent a session that names none runs: the first registered one.
+#[must_use]
+pub fn default_agent() -> Agent {
+    Agent::all()[0]
+}
+
 /// Every registered plugin.
 #[must_use]
 pub fn all() -> &'static [&'static dyn AgentPlugin] {
@@ -33,6 +39,15 @@ mod tests {
         assert_eq!(
             plugin(Agent::Claude).program_env_var(),
             "RUSTLING_TULIP_CLAUDE"
+        );
+    }
+
+    #[test]
+    fn default_agent_is_the_first_registered() {
+        assert_eq!(default_agent(), Agent::all()[0]);
+        assert_eq!(
+            plugin(default_agent()).program_env_var(),
+            all()[0].program_env_var()
         );
     }
 

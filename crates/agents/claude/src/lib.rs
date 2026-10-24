@@ -8,6 +8,7 @@
 //! [`HeadlessEvent`]s.
 
 mod hooks;
+mod import;
 mod providers;
 mod rules;
 mod transcripts;
@@ -17,8 +18,9 @@ pub use transcripts::encode_project_dir;
 
 use agent_api::{
     Agent, AgentError, ConversationPlan, ConversationQuery, EnvPlan, FoundConversation,
-    HeadlessEvent, HookPlan, HookReport, HookShim, KeyLookup, ReadySignal, Refusal, ResolvedRows,
-    ScreenRules, SpawnCheck, SpawnContext, workspace_prelude,
+    HeadlessEvent, HookPlan, HookReport, HookShim, ImportedRun, KeyLookup, ReadySignal,
+    RecoveredRun, Refusal, ResolvedRows, ScreenRules, SpawnCheck, SpawnContext, TracerRun,
+    workspace_prelude,
 };
 use protocol::{
     AccentToken, AgentCaps, AgentDescriptor, AgentId, AgentTexts, ChipRule, Choice, ChoiceStyle,
@@ -188,6 +190,31 @@ impl Agent for ClaudePlugin {
         &["ANTHROPIC_API_KEY", "CLAUDE_CONFIG_DIR"]
     }
 
+    /// `claude`, and `node`, which an npm-installed `claude` runs as.
+    fn liveness_tokens(&self) -> &'static [&'static str] {
+        &["claude", "node"]
+    }
+
+    /// The recorded options, else the default ones. `run.trusted` is not
+    /// read: a trusted recovery carries `--dangerously-skip-permissions` on
+    /// its request, and the recorded permission mode stays as it was.
+    fn recovery_options(&self, run: &RecoveredRun<'_>) -> ClaudeOptions {
+        run.recorded_as().unwrap_or_default()
+    }
+
+    /// Revision 2 reads the provider from the run's `--model`.
+    fn import_rev(&self) -> u32 {
+        import::IMPORT_REV
+    }
+
+    fn import_tracer_run(&self, run: &TracerRun<'_>) -> Option<ImportedRun<ClaudeOptions>> {
+        import::import_tracer_run(run)
+    }
+
+    fn upgrade_import(&self, from_rev: u32, options: &ClaudeOptions) -> Option<ClaudeOptions> {
+        import::upgrade_import(from_rev, options)
+    }
+
     /// Every flag the interactive and headless argv carry, plus the other
     /// ways of picking a conversation, which would break the session's
     /// conversation-id tracking.
@@ -347,12 +374,22 @@ impl Agent for ClaudePlugin {
     /// the config dir can hold spaces; a path holding a double quote cannot be
     /// quoted for cmd and POSIX shells at once, so it, like a spawn that wrote
     /// no file, resumes without the settings.
+    ///
+    /// A shell would type `claude` without a provider's routing, running on
+    /// Anthropic, so a session on another provider is refused, naming the
+    /// provider when this daemon knows it.
     fn shell_resume(
         &self,
-        _opts: &ClaudeOptions,
+        opts: &ClaudeOptions,
         conversation_id: &str,
         hook_files: &[PathBuf],
     ) -> Result<Option<String>, AgentError> {
+        if !opts.provider.is_anthropic() {
+            return Err(AgentError::new(match display_name(opts.provider) {
+                Some(name) => format!("{name} sessions recover as Claude."),
+                None => "Sessions on this Claude provider recover as Claude.".to_owned(),
+            }));
+        }
         let settings = hook_files
             .first()
             .map(|path| path.to_string_lossy())
@@ -519,6 +556,7 @@ struct UsageInfo {
 )]
 mod tests {
     use super::*;
+    use protocol::OptionValues;
 
     fn members(paths: &[&str]) -> Vec<SessionMember> {
         paths
@@ -612,6 +650,105 @@ mod tests {
             shell_resume(&[path]).as_deref(),
             Some("claude --resume abc-123")
         );
+    }
+
+    fn recovered(recorded: Option<&OptionValues>, trusted: bool) -> ClaudeOptions {
+        ClaudePlugin.recovery_options(&RecoveredRun { recorded, trusted })
+    }
+
+    fn claude_values(provider: &str, mode: OptionValue, model: OptionValue) -> OptionValues {
+        OptionValues::from([
+            (
+                "provider".to_string(),
+                OptionValue::Text(provider.to_string()),
+            ),
+            ("permission_mode".to_string(), mode),
+            ("model".to_string(), model),
+        ])
+    }
+
+    #[test]
+    fn recovery_replays_recorded_provider_permission_and_model() {
+        let recorded = claude_values(
+            "deepseek",
+            OptionValue::Text("plan".to_string()),
+            OptionValue::Text("deepseek-pro".to_string()),
+        );
+        assert_eq!(
+            recovered(Some(&recorded), false),
+            ClaudeOptions {
+                permission_mode: Some(PermissionMode::Plan),
+                provider: ClaudeProvider::Deepseek,
+                model: Some("deepseek-pro".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn recovery_without_a_record_is_the_default_options() {
+        assert_eq!(recovered(None, false), ClaudeOptions::default());
+        assert_eq!(recovered(None, true), ClaudeOptions::default());
+    }
+
+    #[test]
+    fn recovery_trusted_leaves_the_recorded_permission_mode() {
+        let recorded = claude_values(
+            "anthropic",
+            OptionValue::Text("accept_edits".to_string()),
+            OptionValue::Null,
+        );
+        let trusted = recovered(Some(&recorded), true);
+        assert_eq!(trusted, recovered(Some(&recorded), false));
+        assert_eq!(trusted.permission_mode, Some(PermissionMode::AcceptEdits));
+        let unset = claude_values("anthropic", OptionValue::Null, OptionValue::Null);
+        assert_eq!(recovered(Some(&unset), true).permission_mode, None);
+    }
+
+    fn on_provider(provider: ClaudeProvider) -> ClaudeOptions {
+        ClaudeOptions {
+            provider,
+            ..ClaudeOptions::default()
+        }
+    }
+
+    #[test]
+    fn shell_resume_refuses_deepseek() {
+        let err = ClaudePlugin
+            .shell_resume(&on_provider(ClaudeProvider::Deepseek), "abc-123", &[])
+            .expect_err("a DeepSeek entry does not resume in a shell");
+        assert_eq!(err.to_string(), "DeepSeek sessions recover as Claude.");
+    }
+
+    #[test]
+    fn shell_resume_refuses_an_unknown_provider() {
+        let err = ClaudePlugin
+            .shell_resume(&on_provider(ClaudeProvider::Unknown), "abc-123", &[])
+            .expect_err("an unknown provider does not resume in a shell");
+        assert_eq!(
+            err.to_string(),
+            "Sessions on this Claude provider recover as Claude."
+        );
+    }
+
+    #[test]
+    fn shell_resume_refusal_does_not_depend_on_the_id() {
+        let files = [std::path::PathBuf::from(HOOK_SETTINGS)];
+        for provider in [ClaudeProvider::Deepseek, ClaudeProvider::Unknown] {
+            let opts = on_provider(provider);
+            let refusals: Vec<Result<Option<String>, AgentError>> = ["abc-123", "", RESUME_ID]
+                .iter()
+                .flat_map(|id| {
+                    [
+                        ClaudePlugin.shell_resume(&opts, id, &[]),
+                        ClaudePlugin.shell_resume(&opts, id, &files),
+                    ]
+                })
+                .collect();
+            assert!(refusals[0].is_err(), "{provider:?}");
+            for refusal in &refusals {
+                assert_eq!(refusal, &refusals[0], "{provider:?}");
+            }
+        }
     }
 
     #[test]

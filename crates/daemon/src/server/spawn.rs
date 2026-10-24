@@ -2823,6 +2823,14 @@ mod tests {
             "scripted-resume"
         }
 
+        fn liveness_tokens(&self) -> &'static [&'static str] {
+            &[]
+        }
+
+        fn recovery_options(&self, run: &agent_api::RecoveredRun<'_>) -> serde_json::Value {
+            run.recorded_as().unwrap_or_default()
+        }
+
         fn check_request(
             &self,
             _opts: &serde_json::Value,

@@ -1,7 +1,10 @@
 //! The check every agent crate runs in one test, so an agent's option schema
 //! and its typed options cannot drift apart.
 
-use crate::{Agent, LineMatcher, ScreenRegion, ScreenVerdict, decode_options, validate};
+use crate::{
+    Agent, AgentPlugin, LineMatcher, RecoveredRun, ScreenRegion, ScreenVerdict, decode_options,
+    validate,
+};
 use protocol::{AgentDescriptor, FieldKind, OptionValue, OptionValues};
 
 /// Check that `agent`'s option schema and its [`Agent::Options`] agree.
@@ -11,6 +14,8 @@ use protocol::{AgentDescriptor, FieldKind, OptionValue, OptionValues};
 /// against the descriptor, decoded into the agent's options, serialized back
 /// into option values, and validated again; a shell resume command the
 /// agent answers for those options must name the conversation it resumes.
+/// A recovery with nothing recorded must succeed, and the adapter's import
+/// revision must be the agent's.
 ///
 /// # Panics
 ///
@@ -36,6 +41,30 @@ pub fn check<A: Agent>(agent: &A) {
         check_shell_resume(agent, &case, &options);
     }
     check_screen_rules(agent);
+    check_recovery_and_import(agent);
+}
+
+/// A recovery with nothing recorded yields option values, trusted or not,
+/// and the adapter reports the agent's own import revision.
+#[expect(
+    clippy::panic,
+    reason = "a conformance failure must fail the calling test"
+)]
+fn check_recovery_and_import<A: Agent>(agent: &A) {
+    for trusted in [false, true] {
+        let run = RecoveredRun {
+            recorded: None,
+            trusted,
+        };
+        if let Err(err) = AgentPlugin::recovery_options(agent, &run) {
+            panic!("a recovery with nothing recorded (trusted {trusted}) fails: {err}");
+        }
+    }
+    assert_eq!(
+        AgentPlugin::import_rev(agent),
+        Agent::import_rev(agent),
+        "the adapter's import revision differs from the agent's"
+    );
 }
 
 /// Every screen rule a plugin hands the daemon is named, ordered and readable:

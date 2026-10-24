@@ -3,7 +3,7 @@
 
 use crate::{
     Agent, ConversationPlan, ConversationQuery, EnvPlan, FoundConversation, HookReport, KeyLookup,
-    PendingUpdate, Refusal, ResolvedRows, SpawnCheck, SpawnContext,
+    PendingUpdate, RecoveredRun, Refusal, ResolvedRows, SpawnCheck, SpawnContext,
 };
 use protocol::{
     AccentToken, AgentCaps, AgentDescriptor, AgentId, AgentTexts, Choice, ChoiceStyle, FieldKind,
@@ -152,6 +152,15 @@ impl Agent for TestAgent {
 
     fn default_program(&self) -> &'static str {
         "test-agent"
+    }
+
+    fn liveness_tokens(&self) -> &'static [&'static str] {
+        &[]
+    }
+
+    /// The recorded options, else the default ones.
+    fn recovery_options(&self, run: &RecoveredRun<'_>) -> TestOptions {
+        run.recorded_as().unwrap_or_default()
     }
 
     fn check_request(&self, _opts: &TestOptions, _req: &SpawnCheck<'_>) -> Result<(), Refusal> {

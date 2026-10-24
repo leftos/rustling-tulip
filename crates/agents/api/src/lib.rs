@@ -368,6 +368,57 @@ impl fmt::Debug for EnvPlan {
     }
 }
 
+/// What [`Agent::recovery_options`] is asked: the options a session recorded
+/// when it ran, if the app has them, and whether it ran trusted.
+#[derive(Debug, Clone, Copy)]
+pub struct RecoveredRun<'a> {
+    /// The options the session ran with, as the app recorded them; `None`
+    /// when it recorded none.
+    pub recorded: Option<&'a OptionValues>,
+    /// Whether the session ran trusted. The app carries the trusted flag on
+    /// the recovery's request itself; Claude's options do not read it.
+    pub trusted: bool,
+}
+
+impl RecoveredRun<'_> {
+    /// The recorded options as `O`, or `None` when none were recorded. The
+    /// [`AgentPlugin`] adapter refuses recorded options that do not decode
+    /// before an agent sees them, so a typed agent reads a decode failure
+    /// as none.
+    #[must_use]
+    pub fn recorded_as<O: DeserializeOwned>(&self) -> Option<O> {
+        let values = self.recorded?;
+        serde_json::to_value(values)
+            .and_then(serde_json::from_value)
+            .ok()
+    }
+}
+
+/// One run a tracer log describes, as [`Agent::import_tracer_run`] reads it:
+/// the program the tracer started, its arguments and its working folder.
+#[derive(Debug, Clone, Copy)]
+pub struct TracerRun<'a> {
+    /// The program, as the log names it (a bare name or a path).
+    pub program: &'a str,
+    /// Its arguments, in order.
+    pub args: &'a [String],
+    /// The folder it ran in.
+    pub cwd: &'a str,
+}
+
+/// A run an agent recognised as its own in a tracer log.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportedRun<O> {
+    /// The program name the imported session is listed under.
+    pub program_name: String,
+    /// The folders the run had on top of its working folder.
+    pub extra_dirs: Vec<String>,
+    /// The options the run's arguments show.
+    pub options: O,
+    /// Whether the run was trusted.
+    pub trusted: bool,
+}
+
 /// Implemented once per supported CLI, over the agent's own typed options.
 /// The daemon never calls it directly: it reaches every agent through the
 /// [`AgentPlugin`] this crate implements for it, so the daemon doesn't need
@@ -401,6 +452,33 @@ pub trait Agent: Send + Sync + 'static {
     /// when the launch command is saved.
     fn reserved_args(&self) -> &'static [&'static str] {
         &[]
+    }
+
+    /// The process names a session of this agent may run as, matched against
+    /// a live process when a sidecar names no program.
+    fn liveness_tokens(&self) -> &'static [&'static str];
+
+    /// The options a recovered run spawns with, from what `run` recorded.
+    fn recovery_options(&self, run: &RecoveredRun<'_>) -> Self::Options;
+
+    /// The revision of this agent's tracer-log import; an older import of
+    /// this agent is read again, or upgraded in place by
+    /// [`Self::upgrade_import`].
+    fn import_rev(&self) -> u32 {
+        0
+    }
+
+    /// The run `run` describes when it is this agent's, or `None` for a run
+    /// of another program.
+    fn import_tracer_run(&self, _run: &TracerRun<'_>) -> Option<ImportedRun<Self::Options>> {
+        None
+    }
+
+    /// The options of an import from revision `from_rev`, brought up to
+    /// [`Self::import_rev`] without its tracer log, or `None` when that
+    /// revision cannot be upgraded in place.
+    fn upgrade_import(&self, _from_rev: u32, _options: &Self::Options) -> Option<Self::Options> {
+        None
     }
 
     /// Refuse a spawn request before anything is sealed, written or checked
@@ -493,8 +571,10 @@ pub trait Agent: Send + Sync + 'static {
     ///
     /// # Errors
     ///
-    /// The agent refuses to resume this conversation from a shell; the spawn
-    /// is refused with the message.
+    /// The agent refuses to resume a conversation on these options from a
+    /// shell; the spawn is refused with the message. A refusal depends on
+    /// `opts` alone, never on `conversation_id` or `hook_files`, so the app
+    /// may ask with any id to learn whether a shell recovery is allowed.
     fn shell_resume(
         &self,
         _opts: &Self::Options,
@@ -545,6 +625,26 @@ pub trait AgentPlugin: Send + Sync {
 
     /// See [`Agent::reserved_args`].
     fn reserved_args(&self) -> &'static [&'static str];
+
+    /// See [`Agent::liveness_tokens`].
+    fn liveness_tokens(&self) -> &'static [&'static str];
+
+    /// [`Agent::recovery_options`] as option values.
+    ///
+    /// # Errors
+    ///
+    /// One naming the agent when `run`'s recorded options do not decode.
+    fn recovery_options(&self, run: &RecoveredRun<'_>) -> Result<OptionValues, AgentError>;
+
+    /// See [`Agent::import_rev`].
+    fn import_rev(&self) -> u32;
+
+    /// [`Agent::import_tracer_run`] with the run's options as option values.
+    fn import_tracer_run(&self, run: &TracerRun<'_>) -> Option<ImportedRun<OptionValues>>;
+
+    /// [`Agent::upgrade_import`] over `options` decoded; `None` when they do
+    /// not decode.
+    fn upgrade_import(&self, from_rev: u32, options: &OptionValues) -> Option<OptionValues>;
 
     /// [`Agent::check_request`] over `opts` decoded.
     ///
@@ -668,6 +768,47 @@ impl<A: Agent> AgentPlugin for A {
         Agent::reserved_args(self)
     }
 
+    fn liveness_tokens(&self) -> &'static [&'static str] {
+        Agent::liveness_tokens(self)
+    }
+
+    fn recovery_options(&self, run: &RecoveredRun<'_>) -> Result<OptionValues, AgentError> {
+        if let Some(values) = run.recorded {
+            decode_options(self, values)?;
+        }
+        encode_options(self, &Agent::recovery_options(self, run))
+    }
+
+    fn import_rev(&self) -> u32 {
+        Agent::import_rev(self)
+    }
+
+    fn import_tracer_run(&self, run: &TracerRun<'_>) -> Option<ImportedRun<OptionValues>> {
+        let imported = Agent::import_tracer_run(self, run)?;
+        match encode_options(self, &imported.options) {
+            Ok(options) => Some(ImportedRun {
+                program_name: imported.program_name,
+                extra_dirs: imported.extra_dirs,
+                options,
+                trusted: imported.trusted,
+            }),
+            Err(err) => {
+                error!(%err, "dropping an imported run whose options do not serialize");
+                None
+            }
+        }
+    }
+
+    fn upgrade_import(&self, from_rev: u32, options: &OptionValues) -> Option<OptionValues> {
+        let options = decode_options(self, options)
+            .map_err(|err| error!(%err, "not upgrading an import whose options do not decode"))
+            .ok()?;
+        let upgraded = Agent::upgrade_import(self, from_rev, &options)?;
+        encode_options(self, &upgraded)
+            .map_err(|err| error!(%err, "not upgrading an import whose options do not serialize"))
+            .ok()
+    }
+
     fn check_request(&self, opts: &OptionValues, req: &SpawnCheck<'_>) -> Result<(), Refusal> {
         let opts = decode_for_spawn(self, opts)?;
         Agent::check_request(self, &opts, req)
@@ -785,6 +926,19 @@ fn decode_options<A: Agent>(agent: &A, values: &OptionValues) -> Result<A::Optio
         .map_err(|err| AgentError {
             message: format!(
                 "{} could not read the spawn's options: {err}",
+                Agent::descriptor(agent).label
+            ),
+        })
+}
+
+/// `options` as option values, or an error naming the agent when they do not
+/// serialize into a map.
+fn encode_options<A: Agent>(agent: &A, options: &A::Options) -> Result<OptionValues, AgentError> {
+    serde_json::to_value(options)
+        .and_then(serde_json::from_value)
+        .map_err(|err| AgentError {
+            message: format!(
+                "{} could not write its options: {err}",
                 Agent::descriptor(agent).label
             ),
         })
@@ -998,6 +1152,14 @@ mod tests {
             "bare-agent"
         }
 
+        fn liveness_tokens(&self) -> &'static [&'static str] {
+            &["bare-agent"]
+        }
+
+        fn recovery_options(&self, _run: &RecoveredRun<'_>) -> Self::Options {
+            crate::test_agent::TestOptions::default()
+        }
+
         fn check_request(
             &self,
             _opts: &Self::Options,
@@ -1116,6 +1278,84 @@ mod tests {
             .shell_resume(&bad, "c-1", &files)
             .expect_err("options that do not decode refuse the resume");
         assert!(err.to_string().contains("Test agent"), "{err}");
+    }
+
+    #[test]
+    fn recovery_options_defaults_to_replaying_the_recorded_options() {
+        let plugin: &dyn AgentPlugin = &TestAgent::default();
+        let recorded = values(&[("mode", text("slow")), ("sandbox", OptionValue::Bool(true))]);
+        let replayed = plugin.recovery_options(&RecoveredRun {
+            recorded: Some(&recorded),
+            trusted: true,
+        });
+        assert_eq!(
+            replayed,
+            Ok(values(&[
+                ("mode", text("slow")),
+                ("sandbox", OptionValue::Bool(true)),
+                ("profile", OptionValue::Null),
+            ]))
+        );
+        let fresh = plugin.recovery_options(&RecoveredRun {
+            recorded: None,
+            trusted: false,
+        });
+        assert_eq!(
+            fresh,
+            Ok(values(&[
+                ("mode", text("")),
+                ("sandbox", OptionValue::Bool(false)),
+                ("profile", OptionValue::Null),
+            ]))
+        );
+    }
+
+    #[test]
+    fn recovery_options_decode_failure_is_an_agent_error() {
+        let plugin: &dyn AgentPlugin = &TestAgent::default();
+        let bad = values(&[("mode", text("slow")), ("sandbox", text("yes"))]);
+        let err = plugin
+            .recovery_options(&RecoveredRun {
+                recorded: Some(&bad),
+                trusted: false,
+            })
+            .expect_err("recorded options that do not decode refuse the recovery");
+        assert!(err.to_string().contains("Test agent"), "{err}");
+    }
+
+    #[test]
+    fn import_defaults_to_none() {
+        let plugin: &dyn AgentPlugin = &TestAgent::default();
+        let args = ["--model".to_string(), "opus".to_string()];
+        let run = TracerRun {
+            program: "test-agent.exe",
+            args: &args,
+            cwd: r"D:\proj",
+        };
+        assert_eq!(plugin.import_tracer_run(&run), None);
+    }
+
+    #[test]
+    fn import_rev_defaults_to_zero() {
+        let plugin: &dyn AgentPlugin = &TestAgent::default();
+        assert_eq!(plugin.import_rev(), 0);
+    }
+
+    #[test]
+    fn upgrade_import_defaults_to_none() {
+        let plugin: &dyn AgentPlugin = &TestAgent::default();
+        let good = values(&[("mode", text("slow")), ("sandbox", OptionValue::Bool(true))]);
+        for rev in [0, 1, 2] {
+            assert_eq!(plugin.upgrade_import(rev, &good), None, "rev {rev}");
+        }
+    }
+
+    #[test]
+    fn liveness_tokens_reach_the_adapter() {
+        let plugin: &dyn AgentPlugin = &TestAgent::default();
+        assert_eq!(plugin.liveness_tokens(), [] as [&str; 0]);
+        let bare: &dyn AgentPlugin = &Bare;
+        assert_eq!(bare.liveness_tokens(), ["bare-agent"]);
     }
 
     #[test]
