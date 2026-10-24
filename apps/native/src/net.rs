@@ -170,22 +170,28 @@ pub enum NetEvent {
     ShutdownFailed,
 }
 
-/// Spawns the network thread on the production [`NetDeps`]. It runs until
-/// the view drops its command sender.
-pub fn spawn(commands: UnboundedReceiver<NetCommand>, events: UnboundedSender<NetEvent>) {
-    spawn_with(NetDeps::production(), commands, events);
+/// Spawns the network thread on the production [`NetDeps`], connecting to
+/// `target` first. It runs until the view drops its command sender.
+pub fn spawn(
+    target: Target,
+    commands: UnboundedReceiver<NetCommand>,
+    events: UnboundedSender<NetEvent>,
+) {
+    spawn_with(NetDeps::production(), target, commands, events);
 }
 
-/// Spawns the network thread on `deps`. It runs until the view drops its
-/// command sender.
+/// Spawns the network thread on `deps`, connecting to `target` first: a
+/// tailnet target never starts the local daemon. It runs until the view
+/// drops its command sender.
 pub fn spawn_with(
     deps: NetDeps,
+    target: Target,
     commands: UnboundedReceiver<NetCommand>,
     events: UnboundedSender<NetEvent>,
 ) {
     let spawned = std::thread::Builder::new()
         .name("net".to_owned())
-        .spawn(move || run_thread(commands, events, deps, Target::Local, WELCOME_TIMEOUT));
+        .spawn(move || run_thread(commands, events, deps, target, WELCOME_TIMEOUT));
     if let Err(err) = spawned {
         error!("spawning the network thread: {err}");
     }
@@ -216,7 +222,7 @@ fn run_thread(
         }),
         Err(err) => {
             error!("building the network runtime: {err}");
-            let mut conn = Connection::new();
+            let mut conn = Connection::for_target(target);
             let _ = conn.on_error(format!("building the network runtime: {err}"));
             // The view may already be gone; nothing else to tell.
             let _ = events.unbounded_send(NetEvent::State(conn));
@@ -1218,6 +1224,36 @@ mod tests {
             token_for: Box::new(move |host| token.filter(|_| host == TLS_HOST).map(str::to_owned)),
             tls: Some(ca.client_config()),
         }
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic,
+        reason = "a tailnet boot target that starts the local daemon fails the spec"
+    )]
+    fn net_starts_on_the_boot_target() {
+        let ca = TestCa::new();
+        let (port, seen) = tls_daemon(&ca);
+        let target = Target::tailnet(TLS_HOST, Some(port));
+        let deps = NetDeps {
+            ensure: Box::new(|| panic!("ensure_running ran for a tailnet boot target")),
+            ..tailnet_deps(&ca, Some(DEVICE_TOKEN))
+        };
+        let (view_tx, commands) = unbounded();
+        let (events, mut view_rx) = unbounded();
+
+        super::spawn_with(deps, target.clone(), commands, events);
+        assert_eq!(
+            next_hello(&seen).as_deref(),
+            Some(DEVICE_TOKEN),
+            "the first attempt did not dial the boot host"
+        );
+        assert!(
+            saw_state(&mut view_rx, |conn| conn.is_open()
+                && conn.target() == &target),
+            "the boot host never opened"
+        );
+        drop(view_tx);
     }
 
     #[test]

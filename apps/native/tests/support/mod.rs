@@ -1018,7 +1018,7 @@ impl<'a> Harness<'a> {
         cx.update(bind_keys);
         let (tx, net_commands) = unbounded();
         let (net_events, rx) = unbounded();
-        spawn_net(net, net_commands, net_events);
+        spawn_net(net, Target::Local, net_commands, net_events);
         let clock = TestClock::new();
         let quits = Rc::new(Cell::new(0));
         let opener = Arc::new(OpenRecorder::default());

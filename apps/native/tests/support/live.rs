@@ -686,7 +686,12 @@ impl<'a> Harness<'a> {
         let (tx, net_commands) = unbounded();
         let (net_events, from_net) = unbounded();
         let (to_view, view_events) = unbounded();
-        spawn_net(live_deps(&daemon.config_dir()), net_commands, net_events);
+        spawn_net(
+            live_deps(&daemon.config_dir()),
+            rustling_tulip_native::target::Target::Local,
+            net_commands,
+            net_events,
+        );
         let states = Arc::new(Mutex::new(Vec::new()));
         let messages = Arc::new(Mutex::new(Vec::new()));
         tee_states(

@@ -64,6 +64,7 @@ Start with [docs/architecture.md](docs/architecture.md) for how the pieces fit a
 - **Background state**: a session whose turn ended while its subagents, background shells or a scheduled wakeup still run; it never counts as finished (RT-84).
 - **Baseline**: the conversations an agent already held for a folder, taken just before a `DiscoverAfterLaunch` session's program starts; only a conversation outside it can be that session's.
 - **Binding window**: whichever of an account's usage windows (5-hour, 7-day, per-model) is fullest; its percentage decides auto-switch.
+- **Boot target**: the `Target` the native client starts on: `native-ui.json`'s `last_target` when it names a saved host (dialled on the port it was saved with, the local daemon never started), else this PC; `connection_picker::resolve_boot_target`, `docs/native-client.md`.
 - **Brief**: a worker's instructions: tree root, files, the change, and a proving command.
 - **Busy-excluded**: a per-session daemon flag (`busy_excluded` on the snapshot, sidecar and history entry) marking a session the user does not want counted as busy; set by `SetSessionBusyExcluded`, optionally carried to a duplicate and kept through reattach and recovery.
 - **CA.0, CA.1, …**: step ids in `docs/plans/accounts.md` (Claude accounts), distinct from `agent-cli.md`'s AC steps.
@@ -153,6 +154,7 @@ Start with [docs/architecture.md](docs/architecture.md) for how the pieces fit a
 - **Ring (keyboard)**: a native dialog's ordered, wrapping list of stops that Tab and Shift-Tab walk; not the drawn focus ring, the outline around the focused control; see `docs/native-client.md` ("Keyboard reachability").
 - **Routing variables**: the `ANTHROPIC_*` and `CLAUDE_*` environment variables that point Claude Code at another endpoint, credential and model; built at each spawn, never stored.
 - **Safe option**: the non-destructive button a confirm dialog opens on — Cancel, Keep running, Ignore, or a pane-only close; see `docs/native-client.md` ("Keyboard reachability").
+- **Saved host**: a tailnet host the user added to the native client's host picker, stored in `native-ui.json`'s `saved_hosts` as `{name, port}` and listed ahead of the scanned peers; `connection_picker::SavedHost`, `docs/native-client.md`.
 - **Screen engine**: the daemon's per-session rendered grid (`crates/daemon/src/screen.rs`) and the Claude rule table that reads it (`crates/daemon/src/screen/rules.rs`); a Claude session's status comes from it and from hooks, never from output volume or PTY silence. The chat mirror's dialog parsers (RT-51) and user rule files (RT-74) build on it; see `docs/plans/screen-status.md` and `docs/spikes/chat-mirror-tui.md`.
 - **Sealing**: the daemon's replacing of a secret row's literal value with a secret reference before the spawn config is captured, at spawn and, for older files, at startup; see `docs/env-secrets.md`.
 - **Secret reference**: an environment-row value written `${secret:<id>}`, standing for a value the daemon saved in Windows Credential Manager; resolved at spawn, stored and echoed in place of the value.

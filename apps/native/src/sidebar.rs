@@ -14,6 +14,7 @@ use std::path::Path;
 use std::sync::LazyLock;
 
 use crate::appearance::{self, AppColors, AppLevel, Resolved};
+use crate::connection_picker::SavedHost;
 use crate::fonts::{self, FontSettings};
 use crate::launch_last;
 use crate::source_control::{Part, ScKey, ScUiState};
@@ -381,6 +382,67 @@ pub struct UiState {
     /// The Settings modal's Spawn defaults tab.
     #[serde(default)]
     pub spawn: SpawnDefaults,
+    /// The tailnet host the client last connected to; `None` is this PC.
+    #[serde(default, deserialize_with = "last_target_or_local")]
+    pub last_target: Option<SavedHost>,
+    /// The tailnet hosts the user added, in the order they were added. An
+    /// entry that is not a valid host is dropped on load.
+    #[serde(default, deserialize_with = "valid_saved_hosts")]
+    pub saved_hosts: Vec<SavedHost>,
+}
+
+/// Reads `last_target` so that a value that is not a host record loads as
+/// this PC and never fails the rest of the file.
+fn last_target_or_local<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<SavedHost>, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    let last: Option<SavedHost> = serde_json::from_value(value.clone()).unwrap_or_else(|err| {
+        tracing::warn!("last_target {value} is not a saved host ({err}); starting on this PC");
+        None
+    });
+    Ok(last.and_then(|host| {
+        host.normalised()
+            .inspect_err(|err| {
+                tracing::warn!(
+                    "last_target {}:{} is not valid ({err}); starting on this PC",
+                    host.name,
+                    host.port
+                );
+            })
+            .ok()
+    }))
+}
+
+/// Reads `saved_hosts`, keeping each entry whose name passes the DNS-name
+/// check and whose port is 1 to 65535, its name normalised; every other
+/// entry is dropped with a warning naming it.
+fn valid_saved_hosts<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<SavedHost>, D::Error> {
+    let entries = Option::<Vec<serde_json::Value>>::deserialize(deserializer)?;
+    Ok(entries
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|entry| {
+            let host: SavedHost = serde_json::from_value(entry.clone())
+                .inspect_err(|err| {
+                    tracing::warn!("saved host {entry} is not a host record ({err}); dropped");
+                })
+                .ok()?;
+            match host.normalised() {
+                Ok(normal) => Some(normal),
+                Err(err) => {
+                    tracing::warn!(
+                        "saved host {}:{} is not valid ({err}); dropped",
+                        host.name,
+                        host.port
+                    );
+                    None
+                }
+            }
+        })
+        .collect())
 }
 
 /// What the spawn dialog pre-fills from the Spawn defaults tab; every
@@ -549,6 +611,8 @@ impl Default for UiState {
             title: TitleSettings::default(),
             notifications: NotificationSettings::default(),
             spawn: SpawnDefaults::default(),
+            last_target: None,
+            saved_hosts: Vec::new(),
         }
     }
 }
@@ -3102,11 +3166,117 @@ pub(crate) mod tests {
                 permission_mode: Some(PermissionMode::Plan),
                 claude_provider: ClaudeProvider::Deepseek,
             },
+            last_target: None,
+            saved_hosts: Vec::new(),
         };
         save_ui_state(&dir.0, &state).expect("first save");
         save_ui_state(&dir.0, &state).expect("save over the existing file");
         assert_eq!(load_ui_state(&dir.0), state);
         assert!(!dir.0.join(format!("{UI_FILE}.tmp")).exists());
+    }
+
+    #[test]
+    fn last_target_and_saved_hosts_round_trip() {
+        let dir = TestDir::new("saved-hosts");
+        let box_host = SavedHost {
+            name: "box.tail1234.ts.net".to_owned(),
+            port: 9443,
+        };
+        let state = UiState {
+            last_target: Some(box_host.clone()),
+            saved_hosts: vec![
+                box_host.clone(),
+                SavedHost {
+                    name: "laptop.tail1234.ts.net".to_owned(),
+                    port: 8787,
+                },
+            ],
+            ..UiState::default()
+        };
+        save_ui_state(&dir.0, &state).expect("save");
+        assert_eq!(load_ui_state(&dir.0), state);
+        let file: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.0.join(UI_FILE)).expect("read"))
+                .expect("JSON");
+        assert_eq!(
+            file["last_target"],
+            json!({ "name": "box.tail1234.ts.net", "port": 9443 })
+        );
+        assert_eq!(
+            file["saved_hosts"][1],
+            json!({ "name": "laptop.tail1234.ts.net", "port": 8787 })
+        );
+
+        std::fs::write(dir.0.join(UI_FILE), r#"{ "last_target": null }"#).expect("write");
+        let local = load_ui_state(&dir.0);
+        assert_eq!(local.last_target, None, "null is this PC");
+        assert_eq!(local.saved_hosts, [] as [SavedHost; 0]);
+        std::fs::write(dir.0.join(UI_FILE), r#"{ "sidebar_collapsed": true }"#).expect("write");
+        assert_eq!(load_ui_state(&dir.0).last_target, None, "absent is this PC");
+    }
+
+    #[test]
+    fn boot_target_matches_a_saved_host_whatever_the_case_or_trailing_dot() {
+        let dir = TestDir::new("boot-target-case");
+        let host = json!({ "name": "Box.tail1234.ts.net.", "port": 9443 });
+        let file = json!({ "saved_hosts": [host.clone()], "last_target": host });
+        std::fs::write(dir.0.join(UI_FILE), file.to_string()).expect("write");
+        let loaded = load_ui_state(&dir.0);
+        assert_eq!(
+            loaded.last_target,
+            Some(SavedHost {
+                name: "box.tail1234.ts.net".to_owned(),
+                port: 9443,
+            }),
+            "the last target's name loads normalised, as a saved host's does"
+        );
+        assert_eq!(
+            crate::connection_picker::resolve_boot_target(&loaded),
+            crate::target::Target::tailnet("box.tail1234.ts.net", Some(9443))
+        );
+
+        let bad = json!({ "last_target": { "name": "box/ws.tail1234.ts.net", "port": 9443 } });
+        std::fs::write(dir.0.join(UI_FILE), bad.to_string()).expect("write");
+        assert_eq!(
+            load_ui_state(&dir.0).last_target,
+            None,
+            "a last target whose name fails the check is this PC"
+        );
+    }
+
+    #[test]
+    fn a_hand_edited_bad_saved_host_is_dropped_on_load() {
+        let dir = TestDir::new("bad-saved-hosts");
+        let file = json!({
+            "sidebar_collapsed": true,
+            "saved_hosts": [
+                { "name": "box.tail1234.ts.net", "port": 9443 },
+                { "name": "evil.example/ws", "port": 8787 },
+                { "name": "user@box.tail1234.ts.net", "port": 8787 },
+                { "name": "box", "port": 8787 },
+                { "name": "zero.tail1234.ts.net", "port": 0 },
+                { "name": "big.tail1234.ts.net", "port": 70000 },
+                { "name": "Up.Tail1234.ts.net.", "port": 8787 },
+                "not a host",
+            ],
+        });
+        std::fs::write(dir.0.join(UI_FILE), file.to_string()).expect("write");
+        let loaded = load_ui_state(&dir.0);
+        assert!(loaded.sidebar_collapsed, "the rest of the file still loads");
+        assert_eq!(
+            loaded.saved_hosts,
+            [
+                SavedHost {
+                    name: "box.tail1234.ts.net".to_owned(),
+                    port: 9443,
+                },
+                SavedHost {
+                    name: "up.tail1234.ts.net".to_owned(),
+                    port: 8787,
+                },
+            ],
+            "only the hosts whose name passes the DNS check and whose port is 1 to 65535 stay"
+        );
     }
 
     #[test]

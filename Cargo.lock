@@ -5334,6 +5334,7 @@ dependencies = [
  "sha2 0.10.9",
  "similar",
  "syntect",
+ "tailnet",
  "tauri-winrt-notification",
  "tokio",
  "tokio-tungstenite",

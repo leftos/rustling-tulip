@@ -17,6 +17,7 @@ mod cleanup_failed;
 mod cleanup_failed_view;
 mod combobox;
 mod connection;
+pub mod connection_picker;
 mod copied;
 pub mod diff_model;
 mod diff_tab;
@@ -785,9 +786,6 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let (out_tx, out_rx) = unbounded();
-        let (in_tx, in_rx) = unbounded();
-        net::spawn(out_rx, in_tx);
         let config_dir = daemon_client::config_dir();
         let ui_dir = match &config_dir {
             Ok(dir) => Some(dir.clone()),
@@ -796,6 +794,12 @@ impl RootView {
                 None
             }
         };
+        let ui = ui_dir
+            .as_deref()
+            .map_or_else(UiState::default, load_ui_state);
+        let (out_tx, out_rx) = unbounded();
+        let (in_tx, in_rx) = unbounded();
+        net::spawn(connection_picker::resolve_boot_target(&ui), out_rx, in_tx);
         let deps = RootDeps {
             tx: out_tx,
             events: in_rx,
@@ -825,6 +829,12 @@ impl RootView {
             .detach();
         }
         root
+    }
+
+    /// The daemon the connection is on, or is trying to reach.
+    #[must_use]
+    pub fn connection_target(&self) -> &target::Target {
+        self.conn.target()
     }
 
     /// Follows the window's activation and bounds. Ctrl stays down in the
@@ -900,7 +910,7 @@ impl RootView {
         let mut view = Self {
             tx,
             now,
-            conn: Connection::new(),
+            conn: Connection::for_target(connection_picker::resolve_boot_target(&ui)),
             handshake: None,
             tabs: TabsModel::new(ui.active_tab_id.clone()),
             sidebar: SidebarModel::new(ui),
