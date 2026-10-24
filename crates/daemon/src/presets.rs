@@ -183,7 +183,8 @@ pub async fn preview_prompts(
     let repo = find_repo(hub, &preset.source_repo_id)
         .with_context(|| format!("preset's source repo missing: {}", preset.source_repo_id))?;
     let repo_path = PathBuf::from(&repo.path);
-    let raw = resolve_prompts(&repo_path, source)
+    let plugin = agent_registry::plugin(preset.agent_options.agent());
+    let raw = resolve_prompts(&repo_path, source, plugin)
         .await
         .map_err(|f| anyhow!(f.error))?;
     Ok(raw.into_iter().map(|p| p.text).collect())
@@ -389,6 +390,7 @@ fn parse_issue_number(raw: &str, token: &str) -> Result<u32, String> {
 async fn resolve_prompts(
     repo_path: &Path,
     source: &LaunchPresetSource,
+    plugin: &dyn agent_api::AgentPlugin,
 ) -> Result<Vec<RawPrompt>, LaunchFailure> {
     match source {
         LaunchPresetSource::File { path } => {
@@ -401,7 +403,9 @@ async fn resolve_prompts(
                 .map(|text| RawPrompt { text, stem: None })
                 .collect())
         }
-        LaunchPresetSource::Folder { path } => resolve_folder_prompts(repo_path, path).await,
+        LaunchPresetSource::Folder { path } => {
+            resolve_folder_prompts(repo_path, path, plugin).await
+        }
         LaunchPresetSource::Inline { prompts } => Ok(prompts
             .iter()
             .filter(|p| !p.trim().is_empty())
@@ -429,6 +433,7 @@ async fn resolve_prompts(
 async fn resolve_folder_prompts(
     repo_path: &Path,
     folder: &str,
+    plugin: &dyn agent_api::AgentPlugin,
 ) -> Result<Vec<RawPrompt>, LaunchFailure> {
     let folder_path = Path::new(folder);
     let mut entries = tokio::fs::read_dir(folder_path)
@@ -456,7 +461,7 @@ async fn resolve_folder_prompts(
         files.push((stem, name.to_string()));
     }
     files.sort_by(|a, b| a.1.cmp(&b.1));
-    // Format prompts as `@<repo-relative-path>` so Claude reads them.
+    // The plugin names each prompt file its own way, so its agent reads it.
     let rel = folder_path.strip_prefix(repo_path).map_or_else(
         |_| folder_path.to_string_lossy().replace('\\', "/"),
         |p| p.to_string_lossy().replace('\\', "/"),
@@ -464,7 +469,7 @@ async fn resolve_folder_prompts(
     Ok(files
         .into_iter()
         .map(|(stem, name)| RawPrompt {
-            text: format!("@{rel}/{name}"),
+            text: plugin.file_reference(&format!("{rel}/{name}")),
             stem: Some(stem),
         })
         .collect())
@@ -1080,7 +1085,8 @@ async fn build_plan(hub: &Hub, args: &LaunchArgs) -> Result<LaunchPlan, LaunchFa
     let repo = find_repo(hub, &preset.source_repo_id)
         .map_err(|e| LaunchFailure::new(format!("preset's source repo missing: {e}")))?;
     let repo_path = PathBuf::from(&repo.path);
-    let raw_prompts = resolve_prompts(&repo_path, &args.source).await?;
+    let plugin = agent_registry::plugin(preset.agent_options.agent());
+    let raw_prompts = resolve_prompts(&repo_path, &args.source, plugin).await?;
     if raw_prompts.is_empty() {
         return Err(LaunchFailure::new("no prompts to launch"));
     }
@@ -2443,6 +2449,68 @@ mod tests {
             tabs::collect_panes(tabs[0].grid().expect("a grid tab")).len(),
             2
         );
+    }
+
+    /// A repo with a `prompts` folder holding `a.md`, `b.md` and `notes.txt`.
+    fn folder_fixture() -> (ScratchDir, PathBuf, PathBuf) {
+        let scratch = ScratchDir::new();
+        let repo = scratch.path().join("repo");
+        let folder = repo.join("prompts");
+        std::fs::create_dir_all(&folder).expect("create prompts folder");
+        std::fs::write(folder.join("b.md"), "b").expect("write b.md");
+        std::fs::write(folder.join("a.md"), "a").expect("write a.md");
+        std::fs::write(folder.join("notes.txt"), "notes").expect("write notes.txt");
+        (scratch, repo, folder)
+    }
+
+    #[tokio::test]
+    async fn folder_prompts_are_named_with_the_plugins_file_reference() {
+        let (_scratch, repo, folder) = folder_fixture();
+        let test_agent = agent_api::test_agent::TestAgent::default();
+        let prompts = resolve_folder_prompts(&repo, &folder.to_string_lossy(), &test_agent)
+            .await
+            .expect("resolve folder prompts");
+        assert_eq!(
+            prompts.iter().map(|p| p.text.as_str()).collect::<Vec<_>>(),
+            ["prompts/a.md", "prompts/b.md"]
+        );
+        assert_eq!(
+            prompts
+                .iter()
+                .map(|p| p.stem.as_deref())
+                .collect::<Vec<_>>(),
+            [Some("a"), Some("b")]
+        );
+    }
+
+    #[tokio::test]
+    async fn folder_prompts_keep_the_at_prefix_for_claude() {
+        let (_scratch, repo, folder) = folder_fixture();
+        let claude = agent_registry::plugin(protocol::Agent::Claude);
+        let prompts = resolve_folder_prompts(&repo, &folder.to_string_lossy(), claude)
+            .await
+            .expect("resolve folder prompts");
+        assert_eq!(
+            prompts.iter().map(|p| p.text.as_str()).collect::<Vec<_>>(),
+            ["@prompts/a.md", "@prompts/b.md"]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_folder_outside_the_repo_keeps_its_absolute_path() {
+        let scratch = ScratchDir::new();
+        let repo = scratch.path().join("repo");
+        let folder = scratch.path().join("outside");
+        std::fs::create_dir_all(&repo).expect("create repo");
+        std::fs::create_dir_all(&folder).expect("create outside");
+        std::fs::write(folder.join("a.md"), "a").expect("write a.md");
+        let claude = agent_registry::plugin(protocol::Agent::Claude);
+        let prompts = resolve_folder_prompts(&repo, &folder.to_string_lossy(), claude)
+            .await
+            .expect("resolve folder prompts");
+        let absolute = folder.to_string_lossy().replace('\\', "/");
+        assert_eq!(prompts.len(), 1);
+        assert_eq!(prompts[0].text, format!("@{absolute}/a.md"));
     }
 
     fn test_hub() -> (Hub, broadcast::Receiver<PresetEvent>, ScratchDir) {
