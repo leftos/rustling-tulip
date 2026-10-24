@@ -10,8 +10,8 @@ use protocol::{ClientMessage, SessionSnapshot, SpawnRequest, SpawnTarget};
 
 use crate::buttons::{ButtonSize, outlined_button};
 use crate::notices::{
-    ActionFailedNotice, CheckoutAsk, CheckoutChoice, CheckoutPrompt, Toast, ToastKind, ToastSpec,
-    toast_action_selector,
+    ActionFailedNotice, CLOSE_SESSION, CheckoutAsk, CheckoutChoice, CheckoutPrompt, Toast,
+    ToastKind, ToastSpec, agent_exit_session_of, toast_action_selector,
 };
 use crate::palette::{ACCENT, CHIP, DIALOG_SHADOW, LINE_STRONG, SURFACE, TOAST_SHADOW};
 use crate::preset_launch::job_id_of;
@@ -134,7 +134,8 @@ impl RootView {
             .retain_shown(|key| toasts.iter().any(|toast| toast.key.as_deref() == Some(key)));
     }
 
-    /// Button `action` on toast `id`: a preset job's goes to its registry.
+    /// Button `action` on toast `id`: an agent-exit toast's closes its
+    /// session, a preset job's goes to its registry.
     fn press_toast_action(
         &mut self,
         id: u64,
@@ -148,7 +149,17 @@ impl RootView {
             .iter()
             .find(|toast| toast.id == id)
             .and_then(|toast| toast.key.clone());
-        if let Some(key) = key.filter(|key| job_id_of(key).is_some()) {
+        let Some(key) = key else {
+            return;
+        };
+        if let Some(session_id) = agent_exit_session_of(&key) {
+            if action == CLOSE_SESSION.id {
+                self.close_session_after_agent_exit(session_id);
+                self.dismiss_toast(id, cx);
+            }
+            return;
+        }
+        if job_id_of(&key).is_some() {
             self.press_preset_toast_action(&key, action, window, cx);
         }
     }

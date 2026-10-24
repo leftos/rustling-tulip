@@ -93,6 +93,39 @@ pub fn resume_report_toast(resumed: u32, left: u32) -> ToastSpec {
     }
 }
 
+/// The key prefix of the toast raised when a session's agent exits.
+const AGENT_EXIT_PREFIX: &str = "agent-exit-";
+
+/// The toast button that closes the session whose agent exited.
+pub const CLOSE_SESSION: ToastAction = ToastAction {
+    id: "close-session",
+    label: "Close session",
+    danger: false,
+};
+
+/// The toast for [`protocol::DaemonMessage::AgentExited`]: the session's
+/// agent ended and left its shell in the pane. Closing the session is a
+/// click away; letting the toast go keeps the shell.
+#[must_use]
+pub fn agent_exited_toast(session_id: &str) -> ToastSpec {
+    ToastSpec {
+        kind: ToastKind::Info,
+        title: "Claude exited. The pane is a shell now.".to_owned(),
+        detail: None,
+        key: Some(format!("{AGENT_EXIT_PREFIX}{session_id}")),
+        sticky: false,
+        actions: vec![CLOSE_SESSION],
+    }
+}
+
+/// The session id of a key [`agent_exited_toast`] raised; `None` for any
+/// other toast's key, and for a key with no id after the prefix.
+#[must_use]
+pub fn agent_exit_session_of(key: &str) -> Option<&str> {
+    key.strip_prefix(AGENT_EXIT_PREFIX)
+        .filter(|id| !id.is_empty())
+}
+
 /// A toast to show: what it reports, and what it does when a toast of the
 /// same key is already on screen.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -617,6 +650,33 @@ mod tests {
         assert_eq!(toast.kind, ToastKind::Warning);
         assert_eq!(toast.title, "No sessions resumed after restart");
         assert_eq!(toast.detail.as_deref(), Some("3 stay in Recover"));
+    }
+
+    #[test]
+    fn agent_exited_toast_reads_claude_exited_with_a_close_action() {
+        let toast = agent_exited_toast("s1");
+        assert_eq!(toast.kind, ToastKind::Info);
+        assert_eq!(toast.title, "Claude exited. The pane is a shell now.");
+        assert_eq!(toast.detail, None);
+        assert_eq!(
+            toast.key.as_deref(),
+            Some("agent-exit-s1"),
+            "a second exit for the session updates this toast in place"
+        );
+        assert!(!toast.sticky, "it goes by itself");
+        assert_eq!(toast.actions, [CLOSE_SESSION], "one way to close it");
+    }
+
+    #[test]
+    fn agent_exit_session_of_parses_only_its_own_keys() {
+        assert_eq!(agent_exit_session_of("agent-exit-s1"), Some("s1"));
+        assert_eq!(agent_exit_session_of("resume-report"), None);
+        assert_eq!(
+            agent_exit_session_of("preset:job1"),
+            None,
+            "a launch job's key"
+        );
+        assert_eq!(agent_exit_session_of("agent-exit-"), None, "no session id");
     }
 
     #[test]

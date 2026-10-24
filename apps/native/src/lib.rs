@@ -2401,6 +2401,9 @@ impl RootView {
         if self.on_resume_report(&msg, cx) {
             return;
         }
+        if self.on_agent_exited(&msg, cx) {
+            return;
+        }
         match msg {
             DaemonMessage::Welcome { .. } => self.on_welcome(window, cx),
             DaemonMessage::Error {
@@ -2494,6 +2497,33 @@ impl RootView {
         };
         self.push_toast_spec(notices::resume_report_toast(*resumed, *left_in_recover), cx);
         true
+    }
+
+    /// Shows a session's agent exit as one toast, keyed by the session so a
+    /// second exit updates it in place; an exit for a session this client
+    /// does not list raises nothing. Returns whether `msg` was that notice.
+    fn on_agent_exited(&mut self, msg: &DaemonMessage, cx: &mut Context<Self>) -> bool {
+        let DaemonMessage::AgentExited { session_id } = msg else {
+            return false;
+        };
+        if self.sidebar.session(session_id).is_some() {
+            self.push_toast_spec(notices::agent_exited_toast(session_id), cx);
+        }
+        true
+    }
+
+    /// The Close session button of an agent-exit toast: stops and discards
+    /// the session, leaving its worktrees on disk; a session this client no
+    /// longer lists sends nothing.
+    fn close_session_after_agent_exit(&mut self, session_id: &str) {
+        let messages = self
+            .sidebar
+            .session(session_id)
+            .map(branch_fate::close_after_agent_exit)
+            .unwrap_or_default();
+        for msg in messages {
+            self.send(msg);
+        }
     }
 
     /// A daemon `Error`: the launch-last wait it answers ends here, so the

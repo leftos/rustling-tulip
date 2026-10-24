@@ -36,6 +36,27 @@ pub(crate) enum DialogMode {
     Ready(DiscardChoice),
 }
 
+/// What closing a session whose agent exited sends: `StopSession` while the
+/// session is still live, then `DiscardSession` with no cleanup, so its
+/// worktrees stay on disk.
+pub(crate) fn close_after_agent_exit(session: &SessionSnapshot) -> Vec<ClientMessage> {
+    let mut messages = Vec::new();
+    if !matches!(
+        session.status,
+        SessionStatus::Stopped | SessionStatus::Error
+    ) {
+        messages.push(ClientMessage::StopSession {
+            session_id: session.id.clone(),
+            cleanup: Vec::new(),
+        });
+    }
+    messages.push(ClientMessage::DiscardSession {
+        session_id: session.id.clone(),
+        cleanup: Vec::new(),
+    });
+    messages
+}
+
 /// A button of the dialog's footer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DialogButton {
@@ -393,7 +414,7 @@ mod tests {
 
     use super::{
         DeleteWorktreeConfirm, DialogButton, DialogMode, DiscardChoice, MemberRow,
-        confirm_messages, describe_member_fate, discard_choice,
+        close_after_agent_exit, confirm_messages, describe_member_fate, discard_choice,
     };
 
     fn member(fate: BranchFate, repo_name: &str) -> MemberBranchFate {
@@ -872,6 +893,32 @@ mod tests {
                 branch,
             })
             .collect()
+    }
+
+    #[test]
+    fn close_after_agent_exit_stops_then_discards_without_cleanup() {
+        let sent = close_after_agent_exit(&session("idle"));
+        assert!(
+            matches!(sent.as_slice(), [
+                ClientMessage::StopSession { session_id: stopped, cleanup: stop_cleanup },
+                ClientMessage::DiscardSession { session_id: discarded, cleanup },
+            ] if stopped == "s1" && stop_cleanup.is_empty()
+                && discarded == "s1" && cleanup.is_empty()),
+            "worktrees stay on disk: {sent:?}"
+        );
+    }
+
+    #[test]
+    fn close_after_agent_exit_skips_stop_when_already_stopped() {
+        for status in ["stopped", "error"] {
+            let sent = close_after_agent_exit(&session(status));
+            assert!(
+                matches!(sent.as_slice(), [
+                    ClientMessage::DiscardSession { session_id, cleanup },
+                ] if session_id == "s1" && cleanup.is_empty()),
+                "{status}: {sent:?}"
+            );
+        }
     }
 
     #[test]

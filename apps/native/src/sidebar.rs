@@ -1847,13 +1847,14 @@ fn home_as_tilde(path: &str, home: Option<&str>) -> String {
     }
 }
 
-/// The runtime tag: the agent for agent sessions, the program for plain
-/// shells.
+/// The runtime tag: the program the pane runs — the session's
+/// `program_name` when the daemon knows one, else the agent for an agent
+/// session — and nothing for a plain shell with no known program.
 pub fn runtime_label(s: &SessionSnapshot) -> Option<String> {
-    if s.mode != SessionMode::PlainShell {
-        return Some(s.agent.as_label().to_owned());
-    }
-    s.program_name.clone().filter(|p| !p.is_empty())
+    s.program_name
+        .clone()
+        .filter(|p| !p.is_empty())
+        .or_else(|| (s.mode != SessionMode::PlainShell).then(|| s.agent.as_label().to_owned()))
 }
 
 /// The endpoint a session is routed to when a chip should say so: its
@@ -2619,11 +2620,34 @@ pub(crate) mod tests {
         let mut agent = session("a");
         agent.agent = protocol::Agent::Claude;
         agent.program_name = Some("node".to_owned());
-        assert_eq!(runtime_label(&agent).as_deref(), Some("claude"));
+        assert_eq!(runtime_label(&agent).as_deref(), Some("node"));
         let mut sh = shell("s", None, SessionKind::Standalone);
         assert_eq!(runtime_label(&sh), None);
         sh.program_name = Some("pwsh".to_owned());
         assert_eq!(runtime_label(&sh).as_deref(), Some("pwsh"));
+    }
+
+    #[test]
+    fn runtime_label_follows_program_name_for_an_agent_session() {
+        let mut agent = session("a");
+        agent.agent = protocol::Agent::Claude;
+        agent.program_name = Some("pwsh".to_owned());
+        assert_eq!(
+            runtime_label(&agent).as_deref(),
+            Some("pwsh"),
+            "the shell Claude left behind"
+        );
+        agent.program_name = None;
+        assert_eq!(
+            runtime_label(&agent).as_deref(),
+            Some("claude"),
+            "no known program: the agent"
+        );
+        let mut sh = shell("s", None, SessionKind::Standalone);
+        sh.program_name = Some("pwsh".to_owned());
+        assert_eq!(runtime_label(&sh).as_deref(), Some("pwsh"));
+        let programless = shell("s2", None, SessionKind::Standalone);
+        assert_eq!(runtime_label(&programless), None, "a shell with no program");
     }
 
     fn model_with(sessions: Vec<SessionSnapshot>) -> SidebarModel {
