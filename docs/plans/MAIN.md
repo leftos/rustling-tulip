@@ -5,12 +5,9 @@
 ## Release 2 — Remote mode and the agent seam
 
 - [/] RT-267 Move all Claude support behind the agent seam as its first plugin · release vNext
-- [ ] RT-96 Remote devices: list connected tailnet devices, block one and drop its connections · release vNext
-  - [ ] RT-391 RT-96 b: Native devices model and the Devices fold · release vNext
-  - [ ] RT-392 RT-96 c: Devices section in Settings > Remote access with Block and Forget · release vNext
 - [ ] RT-243 Split tailnet Supervisor::run and carry the real CertFailed reason
 - [ ] RT-258 Remote mode: don't send this PC's remembered folders to a remote host
-- [ ] RT-158 P6.6: Remote tests over a fake Tailscale, hand checklist, and the docs pass · release vNext
+- [/] RT-158 P6.6: Remote tests over a fake Tailscale, hand checklist, and the docs pass · release vNext
 - [ ] RT-244 Preset wizard: typed host paths instead of local pickers in remote mode
 - [ ] RT-278 Prove the daemon holds the token before a client reuses, retires or kills it
 - [ ] RT-343 Keep name, look and sidebar place when Recover respawns a session
