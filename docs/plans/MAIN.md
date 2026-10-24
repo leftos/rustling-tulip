@@ -16,14 +16,14 @@
 - [/] RT-166 TS.3b: device tokens issued only after the owner approves the device on the host PC · release vNext
 - [ ] RT-278 Prove the daemon holds the token before a client reuses, retires or kills it
 - [ ] RT-331 Built-in text and Markdown viewer with Open in default app and an always-external setting · release vNext
-  - [/] RT-337 RT-331 S4: Text viewer view and link/fetch routing · release vNext
-  - [ ] RT-338 RT-331 S5: Markdown core on pulldown-cmark · release vNext
   - [ ] RT-339 RT-331 S6: Markdown view with Source toggle and links · release vNext
+    - [ ] RT-384 RT-339 S6b: Markdown link clicks and anchor scrolling · release vNext
   - [ ] RT-340 RT-331 S7: Viewer line selection, find and reload · release vNext
   - [ ] RT-341 RT-331 S8: Viewer docs and task index rows · release vNext
 - [ ] RT-343 Keep name, look and sidebar place when Recover respawns a session
 - [ ] RT-349 Restart conversation discovery for sessions reattached after a daemon restart
 - [ ] RT-374 Pair the desktop client with a remote host: device token store and pairing screen · release vNext
+  - [ ] RT-382 RT-374 P3: Desktop pairing dialog, lib.rs wiring and the picker's Not paired tag · release vNext
 - [ ] RT-375 Copy only the text when a terminal selection crosses a TUI's box borders · release vNext+1
 - [ ] RT-378 Close a failed handshake gracefully so AuthFailed is never lost to a reset
 
@@ -280,6 +280,7 @@
 - [ ] RT-372 Clear the Worktrees field's pending apply when the daemon refuses it
 - [ ] RT-373 Check the Shell dialog's typed folder by the host's path rules on a remote host
 - [ ] RT-379 Make toast buttons pressed from Action Center reach the native client
+- [ ] RT-385 Wrap or scroll long code lines in the rendered Markdown view
 
 ## No project
 
