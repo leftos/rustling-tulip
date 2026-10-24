@@ -365,6 +365,7 @@ impl RootView {
             return;
         };
         let was_current = dialog.picker.forget(&row.label, &current);
+        self.sidebar.forget_host_session_count(&row.label);
         let rows = dialog.picker.rows().len();
         dialog.focus = PickerControl::Row(index.min(rows.saturating_sub(1)));
         self.sidebar.set_saved_hosts(dialog.picker.saved().to_vec());

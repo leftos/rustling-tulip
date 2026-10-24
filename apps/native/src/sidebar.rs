@@ -389,6 +389,10 @@ pub struct UiState {
     /// entry that is not a valid host is dropped on load.
     #[serde(default, deserialize_with = "valid_saved_hosts")]
     pub saved_hosts: Vec<SavedHost>,
+    /// The session count each tailnet host last had, by its lower-cased
+    /// `MagicDNS` name: a connect whose first list differs offers the import.
+    #[serde(default)]
+    pub host_session_counts: BTreeMap<String, u32>,
 }
 
 /// Reads `last_target` so that a value that is not a host record loads as
@@ -613,6 +617,7 @@ impl Default for UiState {
             spawn: SpawnDefaults::default(),
             last_target: None,
             saved_hosts: Vec::new(),
+            host_session_counts: BTreeMap::new(),
         }
     }
 }
@@ -1216,6 +1221,22 @@ impl SidebarModel {
     /// Replaces the tailnet hosts the host picker offers.
     pub fn set_saved_hosts(&mut self, hosts: Vec<SavedHost>) {
         self.ui.saved_hosts = hosts;
+    }
+
+    /// The session count last recorded for the tailnet host `host`.
+    pub fn host_session_count(&self, host: &str) -> Option<u32> {
+        self.ui.host_session_counts.get(host).copied()
+    }
+
+    /// Records `host`'s session count; returns whether it changed, so the
+    /// caller knows whether to save.
+    pub fn set_host_session_count(&mut self, host: &str, count: u32) -> bool {
+        self.ui.host_session_counts.insert(host.to_owned(), count) != Some(count)
+    }
+
+    /// Drops `host`'s recorded session count; returns whether it had one.
+    pub fn forget_host_session_count(&mut self, host: &str) -> bool {
+        self.ui.host_session_counts.remove(host).is_some()
     }
 }
 
@@ -3179,6 +3200,7 @@ pub(crate) mod tests {
             },
             last_target: None,
             saved_hosts: Vec::new(),
+            host_session_counts: BTreeMap::new(),
         };
         save_ui_state(&dir.0, &state).expect("first save");
         save_ui_state(&dir.0, &state).expect("save over the existing file");
@@ -3224,6 +3246,47 @@ pub(crate) mod tests {
         assert_eq!(local.saved_hosts, [] as [SavedHost; 0]);
         std::fs::write(dir.0.join(UI_FILE), r#"{ "sidebar_collapsed": true }"#).expect("write");
         assert_eq!(load_ui_state(&dir.0).last_target, None, "absent is this PC");
+    }
+
+    #[test]
+    fn host_session_counts_round_trip() {
+        let dir = TestDir::new("host-session-counts");
+        let state = UiState {
+            host_session_counts: BTreeMap::from([
+                ("box.tail1234.ts.net".to_owned(), 3),
+                ("laptop.tail1234.ts.net".to_owned(), 0),
+            ]),
+            ..UiState::default()
+        };
+        save_ui_state(&dir.0, &state).expect("save");
+        assert_eq!(load_ui_state(&dir.0), state);
+        let file: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.0.join(UI_FILE)).expect("read"))
+                .expect("JSON");
+        assert_eq!(
+            file["host_session_counts"],
+            json!({ "box.tail1234.ts.net": 3, "laptop.tail1234.ts.net": 0 })
+        );
+        std::fs::write(dir.0.join(UI_FILE), r#"{ "sidebar_collapsed": true }"#).expect("write");
+        assert!(
+            load_ui_state(&dir.0).host_session_counts.is_empty(),
+            "absent is no host recorded"
+        );
+    }
+
+    #[test]
+    fn set_host_session_count_reports_a_change_only() {
+        let mut model = SidebarModel::default();
+        let host = "box.tail1234.ts.net";
+        assert_eq!(model.host_session_count(host), None);
+        assert!(model.set_host_session_count(host, 2), "first record");
+        assert!(!model.set_host_session_count(host, 2), "same value");
+        assert!(model.set_host_session_count(host, 0), "changed");
+        assert_eq!(model.host_session_count(host), Some(0));
+        assert_eq!(model.host_session_count("other.tail1234.ts.net"), None);
+        assert!(model.forget_host_session_count(host), "dropped");
+        assert!(!model.forget_host_session_count(host), "nothing left");
+        assert_eq!(model.host_session_count(host), None);
     }
 
     #[test]

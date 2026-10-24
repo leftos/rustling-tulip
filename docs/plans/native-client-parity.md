@@ -111,7 +111,7 @@ Close behind: the paste and key quirks (native clipboard read, Shift+Enter bytes
 - [x] Closing a pane with a session: close pane only / discard session keep worktree / delete worktree — `PaneCloseDialog.tsx` (native: P4.13b; when the daemon refuses the discard, the pane stays open beside its error)
 - [x] Empty pane placeholder and its context menu (Move to ▸, Close) — `EmptyPane.tsx`, `GridRenderer.tsx` `PaneContextMenu` (native: the menu in P4.13b, on a right-click of the empty pane's header or body)
 - [x] Smart placement: next to the same repo → an empty pane → split the largest pane along its longer side — `App.tsx` `paneTargetForSession`
-- [ ] "Import remote sessions" modal when the remote session count changes — `ImportArrangementModal.tsx`
+- [x] "Import remote sessions" modal when the remote session count changes — `ImportArrangementModal.tsx`
 - [x] Active tab remembered across reloads — `App.tsx`
 - [x] Window title "(M/N) Tab — rustling-tulip", debounced 350ms — `utils/windowTitle.ts`
 

@@ -702,6 +702,14 @@ pub struct RootView {
     /// The arrangement the chooser picked, applied to the daemon's next tab
     /// list.
     pending_arrangement: Option<layout_chooser::Arrangement>,
+    /// The import modal, while open.
+    import_modal: Option<layout_chooser::ImportChooser>,
+    /// The import a remote host's first session list offered, shown on the
+    /// next tab list.
+    pending_import: Option<layout_chooser::ImportOffer>,
+    /// True from `Welcome` until the connection's first `Sessions`: only that
+    /// list can offer an import; a later one is a resync.
+    awaiting_initial_sessions: bool,
     /// Worktree cleanups that failed, one per session; the head is shown.
     cleanup_failed: cleanup_failed::CleanupQueue,
     /// The cleanup-failed dialog's keyboard focus.
@@ -1024,6 +1032,9 @@ impl RootView {
             layout_chooser: None,
             chooser_focus: cx.focus_handle(),
             pending_arrangement: None,
+            import_modal: None,
+            pending_import: None,
+            awaiting_initial_sessions: false,
             cleanup_failed: cleanup_failed::CleanupQueue::default(),
             cleanup_focus: cx.focus_handle(),
             opener: open,
@@ -1291,6 +1302,7 @@ impl RootView {
             || self.run_confirm.is_some()
             || self.notices.has_modal()
             || self.layout_chooser.is_some()
+            || self.import_modal.is_some()
             || !self.cleanup_failed.is_empty()
             || self.exit.is_some()
             || self.pane_ui.close.is_some()
@@ -2417,6 +2429,7 @@ impl RootView {
         // snapshot changed is read from the old one.
         let (moved, exit_discard, finished) = self.before_fold(&msg);
         self.fold_sidebar(&msg, cx);
+        self.on_import_message(&msg, window, cx);
         if let Some(discard) = exit_discard {
             self.send(discard);
         }
@@ -2654,6 +2667,7 @@ impl RootView {
     fn on_welcome(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.reset_for_new_daemon(window, cx);
         self.reset_recover(window, cx);
+        self.awaiting_initial_sessions = true;
     }
 
     /// The connection moved to another daemon (this PC's or a tailnet
@@ -2747,6 +2761,7 @@ impl RootView {
         self.tabs.clear_layout_requests();
         self.pending_arrangement = None;
         self.close_layout_chooser(window, cx);
+        self.reset_import(window, cx);
         self.reset_cleanup_failed(window, cx);
         self.reset_worktrees(window, cx);
     }
@@ -2899,7 +2914,7 @@ impl RootView {
             cx.stop_propagation();
             return;
         }
-        if self.on_layout_chooser_key(ks, window, cx) {
+        if self.on_layout_chooser_key(ks, window, cx) || self.on_import_key(ks, window, cx) {
             cx.stop_propagation();
             return;
         }
@@ -3384,6 +3399,7 @@ impl Render for RootView {
             .children(self.undo_layer(window, cx))
             .children(self.run_confirm_layer(cx))
             .children(self.layout_chooser_layer(cx))
+            .children(self.import_layer(cx))
             .children(self.exit_layer(cx))
             .children(delete_over)
             .children(self.cleanup_failed_layer(window, cx))

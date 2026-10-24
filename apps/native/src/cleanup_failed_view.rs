@@ -191,7 +191,7 @@ impl RootView {
             } else {
                 self.quit_focus.focus(window);
             }
-        } else if self.layout_chooser.is_some() {
+        } else if self.layout_chooser.is_some() || self.import_modal.is_some() {
             self.chooser_focus.focus(window);
         } else if self.run_confirm.is_some() {
             self.run_focus.focus(window);

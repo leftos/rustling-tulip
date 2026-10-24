@@ -13,6 +13,7 @@
 use crate::support;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use gpui::{TestAppContext, px};
 use protocol::{DaemonMessage, WorktreeCleanupFailure};
@@ -242,6 +243,39 @@ fn forget_the_current_host_switches_to_local(cx: &mut TestAppContext) {
     let ui = saved_ui(&dir);
     assert_eq!(ui["saved_hosts"], json!([]));
     assert!(ui["last_target"].is_null(), "{}", ui["last_target"]);
+}
+
+#[gpui::test]
+fn forget_the_current_host_drops_its_session_count_for_good(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &json!({
+            "saved_hosts": [{ "name": HOST, "port": 8787 }],
+            "last_target": { "name": HOST, "port": 8787 },
+            "host_session_counts": { HOST: 1 },
+        }),
+    );
+    let mut h = Harness::on_target(
+        cx,
+        &dir,
+        Target::tailnet(HOST, Some(8787)),
+        &Fixture::single(support::session("s1").build()),
+    );
+    open_picker(&mut h, tailnet_with(&[]));
+    h.click_on(&format!("connections-forget-{HOST}"));
+    assert!(saved_ui(&dir)["host_session_counts"][HOST].is_null());
+
+    h.send(DaemonMessage::SessionUpdated {
+        session: support::session("s2").build(),
+        request_id: None,
+    });
+    h.advance(Duration::from_millis(600));
+    let ui = saved_ui(&dir);
+    assert!(
+        ui["host_session_counts"][HOST].is_null(),
+        "a session before the switch lands does not record it again: {ui}"
+    );
 }
 
 #[gpui::test]

@@ -16,11 +16,11 @@ use std::time::Duration;
 
 use gpui::{Modifiers, TestAppContext, px};
 use protocol::{
-    ClientMessage, DaemonMessage, PresetEntry, PresetTarget, SessionSnapshot, SpawnRequest,
-    SpawnTarget, SplitDirection, WorktreeCleanupFailure,
+    ClientMessage, DaemonMessage, InitLayoutKind, PresetEntry, PresetTarget, RearrangeLayout,
+    SessionSnapshot, SpawnRequest, SpawnTarget, SplitDirection, WorktreeCleanupFailure,
 };
 use rustling_tulip_native::target::Target;
-use rustling_tulip_native::{Connection, NetCommand, RootView};
+use rustling_tulip_native::{Connection, NetCommand, NetEvent, RootView};
 use serde_json::json;
 use support::{Fixture, Harness, Opened, TestDir, pane, repo, session, split, tab};
 
@@ -1391,4 +1391,328 @@ fn shell_dialog_leaves_the_remembered_folder_on_remote(cx: &mut TestAppContext) 
         Some("C:\\work"),
         "a shell on the host leaves this PC's quick-shell folder alone"
     );
+}
+
+/// Saves [`HOST`] as a host the picker offers, with `counts` as the
+/// recorded session counts, before the window opens.
+fn seed_saved_host(dir: &TestDir, counts: &serde_json::Value) {
+    let ui = json!({
+        "saved_hosts": [{ "name": HOST, "port": 8787 }],
+        "host_session_counts": counts,
+    });
+    std::fs::write(
+        dir.path().join("native-ui.json"),
+        serde_json::to_vec_pretty(&ui).expect("serialize native-ui.json"),
+    )
+    .expect("write native-ui.json");
+}
+
+/// Saves [`HOST`] with `count` as its last session count before the window
+/// opens.
+fn seed_host_count(dir: &TestDir, count: u32) {
+    seed_saved_host(dir, &json!({ HOST: count }));
+}
+
+/// [`HOST`]'s session count as `native-ui.json` holds it on disk.
+fn saved_host_count(dir: &TestDir) -> serde_json::Value {
+    let text = std::fs::read_to_string(dir.path().join("native-ui.json")).expect("native-ui.json");
+    let ui: serde_json::Value = serde_json::from_str(&text).expect("native-ui.json is JSON");
+    ui["host_session_counts"][HOST].clone()
+}
+
+/// `n` sessions, `s1` shown in pane `p1` of tab `t1`.
+fn with_sessions(n: usize) -> Fixture {
+    Fixture {
+        sessions: (1..=n).map(|i| session(&format!("s{i}")).build()).collect(),
+        tabs: vec![tab("t1", &pane("p1", Some("s1")))],
+        ..Fixture::default()
+    }
+}
+
+fn import_open(h: &mut Harness<'_>) -> bool {
+    h.root(|root, _| root.import_modal_open())
+}
+
+fn init_layouts(sent: &[ClientMessage]) -> Vec<&ClientMessage> {
+    sent.iter()
+        .filter(|msg| matches!(msg, ClientMessage::InitLayout { .. }))
+        .collect()
+}
+
+/// A reconnect to the same host whose first list has `n` sessions,
+/// followed by the client's tab list.
+fn reconnect_with(h: &mut Harness<'_>, n: usize) {
+    let fixture = with_sessions(n);
+    h.send(support::welcome(support::PROTOCOL));
+    h.send(DaemonMessage::Sessions {
+        sessions: fixture.sessions,
+    });
+    h.send(DaemonMessage::Tabs { tabs: fixture.tabs });
+}
+
+#[gpui::test]
+fn count_change_on_a_remote_host_offers_import(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_host_count(&dir, 1);
+    let mut h = Harness::on_target(cx, &dir, remote_target(), &with_sessions(3));
+
+    assert!(import_open(&mut h), "1 recorded, 3 arrived");
+    assert!(drawn(&mut h, "import-keep"));
+    assert!(drawn(&mut h, "import-open-all"));
+    assert!(drawn(&mut h, "import-empty"));
+    assert!(drawn(&mut h, "import-close"));
+    let sent = h.sent();
+    assert!(init_layouts(&sent).is_empty(), "sent {sent:?}");
+    assert_eq!(
+        saved_host_count(&dir),
+        json!(3),
+        "the new count is recorded"
+    );
+}
+
+#[gpui::test]
+fn keep_leaves_the_layout(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_host_count(&dir, 1);
+    let mut h = Harness::on_target(cx, &dir, remote_target(), &with_sessions(3));
+    assert!(import_open(&mut h));
+    h.sent();
+    h.keys("escape");
+    assert!(!import_open(&mut h), "Esc keeps");
+    let sent = h.sent();
+    assert!(sent.is_empty(), "sent {sent:?}");
+
+    reconnect_with(&mut h, 4);
+    assert!(import_open(&mut h), "3 recorded, 4 arrived");
+    h.sent();
+    h.click_on("import-keep");
+    assert!(!import_open(&mut h));
+    let sent = h.sent();
+    assert!(sent.is_empty(), "sent {sent:?}");
+
+    reconnect_with(&mut h, 2);
+    assert!(import_open(&mut h), "4 recorded, 2 arrived");
+    h.sent();
+    h.click_on("import-close");
+    assert!(!import_open(&mut h));
+    let sent = h.sent();
+    assert!(sent.is_empty(), "sent {sent:?}");
+}
+
+#[gpui::test]
+fn import_arranges_the_incoming_sessions(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_host_count(&dir, 1);
+    let mut h = Harness::on_target(cx, &dir, remote_target(), &with_sessions(5));
+    assert!(import_open(&mut h));
+    h.sent();
+    h.click_on("import-open-all");
+    h.click_on("chooser-grid-shape-2");
+    h.click_on("chooser-max-up");
+    h.click_on("chooser-max-up");
+    h.click_on("chooser-confirm-all");
+    let sent = h.sent();
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [ClientMessage::InitLayout {
+                kind: InitLayoutKind::AllSessions
+            }]
+        ),
+        "sent {sent:?}"
+    );
+    assert!(!import_open(&mut h));
+
+    let row = |a: &str, b: &str| split(SplitDirection::Horizontal, pane(a, None), pane(b, None));
+    let grid = split(
+        SplitDirection::Vertical,
+        row("p1", "p2"),
+        split(SplitDirection::Vertical, row("p3", "p4"), pane("p5", None)),
+    );
+    h.send(DaemonMessage::Tabs {
+        tabs: vec![tab("t1", &grid)],
+    });
+    let layout = RearrangeLayout::Grid {
+        cols: 2,
+        aspect: None,
+    };
+    let sent = h.sent();
+    let extracted: Vec<Vec<String>> = sent
+        .iter()
+        .filter_map(|m| match m {
+            ClientMessage::ExtractToNewTab {
+                source_tab_id,
+                pane_ids,
+                name: None,
+                layout: Some(l),
+                request_id: None,
+            } if source_tab_id == "t1" && *l == layout => Some(pane_ids.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        extracted,
+        [
+            vec!["p3".to_owned(), "p4".to_owned()],
+            vec!["p5".to_owned()]
+        ],
+        "sent {sent:?}"
+    );
+    // The reply's panes show no session, so `s1`'s old pane also detaches.
+    let arranged: Vec<&ClientMessage> = sent
+        .iter()
+        .filter(|m| {
+            matches!(
+                m,
+                ClientMessage::ExtractToNewTab { .. } | ClientMessage::RearrangeTab { .. }
+            )
+        })
+        .collect();
+    assert_eq!(arranged.len(), 3, "sent {sent:?}");
+    assert!(
+        matches!(
+            arranged.last(),
+            Some(ClientMessage::RearrangeTab { tab_id, layout: l }) if tab_id == "t1" && *l == layout
+        ),
+        "sent {sent:?}"
+    );
+    assert!(
+        !import_open(&mut h),
+        "the reply to the import offers nothing"
+    );
+}
+
+#[gpui::test]
+fn start_empty_sends_empty(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_host_count(&dir, 4);
+    let mut h = Harness::on_target(cx, &dir, remote_target(), &with_sessions(3));
+    assert!(import_open(&mut h));
+    h.sent();
+    h.click_on("import-empty");
+    let sent = h.sent();
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [ClientMessage::InitLayout {
+                kind: InitLayoutKind::Empty
+            }]
+        ),
+        "sent {sent:?}"
+    );
+    assert!(!import_open(&mut h));
+}
+
+#[gpui::test]
+fn an_unrecorded_host_records_its_count_silently(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_saved_host(&dir, &json!({}));
+    let mut h = Harness::on_target(cx, &dir, remote_target(), &with_sessions(3));
+    assert!(!import_open(&mut h));
+    assert_eq!(saved_host_count(&dir), json!(3));
+
+    h.send(DaemonMessage::SessionUpdated {
+        session: session("s4").build(),
+        request_id: None,
+    });
+    h.advance(Duration::from_millis(600));
+    assert_eq!(saved_host_count(&dir), json!(4), "a new session counts");
+    h.send(DaemonMessage::SessionRemoved {
+        session_id: "s1".to_owned(),
+    });
+    h.advance(Duration::from_millis(600));
+    assert_eq!(saved_host_count(&dir), json!(3), "a removed one too");
+}
+
+#[gpui::test]
+fn a_host_not_saved_records_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::on_target(cx, &dir, remote_target(), &with_sessions(3));
+    h.send(DaemonMessage::SessionUpdated {
+        session: session("s4").build(),
+        request_id: None,
+    });
+    h.advance(Duration::from_millis(600));
+    let ui: serde_json::Value = std::fs::read_to_string(dir.path().join("native-ui.json"))
+        .ok()
+        .map_or(json!({}), |text| {
+            serde_json::from_str(&text).expect("native-ui.json is JSON")
+        });
+    assert!(
+        ui["host_session_counts"][HOST].is_null(),
+        "a host not saved is not recorded: {ui}"
+    );
+}
+
+#[gpui::test]
+fn a_dialog_closing_over_the_import_hands_it_the_keyboard(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_host_count(&dir, 1);
+    let mut h = Harness::on_target(cx, &dir, remote_target(), &with_sessions(3));
+    let import_focused = |h: &mut Harness<'_>| {
+        let root = h.root.clone();
+        h.cx.update(|window, cx| root.read(cx).import_modal_focused(window))
+    };
+    assert!(import_focused(&mut h), "the modal takes the keyboard");
+
+    cleanup_failed(&mut h);
+    assert!(!import_focused(&mut h), "the cleanup dialog has it");
+    h.click_on("cleanup-close");
+    assert!(import_open(&mut h));
+    assert!(
+        import_focused(&mut h),
+        "back to the import modal, not the pane"
+    );
+}
+
+#[gpui::test]
+fn no_offer_when_the_chooser_is_due(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_host_count(&dir, 1);
+    let mut h = Harness::open(cx, &dir);
+    h.event(NetEvent::State(remote()));
+    h.send(support::welcome(support::PROTOCOL));
+    h.send(DaemonMessage::Sessions {
+        sessions: with_sessions(3).sessions,
+    });
+    h.send(DaemonMessage::LayoutInitRequired {
+        has_legacy: false,
+        active_session_count: 3,
+        clonable: Vec::new(),
+    });
+    assert!(h.root(|root, _| root.layout_chooser_open()));
+    assert!(!import_open(&mut h));
+
+    h.keys("enter");
+    h.send(DaemonMessage::Tabs { tabs: Vec::new() });
+    assert!(!import_open(&mut h), "the chooser's answer offers nothing");
+}
+
+#[gpui::test]
+fn a_resync_sessions_list_offers_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_host_count(&dir, 3);
+    let fixture = with_sessions(3);
+    let mut h = Harness::on_target(cx, &dir, remote_target(), &fixture);
+    assert!(!import_open(&mut h), "same count");
+
+    h.send(DaemonMessage::Sessions {
+        sessions: with_sessions(5).sessions,
+    });
+    h.send(DaemonMessage::Tabs { tabs: fixture.tabs });
+    assert!(!import_open(&mut h), "a later list is a resync");
+    assert_eq!(
+        saved_host_count(&dir),
+        json!(5),
+        "a resync still records the count"
+    );
+}
+
+#[gpui::test]
+fn no_offer_on_this_pc(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_host_count(&dir, 1);
+    let mut h = Harness::on_target(cx, &dir, Target::Local, &with_sessions(3));
+    assert!(!import_open(&mut h));
+    assert_eq!(saved_host_count(&dir), json!(1), "this PC records nothing");
 }

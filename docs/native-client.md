@@ -136,6 +136,10 @@ While a tab stays automatic, a window resize re-sends its automatic layout with 
 
 The client sends no `SetPaneRatio` for a divider press that stays within 3 logical px of where it landed, so a click on the handle does not count as a resize. A tab update that rebuilds the dragged tab's split tree renumbers its splits, so the client ends the in-flight drag instead of sending its held path.
 
+**Import remote sessions** (`layout_chooser.rs` model, `layout_chooser_view.rs` view, beside the first-connect chooser): the client records each remote host's session count in `native-ui.json` as `host_session_counts` (`{"<lower-cased MagicDNS name>": <count>}`), only while the host is in `saved_hosts`; Forget drops the entry. It is written on the host's first session list after `Welcome`, on every later full `Sessions` list (a resync) and, debounced, after a session is added or removed. A host with no recorded count records silently. On a reconnect whose first list is non-empty and differs from the recorded count, and unless the first-connect chooser is due, the modal "Import remote sessions" opens: "The remote has N session(s) (d more/fewer than before)." and "Opening them or starting empty replaces this window's tabs on this host. Sessions keep running."
+
+Its rows are Keep existing layout (`import-keep`), Open all N session(s) (`import-open-all`) and Start empty (`import-empty`), with a header ✕ (`import-close`). Esc and ✕ keep, and focus starts on Keep. Open all sends `InitLayout { AllSessions }` and arranges the reply's first tab as the chooser does, through its shape and per-tab picker; Start empty sends `InitLayout { Empty }`. A dialog that closes over the modal (cleanup-failed, a modal notice) returns the keyboard to it.
+
 ## Drag model
 
 `apps/native/src/drag.rs` is the plain-Rust half of every drag. `DragPayload` is a `Pane`, a `Tab`, a `Container` or a `Leaf`. `drop_edge` maps the pointer's fraction of a pane to a `PaneDropEdge`: the outer band (`OUTER_BAND`, 0.12) on a side that touches the grid boundary (`tabs::outer_edges`, within 0.5 px), the nearer outer edge at a corner; the centre box (`CENTRE_LOW` 0.35 to `CENTRE_HIGH` 0.65) is `Replace`; otherwise the half on the nearer axis.
@@ -274,7 +278,7 @@ The stop order, ring step (`step`), where focus goes when a press disables its s
 
 Menus and modals keep to the window and hand the keyboard back. A context menu opens at its anchor and snaps inside the viewport, and its frame never grows past 60% of the window's height: a longer menu scrolls its rows instead (`session_menu.rs` `menu_frame`, `MENU_MAX_SHARE`). Confirm dialogs open on their safe option — Cancel, Keep running, Ignore, or a pane-only close — and every close path, Esc included, returns the keyboard to the pane.
 
-Esc has deliberate exceptions. It never dismisses the layout chooser, and it is ignored while a recovery or an exit is in flight. In a session rename it leaves the menu open and returns to its rows rather than closing them.
+Esc has deliberate exceptions. It never dismisses the layout chooser (the import modal in "Tab layouts" does: Esc and its ✕ both keep the layout), and it is ignored while a recovery or an exit is in flight. In a session rename it leaves the menu open and returns to its rows rather than closing them.
 
 ## Tests
 
