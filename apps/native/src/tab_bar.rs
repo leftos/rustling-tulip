@@ -317,7 +317,7 @@ impl RootView {
     /// Re-applies the panes' fonts and schedules the layout write, so a run
     /// of tab font changes saves at most once per debounce.
     fn after_tab_font_change(&mut self, cx: &mut Context<Self>) {
-        self.apply_pane_fonts(cx);
+        self.apply_pane_fonts(true, cx);
         self.schedule_ui_save(cx);
         cx.notify();
     }

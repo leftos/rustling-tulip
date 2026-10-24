@@ -353,17 +353,20 @@ impl InFlightAppearance {
     }
 
     /// The daemon stored `session_id`'s send `request_id`: drops it and
-    /// every send before it.
-    pub fn answered(&mut self, session_id: &str, request_id: &str) {
+    /// every send before it. Returns whether `request_id` was one of this
+    /// client's sends in flight.
+    pub fn answered(&mut self, session_id: &str, request_id: &str) -> bool {
         let Some(sends) = self.by_session.get_mut(session_id) else {
-            return;
+            return false;
         };
-        if let Some(at) = sends.iter().position(|(id, _)| id == request_id) {
+        let at = sends.iter().position(|(id, _)| id == request_id);
+        if let Some(at) = at {
             sends.drain(..=at);
         }
         if sends.is_empty() {
             self.by_session.remove(session_id);
         }
+        at.is_some()
     }
 
     /// The daemon refused send `request_id`: drops that send alone.

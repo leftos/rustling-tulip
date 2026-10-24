@@ -915,6 +915,7 @@ impl RootView {
         })
         .detach();
         cx.observe_window_bounds(window, |root, window, cx| {
+            root.mark_active_panes_resized(cx);
             root.close_shell_menu(window, cx);
             root.schedule_auto_grid_resend(window, cx);
         })
@@ -1473,7 +1474,7 @@ impl RootView {
     /// and redraws.
     fn after_font_change(&mut self, cx: &mut Context<Self>) {
         self.save_ui();
-        self.apply_pane_fonts(cx);
+        self.apply_pane_fonts(true, cx);
         cx.notify();
     }
 
@@ -1506,8 +1507,8 @@ impl RootView {
     /// A repo or workspace snapshot: a container's appearance is a level
     /// above the session's, so the panes' fonts follow it.
     fn on_containers_changed(&mut self, cx: &mut Context<Self>) {
-        self.settle_container_sends();
-        self.apply_pane_fonts(cx);
+        let own_change = self.settle_container_sends();
+        self.apply_pane_fonts(own_change, cx);
         // A registry change regroups shells: one can gain a new SH or DIR
         // container whose folder has not been scanned.
         self.scan_unseen_cwd_paths();
@@ -1987,7 +1988,7 @@ impl RootView {
         self.reconcile_panes(window, cx);
         self.reconcile_diff_tabs(window, cx);
         self.prune_tab_font_sizes();
-        self.apply_pane_fonts(cx);
+        self.apply_pane_fonts(false, cx);
         self.refresh_spawn_tabs();
         let keyboard_free = !self.overlay_open();
         if let Some(pane_id) = self.tabs.take_focus_request()
@@ -2051,6 +2052,7 @@ impl RootView {
             Some(Drag::Sidebar) => {
                 let window_width = window.viewport_size().width / px(1.0);
                 self.sidebar.set_width(at.0, window_width);
+                self.mark_active_panes_resized(cx);
             }
             Some(Drag::Divider {
                 tab_id,
@@ -2065,6 +2067,8 @@ impl RootView {
                 {
                     self.tabs.set_ratio(tab_id, split_path, next);
                     *ratio = Some(next);
+                    let tab_id = tab_id.clone();
+                    self.mark_tab_panes_resized(&tab_id, cx);
                 }
             }
             Some(Drag::ScSplit) => self.drag_sc_split(at.1),
@@ -2896,12 +2900,11 @@ impl RootView {
         for view in self.pane_views(Some(&session.id)) {
             view.update(cx, |pane, _| pane.update_session(session));
         }
-        if let Some(request_id) = request_id {
-            self.pending_appearance.answered(&session.id, request_id);
-        }
+        let own_change = request_id
+            .is_some_and(|request_id| self.pending_appearance.answered(&session.id, request_id));
         self.attach_waiting_panes(cx);
         if moved {
-            self.apply_session_pane_fonts(&session.id, cx);
+            self.apply_session_pane_fonts(&session.id, own_change, cx);
         }
         self.place_duplicate(request_id, session, window, cx);
         self.place_spawn(request_id, session, window, cx);
@@ -2924,7 +2927,7 @@ impl RootView {
             view.update(cx, |pane, _| pane.refresh_sessions(sessions));
         }
         self.attach_waiting_panes(cx);
-        self.apply_pane_fonts(cx);
+        self.apply_pane_fonts(false, cx);
         self.try_wanted_session(window, cx);
         self.scan_unseen_cwd_paths();
     }
@@ -3281,7 +3284,7 @@ impl RootView {
             changed = true;
         }
         if changed {
-            self.apply_pane_fonts(cx);
+            self.apply_pane_fonts(true, cx);
             self.schedule_ui_save(cx);
             cx.notify();
         }

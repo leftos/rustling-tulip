@@ -157,13 +157,19 @@ impl Attachment {
 const CLAIM_WINDOW: Duration = Duration::from_secs(5);
 
 /// Whether the pane may size its session's PTY: only once a layout pass has
-/// measured its real size, and only while it drives the session's size. It
-/// also keeps the pane's last input, which decides whether a size it sends
-/// claims the session over other clients.
+/// measured its real size, and only while it drives the session's size. A
+/// size it sends claims the session over other clients when the pane had
+/// input within [`CLAIM_WINDOW`], or when it is the first changed measure
+/// after this client resized the pane (the window, a split divider, the
+/// sidebar or a font size). An attach, a re-bind, a reconnect, a tab
+/// switch, a focus change and another client's layout or appearance change
+/// do not claim.
 #[derive(Debug, Default, Clone, Copy)]
 struct SizeGate {
     measured: bool,
     driving: bool,
+    /// This client resized the pane, and the pane has not measured since.
+    resized: bool,
     /// When the pane last had keyboard or pointer input.
     last_input: Option<Instant>,
     /// Where the pointer last moved over the pane, so a move event at the
@@ -205,12 +211,28 @@ impl SizeGate {
         }
     }
 
-    /// A layout pass measured the grid; returns whether to send the size.
-    /// The first measure always does, since nothing was sent before it.
-    fn measure(&mut self, changed: bool) -> bool {
+    /// A layout pass measured the grid, `changed` from the last measure.
+    /// Returns `Some(claim)` when to send the size: the first measure always
+    /// does, since nothing was sent before it. A changed size claims when
+    /// this client resized the pane; the measure uses up that resize
+    /// whether or not the size changed.
+    fn measure(&mut self, changed: bool) -> Option<bool> {
         let first = !self.measured;
+        let claim = changed && self.resized;
+        self.resized = false;
         self.measured = true;
-        self.driving && (first || changed)
+        (self.driving && (first || changed)).then_some(claim)
+    }
+
+    /// This client resized the pane: its next changed measure claims.
+    fn mark_resized(&mut self) {
+        self.resized = true;
+    }
+
+    /// The pane changed hands or connections: a resize marked before it
+    /// does not claim what follows.
+    fn drop_resized(&mut self) {
+        self.resized = false;
     }
 
     /// Returns whether to send the size now: when the pane takes over with
@@ -352,10 +374,16 @@ impl TerminalPane {
 
     /// Draws with `settings` from the next frame, which re-measures the grid
     /// and resizes the PTY to fit.
-    pub fn set_font(&mut self, settings: FontSettings, cx: &mut Context<Self>) {
+    ///
+    /// `by_user` says this client's own font change caused it, so a new size
+    /// resizes the pane as the user's action.
+    pub fn set_font(&mut self, settings: FontSettings, by_user: bool, cx: &mut Context<Self>) {
         let settings = settings.normalized();
         if settings == self.font {
             return;
+        }
+        if by_user && settings.size.to_bits() != self.font.size.to_bits() {
+            self.size_gate.mark_resized();
         }
         self.font = settings;
         self.family = None;
@@ -573,8 +601,14 @@ impl TerminalPane {
     /// showing it, else the first on screen. Taking over sends the size.
     pub fn set_drives_size(&mut self, drives: bool) {
         if self.size_gate.set_driving(drives) {
-            self.send_resize();
+            self.send_resize(false);
         }
+    }
+
+    /// This client resized the pane (the window, a split divider or the
+    /// sidebar): the next size it measures that differs claims the session.
+    pub fn mark_resized(&mut self) {
+        self.size_gate.mark_resized();
     }
 
     /// Whether this pane answers its session's terminal queries, from
@@ -596,7 +630,8 @@ impl TerminalPane {
         self.session = Some(context);
         self.base_dirs = open::base_dirs(session);
         self.attachment.attach(session.id.clone(), (self.now)());
-        self.send_resize();
+        self.size_gate.drop_resized();
+        self.send_resize(false);
         self.schedule_load_tick(cx);
         cx.notify();
     }
@@ -686,7 +721,7 @@ impl TerminalPane {
                 Step::Request => retry = true,
                 Step::History(bytes) => self.feed_history(&bytes, output_follows, cx),
                 Step::Live(bytes) => self.feed_live(&bytes, cx),
-                Step::Resize => self.send_resize(),
+                Step::Resize => self.send_resize(false),
             }
         }
         retry
@@ -742,6 +777,7 @@ impl TerminalPane {
         self.sync_timer = None;
         self.sync_deadline = None;
         self.size_gate.forget_input();
+        self.size_gate.drop_resized();
     }
 
     /// Forget the attachment for a new connection, which starts unattached.
@@ -757,6 +793,7 @@ impl TerminalPane {
         self.load_timer = None;
         self.sync_timer = None;
         self.sync_deadline = None;
+        self.size_gate.drop_resized();
     }
 
     /// Whether the attached session takes input; a composition is only
@@ -960,7 +997,10 @@ impl TerminalPane {
         Some(session_id)
     }
 
-    fn send_resize(&self) {
+    /// Sends the terminal's size when the size gate allows, claimed when
+    /// `resized` (a shown pane's measured size changed) or the pane had
+    /// recent input.
+    fn send_resize(&self, resized: bool) {
         if !self.size_gate.allows() {
             return;
         }
@@ -975,7 +1015,7 @@ impl TerminalPane {
             session_id,
             cols,
             rows,
-            claim: self.size_gate.claims((self.now)()),
+            claim: resized || self.size_gate.claims((self.now)()),
         });
     }
 
@@ -983,7 +1023,7 @@ impl TerminalPane {
     /// spell sends the size again, claimed, ahead of the input itself.
     fn note_input(&mut self) {
         if self.size_gate.note_input((self.now)()) {
-            self.send_resize();
+            self.send_resize(false);
         }
     }
 
@@ -995,8 +1035,8 @@ impl TerminalPane {
             self.term.resize(size);
             self.content_changed();
         }
-        if self.size_gate.measure(changed) {
-            self.send_resize();
+        if let Some(resized) = self.size_gate.measure(changed) {
+            self.send_resize(resized);
         }
         changed
     }
@@ -1229,7 +1269,7 @@ impl TerminalPane {
     /// [`Self::on_gesture_move`].
     fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, _: &mut Context<Self>) {
         if self.size_gate.note_pointer(event.position, (self.now)()) {
-            self.send_resize();
+            self.send_resize(false);
         }
         let mode = self.term.mode();
         if self.tracker.moving().is_some()
@@ -2165,19 +2205,20 @@ mod tests {
         let mut gate = SizeGate::default();
         assert!(!gate.set_driving(true), "nothing measured yet");
         assert!(!gate.allows());
-        assert!(
+        assert_eq!(
             gate.measure(false),
+            Some(false),
             "the first measure sends even at the old size"
         );
         assert!(gate.allows());
-        assert!(!gate.measure(false));
-        assert!(gate.measure(true));
+        assert_eq!(gate.measure(false), None);
+        assert!(gate.measure(true).is_some());
     }
 
     #[test]
     fn size_gate_only_the_driver_sends() {
         let mut gate = SizeGate::default();
-        assert!(!gate.measure(true), "not driving");
+        assert_eq!(gate.measure(true), None, "not driving");
         assert!(!gate.allows());
         assert!(
             gate.set_driving(true),
@@ -2185,7 +2226,43 @@ mod tests {
         );
         assert!(!gate.set_driving(true));
         assert!(!gate.set_driving(false));
-        assert!(!gate.measure(true));
+        assert_eq!(gate.measure(true), None);
+    }
+
+    #[test]
+    fn size_gate_a_resize_then_a_change_claims_once() {
+        let mut gate = SizeGate::default();
+        gate.set_driving(true);
+        gate.measure(false);
+        gate.mark_resized();
+        assert_eq!(gate.measure(true), Some(true), "the resize claims");
+        assert_eq!(
+            gate.measure(true),
+            Some(false),
+            "the resize is used up by the change it caused"
+        );
+    }
+
+    #[test]
+    fn size_gate_a_resize_without_a_change_is_dropped() {
+        let mut gate = SizeGate::default();
+        gate.set_driving(true);
+        gate.measure(false);
+        gate.mark_resized();
+        assert_eq!(gate.measure(false), None, "the size did not change");
+        assert_eq!(
+            gate.measure(true),
+            Some(false),
+            "a later change the resize did not cause does not claim"
+        );
+    }
+
+    #[test]
+    fn size_gate_a_change_without_a_resize_does_not_claim() {
+        let mut gate = SizeGate::default();
+        gate.set_driving(true);
+        gate.measure(false);
+        assert_eq!(gate.measure(true), Some(false));
     }
 
     #[test]

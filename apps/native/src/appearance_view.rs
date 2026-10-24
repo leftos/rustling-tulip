@@ -557,9 +557,11 @@ impl RootView {
 
     /// The daemon's repo or workspace list arrived: a container whose
     /// stored overrides now equal its last send, or that is gone, no
-    /// longer has one pending.
-    pub(crate) fn settle_container_sends(&mut self) {
+    /// longer has one pending. Returns whether any of this client's sends
+    /// landed in it.
+    pub(crate) fn settle_container_sends(&mut self) -> bool {
         let sidebar = &self.sidebar;
+        let mut landed = false;
         self.container_sends.retain(|level, sent| {
             let stored = match level {
                 Level::Repo(id) => sidebar
@@ -574,8 +576,10 @@ impl RootView {
                     .map(|ws| &ws.appearance),
                 Level::Session(_) | Level::App => None,
             };
+            landed |= stored == Some(&*sent);
             stored.is_some_and(|stored| stored != sent)
         });
+        landed
     }
 
     /// Apply, or Enter in the field: sets the typed colour and puts it

@@ -2195,8 +2195,10 @@ pub enum ClientMessage {
         cols: u16,
         rows: u16,
         /// True when the sending pane had keyboard or pointer input in the
-        /// last few seconds: the daemon always applies a claimed size. An
-        /// unclaimed one applies only to a session no client has sized yet.
+        /// last few seconds, or when this client just resized the pane (its
+        /// window, a split divider, the sidebar, or its own font change):
+        /// the daemon always applies a claimed size. An unclaimed one
+        /// applies only to a session no client has sized yet.
         #[serde(default)]
         claim: bool,
     },

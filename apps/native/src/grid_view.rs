@@ -369,19 +369,49 @@ impl RootView {
 
     /// Gives every pane the font and colours it resolves to: each field its
     /// session's, else its container's, else the app's, and for the size
-    /// its tab's override above all of them.
-    pub(crate) fn apply_pane_fonts(&mut self, cx: &mut Context<Self>) {
-        self.apply_fonts_where(|_| true, cx);
+    /// its tab's override above all of them. `by_user` says this client's
+    /// own font change caused it, so a pane it resizes claims its session.
+    pub(crate) fn apply_pane_fonts(&mut self, by_user: bool, cx: &mut Context<Self>) {
+        self.apply_fonts_where(|_| true, by_user, cx);
     }
 
     /// Gives the panes showing `session_id` the font and colours they
     /// resolve to, as a snapshot that moved that session's appearance must.
-    pub(crate) fn apply_session_pane_fonts(&mut self, session_id: &str, cx: &mut Context<Self>) {
-        self.apply_fonts_where(|slot| slot.session.as_deref() == Some(session_id), cx);
+    pub(crate) fn apply_session_pane_fonts(
+        &mut self,
+        session_id: &str,
+        by_user: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.apply_fonts_where(
+            |slot| slot.session.as_deref() == Some(session_id),
+            by_user,
+            cx,
+        );
+    }
+
+    /// This client resized the panes of `tab_id` (the window, a split
+    /// divider or the sidebar): each one's next changed size claims.
+    pub(crate) fn mark_tab_panes_resized(&self, tab_id: &str, cx: &mut Context<Self>) {
+        for slot in self.panes.values().filter(|slot| slot.tab_id == tab_id) {
+            slot.view.update(cx, |pane, _| pane.mark_resized());
+        }
+    }
+
+    /// [`Self::mark_tab_panes_resized`] for the active tab.
+    pub(crate) fn mark_active_panes_resized(&self, cx: &mut Context<Self>) {
+        if let Some(tab_id) = self.tabs.active_id() {
+            self.mark_tab_panes_resized(tab_id, cx);
+        }
     }
 
     /// Gives every pane `keep` takes the font and colours it resolves to.
-    fn apply_fonts_where(&mut self, keep: impl Fn(&PaneSlot) -> bool, cx: &mut Context<Self>) {
+    fn apply_fonts_where(
+        &mut self,
+        keep: impl Fn(&PaneSlot) -> bool,
+        by_user: bool,
+        cx: &mut Context<Self>,
+    ) {
         let resolved: Vec<(String, Resolved)> = self
             .panes
             .iter()
@@ -399,7 +429,7 @@ impl RootView {
             let background = appearance::term_rgb(resolved.background.value);
             let frame = resolved.frame.value.map(appearance::term_rgb);
             slot.view.update(cx, |pane, cx| {
-                pane.set_font(resolved.font(), cx);
+                pane.set_font(resolved.font(), by_user, cx);
                 pane.set_colors(background, frame, cx);
             });
         }
