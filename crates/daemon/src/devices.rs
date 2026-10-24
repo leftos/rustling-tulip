@@ -19,6 +19,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
+use std::collections::VecDeque;
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -40,9 +41,9 @@ pub const MAX_PENDING: usize = 8;
 /// CLI codes that may be live at once; minting one more drops the oldest.
 pub const MAX_CLI_CODES: usize = 4;
 
-/// Wrong CLI redeems inside one [`CODE_LIFETIME`] window that drop every live
-/// CLI code.
-pub const MAX_WRONG_CLI_REDEEMES: u32 = 5;
+/// Wrong CLI redeems inside a rolling [`CODE_LIFETIME`] window that drop
+/// every live CLI code.
+pub const MAX_WRONG_CLI_REDEEMS: usize = 5;
 
 /// One approved device.
 ///
@@ -114,21 +115,22 @@ impl fmt::Debug for DeviceStore {
 impl DeviceStore {
     /// Load the store at `path`.
     ///
-    /// An absent file is an empty store that will be created on the first
-    /// write. A file that cannot be read or decoded leaves a store that
-    /// verifies nothing and refuses to save, so the bad file is preserved for
-    /// the user to inspect instead of being replaced.
+    /// An absent file — `NotFound` — is an empty store that will be created
+    /// on the first write. Any other read failure, and any undecodable file,
+    /// leaves a store that verifies nothing and refuses to save, so a file
+    /// that exists but cannot be read is preserved instead of being
+    /// overwritten.
     #[must_use]
     pub fn load(path: &Path) -> Self {
-        if !path.exists() {
-            return Self {
-                path: path.to_path_buf(),
-                devices: Vec::new(),
-                corrupt: false,
-            };
-        }
         let bytes = match std::fs::read(path) {
             Ok(bytes) => bytes,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                return Self {
+                    path: path.to_path_buf(),
+                    devices: Vec::new(),
+                    corrupt: false,
+                };
+            }
             Err(err) => {
                 tracing::warn!(
                     ?err,
@@ -424,8 +426,9 @@ impl fmt::Debug for CliCode {
 pub struct PairingBook {
     requests: Vec<PendingRequest>,
     cli_codes: Vec<CliCode>,
-    wrong_cli_window: Option<Instant>,
-    wrong_cli_redeems: u32,
+    /// When each recent wrong CLI redeem happened, oldest first; only the
+    /// last [`CODE_LIFETIME`] counts.
+    wrong_cli_redeems: VecDeque<Instant>,
 }
 
 impl PairingBook {
@@ -440,6 +443,7 @@ impl PairingBook {
     /// A device that already has a request has it replaced; the replaced id
     /// comes back in [`Requested::superseded`] so the caller can tell that
     /// connection. Identity comes only from `peer`, never from the wire.
+    /// Lapsed requests are dropped first, so they never count toward the cap.
     ///
     /// # Errors
     ///
@@ -451,6 +455,7 @@ impl PairingBook {
         now: Instant,
         asked_at: DateTime<Utc>,
     ) -> Result<Requested, PairError> {
+        self.expire(now);
         let others = self
             .requests
             .iter()
@@ -494,12 +499,14 @@ impl PairingBook {
             return Err(PairError::Expired);
         }
         let code = crate::secret::generate_pairing_code();
+        let expires_at = now + CODE_LIFETIME;
         let request = &mut self.requests[index];
         request.approved = true;
         request.code = Some(PairCode {
             value: code.clone(),
-            expires_at: now + CODE_LIFETIME,
+            expires_at,
         });
+        request.expires_at = request.expires_at.max(expires_at);
         Ok(code)
     }
 
@@ -603,9 +610,10 @@ impl PairingBook {
     /// Redeem a CLI code for the calling device. The code works once, and any
     /// authorized device may use it since it is bound to no request.
     ///
-    /// Wrong codes cost no per-code attempts, but [`MAX_WRONG_CLI_REDEEMES`]
-    /// wrong redeems inside one [`CODE_LIFETIME`] window drop every live CLI
-    /// code.
+    /// Wrong codes cost no per-code attempts, but [`MAX_WRONG_CLI_REDEEMS`]
+    /// wrong redeems, each within [`CODE_LIFETIME`] of the others, drop every
+    /// live CLI code. A correct redeem neither counts as nor clears a wrong
+    /// one.
     ///
     /// # Errors
     ///
@@ -622,41 +630,44 @@ impl PairingBook {
         }
         if let Some(index) = hit {
             self.cli_codes.remove(index);
-            self.wrong_cli_window = None;
-            self.wrong_cli_redeems = 0;
             return Ok(());
         }
         if self.cli_codes.is_empty() {
             return Err(PairError::Expired);
         }
-        let window_open = self
-            .wrong_cli_window
-            .is_some_and(|start| now.duration_since(start) < CODE_LIFETIME);
-        if !window_open {
-            self.wrong_cli_window = Some(now);
-            self.wrong_cli_redeems = 0;
-        }
-        self.wrong_cli_redeems += 1;
-        if self.wrong_cli_redeems >= MAX_WRONG_CLI_REDEEMES {
+        self.wrong_cli_redeems
+            .retain(|at| now.duration_since(*at) <= CODE_LIFETIME);
+        self.wrong_cli_redeems.push_back(now);
+        if self.wrong_cli_redeems.len() >= MAX_WRONG_CLI_REDEEMS {
             self.cli_codes.clear();
-            self.wrong_cli_window = None;
-            self.wrong_cli_redeems = 0;
+            self.wrong_cli_redeems.clear();
         }
         Err(PairError::WrongCode)
     }
 
     /// Drop every lapsed request and CLI code, returning the ids of the
     /// requests that lapsed so the caller can tell those devices.
+    ///
+    /// A request that is still waiting but whose code has lapsed keeps its
+    /// place and loses the code, so it shows unapproved again and the owner
+    /// can approve it afresh.
     pub fn expire(&mut self, now: Instant) -> Vec<RequestId> {
         self.drop_expired_cli_codes(now);
         let mut lapsed = Vec::new();
-        self.requests.retain(|request| {
+        self.requests.retain_mut(|request| {
             if now >= request.expires_at {
                 lapsed.push(request.id.clone());
-                false
-            } else {
-                true
+                return false;
             }
+            if request
+                .code
+                .as_ref()
+                .is_some_and(|code| now >= code.expires_at)
+            {
+                request.code = None;
+                request.approved = false;
+            }
+            true
         });
         lapsed
     }
@@ -697,7 +708,7 @@ mod tests {
     };
     use chrono::Utc;
     use std::path::PathBuf;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
     use tailnet::PeerIdentity;
 
     /// A scratch config dir holding one `devices.json`, removed on drop.
@@ -1160,5 +1171,140 @@ mod tests {
             !printed.contains(&code),
             "the owner's list never shows a code: {printed}"
         );
+    }
+
+    #[test]
+    fn cli_lockout_is_a_rolling_window() {
+        let mut book = PairingBook::new();
+        let t0 = Instant::now();
+        let at = |millis: u64| t0 + Duration::from_millis(millis);
+        let first = book.mint_cli_code(t0);
+        let wrong = other_code(&first);
+        assert_eq!(
+            book.redeem_cli_code(&wrong, at(0)),
+            Err(PairError::WrongCode)
+        );
+        for _ in 0..3 {
+            assert_eq!(
+                book.redeem_cli_code(&wrong, at(119_000)),
+                Err(PairError::WrongCode)
+            );
+        }
+        // Minted late enough that the check at 2:00.5 still finds it live.
+        let live = book.mint_cli_code(at(119_500));
+        let wrong = other_code(&live);
+        assert_eq!(
+            book.redeem_cli_code(&wrong, at(120_500)),
+            Err(PairError::WrongCode)
+        );
+        assert_eq!(
+            book.redeem_cli_code(&wrong, at(120_500)),
+            Err(PairError::WrongCode),
+            "the fifth wrong redeem within two minutes"
+        );
+        assert_eq!(
+            book.redeem_cli_code(&live, at(120_500)),
+            Err(PairError::Expired),
+            "the live CLI code was dropped"
+        );
+    }
+
+    #[test]
+    fn a_correct_cli_redeem_does_not_reset_the_lockout() {
+        let mut book = PairingBook::new();
+        let t0 = Instant::now();
+        let first = book.mint_cli_code(t0);
+        let wrong = other_code(&first);
+        for _ in 0..4 {
+            assert_eq!(book.redeem_cli_code(&wrong, t0), Err(PairError::WrongCode));
+        }
+        let live = loop {
+            let candidate = book.mint_cli_code(t0);
+            if candidate != wrong {
+                break candidate;
+            }
+        };
+        book.redeem_cli_code(&first, t0)
+            .expect("the right code still redeems");
+        assert_eq!(
+            book.redeem_cli_code(&wrong, t0),
+            Err(PairError::WrongCode),
+            "the fifth wrong redeem inside the window"
+        );
+        assert_eq!(
+            book.redeem_cli_code(&live, t0),
+            Err(PairError::Expired),
+            "a correct redeem must not reset the lockout"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_store_is_corrupt_not_empty() {
+        let scratch = Scratch::new("unreadable");
+        let path = scratch.path();
+        std::fs::create_dir_all(&path).expect("make a directory where the store goes");
+        let mut store = DeviceStore::load(&path);
+        assert!(
+            store.is_corrupt(),
+            "an unreadable store is corrupt, not empty"
+        );
+        assert!(
+            store.issue(&phone(), Utc::now()).is_err(),
+            "and it refuses to save over it"
+        );
+    }
+
+    #[test]
+    fn approve_near_the_request_deadline_keeps_the_code_two_minutes() {
+        let mut book = PairingBook::new();
+        let t0 = Instant::now();
+        let request = book
+            .request(&phone(), t0, Utc::now())
+            .expect("request a pairing");
+        let code = book
+            .approve(&request.id, t0 + Duration::from_secs(298))
+            .expect("approve at 4:58");
+        book.redeem(&request.id, "node-a", &code, t0 + Duration::from_secs(360))
+            .expect("the code outlives the request's own deadline");
+    }
+
+    #[test]
+    fn expire_unapproves_a_request_whose_code_lapsed() {
+        let mut book = PairingBook::new();
+        let t0 = Instant::now();
+        let (id, code) = approved_request(&mut book, t0);
+        let lapsed = book.expire(t0 + CODE_LIFETIME);
+        assert!(lapsed.is_empty(), "the request itself has not lapsed");
+        let view = book.pending();
+        assert_eq!(view.len(), 1);
+        assert!(
+            !view[0].approved,
+            "a lapsed code leaves the request unapproved"
+        );
+        assert_eq!(
+            book.redeem(&id, "node-a", &code, t0 + CODE_LIFETIME),
+            Err(PairError::NotApproved),
+            "and the lapsed code is gone"
+        );
+    }
+
+    #[test]
+    fn lapsed_requests_do_not_count_toward_the_cap() {
+        let mut book = PairingBook::new();
+        let t0 = Instant::now();
+        for n in 0..MAX_PENDING {
+            book.request(
+                &peer(&format!("node-{n}"), "phone", "lefto@example.com"),
+                t0,
+                Utc::now(),
+            )
+            .expect("a request within the cap");
+        }
+        book.request(
+            &peer("node-late", "phone", "lefto@example.com"),
+            t0 + REQUEST_LIFETIME,
+            Utc::now(),
+        )
+        .expect("the eight earlier requests have lapsed");
     }
 }
