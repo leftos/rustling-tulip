@@ -6,47 +6,43 @@
 
 - [/] RT-267 Move all Claude support behind the agent seam as its first plugin · release vNext
 - [ ] RT-96 Remote devices: list connected tailnet devices, block one and drop its connections · release vNext
-- [ ] RT-184 Let only the client with recent input own a session's terminal size · release vNext
 - [ ] RT-187 Await the tailnet servers after the listener's supervisor panics · release vNext
-- [ ] RT-240 Close tailnet sessions when their listener drops · release vNext
 - [ ] RT-243 Split tailnet Supervisor::run and carry the real CertFailed reason
 - [ ] RT-258 Remote mode: don't send this PC's remembered folders to a remote host
 - [ ] RT-158 P6.6: Remote tests over a fake Tailscale, hand checklist, and the docs pass · release vNext
 - [ ] RT-244 Preset wizard: typed host paths instead of local pickers in remote mode
-- [/] RT-166 TS.3b: device tokens issued only after the owner approves the device on the host PC · release vNext
 - [ ] RT-278 Prove the daemon holds the token before a client reuses, retires or kills it
 - [ ] RT-331 Built-in text and Markdown viewer with Open in default app and an always-external setting · release vNext
-  - [ ] RT-339 RT-331 S6: Markdown view with Source toggle and links · release vNext
-    - [ ] RT-384 RT-339 S6b: Markdown link clicks and anchor scrolling · release vNext
   - [ ] RT-340 RT-331 S7: Viewer line selection, find and reload · release vNext
+    - [ ] RT-388 RT-340 S7b: Viewer find bar · release vNext
+    - [ ] RT-389 RT-340 S7c: Reload a viewer tab on activation · release vNext
   - [ ] RT-341 RT-331 S8: Viewer docs and task index rows · release vNext
 - [ ] RT-343 Keep name, look and sidebar place when Recover respawns a session
 - [ ] RT-349 Restart conversation discovery for sessions reattached after a daemon restart
-- [ ] RT-374 Pair the desktop client with a remote host: device token store and pairing screen · release vNext
-  - [ ] RT-382 RT-374 P3: Desktop pairing dialog, lib.rs wiring and the picker's Not paired tag · release vNext
 - [ ] RT-375 Copy only the text when a terminal selection crosses a TUI's box borders · release vNext+1
 - [ ] RT-378 Close a failed handshake gracefully so AuthFailed is never lost to a reset
+- [ ] RT-386 Map a recovered shell's hook events with its recovered agent options and trust
 
 ## Wave 1a — Claude sessions on DeepSeek
 
-- [ ] RT-176 Import a DeepSeek session started with a model alias as DeepSeek · release vNext
-- [ ] RT-192 Verify the DeepSeek provider's model and env handling · release vNext
+- [ ] RT-176 Import a DeepSeek session started with a model alias as DeepSeek
+- [ ] RT-192 Verify the DeepSeek provider's model and env handling
 
 ## Wave 2 — Daily driver: close the port's gaps
 
-- [ ] RT-179 Keep keyboard focus when pressing Worktrees Save disables it · release vNext
-- [ ] RT-195 Give the container menu a keyboard route · release vNext
-- [ ] RT-202 Accept the 1015 and 1016 mouse-report encodings · release vNext
-- [ ] RT-204 Clear the container row focus when the sidebar stops showing the container list · release vNext
-- [ ] RT-205 Re-sync a watched .code-workspace once at daemon start · release vNext
-- [ ] RT-207 Move the .code-workspace folder scan off the connection's dispatch task · release vNext
-- [ ] RT-211 Open the trusted-launch dialog through one helper, with a refusal path · release vNext
-- [ ] RT-212 Clear the sidebar row hover when the pointer leaves · release vNext
-- [ ] RT-223 Test the daemon's branch-name suggestion and its failure routing · release vNext
-- [ ] RT-235 Check a VS Code or Explorer target still exists before opening it · release vNext
-- [ ] RT-236 Fold the container menu's disabled-tip table into its row definitions · release vNext
-- [ ] RT-237 Diagnose the VS Code fallback's dispatch order when two opens are queued · release vNext
-- [ ] RT-238 Route a ListPresets failure by request_id · release vNext
+- [ ] RT-179 Keep keyboard focus when pressing Worktrees Save disables it
+- [ ] RT-195 Give the container menu a keyboard route
+- [ ] RT-202 Accept the 1015 and 1016 mouse-report encodings
+- [ ] RT-204 Clear the container row focus when the sidebar stops showing the container list
+- [ ] RT-205 Re-sync a watched .code-workspace once at daemon start
+- [ ] RT-207 Move the .code-workspace folder scan off the connection's dispatch task
+- [ ] RT-211 Open the trusted-launch dialog through one helper, with a refusal path
+- [ ] RT-212 Clear the sidebar row hover when the pointer leaves
+- [ ] RT-223 Test the daemon's branch-name suggestion and its failure routing
+- [ ] RT-235 Check a VS Code or Explorer target still exists before opening it
+- [ ] RT-236 Fold the container menu's disabled-tip table into its row definitions
+- [ ] RT-237 Diagnose the VS Code fallback's dispatch order when two opens are queued
+- [ ] RT-238 Route a ListPresets failure by request_id
 - [ ] RT-239 Skip touch and broadcast for a MovePane that leaves the grid unchanged
 - [ ] RT-254 Keep preset job events when the broadcast lags
 - [ ] RT-255 Reject or document a preset max_panes_per_tab of 0
@@ -56,12 +52,12 @@
 
 ## Wave 2b — Hook status
 
-- [ ] RT-220 Quote the characters a shell still expands in the hook shim command · release vNext
-- [ ] RT-219 Cap the length of hook-derived pending input strings · release vNext
-- [ ] RT-85 Flag a session hand-off ready when its orchestrator says to /clear and /nextup · release vNext
-- [ ] RT-193 Make SpawnArgs' hook settings a constructor argument, not a comment-enforced None · release vNext
-- [ ] RT-206 Reject a leading hyphen in a hook-reported conversation id · release vNext
-- [ ] RT-210 Match Claude Code's hook matcher semantics in the fake CLI · release vNext
+- [ ] RT-220 Quote the characters a shell still expands in the hook shim command
+- [ ] RT-219 Cap the length of hook-derived pending input strings
+- [ ] RT-85 Flag a session hand-off ready when its orchestrator says to /clear and /nextup
+- [ ] RT-193 Make SpawnArgs' hook settings a constructor argument, not a comment-enforced None
+- [ ] RT-206 Reject a leading hyphen in a hook-reported conversation id
+- [ ] RT-210 Match Claude Code's hook matcher semantics in the fake CLI
 
 ## Wave 4 — Mobile app (iPhone PWA over Tailscale)
 
@@ -195,23 +191,23 @@
 - [ ] RT-253 Check whether the daemon's tokio-rustls can be dev-only after TS.5
 - [ ] RT-260 Autostart test: stop writing to the live HKCU Run key
 - [ ] RT-262 Run the ui_ellipsis specs: test-release builds without debug assertions
-- [!] RT-294 Route rt.ps1 native-e2e to the builder through the gate · release vNext
-- [ ] RT-324 Drive the native client headless: hidden window, virtual input, captures · release vNext
-  - [ ] RT-316 Capture the native client in any state: native-shot views for the overlays and empty area, and a drive-and-capture command · release vNext
-  - [ ] RT-326 RT-324 S1: Harden the cloaked window and refuse a driven run without isolated dirs · release vNext
-  - [ ] RT-327 RT-324 S3: In-process driver endpoint behind a feature: keys, clicks, actions, state, screenshot · release vNext
-  - [ ] RT-328 RT-324 S4: Driver drag, wheel, type_text, pane_text and wait_for · release vNext
-  - [ ] RT-329 RT-324 S5: stdio MCP server over the driver endpoint · release vNext
-  - [ ] RT-330 RT-324 S6: Live no-focus check, DRIVING_CONVENTIONS and task index for driving · release vNext
+- [!] RT-294 Route rt.ps1 native-e2e to the builder through the gate
+- [ ] RT-324 Drive the native client headless: hidden window, virtual input, captures
+  - [ ] RT-316 Capture the native client in any state: native-shot views for the overlays and empty area, and a drive-and-capture command
+  - [ ] RT-326 RT-324 S1: Harden the cloaked window and refuse a driven run without isolated dirs
+  - [ ] RT-327 RT-324 S3: In-process driver endpoint behind a feature: keys, clicks, actions, state, screenshot
+  - [ ] RT-328 RT-324 S4: Driver drag, wheel, type_text, pane_text and wait_for
+  - [ ] RT-329 RT-324 S5: stdio MCP server over the driver endpoint
+  - [ ] RT-330 RT-324 S6: Live no-focus check, DRIVING_CONVENTIONS and task index for driving
 - [ ] RT-346 Make rt.ps1 test -Validate fast: it ran 652 s through the gate
 - [ ] RT-348 Update tokio past RUSTSEC-2026-0386 so cargo deny passes
 
 ## macOS
 
-- [!] RT-46 Verify macOS support M0–M3 on real Mac hardware · release vNext
-- [ ] RT-82 DI.6: macOS dictation through SFSpeechRecognizer and right Option · release vNext
-- [ ] RT-47 M4: macOS packaging, signing and notarization · release vNext
-- [ ] RT-246 Compile-check the macOS and Linux autostart modules, and decide --detach for the LaunchAgent · release vNext
+- [!] RT-46 Verify macOS support M0–M3 on real Mac hardware
+- [ ] RT-82 DI.6: macOS dictation through SFSpeechRecognizer and right Option
+- [ ] RT-47 M4: macOS packaging, signing and notarization
+- [ ] RT-246 Compile-check the macOS and Linux autostart modules, and decide --detach for the LaunchAgent
 
 ## Agent CLIs
 
