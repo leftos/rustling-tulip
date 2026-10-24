@@ -178,7 +178,13 @@ impl RootView {
         self.close_sc_picker(window, cx);
         self.close_sc_file_menu(window, cx);
         self.close_more_menu(window, cx);
+        let was_collapsed = self.sidebar.is_collapsed();
         change(&mut self.sidebar);
+        // Only a fold or an unfold gives the panes a new width; a switch
+        // between two open panels leaves it alone.
+        if self.sidebar.is_collapsed() != was_collapsed {
+            self.mark_active_panes_resized(cx);
+        }
         // The Stop all chip lives only in the sessions panel, so a switch
         // away from it, or a fold, takes any arm with it.
         if self.sidebar.is_collapsed() || self.sidebar.activity() != Activity::Sessions {

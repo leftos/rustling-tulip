@@ -391,7 +391,8 @@ impl RootView {
     }
 
     /// This client resized the panes of `tab_id` (the window, a split
-    /// divider or the sidebar): each one's next changed size claims.
+    /// divider, the sidebar dragged, folded or unfolded): each one's next changed
+    /// size claims.
     pub(crate) fn mark_tab_panes_resized(&self, tab_id: &str, cx: &mut Context<Self>) {
         for slot in self.panes.values().filter(|slot| slot.tab_id == tab_id) {
             slot.view.update(cx, |pane, _| pane.mark_resized());

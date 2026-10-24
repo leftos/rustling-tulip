@@ -605,8 +605,9 @@ impl TerminalPane {
         }
     }
 
-    /// This client resized the pane (the window, a split divider or the
-    /// sidebar): the next size it measures that differs claims the session.
+    /// This client resized the pane (the window, a split divider, the sidebar
+    /// dragged, folded or unfolded): the next size it measures that differs claims
+    /// the session.
     pub fn mark_resized(&mut self) {
         self.size_gate.mark_resized();
     }

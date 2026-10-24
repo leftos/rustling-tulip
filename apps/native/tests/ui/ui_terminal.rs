@@ -808,6 +808,114 @@ fn a_window_resize_claims_the_size(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn collapsing_the_sidebar_claims_the_panes_size(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
+    h.answer_scrollback("s1", b"");
+    // Past the window in which a key or a pointer move would claim the size.
+    h.advance(Duration::from_secs(6));
+    h.sent();
+
+    h.keys("ctrl-b");
+    h.cx.run_until_parked();
+    let claims = resize_claims(&h.sent(), "s1");
+    assert!(
+        !claims.is_empty() && claims.iter().all(|claim| *claim),
+        "collapsing the sidebar claims the panes' new size: {claims:?}"
+    );
+}
+
+#[gpui::test]
+fn reopening_the_sidebar_claims_the_panes_size(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
+    h.answer_scrollback("s1", b"");
+    h.keys("ctrl-b");
+    h.cx.run_until_parked();
+    // Past the window in which a key or a pointer move would claim the size.
+    h.advance(Duration::from_secs(6));
+    h.sent();
+
+    h.keys("ctrl-b");
+    h.cx.run_until_parked();
+    let claims = resize_claims(&h.sent(), "s1");
+    assert!(
+        !claims.is_empty() && claims.iter().all(|claim| *claim),
+        "reopening the sidebar claims the panes' new size: {claims:?}"
+    );
+}
+
+#[gpui::test]
+fn a_rail_click_that_folds_the_sidebar_claims_the_panes_size(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
+    h.answer_scrollback("s1", b"");
+    h.advance(Duration::from_secs(6));
+    let before = resize_cols(&h.sent(), "s1");
+
+    // The sessions panel is the active one at start, so a click folds it.
+    h.click_on("activity-sessions");
+    h.cx.run_until_parked();
+    let sent = h.sent();
+    let cols = resize_cols(&sent, "s1");
+    let claims = resize_claims(&sent, "s1");
+    let changed = cols.last().is_some_and(|cols| match before.last() {
+        Some(width) => cols != width,
+        None => true,
+    });
+    assert!(
+        changed && !claims.is_empty() && claims.iter().all(|claim| *claim),
+        "folding the sidebar from the rail claims the panes' new size: {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn a_rail_click_that_reopens_the_sidebar_claims_the_panes_size(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
+    h.answer_scrollback("s1", b"");
+    h.advance(Duration::from_secs(6));
+    h.sent();
+
+    h.click_on("activity-sessions");
+    h.cx.run_until_parked();
+    h.advance(Duration::from_secs(6));
+    let before = resize_cols(&h.sent(), "s1");
+
+    h.click_on("activity-sessions");
+    h.cx.run_until_parked();
+    let sent = h.sent();
+    let cols = resize_cols(&sent, "s1");
+    let claims = resize_claims(&sent, "s1");
+    let changed = cols.last().is_some_and(|cols| match before.last() {
+        Some(width) => cols != width,
+        None => true,
+    });
+    assert!(
+        changed && !claims.is_empty() && claims.iter().all(|claim| *claim),
+        "reopening the sidebar from the rail claims the panes' new size: {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn a_rail_click_that_only_switches_panels_does_not_claim(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
+    h.answer_scrollback("s1", b"");
+    h.advance(Duration::from_secs(6));
+    h.sent();
+
+    // Another panel keeps the sidebar's width, so no pane resizes.
+    h.click_on("activity-needs-you");
+    h.cx.run_until_parked();
+    let claims = resize_claims(&h.sent(), "s1");
+    assert!(
+        claims.iter().all(|claim| !claim),
+        "switching panels from the rail claims nothing: {claims:?}"
+    );
+}
+
+#[gpui::test]
 fn showing_a_hidden_tab_does_not_claim(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let fixture = Fixture {

@@ -1689,6 +1689,8 @@ impl RootView {
         self.close_sc_picker(window, cx);
         self.close_sc_file_menu(window, cx);
         self.sidebar.toggle_sidebar();
+        // The fold always gives the panes a new width.
+        self.mark_active_panes_resized(cx);
         // The Stop all chip lives only in the sessions panel, so a fold
         // takes any arm with it.
         if self.sidebar.is_collapsed() {
