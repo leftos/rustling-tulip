@@ -11,6 +11,7 @@ use super::tabs::rebind_session_panes;
 use super::{Hub, StateEvent};
 use crate::orphan::OrphanMeta;
 use crate::paths::Dirs;
+use crate::screen::rules::rules_for;
 use crate::session::{SessionRecord, SessionRegistry, attach_lifecycle};
 use crate::{conversations, history, orphan, osc_title, pty_state, screen, tracer_client};
 use agent_api::ResolvedRows;
@@ -194,14 +195,14 @@ async fn reattach_one(
                         screen::REATTACH_COLS,
                         screen::REATTACH_ROWS,
                     )));
-                    let restored = {
+                    let (restored, agent) = {
                         let mut guard = crate::sync::lock(pending.arc());
                         guard.scrollback_snapshot_req = Some(snap_tx);
                         if let Some((in_tx, _)) = &shell_input {
                             guard.input_notifier = Some(in_tx.clone());
                         }
                         guard.screen = Some(Arc::clone(&screen));
-                        guard.status
+                        (guard.status, guard.agent)
                     };
                     pty.resize(screen::REATTACH_COLS, screen::REATTACH_ROWS);
                     if let Some((_, in_rx)) = shell_input {
@@ -215,6 +216,7 @@ async fn reattach_one(
                             },
                             attention_tx.clone(),
                             restored,
+                            rules_for(agent),
                         );
                     } else {
                         pty_state::watch(
@@ -225,6 +227,7 @@ async fn reattach_one(
                                 screen,
                             },
                             attention_tx.clone(),
+                            rules_for(agent),
                         );
                     }
                     osc_title::watch(

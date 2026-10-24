@@ -2,7 +2,8 @@
 //!
 //! An interactive agent session's status comes from its hooks and from its
 //! screen. [`watch`] feeds the session's grid and, once output settles, reads
-//! it with [`crate::screen::rules::read_claude`]. What the screen shows is
+//! it with the session's agent's screen rules
+//! ([`crate::screen::rules::CompiledRules::read`]). What the screen shows is
 //! published behind hysteresis, a hold after any other writer's change, and a
 //! guard that refuses the write once the record has moved since the read. A
 //! quiet screen is never read as idle on its own: a spinner still on screen
@@ -23,7 +24,7 @@
 
 use crate::osc_title::TitleActivity;
 use crate::screen::SharedScreen;
-use crate::screen::rules::{self, Reading, ScreenState, Verdict};
+use crate::screen::rules::{self, CompiledRules, Reading, ScreenState, Verdict};
 use crate::session::{SessionEvent, SessionRecord, SessionRegistry, push_recent_action};
 use protocol::{AttentionReason, SessionStatus};
 use std::collections::VecDeque;
@@ -132,15 +133,16 @@ pub struct AgentStreams {
 /// read (see [`apply_screen_status`]).
 ///
 /// `attention_tx` receives one event each time the screen moves the session
-/// into `AwaitingInput`.
+/// into `AwaitingInput`. `rules` are the screen rules of the session's agent.
 pub fn watch(
     registry: &Arc<SessionRegistry>,
     session_id: String,
     streams: AgentStreams,
     attention_tx: mpsc::UnboundedSender<AttentionEvent>,
+    rules: Arc<CompiledRules>,
 ) {
     let AgentStreams { mut output, screen } = streams;
-    let mut watcher = ScreenWatch::new(registry, session_id, screen, attention_tx);
+    let mut watcher = ScreenWatch::new(registry, session_id, screen, attention_tx, rules);
     tokio::spawn(async move { watcher.run_agent(&mut output).await });
 }
 
@@ -151,7 +153,7 @@ enum Mode {
     Agent,
     /// A plain shell running `claude`: the screen sets its status, until
     /// Claude's screen is gone.
-    ShellClaude,
+    ShellAgent,
     /// A plain shell not running `claude`: the screen is read only to spot
     /// Claude.
     Shell,
@@ -167,10 +169,10 @@ enum Checked {
     /// A shell's hook-driven flag moved since the last read.
     HooksFlipped,
     /// A shell's screen showed Claude for a whole window.
-    ClaudeShown,
+    AgentShown,
     /// Claude's screen was gone from a shell for a whole window, and the
     /// shell was handed back to its classifier.
-    ClaudeEnded,
+    AgentEnded,
 }
 
 /// What a record change seen by the wake asks of the watcher.
@@ -192,6 +194,8 @@ struct ScreenWatch {
     session_id: String,
     screen: SharedScreen,
     attention_tx: mpsc::UnboundedSender<AttentionEvent>,
+    /// The screen rules of the session's agent.
+    rules: Arc<CompiledRules>,
     wake: RecordWake,
     confirm: Confirm,
     /// When the last chunk of output arrived; a check at least
@@ -229,9 +233,9 @@ enum Target {
     /// The status the screen shows.
     Status(SessionStatus),
     /// Claude's screen, in a shell not yet running `claude`.
-    ClaudeShown,
+    AgentShown,
     /// Claude's screen gone, in a shell running `claude`.
-    ClaudeGone,
+    AgentGone,
 }
 
 /// A gated change being confirmed: what it would publish, the record it was
@@ -326,6 +330,7 @@ impl ScreenWatch {
         session_id: String,
         screen: SharedScreen,
         attention_tx: mpsc::UnboundedSender<AttentionEvent>,
+        rules: Arc<CompiledRules>,
     ) -> Self {
         let wake = RecordWake::new(registry, &session_id);
         Self {
@@ -333,6 +338,7 @@ impl ScreenWatch {
             session_id,
             screen,
             attention_tx,
+            rules,
             wake,
             confirm: Confirm::new(Instant::now()),
             last_output: None,
@@ -418,19 +424,17 @@ impl ScreenWatch {
             self.dialog_edge_armed = true;
         }
         match mode {
-            Mode::Shell => {
-                self.watch_for_claude(read, shows_claude(reading) && !prompt, quiet, now)
-            }
-            Mode::ShellClaude if prompt => self.watch_for_claude_end(read, now),
-            Mode::ShellClaude if !shows_claude(reading) => {
+            Mode::Shell => self.watch_for_agent(read, shows_agent(&reading) && !prompt, quiet, now),
+            Mode::ShellAgent if prompt => self.watch_for_agent_end(read, now),
+            Mode::ShellAgent if !shows_agent(&reading) => {
                 // A Claude screen no rule knows, or Claude's title alone, with
                 // the shell's prompt not back: claude may still run. Nothing
                 // writes, and any open window waits for the next check.
                 self.confirm.candidate = None;
                 Checked::Done
             }
-            Mode::Agent | Mode::ShellClaude => {
-                self.follow_screen(read, reading, quiet, now);
+            Mode::Agent | Mode::ShellAgent => {
+                self.follow_screen(read, &reading, quiet, now);
                 Checked::Done
             }
         }
@@ -484,7 +488,7 @@ impl ScreenWatch {
             let screen = crate::sync::lock(&self.screen);
             (
                 screen.size(),
-                rules::read_claude(&screen),
+                self.rules.read(&screen),
                 rules::last_row_is_shell_prompt(&screen),
             )
         };
@@ -494,7 +498,7 @@ impl ScreenWatch {
     }
 
     /// Publish the status the screen shows, at once or after its window.
-    fn follow_screen(&mut self, read: StatusRead, reading: Reading, quiet: bool, now: Instant) {
+    fn follow_screen(&mut self, read: StatusRead, reading: &Reading, quiet: bool, now: Instant) {
         let Some(target) = screen_target(reading).filter(|&target| target != read.status) else {
             self.confirm.window = None;
             self.confirm.candidate = None;
@@ -512,9 +516,9 @@ impl ScreenWatch {
 
     /// In a shell not running `claude`, count a settled check whose screen
     /// shows Claude with no shell prompt under it (`shown`); answers
-    /// [`Checked::ClaudeShown`] once a whole window has. A check inside a
+    /// [`Checked::AgentShown`] once a whole window has. A check inside a
     /// burst of output neither counts nor breaks the window.
-    fn watch_for_claude(
+    fn watch_for_agent(
         &mut self,
         read: StatusRead,
         shown: bool,
@@ -529,8 +533,8 @@ impl ScreenWatch {
             self.confirm.window = None;
             return Checked::Done;
         }
-        if self.confirm.agree(read, Target::ClaudeShown, now) {
-            Checked::ClaudeShown
+        if self.confirm.agree(read, Target::AgentShown, now) {
+            Checked::AgentShown
         } else {
             Checked::Done
         }
@@ -538,17 +542,17 @@ impl ScreenWatch {
 
     /// In a shell running `claude`, count a check whose last row is the
     /// shell's prompt; once a whole window has, hand the shell back to its classifier
-    /// (see [`hand_shell_back`]) and answer [`Checked::ClaudeEnded`]. A write
+    /// (see [`hand_shell_back`]) and answer [`Checked::AgentEnded`]. A write
     /// that lands is this watcher's own, so its broadcast starts no hold.
-    fn watch_for_claude_end(&mut self, read: StatusRead, now: Instant) -> Checked {
+    fn watch_for_agent_end(&mut self, read: StatusRead, now: Instant) -> Checked {
         self.confirm.candidate = None;
-        if !self.confirm.agree(read, Target::ClaudeGone, now) {
+        if !self.confirm.agree(read, Target::AgentGone, now) {
             return Checked::Done;
         }
         match hand_shell_back(&self.registry, &self.session_id, read) {
             Some(after) => {
                 self.wake.seen = Some(after);
-                Checked::ClaudeEnded
+                Checked::AgentEnded
             }
             None => Checked::Done,
         }
@@ -625,7 +629,7 @@ impl ScreenWatch {
 /// The status a screen reading asks for, or `None` when it asks for none: an
 /// overlay, an unmatched screen, or a state read from the title alone, which
 /// never writes.
-fn screen_target(reading: Reading) -> Option<SessionStatus> {
+fn screen_target(reading: &Reading) -> Option<SessionStatus> {
     match reading.verdict {
         Verdict::State(_) if reading.from_title => None,
         Verdict::State(ScreenState::Working) => Some(SessionStatus::Working),
@@ -638,7 +642,7 @@ fn screen_target(reading: Reading) -> Option<SessionStatus> {
 /// Whether a reading comes from Claude's screen: a rule over the screen body
 /// matched, a state or an overlay. A title alone, which outlives the CLI that
 /// set it, does not count.
-fn shows_claude(reading: Reading) -> bool {
+fn shows_agent(reading: &Reading) -> bool {
     !reading.from_title && reading.verdict != Verdict::NoMatch
 }
 
@@ -744,19 +748,21 @@ fn hand_shell_back(
 
 /// Whether the agent typed into session `session_id`'s shell is up: its hooks
 /// drive the session, or its screen shows the agent with no shell prompt
-/// under it, as the shell's watcher reads it.
+/// under it, as the shell's watcher reads it with the screen rules of the
+/// record's agent.
 pub fn agent_up(registry: &SessionRegistry, session_id: &str) -> bool {
     let Some(arc) = registry.get(session_id) else {
         return false;
     };
-    let (hooks, screen) = {
+    let (hooks, screen, agent) = {
         let record = crate::sync::lock(&arc);
-        (record.hook_driven, record.screen.clone())
+        (record.hook_driven, record.screen.clone(), record.agent)
     };
     hooks
         || screen.is_some_and(|screen| {
+            let rules = rules::rules_for(agent);
             let screen = crate::sync::lock(&screen);
-            shows_claude(rules::read_claude(&screen)) && !rules::last_row_is_shell_prompt(&screen)
+            shows_agent(&rules.read(&screen)) && !rules::last_row_is_shell_prompt(&screen)
         })
 }
 
@@ -785,20 +791,22 @@ pub fn agent_up(registry: &SessionRegistry, session_id: &str) -> bool {
 /// the grid. When hooks start or stop driving the shell, the classifier's
 /// state is seeded again from the record and the screen is held off for
 /// [`FOREIGN_WRITE_HOLD`]; on every return to the classifier, its volume
-/// windows, title and silence start afresh.
+/// windows, title and silence start afresh. `rules` are the screen rules the
+/// check reads the screen with: those of the session's agent.
 pub fn watch_plain_shell(
     registry: &Arc<SessionRegistry>,
     session_id: String,
     streams: ShellStreams,
     attention_tx: mpsc::UnboundedSender<AttentionEvent>,
     initial: SessionStatus,
+    rules: Arc<CompiledRules>,
 ) {
     let ShellStreams {
         mut output,
         input_pulses,
         screen,
     } = streams;
-    let watch = ScreenWatch::new(registry, session_id, screen, attention_tx);
+    let watch = ScreenWatch::new(registry, session_id, screen, attention_tx, rules);
     let mut watcher = ShellWatcher {
         replay_until: watch.confirm.hold_until,
         watch,
@@ -809,7 +817,7 @@ pub fn watch_plain_shell(
         in_window: VecDeque::new(),
         out_window: VecDeque::new(),
         title_activity: TitleActivity::new(),
-        claude_on_screen: false,
+        agent_on_screen: false,
     };
     tokio::spawn(async move { watcher.run(&mut output).await });
 }
@@ -834,7 +842,7 @@ struct ShellWatcher {
     title_activity: TitleActivity,
     /// Whether the screen showed Claude for a whole window while hooks were
     /// not driving the shell: `claude` started without hooks.
-    claude_on_screen: bool,
+    agent_on_screen: bool,
 }
 
 impl ShellWatcher {
@@ -842,8 +850,8 @@ impl ShellWatcher {
     /// showed Claude.
     fn mode(&self) -> Mode {
         let hooks = self.watch.wake.seen.is_some_and(|read| read.hook_driven);
-        if hooks || self.claude_on_screen {
-            Mode::ShellClaude
+        if hooks || self.agent_on_screen {
+            Mode::ShellAgent
         } else {
             Mode::Shell
         }
@@ -977,13 +985,13 @@ impl ShellWatcher {
             Checked::Gone => return ControlFlow::Break(()),
             Checked::Done => {}
             Checked::HooksFlipped => self.hooks_flipped(now),
-            Checked::ClaudeShown => {
+            Checked::AgentShown => {
                 // Claude mode reads the screen at once, from a fresh window.
-                self.claude_on_screen = true;
+                self.agent_on_screen = true;
                 self.watch.confirm.check_at = Some(now);
             }
-            Checked::ClaudeEnded => {
-                self.claude_on_screen = false;
+            Checked::AgentEnded => {
+                self.agent_on_screen = false;
                 self.reseed();
                 self.start_shell_mode(now);
             }
@@ -1299,12 +1307,14 @@ mod tests {
 mod hysteresis_tests {
     use super::{
         AgentStreams, CHECK_DEBOUNCE, FOREIGN_WRITE_HOLD, SHELL_IDLE_AFTER, ShellStreams, State,
-        apply_screen_status, hand_shell_back, on_plain_shell_transition, record_status, watch,
-        watch_plain_shell,
+        agent_up, apply_screen_status, hand_shell_back, on_plain_shell_transition, record_status,
+        watch, watch_plain_shell,
     };
     use crate::paths::Dirs;
+    use crate::screen::rules::{CompiledRules, rules_for};
     use crate::screen::{Screen, SharedScreen};
     use crate::session::{SessionRecord, SessionRegistry};
+    use agent_api::{LineMatcher, ScreenRegion, ScreenRule, ScreenRules, ScreenVerdict};
     use chrono::Utc;
     use protocol::{
         Agent, AppearanceOverrides, SessionKind, SessionMetrics, SessionMode, SessionStatus,
@@ -1413,12 +1423,19 @@ mod hysteresis_tests {
     /// Start a watcher over `record` as the session's spawn or reattach left
     /// it.
     fn start_record(tag: &str, plain_shell: bool, record: SessionRecord) -> Harness {
-        start_in(scratch_dirs(tag), plain_shell, record)
+        let rules = rules_for(record.agent);
+        start_in(scratch_dirs(tag), plain_shell, record, rules)
     }
 
     /// [`start_record`] over a registry in `dirs`, so a test can put a
-    /// sidecar there first. The record carries the grid its watcher feeds.
-    fn start_in(dirs: Dirs, plain_shell: bool, mut record: SessionRecord) -> Harness {
+    /// sidecar there first, with the screen rules `rules`. The record carries
+    /// the grid its watcher feeds.
+    fn start_in(
+        dirs: Dirs,
+        plain_shell: bool,
+        mut record: SessionRecord,
+        rules: Arc<CompiledRules>,
+    ) -> Harness {
         let initial = record.status;
         let screen: SharedScreen = Arc::new(Mutex::new(Screen::new(COLS, ROWS)));
         record.screen = Some(Arc::clone(&screen));
@@ -1438,6 +1455,7 @@ mod hysteresis_tests {
                 },
                 attention_tx,
                 initial,
+                rules,
             );
             None
         } else {
@@ -1449,6 +1467,7 @@ mod hysteresis_tests {
                     screen: Arc::clone(&screen),
                 },
                 attention_tx,
+                rules,
             );
             Some(input_rx)
         };
@@ -1743,6 +1762,79 @@ mod hysteresis_tests {
         );
         advance(ms(15)).await;
         assert_eq!(h.status(), SessionStatus::Working);
+    }
+
+    /// Rules made of one regex rule: a row reading exactly `BUSY` is working.
+    fn busy_rules() -> Arc<CompiledRules> {
+        Arc::new(CompiledRules::compile(&ScreenRules {
+            rules: vec![ScreenRule {
+                name: "busy".to_string(),
+                priority: 100,
+                region: ScreenRegion::BottomNonEmpty { rows: 4 },
+                matcher: LineMatcher::Regex("^BUSY$".to_string()),
+                not: Vec::new(),
+                verdict: ScreenVerdict::Working,
+            }],
+        }))
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_regex_rule_in_a_plugin_rule_set_decides_the_status() {
+        let h = start_in(
+            scratch_dirs("plugin-regex"),
+            false,
+            test_record(SESSION),
+            busy_rules(),
+        );
+        pass_hold().await;
+        h.chunk(frame(&["BUSY"]));
+        advance(CHECK_DEBOUNCE + ms(15)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Working,
+            "the plugin's regex rule did not set the status"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_plugin_without_rules_never_writes_a_status() {
+        let empty = Arc::new(CompiledRules::compile(&ScreenRules::default()));
+        let h = start_in(
+            scratch_dirs("plugin-empty"),
+            false,
+            test_record(SESSION),
+            empty,
+        );
+        pass_hold().await;
+        h.chunk(idle_frame(&[SPINNER_ROW]));
+        advance(Duration::from_secs(5)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "a session whose plugin has no rules took a status from its screen"
+        );
+    }
+
+    #[test]
+    fn agent_up_reads_the_plugins_rules() {
+        let registry = SessionRegistry::new(scratch_dirs("agent-up"));
+        let screen: SharedScreen = Arc::new(Mutex::new(Screen::new(COLS, ROWS)));
+        let mut record = test_record(SESSION);
+        record.screen = Some(Arc::clone(&screen));
+        registry.insert(record);
+        screen.lock().expect("screen lock").feed(&idle_frame(&[]));
+        assert!(
+            agent_up(&registry, SESSION),
+            "Claude's idle prompt box did not count as the agent up"
+        );
+        screen
+            .lock()
+            .expect("screen lock")
+            .feed(&box_frame(&[], &["PS C:\\work>"]));
+        assert!(
+            !agent_up(&registry, SESSION),
+            "a shell prompt on the last row counted as the agent up"
+        );
     }
 
     /// A plain shell never waits for input, and its idle timer only fires from
@@ -3176,7 +3268,12 @@ mod hysteresis_tests {
     async fn a_screen_demotion_updates_the_sidecar() {
         let dirs = scratch_dirs("screen-sidecar");
         crate::history::test_support::write_meta_for(&dirs, SESSION);
-        let h = start_in(dirs.clone(), false, hook_record(SessionStatus::Working));
+        let h = start_in(
+            dirs.clone(),
+            false,
+            hook_record(SessionStatus::Working),
+            rules_for(Agent::default()),
+        );
         pass_hold().await;
         h.chunk(idle_frame(&[]));
         advance(ms(700)).await;

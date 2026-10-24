@@ -30,6 +30,7 @@ use crate::pty::PtySpawnSpec;
 use crate::registry::{
     persist_last_agent, persist_repo_last_spawn_config, persist_workspace_last_spawn_config,
 };
+use crate::screen::rules::rules_for;
 use crate::session::SessionRegistry;
 use crate::session::{
     SessionRecord, UpdateOrigin, attach_lifecycle, default_agent, new_id, push_recent_action,
@@ -1246,6 +1247,7 @@ async fn spawn_interactive_session(
             },
             hub.attention_tx.clone(),
             SessionStatus::Idle,
+            rules_for(agent),
         );
     } else {
         pty_state::watch(
@@ -1256,6 +1258,7 @@ async fn spawn_interactive_session(
                 screen,
             },
             hub.attention_tx.clone(),
+            rules_for(agent),
         );
     }
     osc_title::watch(
@@ -1449,6 +1452,7 @@ async fn spawn_plain_shell_session(
         },
         hub.attention_tx.clone(),
         SessionStatus::Idle,
+        rules_for(default_agent()),
     );
     // Keep `osc_title::watch` so window-title escape sequences (which pwsh
     // emits by default) are recorded as `terminal_title` annotations; the

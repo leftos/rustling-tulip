@@ -333,6 +333,7 @@ mod tests {
                 screen,
             },
             hub.attention_tx.clone(),
+            crate::screen::rules::rules_for(protocol::Agent::default()),
         );
         let question = concat!(
             r#"{"hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","#,

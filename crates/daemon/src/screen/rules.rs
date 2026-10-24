@@ -1,31 +1,28 @@
-//! Claude Code's screen rules: the state one rendered session shows.
+//! The evaluator of an agent's screen rules: the state one rendered session
+//! shows.
 //!
-//! One table of rules over the regions [`Screen`] reads back, evaluated by
-//! priority: the highest-priority rule whose matcher hits its region, and none
-//! of whose guards does, decides the reading. An overlay rule keeps whatever
-//! state the session already has, since the overlay is drawn over a turn that
-//! may be running or done. An agent session's status watcher
-//! ([`crate::pty_state::watch`]) and the plain-shell watcher
-//! ([`crate::pty_state::watch_plain_shell`]) read its screen through it.
+//! A plugin hands the daemon its rule table as data
+//! ([`agent_api::ScreenRules`]); [`CompiledRules::compile`] compiles its
+//! patterns once, and [`CompiledRules::read`] evaluates the table over the
+//! regions [`Screen`] reads back, by priority: the highest-priority rule whose
+//! matcher hits its region, and none of whose guards does, decides the
+//! reading. An overlay rule keeps whatever state the session already has,
+//! since the overlay is drawn over a turn that may be running or done. An
+//! agent session's status watcher ([`crate::pty_state::watch`]) and the
+//! plain-shell watcher ([`crate::pty_state::watch_plain_shell`]) read its
+//! screen through the rules of the session's agent ([`rules_for`]).
 
 use std::cmp::Reverse;
-use std::sync::LazyLock;
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex};
 
+use agent_api::{LineMatcher, ScreenRegion, ScreenRule, ScreenRules, ScreenVerdict};
+use protocol::Agent;
 use regex::Regex;
 
 use super::Screen;
 
-/// The spinner line of a turn in progress: a cycling glyph, a capitalised
-/// verb, an ellipsis, then the optional phase, the elapsed time and the token
-/// details, which the terminal width may cut off mid-detail.
-const SPINNER: &str = r"^\s*[·✢*✶✻✽✳]\s+\p{Lu}[\p{L}'’-]*…(?:\s+·\s+[\p{L} ]+?)?(?:\s+\(.*)?\s*$";
-
-/// The spinner a turn keeps painted while its hooks run: Claude leaves it up
-/// across a hook-reported stop or tool start, so the line is not a turn of its
-/// own.
-const HOOKS_RUNNING: &str = r"^\s*[·✢*✶✻✽✳]\s+\S.*\(running \p{L}+ hooks…";
-
-/// The state a Claude session's screen shows.
+/// The state a session's screen shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScreenState {
     /// A turn is in progress.
@@ -49,187 +46,25 @@ pub enum Verdict {
 
 /// One evaluation: the verdict, and the rule that gave it (`None` when no rule
 /// matched).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reading {
     pub verdict: Verdict,
-    pub rule: Option<&'static str>,
+    pub rule: Option<Arc<str>>,
     /// Whether the winning rule read the OSC title rather than the screen
     /// body, so a caller can refuse a state known only from the title.
     pub from_title: bool,
 }
 
-/// The part of the screen a rule reads.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Region {
-    /// The last `n` non-empty rows.
-    BottomNonEmpty(usize),
-    /// The rows between the prompt box's two rules.
-    PromptBoxBody,
-    /// The last `n` non-empty rows above the prompt box.
-    AbovePromptBox(usize),
-    /// The last OSC 0/2 title the stream set.
-    Title,
+/// One agent's rule table with its patterns compiled, highest priority first.
+pub struct CompiledRules {
+    rules: Vec<CompiledRule>,
 }
-
-/// How a rule looks for a hit in its region.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Matcher {
-    /// A literal substring of a row.
-    Contains(&'static str),
-    /// A regex matched against each row.
-    Line(&'static str),
-}
-
-/// One rule: where to look, what for, what to ignore, and what a hit means.
-struct Rule {
-    name: &'static str,
-    /// Higher wins. The table is stored in descending order, and evaluation
-    /// takes the first rule that matches.
-    priority: u16,
-    region: Region,
-    matcher: Matcher,
-    /// Matchers that veto the rule when any of them hits the same region.
-    not: &'static [Matcher],
-    verdict: Verdict,
-}
-
-/// The Claude screen rules, in descending priority order.
-static CLAUDE_RULES: &[Rule] = &[
-    Rule {
-        name: "overlay_detailed_transcript",
-        priority: 990,
-        region: Region::BottomNonEmpty(4),
-        matcher: Matcher::Contains("Showing detailed transcript"),
-        not: &[],
-        verdict: Verdict::Keep,
-    },
-    Rule {
-        name: "overlay_model_picker",
-        priority: 990,
-        region: Region::BottomNonEmpty(4),
-        matcher: Matcher::Contains("Enter to set as default"),
-        not: &[],
-        verdict: Verdict::Keep,
-    },
-    Rule {
-        name: "overlay_btw",
-        priority: 990,
-        region: Region::BottomNonEmpty(4),
-        matcher: Matcher::Contains("f to fork · Esc to close"),
-        not: &[],
-        verdict: Verdict::Keep,
-    },
-    Rule {
-        name: "overlay_rewind",
-        priority: 990,
-        region: Region::BottomNonEmpty(4),
-        matcher: Matcher::Contains("Enter to continue · Esc to cancel"),
-        not: &[],
-        verdict: Verdict::Keep,
-    },
-    Rule {
-        name: "dialog_permission",
-        priority: 980,
-        region: Region::BottomNonEmpty(24),
-        matcher: Matcher::Contains("Esc to cancel · Tab to amend"),
-        not: &[],
-        verdict: Verdict::State(ScreenState::AwaitingInput),
-    },
-    Rule {
-        name: "dialog_question",
-        priority: 980,
-        region: Region::BottomNonEmpty(24),
-        matcher: Matcher::Line(r"Enter to select ·.*Esc to cancel"),
-        not: &[],
-        verdict: Verdict::State(ScreenState::AwaitingInput),
-    },
-    Rule {
-        name: "dialog_question_review",
-        priority: 980,
-        region: Region::BottomNonEmpty(24),
-        matcher: Matcher::Line(r"^\s*(?:❯\s*)?\d+\.\s+Submit answers\s*$"),
-        not: &[],
-        verdict: Verdict::State(ScreenState::AwaitingInput),
-    },
-    Rule {
-        name: "dialog_plan",
-        priority: 980,
-        region: Region::BottomNonEmpty(24),
-        matcher: Matcher::Contains("Tell Claude what to change"),
-        not: &[],
-        verdict: Verdict::State(ScreenState::AwaitingInput),
-    },
-    Rule {
-        name: "dialog_trust",
-        priority: 980,
-        region: Region::BottomNonEmpty(24),
-        matcher: Matcher::Contains("Enter to confirm · Esc to cancel"),
-        not: &[],
-        verdict: Verdict::State(ScreenState::AwaitingInput),
-    },
-    Rule {
-        name: "turn_hooks_running",
-        priority: 975,
-        region: Region::AbovePromptBox(24),
-        matcher: Matcher::Line(HOOKS_RUNNING),
-        not: &[],
-        verdict: Verdict::Keep,
-    },
-    Rule {
-        name: "turn_spinner",
-        priority: 970,
-        region: Region::AbovePromptBox(24),
-        matcher: Matcher::Line(SPINNER),
-        not: &[],
-        verdict: Verdict::State(ScreenState::Working),
-    },
-    Rule {
-        name: "overlay_heads_up",
-        priority: 960,
-        region: Region::AbovePromptBox(24),
-        matcher: Matcher::Contains("✦ Heads up ·"),
-        not: &[],
-        verdict: Verdict::Keep,
-    },
-    Rule {
-        name: "idle_interrupted",
-        priority: 950,
-        region: Region::AbovePromptBox(12),
-        matcher: Matcher::Contains("⎿  Interrupted ·"),
-        not: &[],
-        verdict: Verdict::State(ScreenState::Idle),
-    },
-    Rule {
-        name: "idle_prompt_box",
-        priority: 940,
-        region: Region::PromptBoxBody,
-        matcher: Matcher::Line(r"^\s*(?:❯|!)(?:\s|$)"),
-        not: &[],
-        verdict: Verdict::State(ScreenState::Idle),
-    },
-    Rule {
-        name: "title_working",
-        priority: 200,
-        region: Region::Title,
-        matcher: Matcher::Line(r"^[\u{2800}-\u{28FF}\u{25D0}-\u{25D3}] "),
-        not: &[],
-        verdict: Verdict::State(ScreenState::Working),
-    },
-    Rule {
-        name: "title_idle",
-        priority: 100,
-        region: Region::Title,
-        matcher: Matcher::Line("^✳ "),
-        not: &[],
-        verdict: Verdict::State(ScreenState::Idle),
-    },
-];
 
 /// One rule with its matchers compiled.
-struct Compiled {
-    name: &'static str,
+struct CompiledRule {
+    name: Arc<str>,
     priority: u16,
-    region: Region,
+    region: ScreenRegion,
     matcher: CompiledMatcher,
     not: Vec<CompiledMatcher>,
     verdict: Verdict,
@@ -237,36 +72,57 @@ struct Compiled {
 
 /// One matcher, compiled.
 enum CompiledMatcher {
-    Contains(&'static str),
+    Contains(String),
     Line(Regex),
 }
 
-/// The table with its patterns compiled once, highest priority first; a rule
-/// whose pattern does not compile is left out.
-static COMPILED: LazyLock<Vec<Compiled>> = LazyLock::new(|| {
-    let mut compiled: Vec<Compiled> = CLAUDE_RULES.iter().filter_map(compile_rule).collect();
-    compiled.sort_by_key(|rule| Reverse(rule.priority));
-    compiled
-});
+impl CompiledRules {
+    /// Compiles `rules`, sorted by descending priority (rules of one priority
+    /// keep their table order). A rule whose pattern does not compile is left
+    /// out with an error, and one with a region, a matcher, a guard or a
+    /// verdict this build does not know is left out with a warning.
+    #[must_use]
+    pub fn compile(rules: &ScreenRules) -> Self {
+        let mut compiled: Vec<CompiledRule> = rules.rules.iter().filter_map(compile_rule).collect();
+        compiled.sort_by_key(|rule| Reverse(rule.priority));
+        Self { rules: compiled }
+    }
 
-/// The state the screen shows.
-#[must_use]
-pub fn read_claude(screen: &Screen) -> Reading {
-    let mut regions = RegionLines::default();
-    for rule in COMPILED.iter() {
-        if rule.matches(regions.get(screen, rule.region)) {
-            return Reading {
-                verdict: rule.verdict,
-                rule: Some(rule.name),
-                from_title: rule.region == Region::Title,
-            };
+    /// The state the screen shows.
+    #[must_use]
+    pub fn read(&self, screen: &Screen) -> Reading {
+        let mut regions = RegionLines::default();
+        for rule in &self.rules {
+            if rule.matches(regions.get(screen, rule.region)) {
+                return Reading {
+                    verdict: rule.verdict,
+                    rule: Some(Arc::clone(&rule.name)),
+                    from_title: rule.region == ScreenRegion::Title,
+                };
+            }
+        }
+        Reading {
+            verdict: Verdict::NoMatch,
+            rule: None,
+            from_title: false,
         }
     }
-    Reading {
-        verdict: Verdict::NoMatch,
-        rule: None,
-        from_title: false,
-    }
+}
+
+/// Each agent's compiled rules, compiled on first use.
+static BY_AGENT: LazyLock<Mutex<HashMap<Agent, Arc<CompiledRules>>>> =
+    LazyLock::new(Mutex::default);
+
+/// The compiled screen rules of `agent`'s plugin, compiled once per agent.
+#[must_use]
+pub fn rules_for(agent: Agent) -> Arc<CompiledRules> {
+    let mut cache = crate::sync::lock(&BY_AGENT);
+    let rules = cache.entry(agent).or_insert_with(|| {
+        Arc::new(CompiledRules::compile(
+            agent_registry::plugin(agent).screen_rules(),
+        ))
+    });
+    Arc::clone(rules)
 }
 
 /// A shell's prompt row, each pattern with whether it is the POSIX form,
@@ -318,13 +174,13 @@ fn is_shell_prompt(row: &str) -> bool {
 /// The regions read so far, so each one is read once per evaluation.
 #[derive(Default)]
 struct RegionLines {
-    read: Vec<(Region, Vec<String>)>,
+    read: Vec<(ScreenRegion, Vec<String>)>,
 }
 
 impl RegionLines {
     /// The lines of `region`, read now unless this evaluation has already read
     /// them.
-    fn get(&mut self, screen: &Screen, region: Region) -> &[String] {
+    fn get(&mut self, screen: &Screen, region: ScreenRegion) -> &[String] {
         let index = if let Some(index) = self.read.iter().position(|(key, _)| *key == region) {
             index
         } else {
@@ -336,44 +192,77 @@ impl RegionLines {
 }
 
 /// Compiles one rule's matchers, or gives `None` when one of its patterns does
-/// not compile.
-fn compile_rule(rule: &Rule) -> Option<Compiled> {
-    let matcher = compile_matcher(rule.name, rule.matcher)?;
-    let mut not = Vec::with_capacity(rule.not.len());
-    for guard in rule.not {
-        not.push(compile_matcher(rule.name, *guard)?);
+/// not compile or one of its parts is unknown to this build.
+fn compile_rule(rule: &ScreenRule) -> Option<CompiledRule> {
+    let verdict = verdict_of(rule)?;
+    if rule.region == ScreenRegion::Unknown {
+        tracing::warn!(
+            rule = %rule.name,
+            "screen rules: the rule reads a region this build does not know; it is skipped"
+        );
+        return None;
     }
-    Some(Compiled {
-        name: rule.name,
+    let matcher = compile_matcher(&rule.name, &rule.matcher)?;
+    let mut not = Vec::with_capacity(rule.not.len());
+    for guard in &rule.not {
+        not.push(compile_matcher(&rule.name, guard)?);
+    }
+    Some(CompiledRule {
+        name: Arc::from(rule.name.as_str()),
         priority: rule.priority,
         region: rule.region,
         matcher,
         not,
-        verdict: rule.verdict,
+        verdict,
     })
 }
 
+/// The verdict a rule gives, or `None`, logged, when this build does not know
+/// it.
+fn verdict_of(rule: &ScreenRule) -> Option<Verdict> {
+    match rule.verdict {
+        ScreenVerdict::Working => Some(Verdict::State(ScreenState::Working)),
+        ScreenVerdict::AwaitingInput => Some(Verdict::State(ScreenState::AwaitingInput)),
+        ScreenVerdict::Idle => Some(Verdict::State(ScreenState::Idle)),
+        ScreenVerdict::Keep => Some(Verdict::Keep),
+        ScreenVerdict::Unknown => {
+            tracing::warn!(
+                rule = %rule.name,
+                "screen rules: the rule gives a verdict this build does not know; it is skipped"
+            );
+            None
+        }
+    }
+}
+
 /// Compiles one matcher, logging the rule that named a pattern which did not
-/// compile.
-fn compile_matcher(rule: &str, matcher: Matcher) -> Option<CompiledMatcher> {
+/// compile or a matcher this build does not know.
+fn compile_matcher(rule: &str, matcher: &LineMatcher) -> Option<CompiledMatcher> {
     match matcher {
-        Matcher::Contains(needle) => Some(CompiledMatcher::Contains(needle)),
-        Matcher::Line(pattern) => match Regex::new(pattern) {
+        LineMatcher::Contains(needle) => Some(CompiledMatcher::Contains(needle.clone())),
+        LineMatcher::Regex(pattern) => match Regex::new(pattern) {
             Ok(regex) => Some(CompiledMatcher::Line(regex)),
             Err(error) => {
                 tracing::error!(
-                    rule = rule,
-                    pattern = pattern,
+                    rule = %rule,
+                    pattern = %pattern,
                     %error,
                     "screen rules: a pattern did not compile; the rule is skipped"
                 );
                 None
             }
         },
+        LineMatcher::Unknown => {
+            tracing::warn!(
+                rule = %rule,
+                "screen rules: the rule uses a matcher this build does not know; it is skipped"
+            );
+            None
+        }
     }
 }
 
-impl Compiled {
+impl CompiledRule {
     /// Whether the rule fires over `lines`: its matcher hits one of them and
     /// none of its guards does.
     fn matches(&self, lines: &[String]) -> bool {
@@ -385,19 +274,21 @@ impl CompiledMatcher {
     /// Whether the matcher hits any of `lines`.
     fn hits(&self, lines: &[String]) -> bool {
         lines.iter().any(|line| match self {
-            Self::Contains(needle) => line.contains(*needle),
+            Self::Contains(needle) => line.contains(needle.as_str()),
             Self::Line(regex) => regex.is_match(line),
         })
     }
 }
 
-/// The lines of one region.
-fn region_lines(screen: &Screen, region: Region) -> Vec<String> {
+/// The lines of one region; a region this build does not know has none (a
+/// compiled rule never reads one: [`compile_rule`] drops it).
+fn region_lines(screen: &Screen, region: ScreenRegion) -> Vec<String> {
     match region {
-        Region::BottomNonEmpty(n) => screen.bottom_non_empty_lines(n),
-        Region::PromptBoxBody => screen.prompt_box_body(),
-        Region::AbovePromptBox(n) => screen.above_prompt_box(n),
-        Region::Title => screen.title().into_iter().collect(),
+        ScreenRegion::BottomNonEmpty { rows } => screen.bottom_non_empty_lines(rows),
+        ScreenRegion::PromptBoxBody => screen.prompt_box_body(),
+        ScreenRegion::AbovePromptBox { rows } => screen.above_prompt_box(rows),
+        ScreenRegion::Title => screen.title().into_iter().collect(),
+        ScreenRegion::Unknown => Vec::new(),
     }
 }
 
@@ -432,16 +323,151 @@ mod tests {
         CSI.replace_all(line, "").chars().count()
     }
 
-    /// The regex the table compiled for the line rule `name`.
-    fn line_rule(name: &str) -> &'static Regex {
-        COMPILED
+    /// The state the screen shows by Claude's rules.
+    fn read_claude(screen: &Screen) -> Reading {
+        rules_for(Agent::Claude).read(screen)
+    }
+
+    /// Claude's rule table as its plugin hands it over.
+    fn claude_table() -> &'static ScreenRules {
+        agent_registry::plugin(Agent::Claude).screen_rules()
+    }
+
+    /// The regex Claude's compiled rules hold for the line rule `name`.
+    fn line_rule(name: &str) -> Regex {
+        rules_for(Agent::Claude)
+            .rules
             .iter()
-            .find(|rule| rule.name == name)
+            .find(|rule| &*rule.name == name)
             .and_then(|rule| match &rule.matcher {
-                CompiledMatcher::Line(regex) => Some(regex),
+                CompiledMatcher::Line(regex) => Some(regex.clone()),
                 CompiledMatcher::Contains(_) => None,
             })
             .expect("a compiled line rule")
+    }
+
+    fn rule(
+        name: &str,
+        priority: u16,
+        region: ScreenRegion,
+        matcher: LineMatcher,
+        verdict: ScreenVerdict,
+    ) -> ScreenRule {
+        ScreenRule {
+            name: name.to_string(),
+            priority,
+            region,
+            matcher,
+            not: Vec::new(),
+            verdict,
+        }
+    }
+
+    /// A rule that reads `BUSY` anywhere in the last four rows as working.
+    fn busy_rule(name: &str, priority: u16) -> ScreenRule {
+        rule(
+            name,
+            priority,
+            ScreenRegion::BottomNonEmpty { rows: 4 },
+            LineMatcher::Contains("BUSY".to_string()),
+            ScreenVerdict::Working,
+        )
+    }
+
+    #[test]
+    fn claude_rules_all_compile() {
+        let compiled = CompiledRules::compile(claude_table());
+        assert_eq!(compiled.rules.len(), 16, "no Claude rule was dropped");
+    }
+
+    #[test]
+    fn a_rule_whose_pattern_does_not_compile_is_skipped() {
+        let rules = ScreenRules {
+            rules: vec![
+                rule(
+                    "broken",
+                    900,
+                    ScreenRegion::BottomNonEmpty { rows: 4 },
+                    LineMatcher::Regex("(unclosed".to_string()),
+                    ScreenVerdict::AwaitingInput,
+                ),
+                busy_rule("busy", 100),
+            ],
+        };
+        let compiled = CompiledRules::compile(&rules);
+        assert_eq!(compiled.rules.len(), 1, "only the good rule is kept");
+        let reading = compiled.read(&screen_from("BUSY"));
+        assert_eq!(reading.verdict, Verdict::State(ScreenState::Working));
+        assert_eq!(reading.rule.as_deref(), Some("busy"));
+    }
+
+    #[test]
+    fn an_unknown_matcher_rule_is_skipped() {
+        let unknown_guard = ScreenRule {
+            not: vec![LineMatcher::Unknown],
+            ..busy_rule("unknown_guard", 800)
+        };
+        let unknown_region = ScreenRule {
+            region: ScreenRegion::Unknown,
+            ..busy_rule("unknown_region", 700)
+        };
+        let unknown_verdict = ScreenRule {
+            verdict: ScreenVerdict::Unknown,
+            ..busy_rule("unknown_verdict", 600)
+        };
+        let rules = ScreenRules {
+            rules: vec![
+                rule(
+                    "unknown_matcher",
+                    900,
+                    ScreenRegion::BottomNonEmpty { rows: 4 },
+                    LineMatcher::Unknown,
+                    ScreenVerdict::AwaitingInput,
+                ),
+                unknown_guard,
+                unknown_region,
+                unknown_verdict,
+                busy_rule("busy", 100),
+            ],
+        };
+        let compiled = CompiledRules::compile(&rules);
+        assert_eq!(
+            compiled.rules.len(),
+            1,
+            "every rule with an unknown part is dropped"
+        );
+        let reading = compiled.read(&screen_from("BUSY"));
+        assert_eq!(reading.rule.as_deref(), Some("busy"));
+    }
+
+    #[test]
+    fn rule_order_follows_priority_not_input_order() {
+        let idle_first = ScreenRule {
+            verdict: ScreenVerdict::Idle,
+            ..busy_rule("low", 100)
+        };
+        let rules = ScreenRules {
+            rules: vec![idle_first, busy_rule("high", 500)],
+        };
+        let reading = CompiledRules::compile(&rules).read(&screen_from("BUSY"));
+        assert_eq!(reading.verdict, Verdict::State(ScreenState::Working));
+        assert_eq!(reading.rule.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn a_plugin_without_rules_reads_no_match() {
+        let compiled = CompiledRules::compile(&ScreenRules::default());
+        let reading = compiled.read(&screen_from(include_str!(
+            "fixtures/v71-agents-running.txt"
+        )));
+        assert_eq!(
+            reading,
+            Reading {
+                verdict: Verdict::NoMatch,
+                rule: None,
+                from_title: false
+            }
+        );
     }
 
     #[test]
@@ -647,7 +673,7 @@ mod tests {
         let text = capture.replace("· Cooking… (21s · ↓ 1.1k tokens)", "✶ Cooking…");
         let reading = read_claude(&screen_from(&text));
         assert_eq!(reading.verdict, Verdict::State(ScreenState::Working));
-        assert_eq!(reading.rule, Some("turn_spinner"));
+        assert_eq!(reading.rule.as_deref(), Some("turn_spinner"));
         assert!(!reading.from_title);
     }
 
@@ -740,7 +766,7 @@ mod tests {
         );
         let reading = read_claude(&screen_from(&frame));
         assert_eq!(reading.verdict, Verdict::State(ScreenState::Idle));
-        assert_eq!(reading.rule, Some("idle_prompt_box"));
+        assert_eq!(reading.rule.as_deref(), Some("idle_prompt_box"));
     }
 
     #[test]
@@ -755,7 +781,7 @@ mod tests {
         rows.push("  ? for shortcuts".to_owned());
         let reading = read_claude(&screen_from(&rows.join("\r\n")));
         assert_eq!(reading.verdict, Verdict::State(ScreenState::Working));
-        assert_eq!(reading.rule, Some("turn_spinner"));
+        assert_eq!(reading.rule.as_deref(), Some("turn_spinner"));
     }
 
     #[test]
@@ -763,13 +789,13 @@ mod tests {
         let frame = with_bash_prompt(include_str!("fixtures/v03-ready.txt"));
         let reading = read_claude(&screen_from(&frame));
         assert_eq!(reading.verdict, Verdict::State(ScreenState::Idle));
-        assert_eq!(reading.rule, Some("idle_prompt_box"));
+        assert_eq!(reading.rule.as_deref(), Some("idle_prompt_box"));
         assert!(!reading.from_title);
     }
 
     #[test]
     fn rules_are_in_priority_order() {
-        for pair in CLAUDE_RULES.windows(2) {
+        for pair in claude_table().rules.windows(2) {
             let [above, below] = pair else { continue };
             assert!(
                 above.priority >= below.priority,
@@ -785,8 +811,8 @@ mod tests {
     #[test]
     fn every_pattern_compiles() {
         assert_eq!(
-            COMPILED.len(),
-            CLAUDE_RULES.len(),
+            rules_for(Agent::Claude).rules.len(),
+            claude_table().rules.len(),
             "every rule compiled, none skipped"
         );
         assert_eq!(
@@ -835,12 +861,12 @@ mod tests {
         for working in ["⠋ Fix tests", "◐ Fix tests"] {
             let reading = reading(working);
             assert_eq!(reading.verdict, Verdict::State(ScreenState::Working));
-            assert_eq!(reading.rule, Some("title_working"));
+            assert_eq!(reading.rule.as_deref(), Some("title_working"));
             assert!(reading.from_title);
         }
         let idle = reading("✳ Claude Code");
         assert_eq!(idle.verdict, Verdict::State(ScreenState::Idle));
-        assert_eq!(idle.rule, Some("title_idle"));
+        assert_eq!(idle.rule.as_deref(), Some("title_idle"));
         assert!(idle.from_title);
         let blank = read_claude(&Screen::new(40, 5));
         assert_eq!(
