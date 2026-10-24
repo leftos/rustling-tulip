@@ -5,8 +5,9 @@
 //! settings; every change applies at once. The main window's title, which
 //! the App title tab controls, is kept here too.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gpui::{
@@ -15,18 +16,17 @@ use gpui::{
     Window, div, prelude::*, px,
 };
 use protocol::{
-    AgentCommandEntry, ClientMessage, DaemonMessage, FEATURE_AGENT_COMMANDS, KeepAwakeMode,
-    RemoteState,
+    AgentCommandEntry, AgentId, ClientMessage, DaemonMessage, FEATURE_AGENT_COMMANDS,
+    KeepAwakeMode, OptionValue, RemoteState,
 };
 
+use crate::agent_options::{AgentOptions, FieldEditor, FieldView, descriptor_for};
+use crate::agent_options_view::LOCKED;
 use crate::appearance;
 use crate::appearance_stops::{AppearanceStop, after_lost};
 use crate::appearance_view::{Level, close_footer};
 use crate::buttons::{field_frame, focus_ring};
-use crate::claude_compat::{
-    self, APPROVAL_CHOICES, CLAUDE_LOCKED, ClaudeProvider, PROVIDER_CHOICES, PermissionMode,
-    approval_label, provider_label,
-};
+use crate::claude_compat;
 use crate::mouse::CopyOnSelect;
 use crate::notify::{NotifyState, WINDOWS_NOTIFICATION_SETTINGS};
 use crate::palette::{CHIP, HOVER, LINE, RAISED, SUBTLE, TEXT_2, TRANSPARENT};
@@ -72,10 +72,6 @@ const CHIP_RADIUS: f32 = 5.0;
 /// flickering between working and idle does not flicker the taskbar.
 const TITLE_DEBOUNCE: Duration = Duration::from_millis(350);
 const NOT_CONNECTED: &str = "(daemon not connected)";
-/// The Claude page's locked provider note: unlike the approval mode, the
-/// provider is sent under trusted launch, so the choice stays in effect.
-const PROVIDER_LOCKED: &str =
-    "Trusted launch keeps the provider choice in effect; this lock only stops editing it here.";
 const WORKTREES_HINT: &str = "Per-session git worktrees land under this directory. Changes take effect for new sessions only — sessions already spawned keep their existing worktree paths.";
 const REMOTE_INTRO: &str = "Lets your other devices on your tailnet connect to this PC's sessions over HTTPS. Only devices signed in to your own Tailscale account can connect.";
 const REMOTE_PORT_HINT: &str = "Changing the port or this PC's Tailscale name changes the address the iPhone app is installed at.";
@@ -230,8 +226,20 @@ pub(crate) enum SettingsControl {
     NotifyFinished,
     NotifySkip(NotifySkip),
     SpawnTrusted,
-    SpawnApproval(Option<PermissionMode>),
-    SpawnProvider(ClaudeProvider),
+    /// Choice `choice` of field `field` of the shown agent page's
+    /// [`AgentOptions::settings_fields`]; `selector` is
+    /// `settings-{tag}-{field id}-{choice}`.
+    AgentChoice {
+        field: usize,
+        choice: usize,
+        selector: &'static str,
+    },
+    /// The toggle of field `field` of the shown agent page; `selector` is
+    /// `settings-{tag}-{field id}`.
+    AgentToggle {
+        field: usize,
+        selector: &'static str,
+    },
     WorktreesPath,
     WorktreesBrowse,
     WorktreesSave,
@@ -270,20 +278,7 @@ impl SettingsControl {
             Self::NotifySkip(NotifySkip::Focused) => "settings-notify-skip-focused",
             Self::NotifySkip(NotifySkip::Never) => "settings-notify-skip-never",
             Self::SpawnTrusted => "settings-spawn-trusted",
-            Self::SpawnApproval(mode) => match mode {
-                None => "settings-spawn-approval-cli-default",
-                Some(PermissionMode::Default) => "settings-spawn-approval-default",
-                Some(PermissionMode::AcceptEdits) => "settings-spawn-approval-accept-edits",
-                Some(PermissionMode::BypassPermissions) => {
-                    "settings-spawn-approval-bypass-permissions"
-                }
-                Some(PermissionMode::Plan) => "settings-spawn-approval-plan",
-            },
-            Self::SpawnProvider(provider) => match provider {
-                ClaudeProvider::Anthropic => "settings-spawn-provider-anthropic",
-                ClaudeProvider::Deepseek => "settings-spawn-provider-deepseek",
-                ClaudeProvider::Unknown => "settings-spawn-provider-unknown",
-            },
+            Self::AgentChoice { selector, .. } | Self::AgentToggle { selector, .. } => selector,
             Self::WorktreesPath => "settings-worktrees-root-input",
             Self::WorktreesBrowse => "settings-worktrees-root-browse",
             Self::WorktreesSave => "settings-worktrees-root-save",
@@ -439,47 +434,53 @@ impl RootView {
             .is_some_and(|editor| editor.level == Level::App)
     }
 
-    /// The label of the "Claude provider" choice shown selected.
+    /// The label of the choice the Settings page of the agent tagged `tag`
+    /// shows selected in its field `field`; `None` when the daemon lists no
+    /// such agent, its page has no such field, or the field is no choice.
     #[must_use]
-    pub fn settings_provider_choice(&self) -> &'static str {
-        provider_label(self.shown_default_provider())
+    pub fn settings_field_choice(&self, tag: &str, field: &str) -> Option<String> {
+        let view = self.settings_page_field(tag, field)?;
+        let FieldEditor::Choice { choices, .. } = &view.editor else {
+            return None;
+        };
+        choices
+            .iter()
+            .find(|choice| choice.value == view.value)
+            .map(|choice| choice.label.clone())
     }
 
-    /// The label of the "Claude approval mode" choice shown selected.
+    /// Whether trusted launch locks field `field` on the Settings page of
+    /// the agent tagged `tag`.
     #[must_use]
-    pub fn settings_approval_choice(&self) -> &'static str {
-        approval_label(self.shown_permission_mode())
+    pub fn settings_field_locked(&self, tag: &str, field: &str) -> bool {
+        self.settings_page_field(tag, field)
+            .is_some_and(|view| view.disabled && view.editor != FieldEditor::Unknown)
     }
 
-    /// The note under the Claude page's locked provider row, as it draws it.
-    #[must_use]
-    pub fn settings_provider_locked_note(&self) -> &'static str {
-        PROVIDER_LOCKED
+    fn settings_page_field(&self, tag: &str, field: &str) -> Option<FieldView> {
+        let descriptor = self.agents().iter().find(|agent| agent.tag == tag)?;
+        self.agent_page(&descriptor.id)?
+            .fields
+            .into_iter()
+            .find(|view| view.id == field)
     }
 
-    /// The "Claude provider" choice shown selected: the daemon's Claude
-    /// Settings value, with none or one this client does not know read as
-    /// Anthropic.
-    fn shown_default_provider(&self) -> ClaudeProvider {
-        match self.claude_settings_choice().provider {
-            ClaudeProvider::Unknown => ClaudeProvider::Anthropic,
-            known => known,
-        }
+    /// The Settings page of agent `id` as the daemon last described it and
+    /// broadcast its values; `None` while the daemon lists no such agent.
+    fn agent_page(&self, id: &AgentId) -> Option<AgentPage> {
+        let descriptor = descriptor_for(self.agents(), id)?;
+        let options = AgentOptions::new(descriptor.clone(), self.agent_settings().get(id));
+        Some(AgentPage {
+            id: descriptor.id.clone(),
+            tag: descriptor.tag.clone(),
+            label: descriptor.label.clone(),
+            fields: options.settings_fields(self.sidebar.ui_state().spawn.trusted),
+        })
     }
 
-    /// The "Claude approval mode" choice shown selected: the daemon's Claude
-    /// Settings value, with none or one this client does not know read as
-    /// the CLI default.
-    fn shown_permission_mode(&self) -> Option<PermissionMode> {
-        self.claude_settings_choice().permission_mode
-    }
-
-    /// Claude's Settings values as the daemon last broadcast them.
-    fn claude_settings_choice(&self) -> claude_compat::ClaudeChoice {
-        self.agent_settings()
-            .get(&claude_compat::claude_id())
-            .map(claude_compat::from_options)
-            .unwrap_or_default()
+    /// The Claude tab's agent page.
+    fn claude_page(&self) -> Option<AgentPage> {
+        self.agent_page(&claude_compat::claude_id())
     }
 
     /// The Settings tabs' labels, in the list's order.
@@ -642,16 +643,21 @@ impl RootView {
         }
     }
 
-    /// The Claude page's controls in drawing order. Trusted launch locks
-    /// the approval and provider choices, never the launch command, and
-    /// they are out while [`Self::claude_rows_live`] says no; the
-    /// launch rows leave until the daemon reported its command.
-    /// A Program row an environment variable sets is out of the ring.
+    /// The Claude page's controls in drawing order: each field's, then the
+    /// launch rows. A field trusted launch locks is out, every field is out
+    /// while [`Self::agent_rows_live`] says no, and the launch rows leave
+    /// until the daemon reported its command. A Program row an environment
+    /// variable sets is out of the ring.
     fn claude_controls(&self) -> Vec<SettingsControl> {
         let mut controls = Vec::new();
-        if !self.sidebar.ui_state().spawn.trusted && self.claude_rows_live() {
-            controls.extend(APPROVAL_CHOICES.map(SettingsControl::SpawnApproval));
-            controls.extend(PROVIDER_CHOICES.map(SettingsControl::SpawnProvider));
+        if let Some(page) = self.claude_page()
+            && self.agent_rows_live(&page.id)
+        {
+            for (index, view) in page.fields.iter().enumerate() {
+                if !view.disabled {
+                    controls.extend(field_controls(&page.tag, index, view));
+                }
+            }
         }
         if self.launch_rows_live() {
             if !self.launch_program_read_only() {
@@ -1075,8 +1081,10 @@ impl RootView {
             SettingsControl::NotifyFinished => self.toggle_finished_notification(cx),
             SettingsControl::NotifySkip(skip) => self.set_notify_skip(skip, cx),
             SettingsControl::SpawnTrusted => self.toggle_spawn_trusted(cx),
-            SettingsControl::SpawnApproval(mode) => self.set_spawn_permission_mode(mode),
-            SettingsControl::SpawnProvider(provider) => self.set_spawn_claude_provider(provider),
+            SettingsControl::AgentChoice { field, choice, .. } => {
+                self.press_agent_field(field, Some(choice));
+            }
+            SettingsControl::AgentToggle { field, .. } => self.press_agent_field(field, None),
             SettingsControl::WorktreesPath
             | SettingsControl::RemotePort
             | SettingsControl::AgentProgram
@@ -1668,51 +1676,60 @@ impl RootView {
         cx.notify();
     }
 
-    /// Asks the daemon to make `mode` Claude's approval mode Setting; the
-    /// row shows it when the daemon's broadcast arrives.
-    fn set_spawn_permission_mode(&mut self, mode: Option<PermissionMode>) {
-        tracing::info!(?mode, "settings: setting Claude's approval mode");
-        self.set_claude_setting(
-            claude_compat::PERMISSION_MODE_KEY,
-            claude_compat::permission_mode_value(mode),
-        );
-    }
-
-    /// Asks the daemon to make `provider` Claude's provider Setting; the row
-    /// shows it when the daemon's broadcast arrives.
-    fn set_spawn_claude_provider(&mut self, provider: ClaudeProvider) {
-        tracing::info!(?provider, "settings: setting Claude's provider");
-        self.set_claude_setting(
-            claude_compat::PROVIDER_KEY,
-            claude_compat::provider_value(provider),
-        );
-    }
-
-    /// Sends Claude's Settings values with `key` set to `value`, on top of
-    /// any change still waiting for the daemon's broadcast. Nothing is sent
-    /// while the Claude rows are disabled.
-    fn set_claude_setting(&mut self, key: &str, value: protocol::OptionValue) {
-        if !self.claude_rows_live() {
-            tracing::info!(key, "settings: Claude's rows are disabled; nothing sent");
+    /// A press on field `field` of the shown agent page: its choice
+    /// `choice`, or its toggle when `None`. Asks the daemon to store the
+    /// value; the row shows it when the daemon's broadcast arrives. A
+    /// locked field sends nothing.
+    fn press_agent_field(&mut self, field: usize, choice: Option<usize>) {
+        let Some(page) = self.claude_page() else {
+            tracing::info!("settings: the daemon lists no agent for this page; nothing sent");
+            return;
+        };
+        let Some(view) = page.fields.get(field) else {
+            tracing::warn!(
+                field,
+                "settings: the pressed field left the page; nothing sent"
+            );
+            return;
+        };
+        if view.disabled {
+            tracing::info!(key = %view.id, "settings: the field is locked; nothing sent");
             return;
         }
-        let options = self.merge_claude_setting(key, value);
+        let Some(value) = pressed_value(view, choice) else {
+            tracing::warn!(
+                key = %view.id,
+                ?choice,
+                "settings: the press matches none of the field's choices; nothing sent"
+            );
+            return;
+        };
+        self.set_agent_setting(&page.id, &view.id, value);
+    }
+
+    /// Sends `agent`'s Settings values with `key` set to `value`, on top of
+    /// any change still waiting for the daemon's broadcast. Nothing is sent
+    /// while the agent's rows are disabled.
+    fn set_agent_setting(&mut self, agent: &AgentId, key: &str, value: OptionValue) {
+        if !self.agent_rows_live(agent) {
+            tracing::info!(agent = %agent.0, key, "settings: the agent's rows are disabled; nothing sent");
+            return;
+        }
+        tracing::info!(agent = %agent.0, key, "settings: setting an agent option");
+        let options = self.merge_agent_setting(agent, key, value);
         self.send(ClientMessage::SetAgentSettings {
-            agent: claude_compat::claude_id(),
+            agent: agent.clone(),
             options,
         });
     }
 
-    /// Whether the approval and provider rows take input: connected, this
+    /// Whether agent `agent`'s Settings rows take input: connected, this
     /// connection has heard the agents' Settings values, and the daemon
-    /// lists Claude.
-    fn claude_rows_live(&self) -> bool {
+    /// lists the agent.
+    fn agent_rows_live(&self, agent: &AgentId) -> bool {
         self.conn.is_open()
             && self.agent_settings_received()
-            && self
-                .agents()
-                .iter()
-                .any(|agent| claude_compat::is_claude(&agent.id))
+            && descriptor_for(self.agents(), agent).is_some()
     }
 
     /// Opens Windows' notification settings on a background thread; a
@@ -2239,8 +2256,8 @@ impl RootView {
             .collect()
     }
 
-    /// The Spawn defaults tab: trusted launch, which locks every agent row
-    /// on its own page while it is on.
+    /// The Spawn defaults tab: trusted launch, which locks the agent fields
+    /// marked for it on their pages while it is on.
     fn spawn_defaults_tab(
         &self,
         focused: Option<SettingsControl>,
@@ -2262,44 +2279,32 @@ impl RootView {
             ))
             .child(trusted)
             .child(hint(
-                "When enabled, new Claude sessions bypass approval prompts.",
+                "When enabled, new agent sessions bypass approval prompts.",
             ));
         vec![section.into_any_element()]
     }
 
-    /// The Claude page: approval mode and provider.
+    /// The Claude page: a section titled with the agent's label holding
+    /// its Settings fields in the descriptor's order, then the launch
+    /// command. While the daemon lists no such agent there are no fields.
     fn claude_tab(
         &self,
         focused: Option<SettingsControl>,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        let lock = if self.sidebar.ui_state().spawn.trusted {
-            RowLock::Locked {
-                note: CLAUDE_LOCKED,
-                selector: "settings-spawn-approval-locked",
-            }
-        } else if self.claude_rows_live() {
-            RowLock::Live
-        } else {
-            RowLock::Disabled
-        };
-        let shown = self.shown_permission_mode();
-        let approval = choice_row(
-            "Claude approval mode",
-            &APPROVAL_CHOICES.map(|mode| {
-                (
-                    SettingsControl::SpawnApproval(mode),
-                    approval_label(mode),
-                    mode == shown,
-                )
-            }),
-            lock,
-            focused,
-            cx,
-        );
-        let provider = provider_row(self.shown_default_provider(), lock, focused, cx);
-        let section = section("Claude").child(approval).child(provider);
-        let mut sections = vec![section.into_any_element()];
+        let mut sections = Vec::new();
+        if let Some(page) = self.claude_page() {
+            let live = self.agent_rows_live(&page.id);
+            let rows: Vec<AnyElement> = page
+                .fields
+                .iter()
+                .enumerate()
+                .filter_map(|(index, view)| {
+                    agent_field_row(&page.tag, index, view, live, focused, cx)
+                })
+                .collect();
+            sections.push(section(page.label).children(rows).into_any_element());
+        }
         sections.extend(self.launch_command_section(focused, cx));
         sections
     }
@@ -2681,7 +2686,7 @@ struct ToggleState {
 fn toggle(
     control: SettingsControl,
     state: ToggleState,
-    label: &'static str,
+    label: impl Into<SharedString>,
     focused: Option<SettingsControl>,
     cx: &mut Context<RootView>,
 ) -> Div {
@@ -2689,7 +2694,7 @@ fn toggle(
         control.selector(),
         state.checked,
         focused == Some(control),
-        label,
+        label.into(),
     );
     if state.enabled {
         div().flex().child(row.on_click(press(control, cx)))
@@ -2701,47 +2706,140 @@ fn toggle(
     }
 }
 
-/// The "Claude provider" row, taking input only while `lock` is
-/// [`RowLock::Live`]; under trusted launch's lock it carries its own note.
-fn provider_row(
-    chosen: ClaudeProvider,
-    lock: RowLock,
+/// One agent's Settings page: the agent and the fields the page draws.
+struct AgentPage {
+    id: AgentId,
+    tag: String,
+    label: String,
+    /// [`AgentOptions::settings_fields`], which a page control's indices
+    /// point into.
+    fields: Vec<FieldView>,
+}
+
+/// `selector` as a `&'static str`, leaked once per distinct text. An agent
+/// page's selectors come from the daemon's descriptors, a few per field, and
+/// a [`SettingsControl`] stays `Copy` with its selector in it.
+fn intern(selector: String) -> &'static str {
+    static INTERNED: LazyLock<Mutex<HashSet<&'static str>>> =
+        LazyLock::new(|| Mutex::new(HashSet::new()));
+    // The set only ever grows by whole entries, so a poisoned lock still
+    // holds a usable set.
+    let mut interned = INTERNED.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(found) = interned.get(selector.as_str()) {
+        return found;
+    }
+    let leaked: &'static str = Box::leak(selector.into_boxed_str());
+    interned.insert(leaked);
+    leaked
+}
+
+/// The selector part of field `id`: the id with `_` as `-`.
+fn field_part(id: &str) -> String {
+    id.replace('_', "-")
+}
+
+/// The controls of `view`, field `index` of the page of the agent tagged
+/// `tag`, in drawing order: one per choice of a choice field, one for a
+/// toggle, none for a kind the page does not draw.
+fn field_controls(tag: &str, index: usize, view: &FieldView) -> Vec<SettingsControl> {
+    let field = field_part(&view.id);
+    match &view.editor {
+        FieldEditor::Choice { choices, .. } => choices
+            .iter()
+            .enumerate()
+            .map(|(choice, option)| SettingsControl::AgentChoice {
+                field: index,
+                choice,
+                selector: intern(format!("settings-{tag}-{field}-{}", option.selector)),
+            })
+            .collect(),
+        FieldEditor::Toggle => vec![SettingsControl::AgentToggle {
+            field: index,
+            selector: intern(format!("settings-{tag}-{field}")),
+        }],
+        FieldEditor::Text { .. } | FieldEditor::Model { .. } | FieldEditor::Unknown => Vec::new(),
+    }
+}
+
+/// The value a press on `view` stores: choice `choice`'s value, or for a
+/// toggle (`choice` is `None`) the opposite of the value shown.
+fn pressed_value(view: &FieldView, choice: Option<usize>) -> Option<OptionValue> {
+    match (&view.editor, choice) {
+        (FieldEditor::Choice { choices, .. }, Some(choice)) => {
+            choices.get(choice).map(|option| option.value.clone())
+        }
+        (FieldEditor::Toggle, None) => {
+            Some(OptionValue::Bool(view.value != OptionValue::Bool(true)))
+        }
+        _ => None,
+    }
+}
+
+/// The row of `view`, field `index` of the page of the agent tagged `tag`:
+/// a choice field as a segmented row of its choices, a toggle as a checkbox
+/// row; `None` for a kind the page does not draw. The row takes input only
+/// while `live` and the field is not disabled; a field trusted launch locks
+/// carries the locked note.
+fn agent_field_row(
+    tag: &str,
+    index: usize,
+    view: &FieldView,
+    live: bool,
     focused: Option<SettingsControl>,
     cx: &mut Context<RootView>,
-) -> AnyElement {
-    let enabled = matches!(lock, RowLock::Live);
-    let locked = matches!(lock, RowLock::Locked { .. });
-    let buttons = PROVIDER_CHOICES
-        .into_iter()
-        .map(|provider| {
-            let control = SettingsControl::SpawnProvider(provider);
-            let look = Look {
-                selected: provider == chosen,
-                focused: focused == Some(control),
+) -> Option<AnyElement> {
+    let controls = field_controls(tag, index, view);
+    let enabled = live && !view.disabled;
+    let row = match &view.editor {
+        FieldEditor::Choice { choices, .. } => {
+            let buttons = controls
+                .iter()
+                .zip(choices)
+                .map(|(control, choice)| {
+                    let look = Look {
+                        selected: choice.value == view.value,
+                        focused: focused == Some(*control),
+                        enabled,
+                    };
+                    choice_button(
+                        control.selector().to_owned(),
+                        SharedString::from(choice.label.clone()),
+                        look,
+                        press(*control, cx),
+                    )
+                    .into_any_element()
+                })
+                .collect();
+            field(view.label.clone()).child(div().flex().child(segmented(buttons)))
+        }
+        FieldEditor::Toggle => {
+            let control = *controls.first()?;
+            let state = ToggleState {
+                checked: view.value == OptionValue::Bool(true),
                 enabled,
             };
-            choice_button(
-                control.selector().to_owned(),
-                provider_label(provider),
-                look,
-                press(control, cx),
-            )
-            .into_any_element()
-        })
-        .collect();
-    let row = div()
-        .id("settings-spawn-provider")
-        .flex()
-        .child(segmented(buttons));
-    let row = field("Claude provider").child(row);
-    let row = if locked {
-        row.child(
-            hint(PROVIDER_LOCKED).debug_selector(|| "settings-spawn-provider-locked".to_owned()),
-        )
-    } else {
-        row
+            div().flex().flex_col().gap(px(7.0)).child(toggle(
+                control,
+                state,
+                view.label.clone(),
+                focused,
+                cx,
+            ))
+        }
+        FieldEditor::Text { .. } | FieldEditor::Model { .. } | FieldEditor::Unknown => {
+            return None;
+        }
     };
-    row.into_any_element()
+    let locked = view.disabled && view.editor != FieldEditor::Unknown;
+    let note = locked.then(|| {
+        let selector = format!("settings-{tag}-{}-locked", field_part(&view.id));
+        hint(LOCKED).debug_selector(move || selector)
+    });
+    Some(
+        row.children(view.help.clone().map(hint))
+            .children(note)
+            .into_any_element(),
+    )
 }
 
 /// A launch-command field's frame round `input`; a click gives it the
@@ -2792,8 +2890,6 @@ fn disabled_launch_row(
 enum RowLock {
     /// The choices take clicks and keys.
     Live,
-    /// The choices are dimmed and inert, with no note.
-    Disabled,
     /// The choices are dimmed and inert; the note and its selector say why.
     Locked {
         note: &'static str,
@@ -2833,7 +2929,7 @@ fn choice_row(
         RowLock::Locked { note, selector } => {
             Some(hint(note).debug_selector(move || selector.to_owned()))
         }
-        RowLock::Live | RowLock::Disabled => None,
+        RowLock::Live => None,
     };
     field(label)
         .child(div().flex().child(segmented(buttons)))

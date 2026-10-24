@@ -136,12 +136,24 @@ fn broadcast_claude(h: &mut Harness<'_>, options: OptionValues) {
     });
 }
 
-fn approval_choice(h: &mut Harness<'_>) -> &'static str {
-    h.root(|root, _| root.settings_approval_choice())
+/// The label of the choice the Claude page shows selected in `field`.
+fn claude_choice(h: &mut Harness<'_>, field: &str) -> Option<String> {
+    let field = field.to_owned();
+    h.root(move |root, _| root.settings_field_choice("claude", &field))
 }
 
-fn provider_choice(h: &mut Harness<'_>) -> &'static str {
-    h.root(|root, _| root.settings_provider_choice())
+fn approval_choice(h: &mut Harness<'_>) -> Option<String> {
+    claude_choice(h, "permission_mode")
+}
+
+fn provider_choice(h: &mut Harness<'_>) -> Option<String> {
+    claude_choice(h, "provider")
+}
+
+/// Whether the Claude page shows `field` locked by trusted launch.
+fn claude_locked(h: &mut Harness<'_>, field: &str) -> bool {
+    let field = field.to_owned();
+    h.root(move |root, _| root.settings_field_locked("claude", &field))
 }
 
 /// A point in pane `p1`'s cell (`col`, 0), `dx` pixels off its centre.
@@ -697,8 +709,8 @@ fn spawn_defaults_tab_shows_choices_and_saves(cx: &mut TestAppContext) {
         "the trusted launch toggle is painted"
     );
     for selector in [
-        "settings-spawn-approval-cli-default",
-        "settings-spawn-provider-anthropic",
+        "settings-claude-permission-mode-cli-default",
+        "settings-claude-provider-anthropic",
     ] {
         assert!(
             h.bounds(selector).origin.x < px(0.0),
@@ -709,9 +721,9 @@ fn spawn_defaults_tab_shows_choices_and_saves(cx: &mut TestAppContext) {
     h.click_on("settings-tab-claude");
     assert_eq!(shown_tab(&mut h), "Claude");
     for selector in [
-        "settings-spawn-approval-cli-default",
-        "settings-spawn-approval-accept-edits",
-        "settings-spawn-provider-anthropic",
+        "settings-claude-permission-mode-cli-default",
+        "settings-claude-permission-mode-accept-edits",
+        "settings-claude-provider-anthropic",
     ] {
         assert!(
             h.bounds(selector).origin.x >= px(0.0),
@@ -719,7 +731,7 @@ fn spawn_defaults_tab_shows_choices_and_saves(cx: &mut TestAppContext) {
         );
     }
     h.sent();
-    h.click_on("settings-spawn-approval-accept-edits");
+    h.click_on("settings-claude-permission-mode-accept-edits");
     let accept_edits = options(&[("permission_mode", text("accept_edits"))]);
     assert_eq!(
         sent_agent_settings(&mut h),
@@ -727,12 +739,12 @@ fn spawn_defaults_tab_shows_choices_and_saves(cx: &mut TestAppContext) {
         "sent to the daemon at once"
     );
     assert_eq!(
-        approval_choice(&mut h),
-        "CLI default",
+        approval_choice(&mut h).as_deref(),
+        Some("CLI default"),
         "the row waits for the daemon's broadcast"
     );
     broadcast_claude(&mut h, accept_edits);
-    assert_eq!(approval_choice(&mut h), "accept edits");
+    assert_eq!(approval_choice(&mut h).as_deref(), Some("Accept edits"));
 
     h.click_on("settings-tab-spawn-defaults");
     h.click_on("settings-spawn-trusted");
@@ -742,9 +754,58 @@ fn spawn_defaults_tab_shows_choices_and_saves(cx: &mut TestAppContext) {
         "native-ui.json holds no approval mode"
     );
     assert_eq!(
-        approval_choice(&mut h),
-        "accept edits",
+        approval_choice(&mut h).as_deref(),
+        Some("Accept edits"),
         "the value stays while trusted locks the rows"
+    );
+}
+
+#[gpui::test]
+fn the_claude_page_rows_come_from_the_descriptor(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-claude");
+    assert_eq!(
+        approval_choice(&mut h).as_deref(),
+        Some("CLI default"),
+        "a field whose default is no value shows the no-value choice"
+    );
+    assert_eq!(
+        provider_choice(&mut h).as_deref(),
+        Some("Anthropic"),
+        "the provider shows its default's label"
+    );
+    assert_eq!(
+        claude_choice(&mut h, "model"),
+        None,
+        "the model is not on the Settings page"
+    );
+    assert!(
+        !drawn(&mut h, "settings-claude-model"),
+        "no model row is drawn"
+    );
+    h.keys("tab");
+    for stop in [
+        "settings-claude-permission-mode-cli-default",
+        "settings-claude-permission-mode-default",
+        "settings-claude-permission-mode-accept-edits",
+        "settings-claude-permission-mode-bypass-permissions",
+        "settings-claude-permission-mode-plan",
+        "settings-claude-provider-anthropic",
+        "settings-claude-provider-deepseek",
+    ] {
+        assert_eq!(
+            settings_focus(&mut h),
+            Some(stop),
+            "permission mode, then provider, in the descriptor's order"
+        );
+        h.keys("tab");
+    }
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("list"),
+        "no other field is on the page before the daemon reports its command"
     );
 }
 
@@ -769,28 +830,30 @@ fn spawn_defaults_trusted_disables_choices_and_leaves_ring(cx: &mut TestAppConte
 
     h.click_on("settings-tab-claude");
     assert_eq!(
-        approval_choice(&mut h),
-        "plan",
+        approval_choice(&mut h).as_deref(),
+        Some("Plan"),
         "the locked row keeps showing the daemon's value"
     );
     assert!(
-        h.bounds("settings-spawn-approval-locked").origin.x >= px(0.0),
+        h.bounds("settings-claude-permission-mode-locked").origin.x >= px(0.0),
         "the approval row says why it is dead"
     );
+    assert!(claude_locked(&mut h, "permission_mode"));
     assert!(
-        h.bounds("settings-spawn-provider-locked").origin.x >= px(0.0),
-        "the provider row says why it is dead"
+        !claude_locked(&mut h, "provider"),
+        "trusted launch locks only the fields marked for it"
     );
-    assert_eq!(
-        h.root(|root, _| root.settings_provider_locked_note()),
-        "Trusted launch keeps the provider choice in effect; \
-         this lock only stops editing it here.",
-        "the provider note says the choice stays in effect"
+    assert!(
+        !drawn(&mut h, "settings-claude-provider-locked"),
+        "the provider row carries no locked note"
     );
     h.sent();
-    h.click_on("settings-spawn-approval-accept-edits");
+    h.click_on("settings-claude-permission-mode-accept-edits");
     assert!(
-        h.bounds("settings-spawn-approval-accept-edits").origin.x >= px(0.0),
+        h.bounds("settings-claude-permission-mode-accept-edits")
+            .origin
+            .x
+            >= px(0.0),
         "the disabled choice is still painted"
     );
     assert_eq!(
@@ -798,27 +861,41 @@ fn spawn_defaults_trusted_disables_choices_and_leaves_ring(cx: &mut TestAppConte
         Vec::new(),
         "a click on it sends nothing"
     );
-    h.click_on("settings-spawn-provider-deepseek");
+    h.click_on("settings-claude-provider-deepseek");
     assert_eq!(
         sent_agent_settings(&mut h),
-        Vec::new(),
-        "a click on the locked provider sends nothing"
+        vec![(
+            claude(),
+            options(&[
+                ("permission_mode", text("plan")),
+                ("provider", text("deepseek")),
+            ])
+        )],
+        "the provider stays editable under trusted launch"
     );
     h.click_on("settings-tab-claude");
     assert_eq!(settings_focus(&mut h), Some("list"));
     h.keys("tab");
     assert_eq!(
         settings_focus(&mut h),
-        Some("list"),
-        "every locked Claude row left the ring"
+        Some("settings-claude-provider-anthropic"),
+        "the locked approval row left the ring; the provider stays"
     );
+    h.keys("tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("settings-claude-provider-deepseek")
+    );
+    h.keys("tab");
+    assert_eq!(settings_focus(&mut h), Some("list"));
 
     h.click_on("settings-tab-spawn-defaults");
     h.click_on("settings-spawn-trusted");
     assert_eq!(saved_ui(&dir)["spawn"]["trusted"], false);
     h.click_on("settings-tab-claude");
+    broadcast_claude(&mut h, options(&[("permission_mode", text("plan"))]));
     h.sent();
-    h.click_on("settings-spawn-approval-accept-edits");
+    h.click_on("settings-claude-permission-mode-accept-edits");
     assert_eq!(
         sent_agent_settings(&mut h),
         vec![(
@@ -838,7 +915,7 @@ fn claude_provider_default_saves_and_seeds_the_dialog(cx: &mut TestAppContext) {
     h.keys("ctrl-,");
     h.click_on("settings-tab-claude");
     h.sent();
-    tab_to(&mut h, "settings-spawn-provider-deepseek");
+    tab_to(&mut h, "settings-claude-provider-deepseek");
     h.keys("enter");
     let deepseek = options(&[("provider", text("deepseek"))]);
     assert_eq!(
@@ -846,28 +923,28 @@ fn claude_provider_default_saves_and_seeds_the_dialog(cx: &mut TestAppContext) {
         vec![(claude(), deepseek.clone())]
     );
     assert_eq!(
-        provider_choice(&mut h),
-        "Anthropic",
+        provider_choice(&mut h).as_deref(),
+        Some("Anthropic"),
         "the row waits for the daemon's broadcast"
     );
     broadcast_claude(&mut h, deepseek);
-    assert_eq!(provider_choice(&mut h), "DeepSeek");
-    h.click_on("settings-spawn-provider-anthropic");
+    assert_eq!(provider_choice(&mut h).as_deref(), Some("DeepSeek"));
+    h.click_on("settings-claude-provider-anthropic");
     let anthropic = options(&[("provider", text("anthropic"))]);
     assert_eq!(
         sent_agent_settings(&mut h),
         vec![(claude(), anthropic.clone())]
     );
     broadcast_claude(&mut h, anthropic);
-    assert_eq!(provider_choice(&mut h), "Anthropic");
-    h.click_on("settings-spawn-provider-deepseek");
+    assert_eq!(provider_choice(&mut h).as_deref(), Some("Anthropic"));
+    h.click_on("settings-claude-provider-deepseek");
     let deepseek = options(&[("provider", text("deepseek"))]);
     assert_eq!(
         sent_agent_settings(&mut h),
         vec![(claude(), deepseek.clone())]
     );
     broadcast_claude(&mut h, deepseek);
-    assert_eq!(provider_choice(&mut h), "DeepSeek");
+    assert_eq!(provider_choice(&mut h).as_deref(), Some("DeepSeek"));
     h.keys("escape");
     assert!(!h.root(|root, _| root.settings_open()));
 
@@ -892,7 +969,7 @@ fn a_settings_row_keeps_the_other_claude_settings(cx: &mut TestAppContext) {
     h.keys("ctrl-,");
     h.click_on("settings-tab-claude");
     h.sent();
-    h.click_on("settings-spawn-approval-plan");
+    h.click_on("settings-claude-permission-mode-plan");
     let plan = options(&[
         ("permission_mode", text("plan")),
         ("provider", text("deepseek")),
@@ -903,8 +980,8 @@ fn a_settings_row_keeps_the_other_claude_settings(cx: &mut TestAppContext) {
         "the provider rides along with the changed mode"
     );
     broadcast_claude(&mut h, plan);
-    assert_eq!(approval_choice(&mut h), "plan");
-    h.click_on("settings-spawn-approval-cli-default");
+    assert_eq!(approval_choice(&mut h).as_deref(), Some("Plan"));
+    h.click_on("settings-claude-permission-mode-cli-default");
     assert_eq!(
         sent_agent_settings(&mut h),
         vec![(
@@ -925,8 +1002,8 @@ fn two_quick_settings_clicks_keep_both_keys(cx: &mut TestAppContext) {
     h.keys("ctrl-,");
     h.click_on("settings-tab-claude");
     h.sent();
-    h.click_on("settings-spawn-approval-plan");
-    h.click_on("settings-spawn-provider-deepseek");
+    h.click_on("settings-claude-permission-mode-plan");
+    h.click_on("settings-claude-provider-deepseek");
     let plan = options(&[("permission_mode", text("plan"))]);
     let both = options(&[
         ("permission_mode", text("plan")),
@@ -938,12 +1015,12 @@ fn two_quick_settings_clicks_keep_both_keys(cx: &mut TestAppContext) {
         "the second click keeps the first one's key before any broadcast"
     );
     assert_eq!(
-        approval_choice(&mut h),
-        "CLI default",
+        approval_choice(&mut h).as_deref(),
+        Some("CLI default"),
         "the rows still wait for the daemon"
     );
     broadcast_claude(&mut h, both);
-    h.click_on("settings-spawn-approval-default");
+    h.click_on("settings-claude-permission-mode-default");
     assert_eq!(
         sent_agent_settings(&mut h),
         vec![(
@@ -977,19 +1054,28 @@ fn the_claude_rows_are_disabled_while_disconnected(cx: &mut TestAppContext) {
     dropped.on_closed("the daemon went away".to_owned());
     h.event(NetEvent::State(dropped));
     assert!(h.root(|root, _| root.settings_open()));
+    for selector in [
+        "settings-claude-permission-mode-plan",
+        "settings-claude-provider-deepseek",
+    ] {
+        assert!(
+            !drawn(&mut h, selector),
+            "{selector}: a disconnected client lists no agent to draw"
+        );
+    }
+    assert_eq!(approval_choice(&mut h), None);
+    h.click_on("settings-tab-claude");
     h.sent();
-    h.click_on("settings-spawn-approval-plan");
-    h.click_on("settings-spawn-provider-deepseek");
-    assert_eq!(
-        sent_agent_settings(&mut h),
-        Vec::new(),
-        "a click while disconnected sends nothing"
-    );
     h.keys("tab");
     assert_eq!(
         settings_focus(&mut h),
         Some("list"),
         "the Claude rows left the ring"
+    );
+    assert_eq!(
+        sent_agent_settings(&mut h),
+        Vec::new(),
+        "nothing is sent while disconnected"
     );
 }
 
@@ -1007,7 +1093,7 @@ fn the_claude_rows_wait_for_agent_settings(cx: &mut TestAppContext) {
         agents: agent_registry::descriptors(),
     });
     h.sent();
-    h.click_on("settings-spawn-approval-plan");
+    h.click_on("settings-claude-permission-mode-plan");
     assert_eq!(
         sent_agent_settings(&mut h),
         Vec::new(),
@@ -1021,7 +1107,7 @@ fn the_claude_rows_wait_for_agent_settings(cx: &mut TestAppContext) {
     );
 
     broadcast_claude(&mut h, options(&[("provider", text("deepseek"))]));
-    h.click_on("settings-spawn-approval-plan");
+    h.click_on("settings-claude-permission-mode-plan");
     assert_eq!(
         sent_agent_settings(&mut h),
         vec![(
@@ -1056,17 +1142,17 @@ fn tab_walks_spawn_default_choices(cx: &mut TestAppContext) {
     h.keys("tab");
     assert_eq!(
         settings_focus(&mut h),
-        Some("settings-spawn-approval-cli-default")
+        Some("settings-claude-permission-mode-cli-default")
     );
     h.keys("tab");
     assert_eq!(
         settings_focus(&mut h),
-        Some("settings-spawn-approval-default")
+        Some("settings-claude-permission-mode-default")
     );
     h.keys("tab");
     assert_eq!(
         settings_focus(&mut h),
-        Some("settings-spawn-approval-accept-edits")
+        Some("settings-claude-permission-mode-accept-edits")
     );
     h.sent();
     h.keys("space");
@@ -1076,23 +1162,26 @@ fn tab_walks_spawn_default_choices(cx: &mut TestAppContext) {
         vec![(claude(), accept_edits.clone())]
     );
     broadcast_claude(&mut h, accept_edits);
-    assert_eq!(approval_choice(&mut h), "accept edits");
+    assert_eq!(approval_choice(&mut h).as_deref(), Some("Accept edits"));
     h.keys("tab");
     assert_eq!(
         settings_focus(&mut h),
-        Some("settings-spawn-approval-bypass-permissions")
-    );
-    h.keys("tab");
-    assert_eq!(settings_focus(&mut h), Some("settings-spawn-approval-plan"));
-    h.keys("tab");
-    assert_eq!(
-        settings_focus(&mut h),
-        Some("settings-spawn-provider-anthropic")
+        Some("settings-claude-permission-mode-bypass-permissions")
     );
     h.keys("tab");
     assert_eq!(
         settings_focus(&mut h),
-        Some("settings-spawn-provider-deepseek")
+        Some("settings-claude-permission-mode-plan")
+    );
+    h.keys("tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("settings-claude-provider-anthropic")
+    );
+    h.keys("tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("settings-claude-provider-deepseek")
     );
     h.keys("tab");
     assert_eq!(settings_focus(&mut h), Some("settings-agent-program"));
@@ -1109,6 +1198,16 @@ fn tab_walks_spawn_default_choices(cx: &mut TestAppContext) {
         settings_focus(&mut h),
         Some("settings-agent-args"),
         "Shift+Tab walks back"
+    );
+
+    h.click_on("settings-tab-spawn-defaults");
+    h.click_on("settings-spawn-trusted");
+    h.click_on("settings-tab-claude");
+    h.keys("tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("settings-claude-provider-anthropic"),
+        "under trusted launch the walk starts at the provider"
     );
 }
 
@@ -1219,7 +1318,7 @@ fn launch_command_rows_hidden_until_agent_commands_arrive(cx: &mut TestAppContex
         !drawn(&mut h, "settings-agent-args"),
         "no Extra arguments row yet"
     );
-    tab_to(&mut h, "settings-spawn-provider-deepseek");
+    tab_to(&mut h, "settings-claude-provider-deepseek");
     h.keys("tab");
     assert_eq!(
         settings_focus(&mut h),
@@ -1264,7 +1363,7 @@ fn launch_command_rows_disabled_without_the_feature(cx: &mut TestAppContext) {
         Vec::<(String, String)>::new(),
         "nothing is sent"
     );
-    h.click_on("settings-spawn-provider-deepseek");
+    h.click_on("settings-claude-provider-deepseek");
     h.keys("tab");
     assert_eq!(
         settings_focus(&mut h),
@@ -1518,7 +1617,7 @@ fn disconnect_hides_the_launch_rows_without_the_restart_tip(cx: &mut TestAppCont
         None,
         "a lost connection is no older daemon"
     );
-    h.click_on("settings-spawn-provider-deepseek");
+    h.click_on("settings-tab-claude");
     h.keys("tab");
     assert_eq!(
         settings_focus(&mut h),
@@ -1576,7 +1675,7 @@ fn program_env_locks_the_program_row_and_names_the_variable(cx: &mut TestAppCont
         Some("wrapper"),
         "the read-only row takes no typing"
     );
-    tab_to(&mut h, "settings-spawn-provider-deepseek");
+    tab_to(&mut h, "settings-claude-provider-deepseek");
     h.keys("tab");
     assert_eq!(
         settings_focus(&mut h),
@@ -1610,14 +1709,25 @@ fn trusted_launch_leaves_the_launch_rows_in_the_ring(cx: &mut TestAppContext) {
     h.keys("tab");
     assert_eq!(
         settings_focus(&mut h),
+        Some("settings-claude-provider-anthropic"),
+        "the locked approval row leaves the ring; the provider stays"
+    );
+    h.keys("tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("settings-claude-provider-deepseek")
+    );
+    h.keys("tab");
+    assert_eq!(
+        settings_focus(&mut h),
         Some("settings-agent-program"),
-        "the locked Claude rows leave the ring; the launch rows stay"
+        "the launch rows stay"
     );
     h.keys("tab");
     assert_eq!(settings_focus(&mut h), Some("settings-agent-args"));
     h.keys("tab");
     assert_eq!(settings_focus(&mut h), Some("list"));
-    h.keys("tab");
+    tab_to(&mut h, "settings-agent-program");
     type_line(&mut h, "wrapper");
     h.keys("enter");
     assert_eq!(

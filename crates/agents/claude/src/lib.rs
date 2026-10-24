@@ -150,11 +150,12 @@ fn provider_field() -> OptionField {
     )
 }
 
-/// The model, in the spawn dialog's Advanced section: no value passes the
-/// provider's default; on `DeepSeek` the placeholder names its default model
-/// and the Anthropic aliases go.
+/// The model, chosen per spawn in the dialog's Advanced section and not on
+/// the Settings page: no value passes the provider's default; on `DeepSeek`
+/// the placeholder names its default model and the Anthropic aliases go.
 fn model_field() -> OptionField {
     OptionField {
+        settings: false,
         spawn: SpawnPlacement::Advanced,
         when: vec![FieldRule {
             if_field: "provider".to_string(),
@@ -618,6 +619,22 @@ mod tests {
     #[test]
     fn conformance() {
         agent_api::conformance::check(&ClaudePlugin);
+    }
+
+    #[test]
+    fn the_settings_page_holds_permission_mode_and_provider_not_model() {
+        let settings: Vec<&str> = ClaudePlugin
+            .descriptor()
+            .fields
+            .iter()
+            .filter(|field| field.settings)
+            .map(|field| field.id.as_str())
+            .collect();
+        assert_eq!(
+            settings,
+            ["permission_mode", "provider"],
+            "the model is chosen per spawn, not on the Settings page"
+        );
     }
 
     fn shell_resume(hook_files: &[std::path::PathBuf]) -> Option<String> {

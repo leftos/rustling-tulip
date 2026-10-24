@@ -176,19 +176,24 @@ impl AgentOptions {
             .iter()
             .filter(|field| matches!(field.spawn, SpawnPlacement::Main | SpawnPlacement::Advanced))
             .filter(|field| !is_hidden(field, &resolved))
-            .map(|field| FieldView {
-                id: field.id.clone(),
-                label: field.label.clone(),
-                help: field.help.clone(),
-                placement: field.spawn,
-                editor: editor(field, &resolved),
-                value: kept
-                    .get(&field.id)
-                    .cloned()
-                    .unwrap_or_else(|| field.default.clone()),
-                disabled: matches!(field.kind, FieldKind::Unknown)
-                    || (trusted && field.locked_when_trusted),
-            })
+            .map(|field| field_view(field, &resolved, &kept, trusted))
+            .collect()
+    }
+
+    /// The fields the agent's Settings page draws: those marked for
+    /// Settings, whatever their spawn placement, that no `when` rule hides,
+    /// in the descriptor's order. A field a trusted launch locks is disabled
+    /// while `trusted` and shows the value it keeps for an untrusted launch.
+    #[must_use]
+    pub(crate) fn settings_fields(&self, trusted: bool) -> Vec<FieldView> {
+        let resolved = self.resolved(trusted);
+        let kept = self.resolved(false);
+        self.descriptor
+            .fields
+            .iter()
+            .filter(|field| field.settings)
+            .filter(|field| !is_hidden(field, &resolved))
+            .map(|field| field_view(field, &resolved, &kept, trusted))
             .collect()
     }
 
@@ -285,22 +290,24 @@ impl crate::RootView {
                 self.agents = agents;
             }
             protocol::DaemonMessage::AgentSettings { settings } => {
+                for agent in settings.keys() {
+                    self.agent_settings_pending.remove(agent);
+                }
                 self.agent_settings = settings;
                 self.agent_settings_received = true;
-                self.claude_settings_pending = None;
             }
             _ => {}
         }
     }
 
-    /// Forgets the daemon's agents, their Settings values and the Claude
-    /// page's pending change, as a disconnect does.
+    /// Forgets the daemon's agents, their Settings values and every
+    /// pending Settings change, as a disconnect does.
     pub(crate) fn forget_agents(&mut self) {
         self.agents.clear();
         self.sidebar.set_agents(Vec::new());
         self.agent_settings.clear();
         self.agent_settings_received = false;
-        self.claude_settings_pending = None;
+        self.agent_settings_pending.clear();
     }
 
     /// Whether this connection has heard the agents' Settings values.
@@ -308,24 +315,64 @@ impl crate::RootView {
         self.agent_settings_received
     }
 
-    /// Claude's Settings values with `key` set to `value`, built on the
-    /// Claude page's pending change, else on the daemon's last broadcast;
-    /// kept as the pending change until the next broadcast.
-    pub(crate) fn merge_claude_setting(
+    /// `agent`'s Settings values with `key` set to `value`, built on its
+    /// page's pending change, else on the daemon's last broadcast; kept as
+    /// the agent's pending change until a broadcast names it.
+    pub(crate) fn merge_agent_setting(
         &mut self,
+        agent: &AgentId,
         key: &str,
-        value: protocol::OptionValue,
+        value: OptionValue,
     ) -> OptionValues {
-        let mut options = self.claude_settings_pending.take().unwrap_or_else(|| {
-            self.agent_settings
-                .get(&crate::claude_compat::claude_id())
-                .cloned()
-                .unwrap_or_default()
-        });
-        options.insert(key.to_owned(), value);
-        self.claude_settings_pending = Some(options.clone());
-        options
+        merge_setting(
+            &mut self.agent_settings_pending,
+            &self.agent_settings,
+            agent,
+            key,
+            value,
+        )
     }
+}
+
+/// `field` as a page draws it, with the fields holding `resolved` and
+/// `kept` for an untrusted launch.
+fn field_view(
+    field: &OptionField,
+    resolved: &OptionValues,
+    kept: &OptionValues,
+    trusted: bool,
+) -> FieldView {
+    FieldView {
+        id: field.id.clone(),
+        label: field.label.clone(),
+        help: field.help.clone(),
+        placement: field.spawn,
+        editor: editor(field, resolved),
+        value: kept
+            .get(&field.id)
+            .cloned()
+            .unwrap_or_else(|| field.default.clone()),
+        disabled: matches!(field.kind, FieldKind::Unknown)
+            || (trusted && field.locked_when_trusted),
+    }
+}
+
+/// `agent`'s Settings values with `key` set to `value`, built on its
+/// pending change in `pending`, else on its values in `broadcast` (none
+/// when the broadcast has none); kept in `pending` until the agent's next
+/// broadcast answers.
+fn merge_setting(
+    pending: &mut BTreeMap<AgentId, OptionValues>,
+    broadcast: &BTreeMap<AgentId, OptionValues>,
+    agent: &AgentId,
+    key: &str,
+    value: OptionValue,
+) -> OptionValues {
+    let options = pending
+        .entry(agent.clone())
+        .or_insert_with(|| broadcast.get(agent).cloned().unwrap_or_default());
+    options.insert(key.to_owned(), value);
+    options.clone()
 }
 
 /// `value` as `field` reads it: a text or model value trimmed, blank as no
@@ -811,6 +858,135 @@ mod tests {
         assert_eq!(
             options.wire_values(false),
             values(&[("model", text("opus"))])
+        );
+    }
+
+    fn ids(fields: &[FieldView]) -> Vec<String> {
+        fields.iter().map(|field| field.id.clone()).collect()
+    }
+
+    #[test]
+    fn settings_fields_lists_settings_fields_in_descriptor_order() {
+        let mut descriptor = test_agent();
+        for field in &mut descriptor.fields {
+            if field.id == "mode" {
+                field.spawn = SpawnPlacement::Hidden;
+            }
+        }
+        let options = AgentOptions::new(descriptor, None);
+        assert_eq!(
+            ids(&options.settings_fields(false)),
+            strings(&["mode", "sandbox", "profile"]),
+            "every Settings field, whatever its spawn placement, in the descriptor's order"
+        );
+    }
+
+    #[test]
+    fn settings_fields_skips_spawn_only_fields() {
+        let options = AgentOptions::new(claude(), None);
+        assert_eq!(
+            ids(&options.settings_fields(false)),
+            strings(&["permission_mode", "provider"]),
+            "Claude's model is a spawn-only field"
+        );
+        assert!(
+            ids(&options.fields(false)).contains(&"model".to_owned()),
+            "the spawn dialog still draws the model"
+        );
+    }
+
+    #[test]
+    fn settings_fields_hides_a_field_whose_when_is_false() {
+        let options = AgentOptions::new(
+            test_agent(),
+            Some(&values(&[("sandbox", OptionValue::Bool(true))])),
+        );
+        assert_eq!(
+            ids(&options.settings_fields(false)),
+            strings(&["mode", "sandbox"]),
+            "the sandbox rule hides profile"
+        );
+    }
+
+    #[test]
+    fn settings_fields_locks_only_locked_when_trusted_fields() {
+        let options = AgentOptions::new(
+            claude(),
+            Some(&values(&[("permission_mode", text("plan"))])),
+        );
+        let open = options.settings_fields(false);
+        assert!(open.iter().all(|field| !field.disabled), "{open:?}");
+
+        let trusted = options.settings_fields(true);
+        let mode = field(&trusted, "permission_mode");
+        assert!(mode.disabled, "a trusted launch locks the permission mode");
+        assert_eq!(
+            mode.value,
+            text("plan"),
+            "a locked field shows the value it keeps"
+        );
+        assert!(
+            !field(&trusted, "provider").disabled,
+            "the provider is not locked when trusted"
+        );
+    }
+
+    #[test]
+    fn merge_agent_setting_keeps_other_keys_and_other_agents() {
+        let claude_id = AgentId("claude".to_owned());
+        let other = AgentId("test-agent".to_owned());
+        let broadcast = BTreeMap::from([
+            (claude_id.clone(), values(&[("provider", text("deepseek"))])),
+            (other.clone(), values(&[("mode", text("slow"))])),
+        ]);
+        let mut pending = BTreeMap::new();
+
+        let first = merge_setting(
+            &mut pending,
+            &broadcast,
+            &claude_id,
+            "permission_mode",
+            text("plan"),
+        );
+        assert_eq!(
+            first,
+            values(&[
+                ("permission_mode", text("plan")),
+                ("provider", text("deepseek")),
+            ]),
+            "built on the last broadcast"
+        );
+        let second = merge_setting(
+            &mut pending,
+            &broadcast,
+            &claude_id,
+            "provider",
+            text("anthropic"),
+        );
+        assert_eq!(
+            second,
+            values(&[
+                ("permission_mode", text("plan")),
+                ("provider", text("anthropic")),
+            ]),
+            "built on the pending change before the broadcast answers"
+        );
+        let toggled = merge_setting(
+            &mut pending,
+            &broadcast,
+            &other,
+            "sandbox",
+            OptionValue::Bool(true),
+        );
+        assert_eq!(
+            toggled,
+            values(&[("mode", text("slow")), ("sandbox", OptionValue::Bool(true))]),
+            "another agent's change starts from its own values"
+        );
+        assert_eq!(
+            pending.get(&claude_id),
+            Some(&second),
+            "the other agent's change leaves Claude's pending change"
         );
     }
 

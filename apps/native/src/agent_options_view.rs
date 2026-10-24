@@ -13,8 +13,9 @@ use crate::spawn_view::{
     option_button, press_control, reveal_when_focused, segmented,
 };
 
-/// The note under a field a trusted launch locks.
-const LOCKED: &str = "Ignored while trusted launch is on. The chosen value is kept for when you turn trusted launch off.";
+/// The note under a field a trusted launch locks, in the spawn dialog and on
+/// an agent's Settings page.
+pub(crate) const LOCKED: &str = "Ignored while trusted launch is on. The chosen value is kept for when you turn trusted launch off.";
 
 /// The row of a field whose kind this client does not know.
 const UPDATE_CLIENT: &str = "Update the client to change this";

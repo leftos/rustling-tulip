@@ -215,7 +215,7 @@ pub struct FieldOverride { pub hidden: Option<bool>, pub placeholder: Option<Str
 pub struct ChipRule { pub field: String, pub hide_when: OptionValue, pub tip: String }
 ```
 
-Claude's descriptor holds `permission_mode` (Choice: CLI default, default, accept edits, bypass permissions, plan; Settings and spawn Advanced; locked when trusted), `provider` (Choice Anthropic / DeepSeek, segmented; Settings and spawn Main), `model` (Model with the opus / sonnet / haiku suggestions, spawn Advanced, and a rule: when `provider` is `deepseek`, placeholder `deepseek-flash` and no suggestions), and one chip rule on `provider` hiding at `anthropic`.
+Claude's descriptor holds `permission_mode` (Choice: CLI default, default, accept edits, bypass permissions, plan; Settings and spawn Advanced; locked when trusted), `provider` (Choice Anthropic / DeepSeek, segmented; Settings and spawn Main), `model` (Model with the opus / sonnet / haiku suggestions, spawn Advanced only and not a Settings field, and a rule: when `provider` is `deepseek`, placeholder `deepseek-flash` and no suggestions), and one chip rule on `provider` hiding at `anthropic`.
 
 Its `texts` carry "Shell running claude --resume" and "no conversation found" (`apps/native/src/recover.rs:391`, `475`).
 
@@ -318,6 +318,8 @@ Every proof runs as `pwsh -NoProfile -File tools/gate.ps1 run … -- cargo nexte
 
   Files: `agent_options.rs`, `agent_options_view.rs` (new), `spawn_form.rs`, `spawn_view.rs`, `shell_dialog.rs`, `session_menu.rs` (prefill), `launch_last.rs`, `connection.rs`, `apps/native/tests/support/mod.rs` (the fake daemon sends `Agents` with the registry's descriptors, then an empty `AgentSettings`; specs that need other field kinds use `test-agent`), new spec `tests/ui/ui_agent_options.rs`. Proof: `agent_options` unit tests (rules, defaults, trusted lock, Unknown kind), `--test ui ui_agent_options`, `ui_spawn_dialog`, `ui_launch_last`.
 - [ ] **AP.8 Settings pages, chips, labels and recovery in the client.** One Settings page per descriptor over `AgentSettings` / `SetAgentSettings`, and `SpawnDefaults` loses its Claude fields; chips from `agent_chips`; runtime tag, accent and Shift+Enter from the descriptor; the recover dialog's kinds from `caps` and labels from `texts`.
+
+  AP.8d is done: the Claude page draws its option rows from the descriptor's `settings: true` fields. AP.8e is open: one page per descriptor, the launch command per agent, and `claude_compat` deleted.
 
   Files: `settings_view.rs`, `sidebar.rs`, `sidebar_view.rs`, `grid_view.rs`, `term_input.rs`, `recover.rs`, `recover_view.rs`, `quit.rs`, `examples/shot.rs`. Proof: `--test ui ui_settings`, `ui_panes`, `ui_sidebar`, `ui_recover`, `ui_terminal`; before and after `.\rt.ps1 native-shot settings` and `spawn`.
 - [ ] **AP.9 Fake CLI, the seam check, docs.** `tools/e2e/fake-claude/` moves to `crates/agents/claude/fake/` behind `fake_cli`; `live.rs` sets each registered plugin's override to its fake through `agent-registry`; the UI fixtures holding `"agent": "claude"` (inventory group 8, ten files) use `test-agent`; non-behaviour hits are renamed or allow-listed (Testing); `tools/check-agent-names.ps1`, its allow file and its prek hook; the docs below.
