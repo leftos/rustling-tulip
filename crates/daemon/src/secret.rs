@@ -17,6 +17,13 @@ use rand::distributions::Alphanumeric;
 
 const AUTH_TOKEN_LEN: usize = 48;
 
+/// Entropy in a device token: 256 bits, which base64url without padding
+/// renders as 43 characters.
+const DEVICE_TOKEN_BYTES: usize = 32;
+
+/// One past the largest six-digit pairing code.
+const PAIRING_CODE_RANGE: u32 = 1_000_000;
+
 /// Generate a fresh 48-char alphanumeric auth token, the `daemon.json` token
 /// for one daemon run.
 #[must_use]
@@ -26,6 +33,33 @@ pub fn generate_auth_token() -> String {
         .take(AUTH_TOKEN_LEN)
         .map(char::from)
         .collect()
+}
+
+/// Generate a fresh 256-bit device token as 43 base64url characters without
+/// padding.
+///
+/// A device token is handed to the paired device once and stored by the
+/// daemon only as the hex SHA-256 of this string (see [`crate::devices`]).
+#[must_use]
+pub fn generate_device_token() -> String {
+    use base64::Engine as _;
+    use rand::RngCore as _;
+
+    let mut bytes = [0u8; DEVICE_TOKEN_BYTES];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+/// Generate a fresh pairing code: six decimal digits, zero-padded, uniform
+/// over all million values.
+///
+/// Twenty bits is only enough because the code never leaves memory, lives
+/// [`crate::devices::CODE_LIFETIME`] and is dropped after
+/// [`crate::devices::MAX_WRONG_ATTEMPTS`] wrong tries.
+#[must_use]
+pub fn generate_pairing_code() -> String {
+    let value: u32 = rand::rngs::OsRng.gen_range(0..PAIRING_CODE_RANGE);
+    format!("{value:06}")
 }
 
 /// Write a secret-bearing file so only its owner can read it.
@@ -84,6 +118,28 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 )]
 mod tests {
     use super::constant_time_eq;
+
+    #[test]
+    fn device_token_is_43_url_safe_chars() {
+        let token = super::generate_device_token();
+        assert_eq!(token.len(), 43, "{token}");
+        assert!(
+            token
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+            "base64url without padding: {token}"
+        );
+        assert_ne!(token, super::generate_device_token(), "each call is fresh");
+    }
+
+    #[test]
+    fn pairing_code_is_six_digits() {
+        for _ in 0..100 {
+            let code = super::generate_pairing_code();
+            assert_eq!(code.len(), 6, "{code}");
+            assert!(code.chars().all(|c| c.is_ascii_digit()), "{code}");
+        }
+    }
 
     #[test]
     fn auth_tokens_are_48_alphanumeric_chars_and_fresh() {

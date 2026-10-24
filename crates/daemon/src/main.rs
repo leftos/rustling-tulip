@@ -12,6 +12,8 @@ mod branch_names;
 mod child_env;
 mod conversations;
 mod detach;
+#[expect(dead_code, reason = "wired by RT-166 D2/D3")]
+mod devices;
 mod env_secrets;
 mod file_fetch;
 mod git;

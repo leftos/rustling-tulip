@@ -271,6 +271,15 @@ impl Dirs {
     }
 }
 
+/// The device-token store: `<config>/devices.json`, beside `remote.json`. It
+/// holds one record per approved tailnet device, each with the hex SHA-256 of
+/// that device's token and never the token itself (see [`crate::devices`]).
+#[expect(dead_code, reason = "wired by RT-166 D2/D3")]
+#[must_use]
+pub fn devices_file(dirs: &Dirs) -> PathBuf {
+    dirs.config.join("devices.json")
+}
+
 /// Resolve the tailnet listener's certificate dir, honoring
 /// `RUSTLING_TULIP_TAILNET_DIR` when set (used by e2e isolation). Falls back
 /// to `<data_local>/leftos/rustling-tulip/data/tailnet/`: the private key
