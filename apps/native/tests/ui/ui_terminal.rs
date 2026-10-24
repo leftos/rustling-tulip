@@ -51,6 +51,36 @@ fn shift_enter_sends_line_continuation(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn shift_enter_follows_the_agent_descriptor(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let descriptor = agent_api::test_agent::DESCRIPTOR.clone();
+    // The agent is up: its program_name is its descriptor's tag, as the
+    // runtime tag reads it (not a shell's label).
+    let s = session("lf")
+        .agent("test-agent")
+        .program_name(&descriptor.tag)
+        .build();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(s.clone()));
+    h.send(DaemonMessage::Agents {
+        agents: vec![descriptor],
+    });
+    h.send(DaemonMessage::SessionUpdated {
+        session: s.clone(),
+        request_id: None,
+    });
+    h.answer_scrollback(&s.id, b"");
+    let at = h.cell_center("p1", 0, 0);
+    h.click(at, Modifiers::none());
+    h.sent();
+    h.keys("shift-enter");
+    assert_eq!(
+        h.sent_input(&s.id),
+        b"\n",
+        "the agent's descriptor sends a line feed"
+    );
+}
+
+#[gpui::test]
 fn space_with_windows_key_shape_reaches_the_pty(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = attached(cx, &dir, session("s1").build());

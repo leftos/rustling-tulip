@@ -21,7 +21,7 @@ use gpui::{
     SharedString, StrikethroughStyle, Subscription, Task, TextRun, UTF16Selection, UnderlineStyle,
     Window, canvas, div, fill, font, outline, point, prelude::*, px, size,
 };
-use protocol::{ClientMessage, SessionMode, SessionSnapshot};
+use protocol::{AgentDescriptor, ClientMessage, SessionMode, SessionSnapshot};
 
 use crate::Clock;
 use crate::fonts::{self, FontSettings};
@@ -622,8 +622,13 @@ impl TerminalPane {
     /// size its PTY to this pane. The caller asks for the scrollback once
     /// for every pane showing the session, and names the request through
     /// [`Self::expect_scrollback`].
-    pub fn attach(&mut self, session: &SessionSnapshot, cx: &mut Context<Self>) {
-        let context = SessionContext::of(session);
+    pub fn attach(
+        &mut self,
+        session: &SessionSnapshot,
+        agents: &[AgentDescriptor],
+        cx: &mut Context<Self>,
+    ) {
+        let context = SessionContext::of(session, agents);
         self.fresh_terminal(
             context.default_cursor_shape(),
             context.mode == SessionMode::PlainShell,
@@ -745,23 +750,23 @@ impl TerminalPane {
     }
 
     /// Take in a newer snapshot of the attached session (its status).
-    pub fn update_session(&mut self, session: &SessionSnapshot) {
+    pub fn update_session(&mut self, session: &SessionSnapshot, agents: &[AgentDescriptor]) {
         if self.session_id() == Some(session.id.as_str()) {
-            self.session = Some(SessionContext::of(session));
+            self.session = Some(SessionContext::of(session, agents));
             self.base_dirs = open::base_dirs(session);
             self.drop_marked_unless_accepting();
         }
     }
 
     /// Take in a full session list: the attached session's entry, if listed.
-    pub fn refresh_sessions(&mut self, sessions: &[SessionSnapshot]) {
+    pub fn refresh_sessions(&mut self, sessions: &[SessionSnapshot], agents: &[AgentDescriptor]) {
         let Some(session) = self
             .session_id()
             .and_then(|id| sessions.iter().find(|session| session.id == id))
         else {
             return;
         };
-        self.session = Some(SessionContext::of(session));
+        self.session = Some(SessionContext::of(session, agents));
         self.base_dirs = open::base_dirs(session);
         self.drop_marked_unless_accepting();
     }
@@ -1043,12 +1048,17 @@ impl TerminalPane {
     }
 
     fn on_key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if self.session.is_none() {
+        let Some(session) = self.session else {
             return;
-        }
+        };
         self.note_input();
         let ks = &event.keystroke;
-        let action = term_input::key_action(ks, self.term.app_cursor(), self.term.has_selection());
+        let action = term_input::key_action(
+            ks,
+            self.term.app_cursor(),
+            self.term.has_selection(),
+            session.shift_enter,
+        );
         let Some(action) = action else {
             self.last_key_char = ks.key_char.clone().filter(|text| text.chars().count() == 1);
             return;

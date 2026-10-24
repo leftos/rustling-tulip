@@ -104,13 +104,18 @@ pub const CLOSE_SESSION: ToastAction = ToastAction {
 };
 
 /// The toast for [`protocol::DaemonMessage::AgentExited`]: the session's
-/// agent ended and left its shell in the pane. Closing the session is a
-/// click away; letting the toast go keeps the shell.
+/// agent ended and left its shell in the pane. `label` is the agent's
+/// descriptor label; with none the toast says "The agent". Closing the
+/// session is a click away; letting the toast go keeps the shell.
 #[must_use]
-pub fn agent_exited_toast(session_id: &str) -> ToastSpec {
+pub fn agent_exited_toast(session_id: &str, label: Option<&str>) -> ToastSpec {
+    let title = match label {
+        Some(label) => format!("{label} exited. The pane is a shell now."),
+        None => "The agent exited. The pane is a shell now.".to_owned(),
+    };
     ToastSpec {
         kind: ToastKind::Info,
-        title: "Claude exited. The pane is a shell now.".to_owned(),
+        title,
         detail: None,
         key: Some(format!("{AGENT_EXIT_PREFIX}{session_id}")),
         sticky: false,
@@ -654,7 +659,7 @@ mod tests {
 
     #[test]
     fn agent_exited_toast_reads_claude_exited_with_a_close_action() {
-        let toast = agent_exited_toast("s1");
+        let toast = agent_exited_toast("s1", Some("Claude"));
         assert_eq!(toast.kind, ToastKind::Info);
         assert_eq!(toast.title, "Claude exited. The pane is a shell now.");
         assert_eq!(toast.detail, None);
@@ -665,6 +670,24 @@ mod tests {
         );
         assert!(!toast.sticky, "it goes by itself");
         assert_eq!(toast.actions, [CLOSE_SESSION], "one way to close it");
+    }
+
+    #[test]
+    fn agent_exited_toast_names_the_agent() {
+        let toast = agent_exited_toast("s1", Some("Test agent"));
+        assert_eq!(toast.title, "Test agent exited. The pane is a shell now.");
+        assert_eq!(
+            toast.key.as_deref(),
+            Some("agent-exit-s1"),
+            "the key is still the session's"
+        );
+        assert_eq!(toast.actions, [CLOSE_SESSION]);
+    }
+
+    #[test]
+    fn agent_exited_toast_without_a_label_says_the_agent() {
+        let toast = agent_exited_toast("s1", None);
+        assert_eq!(toast.title, "The agent exited. The pane is a shell now.");
     }
 
     #[test]

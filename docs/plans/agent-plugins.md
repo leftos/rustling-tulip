@@ -236,8 +236,7 @@ What it replaces (inventory group 8, Claude rows, after RT-266 has removed the C
 
 - `spawn_form.rs`: `Runtime::ALL` (106-111); `MODEL_ALIASES`, `DEEPSEEK_MODEL_PLACEHOLDER`, `PROVIDER_CHOICES`, `PROVIDER_UNSUPPORTED_TIP`, `provider_label` and the chip helpers, `stored_claude_provider`, `APPROVAL_CHOICES`, `approval_label` (153-271); `model_chips_shown`, `provider_shown` and the `Agent::Claude` checks (2190-2211); the per-agent control ring (2720) and the `agent_options()` builder (3014-3040).
 - `spawn_view.rs`: the Claude Advanced section and the provider row (2470-2530). `settings_view.rs`: `SettingsTab::Claude`, its page and its provider row (91, 1396-1426, 1789-1830).
-- Gone from the client: `SpawnDefaults`' Claude fields, `chip_provider`, `runtime_color`'s agent table, the provider chip, the `FEATURE_CLAUDE_PROVIDER` checks and `shell_dialog.rs`' `AgentOptions::claude`; the launch summary is built from the descriptor (`summary_fields`).
-- `term_input.rs`: `shift_enter` (45-51). `recover.rs`: the Claude recovery options, labels and provider gate (350-418, 391, 475). `quit.rs`: "owns your claude sessions" (18).
+- Gone from the client: `SpawnDefaults`' Claude fields, `chip_provider`, `runtime_color`'s agent table, the provider chip, the `FEATURE_CLAUDE_PROVIDER` checks and `shell_dialog.rs`' `AgentOptions::claude`; the launch summary is built from the descriptor (`summary_fields`); the Recover dialog's options and labels come from the descriptor and the daemon's `SessionHistoryItem.shell_resume`; Shift+Enter, the agent-exit toast and the quit text follow the descriptor or are agent-neutral.
 
 ## Status rules
 

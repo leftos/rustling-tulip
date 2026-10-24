@@ -1970,21 +1970,29 @@ pub fn runtime_label(s: &SessionSnapshot, agents: &[AgentDescriptor]) -> Option<
         })
 }
 
-/// Whether a session's runtime tag wears its agent's accent: the agent's
-/// descriptor asks for one and the tag names the agent itself, so the plain
-/// tag of a shell the agent left behind stays plain.
+/// The agent driving `s`, when it is the program up in the pane: the session
+/// names one, its descriptor is at hand, and the runtime tag showing
+/// (`runtime`) is the descriptor's own tag — not the shell's label that sits
+/// on screen before a hosted agent starts and after it ends.
+#[must_use]
+pub(crate) fn agent_up<'a>(
+    s: &SessionSnapshot,
+    runtime: Option<&str>,
+    agents: &'a [AgentDescriptor],
+) -> Option<&'a AgentDescriptor> {
+    let descriptor = descriptor_for(agents, s.agent.as_ref()?)?;
+    (runtime == Some(descriptor.tag.as_str())).then_some(descriptor)
+}
+
+/// Whether a session's runtime tag wears its agent's accent: the agent is
+/// up and its descriptor asks for one.
 #[must_use]
 pub(crate) fn runtime_accent(
     s: &SessionSnapshot,
     runtime: Option<&str>,
     agents: &[AgentDescriptor],
 ) -> bool {
-    let Some(agent) = &s.agent else {
-        return false;
-    };
-    descriptor_for(agents, agent).is_some_and(|descriptor| {
-        descriptor.accent == AccentToken::Claude && runtime == Some(descriptor.tag.as_str())
-    })
+    agent_up(s, runtime, agents).is_some_and(|descriptor| descriptor.accent == AccentToken::Claude)
 }
 
 /// Whether a leaf click may attach the terminal to the session: only

@@ -3,26 +3,42 @@
 
 use alacritty_terminal::vte::ansi::CursorShape;
 use gpui::Keystroke;
-use protocol::{SessionMode, SessionSnapshot, SessionStatus};
+use protocol::{AgentDescriptor, SessionMode, SessionSnapshot, SessionStatus, ShiftEnter};
 
 use crate::keys;
+use crate::sidebar::{agent_up, runtime_label};
 
-/// Shift+Enter inserts a newline without submitting: `\` + CR is line
-/// continuation for claude and for shells.
+/// Shift+Enter's fallback bytes: `\` + CR is line continuation for claude and
+/// for shells. An agent whose descriptor names [`ShiftEnter::Lf`] gets a line
+/// feed instead.
 const SHIFT_ENTER: &[u8] = b"\\\r";
+
+/// The bytes Shift+Enter sends to a session that chose `shift_enter`.
+fn shift_enter_bytes(shift_enter: ShiftEnter) -> &'static [u8] {
+    match shift_enter {
+        ShiftEnter::Lf => b"\n",
+        ShiftEnter::BackslashCr | ShiftEnter::Unknown => SHIFT_ENTER,
+    }
+}
 
 /// The parts of the attached session that shape its input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SessionContext {
     pub mode: SessionMode,
     pub status: SessionStatus,
+    /// What Shift+Enter sends while the session's agent is up; a shell's
+    /// prompt takes `\` + CR.
+    pub shift_enter: ShiftEnter,
 }
 
 impl SessionContext {
-    pub fn of(session: &SessionSnapshot) -> Self {
+    pub fn of(session: &SessionSnapshot, agents: &[AgentDescriptor]) -> Self {
+        let runtime = runtime_label(session, agents);
         Self {
             mode: session.mode,
             status: session.status,
+            shift_enter: agent_up(session, runtime.as_deref(), agents)
+                .map_or(ShiftEnter::BackslashCr, |descriptor| descriptor.shift_enter),
         }
     }
 
@@ -57,12 +73,18 @@ pub enum KeyAction {
 
 /// Decides what a keystroke does. `None` means the terminal does not handle
 /// it. Ctrl+C copies when there is a selection and interrupts otherwise;
-/// Ctrl+Shift+C only ever copies; Ctrl+V and Ctrl+Shift+V paste.
-pub fn key_action(ks: &Keystroke, app_cursor: bool, has_selection: bool) -> Option<KeyAction> {
+/// Ctrl+Shift+C only ever copies; Ctrl+V and Ctrl+Shift+V paste. Shift+Enter
+/// sends the bytes `shift_enter` names.
+pub fn key_action(
+    ks: &Keystroke,
+    app_cursor: bool,
+    has_selection: bool,
+    shift_enter: ShiftEnter,
+) -> Option<KeyAction> {
     let m = ks.modifiers;
     let key = ks.key.to_ascii_lowercase();
     if m.shift && !m.control && !m.platform && key == "enter" {
-        return Some(KeyAction::Send(SHIFT_ENTER.to_vec()));
+        return Some(KeyAction::Send(shift_enter_bytes(shift_enter).to_vec()));
     }
     if m.control && !m.alt && !m.platform {
         match key.as_str() {
@@ -155,7 +177,9 @@ pub fn paste_input(text: Option<&str>, bracketed: bool) -> Vec<u8> {
 mod tests {
     use alacritty_terminal::vte::ansi::CursorShape;
     use gpui::{Keystroke, Modifiers};
-    use protocol::{SessionMode, SessionSnapshot, SessionStatus};
+    use protocol::{
+        AgentDescriptor, AgentId, SessionMode, SessionSnapshot, SessionStatus, ShiftEnter,
+    };
 
     use super::{KeyAction, SessionContext, key_action, paste_bytes, paste_input};
 
@@ -163,7 +187,57 @@ mod tests {
         SessionContext {
             mode,
             status: SessionStatus::Idle,
+            shift_enter: ShiftEnter::BackslashCr,
         }
+    }
+
+    /// The test agent's descriptor under `id`, sending `shift_enter` for a
+    /// newline without submitting.
+    fn descriptor(id: &str, shift_enter: ShiftEnter) -> AgentDescriptor {
+        let mut descriptor = agent_api::test_agent::DESCRIPTOR.clone();
+        descriptor.id = AgentId(id.to_owned());
+        descriptor.shift_enter = shift_enter;
+        descriptor
+    }
+
+    /// An idle-elsewhere snapshot running `agent`, whose `program_name` is
+    /// `program`; `None` for the agent is a plain shell.
+    fn snapshot(
+        id: &str,
+        status: &str,
+        agent: Option<&str>,
+        program: Option<&str>,
+    ) -> SessionSnapshot {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "label": id,
+            "kind": "single",
+            "members": [],
+            "status": status,
+            "mode": "plain_shell",
+            "started_at": "2026-01-01T00:00:00Z",
+            "exit_code": null,
+            "metrics": { "input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0, "last_activity_at": null },
+            "recent_actions": [],
+            "agent": agent,
+            "program_name": program,
+        }))
+        .expect("session fixture")
+    }
+
+    /// What Shift+Enter does in `session` under `agents`.
+    fn shift_enter_action_of(
+        session: &SessionSnapshot,
+        agents: &[AgentDescriptor],
+    ) -> Option<KeyAction> {
+        let context = SessionContext::of(session, agents);
+        action_with(&key("enter", shift()), false, context.shift_enter)
+    }
+
+    /// What Shift+Enter does in a session running `agent` whose program is
+    /// not reported yet.
+    fn shift_enter_action(agent: Option<&str>, agents: &[AgentDescriptor]) -> Option<KeyAction> {
+        shift_enter_action_of(&snapshot("s1", "idle", agent, None), agents)
     }
 
     fn claude() -> SessionContext {
@@ -210,7 +284,15 @@ mod tests {
     }
 
     fn action(ks: &Keystroke, has_selection: bool) -> Option<KeyAction> {
-        key_action(ks, false, has_selection)
+        action_with(ks, has_selection, ShiftEnter::BackslashCr)
+    }
+
+    fn action_with(
+        ks: &Keystroke,
+        has_selection: bool,
+        shift_enter: ShiftEnter,
+    ) -> Option<KeyAction> {
+        key_action(ks, false, has_selection, shift_enter)
     }
 
     #[expect(
@@ -269,6 +351,67 @@ mod tests {
         );
         let plain = key("enter", Modifiers::default());
         assert_eq!(action(&plain, false), Some(KeyAction::Send(b"\r".to_vec())));
+    }
+
+    #[test]
+    fn shift_enter_sends_lf_for_an_lf_agent() {
+        let agents = [descriptor("test-agent", ShiftEnter::Lf)];
+        let tag = agents[0].tag.clone();
+        assert_eq!(
+            shift_enter_action_of(
+                &snapshot("s1", "idle", Some("test-agent"), Some(&tag)),
+                &agents
+            ),
+            sends("\n"),
+            "the agent is up: the runtime tag is its own"
+        );
+    }
+
+    #[test]
+    fn shift_enter_uses_shell_bytes_while_the_agents_shell_label_shows() {
+        let agents = [descriptor("test-agent", ShiftEnter::Lf)];
+        let tag = agents[0].tag.clone();
+        assert_eq!(
+            shift_enter_action_of(
+                &snapshot("s1", "idle", Some("test-agent"), Some("pwsh")),
+                &agents
+            ),
+            sends("\\\r"),
+            "the shell's prompt has the pane, where a line feed runs the command"
+        );
+        assert_eq!(
+            shift_enter_action_of(
+                &snapshot("s1", "idle", Some("test-agent"), Some(&tag)),
+                &agents
+            ),
+            sends("\n"),
+            "the agent is up again"
+        );
+    }
+
+    #[test]
+    fn shift_enter_sends_backslash_cr_for_a_plain_shell() {
+        let agents = [descriptor("test-agent", ShiftEnter::Lf)];
+        assert_eq!(shift_enter_action(None, &agents), sends("\\\r"));
+        assert_eq!(
+            shift_enter_action(Some("gone-agent"), &agents),
+            sends("\\\r"),
+            "an agent the daemon does not describe keeps today's bytes"
+        );
+    }
+
+    #[test]
+    fn shift_enter_falls_back_for_an_unknown_choice() {
+        let agents = [descriptor("future-agent", ShiftEnter::Unknown)];
+        let tag = agents[0].tag.clone();
+        assert_eq!(
+            shift_enter_action_of(
+                &snapshot("s1", "idle", Some("future-agent"), Some(&tag)),
+                &agents
+            ),
+            sends("\\\r"),
+            "the agent is up but names a choice this client does not know"
+        );
     }
 
     #[test]
@@ -346,27 +489,12 @@ mod tests {
 
     #[test]
     fn a_session_context_reads_mode_and_status() {
-        let snapshot = |id: &str, status: &str| -> SessionSnapshot {
-            serde_json::from_value(serde_json::json!({
-                "id": id,
-                "label": id,
-                "kind": "single",
-                "members": [],
-                "status": status,
-                "mode": "plain_shell",
-                "started_at": "2026-01-01T00:00:00Z",
-                "exit_code": null,
-                "metrics": { "input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0, "last_activity_at": null },
-                "recent_actions": [],
-                "agent": "claude",
-            }))
-            .expect("session fixture")
-        };
         assert_eq!(
-            SessionContext::of(&snapshot("b", "stopped")),
+            SessionContext::of(&snapshot("b", "stopped", Some("claude"), None), &[]),
             SessionContext {
                 mode: SessionMode::PlainShell,
                 status: SessionStatus::Stopped,
+                shift_enter: ShiftEnter::BackslashCr,
             }
         );
     }

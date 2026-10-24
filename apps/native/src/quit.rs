@@ -15,7 +15,7 @@ use protocol::{BranchCleanup, CleanupAction, ClientMessage, SessionSnapshot, Ses
 pub(crate) const STUCK_AFTER: Duration = Duration::from_secs(5);
 
 pub(crate) const TITLE: &str = "Quit rustling-tulip?";
-pub(crate) const BODY: &str = "The background daemon owns your claude sessions. By default it keeps \
+pub(crate) const BODY: &str = "The background daemon owns your agent sessions. By default it keeps \
      running after the app closes so sessions survive app restarts.";
 /// The error line when a stop could not reach the daemon at all.
 pub(crate) const SHUTDOWN_FAILED: &str =

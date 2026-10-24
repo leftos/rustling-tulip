@@ -2644,9 +2644,18 @@ impl RootView {
         let DaemonMessage::AgentExited { session_id } = msg else {
             return false;
         };
-        if self.sidebar.session(session_id).is_some() {
-            self.push_toast_spec(notices::agent_exited_toast(session_id), cx);
-        }
+        let Some(session) = self.sidebar.session(session_id) else {
+            return true;
+        };
+        let label = session
+            .agent
+            .as_ref()
+            .and_then(|id| crate::agent_options::descriptor_for(&self.agents, id))
+            .map(|descriptor| descriptor.label.clone());
+        self.push_toast_spec(
+            notices::agent_exited_toast(session_id, label.as_deref()),
+            cx,
+        );
         true
     }
 
@@ -2923,7 +2932,7 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         for view in self.pane_views(Some(&session.id)) {
-            view.update(cx, |pane, _| pane.update_session(session));
+            view.update(cx, |pane, _| pane.update_session(session, &self.agents));
         }
         let own_change = request_id
             .is_some_and(|request_id| self.pending_appearance.answered(&session.id, request_id));
@@ -2949,7 +2958,7 @@ impl RootView {
     ) {
         self.sessions_loaded = true;
         for view in self.pane_views(None) {
-            view.update(cx, |pane, _| pane.refresh_sessions(sessions));
+            view.update(cx, |pane, _| pane.refresh_sessions(sessions, &self.agents));
         }
         self.attach_waiting_panes(cx);
         self.apply_pane_fonts(false, cx);

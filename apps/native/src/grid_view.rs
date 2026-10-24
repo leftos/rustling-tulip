@@ -326,7 +326,8 @@ impl RootView {
             .values_mut()
             .filter(|slot| slot.session.as_deref() == Some(session_id))
         {
-            slot.view.update(cx, |pane, cx| pane.attach(&session, cx));
+            slot.view
+                .update(cx, |pane, cx| pane.attach(&session, &self.agents, cx));
             slot.attached = true;
             attached = true;
         }

@@ -28,7 +28,7 @@ use support::{Fixture, Harness, TestDir, pane, repo, session, tab};
 use tokio_tungstenite::tungstenite::{self, Message};
 
 const TITLE: &str = "Quit rustling-tulip?";
-const BODY: &str = "The background daemon owns your claude sessions. By default it keeps running \
+const BODY: &str = "The background daemon owns your agent sessions. By default it keeps running \
                     after the app closes so sessions survive app restarts.";
 
 fn exit_open(h: &mut Harness<'_>) -> bool {
