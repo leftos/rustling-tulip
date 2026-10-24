@@ -21,6 +21,11 @@ use crate::links::{self, TerminalLink, TerminalRow};
 use crate::shell_marks::{Record, Records, Scanner, ShellDot, Split};
 use crate::theme::{self, Theme};
 
+/// The prompt scan and jump choice behind the pane header's prompt buttons.
+/// Declared here, beside the grid it reads, rather than in the crate root.
+#[path = "prompt_nav.rs"]
+pub(crate) mod prompt_nav;
+
 /// Collects what the terminal asks of its client: the replies to the child
 /// (`Event::PtyWrite`: cursor-position reports, device attributes), and the
 /// texts it wants on the clipboard (`Event::ClipboardStore`, OSC 52).
@@ -777,6 +782,82 @@ impl Terminal {
     /// Lines scrolled back into history; 0 on the live screen.
     pub fn display_offset(&self) -> usize {
         self.term.grid().display_offset()
+    }
+
+    /// Scrolls so that grid line `line` is the top row, as far as the
+    /// history reaches; a screen line shows the live screen.
+    pub fn scroll_to_line(&mut self, line: i32) {
+        let target = i64::try_from(prompt_nav::offset_for(line)).unwrap_or(i64::MAX);
+        let current = i64::try_from(self.display_offset()).unwrap_or(i64::MAX);
+        let delta = target.saturating_sub(current);
+        let delta = i32::try_from(delta).unwrap_or(if delta < 0 { i32::MIN } else { i32::MAX });
+        self.scroll(delta);
+    }
+
+    /// The grid lines of the prompts Claude echoed (`❯ ` rows, see
+    /// [`prompt_nav::prompt_rows`]), history and screen, oldest first. Empty
+    /// while the alternate screen is up, which has no history.
+    #[must_use]
+    pub fn prompt_lines(&self) -> Vec<i32> {
+        if Shell::in_alt(&self.term) {
+            return Vec::new();
+        }
+        let (top, bottom) = self.line_bounds();
+        let rows: Vec<(String, bool)> = (top..=bottom)
+            .map(|line| (self.prompt_scan_text(line), self.wraps(line)))
+            .collect();
+        let found = prompt_nav::prompt_rows(rows.iter().map(|(text, wrapped)| prompt_nav::Row {
+            text,
+            wrapped: *wrapped,
+        }));
+        found
+            .into_iter()
+            .filter_map(|index| i32::try_from(index).ok().map(|index| top + index))
+            .collect()
+    }
+
+    /// The text of grid line `line` as the prompt scan needs it: the whole
+    /// row when it starts with `❯` or a `─` rule, else nothing, so the scan
+    /// reads one cell of every other row.
+    fn prompt_scan_text(&self, line: i32) -> String {
+        let row = &self.term.grid()[Line(line)];
+        if !matches!(row[Column(0)].c, '❯' | '─') {
+            return String::new();
+        }
+        (0..self.term.grid().columns())
+            .map(|column| &row[Column(column)])
+            .filter(|cell| {
+                !cell
+                    .flags
+                    .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+            })
+            .map(|cell| cell.c)
+            .collect()
+    }
+
+    /// The grid lines of a plain shell's prompts, from its OSC 133 marks,
+    /// oldest first: every finished command's and the running command's
+    /// whose prompt row the grid still holds; an idle prompt is not one.
+    /// Empty without shell marks and while the alternate screen is up.
+    #[must_use]
+    pub fn shell_prompt_lines(&self) -> Vec<i32> {
+        let Some(shell) = self.shell.as_ref() else {
+            return Vec::new();
+        };
+        if Shell::in_alt(&self.term) {
+            return Vec::new();
+        }
+        let grid = self.term.grid();
+        let mut lines: Vec<i32> = shell
+            .records
+            .iter()
+            .map(|record| record.prompt)
+            .chain(shell.records.running_prompt())
+            .filter_map(|prompt| line_of(prompt, shell.base, grid))
+            .collect();
+        lines.sort_unstable();
+        lines.dedup();
+        lines
     }
 
     pub fn start_selection(&mut self, ty: SelectionType, point: Point, side: Side) {

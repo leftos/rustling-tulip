@@ -32,6 +32,7 @@ use crate::open;
 use crate::palette::{DANGER, SHELL_MARK_BORDER, WAITING};
 use crate::scrollback_load::{self, ReplyVerdict, ScrollbackLoad, State as LoadState, Step};
 use crate::shell_marks::{ShellDot, ShellStatus};
+use crate::term::prompt_nav::{self, Dir, Jump};
 use crate::term::{BgSpan, GridSize, SYNC_TIMEOUT, ShellCommand, Snapshot, Terminal, TextSpan};
 use crate::term_input::{self, DeadKeyFate, KeyAction, SessionContext};
 use crate::text_input::{offset_from_utf16, offset_to_utf16};
@@ -363,6 +364,42 @@ impl TerminalPane {
     /// on screen, top first.
     pub fn shell_dots(&self) -> Vec<ShellDot> {
         self.term.shell_dots()
+    }
+
+    /// Whether the prompt button for `dir` has somewhere to scroll.
+    pub(crate) fn can_jump(&self, dir: Dir) -> bool {
+        self.prompt_target(dir).is_some()
+    }
+
+    /// Scrolls the prompt the button for `dir` names to the top row, or to
+    /// the live screen past the newest. The terminal scrolls itself, never
+    /// the child, so this works under mouse reporting too.
+    pub(crate) fn jump_prompt(&mut self, dir: Dir, cx: &mut Context<Self>) {
+        let Some(jump) = self.prompt_target(dir) else {
+            return;
+        };
+        match jump {
+            Jump::Line(line) => self.term.scroll_to_line(line),
+            Jump::Bottom => self.term.scroll_to_bottom(),
+        }
+        cx.notify();
+    }
+
+    /// Where the prompt button for `dir` scrolls to, from the top row.
+    fn prompt_target(&self, dir: Dir) -> Option<Jump> {
+        let offset = self.term.display_offset();
+        let top = i32::try_from(offset).map_or(i32::MIN, |offset| -offset);
+        prompt_nav::target(&self.prompt_lines(), top, offset == 0, dir)
+    }
+
+    /// The grid lines of the prompts the owner sent: a plain shell's OSC 133
+    /// prompts, an agent's `❯ ` rows, none for any other pane.
+    fn prompt_lines(&self) -> Vec<i32> {
+        match self.session.map(|session| session.mode) {
+            Some(SessionMode::PlainShell) => self.term.shell_prompt_lines(),
+            Some(SessionMode::Interactive) => self.term.prompt_lines(),
+            _ => Vec::new(),
+        }
     }
 
     /// The finished command the gutter dot at `index` stands for, as its

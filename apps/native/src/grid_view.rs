@@ -27,10 +27,11 @@ use crate::session_menu::{BorderedButton, bordered_button};
 use crate::shell_dialog::standalone_shell_request;
 use crate::sidebar::{can_attach, chip_provider, display_label, label_tooltip, runtime_label};
 use crate::spawn_form::{provider_chip_text, provider_chip_tip};
-use crate::spawn_view::SpawnEntry;
+use crate::spawn_view::{DISABLED_OPACITY, SpawnEntry};
 use crate::spawns::{OpenIn, PaneAim};
 use crate::status_glyph::{GlyphSize, glyph, glyph_view};
 use crate::tabs::{self, PaneBinding, TabsModel};
+use crate::term::prompt_nav::Dir;
 use crate::term_view::{PaneEvent, ScrollbackReply, TerminalPane};
 use crate::{
     BORDER, Drag, MUTED, PANE_GUTTER, RootView, TEXT, UI_TEXT_SIZE, new_request_id, tooltip,
@@ -1057,6 +1058,15 @@ impl RootView {
         let drag_session = session_id.map(str::to_owned);
         let stop = self.header_stop(pane_id, session_id, cx);
         let controls = (!stop.is_empty()).then(|| header_controls(cx).children(stop));
+        let prompt_jumps = session_id
+            .and_then(|id| self.sidebar.session(id))
+            .filter(|session| {
+                matches!(
+                    session.mode,
+                    SessionMode::Interactive | SessionMode::PlainShell
+                )
+            })
+            .map(|_| self.pane_prompt_jumps(pane_id, cx));
         div()
             .id(ElementId::Name(SharedString::from(name.clone())))
             .debug_selector(|| name)
@@ -1103,7 +1113,13 @@ impl RootView {
             .children(header_title(pane_id, parts.as_ref(), cx))
             .child(div().flex_1())
             .children(controls)
-            .children(Self::header_buttons(tab_id, pane_id, session_id, cx))
+            .children(Self::header_buttons(
+                tab_id,
+                pane_id,
+                session_id,
+                prompt_jumps,
+                cx,
+            ))
     }
 
     /// Follows a drag over the shown tab: the pane under the pointer and the
@@ -1207,11 +1223,13 @@ impl RootView {
     }
 
     /// Split right and down (Shift: left and up), move to a new tab when
-    /// the pane shows a session, and close.
+    /// the pane shows a session, previous and next prompt when
+    /// `prompt_jumps` holds whether each can jump, and close.
     fn header_buttons(
         tab_id: &str,
         pane_id: &str,
         session_id: Option<&str>,
+        prompt_jumps: Option<(bool, bool)>,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let ids = (tab_id.to_owned(), pane_id.to_owned());
@@ -1252,6 +1270,10 @@ impl RootView {
                 .into_any_element(),
             );
         }
+        if let Some((previous, next)) = prompt_jumps {
+            buttons.push(prompt_button(pane_id, Dir::Previous, previous, cx));
+            buttons.push(prompt_button(pane_id, Dir::Next, next, cx));
+        }
         buttons.push(
             header_button(pane_id, "close-pane", "×", "Close pane", cx)
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
@@ -1271,6 +1293,32 @@ impl RootView {
             .find(|pane| pane.id == pane_id)?
             .session?;
         self.sidebar.session(session)
+    }
+
+    /// Whether pane `pane_id`'s previous and next prompt buttons have
+    /// somewhere to scroll; both false for a pane that is not open.
+    #[must_use]
+    pub fn pane_prompt_jumps(&self, pane_id: &str, cx: &App) -> (bool, bool) {
+        self.panes.get(pane_id).map_or((false, false), |slot| {
+            let pane = slot.view.read(cx);
+            (pane.can_jump(Dir::Previous), pane.can_jump(Dir::Next))
+        })
+    }
+
+    /// A prompt button's click: closes the gutter menu as a wheel scroll
+    /// does, then scrolls pane `pane_id` to the prompt `dir` names.
+    fn jump_prompt(
+        &mut self,
+        pane_id: &str,
+        dir: Dir,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_shell_menu(window, cx);
+        if let Some(slot) = self.panes.get(pane_id) {
+            slot.view.update(cx, |pane, cx| pane.jump_prompt(dir, cx));
+        }
+        cx.notify();
     }
 
     /// What the header of pane `pane_id` in the tab on screen shows of its
@@ -1699,6 +1747,30 @@ fn header_button(
         .hover(|style| style.bg(gpui::rgb(HOVER)).text_color(gpui::rgb(TEXT)))
         .tooltip(tooltip(tip))
         .child(glyph)
+}
+
+/// A pane header's previous or next prompt button, drawn disabled when it
+/// has nowhere to scroll so the header's buttons never move. Its click asks
+/// the pane again, so a header drawn before new output still jumps.
+fn prompt_button(pane_id: &str, dir: Dir, enabled: bool, cx: &mut Context<RootView>) -> AnyElement {
+    let (action, glyph, tip) = match dir {
+        Dir::Previous => ("pane-prompt-prev", "↑", "Previous prompt"),
+        Dir::Next => ("pane-prompt-next", "↓", "Next prompt"),
+    };
+    let pane = pane_id.to_owned();
+    let button = header_button(pane_id, action, glyph, tip, cx).on_click(cx.listener(
+        move |this, _: &ClickEvent, window, cx| {
+            this.jump_prompt(&pane, dir, window, cx);
+        },
+    ));
+    if enabled {
+        button.into_any_element()
+    } else {
+        button
+            .opacity(DISABLED_OPACITY)
+            .cursor_default()
+            .into_any_element()
+    }
 }
 
 /// The gutter between two pane cards: transparent until hovered or

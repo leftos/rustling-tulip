@@ -583,11 +583,13 @@ fn pane_cards_sit_a_gutter_apart_inside_the_grid_padding(cx: &mut TestAppContext
 /// The gap between a pane header's parts, in logical pixels.
 const HEADER_GAP: f32 = 8.0;
 /// The header parts of pane `p1` that never shrink, right of its chips.
-const P1_BUTTONS: [&str; 5] = [
+const P1_BUTTONS: [&str; 7] = [
     "pane-stop-p1",
     "split-right-p1",
     "split-down-p1",
     "pane-move-new-tab-p1",
+    "pane-prompt-prev-p1",
+    "pane-prompt-next-p1",
     "close-pane-p1",
 ];
 
@@ -608,6 +610,10 @@ fn split_at(ratio: f32) -> TabEntry {
         },
     )
 }
+
+/// The smallest share of the row at which `p1`'s long header shows whole
+/// beside all its buttons.
+const WHOLE_HEADER_RATIO: f32 = 0.53;
 
 /// Every header button of `p1` lies inside its card.
 fn assert_buttons_inside_p1(h: &mut Harness<'_>, stage: &str) {
@@ -634,10 +640,15 @@ fn a_narrow_header_gives_up_the_branch_chip_before_the_title(cx: &mut TestAppCon
             )])
             .build()
     };
-    let mut h = Harness::with(cx, &dir, &side_by_side(long("s1"), long("s2")));
+    let fixture = Fixture {
+        sessions: vec![long("s1"), long("s2")],
+        tabs: vec![split_at(WHOLE_HEADER_RATIO)],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
 
     let frame = width_of(&mut h, "pane-frame-p1");
-    let row = frame / 0.5;
+    let row = frame / WHOLE_HEADER_RATIO;
     let title = width_of(&mut h, "pane-title-p1");
     let branch = width_of(&mut h, "pane-chip-p1-branch");
     let free = (h.bounds("pane-stop-p1").left() - h.bounds("pane-chip-p1-branch").right())

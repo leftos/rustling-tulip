@@ -380,6 +380,15 @@ impl Records {
         self.open = None;
     }
 
+    /// The prompt row of the command in flight, once it has run (an output
+    /// mark or a command line arrived).
+    pub fn running_prompt(&self) -> Option<u64> {
+        self.open
+            .as_ref()
+            .filter(|open| open.ran)
+            .map(|open| open.prompt)
+    }
+
     /// The finished commands, oldest first.
     pub fn iter(&self) -> impl DoubleEndedIterator<Item = &Record> {
         self.done.iter()

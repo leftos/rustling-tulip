@@ -632,9 +632,11 @@
     },
     {
       "paths": [
-        "apps/native/src/term.rs"
+        "apps/native/src/term.rs",
+        "apps/native/src/prompt_nav.rs",
+        "apps/native/tests/ui/ui_prompt_jump.rs"
       ],
-      "filter": "(binary_id(rustling-tulip-native) & test(/^term::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_terminal)::/))"
+      "filter": "(binary_id(rustling-tulip-native) & test(/^term::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_prompt_jump|ui_terminal)::/))"
     },
     {
       "paths": [
