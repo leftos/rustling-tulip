@@ -12,11 +12,10 @@
 - [ ] RT-243 Split tailnet Supervisor::run and carry the real CertFailed reason
 - [ ] RT-258 Remote mode: don't send this PC's remembered folders to a remote host
 - [ ] RT-152 P6.3: Host picker from the tailnet's machines, typed-name fallback, boot reconnect · release vNext
-  - [ ] RT-354 P6.3 C: Host picker view and the Connections button · release vNext
 - [ ] RT-173 Import remote sessions: offer to arrange a remote host's sessions when their count changed · release vNext
 - [ ] RT-158 P6.6: Remote tests over a fake Tailscale, hand checklist, and the docs pass · release vNext
 - [ ] RT-244 Preset wizard: typed host paths instead of local pickers in remote mode
-- [ ] RT-166 TS.3b: device tokens issued only after the owner approves the device on the host PC · release vNext
+- [/] RT-166 TS.3b: device tokens issued only after the owner approves the device on the host PC · release vNext
 - [ ] RT-278 Prove the daemon holds the token before a client reuses, retires or kills it
 - [ ] RT-331 Built-in text and Markdown viewer with Open in default app and an always-external setting · release vNext
   - [ ] RT-337 RT-331 S4: Text viewer view and link/fetch routing · release vNext
@@ -27,6 +26,8 @@
 - [ ] RT-343 Keep name, look and sidebar place when Recover respawns a session
 - [ ] RT-349 Restart conversation discovery for sessions reattached after a daemon restart
 - [/] RT-360 Make the agent's launch command customizable in Settings: another program, an alias or extra arguments · release vNext
+- [ ] RT-374 Pair the desktop client with a remote host: device token store and pairing screen · release vNext
+- [ ] RT-375 Copy only the text when a terminal selection crosses a TUI's box borders · release vNext+1
 
 ## Wave 1a — Claude sessions on DeepSeek
 
