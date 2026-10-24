@@ -562,6 +562,12 @@ impl HistoryItemBuilder {
         self.entry("agent", json!(agent))
     }
 
+    /// The daemon says whether a shell can resume the entry's conversation.
+    pub fn shell_resume(mut self, can: bool) -> Self {
+        self.0["shell_resume"] = json!(can);
+        self
+    }
+
     /// Ended `minutes` ago.
     pub fn ended_minutes_ago(self, minutes: i64) -> Self {
         let at = chrono::Utc::now() - chrono::Duration::minutes(minutes);

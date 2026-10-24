@@ -17,7 +17,7 @@ use crate::pty::PtyExit;
 use crate::session::{SessionRecord, SessionRegistry};
 use crate::sync::lock;
 use crate::tracer_log::{self, TracerLogEnd, TracerLogSummary};
-use agent_api::{RecoveredRun, ResolvedRows, TracerRun};
+use agent_api::{AgentPlugin, RecoveredRun, ResolvedRows, TracerRun};
 use anyhow::{Context as _, anyhow};
 use chrono::{DateTime, TimeDelta, Utc};
 use protocol::{
@@ -849,14 +849,16 @@ pub fn recorded_env(entry: &HistoryEntry) -> &[(String, String)] {
 }
 
 /// The history as the client lists it: every non-headless entry, newest end
-/// first, with the conversations it may be recovered into and what its folder
-/// is. `lookup_rows` gives the rows an entry's conversations are looked up
-/// with.
+/// first, with the conversations it may be recovered into, what its folder is
+/// and whether a shell can resume its conversation. `lookup_rows` gives the
+/// rows an entry's conversations are looked up with; `plugins` finds an
+/// agent's plugin.
 #[must_use]
 pub fn history_items(
     dirs: &Dirs,
     repos: &[RepoEntry],
     lookup_rows: &dyn Fn(&HistoryEntry) -> ResolvedRows,
+    plugins: PluginLookup,
 ) -> Vec<SessionHistoryItem> {
     let now = Utc::now();
     read_all(dirs)
@@ -864,7 +866,7 @@ pub fn history_items(
         .filter(|entry| entry.mode != SessionMode::Headless)
         .map(|entry| {
             let rows = lookup_rows(&entry);
-            history_item(entry, repos, &rows, now)
+            history_item(entry, repos, &rows, now, plugins)
         })
         .collect()
 }
@@ -874,6 +876,7 @@ fn history_item(
     repos: &[RepoEntry],
     rows: &ResolvedRows,
     now: DateTime<Utc>,
+    plugins: PluginLookup,
 ) -> SessionHistoryItem {
     let folder = entry_folder(&entry).map(str::to_owned);
     let candidates = match folder.as_deref() {
@@ -887,11 +890,18 @@ fn history_item(
         .as_deref()
         .and_then(|folder| repo_at(repos, folder))
         .map(|repo| repo.id.clone());
+    // The row's first conversation is the one its shell would resume.
+    let shell_resume = shell_resume_applies(
+        &entry,
+        candidates.first().map(|candidate| candidate.id.as_str()),
+        plugins,
+    );
     SessionHistoryItem {
         entry,
         candidates,
         folder_is_git_repo,
         folder_repo_id,
+        shell_resume,
     }
 }
 
@@ -1166,6 +1176,23 @@ fn recovered_spawn(
     item: &RecoverItem,
     plugins: PluginLookup,
 ) -> Result<RecoveredSpawn, String> {
+    let (agent, plugin, options, trusted) = recovery_setup(entry, plugins)?;
+    if item.how == RecoverAs::ShellResume {
+        shell_resume_command(plugin, &options, required_conversation(item)?)?;
+    }
+    Ok(RecoveredSpawn {
+        selection: AgentSelection { agent, options },
+        dangerously_skip_permissions: trusted,
+    })
+}
+
+/// The agent a recovery of `entry` runs, its plugin, the options the plugin
+/// gives for what the entry recorded, and whether it ran trusted. The error
+/// is what the client shows when the recovery cannot start.
+fn recovery_setup(
+    entry: &HistoryEntry,
+    plugins: PluginLookup,
+) -> Result<(AgentId, &'static dyn AgentPlugin, OptionValues, bool), String> {
     let agent = recovery_agent(entry);
     let plugin =
         plugins(&agent).ok_or_else(|| format!("no agent plugin `{}` is registered", agent.0))?;
@@ -1176,27 +1203,48 @@ fn recovered_spawn(
             trusted,
         })
         .map_err(|err| err.to_string())?;
-    if item.how == RecoverAs::ShellResume {
-        let descriptor = plugin.descriptor();
-        let conversation = required_conversation(item)?;
-        let command = if descriptor.caps.shell_resume {
-            plugin
-                .shell_resume(&options, conversation, &[])
-                .map_err(|err| err.to_string())?
-        } else {
-            None
-        };
-        if command.is_none() {
-            return Err(format!(
-                "{} cannot resume a conversation in a shell",
-                descriptor.label
-            ));
-        }
-    }
-    Ok(RecoveredSpawn {
-        selection: AgentSelection { agent, options },
-        dangerously_skip_permissions: trusted,
+    Ok((agent, plugin, options, trusted))
+}
+
+/// The command a shell types to resume `conversation` with `options`; the
+/// error says why the agent cannot, which is the refusal the client shows. A
+/// plugin without `caps.shell_resume` cannot, whatever its `shell_resume`
+/// builds.
+fn shell_resume_command(
+    plugin: &dyn AgentPlugin,
+    options: &OptionValues,
+    conversation: &str,
+) -> Result<String, String> {
+    let descriptor = plugin.descriptor();
+    let command = if descriptor.caps.shell_resume {
+        plugin
+            .shell_resume(options, conversation, &[])
+            .map_err(|err| err.to_string())?
+    } else {
+        None
+    };
+    command.ok_or_else(|| {
+        format!(
+            "{} cannot resume a conversation in a shell",
+            descriptor.label
+        )
     })
+}
+
+/// Whether recovering `entry` as a shell that resumes `conversation` can
+/// work: its agent's plugin has the cap, gives options for what the entry
+/// recorded, and builds that resume command. With no conversation it cannot.
+fn shell_resume_applies(
+    entry: &HistoryEntry,
+    conversation: Option<&str>,
+    plugins: PluginLookup,
+) -> bool {
+    let Some(conversation) = conversation else {
+        return false;
+    };
+    recovery_setup(entry, plugins)
+        .and_then(|(_, plugin, options, _)| shell_resume_command(plugin, &options, conversation))
+        .is_ok()
 }
 
 /// The options `entry` recorded and whether it ran trusted. An agent spawn
@@ -4017,7 +4065,7 @@ mod recovery_tests {
                 .expect("repo"),
         ];
 
-        let items = history_items(&dirs, &repos, &home_rows(&home));
+        let items = history_items(&dirs, &repos, &home_rows(&home), agent_registry::plugin);
 
         let ids: Vec<&str> = items.iter().map(|i| i.entry.session_id.as_str()).collect();
         assert_eq!(ids, ["known", "gone", "shell"], "headless is left out");
@@ -4054,6 +4102,7 @@ mod recovery_tests {
             &dirs,
             &repos,
             &home_rows(&dirs.config.join("no-claude-home")),
+            agent_registry::plugin,
         );
         assert!(no_home.iter().all(|i| i.candidates.is_empty()));
         let _ = std::fs::remove_dir_all(&dirs.config);
@@ -4071,12 +4120,89 @@ mod recovery_tests {
         write_transcript(&home, folder, "within-a-day", ended - TimeDelta::hours(20));
         write_transcript(&home, folder, "too-old", ended - TimeDelta::hours(25));
 
-        let items = history_items(&dirs, &[], &home_rows(&home));
+        let items = history_items(&dirs, &[], &home_rows(&home), agent_registry::plugin);
 
         let ids: Vec<&str> = items[0].candidates.iter().map(|c| c.id.as_str()).collect();
         assert_eq!(ids, ["within-a-day"]);
         assert!(!items[0].folder_is_git_repo);
         let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    /// Whether the one history item `entry` builds carries `shell_resume`,
+    /// with a transcript `conversation` in its folder when one is given.
+    fn shell_resume_flag(
+        tag: &str,
+        entry: &HistoryEntry,
+        plugins: PluginLookup,
+        conversation: Option<&str>,
+    ) -> bool {
+        let dirs = scratch_dirs(tag);
+        let home = dirs.config.join("claude-home");
+        let folder = entry.primary_cwd.clone().expect("folder");
+        if let Some(conversation) = conversation {
+            let at = entry.ended_at - TimeDelta::minutes(5);
+            write_transcript(&home, &folder, conversation, at);
+        }
+        write_if_absent(&dirs, entry).expect("write entry");
+        let items = history_items(&dirs, &[], &home_rows(&home), plugins);
+        let flag = items[0].shell_resume;
+        let _ = std::fs::remove_dir_all(&dirs.config);
+        flag
+    }
+
+    #[test]
+    fn history_item_flags_shell_resume_for_an_anthropic_claude_entry() {
+        let ended = Utc::now() - TimeDelta::minutes(10);
+        let mut entry = history_entry("s", SessionMode::Interactive, r"D:\proj", ended);
+        entry.agent = Some(agent_registry::default_agent());
+        entry.options = Some(claude(&[("provider", "anthropic")]).options);
+        assert!(shell_resume_flag(
+            "shell-resume-anthropic",
+            &entry,
+            agent_registry::plugin,
+            Some("conv-resume"),
+        ));
+    }
+
+    #[test]
+    fn history_item_does_not_flag_shell_resume_on_deepseek() {
+        let ended = Utc::now() - TimeDelta::minutes(10);
+        let mut entry = history_entry("s", SessionMode::Interactive, r"D:\proj", ended);
+        entry.agent = Some(agent_registry::default_agent());
+        entry.options =
+            Some(claude(&[("provider", "deepseek"), ("model", "deepseek-flash")]).options);
+        assert!(!shell_resume_flag(
+            "shell-resume-deepseek",
+            &entry,
+            agent_registry::plugin,
+            Some("conv-resume"),
+        ));
+    }
+
+    #[test]
+    fn history_item_does_not_flag_shell_resume_without_the_cap() {
+        let ended = Utc::now() - TimeDelta::minutes(10);
+        let mut entry = history_entry("s", SessionMode::Interactive, r"D:\proj", ended);
+        entry.agent = Some(agent_registry::default_agent());
+        assert!(!shell_resume_flag(
+            "shell-resume-without-cap",
+            &entry,
+            shell_resume_without_cap_plugin,
+            Some("conv-resume"),
+        ));
+    }
+
+    #[test]
+    fn history_item_does_not_flag_shell_resume_without_a_candidate() {
+        let ended = Utc::now() - TimeDelta::minutes(10);
+        let mut entry = history_entry("s", SessionMode::Interactive, r"D:\proj", ended);
+        entry.agent = Some(agent_registry::default_agent());
+        assert!(!shell_resume_flag(
+            "shell-resume-no-candidate",
+            &entry,
+            agent_registry::plugin,
+            None,
+        ));
     }
 
     /// Candidate ids for one entry `e` alone in a fresh history.
@@ -4092,7 +4218,7 @@ mod recovery_tests {
             write_transcript(&home, &folder, id, *at);
         }
         write_if_absent(&dirs, e).expect("write entry");
-        let items = history_items(&dirs, &[], &home_rows(&home));
+        let items = history_items(&dirs, &[], &home_rows(&home), agent_registry::plugin);
         let _ = std::fs::remove_dir_all(&dirs.config);
         items[0].candidates.iter().map(|c| c.id.clone()).collect()
     }

@@ -10,11 +10,10 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, TimeZone, Utc};
 use protocol::{
-    ClientMessage, ConversationCandidate, DaemonMessage, HistoryEntry, RecoverAs, RecoverItem,
-    RecoverItemResult, SessionEnd, SessionHistoryItem, SessionMode,
+    AgentDescriptor, ClientMessage, ConversationCandidate, DaemonMessage, HistoryEntry, RecoverAs,
+    RecoverItem, RecoverItemResult, SessionEnd, SessionHistoryItem, SessionMode,
 };
 
-use crate::claude_compat;
 use crate::spawn_form::human_relative_time;
 
 /// Unexpected ends this close to the previous one in a burst join it.
@@ -234,13 +233,57 @@ fn row_label(entry: &HistoryEntry) -> String {
         .to_owned()
 }
 
-/// The names the client knows for the registry's ids.
+/// The names the client knows for the registry's ids, and the daemon's agents.
 #[derive(Debug, Default)]
 pub struct Names {
     /// Workspace id to name.
     pub workspaces: HashMap<String, String>,
     /// Repo id to name.
     pub repos: HashMap<String, String>,
+    /// The daemon's agents, in its order.
+    pub agents: Vec<AgentDescriptor>,
+}
+
+/// The descriptor of the agent an entry recovers as: its own agent's, else the
+/// first descriptor the daemon lists, the default agent a plain shell's user
+/// may have run.
+fn descriptor_for<'a>(entry: &HistoryEntry, names: &'a Names) -> Option<&'a AgentDescriptor> {
+    let agent = entry
+        .agent
+        .as_ref()
+        .or_else(|| names.agents.first().map(|descriptor| &descriptor.id))?;
+    names
+        .agents
+        .iter()
+        .find(|descriptor| &descriptor.id == agent)
+}
+
+/// The name a row uses for the entry's agent: its descriptor's label, else the
+/// agent's id, else `Agent` for a shell.
+fn agent_label(entry: &HistoryEntry, names: &Names) -> String {
+    if let Some(descriptor) = descriptor_for(entry, names) {
+        return descriptor.label.clone();
+    }
+    entry
+        .agent
+        .as_ref()
+        .map_or_else(|| "Agent".to_owned(), |agent| agent.0.clone())
+}
+
+/// The note a row with nothing to resume shows.
+fn nothing_to_resume(entry: &HistoryEntry, names: &Names) -> String {
+    descriptor_for(entry, names).map_or_else(
+        || "no conversation found".to_owned(),
+        |descriptor| descriptor.texts.no_conversation.clone(),
+    )
+}
+
+/// The label of the option resuming the conversation in a shell.
+fn shell_resume_label(entry: &HistoryEntry, names: &Names) -> String {
+    descriptor_for(entry, names).map_or_else(
+        || "Shell resume".to_owned(),
+        |descriptor| descriptor.texts.shell_resume_label.clone(),
+    )
 }
 
 /// Where the row ran: its workspace, else its repo, else its folder.
@@ -306,12 +349,13 @@ fn chooses_how(entry: &HistoryEntry) -> bool {
 /// them. Empty when nothing can be offered.
 fn recover_options(item: &SessionHistoryItem, names: &Names) -> (Vec<RecoverOption>, usize) {
     let entry = &item.entry;
+    let label = agent_label(entry, names);
     let has_candidate = !item.candidates.is_empty();
     if !chooses_how(entry) {
         let options = if has_candidate {
             vec![RecoverOption {
                 how: RecoverAs::Agent,
-                label: "Claude session".to_owned(),
+                label: format!("{label} session"),
                 resumes: true,
             }]
         } else {
@@ -331,19 +375,14 @@ fn recover_options(item: &SessionHistoryItem, names: &Names) -> (Vec<RecoverOpti
         };
         return (options, 0);
     }
-    let mut options = folder_claude_options(item, names);
-    // A shell typing `claude --resume` would resume the conversation on
-    // Anthropic, so an entry on any other provider recovers as Claude only.
-    let provider = entry
-        .options
-        .as_ref()
-        .map(|options| claude_compat::from_options(options).provider)
-        .unwrap_or_default();
-    if !provider.is_anthropic() {
+    let mut options = folder_agent_options(item, names, &label);
+    // The daemon says whether a shell can resume the row's conversation; when
+    // it cannot, the row recovers as the agent only.
+    if !item.shell_resume {
         if options.is_empty() {
             options.push(RecoverOption {
                 how: RecoverAs::Agent,
-                label: "Claude session".to_owned(),
+                label: format!("{label} session"),
                 resumes: true,
             });
         }
@@ -356,16 +395,20 @@ fn recover_options(item: &SessionHistoryItem, names: &Names) -> (Vec<RecoverOpti
     };
     options.push(RecoverOption {
         how: RecoverAs::ShellResume,
-        label: "Shell running claude --resume".to_owned(),
+        label: shell_resume_label(entry, names),
         resumes: true,
     });
     (options, default)
 }
 
-/// The Claude choice for a row known by its folder: a Claude session in the
-/// registered repo at the folder, else registering the folder as a repo
-/// first when it is a git repo; none otherwise.
-fn folder_claude_options(item: &SessionHistoryItem, names: &Names) -> Vec<RecoverOption> {
+/// The `label` choice for a row known by its folder: a session in the
+/// registered repo at the folder, else registering the folder as a repo first
+/// when it is a git repo; none otherwise.
+fn folder_agent_options(
+    item: &SessionHistoryItem,
+    names: &Names,
+    label: &str,
+) -> Vec<RecoverOption> {
     let path = folder(&item.entry).unwrap_or_default();
     if let Some(repo_id) = &item.folder_repo_id {
         let repo = names
@@ -375,7 +418,7 @@ fn folder_claude_options(item: &SessionHistoryItem, names: &Names) -> Vec<Recove
             .unwrap_or_else(|| last_segment(path).to_owned());
         vec![RecoverOption {
             how: RecoverAs::Agent,
-            label: format!("Claude session in {repo}"),
+            label: format!("{label} session in {repo}"),
             resumes: true,
         }]
     } else if item.folder_is_git_repo && !path.is_empty() {
@@ -383,7 +426,7 @@ fn folder_claude_options(item: &SessionHistoryItem, names: &Names) -> Vec<Recove
             how: RecoverAs::RegisterRepoThenAgent {
                 path: path.to_owned(),
             },
-            label: format!("Register {path} as a repo, then Claude session"),
+            label: format!("Register {path} as a repo, then {label} session"),
             resumes: true,
         }]
     } else {
@@ -429,7 +472,7 @@ impl Row {
         let (options, option) = recover_options(item, names);
         let disabled = match entry.recovered_at {
             Some(at) => Some(format!("recovered {}", clock(at, now))),
-            None if options.is_empty() => Some("no conversation found".to_owned()),
+            None if options.is_empty() => Some(nothing_to_resume(entry, names)),
             None => None,
         };
         let now_utc = now.with_timezone(&Utc);
@@ -1150,7 +1193,57 @@ mod tests {
     }
 
     fn dialog(items: &[SessionHistoryItem]) -> RecoverDialog {
-        RecoverDialog::new(items, &Names::default(), &now())
+        RecoverDialog::new(items, &names(), &now())
+    }
+
+    /// The registry's Claude descriptor.
+    fn claude_descriptor() -> protocol::AgentDescriptor {
+        agent_registry::descriptors()
+            .into_iter()
+            .find(|descriptor| descriptor.id == protocol::AgentId("claude".to_owned()))
+            .expect("the registry has Claude")
+    }
+
+    /// A descriptor whose label and texts are not Claude's.
+    fn test_agent_descriptor() -> protocol::AgentDescriptor {
+        let mut descriptor = claude_descriptor();
+        descriptor.id = protocol::AgentId("test".to_owned());
+        descriptor.label = "Test agent".to_owned();
+        descriptor.texts = protocol::AgentTexts {
+            shell_resume_label: "Shell running test --resume".to_owned(),
+            no_conversation: "nothing to resume".to_owned(),
+        };
+        descriptor
+    }
+
+    /// The names a dialog over a daemon that lists `agents` uses.
+    fn names_of(agents: Vec<protocol::AgentDescriptor>) -> Names {
+        Names {
+            agents,
+            ..Names::default()
+        }
+    }
+
+    /// The names a dialog over the stock daemon uses: Claude only.
+    fn names() -> Names {
+        names_of(vec![claude_descriptor()])
+    }
+
+    /// A folder-only item of agent `agent` in `D:\proj`, the registered repo
+    /// `r9` named "proj", with one conversation and the daemon's
+    /// `shell_resume` flag.
+    fn folder_item(agent: Option<&str>, shell_resume: bool) -> SessionHistoryItem {
+        let mut item = lost("f", "2026-09-28T09:00:00Z");
+        item.entry.spawn_config = None;
+        item.entry.agent = agent.map(|agent| protocol::AgentId(agent.to_owned()));
+        item.entry.current_cwd = Some("D:\\proj".to_owned());
+        item.folder_repo_id = Some("r9".to_owned());
+        item.shell_resume = shell_resume;
+        item
+    }
+
+    fn option_labels(options: &[RecoverOption]) -> Vec<String> {
+        options.iter().map(|o| o.label.clone()).collect()
     }
 
     /// Each group as "<title> [<row ids>]".
@@ -1467,7 +1560,8 @@ mod tests {
         let mut folder_only = lost("f", "2026-09-28T09:00:00Z");
         folder_only.entry.spawn_config = None;
         folder_only.entry.current_cwd = Some("D:\\proj".to_owned());
-        let mut names = Names::default();
+        folder_only.shell_resume = true;
+        let mut names = names();
         names.repos.insert("r9".to_owned(), "proj".to_owned());
 
         let mut registered = folder_only.clone();
@@ -1514,6 +1608,72 @@ mod tests {
     }
 
     #[test]
+    fn labels_come_from_the_entrys_descriptor() {
+        let mut names = names_of(vec![test_agent_descriptor()]);
+        names.repos.insert("r9".to_owned(), "proj".to_owned());
+        let item = folder_item(Some("test"), true);
+        assert_eq!(
+            option_labels(&recover_options(&item, &names).0),
+            ["Test agent session in proj", "Shell running test --resume"]
+        );
+
+        let mut no_candidate = item.clone();
+        no_candidate.candidates.clear();
+        let row = Row::new(&no_candidate, &names, &now());
+        assert_eq!(row.disabled.as_deref(), Some("nothing to resume"));
+    }
+
+    #[test]
+    fn a_shell_entry_uses_the_first_descriptor() {
+        let mut names = names_of(vec![test_agent_descriptor()]);
+        names.repos.insert("r9".to_owned(), "proj".to_owned());
+        let mut item = folder_item(None, true);
+        item.entry.mode = SessionMode::PlainShell;
+        let (options, default) = recover_options(&item, &names);
+        assert_eq!(
+            option_labels(&options),
+            ["Test agent session in proj", "Shell running test --resume"]
+        );
+        assert_eq!(default, 0, "the registered repo's session is chosen");
+    }
+
+    #[test]
+    fn an_unknown_agent_falls_back_to_its_id() {
+        let mut names = names();
+        names.repos.insert("r9".to_owned(), "proj".to_owned());
+        let item = folder_item(Some("mystery"), false);
+        assert_eq!(
+            option_labels(&recover_options(&item, &names).0),
+            ["mystery session in proj"]
+        );
+
+        let mut no_candidate = item.clone();
+        no_candidate.candidates.clear();
+        let row = Row::new(&no_candidate, &names, &now());
+        assert_eq!(row.disabled.as_deref(), Some("no conversation found"));
+
+        let mut shell = item.clone();
+        shell.entry.agent = None;
+        shell.entry.mode = SessionMode::PlainShell;
+        assert_eq!(
+            option_labels(&recover_options(&shell, &Names::default()).0),
+            ["Agent session in proj"],
+            "a shell with no descriptors at all is `Agent`"
+        );
+    }
+
+    #[test]
+    fn a_shell_resume_without_a_descriptor_reads_shell_resume() {
+        let mut names = Names::default();
+        names.repos.insert("r9".to_owned(), "proj".to_owned());
+        let item = folder_item(Some("mystery"), true);
+        assert_eq!(
+            option_labels(&recover_options(&item, &names).0),
+            ["mystery session in proj", "Shell resume"]
+        );
+    }
+
+    #[test]
     fn plain_shell_without_candidate_offers_plain_shell() {
         let mut dialog = dialog(&[shell("sh", "2026-09-28T09:00:00Z")]);
         let row = dialog.row("sh").expect("row");
@@ -1552,6 +1712,7 @@ mod tests {
     fn a_shell_entry_with_a_conversation_recovers_as_shell_resume() {
         let mut entry = shell("sr", "2026-09-28T09:00:00Z");
         entry.candidates = vec![candidate("conv", "2026-09-28T08:00:00Z", Some("Fix it"))];
+        entry.shell_resume = true;
         assert_eq!(
             sent_items(&[entry]),
             [RecoverItem {

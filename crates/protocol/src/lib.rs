@@ -3005,6 +3005,10 @@ pub struct SessionHistoryItem {
     /// The registered repo whose path is the entry's folder.
     #[serde(default)]
     pub folder_repo_id: Option<String>,
+    /// Whether recovering the entry as a shell that resumes its conversation
+    /// ([`RecoverAs::ShellResume`]) can work. Absent means false.
+    #[serde(default)]
+    pub shell_resume: bool,
 }
 
 /// An agent conversation a history entry may be recovered into.
@@ -4192,6 +4196,23 @@ pub struct GitRemoteUrl {
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_history_item_shell_resume_defaults_to_false() {
+        let json = serde_json::json!({
+            "entry": {
+                "session_id": "s1", "label": "label", "kind": "single",
+                "mode": "interactive", "agent": "claude", "members": [],
+                "ended_at": "2026-09-28T09:00:00Z",
+                "end": {"type": "stopped_by_user"}, "source": "record"
+            },
+            "candidates": [],
+            "folder_is_git_repo": false
+        });
+        let item: SessionHistoryItem =
+            serde_json::from_value(json).expect("an item from before the field decodes");
+        assert!(!item.shell_resume, "no key means the shell cannot resume");
+    }
 
     #[test]
     fn retired_lan_variants_still_decode() {
@@ -7188,7 +7209,7 @@ mod tests {
                 "end":{"type":"tracer_lost"},"conversation_id":null,"source":"tracer_log","recovered_at":null,
                 "end_time_known":true,"import_rev":1},
        "candidates":[{"id":"85573bb1-c581-489e-baaa-94d5a384744c","last_active":"2026-09-27T18:27:37Z","title":"Fix the …"}],
-       "folder_is_git_repo":true,"folder_repo_id":"repo-yaat"}
+       "folder_is_git_repo":true,"folder_repo_id":"repo-yaat","shell_resume":false}
     ]}"#;
 
     #[test]
@@ -7209,6 +7230,7 @@ mod tests {
         assert_eq!(item.candidates[0].title.as_deref(), Some("Fix the …"));
         assert!(item.folder_is_git_repo);
         assert_eq!(item.folder_repo_id.as_deref(), Some("repo-yaat"));
+        assert!(!item.shell_resume, "this entry's shell cannot resume it");
     }
 
     const IMPORTED_ENTRY_PREFIX: &str = r#"{"session_id":"s1","label":"","kind":"standalone","mode":"plain_shell",

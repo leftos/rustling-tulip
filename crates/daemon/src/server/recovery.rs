@@ -683,9 +683,12 @@ async fn session_history_items(hub: &Hub) -> Vec<protocol::SessionHistoryItem> {
     let dirs = hub.dirs.clone();
     let repos = hub.state.with_persisted(|s| s.repos.clone());
     tokio::task::spawn_blocking(move || {
-        history::history_items(&dirs, &repos, &|entry| {
-            conversations::lookup_rows(history::recorded_env(entry))
-        })
+        history::history_items(
+            &dirs,
+            &repos,
+            &|entry| conversations::lookup_rows(history::recorded_env(entry)),
+            agent_registry::plugin,
+        )
     })
     .await
     .unwrap_or_else(|err| {

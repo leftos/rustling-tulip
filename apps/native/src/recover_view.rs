@@ -178,6 +178,7 @@ impl RootView {
                 .iter()
                 .map(|r| (r.id.clone(), r.name.clone()))
                 .collect(),
+            agents: self.agents.clone(),
         }
     }
 

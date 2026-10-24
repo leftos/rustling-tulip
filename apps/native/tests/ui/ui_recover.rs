@@ -300,14 +300,17 @@ fn recover_as_choices_match_folder_flags(cx: &mut TestAppContext) {
         vec![
             history_item("git")
                 .folder_only("D:\\proj", true, None)
+                .shell_resume(true)
                 .ended_minutes_ago(10)
                 .build(),
             history_item("reg")
                 .folder_only("D:\\r1", true, Some("r1"))
+                .shell_resume(true)
                 .ended_minutes_ago(12)
                 .build(),
             history_item("plain")
                 .folder_only("D:\\notes", false, None)
+                .shell_resume(true)
                 .ended_minutes_ago(14)
                 .build(),
             history_item("claude").ended_minutes_ago(16).build(),
@@ -345,40 +348,33 @@ fn recover_as_choices_match_folder_flags(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn a_deepseek_entry_offers_recover_as_claude_only(cx: &mut TestAppContext) {
+fn an_entry_without_shell_resume_offers_the_agent_only(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);
     h.load(&Fixture {
         repos: vec![repo("r1", "D:\\r1")],
         ..Fixture::default()
     });
-    let on_deepseek = |mut item: SessionHistoryItem| {
-        item.entry.options = Some(
-            serde_json::from_value(serde_json::json!({ "provider": "deepseek" })).expect("options"),
-        );
-        item
-    };
+    // The daemon says no shell can resume these conversations, so each row
+    // recovers as the agent only.
     open_with(
         &mut h,
         vec![
-            on_deepseek(
-                history_item("git")
-                    .folder_only("D:\\proj", true, None)
-                    .ended_minutes_ago(10)
-                    .build(),
-            ),
-            on_deepseek(
-                history_item("reg")
-                    .folder_only("D:\\r1", true, Some("r1"))
-                    .ended_minutes_ago(12)
-                    .build(),
-            ),
-            on_deepseek(
-                history_item("plain")
-                    .folder_only("D:\\notes", false, None)
-                    .ended_minutes_ago(14)
-                    .build(),
-            ),
+            history_item("git")
+                .folder_only("D:\\proj", true, None)
+                .shell_resume(false)
+                .ended_minutes_ago(10)
+                .build(),
+            history_item("reg")
+                .folder_only("D:\\r1", true, Some("r1"))
+                .shell_resume(false)
+                .ended_minutes_ago(12)
+                .build(),
+            history_item("plain")
+                .folder_only("D:\\notes", false, None)
+                .shell_resume(false)
+                .ended_minutes_ago(14)
+                .build(),
         ],
     );
     for (id, only) in [
