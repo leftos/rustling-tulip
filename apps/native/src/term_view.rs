@@ -5,7 +5,7 @@ use std::cell::RefCell;
 use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use alacritty_terminal::index::Side;
 use alacritty_terminal::term::cell::Flags;
@@ -152,15 +152,59 @@ impl Attachment {
     }
 }
 
+/// How long after the pane's last keyboard or pointer input its `Resize`
+/// still claims the session's size.
+const CLAIM_WINDOW: Duration = Duration::from_secs(5);
+
 /// Whether the pane may size its session's PTY: only once a layout pass has
-/// measured its real size, and only while it drives the session's size.
+/// measured its real size, and only while it drives the session's size. It
+/// also keeps the pane's last input, which decides whether a size it sends
+/// claims the session over other clients.
 #[derive(Debug, Default, Clone, Copy)]
 struct SizeGate {
     measured: bool,
     driving: bool,
+    /// When the pane last had keyboard or pointer input.
+    last_input: Option<Instant>,
+    /// Where the pointer last moved over the pane, so a move event at the
+    /// same pixel (a resting cursor) is not input.
+    last_pointer: Option<Point<Pixels>>,
 }
 
 impl SizeGate {
+    /// Whether a size sent at `now` claims the session: the pane had input
+    /// within [`CLAIM_WINDOW`].
+    fn claims(self, now: Instant) -> bool {
+        self.last_input
+            .is_some_and(|at| now.saturating_duration_since(at) <= CLAIM_WINDOW)
+    }
+
+    /// The pane had input at `now`. Returns whether to send the size again,
+    /// now claimed: when the pane had no input within [`CLAIM_WINDOW`].
+    fn note_input(&mut self, now: Instant) -> bool {
+        let idle = !self.claims(now);
+        self.last_input = Some(now);
+        idle
+    }
+
+    /// The pane let its session go: input to it does not claim the next.
+    fn forget_input(&mut self) {
+        self.last_input = None;
+        self.last_pointer = None;
+    }
+
+    /// The pointer moved over the pane to `position` at `now`: input only
+    /// when it left the pixel it was last seen at. The first position seen
+    /// only records where the pointer is. Returns what
+    /// [`Self::note_input`] does, or false when the move was no input.
+    fn note_pointer(&mut self, position: Point<Pixels>, now: Instant) -> bool {
+        let previous = self.last_pointer.replace(position);
+        match previous {
+            Some(previous) if previous != position => self.note_input(now),
+            _ => false,
+        }
+    }
+
     /// A layout pass measured the grid; returns whether to send the size.
     /// The first measure always does, since nothing was sent before it.
     fn measure(&mut self, changed: bool) -> bool {
@@ -494,6 +538,7 @@ impl TerminalPane {
         cx: &mut Context<Self>,
     ) {
         if let Some(bytes) = self.rerun_bytes(command) {
+            self.note_input();
             self.send_input(&bytes);
         }
         self.focus(window);
@@ -696,9 +741,12 @@ impl TerminalPane {
         self.load_timer = None;
         self.sync_timer = None;
         self.sync_deadline = None;
+        self.size_gate.forget_input();
     }
 
     /// Forget the attachment for a new connection, which starts unattached.
+    /// The pane's recent input is kept, so a reconnecting typist still
+    /// claims the size.
     pub fn reset_for_reconnect(&mut self) {
         if self.attachment.take().is_some() {
             self.fresh_terminal(CursorShape::Block, false);
@@ -927,7 +975,16 @@ impl TerminalPane {
             session_id,
             cols,
             rows,
+            claim: self.size_gate.claims((self.now)()),
         });
+    }
+
+    /// The pane had keyboard or pointer input: the first after an idle
+    /// spell sends the size again, claimed, ahead of the input itself.
+    fn note_input(&mut self) {
+        if self.size_gate.note_input((self.now)()) {
+            self.send_resize();
+        }
     }
 
     /// Sizes the terminal to `size`, telling the session when the size gate
@@ -948,6 +1005,7 @@ impl TerminalPane {
         if self.session.is_none() {
             return;
         }
+        self.note_input();
         let ks = &event.keystroke;
         let action = term_input::key_action(ks, self.term.app_cursor(), self.term.has_selection());
         let Some(action) = action else {
@@ -1005,6 +1063,7 @@ impl TerminalPane {
     }
 
     fn paste(&mut self, cx: &mut Context<Self>) {
+        self.note_input();
         let text = cx.read_from_clipboard().and_then(|item| item.text());
         let bracketed = self.term.bracketed_paste();
         let bytes = term_input::paste_input(text.as_deref(), bracketed);
@@ -1030,6 +1089,7 @@ impl TerminalPane {
     }
 
     fn on_scroll(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.note_input();
         let line_height = self
             .layout
             .map_or(px(self.font.size * 1.2), |(_, cell)| px(cell.height));
@@ -1110,6 +1170,7 @@ impl TerminalPane {
         cx: &mut Context<Self>,
     ) {
         self.focus.focus(window);
+        self.note_input();
         // The gutter is the dots' own: a press there starts no selection
         // and reaches no program.
         if self.in_gutter(event.position) {
@@ -1167,6 +1228,9 @@ impl TerminalPane {
     /// child asked for all motion. Moves during a gesture go through
     /// [`Self::on_gesture_move`].
     fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, _: &mut Context<Self>) {
+        if self.size_gate.note_pointer(event.position, (self.now)()) {
+            self.send_resize();
+        }
         let mode = self.term.mode();
         if self.tracker.moving().is_some()
             || !mouse::reports(mode, event.modifiers.shift)
@@ -1317,7 +1381,13 @@ impl TerminalPane {
         let Some(button) = report_button(event.button) else {
             return;
         };
-        match self.tracker.up(button) {
+        let gesture = self.tracker.up(button);
+        // A release ends a press on the pane only when a gesture was in
+        // progress; any other release outside the pane is not its input.
+        if gesture.is_some() {
+            self.note_input();
+        }
+        match gesture {
             Some(Gesture::Report) => {
                 if let Some(cell) = self.cell_at(event.position) {
                     self.report(
@@ -1461,6 +1531,7 @@ impl EntityInputHandler for TerminalPane {
         self.marked = None;
         self.last_key_char = None;
         if !text.is_empty() {
+            self.note_input();
             self.term.clear_selection();
             self.send_input(text.as_bytes());
         }
@@ -2021,14 +2092,15 @@ fn paint_span(
 #[cfg(test)]
 mod tests {
     use std::convert::Infallible;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     use alacritty_terminal::term::cell::Flags;
     use alacritty_terminal::vte::ansi::Rgb;
+    use gpui::{point, px};
 
     use super::{
-        Attachment, ReplyVerdict, ShellStatus, SizeGate, decorations, dot_color, paste_log_line,
-        terminal_font, to_rgba,
+        Attachment, CLAIM_WINDOW, ReplyVerdict, ShellStatus, SizeGate, decorations, dot_color,
+        paste_log_line, terminal_font, to_rgba,
     };
     use crate::palette::{DANGER, WAITING};
     use crate::term_input;
@@ -2114,6 +2186,63 @@ mod tests {
         assert!(!gate.set_driving(true));
         assert!(!gate.set_driving(false));
         assert!(!gate.measure(true));
+    }
+
+    #[test]
+    fn size_gate_input_within_five_seconds_claims() {
+        let t0 = Instant::now();
+        let mut gate = SizeGate::default();
+        gate.note_input(t0);
+        assert!(gate.claims(t0));
+        assert!(gate.claims(t0 + Duration::from_millis(4999)));
+        assert!(
+            gate.claims(t0 + CLAIM_WINDOW),
+            "the window's last instant still claims"
+        );
+    }
+
+    #[test]
+    fn size_gate_without_recent_input_does_not_claim() {
+        let t0 = Instant::now();
+        let mut gate = SizeGate::default();
+        assert!(!gate.claims(t0), "no input yet");
+        gate.note_input(t0);
+        assert!(
+            !gate.claims(t0 + CLAIM_WINDOW + Duration::from_millis(1)),
+            "the input is too old"
+        );
+    }
+
+    #[test]
+    fn first_input_after_idle_resends_the_size_with_a_claim() {
+        let t0 = Instant::now();
+        let mut gate = SizeGate::default();
+        assert!(gate.note_input(t0), "the first input ever resends");
+        let soon = t0 + Duration::from_secs(1);
+        assert!(!gate.note_input(soon), "input within the window does not");
+        let later = soon + CLAIM_WINDOW + Duration::from_millis(1);
+        assert!(gate.note_input(later), "the first input after idle resends");
+        assert!(gate.claims(later), "and the resend claims");
+    }
+
+    #[test]
+    fn resting_pointer_move_events_do_not_claim() {
+        let t0 = Instant::now();
+        let mut gate = SizeGate::default();
+        let rest = point(px(40.0), px(30.0));
+        assert!(
+            !gate.note_pointer(rest, t0),
+            "the first position only says where the pointer is"
+        );
+        let t1 = t0 + Duration::from_secs(1);
+        assert!(!gate.note_pointer(rest, t1));
+        assert!(!gate.claims(t1), "a pointer at rest is no input");
+        let t2 = t0 + Duration::from_secs(2);
+        assert!(
+            gate.note_pointer(point(px(41.0), px(30.0)), t2),
+            "a move is input and resends"
+        );
+        assert!(gate.claims(t2));
     }
 
     #[test]

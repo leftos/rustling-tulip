@@ -181,17 +181,29 @@ pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> 
             session_id,
             cols,
             rows,
+            claim,
         } => {
             if let Some(rec) = hub.sessions.get(&session_id) {
-                let (pty, screen) = {
-                    let guard = crate::sync::lock(&rec);
-                    (guard.pty.clone(), guard.screen.clone())
-                };
-                if let Some(pty) = pty {
-                    pty.resize(cols, rows);
-                }
-                if let Some(screen) = screen {
-                    crate::sync::lock(&screen).resize(cols, rows);
+                // The gate, the flag and both resizes happen under one record
+                // lock, so two clients' resizes never interleave. The PTY
+                // resize is a channel send, and the screen lock is a leaf
+                // that is never held while waiting on the record.
+                let mut guard = crate::sync::lock(&rec);
+                if claim || !guard.size_set {
+                    guard.size_set = true;
+                    if let Some(pty) = &guard.pty {
+                        pty.resize(cols, rows);
+                    }
+                    if let Some(screen) = &guard.screen {
+                        crate::sync::lock(screen).resize(cols, rows);
+                    }
+                } else {
+                    tracing::debug!(
+                        session_id = %session_id,
+                        cols,
+                        rows,
+                        "resize ignored: unclaimed and the session is already sized"
+                    );
                 }
             }
         }
@@ -1313,6 +1325,78 @@ mod tests {
         dispatch(hub, msg, &ctx)
             .await
             .expect("a send-input dispatch succeeds");
+    }
+
+    /// A hub holding `s1`, idle with no process, its screen at 80x24.
+    fn hub_with_screen(tag: &str) -> (Hub, crate::server::test_support::ScratchDir) {
+        let (hub, scratch) = test_hub(tag);
+        let mut rec = idle_record("s1");
+        rec.screen = Some(Arc::new(std::sync::Mutex::new(crate::screen::Screen::new(
+            80, 24,
+        ))));
+        hub.sessions.insert(rec);
+        (hub, scratch)
+    }
+
+    fn resize(cols: u16, rows: u16, claim: bool) -> ClientMessage {
+        ClientMessage::Resize {
+            session_id: "s1".to_owned(),
+            cols,
+            rows,
+            claim,
+        }
+    }
+
+    /// The size `s1`'s screen is at.
+    fn screen_size(hub: &Hub) -> (u16, u16) {
+        let rec = hub.sessions.get("s1").expect("s1 is registered");
+        let screen = crate::sync::lock(&rec)
+            .screen
+            .clone()
+            .expect("s1 has a screen");
+        crate::sync::lock(&screen).size()
+    }
+
+    #[tokio::test]
+    async fn the_first_resize_sizes_an_unsized_session() {
+        let (hub, _scratch) = hub_with_screen("first-resize");
+        dispatch_silently(&hub, resize(100, 30, false)).await;
+        assert_eq!(
+            screen_size(&hub),
+            (100, 30),
+            "an unclaimed resize sizes a session no client has sized"
+        );
+    }
+
+    #[tokio::test]
+    async fn unclaimed_resize_is_ignored_once_a_client_has_sized_the_session() {
+        let (hub, _scratch) = hub_with_screen("unclaimed-resize");
+        dispatch_silently(&hub, resize(100, 30, false)).await;
+        dispatch_silently(&hub, resize(60, 20, false)).await;
+        assert_eq!(
+            screen_size(&hub),
+            (100, 30),
+            "a second unclaimed resize is ignored"
+        );
+
+        let (hub, _scratch) = hub_with_screen("unclaimed-after-claim");
+        dispatch_silently(&hub, resize(100, 30, true)).await;
+        dispatch_silently(&hub, resize(60, 20, false)).await;
+        assert_eq!(
+            screen_size(&hub),
+            (100, 30),
+            "an unclaimed resize after a claimed one is ignored"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_claimed_resize_always_applies() {
+        let (hub, _scratch) = hub_with_screen("claimed-resize");
+        dispatch_silently(&hub, resize(100, 30, false)).await;
+        dispatch_silently(&hub, resize(60, 20, true)).await;
+        assert_eq!(screen_size(&hub), (60, 20), "a claim takes the size");
+        dispatch_silently(&hub, resize(90, 25, true)).await;
+        assert_eq!(screen_size(&hub), (90, 25), "another claim takes it again");
     }
 
     /// The owner's key leaves a hook-reported prompt at once, with no settle

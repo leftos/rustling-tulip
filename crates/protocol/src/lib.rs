@@ -2194,6 +2194,11 @@ pub enum ClientMessage {
         session_id: String,
         cols: u16,
         rows: u16,
+        /// True when the sending pane had keyboard or pointer input in the
+        /// last few seconds: the daemon always applies a claimed size. An
+        /// unclaimed one applies only to a session no client has sized yet.
+        #[serde(default)]
+        claim: bool,
     },
     StopSession {
         session_id: String,
@@ -5918,6 +5923,40 @@ mod tests {
             assert_eq!(port, 8787);
             assert_eq!(back_state, state, "{json}");
         }
+    }
+
+    #[test]
+    fn resize_claim_round_trips_and_defaults_to_false() {
+        for claim in [false, true] {
+            let msg = ClientMessage::Resize {
+                session_id: "s1".to_owned(),
+                cols: 120,
+                rows: 40,
+                claim,
+            };
+            let json = serde_json::to_value(&msg).expect("encodes");
+            assert_eq!(
+                json.get("claim"),
+                Some(&serde_json::Value::Bool(claim)),
+                "the field is always sent: {json}"
+            );
+            let back: ClientMessage = serde_json::from_value(json.clone()).expect("round-trips");
+            assert!(
+                matches!(
+                    back,
+                    ClientMessage::Resize { cols: 120, rows: 40, claim: c, .. } if c == claim
+                ),
+                "{json}"
+            );
+        }
+
+        let absent: ClientMessage =
+            serde_json::from_str(r#"{"type":"resize","session_id":"s1","cols":80,"rows":24}"#)
+                .expect("a resize without the field decodes");
+        assert!(
+            matches!(absent, ClientMessage::Resize { claim: false, .. }),
+            "an absent claim is no claim"
+        );
     }
 
     #[test]

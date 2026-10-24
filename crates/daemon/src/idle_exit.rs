@@ -283,6 +283,7 @@ mod tests {
             agent_in_shell: false,
             shell_label: None,
             agent_exit_announced: false,
+            size_set: false,
             hook_agent: None,
         }
     }

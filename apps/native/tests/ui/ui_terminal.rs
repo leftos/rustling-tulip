@@ -734,6 +734,123 @@ fn resize_cols(sent: &[ClientMessage], id: &str) -> Vec<u16> {
         .collect()
 }
 
+/// The `claim` flags of the `Resize`s in `sent` for session `id`, in order.
+fn resize_claims(sent: &[ClientMessage], id: &str) -> Vec<bool> {
+    sent.iter()
+        .filter_map(|m| match m {
+            ClientMessage::Resize {
+                session_id, claim, ..
+            } if session_id == id => Some(*claim),
+            _ => None,
+        })
+        .collect()
+}
+
+#[gpui::test]
+fn typing_claims_the_size(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, session("s1").build());
+    h.advance(Duration::from_secs(6));
+    h.sent();
+
+    h.keys("a");
+    let sent = h.sent();
+    assert_eq!(
+        resize_claims(&sent, "s1"),
+        [true],
+        "the first key after idle claims the size"
+    );
+    let resize_at = sent
+        .iter()
+        .position(|m| matches!(m, ClientMessage::Resize { .. }));
+    let input_at = sent
+        .iter()
+        .position(|m| matches!(m, ClientMessage::SendInput { .. }));
+    assert!(
+        resize_at < input_at,
+        "the claim goes ahead of the key: {sent:?}"
+    );
+
+    h.keys("b");
+    assert_eq!(
+        resize_claims(&h.sent(), "s1"),
+        Vec::<bool>::new(),
+        "a key within the window sends no size again"
+    );
+}
+
+#[gpui::test]
+fn a_window_resize_without_input_sends_an_unclaimed_resize(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
+    h.answer_scrollback("s1", b"");
+    let first = resize_claims(&h.sent(), "s1");
+    assert!(
+        !first.is_empty() && first.iter().all(|claim| !claim),
+        "an idle pane sizes its session unclaimed: {first:?}"
+    );
+
+    h.cx.simulate_resize(size(px(1600.0), px(900.0)));
+    h.cx.run_until_parked();
+    let claims = resize_claims(&h.sent(), "s1");
+    assert!(!claims.is_empty(), "the pane sends its new size");
+    assert!(
+        claims.iter().all(|claim| !claim),
+        "without input it does not claim: {claims:?}"
+    );
+}
+
+#[gpui::test]
+fn a_tab_switch_alone_does_not_claim(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        sessions: vec![session("s1").build(), session("s2").build()],
+        tabs: vec![
+            tab("t1", &pane("p1", Some("s1"))),
+            tab("t2", &pane("p2", Some("s2"))),
+        ],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.sent();
+
+    h.click_on("tab-t2");
+    assert_eq!(
+        resize_claims(&h.sent(), "s2"),
+        [false],
+        "the shown pane sends its size unclaimed"
+    );
+}
+
+#[gpui::test]
+fn a_rebound_pane_does_not_claim_with_the_previous_sessions_input(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        sessions: vec![session("s1").build(), session("s2").build()],
+        tabs: vec![tab("t1", &pane("p1", Some("s1")))],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.answer_scrollback("s1", b"");
+    let at = h.cell_center("p1", 0, 0);
+    h.click(at, Modifiers::none());
+    assert_eq!(
+        resize_claims(&h.sent(), "s1").last(),
+        Some(&true),
+        "the click claims s1"
+    );
+
+    h.send(DaemonMessage::TabUpdated {
+        tab: tab("t1", &pane("p1", Some("s2"))),
+    });
+    h.answer_scrollback("s2", b"");
+    let claims = resize_claims(&h.sent(), "s2");
+    assert!(
+        !claims.is_empty() && claims.iter().all(|claim| !claim),
+        "input to s1 does not claim s2: {claims:?}"
+    );
+}
+
 fn set_app_font(h: &mut Harness<'_>, font: FontSettings) {
     let root = h.root.clone();
     h.cx.update(|_, cx| root.update(cx, |root, cx| root.set_app_font(font, cx)));

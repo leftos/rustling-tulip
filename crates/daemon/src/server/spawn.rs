@@ -729,6 +729,7 @@ fn interactive_record(
         agent_in_shell: new.shell_label.is_some(),
         shell_label: new.shell_label,
         agent_exit_announced: false,
+        size_set: false,
         hook_agent: None,
     };
     push_recent_action(&mut record, "session started".to_string());
@@ -801,6 +802,7 @@ fn plain_shell_record(
         agent_in_shell: false,
         shell_label: None,
         agent_exit_announced: false,
+        size_set: false,
         hook_agent: new.hook_agent,
     };
     push_recent_action(
@@ -1667,6 +1669,7 @@ fn spawn_headless_session(
         agent_in_shell: false,
         shell_label: None,
         agent_exit_announced: false,
+        size_set: false,
         hook_agent: None,
     };
     push_recent_action(&mut record, "headless session started".to_string());
