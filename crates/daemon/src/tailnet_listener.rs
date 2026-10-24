@@ -439,11 +439,12 @@ impl TailnetListener {
     /// On the normal path the supervisor has released every server's address
     /// by then as well: it aborts the cert task and waits for it before it
     /// stops the servers. A supervisor that panicked never runs that
-    /// shutdown, and its servers are dropped — each asking its handle to shut
-    /// down — without waiting out their grace, so one may hold its address
-    /// for up to [`ListenerOptions::shutdown_grace`] after this returns. What
-    /// holds on every path is the cert task's end; the supervisor's own end
-    /// aborts it, and the wait below sees that abort through.
+    /// shutdown: its servers are dropped, each shutting its handle down at
+    /// once, with no drain, and nothing waits for their tasks. Each server
+    /// releases its address when its task is next polled, which may be just
+    /// after this returns. What holds on every path is the cert task's end;
+    /// the supervisor's own end aborts it, and the wait below sees that abort
+    /// through.
     ///
     /// Dropping this future before it returns hands the listener to [`Drop`],
     /// which aborts the supervisor, and with it the cert task.
