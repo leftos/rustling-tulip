@@ -72,4 +72,20 @@ mod tests {
             assert!(plugin(&descriptor.id).is_some(), "{:?}", descriptor.id);
         }
     }
+
+    #[test]
+    #[expect(clippy::panic, reason = "the failure names the agent that has no fake")]
+    fn every_registered_plugin_has_a_fake_cli_on_disk() {
+        for registered in all() {
+            let id = &registered.descriptor().id;
+            let fake = registered
+                .fake_cli()
+                .unwrap_or_else(|| panic!("agent {id:?} has no fake CLI"));
+            assert!(
+                fake.shim.is_file(),
+                "agent {id:?}: fake CLI shim {} is not a file",
+                fake.shim.display()
+            );
+        }
+    }
 }

@@ -419,6 +419,22 @@ pub struct ImportedRun<O> {
     pub trusted: bool,
 }
 
+/// A plugin's stand-in for its CLI, which the live test tier runs in place
+/// of the real program.
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FakeCli {
+    /// The platform's shim that starts the fake: the one the agent's
+    /// [`Agent::program_env_var`] is pointed at.
+    pub shim: PathBuf,
+    /// A variable the harness points at a fresh, empty home folder per test,
+    /// so the agent never reads or writes the user's own.
+    pub home_env: Option<&'static str>,
+    /// A program name the harness shadows on `PATH` with a stub, so a shell
+    /// the daemon starts never runs the user's real CLI.
+    pub path_stub: Option<&'static str>,
+}
+
 /// Implemented once per supported CLI, over the agent's own typed options.
 /// The daemon never calls it directly: it reaches every agent through the
 /// [`AgentPlugin`] this crate implements for it, so the daemon doesn't need
@@ -595,6 +611,13 @@ pub trait Agent: Send + Sync + 'static {
     fn file_reference(&self, repo_relative: &str) -> String {
         repo_relative.to_owned()
     }
+
+    /// The fake CLI the live test tier runs for this agent, or `None` for an
+    /// agent that ships none.
+    #[cfg(feature = "test-support")]
+    fn fake_cli(&self) -> Option<FakeCli> {
+        None
+    }
 }
 
 /// An [`Agent`] as the registry holds it: object-safe, taking the spawn's
@@ -726,6 +749,10 @@ pub trait AgentPlugin: Send + Sync {
 
     /// See [`Agent::file_reference`].
     fn file_reference(&self, repo_relative: &str) -> String;
+
+    /// See [`Agent::fake_cli`].
+    #[cfg(feature = "test-support")]
+    fn fake_cli(&self) -> Option<FakeCli>;
 
     /// Resolve the executable path (the env-var override, or the default).
     /// Concrete `which`/shim resolution lives in the daemon's
@@ -894,6 +921,11 @@ impl<A: Agent> AgentPlugin for A {
 
     fn file_reference(&self, repo_relative: &str) -> String {
         Agent::file_reference(self, repo_relative)
+    }
+
+    #[cfg(feature = "test-support")]
+    fn fake_cli(&self) -> Option<FakeCli> {
+        Agent::fake_cli(self)
     }
 }
 

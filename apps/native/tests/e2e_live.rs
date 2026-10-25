@@ -1,8 +1,8 @@
 //! End-to-end specs: the root view on the real network thread, against a
-//! real daemon isolated under `.tmp/native-e2e/`, with plain shells and
-//! `tools/e2e/fake-claude`. They need the daemon and tracer built beside the
-//! test binary, so they are ignored by default and run by
-//! `.\rt.ps1 native-e2e`.
+//! real daemon isolated under `.tmp/native-e2e/`, with plain shells and the
+//! default agent's fake CLI (`crates/agents/claude/fake`). They need the
+//! daemon and tracer built beside the test binary, so they are ignored by
+//! default and run by `.\rt.ps1 native-e2e`.
 
 #![expect(
     clippy::expect_used,
@@ -24,7 +24,7 @@ use protocol::{
 use serde_json::{Value, json};
 use support::Harness;
 use support::live::{
-    LiveClient, LiveDaemon, kill_tree, processes_under, spawn_claude_in_place, spawn_shell,
+    LiveClient, LiveDaemon, kill_tree, processes_under, spawn_default_agent_in_place, spawn_shell,
 };
 
 const CONNECT: Duration = Duration::from_secs(20);
@@ -189,7 +189,7 @@ fn live_fake_claude_streams_ready_banner(cx: &mut TestAppContext) {
         repo_id = daemon.repo_id(&repo);
         repo_id.is_some()
     });
-    client.send(spawn_claude_in_place(
+    client.send(spawn_default_agent_in_place(
         &repo_id.expect("the repo was registered"),
     ));
     let pane = place_first_session(&mut h, &client);
@@ -224,7 +224,7 @@ fn live_hook_status_reports_working_asking_and_idle(cx: &mut TestAppContext) {
         repo_id = daemon.repo_id(&repo);
         repo_id.is_some()
     });
-    client.send(spawn_claude_in_place(
+    client.send(spawn_default_agent_in_place(
         &repo_id.expect("the repo was registered"),
     ));
     let pane = place_first_session(&mut h, &client);
@@ -330,7 +330,7 @@ fn live_esc_mid_turn_drops_working_to_idle_from_the_screen(cx: &mut TestAppConte
         repo_id = daemon.repo_id(&repo);
         repo_id.is_some()
     });
-    client.send(spawn_claude_in_place(
+    client.send(spawn_default_agent_in_place(
         &repo_id.expect("the repo was registered"),
     ));
     let pane = place_first_session(&mut h, &client);
@@ -383,7 +383,7 @@ fn live_hook_status_reports_background_beside_idle(cx: &mut TestAppContext) {
         repo_id = daemon.repo_id(&repo);
         repo_id.is_some()
     });
-    client.send(spawn_claude_in_place(
+    client.send(spawn_default_agent_in_place(
         &repo_id.expect("the repo was registered"),
     ));
     let pane = place_first_session(&mut h, &client);

@@ -15,7 +15,16 @@ doctest = false
 [lints]
 workspace = true
 
+[features]
+# Every registered plugin's fake CLI, for the live test tier.
+test-support = ["agent-api/test-support", "agent-claude/test-support"]
+
 [dependencies]
 agent-api = { workspace = true }
 agent-claude = { workspace = true }
 protocol = { workspace = true }
+
+[dev-dependencies]
+# The crate's own tests check every plugin's fake CLI.
+agent-api = { workspace = true, features = ["test-support"] }
+agent-claude = { workspace = true, features = ["test-support"] }

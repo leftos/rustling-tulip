@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 /**
- * Deterministic stand-in for the `claude` CLI the daemon spawns. The backend's
- * `program_env_var()` honors `RUSTLING_TULIP_CLAUDE`, so pointing it at this
- * script (via the `fake-claude.cmd` wrapper on Windows) gives the harness a
- * long-running PTY child that doesn't depend on a real install, real
- * credentials or a logged-in account.
+ * Deterministic stand-in for the `claude` CLI the daemon spawns. The Claude
+ * plugin (`crates/agents/claude`) returns this folder's shim from `fake_cli`,
+ * and the live test harness points the plugin's `program_env_var()`,
+ * `RUSTLING_TULIP_CLAUDE`, at it (the `fake-claude.cmd` wrapper on Windows),
+ * which gives the harness a long-running PTY child that doesn't depend on a
+ * real install, real credentials or a logged-in account.
  *
  * Behavior:
  *   - Prints a stable banner the smoke test asserts on.

@@ -13,11 +13,12 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use agent_api::{AgentPlugin, FakeCli};
 use daemon_client::device_tokens::MemoryTokens;
 use futures::StreamExt as _;
 use futures::channel::mpsc::{UnboundedSender, unbounded};
 use gpui::{Modifiers, TestAppContext};
-use protocol::{ClientMessage, DaemonHandshake, DaemonMessage};
+use protocol::{AgentId, ClientMessage, DaemonHandshake, DaemonMessage};
 use rcgen::{
     BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
     KeyUsagePurpose,
@@ -40,7 +41,7 @@ const MISSING_DAEMON: &str = "rustling-tulipd.exe not found next to the test bin
                               run `.\\rt.ps1 native-e2e` or `.\\rt.ps1 native-smoke`; \
                               they build daemon + tracer first";
 
-/// The repository root, for the `.tmp` dir and `tools/e2e/fake-claude`.
+/// The repository root, for the `.tmp` dir and `tools/e2e/fake-tailscale`.
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
@@ -234,10 +235,11 @@ impl LiveDaemon {
         self.root.join("config")
     }
 
-    /// The daemon's `CLAUDE_CONFIG_DIR`: where it looks for Claude Code
-    /// transcripts, in place of the user's `~/.claude`.
-    pub fn claude_config_dir(&self) -> PathBuf {
-        self.root.join("claude-home")
+    /// The home folder `agent`'s fake CLI names in its `home_env`: where the
+    /// daemon and the sessions it spawns look for that agent's files, in
+    /// place of the user's own.
+    pub fn agent_home(&self, agent: &AgentId) -> PathBuf {
+        agent_home(&self.root, agent)
     }
 
     /// The daemon's binary cache: the tracers, and a daemon it respawns,
@@ -401,28 +403,42 @@ impl Drop for LiveDaemon {
     }
 }
 
-/// What the `claude` stub prints before its arguments.
-pub const CLAUDE_STUB_MARKER: &str = "[rt-e2e claude stub]";
+/// What a `PATH` stub prints before its arguments.
+pub const STUB_MARKER: &str = "[rt-e2e agent stub]";
 
-/// A `claude` in `dir` that prints [`CLAUDE_STUB_MARKER`] and its arguments,
-/// so a shell the daemon starts never runs the user's real `claude`.
+/// A `program` in `dir` that prints [`STUB_MARKER`] and its arguments, so a
+/// shell the daemon starts never runs the user's real CLI.
 #[cfg(windows)]
-fn write_claude_stub(dir: &Path) {
-    let script = format!("@echo off\r\necho {CLAUDE_STUB_MARKER} %*\r\n");
-    std::fs::write(dir.join("claude.cmd"), script).expect("write the claude stub");
+fn write_path_stub(dir: &Path, program: &str) {
+    let script = format!("@echo off\r\necho {STUB_MARKER} %*\r\n");
+    std::fs::write(dir.join(format!("{program}.cmd")), script).expect("write the PATH stub");
 }
 
 #[cfg(not(windows))]
-fn write_claude_stub(dir: &Path) {
+fn write_path_stub(dir: &Path, program: &str) {
     use std::os::unix::fs::PermissionsExt as _;
-    let path = dir.join("claude");
-    let script = format!("#!/bin/sh\necho '{CLAUDE_STUB_MARKER}' \"$@\"\n");
-    std::fs::write(&path, script).expect("write the claude stub");
+    let path = dir.join(program);
+    let script = format!("#!/bin/sh\necho '{STUB_MARKER}' \"$@\"\n");
+    std::fs::write(&path, script).expect("write the PATH stub");
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-        .expect("make the claude stub executable");
+        .expect("make the PATH stub executable");
 }
 
-/// `PATH` with the `claude` stub's dir first.
+/// `plugin`'s fake CLI; the live tier runs no agent without one.
+#[expect(clippy::panic, reason = "the failure names the agent that has no fake")]
+fn fake_cli(plugin: &dyn AgentPlugin) -> FakeCli {
+    let id = &plugin.descriptor().id.0;
+    plugin
+        .fake_cli()
+        .unwrap_or_else(|| panic!("agent {id} has no fake CLI for the live tier"))
+}
+
+/// `<root>/<agent id>-home`: the folder `agent`'s fake `home_env` names.
+fn agent_home(root: &Path, agent: &AgentId) -> PathBuf {
+    root.join(format!("{}-home", agent.0))
+}
+
+/// `PATH` with the stubs' dir first.
 fn path_with_stub(root: &Path) -> OsString {
     let inherited = std::env::var_os("PATH").unwrap_or_default();
     let dirs = std::iter::once(root.join("fake-bin")).chain(std::env::split_paths(&inherited));
@@ -438,7 +454,7 @@ const OWNER_USER_ID: i64 = 2;
 const FAKE_TAILSCALE_STATE_ENV: &str = "RUSTLING_TULIP_FAKE_TAILSCALE_STATE";
 
 /// `<repo>/.tmp/native-e2e/<test>-<pid>/`, emptied, with the daemon's
-/// directories and the `claude` stub made.
+/// directories, each registered agent's home folder and its `PATH` stub made.
 fn scratch_root(test: &str) -> PathBuf {
     let root = repo_root()
         .join(".tmp")
@@ -451,12 +467,20 @@ fn scratch_root(test: &str) -> PathBuf {
         "worktrees",
         "tailnet",
         "ui",
-        "claude-home",
         "fake-bin",
     ] {
         std::fs::create_dir_all(root.join(sub)).expect("create the test's scratch dirs");
     }
-    write_claude_stub(&root.join("fake-bin"));
+    for plugin in agent_registry::all() {
+        let fake = fake_cli(*plugin);
+        if fake.home_env.is_some() {
+            std::fs::create_dir_all(agent_home(&root, &plugin.descriptor().id))
+                .expect("create the agent's home folder");
+        }
+        if let Some(program) = fake.path_stub {
+            write_path_stub(&root.join("fake-bin"), program);
+        }
+    }
     root
 }
 
@@ -508,15 +532,17 @@ pub fn free_port() -> u16 {
 }
 
 fn isolated_envs(root: &Path, test: &str) -> Vec<(&'static str, OsString)> {
-    let e2e_tools = repo_root().join("tools").join("e2e");
-    let (fake_claude, fake_tailscale) = if cfg!(windows) {
-        ("fake-claude.cmd", "fake-tailscale.cmd")
+    let fake_tailscale = if cfg!(windows) {
+        "fake-tailscale.cmd"
     } else {
-        ("fake-claude.sh", "fake-tailscale.sh")
+        "fake-tailscale.sh"
     };
-    let fake_claude = e2e_tools.join("fake-claude").join(fake_claude);
-    let fake_tailscale = e2e_tools.join("fake-tailscale").join(fake_tailscale);
-    vec![
+    let fake_tailscale = repo_root()
+        .join("tools")
+        .join("e2e")
+        .join("fake-tailscale")
+        .join(fake_tailscale);
+    let mut envs = vec![
         (
             "RUSTLING_TULIP_CONFIG_DIR",
             root.join("config").into_os_string(),
@@ -535,7 +561,6 @@ fn isolated_envs(root: &Path, test: &str) -> Vec<(&'static str, OsString)> {
         ),
         ("RUSTLING_TULIP_SHELL", test_shell()),
         ("RUSTLING_TULIP_SHELL_INTEGRATION", OsString::from("0")),
-        ("RUSTLING_TULIP_CLAUDE", fake_claude.into_os_string()),
         // The tailnet listener's CLI and certificate dir: never the user's
         // Tailscale or their real certificate, even with remote access off.
         ("RUSTLING_TULIP_TAILSCALE", fake_tailscale.into_os_string()),
@@ -543,13 +568,8 @@ fn isolated_envs(root: &Path, test: &str) -> Vec<(&'static str, OsString)> {
             "RUSTLING_TULIP_TAILNET_DIR",
             root.join("tailnet").into_os_string(),
         ),
-        // Claude Code's home, for the daemon's transcript lookups and the
-        // sessions it spawns: never the user's `~/.claude`.
-        (
-            "CLAUDE_CONFIG_DIR",
-            root.join("claude-home").into_os_string(),
-        ),
-        // A shell the daemon starts finds the stub before any real `claude`.
+        // A shell the daemon starts finds the agents' stubs before any real
+        // CLI.
         ("PATH", path_with_stub(root)),
         // The tracer the daemon copies into its binaries dir: the one built
         // beside it, never the installed app's.
@@ -557,7 +577,18 @@ fn isolated_envs(root: &Path, test: &str) -> Vec<(&'static str, OsString)> {
             "RUSTLING_TULIP_BIN_TEMPLATES",
             target_bin_dir().into_os_string(),
         ),
-    ]
+    ];
+    // Every registered agent runs its fake, with its home under the test's
+    // root: never the user's real CLI or its files.
+    for plugin in agent_registry::all() {
+        let fake = fake_cli(*plugin);
+        envs.push((plugin.program_env_var(), fake.shim.into_os_string()));
+        if let Some(home_env) = fake.home_env {
+            let home = agent_home(root, &plugin.descriptor().id);
+            envs.push((home_env, home.into_os_string()));
+        }
+    }
+    envs
 }
 
 fn same_path(a: &str, b: &str) -> bool {
@@ -861,8 +892,9 @@ pub fn spawn_shell(cwd: &Path) -> ClientMessage {
     spawn_message(&target, "plain_shell", &Value::Null)
 }
 
-/// An interactive claude session on `main`, in place in `repo_id`'s checkout.
-pub fn spawn_claude_in_place(repo_id: &str) -> ClientMessage {
+/// An interactive session of the default agent on `main`, in place in
+/// `repo_id`'s checkout.
+pub fn spawn_default_agent_in_place(repo_id: &str) -> ClientMessage {
     let target = json!({
         "kind": "single",
         "repo_id": repo_id,
@@ -870,8 +902,8 @@ pub fn spawn_claude_in_place(repo_id: &str) -> ClientMessage {
         "base_branch": null,
         "use_worktree": false,
     });
-    let claude = json!({ "agent": "claude", "options": {} });
-    spawn_message(&target, "interactive", &claude)
+    let agent = json!({ "agent": agent_registry::default_agent(), "options": {} });
+    spawn_message(&target, "interactive", &agent)
 }
 
 /// A spawn of `mode` on `target` running `agent` (null for a plain shell).

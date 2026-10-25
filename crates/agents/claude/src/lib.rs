@@ -193,6 +193,24 @@ impl Agent for ClaudePlugin {
         "claude"
     }
 
+    /// `fake/`'s shim, with Claude Code's home under `CLAUDE_CONFIG_DIR` and
+    /// `claude` shadowed on `PATH`.
+    #[cfg(feature = "test-support")]
+    fn fake_cli(&self) -> Option<agent_api::FakeCli> {
+        let shim = if cfg!(windows) {
+            "fake-claude.cmd"
+        } else {
+            "fake-claude.sh"
+        };
+        Some(agent_api::FakeCli {
+            shim: std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("fake")
+                .join(shim),
+            home_env: Some("CLAUDE_CONFIG_DIR"),
+            path_stub: Some("claude"),
+        })
+    }
+
     fn passthrough_vars(&self) -> &'static [&'static str] {
         &["ANTHROPIC_API_KEY", "CLAUDE_CONFIG_DIR"]
     }

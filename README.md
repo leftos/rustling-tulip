@@ -10,12 +10,11 @@ crates/
   daemon/       - long-lived background daemon (WS server, PTY pool, registry)
   daemon-client/ - client-side daemon supervision shared by the clients
   agents/api/   - the agent plugin trait and its context types
-  agents/claude/ - the Claude plugin (argv, hook settings, stream-json parsing)
+  agents/claude/ - the Claude plugin (argv, hook settings, stream-json parsing), with its fake `claude` CLI shim for the native e2e tier in `fake/`
   agents/registry/ - the compiled-in list of agent plugins
 apps/
   native/       - native desktop client (GPUI + alacritty_terminal)
 tools/
-  e2e/fake-claude/ - fake `claude` CLI shim for the native e2e tier
   e2e/fake-tailscale/ - fake `tailscale` CLI shim for the native e2e tier's remote specs
 docs/
   architecture.md - components, what the product does, task index

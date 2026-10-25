@@ -98,7 +98,7 @@ pub async fn wait(ticket: UpdateTicket, limit: Duration) -> UpdateOutcome;
 
 ### Overrides and tests (Open question 8)
 
-- When the agent's override variable (`program_env_var()`) is set, `plan` returns `Skip(SkipReason::Override)`: the program is a test shim (`RUSTLING_TULIP_CLAUDE` points at `tools/e2e/fake-claude/fake-claude.cmd` in the live tier, `apps/native/tests/support/live.rs`) or a build the user chose. So the e2e tiers never touch the network and never see a delay.
+- When the agent's override variable (`program_env_var()`) is set, `plan` returns `Skip(SkipReason::Override)`: the program is a test shim (`RUSTLING_TULIP_CLAUDE` points at `crates/agents/claude/fake/fake-claude.cmd` in the live tier, `apps/native/tests/support/live.rs`) or a build the user chose. So the e2e tiers never touch the network and never see a delay.
 
 ### Protocol (additive, no bump)
 

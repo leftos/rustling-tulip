@@ -19,7 +19,7 @@ crates/agents/claude/   package agent-claude: the Claude plugin (ClaudeOptions a
 crates/agents/registry/ package agent-registry: the compiled-in plugin list (plugin(&AgentId), all(), descriptors(), default_agent())
 crates/tailnet/         Tailscale CLI wrapper (whois, whoami, status, cert) and the owner rule that decides which tailnet peers may connect (docs/plans/remote-access.md)
 apps/native/            binary = rustling-tulip-native (thin main.rs over a lib, rustling_tulip_native; depends on crates/tailnet for the host picker's peer scan): GPUI + alacritty_terminal desktop client (see docs/native-client.md); tests/ui/ (one test binary, a module per spec) drive RootView::with_transport against a scripted fake daemon
-tools/e2e/fake-claude/  fake-claude CLI shim used by the native e2e tier
+crates/agents/claude/fake/ fake-claude CLI shim the Claude plugin hands the native e2e tier through fake_cli
 tools/e2e/fake-tailscale/ fake `tailscale` CLI shim (whoami, whois, status, cert from a JSON state file) used by the live tier's remote specs
 docs/architecture.md    components, what the product does, and a task index: which files to read, in order, for each kind of change
 docs/native-client.md   the native client's settled design decisions
@@ -109,7 +109,7 @@ The native client has three test tiers:
 
 To look at a UI change, run `.\rt.ps1 native-shot <view>` (`main`, `main-compact` for the sidebar's Compact leaves, `source-control`, `diff`, `settings`, `settings-claude`, `spawn`, `viewer`, `viewer-md`): it writes a PNG of the real client window over a scripted fake daemon (`apps/native/examples/shot.rs`) to `.tmp\shots\` and prints its path; Read the PNG, and show the user before and after shots for any visual choice.
 
-The `tools/e2e/fake-claude/` shim (`fake-claude.cmd` + `index.mjs`) replaces the real CLI in the e2e tier. It is wired in via the `RUSTLING_TULIP_CLAUDE` environment variable — the daemon path-resolves the CLI binary from that var at spawn time.
+The `crates/agents/claude/fake/` shim (`fake-claude.cmd` or `fake-claude.sh`, plus `index.mjs`) replaces the real CLI in the e2e tier. The plugin returns it from `Agent::fake_cli` (`agent_api::FakeCli`, feature `test-support`), and the live harness (`apps/native/tests/support/live.rs`) sets each registered agent's override variable (`program_env_var()`, `RUSTLING_TULIP_CLAUDE` for Claude) to its fake through `agent-registry`, so the daemon path-resolves the CLI from that variable at spawn time. It also points the plugin's home variable at `<root>/<agent id>-home` and puts the plugin's stub name first on `PATH`; a registered plugin with no fake panics.
 
 The `tools/e2e/fake-tailscale/` shim (`fake-tailscale.cmd`, `.sh` and `index.mjs`, see its README) answers `whoami`, `whois`, `status` and `cert` from the JSON state file named by `RUSTLING_TULIP_FAKE_TAILSCALE_STATE`; it is wired in through `RUSTLING_TULIP_TAILSCALE`.
 

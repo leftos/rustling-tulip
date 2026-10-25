@@ -116,7 +116,7 @@ Methods with an obvious "does nothing" answer (`passthrough_vars`, `hook_plan`, 
 | Shell resume | `shell_resume` | Called after the shell spawn wrote the plugin's hook files; returns the final command to type, `Err` to refuse (a DeepSeek entry), or `Ok(None)` for an agent without one | `shell_request` and `shell_allowed` (`history.rs`), `prepare_shell_resume` (`server/spawn.rs`) |
 | Import | `import_rev`, `import_tracer_run` | The importer offers each tracer log to every plugin and stamps the plugin's revision; the first `Some` becomes the entry, else the app's shell rule applies | `entry_from_tracer_log` (`history.rs:616-676`), `imported_provider`, `model_arg`, the app-wide `IMPORT_REV` (`history.rs:56`) |
 | Liveness | `liveness_tokens` | The orphan check's fallback for a sidecar with no `program_name` | `orphan.rs:417-423` |
-| Fake CLI | `fake_cli` | The live harness points each plugin's override at its fake | `tools/e2e/fake-claude/`, `apps/native/tests/support/live.rs` |
+| Fake CLI | `fake_cli` | The live harness points each plugin's override at its fake | `crates/agents/claude/fake/`, `apps/native/tests/support/live.rs` |
 
 The context and result types, all in `agent-api`:
 
@@ -322,7 +322,7 @@ Every proof runs as `pwsh -NoProfile -File tools/gate.ps1 run … -- cargo nexte
   AP.8d drew the option rows from the descriptor's `settings: true` fields. AP.8e made one tab per listed agent (each with its launch command, drafts and pending applies per agent), a session with no name of its own shows its agent's tag, and `claude_compat.rs` is deleted.
 
   Files: `settings_view.rs`, `agent_options.rs`, `agent_options_view.rs`, `lib.rs`, `sidebar.rs`, `sidebar_view.rs`, `grid_view.rs`, `term_input.rs`, `recover.rs`, `recover_view.rs`, `quit.rs`, `notify.rs`, `repo_remove.rs`, `source_control_view.rs`, `examples/shot.rs`. Proof: `--test ui ui_settings`, `ui_panes`, `ui_sidebar`, `ui_recover`, `ui_terminal`; before and after `.\rt.ps1 native-shot settings` and `spawn`.
-- [ ] **AP.9 Fake CLI, the seam check, docs.** `tools/e2e/fake-claude/` moves to `crates/agents/claude/fake/` behind `fake_cli`; `live.rs` sets each registered plugin's override to its fake through `agent-registry`; the UI fixtures holding `"agent": "claude"` (inventory group 8, ten files) use `test-agent`; non-behaviour hits are renamed or allow-listed (Testing); `tools/check-agent-names.ps1`, its allow file and its prek hook; the docs below.
+- [ ] **AP.9 Fake CLI, the seam check, docs.** Done: `crates/agents/claude/fake/` holds the fake behind `fake_cli`, and `live.rs` sets each registered plugin's override to its fake through `agent-registry`. Open: the UI fixtures holding `"agent": "claude"` (inventory group 8, ten files) use `test-agent`; non-behaviour hits are renamed or allow-listed (Testing); `tools/check-agent-names.ps1`, its allow file and its prek hook; the docs below.
 
   Files: the fake (moved), `live.rs`, `tests/support/mod.rs`, the ten fixture files, the test keys in `env_secrets.rs`, `pty.rs`, `tracer_client.rs` and `protocol/src/env_rows.rs`, `tools/check-agent-names.ps1`, `tools/agent-names-allow.txt`, `prek.toml`, `tools/test-map.json`, `docs/architecture.md`, CLAUDE.md, `docs/native-client.md`, README glossary.
 
@@ -340,7 +340,7 @@ The glossary gains Agent plugin, Agent descriptor, Option schema and Seam check;
 
 **App tests** use `agent-api`'s `TestAgent` (an id, a schema, scripted argv, hook mapping and conversation plans), so daemon and client tests prove the generic paths, the pre-create runner and the discovery poller included, without naming Claude. Claude-specific daemon assertions (DeepSeek routing, `--settings`, `--resume`) move into `agent-claude`.
 
-**The fake CLI.** Each plugin ships its own fake beside it (`crates/agents/claude/fake/`, today's `index.mjs` and `.cmd`), returned by `fake_cli` under `test-support`. The live harness iterates `agent-registry` and sets each plugin's `program_env_var` to its fake, so a later plugin brings its own fake without touching the harness. The live specs name "the first registered agent", never Claude.
+**The fake CLI.** Each plugin ships its own fake beside it (`crates/agents/claude/fake/`, `index.mjs` with `.cmd` and `.sh` shims), returned by `fake_cli` under `test-support`. The live harness iterates `agent-registry` and sets each plugin's `program_env_var` to its fake, so a later plugin brings its own fake without touching the harness. The live specs name "the first registered agent", never Claude.
 
 **The seam check.** `tools/check-agent-names.ps1`: `rg -i` for `claude|anthropic|deepseek` over `crates/`, `apps/` and `tools/`, excluding the agent crates under `crates/agents/` other than `api` and `registry`.
 

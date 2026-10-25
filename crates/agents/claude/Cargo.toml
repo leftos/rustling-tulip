@@ -15,6 +15,10 @@ doctest = false
 [lints]
 workspace = true
 
+[features]
+# The plugin's fake CLI (`fake/`), handed to the live test tier by `fake_cli`.
+test-support = ["agent-api/test-support"]
+
 [dependencies]
 agent-api = { workspace = true }
 chrono = { workspace = true }

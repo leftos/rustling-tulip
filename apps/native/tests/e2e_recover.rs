@@ -1,5 +1,5 @@
 //! End-to-end spec for session recovery: a real daemon isolated under
-//! `.tmp/native-e2e/`, its real tracers and `tools/e2e/fake-claude`. A
+//! `.tmp/native-e2e/`, its real tracers and `crates/agents/claude/fake`. A
 //! session's tracer is killed, the daemon records the session as lost, and
 //! the history recovers it as Claude resuming its conversation and as a
 //! plain shell typing `claude --settings … --resume`, which runs the
@@ -27,8 +27,8 @@ use protocol::{
 use serde_json::{Value, json};
 use support::Harness;
 use support::live::{
-    CLAUDE_STUB_MARKER, LiveClient, LiveDaemon, kill_process, processes_under,
-    spawn_claude_in_place, spawn_shell,
+    LiveClient, LiveDaemon, STUB_MARKER, kill_process, processes_under,
+    spawn_default_agent_in_place, spawn_shell,
 };
 
 /// The deadline of every wait in these specs. It is a hang guard: a passing
@@ -314,7 +314,7 @@ fn encode_project_dir(cwd: &str) -> String {
 /// A two-line transcript of conversation `id` recorded in `cwd`.
 fn write_transcript(daemon: &LiveDaemon, cwd: &str, id: &str) {
     let dir = daemon
-        .claude_config_dir()
+        .agent_home(&agent_registry::default_agent())
         .join("projects")
         .join(encode_project_dir(cwd));
     std::fs::create_dir_all(&dir).expect("create the transcript's project folder");
@@ -526,7 +526,7 @@ fn recover_claude_session(
     daemon: &LiveDaemon,
     repo_id: &str,
 ) {
-    client.send(spawn_claude_in_place(repo_id));
+    client.send(spawn_default_agent_in_place(repo_id));
     let session = wait_snapshot(h, client, "the claude session's snapshot", |s| {
         s.mode == SessionMode::Interactive
     });
@@ -648,9 +648,9 @@ fn recover_shell_session(
         .join("sessions")
         .join(&new_id)
         .join("hook-settings.json");
-    wait_scrollback_contains(h, client, &new_id, CLAUDE_STUB_MARKER);
+    wait_scrollback_contains(h, client, &new_id, STUB_MARKER);
     let expected = squeeze(&format!(
-        "{CLAUDE_STUB_MARKER} --settings {} --resume {SHELL_CONVERSATION}",
+        "{STUB_MARKER} --settings {} --resume {SHELL_CONVERSATION}",
         settings.display()
     ));
     let deadline = Instant::now() + HANG_GUARD;
@@ -1178,7 +1178,7 @@ fn spawn_claude_with_transcript(
     name: &str,
     others: &[LostClaude],
 ) -> LostClaude {
-    client.send(spawn_claude_in_place(repo_id));
+    client.send(spawn_default_agent_in_place(repo_id));
     let session = wait_snapshot(h, client, "a new claude session's snapshot", |s| {
         s.mode == SessionMode::Interactive && others.iter().all(|other| other.id != s.id)
     });

@@ -16,7 +16,7 @@
                  build output older than 14 days out of target/ (needs
                  cargo-sweep; a build without it skips the sweep).
       setup      Install/check Windows build prerequisites via winget:
-                 Git, Node.js LTS (fake-claude needs it), Rust/rustup,
+                 Git, Node.js LTS (the agents' fake CLIs need it), Rust/rustup,
                  Visual Studio C++ Build Tools, cargo-sweep and
                  cargo-nextest.
       stop       Kill any running daemon and tracer process(es) and clean
@@ -44,8 +44,9 @@
                  and tracer, then run the native client's end-to-end specs
                  (`e2e_live`, `e2e_recover`, `e2e_remote`, under nextest
                  `--run-ignored only`, test-release profile) against a real
-                 daemon isolated under `.tmp\native-e2e\`. The fake-claude
-                 and fake-tailscale specs need `node` on PATH. Refuses
+                 daemon isolated under `.tmp\native-e2e\`. The agents' fake
+                 CLIs (crates\agents\claude\fake) and fake-tailscale need
+                 `node` on PATH. Refuses
                  -Release: the test-only daemon stays in test-release.
       native-smoke
                  Build the daemon and tracer, then run the native client's
