@@ -45,6 +45,12 @@ winget install NSIS.NSIS
 
 `makensis` runs with `/WX`, so any NSIS warning fails the build.
 
+## App icon
+
+`icon.ico` is the app icon for the installer, the uninstaller and the client exe: `apps/native/build.rs` embeds it as icon resource 1 (`apps/native/app.rc`), which GPUI loads for the window and taskbar and which Explorer, the shortcuts and the Add/Remove Programs entry show.
+
+It is built from the SVGs in `icon/`: `icon.svg` for 24 px and up, and `icon-16.svg`, a glyph drawn for 16 px. After changing either, rebuild it from the repo root with `uv run --script tools/installer/icon/build_icon.py` and commit the `.ico`. The design and the concepts it was picked from are in `docs/plans/canvases/app-icon/`.
+
 ## Hand test
 
 1. Run the setup exe with the default options. It installs under `%LOCALAPPDATA%\Programs\rustling-tulip`, adds the Start menu entry and the autostart value, and offers to run the client; it connects to a daemon.

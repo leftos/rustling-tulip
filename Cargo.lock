@@ -5341,6 +5341,7 @@ dependencies = [
  "base64",
  "chrono",
  "daemon-client",
+ "embed-resource",
  "encoding_rs",
  "futures",
  "gpui",

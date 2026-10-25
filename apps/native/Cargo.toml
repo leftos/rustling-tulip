@@ -80,6 +80,10 @@ windows = { version = "0.61", features = [
     "UI_Notifications",
 ] }
 
+[build-dependencies]
+# Embeds the app icon (build.rs); the version gpui's own build script already uses.
+embed-resource = "3.0.9"
+
 [dev-dependencies]
 # The agent options model's conformance check against `validate`, over the
 # test agent's descriptor.
