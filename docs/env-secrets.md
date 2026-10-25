@@ -1,6 +1,6 @@
 # Secrets in environment rows
 
-A secret typed into the spawn dialog's environment rows is sealed: the daemon moves its value into Windows Credential Manager and keeps only a reference in every stored file and every echo. How the pieces fit: [architecture.md](./architecture.md); the dialog's side: [native-client.md](./native-client.md). Terms (secret reference, sealing, secret row, env reference) are in the README glossary.
+A secret typed into the spawn dialog's environment rows is sealed: the daemon moves its value into Windows Credential Manager and keeps only a reference in every stored file and every echo. How the pieces fit: [architecture.md](./architecture.md); the dialog's side: [native-client.md](./native-client.md). Terms (secret reference, sealing, secret row, env reference) are in the [glossary](./README.md#glossary).
 
 ## Rows and references
 

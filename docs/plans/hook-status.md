@@ -1,6 +1,6 @@
 # Hook-reported agent status
 
-Delivered; its durable decisions now live in the docs below (`docs/architecture.md`, `CLAUDE.md`, `README.md`), and this file stays while RT-25 links it.
+Delivered; its durable decisions now live in the docs below (`docs/architecture.md`, `CLAUDE.md`, `docs/README.md`), and this file stays while RT-25 links it.
 
 Take a session's working / awaiting input / idle status from the agent's own hooks instead of guessing it from PTY output, and read the screen where no hook reports (`crates/daemon/src/pty_state.rs`, [screen-status.md](./screen-status.md)). Claude Code is hooked through a settings file, and an opted-in Codex session through the `-c` tables its spawn passes. Index line: [MAIN.md](./MAIN.md), Wave 2. Background and VelaTerm's prior art were in [borrowed-ideas.md](./borrowed-ideas.md) until that entry was removed on delivery.
 

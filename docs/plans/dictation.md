@@ -87,4 +87,4 @@ Item ids are DI.1, DI.2, … (dictation). The parent issue is RT-75.
 - [ ] **DI.5 (RT-81) Remote check.** With Phase 6 in place, run the native client in remote mode against a daemon on another machine and confirm dictated text reaches the remote session and the host's microphone is never opened. Recorded in the RT-34 verification notes.
 - [ ] **DI.6 (RT-82) macOS recognizer.** `SFSpeechRecognizer` behind the same trait, and right Option as the key, with the macOS client work.
 - [ ] **MA11 (RT-83) Phone dictation.** See "Design (mobile app)" above and the MA11 line in [mobile-app.md](./mobile-app.md).
-- [ ] **DI.7 (RT-79) Docs.** `docs/native-client.md` (the dictation box, the key, the error states); README glossary already has the dictation box.
+- [ ] **DI.7 (RT-79) Docs.** `docs/native-client.md` (the dictation box, the key, the error states); `docs/README.md` glossary already has the dictation box.

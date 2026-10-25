@@ -21,6 +21,8 @@ crates/tailnet/         Tailscale CLI wrapper (whois, whoami, status, cert) and 
 apps/native/            binary = rustling-tulip-native (thin main.rs over a lib, rustling_tulip_native; depends on crates/tailnet for the host picker's peer scan): GPUI + alacritty_terminal desktop client (see docs/native-client.md); tests/ui/ (one test binary, a module per spec) drive RootView::with_transport against a scripted fake daemon
 crates/agents/claude/fake/ fake-claude CLI shim the Claude plugin hands the native e2e tier through fake_cli
 tools/e2e/fake-tailscale/ fake `tailscale` CLI shim (whoami, whois, status, cert from a JSON state file) used by the live tier's remote specs
+README.md               the user-facing feature showcase and install steps, refreshed each release (docs/release.md)
+docs/README.md          the docs start page: one line per doc under docs/, the developer layout, build and run notes, and the glossary
 docs/architecture.md    components, what the product does, and a task index: which files to read, in order, for each kind of change
 docs/native-client.md   the native client's settled design decisions
 docs/env-secrets.md     how secret env rows are sealed into Credential Manager, and what is and isn't protected

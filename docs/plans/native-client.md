@@ -102,7 +102,7 @@ Read from `~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gpui-0.2.2/src
 
 ### P5.12 Phase 5 docs
 
-- **Does** (orchestrator): `docs/native-client.md` gains a "Windows and drag-and-drop" section from these rulings and the answers below; CLAUDE.md's native-ui.json line gains the pop-out list; the README glossary gains pop-out, edge overlay and outer band; the parity lines are ticked; this section is deleted. The hand-test list: drags with a real mouse (threshold, overlays, Esc), pop-outs on a second monitor, a restart with pop-outs open.
+- **Does** (orchestrator): `docs/native-client.md` gains a "Windows and drag-and-drop" section from these rulings and the answers below; CLAUDE.md's native-ui.json line gains the pop-out list; the `docs/README.md` glossary gains pop-out, edge overlay and outer band; the parity lines are ticked; this section is deleted. The hand-test list: drags with a real mouse (threshold, overlays, Esc), pop-outs on a second monitor, a restart with pop-outs open.
 - **Needs**: P5.1–P5.11.
 
 ### Open questions
