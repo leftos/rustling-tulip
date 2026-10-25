@@ -184,18 +184,34 @@ pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> 
             claim,
         } => {
             if let Some(rec) = hub.sessions.get(&session_id) {
-                // The gate, the flag and both resizes happen under one record
-                // lock, so two clients' resizes never interleave. The PTY
+                // The gate, the applied size and both resizes happen under one
+                // record lock, so two clients' resizes never interleave. The PTY
                 // resize is a channel send, and the screen lock is a leaf
                 // that is never held while waiting on the record.
                 let mut guard = crate::sync::lock(&rec);
-                if claim || !guard.size_set {
-                    guard.size_set = true;
-                    if let Some(pty) = &guard.pty {
-                        pty.resize(cols, rows);
-                    }
-                    if let Some(screen) = &guard.screen {
-                        crate::sync::lock(screen).resize(cols, rows);
+                if claim || guard.applied_size.is_none() {
+                    if guard.applied_size == Some((cols, rows)) {
+                        // ConPTY answers every resize, an unchanged one
+                        // included, with a full repaint of the screen.
+                        tracing::debug!(
+                            session_id = %session_id,
+                            cols,
+                            rows,
+                            "resize skipped: the session is already at this size"
+                        );
+                    } else {
+                        if let Some(pty) = &guard.pty {
+                            pty.resize(cols, rows);
+                        }
+                        if let Some(screen) = &guard.screen {
+                            crate::sync::lock(screen).resize(cols, rows);
+                        }
+                        // Only a size the PTY was sent is remembered: a record
+                        // without one yet must still forward a later claim to
+                        // the PTY once the spawn attaches it.
+                        if guard.pty.is_some() {
+                            guard.applied_size = Some((cols, rows));
+                        }
                     }
                 } else {
                     tracing::debug!(
@@ -1347,6 +1363,38 @@ mod tests {
         }
     }
 
+    /// Gives `s1` a PTY with no process behind it, so a resize has somewhere to
+    /// go.
+    fn attach_test_pty(hub: &Hub) {
+        #[derive(Debug)]
+        struct NoopKiller;
+        impl portable_pty::ChildKiller for NoopKiller {
+            fn kill(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+            fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+                Box::new(NoopKiller)
+            }
+        }
+        let (output, lifecycle_output) = crate::pty::PtyOutput::channel(16);
+        let (input_tx, _input_rx) = mpsc::unbounded_channel();
+        let (resize_tx, _resize_rx) = mpsc::unbounded_channel();
+        let (_exit_tx, exit_rx) = tokio::sync::oneshot::channel();
+        let pty = Arc::new(crate::pty::PtyHandle::from_parts(
+            crate::pty::PtyHandleParts {
+                output,
+                lifecycle_output,
+                input_tx,
+                resize_tx,
+                exit_rx,
+                killer: Box::new(NoopKiller),
+                pid: None,
+            },
+        ));
+        hub.sessions
+            .update("s1", |rec| rec.pty = Some(Arc::clone(&pty)));
+    }
+
     /// The size `s1`'s screen is at.
     fn screen_size(hub: &Hub) -> (u16, u16) {
         let rec = hub.sessions.get("s1").expect("s1 is registered");
@@ -1371,6 +1419,7 @@ mod tests {
     #[tokio::test]
     async fn unclaimed_resize_is_ignored_once_a_client_has_sized_the_session() {
         let (hub, _scratch) = hub_with_screen("unclaimed-resize");
+        attach_test_pty(&hub);
         dispatch_silently(&hub, resize(100, 30, false)).await;
         dispatch_silently(&hub, resize(60, 20, false)).await;
         assert_eq!(
@@ -1380,6 +1429,7 @@ mod tests {
         );
 
         let (hub, _scratch) = hub_with_screen("unclaimed-after-claim");
+        attach_test_pty(&hub);
         dispatch_silently(&hub, resize(100, 30, true)).await;
         dispatch_silently(&hub, resize(60, 20, false)).await;
         assert_eq!(
@@ -1390,13 +1440,107 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_claimed_resize_always_applies() {
+    async fn a_claimed_resize_to_a_new_size_applies() {
         let (hub, _scratch) = hub_with_screen("claimed-resize");
         dispatch_silently(&hub, resize(100, 30, false)).await;
         dispatch_silently(&hub, resize(60, 20, true)).await;
         assert_eq!(screen_size(&hub), (60, 20), "a claim takes the size");
         dispatch_silently(&hub, resize(90, 25, true)).await;
         assert_eq!(screen_size(&hub), (90, 25), "another claim takes it again");
+    }
+
+    /// A claimed resize to the size the session's PTY already has sends nothing
+    /// to the PTY: `ConPTY` answers every resize, an unchanged one included, with a
+    /// full repaint of the screen.
+    #[tokio::test]
+    async fn a_claimed_resize_to_the_applied_size_does_not_resize_the_pty() {
+        #[derive(Debug)]
+        struct NoopKiller;
+        impl portable_pty::ChildKiller for NoopKiller {
+            fn kill(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+            fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+                Box::new(NoopKiller)
+            }
+        }
+        let (hub, _scratch) = hub_with_screen("same-size-claim");
+        let (output, lifecycle_output) = crate::pty::PtyOutput::channel(16);
+        let (input_tx, _input_rx) = mpsc::unbounded_channel();
+        let (resize_tx, mut resize_rx) = mpsc::unbounded_channel();
+        let (_exit_tx, exit_rx) = tokio::sync::oneshot::channel();
+        let pty = Arc::new(crate::pty::PtyHandle::from_parts(
+            crate::pty::PtyHandleParts {
+                output,
+                lifecycle_output,
+                input_tx,
+                resize_tx,
+                exit_rx,
+                killer: Box::new(NoopKiller),
+                pid: None,
+            },
+        ));
+        hub.sessions
+            .update("s1", |rec| rec.pty = Some(Arc::clone(&pty)));
+        dispatch_silently(&hub, resize(77, 27, false)).await;
+        dispatch_silently(&hub, resize(77, 27, true)).await;
+        assert_eq!(
+            resize_rx.try_recv().ok(),
+            Some((77, 27)),
+            "the first resize sizes the PTY"
+        );
+        assert!(
+            resize_rx.try_recv().is_err(),
+            "a claim at the applied size sends no second resize"
+        );
+        dispatch_silently(&hub, resize(90, 25, true)).await;
+        assert_eq!(
+            resize_rx.try_recv().ok(),
+            Some((90, 25)),
+            "a claim at a new size still applies"
+        );
+    }
+
+    /// A claimed resize before the session has a PTY sizes the screen but is not
+    /// remembered as applied, so a later claim at that size still reaches the
+    /// PTY once it exists.
+    #[tokio::test]
+    async fn a_resize_before_the_pty_exists_does_not_mark_the_size_applied() {
+        #[derive(Debug)]
+        struct NoopKiller;
+        impl portable_pty::ChildKiller for NoopKiller {
+            fn kill(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+            fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+                Box::new(NoopKiller)
+            }
+        }
+        let (hub, _scratch) = hub_with_screen("no-pty-claim");
+        dispatch_silently(&hub, resize(77, 27, true)).await;
+        let (output, lifecycle_output) = crate::pty::PtyOutput::channel(16);
+        let (input_tx, _input_rx) = mpsc::unbounded_channel();
+        let (resize_tx, mut resize_rx) = mpsc::unbounded_channel();
+        let (_exit_tx, exit_rx) = tokio::sync::oneshot::channel();
+        let pty = Arc::new(crate::pty::PtyHandle::from_parts(
+            crate::pty::PtyHandleParts {
+                output,
+                lifecycle_output,
+                input_tx,
+                resize_tx,
+                exit_rx,
+                killer: Box::new(NoopKiller),
+                pid: None,
+            },
+        ));
+        hub.sessions
+            .update("s1", |rec| rec.pty = Some(Arc::clone(&pty)));
+        dispatch_silently(&hub, resize(77, 27, true)).await;
+        assert_eq!(
+            resize_rx.try_recv().ok(),
+            Some((77, 27)),
+            "a claim at that size reaches the PTY once it exists"
+        );
     }
 
     /// The owner's key leaves a hook-reported prompt at once, with no settle

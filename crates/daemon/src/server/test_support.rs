@@ -277,7 +277,7 @@ pub(super) fn idle_record(id: &str) -> SessionRecord {
         agent_in_shell: false,
         shell_label: None,
         agent_exit_announced: false,
-        size_set: false,
+        applied_size: None,
         hook_agent: None,
     }
 }

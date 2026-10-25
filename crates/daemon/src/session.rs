@@ -251,12 +251,12 @@ pub struct SessionRecord {
     /// session, since an agent session maps with [`Self::agent`]; a plain
     /// shell without one maps no hook event. Mirrored into the sidecar.
     pub hook_agent: Option<AgentId>,
-    /// True once a client's `Resize` has sized this session. Until then any
-    /// `Resize` applies; after it only a claimed one does, so a client
-    /// without recent input cannot take the size from the one typing.
-    /// Runtime-only: every new or rebuilt record starts false, and it is
-    /// never mirrored into the sidecar.
-    pub size_set: bool,
+    /// The cols and rows last applied to this session's PTY. Until a client's
+    /// `Resize` has sized this session it is `None`, and any `Resize` applies;
+    /// after that only a claimed one does, so a client without recent input
+    /// cannot take the size from the one typing. Runtime-only: every new or
+    /// rebuilt record starts `None`, and it is never mirrored into the sidecar.
+    pub applied_size: Option<(u16, u16)>,
 }
 
 /// The agent a record names for a session that runs none: a plain shell, the
@@ -1094,7 +1094,7 @@ impl SessionRegistry {
             agent_in_shell: meta.agent_in_shell,
             shell_label: meta.shell_label.clone(),
             agent_exit_announced: false,
-            size_set: false,
+            applied_size: None,
             hook_agent: meta.hook_agent.clone(),
         };
         push_recent_action(&mut record, "reattached after daemon restart".to_string());
@@ -1174,7 +1174,7 @@ impl SessionRegistry {
             agent_in_shell: meta.agent_in_shell,
             shell_label: meta.shell_label.clone(),
             agent_exit_announced: false,
-            size_set: false,
+            applied_size: None,
             hook_agent: meta.hook_agent.clone(),
         };
         push_recent_action(
@@ -1231,7 +1231,7 @@ impl SessionRegistry {
             agent_in_shell: meta.agent_in_shell,
             shell_label: meta.shell_label.clone(),
             agent_exit_announced: false,
-            size_set: false,
+            applied_size: None,
             hook_agent: meta.hook_agent.clone(),
         };
         push_recent_action(
@@ -1312,7 +1312,7 @@ mod tests {
             agent_in_shell: false,
             shell_label: None,
             agent_exit_announced: false,
-            size_set: false,
+            applied_size: None,
             hook_agent: None,
         }
     }
