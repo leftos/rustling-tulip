@@ -243,7 +243,7 @@ pub use crate::settings_view::LaunchCommandRow;
 pub use crate::shell_marks::{ShellDot, ShellStatus};
 pub use crate::sidebar::{
     Activity, Container, ContainerKind, DEFAULT_WIDTH as SIDEBAR_DEFAULT_WIDTH, DETACHED_BANNER,
-    Leaf, LeafState, SidebarView, resume_all_label,
+    Leaf, LeafState, RepoFilter, SidebarView, resume_all_label,
 };
 pub use crate::source_control::{Bucket, ScKey};
 pub use crate::source_control_view::{ScContext, ScPanel, ScPickerRow, ScSectionRow};
@@ -1230,6 +1230,12 @@ impl RootView {
         self.sidebar.sidebar_view()
     }
 
+    /// Which repo and workspace rows the repos view shows.
+    #[must_use]
+    pub fn repo_filter(&self) -> RepoFilter {
+        self.sidebar.repo_filter()
+    }
+
     /// The container row the sidebar's keys act on, if any.
     #[must_use]
     pub fn sidebar_row_focus(&self) -> Option<&str> {
@@ -1258,6 +1264,16 @@ impl RootView {
     /// changed.
     pub(crate) fn set_sidebar_view(&mut self, view: SidebarView, cx: &mut Context<Self>) {
         if self.sidebar.set_sidebar_view(view) {
+            self.row_focus = None;
+            self.save_ui();
+        }
+        cx.notify();
+    }
+
+    /// Shows every repo and workspace row, or only the active ones, saving
+    /// the choice when it changed.
+    pub(crate) fn set_repo_filter(&mut self, filter: RepoFilter, cx: &mut Context<Self>) {
+        if self.sidebar.set_repo_filter(filter) {
             self.row_focus = None;
             self.save_ui();
         }

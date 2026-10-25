@@ -371,6 +371,44 @@ fn drag_under_a_sort_refuses_a_drop_into_another_group(cx: &mut TestAppContext) 
 }
 
 #[gpui::test]
+fn drag_under_the_active_filter_keeps_hidden_repos_in_the_manual_order(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    std::fs::write(
+        dir.path().join("native-ui.json"),
+        r#"{ "repo_filter": "active", "general": { "repo_sort": "manual" } }"#,
+    )
+    .expect("write the layout");
+    let fixture = Fixture {
+        repos: vec![repo("A", "D:\\A"), repo("B", "D:\\B"), repo("C", "D:\\C")],
+        sessions: vec![
+            session("a").in_repo("A").build(),
+            session("c").in_repo("C").build(),
+        ],
+        tabs: vec![tab("t1", &pane("p1", None))],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.sent();
+    assert_eq!(shown(&mut h), ["repo:A", "repo:C"], "B has no live session");
+
+    let from = on_row(&mut h, "container-repo:C", 0.5);
+    let to = on_row(&mut h, "container-repo:A", 0.2);
+    h.start_drag(from);
+    assert!(h.dragging(), "a repo container drags");
+    h.drag_to(to);
+    assert_eq!(mark(&mut h), Some((header("repo:A"), Side::Before)));
+    h.release(to);
+
+    assert_eq!(
+        wire(&reorders(&mut h)),
+        wire(&[ClientMessage::ReorderContainers {
+            ordered: vec![repo_ref("C"), repo_ref("A"), repo_ref("B")],
+        }]),
+        "the hidden repo keeps its slot after the row it followed"
+    );
+}
+
+#[gpui::test]
 fn shell_and_dir_containers_do_not_drag_but_their_leaves_do(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &fixture());

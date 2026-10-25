@@ -32,7 +32,7 @@ use crate::session_menu::{
     menu_separator,
 };
 use crate::sidebar::{
-    Activity, Container, ContainerKind, DETACHED_BANNER, Leaf, LeafDensity, RepoSort,
+    Activity, Container, ContainerKind, DETACHED_BANNER, Leaf, LeafDensity, RepoFilter, RepoSort,
     SessionsUnderRepos, SidebarView, can_attach, chip_tip,
 };
 use crate::spawn_view::SpawnEntry;
@@ -72,6 +72,9 @@ const SUBLINE_INDENT: f32 = 20.0;
 const SUBLINE_TEXT_SIZE: f32 = 11.5;
 /// The gap between the subline's text and chips.
 const SUBLINE_GAP: f32 = 8.0;
+/// The line the sessions body shows when the Active filter leaves no repo or
+/// workspace row.
+const NO_ACTIVE_REPOS: &str = "No active repos or workspaces";
 /// The widest a `T:<name>` chip grows before its name truncates.
 const PILL_MAX_WIDTH: f32 = 96.0;
 
@@ -138,18 +141,19 @@ impl RootView {
         // sessions still list under it; "No sessions" is for a registry
         // with nothing to list.
         let no_repos = self.no_repos_yet();
-        let body = body.when(no_repos, |body| {
-            body.child(no_repos_note(self.add_repo_gate(), self.conn.target(), cx))
-        });
+        // The Active filter's line stands where the repo rows would, above the
+        // shell, folder and Detached rows it keeps.
+        let filter_empty = self.sidebar.active_filter_empty(&containers);
+        let body = body
+            .when(no_repos, |body| {
+                body.child(no_repos_note(self.add_repo_gate(), self.conn.target(), cx))
+            })
+            .when(filter_empty, |body| {
+                body.child(body_note(Some("sidebar-filter-empty"), NO_ACTIVE_REPOS))
+            });
         let body = if containers.is_empty() {
-            body.when(!no_repos, |body| {
-                body.child(
-                    div()
-                        .px(px(ROW_PADDING))
-                        .py(px(6.0))
-                        .text_color(gpui::rgb(MUTED))
-                        .child("No sessions"),
-                )
+            body.when(!no_repos && !filter_empty, |body| {
+                body.child(body_note(None, "No sessions"))
             })
         } else {
             // The ring and the row keys follow the keyboard: a row the
@@ -209,7 +213,11 @@ impl RootView {
             .bg(gpui::rgb(PANEL_BG))
             .text_size(px(UI_TEXT_SIZE))
             .text_color(gpui::rgb(TEXT))
-            .child(header(self.sidebar.sidebar_view(), cx))
+            .child(header(
+                self.sidebar.sidebar_view(),
+                self.sidebar.repo_filter(),
+                cx,
+            ))
             .child(self.toolbar(window, cx))
             .child(body)
     }
@@ -603,31 +611,72 @@ fn add_shell(quick_shell_dir: Option<&str>, cx: &mut Context<RootView>) -> State
         .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.quick_shell(cx)))
 }
 
-/// The panel's title and the Repos / Tabs grouping toggle.
-fn header(view: SidebarView, cx: &mut Context<RootView>) -> Div {
-    let choices = [
-        (
-            SidebarView::Repos,
-            "Repos",
-            "Group by workspace/repo",
-            "sidebar-view-repos",
-        ),
-        (
-            SidebarView::Tabs,
-            "Tabs",
-            "Group by tab",
-            "sidebar-view-tabs",
-        ),
-    ];
-    let segments = choices.map(|(choice, label, tip, selector)| {
-        let active = choice == view;
+/// A muted line in the sessions body; `selector` tags it for the specs.
+fn body_note(selector: Option<&'static str>, text: &'static str) -> impl IntoElement {
+    div()
+        .when_some(selector, |line, selector| {
+            line.debug_selector(move || selector.to_owned())
+        })
+        .px(px(ROW_PADDING))
+        .py(px(6.0))
+        .text_color(gpui::rgb(MUTED))
+        .child(text)
+}
+
+/// One segment of a segmented control: the value it picks, its label, its
+/// hover text and the selector a spec finds it by.
+type Segment<C> = (C, &'static str, &'static str, &'static str);
+
+/// The All / Active row filter the repos view's header offers.
+const FILTER_CHOICES: [Segment<RepoFilter>; 2] = [
+    (
+        RepoFilter::All,
+        "All",
+        "Show every repo and workspace",
+        "sidebar-filter-all",
+    ),
+    (
+        RepoFilter::Active,
+        "Active",
+        "Show only the repos and workspaces a live session works in",
+        "sidebar-filter-active",
+    ),
+];
+
+/// The Repos / Tabs grouping toggle the header always offers.
+const VIEW_CHOICES: [Segment<SidebarView>; 2] = [
+    (
+        SidebarView::Repos,
+        "Repos",
+        "Group by workspace/repo",
+        "sidebar-view-repos",
+    ),
+    (
+        SidebarView::Tabs,
+        "Tabs",
+        "Group by tab",
+        "sidebar-view-tabs",
+    ),
+];
+
+/// The segmented control offering `choices`, the `current` one drawn as
+/// chosen, `pad` either side of each label.
+fn segmented<C: Copy + PartialEq + 'static>(
+    choices: &[Segment<C>],
+    current: C,
+    pad: f32,
+    cx: &mut Context<RootView>,
+    pick: fn(&mut RootView, C, &mut Context<RootView>),
+) -> Div {
+    let segments = choices.iter().map(|&(choice, label, tip, selector)| {
+        let active = choice == current;
         div()
             .id(selector)
-            .debug_selector(|| selector.to_owned())
+            .debug_selector(move || selector.to_owned())
             .flex()
             .items_center()
             .h(px(22.0))
-            .px(px(9.0))
+            .px(px(pad))
             .rounded(px(4.0))
             .text_size(px(11.5))
             .cursor_pointer()
@@ -644,15 +693,35 @@ fn header(view: SidebarView, cx: &mut Context<RootView>) -> Div {
                     .hover(|style| style.text_color(gpui::rgb(TEXT)))
             })
             .child(label)
-            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                this.set_sidebar_view(choice, cx);
-            }))
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| pick(this, choice, cx)))
+    });
+    div()
+        .flex()
+        .flex_none()
+        .p(px(2.0))
+        .rounded(px(6.0))
+        .bg(gpui::rgb(RAISED))
+        .children(segments)
+}
+
+/// The panel's title, the All / Active row filter the repos view gets and the
+/// Repos / Tabs grouping toggle.
+fn header(view: SidebarView, filter: RepoFilter, cx: &mut Context<RootView>) -> Div {
+    let filtering = view == SidebarView::Repos;
+    let pad = if filtering { 7.0 } else { 9.0 };
+    let filter_control = filtering.then(|| {
+        segmented(&FILTER_CHOICES, filter, pad, cx, |this, choice, cx| {
+            this.set_repo_filter(choice, cx);
+        })
+    });
+    let view_control = segmented(&VIEW_CHOICES, view, pad, cx, |this, choice, cx| {
+        this.set_sidebar_view(choice, cx);
     });
     div()
         .flex()
         .flex_none()
         .items_center()
-        .gap(px(8.0))
+        .gap(px(if filtering { 6.0 } else { 8.0 }))
         .h(px(44.0))
         .pl(px(14.0))
         .pr(px(10.0))
@@ -666,15 +735,8 @@ fn header(view: SidebarView, cx: &mut Context<RootView>) -> Div {
                 .text_color(gpui::rgb(TEXT))
                 .child("Sessions"),
         )
-        .child(
-            div()
-                .flex()
-                .flex_none()
-                .p(px(2.0))
-                .rounded(px(6.0))
-                .bg(gpui::rgb(RAISED))
-                .children(segments),
-        )
+        .children(filter_control)
+        .child(view_control)
 }
 
 /// The drag handle; a press starts a resize the root follows until release.
@@ -941,11 +1003,11 @@ impl RootView {
         }
     }
 
-    /// What a sidebar drop of `payload` at `side` of `row` sends. Under a
-    /// repo sort other than Manual, a workspace or repo dropped on another
-    /// one's header is refused unless both sort into the same group; the
-    /// line then comes from the shown order of that group, and the drop moves
-    /// the dragged one next to the target in the manual order.
+    /// What a sidebar drop of `payload` at `side` of `row` sends. A workspace
+    /// or repo dropped on another one's header moves in the full manual order,
+    /// so a row the Active filter hides keeps its place; under a repo sort
+    /// other than Manual the drop is refused unless both rows sort into the
+    /// same group.
     fn sidebar_drop_message(
         &self,
         payload: &DragPayload,
@@ -953,19 +1015,20 @@ impl RootView {
         side: Side,
     ) -> Option<ClientMessage> {
         let shown = self.sidebar_containers();
-        let sorted = self.sidebar.sidebar_view() == SidebarView::Repos
-            && self.sidebar.repo_sort() != RepoSort::Manual;
-        let (DragPayload::Container(dragged), SidebarRow::Container(target), true) =
-            (payload, row, sorted)
+        let (DragPayload::Container(dragged), SidebarRow::Container(target)) = (payload, row)
         else {
             return drag::sidebar_reorder(payload, &shown, row, side);
         };
-        let dragged_key = &shown
-            .iter()
-            .find(|c| drag::container_ref(c).as_ref() == Some(dragged))?
-            .key;
-        if !self.sidebar.same_sort_group(dragged_key, target) {
-            return None;
+        let sorted = self.sidebar.sidebar_view() == SidebarView::Repos
+            && self.sidebar.repo_sort() != RepoSort::Manual;
+        if sorted {
+            let dragged_key = &shown
+                .iter()
+                .find(|c| drag::container_ref(c).as_ref() == Some(dragged))?
+                .key;
+            if !self.sidebar.same_sort_group(dragged_key, target) {
+                return None;
+            }
         }
         drag::sidebar_reorder(payload, &shown, row, side)?;
         drag::sidebar_reorder(payload, &self.sidebar.containers(), row, side)

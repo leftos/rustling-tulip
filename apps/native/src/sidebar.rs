@@ -80,6 +80,19 @@ pub enum SidebarView {
     Repos,
 }
 
+/// Which repo and workspace rows the repos view shows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RepoFilter {
+    /// Only the ones a live session works in.
+    Active,
+    /// Every one of them; also what a value this build does not know loads
+    /// as (`serde(other)` must be the last variant).
+    #[default]
+    #[serde(other)]
+    All,
+}
+
 /// How much room a session leaf takes.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -390,6 +403,9 @@ pub struct UiState {
     /// How the sessions panel groups its sessions.
     #[serde(default)]
     pub sidebar_view: SidebarView,
+    /// Which repo and workspace rows the repos view shows.
+    #[serde(default)]
+    pub repo_filter: RepoFilter,
     pub collapsed_containers: BTreeSet<String>,
     /// The tab shown when the client last ran, restored when the daemon
     /// sends the tab list.
@@ -656,6 +672,7 @@ impl Default for UiState {
             sidebar_collapsed: false,
             activity: Activity::Sessions,
             sidebar_view: SidebarView::Repos,
+            repo_filter: RepoFilter::All,
             collapsed_containers: BTreeSet::new(),
             active_tab_id: None,
             quick_shell_dir: None,
@@ -894,10 +911,37 @@ impl SidebarModel {
 
     /// The repos view's containers in the order its rows show:
     /// [`Self::containers`], which keeps the manual order, sorted by the
-    /// chosen [`RepoSort`].
+    /// chosen [`RepoSort`] and, under [`RepoFilter::Active`], cut down to the
+    /// repo and workspace rows a live session works in or the Needs You list
+    /// shows.
     pub fn display_containers(&self) -> Vec<Container> {
         let active = active_container_keys(&self.repos, &self.workspaces, &self.sessions);
-        sort_containers(self.containers(), self.repo_sort(), &active)
+        let sorted = sort_containers(self.containers(), self.repo_sort(), &active);
+        if self.repo_filter() == RepoFilter::All {
+            return sorted;
+        }
+        sorted
+            .into_iter()
+            .filter(|c| {
+                !matches!(c.kind, ContainerKind::Repo | ContainerKind::Workspace)
+                    || active.contains(&c.key)
+                    || needs_you(c)
+            })
+            .collect()
+    }
+
+    /// Whether the repos view's Active filter has left the body without a
+    /// repo or workspace row: the view is Repos, the daemon's registry is in
+    /// and holds one, and none of `shown` is a repo or workspace.
+    #[must_use]
+    pub fn active_filter_empty(&self, shown: &[Container]) -> bool {
+        self.sidebar_view() == SidebarView::Repos
+            && self.repo_filter() == RepoFilter::Active
+            && self.repos_loaded
+            && !(self.repos.is_empty() && self.workspaces.is_empty())
+            && !shown
+                .iter()
+                .any(|c| matches!(c.kind, ContainerKind::Repo | ContainerKind::Workspace))
     }
 
     /// Whether the repos view's rows keyed `a` and `b` sort into the same
@@ -960,6 +1004,21 @@ impl SidebarModel {
             return false;
         }
         self.ui.sidebar_view = view;
+        true
+    }
+
+    /// Which repo and workspace rows the repos view shows.
+    pub fn repo_filter(&self) -> RepoFilter {
+        self.ui.repo_filter
+    }
+
+    /// Records which repo and workspace rows the repos view shows; returns
+    /// whether it changed.
+    pub fn set_repo_filter(&mut self, filter: RepoFilter) -> bool {
+        if self.ui.repo_filter == filter {
+            return false;
+        }
+        self.ui.repo_filter = filter;
         true
     }
 
@@ -3486,6 +3545,7 @@ pub(crate) mod tests {
             sidebar_collapsed: true,
             activity: Activity::SourceControl,
             sidebar_view: SidebarView::Tabs,
+            repo_filter: RepoFilter::Active,
             collapsed_containers: ["repo:r1".to_owned(), "detached".to_owned()].into(),
             active_tab_id: Some("t1".to_owned()),
             quick_shell_dir: Some("C:\\work".to_owned()),
@@ -3985,6 +4045,129 @@ pub(crate) mod tests {
         assert!(
             !loaded.general.copy_on_select,
             "the rest of the group loads"
+        );
+    }
+
+    #[test]
+    fn repo_filter_round_trips_and_loads_all_when_missing_or_unknown() {
+        let dir = TestDir::new("repo-filter");
+        let mut model = SidebarModel::new(UiState::default());
+        assert_eq!(model.repo_filter(), RepoFilter::All, "the default");
+        assert!(model.set_repo_filter(RepoFilter::Active));
+        assert!(!model.set_repo_filter(RepoFilter::Active), "unchanged");
+        save_ui_state(&dir.0, model.ui_state()).expect("save");
+        let text = std::fs::read_to_string(dir.0.join(UI_FILE)).expect("read");
+        let written: serde_json::Value = serde_json::from_str(&text).expect("JSON");
+        assert_eq!(written["repo_filter"], "active");
+        assert_eq!(load_ui_state(&dir.0).repo_filter, RepoFilter::Active);
+
+        assert!(model.set_repo_filter(RepoFilter::All), "back to every row");
+        save_ui_state(&dir.0, model.ui_state()).expect("save");
+        let text = std::fs::read_to_string(dir.0.join(UI_FILE)).expect("read");
+        let written: serde_json::Value = serde_json::from_str(&text).expect("JSON");
+        assert_eq!(written["repo_filter"], "all");
+
+        for older in [
+            r#"{ "sidebar_collapsed": true }"#,
+            r#"{ "repo_filter": "pinned", "sidebar_collapsed": true }"#,
+        ] {
+            std::fs::write(dir.0.join(UI_FILE), older).expect("write");
+            let loaded = load_ui_state(&dir.0);
+            assert_eq!(loaded.repo_filter, RepoFilter::All, "{older}");
+            assert!(
+                loaded.sidebar_collapsed,
+                "{older} keeps the rest of the file"
+            );
+        }
+    }
+
+    #[test]
+    fn active_filter_leaves_out_the_repos_and_workspaces_with_no_live_session() {
+        let mut model = SidebarModel::new(UiState::default());
+        model.apply(&DaemonMessage::Repos {
+            repos: vec![repo("r1", "D:/src/r1"), repo("r2", "D:/src/r2")],
+        });
+        model.apply(&DaemonMessage::Workspaces {
+            workspaces: vec![workspace("w1", &["r3"]), workspace("w2", &[])],
+        });
+        model.apply(&DaemonMessage::Sessions {
+            sessions: vec![
+                in_repo("busy", "r1"),
+                shell("sh", None, SessionKind::Standalone),
+            ],
+        });
+
+        let shown = model.display_containers();
+        let mut all = keys(&shown);
+        all.sort_unstable();
+        assert_eq!(
+            all,
+            ["repo:r1", "repo:r2", "standalone:sh", "ws:w1", "ws:w2"],
+            "All leaves every row in"
+        );
+
+        assert!(model.set_repo_filter(RepoFilter::Active));
+        assert_eq!(
+            keys(&model.display_containers()),
+            ["repo:r1", "standalone:sh"],
+            "the repo a live session works in stays, and so does the shell"
+        );
+    }
+
+    #[test]
+    fn active_filter_note_waits_for_the_registry_and_never_shows_in_the_tabs_view() {
+        let mut model = SidebarModel::new(UiState::default());
+        assert!(model.set_repo_filter(RepoFilter::Active));
+        assert!(
+            !model.active_filter_empty(&model.display_containers()),
+            "before the daemon's registry arrives the view shows what All shows"
+        );
+
+        model.apply(&DaemonMessage::Repos {
+            repos: vec![repo("r1", "D:/src/r1")],
+        });
+        let shown = model.display_containers();
+        assert!(
+            model.active_filter_empty(&shown),
+            "no live session leaves the note"
+        );
+
+        model.apply(&DaemonMessage::Sessions {
+            sessions: vec![in_repo("busy", "r1")],
+        });
+        let shown = model.display_containers();
+        assert!(!model.active_filter_empty(&shown), "the repo shows");
+
+        model.apply(&DaemonMessage::Sessions {
+            sessions: Vec::new(),
+        });
+        let shown = model.display_containers();
+        assert!(model.active_filter_empty(&shown));
+        assert!(model.set_sidebar_view(SidebarView::Tabs));
+        assert!(
+            !model.active_filter_empty(&shown),
+            "the note is the repos view's"
+        );
+    }
+
+    #[test]
+    fn active_filter_keeps_a_row_the_needs_you_list_shows() {
+        let mut model = SidebarModel::new(UiState::default());
+        model.apply(&DaemonMessage::Repos {
+            repos: vec![repo("r1", "D:/src/r1"), repo("r2", "D:/src/r2")],
+        });
+        let mut failed = in_repo("failed", "r2");
+        failed.status = SessionStatus::Error;
+        model.apply(&DaemonMessage::Sessions {
+            sessions: vec![failed],
+        });
+        flag(&mut model, "failed");
+        assert!(model.set_repo_filter(RepoFilter::Active));
+
+        assert_eq!(
+            keys(&model.display_containers()),
+            ["repo:r2"],
+            "the ended session needing the owner keeps its row"
         );
     }
 

@@ -14,7 +14,7 @@ use protocol::{
     SpawnTarget, SplitDirection, VscodeWorkspaceFolder, VscodeWorkspaceSuggestion,
     WorktreeReusePolicy,
 };
-use rustling_tulip_native::{DETACHED_BANNER, SidebarView, TabPill, resume_all_label};
+use rustling_tulip_native::{DETACHED_BANNER, RepoFilter, SidebarView, TabPill, resume_all_label};
 use support::{Fixture, Harness, TestDir, pane, repo, session, split, tab, workspace};
 
 /// The keys of the sidebar's containers, in the order it shows them.
@@ -335,6 +335,92 @@ fn saved_tabs_view_is_restored_on_launch(cx: &mut TestAppContext) {
     assert_eq!(h.root(|root, _| root.sidebar_view()), SidebarView::Tabs);
     assert_eq!(tree_keys(&mut h), ["tab:t1"]);
     assert!(h.in_model("leaf-s1"));
+}
+
+#[gpui::test]
+fn active_filter_hides_repos_with_no_live_session_and_saves(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = Fixture::single(session("s1").in_repo("r1").status("working").build());
+    fixture.repos = vec![repo("r1", "D:/src/r1"), repo("r2", "D:/src/r2")];
+    let mut h = Harness::with(cx, &dir, &fixture);
+    assert_eq!(tree_keys(&mut h), ["repo:r1", "repo:r2"]);
+
+    h.click_on("sidebar-filter-active");
+    assert_eq!(tree_keys(&mut h), ["repo:r1"], "r2 has no live session");
+    assert_eq!(saved_ui(&dir)["repo_filter"], "active", "saved at once");
+
+    h.click_on("sidebar-filter-all");
+    assert_eq!(tree_keys(&mut h), ["repo:r1", "repo:r2"]);
+    assert_eq!(saved_ui(&dir)["repo_filter"], "all");
+}
+
+#[gpui::test]
+fn active_filter_shows_the_empty_text_when_nothing_is_active(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = Fixture::single(session("sh").shell("D:/elsewhere").build());
+    fixture.repos = vec![repo("r1", "D:/src/r1")];
+    let mut h = Harness::with(cx, &dir, &fixture);
+    assert!(!drawn(&mut h, "sidebar-filter-empty"), "All shows the repo");
+
+    h.click_on("sidebar-filter-active");
+    assert!(drawn(&mut h, "sidebar-filter-empty"));
+    assert_eq!(tree_keys(&mut h), ["standalone:sh"], "the shell row stays");
+    assert!(h.in_model("leaf-sh"));
+}
+
+#[gpui::test]
+fn saved_active_filter_is_restored_on_launch(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    std::fs::write(
+        dir.path().join("native-ui.json"),
+        r#"{ "repo_filter": "active" }"#,
+    )
+    .expect("write the layout");
+    let mut fixture = Fixture::single(session("s1").in_repo("r1").build());
+    fixture.repos = vec![repo("r1", "D:/src/r1"), repo("r2", "D:/src/r2")];
+    let mut h = Harness::with(cx, &dir, &fixture);
+    assert_eq!(h.root(|root, _| root.repo_filter()), RepoFilter::Active);
+    assert_eq!(tree_keys(&mut h), ["repo:r1"]);
+}
+
+#[gpui::test]
+fn the_filter_control_is_not_drawn_in_the_tabs_view(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    std::fs::write(
+        dir.path().join("native-ui.json"),
+        r#"{ "sidebar_view": "tabs" }"#,
+    )
+    .expect("write the layout");
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
+    assert_eq!(h.root(|root, _| root.sidebar_view()), SidebarView::Tabs);
+    assert!(
+        drawn(&mut h, "sidebar-view-tabs"),
+        "the grouping toggle shows"
+    );
+    assert!(!drawn(&mut h, "sidebar-filter-all"), "the filter does not");
+    assert!(!drawn(&mut h, "sidebar-filter-active"));
+}
+
+#[gpui::test]
+fn active_filter_note_is_not_drawn_in_the_tabs_view(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    std::fs::write(
+        dir.path().join("native-ui.json"),
+        r#"{ "repo_filter": "active", "sidebar_view": "tabs" }"#,
+    )
+    .expect("write the layout");
+    let mut fixture = Fixture::single(session("s1").build());
+    fixture.repos = vec![repo("r1", "D:/src/r1")];
+    let mut h = Harness::with(cx, &dir, &fixture);
+    assert_eq!(h.root(|root, _| root.sidebar_view()), SidebarView::Tabs);
+    assert!(
+        !drawn(&mut h, "sidebar-filter-empty"),
+        "the tabs view draws no row note"
+    );
+
+    h.click_on("sidebar-view-repos");
+    assert_eq!(h.root(|root, _| root.sidebar_view()), SidebarView::Repos);
+    assert!(drawn(&mut h, "sidebar-filter-empty"), "the repos view does");
 }
 
 #[gpui::test]
