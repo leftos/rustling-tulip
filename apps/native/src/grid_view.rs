@@ -60,7 +60,7 @@ const CHIP_TEXT_SIZE: f32 = 11.0;
 /// The repo:branch chip's flex shrink against the title's 1: large enough
 /// that the chip gives up nearly all its width before the title gives any.
 const BRANCH_CHIP_SHRINK: f32 = 1000.0;
-/// How strongly the claude runtime chip washes its fill with the accent.
+/// How strongly the agent runtime chip washes its fill with the accent.
 const RUNTIME_WASH_ALPHA: f32 = 0.13;
 const HEADER_BUTTON_SIZE: f32 = 26.0;
 const HEADER_BUTTON_RADIUS: f32 = 6.0;
@@ -1440,7 +1440,7 @@ pub enum HeaderChipKind {
     /// `+N`: the further members of a workspace session.
     More,
     Trusted,
-    /// The non-Anthropic endpoint a Claude session is routed to.
+    /// The provider endpoint an agent session is routed to.
     Provider,
 }
 
@@ -1620,7 +1620,7 @@ fn header_title(
     out
 }
 
-/// A 20 px Geist Mono chip: the claude runtime washed in the accent,
+/// A 20 px Geist Mono chip: the agent runtime washed in the accent,
 /// repo:branch with its repo name bright, trusted outlined, the rest filled.
 fn header_chip(pane_id: &str, chip: &HeaderChip, cx: &mut Context<RootView>) -> AnyElement {
     let name = format!("pane-chip-{pane_id}-{}", chip.kind.name());

@@ -595,7 +595,7 @@ struct SpawnArgs {
     /// The request that asked for this spawn; the session's first broadcast
     /// carries it, so the requester hears of its spawn once, in order.
     origin: Option<UpdateOrigin>,
-    /// The Claude conversation an interactive Claude spawn resumes.
+    /// The agent conversation an interactive agent spawn resumes.
     resume_conversation: Option<String>,
     /// A standalone target's extra `--add-dir` directories.
     add_dirs: Vec<String>,
@@ -1706,7 +1706,7 @@ fn spawn_headless_session(
             Some(stored_config),
             last_prompt,
             Some(initial_cwd),
-            // Headless `claude --print` doesn't use a PTY and therefore doesn't
+            // A headless run doesn't use a PTY and therefore doesn't
             // go through rt-tracer; the tracer fields stay None.
             None,
             None,

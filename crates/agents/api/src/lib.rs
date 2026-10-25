@@ -463,6 +463,14 @@ pub trait Agent: Send + Sync + 'static {
         &[]
     }
 
+    /// Variables a running session of the agent sets for its own children.
+    /// A daemon started from inside such a session would pass them to every
+    /// session it spawns, marking each as that session's child, so every PTY
+    /// spawn removes them unless the spawn sets one itself.
+    fn inherited_session_vars(&self) -> &'static [&'static str] {
+        &[]
+    }
+
     /// The flags the plugin's own argv carries, interactive or headless. A
     /// user's extra launch argument may not name one: the daemon refuses it
     /// when the launch command is saved.
@@ -638,6 +646,9 @@ pub trait AgentPlugin: Send + Sync {
     /// See [`Agent::passthrough_vars`].
     fn passthrough_vars(&self) -> &'static [&'static str];
 
+    /// See [`Agent::inherited_session_vars`].
+    fn inherited_session_vars(&self) -> &'static [&'static str];
+
     /// See [`Agent::reserved_args`].
     fn reserved_args(&self) -> &'static [&'static str];
 
@@ -777,6 +788,10 @@ impl<A: Agent> AgentPlugin for A {
 
     fn passthrough_vars(&self) -> &'static [&'static str] {
         Agent::passthrough_vars(self)
+    }
+
+    fn inherited_session_vars(&self) -> &'static [&'static str] {
+        Agent::inherited_session_vars(self)
     }
 
     fn reserved_args(&self) -> &'static [&'static str] {

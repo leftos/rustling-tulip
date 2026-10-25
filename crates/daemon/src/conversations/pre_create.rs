@@ -23,7 +23,7 @@ use tracing::{debug, warn};
 
 #[cfg(windows)]
 use super::job::{self, JobGuard};
-use crate::tracer_client::{PARENT_SESSION_VARS, is_env_name};
+use crate::tracer_client::{inherited_session_vars, is_env_name};
 
 /// How long a pre-create run may take before it is killed and the spawn goes
 /// ahead with no conversation.
@@ -91,7 +91,7 @@ pub(crate) async fn run_until(
 }
 
 /// The pre-create child's environment: `base` (the daemon's own) without a
-/// parent Claude session's markers, as every PTY spawn drops them, then each
+/// parent agent session's markers, as every PTY spawn drops them, then each
 /// variable in `set` applied, then each name in `remove` removed.
 fn child_env(
     base: impl IntoIterator<Item = (OsString, OsString)>,
@@ -100,7 +100,7 @@ fn child_env(
 ) -> Vec<(OsString, OsString)> {
     let mut env: Vec<(OsString, OsString)> = base
         .into_iter()
-        .filter(|(key, _)| !PARENT_SESSION_VARS.iter().any(|var| names(key, var)))
+        .filter(|(key, _)| !inherited_session_vars().any(|var| names(key, var)))
         .collect();
     for (name, value) in set {
         env.retain(|(key, _)| !names(key, name));

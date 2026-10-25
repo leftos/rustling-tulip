@@ -7,8 +7,8 @@
 //! reattaches the survivors so they appear in the dashboard with their
 //! scrollback intact (PTY stream is gone, but state and history are not).
 //!
-//! Decoupled from Claude Code's own `~/.claude/projects/<encoded-cwd>/*.jsonl`
-//! files so we don't depend on the undocumented log layout.
+//! Decoupled from the agent CLI's own transcript files so we don't depend on
+//! their undocumented layout.
 
 use crate::env_secrets::{self, SealOutcome};
 use crate::paths::Dirs;
@@ -75,11 +75,12 @@ pub struct OrphanMeta {
     #[serde(default)]
     pub workspace_id: Option<String>,
     /// The program the user runs, the label the leaf shows: the agent token
-    /// (e.g. `"claude"`) or the shell label (e.g. `"pwsh"`, `"cmd"`,
+    /// or the shell label (e.g. `"pwsh"`, `"cmd"`,
     /// `"bash"`). A tracer-backed sidecar's liveness goes by `tracer_pid`;
     /// only a sidecar without tracer fields matches its `pid` against this
-    /// name (case-insensitive substring), falling back to the legacy
-    /// `claude`/`node` heuristic when it is `None`.
+    /// name (case-insensitive substring), falling back to the
+    /// liveness tokens of the session's agent (`agent`, else the default
+    /// agent) when it is `None`.
     #[serde(default)]
     pub program_name: Option<String>,
     /// Which agent this session runs; `None` for a plain shell. Reattach
@@ -651,8 +652,8 @@ impl RecordMirror {
 
 /// Best-effort sync of the record's on-disk mirror into the sidecar: the
 /// recent-actions tail, the status/stamp pair, the terminal title and cwd,
-/// the labels, the appearance, the two conversation ids (Claude's and the
-/// agent CLI's) and the busy exclusion. Called by the registry
+/// the labels, the appearance, the two conversation ids and the busy
+/// exclusion. Called by the registry
 /// after every `update()` so abandoned sessions retain the most recent
 /// operational context and a reattach can bring back a session that was still
 /// waiting for input. Silently no-ops if the sidecar doesn't exist (e.g. for a

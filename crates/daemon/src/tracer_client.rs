@@ -80,7 +80,7 @@ pub async fn spawn(
 }
 
 /// [`spawn`] with the cached `rt-tracer` already resolved. A spawn that writes
-/// an injected hook settings file — an interactive Claude spawn, whose argv
+/// an injected hook settings file — an interactive agent spawn, whose argv
 /// names it, or a plain-shell recovery, whose typed command does — resolves it
 /// first, because that file names the same copy as its hook command, and hands
 /// the path here: the file the agent runs and the tracer the session runs are
@@ -147,7 +147,7 @@ pub async fn reattach(
 }
 
 /// The cached `rt-tracer` path a spawn will run, resolved before [`spawn`]:
-/// an interactive Claude spawn's `--settings` file names the shim it must run
+/// an interactive agent spawn's hook settings file names the shim it must run
 /// as a hook, and the argv is built before the tracer exists. That spawn
 /// resolves the path once (through this function), writes the file from it and
 /// passes the same path to [`spawn_with_tracer`], so the hook command and the
@@ -306,21 +306,16 @@ pub const TRACER_OWNER_ENV: &str = "RUSTLING_TULIP_TRACER_OWNER";
 /// Env var naming the tracer's per-session log file (see [`tracer_log_path`]).
 pub const TRACER_LOG_ENV: &str = "RUSTLING_TULIP_TRACER_LOG";
 
-/// The variables a running Claude Code session sets for its own children.
-/// A daemon started from inside one (a terminal in a Claude session) would
-/// pass them to every session it spawns, marking each as that session's
-/// child: no transcript of its own, and a messaging channel pointing at the
-/// parent. Every PTY spawn removes them.
-pub(crate) const PARENT_SESSION_VARS: [&str; 8] = [
-    "CLAUDECODE",
-    "CLAUDE_CODE_CHILD_SESSION",
-    "CLAUDE_CODE_SESSION_ID",
-    "CLAUDE_CODE_ENTRYPOINT",
-    "CLAUDE_CODE_MESSAGING_SOCKET",
-    "CLAUDE_CODE_MESSAGING_TOKEN",
-    "CLAUDE_CODE_SESSION_ATTENDED",
-    "CLAUDE_PID",
-];
+/// The variables a running session of any registered agent sets for its own
+/// children (each plugin's `inherited_session_vars`). A daemon started from
+/// inside such a session would pass them to every session it spawns, marking
+/// each as that session's child. Every PTY spawn, plain shells included,
+/// removes them.
+pub(crate) fn inherited_session_vars() -> impl Iterator<Item = &'static str> {
+    agent_registry::all()
+        .iter()
+        .flat_map(|plugin| plugin.inherited_session_vars().iter().copied())
+}
 
 /// What a spawned tracer runs from and is told at spawn.
 struct TracerLaunch<'a> {
@@ -385,10 +380,10 @@ fn tracer_invocation(launch: &TracerLaunch<'_>) -> TracerInvocation {
         })
         .map(OsString::from)
         .collect();
-    // A parent Claude session's markers are removed too, unless the spawn sets
+    // A parent agent session's markers are removed too, unless the spawn sets
     // one on purpose: `env_set` is applied before `env_remove`, so a name in
     // both would be dropped.
-    for name in PARENT_SESSION_VARS {
+    for name in inherited_session_vars() {
         let set_by_spawn = spec.env.iter().any(|(key, _)| is_env_name(key, name));
         let already_removed = spec
             .env_remove
@@ -1175,7 +1170,12 @@ mod tests {
             owner: &owner,
         });
         let env: Vec<(&OsStr, Option<&OsStr>)> = cmd.get_envs().collect();
-        for name in super::PARENT_SESSION_VARS {
+        let markers: Vec<&str> = super::inherited_session_vars().collect();
+        assert!(
+            markers.contains(&"CLAUDECODE") && markers.len() == 8,
+            "the registered agents' markers: {markers:?}"
+        );
+        for name in markers {
             assert!(
                 env.contains(&(OsStr::new(name), None)),
                 "{name} is removed from the tracer's environment: {env:?}"
@@ -1216,7 +1216,12 @@ mod tests {
             !env.contains(&(OsStr::new("CLAUDE_CODE_ENTRYPOINT"), None)),
             "a variable the spawn sets is not removed: {env:?}"
         );
-        for name in super::PARENT_SESSION_VARS {
+        let markers: Vec<&str> = super::inherited_session_vars().collect();
+        assert!(
+            markers.contains(&"CLAUDECODE") && markers.len() == 8,
+            "the registered agents' markers: {markers:?}"
+        );
+        for name in markers {
             if name == "CLAUDE_CODE_ENTRYPOINT" {
                 continue;
             }

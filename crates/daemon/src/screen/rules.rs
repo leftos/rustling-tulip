@@ -134,7 +134,7 @@ pub fn rules_for(agent: &AgentId) -> Arc<CompiledRules> {
 }
 
 /// A shell's prompt row, each pattern with whether it is the POSIX form,
-/// which a row holding one of Claude's box glyphs never matches: PowerShell's
+/// which a row holding one of an agent's box glyphs never matches: PowerShell's
 /// `PS <path>>`, cmd's `<drive>:\<path>>`, and a POSIX shell's row ending in
 /// `$`, `#` or `%`.
 const SHELL_PROMPTS: [(&str, bool); 3] = [

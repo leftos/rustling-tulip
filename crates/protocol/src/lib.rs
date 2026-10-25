@@ -406,7 +406,7 @@ pub struct RepoEntry {
     pub default_branch: Option<String>,
     /// Persistent UI preference: when a session is spawned against this repo,
     /// should the spawn dialog default to creating a worktree (`true`) or to
-    /// running claude in the repo's main directory (`false`)? Defaults to
+    /// running the session in the repo's main directory (`false`)? Defaults to
     /// `true` for backwards compatibility with state.json files that don't
     /// carry this field yet.
     #[serde(default = "default_true")]
@@ -517,7 +517,7 @@ pub enum SessionMode {
     Interactive,
     Headless,
     /// Non-agentic shell (pwsh/powershell/cmd on Windows, $SHELL/bash/sh on
-    /// Unix) running in the session's primary cwd. Bypasses the `claude` CLI
+    /// Unix) running in the session's primary cwd. Bypasses the agent CLI
     /// entirely; no model/permission/prompt fields apply.
     PlainShell,
 }
@@ -566,13 +566,13 @@ pub struct SessionSnapshot {
     pub metrics: SessionMetrics,
     pub recent_actions: Vec<String>,
     /// True when the session was reattached on daemon startup and we no
-    /// longer have a live PTY/headless handle. The underlying `claude`
+    /// longer have a live PTY/headless handle. The underlying agent
     /// process is still running but its stdio is detached from us, so the
     /// UI shows the session in read-only mode (scrollback only).
     #[serde(default)]
     pub is_orphan: bool,
     /// True when this session was abandoned mid-run: the previous daemon
-    /// crashed (or was killed) and the `claude` process is gone. The UI
+    /// crashed (or was killed) and the agent process is gone. The UI
     /// shows a "Resume" affordance that replays the captured spawn config
     /// + `last_prompt` against a fresh session. Different from `is_orphan`
     ///   (which is "still running, just detached") and from a normal
@@ -602,7 +602,7 @@ pub struct SessionSnapshot {
     /// `None` until the agent emits its first title.
     #[serde(default)]
     pub terminal_title: Option<String>,
-    /// Short label for whatever program is driving this session — `"claude"`,
+    /// Short label for whatever program is driving this session — the agent token,
     /// `"pwsh"`, `"powershell"`, `"cmd"`, `"bash"`, `"sh"`, etc.
     /// Surfaced in the UI next to the session title so users can tell
     /// what's running at a glance regardless of mode. `None` for sessions
@@ -621,7 +621,7 @@ pub struct SessionSnapshot {
     #[serde(default)]
     pub appearance: AppearanceOverrides,
     /// True when the session was launched with approvals/permission prompts
-    /// bypassed (`--dangerously-skip-permissions` for Claude). Clients use this to keep elevated authority visible after the
+    /// bypassed (a trusted launch). Clients use this to keep elevated authority visible after the
     /// spawn dialog closes.
     #[serde(default)]
     pub elevated_authority: bool,
@@ -849,11 +849,11 @@ pub enum SpawnTarget {
         branch_name: String,
         /// Base for branch creation. `None` means "use the repo's default".
         base_branch: Option<String>,
-        /// When `true`, the daemon runs claude in a worktree under its
+        /// When `true`, the daemon runs the session in a worktree under its
         /// worktrees root: the one already holding the branch there, else a
         /// new `wt.<branch-slug>/<repo-slug>`. When `false`, the
-        /// branch is checked out in the repo's primary directory and claude
-        /// runs there directly.
+        /// branch is checked out in the repo's primary directory and the
+        /// session runs there directly.
         use_worktree: bool,
         /// How to resolve a dirty working tree on an in-place
         /// (`use_worktree = false`) switch to a *different* branch. `None`
@@ -901,8 +901,8 @@ pub enum SpawnTarget {
         /// choose its platform default, usually the user's home directory.
         #[serde(default)]
         cwd: Option<String>,
-        /// Extra directories an interactive Claude session is given with
-        /// `--add-dir`. Plain shells ignore them.
+        /// Extra directories an interactive agent session is given access
+        /// to. Plain shells ignore them.
         #[serde(default)]
         add_dirs: Vec<String>,
     },
@@ -932,8 +932,7 @@ pub struct SpawnRequest {
     pub target: SpawnTarget,
     pub mode: SessionMode,
     pub initial_prompt: Option<String>,
-    /// A trusted launch: the agent runs with its permission prompts skipped
-    /// (Claude's `--dangerously-skip-permissions`).
+    /// A trusted launch: the agent runs with its permission prompts skipped.
     pub dangerously_skip_permissions: bool,
     /// The agent to run and its options; `None` exactly for a plain shell.
     pub agent: Option<AgentSelection>,
@@ -973,8 +972,8 @@ pub struct SpawnRequest {
     /// requester. Broadcasts never carry it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
-    /// The agent's conversation to resume. An interactive Claude spawn passes
-    /// `--resume <id>` instead of a fresh `--session-id` and drops the initial
+    /// The agent's conversation to resume. An interactive agent spawn resumes
+    /// it in place of a fresh conversation id and drops the initial
     /// prompt. A daemon that cannot resume the
     /// chosen agent's conversation ignores it and starts a fresh run. Not
     /// part of [`SpawnConfig`], so it is never replayed.
@@ -1500,7 +1499,7 @@ pub enum InjectorStep {
 }
 
 /// Scripted PTY input fed to a freshly spawned interactive session after the
-/// PTY comes up. Used by the preset launcher to enter Claude's plan mode and
+/// PTY comes up. Used by the preset launcher to enter the agent's plan mode and
 /// submit a prompt without relying on the `-p` CLI arg (which submits
 /// immediately and disables plan mode). Standalone outside presets: any
 /// `SpawnRequest` can carry one.
@@ -1546,10 +1545,10 @@ pub enum InjectorStartup {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct InjectorTemplate {
     /// Time to wait after the PTY spawns before sending any keystrokes.
-    /// Lets the `claude` TUI finish painting its first frame.
+    /// Lets the agent's TUI finish painting its first frame.
     pub startup_delay_ms: u32,
     /// Steps sent before the prompt text. Typical use: keystrokes to enter
-    /// plan mode (Shift+Tab × 4 for Claude).
+    /// plan mode.
     pub pre_input: Vec<InjectorStep>,
     /// Steps sent after the prompt text. Typical use: a small delay then
     /// `{ kind: "text", content: "", newline: true }` to submit.
@@ -1559,7 +1558,7 @@ pub struct InjectorTemplate {
     /// scans PTY output for the marker; if absent within a short window,
     /// it re-sends `pre_input` and checks again (up to a few attempts)
     /// before falling through. Lets a Plan-Mode preset self-heal when
-    /// the Shift+Tab keystrokes are dropped because Claude wasn't yet
+    /// the Shift+Tab keystrokes are dropped because the agent wasn't yet
     /// listening. `None` (or absent in JSON) disables verification.
     #[serde(default)]
     pub verify_mode_marker: Option<String>,
@@ -1620,7 +1619,7 @@ pub enum PresetPromptSource {
     File,
     /// Scan a repo-relative directory; one prompt per `.md` file found.
     /// Prompts are file references (e.g. `@docs/plans/open-issues/foo.md`)
-    /// so the templated message can ask Claude to read them.
+    /// so the templated message can ask the agent to read them.
     Folder { relative_path: String },
     /// User types prompts directly into a textarea. Same bullet/paragraph
     /// parsing as `File`.

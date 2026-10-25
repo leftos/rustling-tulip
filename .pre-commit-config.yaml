@@ -59,6 +59,13 @@ repos:
         types: [rust]
         pass_filenames: false
 
+      - id: check-agent-names
+        name: agent names stay behind the seam
+        entry: pwsh -NoProfile -File tools/check-agent-names.ps1
+        language: system
+        pass_filenames: false
+        always_run: true
+
       - id: cargo-clippy
         name: cargo clippy (-D warnings)
         entry: cargo clippy --workspace --all-targets --all-features -- -D warnings

@@ -483,7 +483,7 @@ pub(super) fn request_origin(connection: u64, request_id: Option<String>) -> Opt
 /// daemon picks can't attach a leftover the user was never shown. With
 /// `same_checkout` (a Restart or a Resume, whose source no longer holds the
 /// checkout) it reruns on the source's branch, reusing its worktree, and
-/// continues the source's Claude conversation while its transcript exists.
+/// continues the source's agent conversation while its transcript exists.
 async fn duplicate_request(
     hub: &Hub,
     session_id: &str,
@@ -635,16 +635,16 @@ fn finish_rerun(hub: &Hub, source_id: &str, resumed: bool) {
     }
 }
 
-/// The Claude conversation a rerun of a session could continue.
+/// The agent conversation a rerun of a session could continue.
 struct SourceConversation {
     agent: protocol::AgentId,
     folder: String,
     id: String,
 }
 
-/// `rec`'s conversation: an interactive session's Claude conversation id, if
+/// `rec`'s conversation: an interactive session's agent conversation id, if
 /// it has one, in its launch folder (its first member's worktree, which a
-/// rerun pins, else its standalone folder), where Claude files the
+/// rerun pins, else its standalone folder), where the agent files the
 /// transcript.
 fn resumable_conversation(rec: &crate::session::SessionRecord) -> Option<SourceConversation> {
     if rec.mode != protocol::SessionMode::Interactive {
@@ -1216,7 +1216,7 @@ pub(super) async fn stop_session(hub: &Hub, session_id: &str) -> anyhow::Result<
         // daemon restart. Read the sidecar to recover the pid and try a
         // best-effort kill. Without this, `stop_session` on an orphan
         // would mark daemon state as stopped but leave the underlying
-        // claude / shell process running forever.
+        // agent / shell process running forever.
         match orphan::load_meta(&hub.dirs, session_id) {
             Ok(meta) => {
                 if orphan::kill_pid(&meta) {

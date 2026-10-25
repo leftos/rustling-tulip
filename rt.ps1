@@ -33,7 +33,8 @@
                  reaches, mapped through tools/test-map.json (a central or
                  unmapped file runs the full suite); -PrintOnly prints the
                  selection without running it; -Validate checks the map.
-      clippy     Run the strict workspace clippy pass
+      clippy     Run the agent-name seam check (tools/check-agent-names.ps1),
+                 then the strict workspace clippy pass
                  (`--all-targets --all-features -- -D warnings`).
       fmt        Run `cargo fmt --all`.
       clean      Run `cargo clean`.
@@ -883,6 +884,9 @@ function Get-RowTestCount([string]$LogPath, [string[]]$ListArgs) {
 
 function Invoke-Clippy {
     Test-Tool 'cargo' 'Install Rust via https://rustup.rs.'
+    Write-Host '==> agent names stay behind the seam (tools/check-agent-names.ps1)...' -ForegroundColor Cyan
+    & pwsh -NoProfile -File (Join-Path $ScriptDir 'tools/check-agent-names.ps1')
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     Write-Host '==> cargo clippy --all-targets --all-features -- -D warnings...' -ForegroundColor Cyan
     $clippyArgs = @('cargo', 'clippy', '--manifest-path', $ManifestPath, '--all-targets', '--all-features')
     if ($Rest) { $clippyArgs += $Rest }
@@ -1048,7 +1052,8 @@ Commands:
              reaches (tools/test-map.json; a central or unmapped file
              runs everything). -PrintOnly: print the selection, run
              nothing. -Validate: check the test map.
-  clippy     `cargo clippy --all-targets --all-features -- -D warnings`.
+  clippy     tools/check-agent-names.ps1, then
+             `cargo clippy --all-targets --all-features -- -D warnings`.
   fmt        `cargo fmt --all`.
   clean      `cargo clean`.
   native     `cargo build -p daemon -p tracer`, then `cargo run -p

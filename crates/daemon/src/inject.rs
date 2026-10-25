@@ -1,7 +1,7 @@
 //! Scripted PTY input runner — drives a [`protocol::PromptInjector`] against
 //! a live [`PtyHandle`] after spawn.
 //!
-//! Used by the preset launcher to enter Claude's plan mode and submit a
+//! Used by the preset launcher to enter the agent's plan mode and submit a
 //! prompt without relying on the `-p` CLI flag (which auto-executes). The
 //! runner has two pieces of intelligence layered onto a mostly-dumb
 //! sleep/write loop:
@@ -12,7 +12,7 @@
 //!    waiting the full ceiling, but only after we've seen enough output to
 //!    be confident the TUI has actually started painting. How much output
 //!    that takes and how long the stream must then stay quiet comes from
-//!    the agent's plugin ([`agent_api::ReadySignal`]): Claude's banner is
+//!    the agent's plugin ([`agent_api::ReadySignal`]): by default a banner of
 //!    1024 bytes, then 1.5 s of silence. An injector whose `startup` is
 //!    [`InjectorStartup::ShellPrompt`] waits for a shell prompt instead:
 //!    a short quiet period once the shell has printed anything, capped at
@@ -21,7 +21,7 @@
 //!    PTY output for that marker after the pre-input steps and re-sends
 //!    them up to a few times if the marker doesn't appear. This self-heals
 //!    the common Plan-Mode case where `Shift+Tab` bytes get dropped
-//!    because Claude wasn't yet listening on its keystroke handler.
+//!    because the agent wasn't yet listening on its keystroke handler.
 //!
 //! Subsequent delays in the script (typically inter-keystroke pacing) are
 //! literal sleeps.
@@ -40,7 +40,7 @@ use crate::pty::PtyHandle;
 
 /// Minimum wait before declaring the TUI ready, even if no output has been
 /// observed. Raised from the original 1500 ms after observing that under
-/// burst spawn load (9-prompt preset) Claude's banner-paint sometimes has
+/// burst spawn load (9-prompt preset) the agent's banner-paint sometimes has
 /// silence gaps in the 500–1500 ms range that would otherwise trip early
 /// exit on a TUI whose keystroke handler isn't yet bound.
 const STARTUP_MIN_WAIT: Duration = Duration::from_secs(3);
@@ -71,7 +71,7 @@ const VERIFY_WINDOW: Duration = Duration::from_secs(2);
 const VERIFY_MAX_ATTEMPTS: u32 = 3;
 
 /// How much PTY output (raw bytes, pre-strip) to keep buffered when
-/// scanning for `verify_mode_marker`. Sized generously above Claude's
+/// scanning for `verify_mode_marker`. Sized generously above the agent's
 /// idle-frame size so we don't miss a marker that's only visible in
 /// the bottom-of-screen footer.
 const VERIFY_MARKER_SCROLLBACK_BYTES: usize = 4096;
@@ -369,7 +369,7 @@ async fn wait_for_marker_or_timeout(
             }
             Ok(Err(broadcast::error::RecvError::Lagged(_))) => {
                 // A lag means we may have missed the marker frame. Keep
-                // waiting until the window closes — Claude's footer is
+                // waiting until the window closes — the agent's footer is
                 // re-emitted on each render so it should reappear.
             }
             Err(_) | Ok(Err(broadcast::error::RecvError::Closed)) => {

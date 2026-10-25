@@ -215,6 +215,22 @@ impl Agent for ClaudePlugin {
         &["ANTHROPIC_API_KEY", "CLAUDE_CONFIG_DIR"]
     }
 
+    /// The markers Claude Code sets for a child: without their removal a
+    /// spawned session has no transcript of its own and a messaging channel
+    /// pointing at the parent.
+    fn inherited_session_vars(&self) -> &'static [&'static str] {
+        &[
+            "CLAUDECODE",
+            "CLAUDE_CODE_CHILD_SESSION",
+            "CLAUDE_CODE_SESSION_ID",
+            "CLAUDE_CODE_ENTRYPOINT",
+            "CLAUDE_CODE_MESSAGING_SOCKET",
+            "CLAUDE_CODE_MESSAGING_TOKEN",
+            "CLAUDE_CODE_SESSION_ATTENDED",
+            "CLAUDE_PID",
+        ]
+    }
+
     /// `claude`, and `node`, which an npm-installed `claude` runs as.
     fn liveness_tokens(&self) -> &'static [&'static str] {
         &["claude", "node"]
@@ -579,6 +595,24 @@ struct UsageInfo {
 mod tests {
     use super::*;
     use protocol::OptionValues;
+
+    #[test]
+    fn inherited_session_vars_are_claude_codes_child_markers() {
+        let plugin: &dyn agent_api::AgentPlugin = &ClaudePlugin;
+        assert_eq!(
+            plugin.inherited_session_vars(),
+            [
+                "CLAUDECODE",
+                "CLAUDE_CODE_CHILD_SESSION",
+                "CLAUDE_CODE_SESSION_ID",
+                "CLAUDE_CODE_ENTRYPOINT",
+                "CLAUDE_CODE_MESSAGING_SOCKET",
+                "CLAUDE_CODE_MESSAGING_TOKEN",
+                "CLAUDE_CODE_SESSION_ATTENDED",
+                "CLAUDE_PID",
+            ]
+        );
+    }
 
     fn members(paths: &[&str]) -> Vec<SessionMember> {
         paths

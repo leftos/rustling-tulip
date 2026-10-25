@@ -144,7 +144,7 @@ pub struct PtyHandleParts {
     pub resize_tx: mpsc::UnboundedSender<(u16, u16)>,
     pub exit_rx: oneshot::Receiver<PtyExit>,
     pub killer: Box<dyn ChildKiller + Send + Sync>,
-    /// Process id of the PTY child (claude / shell). `None` when the
+    /// Process id of the PTY child (agent / shell). `None` when the
     /// tracer hasn't yet reported one back. The orphan sidecar's `pid` field
     /// gets this value for legacy compatibility; the `tracer_pid` field carries
     /// the rt-tracer process id used for liveness checks post-C.3.

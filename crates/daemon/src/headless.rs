@@ -37,7 +37,7 @@ pub struct HeadlessSpec {
     pub cwd: PathBuf,
     pub env: Vec<(String, String)>,
     /// Agent kind. Drives which plugin's `parse_headless_line` parses
-    /// stdout — claude's stream-json.
+    /// stdout.
     pub agent: AgentId,
 }
 

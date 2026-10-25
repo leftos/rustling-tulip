@@ -4,7 +4,7 @@
 //! makes both `cargo build` (during dev) and the NSIS installer (in
 //! production) destructive: the only way to free the file is to kill every
 //! process holding it. For `rt-tracer.exe` that means killing every
-//! supervisor, which kills every PTY child — every active claude/shell
+//! supervisor, which kills every PTY child — every active agent/shell
 //! session is gone.
 //!
 //! The fix here is to spawn from a content-addressed copy of the template

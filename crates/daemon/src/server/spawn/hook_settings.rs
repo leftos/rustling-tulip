@@ -1,5 +1,5 @@
-//! The hook files a spawn's plugin plans — for Claude, the `--settings`
-//! document it passes — with writing, discarding and naming them.
+//! The hook files a spawn's plugin plans — such as a settings document its
+//! CLI is passed — with writing, discarding and naming them.
 
 use crate::paths::Dirs;
 use crate::server::Hub;
@@ -10,7 +10,7 @@ use std::path::{Component, Path, PathBuf};
 use tracing::warn;
 
 /// The hook files one spawn's plugin planned and the daemon wrote — an
-/// interactive Claude session or a plain-shell recovery — and what it made on
+/// interactive agent session or a plain-shell recovery — and what it made on
 /// disk.
 pub(super) struct HookSettings {
     /// Every file the plan named, as written, in the plan's order; empty for
@@ -121,12 +121,12 @@ pub(in crate::server) fn remove_hook_settings(hub: &Hub, session_id: &str) {
     }
 }
 
-/// The file name a spawn's injected Claude hook settings land under, inside the
+/// The file name a spawn's injected hook settings land under, inside the
 /// session's own directory.
 const HOOK_SETTINGS_FILE: &str = "hook-settings.json";
 
-/// `session_id`'s injected hook settings file, which a Claude spawn passes as
-/// `--settings` and the hook shim reads.
+/// `session_id`'s injected hook settings file, which an agent spawn passes to
+/// its CLI and the hook shim reads.
 pub(in crate::server) fn hook_settings_path(dirs: &Dirs, session_id: &str) -> PathBuf {
     dirs.sessions_dir.join(session_id).join(HOOK_SETTINGS_FILE)
 }

@@ -44,7 +44,7 @@ PowerShell on Windows is the primary dev environment. `rt.ps1` in the repo root 
 .\rt.ps1 test -Reached    # run only the tests the change reaches: a changed file's row in tools/test-map.json, else the full suite (-Base <ref> sets the diff base: branch.<name>.base, else main's merge-base with HEAD)
 .\rt.ps1 test -Reached -PrintOnly   # print the selection ("full suite: <file> is central" / "is unmapped", "reached: <filter>", or "no tests reached") and run nothing
 .\rt.ps1 test -Validate   # check tools/test-map.json ("test map ok: <n> rows; <m> native source and test files covered")
-.\rt.ps1 clippy           # strict lint pass (-D warnings)
+.\rt.ps1 clippy           # the agent seam check (tools/check-agent-names.ps1) first, then the strict lint pass (-D warnings)
 .\rt.ps1 fmt              # cargo fmt --all
 .\rt.ps1 clean            # cargo clean
 .\rt.ps1 native           # build daemon + tracer, then run the native client (extra args: a session id to focus)
@@ -187,6 +187,8 @@ A fetched `.html` or `.htm` page that opens when done brings the relative media 
 **Single source of truth for the wire protocol.** All daemon/client messages live in `crates/protocol/src/lib.rs` as tagged enums (`#[serde(tag = "type", rename_all = "snake_case")]`).
 
 When adding a message, update both directions (`ClientMessage` + `DaemonMessage` if it's a request/response) and the matching handler arm in the domain module's `handle` under `crates/daemon/src/server/` plus its variant in `dispatch`'s or-pattern in `crates/daemon/src/server.rs` and the native client's handling (`RootView`'s message folds, `on_message` in `apps/native/src/lib.rs`; `net.rs` only forwards). Changes stay additive where they can (see "When to bump" below).
+
+**App code never names an agent.** The daemon, protocol, native client and tracer ask the registry and the plugin's descriptor; agent-specific behaviour lives in `crates/agents/<agent>/`. `tools/check-agent-names.ps1` (a prek hook and the first step of `.\rt.ps1 clippy`) fails on `claude`, `anthropic` or `deepseek` elsewhere, apart from test code and the hits listed in `tools/agent-names-allow.txt`.
 
 **No backward compatibility before the first release.** The app is unreleased: build as if from scratch. A breaking change to the wire, `state.json`, presets, sidecars or history is simply made, with no migration, legacy decoder, tolerant decode or backup; data that no longer decodes is ignored, and live sessions or history from an older build need not survive an upgrade. The bump rules below still apply to the version number.
 

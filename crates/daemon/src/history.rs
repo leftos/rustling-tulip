@@ -5,7 +5,7 @@
 //! `<config>/history/<session-id>.json` before the session's `meta.json`
 //! sidecar is deleted. The first write for a session wins, so a Stop followed
 //! by the exit watcher keeps `StoppedByUser` rather than `Exited`. Headless
-//! sessions are never written: a `claude --print` run has nothing to resume.
+//! sessions are never written: a headless run has nothing to resume.
 //! Startup prunes entries older than [`HISTORY_RETENTION`].
 
 use crate::conversations;
@@ -769,7 +769,7 @@ fn repo_at<'a>(repos: &'a [RepoEntry], path: &str) -> Option<&'a RepoEntry> {
     repos.iter().find(|r| normalize_path_key(&r.path) == key)
 }
 
-/// The workspace a Claude session in `cwd` with `add_dirs` ran for, else the
+/// The workspace an agent session in `cwd` with `add_dirs` ran for, else the
 /// repo, else neither.
 fn match_target(
     cwd: &str,

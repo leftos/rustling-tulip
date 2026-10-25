@@ -1043,8 +1043,8 @@ struct LaunchPlan {
     /// target is held in `spawn_kind`.
     repo: RepoEntry,
     /// Per-session spawn target shape. `Repo` → each session spawns a
-    /// single-repo claude pointed at one repo's worktree. `Workspace` →
-    /// each session spawns a workspace claude pointed at every member's
+    /// single-repo agent pointed at one repo's worktree. `Workspace` →
+    /// each session spawns a workspace agent pointed at every member's
     /// worktree on the same branch.
     spawn_kind: PresetSpawnKind,
     raw_prompts: Vec<RawPrompt>,

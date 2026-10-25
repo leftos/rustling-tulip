@@ -8,9 +8,9 @@ use protocol::{AgentDescriptor, SessionMode, SessionSnapshot, SessionStatus, Shi
 use crate::keys;
 use crate::sidebar::{agent_up, runtime_label};
 
-/// Shift+Enter's fallback bytes: `\` + CR is line continuation for claude and
-/// for shells. An agent whose descriptor names [`ShiftEnter::Lf`] gets a line
-/// feed instead.
+/// Shift+Enter's bytes when the agent's descriptor names none: `\` + CR, the
+/// line continuation Claude's TUI takes, which shells take too. An agent whose
+/// descriptor names [`ShiftEnter::Lf`] gets a line feed instead.
 const SHIFT_ENTER: &[u8] = b"\\\r";
 
 /// The bytes Shift+Enter sends to a session that chose `shift_enter`.

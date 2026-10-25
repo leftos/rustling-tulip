@@ -467,7 +467,7 @@ fn valid_saved_hosts<'de, D: Deserializer<'de>>(
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SpawnDefaults {
-    /// New Claude sessions bypass approval prompts.
+    /// New agent sessions bypass approval prompts.
     pub trusted: bool,
 }
 

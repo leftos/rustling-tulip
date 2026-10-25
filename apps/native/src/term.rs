@@ -794,7 +794,7 @@ impl Terminal {
         self.scroll(delta);
     }
 
-    /// The grid lines of the prompts Claude echoed (`❯ ` rows, see
+    /// The grid lines of the prompts the agent echoed (`❯ ` rows, see
     /// [`prompt_nav::prompt_rows`]), history and screen, oldest first. Empty
     /// while the alternate screen is up, which has no history.
     #[must_use]

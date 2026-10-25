@@ -281,7 +281,7 @@ impl crate::RootView {
 
     /// Keeps the daemon's agents or their Settings values: each message
     /// replaces what the last one of its kind said, and a Settings broadcast
-    /// answers the Claude page's pending change. Any other message is one
+    /// answers the agent page's pending change. Any other message is one
     /// the root view does not fold, and is dropped.
     pub(crate) fn on_agents(&mut self, msg: protocol::DaemonMessage) {
         match msg {

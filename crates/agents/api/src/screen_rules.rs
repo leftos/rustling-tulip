@@ -153,7 +153,7 @@ pub struct ReadySignal {
 }
 
 impl Default for ReadySignal {
-    /// Claude's banner tuning: about 1 KB printed, then 1.5 s of silence.
+    /// A banner of about 1 KB printed, then 1.5 s of silence.
     fn default() -> Self {
         Self {
             min_output_bytes: 1024,

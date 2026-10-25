@@ -1,7 +1,7 @@
 //! "Start the daemon on login", so remote access is available without the client.
 //!
 //! The login launch starts the daemon inside the user's own interactive
-//! session, where it sees that user's `~/.claude` credentials and PATH and
+//! session, where it sees that user's agent credentials and PATH and
 //! binds the tailnet listener that `remote.json` opts into — no window opens,
 //! and no client has to be running. A SYSTEM service was rejected for that
 //! reason: session 0 cannot read the user's credentials.

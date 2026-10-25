@@ -258,7 +258,7 @@ async fn reattach_one(
 
 /// Resume an abandoned session: read its sidecar (spawn config +
 /// `last_prompt`), spawn a session with the same config — continuing the
-/// session's own Claude conversation when its transcript is still there, else
+/// session's own agent conversation when its transcript is still there, else
 /// replaying the captured first prompt — then hand the new session the old
 /// one's name, look and sidebar place, remove the abandoned placeholder from
 /// the registry and delete its on-disk sidecar.
@@ -434,7 +434,7 @@ fn keep_session_order(hub: &Hub, old_id: &str, new_id: &str) {
 
 /// Resume, one at a time and with no client, the sessions the last run lost
 /// with no end recorded (`ids`): each one that is an abandoned interactive
-/// Claude session whose own conversation can be continued in the folders it
+/// agent session whose own conversation can be continued in the folders it
 /// ran in is respawned continuing that conversation, in its panes. Any other
 /// stays abandoned, for Recover. Returns how many were resumed and how many
 /// were left, and keeps them in `Hub::start_resume`.

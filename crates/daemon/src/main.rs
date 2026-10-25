@@ -1,4 +1,4 @@
-//! rustling-tulipd: long-lived daemon that owns Claude Code sessions.
+//! rustling-tulipd: long-lived daemon that owns agent CLI sessions.
 
 // A login launch (the HKCU `Run` entry) must not flash a console window, so on
 // Windows the daemon is a GUI-subsystem exe. Every child it spawns sets

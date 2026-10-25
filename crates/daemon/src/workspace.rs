@@ -22,7 +22,7 @@ pub struct ResolvedMember {
     /// figures are measured against it — both of which apply precisely when
     /// the branch is already there.
     pub resolved_base: String,
-    /// Path where claude will run for this member. When `use_worktree` is
+    /// Path where the session will run for this member. When `use_worktree` is
     /// `true` this is the worktree already holding the branch under the
     /// worktrees root, or else the new dir
     /// `<worktrees_root>/wt.<branch-slug>/<workspace-slug>/<offset>`; when

@@ -1,4 +1,4 @@
-//! The HTTP `/hook` route: Claude Code hook reports, their bearer check and event time.
+//! The HTTP `/hook` route: agent hook reports, their bearer check and event time.
 use super::Hub;
 use axum::body::{Body, Bytes};
 use axum::extract::{Path as AxumPath, State};
@@ -10,7 +10,7 @@ use axum::response::{IntoResponse, Response};
 const HOOK_BODY_LIMIT: usize = 1 << 20;
 
 /// `POST /hook/{session_id}` — one agent hook event for a session, from a
-/// Claude Code session.
+/// hook-driven agent session.
 ///
 /// Auth mirrors `/shutdown`: the daemon's own token as a bearer, compared in
 /// constant time. The answer is `204` for any authenticated request, whatever

@@ -1,4 +1,4 @@
-//! In-memory session registry: spawned `claude` processes plus their state.
+//! In-memory session registry: spawned agent and shell processes plus their state.
 
 use crate::conversations::discovery::Discovery;
 use crate::headless::HeadlessHandle;
@@ -128,8 +128,8 @@ pub struct SessionRecord {
     pub terminal_title: Option<String>,
     /// Short program name driving this session. For `Mode::PlainShell`
     /// this is the shell label (`"pwsh"`, `"cmd"`, `"bash"`, …); for
-    /// `Mode::Interactive` / `Mode::Headless` it's the agent token
-    /// (`"claude"`). Mirrored on disk via
+    /// `Mode::Interactive` / `Mode::Headless` it's the agent token.
+    /// Mirrored on disk via
     /// [`crate::orphan::OrphanMeta::program_name`] so reattach restores
     /// the same chip after a daemon restart.
     pub program_name: Option<String>,
@@ -147,7 +147,7 @@ pub struct SessionRecord {
     /// UI can fall back to opening the spawn dialog with defaults.
     pub spawn_config: Option<SpawnConfig>,
     /// True iff this record was reattached as an abandoned session: the
-    /// previous daemon crashed mid-run and the `claude` process is gone.
+    /// previous daemon crashed mid-run and the agent process is gone.
     /// Surfaced to clients via `SessionSnapshot::is_abandoned`. Distinct
     /// from a normal stopped session (which exited gracefully) and from
     /// an orphan (whose process is still running, just detached).
@@ -1025,7 +1025,7 @@ async fn watch_exit(
 /// Build a [`SessionRecord`] from a sidecar [`OrphanMeta`] and surface it via
 /// `insert` so all attached clients see the reattached session in their next
 /// snapshot. The PTY/headless handles are `None` because we missed the spawn
-/// moment — the underlying `claude` is still running but its stdio is detached
+/// moment — the underlying agent is still running but its stdio is detached
 /// from us. Status is set conservatively to `Idle` until something proves
 /// otherwise.
 /// Resolve `(default_label, user_label, effective_label)` from an

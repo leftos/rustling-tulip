@@ -477,7 +477,7 @@ pub(crate) fn apply_details(
 
 /// A report naming a conversation moves the record to its id. A resumed one
 /// reports the id it already had, so the write is a no-op; a value that is
-/// not a plain id is refused, since it later becomes `claude --resume <id>`
+/// not a plain id is refused, since it later becomes the agent's resume argument
 /// and a transcript path.
 fn update_conversation_id(record: &mut SessionRecord, id: &str) {
     if agent_api::is_plain_id(id) && record.conversation_id.as_deref() != Some(id) {
