@@ -191,6 +191,40 @@ impl LiveDaemon {
         }
     }
 
+    /// Makes the fake tailscale's `whois` answer that every peer belongs to
+    /// a user other than the host's owner, for a daemon from
+    /// [`Self::start_remote`]. The shim reads its state on every run, so the
+    /// next `whois` already answers so.
+    pub fn make_peers_non_owners(&self) {
+        let path = self.root.join("fake-tailscale").join("state.json");
+        let text = std::fs::read_to_string(&path).expect("read the fake tailscale's state");
+        let mut state: Value =
+            serde_json::from_str(&text).expect("the fake tailscale's state is JSON");
+        state["whois_user_id"] = json!(OWNER_USER_ID + 1);
+        // Written beside it and renamed over, so a shim run mid-write never
+        // reads a truncated file.
+        let staged = path.with_extension("json.tmp");
+        std::fs::write(&staged, state.to_string()).expect("write the fake tailscale's new state");
+        std::fs::rename(&staged, &path).expect("replace the fake tailscale's state");
+    }
+
+    /// The daemon's log as written so far; empty before the daemon made the
+    /// file, which a poll for a line reads as "not logged yet".
+    pub fn daemon_log(&self) -> String {
+        let path = self.config_dir().join("logs").join("daemon.log");
+        match std::fs::read_to_string(&path) {
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+            read => read
+                .map_err(|err| format!("{}: {err}", path.display()))
+                .expect("reading the daemon log"),
+        }
+    }
+
+    /// Whether the daemon still answers `GET /health` on its loopback port.
+    pub fn answers_health(&self) -> bool {
+        health_ok(self.handshake.port)
+    }
+
     /// The test's scratch dir; fixtures go here.
     pub fn dir(&self) -> &Path {
         &self.root
@@ -316,6 +350,25 @@ impl LiveDaemon {
         );
         repo
     }
+}
+
+/// Commits every change in `repo`'s worktree, as [`LiveDaemon::git_fixture`]'s
+/// author.
+pub fn commit_all(repo: &Path, message: &str) {
+    git(repo, &["add", "-A"]);
+    git(
+        repo,
+        &[
+            "-c",
+            "user.name=rt-e2e",
+            "-c",
+            "user.email=rt-e2e@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            message,
+        ],
+    );
 }
 
 impl Drop for LiveDaemon {
@@ -767,9 +820,19 @@ impl LiveClient {
 
     /// Sends `msg` to the daemon as the client would.
     pub fn send(&self, msg: ClientMessage) {
+        self.command(NetCommand::Send(Box::new(msg)));
+    }
+
+    /// Hands `command` to the network thread, as the view does.
+    pub fn command(&self, command: NetCommand) {
         self.tx
-            .unbounded_send(NetCommand::Send(Box::new(msg)))
+            .unbounded_send(command)
             .expect("the network thread is running");
+    }
+
+    /// Every state the view was sent, oldest first.
+    pub fn states(&self) -> Vec<Connection> {
+        self.states.lock().expect("state log lock").clone()
     }
 
     /// The footer label of every state the view was sent, oldest first.
