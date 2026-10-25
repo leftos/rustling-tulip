@@ -4,10 +4,8 @@
 
 ## Release 2 — Remote mode and the agent seam
 
-- [/] RT-267 Move all Claude support behind the agent seam as its first plugin · release vNext
 - [ ] RT-243 Split tailnet Supervisor::run and carry the real CertFailed reason
 - [ ] RT-258 Remote mode: don't send this PC's remembered folders to a remote host
-- [/] RT-158 P6.6: Remote tests over a fake Tailscale, hand checklist, and the docs pass · release vNext
 - [ ] RT-244 Preset wizard: typed host paths instead of local pickers in remote mode
 - [ ] RT-278 Prove the daemon holds the token before a client reuses, retires or kills it
 - [ ] RT-343 Keep name, look and sidebar place when Recover respawns a session
@@ -274,3 +272,8 @@
 - [ ] RT-373 Check the Shell dialog's typed folder by the host's path rules on a remote host
 - [ ] RT-379 Make toast buttons pressed from Action Center reach the native client
 - [ ] RT-385 Wrap or scroll long code lines in the rendered Markdown view
+- [ ] RT-399 Let the desktop pairing dialog take a code minted by rustling-tulipd pair
+- [ ] RT-400 Send TLS close_notify when the daemon closes a served tailnet connection
+- [ ] RT-401 Route Settings refusals to the apply they answer with a request id
+- [ ] RT-402 Let pane focus follow the mouse pointer (opt-in setting)
+- [ ] RT-403 Take the prompt-echo marker for prompt navigation from the agent descriptor
