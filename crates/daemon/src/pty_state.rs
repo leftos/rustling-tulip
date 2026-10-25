@@ -10,8 +10,8 @@
 //! keeps a turn `Working` however long the PTY is silent.
 //!
 //! A plain shell ([`watch_plain_shell`]) runs the same screen check while
-//! `claude` runs in it: while hooks drive it, or once its screen has shown
-//! Claude for a whole confirmation window. Once the shell's prompt has been
+//! an agent runs in it: while hooks drive it, or once its screen has shown
+//! the agent for a whole confirmation window. Once the shell's prompt has been
 //! back on the grid's last row for a whole window, the shell is handed back
 //! to its heuristic classifier:
 //! - an output-vs-input byte-volume comparison: command output outpaces
@@ -118,7 +118,7 @@ pub struct AgentStreams {
 /// on its edge: once the session has entered or been taken off a prompt the
 /// screen still shows, a dialog raises nothing until a check has read
 /// something else (the owner's key leaves the answered dialog painted until
-/// Claude redraws). Every other change (leaving
+/// the agent redraws). Every other change (leaving
 /// `AwaitingInput`, `Working` to `Idle`) publishes only after
 /// [`CONFIRM_CHECKS`] agreeing checks at least [`CONFIRM_SPACING`] apart, or on
 /// the first agreeing check [`CONFIRM_CAP`] after the window opened, all read
@@ -157,11 +157,11 @@ pub fn watch(
 enum Mode {
     /// An agent session: the screen sets its status.
     Agent,
-    /// A plain shell running `claude`: the screen sets its status, until
-    /// Claude's screen is gone.
+    /// A plain shell running an agent: the screen sets its status, until
+    /// the agent's screen is gone.
     ShellAgent,
-    /// A plain shell not running `claude`: the screen is read only to spot
-    /// Claude.
+    /// A plain shell not running an agent: the screen is read only to spot
+    /// one.
     Shell,
 }
 
@@ -174,9 +174,9 @@ enum Checked {
     Gone,
     /// A shell's hook-driven flag moved since the last read.
     HooksFlipped,
-    /// A shell's screen showed Claude for a whole window.
+    /// A shell's screen showed an agent for a whole window.
     AgentShown,
-    /// Claude's screen was gone from a shell for a whole window, and the
+    /// The agent's screen was gone from a shell for a whole window, and the
     /// shell was handed back to its classifier.
     AgentEnded,
 }
@@ -188,7 +188,7 @@ enum Moved {
     HooksFlipped,
     /// The screen is held off.
     Held,
-    /// Nothing: a shell not running `claude` writes nothing from its screen.
+    /// Nothing: a shell not running an agent writes nothing from its screen.
     Ignored,
 }
 
@@ -238,9 +238,9 @@ struct Confirm {
 enum Target {
     /// The status the screen shows.
     Status(SessionStatus),
-    /// Claude's screen, in a shell not yet running `claude`.
+    /// An agent's screen, in a shell not yet running one.
     AgentShown,
-    /// Claude's screen gone, in a shell running `claude`.
+    /// The agent's screen gone, in a shell running an agent.
     AgentGone,
 }
 
@@ -433,8 +433,8 @@ impl ScreenWatch {
             Mode::Shell => self.watch_for_agent(read, shows_agent(&reading) && !prompt, quiet, now),
             Mode::ShellAgent if prompt => self.watch_for_agent_end(read, now),
             Mode::ShellAgent if !shows_agent(&reading) => {
-                // A Claude screen no rule knows, or Claude's title alone, with
-                // the shell's prompt not back: claude may still run. Nothing
+                // An agent screen no rule knows, or the agent's title alone, with
+                // the shell's prompt not back: the agent may still run. Nothing
                 // writes, and any open window waits for the next check.
                 self.confirm.candidate = None;
                 Checked::Done
@@ -520,8 +520,8 @@ impl ScreenWatch {
         }
     }
 
-    /// In a shell not running `claude`, count a settled check whose screen
-    /// shows Claude with no shell prompt under it (`shown`); answers
+    /// In a shell not running an agent, count a settled check whose screen
+    /// shows an agent with no shell prompt under it (`shown`); answers
     /// [`Checked::AgentShown`] once a whole window has. A check inside a
     /// burst of output neither counts nor breaks the window.
     fn watch_for_agent(
@@ -546,7 +546,7 @@ impl ScreenWatch {
         }
     }
 
-    /// In a shell running `claude`, count a check whose last row is the
+    /// In a shell running an agent, count a check whose last row is the
     /// shell's prompt; once a whole window has, hand the shell back to its classifier
     /// (see [`hand_shell_back`]) and answer [`Checked::AgentEnded`]. A write
     /// that lands is this watcher's own, so its broadcast starts no hold.
@@ -603,7 +603,7 @@ impl ScreenWatch {
 
     /// The record moved from `before` to what the wake now holds. A shell's
     /// hook-driven flip is left to the shell watcher; a shell not running
-    /// `claude` ignores any other move; otherwise the screen is held off.
+    /// an agent ignores any other move; otherwise the screen is held off.
     fn record_moved(&mut self, before: Option<StatusRead>, mode: Mode, now: Instant) -> Moved {
         let hooks = |read: Option<StatusRead>| read.is_some_and(|read| read.hook_driven);
         if mode != Mode::Agent && hooks(before) != hooks(self.wake.seen) {
@@ -619,7 +619,7 @@ impl ScreenWatch {
     /// Another writer moved the record from `before` to what the wake last
     /// saw: hold off the screen. A move off `AwaitingInput` while the screen
     /// showed the dialog (the owner's key) disarms the dialog edge, since the
-    /// dialog stays painted until Claude redraws.
+    /// dialog stays painted until the agent redraws.
     fn foreign_write(&mut self, before: Option<StatusRead>, now: Instant) {
         let awaiting = |read: Option<StatusRead>| {
             read.is_some_and(|read| read.status == SessionStatus::AwaitingInput)
@@ -645,7 +645,7 @@ fn screen_target(reading: &Reading) -> Option<SessionStatus> {
     }
 }
 
-/// Whether a reading comes from Claude's screen: a rule over the screen body
+/// Whether a reading comes from the agent's screen: a rule over the screen body
 /// matched, a state or an overlay. A title alone, which outlives the CLI that
 /// set it, does not count.
 fn shows_agent(reading: &Reading) -> bool {
@@ -708,8 +708,8 @@ fn apply_screen_status(
     wrote
 }
 
-/// Hand a shell whose `claude` has ended back to its own classifier: clear
-/// `hook_driven` and `background` (claude's background tasks ended with it),
+/// Hand a shell whose agent has ended back to its own classifier: clear
+/// `hook_driven` and `background` (the agent's background tasks ended with it),
 /// and end a `Working` or `AwaitingInput` turn at `Idle` through
 /// [`apply_watcher_status`] (an `Idle` stays as it is). Refused, like
 /// [`apply_screen_status`], unless the record still holds what `from` read;
@@ -779,19 +779,19 @@ pub fn agent_up(registry: &SessionRegistry, session_id: &str) -> bool {
 /// Spawn a background task that sets a plain shell's status.
 ///
 /// The task feeds the shell's grid from its PTY output, in every mode. While
-/// `claude` runs in the shell (hooks drive it, or its screen showed Claude for
-/// a whole window without them), it runs the agent watcher's screen check
+/// an agent runs in the shell (hooks drive it, or its screen showed the agent
+/// for a whole window without them), it runs the agent watcher's screen check
 /// (see [`watch`]), and `attention_tx` receives one event each time the screen
 /// moves the session into `AwaitingInput`. Once the grid's last non-empty row
-/// has been the shell's prompt for a whole window, `claude` has ended (its
+/// has been the shell's prompt for a whole window, the agent has ended (its
 /// last frame stays painted above the prompt): the shell is handed back to
-/// its classifier (see [`hand_shell_back`]). A screen no Claude rule matches,
-/// or Claude's title alone, with no prompt back, keeps `claude` running.
+/// its classifier (see [`hand_shell_back`]). A screen no agent rule matches,
+/// or the agent's title alone, with no prompt back, keeps the agent running.
 /// Without hooks, the shell enters that mode once settled output (read after
-/// [`CHECK_DEBOUNCE`] of quiet, never inside a burst) has shown Claude's
+/// [`CHECK_DEBOUNCE`] of quiet, never inside a burst) has shown the agent's
 /// screen, with no shell prompt under it, for a whole window.
 ///
-/// A shell not running `claude` keeps its classifier: command output sets the
+/// A shell not running an agent keeps its classifier: command output sets the
 /// status to `Working`, while echoed input and prompt redraws leave it
 /// `Idle`, and [`SHELL_IDLE_AFTER`] of silence ends a `Working`. `initial` is
 /// the status the session's record already carries; the classifier only
@@ -832,7 +832,7 @@ pub fn watch_plain_shell(
     tokio::spawn(async move { watcher.run(&mut output).await });
 }
 
-/// One plain shell's status watcher: the screen check it runs while `claude`
+/// One plain shell's status watcher: the screen check it runs while an agent
 /// runs in the shell, and the classifier it runs otherwise.
 struct ShellWatcher {
     watch: ScreenWatch,
@@ -850,14 +850,14 @@ struct ShellWatcher {
     in_window: VecDeque<(Instant, u32)>,
     out_window: VecDeque<(Instant, u32)>,
     title_activity: TitleActivity,
-    /// Whether the screen showed Claude for a whole window while hooks were
-    /// not driving the shell: `claude` started without hooks.
+    /// Whether the screen showed an agent for a whole window while hooks were
+    /// not driving the shell: the agent started without hooks.
     agent_on_screen: bool,
 }
 
 impl ShellWatcher {
-    /// Whether `claude` runs in the shell: hooks drive it, or its screen
-    /// showed Claude.
+    /// Whether an agent runs in the shell: hooks drive it, or its screen
+    /// showed one.
     fn mode(&self) -> Mode {
         let hooks = self.watch.wake.seen.is_some_and(|read| read.hook_driven);
         if hooks || self.agent_on_screen {
@@ -927,7 +927,7 @@ impl ShellWatcher {
     }
 
     /// Feed one chunk into the grid and the volume windows, run the classifier
-    /// on it while `claude` is not running, and run the screen check if it is
+    /// on it while no agent is running, and run the screen check if it is
     /// due. A replay chunk only feeds the grid. Breaks once the record is gone.
     fn on_output(&mut self, bytes: &[u8], mode: Mode) -> ControlFlow<()> {
         let now = Instant::now();
@@ -996,7 +996,7 @@ impl ShellWatcher {
             Checked::Done => {}
             Checked::HooksFlipped => self.hooks_flipped(now),
             Checked::AgentShown => {
-                // Claude mode reads the screen at once, from a fresh window.
+                // Agent mode reads the screen at once, from a fresh window.
                 self.agent_on_screen = true;
                 self.watch.confirm.check_at = Some(now);
             }
@@ -1031,7 +1031,7 @@ impl ShellWatcher {
     }
 
     /// The classifier takes the shell back: the volume, the title and the
-    /// silence it saw while `claude` ran are not the shell's activity.
+    /// silence it saw while the agent ran are not the shell's activity.
     fn start_shell_mode(&mut self, now: Instant) {
         self.in_window.clear();
         self.out_window.clear();

@@ -173,7 +173,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
 
     // Bind the child (and every descendant) to a Job object with
     // KILL_ON_JOB_CLOSE so killing the PTY child — or the tracer just
-    // exiting — takes out the entire process tree. Without this, claude
+    // exiting — takes out the entire process tree. Without this, the agent's
     // grandchildren (node.exe from pnpm install, cargo from a build,
     // dev servers, the user's editor opened through `code .`) survive
     // TerminateProcess on the PTY child and pin worktree files open,

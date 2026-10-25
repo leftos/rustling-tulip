@@ -789,9 +789,9 @@ fn an_env_reference_hides_the_note_and_is_sent_verbatim(cx: &mut TestAppContext)
     let mut h = Harness::with(cx, &dir, &fixture());
     open(&mut h);
     suggest(&mut h, "r1", "wt/brave-fox");
-    add_env_row(&mut h, "ANTHROPIC_API_KEY", "sk-ant-x");
+    add_env_row(&mut h, "EXAMPLE_API_KEY", "sk-dummy");
     assert!(drawn(&mut h, "spawn-env-note-0"));
-    h.set_clipboard("${env:ANTHROPIC_API_KEY}");
+    h.set_clipboard("${env:EXAMPLE_API_KEY}");
     h.keys(
         "backspace backspace backspace backspace backspace backspace backspace backspace ctrl-v",
     );
@@ -804,8 +804,8 @@ fn an_env_reference_hides_the_note_and_is_sent_verbatim(cx: &mut TestAppContext)
     assert_eq!(
         request.extra_env,
         [(
-            "ANTHROPIC_API_KEY".to_owned(),
-            "${env:ANTHROPIC_API_KEY}".to_owned()
+            "EXAMPLE_API_KEY".to_owned(),
+            "${env:EXAMPLE_API_KEY}".to_owned()
         )]
     );
 }

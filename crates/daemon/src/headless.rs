@@ -267,11 +267,14 @@ mod tests {
             program: "claude".to_owned(),
             args: Vec::new(),
             cwd: PathBuf::from("."),
-            env: vec![("ANTHROPIC_API_KEY".to_owned(), "sk-ant-hunter2".to_owned())],
+            env: vec![(
+                "EXAMPLE_API_KEY".to_owned(),
+                "sk-example-hunter2".to_owned(),
+            )],
             agent: agent_registry::default_agent(),
         };
         let shown = format!("{spec:?}");
-        assert!(shown.contains("ANTHROPIC_API_KEY"), "{shown}");
+        assert!(shown.contains("EXAMPLE_API_KEY"), "{shown}");
         assert!(!shown.contains("hunter2"), "{shown}");
     }
 

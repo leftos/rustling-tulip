@@ -2,7 +2,7 @@
 //!
 //! The daemon spawns one of these for every interactive and plain-shell
 //! session. The tracer owns the PTY master and the session's child process
-//! (`claude`, `codex`, a shell). When the daemon dies, the tracer keeps
+//! (an agent CLI or a shell). When the daemon dies, the tracer keeps
 //! running and buffers child output to a ring; when a new daemon starts, it
 //! reconnects over the same local socket and the tracer replays the buffer.
 //! The daemon/tracer wire contract lives in `tracer-protocol` (see
@@ -49,7 +49,7 @@ struct Cli {
     rows: u16,
 
     /// Program to spawn followed by its arguments. The tracer just shells
-    /// out — it doesn't know anything about claude/codex specifics; the
+    /// out — it doesn't know anything about agent specifics; the
     /// daemon's spawn pipeline builds the argv.
     #[arg(trailing_var_arg = true, required = true)]
     program_and_args: Vec<String>,

@@ -3267,7 +3267,7 @@ mod tests {
         let req = env_spawn(
             single_target(true, None),
             SessionMode::Interactive,
-            env(&[("ANTHROPIC_API_KEY", UNSET_REF)]),
+            env(&[("EXAMPLE_API_KEY", UNSET_REF)]),
             Some("rq-env"),
         );
         // Straight into `spawn_session`, the path every replay (duplicate,
@@ -3806,13 +3806,13 @@ mod tests {
         }
     }
 
-    /// An interactive spawn onto `target` whose `ANTHROPIC_API_KEY` row is the
+    /// An interactive spawn onto `target` whose `EXAMPLE_API_KEY` row is the
     /// literal sentinel.
     fn secret_literal_spawn(target: SpawnTarget) -> SpawnRequest {
         env_spawn(
             target,
             SessionMode::Interactive,
-            env(&[("ANTHROPIC_API_KEY", SECRET_SENTINEL)]),
+            env(&[("EXAMPLE_API_KEY", SECRET_SENTINEL)]),
             None,
         )
     }
@@ -4082,7 +4082,7 @@ mod tests {
             .state
             .with_persisted(|s| s.repos[0].last_spawn_config.clone())
             .expect("last spawn config stored");
-        assert_eq!(stored.extra_env[0].0, "ANTHROPIC_API_KEY");
+        assert_eq!(stored.extra_env[0].0, "EXAMPLE_API_KEY");
         record_stopped_session(&hub, "sealed", &stored);
         let recorded = hub
             .sessions
@@ -4121,7 +4121,7 @@ mod tests {
     async fn the_child_gets_the_sealed_value() {
         let (_lock, _secrets_dir) = env_secrets::test_support::scratch_async("seal-child").await;
         let (hub, _scratch, _repo) = env_ref_repo_hub("seal-child");
-        let id = env_secrets::seal("ANTHROPIC_API_KEY", SECRET_SENTINEL).expect("seal the row");
+        let id = env_secrets::seal("EXAMPLE_API_KEY", SECRET_SENTINEL).expect("seal the row");
         let mut target = single_target(false, None);
         if let SpawnTarget::Single { branch_name, .. } = &mut target {
             "main".clone_into(branch_name);
@@ -4129,7 +4129,7 @@ mod tests {
         let req = env_spawn(
             target,
             SessionMode::Interactive,
-            env(&[("ANTHROPIC_API_KEY", &secret_ref(&id))]),
+            env(&[("EXAMPLE_API_KEY", &secret_ref(&id))]),
             None,
         );
         let _ = child_env_probe::take();
@@ -4138,7 +4138,7 @@ mod tests {
             .expect_err("no tracer can start");
         let child = child_env_probe::take().expect("a spawn spec's env was built");
         assert_eq!(
-            child_value(&child, "ANTHROPIC_API_KEY").as_deref(),
+            child_value(&child, "EXAMPLE_API_KEY").as_deref(),
             Some(SECRET_SENTINEL),
             "a secret reference resolves to the value it stands for"
         );
@@ -4222,7 +4222,7 @@ mod tests {
         let folder = scratch.path().join("replay");
         std::fs::create_dir_all(&folder).expect("create folder");
         let folder = folder.to_string_lossy().into_owned();
-        let id = env_secrets::seal("ANTHROPIC_API_KEY", SECRET_SENTINEL).expect("seal the row");
+        let id = env_secrets::seal("EXAMPLE_API_KEY", SECRET_SENTINEL).expect("seal the row");
         let target = SpawnTarget::Standalone {
             cwd: Some(folder.clone()),
             add_dirs: Vec::new(),
@@ -4230,7 +4230,7 @@ mod tests {
         let request = env_spawn(
             target.clone(),
             SessionMode::Interactive,
-            env(&[("ANTHROPIC_API_KEY", &secret_ref(&id))]),
+            env(&[("EXAMPLE_API_KEY", &secret_ref(&id))]),
             None,
         );
         let stored = protocol::SpawnConfig::from_request(&request);
@@ -4250,7 +4250,7 @@ mod tests {
         assert_eq!(
             child_value(
                 &child_env_probe::take().expect("the duplicate built an env"),
-                "ANTHROPIC_API_KEY"
+                "EXAMPLE_API_KEY"
             )
             .as_deref(),
             Some(SECRET_SENTINEL),
@@ -4269,7 +4269,7 @@ mod tests {
         assert_eq!(
             child_value(
                 &child_env_probe::take().expect("the resume built an env"),
-                "ANTHROPIC_API_KEY"
+                "EXAMPLE_API_KEY"
             )
             .as_deref(),
             Some(SECRET_SENTINEL),
@@ -4285,7 +4285,7 @@ mod tests {
         let req = env_spawn(
             single_target(true, None),
             SessionMode::Interactive,
-            env(&[("ANTHROPIC_API_KEY", &secret_ref(MISSING_SECRET_ID))]),
+            env(&[("EXAMPLE_API_KEY", &secret_ref(MISSING_SECRET_ID))]),
             Some("rq-secret"),
         );
         // Straight into `spawn_session`, the path every replay takes, past the
@@ -4305,7 +4305,7 @@ mod tests {
             panic!("expected action_failed");
         };
         assert_eq!(title, "A saved secret is missing");
-        assert!(detail.contains("`ANTHROPIC_API_KEY`"), "{detail}");
+        assert!(detail.contains("`EXAMPLE_API_KEY`"), "{detail}");
         assert!(detail.contains("Windows Credential Manager"), "{detail}");
         assert!(!detail.contains(SECRET_SENTINEL), "{detail}");
         assert!(hint.is_some());
@@ -4341,7 +4341,7 @@ mod tests {
         let req = env_spawn(
             single_target(false, None),
             SessionMode::Interactive,
-            env(&[("ANTHROPIC_API_KEY", &secret_ref(MISSING_SECRET_ID))]),
+            env(&[("EXAMPLE_API_KEY", &secret_ref(MISSING_SECRET_ID))]),
             Some("rq-secret"),
         );
         let reply = dispatch_one(&hub, ClientMessage::SpawnSession(req)).await;
@@ -4349,7 +4349,7 @@ mod tests {
             panic!("the missing secret is refused before the confirm, got {reply:?}");
         };
         assert_eq!(title, "A saved secret is missing");
-        assert!(detail.contains("`ANTHROPIC_API_KEY`"), "{detail}");
+        assert!(detail.contains("`EXAMPLE_API_KEY`"), "{detail}");
         assert!(hub.sessions.snapshots().is_empty(), "nothing was spawned");
     }
 
@@ -4366,7 +4366,7 @@ mod tests {
         let req = env_spawn(
             single_target(false, None),
             SessionMode::Interactive,
-            env(&[("ANTHROPIC_API_KEY", &too_long)]),
+            env(&[("EXAMPLE_API_KEY", &too_long)]),
             Some("rq-long"),
         );
         let reply = dispatch_one(&hub, ClientMessage::SpawnSession(req)).await;
@@ -4380,7 +4380,7 @@ mod tests {
             panic!("the over-long secret is refused before the confirm, got {reply:?}");
         };
         assert_eq!(title, "Could not save a secret");
-        assert!(detail.contains("ANTHROPIC_API_KEY"), "{detail}");
+        assert!(detail.contains("EXAMPLE_API_KEY"), "{detail}");
         assert!(detail.contains("too long"), "{detail}");
         assert!(
             !detail.contains(&too_long),

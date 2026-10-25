@@ -1133,8 +1133,8 @@ mod tests {
             program: "prog".to_string(),
             args: Vec::new(),
             cwd: PathBuf::from("cwd"),
-            env: vec![("ANTHROPIC_API_KEY".to_owned(), "sk-ant-row".to_owned())],
-            env_remove: vec!["ANTHROPIC_API_KEY".to_owned()],
+            env: vec![("EXAMPLE_API_KEY".to_owned(), "sk-example-row".to_owned())],
+            env_remove: vec!["EXAMPLE_API_KEY".to_owned()],
             cols: 80,
             rows: 24,
         };
@@ -1148,7 +1148,7 @@ mod tests {
         });
         let env: Vec<(&OsStr, Option<&OsStr>)> = cmd.get_envs().collect();
         assert!(
-            env.contains(&(OsStr::new("ANTHROPIC_API_KEY"), None)),
+            env.contains(&(OsStr::new("EXAMPLE_API_KEY"), None)),
             "the inherited variable is removed: {env:?}"
         );
     }

@@ -2419,13 +2419,13 @@ mod tests {
             &hub,
             "gone",
             &folder,
-            ("ANTHROPIC_API_KEY", secret_ref(MISSING_SECRET_ID)),
+            ("EXAMPLE_API_KEY", secret_ref(MISSING_SECRET_ID)),
         );
         let before = std::fs::read(&hub.dirs.state_file).ok();
         let mut events = hub.state_events.subscribe();
 
         let error = recover_registering(&hub, "gone", &folder).await;
-        assert!(error.contains("`ANTHROPIC_API_KEY`"), "{error}");
+        assert!(error.contains("`EXAMPLE_API_KEY`"), "{error}");
         assert!(error.contains("A saved secret is missing"), "{error}");
         assert_nothing_registered(&hub, before.as_deref(), &mut events);
     }

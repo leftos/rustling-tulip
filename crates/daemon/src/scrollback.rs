@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use tracing::warn;
 
 /// 2 MB hard cap on scrollback file size. Tunable; balances "users see
-/// enough history" against "we don't waste disk when claude prints a lot".
+/// enough history" against "we don't waste disk when an agent prints a lot".
 const MAX_SIZE: u64 = 2 * 1024 * 1024;
 /// When trimming, keep this many bytes (the most recent ones). The 1.5 MB
 /// floor + 2 MB ceiling means a trim happens at most once per ~512 KB of

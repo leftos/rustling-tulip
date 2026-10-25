@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 /// Resolve an agent-program name into something `CreateProcess` /
 /// portable-pty can actually launch. Returns `(program, prepended_args)`.
 ///
-/// On Windows, agent CLIs distributed via npm (e.g. claude from
-/// `@anthropic-ai/claude-code`) land on
+/// On Windows, agent CLIs distributed via npm (e.g. a scoped package
+/// such as `@scope/agent-cli`) land on
 /// PATH as `.cmd` shims. Two layers of fixup matter here:
 ///
 /// 1. `CreateProcess` does NOT execute `.cmd` or `.bat` directly, so
@@ -28,8 +28,8 @@ use std::path::{Path, PathBuf};
 ///
 /// We dodge both by, when the `.cmd` is an npm-style shim, peeking
 /// into the sibling `node_modules/.../bin/` directory and spawning
-/// either the native `<stem>.exe` (newer claude-code distribution) or
-/// `node.exe <stem>.js` (older claude) directly. That removes
+/// either the native `<stem>.exe` (a native-binary distribution) or
+/// `node.exe <stem>.js` (a JS-only package) directly. That removes
 /// cmd.exe from the chain entirely.
 ///
 /// Order of preference for a `.cmd` shim:
@@ -73,10 +73,10 @@ pub(super) fn resolve_agent_program(name: &str) -> (String, Vec<String>) {
 /// the underlying program the shim ultimately invokes. Two layouts
 /// are supported, in this order of preference:
 ///
-/// - Native binary distribution (`@anthropic-ai/claude-code` since
-///   ~2026): `<dir>/node_modules/<pkg>/bin/<stem>.exe`. Returned as
+/// - Native binary distribution (a package that ships its own exe):
+///   `<dir>/node_modules/<pkg>/bin/<stem>.exe`. Returned as
 ///   `(<exe>, [])` — no node prefix.
-/// - JS entrypoint (older claude): `<dir>/node_modules/<pkg>/
+/// - JS entrypoint (a JS-only package): `<dir>/node_modules/<pkg>/
 ///   bin/<stem>.js`. Returned as `(node.exe, [<js>])`. The `node.exe`
 ///   resolution prefers a sibling next to the shim (nvm-style install
 ///   layout) over a PATH-resolved one, so node-version managers stay
@@ -109,7 +109,7 @@ fn npm_shim_to_native_program(shim: &Path) -> Option<(PathBuf, Vec<String>)> {
         let name = entry.file_name();
         let name_str = name.to_str()?;
         if name_str.starts_with('@') {
-            // Scoped: walk one more level (e.g. node_modules/@anthropic-ai/claude-code/bin/claude.js).
+            // Scoped: walk one more level (e.g. node_modules/@scope/agent-cli/bin/agent.js).
             if let Ok(inner) = std::fs::read_dir(&p) {
                 for sub in inner.flatten() {
                     let bin = sub.path().join("bin");

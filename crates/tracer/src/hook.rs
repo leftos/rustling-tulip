@@ -1,4 +1,4 @@
-//! `rt-tracer hook`: the shim Claude Code's injected command hooks run.
+//! `rt-tracer hook`: the shim an agent's injected command hooks run.
 //!
 //! An interactive agent session is spawned with a `--settings` file whose
 //! hooks are exec-form command hooks running

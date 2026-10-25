@@ -135,7 +135,7 @@ impl AppState {
         };
         // Migrate any Windows verbatim-prefixed paths persisted by an older
         // build that called `canonicalize` without simplifying. Without this
-        // the `claude` CLI still sees `\\?\…` as its cwd on the next spawn,
+        // the agent CLI still sees `\\?\…` as its cwd on the next spawn,
         // producing a different per-project memory key than running it by hand.
         let migrated = migrate_paths_in_place(&mut inner);
         let state = Self {

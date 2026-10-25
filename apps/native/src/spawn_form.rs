@@ -4147,7 +4147,7 @@ mod tests {
 
     #[test]
     fn an_unticked_pattern_row_is_not_listed_but_warned() {
-        let mut form = env_form(&[("ANTHROPIC_API_KEY", "sk-ant-x")]);
+        let mut form = env_form(&[("EXAMPLE_API_KEY", "sk-example-x")]);
         assert_eq!(form.env_row_note(0), Some(EnvRowNote::Saved));
         press(&mut form, &Control::EnvSecret(0));
         assert!(request_of(&form).secret_env_keys.is_empty(), "not listed");

@@ -4,7 +4,7 @@
 //!
 //! Phase C.1's empirical spike will pick the actual cap (the design doc
 //! debates 2 MB vs 4 MB); for now we default to 4 MB which buys roughly
-//! 30 minutes of typical claude output under light load.
+//! 30 minutes of typical agent output under light load.
 
 const DEFAULT_CAP_BYTES: usize = 4 * 1024 * 1024;
 

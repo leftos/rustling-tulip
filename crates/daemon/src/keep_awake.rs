@@ -1,6 +1,6 @@
 //! Keep the host awake while sessions need it, as the user's mode says.
 //!
-//! A `claude` session mid-task — or parked at its prompt waiting for the user
+//! An agent session mid-task — or parked at its prompt waiting for the user
 //! to come back — is silently killed when the machine idle-sleeps. The daemon
 //! owns this hold rather than the app window because the daemon is the process
 //! whose lifetime matches "rustling-tulip is running": it outlives the window

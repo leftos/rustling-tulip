@@ -2,7 +2,7 @@
 //!
 //! Why this exists: portable-pty's `Child::kill()` translates to
 //! `TerminateProcess`, which only kills the immediate child of the
-//! `ConPTY`. Anything claude (or the user's shell) spawned —
+//! `ConPTY`. Anything the agent (or the user's shell) spawned —
 //! `node.exe` from `pnpm install`, cargo from a `cargo build`, dev
 //! servers, GUI editors opened via `code .` — keeps running with its
 //! cwd still pointing inside the worktree. Those open handles wedge

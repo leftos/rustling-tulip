@@ -43,9 +43,9 @@ pub struct Dirs {
 /// the path can be safely represented in normal form. `std::fs::canonicalize`
 /// on Windows always returns the verbatim form, which is correct for the
 /// filesystem but bleeds into anything that uses the path as an *identifier* —
-/// most notably the `claude` CLI, which encodes the cwd into a per-project
-/// memory key under `~/.claude/projects/<encoded-cwd>/`. A verbatim cwd
-/// produces a different key from what the user gets running `claude` by hand,
+/// most notably an agent CLI that encodes the cwd into a per-project memory
+/// key under its own config dir. A verbatim cwd produces a different key
+/// from what the user gets running the agent by hand,
 /// so memories, MCP state, and session history don't carry over.
 ///
 /// Conversions:

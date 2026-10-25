@@ -56,7 +56,7 @@ pub fn reference(value: &str) -> Option<Reference> {
 
 /// Whether `key` names a credential: any whole `_`-delimited segment of it
 /// equals `KEY`, `TOKEN`, `SECRET` or `PASSWORD`, in any case.
-/// `ANTHROPIC_API_KEY` and `db_password` match; `KEYBOARD` and
+/// `EXAMPLE_API_KEY` and `db_password` match; `KEYBOARD` and
 /// `MONKEY_BUSINESS` do not.
 #[must_use]
 pub fn is_secret_key(key: &str) -> bool {
@@ -137,13 +137,13 @@ mod tests {
         );
 
         // Plain literals.
-        assert_eq!(reference("sk-ant-literal"), None);
+        assert_eq!(reference("sk-example-literal"), None);
         assert_eq!(reference(""), None);
     }
 
     #[test]
     fn secret_key_matches_whole_segments_only() {
-        assert!(is_secret_key("ANTHROPIC_API_KEY"));
+        assert!(is_secret_key("EXAMPLE_API_KEY"));
         assert!(is_secret_key("db_password"));
         assert!(is_secret_key("GH_TOKEN"));
         assert!(is_secret_key("MY_SECRET"));

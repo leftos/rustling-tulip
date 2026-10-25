@@ -623,7 +623,7 @@ mod tests {
     #[test]
     fn a_sealed_value_opens() {
         let (_lock, _dir) = scratch("open");
-        let id = seal("ANTHROPIC_API_KEY", VALUE_SENTINEL).expect("seals");
+        let id = seal("EXAMPLE_API_KEY", VALUE_SENTINEL).expect("seals");
         assert_eq!(id.len(), 32, "the id is a 32-character UUID: {id}");
         assert_eq!(
             open(&id).expect("the sealed value opens").expose(),
@@ -634,23 +634,23 @@ mod tests {
     #[test]
     fn the_same_key_and_value_reuse_the_id() {
         let (_lock, _dir) = scratch("reuse");
-        let first = seal("ANTHROPIC_API_KEY", VALUE_SENTINEL).expect("seals");
-        let second = seal("ANTHROPIC_API_KEY", VALUE_SENTINEL).expect("re-seals");
+        let first = seal("EXAMPLE_API_KEY", VALUE_SENTINEL).expect("seals");
+        let second = seal("EXAMPLE_API_KEY", VALUE_SENTINEL).expect("re-seals");
         assert_eq!(first, second, "one entry per distinct value");
     }
 
     #[test]
     fn another_value_gets_a_new_id() {
         let (_lock, _dir) = scratch("distinct");
-        let first = seal("ANTHROPIC_API_KEY", VALUE_SENTINEL).expect("seals");
-        let second = seal("ANTHROPIC_API_KEY", "another-value").expect("seals");
+        let first = seal("EXAMPLE_API_KEY", VALUE_SENTINEL).expect("seals");
+        let second = seal("EXAMPLE_API_KEY", "another-value").expect("seals");
         assert_ne!(first, second);
     }
 
     #[test]
     fn delete_removes_the_entry_and_its_index_line() {
         let (_lock, _dir) = scratch("delete");
-        let id = seal("ANTHROPIC_API_KEY", VALUE_SENTINEL).expect("seals");
+        let id = seal("EXAMPLE_API_KEY", VALUE_SENTINEL).expect("seals");
         delete(&id).expect("deletes");
         assert!(open(&id).is_none(), "the store no longer holds it");
         let index = index_text();
@@ -666,11 +666,11 @@ mod tests {
     #[test]
     fn the_index_file_bytes_never_contain_the_value() {
         let (_lock, _dir) = scratch("index");
-        let id = seal("ANTHROPIC_API_KEY", VALUE_SENTINEL).expect("seals");
+        let id = seal("EXAMPLE_API_KEY", VALUE_SENTINEL).expect("seals");
         let index = index_text();
         assert!(!index.contains(VALUE_SENTINEL), "{index}");
         assert!(index.contains(&id), "{index}");
-        assert!(index.contains("ANTHROPIC_API_KEY"), "{index}");
+        assert!(index.contains("EXAMPLE_API_KEY"), "{index}");
     }
 
     #[test]
@@ -681,15 +681,15 @@ mod tests {
         assert!(seal("RT_TEST_LONG_KEY", &just_fits).is_ok());
 
         let too_long = "a".repeat(MAX_VALUE_UNITS + 1);
-        let refusal = seal("ANTHROPIC_API_KEY", &too_long).expect_err("refuses the value");
-        assert!(refusal.detail.contains("ANTHROPIC_API_KEY"), "{refusal:?}");
+        let refusal = seal("EXAMPLE_API_KEY", &too_long).expect_err("refuses the value");
+        assert!(refusal.detail.contains("EXAMPLE_API_KEY"), "{refusal:?}");
         assert!(refusal.detail.contains("too long"), "{refusal:?}");
         assert!(
             !refusal.detail.contains(&too_long),
             "the refusal never carries the value: {refusal:?}"
         );
         let index = index_text();
-        assert!(!index.contains("ANTHROPIC_API_KEY"), "{index}");
+        assert!(!index.contains("EXAMPLE_API_KEY"), "{index}");
     }
 
     /// The pre-check selects and refuses exactly what sealing does, and writes
@@ -705,7 +705,7 @@ mod tests {
             .borrow()
             .len();
 
-        let rows = vec![("ANTHROPIC_API_KEY".to_owned(), VALUE_SENTINEL.to_owned())];
+        let rows = vec![("EXAMPLE_API_KEY".to_owned(), VALUE_SENTINEL.to_owned())];
         check_sealable(&rows, &[]).expect("a sealable row passes");
         // The same selection `seal_rows` applies: a plain row, a reference and
         // an empty value are none of its business.
@@ -728,9 +728,9 @@ mod tests {
         );
 
         let too_long = "a".repeat(MAX_VALUE_UNITS + 1);
-        let refusal = check_sealable(&[("ANTHROPIC_API_KEY".to_owned(), too_long)], &[])
+        let refusal = check_sealable(&[("EXAMPLE_API_KEY".to_owned(), too_long)], &[])
             .expect_err("an over-long value refuses");
-        assert!(refusal.detail.contains("ANTHROPIC_API_KEY"), "{refusal:?}");
+        assert!(refusal.detail.contains("EXAMPLE_API_KEY"), "{refusal:?}");
         assert!(refusal.detail.contains("too long"), "{refusal:?}");
         assert!(refusal.hint.is_none(), "{refusal:?}");
         assert!(!index.exists(), "a refusal writes nothing either");
@@ -744,12 +744,12 @@ mod tests {
     #[test]
     fn debug_output_holds_no_value() {
         let (_lock, _dir) = scratch("debug");
-        let id = seal("ANTHROPIC_API_KEY", VALUE_SENTINEL).expect("seals");
+        let id = seal("EXAMPLE_API_KEY", VALUE_SENTINEL).expect("seals");
         let entries = read_index(&context().expect("resolves").index).expect("the index reads");
         let shown = format!("{entries:?}");
         assert!(!shown.contains(VALUE_SENTINEL), "{shown}");
         assert!(shown.contains(&id), "{shown}");
-        assert!(shown.contains("ANTHROPIC_API_KEY"), "{shown}");
+        assert!(shown.contains("EXAMPLE_API_KEY"), "{shown}");
     }
 
     #[test]
@@ -825,16 +825,16 @@ mod tests {
     #[test]
     fn a_failed_store_delete_keeps_the_index_line() {
         let (_lock, _dir) = scratch("delete-failure");
-        let id = seal("ANTHROPIC_API_KEY", VALUE_SENTINEL).expect("seals");
+        let id = seal("EXAMPLE_API_KEY", VALUE_SENTINEL).expect("seals");
         inject_store_error(
-            "ANTHROPIC_API_KEY",
+            "EXAMPLE_API_KEY",
             &id,
             KeyringError::Invalid("injected".to_owned(), "the store refused".to_owned()),
         );
 
         let refusal = delete(&id).expect_err("the store refused the removal");
         assert!(
-            format!("{refusal:#}").contains("ANTHROPIC_API_KEY"),
+            format!("{refusal:#}").contains("EXAMPLE_API_KEY"),
             "{refusal:#}"
         );
         assert!(index_text().contains(&id), "the line survives for a retry");
@@ -851,9 +851,9 @@ mod tests {
     #[test]
     fn delete_clears_a_line_whose_credential_is_gone() {
         let (_lock, _dir) = scratch("delete-gone");
-        let id = seal("ANTHROPIC_API_KEY", VALUE_SENTINEL).expect("seals");
+        let id = seal("EXAMPLE_API_KEY", VALUE_SENTINEL).expect("seals");
         let service = service_for(&paths::config_dir().expect("the config dir resolves"));
-        Entry::new(&service, &user("ANTHROPIC_API_KEY", &id))
+        Entry::new(&service, &user("EXAMPLE_API_KEY", &id))
             .expect("the credential is built")
             .delete_credential()
             .expect("the store removes it");
@@ -978,11 +978,11 @@ mod tests {
     }
 
     /// `state.json`'s repo, a sidecar and a history entry whose
-    /// `ANTHROPIC_API_KEY` row holds the sentinel literal, each beside a plain
+    /// `EXAMPLE_API_KEY` row holds the sentinel literal, each beside a plain
     /// `RUST_LOG=debug` row. Returns the loaded state.
     fn seed_startup_fixtures(dirs: &paths::Dirs) -> crate::state::AppState {
         let state = crate::state::AppState::load_or_default(dirs).expect("load the fixture state");
-        let rows = [("ANTHROPIC_API_KEY", VALUE_SENTINEL), ("RUST_LOG", "debug")];
+        let rows = [("EXAMPLE_API_KEY", VALUE_SENTINEL), ("RUST_LOG", "debug")];
         state
             .mutate(|persisted| {
                 persisted
@@ -1214,7 +1214,7 @@ mod tests {
             "the warning line carries the value: {logs}"
         );
         assert!(
-            logs.contains("ANTHROPIC_API_KEY"),
+            logs.contains("EXAMPLE_API_KEY"),
             "no warning named the key: {logs}"
         );
     }
@@ -1242,11 +1242,11 @@ mod tests {
         let (_lock, _config_dir) = scratch("collect-history");
         let dirs = fixture_dirs(&fixture_root("collect-history"));
         let state = crate::state::AppState::load_or_default(&dirs).expect("load state");
-        let id = seal("ANTHROPIC_API_KEY", VALUE_SENTINEL).expect("seals");
+        let id = seal("EXAMPLE_API_KEY", VALUE_SENTINEL).expect("seals");
         write_history(
             &dirs,
             "kept",
-            &fixture_config(&[("ANTHROPIC_API_KEY", &secret_ref(&id))]),
+            &fixture_config(&[("EXAMPLE_API_KEY", &secret_ref(&id))]),
         );
 
         let referenced = crate::referenced_secret_ids(&dirs, &state).expect("every file reads");
@@ -1295,7 +1295,7 @@ mod tests {
     #[test]
     fn an_unreferenced_id_two_hours_old_is_deleted_from_the_store_and_index() {
         let (_lock, _dir) = scratch("collect-old");
-        let id = seal("ANTHROPIC_API_KEY", VALUE_SENTINEL).expect("seals");
+        let id = seal("EXAMPLE_API_KEY", VALUE_SENTINEL).expect("seals");
 
         let removed = collect_unreferenced(&HashSet::new(), Utc::now() + TimeDelta::hours(2));
 
@@ -1307,7 +1307,7 @@ mod tests {
     #[test]
     fn an_unreferenced_id_five_minutes_old_is_kept() {
         let (_lock, _dir) = scratch("collect-young");
-        let id = seal("ANTHROPIC_API_KEY", VALUE_SENTINEL).expect("seals");
+        let id = seal("EXAMPLE_API_KEY", VALUE_SENTINEL).expect("seals");
 
         assert_eq!(
             collect_unreferenced(&HashSet::new(), Utc::now() + TimeDelta::minutes(5)),
@@ -1321,9 +1321,9 @@ mod tests {
     #[test]
     fn collect_unreferenced_drops_a_line_whose_credential_is_gone() {
         let (_lock, _dir) = scratch("collect-gone");
-        let id = seal("ANTHROPIC_API_KEY", VALUE_SENTINEL).expect("seals");
+        let id = seal("EXAMPLE_API_KEY", VALUE_SENTINEL).expect("seals");
         let service = service_for(&paths::config_dir().expect("the config dir resolves"));
-        Entry::new(&service, &user("ANTHROPIC_API_KEY", &id))
+        Entry::new(&service, &user("EXAMPLE_API_KEY", &id))
             .expect("the credential is built")
             .delete_credential()
             .expect("the store removes it");
@@ -1339,9 +1339,9 @@ mod tests {
     #[test]
     fn collect_unreferenced_keeps_a_line_whose_removal_fails() {
         let (_lock, _dir) = scratch("collect-failure");
-        let id = seal("ANTHROPIC_API_KEY", VALUE_SENTINEL).expect("seals");
+        let id = seal("EXAMPLE_API_KEY", VALUE_SENTINEL).expect("seals");
         inject_store_error(
-            "ANTHROPIC_API_KEY",
+            "EXAMPLE_API_KEY",
             &id,
             KeyringError::Invalid("injected".to_owned(), "the store refused".to_owned()),
         );
@@ -1367,7 +1367,7 @@ mod tests {
         let (_lock, _config_dir) = scratch("sweep-clean");
         let dirs = fixture_dirs(&fixture_root("sweep-clean"));
         let state = crate::state::AppState::load_or_default(&dirs).expect("load state");
-        let id = seal("ANTHROPIC_API_KEY", VALUE_SENTINEL).expect("seals");
+        let id = seal("EXAMPLE_API_KEY", VALUE_SENTINEL).expect("seals");
 
         crate::sweep_unreferenced_secrets(&dirs, &state, Utc::now() + TimeDelta::hours(2));
 
@@ -1382,7 +1382,7 @@ mod tests {
         let (_lock, _config_dir) = scratch("sweep-broken-history");
         let dirs = fixture_dirs(&fixture_root("sweep-broken-history"));
         let state = crate::state::AppState::load_or_default(&dirs).expect("load state");
-        let id = seal("ANTHROPIC_API_KEY", VALUE_SENTINEL).expect("seals");
+        let id = seal("EXAMPLE_API_KEY", VALUE_SENTINEL).expect("seals");
         // Invalid JSON (the object is never closed) that still holds the
         // reference text, so only a parse can tell what it pointed at.
         std::fs::write(
@@ -1409,12 +1409,11 @@ mod tests {
         let (_lock, _config_dir) = scratch("sweep-future-sidecar");
         let dirs = fixture_dirs(&fixture_root("sweep-future-sidecar"));
         let state = crate::state::AppState::load_or_default(&dirs).expect("load state");
-        let id = seal("ANTHROPIC_API_KEY", VALUE_SENTINEL).expect("seals");
+        let id = seal("EXAMPLE_API_KEY", VALUE_SENTINEL).expect("seals");
         let dir = dirs.sessions_dir.join("future");
         std::fs::create_dir_all(&dir).expect("create the session dir");
-        let config =
-            serde_json::to_value(fixture_config(&[("ANTHROPIC_API_KEY", &secret_ref(&id))]))
-                .expect("serialize the fixture config");
+        let config = serde_json::to_value(fixture_config(&[("EXAMPLE_API_KEY", &secret_ref(&id))]))
+            .expect("serialize the fixture config");
         std::fs::write(
             dir.join("meta.json"),
             serde_json::json!({
@@ -1448,7 +1447,7 @@ mod tests {
         let (_lock, _config_dir) = scratch("sweep-folder");
         let dirs = fixture_dirs(&fixture_root("sweep-folder"));
         let state = crate::state::AppState::load_or_default(&dirs).expect("load state");
-        let id = seal("ANTHROPIC_API_KEY", VALUE_SENTINEL).expect("seals");
+        let id = seal("EXAMPLE_API_KEY", VALUE_SENTINEL).expect("seals");
         std::fs::remove_dir_all(&dirs.sessions_dir).expect("remove the sessions dir");
         std::fs::write(&dirs.sessions_dir, b"not a folder").expect("replace it with a file");
 
@@ -1472,7 +1471,7 @@ mod tests {
             state.state_file_corrupt(),
             "the fixture loaded as a default"
         );
-        let id = seal("ANTHROPIC_API_KEY", VALUE_SENTINEL).expect("seals");
+        let id = seal("EXAMPLE_API_KEY", VALUE_SENTINEL).expect("seals");
 
         crate::sweep_unreferenced_secrets(&dirs, &state, Utc::now() + TimeDelta::hours(2));
 
@@ -1493,7 +1492,7 @@ mod tests {
             &dirs,
             "expired",
             Utc::now() - TimeDelta::days(8),
-            &fixture_config(&[("ANTHROPIC_API_KEY", VALUE_SENTINEL)]),
+            &fixture_config(&[("EXAMPLE_API_KEY", VALUE_SENTINEL)]),
         );
 
         run_startup_secret_passes(&dirs, &state);
@@ -1521,7 +1520,7 @@ mod tests {
                 ));
                 persisted.repos.push(repo_with_config(
                     "r-good",
-                    fixture_config(&[("ANTHROPIC_API_KEY", VALUE_SENTINEL)]),
+                    fixture_config(&[("EXAMPLE_API_KEY", VALUE_SENTINEL)]),
                 ));
             })
             .expect("seed state.json");

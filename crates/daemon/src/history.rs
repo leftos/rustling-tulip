@@ -2765,7 +2765,7 @@ mod recovery_tests {
         vec![
             ("RT_PLAIN".to_owned(), "1".to_owned()),
             (
-                "ANTHROPIC_API_KEY".to_owned(),
+                "EXAMPLE_API_KEY".to_owned(),
                 "${secret:0123456789abcdef0123456789abcdef}".to_owned(),
             ),
         ]
