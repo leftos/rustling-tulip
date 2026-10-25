@@ -10,7 +10,6 @@
 - [ ] RT-278 Prove the daemon holds the token before a client reuses, retires or kills it
 - [ ] RT-343 Keep name, look and sidebar place when Recover respawns a session
 - [ ] RT-349 Restart conversation discovery for sessions reattached after a daemon restart
-- [ ] RT-375 Copy only the text when a terminal selection crosses a TUI's box borders · release vNext+1
 - [ ] RT-378 Close a failed handshake gracefully so AuthFailed is never lost to a reset
 - [ ] RT-386 Map a recovered shell's hook events with its recovered agent options and trust
 
@@ -41,8 +40,6 @@
 - [ ] RT-256 Name the failing script variable in PresetScriptsError
 - [ ] RT-259 Preset wizard: say so when Esc closes it while its scripts still run
 - [ ] RT-261 Preset launch: Stop all misses sessions whose snapshot hasn't arrived yet
-- [ ] RT-396 Filter the repos and workspaces view between all tracked and active only · release vNext+1
-- [ ] RT-397 Design sidebar display settings: density, sessions under repos, subagent tree depth, sort · release vNext+1
 
 ## Wave 2b — Hook status
 
@@ -112,6 +109,7 @@
 ## Wave 10 — Subagent streams
 
 - [ ] RT-30 View a session's running subagents as read-only sessions
+- [ ] RT-406 Show a session's subagents under it in the sidebar, with a depth setting
 
 ## Wave 11 — Follow dispatch runs
 
@@ -166,7 +164,6 @@
 - [ ] RT-194 Record that a removed repo's session keeps streaming in docs/ux-audit.md
 - [ ] RT-226 Define container, tab container, lock and container menu in the glossary
 - [ ] RT-228 Document the local load-burn recipe and the load-sensitive test lessons
-- [ ] RT-249 Add docs/README.md as the docs start page
 - [ ] RT-277 Rewrite design files' Codex and Cursor claims for the Claude-only app
 - [ ] RT-376 Re-read docs/release.md and docs/env-secrets.md against their named files' changes since 2026-10-22
 
@@ -277,3 +274,4 @@
 - [ ] RT-401 Route Settings refusals to the apply they answer with a request id
 - [ ] RT-402 Let pane focus follow the mouse pointer (opt-in setting)
 - [ ] RT-403 Take the prompt-echo marker for prompt navigation from the agent descriptor
+- [ ] RT-409 Show the whole file name in the Markdown viewer tab's header when it fits
