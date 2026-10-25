@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use alacritty_terminal::Term;
 use alacritty_terminal::event::{Event, EventListener};
-use alacritty_terminal::grid::{Dimensions, Grid, Scroll};
+use alacritty_terminal::grid::{Dimensions, Grid, Row, Scroll};
 use alacritty_terminal::index::{Column, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::cell::{Cell, Flags};
@@ -17,6 +17,7 @@ use alacritty_terminal::term::{ClipboardType, Config, Osc52, TermMode};
 use alacritty_terminal::vte::ansi::{Color, CursorShape, CursorStyle, NamedColor, Processor, Rgb};
 
 use crate::Clock;
+use crate::copy_text::{self, CopyRow};
 use crate::links::{self, TerminalLink, TerminalRow};
 use crate::shell_marks::{Record, Records, Scanner, ShellDot, Split};
 use crate::theme::{self, Theme};
@@ -878,11 +879,52 @@ impl Terminal {
         self.term.selection.as_ref().is_some_and(|s| !s.is_empty())
     }
 
-    /// The selected text, or `None` when nothing is selected.
+    /// The selected text, or `None` when nothing is selected. A selection
+    /// crossing a TUI's box-drawn panel copies the panel's text without its
+    /// borders and padding (`copy_text::strip_box`); any other copies as the
+    /// grid gives it.
     pub fn selection_text(&self) -> Option<String> {
-        self.term
+        let text = self
+            .term
             .selection_to_string()
-            .filter(|text| !text.is_empty())
+            .filter(|text| !text.is_empty())?;
+        let selection = self.term.selection.as_ref()?;
+        let Some(range) = selection
+            .to_range(&self.term)
+            .filter(|range| !range.is_block)
+        else {
+            return Some(text);
+        };
+        let rows = self.copy_rows(range.start, range.end);
+        let Some(mut stripped) = copy_text::strip_box(&rows) else {
+            return Some(text);
+        };
+        if selection.ty == SelectionType::Lines {
+            stripped.push('\n');
+        }
+        Some(stripped)
+    }
+
+    /// One [`CopyRow`] per grid line from `start` to `end`, each clipped to
+    /// the selected columns.
+    fn copy_rows(&self, start: Point, end: Point) -> Vec<CopyRow> {
+        let grid = self.term.grid();
+        let last = grid.last_column();
+        (start.line.0..=end.line.0)
+            .map(|line| {
+                let from = if line == start.line.0 {
+                    start.column.0
+                } else {
+                    0
+                };
+                let to = if line == end.line.0 {
+                    end.column.min(last).0
+                } else {
+                    last.0
+                };
+                copy_row(&grid[Line(line)], from, to, last)
+            })
+            .collect()
     }
 
     /// The background the terminal paints: a program's `OSC 11`, else the
@@ -1130,6 +1172,54 @@ impl Terminal {
         grid[Line(line - 1)][grid.last_column()]
             .flags
             .contains(Flags::WRAPLINE)
+    }
+}
+
+/// The columns between tab stops. The grid's own stops are private to
+/// alacritty, so a copy assumes the default ones.
+const TAB_STOP: usize = 8;
+
+/// Columns `from` to `to` of `row` as a [`CopyRow`], read as alacritty's own
+/// copy reads them: a selection starting on a wide glyph's spacer takes the
+/// glyph, the spacer cell is left out (its column counted to the glyph), and
+/// a tab with the blanks up to the next tab stop copies as one `\t`.
+fn copy_row(row: &Row<Cell>, from: usize, to: usize, last: Column) -> CopyRow {
+    let mut copy = CopyRow {
+        text: String::with_capacity(to + 1),
+        widths: Vec::with_capacity(to + 1),
+        wrapped: row[last].flags.contains(Flags::WRAPLINE),
+    };
+    let on_spacer = row[Column(from)].flags.contains(Flags::WIDE_CHAR_SPACER);
+    let mut in_tab = false;
+    for column in from.saturating_sub(usize::from(on_spacer))..=to {
+        let cell = &row[Column(column)];
+        if in_tab && column % TAB_STOP != 0 && cell.c == ' ' {
+            widen_last(&mut copy);
+            continue;
+        }
+        in_tab = cell.c == '\t';
+        push_cell(&mut copy, cell);
+    }
+    copy
+}
+
+fn push_cell(copy: &mut CopyRow, cell: &Cell) {
+    if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+        widen_last(copy);
+    } else if !cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER) {
+        copy.text.push(cell.c);
+        copy.widths.push(1);
+        for &mark in cell.zerowidth().into_iter().flatten() {
+            copy.text.push(mark);
+            copy.widths.push(0);
+        }
+    }
+}
+
+/// Counts one more column to the character last copied.
+fn widen_last(copy: &mut CopyRow) {
+    if let Some(width) = copy.widths.last_mut() {
+        *width += 1;
     }
 }
 
@@ -1510,6 +1600,42 @@ mod tests {
         assert_eq!(theme.selection_fg, theme.fg);
         assert_eq!(texts[0], (0, "abcd      ", theme.fg));
         assert_eq!(term.selection_text().as_deref(), Some("ab"));
+    }
+
+    #[test]
+    fn a_selection_across_a_panel_copies_only_its_text() {
+        let mut term = sized("╭────╮\r\n│ ab │\r\n╰────╯".as_bytes(), 10, 3);
+        term.start_selection(
+            SelectionType::Simple,
+            Point::new(Line(0), Column(0)),
+            Side::Left,
+        );
+        term.update_selection(Point::new(Line(2), Column(5)), Side::Right);
+        assert_eq!(term.selection_text().as_deref(), Some("ab"));
+    }
+
+    #[test]
+    fn a_line_selection_across_a_panel_keeps_its_trailing_newline() {
+        let mut term = sized("╭────╮\r\n│ ab │\r\n╰────╯".as_bytes(), 10, 3);
+        term.start_selection(
+            SelectionType::Lines,
+            Point::new(Line(0), Column(0)),
+            Side::Left,
+        );
+        term.update_selection(Point::new(Line(2), Column(0)), Side::Right);
+        assert_eq!(term.selection_text().as_deref(), Some("ab\n"));
+    }
+
+    #[test]
+    fn a_tabbed_row_beside_a_panel_keeps_its_tab() {
+        let mut term = sized("a\tb\r\n╭────╮\r\n│ ab │\r\n╰────╯".as_bytes(), 10, 4);
+        term.start_selection(
+            SelectionType::Simple,
+            Point::new(Line(0), Column(0)),
+            Side::Left,
+        );
+        term.update_selection(Point::new(Line(3), Column(5)), Side::Right);
+        assert_eq!(term.selection_text().as_deref(), Some("a\tb\nab"));
     }
 
     #[test]

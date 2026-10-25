@@ -316,6 +316,25 @@ fn drag_selects_copies_on_release_and_ctrl_c_copies_instead_of_interrupting(
 }
 
 #[gpui::test]
+fn copying_a_boxed_selection_drops_the_panel_borders(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, session("s1").build());
+    let rule = "─".repeat(20);
+    let panel = [
+        format!("╭{rule}╮"),
+        format!("│{:<20}│", ""),
+        format!("│{:<20}│", "  hi"),
+        format!("│{:<20}│", "  second row"),
+        format!("╰{rule}╯"),
+    ];
+    h.pty("s1", panel.join("\r\n").as_bytes());
+
+    let (from, to) = (near(&mut h, 0, 0, -2.0), near(&mut h, 21, 4, 2.0));
+    h.drag(from, to, [Modifiers::none(); 2]);
+    assert_eq!(h.clipboard().as_deref(), Some("hi\nsecond row"));
+}
+
+#[gpui::test]
 fn ctrl_c_without_selection_interrupts_and_ctrl_shift_c_sends_nothing(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = attached(cx, &dir, session("s1").build());

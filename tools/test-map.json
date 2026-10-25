@@ -218,6 +218,12 @@
     },
     {
       "paths": [
+        "apps/native/src/copy_text.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & test(/^copy_text::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_terminal)::/))"
+    },
+    {
+      "paths": [
         "apps/native/src/device_pairing.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native) & test(/^device_pairing::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_device_pairing)::/))"
@@ -721,7 +727,7 @@
         "apps/native/src/prompt_nav.rs",
         "apps/native/tests/ui/ui_prompt_jump.rs"
       ],
-      "filter": "(binary_id(rustling-tulip-native) & test(/^term::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_prompt_jump|ui_terminal)::/))"
+      "filter": "(binary_id(rustling-tulip-native) & test(/^(copy_text|term)::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_prompt_jump|ui_terminal)::/))"
     },
     {
       "paths": [

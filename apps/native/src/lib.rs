@@ -22,6 +22,7 @@ mod connection;
 pub mod connection_picker;
 mod connection_picker_view;
 mod copied;
+mod copy_text;
 mod device_pairing;
 mod device_pairing_view;
 mod devices;
