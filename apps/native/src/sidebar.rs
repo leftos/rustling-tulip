@@ -94,6 +94,45 @@ pub enum LeafDensity {
     Comfortable,
 }
 
+/// How many of a repo or workspace's sessions show under its row.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionsUnderRepos {
+    /// Only the sessions still at work: a starting, working, waiting or
+    /// failed one, and one carrying background work, an unseen finish or a
+    /// request for the owner.
+    Busy,
+    /// None of them; the row keeps its session count.
+    None,
+    /// Every session of the repo or workspace; also what a value this build
+    /// does not know loads as (`serde(other)` must be the last variant).
+    #[default]
+    #[serde(other)]
+    Every,
+}
+
+impl SessionsUnderRepos {
+    /// Whether `leaf` shows under its repo or workspace row in this mode.
+    #[must_use]
+    pub fn shows(self, leaf: &Leaf) -> bool {
+        match self {
+            Self::Every => true,
+            Self::None => false,
+            Self::Busy => {
+                matches!(
+                    leaf.status,
+                    SessionStatus::Spawning
+                        | SessionStatus::Working
+                        | SessionStatus::AwaitingInput
+                        | SessionStatus::Error
+                ) || leaf.background
+                    || leaf.unseen
+                    || leaf.attention
+            }
+        }
+    }
+}
+
 /// One session row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[expect(
@@ -535,6 +574,8 @@ pub struct GeneralSettings {
     pub copy_on_select: bool,
     /// How much room each session leaf takes.
     pub leaf_density: LeafDensity,
+    /// How many of a repo or workspace's sessions show under its row.
+    pub sessions_under_repos: SessionsUnderRepos,
     /// Whether text files a link or a fetch opens go to the external app
     /// instead of the built-in viewer.
     pub open_text_externally: bool,
@@ -545,6 +586,7 @@ impl Default for GeneralSettings {
         Self {
             copy_on_select: true,
             leaf_density: LeafDensity::Comfortable,
+            sessions_under_repos: SessionsUnderRepos::Every,
             open_text_externally: false,
         }
     }
@@ -1027,6 +1069,21 @@ impl SidebarModel {
             return false;
         }
         self.ui.general.leaf_density = density;
+        true
+    }
+
+    /// How many of a repo or workspace's sessions show under its row.
+    pub fn sessions_under_repos(&self) -> SessionsUnderRepos {
+        self.ui.general.sessions_under_repos
+    }
+
+    /// Records how many of a repo or workspace's sessions show under its row;
+    /// returns whether it changed.
+    pub fn set_sessions_under_repos(&mut self, mode: SessionsUnderRepos) -> bool {
+        if self.ui.general.sessions_under_repos == mode {
+            return false;
+        }
+        self.ui.general.sessions_under_repos = mode;
         true
     }
 
@@ -3306,6 +3363,7 @@ pub(crate) mod tests {
             general: GeneralSettings {
                 copy_on_select: false,
                 leaf_density: LeafDensity::Compact,
+                sessions_under_repos: SessionsUnderRepos::Busy,
                 open_text_externally: true,
             },
             title: TitleSettings {
@@ -3608,6 +3666,132 @@ pub(crate) mod tests {
             !loaded.general.copy_on_select,
             "the rest of the group loads"
         );
+    }
+
+    #[test]
+    fn sessions_under_repos_round_trips_and_loads_every_when_missing_or_unknown() {
+        let dir = TestDir::new("sessions-under-repos");
+        let mut model = SidebarModel::new(UiState::default());
+        assert_eq!(
+            model.sessions_under_repos(),
+            SessionsUnderRepos::Every,
+            "the default"
+        );
+        for (mode, saved) in [
+            (SessionsUnderRepos::Busy, "busy"),
+            (SessionsUnderRepos::None, "none"),
+            (SessionsUnderRepos::Every, "every"),
+        ] {
+            assert!(model.set_sessions_under_repos(mode), "{saved}");
+            assert!(!model.set_sessions_under_repos(mode), "unchanged");
+            save_ui_state(&dir.0, model.ui_state()).expect("save");
+            let text = std::fs::read_to_string(dir.0.join(UI_FILE)).expect("read");
+            let written: serde_json::Value = serde_json::from_str(&text).expect("JSON");
+            assert_eq!(written["general"]["sessions_under_repos"], saved);
+            assert_eq!(load_ui_state(&dir.0).general.sessions_under_repos, mode);
+        }
+
+        for older in [
+            r#"{ "sidebar_collapsed": true }"#,
+            r#"{ "general": { "copy_on_select": false } }"#,
+        ] {
+            std::fs::write(dir.0.join(UI_FILE), older).expect("write");
+            assert_eq!(
+                load_ui_state(&dir.0).general.sessions_under_repos,
+                SessionsUnderRepos::Every,
+                "{older}"
+            );
+        }
+
+        let unknown =
+            r#"{ "general": { "copy_on_select": false, "sessions_under_repos": "all" } }"#;
+        std::fs::write(dir.0.join(UI_FILE), unknown).expect("write");
+        let loaded = load_ui_state(&dir.0);
+        assert_eq!(
+            loaded.general.sessions_under_repos,
+            SessionsUnderRepos::Every
+        );
+        assert!(
+            !loaded.general.copy_on_select,
+            "the rest of the group loads"
+        );
+    }
+
+    /// The leaf of a session with `status`, `background`, `unseen` and
+    /// `attention` set.
+    fn busy_leaf(status: SessionStatus, background: bool, unseen: bool, attention: bool) -> Leaf {
+        let mut s = session("s1");
+        s.status = status;
+        s.background = background;
+        let id = s.id.clone();
+        let marked = |on: bool| -> HashSet<String> { on.then(|| id.clone()).into_iter().collect() };
+        leaf(&s, &marked(attention), &marked(unseen), false, &[])
+    }
+
+    #[test]
+    fn sessions_under_repos_every_shows_every_leaf() {
+        for status in [
+            SessionStatus::Working,
+            SessionStatus::AwaitingInput,
+            SessionStatus::Idle,
+            SessionStatus::Stopped,
+        ] {
+            assert!(SessionsUnderRepos::Every.shows(&busy_leaf(status, false, false, false)));
+        }
+    }
+
+    #[test]
+    fn sessions_under_repos_busy_shows_only_the_sessions_still_at_work() {
+        let busy = SessionsUnderRepos::Busy;
+        assert!(busy.shows(&busy_leaf(SessionStatus::Working, false, false, false)));
+        assert!(busy.shows(&busy_leaf(
+            SessionStatus::AwaitingInput,
+            false,
+            false,
+            false
+        )));
+        assert!(busy.shows(&busy_leaf(SessionStatus::Spawning, false, false, false)));
+        assert!(busy.shows(&busy_leaf(SessionStatus::Error, false, false, false)));
+        assert!(
+            busy.shows(&busy_leaf(SessionStatus::Idle, true, false, false)),
+            "background work still runs"
+        );
+        assert!(
+            busy.shows(&busy_leaf(SessionStatus::Idle, false, true, false)),
+            "its finish is unseen"
+        );
+        assert!(
+            busy.shows(&busy_leaf(SessionStatus::Idle, false, false, true)),
+            "it needs the owner"
+        );
+        assert!(
+            !busy.shows(&busy_leaf(SessionStatus::Idle, false, false, false)),
+            "an idle session"
+        );
+        assert!(
+            !busy.shows(&busy_leaf(SessionStatus::Stopped, false, false, false)),
+            "an ended one"
+        );
+        assert!(
+            busy.shows(&busy_leaf(SessionStatus::Stopped, false, false, true)),
+            "an ended one still needing the owner"
+        );
+    }
+
+    #[test]
+    fn sessions_under_repos_none_hides_every_leaf() {
+        for status in [
+            SessionStatus::Working,
+            SessionStatus::AwaitingInput,
+            SessionStatus::Idle,
+            SessionStatus::Stopped,
+            SessionStatus::Error,
+        ] {
+            assert!(
+                !SessionsUnderRepos::None.shows(&busy_leaf(status, true, true, true)),
+                "no leaf shows"
+            );
+        }
     }
 
     fn member(repo: &str, branch: &str) -> SessionMember {

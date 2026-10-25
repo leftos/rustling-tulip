@@ -595,6 +595,26 @@ fn leaf_density_choice_switches_the_leaves_saves_and_is_reached_by_tab(cx: &mut 
 }
 
 #[gpui::test]
+fn sessions_under_repos_choice_saves_and_is_reached_by_tab(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+
+    h.keys("ctrl-,");
+    h.click_on("settings-sessions-under-repos-busy");
+    assert_eq!(saved_ui(&dir)["general"]["sessions_under_repos"], "busy");
+    h.keys("escape");
+
+    h.keys("ctrl-,");
+    assert_eq!(settings_focus(&mut h), Some("list"));
+    h.keys("tab tab tab tab tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("settings-sessions-under-repos-every"),
+        "one tab past the two Leaf density choices"
+    );
+}
+
+#[gpui::test]
 fn tab_walks_general_controls_and_space_toggles(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);
@@ -620,11 +640,11 @@ fn tab_walks_general_controls_and_space_toggles(cx: &mut TestAppContext) {
         "Space presses the keep-awake choice"
     );
 
-    h.keys("tab tab tab tab tab tab");
+    h.keys("tab tab tab tab tab tab tab tab tab");
     assert_eq!(
         settings_focus(&mut h),
         Some("settings-general-open-text-externally"),
-        "past Always, the two Default view and the two Leaf density choices"
+        "past Always, the two Default view, the two Leaf density and the three Sessions under repos choices"
     );
     h.keys("space");
     assert_eq!(saved_ui(&dir)["general"]["open_text_externally"], true);
@@ -650,7 +670,10 @@ fn tab_walks_general_controls_and_space_toggles(cx: &mut TestAppContext) {
         Some("settings-terminal-copy-on-selection"),
         "Shift+Tab walks back"
     );
-    h.keys("shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab");
+    h.keys(
+        "shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab \
+         shift-tab shift-tab",
+    );
     assert_eq!(
         settings_focus(&mut h),
         Some("settings-keep-awake-off"),

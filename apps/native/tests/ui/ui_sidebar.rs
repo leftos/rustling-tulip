@@ -1161,6 +1161,93 @@ fn repo_container_draws_its_icon_tag_count_and_attention_badge(cx: &mut TestAppC
     );
 }
 
+#[gpui::test]
+fn busy_only_hides_idle_sessions_under_repos_and_keeps_the_count(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    std::fs::write(
+        dir.path().join("native-ui.json"),
+        r#"{ "general": { "sessions_under_repos": "busy" } }"#,
+    )
+    .expect("write the layout");
+    // The focused pane holds a shell, so neither repo session is the one a
+    // focused-pane rule would keep on screen.
+    let mut fixture = Fixture::single(
+        session("sh")
+            .shell("D:/src/app")
+            .program_name("pwsh")
+            .build(),
+    );
+    fixture.repos = vec![repo("r1", "D:/src/r1")];
+    fixture
+        .sessions
+        .push(session("s1").in_repo("r1").status("working").build());
+    fixture.sessions.push(session("s2").in_repo("r1").build());
+    let mut h = Harness::with(cx, &dir, &fixture);
+
+    assert!(drawn(&mut h, "leaf-s1"), "the working session shows");
+    assert!(!drawn(&mut h, "leaf-s2"), "the idle one does not");
+    assert!(
+        drawn(&mut h, "container-repo:r1-count"),
+        "the row still counts its sessions"
+    );
+    assert_eq!(
+        h.root(|root, _| root
+            .sidebar_containers()
+            .into_iter()
+            .find(|container| container.key == "repo:r1")
+            .map(|container| container.leaves.len())),
+        Some(2),
+        "the count is every session of the repo"
+    );
+}
+
+#[gpui::test]
+fn none_hides_every_session_under_repos_but_not_shell_rows(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    std::fs::write(
+        dir.path().join("native-ui.json"),
+        r#"{ "general": { "sessions_under_repos": "none" } }"#,
+    )
+    .expect("write the layout");
+    // The focused pane holds a shell, so the repo's session is not the one a
+    // focused-pane rule would keep on screen.
+    let mut fixture = Fixture::single(
+        session("sh")
+            .shell("D:/src/app")
+            .program_name("pwsh")
+            .build(),
+    );
+    fixture.repos = vec![repo("r1", "D:/src/r1")];
+    fixture
+        .sessions
+        .push(session("s1").in_repo("r1").status("awaiting_input").build());
+    let mut h = Harness::with(cx, &dir, &fixture);
+
+    assert!(!drawn(&mut h, "leaf-s1"), "no leaf under the repo");
+    assert!(drawn(&mut h, "container-repo:r1-count"), "its count stays");
+    assert!(drawn(&mut h, "leaf-sh"), "a shell row keeps its leaf");
+}
+
+#[gpui::test]
+fn focused_session_stays_under_its_repo_when_sessions_under_repos_is_none(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    std::fs::write(
+        dir.path().join("native-ui.json"),
+        r#"{ "general": { "sessions_under_repos": "none" } }"#,
+    )
+    .expect("write the layout");
+    let mut fixture = Fixture::single(session("s1").in_repo("r1").build());
+    fixture.repos = vec![repo("r1", "D:/src/r1")];
+    fixture.sessions.push(session("s2").in_repo("r1").build());
+    let mut h = Harness::with(cx, &dir, &fixture);
+
+    assert!(
+        drawn(&mut h, "leaf-s1"),
+        "the focused pane's session keeps its row"
+    );
+    assert!(!drawn(&mut h, "leaf-s2"), "the other one is hidden");
+}
+
 const FULL_SUMMARY: &str =
     "Claude · Interactive · new worktree from main · Accept edits · opus · 2 env";
 

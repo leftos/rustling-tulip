@@ -36,7 +36,7 @@ use crate::remote_access::{
 };
 use crate::section::section;
 use crate::session_menu::{backdrop, dialog_button};
-use crate::sidebar::{LeafDensity, NotifySkip, SidebarView};
+use crate::sidebar::{LeafDensity, NotifySkip, SessionsUnderRepos, SidebarView};
 use crate::spawn_view::{
     DISABLED_OPACITY, Look, checkbox_row, choice_button, close_button, dialog_card,
     dialog_title_bar, field, muted, segmented,
@@ -251,6 +251,13 @@ const SIDEBAR_VIEW_CHOICES: [SidebarView; 2] = [SidebarView::Repos, SidebarView:
 /// The General tab's Leaf density choices, in the order they show.
 const LEAF_DENSITY_CHOICES: [LeafDensity; 2] = [LeafDensity::Comfortable, LeafDensity::Compact];
 
+/// The General tab's Sessions under repos choices, in the order they show.
+const SESSIONS_UNDER_REPOS_CHOICES: [SessionsUnderRepos; 3] = [
+    SessionsUnderRepos::Every,
+    SessionsUnderRepos::Busy,
+    SessionsUnderRepos::None,
+];
+
 /// The Notifications tab's skip choices, in the order they show.
 const NOTIFY_SKIP_CHOICES: [NotifySkip; 3] =
     [NotifySkip::OnScreen, NotifySkip::Focused, NotifySkip::Never];
@@ -261,6 +268,7 @@ pub(crate) enum SettingsControl {
     KeepAwake(KeepAwakeMode),
     SidebarView(SidebarView),
     LeafDensity(LeafDensity),
+    SessionsUnderRepos(SessionsUnderRepos),
     OpenTextExternally,
     CopyOnSelect,
     TitleCount,
@@ -317,6 +325,15 @@ impl SettingsControl {
             Self::SidebarView(SidebarView::Tabs) => "settings-sidebar-view-tabs",
             Self::LeafDensity(LeafDensity::Comfortable) => "settings-leaf-density-comfortable",
             Self::LeafDensity(LeafDensity::Compact) => "settings-leaf-density-compact",
+            Self::SessionsUnderRepos(SessionsUnderRepos::Every) => {
+                "settings-sessions-under-repos-every"
+            }
+            Self::SessionsUnderRepos(SessionsUnderRepos::Busy) => {
+                "settings-sessions-under-repos-busy"
+            }
+            Self::SessionsUnderRepos(SessionsUnderRepos::None) => {
+                "settings-sessions-under-repos-none"
+            }
             Self::OpenTextExternally => "settings-general-open-text-externally",
             Self::CopyOnSelect => "settings-terminal-copy-on-selection",
             Self::TitleCount => "settings-title-busy-count",
@@ -891,6 +908,7 @@ impl RootView {
                     .flatten()
                     .chain(SIDEBAR_VIEW_CHOICES.map(SettingsControl::SidebarView))
                     .chain(LEAF_DENSITY_CHOICES.map(SettingsControl::LeafDensity))
+                    .chain(SESSIONS_UNDER_REPOS_CHOICES.map(SettingsControl::SessionsUnderRepos))
                     .chain([
                         SettingsControl::OpenTextExternally,
                         SettingsControl::CopyOnSelect,
@@ -1539,6 +1557,7 @@ impl RootView {
             SettingsControl::KeepAwake(mode) => self.choose_keep_awake_mode(mode),
             SettingsControl::SidebarView(view) => self.set_sidebar_view(view, cx),
             SettingsControl::LeafDensity(density) => self.set_leaf_density(density, cx),
+            SettingsControl::SessionsUnderRepos(mode) => self.set_sessions_under_repos(mode, cx),
             SettingsControl::OpenTextExternally => self.toggle_open_text_externally(cx),
             SettingsControl::CopyOnSelect => self.toggle_copy_on_select(cx),
             SettingsControl::TitleCount => self.toggle_title_count(window, cx),
@@ -2317,6 +2336,15 @@ impl RootView {
         cx.notify();
     }
 
+    /// Sets how many of a repo or workspace's sessions show under its row,
+    /// saving it when it changed.
+    fn set_sessions_under_repos(&mut self, mode: SessionsUnderRepos, cx: &mut Context<Self>) {
+        if self.sidebar.set_sessions_under_repos(mode) {
+            self.save_ui();
+        }
+        cx.notify();
+    }
+
     fn toggle_copy_on_select(&mut self, cx: &mut Context<Self>) {
         let on = !self.sidebar.ui_state().general.copy_on_select;
         self.sidebar.set_copy_on_select(on);
@@ -2994,41 +3022,7 @@ impl RootView {
                 cx,
             ))
             .children(status);
-        let view = self.sidebar.sidebar_view();
-        let choices = SIDEBAR_VIEW_CHOICES.map(|choice| {
-            let text = match choice {
-                SidebarView::Repos => "Repos",
-                SidebarView::Tabs => "Tabs",
-            };
-            (SettingsControl::SidebarView(choice), text, choice == view)
-        });
-        let density = self.sidebar.leaf_density();
-        let densities = LEAF_DENSITY_CHOICES.map(|choice| {
-            let text = match choice {
-                LeafDensity::Comfortable => "Comfortable",
-                LeafDensity::Compact => "Compact",
-            };
-            (
-                SettingsControl::LeafDensity(choice),
-                text,
-                choice == density,
-            )
-        });
-        let sidebar = section("Sidebar")
-            .child(choice_row(
-                "Default view",
-                &choices,
-                RowLock::Live,
-                focused,
-                cx,
-            ))
-            .child(choice_row(
-                "Leaf density",
-                &densities,
-                RowLock::Live,
-                focused,
-                cx,
-            ));
+        let sidebar = self.sidebar_section(focused, cx);
         let copy = toggle(
             SettingsControl::CopyOnSelect,
             ToggleState {
@@ -3056,10 +3050,63 @@ impl RootView {
         let files = section("Files").child(open_text);
         vec![
             power.into_any_element(),
-            sidebar.into_any_element(),
+            sidebar,
             files.into_any_element(),
             terminal.into_any_element(),
         ]
+    }
+
+    /// The Sidebar section: the default view, how much room a leaf takes and
+    /// how many of a repo's or workspace's sessions show under its row.
+    fn sidebar_section(
+        &self,
+        focused: Option<SettingsControl>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let view = self.sidebar.sidebar_view();
+        let choices = SIDEBAR_VIEW_CHOICES.map(|choice| {
+            let text = match choice {
+                SidebarView::Repos => "Repos",
+                SidebarView::Tabs => "Tabs",
+            };
+            (SettingsControl::SidebarView(choice), text, choice == view)
+        });
+        let density = self.sidebar.leaf_density();
+        let densities = LEAF_DENSITY_CHOICES.map(|choice| {
+            let text = match choice {
+                LeafDensity::Comfortable => "Comfortable",
+                LeafDensity::Compact => "Compact",
+            };
+            (
+                SettingsControl::LeafDensity(choice),
+                text,
+                choice == density,
+            )
+        });
+        let under = sessions_under_repos_choices(self.sidebar.sessions_under_repos());
+        section("Sidebar")
+            .child(choice_row(
+                "Default view",
+                &choices,
+                RowLock::Live,
+                focused,
+                cx,
+            ))
+            .child(choice_row(
+                "Leaf density",
+                &densities,
+                RowLock::Live,
+                focused,
+                cx,
+            ))
+            .child(choice_row(
+                "Sessions under repos",
+                &under,
+                RowLock::Live,
+                focused,
+                cx,
+            ))
+            .into_any_element()
     }
 
     fn app_title_tab(
@@ -3508,6 +3555,24 @@ enum RowLock {
         note: &'static str,
         selector: &'static str,
     },
+}
+
+/// The General tab's Sessions under repos choices, `current` selected.
+fn sessions_under_repos_choices(
+    current: SessionsUnderRepos,
+) -> [(SettingsControl, &'static str, bool); 3] {
+    SESSIONS_UNDER_REPOS_CHOICES.map(|choice| {
+        let text = match choice {
+            SessionsUnderRepos::Every => "Every session",
+            SessionsUnderRepos::Busy => "Busy only",
+            SessionsUnderRepos::None => "None",
+        };
+        (
+            SettingsControl::SessionsUnderRepos(choice),
+            text,
+            choice == current,
+        )
+    })
 }
 
 /// A labelled row of segmented choices, laid out as the spawn dialog's;

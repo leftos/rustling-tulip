@@ -32,8 +32,8 @@ use crate::session_menu::{
     menu_separator,
 };
 use crate::sidebar::{
-    Activity, Container, ContainerKind, DETACHED_BANNER, Leaf, LeafDensity, SidebarView,
-    can_attach, chip_tip,
+    Activity, Container, ContainerKind, DETACHED_BANNER, Leaf, LeafDensity, SessionsUnderRepos,
+    SidebarView, can_attach, chip_tip,
 };
 use crate::spawn_view::SpawnEntry;
 use crate::status_glyph::{GlyphSize, glyph, glyph_view};
@@ -172,6 +172,7 @@ impl RootView {
                     .map(|s| s.id.as_str())
                     .collect(),
                 density: self.sidebar.leaf_density(),
+                under_repos: self.sidebar.sessions_under_repos(),
                 focused_row,
                 hovered_row: self.hovered_container.as_deref(),
                 detached_stop_all: self.detached_stop_all.armed(),
@@ -719,7 +720,11 @@ fn container_rows(
         if container.kind == ContainerKind::Detached {
             rows.push(detached_banner(container, ctx.detached_stop_all, cx).into_any_element());
         }
-        for leaf in &container.leaves {
+        for leaf in container
+            .leaves
+            .iter()
+            .filter(|leaf| ctx.shows(container.kind, leaf))
+        {
             rows.push(leaf_drag_row(container, leaf, ctx, window, cx).into_any_element());
         }
     }
@@ -1191,6 +1196,8 @@ struct LeafRows<'a> {
     /// The sessions that cannot be shown in a pane.
     headless: HashSet<&'a str>,
     density: LeafDensity,
+    /// How many of a repo or workspace's sessions show under its row.
+    under_repos: SessionsUnderRepos,
     /// The width a Comfortable subline's text and chips share, in px.
     subline_room: f32,
     /// The container row the sidebar's keys act on, if any.
@@ -1226,6 +1233,19 @@ impl LeafRows<'_> {
     /// Whether session `id` can be shown in a pane.
     fn attachable(&self, id: &str) -> bool {
         !self.headless.contains(id)
+    }
+
+    /// Whether `leaf` of a repo or workspace row shows in the chosen mode;
+    /// every other kind of row shows all its leaves, and the session the
+    /// focused pane shows always keeps its row.
+    fn shows(&self, kind: ContainerKind, leaf: &Leaf) -> bool {
+        if self.attached == Some(leaf.id.as_str()) {
+            return true;
+        }
+        match kind {
+            ContainerKind::Repo | ContainerKind::Workspace => self.under_repos.shows(leaf),
+            _ => true,
+        }
     }
 }
 
