@@ -5,7 +5,7 @@
 //! settings; every change applies at once. The main window's title, which
 //! the App title tab controls, is kept here too.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -16,17 +16,16 @@ use gpui::{
     Window, div, prelude::*, px,
 };
 use protocol::{
-    AgentCommandEntry, AgentId, ClientMessage, DaemonMessage, FEATURE_AGENT_COMMANDS,
-    KeepAwakeMode, OptionValue, RemoteState,
+    AgentCommandEntry, AgentDescriptor, AgentId, ClientMessage, DaemonMessage,
+    FEATURE_AGENT_COMMANDS, FieldKind, KeepAwakeMode, OptionValue, RemoteState,
 };
 
 use crate::agent_options::{AgentOptions, FieldEditor, FieldView, descriptor_for};
-use crate::agent_options_view::LOCKED;
+use crate::agent_options_view::{LOCKED, UPDATE_CLIENT};
 use crate::appearance;
 use crate::appearance_stops::{AppearanceStop, after_lost};
 use crate::appearance_view::{Level, close_footer};
 use crate::buttons::{field_frame, focus_ring};
-use crate::claude_compat;
 use crate::mouse::CopyOnSelect;
 use crate::notify::{NotifyState, WINDOWS_NOTIFICATION_SETTINGS};
 use crate::palette::{CHIP, HOVER, LINE, RAISED, SUBTLE, TEXT_2, TRANSPARENT};
@@ -40,7 +39,7 @@ use crate::session_menu::{backdrop, dialog_button};
 use crate::sidebar::{LeafDensity, NotifySkip, SidebarView};
 use crate::spawn_view::{
     DISABLED_OPACITY, Look, checkbox_row, choice_button, close_button, dialog_card,
-    dialog_title_bar, field, segmented,
+    dialog_title_bar, field, muted, segmented,
 };
 use crate::tabs::tab_session_counts;
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
@@ -82,11 +81,12 @@ const AUTOSTART_HINT: &str = "So remote access works before you open this app.";
 const DEFAULT_PORT_TEXT: &str = "8787";
 /// The port field's width.
 const PORT_FIELD_WIDTH: f32 = 96.0;
-/// Why the Claude page's launch-command rows are disabled on a daemon that
+/// Why an agent page's launch-command rows are disabled on a daemon that
 /// does not store a launch command.
 const LAUNCH_COMMAND_UNSUPPORTED_TIP: &str =
     "Restart the daemon to set the launch command: .\\rt.ps1 restart";
-const LAUNCH_PROGRAM_PLACEHOLDER: &str = "claude";
+/// The tab list's group row over the agents' pages.
+const AGENTS_GROUP: &str = "Agents";
 const LAUNCH_ARGS_PLACEHOLDER: &str = "Extra arguments";
 const LAUNCH_USE_HINT: &str = "Used for new sessions, Restart and Resume; not for headless runs.";
 const LAUNCH_QUOTING_HINT: &str = "Extra arguments follow POSIX shell rules: quote a Windows path or double its backslashes. In cmd, a doskey macro is not expanded; set Program to a .cmd file instead.";
@@ -98,7 +98,7 @@ const LAUNCH_UNCLOSED_QUOTE: &str = "The extra arguments have an unclosed quote.
 const LAUNCH_RESERVED_FLAG_SUFFIX: &str =
     " is set by rustling-tulip; remove it from the extra arguments.";
 
-/// A tab of the Settings modal, in the order the list shows them.
+/// A tab of the Settings modal.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum SettingsTab {
     #[default]
@@ -109,11 +109,14 @@ pub(crate) enum SettingsTab {
     RemoteAccess,
     Appearance,
     AppTitle,
-    Claude,
+    /// The page of the agent with this id (interned), one per agent the
+    /// daemon lists.
+    Agent(&'static str),
 }
 
 impl SettingsTab {
-    const ALL: [Self; 8] = [
+    /// The tabs shown before the agents' pages, in the list's order.
+    const FIXED: [Self; 7] = [
         Self::General,
         Self::Notifications,
         Self::SpawnDefaults,
@@ -121,10 +124,11 @@ impl SettingsTab {
         Self::RemoteAccess,
         Self::Appearance,
         Self::AppTitle,
-        Self::Claude,
     ];
 
-    const fn label(self) -> &'static str {
+    /// The tab's label: an agent page's is its descriptor's label in
+    /// `agents`, else the agent's id.
+    fn label(self, agents: &[AgentDescriptor]) -> &'static str {
         match self {
             Self::General => "General",
             Self::Notifications => "Notifications",
@@ -133,11 +137,13 @@ impl SettingsTab {
             Self::RemoteAccess => "Remote access",
             Self::Appearance => "Appearance",
             Self::AppTitle => "App title",
-            Self::Claude => "Claude",
+            Self::Agent(id) => agent_descriptor(agents, id)
+                .map_or(id, |descriptor| intern(descriptor.label.clone())),
         }
     }
 
-    const fn selector(self) -> &'static str {
+    /// The tab row's selector: an agent page's names its descriptor's tag.
+    fn selector(self, agents: &[AgentDescriptor]) -> &'static str {
         match self {
             Self::General => "settings-tab-general",
             Self::Notifications => "settings-tab-notifications",
@@ -146,7 +152,18 @@ impl SettingsTab {
             Self::RemoteAccess => "settings-tab-remote-access",
             Self::Appearance => "settings-tab-appearance",
             Self::AppTitle => "settings-tab-app-title",
-            Self::Claude => "settings-tab-claude",
+            Self::Agent(id) => {
+                let tag = agent_descriptor(agents, id).map_or(id, |descriptor| &descriptor.tag);
+                intern(format!("settings-tab-{tag}"))
+            }
+        }
+    }
+
+    /// The agent whose page this tab is.
+    fn agent(self) -> Option<AgentId> {
+        match self {
+            Self::Agent(id) => Some(AgentId(id.to_owned())),
+            _ => None,
         }
     }
 
@@ -172,27 +189,54 @@ enum SettingsRow {
 }
 
 impl SettingsRow {
-    const fn label(self) -> &'static str {
+    fn label(self, agents: &[AgentDescriptor]) -> &'static str {
         match self {
             Self::Group(label) => label,
-            Self::Tab(tab) => tab.label(),
+            Self::Tab(tab) => tab.label(agents),
         }
     }
 }
 
-/// The tab list's rows, in order. A group row is drawn between the tabs
-/// and never reached by the keyboard.
-const ROWS: [SettingsRow; 9] = [
-    SettingsRow::Tab(SettingsTab::General),
-    SettingsRow::Tab(SettingsTab::Notifications),
-    SettingsRow::Tab(SettingsTab::SpawnDefaults),
-    SettingsRow::Tab(SettingsTab::Worktrees),
-    SettingsRow::Tab(SettingsTab::RemoteAccess),
-    SettingsRow::Tab(SettingsTab::Appearance),
-    SettingsRow::Tab(SettingsTab::AppTitle),
-    SettingsRow::Group("Agents"),
-    SettingsRow::Tab(SettingsTab::Claude),
-];
+/// The descriptor `agents` lists under id `id`.
+fn agent_descriptor<'a>(agents: &'a [AgentDescriptor], id: &str) -> Option<&'a AgentDescriptor> {
+    agents.iter().find(|descriptor| descriptor.id.0 == id)
+}
+
+/// The tab list's rows in order: the fixed tabs (Remote access only when
+/// `remote`), then, while `agents` lists any, the Agents group row and one
+/// page per agent in the daemon's order. A group row is drawn between the
+/// tabs and never reached by the keyboard.
+fn tab_rows(agents: &[AgentDescriptor], remote: bool) -> Vec<SettingsRow> {
+    let fixed = SettingsTab::FIXED
+        .into_iter()
+        .filter(|tab| remote || *tab != SettingsTab::RemoteAccess)
+        .map(SettingsRow::Tab);
+    let group = (!agents.is_empty()).then_some(SettingsRow::Group(AGENTS_GROUP));
+    let pages = agents
+        .iter()
+        .map(|descriptor| SettingsRow::Tab(SettingsTab::Agent(intern(descriptor.id.0.clone()))));
+    fixed.chain(group).chain(pages).collect()
+}
+
+/// The tabs among `rows`, in order.
+fn row_tabs(rows: &[SettingsRow]) -> Vec<SettingsTab> {
+    rows.iter()
+        .filter_map(|row| match row {
+            SettingsRow::Tab(tab) => Some(*tab),
+            SettingsRow::Group(_) => None,
+        })
+        .collect()
+}
+
+/// The tab to show once the list is `rows`: `shown` while the list still
+/// offers it, else General.
+fn tab_kept(shown: SettingsTab, rows: &[SettingsRow]) -> SettingsTab {
+    if rows.contains(&SettingsRow::Tab(shown)) {
+        shown
+    } else {
+        SettingsTab::General
+    }
+}
 
 /// The General tab's keep-awake choices, in the order they show.
 const KEEP_AWAKE_CHOICES: [KeepAwakeMode; 3] = [
@@ -240,6 +284,12 @@ pub(crate) enum SettingsControl {
         field: usize,
         selector: &'static str,
     },
+    /// The input of the text or model field with id `field` (interned) of
+    /// the shown agent page; `selector` is `settings-{tag}-{field id}`.
+    AgentText {
+        field: &'static str,
+        selector: &'static str,
+    },
     WorktreesPath,
     WorktreesBrowse,
     WorktreesSave,
@@ -278,7 +328,9 @@ impl SettingsControl {
             Self::NotifySkip(NotifySkip::Focused) => "settings-notify-skip-focused",
             Self::NotifySkip(NotifySkip::Never) => "settings-notify-skip-never",
             Self::SpawnTrusted => "settings-spawn-trusted",
-            Self::AgentChoice { selector, .. } | Self::AgentToggle { selector, .. } => selector,
+            Self::AgentChoice { selector, .. }
+            | Self::AgentToggle { selector, .. }
+            | Self::AgentText { selector, .. } => selector,
             Self::WorktreesPath => "settings-worktrees-root-input",
             Self::WorktreesBrowse => "settings-worktrees-root-browse",
             Self::WorktreesSave => "settings-worktrees-root-save",
@@ -331,7 +383,7 @@ pub(crate) struct RemoteAccessTab {
     _subscriptions: Vec<Subscription>,
 }
 
-/// A row of the Claude page's Launch command section.
+/// A row of an agent page's Launch command section.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LaunchCommandRow {
     Program,
@@ -353,9 +405,9 @@ fn launch_refusal_row(message: &str) -> Option<LaunchCommandRow> {
     }
 }
 
-/// The Claude page's launch-command fields and the apply they wait to hear
-/// back.
-pub(crate) struct ClaudeTab {
+/// One agent page's launch-command fields and text fields, and the apply
+/// they wait to hear back.
+pub(crate) struct AgentTab {
     program: Entity<TextInput>,
     program_focus: FocusHandle,
     args: Entity<TextInput>,
@@ -371,10 +423,93 @@ pub(crate) struct ClaudeTab {
     saved: bool,
     /// The daemon's refusal of the last apply, under the row it names.
     refusal: Option<(LaunchCommandRow, String)>,
+    /// The page's text and model fields, one per such field its descriptor
+    /// marks for Settings.
+    texts: Vec<SettingText>,
     _subscriptions: Vec<Subscription>,
 }
 
-impl ClaudeTab {
+/// A text or model field's input on an agent page.
+struct SettingText {
+    field: String,
+    input: Entity<TextInput>,
+    focus: FocusHandle,
+    /// The input's text, kept as it changes.
+    draft: String,
+    /// The user edited the text since it was last applied or filled.
+    edited: bool,
+    /// The placeholder the input shows, as the page's values set it.
+    placeholder: String,
+}
+
+/// What a [`SettingText`] of agent `agent`'s page shows anew: its value
+/// when `text` is set, its placeholder when `placeholder` is.
+struct TextRefresh {
+    agent: AgentId,
+    field: String,
+    text: Option<String>,
+    placeholder: Option<String>,
+}
+
+/// What a new [`SettingText`] starts with.
+struct TextSeed {
+    field: String,
+    draft: String,
+    placeholder: String,
+}
+
+/// The agent pages' state while Settings is open: each page's fields, kept
+/// while another tab shows, the agent page last selected, and the agents
+/// whose launch-command applies still owe the daemon's answer, oldest
+/// first.
+#[derive(Default)]
+pub(crate) struct AgentTabs {
+    tabs: BTreeMap<AgentId, AgentTab>,
+    current: Option<AgentId>,
+    applies: VecDeque<AgentId>,
+}
+
+impl AgentTabs {
+    /// Drops the pages of the agents `agents` no longer lists, and their
+    /// applies from the queue.
+    fn keep_listed(&mut self, agents: &[AgentDescriptor]) {
+        self.tabs
+            .retain(|agent, _| descriptor_for(agents, agent).is_some());
+        self.applies
+            .retain(|agent| descriptor_for(agents, agent).is_some());
+        if self
+            .current
+            .as_ref()
+            .is_some_and(|agent| descriptor_for(agents, agent).is_none())
+        {
+            self.current = None;
+        }
+    }
+
+    /// A lost connection: no answer to an apply in flight can arrive, so
+    /// the queue empties and every page's apply returns to unsent; the
+    /// pages and their drafts stay.
+    pub(crate) fn forget_applies(&mut self) {
+        self.applies.clear();
+        for tab in self.tabs.values_mut() {
+            tab.awaiting = 0;
+            tab.sent = None;
+            tab.saved = false;
+        }
+    }
+}
+
+/// The launch commands the daemon broadcast, as one page reads them.
+struct CommandEcho {
+    /// The page's command before and after the broadcast.
+    old: Option<AgentCommandEntry>,
+    stored: Option<AgentCommandEntry>,
+    read_only: bool,
+    /// The broadcast answers this page's oldest apply.
+    answers: bool,
+}
+
+impl AgentTab {
     /// Puts `text` in `row`'s field and draft.
     fn fill(&mut self, row: LaunchCommandRow, text: String, cx: &mut Context<RootView>) {
         let (draft, input) = match row {
@@ -383,6 +518,42 @@ impl ClaudeTab {
         };
         draft.clone_from(&text);
         input.update(cx, |input, cx| input.set_text(text, cx));
+    }
+
+    /// The daemon's launch commands: an echo answering the page's last
+    /// apply puts the stored command in each field that still reads as the
+    /// apply sent it, and shows Saved when both do. An echo answering none
+    /// is another client's change: it fills a field only while that field
+    /// still reads as the daemon left it.
+    fn on_echo(&mut self, echo: CommandEcho, cx: &mut Context<RootView>) {
+        let read_only = echo.read_only;
+        self.program
+            .update(cx, |input, cx| input.set_read_only(read_only, cx));
+        let mine = echo.answers && self.awaiting > 0;
+        if mine {
+            self.awaiting -= 1;
+        }
+        let settles = mine && self.awaiting == 0;
+        let (old_program, old_args) = echo
+            .old
+            .map_or_else(Default::default, |entry| (entry.program, entry.args));
+        let (program, args) = echo
+            .stored
+            .map_or_else(Default::default, |entry| (entry.program, entry.args));
+        let (sent_program, sent_args) = if settles {
+            self.sent.take().unwrap_or_default()
+        } else {
+            Default::default()
+        };
+        let program_as_sent = settles && self.program_draft.trim() == sent_program;
+        let args_as_sent = settles && self.args_draft.trim() == sent_args;
+        self.saved = program_as_sent && args_as_sent;
+        if program_as_sent || (!mine && self.program_draft == old_program) {
+            self.fill(LaunchCommandRow::Program, program, cx);
+        }
+        if args_as_sent || (!mine && self.args_draft == old_args) {
+            self.fill(LaunchCommandRow::Args, args, cx);
+        }
     }
 }
 
@@ -457,6 +628,48 @@ impl RootView {
             .is_some_and(|view| view.disabled && view.editor != FieldEditor::Unknown)
     }
 
+    /// The note the Settings page of the agent tagged `tag` shows for its
+    /// field `field`: the update note for a kind this client does not know,
+    /// the locked note for a field trusted launch locks, else `None`.
+    #[must_use]
+    pub fn settings_field_note(&self, tag: &str, field: &str) -> Option<&'static str> {
+        let view = self.settings_page_field(tag, field)?;
+        if view.editor == FieldEditor::Unknown {
+            Some(UPDATE_CLIENT)
+        } else if view.disabled {
+            Some(LOCKED)
+        } else {
+            None
+        }
+    }
+
+    /// The ids of the fields the Settings page of the agent tagged `tag`
+    /// draws, in order; empty while the daemon lists no such agent.
+    #[must_use]
+    pub fn settings_page_fields(&self, tag: &str) -> Vec<String> {
+        self.agents()
+            .iter()
+            .find(|agent| agent.tag == tag)
+            .and_then(|descriptor| self.agent_page(&descriptor.id))
+            .map(|page| page.fields.into_iter().map(|view| view.id).collect())
+            .unwrap_or_default()
+    }
+
+    /// The placeholder the input of text or model field `field` shows on
+    /// the Settings page of the agent tagged `tag`, once that page was
+    /// shown.
+    #[must_use]
+    pub fn settings_text_placeholder(&self, tag: &str, field: &str) -> Option<String> {
+        let descriptor = self.agents().iter().find(|agent| agent.tag == tag)?;
+        self.agent_tabs
+            .tabs
+            .get(&descriptor.id)?
+            .texts
+            .iter()
+            .find(|setting| setting.field == field)
+            .map(|setting| setting.placeholder.clone())
+    }
+
     fn settings_page_field(&self, tag: &str, field: &str) -> Option<FieldView> {
         let descriptor = self.agents().iter().find(|agent| agent.tag == tag)?;
         self.agent_page(&descriptor.id)?
@@ -478,66 +691,143 @@ impl RootView {
         })
     }
 
-    /// The Claude tab's agent page.
-    fn claude_page(&self) -> Option<AgentPage> {
-        self.agent_page(&claude_compat::claude_id())
+    /// The page of the agent whose tab is shown.
+    fn shown_page(&self) -> Option<AgentPage> {
+        self.agent_page(&self.settings_tab.agent()?)
     }
 
     /// The Settings tabs' labels, in the list's order.
     #[must_use]
     pub fn settings_tab_labels(&self) -> Vec<&'static str> {
+        let agents = self.agents();
         self.settings_tabs()
             .into_iter()
-            .map(SettingsTab::label)
+            .map(|tab| tab.label(agents))
             .collect()
     }
 
     /// Every label the Settings tab list draws, group rows included.
     #[must_use]
     pub fn settings_tab_rows(&self) -> Vec<&'static str> {
+        let agents = self.agents();
         self.settings_rows()
             .into_iter()
-            .map(SettingsRow::label)
+            .map(|row| row.label(agents))
             .collect()
-    }
-
-    /// Whether the connection target offers `tab`: Remote access configures
-    /// this PC's daemon, so it is offered only where the client manages it.
-    fn offers_settings_tab(&self, tab: SettingsTab) -> bool {
-        tab != SettingsTab::RemoteAccess || self.capabilities().manages_daemon()
     }
 
     /// The tabs the list shows on this target, in order.
     fn settings_tabs(&self) -> Vec<SettingsTab> {
-        SettingsTab::ALL
-            .into_iter()
-            .filter(|tab| self.offers_settings_tab(*tab))
-            .collect()
+        row_tabs(&self.settings_rows())
     }
 
-    /// The rows the tab list draws on this target, in order.
+    /// The rows the tab list draws on this target, in order: Remote access
+    /// configures this PC's daemon, so it is offered only where the client
+    /// manages it, and an agent's page only while the daemon lists it.
     fn settings_rows(&self) -> Vec<SettingsRow> {
-        ROWS.into_iter()
-            .filter(|row| match row {
-                SettingsRow::Group(_) => true,
-                SettingsRow::Tab(tab) => self.offers_settings_tab(*tab),
-            })
-            .collect()
+        tab_rows(self.agents(), self.capabilities().manages_daemon())
     }
 
-    /// After the connection target changed: a shown tab the new target
-    /// does not offer gives way to General.
+    /// After the connection target or its state changed: a shown tab the
+    /// list no longer offers gives way to General. An agent page stays
+    /// through a lost connection, whose agent list is empty; only a
+    /// connected daemon's list drops it ([`Self::follow_agent_list`]).
     pub(crate) fn follow_settings_target(&mut self) {
-        if !self.offers_settings_tab(self.settings_tab) {
-            self.settings_tab = SettingsTab::General;
+        if !matches!(self.settings_tab, SettingsTab::Agent(_)) {
+            self.keep_offered_tab();
+        }
+    }
+
+    /// After a connected daemon listed its agents: the page of an agent it
+    /// no longer lists gives way to General, and drops its drafts and
+    /// applies.
+    fn follow_agent_list(&mut self) {
+        self.keep_offered_tab();
+        let agents = self.agents.clone();
+        self.agent_tabs.keep_listed(&agents);
+    }
+
+    /// The shown tab, or General when the list no longer offers it.
+    fn keep_offered_tab(&mut self) {
+        let kept = tab_kept(self.settings_tab, &self.settings_rows());
+        if kept != self.settings_tab {
+            self.settings_tab = kept;
             self.settings_control = None;
         }
+    }
+
+    /// Folds the daemon's agents or their Settings values, as
+    /// [`RootView::on_agents`] does, and the agent pages follow them; any
+    /// other message is dropped.
+    pub(crate) fn fold_agents(&mut self, msg: DaemonMessage, cx: &mut Context<Self>) {
+        let listed = matches!(msg, DaemonMessage::Agents { .. });
+        let pages_follow = listed || matches!(msg, DaemonMessage::AgentSettings { .. });
+        self.on_agents(msg);
+        if listed {
+            self.follow_agent_list();
+        }
+        if pages_follow {
+            self.refresh_setting_texts(cx);
+        }
+    }
+
+    /// After the daemon's agents or their Settings values arrived: each
+    /// text field shows the placeholder its page's values now set, and one
+    /// the user has not edited shows the value its page now holds.
+    fn refresh_setting_texts(&mut self, cx: &mut Context<Self>) {
+        for refresh in self.text_refreshes() {
+            let Some(setting) = self.setting_text_mut(&refresh.agent, &refresh.field) else {
+                continue;
+            };
+            if let Some(text) = refresh.text {
+                setting.draft.clone_from(&text);
+                setting
+                    .input
+                    .update(cx, |input, cx| input.set_text(text, cx));
+            }
+            if let Some(placeholder) = refresh.placeholder {
+                setting.placeholder.clone_from(&placeholder);
+                setting
+                    .input
+                    .update(cx, |input, cx| input.set_placeholder(placeholder, cx));
+            }
+        }
+        cx.notify();
+    }
+
+    /// The text fields whose value or placeholder no longer reads as their
+    /// page's values say, and what each should show.
+    fn text_refreshes(&self) -> Vec<TextRefresh> {
+        let mut refreshes = Vec::new();
+        for (agent, tab) in &self.agent_tabs.tabs {
+            let Some(page) = self.agent_page(agent) else {
+                continue;
+            };
+            for setting in &tab.texts {
+                let Some(view) = page.fields.iter().find(|view| view.id == setting.field) else {
+                    continue;
+                };
+                let text = Some(setting_text(&view.value))
+                    .filter(|text| !setting.edited && *text != setting.draft);
+                let placeholder = Some(text_placeholder(view).unwrap_or_default())
+                    .filter(|placeholder| *placeholder != setting.placeholder);
+                if text.is_some() || placeholder.is_some() {
+                    refreshes.push(TextRefresh {
+                        agent: agent.clone(),
+                        field: setting.field.clone(),
+                        text,
+                        placeholder,
+                    });
+                }
+            }
+        }
+        refreshes
     }
 
     /// The label of the Settings tab shown.
     #[must_use]
     pub fn settings_tab(&self) -> &'static str {
-        self.settings_tab.label()
+        self.settings_tab.label(self.agents())
     }
 
     /// The keep-awake choice selected, or `None` while the daemon has not
@@ -619,7 +909,7 @@ impl RootView {
             .chain(NOTIFY_SKIP_CHOICES.map(SettingsControl::NotifySkip))
             .collect(),
             SettingsTab::SpawnDefaults => vec![SettingsControl::SpawnTrusted],
-            SettingsTab::Claude => self.claude_controls(),
+            SettingsTab::Agent(_) => self.agent_controls(),
             SettingsTab::Worktrees => {
                 let mut controls = vec![SettingsControl::WorktreesPath];
                 if self.capabilities().opens_local_files() {
@@ -643,24 +933,25 @@ impl RootView {
         }
     }
 
-    /// The Claude page's controls in drawing order: each field's, then the
-    /// launch rows. A field trusted launch locks is out, every field is out
-    /// while [`Self::agent_rows_live`] says no, and the launch rows leave
-    /// until the daemon reported its command. A Program row an environment
-    /// variable sets is out of the ring.
-    fn claude_controls(&self) -> Vec<SettingsControl> {
+    /// The shown agent page's controls in drawing order: each field's, then
+    /// the launch rows. A field trusted launch locks is out, every field is
+    /// out while [`Self::agent_rows_live`] says no, and the launch rows
+    /// leave until the daemon reported the agent's command. A Program row
+    /// an environment variable sets is out of the ring.
+    fn agent_controls(&self) -> Vec<SettingsControl> {
+        let Some(page) = self.shown_page() else {
+            return Vec::new();
+        };
         let mut controls = Vec::new();
-        if let Some(page) = self.claude_page()
-            && self.agent_rows_live(&page.id)
-        {
+        if self.agent_rows_live(&page.id) {
             for (index, view) in page.fields.iter().enumerate() {
                 if !view.disabled {
                     controls.extend(field_controls(&page.tag, index, view));
                 }
             }
         }
-        if self.launch_rows_live() {
-            if !self.launch_program_read_only() {
+        if self.launch_rows_live(&page.id) {
+            if !self.program_read_only(&page.id) {
                 controls.push(SettingsControl::AgentProgram);
             }
             controls.push(SettingsControl::AgentArgs);
@@ -673,11 +964,30 @@ impl RootView {
         self.conn.supports(FEATURE_AGENT_COMMANDS)
     }
 
-    /// Claude's launch command as the daemon last reported it.
-    fn claude_command(&self) -> Option<&AgentCommandEntry> {
-        self.agent_commands
-            .as_ref()?
-            .get(&claude_compat::claude_id())
+    /// Agent `agent`'s launch command as the daemon last reported it.
+    fn agent_command(&self, agent: &AgentId) -> Option<&AgentCommandEntry> {
+        self.agent_commands.as_ref()?.get(agent)
+    }
+
+    /// The agent page last selected and its fields, while Settings has
+    /// shown one.
+    fn current_agent_tab(&self) -> Option<(&AgentId, &AgentTab)> {
+        let agent = self.agent_tabs.current.as_ref()?;
+        Some((agent, self.agent_tabs.tabs.get(agent)?))
+    }
+
+    /// The shown agent page's fields.
+    fn shown_agent_tab(&self) -> Option<&AgentTab> {
+        self.agent_tabs.tabs.get(&self.settings_tab.agent()?)
+    }
+
+    fn setting_text_mut(&mut self, agent: &AgentId, field: &str) -> Option<&mut SettingText> {
+        self.agent_tabs
+            .tabs
+            .get_mut(agent)?
+            .texts
+            .iter_mut()
+            .find(|setting| setting.field == field)
     }
 
     /// Whether the connected daemon's Welcome leaves the launch command out:
@@ -687,38 +997,44 @@ impl RootView {
         self.conn.is_open() && !self.launch_command_supported()
     }
 
-    /// Whether the launch-command rows take input: the daemon stores a
-    /// launch command and has reported Claude's.
-    fn launch_rows_live(&self) -> bool {
-        self.launch_command_supported() && self.claude_command().is_some()
+    /// Whether agent `agent`'s launch-command rows take input: the daemon
+    /// stores a launch command and has reported the agent's.
+    fn launch_rows_live(&self, agent: &AgentId) -> bool {
+        self.launch_command_supported() && self.agent_command(agent).is_some()
     }
 
-    /// The Program field's text, while the Claude page has been shown.
+    /// The Program field's text on the agent page last selected.
     #[must_use]
     pub fn launch_program(&self) -> Option<String> {
-        self.claude_tab
-            .as_ref()
-            .map(|tab| tab.program_draft.clone())
+        self.current_agent_tab()
+            .map(|(_, tab)| tab.program_draft.clone())
     }
 
-    /// The Extra arguments field's text, while the Claude page has been
-    /// shown.
+    /// The Extra arguments field's text on the agent page last selected.
     #[must_use]
     pub fn launch_args(&self) -> Option<String> {
-        self.claude_tab.as_ref().map(|tab| tab.args_draft.clone())
+        self.current_agent_tab()
+            .map(|(_, tab)| tab.args_draft.clone())
     }
 
-    /// The daemon's refusal of the last apply and the row it shows under.
+    /// The daemon's refusal of the last apply and the row it shows under,
+    /// on the agent page last selected.
     #[must_use]
     pub fn launch_command_refusal(&self) -> Option<(LaunchCommandRow, String)> {
-        self.claude_tab.as_ref()?.refusal.clone()
+        self.current_agent_tab()?.1.refusal.clone()
     }
 
-    /// Whether the launch command's Saved note shows: the daemon echoed
-    /// the last apply, and both fields still read as it stored them.
+    /// Whether the launch command's Saved note shows on the agent page
+    /// last selected: the daemon echoed the last apply, and both fields
+    /// still read as it stored them.
     #[must_use]
     pub fn launch_saved(&self) -> bool {
-        let (Some(tab), Some(stored)) = (&self.claude_tab, self.claude_command()) else {
+        self.current_agent_tab()
+            .is_some_and(|(agent, tab)| self.shows_saved(agent, tab))
+    }
+
+    fn shows_saved(&self, agent: &AgentId, tab: &AgentTab) -> bool {
+        let Some(stored) = self.agent_command(agent) else {
             return false;
         };
         tab.saved
@@ -727,18 +1043,30 @@ impl RootView {
             && tab.args_draft.trim() == stored.args
     }
 
-    /// Whether the Program row is read-only: an environment variable on the
-    /// host sets the program.
+    /// Whether the Program row of the agent page last selected is
+    /// read-only: an environment variable on the host sets the program.
     #[must_use]
     pub fn launch_program_read_only(&self) -> bool {
-        self.claude_command()
+        self.agent_tabs
+            .current
+            .as_ref()
+            .is_some_and(|agent| self.program_read_only(agent))
+    }
+
+    fn program_read_only(&self, agent: &AgentId) -> bool {
+        self.agent_command(agent)
             .is_some_and(|entry| entry.program_env.is_some())
     }
 
-    /// The note under a read-only Program row naming the variable.
+    /// The note under the read-only Program row of the agent page last
+    /// selected, naming the variable.
     #[must_use]
     pub fn launch_program_env_note(&self) -> Option<String> {
-        let env = self.claude_command()?.program_env.as_ref()?;
+        self.program_env_note(self.agent_tabs.current.as_ref()?)
+    }
+
+    fn program_env_note(&self, agent: &AgentId) -> Option<String> {
+        let env = self.agent_command(agent)?.program_env.as_ref()?;
         Some(format!("Set by {env}"))
     }
 
@@ -750,16 +1078,25 @@ impl RootView {
             .then_some(LAUNCH_COMMAND_UNSUPPORTED_TIP)
     }
 
-    /// The Claude page's fields afresh, holding the daemon's command.
-    fn new_claude_tab(&self, window: &mut Window, cx: &mut Context<Self>) -> ClaudeTab {
+    /// Agent `agent`'s page afresh: its launch-command fields holding the
+    /// daemon's command, Program's placeholder the agent's tag, and an
+    /// input per text or model field.
+    fn new_agent_tab(
+        &self,
+        agent: &AgentId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AgentTab {
         let (program_draft, args_draft) = self
-            .claude_command()
+            .agent_command(agent)
             .map_or_else(Default::default, |entry| {
                 (entry.program.clone(), entry.args.clone())
             });
-        let read_only = self.launch_program_read_only();
+        let read_only = self.program_read_only(agent);
+        let placeholder = descriptor_for(self.agents(), agent)
+            .map_or_else(|| agent.0.clone(), |descriptor| descriptor.tag.clone());
         let program = cx.new(|cx| {
-            let mut input = TextInput::new(program_draft.clone(), LAUNCH_PROGRAM_PLACEHOLDER, cx);
+            let mut input = TextInput::new(program_draft.clone(), placeholder, cx);
             input.set_read_only(read_only, cx);
             input
         });
@@ -771,23 +1108,25 @@ impl RootView {
             (&program, LaunchCommandRow::Program),
             (&args, LaunchCommandRow::Args),
         ] {
+            let submitter = agent.clone();
             subscriptions.push(cx.subscribe_in(
                 input,
                 window,
-                |this, _, event: &TextInputEvent, window, cx| match event {
+                move |this, _, event: &TextInputEvent, window, cx| match event {
                     TextInputEvent::Submit => {
-                        this.apply_launch_command();
+                        this.apply_launch_command(&submitter);
                         cx.notify();
                     }
                     TextInputEvent::Cancel => this.close_appearance_editor(window, cx),
                 },
             ));
+            let editor = agent.clone();
             subscriptions.push(cx.subscribe_in(
                 input,
                 window,
                 move |this, input, _: &TextChanged, _, cx| {
                     let text = input.read(cx).text().to_owned();
-                    if let Some(tab) = &mut this.claude_tab {
+                    if let Some(tab) = this.agent_tabs.tabs.get_mut(&editor) {
                         match row {
                             LaunchCommandRow::Program => tab.program_draft = text,
                             LaunchCommandRow::Args => tab.args_draft = text,
@@ -798,7 +1137,13 @@ impl RootView {
                 },
             ));
         }
-        ClaudeTab {
+        let mut texts = Vec::new();
+        for seed in self.text_seeds(agent) {
+            let (text, text_subscriptions) = new_setting_text(agent, seed, window, cx);
+            texts.push(text);
+            subscriptions.extend(text_subscriptions);
+        }
+        AgentTab {
             program,
             program_focus,
             args,
@@ -809,18 +1154,108 @@ impl RootView {
             sent: None,
             saved: false,
             refusal: None,
+            texts,
             _subscriptions: subscriptions,
         }
     }
 
-    /// Enter in either launch-command row: both fields, trimmed, as
-    /// Claude's command; two empty fields clear it. Nothing is sent before
-    /// the daemon reported its command.
-    fn apply_launch_command(&mut self) {
-        if !self.launch_rows_live() {
+    /// What each text or model field agent `agent`'s descriptor marks for
+    /// Settings starts with: the value its page shows, and its placeholder.
+    fn text_seeds(&self, agent: &AgentId) -> Vec<TextSeed> {
+        let Some(descriptor) = descriptor_for(self.agents(), agent) else {
+            return Vec::new();
+        };
+        let shown = self.agent_page(agent).map(|page| page.fields);
+        descriptor
+            .fields
+            .iter()
+            .filter(|field| {
+                field.settings
+                    && matches!(field.kind, FieldKind::Text { .. } | FieldKind::Model { .. })
+            })
+            .map(|field| {
+                let view = shown.iter().flatten().find(|view| view.id == field.id);
+                TextSeed {
+                    field: field.id.clone(),
+                    draft: view
+                        .map(|view| setting_text(&view.value))
+                        .unwrap_or_default(),
+                    placeholder: view.and_then(text_placeholder).unwrap_or_default(),
+                }
+            })
+            .collect()
+    }
+
+    /// Enter in, or leaving, the input of agent `agent`'s text field
+    /// `field`: an edited value is sent as the field's Settings value, an
+    /// empty one as no value. Nothing is sent for a field that is locked or
+    /// hidden, or while the agent's rows are disabled.
+    fn apply_setting_text(&mut self, agent: &AgentId, field: &str) {
+        let Some(setting) = self
+            .agent_tabs
+            .tabs
+            .get(agent)
+            .and_then(|tab| tab.texts.iter().find(|setting| setting.field == field))
+        else {
+            return;
+        };
+        if !setting.edited {
             return;
         }
-        let Some(tab) = &mut self.claude_tab else {
+        let value = typed_value(&setting.draft);
+        let open = self
+            .agent_page(agent)
+            .and_then(|page| page.fields.into_iter().find(|view| view.id == field))
+            .is_some_and(|view| !view.disabled);
+        if !open || !self.agent_rows_live(agent) {
+            tracing::info!(
+                agent = %agent.0,
+                key = field,
+                "settings: the text field takes no value now; nothing sent"
+            );
+            return;
+        }
+        if let Some(setting) = self.setting_text_mut(agent, field) {
+            setting.edited = false;
+        }
+        self.set_agent_setting(agent, field, value);
+    }
+
+    /// Tab leaving the field with id `field` on the shown agent page
+    /// applies it, as any other way of leaving the input does.
+    fn leave_agent_text(&mut self, field: &str) {
+        if let Some(agent) = self.settings_tab.agent() {
+            self.apply_setting_text(&agent, field);
+        }
+    }
+
+    /// Settings closing: every text field the user edited is applied, as
+    /// Enter in it would apply it.
+    pub(crate) fn apply_edited_texts(&mut self) {
+        let edited: Vec<(AgentId, String)> = self
+            .agent_tabs
+            .tabs
+            .iter()
+            .flat_map(|(agent, tab)| {
+                tab.texts
+                    .iter()
+                    .filter(|setting| setting.edited)
+                    .map(move |setting| (agent.clone(), setting.field.clone()))
+            })
+            .collect();
+        for (agent, field) in edited {
+            self.apply_setting_text(&agent, &field);
+        }
+    }
+
+    /// Enter in either launch-command row of agent `agent`'s page: both
+    /// fields, trimmed, as the agent's command; two empty fields clear it.
+    /// Nothing is sent before the daemon reported the agent's command.
+    fn apply_launch_command(&mut self, agent: &AgentId) {
+        if !self.launch_rows_live(agent) {
+            return;
+        }
+        let Some(tab) = self.agent_tabs.tabs.get_mut(agent) else {
             return;
         };
         let program = tab.program_draft.trim().to_owned();
@@ -829,75 +1264,68 @@ impl RootView {
         tab.sent = Some((program.clone(), args.clone()));
         tab.saved = false;
         tab.refusal = None;
-        tracing::info!(%program, %args, "settings: applying Claude's launch command");
+        self.agent_tabs.applies.push_back(agent.clone());
+        tracing::info!(agent = %agent.0, %program, %args, "settings: applying an agent's launch command");
         self.send(ClientMessage::SetAgentCommand {
-            agent: claude_compat::claude_id(),
+            agent: agent.clone(),
             program,
             args,
         });
     }
 
-    /// The daemon's launch commands. Each echo answers one of the page's
-    /// applies, and the one answering the last puts the command the daemon
-    /// stored in each field that still reads as that apply sent it, and
-    /// shows Saved when both do. An echo answering none is another client's
-    /// change: it fills a field only while that field still reads as the
-    /// daemon left it.
+    /// The daemon's launch commands. Each echo answers the oldest apply
+    /// still waiting, and every agent page takes the broadcast as
+    /// [`AgentTab::on_echo`] says.
     pub(crate) fn on_agent_commands(&mut self, msg: DaemonMessage, cx: &mut Context<Self>) {
         let DaemonMessage::AgentCommands { commands } = msg else {
             return;
         };
-        let previous = self.claude_command().cloned();
+        let previous = self.agent_commands.take();
         self.agent_commands = Some(
             commands
                 .into_iter()
                 .map(|entry| (entry.agent.clone(), entry))
                 .collect(),
         );
-        let stored = self.claude_command().cloned();
-        let read_only = self.launch_program_read_only();
-        if let Some(tab) = &mut self.claude_tab {
-            tab.program
-                .update(cx, |input, cx| input.set_read_only(read_only, cx));
-            let mine = tab.awaiting > 0;
-            tab.awaiting = tab.awaiting.saturating_sub(1);
-            let settles = mine && tab.awaiting == 0;
-            let (old_program, old_args) =
-                previous.map_or_else(Default::default, |entry| (entry.program, entry.args));
-            let (program, args) =
-                stored.map_or_else(Default::default, |entry| (entry.program, entry.args));
-            let (sent_program, sent_args) = if settles {
-                tab.sent.take().unwrap_or_default()
-            } else {
-                Default::default()
+        let answered = self.agent_tabs.applies.pop_front();
+        let agents: Vec<AgentId> = self.agent_tabs.tabs.keys().cloned().collect();
+        for agent in agents {
+            let echo = CommandEcho {
+                old: previous
+                    .as_ref()
+                    .and_then(|commands| commands.get(&agent))
+                    .cloned(),
+                stored: self.agent_command(&agent).cloned(),
+                read_only: self.program_read_only(&agent),
+                answers: answered.as_ref() == Some(&agent),
             };
-            let program_as_sent = settles && tab.program_draft.trim() == sent_program;
-            let args_as_sent = settles && tab.args_draft.trim() == sent_args;
-            tab.saved = program_as_sent && args_as_sent;
-            if program_as_sent || (!mine && tab.program_draft == old_program) {
-                tab.fill(LaunchCommandRow::Program, program, cx);
-            }
-            if args_as_sent || (!mine && tab.args_draft == old_args) {
-                tab.fill(LaunchCommandRow::Args, args, cx);
+            if let Some(tab) = self.agent_tabs.tabs.get_mut(&agent) {
+                tab.on_echo(echo, cx);
             }
         }
         cx.notify();
     }
 
     /// An unrouted daemon refusal while Settings is open and a
-    /// launch-command apply waits: any refusal ends the apply, and one of
-    /// the launch-command refusals shows under the row it names. Returns
-    /// whether it took `message`; any other refusal is left to toast.
+    /// launch-command apply waits: any refusal ends the oldest apply, and
+    /// one of the launch-command refusals shows under the row it names on
+    /// that apply's page. Returns whether it took `message`; any other
+    /// refusal is left to toast.
     pub(crate) fn on_agent_command_error(&mut self, message: &str, cx: &mut Context<Self>) -> bool {
         if !self.settings_open() {
             return false;
         }
-        let Some(tab) = &mut self.claude_tab else {
+        let Some(agent) = self.agent_tabs.applies.pop_front() else {
             return false;
         };
-        if tab.awaiting == 0 {
+        let Some(tab) = self
+            .agent_tabs
+            .tabs
+            .get_mut(&agent)
+            .filter(|tab| tab.awaiting > 0)
+        else {
             return false;
-        }
+        };
         tab.awaiting -= 1;
         tab.saved = false;
         cx.notify();
@@ -943,6 +1371,12 @@ impl RootView {
                 SettingsControl::RemotePort => self.remote_port_focused(window),
                 SettingsControl::AgentProgram => self.launch_program_focused(window),
                 SettingsControl::AgentArgs => self.launch_args_focused(window),
+                SettingsControl::AgentText { field, .. } => {
+                    self.agent_page_shown()
+                        && self
+                            .agent_text_focus(field)
+                            .is_some_and(|focus| focus.is_focused(window))
+                }
                 SettingsControl::Appearance(stop) if stop.is_field() => {
                     self.appearance_field_has_keyboard(*stop, window, cx)
                 }
@@ -979,10 +1413,17 @@ impl RootView {
     pub(crate) fn focus_settings_control(&mut self, control: SettingsControl, window: &mut Window) {
         self.settings_control = Some(control);
         let field = match control {
-            SettingsControl::WorktreesPath => self.worktrees_tab.as_ref().map(|tab| &tab.focus),
-            SettingsControl::RemotePort => self.remote_access_tab.as_ref().map(|tab| &tab.focus),
-            SettingsControl::AgentProgram => self.claude_tab.as_ref().map(|tab| &tab.program_focus),
-            SettingsControl::AgentArgs => self.claude_tab.as_ref().map(|tab| &tab.args_focus),
+            SettingsControl::WorktreesPath => {
+                self.worktrees_tab.as_ref().map(|tab| tab.focus.clone())
+            }
+            SettingsControl::RemotePort => {
+                self.remote_access_tab.as_ref().map(|tab| tab.focus.clone())
+            }
+            SettingsControl::AgentProgram => {
+                self.shown_agent_tab().map(|tab| tab.program_focus.clone())
+            }
+            SettingsControl::AgentArgs => self.shown_agent_tab().map(|tab| tab.args_focus.clone()),
+            SettingsControl::AgentText { field, .. } => self.agent_text_focus(field),
             _ => None,
         };
         match field {
@@ -1001,26 +1442,47 @@ impl RootView {
                 .is_some_and(|tab| tab.focus.is_focused(window))
     }
 
-    /// Whether the Claude page's Program field has the keyboard.
+    /// Whether the shown agent page's Program field has the keyboard.
     fn launch_program_focused(&self, window: &Window) -> bool {
-        self.claude_page_shown()
+        self.agent_page_shown()
             && self
-                .claude_tab
-                .as_ref()
+                .shown_agent_tab()
                 .is_some_and(|tab| tab.program_focus.is_focused(window))
     }
 
-    /// Whether the Claude page's Extra arguments field has the keyboard.
+    /// Whether the shown agent page's Extra arguments field has the
+    /// keyboard.
     fn launch_args_focused(&self, window: &Window) -> bool {
-        self.claude_page_shown()
+        self.agent_page_shown()
             && self
-                .claude_tab
-                .as_ref()
+                .shown_agent_tab()
                 .is_some_and(|tab| tab.args_focus.is_focused(window))
     }
 
-    fn claude_page_shown(&self) -> bool {
-        self.settings_open() && self.settings_tab == SettingsTab::Claude
+    /// Whether one of the shown agent page's text fields has the keyboard.
+    fn agent_texts_focused(&self, window: &Window) -> bool {
+        self.agent_page_shown()
+            && self.shown_agent_tab().is_some_and(|tab| {
+                tab.texts
+                    .iter()
+                    .any(|setting| setting.focus.is_focused(window))
+            })
+    }
+
+    /// The focus of the input of the field with id `field` on the shown
+    /// agent page.
+    fn agent_text_focus(&self, field: &str) -> Option<FocusHandle> {
+        self.agent_tabs
+            .tabs
+            .get(&self.settings_tab.agent()?)?
+            .texts
+            .iter()
+            .find(|setting| setting.field == field)
+            .map(|setting| setting.focus.clone())
+    }
+
+    fn agent_page_shown(&self) -> bool {
+        self.settings_open() && matches!(self.settings_tab, SettingsTab::Agent(_))
     }
 
     /// Whether the Worktrees tab's path field has the keyboard.
@@ -1037,6 +1499,11 @@ impl RootView {
     /// shown tab's controls make, backwards with `back`. From anywhere off
     /// the ring it goes to the tab list.
     fn step_settings_focus(&mut self, back: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(SettingsControl::AgentText { field, .. }) =
+            self.focused_settings_control(window, cx)
+        {
+            self.leave_agent_text(field);
+        }
         let controls = self.settings_controls(cx);
         let at = if self.settings_tabs_focus.is_focused(window) {
             Some(0)
@@ -1081,14 +1548,19 @@ impl RootView {
             SettingsControl::NotifyFinished => self.toggle_finished_notification(cx),
             SettingsControl::NotifySkip(skip) => self.set_notify_skip(skip, cx),
             SettingsControl::SpawnTrusted => self.toggle_spawn_trusted(cx),
-            SettingsControl::AgentChoice { field, choice, .. } => {
-                self.press_agent_field(field, Some(choice));
+            SettingsControl::AgentChoice {
+                field,
+                choice,
+                selector,
+            } => self.press_agent_field(field, Some(choice), selector),
+            SettingsControl::AgentToggle { field, selector } => {
+                self.press_agent_field(field, None, selector);
             }
-            SettingsControl::AgentToggle { field, .. } => self.press_agent_field(field, None),
             SettingsControl::WorktreesPath
             | SettingsControl::RemotePort
             | SettingsControl::AgentProgram
-            | SettingsControl::AgentArgs => {}
+            | SettingsControl::AgentArgs
+            | SettingsControl::AgentText { .. } => {}
             SettingsControl::WorktreesBrowse => self.browse_worktrees_root(cx),
             SettingsControl::WorktreesSave => self.save_worktrees_root(),
             SettingsControl::WorktreesReset => self.reset_worktrees_root(cx),
@@ -1608,10 +2080,15 @@ impl RootView {
             self.remote_access_tab = Some(self.new_remote_access_tab(window, cx));
             self.on_devices_page_selected();
         }
-        // The Claude page keeps its fields and the apply they wait on until
+        // An agent page keeps its fields and the apply they wait on until
         // Settings closes, so selecting it again loses nothing.
-        if tab == SettingsTab::Claude && self.claude_tab.is_none() {
-            self.claude_tab = Some(self.new_claude_tab(window, cx));
+        if let Some(agent) = tab.agent() {
+            let fresh = (!self.agent_tabs.tabs.contains_key(&agent))
+                .then(|| self.new_agent_tab(&agent, window, cx));
+            if let Some(fresh) = fresh {
+                self.agent_tabs.tabs.insert(agent.clone(), fresh);
+            }
+            self.agent_tabs.current = Some(agent);
         }
         self.settings_tabs_focus.focus(window);
         cx.notify();
@@ -1676,12 +2153,14 @@ impl RootView {
         cx.notify();
     }
 
-    /// A press on field `field` of the shown agent page: its choice
-    /// `choice`, or its toggle when `None`. Asks the daemon to store the
-    /// value; the row shows it when the daemon's broadcast arrives. A
-    /// locked field sends nothing.
-    fn press_agent_field(&mut self, field: usize, choice: Option<usize>) {
-        let Some(page) = self.claude_page() else {
+    /// A press on field `field` of the shown agent page, made on the
+    /// control `selector` names: its choice `choice`, or its toggle when
+    /// `None`. Asks the daemon to store the value; the row shows it when
+    /// the daemon's broadcast arrives. A locked field sends nothing, and so
+    /// does a press whose control is not the indexed field's, as when a
+    /// `when` rule changed the page under it.
+    fn press_agent_field(&mut self, field: usize, choice: Option<usize>, selector: &str) {
+        let Some(page) = self.shown_page() else {
             tracing::info!("settings: the daemon lists no agent for this page; nothing sent");
             return;
         };
@@ -1692,6 +2171,10 @@ impl RootView {
             );
             return;
         };
+        if !control_matches(&page.tag, field, view, selector) {
+            tracing::debug!("settings: pressed control does not match its field; ignored");
+            return;
+        }
         if view.disabled {
             tracing::info!(key = %view.id, "settings: the field is locked; nothing sent");
             return;
@@ -1800,6 +2283,7 @@ impl RootView {
             || self.remote_port_focused(window)
             || self.launch_program_focused(window)
             || self.launch_args_focused(window)
+            || self.agent_texts_focused(window)
             || self.appearance_field_focused(window, cx)
     }
 
@@ -1994,7 +2478,8 @@ impl RootView {
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let shown = tab == self.settings_tab;
-        let selector = tab.selector();
+        let selector = tab.selector(self.agents());
+        let label = tab.label(self.agents());
         let (text, weight) = if shown {
             (TEXT, FontWeight::SEMIBOLD)
         } else {
@@ -2024,7 +2509,7 @@ impl RootView {
             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                 this.select_settings_tab(tab, window, cx);
             }))
-            .child(tab.label())
+            .child(label)
             .children(if tab == SettingsTab::RemoteAccess {
                 self.remote_access_tab_badge()
             } else {
@@ -2044,7 +2529,7 @@ impl RootView {
             SettingsTab::AppTitle => self.app_title_tab(focused, cx),
             SettingsTab::Notifications => self.notifications_tab(focused, cx),
             SettingsTab::SpawnDefaults => self.spawn_defaults_tab(focused, cx),
-            SettingsTab::Claude => self.claude_tab(focused, cx),
+            SettingsTab::Agent(_) => self.agent_page_content(focused, cx),
             SettingsTab::Worktrees => self.worktrees_tab_content(focused, cx),
             SettingsTab::RemoteAccess => self.remote_access_tab_content(focused, cx),
         }
@@ -2279,51 +2764,64 @@ impl RootView {
             ))
             .child(trusted)
             .child(hint(
-                "When enabled, new agent sessions bypass approval prompts.",
+                "When enabled, new agent sessions skip their approval prompts.",
             ));
         vec![section.into_any_element()]
     }
 
-    /// The Claude page: a section titled with the agent's label holding
-    /// its Settings fields in the descriptor's order, then the launch
-    /// command. While the daemon lists no such agent there are no fields.
-    fn claude_tab(
+    /// The shown agent's page: a section titled with the agent's label
+    /// holding its Settings fields in the descriptor's order, when it has
+    /// any, then the launch command.
+    fn agent_page_content(
         &self,
         focused: Option<SettingsControl>,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
+        let Some(page) = self.shown_page() else {
+            return Vec::new();
+        };
+        let rows_of = RowPage {
+            tag: &page.tag,
+            live: self.agent_rows_live(&page.id),
+            tab: self.agent_tabs.tabs.get(&page.id),
+            focused,
+        };
+        let rows: Vec<AnyElement> = page
+            .fields
+            .iter()
+            .enumerate()
+            .filter_map(|(index, view)| agent_field_row(&rows_of, index, view, cx))
+            .collect();
         let mut sections = Vec::new();
-        if let Some(page) = self.claude_page() {
-            let live = self.agent_rows_live(&page.id);
-            let rows: Vec<AnyElement> = page
-                .fields
-                .iter()
-                .enumerate()
-                .filter_map(|(index, view)| {
-                    agent_field_row(&page.tag, index, view, live, focused, cx)
-                })
-                .collect();
-            sections.push(section(page.label).children(rows).into_any_element());
+        if !rows.is_empty() {
+            sections.push(
+                section(page.label.clone())
+                    .children(rows)
+                    .into_any_element(),
+            );
         }
-        sections.extend(self.launch_command_section(focused, cx));
+        sections.extend(self.launch_command_section(&page, focused, cx));
         sections
     }
 
-    /// The Claude page's Launch command section: the Program and Extra
+    /// Agent `page`'s Launch command section: the Program and Extra
     /// arguments rows and their notes. On a daemon that stores no launch
     /// command the rows are dimmed and inert; while not connected, and
-    /// before a capable daemon reported its command, there is no section.
+    /// before a capable daemon reported the agent's command, there is no
+    /// section.
     fn launch_command_section(
         &self,
+        page: &AgentPage,
         focused: Option<SettingsControl>,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if !self.launch_rows_live() && !self.launch_command_unsupported() {
+        let live = self.launch_rows_live(&page.id);
+        if !live && !self.launch_command_unsupported() {
             return None;
         }
         let section = section("Launch command");
-        let section = if self.launch_rows_live() {
-            let tab = self.claude_tab.as_ref()?;
+        let section = if live {
+            let tab = self.agent_tabs.tabs.get(&page.id)?;
             let refusal = |row| {
                 tab.refusal
                     .as_ref()
@@ -2336,18 +2834,18 @@ impl RootView {
             let args_error = refusal(LaunchCommandRow::Args)
                 .map(|text| hint(text).debug_selector(|| "settings-agent-args-error".to_owned()));
             let env_note = self
-                .launch_program_env_note()
+                .program_env_note(&page.id)
                 .map(|note| hint(note).debug_selector(|| "settings-agent-program-env".to_owned()));
-            let program = launch_field(
+            let program = input_frame(
                 SettingsControl::AgentProgram,
                 &tab.program,
-                !self.launch_program_read_only(),
+                !self.program_read_only(&page.id),
                 focused,
                 cx,
             );
-            let args = launch_field(SettingsControl::AgentArgs, &tab.args, true, focused, cx);
+            let args = input_frame(SettingsControl::AgentArgs, &tab.args, true, focused, cx);
             let saved = self
-                .launch_saved()
+                .shows_saved(&page.id, tab)
                 .then(|| hint("Saved").debug_selector(|| "settings-agent-saved".to_owned()));
             section
                 .child(
@@ -2363,12 +2861,12 @@ impl RootView {
                 .child(disabled_launch_row(
                     "Program",
                     SettingsControl::AgentProgram,
-                    LAUNCH_PROGRAM_PLACEHOLDER,
+                    page.tag.clone(),
                 ))
                 .child(disabled_launch_row(
                     "Extra arguments",
                     SettingsControl::AgentArgs,
-                    LAUNCH_ARGS_PLACEHOLDER,
+                    LAUNCH_ARGS_PLACEHOLDER.to_owned(),
                 ))
         };
         let section = section
@@ -2757,8 +3255,110 @@ fn field_controls(tag: &str, index: usize, view: &FieldView) -> Vec<SettingsCont
             field: index,
             selector: intern(format!("settings-{tag}-{field}")),
         }],
-        FieldEditor::Text { .. } | FieldEditor::Model { .. } | FieldEditor::Unknown => Vec::new(),
+        FieldEditor::Text { .. } | FieldEditor::Model { .. } => vec![SettingsControl::AgentText {
+            field: intern(view.id.clone()),
+            selector: intern(format!("settings-{tag}-{field}")),
+        }],
+        FieldEditor::Unknown => Vec::new(),
     }
+}
+
+/// Whether `selector` names one of the controls of `view`, field `index`
+/// of the page of the agent tagged `tag`; a press made before the page
+/// changed under it names another field's control.
+fn control_matches(tag: &str, index: usize, view: &FieldView, selector: &str) -> bool {
+    field_controls(tag, index, view)
+        .iter()
+        .any(|control| control.selector() == selector)
+}
+
+/// The text a text or model field's input shows for `value`.
+fn setting_text(value: &OptionValue) -> String {
+    match value {
+        OptionValue::Text(text) => text.clone(),
+        OptionValue::Bool(_) | OptionValue::Null => String::new(),
+    }
+}
+
+/// The value a text field's typed `text` stores: no value when blank.
+fn typed_value(text: &str) -> OptionValue {
+    let text = text.trim();
+    if text.is_empty() {
+        OptionValue::Null
+    } else {
+        OptionValue::Text(text.to_owned())
+    }
+}
+
+/// A text or model field's placeholder.
+fn text_placeholder(view: &FieldView) -> Option<String> {
+    match &view.editor {
+        FieldEditor::Text { placeholder } | FieldEditor::Model { placeholder, .. } => {
+            placeholder.clone()
+        }
+        FieldEditor::Toggle | FieldEditor::Choice { .. } | FieldEditor::Unknown => None,
+    }
+}
+
+/// The input of agent `agent`'s text field `seed` names, and its
+/// subscriptions: typing keeps the draft, and Enter or leaving the input
+/// applies it.
+fn new_setting_text(
+    agent: &AgentId,
+    seed: TextSeed,
+    window: &mut Window,
+    cx: &mut Context<RootView>,
+) -> (SettingText, Vec<Subscription>) {
+    let input = cx.new(|cx| TextInput::new(seed.draft.clone(), seed.placeholder.clone(), cx));
+    let focus = input.read(cx).focus_handle(cx);
+    let (submitter, submitted) = (agent.clone(), seed.field.clone());
+    let keys = cx.subscribe_in(
+        &input,
+        window,
+        move |this, _, event: &TextInputEvent, window, cx| match event {
+            TextInputEvent::Submit => {
+                this.apply_setting_text(&submitter, &submitted);
+                cx.notify();
+            }
+            TextInputEvent::Cancel => this.close_appearance_editor(window, cx),
+        },
+    );
+    let (editor, edited) = (agent.clone(), seed.field.clone());
+    let edits = cx.subscribe_in(
+        &input,
+        window,
+        move |this, input, _: &TextChanged, _, cx| {
+            let text = input.read(cx).text().to_owned();
+            if let Some(setting) = this.setting_text_mut(&editor, &edited) {
+                setting.draft = text;
+                setting.edited = true;
+            }
+            cx.notify();
+        },
+    );
+    let (leaver, left) = (agent.clone(), seed.field.clone());
+    let blur = cx.on_blur(&focus, window, move |this, _, cx| {
+        this.apply_setting_text(&leaver, &left);
+        cx.notify();
+    });
+    let text = SettingText {
+        field: seed.field,
+        input,
+        focus,
+        draft: seed.draft,
+        edited: false,
+        placeholder: seed.placeholder,
+    };
+    (text, vec![keys, edits, blur])
+}
+
+/// What an agent page's rows draw from: the agent's tag, whether its rows
+/// take input, its fields' inputs, and the control with the keyboard.
+struct RowPage<'a> {
+    tag: &'a str,
+    live: bool,
+    tab: Option<&'a AgentTab>,
+    focused: Option<SettingsControl>,
 }
 
 /// The value a press on `view` stores: choice `choice`'s value, or for a
@@ -2775,21 +3375,22 @@ fn pressed_value(view: &FieldView, choice: Option<usize>) -> Option<OptionValue>
     }
 }
 
-/// The row of `view`, field `index` of the page of the agent tagged `tag`:
-/// a choice field as a segmented row of its choices, a toggle as a checkbox
-/// row; `None` for a kind the page does not draw. The row takes input only
-/// while `live` and the field is not disabled; a field trusted launch locks
-/// carries the locked note.
+/// The row of `view`, field `index` of agent `page`: a choice field as a
+/// segmented row of its choices, a toggle as a checkbox row, a text or
+/// model field as an input, and a kind this client does not know as a note
+/// saying so. The row takes input only while the page is live and the
+/// field is not disabled; a field trusted launch locks carries the locked
+/// note.
 fn agent_field_row(
-    tag: &str,
+    page: &RowPage<'_>,
     index: usize,
     view: &FieldView,
-    live: bool,
-    focused: Option<SettingsControl>,
     cx: &mut Context<RootView>,
 ) -> Option<AnyElement> {
+    let tag = page.tag;
+    let focused = page.focused;
     let controls = field_controls(tag, index, view);
-    let enabled = live && !view.disabled;
+    let enabled = page.live && !view.disabled;
     let row = match &view.editor {
         FieldEditor::Choice { choices, .. } => {
             let buttons = controls
@@ -2826,8 +3427,24 @@ fn agent_field_row(
                 cx,
             ))
         }
-        FieldEditor::Text { .. } | FieldEditor::Model { .. } | FieldEditor::Unknown => {
-            return None;
+        FieldEditor::Text { .. } | FieldEditor::Model { .. } => {
+            let control = *controls.first()?;
+            let setting = page.tab?.texts.iter().find(|text| text.field == view.id)?;
+            let frame = input_frame(control, &setting.input, enabled, focused, cx);
+            field(view.label.clone()).child(if enabled {
+                frame
+            } else {
+                frame.opacity(DISABLED_OPACITY)
+            })
+        }
+        FieldEditor::Unknown => {
+            let selector = format!("settings-{tag}-{}", field_part(&view.id));
+            field(view.label.clone()).child(
+                div()
+                    .debug_selector(move || selector)
+                    .opacity(DISABLED_OPACITY)
+                    .child(muted(UPDATE_CLIENT)),
+            )
         }
     };
     let locked = view.disabled && view.editor != FieldEditor::Unknown;
@@ -2842,9 +3459,9 @@ fn agent_field_row(
     )
 }
 
-/// A launch-command field's frame round `input`; a click gives it the
-/// keyboard unless the field is read-only.
-fn launch_field(
+/// A text field's frame round `input`; a click gives it the keyboard
+/// unless the field takes no input.
+fn input_frame(
     control: SettingsControl,
     input: &Entity<TextInput>,
     editable: bool,
@@ -2869,11 +3486,7 @@ fn launch_field(
 /// A launch-command row on a daemon that stores no launch command: a dimmed
 /// field showing `placeholder` that takes no keys, and a tooltip saying how
 /// to get it.
-fn disabled_launch_row(
-    label: &'static str,
-    control: SettingsControl,
-    placeholder: &'static str,
-) -> Div {
+fn disabled_launch_row(label: &'static str, control: SettingsControl, placeholder: String) -> Div {
     let selector = control.selector();
     let frame = field_frame(false)
         .id(selector)
@@ -2935,4 +3548,205 @@ fn choice_row(
         .child(div().flex().child(segmented(buttons)))
         .children(note)
         .into_any_element()
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "a test fails with the message of the precondition it lost"
+)]
+mod tests {
+    use std::collections::VecDeque;
+
+    use gpui::{AppContext as _, TestAppContext};
+    use protocol::{AgentDescriptor, AgentId, OptionValue, SpawnPlacement};
+
+    use super::{
+        AgentTab, AgentTabs, SettingsTab, control_matches, intern, row_tabs, tab_kept, tab_rows,
+    };
+    use crate::agent_options::{FieldEditor, FieldView};
+    use crate::text_input::TextInput;
+
+    const FIXED: [&str; 7] = [
+        "General",
+        "Notifications",
+        "Spawn defaults",
+        "Worktrees",
+        "Remote access",
+        "Appearance",
+        "App title",
+    ];
+
+    fn agent(id: &str, label: &str, tag: &str) -> AgentDescriptor {
+        let mut descriptor = agent_api::test_agent::DESCRIPTOR.clone();
+        descriptor.id = AgentId(id.to_owned());
+        label.clone_into(&mut descriptor.label);
+        tag.clone_into(&mut descriptor.tag);
+        descriptor
+    }
+
+    fn claude() -> AgentDescriptor {
+        agent("claude", "Claude", "claude")
+    }
+
+    fn test_agent() -> AgentDescriptor {
+        agent("test-agent", "Test agent", "test")
+    }
+
+    fn labels(agents: &[AgentDescriptor], remote: bool) -> Vec<&'static str> {
+        tab_rows(agents, remote)
+            .into_iter()
+            .map(|row| row.label(agents))
+            .collect()
+    }
+
+    fn agent_selectors(agents: &[AgentDescriptor]) -> Vec<&'static str> {
+        row_tabs(&tab_rows(agents, true))
+            .into_iter()
+            .filter(|tab| matches!(tab, SettingsTab::Agent(_)))
+            .map(|tab| tab.selector(agents))
+            .collect()
+    }
+
+    #[test]
+    fn no_listed_agent_draws_no_agents_group() {
+        assert_eq!(labels(&[], true), FIXED);
+        assert_eq!(agent_selectors(&[]), [] as [&str; 0]);
+    }
+
+    #[test]
+    fn one_agent_gets_the_group_row_and_its_page() {
+        let agents = [claude()];
+        let mut want = FIXED.to_vec();
+        want.extend(["Agents", "Claude"]);
+        assert_eq!(labels(&agents, true), want);
+        assert_eq!(agent_selectors(&agents), ["settings-tab-claude"]);
+    }
+
+    #[test]
+    fn two_agents_get_a_page_each_in_the_daemons_order() {
+        let agents = [test_agent(), claude()];
+        let mut want = FIXED.to_vec();
+        want.extend(["Agents", "Test agent", "Claude"]);
+        assert_eq!(labels(&agents, true), want);
+        assert_eq!(
+            agent_selectors(&agents),
+            ["settings-tab-test", "settings-tab-claude"],
+            "a page's selector names its agent's tag"
+        );
+        assert!(
+            !labels(&agents, false).contains(&"Remote access"),
+            "Remote access only where the client manages the daemon"
+        );
+        assert!(
+            !row_tabs(&tab_rows(&agents, true))
+                .iter()
+                .any(|tab| tab.label(&agents) == "Agents"),
+            "the group row is no tab"
+        );
+    }
+
+    #[test]
+    fn a_shown_agent_page_falls_back_to_general_when_its_agent_leaves() {
+        let shown = SettingsTab::Agent(intern("test-agent".to_owned()));
+        assert_eq!(
+            tab_kept(shown, &tab_rows(&[claude(), test_agent()], true)),
+            shown
+        );
+        assert_eq!(
+            tab_kept(shown, &tab_rows(&[claude()], true)),
+            SettingsTab::General,
+            "the daemon no longer lists the agent"
+        );
+        assert_eq!(
+            tab_kept(shown, &tab_rows(&[], true)),
+            SettingsTab::General,
+            "a disconnected client lists no agent"
+        );
+        assert_eq!(
+            tab_kept(SettingsTab::RemoteAccess, &tab_rows(&[claude()], false)),
+            SettingsTab::General
+        );
+    }
+
+    /// An agent page waiting on one apply of `(program, args)`, which its
+    /// fields still read as.
+    fn waiting_tab(cx: &mut TestAppContext, program: &str, args: &str) -> AgentTab {
+        let program_input = cx.new(|cx| TextInput::new(program.to_owned(), "", cx));
+        let args_input = cx.new(|cx| TextInput::new(args.to_owned(), "", cx));
+        let (program_focus, args_focus) = cx.update(|cx| (cx.focus_handle(), cx.focus_handle()));
+        AgentTab {
+            program: program_input,
+            program_focus,
+            args: args_input,
+            args_focus,
+            program_draft: program.to_owned(),
+            args_draft: args.to_owned(),
+            awaiting: 1,
+            sent: Some((program.to_owned(), args.to_owned())),
+            saved: true,
+            refusal: None,
+            texts: Vec::new(),
+            _subscriptions: Vec::new(),
+        }
+    }
+
+    fn id(agent: &str) -> AgentId {
+        AgentId(agent.to_owned())
+    }
+
+    #[gpui::test]
+    fn a_dropped_page_leaves_the_apply_queue(cx: &mut TestAppContext) {
+        let mut tabs = AgentTabs::default();
+        tabs.tabs
+            .insert(id("claude"), waiting_tab(cx, "wrapper", ""));
+        tabs.tabs
+            .insert(id("test-agent"), waiting_tab(cx, "", "verbose"));
+        tabs.applies = VecDeque::from([id("test-agent"), id("claude"), id("test-agent")]);
+        tabs.keep_listed(&[claude()]);
+        assert_eq!(
+            tabs.applies,
+            [id("claude")],
+            "the dropped agent's applies leave the queue, so the next echo answers Claude's"
+        );
+        assert!(tabs.tabs.contains_key(&id("claude")));
+        assert!(!tabs.tabs.contains_key(&id("test-agent")));
+    }
+
+    #[gpui::test]
+    fn a_disconnect_clears_the_apply_queue_and_keeps_the_drafts(cx: &mut TestAppContext) {
+        let mut tabs = AgentTabs::default();
+        tabs.tabs
+            .insert(id("claude"), waiting_tab(cx, "wrapper", "-v"));
+        tabs.applies = VecDeque::from([id("claude")]);
+        tabs.forget_applies();
+        assert!(tabs.applies.is_empty(), "no echo for these can arrive");
+        let tab = tabs.tabs.get(&id("claude")).expect("the page is kept");
+        assert_eq!(tab.awaiting, 0, "nothing in flight");
+        assert_eq!(tab.sent, None, "the apply returns to unsent");
+        assert!(!tab.saved);
+        assert_eq!(
+            (tab.program_draft.as_str(), tab.args_draft.as_str()),
+            ("wrapper", "-v"),
+            "the drafts stay"
+        );
+    }
+
+    #[test]
+    fn a_press_whose_selector_is_not_its_fields_control_is_refused() {
+        let toggle = FieldView {
+            id: "sandbox".to_owned(),
+            label: "sandbox".to_owned(),
+            help: None,
+            placement: SpawnPlacement::Main,
+            editor: FieldEditor::Toggle,
+            value: OptionValue::Bool(false),
+            disabled: false,
+        };
+        assert!(control_matches("test", 1, &toggle, "settings-test-sandbox"));
+        assert!(
+            !control_matches("test", 1, &toggle, "settings-test-profile"),
+            "a press on another field's control writes nothing"
+        );
+    }
 }

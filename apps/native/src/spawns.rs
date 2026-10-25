@@ -503,9 +503,7 @@ mod tests {
             mode: SessionMode::Interactive,
             initial_prompt: None,
             dangerously_skip_permissions: false,
-            agent: Some(crate::claude_compat::selection(
-                &crate::claude_compat::ClaudeChoice::default(),
-            )),
+            agent: Some(crate::agent_options::test_selection("claude", &[])),
             extra_env: Vec::new(),
             secret_env_keys: Vec::new(),
             prompt_injector: None,

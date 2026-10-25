@@ -6,7 +6,9 @@
 use std::sync::Arc;
 
 use gpui::Context;
-use protocol::{AttentionReason, DaemonMessage, SessionMode, SessionSnapshot, SessionStatus};
+use protocol::{
+    AgentDescriptor, AttentionReason, DaemonMessage, SessionMode, SessionSnapshot, SessionStatus,
+};
 
 use crate::RootView;
 use crate::pairing::{PairingAction, PairingToast};
@@ -211,9 +213,9 @@ pub(crate) fn skips(
 /// The notification's body: the session's label, or the product name for
 /// a session the client does not know or whose only name is its id.
 #[must_use]
-pub(crate) fn body(session: Option<&SessionSnapshot>) -> String {
+pub(crate) fn body(session: Option<&SessionSnapshot>, agents: &[AgentDescriptor]) -> String {
     session
-        .map(|s| (display_label(s), s.id.as_str()))
+        .map(|s| (display_label(s, agents), s.id.as_str()))
         .filter(|(label, id)| label != id)
         .map_or_else(|| PRODUCT_NAME.to_owned(), |(label, _)| label)
 }
@@ -277,7 +279,7 @@ impl RootView {
         }) {
             return;
         }
-        let body = body(session);
+        let body = body(session, &self.agents);
         let notifier = Arc::clone(&self.notifications.notifier);
         cx.background_executor()
             .spawn(async move { notifier.notify(title, &body) })
@@ -338,10 +340,14 @@ mod tests {
     #[test]
     fn body_is_label_or_product_name() {
         let labelled = snapshot(&serde_json::json!({ "user_label": "fix login" }));
-        assert_eq!(body(Some(&labelled)), "fix login");
-        assert_eq!(body(None), "rustling-tulip", "an unknown session");
+        assert_eq!(body(Some(&labelled), &[]), "fix login");
+        assert_eq!(body(None, &[]), "rustling-tulip", "an unknown session");
         let bare = snapshot(&serde_json::json!({ "label": "", "mode": "plain_shell" }));
-        assert_eq!(body(Some(&bare)), "rustling-tulip", "named only by its id");
+        assert_eq!(
+            body(Some(&bare), &[]),
+            "rustling-tulip",
+            "named only by its id"
+        );
     }
 
     #[test]

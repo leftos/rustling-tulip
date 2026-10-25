@@ -15,7 +15,6 @@ mod assets;
 mod branch_fate;
 mod buttons;
 mod changes_view;
-mod claude_compat;
 mod cleanup_failed;
 mod cleanup_failed_view;
 mod combobox;
@@ -612,8 +611,9 @@ pub struct RootView {
     /// Each agent's Settings values as its page last sent them, until a
     /// daemon broadcast naming the agent answers.
     agent_settings_pending: std::collections::BTreeMap<protocol::AgentId, protocol::OptionValues>,
-    /// The Claude page's launch-command fields, once shown.
-    claude_tab: Option<settings_view::ClaudeTab>,
+    /// The agent pages' launch-command and text fields, each kept per
+    /// agent once its page was shown, while Settings is open.
+    agent_tabs: settings_view::AgentTabs,
     /// Reads and switches whether this PC starts the daemon at login.
     autostart: Arc<dyn remote_access::Autostart>,
     /// The title last set on the window.
@@ -1036,7 +1036,7 @@ impl RootView {
             agent_settings: std::collections::BTreeMap::new(),
             agent_settings_received: false,
             agent_settings_pending: std::collections::BTreeMap::new(),
-            claude_tab: None,
+            agent_tabs: settings_view::AgentTabs::default(),
             autostart,
             window_title: String::new(),
             title_pending: None,
@@ -2388,6 +2388,7 @@ impl RootView {
                     self.set_keep_awake(None);
                     self.forget_agent_commands();
                     self.forget_agents();
+                    self.agent_tabs.forget_applies();
                     self.launch_last.clear();
                 }
                 // The handshake is the old target's daemon's.
@@ -2612,7 +2613,7 @@ impl RootView {
             msg @ DaemonMessage::KeepAwakeStatus { .. } => self.on_keep_awake_status(&msg),
             msg @ DaemonMessage::RemoteStatus { .. } => self.on_remote_status(msg, cx),
             msg @ DaemonMessage::AgentCommands { .. } => self.on_agent_commands(msg, cx),
-            other => self.on_agents(other),
+            other => self.fold_agents(other, cx),
         }
     }
 
@@ -2835,7 +2836,7 @@ impl RootView {
         self.set_keep_awake(None);
         self.forget_agent_commands();
         self.forget_agents();
-        self.claude_tab = None;
+        self.agent_tabs = settings_view::AgentTabs::default();
         self.set_remote_status(None, cx);
         self.reset_panes(cx);
         self.pending_appearance.clear();
@@ -3361,9 +3362,10 @@ impl RootView {
 
     /// The name the sidebar shows for a session, or its id when unknown.
     fn session_label(&self, id: &str) -> String {
-        self.sidebar
-            .session(id)
-            .map_or_else(|| id.to_owned(), crate::sidebar::display_label)
+        self.sidebar.session(id).map_or_else(
+            || id.to_owned(),
+            |session| crate::sidebar::display_label(session, &self.agents),
+        )
     }
 }
 

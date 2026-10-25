@@ -2313,7 +2313,7 @@ impl RootView {
                 .bg(gpui::rgba((WARNING << 8) | 0x24))
                 .text_size(px(UI_TEXT_SIZE))
                 .text_color(gpui::rgb(TEXT))
-                .child(orphan_banner_text(session)),
+                .child(orphan_banner_text(session, &self.agents)),
         )
     }
 
@@ -2355,7 +2355,7 @@ impl RootView {
         };
         let mut text = Vec::new();
         if session.is_orphan {
-            text.push(orphan_banner_text(session));
+            text.push(orphan_banner_text(session, &self.agents));
         }
         if action_state(session) == ActionState::Abandoned {
             text.extend(abandoned_lines(session));

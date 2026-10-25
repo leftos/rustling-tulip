@@ -4,7 +4,9 @@
 
 use std::collections::HashMap;
 
-use protocol::{ClientMessage, SessionMode, SessionSnapshot, SessionStatus, TabEntry};
+use protocol::{
+    AgentDescriptor, ClientMessage, SessionMode, SessionSnapshot, SessionStatus, TabEntry,
+};
 
 use crate::remote_mode::Capabilities;
 use crate::sidebar::{LeafState, can_attach, runtime_label};
@@ -366,9 +368,10 @@ pub(crate) fn abandoned_lines(session: &SessionSnapshot) -> Vec<String> {
     lines
 }
 
-/// The banner over an orphan's pane, naming what still runs under it.
-pub(crate) fn orphan_banner_text(session: &SessionSnapshot) -> String {
-    let runtime = runtime_label(session, &[]).unwrap_or_else(|| "shell".to_owned());
+/// The banner over an orphan's pane, naming what still runs under it: an
+/// agent by its descriptor's tag in `agents`.
+pub(crate) fn orphan_banner_text(session: &SessionSnapshot, agents: &[AgentDescriptor]) -> String {
+    let runtime = runtime_label(session, agents).unwrap_or_else(|| "shell".to_owned());
     format!(
         "PTY stream lost across daemon restart. The underlying {runtime} process is still \
          running, but live input/output is not available. Use Stop to kill the recorded PID and \
@@ -940,8 +943,8 @@ mod tests {
         MenuEntry, MenuMode, MoveTarget, OfferedRow, PendingPrefill, PlacedFocus, Prefills,
         SessionAction, SessionRow, Step, SubmenuLine, action_state, busy_exclusion_message,
         busy_row, exit_code_label, exited_message, header_shows_exit_code, menu_actions,
-        menu_entries, move_lines, move_source, overlay_actions, pane_shows_exit, plan,
-        rename_message, self_exited, session_rows, worktree_to_reveal,
+        menu_entries, move_lines, move_source, orphan_banner_text, overlay_actions,
+        pane_shows_exit, plan, rename_message, self_exited, session_rows, worktree_to_reveal,
     };
     use crate::remote_mode::Capabilities;
     use crate::spawn_form::{OpenChoice, Target};
@@ -973,6 +976,20 @@ mod tests {
             "agent": "claude",
         }))
         .expect("session fixture")
+    }
+
+    #[test]
+    fn orphan_banner_names_the_descriptor_tag() {
+        let mut s = session("idle");
+        s.agent = Some(protocol::AgentId("test-agent".to_owned()));
+        let text = orphan_banner_text(
+            &s,
+            std::slice::from_ref(&*agent_api::test_agent::DESCRIPTOR),
+        );
+        assert!(
+            text.contains("The underlying test process is still running"),
+            "the banner names the descriptor's tag: {text}"
+        );
     }
 
     fn with_worktree(mut s: SessionSnapshot) -> SessionSnapshot {

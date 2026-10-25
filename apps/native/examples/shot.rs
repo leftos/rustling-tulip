@@ -51,8 +51,8 @@ const WINDOW_SIZE: (u16, u16) = (1000, 640);
 const LOAD_WAIT: Duration = Duration::from_millis(1500);
 /// How long the view gets to answer the input that reaches it.
 const DRIVE_WAIT: Duration = Duration::from_millis(1000);
-/// How many Downs on the Settings tab list reach the Claude tab: every tab
-/// this PC offers sits above it.
+/// How many Downs on the Settings tab list reach the Claude tab, the page of
+/// the registry's first agent: every tab this PC offers sits above it.
 const CLAUDE_TAB_DOWNS: usize = 7;
 /// The port and pid the fake handshake reports.
 const FAKE_PORT: u16 = 4242;
@@ -830,6 +830,9 @@ impl FakeDaemon {
         })?;
         self.send(DaemonMessage::Agents {
             agents: agent_registry::descriptors(),
+        })?;
+        self.send(DaemonMessage::AgentSettings {
+            settings: std::collections::BTreeMap::new(),
         })?;
         self.send(fixture.repos.clone())?;
         self.send(fixture.workspaces.clone())?;

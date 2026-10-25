@@ -334,6 +334,21 @@ impl crate::RootView {
     }
 }
 
+/// A selection of agent `agent` running with `options`.
+#[cfg(test)]
+pub(crate) fn test_selection(
+    agent: &str,
+    options: &[(&str, OptionValue)],
+) -> protocol::AgentSelection {
+    protocol::AgentSelection {
+        agent: AgentId(agent.to_owned()),
+        options: options
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), value.clone()))
+            .collect(),
+    }
+}
+
 /// `field` as a page draws it, with the fields holding `resolved` and
 /// `kept` for an untrusted launch.
 fn field_view(

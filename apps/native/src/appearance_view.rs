@@ -392,7 +392,8 @@ impl RootView {
             // The Worktrees tab lives with Settings: dropping it here means
             // a picker answer arriving later finds nothing to fill.
             self.worktrees_tab = None;
-            self.claude_tab = None;
+            self.apply_edited_texts();
+            self.agent_tabs = crate::settings_view::AgentTabs::default();
             self.settings_control = None;
             self.focus_active_pane(window, cx);
             cx.notify();

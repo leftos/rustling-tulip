@@ -160,7 +160,7 @@ The frontend has no search addon, bell handling or title parsing; `terminal_titl
 
 ## Settings & appearance
 
-- [x] Settings tabs: General / Notifications / Spawn defaults / Worktrees / Remote access / Appearance / App Title; changes save immediately — `SettingsModal.tsx`, `utils/settings.ts` (native: the frame landed in P4.2a with every tab but Remote access, which landed with P6.4, and an Agents category whose Claude page holds the per-agent settings; Tab walks the tab list and the shown tab's controls)
+- [x] Settings tabs: General / Notifications / Spawn defaults / Worktrees / Remote access / Appearance / App Title; changes save immediately — `SettingsModal.tsx`, `utils/settings.ts` (native: the frame landed in P4.2a with every tab but Remote access, which landed with P6.4, and an Agents category with one page per agent the daemon lists, holding that agent's settings and launch command; Tab walks the tab list and the shown tab's controls)
 - [x] General: keep the machine awake (with status), default sidebar view, copy on select — `SettingsModal.tsx` (native: keep awake and copy on select in P4.2a; the default sidebar view comes with P4.9)
 - [x] Settings defaults: trusted default, Claude approval mode — `SettingsModal.tsx` (native: P4.2b; Spawn defaults holds only trusted launch, while the Claude page holds approval mode and provider)
 - [x] App title: busy count and product suffix toggles, live preview — `SettingsModal.tsx`

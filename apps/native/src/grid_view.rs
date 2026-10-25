@@ -1522,8 +1522,8 @@ fn header_parts(
             "status: {}",
             status_label(session.status, session.background)
         ),
-        title: display_label(session),
-        title_tip: label_tooltip(session),
+        title: display_label(session, agents),
+        title_tip: label_tooltip(session, agents),
         chips,
     }
 }

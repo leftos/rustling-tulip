@@ -216,6 +216,45 @@ fn settings_opens_on_general_with_tab_order(cx: &mut TestAppContext) {
     h.keys("escape");
     h.keys("ctrl-,");
     assert_eq!(shown_tab(&mut h), "General", "it opens on General again");
+
+    list_agents(&mut h, test_agent());
+    assert_eq!(
+        h.root(|root, _| root.settings_tab_rows()),
+        [
+            "General",
+            "Notifications",
+            "Spawn defaults",
+            "Worktrees",
+            "Remote access",
+            "Appearance",
+            "App title",
+            "Agents",
+            "Claude",
+            "Test agent"
+        ],
+        "one tab per listed agent, labelled with its descriptor's label, in the daemon's order"
+    );
+    assert!(
+        drawn(&mut h, "settings-tab-test"),
+        "an agent's tab selector names its tag"
+    );
+}
+
+/// The test agent's descriptor: a second agent beside Claude, with a
+/// choice, a toggle, and a text field the toggle hides.
+fn test_agent() -> protocol::AgentDescriptor {
+    agent_api::test_agent::DESCRIPTOR.clone()
+}
+
+fn test_agent_id() -> AgentId {
+    AgentId("test-agent".to_owned())
+}
+
+/// The daemon lists its registered agents, then `second`.
+fn list_agents(h: &mut Harness<'_>, second: protocol::AgentDescriptor) {
+    let mut agents = agent_registry::descriptors();
+    agents.push(second);
+    h.send(DaemonMessage::Agents { agents });
 }
 
 #[gpui::test]
@@ -1054,6 +1093,16 @@ fn the_claude_rows_are_disabled_while_disconnected(cx: &mut TestAppContext) {
     dropped.on_closed("the daemon went away".to_owned());
     h.event(NetEvent::State(dropped));
     assert!(h.root(|root, _| root.settings_open()));
+    assert_ne!(
+        shown_tab(&mut h),
+        "General",
+        "a disconnect keeps the agent page shown"
+    );
+    assert!(
+        !h.root(|root, _| root.settings_tab_rows())
+            .contains(&"Claude"),
+        "a disconnected client lists no agent tab"
+    );
     for selector in [
         "settings-claude-permission-mode-plan",
         "settings-claude-provider-deepseek",
@@ -1064,14 +1113,7 @@ fn the_claude_rows_are_disabled_while_disconnected(cx: &mut TestAppContext) {
         );
     }
     assert_eq!(approval_choice(&mut h), None);
-    h.click_on("settings-tab-claude");
     h.sent();
-    h.keys("tab");
-    assert_eq!(
-        settings_focus(&mut h),
-        Some("list"),
-        "the Claude rows left the ring"
-    );
     assert_eq!(
         sent_agent_settings(&mut h),
         Vec::new(),
@@ -1092,6 +1134,12 @@ fn the_claude_rows_wait_for_agent_settings(cx: &mut TestAppContext) {
     h.send(DaemonMessage::Agents {
         agents: agent_registry::descriptors(),
     });
+    assert_eq!(
+        shown_tab(&mut h),
+        "Claude",
+        "the reconnect keeps Claude's page"
+    );
+    h.click_on("settings-tab-claude");
     h.sent();
     h.click_on("settings-claude-permission-mode-plan");
     assert_eq!(
@@ -1617,12 +1665,366 @@ fn disconnect_hides_the_launch_rows_without_the_restart_tip(cx: &mut TestAppCont
         None,
         "a lost connection is no older daemon"
     );
+    assert_ne!(
+        shown_tab(&mut h),
+        "General",
+        "a disconnect keeps the agent page shown"
+    );
+    assert!(
+        !drawn(&mut h, "settings-agent-program"),
+        "no launch rows are drawn"
+    );
+}
+
+/// A launch-command entry for agent `agent`.
+fn command_entry(agent: &str, program: &str, args: &str) -> AgentCommandEntry {
+    AgentCommandEntry {
+        agent: AgentId(agent.to_owned()),
+        program: program.to_owned(),
+        args: args.to_owned(),
+        program_env: None,
+    }
+}
+
+/// The `(agent, program, args)` of every launch command the client sent.
+fn command_sets(sent: &[ClientMessage]) -> Vec<(String, String, String)> {
+    sent.iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::SetAgentCommand {
+                agent,
+                program,
+                args,
+            } => Some((agent.0.clone(), program.clone(), args.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+#[gpui::test]
+fn launch_command_drafts_are_kept_per_agent(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    list_agents(&mut h, test_agent());
+    h.send(DaemonMessage::AgentCommands {
+        commands: vec![
+            command_entry("claude", "", ""),
+            command_entry("test-agent", "", ""),
+        ],
+    });
+    h.keys("ctrl-,");
     h.click_on("settings-tab-claude");
+    h.click_on("settings-agent-program");
+    type_line(&mut h, "wrapper");
+    h.click_on("settings-tab-test");
+    assert_eq!(shown_tab(&mut h), "Test agent");
+    assert_eq!(
+        launch_fields(&mut h),
+        (Some(String::new()), Some(String::new())),
+        "the second agent's page has its own launch fields"
+    );
+    h.click_on("settings-agent-args");
+    type_line(&mut h, "verbose");
+    h.sent();
+    h.keys("enter");
+    assert_eq!(
+        command_sets(&h.sent()),
+        [("test-agent".to_owned(), String::new(), "verbose".to_owned())],
+        "Apply sends the shown page's agent's command only"
+    );
+    h.click_on("settings-tab-claude");
+    assert_eq!(
+        launch_fields(&mut h),
+        (Some("wrapper".to_owned()), Some(String::new())),
+        "Claude's draft survives the other page"
+    );
+    h.click_on("settings-tab-test");
+    assert_eq!(
+        launch_fields(&mut h),
+        (Some(String::new()), Some("verbose".to_owned())),
+        "and the second page keeps its own"
+    );
+}
+
+#[gpui::test]
+fn a_second_agents_page_lists_its_settings_fields(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    let mut agent = test_agent();
+    let toggle = agent
+        .fields
+        .iter()
+        .find(|field| field.id == "sandbox")
+        .cloned()
+        .expect("the test agent has a toggle");
+    agent.fields.push(protocol::OptionField {
+        id: "future".to_owned(),
+        label: "future".to_owned(),
+        kind: protocol::FieldKind::Unknown,
+        ..toggle
+    });
+    list_agents(&mut h, agent);
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-test");
+    assert_eq!(shown_tab(&mut h), "Test agent");
+    assert_eq!(
+        h.root(|root, _| root.settings_field_choice("test", "mode"))
+            .as_deref(),
+        Some("fast"),
+        "the choice shows its default"
+    );
+    for selector in [
+        "settings-test-mode-fast",
+        "settings-test-mode-slow",
+        "settings-test-sandbox",
+        "settings-test-profile",
+        "settings-test-future",
+    ] {
+        assert!(drawn(&mut h, selector), "{selector} is drawn");
+    }
+    assert_eq!(
+        h.root(|root, _| root.settings_page_fields("test")),
+        ["mode", "sandbox", "profile", "future"],
+        "the page holds its Settings fields in the descriptor's order"
+    );
+    assert_eq!(
+        h.root(|root, _| root.settings_field_note("test", "future")),
+        Some("Update the client to change this"),
+        "a kind this client does not know says so"
+    );
+    h.sent();
+    h.click_on("settings-test-sandbox");
+    let sandboxed = options(&[("sandbox", OptionValue::Bool(true))]);
+    assert_eq!(
+        sent_agent_settings(&mut h),
+        vec![(test_agent_id(), sandboxed.clone())],
+        "the toggle writes the second agent's settings"
+    );
+    h.send(DaemonMessage::AgentSettings {
+        settings: std::collections::BTreeMap::from([(test_agent_id(), sandboxed)]),
+    });
+    assert_eq!(
+        h.root(|root, _| root.settings_page_fields("test")),
+        ["mode", "sandbox", "future"],
+        "a field a when rule hides is absent"
+    );
+}
+
+#[gpui::test]
+fn a_text_setting_applies_on_enter_and_on_blur(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    list_agents(&mut h, test_agent());
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-test");
+    h.sent();
+    h.click_on("settings-test-profile");
+    assert_eq!(settings_focus(&mut h), Some("settings-test-profile"));
+    type_line(&mut h, "work");
+    assert_eq!(
+        sent_agent_settings(&mut h),
+        Vec::new(),
+        "typing alone sends nothing"
+    );
+    h.keys("enter");
+    let work = options(&[("profile", text("work"))]);
+    assert_eq!(
+        sent_agent_settings(&mut h),
+        vec![(test_agent_id(), work.clone())],
+        "Enter applies the field"
+    );
+    h.send(DaemonMessage::AgentSettings {
+        settings: std::collections::BTreeMap::from([(test_agent_id(), work)]),
+    });
+    type_line(&mut h, "s");
+    h.keys("tab");
+    assert_eq!(settings_focus(&mut h), Some("list"));
+    assert_eq!(
+        sent_agent_settings(&mut h),
+        vec![(test_agent_id(), options(&[("profile", text("works"))]))],
+        "leaving the field applies it"
+    );
+    h.click_on("settings-test-profile");
+    h.keys("tab");
+    assert_eq!(
+        sent_agent_settings(&mut h),
+        Vec::new(),
+        "leaving an unedited field sends nothing"
+    );
+}
+
+#[gpui::test]
+fn an_edited_text_setting_applies_when_settings_closes(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    list_agents(&mut h, test_agent());
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-test");
+    h.click_on("settings-test-profile");
+    type_line(&mut h, "work");
+    h.sent();
+    h.keys("escape");
+    assert!(!h.root(|root, _| root.settings_open()));
+    assert_eq!(
+        sent_agent_settings(&mut h),
+        vec![(test_agent_id(), options(&[("profile", text("work"))]))],
+        "closing Settings applies the edited field as Enter would"
+    );
+}
+
+/// The Settings placeholder of field `field` on the page of the agent
+/// tagged `tag`.
+fn text_placeholder(h: &mut Harness<'_>, tag: &str, field: &str) -> Option<String> {
+    let (tag, field) = (tag.to_owned(), field.to_owned());
+    h.root(move |root, _| root.settings_text_placeholder(&tag, &field))
+}
+
+#[gpui::test]
+fn a_model_placeholder_follows_the_field_it_depends_on(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    let mut agent = test_agent();
+    agent
+        .fields
+        .iter_mut()
+        .find(|field| field.id == "profile")
+        .expect("the test agent has a text field")
+        .when
+        .push(protocol::FieldRule {
+            if_field: "mode".to_owned(),
+            equals: text("slow"),
+            then: protocol::FieldOverride {
+                hidden: None,
+                placeholder: Some("slow profile".to_owned()),
+                suggestions: None,
+            },
+        });
+    list_agents(&mut h, agent);
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-test");
+    let before = text_placeholder(&mut h, "test", "profile");
+    assert!(before.is_some(), "the page has the text field's input");
+    assert_ne!(before.as_deref(), Some("slow profile"));
+    h.send(DaemonMessage::AgentSettings {
+        settings: std::collections::BTreeMap::from([(
+            test_agent_id(),
+            options(&[("mode", text("slow"))]),
+        )]),
+    });
+    assert_eq!(
+        text_placeholder(&mut h, "test", "profile").as_deref(),
+        Some("slow profile"),
+        "the rule on the field it depends on sets the placeholder"
+    );
+    h.send(DaemonMessage::AgentSettings {
+        settings: std::collections::BTreeMap::from([(test_agent_id(), OptionValues::new())]),
+    });
+    assert_eq!(
+        text_placeholder(&mut h, "test", "profile"),
+        before,
+        "and gives it back once the rule no longer matches"
+    );
+}
+
+#[gpui::test]
+fn a_disconnect_keeps_the_agent_page_until_the_next_welcome(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = claude_page(cx, &dir, agent_commands("", "", None));
+    h.click_on("settings-agent-args");
+    type_line(&mut h, "verbose");
+    let mut dropped = welcomed();
+    dropped.on_closed("the daemon went away".to_owned());
+    h.event(NetEvent::State(dropped));
+    assert!(h.root(|root, _| root.settings_open()));
+    assert_eq!(
+        shown_tab(&mut h),
+        "claude",
+        "the agent page stays shown, named by its id while no descriptor is at hand"
+    );
+    assert_eq!(
+        h.root(|root, _| root.settings_page_fields("claude")),
+        Vec::<String>::new(),
+        "no option rows while disconnected"
+    );
+    assert_eq!(launch_fields(&mut h).1.as_deref(), Some("verbose"));
+
+    h.event(NetEvent::State(welcomed()));
+    h.send(DaemonMessage::Agents {
+        agents: agent_registry::descriptors(),
+    });
+    h.send(agent_commands("", "", None));
+    assert_eq!(
+        shown_tab(&mut h),
+        "Claude",
+        "the same page after the reconnect"
+    );
+    assert_eq!(
+        launch_fields(&mut h),
+        (Some(String::new()), Some("verbose".to_owned())),
+        "the draft survives the reconnect"
+    );
+
+    h.send(DaemonMessage::Agents {
+        agents: vec![test_agent()],
+    });
+    assert_eq!(
+        shown_tab(&mut h),
+        "General",
+        "a daemon that no longer lists the agent drops its page"
+    );
+    assert_eq!(launch_fields(&mut h), (None, None), "and its drafts");
+}
+
+#[gpui::test]
+fn tab_from_a_text_field_follows_its_field_when_an_earlier_one_hides(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    let mut agent = test_agent();
+    let profile = agent
+        .fields
+        .iter()
+        .find(|field| field.id == "profile")
+        .cloned()
+        .expect("the test agent has a text field");
+    agent.fields.push(protocol::OptionField {
+        id: "second".to_owned(),
+        label: "second".to_owned(),
+        when: Vec::new(),
+        ..profile
+    });
+    list_agents(&mut h, agent);
+    h.send(DaemonMessage::AgentCommands {
+        commands: vec![
+            command_entry("claude", "", ""),
+            command_entry("test-agent", "", ""),
+        ],
+    });
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-test");
+    h.click_on("settings-test-second");
+    type_line(&mut h, "x");
+    let sandboxed = options(&[("sandbox", OptionValue::Bool(true))]);
+    h.send(DaemonMessage::AgentSettings {
+        settings: std::collections::BTreeMap::from([(test_agent_id(), sandboxed)]),
+    });
+    assert_eq!(
+        h.root(|root, _| root.settings_page_fields("test")),
+        ["mode", "sandbox", "second"],
+        "the rule hid the field before the focused one"
+    );
+    h.sent();
     h.keys("tab");
     assert_eq!(
         settings_focus(&mut h),
-        Some("list"),
-        "no launch rows in the ring"
+        Some("settings-agent-program"),
+        "Tab leaves the focused field for the control after it"
+    );
+    assert_eq!(
+        sent_agent_settings(&mut h),
+        vec![(
+            test_agent_id(),
+            options(&[("sandbox", OptionValue::Bool(true)), ("second", text("x"))])
+        )],
+        "Tab applies the focused field's own value"
     );
 }
 
@@ -1759,21 +2161,44 @@ fn agents_group_row_is_not_selectable(cx: &mut TestAppContext) {
         "App title",
         "a click on the group row selects nothing and opens no page"
     );
+
+    list_agents(&mut h, test_agent());
+    h.click_on("settings-tab-claude");
+    h.keys("down");
+    assert_eq!(
+        shown_tab(&mut h),
+        "Test agent",
+        "Down walks on to the next agent's tab"
+    );
+    let mut dropped = welcomed();
+    dropped.on_closed("the daemon went away".to_owned());
+    h.event(NetEvent::State(dropped));
+    assert!(
+        !h.root(|root, _| root.settings_tab_rows())
+            .contains(&"Agents"),
+        "the group row is drawn only while the daemon lists agents"
+    );
 }
 
 #[gpui::test]
 fn tab_rows_list_every_tab_of_the_tab_enum_in_order(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);
+    list_agents(&mut h, test_agent());
     h.keys("ctrl-,");
     let mut rows = h.root(|root, _| root.settings_tab_rows());
     // The list interleaves the "Agents" group row; the tabs it draws must be
-    // SettingsTab::ALL in the same order, or Down/Up leaves a tab unreachable.
+    // the tabs Down and Up walk, in the same order, or a tab is unreachable.
     rows.retain(|label| *label != "Agents");
     assert_eq!(
         rows,
         h.root(|root, _| root.settings_tab_labels()),
-        "the tab list's tabs are SettingsTab::ALL in order"
+        "the tab list's tabs are the walked tabs in order"
+    );
+    assert_eq!(
+        rows.last().copied(),
+        Some("Test agent"),
+        "each listed agent's tab is walked"
     );
 }
 

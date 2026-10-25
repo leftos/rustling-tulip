@@ -259,9 +259,7 @@ mod tests {
             target,
             mode: SessionMode::Interactive,
             dangerously_skip_permissions: false,
-            agent: Some(crate::claude_compat::selection(
-                &crate::claude_compat::ClaudeChoice::default(),
-            )),
+            agent: Some(crate::agent_options::test_selection("claude", &[])),
             extra_env: Vec::new(),
         }
     }

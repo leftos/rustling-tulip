@@ -17,8 +17,9 @@ use crate::spawn_view::{
 /// an agent's Settings page.
 pub(crate) const LOCKED: &str = "Ignored while trusted launch is on. The chosen value is kept for when you turn trusted launch off.";
 
-/// The row of a field whose kind this client does not know.
-const UPDATE_CLIENT: &str = "Update the client to change this";
+/// The row of a field whose kind this client does not know, in the spawn
+/// dialog and on an agent's Settings page.
+pub(crate) const UPDATE_CLIENT: &str = "Update the client to change this";
 
 /// The rows of the form's agent fields placed at `placement`, in the
 /// descriptor's order; `inputs` are the dialog's text fields, one per text

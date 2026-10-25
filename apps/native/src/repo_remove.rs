@@ -281,7 +281,7 @@ pub(crate) fn live_owned_sessions(
         .filter(|session| is_live(session) && owned_by(level, session, model))
         .map(|session| RepoRemoveSession {
             id: session.id.clone(),
-            label: crate::sidebar::display_label(session),
+            label: crate::sidebar::display_label(session, model.agents()),
             agent: session
                 .agent
                 .as_ref()
@@ -490,7 +490,7 @@ mod tests {
         let model = model(&["r1"], &[]);
         let mut s = in_repo("s1", "r1");
         s.label = "feature work".to_owned();
-        s.agent = Some(crate::claude_compat::claude_id());
+        s.agent = Some(protocol::AgentId("claude".to_owned()));
         let level = Level::Repo("r1".to_owned());
         let listed = live_owned_sessions(&level, &[s], &model);
         assert_eq!(

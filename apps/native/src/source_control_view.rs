@@ -263,7 +263,10 @@ impl RootView {
     fn sc_context(&self, member_count: Option<usize>, sections: &[Section]) -> Option<ScContext> {
         if let Some(count) = member_count {
             let session = self.focused_session()?;
-            let label = self.sidebar.session(&session).map(display_label)?;
+            let label = self
+                .sidebar
+                .session(&session)
+                .map(|s| display_label(s, &self.agents))?;
             let plural = if count == 1 { "" } else { "s" };
             return Some(ScContext {
                 text: format!("{label} · {count} repo{plural}"),
