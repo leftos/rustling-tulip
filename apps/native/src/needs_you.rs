@@ -4,7 +4,7 @@
 //! GPUI; the view in `needs_you_view` draws these rows.
 
 use crate::appearance;
-use crate::sidebar::{Leaf, SidebarModel};
+use crate::sidebar::{Leaf, LeafState, SidebarModel};
 use chrono::{DateTime, Utc};
 use protocol::{SessionSnapshot, SessionStatus};
 
@@ -47,10 +47,7 @@ pub(crate) fn rows(model: &SidebarModel) -> Vec<NeedsYouRow> {
             let Some(session) = model.session(&leaf.id) else {
                 continue;
             };
-            if session.is_inactive || session.is_abandoned {
-                continue;
-            }
-            let Some(reason) = reason_of(leaf, session) else {
+            let Some(reason) = reason_of(leaf) else {
                 continue;
             };
             let row = NeedsYouRow {
@@ -76,11 +73,24 @@ pub(crate) fn rows(model: &SidebarModel) -> Vec<NeedsYouRow> {
     asking
 }
 
-/// Why `session` is listed, or `None` when it is not. Asking comes from the
-/// snapshot, so a cleared attention leaves the row; an ended session is
-/// listed only while its leaf is still flagged.
-fn reason_of(leaf: &Leaf, session: &SessionSnapshot) -> Option<Reason> {
-    match session.status {
+/// Whether the session of `leaf` is in the list; the sidebar's Needs you on
+/// top sort lifts a container by this same test.
+pub(crate) fn is_listed(leaf: &Leaf) -> bool {
+    reason_of(leaf).is_some()
+}
+
+/// Why the session of `leaf` is listed, or `None` when it is not. A parked or
+/// abandoned session never is. Asking comes from the status, so a cleared
+/// attention leaves the row; an ended session is listed only while its leaf
+/// is still flagged.
+fn reason_of(leaf: &Leaf) -> Option<Reason> {
+    if matches!(
+        leaf.state,
+        LeafState::Inactive { .. } | LeafState::Abandoned { .. }
+    ) {
+        return None;
+    }
+    match leaf.status {
         SessionStatus::AwaitingInput => Some(Reason::Asking),
         SessionStatus::Error | SessionStatus::Stopped if leaf.attention => Some(Reason::Ended),
         _ => None,

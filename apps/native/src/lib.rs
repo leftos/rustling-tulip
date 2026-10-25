@@ -1185,7 +1185,7 @@ impl RootView {
     #[must_use]
     pub fn sidebar_containers(&self) -> Vec<Container> {
         match self.sidebar.sidebar_view() {
-            SidebarView::Repos => self.sidebar.containers(),
+            SidebarView::Repos => self.sidebar.display_containers(),
             SidebarView::Tabs if self.tabs.is_loaded() => {
                 self.sidebar.tab_containers(self.tabs.tabs())
             }

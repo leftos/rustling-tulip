@@ -615,6 +615,32 @@ fn sessions_under_repos_choice_saves_and_is_reached_by_tab(cx: &mut TestAppConte
 }
 
 #[gpui::test]
+fn repo_sort_choice_saves_and_is_reached_by_tab(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+
+    h.keys("ctrl-,");
+    h.click_on("settings-repo-sort-active");
+    assert_eq!(saved_ui(&dir)["general"]["repo_sort"], "active");
+    h.click_on("settings-repo-sort-manual");
+    assert_eq!(saved_ui(&dir)["general"]["repo_sort"], "manual");
+    h.keys("escape");
+
+    h.keys("ctrl-,");
+    assert_eq!(settings_focus(&mut h), Some("list"));
+    h.keys("tab tab tab tab tab tab tab tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("settings-repo-sort-manual"),
+        "one tab past the three Sessions under repos choices"
+    );
+    h.keys("tab tab");
+    assert_eq!(settings_focus(&mut h), Some("settings-repo-sort-needs-you"));
+    h.keys("space");
+    assert_eq!(saved_ui(&dir)["general"]["repo_sort"], "needs_you");
+}
+
+#[gpui::test]
 fn tab_walks_general_controls_and_space_toggles(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);
@@ -640,11 +666,12 @@ fn tab_walks_general_controls_and_space_toggles(cx: &mut TestAppContext) {
         "Space presses the keep-awake choice"
     );
 
-    h.keys("tab tab tab tab tab tab tab tab tab");
+    h.keys("tab tab tab tab tab tab tab tab tab tab tab tab");
     assert_eq!(
         settings_focus(&mut h),
         Some("settings-general-open-text-externally"),
-        "past Always, the two Default view, the two Leaf density and the three Sessions under repos choices"
+        "past Always, the two Default view, the two Leaf density, the three Sessions under repos \
+         and the three Sort repos choices"
     );
     h.keys("space");
     assert_eq!(saved_ui(&dir)["general"]["open_text_externally"], true);
@@ -672,7 +699,7 @@ fn tab_walks_general_controls_and_space_toggles(cx: &mut TestAppContext) {
     );
     h.keys(
         "shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab \
-         shift-tab shift-tab",
+         shift-tab shift-tab shift-tab shift-tab shift-tab",
     );
     assert_eq!(
         settings_focus(&mut h),

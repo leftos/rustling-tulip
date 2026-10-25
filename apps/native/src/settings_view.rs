@@ -36,7 +36,7 @@ use crate::remote_access::{
 };
 use crate::section::section;
 use crate::session_menu::{backdrop, dialog_button};
-use crate::sidebar::{LeafDensity, NotifySkip, SessionsUnderRepos, SidebarView};
+use crate::sidebar::{LeafDensity, NotifySkip, RepoSort, SessionsUnderRepos, SidebarView};
 use crate::spawn_view::{
     DISABLED_OPACITY, Look, checkbox_row, choice_button, close_button, dialog_card,
     dialog_title_bar, field, muted, segmented,
@@ -258,6 +258,9 @@ const SESSIONS_UNDER_REPOS_CHOICES: [SessionsUnderRepos; 3] = [
     SessionsUnderRepos::None,
 ];
 
+/// The General tab's Sort repos choices, in the order they show.
+const REPO_SORT_CHOICES: [RepoSort; 3] = [RepoSort::Manual, RepoSort::Active, RepoSort::NeedsYou];
+
 /// The Notifications tab's skip choices, in the order they show.
 const NOTIFY_SKIP_CHOICES: [NotifySkip; 3] =
     [NotifySkip::OnScreen, NotifySkip::Focused, NotifySkip::Never];
@@ -269,6 +272,7 @@ pub(crate) enum SettingsControl {
     SidebarView(SidebarView),
     LeafDensity(LeafDensity),
     SessionsUnderRepos(SessionsUnderRepos),
+    RepoSort(RepoSort),
     OpenTextExternally,
     CopyOnSelect,
     TitleCount,
@@ -334,6 +338,9 @@ impl SettingsControl {
             Self::SessionsUnderRepos(SessionsUnderRepos::None) => {
                 "settings-sessions-under-repos-none"
             }
+            Self::RepoSort(RepoSort::Manual) => "settings-repo-sort-manual",
+            Self::RepoSort(RepoSort::Active) => "settings-repo-sort-active",
+            Self::RepoSort(RepoSort::NeedsYou) => "settings-repo-sort-needs-you",
             Self::OpenTextExternally => "settings-general-open-text-externally",
             Self::CopyOnSelect => "settings-terminal-copy-on-selection",
             Self::TitleCount => "settings-title-busy-count",
@@ -909,6 +916,7 @@ impl RootView {
                     .chain(SIDEBAR_VIEW_CHOICES.map(SettingsControl::SidebarView))
                     .chain(LEAF_DENSITY_CHOICES.map(SettingsControl::LeafDensity))
                     .chain(SESSIONS_UNDER_REPOS_CHOICES.map(SettingsControl::SessionsUnderRepos))
+                    .chain(REPO_SORT_CHOICES.map(SettingsControl::RepoSort))
                     .chain([
                         SettingsControl::OpenTextExternally,
                         SettingsControl::CopyOnSelect,
@@ -1558,6 +1566,7 @@ impl RootView {
             SettingsControl::SidebarView(view) => self.set_sidebar_view(view, cx),
             SettingsControl::LeafDensity(density) => self.set_leaf_density(density, cx),
             SettingsControl::SessionsUnderRepos(mode) => self.set_sessions_under_repos(mode, cx),
+            SettingsControl::RepoSort(sort) => self.set_repo_sort(sort, cx),
             SettingsControl::OpenTextExternally => self.toggle_open_text_externally(cx),
             SettingsControl::CopyOnSelect => self.toggle_copy_on_select(cx),
             SettingsControl::TitleCount => self.toggle_title_count(window, cx),
@@ -2345,6 +2354,15 @@ impl RootView {
         cx.notify();
     }
 
+    /// Sets how the repos view orders its repo and workspace rows, saving it
+    /// when it changed.
+    fn set_repo_sort(&mut self, sort: RepoSort, cx: &mut Context<Self>) {
+        if self.sidebar.set_repo_sort(sort) {
+            self.save_ui();
+        }
+        cx.notify();
+    }
+
     fn toggle_copy_on_select(&mut self, cx: &mut Context<Self>) {
         let on = !self.sidebar.ui_state().general.copy_on_select;
         self.sidebar.set_copy_on_select(on);
@@ -3056,8 +3074,9 @@ impl RootView {
         ]
     }
 
-    /// The Sidebar section: the default view, how much room a leaf takes and
-    /// how many of a repo's or workspace's sessions show under its row.
+    /// The Sidebar section: the default view, how much room a leaf takes, how
+    /// many of a repo's or workspace's sessions show under its row and how
+    /// the repo and workspace rows are ordered.
     fn sidebar_section(
         &self,
         focused: Option<SettingsControl>,
@@ -3084,6 +3103,7 @@ impl RootView {
             )
         });
         let under = sessions_under_repos_choices(self.sidebar.sessions_under_repos());
+        let sorts = repo_sort_choices(self.sidebar.repo_sort());
         section("Sidebar")
             .child(choice_row(
                 "Default view",
@@ -3106,6 +3126,7 @@ impl RootView {
                 focused,
                 cx,
             ))
+            .child(choice_row("Sort repos", &sorts, RowLock::Live, focused, cx))
             .into_any_element()
     }
 
@@ -3572,6 +3593,18 @@ fn sessions_under_repos_choices(
             text,
             choice == current,
         )
+    })
+}
+
+/// The General tab's Sort repos choices, `current` selected.
+fn repo_sort_choices(current: RepoSort) -> [(SettingsControl, &'static str, bool); 3] {
+    REPO_SORT_CHOICES.map(|choice| {
+        let text = match choice {
+            RepoSort::Manual => "Manual",
+            RepoSort::Active => "Active first",
+            RepoSort::NeedsYou => "Needs you on top",
+        };
+        (SettingsControl::RepoSort(choice), text, choice == current)
     })
 }
 

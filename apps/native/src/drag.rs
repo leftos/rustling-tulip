@@ -459,12 +459,12 @@ pub fn leaf_reorders(kind: ContainerKind) -> bool {
 }
 
 /// What a sidebar drop of `payload` at `side` of `row` sends, given the
-/// sidebar's shown `containers`: a workspace or repo container dropped on
-/// another one's header sends every shown workspace and repo in the new
-/// order; a tab dropped on a tab container's header sends the new tab order;
-/// a leaf dropped on another leaf of its own container sends that
-/// container's new session order. Anything else, or a drop that keeps the
-/// order, sends nothing.
+/// sidebar's `containers`: a workspace or repo container dropped on another
+/// one's header sends every workspace and repo of `containers` in their
+/// order with the dragged one moved next to the target; a tab dropped on a
+/// tab container's header sends the new tab order; a leaf dropped on another
+/// leaf of its own container sends that container's new session order.
+/// Anything else, or a drop that keeps the order, sends nothing.
 #[must_use]
 pub fn sidebar_reorder(
     payload: &DragPayload,

@@ -1161,6 +1161,75 @@ fn repo_container_draws_its_icon_tag_count_and_attention_badge(cx: &mut TestAppC
     );
 }
 
+/// Repos `ra`, `rb` and `rc`, manual order by name: `rb` holds a working
+/// session, `rc` one awaiting input, `ra` none.
+fn sort_fixture() -> Fixture {
+    Fixture {
+        repos: vec![
+            repo("ra", "D:/src/ra"),
+            repo("rb", "D:/src/rb"),
+            repo("rc", "D:/src/rc"),
+        ],
+        sessions: vec![
+            session("busy").in_repo("rb").status("working").build(),
+            session("asks")
+                .in_repo("rc")
+                .status("awaiting_input")
+                .build(),
+        ],
+        tabs: vec![tab("t1", &pane("p1", None))],
+        ..Fixture::default()
+    }
+}
+
+/// The repo rows' keys, top to bottom as painted.
+fn painted_repo_rows(h: &mut Harness<'_>, keys: &[&str]) -> Vec<String> {
+    let mut rows: Vec<(f32, String)> = keys
+        .iter()
+        .map(|key| {
+            let bounds = h.bounds(&format!("container-{key}"));
+            assert!(bounds.origin.x >= px(0.0), "{key} is painted");
+            (bounds.origin.y / px(1.0), (*key).to_owned())
+        })
+        .collect();
+    rows.sort_by(|a, b| a.0.total_cmp(&b.0));
+    rows.into_iter().map(|(_, key)| key).collect()
+}
+
+#[gpui::test]
+fn needs_you_on_top_floats_the_repo_that_needs_you(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &sort_fixture());
+
+    assert_eq!(
+        &tree_keys(&mut h)[..3],
+        ["repo:rc", "repo:rb", "repo:ra"],
+        "the repo that needs you, then the active one, then the rest"
+    );
+    assert_eq!(
+        painted_repo_rows(&mut h, &["repo:ra", "repo:rb", "repo:rc"]),
+        ["repo:rc", "repo:rb", "repo:ra"],
+        "the rows read in that order"
+    );
+}
+
+#[gpui::test]
+fn manual_sort_keeps_the_saved_order(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    std::fs::write(
+        dir.path().join("native-ui.json"),
+        r#"{ "general": { "repo_sort": "manual" } }"#,
+    )
+    .expect("write the layout");
+    let mut h = Harness::with(cx, &dir, &sort_fixture());
+
+    assert_eq!(&tree_keys(&mut h)[..3], ["repo:ra", "repo:rb", "repo:rc"]);
+    assert_eq!(
+        painted_repo_rows(&mut h, &["repo:ra", "repo:rb", "repo:rc"]),
+        ["repo:ra", "repo:rb", "repo:rc"]
+    );
+}
+
 #[gpui::test]
 fn busy_only_hides_idle_sessions_under_repos_and_keeps_the_count(cx: &mut TestAppContext) {
     let dir = TestDir::new();

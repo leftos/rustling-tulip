@@ -133,6 +133,23 @@ impl SessionsUnderRepos {
     }
 }
 
+/// How the repos view orders its repo and workspace rows; shell, folder and
+/// Detached rows stay after them whatever the choice.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepoSort {
+    /// The manual order a drag sets.
+    Manual,
+    /// The ones a live session counts for first, then the rest.
+    Active,
+    /// The ones with a session that needs the owner first, then the active
+    /// ones, then the rest; also what a value this build does not know loads
+    /// as (`serde(other)` must be the last variant).
+    #[default]
+    #[serde(other)]
+    NeedsYou,
+}
+
 /// One session row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[expect(
@@ -576,6 +593,8 @@ pub struct GeneralSettings {
     pub leaf_density: LeafDensity,
     /// How many of a repo or workspace's sessions show under its row.
     pub sessions_under_repos: SessionsUnderRepos,
+    /// How the repos view orders its repo and workspace rows.
+    pub repo_sort: RepoSort,
     /// Whether text files a link or a fetch opens go to the external app
     /// instead of the built-in viewer.
     pub open_text_externally: bool,
@@ -587,6 +606,7 @@ impl Default for GeneralSettings {
             copy_on_select: true,
             leaf_density: LeafDensity::Comfortable,
             sessions_under_repos: SessionsUnderRepos::Every,
+            repo_sort: RepoSort::NeedsYou,
             open_text_externally: false,
         }
     }
@@ -872,6 +892,31 @@ impl SidebarModel {
         })
     }
 
+    /// The repos view's containers in the order its rows show:
+    /// [`Self::containers`], which keeps the manual order, sorted by the
+    /// chosen [`RepoSort`].
+    pub fn display_containers(&self) -> Vec<Container> {
+        let active = active_container_keys(&self.repos, &self.workspaces, &self.sessions);
+        sort_containers(self.containers(), self.repo_sort(), &active)
+    }
+
+    /// Whether the repos view's rows keyed `a` and `b` sort into the same
+    /// group under the chosen [`RepoSort`] ([`sort_group`]); false when
+    /// either row is not there.
+    pub fn same_sort_group(&self, a: &str, b: &str) -> bool {
+        let active = active_container_keys(&self.repos, &self.workspaces, &self.sessions);
+        let sort = self.repo_sort();
+        let containers = self.containers();
+        let group = |key: &str| {
+            containers
+                .iter()
+                .find(|c| c.key == key)
+                .map(|c| sort_group(c, sort, &active))
+        };
+        let a = group(a);
+        a.is_some() && a == group(b)
+    }
+
     /// The tabs view's containers for `tabs`, in the daemon's tab order.
     pub fn tab_containers(&self, tabs: &[TabEntry]) -> Vec<Container> {
         build_tab_containers(
@@ -1084,6 +1129,21 @@ impl SidebarModel {
             return false;
         }
         self.ui.general.sessions_under_repos = mode;
+        true
+    }
+
+    /// How the repos view orders its repo and workspace rows.
+    pub fn repo_sort(&self) -> RepoSort {
+        self.ui.general.repo_sort
+    }
+
+    /// Records how the repos view orders its repo and workspace rows;
+    /// returns whether it changed.
+    pub fn set_repo_sort(&mut self, sort: RepoSort) -> bool {
+        if self.ui.general.repo_sort == sort {
+            return false;
+        }
+        self.ui.general.repo_sort = sort;
         true
     }
 
@@ -1833,6 +1893,98 @@ fn apply_container_order(
     out.extend(workspaces.into_iter().flatten());
     out.extend(repos.into_iter().flatten());
     out
+}
+
+/// The keys of the repo and workspace containers a live session counts for
+/// ([`crate::repo_remove::is_live`]: orphans, headless runs and plain shells
+/// count). A repo is active when a session's member names it, or a member's
+/// start folder, one of the session's worktrees or its current folder is the
+/// repo's folder or under it; a workspace when a session was spawned for it
+/// or any of its member repos is active.
+#[must_use]
+pub(crate) fn active_container_keys(
+    repos: &[RepoEntry],
+    workspaces: &[WorkspaceEntry],
+    sessions: &[SessionSnapshot],
+) -> HashSet<String> {
+    let live: Vec<&SessionSnapshot> = sessions
+        .iter()
+        .filter(|s| crate::repo_remove::is_live(s))
+        .collect();
+    let active_repos: HashSet<&str> = repos
+        .iter()
+        .filter(|repo| live.iter().any(|s| counts_for_repo(s, repo)))
+        .map(|repo| repo.id.as_str())
+        .collect();
+    let mut keys: HashSet<String> = active_repos
+        .iter()
+        .map(|id| container_key(ContainerKind::Repo, id))
+        .collect();
+    for w in workspaces {
+        let spawned_for = live
+            .iter()
+            .any(|s| s.workspace_id.as_deref() == Some(w.id.as_str()));
+        let member_active = w
+            .member_repo_ids
+            .iter()
+            .any(|id| active_repos.contains(id.as_str()));
+        if spawned_for || member_active {
+            keys.insert(container_key(ContainerKind::Workspace, &w.id));
+        }
+    }
+    keys
+}
+
+/// Whether `s` counts for `repo`: a member names it, or a member's start
+/// folder, one of its worktrees or its current folder is the repo's folder or
+/// under it.
+fn counts_for_repo(s: &SessionSnapshot, repo: &RepoEntry) -> bool {
+    let under = |path: &str| !path.is_empty() && path_contains(&repo.path, path);
+    s.members
+        .iter()
+        .any(|m| m.repo_id == repo.id || under(&m.worktree_path))
+        || s.worktree_paths.iter().any(|path| under(path))
+        || s.current_cwd.as_deref().is_some_and(under)
+}
+
+/// Whether a session of `container` needs the owner: the Needs You list
+/// shows it.
+fn needs_you(container: &Container) -> bool {
+    container.leaves.iter().any(crate::needs_you::is_listed)
+}
+
+/// The group `container` sorts into under `sort`, lower first: under Needs
+/// you on top 0 for needing the owner, 1 for active, 2 for the rest; under
+/// Active first 0 for active, 1 for the rest; under Manual 0. A shell, folder
+/// or Detached row is always 3, after every repo and workspace.
+#[must_use]
+pub fn sort_group(container: &Container, sort: RepoSort, active: &HashSet<String>) -> u8 {
+    if !matches!(
+        container.kind,
+        ContainerKind::Repo | ContainerKind::Workspace
+    ) {
+        return 3;
+    }
+    let inactive = u8::from(!active.contains(&container.key));
+    match sort {
+        RepoSort::Manual => 0,
+        RepoSort::Active => inactive,
+        RepoSort::NeedsYou if needs_you(container) => 0,
+        RepoSort::NeedsYou => 1 + inactive,
+    }
+}
+
+/// `containers` in `sort`'s order: the repo and workspace rows sorted into
+/// its groups ([`sort_group`]), each group keeping their incoming manual
+/// order, and every other row after them in its own order.
+#[must_use]
+pub fn sort_containers(
+    mut containers: Vec<Container>,
+    sort: RepoSort,
+    active: &HashSet<String>,
+) -> Vec<Container> {
+    containers.sort_by_key(|c| sort_group(c, sort, active));
+    containers
 }
 
 fn cmp_ci(a: &str, b: &str) -> Ordering {
@@ -3364,6 +3516,7 @@ pub(crate) mod tests {
                 copy_on_select: false,
                 leaf_density: LeafDensity::Compact,
                 sessions_under_repos: SessionsUnderRepos::Busy,
+                repo_sort: RepoSort::Active,
                 open_text_externally: true,
             },
             title: TitleSettings {
@@ -3792,6 +3945,259 @@ pub(crate) mod tests {
                 "no leaf shows"
             );
         }
+    }
+
+    #[test]
+    fn repo_sort_round_trips_and_loads_needs_you_when_missing_or_unknown() {
+        let dir = TestDir::new("repo-sort");
+        let mut model = SidebarModel::new(UiState::default());
+        assert_eq!(model.repo_sort(), RepoSort::NeedsYou, "the default");
+        for (sort, saved) in [
+            (RepoSort::Manual, "manual"),
+            (RepoSort::Active, "active"),
+            (RepoSort::NeedsYou, "needs_you"),
+        ] {
+            assert!(model.set_repo_sort(sort), "{saved}");
+            assert!(!model.set_repo_sort(sort), "unchanged");
+            save_ui_state(&dir.0, model.ui_state()).expect("save");
+            let text = std::fs::read_to_string(dir.0.join(UI_FILE)).expect("read");
+            let written: serde_json::Value = serde_json::from_str(&text).expect("JSON");
+            assert_eq!(written["general"]["repo_sort"], saved);
+            assert_eq!(load_ui_state(&dir.0).general.repo_sort, sort);
+        }
+
+        for older in [
+            r#"{ "sidebar_collapsed": true }"#,
+            r#"{ "general": { "copy_on_select": false } }"#,
+        ] {
+            std::fs::write(dir.0.join(UI_FILE), older).expect("write");
+            assert_eq!(
+                load_ui_state(&dir.0).general.repo_sort,
+                RepoSort::NeedsYou,
+                "{older}"
+            );
+        }
+
+        let unknown = r#"{ "general": { "copy_on_select": false, "repo_sort": "newest" } }"#;
+        std::fs::write(dir.0.join(UI_FILE), unknown).expect("write");
+        let loaded = load_ui_state(&dir.0);
+        assert_eq!(loaded.general.repo_sort, RepoSort::NeedsYou);
+        assert!(
+            !loaded.general.copy_on_select,
+            "the rest of the group loads"
+        );
+    }
+
+    /// The container keys in `active`, sorted.
+    fn sorted_keys(active: &HashSet<String>) -> Vec<&str> {
+        let mut keys: Vec<&str> = active.iter().map(String::as_str).collect();
+        keys.sort_unstable();
+        keys
+    }
+
+    #[test]
+    fn a_repo_is_active_when_a_live_session_names_it_or_works_under_it() {
+        let repos = vec![
+            repo("r1", "D:/src/r1"),
+            repo("r2", "D:/src/r2"),
+            repo("r3", "D:/src/r3"),
+            repo("r4", "D:/src/r4"),
+            repo("r5", "D:/src/r5"),
+        ];
+        let by_member = in_repo("a", "r1");
+        let mut by_worktree = session("b");
+        by_worktree.worktree_paths = vec!["D:\\src\\r2\\.wt\\feat".to_owned()];
+        let by_cwd = shell("c", Some("d:/SRC/r3/sub"), SessionKind::Standalone);
+        let mut by_start_folder = in_repo("d", "elsewhere");
+        by_start_folder.members[0].worktree_path = "D:/src/r4/nested".to_owned();
+        let mut beside = session("e");
+        beside.current_cwd = Some("D:/src/r55".to_owned());
+
+        let active = active_container_keys(
+            &repos,
+            &[],
+            &[by_member, by_worktree, by_cwd, by_start_folder, beside],
+        );
+
+        assert_eq!(
+            sorted_keys(&active),
+            ["repo:r1", "repo:r2", "repo:r3", "repo:r4"],
+            "a folder beside r5 that only shares its name's start does not count"
+        );
+    }
+
+    #[test]
+    fn a_repo_is_not_active_when_its_only_session_has_ended_is_abandoned_or_parked() {
+        let repos = vec![repo("r1", "D:/src/r1")];
+        let mut stopped = in_repo("s", "r1");
+        stopped.status = SessionStatus::Stopped;
+        let mut errored = in_repo("s", "r1");
+        errored.status = SessionStatus::Error;
+        let mut abandoned = in_repo("s", "r1");
+        abandoned.is_abandoned = true;
+        let mut parked = in_repo("s", "r1");
+        parked.is_inactive = true;
+        for (why, s) in [
+            ("stopped", stopped),
+            ("errored", errored),
+            ("abandoned", abandoned),
+            ("parked", parked),
+        ] {
+            assert!(active_container_keys(&repos, &[], &[s]).is_empty(), "{why}");
+        }
+
+        let mut orphan = in_repo("s", "r1");
+        orphan.is_orphan = true;
+        assert_eq!(
+            sorted_keys(&active_container_keys(&repos, &[], &[orphan])),
+            ["repo:r1"],
+            "an orphan still runs"
+        );
+    }
+
+    #[test]
+    fn a_workspace_is_active_when_a_session_is_spawned_for_it_or_a_member_is_active() {
+        let repos = vec![repo("r1", "D:/src/r1"), repo("r2", "D:/src/r2")];
+        let workspaces = vec![
+            workspace("w1", &["r1"]),
+            workspace("w2", &["r2"]),
+            workspace("w3", &[]),
+        ];
+        let mut spawned_for = session("s1");
+        spawned_for.workspace_id = Some("w3".to_owned());
+        let member = in_repo("s2", "r1");
+
+        let active = active_container_keys(&repos, &workspaces, &[spawned_for, member]);
+
+        assert_eq!(sorted_keys(&active), ["repo:r1", "ws:w1", "ws:w3"]);
+    }
+
+    /// Repos `ra` (a working session), `rb` (a stopped one), `rc` (one
+    /// awaiting input), `rd` (none) and workspace `wz` (an idle one), in the
+    /// manual order rd, ra, wz, rc, rb; then a shell, a folder and Detached.
+    fn mixed_fixture() -> Fixture {
+        let mut working = in_repo("working", "ra");
+        working.status = SessionStatus::Working;
+        let mut stopped = in_repo("stopped", "rb");
+        stopped.status = SessionStatus::Stopped;
+        let mut waiting = in_repo("waiting", "rc");
+        waiting.status = SessionStatus::AwaitingInput;
+        let mut idle = session("idle");
+        idle.workspace_id = Some("wz".to_owned());
+        let mut fixture = Fixture::new(
+            vec![
+                repo("ra", "D:/src/ra"),
+                repo("rb", "D:/src/rb"),
+                repo("rc", "D:/src/rc"),
+                repo("rd", "D:/src/rd"),
+            ],
+            vec![workspace("wz", &[])],
+            vec![
+                working,
+                stopped,
+                waiting,
+                idle,
+                shell("sh", None, SessionKind::Standalone),
+                shell("dir", Some("E:/elsewhere"), SessionKind::Single),
+                in_repo("gone", "unregistered"),
+            ],
+        );
+        fixture.container_order = refs(&[
+            ("rd", true),
+            ("ra", true),
+            ("wz", false),
+            ("rc", true),
+            ("rb", true),
+        ]);
+        fixture
+    }
+
+    #[test]
+    fn each_repo_sort_groups_repos_and_workspaces_and_keeps_other_rows_last() {
+        let fixture = mixed_fixture();
+        let manual = fixture.build();
+        assert_eq!(
+            keys(&manual)[..5],
+            ["repo:rd", "repo:ra", "ws:wz", "repo:rc", "repo:rb"]
+        );
+        let rest = keys(&manual)[5..].to_vec();
+        assert_eq!(rest.len(), 3, "a shell, a folder and Detached");
+        let active = active_container_keys(&fixture.repos, &fixture.workspaces, &fixture.sessions);
+
+        for (sort, expected) in [
+            (
+                RepoSort::Manual,
+                ["repo:rd", "repo:ra", "ws:wz", "repo:rc", "repo:rb"],
+            ),
+            (
+                RepoSort::Active,
+                ["repo:ra", "ws:wz", "repo:rc", "repo:rd", "repo:rb"],
+            ),
+            (
+                RepoSort::NeedsYou,
+                ["repo:rc", "repo:ra", "ws:wz", "repo:rd", "repo:rb"],
+            ),
+        ] {
+            let sorted = sort_containers(fixture.build(), sort, &active);
+            assert_eq!(keys(&sorted)[..5], expected, "{sort:?}");
+            assert_eq!(
+                keys(&sorted)[5..],
+                rest,
+                "{sort:?} keeps the other rows last"
+            );
+        }
+    }
+
+    #[test]
+    fn needs_you_on_top_floats_a_row_whose_ended_session_the_needs_you_list_shows() {
+        for excluded in [false, true] {
+            let mut fixture = mixed_fixture();
+            let mut asked = in_repo("asked", "rd");
+            asked.status = SessionStatus::Stopped;
+            asked.busy_excluded = excluded;
+            fixture.sessions.push(asked);
+            let attention: HashSet<String> = ["asked".to_owned()].into();
+            let containers = build_containers(&TreeInputs {
+                repos: &fixture.repos,
+                workspaces: &fixture.workspaces,
+                sessions: &fixture.sessions,
+                agents: &[],
+                container_order: &fixture.container_order,
+                session_order: &fixture.session_order,
+                attention: &attention,
+                unseen: &HashSet::new(),
+                collapsed: &BTreeSet::new(),
+            });
+            let active =
+                active_container_keys(&fixture.repos, &fixture.workspaces, &fixture.sessions);
+
+            let sorted = sort_containers(containers, RepoSort::NeedsYou, &active);
+
+            assert_eq!(
+                keys(&sorted)[..5],
+                ["repo:rd", "repo:rc", "repo:ra", "ws:wz", "repo:rb"],
+                "the Needs You list shows rd's ended session (busy excluded: {excluded}), \
+                 so rd joins rc on top in manual order"
+            );
+        }
+    }
+
+    #[test]
+    fn needs_you_on_top_ignores_an_abandoned_session_awaiting_input() {
+        let mut fixture = mixed_fixture();
+        let mut left = in_repo("left", "rd");
+        left.status = SessionStatus::AwaitingInput;
+        left.is_abandoned = true;
+        fixture.sessions.push(left);
+        let active = active_container_keys(&fixture.repos, &fixture.workspaces, &fixture.sessions);
+
+        let sorted = sort_containers(fixture.build(), RepoSort::NeedsYou, &active);
+
+        assert_eq!(
+            keys(&sorted)[..5],
+            ["repo:rc", "repo:ra", "ws:wz", "repo:rd", "repo:rb"],
+            "the Needs You list never shows an abandoned session, so rd stays with the rest"
+        );
     }
 
     fn member(repo: &str, branch: &str) -> SessionMember {

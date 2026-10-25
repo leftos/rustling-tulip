@@ -32,8 +32,8 @@ use crate::session_menu::{
     menu_separator,
 };
 use crate::sidebar::{
-    Activity, Container, ContainerKind, DETACHED_BANNER, Leaf, LeafDensity, SessionsUnderRepos,
-    SidebarView, can_attach, chip_tip,
+    Activity, Container, ContainerKind, DETACHED_BANNER, Leaf, LeafDensity, RepoSort,
+    SessionsUnderRepos, SidebarView, can_attach, chip_tip,
 };
 use crate::spawn_view::SpawnEntry;
 use crate::status_glyph::{GlyphSize, glyph, glyph_view};
@@ -927,7 +927,7 @@ impl RootView {
                     bounds.origin.y / px(1.0),
                     bounds.size.height / px(1.0),
                 );
-                drag::sidebar_reorder(event.drag(cx), &self.sidebar_containers(), row, side)
+                self.sidebar_drop_message(event.drag(cx), row, side)
                     .map(|_| (row.clone(), side))
             })
             .flatten();
@@ -939,6 +939,36 @@ impl RootView {
             self.sidebar_drop = None;
             cx.notify();
         }
+    }
+
+    /// What a sidebar drop of `payload` at `side` of `row` sends. Under a
+    /// repo sort other than Manual, a workspace or repo dropped on another
+    /// one's header is refused unless both sort into the same group; the
+    /// line then comes from the shown order of that group, and the drop moves
+    /// the dragged one next to the target in the manual order.
+    fn sidebar_drop_message(
+        &self,
+        payload: &DragPayload,
+        row: &SidebarRow,
+        side: Side,
+    ) -> Option<ClientMessage> {
+        let shown = self.sidebar_containers();
+        let sorted = self.sidebar.sidebar_view() == SidebarView::Repos
+            && self.sidebar.repo_sort() != RepoSort::Manual;
+        let (DragPayload::Container(dragged), SidebarRow::Container(target), true) =
+            (payload, row, sorted)
+        else {
+            return drag::sidebar_reorder(payload, &shown, row, side);
+        };
+        let dragged_key = &shown
+            .iter()
+            .find(|c| drag::container_ref(c).as_ref() == Some(dragged))?
+            .key;
+        if !self.sidebar.same_sort_group(dragged_key, target) {
+            return None;
+        }
+        drag::sidebar_reorder(payload, &shown, row, side)?;
+        drag::sidebar_reorder(payload, &self.sidebar.containers(), row, side)
     }
 
     /// A drop on the sidebar row `row` where the line stands: the new order
@@ -953,7 +983,7 @@ impl RootView {
         let Some((target, side)) = mark.filter(|(marked, _)| marked == row) else {
             return;
         };
-        match drag::sidebar_reorder(payload, &self.sidebar_containers(), &target, side) {
+        match self.sidebar_drop_message(payload, &target, side) {
             Some(ClientMessage::ReorderTabs { ordered_ids, .. }) => {
                 self.reorder_tabs_by_drop(ordered_ids);
             }

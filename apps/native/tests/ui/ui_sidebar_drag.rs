@@ -276,6 +276,101 @@ fn container_dropped_before_another_sends_the_full_order(cx: &mut TestAppContext
 }
 
 #[gpui::test]
+fn drag_under_a_sort_edits_the_manual_order(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        repos: vec![
+            repo("ra", "D:\\ra"),
+            repo("rb", "D:\\rb"),
+            repo("rc", "D:\\rc"),
+            repo("rd", "D:\\rd"),
+        ],
+        sessions: vec![
+            session("asks")
+                .in_repo("rc")
+                .status("awaiting_input")
+                .build(),
+        ],
+        tabs: vec![tab("t1", &pane("p1", None))],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.sent();
+    assert_eq!(
+        shown(&mut h),
+        ["repo:rc", "repo:ra", "repo:rb", "repo:rd"],
+        "Needs you on top shows rc first; the manual order is by name"
+    );
+
+    let from = on_row(&mut h, "container-repo:rd", 0.5);
+    let to = on_row(&mut h, "container-repo:ra", 0.2);
+    h.start_drag(from);
+    assert!(h.dragging(), "a repo container drags");
+    h.drag_to(to);
+    assert_eq!(mark(&mut h), Some((header("repo:ra"), Side::Before)));
+    h.release(to);
+
+    assert_eq!(
+        wire(&reorders(&mut h)),
+        wire(&[ClientMessage::ReorderContainers {
+            ordered: vec![
+                repo_ref("rd"),
+                repo_ref("ra"),
+                repo_ref("rb"),
+                repo_ref("rc")
+            ],
+        }]),
+        "only rd moved in the manual order, to just before ra"
+    );
+    assert_eq!(
+        shown(&mut h),
+        ["repo:rc", "repo:rd", "repo:ra", "repo:rb"],
+        "rc stays on top; the rest follow the new manual order"
+    );
+}
+
+#[gpui::test]
+fn drag_under_a_sort_refuses_a_drop_into_another_group(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        repos: vec![
+            repo("ra", "D:\\ra"),
+            repo("rb", "D:\\rb"),
+            repo("rc", "D:\\rc"),
+        ],
+        sessions: vec![
+            session("asks")
+                .in_repo("rc")
+                .status("awaiting_input")
+                .build(),
+        ],
+        tabs: vec![tab("t1", &pane("p1", None))],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.sent();
+    let before = shown(&mut h);
+    assert_eq!(before, ["repo:rc", "repo:ra", "repo:rb"]);
+
+    // In the manual order ra, rb, rc this drop would put ra after rb, so only
+    // the group rule keeps it out.
+    let from = on_row(&mut h, "container-repo:ra", 0.5);
+    let to = on_row(&mut h, "container-repo:rc", 0.2);
+    h.start_drag(from);
+    assert!(h.dragging(), "a repo container drags");
+    h.drag_to(to);
+    assert_eq!(
+        mark(&mut h),
+        None,
+        "no line on a row that needs you for a repo that does not"
+    );
+    h.release(to);
+
+    assert!(reorders(&mut h).is_empty(), "nothing is sent");
+    assert_eq!(shown(&mut h), before, "the order is unchanged");
+}
+
+#[gpui::test]
 fn shell_and_dir_containers_do_not_drag_but_their_leaves_do(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &fixture());
