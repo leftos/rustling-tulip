@@ -32,7 +32,7 @@ Design for Wave 3's remote desktop (Linear RT-33, RT-34 and their sub-issues). R
 - whois goes through the `tailscale` CLI (`whois --json`, `whoami --json`, `cert`, `status --json`), run with `CREATE_NO_WINDOW`; the binary is `RUSTLING_TULIP_TAILSCALE`, else `%ProgramFiles%\Tailscale\tailscale.exe`, else PATH. The LocalAPI is not used: its Windows pipe path is undocumented.
 - Certificates: checked at start and every 24 h with `tailscale cert --min-validity` of about 14 days, reloaded only when the files' SHA-256 changed, by building the daemon's own rustls `ServerConfig` (ALPN `http/1.1` only, since `RustlsConfig::reload_from_pem_file` forces h2) and swapping it with `RustlsConfig::reload_from_config`; the key lives under the machine-local data dir.
 - The host picker reads `tailscale status --json` and also accepts a typed MagicDNS name, since the JSON is documented as subject to change.
-- Remote tests: in-process tests with a fake whois and a test CA, a fake-TLS daemon for the client, and a hand checklist on real Tailscale (two machines and the iPhone). No production setting widens the allowed address ranges.
+- Remote tests: daemon in-process tests with a fake whois and a test CA, the native client's fake-TLS daemon, the live e2e tier (`apps/native/tests/e2e_remote.rs`) over the `tools/e2e/fake-tailscale/` shim against a daemon built with the off-by-default `e2e-loopback-peers` feature, and the hand checklist on real Tailscale ([remote-hand-checklist.md](../remote-hand-checklist.md): two machines and the iPhone). No production setting widens the allowed address ranges.
 
 ## Invariants and the sites that obey them
 
@@ -70,7 +70,7 @@ Hotspot items (touching `crates/protocol/src/lib.rs` or `crates/daemon/src/serve
 | P6.3 | Host picker from the tailnet's machines, a typed-name fallback, boot reconnect | no | P6.1, P6.2a |
 | P6.4 | Host Settings: Remote access (Tailscale) panel. Landed on main (RT-154) | no | TS.4 |
 | P6.5 | Autostart: start the daemon on login | no | none |
-| P6.6 | Remote tests over a fake Tailscale, the hand checklist, and the docs pass. Part A landed (RT-158): the `e2e-loopback-peers` seam, the `tools/e2e/fake-tailscale/` shim and the smoke spec `remote_listener_comes_up_for_the_fake_tailnet`; the hand checklist is [docs/remote-hand-checklist.md](../remote-hand-checklist.md) (part C); parts B and D are open | no | all of the above |
+| P6.6 | Remote tests over a fake Tailscale, the hand checklist, and the docs pass. Part A landed (RT-158): the `e2e-loopback-peers` seam, the `tools/e2e/fake-tailscale/` shim and the smoke spec `remote_listener_comes_up_for_the_fake_tailnet`; the hand checklist is [docs/remote-hand-checklist.md](../remote-hand-checklist.md) (part C); part B, the eight specs of `e2e_remote.rs`, and part D, the docs pass, have landed | no | all of the above |
 | P6.7 | Cutover: installer (no firewall rule, per RT-157) | no | P6.5 |
 
 File fetch (RT-35 to RT-37) follows P6.1 to P6.3; a host's download folder is keyed by its MagicDNS name, lower-cased.

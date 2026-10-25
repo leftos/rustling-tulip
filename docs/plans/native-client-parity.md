@@ -160,7 +160,7 @@ The frontend has no search addon, bell handling or title parsing; `terminal_titl
 
 ## Settings & appearance
 
-- [x] Settings tabs: General / Notifications / Spawn defaults / Worktrees / Remote access / Appearance / App Title; changes save immediately — `SettingsModal.tsx`, `utils/settings.ts` (native: the frame landed in P4.2a with every tab but Remote access, which comes with Phase 6, and an Agents category whose Claude page holds the per-agent settings; Tab walks the tab list and the shown tab's controls)
+- [x] Settings tabs: General / Notifications / Spawn defaults / Worktrees / Remote access / Appearance / App Title; changes save immediately — `SettingsModal.tsx`, `utils/settings.ts` (native: the frame landed in P4.2a with every tab but Remote access, which landed with P6.4, and an Agents category whose Claude page holds the per-agent settings; Tab walks the tab list and the shown tab's controls)
 - [x] General: keep the machine awake (with status), default sidebar view, copy on select — `SettingsModal.tsx` (native: keep awake and copy on select in P4.2a; the default sidebar view comes with P4.9)
 - [x] Settings defaults: trusted default, Claude approval mode — `SettingsModal.tsx` (native: P4.2b; Spawn defaults holds only trusted launch, while the Claude page holds approval mode and provider)
 - [x] App title: busy count and product suffix toggles, live preview — `SettingsModal.tsx`
@@ -189,9 +189,9 @@ The frontend has no search addon, bell handling or title parsing; `terminal_titl
 
 > **Superseded:** the LAN discovery, host LAN panel and pairing/connection-code rows below describe the Tauri client and are retired by the Tailscale-first ruling (`docs/plans/remote-access.md`); the live scope is the "Remote host profiles over Tailscale" row.
 
-- [ ] Connection picker: this machine, saved hosts (select / forget), LAN discovery (2.5s mDNS) then pairing code, or paste a connection code — `ConnectionPicker.tsx`
+- [x] Connection picker: this machine, saved hosts (select / forget), LAN discovery (2.5s mDNS) then pairing code, or paste a connection code — `ConnectionPicker.tsx` (superseded by the "Remote host profiles over Tailscale" row: the host picker lists this PC and the tailnet's machines; no LAN discovery or pasted code)
 - [x] Host LAN panel: enable, port, advertised address, cert fingerprint, connection code with Copy — `SettingsModal.tsx` `LanPanel` (superseded by the Remote access (Tailscale) panel in `settings_view.rs`: switch, status, address, port; no fingerprint or connection code)
-- [x] Pair a device: one-time code with countdown and Cancel, and the pairing outcome — `SettingsModal.tsx` `PairDevicePanel` (retired: no pairing over Tailscale, `docs/plans/remote-access.md`)
+- [x] Pair a device: one-time code with countdown and Cancel, and the pairing outcome — `SettingsModal.tsx` `PairDevicePanel` (retired: the one-time LAN code is gone; a tailnet device pairs through the owner's approval on the host PC, the Waiting devices section and the "Pair with {host}" dialog, `docs/plans/remote-access.md`)
 - [x] Start daemon on login (HKCU Run key / LaunchAgent) — `src-tauri/src/autostart.rs` (native: the registration and the startup refresh in P6.5, `daemon_client::autostart`; the toggle is `Start the daemon when I log in` in Settings → Remote access, `settings_view.rs`)
 - [x] Remote host profiles over Tailscale: the host picker from the tailnet's machines, a typed MagicDNS name, the chosen connection saved, and the client verifying the listener's `tailscale cert` TLS itself — no pinned-TLS tunnel, local plaintext bridge, pairing over it or `remote-profiles.json` (`docs/plans/remote-access.md`, P6.1–P6.3)
 - [x] Remote mode disables local-file actions (add repo, reveal, VS Code, pickers become typed paths) — `utils/remoteMode.ts` (native: disabled with a reason since P6.2a; Add repo, the workspace creator's file and the worktrees root are typed host paths since P6.2b, RT-257; a terminal path link fetches its file instead, FT.3, and the ⋯ menu's Fetch file… popup fetches a typed path, FT.4)
@@ -216,6 +216,6 @@ Today these live in Tauri commands and plugins; natively they become plain Rust 
 - Clipboard: `read_clipboard_text` (arboard) plus writes.
 - Notifications: permission and send (notification plugin).
 - Logging and quit: `log_message`, `quit_app`.
-- Remote: `connect_remote`, `disconnect_remote`, `decode_connection_code`, remote profiles, `discover_lan_hosts`, `pair_with_host` (`src-tauri/src/remote.rs`, reusable as a library).
+- Remote: `connect_remote`, `disconnect_remote`, `decode_connection_code`, remote profiles, `discover_lan_hosts`, `pair_with_host` (`src-tauri/src/remote.rs`; retired, the native client dials the tailnet listener itself in `net.rs`).
 - Autostart: `get_autostart`, `set_autostart`.
 - Tauri's `tray-icon` feature is enabled, but no tray code exists.

@@ -322,4 +322,4 @@ Don't go looking for these — they're explicitly out of scope until their plan 
 
 - **Auto-update** for the native client — deferred until its installer (Phase 6) and a signed release pipeline exist.
 - **Code signing / notarization** of the native client's installer (Phase 6) and the binaries inside it — there is no signing cert, so an unsigned bundle trips SmartScreen.
-- **Sub-agent / Task-tool interception**, **multi-machine attach**, **cloud sync** — explicit non-goals. Viewing a subagent's transcript read-only is planned (Wave 10, "Subagent streams"; design in `docs/plans/subagent-streams.md`). The mobile app is planned (`docs/plans/mobile-app.md`) but not started.
+- **Sub-agent / Task-tool interception**, **attach from outside the tailnet** (internet exposure, SSH tunnelling, a relay), **cloud sync** — explicit non-goals; the tailnet listener is the one way in from another machine (`docs/architecture.md` "Non-goals", `docs/plans/remote-access.md`). Viewing a subagent's transcript read-only is planned (Wave 10, "Subagent streams"; design in `docs/plans/subagent-streams.md`). The mobile app is planned (`docs/plans/mobile-app.md`) but not started.

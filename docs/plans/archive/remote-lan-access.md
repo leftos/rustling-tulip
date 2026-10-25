@@ -1,5 +1,7 @@
 # Remote LAN Access — Control Desktop Shells from a Laptop
 
+Superseded by [remote-access.md](../remote-access.md) (Tailscale-first).
+
 ## Status (2026-05-30)
 
 - [x] Dependency guardrail — `rustls`/`tokio-rustls`/`axum-server`/`rcgen` on the

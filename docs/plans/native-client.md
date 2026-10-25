@@ -126,6 +126,6 @@ Answered (user): Q1–Q13 (a) and Q14 (b); Q8, Q12 and Q14 were confirmed again 
 
 ## Phase 6 — remote and cutover
 
-- Connection picker and host profiles over the tailnet listener (`remote-access.md`), built on the shared client-core crate the mobile app also uses (MA1 in [mobile-app.md](./mobile-app.md)).
-- Autostart: `remote.rs` and `autostart.rs` are recovered from the `tauri-last` tag.
+- Remote mode follows steps P6.1 to P6.7 of [remote-access.md](./remote-access.md). Landed: the transport seam (P6.1), remote-mode rules and typed host paths (P6.2a, P6.2b), the host picker (P6.3) and the Remote access panel (P6.4).
+- Autostart (P6.5) has landed as `daemon_client::autostart`. Remote tests, the hand checklist and the docs pass (P6.6) have landed. The installer (P6.7) is open.
 - Cutover: the installer ships the native client, and on uninstall deletes the daemon's `rustling-tulip-daemon` login `Run` value; update CLAUDE.md.
