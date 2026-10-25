@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <linearGradient id="plate" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#23262e"/>
+      <stop offset="1" stop-color="#0c0b0e"/>
+    </linearGradient>
+    <linearGradient id="petal" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ff8585"/>
+      <stop offset="1" stop-color="#d9434e"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="url(#plate)" stroke="#2c2f38" stroke-width="2"/>
+  <path d="M120 228 C122 204 132 186 146 172" stroke="#3fb96a" stroke-width="12" stroke-linecap="round" fill="none"/>
+  <g transform="rotate(16 140 170) translate(18 -10)">
+    <path d="M128 182 C96 182 78 158 78 124 V84 L104 104 L128 72 L152 104 L178 84 V124 C178 158 160 182 128 182 Z" fill="url(#petal)"/>
+  </g>
+  <g stroke="#9aa0ad" stroke-width="10" stroke-linecap="round" fill="none">
+    <path d="M30 96 C52 82 74 82 92 92"/>
+    <path d="M26 134 C44 124 60 124 74 130"/>
+    <path d="M38 170 C56 162 72 164 84 172"/>
+  </g>
+</svg>

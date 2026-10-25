@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>App icon concepts</title>
+<style>
+  :root { --bg: #0c0b0e; --panel: #16181d; --fg: #e5e6e8; --muted: #9aa0ad; --line: #2c2f38; }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 24px 16px 40px; background: var(--bg); color: var(--fg); font: 14px/1.45 "Segoe UI", system-ui, sans-serif; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .intro { color: var(--muted); margin: 0 0 20px; max-width: 760px; }
+  .lane { display: grid; grid-template-columns: 200px 160px 1fr; gap: 20px; align-items: center; padding: 16px; margin-bottom: 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; }
+  .lane h2 { font-size: 16px; margin: 0 0 4px; }
+  .lane p { margin: 0; color: var(--muted); font-size: 13px; }
+  .big img { width: 160px; height: 160px; display: block; }
+  .ladders { display: grid; gap: 10px; }
+  .ladder { display: flex; align-items: flex-end; gap: 18px; padding: 12px 16px; border-radius: 8px; }
+  .ladder.dark { background: #1c1c1c; }
+  .ladder.light { background: #f3f3f3; }
+  .ladder figure { margin: 0; display: grid; justify-items: center; gap: 4px; }
+  .ladder figcaption { font-size: 11px; color: #8a8f99; }
+  .ladder img { display: block; }
+  @media (max-width: 760px) { .lane { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<h1>App icon concepts</h1>
+<p class="intro">Five tulip concepts in the client's own palette, on a dark rounded plate. Each lane shows the concept at 160 px, then at 64, 48, 32, 24 and 16 px on a dark and a light taskbar (the sizes the .ico carries). The last lane is the current placeholder.</p>
+
+<section class="lane" id="a">
+  <div><h2>A · Bloom</h2><p>A single red tulip on a green stem. The plainest mark; holds its shape at 16 px.</p></div>
+  <div class="big"><img src="a-bloom.svg" alt="A, bloom"></div>
+  <div class="ladders" data-src="a-bloom.svg"></div>
+</section>
+
+<section class="lane" id="b">
+  <div><h2>B · Prompt</h2><p>The bloom with a terminal prompt cut into it. The prompt drops out below 32 px and leaves A.</p></div>
+  <div class="big"><img src="b-prompt.svg" alt="B, prompt"></div>
+  <div class="ladders" data-src="b-prompt.svg"></div>
+</section>
+
+<section class="lane" id="c">
+  <div><h2>C · Bouquet</h2><p>Three tulips from one stem: many sessions from one app, in the blue, red and amber the status colours use. Turns into a colour cluster at 16 px.</p></div>
+  <div class="big"><img src="c-bouquet.svg" alt="C, bouquet"></div>
+  <div class="ladders" data-src="c-bouquet.svg"></div>
+</section>
+
+<section class="lane" id="d">
+  <div><h2>D · Petals</h2><p>One tulip whose petals are separate colours, each one a session. Brighter and more logo-like than A.</p></div>
+  <div class="big"><img src="d-petals.svg" alt="D, petals"></div>
+  <div class="ladders" data-src="d-petals.svg"></div>
+</section>
+
+<section class="lane" id="e">
+  <div><h2>E · Rustle</h2><p>The bloom leaning in a breeze, with wind lines: the name's "rustling". Off-centre, so it reads smaller at 16 px.</p></div>
+  <div class="big"><img src="e-rustle.svg" alt="E, rustle"></div>
+  <div class="ladders" data-src="e-rustle.svg"></div>
+</section>
+
+<h1 style="margin-top:32px">Round 2 · refining B</h1>
+<p class="intro"><strong>Chosen: B1</strong>, with the 16 px glyph for the smallest size (RT-410). Round 1 chose B. These lanes vary its framing. The 16 px slot in each light row shows a glyph drawn for 16 px (bloom wider, prompt on whole pixels) rather than the large art shrunk; the dark row keeps the shrunk art for comparison.</p>
+
+<section class="lane" id="b1">
+  <div><h2>B1 · As drawn</h2><p>Round 1's B: bloom, leaf and stem on the plate.</p></div>
+  <div class="big"><img src="b-prompt.svg" alt="B1"></div>
+  <div class="ladders" data-src="b-prompt.svg" data-small="1"></div>
+</section>
+
+<section class="lane" id="b2">
+  <div><h2>B2 · Large bloom</h2><p>No stem; the bloom fills the plate, so the prompt holds down to 24 px.</p></div>
+  <div class="big"><img src="b2-prompt-large.svg" alt="B2"></div>
+  <div class="ladders" data-src="b2-prompt-large.svg" data-small="1"></div>
+</section>
+
+<section class="lane" id="b3">
+  <div><h2>B3 · No plate</h2><p>The tulip alone on a transparent ground, as most Windows app icons are; larger at every size, but it depends on the taskbar behind it.</p></div>
+  <div class="big"><img src="b3-prompt-noplate.svg" alt="B3"></div>
+  <div class="ladders" data-src="b3-prompt-noplate.svg"></div>
+</section>
+
+<section class="lane" id="current">
+  <div><h2>Current</h2><p>The installer's placeholder, <code>tools/installer/icon.ico</code>.</p></div>
+  <div class="big"><img src="current.png" alt="Current placeholder"></div>
+  <div class="ladders" data-src="current.png"></div>
+</section>
+
+<img id="tuned16" src="b-prompt-16.svg" alt="" hidden>
+<script>
+  const sizes = [64, 48, 32, 24, 16];
+  const tunedSrc = document.getElementById('tuned16').src;
+  for (const host of document.querySelectorAll('.ladders')) {
+    for (const tone of ['dark', 'light']) {
+      const row = document.createElement('div');
+      row.className = 'ladder ' + tone;
+      for (const s of sizes) {
+        const fig = document.createElement('figure');
+        const img = document.createElement('img');
+        const tuned = s === 16 && tone === 'light' && host.dataset.small;
+        img.src = tuned ? tunedSrc : host.dataset.src;
+        img.width = s; img.height = s; img.alt = '';
+        const cap = document.createElement('figcaption');
+        cap.textContent = s + ' px';
+        fig.append(img, cap);
+        row.append(fig);
+      }
+      host.append(row);
+    }
+  }
+</script>
+</body>
+</html>

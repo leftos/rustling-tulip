@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <linearGradient id="plate" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#23262e"/>
+      <stop offset="1" stop-color="#0c0b0e"/>
+    </linearGradient>
+    <path id="bloom" d="M0 34 C-22 34 -34 18 -34 -4 V-30 L-17 -17 L0 -38 L17 -17 L34 -30 V-4 C34 18 22 34 0 34 Z"/>
+  </defs>
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="url(#plate)" stroke="#2c2f38" stroke-width="2"/>
+  <g stroke="#3fb96a" stroke-width="9" stroke-linecap="round" fill="none">
+    <path d="M128 222 C120 180 96 150 78 128"/>
+    <path d="M128 222 V118"/>
+    <path d="M128 222 C136 180 160 150 178 128"/>
+  </g>
+  <use xlink:href="#bloom" href="#bloom" transform="translate(74 112) rotate(-16)" fill="#5b9bff"/>
+  <use xlink:href="#bloom" href="#bloom" transform="translate(182 112) rotate(16)" fill="#e8a531"/>
+  <use xlink:href="#bloom" href="#bloom" transform="translate(128 84)" fill="#ef5c5c"/>
+</svg>

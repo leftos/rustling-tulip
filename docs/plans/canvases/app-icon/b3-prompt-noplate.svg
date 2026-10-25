@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <linearGradient id="petal" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ff8585"/>
+      <stop offset="1" stop-color="#d9434e"/>
+    </linearGradient>
+  </defs>
+  <g transform="translate(128 128) scale(1.45) translate(-128 -139)">
+    <path d="M128 186 V226" stroke="#3fb96a" stroke-width="12" stroke-linecap="round" fill="none"/>
+    <path d="M128 220 C108 214 92 196 90 172 C110 178 124 194 128 212 Z" fill="#3fb96a"/>
+    <path d="M128 190 C90 190 70 162 70 126 V80 L100 102 L128 68 L156 102 L186 80 V126 C186 162 166 190 128 190 Z" fill="url(#petal)"/>
+    <path d="M100 118 L120 134 L100 150" stroke="#16181d" stroke-width="12" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+    <path d="M130 156 H156" stroke="#16181d" stroke-width="12" stroke-linecap="round" fill="none"/>
+  </g>
+</svg>
