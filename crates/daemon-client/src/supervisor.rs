@@ -1,7 +1,10 @@
 //! Locate and (if needed) spawn the rustling-tulipd binary, then return its
 //! handshake to the caller.
 
-use crate::handshake_file;
+#[cfg(windows)]
+use crate::pinned_process::{OpenFailure, PinnedProcess};
+use crate::proof::{self, Proof};
+use crate::{handshake_file_in, remove_handshake_holding_token};
 use anyhow::{Context as _, anyhow};
 use protocol::DaemonHandshake;
 use sha2::{Digest, Sha256};
@@ -15,7 +18,8 @@ use tokio::sync::Mutex;
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
-const HEALTH_TIMEOUT: Duration = Duration::from_millis(800);
+/// The budget for one proof exchange, and for the shutdown request's answer.
+pub(crate) const PROOF_TIMEOUT: Duration = Duration::from_millis(800);
 // Bumped from 8s to 30s so a freshly-spawned daemon has time to finish
 // `reattach_orphans` before the supervisor declares it stuck. Each
 // per-session tracer reattach can take up to PIPE_CONNECT_TIMEOUT (15s)
@@ -117,12 +121,17 @@ fn spawn_lock() -> &'static Mutex<()> {
 /// Return the handshake of a healthy daemon this client can speak to,
 /// spawning or replacing one when needed.
 ///
+/// A daemon counts as running only when the listener on the port `daemon.json`
+/// names proves it holds that file's token (`GET /proof`); a listener that
+/// does not is treated as no daemon and is never sent the token.
+///
 /// `client_versions` lists the protocol versions the calling client speaks; a
 /// running daemon is protocol-compatible when it speaks at least one of them.
-/// Any healthy daemon with a compatible protocol is reused, whatever build it
+/// Any proven daemon with a compatible protocol is reused, whatever build it
 /// came from, and no local daemon binary is located unless one has to be
 /// spawned. A protocol-incompatible daemon is retired (graceful `/shutdown`,
-/// then a force kill) and a fresh one is spawned from the binary cache.
+/// then a force kill through a handle pinned before its proof) and a fresh one
+/// is spawned from the binary cache.
 /// Concurrent callers serialize on a process-wide lock so only one of them
 /// spawns.
 ///
@@ -163,7 +172,7 @@ pub async fn ensure_running(client_versions: &[u32]) -> anyhow::Result<DaemonHan
     {
         retire_daemon(handshake, "protocol mismatch", client_versions).await?;
     }
-    spawn_current_daemon(&current).await
+    spawn_current_daemon(&current, client_versions).await
 }
 
 fn resolve_current_daemon_binary() -> anyhow::Result<CurrentDaemonBinary> {
@@ -172,7 +181,10 @@ fn resolve_current_daemon_binary() -> anyhow::Result<CurrentDaemonBinary> {
     Ok(CurrentDaemonBinary { template, cached })
 }
 
-async fn spawn_current_daemon(current: &CurrentDaemonBinary) -> anyhow::Result<DaemonHandshake> {
+async fn spawn_current_daemon(
+    current: &CurrentDaemonBinary,
+    client_versions: &[u32],
+) -> anyhow::Result<DaemonHandshake> {
     let cache_dir = current
         .cached
         .parent()
@@ -204,45 +216,73 @@ async fn spawn_current_daemon(current: &CurrentDaemonBinary) -> anyhow::Result<D
         .ok_or_else(|| anyhow!("template has no parent dir"))?;
     spawn_daemon(&current.cached, &template_dir)?;
 
-    wait_for_handshake().await
+    wait_for_handshake(client_versions).await
 }
 
-/// Classify the daemon named by `daemon.json`. With no `current_daemon` to
-/// compare against, a healthy daemon whose protocol is compatible with
-/// `client_versions` counts as compatible whatever executable it runs. A
-/// daemon from a different build is still reused, so the difference is
-/// reported at debug.
+/// Classify the daemon named by `daemon.json` in the config dir; see
+/// [`classify_existing_daemon_in`].
 async fn classify_existing_daemon(
     current_daemon: Option<&Path>,
     client_versions: &[u32],
 ) -> ExistingDaemon {
-    if let Some(handshake) = load_existing_if_alive().await {
-        if protocol_kind(&handshake, client_versions) == ExistingKind::Compatible {
-            let Some(current_daemon) = current_daemon else {
-                return ExistingDaemon::Compatible(handshake);
-            };
-            if running_daemon_matches_current_binary(handshake.pid, current_daemon) {
-                ExistingDaemon::Compatible(handshake)
-            } else {
-                let (pid, port, protocol_version) =
-                    (handshake.pid, handshake.port, handshake.protocol_version);
-                let current_daemon = current_daemon.display();
-                debug!(pid, port, protocol_version, %current_daemon, "running daemon binary is not current");
-                ExistingDaemon::StaleBinary(handshake)
-            }
-        } else {
-            warn!(
-                daemon_protocol = handshake.protocol_version,
-                daemon_supported = ?handshake.supported(),
-                client_supported = ?client_versions,
-                port = handshake.port,
-                pid = handshake.pid,
-                "running daemon protocol is incompatible with this app"
-            );
-            ExistingDaemon::Incompatible(handshake)
+    match crate::config_dir() {
+        Ok(config_dir) => {
+            classify_existing_daemon_in(&config_dir, current_daemon, client_versions, PROOF_TIMEOUT)
+                .await
         }
+        Err(err) => {
+            debug!("no config dir, so no daemon to classify: {err:#}");
+            ExistingDaemon::Missing
+        }
+    }
+}
+
+/// Classify the daemon named by `config_dir`'s `daemon.json`: read once, and
+/// classified from that parsed copy only when its listener proves it holds
+/// the copy's token; anything else is [`ExistingDaemon::Missing`].
+async fn classify_existing_daemon_in(
+    config_dir: &Path,
+    current_daemon: Option<&Path>,
+    client_versions: &[u32],
+    proof_budget: Duration,
+) -> ExistingDaemon {
+    match load_existing_if_alive(config_dir, proof_budget).await {
+        Some(handshake) => classify_proven(handshake, current_daemon, client_versions),
+        None => ExistingDaemon::Missing,
+    }
+}
+
+/// Classify a proven daemon. With no `current_daemon` to compare against, a
+/// daemon whose protocol is compatible with `client_versions` counts as
+/// compatible whatever executable it runs. A daemon from a different build is
+/// still reused, so the difference is reported at debug.
+fn classify_proven(
+    handshake: DaemonHandshake,
+    current_daemon: Option<&Path>,
+    client_versions: &[u32],
+) -> ExistingDaemon {
+    if protocol_kind(&handshake, client_versions) != ExistingKind::Compatible {
+        warn!(
+            daemon_protocol = handshake.protocol_version,
+            daemon_supported = ?handshake.supported(),
+            client_supported = ?client_versions,
+            port = handshake.port,
+            pid = handshake.pid,
+            "running daemon protocol is incompatible with this app"
+        );
+        return ExistingDaemon::Incompatible(handshake);
+    }
+    let Some(current_daemon) = current_daemon else {
+        return ExistingDaemon::Compatible(handshake);
+    };
+    if running_daemon_matches_current_binary(handshake.pid, current_daemon) {
+        ExistingDaemon::Compatible(handshake)
     } else {
-        ExistingDaemon::Missing
+        let (pid, port, protocol_version) =
+            (handshake.pid, handshake.port, handshake.protocol_version);
+        let current_daemon = current_daemon.display();
+        debug!(pid, port, protocol_version, %current_daemon, "running daemon binary is not current");
+        ExistingDaemon::StaleBinary(handshake)
     }
 }
 
@@ -298,6 +338,8 @@ fn daemon_exe_matches_expected(actual: &Path, expected: &Path) -> bool {
     normalize_process_path(actual) == normalize_process_path(expected)
 }
 
+/// Retire the daemon `handshake` names from the config dir's `daemon.json`;
+/// see [`retire_daemon_in`].
 async fn retire_daemon(
     handshake: &DaemonHandshake,
     reason: &str,
@@ -312,89 +354,211 @@ async fn retire_daemon(
         reason,
         "retiring running daemon before spawning current version"
     );
+    let config_dir = crate::config_dir()?;
+    retire_daemon_in(&config_dir, handshake, PROOF_TIMEOUT, SHUTDOWN_WAIT_TIMEOUT).await
+}
 
-    match request_graceful_shutdown(handshake).await {
-        Ok(()) => {
-            if wait_for_daemon_to_stop(handshake, SHUTDOWN_WAIT_TIMEOUT).await {
-                remove_matching_handshake_file(handshake).await;
-                return Ok(());
-            }
-            warn!(
+/// Retire the daemon `handshake` (read from `config_dir`'s `daemon.json`)
+/// names: pin its pid (Windows), open a connection, have the listener prove
+/// it holds the token within `proof_budget`, then send the bearer `/shutdown`
+/// on that connection. A daemon still alive after `shutdown_wait` is
+/// force-stopped through the pin. `daemon.json` is removed only while it
+/// still holds this token.
+///
+/// # Errors
+///
+/// Fails when the listener does not prove itself (it is sent nothing and
+/// nothing is killed), so the caller does not replace a daemon it could not
+/// retire; when this client may not terminate the daemon and it is still
+/// running after the shutdown request; or when the force-stop fails. A pid
+/// that is no longer running is `Ok`.
+async fn retire_daemon_in(
+    config_dir: &Path,
+    handshake: &DaemonHandshake,
+    proof_budget: Duration,
+    shutdown_wait: Duration,
+) -> anyhow::Result<()> {
+    #[cfg(windows)]
+    let pinned = match PinnedProcess::open(handshake.pid) {
+        Ok(pinned) => Some(pinned),
+        Err(OpenFailure::NotRunning) => {
+            info!(
                 pid = handshake.pid,
-                port = handshake.port,
-                "daemon did not exit after graceful shutdown request"
+                "the daemon named by daemon.json is no longer running; nothing to retire"
             );
+            remove_handshake_holding_token(config_dir, &handshake.auth_token).await;
+            return Ok(());
         }
-        Err(err) => {
+        Err(OpenFailure::NoRights(err)) => {
             warn!(
-                ?err,
                 pid = handshake.pid,
-                port = handshake.port,
-                "graceful daemon shutdown request failed"
+                %err,
+                "this client may not terminate the daemon; asking it to shut down only"
             );
+            None
+        }
+    };
+    let stream = connect_then_prove(handshake, proof_budget).await?;
+    request_shutdown(stream, handshake, proof_budget).await;
+    #[cfg(windows)]
+    {
+        match &pinned {
+            Some(pinned) => stop_pinned(pinned, handshake, shutdown_wait).await?,
+            None => stop_by_request_only(handshake, proof_budget, shutdown_wait).await?,
         }
     }
+    #[cfg(not(windows))]
+    stop_unpinned(handshake, proof_budget, shutdown_wait).await?;
+    remove_handshake_holding_token(config_dir, &handshake.auth_token).await;
+    Ok(())
+}
 
-    if !probe_health(handshake.port).await {
-        remove_matching_handshake_file(handshake).await;
+/// A connection to the daemon's port opened before its listener proved,
+/// within `proof_budget`, that it holds the token.
+///
+/// # Errors
+///
+/// Fails (logging why) when the connection could not be opened or the proof
+/// failed: the daemon classified as proven stopped proving itself.
+async fn connect_then_prove(
+    handshake: &DaemonHandshake,
+    proof_budget: Duration,
+) -> anyhow::Result<tokio::net::TcpStream> {
+    let port = handshake.port;
+    let stopped_proving = || {
+        anyhow!(
+            "the daemon on 127.0.0.1:{port} stopped proving it holds its token while being \
+             retired; not replacing it"
+        )
+    };
+    let stream = match proof::connect(port, proof_budget).await {
+        Ok(stream) => stream,
+        Err(err) => {
+            info!(port, err = %format!("{err:#}"), "nothing listens on the daemon's port");
+            return Err(stopped_proving());
+        }
+    };
+    let proof = proof::prove(port, &handshake.auth_token, proof_budget).await;
+    if proof != Proof::Proven {
+        info!(
+            port,
+            ?proof,
+            "daemon.json names a listener that did not prove it holds the token; nothing to retire"
+        );
+        return Err(stopped_proving());
+    }
+    Ok(stream)
+}
+
+/// Sends the bearer `/shutdown` on `stream`; a failure is logged, since the
+/// wait that follows decides whether the daemon stopped.
+async fn request_shutdown(
+    stream: tokio::net::TcpStream,
+    handshake: &DaemonHandshake,
+    budget: Duration,
+) {
+    if let Err(err) =
+        proof::post_shutdown(stream, handshake.port, &handshake.auth_token, budget).await
+    {
+        warn!(
+            err = %format!("{err:#}"),
+            pid = handshake.pid,
+            port = handshake.port,
+            "graceful daemon shutdown request failed"
+        );
+    }
+}
+
+/// Waits for a daemon this client may not terminate to stop proving itself
+/// after its shutdown request.
+///
+/// # Errors
+///
+/// Fails when it still proves itself after `shutdown_wait`.
+#[cfg(windows)]
+async fn stop_by_request_only(
+    handshake: &DaemonHandshake,
+    proof_budget: Duration,
+    shutdown_wait: Duration,
+) -> anyhow::Result<()> {
+    if wait_until_unproven(handshake, proof_budget, shutdown_wait).await {
         return Ok(());
     }
+    Err(anyhow!(
+        "the daemon (pid {}) did not stop after a shutdown request, and this client may not \
+         terminate it",
+        handshake.pid
+    ))
+}
 
+/// Waits for the pinned daemon to exit after its shutdown request, then
+/// force-terminates it through the pin if it has not.
+#[cfg(windows)]
+async fn stop_pinned(
+    pinned: &PinnedProcess,
+    handshake: &DaemonHandshake,
+    shutdown_wait: Duration,
+) -> anyhow::Result<()> {
+    if pinned.wait(shutdown_wait).await {
+        return Ok(());
+    }
     warn!(
         pid = handshake.pid,
         port = handshake.port,
-        "falling back to force-stopping daemon"
+        "daemon did not exit after graceful shutdown request; falling back to force-stopping daemon"
     );
-    crate::kill_pid(handshake.pid).await?;
-    let _ = wait_for_daemon_to_stop(handshake, SHUTDOWN_WAIT_TIMEOUT).await;
-    remove_matching_handshake_file(handshake).await;
-    Ok(())
-}
-
-async fn request_graceful_shutdown(handshake: &DaemonHandshake) -> anyhow::Result<()> {
-    let url = shutdown_url(handshake.port);
-    let client = reqwest::Client::builder()
-        .timeout(HEALTH_TIMEOUT)
-        .build()
-        .context("building shutdown client")?;
-    let response = client
-        .post(url)
-        .bearer_auth(&handshake.auth_token)
-        .send()
-        .await
-        .context("sending shutdown request")?;
-    let status = response.status();
-    if !status.is_success() {
-        return Err(anyhow!("shutdown endpoint returned {status}"));
+    pinned.terminate()?;
+    if !pinned.wait(shutdown_wait).await {
+        warn!(
+            pid = handshake.pid,
+            "daemon did not exit after it was terminated"
+        );
     }
     Ok(())
 }
 
-fn shutdown_url(port: u16) -> String {
-    format!("http://127.0.0.1:{port}/shutdown")
+/// Waits for the daemon to stop proving itself after its shutdown request;
+/// if it still does, proves it once more right before `kill -TERM`.
+#[cfg(not(windows))]
+async fn stop_unpinned(
+    handshake: &DaemonHandshake,
+    proof_budget: Duration,
+    shutdown_wait: Duration,
+) -> anyhow::Result<()> {
+    if wait_until_unproven(handshake, proof_budget, shutdown_wait).await {
+        return Ok(());
+    }
+    if proof::prove(handshake.port, &handshake.auth_token, proof_budget).await != Proof::Proven {
+        return Ok(());
+    }
+    warn!(
+        pid = handshake.pid,
+        port = handshake.port,
+        "daemon did not exit after graceful shutdown request; falling back to force-stopping daemon"
+    );
+    crate::kill_pid(handshake.pid).await?;
+    if !wait_until_unproven(handshake, proof_budget, shutdown_wait).await {
+        warn!(pid = handshake.pid, "daemon did not exit after kill -TERM");
+    }
+    Ok(())
 }
 
-async fn wait_for_daemon_to_stop(handshake: &DaemonHandshake, timeout: Duration) -> bool {
+/// Whether the daemon stopped proving it holds its token within `timeout`,
+/// each proof given `proof_budget`.
+async fn wait_until_unproven(
+    handshake: &DaemonHandshake,
+    proof_budget: Duration,
+    timeout: Duration,
+) -> bool {
     let deadline = tokio::time::Instant::now() + timeout;
     while tokio::time::Instant::now() < deadline {
-        if !probe_health(handshake.port).await {
+        if proof::prove(handshake.port, &handshake.auth_token, proof_budget).await != Proof::Proven
+        {
             return true;
         }
         sleep(POLL_INTERVAL).await;
     }
     false
-}
-
-async fn remove_matching_handshake_file(expected: &DaemonHandshake) {
-    let Ok(path) = handshake_file() else {
-        return;
-    };
-    let Some(current) = try_load_handshake(&path).await else {
-        return;
-    };
-    if current.pid == expected.pid && current.port == expected.port {
-        let _ = tokio::fs::remove_file(path).await;
-    }
 }
 
 /// Find every `rustling-tulipd*` process launched from this instance's binary
@@ -468,27 +632,29 @@ fn normalize_process_path(path: &Path) -> String {
     path.to_string_lossy().trim_end_matches('/').to_string()
 }
 
-async fn load_existing_if_alive() -> Option<DaemonHandshake> {
-    let path = handshake_file().ok()?;
-    if !path.exists() {
-        return None;
+/// The handshake in `config_dir`'s `daemon.json`, read once, when the listener
+/// on its port proves it holds its token; `None` otherwise.
+async fn load_existing_if_alive(
+    config_dir: &Path,
+    proof_budget: Duration,
+) -> Option<DaemonHandshake> {
+    let parsed = try_load_handshake(&handshake_file_in(config_dir)).await?;
+    let port = parsed.port;
+    match proof::prove(port, &parsed.auth_token, proof_budget).await {
+        Proof::Proven => Some(parsed),
+        proof @ (Proof::Unproven | Proof::NoResponse) => {
+            info!(
+                port,
+                ?proof,
+                "daemon.json names a listener that did not prove it holds the token; treating it as no daemon"
+            );
+            None
+        }
+        Proof::Refused => {
+            debug!(port, "stale handshake, nothing listens on its port");
+            None
+        }
     }
-    let bytes = tokio::fs::read(&path).await.ok()?;
-    let parsed: DaemonHandshake = serde_json::from_slice(&bytes).ok()?;
-    if probe_health(parsed.port).await {
-        Some(parsed)
-    } else {
-        debug!(port = parsed.port, "stale handshake, daemon not responding");
-        None
-    }
-}
-
-async fn probe_health(port: u16) -> bool {
-    let url = format!("http://127.0.0.1:{port}/health");
-    let Ok(client) = reqwest::Client::builder().timeout(HEALTH_TIMEOUT).build() else {
-        return false;
-    };
-    matches!(client.get(&url).send().await, Ok(resp) if resp.status().is_success())
 }
 
 /// Locate the shipped `rustling-tulipd` binary (the template the cache copies
@@ -694,14 +860,69 @@ async fn try_load_handshake(path: &std::path::Path) -> Option<DaemonHandshake> {
     serde_json::from_slice::<DaemonHandshake>(&bytes).ok()
 }
 
-async fn wait_for_handshake() -> anyhow::Result<DaemonHandshake> {
-    let path = handshake_file()?;
+/// Wait for the config dir's `daemon.json` to name a ready daemon; see
+/// [`wait_for_handshake_in`].
+async fn wait_for_handshake(client_versions: &[u32]) -> anyhow::Result<DaemonHandshake> {
+    wait_for_handshake_in(
+        &crate::config_dir()?,
+        client_versions,
+        SPAWN_WAIT_TIMEOUT,
+        PROOF_TIMEOUT,
+    )
+    .await
+}
+
+/// The handshake `path` holds when its listener proves it holds the token and
+/// speaks one of `client_versions`. A proven but incompatible daemon is
+/// warned about once per wait (`warned` remembers it).
+async fn ready_handshake(
+    path: &Path,
+    client_versions: &[u32],
+    warned: &mut bool,
+    proof_budget: Duration,
+) -> Option<DaemonHandshake> {
+    let parsed = try_load_handshake(path).await?;
+    if proof::prove(parsed.port, &parsed.auth_token, proof_budget).await != Proof::Proven {
+        return None;
+    }
+    if protocol_compatible(&parsed, client_versions) {
+        return Some(parsed);
+    }
+    if !*warned {
+        warn!(
+            port = parsed.port,
+            daemon_supported = ?parsed.supported(),
+            client_supported = ?client_versions,
+            "daemon.json names a daemon that speaks none of this client's protocol versions; still waiting"
+        );
+        *warned = true;
+    }
+    None
+}
+
+/// Wait up to `timeout` for `config_dir`'s `daemon.json` to name a daemon
+/// that proves it holds the file's token and speaks one of
+/// `client_versions`. A stale file never satisfies the wait; the daemon's pid
+/// need not be the one this client spawned.
+async fn wait_for_handshake_in(
+    config_dir: &Path,
+    client_versions: &[u32],
+    timeout: Duration,
+    proof_budget: Duration,
+) -> anyhow::Result<DaemonHandshake> {
+    let path = handshake_file_in(config_dir);
     let started = tokio::time::Instant::now();
-    let deadline = started + SPAWN_WAIT_TIMEOUT;
+    let deadline = started + timeout;
     let mut next_progress = started + Duration::from_secs(1);
+    let mut warned_incompatible = false;
     while tokio::time::Instant::now() < deadline {
-        if let Some(parsed) = try_load_handshake(&path).await
-            && probe_health(parsed.port).await
+        if let Some(parsed) = ready_handshake(
+            &path,
+            client_versions,
+            &mut warned_incompatible,
+            proof_budget,
+        )
+        .await
         {
             info!(
                 elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
@@ -727,7 +948,7 @@ async fn wait_for_handshake() -> anyhow::Result<DaemonHandshake> {
     }
     warn!(
         elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-        timeout_secs = SPAWN_WAIT_TIMEOUT.as_secs(),
+        timeout_secs = timeout.as_secs(),
         "daemon never reported handshake"
     );
     Err(anyhow!("daemon failed to start within the timeout"))
@@ -740,11 +961,21 @@ async fn wait_for_handshake() -> anyhow::Result<DaemonHandshake> {
 )]
 mod tests {
     use super::{
-        Action, ExistingKind, action_for, daemon_exe_matches_expected, dev_workspace_root,
-        is_daemon_image, path_is_under, protocol_compatible, protocol_kind, shutdown_url,
+        Action, ExistingKind, action_for, classify_existing_daemon_in, daemon_exe_matches_expected,
+        dev_workspace_root, is_daemon_image, path_is_under, protocol_compatible, protocol_kind,
+        wait_for_handshake_in,
+    };
+    use crate::supervisor::retire_daemon_in;
+    use crate::test_fakes::{
+        FakeListener, ScratchDir, block_on, handshake_naming, stand_in, write_daemon_json,
     };
     use protocol::DaemonHandshake;
     use std::path::Path;
+    use std::time::Duration;
+
+    const SUPPORTED: &[u32] = protocol::SUPPORTED_PROTOCOL_VERSIONS;
+    /// Only a hang guard: no test asserts how long anything took.
+    const HANG_GUARD: Duration = Duration::from_secs(10);
 
     fn handshake(protocol_version: u32, supported_versions: &[u32]) -> DaemonHandshake {
         DaemonHandshake {
@@ -829,8 +1060,174 @@ mod tests {
     }
 
     #[test]
-    fn shutdown_url_targets_loopback_port() {
-        assert_eq!(shutdown_url(51418), "http://127.0.0.1:51418/shutdown");
+    fn a_listener_answering_health_without_a_proof_is_not_a_daemon() {
+        let scratch = ScratchDir::new("classify-health");
+        let fake = FakeListener::healthy();
+        let file = handshake_naming(4242, fake.port, "token", SUPPORTED);
+        write_daemon_json(&scratch.0, &file);
+
+        let existing = block_on(classify_existing_daemon_in(
+            &scratch.0, None, SUPPORTED, HANG_GUARD,
+        ));
+
+        assert_eq!(existing.kind(), ExistingKind::Missing);
+        assert!(!fake.saw_authorization(), "heads: {:?}", fake.heads());
+    }
+
+    #[test]
+    fn a_proven_listener_is_classified_from_the_file_it_proved() {
+        let scratch = ScratchDir::new("classify-proven");
+        let fake = FakeListener::proving("good-token");
+
+        let compatible = handshake_naming(4242, fake.port, "good-token", SUPPORTED);
+        write_daemon_json(&scratch.0, &compatible);
+        let existing = block_on(classify_existing_daemon_in(
+            &scratch.0, None, SUPPORTED, HANG_GUARD,
+        ));
+        assert_eq!(existing.kind(), ExistingKind::Compatible);
+        assert_eq!(
+            existing.handshake().map(|h| h.port),
+            Some(fake.port),
+            "classified from another file"
+        );
+
+        let incompatible = handshake_naming(4242, fake.port, "good-token", &[0]);
+        write_daemon_json(&scratch.0, &incompatible);
+        let existing = block_on(classify_existing_daemon_in(
+            &scratch.0, None, SUPPORTED, HANG_GUARD,
+        ));
+        assert_eq!(existing.kind(), ExistingKind::Incompatible);
+    }
+
+    #[test]
+    fn wait_for_handshake_skips_a_stale_file_whose_port_answers_health() {
+        let scratch = ScratchDir::new("wait-stale");
+        let (stale, polled) = FakeListener::healthy_signalling();
+        let daemon = FakeListener::proving("good-token");
+        write_daemon_json(
+            &scratch.0,
+            &handshake_naming(4242, stale.port, "stale-token", SUPPORTED),
+        );
+
+        let dir = scratch.0.clone();
+        let waiter = std::thread::spawn(move || {
+            block_on(wait_for_handshake_in(
+                &dir, SUPPORTED, HANG_GUARD, HANG_GUARD,
+            ))
+        });
+        polled
+            .recv_timeout(HANG_GUARD)
+            .expect("hung: the wait never challenged the stale file's port");
+        let good = handshake_naming(4343, daemon.port, "good-token", SUPPORTED);
+        let staged = scratch.0.join("daemon.json.tmp");
+        std::fs::write(
+            &staged,
+            serde_json::to_vec(&good).expect("encode handshake"),
+        )
+        .expect("write the staged daemon.json");
+        std::fs::rename(&staged, crate::handshake_file_in(&scratch.0))
+            .expect("rename the good daemon.json in");
+
+        let found = waiter
+            .join()
+            .expect("the waiting thread")
+            .expect("the wait accepts the proven file");
+        assert_eq!(found.port, daemon.port);
+        assert_eq!(found.auth_token, "good-token");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn retire_never_kills_a_pid_no_proof_vouched_for() {
+        let scratch = ScratchDir::new("retire-unproven");
+        let fake = FakeListener::healthy();
+        let mut child = stand_in();
+        let file = handshake_naming(child.id(), fake.port, "token", &[0]);
+        write_daemon_json(&scratch.0, &file);
+
+        let retired = block_on(retire_daemon_in(&scratch.0, &file, HANG_GUARD, HANG_GUARD));
+        let alive = child.try_wait().expect("poll the stand-in").is_none();
+        let _ = child.kill();
+        let _ = child.wait();
+
+        let err = retired.expect_err("an unproven listener is not reported as retired");
+        assert_eq!(format!("{err:#}"), stopped_proving(fake.port));
+        assert!(alive, "the stand-in was killed");
+        assert!(!fake.saw_authorization(), "heads: {:?}", fake.heads());
+    }
+
+    fn stopped_proving(port: u16) -> String {
+        format!(
+            "the daemon on 127.0.0.1:{port} stopped proving it holds its token while being \
+             retired; not replacing it"
+        )
+    }
+
+    #[test]
+    fn retire_does_not_report_success_when_the_daemon_stops_proving() {
+        let scratch = ScratchDir::new("retire-silent");
+        let fake = FakeListener::silent();
+        let mut child = stand_in();
+        let file = handshake_naming(child.id(), fake.port, "token", &[0]);
+        write_daemon_json(&scratch.0, &file);
+
+        // The silent listener never answers, so a short proof budget only
+        // decides how soon the retire gives up waiting for nothing.
+        let retired = block_on(retire_daemon_in(
+            &scratch.0,
+            &file,
+            Duration::from_millis(200),
+            HANG_GUARD,
+        ));
+        let alive = child.try_wait().expect("poll the stand-in").is_none();
+        let _ = child.kill();
+        let _ = child.wait();
+
+        let err = retired.expect_err("a daemon that stopped proving is not reported as retired");
+        assert_eq!(format!("{err:#}"), stopped_proving(fake.port));
+        assert!(alive, "the stand-in was killed");
+        assert!(!fake.saw_authorization(), "heads: {:?}", fake.heads());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn retire_shuts_down_a_proven_daemon_through_its_pinned_pid() {
+        let scratch = ScratchDir::new("retire-proven");
+        let fake = FakeListener::proving("good-token");
+        let mut child = stand_in();
+        let file = handshake_naming(child.id(), fake.port, "good-token", &[0]);
+        write_daemon_json(&scratch.0, &file);
+
+        // The stand-in ignores `/shutdown`, so the graceful wait always runs
+        // out and the pin's terminate is what ends it.
+        let retired = block_on(retire_daemon_in(
+            &scratch.0,
+            &file,
+            HANG_GUARD,
+            Duration::from_millis(300),
+        ));
+        if retired.is_err() {
+            let _ = child.kill();
+        }
+        let status = child.wait().expect("wait for the stand-in");
+
+        retired.expect("retiring a proven daemon succeeds");
+        assert!(
+            fake.heads()
+                .iter()
+                .any(|head| head.starts_with("POST /shutdown ")
+                    && head.contains("\r\nAuthorization: Bearer good-token\r\n")),
+            "no bearer shutdown reached the proven daemon: {:?}",
+            fake.heads()
+        );
+        assert!(
+            !status.success(),
+            "the stand-in exited on its own: {status}"
+        );
+        assert!(
+            !crate::handshake_file_in(&scratch.0).exists(),
+            "daemon.json survived"
+        );
     }
 
     #[test]

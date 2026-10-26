@@ -12,7 +12,12 @@
 
 pub mod autostart;
 pub mod device_tokens;
+#[cfg(windows)]
+mod pinned_process;
+mod proof;
 mod supervisor;
+#[cfg(test)]
+mod test_fakes;
 
 pub use supervisor::ensure_running;
 
@@ -20,6 +25,7 @@ use anyhow::{Context as _, anyhow, bail};
 use protocol::DaemonHandshake;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// Resolve the per-user config directory.
 ///
@@ -153,19 +159,31 @@ pub fn client_identity_in(dir: &Path, id_file_name: &str) -> anyhow::Result<Clie
     })
 }
 
-/// Force-stop the running daemon: read its pid from `daemon.json`, kill the
-/// process and remove the handshake file.
+/// How long [`stop_in`] waits for a terminated daemon to exit.
+#[cfg(windows)]
+const STOP_WAIT: Duration = Duration::from_secs(5);
+
+/// Force-stop the running daemon: read `daemon.json`, have the listener on its
+/// port prove it holds its token, kill the process its pid names and remove
+/// the handshake file.
 ///
-/// Kills by pid rather than sending a `Shutdown` WS message because the WS may
-/// already be closed, and a pid kill works in both states. The daemon's drop
-/// guard would normally remove `daemon.json` on graceful exit; it is removed
-/// here too so a later [`ensure_running`] doesn't mistake a stale handshake for
-/// a live daemon.
+/// On Windows the pid is pinned by a process handle before the proof and
+/// killed through that handle, so a pid reused by another process is never
+/// killed. Kills by pid rather than sending a `Shutdown` WS message because
+/// the WS may already be closed, and a pid kill works in both states. The
+/// daemon's drop guard would normally remove `daemon.json` on graceful exit;
+/// it is removed here too so a later [`ensure_running`] doesn't mistake a
+/// stale handshake for a live daemon.
 ///
 /// # Errors
 ///
-/// Fails when there is no handshake on disk, it cannot be read or parsed, or
-/// the kill fails.
+/// Fails when there is no handshake on disk or it cannot be read or parsed;
+/// on Windows only, when its pid is not running (the stale file is removed)
+/// or this client may not terminate it (nothing is stopped); when its
+/// listener does not prove it is the daemon (nothing is killed; the file is
+/// removed, except when the listener did not answer at all); or when the kill
+/// fails. The file is only ever removed while it still holds the token that
+/// was read.
 pub async fn stop() -> anyhow::Result<()> {
     stop_in(&config_dir()?).await
 }
@@ -176,16 +194,124 @@ pub async fn stop() -> anyhow::Result<()> {
 ///
 /// As [`stop`].
 pub async fn stop_in(config_dir: &Path) -> anyhow::Result<()> {
+    stop_in_with(config_dir, supervisor::PROOF_TIMEOUT).await
+}
+
+/// [`stop_in`] with `proof_budget` for the listener's proof.
+///
+/// # Errors
+///
+/// As [`stop`].
+pub(crate) async fn stop_in_with(config_dir: &Path, proof_budget: Duration) -> anyhow::Result<()> {
     let path = handshake_file_in(config_dir);
     if !path.exists() {
         bail!("no daemon handshake on disk — daemon may not be running");
     }
     let parsed = read_handshake_in(config_dir)?;
+    #[cfg(windows)]
+    let pinned = pin_for_stop(config_dir, &parsed, &path).await?;
+    let proof = proof::prove(parsed.port, &parsed.auth_token, proof_budget).await;
+    refuse_unproven(proof, config_dir, &parsed, &path).await?;
+    #[cfg(windows)]
+    {
+        pinned.terminate()?;
+        if !pinned.wait(STOP_WAIT).await {
+            bail!("pid {} did not exit after it was terminated", parsed.pid);
+        }
+    }
+    #[cfg(not(windows))]
     kill_pid(parsed.pid).await?;
-    // Best-effort cleanup; absence will be detected on the next ensure_running
-    // regardless. Don't error if the daemon's drop guard beat us to it.
-    let _ = tokio::fs::remove_file(&path).await;
+    remove_handshake_holding_token(config_dir, &parsed.auth_token).await;
     Ok(())
+}
+
+/// Pins the pid `parsed` names for [`stop_in`].
+///
+/// # Errors
+///
+/// Fails when the pid is not running (removing the handshake while it still
+/// holds `parsed`'s token) or this client may not terminate it (nothing is
+/// stopped and the handshake is kept).
+#[cfg(windows)]
+async fn pin_for_stop(
+    config_dir: &Path,
+    parsed: &DaemonHandshake,
+    path: &Path,
+) -> anyhow::Result<pinned_process::PinnedProcess> {
+    match pinned_process::PinnedProcess::open(parsed.pid) {
+        Ok(pinned) => Ok(pinned),
+        Err(pinned_process::OpenFailure::NotRunning) => {
+            remove_handshake_holding_token(config_dir, &parsed.auth_token).await;
+            bail!(
+                "no daemon is running: pid {} named by {} is not running; removed the stale handshake",
+                parsed.pid,
+                path.display()
+            )
+        }
+        Err(pinned_process::OpenFailure::NoRights(err)) => {
+            tracing::info!(pid = parsed.pid, %err, "this client may not terminate the daemon");
+            bail!(
+                "pid {} named by {} is running but this client may not stop it; nothing was stopped",
+                parsed.pid,
+                path.display()
+            )
+        }
+    }
+}
+
+/// The error [`stop_in`] returns for a listener that did not prove it is the
+/// daemon `parsed` names, removing the handshake at `path` (while it still
+/// holds `parsed`'s token) when the listener answered or nothing listens;
+/// `Ok` when it proved itself.
+async fn refuse_unproven(
+    proof: proof::Proof,
+    config_dir: &Path,
+    parsed: &DaemonHandshake,
+    path: &Path,
+) -> anyhow::Result<()> {
+    match proof {
+        proof::Proof::Proven => Ok(()),
+        proof::Proof::Unproven | proof::Proof::Refused => {
+            remove_handshake_holding_token(config_dir, &parsed.auth_token).await;
+            bail!(
+                "the listener on 127.0.0.1:{} named by {} did not prove it is the daemon; \
+                 nothing was stopped and the stale handshake was removed",
+                parsed.port,
+                path.display()
+            )
+        }
+        proof::Proof::NoResponse => bail!(
+            "the daemon on 127.0.0.1:{} did not answer its proof; nothing was stopped",
+            parsed.port
+        ),
+    }
+}
+
+/// Removes the handshake at `path`. Best effort: a file already gone (the
+/// daemon's drop guard beat us to it) is fine, and any other failure is
+/// logged, since the next [`ensure_running`] proves the file anyway.
+async fn remove_handshake(path: &Path) {
+    match tokio::fs::remove_file(path).await {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            tracing::warn!(path = %path.display(), %err, "could not remove the daemon handshake");
+        }
+    }
+}
+
+/// Removes `config_dir`'s `daemon.json` only while it still holds `token`, so
+/// a handshake a newer daemon wrote in the meantime survives.
+pub(crate) async fn remove_handshake_holding_token(config_dir: &Path, token: &str) {
+    let path = handshake_file_in(config_dir);
+    let Ok(bytes) = tokio::fs::read(&path).await else {
+        return;
+    };
+    let holds_token = serde_json::from_slice::<DaemonHandshake>(&bytes)
+        .is_ok_and(|current| current.auth_token == token);
+    if holds_token {
+        remove_handshake(&path).await;
+    }
 }
 
 /// Force-kill a process by pid with `taskkill /F`.
@@ -194,7 +320,7 @@ pub async fn stop_in(config_dir: &Path) -> anyhow::Result<()> {
 ///
 /// Fails when the kill command cannot be run or exits unsuccessfully.
 #[cfg(windows)]
-pub async fn kill_pid(pid: u32) -> anyhow::Result<()> {
+pub(crate) async fn kill_pid(pid: u32) -> anyhow::Result<()> {
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let status = tokio::process::Command::new("taskkill")
         .arg("/PID")
@@ -218,7 +344,7 @@ pub async fn kill_pid(pid: u32) -> anyhow::Result<()> {
 ///
 /// Fails when the kill command cannot be run or exits unsuccessfully.
 #[cfg(not(windows))]
-pub async fn kill_pid(pid: u32) -> anyhow::Result<()> {
+pub(crate) async fn kill_pid(pid: u32) -> anyhow::Result<()> {
     let status = tokio::process::Command::new("kill")
         .arg("-TERM")
         .arg(pid.to_string())
@@ -238,13 +364,19 @@ pub async fn kill_pid(pid: u32) -> anyhow::Result<()> {
 )]
 mod tests {
     use super::client_identity;
+    use crate::test_fakes::{
+        FakeListener, ScratchDir, block_on, handshake_naming, stand_in, write_daemon_json,
+    };
     use std::ffi::OsString;
     use std::path::PathBuf;
     use std::sync::{Mutex, PoisonError};
+    use std::time::Duration;
     use uuid::Uuid;
 
     const ID_FILE: &str = "client-id-test";
     const CONFIG_DIR_VAR: &str = "RUSTLING_TULIP_CONFIG_DIR";
+    /// Only a hang guard: no test asserts how long anything took.
+    const HANG_GUARD: Duration = Duration::from_secs(10);
 
     /// Serialises the tests that point `RUSTLING_TULIP_CONFIG_DIR` somewhere:
     /// env vars are process-global and tests run on parallel threads.
@@ -329,51 +461,23 @@ mod tests {
         assert_eq!(on_disk, identity.client_id);
     }
 
-    /// A directory under `<workspace>/.tmp` that the `*_in` functions are
-    /// pointed at explicitly; the environment is left alone. Drop removes it.
-    struct ScratchDir(PathBuf);
-
-    impl ScratchDir {
-        fn new(label: &str) -> Self {
-            let path = crate::supervisor::dev_workspace_root()
-                .expect("workspace root resolves")
-                .join(".tmp")
-                .join(format!("daemon-client-{label}-{}", Uuid::new_v4().simple()));
-            std::fs::create_dir_all(&path).expect("create scratch dir");
-            Self(path)
-        }
+    fn write_handshake(dir: &std::path::Path, pid: u32, port: u16, token: &str) {
+        write_daemon_json(dir, &handshake_naming(pid, port, token, &[]));
     }
 
-    impl Drop for ScratchDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
-    fn write_handshake(dir: &std::path::Path, pid: u32) {
-        let handshake = protocol::DaemonHandshake {
-            protocol_version: 7,
-            port: 40123,
-            auth_token: "token".to_owned(),
-            pid,
-            supported_versions: Vec::new(),
-        };
-        let json = serde_json::to_vec(&handshake).expect("encode handshake");
-        std::fs::write(super::handshake_file_in(dir), json).expect("write daemon.json");
-    }
-
-    fn block_on<F: std::future::Future>(future: F) -> F::Output {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("build a test runtime")
-            .block_on(future)
+    /// Whether `child` is still running, then kills and reaps it so a test
+    /// leaves nothing behind.
+    fn alive_then_reaped(child: &mut std::process::Child) -> bool {
+        let alive = child.try_wait().expect("poll the stand-in").is_none();
+        let _ = child.kill();
+        let _ = child.wait();
+        alive
     }
 
     #[test]
     fn read_handshake_in_reads_that_dirs_daemon_json() {
         let scratch = ScratchDir::new("handshake");
-        write_handshake(&scratch.0, 99);
+        write_handshake(&scratch.0, 99, 40123, "token");
 
         let handshake = super::read_handshake_in(&scratch.0).expect("handshake parses");
 
@@ -421,18 +525,90 @@ mod tests {
         );
     }
 
+    #[test]
+    fn stop_in_refuses_a_pid_that_is_not_the_daemon() {
+        let scratch = ScratchDir::new("stop-unproven");
+        let fake = FakeListener::healthy();
+        let mut child = stand_in();
+        write_handshake(&scratch.0, child.id(), fake.port, "token");
+
+        let stopped = block_on(super::stop_in_with(&scratch.0, HANG_GUARD));
+        let alive = alive_then_reaped(&mut child);
+
+        let err = stopped.expect_err("an unproven listener is not stopped");
+        let path = super::handshake_file_in(&scratch.0);
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                "the listener on 127.0.0.1:{} named by {} did not prove it is the daemon; \
+                 nothing was stopped and the stale handshake was removed",
+                fake.port,
+                path.display()
+            )
+        );
+        assert!(alive, "the stand-in was killed");
+        assert!(!path.exists(), "the stale daemon.json survived");
+        assert!(!fake.saw_authorization(), "heads: {:?}", fake.heads());
+    }
+
+    #[test]
+    fn stop_in_keeps_a_handshake_a_newer_daemon_wrote() {
+        let scratch = ScratchDir::new("stop-newer");
+        let mut child = stand_in();
+        let pid = child.id();
+        let dir = scratch.0.clone();
+        // The listener answers its proof request only after a newer daemon's
+        // handshake has replaced the file, so no timing is involved.
+        let fake = FakeListener::healthy_then(move || {
+            write_handshake(&dir, pid, 40999, "newer-token");
+        });
+        write_handshake(&scratch.0, pid, fake.port, "token");
+
+        let stopped = block_on(super::stop_in_with(&scratch.0, HANG_GUARD));
+        let alive = alive_then_reaped(&mut child);
+
+        stopped.expect_err("an unproven listener is not stopped");
+        assert!(alive, "the stand-in was killed");
+        let kept = super::read_handshake_in(&scratch.0).expect("the newer handshake survives");
+        assert_eq!(kept.auth_token, "newer-token");
+    }
+
+    #[test]
+    fn stop_in_leaves_a_silent_daemon_alone() {
+        let scratch = ScratchDir::new("stop-silent");
+        let fake = FakeListener::silent();
+        let mut child = stand_in();
+        write_handshake(&scratch.0, child.id(), fake.port, "token");
+
+        // The listener never answers, so a short proof budget only decides how
+        // soon stop gives up waiting for nothing.
+        let stopped = block_on(super::stop_in_with(&scratch.0, Duration::from_millis(200)));
+        let alive = alive_then_reaped(&mut child);
+
+        let err = stopped.expect_err("a silent daemon is not stopped");
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                "the daemon on 127.0.0.1:{} did not answer its proof; nothing was stopped",
+                fake.port
+            )
+        );
+        assert!(alive, "the stand-in was killed");
+        assert!(
+            super::handshake_file_in(&scratch.0).exists(),
+            "daemon.json was removed"
+        );
+    }
+
     #[cfg(windows)]
     #[test]
-    fn stop_in_kills_the_named_pid_and_removes_the_handshake() {
+    fn stop_in_kills_the_proven_pid_and_removes_the_handshake() {
         let scratch = ScratchDir::new("stop-kill");
-        let mut child = std::process::Command::new("ping")
-            .args(["-n", "60", "127.0.0.1"])
-            .stdout(std::process::Stdio::null())
-            .spawn()
-            .expect("spawn a stand-in daemon");
-        write_handshake(&scratch.0, child.id());
+        let fake = FakeListener::proving("token");
+        let mut child = stand_in();
+        write_handshake(&scratch.0, child.id(), fake.port, "token");
 
-        let stopped = block_on(super::stop_in(&scratch.0));
+        let stopped = block_on(super::stop_in_with(&scratch.0, HANG_GUARD));
         // Reap the child whatever happened, so a failure leaves nothing behind.
         if stopped.is_err() {
             let _ = child.kill();

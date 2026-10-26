@@ -9,6 +9,10 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - The Needs You panel says what a waiting session asks: its question, the tool it wants to run, or the plan to approve, cut short when it runs long.
 - On a remote host the preset wizard takes typed paths on that host for its prompt file, prompt folder and path variables.
 
+### Fixed
+
+- Starting, replacing or stopping the daemon now checks that the program on its port is really the daemon, so a leftover file never sends your key to another program or stops it.
+
 ### Changed
 
 - When remote access has no certificate, Settings says why: the certificate command failed, its files were unusable, Tailscale gave no name, or the certificate task stopped.
