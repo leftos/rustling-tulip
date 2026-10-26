@@ -4,14 +4,12 @@
 
 ## Release 2 — Remote mode and the agent seam
 
-- [ ] RT-243 Split tailnet Supervisor::run and carry the real CertFailed reason · release vNext
-- [ ] RT-258 Remote mode: don't send this PC's remembered folders to a remote host · release vNext
-- [ ] RT-244 Preset wizard: typed host paths instead of local pickers in remote mode · release vNext
-- [ ] RT-278 Prove the daemon holds the token before a client reuses, retires or kills it · release vNext
+- [/] RT-278 Prove the daemon holds the token before a client reuses, retires or kills it · release vNext
 - [ ] RT-343 Keep name, look and sidebar place when Recover respawns a session · release vNext
 - [ ] RT-349 Restart conversation discovery for sessions reattached after a daemon restart · release vNext
 - [ ] RT-378 Close a failed handshake gracefully so AuthFailed is never lost to a reset · release vNext
 - [ ] RT-386 Map a recovered shell's hook events with its recovered agent options and trust · release vNext
+- [ ] RT-426 Prove the daemon before the installer sends it /shutdown
 
 ## Wave 1a — Claude sessions on DeepSeek
 
@@ -44,7 +42,6 @@
 ## Wave 2b — Hook status
 
 - [ ] RT-220 Quote the characters a shell still expands in the hook shim command · release vNext
-- [ ] RT-219 Cap the length of hook-derived pending input strings · release vNext
 - [ ] RT-85 Flag a session hand-off ready when its orchestrator says to /clear and /nextup
 - [ ] RT-193 Make SpawnArgs' hook settings a constructor argument, not a comment-enforced None
 - [ ] RT-206 Reject a leading hyphen in a hook-reported conversation id
@@ -85,7 +82,6 @@
 ## Wave 7 — Pop-out windows
 
 - [ ] RT-32 Phase 5b: pop-out windows (P5.6–P5.12) · release vNext
-  - [ ] RT-412 Open a second window that draws a popped pane · release vNext
   - [ ] RT-413 Pop a pane out from its header and the session menu · release vNext
   - [ ] RT-414 Give a pane pop-out its toolbar, two-step Stop, focus and attention rules · release vNext
   - [ ] RT-415 Open a session with no pane in its own window · release vNext
@@ -203,6 +199,7 @@
 - [ ] RT-346 Make rt.ps1 test -Validate fast: it ran 652 s through the gate
 - [ ] RT-348 Update tokio past RUSTSEC-2026-0386 so cargo deny passes
 - [ ] RT-422 Remove wall-clock time assertions from the tests · release vNext+1
+- [ ] RT-427 Kill hung tests with a nextest terminate-after guard
 
 ## macOS
 
