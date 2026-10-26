@@ -6,7 +6,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Added
 
-- The Needs You panel says what a waiting session asks: its question, the tool it wants to run, or the plan to approve.
+- The Needs You panel says what a waiting session asks: its question, the tool it wants to run, or the plan to approve, cut short when it runs long.
 
 ## v0.3.0-alpha
 

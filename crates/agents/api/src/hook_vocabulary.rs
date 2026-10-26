@@ -16,6 +16,15 @@ const PLAN_MAX_CHARS: usize = 2000;
 /// of a failure reason kept in its recent-actions line.
 const DETAIL_MAX_CHARS: usize = 200;
 
+/// Characters kept of a question's text and of an `Other` prompt's message.
+const MESSAGE_MAX_CHARS: usize = 1000;
+
+/// Questions kept from one `AskUserQuestion` payload.
+const MAX_QUESTIONS: usize = 8;
+
+/// Option labels kept per question.
+const MAX_OPTIONS: usize = 8;
+
 /// The payload fields a mapped event carries beside its status and pending
 /// input.
 #[derive(Debug, Clone, PartialEq)]
@@ -211,7 +220,7 @@ fn permission_request(body: &Value) -> Option<Signal> {
         },
         "ExitPlanMode" => PendingInput::PlanApproval { plan: plan(input) },
         _ => PendingInput::Permission {
-            tool_name: name.to_owned(),
+            tool_name: truncate(name, DETAIL_MAX_CHARS),
             summary: permission_summary(input),
         },
     };
@@ -243,7 +252,7 @@ fn notification(body: &Value) -> Option<Signal> {
         return Some(signal(
             Some(SessionStatus::AwaitingInput),
             PendingUpdate::KeepOr(PendingInput::Other {
-                message: message.to_owned(),
+                message: truncate(message, MESSAGE_MAX_CHARS),
             }),
         ));
     }
@@ -261,15 +270,15 @@ fn questions(input: Option<&Value>) -> Vec<PendingQuestion> {
     input
         .and_then(|input| input.get("questions"))
         .and_then(Value::as_array)
-        .map(|items| items.iter().map(question).collect())
+        .map(|items| items.iter().take(MAX_QUESTIONS).map(question).collect())
         .unwrap_or_default()
 }
 
 /// One question, with what the prompt left out filled in.
 fn question(item: &Value) -> PendingQuestion {
     PendingQuestion {
-        question: text(item, "question"),
-        header: text(item, "header"),
+        question: truncate(&text(item, "question"), MESSAGE_MAX_CHARS),
+        header: truncate(&text(item, "header"), DETAIL_MAX_CHARS),
         options: item
             .get("options")
             .and_then(Value::as_array)
@@ -277,7 +286,8 @@ fn question(item: &Value) -> PendingQuestion {
                 options
                     .iter()
                     .filter_map(|option| option.get("label").and_then(Value::as_str))
-                    .map(str::to_owned)
+                    .take(MAX_OPTIONS)
+                    .map(|label| truncate(label, DETAIL_MAX_CHARS))
                     .collect()
             })
             .unwrap_or_default(),
@@ -309,12 +319,58 @@ fn permission_summary(input: Option<&Value>) -> String {
     let Some(input) = input else {
         return String::new();
     };
-    let asked = input
-        .get("command")
-        .and_then(Value::as_str)
-        .or_else(|| input.get("file_path").and_then(Value::as_str))
-        .map_or_else(|| input.to_string(), str::to_owned);
-    truncate(&asked, DETAIL_MAX_CHARS)
+    if let Some(command) = input.get("command").and_then(Value::as_str) {
+        return truncate(command, DETAIL_MAX_CHARS);
+    }
+    if let Some(path) = input.get("file_path").and_then(Value::as_str) {
+        return truncate(path, DETAIL_MAX_CHARS);
+    }
+    json_prefix(input, DETAIL_MAX_CHARS)
+}
+
+/// `value` serialised as JSON and cut like [`truncate`] to `max` characters,
+/// without serialising more of it than the cut keeps.
+fn json_prefix(value: &Value, max: usize) -> String {
+    let mut buf = CappedBuf {
+        bytes: Vec::new(),
+        limit: max * 4 + 4,
+    };
+    // The error is the stop signal once the buffer is full, not a failure.
+    let _ = serde_json::to_writer(&mut buf, value);
+    let text = match std::str::from_utf8(&buf.bytes) {
+        Ok(text) => text,
+        // The cut lands inside a multi-byte char only at the very end, and
+        // every byte before it is exactly the prefix that had been written.
+        Err(err) => std::str::from_utf8(&buf.bytes[..err.valid_up_to()]).unwrap_or(""),
+    };
+    truncate(text, max)
+}
+
+/// A byte sink that keeps at most `limit` bytes and then refuses the write,
+/// which is how [`serde_json::to_writer`] is stopped early.
+struct CappedBuf {
+    bytes: Vec<u8>,
+    limit: usize,
+}
+
+impl std::io::Write for CappedBuf {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        let room = self.limit.saturating_sub(self.bytes.len());
+        if room == 0 {
+            return Err(std::io::ErrorKind::WriteZero.into());
+        }
+        let taken = data.len().min(room);
+        self.bytes.extend_from_slice(&data[..taken]);
+        if taken < data.len() {
+            // Full: refusing the rest is how the serializer is told to stop.
+            return Err(std::io::ErrorKind::WriteZero.into());
+        }
+        Ok(taken)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 /// An MCP elicitation's message, named by its server.
@@ -323,10 +379,11 @@ fn elicitation_message(body: &Value) -> String {
         .get("mcp_server_name")
         .and_then(Value::as_str)
         .unwrap_or("An MCP server");
-    match body.get("message").and_then(Value::as_str) {
+    let message = match body.get("message").and_then(Value::as_str) {
         Some(message) => format!("{server}: {message}"),
         None => format!("{server} asks for input"),
-    }
+    };
+    truncate(&message, MESSAGE_MAX_CHARS)
 }
 
 /// `text` cut to at most `max` characters, the trailing `…` counted inside
@@ -375,6 +432,33 @@ mod tests {
         match signal(body).pending {
             PendingUpdate::Set(PendingInput::Permission { summary, .. }) => summary,
             other => format!("not a permission prompt: {other:?}"),
+        }
+    }
+
+    /// The questions a question prompt carries, when the payload maps to one.
+    fn questions_of(body: &Value) -> Option<Vec<PendingQuestion>> {
+        match pending_of(body) {
+            PendingUpdate::Set(PendingInput::Question { questions }) => Some(questions),
+            _ => None,
+        }
+    }
+
+    /// The message of an `Other` prompt, when the payload maps to one.
+    fn other_message_of(body: &Value) -> Option<String> {
+        match pending_of(body) {
+            PendingUpdate::Set(PendingInput::Other { message }) => Some(message),
+            _ => None,
+        }
+    }
+
+    /// The tool name and summary of a permission prompt, when the payload
+    /// maps to one.
+    fn permission_of(body: &Value) -> Option<(String, String)> {
+        match pending_of(body) {
+            PendingUpdate::Set(PendingInput::Permission { tool_name, summary }) => {
+                Some((tool_name, summary))
+            }
+            _ => None,
         }
     }
 
@@ -855,5 +939,138 @@ mod tests {
                 plan: Some("x".repeat(PLAN_MAX_CHARS)),
             })
         );
+    }
+
+    #[test]
+    fn a_long_question_and_its_labels_are_capped() {
+        // A question, its header and its labels are all capped where they are
+        // built, so no prompt can put an unbounded string on the wire.
+        let long_input = json!({"questions": [{
+            "question": "q".repeat(MESSAGE_MAX_CHARS + 50),
+            "header": "h".repeat(500),
+            "options": [{"label": "o".repeat(500)}, {"label": "short"}],
+        }]});
+        for event in ["PreToolUse", "PermissionRequest"] {
+            let body = json!({
+                "hook_event_name": event,
+                "tool_name": "AskUserQuestion",
+                "tool_input": long_input.clone(),
+            });
+            let questions = questions_of(&body).expect("the payload is a question prompt");
+            assert_eq!(questions.len(), 1, "{event}");
+            let asked = &questions[0];
+            assert_eq!(
+                asked.question,
+                format!("{}…", "q".repeat(MESSAGE_MAX_CHARS - 1)),
+                "{event}"
+            );
+            assert_eq!(asked.header.chars().count(), DETAIL_MAX_CHARS, "{event}");
+            assert!(asked.header.ends_with('…'), "{event}");
+            assert_eq!(asked.options.len(), 2, "{event}");
+            assert_eq!(
+                asked.options[0].chars().count(),
+                DETAIL_MAX_CHARS,
+                "{event}"
+            );
+            assert!(asked.options[0].ends_with('…'), "{event}");
+            assert_eq!(asked.options[1], "short", "{event}");
+        }
+    }
+
+    #[test]
+    fn question_and_option_counts_are_capped() {
+        // The first ones in order are kept; the rest are dropped.
+        let items: Vec<Value> = (0..12)
+            .map(|q| {
+                let options: Vec<Value> = (0..12)
+                    .map(|o| json!({ "label": format!("q{q}-o{o}") }))
+                    .collect();
+                json!({ "question": format!("question {q}"), "options": options })
+            })
+            .collect();
+        let body = json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "AskUserQuestion",
+            "tool_input": {"questions": items},
+        });
+        let questions = questions_of(&body).expect("the payload is a question prompt");
+        assert_eq!(questions.len(), MAX_QUESTIONS);
+        assert_eq!(questions[0].question, "question 0");
+        let last = MAX_QUESTIONS - 1;
+        assert_eq!(questions[last].question, format!("question {last}"));
+        for question in &questions {
+            assert_eq!(question.options.len(), MAX_OPTIONS);
+        }
+        assert_eq!(questions[0].options[0], "q0-o0");
+        assert_eq!(
+            questions[0].options[MAX_OPTIONS - 1],
+            format!("q0-o{}", MAX_OPTIONS - 1)
+        );
+    }
+
+    #[test]
+    fn a_long_elicitation_message_is_capped() {
+        let body = json!({
+            "hook_event_name": "Elicitation",
+            "mcp_server_name": "linear",
+            "message": "m".repeat(5000),
+        });
+        let message = other_message_of(&body).expect("the payload is an Other prompt");
+        assert_eq!(message.chars().count(), MESSAGE_MAX_CHARS);
+        assert!(message.starts_with("linear: mmm"), "{message}");
+        assert!(message.ends_with('…'), "{message}");
+    }
+
+    #[test]
+    fn a_long_notification_message_is_capped() {
+        let body = json!({
+            "hook_event_name": "Notification",
+            "notification_type": "permission_prompt",
+            "message": "n".repeat(5000),
+        });
+        assert_eq!(
+            pending_of(&body),
+            PendingUpdate::KeepOr(PendingInput::Other {
+                message: format!("{}…", "n".repeat(MESSAGE_MAX_CHARS - 1)),
+            })
+        );
+    }
+
+    #[test]
+    fn a_long_permission_tool_name_is_capped() {
+        // The tool name rides every snapshot with the prompt, so it is capped
+        // like the summary beside it.
+        let body = json!({
+            "hook_event_name": "PermissionRequest",
+            "tool_name": "t".repeat(500),
+            "tool_input": {"command": "ls"},
+        });
+        let (tool_name, summary) =
+            permission_of(&body).expect("the payload is a permission prompt");
+        assert_eq!(tool_name, format!("{}…", "t".repeat(DETAIL_MAX_CHARS - 1)));
+        assert_eq!(summary, "ls");
+    }
+
+    #[test]
+    fn json_prefix_matches_a_full_serialisation_cut_the_same_way() {
+        let values = [
+            json!({"url": "https://example.com"}),
+            json!({"url": "y".repeat(300)}),
+            json!({"k": "é".repeat(400)}),
+            json!({"a": [1, 2, 3], "b": {"c": "z".repeat(10_000)}}),
+        ];
+        for value in values {
+            assert_eq!(
+                json_prefix(&value, DETAIL_MAX_CHARS),
+                truncate(&value.to_string(), DETAIL_MAX_CHARS),
+                "{value}"
+            );
+        }
+        // A serialisation exactly at the cap is kept whole, with no ellipsis.
+        let exact = json!({"k": "a".repeat(DETAIL_MAX_CHARS - 8)});
+        assert_eq!(exact.to_string().chars().count(), DETAIL_MAX_CHARS);
+        let prefix = json_prefix(&exact, DETAIL_MAX_CHARS);
+        assert_eq!(prefix, exact.to_string());
+        assert!(!prefix.ends_with('…'), "{prefix}");
     }
 }
