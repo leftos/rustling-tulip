@@ -4,14 +4,14 @@
 
 ## Release 2 — Remote mode and the agent seam
 
-- [ ] RT-243 Split tailnet Supervisor::run and carry the real CertFailed reason
-- [ ] RT-258 Remote mode: don't send this PC's remembered folders to a remote host
-- [ ] RT-244 Preset wizard: typed host paths instead of local pickers in remote mode
-- [ ] RT-278 Prove the daemon holds the token before a client reuses, retires or kills it
-- [ ] RT-343 Keep name, look and sidebar place when Recover respawns a session
-- [ ] RT-349 Restart conversation discovery for sessions reattached after a daemon restart
-- [ ] RT-378 Close a failed handshake gracefully so AuthFailed is never lost to a reset
-- [ ] RT-386 Map a recovered shell's hook events with its recovered agent options and trust
+- [ ] RT-243 Split tailnet Supervisor::run and carry the real CertFailed reason · release vNext
+- [ ] RT-258 Remote mode: don't send this PC's remembered folders to a remote host · release vNext
+- [ ] RT-244 Preset wizard: typed host paths instead of local pickers in remote mode · release vNext
+- [ ] RT-278 Prove the daemon holds the token before a client reuses, retires or kills it · release vNext
+- [ ] RT-343 Keep name, look and sidebar place when Recover respawns a session · release vNext
+- [ ] RT-349 Restart conversation discovery for sessions reattached after a daemon restart · release vNext
+- [ ] RT-378 Close a failed handshake gracefully so AuthFailed is never lost to a reset · release vNext
+- [ ] RT-386 Map a recovered shell's hook events with its recovered agent options and trust · release vNext
 
 ## Wave 1a — Claude sessions on DeepSeek
 
@@ -20,15 +20,15 @@
 
 ## Wave 2 — Daily driver: close the port's gaps
 
-- [ ] RT-179 Keep keyboard focus when pressing Worktrees Save disables it
-- [ ] RT-377 Draw no selection in an unfocused Settings text field
+- [ ] RT-179 Keep keyboard focus when pressing Worktrees Save disables it · release vNext
+- [ ] RT-377 Draw no selection in an unfocused Settings text field · release vNext
 - [ ] RT-195 Give the container menu a keyboard route
 - [ ] RT-202 Accept the 1015 and 1016 mouse-report encodings
-- [ ] RT-204 Clear the container row focus when the sidebar stops showing the container list
+- [ ] RT-204 Clear the container row focus when the sidebar stops showing the container list · release vNext
 - [ ] RT-205 Re-sync a watched .code-workspace once at daemon start
 - [ ] RT-207 Move the .code-workspace folder scan off the connection's dispatch task
 - [ ] RT-211 Open the trusted-launch dialog through one helper, with a refusal path
-- [ ] RT-212 Clear the sidebar row hover when the pointer leaves
+- [ ] RT-212 Clear the sidebar row hover when the pointer leaves · release vNext
 - [ ] RT-223 Test the daemon's branch-name suggestion and its failure routing
 - [ ] RT-235 Check a VS Code or Explorer target still exists before opening it
 - [ ] RT-236 Fold the container menu's disabled-tip table into its row definitions
@@ -39,12 +39,12 @@
 - [ ] RT-255 Reject or document a preset max_panes_per_tab of 0
 - [ ] RT-256 Name the failing script variable in PresetScriptsError
 - [ ] RT-259 Preset wizard: say so when Esc closes it while its scripts still run
-- [ ] RT-261 Preset launch: Stop all misses sessions whose snapshot hasn't arrived yet
+- [ ] RT-261 Preset launch: Stop all misses sessions whose snapshot hasn't arrived yet · release vNext
 
 ## Wave 2b — Hook status
 
-- [ ] RT-220 Quote the characters a shell still expands in the hook shim command
-- [ ] RT-219 Cap the length of hook-derived pending input strings
+- [ ] RT-220 Quote the characters a shell still expands in the hook shim command · release vNext
+- [ ] RT-219 Cap the length of hook-derived pending input strings · release vNext
 - [ ] RT-85 Flag a session hand-off ready when its orchestrator says to /clear and /nextup
 - [ ] RT-193 Make SpawnArgs' hook settings a constructor argument, not a comment-enforced None
 - [ ] RT-206 Reject a leading hyphen in a hook-reported conversation id
@@ -66,7 +66,6 @@
 
 - [ ] RT-87 Daemon attention feed: one event stream for needs-you, hand-offs, progress, done and fleet items
 - [ ] RT-88 Turn Needs You into an attention inbox with streams, unread state and mark unread
-- [ ] RT-29 Needs You: line 2 from hook detail, Answer rows from summaries
 - [ ] RT-89 Answer permissions and single-choice questions from Windows toasts
 - [ ] RT-91 Clear and continue: one click runs /clear then /nextup, refused while work runs
 - [ ] RT-92 Show context %, cost and prompt-cache expiry on each session
@@ -85,7 +84,18 @@
 
 ## Wave 7 — Pop-out windows
 
-- [ ] RT-32 Phase 5b: pop-out windows (P5.6–P5.12)
+- [ ] RT-32 Phase 5b: pop-out windows (P5.6–P5.12) · release vNext
+  - [ ] RT-412 Open a second window that draws a popped pane · release vNext
+  - [ ] RT-413 Pop a pane out from its header and the session menu · release vNext
+  - [ ] RT-414 Give a pane pop-out its toolbar, two-step Stop, focus and attention rules · release vNext
+  - [ ] RT-415 Open a session with no pane in its own window · release vNext
+  - [ ] RT-416 Key the grid's bounds and drag state by window · release vNext
+  - [ ] RT-417 Draw menus, dialogs and toasts in the window that opened them · release vNext
+  - [ ] RT-418 Pop out a whole tab · release vNext
+  - [ ] RT-419 Pop out a diff tab · release vNext
+  - [ ] RT-420 Reopen pop-outs after a restart · release vNext
+  - [ ] RT-421 Write the pop-out docs and tick the parity lines · release vNext
+  - [ ] RT-425 Merge feat/pop-outs to main (#202) · release vNext
 
 ## Wave 8 — Chat mirror and phone session views
 
@@ -100,11 +110,11 @@
 
 ## Wave 9 — Summaries, spoken alerts and the Dashboard
 
-- [ ] RT-67 Record ops-tower's Agents tab rulings against RT-28 and reconcile DB.1's summarizer
 - [ ] RT-27 Measure a local small model as the alerts' summarizer provider
 - [ ] RT-26 Speak a summary aloud when an agent waits
 - [ ] RT-28 Dashboard view: cards for every live session, fed by the summarizer
 - [ ] RT-111 Summary view: one line per stretch of work, expandable into the chat
+- [ ] RT-423 Needs You: Answer rows and line 2 from session summaries (NY.5)
 
 ## Wave 10 — Subagent streams
 
@@ -192,6 +202,7 @@
   - [ ] RT-330 RT-324 S6: Live no-focus check, DRIVING_CONVENTIONS and task index for driving
 - [ ] RT-346 Make rt.ps1 test -Validate fast: it ran 652 s through the gate
 - [ ] RT-348 Update tokio past RUSTSEC-2026-0386 so cargo deny passes
+- [ ] RT-422 Remove wall-clock time assertions from the tests · release vNext+1
 
 ## macOS
 
@@ -246,15 +257,15 @@
 - [ ] RT-279 Stop sending loopback bearer tokens in cleartext
 - [ ] RT-289 Classify a plain shell by its prompt at the cursor, not by output volume
 - [ ] RT-306 Polish from v0.1.0-alpha dogfooding
-  - [ ] RT-307 Draw the spawn dialog's base-branch selection only when the field has focus
+  - [ ] RT-307 Draw the spawn dialog's base-branch selection only when the field has focus · release vNext
   - [ ] RT-308 Show the focused session's name without its UUID in the status bar
-  - [ ] RT-309 Clear the Spawning session toast once the session's pane is live
+  - [ ] RT-309 Clear the Spawning session toast once the session's pane is live · release vNext
   - [ ] RT-310 Lay out the Quit dialog's buttons in tidy rows
   - [ ] RT-311 Draw Open in forge disabled on a repo with no origin remote
   - [ ] RT-314 Drop the doubled wt. prefix from default worktree folders
-  - [ ] RT-315 Keep an activity-rail tooltip from covering the panel its click opened
-- [ ] RT-312 Strip Claude's title spinner glyph from session names
-- [ ] RT-332 Hand a session's exit through its lifecycle queue so output never trails the exit
+  - [ ] RT-315 Keep an activity-rail tooltip from covering the panel its click opened · release vNext
+- [ ] RT-312 Strip Claude's title spinner glyph from session names · release vNext
+- [ ] RT-332 Hand a session's exit through its lifecycle queue so output never trails the exit · release vNext
 - [ ] RT-342 Scroll the focused Settings control into view on Tab
 - [ ] RT-318 Show Claude's HTML/SVG mocks in a panel beside its session
   - [ ] RT-355 Serve pinned three.js, chart and sketch libraries to mock pages
@@ -264,14 +275,14 @@
   - [ ] RT-395 Show a remote session's mock locally with its files fetched on demand, discarded when the pane closes
 - [ ] RT-344 Mark files fetched from a remote host with Mark-of-the-Web
 - [ ] RT-347 Make the UI test harness's in_model refuse a selector it does not know
-- [ ] RT-362 Keep a shell-hosted Claude session's kind and conversation when history is rebuilt from tracer logs
-- [ ] RT-372 Clear the Worktrees field's pending apply when the daemon refuses it
-- [ ] RT-373 Check the Shell dialog's typed folder by the host's path rules on a remote host
-- [ ] RT-379 Make toast buttons pressed from Action Center reach the native client
+- [ ] RT-362 Keep a shell-hosted Claude session's kind and conversation when history is rebuilt from tracer logs · release vNext
+- [ ] RT-372 Clear the Worktrees field's pending apply when the daemon refuses it · release vNext
+- [ ] RT-373 Check the Shell dialog's typed folder by the host's path rules on a remote host · release vNext
+- [ ] RT-379 Make toast buttons pressed from Action Center reach the native client · release vNext
 - [ ] RT-385 Wrap or scroll long code lines in the rendered Markdown view
-- [ ] RT-399 Let the desktop pairing dialog take a code minted by rustling-tulipd pair
+- [ ] RT-399 Let the desktop pairing dialog take a code minted by rustling-tulipd pair · release vNext
 - [ ] RT-400 Send TLS close_notify when the daemon closes a served tailnet connection
-- [ ] RT-401 Route Settings refusals to the apply they answer with a request id
+- [ ] RT-401 Route Settings refusals to the apply they answer with a request id · release vNext
 - [ ] RT-402 Let pane focus follow the mouse pointer (opt-in setting)
 - [ ] RT-403 Take the prompt-echo marker for prompt navigation from the agent descriptor
 - [ ] RT-409 Show the whole file name in the Markdown viewer tab's header when it fits
