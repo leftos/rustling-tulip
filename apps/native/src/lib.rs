@@ -72,6 +72,11 @@ pub mod palette;
 mod pane_close;
 mod pane_close_view;
 mod pane_menu;
+#[expect(
+    dead_code,
+    reason = "the pop-out windows (RT-412) are its first caller"
+)]
+mod popouts;
 mod preset_launch;
 mod preset_prompts;
 pub(crate) mod preset_wizard;
