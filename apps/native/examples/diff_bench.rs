@@ -129,7 +129,7 @@ fn open(model: DiffModel, cx: &mut App) {
         },
         move |window, cx| {
             if offscreen {
-                show_cloaked(window);
+                show_cloaked(window, WINDOW_SIZE);
             }
             let view = cx.new(|cx| DiffView::new(model, FontSettings::default(), cx));
             let bench = Bench {

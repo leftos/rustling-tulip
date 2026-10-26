@@ -44,6 +44,9 @@ pub(crate) const NO_REPOS_TIP: &str = "Register a repo to spawn repo-tied sessio
 pub(crate) const ADD_REPO_TIP: &str = "Pick a folder to register as a repo";
 /// Why a pane's spawn buttons are disabled while a spawn aimed at it waits.
 pub(crate) const PANE_PENDING_TIP: &str = "A new session is on its way to this pane";
+/// What a pane's body shows in the main grid while its terminal draws in a
+/// pop-out window.
+pub const POPPED_OUT_NOTE: &str = "Popped out to its own window";
 const PANE_SPAWN_TIP: &str = "Open the spawn dialog; the new session fills this pane";
 const PANE_SHELL_TIP: &str = "A plain shell in this pane, in the remembered folder";
 pub(crate) const SPAWN_TIP: &str = "Spawn a new session";
@@ -84,6 +87,11 @@ pub(crate) struct PaneSlot {
 impl PaneSlot {
     pub(crate) fn view(&self) -> &Entity<TerminalPane> {
         &self.view
+    }
+
+    /// The tab whose grid holds the pane.
+    pub(crate) fn tab_id(&self) -> &str {
+        &self.tab_id
     }
 
     /// The session the pane shows.
@@ -398,6 +406,14 @@ impl RootView {
     /// size claims.
     pub(crate) fn mark_tab_panes_resized(&self, tab_id: &str, cx: &mut Context<Self>) {
         for slot in self.panes.values().filter(|slot| slot.tab_id == tab_id) {
+            slot.view.update(cx, |pane, _| pane.mark_resized());
+        }
+    }
+
+    /// This client moved pane `pane_id` to another window or resized the
+    /// window it draws in: its next changed size claims.
+    pub(crate) fn mark_pane_resized(&self, pane_id: &str, cx: &mut Context<Self>) {
+        if let Some(slot) = self.panes.get(pane_id) {
             slot.view.update(cx, |pane, _| pane.mark_resized());
         }
     }
@@ -999,7 +1015,12 @@ impl RootView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let focused = self.tabs.focused_pane(tab_id).as_deref() == Some(pane_id);
+        let popped = self.is_popped_out(tab_id, pane_id);
         let body = match (session_id, self.panes.get(pane_id)) {
+            // One terminal draws in one window: the pop-out's.
+            _ if popped => muted_note(POPPED_OUT_NOTE)
+                .debug_selector(|| format!("pane-popped-{pane_id}"))
+                .into_any_element(),
             (Some(_), Some(slot)) if slot.attached => div()
                 .flex_1()
                 .min_h(px(0.0))
@@ -1394,13 +1415,25 @@ impl RootView {
     }
 
     /// The note the body of pane `pane_id` draws where a terminal would be,
-    /// while the pane shows a session it has not attached to; `None`
-    /// otherwise.
+    /// while its terminal draws in a pop-out window or the pane shows a
+    /// session it has not attached to; `None` otherwise.
     #[must_use]
     pub fn pane_note(&self, pane_id: &str) -> Option<&'static str> {
-        let slot = self.panes.get(pane_id).filter(|slot| !slot.attached)?;
+        let slot = self.panes.get(pane_id)?;
+        if self.is_popped_out(&slot.tab_id, pane_id) {
+            return Some(POPPED_OUT_NOTE);
+        }
+        let slot = Some(slot).filter(|slot| !slot.attached)?;
         let session = self.sidebar.session(slot.session.as_deref()?);
         Some(body_note(session))
+    }
+
+    /// Whether pane `pane_id`'s terminal has the keyboard in `window`.
+    #[must_use]
+    pub fn pane_terminal_focused(&self, pane_id: &str, window: &Window, cx: &App) -> bool {
+        self.panes
+            .get(pane_id)
+            .is_some_and(|slot| slot.view.read(cx).is_focused(window))
     }
 
     /// The pane the drop overlay is drawn on and the edge it shows, while a

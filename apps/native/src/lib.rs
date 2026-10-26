@@ -72,9 +72,13 @@ pub mod palette;
 mod pane_close;
 mod pane_close_view;
 mod pane_menu;
-#[expect(
-    dead_code,
-    reason = "the pop-out windows (RT-412) are its first caller"
+mod popout_view;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "pruning pop-outs whose content went is not wired to the session and tab folds yet"
+    )
 )]
 mod popouts;
 mod preset_launch;
@@ -148,7 +152,7 @@ use gpui::{
     CursorStyle, DisplayId, Div, ElementId, ElementInputHandler, FocusHandle, FontWeight,
     InputHandler, KeyDownEvent, Keystroke, ModifiersChangedEvent, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Stateful, StyledText, Task, Window,
-    WindowBounds, WindowOptions, div, prelude::*, pulsating_between, px, size,
+    WindowBounds, WindowHandle, WindowOptions, div, point, prelude::*, pulsating_between, px, size,
 };
 use protocol::{
     AppearanceOverrides, ClientMessage, DaemonMessage, GridNode, PaneDropEdge, RepoEntry,
@@ -178,6 +182,8 @@ use crate::notice_view::MODAL_RADIUS;
 use crate::notices::Notices;
 use crate::notify::{SilentNotifier, SystemNotifier};
 use crate::open::SystemOpener;
+use crate::popout_view::PopoutView;
+use crate::popouts::{POPOUT_CASCADE, POPOUT_MIN_SIZE, POPOUT_SIZE, Popouts};
 use crate::quit_view::{ExitView, Quitter};
 use crate::remote_mode::Capabilities;
 use crate::repo_remove::RepoRemove;
@@ -222,7 +228,7 @@ pub use crate::diff_tab::{
 };
 pub use crate::drag::{Side, SidebarRow};
 pub use crate::footer::LogPaths;
-pub use crate::grid_view::{HeaderChip, HeaderChipKind, PaneHeaderParts};
+pub use crate::grid_view::{HeaderChip, HeaderChipKind, POPPED_OUT_NOTE, PaneHeaderParts};
 pub use crate::history::{
     CommitDetailView, CommitRow, DetailFile, DetailPane, ForgeButton, HistoryBlock, HistoryBody,
     MoreRow,
@@ -242,6 +248,7 @@ pub use crate::pairing::{
     DialogPhase, DialogView, PairingAction, PairingState, PairingToast, QrMatrix, WaitingRow,
     approve_message, deny_message,
 };
+pub use crate::popouts::{OpenOutcome, PopoutKey};
 pub use crate::preset_wizard::{LaunchButton, NextButton};
 pub use crate::quit_view::QuitFn;
 pub use crate::recover_view::RecoverRow;
@@ -398,7 +405,7 @@ pub fn open_main_window(wanted_session: Option<String>, cx: &mut App) {
         },
         move |window, cx| {
             if offscreen {
-                offscreen::show_cloaked(window);
+                offscreen::show_cloaked(window, WINDOW_SIZE);
             }
             cx.new(|cx| RootView::new(wanted_session, window, cx))
         },
@@ -449,6 +456,93 @@ fn window_placement(saved: Option<&WindowState>, cx: &App) -> (Option<DisplayId>
 
 /// The main window's size in logical pixels.
 pub(crate) const WINDOW_SIZE: (u16, u16) = (1000, 640);
+
+/// Where a pop-out opens: centred on `display_id`, moved right and down by
+/// [`POPOUT_CASCADE`] for each pop-out opened before it.
+fn popout_bounds(display_id: Option<DisplayId>, cascade: usize, cx: &App) -> Bounds<Pixels> {
+    let (width, height) = POPOUT_SIZE;
+    let mut bounds = Bounds::centered(display_id, size(px(width.into()), px(height.into())), cx);
+    let steps = u16::try_from(cascade).unwrap_or(u16::MAX);
+    let offset = px(f32::from(POPOUT_CASCADE) * f32::from(steps));
+    bounds.origin += point(offset, offset);
+    bounds
+}
+
+/// What a pop-out window opens with, gathered from the root view.
+struct PopoutOpening {
+    key: PopoutKey,
+    display_id: Option<DisplayId>,
+    bounds: Bounds<Pixels>,
+    title: String,
+    /// The popped pane's terminal, which takes the keyboard in the window.
+    terminal: Option<gpui::Entity<term_view::TerminalPane>>,
+}
+
+/// Opens the window `opening` describes and records it on `root`; a window
+/// that fails to open closes its pop-out again. A pop-out docked back (or
+/// closed with the main window) before this ran opens nothing.
+fn open_popout_now(root: &gpui::WeakEntity<RootView>, opening: PopoutOpening, cx: &mut App) {
+    let still_open = root
+        .read_with(cx, |root, _| root.popouts.is_open(&opening.key))
+        .unwrap_or(false);
+    if !still_open {
+        tracing::debug!(key = ?opening.key, "pop-out closed before its window opened");
+        return;
+    }
+    let PopoutOpening {
+        key,
+        display_id,
+        bounds,
+        title,
+        terminal,
+    } = opening;
+    let offscreen = offscreen::requested();
+    let (min_width, min_height) = POPOUT_MIN_SIZE;
+    let view_root = root.clone();
+    let view_key = key.clone();
+    let opened = cx.open_window(
+        WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            window_min_size: Some(size(px(min_width.into()), px(min_height.into()))),
+            display_id,
+            // As the main window: a cloaked window opens hidden and is
+            // shown by `show_cloaked`, never activated.
+            focus: !offscreen,
+            show: !offscreen,
+            ..Default::default()
+        },
+        move |window, cx| {
+            if offscreen {
+                offscreen::show_cloaked(window, POPOUT_SIZE);
+            }
+            window.set_window_title(&title);
+            if let Some(terminal) = &terminal {
+                terminal.read(cx).focus(window);
+            }
+            cx.new(|cx| PopoutView::new(view_root, view_key, window, cx))
+        },
+    );
+    let recorded = root.update(cx, |root, cx| match opened {
+        Ok(handle) => {
+            root.popout_windows.insert(key, handle);
+        }
+        Err(err) => {
+            tracing::error!(?key, "opening a pop-out window: {err:#}");
+            root.popouts.close(&key);
+            cx.notify();
+        }
+    });
+    if let Err(err) = recorded {
+        tracing::debug!("a pop-out opened after the root view went: {err:#}");
+    }
+}
+
+/// Closes `key`'s pop-out window; one already gone is logged.
+fn close_popout_window(key: &PopoutKey, handle: WindowHandle<PopoutView>, cx: &mut App) {
+    if let Err(err) = handle.update(cx, |_, window, _| window.remove_window()) {
+        tracing::debug!(?key, "the pop-out window was already closed: {err:#}");
+    }
+}
 
 /// Text size of the footer, flyout and overlay.
 const UI_TEXT_SIZE: f32 = 12.0;
@@ -552,6 +646,10 @@ pub struct RootView {
     /// The window's keystroke interceptor, which lets Esc end a drag before
     /// gpui dispatches the key to any keymap action.
     _drag_escape: gpui::Subscription,
+    /// The open pop-out windows' contents, in the order they opened.
+    popouts: Popouts,
+    /// Each open pop-out's window.
+    popout_windows: HashMap<PopoutKey, WindowHandle<PopoutView>>,
     /// Focus for the sidebar, which takes it on a click so Ctrl+B there
     /// toggles the sidebar instead of reaching the terminal.
     sidebar_focus: FocusHandle,
@@ -1028,6 +1126,8 @@ impl RootView {
             sidebar_drop: None,
             escape_ended_drag: false,
             _drag_escape: drag_escape,
+            popouts: Popouts::default(),
+            popout_windows: HashMap::new(),
             sidebar_focus: cx.focus_handle(),
             row_focus: None,
             hovered_container: None,
@@ -1176,13 +1276,20 @@ impl RootView {
         view
     }
 
-    /// Sends a request to close the window through the quit flow.
+    /// Sends a request to close the window through the quit flow; a close
+    /// that goes ahead closes every pop-out window first.
     fn watch_close_request(window: &mut Window, cx: &mut Context<Self>) {
         let view = cx.weak_entity();
         window.on_window_should_close(cx, move |window, cx| {
             // A view that is gone has nothing to ask; let the window close.
-            view.update(cx, |root, cx| root.on_close_requested(window, cx))
-                .unwrap_or(true)
+            view.update(cx, |root, cx| {
+                let close = root.on_close_requested(window, cx);
+                if close {
+                    root.close_popouts(cx);
+                }
+                close
+            })
+            .unwrap_or(true)
         });
     }
 
@@ -1203,6 +1310,132 @@ impl RootView {
             }
         })
         .detach();
+    }
+
+    /// Opens `key` in a window of its own, or activates the open pop-out
+    /// that already shows it. Only a pane pop-out opens; the other kinds
+    /// open nothing and report themselves as already open.
+    pub fn open_popout(
+        &mut self,
+        key: PopoutKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> OpenOutcome {
+        if !matches!(key, PopoutKey::Pane { .. }) {
+            tracing::debug!(?key, "pop-out kind not supported yet");
+            return OpenOutcome::Existing(key);
+        }
+        let outcome = self.popouts.open(key.clone(), self.tabs.tabs());
+        match &outcome {
+            OpenOutcome::Opened => {
+                self.mark_popout_resized(&key, cx);
+                self.open_popout_window(key, window, cx);
+            }
+            OpenOutcome::Existing(open) | OpenOutcome::Overlaps(open) => {
+                self.activate_popout(open, cx);
+            }
+        }
+        cx.notify();
+        outcome
+    }
+
+    /// Opens the window for `key`, already in the registry, at its cascade
+    /// place on the main window's display, and gives the keyboard to its
+    /// terminal.
+    fn open_popout_window(&mut self, key: PopoutKey, window: &Window, cx: &mut Context<Self>) {
+        let cascade = self.popouts.cascade_index(&key).unwrap_or(0);
+        let display_id = window.display(cx).map(|display| display.id());
+        let bounds = popout_bounds(display_id, cascade, cx);
+        let title = popouts::title(
+            &key,
+            self.tabs.tabs(),
+            self.sidebar.sessions(),
+            &self.agents,
+        );
+        let terminal = match &key {
+            PopoutKey::Pane { pane_id, .. } => {
+                self.panes.get(pane_id).map(|slot| slot.view().clone())
+            }
+            PopoutKey::Tab { .. } | PopoutKey::Session { .. } => None,
+        };
+        let opening = PopoutOpening {
+            key,
+            display_id,
+            bounds,
+            title,
+            terminal,
+        };
+        let root = cx.weak_entity();
+        // The new window draws at once and reads this view, so it opens once
+        // this update is over.
+        cx.defer(move |cx| open_popout_now(&root, opening, cx));
+    }
+
+    /// Brings `key`'s pop-out window to the front; a cloaked client never
+    /// activates a window.
+    fn activate_popout(&self, key: &PopoutKey, cx: &mut Context<Self>) {
+        if offscreen::requested() {
+            return;
+        }
+        let Some(handle) = self.popout_windows.get(key) else {
+            return;
+        };
+        if let Err(err) = handle.update(cx, |_, window, _| window.activate_window()) {
+            tracing::warn!(?key, "activating a pop-out window: {err:#}");
+        }
+    }
+
+    /// Docks `key` back: its content returns to the main window, and its
+    /// window closes if it is still open. Nothing goes to the daemon.
+    pub fn dock_back(&mut self, key: &PopoutKey, cx: &mut Context<Self>) {
+        if let Some(handle) = self.forget_popout(key, cx) {
+            close_popout_window(key, handle, cx);
+        }
+    }
+
+    /// Drops `key` from the open pop-outs without touching its window, as
+    /// its own close request does; the window it had, if any.
+    pub(crate) fn forget_popout(
+        &mut self,
+        key: &PopoutKey,
+        cx: &mut Context<Self>,
+    ) -> Option<WindowHandle<PopoutView>> {
+        if self.popouts.close(key) {
+            self.mark_popout_resized(key, cx);
+        }
+        let handle = self.popout_windows.remove(key);
+        cx.notify();
+        handle
+    }
+
+    /// `key`'s pane moves between windows: its next size claims its session.
+    fn mark_popout_resized(&self, key: &PopoutKey, cx: &mut Context<Self>) {
+        if let PopoutKey::Pane { pane_id, .. } = key {
+            self.mark_pane_resized(pane_id, cx);
+        }
+    }
+
+    /// Closes every pop-out window, as the main window closes.
+    fn close_popouts(&mut self, cx: &mut Context<Self>) {
+        for (key, handle) in std::mem::take(&mut self.popout_windows) {
+            self.popouts.close(&key);
+            close_popout_window(&key, handle, cx);
+        }
+    }
+
+    /// Whether pane `pane_id` of tab `tab_id` draws in a pop-out window.
+    #[must_use]
+    pub fn is_popped_out(&self, tab_id: &str, pane_id: &str) -> bool {
+        self.popouts.is_open(&PopoutKey::Pane {
+            tab_id: tab_id.to_owned(),
+            pane_id: pane_id.to_owned(),
+        })
+    }
+
+    /// How many pop-out windows are open.
+    #[must_use]
+    pub fn popout_count(&self) -> usize {
+        self.popouts.keys().len()
     }
 
     /// The sidebar's containers for the view it shows, in the order it

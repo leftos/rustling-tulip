@@ -346,7 +346,7 @@ fn open_window(deps: RootDeps, cx: &mut App) -> Result<WindowHandle<RootView>> {
             ..Default::default()
         },
         move |window, cx| {
-            show_cloaked(window);
+            show_cloaked(window, WINDOW_SIZE);
             cx.new(|cx| RootView::with_transport(deps, window, cx))
         },
     )

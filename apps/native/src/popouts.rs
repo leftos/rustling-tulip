@@ -10,7 +10,7 @@ use crate::tabs::{TabsModel, collect_panes};
 
 /// What one pop-out window holds.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) enum PopoutKey {
+pub enum PopoutKey {
     /// One pane of a tab, named by its tab and its pane.
     Pane { tab_id: String, pane_id: String },
     /// A whole tab.
@@ -30,7 +30,7 @@ pub(crate) const POPOUT_CASCADE: u16 = 32;
 
 /// What [`Popouts::open`] did with the pop-out it was given.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum OpenOutcome {
+pub enum OpenOutcome {
     /// The pop-out is new, and is now open.
     Opened,
     /// This pop-out already has a window: focus it.

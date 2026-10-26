@@ -1927,4 +1927,37 @@ impl<'a> Harness<'a> {
         self.cx
             .update(|window, _| window.viewport_size().height / px(1.0))
     }
+
+    /// How many windows are open, the main one included.
+    pub fn window_count(&mut self) -> usize {
+        self.cx.run_until_parked();
+        self.cx.windows().len()
+    }
+
+    /// The one open window other than the main one, as a test context of
+    /// its own, to type into, read and close.
+    pub fn popout_window(&mut self) -> VisualTestContext {
+        self.cx.run_until_parked();
+        let main = self.cx.update(|window, _| window.window_handle());
+        let popout = self
+            .cx
+            .windows()
+            .into_iter()
+            .find(|window| *window != main)
+            .expect("a pop-out window is open");
+        VisualTestContext::from_window(popout, &self.cx.cx)
+    }
+
+    /// Asks the pop-out window to close, as its X button does, and closes it
+    /// when its handler agrees, as the platform does (the test platform
+    /// only asks); returns whether it may close.
+    pub fn close_popout(&mut self) -> bool {
+        let mut popout = self.popout_window();
+        let closed = popout.simulate_close();
+        if closed {
+            popout.update(|window, _| window.remove_window());
+        }
+        self.cx.run_until_parked();
+        closed
+    }
 }

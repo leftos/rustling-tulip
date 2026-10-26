@@ -17,13 +17,13 @@ pub fn requested() -> bool {
     std::env::var_os(OFFSCREEN_ENV).is_some_and(|value| !value.is_empty())
 }
 
-/// Places `window` at the primary display's work-area origin at its full
-/// size (gpui applies neither to a window it opens hidden), cloaks it and
-/// shows it without activating it. The compositor still renders a cloaked
-/// window, so its pixels can be read, but the user never sees it. A window
-/// that cannot be cloaked stays hidden.
+/// Places `window` at the primary display's work-area origin at `size` in
+/// logical pixels (gpui applies neither to a window it opens hidden), cloaks
+/// it and shows it without activating it. The compositor still renders a
+/// cloaked window, so its pixels can be read, but the user never sees it. A
+/// window that cannot be cloaked stays hidden.
 #[cfg(windows)]
-pub fn show_cloaked(window: &Window) {
+pub fn show_cloaked(window: &Window, size: (u16, u16)) {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     // `Window::window_handle` is gpui's own handle; the raw one is the trait's.
     let raw = HasWindowHandle::window_handle(window).map(|handle| handle.as_raw());
@@ -40,7 +40,7 @@ pub fn show_cloaked(window: &Window) {
     // another thread, they wait for gpui's message loop.
     let spawned = std::thread::Builder::new()
         .name("cloak-window".to_owned())
-        .spawn(move || cloak_and_show(address));
+        .spawn(move || cloak_and_show(address, size));
     if let Err(err) = spawned {
         tracing::error!("{OFFSCREEN_ENV}: starting the thread that shows the window: {err}");
     }
@@ -48,7 +48,7 @@ pub fn show_cloaked(window: &Window) {
 
 /// The work of [`show_cloaked`] on the window whose handle is `address`.
 #[cfg(windows)]
-fn cloak_and_show(address: usize) {
+fn cloak_and_show(address: usize, size: (u16, u16)) {
     use windows::Win32::Foundation::{HWND, RECT};
     use windows::Win32::Graphics::Dwm::{DWMWA_CLOAK, DwmSetWindowAttribute};
     use windows::Win32::UI::HiDpi::GetDpiForWindow;
@@ -67,7 +67,7 @@ fn cloak_and_show(address: usize) {
         dpi => i32::try_from(dpi).unwrap_or(96),
     };
     let scaled = |logical: u16| i32::from(logical) * dpi / 96;
-    let (width, height) = (scaled(crate::WINDOW_SIZE.0), scaled(crate::WINDOW_SIZE.1));
+    let (width, height) = (scaled(size.0), scaled(size.1));
     // SAFETY: `hwnd` is this live window's handle and the pointers are to
     // locals that outlive the calls; none of the calls activates the window.
     unsafe {
@@ -92,6 +92,6 @@ fn cloak_and_show(address: usize) {
 }
 
 #[cfg(not(windows))]
-pub fn show_cloaked(_window: &Window) {
+pub fn show_cloaked(_window: &Window, _size: (u16, u16)) {
     tracing::warn!("{OFFSCREEN_ENV} is only honoured on Windows; the window stays hidden");
 }
