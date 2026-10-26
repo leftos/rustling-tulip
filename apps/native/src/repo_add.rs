@@ -32,6 +32,8 @@ pub(crate) struct RepoAdd {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HostPathProblem {
     Empty,
+    /// An empty field that asks for a file, not a folder.
+    EmptyFile,
     /// Not a drive, `\\server` or `/` path.
     NotAbsolute,
     /// A `..` segment, which the daemon would resolve before naming it.
@@ -46,6 +48,7 @@ impl HostPathProblem {
     pub(crate) fn message(self, host: &str) -> String {
         match self {
             Self::Empty => format!("Type a folder path on {host}."),
+            Self::EmptyFile => format!("Type a file path on {host}."),
             Self::NotAbsolute => {
                 format!("Use a full path on {host}, starting with a drive letter, \\\\server or /.")
             }
@@ -64,6 +67,15 @@ struct HostPathText {
     name: String,
     /// The text after the last separator, empty when it ends in one.
     last_raw: String,
+}
+
+/// Whether `text` passes the host path string rules of
+/// [`check_host_path`].
+///
+/// # Errors
+/// The [`HostPathProblem`] that refuses it.
+pub(crate) fn check_host_path_rules(text: &str) -> Result<(), HostPathProblem> {
+    check_host_path(text).map(|_| ())
 }
 
 /// `text` against the string rules: trimmed, not empty, absolute in either

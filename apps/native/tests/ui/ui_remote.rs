@@ -16,8 +16,9 @@ use std::time::Duration;
 
 use gpui::{Modifiers, TestAppContext, px};
 use protocol::{
-    ClientMessage, DaemonMessage, InitLayoutKind, PresetEntry, PresetTarget, RearrangeLayout,
-    SessionSnapshot, SpawnRequest, SpawnTarget, SplitDirection, WorktreeCleanupFailure,
+    ClientMessage, DaemonMessage, InitLayoutKind, LaunchPresetSource, PresetEntry, PresetTarget,
+    RearrangeLayout, SessionSnapshot, SpawnRequest, SpawnTarget, SplitDirection,
+    WorktreeCleanupFailure,
 };
 use rustling_tulip_native::target::Target;
 use rustling_tulip_native::{Connection, NetCommand, NetEvent, RootView};
@@ -1254,6 +1255,147 @@ fn preset_wizard_browse_opens_no_picker_on_remote(cx: &mut TestAppContext) {
 
     assert_eq!(h.file_asks(), 0, "no file picker opens on this PC");
     assert_eq!(h.folder_asks(), 0, "no folder picker opens on this PC");
+}
+
+/// The text of the wizard's typed host path field tagged `selector`.
+fn path_text(h: &mut Harness<'_>, selector: &str) -> Option<String> {
+    h.root(|root, cx| root.preset_wizard_path_text(selector, cx))
+}
+
+/// Answers the preview the client asked of the daemon, if it asked, with
+/// one prompt, presses Launch and returns the launch the client sent.
+fn launch_from_preview(h: &mut Harness<'_>) -> ClientMessage {
+    let asked = h.sent().into_iter().find_map(|msg| match msg {
+        ClientMessage::PreviewPreset { id, .. } => Some(id),
+        _ => None,
+    });
+    if let Some(id) = asked {
+        h.send(DaemonMessage::PresetPreview {
+            id,
+            prompts: vec!["fix".to_owned()],
+        });
+    }
+    h.click_on("preset-launch");
+    h.sent()
+        .into_iter()
+        .find(|msg| matches!(msg, ClientMessage::LaunchPreset { .. }))
+        .expect("a launch went out")
+}
+
+#[gpui::test]
+fn preset_wizard_path_rows_take_a_typed_host_path_on_remote(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = remote_with_r1(cx, &dir);
+    open_preset_wizard(&mut h, preset(json!([{"kind": "file"}]), json!([])));
+
+    h.click_on("preset-source-file");
+    type_text(&mut h, "E:/prompts/bugs.md");
+    assert_eq!(
+        path_text(&mut h, "preset-source-file").as_deref(),
+        Some("E:/prompts/bugs.md")
+    );
+    assert!(
+        tooltip_on(&mut h, "preset-source-file-pick", LOCAL_FILES),
+        "Pick… stays disabled beside the field"
+    );
+    h.click_on("preset-next");
+    let ClientMessage::LaunchPreset { source, .. } = launch_from_preview(&mut h) else {
+        panic!("a launch went out");
+    };
+    assert_eq!(
+        source,
+        LaunchPresetSource::File {
+            path: "E:/prompts/bugs.md".to_owned()
+        }
+    );
+    assert_eq!(h.file_asks(), 0, "no file picker opens on this PC");
+}
+
+#[gpui::test]
+fn preset_wizard_folder_row_is_prefilled_and_typed_on_remote(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = remote_with_r1(cx, &dir);
+    let sources = json!([{"kind": "folder", "relative_path": "docs/prompts"}]);
+    open_preset_wizard(&mut h, preset(sources, json!([])));
+
+    assert_eq!(
+        path_text(&mut h, "preset-source-folder").as_deref(),
+        Some("D:/src/r1\\docs\\prompts"),
+        "the field starts at the default under the source repo"
+    );
+    h.click_on("preset-source-folder");
+    h.keys("ctrl-a backspace");
+    type_text(&mut h, "E:/prompts");
+    h.click_on("preset-next");
+    let ClientMessage::LaunchPreset { source, .. } = launch_from_preview(&mut h) else {
+        panic!("a launch went out");
+    };
+    assert_eq!(
+        source,
+        LaunchPresetSource::Folder {
+            path: "E:/prompts".to_owned()
+        }
+    );
+}
+
+#[gpui::test]
+fn preset_wizard_path_variables_take_typed_host_paths_on_remote(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = remote_with_r1(cx, &dir);
+    let variables = json!([
+        {"name": "log", "label": "Log file", "kind": {"kind": "file_path", "extensions": ["log"]},
+         "prompt_at_launch": true}
+    ]);
+    open_preset_wizard(&mut h, preset(json!([{"kind": "inline"}]), variables));
+    h.click_on("preset-source-inline-text");
+    type_text(&mut h, "fix");
+    h.click_on("preset-next");
+
+    h.click_on("preset-variable-log");
+    type_text(&mut h, "E:/logs/run.log");
+    assert!(
+        !drawn(&mut h, "preset-variable-log-clear"),
+        "a typed row is cleared by editing, not by a button"
+    );
+    h.click_on("preset-next");
+    let ClientMessage::LaunchPreset {
+        variable_values, ..
+    } = launch_from_preview(&mut h)
+    else {
+        panic!("a launch went out");
+    };
+    assert_eq!(
+        variable_values,
+        vec![("log".to_owned(), "E:/logs/run.log".to_owned())]
+    );
+}
+
+#[gpui::test]
+fn preset_wizard_refuses_a_relative_typed_path_on_remote(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = remote_with_r1(cx, &dir);
+    open_preset_wizard(&mut h, preset(json!([{"kind": "file"}]), json!([])));
+    assert!(
+        !drawn(&mut h, "preset-source-file-error"),
+        "an empty row says nothing yet"
+    );
+
+    h.click_on("preset-source-file");
+    type_text(&mut h, "prompts/bugs.md");
+    assert!(drawn(&mut h, "preset-source-file-error"));
+    assert_eq!(
+        h.root(|root, _| root.preset_wizard_path_refusal("preset-source-file"))
+            .as_deref(),
+        Some("Use a full path on box, starting with a drive letter, \\\\server or /.")
+    );
+    assert_eq!(
+        h.root(|root, _| root.preset_wizard_next())
+            .map(|next| next.enabled),
+        Some(false),
+        "Next waits for a full path"
+    );
+    h.click_on("preset-next");
+    assert_eq!(h.root(|root, _| root.preset_wizard_stage()), Some("source"));
 }
 
 /// Seeds `native-ui.json` with `folder` remembered for "+ Shell".

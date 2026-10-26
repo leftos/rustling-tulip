@@ -19,6 +19,7 @@ use crate::preset_launch::{
     script_commands,
 };
 use crate::preset_prompts::{issue_summary, parse_issue_spec, parse_prompts};
+use crate::repo_add::{HostPathProblem, check_host_path_rules};
 
 pub const SOURCE_LEGEND: &str = "Prompt source";
 pub const FILE_LABEL: &str = "Prompts file";
@@ -155,6 +156,9 @@ pub struct PresetWizard {
     max_per_tab: String,
     preview: Preview,
     scripts: ScriptStage,
+    /// The remote host's short name, whose path rows take typed host
+    /// paths; `None` on this PC, where a path is picked.
+    host: Option<String>,
 }
 
 impl PresetWizard {
@@ -185,22 +189,80 @@ impl PresetWizard {
             max_per_tab,
             preview: Preview::Ready(Vec::new()),
             scripts: ScriptStage::Idle,
+            host: None,
+        }
+    }
+
+    /// Sets the remote host whose path rows take typed host paths, by its
+    /// short name; `None` on this PC.
+    pub fn set_host(&mut self, host: Option<String>) {
+        self.host = host;
+    }
+
+    /// Why the typed host path in `pick`'s row is refused; `None` on this
+    /// PC, for a path that passes, and for an empty variable.
+    #[must_use]
+    pub fn typed_path_problem(&self, pick: &Pick) -> Option<HostPathProblem> {
+        self.host.as_ref()?;
+        let problem = check_host_path_rules(self.path_text(pick)).err()?;
+        match (pick, problem) {
+            (Pick::SourceFile, HostPathProblem::Empty) => Some(HostPathProblem::EmptyFile),
+            (Pick::VariableFile(_) | Pick::VariableFolder(_), HostPathProblem::Empty) => None,
+            (_, problem) => Some(problem),
+        }
+    }
+
+    /// What the line under `pick`'s typed host path row says: its refusal,
+    /// naming the host, once the row holds text that fails the rules.
+    #[must_use]
+    pub fn typed_path_refusal(&self, pick: &Pick) -> Option<String> {
+        let host = self.host.as_deref()?;
+        if self.path_text(pick).is_empty() {
+            return None;
+        }
+        self.typed_path_problem(pick)
+            .map(|problem| problem.message(host))
+    }
+
+    /// The text `pick`'s row holds, `""` when it holds none.
+    #[must_use]
+    pub fn path_text(&self, pick: &Pick) -> &str {
+        match pick {
+            Pick::SourceFile => self.file_path.as_deref().unwrap_or_default(),
+            Pick::SourceFolder => self.folder_path.as_deref().unwrap_or_default(),
+            Pick::VariableFile(name) | Pick::VariableFolder(name) => self.value(name),
         }
     }
 
     /// Every variable holding a value, in the preset's order, as the daemon
-    /// takes them: defaults and edits alike, untrimmed.
+    /// takes them: defaults and edits alike, untrimmed but for a file or
+    /// folder path typed on a remote host, which goes trimmed.
     #[must_use]
     pub fn variable_values(&self) -> Vec<(String, String)> {
         self.entry
             .variables
             .iter()
             .filter_map(|variable| {
-                self.values
-                    .get(&variable.name)
-                    .map(|value| (variable.name.clone(), value.clone()))
+                self.values.get(&variable.name).map(|value| {
+                    let value = if Pick::for_variable(variable).is_some() {
+                        self.sent_path(value)
+                    } else {
+                        value.as_str()
+                    };
+                    (variable.name.clone(), value.to_owned())
+                })
             })
             .collect()
+    }
+
+    /// Path `text` as it is sent: trimmed when typed on a remote host, as
+    /// picked on this PC.
+    fn sent_path<'a>(&self, text: &'a str) -> &'a str {
+        if self.host.is_some() {
+            text.trim()
+        } else {
+            text
+        }
     }
 
     /// Whether the preview shows the max-panes field: the preset packs its
@@ -296,14 +358,12 @@ impl PresetWizard {
         Some(preview_summary(prompts.len(), tabs))
     }
 
-    /// The preset's script commands as they would run now.
+    /// The preset's script commands as they would run now, filled from the
+    /// values [`Self::variable_values`] sends.
     #[must_use]
     pub fn script_commands(&self) -> Vec<ScriptCommand> {
-        script_commands(
-            &self.entry.variables,
-            &self.values,
-            self.repo_root.as_deref(),
-        )
+        let values: HashMap<String, String> = self.variable_values().into_iter().collect();
+        script_commands(&self.entry.variables, &values, self.repo_root.as_deref())
     }
 
     #[must_use]
@@ -447,20 +507,28 @@ impl PresetWizard {
     }
 
     /// Whether the picked source can produce prompts: a file or folder is
-    /// picked, the inline text parses to a prompt, or the issue spec is
-    /// valid.
+    /// picked (on a remote host, typed and passing the host path rules),
+    /// the inline text parses to a prompt, or the issue spec is valid.
     #[must_use]
     pub fn is_source_ready(&self) -> bool {
         match self.source_kind {
-            SourceKind::File => non_empty(self.file_path.as_deref()).is_some(),
-            SourceKind::Folder => non_empty(self.folder_path.as_deref()).is_some(),
+            SourceKind::File => {
+                non_empty(self.file_path.as_deref()).is_some()
+                    && self.typed_path_problem(&Pick::SourceFile).is_none()
+            }
+            SourceKind::Folder => {
+                non_empty(self.folder_path.as_deref()).is_some()
+                    && self.typed_path_problem(&Pick::SourceFolder).is_none()
+            }
             SourceKind::Inline => !parse_prompts(&self.inline_text).is_empty(),
             SourceKind::GithubIssues => parse_issue_spec(&self.issues_spec).is_ok(),
         }
     }
 
-    /// The launch source the picked source produces, once it is ready. An
-    /// issue spec goes as typed: the daemon expands it.
+    /// The launch source the picked source produces, once it is ready. A
+    /// file or folder path typed on a remote host goes trimmed, a picked
+    /// one as picked; an issue spec goes as typed: the
+    /// daemon expands it.
     #[must_use]
     pub fn launch_source(&self) -> Option<LaunchPresetSource> {
         if !self.is_source_ready() {
@@ -468,10 +536,12 @@ impl PresetWizard {
         }
         Some(match self.source_kind {
             SourceKind::File => LaunchPresetSource::File {
-                path: self.file_path.clone().unwrap_or_default(),
+                path: self.sent_path(self.path_text(&Pick::SourceFile)).to_owned(),
             },
             SourceKind::Folder => LaunchPresetSource::Folder {
-                path: self.folder_path.clone().unwrap_or_default(),
+                path: self
+                    .sent_path(self.path_text(&Pick::SourceFolder))
+                    .to_owned(),
             },
             SourceKind::Inline => LaunchPresetSource::Inline {
                 prompts: parse_prompts(&self.inline_text),
@@ -617,24 +687,45 @@ impl PresetWizard {
     }
 
     /// Next on the stage on screen. Source waits for its source; the
-    /// variables name the labels still missing; the preview has no Next.
+    /// variables name the labels still missing, else those whose typed host
+    /// path is refused; the preview has no Next.
     #[must_use]
     pub fn next_button(&self) -> NextButton {
         let enabled = |enabled: bool| NextButton { enabled, tip: None };
         match self.stage {
             Stage::Source => enabled(self.is_source_ready()),
-            Stage::Variables => {
-                let missing = self.missing_required();
-                if missing.is_empty() {
-                    return enabled(true);
-                }
-                let labels: Vec<&str> = missing.iter().map(|v| v.label.as_str()).collect();
-                NextButton {
-                    enabled: false,
-                    tip: Some(format!("Fill in: {}", labels.join(", "))),
-                }
-            }
+            Stage::Variables => self.variables_next(),
             Stage::Preview => enabled(false),
+        }
+    }
+
+    /// Next on the Variables stage: `Fill in:` the missing labels, else
+    /// `Fix:` the refused typed paths' labels.
+    fn variables_next(&self) -> NextButton {
+        let label = |variable: &&PresetVariable| variable.label.clone();
+        let missing: Vec<String> = self.missing_required().iter().map(label).collect();
+        let refused: Vec<String> = self
+            .prompted_variables()
+            .iter()
+            .filter(|variable| {
+                Pick::for_variable(variable)
+                    .is_some_and(|pick| self.typed_path_problem(&pick).is_some())
+            })
+            .map(label)
+            .collect();
+        let tip = if !missing.is_empty() {
+            format!("Fill in: {}", missing.join(", "))
+        } else if !refused.is_empty() {
+            format!("Fix: {}", refused.join(", "))
+        } else {
+            return NextButton {
+                enabled: true,
+                tip: None,
+            };
+        };
+        NextButton {
+            enabled: false,
+            tip: Some(tip),
         }
     }
 
@@ -779,7 +870,7 @@ pub fn source_label(source: &PresetPromptSource) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::preset_launch::MAX_PER_TAB_INVALID;
+    use crate::preset_launch::{MAX_PER_TAB_INVALID, ScriptLine};
     use serde_json::json;
 
     #[expect(
@@ -1442,6 +1533,236 @@ mod tests {
                 Some(Pick::VariableFolder("out".to_owned())),
                 None
             ]
+        );
+    }
+
+    #[test]
+    fn typed_paths_fill_what_a_pick_would() {
+        let mut wizard = wizard(all_sources(), path_variables());
+        wizard.set_host(Some("box".to_owned()));
+        wizard.apply_pick(Pick::SourceFile, " E:\\prompts\\bugs.md ".to_owned());
+        assert_eq!(
+            wizard.file_path(),
+            Some(" E:\\prompts\\bugs.md "),
+            "the model keeps the text as typed"
+        );
+        assert_eq!(
+            wizard.launch_source(),
+            Some(LaunchPresetSource::File {
+                path: "E:\\prompts\\bugs.md".to_owned()
+            }),
+            "the source goes trimmed"
+        );
+        assert!(wizard.set_source_kind(SourceKind::Folder));
+        wizard.apply_pick(Pick::SourceFolder, "/srv/prompts ".to_owned());
+        let folder = LaunchPresetSource::Folder {
+            path: "/srv/prompts".to_owned(),
+        };
+        assert_eq!(wizard.launch_source(), Some(folder.clone()));
+        assert!(
+            matches!(
+                wizard.start_preview("p1".to_owned()),
+                Some(ClientMessage::PreviewPreset { source, .. }) if source == folder
+            ),
+            "the preview asks for the trimmed folder"
+        );
+
+        wizard.apply_pick(
+            Pick::VariableFile("log".to_owned()),
+            " E:\\logs\\run.log".to_owned(),
+        );
+        wizard.apply_pick(
+            Pick::VariableFolder("out".to_owned()),
+            "/srv/out\t".to_owned(),
+        );
+        wizard.set_value("note", " kept ".to_owned());
+        assert_eq!(wizard.value("log"), " E:\\logs\\run.log");
+        assert_eq!(
+            wizard.variable_values(),
+            pairs(&[
+                ("log", "E:\\logs\\run.log"),
+                ("out", "/srv/out"),
+                ("note", " kept ")
+            ]),
+            "path variables go trimmed, a text variable as typed"
+        );
+    }
+
+    #[test]
+    fn local_paths_are_sent_as_picked() {
+        let mut wizard = wizard(all_sources(), path_variables());
+        assert!(wizard.set_source_kind(SourceKind::Folder));
+        wizard.apply_pick(Pick::SourceFolder, "/srv/prompts ".to_owned());
+        wizard.apply_pick(
+            Pick::VariableFile("log".to_owned()),
+            " E:\\a.log".to_owned(),
+        );
+        let folder = |path: &str| {
+            Some(LaunchPresetSource::Folder {
+                path: path.to_owned(),
+            })
+        };
+        assert_eq!(
+            wizard.launch_source(),
+            folder("/srv/prompts "),
+            "no host, as picked"
+        );
+        assert_eq!(wizard.variable_values(), pairs(&[("log", " E:\\a.log")]));
+
+        wizard.set_host(Some("box".to_owned()));
+        assert_eq!(
+            wizard.launch_source(),
+            folder("/srv/prompts"),
+            "a host's typed path goes trimmed"
+        );
+        assert_eq!(wizard.variable_values(), pairs(&[("log", "E:\\a.log")]));
+    }
+
+    #[test]
+    fn shown_script_commands_match_the_sent_values() {
+        let mut wizard = inline_ready(json!([
+            {"name": "log", "label": "Log file", "kind": {"kind": "file_path", "extensions": []},
+             "prompt_at_launch": true},
+            {"name": "s", "label": "Summarize", "kind": {"kind": "script", "cmd": "sum", "args": ["{log}"]}}
+        ]));
+        wizard.set_host(Some("box".to_owned()));
+        wizard.apply_pick(
+            Pick::VariableFile("log".to_owned()),
+            " E:\\logs\\run.log".to_owned(),
+        );
+        let lines: Vec<ScriptLine> = wizard
+            .script_commands()
+            .into_iter()
+            .map(|command| command.line)
+            .collect();
+        assert_eq!(
+            lines,
+            [ScriptLine::Ready("sum E:\\logs\\run.log".to_owned())]
+        );
+        assert_eq!(
+            wizard.variable_values(),
+            pairs(&[("log", "E:\\logs\\run.log")])
+        );
+    }
+
+    fn problem_of(wizard: &mut PresetWizard, pick: &Pick, text: &str) -> Option<HostPathProblem> {
+        wizard.apply_pick(pick.clone(), text.to_owned());
+        wizard.typed_path_problem(pick)
+    }
+
+    #[test]
+    fn a_typed_host_path_must_be_absolute_and_free_of_parent_segments() {
+        let mut wizard = wizard(all_sources(), path_variables());
+        wizard.set_host(Some("box".to_owned()));
+        let file = Pick::SourceFile;
+        assert_eq!(
+            problem_of(&mut wizard, &file, "docs\\a.md"),
+            Some(HostPathProblem::NotAbsolute)
+        );
+        assert_eq!(
+            problem_of(&mut wizard, &file, "D:\\a\\..\\b.md"),
+            Some(HostPathProblem::ParentSegment)
+        );
+        assert_eq!(
+            problem_of(&mut wizard, &file, "  "),
+            Some(HostPathProblem::EmptyFile)
+        );
+        assert_eq!(
+            HostPathProblem::EmptyFile.message("box"),
+            "Type a file path on box."
+        );
+        assert_eq!(problem_of(&mut wizard, &file, "D:\\prompts\\a.md"), None);
+        assert_eq!(problem_of(&mut wizard, &file, "/home/me/a.md"), None);
+
+        wizard.set_folder_path(None);
+        assert_eq!(
+            wizard.typed_path_problem(&Pick::SourceFolder),
+            Some(HostPathProblem::Empty),
+            "an empty folder source asks for a folder"
+        );
+        let log = Pick::VariableFile("log".to_owned());
+        assert_eq!(
+            problem_of(&mut wizard, &log, "logs\\run.log"),
+            Some(HostPathProblem::NotAbsolute)
+        );
+        assert_eq!(
+            problem_of(&mut wizard, &log, ""),
+            None,
+            "an empty variable is the required check's"
+        );
+
+        wizard.set_host(None);
+        assert_eq!(
+            problem_of(&mut wizard, &file, "docs\\a.md"),
+            None,
+            "this PC's picks are trusted"
+        );
+    }
+
+    #[test]
+    fn a_typed_source_path_gates_next_only_on_a_host() {
+        let mut wizard = wizard(all_sources(), json!([]));
+        wizard.apply_pick(Pick::SourceFile, "prompts\\a.md".to_owned());
+        assert!(wizard.next_button().enabled, "no host, no rule");
+        wizard.set_host(Some("box".to_owned()));
+        assert_eq!(
+            wizard.next_button(),
+            NextButton {
+                enabled: false,
+                tip: None
+            }
+        );
+        assert_eq!(wizard.launch_source(), None);
+        assert!(!wizard.advance());
+        wizard.apply_pick(Pick::SourceFile, "D:\\prompts\\a.md".to_owned());
+        assert!(wizard.next_button().enabled);
+
+        assert!(wizard.set_source_kind(SourceKind::Folder));
+        assert!(
+            wizard.is_source_ready(),
+            "the default folder is a host path"
+        );
+        wizard.apply_pick(Pick::SourceFolder, "docs".to_owned());
+        assert!(!wizard.is_source_ready());
+    }
+
+    #[test]
+    fn a_bad_typed_variable_path_holds_next_with_a_fix_tip() {
+        let mut wizard = inline_ready(json!([
+            {"name": "log", "label": "Log file", "kind": {"kind": "file_path", "extensions": ["log"]},
+             "prompt_at_launch": true},
+            {"name": "out", "label": "Out", "kind": {"kind": "folder_path"},
+             "prompt_at_launch": true, "optional": true}
+        ]));
+        wizard.set_host(Some("box".to_owned()));
+        assert!(wizard.advance());
+        let log = Pick::VariableFile("log".to_owned());
+        let out = Pick::VariableFolder("out".to_owned());
+        let held = |tip: &str| NextButton {
+            enabled: false,
+            tip: Some(tip.to_owned()),
+        };
+        wizard.apply_pick(out.clone(), "out".to_owned());
+        assert_eq!(
+            wizard.next_button(),
+            held("Fill in: Log file"),
+            "a missing row's tip wins"
+        );
+        wizard.apply_pick(log.clone(), "logs\\run.log".to_owned());
+        assert_eq!(wizard.next_button(), held("Fix: Log file, Out"));
+        wizard.apply_pick(out, String::new());
+        assert_eq!(
+            wizard.next_button(),
+            held("Fix: Log file"),
+            "an empty optional row is not refused"
+        );
+        wizard.apply_pick(log, "E:\\logs\\run.log".to_owned());
+        assert_eq!(
+            wizard.next_button(),
+            NextButton {
+                enabled: true,
+                tip: None
+            }
         );
     }
 

@@ -242,6 +242,29 @@ fn picks_fill_the_folder_and_the_file(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn preset_wizard_path_rows_stay_read_only_on_a_local_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_repos());
+    open_wizard(&mut h, preset(all_sources(), json!([])));
+
+    h.click_on("preset-source-file");
+    type_text(&mut h, "bugs");
+    assert_eq!(
+        h.root(|root, _| root.preset_wizard_file_path()),
+        None,
+        "typing fills nothing"
+    );
+    assert_eq!(
+        h.root(|root, cx| root.preset_wizard_path_text("preset-source-file", cx)),
+        None,
+        "the row has no text field"
+    );
+    h.set_picked_file(Some("E:/prompts/bugs.md"));
+    h.click_on("preset-source-file-pick");
+    assert_eq!(h.file_asks(), 1, "Pick… opens this PC's picker");
+}
+
+#[gpui::test]
 fn required_variables_hold_next_with_their_labels(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &two_repos());

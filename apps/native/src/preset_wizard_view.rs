@@ -8,8 +8,8 @@
 use std::path::PathBuf;
 
 use gpui::{
-    AnyElement, ClickEvent, Context, Div, Entity, FontWeight, Keystroke, Stateful, Subscription,
-    Window, div, prelude::*, px,
+    AnyElement, App, ClickEvent, Context, Div, Entity, FontWeight, Keystroke, Stateful,
+    Subscription, Window, div, prelude::*, px,
 };
 use protocol::{
     ClientMessage, DaemonMessage, PresetEntry, PresetPromptSource, PresetTarget, PresetVariable,
@@ -17,6 +17,7 @@ use protocol::{
 };
 
 use crate::notice_view::modal_panel;
+use crate::palette::DANGER_BG;
 use crate::preset_launch::{
     JobAction, LAUNCH_CAVEAT, MAX_PER_TAB_LABEL, MAX_PER_TAB_PLACEHOLDER, PREVIEW_EMPTY, Preview,
     PreviewRow, SCRIPT_UNRESOLVED, SCRIPTS_LEGEND, SCRIPTS_NOTE, ScriptLine, max_per_tab_note,
@@ -43,6 +44,9 @@ pub(crate) struct PresetWizardDialog {
     max_per_tab_input: Entity<TextInput>,
     /// The text field of each prompted variable typed as text, by name.
     text_inputs: Vec<(String, Entity<TextInput>)>,
+    /// The typed host path field of each path row, by the pick it stands
+    /// in for; built only on a remote host, where no picker opens.
+    path_inputs: Vec<(Pick, Entity<TextInput>)>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -53,9 +57,27 @@ enum Field {
     Issues,
     MaxPerTab,
     Variable(String),
+    /// A path row's typed host path, which fills what its pick would.
+    Path(Pick),
 }
 
 impl PresetWizardDialog {
+    /// The typed host path field standing in for `pick`, on a remote host.
+    fn path_input(&self, pick: &Pick) -> Option<&Entity<TextInput>> {
+        self.path_inputs
+            .iter()
+            .find(|(own, _)| own == pick)
+            .map(|(_, input)| input)
+    }
+
+    /// The pick whose path row is tagged `selector`.
+    fn pick_at(&self, selector: &str) -> Option<&Pick> {
+        self.path_inputs
+            .iter()
+            .map(|(pick, _)| pick)
+            .find(|pick| pick_selector(pick) == selector)
+    }
+
     /// The max-panes field takes no edit while the scripts run, as Cancel
     /// and Back take no click.
     fn lock_max_per_tab(&self, cx: &mut Context<RootView>) {
@@ -69,6 +91,16 @@ impl PresetWizardDialog {
 /// `-clear`.
 fn variable_selector(name: &str) -> String {
     format!("preset-variable-{name}")
+}
+
+/// The selector of `pick`'s path row; its Pick… adds `-pick` and its
+/// refusal `-error`.
+fn pick_selector(pick: &Pick) -> String {
+    match pick {
+        Pick::SourceFile => "preset-source-file".to_owned(),
+        Pick::SourceFolder => "preset-source-folder".to_owned(),
+        Pick::VariableFile(name) | Pick::VariableFolder(name) => variable_selector(name),
+    }
 }
 
 impl RootView {
@@ -90,7 +122,11 @@ impl RootView {
             .iter()
             .find(|repo| repo.id == entry.source_repo_id)
             .map(|repo| repo.path.clone());
-        let wizard = PresetWizard::new(entry, target, repo_path.as_deref());
+        let mut wizard = PresetWizard::new(entry, target, repo_path.as_deref());
+        let host = (!self.capabilities().opens_local_files())
+            .then(|| self.conn.target().short_name().map(str::to_owned))
+            .flatten();
+        wizard.set_host(host.clone());
         let inline_input = cx
             .new(|cx| TextInput::multi_line(String::new(), INLINE_PLACEHOLDER, cx).with_rows(4, 8));
         let issues_input = cx.new(|cx| TextInput::new(String::new(), ISSUES_PLACEHOLDER, cx));
@@ -122,16 +158,49 @@ impl RootView {
             subscriptions.extend(Self::watch_preset_field(&input, field, window, cx));
             text_inputs.push((variable.name.clone(), input));
         }
+        let path_inputs = match &host {
+            Some(host) => Self::preset_path_inputs(&wizard, host, &mut subscriptions, window, cx),
+            None => Vec::new(),
+        };
         self.preset_wizard = Some(PresetWizardDialog {
             wizard,
             inline_input,
             issues_input,
             max_per_tab_input,
             text_inputs,
+            path_inputs,
             _subscriptions: subscriptions,
         });
         self.preset_wizard_focus.focus(window);
         cx.notify();
+    }
+
+    /// A typed host path field for each of `wizard`'s path rows, prefilled
+    /// with what the row holds, for remote `host`, where no picker opens;
+    /// their watches go into `subscriptions`.
+    fn preset_path_inputs(
+        wizard: &PresetWizard,
+        host: &str,
+        subscriptions: &mut Vec<Subscription>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<(Pick, Entity<TextInput>)> {
+        let placeholder = format!("Full path on {host}");
+        let picks = [Pick::SourceFile, Pick::SourceFolder].into_iter().chain(
+            wizard
+                .prompted_variables()
+                .into_iter()
+                .filter_map(Pick::for_variable),
+        );
+        let mut inputs = Vec::new();
+        for pick in picks {
+            let text = wizard.path_text(&pick).to_owned();
+            let input = cx.new(|cx| TextInput::new(text, placeholder.clone(), cx));
+            let field = Field::Path(pick.clone());
+            subscriptions.extend(Self::watch_preset_field(&input, field, window, cx));
+            inputs.push((pick, input));
+        }
+        inputs
     }
 
     /// Closes the wizard and hands the keyboard back to the active pane.
@@ -157,6 +226,7 @@ impl RootView {
                     Field::Issues => dialog.wizard.set_issues_spec(text),
                     Field::MaxPerTab => dialog.wizard.set_max_per_tab(text),
                     Field::Variable(name) => dialog.wizard.set_value(name, text),
+                    Field::Path(pick) => dialog.wizard.apply_pick(pick.clone(), text),
                 }
             }
             cx.notify();
@@ -524,6 +594,22 @@ impl RootView {
             .and_then(|d| d.wizard.folder_path().map(str::to_owned))
     }
 
+    /// The text of the typed host path field tagged `selector`; `None` when
+    /// the row has none, as on this PC.
+    #[must_use]
+    pub fn preset_wizard_path_text(&self, selector: &str, cx: &App) -> Option<String> {
+        let dialog = self.preset_wizard.as_ref()?;
+        let input = dialog.path_input(dialog.pick_at(selector)?)?;
+        Some(input.read(cx).text().to_owned())
+    }
+
+    /// The refusal under the typed host path row tagged `selector`.
+    #[must_use]
+    pub fn preset_wizard_path_refusal(&self, selector: &str) -> Option<String> {
+        let dialog = self.preset_wizard.as_ref()?;
+        dialog.wizard.typed_path_refusal(dialog.pick_at(selector)?)
+    }
+
     /// Next as drawn: whether it can be pressed, and its tooltip.
     #[must_use]
     pub fn preset_wizard_next(&self) -> Option<NextButton> {
@@ -789,9 +875,104 @@ struct PickButton {
     refusal: Option<&'static str>,
 }
 
+/// What a path row shows beside its Pick… button.
+enum PathCell<'a> {
+    /// The path as picked, read-only, with Clear when `on_clear` is given
+    /// and the path is set.
+    Picked {
+        path: Option<&'a str>,
+        placeholder: &'a str,
+        on_clear: Option<ViewAction>,
+    },
+    /// On a remote host, the typed host path's field and the refusal
+    /// shown under it.
+    Typed {
+        input: &'a Entity<TextInput>,
+        refusal: Option<String>,
+    },
+}
+
+/// `pick`'s cell: its typed host path field when the dialog has one,
+/// else `picked`.
+fn path_cell<'a>(
+    dialog: &'a PresetWizardDialog,
+    pick: &Pick,
+    picked: PathCell<'a>,
+) -> PathCell<'a> {
+    match dialog.path_input(pick) {
+        Some(input) => PathCell::Typed {
+            input,
+            refusal: dialog.wizard.typed_path_refusal(pick),
+        },
+        None => picked,
+    }
+}
+
+/// A path row: `cell` beside its Pick… button, then a typed path's
+/// refusal under them.
+fn path_row(
+    selector: &str,
+    cell: PathCell<'_>,
+    button: PickButton,
+    cx: &mut Context<RootView>,
+) -> Div {
+    match cell {
+        PathCell::Picked {
+            path,
+            placeholder,
+            on_clear,
+        } => picked_path_row(selector, path, placeholder, button, on_clear, cx),
+        PathCell::Typed { input, refusal } => {
+            let row = div()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .child(input_box(selector.to_owned(), input))
+                .child(pick_button(selector, button, cx));
+            let error = refusal.map(|refusal| {
+                let tag = format!("{selector}-error");
+                div()
+                    .debug_selector(move || tag)
+                    .px(px(6.0))
+                    .py(px(3.0))
+                    .rounded(px(4.0))
+                    .bg(gpui::rgb(DANGER_BG))
+                    .text_color(gpui::rgb(DANGER))
+                    .child(refusal)
+            });
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(4.0))
+                .child(row)
+                .children(error)
+        }
+    }
+}
+
+/// A path row's Pick… button, disabled with its refusal as its tooltip
+/// when it has one.
+fn pick_button(selector: &str, button: PickButton, cx: &mut Context<RootView>) -> Stateful<Div> {
+    let PickButton { pick, refusal } = button;
+    let pick_enabled = refusal.is_none();
+    dialog_button(
+        &format!("{selector}-pick"),
+        PICK_LABEL.to_owned(),
+        false,
+        false,
+        pick_enabled,
+    )
+    .when_some(refusal, |button, tip| button.tooltip(tooltip(tip)))
+    .when(pick_enabled, |button| {
+        button.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+            this.pick_for_preset(pick.clone(), cx);
+        }))
+    })
+}
+
 /// A read-only path with its Pick… button, and Clear when `clear` is
 /// given and the path is set.
-fn path_row(
+fn picked_path_row(
     selector: &str,
     path: Option<&str>,
     placeholder: &str,
@@ -812,21 +993,7 @@ fn path_row(
         .border_color(gpui::rgb(BORDER))
         .text_color(gpui::rgb(if path.is_some() { TEXT } else { MUTED }))
         .child(path.unwrap_or(placeholder).to_owned());
-    let PickButton { pick, refusal } = button;
-    let pick_enabled = refusal.is_none();
-    let pick_button = dialog_button(
-        &format!("{selector}-pick"),
-        PICK_LABEL.to_owned(),
-        false,
-        false,
-        pick_enabled,
-    )
-    .when_some(refusal, |button, tip| button.tooltip(tooltip(tip)))
-    .when(pick_enabled, |button| {
-        button.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-            this.pick_for_preset(pick.clone(), cx);
-        }))
-    });
+    let pick_button = pick_button(selector, button, cx);
     let clear = on_clear.filter(|_| path.is_some()).map(|on_clear| {
         dialog_button(
             &format!("{selector}-clear"),
@@ -871,8 +1038,8 @@ fn source_body(
         })
         .collect();
     let field = match picked {
-        SourceKind::File => file_field(wizard, pick_refusal, cx),
-        SourceKind::Folder => folder_field(wizard, pick_refusal, cx),
+        SourceKind::File => file_field(dialog, pick_refusal, cx),
+        SourceKind::Folder => folder_field(dialog, pick_refusal, cx),
         SourceKind::Inline => div()
             .flex()
             .flex_col()
@@ -894,19 +1061,22 @@ fn source_body(
 }
 
 fn file_field(
-    wizard: &PresetWizard,
+    dialog: &PresetWizardDialog,
     pick_refusal: Option<&'static str>,
     cx: &mut Context<RootView>,
 ) -> Div {
+    let picked = PathCell::Picked {
+        path: dialog.wizard.file_path(),
+        placeholder: FILE_PLACEHOLDER,
+        on_clear: None,
+    };
     let row = path_row(
         "preset-source-file",
-        wizard.file_path(),
-        FILE_PLACEHOLDER,
+        path_cell(dialog, &Pick::SourceFile, picked),
         PickButton {
             pick: Pick::SourceFile,
             refusal: pick_refusal,
         },
-        None,
         cx,
     );
     div()
@@ -918,10 +1088,11 @@ fn file_field(
 }
 
 fn folder_field(
-    wizard: &PresetWizard,
+    dialog: &PresetWizardDialog,
     pick_refusal: Option<&'static str>,
     cx: &mut Context<RootView>,
 ) -> Div {
+    let wizard = &dialog.wizard;
     let note = wizard
         .entry()
         .prompt_sources
@@ -932,15 +1103,18 @@ fn folder_field(
             }
             _ => None,
         });
+    let picked = PathCell::Picked {
+        path: wizard.folder_path(),
+        placeholder: FOLDER_PLACEHOLDER,
+        on_clear: None,
+    };
     let row = path_row(
         "preset-source-folder",
-        wizard.folder_path(),
-        FOLDER_PLACEHOLDER,
+        path_cell(dialog, &Pick::SourceFolder, picked),
         PickButton {
             pick: Pick::SourceFolder,
             refusal: pick_refusal,
         },
-        None,
         cx,
     );
     div()
@@ -1004,18 +1178,23 @@ fn variable_field(
     let name = variable.name.clone();
     let value = wizard.value(&variable.name);
     let path = (!value.is_empty()).then_some(value);
+    let placeholder = variable_placeholder(variable);
     let input: AnyElement = if let Some(pick) = Pick::for_variable(variable) {
+        let picked = PathCell::Picked {
+            path,
+            placeholder: &placeholder,
+            on_clear: Some(Box::new(move |this, cx| {
+                this.with_preset_wizard(cx, |wizard| wizard.set_value(&name, String::new()));
+            })),
+        };
+        let cell = path_cell(dialog, &pick, picked);
         path_row(
             &selector,
-            path,
-            &variable_placeholder(variable),
+            cell,
             PickButton {
                 pick,
                 refusal: pick_refusal,
             },
-            Some(Box::new(move |this, cx| {
-                this.with_preset_wizard(cx, |wizard| wizard.set_value(&name, String::new()));
-            })),
             cx,
         )
         .into_any_element()
