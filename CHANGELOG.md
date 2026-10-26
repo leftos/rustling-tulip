@@ -8,6 +8,10 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 - The Needs You panel says what a waiting session asks: its question, the tool it wants to run, or the plan to approve, cut short when it runs long.
 
+### Changed
+
+- When remote access has no certificate, Settings says why: the certificate command failed, its files were unusable, Tailscale gave no name, or the certificate task stopped.
+
 ## v0.3.0-alpha
 
 ### Added

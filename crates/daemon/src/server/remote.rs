@@ -480,6 +480,7 @@ mod tests {
         loopback_ws_client, tailnet_ws_client_under, test_hub, test_hub_in, test_peer, ws_next,
         ws_send,
     };
+    use crate::tailnet_listener::CertFailedCause;
     use axum::body::Body;
     use axum::http::{Method, Request};
     use std::net::Ipv4Addr;
@@ -790,7 +791,7 @@ mod tests {
         for status in [
             ListenerStatus::Starting,
             ListenerStatus::HttpsDisabled,
-            ListenerStatus::CertFailed,
+            ListenerStatus::CertFailed(CertFailedCause::Command),
             ListenerStatus::PortInUse { port: 8787 },
             ListenerStatus::BindFailed("in use".to_owned()),
             ListenerStatus::TailscaleDown(tailnet::TailnetError::NotConnected),

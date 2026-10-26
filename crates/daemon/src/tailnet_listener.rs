@@ -55,6 +55,23 @@ const CERT_BACKOFF_CAP: Duration = Duration::from_hours(1);
 /// connect) is picked up soon.
 const CERT_BACKOFF_CAP_DOWN: Duration = Duration::from_mins(5);
 
+/// Why no certificate is in service: the cause [`ListenerStatus::CertFailed`]
+/// carries, so a client reads which of the fixed texts applies. The failure's
+/// own text, which can name a path, stays in `daemon.log`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CertFailedCause {
+    /// `tailscale cert` failed.
+    Command,
+    /// The certificate files could not be read, or do not make a usable
+    /// certificate and key.
+    Unusable,
+    /// `whoami` gave no `MagicDNS` name to ask a certificate for.
+    NoDnsName,
+    /// The certificate task stopped; nothing loads a certificate until the
+    /// daemon restarts.
+    TaskEnded,
+}
+
 /// What the listener is doing, published on a watch for the status surface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ListenerStatus {
@@ -76,9 +93,10 @@ pub enum ListenerStatus {
     /// HTTPS certificates are disabled in the tailnet's admin console; no
     /// server runs, even when a certificate had loaded before.
     HttpsDisabled,
-    /// No certificate is in service: `tailscale cert` failed for another
-    /// reason, its files were unusable, or `whoami` gave no name to ask for.
-    CertFailed,
+    /// No certificate is in service; the [`CertFailedCause`] says why: the `tailscale cert`
+    /// command failed, its files were unusable, `whoami` gave no `MagicDNS`
+    /// name to ask for, or the certificate task stopped.
+    CertFailed(CertFailedCause),
     /// Every address failed to bind because `port` stayed in use past the
     /// retry budget.
     PortInUse { port: u16 },
@@ -91,11 +109,39 @@ pub enum ListenerStatus {
     TailscaleDown(TailnetError),
 }
 
+impl CertFailedCause {
+    /// The fixed text [`protocol::RemoteState::CertFailed`] carries for this
+    /// cause; the failure's own text, logged in `daemon.log`, can carry a
+    /// path and never goes on the wire.
+    fn reason(self) -> &'static str {
+        match self {
+            Self::Command => CERT_COMMAND_FAILED_REASON,
+            Self::Unusable => CERT_FILES_UNUSABLE_REASON,
+            Self::NoDnsName => CERT_NO_NAME_REASON,
+            Self::TaskEnded => CERT_TASK_ENDED_REASON,
+        }
+    }
+}
+
 /// The reason [`protocol::RemoteState::CertFailed`] gives for
-/// [`ListenerStatus::CertFailed`], which carries none.
-const CERT_FAILED_REASON: &str = "No certificate is in service: tailscale cert failed, its files \
-                                  were unusable, or Tailscale gave no MagicDNS name; see the \
-                                  daemon log.";
+/// [`CertFailedCause::Command`].
+const CERT_COMMAND_FAILED_REASON: &str =
+    "No certificate is in service: the tailscale cert command failed; see the daemon log.";
+
+/// The reason [`protocol::RemoteState::CertFailed`] gives for
+/// [`CertFailedCause::Unusable`].
+const CERT_FILES_UNUSABLE_REASON: &str = "No certificate is in service: the certificate files \
+                                          Tailscale wrote were unusable; see the daemon log.";
+
+/// The reason [`protocol::RemoteState::CertFailed`] gives for
+/// [`CertFailedCause::NoDnsName`].
+const CERT_NO_NAME_REASON: &str = "No certificate is in service: Tailscale gave no MagicDNS name \
+                                   for this PC; see the daemon log.";
+
+/// The reason [`protocol::RemoteState::CertFailed`] gives for
+/// [`CertFailedCause::TaskEnded`].
+const CERT_TASK_ENDED_REASON: &str =
+    "No certificate is in service: the certificate task stopped; see the daemon log.";
 
 /// The reason [`protocol::RemoteState::TailscaleError`] gives for
 /// [`TailnetError::Timeout`]. Like the other reasons below it is a fixed
@@ -138,8 +184,8 @@ pub fn remote_state(status: &ListenerStatus, port: u16) -> protocol::RemoteState
         ListenerStatus::HttpsDisabled
         | ListenerStatus::TailscaleDown(TailnetError::HttpsDisabled) => RemoteState::HttpsDisabled,
         ListenerStatus::HostTagged => RemoteState::HostTagged,
-        ListenerStatus::CertFailed => RemoteState::CertFailed {
-            reason: CERT_FAILED_REASON.to_owned(),
+        ListenerStatus::CertFailed(cause) => RemoteState::CertFailed {
+            reason: cause.reason().to_owned(),
         },
         ListenerStatus::PortInUse { .. } => RemoteState::PortInUse,
         ListenerStatus::BindFailed(_) => RemoteState::BindFailed {
@@ -562,7 +608,10 @@ impl CertFailure {
     fn status(&self) -> ListenerStatus {
         match self {
             Self::Cli(TailnetError::HttpsDisabled) => ListenerStatus::HttpsDisabled,
-            _ => ListenerStatus::CertFailed,
+            Self::Cli(_) => ListenerStatus::CertFailed(CertFailedCause::Command),
+            Self::Read(_) | Self::Unusable(_) => {
+                ListenerStatus::CertFailed(CertFailedCause::Unusable)
+            }
         }
     }
 }
@@ -908,39 +957,62 @@ impl<A: TailnetApi, S: Serve<A>> Supervisor<A, S> {
             let Some(answer) = until_shutdown(self.api.whoami(), &mut shutdown).await else {
                 break;
             };
-            let pause = match answer {
-                Ok(who) if tailnet::host_can_serve(&who).is_err() => {
-                    down_backoff = self.options.down_backoff;
-                    self.transient_failures = 0;
-                    self.last_down_error = None;
-                    self.host_tagged().await;
-                    self.options.poll_interval
-                }
-                Ok(who) => {
-                    self.host.send_replace(Some(who.clone()));
-                    down_backoff = self.options.down_backoff;
-                    self.transient_failures = 0;
-                    self.last_down_error = None;
-                    let flow = self.apply(&who, &mut shutdown).await;
-                    self.last_who = Some(who);
-                    if flow == Flow::Shutdown {
-                        break;
-                    }
-                    self.options.poll_interval
-                }
-                Err(err) => {
-                    self.whoami_failed(err).await;
-                    let pause = down_backoff;
-                    down_backoff = (down_backoff * 2).min(self.options.poll_interval);
-                    pause
-                }
+            let Some(pause) = self
+                .on_answer(answer, &mut down_backoff, &mut shutdown)
+                .await
+            else {
+                break;
             };
             if self.pause(pause, &mut shutdown).await == Flow::Shutdown {
                 break;
             }
         }
-        // No `tailscale cert` call may outlive the listener, nor wait out the
-        // servers' drain.
+        self.finish().await;
+    }
+
+    /// Apply one `whoami` answer: the pause before the next one, or `None`
+    /// when applying it saw shutdown asked for and the loop must end.
+    async fn on_answer(
+        &mut self,
+        answer: Result<WhoIs, TailnetError>,
+        down_backoff: &mut Duration,
+        shutdown: &mut watch::Receiver<bool>,
+    ) -> Option<Duration> {
+        match answer {
+            Ok(who) if tailnet::host_can_serve(&who).is_err() => {
+                *down_backoff = self.options.down_backoff;
+                self.clear_down_state();
+                self.host_tagged().await;
+                Some(self.options.poll_interval)
+            }
+            Ok(who) => {
+                self.host.send_replace(Some(who.clone()));
+                *down_backoff = self.options.down_backoff;
+                self.clear_down_state();
+                let flow = self.apply(&who, shutdown).await;
+                self.last_who = Some(who);
+                (flow != Flow::Shutdown).then_some(self.options.poll_interval)
+            }
+            Err(err) => {
+                self.whoami_failed(err).await;
+                let pause = *down_backoff;
+                *down_backoff = (pause * 2).min(self.options.poll_interval);
+                Some(pause)
+            }
+        }
+    }
+
+    /// Forget the `whoami` failure bookkeeping: an answer that keeps the
+    /// listener up was applied.
+    fn clear_down_state(&mut self) {
+        self.transient_failures = 0;
+        self.last_down_error = None;
+    }
+
+    /// The supervisor is done: no `tailscale cert` call may outlive the
+    /// listener, nor wait out the servers' drain, so the cert task is
+    /// aborted and awaited before every server stops.
+    async fn finish(&mut self) {
         self.cert_task.0.abort();
         if let Err(err) = (&mut self.cert_task.0).await
             && !err.is_cancelled()
@@ -1061,7 +1133,7 @@ impl<A: TailnetApi, S: Serve<A>> Supervisor<A, S> {
                 let cert = ServingCert { name, expires_at };
                 return self.serve_addresses(who, cert, &tls, shutdown).await;
             }
-            _ if name.is_none() => ListenerStatus::CertFailed,
+            _ if name.is_none() => ListenerStatus::CertFailed(CertFailedCause::NoDnsName),
             CertState::Down {
                 name: failed_for,
                 status,
@@ -1084,7 +1156,7 @@ impl<A: TailnetApi, S: Serve<A>> Supervisor<A, S> {
             );
         }
         self.stop_all().await;
-        self.publish(ListenerStatus::CertFailed);
+        self.publish(ListenerStatus::CertFailed(CertFailedCause::TaskEnded));
     }
 
     /// Bring the servers in line with `who`'s addresses, serving `tls` as
@@ -2494,7 +2566,10 @@ mod tests {
         let serve = Arc::new(PlainServe::default());
         let (listener, shutdown) = start(&fake, &serve, options(0));
         let status = wait_for_status(&listener, |s| *s != ListenerStatus::Starting).await;
-        assert_eq!(status, ListenerStatus::CertFailed);
+        assert_eq!(
+            status,
+            ListenerStatus::CertFailed(CertFailedCause::NoDnsName)
+        );
         assert!(
             fake.cert_calls().is_empty(),
             "no name, no certificate to ask for"
@@ -3036,11 +3111,33 @@ mod tests {
             let serve = Arc::new(PlainServe::default());
             let (listener, shutdown) = start(&fake, &serve, options(0));
             let status = wait_for_status(&listener, |s| *s != ListenerStatus::Starting).await;
-            assert_eq!(status, ListenerStatus::CertFailed, "{err:?}");
+            assert_eq!(
+                status,
+                ListenerStatus::CertFailed(CertFailedCause::Command),
+                "{err:?}"
+            );
             assert_eq!(serve.started.load(Ordering::SeqCst), 0, "{err:?}");
             shutdown.send_replace(true);
             listener.stopped().await;
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cert_files_unusable_reports_the_unusable_cause() {
+        let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
+        fake.set_cert(CertScript::Write {
+            cert: b"not a usable pem".to_vec(),
+            key: b"not a usable pem".to_vec(),
+        });
+        let serve = Arc::new(PlainServe::default());
+        let (listener, shutdown) = start(&fake, &serve, options(0));
+        let status = wait_for_status(&listener, |s| *s != ListenerStatus::Starting).await;
+        assert_eq!(
+            status,
+            ListenerStatus::CertFailed(CertFailedCause::Unusable)
+        );
+        assert_eq!(serve.started.load(Ordering::SeqCst), 0, "nothing bound");
+        shutdown.send_replace(true);
     }
 
     #[tokio::test(start_paused = true)]
@@ -3439,7 +3536,7 @@ mod tests {
 
         listener.abort_cert_task();
         let down = wait_for_status(&listener, |s| !is_serving(s)).await;
-        assert_eq!(down, ListenerStatus::CertFailed);
+        assert_eq!(down, ListenerStatus::CertFailed(CertFailedCause::TaskEnded));
         assert_eq!(serve.finished.load(Ordering::SeqCst), 1, "server stopped");
         std::net::TcpListener::bind(addr).expect("nothing bound: the address was released");
 
@@ -3450,7 +3547,10 @@ mod tests {
             before + 3,
             "whoami is still polled, every poll interval"
         );
-        assert_eq!(*listener.status().borrow(), ListenerStatus::CertFailed);
+        assert_eq!(
+            *listener.status().borrow(),
+            ListenerStatus::CertFailed(CertFailedCause::TaskEnded)
+        );
         assert_eq!(
             serve.started.load(Ordering::SeqCst),
             1,
@@ -3664,7 +3764,10 @@ mod tests {
         fake.set_cert(CertScript::Panic);
         let serve = Arc::new(PlainServe::default());
         let (listener, shutdown) = start(&fake, &serve, options(0));
-        wait_for_status(&listener, |s| *s == ListenerStatus::CertFailed).await;
+        wait_for_status(&listener, |s| {
+            *s == ListenerStatus::CertFailed(CertFailedCause::TaskEnded)
+        })
+        .await;
         shutdown.send_replace(true);
         listener.stopped().await;
         assert_eq!(
@@ -3736,7 +3839,10 @@ mod tests {
         fake.set_cert(CertScript::Fail(TailnetError::Timeout));
         let serve = Arc::new(PlainServe::default());
         let (listener, shutdown) = start(&fake, &serve, options(0));
-        wait_for_status(&listener, |s| *s == ListenerStatus::CertFailed).await;
+        wait_for_status(&listener, |s| {
+            *s == ListenerStatus::CertFailed(CertFailedCause::Command)
+        })
+        .await;
 
         let mut state = listener.cert_state.clone();
         state.borrow_and_update();
@@ -4445,9 +4551,27 @@ mod tests {
             (ListenerStatus::HttpsDisabled, RemoteState::HttpsDisabled),
             (ListenerStatus::HostTagged, RemoteState::HostTagged),
             (
-                ListenerStatus::CertFailed,
+                ListenerStatus::CertFailed(CertFailedCause::Command),
                 RemoteState::CertFailed {
-                    reason: CERT_FAILED_REASON.to_owned(),
+                    reason: CERT_COMMAND_FAILED_REASON.to_owned(),
+                },
+            ),
+            (
+                ListenerStatus::CertFailed(CertFailedCause::Unusable),
+                RemoteState::CertFailed {
+                    reason: CERT_FILES_UNUSABLE_REASON.to_owned(),
+                },
+            ),
+            (
+                ListenerStatus::CertFailed(CertFailedCause::NoDnsName),
+                RemoteState::CertFailed {
+                    reason: CERT_NO_NAME_REASON.to_owned(),
+                },
+            ),
+            (
+                ListenerStatus::CertFailed(CertFailedCause::TaskEnded),
+                RemoteState::CertFailed {
+                    reason: CERT_TASK_ENDED_REASON.to_owned(),
                 },
             ),
             (
@@ -4542,6 +4666,31 @@ mod tests {
                 assert!(
                     !reason.contains(forbidden),
                     "{label}: {reason:?} holds {forbidden:?}"
+                );
+            }
+        }
+        let causes = [
+            (CertFailedCause::Command, CERT_COMMAND_FAILED_REASON),
+            (CertFailedCause::Unusable, CERT_FILES_UNUSABLE_REASON),
+            (CertFailedCause::NoDnsName, CERT_NO_NAME_REASON),
+            (CertFailedCause::TaskEnded, CERT_TASK_ENDED_REASON),
+        ];
+        for (cause, expected) in causes {
+            let state = remote_state(&ListenerStatus::CertFailed(cause), 9000);
+            assert_eq!(
+                state,
+                RemoteState::CertFailed {
+                    reason: expected.to_owned()
+                },
+                "{cause:?}"
+            );
+            let RemoteState::CertFailed { reason } = &state else {
+                continue;
+            };
+            for forbidden in ["\\", "/", ".exe"] {
+                assert!(
+                    !reason.contains(forbidden),
+                    "{cause:?}: {reason:?} holds {forbidden:?}"
                 );
             }
         }
