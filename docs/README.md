@@ -1,6 +1,6 @@
 # rustling-tulip developer docs
 
-The start page for working on rustling-tulip: a native Windows desktop client (GPUI) and a long-lived Rust daemon that runs many parallel `claude` CLI sessions across repos and multi-repo "workspaces". What the app does for its users is in the [root README](../README.md); agent instructions are in [CLAUDE.md](../CLAUDE.md).
+The start page for working on rustling-tulip: a native Windows desktop client (GPUI) and a long-lived Rust daemon that runs many parallel `claude` CLI sessions across repos and multi-repo "workspaces". What the app does for its users is in the [root README](../README.md), and what changed in each release in the [changelog](../CHANGELOG.md); agent instructions are in [CLAUDE.md](../CLAUDE.md).
 
 ## Docs
 

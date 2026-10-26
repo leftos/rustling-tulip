@@ -89,8 +89,11 @@ The goal is each release as soon as possible, through Release 2; this overrides 
 
 ## Changelog
 
-The repo keeps no CHANGELOG. Read by the user-level `changelog-and-commit`:
+The repo keeps `CHANGELOG.md` in its root. Read by the user-level `changelog-and-commit`:
 
+- Every landed item with a user-visible change adds or folds its bullet under `## Unreleased`, in the item's own commit (an item on a feature branch: in its commit there, and the merge carries it).
+- Sub-headings, in order: `### Added`, `### Fixed`, `### Changed`. The audience is the app's users: no issue numbers, crate, module or type names.
+- The release cut renames `## Unreleased` to `## v<version>` and opens a new empty `## Unreleased` above it (`docs/release.md`).
 - Plan (Step 2b): **land** each item after its commit.
 
 ## Landing
