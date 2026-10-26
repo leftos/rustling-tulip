@@ -291,7 +291,19 @@ Sessions a reboot, a crash or a killed process tree ended come back on their own
 
 ## Needs You
 
-A rail item after Sessions (an inbox tray) opens a panel listing every session waiting on the user, headed "NEEDS YOU · N"; its badge counts the rows (hidden at 0, `99+` above 99), and the rail never switches to it on its own. The list is plain Rust (`needs_you.rs`) over the sidebar model, drawn by `needs_you_view.rs`. A session is listed as **Asking** while its status is `AwaitingInput`, and as **Ended** while it is `Error` or `Stopped` and its leaf is still flagged; parked and abandoned sessions never are. Rows run longest wait first by the snapshot's `status_since` (the daemon's stamp of the last status change, kept across a reattach), rows with no stamp next, ended rows last, ties in sidebar order. A row shows the status glyph, the container name in its accent, the session's label and the time waited; line two reads "Waiting for input" (with the terminal title when it has one), "Error", "Exited with code N" or "Stopped". A click is a leaf click: it focuses or places the session's pane and clears the flag, so an Ended row leaves while an Asking row stays until the question is answered; right-click opens the session menu.
+A rail item after Sessions (an inbox tray) opens a panel listing every session waiting on the user, headed "NEEDS YOU · N"; its badge counts the rows (hidden at 0, `99+` above 99), and the rail never switches to it on its own.
+
+The list is plain Rust (`needs_you.rs`) over the sidebar model, drawn by `needs_you_view.rs`. A session is listed as **Asking** while its status is `AwaitingInput`, and as **Ended** while it is `Error` or `Stopped` and its leaf is still flagged; parked and abandoned sessions never are.
+
+Rows run longest wait first by the snapshot's `status_since` (the daemon's stamp of the last status change, kept across a reattach), rows with no stamp next, ended rows last, ties in sidebar order.
+
+A row shows the status glyph, the container name in its accent, the session's label and the time waited.
+
+Line two says what an Asking session wants, from the prompt its hooks reported (`pending_input`): a question's header and text ("Migration: keep newest, merge oldest, or skip?", with "+N more" for several), "Allow <tool>: <what it runs>", "Approve plan: " and the plan's first line, or the notification's message, on one line with an ellipsis and in full in the tooltip; with no prompt it reads "Waiting for input" (with the terminal title when it has one).
+
+An Ended row reads "Error", "Exited with code N" or "Stopped".
+
+A click is a leaf click: it focuses or places the session's pane and clears the flag, so an Ended row leaves while an Asking row stays until the question is answered; right-click opens the session menu.
 
 ## Text viewer
 

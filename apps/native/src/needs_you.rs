@@ -6,7 +6,7 @@
 use crate::appearance;
 use crate::sidebar::{Leaf, LeafState, SidebarModel};
 use chrono::{DateTime, Utc};
-use protocol::{SessionSnapshot, SessionStatus};
+use protocol::{PendingInput, PendingQuestion, SessionSnapshot, SessionStatus};
 
 /// Why a session is listed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,16 +100,93 @@ fn reason_of(leaf: &Leaf) -> Option<Reason> {
 /// Line two for a listed session.
 fn detail_of(reason: Reason, session: &SessionSnapshot) -> String {
     match reason {
-        Reason::Asking => terminal_title(session).map_or_else(
-            || "Waiting for input".to_owned(),
-            |title| format!("Waiting for input · {title}"),
-        ),
+        Reason::Asking => session
+            .pending_input
+            .as_ref()
+            .and_then(pending_line)
+            .unwrap_or_else(|| waiting_line(session)),
         Reason::Ended if session.status == SessionStatus::Error => "Error".to_owned(),
         Reason::Ended => session.exit_code.map_or_else(
             || "Stopped".to_owned(),
             |code| format!("Exited with code {code}"),
         ),
     }
+}
+
+/// Line two when no hook has said what the session wants: the waiting text,
+/// with the terminal title when the session has one.
+fn waiting_line(session: &SessionSnapshot) -> String {
+    terminal_title(session).map_or_else(
+        || "Waiting for input".to_owned(),
+        |title| format!("Waiting for input · {title}"),
+    )
+}
+
+/// Line two from the prompt the agent's hooks last reported, or `None` when
+/// the prompt cannot be said in one line.
+fn pending_line(pending: &PendingInput) -> Option<String> {
+    match pending {
+        PendingInput::Question { questions } => question_line(questions),
+        PendingInput::Permission { tool_name, summary } => permission_line(tool_name, summary),
+        PendingInput::PlanApproval { plan } => Some(plan_line(plan.as_deref())),
+        PendingInput::Other { message } => {
+            let message = one_line(message);
+            (!message.is_empty()).then_some(message)
+        }
+        PendingInput::Unknown => None,
+    }
+}
+
+/// The first question that has text, as `header: question`, with a count of
+/// the questions after it when the prompt asks several.
+fn question_line(questions: &[PendingQuestion]) -> Option<String> {
+    let (header, question) = questions
+        .iter()
+        .map(|question| (one_line(&question.header), one_line(&question.question)))
+        .find(|(_, question)| !question.is_empty())?;
+    let line = if header.is_empty() {
+        question
+    } else {
+        format!("{header}: {question}")
+    };
+    let rest = questions.len() - 1;
+    if rest == 0 {
+        Some(line)
+    } else {
+        Some(format!("{line} +{rest} more"))
+    }
+}
+
+/// What one tool call would do, named by the tool.
+fn permission_line(tool_name: &str, summary: &str) -> Option<String> {
+    let tool = one_line(tool_name);
+    if tool.is_empty() {
+        return None;
+    }
+    let summary = one_line(summary);
+    if summary.is_empty() {
+        Some(format!("Allow {tool}"))
+    } else {
+        Some(format!("Allow {tool}: {summary}"))
+    }
+}
+
+/// A plan approval, named by the plan's first line.
+fn plan_line(plan: Option<&str>) -> String {
+    plan.and_then(first_line).map_or_else(
+        || "Approve plan".to_owned(),
+        |line| format!("Approve plan: {line}"),
+    )
+}
+
+/// The first line of `text` that holds anything but whitespace, as one line.
+fn first_line(text: &str) -> Option<String> {
+    text.lines().map(one_line).find(|line| !line.is_empty())
+}
+
+/// `text` with every run of whitespace, newlines included, as one space.
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// The session's terminal title, when it has a non-blank one.
@@ -148,7 +225,7 @@ pub(crate) fn waited(now: DateTime<Utc>, since: DateTime<Utc>) -> String {
 )]
 mod tests {
     use super::*;
-    use protocol::{AttentionReason, DaemonMessage, RepoEntry};
+    use protocol::{AttentionReason, DaemonMessage, PendingInput, PendingQuestion, RepoEntry};
     use serde_json::json;
 
     /// The repo every fixture session belongs to.
@@ -190,6 +267,23 @@ mod tests {
         let mut s = session(id);
         s.status = SessionStatus::AwaitingInput;
         s
+    }
+
+    /// A session waiting for an answer, with `pending` as the prompt its
+    /// agent's hooks last reported.
+    fn asking_with(id: &str, pending: PendingInput) -> SessionSnapshot {
+        let mut s = asking(id);
+        s.pending_input = Some(pending);
+        s
+    }
+
+    fn question(header: &str, text: &str) -> PendingQuestion {
+        PendingQuestion {
+            question: text.to_owned(),
+            header: header.to_owned(),
+            options: Vec::new(),
+            multi_select: false,
+        }
     }
 
     fn ended(id: &str, status: SessionStatus, exit_code: Option<i32>) -> SessionSnapshot {
@@ -388,6 +482,156 @@ mod tests {
             listed[1].detail,
             "Waiting for input · Running the migration"
         );
+    }
+
+    #[test]
+    fn question_detail_is_header_and_first_question() {
+        let pending = PendingInput::Question {
+            questions: vec![question("Migration", "keep newest, merge oldest, or skip?")],
+        };
+        let listed = rows(&list(vec![asking_with("s1", pending)]));
+        assert_eq!(
+            listed[0].detail,
+            "Migration: keep newest, merge oldest, or skip?"
+        );
+    }
+
+    #[test]
+    fn question_without_header_shows_the_bare_question() {
+        let pending = PendingInput::Question {
+            questions: vec![question("", "keep newest, merge oldest, or skip?")],
+        };
+        let listed = rows(&list(vec![asking_with("s1", pending)]));
+        assert_eq!(listed[0].detail, "keep newest, merge oldest, or skip?");
+    }
+
+    #[test]
+    fn several_questions_add_a_plus_n_more_suffix() {
+        let pending = PendingInput::Question {
+            questions: vec![
+                question("Migration", "keep newest, merge oldest, or skip?"),
+                question("Backup", "keep a copy first?"),
+                question("Downtime", "is a restart acceptable?"),
+            ],
+        };
+        let listed = rows(&list(vec![asking_with("s1", pending)]));
+        assert_eq!(
+            listed[0].detail,
+            "Migration: keep newest, merge oldest, or skip? +2 more"
+        );
+    }
+
+    #[test]
+    fn question_with_no_questions_falls_back_to_waiting_for_input() {
+        let listed = rows(&list(vec![asking_with(
+            "s1",
+            PendingInput::Question {
+                questions: Vec::new(),
+            },
+        )]));
+        assert_eq!(listed[0].detail, "Waiting for input");
+    }
+
+    #[test]
+    fn permission_detail_names_the_tool_and_what_it_runs() {
+        let pending = PendingInput::Permission {
+            tool_name: "Bash".to_owned(),
+            summary: "cargo build".to_owned(),
+        };
+        let listed = rows(&list(vec![asking_with("s1", pending)]));
+        assert_eq!(listed[0].detail, "Allow Bash: cargo build");
+    }
+
+    #[test]
+    fn permission_with_an_empty_summary_names_only_the_tool() {
+        let pending = PendingInput::Permission {
+            tool_name: "Write".to_owned(),
+            summary: String::new(),
+        };
+        let listed = rows(&list(vec![asking_with("s1", pending)]));
+        assert_eq!(listed[0].detail, "Allow Write");
+    }
+
+    #[test]
+    fn plan_approval_detail_is_the_plans_first_line() {
+        let pending = PendingInput::PlanApproval {
+            plan: Some("\n\n# Plan\nstep 1".to_owned()),
+        };
+        let listed = rows(&list(vec![asking_with("s1", pending)]));
+        assert_eq!(listed[0].detail, "Approve plan: # Plan");
+    }
+
+    #[test]
+    fn plan_approval_without_a_plan_reads_approve_plan() {
+        let blank = rows(&list(vec![asking_with(
+            "s1",
+            PendingInput::PlanApproval {
+                plan: Some(" \n\t\n".to_owned()),
+            },
+        )]));
+        assert_eq!(blank[0].detail, "Approve plan");
+        let absent = rows(&list(vec![asking_with(
+            "s2",
+            PendingInput::PlanApproval { plan: None },
+        )]));
+        assert_eq!(absent[0].detail, "Approve plan");
+    }
+
+    #[test]
+    fn other_detail_is_the_message() {
+        let pending = PendingInput::Other {
+            message: "An MCP server asks for input".to_owned(),
+        };
+        let listed = rows(&list(vec![asking_with("s1", pending)]));
+        assert_eq!(listed[0].detail, "An MCP server asks for input");
+        let blank = rows(&list(vec![asking_with(
+            "s2",
+            PendingInput::Other {
+                message: "  ".to_owned(),
+            },
+        )]));
+        assert_eq!(blank[0].detail, "Waiting for input");
+    }
+
+    #[test]
+    fn unknown_pending_input_falls_back_to_the_degraded_text() {
+        let bare = asking_with("s1", PendingInput::Unknown);
+        let mut titled = asking_with("s2", PendingInput::Unknown);
+        titled.terminal_title = Some("Running the migration".to_owned());
+        let listed = rows(&list(vec![bare, titled]));
+        assert_eq!(listed[0].detail, "Waiting for input");
+        assert_eq!(
+            listed[1].detail,
+            "Waiting for input · Running the migration"
+        );
+    }
+
+    #[test]
+    fn pending_input_text_is_one_line() {
+        let pending = PendingInput::Question {
+            questions: vec![question(
+                "Migration",
+                "keep newest,\nmerge oldest,\tor\nskip?",
+            )],
+        };
+        let listed = rows(&list(vec![asking_with("s1", pending)]));
+        assert_eq!(
+            listed[0].detail,
+            "Migration: keep newest, merge oldest, or skip?"
+        );
+    }
+
+    #[test]
+    fn pending_input_is_ignored_for_ended_rows() {
+        let mut stale = ended("s1", SessionStatus::Error, None);
+        stale.pending_input = Some(PendingInput::Other {
+            message: "stale question".to_owned(),
+        });
+        let mut model = list(vec![stale]);
+        attend(&mut model, "s1");
+        let listed = rows(&model);
+        assert_eq!(listed[0].reason, Reason::Ended);
+        assert_eq!(listed[0].detail, "Error");
     }
 
     #[test]

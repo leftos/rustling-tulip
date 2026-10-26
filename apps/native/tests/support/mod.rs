@@ -412,6 +412,11 @@ impl SessionBuilder {
         self.set("status_since", json!(at))
     }
 
+    /// What its agent's hooks last reported it is waiting for.
+    pub fn pending_input(self, value: Value) -> Self {
+        self.set("pending_input", value)
+    }
+
     pub fn in_repo(self, repo_id: &str) -> Self {
         self.set(
             "members",

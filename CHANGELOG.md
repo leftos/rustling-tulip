@@ -4,6 +4,10 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+### Added
+
+- The Needs You panel says what a waiting session asks: its question, the tool it wants to run, or the plan to approve.
+
 ## v0.3.0-alpha
 
 ### Added

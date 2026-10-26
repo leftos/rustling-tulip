@@ -262,6 +262,47 @@ fn working_update_drops_a_row(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_question_shows_its_header_and_first_question(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        repos: vec![repo("r1", "D:/src/r1")],
+        sessions: vec![
+            session("s1")
+                .in_repo("r1")
+                .status("awaiting_input")
+                .status_since(Utc::now() - Duration::seconds(20))
+                .pending_input(json!({
+                    "kind": "question",
+                    "questions": [{
+                        "question": "keep newest, merge oldest, or skip?",
+                        "header": "Migration",
+                        "options": [],
+                        "multi_select": false,
+                    }],
+                }))
+                .build(),
+        ],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.click_on("activity-needs-you");
+    let rows = entries(&mut h);
+    assert_eq!(
+        rows[0].detail,
+        "Migration: keep newest, merge oldest, or skip?"
+    );
+    assert_eq!(ids(&mut h), ["s1"]);
+
+    h.send(DaemonMessage::SessionUpdated {
+        session: session("s1").in_repo("r1").status("working").build(),
+        request_id: None,
+    });
+    assert!(entries(&mut h).is_empty(), "answering drops the row");
+    assert!(!h.in_model("needs-you-row-s1"));
+    assert_eq!(header(&mut h), "NEEDS YOU · 0");
+}
+
+#[gpui::test]
 fn empty_panel_shows_the_empty_text(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let fixture = Fixture {
