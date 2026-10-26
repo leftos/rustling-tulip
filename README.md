@@ -16,6 +16,7 @@ It is alpha software, Windows only for now.
 - The Needs You panel lists every session waiting on you, longest wait first, and a Windows notification fires when a session needs you or finishes (skipped when you are already looking at it).
 - Tabs and split panes: drag a pane or a sidebar session onto a pane to split, swap or move it, rearrange a tab into a grid, and undo a closed tab or a moved pane.
 - The sidebar groups sessions by repo or by tab, in Comfortable or Compact rows, and can show every session under a repo, only the busy ones, or just a count.
+- Repos sort with the ones that need you on top, by latest activity, or in your own order, and an All / Active switch hides the repos and workspaces with nothing running.
 - Launch again with one click: a repo's last launch settings are replayed from its row. Presets start many sessions at once from a prompts file, a folder or GitHub issue ranges.
 - In the terminal, copying from Claude Code's boxed panels leaves out the borders, file paths and URLs open with Ctrl+click, shell commands get a pass/fail mark in the gutter with copy and re-run, and two header buttons jump between the prompts you sent.
 - When Claude exits, its pane stays a working shell.
@@ -71,18 +72,13 @@ It is alpha software, Windows only for now.
 
 Remote access also needs [Tailscale](https://tailscale.com/) on both PCs, signed in to the same tailnet, with HTTPS certificates turned on for it.
 
-## What's new in v0.2.0-alpha
+## What's new in v0.3.0-alpha
 
-- Remote mode over Tailscale: open another PC's sessions, approve new devices with a pairing code, and block or forget them.
-- Fetch a file from a remote session by Ctrl+clicking its path, or with Fetch file….
-- A built-in text and Markdown viewer, with find, line copy and a Rendered / Source toggle.
-- Sessions a reboot killed resume on their own at the next start.
-- Copying from Claude Code's panels leaves out the box borders.
-- A Claude pane stays a shell after Claude exits, and header buttons jump between the prompts you sent.
-- Drag panes and sidebar sessions to split, swap or move them, and drag to reorder the sidebar.
-- New settings: a launch command per agent, the interface font, a three-way keep-awake switch, and which sessions show under each repo.
+- Sort repos with the ones that need you on top (the default), by latest activity, or by hand.
+- An All / Active switch in the sidebar header shows only the repos and workspaces with live sessions.
+- The app has its own icon in the window, the taskbar and Explorer.
 
-The full list is in the [release notes](https://github.com/leftos/rustling-tulip/releases/tag/v0.2.0-alpha).
+The full list is in the [release notes](https://github.com/leftos/rustling-tulip/releases/tag/v0.3.0-alpha).
 
 ## Building from source
 
