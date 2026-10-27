@@ -4,12 +4,11 @@
 
 ## Release 2 — Remote mode and the agent seam
 
-- [/] RT-278 Prove the daemon holds the token before a client reuses, retires or kills it · release vNext
-- [ ] RT-343 Keep name, look and sidebar place when Recover respawns a session · release vNext
 - [ ] RT-349 Restart conversation discovery for sessions reattached after a daemon restart · release vNext
-- [ ] RT-378 Close a failed handshake gracefully so AuthFailed is never lost to a reset · release vNext
 - [ ] RT-386 Map a recovered shell's hook events with its recovered agent options and trust · release vNext
 - [ ] RT-426 Prove the daemon before the installer sends it /shutdown
+- [ ] RT-430 Bind the daemon's loopback listener so no other socket can share its port
+- [ ] RT-431 Refuse or escape cmd metacharacters in a .cmd agent shim's direct-spawn arguments
 
 ## Wave 1a — Claude sessions on DeepSeek
 
@@ -41,7 +40,6 @@
 
 ## Wave 2b — Hook status
 
-- [ ] RT-220 Quote the characters a shell still expands in the hook shim command · release vNext
 - [ ] RT-85 Flag a session hand-off ready when its orchestrator says to /clear and /nextup
 - [ ] RT-193 Make SpawnArgs' hook settings a constructor argument, not a comment-enforced None
 - [ ] RT-206 Reject a leading hyphen in a hook-reported conversation id
@@ -82,8 +80,7 @@
 ## Wave 7 — Pop-out windows
 
 - [ ] RT-32 Phase 5b: pop-out windows (P5.6–P5.12) · release vNext
-  - [ ] RT-413 Pop a pane out from its header and the session menu · release vNext
-  - [ ] RT-414 Give a pane pop-out its toolbar, two-step Stop, focus and attention rules · release vNext
+  - [/] RT-414 Give a pane pop-out its toolbar, two-step Stop, focus and attention rules · release vNext
   - [ ] RT-415 Open a session with no pane in its own window · release vNext
   - [ ] RT-416 Key the grid's bounds and drag state by window · release vNext
   - [ ] RT-417 Draw menus, dialogs and toasts in the window that opened them · release vNext
@@ -164,6 +161,7 @@
 ## Docs
 
 - [ ] RT-86 Fix CLAUDE.md's transcript cost claim, add docs/README.md and a channels Task Index row
+- [ ] RT-428 Add Task Index rows for the native UI files agents keep re-deriving
 - [ ] RT-40 Add Integration Footguns and Test locations sections to architecture.md
 - [ ] RT-62 Write down the ops-tower relationship in the docs and on RT-28, RT-55 and RT-56
 - [ ] RT-63 Split markdown lines of 500+ characters
@@ -273,7 +271,6 @@
 - [ ] RT-344 Mark files fetched from a remote host with Mark-of-the-Web
 - [ ] RT-347 Make the UI test harness's in_model refuse a selector it does not know
 - [ ] RT-362 Keep a shell-hosted Claude session's kind and conversation when history is rebuilt from tracer logs · release vNext
-- [ ] RT-372 Clear the Worktrees field's pending apply when the daemon refuses it · release vNext
 - [ ] RT-373 Check the Shell dialog's typed folder by the host's path rules on a remote host · release vNext
 - [ ] RT-379 Make toast buttons pressed from Action Center reach the native client · release vNext
 - [ ] RT-385 Wrap or scroll long code lines in the rendered Markdown view
