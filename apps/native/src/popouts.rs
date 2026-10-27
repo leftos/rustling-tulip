@@ -6,7 +6,7 @@
 use protocol::{AgentDescriptor, SessionSnapshot, TabEntry};
 
 use crate::sidebar::display_label;
-use crate::tabs::{TabsModel, collect_panes};
+use crate::tabs::{Pane, TabsModel, collect_panes};
 
 /// What one pop-out window holds.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -96,6 +96,24 @@ impl Popouts {
         self.keys.iter().position(|open| open == key)
     }
 
+    /// The pane pop-out showing pane `pane_id`, whichever tab its key names.
+    pub(crate) fn popped_key(&self, pane_id: &str) -> Option<&PopoutKey> {
+        self.keys
+            .iter()
+            .find(|key| matches!(key, PopoutKey::Pane { pane_id: id, .. } if id == pane_id))
+    }
+
+    /// The pane pop-out showing session `session_id`, if any.
+    pub(crate) fn showing_session(
+        &self,
+        session_id: &str,
+        tabs: &[TabEntry],
+    ) -> Option<&PopoutKey> {
+        self.keys.iter().find(|key| {
+            matches!(key, PopoutKey::Pane { .. }) && sessions_of(key, tabs).contains(&session_id)
+        })
+    }
+
     /// The panes open in pane pop-outs, by pane id.
     pub(crate) fn popped_panes(&self) -> Vec<&str> {
         self.keys
@@ -132,18 +150,14 @@ impl Popouts {
 
     /// Closes and returns the pop-outs whose content has gone, in the order
     /// they were opened. Nothing closes before the first tab list arrives.
-    pub(crate) fn prune(
-        &mut self,
-        tabs: &TabsModel,
-        sessions: &[SessionSnapshot],
-    ) -> Vec<PopoutKey> {
+    pub(crate) fn prune(&mut self, tabs: &TabsModel) -> Vec<PopoutKey> {
         if !tabs.is_loaded() {
             return Vec::new();
         }
         let gone: Vec<PopoutKey> = self
             .keys
             .iter()
-            .filter(|key| content_gone(key, tabs.tabs(), sessions))
+            .filter(|key| content_gone(key, tabs.tabs()))
             .cloned()
             .collect();
         for key in &gone {
@@ -234,15 +248,14 @@ pub(crate) fn pane_to_pop(
         .or_else(|| tabs.iter().find_map(shown_in))
 }
 
-/// Whether the content `key` shows has gone from `tabs` and `sessions`. A
-/// session pop-out never goes: it outlives its session's stop, and shows
-/// "not found" once the daemon drops it.
-fn content_gone(key: &PopoutKey, tabs: &[TabEntry], sessions: &[SessionSnapshot]) -> bool {
+/// Whether the content `key` shows has gone from `tabs`. A pane pop-out goes
+/// only with its pane: a session removed before the tab update that
+/// rebinds the pane leaves it open. A session pop-out never goes: it
+/// outlives its session's stop, and shows "not found" once the daemon drops
+/// it.
+fn content_gone(key: &PopoutKey, tabs: &[TabEntry]) -> bool {
     match key {
-        PopoutKey::Pane { tab_id, pane_id } => match bound_session(tab_id, pane_id, tabs) {
-            Some(session) => !sessions.iter().any(|s| s.id == session),
-            None => !pane_exists(tab_id, pane_id, tabs),
-        },
+        PopoutKey::Pane { pane_id, .. } => pane_in_tabs(pane_id, tabs).is_none(),
         PopoutKey::Tab { tab_id } => !tabs.iter().any(|t| t.id == tab_id.as_str()),
         PopoutKey::Session { .. } => false,
     }
@@ -263,6 +276,15 @@ fn moved_to(key: &PopoutKey, tabs: &[TabEntry]) -> Option<String> {
                 .is_some_and(|grid| collect_panes(grid).iter().any(|pane| pane.id == pane_id))
         })
         .map(|tab| tab.id.clone())
+}
+
+/// Pane `pane_id` in whichever tab holds it: the first in tab order while a
+/// move has it in two tabs for one fold.
+pub(crate) fn pane_in_tabs<'a>(pane_id: &str, tabs: &'a [TabEntry]) -> Option<Pane<'a>> {
+    tabs.iter()
+        .filter_map(TabEntry::grid)
+        .flat_map(collect_panes)
+        .find(|pane| pane.id == pane_id)
 }
 
 /// Whether `tab_id`'s grid still holds `pane_id`, bound or empty.
@@ -454,10 +476,7 @@ mod tests {
         let mut popouts = Popouts::default();
         popouts.open(pane_key("t1", "p1"), &two_panes());
 
-        let closed = popouts.prune(
-            &model_with(&[tab("t1", &pane("p2", Some("s2")))]),
-            &[session("s1"), session("s2")],
-        );
+        let closed = popouts.prune(&model_with(&[tab("t1", &pane("p2", Some("s2")))]));
 
         assert_eq!(closed, vec![pane_key("t1", "p1")]);
         assert!(!popouts.is_open(&pane_key("t1", "p1")));
@@ -468,24 +487,23 @@ mod tests {
         let mut popouts = Popouts::default();
         popouts.open(pane_key("t1", "p1"), &two_panes());
 
-        let closed = popouts.prune(
-            &model_with(&[tab("t2", &pane("p2", Some("s2")))]),
-            &[session("s1"), session("s2")],
-        );
+        let closed = popouts.prune(&model_with(&[tab("t2", &pane("p2", Some("s2")))]));
 
         assert_eq!(closed, vec![pane_key("t1", "p1")]);
         assert_eq!(popouts.keys(), [].as_slice(), "the registry is empty again");
     }
 
     #[test]
-    fn pane_popout_closes_when_its_session_goes() {
+    fn pane_popout_outlives_its_session_while_the_pane_stays() {
         let mut popouts = Popouts::default();
         popouts.open(pane_key("t1", "p1"), &two_panes());
 
-        let closed = popouts.prune(&model_with(&two_panes()), &[session("s2")]);
+        // The session's removal can come before the tab update that
+        // rebinds its pane to a resumed or restarted session.
+        let closed = popouts.prune(&model_with(&two_panes()));
 
-        assert_eq!(closed, vec![pane_key("t1", "p1")]);
-        assert!(!popouts.is_open(&pane_key("t1", "p1")));
+        assert!(closed.is_empty(), "only a pane in no tab closes");
+        assert!(popouts.is_open(&pane_key("t1", "p1")));
     }
 
     #[test]
@@ -503,9 +521,7 @@ mod tests {
         );
         assert_eq!(popouts.keys(), [pane_key("t2", "p1")].as_slice());
         assert!(
-            popouts
-                .prune(&moved, &[session("s1"), session("s2")])
-                .is_empty(),
+            popouts.prune(&moved).is_empty(),
             "the re-keyed pop-out still has its content"
         );
         assert!(
@@ -526,16 +542,31 @@ mod tests {
             [pane_key("t1", "p1")].as_slice(),
             "a pane in no tab keeps its key"
         );
-        assert_eq!(
-            popouts.prune(&gone, &[session("s1"), session("s2")]),
-            vec![pane_key("t1", "p1")]
-        );
+        assert_eq!(popouts.prune(&gone), vec![pane_key("t1", "p1")]);
         assert!(
             Popouts::default()
                 .follow_moves(&TabsModel::new(None))
                 .is_empty(),
             "nothing moves before the first tab list"
         );
+    }
+
+    #[test]
+    fn prune_keeps_a_pane_still_in_some_tab() {
+        let mut popouts = Popouts::default();
+        popouts.open(pane_key("t1", "p1"), &two_panes());
+        let moved = model_with(&[
+            tab("t1", &pane("p2", Some("s2"))),
+            tab("t2", &pane("p1", Some("s1"))),
+        ]);
+
+        let closed = popouts.prune(&moved);
+
+        assert!(
+            closed.is_empty(),
+            "a pane in another tab is still open, re-keyed or not"
+        );
+        assert!(popouts.is_open(&pane_key("t1", "p1")));
     }
 
     #[test]
@@ -563,7 +594,7 @@ mod tests {
         let mut popouts = Popouts::default();
         popouts.open(pane_key("t2", "p2"), &tabs);
 
-        let closed = popouts.prune(&model_with(&tabs), &[]);
+        let closed = popouts.prune(&model_with(&tabs));
 
         assert!(closed.is_empty(), "an empty pane that still exists stays");
         assert!(popouts.is_open(&pane_key("t2", "p2")));
@@ -578,10 +609,7 @@ mod tests {
         let mut popouts = Popouts::default();
         popouts.open(tab_key("t1"), &tabs);
 
-        let closed = popouts.prune(
-            &model_with(&[tab("t2", &pane("p2", Some("s2")))]),
-            &[session("s1"), session("s2")],
-        );
+        let closed = popouts.prune(&model_with(&[tab("t2", &pane("p2", Some("s2")))]));
 
         assert_eq!(closed, vec![tab_key("t1")]);
         assert_eq!(popouts.keys(), [].as_slice());
@@ -595,7 +623,7 @@ mod tests {
         let mut stopped = session("s1");
         stopped.status = protocol::SessionStatus::Stopped;
 
-        let closed = popouts.prune(&model_with(&tabs), std::slice::from_ref(&stopped));
+        let closed = popouts.prune(&model_with(&tabs));
 
         assert!(closed.is_empty(), "a stopped session is still listed");
         assert!(popouts.is_open(&session_key("s1")));
@@ -608,7 +636,7 @@ mod tests {
         let mut popouts = Popouts::default();
         popouts.open(session_key("s1"), &tabs);
 
-        let closed = popouts.prune(&model_with(&tabs), &[]);
+        let closed = popouts.prune(&model_with(&tabs));
 
         assert!(closed.is_empty(), "a session pop-out is never pruned");
         assert!(popouts.is_open(&session_key("s1")), "the window stays open");
@@ -625,7 +653,7 @@ mod tests {
         let mut popouts = Popouts::default();
         popouts.open(pane_key("t1", "p1"), &tabs);
 
-        let closed = popouts.prune(&TabsModel::new(None), &[]);
+        let closed = popouts.prune(&TabsModel::new(None));
 
         assert!(
             closed.is_empty(),

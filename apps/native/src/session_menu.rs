@@ -17,7 +17,7 @@ use crate::appearance::{self, ACCENT_PRESETS, AppearanceChange};
 use crate::appearance_view::Level;
 use crate::branch_fate::{DeleteWorktreeConfirm, DialogButton, confirm_messages};
 use crate::buttons::{ButtonKind, ButtonSize, button, field_frame, focus_ring, outlined_button};
-use crate::grid_view::{NO_REPOS_TIP, PANE_PENDING_TIP};
+use crate::grid_view::{DOCK_BACK_TIP, NO_REPOS_TIP, PANE_PENDING_TIP};
 use crate::launch_last;
 use crate::notice_view::{MODAL_RADIUS, drop_shadow, modal_panel};
 use crate::notices::{ActionFailedNotice, ToastKind};
@@ -28,11 +28,11 @@ use crate::popouts::{POP_OUT_ALREADY_TIP, PopoutKey, pane_to_pop};
 use crate::remote_mode::Capabilities;
 use crate::session_actions::{
     ABANDONED_ACTIONS, ActionState, DuplicateTarget, HEADLESS_UNSUPPORTED_TIP, MenuEntry, MenuMode,
-    MoveTarget, OfferedRow, PendingPrefill, PlacedFocus, SessionAction, SessionRow, Step, Submenu,
-    SubmenuLine, abandoned_lines, action_disabled_tip, action_state, busy_exclusion_message,
-    busy_row, duplicate_lines, exit_code_label, exited_message, header_shows_exit_code,
-    menu_entries, move_lines, move_source, orphan_banner_text, overlay_actions, pane_shows_exit,
-    plan, rename_message, session_rows, worktree_to_reveal,
+    MoveTarget, OfferedRow, PendingPrefill, PlacedFocus, SessionAction, SessionRow, Step,
+    StopPlace, Submenu, SubmenuLine, abandoned_lines, action_disabled_tip, action_state,
+    busy_exclusion_message, busy_row, duplicate_lines, exit_code_label, exited_message,
+    header_shows_exit_code, menu_entries, move_lines, move_source, orphan_banner_text,
+    overlay_actions, pane_shows_exit, plan, rename_message, session_rows, worktree_to_reveal,
 };
 use crate::sidebar::can_attach;
 use crate::spawn_form::{Lock, Prefill, Target};
@@ -420,7 +420,7 @@ impl RootView {
     /// A pane showing the session whose header Stop waits for its confirm.
     #[must_use]
     pub fn armed_stop_pane(&self) -> Option<&str> {
-        let session_id = self.confirm.armed()?;
+        let session_id = self.confirm.armed(StopPlace::Grid)?;
         self.tabs
             .tabs()
             .iter()
@@ -2159,20 +2159,82 @@ impl RootView {
         )
     }
 
+    /// A pane pop-out's Dock back, which docks it back as the main grid's
+    /// card's Dock back does.
+    pub(crate) fn popout_dock_back(pane_id: &str, cx: &mut Context<Self>) -> AnyElement {
+        let button = header_text_button(&format!("popout-dock-{pane_id}"), "Dock back", MUTED)
+            .tooltip(tooltip(DOCK_BACK_TIP));
+        on_press(button, cx, |this, window, cx| {
+            this.dock_back_from_popout(window, cx);
+        })
+        .into_any_element()
+    }
+
+    /// Docks back the pop-out whose window is `window`, found by the
+    /// window's id at the press since its key follows a moved pane. The
+    /// press is in that window, so it closes the window itself: the window
+    /// cannot be reached by its handle while it dispatches the press.
+    pub(crate) fn dock_back_from_popout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.forget_popout_window(window.window_handle().window_id(), cx);
+        window.remove_window();
+    }
+
+    /// Runs `act` in the main window, as a pop-out overlay's action that
+    /// opens a main-window dialog does: when `window` is a pop-out, the
+    /// pop-out docks back first and the main window is activated, so the
+    /// dialog has the keyboard there.
+    fn in_main_window(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        act: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+    ) {
+        let in_popout = window
+            .window_handle()
+            .downcast::<crate::popout_view::PopoutView>()
+            .is_some();
+        if !in_popout {
+            act(self, window, cx);
+            return;
+        }
+        self.dock_back_from_popout(window, cx);
+        let main = cx
+            .windows()
+            .into_iter()
+            .find_map(|handle| handle.downcast::<RootView>());
+        let Some(main) = main else {
+            tracing::warn!("a pop-out action found no main window to run in");
+            return;
+        };
+        cx.defer(move |cx| {
+            let ran = main.update(cx, |root, window, cx| {
+                window.activate_window();
+                act(root, window, cx);
+            });
+            if let Err(err) = ran {
+                tracing::warn!("running a pop-out action in the main window: {err:#}");
+            }
+        });
+    }
+
     /// The pane header's Stop (then "Confirm stop" / "Cancel"), or the exit
-    /// code once the session has stopped. Nothing for an empty pane. The
-    /// buttons act on the press, as the tab close does.
+    /// code once the session has stopped, as drawn at `place`. Nothing for
+    /// an empty pane. The buttons act on the press, as the tab close does.
     pub(crate) fn header_stop(
         &self,
         pane_id: &str,
         session_id: Option<&str>,
+        place: StopPlace,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let Some(session) = session_id.and_then(|id| self.sidebar.session(id)) else {
             return Vec::new();
         };
         if header_shows_exit_code(session) {
-            let name = format!("exit-code-{pane_id}");
+            let name = match place {
+                StopPlace::Grid => format!("exit-code-{pane_id}"),
+                StopPlace::Popout => format!("popout-exit-code-{pane_id}"),
+            };
             return vec![
                 div()
                     .debug_selector(|| name)
@@ -2184,24 +2246,25 @@ impl RootView {
         }
         let id = session.id.clone();
         let stop = SessionAction::StopKeepWorktree;
-        if !self.confirm.is_armed(&id) {
-            let button = header_text_button(&format!("pane-stop-{pane_id}"), "Stop", MUTED);
+        let prefix = place.selector_prefix();
+        if !self.confirm.is_armed(place, &id) {
+            let button = header_text_button(&format!("{prefix}-{pane_id}"), "Stop", MUTED);
             return vec![
                 on_press(button, cx, move |this, _, _| {
-                    this.confirm.click(&id);
+                    this.confirm.click(place, &id);
                 })
                 .into_any_element(),
             ];
         }
         let confirm = header_text_button(
-            &format!("pane-stop-confirm-{pane_id}"),
+            &format!("{prefix}-confirm-{pane_id}"),
             "Confirm stop",
             DANGER,
         );
-        let cancel = header_text_button(&format!("pane-stop-cancel-{pane_id}"), "Cancel", TEXT);
+        let cancel = header_text_button(&format!("{prefix}-cancel-{pane_id}"), "Cancel", TEXT);
         vec![
             on_press(confirm, cx, move |this, window, cx| {
-                if this.confirm.click(&id) {
+                if this.confirm.click(place, &id) {
                     this.choose_action(&id, stop, window, cx);
                 }
             })
@@ -2240,7 +2303,12 @@ impl RootView {
         let (tab_id, pane_id, session_id) =
             (tab_id.to_owned(), pane_id.to_owned(), session_id.to_owned());
         bordered_button(button, cx, move |this, window, cx| {
-            this.new_session_in_pane(&tab_id, &pane_id, Some(&session_id), window, cx);
+            let (tab_id, pane_id, session_id) =
+                (tab_id.clone(), pane_id.clone(), session_id.clone());
+            // The spawn dialog is a main-window dialog.
+            this.in_main_window(window, cx, move |this, window, cx| {
+                this.new_session_in_pane(&tab_id, &pane_id, Some(&session_id), window, cx);
+            });
         })
         .into_any_element()
     }
@@ -2789,7 +2857,15 @@ fn on_action_press(
         MouseButton::Left,
         cx.listener(move |this, _: &MouseDownEvent, window, cx| {
             cx.stop_propagation();
-            this.choose_action(&session_id, action, window, cx);
+            if action == SessionAction::RemovePaneDeleteWorktree {
+                // Its confirm is a main-window dialog.
+                let session_id = session_id.clone();
+                this.in_main_window(window, cx, move |this, window, cx| {
+                    this.choose_action(&session_id, action, window, cx);
+                });
+            } else {
+                this.choose_action(&session_id, action, window, cx);
+            }
         }),
     )
 }

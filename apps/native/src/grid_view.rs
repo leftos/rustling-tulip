@@ -23,7 +23,8 @@ use crate::fonts::DEFAULT_FAMILY;
 use crate::palette::{
     ACCENT, CHIP, GROUND, HOVER, LINE, LINE_STRONG, RAISED, SUBTLE, SURFACE, TEXT_2, TRANSPARENT,
 };
-use crate::popouts::PopoutKey;
+use crate::popouts::{self, PopoutKey};
+use crate::session_actions::StopPlace;
 use crate::session_menu::{BorderedButton, bordered_button};
 use crate::shell_dialog::standalone_shell_request;
 use crate::sidebar::{
@@ -51,7 +52,7 @@ pub const POPPED_OUT_NOTE: &str = "Popped out to its own window";
 /// What a popped pane's card's Focus window does.
 const FOCUS_WINDOW_TIP: &str = "Bring the pop-out window to the front";
 /// What a popped pane's card's Dock back does.
-const DOCK_BACK_TIP: &str = "Close the pop-out window and show the pane here again";
+pub(crate) const DOCK_BACK_TIP: &str = "Close the pop-out window and show the pane here again";
 const PANE_SPAWN_TIP: &str = "Open the spawn dialog; the new session fills this pane";
 const PANE_SHELL_TIP: &str = "A plain shell in this pane, in the remembered folder";
 pub(crate) const SPAWN_TIP: &str = "Spawn a new session";
@@ -92,11 +93,6 @@ pub(crate) struct PaneSlot {
 impl PaneSlot {
     pub(crate) fn view(&self) -> &Entity<TerminalPane> {
         &self.view
-    }
-
-    /// The tab whose grid holds the pane.
-    pub(crate) fn tab_id(&self) -> &str {
-        &self.tab_id
     }
 
     /// The session the pane shows.
@@ -232,7 +228,7 @@ impl RootView {
         for session_id in to_sync {
             self.sync_session(&session_id, cx);
         }
-        if let Some(id) = self.focused_session() {
+        if let Some(id) = self.shown_session() {
             self.sidebar.mark_seen(&id);
         }
         self.update_pane_roles(cx);
@@ -654,7 +650,7 @@ impl RootView {
     /// window focuses nothing for it.
     pub(crate) fn focus_pane_view(&self, pane_id: &str, window: &mut Window, cx: &Context<Self>) {
         if let Some(slot) = self.panes.get(pane_id)
-            && !self.is_popped_out(&slot.tab_id, pane_id)
+            && !self.is_pane_popped(pane_id)
         {
             slot.view.read(cx).focus(window);
         }
@@ -673,6 +669,17 @@ impl RootView {
         {
             self.focus_pane_view(&pane_id, window, cx);
         }
+    }
+
+    /// The session the main window shows focused, for the unseen-turn rule:
+    /// the active tab's focused pane's, unless that pane draws in a pop-out.
+    pub(crate) fn shown_session(&self) -> Option<String> {
+        let tab = self.tabs.active_tab()?;
+        let pane_id = self.tabs.focused_pane(&tab.id)?;
+        if self.is_pane_popped(&pane_id) {
+            return None;
+        }
+        self.focused_session()
     }
 
     /// The session of the active tab's focused pane.
@@ -1026,9 +1033,9 @@ impl RootView {
         session_id: Option<&str>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        if self.is_popped_out(tab_id, pane_id) {
+        if let Some(key) = self.popouts.popped_key(pane_id).cloned() {
             // One terminal draws in one window: the pop-out's.
-            return self.popped_card(tab_id, pane_id, session_id, cx);
+            return self.popped_card(key, pane_id, session_id, cx);
         }
         let focused = self.tabs.focused_pane(tab_id).as_deref() == Some(pane_id);
         let body = match (session_id, self.panes.get(pane_id)) {
@@ -1097,10 +1104,11 @@ impl RootView {
 
     /// The card a popped pane leaves in its place in the main grid: its
     /// session's label, the popped-out note, Focus window and Dock back. It
-    /// holds no focus, so keys typed while it shows go nowhere.
+    /// holds no focus, so keys typed while it shows go nowhere. `key` is the
+    /// pop-out showing the pane, whichever tab it names.
     fn popped_card(
         &self,
-        tab_id: &str,
+        key: PopoutKey,
         pane_id: &str,
         session_id: Option<&str>,
         cx: &mut Context<Self>,
@@ -1111,10 +1119,6 @@ impl RootView {
                 || drag::EMPTY_PANE_LABEL.to_owned(),
                 |session| display_label(session, &self.agents),
             );
-        let key = PopoutKey::Pane {
-            tab_id: tab_id.to_owned(),
-            pane_id: pane_id.to_owned(),
-        };
         let focus_key = key.clone();
         let focus = BorderedButton {
             selector: format!("popped-focus-{pane_id}"),
@@ -1168,6 +1172,106 @@ impl RootView {
             .into_any_element()
     }
 
+    /// What pane `key`'s pop-out window draws: its toolbar over its terminal,
+    /// with the note, the banner and the overlays the main grid would draw
+    /// for the pane. `None` while the pop-out has no pane to show.
+    pub(crate) fn popout_pane(
+        &self,
+        key: &PopoutKey,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let PopoutKey::Pane { tab_id, pane_id } = key else {
+            return None;
+        };
+        let terminal = self.popout_terminal(key)?;
+        let session_id = popouts::pane_in_tabs(pane_id, self.tabs.tabs())
+            .and_then(|pane| pane.session)
+            .map(str::to_owned);
+        let session_id = session_id.as_deref();
+        // As the main grid draws the pane: the terminal once attached, else
+        // the note for its session, gone or not yet attached.
+        let body = match (session_id, self.panes.get(pane_id)) {
+            (Some(_), Some(slot)) if slot.attached => div()
+                .flex_1()
+                .min_h(px(0.0))
+                .size_full()
+                .child(terminal)
+                .into_any_element(),
+            (Some(id), slot) => self.note_body(pane_id, id, slot, cx),
+            (None, _) => div()
+                .flex_1()
+                .min_h(px(0.0))
+                .size_full()
+                .child(terminal)
+                .into_any_element(),
+        };
+        let body = div()
+            .relative()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h(px(0.0))
+            .children(self.orphan_banner(pane_id, session_id))
+            .child(body)
+            .children(self.exited_overlay(tab_id, pane_id, session_id, cx))
+            .children(self.abandoned_overlay(pane_id, session_id, cx));
+        let toolbar = self.popout_toolbar(pane_id, session_id, cx);
+        Some(
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(toolbar)
+                .child(body)
+                .into_any_element(),
+        )
+    }
+
+    /// A pane pop-out's toolbar: the pane header's status glyph and name,
+    /// the tab the pane is docked in, the header's chips, then Stop and
+    /// Dock back. It has no split, close or Pop out.
+    fn popout_toolbar(
+        &self,
+        pane_id: &str,
+        session_id: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let parts = self.popout_header_parts(pane_id);
+        let mut title = header_title(pane_id, parts.as_ref(), cx);
+        if let Some(docked) = self.popout_docked_in(pane_id) {
+            let name = format!("popout-tab-{pane_id}");
+            let docked = div()
+                .debug_selector(|| name)
+                .flex_none()
+                .whitespace_nowrap()
+                .text_color(gpui::rgb(MUTED))
+                .child(docked)
+                .into_any_element();
+            // After the glyph and the name, before the chips.
+            title.insert(title.len().min(2), docked);
+        }
+        let mut controls = self.header_stop(pane_id, session_id, StopPlace::Popout, cx);
+        controls.push(Self::popout_dock_back(pane_id, cx));
+        div()
+            .debug_selector(|| format!("popout-toolbar-{pane_id}"))
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(8.0))
+            .h(px(PANE_HEADER_HEIGHT))
+            .pl(px(12.0))
+            .pr(px(8.0))
+            .border_b_1()
+            .border_color(gpui::rgb(LINE))
+            .bg(gpui::rgb(RAISED))
+            .text_size(px(UI_TEXT_SIZE))
+            .text_color(gpui::rgb(TEXT_2))
+            .children(title)
+            .child(div().flex_1())
+            .child(header_controls(cx).children(controls))
+            .into_any_element()
+    }
+
     /// The session's status glyph, name and chips (runtime, repo:branch
     /// with a count of further members, trusted), its Pop out, its Stop or
     /// exit code, split right and down (Shift: left and up), move and
@@ -1202,7 +1306,7 @@ impl RootView {
             .header_pop_out(tab_id, pane_id, session_id, cx)
             .into_iter()
             .collect();
-        controls.extend(self.header_stop(pane_id, session_id, cx));
+        controls.extend(self.header_stop(pane_id, session_id, StopPlace::Grid, cx));
         let controls = (!controls.is_empty()).then(|| header_controls(cx).children(controls));
         let prompt_jumps = session_id
             .and_then(|id| self.sidebar.session(id))
@@ -1331,7 +1435,7 @@ impl RootView {
         let (pane_id, edge) = drag::pane_target(tab.grid()?, rect, PANE_GUTTER, at)?;
         // A popped pane's card takes no drop: it would split or rebind the
         // pane its pop-out shows.
-        if self.is_popped_out(&tab.id, &pane_id) {
+        if self.is_pane_popped(&pane_id) {
             return None;
         }
         if let DragPayload::Leaf { session_id, .. } = payload {
@@ -1480,6 +1584,36 @@ impl RootView {
             .map(|session| header_parts(session, self.sidebar.is_unseen(&session.id), &self.agents))
     }
 
+    /// What the toolbar of pane `pane_id`'s pop-out shows of its session,
+    /// as its header in the main grid would; `None` while the pane is not
+    /// popped out or is empty.
+    #[must_use]
+    pub fn popout_header_parts(&self, pane_id: &str) -> Option<PaneHeaderParts> {
+        self.popouts.popped_key(pane_id)?;
+        self.popped_pane_session(pane_id)
+            .map(|session| header_parts(session, self.sidebar.is_unseen(&session.id), &self.agents))
+    }
+
+    /// The pop-out toolbar's "in {tab name}": the tab pane `pane_id` is
+    /// docked in; `None` while the pane is not popped out.
+    #[must_use]
+    pub fn popout_docked_in(&self, pane_id: &str) -> Option<String> {
+        let PopoutKey::Pane { tab_id, .. } = self.popouts.popped_key(pane_id)? else {
+            return None;
+        };
+        let name = self
+            .tabs
+            .tab(tab_id)
+            .map_or(tab_id.as_str(), |tab| tab.name.as_str());
+        Some(format!("in {name}"))
+    }
+
+    /// The session pane `pane_id` shows, in whichever tab holds it.
+    fn popped_pane_session(&self, pane_id: &str) -> Option<&SessionSnapshot> {
+        let session = popouts::pane_in_tabs(pane_id, self.tabs.tabs())?.session?;
+        self.sidebar.session(session)
+    }
+
     /// The body of a pane showing `session_id` before its terminal attaches:
     /// a muted note. A headless pane never attaches, so its note holds the
     /// pane's focus handle and a click in it focuses the pane, as an empty
@@ -1513,7 +1647,7 @@ impl RootView {
     #[must_use]
     pub fn pane_note(&self, pane_id: &str) -> Option<&'static str> {
         let slot = self.panes.get(pane_id)?;
-        if self.is_popped_out(&slot.tab_id, pane_id) {
+        if self.is_pane_popped(pane_id) {
             return Some(POPPED_OUT_NOTE);
         }
         let slot = Some(slot).filter(|slot| !slot.attached)?;

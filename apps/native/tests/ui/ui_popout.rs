@@ -5,8 +5,8 @@
 use crate::support;
 
 use gpui::{
-    App, EntityId, InputHandler, Modifiers, Pixels, Point, TestAppContext, VisualTestContext,
-    Window, point, px, size,
+    App, EntityId, InputHandler, Modifiers, MouseButton, MouseDownEvent, Pixels, Point,
+    TestAppContext, VisualTestContext, Window, point, px, size,
 };
 use protocol::{ClientMessage, DaemonMessage, SplitDirection, TabEntry};
 use rustling_tulip_native::{OpenOutcome, POPPED_OUT_NOTE, PopoutKey};
@@ -1015,4 +1015,541 @@ fn a_popped_pane_extracted_to_a_new_tab_keeps_its_terminal_and_focus(cx: &mut Te
     });
 
     assert_popout_kept_p1(&mut h, &mut popout, "t3", before);
+}
+
+/// Whether `selector` is drawn in the pop-out window.
+fn drawn_in_popout(popout: &mut VisualTestContext, selector: &'static str) -> bool {
+    popout.run_until_parked();
+    popout.debug_bounds(selector).is_some()
+}
+
+/// Presses `selector` in the pop-out window.
+fn click_in_popout(popout: &mut VisualTestContext, selector: &'static str) {
+    popout.run_until_parked();
+    let bounds = popout
+        .debug_bounds(selector)
+        .expect("the control is drawn in the pop-out");
+    popout.simulate_click(bounds.center(), Modifiers::none());
+    popout.run_until_parked();
+}
+
+#[gpui::test]
+fn popout_toolbar_shows_the_header_parts(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture::single(session("s1").user_label("Build").build());
+    let mut h = Harness::with(cx, &dir, &fixture);
+    let main_parts = h.root(|root, _| root.pane_header_parts("p1"));
+    assert!(main_parts.is_some(), "the main header shows s1");
+
+    pop_out(&mut h, "t1", "p1");
+    let mut popout = h.popout_window();
+
+    assert_eq!(
+        h.root(|root, _| root.popout_header_parts("p1")),
+        main_parts,
+        "the toolbar shows what the main header showed"
+    );
+    assert_eq!(
+        h.root(|root, _| root.popout_docked_in("p1")).as_deref(),
+        Some("in t1")
+    );
+    for part in [
+        "pane-glyph-p1-idle",
+        "pane-title-p1",
+        "popout-tab-p1",
+        "pane-chip-p1-runtime",
+        "popout-stop-p1",
+        "popout-dock-p1",
+    ] {
+        assert!(drawn_in_popout(&mut popout, part), "{part} is drawn");
+    }
+    assert!(
+        !drawn_in_popout(&mut popout, "pane-popout-p1"),
+        "a pop-out has no Pop out of its own"
+    );
+}
+
+#[gpui::test]
+fn popout_stop_asks_twice(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
+    pop_out(&mut h, "t1", "p1");
+    let mut popout = h.popout_window();
+    h.sent();
+
+    click_in_popout(&mut popout, "popout-stop-p1");
+
+    assert!(h.sent().is_empty(), "the first press only asks");
+    assert!(drawn_in_popout(&mut popout, "popout-stop-confirm-p1"));
+    assert!(drawn_in_popout(&mut popout, "popout-stop-cancel-p1"));
+    assert_eq!(
+        h.root(|root, _| root.armed_stop_pane().map(str::to_owned)),
+        None,
+        "the main window's Stop is not armed"
+    );
+
+    click_in_popout(&mut popout, "popout-stop-confirm-p1");
+    let sent = h.sent();
+    assert!(
+        sent.iter().any(|msg| matches!(
+            msg,
+            ClientMessage::StopSession { session_id, .. } if session_id == "s1"
+        )),
+        "the second press stops s1: {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn popout_dock_back_closes_the_window(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
+    pop_out(&mut h, "t1", "p1");
+    let mut popout = h.popout_window();
+    h.sent();
+
+    popout.run_until_parked();
+    let dock = popout
+        .debug_bounds("popout-dock-p1")
+        .expect("Dock back is drawn in the pop-out");
+    // Dock back acts on the press and closes the window it lands in, so no
+    // release can follow it there.
+    popout.simulate_event(MouseDownEvent {
+        position: dock.center(),
+        modifiers: Modifiers::none(),
+        button: MouseButton::Left,
+        click_count: 1,
+        first_mouse: false,
+    });
+
+    assert_eq!(h.window_count(), 1, "the pop-out window closed");
+    assert!(!popped(&mut h));
+    assert_eq!(h.root(|root, _| root.pane_note("p1")), None);
+    let sent = h.sent();
+    assert!(
+        !sent.iter().any(changes_layout_or_sessions),
+        "docking back asks the daemon for nothing: {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn popout_shows_the_exited_overlay(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
+    h.answer_scrollback("s1", b"last words");
+    pop_out(&mut h, "t1", "p1");
+    let mut popout = h.popout_window();
+
+    h.send(DaemonMessage::SessionUpdated {
+        session: session("s1").exited(3).build(),
+        request_id: None,
+    });
+
+    for part in [
+        "exited-p1",
+        "exited-restart-p1",
+        "exited-remove-pane-p1",
+        "popout-exit-code-p1",
+    ] {
+        assert!(drawn_in_popout(&mut popout, part), "{part} is drawn");
+    }
+    assert_eq!(h.window_count(), 2, "an exited session keeps its pop-out");
+}
+
+#[gpui::test]
+fn popout_closes_when_its_session_is_removed(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = s1_working_beside_s2(cx, &dir);
+    let mut popout = h.popout_window();
+
+    h.send(DaemonMessage::SessionRemoved {
+        session_id: "s1".to_owned(),
+    });
+    assert_eq!(
+        h.window_count(),
+        2,
+        "the removal alone leaves the pane, so the pop-out stays"
+    );
+    assert!(
+        !drawn_in_popout(&mut popout, "popout-pane-gone"),
+        "the pop-out still draws the pane, as the main grid would"
+    );
+
+    // The tab update that drops the pane.
+    h.send(DaemonMessage::TabUpdated {
+        tab: tab("t1", &pane("p2", Some("s2"))),
+    });
+    assert_eq!(h.window_count(), 1, "the pop-out window closed");
+    assert_eq!(h.root(|root, _| root.popout_count()), 0);
+}
+
+#[gpui::test]
+fn resume_in_a_popout_keeps_the_window(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = s1_working_beside_s2(cx, &dir);
+
+    // A resume's removal of the old session can come before the tab update
+    // that rebinds its pane.
+    h.send(DaemonMessage::SessionRemoved {
+        session_id: "s1".to_owned(),
+    });
+    h.send(DaemonMessage::SessionUpdated {
+        session: session("s1b").build(),
+        request_id: None,
+    });
+    h.send(DaemonMessage::TabUpdated {
+        tab: tab(
+            "t1",
+            &split(
+                SplitDirection::Horizontal,
+                pane("p1", Some("s1b")),
+                pane("p2", Some("s2")),
+            ),
+        ),
+    });
+
+    assert_eq!(h.window_count(), 2, "the pop-out window stays open");
+    assert!(h.root(|root, _| root.is_popped_out("t1", "p1")));
+    let mut popout = h.popout_window();
+    popout.run_until_parked();
+    assert_eq!(popout.window_title().as_deref(), Some("s1b"));
+}
+
+#[gpui::test]
+fn new_session_from_a_popout_overlay_docks_and_opens_the_dialog_in_the_main_window(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &with_a_repo());
+    pop_out(&mut h, "t1", "p1");
+    h.send(DaemonMessage::SessionUpdated {
+        session: session("s1").in_repo("r1").exited(3).build(),
+        request_id: None,
+    });
+    let mut popout = h.popout_window();
+    popout.run_until_parked();
+    let button = popout
+        .debug_bounds("exited-new-session-p1")
+        .expect("the overlay's New session is drawn in the pop-out");
+
+    // The press closes the window it lands in, so no release follows it.
+    popout.simulate_event(MouseDownEvent {
+        position: button.center(),
+        modifiers: Modifiers::none(),
+        button: MouseButton::Left,
+        click_count: 1,
+        first_mouse: false,
+    });
+
+    assert_eq!(h.window_count(), 1, "the pane docked back");
+    assert!(!popped(&mut h));
+    assert!(
+        h.root(|root, _| root.spawn_dialog_open()),
+        "the spawn dialog opens in the main window"
+    );
+    assert!(
+        h.cx.update(|window, _| window.is_window_active()),
+        "the main window is in front"
+    );
+}
+
+#[gpui::test]
+fn popout_closes_when_its_pane_is_closed(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = Fixture::single(session("s1").build());
+    fixture.sessions.push(session("s2").build());
+    fixture.tabs = vec![tab(
+        "t1",
+        &split(
+            SplitDirection::Horizontal,
+            pane("p1", Some("s1")),
+            pane("p2", Some("s2")),
+        ),
+    )];
+    let mut h = Harness::with(cx, &dir, &fixture);
+    pop_out(&mut h, "t1", "p1");
+    assert_eq!(h.window_count(), 2);
+
+    h.send(DaemonMessage::TabUpdated {
+        tab: tab("t1", &pane("p2", Some("s2"))),
+    });
+
+    assert_eq!(h.window_count(), 1, "the pop-out window closed");
+    assert_eq!(h.root(|root, _| root.popout_count()), 0);
+}
+
+#[gpui::test]
+fn a_moved_popped_pane_keeps_its_popout_through_prune(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = Fixture::single(session("s1").build());
+    fixture.sessions.push(session("s2").build());
+    fixture.sessions.push(session("s3").build());
+    fixture.tabs = vec![
+        tab(
+            "t1",
+            &split(
+                SplitDirection::Horizontal,
+                pane("p1", Some("s1")),
+                pane("p3", Some("s3")),
+            ),
+        ),
+        tab("t2", &pane("p2", Some("s2"))),
+    ];
+    let mut h = Harness::with(cx, &dir, &fixture);
+    pop_out(&mut h, "t1", "p1");
+
+    h.send(DaemonMessage::TabUpdated {
+        tab: tab(
+            "t2",
+            &split(
+                SplitDirection::Horizontal,
+                pane("p2", Some("s2")),
+                pane("p1", Some("s1")),
+            ),
+        ),
+    });
+    assert_eq!(h.window_count(), 2, "the destination's fold keeps it");
+    assert_eq!(h.root(|root, _| root.popout_count()), 1);
+
+    h.send(DaemonMessage::TabUpdated {
+        tab: tab("t1", &pane("p3", Some("s3"))),
+    });
+    assert_eq!(h.window_count(), 2, "the source's fold keeps it");
+    assert!(h.root(|root, _| root.is_popped_out("t2", "p1")));
+}
+
+/// Whether leaf `id` holds an unseen turn.
+fn leaf_unseen(h: &mut Harness<'_>, id: &str) -> Option<bool> {
+    h.root(|root, _| {
+        root.sidebar_containers()
+            .into_iter()
+            .flat_map(|c| c.leaves)
+            .find(|leaf| leaf.id == id)
+            .map(|leaf| leaf.unseen)
+    })
+}
+
+/// `s1` working in `p1` beside `s2` in `p2`, with `p1` popped out.
+fn s1_working_beside_s2<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let mut fixture = Fixture::single(session("s1").status("working").build());
+    fixture.sessions.push(session("s2").build());
+    fixture.tabs = vec![tab(
+        "t1",
+        &split(
+            SplitDirection::Horizontal,
+            pane("p1", Some("s1")),
+            pane("p2", Some("s2")),
+        ),
+    )];
+    let mut h = Harness::with(cx, dir, &fixture);
+    h.answer_scrollback("s1", b"");
+    h.answer_scrollback("s2", b"");
+    pop_out(&mut h, "t1", "p1");
+    h
+}
+
+/// Ends `s1`'s turn.
+fn end_s1_turn(h: &mut Harness<'_>) {
+    h.send(DaemonMessage::SessionUpdated {
+        session: session("s1").build(),
+        request_id: None,
+    });
+}
+
+/// Whether `window` is the active window, its frames settled.
+fn window_active(window: &mut VisualTestContext) -> bool {
+    window.run_until_parked();
+    window.update(|window, _| window.is_window_active())
+}
+
+#[gpui::test]
+fn a_deactivated_popout_stops_clearing_unseen_turns(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = s1_working_beside_s2(cx, &dir);
+    let mut popout = h.popout_window();
+    assert!(focused_in_popout(&h, &mut popout, "p1"));
+
+    h.cx.update(|window, _| window.activate_window());
+    assert!(!window_active(&mut popout), "the main window is in front");
+    end_s1_turn(&mut h);
+
+    assert_eq!(
+        leaf_unseen(&mut h, "s1"),
+        Some(true),
+        "an inactive pop-out does not show s1, though its terminal keeps its focus"
+    );
+}
+
+#[gpui::test]
+fn raising_a_focused_popout_clears_its_turn(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = s1_working_beside_s2(cx, &dir);
+    h.cx.update(|window, _| window.activate_window());
+    end_s1_turn(&mut h);
+    assert_eq!(leaf_unseen(&mut h, "s1"), Some(true));
+    let mut popout = h.popout_window();
+    assert!(
+        focused_in_popout(&h, &mut popout, "p1"),
+        "the terminal kept its window's keyboard"
+    );
+
+    popout.update(|window, _| window.activate_window());
+
+    assert!(window_active(&mut popout));
+    assert_eq!(
+        leaf_unseen(&mut h, "s1"),
+        Some(false),
+        "raising the pop-out shows s1"
+    );
+}
+
+#[gpui::test]
+fn a_popped_single_pane_tab_lets_turns_end_unseen(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture::single(session("s1").status("working").build());
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.answer_scrollback("s1", b"");
+    pop_out(&mut h, "t1", "p1");
+    assert_eq!(
+        h.root(|root, _| root.focused_pane()).as_deref(),
+        Some("p1"),
+        "the main tab still names the popped pane focused"
+    );
+    h.cx.update(|window, _| window.activate_window());
+
+    end_s1_turn(&mut h);
+
+    assert_eq!(
+        leaf_unseen(&mut h, "s1"),
+        Some(true),
+        "a popped pane shows nothing in the main window"
+    );
+}
+
+/// [`s1_working_beside_s2`] with the main window in front, `p2` focused
+/// there, and `s1`'s turn ended while nothing showed it.
+fn s1_ends_unseen_beside_a_popout<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let mut h = s1_working_beside_s2(cx, dir);
+    h.cx.update(|window, _| window.activate_window());
+    let cell = h.cell_center("p2", 0, 0);
+    h.click(cell, Modifiers::none());
+    assert!(focused_in_main(&mut h, "p2"));
+    assert_eq!(h.root(|root, _| root.focused_pane()).as_deref(), Some("p2"));
+
+    end_s1_turn(&mut h);
+    assert_eq!(leaf_unseen(&mut h, "s1"), Some(true), "s1 ended unseen");
+    h
+}
+
+#[gpui::test]
+fn focused_popout_clears_the_unseen_turn(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = s1_ends_unseen_beside_a_popout(cx, &dir);
+
+    h.click_on("popped-focus-p1");
+    let mut popout = h.popout_window();
+    assert!(focused_in_popout(&h, &mut popout, "p1"));
+    assert_eq!(
+        leaf_unseen(&mut h, "s1"),
+        Some(false),
+        "the focused pop-out shows s1"
+    );
+
+    for status in ["working", "idle"] {
+        h.send(DaemonMessage::SessionUpdated {
+            session: session("s1").status(status).build(),
+            request_id: None,
+        });
+    }
+    assert_eq!(
+        leaf_unseen(&mut h, "s1"),
+        Some(false),
+        "a turn ending in the focused pop-out is seen"
+    );
+}
+
+#[gpui::test]
+fn an_open_but_unfocused_popout_leaves_the_unseen_turn(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = s1_ends_unseen_beside_a_popout(cx, &dir);
+
+    let cell = h.cell_center("p2", 0, 0);
+    h.click(cell, Modifiers::none());
+
+    assert_eq!(
+        leaf_unseen(&mut h, "s1"),
+        Some(true),
+        "neither the open pop-out nor focus elsewhere in the main window saw s1"
+    );
+    assert_eq!(h.window_count(), 2);
+}
+
+#[gpui::test]
+fn popout_terminal_takes_focus_on_open(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
+
+    pop_out(&mut h, "t1", "p1");
+
+    let mut popout = h.popout_window();
+    assert!(
+        focused_in_popout(&h, &mut popout, "p1"),
+        "the pop-out's terminal has its window's keyboard"
+    );
+    assert!(!focused_in_main(&mut h, "p1"));
+}
+
+#[gpui::test]
+fn leaf_click_raises_a_popped_pane(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
+    pop_out(&mut h, "t1", "p1");
+    let mut popout = h.popout_window();
+    popout.update(|window, _| window.blur());
+    h.cx.update(|window, _| window.activate_window());
+    assert!(!is_active(&mut popout), "the main window is in front");
+
+    h.click_on("leaf-s1");
+
+    assert!(is_active(&mut popout), "the pop-out window is raised");
+    assert!(
+        focused_in_popout(&h, &mut popout, "p1"),
+        "its terminal has the keyboard"
+    );
+    assert!(!focused_in_main(&mut h, "p1"));
+    assert_eq!(h.window_count(), 2);
+}
+
+#[gpui::test]
+fn a_pane_in_two_tabs_for_one_fold_draws_no_gone_frame(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = Fixture::single(session("s1").build());
+    fixture.sessions.push(session("s2").build());
+    fixture.tabs.push(tab("t2", &pane("p2", Some("s2"))));
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.click_on("tab-t2");
+    pop_out(&mut h, "t1", "p1");
+
+    // The destination's event alone: p1 is in t1 and in t2 for this fold.
+    h.send(DaemonMessage::TabUpdated {
+        tab: tab(
+            "t2",
+            &split(
+                SplitDirection::Horizontal,
+                pane("p2", Some("s2")),
+                pane("p1", Some("s1")),
+            ),
+        ),
+    });
+
+    let mut popout = h.popout_window();
+    popout.run_until_parked();
+    assert!(
+        popout.debug_bounds("popout-pane-gone").is_none(),
+        "the pop-out still draws p1's terminal"
+    );
+    assert_eq!(
+        h.root(|root, _| root.pane_note("p1")),
+        Some(POPPED_OUT_NOTE),
+        "the main grid draws the card, not p1's terminal"
+    );
 }

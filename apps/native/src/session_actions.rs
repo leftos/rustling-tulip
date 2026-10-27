@@ -81,10 +81,31 @@ pub(crate) enum Step {
 }
 
 /// The pane header's Stop waiting for its confirming second click, keyed by
-/// the session it stops, so it never carries over to another session.
+/// where the Stop is drawn and the session it stops, so it never carries
+/// over to another session or between the main grid and a pop-out.
 #[derive(Debug, Default)]
 pub(crate) struct HeaderStopConfirm {
-    armed: Option<String>,
+    armed: Option<(StopPlace, String)>,
+}
+
+/// Where a pane's two-step Stop is drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StopPlace {
+    /// A pane header in the main window's grid.
+    Grid,
+    /// A pane pop-out's toolbar.
+    Popout,
+}
+
+impl StopPlace {
+    /// The start of the Stop's selectors: `<prefix>-<pane>`, then
+    /// `<prefix>-confirm-<pane>` and `<prefix>-cancel-<pane>`.
+    pub(crate) fn selector_prefix(self) -> &'static str {
+        match self {
+            Self::Grid => "pane-stop",
+            Self::Popout => "popout-stop",
+        }
+    }
 }
 
 /// Which submenu replaces the context menu's rows.
@@ -803,24 +824,31 @@ impl SessionAction {
 }
 
 impl HeaderStopConfirm {
-    /// A Stop click for `session_id`: true when exactly that session was
-    /// armed (and disarms it), else arms it and returns false.
-    pub(crate) fn click(&mut self, session_id: &str) -> bool {
-        if self.is_armed(session_id) {
+    /// A Stop click at `place` for `session_id`: true when exactly that
+    /// place and session were armed (and disarms it), else arms them and
+    /// returns false.
+    pub(crate) fn click(&mut self, place: StopPlace, session_id: &str) -> bool {
+        if self.is_armed(place, session_id) {
             self.armed = None;
             true
         } else {
-            self.armed = Some(session_id.to_owned());
+            self.armed = Some((place, session_id.to_owned()));
             false
         }
     }
 
-    pub(crate) fn is_armed(&self, session_id: &str) -> bool {
-        self.armed.as_deref() == Some(session_id)
+    pub(crate) fn is_armed(&self, place: StopPlace, session_id: &str) -> bool {
+        self.armed
+            .as_ref()
+            .is_some_and(|(armed, id)| *armed == place && id == session_id)
     }
 
-    pub(crate) fn armed(&self) -> Option<&str> {
-        self.armed.as_deref()
+    /// The session whose Stop at `place` waits for its confirm.
+    pub(crate) fn armed(&self, place: StopPlace) -> Option<&str> {
+        self.armed
+            .as_ref()
+            .filter(|(armed, _)| *armed == place)
+            .map(|(_, id)| id.as_str())
     }
 
     /// Returns whether anything was armed.
@@ -970,9 +998,9 @@ mod tests {
     use super::{
         ActionState, DuplicateTarget, Duplicates, HEADLESS_UNSUPPORTED_TIP, HeaderStopConfirm,
         MenuEntry, MenuMode, MoveTarget, OfferedRow, PendingPrefill, PlacedFocus, Prefills,
-        SessionAction, SessionRow, Step, SubmenuLine, action_state, busy_exclusion_message,
-        busy_row, exit_code_label, exited_message, header_shows_exit_code, menu_actions,
-        menu_entries, move_lines, move_source, orphan_banner_text, overlay_actions,
+        SessionAction, SessionRow, Step, StopPlace, SubmenuLine, action_state,
+        busy_exclusion_message, busy_row, exit_code_label, exited_message, header_shows_exit_code,
+        menu_actions, menu_entries, move_lines, move_source, orphan_banner_text, overlay_actions,
         pane_shows_exit, plan, rename_message, self_exited, session_rows, worktree_to_reveal,
     };
     use crate::popouts::{POP_OUT_ALREADY_TIP, POP_OUT_NO_PANE_TIP, PopoutKey, Popouts};
@@ -1454,21 +1482,46 @@ mod tests {
 
     #[test]
     fn actions_header_stop_confirm_is_keyed_by_session() {
+        let grid = StopPlace::Grid;
         let mut confirm = HeaderStopConfirm::default();
-        assert!(!confirm.click("s1"), "the first click only arms");
-        assert!(confirm.is_armed("s1"));
-        assert_eq!(confirm.armed(), Some("s1"));
+        assert!(!confirm.click(grid, "s1"), "the first click only arms");
+        assert!(confirm.is_armed(grid, "s1"));
+        assert_eq!(confirm.armed(grid), Some("s1"));
         assert!(
-            !confirm.click("s2"),
+            !confirm.click(grid, "s2"),
             "another session arms its own, never stops on s1's arm"
         );
-        assert!(!confirm.is_armed("s1"));
-        assert!(confirm.click("s2"));
-        assert_eq!(confirm.armed(), None, "acting disarms");
+        assert!(!confirm.is_armed(grid, "s1"));
+        assert!(confirm.click(grid, "s2"));
+        assert_eq!(confirm.armed(grid), None, "acting disarms");
         assert!(!confirm.disarm());
-        confirm.click("s1");
+        confirm.click(grid, "s1");
         assert!(confirm.disarm());
-        assert!(!confirm.click("s1"), "a disarm needs two clicks again");
+        assert!(
+            !confirm.click(grid, "s1"),
+            "a disarm needs two clicks again"
+        );
+    }
+
+    #[test]
+    fn actions_header_stop_confirm_is_keyed_by_place() {
+        let (grid, popout) = (StopPlace::Grid, StopPlace::Popout);
+        let mut confirm = HeaderStopConfirm::default();
+        assert!(
+            !confirm.click(popout, "s1"),
+            "the pop-out's first click arms"
+        );
+        assert!(
+            !confirm.is_armed(grid, "s1"),
+            "the main grid's Stop is not armed"
+        );
+        assert_eq!(confirm.armed(grid), None);
+        assert!(
+            !confirm.click(grid, "s1"),
+            "the main grid's click arms its own, never stops on the pop-out's arm"
+        );
+        assert!(!confirm.is_armed(popout, "s1"), "one arm at a time");
+        assert!(confirm.click(grid, "s1"));
     }
 
     fn named(id: &str) -> SessionSnapshot {

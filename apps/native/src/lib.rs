@@ -661,6 +661,8 @@ pub struct RootView {
     popouts: Popouts,
     /// Each open pop-out's window.
     popout_windows: HashMap<PopoutKey, PopoutWindow>,
+    /// The popped pane whose terminal has its pop-out window's keyboard.
+    popout_focused: Option<String>,
     /// The main window's own focus, on its outermost element: a pane popping
     /// out hands the keyboard here when its terminal had it, so the app's
     /// shortcuts keep working with no terminal focused.
@@ -1143,6 +1145,7 @@ impl RootView {
             _drag_escape: drag_escape,
             popouts: Popouts::default(),
             popout_windows: HashMap::new(),
+            popout_focused: None,
             root_focus: cx.focus_handle(),
             sidebar_focus: cx.focus_handle(),
             row_focus: None,
@@ -1400,20 +1403,67 @@ impl RootView {
         cx.defer(move |cx| open_popout_now(&root, opening, cx));
     }
 
-    /// The terminal `key`'s pop-out draws: a pane pop-out's pane while it is
-    /// in the key's tab. A pane moved to another tab re-keys its pop-out
-    /// (`follow_popout_moves`), so this finds it there too.
+    /// The terminal `key`'s pop-out draws: a pane pop-out's pane while some
+    /// tab holds it. The pane is judged by its id, not by the tab the key
+    /// names, so the fold in which a moved pane is in its old tab and its
+    /// new one still finds it.
     pub(crate) fn popout_terminal(
         &self,
         key: &PopoutKey,
     ) -> Option<gpui::Entity<term_view::TerminalPane>> {
-        let PopoutKey::Pane { tab_id, pane_id } = key else {
+        let PopoutKey::Pane { pane_id, .. } = key else {
             return None;
         };
-        self.panes
-            .get(pane_id)
-            .filter(|slot| slot.tab_id() == tab_id)
-            .map(|slot| slot.view().clone())
+        popouts::pane_in_tabs(pane_id, self.tabs.tabs())?;
+        self.panes.get(pane_id).map(|slot| slot.view().clone())
+    }
+
+    /// Pane `pane_id`'s pop-out window became active with its terminal
+    /// focused (`shown`), or stopped being either: a session shown that way
+    /// counts as shown, so its finished turn is seen.
+    pub(crate) fn popout_terminal_focus(
+        &mut self,
+        pane_id: &str,
+        shown: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if shown {
+            self.popout_focused = Some(pane_id.to_owned());
+            if let Some(session) = self.popout_focused_session() {
+                self.sidebar.mark_seen(&session);
+            }
+        } else if self.popout_focused.as_deref() == Some(pane_id) {
+            self.popout_focused = None;
+        }
+        cx.notify();
+    }
+
+    /// The session a pane pop-out's terminal shows with its window's
+    /// keyboard, while that pane is still popped out.
+    fn popout_focused_session(&self) -> Option<String> {
+        let pane_id = self.popout_focused.as_deref()?;
+        self.popouts.popped_key(pane_id)?;
+        let session = popouts::pane_in_tabs(pane_id, self.tabs.tabs())?.session?;
+        Some(session.to_owned())
+    }
+
+    /// Closes the pop-outs whose content has gone: a pane pop-out whose pane
+    /// is in no tab or whose session the daemon removed. Their panes take
+    /// their roles in the main window back.
+    fn prune_popouts(&mut self, cx: &mut Context<Self>) {
+        let gone = self.popouts.prune(&self.tabs);
+        if gone.is_empty() {
+            return;
+        }
+        self.update_pane_roles(cx);
+        for key in &gone {
+            tracing::debug!(?key, "closing a pop-out whose content has gone");
+            self.mark_popout_resized(key, cx);
+            if let Some(popout) = self.popout_windows.remove(key) {
+                close_popout_window(key, popout.handle, cx);
+            }
+        }
+        cx.notify();
     }
 
     /// Brings `key`'s pop-out window to the front and gives the keyboard to
@@ -1537,6 +1587,13 @@ impl RootView {
             tab_id: tab_id.to_owned(),
             pane_id: pane_id.to_owned(),
         })
+    }
+
+    /// Whether pane `pane_id` draws in a pop-out window, whichever tab the
+    /// pop-out's key names.
+    #[must_use]
+    pub fn is_pane_popped(&self, pane_id: &str) -> bool {
+        self.popouts.popped_key(pane_id).is_some()
     }
 
     /// How many pop-out windows are open.
@@ -2335,7 +2392,10 @@ impl RootView {
     fn show_session(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.sidebar.clear_attention(id);
         self.sidebar.mark_seen(id);
-        if let Some((tab_id, pane_id)) = find_tab_containing_session(self.tabs.tabs(), id) {
+        if let Some(key) = self.popouts.showing_session(id, self.tabs.tabs()).cloned() {
+            // Its pane draws in a pop-out: that window comes to the front.
+            self.activate_popout(&key, cx);
+        } else if let Some((tab_id, pane_id)) = find_tab_containing_session(self.tabs.tabs(), id) {
             self.tabs.focus_pane(&tab_id, &pane_id);
             self.after_tabs_change(window, cx);
         } else if let Some(session) = self.sidebar.session(id).filter(|s| can_attach(s)).cloned() {
@@ -2651,6 +2711,7 @@ impl RootView {
         self.follow_popout_moves(cx);
         self.after_tabs_change(window, cx);
         self.refresh_popout_titles(cx);
+        self.prune_popouts(cx);
         true
     }
 
@@ -2882,9 +2943,14 @@ impl RootView {
     /// armed.
     fn fold_sidebar(&mut self, msg: &DaemonMessage, cx: &mut Context<Self>) {
         let before = moves_needs_you(msg).then(|| self.needs_you_list());
-        let focused = self.focused_session();
+        let focused = self.shown_session();
         self.sidebar.set_focused_session(focused.as_deref());
         self.sidebar.apply(msg);
+        // A session focused in a pop-out is shown too: a turn ending there
+        // is seen.
+        if let Some(session) = self.popout_focused_session() {
+            self.sidebar.mark_seen(&session);
+        }
         self.prune_container_row_focus();
         self.forget_remembered_session(msg);
         if before.is_some_and(|before| self.needs_you_list() != before) {
