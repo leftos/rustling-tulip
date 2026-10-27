@@ -4,12 +4,22 @@
 use protocol::{MergeLayout, RearrangeLayout, TabContent, TabEntry};
 
 use crate::layout_chooser::grid_shapes;
+use crate::popouts::{POP_OUT_ALREADY_TIP, PopoutKey, Popouts};
 use crate::tabs::TabSelection;
+
+/// Why the tab menu's Pop out is dimmed for a viewer tab.
+pub(crate) const VIEWER_POP_OUT_TIP: &str = "Viewer tabs can't be popped out";
+/// Why the tab menu's Pop out is dimmed for a diff tab.
+pub(crate) const DIFF_POP_OUT_TIP: &str = "Diff tabs can't be popped out";
+/// The tab menu's Pop out row, which reads Focus window once the tab is out.
+const POP_OUT_SELECTOR: &str = "tab-menu-popout";
 
 /// What a row of the tab menu does when pressed.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum TabAction {
     Rename,
+    /// Opens the tab in a window of its own, or raises its open pop-out.
+    PopOut,
     /// Swaps the rows for the Grid submenu.
     OpenGrid,
     /// Swaps the Grid submenu back for the rows.
@@ -158,6 +168,57 @@ pub(crate) fn rearrange_lines(bound: usize, aspect: f32, grid_open: bool) -> Vec
     ]
 }
 
+/// The first lines of `tab`'s menu: Rename (not for a viewer tab, whose
+/// pill shows its file's name), then Pop out.
+pub(crate) fn head_lines(tab: &TabEntry, tabs: &[TabEntry], popouts: &Popouts) -> Vec<MenuLine> {
+    let mut lines = Vec::new();
+    if !matches!(tab.content, TabContent::Viewer { .. }) {
+        lines.push(MenuLine::row(
+            "tab-menu-rename",
+            "Rename tab",
+            TabAction::Rename,
+        ));
+    }
+    lines.extend(pop_out_lines(tab, tabs, popouts));
+    lines
+}
+
+/// `tab`'s Pop out: Focus window while the tab has its own window, else
+/// Pop out, dimmed under a line naming why for a viewer or diff tab and for
+/// a grid tab an open pop-out already shares content with.
+fn pop_out_lines(tab: &TabEntry, tabs: &[TabEntry], popouts: &Popouts) -> Vec<MenuLine> {
+    let refusal = match &tab.content {
+        TabContent::Viewer { .. } => VIEWER_POP_OUT_TIP,
+        TabContent::Diff { .. } => DIFF_POP_OUT_TIP,
+        TabContent::Grid { .. } => {
+            let key = PopoutKey::Tab {
+                tab_id: tab.id.clone(),
+            };
+            match popouts.blocking(&key, tabs) {
+                None => {
+                    return vec![MenuLine::row(
+                        POP_OUT_SELECTOR,
+                        "Pop out",
+                        TabAction::PopOut,
+                    )];
+                }
+                Some(open) if open == key => {
+                    return vec![MenuLine::row(
+                        POP_OUT_SELECTOR,
+                        "Focus window",
+                        TabAction::PopOut,
+                    )];
+                }
+                Some(_) => POP_OUT_ALREADY_TIP,
+            }
+        }
+    };
+    vec![
+        MenuLine::inert(POP_OUT_SELECTOR, "Pop out"),
+        MenuLine::Label(refusal.to_owned()),
+    ]
+}
+
 /// The merge section for the menu of `menu_tab`: nothing unless two tabs
 /// or more are selected and `menu_tab` is one of them; disabled rows when
 /// a selected tab has no grid (a diff or viewer tab), which the daemon
@@ -205,8 +266,147 @@ pub(crate) fn merge_lines(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::popouts::{PopoutKey, Popouts};
+    use crate::tabs::tests::{diff_tab, pane, split, tab};
+    use protocol::SplitDirection;
 
     const WIDE: f32 = 16.0 / 10.0;
+
+    /// `t1` holding `p1` on `s1` and `p2` on `s2`.
+    fn grid_tab() -> TabEntry {
+        tab(
+            "t1",
+            &split(
+                SplitDirection::Horizontal,
+                0.5,
+                pane("p1", Some("s1")),
+                pane("p2", Some("s2")),
+            ),
+        )
+    }
+
+    /// The label and action of `selector`'s row.
+    fn row_of<'a>(lines: &'a [MenuLine], selector: &str) -> Option<(&'a str, Option<TabAction>)> {
+        lines.iter().find_map(|line| match line {
+            MenuLine::Row {
+                selector: s,
+                label,
+                action,
+                ..
+            } if s == selector => Some((label.as_str(), *action)),
+            _ => None,
+        })
+    }
+
+    fn labels(lines: &[MenuLine]) -> Vec<&str> {
+        lines
+            .iter()
+            .filter_map(|line| match line {
+                MenuLine::Label(text) => Some(text.as_str()),
+                MenuLine::Row { .. } | MenuLine::Separator => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn pop_out_row_follows_rename() {
+        let t1 = grid_tab();
+        let lines = head_lines(&t1, std::slice::from_ref(&t1), &Popouts::default());
+
+        assert_eq!(selectors(&lines), ["tab-menu-rename", "tab-menu-popout"]);
+        assert_eq!(
+            row_of(&lines, "tab-menu-popout"),
+            Some(("Pop out", Some(TabAction::PopOut)))
+        );
+        assert_eq!(
+            labels(&lines),
+            [] as [&str; 0],
+            "an enabled row gives no reason"
+        );
+    }
+
+    #[test]
+    fn pop_out_row_is_disabled_for_a_viewer_tab() {
+        let mut viewer = grid_tab();
+        viewer.content = TabContent::Viewer {
+            path: "C:\\notes\\a.md".to_owned(),
+        };
+        let lines = head_lines(&viewer, std::slice::from_ref(&viewer), &Popouts::default());
+
+        assert_eq!(
+            selectors(&lines),
+            ["tab-menu-popout"],
+            "a viewer tab has no Rename"
+        );
+        assert_eq!(row_of(&lines, "tab-menu-popout"), Some(("Pop out", None)));
+        assert_eq!(labels(&lines), ["Viewer tabs can't be popped out"]);
+    }
+
+    #[test]
+    fn pop_out_row_is_disabled_for_a_diff_tab() {
+        let diff = diff_tab("d1");
+        let lines = head_lines(&diff, std::slice::from_ref(&diff), &Popouts::default());
+
+        assert_eq!(selectors(&lines), ["tab-menu-rename", "tab-menu-popout"]);
+        assert_eq!(row_of(&lines, "tab-menu-popout"), Some(("Pop out", None)));
+        assert_eq!(labels(&lines), ["Diff tabs can't be popped out"]);
+    }
+
+    #[test]
+    fn pop_out_row_is_disabled_when_a_pane_is_popped() {
+        let tabs = vec![grid_tab(), tab("t2", &pane("p3", Some("s3")))];
+        let mut popouts = Popouts::default();
+        popouts.open(
+            PopoutKey::Pane {
+                tab_id: "t1".to_owned(),
+                pane_id: "p2".to_owned(),
+            },
+            &tabs,
+        );
+
+        let lines = head_lines(&tabs[0], &tabs, &popouts);
+        assert_eq!(row_of(&lines, "tab-menu-popout"), Some(("Pop out", None)));
+        assert_eq!(labels(&lines), ["Already in a pop-out"]);
+
+        let mut sessions = Popouts::default();
+        sessions.open(
+            PopoutKey::Session {
+                session_id: "s1".to_owned(),
+            },
+            &tabs,
+        );
+        let lines = head_lines(&tabs[0], &tabs, &sessions);
+        assert_eq!(
+            labels(&lines),
+            ["Already in a pop-out"],
+            "a pane's session in a session pop-out overlaps too"
+        );
+        let lines = head_lines(&tabs[1], &tabs, &popouts);
+        assert_eq!(
+            row_of(&lines, "tab-menu-popout"),
+            Some(("Pop out", Some(TabAction::PopOut))),
+            "another tab is not held back"
+        );
+    }
+
+    #[test]
+    fn pop_out_row_reads_focus_window_for_a_popped_tab() {
+        let tabs = vec![grid_tab()];
+        let mut popouts = Popouts::default();
+        popouts.open(
+            PopoutKey::Tab {
+                tab_id: "t1".to_owned(),
+            },
+            &tabs,
+        );
+
+        let lines = head_lines(&tabs[0], &tabs, &popouts);
+        assert_eq!(
+            row_of(&lines, "tab-menu-popout"),
+            Some(("Focus window", Some(TabAction::PopOut)))
+        );
+        assert_eq!(labels(&lines), [] as [&str; 0]);
+    }
 
     fn selectors(lines: &[MenuLine]) -> Vec<&str> {
         lines.iter().filter_map(MenuLine::selector).collect()

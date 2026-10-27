@@ -702,6 +702,7 @@ fn menu_hides_rearrange_under_two_panes(cx: &mut TestAppContext) {
         rows,
         [
             "tab-menu-rename",
+            "tab-menu-popout",
             "tab-menu-increase",
             "tab-menu-decrease",
             "tab-menu-reset",

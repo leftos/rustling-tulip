@@ -7,8 +7,8 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, Context, CursorStyle, Div, DragMoveEvent, ElementId,
     Entity, FocusHandle, FontWeight, HighlightStyle, MouseButton, MouseDownEvent, Pixels, Point,
-    SharedString, Stateful, StyledText, Subscription, Window, canvas, div, prelude::*, px,
-    relative,
+    SharedString, Stateful, StyledText, Subscription, Window, WindowId, canvas, div, prelude::*,
+    px, relative,
 };
 use protocol::{
     AgentDescriptor, ClientMessage, GridNode, PaneDropEdge, SessionMember, SessionMode,
@@ -53,6 +53,10 @@ pub const POPPED_OUT_NOTE: &str = "Popped out to its own window";
 const FOCUS_WINDOW_TIP: &str = "Bring the pop-out window to the front";
 /// What a popped pane's card's Dock back does.
 pub(crate) const DOCK_BACK_TIP: &str = "Close the pop-out window and show the pane here again";
+/// What a popped tab's Dock back does, on its card and in its pop-out.
+pub(crate) const TAB_DOCK_BACK_TIP: &str = "Close the pop-out window and show the tab here again";
+/// Why an empty pane's spawn buttons are disabled in a tab pop-out.
+pub(crate) const SPAWN_FROM_MAIN_TIP: &str = "Spawn from the main window";
 const PANE_SPAWN_TIP: &str = "Open the spawn dialog; the new session fills this pane";
 const PANE_SHELL_TIP: &str = "A plain shell in this pane, in the remembered folder";
 pub(crate) const SPAWN_TIP: &str = "Spawn a new session";
@@ -86,7 +90,9 @@ pub(crate) struct PaneSlot {
     attached: bool,
     /// The accent the pane's last apply resolved, `0xRRGGBB`.
     accent: u32,
-    _focus_in: Subscription,
+    /// The window whose focus-in events the pane follows, the one that
+    /// draws it, and that subscription.
+    focus_in: (WindowId, Subscription),
     _events: Subscription,
 }
 
@@ -237,6 +243,7 @@ impl RootView {
             self.sidebar.mark_seen(&id);
         }
         self.update_pane_roles(cx);
+        self.follow_pane_focus_windows(cx);
     }
 
     /// Drops the terminals of panes no tab holds any more; a session
@@ -284,12 +291,7 @@ impl RootView {
         let (tx, now) = (self.tx.clone(), self.now.clone());
         let font = self.sidebar.ui_state().terminal_font.clone();
         let view = cx.new(|cx| TerminalPane::new(pane_id.to_owned(), tx, now, font, cx));
-        let handle = view.read(cx).focus_handle();
-        let id = pane_id.to_owned();
-        let focus_in = cx.on_focus_in(&handle, window, move |this, window, cx| {
-            this.pane_focused(&id, window, cx);
-            cx.notify();
-        });
+        let focus_in = Self::follow_focus_in(pane_id, &view, window, cx);
         // The window given here is the one the slot was made in; an event
         // acts for the window that draws the terminal when it fires.
         let events = cx.subscribe_in(
@@ -306,9 +308,99 @@ impl RootView {
             session: None,
             attached: false,
             accent: appearance::BUILTIN_ACCENT,
-            _focus_in: focus_in,
+            focus_in,
             _events: events,
         }
+    }
+
+    /// Follows `view`'s focus-in events in `window`: a focus there runs
+    /// [`Self::pane_focused`] for pane `pane_id`.
+    fn follow_focus_in(
+        pane_id: &str,
+        view: &Entity<TerminalPane>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> (WindowId, Subscription) {
+        let handle = view.read(cx).focus_handle();
+        let id = pane_id.to_owned();
+        let subscription = cx.on_focus_in(&handle, window, move |this, window, cx| {
+            this.pane_focused(&id, window, cx);
+            cx.notify();
+        });
+        (window.window_handle().window_id(), subscription)
+    }
+
+    /// The window that draws tab `tab_id`'s grid: its pop-out's while the
+    /// tab is popped out and its window is open, else the main window.
+    pub(crate) fn tab_window(&self, tab_id: &str) -> WindowId {
+        self.popout_windows
+            .get(&PopoutKey::Tab {
+                tab_id: tab_id.to_owned(),
+            })
+            .map_or_else(
+                || self.layouts.main(),
+                |popout| gpui::AnyWindowHandle::from(popout.handle).window_id(),
+            )
+    }
+
+    /// Moves each tab pane's focus follower to the window that draws the
+    /// pane now, once this update is over: a click on a pane of a popped
+    /// tab focuses it as a click in the main window does. A session
+    /// pop-out's terminal belongs to no tab and keeps its own.
+    pub(crate) fn follow_pane_focus_windows(&self, cx: &mut Context<Self>) {
+        for (pane_id, slot) in &self.panes {
+            if popouts::slot_session(pane_id).is_some() {
+                continue;
+            }
+            let drawn_in = self.tab_window(&slot.tab_id);
+            if drawn_in == slot.focus_in.0 {
+                continue;
+            }
+            let pane_id = pane_id.clone();
+            Self::in_window(drawn_in, cx, move |root, window, cx| {
+                root.refollow_focus_in(&pane_id, window, cx);
+            });
+        }
+    }
+
+    /// Pane `pane_id` follows its focus-in events in `window` from now on.
+    fn refollow_focus_in(&mut self, pane_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let here = window.window_handle().window_id();
+        let Some(view) = self
+            .panes
+            .get(pane_id)
+            .filter(|slot| slot.focus_in.0 != here)
+            .map(|slot| slot.view.clone())
+        else {
+            return;
+        };
+        let focus_in = Self::follow_focus_in(pane_id, &view, window, cx);
+        if let Some(slot) = self.panes.get_mut(pane_id) {
+            slot.focus_in = focus_in;
+        }
+    }
+
+    /// Gives pane `pane_id`'s terminal the keyboard of the window that
+    /// draws it: a popped tab's pane takes its pop-out's once this update
+    /// is over, whichever tab the main window shows.
+    pub(crate) fn focus_pane_where_drawn(
+        &self,
+        pane_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let drawn_in = self
+            .panes
+            .get(pane_id)
+            .map_or_else(|| self.layouts.main(), |slot| self.tab_window(&slot.tab_id));
+        if drawn_in == window.window_handle().window_id() {
+            self.focus_pane_view(pane_id, window, cx);
+            return;
+        }
+        let pane_id = pane_id.to_owned();
+        Self::in_window(drawn_in, cx, move |root, window, cx| {
+            root.focus_pane_view(&pane_id, window, cx);
+        });
     }
 
     pub(crate) fn pane_focused(
@@ -328,6 +420,11 @@ impl RootView {
                 self.sidebar.mark_seen(&session);
             }
             self.tabs.set_focused(&tab_id, pane_id);
+            // In a popped tab's own window, the pane shows its session while
+            // that window is active, as a pane pop-out's terminal does.
+            if self.is_tab_popped(&tab_id) && !self.is_main_window(window) {
+                self.popout_terminal_focus(pane_id, window.is_window_active(), cx);
+            }
             self.remember_focused_session();
             self.update_pane_roles(cx);
             self.drop_stale_sc_picker();
@@ -384,7 +481,9 @@ impl RootView {
         let active = self.tabs.active_id();
         let focused = active.and_then(|tab_id| self.tabs.focused_pane(tab_id));
         let bindings = self.tabs.bindings();
-        let popped = self.popouts.popped_panes();
+        let tab_panes = self.popped_tab_panes();
+        let mut popped = self.popouts.popped_panes();
+        popped.extend(tab_panes.iter().map(String::as_str));
         let popped_sessions = self.popouts.popped_sessions();
         let drivers = tabs::size_drivers(
             &bindings,
@@ -406,6 +505,29 @@ impl RootView {
                 pane.set_answers_queries(answers);
             });
         }
+    }
+
+    /// The tab pop-out that draws pane `pane_id` with the rest of its tab.
+    pub(crate) fn tab_popout_of_pane(&self, pane_id: &str) -> Option<PopoutKey> {
+        let tab_id = &self.panes.get(pane_id)?.tab_id;
+        self.is_tab_popped(tab_id).then(|| PopoutKey::Tab {
+            tab_id: tab_id.clone(),
+        })
+    }
+
+    /// The panes of the tabs open in tab pop-outs, which draw there whichever
+    /// tab the main window shows.
+    fn popped_tab_panes(&self) -> Vec<String> {
+        self.popouts
+            .keys()
+            .iter()
+            .filter_map(|key| match key {
+                PopoutKey::Tab { tab_id } => Some(tab_id),
+                PopoutKey::Pane { .. } | PopoutKey::Session { .. } => None,
+            })
+            .flat_map(|tab_id| self.tab_pane_sessions(tab_id))
+            .map(|(pane_id, _)| pane_id)
+            .collect()
     }
 
     /// Gives every pane the font and colours it resolves to: each field its
@@ -448,9 +570,12 @@ impl RootView {
         }
     }
 
-    /// [`Self::mark_tab_panes_resized`] for the active tab.
+    /// [`Self::mark_tab_panes_resized`] for the active tab, unless it draws
+    /// in a pop-out: the main window never sizes its panes then.
     pub(crate) fn mark_active_panes_resized(&self, cx: &mut Context<Self>) {
-        if let Some(tab_id) = self.tabs.active_id() {
+        if let Some(tab_id) = self.tabs.active_id()
+            && !self.is_tab_popped(tab_id)
+        {
             self.mark_tab_panes_resized(tab_id, cx);
         }
     }
@@ -744,38 +869,45 @@ impl RootView {
         })
     }
 
-    /// Gives the main window's keyboard to `pane_id`'s terminal, unless the
-    /// pane is open in a pop-out: its terminal draws there, so the main
-    /// window focuses nothing for it.
+    /// Gives `window`'s keyboard to `pane_id`'s terminal, unless the pane
+    /// is open in a pop-out, or `window` is the main one and the pane's tab
+    /// is popped out: its terminal draws in the pop-out, so the main window
+    /// focuses nothing for it.
     pub(crate) fn focus_pane_view(&self, pane_id: &str, window: &mut Window, cx: &Context<Self>) {
         if let Some(slot) = self.panes.get(pane_id)
             && !self.is_pane_popped(pane_id)
+            && !(self.is_tab_popped(&slot.tab_id) && self.is_main_window(window))
         {
             slot.view.read(cx).focus(window);
         }
     }
 
     /// Gives the keyboard to the active tab: its focused pane, or a diff or
-    /// viewer tab's body. A popped focused pane takes nothing.
+    /// viewer tab's body. A popped focused pane takes nothing; a popped tab's
+    /// card holds no focus, so the main window keeps the keyboard to itself.
     pub(crate) fn focus_active_pane(&self, window: &mut Window, cx: &Context<Self>) {
         if self.focus_active_diff_tab(window, cx) || self.focus_active_viewer_tab(window) {
             return;
         }
-        if let Some(pane_id) = self
-            .tabs
-            .active_id()
-            .and_then(|tab_id| self.tabs.focused_pane(tab_id))
-        {
+        let Some(tab_id) = self.tabs.active_id() else {
+            return;
+        };
+        if self.is_tab_popped(tab_id) && self.is_main_window(window) {
+            self.root_focus.focus(window);
+            return;
+        }
+        if let Some(pane_id) = self.tabs.focused_pane(tab_id) {
             self.focus_pane_view(&pane_id, window, cx);
         }
     }
 
     /// The session the main window shows focused, for the unseen-turn rule:
-    /// the active tab's focused pane's, unless that pane draws in a pop-out.
+    /// the active tab's focused pane's, unless that pane or its tab draws in
+    /// a pop-out.
     pub(crate) fn shown_session(&self) -> Option<String> {
         let tab = self.tabs.active_tab()?;
         let pane_id = self.tabs.focused_pane(&tab.id)?;
-        if self.is_pane_popped(&pane_id) {
+        if self.is_pane_popped(&pane_id) || self.is_tab_popped(&tab.id) {
             return None;
         }
         self.focused_session()
@@ -980,17 +1112,20 @@ impl RootView {
     ) -> AnyElement {
         let has_repos = self.has_repos();
         let pending = self.spawns.aims_at(tab_id, pane_id);
+        let refused = self.pane_spawn_refusal(tab_id);
         let spawn = BorderedButton {
             selector: format!("empty-pane-new-session-{pane_id}"),
             label: "New session…",
-            tip: if !has_repos {
+            tip: if let Some(refusal) = refused {
+                refusal
+            } else if !has_repos {
                 NO_REPOS_TIP
             } else if pending {
                 PANE_PENDING_TIP
             } else {
                 PANE_SPAWN_TIP
             },
-            enabled: has_repos && !pending,
+            enabled: refused.is_none() && has_repos && !pending,
         };
         let ids = (tab_id.to_owned(), pane_id.to_owned());
         let spawn = bordered_button(spawn, cx, move |this, window, cx| {
@@ -999,12 +1134,14 @@ impl RootView {
         let shell = BorderedButton {
             selector: format!("empty-pane-shell-{pane_id}"),
             label: "Shell here",
-            tip: if pending {
+            tip: if let Some(refusal) = refused {
+                refusal
+            } else if pending {
                 PANE_PENDING_TIP
             } else {
                 PANE_SHELL_TIP
             },
-            enabled: !pending,
+            enabled: refused.is_none() && !pending,
         };
         let ids = (tab_id.to_owned(), pane_id.to_owned());
         let shell = bordered_button(shell, cx, move |this, window, cx| {
@@ -1029,8 +1166,8 @@ impl RootView {
         }
     }
 
-    /// The active tab: its split tree, a diff or viewer tab's body, or the
-    /// spawn choices when there is no tab.
+    /// The active tab: its split tree, a diff or viewer tab's body, the card
+    /// a popped-out tab leaves, or the spawn choices when there is no tab.
     pub(crate) fn grid_area(&self, cx: &mut Context<Self>) -> Div {
         let content = match self.tabs.active_tab() {
             None => self.no_tab(cx),
@@ -1041,27 +1178,34 @@ impl RootView {
                 TabContent::Viewer { .. } => self
                     .viewer_tab_element(&tab.id, cx)
                     .unwrap_or_else(|| div().into_any_element()),
-                TabContent::Grid { grid } => {
-                    let name = format!("tab-grid-{}", tab.id);
-                    div()
-                        .debug_selector(|| name)
-                        .relative()
-                        .flex()
-                        .size_full()
-                        .p(px(PANE_GUTTER))
-                        .child(self.render_node(&tab.id, grid, &mut Vec::new(), cx))
-                        .child(drop_layer(&tab.id, cx))
-                        .into_any_element()
+                TabContent::Grid { .. } if self.is_tab_popped(&tab.id) => {
+                    Self::popped_tab_card(tab, cx)
                 }
+                TabContent::Grid { grid } => self.tab_grid(&tab.id, grid, self.layouts.main(), cx),
             },
         };
+        grid_frame(content, cx)
+    }
+
+    /// `tab_id`'s split tree as window `here` draws it, with the layer that
+    /// takes a pane or leaf drop on it.
+    fn tab_grid(
+        &self,
+        tab_id: &str,
+        grid: &GridNode,
+        here: WindowId,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let name = format!("tab-grid-{tab_id}");
         div()
+            .debug_selector(|| name)
             .relative()
             .flex()
-            .flex_1()
-            .min_h(px(0.0))
-            .child(bounds_probe(cx))
-            .child(content)
+            .size_full()
+            .p(px(PANE_GUTTER))
+            .child(self.render_node(tab_id, grid, &mut Vec::new(), here, cx))
+            .child(drop_layer(tab_id, cx))
+            .into_any_element()
     }
 
     fn render_node(
@@ -1069,6 +1213,7 @@ impl RootView {
         tab_id: &str,
         node: &GridNode,
         path: &mut Vec<u8>,
+        here: WindowId,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         match node {
@@ -1083,15 +1228,27 @@ impl RootView {
                 second,
             } => {
                 path.push(0);
-                let first = self.render_node(tab_id, first, path, cx);
+                let first = self.render_node(tab_id, first, path, here, cx);
                 path.pop();
                 path.push(1);
-                let second = self.render_node(tab_id, second, path, cx);
+                let second = self.render_node(tab_id, second, path, here, cx);
                 path.pop();
-                let divider = self.pane_divider(tab_id, path, *direction, cx);
+                let divider = self.pane_divider(tab_id, path, *direction, here, cx);
                 split_box(*direction, *ratio, [first, divider, second])
             }
         }
+    }
+
+    /// Whether the divider at `split_path` of `tab_id` shows its drag
+    /// highlight in window `here`: only while a drag that started in that
+    /// window holds it.
+    #[must_use]
+    pub fn divider_highlighted(&self, tab_id: &str, split_path: &[u8], here: WindowId) -> bool {
+        matches!(
+            &self.drag,
+            Some(Drag::Divider { window, tab_id: t, split_path: p, .. })
+                if *window == here && t == tab_id && p == split_path
+        )
     }
 
     fn pane_divider(
@@ -1099,12 +1256,10 @@ impl RootView {
         tab_id: &str,
         path: &[u8],
         direction: SplitDirection,
+        here: WindowId,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let active = matches!(
-            &self.drag,
-            Some(Drag::Divider { tab_id: t, split_path, .. }) if t == tab_id && split_path == path
-        );
+        let active = self.divider_highlighted(tab_id, path, here);
         let name = format!("divider-{tab_id}-{path:?}");
         let id = ElementId::Name(SharedString::from(name.clone()));
         let (tab_id, split_path) = (tab_id.to_owned(), path.to_vec());
@@ -1236,54 +1391,91 @@ impl RootView {
             enabled: true,
         };
         let dock = bordered_button(dock, cx, move |this, _, cx| this.dock_back(&key, cx));
-        let label_name = format!("popped-label-{pane_id}");
-        let heading = div()
-            .debug_selector(|| label_name)
-            .max_w_full()
-            .overflow_hidden()
-            .whitespace_nowrap()
-            .text_size(px(TITLE_TEXT_SIZE))
-            .font_weight(FontWeight::SEMIBOLD)
-            .text_color(gpui::rgb(TEXT))
-            .child(label);
-        let buttons = div()
-            .flex()
-            .justify_center()
-            .gap(px(6.0))
-            .children([focus, dock]);
-        div()
-            .debug_selector(|| format!("pane-popped-{pane_id}"))
-            .flex()
-            .flex_col()
-            .size_full()
-            .items_center()
-            .justify_center()
-            .gap(px(8.0))
-            .px(px(12.0))
-            .rounded(px(PANE_RADIUS))
-            .border_1()
-            .border_color(gpui::rgb(LINE))
-            .bg(gpui::rgb(SURFACE))
-            .text_size(px(UI_TEXT_SIZE))
-            .text_color(gpui::rgb(MUTED))
-            .child(heading)
-            .child(POPPED_OUT_NOTE)
-            .child(buttons)
-            .into_any_element()
+        let names = CardNames {
+            card: format!("pane-popped-{pane_id}"),
+            label: format!("popped-label-{pane_id}"),
+        };
+        popped_out_card(names, label, [focus, dock])
     }
 
-    /// What `key`'s pop-out window draws: a pane's or a session's toolbar
-    /// over its terminal. `None` while a pane pop-out has no pane to show.
+    /// The card a popped-out tab leaves in the main window in place of its
+    /// grid: the tab's name, the popped-out note, Focus window and Dock
+    /// back. It holds no focus, so keys typed while it shows go nowhere.
+    fn popped_tab_card(tab: &TabEntry, cx: &mut Context<Self>) -> AnyElement {
+        let key = PopoutKey::Tab {
+            tab_id: tab.id.clone(),
+        };
+        let focus_key = key.clone();
+        let focus = BorderedButton {
+            selector: format!("popped-tab-focus-{}", tab.id),
+            label: "Focus window",
+            tip: FOCUS_WINDOW_TIP,
+            enabled: true,
+        };
+        let focus = bordered_button(focus, cx, move |this, window, cx| {
+            this.open_popout(focus_key.clone(), window, cx);
+        });
+        let dock = BorderedButton {
+            selector: format!("popped-tab-dock-{}", tab.id),
+            label: "Dock back",
+            tip: TAB_DOCK_BACK_TIP,
+            enabled: true,
+        };
+        let dock = bordered_button(dock, cx, move |this, _, cx| this.dock_back(&key, cx));
+        let names = CardNames {
+            card: format!("popped-tab-{}", tab.id),
+            label: format!("popped-tab-label-{}", tab.id),
+        };
+        popped_out_card(names, tab.name.clone(), [focus, dock])
+    }
+
+    /// Why an empty pane of `tab_id` offers no spawn: a popped-out tab
+    /// spawns from the main window only.
+    #[must_use]
+    pub fn pane_spawn_refusal(&self, tab_id: &str) -> Option<&'static str> {
+        self.is_tab_popped(tab_id).then_some(SPAWN_FROM_MAIN_TIP)
+    }
+
+    /// What `key`'s pop-out window `here` draws: a pane's or a session's
+    /// toolbar over its terminal, or a tab's toolbar over its grid. `None`
+    /// while a pane or tab pop-out has nothing to show.
     pub(crate) fn popout_pane(
         &self,
         key: &PopoutKey,
+        here: WindowId,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         match key {
             PopoutKey::Pane { tab_id, pane_id } => self.popped_pane(key, tab_id, pane_id, cx),
             PopoutKey::Session { session_id } => Some(self.popped_session(session_id, cx)),
-            PopoutKey::Tab { .. } => None,
+            PopoutKey::Tab { tab_id } => self.popped_tab(tab_id, here, cx),
         }
+    }
+
+    /// What tab `tab_id`'s pop-out window `here` draws: a toolbar with the
+    /// tab's name and Dock back over the tab's whole grid, with no tab
+    /// strip. `None` once the tab has gone or holds no grid.
+    fn popped_tab(
+        &self,
+        tab_id: &str,
+        here: WindowId,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let tab = self.tabs.tab(tab_id)?;
+        let grid = tab.grid()?;
+        let name = format!("popout-tab-title-{tab_id}");
+        let title = div()
+            .debug_selector(|| name)
+            .flex_none()
+            .whitespace_nowrap()
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(gpui::rgb(TEXT))
+            .child(tab.name.clone())
+            .into_any_element();
+        let dock = Self::popout_tab_dock_back(tab_id, cx);
+        let toolbar = popout_toolbar_row(&format!("tab-{tab_id}"), vec![title], vec![dock], cx);
+        let body = grid_frame(self.tab_grid(tab_id, grid, here, cx), cx);
+        Some(popout_column(toolbar, body.into_any_element()))
     }
 
     /// What a session pop-out draws: its toolbar over its terminal, with the
@@ -1562,11 +1754,12 @@ impl RootView {
         at: Point<Pixels>,
         request_id: Option<String>,
     ) -> Option<(String, PaneDropEdge, LeafDrop)> {
-        let tab = self.tabs.active_tab()?;
+        let here = window.window_handle().window_id();
+        let tab = self.window_tab(here)?;
         if !matches!(payload, DragPayload::Pane { .. } | DragPayload::Leaf { .. }) {
             return None;
         }
-        let rect = grid_rect(self.layouts.grid(window.window_handle().window_id())?);
+        let rect = grid_rect(self.layouts.grid(here)?);
         let at = (at.x / px(1.0), at.y / px(1.0));
         let (pane_id, edge) = drag::pane_target(tab.grid()?, rect, PANE_GUTTER, at)?;
         // A popped pane's card takes no drop: it would split or rebind the
@@ -2315,6 +2508,63 @@ fn popout_toolbar_row(
         .child(div().flex_1())
         .child(header_controls(cx).children(controls))
         .into_any_element()
+}
+
+/// What a card standing in for popped-out content is found by: the card,
+/// and its heading.
+struct CardNames {
+    card: String,
+    label: String,
+}
+
+/// A card standing in for content a pop-out window draws: `label` over the
+/// popped-out note and `buttons`.
+fn popped_out_card(names: CardNames, label: String, buttons: [Stateful<Div>; 2]) -> AnyElement {
+    let CardNames {
+        card,
+        label: label_name,
+    } = names;
+    let heading = div()
+        .debug_selector(|| label_name)
+        .max_w_full()
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .text_size(px(TITLE_TEXT_SIZE))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(gpui::rgb(TEXT))
+        .child(label);
+    let buttons = div().flex().justify_center().gap(px(6.0)).children(buttons);
+    div()
+        .debug_selector(|| card)
+        .flex()
+        .flex_col()
+        .size_full()
+        .items_center()
+        .justify_center()
+        .gap(px(8.0))
+        .px(px(12.0))
+        .rounded(px(PANE_RADIUS))
+        .border_1()
+        .border_color(gpui::rgb(LINE))
+        .bg(gpui::rgb(SURFACE))
+        .text_size(px(UI_TEXT_SIZE))
+        .text_color(gpui::rgb(MUTED))
+        .child(heading)
+        .child(POPPED_OUT_NOTE)
+        .child(buttons)
+        .into_any_element()
+}
+
+/// The area a window's grid fills, around `content`, with the probe that
+/// records where the window laid the grid out.
+fn grid_frame(content: AnyElement, cx: &mut Context<RootView>) -> Div {
+    div()
+        .relative()
+        .flex()
+        .flex_1()
+        .min_h(px(0.0))
+        .child(bounds_probe(cx))
+        .child(content)
 }
 
 /// A pop-out window's content: `toolbar` over `body`.

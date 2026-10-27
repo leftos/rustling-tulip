@@ -18,7 +18,7 @@ use crate::appearance::{self, ACCENT_PRESETS, AppearanceChange};
 use crate::appearance_view::Level;
 use crate::branch_fate::{DeleteWorktreeConfirm, DialogButton, confirm_messages};
 use crate::buttons::{ButtonKind, ButtonSize, button, field_frame, focus_ring, outlined_button};
-use crate::grid_view::{DOCK_BACK_TIP, NO_REPOS_TIP, PANE_PENDING_TIP};
+use crate::grid_view::{DOCK_BACK_TIP, NO_REPOS_TIP, PANE_PENDING_TIP, TAB_DOCK_BACK_TIP};
 use crate::launch_last;
 use crate::notice_view::{MODAL_RADIUS, drop_shadow, modal_panel};
 use crate::notices::{ActionFailedNotice, ToastKind};
@@ -2204,6 +2204,17 @@ impl RootView {
         .into_any_element()
     }
 
+    /// A tab pop-out's Dock back: the window closes and the tab draws in
+    /// the main window again.
+    pub(crate) fn popout_tab_dock_back(tab_id: &str, cx: &mut Context<Self>) -> AnyElement {
+        let button = header_text_button(&format!("popout-tab-dock-{tab_id}"), "Dock back", MUTED)
+            .tooltip(tooltip(TAB_DOCK_BACK_TIP));
+        on_press(button, cx, |this, window, cx| {
+            this.dock_back_from_popout(window, cx);
+        })
+        .into_any_element()
+    }
+
     /// A session pop-out's Close window, in place of Dock back: the window
     /// closes and the session is left as it is.
     pub(crate) fn popout_close_window(slot_id: &str, cx: &mut Context<Self>) -> AnyElement {
@@ -2225,9 +2236,10 @@ impl RootView {
     }
 
     /// Runs `act` in the main window, as a pop-out overlay's action that
-    /// opens a main-window dialog does: when `window` is a pop-out, the
-    /// pop-out docks back first and the main window is activated, so the
-    /// dialog has the keyboard there.
+    /// opens a main-window dialog does: when `window` is a pane or session
+    /// pop-out, the pop-out docks back first and the main window is
+    /// activated, so the dialog has the keyboard there. A tab pop-out stays
+    /// open: the dialog opens in the main window, which comes to the front.
     fn in_main_window(
         &mut self,
         window: &mut Window,
@@ -2240,6 +2252,13 @@ impl RootView {
             .is_some();
         if !in_popout {
             act(self, window, cx);
+            return;
+        }
+        if self
+            .window_tab(window.window_handle().window_id())
+            .is_some()
+        {
+            self.open_in_main_window(cx, act);
             return;
         }
         self.dock_back_from_popout(window, cx);

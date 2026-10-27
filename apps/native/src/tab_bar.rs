@@ -16,9 +16,10 @@ use crate::drag::{self, DragPayload, Side};
 use crate::fonts;
 use crate::overlay_owner::Overlay;
 use crate::palette::{ACCENT, CHIP, GROUND, LINE_STRONG, RAISED, SUBTLE, SURFACE, WORKING};
+use crate::popouts::PopoutKey;
 use crate::session_menu::{MENU_MAX_SHARE, menu_frame, menu_item, menu_separator, muted_row};
 use crate::status_glyph::{GlyphSize, glyph, glyph_view};
-use crate::tab_menu::{MenuLine, TabAction, merge_lines, rearrange_lines};
+use crate::tab_menu::{MenuLine, TabAction, head_lines, merge_lines, rearrange_lines};
 use crate::tabs::{PillClick, bound_pane_count, collect_panes, tab_session_counts};
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::undo;
@@ -167,14 +168,7 @@ impl RootView {
         if menu.grid_open && submenu {
             return rearrange;
         }
-        let mut lines = Vec::new();
-        if !matches!(tab.content, TabContent::Viewer { .. }) {
-            lines.push(MenuLine::row(
-                "tab-menu-rename",
-                "Rename tab",
-                TabAction::Rename,
-            ));
-        }
+        let mut lines = head_lines(tab, tabs, &self.popouts);
         if !rearrange.is_empty() {
             if !lines.is_empty() {
                 lines.push(MenuLine::Separator);
@@ -375,6 +369,13 @@ impl RootView {
                 self.tab_menu = None;
                 self.start_rename(tab_id, window, cx);
             }
+            TabAction::PopOut => {
+                self.close_tab_menu(window, cx);
+                let key = PopoutKey::Tab {
+                    tab_id: tab_id.to_owned(),
+                };
+                self.open_popout(key, window, cx);
+            }
             TabAction::OpenGrid | TabAction::CloseGrid => {
                 self.show_grid_menu(action == TabAction::OpenGrid, window, cx);
             }
@@ -455,6 +456,19 @@ impl RootView {
         self.tabs.selection.clear();
         self.close_tab_menu(window, cx);
     }
+}
+
+/// The mark after a popped-out tab's name on its pill, in the strip's muted
+/// text.
+fn popped_mark(tab_id: &str) -> Stateful<Div> {
+    let name = format!("tab-pill-popped-{tab_id}");
+    div()
+        .id(ElementId::Name(SharedString::from(name.clone())))
+        .debug_selector(|| name)
+        .flex_none()
+        .text_color(gpui::rgb(MUTED))
+        .tooltip(tooltip("Popped out"))
+        .child("↗")
 }
 
 /// `Close tab`, or its confirm while the tab's close waits for a second
@@ -602,6 +616,7 @@ impl RootView {
             .map(|(_, side)| insertion_mark(&tab.id, side));
         let (move_id, drop_id) = (tab.id.clone(), tab.id.clone());
         let ghost = self.pill_ghost(tab, cx);
+        let popped = self.is_tab_popped(&tab.id).then(|| popped_mark(&tab.id));
         div()
             .id(ElementId::Name(SharedString::from(name.clone())))
             .debug_selector(|| name)
@@ -649,6 +664,7 @@ impl RootView {
             })
             .children(badge)
             .child(label)
+            .children(popped)
             .child(close_button(&tab.id, armed, cx))
             .children(mark)
             .into_any_element()

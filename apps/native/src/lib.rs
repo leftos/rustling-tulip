@@ -534,6 +534,8 @@ fn open_popout_now(root: &gpui::WeakEntity<RootView>, opening: PopoutOpening, cx
                 title: shown_title,
             };
             root.popout_windows.insert(key, popout);
+            // A popped tab's panes follow their focus in their new window.
+            root.follow_pane_focus_windows(cx);
         }
         Err(err) => {
             tracing::error!(?key, "opening a pop-out window: {err:#}");
@@ -1347,9 +1349,10 @@ impl RootView {
     }
 
     /// Opens `key` in a window of its own, or activates the open pop-out
-    /// that already shows it. A pane or a session pop-out opens; a tab
-    /// pop-out, or a session the daemon does not list or no terminal can
-    /// show, opens nothing and reports itself as already open.
+    /// that already shows it. A pane, a grid tab or a session pop-out
+    /// opens; a diff or viewer tab, or a session the daemon does not list
+    /// or no terminal can show, opens nothing and reports itself as already
+    /// open.
     pub fn open_popout(
         &mut self,
         key: PopoutKey,
@@ -1361,7 +1364,10 @@ impl RootView {
             PopoutKey::Session { session_id } => {
                 self.sidebar.session(session_id).is_some_and(can_attach)
             }
-            PopoutKey::Tab { .. } => false,
+            PopoutKey::Tab { tab_id } => self
+                .tabs
+                .tab(tab_id)
+                .is_some_and(|tab| tab.grid().is_some()),
         };
         if !opens {
             tracing::debug!(?key, "nothing to show in this pop-out");
@@ -1386,17 +1392,24 @@ impl RootView {
         outcome
     }
 
-    /// The main window lets go of `key`'s pane as it pops out: a terminal
-    /// that had the keyboard there hands it to the main window's own focus,
-    /// so the app's shortcuts work there again.
+    /// The main window lets go of `key`'s pane, or of a tab's panes, as they
+    /// pop out: a terminal that had the keyboard there hands it to the main
+    /// window's own focus, so the app's shortcuts work there again.
     fn unfocus_popped_pane(&self, key: &PopoutKey, window: &mut Window, cx: &Context<Self>) {
-        let PopoutKey::Pane { pane_id, .. } = key else {
-            return;
+        let pane_ids = match key {
+            PopoutKey::Pane { pane_id, .. } => vec![pane_id.clone()],
+            PopoutKey::Tab { tab_id } => self
+                .tab_pane_sessions(tab_id)
+                .into_iter()
+                .map(|(pane_id, _)| pane_id)
+                .collect(),
+            PopoutKey::Session { .. } => return,
         };
-        let focused = self
-            .panes
-            .get(pane_id)
-            .is_some_and(|slot| slot.view().read(cx).is_focused(window));
+        let focused = pane_ids.iter().any(|pane_id| {
+            self.panes
+                .get(pane_id)
+                .is_some_and(|slot| slot.view().read(cx).is_focused(window))
+        });
         if focused {
             self.root_focus.focus(window);
         }
@@ -1429,16 +1442,24 @@ impl RootView {
         cx.defer(move |cx| open_popout_now(&root, opening, cx));
     }
 
-    /// The terminal `key`'s pop-out draws: a pane pop-out's pane while some
-    /// tab holds it, or a session pop-out's own terminal. The pane is judged
-    /// by its id, not by the tab the key names, so the fold in which a moved
-    /// pane is in its old tab and its new one still finds it.
+    /// The terminal `key`'s pop-out gives the keyboard to: a pane pop-out's
+    /// pane while some tab holds it, a tab pop-out's focused pane, or a
+    /// session pop-out's own terminal. The pane is judged by its id, not by
+    /// the tab the key names, so the fold in which a moved pane is in its old
+    /// tab and its new one still finds it.
     pub(crate) fn popout_terminal(
         &self,
         key: &PopoutKey,
     ) -> Option<gpui::Entity<term_view::TerminalPane>> {
-        if let PopoutKey::Pane { pane_id, .. } = key {
-            popouts::pane_in_tabs(pane_id, self.tabs.tabs())?;
+        match key {
+            PopoutKey::Pane { pane_id, .. } => {
+                popouts::pane_in_tabs(pane_id, self.tabs.tabs())?;
+            }
+            PopoutKey::Tab { tab_id } => {
+                let pane_id = self.tabs.focused_pane(tab_id)?;
+                return self.panes.get(&pane_id).map(|slot| slot.view().clone());
+            }
+            PopoutKey::Session { .. } => {}
         }
         let slot_id = popouts::terminal_slot(key)?;
         self.panes.get(&slot_id).map(|slot| slot.view().clone())
@@ -1466,7 +1487,7 @@ impl RootView {
     }
 
     /// The session a pop-out's terminal shows with its window's keyboard,
-    /// while that pane or session is still popped out.
+    /// while that pane, its tab or that session is still popped out.
     fn popout_focused_session(&self) -> Option<String> {
         let pane_id = self.popout_focused.as_deref()?;
         if let Some(session_id) = popouts::slot_session(pane_id) {
@@ -1474,6 +1495,9 @@ impl RootView {
                 session_id: session_id.to_owned(),
             };
             return self.popouts.is_open(&key).then(|| session_id.to_owned());
+        }
+        if self.tab_popout_of_pane(pane_id).is_some() {
+            return self.panes.get(pane_id)?.session().map(str::to_owned);
         }
         self.popouts.popped_key(pane_id)?;
         let session = popouts::pane_in_tabs(pane_id, self.tabs.tabs())?.session?;
@@ -1530,13 +1554,17 @@ impl RootView {
     }
 
     /// Drops `key` from the open pop-outs without touching its window, as
-    /// its own close request does; the window it had, if any.
+    /// its own close request does; the window it had, if any. A docked-back
+    /// tab's panes follow their focus in the main window again, and when it
+    /// is the main window's active tab its focused pane takes the keyboard
+    /// there.
     pub(crate) fn forget_popout(
         &mut self,
         key: &PopoutKey,
         cx: &mut Context<Self>,
     ) -> Option<WindowHandle<PopoutView>> {
-        if self.popouts.close(key) {
+        let closed = self.popouts.close(key);
+        if closed {
             if let PopoutKey::Session { session_id } = key {
                 self.drop_session_slot(session_id, cx);
             }
@@ -1544,15 +1572,31 @@ impl RootView {
             self.mark_popout_resized(key, cx);
         }
         let handle = self.take_popout_window(key);
+        if let PopoutKey::Tab { tab_id } = key
+            && closed
+        {
+            self.follow_pane_focus_windows(cx);
+            if self.tabs.active_id() == Some(tab_id.as_str()) {
+                Self::in_window(self.layouts.main(), cx, |root, window, cx| {
+                    if !root.overlay_open() {
+                        root.focus_active_pane(window, cx);
+                    }
+                });
+            }
+        }
         cx.notify();
         handle
     }
 
     /// Drops `key`'s window from the open pop-out windows, its grid layout
-    /// with it; the window it had, if any.
+    /// with it; the window it had, if any. A divider drag that started in
+    /// that window ends there, sending the ratio it set, as a release does.
     fn take_popout_window(&mut self, key: &PopoutKey) -> Option<WindowHandle<PopoutView>> {
         let handle = self.popout_windows.remove(key)?.handle;
         let window_id = AnyWindowHandle::from(handle).window_id();
+        if self.drag_started_in(window_id) {
+            self.finish_drag();
+        }
         self.layouts.forget(window_id);
         self.drop_window_overlays(window_id);
         Some(handle)
@@ -1651,11 +1695,16 @@ impl RootView {
         }
     }
 
-    /// `key`'s terminal moves between windows or opens in one: its next
-    /// size claims its session.
+    /// `key`'s terminal, or a tab's every terminal, moves between windows or
+    /// opens in one: its next size claims its session.
     fn mark_popout_resized(&self, key: &PopoutKey, cx: &mut Context<Self>) {
-        if let Some(slot_id) = popouts::terminal_slot(key) {
-            self.mark_pane_resized(&slot_id, cx);
+        match key {
+            PopoutKey::Tab { tab_id } => self.mark_tab_panes_resized(tab_id, cx),
+            PopoutKey::Pane { .. } | PopoutKey::Session { .. } => {
+                if let Some(slot_id) = popouts::terminal_slot(key) {
+                    self.mark_pane_resized(&slot_id, cx);
+                }
+            }
         }
     }
 
@@ -1680,6 +1729,72 @@ impl RootView {
             tab_id: tab_id.to_owned(),
             pane_id: pane_id.to_owned(),
         })
+    }
+
+    /// Whether tab `tab_id` draws in a pop-out window of its own.
+    #[must_use]
+    pub fn is_tab_popped(&self, tab_id: &str) -> bool {
+        self.popouts.is_open(&PopoutKey::Tab {
+            tab_id: tab_id.to_owned(),
+        })
+    }
+
+    /// Each popped-out tab with the pane it focuses.
+    fn popped_tab_focus(&self) -> Vec<(String, Option<String>)> {
+        self.popouts
+            .keys()
+            .iter()
+            .filter_map(|key| match key {
+                PopoutKey::Tab { tab_id } => Some((tab_id.clone(), self.tabs.focused_pane(tab_id))),
+                PopoutKey::Pane { .. } | PopoutKey::Session { .. } => None,
+            })
+            .collect()
+    }
+
+    /// A tab change moved a popped tab's focus (a new pane, or the focused
+    /// one closed): the pane it focuses now takes its pop-out's keyboard,
+    /// whichever tab the main window shows. `before` is
+    /// [`Self::popped_tab_focus`] from before the change.
+    fn focus_moved_popped_panes(
+        &self,
+        before: Vec<(String, Option<String>)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.overlay_open() {
+            return;
+        }
+        for (tab_id, was) in before {
+            if !self.is_tab_popped(&tab_id) {
+                continue;
+            }
+            if let Some(now) = self.tabs.focused_pane(&tab_id)
+                && was.as_ref() != Some(&now)
+            {
+                self.focus_pane_where_drawn(&now, window, cx);
+            }
+        }
+    }
+
+    /// The tab window `here` draws as a grid: the main window's active tab
+    /// unless it is popped out, or a tab pop-out's own tab.
+    pub(crate) fn window_tab(&self, here: WindowId) -> Option<&TabEntry> {
+        if here == self.layouts.main() {
+            return self
+                .tabs
+                .active_tab()
+                .filter(|tab| !self.is_tab_popped(&tab.id));
+        }
+        self.popout_windows
+            .iter()
+            .find_map(|(key, popout)| match key {
+                PopoutKey::Tab { tab_id }
+                    if AnyWindowHandle::from(popout.handle).window_id() == here =>
+                {
+                    self.tabs.tab(tab_id)
+                }
+                _ => None,
+            })
     }
 
     /// Whether pane `pane_id` draws in a pop-out window, whichever tab the
@@ -2489,8 +2604,17 @@ impl RootView {
             // Its pane draws in a pop-out: that window comes to the front.
             self.activate_popout(&key, cx);
         } else if let Some((tab_id, pane_id)) = find_tab_containing_session(self.tabs.tabs(), id) {
-            self.tabs.focus_pane(&tab_id, &pane_id);
-            self.after_tabs_change(window, cx);
+            if self.is_tab_popped(&tab_id) {
+                // Its tab draws in a pop-out: the pane takes its tab's focus
+                // and that window comes to the front, whichever tab the main
+                // window shows.
+                self.tabs.set_focused(&tab_id, &pane_id);
+                self.update_pane_roles(cx);
+                self.activate_popout(&PopoutKey::Tab { tab_id }, cx);
+            } else {
+                self.tabs.focus_pane(&tab_id, &pane_id);
+                self.after_tabs_change(window, cx);
+            }
         } else if let Some(session) = self.sidebar.session(id).filter(|s| can_attach(s)).cloned() {
             self.place_session(&session, window, cx);
         }
@@ -2567,7 +2691,7 @@ impl RootView {
         if let Some(pane_id) = self.tabs.take_focus_request()
             && keyboard_free
         {
-            self.focus_pane_view(&pane_id, window, cx);
+            self.focus_pane_where_drawn(&pane_id, window, cx);
         }
         let active = self.tabs.active_id().map(str::to_owned);
         if active != self.last_active_tab {
@@ -2806,6 +2930,7 @@ impl RootView {
         cx: &mut Context<Self>,
     ) -> bool {
         let drag_tree = self.divider_tree_before(msg);
+        let popped_focus = self.popped_tab_focus();
         if !self.tabs.apply(msg) {
             return false;
         }
@@ -2813,6 +2938,7 @@ impl RootView {
         self.confirm.disarm();
         self.follow_popout_moves(cx);
         self.after_tabs_change(window, cx);
+        self.focus_moved_popped_panes(popped_focus, window, cx);
         self.refresh_popout_titles(cx);
         self.prune_popouts(cx);
         true
@@ -3809,8 +3935,15 @@ impl RootView {
     /// A font-size shortcut: Ctrl+`=`/`+`/`-` steps the focused session's
     /// size, with Shift the active tab's override, and Ctrl+0 clears both.
     /// The pane follows the session's change when the daemon echoes it.
+    /// While the active tab is popped out, they do nothing.
     fn on_font_key(&mut self, key: FontKey, cx: &mut Context<Self>) {
         match key {
+            // The card a popped tab leaves stands in for its panes: the
+            // shortcuts there have no pane or tab to act on.
+            _ if self
+                .tabs
+                .active_id()
+                .is_some_and(|id| self.is_tab_popped(id)) => {}
             FontKey::Session(step) => self.step_session_font(step, cx),
             FontKey::Tab(step) => {
                 if let Some(tab_id) = self.tabs.active_id().map(str::to_owned) {

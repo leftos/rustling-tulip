@@ -1,11 +1,12 @@
 //! A pop-out window's root: the popped pane's or session's toolbar and
-//! terminal, drawn
-//! from the main window's [`RootView`] over its one daemon connection. It
-//! registers no app shortcuts, so every key goes to the terminal.
+//! terminal, or a popped tab's toolbar and whole grid, drawn from the main
+//! window's [`RootView`] over its one daemon connection. It registers no app
+//! shortcuts, so every key goes to the terminal.
 
 use gpui::{
     AnyElement, AnyWindowHandle, App, Context, Entity, FocusHandle, IntoElement, KeyDownEvent,
-    MouseDownEvent, Render, Subscription, WeakEntity, Window, WindowId, div, prelude::*, px,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render, Subscription, WeakEntity,
+    Window, WindowId, div, prelude::*, px,
 };
 
 use crate::overlay_owner::Overlay;
@@ -52,24 +53,34 @@ impl PopoutView {
         self.key = key;
     }
 
-    /// The window was resized: its terminal's next size claims its session.
+    /// The window was resized: its terminal's next size, or every one of a
+    /// popped tab's, claims its session.
     fn mark_resized(&self, cx: &mut Context<Self>) {
-        let Some(slot_id) = popouts::terminal_slot(&self.key) else {
-            return;
-        };
-        if let Err(err) = self
-            .root
-            .update(cx, |root, cx| root.mark_pane_resized(&slot_id, cx))
-        {
+        let key = self.key.clone();
+        let marked = self.root.update(cx, |root, cx| match &key {
+            PopoutKey::Tab { tab_id } => root.mark_tab_panes_resized(tab_id, cx),
+            PopoutKey::Pane { .. } | PopoutKey::Session { .. } => {
+                if let Some(slot_id) = popouts::terminal_slot(&key) {
+                    root.mark_pane_resized(&slot_id, cx);
+                }
+            }
+        });
+        if let Err(err) = marked {
             tracing::debug!("pop-out resized after the root view went: {err:#}");
         }
     }
 
     /// The window's activation or the popped terminal's focus changed: its
     /// session counts as shown while the window is active and the terminal
-    /// has its keyboard.
+    /// has its keyboard. A popped tab's terminal is its focused pane's.
     fn report_shown(&self, handle: &FocusHandle, window: &Window, cx: &mut Context<Self>) {
-        let Some(slot_id) = popouts::terminal_slot(&self.key) else {
+        let followed = match &self.key {
+            PopoutKey::Tab { .. } => self.tab_terminal(cx),
+            PopoutKey::Pane { .. } | PopoutKey::Session { .. } => {
+                popouts::terminal_slot(&self.key).map(|slot_id| (slot_id, handle.clone()))
+            }
+        };
+        let Some((slot_id, handle)) = followed else {
             return;
         };
         let focused = window.is_window_active() && handle.is_focused(window);
@@ -80,16 +91,26 @@ impl PopoutView {
         }
     }
 
-    /// The popped pane's toolbar and terminal, while the pop-out is open and
-    /// the root view still has the pane. A docked-back pane draws in the
-    /// main grid alone: one terminal drawn in two windows at two sizes
-    /// would resize itself for ever.
-    fn pane(&self, cx: &mut App) -> Option<AnyElement> {
+    /// A popped tab's focused pane, by slot id, and its terminal's focus
+    /// handle.
+    fn tab_terminal(&self, cx: &App) -> Option<(String, FocusHandle)> {
+        let root = self.root.upgrade()?;
+        let terminal = root.read(cx).popout_terminal(&self.key)?;
+        let terminal = terminal.read(cx);
+        Some((terminal.pane_id().to_owned(), terminal.focus_handle()))
+    }
+
+    /// The popped pane's toolbar and terminal, or the popped tab's toolbar
+    /// and grid, as window `here` draws them, while the pop-out is open and
+    /// the root view still has its content. Docked-back content draws in
+    /// the main window alone: one terminal drawn in two windows at two
+    /// sizes would resize itself for ever.
+    fn pane(&self, here: WindowId, cx: &mut App) -> Option<AnyElement> {
         let root = self.root.upgrade()?;
         if !root.read(cx).popouts.is_open(&self.key) {
             return None;
         }
-        root.update(cx, |root, cx| root.popout_pane(&self.key, cx))
+        root.update(cx, |root, cx| root.popout_pane(&self.key, here, cx))
     }
 }
 
@@ -144,7 +165,8 @@ fn watch_close_request(
 
 impl Render for PopoutView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let body: AnyElement = self.pane(cx).unwrap_or_else(|| {
+        let here = window.window_handle().window_id();
+        let body: AnyElement = self.pane(here, cx).unwrap_or_else(|| {
             div()
                 .flex()
                 .flex_1()
@@ -157,11 +179,11 @@ impl Render for PopoutView {
                 .child(PANE_GONE_NOTE)
                 .into_any_element()
         });
-        let here = window.window_handle().window_id();
         let overlays = self.root.upgrade().map_or_else(Vec::new, |root| {
             root.update(cx, |root, cx| root.window_overlays(here, cx))
         });
         let (root, on_press, on_key) = (self.root.clone(), self.root.clone(), self.root.clone());
+        let (on_move, on_up) = (self.root.clone(), self.root.clone());
         div()
             .relative()
             .size_full()
@@ -192,6 +214,25 @@ impl Render for PopoutView {
                     tracing::debug!("a pop-out press after the root view went: {err:#}");
                 }
             })
+            // A divider drag a popped tab's grid started follows the
+            // pointer in this window only.
+            .on_mouse_move(move |event: &MouseMoveEvent, window, cx| {
+                if let Err(err) =
+                    on_move.update(cx, |root, cx| root.on_drag_move(event, window, cx))
+                {
+                    tracing::debug!("a pop-out drag after the root view went: {err:#}");
+                }
+            })
+            .on_mouse_up(
+                MouseButton::Left,
+                move |event: &MouseUpEvent, window, cx| {
+                    if let Err(err) =
+                        on_up.update(cx, |root, cx| root.on_drag_end(event, window, cx))
+                    {
+                        tracing::debug!("a pop-out release after the root view went: {err:#}");
+                    }
+                },
+            )
             .child(body)
             .children(overlays)
     }
@@ -353,13 +394,17 @@ impl RootView {
         }
     }
 
-    /// The pop-out window that draws terminal `slot_id`, if one does.
+    /// The pop-out window that draws terminal `slot_id`, if one does: its
+    /// session's, its pane's, or its tab's.
     fn slot_window(&self, slot_id: &str) -> Option<WindowId> {
         let key = match popouts::slot_session(slot_id) {
             Some(session_id) => PopoutKey::Session {
                 session_id: session_id.to_owned(),
             },
-            None => self.popouts.popped_key(slot_id)?.clone(),
+            None => match self.popouts.popped_key(slot_id) {
+                Some(key) => key.clone(),
+                None => self.tab_popout_of_pane(slot_id)?,
+            },
         };
         self.popout_windows
             .get(&key)
@@ -378,7 +423,7 @@ impl RootView {
 
     /// Runs `act` for window `window_id` once this update is over; a window
     /// closed by then is passed over.
-    fn in_window(
+    pub(crate) fn in_window(
         window_id: WindowId,
         cx: &mut Context<Self>,
         act: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>) + 'static,
