@@ -94,6 +94,9 @@ const LAUNCH_QUOTING_HINT: &str = "Extra arguments follow POSIX shell rules: quo
 /// field, and the start of those naming Program.
 const LAUNCH_REFUSAL_PREFIX: &str = "The launch command's ";
 const LAUNCH_PROGRAM_REFUSAL_PREFIX: &str = "The launch command's Program";
+/// The daemon's refusal when it cannot create a worktrees root, from
+/// `State::set_worktrees_root`'s `creating worktrees root {path}` context.
+const WORKTREES_ROOT_REFUSAL_PREFIX: &str = "creating worktrees root ";
 const LAUNCH_UNCLOSED_QUOTE: &str = "The extra arguments have an unclosed quote.";
 const LAUNCH_RESERVED_FLAG_SUFFIX: &str =
     " is set by rustling-tulip; remove it from the extra arguments.";
@@ -1360,6 +1363,23 @@ impl RootView {
         };
         tab.refusal = Some((row, message.to_owned()));
         true
+    }
+
+    /// A daemon refusal of the worktrees root while the tab's field waits:
+    /// the save the daemon could not make ends here, so a later broadcast
+    /// from another client is not taken for its echo. The refusal is not
+    /// claimed: the tab has no inline slot for it, and the generic toast
+    /// still shows the message.
+    pub(crate) fn on_worktrees_root_error(&mut self, message: &str, cx: &mut Context<Self>) {
+        if !message.starts_with(WORKTREES_ROOT_REFUSAL_PREFIX) {
+            return;
+        }
+        let Some(tab) = self.worktrees_tab.as_mut().filter(|tab| tab.awaiting > 0) else {
+            return;
+        };
+        tab.awaiting = tab.awaiting.saturating_sub(1);
+        tab.saved = false;
+        cx.notify();
     }
 
     /// Forgets the daemon's launch commands, as a disconnect does.

@@ -15,6 +15,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - A connection the daemon refuses always shows why, instead of sometimes dropping with no reason.
 - A session brought back from Recover keeps its name, colours and place in the sidebar.
 - Recovering a session in a shell never lets a `$`, `%`, `!` or backtick in your config folder's path run as shell code.
+- A Worktrees folder the daemon can't create no longer leaves Settings showing it as saved after another window changes it.
 
 ### Changed
 

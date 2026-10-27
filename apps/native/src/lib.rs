@@ -2709,8 +2709,9 @@ impl RootView {
     /// A daemon refusal: an unrouted one (`None`) while the workspace creator
     /// waits fails a pending create or parse inline there, and one of the
     /// launch-command refusals while an apply of it waits shows under its
-    /// row; neither raises a toast. A routed refusal (`Some`) answers its own
-    /// request and takes the generic path, as every other refusal does.
+    /// row; neither raises a toast. A refused worktrees root ends that tab's
+    /// save, whose message still toasts. A routed refusal (`Some`) answers its
+    /// own request and takes the generic path, as every other refusal does.
     fn on_refusal(
         &mut self,
         message: String,
@@ -2718,6 +2719,9 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if request_id.is_none() {
+            self.on_worktrees_root_error(&message, cx);
+        }
         let inline = request_id.is_none()
             && (self.on_agent_command_error(&message, cx)
                 || self.on_creator_error(&message, cx)

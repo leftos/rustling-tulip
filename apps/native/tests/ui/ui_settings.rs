@@ -2711,3 +2711,60 @@ fn window_title_without_suffix_or_count(cx: &mut TestAppContext) {
     h.advance(Duration::from_millis(360));
     assert_eq!(title(&mut h), "work — rustling-tulip");
 }
+
+/// The paths the client asked the daemon to set as the worktrees root.
+fn worktrees_root_sets(sent: &[ClientMessage]) -> Vec<Option<String>> {
+    sent.iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::SetWorktreesRoot { path } => Some(path.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[gpui::test]
+fn a_refused_worktrees_save_stops_waiting(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.send(DaemonMessage::WorktreesRootChanged {
+        root: "C:/default".to_owned(),
+        is_override: false,
+    });
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-worktrees");
+    assert_eq!(
+        h.root(|root, _| root.worktrees_path()).as_deref(),
+        Some(""),
+        "the field holds the override only"
+    );
+    h.click_on("settings-worktrees-root-input");
+    type_text(&mut h, "X:/nope");
+    h.sent();
+    h.click_on("settings-worktrees-root-save");
+    assert_eq!(worktrees_root_sets(&h.sent()), [Some("X:/nope".to_owned())]);
+    refuse(
+        &mut h,
+        "creating worktrees root X:\\nope: Access is denied. (os error 5)",
+    );
+    assert_eq!(toast_titles(&mut h).len(), 1, "the refusal still toasts");
+
+    h.send(DaemonMessage::WorktreesRootChanged {
+        root: "D:/other".to_owned(),
+        is_override: true,
+    });
+    assert_eq!(
+        h.root(|root, _| root.worktrees_path()).as_deref(),
+        Some("X:/nope"),
+        "a refused apply is not another client's change to overwrite"
+    );
+    assert_eq!(
+        h.root(|root, _| root.worktrees_save_button()).0,
+        "Save",
+        "the save the daemon refused never shows Saved"
+    );
+    assert_eq!(
+        h.root(|root, _| root.worktrees_active_line()),
+        "Active: D:/other — user override",
+        "another client's root still lands"
+    );
+}
