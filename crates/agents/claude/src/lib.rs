@@ -40,6 +40,16 @@ const INSTRUCTION_FILES: &[&str] = &["CLAUDE.md", "AGENTS.md"];
 /// The model a `DeepSeek` spawn passes as `--model` when it names none.
 pub const DEEPSEEK_MODEL: &str = "deepseek-flash";
 
+/// The characters a double-quoted string does not protect in at least one of
+/// cmd, PowerShell and POSIX shells: each stays live for expansion there, so a
+/// hook settings path holding one cannot be quoted for all three at once and
+/// the resume line drops its `--settings` instead. PowerShell closes a
+/// double-quoted string on the typographic quotes U+201C, U+201D and U+201E,
+/// which the daemon's `powershell_quote` handles the same way.
+const SHELL_EXPANDED: &[char] = &[
+    '"', '\u{201C}', '\u{201D}', '\u{201E}', '$', '`', '%', '!', '\r', '\n',
+];
+
 /// The options a Claude spawn takes, one per field of Claude's descriptor.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClaudeOptions {
@@ -409,9 +419,14 @@ impl Agent for ClaudePlugin {
 
     /// `claude --settings "<path>" --resume <id>`, naming the hook settings
     /// file the shell's spawn wrote. The path is always double-quoted, since
-    /// the config dir can hold spaces; a path holding a double quote cannot be
-    /// quoted for cmd and POSIX shells at once, so it, like a spawn that wrote
-    /// no file, resumes without the settings.
+    /// the config dir can hold spaces; a path holding a character a shell
+    /// expands inside double quotes (`SHELL_EXPANDED`) or the pair `\\` cannot
+    /// be quoted for cmd, PowerShell and POSIX shells at once, so it, like a
+    /// spawn that wrote no file, resumes without the settings.
+    ///
+    /// An id outside `[A-Za-z0-9][A-Za-z0-9-]*`, an empty id included, has no
+    /// resume line at all: it could read as more than one word in some shell,
+    /// so there is no shell resume for that session.
     ///
     /// A shell would type `claude` without a provider's routing, running on
     /// Anthropic, so a session on another provider is refused, naming the
@@ -428,10 +443,15 @@ impl Agent for ClaudePlugin {
                 None => "Sessions on this Claude provider recover as Claude.".to_owned(),
             }));
         }
+        if !is_plain_conversation_id(conversation_id) {
+            return Ok(None);
+        }
+        // A POSIX shell turns `\\` inside double quotes into `\`, which mangles
+        // a UNC path or any doubled backslash before claude sees it.
         let settings = hook_files
             .first()
             .map(|path| path.to_string_lossy())
-            .filter(|path| !path.contains('"'));
+            .filter(|path| !path.contains(SHELL_EXPANDED) && !path.contains(r"\\"));
         Ok(Some(match settings {
             Some(path) => format!("claude --settings \"{path}\" --resume {conversation_id}"),
             None => format!("claude --resume {conversation_id}"),
@@ -453,6 +473,17 @@ impl Agent for ClaudePlugin {
     fn file_reference(&self, repo_relative: &str) -> String {
         rules::file_reference(repo_relative)
     }
+}
+
+/// Whether `id` is a conversation id a shell can take as one bare word: an
+/// ASCII letter or digit first, then only ASCII letters, digits and hyphens
+/// (`[A-Za-z0-9][A-Za-z0-9-]*`).
+fn is_plain_conversation_id(id: &str) -> bool {
+    let mut chars = id.chars();
+    chars
+        .next()
+        .is_some_and(|first| first.is_ascii_alphanumeric())
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
 /// The session changes one parsed stream-json event makes, in order.
@@ -722,6 +753,49 @@ mod tests {
             shell_resume(&[path]).as_deref(),
             Some("claude --resume abc-123")
         );
+    }
+
+    #[test]
+    fn shell_resume_drops_the_settings_for_a_path_a_shell_would_expand() {
+        for expanded in [
+            '$', '`', '%', '!', '\r', '\n', '\u{201C}', '\u{201D}', '\u{201E}',
+        ] {
+            let path = std::path::PathBuf::from(format!(
+                r"C:\Users\a{expanded}b\config\sessions\s1\hook-settings.json"
+            ));
+            assert_eq!(
+                shell_resume(&[path]).as_deref(),
+                Some("claude --resume abc-123"),
+                "{expanded:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn shell_resume_drops_the_settings_for_a_unc_path() {
+        let path = std::path::PathBuf::from(r"\\server\share\rt\sessions\s1\hook-settings.json");
+        assert_eq!(
+            shell_resume(&[path]).as_deref(),
+            Some("claude --resume abc-123")
+        );
+    }
+
+    #[test]
+    fn shell_resume_refuses_an_id_a_shell_could_read_as_more() {
+        for id in ["", "-rf", "abc 123", "abc;rm", "abc$x", "abc%x%"] {
+            assert_eq!(
+                ClaudePlugin.shell_resume(&ClaudeOptions::default(), id, &[]),
+                Ok(None),
+                "{id:?}"
+            );
+        }
+        for id in ["abc-123", "85573BB1-C581-489E-BAAA-94D5A384744C"] {
+            assert_eq!(
+                ClaudePlugin.shell_resume(&ClaudeOptions::default(), id, &[]),
+                Ok(Some(format!("claude --resume {id}"))),
+                "{id:?}"
+            );
+        }
     }
 
     fn recovered(recorded: Option<&OptionValues>, trusted: bool) -> ClaudeOptions {
