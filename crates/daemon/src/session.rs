@@ -2631,22 +2631,26 @@ mod tests {
     /// chunk per millisecond, until `finish`.
     struct NumberedSender {
         stop: Arc<std::sync::atomic::AtomicBool>,
+        sent: Arc<std::sync::atomic::AtomicU64>,
         handle: std::thread::JoinHandle<()>,
     }
 
     impl NumberedSender {
         fn start(output: &Arc<PtyProducer>) -> Self {
-            use std::sync::atomic::{AtomicBool, Ordering};
+            use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
             use std::time::{Duration, Instant};
             let stop = Arc::new(AtomicBool::new(false));
+            let sent = Arc::new(AtomicU64::new(0));
             let handle = {
                 let stop = Arc::clone(&stop);
+                let sent = Arc::clone(&sent);
                 let output = output.clone();
                 std::thread::spawn(move || {
                     let mut seq: u64 = 0;
                     while !stop.load(Ordering::Relaxed) {
                         output.blocking_send(format!("<{seq}>").into_bytes());
                         seq += 1;
+                        sent.fetch_add(1, Ordering::Release);
                         let started = Instant::now();
                         while started.elapsed() < Duration::from_micros(1000) {
                             std::hint::spin_loop();
@@ -2654,13 +2658,21 @@ mod tests {
                     }
                 })
             };
-            Self { stop, handle }
+            Self { stop, sent, handle }
         }
 
-        /// Stops the thread and reports whether it ended without panicking.
-        fn finish(self) -> bool {
-            self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
-            self.handle.join().is_ok()
+        /// The number of chunks broadcast so far.
+        fn sent(&self) -> u64 {
+            self.sent.load(std::sync::atomic::Ordering::Acquire)
+        }
+
+        /// Stops the thread and reports the chunks it sent, or `None` when it
+        /// panicked.
+        fn finish(self) -> Option<u64> {
+            let Self { stop, sent, handle } = self;
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            handle.join().ok()?;
+            Some(sent.load(std::sync::atomic::Ordering::Acquire))
         }
     }
 
@@ -2696,7 +2708,7 @@ mod tests {
             Ok::<u64, String>(lost_total)
         }
         .await;
-        let sender_ok = sender.finish();
+        let sender_ok = sender.finish().is_some();
         let _ = std::fs::remove_dir_all(&session.dirs.config);
 
         assert!(sender_ok, "the sender thread panicked");
@@ -2709,28 +2721,62 @@ mod tests {
 
     /// A client already attached misses no chunk while other clients take
     /// snapshots: its live receiver, kept from a first snapshot, holds a
-    /// contiguous run of sequence numbers after 200 further snapshots.
+    /// contiguous run of sequence numbers ending at the sender's last chunk,
+    /// after at least 200 snapshots were taken while at least 50 chunks were
+    /// sent.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_attached_client_misses_no_chunk_when_another_client_takes_a_snapshot() {
         let session = fed_session("attached-client");
         let sender = NumberedSender::start(&session.output);
         let attached = async {
             let attached = take_snapshot(&session.snap_tx).await?.live;
-            for _ in 0..200 {
-                drop(take_snapshot(&session.snap_tx).await?);
-            }
+            let start = sender.sent();
+            let waited = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+                let mut taken = 0_u64;
+                while taken < 200 || sender.sent() < start + 50 {
+                    drop(take_snapshot(&session.snap_tx).await?);
+                    taken += 1;
+                    if taken >= 200 && sender.sent() < start + 50 {
+                        tokio::task::yield_now().await;
+                    }
+                }
+                Ok::<(), String>(())
+            })
+            .await
+            .map_err(|_| "hung: fewer than 50 chunks sent while snapshots were taken".to_owned())?;
+            waited?;
             Ok::<_, String>(attached)
         }
         .await;
-        let sender_ok = sender.finish();
+        let total = sender.finish();
         let _ = std::fs::remove_dir_all(&session.dirs.config);
 
-        assert!(sender_ok, "the sender thread panicked");
+        let total = total.expect("the sender thread panicked");
+        assert!(total > 0, "the sender sent nothing");
         let mut attached = attached.expect("every snapshot");
-        let mut seqs = Vec::new();
-        while let Ok(chunk) = attached.try_recv() {
-            seqs.push(last_seq(&chunk));
+        let seqs = async {
+            let mut seqs = Vec::new();
+            loop {
+                let chunk =
+                    tokio::time::timeout(std::time::Duration::from_secs(60), attached.recv())
+                        .await
+                        .map_err(|_| {
+                            format!(
+                                "hung: the attached client stopped receiving before chunk {}",
+                                total - 1
+                            )
+                        })?
+                        .ok_or_else(|| "the attached receiver closed".to_owned())?;
+                let seq = last_seq(&chunk);
+                seqs.push(seq);
+                if seq == Some(total - 1) {
+                    break;
+                }
+            }
+            Ok::<_, String>(seqs)
         }
+        .await
+        .expect("the attached client's chunks");
         let gaps: Vec<(Option<u64>, Option<u64>)> = seqs
             .windows(2)
             .filter(|pair| pair[0].map(|n| n + 1) != pair[1])
