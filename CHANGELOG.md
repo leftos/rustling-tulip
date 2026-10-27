@@ -13,6 +13,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 - Starting, replacing or stopping the daemon now checks that the program on its port is really the daemon, so a leftover file never sends your key to another program or stops it.
 - A connection the daemon refuses always shows why, instead of sometimes dropping with no reason.
+- A session brought back from Recover keeps its name, colours and place in the sidebar.
 
 ### Changed
 

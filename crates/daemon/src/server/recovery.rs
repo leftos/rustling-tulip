@@ -414,13 +414,13 @@ fn carry_identity(hub: &Hub, old_id: &str, new_id: &str) {
 }
 
 /// Put `new_id` in `old_id`'s place in every container's session order, and
-/// tell the clients, so the resumed session keeps the sidebar slot it held. A
-/// failed save is logged and never fails the resume.
+/// tell the clients, so a resumed or recovered session keeps the sidebar slot
+/// it held. A failed save is logged and never fails the respawn.
 fn keep_session_order(hub: &Hub, old_id: &str, new_id: &str) {
     let changed = match crate::registry::replace_session_in_order(&hub.state, old_id, new_id) {
         Ok(changed) => changed,
         Err(err) => {
-            warn!(?err, %old_id, %new_id, "finish_resume: state.mutate failed");
+            warn!(?err, %old_id, %new_id, "keeping the session order: state.mutate failed");
             return;
         }
     };
@@ -835,9 +835,10 @@ pub(super) fn recovery_conversation_exists(
 
 /// After a successful recovery spawn of `history_id` as `new_id`: mark the
 /// history entry recovered and, when that session still sits in the
-/// Abandoned group, hand its panes to `new_id` in every client layout and
-/// remove it from there. Its history entry already exists, so the removal
-/// writes no second end.
+/// Abandoned group, hand its panes to `new_id` in every client layout, give
+/// the new session the name, the look and the sidebar place the abandoned one
+/// held, and remove it from there. Its history entry already exists, so the
+/// removal writes no second end.
 fn finish_recovery(
     hub: &Hub,
     history_id: &str,
@@ -851,6 +852,8 @@ fn finish_recovery(
         .is_some_and(|rec| crate::sync::lock(&rec).is_abandoned);
     if still_abandoned {
         rebind_session_panes(hub, history_id, new_id);
+        carry_identity(hub, history_id, new_id);
+        keep_session_order(hub, history_id, new_id);
         discard_abandoned(hub, history_id, out_tx);
     }
 }
@@ -1474,6 +1477,78 @@ mod tests {
         };
         assert_eq!(container_id, "r1", "only the container that listed it");
         assert_eq!(ordered_ids, &["a", "fresh", "b"]);
+    }
+
+    #[tokio::test]
+    async fn finish_recovery_keeps_user_label_and_appearance() {
+        let (hub, _scratch) = spawnless_test_hub("recover-keeps-identity");
+        insert_abandoned_with_history(&hub, "lost");
+        rename_and_recolour(&hub, "lost");
+        hub.sessions.insert(idle_record("fresh"));
+        let (out_tx, _out_rx) = mpsc::unbounded_channel();
+
+        finish_recovery(&hub, "lost", "fresh", &out_tx);
+
+        let rec = hub.sessions.get("fresh").expect("fresh is registered");
+        let rec = crate::sync::lock(&rec);
+        assert_eq!(
+            rec.user_label.as_deref(),
+            Some("mine"),
+            "the recovery keeps the name the user gave it"
+        );
+        assert_eq!(rec.label, "mine");
+        assert_eq!(
+            rec.appearance.accent_color.as_deref(),
+            Some("#38bdf8"),
+            "and the look"
+        );
+    }
+
+    #[tokio::test]
+    #[expect(clippy::panic, reason = "a wrong broadcast fails the test loudly")]
+    async fn finish_recovery_swaps_the_id_in_session_order() {
+        let (hub, _scratch) = spawnless_test_hub("recover-keeps-place");
+        insert_abandoned_with_history(&hub, "lost");
+        seed_session_order(&hub, "r1", &["a", "lost", "b"]);
+        seed_session_order(&hub, "r2", &["x", "y"]);
+        let mut events = hub.state_events.subscribe();
+        let (out_tx, _out_rx) = mpsc::unbounded_channel();
+
+        finish_recovery(&hub, "lost", "fresh", &out_tx);
+
+        assert_eq!(order_of(&hub, "r1"), Some(ids(&["a", "fresh", "b"])));
+        assert_eq!(order_of(&hub, "r2"), Some(ids(&["x", "y"])));
+        let reordered: Vec<StateEvent> = std::iter::from_fn(|| events.try_recv().ok()).collect();
+        let [
+            StateEvent::SessionsReordered {
+                container_id,
+                ordered_ids,
+            },
+        ] = reordered.as_slice()
+        else {
+            panic!("expected one reorder, got {reordered:?}");
+        };
+        assert_eq!(container_id, "r1", "only the container that listed it");
+        assert_eq!(ordered_ids, &["a", "fresh", "b"]);
+    }
+
+    #[tokio::test]
+    async fn finish_recovery_from_history_only_leaves_the_fresh_record_alone() {
+        let (hub, _scratch) = spawnless_test_hub("recover-history-only");
+        write_history(&hub, "lost", SessionMode::Interactive, false);
+        hub.sessions.insert(idle_record("fresh"));
+        let (out_tx, _out_rx) = mpsc::unbounded_channel();
+
+        finish_recovery(&hub, "lost", "fresh", &out_tx);
+
+        let rec = hub.sessions.get("fresh").expect("fresh is registered");
+        let rec = crate::sync::lock(&rec);
+        assert_eq!(rec.user_label, None, "a history entry holds no rename");
+        assert_eq!(rec.label, "fresh", "so the fresh record's own label stands");
+        assert!(
+            rec.appearance.accent_color.is_none(),
+            "and a history entry holds no look"
+        );
     }
 
     /// The request `how` recovers `entry` with, resuming `conversation`,
