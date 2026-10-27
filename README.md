@@ -13,11 +13,11 @@ It is alpha software, Windows only for now.
 - Start a Claude session or a plain shell in a repo's own folder, or in a new git worktree on its own branch, so parallel sessions never edit the same checkout.
 - Group repos into a workspace: one session works across all of them, with their relative paths kept. A VS Code `.code-workspace` file next to a repo is offered as a workspace.
 - Every session's status has its own shape and colour: working, asking you something, finished while you were away, idle, or idle with background work still running.
-- The Needs You panel lists every session waiting on you, longest wait first, and a Windows notification fires when a session needs you or finishes (skipped when you are already looking at it).
+- The Needs You panel lists every session waiting on you, longest wait first, with what each asks: its question, the tool it wants to run, or the plan to approve. A Windows notification fires when a session needs you or finishes (skipped when you are already looking at it).
 - Tabs and split panes: drag a pane or a sidebar session onto a pane to split, swap or move it, rearrange a tab into a grid, and undo a closed tab or a moved pane.
 - The sidebar groups sessions by repo or by tab, in Comfortable or Compact rows, and can show every session under a repo, only the busy ones, or just a count.
 - Repos sort with the ones that need you on top, by latest activity, or in your own order, and an All / Active switch hides the repos and workspaces with nothing running.
-- Launch again with one click: a repo's last launch settings are replayed from its row. Presets start many sessions at once from a prompts file, a folder or GitHub issue ranges.
+- Launch again with one click: a repo's last launch settings are replayed from its row. Presets start many sessions at once from a prompts file, a folder or GitHub issue ranges, and on a remote host the wizard takes typed paths on that host.
 - In the terminal, copying from Claude Code's boxed panels leaves out the borders, file paths and URLs open with Ctrl+click, shell commands get a pass/fail mark in the gutter with copy and re-run, and two header buttons jump between the prompts you sent.
 - When Claude exits, its pane stays a working shell.
 - Secret environment values you give a session are stored in Windows Credential Manager, never in a settings file.
@@ -49,6 +49,12 @@ It is alpha software, Windows only for now.
 
 ![A rendered Markdown file in a viewer tab, with the Rendered / Source toggle and its header buttons](docs/images/markdown-viewer.png)
 
+### Windows and pop-outs
+
+- Pop a pane, a whole tab (a grid or a diff) or a session out into its own window, for a second monitor or a diff beside your work.
+- A popped pane or tab leaves a card in the main window with Focus window and Dock back. Dock back returns it to the main window.
+- Pop-out windows reopen where you left them the next time the app starts.
+
 ### Recovery after a reboot
 
 - Sessions run under a small supervisor process each, so closing the window or restarting the daemon never kills them.
@@ -72,13 +78,15 @@ It is alpha software, Windows only for now.
 
 Remote access also needs [Tailscale](https://tailscale.com/) on both PCs, signed in to the same tailnet, with HTTPS certificates turned on for it.
 
-## What's new in v0.3.0-alpha
+## What's new in v0.4.0-alpha
 
-- Sort repos with the ones that need you on top (the default), by latest activity, or by hand.
-- An All / Active switch in the sidebar header shows only the repos and workspaces with live sessions.
-- The app has its own icon in the window, the taskbar and Explorer.
+- Pop a pane, a whole tab, a diff or a session out into its own window, and Dock back returns it. Pop-outs reopen where you left them on the next start.
+- The Needs You panel says what a waiting session asks: its question, the tool it wants to run, or the plan to approve.
+- On a remote host the preset wizard takes typed paths on that host.
+- Safer daemon connections: the app checks that the program on its port is really the daemon before sending your key, and a refused connection always shows why.
+- Many fixes to Recover, spawning, notifications and keyboard handling.
 
-The full list is in the [release notes](https://github.com/leftos/rustling-tulip/releases/tag/v0.3.0-alpha).
+The full list is in the [release notes](https://github.com/leftos/rustling-tulip/releases/tag/v0.4.0-alpha).
 
 ## Building from source
 
