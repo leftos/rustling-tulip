@@ -1,7 +1,8 @@
 //! OS notifications for the daemon's attention events: a session awaiting
-//! input raises Needs you, titled so with the session's label as its body;
-//! the toast sender, and Windows' own setting for this app's toasts. An
-//! exited or errored session raises none.
+//! input raises Needs you and one whose turn ended raises Finished, each
+//! with the session's label as its body; the toast sender, and Windows' own
+//! setting for this app's toasts. An exited or errored session raises none.
+//! How a press reaches the client is [`crate::toast_activation`].
 
 use std::sync::Arc;
 
@@ -13,6 +14,8 @@ use protocol::{
 use crate::RootView;
 use crate::pairing::{PairingAction, PairingToast};
 use crate::sidebar::{NotifySkip, display_label};
+#[cfg(windows)]
+use crate::toast_activation;
 use crate::window_title::PRODUCT_NAME;
 
 /// The URI of Windows' notification settings page.
@@ -70,37 +73,28 @@ pub trait Notifier: Send + Sync {
     fn state(&self) -> NotifyState;
 }
 
-/// The notifier the client runs with: Windows toasts under the PowerShell
-/// app id, as the client has no registered app id of its own.
+/// The notifier the client runs with: Windows toasts under the client's own
+/// app id once its toast activator is registered, whose presses reach the
+/// client through the activator; otherwise under the PowerShell app id,
+/// where only a pairing toast's press from its popup reaches the client.
 pub struct SystemNotifier;
 
 #[cfg(windows)]
 impl Notifier for SystemNotifier {
     fn notify(&self, title: &str, body: &str) {
-        use tauri_winrt_notification::Toast;
-        let toast = Toast::new(Toast::POWERSHELL_APP_ID)
-            .title(title)
-            .text1(body);
-        if let Err(err) = toast.show() {
+        let xml = toast_activation::toast_xml(title, body, &[], toast_activation::registered());
+        if let Err(err) = show_toast(&xml, None) {
             tracing::warn!("notification {title:?} was not shown: {err}");
         }
     }
 
     fn notify_pairing(&self, toast: &PairingToast, on_action: PairingActionSink) {
-        use tauri_winrt_notification::Toast;
-        let raised = Toast::new(Toast::POWERSHELL_APP_ID)
-            .title(&toast.title)
-            .text1(&toast.body)
-            .add_button("Approve…", &PairingAction::approve_arg(&toast.request_id))
-            .add_button("Deny", &PairingAction::deny_arg(&toast.request_id))
-            .on_activated(move |arg| {
-                if let Some(action) = PairingAction::from_activation(arg.as_deref()) {
-                    on_action(action);
-                }
-                Ok(())
-            })
-            .show();
-        if let Err(err) = raised {
+        let registered = toast_activation::registered();
+        let xml = toast_activation::pairing_toast_xml(toast, registered);
+        // Once registered, every press reaches the client through the
+        // activator; an in-process handler too would apply it twice.
+        let in_process = (!registered).then_some(on_action);
+        if let Err(err) = show_toast(&xml, in_process) {
             tracing::warn!(
                 "pairing notification {} was not shown: {err}",
                 toast.request_id
@@ -120,12 +114,49 @@ impl Notifier for SystemNotifier {
     }
 }
 
-/// Whether Windows lets toasts under the PowerShell app id show.
+/// Shows the toast `xml` under the app id toasts are raised under, handing
+/// a press on it to `on_action` in-process when one is given.
+#[cfg(windows)]
+fn show_toast(xml: &str, on_action: Option<PairingActionSink>) -> windows::core::Result<()> {
+    use windows::Data::Xml::Dom::XmlDocument;
+    use windows::Foundation::TypedEventHandler;
+    use windows::UI::Notifications::{
+        ToastActivatedEventArgs, ToastNotification, ToastNotificationManager,
+    };
+    use windows::core::{HSTRING, IInspectable, Interface as _, Ref};
+
+    let document = XmlDocument::new()?;
+    document.LoadXml(&HSTRING::from(xml))?;
+    let toast = ToastNotification::CreateToastNotification(&document)?;
+    if let Some(on_action) = on_action {
+        toast.Activated(&TypedEventHandler::new(
+            move |_: Ref<'_, ToastNotification>, args: Ref<'_, IInspectable>| {
+                let arg = match args.as_ref() {
+                    Some(args) => Some(
+                        args.cast::<ToastActivatedEventArgs>()?
+                            .Arguments()?
+                            .to_string(),
+                    ),
+                    None => None,
+                };
+                if let Some(action) = PairingAction::from_activation(arg.as_deref()) {
+                    on_action(action);
+                }
+                Ok(())
+            },
+        ))?;
+    }
+    let app_id = HSTRING::from(toast_activation::app_id());
+    ToastNotificationManager::CreateToastNotifierWithId(&app_id)?.Show(&toast)
+}
+
+/// Whether Windows lets toasts under the app id toasts are raised under
+/// show.
 #[cfg(windows)]
 fn toasts_enabled() -> windows::core::Result<bool> {
     use windows::UI::Notifications::{NotificationSetting, ToastNotificationManager};
     use windows::core::HSTRING;
-    let app_id = HSTRING::from(tauri_winrt_notification::Toast::POWERSHELL_APP_ID);
+    let app_id = HSTRING::from(toast_activation::app_id());
     let notifier = ToastNotificationManager::CreateToastNotifierWithId(&app_id)?;
     Ok(notifier.Setting()? == NotificationSetting::Enabled)
 }

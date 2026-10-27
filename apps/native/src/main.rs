@@ -2,7 +2,9 @@
 //!
 //! Usage: `rustling-tulip-native [session-id]`. The daemon keeps the layout;
 //! a session id is focused once the layout and the sessions arrive, as a
-//! sidebar click would, placing it when no pane shows it. It starts the
+//! sidebar click would, placing it when no pane shows it. A toast press on a
+//! closed client starts it as `rustling-tulip-native -ToastActivated
+//! -Embedding`, and neither flag is a session id. It starts the
 //! daemon when none is running and reconnects when the connection drops.
 //! Logs go to `<config dir>/logs/native.log` (the previous launch's log kept
 //! as `native.log.old`), filtered by `RUST_LOG` (default `info`), and to
@@ -18,7 +20,7 @@
 
 use anyhow::Context as _;
 use gpui::{App, Application};
-use rustling_tulip_native::{Assets, LOG_FILE};
+use rustling_tulip_native::{Assets, LOG_FILE, toast_activation};
 use std::fs::File;
 use std::path::Path;
 use std::sync::Mutex;
@@ -102,7 +104,14 @@ fn main() {
     // daemon is rewritten in its current `--detach` form. An entry naming any
     // other path, or none at all, is left alone.
     daemon_client::autostart::refresh_registration();
-    let wanted_session = std::env::args().nth(1);
+    let launch = toast_activation::parse_launch_args(std::env::args().skip(1));
+    if launch.toast_activated {
+        tracing::info!("started by a toast press");
+    }
+    // Before the window: a press that started this launch is waiting on the
+    // activator's class object.
+    toast_activation::register();
+    let wanted_session = launch.session;
     Application::new()
         .with_assets(Assets)
         .run(move |cx: &mut App| {

@@ -98,11 +98,11 @@ pub enum PairingAction {
 
 impl PairingAction {
     /// The action a toast activation carries: `approve:<id>` or `deny:<id>`
-    /// from a button, no argument at all from a press on the toast body, and
-    /// nothing from any other argument.
+    /// from a button, no argument or an empty one from a press on the toast
+    /// body, and nothing from any other argument.
     #[must_use]
     pub fn from_activation(arg: Option<&str>) -> Option<Self> {
-        let Some(arg) = arg else {
+        let Some(arg) = arg.filter(|arg| !arg.is_empty()) else {
             return Some(Self::Open);
         };
         let (kind, request_id) = arg.split_once(':')?;
@@ -130,6 +130,85 @@ impl PairingAction {
     #[must_use]
     pub fn deny_arg(request_id: &str) -> String {
         format!("deny:{request_id}")
+    }
+}
+
+/// What becomes of a toast press that arrived.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Arrival {
+    /// Apply it now.
+    Apply(PairingAction),
+    /// Held until the waiting list arrives.
+    Held,
+    /// Dropped: this PC's daemon, whose requests the pairing toasts name,
+    /// is not the one connected.
+    Dropped(PairingAction),
+}
+
+/// Whether the daemon's waiting list can come.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum ListState {
+    /// Not yet: the connection is new or not yet known.
+    #[default]
+    Waiting,
+    /// It has arrived.
+    Listed,
+    /// It never will: the connection is to a tailnet host, or to a daemon
+    /// that does not pair devices.
+    Unreachable,
+}
+
+/// The toast presses that wait for the client's first waiting list: a
+/// press that starts the client arrives before the daemon has said which
+/// requests wait, so it is held until the list comes and then applied. The
+/// pairing toasts name this PC's daemon's requests, so a press while
+/// another daemon (or one that cannot pair) is connected is dropped. A body
+/// press needs no list and passes at once.
+#[derive(Debug, Clone, Default)]
+pub struct ToastActionQueue {
+    list: ListState,
+    held: Vec<PairingAction>,
+}
+
+impl ToastActionQueue {
+    /// A press arrived: applied now, held for the list, or dropped.
+    pub fn arrive(&mut self, action: PairingAction) -> Arrival {
+        if action == PairingAction::Open {
+            return Arrival::Apply(action);
+        }
+        match self.list {
+            ListState::Listed => Arrival::Apply(action),
+            ListState::Waiting => {
+                self.held.push(action);
+                Arrival::Held
+            }
+            ListState::Unreachable => Arrival::Dropped(action),
+        }
+    }
+
+    /// The waiting list arrived: the held presses to apply, in the order
+    /// they came.
+    pub fn list_arrived(&mut self) -> Vec<PairingAction> {
+        self.list = ListState::Listed;
+        std::mem::take(&mut self.held)
+    }
+
+    /// A connection was made: to this PC's daemon (`local`) or not, and to
+    /// one that pairs devices (`can_pair`) or not. When no waiting list can
+    /// come, the held presses are dropped and returned.
+    pub fn connected(&mut self, local: bool, can_pair: bool) -> Vec<PairingAction> {
+        if local && can_pair {
+            return Vec::new();
+        }
+        self.list = ListState::Unreachable;
+        std::mem::take(&mut self.held)
+    }
+
+    /// Another daemon, or the connection lost: the held presses are dropped
+    /// and returned, and new ones wait for the next connection's list.
+    pub fn reset(&mut self) -> Vec<PairingAction> {
+        self.list = ListState::Waiting;
+        std::mem::take(&mut self.held)
     }
 }
 
@@ -438,6 +517,19 @@ impl PairingState {
             .count()
     }
 
+    /// Whether a toast's `action` still applies at `now`: a body press
+    /// always does, a button only while its request is listed.
+    #[must_use]
+    pub fn applies(&self, action: &PairingAction, now: DateTime<Utc>) -> bool {
+        match action {
+            PairingAction::Open => true,
+            PairingAction::Approve { request_id } | PairingAction::Deny { request_id } => self
+                .rows(now)
+                .iter()
+                .any(|row| row.request_id == *request_id),
+        }
+    }
+
     /// Opens the approval dialog for `request_id` in its Confirm phase.
     pub fn open_dialog(&mut self, request_id: &str) {
         let (name, login) = self.identity(request_id);
@@ -509,8 +601,8 @@ mod tests {
     use protocol::{ClientMessage, PendingDevice, Secret};
 
     use super::{
-        DialogPhase, PairingAction, PairingState, PairingToast, approve_message, deny_message,
-        qr_matrix, qr_payload,
+        Arrival, DialogPhase, PairingAction, PairingState, PairingToast, ToastActionQueue,
+        approve_message, deny_message, qr_matrix, qr_payload,
     };
 
     /// The instant every fixture request asked at.
@@ -893,7 +985,6 @@ mod tests {
         assert_eq!(PairingAction::approve_arg("r1"), "approve:r1");
         assert_eq!(PairingAction::deny_arg("r1"), "deny:r1");
         for garbage in [
-            "",
             "approve",
             "approve:",
             "approve:r1:extra",
@@ -908,5 +999,160 @@ mod tests {
                 "{garbage:?}"
             );
         }
+    }
+
+    #[test]
+    fn from_activation_treats_an_empty_argument_as_a_body_click() {
+        assert_eq!(
+            PairingAction::from_activation(Some("")),
+            Some(PairingAction::Open),
+            "the COM activator hands a body click over as an empty string"
+        );
+    }
+
+    #[test]
+    fn pairing_action_arguments_round_trip() {
+        for id in ["r1", "7f3c-91aa", "a b", "ünï"] {
+            assert_eq!(
+                PairingAction::from_activation(Some(&PairingAction::approve_arg(id))),
+                Some(PairingAction::Approve {
+                    request_id: id.to_owned()
+                }),
+                "{id:?}"
+            );
+            assert_eq!(
+                PairingAction::from_activation(Some(&PairingAction::deny_arg(id))),
+                Some(PairingAction::Deny {
+                    request_id: id.to_owned()
+                }),
+                "{id:?}"
+            );
+        }
+    }
+
+    fn deny(id: &str) -> PairingAction {
+        PairingAction::Deny {
+            request_id: id.to_owned(),
+        }
+    }
+
+    fn approve(id: &str) -> PairingAction {
+        PairingAction::Approve {
+            request_id: id.to_owned(),
+        }
+    }
+
+    #[test]
+    fn actions_before_the_pending_list_replay_once_it_arrives() {
+        let mut queue = ToastActionQueue::default();
+        assert_eq!(
+            queue.arrive(deny("r1")),
+            Arrival::Held,
+            "held until the list"
+        );
+        assert_eq!(
+            queue.arrive(approve("r2")),
+            Arrival::Held,
+            "held until the list"
+        );
+        assert_eq!(
+            queue.arrive(PairingAction::Open),
+            Arrival::Apply(PairingAction::Open),
+            "a body press needs no list"
+        );
+        assert!(
+            queue.connected(true, true).is_empty(),
+            "this PC's daemon will list its requests"
+        );
+        assert_eq!(
+            queue.list_arrived(),
+            [deny("r1"), approve("r2")],
+            "in order"
+        );
+        assert!(queue.list_arrived().is_empty(), "replayed once");
+        assert_eq!(
+            queue.arrive(deny("r3")),
+            Arrival::Apply(deny("r3")),
+            "the list is known"
+        );
+        assert!(queue.reset().is_empty(), "nothing was held");
+        assert_eq!(
+            queue.arrive(deny("r4")),
+            Arrival::Held,
+            "another daemon's list is not known yet"
+        );
+        assert_eq!(queue.list_arrived(), [deny("r4")]);
+    }
+
+    #[test]
+    fn held_presses_drop_on_a_remote_target() {
+        let mut queue = ToastActionQueue::default();
+        assert_eq!(queue.arrive(deny("r1")), Arrival::Held);
+        assert_eq!(queue.arrive(approve("r2")), Arrival::Held);
+        assert_eq!(
+            queue.connected(false, true),
+            [deny("r1"), approve("r2")],
+            "a tailnet host never lists this PC's requests"
+        );
+        assert_eq!(queue.arrive(deny("r3")), Arrival::Dropped(deny("r3")));
+        assert_eq!(
+            queue.arrive(PairingAction::Open),
+            Arrival::Apply(PairingAction::Open),
+            "a body press still brings the window forward"
+        );
+        assert!(queue.list_arrived().is_empty(), "nothing is replayed");
+    }
+
+    #[test]
+    fn held_presses_drop_when_the_daemon_cannot_pair() {
+        let mut queue = ToastActionQueue::default();
+        assert_eq!(queue.arrive(approve("r1")), Arrival::Held);
+        assert_eq!(
+            queue.connected(true, false),
+            [approve("r1")],
+            "a daemon without device pairing never lists requests"
+        );
+        assert_eq!(queue.arrive(approve("r2")), Arrival::Dropped(approve("r2")));
+    }
+
+    #[test]
+    fn a_host_switch_drops_held_presses() {
+        let mut queue = ToastActionQueue::default();
+        assert_eq!(queue.arrive(deny("r1")), Arrival::Held);
+        assert_eq!(queue.reset(), [deny("r1")], "the old host's presses go");
+        assert!(queue.list_arrived().is_empty(), "nothing is replayed");
+        assert_eq!(
+            queue.reset(),
+            Vec::<PairingAction>::new(),
+            "already dropped"
+        );
+        assert_eq!(queue.connected(false, false), Vec::<PairingAction>::new());
+        assert_eq!(queue.arrive(deny("r2")), Arrival::Dropped(deny("r2")));
+        assert!(queue.reset().is_empty(), "a dropped press is not held");
+        assert_eq!(
+            queue.arrive(deny("r3")),
+            Arrival::Held,
+            "the next host may list it"
+        );
+    }
+
+    #[test]
+    fn an_action_for_an_unlisted_request_is_dropped() {
+        let mut state = PairingState::new();
+        state.on_pending(&[request("r1")], asked_at());
+        assert!(state.applies(&deny("r1"), asked_at()));
+        assert!(state.applies(&approve("r1"), asked_at()));
+        assert!(!state.applies(&deny("r2"), asked_at()), "never listed");
+        assert!(!state.applies(&approve("r2"), asked_at()), "never listed");
+        assert!(
+            !state.applies(&deny("r1"), asked_at() + TimeDelta::seconds(300)),
+            "lapsed"
+        );
+        state.on_pending(&[], asked_at());
+        assert!(!state.applies(&deny("r1"), asked_at()), "left the list");
+        assert!(
+            state.applies(&PairingAction::Open, asked_at()),
+            "a body press names no request"
+        );
     }
 }

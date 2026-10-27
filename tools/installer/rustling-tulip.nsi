@@ -33,6 +33,10 @@ RequestExecutionLevel user
 !define UNINSTKEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\rustling-tulip"
 !define RUNKEY "Software\Microsoft\Windows\CurrentVersion\Run"
 !define RUNVALUE "rustling-tulip-daemon"
+; The client's toast activator class, which the client registers itself at
+; startup (with its Start-menu shortcut): ACTIVATOR_CLSID in
+; apps/native/src/toast_activation.rs.
+!define TOASTCLSIDKEY "Software\Classes\CLSID\{354BE9DC-6D82-4269-8883-D13CE3E38648}"
 
 Name "rustling-tulip"
 OutFile "${OUTFILE}"
@@ -149,6 +153,7 @@ Section "Uninstall"
   !insertmacro RT_GRACEFUL_SHUTDOWN
 
   DeleteRegValue HKCU "${RUNKEY}" "${RUNVALUE}"
+  DeleteRegKey HKCU "${TOASTCLSIDKEY}"
 
   Delete "$INSTDIR\${APPEXE}"
   Delete "$INSTDIR\${DAEMONEXE}"

@@ -65,20 +65,35 @@ qrcodegen = "1.8"
 
 [target.'cfg(windows)'.dependencies]
 raw-window-handle = "0.6"
-tauri-winrt-notification = "0.7.3"
+# Toasts: their XML (`Data_Xml_Dom`), the popup's in-process press handler
+# (`Foundation`), and the toast activator (`Win32_UI_Notifications`) with the
+# Start-menu shortcut that carries the app id and its class id
+# (`Win32_UI_Shell_PropertiesSystem`, `Win32_Storage_EnhancedStorage` for the
+# property keys, `Win32_System_Com_StructuredStorage` and `Win32_System_Variant`
+# for their values).
 windows = { version = "0.61", features = [
+    "Data_Xml_Dom",
+    "Foundation",
     "Win32_Foundation",
     "Win32_Graphics_Dwm",
     "Win32_NetworkManagement_WNet",
+    "Win32_Storage_EnhancedStorage",
     "Win32_Storage_FileSystem",
     "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
     "Win32_System_Registry",
+    "Win32_System_Variant",
     "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Notifications",
     "Win32_UI_Shell",
+    "Win32_UI_Shell_PropertiesSystem",
     "Win32_UI_WindowsAndMessaging",
     "UI_Notifications",
 ] }
+# `#[implement]` (the toast activator's COM classes) expands to paths under
+# `::windows_core`, so the crate `windows` already pulls in is named directly.
+windows-core = "0.61"
 
 [build-dependencies]
 # Embeds the app icon (build.rs); the version gpui's own build script already uses.

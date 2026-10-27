@@ -21,8 +21,8 @@ use crate::fonts::DEFAULT_FAMILY;
 use crate::notice_view::modal_panel;
 use crate::notify::PairingActionSink;
 use crate::pairing::{
-    DialogPhase, DialogView, PairingAction, PairingState, PairingToast, QrMatrix, WaitingRow,
-    approve_message, deny_message,
+    Arrival, DialogPhase, DialogView, PairingAction, PairingState, PairingToast, QrMatrix,
+    ToastActionQueue, WaitingRow, approve_message, deny_message,
 };
 use crate::palette::{ASKING, ON_ASKING};
 use crate::session_menu::backdrop;
@@ -68,6 +68,8 @@ pub(crate) struct PairingView {
     tick: Option<Task<()>>,
     /// Where a pressed pairing toast hands its action, from any thread.
     actions: UnboundedSender<PairingAction>,
+    /// Toast presses waiting for the daemon's first waiting list.
+    toast_actions: ToastActionQueue,
 }
 
 impl PairingView {
@@ -81,6 +83,7 @@ impl PairingView {
             drawn: Vec::new(),
             tick: None,
             actions,
+            toast_actions: ToastActionQueue::default(),
         }
     }
 }
@@ -154,11 +157,8 @@ impl RootView {
         actions
     }
 
-    /// A pairing toast was pressed. Approve… brings the window forward and,
-    /// unless a dialog is already open, opens the request's dialog as the
-    /// row's Approve… does; Deny declines
-    /// the request; a press on the body only brings the window forward. A
-    /// request the client no longer lists opens and sends nothing.
+    /// A pairing toast was pressed: applied now, or once the daemon's first
+    /// waiting list arrives when it has not yet.
     fn on_pairing_action(
         &mut self,
         action: PairingAction,
@@ -166,6 +166,31 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         tracing::info!(?action, "pairing: a toast was pressed");
+        match self.pairing.toast_actions.arrive(action) {
+            Arrival::Apply(action) => self.apply_pairing_action(action, window, cx),
+            Arrival::Held => tracing::info!("pairing: the toast press waits for the waiting list"),
+            Arrival::Dropped(action) => log_dropped_presses(&[action]),
+        }
+    }
+
+    /// Applies a toast press. Approve… brings the window forward and,
+    /// unless a dialog is already open, opens the request's dialog as the
+    /// row's Approve… does; Deny declines the request; a press on the body
+    /// only brings the window forward. A press for a request the client no
+    /// longer lists is dropped.
+    fn apply_pairing_action(
+        &mut self,
+        action: PairingAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.pairing.model.applies(&action, Utc::now()) {
+            tracing::info!(
+                ?action,
+                "pairing: a toast press for a request no longer listed was dropped"
+            );
+            return;
+        }
         match action {
             PairingAction::Approve { request_id } => {
                 window.activate_window();
@@ -198,8 +223,12 @@ impl RootView {
 
     /// Asks this PC's daemon for its waiting list, when it pairs devices;
     /// a tailnet host's list is not this client's to approve.
-    pub(crate) fn ask_pending_devices(&self) {
-        if self.conn.target().is_local() && self.conn.supports(FEATURE_DEVICE_PAIRING) {
+    /// A toast press held for a list that cannot come is dropped.
+    pub(crate) fn ask_pending_devices(&mut self) {
+        let local = self.conn.target().is_local();
+        let can_pair = self.conn.supports(FEATURE_DEVICE_PAIRING);
+        log_dropped_presses(&self.pairing.toast_actions.connected(local, can_pair));
+        if local && can_pair {
             self.send(ClientMessage::ListPendingDevices);
         }
     }
@@ -216,6 +245,9 @@ impl RootView {
             DaemonMessage::PendingDevices { requests } => {
                 let fresh = self.fold_pending_devices(requests, window, cx);
                 self.raise_pairing_toasts(requests, &fresh, cx);
+                for action in self.pairing.toast_actions.list_arrived() {
+                    self.apply_pairing_action(action, window, cx);
+                }
             }
             DaemonMessage::DevicePairCode {
                 request_id,
@@ -251,7 +283,7 @@ impl RootView {
 
     /// Hands a pressed toast's action to the window, from whichever thread
     /// the OS raises it on.
-    fn pairing_sink(&self) -> PairingActionSink {
+    pub(crate) fn pairing_sink(&self) -> PairingActionSink {
         let actions = self.pairing.actions.clone();
         Arc::new(move |action: PairingAction| {
             if let Err(err) = actions.unbounded_send(action) {
@@ -457,6 +489,7 @@ impl RootView {
     /// Another daemon or a lost one: every request and the dialog go.
     pub(crate) fn reset_pairing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.pairing.model.reset();
+        log_dropped_presses(&self.pairing.toast_actions.reset());
         self.pairing.tick = None;
         self.sync_pairing(window, cx);
     }
@@ -666,6 +699,17 @@ impl RootView {
             .child(body)
             .child(footer);
         Some(backdrop("pairing", panel))
+    }
+}
+
+/// Logs each toast press dropped because this PC's daemon, whose requests
+/// the pairing toasts name, is not the one connected.
+fn log_dropped_presses(dropped: &[PairingAction]) {
+    for action in dropped {
+        tracing::info!(
+            ?action,
+            "pairing: a toast press was dropped: this PC's daemon is not connected"
+        );
     }
 }
 

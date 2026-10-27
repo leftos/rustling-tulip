@@ -10,7 +10,8 @@ A per-user install, no elevation: every path and registry key is under the curre
 |---|---|
 | `rustling-tulip-native.exe` (the GPUI client), `rustling-tulipd.exe` (the daemon), `rt-tracer.exe` (the per-session PTY supervisor) | `%LOCALAPPDATA%\Programs\rustling-tulip\` |
 | Uninstaller | `%LOCALAPPDATA%\Programs\rustling-tulip\uninstall.exe` |
-| Start menu shortcut | `%APPDATA%\Microsoft\Windows\Start Menu\Programs\rustling-tulip.lnk` |
+| Start menu shortcut | `%APPDATA%\Microsoft\Windows\Start Menu\Programs\rustling-tulip.lnk`; the installed client rewrites it at each start with the app id `leftos.RustlingTulip` and the toast activator CLSID `{354BE9DC-6D82-4269-8883-D13CE3E38648}`, so toast buttons pressed from Action Center reach it |
+| Toast activator (written by the installed client, not the installer) | `HKCU\Software\Classes\CLSID\{354BE9DC-6D82-4269-8883-D13CE3E38648}\LocalServer32`, default `"<install dir>\rustling-tulip-native.exe" -ToastActivated` |
 | Desktop shortcut (optional checkbox, off by default) | `%USERPROFILE%\Desktop\rustling-tulip.lnk` |
 | Daemon autostart (optional checkbox, on by default) | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, value `rustling-tulip-daemon` = `"<install dir>\rustling-tulipd.exe" --detach` |
 | Add/Remove Programs entry | `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\rustling-tulip` |
@@ -25,7 +26,7 @@ Before it copies files and before the uninstaller deletes them, the script stops
 
 ## What uninstall removes and keeps
 
-Removed: the three exes, `uninstall.exe`, the install directory, both shortcuts, the `rustling-tulip-daemon` autostart value and the uninstall registry key.
+Removed: the three exes, `uninstall.exe`, the install directory, both shortcuts, the `rustling-tulip-daemon` autostart value, the toast activator's `HKCU\Software\Classes\CLSID\{354BE9DC-…}` key and the uninstall registry key.
 
 Kept: the config and data directories — `%APPDATA%\leftos\rustling-tulip\` (repos, workspaces, session history, secrets index) and `%LOCALAPPDATA%\leftos\rustling-tulip\` (worktrees, binary cache, tailnet certificate). Uninstalling never deletes the user's repos or session history; delete those folders by hand to start clean.
 
@@ -56,4 +57,5 @@ It is built from the SVGs in `icon/`: `icon.svg` for 24 px and up, and `icon-16.
 1. Run the setup exe with the default options. It installs under `%LOCALAPPDATA%\Programs\rustling-tulip`, adds the Start menu entry and the autostart value, and offers to run the client; it connects to a daemon.
 2. Sign out and back in: the daemon starts at login (`%APPDATA%\leftos\rustling-tulip\config\logs\autostart.log` shows the launch) and the client connects without starting one itself.
 3. With the client open and a session running, run the same setup exe again: it completes and the session survives (the tracer kept the PTY alive and the new daemon reattached).
-4. Uninstall from Settings → Apps (or the Start menu): the `rustling-tulip-daemon` value is gone from `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, the Start menu entry is gone, the install directory is gone, and `%APPDATA%\leftos\rustling-tulip\config\` is still there.
+4. Toasts: with the installed client connected to this PC's daemon, a device pairing request raises a toast under rustling-tulip (the sender name and icon, not PowerShell). Close the client, then press Approve… or Deny from Action Center: the client starts (`native.log`: "started by a toast press") and applies the press. `native.log` also says "toast activator registered", and the Start menu shortcut and the CLSID key above exist.
+5. Uninstall from Settings → Apps (or the Start menu): the `rustling-tulip-daemon` value is gone from `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, the `HKCU\Software\Classes\CLSID\{354BE9DC-…}` key is gone, the Start menu entry is gone, the install directory is gone, and `%APPDATA%\leftos\rustling-tulip\config\` is still there.

@@ -755,6 +755,12 @@
     },
     {
       "paths": [
+        "apps/native/src/toast_activation.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & test(/^(toast_activation|notify|pairing)::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_notifications|ui_pairing)::/))"
+    },
+    {
+      "paths": [
         "apps/native/src/undo.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native) & test(/^undo::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_pane_drag|ui_tabs|ui_viewer_tabs)::/))"

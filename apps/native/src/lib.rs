@@ -116,6 +116,7 @@ mod term_input;
 mod term_view;
 mod text_input;
 mod theme;
+pub mod toast_activation;
 mod undo;
 mod undo_view;
 mod viewer_find;
@@ -906,6 +907,9 @@ impl RootView {
             tokens,
         };
         let root = Self::with_transport(deps, window, cx);
+        // Presses the toast activator receives, those that arrived before
+        // this window among them, go to this window's pairing actions.
+        toast_activation::attach(&root.pairing_sink());
         // The cloaked window neither restores nor saves its place.
         if !offscreen::requested() {
             cx.observe_window_bounds(window, |root, window, cx| {
