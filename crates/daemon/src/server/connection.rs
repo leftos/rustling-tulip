@@ -55,6 +55,10 @@ pub(super) enum AuthKind {
 /// closing handshake before its socket is dropped.
 const SERVER_ENDED_CLOSE_LIMIT: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// How long a refused handshake's connection has to finish sending its
+/// refusal and the closing handshake before its socket is dropped.
+const REFUSED_CLOSE_LIMIT: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// A loopback connection: [`client_session_until`] with no server life, so
 /// nothing but the peer or the daemon's shutdown ends it.
 pub(super) async fn client_session(hub: Hub, socket: WebSocket, auth: AuthKind) {
@@ -104,8 +108,9 @@ pub(super) async fn client_session_until(
             let _ = out_tx.send(DaemonMessage::AuthFailed {
                 reason: err.to_string(),
             });
+            drop(client_guard);
             drop(out_tx);
-            let _ = send_task.await;
+            end_refused_handshake(send_task, &life, &mut receiver).await;
             return;
         }
     };
@@ -298,6 +303,27 @@ async fn end_within<S>(
 /// The sink of a connection's WebSocket.
 type Sink = futures::stream::SplitSink<WebSocket, Message>;
 
+/// End a connection whose handshake was refused: send the refusal still
+/// queued for it, then close it with the closing handshake, within
+/// [`REFUSED_CLOSE_LIMIT`]. The client's next frame may still be unread here,
+/// and a bare drop would reset the socket, which can destroy the refusal
+/// before the client reads it.
+async fn end_refused_handshake(
+    send_task: tokio::task::JoinHandle<PumpEnd>,
+    life: &CancellationToken,
+    receiver: &mut futures::stream::SplitStream<WebSocket>,
+) {
+    end_within(
+        send_task,
+        REFUSED_CLOSE_LIMIT,
+        life,
+        async |(sender, queued)| {
+            send_queued_then_close(sender, queued, receiver).await;
+        },
+    )
+    .await;
+}
+
 /// Send `msg` as one text frame; `false` once the socket has failed.
 async fn send_message(sender: &mut Sink, msg: &DaemonMessage) -> bool {
     match serde_json::to_string(msg) {
@@ -309,8 +335,9 @@ async fn send_message(sender: &mut Sink, msg: &DaemonMessage) -> bool {
     }
 }
 
-/// Send what is still `queued` for a pairing connection, then close it with
-/// the closing handshake.
+/// Send what is still `queued` for a connection that is ending (a pairing
+/// connection, or a failed handshake), then close it with the closing
+/// handshake.
 async fn send_queued_then_close(
     mut sender: Sink,
     mut queued: mpsc::UnboundedReceiver<DaemonMessage>,
@@ -757,7 +784,8 @@ async fn recv_loop(
 mod tests {
     use super::*;
     use crate::server::test_support::{
-        WsClient, hello, next_message, tailnet_ws_client, test_hub, test_peer, ws_next, ws_send,
+        WsClient, hello, loopback_ws_client, next_message, tailnet_ws_client, test_hub, test_peer,
+        ws_next, ws_send,
     };
     use std::time::Duration;
 
@@ -853,6 +881,43 @@ mod tests {
         assert!(
             closed_with_a_close_frame(&mut client).await,
             "the daemon sends Close before it ends the connection"
+        );
+    }
+
+    /// A refused handshake still delivers `AuthFailed`: the client's next
+    /// frame is unread when the daemon refuses it, and a bare drop would
+    /// reset the socket, which can destroy the refusal before the client
+    /// reads it. The daemon ends the connection with the closing handshake
+    /// instead.
+    #[tokio::test]
+    async fn failed_handshake_delivers_auth_failed_before_the_close() {
+        use futures::SinkExt as _;
+        use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+        let (hub, _scratch) = test_hub("failed-handshake-close");
+        let mut client = loopback_ws_client(&hub).await;
+        // Both frames leave together, so the second is still unread at the
+        // daemon when it refuses the handshake.
+        for frame in [
+            hello("not-the-daemons-token", None),
+            protocol::ClientMessage::ListRepos,
+        ] {
+            let json = serde_json::to_string(&frame).expect("serialize a client message");
+            client
+                .feed(WsMessage::text(json))
+                .await
+                .expect("queue a frame");
+        }
+        client.flush().await.expect("send the frames");
+
+        let first = ws_next(&mut client).await;
+        assert!(
+            matches!(first, Some(DaemonMessage::AuthFailed { .. })),
+            "the first message is the refusal: {first:?}"
+        );
+        assert!(
+            closed_with_a_close_frame(&mut client).await,
+            "the daemon closes a failed handshake, so the refusal is not lost to a reset"
         );
     }
 
