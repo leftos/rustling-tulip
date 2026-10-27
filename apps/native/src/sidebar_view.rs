@@ -178,7 +178,11 @@ impl RootView {
                 density: self.sidebar.leaf_density(),
                 under_repos: self.sidebar.sessions_under_repos(),
                 focused_row,
-                hovered_row: self.hovered_container.as_deref(),
+                hovered_row: crate::sidebar::shown_hovered_row(
+                    self.hovered_container.as_deref(),
+                    self.window_hover_override
+                        .unwrap_or_else(|| window.is_window_hovered()),
+                ),
                 detached_stop_all: self.detached_stop_all.armed(),
                 highlighted: &self.launched_highlight,
                 dragged: self.dragged_sidebar_row(cx),

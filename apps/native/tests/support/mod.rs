@@ -1074,8 +1074,15 @@ impl<'a> Harness<'a> {
             autostart,
             tokens,
         };
+        harness.count_the_window_hovered();
         harness.connect();
         harness
+    }
+
+    /// gpui's test window never reports the pointer in the window, so the
+    /// specs say it is there, as a real pointer over a row would be.
+    fn count_the_window_hovered(&mut self) {
+        self.root_update(|root, _, cx| root.set_window_hover_override(Some(true), cx));
     }
 
     /// Opens the window on the real network thread over `net`. The
@@ -1110,7 +1117,7 @@ impl<'a> Harness<'a> {
         };
         let (root, cx) =
             cx.add_window_view(move |window, cx| RootView::with_transport(deps, window, cx));
-        Self {
+        let mut harness = Self {
             cx,
             root,
             events: unbounded().0,
@@ -1124,7 +1131,9 @@ impl<'a> Harness<'a> {
             picker,
             autostart,
             tokens,
-        }
+        };
+        harness.count_the_window_hovered();
+        harness
     }
 
     /// The device tokens the client holds per tailnet host.

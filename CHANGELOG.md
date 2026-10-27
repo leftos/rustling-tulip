@@ -18,6 +18,8 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - A Worktrees folder the daemon can't create no longer leaves Settings showing it as saved after another window changes it.
 - A text field you aren't typing in no longer shows its text selected, in Settings, the Spawn dialog and everywhere else.
 - In Settings, when saving or applying makes the focused button go away, the keyboard moves to the next control instead of jumping back to the tabs.
+- Arrow keys, Enter and Space no longer fold a repo row you can't see after switching to Source control or Needs You, or hiding the sidebar.
+- A repo row's ▶ no longer stays lit after the pointer leaves the window or the sidebar is hidden and shown again.
 
 ### Changed
 

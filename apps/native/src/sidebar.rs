@@ -1780,6 +1780,13 @@ pub fn resume_all_label(count: usize) -> Option<String> {
     (count >= 2).then(|| format!("Resume all abandoned ({count})"))
 }
 
+/// The container row drawn as hovered: the one under the pointer, while the
+/// pointer is still in the window.
+#[must_use]
+pub fn shown_hovered_row(hovered: Option<&str>, window_hovered: bool) -> Option<&str> {
+    hovered.filter(|_| window_hovered)
+}
+
 /// The key focused row navigation moves to: `delta` rows from `current`
 /// among `keys`, clamped to the ends; with no current row, the first for a
 /// forward move and the last for a backward one.
@@ -2424,6 +2431,18 @@ pub(crate) mod tests {
     use serde_json::json;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+
+    #[test]
+    fn no_hovered_row_once_the_pointer_has_left_the_window() {
+        assert_eq!(shown_hovered_row(Some("repo:r1"), false), None);
+        assert_eq!(shown_hovered_row(None, false), None);
+    }
+
+    #[test]
+    fn the_hovered_row_shows_while_the_window_is_hovered() {
+        assert_eq!(shown_hovered_row(Some("repo:r1"), true), Some("repo:r1"));
+        assert_eq!(shown_hovered_row(None, true), None);
+    }
 
     pub(crate) fn repo(id: &str, path: &str) -> RepoEntry {
         serde_json::from_value(json!({ "id": id, "name": id, "path": path })).expect("repo fixture")

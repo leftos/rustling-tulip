@@ -553,6 +553,9 @@ pub struct RootView {
     row_focus: Option<String>,
     /// The container row the pointer is over, while it is over one.
     hovered_container: Option<String>,
+    /// Whether the pointer is in the window, in place of the platform's
+    /// answer; `None` asks the platform.
+    window_hover_override: Option<bool>,
     /// The launch-last replay waiting for the daemon's fresh branch name,
     /// if any.
     launch_last: launch_last::State,
@@ -1014,6 +1017,7 @@ impl RootView {
             sidebar_focus: cx.focus_handle(),
             row_focus: None,
             hovered_container: None,
+            window_hover_override: None,
             launch_last: launch_last::State::default(),
             wanted_session: wanted,
             sessions_loaded: false,
@@ -1726,10 +1730,13 @@ impl RootView {
         self.sidebar.toggle_sidebar();
         // The fold always gives the panes a new width.
         self.mark_active_panes_resized(cx);
-        // The Stop all chip lives only in the sessions panel, so a fold
-        // takes any arm with it.
+        // The Stop all chip and the container rows live only in the sessions
+        // panel, so a fold takes any arm and the row focus and hover with
+        // it.
         if self.sidebar.is_collapsed() {
             self.detached_stop_all.disarm();
+            self.row_focus = None;
+            self.hovered_container = None;
         }
         self.drag = None;
         self.save_ui();
@@ -1752,6 +1759,13 @@ impl RootView {
     pub fn focus_container_row(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.row_focus = Some(key.to_owned());
         self.sidebar_focus.focus(window);
+        cx.notify();
+    }
+
+    /// Sets whether the pointer counts as in the window, in place of the
+    /// platform's answer; `None` asks the platform again.
+    pub fn set_window_hover_override(&mut self, hovered: Option<bool>, cx: &mut Context<Self>) {
+        self.window_hover_override = hovered;
         cx.notify();
     }
 

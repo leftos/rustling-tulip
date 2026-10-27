@@ -12,7 +12,7 @@ use crate::support;
 use std::time::Duration;
 
 use gpui::{
-    Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, Pixels, Point, TestAppContext, px,
+    Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, Pixels, Point, TestAppContext, point, px,
 };
 use protocol::{
     ClientMessage, DaemonMessage, SessionMode, SessionSnapshot, SpawnConfig, SpawnTarget,
@@ -170,6 +170,51 @@ fn launch_last_quick_button_shows_on_hover_or_focus(cx: &mut TestAppContext) {
     assert!(
         painted(&mut h, "container-repo:r2-launch"),
         "a hovered row with no focus shows its ▶ too"
+    );
+}
+
+#[gpui::test]
+fn the_quick_button_hides_once_the_pointer_leaves_the_window(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_repos(cx, &dir);
+
+    let r1 = h.center("container-repo:r1");
+    h.hover(r1, Modifiers::default());
+    assert!(
+        painted(&mut h, "container-repo:r1-launch"),
+        "the hovered row shows its ▶"
+    );
+    h.root_update(|root, _, cx| root.set_window_hover_override(Some(false), cx));
+    assert!(
+        !painted(&mut h, "container-repo:r1-launch"),
+        "the ▶ goes once the pointer has left the window"
+    );
+}
+
+#[gpui::test]
+fn a_fold_clears_the_row_hover(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_repos(cx, &dir);
+
+    // The keyboard in the sidebar, so Ctrl+B folds it.
+    let panel = h.bounds("sidebar-panel");
+    h.click(
+        point(panel.center().x, panel.bottom() - px(10.0)),
+        Modifiers::none(),
+    );
+    let r1 = h.center("container-repo:r1");
+    h.hover(r1, Modifiers::default());
+    assert!(
+        painted(&mut h, "container-repo:r1-launch"),
+        "the hovered row shows its ▶"
+    );
+    h.keys("ctrl-b");
+    assert!(h.root(|root, _| root.sidebar_collapsed()), "folded");
+    h.click_on("activity-sessions");
+    assert!(!h.root(|root, _| root.sidebar_collapsed()), "unfolded");
+    assert!(
+        !painted(&mut h, "container-repo:r1-launch"),
+        "the ▶ does not come back with the unfold"
     );
 }
 

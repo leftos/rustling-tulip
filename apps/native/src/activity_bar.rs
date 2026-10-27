@@ -185,10 +185,13 @@ impl RootView {
         if self.sidebar.is_collapsed() != was_collapsed {
             self.mark_active_panes_resized(cx);
         }
-        // The Stop all chip lives only in the sessions panel, so a switch
-        // away from it, or a fold, takes any arm with it.
+        // The Stop all chip and the container rows live only in the sessions
+        // panel, so a switch away from it, or a fold, takes any arm and the
+        // row focus and hover with it.
         if self.sidebar.is_collapsed() || self.sidebar.activity() != Activity::Sessions {
             self.detached_stop_all.disarm();
+            self.row_focus = None;
+            self.hovered_container = None;
         }
         self.drag = None;
         self.save_ui();

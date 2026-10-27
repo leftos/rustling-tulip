@@ -14,7 +14,9 @@ use protocol::{
     SpawnTarget, SplitDirection, VscodeWorkspaceFolder, VscodeWorkspaceSuggestion,
     WorktreeReusePolicy,
 };
-use rustling_tulip_native::{DETACHED_BANNER, RepoFilter, SidebarView, TabPill, resume_all_label};
+use rustling_tulip_native::{
+    Activity, DETACHED_BANNER, RepoFilter, SidebarView, TabPill, resume_all_label,
+};
 use support::{Fixture, Harness, TestDir, pane, repo, session, split, tab, workspace};
 
 /// The keys of the sidebar's containers, in the order it shows them.
@@ -1659,6 +1661,88 @@ fn container_row_enter_and_space_fold_it(cx: &mut TestAppContext) {
         closes(&h.sent(), "t1"),
         1,
         "the armed confirm survived that Escape"
+    );
+}
+
+/// Two repos, with the keyboard on r1's row (folded by that click).
+fn focused_container_row<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let mut fixture = Fixture::single(session("s1").in_repo("r1").build());
+    fixture.repos = vec![repo("r1", "D:/src/r1"), repo("r2", "D:/src/r2")];
+    fixture.sessions.push(session("s2").in_repo("r2").build());
+    let mut h = Harness::with(cx, dir, &fixture);
+    h.answer_scrollback("s1", b"");
+    h.click_on("container-repo:r1");
+    assert_eq!(
+        h.root(|root, _| root.sidebar_row_focus().map(str::to_owned)),
+        Some("repo:r1".to_owned())
+    );
+    assert!(!h.in_model("leaf-s1"), "the click folded it");
+    h.sent_input("s1");
+    h.sent();
+    h
+}
+
+/// Back on the sessions panel: it is shown, no row holds the keyboard, and
+/// r1 is still folded.
+fn back_on_sessions_with_r1_still_folded(h: &mut Harness<'_>) {
+    h.click_on("activity-sessions");
+    assert!(
+        h.root(|root, _| !root.sidebar_collapsed() && root.activity() == Activity::Sessions),
+        "the sessions panel is shown"
+    );
+    assert_eq!(
+        h.root(|root, _| root.sidebar_row_focus().map(str::to_owned)),
+        None,
+        "the row focus does not come back"
+    );
+    assert!(!h.in_model("leaf-s1"), "r1 is still folded");
+}
+
+/// A switch to `activity` hides the container list: the row focus goes with
+/// it, so Enter folds nothing.
+fn switching_away_clears_the_row_focus(cx: &mut TestAppContext, activity: &str) {
+    let dir = TestDir::new();
+    let mut h = focused_container_row(cx, &dir);
+    h.click_on(activity);
+    assert_eq!(
+        h.root(|root, _| root.sidebar_row_focus().map(str::to_owned)),
+        None,
+        "the switch clears the row focus"
+    );
+    h.keys("enter");
+    assert!(
+        h.sent_input("s1").is_empty(),
+        "nothing reaches the terminal"
+    );
+    back_on_sessions_with_r1_still_folded(&mut h);
+}
+
+#[gpui::test]
+fn switching_to_source_control_clears_the_row_focus(cx: &mut TestAppContext) {
+    switching_away_clears_the_row_focus(cx, "activity-source-control");
+}
+
+#[gpui::test]
+fn switching_to_needs_you_clears_the_row_focus(cx: &mut TestAppContext) {
+    switching_away_clears_the_row_focus(cx, "activity-needs-you");
+}
+
+#[gpui::test]
+fn collapsing_the_sidebar_clears_the_row_focus(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = focused_container_row(cx, &dir);
+    h.keys("ctrl-b");
+    assert_eq!(
+        h.root(|root, _| root.sidebar_row_focus().map(str::to_owned)),
+        None,
+        "the fold clears the row focus"
+    );
+    h.keys("enter");
+    back_on_sessions_with_r1_still_folded(&mut h);
+    h.keys("enter");
+    assert!(
+        !h.in_model("leaf-s1"),
+        "Enter after the unfold folds nothing"
     );
 }
 
