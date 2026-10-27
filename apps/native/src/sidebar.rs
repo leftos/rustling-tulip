@@ -3,9 +3,9 @@
 //! layout. Plain Rust, so every rule is unit-tested; `sidebar_view` renders it.
 
 use protocol::{
-    AccentToken, AgentDescriptor, AgentId, AppearanceOverrides, ContainerRef, DaemonMessage,
-    RepoEntry, SessionChip, SessionKind, SessionMode, SessionSnapshot, SessionStatus, SpawnConfig,
-    SpawnTarget, TabEntry, WorkspaceEntry,
+    AccentToken, AgentDescriptor, AgentId, AppearanceOverrides, CharRange, ContainerRef,
+    DaemonMessage, RepoEntry, SessionChip, SessionKind, SessionMode, SessionSnapshot,
+    SessionStatus, SpawnConfig, SpawnTarget, TabEntry, WorkspaceEntry,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use std::cmp::Ordering;
@@ -2140,7 +2140,7 @@ pub fn display_label(s: &SessionSnapshot, agents: &[AgentDescriptor]) -> String 
             .flatten()
             .map(path_leaf_name)
     };
-    let title = || non_empty(s.terminal_title.as_deref()).filter(|t| !is_noisy_shell_title(t));
+    let title = || session_title(s, agents).filter(|t| !is_noisy_shell_title(t));
     non_empty(s.user_label.as_deref())
         .map(str::to_owned)
         .or_else(cwd_leaf)
@@ -2160,13 +2160,51 @@ pub fn label_tooltip(s: &SessionSnapshot, agents: &[AgentDescriptor]) -> String 
     if let Some(label) = non_empty(Some(&s.label)).filter(|l| *l != display) {
         lines.push(format!("Session: {label}"));
     }
-    if let Some(title) = non_empty(s.terminal_title.as_deref()).filter(|t| *t != display) {
+    if let Some(title) = session_title(s, agents).filter(|t| *t != display) {
         lines.push(format!("Terminal title: {title}"));
     }
     if let Some(cwd) = non_empty(s.current_cwd.as_deref()) {
         lines.push(format!("Cwd: {cwd}"));
     }
     lines.join("\n")
+}
+
+/// The session's terminal title as its agent means it, trimmed: without a
+/// leading title glyph from the agent's descriptor in `agents` and the
+/// whitespace after it, and `None` when what is left is blank or only the
+/// agent's placeholder. A session with no agent, or whose descriptor is not
+/// at hand, keeps its title as it stands.
+pub(crate) fn session_title<'a>(
+    s: &'a SessionSnapshot,
+    agents: &[AgentDescriptor],
+) -> Option<&'a str> {
+    let title = non_empty(s.terminal_title.as_deref())?;
+    let Some(rules) = s
+        .agent
+        .as_ref()
+        .and_then(|agent| descriptor_for(agents, agent))
+        .map(|descriptor| &descriptor.title)
+    else {
+        return Some(title);
+    };
+    let name = strip_title_glyph(title, &rules.glyphs);
+    (!name.is_empty() && rules.placeholder.as_deref() != Some(name)).then_some(name)
+}
+
+/// `title` without a leading glyph from `glyphs` and the whitespace after
+/// it; a glyph with no whitespace after it, and not the whole title, stays.
+fn strip_title_glyph<'a>(title: &'a str, glyphs: &[CharRange]) -> &'a str {
+    let mut chars = title.chars();
+    let Some(first) = chars.next() else {
+        return title;
+    };
+    let rest = chars.as_str();
+    let leads = glyphs.iter().any(|range| range.contains(first));
+    if leads && (rest.is_empty() || rest.starts_with(char::is_whitespace)) {
+        rest.trim_start()
+    } else {
+        title
+    }
 }
 
 /// A leaf's hover text: [`label_tooltip`], then a line per agent chip, its
@@ -3005,6 +3043,137 @@ pub(crate) mod tests {
         assert_eq!(
             label_tooltip(&s, &[]),
             "app\nSession: id\nTerminal title: vim\nCwd: D:/src/app"
+        );
+    }
+
+    /// A Claude session labelled `repo · main` whose terminal title is `title`.
+    fn titled(title: &str) -> SessionSnapshot {
+        let mut s = session("id");
+        s.label = "repo · main".to_owned();
+        s.terminal_title = Some(title.to_owned());
+        s
+    }
+
+    #[test]
+    fn label_strips_the_agents_title_glyph() {
+        let agents = [claude_descriptor()];
+        for (title, name) in [
+            ("◑ main.rs greet function", "main.rs greet function"),
+            ("⠋ Fixing", "Fixing"),
+            ("✳  Two spaces\tand a tab", "Two spaces\tand a tab"),
+            ("  ◐\tLeading blanks  ", "Leading blanks"),
+        ] {
+            assert_eq!(
+                display_label(&titled(title), &agents),
+                name,
+                "title {title:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn label_strips_every_glyph_in_the_descriptor_ranges() {
+        let descriptor = claude_descriptor();
+        let ends = descriptor
+            .title
+            .glyphs
+            .iter()
+            .flat_map(|range| [range.first, range.last]);
+        let agents = [descriptor.clone()];
+        for glyph in ends.chain(['◐', '◒', '⡀']) {
+            let title = format!("{glyph} Fixing");
+            assert_eq!(
+                display_label(&titled(&title), &agents),
+                "Fixing",
+                "title {title:?}"
+            );
+            assert_eq!(
+                display_label(&titled(&glyph.to_string()), &agents),
+                "repo · main",
+                "a glyph alone names nothing: {glyph:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn label_falls_through_when_the_title_is_only_the_placeholder() {
+        let agents = [claude_descriptor()];
+        for title in [
+            "✳ Claude Code",
+            "◐ Claude Code",
+            "Claude Code",
+            "  ✳   Claude Code  ",
+        ] {
+            assert_eq!(
+                display_label(&titled(title), &agents),
+                "repo · main",
+                "title {title:?}"
+            );
+        }
+        let mut unlabelled = titled("✳ Claude Code");
+        unlabelled.label = String::new();
+        assert_eq!(
+            display_label(&unlabelled, &agents),
+            "claude",
+            "then the runtime tag"
+        );
+        for (title, name) in [
+            ("✳ Claude Code rocks", "Claude Code rocks"),
+            ("✳ claude code", "claude code"),
+        ] {
+            assert_eq!(
+                display_label(&titled(title), &agents),
+                name,
+                "title {title:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn label_keeps_a_glyph_lead_title_for_an_agent_without_title_rules() {
+        let mut s = titled("✳ Claude Code");
+        s.agent = Some(AgentId("test-agent".to_owned()));
+        assert_eq!(display_label(&s, &[test_descriptor()]), "✳ Claude Code");
+        let unknown = titled("◑ Fixing");
+        assert_eq!(
+            display_label(&unknown, &[]),
+            "◑ Fixing",
+            "no descriptor at hand"
+        );
+        let mut no_agent = titled("◑ Fixing");
+        no_agent.agent = None;
+        assert_eq!(display_label(&no_agent, &[claude_descriptor()]), "◑ Fixing");
+    }
+
+    #[test]
+    fn label_does_not_strip_a_glyph_without_the_following_space() {
+        let agents = [claude_descriptor()];
+        for title in ["✳x", "◑main.rs", "⠋-Fixing"] {
+            assert_eq!(
+                display_label(&titled(title), &agents),
+                title,
+                "title {title:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tooltip_leaves_out_a_placeholder_title() {
+        let agents = [claude_descriptor()];
+        assert_eq!(
+            label_tooltip(&titled("✳ Claude Code"), &agents),
+            "repo · main"
+        );
+        assert_eq!(
+            label_tooltip(&titled("◑ Fixing"), &agents),
+            "Fixing\nSession: repo · main",
+            "the stripped title is the name, so it is not repeated"
+        );
+        let mut named = titled("◑ Fixing");
+        named.user_label = Some("mine".to_owned());
+        assert_eq!(
+            label_tooltip(&named, &agents),
+            "mine\nSession: repo · main\nTerminal title: Fixing"
         );
     }
 

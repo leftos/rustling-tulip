@@ -31,3 +31,4 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 agent-api = { workspace = true, features = ["test-support"] }
+regex = "1.11"

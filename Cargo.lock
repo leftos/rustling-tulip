@@ -48,6 +48,7 @@ dependencies = [
  "chrono",
  "directories",
  "protocol",
+ "regex",
  "serde",
  "serde_json",
  "tracing",

@@ -25,9 +25,9 @@ use agent_api::{
 };
 use options::{ClaudeProvider, PermissionMode};
 use protocol::{
-    AccentToken, AgentCaps, AgentDescriptor, AgentId, AgentTexts, ChipRule, Choice, ChoiceStyle,
-    FieldKind, FieldOverride, FieldRule, OptionField, OptionValue, SessionMember, SessionStatus,
-    ShiftEnter, SpawnPlacement,
+    AccentToken, AgentCaps, AgentDescriptor, AgentId, AgentTexts, CharRange, ChipRule, Choice,
+    ChoiceStyle, FieldKind, FieldOverride, FieldRule, OptionField, OptionValue, SessionMember,
+    SessionStatus, ShiftEnter, SpawnPlacement, TitleRules,
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -95,8 +95,30 @@ fn claude_descriptor() -> AgentDescriptor {
             hide_when: OptionValue::Text("anthropic".to_string()),
             tip: "Runs on DeepSeek".to_string(),
         }],
+        title: TitleRules {
+            glyphs: TITLE_GLYPHS.to_vec(),
+            placeholder: Some("Claude Code".to_string()),
+        },
     }
 }
+
+/// The glyphs Claude Code leads its terminal title with: a braille spinner
+/// frame or a turning circle while a turn runs, the six-spoked asterisk when
+/// idle; the `title_working` and `title_idle` screen rules match the same.
+const TITLE_GLYPHS: [CharRange; 3] = [
+    CharRange {
+        first: '\u{2800}',
+        last: '\u{28FF}',
+    },
+    CharRange {
+        first: '\u{25D0}',
+        last: '\u{25D3}',
+    },
+    CharRange {
+        first: '\u{2733}',
+        last: '\u{2733}',
+    },
+];
 
 /// A field shown on Claude's Settings page and placed in the spawn dialog's
 /// Main section, with no help text and no rules; a field placed elsewhere
@@ -626,6 +648,50 @@ struct UsageInfo {
 mod tests {
     use super::*;
     use protocol::OptionValues;
+
+    /// The compiled regex of the title screen rule named `name`.
+    fn title_rule(name: &str) -> regex::Regex {
+        let rule = rules::screen_rules()
+            .rules
+            .iter()
+            .find(|rule| rule.name == name)
+            .expect("the title rule exists");
+        let pattern = match &rule.matcher {
+            agent_api::LineMatcher::Regex(pattern) => Some(pattern),
+            _ => None,
+        }
+        .expect("the title rule is a regex");
+        regex::Regex::new(pattern).expect("the title rule compiles")
+    }
+
+    #[test]
+    fn title_rules_agree_with_the_title_screen_rules() {
+        let rules = [title_rule("title_working"), title_rule("title_idle")];
+        let title = &claude_descriptor().title;
+        assert_eq!(title.glyphs, TITLE_GLYPHS);
+        for range in &title.glyphs {
+            for glyph in [range.first, range.last] {
+                let line = format!("{glyph} Fixing");
+                assert!(
+                    rules.iter().any(|rule| rule.is_match(&line)),
+                    "U+{:04X} with a trailing space matches a title rule",
+                    u32::from(glyph)
+                );
+            }
+            let outside = [u32::from(range.first) - 1, u32::from(range.last) + 1]
+                .into_iter()
+                .filter_map(char::from_u32)
+                .filter(|c| !title.glyphs.iter().any(|other| other.contains(*c)));
+            for glyph in outside {
+                let line = format!("{glyph} Fixing");
+                assert!(
+                    !rules.iter().any(|rule| rule.is_match(&line)),
+                    "U+{:04X} just outside a range matches no title rule",
+                    u32::from(glyph)
+                );
+            }
+        }
+    }
 
     #[test]
     fn inherited_session_vars_are_claude_codes_child_markers() {

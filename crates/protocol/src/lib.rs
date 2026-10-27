@@ -96,6 +96,37 @@ pub struct AgentDescriptor {
     pub texts: AgentTexts,
     pub fields: Vec<OptionField>,
     pub chips: Vec<ChipRule>,
+    /// How the agent's terminal title reads as a session name; empty rules
+    /// use the title as it stands.
+    #[serde(default)]
+    pub title: TitleRules,
+}
+
+/// What an agent paints into its terminal title besides a name: a leading
+/// status glyph, and a placeholder it shows when it has no name to give.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TitleRules {
+    /// The glyphs that may lead the title, each followed by whitespace.
+    #[serde(default)]
+    pub glyphs: Vec<CharRange>,
+    /// The title the agent shows when it names nothing.
+    #[serde(default)]
+    pub placeholder: Option<String>,
+}
+
+/// An inclusive range of characters.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CharRange {
+    pub first: char,
+    pub last: char,
+}
+
+impl CharRange {
+    /// Whether `c` lies in the range, both ends included.
+    #[must_use]
+    pub fn contains(&self, c: char) -> bool {
+        (self.first..=self.last).contains(&c)
+    }
 }
 
 /// The palette colour an agent's runtime chip uses.
@@ -7738,7 +7769,30 @@ mod tests {
                 hide_when: text("anthropic"),
                 tip: "Runs on DeepSeek".to_owned(),
             }],
+            title: TitleRules {
+                glyphs: vec![
+                    CharRange {
+                        first: '\u{25D0}',
+                        last: '\u{25D3}',
+                    },
+                    CharRange {
+                        first: '\u{2733}',
+                        last: '\u{2733}',
+                    },
+                ],
+                placeholder: Some("Claude Code".to_owned()),
+            },
         }
+    }
+
+    #[test]
+    fn descriptor_without_title_rules_decodes_to_defaults() {
+        let mut json = serde_json::to_value(sample_descriptor()).expect("encode");
+        json.as_object_mut().expect("an object").remove("title");
+        let back: AgentDescriptor = serde_json::from_value(json).expect("decode");
+        assert_eq!(back.title, TitleRules::default());
+        let partial: TitleRules = serde_json::from_str("{}").expect("decode empty rules");
+        assert_eq!(partial, TitleRules::default());
     }
 
     #[test]
@@ -7750,6 +7804,11 @@ mod tests {
         assert_eq!(json["type"], "agents");
         assert_eq!(json["agents"][0]["id"], "claude");
         assert_eq!(json["agents"][0]["fields"][0]["kind"]["kind"], "choice");
+        assert_eq!(
+            json["agents"][0]["title"]["glyphs"][0],
+            serde_json::json!({ "first": "\u{25D0}", "last": "\u{25D3}" })
+        );
+        assert_eq!(json["agents"][0]["title"]["placeholder"], "Claude Code");
         let text = serde_json::to_string(&json).expect("encode text");
         let InboundDaemonMessage::Known(back) =
             InboundDaemonMessage::from_json_str(&text).expect("parse")

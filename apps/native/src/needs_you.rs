@@ -4,9 +4,9 @@
 //! GPUI; the view in `needs_you_view` draws these rows.
 
 use crate::appearance;
-use crate::sidebar::{Leaf, LeafState, SidebarModel};
+use crate::sidebar::{Leaf, LeafState, SidebarModel, session_title};
 use chrono::{DateTime, Utc};
-use protocol::{PendingInput, PendingQuestion, SessionSnapshot, SessionStatus};
+use protocol::{AgentDescriptor, PendingInput, PendingQuestion, SessionSnapshot, SessionStatus};
 
 /// Why a session is listed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,7 +60,7 @@ pub(crate) fn rows(model: &SidebarModel) -> Vec<NeedsYouRow> {
                 label: leaf.label.clone(),
                 reason,
                 since: session.status_since,
-                detail: detail_of(reason, session),
+                detail: detail_of(reason, session, model.agents()),
             };
             match reason {
                 Reason::Asking => asking.push(row),
@@ -97,14 +97,14 @@ fn reason_of(leaf: &Leaf) -> Option<Reason> {
     }
 }
 
-/// Line two for a listed session.
-fn detail_of(reason: Reason, session: &SessionSnapshot) -> String {
+/// Line two for a listed session; `agents` says how its terminal title reads.
+fn detail_of(reason: Reason, session: &SessionSnapshot, agents: &[AgentDescriptor]) -> String {
     match reason {
         Reason::Asking => session
             .pending_input
             .as_ref()
             .and_then(pending_line)
-            .unwrap_or_else(|| waiting_line(session)),
+            .unwrap_or_else(|| waiting_line(session, agents)),
         Reason::Ended if session.status == SessionStatus::Error => "Error".to_owned(),
         Reason::Ended => session.exit_code.map_or_else(
             || "Stopped".to_owned(),
@@ -114,9 +114,9 @@ fn detail_of(reason: Reason, session: &SessionSnapshot) -> String {
 }
 
 /// Line two when no hook has said what the session wants: the waiting text,
-/// with the terminal title when the session has one.
-fn waiting_line(session: &SessionSnapshot) -> String {
-    terminal_title(session).map_or_else(
+/// with the terminal title when it names something (see [`session_title`]).
+fn waiting_line(session: &SessionSnapshot, agents: &[AgentDescriptor]) -> String {
+    session_title(session, agents).map_or_else(
         || "Waiting for input".to_owned(),
         |title| format!("Waiting for input · {title}"),
     )
@@ -187,15 +187,6 @@ fn first_line(text: &str) -> Option<String> {
 /// `text` with every run of whitespace, newlines included, as one space.
 fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-/// The session's terminal title, when it has a non-blank one.
-fn terminal_title(session: &SessionSnapshot) -> Option<&str> {
-    session
-        .terminal_title
-        .as_deref()
-        .map(str::trim)
-        .filter(|title| !title.is_empty())
 }
 
 /// How long a wait reads: whole seconds below a minute, whole minutes below
@@ -481,6 +472,25 @@ mod tests {
         assert_eq!(
             listed[1].detail,
             "Waiting for input · Running the migration"
+        );
+    }
+
+    #[test]
+    fn waiting_line_drops_the_glyph() {
+        let mut working = asking("s1");
+        working.terminal_title = Some("◑ Running the migration".to_owned());
+        let mut idle = asking("s2");
+        idle.terminal_title = Some("✳ Claude Code".to_owned());
+        let mut model = list(vec![working, idle]);
+        model.set_agents(agent_registry::descriptors());
+        let listed = rows(&model);
+        assert_eq!(
+            listed[0].detail,
+            "Waiting for input · Running the migration"
+        );
+        assert_eq!(
+            listed[1].detail, "Waiting for input",
+            "a placeholder title says nothing"
         );
     }
 

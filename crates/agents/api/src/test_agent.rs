@@ -8,7 +8,7 @@ use crate::{
 use protocol::{
     AccentToken, AgentCaps, AgentDescriptor, AgentId, AgentTexts, Choice, ChoiceStyle, FieldKind,
     FieldOverride, FieldRule, OptionField, OptionValue, SessionMember, SessionStatus, ShiftEnter,
-    SpawnPlacement,
+    SpawnPlacement, TitleRules,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -89,6 +89,7 @@ pub static DESCRIPTOR: LazyLock<AgentDescriptor> = LazyLock::new(|| AgentDescrip
         },
     ],
     chips: Vec::new(),
+    title: TitleRules::default(),
 });
 
 /// The conversations a [`TestAgent`] finds, keyed by the folder text a query
