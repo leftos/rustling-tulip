@@ -411,10 +411,8 @@ fn error_shows_daemon_error_toast_that_expires(cx: &mut TestAppContext) {
     });
     assert_eq!(
         toasts(&mut h),
-        [
-            owned(SPAWNING),
-            owned(("Daemon error", Some("no such repo")))
-        ]
+        [owned(("Daemon error", Some("no such repo")))],
+        "the refused spawn's toast goes"
     );
     h.send(updated(session("s2").build(), Some(&spawn_id)));
     assert!(
@@ -422,9 +420,9 @@ fn error_shows_daemon_error_toast_that_expires(cx: &mut TestAppContext) {
         "the failed spawn is forgotten"
     );
 
-    let error_id = toast_ids(&mut h)[1];
+    let error_id = toast_ids(&mut h)[0];
     h.click_on(&format!("toast-close-{error_id}"));
-    assert_eq!(toasts(&mut h), [owned(SPAWNING)], "× dismisses its toast");
+    assert!(toasts(&mut h).is_empty(), "× dismisses its toast");
 
     for message in ["a", "b", "c"] {
         h.send(DaemonMessage::Error {
@@ -586,7 +584,11 @@ fn checkout_confirm_stash_resends_with_same_request_id(cx: &mut TestAppContext) 
         }
     ));
     assert_eq!(checkout_focus(&mut h), None, "the prompt closed");
-    assert_eq!(toasts(&mut h), [owned(SPAWNING), owned(SPAWNING)]);
+    assert_eq!(
+        toasts(&mut h),
+        [owned(SPAWNING)],
+        "the retry keeps one toast"
+    );
 
     h.send(updated(session("s2").build(), Some(&id)));
     assert_eq!(placements(h.sent()).len(), 1, "the retry is placed");
@@ -1187,24 +1189,134 @@ fn reask_shows_no_extra_toast(cx: &mut TestAppContext) {
     let a = spawn(&mut h, in_place("R1", "x"), OpenIn::NewTab);
     let b = spawn(&mut h, in_place("R2", "y"), OpenIn::NewTab);
     assert_eq!(toasts(&mut h), [owned(SPAWNING), owned(SPAWNING)]);
+    let b_toast = toast_ids(&mut h)[1];
     h.send(dirty_at("R1", "x", &a));
     h.send(dirty_at("R2", "y", &b));
 
     h.keys("escape");
     assert_eq!(requested(h.sent()), [(b.clone(), None)], "B is asked again");
     assert_eq!(
-        toasts(&mut h),
-        [owned(SPAWNING), owned(SPAWNING)],
-        "B showed its toast when it started"
+        toast_ids(&mut h),
+        [b_toast],
+        "A's cancel took its toast; B showed its own when it started"
     );
 
     h.send(dirty_at("R2", "y", &b));
     h.click_on("checkout-stash");
     assert_eq!(requested(h.sent()), [(b, Some(CheckoutStrategy::Stash))]);
     assert_eq!(
+        toast_ids(&mut h),
+        [b_toast],
+        "an answer that retries the spawn keeps its one toast"
+    );
+}
+
+#[gpui::test]
+fn cancelling_a_checkout_prompt_clears_its_spawning_toast(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = single(cx, &dir);
+
+    let escaped = spawn(&mut h, request(false), OpenIn::NewTab);
+    h.send(dirty(Some(&escaped)));
+    h.keys("escape");
+    assert_eq!(checkout_focus(&mut h), None, "Esc cancels");
+    assert!(toasts(&mut h).is_empty(), "Esc takes the spawn's toast");
+
+    let clicked = spawn(&mut h, request(false), OpenIn::NewTab);
+    h.send(dirty(Some(&clicked)));
+    h.click_on("checkout-cancel");
+    assert_eq!(checkout_focus(&mut h), None, "Cancel closes the prompt");
+    assert!(toasts(&mut h).is_empty(), "Cancel takes the spawn's toast");
+}
+
+#[gpui::test]
+fn spawn_reply_clears_its_spawning_toast(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = single(cx, &dir);
+
+    let first = spawn(&mut h, request(true), OpenIn::NewTab);
+    let second = spawn(&mut h, request(true), OpenIn::NewTab);
+    let ids = toast_ids(&mut h);
+    assert_eq!(ids.len(), 2, "one toast per spawn");
+
+    h.send(updated(session("s2").build(), Some(&first)));
+    assert_eq!(
+        toast_ids(&mut h),
+        [ids[1]],
+        "the first reply clears only the first spawn's toast"
+    );
+    h.send(updated(session("s3").build(), Some(&second)));
+    assert!(toasts(&mut h).is_empty(), "each reply clears its own toast");
+}
+
+#[gpui::test]
+fn refused_spawn_clears_its_spawning_toast(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = single(cx, &dir);
+
+    let errored = spawn(&mut h, request(true), OpenIn::NewTab);
+    h.send(DaemonMessage::Error {
+        message: "no such repo".to_owned(),
+        request_id: Some(errored),
+    });
+    let error_toast = owned(("Daemon error", Some("no such repo")));
+    assert_eq!(
         toasts(&mut h),
-        [owned(SPAWNING), owned(SPAWNING), owned(SPAWNING)],
-        "an answer that retries the spawn keeps its toast"
+        std::slice::from_ref(&error_toast),
+        "only the error shows"
+    );
+
+    let refused = spawn(&mut h, request(true), OpenIn::NewTab);
+    h.send(failed("Worktree in use", Some(&refused)));
+    assert_eq!(
+        toasts(&mut h),
+        [error_toast],
+        "an action-failed refusal clears its spawn's toast too"
+    );
+}
+
+#[gpui::test]
+fn checkout_resend_keeps_a_single_spawning_toast(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = single(cx, &dir);
+
+    let id = spawn(&mut h, request(false), OpenIn::NewTab);
+    let ids = toast_ids(&mut h);
+    h.send(dirty(Some(&id)));
+    h.click_on("checkout-stash");
+    assert_eq!(toast_ids(&mut h), ids, "the resend updates the same toast");
+    assert_eq!(toasts(&mut h), [owned(SPAWNING)]);
+
+    h.send(updated(session("s2").build(), Some(&id)));
+    assert!(toasts(&mut h).is_empty(), "the reply clears it");
+}
+
+#[gpui::test]
+fn reconnect_clears_spawning_toasts(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = single(cx, &dir);
+
+    h.send(DaemonMessage::Error {
+        message: "boom".to_owned(),
+        request_id: None,
+    });
+    spawn(&mut h, request(true), OpenIn::NewTab);
+    spawn(&mut h, request(true), OpenIn::NewTab);
+    assert_eq!(toasts(&mut h).len(), 3);
+
+    h.send_welcome(1);
+    assert_eq!(
+        toasts(&mut h),
+        [owned(("Daemon error", Some("boom")))],
+        "a new connection clears every spawn's toast and leaves the rest"
+    );
+
+    h.sent();
+    spawn(&mut h, request(true), OpenIn::NewTab);
+    h.lose_connection();
+    assert!(
+        !toasts(&mut h).contains(&owned(SPAWNING)),
+        "a lost connection clears it too"
     );
 }
 

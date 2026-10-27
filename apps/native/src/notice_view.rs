@@ -11,7 +11,7 @@ use protocol::{ClientMessage, SessionSnapshot, SpawnRequest, SpawnTarget};
 use crate::buttons::{ButtonSize, outlined_button};
 use crate::notices::{
     ActionFailedNotice, CLOSE_SESSION, CheckoutAsk, CheckoutChoice, CheckoutPrompt, Toast,
-    ToastKind, ToastSpec, agent_exit_session_of, toast_action_selector,
+    ToastKind, ToastSpec, agent_exit_session_of, spawning_key, toast_action_selector,
 };
 use crate::palette::{ACCENT, CHIP, DIALOG_SHADOW, LINE_STRONG, SURFACE, TOAST_SHADOW};
 use crate::preset_launch::job_id_of;
@@ -35,7 +35,9 @@ const DAEMON_ERROR_TITLE: &str = "Daemon error";
 impl RootView {
     /// Asks the daemon for a new session and places it by `open_in` when
     /// its reply arrives, under the request id it went out with. A
-    /// "Spawning session…" toast shows meanwhile.
+    /// "Spawning session…" toast shows meanwhile: it clears when the daemon
+    /// answers or the spawn otherwise ends, and else expires or is pushed
+    /// out as any other timed toast is.
     pub fn spawn(
         &mut self,
         request: SpawnRequest,
@@ -46,7 +48,7 @@ impl RootView {
         let detail = spawning_detail(&request);
         let msg = self.spawns.start(request, request_id.clone(), open_in);
         self.send(msg);
-        self.push_spawning_toast(detail, cx);
+        self.push_spawning_toast(detail, &request_id, cx);
         request_id
     }
 
@@ -88,9 +90,27 @@ impl RootView {
         self.notice_focus.is_focused(window)
     }
 
-    fn push_spawning_toast(&mut self, detail: &str, cx: &mut Context<Self>) {
-        let detail = Some(detail.to_owned());
-        self.push_toast(ToastKind::Info, SPAWNING_TITLE, detail, cx);
+    /// The "Spawning session…" toast of spawn `request_id`, keyed by it so a
+    /// resend updates it in place and the daemon's answer clears it.
+    fn push_spawning_toast(&mut self, detail: &str, request_id: &str, cx: &mut Context<Self>) {
+        let spec = ToastSpec {
+            kind: ToastKind::Info,
+            title: SPAWNING_TITLE.to_owned(),
+            detail: Some(detail.to_owned()),
+            key: Some(spawning_key(request_id)),
+            sticky: false,
+            actions: Vec::new(),
+        };
+        self.push_toast_spec(spec, cx);
+    }
+
+    /// The daemon answered spawn `request_id`: its toast goes.
+    fn clear_spawning_toast(&mut self, request_id: &str, cx: &mut Context<Self>) {
+        if self.notices.dismiss_key(&spawning_key(request_id)) {
+            self.forget_closed_jobs();
+            self.schedule_toast_expiry(cx);
+            cx.notify();
+        }
     }
 
     /// A spawn that landed: the quick-shell folder it came with, if one was
@@ -207,9 +227,10 @@ impl RootView {
     }
 
     /// A spawn or duplicate the daemon refused is no longer on the way, nor
-    /// is any checkout prompt for it, and a new tab it refused activates
-    /// nothing when another tab arrives. A refused split, move or extract
-    /// is no longer in flight, and a tab its send marked closing is not.
+    /// is its spawning toast or any checkout prompt for it, and a new tab it
+    /// refused activates nothing when another tab arrives. A refused split,
+    /// move or extract is no longer in flight, and a tab its send marked
+    /// closing is not.
     fn fail_request(
         &mut self,
         request_id: Option<&str>,
@@ -221,7 +242,7 @@ impl RootView {
             self.tabs.disarm_create(id);
             self.tabs.fail_layout_request(id);
             self.tabs.fail_reorder(id);
-            self.spawns.fail(id);
+            self.end_spawn(id, cx);
             self.quick_shell_saves.fail(id);
             self.settle_checkout(id, window, cx);
         }
@@ -234,7 +255,7 @@ impl RootView {
     fn settle_checkout(&mut self, request_id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let held = self.notices.reasking();
         self.notices.spawn_settled(request_id);
-        self.pump_checkout();
+        self.pump_checkout(cx);
         if held && !self.notices.has_modal() {
             self.after_notice_closed(window, cx);
         }
@@ -243,13 +264,31 @@ impl RootView {
     /// When no checkout prompt is shown and none is being asked again, the
     /// oldest waiting prompt's spawn is sent again, unchanged, so the daemon
     /// answers with a freshly measured prompt or with the session itself. A
-    /// waiting spawn that cannot be asked again is forgotten. No toast: the
-    /// spawn showed one when it started.
-    fn pump_checkout(&mut self) {
+    /// waiting spawn that cannot be asked again ends, its toast with it. No
+    /// new toast: the spawn showed one when it started.
+    fn pump_checkout(&mut self, cx: &mut Context<Self>) {
         let spawns = &mut self.spawns;
-        if let Some(msg) = self.notices.pump(|id| spawns.reask(id)) {
+        let mut dropped = Vec::new();
+        let msg = self.notices.pump(|id| {
+            let msg = spawns.reask(id);
+            if msg.is_none() {
+                dropped.push(id.to_owned());
+            }
+            msg
+        });
+        for request_id in dropped {
+            self.end_spawn(&request_id, cx);
+        }
+        if let Some(msg) = msg {
             self.send(msg);
         }
+    }
+
+    /// Spawn `request_id` ends without a session: it is no longer pending,
+    /// and its spawning toast goes.
+    fn end_spawn(&mut self, request_id: &str, cx: &mut Context<Self>) {
+        self.spawns.fail(request_id);
+        self.clear_spawning_toast(request_id, cx);
     }
 
     /// `Error`: a toast, and the request it answers fails.
@@ -335,8 +374,8 @@ impl RootView {
         cx.notify();
     }
 
-    /// A session that answers one of this client's spawns goes where the
-    /// spawn asked for it.
+    /// A session that answers one of this client's spawns clears its
+    /// spawning toast and goes where the spawn asked for it.
     pub(crate) fn place_spawn(
         &mut self,
         request_id: Option<&str>,
@@ -347,6 +386,7 @@ impl RootView {
         let Some(request_id) = request_id else {
             return;
         };
+        self.clear_spawning_toast(request_id, cx);
         let sessions = self.sidebar.sessions();
         let Some(placed) = self
             .spawns
@@ -366,11 +406,16 @@ impl RootView {
         }
     }
 
-    /// Forgets every spawn and closes both modal notices, as a new or lost
-    /// connection must.
+    /// Forgets every spawn and its spawning toast and closes both modal
+    /// notices, as a new or lost connection must.
     pub(crate) fn reset_notices(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.spawns.clear();
         self.quick_shell_saves.clear();
+        if self.notices.dismiss_spawning() {
+            self.forget_closed_jobs();
+            self.schedule_toast_expiry(cx);
+            cx.notify();
+        }
         if self.notices.close_modals() {
             self.after_notice_closed(window, cx);
         }
@@ -437,17 +482,17 @@ impl RootView {
         match (prompt.request_id, choice.strategy()) {
             (None, _) => {}
             (Some(request_id), None) => {
-                self.spawns.fail(&request_id);
+                self.end_spawn(&request_id, cx);
             }
             (Some(request_id), strategy @ Some(_)) => {
                 if let Some(msg) = self.spawns.resend(&request_id, strategy) {
                     let detail = spawn_detail_of(&msg);
                     self.send(msg);
-                    self.push_spawning_toast(detail, cx);
+                    self.push_spawning_toast(detail, &request_id, cx);
                 }
             }
         }
-        self.pump_checkout();
+        self.pump_checkout(cx);
         self.after_notice_closed(window, cx);
     }
 

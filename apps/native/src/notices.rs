@@ -131,6 +131,17 @@ pub fn agent_exit_session_of(key: &str) -> Option<&str> {
         .filter(|id| !id.is_empty())
 }
 
+/// The key prefix of a spawn's "Spawning session…" toast.
+const SPAWNING_PREFIX: &str = "spawning:";
+
+/// The key of the "Spawning session…" toast of the spawn sent under
+/// `request_id`: a resend of that spawn updates the toast in place, and the
+/// daemon's answer to it clears that toast alone.
+#[must_use]
+pub fn spawning_key(request_id: &str) -> String {
+    format!("{SPAWNING_PREFIX}{request_id}")
+}
+
 /// A toast to show: what it reports, and what it does when a toast of the
 /// same key is already on screen.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -417,6 +428,27 @@ impl Notices {
     pub fn dismiss(&mut self, id: u64) -> bool {
         let before = self.toasts.len();
         self.toasts.retain(|toast| toast.id != id);
+        self.toasts.len() != before
+    }
+
+    /// Drops the toast of `key`; returns whether it was shown.
+    pub fn dismiss_key(&mut self, key: &str) -> bool {
+        let before = self.toasts.len();
+        self.toasts
+            .retain(|toast| toast.key.as_deref() != Some(key));
+        self.toasts.len() != before
+    }
+
+    /// Drops every spawn's "Spawning session…" toast, as a new or lost
+    /// connection must; returns whether any was shown.
+    pub fn dismiss_spawning(&mut self) -> bool {
+        let before = self.toasts.len();
+        self.toasts.retain(|toast| {
+            !toast
+                .key
+                .as_deref()
+                .is_some_and(|key| key.starts_with(SPAWNING_PREFIX))
+        });
         self.toasts.len() != before
     }
 
@@ -752,6 +784,61 @@ mod tests {
         assert!(notices.dismiss(first));
         assert_eq!(titles(&notices), ["two"]);
         assert!(!notices.dismiss(first), "a toast goes once");
+    }
+
+    #[test]
+    fn dismiss_key_drops_only_the_keyed_toast() {
+        let now = Instant::now();
+        let mut notices = Notices::default();
+        let keyed_as = |key: &str, title: &str| ToastSpec {
+            key: Some(key.to_owned()),
+            ..spec(ToastKind::Info, title)
+        };
+        notices.push_spec(keyed_as("a", "one"), now);
+        notices.push(ToastKind::Info, "plain", None, now + Duration::from_secs(1));
+        notices.push_spec(keyed_as("b", "two"), now + Duration::from_secs(2));
+
+        assert!(notices.dismiss_key("a"));
+        assert_eq!(titles(&notices), ["plain", "two"], "the rest stay");
+        assert_eq!(
+            notices.next_expiry(),
+            Some(now + Duration::from_secs(1) + TOAST_LIFETIME),
+            "the next deadline is the oldest toast left"
+        );
+        assert!(!notices.dismiss_key("a"), "a toast goes once");
+        assert!(!notices.dismiss_key("missing"), "no toast has that key");
+        assert_eq!(titles(&notices), ["plain", "two"]);
+    }
+
+    #[test]
+    fn spawning_key_is_per_request() {
+        assert_eq!(spawning_key("r1"), "spawning:r1");
+        assert_ne!(spawning_key("r1"), spawning_key("r2"));
+        assert_eq!(
+            agent_exit_session_of(&spawning_key("r1")),
+            None,
+            "not an agent-exit key"
+        );
+
+        let now = Instant::now();
+        let mut notices = Notices::default();
+        let spawning = |request_id: &str| ToastSpec {
+            key: Some(spawning_key(request_id)),
+            ..spec(ToastKind::Info, request_id)
+        };
+        let first = notices.push_spec(spawning("r1"), now);
+        notices.push_spec(spawning("r2"), now);
+        assert_eq!(
+            notices.push_spec(spawning("r1"), now),
+            first,
+            "a resend of r1 updates its toast"
+        );
+        notices.push(ToastKind::Error, "Daemon error", None, now);
+        assert_eq!(titles(&notices), ["r1", "r2", "Daemon error"]);
+
+        assert!(notices.dismiss_spawning());
+        assert_eq!(titles(&notices), ["Daemon error"], "only spawn toasts go");
+        assert!(!notices.dismiss_spawning(), "none left");
     }
 
     #[test]
