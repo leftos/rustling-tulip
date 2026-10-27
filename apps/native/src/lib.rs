@@ -224,7 +224,7 @@ pub use crate::history::{
 pub use crate::needs_you_view::NeedsYouEntry;
 pub use crate::net::{
     EnsureFuture, HandshakeInfo, NATIVE_PROTOCOL_VERSIONS, NetCommand, NetDeps, NetEvent,
-    StopFuture, spawn_with as spawn_net,
+    OpenLocalFuture, StopFuture, spawn_with as spawn_net,
 };
 pub use crate::notices::{
     ActionFailedNotice, CheckoutChoice, CheckoutPrompt, TOAST_LIFETIME, Toast, ToastAction,

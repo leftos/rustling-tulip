@@ -19,7 +19,7 @@ use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
 /// The budget for one proof exchange, and for the shutdown request's answer.
-pub(crate) const PROOF_TIMEOUT: Duration = Duration::from_millis(800);
+pub const PROOF_TIMEOUT: Duration = Duration::from_millis(800);
 // Bumped from 8s to 30s so a freshly-spawned daemon has time to finish
 // `reattach_orphans` before the supervisor declares it stuck. Each
 // per-session tracer reattach can take up to PIPE_CONNECT_TIMEOUT (15s)

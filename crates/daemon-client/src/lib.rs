@@ -19,7 +19,8 @@ mod supervisor;
 #[cfg(test)]
 mod test_fakes;
 
-pub use supervisor::ensure_running;
+pub use proof::{Proof, ProvenConnectError, connect_proven};
+pub use supervisor::{PROOF_TIMEOUT, ensure_running};
 
 use anyhow::{Context as _, anyhow, bail};
 use protocol::DaemonHandshake;

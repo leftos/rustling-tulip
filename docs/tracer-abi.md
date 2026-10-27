@@ -50,7 +50,7 @@ sets. An empty intersection closes the pipe.
 
 The daemon derives `proof_key = HMAC-SHA256(key = auth_token, msg = DAEMON_PROOF_CONTEXT)` once per run, with `DAEMON_PROOF_CONTEXT = b"rustling-tulip/daemon-proof/v1"`, and the proof is `HMAC-SHA256(proof_key, challenge)`. Both sides call the same functions: `daemon_proof_key`, `daemon_proof`, `verify_daemon_proof` (constant time), `to_lower_hex`, `parse_lower_hex32`, and `parse_daemon_proof_head`, the shim's check of the answer's head (a `204`, exactly one `x-rt-proof`, no body announced).
 
-`daemon-client` asks the same proof before it reuses a daemon, accepts one in its spawn wait, sends it `/shutdown` or stops its pid (`crates/daemon-client/src/proof.rs`); it proves on a second connection after opening the one that carries the token.
+`daemon-client` asks the same proof before it reuses a daemon, accepts one in its spawn wait, sends it `/shutdown` or stops its pid (`crates/daemon-client/src/proof.rs`); it proves on a second connection after opening the one that carries the token. The native client's loopback connect and `rustling-tulipd pair` open their stream through its `connect_proven`, so `Hello` and the token travel only on a stream opened before the proof.
 
 These are new functions only: no message or type changes, so they are additive and not a `TRACER_VERSION` bump. A change to the context string or the derivation is breaking, since a shim and a daemon from different builds would then never agree; the `v1` in the context names the version.
 

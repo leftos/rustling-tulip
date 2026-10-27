@@ -25,8 +25,9 @@ use protocol::{
 };
 use rustling_tulip_native::{
     Activity, Clock, Connection, ContainerKind, FileFilter, FilePicker, FolderPicker,
-    HandshakeInfo, NetCommand, NetDeps, NetEvent, Notifier, NotifyState, OpenFailure, Opener,
-    PairingAction, PairingActionSink, PairingToast, QuitFn, RootDeps, RootView, ScPanel, bind_keys,
+    HandshakeInfo, NetCommand, NetDeps, NetEvent, Notifier, NotifyState, OpenFailure,
+    OpenLocalFuture, Opener, PairingAction, PairingActionSink, PairingToast, QuitFn, RootDeps,
+    RootView, ScPanel, bind_keys,
     remote_access::Autostart,
     spawn_net,
     target::{TailnetHost, Target},
@@ -36,6 +37,18 @@ use serde_json::{Value, json};
 pub mod live;
 
 pub const PROTOCOL: u32 = 1;
+
+/// The `NetDeps::open_local` of every spec: a plain loopback connection, no
+/// daemon proof.
+pub fn plain_open() -> Box<dyn Fn(u16, String) -> OpenLocalFuture + Send> {
+    Box::new(|port, _| {
+        Box::pin(async move {
+            tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .map_err(|err| daemon_client::ProvenConnectError::Connect(err.into()))
+        })
+    })
+}
 
 /// The features the fake daemon lists in its `Welcome`, as a current daemon
 /// does.

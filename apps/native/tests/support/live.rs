@@ -1097,6 +1097,12 @@ fn live_deps(
             let dir = ensure_dir.clone();
             Box::pin(async move { daemon_client::read_handshake_in(&dir) })
         }),
+        // A real daemon answers the proof: the production open.
+        open_local: Box::new(|port, token| {
+            Box::pin(async move {
+                daemon_client::connect_proven(port, &token, daemon_client::PROOF_TIMEOUT).await
+            })
+        }),
         identity: Some(identity),
         stop: Box::new(move || {
             let dir = stop_dir.clone();

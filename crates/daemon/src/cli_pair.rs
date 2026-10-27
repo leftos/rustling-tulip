@@ -6,6 +6,7 @@
 //! waiting.
 
 use anyhow::anyhow;
+use daemon_client::{Proof, ProvenConnectError};
 use futures::{SinkExt as _, StreamExt as _};
 use protocol::{
     ClientMessage, DaemonHandshake, DaemonMessage, InboundDaemonMessage,
@@ -110,8 +111,17 @@ pub fn attach_parent_console() {}
 /// Connect to the running daemon named by `handshake_file`, mint a one-time
 /// pairing code and write it to `out` with how long it stays valid.
 pub async fn run(handshake_file: &Path, out: &mut impl std::io::Write) -> anyhow::Result<()> {
+    run_with(handshake_file, out, daemon_client::PROOF_TIMEOUT).await
+}
+
+/// [`run`], giving the daemon proof `proof_budget`.
+async fn run_with(
+    handshake_file: &Path,
+    out: &mut impl std::io::Write,
+    proof_budget: Duration,
+) -> anyhow::Result<()> {
     let timeout_secs = EXCHANGE_TIMEOUT.as_secs();
-    let minted = tokio::time::timeout(EXCHANGE_TIMEOUT, exchange(handshake_file))
+    let minted = tokio::time::timeout(EXCHANGE_TIMEOUT, exchange(handshake_file, proof_budget))
         .await
         .map_err(|_| anyhow!("rustling-tulipd sent no pairing code within {timeout_secs} s"))??;
     let Minted {
@@ -127,22 +137,58 @@ pub async fn run(handshake_file: &Path, out: &mut impl std::io::Write) -> anyhow
     Ok(())
 }
 
-/// Read the handshake file and mint a code over one loopback connection.
-async fn exchange(handshake_file: &Path) -> anyhow::Result<Minted> {
+/// Read the handshake file and mint a code over one loopback connection,
+/// opened only once the listener proves it holds the token within
+/// `proof_budget`.
+async fn exchange(handshake_file: &Path, proof_budget: Duration) -> anyhow::Result<Minted> {
     let handshake = read_handshake(handshake_file)?;
-    let (mut socket, _) =
-        tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{}/ws", handshake.port))
-            .await
-            .map_err(|err| {
-                anyhow!(
-                    "could not reach rustling-tulipd on 127.0.0.1:{}: {err}",
-                    handshake.port
-                )
-            })?;
+    let port = handshake.port;
+    let stream =
+        match daemon_client::connect_proven(port, &handshake.auth_token, proof_budget).await {
+            Ok(stream) => stream,
+            Err(ProvenConnectError::NotProven(proof)) => {
+                return Err(anyhow!(
+                    "{}",
+                    not_proven_reason(port, handshake_file, proof)
+                ));
+            }
+            Err(ProvenConnectError::Connect(err)) => {
+                return Err(anyhow!(
+                    "could not reach rustling-tulipd on 127.0.0.1:{port}: {err:#}"
+                ));
+            }
+        };
+    let (mut socket, _) = tokio_tungstenite::client_async(
+        format!("ws://127.0.0.1:{port}/ws"),
+        MaybeTlsStream::Plain(stream),
+    )
+    .await
+    .map_err(|err| anyhow!("could not reach rustling-tulipd on 127.0.0.1:{port}: {err}"))?;
     send(&mut socket, &hello(&handshake)).await?;
     let minted = read_until_code(&mut socket).await?;
     let _ = socket.close(None).await;
     Ok(minted)
+}
+
+/// The error when the listener on `port`, named by `path`, did not prove it
+/// holds the token, telling an impostor from a slow or vanished daemon.
+fn not_proven_reason(port: u16, path: &Path, proof: Proof) -> String {
+    let path = path.display();
+    match proof {
+        // `Proven` never reaches here; it reads as the impostor case.
+        Proof::Proven | Proof::Unproven => format!(
+            "the listener on 127.0.0.1:{port} named by {path} did not prove it is \
+             rustling-tulipd; nothing was sent"
+        ),
+        Proof::NoResponse => format!(
+            "the listener on 127.0.0.1:{port} named by {path} did not answer the \
+             rustling-tulipd proof in time; nothing was sent"
+        ),
+        Proof::Refused => format!(
+            "the listener on 127.0.0.1:{port} named by {path} closed before it could \
+             prove it is rustling-tulipd; nothing was sent"
+        ),
+    }
 }
 
 /// The `daemon.json` the running daemon wrote, or the error that says why
@@ -418,7 +464,7 @@ mod tests {
         let path = write_handshake(scratch.path(), port, "test-token");
 
         let mut out = Vec::new();
-        run(&path, &mut out)
+        run_with(&path, &mut out, HANG_GUARD)
             .await
             .expect("the pairing exchange succeeds");
 
@@ -455,7 +501,7 @@ mod tests {
         let scratch = ScratchDir::new("cli-pair-absent");
         let path = scratch.path().join("daemon.json");
 
-        let err = run(&path, &mut Vec::new())
+        let err = run_with(&path, &mut Vec::new(), HANG_GUARD)
             .await
             .expect_err("no daemon runs for an absent handshake file");
 
@@ -474,14 +520,128 @@ mod tests {
         let port = serve_loopback(&hub).await;
         let path = write_handshake(scratch.path(), port, "not-the-daemons-token");
 
-        let err = run(&path, &mut Vec::new())
+        let err = run_with(&path, &mut Vec::new(), HANG_GUARD)
             .await
-            .expect_err("the daemon refuses a wrong token");
+            .expect_err("a wrong token never reaches the daemon");
 
+        let text = err.to_string();
+        assert!(text.starts_with("the listener on 127.0.0.1:"), "{err}");
         assert!(
-            err.to_string()
-                .starts_with("rustling-tulipd refused the handshake:"),
+            text.contains("did not prove it is rustling-tulipd; nothing was sent"),
             "{err}"
         );
+    }
+
+    /// The proof budget every test passes: a hang guard only, so no test
+    /// depends on the production proof timeout.
+    const HANG_GUARD: Duration = Duration::from_secs(120);
+
+    #[test]
+    fn not_proven_reason_names_an_impostor() {
+        assert_eq!(
+            not_proven_reason(4242, Path::new("daemon.json"), Proof::Unproven),
+            "the listener on 127.0.0.1:4242 named by daemon.json did not prove it is \
+             rustling-tulipd; nothing was sent"
+        );
+    }
+
+    #[test]
+    fn not_proven_reason_names_a_silent_listener() {
+        assert_eq!(
+            not_proven_reason(4242, Path::new("daemon.json"), Proof::NoResponse),
+            "the listener on 127.0.0.1:4242 named by daemon.json did not answer the \
+             rustling-tulipd proof in time; nothing was sent"
+        );
+    }
+
+    #[test]
+    fn not_proven_reason_names_a_vanished_listener() {
+        assert_eq!(
+            not_proven_reason(4242, Path::new("daemon.json"), Proof::Refused),
+            "the listener on 127.0.0.1:4242 named by daemon.json closed before it could \
+             prove it is rustling-tulipd; nothing was sent"
+        );
+    }
+
+    #[test]
+    fn not_proven_reason_names_proven_as_an_impostor() {
+        let path = Path::new("daemon.json");
+        assert_eq!(
+            not_proven_reason(4242, path, Proof::Proven),
+            not_proven_reason(4242, path, Proof::Unproven)
+        );
+    }
+
+    /// Serves one connection to [`unproven_listener`]: a `GET /proof` gets a
+    /// 404 and `None`; any other connection returns every byte it sent, once
+    /// it closes.
+    fn serve_unproven(mut stream: std::net::TcpStream) -> Option<Vec<u8>> {
+        use std::io::{Read as _, Write as _};
+        let mut received = Vec::new();
+        let mut byte = [0u8; 1];
+        while !received.ends_with(b"\r\n\r\n") {
+            match stream.read(&mut byte) {
+                Ok(1) => received.push(byte[0]),
+                _ => break,
+            }
+        }
+        if received.starts_with(b"GET /proof ") {
+            let _ = stream.write_all(
+                b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            );
+            return None;
+        }
+        let _ = stream.read_to_end(&mut received);
+        Some(received)
+    }
+
+    /// A loopback listener that proves no token: see [`serve_unproven`]. The
+    /// receiver gets the bytes of each connection that was not a proof
+    /// request, once the client closes it.
+    fn unproven_listener() -> (u16, std::sync::mpsc::Receiver<Vec<u8>>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a loopback port");
+        let port = listener.local_addr().expect("listener address").port();
+        let (received_tx, received) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let received_tx = received_tx.clone();
+                std::thread::spawn(move || {
+                    if let Some(bytes) = serve_unproven(stream) {
+                        let _ = received_tx.send(bytes);
+                    }
+                });
+            }
+        });
+        (port, received)
+    }
+
+    #[tokio::test]
+    async fn pair_sends_nothing_to_a_listener_without_the_proof() {
+        let scratch = ScratchDir::new("cli-pair-unproven");
+        let (port, received) = unproven_listener();
+        let path = write_handshake(scratch.path(), port, "test-token");
+
+        let err = run_with(&path, &mut Vec::new(), HANG_GUARD)
+            .await
+            .expect_err("an unproven listener gets no pairing exchange");
+
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "the listener on 127.0.0.1:{port} named by {} did not prove it is \
+                 rustling-tulipd; nothing was sent",
+                path.display()
+            )
+        );
+        let first = received
+            .recv_timeout(HANG_GUARD)
+            .expect("the connection opened before the proof was closed");
+        for bytes in std::iter::once(first).chain(received.try_iter()) {
+            assert!(
+                bytes.is_empty(),
+                "the unproven listener was sent {:?}",
+                String::from_utf8_lossy(&bytes)
+            );
+        }
     }
 }

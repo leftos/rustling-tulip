@@ -1608,6 +1608,7 @@ dependencies = [
  "axum-server",
  "base64",
  "chrono",
+ "daemon-client",
  "directories",
  "futures",
  "interprocess",

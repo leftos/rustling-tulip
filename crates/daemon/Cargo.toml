@@ -25,6 +25,9 @@ e2e-loopback-peers = []
 [dependencies]
 protocol = { workspace = true }
 tracer-protocol = { workspace = true }
+# `pair` opens its loopback connection through the daemon proof
+# (`connect_proven`), so the token goes only to a listener that holds it.
+daemon-client = { workspace = true }
 tailnet = { workspace = true }
 agent-api = { workspace = true }
 agent-registry = { workspace = true }

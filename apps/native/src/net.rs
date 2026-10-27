@@ -11,8 +11,8 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context as _, Result};
-use daemon_client::ClientIdentity;
 use daemon_client::device_tokens::{CredentialManagerTokens, DeviceTokenStore, MemoryTokens};
+use daemon_client::{ClientIdentity, Proof, ProvenConnectError};
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender};
 use futures::{SinkExt as _, StreamExt as _};
 use protocol::{
@@ -41,11 +41,18 @@ pub const NATIVE_PROTOCOL_VERSIONS: &[u32] = protocol::SUPPORTED_PROTOCOL_VERSIO
 /// A pending force-stop of the daemon.
 pub type StopFuture = Pin<Box<dyn Future<Output = Result<()>>>>;
 
+/// A pending open of the loopback stream the `daemon.json` token travels on.
+pub type OpenLocalFuture =
+    Pin<Box<dyn Future<Output = Result<TcpStream, daemon_client::ProvenConnectError>>>>;
+
 /// How the network thread reaches its daemon.
 pub struct NetDeps {
     /// Starts an `ensure_running`: the daemon step of each connection
     /// attempt.
     pub ensure: Box<dyn Fn() -> EnsureFuture + Send>,
+    /// Opens the loopback stream the token will travel on: production proves
+    /// the listener holds the token first; tests open plain connections.
+    pub open_local: Box<dyn Fn(u16, String) -> OpenLocalFuture + Send>,
     /// The identity sent in `Hello`; `None` connects without one.
     pub identity: Option<ClientIdentity>,
     /// Force-stops the daemon, for [`NetCommand::Stop`].
@@ -99,6 +106,11 @@ impl NetDeps {
             .ok();
         Self {
             ensure: Box::new(ensure_daemon),
+            open_local: Box::new(|port, token| {
+                Box::pin(async move {
+                    daemon_client::connect_proven(port, &token, daemon_client::PROOF_TIMEOUT).await
+                })
+            }),
             identity,
             stop: Box::new(|| Box::pin(daemon_client::stop())),
             tokens,
@@ -259,6 +271,25 @@ pub fn spawn_with(
         .spawn(move || run_thread(commands, events, deps, target, WELCOME_TIMEOUT));
     if let Err(err) = spawned {
         error!("spawning the network thread: {err}");
+    }
+}
+
+/// The closed-state reason when the loopback listener on `port` did not prove
+/// it holds the token, telling an impostor from a slow or vanished daemon.
+fn not_proven_reason(port: u16, proof: Proof) -> String {
+    match proof {
+        // `Proven` never reaches here; it reads as the impostor case.
+        Proof::Proven | Proof::Unproven => format!(
+            "the listener on 127.0.0.1:{port} did not prove it is the daemon; nothing was sent"
+        ),
+        Proof::NoResponse => format!(
+            "the listener on 127.0.0.1:{port} did not answer the daemon proof in time; \
+             nothing was sent"
+        ),
+        Proof::Refused => format!(
+            "the listener on 127.0.0.1:{port} closed before it could prove it is the daemon; \
+             nothing was sent"
+        ),
     }
 }
 
@@ -447,14 +478,34 @@ impl Net {
         self.emit(NetEvent::Handshake(HandshakeInfo::from(&handshake)));
         self.conn.on_connecting();
         self.emit_state();
-        let url = format!("ws://127.0.0.1:{}/ws", handshake.port);
-        let connect = Box::pin(tokio_tungstenite::connect_async(&url));
+        let port = handshake.port;
+        let url = format!("ws://127.0.0.1:{port}/ws");
+        let open = (self.deps.open_local)(port, handshake.auth_token.clone());
+        let stream = match self.or_command(open).await {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(ProvenConnectError::NotProven(proof))) => {
+                warn!(
+                    port,
+                    ?proof,
+                    "the loopback listener did not prove it is the daemon"
+                );
+                return self.closed(not_proven_reason(port, proof));
+            }
+            Ok(Err(ProvenConnectError::Connect(err))) => {
+                return self.closed(format!("connecting to {url}: {err:#}"));
+            }
+            Err(next) => return next,
+        };
+        let connect = Box::pin(tokio_tungstenite::client_async(
+            url.as_str(),
+            MaybeTlsStream::Plain(stream),
+        ));
         let ws = match self.or_command(connect).await {
             Ok(Ok((ws, _))) => ws,
             Ok(Err(err)) => return self.closed(format!("connecting to {url}: {err}")),
             Err(next) => return next,
         };
-        self.conn.on_socket_open(handshake.port);
+        self.conn.on_socket_open(port);
         self.pump(ws, handshake.auth_token).await
     }
 
@@ -1109,8 +1160,8 @@ async fn sleep_until(deadline: Option<Instant>) {
 )]
 mod tests {
     use super::{
-        EnsureFuture, Net, NetCommand, NetDeps, NetEvent, WELCOME_TIMEOUT, run_thread,
-        tls_config_trusting,
+        EnsureFuture, Net, NetCommand, NetDeps, NetEvent, OpenLocalFuture, Proof, WELCOME_TIMEOUT,
+        not_proven_reason, run_thread, tls_config_trusting,
     };
     use crate::connection::{Connection, State};
     use crate::target::Target;
@@ -1141,10 +1192,24 @@ mod tests {
     /// backstop only, never the expected wait.
     const BACKSTOP: Duration = Duration::from_secs(30);
 
-    /// Deps that ensure with `ensure`, send no identity and never stop.
+    /// The `open_local` of every test that is not about the proof: a plain
+    /// loopback connection.
+    fn plain_open() -> Box<dyn Fn(u16, String) -> OpenLocalFuture + Send> {
+        Box::new(|port, _| {
+            Box::pin(async move {
+                tokio::net::TcpStream::connect(("127.0.0.1", port))
+                    .await
+                    .map_err(|err| daemon_client::ProvenConnectError::Connect(err.into()))
+            })
+        })
+    }
+
+    /// Deps that ensure with `ensure`, open plain connections, send no
+    /// identity and never stop.
     fn deps(ensure: fn() -> EnsureFuture) -> NetDeps {
         NetDeps {
             ensure: Box::new(ensure),
+            open_local: plain_open(),
             identity: None,
             stop: Box::new(|| Box::pin(async { Ok(()) })),
             tokens: Arc::new(MemoryTokens::default()),
@@ -1316,6 +1381,152 @@ mod tests {
         net.join()
             .expect("net thread exits when the command channel closes");
         drop(sockets);
+    }
+
+    /// A request head read from `stream` up to its blank line or EOF.
+    fn request_head(stream: &mut TcpStream) -> Vec<u8> {
+        use std::io::Read as _;
+        let mut head = Vec::new();
+        let mut byte = [0u8; 1];
+        while !head.ends_with(b"\r\n\r\n") {
+            match stream.read(&mut byte) {
+                Ok(1) => head.push(byte[0]),
+                _ => break,
+            }
+        }
+        head
+    }
+
+    /// Serves one connection to [`unproven_ws_listener`]: a `GET /proof` gets
+    /// a 404 and `None`; any other connection completes the WebSocket upgrade
+    /// it asks for and returns every byte it sent, once it closes.
+    fn serve_unproven(mut stream: TcpStream) -> Option<Vec<u8>> {
+        use std::io::{Read as _, Write as _};
+        let mut received = request_head(&mut stream);
+        if received.starts_with(b"GET /proof ") {
+            let _ = stream.write_all(
+                b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            );
+            return None;
+        }
+        let head = String::from_utf8_lossy(&received).into_owned();
+        let key = head.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("sec-websocket-key")
+                .then(|| value.trim().to_owned())
+        });
+        if let Some(key) = key {
+            let accept = tungstenite::handshake::derive_accept_key(key.as_bytes());
+            let _ = stream.write_all(
+                format!(
+                    "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\
+                     Connection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n"
+                )
+                .as_bytes(),
+            );
+        }
+        let _ = stream.read_to_end(&mut received);
+        Some(received)
+    }
+
+    /// A loopback listener that does not prove it holds any token: see
+    /// [`serve_unproven`]. The receiver gets the bytes of each connection that
+    /// was not a proof request, once the client closes it.
+    fn unproven_ws_listener() -> (u16, mpsc::Receiver<Vec<u8>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind a loopback port");
+        let port = listener.local_addr().expect("listener address").port();
+        let (received_tx, received) = mpsc::channel();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let received_tx = received_tx.clone();
+                std::thread::spawn(move || {
+                    if let Some(bytes) = serve_unproven(stream) {
+                        let _ = received_tx.send(bytes);
+                    }
+                });
+            }
+        });
+        (port, received)
+    }
+
+    #[test]
+    fn not_proven_reason_names_an_impostor() {
+        assert_eq!(
+            not_proven_reason(4242, Proof::Unproven),
+            "the listener on 127.0.0.1:4242 did not prove it is the daemon; nothing was sent"
+        );
+    }
+
+    #[test]
+    fn not_proven_reason_names_a_silent_listener() {
+        assert_eq!(
+            not_proven_reason(4242, Proof::NoResponse),
+            "the listener on 127.0.0.1:4242 did not answer the daemon proof in time; \
+             nothing was sent"
+        );
+    }
+
+    #[test]
+    fn not_proven_reason_names_a_vanished_listener() {
+        assert_eq!(
+            not_proven_reason(4242, Proof::Refused),
+            "the listener on 127.0.0.1:4242 closed before it could prove it is the daemon; \
+             nothing was sent"
+        );
+    }
+
+    #[test]
+    fn not_proven_reason_names_proven_as_an_impostor() {
+        assert_eq!(
+            not_proven_reason(4242, Proof::Proven),
+            not_proven_reason(4242, Proof::Unproven)
+        );
+    }
+
+    #[test]
+    fn an_unproven_listener_never_gets_hello() {
+        let (port, received) = unproven_ws_listener();
+        let net_deps = NetDeps {
+            ensure: Box::new(move || {
+                Box::pin(async move {
+                    Ok(DaemonHandshake {
+                        protocol_version: 23,
+                        port,
+                        auth_token: "test-token".to_owned(),
+                        pid: 0,
+                        supported_versions: vec![23],
+                    })
+                })
+            }),
+            // The production open, with the proof's budget as a hang guard.
+            open_local: Box::new(|port, token| {
+                Box::pin(async move { daemon_client::connect_proven(port, &token, BACKSTOP).await })
+            }),
+            ..deps(ensure_silent_server)
+        };
+        let (view_tx, mut view_rx, net) = run_net(net_deps, Target::Local);
+
+        let reason = format!(
+            "the listener on 127.0.0.1:{port} did not prove it is the daemon; nothing was sent"
+        );
+        assert!(
+            saw_state(&mut view_rx, |conn| {
+                matches!(conn.state(), State::Closed { .. })
+                    && conn.reason() == Some(reason.as_str())
+            }),
+            "the attempt did not close as unproven"
+        );
+        stop_net(view_tx, net);
+        let first = received
+            .recv_timeout(BACKSTOP)
+            .expect("the connection opened before the proof was closed");
+        for bytes in std::iter::once(first).chain(received.try_iter()) {
+            assert!(
+                bytes.is_empty(),
+                "the unproven listener was sent {:?}",
+                String::from_utf8_lossy(&bytes)
+            );
+        }
     }
 
     #[test]
@@ -1817,6 +2028,7 @@ mod tests {
     fn tailnet_deps(ca: &TestCa, token: Option<&'static str>) -> NetDeps {
         NetDeps {
             ensure: Box::new(ensure_must_not_run),
+            open_local: plain_open(),
             identity: None,
             stop: Box::new(|| {
                 TAILNET_STOPS.fetch_add(1, Ordering::SeqCst);

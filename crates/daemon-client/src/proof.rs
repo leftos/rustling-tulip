@@ -18,7 +18,7 @@ const HEAD_LIMIT: usize = 8 * 1024;
 
 /// What a listener did when asked to prove it holds a token.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Proof {
+pub enum Proof {
     /// A `204` whose `x-rt-proof` answers the challenge under the token.
     Proven,
     /// An HTTP answer that is not a valid proof: another status, a missing
@@ -45,6 +45,65 @@ pub(crate) async fn prove(port: u16, token: &str, budget: Duration) -> Proof {
     tokio::time::timeout(budget, exchange(port, token, &challenge))
         .await
         .unwrap_or(Proof::NoResponse)
+}
+
+/// Why [`connect_proven`] handed back no stream.
+#[derive(Debug)]
+pub enum ProvenConnectError {
+    /// The connection the token would travel on could not be opened.
+    Connect(anyhow::Error),
+    /// The connection opened, but the listener did not prove it holds the
+    /// token; nothing was sent on it.
+    NotProven(Proof),
+}
+
+impl std::fmt::Display for ProvenConnectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Connect(err) => write!(f, "could not open the connection: {err:#}"),
+            Self::NotProven(proof) => {
+                write!(
+                    f,
+                    "the listener did not prove it holds the token ({proof:?})"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for ProvenConnectError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Connect(err) => Some(err.as_ref()),
+            Self::NotProven(_) => None,
+        }
+    }
+}
+
+/// Opens the loopback connection `token` will travel on, then asks the
+/// listener on `127.0.0.1:port` to prove it holds `token` on a second
+/// connection, and returns the first one only once the proof holds. The
+/// daemon binds its port before writing `daemon.json` and holds it until it
+/// stops, so a connection opened before a successful proof reached it.
+///
+/// Opening and proving each get `budget`.
+///
+/// # Errors
+///
+/// [`ProvenConnectError::Connect`] when the first connection cannot be
+/// opened, [`ProvenConnectError::NotProven`] when the proof does not hold.
+pub async fn connect_proven(
+    port: u16,
+    token: &str,
+    budget: Duration,
+) -> Result<TcpStream, ProvenConnectError> {
+    let stream = connect(port, budget)
+        .await
+        .map_err(ProvenConnectError::Connect)?;
+    match prove(port, token, budget).await {
+        Proof::Proven => Ok(stream),
+        proof => Err(ProvenConnectError::NotProven(proof)),
+    }
 }
 
 /// Opens a connection to `127.0.0.1:port` within `budget`.
@@ -182,4 +241,83 @@ async fn read_head(stream: &mut TcpStream) -> Head {
 /// can end this header or start another.
 fn is_safe_token(token: &str) -> bool {
     !token.is_empty() && token.bytes().all(|byte| (b'!'..=b'~').contains(&byte))
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "tests assert preconditions with expect; failure messages aid debugging"
+)]
+mod tests {
+    use super::*;
+    use crate::test_fakes::{FakeListener, block_on};
+
+    /// A hang guard only: every fake here answers at once.
+    const HANG_GUARD: Duration = Duration::from_secs(120);
+
+    #[test]
+    fn connect_proven_returns_the_stream_opened_before_the_proof() {
+        let fake = FakeListener::proving("token");
+
+        let answer = block_on(async {
+            let mut stream = connect_proven(fake.port, "token", HANG_GUARD)
+                .await
+                .expect("the fake proves the token");
+            stream
+                .write_all(b"GET /marker HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+                .await
+                .expect("send on the proven stream");
+            let mut answer = Vec::new();
+            tokio::time::timeout(HANG_GUARD, stream.read_to_end(&mut answer))
+                .await
+                .expect("the fake answers the marker request")
+                .expect("read the answer");
+            answer
+        });
+
+        assert!(
+            answer.starts_with(b"HTTP/1.1 404"),
+            "{}",
+            String::from_utf8_lossy(&answer)
+        );
+        let heads = fake.heads_by_accept();
+        let accepted_as = |request: &str| {
+            heads
+                .iter()
+                .find(|(_, head)| head.starts_with(request))
+                .map(|(accepted, _)| *accepted)
+        };
+        assert_eq!(
+            accepted_as("GET /marker "),
+            Some(0),
+            "the returned stream is the first connection accepted: {heads:?}"
+        );
+        assert_eq!(
+            accepted_as("GET /proof "),
+            Some(1),
+            "the proof came on the second connection: {heads:?}"
+        );
+    }
+
+    #[test]
+    fn connect_proven_refuses_an_unproven_listener() {
+        let fake = FakeListener::healthy();
+
+        let result = block_on(connect_proven(fake.port, "token", HANG_GUARD));
+
+        assert!(
+            matches!(result, Err(ProvenConnectError::NotProven(Proof::Unproven))),
+            "{result:?}"
+        );
+        let heads = fake.heads_when(2, HANG_GUARD);
+        let first = heads
+            .iter()
+            .find(|(accepted, _)| *accepted == 0)
+            .map(|(_, head)| head.as_str());
+        assert_eq!(
+            first,
+            Some(""),
+            "nothing was written on the first connection: {heads:?}"
+        );
+    }
 }

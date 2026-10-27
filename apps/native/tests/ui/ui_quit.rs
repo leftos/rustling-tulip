@@ -747,6 +747,7 @@ fn shutdown_does_not_reconnect_after_close(cx: &mut TestAppContext) {
                 })
             })
         }),
+        open_local: support::plain_open(),
         identity: None,
         stop: Box::new(|| Box::pin(async { Ok(()) })),
         tokens: std::sync::Arc::new(daemon_client::device_tokens::MemoryTokens::default()),

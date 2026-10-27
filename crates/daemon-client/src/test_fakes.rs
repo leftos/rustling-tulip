@@ -15,8 +15,9 @@ use protocol::DaemonHandshake;
 use std::io::{Read as _, Write as _};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, PoisonError, mpsc};
+use std::sync::{Arc, Condvar, Mutex, PoisonError, mpsc};
 use std::thread;
+use std::time::Duration;
 use uuid::Uuid;
 
 /// The answer a healthy listener that is not the daemon gives every request.
@@ -37,11 +38,19 @@ enum Behaviour {
     Silent,
 }
 
+/// The request heads a [`FakeListener`] has read, each with the order its
+/// connection was accepted in (0 first), and a signal for each new one.
+#[derive(Default)]
+struct Recorded {
+    heads: Mutex<Vec<(usize, String)>>,
+    changed: Condvar,
+}
+
 /// A loopback listener on a free port, serving each connection on its own
 /// thread so a connection held open never blocks the next one.
 pub(crate) struct FakeListener {
     pub(crate) port: u16,
-    heads: Arc<Mutex<Vec<String>>>,
+    recorded: Arc<Recorded>,
 }
 
 impl FakeListener {
@@ -79,24 +88,51 @@ impl FakeListener {
     fn start(behaviour: Behaviour) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind the fake listener");
         let port = listener.local_addr().expect("fake listener addr").port();
-        let heads = Arc::new(Mutex::new(Vec::new()));
-        let recorded = Arc::clone(&heads);
+        let recorded = Arc::new(Recorded::default());
+        let serving = Arc::clone(&recorded);
         thread::spawn(move || {
-            for stream in listener.incoming().flatten() {
+            for (accepted, stream) in listener.incoming().flatten().enumerate() {
                 let behaviour = behaviour.clone();
-                let recorded = Arc::clone(&recorded);
-                thread::spawn(move || serve(stream, &behaviour, &recorded));
+                let recorded = Arc::clone(&serving);
+                thread::spawn(move || serve(stream, accepted, &behaviour, &recorded));
             }
         });
-        Self { port, heads }
+        Self { port, recorded }
     }
 
     /// Every request head read so far.
     pub(crate) fn heads(&self) -> Vec<String> {
-        self.heads
+        self.heads_by_accept()
+            .into_iter()
+            .map(|(_, head)| head)
+            .collect()
+    }
+
+    /// Every request head read so far, in the order they were read, each with
+    /// the order its connection was accepted in (0 first). A connection that
+    /// closed with nothing sent records an empty head.
+    pub(crate) fn heads_by_accept(&self) -> Vec<(usize, String)> {
+        self.recorded
+            .heads
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    /// [`Self::heads_by_accept`] once at least `count` heads are read, or
+    /// whatever was read when `hang_guard` passes.
+    pub(crate) fn heads_when(&self, count: usize, hang_guard: Duration) -> Vec<(usize, String)> {
+        let heads = self
+            .recorded
+            .heads
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let (heads, _) = self
+            .recorded
+            .changed
+            .wait_timeout_while(heads, hang_guard, |heads| heads.len() < count)
+            .unwrap_or_else(PoisonError::into_inner);
+        heads.clone()
     }
 
     /// Whether any request carried an `Authorization` header.
@@ -108,12 +144,14 @@ impl FakeListener {
 }
 
 /// Reads one request head, records it, then answers as `behaviour` says.
-fn serve(mut stream: TcpStream, behaviour: &Behaviour, recorded: &Mutex<Vec<String>>) {
+fn serve(mut stream: TcpStream, accepted: usize, behaviour: &Behaviour, recorded: &Recorded) {
     let head = read_head(&mut stream);
     recorded
+        .heads
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
-        .push(head.clone());
+        .push((accepted, head.clone()));
+    recorded.changed.notify_all();
     let answer = match behaviour {
         Behaviour::Proving(proof_key) => proving_answer(&head, proof_key),
         Behaviour::Healthy(on_proof) => {
