@@ -26,6 +26,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - A Claude session started in your shell that is lost before its history is saved now comes back in Recover as Claude, with its settings and conversation, not as a plain shell.
 - The "Spawning session…" notice goes away as soon as the session starts, or when the spawn is refused or cancelled, instead of lingering for several seconds.
 - Clicking a button on the left-hand rail no longer leaves its tooltip covering the panel it just opened.
+- On a remote host the Shell dialog takes a folder in the host's own path style, and a folder that isn't a full path on the host is refused instead of opening somewhere else.
 
 ### Changed
 

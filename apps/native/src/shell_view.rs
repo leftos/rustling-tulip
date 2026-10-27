@@ -11,7 +11,7 @@ use gpui::{
 use crate::notice_view::modal_panel;
 use crate::session_menu::{backdrop, dialog_button};
 use crate::shell_dialog::{
-    FOLDER_PLACEHOLDER, PATH_HINT, ShellControl, ShellForm, standalone_shell_request,
+    FOLDER_PLACEHOLDER, ShellControl, ShellForm, host_placeholder, standalone_shell_request,
 };
 use crate::spawn_view::checkbox_row;
 use crate::spawns::OpenIn;
@@ -58,15 +58,16 @@ impl RootView {
         let Some(dialog) = self.shell_dialog.as_ref() else {
             return false;
         };
-        ShellForm::can_submit(shell_folder(dialog, cx))
+        dialog.form.can_submit(shell_folder(dialog, cx))
     }
 
-    /// The hint under the folder field, while the folder is something but
-    /// not a full path.
+    /// The hint under the folder field, while the folder is something the
+    /// dialog cannot open: not a full path, or on a remote host a path with
+    /// a `..` segment.
     #[must_use]
-    pub fn shell_dialog_hint(&self, cx: &App) -> Option<&'static str> {
+    pub fn shell_dialog_hint(&self, cx: &App) -> Option<String> {
         let dialog = self.shell_dialog.as_ref()?;
-        ShellForm::hint_shown(shell_folder(dialog, cx)).then_some(PATH_HINT)
+        dialog.form.hint(shell_folder(dialog, cx))
     }
 
     /// Whether the dialog would remember its folder for the quick shell.
@@ -126,12 +127,20 @@ impl RootView {
         let remembered = self.quick_shell_default().map(str::to_owned);
         let folder = remembered.clone().unwrap_or_default();
         self.shell_generation += 1;
-        let form = if self.capabilities().opens_local_files() {
-            ShellForm::new(self.shell_generation, remembered.as_deref())
-        } else {
-            ShellForm::without_default(self.shell_generation)
+        let host = (!self.capabilities().opens_local_files())
+            .then(|| self.conn.target().short_name().map(str::to_owned))
+            .flatten();
+        let (form, placeholder) = match host {
+            None => (
+                ShellForm::new(self.shell_generation, remembered.as_deref()),
+                FOLDER_PLACEHOLDER.to_owned(),
+            ),
+            Some(host) => (
+                ShellForm::without_default(self.shell_generation, &host),
+                host_placeholder(&host),
+            ),
         };
-        let folder_input = cx.new(|cx| TextInput::new(folder, FOLDER_PLACEHOLDER, cx));
+        let folder_input = cx.new(|cx| TextInput::new(folder, placeholder, cx));
         let subscriptions = Self::watch_shell_field(&folder_input, window, cx);
         self.renaming = None;
         self.close_flyout();
@@ -423,7 +432,7 @@ impl RootView {
                     .child(input_box(dialog, focus))
                     .child(browse),
             )
-            .children(hint_row(&folder));
+            .children(hint_row(form, &folder));
         let clear = form.remembered().then(|| {
             link_button(
                 ShellControl::ClearDefault.selector(),
@@ -443,7 +452,7 @@ impl RootView {
                     .then(|| save_default_row(form, focus, cx)),
             )
             .children(clear)
-            .child(footer(&folder, focus, cx));
+            .child(footer(form.can_submit(&folder), focus, cx));
         Some(backdrop("shell-dialog", panel))
     }
 }
@@ -472,12 +481,12 @@ fn input_box(dialog: &ShellDialog, focus: ShellControl) -> Div {
 }
 
 /// What the folder field says about a text that is not yet a full path.
-fn hint_row(folder: &str) -> Option<Div> {
-    ShellForm::hint_shown(folder).then(|| {
+fn hint_row(form: &ShellForm, folder: &str) -> Option<Div> {
+    form.hint(folder).map(|hint| {
         div()
             .debug_selector(|| "shell-path-hint".to_owned())
             .text_color(gpui::rgb(MUTED))
-            .child(PATH_HINT)
+            .child(hint)
     })
 }
 
@@ -512,8 +521,8 @@ fn link_button(selector: &'static str, label: &'static str, focused: bool) -> St
         .child(label)
 }
 
-/// Cancel, and Open shell while a folder is there to open.
-fn footer(folder: &str, focus: ShellControl, cx: &mut Context<RootView>) -> Div {
+/// Cancel, and Open shell while a folder is there to open (`can_submit`).
+fn footer(can_submit: bool, focus: ShellControl, cx: &mut Context<RootView>) -> Div {
     let cancel = dialog_button(
         ShellControl::Cancel.selector(),
         "Cancel".to_owned(),
@@ -524,7 +533,6 @@ fn footer(folder: &str, focus: ShellControl, cx: &mut Context<RootView>) -> Div 
     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
         this.press_shell_control(ShellControl::Cancel, window, cx);
     }));
-    let can_submit = ShellForm::can_submit(folder);
     let submit = dialog_button(
         ShellControl::Submit.selector(),
         "Open shell".to_owned(),

@@ -1969,9 +1969,20 @@ fn spawn_standalone_agent(cwd: Option<&str>) -> anyhow::Result<SpawnResolution> 
     Ok((SessionKind::Standalone, Vec::new(), cwd, label, None))
 }
 
+/// Why a standalone folder that is not absolute on this host is refused: a
+/// client on another OS may send a path that is absolute only there.
+const NOT_A_FULL_PATH: &str = "The folder must be a full path on this host.";
+
 fn resolve_standalone_cwd(cwd: Option<&str>) -> anyhow::Result<PathBuf> {
     let path = match cwd.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(path) => PathBuf::from(path),
+        Some(path) if Path::new(path).is_absolute() => PathBuf::from(path),
+        Some(path) => {
+            warn!(
+                folder = path,
+                "standalone folder refused: not absolute on this host"
+            );
+            return Err(anyhow!(NOT_A_FULL_PATH));
+        }
         None => default_standalone_cwd()?,
     };
     let metadata = std::fs::metadata(&path)
@@ -4665,6 +4676,39 @@ mod tests {
         assert!(standalone_supports(SessionMode::Interactive));
         assert!(standalone_supports(SessionMode::PlainShell));
         assert!(!standalone_supports(SessionMode::Headless));
+    }
+
+    #[tokio::test]
+    async fn standalone_cwd_refuses_a_path_not_absolute_on_this_host() {
+        let (hub, _scratch) = spawnless_test_hub("standalone-relative");
+        // `/` exists on every host but is absolute only on POSIX; a drive
+        // path is absolute only on Windows.
+        let elsewhere = if cfg!(windows) { "/" } else { "C:\\work" };
+        for folder in [elsewhere, "work", " sub/dir "] {
+            let req = env_spawn(
+                SpawnTarget::Standalone {
+                    cwd: Some(folder.to_owned()),
+                    add_dirs: Vec::new(),
+                },
+                SessionMode::PlainShell,
+                Vec::new(),
+                None,
+            );
+            let err = spawn_session(&hub, req, None, false)
+                .await
+                .expect_err("a folder that is not a full path here is refused");
+            assert_eq!(format!("{err:#}"), NOT_A_FULL_PATH, "{folder:?}");
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            send_spawn_failure(&tx, &err, Some("r1"));
+            assert!(
+                matches!(
+                    rx.try_recv(),
+                    Ok(DaemonMessage::ActionFailed { detail, request_id: Some(id), .. })
+                        if detail == NOT_A_FULL_PATH && id == "r1"
+                ),
+                "{folder:?}: the requester hears the refusal under its id"
+            );
+        }
     }
 
     /// Where an interactive spawn of `agent` in `folder` stops on the

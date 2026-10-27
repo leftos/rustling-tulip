@@ -853,6 +853,43 @@ fn shell_browse_disabled_on_remote(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn shell_folder_on_remote_follows_the_host_path_rules(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = remote_with_repos(cx, &dir, Vec::new());
+    h.open_shell_dialog_from_more();
+    type_text(&mut h, "work");
+    assert!(!h.root(RootView::shell_dialog_can_submit));
+    assert_eq!(
+        h.root(RootView::shell_dialog_hint).as_deref(),
+        Some("Use a full path on box, starting with a drive letter, \\\\server or /."),
+        "the hint names the host, as the Add repo prompt does"
+    );
+    h.keys("backspace backspace backspace backspace");
+    type_text(&mut h, "/home/me");
+    assert!(
+        h.root(RootView::shell_dialog_can_submit),
+        "a POSIX host path can go"
+    );
+    assert_eq!(h.root(RootView::shell_dialog_hint), None);
+    h.click_on("shell-submit");
+    let cwds: Vec<SpawnTarget> = h
+        .sent()
+        .iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::SpawnSession(request) => Some(request.target.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        cwds,
+        [SpawnTarget::Standalone {
+            cwd: Some("/home/me".to_owned()),
+            add_dirs: Vec::new(),
+        }]
+    );
+}
+
+#[gpui::test]
 fn worktrees_root_browse_disabled_on_remote(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = remote_with_repos(cx, &dir, Vec::new());

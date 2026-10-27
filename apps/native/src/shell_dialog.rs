@@ -9,6 +9,8 @@ use std::path::Path;
 
 use protocol::{SessionMode, SpawnRequest, SpawnTarget};
 
+use crate::repo_add::check_host_path_rules;
+
 /// A focusable control of the Shell… dialog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ShellControl {
@@ -40,6 +42,12 @@ impl ShellControl {
 /// The folder the dialog shows as an example while its field is empty.
 pub(crate) const FOLDER_PLACEHOLDER: &str = "C:\\Users\\you";
 
+/// The folder field's example on remote host `host` (its short name), whose
+/// OS this PC does not know.
+pub(crate) fn host_placeholder(host: &str) -> String {
+    format!("A full path on {host}")
+}
+
 /// What the dialog says while the folder is something but not a full path.
 pub(crate) const PATH_HINT: &str = "Enter a full path, like C:\\Users\\you";
 
@@ -56,6 +64,9 @@ pub(crate) struct ShellForm {
     save_default: bool,
     focus: ShellControl,
     submitted: bool,
+    /// The remote host's short name the shell opens on, whose path rules
+    /// judge the folder; `None` for this PC.
+    host: Option<String>,
 }
 
 /// What the dialog offers about the folder "+ Shell" opens in.
@@ -95,14 +106,18 @@ impl ShellForm {
             save_default: true,
             focus: ShellControl::Folder,
             submitted: false,
+            host: None,
         }
     }
 
-    /// The dialog numbered `generation` on a remote host: it neither
-    /// remembers its folder for "+ Shell" nor offers to forget one.
-    pub(crate) fn without_default(generation: u64) -> Self {
+    /// The dialog numbered `generation` on remote host `host` (the
+    /// connection's short name): it neither remembers its folder for
+    /// "+ Shell" nor offers to forget one, and judges the folder by the host
+    /// path rules, since the host may run another OS than this PC.
+    pub(crate) fn without_default(generation: u64, host: &str) -> Self {
         Self {
             quick_shell: QuickShellDefault::NotOffered,
+            host: Some(host.to_owned()),
             ..Self::new(generation, None)
         }
     }
@@ -172,22 +187,39 @@ impl ShellForm {
         self.save_default = !self.save_default;
     }
 
+    /// Why `trimmed`, a folder that is not empty, cannot be opened: on this
+    /// PC [`PATH_HINT`] unless it is a full path here (a drive or UNC path on
+    /// Windows); on a remote host the Add repo prompt's refusal naming it,
+    /// unless it passes the host path rules.
+    fn refusal(&self, trimmed: &str) -> Option<String> {
+        match &self.host {
+            None => (!Path::new(trimmed).is_absolute()).then(|| PATH_HINT.to_owned()),
+            Some(host) => check_host_path_rules(trimmed)
+                .err()
+                .map(|problem| problem.message(host)),
+        }
+    }
+
     /// The folder to open in: `folder` without the spaces around it, when it
-    /// is a full path — a drive or UNC path on Windows.
-    fn openable(folder: &str) -> Option<&str> {
+    /// is a full path by the rules of the machine the shell runs on.
+    fn openable<'a>(&self, folder: &'a str) -> Option<&'a str> {
         let trimmed = folder.trim();
-        (!trimmed.is_empty() && Path::new(trimmed).is_absolute()).then_some(trimmed)
+        (!trimmed.is_empty() && self.refusal(trimmed).is_none()).then_some(trimmed)
     }
 
     /// Whether Open shell can go with the field holding `folder`.
-    pub(crate) fn can_submit(folder: &str) -> bool {
-        Self::openable(folder).is_some()
+    pub(crate) fn can_submit(&self, folder: &str) -> bool {
+        self.openable(folder).is_some()
     }
 
-    /// Whether the field's text asks for a full path.
-    pub(crate) fn hint_shown(folder: &str) -> bool {
+    /// What the field says while its text is something it cannot open: not
+    /// a full path, or on a remote host a path with a `..` segment.
+    pub(crate) fn hint(&self, folder: &str) -> Option<String> {
         let trimmed = folder.trim();
-        !trimmed.is_empty() && !Path::new(trimmed).is_absolute()
+        if trimmed.is_empty() {
+            return None;
+        }
+        self.refusal(trimmed)
     }
 
     /// The focusable controls, in the order they are drawn; Open shell joins
@@ -207,7 +239,7 @@ impl ShellForm {
             ring.push(ShellControl::ClearDefault);
         }
         ring.push(ShellControl::Cancel);
-        if Self::can_submit(folder) {
+        if self.can_submit(folder) {
             ring.push(ShellControl::Submit);
         }
         ring
@@ -251,7 +283,7 @@ impl ShellForm {
         if self.submitted {
             return None;
         }
-        let folder = Self::openable(folder)?.to_owned();
+        let folder = self.openable(folder)?.to_owned();
         self.submitted = true;
         Some(ShellSubmission {
             folder,
@@ -315,27 +347,86 @@ impl PendingQuickShell {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::repo_add::HostPathProblem;
 
     #[test]
     fn only_a_full_path_can_be_opened() {
+        let form = ShellForm::new(1, None);
         for folder in ["", "   ", "work", "sub\\dir", ".\\x", "C:work"] {
-            assert!(!ShellForm::can_submit(folder), "{folder:?} opens nothing");
+            assert!(!form.can_submit(folder), "{folder:?} opens nothing");
         }
         for folder in ["C:\\work", "C:/work", "\\\\server\\share", "  C:\\work  "] {
-            assert!(ShellForm::can_submit(folder), "{folder:?} is a full path");
-            assert!(!ShellForm::hint_shown(folder), "{folder:?} shows no hint");
+            assert!(form.can_submit(folder), "{folder:?} is a full path");
+            assert!(form.hint(folder).is_none(), "{folder:?} shows no hint");
         }
         for folder in ["", "  "] {
             assert!(
-                !ShellForm::hint_shown(folder),
+                form.hint(folder).is_none(),
                 "an empty field asks for nothing"
             );
         }
         assert!(
-            ShellForm::hint_shown(" work "),
+            form.hint(" work ").is_some(),
             "a relative folder asks for a full path"
         );
-        assert!(ShellForm::hint_shown("C:work"), "a drive-relative one too");
+        assert!(form.hint("C:work").is_some(), "a drive-relative one too");
+    }
+
+    #[test]
+    fn local_shell_folder_check_is_unchanged() {
+        let mut form = ShellForm::new(1, Some("C:\\work"));
+        assert!(
+            !form.can_submit("/home/me"),
+            "a POSIX path is no full path on this PC"
+        );
+        assert_eq!(form.hint("/home/me").as_deref(), Some(PATH_HINT));
+        assert_eq!(form.hint("work").as_deref(), Some(PATH_HINT));
+        assert_eq!(form.hint("C:\\work"), None);
+        assert_eq!(
+            form.submit(" C:\\work "),
+            Some(ShellSubmission {
+                folder: "C:\\work".to_owned(),
+                save_default: true,
+            })
+        );
+    }
+
+    #[test]
+    fn remote_shell_folder_accepts_a_posix_host_path() {
+        let mut form = ShellForm::without_default(1, "box");
+        for folder in ["/home/me", "/", "C:\\work", "\\\\server\\share"] {
+            assert!(form.can_submit(folder), "{folder:?} is a full host path");
+            assert_eq!(form.hint(folder), None, "{folder:?} shows no hint");
+        }
+        assert_eq!(
+            form.submit("  /home/me/src  "),
+            Some(ShellSubmission {
+                folder: "/home/me/src".to_owned(),
+                save_default: false,
+            })
+        );
+    }
+
+    #[test]
+    fn remote_shell_folder_refuses_a_relative_host_path_with_the_host_wording() {
+        let mut form = ShellForm::without_default(1, "box");
+        let not_absolute = Some(HostPathProblem::NotAbsolute.message("box"));
+        for folder in ["work", "home/me", "C:work", "\\work"] {
+            assert!(!form.can_submit(folder), "{folder:?} opens nothing");
+            assert_eq!(form.hint(folder), not_absolute, "{folder:?}");
+        }
+        assert_eq!(
+            form.hint("/home/../etc"),
+            Some(HostPathProblem::ParentSegment.message("box"))
+        );
+        assert_eq!(form.hint("  "), None, "an empty field asks for nothing");
+        assert_eq!(form.submit("work"), None);
+    }
+
+    #[test]
+    fn remote_shell_folder_placeholder_names_the_host() {
+        assert_eq!(host_placeholder("box"), "A full path on box");
+        assert_eq!(FOLDER_PLACEHOLDER, "C:\\Users\\you", "this PC's stays");
     }
 
     #[test]

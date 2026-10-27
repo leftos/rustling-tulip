@@ -47,7 +47,7 @@ fn can_submit(h: &mut Harness<'_>) -> bool {
     h.root(RootView::shell_dialog_can_submit)
 }
 
-fn hint(h: &mut Harness<'_>) -> Option<&'static str> {
+fn hint(h: &mut Harness<'_>) -> Option<String> {
     h.root(RootView::shell_dialog_hint)
 }
 
@@ -263,7 +263,11 @@ fn relative_folder_cannot_submit_and_shows_hint(cx: &mut TestAppContext) {
     type_text(&mut h, "work");
     assert_eq!(folder(&mut h).as_deref(), Some("work"));
     assert!(!can_submit(&mut h), "a relative folder opens nothing");
-    assert_eq!(hint(&mut h), Some(PATH_HINT), "and asks for a full path");
+    assert_eq!(
+        hint(&mut h).as_deref(),
+        Some(PATH_HINT),
+        "and asks for a full path"
+    );
 
     h.click_on("shell-submit");
     assert!(is_open(&mut h), "nothing to open");
