@@ -29,7 +29,7 @@ The goal is each release as soon as possible, through Release 2; this overrides 
 
 - **No questions to the owner:** no `AskUserQuestion`, no interview, no decision round put to the owner, branch verdicts included. Every open decision, behaviour and look included, is the orchestrator's: settle it from the docs and code, record it with **settle** `--by orchestrator`, and keep going. The owner polishes once the release is a working daily driver.
 
-  One exception: a task the owner asks for mid-session does not join `vNext` by being asked for. The orchestrator **add**s it, judges whether it fits the open release's goal (its project's outcome), and asks the owner where it goes (`vNext`, `vNext+1` or Backlog) with `AskUserQuestion`, the recommended slot first and each option's cost to the release cut.
+  Two questions still go to the owner, as the user-level rules ask them: where a task asked for in the session goes (`plan-operations.md`, "Release fence"), and the next release's scope after a cut (the **release** operation).
 
 - **Per item:** the implementer's gates are `cargo fmt --all --check`, `cargo clippy` on the touched crates, and the item's own new or changed tests by name. No reached tests, no full suite, no load-burn, no `--slot critical`.
 - **Review:** one `code-review` pass per item. Only real bugs in the item's own change go back (one fix round); every other finding (hardening, style, coverage, behaviour not asked for) is dropped, not booked. Nits ride the next change touching their file.
