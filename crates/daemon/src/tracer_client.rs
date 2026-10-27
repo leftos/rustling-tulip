@@ -12,7 +12,7 @@
 
 use crate::binary_cache;
 use crate::paths::Dirs;
-use crate::pty::{PtyExit, PtyHandle, PtyHandleParts, PtyOutput, PtySpawnSpec};
+use crate::pty::{PtyExit, PtyHandle, PtyHandleParts, PtyProducer, PtySpawnSpec};
 use anyhow::{Context as _, anyhow};
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use interprocess::local_socket::tokio::{Stream, prelude::*};
@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt as _, AsyncRead, AsyncWrite, AsyncWriteExt as _, BufReader};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 use tracer_protocol::{
     InboundTracerResponse, SUPPORTED_TRACER_VERSIONS, TRACER_VERSION, TracerHello, TracerRequest,
     TracerResponse, TracerWelcome, negotiate,
@@ -623,14 +623,15 @@ where
     );
 
     // Wire the four daemon-facing channels.
-    let (output_tx, lifecycle_output) = PtyOutput::channel(OUTPUT_BROADCAST_CAPACITY);
+    let (producer, lifecycle_output) = PtyProducer::channel(OUTPUT_BROADCAST_CAPACITY);
+    let output_tx = producer.output();
     let (input_tx, input_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let (resize_tx, resize_rx) = mpsc::unbounded_channel::<(u16, u16)>();
     let (stop_tx, stop_rx) = mpsc::unbounded_channel::<()>();
-    let (exit_tx, exit_rx) = oneshot::channel::<PtyExit>();
 
-    // Reader task: parse TracerResponse frames, route to the session output +
-    // exit oneshot. On stream EOF or read error, the exit is `TracerLost`.
+    // Reader task: parse TracerResponse frames into the session's producer,
+    // then end its lifecycle queue with the exit (`TracerLost` on stream EOF
+    // or a read error).
     //
     // Yield until every startup watcher has called `output_tx.subscribe()`
     // before starting the pipe read loop, so the first Output frame (the
@@ -665,8 +666,7 @@ where
             elapsed = ?started.elapsed(),
             "tracer_client: reader starting"
         );
-        let exit = read_loop(reader, output_for_reader, &session_id_for_reader).await;
-        let _ = exit_tx.send(exit);
+        run_reader(reader, producer, &session_id_for_reader).await;
     });
 
     // Writer task: pump input/resize/stop into the pipe.
@@ -683,7 +683,6 @@ where
         lifecycle_output,
         input_tx,
         resize_tx,
-        exit_rx,
         killer,
         // The sidecar's `pid` field gets the tracer's pid; liveness and reattach
         // go by `tracer_pid` (the same value) checked against the tracer's own
@@ -693,9 +692,19 @@ where
     Ok((handle, negotiated))
 }
 
+/// The reader's whole life: pump tracer frames into `producer`, then end its
+/// lifecycle queue with how the session ended, behind every chunk.
+async fn run_reader<R>(reader: R, producer: PtyProducer, session_id: &str)
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    let exit = read_loop(reader, &producer, session_id).await;
+    producer.finish(exit).await;
+}
+
 /// Pump tracer frames until the tracer reports the child's exit
 /// ([`PtyExit::Code`]) or the pipe ends without one ([`PtyExit::TracerLost`]).
-async fn read_loop<R>(mut reader: R, output_tx: PtyOutput, session_id: &str) -> PtyExit
+async fn read_loop<R>(mut reader: R, output_tx: &PtyProducer, session_id: &str) -> PtyExit
 where
     R: tokio::io::AsyncBufRead + Unpin,
 {
@@ -966,31 +975,29 @@ mod tests {
     /// Run a session with a `meta.json` sidecar whose tracer sends `frames`
     /// and then closes its pipe; return once its history entry is written.
     async fn run_tracer_frames(tag: &str, frames: String) -> TracerRun {
-        use super::{TracerKiller, read_loop};
+        use super::{TracerKiller, run_reader};
         use crate::history::test_support::{
             insert_live, record, scratch_dirs, wait_for_entry, write_meta_for,
         };
-        use crate::pty::{PtyHandle, PtyHandleParts, PtyOutput};
+        use crate::pty::{PtyHandle, PtyHandleParts, PtyProducer};
         use crate::session::SessionRegistry;
         use protocol::SessionMode;
         use std::sync::Arc;
-        use tokio::sync::{mpsc, oneshot};
+        use tokio::sync::mpsc;
 
         let dirs = scratch_dirs(tag);
         write_meta_for(&dirs, tag);
         let registry = SessionRegistry::new(dirs.clone());
         let events = registry.subscribe();
-        let (output, lifecycle_output) = PtyOutput::channel(16);
+        let (producer, lifecycle_output) = PtyProducer::channel(16);
         let (input_tx, _input_rx) = mpsc::unbounded_channel();
         let (resize_tx, _resize_rx) = mpsc::unbounded_channel();
         let (stop_tx, _stop_rx) = mpsc::unbounded_channel();
-        let (exit_tx, exit_rx) = oneshot::channel();
         let pty = Arc::new(PtyHandle::from_parts(PtyHandleParts {
-            output: output.clone(),
+            output: producer.output(),
             lifecycle_output,
             input_tx,
             resize_tx,
-            exit_rx,
             killer: Box::new(TracerKiller { stop_tx }),
             pid: None,
         }));
@@ -1003,8 +1010,7 @@ mod tests {
         let session_id = tag.to_string();
         tokio::spawn(async move {
             let pipe = BufReader::new(std::io::Cursor::new(frames.into_bytes()));
-            let exit = read_loop(pipe, output, &session_id).await;
-            let _ = exit_tx.send(exit);
+            run_reader(pipe, producer, &session_id).await;
         });
         let entry = wait_for_entry(&dirs, tag).await;
         TracerRun {

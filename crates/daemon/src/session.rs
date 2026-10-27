@@ -5,7 +5,7 @@ use crate::headless::HeadlessHandle;
 use crate::history;
 use crate::orphan::{self, OrphanMeta};
 use crate::paths::Dirs;
-use crate::pty::{PtyExit, PtyHandle};
+use crate::pty::{LifecycleItem, PtyExit, PtyHandle};
 use crate::screen::SharedScreen;
 use crate::scrollback;
 use crate::sync::{lock, read, write};
@@ -66,8 +66,8 @@ pub enum SessionEvent {
 /// it via the `scrollback_snapshot_req` channel. `live` receives, from that
 /// same task, every PTY chunk it persists after building `data`, so a
 /// freshly-spawned forwarder task reading from `live` produces exactly the
-/// bytes after the snapshot — no overlap with `data`, no gap. It closes when
-/// the session's output ends.
+/// bytes after the snapshot — no overlap with `data`, no gap. It closes at
+/// the session's exit, once every chunk before the exit is in it.
 #[derive(Debug)]
 pub struct ScrollbackSnapshot {
     pub data: Vec<u8>,
@@ -433,8 +433,39 @@ pub struct SessionRegistry {
     /// gate, then the registry map, then a record; this map's own lock is
     /// only held to look a gate up, with no other lock held.
     sidecar_gates: Mutex<HashMap<String, Arc<Mutex<SidecarGate>>>>,
+    /// One gate per session, made with its record and dropped by `remove`,
+    /// that bars the lifecycle task's scrollback writes once a discard or
+    /// dismiss has deleted the session's dir. Distinct from the sidecar gate,
+    /// which a stop closes while the session's scrollback keeps growing.
+    scrollback_gates: Mutex<HashMap<String, ScrollbackGate>>,
     /// The sessions waiting for their conversation ids to be discovered.
     discovery: Discovery,
+}
+
+/// A session's scrollback gate: the lifecycle task appends scrollback and
+/// saves the terminal state under it, and deleting the session's dir closes
+/// it for good. Session ids are never reused, so it never reopens.
+#[derive(Clone, Debug, Default)]
+pub struct ScrollbackGate {
+    deleted: Arc<Mutex<bool>>,
+}
+
+impl ScrollbackGate {
+    /// Runs `write` under the gate unless the session's dir was deleted.
+    fn write(&self, write: impl FnOnce()) {
+        let deleted = lock(&self.deleted);
+        if !*deleted {
+            write();
+        }
+    }
+
+    /// Closes the gate and runs `delete` under it, so no write is part-way
+    /// through while the dir goes and none follows.
+    fn delete(&self, delete: impl FnOnce()) {
+        let mut deleted = lock(&self.deleted);
+        *deleted = true;
+        delete();
+    }
 }
 
 /// The per-session sidecar lock's state.
@@ -453,8 +484,35 @@ impl SessionRegistry {
             events,
             dirs: Some(dirs),
             sidecar_gates: Mutex::new(HashMap::new()),
+            scrollback_gates: Mutex::new(HashMap::new()),
             discovery: Discovery::default(),
         })
+    }
+
+    /// `id`'s scrollback gate, made with its record; one is made here for a
+    /// record inserted before this was asked.
+    fn scrollback_gate(&self, id: &str) -> ScrollbackGate {
+        lock(&self.scrollback_gates)
+            .entry(id.to_owned())
+            .or_default()
+            .clone()
+    }
+
+    /// Delete the session's `sessions/<id>/` dir for good, inside its
+    /// scrollback gate: the lifecycle task writes no scrollback or terminal
+    /// state for it afterwards, so output still queued behind a discard
+    /// cannot recreate the dir. The gate is looked up, never made: with no
+    /// entry the record is already removed, and the delete that removed it
+    /// closed the gate its lifecycle task holds, so the dir goes directly.
+    pub fn delete_session_dir(&self, id: &str) {
+        let Some(dirs) = self.dirs.as_ref() else {
+            return;
+        };
+        let gate = lock(&self.scrollback_gates).get(id).cloned();
+        match gate {
+            Some(gate) => gate.delete(|| orphan::try_delete_session_dir(dirs, id)),
+            None => orphan::try_delete_session_dir(dirs, id),
+        }
     }
 
     /// The sessions waiting for their conversation ids to be discovered.
@@ -493,6 +551,12 @@ impl SessionRegistry {
             return;
         };
         write(&arc);
+    }
+
+    /// Whether the scrollback gates map holds an entry for `id`.
+    #[cfg(test)]
+    fn has_scrollback_gate(&self, id: &str) -> bool {
+        lock(&self.scrollback_gates).contains_key(id)
     }
 
     /// Whether the gates map holds an entry for `id`.
@@ -546,6 +610,7 @@ impl SessionRegistry {
     pub fn insert_pending(&self, record: SessionRecord) -> PendingInsert<'_> {
         let id = record.id.clone();
         let arc = Arc::new(Mutex::new(record));
+        lock(&self.scrollback_gates).entry(id.clone()).or_default();
         {
             let mut guard = write(&self.by_id);
             guard.insert(id, arc.clone());
@@ -567,6 +632,8 @@ impl SessionRegistry {
         // still holding this gate skips, and one that makes a new gate finds
         // the record gone.
         lock(&self.sidecar_gates).remove(id);
+        // A lifecycle task keeps its own clone of the scrollback gate.
+        lock(&self.scrollback_gates).remove(id);
     }
 
     pub fn update<F>(&self, id: &str, f: F)
@@ -763,6 +830,7 @@ impl PendingInsert<'_> {
         let id = lock(&self.arc).id.clone();
         write(&self.registry.by_id).remove(&id);
         lock(&self.registry.sidecar_gates).remove(&id);
+        lock(&self.registry.scrollback_gates).remove(&id);
     }
 
     /// [`Self::publish`], its broadcast carrying `origin`, which the record
@@ -837,16 +905,22 @@ pub fn push_recent_action(rec: &mut SessionRecord, action: String) {
     rec.metrics.last_activity_at = Some(Utc::now());
 }
 
-/// Wires up the lifecycle tasks for a PTY session and returns the snapshot-
+/// Wires up the lifecycle task for a PTY session and returns the snapshot-
 /// request sender the caller must store on the `SessionRecord`. The lifecycle
-/// task:
-///   - persists each PTY chunk to scrollback when `dirs.is_some()`, then
-///     forwards it to every client that has taken a snapshot
-///   - handles snapshot requests atomically: reads the scrollback file and
+/// task is the only reader of the session's lifecycle queue:
+///   - it forwards each PTY chunk to every client that has taken a snapshot,
+///     then persists it to scrollback when `dirs.is_some()` and the session's
+///     dir has not been deleted (its [`ScrollbackGate`])
+///   - it handles snapshot requests atomically: reads the scrollback file and
 ///     registers the client's channel in the same `tokio::select!` arm, so the
 ///     returned `ScrollbackSnapshot.live` starts at the next chunk NOT in
 ///     `data` — no overlap, no gap. This lets a freshly-spawned per-client
 ///     forwarder pick up exactly where the persisted scrollback left off.
+///   - on the queue's last item, the exit (or a closed queue, a lost
+///     tracer), it closes every client's `live`, drops the snapshot requests
+///     still queued (their `LoadScrollback` reads the now-final file) and
+///     handles the exit (see [`handle_exit`]), so every chunk before the exit
+///     has reached clients and scrollback before the session reads `Stopped`.
 ///
 /// `dirs` is `Some` for normal spawns + reattaches so the orphan-meta sidecar
 /// gets cleaned up on exit and scrollback gets persisted; pass `None` for
@@ -854,7 +928,7 @@ pub fn push_recent_action(rec: &mut SessionRecord, action: String) {
 /// option is preserved for symmetry with the previous signature).
 ///
 /// Callers must invoke `attach_lifecycle` AFTER `insert_pending` so the exit
-/// watcher's `registry.update` finds the session record. The returned
+/// handling's `registry.update` finds the session record. The returned
 /// `snap_tx` should be patched onto the record's `scrollback_snapshot_req`
 /// field before calling `PendingInsert::publish`.
 pub fn attach_lifecycle(
@@ -865,25 +939,25 @@ pub fn attach_lifecycle(
 ) -> ScrollbackSnapshotReq {
     let (snap_tx, mut snap_rx) = mpsc::unbounded_channel::<oneshot::Sender<ScrollbackSnapshot>>();
     let output = pty.take_lifecycle_output();
-    let session_for_task = session_id.clone();
-    let dirs_for_task = dirs.clone();
+    let gate = registry.scrollback_gate(&session_id);
+    let registry = Arc::clone(registry);
     tokio::spawn(async move {
         let Some(mut output) = output else {
             error!(
-                session_id = %session_for_task,
-                "pty lifecycle output already taken; the session's output reaches no client"
+                %session_id,
+                "pty lifecycle queue already taken; the session's output and exit reach no one"
             );
             return;
         };
         // Tracks whether snap_rx is still open. When all senders drop the
-        // record's `scrollback_snapshot_req` (typically on session exit), the
-        // receiver's `recv()` would return None on every poll — without the
-        // guard the select! arm would spin.
+        // record's `scrollback_snapshot_req`, the receiver's `recv()` would
+        // return None on every poll — without the guard the select! arm
+        // would spin.
         let mut snap_open = true;
         // One sender per client snapshot. This task is the only reader of the
-        // session's lossless output queue: it forwards each chunk here, then
-        // persists it, so a client sees every chunk after its snapshot in
-        // order. Dropped with the task, which closes every client's `live`.
+        // session's lossless lifecycle queue: it forwards each chunk here,
+        // then persists it, so a client sees every chunk after its snapshot
+        // in order. Dropped at the exit, which closes every client's `live`.
         let mut clients: Vec<mpsc::UnboundedSender<Vec<u8>>> = Vec::new();
         // Sticky bracketed-paste (DEC 2004) state, seeded from disk so it
         // survives across daemon restarts even when the scrollback ring has
@@ -891,30 +965,31 @@ pub fn attach_lifecycle(
         // the replay snapshot below so a freshly-attached xterm's paste flag
         // matches the child. See `termstate` for the full rationale.
         let mut bp_tracker = BracketedPasteTracker::new(
-            dirs_for_task
-                .as_ref()
-                .is_some_and(|d| termstate::load(d, &session_for_task)),
+            dirs.as_ref()
+                .is_some_and(|d| termstate::load(d, &session_id)),
         );
-        loop {
+        let exit = loop {
             tokio::select! {
                 msg = output.recv() => {
                     match msg {
-                        Some(bytes) => deliver_chunk(
+                        Some(LifecycleItem::Chunk(bytes)) => deliver_chunk(
                             &bytes,
                             &mut clients,
-                            dirs_for_task.as_ref(),
-                            &session_for_task,
+                            dirs.as_ref().map(|d| (d, &gate)),
+                            &session_id,
                             &mut bp_tracker,
                         ),
-                        None => break,
+                        Some(LifecycleItem::Exited(exit)) => break exit,
+                        // The reader is gone without reporting an exit.
+                        None => break PtyExit::TracerLost,
                     }
                 }
                 req = snap_rx.recv(), if snap_open => {
                     match req {
                         Some(reply) => {
                             let (data, truncated) = build_replay_snapshot(
-                                dirs_for_task.as_ref(),
-                                &session_for_task,
+                                dirs.as_ref(),
+                                &session_id,
                                 bp_tracker.enabled(),
                             );
                             // Exact by construction: only this task writes
@@ -936,55 +1011,57 @@ pub fn attach_lifecycle(
                     }
                 }
             }
-        }
+        };
+        // Close every client's `live` and drop the snapshot requests still
+        // queued: a `LoadScrollback` whose reply is dropped reads the file,
+        // which holds every chunk by now.
+        drop(clients);
+        drop(snap_rx);
+        handle_exit(&registry, &session_id, exit, dirs.as_ref());
     });
-
-    // Exit watcher.
-    if let Some(rx) = pty.take_exit() {
-        tokio::spawn(watch_exit(Arc::clone(registry), session_id, rx, dirs));
-    }
 
     snap_tx
 }
 
 /// One PTY chunk on its way through `attach_lifecycle`'s task: every attached
 /// client gets it first, so client output never waits on scrollback I/O, then
-/// it is appended to scrollback (when `dirs` is set) and the bracketed-paste
-/// state is saved if the chunk changed it. Clients whose `live` receiver is
-/// gone are dropped from `clients`.
+/// it is appended to scrollback (when `persist` is set) and the
+/// bracketed-paste state is saved if the chunk changed it, both under the
+/// session's scrollback gate, which skips them once the session's dir is
+/// deleted. Clients whose `live` receiver is gone are dropped from `clients`.
 fn deliver_chunk(
     bytes: &[u8],
     clients: &mut Vec<mpsc::UnboundedSender<Vec<u8>>>,
-    dirs: Option<&Dirs>,
+    persist: Option<(&Dirs, &ScrollbackGate)>,
     session_id: &str,
     bp_tracker: &mut BracketedPasteTracker,
 ) {
     clients.retain(|tx| tx.send(bytes.to_vec()).is_ok());
-    if let Some(d) = dirs {
-        scrollback::append(d, session_id, bytes);
-        if bp_tracker.observe(bytes) {
-            termstate::save(d, session_id, bp_tracker.enabled());
-        }
+    if let Some((d, gate)) = persist {
+        gate.write(|| {
+            scrollback::append(d, session_id, bytes);
+            if bp_tracker.observe(bytes) {
+                termstate::save(d, session_id, bp_tracker.enabled());
+            }
+        });
     }
 }
 
-/// Exit watcher: mark the session stopped once its PTY exit arrives, record
-/// how it ended in the history, then drop its sidecar.
+/// The session's exit, handled by its lifecycle task once every chunk before
+/// it is delivered: mark the session stopped, record how it ended in the
+/// history, then drop its sidecar.
 ///
 /// A tracer lost while the session still holds its pty leaves the session
 /// abandoned instead: no exit code, sidecar kept for Resume, and an `Error`
 /// attention. A session the user already stopped or parked has released its
 /// pty, so its lost tracer ends it like any exit, and any exit after such a
 /// stop is the kill's: it sets no exit code and asks for no attention.
-async fn watch_exit(
-    registry: Arc<SessionRegistry>,
-    session_id: String,
-    rx: oneshot::Receiver<PtyExit>,
-    dirs: Option<Dirs>,
+fn handle_exit(
+    registry: &Arc<SessionRegistry>,
+    session_id: &str,
+    exit: PtyExit,
+    dirs: Option<&Dirs>,
 ) {
-    // A dropped sender means the reader task died without reporting an exit,
-    // which is a lost tracer as far as anyone can tell.
-    let exit = rx.await.unwrap_or(PtyExit::TracerLost);
     let code = exit.code();
     // Record the end before the `Stopped` update goes out. A client that
     // reacts to that update by discarding the session writes its own
@@ -993,12 +1070,12 @@ async fn watch_exit(
     // away by the user instead of as the exit it was. The update below
     // touches nothing the entry is built from (label, members, spawn_config,
     // started_at) and nothing else it reads.
-    if let Some(dirs) = dirs.as_ref() {
-        history::record_session_end(&registry, dirs, &session_id, history::end_for_exit(exit));
+    if let Some(dirs) = dirs {
+        history::record_session_end(registry, dirs, session_id, history::end_for_exit(exit));
     }
     let mut abandoned = false;
     let mut user_stopped = false;
-    registry.update(&session_id, |rec| {
+    registry.update(session_id, |rec| {
         abandoned = matches!(exit, PtyExit::TracerLost) && rec.pty.is_some();
         // A Stop or a Park claims the session (stopped, pty taken) before the
         // kill, so this exit is the kill's: no code of its own, no attention.
@@ -1022,13 +1099,13 @@ async fn watch_exit(
         }
     });
     if abandoned {
-        registry.fan_out_attention(session_id.clone(), protocol::AttentionReason::Error);
+        registry.fan_out_attention(session_id.to_owned(), protocol::AttentionReason::Error);
         return;
     }
     if !user_stopped {
-        registry.fan_out_attention(session_id.clone(), protocol::AttentionReason::Stopped);
+        registry.fan_out_attention(session_id.to_owned(), protocol::AttentionReason::Stopped);
     }
-    registry.delete_sidecar(&session_id);
+    registry.delete_sidecar(session_id);
 }
 
 /// Build a [`SessionRecord`] from a sidecar [`OrphanMeta`] and surface it via
@@ -1265,7 +1342,7 @@ impl SessionRegistry {
 )]
 mod tests {
     use super::*;
-    use crate::pty::PtyOutput;
+    use crate::pty::PtyProducer;
 
     /// Scratch config dir for the replay-snapshot tests.
     fn scratch_dirs(tag: &str) -> Dirs {
@@ -1823,6 +1900,94 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dirs.config);
     }
 
+    /// Every chunk the reader sent before the exit is in scrollback by the
+    /// time the session reads `Stopped`. The chunks and the exit go out
+    /// without yielding, so on this current-thread runtime nothing else runs
+    /// until the test drives it; more chunks than tokio's cooperative budget
+    /// of 128 make a lifecycle task that yields mid-queue show.
+    #[tokio::test]
+    async fn no_output_trails_the_exit() {
+        use crate::history::test_support::{fake_pty, insert_live, record, scratch_dirs};
+        use crate::pty::PtyExit;
+        const SENT: usize = 200;
+        let dirs = scratch_dirs("no-output-trails-exit");
+        let registry = SessionRegistry::new(dirs.clone());
+        let (pty, exit_tx) = fake_pty();
+        insert_live(
+            &registry,
+            &dirs,
+            record("s1", SessionMode::Interactive),
+            &pty,
+        );
+        let mut expected = Vec::new();
+        tokio::task::unconstrained(async {
+            for seq in 0..SENT {
+                let chunk = format!("<{seq}>").into_bytes();
+                expected.extend_from_slice(&chunk);
+                exit_tx.chunk(chunk).await;
+            }
+            exit_tx.finish(PtyExit::Code(0)).await;
+        })
+        .await;
+
+        let stopped = || {
+            registry
+                .get("s1")
+                .is_some_and(|rec| crate::sync::lock(&rec).status == SessionStatus::Stopped)
+        };
+        let mut yields = 0_u32;
+        while !stopped() {
+            assert!(yields < 1_000_000, "hung: the exit was never handled");
+            tokio::task::yield_now().await;
+            yields += 1;
+        }
+        let (persisted, _) = scrollback::load(&dirs, "s1");
+        let _ = std::fs::remove_dir_all(&dirs.config);
+        assert_eq!(
+            String::from_utf8_lossy(&persisted),
+            String::from_utf8_lossy(&expected),
+            "the scrollback when the session first reads Stopped"
+        );
+    }
+
+    /// A reader that ends without reporting an exit leaves the session
+    /// abandoned, and the exit is handled once: one `Error` attention.
+    #[tokio::test]
+    async fn a_reader_that_ends_without_an_exit_abandons_the_session_once() {
+        use crate::history::test_support::{
+            fake_pty, insert_live, record, scratch_dirs, write_meta_for,
+        };
+        let dirs = scratch_dirs("reader-ends-without-exit");
+        let registry = SessionRegistry::new(dirs.clone());
+        let (pty, exit_tx) = fake_pty();
+        insert_live(
+            &registry,
+            &dirs,
+            record("s1", SessionMode::Interactive),
+            &pty,
+        );
+        write_meta_for(&dirs, "s1");
+        let mut events = registry.subscribe();
+
+        drop(exit_tx);
+        let abandoned = || {
+            registry
+                .get("s1")
+                .is_some_and(|rec| crate::sync::lock(&rec).is_abandoned)
+        };
+        let mut waits = 0_u32;
+        while !abandoned() {
+            assert!(waits < 30_000, "hung: the session was never abandoned");
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            waits += 1;
+        }
+        // The update and its attention go out in one poll with no await
+        // between them, so every attention is out once the update shows.
+        let reasons = drained_attention(&mut events);
+        let _ = std::fs::remove_dir_all(&dirs.config);
+        assert_eq!(reasons, vec![protocol::AttentionReason::Error]);
+    }
+
     /// Every status change must reach the sidecar, in the same read-modify-
     /// write that carries the recent-actions tail.
     #[tokio::test]
@@ -2167,6 +2332,54 @@ mod tests {
     /// not after `remove`, not after a discarded pending insert, not for a
     /// write that finds its record gone, and not for a delete of an unknown
     /// id.
+    /// A spawn that fails after `insert_pending` takes its record back out,
+    /// and leaves no scrollback gate behind.
+    #[test]
+    fn a_failed_pending_insert_leaves_no_scrollback_gate() {
+        use crate::history::test_support::{record, scratch_dirs};
+        let dirs = scratch_dirs("failed-insert-scrollback-gate");
+        let registry = SessionRegistry::new(dirs.clone());
+
+        let pending = registry.insert_pending(record("s1", SessionMode::Interactive));
+        assert!(
+            registry.has_scrollback_gate("s1"),
+            "the insert made the gate"
+        );
+        pending.discard();
+
+        let _ = std::fs::remove_dir_all(&dirs.config);
+        assert!(
+            !registry.has_scrollback_gate("s1"),
+            "a discarded insert drops its scrollback gate"
+        );
+    }
+
+    /// A discard that loses the race with another discard of the same session
+    /// finds the record still listed but its gate already dropped by
+    /// `remove`; it deletes the dir and makes no new gate.
+    #[test]
+    fn a_second_discard_of_a_removed_session_creates_no_gate() {
+        use crate::history::test_support::{record, scratch_dirs};
+        let dirs = scratch_dirs("second-discard-no-gate");
+        let registry = SessionRegistry::new(dirs.clone());
+        registry.insert(record("s1", SessionMode::Interactive));
+        let session_dir = dirs.sessions_dir.join("s1");
+        std::fs::create_dir_all(&session_dir).expect("create the session dir");
+        // The first discard's `remove` has dropped the gate, the record
+        // lookup of the second has already succeeded.
+        lock(&registry.scrollback_gates).remove("s1");
+
+        registry.delete_session_dir("s1");
+
+        let dir_left = session_dir.exists();
+        let _ = std::fs::remove_dir_all(&dirs.config);
+        assert!(!dir_left, "the second discard still deletes the dir");
+        assert!(
+            !registry.has_scrollback_gate("s1"),
+            "the second discard makes no gate"
+        );
+    }
+
     #[test]
     fn sidecar_gates_do_not_outlive_their_sessions() {
         use crate::history::test_support::{record, scratch_dirs, write_meta_for};
@@ -2374,24 +2587,21 @@ mod tests {
         dirs: Dirs,
         _registry: Arc<SessionRegistry>,
         _pty: Arc<PtyHandle>,
-        _exit_tx: oneshot::Sender<PtyExit>,
-        output: PtyOutput,
+        output: Arc<PtyProducer>,
         snap_tx: ScrollbackSnapshotReq,
     }
 
     fn fed_session(tag: &str) -> FedSession {
         let dirs = scratch_dirs(tag);
         let registry = SessionRegistry::new(dirs.clone());
-        let (output, lifecycle_output) = PtyOutput::channel(256);
+        let (producer, lifecycle_output) = PtyProducer::channel(256);
         let (input_tx, _) = mpsc::unbounded_channel();
         let (resize_tx, _) = mpsc::unbounded_channel();
-        let (exit_tx, exit_rx) = oneshot::channel();
         let pty = Arc::new(PtyHandle::from_parts(crate::pty::PtyHandleParts {
-            output: output.clone(),
+            output: producer.output(),
             lifecycle_output,
             input_tx,
             resize_tx,
-            exit_rx,
             killer: Box::new(NoopKiller),
             pid: None,
         }));
@@ -2400,8 +2610,7 @@ mod tests {
             dirs,
             _registry: registry,
             _pty: pty,
-            _exit_tx: exit_tx,
-            output,
+            output: Arc::new(producer),
             snap_tx,
         }
     }
@@ -2426,7 +2635,7 @@ mod tests {
     }
 
     impl NumberedSender {
-        fn start(output: &PtyOutput) -> Self {
+        fn start(output: &Arc<PtyProducer>) -> Self {
             use std::sync::atomic::{AtomicBool, Ordering};
             use std::time::{Duration, Instant};
             let stop = Arc::new(AtomicBool::new(false));
@@ -2691,16 +2900,16 @@ mod tests {
         assert!(snap.is_ok(), "{:?}", snap.err());
     }
 
-    /// A client's live receiver ends once the session's output ends: the
-    /// lifecycle task stops on the closed output queue and drops the client's
-    /// sender with it, so the per-client forwarder finishes.
+    /// A client's live receiver ends at the session's exit: the lifecycle
+    /// task stops on the exit at the end of its queue and drops the client's
+    /// sender, so the per-client forwarder finishes.
     #[tokio::test]
-    async fn a_client_live_receiver_closes_when_the_session_output_ends() {
+    async fn a_client_live_receiver_closes_at_the_exit() {
         use crate::history::test_support::fake_pty;
         use std::time::Duration;
         let dirs = scratch_dirs("live-closes");
         let registry = SessionRegistry::new(dirs.clone());
-        let (pty, _exit_tx) = fake_pty();
+        let (pty, exit_tx) = fake_pty();
         let snap_tx = attach_lifecycle(&registry, "s".to_owned(), &pty, Some(dirs.clone()));
         let (tx, rx) = oneshot::channel();
         snap_tx.send(tx).expect("the lifecycle task is alive");
@@ -2710,15 +2919,13 @@ mod tests {
             .expect("a snapshot reply");
         let mut live = snap.live;
 
+        exit_tx.finish(PtyExit::Code(0)).await;
         drop(pty);
 
         let end = tokio::time::timeout(Duration::from_secs(60), live.recv())
             .await
             .expect("the live receiver ends within 60 s");
-        assert!(
-            end.is_none(),
-            "no output after the session's output ended: {end:?}"
-        );
+        assert!(end.is_none(), "no output after the session's exit: {end:?}");
         let _ = std::fs::remove_dir_all(&dirs.config);
     }
 }

@@ -1560,7 +1560,7 @@ fn shell_request(entry: &HistoryEntry, folder: &str) -> SpawnRequest {
 )]
 pub(crate) mod test_support {
     use crate::paths::Dirs;
-    use crate::pty::{PtyExit, PtyHandle, PtyHandleParts, PtyOutput};
+    use crate::pty::{PtyExit, PtyHandle, PtyHandleParts, PtyProducer};
     use crate::session::{SessionRecord, SessionRegistry, attach_lifecycle};
     use chrono::Utc;
     use portable_pty::ChildKiller;
@@ -1569,7 +1569,7 @@ pub(crate) mod test_support {
     };
     use std::sync::Arc;
     use std::time::Duration;
-    use tokio::sync::{mpsc, oneshot};
+    use tokio::sync::mpsc;
 
     #[derive(Debug)]
     struct NoopKiller;
@@ -1584,23 +1584,51 @@ pub(crate) mod test_support {
         }
     }
 
+    /// The tracer reader's side of a [`fake_pty`]: it owns the session's
+    /// producer, sends its output and reports how the session ended. Dropping
+    /// it without an exit is a reader gone without one, a lost tracer.
+    pub struct FakeExit {
+        producer: PtyProducer,
+    }
+
+    impl FakeExit {
+        /// Reports `exit` without waiting for it to be queued, the way a
+        /// oneshot send does: [`PtyProducer::finish`] runs on its own task.
+        /// Gives the exit back when there is no runtime to run it on.
+        pub fn send(self, exit: PtyExit) -> Result<(), PtyExit> {
+            let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+                return Err(exit);
+            };
+            runtime.spawn(self.producer.finish(exit));
+            Ok(())
+        }
+
+        /// Sends one output chunk, as the tracer reader does.
+        pub async fn chunk(&self, bytes: Vec<u8>) {
+            self.producer.send(bytes).await;
+        }
+
+        /// Queues `exit` behind every chunk sent before it.
+        pub async fn finish(self, exit: PtyExit) {
+            self.producer.finish(exit).await;
+        }
+    }
+
     /// A PTY handle with no process behind it: kills do nothing, and the
-    /// returned sender plays the tracer reporting how the session ended.
-    pub fn fake_pty() -> (Arc<PtyHandle>, oneshot::Sender<PtyExit>) {
-        let (output, lifecycle_output) = PtyOutput::channel(16);
+    /// returned [`FakeExit`] plays the tracer reporting how the session ended.
+    pub fn fake_pty() -> (Arc<PtyHandle>, FakeExit) {
+        let (producer, lifecycle_output) = PtyProducer::channel(16);
         let (input_tx, _) = mpsc::unbounded_channel();
         let (resize_tx, _) = mpsc::unbounded_channel();
-        let (exit_tx, exit_rx) = oneshot::channel();
         let handle = PtyHandle::from_parts(PtyHandleParts {
-            output,
+            output: producer.output(),
             lifecycle_output,
             input_tx,
             resize_tx,
-            exit_rx,
             killer: Box::new(NoopKiller),
             pid: None,
         });
-        (Arc::new(handle), exit_tx)
+        (Arc::new(handle), FakeExit { producer })
     }
 
     /// Hold the history write lock until the returned guard drops. While a

@@ -323,7 +323,9 @@ async fn load_scrollback_and_attach_forwarder(
             match tokio::time::timeout(SCROLLBACK_SNAPSHOT_TIMEOUT, reply_rx).await {
                 Ok(Ok(snap)) => Some(snap),
                 Ok(Err(_recv_err)) => {
-                    warn!(
+                    // The normal path for a request queued behind the exit:
+                    // the file it falls back to is final by then.
+                    debug!(
                         %session_id,
                         "load_scrollback: lifecycle task dropped snapshot reply"
                     );
@@ -1172,7 +1174,7 @@ async fn discard_session(
     }
     record_end(hub, session_id, SessionEnd::StoppedByUser);
     hub.sessions.delete_sidecar(session_id);
-    orphan::try_delete_session_dir(&hub.dirs, session_id);
+    hub.sessions.delete_session_dir(session_id);
     hub.sessions.remove(session_id);
     close_session_panes(hub, session_id);
 
@@ -1194,7 +1196,7 @@ pub(super) async fn stop_session(hub: &Hub, session_id: &str) -> anyhow::Result<
     record_end(hub, session_id, SessionEnd::StoppedByUser);
     // Mark the session stopped BEFORE killing the child.
     //
-    // The child's own exit watcher (`session::watch_exit`) also marks it
+    // The session's exit handling (`session::handle_exit`) also marks it
     // stopped, but *with* an exit code — and a client reads a
     // running-to-stopped transition carrying an exit code as a self-exit,
     // which for a worktree-less session means auto-discard. Killing first
@@ -1376,17 +1378,15 @@ mod tests {
                 Box::new(NoopKiller)
             }
         }
-        let (output, lifecycle_output) = crate::pty::PtyOutput::channel(16);
+        let (producer, lifecycle_output) = crate::pty::PtyProducer::channel(16);
         let (input_tx, _input_rx) = mpsc::unbounded_channel();
         let (resize_tx, _resize_rx) = mpsc::unbounded_channel();
-        let (_exit_tx, exit_rx) = tokio::sync::oneshot::channel();
         let pty = Arc::new(crate::pty::PtyHandle::from_parts(
             crate::pty::PtyHandleParts {
-                output,
+                output: producer.output(),
                 lifecycle_output,
                 input_tx,
                 resize_tx,
-                exit_rx,
                 killer: Box::new(NoopKiller),
                 pid: None,
             },
@@ -1465,17 +1465,15 @@ mod tests {
             }
         }
         let (hub, _scratch) = hub_with_screen("same-size-claim");
-        let (output, lifecycle_output) = crate::pty::PtyOutput::channel(16);
+        let (producer, lifecycle_output) = crate::pty::PtyProducer::channel(16);
         let (input_tx, _input_rx) = mpsc::unbounded_channel();
         let (resize_tx, mut resize_rx) = mpsc::unbounded_channel();
-        let (_exit_tx, exit_rx) = tokio::sync::oneshot::channel();
         let pty = Arc::new(crate::pty::PtyHandle::from_parts(
             crate::pty::PtyHandleParts {
-                output,
+                output: producer.output(),
                 lifecycle_output,
                 input_tx,
                 resize_tx,
-                exit_rx,
                 killer: Box::new(NoopKiller),
                 pid: None,
             },
@@ -1518,17 +1516,15 @@ mod tests {
         }
         let (hub, _scratch) = hub_with_screen("no-pty-claim");
         dispatch_silently(&hub, resize(77, 27, true)).await;
-        let (output, lifecycle_output) = crate::pty::PtyOutput::channel(16);
+        let (producer, lifecycle_output) = crate::pty::PtyProducer::channel(16);
         let (input_tx, _input_rx) = mpsc::unbounded_channel();
         let (resize_tx, mut resize_rx) = mpsc::unbounded_channel();
-        let (_exit_tx, exit_rx) = tokio::sync::oneshot::channel();
         let pty = Arc::new(crate::pty::PtyHandle::from_parts(
             crate::pty::PtyHandleParts {
-                output,
+                output: producer.output(),
                 lifecycle_output,
                 input_tx,
                 resize_tx,
-                exit_rx,
                 killer: Box::new(NoopKiller),
                 pid: None,
             },
@@ -2132,6 +2128,174 @@ mod tests {
         let entries = history::read_all(&hub.dirs);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].end, SessionEnd::TracerLost);
+    }
+
+    /// A backstop for the waits below: a passing run never reaches it.
+    const HANG_GUARD: Duration = Duration::from_secs(300);
+
+    /// More chunks than tokio's cooperative budget of 128, fewer than the
+    /// lifecycle queue's 256.
+    const TRAILING_CHUNKS: usize = 200;
+
+    /// A live `s1` on `hub` with its own `pty` reference dropped, so only the
+    /// record and the tracer side keep it, and a client's `live` receiver
+    /// from a snapshot taken before any output.
+    async fn live_session_with_client(
+        hub: &Hub,
+    ) -> (
+        history::test_support::FakeExit,
+        mpsc::UnboundedReceiver<Vec<u8>>,
+    ) {
+        use crate::history::test_support::{fake_pty, insert_live, record};
+        let (pty, exit_tx) = fake_pty();
+        insert_live(
+            &hub.sessions,
+            &hub.dirs,
+            record("s1", SessionMode::Interactive),
+            &pty,
+        );
+        drop(pty);
+        let snap_tx = hub
+            .sessions
+            .get("s1")
+            .and_then(|rec| crate::sync::lock(&rec).scrollback_snapshot_req.clone())
+            .expect("a live session takes snapshot requests");
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        snap_tx.send(reply_tx).expect("the lifecycle task is alive");
+        let snap = tokio::time::timeout(HANG_GUARD, reply_rx)
+            .await
+            .expect("hung: no snapshot reply")
+            .expect("a snapshot reply");
+        (exit_tx, snap.live)
+    }
+
+    /// Sends `<0>`, `<1>`, … without yielding and returns the bytes sent.
+    async fn send_numbered_chunks(exit_tx: &history::test_support::FakeExit) -> Vec<u8> {
+        tokio::task::unconstrained(async {
+            let mut sent = Vec::new();
+            for seq in 0..TRAILING_CHUNKS {
+                let chunk = format!("<{seq}>").into_bytes();
+                sent.extend_from_slice(&chunk);
+                exit_tx.chunk(chunk).await;
+            }
+            sent
+        })
+        .await
+    }
+
+    /// Waits for the next update that reports `s1` stopped.
+    async fn wait_for_stopped(events: &mut tokio::sync::broadcast::Receiver<SessionEvent>) {
+        let stopped = async {
+            loop {
+                match events.recv().await {
+                    Ok(SessionEvent::Updated(snap, _))
+                        if snap.id == "s1" && snap.status == protocol::SessionStatus::Stopped =>
+                    {
+                        return;
+                    }
+                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        std::future::pending::<()>().await;
+                    }
+                }
+            }
+        };
+        tokio::time::timeout(HANG_GUARD, stopped)
+            .await
+            .expect("hung: the session never read Stopped");
+    }
+
+    /// Waits for a client's `live` receiver to close.
+    async fn wait_for_live_closed(live: &mut mpsc::UnboundedReceiver<Vec<u8>>) {
+        tokio::time::timeout(HANG_GUARD, async { while live.recv().await.is_some() {} })
+            .await
+            .expect("hung: the client's live receiver never closed");
+    }
+
+    /// A discard sent as the session reads `Stopped` leaves no session dir:
+    /// no output still on its way recreates it.
+    #[tokio::test]
+    async fn a_discard_after_the_exit_leaves_no_session_dir() {
+        let (hub, _scratch) = test_hub("discard-after-exit");
+        let (exit_tx, mut live) = live_session_with_client(&hub).await;
+        let mut events = hub.sessions.subscribe();
+        send_numbered_chunks(&exit_tx).await;
+        tokio::task::unconstrained(exit_tx.finish(crate::pty::PtyExit::Code(0))).await;
+
+        wait_for_stopped(&mut events).await;
+        dispatch_silently(
+            &hub,
+            ClientMessage::DiscardSession {
+                session_id: "s1".to_owned(),
+                cleanup: Vec::new(),
+            },
+        )
+        .await;
+        wait_for_live_closed(&mut live).await;
+
+        assert!(
+            !hub.dirs.sessions_dir.join("s1").exists(),
+            "the discarded session's dir is gone"
+        );
+    }
+
+    /// A `LoadScrollback` sent as the session reads `Stopped` gets every
+    /// chunk the session sent before its exit.
+    #[tokio::test]
+    async fn load_scrollback_after_the_exit_has_every_chunk() {
+        let (hub, _scratch) = test_hub("load-after-exit");
+        let (exit_tx, _live) = live_session_with_client(&hub).await;
+        let mut events = hub.sessions.subscribe();
+        let sent = send_numbered_chunks(&exit_tx).await;
+        tokio::task::unconstrained(exit_tx.finish(crate::pty::PtyExit::Code(0))).await;
+
+        wait_for_stopped(&mut events).await;
+        let replies = dispatch_all(
+            &hub,
+            ClientMessage::LoadScrollback {
+                session_id: "s1".to_owned(),
+                request_id: None,
+            },
+        )
+        .await;
+
+        let data = replies
+            .iter()
+            .find_map(|msg| match msg {
+                DaemonMessage::Scrollback { data_b64, .. } => Some(
+                    base64::engine::general_purpose::STANDARD
+                        .decode(data_b64)
+                        .expect("the reply's data is base64"),
+                ),
+                _ => None,
+            })
+            .expect("a Scrollback reply");
+        assert_eq!(
+            String::from_utf8_lossy(&data),
+            String::from_utf8_lossy(&sent),
+            "the scrollback a client loads once the session reads Stopped"
+        );
+    }
+
+    /// Stop then Discard back to back, with output still queued behind them,
+    /// leaves no session dir: the lifecycle task writes nothing for a
+    /// session whose dir was deleted.
+    #[tokio::test]
+    async fn stop_then_discard_leaves_no_session_dir() {
+        let (hub, _scratch) = test_hub("stop-then-discard");
+        let (exit_tx, mut live) = live_session_with_client(&hub).await;
+        stop_session(&hub, "s1").await.expect("stop");
+        send_numbered_chunks(&exit_tx).await;
+        let (out_tx, _out_rx) = mpsc::unbounded_channel();
+        discard_session(&hub, "s1", &[], &out_tx).await;
+        tokio::task::unconstrained(exit_tx.finish(crate::pty::PtyExit::Code(0))).await;
+
+        wait_for_live_closed(&mut live).await;
+
+        assert!(
+            !hub.dirs.sessions_dir.join("s1").exists(),
+            "the discarded session's dir is gone"
+        );
     }
 
     #[tokio::test]

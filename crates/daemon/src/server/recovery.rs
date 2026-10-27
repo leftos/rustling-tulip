@@ -15,7 +15,7 @@ use crate::orphan::OrphanMeta;
 use crate::paths::Dirs;
 use crate::screen::rules::rules_for;
 use crate::session::{SessionRecord, SessionRegistry, attach_lifecycle};
-use crate::{conversations, history, orphan, osc_title, pty_state, screen, tracer_client};
+use crate::{conversations, history, osc_title, pty_state, screen, tracer_client};
 use agent_api::{ConversationPlan, ResolvedRows};
 use anyhow::anyhow;
 use protocol::{
@@ -981,7 +981,7 @@ pub(super) fn discard_abandoned(
 ) {
     record_end(hub, session_id, SessionEnd::StoppedByUser);
     hub.sessions.delete_sidecar(session_id);
-    orphan::try_delete_session_dir(&hub.dirs, session_id);
+    hub.sessions.delete_session_dir(session_id);
     hub.sessions.remove(session_id);
     let _ = out_tx.send(DaemonMessage::SessionRemoved {
         session_id: session_id.to_string(),
@@ -1397,7 +1397,7 @@ mod tests {
     async fn dismissing_a_start_up_loss_records_stopped_by_user() {
         let (hub, _scratch) = spawnless_test_hub("dismiss-start-up-loss");
         crate::history::test_support::write_meta_for(&hub.dirs, "lost");
-        let meta = orphan::load_meta(&hub.dirs, "lost").expect("load meta");
+        let meta = crate::orphan::load_meta(&hub.dirs, "lost").expect("load meta");
         let ids = history::record_lost_at_start(&hub.dirs, std::slice::from_ref(&meta), Utc::now());
         assert_eq!(ids, vec!["lost".to_owned()]);
         let lost = history::read_one(&hub.dirs, "lost").expect("start-up entry");
