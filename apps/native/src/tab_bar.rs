@@ -14,6 +14,7 @@ use protocol::{
 use crate::assets::{TAB_CLOSE_ICON, TAB_NEW_ICON};
 use crate::drag::{self, DragPayload, Side};
 use crate::fonts;
+use crate::overlay_owner::Overlay;
 use crate::palette::{ACCENT, CHIP, GROUND, LINE_STRONG, RAISED, SUBTLE, SURFACE, WORKING};
 use crate::session_menu::{MENU_MAX_SHARE, menu_frame, menu_item, menu_separator, muted_row};
 use crate::status_glyph::{GlyphSize, glyph, glyph_view};
@@ -955,10 +956,10 @@ impl RootView {
     /// A context menu or a popup Esc closes is open.
     fn menu_open(&self) -> bool {
         self.tab_menu.is_some()
-            || self.pane_ui.menu.is_some()
-            || self.menu.is_some()
+            || self.open_in_main(Overlay::EmptyPaneMenu)
+            || self.open_in_main(Overlay::SessionMenu)
             || self.container_menu.is_some()
-            || self.shell_menu.is_some()
+            || self.open_in_main(Overlay::ShellMenu)
             || self.sc_picker_open
             || self.changes.file_menu.is_some()
             || self.flyout_open

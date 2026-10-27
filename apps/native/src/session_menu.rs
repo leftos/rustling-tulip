@@ -6,7 +6,8 @@ use std::path::PathBuf;
 use gpui::{
     AnyElement, App, ClickEvent, Context, Div, ElementId, Entity, FocusHandle, Focusable as _,
     FontWeight, Keystroke, MouseButton, MouseDownEvent, Pixels, Point, ScrollWheelEvent,
-    SharedString, Stateful, Subscription, Task, Window, anchored, deferred, div, prelude::*, px,
+    SharedString, Stateful, Subscription, Task, Window, WindowId, anchored, deferred, div,
+    prelude::*, px,
 };
 use protocol::{
     ClientMessage, DaemonMessage, MemberBranchFate, PresetEntry, PresetTarget, SessionMode,
@@ -23,6 +24,7 @@ use crate::notice_view::{MODAL_RADIUS, drop_shadow, modal_panel};
 use crate::notices::{ActionFailedNotice, ToastKind};
 use crate::open::{OpenJob, VsCodeTarget, copy_path, repo_folder, workspace_vscode_target};
 use crate::open_view::Then;
+use crate::overlay_owner::Overlay;
 use crate::palette::{CHIP, DIALOG_SHADOW, LINE_STRONG, SCRIM, SURFACE};
 use crate::popouts::{POP_OUT_ALREADY_TIP, PopoutKey, pane_to_pop};
 use crate::remote_mode::Capabilities;
@@ -608,8 +610,9 @@ impl RootView {
 
     /// Opens the menu of `session_id` at `at`, taking the keyboard so Esc
     /// reaches it. `pane` is the `(tab, pane)` whose header was
-    /// right-clicked, `None` when the menu opens elsewhere.
-    pub(crate) fn open_session_menu(
+    /// right-clicked, `None` when the menu opens elsewhere. The menu draws in
+    /// `window`, the window that asked for it.
+    pub fn open_session_menu(
         &mut self,
         session_id: &str,
         pane: Option<&(String, String)>,
@@ -621,7 +624,15 @@ impl RootView {
             return;
         }
         self.close_more_menu(window, cx);
+        // Another window's menu is not under this one's backdrop: only one
+        // menu is open at a time across the windows.
+        self.close_shell_menu(window, cx);
+        self.close_empty_pane_menu(window, cx);
+        // A menu open in another window hands that window's keyboard back.
+        self.close_session_menu(window, cx);
         self.prefills.clear();
+        self.overlays
+            .opened(Overlay::SessionMenu, window.window_handle().window_id());
         self.menu = Some(SessionMenu {
             session_id: session_id.to_owned(),
             at,
@@ -636,11 +647,13 @@ impl RootView {
         cx.notify();
     }
 
-    /// Closes the menu and hands the keyboard back to the active pane.
+    /// Closes the menu and hands the keyboard back to the terminal of the
+    /// window it was open in.
     pub(crate) fn close_session_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.confirm.disarm();
         if self.menu.take().is_some() {
-            self.focus_active_pane(window, cx);
+            let owner = self.overlays.owner(Overlay::SessionMenu);
+            self.hand_back_focus(owner, window, cx);
             cx.notify();
         }
     }
@@ -1779,8 +1792,15 @@ impl RootView {
     }
 
     /// The open menu over a layer that keeps a click outside it from
-    /// reaching what lies beneath.
-    pub(crate) fn session_menu_layer(&self, cx: &mut Context<Self>) -> Option<[AnyElement; 2]> {
+    /// reaching what lies beneath, while window `here` draws it.
+    pub(crate) fn session_menu_layer(
+        &self,
+        here: WindowId,
+        cx: &mut Context<Self>,
+    ) -> Option<[AnyElement; 2]> {
+        if !self.overlays.shows(Overlay::SessionMenu, here) {
+            return None;
+        }
         let menu = self.menu.as_ref()?;
         self.sidebar.session(&menu.session_id)?;
         let backdrop = div().absolute().top_0().left_0().size_full().occlude();
@@ -2630,6 +2650,13 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.is_main_window(window) {
+            let session_id = session_id.to_owned();
+            self.open_in_main_window(cx, move |root, window, cx| {
+                root.open_delete_dialog(&session_id, owner, window, cx);
+            });
+            return;
+        }
         let confirm = DeleteWorktreeConfirm::new(session_id, (self.now)());
         self.send(confirm.request());
         self.delete_dialog = Some(DeleteDialog {
@@ -3161,6 +3188,9 @@ impl RootView {
         self.close_session_menu(window, cx);
         self.close_tab_menu(window, cx);
         self.close_more_menu(window, cx);
+        self.close_empty_pane_menu(window, cx);
+        self.overlays
+            .opened(Overlay::ShellMenu, window.window_handle().window_id());
         self.shell_menu = Some(ShellMenu {
             pane_id: pane_id.to_owned(),
             session_id: self.pane_session(pane_id),
@@ -3174,11 +3204,12 @@ impl RootView {
         cx.notify();
     }
 
-    /// Closes the gutter menu and hands the keyboard back to the active
-    /// pane.
+    /// Closes the gutter menu and hands the keyboard back to the terminal of
+    /// the window it was open in.
     pub(crate) fn close_shell_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.shell_menu.take().is_some() {
-            self.focus_active_pane(window, cx);
+            let owner = self.overlays.owner(Overlay::ShellMenu);
+            self.hand_back_focus(owner, window, cx);
             cx.notify();
         }
     }
@@ -3200,8 +3231,16 @@ impl RootView {
 
     /// The open gutter menu over a layer that keeps a click outside it from
     /// reaching what lies beneath. The layer takes the wheel too, so a
-    /// scroll anywhere, which would move the menu's dot, closes it.
-    pub(crate) fn shell_menu_layer(&self, cx: &mut Context<Self>) -> Option<[AnyElement; 2]> {
+    /// scroll anywhere, which would move the menu's dot, closes it. Only
+    /// window `here`, the one it opened in, draws it.
+    pub(crate) fn shell_menu_layer(
+        &self,
+        here: WindowId,
+        cx: &mut Context<Self>,
+    ) -> Option<[AnyElement; 2]> {
+        if !self.overlays.shows(Overlay::ShellMenu, here) {
+            return None;
+        }
         let menu = self.shell_menu.as_ref()?;
         let backdrop = div()
             .absolute()

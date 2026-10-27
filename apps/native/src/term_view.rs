@@ -298,6 +298,17 @@ pub enum PaneEvent {
 impl EventEmitter<PaneEvent> for TerminalPane {}
 
 impl TerminalPane {
+    /// The id of the slot that holds this terminal, which its events name.
+    pub(crate) fn pane_id(&self) -> &str {
+        &self.pane_id
+    }
+
+    /// The slot holding this terminal was re-keyed to `pane_id`, as a
+    /// session pop-out's is when its session restarts.
+    pub(crate) fn set_pane_id(&mut self, pane_id: String) {
+        self.pane_id = pane_id;
+    }
+
     pub fn new(
         pane_id: String,
         tx: UnboundedSender<NetCommand>,

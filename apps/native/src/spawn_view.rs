@@ -20,6 +20,7 @@ use crate::assets::{SIDEBAR_CHEVRON_DOWN_ICON, SIDEBAR_CHEVRON_RIGHT_ICON};
 use crate::buttons::{ButtonKind, ButtonSize, button, field_frame, focus_ring};
 use crate::combobox::{ComboRow, list_placement};
 use crate::notice_view::{MODAL_RADIUS, modal_panel};
+use crate::overlay_owner::Overlay;
 use crate::palette::{
     ACCENT, CHIP, GROUND, HOVER, LINE, LINE_STRONG, ON_ACCENT, RAISED, SPAWN_BADGE_OK, SUBTLE,
     TEXT_2, TRANSPARENT,
@@ -519,9 +520,9 @@ impl RootView {
             || (self.worktrees_manager.is_some() && !handoff)
             || self.recover.is_some()
             || self.delete_dialog.is_some()
-            || self.menu.is_some()
+            || self.open_in_main(Overlay::SessionMenu)
             || self.container_menu.is_some()
-            || self.shell_menu.is_some()
+            || self.open_in_main(Overlay::ShellMenu)
             || self.sc_picker_open
             || self.changes.file_menu.is_some()
             || self.changes.discard.is_some()
@@ -544,6 +545,12 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if !self.is_main_window(window) {
+            self.open_in_main_window(cx, move |root, window, cx| {
+                root.open_spawn_dialog(entry, window, cx);
+            });
+            return true;
+        }
         if entry.lock().and_then(Lock::target).is_none() && !self.has_repos() {
             self.prefills.clear();
             if self.spawn_dialog_blocker(None, false).is_some() {

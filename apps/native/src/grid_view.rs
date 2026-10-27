@@ -290,9 +290,16 @@ impl RootView {
             this.pane_focused(&id, window, cx);
             cx.notify();
         });
-        let events = cx.subscribe_in(&view, window, |this, _, event: &PaneEvent, window, cx| {
-            this.on_pane_event(event, window, cx);
-        });
+        // The window given here is the one the slot was made in; an event
+        // acts for the window that draws the terminal when it fires.
+        let events = cx.subscribe_in(
+            &view,
+            window,
+            |this, pane, event: &PaneEvent, window, cx| {
+                let slot_id = pane.read(cx).pane_id().to_owned();
+                this.route_pane_event(&slot_id, event, window, cx);
+            },
+        );
         PaneSlot {
             view,
             tab_id: String::new(),
@@ -550,7 +557,12 @@ impl RootView {
     /// A pane's scrollback retry, sent once per session and attempt; a
     /// pane's copy, which the root's clipboard write and chip answer; or a
     /// pane's Ctrl+clicked link, which opens.
-    fn on_pane_event(&mut self, event: &PaneEvent, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_pane_event(
+        &mut self,
+        event: &PaneEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match event {
             PaneEvent::ScrollbackRetry {
                 session_id,
@@ -639,7 +651,11 @@ impl RootView {
             return;
         };
         let new_id = popouts::session_slot_id(new);
-        slot.view.update(cx, |pane, _| pane.release());
+        slot.view.update(cx, |pane, cx| {
+            pane.release();
+            pane.set_pane_id(new_id.clone());
+            cx.notify();
+        });
         slot.session = Some(new.to_owned());
         slot.attached = false;
         self.panes.insert(new_id.clone(), slot);

@@ -4,7 +4,7 @@
 
 use gpui::{
     AnyElement, BoxShadow, ClickEvent, Context, Div, ElementId, FontWeight, Keystroke,
-    SharedString, Stateful, Window, div, point, prelude::*, px, relative,
+    SharedString, Stateful, Window, WindowId, div, point, prelude::*, px, relative,
 };
 use protocol::{ClientMessage, SessionSnapshot, SpawnRequest, SpawnTarget};
 
@@ -131,6 +131,7 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         self.notices.push(kind, title, detail, (self.now)());
+        self.place_toasts();
         self.forget_closed_jobs();
         self.schedule_toast_expiry(cx);
         cx.notify();
@@ -140,10 +141,18 @@ impl RootView {
     /// toast's id.
     pub fn push_toast_spec(&mut self, spec: ToastSpec, cx: &mut Context<Self>) -> u64 {
         let id = self.notices.push_spec(spec, (self.now)());
+        self.place_toasts();
         self.forget_closed_jobs();
         self.schedule_toast_expiry(cx);
         cx.notify();
         id
+    }
+
+    /// A new toast shows in the window the user last pressed a mouse
+    /// button or a key in, else the main one; a shown one stays put.
+    fn place_toasts(&mut self) {
+        self.overlays
+            .place_toasts(self.notices.toasts().iter().map(|toast| toast.id));
     }
 
     /// Drops the ended launch jobs whose toast went: closed, timed out or
@@ -520,14 +529,25 @@ impl RootView {
         cx.notify();
     }
 
-    /// The toasts, stacked in the bottom-right corner above the footer.
-    pub(crate) fn toast_layer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let toasts = self.notices.toasts();
+    /// Window `here`'s toasts, stacked in its bottom-right corner, above the
+    /// footer in the main window.
+    pub(crate) fn toast_layer(&self, here: WindowId, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let toasts: Vec<&Toast> = self
+            .notices
+            .toasts()
+            .iter()
+            .filter(|toast| self.overlays.toast_owner(toast.id) == here)
+            .collect();
         if toasts.is_empty() {
             return None;
         }
+        let bottom = if here == self.layouts.main() {
+            FOOTER_HEIGHT + 8.0
+        } else {
+            8.0
+        };
         let cards: Vec<AnyElement> = toasts
-            .iter()
+            .into_iter()
             .map(|toast| {
                 let progress = toast
                     .key
@@ -540,7 +560,7 @@ impl RootView {
             div()
                 .absolute()
                 .right(px(8.0))
-                .bottom(px(FOOTER_HEIGHT + 8.0))
+                .bottom(px(bottom))
                 .w(px(TOAST_WIDTH))
                 .flex()
                 .flex_col()

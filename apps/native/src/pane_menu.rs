@@ -4,12 +4,13 @@
 
 use gpui::{
     AnyElement, ClickEvent, Context, Div, FocusHandle, Keystroke, MouseDownEvent, Pixels, Point,
-    Stateful, Window, anchored, deferred, div, prelude::*,
+    Stateful, Window, WindowId, anchored, deferred, div, prelude::*,
 };
 use protocol::{ClientMessage, TabContent};
 
 use crate::drag::PaneDrop;
 use crate::move_panes_view::MovePanesDialog;
+use crate::overlay_owner::Overlay;
 use crate::pane_close::PaneClose;
 use crate::session_menu::{MENU_MAX_SHARE, menu_frame, menu_item, menu_separator};
 use crate::tabs::{collect_panes, pick_balanced_drop_target};
@@ -163,8 +164,13 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.menu = None;
+        // Another window's menu is not under this one's backdrop: only one
+        // menu is open at a time across the windows.
+        self.close_session_menu(window, cx);
+        self.close_shell_menu(window, cx);
         self.tab_menu = None;
+        self.overlays
+            .opened(Overlay::EmptyPaneMenu, window.window_handle().window_id());
         self.pane_ui.menu = Some(EmptyPaneMenu {
             tab_id: tab_id.to_owned(),
             pane_id: pane_id.to_owned(),
@@ -176,10 +182,12 @@ impl RootView {
         cx.notify();
     }
 
-    /// Closes the menu and hands the keyboard back to the active pane.
+    /// Closes the menu and hands the keyboard back to the terminal of the
+    /// window it was open in.
     pub(crate) fn close_empty_pane_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.pane_ui.menu.take().is_some() {
-            self.focus_active_pane(window, cx);
+            let owner = self.overlays.owner(Overlay::EmptyPaneMenu);
+            self.hand_back_focus(owner, window, cx);
             cx.notify();
         }
     }
@@ -312,8 +320,15 @@ impl RootView {
     }
 
     /// The open empty-pane menu over a layer that keeps a click outside it
-    /// from reaching what lies beneath.
-    pub(crate) fn empty_pane_menu_layer(&self, cx: &mut Context<Self>) -> Option<[AnyElement; 2]> {
+    /// from reaching what lies beneath, while window `here` draws it.
+    pub(crate) fn empty_pane_menu_layer(
+        &self,
+        here: WindowId,
+        cx: &mut Context<Self>,
+    ) -> Option<[AnyElement; 2]> {
+        if !self.overlays.shows(Overlay::EmptyPaneMenu, here) {
+            return None;
+        }
         let menu = self.pane_ui.menu.as_ref()?;
         let rows: Vec<AnyElement> = self
             .empty_pane_menu_lines(menu)
@@ -401,19 +416,24 @@ impl RootView {
     }
 
     /// A key while the pane-close dialog or the empty pane's menu is open;
-    /// returns whether it was taken. The menu takes only Esc. The Move
-    /// panes dialog's keys go through [`Self::on_move_panes_key`].
+    /// returns whether it was taken. Only the window that draws the dialog
+    /// or the menu hands it keys. The menu takes only Esc. The Move panes
+    /// dialog's keys go through [`Self::on_move_panes_key`].
     pub(crate) fn on_pane_ui_key(
         &mut self,
         keystroke: &Keystroke,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.pane_ui.close.is_some() {
+        let here = window.window_handle().window_id();
+        if self.pane_ui.close.is_some() && self.overlays.shows(Overlay::PaneClose, here) {
             self.on_pane_close_key(keystroke, window, cx);
             return true;
         }
-        if self.pane_ui.menu.is_some() && keystroke.key == "escape" {
+        if self.pane_ui.menu.is_some()
+            && self.overlays.shows(Overlay::EmptyPaneMenu, here)
+            && keystroke.key == "escape"
+        {
             self.close_empty_pane_menu(window, cx);
             return true;
         }

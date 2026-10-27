@@ -66,6 +66,7 @@ mod notify;
 pub mod offscreen;
 mod open;
 mod open_view;
+mod overlay_owner;
 mod pairing;
 mod pairing_view;
 pub mod palette;
@@ -177,6 +178,7 @@ use crate::notice_view::MODAL_RADIUS;
 use crate::notices::Notices;
 use crate::notify::{SilentNotifier, SystemNotifier};
 use crate::open::SystemOpener;
+use crate::overlay_owner::{Overlay, OverlayOwners};
 use crate::popout_view::PopoutView;
 use crate::popouts::{POPOUT_CASCADE, POPOUT_MIN_SIZE, POPOUT_SIZE, Popouts};
 use crate::quit_view::{ExitView, Quitter};
@@ -629,6 +631,9 @@ pub struct RootView {
     /// Where each window's split tree was last laid out; a divider drag maps
     /// the pointer through its own window's.
     layouts: WindowLayouts,
+    /// The window each menu, dialog and toast draws in, and the window the
+    /// user last pressed a mouse button or a key in.
+    overlays: OverlayOwners,
     /// The tab whose name is being edited.
     renaming: Option<Rename>,
     /// Where the sidebar layout is saved; `None` when the config dir could
@@ -1140,6 +1145,7 @@ impl RootView {
             panes: HashMap::new(),
             retries: RetryGate::default(),
             layouts: WindowLayouts::new(window.window_handle().window_id()),
+            overlays: OverlayOwners::new(window.window_handle().window_id()),
             renaming: None,
             ui_dir,
             drag: None,
@@ -1475,8 +1481,9 @@ impl RootView {
     }
 
     /// Closes the pop-outs whose content has gone: a pane pop-out whose pane
-    /// is in no tab or whose session the daemon removed. Their panes take
-    /// their roles in the main window back.
+    /// is in no tab, or a tab pop-out whose tab is. A pane pop-out whose
+    /// session the daemon removed stays open, as a session pop-out does.
+    /// Their panes take their roles in the main window back.
     fn prune_popouts(&mut self, cx: &mut Context<Self>) {
         let gone = self.popouts.prune(&self.tabs);
         if gone.is_empty() {
@@ -1545,8 +1552,9 @@ impl RootView {
     /// with it; the window it had, if any.
     fn take_popout_window(&mut self, key: &PopoutKey) -> Option<WindowHandle<PopoutView>> {
         let handle = self.popout_windows.remove(key)?.handle;
-        self.layouts
-            .forget(AnyWindowHandle::from(handle).window_id());
+        let window_id = AnyWindowHandle::from(handle).window_id();
+        self.layouts.forget(window_id);
+        self.drop_window_overlays(window_id);
         Some(handle)
     }
 
@@ -1892,9 +1900,9 @@ impl RootView {
             || self.import_modal.is_some()
             || !self.cleanup_failed.is_empty()
             || self.exit.is_some()
-            || self.pane_ui.close.is_some()
+            || self.open_in_main(Overlay::PaneClose)
             || self.pane_ui.move_panes.is_some()
-            || self.pane_ui.menu.is_some()
+            || self.open_in_main(Overlay::EmptyPaneMenu)
             || self.connection_picker.is_some()
     }
 
@@ -3596,6 +3604,7 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.note_interaction(window);
         let ks = &event.keystroke;
         if self.on_top_layer_key(ks, window, cx) {
             return;
@@ -3759,15 +3768,22 @@ impl RootView {
     /// Ctrl+Shift+N opens the spawn dialog from anywhere.
     fn on_shortcut(&mut self, ks: &Keystroke, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let ctrl_only = ks.modifiers.control && !ks.modifiers.shift && !ks.modifiers.alt;
+        let here = window.window_handle().window_id();
         if self.tab_menu.is_some() && ks.key == "escape" {
             self.close_tab_menu(window, cx);
-        } else if self.menu.is_some() && ks.key == "escape" {
+        } else if self.menu.is_some()
+            && self.overlays.shows(Overlay::SessionMenu, here)
+            && ks.key == "escape"
+        {
             self.close_session_menu(window, cx);
         } else if self.container_menu.is_some() && ks.key == "escape" {
             self.close_container_menu(window, cx);
         } else if self.sidebar_more_open() && ks.key == "escape" {
             self.close_more_menu(window, cx);
-        } else if self.shell_menu.is_some() && ks.key == "escape" {
+        } else if self.shell_menu.is_some()
+            && self.overlays.shows(Overlay::ShellMenu, here)
+            && ks.key == "escape"
+        {
             self.close_shell_menu(window, cx);
         } else if self.sc_picker_open && ks.key == "escape" {
             self.close_sc_picker(window, cx);
@@ -4044,6 +4060,7 @@ impl Render for RootView {
         let repo_remove_layer = self.repo_remove_layer(cx);
         let workspace_creator_layer = self.workspace_creator_layer(cx);
         let vscode_prompt_layer = self.vscode_prompt_layer(cx);
+        let here = window.window_handle().window_id();
 
         div()
             .relative()
@@ -4054,15 +4071,18 @@ impl Render for RootView {
             .track_focus(&self.root_focus)
             .capture_key_down(cx.listener(Self::on_key_capture))
             .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
+            .capture_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, window, _| {
+                this.note_interaction(window);
+            }))
             .on_any_mouse_down(cx.listener(Self::on_any_mouse_down))
             .on_mouse_move(cx.listener(Self::on_drag_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_drag_end))
             .child(self.main_row(window, cx))
             .child(self.footer_bar(&footer, cx))
-            .children(self.session_menu_layer(cx).into_iter().flatten())
-            .children(self.shell_menu_layer(cx).into_iter().flatten())
+            .children(self.session_menu_layer(here, cx).into_iter().flatten())
+            .children(self.shell_menu_layer(here, cx).into_iter().flatten())
             .children(self.tab_menu_layer(cx).into_iter().flatten())
-            .children(self.empty_pane_menu_layer(cx).into_iter().flatten())
+            .children(self.empty_pane_menu_layer(here, cx).into_iter().flatten())
             .children(self.container_menu_layer(cx).into_iter().flatten())
             .children(self.more_menu_layer())
             .children(self.sc_picker_layer())
@@ -4082,7 +4102,7 @@ impl Render for RootView {
             .children(self.recover_layer(window, cx))
             .children(self.pairing_layer(cx))
             .children(self.device_block_layer(cx))
-            .children(self.pane_close_layer(cx))
+            .children(self.pane_close_layer(here, cx))
             .children(self.move_panes_layer(cx))
             .children(delete_under)
             .children(repo_remove_layer)
@@ -4092,7 +4112,7 @@ impl Render for RootView {
             .children(self.discard_confirm_layer(cx))
             .children(self.stash_drop_layer(cx))
             .children(self.notice_layers(cx))
-            .children(self.toast_layer(cx))
+            .children(self.toast_layer(here, cx))
             .children(self.undo_layer(window, cx))
             .children(self.run_confirm_layer(cx))
             .children(self.layout_chooser_layer(cx))

@@ -8,8 +8,10 @@ use gpui::{
     App, EntityId, InputHandler, Modifiers, MouseButton, MouseDownEvent, Pixels, Point,
     TestAppContext, VisualTestContext, Window, point, px, size,
 };
-use protocol::{ClientMessage, DaemonMessage, SplitDirection, TabEntry};
-use rustling_tulip_native::{OpenOutcome, POPPED_OUT_NOTE, PopoutKey};
+use protocol::{AttentionReason, ClientMessage, DaemonMessage, SplitDirection, TabEntry};
+use rustling_tulip_native::{
+    OpenOutcome, POPPED_OUT_NOTE, PopoutKey, RootView, ToastKind, ToastSpec,
+};
 use serde_json::json;
 use support::{Fixture, Harness, TestDir, pane, repo, session, split, tab};
 
@@ -1902,5 +1904,349 @@ fn leaf_click_on_a_popped_session(cx: &mut TestAppContext) {
         !sent.iter().any(|msg| changes_layout_or_sessions(msg)
             || matches!(msg, ClientMessage::ReplacePaneSession { .. })),
         "the click places s2 in no pane: {sent:?}"
+    );
+}
+
+/// Runs `change` on the root view in the pop-out window, as a control drawn
+/// there would, then lets the window settle.
+fn in_popout<R>(
+    h: &Harness<'_>,
+    popout: &mut VisualTestContext,
+    change: impl FnOnce(&mut RootView, &mut Window, &mut gpui::Context<RootView>) -> R,
+) -> R {
+    let root = h.root.clone();
+    let out = popout.update(|window, cx| root.update(cx, |root, cx| change(root, window, cx)));
+    popout.run_until_parked();
+    out
+}
+
+/// Whether `selector` was ever drawn in the main window. gpui never clears
+/// a selector's bounds, so this only says "never" for a selector new to it.
+fn ever_drawn_in_main(h: &mut Harness<'_>, selector: &str) -> bool {
+    h.cx.run_until_parked();
+    h.cx.debug_bounds(named(selector)).is_some()
+}
+
+/// `selector`, built at run time, as the `'static` name gpui's debug
+/// bounds take; a spec leaks a handful of these.
+fn named(selector: &str) -> &'static str {
+    Box::leak(selector.to_owned().into_boxed_str())
+}
+
+/// Presses `selector` in the pop-out window, a selector built at run time.
+fn click_in_popout_named(popout: &mut VisualTestContext, selector: &str) {
+    popout.run_until_parked();
+    let bounds = popout
+        .debug_bounds(named(selector))
+        .expect("the control is drawn in the pop-out");
+    popout.simulate_click(bounds.center(), Modifiers::none());
+    popout.run_until_parked();
+}
+
+/// A shell command's prompt, typed command, output and exit marks.
+fn marked_command(line: &str) -> String {
+    format!("\x1b]133;A\x07$ {line}\r\n\x1b]133;C\x07out\r\n\x1b]133;D;0\x07")
+}
+
+#[gpui::test]
+fn pane_close_dialog_opens_in_the_window_that_asked(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
+    h.answer_scrollback("s1", b"");
+    pop_out(&mut h, "t1", "p1");
+    let mut popout = h.popout_window();
+
+    in_popout(&h, &mut popout, |root, window, cx| {
+        root.close_pane_clicked("t1", "p1", Some("s1"), window, cx);
+    });
+
+    assert!(h.root(|root, _| root.pane_close_open()));
+    assert!(
+        drawn_in_popout(&mut popout, "pane-close"),
+        "the dialog draws in the pop-out that asked"
+    );
+    assert!(
+        !ever_drawn_in_main(&mut h, "pane-close"),
+        "the main window draws no copy of it"
+    );
+    popout.simulate_keystrokes("escape");
+    assert!(
+        !h.root(|root, _| root.pane_close_open()),
+        "Esc in the pop-out cancels it"
+    );
+    assert!(
+        focused_in_popout(&h, &mut popout, "p1"),
+        "the pop-out's terminal has the keyboard back"
+    );
+
+    in_popout(&h, &mut popout, |root, window, cx| {
+        root.close_pane_clicked("t1", "p1", Some("s1"), window, cx);
+    });
+    assert!(h.root(|root, _| root.pane_close_open()));
+    h.root_update(|root, _, cx| root.dock_back(&pane_key("t1", "p1"), cx));
+    assert!(
+        !h.root(|root, _| root.pane_close_open()),
+        "docking the pop-out back closes the dialog it opened"
+    );
+}
+
+#[gpui::test]
+fn session_menu_opens_in_the_popout(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
+    h.answer_scrollback("s1", b"");
+    pop_out(&mut h, "t1", "p1");
+    let mut popout = h.popout_window();
+    h.sent();
+
+    let pane = ("t1".to_owned(), "p1".to_owned());
+    in_popout(&h, &mut popout, |root, window, cx| {
+        root.open_session_menu("s1", Some(&pane), point(px(40.0), px(12.0)), window, cx);
+    });
+
+    assert!(
+        !h.root(|root, _| root.menu_labels()).is_empty(),
+        "the menu is open"
+    );
+    assert!(
+        drawn_in_popout(&mut popout, "session-menu"),
+        "the menu draws in the pop-out"
+    );
+    assert!(
+        !ever_drawn_in_main(&mut h, "session-menu"),
+        "the main window draws no copy of it"
+    );
+    popout.simulate_keystrokes("escape");
+    assert!(
+        h.root(|root, _| root.menu_labels()).is_empty(),
+        "Esc in the pop-out closes it"
+    );
+    assert!(
+        focused_in_popout(&h, &mut popout, "p1"),
+        "the pop-out's terminal has the keyboard back"
+    );
+    popout.simulate_keystrokes("a");
+    assert_eq!(h.sent_input("s1"), b"a", "keys reach the session again");
+}
+
+#[gpui::test]
+fn gutter_dot_menu_opens_in_the_popout(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture::single(session("s1").shell("C:/work").build());
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.answer_scrollback("s1", b"");
+    pop_out(&mut h, "t1", "p1");
+    let mut popout = h.popout_window();
+    h.pty("s1", marked_command("make").as_bytes());
+
+    click_in_popout_named(&mut popout, "shell-dot-p1-0");
+
+    assert!(h.root(|root, _| root.shell_menu_open()));
+    assert!(
+        drawn_in_popout(&mut popout, "shell-menu"),
+        "the gutter menu draws in the pop-out"
+    );
+    assert!(
+        !ever_drawn_in_main(&mut h, "shell-menu"),
+        "the main window draws no copy of it"
+    );
+    popout.simulate_keystrokes("escape");
+    assert!(
+        !h.root(|root, _| root.shell_menu_open()),
+        "Esc in the pop-out closes it"
+    );
+    assert!(focused_in_popout(&h, &mut popout, "p1"));
+}
+
+/// A toast that stays until closed, titled `title`.
+fn sticky_toast(title: &str) -> ToastSpec {
+    ToastSpec {
+        kind: ToastKind::Info,
+        title: title.to_owned(),
+        detail: None,
+        key: None,
+        sticky: true,
+        actions: Vec::new(),
+    }
+}
+
+#[gpui::test]
+fn toast_shows_in_the_focused_window(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
+    h.answer_scrollback("s1", b"");
+    pop_out(&mut h, "t1", "p1");
+    let mut popout = h.popout_window();
+
+    click_in_popout_named(&mut popout, "popout-toolbar-p1");
+    let first = h.root_update(|root, _, cx| root.push_toast_spec(sticky_toast("first"), cx));
+    let first_close = format!("toast-close-{first}");
+    popout.run_until_parked();
+    assert!(
+        popout.debug_bounds(named(&first_close)).is_some(),
+        "a toast raised after a press in the pop-out shows there"
+    );
+    assert!(!ever_drawn_in_main(&mut h, &first_close));
+
+    h.cx.simulate_keystrokes("escape");
+    let second = h.root_update(|root, _, cx| root.push_toast_spec(sticky_toast("second"), cx));
+    assert!(
+        ever_drawn_in_main(&mut h, &format!("toast-close-{second}")),
+        "a toast raised after a key in the main window shows there"
+    );
+    assert!(
+        !ever_drawn_in_main(&mut h, &first_close),
+        "the shown toast stays in the pop-out"
+    );
+
+    assert!(h.close_popout(), "the pop-out closes");
+    assert!(
+        ever_drawn_in_main(&mut h, &first_close),
+        "a closed window's toast moves to the main window"
+    );
+}
+
+#[gpui::test]
+fn gutter_dot_menu_works_after_a_popout_restart(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = Fixture::single(session("s1").build());
+    fixture
+        .sessions
+        .push(session("s2").shell("C:/work").build());
+    let mut h = Harness::with(cx, &dir, &fixture);
+    pop_out_session(&mut h, "s2");
+    h.answer_scrollback("s2", b"");
+    h.send(DaemonMessage::SessionUpdated {
+        session: session("s2").shell("C:/work").exited(3).build(),
+        request_id: None,
+    });
+    let mut popout = h.popout_window();
+    h.sent();
+
+    click_in_popout(&mut popout, "exited-restart-popout:s2");
+    let restart = h
+        .sent()
+        .into_iter()
+        .find_map(|msg| match msg {
+            ClientMessage::DuplicateSession {
+                session_id,
+                request_id,
+                ..
+            } if session_id == "s2" => request_id,
+            _ => None,
+        })
+        .expect("a restart of s2 with a request id");
+    h.send(DaemonMessage::SessionUpdated {
+        session: session("s2b").shell("C:/work").build(),
+        request_id: Some(restart),
+    });
+    h.answer_scrollback("s2b", b"");
+    h.pty("s2b", marked_command("make").as_bytes());
+
+    click_in_popout_named(&mut popout, "shell-dot-popout:s2b-0");
+
+    assert!(
+        h.root(|root, _| root.shell_menu_open()),
+        "the restarted terminal's gutter dot opens its menu"
+    );
+    assert!(drawn_in_popout(&mut popout, "shell-menu"));
+}
+
+#[gpui::test]
+fn delete_worktree_confirm_from_a_popout_menu_takes_the_main_windows_keys(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture::single(session("s1").worktree("r1").build());
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.answer_scrollback("s1", b"");
+    pop_out(&mut h, "t1", "p1");
+    let mut popout = h.popout_window();
+    popout.update(|window, _| window.activate_window());
+    in_popout(&h, &mut popout, |root, window, cx| {
+        root.close_pane_clicked("t1", "p1", Some("s1"), window, cx);
+    });
+
+    click_in_popout(&mut popout, "pane-close-delete");
+
+    assert_eq!(
+        h.root(|root, _| root.delete_dialog_session().map(str::to_owned))
+            .as_deref(),
+        Some("s1"),
+        "the delete-worktree confirm opens"
+    );
+    assert!(
+        window_active(h.cx),
+        "the main window, which draws the confirm, comes to the front"
+    );
+    h.cx.simulate_keystrokes("escape");
+    assert_eq!(
+        h.root(|root, _| root.delete_dialog_session().map(str::to_owned)),
+        None,
+        "Esc in the main window cancels it"
+    );
+}
+
+#[gpui::test]
+fn opening_a_menu_in_main_hands_the_popouts_keys_back(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
+    h.answer_scrollback("s1", b"");
+    pop_out(&mut h, "t1", "p1");
+    let mut popout = h.popout_window();
+    let pane = ("t1".to_owned(), "p1".to_owned());
+    in_popout(&h, &mut popout, |root, window, cx| {
+        root.open_session_menu("s1", Some(&pane), point(px(40.0), px(12.0)), window, cx);
+    });
+    assert!(!focused_in_popout(&h, &mut popout, "p1"), "the menu has it");
+
+    h.right_click_on("leaf-s1");
+
+    assert!(
+        !h.root(|root, _| root.menu_labels()).is_empty(),
+        "the menu opened in the main window"
+    );
+    popout.run_until_parked();
+    assert!(
+        focused_in_popout(&h, &mut popout, "p1"),
+        "the pop-out's terminal has its window's keyboard back"
+    );
+}
+
+#[gpui::test]
+fn an_overlay_in_a_popout_does_not_block_the_main_window(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = Fixture::single(session("s1").build());
+    fixture
+        .sessions
+        .push(session("s2").status("working").build());
+    fixture.tabs = vec![tab(
+        "t1",
+        &split(
+            SplitDirection::Horizontal,
+            pane("p1", Some("s1")),
+            pane("p2", Some("s2")),
+        ),
+    )];
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.answer_scrollback("s1", b"");
+    h.answer_scrollback("s2", b"");
+    pop_out(&mut h, "t1", "p1");
+    let mut popout = h.popout_window();
+    in_popout(&h, &mut popout, |root, window, cx| {
+        root.close_pane_clicked("t1", "p1", Some("s1"), window, cx);
+    });
+    assert!(h.root(|root, _| root.pane_close_open()));
+    h.cx.update(|window, _| window.activate_window());
+    assert!(window_active(h.cx), "the main window has the keyboard");
+    h.notified();
+
+    h.send(DaemonMessage::Attention {
+        session_id: "s2".to_owned(),
+        reason: AttentionReason::AwaitingInput,
+    });
+
+    assert_eq!(
+        h.notified(),
+        Vec::new(),
+        "s2's pane is on screen in the main window, which no dialog covers"
     );
 }

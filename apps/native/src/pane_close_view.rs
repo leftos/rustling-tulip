@@ -1,10 +1,13 @@
 //! The pane-close dialog: its modal, its keys, and what each answer sends.
 //! The model is [`crate::pane_close`].
 
-use gpui::{AnyElement, ClickEvent, Context, FontWeight, Keystroke, Window, div, prelude::*, px};
+use gpui::{
+    AnyElement, ClickEvent, Context, FontWeight, Keystroke, Window, WindowId, div, prelude::*, px,
+};
 use protocol::ClientMessage;
 
 use crate::notice_view::modal_panel;
+use crate::overlay_owner::Overlay;
 use crate::pane_close::{Control, NOTE, PaneClose, TITLE};
 use crate::session_menu::{ConfirmOwner, backdrop, dialog_button};
 use crate::{MUTED, RootView};
@@ -40,8 +43,9 @@ impl RootView {
     }
 
     /// The header's ×: an empty pane closes at once; a pane showing a
-    /// session asks what becomes of the session first.
-    pub(crate) fn close_pane_clicked(
+    /// session asks what becomes of the session first, in `window`, the
+    /// window that asked.
+    pub fn close_pane_clicked(
         &mut self,
         tab_id: &str,
         pane_id: &str,
@@ -67,6 +71,8 @@ impl RootView {
         };
         let label = self.session_label(&session.id);
         self.pane_ui.close = Some(PaneClose::new(tab_id, pane_id, session, label));
+        self.overlays
+            .opened(Overlay::PaneClose, window.window_handle().window_id());
         self.pane_ui.dialog_focus.focus(window);
         cx.notify();
     }
@@ -104,6 +110,7 @@ impl RootView {
         let Some(dialog) = self.pane_ui.close.take() else {
             return;
         };
+        let owner = self.overlays.owner(Overlay::PaneClose);
         match control {
             Control::Cancel | Control::Dismiss => {}
             Control::PaneOnly => {
@@ -133,16 +140,29 @@ impl RootView {
                 }
             }
             Control::Delete => {
+                // The confirm draws in the main window: a pop-out that asked
+                // gets its terminal's keyboard back.
+                if !self.is_main_window(window) {
+                    self.hand_back_focus(owner, window, cx);
+                }
                 self.open_delete_dialog(dialog.session_id(), ConfirmOwner::Menu, window, cx);
                 return;
             }
         }
-        self.focus_active_pane(window, cx);
+        self.hand_back_focus(owner, window, cx);
         cx.notify();
     }
 
-    /// The dialog over a backdrop that takes every click beneath it.
-    pub(crate) fn pane_close_layer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// The dialog over a backdrop that takes every click beneath it, while
+    /// window `here`, the one that asked, draws it.
+    pub(crate) fn pane_close_layer(
+        &self,
+        here: WindowId,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if !self.overlays.shows(Overlay::PaneClose, here) {
+            return None;
+        }
         let dialog = self.pane_ui.close.as_ref()?;
         let mut button = |control: Control| {
             dialog_button(
