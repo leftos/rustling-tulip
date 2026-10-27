@@ -1352,12 +1352,7 @@ impl RootView {
             self.sidebar.sessions(),
             &self.agents,
         );
-        let terminal = match &key {
-            PopoutKey::Pane { pane_id, .. } => {
-                self.panes.get(pane_id).map(|slot| slot.view().clone())
-            }
-            PopoutKey::Tab { .. } | PopoutKey::Session { .. } => None,
-        };
+        let terminal = self.popout_terminal(&key);
         let opening = PopoutOpening {
             key,
             display_id,
@@ -1371,16 +1366,39 @@ impl RootView {
         cx.defer(move |cx| open_popout_now(&root, opening, cx));
     }
 
-    /// Brings `key`'s pop-out window to the front; a cloaked client never
-    /// activates a window.
+    /// The terminal `key`'s pop-out draws: a pane pop-out's pane while it is
+    /// still in the key's tab. A pane moved to another tab draws in the main
+    /// grid there, so its pop-out draws no terminal.
+    pub(crate) fn popout_terminal(
+        &self,
+        key: &PopoutKey,
+    ) -> Option<gpui::Entity<term_view::TerminalPane>> {
+        let PopoutKey::Pane { tab_id, pane_id } = key else {
+            return None;
+        };
+        self.panes
+            .get(pane_id)
+            .filter(|slot| slot.tab_id() == tab_id)
+            .map(|slot| slot.view().clone())
+    }
+
+    /// Brings `key`'s pop-out window to the front and gives the keyboard to
+    /// its pane's terminal; a cloaked client never activates a window.
     fn activate_popout(&self, key: &PopoutKey, cx: &mut Context<Self>) {
-        if offscreen::requested() {
-            return;
-        }
         let Some(handle) = self.popout_windows.get(key) else {
             return;
         };
-        if let Err(err) = handle.update(cx, |_, window, _| window.activate_window()) {
+        let terminal = self.popout_terminal(key);
+        let activate = !offscreen::requested();
+        let raised = handle.update(cx, |_, window, cx| {
+            if activate {
+                window.activate_window();
+            }
+            if let Some(terminal) = &terminal {
+                terminal.read(cx).focus(window);
+            }
+        });
+        if let Err(err) = raised {
             tracing::warn!(?key, "activating a pop-out window: {err:#}");
         }
     }

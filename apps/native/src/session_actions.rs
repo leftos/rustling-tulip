@@ -8,6 +8,7 @@ use protocol::{
     AgentDescriptor, ClientMessage, SessionMode, SessionSnapshot, SessionStatus, TabEntry,
 };
 
+use crate::popouts::{POP_OUT_ALREADY_TIP, POP_OUT_NO_PANE_TIP, PopoutKey, Popouts, pane_to_pop};
 use crate::remote_mode::Capabilities;
 use crate::sidebar::{LeafState, can_attach, runtime_label};
 use crate::spawn_form::{OpenChoice, Target};
@@ -113,6 +114,10 @@ pub(crate) enum SessionRow {
     AddToCurrentTab { new_tab: bool },
     /// Opens the session in a new tab; offered while no pane shows it.
     AddToNewTab,
+    /// Pops the pane [`crate::popouts::pane_to_pop`] picks out into its own
+    /// window; dimmed while no pane shows the session or a pop-out already
+    /// does.
+    PopOut,
     /// Opens the folder of the session's own worktree.
     RevealWorktree,
     /// The checkable "Don't count as busy", among the appearance rows and
@@ -481,12 +486,15 @@ pub(crate) fn menu_entries(session: &SessionSnapshot, mode: MenuMode) -> Vec<Men
 /// rows: Duplicate ▸ in every state (dimmed for a headless session); Move
 /// to ▸ while a pane shows the session, else Add to current tab and Add to
 /// new tab when it can be shown in a pane (only the first, reading Add to
-/// new tab, when placing it would open a tab anyway); Reveal worktree when
-/// it has a worktree of its own, dimmed where `caps` opens no local files.
+/// new tab, when placing it would open a tab anyway); Pop out after either,
+/// dimmed while no pane shows the session or one of `popouts` already does;
+/// Reveal worktree when it has a worktree of its own, dimmed where `caps`
+/// opens no local files.
 pub(crate) fn session_rows(
     session: &SessionSnapshot,
     tabs: &TabsModel,
     sessions: &[SessionSnapshot],
+    popouts: &Popouts,
     caps: Capabilities,
 ) -> Vec<OfferedRow> {
     let offered = |row| OfferedRow {
@@ -499,12 +507,16 @@ pub(crate) fn session_rows(
     }];
     if find_tab_containing_session(tabs.tabs(), &session.id).is_some() {
         rows.push(offered(SessionRow::MoveTo));
+        if can_attach(session) {
+            rows.push(pop_out_row(&session.id, tabs, popouts));
+        }
     } else if can_attach(session) {
         let new_tab = matches!(tabs.place(session, sessions), Placement::NewTab);
         rows.push(offered(SessionRow::AddToCurrentTab { new_tab }));
         if !new_tab {
             rows.push(offered(SessionRow::AddToNewTab));
         }
+        rows.push(pop_out_row(&session.id, tabs, popouts));
     }
     if worktree_to_reveal(session).is_some() {
         rows.push(OfferedRow {
@@ -513,6 +525,21 @@ pub(crate) fn session_rows(
         });
     }
     rows
+}
+
+/// Pop out for `session_id`: dimmed while no pane shows it, or while an open
+/// pop-out already shows the pane it would pop, or content overlapping it.
+fn pop_out_row(session_id: &str, tabs: &TabsModel, popouts: &Popouts) -> OfferedRow {
+    let disabled = match pane_to_pop(session_id, tabs.tabs(), tabs.active_id()) {
+        None => Some(POP_OUT_NO_PANE_TIP),
+        Some((tab_id, pane_id)) => popouts
+            .blocking(&PopoutKey::Pane { tab_id, pane_id }, tabs.tabs())
+            .map(|_| POP_OUT_ALREADY_TIP),
+    };
+    OfferedRow {
+        row: SessionRow::PopOut,
+        disabled,
+    }
 }
 
 /// The folder Reveal worktree opens: the first member's worktree, for a
@@ -625,6 +652,7 @@ impl SessionRow {
             Self::MoveTo => "session-menu-move",
             Self::AddToCurrentTab { .. } => "session-menu-add-current",
             Self::AddToNewTab => "session-menu-add-new",
+            Self::PopOut => "session-menu-popout",
             Self::RevealWorktree => "session-menu-reveal",
             Self::BusyExcluded { .. } => "session-menu-busy-excluded",
         }
@@ -636,6 +664,7 @@ impl SessionRow {
             Self::MoveTo => "Move to ▸",
             Self::AddToCurrentTab { new_tab: false } => "Add to current tab",
             Self::AddToCurrentTab { new_tab: true } | Self::AddToNewTab => "Add to new tab",
+            Self::PopOut => "Pop out",
             Self::RevealWorktree => "Reveal worktree",
             Self::BusyExcluded { .. } => "Don't count as busy",
         }
@@ -946,6 +975,7 @@ mod tests {
         menu_entries, move_lines, move_source, orphan_banner_text, overlay_actions,
         pane_shows_exit, plan, rename_message, self_exited, session_rows, worktree_to_reveal,
     };
+    use crate::popouts::{POP_OUT_ALREADY_TIP, POP_OUT_NO_PANE_TIP, PopoutKey, Popouts};
     use crate::remote_mode::Capabilities;
     use crate::spawn_form::{OpenChoice, Target};
     use crate::tabs::TabsModel;
@@ -1485,10 +1515,124 @@ mod tests {
     }
 
     fn rows_of(s: &SessionSnapshot, tabs: &TabsModel) -> Vec<SessionRow> {
-        session_rows(s, tabs, &[], local())
+        session_rows(s, tabs, &[], &Popouts::default(), local())
             .into_iter()
             .map(|offered| offered.row)
             .collect()
+    }
+
+    /// The Pop out row `s` offers with `popouts` open, if any.
+    fn pop_out_row(s: &SessionSnapshot, tabs: &TabsModel, popouts: &Popouts) -> Option<OfferedRow> {
+        session_rows(s, tabs, &[], popouts, local())
+            .into_iter()
+            .find(|offered| offered.row == SessionRow::PopOut)
+    }
+
+    fn pane_key(tab_id: &str, pane_id: &str) -> PopoutKey {
+        PopoutKey::Pane {
+            tab_id: tab_id.to_owned(),
+            pane_id: pane_id.to_owned(),
+        }
+    }
+
+    #[test]
+    fn pop_out_is_offered_for_a_session_in_a_pane() {
+        let tabs = model_with(&[tab("t1", &pane("p1", Some("s1")))]);
+        let s = session("idle");
+        assert_eq!(
+            rows_of(&s, &tabs),
+            [
+                SessionRow::Duplicate,
+                SessionRow::MoveTo,
+                SessionRow::PopOut
+            ],
+            "Pop out follows Move to"
+        );
+        assert_eq!(
+            pop_out_row(&s, &tabs, &Popouts::default()),
+            Some(OfferedRow {
+                row: SessionRow::PopOut,
+                disabled: None,
+            })
+        );
+        assert_eq!(SessionRow::PopOut.label(), "Pop out");
+        assert_eq!(SessionRow::PopOut.selector(), "session-menu-popout");
+    }
+
+    #[test]
+    fn pop_out_is_disabled_without_a_pane() {
+        let mut tabs = model_with(&[tab("t1", &pane("p1", None))]);
+        tabs.activate("t1");
+        let s = session("idle");
+        assert_eq!(
+            rows_of(&s, &tabs),
+            [
+                SessionRow::Duplicate,
+                SessionRow::AddToCurrentTab { new_tab: false },
+                SessionRow::AddToNewTab,
+                SessionRow::PopOut,
+            ],
+            "Pop out follows Add to new tab"
+        );
+        assert_eq!(
+            pop_out_row(&s, &tabs, &Popouts::default()),
+            Some(OfferedRow {
+                row: SessionRow::PopOut,
+                disabled: Some(POP_OUT_NO_PANE_TIP),
+            })
+        );
+        assert_eq!(POP_OUT_NO_PANE_TIP, "Show it in a pane to pop it out");
+    }
+
+    #[test]
+    fn pop_out_is_disabled_when_already_popped() {
+        let entries = [
+            tab("t1", &pane("p1", Some("s1"))),
+            tab("t2", &pane("p2", Some("s1"))),
+        ];
+        let tabs = model_with(&entries);
+        let s = session("idle");
+        let dimmed = Some(OfferedRow {
+            row: SessionRow::PopOut,
+            disabled: Some(POP_OUT_ALREADY_TIP),
+        });
+
+        let mut same_pane = Popouts::default();
+        same_pane.open(pane_key("t1", "p1"), &entries);
+        assert_eq!(pop_out_row(&s, &tabs, &same_pane), dimmed);
+
+        let mut other_pane = Popouts::default();
+        other_pane.open(pane_key("t2", "p2"), &entries);
+        assert_eq!(
+            pop_out_row(&s, &tabs, &other_pane),
+            dimmed,
+            "another pane of the session is popped: the pop-outs would overlap"
+        );
+        assert_eq!(POP_OUT_ALREADY_TIP, "Already in a pop-out");
+    }
+
+    #[test]
+    fn pop_out_is_hidden_for_a_headless_session_in_a_pane() {
+        let tabs = model_with(&[tab("t1", &pane("p1", Some("s1")))]);
+        let mut s = session("working");
+        s.mode = SessionMode::Headless;
+        assert_eq!(
+            pop_out_row(&s, &tabs, &Popouts::default()),
+            None,
+            "a pop-out draws a bare terminal, which a headless session never fills"
+        );
+    }
+
+    #[test]
+    fn pop_out_is_hidden_when_attach_is_refused() {
+        let tabs = model_with(&[tab("t1", &pane("p1", None))]);
+        let mut s = session("working");
+        s.mode = SessionMode::Headless;
+        assert_eq!(
+            pop_out_row(&s, &tabs, &Popouts::default()),
+            None,
+            "a session no pane can ever show offers no Pop out"
+        );
     }
 
     #[test]
@@ -1505,7 +1649,7 @@ mod tests {
             abandoned(),
         ] {
             assert_eq!(
-                session_rows(&s, &tabs, &[], local()).first(),
+                session_rows(&s, &tabs, &[], &Popouts::default(), local()).first(),
                 Some(&offered),
                 "{:?}",
                 action_state(&s)
@@ -1521,7 +1665,7 @@ mod tests {
             let mut s = session(status);
             s.mode = SessionMode::Headless;
             assert_eq!(
-                session_rows(&s, &tabs, &[], local()).first(),
+                session_rows(&s, &tabs, &[], &Popouts::default(), local()).first(),
                 Some(&OfferedRow {
                     row: SessionRow::Duplicate,
                     disabled: Some(HEADLESS_UNSUPPORTED_TIP),
@@ -1544,7 +1688,11 @@ mod tests {
         for s in [session("idle"), session("stopped")] {
             assert_eq!(
                 rows_of(&s, &tabs),
-                [SessionRow::Duplicate, SessionRow::MoveTo],
+                [
+                    SessionRow::Duplicate,
+                    SessionRow::MoveTo,
+                    SessionRow::PopOut
+                ],
                 "{:?}",
                 s.status
             );
@@ -1561,7 +1709,12 @@ mod tests {
         for s in [session("idle"), inactive(session("stopped"))] {
             assert_eq!(
                 rows_of(&s, &tabs),
-                [SessionRow::Duplicate, current, SessionRow::AddToNewTab],
+                [
+                    SessionRow::Duplicate,
+                    current,
+                    SessionRow::AddToNewTab,
+                    SessionRow::PopOut
+                ],
                 "{:?}",
                 action_state(&s)
             );
@@ -1579,7 +1732,7 @@ mod tests {
         let into_new = SessionRow::AddToCurrentTab { new_tab: true };
         assert_eq!(
             rows_of(&session("idle"), &tabs),
-            [SessionRow::Duplicate, into_new],
+            [SessionRow::Duplicate, into_new, SessionRow::PopOut],
             "with a diff tab active the current-tab row opens a tab, so it is the only one"
         );
         assert_eq!(into_new.label(), "Add to new tab");
@@ -1587,7 +1740,7 @@ mod tests {
         let no_tabs = model_with(&[]);
         assert_eq!(
             rows_of(&session("idle"), &no_tabs),
-            [SessionRow::Duplicate, into_new],
+            [SessionRow::Duplicate, into_new, SessionRow::PopOut],
             "no tab at all"
         );
     }
@@ -1617,6 +1770,7 @@ mod tests {
             [
                 SessionRow::Duplicate,
                 SessionRow::MoveTo,
+                SessionRow::PopOut,
                 SessionRow::RevealWorktree
             ]
         );
@@ -1634,7 +1788,11 @@ mod tests {
         for s in [blank, shared, second] {
             assert_eq!(
                 rows_of(&s, &tabs),
-                [SessionRow::Duplicate, SessionRow::MoveTo]
+                [
+                    SessionRow::Duplicate,
+                    SessionRow::MoveTo,
+                    SessionRow::PopOut
+                ]
             );
         }
     }

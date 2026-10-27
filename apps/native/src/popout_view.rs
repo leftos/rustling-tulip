@@ -57,18 +57,12 @@ impl PopoutView {
     /// A pane moved to another tab has left this pop-out too: the main grid
     /// draws it there.
     fn terminal(&self, cx: &App) -> Option<Entity<TerminalPane>> {
-        let PopoutKey::Pane { tab_id, pane_id } = &self.key else {
-            return None;
-        };
         let root = self.root.upgrade()?;
         let root = root.read(cx);
         if !root.popouts.is_open(&self.key) {
             return None;
         }
-        root.panes
-            .get(pane_id)
-            .filter(|slot| slot.tab_id() == tab_id)
-            .map(|slot| slot.view().clone())
+        root.popout_terminal(&self.key)
     }
 }
 

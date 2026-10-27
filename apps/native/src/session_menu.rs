@@ -24,6 +24,7 @@ use crate::notices::{ActionFailedNotice, ToastKind};
 use crate::open::{OpenJob, VsCodeTarget, copy_path, repo_folder, workspace_vscode_target};
 use crate::open_view::Then;
 use crate::palette::{CHIP, DIALOG_SHADOW, LINE_STRONG, SCRIM, SURFACE};
+use crate::popouts::{POP_OUT_ALREADY_TIP, PopoutKey, pane_to_pop};
 use crate::remote_mode::Capabilities;
 use crate::session_actions::{
     ABANDONED_ACTIONS, ActionState, DuplicateTarget, HEADLESS_UNSUPPORTED_TIP, MenuEntry, MenuMode,
@@ -39,6 +40,9 @@ use crate::spawn_view::SpawnEntry;
 use crate::tabs::{collect_panes, find_tab_containing_session};
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::{BORDER, DANGER, HOVER_BG, MUTED, RootView, TEXT, UI_TEXT_SIZE, WARNING, tooltip};
+
+/// What the pane header's Pop out does.
+const POP_OUT_TIP: &str = "Open this pane in a window of its own";
 
 pub(crate) const MENU_WIDTH: f32 = 240.0;
 /// The share of the window's height a menu may take before its rows scroll,
@@ -462,6 +466,7 @@ impl RootView {
                     session,
                     &self.tabs,
                     self.sidebar.sessions(),
+                    &self.popouts,
                     self.capabilities(),
                 )
             })
@@ -1556,6 +1561,15 @@ impl RootView {
                 self.close_session_menu(window, cx);
                 self.open_in_new_tab(session_id);
             }
+            SessionRow::PopOut => {
+                let pane = pane_to_pop(session_id, self.tabs.tabs(), self.tabs.active_id());
+                self.close_session_menu(window, cx);
+                let Some((tab_id, pane_id)) = pane else {
+                    tracing::warn!(session = %session_id, "pop out: no pane shows the session");
+                    return;
+                };
+                self.open_popout(PopoutKey::Pane { tab_id, pane_id }, window, cx);
+            }
             SessionRow::RevealWorktree => {
                 let path = self
                     .sidebar
@@ -2106,6 +2120,43 @@ impl RootView {
     /// the one in flight.
     fn action_ready(&self, session_id: &str, action: SessionAction) -> bool {
         action.pending_label().is_none() || !self.duplicates.is_pending(session_id)
+    }
+
+    /// The pane header's Pop out, which opens the pane in a window of its
+    /// own on the press; dimmed while an open pop-out already shows its
+    /// session. Nothing for an empty pane.
+    pub(crate) fn header_pop_out(
+        &self,
+        tab_id: &str,
+        pane_id: &str,
+        session_id: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        session_id
+            .and_then(|id| self.sidebar.session(id))
+            .filter(|session| can_attach(session))?;
+        let key = PopoutKey::Pane {
+            tab_id: tab_id.to_owned(),
+            pane_id: pane_id.to_owned(),
+        };
+        let button = header_text_button(&format!("pane-popout-{pane_id}"), "Pop out", MUTED);
+        if self.popouts.blocking(&key, self.tabs.tabs()).is_some() {
+            return Some(
+                button
+                    .opacity(0.6)
+                    .cursor_default()
+                    .hover(|style| style)
+                    .tooltip(tooltip(POP_OUT_ALREADY_TIP))
+                    .into_any_element(),
+            );
+        }
+        let button = button.tooltip(tooltip(POP_OUT_TIP));
+        Some(
+            on_press(button, cx, move |this, window, cx| {
+                this.open_popout(key.clone(), window, cx);
+            })
+            .into_any_element(),
+        )
     }
 
     /// The pane header's Stop (then "Confirm stop" / "Cancel"), or the exit

@@ -4,11 +4,11 @@
 
 use crate::support;
 
-use gpui::{Modifiers, TestAppContext, px, size};
-use protocol::{ClientMessage, DaemonMessage, TabEntry};
+use gpui::{Modifiers, Pixels, Point, TestAppContext, VisualTestContext, px, size};
+use protocol::{ClientMessage, DaemonMessage, SplitDirection, TabEntry};
 use rustling_tulip_native::{OpenOutcome, POPPED_OUT_NOTE, PopoutKey};
 use serde_json::json;
-use support::{Fixture, Harness, TestDir, pane, repo, session, tab};
+use support::{Fixture, Harness, TestDir, pane, repo, session, split, tab};
 
 /// A diff tab of `path` in `r1`'s main tree.
 fn diff_tab(id: &str, path: &str) -> TabEntry {
@@ -115,6 +115,7 @@ fn main_grid_shows_a_placeholder_for_a_popped_pane(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
     assert_eq!(h.root(|root, _| root.pane_note("p1")), None);
+    let header = h.center("pane-header-p1");
 
     pop_out(&mut h, "t1", "p1");
     assert_eq!(
@@ -124,7 +125,14 @@ fn main_grid_shows_a_placeholder_for_a_popped_pane(cx: &mut TestAppContext) {
     assert_eq!(POPPED_OUT_NOTE, "Popped out to its own window");
     assert!(
         h.bounds("pane-popped-p1").origin.x >= px(0.0),
-        "the placeholder is drawn"
+        "the card is drawn"
+    );
+    for part in ["popped-label-p1", "popped-focus-p1", "popped-dock-p1"] {
+        assert!(h.bounds(part).origin.x >= px(0.0), "{part} is drawn");
+    }
+    assert!(
+        !header_takes_a_right_click(&mut h, header),
+        "the card replaces the pane, header and all"
     );
 
     let key = pane_key("t1", "p1");
@@ -321,4 +329,274 @@ fn docking_back_before_the_window_opens_leaves_no_window(cx: &mut TestAppContext
         "no pop-out window outlives its dock-back"
     );
     assert_eq!(h.root(|root, _| root.popout_count()), 0);
+}
+
+#[gpui::test]
+fn a_drop_on_a_popped_card_changes_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = Fixture::single(session("s1").build());
+    fixture.sessions.push(session("s2").build());
+    fixture.sessions.push(session("s3").build());
+    fixture.tabs = vec![tab(
+        "t1",
+        &split(
+            SplitDirection::Horizontal,
+            pane("p1", Some("s1")),
+            pane("p2", Some("s2")),
+        ),
+    )];
+    let mut h = Harness::with(cx, &dir, &fixture);
+    pop_out(&mut h, "t1", "p1");
+    h.sent();
+    let card = h.center("pane-popped-p1");
+
+    let header = h.center("pane-header-p2");
+    h.drag_and_drop(header, card);
+    let leaf = h.center("leaf-s3");
+    h.drag_and_drop(leaf, card);
+
+    let sent = h.sent();
+    assert!(
+        !sent.iter().any(|msg| changes_layout_or_sessions(msg)
+            || matches!(msg, ClientMessage::ReplacePaneSession { .. })),
+        "a drop on the card asks the daemon for nothing: {sent:?}"
+    );
+    assert!(popped(&mut h), "the pop-out stays open");
+    let mut popout = h.popout_window();
+    popout.run_until_parked();
+    assert_eq!(
+        popout.window_title().as_deref(),
+        Some("s1"),
+        "the pop-out still shows its session"
+    );
+}
+
+#[gpui::test]
+fn focus_window_after_a_cross_tab_move_focuses_no_hidden_terminal(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = Fixture::single(session("s1").build());
+    fixture.sessions.push(session("s2").build());
+    fixture.tabs.push(tab("t2", &pane("p2", Some("s2"))));
+    let mut h = Harness::with(cx, &dir, &fixture);
+    pop_out(&mut h, "t1", "p1");
+
+    // The daemon moved p1 out of t1 and into t2.
+    h.send(DaemonMessage::Tabs {
+        tabs: vec![tab(
+            "t2",
+            &split(
+                SplitDirection::Horizontal,
+                pane("p2", Some("s2")),
+                pane("p1", Some("s1")),
+            ),
+        )],
+    });
+    let mut popout = h.popout_window();
+    popout.update(|window, _| window.blur());
+    h.cx.update(|window, _| window.blur());
+
+    let key = pane_key("t1", "p1");
+    h.root_update(move |root, window, cx| root.open_popout(key, window, cx));
+
+    let root = h.root.clone();
+    let in_popout =
+        popout.update(|window, cx| root.read(cx).pane_terminal_focused("p1", window, cx));
+    let root = h.root.clone();
+    let in_main =
+        h.cx.update(|window, cx| root.read(cx).pane_terminal_focused("p1", window, cx));
+    assert!(
+        !in_popout && !in_main,
+        "p1's terminal draws in the main grid now; the pop-out focuses nothing \
+         (pop-out {in_popout}, main {in_main})"
+    );
+}
+
+/// Whether a right-click where a pane header was opens a session menu, as a
+/// drawn header does; a stale debug bound cannot say whether it still is.
+fn header_takes_a_right_click(h: &mut Harness<'_>, at: Point<Pixels>) -> bool {
+    h.right_click(at);
+    let opened = !h.root(|root, _| root.menu_groups()).is_empty();
+    if opened {
+        h.keys("escape");
+    }
+    opened
+}
+
+/// Whether `window` is the active window.
+fn is_active(window: &mut VisualTestContext) -> bool {
+    window.run_until_parked();
+    window.update(|window, _| window.is_window_active())
+}
+
+#[gpui::test]
+fn header_pop_out_opens_a_window_and_leaves_a_card(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
+    h.sent();
+    let header = h.center("pane-header-p1");
+    assert!(
+        header_takes_a_right_click(&mut h, header),
+        "a drawn header opens the session menu"
+    );
+
+    h.click_on("pane-popout-p1");
+
+    assert_eq!(h.window_count(), 2, "the pane has a window of its own");
+    assert!(popped(&mut h));
+    let sent = h.sent();
+    assert!(
+        !sent.iter().any(changes_layout_or_sessions),
+        "popping out asks the daemon for nothing: {sent:?}"
+    );
+    for part in [
+        "pane-popped-p1",
+        "popped-label-p1",
+        "popped-focus-p1",
+        "popped-dock-p1",
+    ] {
+        assert!(h.bounds(part).origin.x >= px(0.0), "{part} is drawn");
+    }
+    assert_eq!(
+        h.root(|root, _| root.pane_note("p1")),
+        Some(POPPED_OUT_NOTE)
+    );
+    assert!(
+        !header_takes_a_right_click(&mut h, header),
+        "the popped pane's header is not drawn in the main grid"
+    );
+}
+
+#[gpui::test]
+fn dock_back_from_the_card_closes_the_window(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
+    pop_out(&mut h, "t1", "p1");
+    assert_eq!(h.window_count(), 2);
+    h.sent();
+
+    h.click_on("popped-dock-p1");
+
+    assert_eq!(h.window_count(), 1, "the pop-out window closed");
+    assert!(!popped(&mut h));
+    assert_eq!(h.root(|root, _| root.popout_count()), 0);
+    assert_eq!(
+        h.root(|root, _| root.pane_note("p1")),
+        None,
+        "the terminal is back in the grid"
+    );
+    let sent = h.sent();
+    assert!(
+        !sent.iter().any(changes_layout_or_sessions),
+        "docking back asks the daemon for nothing: {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn focus_window_raises_the_open_popout(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
+    pop_out(&mut h, "t1", "p1");
+    let mut popout = h.popout_window();
+    popout.update(|window, _| window.blur());
+    h.cx.update(|window, _| window.activate_window());
+    assert!(!is_active(&mut popout), "the main window is in front");
+
+    h.click_on("popped-focus-p1");
+
+    assert!(is_active(&mut popout), "the pop-out window is raised");
+    let root = h.root.clone();
+    let focused = popout.update(|window, cx| root.read(cx).pane_terminal_focused("p1", window, cx));
+    assert!(focused, "its terminal has the keyboard");
+    assert_eq!(h.window_count(), 2, "no second pop-out window");
+    assert_eq!(h.root(|root, _| root.popout_count()), 1);
+}
+
+#[gpui::test]
+fn session_menu_pops_the_active_tab_pane(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = Fixture::single(session("s1").build());
+    fixture.tabs.push(tab("t2", &pane("p2", Some("s1"))));
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.click_on("tab-t2");
+
+    h.right_click_on("leaf-s1");
+    assert_eq!(
+        h.root(|root, _| root.menu_row_label("session-menu-popout")),
+        Some("Pop out")
+    );
+    h.click_on("session-menu-popout");
+
+    assert!(
+        h.root(|root, _| root.is_popped_out("t2", "p2")),
+        "the pane in the tab on screen pops"
+    );
+    assert!(!popped(&mut h), "t1's pane stays in its grid");
+    assert_eq!(h.window_count(), 2);
+
+    h.right_click_on("leaf-s1");
+    assert_eq!(
+        h.root(|root, _| root.menu_disabled_tip("session-menu-popout")),
+        Some("Already in a pop-out")
+    );
+    h.click_on("session-menu-popout");
+    assert_eq!(
+        h.root(|root, _| root.popout_count()),
+        1,
+        "the dimmed row does nothing"
+    );
+    h.keys("escape");
+
+    h.click_on("tab-t1");
+    h.click_on("pane-popout-p1");
+    assert_eq!(
+        h.root(|root, _| root.popout_count()),
+        1,
+        "the header's Pop out is dimmed while a pop-out shows its session"
+    );
+    assert!(!popped(&mut h));
+}
+
+#[gpui::test]
+fn moved_popped_pane_keeps_its_popout(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = Fixture::single(session("s1").build());
+    fixture.sessions.push(session("s2").build());
+    fixture.tabs = vec![tab(
+        "t1",
+        &split(
+            SplitDirection::Horizontal,
+            pane("p1", Some("s1")),
+            pane("p3", Some("s2")),
+        ),
+    )];
+    let mut h = Harness::with(cx, &dir, &fixture);
+    pop_out(&mut h, "t1", "p1");
+
+    // The daemon swapped p1 and p3 within t1: p1 keeps its id.
+    h.send(DaemonMessage::Tabs {
+        tabs: vec![tab(
+            "t1",
+            &split(
+                SplitDirection::Horizontal,
+                pane("p3", Some("s2")),
+                pane("p1", Some("s1")),
+            ),
+        )],
+    });
+
+    assert!(popped(&mut h), "the pop-out stays open");
+    assert_eq!(h.window_count(), 2);
+    let mut popout = h.popout_window();
+    popout.run_until_parked();
+    assert!(
+        popout.debug_bounds("popout-pane-gone").is_none(),
+        "the pop-out still draws the pane's terminal"
+    );
+    assert!(
+        h.bounds("popped-dock-p1").origin.x >= px(0.0),
+        "the main grid still shows the card"
+    );
+    h.sent();
+    popout.simulate_keystrokes("c");
+    assert_eq!(h.sent_input("s1"), b"c", "keys still reach the session");
 }

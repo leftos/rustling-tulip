@@ -28,6 +28,12 @@ pub(crate) const POPOUT_MIN_SIZE: (u16, u16) = (700, 400);
 /// How far right and down each further pop-out opens from the one before it.
 pub(crate) const POPOUT_CASCADE: u16 = 32;
 
+/// Why Pop out is dimmed for a session no pane shows.
+pub(crate) const POP_OUT_NO_PANE_TIP: &str = "Show it in a pane to pop it out";
+
+/// Why Pop out is dimmed for a session an open pop-out already shows.
+pub(crate) const POP_OUT_ALREADY_TIP: &str = "Already in a pop-out";
+
 /// What [`Popouts::open`] did with the pop-out it was given.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OpenOutcome {
@@ -105,6 +111,15 @@ impl Popouts {
         gone
     }
 
+    /// The open pop-out that already shows what `key` would, as
+    /// [`Popouts::open`] would report it, without opening anything.
+    pub(crate) fn blocking(&self, key: &PopoutKey, tabs: &[TabEntry]) -> Option<PopoutKey> {
+        if self.is_open(key) {
+            return Some(key.clone());
+        }
+        self.overlapping(key, tabs)
+    }
+
     /// The first open pop-out `key` would share content with, if any.
     fn overlapping(&self, key: &PopoutKey, tabs: &[TabEntry]) -> Option<PopoutKey> {
         let wanted = sessions_of(key, tabs);
@@ -155,6 +170,27 @@ pub(crate) fn title(
             .find(|t| t.id == tab_id.as_str())
             .map_or_else(|| "Tab not found".to_owned(), |t| t.name.clone()),
     }
+}
+
+/// The pane Pop out pops for `session_id`, as `(tab id, pane id)`: the
+/// pane showing it in the active tab, else the first pane showing it in tab
+/// order; `None` when no pane shows it.
+#[must_use]
+pub(crate) fn pane_to_pop(
+    session_id: &str,
+    tabs: &[TabEntry],
+    active_tab_id: Option<&str>,
+) -> Option<(String, String)> {
+    let shown_in = |tab: &TabEntry| {
+        let pane = collect_panes(tab.grid()?)
+            .into_iter()
+            .find(|pane| pane.session == Some(session_id))?;
+        Some((tab.id.clone(), pane.id.to_owned()))
+    };
+    active_tab_id
+        .and_then(|active| tabs.iter().find(|tab| tab.id == active))
+        .and_then(shown_in)
+        .or_else(|| tabs.iter().find_map(shown_in))
 }
 
 /// Whether the content `key` shows has gone from `tabs` and `sessions`. A
@@ -486,6 +522,63 @@ mod tests {
         assert_eq!(popouts.cascade_index(&tab_key("t2")), Some(1));
         assert_eq!(popouts.cascade_index(&session_key("s9")), Some(2));
         assert_eq!(popouts.cascade_index(&session_key("gone")), None);
+    }
+
+    fn ids(tab_id: &str, pane_id: &str) -> (String, String) {
+        (tab_id.to_owned(), pane_id.to_owned())
+    }
+
+    /// `s1` shown in `t1`'s `p1` and in `t2`'s `p2`, beside `s2` in `p3`.
+    fn shown_twice() -> Vec<TabEntry> {
+        vec![
+            tab("t1", &pane("p1", Some("s1"))),
+            tab(
+                "t2",
+                &split(
+                    SplitDirection::Horizontal,
+                    0.5,
+                    pane("p3", Some("s2")),
+                    pane("p2", Some("s1")),
+                ),
+            ),
+        ]
+    }
+
+    #[test]
+    fn pane_to_pop_prefers_the_active_tab() {
+        assert_eq!(
+            pane_to_pop("s1", &shown_twice(), Some("t2")),
+            Some(ids("t2", "p2")),
+            "the pane in the tab on screen"
+        );
+        assert_eq!(
+            pane_to_pop("s2", &shown_twice(), Some("t2")),
+            Some(ids("t2", "p3"))
+        );
+    }
+
+    #[test]
+    fn pane_to_pop_falls_back_to_the_first_pane() {
+        let mut tabs = shown_twice();
+        tabs.push(tab("t3", &pane("p4", None)));
+        assert_eq!(
+            pane_to_pop("s1", &tabs, Some("t3")),
+            Some(ids("t1", "p1")),
+            "the active tab does not show it: the first pane in tab order"
+        );
+        assert_eq!(
+            pane_to_pop("s1", &tabs, None),
+            Some(ids("t1", "p1")),
+            "no active tab"
+        );
+        assert_eq!(pane_to_pop("s2", &tabs, Some("t1")), Some(ids("t2", "p3")));
+    }
+
+    #[test]
+    fn pane_to_pop_is_none_without_a_pane() {
+        let tabs = vec![tab("t1", &pane("p1", None))];
+        assert_eq!(pane_to_pop("s1", &tabs, Some("t1")), None);
+        assert_eq!(pane_to_pop("s1", &[], None), None, "no tabs at all");
     }
 
     #[test]

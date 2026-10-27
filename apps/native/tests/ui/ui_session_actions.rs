@@ -1294,7 +1294,11 @@ fn duplicate_back_returns_to_actions(cx: &mut TestAppContext) {
         groups(&mut h),
         [
             vec!["menu-rename", "menu-stop"],
-            vec!["session-menu-duplicate", "session-menu-move"],
+            vec![
+                "session-menu-duplicate",
+                "session-menu-move",
+                "session-menu-popout",
+            ],
             APPEARANCE_GROUP.to_vec(),
         ]
     );
@@ -1434,10 +1438,11 @@ fn new_rows_sit_between_state_actions_and_appearance(cx: &mut TestAppContext) {
     );
 }
 
-const ADD_GROUP: [&str; 3] = [
+const ADD_GROUP: [&str; 4] = [
     "session-menu-duplicate",
     "session-menu-add-current",
     "session-menu-add-new",
+    "session-menu-popout",
 ];
 
 fn active_tab(h: &mut Harness<'_>) -> Option<String> {
@@ -1726,6 +1731,7 @@ fn menu_groups_order_is_state_then_location_then_appearance(cx: &mut TestAppCont
     let located = [
         "session-menu-duplicate",
         "session-menu-move",
+        "session-menu-popout",
         "session-menu-reveal",
     ];
     assert_eq!(
@@ -1740,6 +1746,7 @@ fn menu_groups_order_is_state_then_location_then_appearance(cx: &mut TestAppCont
         "menu-stop",
         "session-menu-duplicate",
         "session-menu-move",
+        "session-menu-popout",
         "session-menu-reveal",
         "session-menu-appearance",
     ];
@@ -1762,6 +1769,7 @@ fn menu_groups_order_is_state_then_location_then_appearance(cx: &mut TestAppCont
                 "session-menu-duplicate",
                 "session-menu-add-current",
                 "session-menu-add-new",
+                "session-menu-popout",
                 "session-menu-reveal",
             ],
             APPEARANCE_GROUP.to_vec(),
