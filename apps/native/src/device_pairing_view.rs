@@ -15,10 +15,10 @@ use protocol::DaemonMessage;
 use crate::RootView;
 use crate::buttons::{ButtonKind, ButtonSize, button, focus_ring};
 use crate::connection::State;
-use crate::device_pairing::{DeviceButton, DevicePairing, PhaseKind};
+use crate::device_pairing::{DeviceButton, DevicePairing};
 use crate::net::{NetCommand, NetEvent};
 use crate::notice_view::modal_panel;
-use crate::palette::{BORDER, DANGER, DANGER_BG, MUTED, TEXT};
+use crate::palette::{BORDER, DANGER, DANGER_BG, HOVER_BG, MUTED, TEXT};
 use crate::session_menu::backdrop;
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
 
@@ -28,6 +28,11 @@ const TICK: Duration = Duration::from_secs(1);
 const CODE_PLACEHOLDER: &str = "6 digits";
 /// The code field's width.
 const CODE_WIDTH: f32 = 120.0;
+/// The link that reveals the code field while the request waits.
+const CODE_LINK_LABEL: &str = "Have a code?";
+const CODE_LINK_SELECTOR: &str = "device-pairing-have-code";
+/// The code link's corner radius.
+const LINK_RADIUS: f32 = 4.0;
 
 /// What of a network event the pairing dialog follows.
 pub(crate) enum PairingInput {
@@ -66,6 +71,8 @@ impl PairingInput {
 /// A control of the dialog, in the order Tab walks them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DeviceControl {
+    /// The "Have a code?" link.
+    CodeLink,
     /// The code field.
     Field,
     Button(DeviceButton),
@@ -105,11 +112,14 @@ impl DevicePairingView {
     }
 }
 
-/// The controls Tab walks: the code field while it shows, then the buttons
-/// that take a press.
+/// The controls Tab walks: the code link or the code field while it shows,
+/// then the buttons that take a press.
 fn control_ring(model: &DevicePairing) -> Vec<DeviceControl> {
     let mut ring = Vec::new();
-    if model.kind() == PhaseKind::CodeEntry {
+    if model.offers_code_link() {
+        ring.push(DeviceControl::CodeLink);
+    }
+    if model.code().is_some() {
         ring.push(DeviceControl::Field);
     }
     ring.extend(
@@ -129,7 +139,7 @@ fn button_enabled(model: &DevicePairing, pressed: DeviceButton) -> bool {
 
 /// Where the keyboard goes as a phase starts: the code field once it shows.
 fn phase_control(model: &DevicePairing) -> Option<DeviceControl> {
-    (model.kind() == PhaseKind::CodeEntry).then_some(DeviceControl::Field)
+    model.code().is_some().then_some(DeviceControl::Field)
 }
 
 impl RootView {
@@ -287,6 +297,21 @@ impl RootView {
         self.apply_device_pairing_focus(window, cx);
     }
 
+    /// "Have a code?": the code field shows and takes the keyboard while the
+    /// request keeps waiting for the host's approval.
+    fn reveal_device_code(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(dialog) = &mut self.device_pairing.dialog else {
+            return;
+        };
+        if !dialog.model.offers_code_link() {
+            return;
+        }
+        dialog.model.reveal_code();
+        dialog.control = Some(DeviceControl::Field);
+        tracing::info!("device pairing: the code field shows while waiting");
+        self.apply_device_pairing_focus(window, cx);
+    }
+
     fn press_device_button(
         &mut self,
         pressed: DeviceButton,
@@ -297,6 +322,20 @@ impl RootView {
             DeviceButton::Ask | DeviceButton::AskAgain => self.ask_device_pairing(window, cx),
             DeviceButton::Pair => self.submit_device_code(window, cx),
             DeviceButton::Cancel | DeviceButton::Close => self.cancel_device_pairing(window, cx),
+        }
+    }
+
+    /// Enter or Space on a control that is not the code field.
+    fn press_device_control(
+        &mut self,
+        control: DeviceControl,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match control {
+            DeviceControl::CodeLink => self.reveal_device_code(window, cx),
+            DeviceControl::Button(pressed) => self.press_device_button(pressed, window, cx),
+            DeviceControl::Field => {}
         }
     }
 
@@ -345,7 +384,7 @@ impl RootView {
         };
         let after = dialog.model.kind();
         if before.is_some_and(|kind| kind != after) {
-            if before == Some(PhaseKind::CodeEntry) {
+            if dialog.model.code().is_none_or(str::is_empty) {
                 clear_code_field(dialog, cx);
             }
             dialog.control = phase_control(&dialog.model);
@@ -422,8 +461,8 @@ impl RootView {
     /// A key while the dialog is open: whether it was the dialog's (every
     /// key but typing in the code field is), and `None` while it is closed.
     /// Tab and Shift+Tab move the focus, Esc cancels, Enter presses the
-    /// focused button or else the phase's main one, and Space the focused
-    /// button.
+    /// focused button or link or else the phase's main button, and Space
+    /// the focused button or link.
     pub(crate) fn on_device_pairing_key(
         &mut self,
         keystroke: &Keystroke,
@@ -431,11 +470,10 @@ impl RootView {
         cx: &mut Context<Self>,
     ) -> Option<bool> {
         let dialog = self.device_pairing.dialog.as_ref()?;
-        let focused = match dialog.control {
-            Some(DeviceControl::Button(pressed)) => Some(pressed),
-            Some(DeviceControl::Field) | None => None,
-        };
-        let primary = dialog.model.primary();
+        let focused = dialog
+            .control
+            .filter(|control| *control != DeviceControl::Field);
+        let primary = dialog.model.primary().map(DeviceControl::Button);
         Some(match keystroke.key.as_str() {
             "tab" => {
                 self.move_device_pairing_focus(!keystroke.modifiers.shift);
@@ -450,7 +488,7 @@ impl RootView {
             "enter" | "space" => {
                 let pressed = focused.or(primary.filter(|_| keystroke.key == "enter"));
                 if let Some(pressed) = pressed {
-                    self.press_device_button(pressed, window, cx);
+                    self.press_device_control(pressed, window, cx);
                 }
                 true
             }
@@ -487,7 +525,9 @@ impl RootView {
         };
         match dialog.control {
             Some(DeviceControl::Field) => dialog.code_input.read(cx).focus_handle(cx).focus(window),
-            Some(DeviceControl::Button(_)) | None => self.device_pairing.focus.focus(window),
+            Some(DeviceControl::CodeLink | DeviceControl::Button(_)) | None => {
+                self.device_pairing.focus.focus(window);
+            }
         }
         cx.notify();
     }
@@ -552,6 +592,10 @@ impl RootView {
                     .debug_selector(|| "device-pairing-line".to_owned())
                     .child(model.line()),
             )
+            .children(model.offers_code_link().then(|| {
+                let focused = dialog.control == Some(DeviceControl::CodeLink);
+                div().flex().child(code_link(focused, cx))
+            }))
             .children(model.code().map(|_| code_box(dialog)))
             .children(model.countdown((self.now)()).map(|countdown| {
                 div()
@@ -593,6 +637,26 @@ fn clear_code_field(dialog: &DevicePairingDialog, cx: &mut Context<RootView>) {
     dialog
         .code_input
         .update(cx, |input, cx| input.set_text(String::new(), cx));
+}
+
+/// "Have a code?": plain text that lights up under the pointer, ringed
+/// while it has the keyboard.
+fn code_link(focused: bool, cx: &mut Context<RootView>) -> Stateful<Div> {
+    div()
+        .id(CODE_LINK_SELECTOR)
+        .debug_selector(|| CODE_LINK_SELECTOR.to_owned())
+        .relative()
+        .px(px(4.0))
+        .py(px(2.0))
+        .rounded(px(LINK_RADIUS))
+        .text_color(gpui::rgb(if focused { TEXT } else { MUTED }))
+        .cursor_pointer()
+        .hover(|style| style.bg(gpui::rgb(HOVER_BG)).text_color(gpui::rgb(TEXT)))
+        .when(focused, |link| link.child(focus_ring(LINK_RADIUS)))
+        .child(CODE_LINK_LABEL)
+        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+            this.reveal_device_code(window, cx);
+        }))
 }
 
 /// The code field in its box, outlined brighter while it has the focus.

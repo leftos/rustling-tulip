@@ -16,6 +16,21 @@ pub(crate) const CODE_LEN: usize = 6;
 /// How long an approval's code stays good on the host.
 const CODE_LIFETIME: Duration = Duration::from_secs(120);
 
+/// The host's refusals of a redeemed code that keep the request: the
+/// daemon's `PairError::WrongCode` and `PairError::NotYours`, and its
+/// `CODE_LAPSED` (`crates/daemon/src/devices.rs`,
+/// `crates/daemon/src/server/pairing.rs`).
+const CODE_REFUSALS: [&str; 3] = [
+    "That code is not right.",
+    "This code is for another device.",
+    "the code has expired; ask the owner to approve again",
+];
+
+/// Whether `reason` refuses the typed code itself rather than the request.
+fn refuses_the_code(reason: &str) -> bool {
+    CODE_REFUSALS.contains(&reason)
+}
+
 /// Which phase the dialog is in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PhaseKind {
@@ -78,6 +93,15 @@ enum EndReason {
     Failed(String),
 }
 
+/// The code field's contents.
+#[derive(Clone, Default)]
+struct CodeField {
+    /// The digits typed so far; never printed.
+    code: String,
+    /// The host's last refusal of a code, until the next keystroke.
+    refusal: Option<String>,
+}
+
 #[derive(Clone)]
 enum Phase {
     Intro,
@@ -85,15 +109,15 @@ enum Phase {
     Asking {
         sent: bool,
     },
+    /// The owner has not approved yet; `field` once "Have a code?" revealed
+    /// it, for a code minted on the host by `rustling-tulipd pair`.
     Waiting {
         deadline: Instant,
+        field: Option<CodeField>,
     },
     CodeEntry {
         deadline: Instant,
-        /// The digits typed so far; never printed.
-        code: String,
-        /// The host's last refusal of a code, until the next keystroke.
-        refusal: Option<String>,
+        field: CodeField,
     },
     Ended(EndReason),
 }
@@ -179,7 +203,7 @@ impl DevicePairing {
     pub(crate) fn countdown(&self, now: Instant) -> Option<String> {
         let left = |deadline: Instant| mmss(deadline.saturating_duration_since(now).as_secs());
         match &self.phase {
-            Phase::Waiting { deadline } => Some(format!("expires in {}", left(*deadline))),
+            Phase::Waiting { deadline, .. } => Some(format!("expires in {}", left(*deadline))),
             Phase::CodeEntry { deadline, .. } => {
                 Some(format!("code expires in {}", left(*deadline)))
             }
@@ -187,27 +211,54 @@ impl DevicePairing {
         }
     }
 
+    /// The code field, while it shows.
+    fn field(&self) -> Option<&CodeField> {
+        match &self.phase {
+            Phase::Waiting { field, .. } => field.as_ref(),
+            Phase::CodeEntry { field, .. } => Some(field),
+            Phase::Intro | Phase::Asking { .. } | Phase::Ended(_) => None,
+        }
+    }
+
+    fn field_mut(&mut self) -> Option<&mut CodeField> {
+        match &mut self.phase {
+            Phase::Waiting { field, .. } => field.as_mut(),
+            Phase::CodeEntry { field, .. } => Some(field),
+            Phase::Intro | Phase::Asking { .. } | Phase::Ended(_) => None,
+        }
+    }
+
     /// The host's last refusal of a typed code.
     pub(crate) fn refusal(&self) -> Option<&str> {
-        match &self.phase {
-            Phase::CodeEntry { refusal, .. } => refusal.as_deref(),
-            _ => None,
-        }
+        self.field()?.refusal.as_deref()
     }
 
     /// The digits in the code field, while it shows.
     pub(crate) fn code(&self) -> Option<&str> {
-        match &self.phase {
-            Phase::CodeEntry { code, .. } => Some(code),
-            _ => None,
+        self.field().map(|field| field.code.as_str())
+    }
+
+    /// Whether the "Have a code?" link shows: while the request waits and
+    /// the code field is still hidden.
+    pub(crate) fn offers_code_link(&self) -> bool {
+        matches!(self.phase, Phase::Waiting { field: None, .. })
+    }
+
+    /// "Have a code?": the code field shows while the request keeps
+    /// waiting; nothing changes outside the Waiting phase.
+    pub(crate) fn reveal_code(&mut self) {
+        if let Phase::Waiting { field, .. } = &mut self.phase {
+            field.get_or_insert_with(CodeField::default);
         }
     }
 
     pub(crate) fn buttons(&self) -> &'static [DeviceButton] {
         match self.phase {
             Phase::Intro => &[DeviceButton::Ask, DeviceButton::Close],
-            Phase::Asking { .. } | Phase::Waiting { .. } => &[DeviceButton::Cancel],
-            Phase::CodeEntry { .. } => &[DeviceButton::Pair, DeviceButton::Cancel],
+            Phase::Asking { .. } | Phase::Waiting { field: None, .. } => &[DeviceButton::Cancel],
+            Phase::Waiting { field: Some(_), .. } | Phase::CodeEntry { .. } => {
+                &[DeviceButton::Pair, DeviceButton::Cancel]
+            }
             Phase::Ended(_) => &[DeviceButton::AskAgain, DeviceButton::Close],
         }
     }
@@ -222,8 +273,9 @@ impl DevicePairing {
         match self.phase {
             Phase::Intro => Some(DeviceButton::Ask),
             Phase::Ended(_) => Some(DeviceButton::AskAgain),
-            Phase::CodeEntry { .. } if self.can_pair() => Some(DeviceButton::Pair),
-            Phase::Asking { .. } | Phase::Waiting { .. } | Phase::CodeEntry { .. } => None,
+            Phase::Asking { .. } | Phase::Waiting { .. } | Phase::CodeEntry { .. } => {
+                self.can_pair().then_some(DeviceButton::Pair)
+            }
         }
     }
 
@@ -246,28 +298,40 @@ impl DevicePairing {
     }
 
     /// Folds in a pairing message from the host, at `now`. The "not
-    /// approved" signal ends the request only once it is on the host's
-    /// socket ([`Self::on_request_sent`]); before that it is the pairing
-    /// connection's greeting and changes nothing.
+    /// approved" signal ends the request once it is on the host's socket
+    /// ([`Self::on_request_sent`]) and while a code can be typed as it
+    /// waits; otherwise it is the pairing connection's greeting and changes
+    /// nothing.
     pub(crate) fn on_message(&mut self, msg: &DaemonMessage, now: Instant) {
         match msg {
             DaemonMessage::DevicePairPending {
                 expires_in_secs, ..
             } => {
-                if matches!(self.phase, Phase::Asking { .. } | Phase::Waiting { .. }) {
-                    let deadline = now + Duration::from_secs(*expires_in_secs);
-                    self.phase = Phase::Waiting { deadline };
+                let renewed = now + Duration::from_secs(*expires_in_secs);
+                match &mut self.phase {
+                    Phase::Asking { .. } => {
+                        self.phase = Phase::Waiting {
+                            deadline: renewed,
+                            field: None,
+                        };
+                    }
+                    Phase::Waiting { deadline, .. } => *deadline = renewed,
+                    Phase::Intro | Phase::CodeEntry { .. } | Phase::Ended(_) => {}
                 }
             }
             DaemonMessage::DevicePairDecided { outcome, .. } => self.on_decided(*outcome, now),
             DaemonMessage::DevicePairFailed { reason } if reason != DEVICE_NOT_APPROVED => {
                 self.on_failed(reason);
             }
-            DaemonMessage::DevicePairFailed { .. } => {
-                if matches!(self.phase, Phase::Asking { sent: true }) {
-                    self.phase = Phase::Ended(EndReason::NotAccepted);
+            DaemonMessage::DevicePairFailed { reason } => match self.phase {
+                Phase::Asking { sent: true } => self.phase = Phase::Ended(EndReason::NotAccepted),
+                // Only a code typed while waiting draws it here: the host
+                // turned this device down, e.g. as blocked.
+                Phase::Waiting { field: Some(_), .. } => {
+                    self.phase = Phase::Ended(EndReason::Failed(reason.clone()));
                 }
-            }
+                _ => {}
+            },
             _ => {}
         }
     }
@@ -289,23 +353,32 @@ impl DevicePairing {
         self.phase = Phase::Ended(reason);
     }
 
-    /// The owner approved: the code field shows, its countdown restarted;
-    /// digits typed under an earlier approval stay.
+    /// The owner approved: the code field shows, its countdown restarted.
+    /// Digits typed under an earlier approval stay; digits typed while
+    /// waiting go, as the host now takes only the approval's code.
     fn on_approved(&mut self, now: Instant) {
         let code = match &mut self.phase {
-            Phase::CodeEntry { code, .. } => std::mem::take(code),
+            Phase::CodeEntry { field, .. } => std::mem::take(&mut field.code),
             _ => String::new(),
         };
         self.phase = Phase::CodeEntry {
             deadline: now + CODE_LIFETIME,
-            code,
-            refusal: None,
+            field: CodeField {
+                code,
+                refusal: None,
+            },
         };
     }
 
+    /// A refusal shows in the code field after the approval. While waiting
+    /// only a refusal of the code itself shows there and the request keeps
+    /// waiting; any other ends the request.
     fn on_failed(&mut self, reason: &str) {
         match &mut self.phase {
-            Phase::CodeEntry { refusal, .. } => *refusal = Some(reason.to_owned()),
+            Phase::CodeEntry { field, .. } => field.refusal = Some(reason.to_owned()),
+            Phase::Waiting {
+                field: Some(field), ..
+            } if refuses_the_code(reason) => field.refusal = Some(reason.to_owned()),
             Phase::Asking { .. } | Phase::Waiting { .. } => {
                 self.phase = Phase::Ended(EndReason::Failed(reason.to_owned()));
             }
@@ -334,19 +407,19 @@ impl DevicePairing {
     }
 
     /// The code field's new text: its digits, at most six, kept; returns
-    /// what the field holds now. Any keystroke clears the refusal. Before
-    /// the approval there is no field and nothing is kept.
+    /// what the field holds now. Any keystroke clears the refusal. While
+    /// the field is hidden nothing is kept.
     pub(crate) fn type_code(&mut self, text: &str) -> String {
-        let Phase::CodeEntry { code, refusal, .. } = &mut self.phase else {
+        let Some(field) = self.field_mut() else {
             return String::new();
         };
-        *code = text
+        field.code = text
             .chars()
             .filter(char::is_ascii_digit)
             .take(CODE_LEN)
             .collect();
-        *refusal = None;
-        code.clone()
+        field.refusal = None;
+        field.code.clone()
     }
 
     /// Pair: the six typed digits, the field cleared; `None` while the code
@@ -355,10 +428,8 @@ impl DevicePairing {
         if !self.can_pair() {
             return None;
         }
-        match &mut self.phase {
-            Phase::CodeEntry { code, .. } => Some(std::mem::take(code)),
-            _ => None,
-        }
+        self.field_mut()
+            .map(|field| std::mem::take(&mut field.code))
     }
 }
 
@@ -730,5 +801,133 @@ mod tests {
         };
         assert_eq!(entry.kind(), PhaseKind::CodeEntry);
         assert_eq!(entry.refusal(), None);
+    }
+
+    #[test]
+    fn waiting_step_can_reveal_the_code_entry() {
+        let now = Instant::now();
+        let mut pairing = waiting(now);
+        assert!(pairing.offers_code_link());
+        assert_eq!(pairing.code(), None, "no field until the link is pressed");
+        assert_eq!(pairing.buttons(), [DeviceButton::Cancel]);
+
+        pairing.reveal_code();
+        assert_eq!(pairing.kind(), PhaseKind::Waiting, "still waiting");
+        assert_eq!(pairing.line(), "Approve this PC on box.tail1234.ts.net.");
+        assert_eq!(pairing.countdown(now).as_deref(), Some("expires in 5:00"));
+        assert!(!pairing.offers_code_link());
+        assert_eq!(pairing.code(), Some(""));
+        assert_eq!(
+            pairing.buttons(),
+            [DeviceButton::Pair, DeviceButton::Cancel]
+        );
+        assert!(pairing.cancels_request());
+
+        pairing.type_code("12");
+        pairing.on_message(&pending(200), now);
+        assert_eq!(
+            pairing.code(),
+            Some("12"),
+            "a renewed request keeps the field"
+        );
+        assert_eq!(pairing.countdown(now).as_deref(), Some("expires in 3:20"));
+
+        let mut intro = DevicePairing::new(HOST, false);
+        assert!(!intro.offers_code_link());
+        intro.reveal_code();
+        assert_eq!(intro.code(), None, "no field before a request is waiting");
+        assert!(!code_entry(now).offers_code_link());
+    }
+
+    #[test]
+    fn a_code_typed_while_waiting_sends_redeem() {
+        let now = Instant::now();
+        let mut pairing = waiting(now);
+        pairing.reveal_code();
+        assert_eq!(pairing.type_code("12a3456"), "123456");
+        assert!(pairing.can_pair());
+        assert_eq!(pairing.primary(), Some(DeviceButton::Pair));
+        assert_eq!(pairing.take_code().as_deref(), Some("123456"));
+        assert_eq!(pairing.code(), Some(""), "the field clears on Pair");
+        assert_eq!(pairing.kind(), PhaseKind::Waiting);
+    }
+
+    #[test]
+    fn approval_clears_a_code_typed_while_waiting() {
+        let now = Instant::now();
+        let mut pairing = waiting(now);
+        pairing.reveal_code();
+        pairing.type_code("12");
+        pairing.on_message(&decided(DevicePairOutcome::Approved), now);
+        assert_eq!(pairing.kind(), PhaseKind::CodeEntry);
+        assert_eq!(
+            pairing.code(),
+            Some(""),
+            "the host now checks only the approval's code"
+        );
+        assert_eq!(
+            pairing.countdown(now).as_deref(),
+            Some("code expires in 2:00")
+        );
+    }
+
+    #[test]
+    fn a_refused_code_while_waiting_shows_the_error() {
+        let now = Instant::now();
+        let mut pairing = waiting(now);
+        pairing.reveal_code();
+        pairing.type_code("123456");
+        assert!(pairing.take_code().is_some());
+        pairing.on_message(&failed("That code is not right."), now);
+        assert_eq!(pairing.kind(), PhaseKind::Waiting, "the request stays");
+        assert_eq!(pairing.refusal(), Some("That code is not right."));
+        pairing.type_code("1");
+        assert_eq!(pairing.refusal(), None, "a keystroke clears the refusal");
+
+        pairing.on_message(
+            &failed("the code has expired; ask the owner to approve again"),
+            now,
+        );
+        assert_eq!(pairing.kind(), PhaseKind::Waiting);
+        assert_eq!(
+            pairing.refusal(),
+            Some("the code has expired; ask the owner to approve again")
+        );
+        pairing.on_message(&decided(DevicePairOutcome::Approved), now);
+        assert_eq!(pairing.refusal(), None, "an approval starts clean");
+    }
+
+    #[test]
+    fn a_request_ending_failure_while_waiting_ends_with_its_reason() {
+        let now = Instant::now();
+        for reason in [
+            "remote access is off",
+            "Too many wrong codes; ask again from the device.",
+        ] {
+            let mut pairing = waiting(now);
+            pairing.reveal_code();
+            pairing.type_code("123456");
+            assert!(pairing.take_code().is_some());
+            pairing.on_message(&failed(reason), now);
+            assert_eq!(pairing.kind(), PhaseKind::Ended, "{reason}");
+            assert_eq!(pairing.line(), reason);
+            assert_eq!(pairing.refusal(), None);
+        }
+    }
+
+    #[test]
+    fn a_blocked_device_redeeming_while_waiting_is_told_why() {
+        let now = Instant::now();
+        let mut pairing = waiting(now);
+        pairing.reveal_code();
+        pairing.type_code("123456");
+        assert!(pairing.take_code().is_some());
+        pairing.on_message(&failed(DEVICE_NOT_APPROVED), now);
+        assert_eq!(pairing.kind(), PhaseKind::Ended);
+        assert_eq!(pairing.line(), DEVICE_NOT_APPROVED);
+        assert_eq!(
+            pairing.buttons(),
+            [DeviceButton::AskAgain, DeviceButton::Close]
+        );
     }
 }

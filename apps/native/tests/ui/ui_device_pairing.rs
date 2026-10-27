@@ -372,6 +372,55 @@ fn a_refused_code_returns_focus_to_the_field(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn waiting_dialog_takes_a_cli_minted_code(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = waiting(cx, &dir);
+    h.commands();
+    assert_eq!(h.root(RootView::device_pairing_code), None);
+
+    h.click_on("device-pairing-have-code");
+    assert_eq!(
+        line(&mut h).as_deref(),
+        Some("Approve this PC on box.tail1234.ts.net."),
+        "the request still waits for the host"
+    );
+    assert_eq!(buttons(&mut h), ["Pair", "Cancel"]);
+    h.keys("1 2 3 4 5 6 enter");
+    let redeemed: Vec<String> = h
+        .commands()
+        .into_iter()
+        .filter_map(|command| match command {
+            NetCommand::PairRedeem { code } => Some(code),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(redeemed, ["123456"], "the code goes to the host");
+
+    h.send(DaemonMessage::DevicePairFailed {
+        reason: "That code is not right.".to_owned(),
+    });
+    assert_eq!(
+        h.root(|root, _| root.device_pairing_refusal()).as_deref(),
+        Some("That code is not right.")
+    );
+
+    h.keys("4 2");
+    h.send(DaemonMessage::DevicePairDecided {
+        request_id: "r1".to_owned(),
+        outcome: DevicePairOutcome::Approved,
+    });
+    assert_eq!(
+        line(&mut h).as_deref(),
+        Some("Type the code box.tail1234.ts.net shows.")
+    );
+    assert_eq!(
+        h.root(RootView::device_pairing_code).as_deref(),
+        Some(""),
+        "the approval clears what was typed for a CLI code"
+    );
+}
+
+#[gpui::test]
 fn picking_the_current_unpaired_host_opens_the_dialog(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     seed_saved_hosts(&dir, &[HOST]);
