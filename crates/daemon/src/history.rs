@@ -86,7 +86,10 @@ pub(crate) fn primary_cwd(rec: &SessionRecord) -> Option<String> {
 }
 
 /// The folder a session with `members` and `config` started in.
-fn start_folder(members: &[SessionMember], config: Option<&SpawnConfig>) -> Option<String> {
+pub(crate) fn start_folder(
+    members: &[SessionMember],
+    config: Option<&SpawnConfig>,
+) -> Option<String> {
     if let Some(first) = members.first() {
         return Some(first.worktree_path.clone());
     }
@@ -1684,6 +1687,8 @@ pub(crate) mod test_support {
             agent_exit_announced: false,
             applied_size: None,
             hook_agent: None,
+            hook_options: protocol::OptionValues::new(),
+            hook_trusted: false,
         }
     }
 

@@ -1395,6 +1395,8 @@ mod hysteresis_tests {
             agent_exit_announced: false,
             applied_size: None,
             hook_agent: None,
+            hook_options: protocol::OptionValues::new(),
+            hook_trusted: false,
         }
     }
 

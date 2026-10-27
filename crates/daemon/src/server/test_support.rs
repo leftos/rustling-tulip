@@ -279,6 +279,8 @@ pub(super) fn idle_record(id: &str) -> SessionRecord {
         agent_exit_announced: false,
         applied_size: None,
         hook_agent: None,
+        hook_options: protocol::OptionValues::new(),
+        hook_trusted: false,
     }
 }
 

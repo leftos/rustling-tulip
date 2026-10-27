@@ -9,18 +9,21 @@ use super::spawn::{
 };
 use super::tabs::rebind_session_panes;
 use super::{Hub, StateEvent};
+use crate::conversations::discovery::{self, Baseline, Waiter};
+use crate::hook_status::PluginLookup;
 use crate::orphan::OrphanMeta;
 use crate::paths::Dirs;
 use crate::screen::rules::rules_for;
 use crate::session::{SessionRecord, SessionRegistry, attach_lifecycle};
 use crate::{conversations, history, orphan, osc_title, pty_state, screen, tracer_client};
-use agent_api::ResolvedRows;
+use agent_api::{ConversationPlan, ResolvedRows};
 use anyhow::anyhow;
 use protocol::{
-    AgentId, ClientMessage, DaemonMessage, SessionEnd, SessionMember, SessionMode, SpawnRequest,
-    SpawnTarget,
+    AgentId, ClientMessage, DaemonMessage, SessionEnd, SessionMember, SessionMode, SessionStatus,
+    SpawnRequest, SpawnTarget,
 };
-use std::path::Path;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
@@ -132,13 +135,24 @@ pub(super) async fn reattach_orphans(
             meta,
         )));
     }
+    let mut restarts = Vec::new();
     for task in tasks {
-        if let Err(err) = task.await {
-            warn!(?err, "reattach_orphans: reattach task failed to join");
+        match task.await {
+            Ok(Some(restart)) => restarts.push(restart),
+            Ok(None) => {}
+            Err(err) => warn!(?err, "reattach_orphans: reattach task failed to join"),
         }
     }
     for meta in abandoned {
         sessions.insert_abandoned(&meta);
+    }
+    // Every sidecar's record is in the registry only now, so a discovery
+    // pass excludes every conversation id a sibling's sidecar holds.
+    for restart in restarts {
+        let session_id = restart.session_id.clone();
+        if restart_discovery(sessions, restart) {
+            discovery::start_poller(sessions, dirs.clone(), session_id);
+        }
     }
     info!(
         orphan_count,
@@ -154,106 +168,177 @@ fn runs_shell_watcher(meta: &OrphanMeta) -> bool {
     meta.mode == SessionMode::PlainShell || meta.agent_in_shell
 }
 
+/// A reattached session whose conversation discovery restarts once every
+/// orphan is in the registry.
+struct DiscoveryRestart {
+    session_id: String,
+    baseline: Baseline,
+}
+
 /// Reattach a single orphan to its still-running tracer, or route it to the
 /// abandoned bucket if the tracer is unreachable. Runs as its own task so a
 /// slow/dead tracer doesn't serialize the others (see `reattach_orphans`).
+/// Answers the discovery restart a reattached session needs, which the
+/// caller starts after every reattach has joined.
 async fn reattach_one(
     sessions: Arc<SessionRegistry>,
     dirs: Dirs,
     attention_tx: mpsc::UnboundedSender<pty_state::AttentionEvent>,
     meta: OrphanMeta,
-) {
+) -> Option<DiscoveryRestart> {
     let session_start = std::time::Instant::now();
-    match (meta.tracer_pipe.as_deref(), meta.tracer_pid) {
-        (Some(pipe), Some(tracer_pid)) => {
-            match tracer_client::reattach(
-                &meta.session_id,
-                pipe,
+    let (Some(pipe), Some(tracer_pid)) = (meta.tracer_pipe.as_deref(), meta.tracer_pid) else {
+        sessions.insert_orphan(&meta);
+        return None;
+    };
+    match tracer_client::reattach(
+        &meta.session_id,
+        pipe,
+        tracer_pid,
+        expected_output_subscribers(meta.mode),
+    )
+    .await
+    {
+        Ok(pty) => {
+            info!(
+                session_id = %meta.session_id,
                 tracer_pid,
-                expected_output_subscribers(meta.mode),
-            )
-            .await
-            {
-                Ok(pty) => {
-                    info!(
-                        session_id = %meta.session_id,
-                        tracer_pid,
-                        elapsed_ms = u64::try_from(session_start.elapsed().as_millis()).unwrap_or(u64::MAX),
-                        "tracer reattach succeeded"
-                    );
-                    let pending = sessions.insert_reattached(&meta, Arc::clone(&pty));
-                    let snap_tx = attach_lifecycle(
-                        &sessions,
-                        meta.session_id.clone(),
-                        &pty,
-                        Some(dirs.clone()),
-                    );
-                    // Only a shell's classifier reads input volume.
-                    let shell_watcher = runs_shell_watcher(&meta);
-                    let shell_input = shell_watcher.then(mpsc::unbounded_channel::<usize>);
-                    let screen: screen::SharedScreen = Arc::new(Mutex::new(screen::Screen::new(
-                        screen::REATTACH_COLS,
-                        screen::REATTACH_ROWS,
-                    )));
-                    let (restored, agent) = {
-                        let mut guard = crate::sync::lock(pending.arc());
-                        guard.scrollback_snapshot_req = Some(snap_tx);
-                        if let Some((in_tx, _)) = &shell_input {
-                            guard.input_notifier = Some(in_tx.clone());
-                        }
-                        guard.screen = Some(Arc::clone(&screen));
-                        (guard.status, guard.agent.clone())
-                    };
-                    pty.resize(screen::REATTACH_COLS, screen::REATTACH_ROWS);
-                    if let Some((_, in_rx)) = shell_input {
-                        pty_state::watch_plain_shell(
-                            &sessions,
-                            meta.session_id.clone(),
-                            pty_state::ShellStreams {
-                                output: pty.output.subscribe(),
-                                input_pulses: in_rx,
-                                screen,
-                                rules: rules_for(&agent),
-                            },
-                            attention_tx.clone(),
-                            restored,
-                        );
-                    } else {
-                        pty_state::watch(
-                            &sessions,
-                            meta.session_id.clone(),
-                            pty_state::AgentStreams {
-                                output: pty.output.subscribe(),
-                                screen,
-                                rules: rules_for(&agent),
-                            },
-                            attention_tx.clone(),
-                        );
-                    }
-                    osc_title::watch(
-                        &sessions,
-                        meta.session_id.clone(),
-                        pty.output.subscribe(),
-                        shell_watcher,
-                    );
-                    pending.publish();
+                elapsed_ms = u64::try_from(session_start.elapsed().as_millis()).unwrap_or(u64::MAX),
+                "tracer reattach succeeded"
+            );
+            let pending = sessions.insert_reattached(&meta, Arc::clone(&pty));
+            let snap_tx =
+                attach_lifecycle(&sessions, meta.session_id.clone(), &pty, Some(dirs.clone()));
+            // Only a shell's classifier reads input volume.
+            let shell_watcher = runs_shell_watcher(&meta);
+            let shell_input = shell_watcher.then(mpsc::unbounded_channel::<usize>);
+            let screen: screen::SharedScreen = Arc::new(Mutex::new(screen::Screen::new(
+                screen::REATTACH_COLS,
+                screen::REATTACH_ROWS,
+            )));
+            let (restored, agent) = {
+                let mut guard = crate::sync::lock(pending.arc());
+                guard.scrollback_snapshot_req = Some(snap_tx);
+                if let Some((in_tx, _)) = &shell_input {
+                    guard.input_notifier = Some(in_tx.clone());
                 }
-                Err(err) => {
-                    warn!(
-                        ?err,
-                        session_id = %meta.session_id,
-                        tracer_pid,
-                        elapsed_ms = u64::try_from(session_start.elapsed().as_millis()).unwrap_or(u64::MAX),
-                        "tracer reattach failed; routing to abandoned"
-                    );
-                    sessions.insert_abandoned(&meta);
-                }
+                guard.screen = Some(Arc::clone(&screen));
+                (guard.status, guard.agent.clone())
+            };
+            pty.resize(screen::REATTACH_COLS, screen::REATTACH_ROWS);
+            if let Some((_, in_rx)) = shell_input {
+                pty_state::watch_plain_shell(
+                    &sessions,
+                    meta.session_id.clone(),
+                    pty_state::ShellStreams {
+                        output: pty.output.subscribe(),
+                        input_pulses: in_rx,
+                        screen,
+                        rules: rules_for(&agent),
+                    },
+                    attention_tx.clone(),
+                    restored,
+                );
+            } else {
+                pty_state::watch(
+                    &sessions,
+                    meta.session_id.clone(),
+                    pty_state::AgentStreams {
+                        output: pty.output.subscribe(),
+                        screen,
+                        rules: rules_for(&agent),
+                    },
+                    attention_tx.clone(),
+                );
             }
+            osc_title::watch(
+                &sessions,
+                meta.session_id.clone(),
+                pty.output.subscribe(),
+                shell_watcher,
+            );
+            pending.publish();
+            reattach_baseline(&meta, agent_registry::plugin).map(|baseline| DiscoveryRestart {
+                session_id: meta.session_id.clone(),
+                baseline,
+            })
         }
-        _ => {
-            sessions.insert_orphan(&meta);
+        Err(err) => {
+            warn!(
+                ?err,
+                session_id = %meta.session_id,
+                tracer_pid,
+                elapsed_ms = u64::try_from(session_start.elapsed().as_millis()).unwrap_or(u64::MAX),
+                "tracer reattach failed; routing to abandoned"
+            );
+            sessions.insert_abandoned(&meta);
+            None
         }
     }
+}
+
+/// The baseline a reattached session's conversation discovery restarts
+/// from: an interactive session whose sidecar holds no conversation id and
+/// whose plugin (found through `plugins`) discovers its conversation after
+/// launch. Its launch is the session's start time and the baseline is
+/// empty, so a conversation created while no daemon watched is still found;
+/// the folder is the one it started in. `None` for every other session.
+fn reattach_baseline(meta: &OrphanMeta, plugins: PluginLookup) -> Option<Baseline> {
+    if meta.mode != SessionMode::Interactive || meta.conversation_id.is_some() {
+        return None;
+    }
+    let config = meta.spawn_config.as_ref()?;
+    let selection = config.agent.as_ref()?;
+    let Some(plugin) = plugins(&selection.agent) else {
+        warn!(
+            session_id = %meta.session_id,
+            "no agent plugin `{}` is registered; the reattached session's conversation is not looked for",
+            selection.agent.0
+        );
+        return None;
+    };
+    if !matches!(
+        plugin.conversation_plan(&selection.options, None),
+        ConversationPlan::DiscoverAfterLaunch
+    ) {
+        return None;
+    }
+    let Some(folder) = history::start_folder(&meta.members, Some(config)) else {
+        warn!(
+            session_id = %meta.session_id,
+            "the reattached session names no start folder; its conversation is not looked for"
+        );
+        return None;
+    };
+    Some(Baseline {
+        ids: HashSet::new(),
+        plugin,
+        rows: conversations::lookup_rows(&config.extra_env),
+        folder: PathBuf::from(folder),
+        launched_at: meta.started_at,
+    })
+}
+
+/// Register `restart`'s waiter, once every reattached and abandoned sidecar
+/// is in the registry, when its session is still running with no
+/// conversation id. A session that ended or gained an id before then gets
+/// none. Answers whether one was registered, so the caller starts its
+/// poller.
+fn restart_discovery(sessions: &SessionRegistry, restart: DiscoveryRestart) -> bool {
+    let waiting = sessions.get(&restart.session_id).is_some_and(|rec| {
+        let rec = crate::sync::lock(&rec);
+        !matches!(rec.status, SessionStatus::Stopped | SessionStatus::Error)
+            && rec.conversation_id.is_none()
+    });
+    if !waiting {
+        info!(
+            session_id = %restart.session_id,
+            "discovery: the reattached session ended or holds a conversation; not looking for one"
+        );
+        return false;
+    }
+    discovery::register(sessions, Waiter::new(restart.session_id, restart.baseline));
+    true
 }
 
 /// Resume an abandoned session: read its sidecar (spawn config +
@@ -957,6 +1042,204 @@ mod tests {
             "an agent inside its shell runs the shell's watcher"
         );
         assert!(runs_shell_watcher(&meta(SessionMode::PlainShell)));
+    }
+
+    /// A plugin that discovers its conversation after launch.
+    static DISCOVERING_AGENT: std::sync::LazyLock<agent_api::test_agent::TestAgent> =
+        std::sync::LazyLock::new(|| {
+            agent_api::test_agent::TestAgent::new(agent_api::ConversationPlan::DiscoverAfterLaunch)
+        });
+
+    /// A plugin that mints its conversation id before launch.
+    static MINTING_AGENT: std::sync::LazyLock<agent_api::test_agent::TestAgent> =
+        std::sync::LazyLock::new(|| {
+            agent_api::test_agent::TestAgent::new(agent_api::ConversationPlan::Minted(
+                "minted-1".to_owned(),
+            ))
+        });
+
+    #[expect(clippy::unnecessary_wraps, reason = "a PluginLookup answers an Option")]
+    fn discovering_plugin(_agent: &AgentId) -> Option<&'static dyn agent_api::AgentPlugin> {
+        Some(&*DISCOVERING_AGENT)
+    }
+
+    #[expect(clippy::unnecessary_wraps, reason = "a PluginLookup answers an Option")]
+    fn minting_plugin(_agent: &AgentId) -> Option<&'static dyn agent_api::AgentPlugin> {
+        Some(&*MINTING_AGENT)
+    }
+
+    /// The folder the reattached session `s1` started in.
+    const START_FOLDER: &str = r"C:\work\started-here";
+
+    /// The sidecar of a reattached interactive session `s1` of the test
+    /// agent, started in [`START_FOLDER`] and since moved elsewhere, holding
+    /// no conversation id.
+    fn test_agent_meta() -> OrphanMeta {
+        let config = protocol::SpawnConfig {
+            target: SpawnTarget::Standalone {
+                cwd: Some(START_FOLDER.to_owned()),
+                add_dirs: Vec::new(),
+            },
+            mode: SessionMode::Interactive,
+            dangerously_skip_permissions: false,
+            agent: Some(protocol::AgentSelection {
+                agent: AgentId("test-agent".to_owned()),
+                options: protocol::OptionValues::from([
+                    (
+                        "mode".to_owned(),
+                        protocol::OptionValue::Text("fast".to_owned()),
+                    ),
+                    ("sandbox".to_owned(), protocol::OptionValue::Bool(false)),
+                ]),
+            }),
+            extra_env: Vec::new(),
+        };
+        crate::orphan::meta_from_record(
+            "s1".to_owned(),
+            4242,
+            "s1".to_owned(),
+            protocol::SessionKind::Standalone,
+            SessionMode::Interactive,
+            Vec::new(),
+            chrono::DateTime::from_timestamp(1_700_000_000, 0).expect("a valid time"),
+            None,
+            Some("test-agent".to_owned()),
+            Some(AgentId("test-agent".to_owned())),
+            Some(config),
+            None,
+            Some(r"C:\work\moved-here".to_owned()),
+            Some(4242),
+            Some(r"\\.\pipe\rt-tracer-s1".to_owned()),
+            None,
+            None,
+        )
+        .expect("build meta")
+    }
+
+    #[tokio::test]
+    async fn a_reattached_discover_after_launch_session_restarts_discovery() {
+        let meta = test_agent_meta();
+        let baseline = reattach_baseline(&meta, discovering_plugin).expect("a baseline");
+        assert!(baseline.ids.is_empty(), "the baseline is empty");
+        assert_eq!(
+            baseline.launched_at, meta.started_at,
+            "launched at the start"
+        );
+        assert_eq!(
+            baseline.folder,
+            PathBuf::from(START_FOLDER),
+            "the folder it started in, not its current one"
+        );
+        assert_eq!(
+            history::start_folder(&meta.members, meta.spawn_config.as_ref()).as_deref(),
+            Some(START_FOLDER)
+        );
+
+        let dirs = history::test_support::scratch_dirs("reattach-restarts-discovery");
+        let registry = SessionRegistry::new(dirs.clone());
+        registry.insert(history::test_support::record(
+            "s1",
+            SessionMode::Interactive,
+        ));
+        assert!(restart_discovery(&registry, restart_of(&meta)));
+        let waiter = registry
+            .discovery()
+            .waiter("s1")
+            .expect("a registered waiter");
+        assert!(waiter.baseline().is_empty());
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn a_reattached_session_with_a_conversation_id_starts_no_discovery() {
+        let mut meta = test_agent_meta();
+        meta.conversation_id = Some("known-1".to_owned());
+        assert!(reattach_baseline(&meta, discovering_plugin).is_none());
+    }
+
+    #[test]
+    fn a_reattached_session_whose_plugin_mints_ids_starts_no_discovery() {
+        let meta = test_agent_meta();
+        assert!(reattach_baseline(&meta, minting_plugin).is_none());
+    }
+
+    /// The deferred restart of [`test_agent_meta`]'s session `s1`.
+    fn restart_of(meta: &OrphanMeta) -> DiscoveryRestart {
+        DiscoveryRestart {
+            session_id: meta.session_id.clone(),
+            baseline: reattach_baseline(meta, discovering_plugin).expect("a baseline"),
+        }
+    }
+
+    /// Once every reattach has joined, a sibling's sidecar id is in the
+    /// registry, so the restarted waiter of `s1` never claims it, even
+    /// though it was active after `s1` started.
+    #[tokio::test]
+    async fn discovery_restarts_only_after_every_orphan_is_in_the_registry() {
+        let dirs = history::test_support::scratch_dirs("reattach-restart-after-join");
+        let registry = SessionRegistry::new(dirs.clone());
+        let meta = test_agent_meta();
+        DISCOVERING_AGENT.set_found(
+            START_FOLDER,
+            vec![agent_api::FoundConversation {
+                id: "held-by-b".to_owned(),
+                last_active: meta.started_at + chrono::TimeDelta::minutes(1),
+                title: None,
+            }],
+        );
+        registry.insert(history::test_support::record(
+            "s1",
+            SessionMode::Interactive,
+        ));
+        let mut sibling = history::test_support::record("s2", SessionMode::Interactive);
+        sibling.conversation_id = Some("held-by-b".to_owned());
+        registry.insert(sibling);
+
+        assert!(restart_discovery(&registry, restart_of(&meta)));
+        let waiter = registry
+            .discovery()
+            .waiter("s1")
+            .expect("a registered waiter");
+        discovery::pass(
+            &registry,
+            &dirs,
+            &waiter,
+            meta.started_at + chrono::TimeDelta::hours(1),
+            discovery::PassBy::Poller,
+        );
+        let session = registry.get("s1").expect("s1 is registered");
+        assert_eq!(
+            crate::sync::lock(&session).conversation_id,
+            None,
+            "an id a sibling holds is never claimed"
+        );
+        assert!(
+            registry.discovery().waiter("s1").is_some(),
+            "s1 still waits for its own conversation"
+        );
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    /// A session that ended, or left the registry, before every reattach
+    /// joined gets no waiter.
+    #[tokio::test]
+    async fn a_session_that_ended_before_the_join_gets_no_waiter() {
+        let dirs = history::test_support::scratch_dirs("reattach-ended-before-join");
+        let registry = SessionRegistry::new(dirs.clone());
+        let meta = test_agent_meta();
+        assert!(
+            !restart_discovery(&registry, restart_of(&meta)),
+            "a session no longer in the registry"
+        );
+        let mut ended = history::test_support::record("s1", SessionMode::Interactive);
+        ended.status = protocol::SessionStatus::Stopped;
+        registry.insert(ended);
+        assert!(
+            !restart_discovery(&registry, restart_of(&meta)),
+            "a session that stopped"
+        );
+        assert!(registry.discovery().waiter("s1").is_none());
+        let _ = std::fs::remove_dir_all(&dirs.config);
     }
 
     /// A recovered shell reattached after a restart still maps its hooks with

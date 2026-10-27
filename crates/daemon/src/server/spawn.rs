@@ -731,6 +731,8 @@ fn interactive_record(
         agent_exit_announced: false,
         applied_size: None,
         hook_agent: None,
+        hook_options: OptionValues::new(),
+        hook_trusted: false,
     };
     push_recent_action(&mut record, "session started".to_string());
     record
@@ -750,6 +752,11 @@ struct NewPlainShell {
     busy_excluded: bool,
     /// The agent a recovered shell's hook events are mapped with.
     hook_agent: Option<AgentId>,
+    /// The recovered selection's options those hook events are mapped with.
+    hook_options: OptionValues,
+    /// Whether the recovered run was trusted, which those hook events are
+    /// mapped with.
+    hook_trusted: bool,
 }
 
 /// The record of a new plain-shell session.
@@ -804,6 +811,8 @@ fn plain_shell_record(
         agent_exit_announced: false,
         applied_size: None,
         hook_agent: new.hook_agent,
+        hook_options: new.hook_options,
+        hook_trusted: new.hook_trusted,
     };
     push_recent_action(
         &mut record,
@@ -1424,6 +1433,8 @@ async fn spawn_plain_shell_session(
             started_at,
             busy_excluded,
             hook_agent: cfg.extras.hook_agent.clone(),
+            hook_options: cfg.extras.hook_options.clone(),
+            hook_trusted: cfg.extras.hook_trusted,
         },
         Some(Arc::clone(&pty)),
     );
@@ -1492,6 +1503,8 @@ async fn spawn_plain_shell_session(
         meta.status = Some(snap.status);
         meta.status_since = snap.status_since;
         meta.hook_agent.clone_from(&cfg.extras.hook_agent);
+        meta.hook_options.clone_from(&cfg.extras.hook_options);
+        meta.hook_trusted = cfg.extras.hook_trusted;
         write_meta_then_sync(hub, &meta);
     }
 
@@ -1671,6 +1684,8 @@ fn spawn_headless_session(
         agent_exit_announced: false,
         applied_size: None,
         hook_agent: None,
+        hook_options: OptionValues::new(),
+        hook_trusted: false,
     };
     push_recent_action(&mut record, "headless session started".to_string());
     // Held unpublished until the child runs, so a failed spawn is never
@@ -3948,6 +3963,8 @@ mod tests {
                 started_at: Utc::now(),
                 busy_excluded: false,
                 hook_agent: None,
+                hook_options: OptionValues::new(),
+                hook_trusted: false,
             },
             None,
         );
@@ -3998,6 +4015,8 @@ mod tests {
                 started_at: Utc::now(),
                 busy_excluded: true,
                 hook_agent: None,
+                hook_options: OptionValues::new(),
+                hook_trusted: false,
             },
             None,
         );

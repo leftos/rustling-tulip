@@ -190,6 +190,16 @@ pub struct OrphanMeta {
     /// existed: such a shell maps no hook event.
     #[serde(default)]
     pub hook_agent: Option<AgentId>,
+    /// The recovered selection's options that `hook_agent`'s plugin maps a
+    /// recovered shell's hook events with, set at spawn. Empty for every
+    /// other session and for sidecars written before this field existed.
+    #[serde(default)]
+    pub hook_options: protocol::OptionValues,
+    /// Whether the run a recovered shell resumes in `hook_agent` was trusted,
+    /// which its hook events are mapped with, set at spawn. False for every
+    /// other session and for sidecars written before this field existed.
+    #[serde(default)]
+    pub hook_trusted: bool,
 }
 
 fn meta_path(dirs: &Dirs, session_id: &str) -> PathBuf {
@@ -578,8 +588,10 @@ pub fn meta_from_record(
         busy_excluded: false,
         agent_in_shell: false,
         shell_label: None,
-        // A recovered shell's spawn sets it on the meta this returns.
+        // A recovered shell's spawn sets these on the meta this returns.
         hook_agent: None,
+        hook_options: protocol::OptionValues::new(),
+        hook_trusted: false,
     })
 }
 
@@ -910,6 +922,8 @@ mod tests {
             agent_in_shell: false,
             shell_label: None,
             hook_agent: None,
+            hook_options: protocol::OptionValues::new(),
+            hook_trusted: false,
         };
         let bytes = serde_json::to_vec(&original).expect("serialize");
         let decoded = load_meta_from_bytes(&bytes).expect("decode");
@@ -1115,6 +1129,41 @@ mod tests {
         }"#;
         let old_meta = load_meta_from_bytes(old).expect("parse old meta");
         assert_eq!(old_meta.hook_agent, None);
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    /// A recovered shell's hook options and trust survive the sidecar; a
+    /// sidecar without the fields loads as empty options, untrusted.
+    #[test]
+    fn hook_options_and_trust_round_trip_through_the_sidecar() {
+        let dirs = scratch_dirs("hook-options-round-trip");
+        let mut meta = s1_meta(None);
+        meta.mode = SessionMode::PlainShell;
+        meta.hook_agent = Some(agent_registry::default_agent());
+        meta.hook_options = protocol::OptionValues::from([(
+            "mode".to_owned(),
+            protocol::OptionValue::Text("fast".to_owned()),
+        )]);
+        meta.hook_trusted = true;
+        write_meta(&dirs, &meta).expect("write meta");
+        let loaded = load_meta(&dirs, "s1").expect("load meta");
+        assert_eq!(loaded.hook_options, meta.hook_options);
+        assert!(loaded.hook_trusted, "the trust reached the sidecar");
+
+        let old = br#"{
+            "on_disk_version": 2,
+            "session_id": "old",
+            "pid": 9001,
+            "label": "legacy",
+            "kind": "single",
+            "mode": "plain_shell",
+            "members": [],
+            "started_at": "2024-01-01T00:00:00Z",
+            "hook_agent": "claude"
+        }"#;
+        let old_meta = load_meta_from_bytes(old).expect("parse old meta");
+        assert!(old_meta.hook_options.is_empty());
+        assert!(!old_meta.hook_trusted);
         let _ = std::fs::remove_dir_all(&dirs.config);
     }
 
