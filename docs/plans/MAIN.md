@@ -4,9 +4,9 @@
 
 ## Release 2 — Remote mode and the agent seam
 
-- [ ] RT-426 Prove the daemon before the installer sends it /shutdown
-- [ ] RT-430 Bind the daemon's loopback listener so no other socket can share its port
-- [ ] RT-431 Refuse or escape cmd metacharacters in a .cmd agent shim's direct-spawn arguments
+- [ ] RT-426 Prove the daemon before the installer sends it /shutdown · release vNext
+- [ ] RT-430 Bind the daemon's loopback listener so no other socket can share its port · release vNext
+- [ ] RT-431 Refuse or escape cmd metacharacters in a .cmd agent shim's direct-spawn arguments · release vNext
 
 ## Wave 1a — Claude sessions on DeepSeek
 
@@ -15,21 +15,21 @@
 
 ## Wave 2 — Daily driver: close the port's gaps
 
-- [ ] RT-195 Give the container menu a keyboard route
-- [ ] RT-202 Accept the 1015 and 1016 mouse-report encodings
-- [ ] RT-205 Re-sync a watched .code-workspace once at daemon start
-- [ ] RT-207 Move the .code-workspace folder scan off the connection's dispatch task
-- [ ] RT-211 Open the trusted-launch dialog through one helper, with a refusal path
-- [ ] RT-223 Test the daemon's branch-name suggestion and its failure routing
-- [ ] RT-235 Check a VS Code or Explorer target still exists before opening it
-- [ ] RT-236 Fold the container menu's disabled-tip table into its row definitions
-- [ ] RT-237 Diagnose the VS Code fallback's dispatch order when two opens are queued
-- [ ] RT-238 Route a ListPresets failure by request_id
-- [ ] RT-239 Skip touch and broadcast for a MovePane that leaves the grid unchanged
-- [ ] RT-254 Keep preset job events when the broadcast lags
-- [ ] RT-255 Reject or document a preset max_panes_per_tab of 0
-- [ ] RT-256 Name the failing script variable in PresetScriptsError
-- [ ] RT-259 Preset wizard: say so when Esc closes it while its scripts still run
+- [ ] RT-195 Give the container menu a keyboard route · release vNext
+- [ ] RT-202 Accept the 1015 and 1016 mouse-report encodings · release vNext
+- [ ] RT-205 Re-sync a watched .code-workspace once at daemon start · release vNext
+- [ ] RT-207 Move the .code-workspace folder scan off the connection's dispatch task · release vNext
+- [ ] RT-211 Open the trusted-launch dialog through one helper, with a refusal path · release vNext
+- [ ] RT-223 Test the daemon's branch-name suggestion and its failure routing · release vNext
+- [ ] RT-235 Check a VS Code or Explorer target still exists before opening it · release vNext
+- [ ] RT-236 Fold the container menu's disabled-tip table into its row definitions · release vNext
+- [ ] RT-237 Diagnose the VS Code fallback's dispatch order when two opens are queued · release vNext
+- [ ] RT-238 Route a ListPresets failure by request_id · release vNext
+- [ ] RT-239 Skip touch and broadcast for a MovePane that leaves the grid unchanged · release vNext
+- [ ] RT-254 Keep preset job events when the broadcast lags · release vNext
+- [ ] RT-255 Reject or document a preset max_panes_per_tab of 0 · release vNext
+- [ ] RT-256 Name the failing script variable in PresetScriptsError · release vNext
+- [ ] RT-259 Preset wizard: say so when Esc closes it while its scripts still run · release vNext
 
 ## Wave 2b — Hook status
 
@@ -72,7 +72,7 @@
 
 ## Wave 7 — Pop-out windows
 
-- [ ] RT-440 Check the Shell dialog and spec pane drag inside a tab pop-out
+- [ ] RT-440 Check the Shell dialog and spec pane drag inside a tab pop-out · release vNext
 
 ## Wave 8 — Chat mirror and phone session views
 
@@ -87,11 +87,11 @@
 
 ## Wave 9 — Summaries, spoken alerts and the Dashboard
 
-- [ ] RT-27 Measure a local small model as the alerts' summarizer provider
-- [ ] RT-26 Speak a summary aloud when an agent waits
-- [ ] RT-28 Dashboard view: cards for every live session, fed by the summarizer
-- [ ] RT-111 Summary view: one line per stretch of work, expandable into the chat
-- [ ] RT-423 Needs You: Answer rows and line 2 from session summaries (NY.5)
+- [ ] RT-27 Measure a local small model as the alerts' summarizer provider · release vNext
+- [ ] RT-26 Speak a summary aloud when an agent waits · release vNext
+- [ ] RT-28 Dashboard view: cards for every live session, fed by the summarizer · release vNext
+- [ ] RT-111 Summary view: one line per stretch of work, expandable into the chat · release vNext
+- [ ] RT-423 Needs You: Answer rows and line 2 from session summaries (NY.5) · release vNext
 
 ## Wave 10 — Subagent streams
 
@@ -180,9 +180,10 @@
   - [ ] RT-330 RT-324 S6: Live no-focus check, DRIVING_CONVENTIONS and task index for driving
 - [ ] RT-346 Make rt.ps1 test -Validate fast: it ran 652 s through the gate
 - [ ] RT-348 Update tokio past RUSTSEC-2026-0386 so cargo deny passes
-- [ ] RT-422 Remove wall-clock time assertions from the tests · release vNext+1
+- [ ] RT-422 Remove wall-clock time assertions from the tests · release vNext
 - [ ] RT-427 Kill hung tests with a nextest terminate-after guard
-- [ ] RT-441 Treat GATE_BOX_JOB as already gated in rt.ps1
+- [ ] RT-441 Treat GATE_BOX_JOB as already gated in rt.ps1 · release vNext
+- [ ] RT-442 Find rc.exe for the native build when KitsRoot10 names the wrong folder · release vNext
 
 ## macOS
 
@@ -227,7 +228,7 @@
 - [ ] RT-124 Fetch every file a turn touched as one folder
 - [ ] RT-125 Launch a session from the phone: launch last again, a preset, or /nextup in a repo
 - [ ] RT-293 Show a running shell command's live output beside its session
-- [ ] RT-438 Make a session follow the agent running in it: detect an agent typed into a plain shell and its exit · release vNext+1
+- [ ] RT-438 Make a session follow the agent running in it: detect an agent typed into a plain shell and its exit · release vNext
 
 ## Backlog
 
@@ -261,4 +262,4 @@
 - [ ] RT-434 Install the scrollback snapshot sender in attach_lifecycle itself
 - [ ] RT-435 Send the tracer's Exited only after the child's last output
 - [ ] RT-436 Send no Stopped attention for a session discarded before its exit
-- [ ] RT-437 Detect an agent's request to reconnect an MCP server and run the reconnect for the user · release vNext+1
+- [ ] RT-437 Detect an agent's request to reconnect an MCP server and run the reconnect for the user · release vNext
