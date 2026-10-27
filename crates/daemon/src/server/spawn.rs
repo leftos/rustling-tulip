@@ -35,6 +35,7 @@ use crate::session::SessionRegistry;
 use crate::session::{
     SessionRecord, UpdateOrigin, attach_lifecycle, default_agent, new_id, push_recent_action,
 };
+use crate::tracer_log::AgentNote;
 use crate::{
     env_secrets, headless, inject, orphan, osc_title, pty_state, screen, spawn_plan, tracer_client,
     user_env, workspace as ws,
@@ -953,6 +954,63 @@ async fn planned_conversation(
     }
 }
 
+/// The note a shell-hosted agent's tracer writes to its log, so the
+/// tracer-log import knows the agent the shell ran: its options, trust,
+/// conversation and the session's folders after the first. A directly
+/// spawned agent gets none, as its argv names it. The note never carries the
+/// spawn's environment.
+fn shell_agent_note(
+    launch: &Launch,
+    cfg: &SpawnArgs,
+    conversation_id: Option<&str>,
+    members: &[SessionMember],
+) -> Option<AgentNote> {
+    let Launch::InShell(_) = launch else {
+        return None;
+    };
+    Some(AgentNote {
+        agent: cfg.agent.clone(),
+        options: cfg.options.clone(),
+        trusted: cfg.dangerously_skip_permissions,
+        conversation_id: conversation_id.map(str::to_owned),
+        extra_dirs: note_extra_dirs(cfg, members),
+    })
+}
+
+/// The note for a recovered plain shell that types its hook agent's resume
+/// command (`resume_typed`): the hook agent with the recovered options and
+/// trust, and the resumed conversation. A shell with no hook agent, no
+/// conversation to resume or no resume command typed gets none.
+fn shell_resume_agent_note(
+    cfg: &SpawnArgs,
+    resume_typed: bool,
+    members: &[SessionMember],
+) -> Option<AgentNote> {
+    let (Some(agent), Some(conversation)) =
+        (&cfg.extras.hook_agent, &cfg.extras.resume_conversation)
+    else {
+        return None;
+    };
+    resume_typed.then(|| AgentNote {
+        agent: agent.clone(),
+        options: cfg.extras.hook_options.clone(),
+        trusted: cfg.extras.hook_trusted,
+        conversation_id: Some(conversation.clone()),
+        extra_dirs: note_extra_dirs(cfg, members),
+    })
+}
+
+/// A note's extra folders: the members after the first, then the target's
+/// standalone extra folders, in the order the agent's argv names them.
+fn note_extra_dirs(cfg: &SpawnArgs, members: &[SessionMember]) -> Vec<String> {
+    members
+        .iter()
+        .skip(1)
+        .map(|member| member.worktree_path.clone())
+        .chain(cfg.add_dirs.iter().cloned())
+        .collect()
+}
+
 /// The conversations `backend` holds for `folder` before the spawn, every
 /// one recorded up to now, so discovery never gives the new session one of
 /// them. `None`, logged, when the lookup itself fails: the session then
@@ -1093,6 +1151,7 @@ async fn spawn_interactive_session(
         }
         None => Launch::Direct,
     };
+    let agent_note = shell_agent_note(&launch, cfg, conversation_id.as_deref(), &members);
     let (program, args, env, injectors, shell_label) = match launch {
         Launch::Direct => {
             let args = backend.interactive_args(
@@ -1145,6 +1204,7 @@ async fn spawn_interactive_session(
         env_remove: cfg.env.remove.clone(),
         cols: 120,
         rows: 32,
+        agent_note,
     };
     let (cols, rows) = (spec.cols, spec.rows);
     #[cfg(test)]
@@ -1371,6 +1431,7 @@ async fn spawn_plain_shell_session(
         hook_settings,
         injector: resume_injector,
     } = resume;
+    let agent_note = shell_resume_agent_note(cfg, resume_injector.is_some(), &members);
     let initial_cwd = primary_cwd.to_string_lossy().into_owned();
     let env = with_shell_env(cfg.env.set.clone(), shell.extra_env);
     let spec = PtySpawnSpec {
@@ -1382,6 +1443,7 @@ async fn spawn_plain_shell_session(
         env_remove: cfg.env.remove.clone(),
         cols: 120,
         rows: 32,
+        agent_note,
     };
     let (cols, rows) = (spec.cols, spec.rows);
     #[cfg(test)]
@@ -2720,6 +2782,168 @@ mod tests {
     /// Claude's plugin.
     fn claude_backend() -> &'static dyn AgentPlugin {
         agent_registry::plugin(&agent_registry::default_agent()).expect("Claude is registered")
+    }
+
+    /// Claude's spawn arguments with secret-bearing env rows, trusted, with
+    /// one standalone extra folder.
+    fn note_spawn_args() -> SpawnArgs {
+        SpawnArgs {
+            dangerously_skip_permissions: true,
+            agent: agent_registry::default_agent(),
+            backend: claude_backend(),
+            options: claude_options(),
+            env: agent_api::EnvPlan {
+                set: vec![(
+                    "EXAMPLE_API_KEY".to_owned(),
+                    "sk-example-note-secret".to_owned(),
+                )],
+                remove: vec!["EXAMPLE_REMOVED_VAR".to_owned()],
+            },
+            prompt_injector: None,
+            origin: None,
+            resume_conversation: None,
+            add_dirs: vec![r"D:\extra".to_owned()],
+            extras: SpawnExtras::default(),
+        }
+    }
+
+    fn note_member(path: &str) -> SessionMember {
+        SessionMember {
+            repo_id: String::new(),
+            repo_name: String::new(),
+            branch: String::new(),
+            worktree_path: path.to_owned(),
+        }
+    }
+
+    #[test]
+    fn an_in_shell_spawn_builds_a_note_without_env_rows() {
+        let launch = Launch::InShell(shell::ShellLaunch {
+            shell: ShellProgram {
+                program: "pwsh.exe".to_owned(),
+                args: vec!["-NoExit".to_owned()],
+                label: "pwsh".to_owned(),
+                extra_env: vec![("EXAMPLE_SHELL_VAR".to_owned(), "shell-value".to_owned())],
+            },
+            injectors: Vec::new(),
+        });
+        let members = [note_member(r"D:\yaat"), note_member(r"D:\yaat-server")];
+
+        let note = shell_agent_note(&launch, &note_spawn_args(), Some("conv-1"), &members)
+            .expect("a shell-hosted agent gets a note");
+
+        assert_eq!(note.agent, agent_registry::default_agent());
+        assert_eq!(note.options, claude_options());
+        assert!(note.trusted);
+        assert_eq!(note.conversation_id.as_deref(), Some("conv-1"));
+        assert_eq!(note.extra_dirs, [r"D:\yaat-server", r"D:\extra"]);
+        let json = serde_json::to_string(&note).expect("encode the note");
+        for env_text in [
+            "EXAMPLE_API_KEY",
+            "sk-example-note-secret",
+            "EXAMPLE_REMOVED_VAR",
+            "EXAMPLE_SHELL_VAR",
+            "shell-value",
+        ] {
+            assert!(
+                !json.contains(env_text),
+                "{env_text} is in the note: {json}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_direct_spawn_builds_no_note() {
+        let members = [note_member(r"D:\yaat")];
+
+        let note = shell_agent_note(
+            &Launch::Direct,
+            &note_spawn_args(),
+            Some("conv-1"),
+            &members,
+        );
+
+        assert_eq!(note, None);
+    }
+
+    /// The recovered selection's options a shell-resume note carries.
+    fn recovered_options() -> OptionValues {
+        OptionValues::from([
+            (
+                "model".to_owned(),
+                protocol::OptionValue::Text("deepseek-v4-pro".to_owned()),
+            ),
+            (
+                "provider".to_owned(),
+                protocol::OptionValue::Text("deepseek".to_owned()),
+            ),
+        ])
+    }
+
+    /// A recovered plain shell's spawn arguments: its own options empty and
+    /// untrusted, resuming `abc-123` with `hook_agent` on the recovered
+    /// options and trust, with secret-bearing env rows.
+    fn shell_resume_note_args(hook_agent: Option<AgentId>) -> SpawnArgs {
+        SpawnArgs {
+            dangerously_skip_permissions: false,
+            options: OptionValues::new(),
+            extras: SpawnExtras {
+                hook_agent,
+                resume_conversation: Some("abc-123".to_owned()),
+                hook_options: recovered_options(),
+                hook_trusted: true,
+            },
+            ..note_spawn_args()
+        }
+    }
+
+    #[test]
+    fn a_shell_resume_spawn_builds_a_note_for_its_agent() {
+        let cfg = shell_resume_note_args(Some(agent_registry::default_agent()));
+        let members = [note_member(r"D:\yaat"), note_member(r"D:\yaat-server")];
+
+        let note = shell_resume_agent_note(&cfg, true, &members)
+            .expect("a shell resuming its hook agent gets a note");
+
+        assert_eq!(note.agent, agent_registry::default_agent());
+        assert_eq!(note.options, recovered_options());
+        assert!(note.trusted, "the recovered trust, not the shell's own");
+        assert_eq!(note.conversation_id.as_deref(), Some("abc-123"));
+        assert_eq!(note.extra_dirs, [r"D:\yaat-server", r"D:\extra"]);
+        let json = serde_json::to_string(&note).expect("encode the note");
+        for env_text in [
+            "EXAMPLE_API_KEY",
+            "sk-example-note-secret",
+            "EXAMPLE_REMOVED_VAR",
+        ] {
+            assert!(
+                !json.contains(env_text),
+                "{env_text} is in the note: {json}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_plain_shell_without_a_hook_agent_builds_no_note() {
+        let members = [note_member(r"D:\yaat")];
+        let no_hook_agent = shell_resume_note_args(None);
+        let mut no_conversation = shell_resume_note_args(Some(agent_registry::default_agent()));
+        no_conversation.extras.resume_conversation = None;
+        let resuming = shell_resume_note_args(Some(agent_registry::default_agent()));
+
+        assert_eq!(
+            shell_resume_agent_note(&no_hook_agent, false, &members),
+            None
+        );
+        assert_eq!(
+            shell_resume_agent_note(&no_conversation, false, &members),
+            None
+        );
+        assert_eq!(
+            shell_resume_agent_note(&resuming, false, &members),
+            None,
+            "a plugin that typed no resume command leaves a bare shell"
+        );
     }
 
     /// Claude with its default options.

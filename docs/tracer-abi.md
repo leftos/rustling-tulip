@@ -7,15 +7,9 @@ expectations for each. **Treat this as a public stability contract** — every
 live session is bound to a specific tracer binary version, so the cost of
 breaking changes is high.
 
-## Status: Phase C.2 (skeleton)
+## Status
 
-As of this commit, the tracer protocol crate (`tracer-protocol`) and the
-tracer binary skeleton (`rt-tracer`) exist but are not wired into the daemon's
-spawn path. The daemon still spawns `claude` directly via `portable-pty`.
-
-Phase C.3 (a future iter, gated by the C.1 empirical spike) will switch the
-daemon's spawn path to invoke `rt-tracer` instead. Until then, this protocol
-is forward-only: the daemon won't emit any of these messages in production.
+Every interactive and plain-shell PTY child is spawned under `rt-tracer` (`crates/daemon/src/tracer_client.rs`); it is the only PTY spawn path. Headless sessions do not use it.
 
 ## Message set
 
@@ -62,6 +56,10 @@ These are new functions only: no message or type changes, so they are additive a
 - A new `TracerResponse` variant (older daemons see `InboundTracerResponse::Unknown`)
 - A new `#[serde(default)]` field on an existing message
 - New enum variants on nested types
+- A new optional tracer CLI argument, placed before the program (the daemon passes it only when it has something to say)
+- A new tracer log line, which `crates/daemon/src/tracer_log.rs` reads; older readers ignore lines they do not know (the `rt-tracer agent note` line is one)
+
+The tracer's CLI arguments and its log lines are part of the contract beside the messages, and are additive-only.
 
 **IS a bump** (requires `TRACER_VERSION += 1` and adding the previous
 version to `SUPPORTED_TRACER_VERSIONS` for one release cycle):

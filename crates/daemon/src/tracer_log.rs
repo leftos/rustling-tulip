@@ -12,8 +12,13 @@ use std::collections::HashMap;
 use std::str::Chars;
 
 use chrono::{DateTime, Utc};
+use protocol::{AgentId, OptionValues};
+use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 const START_MARKER: &str = "rt-tracer starting ";
+/// The line `rt-tracer` writes for its `--agent-note`, up to the note's JSON.
+const AGENT_NOTE_MARKER: &str = "rt-tracer agent note agent_note=";
 const SPAWN_MARKER: &str = "supervisor: about to spawn child ";
 const STOP_MARKER: &str = "supervisor: Stop request received";
 const EXIT_MARKER: &str = "supervisor: child exited; shutting down ";
@@ -44,6 +49,25 @@ pub struct TracerLogSummary {
     /// The timestamp of the log's last line.
     pub last_line_at: DateTime<Utc>,
     pub end: TracerLogEnd,
+    /// The agent a shell-hosted session typed into its shell, from the log's
+    /// first agent note line; `None` when it has none or that line is
+    /// unreadable.
+    pub agent_note: Option<AgentNote>,
+}
+
+/// The agent a shell-hosted session runs, which the daemon hands its tracer
+/// with `--agent-note` because the tracer's child is the shell and its argv
+/// does not name the agent. The tracer writes it to its log as JSON; it never
+/// carries the session's environment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentNote {
+    pub agent: AgentId,
+    pub options: OptionValues,
+    pub trusted: bool,
+    /// The agent conversation, when the daemon knew it at spawn.
+    pub conversation_id: Option<String>,
+    /// The session's folders after its working directory.
+    pub extra_dirs: Vec<String>,
 }
 
 /// Summarises a tracer log, or `None` when it has no `rt-tracer starting`
@@ -102,6 +126,9 @@ struct Scan {
     stopped: bool,
     exit_code: Option<i32>,
     last_line_at: Option<DateTime<Utc>>,
+    /// Whether an agent note line was seen: the first one decides the note.
+    note_seen: bool,
+    agent_note: Option<AgentNote>,
 }
 
 impl Scan {
@@ -118,6 +145,12 @@ impl Scan {
         }
         if self.exit_code.is_none() {
             self.exit_code = parse_exit(rest);
+        }
+        if !self.note_seen
+            && let Some(json) = note_json(rest)
+        {
+            self.note_seen = true;
+            self.agent_note = parse_agent_note(json);
         }
     }
 
@@ -140,7 +173,28 @@ impl Scan {
             started_at: start.at,
             last_line_at: self.last_line_at.unwrap_or(start.at),
             end,
+            agent_note: self.agent_note,
         })
+    }
+}
+
+/// The JSON after an agent note line's marker.
+fn note_json(rest: &str) -> Option<&str> {
+    Some(&rest[rest.find(AGENT_NOTE_MARKER)? + AGENT_NOTE_MARKER.len()..])
+}
+
+/// The note `json` starts with; anything after its closing brace is ignored.
+/// An unreadable note is logged and dropped, never fatal to the import.
+fn parse_agent_note(json: &str) -> Option<AgentNote> {
+    match serde_json::Deserializer::from_str(json)
+        .into_iter::<AgentNote>()
+        .next()?
+    {
+        Ok(note) => Some(note),
+        Err(err) => {
+            warn!(%err, "ignoring an unreadable agent note in a tracer log");
+            None
+        }
     }
 }
 
@@ -274,6 +328,7 @@ mod tests {
         TracerLogEnd, TracerLogSummary, parse_debug_str_list, parse_tracer_log, session_end_times,
     };
     use chrono::{DateTime, Utc};
+    use protocol::{AgentId, OptionValue, OptionValues};
 
     fn ts(stamp: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(stamp)
@@ -433,6 +488,73 @@ mod tests {
         assert_eq!(parse_debug_str_list(r#"["a","b"]"#), None);
         assert_eq!(parse_debug_str_list(r#"["bad \q escape"]"#), None);
         assert_eq!(parse_debug_str_list(r#"["\u{110000}"]"#), None);
+    }
+
+    /// A pwsh-hosted session's start and spawn lines with `note_lines`
+    /// between them.
+    fn shell_hosted(note_lines: &[&str]) -> TracerLogSummary {
+        let mut lines = vec![STOP_START[0]];
+        lines.extend_from_slice(note_lines);
+        lines.push(
+            r#"2026-09-26T03:53:21.120000Z  INFO rt_tracer::supervisor: supervisor: about to spawn child program=pwsh.exe argc=1 args=["-NoExit"] cwd=D:\rustling-tulip"#,
+        );
+        parse(&lines)
+    }
+
+    const NOTE_LINE: &str = r#"2026-09-26T03:53:21.117000Z  INFO rt_tracer: rt-tracer agent note agent_note={"agent":"test-agent","options":{"model":"opus","fast":true,"effort":null},"trusted":true,"conversation_id":"conv-1","extra_dirs":["D:\\b c"]}"#;
+
+    #[test]
+    fn parses_the_agent_note_line() {
+        let summary = shell_hosted(&[NOTE_LINE]);
+
+        let note = summary.agent_note.expect("the note is read");
+        assert_eq!(note.agent, AgentId("test-agent".to_owned()));
+        assert_eq!(
+            note.options,
+            OptionValues::from([
+                ("model".to_owned(), OptionValue::Text("opus".to_owned())),
+                ("fast".to_owned(), OptionValue::Bool(true)),
+                ("effort".to_owned(), OptionValue::Null),
+            ])
+        );
+        assert!(note.trusted);
+        assert_eq!(note.conversation_id.as_deref(), Some("conv-1"));
+        assert_eq!(note.extra_dirs, [r"D:\b c"]);
+        assert_eq!(summary.program, "pwsh.exe", "the spawn line still reads");
+    }
+
+    #[test]
+    fn a_log_without_a_note_has_none() {
+        assert_eq!(shell_hosted(&[]).agent_note, None);
+        assert_eq!(parse(&LOST_CLAUDE_LOG).agent_note, None);
+    }
+
+    #[test]
+    fn a_malformed_note_is_ignored_not_fatal() {
+        let cases = [
+            r"2026-09-26T03:53:21.117000Z  INFO rt_tracer: rt-tracer agent note agent_note={not json",
+            r#"2026-09-26T03:53:21.117000Z  INFO rt_tracer: rt-tracer agent note agent_note={"agent":"test-agent"}"#,
+            r"2026-09-26T03:53:21.117000Z  INFO rt_tracer: rt-tracer agent note agent_note=",
+        ];
+        for line in cases {
+            let summary = shell_hosted(&[line]);
+
+            assert_eq!(summary.agent_note, None, "{line}");
+            assert_eq!(summary.program, "pwsh.exe", "{line}");
+            assert_eq!(summary.session_id, "22b5a96d-8d81-40e3-a594-498fc639c7cc");
+        }
+    }
+
+    #[test]
+    fn the_first_note_wins() {
+        let second = r#"2026-09-26T03:53:21.118000Z  INFO rt_tracer: rt-tracer agent note agent_note={"agent":"other-agent","options":{},"trusted":false,"conversation_id":null,"extra_dirs":[]}"#;
+
+        let note = shell_hosted(&[NOTE_LINE, second])
+            .agent_note
+            .expect("the first note is read");
+
+        assert_eq!(note.agent, AgentId("test-agent".to_owned()));
+        assert_eq!(note.conversation_id.as_deref(), Some("conv-1"));
     }
 
     #[test]

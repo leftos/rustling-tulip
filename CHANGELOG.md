@@ -23,6 +23,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - A session's last output before it ends always reaches its scrollback before it shows as stopped, and discarding a session right after stopping it leaves no folder behind.
 - A preset launch's Stop all also stops sessions that haven't shown up in the sidebar yet, and cancels a running launch even before any session exists.
 - A Claude session's name no longer flickers with Claude's spinner, and a session titled only "Claude Code" shows its own label instead.
+- A Claude session started in your shell that is lost before its history is saved now comes back in Recover as Claude, with its settings and conversation, not as a plain shell.
 
 ### Changed
 

@@ -351,6 +351,17 @@ fn tracer_invocation(launch: &TracerLaunch<'_>) -> TracerInvocation {
         "--rows".into(),
         spec.rows.to_string().into(),
     ];
+    // The tracer's program-and-args are trailing, so the note goes before.
+    if let Some(note) = &spec.agent_note {
+        match serde_json::to_string(note) {
+            Ok(json) => args.extend(["--agent-note".into(), json.into()]),
+            Err(err) => warn!(
+                ?err,
+                session_id = %spec.session_id,
+                "cannot encode the agent note; the tracer log will not name the agent"
+            ),
+        }
+    }
     // Trailing program-and-args: program first, then its args. portable-pty
     // expects this shape on the tracer side.
     args.push(spec.program.clone().into());
@@ -1109,6 +1120,7 @@ mod tests {
             env_remove: Vec::new(),
             cols: 80,
             rows: 24,
+            agent_note: None,
         };
         let owner = PathBuf::from("owner-config");
         let log = PathBuf::from("owner-config")
@@ -1138,6 +1150,7 @@ mod tests {
             env_remove: vec!["EXAMPLE_API_KEY".to_owned()],
             cols: 80,
             rows: 24,
+            agent_note: None,
         };
         let owner = PathBuf::from("owner-config");
         let cmd = super::tracer_command(&super::TracerLaunch {
@@ -1166,6 +1179,7 @@ mod tests {
             env_remove: Vec::new(),
             cols: 80,
             rows: 24,
+            agent_note: None,
         };
         let owner = PathBuf::from("owner-config");
         let cmd = super::tracer_command(&super::TracerLaunch {
@@ -1201,6 +1215,7 @@ mod tests {
             env_remove: Vec::new(),
             cols: 80,
             rows: 24,
+            agent_note: None,
         };
         let owner = PathBuf::from("owner-config");
         let cmd = super::tracer_command(&super::TracerLaunch {
@@ -1253,6 +1268,7 @@ mod tests {
             ],
             cols: 80,
             rows: 24,
+            agent_note: None,
         };
         let owner = PathBuf::from("owner-config");
         let log = PathBuf::from("tracer-abc.log");
@@ -1276,6 +1292,77 @@ mod tests {
         assert!(
             entries.contains(&owner_entry.as_str()) && entries.contains(&log_entry.as_str()),
             "a removal naming the owner or log variable never drops it: {entries:?}"
+        );
+    }
+
+    /// The tracer's args for a `pwsh.exe -NoExit` spawn carrying `agent_note`.
+    fn shell_invocation_args(
+        agent_note: Option<crate::tracer_log::AgentNote>,
+    ) -> Vec<std::ffi::OsString> {
+        let spec = crate::pty::PtySpawnSpec {
+            session_id: "abc".to_string(),
+            program: "pwsh.exe".to_string(),
+            args: vec!["-NoExit".to_owned()],
+            cwd: PathBuf::from("cwd"),
+            env: vec![("EXAMPLE_API_KEY".to_owned(), "sk-example-row".to_owned())],
+            env_remove: Vec::new(),
+            cols: 80,
+            rows: 24,
+            agent_note,
+        };
+        let owner = PathBuf::from("owner-config");
+        super::tracer_invocation(&super::TracerLaunch {
+            tracer: Path::new("rt-tracer"),
+            spec: &spec,
+            pipe_name: "pipe",
+            log_path: None,
+            owner: &owner,
+        })
+        .args
+    }
+
+    #[test]
+    fn tracer_invocation_passes_the_agent_note_before_the_program() {
+        let note = crate::tracer_log::AgentNote {
+            agent: protocol::AgentId("test-agent".to_owned()),
+            options: protocol::OptionValues::from([(
+                "model".to_owned(),
+                protocol::OptionValue::Text("opus".to_owned()),
+            )]),
+            trusted: true,
+            conversation_id: Some("conv-1".to_owned()),
+            extra_dirs: vec![r"D:\b".to_owned()],
+        };
+
+        let args = shell_invocation_args(Some(note.clone()));
+
+        let flag = args
+            .iter()
+            .position(|arg| arg == "--agent-note")
+            .expect("the note flag is passed");
+        let json = args[flag + 1].to_str().expect("the note is UTF-8");
+        let passed: crate::tracer_log::AgentNote =
+            serde_json::from_str(json).expect("the note is JSON");
+        assert_eq!(passed, note);
+        assert!(!json.contains("sk-example-row"), "{json}");
+        let program = args
+            .iter()
+            .position(|arg| arg == "pwsh.exe")
+            .expect("the program is passed");
+        assert!(
+            flag + 1 < program,
+            "the note precedes the program: {args:?}"
+        );
+        assert_eq!(args[program + 1..], [std::ffi::OsString::from("-NoExit")]);
+    }
+
+    #[test]
+    fn tracer_invocation_omits_the_note_for_a_plain_shell() {
+        let args = shell_invocation_args(None);
+
+        assert!(
+            !args.iter().any(|arg| arg == "--agent-note"),
+            "no note flag: {args:?}"
         );
     }
 

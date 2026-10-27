@@ -68,6 +68,9 @@ pub struct PtySpawnSpec {
     pub env_remove: Vec<String>,
     pub cols: u16,
     pub rows: u16,
+    /// The agent a shell typed it into runs, handed to the tracer so its log
+    /// names it; `None` for every other spawn.
+    pub agent_note: Option<crate::tracer_log::AgentNote>,
 }
 
 /// Shows the env's keys only: its values can hold resolved secrets.
@@ -83,6 +86,7 @@ impl std::fmt::Debug for PtySpawnSpec {
             .field("env_remove", &self.env_remove)
             .field("cols", &self.cols)
             .field("rows", &self.rows)
+            .field("agent_note", &self.agent_note)
             .finish()
     }
 }
@@ -307,6 +311,7 @@ mod tests {
             env_remove: Vec::new(),
             cols: 80,
             rows: 24,
+            agent_note: None,
         };
         let shown = format!("{spec:?}");
         assert!(shown.contains("EXAMPLE_API_KEY"), "{shown}");

@@ -16,7 +16,7 @@ use crate::paths::{Dirs, normalize_path_key};
 use crate::pty::PtyExit;
 use crate::session::{SessionRecord, SessionRegistry};
 use crate::sync::lock;
-use crate::tracer_log::{self, TracerLogEnd, TracerLogSummary};
+use crate::tracer_log::{self, AgentNote, TracerLogEnd, TracerLogSummary};
 use agent_api::{AgentPlugin, RecoveredRun, ResolvedRows, TracerRun};
 use anyhow::{Context as _, anyhow};
 use chrono::{DateTime, TimeDelta, Utc};
@@ -692,7 +692,9 @@ fn end_from_log(end: TracerLogEnd) -> SessionEnd {
     }
 }
 
-/// The history entry a tracer log describes. The run is offered to every
+/// The history entry a tracer log describes. A log whose agent note names a
+/// registered agent is that agent's session (see [`entry_from_agent_note`]);
+/// a note naming no registered agent is ignored. Otherwise the run is offered to every
 /// agent's plugin in order, and the first that recognises it gives the
 /// entry's program name, extra folders, options and trust. Such a session is
 /// matched to the workspace (cwd its first member, extra folders its other
@@ -734,6 +736,16 @@ fn entry_from_tracer_log(
         options: None,
         trusted: false,
     };
+    if let Some(note) = &summary.agent_note {
+        if let Some(plugin) = agent_registry::plugin(&note.agent) {
+            return Some(entry_from_agent_note(note, plugin, shell, registered));
+        }
+        warn!(
+            session_id = id,
+            agent = %note.agent.0,
+            "the tracer log's agent note names an unregistered agent; importing the log by its program"
+        );
+    }
     let run = TracerRun {
         program: &summary.program,
         args: &summary.args,
@@ -765,6 +777,33 @@ fn entry_from_tracer_log(
             program_name: Some(stem),
             ..shell
         })
+}
+
+/// The agent entry a shell-hosted session's agent note describes, built on
+/// the log's `shell` entry: the note's agent, options, trust and
+/// conversation, matched to its folders like a recognised run.
+fn entry_from_agent_note(
+    note: &AgentNote,
+    plugin: &dyn AgentPlugin,
+    shell: HistoryEntry,
+    registered: &Registered<'_>,
+) -> HistoryEntry {
+    let cwd = shell.primary_cwd.clone().unwrap_or_default();
+    let (kind, workspace_id) = match_target(&cwd, &note.extra_dirs, registered);
+    HistoryEntry {
+        kind,
+        mode: SessionMode::Interactive,
+        agent: Some(note.agent.clone()),
+        members: folder_members(&cwd, &note.extra_dirs, registered.repos),
+        workspace_id,
+        current_cwd: None,
+        program_name: Some(plugin.descriptor().tag.clone()),
+        import_rev: plugin.import_rev(),
+        options: Some(note.options.clone()),
+        trusted: note.trusted,
+        conversation_id: note.conversation_id.clone(),
+        ..shell
+    }
 }
 
 fn repo_at<'a>(repos: &'a [RepoEntry], path: &str) -> Option<&'a RepoEntry> {
@@ -2408,6 +2447,142 @@ mod import_tests {
     #[test]
     fn shell_import_rev_is_3() {
         assert_eq!(SHELL_IMPORT_REV, 3);
+    }
+
+    const SHELL_HOSTED_CONV: &str = "85573bb1-c581-489e-baaa-94d5a384744c";
+
+    /// The tracer log of a pwsh in `D:\yaat` that Claude was typed into, with
+    /// `note` on its agent note line, or no such line.
+    fn shell_hosted_log(id: &str, note: Option<&serde_json::Value>) -> Vec<String> {
+        let mut lines = vec![format!(
+            r"2026-09-27T08:00:00.000000Z  INFO rt_tracer: rt-tracer starting session_id={id} cwd=D:\yaat cols=120 rows=32 argc=4"
+        )];
+        if let Some(note) = note {
+            lines.push(format!(
+                "2026-09-27T08:00:00.005000Z  INFO rt_tracer: rt-tracer agent note agent_note={note}"
+            ));
+        }
+        lines.push(
+            r#"2026-09-27T08:00:00.010000Z  INFO rt_tracer::supervisor: supervisor: about to spawn child program=pwsh.exe argc=1 args=["-NoExit"] cwd=D:\yaat"#
+                .to_owned(),
+        );
+        lines
+    }
+
+    fn import_shell_hosted(dirs: &Dirs, id: &str, note: Option<&serde_json::Value>) {
+        let lines = shell_hosted_log(id, note);
+        let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+        write_log(dirs, &format!("tracer-{id}.log"), &lines);
+        let repos = [repo("r-yaat", r"D:\yaat"), repo("r-srv", r"D:\yaat-server")];
+        let workspaces = [workspace("ws1", &["r-yaat", "r-srv"])];
+        assert_eq!(import(dirs, &repos, &workspaces), 1);
+    }
+
+    fn deepseek_options() -> OptionValues {
+        OptionValues::from([
+            ("model".to_owned(), text("deepseek-v4-pro")),
+            ("provider".to_owned(), text("deepseek")),
+            ("permission_mode".to_owned(), OptionValue::Null),
+        ])
+    }
+
+    /// A trusted Claude note on the `deepseek` provider with `conversation_id` and the
+    /// second workspace member as its extra folder.
+    fn claude_note(conversation_id: Option<&str>) -> serde_json::Value {
+        json!({
+            "agent": agent_registry::default_agent(),
+            "options": deepseek_options(),
+            "trusted": true,
+            "conversation_id": conversation_id,
+            "extra_dirs": [r"D:\yaat-server"],
+        })
+    }
+
+    /// Asserts `entry` is the plain pwsh entry a log without a note gives.
+    fn assert_plain_shell(entry: &HistoryEntry) {
+        assert_eq!(entry.mode, SessionMode::PlainShell);
+        assert_eq!(entry.agent, None);
+        assert_eq!(entry.kind, SessionKind::Standalone);
+        assert_eq!(entry.workspace_id, None);
+        assert_eq!(entry.program_name.as_deref(), Some("pwsh"));
+        assert_eq!(entry.members, [] as [protocol::SessionMember; 0]);
+        assert_eq!(entry.current_cwd.as_deref(), Some(r"D:\yaat"));
+        assert_eq!(entry.options, None);
+        assert!(!entry.trusted);
+        assert_eq!(entry.conversation_id, None);
+        assert_eq!(entry.import_rev, SHELL_IMPORT_REV);
+    }
+
+    #[test]
+    fn a_shell_hosted_agent_log_imports_as_the_agent_with_its_options_and_conversation() {
+        let dirs = scratch_dirs("import-shell-hosted-note");
+        let id = "aaaaaaaa-0000-4000-8000-0000000003a1";
+
+        import_shell_hosted(&dirs, id, Some(&claude_note(Some(SHELL_HOSTED_CONV))));
+
+        let entry = only(&dirs, id);
+        let plugin =
+            agent_registry::plugin(&agent_registry::default_agent()).expect("Claude is registered");
+        assert_eq!(entry.mode, SessionMode::Interactive);
+        assert_eq!(entry.agent, Some(agent_registry::default_agent()));
+        assert_eq!(entry.options, Some(deepseek_options()));
+        assert!(entry.trusted);
+        assert_eq!(entry.conversation_id.as_deref(), Some(SHELL_HOSTED_CONV));
+        assert_eq!(
+            entry.program_name.as_deref(),
+            Some(plugin.descriptor().tag.as_str())
+        );
+        assert_eq!(entry.import_rev, claude_import_rev());
+        assert_eq!(entry.kind, SessionKind::Workspace);
+        assert_eq!(entry.workspace_id.as_deref(), Some("ws1"));
+        assert_eq!(
+            member_ids(&entry),
+            [("r-yaat", r"D:\yaat"), ("r-srv", r"D:\yaat-server")]
+        );
+        assert_eq!(entry.primary_cwd.as_deref(), Some(r"D:\yaat"));
+        assert_eq!(entry.current_cwd, None);
+        assert_eq!(entry.spawn_config, None);
+        assert_eq!(entry.source, HistorySource::TracerLog);
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn a_shell_hosted_log_without_a_note_stays_a_plain_shell() {
+        let dirs = scratch_dirs("import-shell-hosted-no-note");
+        let id = "aaaaaaaa-0000-4000-8000-0000000003a2";
+
+        import_shell_hosted(&dirs, id, None);
+
+        assert_plain_shell(&only(&dirs, id));
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn a_note_with_no_conversation_id_imports_with_none() {
+        let dirs = scratch_dirs("import-shell-hosted-no-conv");
+        let id = "aaaaaaaa-0000-4000-8000-0000000003a3";
+
+        import_shell_hosted(&dirs, id, Some(&claude_note(None)));
+
+        let entry = only(&dirs, id);
+        assert_eq!(entry.mode, SessionMode::Interactive);
+        assert_eq!(entry.agent, Some(agent_registry::default_agent()));
+        assert_eq!(entry.options, Some(deepseek_options()));
+        assert_eq!(entry.conversation_id, None);
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn a_note_naming_an_unregistered_agent_falls_back_to_the_shell_entry() {
+        let dirs = scratch_dirs("import-shell-hosted-unknown");
+        let id = "aaaaaaaa-0000-4000-8000-0000000003a4";
+        let mut note = claude_note(Some(SHELL_HOSTED_CONV));
+        note["agent"] = json!("no-such-agent");
+
+        import_shell_hosted(&dirs, id, Some(&note));
+
+        assert_plain_shell(&only(&dirs, id));
+        let _ = std::fs::remove_dir_all(&dirs.config);
     }
 
     #[test]

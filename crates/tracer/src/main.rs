@@ -48,6 +48,12 @@ struct Cli {
     #[arg(long, default_value_t = 32)]
     rows: u16,
 
+    /// The agent a shell child hosts, as the daemon's JSON note. The tracer
+    /// only writes it to its log, where the daemon reads it back when it
+    /// rebuilds history; it must precede the program.
+    #[arg(long)]
+    agent_note: Option<String>,
+
     /// Program to spawn followed by its arguments. The tracer just shells
     /// out — it doesn't know anything about agent specifics; the
     /// daemon's spawn pipeline builds the argv.
@@ -77,15 +83,7 @@ fn main() -> anyhow::Result<()> {
 async fn run_tracer() -> anyhow::Result<()> {
     init_tracing();
     let cli = Cli::parse();
-
-    info!(
-        session_id = %cli.session_id,
-        cwd = %cli.cwd.display(),
-        cols = cli.cols,
-        rows = cli.rows,
-        argc = cli.program_and_args.len(),
-        "rt-tracer starting"
-    );
+    log_start(&cli);
 
     let (program, args) = cli
         .program_and_args
@@ -109,6 +107,22 @@ async fn run_tracer() -> anyhow::Result<()> {
     supervisor::run(cfg).await
 }
 
+/// The log's starting line, then the agent note's line when there is one.
+/// The daemon's tracer-log reader parses both.
+fn log_start(cli: &Cli) {
+    info!(
+        session_id = %cli.session_id,
+        cwd = %cli.cwd.display(),
+        cols = cli.cols,
+        rows = cli.rows,
+        argc = cli.program_and_args.len(),
+        "rt-tracer starting"
+    );
+    if let Some(note) = &cli.agent_note {
+        info!(agent_note = %note, "rt-tracer agent note");
+    }
+}
+
 fn init_tracing() {
     // If the daemon set `RUSTLING_TULIP_TRACER_LOG`, mirror tracing output
     // to that file (truncated on each start). Otherwise fall back to
@@ -128,5 +142,97 @@ fn init_tracing() {
         builder.with_writer(std::sync::Mutex::new(file)).init();
     } else {
         builder.init();
+    }
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "tests unwrap parsed fixtures with expect for clear failure messages"
+)]
+mod tests {
+    use super::{Cli, log_start};
+    use clap::Parser;
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
+    const NOTE: &str = r#"{"agent":"test-agent","options":{},"trusted":true,"conversation_id":null,"extra_dirs":["D:\\b c"]}"#;
+
+    fn cli(args: &[&str]) -> Cli {
+        let argv = ["rt-tracer", "--session-id", "s1", "--cwd", "D:\\a"];
+        Cli::try_parse_from(argv.iter().chain(args)).expect("the args parse")
+    }
+
+    #[test]
+    fn agent_note_is_optional_and_precedes_the_program() {
+        let with_note = cli(&["--agent-note", NOTE, "pwsh.exe", "-NoExit"]);
+        assert_eq!(with_note.agent_note.as_deref(), Some(NOTE));
+        assert_eq!(with_note.program_and_args, ["pwsh.exe", "-NoExit"]);
+
+        let without = cli(&["pwsh.exe", "-NoExit"]);
+        assert_eq!(without.agent_note, None);
+        assert_eq!(without.program_and_args, ["pwsh.exe", "-NoExit"]);
+
+        let after_program = cli(&["pwsh.exe", "--agent-note", NOTE]);
+        assert_eq!(
+            after_program.agent_note, None,
+            "a flag after the program is the program's"
+        );
+        assert_eq!(
+            after_program.program_and_args,
+            ["pwsh.exe", "--agent-note", NOTE]
+        );
+    }
+
+    /// A log writer that keeps what the subscriber writes.
+    #[derive(Clone, Default)]
+    struct Captured(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("capture lock").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The lines [`log_start`] writes for `cli` under the tracer's format.
+    fn start_lines(cli: &Cli) -> String {
+        let captured = Captured::default();
+        let writer = captured.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_target(true)
+            .with_ansi(false)
+            .compact()
+            .with_writer(move || writer.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || log_start(cli));
+        let bytes = captured.0.lock().expect("capture lock").clone();
+        String::from_utf8(bytes).expect("the log is UTF-8")
+    }
+
+    #[test]
+    fn the_start_writes_the_agent_note_line() {
+        let lines = start_lines(&cli(&["--agent-note", NOTE, "pwsh.exe"]));
+
+        assert!(
+            lines.contains("rt-tracer starting session_id=s1 "),
+            "{lines}"
+        );
+        assert!(
+            lines.contains(&format!("rt-tracer agent note agent_note={NOTE}\n")),
+            "{lines}"
+        );
+    }
+
+    #[test]
+    fn a_start_without_a_note_writes_no_note_line() {
+        let lines = start_lines(&cli(&["pwsh.exe"]));
+
+        assert!(lines.contains("rt-tracer starting "), "{lines}");
+        assert!(!lines.contains("agent note"), "{lines}");
     }
 }
