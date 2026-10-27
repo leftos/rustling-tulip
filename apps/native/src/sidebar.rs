@@ -18,6 +18,7 @@ use crate::appearance::{self, AppColors, AppLevel, Resolved};
 use crate::connection_picker::SavedHost;
 use crate::fonts::{self, FontSettings};
 use crate::launch_last;
+use crate::popouts::{PopoutKey, SavedPopout};
 use crate::source_control::{Part, ScKey, ScUiState};
 use crate::tabs::collect_panes;
 use crate::window_state::WindowState;
@@ -454,6 +455,10 @@ pub struct UiState {
     /// The main window's place when it last moved; `None` until it has.
     #[serde(default)]
     pub window: Option<WindowState>,
+    /// The open pop-outs, in the order they opened, reopened at the next
+    /// launch. An entry that does not decode is dropped on load.
+    #[serde(default, deserialize_with = "decodable_popouts")]
+    pub popouts: Vec<SavedPopout>,
     /// The Settings modal's General tab.
     #[serde(default)]
     pub general: GeneralSettings,
@@ -531,6 +536,59 @@ fn valid_saved_hosts<'de, D: Deserializer<'de>>(
             }
         })
         .collect())
+}
+
+/// Reads `popouts`, never failing the file: a value that is not a list
+/// loads as no pop-outs, and each entry is read by [`decode_saved_popout`],
+/// each with a warning naming what was wrong.
+fn decodable_popouts<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<SavedPopout>, D::Error> {
+    let entries = match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::Null => return Ok(Vec::new()),
+        serde_json::Value::Array(entries) => entries,
+        other => {
+            tracing::warn!(
+                "saved pop-outs are {}, not a list; no pop-out reopens",
+                json_type(&other)
+            );
+            return Ok(Vec::new());
+        }
+    };
+    Ok(entries.iter().filter_map(decode_saved_popout).collect())
+}
+
+/// One saved pop-out: an entry whose window place does not decode keeps
+/// its key with no place, and one whose key does not decode is dropped.
+fn decode_saved_popout(entry: &serde_json::Value) -> Option<SavedPopout> {
+    if let Ok(saved) = SavedPopout::deserialize(entry) {
+        return Some(saved);
+    }
+    match PopoutKey::deserialize(entry.get("key").unwrap_or(&serde_json::Value::Null)) {
+        Ok(key) => {
+            tracing::warn!(
+                "saved pop-out {entry} has a window place that does not decode; \
+                 it reopens at its first-open place"
+            );
+            Some(SavedPopout { key, window: None })
+        }
+        Err(err) => {
+            tracing::warn!("saved pop-out {entry} is not a pop-out record ({err}); dropped");
+            None
+        }
+    }
+}
+
+/// What kind of JSON value `value` is, as a warning names it.
+fn json_type(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "a boolean",
+        serde_json::Value::Number(_) => "a number",
+        serde_json::Value::String(_) => "a string",
+        serde_json::Value::Array(_) => "a list",
+        serde_json::Value::Object(_) => "an object",
+    }
 }
 
 /// What the spawn dialog pre-fills from the client's Spawn defaults: only
@@ -688,6 +746,7 @@ impl Default for UiState {
             diff_highlight: true,
             viewer_markdown_rendered: true,
             window: None,
+            popouts: Vec::new(),
             general: GeneralSettings::default(),
             title: TitleSettings::default(),
             notifications: NotificationSettings::default(),
@@ -720,6 +779,11 @@ pub struct SidebarModel {
     /// before folding a message in.
     focused: Option<String>,
     ui: UiState,
+    /// The saved pop-outs whose windows the user closed since the layout was
+    /// last written, each with its place in the saved list when it left,
+    /// oldest first: a quit that starts before the next write saves them
+    /// again.
+    closed_popouts: Vec<(usize, SavedPopout)>,
 }
 
 impl SidebarModel {
@@ -734,7 +798,9 @@ impl SidebarModel {
     /// must; the layout in `ui` is this PC's and stays.
     pub fn clear_daemon_state(&mut self) {
         let ui = std::mem::take(&mut self.ui);
+        let closed_popouts = std::mem::take(&mut self.closed_popouts);
         *self = Self::new(ui);
+        self.closed_popouts = closed_popouts;
     }
 
     /// Keeps the daemon's agents, in its order, as a connection sends them.
@@ -1248,6 +1314,90 @@ impl SidebarModel {
         }
         self.ui.window = Some(state);
         true
+    }
+
+    /// Hands over the saved pop-outs, leaving none saved.
+    pub fn take_saved_popouts(&mut self) -> Vec<SavedPopout> {
+        std::mem::take(&mut self.ui.popouts)
+    }
+
+    /// Replaces the saved pop-outs with `popouts`.
+    pub fn set_saved_popouts(&mut self, popouts: Vec<SavedPopout>) {
+        self.ui.popouts = popouts;
+    }
+
+    /// Records an opened pop-out, last, with the place its window opens at;
+    /// returns whether it was not already saved.
+    pub fn save_popout(&mut self, key: PopoutKey, window: Option<WindowState>) -> bool {
+        if self.ui.popouts.iter().any(|saved| saved.key == key) {
+            return false;
+        }
+        self.ui.popouts.push(SavedPopout { key, window });
+        true
+    }
+
+    /// Records where `key`'s pop-out window now is; returns whether the
+    /// saved entry changed.
+    pub fn set_popout_window(&mut self, key: &PopoutKey, state: WindowState) -> bool {
+        let Some(saved) = self.ui.popouts.iter_mut().find(|saved| saved.key == *key) else {
+            return false;
+        };
+        if saved.window.as_ref() == Some(&state) {
+            return false;
+        }
+        saved.window = Some(state);
+        true
+    }
+
+    /// Gives the saved pop-out `old` the key `new`; returns whether it was
+    /// saved.
+    pub fn rekey_saved_popout(&mut self, old: &PopoutKey, new: PopoutKey) -> bool {
+        let Some(saved) = self.ui.popouts.iter_mut().find(|saved| saved.key == *old) else {
+            return false;
+        };
+        saved.key = new;
+        true
+    }
+
+    /// Forgets the saved pop-out `key`; returns whether it was saved.
+    pub fn forget_saved_popout(&mut self, key: &PopoutKey) -> bool {
+        let before = self.ui.popouts.len();
+        self.ui.popouts.retain(|saved| saved.key != *key);
+        self.ui.popouts.len() != before
+    }
+
+    /// Forgets the saved pop-out `key` as its window closes, keeping it to
+    /// save again should a quit start before the layout is next written;
+    /// returns whether it was saved.
+    pub fn close_saved_popout(&mut self, key: &PopoutKey) -> bool {
+        let Some(index) = self.ui.popouts.iter().position(|saved| saved.key == *key) else {
+            return false;
+        };
+        let entry = self.ui.popouts.remove(index);
+        self.closed_popouts.push((index, entry));
+        true
+    }
+
+    /// Saves again, each in its old place, the pop-outs whose windows closed
+    /// since the layout was last written, as a quit closing every window
+    /// must; one saved again since is left as it is. Returns whether any
+    /// came back.
+    pub fn keep_closed_popouts(&mut self) -> bool {
+        let mut kept = false;
+        while let Some((index, entry)) = self.closed_popouts.pop() {
+            if self.ui.popouts.iter().any(|saved| saved.key == entry.key) {
+                continue;
+            }
+            let index = index.min(self.ui.popouts.len());
+            self.ui.popouts.insert(index, entry);
+            kept = true;
+        }
+        kept
+    }
+
+    /// The layout was written: the pop-outs closed before it stay forgotten.
+    pub fn popouts_written(&mut self) {
+        self.closed_popouts.clear();
     }
 
     /// The size stored for `tab_id`, if the tab has an override.
@@ -3760,6 +3910,7 @@ pub(crate) mod tests {
             diff_highlight: false,
             viewer_markdown_rendered: false,
             window: None,
+            popouts: Vec::new(),
             general: GeneralSettings {
                 copy_on_select: false,
                 leaf_density: LeafDensity::Compact,
@@ -3785,6 +3936,125 @@ pub(crate) mod tests {
         save_ui_state(&dir.0, &state).expect("save over the existing file");
         assert_eq!(load_ui_state(&dir.0), state);
         assert!(!dir.0.join(format!("{UI_FILE}.tmp")).exists());
+    }
+
+    fn pane_popout(tab_id: &str, pane_id: &str) -> SavedPopout {
+        SavedPopout {
+            key: PopoutKey::Pane {
+                tab_id: tab_id.to_owned(),
+                pane_id: pane_id.to_owned(),
+            },
+            window: None,
+        }
+    }
+
+    #[test]
+    fn ui_state_round_trips_its_popouts() {
+        let dir = TestDir::new("popouts");
+        let state = UiState {
+            popouts: vec![
+                SavedPopout {
+                    key: PopoutKey::Session {
+                        session_id: "s1".to_owned(),
+                    },
+                    window: Some(WindowState {
+                        x: 40.0,
+                        y: 50.0,
+                        width: 900.0,
+                        height: 600.0,
+                        maximized: false,
+                        display_uuid: Some("secondary".to_owned()),
+                    }),
+                },
+                pane_popout("t1", "p1"),
+            ],
+            ..UiState::default()
+        };
+        save_ui_state(&dir.0, &state).expect("save");
+        assert_eq!(load_ui_state(&dir.0), state);
+        let file: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.0.join(UI_FILE)).expect("read"))
+                .expect("JSON");
+        assert_eq!(
+            file["popouts"][1],
+            json!({ "key": { "kind": "pane", "tab_id": "t1", "pane_id": "p1" }, "window": null })
+        );
+    }
+
+    #[test]
+    fn ui_state_without_popouts_loads_empty() {
+        let older: UiState = serde_json::from_value(json!({ "sidebar_collapsed": true }))
+            .expect("a file from before pop-outs were saved");
+        assert_eq!(older.popouts, Vec::<SavedPopout>::new());
+        let null: UiState =
+            serde_json::from_value(json!({ "popouts": null })).expect("a null list");
+        assert_eq!(null.popouts, Vec::<SavedPopout>::new());
+    }
+
+    #[test]
+    fn ui_state_skips_an_undecodable_popout() {
+        let dir = TestDir::new("bad-popouts");
+        let file = json!({
+            "sidebar_collapsed": true,
+            "popouts": [
+                { "key": { "kind": "pane", "tab_id": "t1", "pane_id": "p1" }, "window": null },
+                { "key": { "kind": "window", "id": "w1" } },
+                { "key": { "kind": "tab" } },
+                "not a pop-out",
+                { "key": { "kind": "pane", "tab_id": "t2", "pane_id": "p2" } },
+            ],
+        });
+        std::fs::write(dir.0.join(UI_FILE), file.to_string()).expect("write");
+        let loaded = load_ui_state(&dir.0);
+        assert!(loaded.sidebar_collapsed, "the rest of the file still loads");
+        assert_eq!(
+            loaded.popouts,
+            vec![pane_popout("t1", "p1"), pane_popout("t2", "p2")],
+            "only the entries that decode stay, in their order"
+        );
+    }
+
+    #[test]
+    fn ui_state_with_a_non_list_popouts_keeps_every_other_setting() {
+        let dir = TestDir::new("non-list-popouts");
+        let not_lists = [
+            json!(5),
+            json!("t1"),
+            json!(true),
+            json!({ "key": { "kind": "tab", "tab_id": "t1" } }),
+        ];
+        for popouts in not_lists {
+            let file = json!({ "sidebar_collapsed": true, "popouts": popouts });
+            std::fs::write(dir.0.join(UI_FILE), file.to_string()).expect("write");
+            let loaded = load_ui_state(&dir.0);
+            assert!(
+                loaded.sidebar_collapsed,
+                "{popouts}: the rest of the file loads"
+            );
+            assert_eq!(
+                loaded.popouts,
+                Vec::<SavedPopout>::new(),
+                "{popouts}: no pop-out reopens"
+            );
+        }
+    }
+
+    #[test]
+    fn a_saved_popout_with_a_bad_place_keeps_its_key() {
+        let dir = TestDir::new("bad-popout-place");
+        let file = json!({
+            "popouts": [
+                { "key": { "kind": "pane", "tab_id": "t1", "pane_id": "p1" }, "window": "nowhere" },
+                { "key": { "kind": "pane", "tab_id": "t2", "pane_id": "p2" }, "window": { "x": "left" } },
+                { "key": { "kind": "nowhere" }, "window": null },
+            ],
+        });
+        std::fs::write(dir.0.join(UI_FILE), file.to_string()).expect("write");
+        assert_eq!(
+            load_ui_state(&dir.0).popouts,
+            vec![pane_popout("t1", "p1"), pane_popout("t2", "p2")],
+            "a bad place loads as none; only the entry whose key does not decode is dropped"
+        );
     }
 
     #[test]

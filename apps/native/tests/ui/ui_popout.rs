@@ -5,12 +5,14 @@
 use crate::support;
 
 use gpui::{
-    App, EntityId, InputHandler, Modifiers, MouseButton, MouseDownEvent, Pixels, Point,
-    TestAppContext, VisualTestContext, Window, WindowId, point, px, size,
+    App, AppContext as _, EntityId, InputHandler, Modifiers, MouseButton, MouseDownEvent, Pixels,
+    Point, TestAppContext, VisualContext as _, VisualTestContext, Window, WindowId, point, px,
+    size,
 };
 use protocol::{AttentionReason, ClientMessage, DaemonMessage, SplitDirection, TabEntry};
+use rustling_tulip_native::target::Target;
 use rustling_tulip_native::{
-    OpenOutcome, POPPED_OUT_NOTE, PopoutKey, RootView, ToastKind, ToastSpec,
+    Connection, OpenOutcome, POPPED_OUT_NOTE, PopoutKey, RootView, ToastKind, ToastSpec,
 };
 use serde_json::json;
 use support::{Fixture, Harness, TestDir, pane, repo, session, split, tab};
@@ -3467,4 +3469,463 @@ fn removing_a_diff_tab_closes_its_popout(cx: &mut TestAppContext) {
     );
     assert_eq!(h.root(|root, _| root.popout_count()), 0);
     assert!(!tab_popped(&mut h, "d1"));
+}
+
+/// `native-ui.json` in the spec's ui dir, as it stands on disk.
+fn saved_ui(dir: &TestDir) -> serde_json::Value {
+    let text = std::fs::read_to_string(dir.path().join("native-ui.json")).expect("a saved layout");
+    serde_json::from_str(&text).expect("native-ui.json is JSON")
+}
+
+/// Writes `native-ui.json` in `dir` before the window opens.
+fn seed_ui(dir: &TestDir, ui: &serde_json::Value) {
+    std::fs::write(dir.path().join("native-ui.json"), ui.to_string())
+        .expect("write native-ui.json");
+}
+
+/// What `native-ui.json` keeps for pane `pane_id` of tab `tab_id` popped out
+/// before its window has moved.
+fn saved_pane(tab_id: &str, pane_id: &str) -> serde_json::Value {
+    json!({
+        "key": { "kind": "pane", "tab_id": tab_id, "pane_id": pane_id },
+        "window": null,
+    })
+}
+
+/// Lets the layout's save debounce run out, so a pending save is written.
+fn let_the_save_run(h: &mut Harness<'_>) {
+    h.advance(std::time::Duration::from_millis(500));
+}
+
+#[gpui::test]
+fn opening_a_popout_saves_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
+
+    pop_out(&mut h, "t1", "p1");
+    let_the_save_run(&mut h);
+
+    assert_eq!(saved_ui(&dir)["popouts"], json!([saved_pane("t1", "p1")]));
+}
+
+#[gpui::test]
+fn docking_back_forgets_a_saved_popout(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
+    pop_out(&mut h, "t1", "p1");
+    let_the_save_run(&mut h);
+    assert_eq!(saved_ui(&dir)["popouts"], json!([saved_pane("t1", "p1")]));
+
+    let key = pane_key("t1", "p1");
+    h.root_update(move |root, _, cx| root.dock_back(&key, cx));
+    let_the_save_run(&mut h);
+
+    assert_eq!(saved_ui(&dir)["popouts"], json!([]));
+}
+
+#[gpui::test]
+fn closing_a_popout_window_forgets_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
+    pop_out(&mut h, "t1", "p1");
+    let_the_save_run(&mut h);
+    assert_eq!(saved_ui(&dir)["popouts"], json!([saved_pane("t1", "p1")]));
+
+    assert!(h.close_popout());
+    let_the_save_run(&mut h);
+
+    assert_eq!(saved_ui(&dir)["popouts"], json!([]));
+}
+
+#[gpui::test]
+fn quitting_keeps_the_saved_popouts(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture::single(session("s1").in_repo("r1").exited(0).build());
+    let mut h = Harness::with(cx, &dir, &fixture);
+    pop_out(&mut h, "t1", "p1");
+
+    assert!(h.cx.simulate_close(), "nothing to ask about: it may close");
+    h.cx.run_until_parked();
+
+    assert_eq!(h.quit_requests(), 1);
+    assert_eq!(h.window_count(), 1, "the pop-out closed with the app");
+    assert_eq!(
+        saved_ui(&dir)["popouts"],
+        json!([saved_pane("t1", "p1")]),
+        "the open set is written before the app goes, with no debounce wait"
+    );
+    let_the_save_run(&mut h);
+    assert_eq!(
+        saved_ui(&dir)["popouts"],
+        json!([saved_pane("t1", "p1")]),
+        "closing with the app forgets no pop-out"
+    );
+}
+
+#[gpui::test]
+fn popouts_reopen_once_tabs_and_sessions_arrive(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(&dir, &json!({ "popouts": [saved_pane("t1", "p1")] }));
+    let fixture = Fixture::single(session("s1").build());
+    let mut h = Harness::open(cx, &dir);
+
+    h.send(DaemonMessage::Tabs {
+        tabs: fixture.tabs.clone(),
+    });
+    assert_eq!(
+        h.window_count(),
+        1,
+        "nothing reopens before the session list"
+    );
+    assert!(!popped(&mut h));
+
+    h.send(DaemonMessage::Sessions {
+        sessions: fixture.sessions.clone(),
+    });
+    assert_eq!(h.window_count(), 2, "the saved pop-out reopened");
+    assert!(popped(&mut h));
+    h.sent();
+    let mut popout = h.popout_window();
+    popout.simulate_keystrokes("a");
+    assert_eq!(h.sent_input("s1"), b"a", "its terminal takes keys");
+}
+
+#[gpui::test]
+fn a_saved_popout_whose_tab_is_gone_is_dropped(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &json!({ "popouts": [saved_pane("t9", "p9"), saved_pane("t1", "p1")] }),
+    );
+
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
+
+    assert_eq!(
+        h.window_count(),
+        2,
+        "only the pane that still exists reopens"
+    );
+    assert!(popped(&mut h));
+    let_the_save_run(&mut h);
+    assert_eq!(
+        saved_ui(&dir)["popouts"],
+        json!([saved_pane("t1", "p1")]),
+        "the gone entry is dropped from the saved list"
+    );
+}
+
+#[gpui::test]
+fn a_popout_saved_on_a_missing_monitor_opens_at_its_size_on_the_primary(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let saved_place = json!({
+        "x": 5000.0,
+        "y": 100.0,
+        "width": 900.0,
+        "height": 500.0,
+        "maximized": false,
+        "display_uuid": "unplugged",
+    });
+    seed_ui(
+        &dir,
+        &json!({ "popouts": [{
+            "key": { "kind": "pane", "tab_id": "t1", "pane_id": "p1" },
+            "window": saved_place,
+        }] }),
+    );
+
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
+
+    let mut popout = h.popout_window();
+    let bounds = popout.update(|window, _| window.bounds());
+    let primary =
+        h.cx.update(|_, cx| cx.primary_display().expect("a display").bounds());
+    assert_eq!(bounds.size, size(px(900.0), px(500.0)), "its saved size");
+    assert_eq!(
+        bounds.center(),
+        primary.center(),
+        "centred on the primary monitor"
+    );
+}
+
+#[gpui::test]
+fn a_restored_popout_leaves_the_keyboard_in_the_main_window(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &json!({ "popouts": [{ "key": { "kind": "session", "session_id": "s2" } }] }),
+    );
+    let mut fixture = Fixture::single(session("s1").build());
+    fixture.sessions.push(session("s2").build());
+    // Named on the command line, s1's pane takes the main window's keyboard
+    // as the layout arrives, just before the saved pop-out reopens.
+    let mut h = Harness::open_wanting(cx, &dir, Some("s1"));
+    h.cx.update(|window, _| window.activate_window());
+
+    h.load(&fixture);
+
+    assert_eq!(h.window_count(), 2, "the session pop-out reopened");
+    let mut popout = h.popout_window();
+    assert!(!is_active(&mut popout), "the pop-out opened behind");
+    assert!(
+        h.cx.update(|window, _| window.is_window_active()),
+        "the main window stays in front"
+    );
+    assert!(
+        focused_in_popout(&h, &mut popout, "popout:s2"),
+        "the pop-out's terminal has its own window's keyboard"
+    );
+    assert!(
+        focused_in_main(&mut h, "p1"),
+        "p1 keeps the main window's keyboard"
+    );
+    h.sent();
+    h.keys("x");
+    assert_eq!(
+        h.sent_input("s1"),
+        b"x",
+        "keys still reach the main window's pane"
+    );
+}
+
+#[gpui::test]
+fn a_reconnect_restores_nothing_again(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(&dir, &json!({ "popouts": [saved_pane("t1", "p1")] }));
+    let fixture = Fixture::single(session("s1").build());
+    let mut h = Harness::with(cx, &dir, &fixture);
+    assert_eq!(h.window_count(), 2);
+
+    h.lose_connection();
+    h.welcome_with_features();
+    h.send_welcome(support::PROTOCOL);
+    h.load(&fixture);
+    let_the_save_run(&mut h);
+
+    assert_eq!(
+        h.window_count(),
+        2,
+        "the open pop-out stays, and no second opens"
+    );
+    assert_eq!(h.root(|root, _| root.popout_count()), 1);
+    assert_eq!(
+        saved_ui(&dir)["popouts"],
+        json!([saved_pane("t1", "p1")]),
+        "the open pop-out is still saved"
+    );
+}
+
+/// `s1` in `t1` and `s2` in `t2`, both stopped, so the main window's close
+/// asks nothing.
+fn two_stopped_tabs() -> Fixture {
+    let mut fixture = Fixture::single(session("s1").in_repo("r1").exited(0).build());
+    fixture
+        .sessions
+        .push(session("s2").in_repo("r1").exited(0).build());
+    fixture.tabs.push(tab("t2", &pane("p2", Some("s2"))));
+    fixture
+}
+
+/// What `native-ui.json` keeps for a session pop-out of `session_id` before
+/// its window has moved.
+fn saved_session(session_id: &str) -> serde_json::Value {
+    json!({
+        "key": { "kind": "session", "session_id": session_id },
+        "window": null,
+    })
+}
+
+/// `s1` in `t1`, and `s2` listed in no pane.
+fn s1_and_s2() -> Fixture {
+    let mut fixture = Fixture::single(session("s1").build());
+    fixture.sessions.push(session("s2").build());
+    fixture
+}
+
+/// An open connection to a tailnet host.
+fn on_a_tailnet_host() -> Connection {
+    let mut conn = Connection::for_target(Target::tailnet("box.tail1234.ts.net", None));
+    conn.on_connecting();
+    conn.on_socket_open(8787);
+    conn.on_welcome(support::PROTOCOL, support::daemon_features());
+    conn
+}
+
+#[gpui::test]
+fn closing_all_windows_keeps_the_saved_popouts(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_stopped_tabs());
+    pop_out(&mut h, "t1", "p1");
+    pop_out(&mut h, "t2", "p2");
+    let_the_save_run(&mut h);
+    let both = json!([saved_pane("t1", "p1"), saved_pane("t2", "p2")]);
+    assert_eq!(saved_ui(&dir)["popouts"], both);
+
+    // Windows' "Close all windows": each pop-out's close request, then the
+    // main window's, with no save in between.
+    assert!(h.close_popout());
+    assert!(h.close_popout());
+    assert!(h.cx.simulate_close(), "nothing to ask about: it may close");
+    h.cx.run_until_parked();
+
+    assert_eq!(h.quit_requests(), 1);
+    assert_eq!(
+        saved_ui(&dir)["popouts"],
+        both,
+        "the pop-outs closed on the way out are saved again, in their order"
+    );
+}
+
+#[gpui::test]
+fn a_closed_popout_stays_forgotten_once_saved(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_stopped_tabs());
+    pop_out(&mut h, "t1", "p1");
+    let_the_save_run(&mut h);
+    assert!(h.close_popout());
+    let_the_save_run(&mut h);
+    assert_eq!(saved_ui(&dir)["popouts"], json!([]));
+
+    assert!(h.cx.simulate_close(), "nothing to ask about: it may close");
+    h.cx.run_until_parked();
+
+    assert_eq!(h.quit_requests(), 1);
+    assert_eq!(
+        saved_ui(&dir)["popouts"],
+        json!([]),
+        "the quit does not save again a pop-out forgotten by an earlier write"
+    );
+}
+
+#[gpui::test]
+fn a_popout_opened_before_the_restore_stays_saved(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(&dir, &json!({ "popouts": [saved_session("s2")] }));
+    let fixture = s1_and_s2();
+    let mut h = Harness::open(cx, &dir);
+    h.send(DaemonMessage::Tabs {
+        tabs: fixture.tabs.clone(),
+    });
+    assert_eq!(
+        pop_out(&mut h, "t1", "p1"),
+        OpenOutcome::Opened,
+        "p1 pops out before the session list arrives"
+    );
+
+    h.send(DaemonMessage::Sessions {
+        sessions: fixture.sessions.clone(),
+    });
+
+    assert_eq!(
+        h.window_count(),
+        3,
+        "the saved pop-out reopened beside p1's"
+    );
+    assert!(popped(&mut h));
+    let_the_save_run(&mut h);
+    assert_eq!(
+        saved_ui(&dir)["popouts"],
+        json!([saved_pane("t1", "p1"), saved_session("s2")]),
+        "every open pop-out is saved, in the order they opened"
+    );
+}
+
+#[gpui::test]
+fn a_saved_session_that_cannot_attach_does_not_block_its_pane(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &json!({ "popouts": [saved_session("s1"), saved_pane("t1", "p1")] }),
+    );
+
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").headless().build()));
+
+    assert_eq!(h.window_count(), 2, "p1's pop-out reopened");
+    assert!(popped(&mut h));
+    let_the_save_run(&mut h);
+    assert_eq!(
+        saved_ui(&dir)["popouts"],
+        json!([saved_pane("t1", "p1")]),
+        "the session pop-out that could not open is dropped"
+    );
+}
+
+#[gpui::test]
+fn a_restore_does_not_raise_an_inactive_main_window(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(&dir, &json!({ "popouts": [saved_pane("t1", "p1")] }));
+    let mut h = Harness::open(cx, &dir);
+    h.cx.deactivate_window();
+
+    h.load(&Fixture::single(session("s1").build()));
+
+    assert_eq!(h.window_count(), 2, "the saved pop-out reopened");
+    let mut popout = h.popout_window();
+    assert!(!is_active(&mut popout), "the pop-out opened behind");
+    assert!(
+        !h.cx.update(|window, _| window.is_window_active()),
+        "the main window, not in front when the restore began, is not raised"
+    );
+}
+
+#[gpui::test]
+fn switching_host_before_the_restore_keeps_the_saved_popouts(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(&dir, &json!({ "popouts": [saved_pane("t1", "p1")] }));
+    let mut h = Harness::open(cx, &dir);
+
+    h.set_connection(on_a_tailnet_host());
+    // The host's layout happens to use the same ids as this PC's.
+    h.load(&Fixture::single(session("s1").build()));
+
+    assert_eq!(
+        h.window_count(),
+        1,
+        "nothing saved on this PC reopens on the host"
+    );
+    let_the_save_run(&mut h);
+    assert_eq!(
+        saved_ui(&dir)["popouts"],
+        json!([saved_pane("t1", "p1")]),
+        "the saved list is left as it was"
+    );
+}
+
+#[gpui::test]
+fn a_restore_triggered_from_a_popout_uses_the_main_window(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(&dir, &json!({ "popouts": [saved_session("s2")] }));
+    let fixture = s1_and_s2();
+    let mut h = Harness::open(cx, &dir);
+    h.send(DaemonMessage::Tabs {
+        tabs: fixture.tabs.clone(),
+    });
+    assert_eq!(pop_out(&mut h, "t1", "p1"), OpenOutcome::Opened);
+    let popped = h.popout_window().window_handle();
+    let main = h.cx.update(|window, _| {
+        window.activate_window();
+        window.window_handle()
+    });
+    let main_display = h.cx.update(|window, cx| window.display(cx).map(|d| d.id()));
+
+    h.send(DaemonMessage::Sessions {
+        sessions: fixture.sessions.clone(),
+    });
+
+    assert_eq!(h.window_count(), 3, "the saved session pop-out reopened");
+    let restored =
+        h.cx.windows()
+            .into_iter()
+            .find(|window| *window != main && *window != popped)
+            .expect("the restored pop-out's window");
+    let restored_display =
+        h.cx.update_window(restored, |_, window, cx| window.display(cx).map(|d| d.id()))
+            .expect("the restored window is open");
+    assert_eq!(
+        restored_display, main_display,
+        "it opens on the main window's display"
+    );
+    assert!(
+        h.cx.update(|window, _| window.is_window_active()),
+        "the main window is the one in front"
+    );
 }

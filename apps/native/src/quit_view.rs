@@ -125,6 +125,7 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        self.keep_closed_popouts(cx);
         if self.quitter.requested() {
             return true;
         }
@@ -176,9 +177,18 @@ impl RootView {
         false
     }
 
-    /// Quits the app, once, after writing the layout change a font step or
-    /// a window move left pending.
+    /// Whether the app has asked to quit, so the windows closing now close
+    /// with it.
+    pub(crate) fn quitting(&self) -> bool {
+        self.quitter.requested()
+    }
+
+    /// Quits the app, once, after writing the layout change a font step, a
+    /// window move or a pop-out left pending, so the open pop-outs, and
+    /// those whose windows closed since the last write, are saved before
+    /// the app goes.
     fn request_quit(&mut self, cx: &mut Context<Self>) {
+        self.keep_closed_popouts(cx);
         self.flush_ui_save();
         self.quitter.request(cx);
     }

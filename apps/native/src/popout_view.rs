@@ -38,8 +38,11 @@ impl PopoutView {
         cx: &mut Context<Self>,
     ) -> Self {
         watch_close_request(root.clone(), window, cx);
-        cx.observe_window_bounds(window, |this, _, cx| this.mark_resized(cx))
-            .detach();
+        cx.observe_window_bounds(window, |this, window, cx| {
+            this.mark_resized(cx);
+            this.remember_place(window, cx);
+        })
+        .detach();
         let focus = watch_terminal_focus(&root, &key, window, cx);
         Self {
             root,
@@ -67,6 +70,18 @@ impl PopoutView {
         });
         if let Err(err) = marked {
             tracing::debug!("pop-out resized after the root view went: {err:#}");
+        }
+    }
+
+    /// The window moved or was resized: the root view keeps its place for
+    /// the next launch.
+    fn remember_place(&self, window: &Window, cx: &mut Context<Self>) {
+        let key = self.key.clone();
+        let remembered = self
+            .root
+            .update(cx, |root, cx| root.remember_popout_place(&key, window, cx));
+        if let Err(err) = remembered {
+            tracing::debug!("pop-out moved after the root view went: {err:#}");
         }
     }
 

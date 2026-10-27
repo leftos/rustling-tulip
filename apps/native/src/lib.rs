@@ -246,7 +246,7 @@ pub use crate::pairing::{
     DialogPhase, DialogView, PairingAction, PairingState, PairingToast, QrMatrix, WaitingRow,
     approve_message, deny_message,
 };
-pub use crate::popouts::{OpenOutcome, PopoutKey};
+pub use crate::popouts::{OpenOutcome, PopoutKey, SavedPopout};
 pub use crate::preset_wizard::{LaunchButton, NextButton};
 pub use crate::quit_view::QuitFn;
 pub use crate::recover_view::RecoverRow;
@@ -432,12 +432,21 @@ fn saved_window_state() -> Option<WindowState> {
 
 /// The monitor and bounds the main window opens with, from `saved`.
 fn window_placement(saved: Option<&WindowState>, cx: &App) -> (Option<DisplayId>, WindowBounds) {
+    placement(saved, WINDOW_SIZE, cx)
+}
+
+/// The monitor and bounds a window opens with from `saved`: nothing saved
+/// opens `(width, height)` centred on the primary monitor.
+fn placement(
+    saved: Option<&WindowState>,
+    (width, height): (u16, u16),
+    cx: &App,
+) -> (Option<DisplayId>, WindowBounds) {
     let displays: Vec<(DisplayId, String)> = cx
         .displays()
         .iter()
         .filter_map(|display| Some((display.id(), display.uuid().ok()?.to_string())))
         .collect();
-    let (width, height) = WINDOW_SIZE;
     let default_size = size(px(width.into()), px(height.into()));
     let restore = window_state::restore_options(saved, &displays, default_size);
     let bounds = match restore.rect {
@@ -466,11 +475,61 @@ fn popout_bounds(display_id: Option<DisplayId>, cascade: usize, cx: &App) -> Bou
     bounds
 }
 
+/// Where `window` is now, as `native-ui.json` keeps a window's place; `None`
+/// while it is minimized or has no area, which is nowhere to reopen at.
+fn window_place(window: &Window, cx: &App) -> Option<WindowState> {
+    if window_state::is_minimized(window) {
+        return None;
+    }
+    let display_uuid = window
+        .display(cx)
+        .and_then(|display| display.uuid().ok())
+        .map(|uuid| uuid.to_string());
+    window_state::to_window_state(window.window_bounds(), display_uuid)
+}
+
+/// Where a pop-out's window opens.
+enum PopoutPlace {
+    /// Opened by the user: at its cascade place on the main window's
+    /// display, in front.
+    Fresh,
+    /// Reopened at launch from `native-ui.json`: at its saved place, else at
+    /// its cascade place, behind the main window.
+    Restored(Option<WindowState>),
+}
+
+/// How far a launch's reopening of the pop-outs saved at the last quit has
+/// come.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PopoutRestore {
+    /// Waiting for the boot target's tab and session lists.
+    Waiting,
+    /// Over: nothing more reopens this launch.
+    Done,
+    /// Given up because the client left the target it booted onto first.
+    /// The saved list is still that target's, kept as it is until a
+    /// pop-out opens or closes here and the open set replaces it.
+    Skipped,
+}
+
+/// How a closing pop-out leaves the saved list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SavedRemoval {
+    /// Docked back, or never opened: forgotten at once.
+    AtOnce,
+    /// Its window closed: forgotten, but saved again should a quit start
+    /// before the layout is next written, as Windows' "Close all windows"
+    /// closes the pop-outs before the main window.
+    UnlessQuitFollows,
+}
+
 /// What a pop-out window opens with, gathered from the root view.
 struct PopoutOpening {
     key: PopoutKey,
     display_id: Option<DisplayId>,
-    bounds: Bounds<Pixels>,
+    bounds: WindowBounds,
+    /// Whether the window comes to the front as it opens.
+    activate: bool,
     title: String,
     /// What takes the keyboard in the window: the popped terminal, or a
     /// popped diff tab's view.
@@ -498,6 +557,7 @@ fn open_popout_now(root: &gpui::WeakEntity<RootView>, opening: PopoutOpening, cx
         key,
         display_id,
         bounds,
+        activate,
         title,
         focus,
     } = opening;
@@ -508,12 +568,12 @@ fn open_popout_now(root: &gpui::WeakEntity<RootView>, opening: PopoutOpening, cx
     let shown_title = title.clone();
     let opened = cx.open_window(
         WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            window_bounds: Some(bounds),
             window_min_size: Some(size(px(min_width.into()), px(min_height.into()))),
             display_id,
             // As the main window: a cloaked window opens hidden and is
             // shown by `show_cloaked`, never activated.
-            focus: !offscreen,
+            focus: !offscreen && activate,
             show: !offscreen,
             ..Default::default()
         },
@@ -540,7 +600,7 @@ fn open_popout_now(root: &gpui::WeakEntity<RootView>, opening: PopoutOpening, cx
         }
         Err(err) => {
             tracing::error!(?key, "opening a pop-out window: {err:#}");
-            root.forget_popout(&key, cx);
+            root.forget_popout(&key, SavedRemoval::AtOnce, cx);
         }
     });
     if let Err(err) = recorded {
@@ -680,6 +740,13 @@ pub struct RootView {
     popout_windows: HashMap<PopoutKey, PopoutWindow>,
     /// The popped pane whose terminal has its pop-out window's keyboard.
     popout_focused: Option<String>,
+    /// How far this launch's reopening of the pop-outs saved at the last
+    /// quit has come.
+    popout_restore: PopoutRestore,
+    /// Whether moving a window records its place for the next launch: only
+    /// real, visible windows do, since gpui's test windows panic when asked
+    /// for their handle and a cloaked window's place means nothing.
+    remembers_window_places: bool,
     /// The main window's own focus, on its outermost element: a pane popping
     /// out hands the keyboard here when its terminal had it, so the app's
     /// shortcuts keep working with no terminal focused.
@@ -1046,12 +1113,13 @@ impl RootView {
             autostart: Arc::new(remote_access::SystemAutostart),
             tokens,
         };
-        let root = Self::with_transport(deps, window, cx);
+        let mut root = Self::with_transport(deps, window, cx);
         // Presses the toast activator receives, those that arrived before
         // this window among them, go to this window's pairing actions.
         toast_activation::attach(&root.pairing_sink());
         // The cloaked window neither restores nor saves its place.
-        if !offscreen::requested() {
+        root.remembers_window_places = !offscreen::requested();
+        if root.remembers_window_places {
             cx.observe_window_bounds(window, |root, window, cx| {
                 root.remember_window_place(window, cx);
             })
@@ -1089,18 +1157,32 @@ impl RootView {
     /// Records where the window now is and schedules a save, unless it is
     /// minimized, has no area, or has not moved.
     fn remember_window_place(&mut self, window: &Window, cx: &mut Context<Self>) {
-        if self.ui_dir.is_none() || window_state::is_minimized(window) {
+        if self.ui_dir.is_none() {
             return;
         }
-        let display_uuid = window
-            .display(cx)
-            .and_then(|display| display.uuid().ok())
-            .map(|uuid| uuid.to_string());
-        let Some(state) = window_state::to_window_state(window.window_bounds(), display_uuid)
-        else {
+        let Some(state) = window_place(window, cx) else {
             return;
         };
         if self.sidebar.set_window_state(state) {
+            self.schedule_ui_save(cx);
+        }
+    }
+
+    /// Records where `key`'s pop-out window now is and schedules a save, as
+    /// [`Self::remember_window_place`] does for the main window.
+    pub(crate) fn remember_popout_place(
+        &mut self,
+        key: &PopoutKey,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.remembers_window_places || self.ui_dir.is_none() {
+            return;
+        }
+        let Some(state) = window_place(window, cx) else {
+            return;
+        };
+        if self.sidebar.set_popout_window(key, state) {
             self.schedule_ui_save(cx);
         }
     }
@@ -1164,6 +1246,8 @@ impl RootView {
             popouts: Popouts::default(),
             popout_windows: HashMap::new(),
             popout_focused: None,
+            popout_restore: PopoutRestore::Waiting,
+            remembers_window_places: false,
             root_focus: cx.focus_handle(),
             sidebar_focus: cx.focus_handle(),
             row_focus: None,
@@ -1360,6 +1444,18 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> OpenOutcome {
+        self.open_popout_at(key, &PopoutPlace::Fresh, window, cx)
+    }
+
+    /// Opens `key` as [`Self::open_popout`] does, its window at `place`, and
+    /// saves it for the next launch.
+    fn open_popout_at(
+        &mut self,
+        key: PopoutKey,
+        place: &PopoutPlace,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> OpenOutcome {
         let opens = match &key {
             PopoutKey::Pane { .. } => true,
             PopoutKey::Session { session_id } => {
@@ -1380,13 +1476,25 @@ impl RootView {
                 if let PopoutKey::Session { session_id } = &key {
                     self.open_session_slot(session_id, window, cx);
                 }
+                let saved_place = match place {
+                    PopoutPlace::Restored(saved) => saved.clone(),
+                    PopoutPlace::Fresh => None,
+                };
+                let adopted = self.adopt_open_popouts();
+                if self.sidebar.save_popout(key.clone(), saved_place) || adopted {
+                    self.schedule_ui_save(cx);
+                }
                 self.unfocus_popped_pane(&key, window, cx);
                 self.update_pane_roles(cx);
                 self.mark_popout_resized(&key, cx);
-                self.open_popout_window(key, window, cx);
+                self.open_popout_window(key, place, window, cx);
             }
+            // A restore raises nothing: the pop-out already open stays
+            // where it is.
             OpenOutcome::Existing(open) | OpenOutcome::Overlaps(open) => {
-                self.activate_popout(open, cx);
+                if matches!(place, PopoutPlace::Fresh) {
+                    self.activate_popout(open, cx);
+                }
             }
         }
         cx.notify();
@@ -1422,13 +1530,28 @@ impl RootView {
         }
     }
 
-    /// Opens the window for `key`, already in the registry, at its cascade
-    /// place on the main window's display, and gives the keyboard to its
-    /// terminal or diff.
-    fn open_popout_window(&mut self, key: PopoutKey, window: &Window, cx: &mut Context<Self>) {
+    /// Opens the window for `key`, already in the registry, at `place`: a
+    /// saved place, else its cascade place on the main window's display. Its
+    /// terminal or diff takes the keyboard in that window; only a fresh
+    /// pop-out comes to the front.
+    fn open_popout_window(
+        &mut self,
+        key: PopoutKey,
+        place: &PopoutPlace,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
         let cascade = self.popouts.cascade_index(&key).unwrap_or(0);
-        let display_id = window.display(cx).map(|display| display.id());
-        let bounds = popout_bounds(display_id, cascade, cx);
+        let main_display = window.display(cx).map(|display| display.id());
+        let cascaded = || WindowBounds::Windowed(popout_bounds(main_display, cascade, cx));
+        let (display_id, bounds, activate) = match place {
+            PopoutPlace::Fresh => (main_display, cascaded(), true),
+            PopoutPlace::Restored(None) => (main_display, cascaded(), false),
+            PopoutPlace::Restored(Some(saved)) => {
+                let (display_id, bounds) = placement(Some(saved), POPOUT_SIZE, cx);
+                (display_id, bounds, false)
+            }
+        };
         let title = popouts::title(
             &key,
             self.tabs.tabs(),
@@ -1440,6 +1563,7 @@ impl RootView {
             key,
             display_id,
             bounds,
+            activate,
             title,
             focus,
         };
@@ -1535,6 +1659,9 @@ impl RootView {
         self.update_pane_roles(cx);
         for key in &gone {
             tracing::debug!(?key, "closing a pop-out whose content has gone");
+            if self.sidebar.forget_saved_popout(key) {
+                self.schedule_ui_save(cx);
+            }
             self.mark_popout_resized(key, cx);
             if let Some(handle) = self.take_popout_window(key) {
                 close_popout_window(key, handle, cx);
@@ -1568,21 +1695,34 @@ impl RootView {
     /// Docks `key` back: its content returns to the main window, and its
     /// window closes if it is still open. Nothing goes to the daemon.
     pub fn dock_back(&mut self, key: &PopoutKey, cx: &mut Context<Self>) {
-        if let Some(handle) = self.forget_popout(key, cx) {
+        if let Some(handle) = self.forget_popout(key, SavedRemoval::AtOnce, cx) {
             close_popout_window(key, handle, cx);
         }
     }
 
     /// Drops `key` from the open pop-outs without touching its window, as
-    /// its own close request does; the window it had, if any. A docked-back
-    /// tab's panes follow their focus in the main window again, and when it
-    /// is the main window's active tab its focused pane or its diff takes
-    /// the keyboard there.
-    pub(crate) fn forget_popout(
+    /// its own close request does; the window it had, if any. It is no
+    /// longer saved for the next launch, as `removal` says, unless its
+    /// window closes because the app is quitting. A docked-back tab's panes
+    /// follow their focus in the main window again, and when it is the main
+    /// window's active tab its focused pane or its diff takes the keyboard
+    /// there.
+    fn forget_popout(
         &mut self,
         key: &PopoutKey,
+        removal: SavedRemoval,
         cx: &mut Context<Self>,
     ) -> Option<WindowHandle<PopoutView>> {
+        if !self.quitting() {
+            let adopted = self.adopt_open_popouts();
+            let forgotten = match removal {
+                SavedRemoval::AtOnce => self.sidebar.forget_saved_popout(key),
+                SavedRemoval::UnlessQuitFollows => self.sidebar.close_saved_popout(key),
+            };
+            if adopted || forgotten {
+                self.schedule_ui_save(cx);
+            }
+        }
         let closed = self.popouts.close(key);
         if closed {
             if let PopoutKey::Session { session_id } = key {
@@ -1632,7 +1772,7 @@ impl RootView {
             .find(|(_, popout)| AnyWindowHandle::from(popout.handle).window_id() == window_id)
             .map(|(key, _)| key.clone());
         if let Some(key) = key {
-            self.forget_popout(&key, cx);
+            self.forget_popout(&key, SavedRemoval::UnlessQuitFollows, cx);
         } else {
             tracing::debug!(?window_id, "a closed window is no open pop-out");
         }
@@ -1642,6 +1782,9 @@ impl RootView {
     /// them, windows and all.
     fn follow_popout_moves(&mut self, cx: &mut Context<Self>) {
         for (old, new) in self.popouts.follow_moves(&self.tabs) {
+            if self.sidebar.rekey_saved_popout(&old, new.clone()) {
+                self.schedule_ui_save(cx);
+            }
             let Some(popout) = self.popout_windows.remove(&old) else {
                 continue;
             };
@@ -1677,6 +1820,9 @@ impl RootView {
         if !self.popouts.rekey(&old_key, new_key.clone()) {
             tracing::debug!(%old, "the restarted session's pop-out has closed");
             return;
+        }
+        if self.sidebar.rekey_saved_popout(&old_key, new_key.clone()) {
+            self.schedule_ui_save(cx);
         }
         if let Some(popout) = self.popout_windows.remove(&old_key) {
             let key = new_key.clone();
@@ -2283,12 +2429,15 @@ impl RootView {
         }
     }
 
-    fn save_ui(&self) {
+    /// Writes the layout now; the pop-outs closed before a write that
+    /// lands stay forgotten.
+    fn save_ui(&mut self) {
         let Some(dir) = &self.ui_dir else {
             return;
         };
-        if let Err(err) = save_ui_state(dir, self.sidebar.ui_state()) {
-            tracing::warn!("saving the sidebar layout: {err:#}");
+        match save_ui_state(dir, self.sidebar.ui_state()) {
+            Ok(()) => self.sidebar.popouts_written(),
+            Err(err) => tracing::warn!("saving the sidebar layout: {err:#}"),
         }
     }
 
@@ -2688,6 +2837,108 @@ impl RootView {
         self.show_session(&id, window, cx);
     }
 
+    /// Reopens the pop-outs saved at the last quit, once per launch, the
+    /// first time the boot target's layout and session list are both in,
+    /// always for the main window, whichever window's change got here. A
+    /// reconnect later in the launch reopens nothing.
+    fn try_restore_popouts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.popout_restore != PopoutRestore::Waiting
+            || !(self.tabs.is_loaded() && self.sessions_loaded)
+        {
+            return;
+        }
+        self.popout_restore = PopoutRestore::Done;
+        if self.is_main_window(window) {
+            self.restore_popouts(window, cx);
+        } else {
+            Self::in_window(self.layouts.main(), cx, Self::restore_popouts);
+        }
+    }
+
+    /// Opens each saved pop-out not already open through the normal open
+    /// path, in saved order, at its saved place and behind the main window
+    /// (`window`), a moved pane under its new tab. The saved list becomes
+    /// every pop-out then open, in open order; one that did not open is
+    /// dropped. The main window comes back to the front only if it was
+    /// there when this began.
+    fn restore_popouts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let main_was_active = window.is_window_active();
+        let earlier = self.sidebar.take_saved_popouts();
+        let saved = popouts::follow_saved_moves(earlier.clone(), self.tabs.tabs());
+        let (mut tried, mut reopened) = (0_usize, 0_usize);
+        for entry in saved {
+            if self.popouts.is_open(&entry.key) {
+                continue;
+            }
+            tried += 1;
+            let key = entry.key.clone();
+            let place = PopoutPlace::Restored(entry.window);
+            if self.open_popout_at(key.clone(), &place, window, cx) == OpenOutcome::Opened {
+                reopened += 1;
+            } else {
+                tracing::info!(?key, "a saved pop-out could not reopen; dropped");
+            }
+        }
+        let dropped = tried - reopened;
+        if dropped > 0 {
+            tracing::info!(reopened, dropped, "saved pop-outs dropped at launch");
+        }
+        let restored = self.sidebar.take_saved_popouts();
+        let open = self.open_popouts_saved(&[restored, earlier.clone()].concat());
+        if open != earlier {
+            self.schedule_ui_save(cx);
+        }
+        self.sidebar.set_saved_popouts(open);
+        if reopened > 0 && main_was_active && !offscreen::requested() {
+            // Each pop-out window opens deferred; this runs after them.
+            let main = window.window_handle();
+            cx.defer(move |cx| {
+                if let Err(err) = main.update(cx, |_, window, _| window.activate_window()) {
+                    tracing::debug!("the main window closed as pop-outs reopened: {err:#}");
+                }
+            });
+        }
+    }
+
+    /// The open pop-outs as the saved list keeps them, in open order, each
+    /// with the window place of its first entry in `known`, else none.
+    fn open_popouts_saved(&self, known: &[SavedPopout]) -> Vec<SavedPopout> {
+        self.popouts
+            .keys()
+            .iter()
+            .map(|key| SavedPopout {
+                key: key.clone(),
+                window: known
+                    .iter()
+                    .find(|saved| saved.key == *key)
+                    .and_then(|saved| saved.window.clone()),
+            })
+            .collect()
+    }
+
+    /// After the restore was skipped for a target switch, the first pop-out
+    /// to open or close here replaces the saved list with the pop-outs then
+    /// open; returns whether it did.
+    fn adopt_open_popouts(&mut self) -> bool {
+        if self.popout_restore != PopoutRestore::Skipped {
+            return false;
+        }
+        self.popout_restore = PopoutRestore::Done;
+        let known = self.sidebar.take_saved_popouts();
+        let open = self.open_popouts_saved(&known);
+        self.sidebar.set_saved_popouts(open);
+        true
+    }
+
+    /// A quit is starting or the main window was asked to close: the
+    /// pop-outs whose windows closed since the layout was last written are
+    /// saved again, so a "Close all windows" keeps them.
+    pub(crate) fn keep_closed_popouts(&mut self, cx: &mut Context<Self>) {
+        if self.sidebar.keep_closed_popouts() {
+            self.schedule_ui_save(cx);
+        }
+    }
+
     /// After any change to the tab model: terminals follow the layout, the
     /// requested pane takes the keyboard (unless the spawn dialog, the
     /// delete-worktree confirm, the discard or stash drop confirm, the run
@@ -2737,6 +2988,7 @@ impl RootView {
         let dropped_pane_ui = self.drop_stale_pane_ui();
         let dropped_picker = self.drop_stale_sc_picker();
         self.try_wanted_session(window, cx);
+        self.try_restore_popouts(window, cx);
         let dropped_changes = self.seed_source_control(window, cx);
         if dropped_pane_ui || dropped_picker || dropped_changes {
             self.after_notice_closed(window, cx);
@@ -3521,6 +3773,13 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         tracing::info!("connection target changed: clearing the old daemon's state");
+        if self.popout_restore == PopoutRestore::Waiting {
+            tracing::info!(
+                "left the boot target before the saved pop-outs reopened; \
+                 they stay saved and reopen nowhere this launch"
+            );
+            self.popout_restore = PopoutRestore::Skipped;
+        }
         self.pane_ui.close = None;
         self.pane_ui.move_panes = None;
         self.pane_ui.menu = None;
@@ -3702,6 +3961,7 @@ impl RootView {
         self.attach_waiting_panes(cx);
         self.apply_pane_fonts(false, cx);
         self.try_wanted_session(window, cx);
+        self.try_restore_popouts(window, cx);
         self.scan_unseen_cwd_paths();
     }
 

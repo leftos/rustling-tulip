@@ -4,12 +4,15 @@
 //! draws it.
 
 use protocol::{AgentDescriptor, SessionSnapshot, TabEntry};
+use serde::{Deserialize, Serialize};
 
 use crate::sidebar::display_label;
 use crate::tabs::{Pane, TabsModel, collect_panes};
+use crate::window_state::WindowState;
 
 /// What one pop-out window holds.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PopoutKey {
     /// One pane of a tab, named by its tab and its pane.
     Pane { tab_id: String, pane_id: String },
@@ -17,6 +20,16 @@ pub enum PopoutKey {
     Tab { tab_id: String },
     /// A session that has no pane of its own.
     Session { session_id: String },
+}
+
+/// An open pop-out as `native-ui.json` keeps it across restarts: what it
+/// shows, and where its window last was.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SavedPopout {
+    pub key: PopoutKey,
+    /// The window's place when it last moved; `None` until it has.
+    #[serde(default)]
+    pub window: Option<WindowState>,
 }
 
 /// A pop-out window's size in logical pixels.
@@ -242,6 +255,24 @@ pub(crate) fn title(
             .find(|t| t.id == tab_id.as_str())
             .map_or_else(|| "Tab not found".to_owned(), |t| t.name.clone()),
     }
+}
+
+/// The pop-outs saved at the last quit, in their saved order, each pane
+/// pop-out whose pane has moved to another tab since re-keyed to that tab,
+/// so it reopens there.
+#[must_use]
+pub(crate) fn follow_saved_moves(saved: Vec<SavedPopout>, tabs: &[TabEntry]) -> Vec<SavedPopout> {
+    saved
+        .into_iter()
+        .map(|mut entry| {
+            if let Some(new_tab) = moved_to(&entry.key, tabs)
+                && let PopoutKey::Pane { tab_id, .. } = &mut entry.key
+            {
+                *tab_id = new_tab;
+            }
+            entry
+        })
+        .collect()
 }
 
 /// The id of the terminal a session pop-out of `session_id` draws.
@@ -758,6 +789,75 @@ mod tests {
         let tabs = vec![tab("t1", &pane("p1", None))];
         assert_eq!(pane_to_pop("s1", &tabs, Some("t1")), None);
         assert_eq!(pane_to_pop("s1", &[], None), None, "no tabs at all");
+    }
+
+    fn saved(key: PopoutKey) -> SavedPopout {
+        SavedPopout { key, window: None }
+    }
+
+    #[test]
+    fn saved_popouts_follow_a_pane_moved_to_another_tab() {
+        let tabs = vec![
+            tab("t1", &pane("p1", Some("s1"))),
+            tab("t2", &pane("p2", Some("s2"))),
+        ];
+        let placed = WindowState {
+            x: 10.0,
+            y: 20.0,
+            width: 900.0,
+            height: 500.0,
+            maximized: true,
+            display_uuid: Some("secondary".to_owned()),
+        };
+        let entries = vec![
+            SavedPopout {
+                key: pane_key("t9", "p2"),
+                window: Some(placed.clone()),
+            },
+            saved(pane_key("t1", "p1")),
+            saved(pane_key("t1", "p9")),
+            saved(session_key("s3")),
+        ];
+
+        let followed = follow_saved_moves(entries, &tabs);
+
+        assert_eq!(
+            followed,
+            vec![
+                SavedPopout {
+                    key: pane_key("t2", "p2"),
+                    window: Some(placed),
+                },
+                saved(pane_key("t1", "p1")),
+                saved(pane_key("t1", "p9")),
+                saved(session_key("s3")),
+            ],
+            "only the moved pane is re-keyed, its place with it; the rest keep their keys and order"
+        );
+    }
+
+    #[test]
+    fn popout_key_serializes_with_a_kind_tag() {
+        let cases = [
+            (
+                pane_key("t1", "p1"),
+                json!({ "kind": "pane", "tab_id": "t1", "pane_id": "p1" }),
+            ),
+            (tab_key("t2"), json!({ "kind": "tab", "tab_id": "t2" })),
+            (
+                session_key("s3"),
+                json!({ "kind": "session", "session_id": "s3" }),
+            ),
+        ];
+        for (key, expected) in cases {
+            assert_eq!(
+                serde_json::to_value(&key).expect("serialize"),
+                expected,
+                "{key:?}"
+            );
+            let back: PopoutKey = serde_json::from_value(expected).expect("deserialize");
+            assert_eq!(back, key);
+        }
     }
 
     #[test]
