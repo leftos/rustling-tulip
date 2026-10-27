@@ -19,7 +19,7 @@ use gpui::{
     HitboxBehavior, Hsla, KeyDownEvent, Keystroke, Modifiers, MouseButton, MouseDownEvent,
     MouseExitEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Rgba, ScrollWheelEvent,
     SharedString, StrikethroughStyle, Subscription, Task, TextRun, UTF16Selection, UnderlineStyle,
-    Window, canvas, div, fill, font, outline, point, prelude::*, px, size,
+    Window, WindowId, canvas, div, fill, font, outline, point, prelude::*, px, size,
 };
 use protocol::{AgentDescriptor, ClientMessage, SessionMode, SessionSnapshot};
 
@@ -91,8 +91,10 @@ pub struct TerminalPane {
     /// The character of the last key-down left to the text input, which a
     /// dead key's mark repeats.
     last_key_char: Option<String>,
-    /// Drops the composition when the pane loses focus.
-    blur: Option<Subscription>,
+    /// Drops the composition when the pane loses focus in the window it
+    /// draws in, named by its id: a pane moved to another window (a
+    /// pop-out, or back) subscribes again there.
+    blur: Option<(WindowId, Subscription)>,
     /// The font the pane draws with.
     font: FontSettings,
     /// `font`'s family resolved against the installed fonts, once measured.
@@ -1645,9 +1647,10 @@ fn report_button(button: MouseButton) -> Option<mouse::Button> {
 
 impl Render for TerminalPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.blur.is_none() {
+        let window_id = window.window_handle().window_id();
+        if self.blur.as_ref().is_none_or(|(id, _)| *id != window_id) {
             let blur = cx.on_blur(&self.focus, window, |pane, _, cx| pane.drop_marked(cx));
-            self.blur = Some(blur);
+            self.blur = Some((window_id, blur));
         }
         let family = self.resolved_family(window);
         let font_settings = self.font.clone();

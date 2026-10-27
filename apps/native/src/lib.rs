@@ -148,11 +148,12 @@ use futures::StreamExt as _;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use futures::future::LocalBoxFuture;
 use gpui::{
-    Animation, AnimationExt as _, AnyElement, AnyView, App, Bounds, ClickEvent, Context,
-    CursorStyle, DisplayId, Div, ElementId, ElementInputHandler, FocusHandle, FontWeight,
+    Animation, AnimationExt as _, AnyElement, AnyView, AnyWindowHandle, App, Bounds, ClickEvent,
+    Context, CursorStyle, DisplayId, Div, ElementId, ElementInputHandler, FocusHandle, FontWeight,
     InputHandler, KeyDownEvent, Keystroke, ModifiersChangedEvent, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Stateful, StyledText, Task, Window,
-    WindowBounds, WindowHandle, WindowOptions, div, point, prelude::*, pulsating_between, px, size,
+    WindowBounds, WindowHandle, WindowId, WindowOptions, div, point, prelude::*, pulsating_between,
+    px, size,
 };
 use protocol::{
     AppearanceOverrides, ClientMessage, DaemonMessage, GridNode, PaneDropEdge, RepoEntry,
@@ -478,6 +479,12 @@ struct PopoutOpening {
     terminal: Option<gpui::Entity<term_view::TerminalPane>>,
 }
 
+/// An open pop-out window and the title it shows.
+struct PopoutWindow {
+    handle: WindowHandle<PopoutView>,
+    title: String,
+}
+
 /// Opens the window `opening` describes and records it on `root`; a window
 /// that fails to open closes its pop-out again. A pop-out docked back (or
 /// closed with the main window) before this ran opens nothing.
@@ -500,6 +507,7 @@ fn open_popout_now(root: &gpui::WeakEntity<RootView>, opening: PopoutOpening, cx
     let (min_width, min_height) = POPOUT_MIN_SIZE;
     let view_root = root.clone();
     let view_key = key.clone();
+    let shown_title = title.clone();
     let opened = cx.open_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -524,12 +532,15 @@ fn open_popout_now(root: &gpui::WeakEntity<RootView>, opening: PopoutOpening, cx
     );
     let recorded = root.update(cx, |root, cx| match opened {
         Ok(handle) => {
-            root.popout_windows.insert(key, handle);
+            let popout = PopoutWindow {
+                handle,
+                title: shown_title,
+            };
+            root.popout_windows.insert(key, popout);
         }
         Err(err) => {
             tracing::error!(?key, "opening a pop-out window: {err:#}");
-            root.popouts.close(&key);
-            cx.notify();
+            root.forget_popout(&key, cx);
         }
     });
     if let Err(err) = recorded {
@@ -649,7 +660,11 @@ pub struct RootView {
     /// The open pop-out windows' contents, in the order they opened.
     popouts: Popouts,
     /// Each open pop-out's window.
-    popout_windows: HashMap<PopoutKey, WindowHandle<PopoutView>>,
+    popout_windows: HashMap<PopoutKey, PopoutWindow>,
+    /// The main window's own focus, on its outermost element: a pane popping
+    /// out hands the keyboard here when its terminal had it, so the app's
+    /// shortcuts keep working with no terminal focused.
+    root_focus: FocusHandle,
     /// Focus for the sidebar, which takes it on a click so Ctrl+B there
     /// toggles the sidebar instead of reaching the terminal.
     sidebar_focus: FocusHandle,
@@ -1128,6 +1143,7 @@ impl RootView {
             _drag_escape: drag_escape,
             popouts: Popouts::default(),
             popout_windows: HashMap::new(),
+            root_focus: cx.focus_handle(),
             sidebar_focus: cx.focus_handle(),
             row_focus: None,
             hovered_container: None,
@@ -1328,6 +1344,8 @@ impl RootView {
         let outcome = self.popouts.open(key.clone(), self.tabs.tabs());
         match &outcome {
             OpenOutcome::Opened => {
+                self.unfocus_popped_pane(&key, window, cx);
+                self.update_pane_roles(cx);
                 self.mark_popout_resized(&key, cx);
                 self.open_popout_window(key, window, cx);
             }
@@ -1337,6 +1355,22 @@ impl RootView {
         }
         cx.notify();
         outcome
+    }
+
+    /// The main window lets go of `key`'s pane as it pops out: a terminal
+    /// that had the keyboard there hands it to the main window's own focus,
+    /// so the app's shortcuts work there again.
+    fn unfocus_popped_pane(&self, key: &PopoutKey, window: &mut Window, cx: &Context<Self>) {
+        let PopoutKey::Pane { pane_id, .. } = key else {
+            return;
+        };
+        let focused = self
+            .panes
+            .get(pane_id)
+            .is_some_and(|slot| slot.view().read(cx).is_focused(window));
+        if focused {
+            self.root_focus.focus(window);
+        }
     }
 
     /// Opens the window for `key`, already in the registry, at its cascade
@@ -1367,8 +1401,8 @@ impl RootView {
     }
 
     /// The terminal `key`'s pop-out draws: a pane pop-out's pane while it is
-    /// still in the key's tab. A pane moved to another tab draws in the main
-    /// grid there, so its pop-out draws no terminal.
+    /// in the key's tab. A pane moved to another tab re-keys its pop-out
+    /// (`follow_popout_moves`), so this finds it there too.
     pub(crate) fn popout_terminal(
         &self,
         key: &PopoutKey,
@@ -1385,7 +1419,7 @@ impl RootView {
     /// Brings `key`'s pop-out window to the front and gives the keyboard to
     /// its pane's terminal; a cloaked client never activates a window.
     fn activate_popout(&self, key: &PopoutKey, cx: &mut Context<Self>) {
-        let Some(handle) = self.popout_windows.get(key) else {
+        let Some(PopoutWindow { handle, .. }) = self.popout_windows.get(key) else {
             return;
         };
         let terminal = self.popout_terminal(key);
@@ -1419,11 +1453,66 @@ impl RootView {
         cx: &mut Context<Self>,
     ) -> Option<WindowHandle<PopoutView>> {
         if self.popouts.close(key) {
+            self.update_pane_roles(cx);
             self.mark_popout_resized(key, cx);
         }
-        let handle = self.popout_windows.remove(key);
+        let handle = self.popout_windows.remove(key).map(|popout| popout.handle);
         cx.notify();
         handle
+    }
+
+    /// Drops the pop-out whose window is `window_id`, as that window's own
+    /// close request does; the window's key may have followed its pane to
+    /// another tab since it opened.
+    pub(crate) fn forget_popout_window(&mut self, window_id: WindowId, cx: &mut Context<Self>) {
+        let key = self
+            .popout_windows
+            .iter()
+            .find(|(_, popout)| AnyWindowHandle::from(popout.handle).window_id() == window_id)
+            .map(|(key, _)| key.clone());
+        if let Some(key) = key {
+            self.forget_popout(&key, cx);
+        } else {
+            tracing::debug!(?window_id, "a closed window is no open pop-out");
+        }
+    }
+
+    /// A tab change moved popped panes to other tabs: their pop-outs follow
+    /// them, windows and all.
+    fn follow_popout_moves(&mut self, cx: &mut Context<Self>) {
+        for (old, new) in self.popouts.follow_moves(&self.tabs) {
+            let Some(popout) = self.popout_windows.remove(&old) else {
+                continue;
+            };
+            let key = new.clone();
+            let followed = popout.handle.update(cx, |view, _, cx| {
+                view.follow(key);
+                cx.notify();
+            });
+            if let Err(err) = followed {
+                tracing::debug!(?new, "the moved pane's pop-out window has gone: {err:#}");
+            }
+            self.popout_windows.insert(new, popout);
+        }
+    }
+
+    /// Sets each open pop-out window's title to what its content now reads,
+    /// after a rename or a re-bind; a title that did not change is left.
+    fn refresh_popout_titles(&mut self, cx: &mut Context<Self>) {
+        let (tabs, sessions, agents) = (self.tabs.tabs(), self.sidebar.sessions(), &self.agents);
+        for (key, popout) in &mut self.popout_windows {
+            let title = popouts::title(key, tabs, sessions, agents);
+            if title == popout.title {
+                continue;
+            }
+            let set = popout
+                .handle
+                .update(cx, |_, window, _| window.set_window_title(&title));
+            match set {
+                Ok(()) => popout.title = title,
+                Err(err) => tracing::debug!(?key, "retitling a pop-out window: {err:#}"),
+            }
+        }
     }
 
     /// `key`'s pane moves between windows: its next size claims its session.
@@ -1435,9 +1524,9 @@ impl RootView {
 
     /// Closes every pop-out window, as the main window closes.
     fn close_popouts(&mut self, cx: &mut Context<Self>) {
-        for (key, handle) in std::mem::take(&mut self.popout_windows) {
+        for (key, popout) in std::mem::take(&mut self.popout_windows) {
             self.popouts.close(&key);
-            close_popout_window(&key, handle, cx);
+            close_popout_window(&key, popout.handle, cx);
         }
     }
 
@@ -1709,6 +1798,19 @@ impl RootView {
     pub fn pane_grid_text(&self, pane_id: &str, cx: &App) -> Option<Vec<String>> {
         let slot = self.panes.get(pane_id)?;
         Some(slot.view().read(cx).grid_text())
+    }
+
+    /// Whether the sidebar has the main window's keyboard.
+    #[must_use]
+    pub fn sidebar_focused(&self, window: &Window) -> bool {
+        self.sidebar_focus.is_focused(window)
+    }
+
+    /// The id of pane `pane_id`'s terminal, which stays the same for as long
+    /// as the pane keeps its terminal.
+    #[must_use]
+    pub fn pane_terminal_id(&self, pane_id: &str) -> Option<gpui::EntityId> {
+        Some(self.panes.get(pane_id)?.view().entity_id())
     }
 
     /// Pane `pane_id`'s text input, which the platform drives with typed
@@ -2546,7 +2648,9 @@ impl RootView {
         }
         self.drop_stale_divider_drag(drag_tree);
         self.confirm.disarm();
+        self.follow_popout_moves(cx);
         self.after_tabs_change(window, cx);
+        self.refresh_popout_titles(cx);
         true
     }
 
@@ -2785,6 +2889,14 @@ impl RootView {
         self.forget_remembered_session(msg);
         if before.is_some_and(|before| self.needs_you_list() != before) {
             self.arm_needs_you_repaint(cx);
+        }
+        if matches!(
+            msg,
+            DaemonMessage::Sessions { .. }
+                | DaemonMessage::SessionUpdated { .. }
+                | DaemonMessage::SessionRemoved { .. }
+        ) {
+            self.refresh_popout_titles(cx);
         }
     }
 
@@ -3778,6 +3890,7 @@ impl Render for RootView {
             .flex()
             .flex_col()
             .font_family(fonts::ui_family(cx))
+            .track_focus(&self.root_focus)
             .capture_key_down(cx.listener(Self::on_key_capture))
             .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
             .on_any_mouse_down(cx.listener(Self::on_any_mouse_down))

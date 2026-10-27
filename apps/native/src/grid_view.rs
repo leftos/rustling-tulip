@@ -362,12 +362,14 @@ impl RootView {
     }
 
     /// Tells every pane whether it drives its session's PTY size and whether
-    /// it answers the session's terminal queries.
-    fn update_pane_roles(&self, cx: &mut Context<Self>) {
+    /// it answers the session's terminal queries: a pane open in a pop-out
+    /// does both for its session, whichever tab the main window shows.
+    pub(crate) fn update_pane_roles(&self, cx: &mut Context<Self>) {
         let active = self.tabs.active_id();
         let focused = active.and_then(|tab_id| self.tabs.focused_pane(tab_id));
         let bindings = self.tabs.bindings();
-        let drivers = tabs::size_drivers(&bindings, active, focused.as_deref());
+        let popped = self.popouts.popped_panes();
+        let drivers = tabs::size_drivers(&bindings, active, focused.as_deref(), &popped);
         let answerers = query_answerers(&bindings, &drivers);
         for (pane_id, slot) in &self.panes {
             let holds = |roles: &HashMap<String, String>| {
@@ -647,14 +649,19 @@ impl RootView {
         })
     }
 
+    /// Gives the main window's keyboard to `pane_id`'s terminal, unless the
+    /// pane is open in a pop-out: its terminal draws there, so the main
+    /// window focuses nothing for it.
     pub(crate) fn focus_pane_view(&self, pane_id: &str, window: &mut Window, cx: &Context<Self>) {
-        if let Some(slot) = self.panes.get(pane_id) {
+        if let Some(slot) = self.panes.get(pane_id)
+            && !self.is_popped_out(&slot.tab_id, pane_id)
+        {
             slot.view.read(cx).focus(window);
         }
     }
 
     /// Gives the keyboard to the active tab: its focused pane, or a diff or
-    /// viewer tab's body.
+    /// viewer tab's body. A popped focused pane takes nothing.
     pub(crate) fn focus_active_pane(&self, window: &mut Window, cx: &Context<Self>) {
         if self.focus_active_diff_tab(window, cx) || self.focus_active_viewer_tab(window) {
             return;

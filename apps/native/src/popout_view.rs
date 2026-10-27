@@ -30,10 +30,15 @@ impl PopoutView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        watch_close_request(root.clone(), key.clone(), window, cx);
+        watch_close_request(root.clone(), window, cx);
         cx.observe_window_bounds(window, |this, _, cx| this.mark_resized(cx))
             .detach();
         Self { root, key }
+    }
+
+    /// The popped pane moved to another tab: the window now holds `key`.
+    pub(crate) fn follow(&mut self, key: PopoutKey) {
+        self.key = key;
     }
 
     /// The window was resized: the popped pane's next size claims its
@@ -54,8 +59,6 @@ impl PopoutView {
     /// view still has the pane. A docked-back pane draws in the main grid
     /// alone: one terminal drawn in two windows at two sizes would resize
     /// itself for ever.
-    /// A pane moved to another tab has left this pop-out too: the main grid
-    /// draws it there.
     fn terminal(&self, cx: &App) -> Option<Entity<TerminalPane>> {
         let root = self.root.upgrade()?;
         let root = root.read(cx);
@@ -67,16 +70,17 @@ impl PopoutView {
 }
 
 /// A close request docks the pop-out back and lets the window close; it
-/// never reaches the main window's quit flow.
+/// never reaches the main window's quit flow. The window is found by its id,
+/// since its key follows a moved pane.
 fn watch_close_request(
     root: WeakEntity<RootView>,
-    key: PopoutKey,
     window: &mut Window,
     cx: &mut Context<PopoutView>,
 ) {
-    window.on_window_should_close(cx, move |_, cx| {
-        if let Err(err) = root.update(cx, |root, cx| root.forget_popout(&key, cx)) {
-            tracing::debug!(?key, "pop-out closed after the root view: {err:#}");
+    window.on_window_should_close(cx, move |window, cx| {
+        let window_id = window.window_handle().window_id();
+        if let Err(err) = root.update(cx, |root, cx| root.forget_popout_window(window_id, cx)) {
+            tracing::debug!(?window_id, "pop-out closed after the root view: {err:#}");
         }
         true
     });

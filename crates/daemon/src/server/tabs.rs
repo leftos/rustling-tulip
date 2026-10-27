@@ -329,10 +329,11 @@ pub(super) fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow
                     return Ok(());
                 }
             };
-            for id in &tab_ids {
-                hub.emit_tab(client_id, TabEvent::Removed(id.clone()));
-            }
+            // The new tab first, so its panes are in a tab after each event.
             hub.emit_tab(client_id, TabEvent::Updated(new_tab));
+            for id in tab_ids {
+                hub.emit_tab(client_id, TabEvent::Removed(id));
+            }
         }
         ClientMessage::ExtractToNewTab {
             source_tab_id,
@@ -351,12 +352,13 @@ pub(super) fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow
                     return Ok(());
                 }
             };
+            // The new tab first, so its panes are in a tab after each event.
+            hub.emit_tab(client_id, TabEvent::Updated(new_tab));
             if let Some(survivor) = source {
                 hub.emit_tab(client_id, TabEvent::Updated(survivor));
             } else {
                 hub.emit_tab(client_id, TabEvent::Removed(source_tab_id));
             }
-            hub.emit_tab(client_id, TabEvent::Updated(new_tab));
         }
         _ => warn!("tabs::handle: dispatch routed a message this module does not handle"),
     }
@@ -1079,6 +1081,76 @@ mod tests {
                 ("p4".to_string(), Some("s-p4".to_string())),
             ]
         );
+    }
+
+    /// The pane ids of `tab`'s grid, in walk order.
+    fn pane_ids(tab: &TabEntry) -> Vec<String> {
+        crate::tabs::collect_panes(tab.grid().expect("a grid tab"))
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn merge_tabs_emits_the_new_tab_before_removing_the_merged_ones() {
+        let (hub, _scratch) = test_hub("merge-order");
+        seed_bound_layout(&hub, "c1");
+        let mut events = hub.tab_events.subscribe();
+
+        let merge = ClientMessage::MergeTabs {
+            tab_ids: vec!["t1".to_string(), "t2".to_string()],
+            name: None,
+            layout: protocol::MergeLayout::TileVertical,
+            request_id: None,
+        };
+        let replies = dispatch_all(&hub, merge).await;
+        assert!(replies.is_empty(), "a merge answers nothing: {replies:?}");
+
+        let events = take_tab_events(&mut events);
+        let [
+            TabEvent::Updated(merged),
+            TabEvent::Removed(first),
+            TabEvent::Removed(second),
+        ] = events.as_slice()
+        else {
+            unreachable!("expected the new tab, then each merged tab's removal: {events:?}");
+        };
+        assert_eq!(pane_ids(merged), ["p1", "p2", "p3", "p4"]);
+        assert_eq!((first.as_str(), second.as_str()), ("t1", "t2"));
+    }
+
+    fn extract_of(source_tab_id: &str, pane_ids: &[&str]) -> ClientMessage {
+        ClientMessage::ExtractToNewTab {
+            source_tab_id: source_tab_id.to_string(),
+            pane_ids: pane_ids.iter().map(|id| (*id).to_string()).collect(),
+            name: None,
+            layout: None,
+            request_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn extract_to_new_tab_emits_the_new_tab_before_its_source() {
+        let (hub, _scratch) = test_hub("extract-order");
+        seed_bound_layout(&hub, "c1");
+        let mut events = hub.tab_events.subscribe();
+
+        dispatch_all(&hub, extract_of("t1", &["p1"])).await;
+        let survived = take_tab_events(&mut events);
+        let [TabEvent::Updated(new_tab), TabEvent::Updated(source)] = survived.as_slice() else {
+            unreachable!("expected the new tab, then its source: {survived:?}");
+        };
+        assert_eq!(pane_ids(new_tab), ["p1"]);
+        assert_eq!(source.id, "t1");
+        assert_eq!(pane_ids(source), ["p2"]);
+
+        dispatch_all(&hub, extract_of("t2", &["p3", "p4"])).await;
+        let emptied = take_tab_events(&mut events);
+        let [TabEvent::Updated(new_tab), TabEvent::Removed(gone)] = emptied.as_slice() else {
+            unreachable!("expected the new tab, then its emptied source's removal: {emptied:?}");
+        };
+        assert_eq!(pane_ids(new_tab), ["p3", "p4"]);
+        assert_eq!(gone, "t2");
     }
 
     #[tokio::test]

@@ -53,9 +53,16 @@ pub(crate) struct Popouts {
 
 impl Popouts {
     /// Opens `key`, or reports the open pop-out that already shows what it
-    /// would: the same key first, then one whose content overlaps.
+    /// would: the same key first, then one whose content overlaps. A pane
+    /// key whose pane is not in its tab opens nothing and reports itself as
+    /// already open, as a pop-out with nothing to show.
     pub(crate) fn open(&mut self, key: PopoutKey, tabs: &[TabEntry]) -> OpenOutcome {
         if self.is_open(&key) {
+            return OpenOutcome::Existing(key);
+        }
+        if let PopoutKey::Pane { tab_id, pane_id } = &key
+            && !pane_exists(tab_id, pane_id, tabs)
+        {
             return OpenOutcome::Existing(key);
         }
         if let Some(open) = self.overlapping(&key, tabs) {
@@ -87,6 +94,40 @@ impl Popouts {
     /// `key`'s place among the open pop-outs, which sets its cascade offset.
     pub(crate) fn cascade_index(&self, key: &PopoutKey) -> Option<usize> {
         self.keys.iter().position(|open| open == key)
+    }
+
+    /// The panes open in pane pop-outs, by pane id.
+    pub(crate) fn popped_panes(&self) -> Vec<&str> {
+        self.keys
+            .iter()
+            .filter_map(|key| match key {
+                PopoutKey::Pane { pane_id, .. } => Some(pane_id.as_str()),
+                PopoutKey::Tab { .. } | PopoutKey::Session { .. } => None,
+            })
+            .collect()
+    }
+
+    /// Re-keys each pane pop-out whose pane has left its key's tab for
+    /// another tab, since the daemon keeps a moved pane's id; returns each
+    /// move as `(old key, new key)`. A pane gone from every tab keeps its
+    /// key, for [`Popouts::prune`] to close. Nothing moves before the first
+    /// tab list arrives.
+    pub(crate) fn follow_moves(&mut self, tabs: &TabsModel) -> Vec<(PopoutKey, PopoutKey)> {
+        if !tabs.is_loaded() {
+            return Vec::new();
+        }
+        let mut moved = Vec::new();
+        for key in &mut self.keys {
+            let Some(new_tab) = moved_to(key, tabs.tabs()) else {
+                continue;
+            };
+            let old = key.clone();
+            if let PopoutKey::Pane { tab_id, .. } = key {
+                *tab_id = new_tab;
+            }
+            moved.push((old, key.clone()));
+        }
+        moved
     }
 
     /// Closes and returns the pop-outs whose content has gone, in the order
@@ -205,6 +246,23 @@ fn content_gone(key: &PopoutKey, tabs: &[TabEntry], sessions: &[SessionSnapshot]
         PopoutKey::Tab { tab_id } => !tabs.iter().any(|t| t.id == tab_id.as_str()),
         PopoutKey::Session { .. } => false,
     }
+}
+
+/// The tab a pane pop-out's pane now lives in, when it has left its key's
+/// tab for another one; `None` while it is still there or is in no tab.
+fn moved_to(key: &PopoutKey, tabs: &[TabEntry]) -> Option<String> {
+    let PopoutKey::Pane { tab_id, pane_id } = key else {
+        return None;
+    };
+    if pane_exists(tab_id, pane_id, tabs) {
+        return None;
+    }
+    tabs.iter()
+        .find(|tab| {
+            tab.grid()
+                .is_some_and(|grid| collect_panes(grid).iter().any(|pane| pane.id == pane_id))
+        })
+        .map(|tab| tab.id.clone())
 }
 
 /// Whether `tab_id`'s grid still holds `pane_id`, bound or empty.
@@ -428,6 +486,75 @@ mod tests {
 
         assert_eq!(closed, vec![pane_key("t1", "p1")]);
         assert!(!popouts.is_open(&pane_key("t1", "p1")));
+    }
+
+    #[test]
+    fn follow_moves_rekeys_a_pane_moved_to_another_tab() {
+        let mut popouts = Popouts::default();
+        popouts.open(pane_key("t1", "p1"), &two_panes());
+        let moved = model_with(&[
+            tab("t1", &pane("p2", Some("s2"))),
+            tab("t2", &pane("p1", Some("s1"))),
+        ]);
+
+        assert_eq!(
+            popouts.follow_moves(&moved),
+            vec![(pane_key("t1", "p1"), pane_key("t2", "p1"))]
+        );
+        assert_eq!(popouts.keys(), [pane_key("t2", "p1")].as_slice());
+        assert!(
+            popouts
+                .prune(&moved, &[session("s1"), session("s2")])
+                .is_empty(),
+            "the re-keyed pop-out still has its content"
+        );
+        assert!(
+            popouts.follow_moves(&moved).is_empty(),
+            "a pane already under its tab does not move again"
+        );
+    }
+
+    #[test]
+    fn follow_moves_leaves_a_gone_pane_for_prune() {
+        let mut popouts = Popouts::default();
+        popouts.open(pane_key("t1", "p1"), &two_panes());
+        let gone = model_with(&[tab("t1", &pane("p2", Some("s2")))]);
+
+        assert_eq!(popouts.follow_moves(&gone), Vec::new());
+        assert_eq!(
+            popouts.keys(),
+            [pane_key("t1", "p1")].as_slice(),
+            "a pane in no tab keeps its key"
+        );
+        assert_eq!(
+            popouts.prune(&gone, &[session("s1"), session("s2")]),
+            vec![pane_key("t1", "p1")]
+        );
+        assert!(
+            Popouts::default()
+                .follow_moves(&TabsModel::new(None))
+                .is_empty(),
+            "nothing moves before the first tab list"
+        );
+    }
+
+    #[test]
+    fn open_refuses_a_pane_not_in_its_tab() {
+        let tabs = two_panes();
+        let mut popouts = Popouts::default();
+
+        for stale in [pane_key("t2", "p1"), pane_key("t1", "p9")] {
+            assert_ne!(
+                popouts.open(stale.clone(), &tabs),
+                OpenOutcome::Opened,
+                "{stale:?} names no pane of its tab"
+            );
+        }
+        assert!(popouts.keys().is_empty(), "nothing opened");
+        assert_eq!(
+            popouts.open(pane_key("t1", "p1"), &tabs),
+            OpenOutcome::Opened
+        );
     }
 
     #[test]

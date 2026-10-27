@@ -1083,17 +1083,18 @@ fn move_within_tab(tabs: &mut [TabEntry], mv: &PaneMove<'_>) -> anyhow::Result<V
     Ok(vec![MovedTab::Updated(tab.clone())])
 }
 
+/// Reports the destination before the source, so a client folding the two
+/// events in order finds the moved pane in a tab after each of them.
 fn move_across_tabs(tabs: &mut Vec<TabEntry>, mv: &PaneMove<'_>) -> anyhow::Result<Vec<MovedTab>> {
     let src_tab = find_tab_mut(tabs, mv.src_tab_id)?;
     let (extracted, source_empty) = extract_pane(grid_or_err_mut(src_tab)?, mv.src_pane_id)?;
-    let mut moved = Vec::new();
-    if source_empty {
+    let source_event = if source_empty {
         tabs.retain(|t| t.id != mv.src_tab_id);
-        moved.push(MovedTab::Removed(mv.src_tab_id.to_string()));
+        MovedTab::Removed(mv.src_tab_id.to_string())
     } else {
         reapply_if_untouched(src_tab);
-        moved.push(MovedTab::Updated(src_tab.clone()));
-    }
+        MovedTab::Updated(src_tab.clone())
+    };
     let dst_tab = find_tab_mut(tabs, mv.dst_tab_id)?;
     insert_adjacent(
         grid_or_err_mut(dst_tab)?,
@@ -1106,8 +1107,7 @@ fn move_across_tabs(tabs: &mut Vec<TabEntry>, mv: &PaneMove<'_>) -> anyhow::Resu
     } else {
         reapply_if_untouched(dst_tab);
     }
-    moved.push(MovedTab::Updated(dst_tab.clone()));
-    Ok(moved)
+    Ok(vec![MovedTab::Updated(dst_tab.clone()), source_event])
 }
 
 /// One pane swap: the pane `src_pane_id` of `src_tab_id` and the pane
@@ -1169,7 +1169,7 @@ fn pane_session_at(
 
 /// Merge multiple tabs into a single new tab. Removes the source tabs from
 /// `tabs` and returns the new tab. Caller is responsible for broadcasting
-/// `TabRemoved` for each consumed id and `TabUpdated` for the survivor.
+/// `TabUpdated` for the new tab, then `TabRemoved` for each consumed id.
 pub fn merge_tabs(
     tabs: &mut Vec<TabEntry>,
     tab_ids: &[String],
@@ -1223,7 +1223,8 @@ pub struct ExtractOutcome {
 /// it. `None` keeps the historical horizontal tiling and picks nothing. A
 /// surviving source tab untouched since its own pick is rebuilt over the panes
 /// left. If extracting empties the source tab, the source is removed (caller
-/// must broadcast `TabRemoved` for the source as well).
+/// must broadcast `TabRemoved` for the source as well). The caller broadcasts
+/// the new tab before the source.
 pub fn extract_to_new_tab(
     tabs: &mut Vec<TabEntry>,
     source_tab_id: &str,
@@ -2877,8 +2878,31 @@ mod tests {
         assert_eq!(
             moved,
             vec![
+                MovedTab::Updated(tabs[1].clone()),
+                MovedTab::Updated(tabs[0].clone())
+            ],
+            "the destination comes first, so the moved pane is in a tab at every step"
+        );
+    }
+
+    #[test]
+    fn move_pane_across_tabs_reports_the_destination_before_an_emptied_source() {
+        let mut tabs = vec![
+            picked_tab("S", &bound(&["a"]), RearrangeLayout::Horizontal),
+            picked_tab("D", &bound(&["x"]), RearrangeLayout::Horizontal),
+        ];
+        let moved = move_pane(
+            &mut tabs,
+            &pane_move(("S", "a"), ("D", "x"), PaneDropEdge::Right),
+        )
+        .expect("move");
+
+        assert_eq!(tabs.len(), 1, "the emptied source is gone");
+        assert_eq!(
+            moved,
+            vec![
                 MovedTab::Updated(tabs[0].clone()),
-                MovedTab::Updated(tabs[1].clone())
+                MovedTab::Removed("S".to_string())
             ]
         );
     }
