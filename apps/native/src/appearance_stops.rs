@@ -213,14 +213,10 @@ pub(crate) fn step(
     ring.get(next).copied()
 }
 
-/// The stop the keyboard moves to when a press took `stop` out of `ring`:
-/// the first stop after its place in `order` (every stop, enabled or not)
-/// that `ring` still holds, searching on round to the start.
-pub(crate) fn after_lost(
-    order: &[AppearanceStop],
-    ring: &[AppearanceStop],
-    stop: AppearanceStop,
-) -> Option<AppearanceStop> {
+/// The stop the keyboard moves to when `stop` left `ring`: the first stop
+/// after its place in `order` (every stop, enabled or not) that `ring`
+/// still holds, searching on round to the start.
+pub(crate) fn after_lost<T: Copy + PartialEq>(order: &[T], ring: &[T], stop: T) -> Option<T> {
     let at = order.iter().position(|s| *s == stop)?;
     let (before, after) = order.split_at(at);
     after

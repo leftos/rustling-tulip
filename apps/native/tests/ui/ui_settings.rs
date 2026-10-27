@@ -1860,6 +1860,40 @@ fn a_second_agents_page_lists_its_settings_fields(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_field_a_when_rule_hides_keeps_the_keyboard(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    list_agents(&mut h, test_agent());
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-test");
+    h.keys("tab tab tab tab");
+    assert_eq!(settings_focus(&mut h), Some("settings-test-profile"));
+    h.send(DaemonMessage::AgentSettings {
+        settings: std::collections::BTreeMap::from([(
+            test_agent_id(),
+            options(&[("sandbox", OptionValue::Bool(true))]),
+        )]),
+    });
+    assert_eq!(
+        h.root(|root, _| root.settings_page_fields("test")),
+        ["mode", "sandbox"],
+        "the sandbox rule hid profile"
+    );
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("settings-test-mode-fast"),
+        "the keyboard moves to the stop after profile in the full order: past the launch rows \
+         the daemon has not reported, round to the first"
+    );
+    h.keys("tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("settings-test-mode-slow"),
+        "Tab walks on from there"
+    );
+}
+
+#[gpui::test]
 fn a_text_setting_applies_on_enter_and_on_blur(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);

@@ -330,6 +330,14 @@ impl TextInput {
         self.content.len()
     }
 
+    /// The selection drawn while the input does (`focused`) or does not
+    /// have the keyboard: none while it does not, as for the caret, and
+    /// none for an empty selection. The selection itself stays, so a field
+    /// built all selected still replaces its text once it takes the keyboard.
+    fn painted_selection(&self, focused: bool) -> Option<Range<usize>> {
+        (focused && !self.selected_range.is_empty()).then(|| self.selected_range.clone())
+    }
+
     /// The drawn text's range of the text's byte `range`.
     fn range_to_shown(&self, range: &Range<usize>) -> Range<usize> {
         self.to_shown(range.start)..self.to_shown(range.end)
@@ -1288,7 +1296,7 @@ impl Element for TextElement {
         };
         let layout = TextLayout::new(lines, line_height);
         let caret = layout.position(input.to_shown(input.cursor_offset()));
-        let selected = input.range_to_shown(&input.selected_range);
+        let painted = input.painted_selection(input.focus_handle.is_focused(window));
         let scroll_y = if multi_line {
             let view_height = bounds.size.height;
             scroll_to_caret(
@@ -1302,11 +1310,12 @@ impl Element for TextElement {
             px(0.)
         };
         let origin = point(bounds.left(), bounds.top() - scroll_y);
-        let (selection, cursor) = if selected.is_empty() {
+        let (selection, cursor) = if let Some(painted) = painted {
+            let shown = input.range_to_shown(&painted);
+            (layout.selection_quads(&shown, origin), None)
+        } else {
             let caret = Bounds::new(origin + caret, size(px(2.), line_height));
             (Vec::new(), Some(fill(caret, rgb(INPUT_CURSOR))))
-        } else {
-            (layout.selection_quads(&selected, origin), None)
         };
         self.input.update(cx, |input, _| input.scroll_y = scroll_y);
         PrepaintState {
@@ -1744,5 +1753,30 @@ mod tests {
         for utf8 in [0, THUMB, E, B, TEXT.len()] {
             assert_eq!(offset_from_utf16(TEXT, offset_to_utf16(TEXT, utf8)), utf8);
         }
+    }
+
+    /// A new input seeded with `SEED`, all of it selected, never focused.
+    fn seeded(cx: &mut TestAppContext) -> (Entity<TextInput>, &mut VisualTestContext) {
+        cx.add_window_view(|_, cx| TextInput::new(SEED, "", cx))
+    }
+
+    const SEED: &str = "C:/old";
+
+    #[gpui::test]
+    fn an_unfocused_input_paints_no_selection(cx: &mut TestAppContext) {
+        let (input, cx) = seeded(cx);
+        assert_eq!(
+            cx.update(|_, cx| input.read(cx).painted_selection(false)),
+            None
+        );
+    }
+
+    #[gpui::test]
+    fn a_focused_input_paints_its_selection(cx: &mut TestAppContext) {
+        let (input, cx) = seeded(cx);
+        assert_eq!(
+            cx.update(|_, cx| input.read(cx).painted_selection(true)),
+            Some(0..SEED.len())
+        );
     }
 }

@@ -595,6 +595,10 @@ pub struct RootView {
     /// The Settings control Tab or a click last moved to; it has the
     /// keyboard while the modal's own focus does.
     settings_control: Option<settings_view::SettingsControl>,
+    /// The Settings control the keyboard ring last had focused, as the
+    /// last render saw it; when it leaves the ring the keyboard moves on
+    /// from its place.
+    settings_ring_control: Option<settings_view::SettingsControl>,
     /// The daemon's keep-awake state as this connection last heard it.
     keep_awake: Option<settings_view::KeepAwake>,
     /// The daemon's remote access status as this connection last heard it.
@@ -1029,6 +1033,7 @@ impl RootView {
             settings_tab: settings_view::SettingsTab::default(),
             settings_tabs_focus: cx.focus_handle(),
             settings_control: None,
+            settings_ring_control: None,
             keep_awake: None,
             remote_status: None,
             remote_access_tab: None,
@@ -3452,6 +3457,9 @@ impl Render for RootView {
         // Tab switches and renames made here change the title without a
         // daemon message.
         self.refresh_window_title(window, cx);
+        // A daemon echo or a re-read can take the focused Settings control
+        // out of the ring; the keyboard moves on from its place.
+        self.keep_settings_keyboard(window, cx);
         // A pane, pill or sidebar row drag gpui ended on a release no
         // listener took (a modal over the window swallows it) leaves nothing
         // behind to mistake a later drag for it: no payload, no overlay, no

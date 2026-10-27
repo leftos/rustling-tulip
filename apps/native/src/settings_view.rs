@@ -909,23 +909,7 @@ impl RootView {
     /// left out.
     fn settings_controls(&self, cx: &App) -> Vec<SettingsControl> {
         match self.settings_tab {
-            SettingsTab::General => {
-                let keep_awake = self
-                    .keep_awake
-                    .map(|_| KEEP_AWAKE_CHOICES.map(SettingsControl::KeepAwake));
-                keep_awake
-                    .into_iter()
-                    .flatten()
-                    .chain(SIDEBAR_VIEW_CHOICES.map(SettingsControl::SidebarView))
-                    .chain(LEAF_DENSITY_CHOICES.map(SettingsControl::LeafDensity))
-                    .chain(SESSIONS_UNDER_REPOS_CHOICES.map(SettingsControl::SessionsUnderRepos))
-                    .chain(REPO_SORT_CHOICES.map(SettingsControl::RepoSort))
-                    .chain([
-                        SettingsControl::OpenTextExternally,
-                        SettingsControl::CopyOnSelect,
-                    ])
-                    .collect()
-            }
+            SettingsTab::General => general_controls(self.keep_awake.is_some()),
             SettingsTab::AppTitle => {
                 vec![SettingsControl::TitleCount, SettingsControl::TitleSuffix]
             }
@@ -956,6 +940,55 @@ impl RootView {
             SettingsTab::RemoteAccess => self.remote_access_controls(),
             SettingsTab::Appearance => self
                 .appearance_stops(false, cx)
+                .into_iter()
+                .map(SettingsControl::Appearance)
+                .collect(),
+        }
+    }
+
+    /// The shown tab's stops in the order Tab walks them, each one there
+    /// whether the ring holds it now or not.
+    fn settings_stop_order(&self, cx: &App) -> Vec<SettingsControl> {
+        match self.settings_tab {
+            SettingsTab::General => general_controls(true),
+            SettingsTab::AppTitle | SettingsTab::Notifications | SettingsTab::SpawnDefaults => {
+                self.settings_controls(cx)
+            }
+            SettingsTab::Agent(_) => {
+                let Some(agent) = self.settings_tab.agent() else {
+                    return Vec::new();
+                };
+                let Some(descriptor) = descriptor_for(self.agents(), &agent) else {
+                    return Vec::new();
+                };
+                let options =
+                    AgentOptions::new(descriptor.clone(), self.agent_settings().get(&agent));
+                let trusted = self.sidebar.ui_state().spawn.trusted;
+                // The indices are places among every field, not among those
+                // shown: only the selectors are compared with the ring.
+                options
+                    .every_settings_field(trusted)
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(index, view)| field_controls(&descriptor.tag, index, view))
+                    .chain([SettingsControl::AgentProgram, SettingsControl::AgentArgs])
+                    .collect()
+            }
+            SettingsTab::Worktrees => vec![
+                SettingsControl::WorktreesPath,
+                SettingsControl::WorktreesBrowse,
+                SettingsControl::WorktreesSave,
+                SettingsControl::WorktreesReset,
+                SettingsControl::WorktreesManage,
+            ],
+            SettingsTab::RemoteAccess => vec![
+                SettingsControl::RemoteToggle,
+                SettingsControl::RemotePort,
+                SettingsControl::RemotePortApply,
+                SettingsControl::RemoteAutostart,
+            ],
+            SettingsTab::Appearance => self
+                .appearance_stop_order(false)
                 .into_iter()
                 .map(SettingsControl::Appearance)
                 .collect(),
@@ -1458,7 +1491,16 @@ impl RootView {
     /// other control through the modal's focus.
     pub(crate) fn focus_settings_control(&mut self, control: SettingsControl, window: &mut Window) {
         self.settings_control = Some(control);
-        let field = match control {
+        match self.settings_field_focus(control) {
+            Some(focus) => focus.focus(window),
+            None => self.appearance_focus.focus(window),
+        }
+    }
+
+    /// The focus of `control` when it is a text field; `None` for a control
+    /// that has the keyboard through the modal's focus.
+    fn settings_field_focus(&self, control: SettingsControl) -> Option<FocusHandle> {
+        match control {
             SettingsControl::WorktreesPath => {
                 self.worktrees_tab.as_ref().map(|tab| tab.focus.clone())
             }
@@ -1471,11 +1513,62 @@ impl RootView {
             SettingsControl::AgentArgs => self.shown_agent_tab().map(|tab| tab.args_focus.clone()),
             SettingsControl::AgentText { field, .. } => self.agent_text_focus(field),
             _ => None,
-        };
-        match field {
-            Some(focus) => focus.focus(window),
-            None => self.appearance_focus.focus(window),
         }
+    }
+
+    /// Run at each render: remembers the control the keyboard ring has
+    /// focused, and when an echo or a re-read took it out of the ring while
+    /// the keyboard still sits on it (or on the modal's own focus), moves
+    /// the keyboard, after this render, to the stop after its place in the
+    /// shown tab's full order that the ring holds. With the keyboard
+    /// anywhere else, the lost control is forgotten and nothing moves.
+    pub(crate) fn keep_settings_keyboard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.settings_open() {
+            self.settings_ring_control = None;
+            return;
+        }
+        let controls = self.settings_controls(cx);
+        if let Some(control) = self.focused_control_in(&controls, window, cx) {
+            self.settings_ring_control = Some(control);
+            return;
+        }
+        let Some(lost) = self.settings_ring_control.take() else {
+            return;
+        };
+        let still_on_it = self.appearance_focus.is_focused(window)
+            || self
+                .settings_field_focus(lost)
+                .is_some_and(|focus| focus.is_focused(window));
+        if self.settings_control != Some(lost) || !still_on_it {
+            return;
+        }
+        // An agent page's control carries its field's place among the
+        // fields shown, which a `when` rule hiding an earlier field shifts:
+        // stops are matched by their selector, which names the field (and
+        // the choice) and survives that.
+        let key = lost.selector();
+        if let Some(moved) = controls.iter().find(|c| c.selector() == key).copied() {
+            self.settings_control = Some(moved);
+            self.settings_ring_control = Some(moved);
+            return;
+        }
+        let order: Vec<&str> = self
+            .settings_stop_order(cx)
+            .into_iter()
+            .map(SettingsControl::selector)
+            .collect();
+        let ring: Vec<&str> = controls.iter().map(|c| c.selector()).collect();
+        let Some(next) = after_lost(&order, &ring, key)
+            .and_then(|next| controls.iter().find(|c| c.selector() == next).copied())
+        else {
+            return;
+        };
+        cx.defer_in(window, move |this, window, cx| {
+            if this.settings_open() {
+                this.move_settings_focus(next, window, cx);
+                cx.notify();
+            }
+        });
     }
 
     /// Whether the Remote access page's port field has the keyboard.
@@ -3322,6 +3415,24 @@ fn intern(selector: String) -> &'static str {
 /// The selector part of field `id`: the id with `_` as `-`.
 fn field_part(id: &str) -> String {
     id.replace('_', "-")
+}
+
+/// The General tab's controls in drawing order; the keep-awake choices
+/// only with `keep_awake`, once the daemon reported its state.
+fn general_controls(keep_awake: bool) -> Vec<SettingsControl> {
+    let keep_awake = keep_awake.then_some(KEEP_AWAKE_CHOICES.map(SettingsControl::KeepAwake));
+    keep_awake
+        .into_iter()
+        .flatten()
+        .chain(SIDEBAR_VIEW_CHOICES.map(SettingsControl::SidebarView))
+        .chain(LEAF_DENSITY_CHOICES.map(SettingsControl::LeafDensity))
+        .chain(SESSIONS_UNDER_REPOS_CHOICES.map(SettingsControl::SessionsUnderRepos))
+        .chain(REPO_SORT_CHOICES.map(SettingsControl::RepoSort))
+        .chain([
+            SettingsControl::OpenTextExternally,
+            SettingsControl::CopyOnSelect,
+        ])
+        .collect()
 }
 
 /// The controls of `view`, field `index` of the page of the agent tagged

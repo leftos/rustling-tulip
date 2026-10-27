@@ -186,13 +186,26 @@ impl AgentOptions {
     /// while `trusted` and shows the value it keeps for an untrusted launch.
     #[must_use]
     pub(crate) fn settings_fields(&self, trusted: bool) -> Vec<FieldView> {
+        self.settings_views(trusted, false)
+    }
+
+    /// Every field marked for Settings, in the descriptor's order, those a
+    /// `when` rule hides now included: the page's full order of fields.
+    #[must_use]
+    pub(crate) fn every_settings_field(&self, trusted: bool) -> Vec<FieldView> {
+        self.settings_views(trusted, true)
+    }
+
+    /// The fields marked for Settings, without those a `when` rule hides
+    /// unless `hidden_too`.
+    fn settings_views(&self, trusted: bool, hidden_too: bool) -> Vec<FieldView> {
         let resolved = self.resolved(trusted);
         let kept = self.resolved(false);
         self.descriptor
             .fields
             .iter()
             .filter(|field| field.settings)
-            .filter(|field| !is_hidden(field, &resolved))
+            .filter(|field| hidden_too || !is_hidden(field, &resolved))
             .map(|field| field_view(field, &resolved, &kept, trusted))
             .collect()
     }

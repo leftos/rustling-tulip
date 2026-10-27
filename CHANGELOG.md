@@ -16,6 +16,8 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - A session brought back from Recover keeps its name, colours and place in the sidebar.
 - Recovering a session in a shell never lets a `$`, `%`, `!` or backtick in your config folder's path run as shell code.
 - A Worktrees folder the daemon can't create no longer leaves Settings showing it as saved after another window changes it.
+- A text field you aren't typing in no longer shows its text selected, in Settings, the Spawn dialog and everywhere else.
+- In Settings, when saving or applying makes the focused button go away, the keyboard moves to the next control instead of jumping back to the tabs.
 
 ### Changed
 

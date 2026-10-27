@@ -378,6 +378,10 @@ The editor walks the same stops, Close included, and draws the focus ring on its
 
 The stop order, ring step (`step`), where focus goes when a press disables its stop (`after_lost`, shared by Settings and the editor), cursor and highlight logic is plain Rust in `appearance_stops.rs`, unit-tested; Settings keeps its one focus slot, `settings_control`.
 
+When a daemon echo or re-read removes the focused Settings control from the Tab ring (Worktrees Save or Reset, Remote access Apply or Autostart, an agent field a rule disables), the keyboard moves to the next stop in that page's full order (`settings_stop_order`) instead of falling back to the tab list; after a Worktrees Save it lands on Reset. If the user has moved focus elsewhere, nothing moves. The rule runs at render time (`RootView::render` calls `keep_settings_keyboard`).
+
+A text field without the keyboard draws no selection. A field built with its text selected shows the selection once it takes focus, and typing still replaces the text (`text_input.rs`, `painted_selection`).
+
 Menus and modals keep to the window and hand the keyboard back. A context menu opens at its anchor and snaps inside the viewport, and its frame never grows past 60% of the window's height: a longer menu scrolls its rows instead (`session_menu.rs` `menu_frame`, `MENU_MAX_SHARE`). Confirm dialogs open on their safe option — Cancel, Keep running, Ignore, or a pane-only close — and every close path, Esc included, returns the keyboard to the pane.
 
 Esc has deliberate exceptions. It never dismisses the layout chooser (the import modal in "Tab layouts" does: Esc and its ✕ both keep the layout), and it is ignored while a recovery or an exit is in flight. In a session rename it leaves the menu open and returns to its rows rather than closing them.

@@ -236,6 +236,53 @@ fn reset_disabled_without_override(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn save_that_the_echo_disables_keeps_the_keyboard(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    root_changed(&mut h, "C:/default", false);
+    worktrees_tab(&mut h);
+    h.click_on("settings-worktrees-root-input");
+    type_text(&mut h, "D:/wt");
+    h.keys("tab tab");
+    assert_eq!(settings_focus(&mut h), Some("settings-worktrees-root-save"));
+    h.keys("enter");
+    assert_eq!(root_sets(&h.sent()), [Some("D:/wt".to_owned())]);
+    root_changed(&mut h, "D:/wt", true);
+    assert_eq!(save(&mut h), ("Saved", false));
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("settings-worktrees-root-reset"),
+        "the keyboard moves to the stop after Save: the Reset the override enabled"
+    );
+    h.keys("tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("settings-worktrees-open-manager"),
+        "Tab walks on from there"
+    );
+}
+
+#[gpui::test]
+fn a_removed_stop_with_focus_elsewhere_moves_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    root_changed(&mut h, "C:/default", false);
+    worktrees_tab(&mut h);
+    h.click_on("settings-worktrees-root-input");
+    type_text(&mut h, "D:/wt");
+    h.keys("tab tab");
+    assert_eq!(settings_focus(&mut h), Some("settings-worktrees-root-save"));
+    h.click_on("settings-worktrees-root-input");
+    root_changed(&mut h, "D:/wt", true);
+    assert!(!save(&mut h).1, "the echo took Save out");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("settings-worktrees-root-input"),
+        "the keyboard stays in the field the user went to"
+    );
+}
+
+#[gpui::test]
 fn browse_fills_the_path_from_the_picker(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);

@@ -584,6 +584,33 @@ fn tab_walks_the_remote_access_controls(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn apply_that_the_echo_removes_keeps_the_keyboard(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.send(status(false, 8787, RemoteState::Off));
+    open_page(&mut h);
+    h.keys("tab tab");
+    assert_eq!(settings_focus(&mut h), Some(PORT));
+    h.keys("ctrl-a backspace");
+    type_text(&mut h, "9000");
+    h.keys("tab");
+    assert_eq!(settings_focus(&mut h), Some(APPLY));
+    h.keys("enter");
+    assert_eq!(configures(&mut h), [(false, Some(9000))]);
+    h.send(status(false, 9000, RemoteState::Off));
+    assert!(!h.root(|root, _| root.remote_port_apply()), "applied");
+    // The page's full order is the switch, the port, Apply, the login
+    // launch: the stop after Apply is the login launch.
+    let focus = settings_focus(&mut h);
+    assert_ne!(focus, Some("list"), "the keyboard stays on the page");
+    assert_eq!(
+        focus,
+        Some(AUTOSTART),
+        "the keyboard moves to the stop after Apply"
+    );
+}
+
+#[gpui::test]
 fn autostart_toggle_calls_the_seam_and_shows_a_failure(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);
