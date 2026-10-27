@@ -1,0 +1,33 @@
+# Runtime files under the config dir and session dirs, never tracked
+daemon.json
+devices.json
+native-ui.json
+state.json
+meta.json
+remote.json
+hook-settings.json
+# Upstream gpui source the docs cite
+elements/text.rs
+# Spike scratch files, kept outside the repo
+hooklog.mjs
+mksettings.mjs
+run.sh
+tui.py
+show.mjs
+spike_*.rs
+# Claude Code's own TUI sources the chat-mirror spike read
+prompt-select.ts
+multi-select.ts
+preview-select.ts
+paste.ts
+resume.ts
+effort.ts
+switch-model.ts
+wizard.ts
+markers.ts
+chrome.ts
+above-prompt-notice.ts
+task-checklist.ts
+# The retired Tauri app's files, named by the UX audit
+utils/a11y.ts
+GitPanel.tsx
