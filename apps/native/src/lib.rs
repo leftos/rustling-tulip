@@ -152,7 +152,7 @@ use gpui::{
 };
 use protocol::{
     AppearanceOverrides, ClientMessage, DaemonMessage, GridNode, PaneDropEdge, RepoEntry,
-    SessionMode, SessionSnapshot, SuggestTarget, TabEntry, VscodeWorkspaceSuggestion,
+    SessionMode, SessionSnapshot, SuggestTarget, TabContent, TabEntry, VscodeWorkspaceSuggestion,
     WorkspaceEntry,
 };
 use std::collections::{HashMap, HashSet};
@@ -472,8 +472,9 @@ struct PopoutOpening {
     display_id: Option<DisplayId>,
     bounds: Bounds<Pixels>,
     title: String,
-    /// The popped pane's terminal, which takes the keyboard in the window.
-    terminal: Option<gpui::Entity<term_view::TerminalPane>>,
+    /// What takes the keyboard in the window: the popped terminal, or a
+    /// popped diff tab's view.
+    focus: Option<gpui::FocusHandle>,
 }
 
 /// An open pop-out window and the title it shows.
@@ -498,7 +499,7 @@ fn open_popout_now(root: &gpui::WeakEntity<RootView>, opening: PopoutOpening, cx
         display_id,
         bounds,
         title,
-        terminal,
+        focus,
     } = opening;
     let offscreen = offscreen::requested();
     let (min_width, min_height) = POPOUT_MIN_SIZE;
@@ -521,8 +522,8 @@ fn open_popout_now(root: &gpui::WeakEntity<RootView>, opening: PopoutOpening, cx
                 offscreen::show_cloaked(window, POPOUT_SIZE);
             }
             window.set_window_title(&title);
-            if let Some(terminal) = &terminal {
-                terminal.read(cx).focus(window);
+            if let Some(focus) = &focus {
+                focus.focus(window);
             }
             cx.new(|cx| PopoutView::new(view_root, view_key, window, cx))
         },
@@ -1349,8 +1350,8 @@ impl RootView {
     }
 
     /// Opens `key` in a window of its own, or activates the open pop-out
-    /// that already shows it. A pane, a grid tab or a session pop-out
-    /// opens; a diff or viewer tab, or a session the daemon does not list
+    /// that already shows it. A pane, a grid or diff tab or a session
+    /// pop-out opens; a viewer tab, or a session the daemon does not list
     /// or no terminal can show, opens nothing and reports itself as already
     /// open.
     pub fn open_popout(
@@ -1367,7 +1368,7 @@ impl RootView {
             PopoutKey::Tab { tab_id } => self
                 .tabs
                 .tab(tab_id)
-                .is_some_and(|tab| tab.grid().is_some()),
+                .is_some_and(|tab| !matches!(tab.content, TabContent::Viewer { .. })),
         };
         if !opens {
             tracing::debug!(?key, "nothing to show in this pop-out");
@@ -1392,9 +1393,10 @@ impl RootView {
         outcome
     }
 
-    /// The main window lets go of `key`'s pane, or of a tab's panes, as they
-    /// pop out: a terminal that had the keyboard there hands it to the main
-    /// window's own focus, so the app's shortcuts work there again.
+    /// The main window lets go of `key`'s pane, or of a tab's panes or diff,
+    /// as they pop out: a terminal or diff that had the keyboard there hands
+    /// it to the main window's own focus, so the app's shortcuts work there
+    /// again.
     fn unfocus_popped_pane(&self, key: &PopoutKey, window: &mut Window, cx: &Context<Self>) {
         let pane_ids = match key {
             PopoutKey::Pane { pane_id, .. } => vec![pane_id.clone()],
@@ -1405,11 +1407,16 @@ impl RootView {
                 .collect(),
             PopoutKey::Session { .. } => return,
         };
-        let focused = pane_ids.iter().any(|pane_id| {
-            self.panes
-                .get(pane_id)
-                .is_some_and(|slot| slot.view().read(cx).is_focused(window))
-        });
+        let diff_focused = match key {
+            PopoutKey::Tab { tab_id } => self.diff_tab_focused(tab_id, window, cx),
+            PopoutKey::Pane { .. } | PopoutKey::Session { .. } => false,
+        };
+        let focused = diff_focused
+            || pane_ids.iter().any(|pane_id| {
+                self.panes
+                    .get(pane_id)
+                    .is_some_and(|slot| slot.view().read(cx).is_focused(window))
+            });
         if focused {
             self.root_focus.focus(window);
         }
@@ -1417,7 +1424,7 @@ impl RootView {
 
     /// Opens the window for `key`, already in the registry, at its cascade
     /// place on the main window's display, and gives the keyboard to its
-    /// terminal.
+    /// terminal or diff.
     fn open_popout_window(&mut self, key: PopoutKey, window: &Window, cx: &mut Context<Self>) {
         let cascade = self.popouts.cascade_index(&key).unwrap_or(0);
         let display_id = window.display(cx).map(|display| display.id());
@@ -1428,13 +1435,13 @@ impl RootView {
             self.sidebar.sessions(),
             &self.agents,
         );
-        let terminal = self.popout_terminal(&key);
+        let focus = self.popout_focus(&key, cx);
         let opening = PopoutOpening {
             key,
             display_id,
             bounds,
             title,
-            terminal,
+            focus,
         };
         let root = cx.weak_entity();
         // The new window draws at once and reads this view, so it opens once
@@ -1463,6 +1470,18 @@ impl RootView {
         }
         let slot_id = popouts::terminal_slot(key)?;
         self.panes.get(&slot_id).map(|slot| slot.view().clone())
+    }
+
+    /// What takes the keyboard in `key`'s pop-out window: a popped diff
+    /// tab's view, else [`Self::popout_terminal`].
+    pub(crate) fn popout_focus(&self, key: &PopoutKey, cx: &App) -> Option<gpui::FocusHandle> {
+        if let PopoutKey::Tab { tab_id } = key
+            && let Some(focus) = self.diff_tab_focus(tab_id, cx)
+        {
+            return Some(focus);
+        }
+        self.popout_terminal(key)
+            .map(|terminal| terminal.read(cx).focus_handle())
     }
 
     /// The pop-out window of terminal `pane_id` (a pane's, or a session
@@ -1525,19 +1544,20 @@ impl RootView {
     }
 
     /// Brings `key`'s pop-out window to the front and gives the keyboard to
-    /// its pane's terminal; a cloaked client never activates a window.
+    /// its pane's terminal or its diff; a cloaked client never activates a
+    /// window.
     fn activate_popout(&self, key: &PopoutKey, cx: &mut Context<Self>) {
         let Some(PopoutWindow { handle, .. }) = self.popout_windows.get(key) else {
             return;
         };
-        let terminal = self.popout_terminal(key);
+        let focus = self.popout_focus(key, cx);
         let activate = !offscreen::requested();
-        let raised = handle.update(cx, |_, window, cx| {
+        let raised = handle.update(cx, |_, window, _| {
             if activate {
                 window.activate_window();
             }
-            if let Some(terminal) = &terminal {
-                terminal.read(cx).focus(window);
+            if let Some(focus) = &focus {
+                focus.focus(window);
             }
         });
         if let Err(err) = raised {
@@ -1556,8 +1576,8 @@ impl RootView {
     /// Drops `key` from the open pop-outs without touching its window, as
     /// its own close request does; the window it had, if any. A docked-back
     /// tab's panes follow their focus in the main window again, and when it
-    /// is the main window's active tab its focused pane takes the keyboard
-    /// there.
+    /// is the main window's active tab its focused pane or its diff takes
+    /// the keyboard there.
     pub(crate) fn forget_popout(
         &mut self,
         key: &PopoutKey,

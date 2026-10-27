@@ -3025,3 +3025,446 @@ fn font_shortcuts_in_the_main_window_skip_a_popped_tab(cx: &mut TestAppContext) 
         "the popped tab's own size stays"
     );
 }
+
+// --- Diff tab pop-outs -----------------------------------------------------
+
+/// `s1` in `t1`, then a diff tab `d1` of `r1`'s `src/main.rs`.
+fn with_a_diff_tab() -> Fixture {
+    let mut fixture = Fixture::single(session("s1").build());
+    fixture.repos = vec![repo("r1", "D:/src/r1")];
+    fixture.tabs.push(diff_tab("d1", "src/main.rs"));
+    fixture
+}
+
+/// The ids of the `GetFileSnapshot`s in `sent`.
+fn snapshot_ids(sent: &[ClientMessage]) -> Vec<String> {
+    sent.iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::GetFileSnapshot { id, .. } => Some(id.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// `count` numbered lines, with the lines in `changed` (1-based) edited.
+fn numbered(count: usize, changed: &[usize]) -> String {
+    (1..=count)
+        .map(|n| {
+            if changed.contains(&n) {
+                format!("line {n} edited\n")
+            } else {
+                format!("line {n}\n")
+            }
+        })
+        .collect()
+}
+
+/// [`with_a_diff_tab`]'s client with `d1`'s one snapshot answered with
+/// `old` and `new`, and what it sent so far drained.
+fn diff_landed<'a>(cx: &'a mut TestAppContext, dir: &TestDir, old: &str, new: &str) -> Harness<'a> {
+    let mut h = Harness::with(cx, dir, &with_a_diff_tab());
+    let ids = snapshot_ids(&h.sent());
+    assert_eq!(ids.len(), 1, "d1 fetches its snapshot once: {ids:?}");
+    h.send(DaemonMessage::FileSnapshot {
+        id: ids[0].clone(),
+        repo_id: "r1".to_owned(),
+        path: "src/main.rs".to_owned(),
+        against: None,
+        old: old.to_owned(),
+        new: new.to_owned(),
+        language: "rust".to_owned(),
+        unavailable: None,
+        worktree_path: None,
+    });
+    h.sent();
+    h
+}
+
+/// Whether diff tab `d1`'s view has the keyboard of the window `window`
+/// tests.
+fn diff_focused_in(h: &Harness<'_>, window: &mut VisualTestContext) -> bool {
+    let root = h.root.clone();
+    window.update(|window, cx| root.read(cx).diff_tab_focused("d1", window, cx))
+}
+
+fn diff_focused_in_main(h: &mut Harness<'_>) -> bool {
+    let root = h.root.clone();
+    h.cx.update(|window, cx| root.read(cx).diff_tab_focused("d1", window, cx))
+}
+
+/// `d1`'s header as text.
+fn d1_header(h: &mut Harness<'_>) -> rustling_tulip_native::DiffTabHeader {
+    h.root(|root, cx| root.diff_tab_header("d1", cx))
+        .expect("d1 has a view")
+}
+
+/// The id of `d1`'s side-by-side view, once its diff is built.
+fn d1_view(h: &mut Harness<'_>) -> EntityId {
+    h.root(|root, cx| root.diff_tab_view("d1", cx))
+        .expect("d1's diff is built")
+        .entity_id()
+}
+
+fn d1_current_change(h: &mut Harness<'_>) -> Option<usize> {
+    h.root(|root, cx| {
+        root.diff_tab_view("d1", cx)
+            .and_then(|view| view.read(cx).current_hunk())
+    })
+}
+
+/// The whitespace setting saved in `native-ui.json`.
+fn saved_include_whitespace(dir: &TestDir) -> serde_json::Value {
+    let text = std::fs::read_to_string(dir.path().join("native-ui.json")).expect("native-ui.json");
+    let saved: serde_json::Value = serde_json::from_str(&text).expect("native-ui.json is JSON");
+    saved["diff_include_whitespace"].clone()
+}
+
+#[gpui::test]
+fn tab_menu_pops_out_a_diff_tab(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = diff_landed(cx, &dir, "a\n", "b\n");
+    let view = d1_view(&mut h);
+
+    h.right_click_on("tab-d1");
+    assert!(
+        h.root(|root, _| root.tab_menu_text())
+            .contains(&"Pop out".to_owned())
+    );
+    h.click_on("tab-menu-popout");
+
+    assert_eq!(h.window_count(), 2, "the diff tab has a window of its own");
+    assert!(tab_popped(&mut h, "d1"));
+    let sent = h.sent();
+    assert!(
+        snapshot_ids(&sent).is_empty(),
+        "the pop-out shows the snapshot held: {sent:?}"
+    );
+    assert!(
+        !sent.iter().any(changes_layout_or_sessions),
+        "popping a diff tab out asks the daemon for nothing: {sent:?}"
+    );
+    let mut popout = h.popout_window();
+    assert_eq!(
+        popout.window_title().as_deref(),
+        Some("src/main.rs"),
+        "titled by its tab"
+    );
+    for part in [
+        "popout-tab-title-d1",
+        "popout-tab-dock-d1",
+        "diff-path",
+        "diff-whitespace",
+    ] {
+        assert!(drawn_in_popout(&mut popout, part), "{part} is drawn");
+    }
+    assert_eq!(d1_view(&mut h), view, "the tab's own view, not a copy");
+    assert!(
+        diff_focused_in(&h, &mut popout),
+        "the diff has the pop-out's keyboard"
+    );
+
+    h.right_click_on("tab-d1");
+    assert!(
+        h.root(|root, _| root.tab_menu_text())
+            .contains(&"Focus window".to_owned()),
+        "the row reads Focus window once the tab is out"
+    );
+}
+
+#[gpui::test]
+fn main_window_shows_a_card_for_a_popped_diff_tab(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = diff_landed(cx, &dir, "a\n", "b\n");
+    h.cx.update(|window, _| window.activate_window());
+    pop_out_tab(&mut h, "d1");
+    assert!(
+        on_screen(&mut h, "tab-pill-popped-d1"),
+        "the popped diff tab's pill carries the mark"
+    );
+
+    h.click_on("tab-d1");
+
+    for part in [
+        "popped-tab-d1",
+        "popped-tab-label-d1",
+        "popped-tab-focus-d1",
+        "popped-tab-dock-d1",
+    ] {
+        assert!(on_screen(&mut h, part), "{part} is drawn");
+    }
+    assert!(
+        !ever_drawn_in_main(&mut h, "diff-path"),
+        "the card stands in for the diff"
+    );
+    assert!(!diff_focused_in_main(&mut h), "the card holds no focus");
+
+    let mut popout = h.popout_window();
+    popout.update(|window, _| window.blur());
+    h.click_on("popped-tab-focus-d1");
+    assert!(is_active(&mut popout), "Focus window raises the pop-out");
+    assert!(diff_focused_in(&h, &mut popout));
+    assert_eq!(h.root(|root, _| root.popout_count()), 1);
+}
+
+#[gpui::test]
+fn diff_toggles_work_in_a_diff_popout(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = diff_landed(cx, &dir, "a\n  b\nc\n", "a\nb\nc\n");
+    assert_eq!(d1_header(&mut h).count, "1 change");
+    pop_out_tab(&mut h, "d1");
+    let mut popout = h.popout_window();
+    h.sent();
+
+    click_in_popout(&mut popout, "diff-whitespace");
+
+    let shown = d1_header(&mut h);
+    assert!(!shown.include_whitespace, "the toggle flips the view");
+    assert_eq!(shown.count, "no changes");
+    assert_eq!(
+        saved_include_whitespace(&dir),
+        json!(false),
+        "the setting flips"
+    );
+    let highlight = d1_header(&mut h).highlight;
+    click_in_popout(&mut popout, "diff-highlight");
+    assert_eq!(d1_header(&mut h).highlight, !highlight);
+    let sent = h.sent();
+    assert!(
+        snapshot_ids(&sent).is_empty(),
+        "rebuilt from the texts held: {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn docking_a_diff_tab_back_keeps_its_view(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (old, new) = (numbered(40, &[]), numbered(40, &[3, 20, 37]));
+    let mut h = diff_landed(cx, &dir, &old, &new);
+    h.cx.update(|window, _| window.activate_window());
+    h.click_on("tab-d1");
+    let view = d1_view(&mut h);
+    pop_out_tab(&mut h, "d1");
+    let mut popout = h.popout_window();
+    click_in_popout(&mut popout, "diff-last");
+    assert_eq!(d1_current_change(&mut h), Some(2));
+    h.sent();
+
+    press_in_popout(&mut popout, "popout-tab-dock-d1");
+    h.cx.run_until_parked();
+
+    assert_eq!(
+        h.window_count(),
+        1,
+        "the toolbar's Dock back closes the window"
+    );
+    assert!(!tab_popped(&mut h, "d1"));
+    assert_eq!(d1_view(&mut h), view, "the same view comes back");
+    assert_eq!(
+        d1_current_change(&mut h),
+        Some(2),
+        "its place in the diff stays"
+    );
+    assert!(
+        diff_focused_in_main(&mut h),
+        "the diff takes the main window's keyboard"
+    );
+    h.click_on("diff-whitespace");
+    assert!(
+        !d1_header(&mut h).include_whitespace,
+        "the toggles work in the main window again"
+    );
+    let sent = h.sent();
+    assert!(
+        snapshot_ids(&sent).is_empty(),
+        "nothing refetched: {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn closing_a_diff_popout_docks_it_back(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = diff_landed(cx, &dir, "a\n  b\nc\n", "a\nb\nc\n");
+    pop_out_tab(&mut h, "d1");
+    h.sent();
+
+    assert!(h.close_popout(), "the pop-out may close");
+
+    assert_eq!(h.window_count(), 1);
+    assert!(!tab_popped(&mut h, "d1"), "closing docks the tab back");
+    assert_eq!(h.root(|root, _| root.popout_count()), 0);
+    assert_eq!(h.quit_requests(), 0, "the app stays");
+    let sent = h.sent();
+    assert!(
+        !sent.iter().any(changes_layout_or_sessions) && snapshot_ids(&sent).is_empty(),
+        "closing removes no tab and refetches nothing: {sent:?}"
+    );
+    h.click_on("tab-d1");
+    assert!(
+        on_screen(&mut h, "diff-path"),
+        "the diff draws in the main window"
+    );
+    h.click_on("diff-whitespace");
+    assert!(
+        !d1_header(&mut h).include_whitespace,
+        "the toggles work in the main window"
+    );
+}
+
+/// `r1`'s main tree with `c.rs` changed, as a `RepoStatus`.
+fn c_rs_changed() -> DaemonMessage {
+    serde_json::from_value(json!({
+        "type": "repo_status",
+        "repo_id": "r1",
+        "index_changes": [],
+        "worktree_changes": [{ "path": "c.rs", "status": "M", "from_path": null }],
+        "worktree_path": null,
+    }))
+    .expect("status fixture")
+}
+
+#[gpui::test]
+fn reopening_a_popped_diff_tab_raises_its_popout(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        repos: vec![repo("r1", "D:/src/r1")],
+        tabs: vec![tab("t1", &pane("p1", None)), diff_tab("d1", "c.rs")],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.click_on("activity-source-control");
+    h.send(c_rs_changed());
+    pop_out_tab(&mut h, "d1");
+    let mut popout = h.popout_window();
+    popout.update(|window, _| window.blur());
+    h.cx.update(|window, _| window.activate_window());
+    assert!(!is_active(&mut popout), "the main window is in front");
+    let active = |h: &mut Harness<'_>| h.root(|root, _| root.active_tab_id().map(str::to_owned));
+    assert_eq!(active(&mut h).as_deref(), Some("t1"));
+    h.sent();
+
+    h.click_on("sc-row-changes-r1::|c.rs");
+    let open_id = h
+        .sent()
+        .into_iter()
+        .find_map(|msg| match msg {
+            ClientMessage::OpenDiffTab { id, .. } => Some(id),
+            _ => None,
+        })
+        .expect("the row asks to open its diff");
+    h.send(DaemonMessage::DiffTabOpened {
+        id: open_id,
+        tab_id: "d1".to_owned(),
+    });
+
+    assert!(is_active(&mut popout), "the diff's pop-out is raised");
+    assert!(
+        diff_focused_in(&h, &mut popout),
+        "the diff has the pop-out's keyboard"
+    );
+    assert_eq!(
+        active(&mut h).as_deref(),
+        Some("t1"),
+        "the main window keeps its tab"
+    );
+}
+
+#[gpui::test]
+fn switching_the_main_window_to_a_popped_diff_tab_takes_keys_from_the_terminal(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let mut h = diff_landed(cx, &dir, "a\n", "b\n");
+    h.answer_scrollback("s1", b"");
+    h.cx.update(|window, _| window.activate_window());
+    focus_p1_in_main(&mut h);
+    pop_out_tab(&mut h, "d1");
+    assert!(
+        focused_in_main(&mut h, "p1"),
+        "t1's pane keeps the keyboard"
+    );
+
+    h.keys("ctrl-tab");
+
+    assert_eq!(
+        h.root(|root, _| root.active_tab_id().map(str::to_owned))
+            .as_deref(),
+        Some("d1")
+    );
+    assert!(!focused_in_main(&mut h, "p1"), "the card takes it from p1");
+    h.sent();
+    h.keys("a");
+    assert!(
+        h.sent_input("s1").is_empty(),
+        "keys typed at the card reach no terminal"
+    );
+}
+
+#[gpui::test]
+fn closing_an_overlay_in_a_diff_popout_hands_the_diff_its_keyboard(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = diff_landed(cx, &dir, "a\n", "b\n");
+    pop_out_tab(&mut h, "d1");
+    let mut popout = h.popout_window();
+    assert!(diff_focused_in(&h, &mut popout));
+
+    // No overlay opens from a diff pop-out's own controls; a pane close
+    // asked for from its window draws there, as a gutter menu's would.
+    in_popout(&h, &mut popout, |root, window, cx| {
+        root.close_pane_clicked("t1", "p1", Some("s1"), window, cx);
+    });
+    assert!(drawn_in_popout(&mut popout, "pane-close"));
+    assert!(
+        !diff_focused_in(&h, &mut popout),
+        "the dialog has the keyboard"
+    );
+    popout.simulate_keystrokes("escape");
+    popout.run_until_parked();
+
+    assert!(!h.root(|root, _| root.pane_close_open()));
+    assert!(
+        diff_focused_in(&h, &mut popout),
+        "the diff has the pop-out's keyboard back"
+    );
+}
+
+#[gpui::test]
+fn toggles_work_after_a_quick_pop_and_dock(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = diff_landed(cx, &dir, "a\n  b\nc\n", "a\nb\nc\n");
+    h.click_on("tab-d1");
+    let key = tab_key("d1");
+
+    h.root_update(move |root, window, cx| {
+        root.open_popout(key.clone(), window, cx);
+        root.dock_back(&key, cx);
+    });
+    pop_out_tab(&mut h, "d1");
+    h.root_update(|root, _, cx| root.dock_back(&tab_key("d1"), cx));
+
+    assert_eq!(h.window_count(), 1);
+    h.click_on("diff-whitespace");
+    assert!(
+        !d1_header(&mut h).include_whitespace,
+        "the toggles work in the main window"
+    );
+}
+
+#[gpui::test]
+fn removing_a_diff_tab_closes_its_popout(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = diff_landed(cx, &dir, "a\n", "b\n");
+    pop_out_tab(&mut h, "d1");
+    assert_eq!(h.window_count(), 2);
+
+    h.send(DaemonMessage::TabRemoved {
+        tab_id: "d1".to_owned(),
+    });
+
+    assert_eq!(
+        h.window_count(),
+        1,
+        "the pop-out window closed with its tab"
+    );
+    assert_eq!(h.root(|root, _| root.popout_count()), 0);
+    assert!(!tab_popped(&mut h, "d1"));
+}

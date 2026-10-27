@@ -1172,15 +1172,17 @@ impl RootView {
         let content = match self.tabs.active_tab() {
             None => self.no_tab(cx),
             Some(tab) => match &tab.content {
+                TabContent::Grid { .. } | TabContent::Diff { .. }
+                    if self.is_tab_popped(&tab.id) =>
+                {
+                    Self::popped_tab_card(tab, cx)
+                }
                 TabContent::Diff { .. } => self
                     .diff_tab_element(&tab.id)
                     .unwrap_or_else(|| muted_note(DIFF_LOADING_TEXT).into_any_element()),
                 TabContent::Viewer { .. } => self
                     .viewer_tab_element(&tab.id, cx)
                     .unwrap_or_else(|| div().into_any_element()),
-                TabContent::Grid { .. } if self.is_tab_popped(&tab.id) => {
-                    Self::popped_tab_card(tab, cx)
-                }
                 TabContent::Grid { grid } => self.tab_grid(&tab.id, grid, self.layouts.main(), cx),
             },
         };
@@ -1453,8 +1455,9 @@ impl RootView {
     }
 
     /// What tab `tab_id`'s pop-out window `here` draws: a toolbar with the
-    /// tab's name and Dock back over the tab's whole grid, with no tab
-    /// strip. `None` once the tab has gone or holds no grid.
+    /// tab's name and Dock back over the tab's whole grid, or over a diff
+    /// tab's diff (its loading note before it has a view), with no tab
+    /// strip. `None` once the tab has gone, or for a viewer tab.
     fn popped_tab(
         &self,
         tab_id: &str,
@@ -1462,7 +1465,13 @@ impl RootView {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let tab = self.tabs.tab(tab_id)?;
-        let grid = tab.grid()?;
+        let content = match &tab.content {
+            TabContent::Grid { grid } => self.tab_grid(tab_id, grid, here, cx),
+            TabContent::Diff { .. } => self
+                .diff_tab_element(tab_id)
+                .unwrap_or_else(|| muted_note(DIFF_LOADING_TEXT).into_any_element()),
+            TabContent::Viewer { .. } => return None,
+        };
         let name = format!("popout-tab-title-{tab_id}");
         let title = div()
             .debug_selector(|| name)
@@ -1474,7 +1483,7 @@ impl RootView {
             .into_any_element();
         let dock = Self::popout_tab_dock_back(tab_id, cx);
         let toolbar = popout_toolbar_row(&format!("tab-{tab_id}"), vec![title], vec![dock], cx);
-        let body = grid_frame(self.tab_grid(tab_id, grid, here, cx), cx);
+        let body = grid_frame(content, cx);
         Some(popout_column(toolbar, body.into_any_element()))
     }
 

@@ -32,6 +32,7 @@ use crate::ellipsis::ellipsized;
 use crate::fonts::FontSettings;
 use crate::notices::ToastKind;
 use crate::palette::{LINE, SUBTLE, SURFACE};
+use crate::popouts::PopoutKey;
 use crate::source_control::ScKey;
 use crate::syntax::{self, Highlighted};
 use crate::{HOVER_BG, MUTED, RootView, TEXT, UI_TEXT_SIZE, tooltip};
@@ -663,7 +664,9 @@ impl Render for DiffTabView {
     }
 }
 
-/// A diff tab's view and the subscription to its events.
+/// A diff tab's view and the subscription to its events, made on the main
+/// window, which outlives every pop-out: the toggles act from whichever
+/// window draws the view.
 pub(crate) struct DiffSlot {
     view: Entity<DiffTabView>,
     _events: Subscription,
@@ -770,10 +773,16 @@ impl RootView {
             DaemonMessage::DiffTabOpened { id, tab_id } => {
                 let known = self.tabs.tab(tab_id).is_some();
                 if let Some(tab_id) = self.diff_opens.opened(id, tab_id, known, (self.now)()) {
-                    // Re-opening the active tab focuses it again too.
-                    self.last_active_tab = None;
-                    self.tabs.activate(&tab_id);
-                    self.after_tabs_change(window, cx);
+                    if self.is_tab_popped(&tab_id) {
+                        // It draws in a pop-out: that window comes to the
+                        // front, whichever tab the main window shows.
+                        self.activate_popout(&PopoutKey::Tab { tab_id }, cx);
+                    } else {
+                        // Re-opening the active tab focuses it again too.
+                        self.last_active_tab = None;
+                        self.tabs.activate(&tab_id);
+                        self.after_tabs_change(window, cx);
+                    }
                 }
                 true
             }
@@ -894,13 +903,27 @@ impl RootView {
     }
 
     /// Gives the keyboard to the active tab when it is a diff tab; returns
-    /// whether it was.
+    /// whether it was. A popped diff tab draws in its pop-out, so the main
+    /// window keeps the keyboard to itself, as for a popped grid tab.
     pub(crate) fn focus_active_diff_tab(&self, window: &mut Window, cx: &App) -> bool {
-        let Some(slot) = self.tabs.active_id().and_then(|id| self.diff_tabs.get(id)) else {
+        let Some(tab_id) = self.tabs.active_id() else {
             return false;
         };
+        let Some(slot) = self.diff_tabs.get(tab_id) else {
+            return false;
+        };
+        if self.is_tab_popped(tab_id) && self.is_main_window(window) {
+            self.root_focus.focus(window);
+            return true;
+        }
         slot.view.read(cx).focus.focus(window);
         true
+    }
+
+    /// Diff tab `tab_id`'s focus handle, which takes the keyboard of the
+    /// window that draws it.
+    pub(crate) fn diff_tab_focus(&self, tab_id: &str, cx: &App) -> Option<FocusHandle> {
+        Some(self.diff_tabs.get(tab_id)?.view.read(cx).focus.clone())
     }
 
     /// The diff tab `tab_id`'s view, as an element.

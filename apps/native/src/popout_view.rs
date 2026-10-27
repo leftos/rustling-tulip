@@ -1,18 +1,18 @@
 //! A pop-out window's root: the popped pane's or session's toolbar and
-//! terminal, or a popped tab's toolbar and whole grid, drawn from the main
+//! terminal, or a popped tab's toolbar and whole grid or diff, drawn from the main
 //! window's [`RootView`] over its one daemon connection. It registers no app
 //! shortcuts, so every key goes to the terminal.
 
 use gpui::{
-    AnyElement, AnyWindowHandle, App, Context, Entity, FocusHandle, IntoElement, KeyDownEvent,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render, Subscription, WeakEntity,
-    Window, WindowId, div, prelude::*, px,
+    AnyElement, AnyWindowHandle, App, Context, FocusHandle, IntoElement, KeyDownEvent, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render, Subscription, WeakEntity, Window,
+    WindowId, div, prelude::*, px,
 };
 
 use crate::overlay_owner::Overlay;
 use crate::palette::GROUND;
 use crate::popouts::{self, PopoutKey};
-use crate::term_view::{PaneEvent, TerminalPane};
+use crate::term_view::PaneEvent;
 use crate::{MUTED, RootView, UI_TEXT_SIZE, fonts};
 
 /// What a pop-out whose pane has gone shows.
@@ -363,13 +363,13 @@ impl RootView {
     }
 
     /// Gives `window`'s keyboard to its terminal: the active pane in the
-    /// main window, the popped terminal in a pop-out.
+    /// main window, the popped terminal or diff in a pop-out.
     fn focus_window_terminal(&self, window: &mut Window, cx: &Context<Self>) {
         let here = window.window_handle().window_id();
         if here == self.layouts.main() {
             self.focus_active_pane(window, cx);
-        } else if let Some(terminal) = self.popout_terminal_in(here) {
-            terminal.read(cx).focus(window);
+        } else if let Some(focus) = self.popout_focus_in(here, cx) {
+            focus.focus(window);
         }
     }
 
@@ -411,14 +411,15 @@ impl RootView {
             .map(|popout| AnyWindowHandle::from(popout.handle).window_id())
     }
 
-    /// The terminal pop-out window `window_id` draws.
-    fn popout_terminal_in(&self, window_id: WindowId) -> Option<Entity<TerminalPane>> {
+    /// What takes the keyboard in pop-out window `window_id`: its terminal,
+    /// or a popped diff tab's view.
+    fn popout_focus_in(&self, window_id: WindowId, cx: &App) -> Option<FocusHandle> {
         let key = self
             .popout_windows
             .iter()
             .find(|(_, popout)| AnyWindowHandle::from(popout.handle).window_id() == window_id)
             .map(|(key, _)| key)?;
-        self.popout_terminal(key)
+        self.popout_focus(key, cx)
     }
 
     /// Runs `act` for window `window_id` once this update is over; a window

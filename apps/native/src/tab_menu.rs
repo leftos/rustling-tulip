@@ -9,8 +9,6 @@ use crate::tabs::TabSelection;
 
 /// Why the tab menu's Pop out is dimmed for a viewer tab.
 pub(crate) const VIEWER_POP_OUT_TIP: &str = "Viewer tabs can't be popped out";
-/// Why the tab menu's Pop out is dimmed for a diff tab.
-pub(crate) const DIFF_POP_OUT_TIP: &str = "Diff tabs can't be popped out";
 /// The tab menu's Pop out row, which reads Focus window once the tab is out.
 const POP_OUT_SELECTOR: &str = "tab-menu-popout";
 
@@ -184,13 +182,12 @@ pub(crate) fn head_lines(tab: &TabEntry, tabs: &[TabEntry], popouts: &Popouts) -
 }
 
 /// `tab`'s Pop out: Focus window while the tab has its own window, else
-/// Pop out, dimmed under a line naming why for a viewer or diff tab and for
-/// a grid tab an open pop-out already shares content with.
+/// Pop out, dimmed under a line naming why for a viewer tab and for a tab
+/// an open pop-out already shares content with.
 fn pop_out_lines(tab: &TabEntry, tabs: &[TabEntry], popouts: &Popouts) -> Vec<MenuLine> {
     let refusal = match &tab.content {
         TabContent::Viewer { .. } => VIEWER_POP_OUT_TIP,
-        TabContent::Diff { .. } => DIFF_POP_OUT_TIP,
-        TabContent::Grid { .. } => {
+        TabContent::Grid { .. } | TabContent::Diff { .. } => {
             let key = PopoutKey::Tab {
                 tab_id: tab.id.clone(),
             };
@@ -343,13 +340,30 @@ mod tests {
     }
 
     #[test]
-    fn pop_out_row_is_disabled_for_a_diff_tab() {
-        let diff = diff_tab("d1");
-        let lines = head_lines(&diff, std::slice::from_ref(&diff), &Popouts::default());
+    fn pop_out_row_is_enabled_for_a_diff_tab() {
+        let tabs = vec![diff_tab("d1")];
+        let lines = head_lines(&tabs[0], &tabs, &Popouts::default());
 
         assert_eq!(selectors(&lines), ["tab-menu-rename", "tab-menu-popout"]);
-        assert_eq!(row_of(&lines, "tab-menu-popout"), Some(("Pop out", None)));
-        assert_eq!(labels(&lines), ["Diff tabs can't be popped out"]);
+        assert_eq!(
+            row_of(&lines, "tab-menu-popout"),
+            Some(("Pop out", Some(TabAction::PopOut)))
+        );
+        assert_eq!(labels(&lines), [] as [&str; 0], "a diff tab pops out");
+
+        let mut popouts = Popouts::default();
+        popouts.open(
+            PopoutKey::Tab {
+                tab_id: "d1".to_owned(),
+            },
+            &tabs,
+        );
+        let lines = head_lines(&tabs[0], &tabs, &popouts);
+        assert_eq!(
+            row_of(&lines, "tab-menu-popout"),
+            Some(("Focus window", Some(TabAction::PopOut))),
+            "a popped diff tab's row raises its window"
+        );
     }
 
     #[test]
