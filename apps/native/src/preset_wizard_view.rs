@@ -365,8 +365,8 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         let sidebar = &self.sidebar;
-        let live = |id: &str| sidebar.session(id).is_some_and(is_live);
-        if let Some(spec) = self.preset_launches.on_message(&live, msg) {
+        let listed = |id: &str| sidebar.session(id).map(is_live);
+        if let Some(spec) = self.preset_launches.on_message(&listed, msg) {
             self.push_toast_spec(spec, cx);
         }
         self.launched_highlight.follow(&self.preset_launches);
@@ -387,14 +387,15 @@ impl RootView {
         }
     }
 
-    /// Fits each launch toast's buttons to its job: Stop all only while one
-    /// of its sessions is live, which any session update may change.
+    /// Fits each launch toast's buttons to its job: Stop all only while the
+    /// job runs or one of its sessions is not known to have ended, which any
+    /// session update may change.
     fn sync_preset_toast_actions(&mut self, cx: &mut Context<Self>) {
         self.preset_launch_syncs += 1;
         let sidebar = &self.sidebar;
-        let live = |id: &str| sidebar.session(id).is_some_and(is_live);
+        let listed = |id: &str| sidebar.session(id).map(is_live);
         let mut changed = false;
-        for (key, actions) in self.preset_launches.shown_actions(&live) {
+        for (key, actions) in self.preset_launches.shown_actions(&listed) {
             changed |= self.notices.set_actions(&key, actions);
         }
         if changed {
@@ -405,7 +406,8 @@ impl RootView {
     /// Button `action` on launch toast `key`: Cancel cancels the running
     /// job, Select marks its sessions (and those it makes later) and shows
     /// the sessions panel, Stop all cancels a running job, then stops its
-    /// live sessions and keeps their worktrees.
+    /// sessions not known to have ended (one the sidebar does not list yet
+    /// included) and keeps their worktrees.
     pub(crate) fn press_preset_toast_action(
         &mut self,
         key: &str,
@@ -414,8 +416,8 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         let sidebar = &self.sidebar;
-        let live = |id: &str| sidebar.session(id).is_some_and(is_live);
-        match self.preset_launches.press(key, action, &live) {
+        let listed = |id: &str| sidebar.session(id).map(is_live);
+        match self.preset_launches.press(key, action, &listed) {
             Some(JobAction::Cancel(job_id)) => {
                 self.send(ClientMessage::CancelPresetLaunch { job_id });
             }

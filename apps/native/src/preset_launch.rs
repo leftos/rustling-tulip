@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 
 use protocol::{
     DaemonMessage, PresetEntry, PresetLaunchJobSnapshot, PresetLaunchJobStatus, PresetVariable,
-    PresetVariableKind, TabGroupingConfig,
+    PresetVariableKind, SessionSnapshot, TabGroupingConfig,
 };
 
 use crate::notices::{ToastAction, ToastKind, ToastSpec};
@@ -447,7 +447,14 @@ struct LaunchJob {
     first_tab: FirstTab,
     /// A cancel went out for the running job; its end is still to come.
     cancel_requested: bool,
+    /// The job's sessions seen removed, or missing from a full session list;
+    /// Stop all skips them.
+    removed: HashSet<String>,
 }
+
+/// What the sidebar knows of session `id`: None while it does not list it,
+/// else whether it is live.
+pub type SessionLookup<'a> = dyn Fn(&str) -> Option<bool> + 'a;
 
 /// The toast button that cancels a running launch.
 pub const CANCEL: ToastAction = ToastAction {
@@ -461,7 +468,8 @@ pub const SELECT: ToastAction = ToastAction {
     label: "Select",
     danger: false,
 };
-/// The toast button that stops the launch's live sessions.
+/// The toast button that cancels a running launch and stops its sessions
+/// not known to have ended.
 pub const STOP_ALL: ToastAction = ToastAction {
     id: "stop-all",
     label: "Stop all",
@@ -475,7 +483,7 @@ pub enum JobAction {
     Cancel(String),
     /// Mark the job's sessions, following it as it makes more.
     Select,
-    /// Cancel the running job `cancel` names first, then stop these live
+    /// Cancel the running job `cancel` names first, then stop these
     /// sessions.
     StopAll {
         cancel: Option<String>,
@@ -545,20 +553,42 @@ impl LaunchJob {
         send
     }
 
-    /// Stop all: the live sessions, after a cancel when the job still runs;
-    /// None with nothing live to stop.
-    fn stop_all(&mut self, job_id: &str, live: &dyn Fn(&str) -> bool) -> Option<JobAction> {
+    /// Whether Stop all counts session `id`: unless it is known ended, listed
+    /// by `listed` and not live, or seen removed. An id not listed yet counts,
+    /// since the job reports a session before its snapshot may arrive.
+    fn counts(&self, id: &str, listed: &SessionLookup<'_>) -> bool {
+        !self.removed.contains(id) && listed(id).unwrap_or(true)
+    }
+
+    /// Stop all: a cancel while the job runs and none went out, then the
+    /// sessions it counts; None when neither is due.
+    fn stop_all(&mut self, job_id: &str, listed: &SessionLookup<'_>) -> Option<JobAction> {
         let sessions: Vec<String> = self
             .session_ids
             .iter()
-            .filter(|id| live(id))
+            .filter(|id| self.counts(id, listed))
             .cloned()
             .collect();
-        if sessions.is_empty() {
-            return None;
-        }
         let cancel = self.request_cancel().then(|| job_id.to_owned());
-        Some(JobAction::StopAll { cancel, sessions })
+        (cancel.is_some() || !sessions.is_empty())
+            .then_some(JobAction::StopAll { cancel, sessions })
+    }
+
+    /// Notes that session `id` was removed, when it is one of the job's.
+    fn fold_removed(&mut self, id: &str) {
+        if self.session_ids.iter().any(|known| known == id) {
+            self.removed.insert(id.to_owned());
+        }
+    }
+
+    /// Notes each of the job's sessions full session list `sessions` lacks
+    /// as removed: the list is the daemon's whole registry.
+    fn fold_session_list(&mut self, sessions: &[SessionSnapshot]) {
+        for id in &self.session_ids {
+            if !sessions.iter().any(|session| &session.id == id) {
+                self.removed.insert(id.clone());
+            }
+        }
     }
 
     /// Notes the sessions and the first tab a message names.
@@ -576,13 +606,12 @@ impl LaunchJob {
     }
 
     /// The toast's buttons: Cancel while it runs and no cancel went out,
-    /// Select, and Stop all while one of its sessions is `live`.
-    fn actions(&self, live: &dyn Fn(&str) -> bool) -> Vec<ToastAction> {
-        let cancel = (self.state == JobState::Running && !self.cancel_requested).then_some(CANCEL);
-        let stop = self
-            .session_ids
-            .iter()
-            .any(|id| live(id))
+    /// Select, and Stop all while it runs or Stop all counts one of its
+    /// sessions.
+    fn actions(&self, listed: &SessionLookup<'_>) -> Vec<ToastAction> {
+        let running = self.state == JobState::Running;
+        let cancel = (running && !self.cancel_requested).then_some(CANCEL);
+        let stop = (running || self.session_ids.iter().any(|id| self.counts(id, listed)))
             .then_some(STOP_ALL);
         cancel.into_iter().chain([SELECT]).chain(stop).collect()
     }
@@ -630,7 +659,7 @@ impl LaunchJob {
         ))
     }
 
-    fn toast(&self, job_id: &str, live: &dyn Fn(&str) -> bool) -> ToastSpec {
+    fn toast(&self, job_id: &str, listed: &SessionLookup<'_>) -> ToastSpec {
         let preset = &self.preset;
         let (kind, title, detail, sticky) = match &self.state {
             JobState::Running => (
@@ -677,7 +706,7 @@ impl LaunchJob {
             detail,
             key: Some(toast_key(job_id)),
             sticky,
-            actions: self.actions(live),
+            actions: self.actions(listed),
         }
     }
 }
@@ -711,21 +740,38 @@ impl PresetLaunches {
             session_ids: Vec::new(),
             first_tab: FirstTab::Unknown,
             cancel_requested: false,
+            removed: HashSet::new(),
         };
-        let spec = job.toast(&job_id, &|_| false);
+        let spec = job.toast(&job_id, &|_| None);
         self.jobs.insert(job_id, job);
         spec
     }
 
-    /// Folds a job event of one of these jobs; returns the toast it now
-    /// shows, its Stop all offered while a session is `live`, or None when
-    /// the message changes nothing shown. Session and tab ids fold in
+    /// Folds a job event of one of these jobs, or a removal of their
+    /// sessions: one removed, or each a full session list lacks; returns the
+    /// toast it now shows, its Stop all as `listed` lets it count, or None
+    /// when the message changes nothing shown. Session and tab ids fold in
     /// whatever the job's state.
     pub fn on_message(
         &mut self,
-        live: &dyn Fn(&str) -> bool,
+        listed: &SessionLookup<'_>,
         msg: &DaemonMessage,
     ) -> Option<ToastSpec> {
+        match msg {
+            DaemonMessage::SessionRemoved { session_id } => {
+                for job in self.jobs.values_mut() {
+                    job.fold_removed(session_id);
+                }
+                return None;
+            }
+            DaemonMessage::Sessions { sessions } => {
+                for job in self.jobs.values_mut() {
+                    job.fold_session_list(sessions);
+                }
+                return None;
+            }
+            _ => {}
+        }
         let job_id = job_of_message(msg)?;
         let launch = self.jobs.get_mut(job_id)?;
         launch.fold_ids_of(msg);
@@ -733,17 +779,17 @@ impl PresetLaunches {
             return None;
         }
         (launch.state != JobState::Running || !launch.progress_dismissed)
-            .then(|| launch.toast(job_id, live))
+            .then(|| launch.toast(job_id, listed))
     }
 
-    /// Each job's toast key and its buttons, Stop all offered while one of
-    /// its sessions is `live`; sorted by key.
+    /// Each job's toast key and its buttons, Stop all as `listed` lets it
+    /// count; sorted by key.
     #[must_use]
-    pub fn shown_actions(&self, live: &dyn Fn(&str) -> bool) -> Vec<(String, Vec<ToastAction>)> {
+    pub fn shown_actions(&self, listed: &SessionLookup<'_>) -> Vec<(String, Vec<ToastAction>)> {
         let mut shown: Vec<(String, Vec<ToastAction>)> = self
             .jobs
             .iter()
-            .map(|(job_id, job)| (toast_key(job_id), job.actions(live)))
+            .map(|(job_id, job)| (toast_key(job_id), job.actions(listed)))
             .collect();
         shown.sort_by(|a, b| a.0.cmp(&b.0));
         shown
@@ -752,12 +798,12 @@ impl PresetLaunches {
     /// A press of button `action` on toast `key`: what it does, or None when
     /// the toast is no job's or the job no longer offers it. Cancel goes
     /// out once, only while the job runs, and so does Stop all's cancel;
-    /// Stop all needs a session `live`.
+    /// Stop all stops the sessions `listed` lets it count.
     pub fn press(
         &mut self,
         key: &str,
         action: &str,
-        live: &dyn Fn(&str) -> bool,
+        listed: &SessionLookup<'_>,
     ) -> Option<JobAction> {
         let job_id = job_id_of(key)?;
         let job = self.jobs.get_mut(job_id)?;
@@ -766,7 +812,7 @@ impl PresetLaunches {
                 .request_cancel()
                 .then(|| JobAction::Cancel(job_id.to_owned())),
             id if id == SELECT.id => Some(JobAction::Select),
-            id if id == STOP_ALL.id => job.stop_all(job_id, live),
+            id if id == STOP_ALL.id => job.stop_all(job_id, listed),
             _ => None,
         }
     }
@@ -1251,8 +1297,12 @@ mod tests {
         );
     }
 
-    fn all_live(_: &str) -> bool {
-        true
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "a sidebar lookup, which answers None for an unlisted id"
+    )]
+    fn all_live(_: &str) -> Option<bool> {
+        Some(true)
     }
 
     fn with_sessions(mut job: PresetLaunchJobSnapshot, ids: &[&str]) -> PresetLaunchJobSnapshot {
@@ -1270,8 +1320,8 @@ mod tests {
         let first = launches.start("j1".to_owned(), "Sweep".to_owned(), true, Some(3));
         assert_eq!(
             ids(&first.actions),
-            ["cancel", "select"],
-            "nothing to stop yet"
+            ["cancel", "select", "stop-all"],
+            "Stop all cancels the running job before it made a session"
         );
         let spawning = with_sessions(snapshot("j1", PresetLaunchJobStatus::Spawning), &["s1"]);
         let spec = launches.on_message(&all_live, &updated(spawning));
@@ -1288,15 +1338,15 @@ mod tests {
             [true, false, true],
             "Cancel and Stop all are destructive"
         );
-        let none_live = |_: &str| false;
+        let none_live = |_: &str| Some(false);
         let shown = launches.shown_actions(&none_live);
         assert_eq!(
             shown
                 .iter()
                 .map(|(key, actions)| (key.as_str(), ids(actions)))
                 .collect::<Vec<_>>(),
-            [("preset:j1", vec!["cancel", "select"])],
-            "Stop all goes once nothing it would stop runs"
+            [("preset:j1", vec!["cancel", "select", "stop-all"])],
+            "a running job keeps Stop all with nothing live"
         );
         let done = with_sessions(snapshot("j1", PresetLaunchJobStatus::Completed), &["s1"]);
         let spec = launches.on_message(&all_live, &updated(done));
@@ -1304,6 +1354,16 @@ mod tests {
             spec.map(|spec| ids(&spec.actions)),
             Some(vec!["select", "stop-all"]),
             "an ended job drops Cancel"
+        );
+        assert_eq!(
+            ids(&launches.shown_actions(&none_live)[0].1),
+            ["select"],
+            "an ended job's Stop all goes once its sessions are known ended"
+        );
+        assert_eq!(
+            ids(&launches.shown_actions(&|_| None)[0].1),
+            ["select", "stop-all"],
+            "a session not listed yet keeps it"
         );
     }
 
@@ -1343,7 +1403,7 @@ mod tests {
         );
         assert_eq!(
             ids(&launches.shown_actions(&all_live)[0].1),
-            ["select"],
+            ["select", "stop-all"],
             "Cancel goes once pressed"
         );
         assert_eq!(
@@ -1366,16 +1426,21 @@ mod tests {
         launches.start("j1".to_owned(), "Sweep".to_owned(), true, Some(3));
         let job = with_sessions(
             snapshot("j1", PresetLaunchJobStatus::Spawning),
-            &["s1", "s2"],
+            &["s1", "s2", "s3"],
         );
         launches.on_message(&all_live, &updated(job));
-        let s2_live = |id: &str| id == "s2";
+        let s1_stopped_s3_unlisted = |id: &str| match id {
+            "s1" => Some(false),
+            "s2" => Some(true),
+            _ => None,
+        };
         assert_eq!(
-            launches.press("preset:j1", STOP_ALL.id, &s2_live),
+            launches.press("preset:j1", STOP_ALL.id, &s1_stopped_s3_unlisted),
             Some(JobAction::StopAll {
                 cancel: Some("j1".to_owned()),
-                sessions: strings(&["s2"])
-            })
+                sessions: strings(&["s2", "s3"])
+            }),
+            "a session whose snapshot has not arrived is stopped too"
         );
         assert_eq!(
             launches.press("preset:j1", CANCEL.id, &all_live),
@@ -1383,12 +1448,98 @@ mod tests {
             "Stop all already asked for the cancel"
         );
         assert_eq!(
-            launches.press("preset:j1", STOP_ALL.id, &s2_live),
+            launches.press("preset:j1", STOP_ALL.id, &s1_stopped_s3_unlisted),
             Some(JobAction::StopAll {
                 cancel: None,
-                sessions: strings(&["s2"])
+                sessions: strings(&["s2", "s3"])
             }),
             "the cancel is asked once"
+        );
+    }
+
+    #[test]
+    fn stop_all_on_a_running_job_with_nothing_listed_still_cancels() {
+        let mut launches = PresetLaunches::default();
+        launches.start("j1".to_owned(), "Sweep".to_owned(), true, Some(3));
+        assert_eq!(
+            launches.press("preset:j1", STOP_ALL.id, &|_| None),
+            Some(JobAction::StopAll {
+                cancel: Some("j1".to_owned()),
+                sessions: Vec::new()
+            }),
+            "the cancel goes with no session to stop"
+        );
+        assert_eq!(
+            launches.press("preset:j1", STOP_ALL.id, &|_| None),
+            None,
+            "nothing is left to send"
+        );
+    }
+
+    #[test]
+    fn a_removed_id_is_not_stopped() {
+        let mut launches = PresetLaunches::default();
+        launches.start("j1".to_owned(), "Sweep".to_owned(), true, Some(3));
+        let job = with_sessions(
+            snapshot("j1", PresetLaunchJobStatus::Spawning),
+            &["s1", "s2"],
+        );
+        launches.on_message(&all_live, &updated(job));
+        let removed = DaemonMessage::SessionRemoved {
+            session_id: "s1".to_owned(),
+        };
+        assert_eq!(launches.on_message(&|_| None, &removed), None);
+        assert_eq!(
+            launches.press("preset:j1", STOP_ALL.id, &|_| None),
+            Some(JobAction::StopAll {
+                cancel: Some("j1".to_owned()),
+                sessions: strings(&["s2"])
+            }),
+            "the removed s1 is gone, the unlisted s2 is not"
+        );
+    }
+
+    #[test]
+    fn a_sessions_list_marks_a_reported_id_it_lacks_as_removed() {
+        let mut launches = PresetLaunches::default();
+        launches.start("j1".to_owned(), "Sweep".to_owned(), true, Some(3));
+        let done = with_sessions(snapshot("j1", PresetLaunchJobStatus::Completed), &["s1"]);
+        launches.on_message(&all_live, &updated(done));
+        assert_eq!(
+            ids(&launches.shown_actions(&|_| None)[0].1),
+            ["select", "stop-all"],
+            "an unlisted s1 counts before a list"
+        );
+        assert!(
+            launches.drop_running().is_empty(),
+            "the ended job stays on a new connection"
+        );
+        let list = DaemonMessage::Sessions {
+            sessions: Vec::new(),
+        };
+        assert_eq!(launches.on_message(&|_| None, &list), None);
+        assert_eq!(
+            ids(&launches.shown_actions(&|_| None)[0].1),
+            ["select"],
+            "the list lacks s1, so it is gone"
+        );
+        assert_eq!(
+            launches.press("preset:j1", STOP_ALL.id, &|_| None),
+            None,
+            "nothing to stop"
+        );
+
+        launches.start("j2".to_owned(), "Later".to_owned(), false, None);
+        launches.on_message(&|_| None, &list);
+        let running = with_sessions(snapshot("j2", PresetLaunchJobStatus::Spawning), &["s2"]);
+        launches.on_message(&|_| None, &updated(running));
+        assert_eq!(
+            launches.press("preset:j2", STOP_ALL.id, &|_| None),
+            Some(JobAction::StopAll {
+                cancel: Some("j2".to_owned()),
+                sessions: strings(&["s2"])
+            }),
+            "an id reported after the list counts until listed or removed"
         );
     }
 
@@ -1413,9 +1564,17 @@ mod tests {
             })
         );
         assert_eq!(
-            launches.press("preset:j1", STOP_ALL.id, &|_| false),
+            launches.press("preset:j1", STOP_ALL.id, &|_| Some(false)),
             None,
-            "nothing live to stop"
+            "a session known ended is not stopped"
+        );
+        assert_eq!(
+            launches.press("preset:j1", STOP_ALL.id, &|_| None),
+            Some(JobAction::StopAll {
+                cancel: None,
+                sessions: strings(&["s1"])
+            }),
+            "an unlisted session is"
         );
     }
 

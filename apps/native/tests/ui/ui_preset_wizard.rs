@@ -1049,8 +1049,8 @@ fn running_toast_offers_cancel_select_stop_all(cx: &mut TestAppContext) {
     let job_id = launch_three(&mut h);
     assert_eq!(
         actions(&mut h, &job_id),
-        ["cancel", "select"],
-        "nothing to stop before a session exists"
+        ["cancel", "select", "stop-all"],
+        "Stop all cancels the running job before a session exists"
     );
     h.send(session_update("s2", "working"));
     h.send(job_with(
@@ -1179,18 +1179,103 @@ fn stop_all_stops_only_live_created_sessions(cx: &mut TestAppContext) {
         &["t1"],
         &["s2", "s3", "gone"],
     ));
+    h.send(DaemonMessage::SessionRemoved {
+        session_id: "gone".to_owned(),
+    });
     h.sent();
     press(&mut h, &job_id, "stop-all");
     assert_eq!(
         stops(&mut h),
         ["s2"],
-        "a stopped or unknown session is not stopped again, s1 is not the job's"
+        "a stopped or removed session is not stopped again, s1 is not the job's"
     );
     h.send(session_update("s2", "stopped"));
     assert_eq!(
         actions(&mut h, &job_id),
+        ["select", "stop-all"],
+        "the running job keeps Stop all, and its cancel took Cancel"
+    );
+    h.send(job_with(
+        &job_id,
+        PresetLaunchJobStatus::Cancelled,
+        3,
+        &["t1"],
+        &["s2", "s3", "gone"],
+    ));
+    assert_eq!(
+        actions(&mut h, &job_id),
         ["select"],
-        "Stop all goes once nothing it would stop runs, and its cancel took Cancel"
+        "Stop all goes once the job ended and nothing it would stop runs"
+    );
+}
+
+#[gpui::test]
+fn stop_all_stops_a_session_whose_snapshot_has_not_arrived(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_repos());
+    let job_id = launch_three(&mut h);
+    h.send(job_with(
+        &job_id,
+        PresetLaunchJobStatus::Spawning,
+        1,
+        &["t1"],
+        &["s9"],
+    ));
+    h.sent();
+    press(&mut h, &job_id, "stop-all");
+    assert_eq!(
+        cancels_and_stops(&mut h),
+        [format!("cancel {job_id}"), "stop s9".to_owned()],
+        "the job reported s9 before its snapshot arrived"
+    );
+}
+
+#[gpui::test]
+fn an_ended_job_offers_no_stop_all_after_a_reconnect_without_its_sessions(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = two_repos();
+    let mut h = Harness::with(cx, &dir, &fixture);
+    let job_id = launch_three(&mut h);
+    h.send(job_with(
+        &job_id,
+        PresetLaunchJobStatus::Completed,
+        3,
+        &["t1", "t2"],
+        &["s1"],
+    ));
+    assert_eq!(actions(&mut h, &job_id), ["select", "stop-all"], "s1 runs");
+    h.send_welcome(PROTOCOL);
+    let sessions = fixture
+        .sessions
+        .iter()
+        .filter(|session| session.id != "s1")
+        .cloned()
+        .collect();
+    h.send(DaemonMessage::Sessions { sessions });
+    assert_eq!(
+        actions(&mut h, &job_id),
+        ["select"],
+        "the new connection's list lacks s1, discarded while the client was away"
+    );
+    assert!(
+        stops(&mut h).is_empty(),
+        "nothing goes to the daemon for the gone s1"
+    );
+}
+
+#[gpui::test]
+fn a_running_job_with_nothing_listed_offers_stop_all(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_repos());
+    let job_id = launch_three(&mut h);
+    h.send(job(&job_id, PresetLaunchJobStatus::Spawning, 0, &[]));
+    assert_eq!(actions(&mut h, &job_id), ["cancel", "select", "stop-all"]);
+    h.sent();
+    press(&mut h, &job_id, "stop-all");
+    assert_eq!(
+        cancels_and_stops(&mut h),
+        [format!("cancel {job_id}")],
+        "Stop all cancels the job with no session to stop"
     );
 }
 
@@ -1287,8 +1372,11 @@ fn welcome_keeps_finished_job_toasts_and_drops_running_ones(cx: &mut TestAppCont
     assert_eq!(toasts(&mut h).len(), 2);
 
     h.send_welcome(PROTOCOL);
-    h.load(&two_repos());
-    h.send(session_update("s2", "idle"));
+    let mut fixture = two_repos();
+    fixture
+        .sessions
+        .push(session("s2").in_repo("r1").status("idle").build());
+    h.load(&fixture);
     let keys: Vec<Option<String>> = toasts(&mut h).into_iter().map(|toast| toast.key).collect();
     assert_eq!(keys, [Some(format!("preset:{finished}"))]);
     assert_eq!(actions(&mut h, &finished), ["select", "stop-all"]);
@@ -1409,13 +1497,13 @@ fn cancel_is_dropped_once_pressed(cx: &mut TestAppContext) {
     assert_eq!(cancels_and_stops(&mut h), [format!("cancel {job_id}")]);
     assert_eq!(
         actions(&mut h, &job_id),
-        ["select"],
+        ["select", "stop-all"],
         "a second press cannot send another cancel"
     );
     h.send(job(&job_id, PresetLaunchJobStatus::Spawning, 1, &["t1"]));
     assert_eq!(
         actions(&mut h, &job_id),
-        ["select"],
+        ["select", "stop-all"],
         "nor does a snapshot of the still running job bring it back"
     );
 }

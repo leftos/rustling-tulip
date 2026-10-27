@@ -21,6 +21,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - Arrow keys, Enter and Space no longer fold a repo row you can't see after switching to Source control or Needs You, or hiding the sidebar.
 - A repo row's ▶ no longer stays lit after the pointer leaves the window or the sidebar is hidden and shown again.
 - A session's last output before it ends always reaches its scrollback before it shows as stopped, and discarding a session right after stopping it leaves no folder behind.
+- A preset launch's Stop all also stops sessions that haven't shown up in the sidebar yet, and cancels a running launch even before any session exists.
 
 ### Changed
 
