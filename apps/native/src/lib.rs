@@ -622,6 +622,9 @@ pub struct RootView {
     /// Each agent's Settings values as its page last sent them, until a
     /// daemon broadcast naming the agent answers.
     agent_settings_pending: std::collections::BTreeMap<protocol::AgentId, protocol::OptionValues>,
+    /// The Settings values sent and not yet answered, oldest first, so a
+    /// refusal finds the one it answers by its request id.
+    agent_setting_applies: std::collections::VecDeque<settings_view::SettingApply>,
     /// The agent pages' launch-command and text fields, each kept per
     /// agent once its page was shown, while Settings is open.
     agent_tabs: settings_view::AgentTabs,
@@ -1053,6 +1056,7 @@ impl RootView {
             agent_settings: std::collections::BTreeMap::new(),
             agent_settings_received: false,
             agent_settings_pending: std::collections::BTreeMap::new(),
+            agent_setting_applies: std::collections::VecDeque::new(),
             agent_tabs: settings_view::AgentTabs::default(),
             autostart,
             window_title: String::new(),
@@ -2733,11 +2737,12 @@ impl RootView {
     }
 
     /// A daemon refusal: an unrouted one (`None`) while the workspace creator
-    /// waits fails a pending create or parse inline there, and one of the
-    /// launch-command refusals while an apply of it waits shows under its
-    /// row; neither raises a toast. A refused worktrees root ends that tab's
-    /// save, whose message still toasts. A routed refusal (`Some`) answers its
-    /// own request and takes the generic path, as every other refusal does.
+    /// waits fails a pending create or parse inline there, raising no toast,
+    /// and a refused worktrees root ends that tab's save, whose message
+    /// still toasts. A routed refusal (`Some`) answers its own request: one
+    /// of the launch-command refusals of an apply shows under its row with
+    /// no toast; refused Settings values end their apply and toast; any
+    /// other takes the generic path.
     fn on_refusal(
         &mut self,
         message: String,
@@ -2748,10 +2753,13 @@ impl RootView {
         if request_id.is_none() {
             self.on_worktrees_root_error(&message, cx);
         }
-        let inline = request_id.is_none()
-            && (self.on_agent_command_error(&message, cx)
-                || self.on_creator_error(&message, cx)
-                || self.on_preset_list_error(&message, cx));
+        let inline = match request_id {
+            None => self.on_creator_error(&message, cx) || self.on_preset_list_error(&message, cx),
+            Some(id) => {
+                self.on_agent_setting_refused(id, &message, cx);
+                self.on_agent_command_error(id, &message, cx)
+            }
+        };
         self.repo_remove.disarm();
         if !inline {
             self.on_daemon_error(message, request_id, window, cx);

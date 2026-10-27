@@ -120,10 +120,16 @@ fn options(pairs: &[(&str, OptionValue)]) -> OptionValues {
 
 /// The `SetAgentSettings` messages the client sent since the last look.
 fn sent_agent_settings(h: &mut Harness<'_>) -> Vec<(AgentId, OptionValues)> {
-    h.sent()
-        .into_iter()
+    settings_sets(&h.sent())
+}
+
+/// The `(agent, options)` of every `SetAgentSettings` among `sent`.
+fn settings_sets(sent: &[ClientMessage]) -> Vec<(AgentId, OptionValues)> {
+    sent.iter()
         .filter_map(|msg| match msg {
-            ClientMessage::SetAgentSettings { agent, options } => Some((agent, options)),
+            ClientMessage::SetAgentSettings { agent, options, .. } => {
+                Some((agent.clone(), options.clone()))
+            }
             _ => None,
         })
         .collect()
@@ -1353,6 +1359,7 @@ fn launch_sets(sent: &[ClientMessage]) -> Vec<(String, String)> {
                 agent,
                 program,
                 args,
+                ..
             } if agent.0 == "claude" => Some((program.clone(), args.clone())),
             _ => None,
         })
@@ -1391,11 +1398,43 @@ fn toast_titles(h: &mut Harness<'_>) -> Vec<String> {
     })
 }
 
-fn refuse(h: &mut Harness<'_>, message: &str) {
+/// The daemon refuses with `message`, answering the request `request_id`
+/// names, or none.
+fn refuse(h: &mut Harness<'_>, request_id: Option<&str>, message: &str) {
     h.send(DaemonMessage::Error {
         message: message.to_owned(),
-        request_id: None,
+        request_id: request_id.map(str::to_owned),
     });
+}
+
+/// The request id of the last launch command among `sent`.
+fn last_command_id(sent: &[ClientMessage]) -> Option<String> {
+    sent.iter()
+        .rev()
+        .find_map(|msg| match msg {
+            ClientMessage::SetAgentCommand { request_id, .. } => Some(request_id.clone()),
+            _ => None,
+        })
+        .flatten()
+}
+
+/// The request id of the last Settings values among `sent`.
+fn last_settings_id(sent: &[ClientMessage]) -> Option<String> {
+    sent.iter()
+        .rev()
+        .find_map(|msg| match msg {
+            ClientMessage::SetAgentSettings { request_id, .. } => Some(request_id.clone()),
+            _ => None,
+        })
+        .flatten()
+}
+
+/// The daemon refuses the last launch command the client sent with
+/// `message`; returns the request id it answered.
+fn refuse_last_command(h: &mut Harness<'_>, message: &str) -> Option<String> {
+    let id = last_command_id(&h.sent());
+    refuse(h, id.as_deref(), message);
+    id
 }
 
 fn drawn(h: &mut Harness<'_>, selector: &str) -> bool {
@@ -1559,7 +1598,7 @@ fn program_refusal_shows_under_program_and_skips_the_toast(cx: &mut TestAppConte
     h.click_on("settings-agent-program");
     type_line(&mut h, "wrapper");
     h.keys("enter");
-    refuse(&mut h, PROGRAM_REFUSAL);
+    let id = refuse_last_command(&mut h, PROGRAM_REFUSAL);
     assert_eq!(
         refusal(&mut h),
         Some((LaunchCommandRow::Program, PROGRAM_REFUSAL.to_owned()))
@@ -1572,11 +1611,11 @@ fn program_refusal_shows_under_program_and_skips_the_toast(cx: &mut TestAppConte
     );
     assert!(!h.root(|root, _| root.launch_saved()));
 
-    refuse(&mut h, PROGRAM_REFUSAL);
+    refuse(&mut h, id.as_deref(), PROGRAM_REFUSAL);
     assert_eq!(
         toast_titles(&mut h).len(),
         1,
-        "the claimed refusal ended the apply, so the next one toasts"
+        "the claimed refusal ended the apply, so another for its id toasts"
     );
 }
 
@@ -1587,7 +1626,7 @@ fn args_refusal_shows_under_extra_arguments(cx: &mut TestAppContext) {
     h.click_on("settings-agent-args");
     for text in [UNCLOSED_QUOTE, RESERVED_FLAG, ARGS_CONTROL] {
         h.keys("enter");
-        refuse(&mut h, text);
+        refuse_last_command(&mut h, text);
         assert_eq!(
             refusal(&mut h),
             Some((LaunchCommandRow::Args, text.to_owned())),
@@ -1605,7 +1644,7 @@ fn refusal_clears_on_the_next_edit(cx: &mut TestAppContext) {
     h.click_on("settings-agent-args");
     type_line(&mut h, "open");
     h.keys("enter");
-    refuse(&mut h, UNCLOSED_QUOTE);
+    refuse_last_command(&mut h, UNCLOSED_QUOTE);
     assert!(refusal(&mut h).is_some());
     type_line(&mut h, "x");
     assert_eq!(refusal(&mut h), None, "the edit clears the refusal");
@@ -1618,20 +1657,21 @@ fn unrelated_error_while_pending_still_toasts(cx: &mut TestAppContext) {
     h.click_on("settings-agent-program");
     type_line(&mut h, "wrapper");
     h.keys("enter");
-    refuse(&mut h, "worktree delete failed");
+    let id = last_command_id(&h.sent());
+    refuse(&mut h, None, "worktree delete failed");
     assert_eq!(
         refusal(&mut h),
         None,
         "another refusal is not the launch command's"
     );
     assert_eq!(toast_titles(&mut h).len(), 1, "it toasts as before");
-    refuse(&mut h, PROGRAM_REFUSAL);
+    refuse(&mut h, id.as_deref(), PROGRAM_REFUSAL);
     assert_eq!(
         refusal(&mut h),
-        None,
-        "the other error ended the apply, so nothing waits to claim this one"
+        Some((LaunchCommandRow::Program, PROGRAM_REFUSAL.to_owned())),
+        "the unrouted error answered no apply, so the apply's own refusal still lands"
     );
-    assert_eq!(toast_titles(&mut h).len(), 2);
+    assert_eq!(toast_titles(&mut h).len(), 1, "and raises no toast");
 }
 
 #[gpui::test]
@@ -1651,7 +1691,7 @@ fn reselecting_the_claude_tab_keeps_drafts_and_pending_apply(cx: &mut TestAppCon
         (Some("wrapper".to_owned()), Some("verbose".to_owned())),
         "the drafts survive selecting the tab again"
     );
-    refuse(&mut h, PROGRAM_REFUSAL);
+    refuse_last_command(&mut h, PROGRAM_REFUSAL);
     assert_eq!(
         refusal(&mut h),
         Some((LaunchCommandRow::Program, PROGRAM_REFUSAL.to_owned())),
@@ -1668,7 +1708,7 @@ fn refusal_after_switching_tabs_shows_on_return(cx: &mut TestAppContext) {
     type_line(&mut h, "wrapper");
     h.keys("enter");
     h.click_on("settings-tab-general");
-    refuse(&mut h, PROGRAM_REFUSAL);
+    refuse_last_command(&mut h, PROGRAM_REFUSAL);
     assert_eq!(toast_titles(&mut h), Vec::<String>::new());
     h.click_on("settings-tab-claude");
     assert_eq!(
@@ -1686,8 +1726,12 @@ fn a_failed_apply_with_another_error_does_not_count_the_next_broadcast(cx: &mut 
     h.click_on("settings-agent-program");
     type_line(&mut h, "wrapper");
     h.keys("enter");
-    refuse(&mut h, "worktree delete failed");
-    assert_eq!(toast_titles(&mut h).len(), 1);
+    refuse_last_command(&mut h, "worktree delete failed");
+    assert_eq!(
+        toast_titles(&mut h).len(),
+        1,
+        "a refusal with no launch-row text toasts"
+    );
     h.click_on("settings-agent-program");
     h.keys("ctrl-a backspace");
     h.send(agent_commands("", "", None));
@@ -1744,6 +1788,7 @@ fn command_sets(sent: &[ClientMessage]) -> Vec<(String, String, String)> {
                 agent,
                 program,
                 args,
+                ..
             } => Some((agent.0.clone(), program.clone(), args.clone())),
             _ => None,
         })
@@ -1952,6 +1997,183 @@ fn an_edited_text_setting_applies_when_settings_closes(cx: &mut TestAppContext) 
         sent_agent_settings(&mut h),
         vec![(test_agent_id(), options(&[("profile", text("work"))]))],
         "closing Settings applies the edited field as Enter would"
+    );
+}
+
+/// A daemon refusal of the test agent's profile.
+const PROFILE_REFUSAL: &str = "Test agent refuses the profile `work`.";
+
+#[gpui::test]
+fn a_refused_setting_does_not_consume_the_launch_command_apply(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = claude_page(cx, &dir, agent_commands("", "", None));
+    h.click_on("settings-agent-program");
+    type_line(&mut h, "wrapper");
+    h.keys("enter");
+    assert_eq!(
+        launch_sets(&h.sent()),
+        [("wrapper".to_owned(), String::new())]
+    );
+    h.click_on("settings-claude-permission-mode-plan");
+    let settings_id = last_settings_id(&h.sent());
+    refuse(&mut h, settings_id.as_deref(), PROFILE_REFUSAL);
+    assert_eq!(
+        toast_titles(&mut h).len(),
+        1,
+        "the setting's refusal toasts"
+    );
+    assert_eq!(refusal(&mut h), None, "it is no launch-command refusal");
+    h.send(agent_commands("wrapper", "", None));
+    assert!(
+        h.root(|root, _| root.launch_saved()),
+        "the launch command's echo still answers its own apply"
+    );
+}
+
+#[gpui::test]
+fn a_refused_setting_shows_unsaved_and_is_not_resent(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    list_agents(&mut h, test_agent());
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-test");
+    h.click_on("settings-test-profile");
+    type_line(&mut h, "work");
+    h.sent();
+    h.keys("enter");
+    let first = last_settings_id(&h.sent());
+    refuse(&mut h, first.as_deref(), PROFILE_REFUSAL);
+    assert_eq!(
+        toast_titles(&mut h).len(),
+        1,
+        "the refusal shows where Settings errors show"
+    );
+
+    h.keys("tab");
+    let sent = h.sent();
+    assert_eq!(
+        settings_sets(&sent),
+        vec![(test_agent_id(), options(&[("profile", text("work"))]))],
+        "the field still holds the refused text, unsaved, so leaving it applies it again"
+    );
+    refuse(&mut h, last_settings_id(&sent).as_deref(), PROFILE_REFUSAL);
+
+    h.click_on("settings-test-sandbox");
+    assert_eq!(
+        sent_agent_settings(&mut h),
+        vec![(
+            test_agent_id(),
+            options(&[("sandbox", OptionValue::Bool(true))])
+        )],
+        "a later press does not carry the refused value"
+    );
+}
+
+#[gpui::test]
+fn a_refusal_after_an_unrelated_broadcast_still_reaches_its_field(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    list_agents(&mut h, test_agent());
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-test");
+    h.click_on("settings-test-profile");
+    type_line(&mut h, "work");
+    h.sent();
+    h.keys("enter");
+    let refused = last_settings_id(&h.sent());
+    let slow = options(&[("mode", text("slow"))]);
+    h.send(DaemonMessage::AgentSettings {
+        settings: std::collections::BTreeMap::from([(test_agent_id(), slow)]),
+    });
+    refuse(&mut h, refused.as_deref(), PROFILE_REFUSAL);
+
+    h.keys("tab");
+    assert_eq!(
+        sent_agent_settings(&mut h),
+        vec![(
+            test_agent_id(),
+            options(&[("mode", text("slow")), ("profile", text("work"))])
+        )],
+        "the refusal still finds its field, which holds the user's text, unsaved"
+    );
+}
+
+#[gpui::test]
+fn a_refusal_keeps_an_earlier_applys_pending_values(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    list_agents(&mut h, test_agent());
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-test");
+    h.sent();
+    h.click_on("settings-test-mode-slow");
+    h.click_on("settings-test-sandbox");
+    let sent = h.sent();
+    assert_eq!(
+        settings_sets(&sent),
+        vec![
+            (test_agent_id(), options(&[("mode", text("slow"))])),
+            (
+                test_agent_id(),
+                options(&[("mode", text("slow")), ("sandbox", OptionValue::Bool(true))])
+            ),
+        ]
+    );
+    refuse(&mut h, last_settings_id(&sent).as_deref(), PROFILE_REFUSAL);
+
+    h.click_on("settings-test-profile");
+    type_line(&mut h, "work");
+    h.keys("enter");
+    assert_eq!(
+        sent_agent_settings(&mut h),
+        vec![(
+            test_agent_id(),
+            options(&[("mode", text("slow")), ("profile", text("work"))])
+        )],
+        "the earlier apply's mode, still waiting, rides along; the refused sandbox does not"
+    );
+}
+
+#[gpui::test]
+fn refusals_route_to_the_right_agents_page(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    list_agents(&mut h, test_agent());
+    h.send(DaemonMessage::AgentCommands {
+        commands: vec![
+            command_entry("claude", "", ""),
+            command_entry("test-agent", "", ""),
+        ],
+    });
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-test");
+    h.click_on("settings-agent-args");
+    type_line(&mut h, "verbose");
+    h.keys("enter");
+    h.click_on("settings-tab-claude");
+    h.click_on("settings-agent-program");
+    type_line(&mut h, "wrapper");
+    h.sent();
+    h.keys("enter");
+    let claude_apply = last_command_id(&h.sent());
+
+    refuse(&mut h, claude_apply.as_deref(), PROGRAM_REFUSAL);
+    assert_eq!(
+        refusal(&mut h),
+        Some((LaunchCommandRow::Program, PROGRAM_REFUSAL.to_owned())),
+        "Claude's page shows the refusal of its own apply"
+    );
+    h.send(DaemonMessage::AgentCommands {
+        commands: vec![
+            command_entry("claude", "", ""),
+            command_entry("test-agent", "", "verbose"),
+        ],
+    });
+    h.click_on("settings-tab-test");
+    assert_eq!(refusal(&mut h), None, "the test agent's page shows none");
+    assert!(
+        h.root(|root, _| root.launch_saved()),
+        "the echo answers the test agent's apply, which the refusal left waiting"
     );
 }
 
@@ -2778,6 +3000,7 @@ fn a_refused_worktrees_save_stops_waiting(cx: &mut TestAppContext) {
     assert_eq!(worktrees_root_sets(&h.sent()), [Some("X:/nope".to_owned())]);
     refuse(
         &mut h,
+        None,
         "creating worktrees root X:\\nope: Access is denied. (os error 5)",
     );
     assert_eq!(toast_titles(&mut h).len(), 1, "the refusal still toasts");

@@ -150,10 +150,21 @@ pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> 
             agent,
             program,
             args,
-        } => set_agent_command(hub, &agent, AgentCommand { program, args })?,
-        ClientMessage::SetAgentSettings { agent, options } => {
-            set_agent_settings(hub, &agent, &options)?;
-        }
+            request_id,
+        } => answer_refusal(
+            out_tx,
+            set_agent_command(hub, &agent, AgentCommand { program, args }),
+            request_id,
+        )?,
+        ClientMessage::SetAgentSettings {
+            agent,
+            options,
+            request_id,
+        } => answer_refusal(
+            out_tx,
+            set_agent_settings(hub, &agent, &options),
+            request_id,
+        )?,
         ClientMessage::InspectWorktreesRoot => {
             let root = hub.state.worktrees_dir();
             let is_override = hub.state.worktrees_root_is_override();
@@ -195,6 +206,28 @@ fn set_keep_awake_mode(hub: &Hub, mode: KeepAwakeMode) -> anyhow::Result<()> {
     hub.keep_awake_mode.send_replace(mode);
     info!(?mode, "keep-awake mode changed");
     Ok(())
+}
+
+/// A Settings request's outcome: a refusal of a request that carried a
+/// `request_id` is answered here with an `Error` echoing it, to this
+/// requester only; any other outcome is returned as it came, so a refusal
+/// without one still gets the connection's `Error { request_id: None }`.
+fn answer_refusal(
+    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
+    outcome: anyhow::Result<()>,
+    request_id: Option<String>,
+) -> anyhow::Result<()> {
+    match (outcome, request_id) {
+        (Err(err), Some(request_id)) => {
+            warn!(?err, %request_id, "settings request refused");
+            let _ = out_tx.send(DaemonMessage::Error {
+                message: err.to_string(),
+                request_id: Some(request_id),
+            });
+            Ok(())
+        }
+        (outcome, _) => outcome,
+    }
 }
 
 /// Check `command` against `agent`'s reserved flags, persist it (a blank pair
@@ -418,7 +451,9 @@ async fn accept_vscode_suggestion(
 )]
 mod tests {
     use super::*;
-    use crate::server::test_support::{dispatch_err, repo_entry, test_hub, workspace_entry};
+    use crate::server::test_support::{
+        dispatch_err, dispatch_one, repo_entry, test_hub, workspace_entry,
+    };
     use std::path::Path;
     #[tokio::test]
     async fn accepting_a_vscode_suggestion_stores_whether_it_watches() {
@@ -616,6 +651,7 @@ mod tests {
             agent: agent_registry::default_agent(),
             program: program.to_owned(),
             args: args.to_owned(),
+            request_id: None,
         }
     }
 
@@ -726,11 +762,70 @@ mod tests {
                 .iter()
                 .map(|(key, value)| ((*key).to_owned(), value.clone()))
                 .collect(),
+            request_id: None,
         }
     }
 
     fn text(value: &str) -> protocol::OptionValue {
         protocol::OptionValue::Text(value.to_owned())
+    }
+
+    #[tokio::test]
+    async fn refused_agent_settings_echo_the_request_id() {
+        let (hub, _scratch) = test_hub("agent-settings-request-id");
+        let claude = agent_registry::default_agent();
+        let reply = dispatch_one(
+            &hub,
+            ClientMessage::SetAgentSettings {
+                agent: claude.clone(),
+                options: protocol::OptionValues::from([("x".to_owned(), text("1"))]),
+                request_id: Some("s1".to_owned()),
+            },
+        )
+        .await;
+        assert!(
+            matches!(
+                &reply,
+                DaemonMessage::Error { message, request_id: Some(id) }
+                    if message == "Claude has no option `x`" && id == "s1"
+            ),
+            "the refusal answers the request it refuses: {reply:?}"
+        );
+        assert!(hub.state.agent_settings().is_empty(), "nothing was stored");
+        assert_eq!(
+            dispatch_err(&hub, set_settings(&claude.0, &[("x", text("1"))]))
+                .await
+                .as_deref(),
+            Some("Claude has no option `x`"),
+            "a refusal without a request id still fails as before"
+        );
+    }
+
+    #[tokio::test]
+    async fn refused_agent_command_echoes_the_request_id() {
+        let (hub, _scratch) = test_hub("agent-command-request-id");
+        let reply = dispatch_one(
+            &hub,
+            ClientMessage::SetAgentCommand {
+                agent: agent_registry::default_agent(),
+                program: String::new(),
+                args: "'x".to_owned(),
+                request_id: Some("c1".to_owned()),
+            },
+        )
+        .await;
+        assert!(
+            matches!(
+                &reply,
+                DaemonMessage::Error { message, request_id: Some(id) }
+                    if message == "The extra arguments have an unclosed quote." && id == "c1"
+            ),
+            "the refusal answers the request it refuses: {reply:?}"
+        );
+        assert!(
+            hub.state.with_persisted(|s| s.agent_commands.is_empty()),
+            "a refused command is not stored"
+        );
     }
 
     #[tokio::test]

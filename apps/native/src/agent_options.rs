@@ -321,6 +321,7 @@ impl crate::RootView {
         self.agent_settings.clear();
         self.agent_settings_received = false;
         self.agent_settings_pending.clear();
+        self.agent_setting_applies.clear();
     }
 
     /// Whether this connection has heard the agents' Settings values.

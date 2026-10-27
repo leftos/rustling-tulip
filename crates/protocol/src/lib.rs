@@ -2617,6 +2617,10 @@ pub enum ClientMessage {
         program: String,
         #[serde(default)]
         args: String,
+        /// Echoed only on the [`DaemonMessage::Error`] that refuses the
+        /// command; the broadcast that answers a stored one carries none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
     /// Set the values `agent`'s Settings page holds, which clients use as the
     /// spawn dialog's defaults. The daemon validates them against the agent's
@@ -2626,6 +2630,10 @@ pub enum ClientMessage {
     SetAgentSettings {
         agent: AgentId,
         options: OptionValues,
+        /// Echoed only on the [`DaemonMessage::Error`] that refuses the
+        /// values; the broadcast that answers stored ones carries none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
     /// Retired with LAN pairing: it stays decodable, and the daemon answers it
     /// on every connection with the same `Error` as
@@ -6381,6 +6389,7 @@ mod tests {
             agent: claude_id(),
             program: "claude-wrapper".to_owned(),
             args: "--debug \"a b\"".to_owned(),
+            request_id: None,
         };
         let json = serde_json::to_value(&set).expect("serialize");
         assert_eq!(
@@ -6396,12 +6405,23 @@ mod tests {
         assert!(
             matches!(
                 &back,
-                ClientMessage::SetAgentCommand { agent, program, args }
+                ClientMessage::SetAgentCommand { agent, program, args, request_id: None }
                     if agent == &claude_id()
                         && program == "claude-wrapper"
                         && args == "--debug \"a b\""
             ),
-            "{back:?}"
+            "a message without a request id decodes to None: {back:?}"
+        );
+
+        let back: ClientMessage = assert_round_trip(
+            r#"{"type":"set_agent_command","agent":"claude","program":"","args":"","request_id":"r1"}"#,
+        );
+        assert!(
+            matches!(
+                &back,
+                ClientMessage::SetAgentCommand { request_id: Some(id), .. } if id == "r1"
+            ),
+            "the request id round-trips: {back:?}"
         );
 
         let commands = DaemonMessage::AgentCommands {
@@ -7853,9 +7873,18 @@ mod tests {
         let msg: ClientMessage = assert_round_trip(
             r#"{"type":"set_agent_settings","agent":"claude","options":{"permission_mode":"plan","model":null}}"#,
         );
-        let ClientMessage::SetAgentSettings { agent, options } = msg else {
+        let ClientMessage::SetAgentSettings {
+            agent,
+            options,
+            request_id,
+        } = msg
+        else {
             panic!("decoded as another message: {msg:?}");
         };
+        assert_eq!(
+            request_id, None,
+            "a message without a request id decodes to None"
+        );
         assert_eq!(agent, claude_id());
         assert_eq!(
             options,
@@ -7863,6 +7892,17 @@ mod tests {
                 ("permission_mode", text("plan")),
                 ("model", OptionValue::Null)
             ])
+        );
+
+        let msg: ClientMessage = assert_round_trip(
+            r#"{"type":"set_agent_settings","agent":"claude","options":{},"request_id":"r2"}"#,
+        );
+        assert!(
+            matches!(
+                &msg,
+                ClientMessage::SetAgentSettings { request_id: Some(id), .. } if id == "r2"
+            ),
+            "the request id round-trips: {msg:?}"
         );
     }
 

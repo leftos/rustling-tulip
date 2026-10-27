@@ -29,6 +29,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - On a remote host the Shell dialog takes a folder in the host's own path style, and a folder that isn't a full path on the host is refused instead of opening somewhere else.
 - Approve… and Deny on a device-pairing notification now work when pressed from Action Center, even with the app closed, and notifications show as rustling-tulip instead of PowerShell.
 - While a pairing request waits, "Have a code?" lets you type a code made with `rustling-tulipd pair` on the host.
+- A setting the daemon refuses in Settings now shows as unsaved in its own field, instead of being blamed on another change or re-sent with every later click.
 
 ### Changed
 

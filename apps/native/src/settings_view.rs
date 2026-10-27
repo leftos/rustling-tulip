@@ -485,15 +485,31 @@ struct TextSeed {
     placeholder: String,
 }
 
+/// How many sent Settings values [`SettingApply`] keeps waiting for a
+/// refusal; an accepted apply is never answered by id, so older ones go.
+const WAITING_SETTING_APPLIES: usize = 32;
+
+/// Settings values an agent page sent, kept until the refusal carrying `id`
+/// answers them, a disconnect, or [`WAITING_SETTING_APPLIES`] newer ones.
+pub(crate) struct SettingApply {
+    id: String,
+    agent: AgentId,
+    /// The option the apply changed, and the value it set it to.
+    key: String,
+    value: OptionValue,
+    /// The apply came from text field `key`.
+    from_text: bool,
+}
+
 /// The agent pages' state while Settings is open: each page's fields, kept
-/// while another tab shows, the agent page last selected, and the agents
-/// whose launch-command applies still owe the daemon's answer, oldest
-/// first.
+/// while another tab shows, the agent page last selected, and the request
+/// ids and agents of the launch-command applies that still owe the
+/// daemon's answer, oldest first.
 #[derive(Default)]
 pub(crate) struct AgentTabs {
     tabs: BTreeMap<AgentId, AgentTab>,
     current: Option<AgentId>,
-    applies: VecDeque<AgentId>,
+    applies: VecDeque<(String, AgentId)>,
 }
 
 impl AgentTabs {
@@ -503,7 +519,7 @@ impl AgentTabs {
         self.tabs
             .retain(|agent, _| descriptor_for(agents, agent).is_some());
         self.applies
-            .retain(|agent| descriptor_for(agents, agent).is_some());
+            .retain(|(_, agent)| descriptor_for(agents, agent).is_some());
         if self
             .current
             .as_ref()
@@ -1280,7 +1296,7 @@ impl RootView {
         if let Some(setting) = self.setting_text_mut(agent, field) {
             setting.edited = false;
         }
-        self.set_agent_setting(agent, field, value);
+        self.set_agent_setting(agent, field, value, true);
     }
 
     /// Tab leaving the field with id `field` on the shown agent page
@@ -1326,12 +1342,16 @@ impl RootView {
         tab.sent = Some((program.clone(), args.clone()));
         tab.saved = false;
         tab.refusal = None;
-        self.agent_tabs.applies.push_back(agent.clone());
-        tracing::info!(agent = %agent.0, %program, %args, "settings: applying an agent's launch command");
+        let request_id = crate::new_request_id();
+        self.agent_tabs
+            .applies
+            .push_back((request_id.clone(), agent.clone()));
+        tracing::info!(agent = %agent.0, %program, %args, %request_id, "settings: applying an agent's launch command");
         self.send(ClientMessage::SetAgentCommand {
             agent: agent.clone(),
             program,
             args,
+            request_id: Some(request_id),
         });
     }
 
@@ -1349,7 +1369,7 @@ impl RootView {
                 .map(|entry| (entry.agent.clone(), entry))
                 .collect(),
         );
-        let answered = self.agent_tabs.applies.pop_front();
+        let answered = self.agent_tabs.applies.pop_front().map(|(_, agent)| agent);
         let agents: Vec<AgentId> = self.agent_tabs.tabs.keys().cloned().collect();
         for agent in agents {
             let echo = CommandEcho {
@@ -1368,16 +1388,26 @@ impl RootView {
         cx.notify();
     }
 
-    /// An unrouted daemon refusal while Settings is open and a
-    /// launch-command apply waits: any refusal ends the oldest apply, and
-    /// one of the launch-command refusals shows under the row it names on
-    /// that apply's page. Returns whether it took `message`; any other
-    /// refusal is left to toast.
-    pub(crate) fn on_agent_command_error(&mut self, message: &str, cx: &mut Context<Self>) -> bool {
-        if !self.settings_open() {
+    /// A daemon refusal carrying `request_id`: when it names a
+    /// launch-command apply still waiting, it ends that apply, and one of
+    /// the launch-command refusals shows under the row it names on that
+    /// apply's page. Returns whether it took `message`; any other refusal
+    /// is left to toast.
+    pub(crate) fn on_agent_command_error(
+        &mut self,
+        request_id: &str,
+        message: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(at) = self
+            .agent_tabs
+            .applies
+            .iter()
+            .position(|(id, _)| id == request_id)
+        else {
             return false;
-        }
-        let Some(agent) = self.agent_tabs.applies.pop_front() else {
+        };
+        let Some((_, agent)) = self.agent_tabs.applies.remove(at) else {
             return false;
         };
         let Some(tab) = self
@@ -1396,6 +1426,57 @@ impl RootView {
         };
         tab.refusal = Some((row, message.to_owned()));
         true
+    }
+
+    /// A daemon refusal carrying `request_id`: when it names Settings
+    /// values still waiting, that apply ends. The option it changed goes
+    /// back to the daemon's value in the agent's pending values, unless a
+    /// later apply changed it again, so the next press neither re-sends the
+    /// refused value nor drops another apply's; the text field whose apply
+    /// it was holds the refused text again, as edited, unless the user
+    /// typed on since. The refusal itself still toasts.
+    pub(crate) fn on_agent_setting_refused(
+        &mut self,
+        request_id: &str,
+        message: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(at) = self
+            .agent_setting_applies
+            .iter()
+            .position(|apply| apply.id == request_id)
+        else {
+            return;
+        };
+        let Some(apply) = self.agent_setting_applies.remove(at) else {
+            return;
+        };
+        tracing::warn!(agent = %apply.agent.0, request_id, message, "settings: the daemon refused an agent's values");
+        let stored = self
+            .agent_settings
+            .get(&apply.agent)
+            .and_then(|values| values.get(&apply.key))
+            .cloned();
+        if let Some(pending) = self.agent_settings_pending.get_mut(&apply.agent)
+            && pending.get(&apply.key) == Some(&apply.value)
+        {
+            match stored {
+                Some(stored) => pending.insert(apply.key.clone(), stored),
+                None => pending.remove(&apply.key),
+            };
+        }
+        if apply.from_text
+            && let Some(setting) = self.setting_text_mut(&apply.agent, &apply.key)
+            && !setting.edited
+        {
+            let text = setting_text(&apply.value);
+            setting.draft.clone_from(&text);
+            setting.edited = true;
+            setting
+                .input
+                .update(cx, |input, cx| input.set_text(text, cx));
+        }
+        cx.notify();
     }
 
     /// A daemon refusal of the worktrees root while the tab's field waits:
@@ -2328,22 +2409,41 @@ impl RootView {
             );
             return;
         };
-        self.set_agent_setting(&page.id, &view.id, value);
+        self.set_agent_setting(&page.id, &view.id, value, false);
     }
 
     /// Sends `agent`'s Settings values with `key` set to `value`, on top of
-    /// any change still waiting for the daemon's broadcast. Nothing is sent
-    /// while the agent's rows are disabled.
-    fn set_agent_setting(&mut self, agent: &AgentId, key: &str, value: OptionValue) {
+    /// any change still waiting for the daemon's broadcast, under a fresh
+    /// request id; `from_text` marks the apply of text field `key`. Nothing
+    /// is sent while the agent's rows are disabled.
+    fn set_agent_setting(
+        &mut self,
+        agent: &AgentId,
+        key: &str,
+        value: OptionValue,
+        from_text: bool,
+    ) {
         if !self.agent_rows_live(agent) {
             tracing::info!(agent = %agent.0, key, "settings: the agent's rows are disabled; nothing sent");
             return;
         }
-        tracing::info!(agent = %agent.0, key, "settings: setting an agent option");
-        let options = self.merge_agent_setting(agent, key, value);
+        let request_id = crate::new_request_id();
+        tracing::info!(agent = %agent.0, key, %request_id, "settings: setting an agent option");
+        let options = self.merge_agent_setting(agent, key, value.clone());
+        self.agent_setting_applies.push_back(SettingApply {
+            id: request_id.clone(),
+            agent: agent.clone(),
+            key: key.to_owned(),
+            value,
+            from_text,
+        });
+        while self.agent_setting_applies.len() > WAITING_SETTING_APPLIES {
+            self.agent_setting_applies.pop_front();
+        }
         self.send(ClientMessage::SetAgentSettings {
             agent: agent.clone(),
             options,
+            request_id: Some(request_id),
         });
     }
 
@@ -3931,11 +4031,15 @@ mod tests {
             .insert(id("claude"), waiting_tab(cx, "wrapper", ""));
         tabs.tabs
             .insert(id("test-agent"), waiting_tab(cx, "", "verbose"));
-        tabs.applies = VecDeque::from([id("test-agent"), id("claude"), id("test-agent")]);
+        tabs.applies = VecDeque::from([
+            ("r1".to_owned(), id("test-agent")),
+            ("r2".to_owned(), id("claude")),
+            ("r3".to_owned(), id("test-agent")),
+        ]);
         tabs.keep_listed(&[claude()]);
         assert_eq!(
             tabs.applies,
-            [id("claude")],
+            [("r2".to_owned(), id("claude"))],
             "the dropped agent's applies leave the queue, so the next echo answers Claude's"
         );
         assert!(tabs.tabs.contains_key(&id("claude")));
@@ -3947,7 +4051,7 @@ mod tests {
         let mut tabs = AgentTabs::default();
         tabs.tabs
             .insert(id("claude"), waiting_tab(cx, "wrapper", "-v"));
-        tabs.applies = VecDeque::from([id("claude")]);
+        tabs.applies = VecDeque::from([("r1".to_owned(), id("claude"))]);
         tabs.forget_applies();
         assert!(tabs.applies.is_empty(), "no echo for these can arrive");
         let tab = tabs.tabs.get(&id("claude")).expect("the page is kept");
