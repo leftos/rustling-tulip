@@ -59,10 +59,10 @@ Close behind: the paste and key quirks (native clipboard read, Shift+Enter bytes
 
 ## Sessions
 
-- [ ] Session context menu: rename inline (blank restores the default), Duplicate ▸ new tab (Shift = prefilled dialog) or an existing tab, Move to ▸, Add to current / new tab, Pop out, Appearance…, Accent ▸ (presets / recent / custom / inherit), Reveal worktree — `SessionContextMenu.tsx`, `MoveToSubmenu.tsx`, `MenuSubmenu.tsx` (native: Appearance… and Accent ▸ landed in P2.10; Duplicate ▸, Move to ▸, Add to current / new tab and Reveal worktree in P4.12b; Shift on Duplicate ▸ in P4.12c)
+- [x] Session context menu: rename inline (blank restores the default), Duplicate ▸ new tab (Shift = prefilled dialog) or an existing tab, Move to ▸, Add to current / new tab, Pop out, Appearance…, Accent ▸ (presets / recent / custom / inherit), Reveal worktree — `SessionContextMenu.tsx`, `MoveToSubmenu.tsx`, `MenuSubmenu.tsx` (native: Appearance… and Accent ▸ landed in P2.10; Duplicate ▸, Move to ▸, Add to current / new tab and Reveal worktree in P4.12b; Shift on Duplicate ▸ in P4.12c; Pop out pops the pane showing the session, the active tab's first, else opens a session pop-out, and is dimmed "Already in a pop-out" for a session an open pop-out shows)
 - [x] Actions by state: running → Stop (delete or keep worktree); stopped → Restart / park / remove (± worktree); inactive → Resume / remove (± worktree) — `SessionContextMenu.tsx`
 - [x] Stopping a session with no pane parks it or discards it — `SessionContextMenu.tsx`
-- [ ] Pane header: status dot, label, runtime chip, trusted chip, one repo:branch chip per member (path in tooltip), Pop out, two-step Stop or "exit code N" — `SessionPane.tsx` (native: all but Pop out, which comes with Phase 5, landed in P4.12a; member chips sit on a second row)
+- [x] Pane header: status dot, label, runtime chip, trusted chip, one repo:branch chip per member (path in tooltip), Pop out, two-step Stop or "exit code N" — `SessionPane.tsx` (native: all but Pop out landed in P4.12a, with member chips on a second row; Pop out pops the pane into its own window and leaves a card in the grid)
 - [x] Stopped-pane overlay: Restart in place, New session… into this pane, remove pane keep worktree, remove pane (± worktree) — `SessionPane.tsx`
 - [x] Abandoned overlay (shows the last prompt) with Resume / Dismiss; orphan banner — `SessionPane.tsx` (native: P4.12a; the banner names the session's runtime)
 - [x] Dropped by RT-183 (the native client has no headless view; a pane bound to a headless session shows one muted line): Headless view: status, tokens in/out, cost, recent-actions log (last 200, "Show all") — `SessionPane.tsx` `HeadlessView` (native: P4.6; the daemon keeps 200 actions, the same as the tail, so "Show all" appears only if one side's cap changes)
@@ -101,7 +101,7 @@ Close behind: the paste and key quirks (native clipboard read, Shift+Enter bytes
 - [x] Close with × (two-click when the tab has sessions or ≥2 panes; Esc / outside click resets); middle-click closes — `TabBar.tsx`
 - [x] Double-click to rename inline — `TabBar.tsx`
 - [x] Drag to reorder; a pane dragged over a pill activates that tab; dropping on a pill places the pane automatically — `TabBar.tsx`
-- [ ] Tab menu: Rename, Pop out, Rearrange ▸ grid (auto / N×M) / side by side / stacked, Move panes to new tab… (≥3 panes), font +/−/reset, Close, Close others, Merge selected (horizontal / vertical) — `TabBar.tsx` (native: P4.13a has all but Pop out (Phase 5), and Move panes to new tab… landed in P4.13b; a selection holding a diff tab shows Merge disabled)
+- [x] Tab menu: Rename, Pop out, Rearrange ▸ grid (auto / N×M) / side by side / stacked, Move panes to new tab… (≥3 panes), font +/−/reset, Close, Close others, Merge selected (horizontal / vertical) — `TabBar.tsx` (native: P4.13a has all but Pop out, which follows Rename and reads Focus window once the tab is out (dimmed for a viewer tab), and Move panes to new tab… landed in P4.13b; a selection holding a diff tab shows Merge disabled)
 - [x] Move panes dialog: pick panes, layout, grid shape, name — `MovePanesDialog.tsx` (native: P4.13b)
 - [x] Undo shelf for closed tab / closed pane / move / swap (8s, at most 3) — `UndoShelf.tsx` (native: P4.13c; the swap gesture is a pane drag's centre drop since P5.2, which records its own undo)
 - [x] Split tree with draggable dividers (5–95%), ratio saved on release — `GridRenderer.tsx` `SplitRenderer`
@@ -135,7 +135,7 @@ Close behind: the paste and key quirks (native clipboard read, Shift+Enter bytes
 - [x] Theme: fixed palette, ANSI colours contrast-adjusted against the background, white caret, blue selection — `utils/terminalTheme.ts`
 - [x] **(hard)** Fonts: Geist Mono preloaded; Fira Code / JetBrains Mono / Cascadia Code bundled; system fonts listed; bold toggle; size 8–32; applied live — `Terminal.tsx`, `utils/bundledFonts.ts` (native: P2.8 bundled the four families with italics (none for Fira Code); the P2.10 editor chooses the family from the bundled and system lists, and sets size and bold)
 - [x] Font size per app / repo / session (Ctrl+= / − / 0) / tab (Ctrl+Shift+= / −, tab menu) — `utils/fontSize.ts`
-- [ ] Focus goes to the terminal after spawn and when a pop-out opens — `utils/autofocus.ts`
+- [x] Focus goes to the terminal after spawn and when a pop-out opens — `utils/autofocus.ts` (native: a pop-out's terminal or diff takes its window's keyboard when it opens, except a restored one, which leaves the keyboard in the main window)
 
 The frontend has no search addon, bell handling or title parsing; `terminal_title`, `current_cwd` and `program_name` come from the daemon in each session snapshot.
 
@@ -179,11 +179,11 @@ The frontend has no search addon, bell handling or title parsing; `terminal_titl
 
 ## Pop-out windows
 
-- [ ] **(hard)** Pane pop-out: toolbar (status, label, source tab, members, runtime, trusted), Stop, Dock back; the main grid keeps a "popped out" card (Focus window / Dock back); closes itself when the pane or session goes — `PaneWindow.tsx`, `GridRenderer.tsx` `PoppedOutPaneCard`, `utils/poppedPanes.ts`, `lib.rs` `open_pane_window`
-- [ ] Tab pop-out: full grid (split, drag, close) or a diff tab, Close window; spawning disabled with a hint; closes when the tab is removed — `TabWindow.tsx`
-- [ ] Session pop-out (session with no pane): Stop, Close window; stays open after the session stops — `SessionWindow.tsx`
-- [ ] **(hard)** Opening an existing pop-out focuses it; title is the session or tab name; 1100×720 (min 700×400); "not found" state — `lib.rs`
-- [ ] Pop-outs have no app shortcuts and no Pop out button of their own — `App.tsx`, `SessionPane.tsx`
+- [x] **(hard)** Pane pop-out: toolbar (status, label, source tab, members, runtime, trusted), Stop, Dock back; the main grid keeps a "popped out" card (Focus window / Dock back); closes itself when the pane or session goes — `PaneWindow.tsx`, `GridRenderer.tsx` `PoppedOutPaneCard`, `utils/poppedPanes.ts`, `lib.rs` `open_pane_window` (native: the card shows the label, "Popped out to its own window", Focus window and Dock back; the toolbar adds the two-step Stop and Dock back)
+- [x] Tab pop-out: full grid (split, drag, close) or a diff tab, Close window; spawning disabled with a hint; closes when the tab is removed — `TabWindow.tsx` (native: the pop-out has Dock back, not Close window, and a viewer tab is refused; the pill keeps a ↗ mark and a card shows in the main window while it is active; spawn buttons read "Spawn from the main window")
+- [x] Session pop-out (session with no pane): Stop, Close window; stays open after the session stops — `SessionWindow.tsx` (native: Stop and Close window)
+- [x] **(hard)** Opening an existing pop-out focuses it; title is the session or tab name; 1100×720 (min 700×400); "not found" state — `lib.rs` (native: an overlapping pop-out raises the open one; a session pop-out reads "Session not found" once the daemon removes the session)
+- [x] Pop-outs have no app shortcuts and no Pop out button of their own — `App.tsx`, `SessionPane.tsx` (native: app shortcuts do nothing in a pop-out)
 
 ## Remote / LAN
 

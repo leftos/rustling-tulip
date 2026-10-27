@@ -364,6 +364,36 @@ The window's restore rect, maximized flag and monitor are saved in native-ui.jso
 
 Closing a tab, closing a pane but keeping its session, and moving a pane to an existing tab each leave an entry on the undo shelf (bottom centre, 8 s, at most 3, newest on top). An entry holds a whole-tab snapshot of every tab it touched, and Undo sends `RestoreTabSnapshot` for a tab that still exists or `RestoreTab` at its old index for one that is gone; a tab this client has asked to remove (closing it, closing its last pane, moving its only pane out) counts as gone from the send until its removal arrives, so an Undo pressed inside that round trip still restores it, bringing back splits and ratios exactly (moving the only pane via "Move this pane to a new tab", or via the Move-panes dialog with every pane ticked, marks the source tab closing the same way; a refused `MovePane` or `ExtractToNewTab` clears the mark, so Undo sends `RestoreTabSnapshot` and spawns aimed at the tab go into it); a pane whose session has since gone comes back empty. The shelf clears when the connection drops or a new `Welcome` arrives.
 
+## Windows and pop-outs
+
+A pop-out is an extra window of the one client process: one daemon connection and one `RootView`, and each pop-out's root (`PopoutView`, `popout_view.rs`) holds a weak handle to it and draws from it, so every window whose last draw read the `RootView` repaints with it. A pop-out holds a pane, a whole tab (a grid or a diff) or a session that has no pane. The wire does not change, since the daemon's layout still holds a popped pane in its tab; the open pop-outs live only in `native-ui.json`.
+
+`popouts.rs` keys a pop-out by what it holds: `Pane { tab_id, pane_id }`, `Tab { tab_id }` or `Session { session_id }`, kept in open order. Opening one again raises the first. A pop-out that would share content with an open one raises that one instead and its Pop out row is dimmed "Already in a pop-out": a session already shown by a pane or session pop-out, or a pane and the tab that holds it.
+
+A viewer tab is refused ("Viewer tabs can't be popped out"). A pane keeps its id when it moves in the main window, so its pop-out follows it to its new tab.
+
+A pop-out opens 1100×720 (minimum 700×400), centred on the main window's display; each further one opens 32 px right and down of the one before it. Its title is the session's label or the tab's name, and a session pop-out whose session the daemon has removed reads "Session not found". Only the main window's close runs the quit flow; closing a pop-out docks it back.
+
+Dock back is the close of every kind: a pane returns to its grid, a tab's pill loses its mark, a session pop-out simply closes. It sends nothing, so it never stops a session or removes a tab. A pane pop-out closes by itself when its pane leaves every tab, and a tab pop-out when its tab does; a session pop-out stays open after its session stops. Pop-outs have no app shortcuts and no Pop out button of their own.
+
+The main window keeps the popped content's place as a card, which is not a terminal and holds no keyboard. A popped pane's grid slot draws a card with the session's label, "Popped out to its own window", Focus window and Dock back; a popped tab draws the same card over its body while it is the active tab, and its pill shows a muted ↗ ("Popped out"). Focus window raises the pop-out and focuses its terminal or diff.
+
+A pane pop-out's toolbar has the status glyph, the label, the tab it came from, the member, runtime and trusted chips, a two-step Stop and Dock back.
+
+A tab pop-out has its own toolbar (the tab's name, Dock back) and no tab strip; it draws the tab's whole grid, with splits, divider drags, pane drops and menus working inside it, or a diff tab's own view, which moves over without a refetch. In it Pop out on a pane is dimmed, and empty panes have New session… and Shell here dimmed "Spawn from the main window". A session pop-out has Stop and Close window.
+
+A pop-out's terminal takes part in `tabs::size_drivers`, so only one view of a session answers terminal queries, and a popped tab's panes are sized and focused from the pop-out whichever tab the main window shows. The grid's bounds (`window_layouts.rs`) and the drag state are keyed by window. A drag stays inside the window it started in: on Windows the press captures the mouse to that window, so panes move between windows by Dock back and Move to ▸, never by a cross-window drop.
+
+A pop-out's terminal or diff takes its window's keyboard when the window opens and on Focus window. Docking back a tab that is the main window's active tab returns the keyboard to its focused pane or diff. Showing a session that a pop-out holds (a leaf click, a jump) raises that pop-out and clears attention instead of placing the session again, and a session shown in the active pop-out's focused terminal counts as seen.
+
+Menus, dialogs and toasts open in the window that asked (`overlay_owner.rs` records each overlay's window, and a closing window drops its overlays). A toast shows in the window the user last interacted with, else the main window.
+
+`native-ui.json` keeps the open pop-outs in open order, each with its key and its window's place (`window_state.rs`), saved as the window moves or resizes with the layout's 500 ms debounce. Once per launch, when the boot target's tabs and sessions have both arrived, the client reopens them in saved order behind the main window at their saved places, on the primary display when the monitor is gone and at the cascade place when the entry never moved.
+
+A restore leaves the keyboard in the main window and raises it only if it was active, and an entry whose pane, tab or session is gone is dropped (a pane that moved reopens under its new tab). A reconnect reopens nothing, and a switch of host skips the restore until the first pop-out opens or closes there.
+
+Quitting closes the pop-outs with the app after saving the open set, and the exit dialog counts sessions only. Closing every window, the main one included, keeps the pop-outs for the next launch. A missing `popouts` key or a value that is not a list loads as empty, and an entry whose key does not decode is dropped alone.
+
 ## Keyboard reachability
 
 Settings → Appearance and the appearance editor share one set of keyboard stops. Tab and Shift-Tab leave the hex and filter fields for the next or previous stop, as the Worktrees path field does, rather than staying inside the field.
