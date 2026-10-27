@@ -553,6 +553,8 @@ pub struct RootView {
     row_focus: Option<String>,
     /// The container row the pointer is over, while it is over one.
     hovered_container: Option<String>,
+    /// The rail button whose tooltip a press put away.
+    rail_tip: activity_bar::RailTipSuppression,
     /// Whether the pointer is in the window, in place of the platform's
     /// answer; `None` asks the platform.
     window_hover_override: Option<bool>,
@@ -1017,6 +1019,7 @@ impl RootView {
             sidebar_focus: cx.focus_handle(),
             row_focus: None,
             hovered_container: None,
+            rail_tip: activity_bar::RailTipSuppression::default(),
             window_hover_override: None,
             launch_last: launch_last::State::default(),
             wanted_session: wanted,

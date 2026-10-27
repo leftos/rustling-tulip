@@ -9,7 +9,9 @@
 
 use crate::support;
 
-use gpui::{Modifiers, TestAppContext, point, px};
+use std::time::Duration;
+
+use gpui::{Modifiers, MouseButton, MouseExitEvent, Pixels, Point, TestAppContext, point, px};
 use protocol::{ClientMessage, DaemonMessage};
 use rustling_tulip_native::{Activity, ScContext, ScPanel};
 use serde_json::json;
@@ -149,6 +151,108 @@ fn clicking_the_active_item_collapses_and_again_expands(cx: &mut TestAppContext)
     );
     assert!(h.in_model("sidebar-panel"));
     assert_eq!(saved_ui(&dir)["sidebar_collapsed"], json!(false));
+}
+
+/// Whether resting the mouse at `at` past the show delay draws a tooltip
+/// reading `text` against the mouse there. gpui keeps what it painted
+/// before, so a spec asks about a text only before it was ever drawn.
+fn tip_after_rest(h: &mut Harness<'_>, at: Point<Pixels>, text: &str) -> bool {
+    h.hover(at, Modifiers::none());
+    h.advance(Duration::from_millis(600));
+    let tip = h.bounds(&format!("tooltip={text}"));
+    let slack = px(2.0);
+    tip.origin.x >= px(0.0)
+        && at.x >= tip.left() - slack
+        && at.x <= tip.right() + slack
+        && at.y >= tip.top() - slack
+        && at.y <= tip.bottom() + slack
+}
+
+#[gpui::test]
+fn rail_click_hides_its_tooltip(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_repos());
+    let at = h.center("activity-source-control");
+    assert!(
+        tip_after_rest(&mut h, at, "Source control — click to show (Ctrl+B)"),
+        "resting on the button shows its tooltip"
+    );
+
+    h.click(at, Modifiers::none());
+    assert_eq!(activity(&mut h), Activity::SourceControl);
+    let collapse = "Source control — click to collapse sidebar (Ctrl+B)";
+    assert!(
+        !tip_after_rest(&mut h, at + point(px(1.0), px(1.0)), collapse),
+        "a press puts the tooltip away while the pointer stays on the button"
+    );
+    let away = h.center("activity-sessions");
+    h.hover(away, Modifiers::none());
+    assert!(
+        tip_after_rest(&mut h, at, collapse),
+        "leaving the button and coming back offers it again"
+    );
+
+    let needs_you = h.center("activity-needs-you");
+    h.hover(needs_you, Modifiers::none());
+    h.click(needs_you, Modifiers::none());
+    h.advance(Duration::from_millis(600));
+    let tip = h.bounds("tooltip=Needs You — click to show (Ctrl+B)");
+    assert!(
+        tip.origin.x < px(0.0),
+        "a press before the show delay keeps the tooltip from showing"
+    );
+}
+
+#[gpui::test]
+fn rail_press_with_a_move_keeps_its_tooltip_hidden(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_repos());
+    let at = h.center("activity-source-control");
+    let jitter = at + point(px(1.0), px(1.0));
+    h.hover(at, Modifiers::none());
+    h.cx.simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+    h.cx.simulate_mouse_move(jitter, Some(MouseButton::Left), Modifiers::none());
+    h.cx.simulate_mouse_up(jitter, MouseButton::Left, Modifiers::none());
+    h.cx.run_until_parked();
+    assert_eq!(
+        activity(&mut h),
+        Activity::SourceControl,
+        "the press clicked"
+    );
+
+    assert!(
+        !tip_after_rest(
+            &mut h,
+            at + point(px(2.0), px(2.0)),
+            "Source control — click to collapse sidebar (Ctrl+B)"
+        ),
+        "a move on the button while it is held does not count as leaving it"
+    );
+}
+
+#[gpui::test]
+fn rail_tip_returns_after_the_pointer_leaves_the_window(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_repos());
+    let at = h.center("activity-source-control");
+    h.hover(at, Modifiers::none());
+    h.click(at, Modifiers::none());
+    assert_eq!(activity(&mut h), Activity::SourceControl);
+
+    h.cx.simulate_event(MouseExitEvent {
+        position: at,
+        pressed_button: None,
+        modifiers: Modifiers::none(),
+    });
+    h.cx.run_until_parked();
+    assert!(
+        tip_after_rest(
+            &mut h,
+            at,
+            "Source control — click to collapse sidebar (Ctrl+B)"
+        ),
+        "leaving the window lifts the press's hold on the tooltip"
+    );
 }
 
 #[gpui::test]

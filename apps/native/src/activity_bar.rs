@@ -4,7 +4,10 @@
 //! at the bottom the Recover sessions button with its badge and the
 //! Settings button.
 
-use gpui::{ClickEvent, Context, Div, FontWeight, Stateful, Window, div, prelude::*, px, svg};
+use gpui::{
+    ClickEvent, Context, DispatchPhase, Div, FontWeight, MouseButton, MouseDownEvent,
+    MouseExitEvent, MouseUpEvent, SharedString, Stateful, Window, canvas, div, prelude::*, px, svg,
+};
 
 use crate::assets::{
     NEEDS_YOU_ICON, RECOVER_ICON, SESSIONS_ICON, SETTINGS_ICON, SOURCE_CONTROL_ICON,
@@ -58,6 +61,62 @@ fn item_tip(label: &str, badge: usize, noun: &str, active: bool, collapsed: bool
         (false, false) => "show",
     };
     format!("{base} — click to {action} (Ctrl+B)")
+}
+
+/// The rail button a press put the tooltip away on: it offers no tooltip
+/// until the pointer leaves it with no button held, or leaves the window,
+/// so the tooltip cannot cover the panel the press opened.
+#[derive(Debug, Default)]
+pub(crate) struct RailTipSuppression {
+    pressed: Option<&'static str>,
+    /// Whether the press is still held. gpui reports a held element as
+    /// unhovered, so a leave while held is no leave.
+    held: bool,
+}
+
+impl RailTipSuppression {
+    /// The button tagged `selector` was pressed.
+    pub(crate) fn press(&mut self, selector: &'static str) {
+        self.pressed = Some(selector);
+        self.held = true;
+    }
+
+    /// The press on the button tagged `selector` was released, over the
+    /// button (`inside`) or off it; whether that brought a put-away tooltip
+    /// back, which a release off the button does.
+    pub(crate) fn release(&mut self, selector: &'static str, inside: bool) -> bool {
+        if self.pressed != Some(selector) {
+            return false;
+        }
+        self.held = false;
+        if inside {
+            return false;
+        }
+        self.pressed = None;
+        true
+    }
+
+    /// The pointer entered (`hovered`) or left the button tagged `selector`;
+    /// whether that brought a put-away tooltip back.
+    pub(crate) fn hover_changed(&mut self, selector: &'static str, hovered: bool) -> bool {
+        let leaves_pressed = !hovered && !self.held && self.pressed == Some(selector);
+        if leaves_pressed {
+            self.pressed = None;
+        }
+        leaves_pressed
+    }
+
+    /// The pointer left the window; whether that brought a put-away tooltip
+    /// back.
+    pub(crate) fn pointer_left_window(&mut self) -> bool {
+        self.held = false;
+        self.pressed.take().is_some()
+    }
+
+    /// Whether the button tagged `selector` offers its tooltip.
+    pub(crate) fn offers_tip(&self, selector: &'static str) -> bool {
+        self.pressed != Some(selector)
+    }
 }
 
 /// What a rail item shows.
@@ -129,25 +188,114 @@ impl RootView {
             .border_r_1()
             .border_color(gpui::rgb(BORDER))
             .children(items.into_iter().map(|item| self.rail_item(item, cx)))
-            .child(div().flex_1())
-            .child(recover_button(self.session_history.badge_count(), cx))
-            .child(settings_button(cx))
+            .child(Self::rail_spacer(cx))
+            .child(self.rail_recover_button(cx))
+            .child(self.rail_settings_button(cx))
     }
 
     fn rail_item(&self, item: Item, cx: &mut Context<Self>) -> Stateful<Div> {
         let active = self.sidebar.activity() == item.activity;
         let collapsed = self.sidebar.is_collapsed();
         let activity = item.activity;
-        rail_button(item.selector, item.icon, active)
+        let button = rail_button(item.selector, item.icon, active)
             .when_some(badge_text(item.badge), |row, text| {
                 row.child(badge(item.badge_selector, text))
             })
-            .tooltip(tooltip(item_tip(
-                item.label, item.badge, item.noun, active, collapsed,
-            )))
             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                 this.click_activity(activity, window, cx);
+            }));
+        let tip = item_tip(item.label, item.badge, item.noun, active, collapsed);
+        self.with_rail_tip(button, item.selector, tip, cx)
+    }
+
+    /// The Recover sessions button, above Settings, with its badge counting
+    /// the sessions lost and not yet recovered.
+    fn rail_recover_button(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        let selector = "activity-recover";
+        let button = rail_button(selector, RECOVER_ICON, false)
+            .when_some(
+                badge_text(self.session_history.badge_count()),
+                |row, text| row.child(badge("recover-badge", text)),
+            )
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                this.toggle_recover(window, cx);
+            }));
+        self.with_rail_tip(button, selector, "Recover sessions", cx)
+    }
+
+    /// The Settings button, pinned to the rail's bottom.
+    fn rail_settings_button(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        let selector = "settings-open";
+        let button = rail_button(selector, SETTINGS_ICON, false).on_click(cx.listener(
+            |this, _: &ClickEvent, window, cx| {
+                this.open_settings(window, cx);
+            },
+        ));
+        self.with_rail_tip(button, selector, "Settings (Ctrl+,)", cx)
+    }
+
+    /// Gives the rail button tagged `selector` its tooltip `tip`, unless a
+    /// press put the tooltip away and the pointer has not left the button
+    /// since: see [`RailTipSuppression`].
+    fn with_rail_tip(
+        &self,
+        button: Stateful<Div>,
+        selector: &'static str,
+        tip: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        button
+            .when(self.rail_tip.offers_tip(selector), |button| {
+                button.tooltip(tooltip(tip))
+            })
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                    this.rail_tip.press(selector);
+                    cx.notify();
+                }),
+            )
+            // Releases are caught in the capture phase, which no click
+            // handler can stop.
+            .capture_any_mouse_up(cx.listener(move |this, event: &MouseUpEvent, _, cx| {
+                if event.button == MouseButton::Left && this.rail_tip.release(selector, true) {
+                    cx.notify();
+                }
             }))
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(move |this, _: &MouseUpEvent, _, cx| {
+                    if this.rail_tip.release(selector, false) {
+                        cx.notify();
+                    }
+                }),
+            )
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                if this.rail_tip.hover_changed(selector, *hovered) {
+                    cx.notify();
+                }
+            }))
+    }
+
+    /// The rail's spacer, which also listens for the pointer leaving the
+    /// window: that sends no move, so no button hears it leave.
+    fn rail_spacer(cx: &mut Context<Self>) -> impl IntoElement {
+        let root = cx.entity();
+        canvas(
+            |_, _, _| {},
+            move |_, (), window, _| {
+                window.on_mouse_event(move |_: &MouseExitEvent, phase, _, cx| {
+                    if phase == DispatchPhase::Bubble {
+                        root.update(cx, |this, cx| {
+                            if this.rail_tip.pointer_left_window() {
+                                cx.notify();
+                            }
+                        });
+                    }
+                });
+            },
+        )
+        .flex_1()
     }
 
     /// A rail click: see [`crate::sidebar::SidebarModel::click_activity`].
@@ -273,31 +421,66 @@ fn badge(selector: &'static str, text: String) -> Div {
         .child(text)
 }
 
-/// The Recover sessions button, above Settings, with its badge counting
-/// the sessions lost and not yet recovered.
-fn recover_button(badge_count: usize, cx: &mut Context<RootView>) -> Stateful<Div> {
-    rail_button("activity-recover", RECOVER_ICON, false)
-        .when_some(badge_text(badge_count), |row, text| {
-            row.child(badge("recover-badge", text))
-        })
-        .tooltip(tooltip("Recover sessions"))
-        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-            this.toggle_recover(window, cx);
-        }))
-}
-
-/// The Settings button, pinned to the rail's bottom.
-fn settings_button(cx: &mut Context<RootView>) -> Stateful<Div> {
-    rail_button("settings-open", SETTINGS_ICON, false)
-        .tooltip(tooltip("Settings (Ctrl+,)"))
-        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-            this.open_settings(window, cx);
-        }))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pressed_rail_item_suppresses_its_tooltip_until_hover_leaves() {
+        let mut tips = RailTipSuppression::default();
+        assert!(
+            tips.offers_tip("a"),
+            "every button offers its tooltip at first"
+        );
+        tips.press("a");
+        assert!(!tips.offers_tip("a"), "a press puts the tooltip away");
+        assert!(tips.offers_tip("b"), "only the pressed button's");
+        assert!(!tips.release("a", true), "a release on the button");
+        assert!(
+            !tips.hover_changed("a", true),
+            "hovering it again changes nothing"
+        );
+        assert!(
+            !tips.hover_changed("b", false),
+            "leaving another button changes nothing"
+        );
+        assert!(!tips.offers_tip("a"));
+        assert!(tips.hover_changed("a", false), "leaving the pressed button");
+        assert!(tips.offers_tip("a"), "brings its tooltip back");
+        assert!(
+            !tips.hover_changed("a", false),
+            "a second leave changes nothing"
+        );
+    }
+
+    #[test]
+    fn a_held_press_is_lifted_only_by_a_leave_after_release_or_the_window() {
+        let mut tips = RailTipSuppression::default();
+        tips.press("a");
+        assert!(!tips.hover_changed("a", false), "gpui's unhover while held");
+        assert!(!tips.release("b", true), "another button's release");
+        assert!(!tips.release("a", true), "a release on the button");
+        assert!(!tips.offers_tip("a"), "keeps the tooltip away");
+        assert!(tips.hover_changed("a", false), "until the pointer leaves");
+
+        tips.press("a");
+        assert!(
+            tips.release("a", false),
+            "a release off the button lifts it"
+        );
+        assert!(tips.offers_tip("a"));
+
+        tips.press("a");
+        assert!(
+            tips.pointer_left_window(),
+            "so does leaving the window, held"
+        );
+        assert!(tips.offers_tip("a"));
+        assert!(
+            !tips.pointer_left_window(),
+            "with nothing put away, nothing"
+        );
+    }
 
     #[test]
     fn item_tip_uses_each_items_noun() {

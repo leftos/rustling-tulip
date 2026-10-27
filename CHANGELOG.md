@@ -25,6 +25,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - A Claude session's name no longer flickers with Claude's spinner, and a session titled only "Claude Code" shows its own label instead.
 - A Claude session started in your shell that is lost before its history is saved now comes back in Recover as Claude, with its settings and conversation, not as a plain shell.
 - The "Spawning session…" notice goes away as soon as the session starts, or when the spawn is refused or cancelled, instead of lingering for several seconds.
+- Clicking a button on the left-hand rail no longer leaves its tooltip covering the panel it just opened.
 
 ### Changed
 
