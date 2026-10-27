@@ -4,8 +4,6 @@
 
 ## Release 2 — Remote mode and the agent seam
 
-- [ ] RT-349 Restart conversation discovery for sessions reattached after a daemon restart · release vNext
-- [ ] RT-386 Map a recovered shell's hook events with its recovered agent options and trust · release vNext
 - [ ] RT-426 Prove the daemon before the installer sends it /shutdown
 - [ ] RT-430 Bind the daemon's loopback listener so no other socket can share its port
 - [ ] RT-431 Refuse or escape cmd metacharacters in a .cmd agent shim's direct-spawn arguments
@@ -17,15 +15,11 @@
 
 ## Wave 2 — Daily driver: close the port's gaps
 
-- [ ] RT-179 Keep keyboard focus when pressing Worktrees Save disables it · release vNext
-- [ ] RT-377 Draw no selection in an unfocused Settings text field · release vNext
 - [ ] RT-195 Give the container menu a keyboard route
 - [ ] RT-202 Accept the 1015 and 1016 mouse-report encodings
-- [ ] RT-204 Clear the container row focus when the sidebar stops showing the container list · release vNext
 - [ ] RT-205 Re-sync a watched .code-workspace once at daemon start
 - [ ] RT-207 Move the .code-workspace folder scan off the connection's dispatch task
 - [ ] RT-211 Open the trusted-launch dialog through one helper, with a refusal path
-- [ ] RT-212 Clear the sidebar row hover when the pointer leaves · release vNext
 - [ ] RT-223 Test the daemon's branch-name suggestion and its failure routing
 - [ ] RT-235 Check a VS Code or Explorer target still exists before opening it
 - [ ] RT-236 Fold the container menu's disabled-tip table into its row definitions
@@ -36,7 +30,6 @@
 - [ ] RT-255 Reject or document a preset max_panes_per_tab of 0
 - [ ] RT-256 Name the failing script variable in PresetScriptsError
 - [ ] RT-259 Preset wizard: say so when Esc closes it while its scripts still run
-- [ ] RT-261 Preset launch: Stop all misses sessions whose snapshot hasn't arrived yet · release vNext
 
 ## Wave 2b — Hook status
 
@@ -80,7 +73,6 @@
 ## Wave 7 — Pop-out windows
 
 - [ ] RT-32 Phase 5b: pop-out windows (P5.6–P5.12) · release vNext
-  - [/] RT-414 Give a pane pop-out its toolbar, two-step Stop, focus and attention rules · release vNext
   - [ ] RT-415 Open a session with no pane in its own window · release vNext
   - [ ] RT-416 Key the grid's bounds and drag state by window · release vNext
   - [ ] RT-417 Draw menus, dialogs and toasts in the window that opened them · release vNext
@@ -252,7 +244,6 @@
 - [ ] RT-279 Stop sending loopback bearer tokens in cleartext
 - [ ] RT-289 Classify a plain shell by its prompt at the cursor, not by output volume
 - [ ] RT-306 Polish from v0.1.0-alpha dogfooding
-  - [ ] RT-307 Draw the spawn dialog's base-branch selection only when the field has focus · release vNext
   - [ ] RT-308 Show the focused session's name without its UUID in the status bar
   - [ ] RT-309 Clear the Spawning session toast once the session's pane is live · release vNext
   - [ ] RT-310 Lay out the Quit dialog's buttons in tidy rows
@@ -260,7 +251,6 @@
   - [ ] RT-314 Drop the doubled wt. prefix from default worktree folders
   - [ ] RT-315 Keep an activity-rail tooltip from covering the panel its click opened · release vNext
 - [ ] RT-312 Strip Claude's title spinner glyph from session names · release vNext
-- [ ] RT-332 Hand a session's exit through its lifecycle queue so output never trails the exit · release vNext
 - [ ] RT-342 Scroll the focused Settings control into view on Tab
 - [ ] RT-318 Show Claude's HTML/SVG mocks in a panel beside its session
   - [ ] RT-355 Serve pinned three.js, chart and sketch libraries to mock pages
@@ -280,3 +270,8 @@
 - [ ] RT-402 Let pane focus follow the mouse pointer (opt-in setting)
 - [ ] RT-403 Take the prompt-echo marker for prompt navigation from the agent descriptor
 - [ ] RT-409 Show the whole file name in the Markdown viewer tab's header when it fits
+- [ ] RT-432 Remove a session folder left with no sidecar after a self-exit
+- [ ] RT-433 Record a headless run's end only after its last output line
+- [ ] RT-434 Install the scrollback snapshot sender in attach_lifecycle itself
+- [ ] RT-435 Send the tracer's Exited only after the child's last output
+- [ ] RT-436 Send no Stopped attention for a session discarded before its exit
