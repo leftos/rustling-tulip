@@ -352,10 +352,17 @@ function Test-CargoExitOk {
     if ($LASTEXITCODE -ne 0) { throw "$What failed (exit $LASTEXITCODE)" }
 }
 
-# Runs a command through tools/gate.ps1, or directly when already inside a gate's
-# command: a nested gate call would queue behind the slot this run already holds.
+# True inside a gate's command: a local gate sets GATE_SLOT_HELD, a routed run on a builder sets GATE_BOX_JOB.
+function Test-UnderGate {
+    [OutputType([bool])]
+    param()
+    return [bool]($env:GATE_SLOT_HELD -or $env:GATE_BOX_JOB)
+}
+
+# Runs a command through tools/gate.ps1, or directly when already under a gate
+# (Test-UnderGate): a nested gate call would queue behind the slot this run already holds.
 function Invoke-Gated([string]$Slot, [string]$Name, [string[]]$Command) {
-    if ($env:GATE_SLOT_HELD) {
+    if (Test-UnderGate) {
         & $Command[0] @($Command | Select-Object -Skip 1)
         return
     }
@@ -683,9 +690,9 @@ function Invoke-Test {
     if ($Validate) {
         # -Validate reads nextest's JSON listings, which a gate call would mix its
         # own lines into: re-run this script under one gate and let the child's
-        # calls run directly (it sees GATE_SLOT_HELD). Heavy: its nextest listings
-        # keep several cores busy.
-        if (-not $env:GATE_SLOT_HELD) {
+        # calls run directly (it is under that gate, Test-UnderGate). Heavy: its
+        # nextest listings keep several cores busy.
+        if (-not (Test-UnderGate)) {
             Invoke-Gated -Slot heavy -Name test-validate -Command @(
                 'pwsh', '-NoProfile', '-File', $PSCommandPath, 'test', '-Validate'
             )
@@ -962,7 +969,7 @@ function Invoke-Native {
 # run on different machines, leaving the specs without the daemon binary.
 function Invoke-NativeSpecFile([string]$Verb, [string[]]$TestFiles, [string]$Slot, [string]$Name, [string[]]$DaemonFeatures = @()) {
     Assert-Nextest
-    if (-not $env:GATE_SLOT_HELD) {
+    if (-not (Test-UnderGate)) {
         $reentry = @('pwsh', '-NoProfile', '-File', $PSCommandPath, $Verb)
         if ($Release) { $reentry += '-Release' }
         Invoke-Gated -Slot $Slot -Name $Name -Command $reentry

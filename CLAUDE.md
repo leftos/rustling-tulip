@@ -88,7 +88,7 @@ The repo is in `test mode: stable`: every landed change's last gate runs the ful
 
 The release step is cutting a versioned release from the Linear release pipeline's `vNext`, only after a green full suite (procedure: `docs/release.md`); `v0.1.0-alpha` was the first.
 
-Every cargo command `rt.ps1` runs goes through the repo's gate wrapper, `pwsh -NoProfile -File tools/gate.ps1 run …` (`Invoke-Gated`, logging to `.tmp/rt-<name>.log`), so a bare `.\rt.ps1 test` routes its nextest run to a builder machine; inside a gate's command (`GATE_SLOT_HELD` set) it runs them directly, and the native client the `launch` verbs open holds no slot.
+Every cargo command `rt.ps1` runs goes through the repo's gate wrapper, `pwsh -NoProfile -File tools/gate.ps1 run …` (`Invoke-Gated`, logging to `.tmp/rt-<name>.log`), so a bare `.\rt.ps1 test` routes its nextest run to a builder machine; inside a gate's command (`GATE_SLOT_HELD` set by a local gate, `GATE_BOX_JOB` by a routed run on a builder; `Test-UnderGate`) it runs them directly, and the native client the `launch` verbs open holds no slot.
 
 Nothing calls `gate.exe` directly. The wrapper hands the call to the installed gate.exe (installed from the gate repo with `pwsh tools/install.ps1`), or runs the command directly on a machine without one.
 
