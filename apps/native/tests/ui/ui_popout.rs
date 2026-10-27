@@ -1833,6 +1833,52 @@ fn restart_from_a_session_popout_reopens_in_it(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn restart_from_the_sidebar_reopens_in_the_sessions_popout(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = stopped_s2_popped_out(cx, &dir);
+    let mut popout = h.popout_window();
+    h.sent();
+
+    h.right_click_on("leaf-s2");
+    h.click_on("menu-restart");
+    let restart = h
+        .sent()
+        .into_iter()
+        .find_map(|msg| match msg {
+            ClientMessage::DuplicateSession {
+                session_id,
+                request_id,
+                ..
+            } if session_id == "s2" => request_id,
+            _ => None,
+        })
+        .expect("a restart of s2 with a request id");
+    h.send(DaemonMessage::SessionUpdated {
+        session: session("s2b").build(),
+        request_id: Some(restart),
+    });
+
+    let sent = h.sent();
+    assert!(
+        !sent.iter().any(|msg| changes_layout_or_sessions(msg)
+            || matches!(msg, ClientMessage::ReplacePaneSession { .. })),
+        "the copy is placed in no tab: {sent:?}"
+    );
+    assert_eq!(h.window_count(), 2, "one pop-out window, the same one");
+    assert_eq!(h.root(|root, _| root.popout_count()), 1);
+    popout.run_until_parked();
+    assert_eq!(popout.window_title().as_deref(), Some("s2b"));
+    h.answer_scrollback("s2b", b"");
+    h.send(DaemonMessage::SessionRemoved {
+        session_id: "s2".to_owned(),
+    });
+    assert!(
+        !drawn_in_popout(&mut popout, "popout-not-found-popout:s2b"),
+        "the pop-out shows the copy, not a missing session"
+    );
+}
+
+#[gpui::test]
 fn leaf_click_on_a_popped_session(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &s2_without_a_pane());

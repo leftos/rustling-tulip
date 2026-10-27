@@ -128,6 +128,7 @@ mod viewer_tab_view;
 mod viewer_text;
 mod vscode_suggestion;
 mod vscode_suggestion_view;
+mod window_layouts;
 mod window_state;
 mod window_title;
 mod workspace_creator;
@@ -208,6 +209,7 @@ use crate::term::ShellCommand;
 use crate::term_view::ScrollbackReply;
 use crate::undo::UndoShelf;
 use crate::vscode_suggestion::VscodeSuggestions;
+use crate::window_layouts::WindowLayouts;
 use crate::window_state::{RestoreRect, WindowState};
 use crate::workspace_creator_view::WorkspaceCreatorDialog;
 
@@ -574,6 +576,9 @@ enum Drag {
     Sidebar,
     /// A split of `tab_id`; `ratio` is where the drag has taken it so far.
     Divider {
+        /// The window whose grid the press landed in; the drag follows only
+        /// that window's pointer.
+        window: WindowId,
         tab_id: String,
         split_path: Vec<u8>,
         /// Where the press landed; a press that stays within
@@ -586,6 +591,17 @@ enum Drag {
     /// The split between a section's commit list and its detail pane, by
     /// section key id.
     HistoryList(String),
+}
+
+impl Drag {
+    /// The window the press that started this drag landed in: a divider's
+    /// own, and `main` for the handles only the main window draws.
+    fn window(&self, main: WindowId) -> WindowId {
+        match self {
+            Self::Divider { window, .. } => *window,
+            Self::Sidebar | Self::ScSplit | Self::HistoryList(_) => main,
+        }
+    }
 }
 
 /// The window's content: sidebar, tabs and panes, footer and overlays.
@@ -610,9 +626,9 @@ pub struct RootView {
     panes: HashMap<String, PaneSlot>,
     /// Scrollback retries already sent, so each goes out once per session.
     retries: RetryGate,
-    /// Where the active tab's split tree was last laid out; divider drags
-    /// map the pointer through it.
-    grid_bounds: Option<Bounds<Pixels>>,
+    /// Where each window's split tree was last laid out; a divider drag maps
+    /// the pointer through its own window's.
+    layouts: WindowLayouts,
     /// The tab whose name is being edited.
     renaming: Option<Rename>,
     /// Where the sidebar layout is saved; `None` when the config dir could
@@ -1123,7 +1139,7 @@ impl RootView {
             sidebar: SidebarModel::new(ui),
             panes: HashMap::new(),
             retries: RetryGate::default(),
-            grid_bounds: None,
+            layouts: WindowLayouts::new(window.window_handle().window_id()),
             renaming: None,
             ui_dir,
             drag: None,
@@ -1470,8 +1486,8 @@ impl RootView {
         for key in &gone {
             tracing::debug!(?key, "closing a pop-out whose content has gone");
             self.mark_popout_resized(key, cx);
-            if let Some(popout) = self.popout_windows.remove(key) {
-                close_popout_window(key, popout.handle, cx);
+            if let Some(handle) = self.take_popout_window(key) {
+                close_popout_window(key, handle, cx);
             }
         }
         cx.notify();
@@ -1520,9 +1536,18 @@ impl RootView {
             self.update_pane_roles(cx);
             self.mark_popout_resized(key, cx);
         }
-        let handle = self.popout_windows.remove(key).map(|popout| popout.handle);
+        let handle = self.take_popout_window(key);
         cx.notify();
         handle
+    }
+
+    /// Drops `key`'s window from the open pop-out windows, its grid layout
+    /// with it; the window it had, if any.
+    fn take_popout_window(&mut self, key: &PopoutKey) -> Option<WindowHandle<PopoutView>> {
+        let handle = self.popout_windows.remove(key)?.handle;
+        self.layouts
+            .forget(AnyWindowHandle::from(handle).window_id());
+        Some(handle)
     }
 
     /// Drops the pop-out whose window is `window_id`, as that window's own
@@ -1560,17 +1585,15 @@ impl RootView {
         }
     }
 
-    /// Whether `window` is session `session_id`'s own pop-out window.
-    pub(crate) fn in_session_popout(&self, session_id: &str, window: &Window) -> bool {
-        let key = PopoutKey::Session {
+    /// Whether session `session_id` has a pop-out window of its own, so a
+    /// restart from any window reopens the copy there.
+    pub(crate) fn has_session_popout(&self, session_id: &str) -> bool {
+        self.popout_windows.contains_key(&PopoutKey::Session {
             session_id: session_id.to_owned(),
-        };
-        self.popout_windows.get(&key).is_some_and(|popout| {
-            AnyWindowHandle::from(popout.handle).window_id() == window.window_handle().window_id()
         })
     }
 
-    /// A restart of `old` pressed in its pop-out arrived as `new`: the
+    /// A restart of `old`, whose session pop-out is open, arrived as `new`: the
     /// pop-out, its window and its terminal now show `new`.
     pub(crate) fn rekey_session_popout(&mut self, old: &str, new: &str, cx: &mut Context<Self>) {
         let old_key = PopoutKey::Session {
@@ -1630,12 +1653,15 @@ impl RootView {
 
     /// Closes every pop-out window, as the main window closes.
     fn close_popouts(&mut self, cx: &mut Context<Self>) {
-        for (key, popout) in std::mem::take(&mut self.popout_windows) {
+        let keys: Vec<PopoutKey> = self.popout_windows.keys().cloned().collect();
+        for key in keys {
             self.popouts.close(&key);
             if let PopoutKey::Session { session_id } = &key {
                 self.drop_session_slot(session_id, cx);
             }
-            close_popout_window(&key, popout.handle, cx);
+            if let Some(handle) = self.take_popout_window(&key) {
+                close_popout_window(&key, handle, cx);
+            }
         }
     }
 
@@ -2579,7 +2605,8 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.drag.is_none() {
+        let event_window = window.window_handle().window_id();
+        if !self.drag_started_in(event_window) {
             return;
         }
         if event.pressed_button != Some(MouseButton::Left) {
@@ -2595,15 +2622,16 @@ impl RootView {
                 self.mark_active_panes_resized(cx);
             }
             Some(Drag::Divider {
+                window: drag_window,
                 tab_id,
                 split_path,
                 origin,
                 ratio,
             }) => {
                 let travelled = (at.0 - origin.0).hypot(at.1 - origin.1);
+                let grid = self.layouts.grid(*drag_window);
                 if (ratio.is_some() || travelled >= DIVIDER_DRAG_THRESHOLD)
-                    && let Some(next) =
-                        divider_ratio(&self.tabs, self.grid_bounds, tab_id, split_path, at)
+                    && let Some(next) = divider_ratio(&self.tabs, grid, tab_id, split_path, at)
                 {
                     self.tabs.set_ratio(tab_id, split_path, next);
                     *ratio = Some(next);
@@ -2621,8 +2649,16 @@ impl RootView {
         cx.notify();
     }
 
-    fn on_drag_end(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if self.drag.is_some() {
+    /// Whether a drag is under way that started in `window`; a drag never
+    /// follows the pointer in another window.
+    fn drag_started_in(&self, window: WindowId) -> bool {
+        self.drag
+            .as_ref()
+            .is_some_and(|drag| drag.window(self.layouts.main()) == window)
+    }
+
+    fn on_drag_end(&mut self, _: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.drag_started_in(window.window_handle().window_id()) {
             self.finish_drag();
             cx.notify();
         }

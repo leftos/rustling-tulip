@@ -167,10 +167,11 @@ impl RootView {
         }
     }
 
-    /// The pane area's width over its height, or 16:10 before it has been
-    /// laid out.
+    /// The main window's pane area's width over its height, or 16:10 before
+    /// it has been laid out.
     pub(crate) fn pane_area_aspect(&self) -> f32 {
-        self.grid_bounds
+        self.layouts
+            .main_grid()
             .map(|bounds| bounds.size.width / bounds.size.height)
             .filter(|aspect| aspect.is_finite() && *aspect > 0.0)
             .unwrap_or(FALLBACK_ASPECT)

@@ -78,7 +78,7 @@ Read from `~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gpui-0.2.2/src
 
 ### P5.9 Grids in any window
 
-- **Does**: the split tree, divider drags, pane drops and the pane-level menus and dialogs work in whichever window draws the tab: `grid_bounds` and the `Drag` state keyed by window, and the pane-close dialog, empty-pane menu, session menu and toasts drawn where Q6 says. The main window looks and behaves as before. This is what "Tab pop-out: full grid (split, drag, close)" needs.
+- **Does**: the split tree, divider drags, pane drops and the pane-level menus and dialogs work in whichever window draws the tab: the grid bounds (`WindowLayouts`, `window_layouts.rs`) and the `Drag` state keyed by window, and the pane-close dialog, empty-pane menu, session menu and toasts drawn where Q6 says. The main window looks and behaves as before. This is what "Tab pop-out: full grid (split, drag, close)" needs.
 - **Files**: `lib.rs`; `grid_view.rs`; `pane_menu.rs`; `pane_close_view.rs`; `popout_view.rs`; `tests/ui/ui_popout.rs`.
 - **Core / view**: a window-keyed layout and overlay-owner map in plain Rust, unit-tested; the views look up their window's entry.
 - **Proof**: red first: `divider_drag_in_a_second_window_sets_its_ratio`, `pane_close_dialog_opens_in_the_window_that_asked` (Q6); `ui_panes`, `ui_pane_drag` and `ui_tabs` stay green.

@@ -1096,8 +1096,9 @@ impl RootView {
             .debug_selector(|| name)
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                     this.drag = Some(Drag::Divider {
+                        window: window.window_handle().window_id(),
                         tab_id: tab_id.clone(),
                         split_path: split_path.clone(),
                         origin: (event.position.x / px(1.0), event.position.y / px(1.0)),
@@ -1493,12 +1494,12 @@ impl RootView {
     fn on_pane_drag_move(
         &mut self,
         event: &DragMoveEvent<DragPayload>,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let payload = event.drag(cx).clone();
         let target = self
-            .drop_at(&payload, event.event.position, None)
+            .drop_at(&payload, window, event.event.position, None)
             .map(|(pane_id, edge, _)| (pane_id, edge));
         if target != self.pane_drop {
             self.pane_drop = target;
@@ -1515,7 +1516,8 @@ impl RootView {
         self.sidebar_drag = None;
         self.sidebar_drop = None;
         let request_id = Some(new_request_id());
-        if let Some((_, _, drop)) = self.drop_at(payload, window.mouse_position(), request_id) {
+        let at = window.mouse_position();
+        if let Some((_, _, drop)) = self.drop_at(payload, window, at, request_id) {
             self.send_leaf_drop(drop, cx);
         }
         cx.notify();
@@ -1536,9 +1538,11 @@ impl RootView {
     /// The pane of the shown tab under `at`, the edge the drop lands on and
     /// what the drop of `payload` there does, when it would be accepted: a
     /// pane from any tab and a sidebar leaf drop on a pane of the shown one.
+    /// The pane is found in the grid `window` laid out.
     fn drop_at(
         &self,
         payload: &DragPayload,
+        window: &Window,
         at: Point<Pixels>,
         request_id: Option<String>,
     ) -> Option<(String, PaneDropEdge, LeafDrop)> {
@@ -1546,7 +1550,7 @@ impl RootView {
         if !matches!(payload, DragPayload::Pane { .. } | DragPayload::Leaf { .. }) {
             return None;
         }
-        let rect = grid_rect(self.grid_bounds?);
+        let rect = grid_rect(self.layouts.grid(window.window_handle().window_id())?);
         let at = (at.x / px(1.0), at.y / px(1.0));
         let (pane_id, edge) = drag::pane_target(tab.grid()?, rect, PANE_GUTTER, at)?;
         // A popped pane's card takes no drop: it would split or rebind the
@@ -2388,13 +2392,14 @@ fn drop_overlay(
         .into_any_element()
 }
 
-/// An invisible layer that records where the grid was laid out, for the
-/// divider drags.
+/// An invisible layer that records where the grid was laid out in the window
+/// drawing it, for the divider drags and pane drops there.
 fn bounds_probe(cx: &mut Context<RootView>) -> impl IntoElement {
     let root = cx.entity();
     canvas(
-        move |bounds, _, cx| {
-            root.update(cx, |this, _| this.grid_bounds = Some(bounds));
+        move |bounds, window, cx| {
+            let window_id = window.window_handle().window_id();
+            root.update(cx, |this, _| this.layouts.set_grid(window_id, bounds));
         },
         |_, (), _, _| {},
     )

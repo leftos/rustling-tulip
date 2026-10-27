@@ -189,8 +189,8 @@ pub(crate) enum DuplicateTarget {
     /// A restart or resume: the copy takes every pane that showed the
     /// original, or a new tab when none did, and the original is discarded.
     Restart,
-    /// A restart or resume pressed in the original's own pop-out window:
-    /// the copy takes over that window and every pane that showed the
+    /// A restart or resume, from any window, of a session whose own pop-out
+    /// window is open: the copy takes over that window and every pane that showed the
     /// original, no tab is added, and the original is discarded.
     RestartInPopout,
     /// A new tab of its own; the original stays.

@@ -1656,7 +1656,7 @@ impl RootView {
             Step::EditName => self.start_session_rename(&session, window, cx),
             Step::Duplicate => {
                 let request_id = crate::new_request_id();
-                let target = if self.in_session_popout(session_id, window) {
+                let target = if self.has_session_popout(session_id) {
                     DuplicateTarget::RestartInPopout
                 } else {
                     DuplicateTarget::Restart
