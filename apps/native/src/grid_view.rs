@@ -220,7 +220,12 @@ impl RootView {
         let bindings = self.tabs.bindings();
         self.drop_removed_panes(&bindings, cx);
         let mut to_sync = self.bind_panes(bindings, window, cx);
-        let changes = tabs::session_changes(&before, &self.tabs.view_counts());
+        // A session pop-out's terminal shows its session beside the panes.
+        let mut after = self.tabs.view_counts();
+        for session_id in self.popouts.popped_sessions() {
+            *after.entry(session_id.to_owned()).or_insert(0) += 1;
+        }
+        let changes = tabs::session_changes(&before, &after);
         for session_id in changes.detach {
             self.send(ClientMessage::Detach { session_id });
         }
@@ -234,10 +239,12 @@ impl RootView {
         self.update_pane_roles(cx);
     }
 
+    /// Drops the terminals of panes no tab holds any more; a session
+    /// pop-out's terminal, in no tab, goes only with its window.
     fn drop_removed_panes(&mut self, bindings: &[PaneBinding], cx: &mut Context<Self>) {
         let live: HashSet<&str> = bindings.iter().map(|b| b.pane_id.as_str()).collect();
         self.panes.retain(|pane_id, slot| {
-            let keep = live.contains(pane_id.as_str());
+            let keep = live.contains(pane_id.as_str()) || popouts::slot_session(pane_id).is_some();
             if !keep {
                 slot.view.update(cx, |pane, _| pane.release());
             }
@@ -303,6 +310,11 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A session pop-out's terminal belongs to no tab; its window reports
+        // its focus.
+        if popouts::slot_session(pane_id).is_some() {
+            return;
+        }
         if let Some(slot) = self.panes.get(pane_id) {
             let (tab_id, session) = (slot.tab_id.clone(), slot.session.clone());
             if let Some(session) = session {
@@ -357,15 +369,23 @@ impl RootView {
         });
     }
 
-    /// Tells every pane whether it drives its session's PTY size and whether
-    /// it answers the session's terminal queries: a pane open in a pop-out
-    /// does both for its session, whichever tab the main window shows.
+    /// Tells every terminal whether it drives its session's PTY size and
+    /// whether it answers the session's terminal queries: a pane open in a
+    /// pop-out, or a session pop-out's terminal, does both for its session,
+    /// whichever tab the main window shows.
     pub(crate) fn update_pane_roles(&self, cx: &mut Context<Self>) {
         let active = self.tabs.active_id();
         let focused = active.and_then(|tab_id| self.tabs.focused_pane(tab_id));
         let bindings = self.tabs.bindings();
         let popped = self.popouts.popped_panes();
-        let drivers = tabs::size_drivers(&bindings, active, focused.as_deref(), &popped);
+        let popped_sessions = self.popouts.popped_sessions();
+        let drivers = tabs::size_drivers(
+            &bindings,
+            active,
+            focused.as_deref(),
+            &popped,
+            &popped_sessions,
+        );
         let answerers = query_answerers(&bindings, &drivers);
         for (pane_id, slot) in &self.panes {
             let holds = |roles: &HashMap<String, String>| {
@@ -575,15 +595,78 @@ impl RootView {
     }
 
     /// A new connection starts with nothing attached; the next tab list
-    /// attaches every pane again.
+    /// attaches every pane again. A session pop-out's terminal, which no tab
+    /// list names, keeps its session and attaches with the next session
+    /// list.
     pub(crate) fn reset_panes(&mut self, cx: &mut Context<Self>) {
-        for slot in self.panes.values_mut() {
+        for (pane_id, slot) in &mut self.panes {
             slot.view.update(cx, |pane, cx| {
                 pane.reset_for_reconnect();
                 cx.notify();
             });
-            slot.session = None;
+            if popouts::slot_session(pane_id).is_none() {
+                slot.session = None;
+            }
             slot.attached = false;
+        }
+    }
+
+    /// Gives session `session_id`'s pop-out a terminal of its own, outside
+    /// every grid, and attaches it as a pane attaches: scrollback first.
+    pub(crate) fn open_session_slot(
+        &mut self,
+        session_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let slot_id = popouts::session_slot_id(session_id);
+        let mut slot = self.new_slot(&slot_id, window, cx);
+        slot.session = Some(session_id.to_owned());
+        self.panes.insert(slot_id.clone(), slot);
+        self.apply_fonts_where(
+            |slot| slot.session.as_deref() == Some(session_id),
+            false,
+            cx,
+        );
+        self.sync_session(session_id, cx);
+    }
+
+    /// Moves session `old`'s pop-out terminal to its restart `new`: the same
+    /// terminal, emptied and attached afresh to `new`.
+    pub(crate) fn rekey_session_slot(&mut self, old: &str, new: &str, cx: &mut Context<Self>) {
+        let old_id = popouts::session_slot_id(old);
+        let Some(mut slot) = self.panes.remove(&old_id) else {
+            return;
+        };
+        let new_id = popouts::session_slot_id(new);
+        slot.view.update(cx, |pane, _| pane.release());
+        slot.session = Some(new.to_owned());
+        slot.attached = false;
+        self.panes.insert(new_id.clone(), slot);
+        if self.popout_focused.as_deref() == Some(old_id.as_str()) {
+            self.popout_focused = Some(new_id);
+        }
+        self.apply_fonts_where(|slot| slot.session.as_deref() == Some(new), false, cx);
+        self.sync_session(new, cx);
+    }
+
+    /// Drops session `session_id`'s pop-out terminal as its window closes;
+    /// a session no other terminal shows is detached while the daemon still
+    /// lists it.
+    pub(crate) fn drop_session_slot(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        let slot_id = popouts::session_slot_id(session_id);
+        let Some(slot) = self.panes.remove(&slot_id) else {
+            return;
+        };
+        slot.view.update(cx, |pane, _| pane.release());
+        if self.popout_focused.as_deref() == Some(slot_id.as_str()) {
+            self.popout_focused = None;
+        }
+        let listed = self.sidebar.session(session_id).is_some();
+        if listed && self.pane_views(Some(session_id)).is_empty() {
+            self.send(ClientMessage::Detach {
+                session_id: session_id.to_owned(),
+            });
         }
     }
 
@@ -1060,7 +1143,7 @@ impl RootView {
             .min_h(px(0.0))
             .children(self.orphan_banner(pane_id, session_id))
             .child(body)
-            .children(self.exited_overlay(tab_id, pane_id, session_id, cx))
+            .children(self.exited_overlay(Some(tab_id), pane_id, session_id, cx))
             .children(self.abandoned_overlay(pane_id, session_id, cx));
         let colors = self.frame_colors(pane_id, session_id, focused);
         let overlay = self
@@ -1172,17 +1255,75 @@ impl RootView {
             .into_any_element()
     }
 
-    /// What pane `key`'s pop-out window draws: its toolbar over its terminal,
-    /// with the note, the banner and the overlays the main grid would draw
-    /// for the pane. `None` while the pop-out has no pane to show.
+    /// What `key`'s pop-out window draws: a pane's or a session's toolbar
+    /// over its terminal. `None` while a pane pop-out has no pane to show.
     pub(crate) fn popout_pane(
         &self,
         key: &PopoutKey,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let PopoutKey::Pane { tab_id, pane_id } = key else {
-            return None;
+        match key {
+            PopoutKey::Pane { tab_id, pane_id } => self.popped_pane(key, tab_id, pane_id, cx),
+            PopoutKey::Session { session_id } => Some(self.popped_session(session_id, cx)),
+            PopoutKey::Tab { .. } => None,
+        }
+    }
+
+    /// What a session pop-out draws: its toolbar over its terminal, with the
+    /// note, the banner and the overlays a pane would draw for it; once the
+    /// daemon has dropped the session, the not-found note under a toolbar
+    /// holding only Close window.
+    fn popped_session(&self, session_id: &str, cx: &mut Context<Self>) -> AnyElement {
+        let slot_id = popouts::session_slot_id(session_id);
+        let Some(session) = self.sidebar.session(session_id) else {
+            let toolbar = popout_toolbar_row(
+                &slot_id,
+                Vec::new(),
+                vec![Self::popout_close_window(&slot_id, cx)],
+                cx,
+            );
+            let name = format!("popout-not-found-{slot_id}");
+            let note = muted_note(popouts::SESSION_NOT_FOUND).debug_selector(|| name);
+            return popout_column(toolbar, note.into_any_element());
         };
+        let parts = header_parts(session, self.sidebar.is_unseen(session_id), &self.agents);
+        let title = header_title(&slot_id, Some(&parts), cx);
+        let mut controls = self.header_stop(&slot_id, Some(session_id), StopPlace::Popout, cx);
+        controls.push(Self::popout_close_window(&slot_id, cx));
+        let toolbar = popout_toolbar_row(&slot_id, title, controls, cx);
+        let slot = self.panes.get(&slot_id);
+        let body = match slot {
+            Some(slot) if slot.attached => div()
+                .flex_1()
+                .min_h(px(0.0))
+                .size_full()
+                .child(slot.view.clone())
+                .into_any_element(),
+            slot => self.note_body(&slot_id, session_id, slot, cx),
+        };
+        let body = div()
+            .relative()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h(px(0.0))
+            .children(self.orphan_banner(&slot_id, Some(session_id)))
+            .child(body)
+            .children(self.exited_overlay(None, &slot_id, Some(session_id), cx))
+            .children(self.abandoned_overlay(&slot_id, Some(session_id), cx));
+        popout_column(toolbar, body.into_any_element())
+    }
+
+    /// What pane `pane_id`'s pop-out window draws: its toolbar over its
+    /// terminal, with the note, the banner and the overlays the main grid
+    /// would draw for the pane. `None` while the pop-out has no pane to show.
+    fn popped_pane(
+        &self,
+        key: &PopoutKey,
+        tab_id: &str,
+        pane_id: &str,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let terminal = self.popout_terminal(key)?;
         let session_id = popouts::pane_in_tabs(pane_id, self.tabs.tabs())
             .and_then(|pane| pane.session)
@@ -1213,18 +1354,10 @@ impl RootView {
             .min_h(px(0.0))
             .children(self.orphan_banner(pane_id, session_id))
             .child(body)
-            .children(self.exited_overlay(tab_id, pane_id, session_id, cx))
+            .children(self.exited_overlay(Some(tab_id), pane_id, session_id, cx))
             .children(self.abandoned_overlay(pane_id, session_id, cx));
         let toolbar = self.popout_toolbar(pane_id, session_id, cx);
-        Some(
-            div()
-                .size_full()
-                .flex()
-                .flex_col()
-                .child(toolbar)
-                .child(body)
-                .into_any_element(),
-        )
+        Some(popout_column(toolbar, body.into_any_element()))
     }
 
     /// A pane pop-out's toolbar: the pane header's status glyph and name,
@@ -1252,24 +1385,7 @@ impl RootView {
         }
         let mut controls = self.header_stop(pane_id, session_id, StopPlace::Popout, cx);
         controls.push(Self::popout_dock_back(pane_id, cx));
-        div()
-            .debug_selector(|| format!("popout-toolbar-{pane_id}"))
-            .flex()
-            .flex_none()
-            .items_center()
-            .gap(px(8.0))
-            .h(px(PANE_HEADER_HEIGHT))
-            .pl(px(12.0))
-            .pr(px(8.0))
-            .border_b_1()
-            .border_color(gpui::rgb(LINE))
-            .bg(gpui::rgb(RAISED))
-            .text_size(px(UI_TEXT_SIZE))
-            .text_color(gpui::rgb(TEXT_2))
-            .children(title)
-            .child(div().flex_1())
-            .child(header_controls(cx).children(controls))
-            .into_any_element()
+        popout_toolbar_row(pane_id, title, controls, cx)
     }
 
     /// The session's status glyph, name and chips (runtime, repo:branch
@@ -2150,6 +2266,46 @@ fn ghost_pill(text: impl Into<SharedString>, accent: u32, family: SharedString) 
         .text_size(px(GHOST_TEXT_SIZE))
         .text_color(gpui::rgb(TEXT))
         .child(text.into())
+}
+
+/// A pop-out window's toolbar for the terminal `slot_id`: `title` on the
+/// left, `controls` on the right.
+fn popout_toolbar_row(
+    slot_id: &str,
+    title: Vec<AnyElement>,
+    controls: Vec<AnyElement>,
+    cx: &mut Context<RootView>,
+) -> AnyElement {
+    let name = format!("popout-toolbar-{slot_id}");
+    div()
+        .debug_selector(|| name)
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap(px(8.0))
+        .h(px(PANE_HEADER_HEIGHT))
+        .pl(px(12.0))
+        .pr(px(8.0))
+        .border_b_1()
+        .border_color(gpui::rgb(LINE))
+        .bg(gpui::rgb(RAISED))
+        .text_size(px(UI_TEXT_SIZE))
+        .text_color(gpui::rgb(TEXT_2))
+        .children(title)
+        .child(div().flex_1())
+        .child(header_controls(cx).children(controls))
+        .into_any_element()
+}
+
+/// A pop-out window's content: `toolbar` over `body`.
+fn popout_column(toolbar: AnyElement, body: AnyElement) -> AnyElement {
+    div()
+        .size_full()
+        .flex()
+        .flex_col()
+        .child(toolbar)
+        .child(body)
+        .into_any_element()
 }
 
 /// The header's Stop or exit code, in a row a left press on which never

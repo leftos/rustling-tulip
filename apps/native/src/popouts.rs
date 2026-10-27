@@ -28,8 +28,13 @@ pub(crate) const POPOUT_MIN_SIZE: (u16, u16) = (700, 400);
 /// How far right and down each further pop-out opens from the one before it.
 pub(crate) const POPOUT_CASCADE: u16 = 32;
 
-/// Why Pop out is dimmed for a session no pane shows.
-pub(crate) const POP_OUT_NO_PANE_TIP: &str = "Show it in a pane to pop it out";
+/// What a session pop-out shows, and is titled, once the daemon has dropped
+/// its session.
+pub(crate) const SESSION_NOT_FOUND: &str = "Session not found";
+
+/// What the id of a session pop-out's terminal starts with: it sits in no
+/// grid, beside the panes' terminals.
+const SESSION_SLOT_PREFIX: &str = "popout:";
 
 /// Why Pop out is dimmed for a session an open pop-out already shows.
 pub(crate) const POP_OUT_ALREADY_TIP: &str = "Already in a pop-out";
@@ -81,6 +86,16 @@ impl Popouts {
         true
     }
 
+    /// Gives open pop-out `old` the key `new` in its place; whether `old`
+    /// was open.
+    pub(crate) fn rekey(&mut self, old: &PopoutKey, new: PopoutKey) -> bool {
+        let Some(open) = self.keys.iter_mut().find(|open| *open == old) else {
+            return false;
+        };
+        *open = new;
+        true
+    }
+
     /// The open pop-outs, in the order they were opened.
     pub(crate) fn keys(&self) -> &[PopoutKey] {
         &self.keys
@@ -103,15 +118,27 @@ impl Popouts {
             .find(|key| matches!(key, PopoutKey::Pane { pane_id: id, .. } if id == pane_id))
     }
 
-    /// The pane pop-out showing session `session_id`, if any.
+    /// The pane or session pop-out showing session `session_id`, if any.
     pub(crate) fn showing_session(
         &self,
         session_id: &str,
         tabs: &[TabEntry],
     ) -> Option<&PopoutKey> {
         self.keys.iter().find(|key| {
-            matches!(key, PopoutKey::Pane { .. }) && sessions_of(key, tabs).contains(&session_id)
+            matches!(key, PopoutKey::Pane { .. } | PopoutKey::Session { .. })
+                && sessions_of(key, tabs).contains(&session_id)
         })
+    }
+
+    /// The sessions open in session pop-outs.
+    pub(crate) fn popped_sessions(&self) -> Vec<&str> {
+        self.keys
+            .iter()
+            .filter_map(|key| match key {
+                PopoutKey::Session { session_id } => Some(session_id.as_str()),
+                PopoutKey::Pane { .. } | PopoutKey::Tab { .. } => None,
+            })
+            .collect()
     }
 
     /// The panes open in pane pop-outs, by pane id.
@@ -190,16 +217,6 @@ impl Popouts {
     }
 }
 
-/// Whether the session `key` names is still in `sessions`; true for a pane or
-/// a tab, whose own content decides.
-#[must_use]
-pub(crate) fn session_found(key: &PopoutKey, sessions: &[SessionSnapshot]) -> bool {
-    match key {
-        PopoutKey::Session { session_id } => sessions.iter().any(|s| s.id == session_id.as_str()),
-        PopoutKey::Pane { .. } | PopoutKey::Tab { .. } => true,
-    }
-}
-
 /// A pop-out window's title: the session's display label, the tab's name, or
 /// the not-found text once the daemon has dropped the session.
 #[must_use]
@@ -214,7 +231,7 @@ pub(crate) fn title(
             .iter()
             .find(|s| s.id == session_id.as_str())
             .map_or_else(
-                || "Session not found".to_owned(),
+                || SESSION_NOT_FOUND.to_owned(),
                 |s| display_label(s, agents),
             ),
         PopoutKey::Pane { tab_id, pane_id } => bound_session(tab_id, pane_id, tabs)
@@ -224,6 +241,29 @@ pub(crate) fn title(
             .iter()
             .find(|t| t.id == tab_id.as_str())
             .map_or_else(|| "Tab not found".to_owned(), |t| t.name.clone()),
+    }
+}
+
+/// The id of the terminal a session pop-out of `session_id` draws.
+#[must_use]
+pub(crate) fn session_slot_id(session_id: &str) -> String {
+    format!("{SESSION_SLOT_PREFIX}{session_id}")
+}
+
+/// The session whose pop-out terminal `slot_id` names; `None` for a pane's.
+#[must_use]
+pub(crate) fn slot_session(slot_id: &str) -> Option<&str> {
+    slot_id.strip_prefix(SESSION_SLOT_PREFIX)
+}
+
+/// The id of the terminal `key`'s window draws: a pane pop-out's pane, a
+/// session pop-out's own terminal; none for a tab.
+#[must_use]
+pub(crate) fn terminal_slot(key: &PopoutKey) -> Option<String> {
+    match key {
+        PopoutKey::Pane { pane_id, .. } => Some(pane_id.clone()),
+        PopoutKey::Session { session_id } => Some(session_slot_id(session_id)),
+        PopoutKey::Tab { .. } => None,
     }
 }
 
@@ -616,21 +656,6 @@ mod tests {
     }
 
     #[test]
-    fn session_popout_outlives_a_stop() {
-        let tabs = vec![tab("t1", &pane("p1", Some("s1")))];
-        let mut popouts = Popouts::default();
-        popouts.open(session_key("s1"), &tabs);
-        let mut stopped = session("s1");
-        stopped.status = protocol::SessionStatus::Stopped;
-
-        let closed = popouts.prune(&model_with(&tabs));
-
-        assert!(closed.is_empty(), "a stopped session is still listed");
-        assert!(popouts.is_open(&session_key("s1")));
-        assert!(session_found(&session_key("s1"), &[stopped]));
-    }
-
-    #[test]
     fn session_popout_not_found_once_removed() {
         let tabs = vec![tab("t1", &pane("p1", Some("s1")))];
         let mut popouts = Popouts::default();
@@ -640,7 +665,6 @@ mod tests {
 
         assert!(closed.is_empty(), "a session pop-out is never pruned");
         assert!(popouts.is_open(&session_key("s1")), "the window stays open");
-        assert!(!session_found(&session_key("s1"), &[]));
         assert_eq!(
             title(&session_key("s1"), &tabs, &[], &[]),
             "Session not found"

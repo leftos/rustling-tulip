@@ -1553,3 +1553,308 @@ fn a_pane_in_two_tabs_for_one_fold_draws_no_gone_frame(cx: &mut TestAppContext) 
         "the main grid draws the card, not p1's terminal"
     );
 }
+
+/// The terminal a session pop-out of `s2` draws, outside every grid.
+const S2_SLOT: &str = "popout:s2";
+
+/// `s1` in `t1`'s `p1`, beside `s2`, which no pane shows.
+fn s2_without_a_pane() -> Fixture {
+    let mut fixture = Fixture::single(session("s1").build());
+    fixture.sessions.push(session("s2").build());
+    fixture
+}
+
+/// Pops session `id` out into a window of its own.
+fn pop_out_session(h: &mut Harness<'_>, id: &str) -> OpenOutcome {
+    let key = PopoutKey::Session {
+        session_id: id.to_owned(),
+    };
+    h.root_update(move |root, window, cx| root.open_popout(key, window, cx))
+}
+
+/// Clicks the pop-out window at `at`.
+fn click_in_popout_at(popout: &mut VisualTestContext, at: Point<Pixels>) {
+    popout.simulate_click(at, Modifiers::none());
+    popout.run_until_parked();
+}
+
+/// Presses `selector` in the pop-out window with no release, as a press
+/// that closes its own window must be sent.
+fn press_in_popout(popout: &mut VisualTestContext, selector: &'static str) {
+    popout.run_until_parked();
+    let bounds = popout
+        .debug_bounds(selector)
+        .expect("the control is drawn in the pop-out");
+    popout.simulate_event(MouseDownEvent {
+        position: bounds.center(),
+        modifiers: Modifiers::none(),
+        button: MouseButton::Left,
+        click_count: 1,
+        first_mouse: false,
+    });
+}
+
+#[gpui::test]
+fn session_popout_loads_scrollback_and_takes_keys(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &s2_without_a_pane());
+    h.sent();
+
+    h.right_click_on("leaf-s2");
+    assert_eq!(
+        h.root(|root, _| root.menu_row_label("session-menu-popout")),
+        Some("Pop out")
+    );
+    assert_eq!(
+        h.root(|root, _| root.menu_disabled_tip("session-menu-popout")),
+        None,
+        "Pop out is enabled for a session no pane shows"
+    );
+    h.click_on("session-menu-popout");
+
+    assert_eq!(h.window_count(), 2, "the session has a window of its own");
+    assert_eq!(h.root(|root, _| root.popout_count()), 1);
+    assert_eq!(
+        h.scrollback_requests("s2").len(),
+        1,
+        "the pop-out's terminal asks for s2's scrollback"
+    );
+    h.answer_scrollback("s2", b"earlier output");
+    let mut popout = h.popout_window();
+    popout.run_until_parked();
+    assert!(
+        h.grid_text(S2_SLOT)
+            .iter()
+            .any(|row| row.contains("earlier output")),
+        "the scrollback fills the pop-out's terminal"
+    );
+    assert_eq!(popout.window_title().as_deref(), Some("s2"));
+    let sent = h.sent();
+    assert!(
+        !sent.iter().any(changes_layout_or_sessions),
+        "popping a session out places it in no tab: {sent:?}"
+    );
+    assert!(
+        sent.iter().any(|msg| matches!(
+            msg,
+            ClientMessage::Resize { session_id, .. } if session_id == "s2"
+        )),
+        "the pop-out's terminal drives s2's size: {sent:?}"
+    );
+    assert!(
+        focused_in_popout(&h, &mut popout, S2_SLOT),
+        "its terminal has the window's keyboard"
+    );
+
+    popout.simulate_keystrokes("a");
+    assert_eq!(h.sent_input("s2"), b"a", "the key reached the session");
+}
+
+#[gpui::test]
+fn session_popout_stays_after_stop(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &s2_without_a_pane());
+    assert_eq!(pop_out_session(&mut h, "s2"), OpenOutcome::Opened);
+    h.answer_scrollback("s2", b"");
+    let mut popout = h.popout_window();
+    h.sent();
+
+    click_in_popout(&mut popout, "popout-stop-popout:s2");
+    assert!(h.sent().is_empty(), "the first press only asks");
+    click_in_popout(&mut popout, "popout-stop-confirm-popout:s2");
+    let sent = h.sent();
+    assert!(
+        sent.iter().any(|msg| matches!(
+            msg,
+            ClientMessage::StopSession { session_id, .. } if session_id == "s2"
+        )),
+        "the second press stops s2: {sent:?}"
+    );
+    assert!(
+        !sent
+            .iter()
+            .any(|msg| matches!(msg, ClientMessage::DiscardSession { .. })),
+        "a session its pop-out shows is stopped, not removed: {sent:?}"
+    );
+
+    h.send(DaemonMessage::SessionUpdated {
+        session: session("s2").exited(3).build(),
+        request_id: None,
+    });
+
+    assert_eq!(h.window_count(), 2, "a stopped session keeps its pop-out");
+    for part in [
+        "exited-popout:s2",
+        "exited-restart-popout:s2",
+        "popout-exit-code-popout:s2",
+        "popout-close-popout:s2",
+    ] {
+        assert!(drawn_in_popout(&mut popout, part), "{part} is drawn");
+    }
+    assert!(
+        !drawn_in_popout(&mut popout, "exited-new-session-popout:s2"),
+        "no pane waits for a new session"
+    );
+    assert_eq!(popout.window_title().as_deref(), Some("s2"));
+}
+
+#[gpui::test]
+fn session_popout_shows_not_found_when_removed(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &s2_without_a_pane());
+    pop_out_session(&mut h, "s2");
+    h.answer_scrollback("s2", b"");
+    let mut popout = h.popout_window();
+    assert!(drawn_in_popout(&mut popout, "popout-stop-popout:s2"));
+    let stop = popout
+        .debug_bounds("popout-stop-popout:s2")
+        .expect("Stop is drawn while s2 is listed");
+
+    h.send(DaemonMessage::SessionRemoved {
+        session_id: "s2".to_owned(),
+    });
+
+    assert_eq!(h.window_count(), 2, "the window stays open");
+    assert!(drawn_in_popout(&mut popout, "popout-not-found-popout:s2"));
+    assert!(drawn_in_popout(&mut popout, "popout-close-popout:s2"));
+    assert_eq!(popout.window_title().as_deref(), Some("Session not found"));
+    h.sent();
+    // A frame's debug bounds outlive it, so Stop's absence shows as two
+    // presses where it stood that ask nothing.
+    click_in_popout_at(&mut popout, stop.center());
+    click_in_popout_at(&mut popout, stop.center());
+    let sent = h.sent();
+    assert!(
+        !sent
+            .iter()
+            .any(|msg| matches!(msg, ClientMessage::StopSession { .. })),
+        "nothing is left to stop: {sent:?}"
+    );
+
+    press_in_popout(&mut popout, "popout-close-popout:s2");
+
+    assert_eq!(h.window_count(), 1, "Close window closed it");
+    assert_eq!(h.root(|root, _| root.popout_count()), 0);
+    let sent = h.sent();
+    assert!(
+        !sent.iter().any(changes_layout_or_sessions) && !detached(&sent, "s2"),
+        "closing asks the daemon nothing of a removed session: {sent:?}"
+    );
+}
+
+/// `s2` popped out on its own, then stopped with exit code 3.
+fn stopped_s2_popped_out<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let mut h = Harness::with(cx, dir, &s2_without_a_pane());
+    pop_out_session(&mut h, "s2");
+    h.answer_scrollback("s2", b"");
+    h.send(DaemonMessage::SessionUpdated {
+        session: session("s2").exited(3).build(),
+        request_id: None,
+    });
+    h
+}
+
+#[gpui::test]
+fn session_menu_labels_a_popped_out_session_without_a_pane(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = stopped_s2_popped_out(cx, &dir);
+
+    h.right_click_on("leaf-s2");
+
+    let labels = h.root(|root, _| root.menu_labels());
+    assert!(
+        labels.iter().any(|label| label == "Remove session"),
+        "no tab pane shows s2: {labels:?}"
+    );
+    assert!(
+        !labels.iter().any(|label| label.starts_with("Remove pane")),
+        "a session pop-out is no pane: {labels:?}"
+    );
+}
+
+#[gpui::test]
+fn restart_from_a_session_popout_reopens_in_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = stopped_s2_popped_out(cx, &dir);
+    let mut popout = h.popout_window();
+    h.sent();
+
+    click_in_popout(&mut popout, "exited-restart-popout:s2");
+    let restart = h
+        .sent()
+        .into_iter()
+        .find_map(|msg| match msg {
+            ClientMessage::DuplicateSession {
+                session_id,
+                request_id,
+                ..
+            } if session_id == "s2" => request_id,
+            _ => None,
+        })
+        .expect("a restart of s2 with a request id");
+    h.send(DaemonMessage::SessionUpdated {
+        session: session("s2b").build(),
+        request_id: Some(restart),
+    });
+
+    let sent = h.sent();
+    assert!(
+        !sent.iter().any(|msg| changes_layout_or_sessions(msg)
+            || matches!(msg, ClientMessage::ReplacePaneSession { .. })),
+        "the copy is placed in no tab: {sent:?}"
+    );
+    assert!(
+        sent.iter().any(|msg| matches!(
+            msg,
+            ClientMessage::DiscardSession { session_id, .. } if session_id == "s2"
+        )),
+        "the restarted session is discarded: {sent:?}"
+    );
+    assert_eq!(h.window_count(), 2, "one pop-out window, the same one");
+    assert_eq!(h.root(|root, _| root.popout_count()), 1);
+    popout.run_until_parked();
+    assert_eq!(popout.window_title().as_deref(), Some("s2b"));
+    assert_eq!(
+        h.scrollback_requests("s2b").len(),
+        1,
+        "the pop-out's terminal attaches the copy"
+    );
+    h.answer_scrollback("s2b", b"");
+    popout.simulate_keystrokes("a");
+    assert_eq!(h.sent_input("s2b"), b"a", "keys reach the copy");
+
+    h.send(DaemonMessage::SessionRemoved {
+        session_id: "s2".to_owned(),
+    });
+    assert!(
+        !drawn_in_popout(&mut popout, "popout-not-found-popout:s2b"),
+        "the old session's removal leaves the copy shown"
+    );
+}
+
+#[gpui::test]
+fn leaf_click_on_a_popped_session(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &s2_without_a_pane());
+    pop_out_session(&mut h, "s2");
+    let mut popout = h.popout_window();
+    popout.update(|window, _| window.blur());
+    h.cx.update(|window, _| window.activate_window());
+    assert!(!is_active(&mut popout), "the main window is in front");
+    h.sent();
+
+    h.click_on("leaf-s2");
+
+    assert!(is_active(&mut popout), "the pop-out window is raised");
+    assert!(
+        focused_in_popout(&h, &mut popout, S2_SLOT),
+        "its terminal has the keyboard"
+    );
+    assert_eq!(h.window_count(), 2);
+    let sent = h.sent();
+    assert!(
+        !sent.iter().any(|msg| changes_layout_or_sessions(msg)
+            || matches!(msg, ClientMessage::ReplacePaneSession { .. })),
+        "the click places s2 in no pane: {sent:?}"
+    );
+}

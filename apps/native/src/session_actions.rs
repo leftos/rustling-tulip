@@ -8,7 +8,7 @@ use protocol::{
     AgentDescriptor, ClientMessage, SessionMode, SessionSnapshot, SessionStatus, TabEntry,
 };
 
-use crate::popouts::{POP_OUT_ALREADY_TIP, POP_OUT_NO_PANE_TIP, PopoutKey, Popouts, pane_to_pop};
+use crate::popouts::{POP_OUT_ALREADY_TIP, PopoutKey, Popouts, pane_to_pop};
 use crate::remote_mode::Capabilities;
 use crate::sidebar::{LeafState, can_attach, runtime_label};
 use crate::spawn_form::{OpenChoice, Target};
@@ -136,8 +136,8 @@ pub(crate) enum SessionRow {
     /// Opens the session in a new tab; offered while no pane shows it.
     AddToNewTab,
     /// Pops the pane [`crate::popouts::pane_to_pop`] picks out into its own
-    /// window; dimmed while no pane shows the session or a pop-out already
-    /// does.
+    /// window, or the session itself while no pane shows it; dimmed while a
+    /// pop-out already shows it.
     PopOut,
     /// Opens the folder of the session's own worktree.
     RevealWorktree,
@@ -189,11 +189,22 @@ pub(crate) enum DuplicateTarget {
     /// A restart or resume: the copy takes every pane that showed the
     /// original, or a new tab when none did, and the original is discarded.
     Restart,
+    /// A restart or resume pressed in the original's own pop-out window:
+    /// the copy takes over that window and every pane that showed the
+    /// original, no tab is added, and the original is discarded.
+    RestartInPopout,
     /// A new tab of its own; the original stays.
     NewTab,
     /// Grid tab `id`, by [`crate::tabs::pane_target_for_session`]; the
     /// original stays.
     Tab(String),
+}
+
+impl DuplicateTarget {
+    /// Whether the duplicate replaces its original: a restart or resume.
+    fn is_restart(&self) -> bool {
+        matches!(self, Self::Restart | Self::RestartInPopout)
+    }
 }
 
 /// A duplicate on its way: the session it copies and where it goes.
@@ -233,7 +244,7 @@ impl PendingPrefill {
     /// restart, which leaves the dialog's own.
     pub(crate) fn open_in(&self) -> Option<OpenChoice> {
         match &self.target {
-            DuplicateTarget::Restart => None,
+            DuplicateTarget::Restart | DuplicateTarget::RestartInPopout => None,
             DuplicateTarget::NewTab => Some(OpenChoice::NewTab),
             DuplicateTarget::Tab(id) => Some(OpenChoice::Tab(id.clone())),
         }
@@ -289,6 +300,8 @@ pub(crate) enum PlacedFocus {
     /// Show `tab_id`; the pane the placement adds takes the focus when it
     /// arrives.
     Tab(String),
+    /// The copy takes over the pop-out window of session `original`.
+    Popout { original: String },
 }
 
 /// How a duplicate that arrived is placed.
@@ -508,7 +521,7 @@ pub(crate) fn menu_entries(session: &SessionSnapshot, mode: MenuMode) -> Vec<Men
 /// to ▸ while a pane shows the session, else Add to current tab and Add to
 /// new tab when it can be shown in a pane (only the first, reading Add to
 /// new tab, when placing it would open a tab anyway); Pop out after either,
-/// dimmed while no pane shows the session or one of `popouts` already does;
+/// dimmed while one of `popouts` already shows the session;
 /// Reveal worktree when it has a worktree of its own, dimmed where `caps`
 /// opens no local files.
 pub(crate) fn session_rows(
@@ -548,15 +561,19 @@ pub(crate) fn session_rows(
     rows
 }
 
-/// Pop out for `session_id`: dimmed while no pane shows it, or while an open
-/// pop-out already shows the pane it would pop, or content overlapping it.
+/// Pop out for `session_id`: the pane showing it, else the session alone;
+/// dimmed while an open pop-out already shows what it would pop, or content
+/// overlapping it.
 fn pop_out_row(session_id: &str, tabs: &TabsModel, popouts: &Popouts) -> OfferedRow {
-    let disabled = match pane_to_pop(session_id, tabs.tabs(), tabs.active_id()) {
-        None => Some(POP_OUT_NO_PANE_TIP),
-        Some((tab_id, pane_id)) => popouts
-            .blocking(&PopoutKey::Pane { tab_id, pane_id }, tabs.tabs())
-            .map(|_| POP_OUT_ALREADY_TIP),
+    let key = match pane_to_pop(session_id, tabs.tabs(), tabs.active_id()) {
+        Some((tab_id, pane_id)) => PopoutKey::Pane { tab_id, pane_id },
+        None => PopoutKey::Session {
+            session_id: session_id.to_owned(),
+        },
     };
+    let disabled = popouts
+        .blocking(&key, tabs.tabs())
+        .map(|_| POP_OUT_ALREADY_TIP);
     OfferedRow {
         row: SessionRow::PopOut,
         disabled,
@@ -869,7 +886,7 @@ impl Duplicates {
         request_id: String,
         target: DuplicateTarget,
     ) -> Option<ClientMessage> {
-        let restart = target == DuplicateTarget::Restart;
+        let restart = target.is_restart();
         if restart && self.is_pending(session_id) {
             return None;
         }
@@ -892,7 +909,7 @@ impl Duplicates {
     pub(crate) fn is_pending(&self, session_id: &str) -> bool {
         self.pending
             .values()
-            .any(|dup| dup.target == DuplicateTarget::Restart && dup.original == session_id)
+            .any(|dup| dup.target.is_restart() && dup.original == session_id)
     }
 
     /// Whether `request_id` is one of this client's duplicates.
@@ -928,6 +945,15 @@ impl Duplicates {
                     pending.original,
                     &copy.id,
                     &tabs.bindings(),
+                    false,
+                ));
+            }
+            DuplicateTarget::RestartInPopout => {
+                return Some(restart_placement(
+                    pending.original,
+                    &copy.id,
+                    &tabs.bindings(),
+                    true,
                 ));
             }
             DuplicateTarget::NewTab => Placement::NewTab,
@@ -952,10 +978,16 @@ impl Duplicates {
 }
 
 /// The messages that put `new_id` where `original` was (every pane that
-/// showed it, focusing the first, or a new tab when none did) and then
-/// discard the original. The discard goes last so the daemon has rebound
+/// showed it, focusing the first, or a new tab when none did; `in_popout`,
+/// the original's pop-out window, which takes the copy in place of a new
+/// tab) and then discard the original. The discard goes last so the daemon has rebound
 /// the panes before it closes the original's.
-fn restart_placement(original: String, new_id: &str, bindings: &[PaneBinding]) -> Placed {
+fn restart_placement(
+    original: String,
+    new_id: &str,
+    bindings: &[PaneBinding],
+    in_popout: bool,
+) -> Placed {
     let panes: Vec<&PaneBinding> = bindings
         .iter()
         .filter(|binding| binding.session_id.as_deref() == Some(original.as_str()))
@@ -968,7 +1000,7 @@ fn restart_placement(original: String, new_id: &str, bindings: &[PaneBinding]) -
             session_id: Some(new_id.to_owned()),
         })
         .collect();
-    if panes.is_empty() {
+    if panes.is_empty() && !in_popout {
         messages.push(ClientMessage::CreateTab {
             name: None,
             initial_session_id: Some(new_id.to_owned()),
@@ -976,15 +1008,19 @@ fn restart_placement(original: String, new_id: &str, bindings: &[PaneBinding]) -
         });
     }
     messages.push(ClientMessage::DiscardSession {
-        session_id: original,
+        session_id: original.clone(),
         cleanup: Vec::new(),
     });
-    let focus = panes
-        .first()
-        .map_or(PlacedFocus::NewTab, |binding| PlacedFocus::Pane {
-            tab_id: binding.tab_id.clone(),
-            pane_id: binding.pane_id.clone(),
-        });
+    let focus = if in_popout {
+        PlacedFocus::Popout { original }
+    } else {
+        panes
+            .first()
+            .map_or(PlacedFocus::NewTab, |binding| PlacedFocus::Pane {
+                tab_id: binding.tab_id.clone(),
+                pane_id: binding.pane_id.clone(),
+            })
+    };
     Placed { messages, focus }
 }
 
@@ -1003,7 +1039,7 @@ mod tests {
         menu_actions, menu_entries, move_lines, move_source, orphan_banner_text, overlay_actions,
         pane_shows_exit, plan, rename_message, self_exited, session_rows, worktree_to_reveal,
     };
-    use crate::popouts::{POP_OUT_ALREADY_TIP, POP_OUT_NO_PANE_TIP, PopoutKey, Popouts};
+    use crate::popouts::{POP_OUT_ALREADY_TIP, PopoutKey, Popouts};
     use crate::remote_mode::Capabilities;
     use crate::spawn_form::{OpenChoice, Target};
     use crate::tabs::TabsModel;
@@ -1613,8 +1649,9 @@ mod tests {
     }
 
     #[test]
-    fn pop_out_is_disabled_without_a_pane() {
-        let mut tabs = model_with(&[tab("t1", &pane("p1", None))]);
+    fn pop_out_is_offered_without_a_pane() {
+        let entries = [tab("t1", &pane("p1", None))];
+        let mut tabs = model_with(&entries);
         tabs.activate("t1");
         let s = session("idle");
         assert_eq!(
@@ -1631,10 +1668,26 @@ mod tests {
             pop_out_row(&s, &tabs, &Popouts::default()),
             Some(OfferedRow {
                 row: SessionRow::PopOut,
-                disabled: Some(POP_OUT_NO_PANE_TIP),
-            })
+                disabled: None,
+            }),
+            "a session no pane shows pops out into a window of its own"
         );
-        assert_eq!(POP_OUT_NO_PANE_TIP, "Show it in a pane to pop it out");
+
+        let mut popped = Popouts::default();
+        popped.open(
+            PopoutKey::Session {
+                session_id: s.id.clone(),
+            },
+            &entries,
+        );
+        assert_eq!(
+            pop_out_row(&s, &tabs, &popped),
+            Some(OfferedRow {
+                row: SessionRow::PopOut,
+                disabled: Some(POP_OUT_ALREADY_TIP),
+            }),
+            "its session pop-out is already open"
+        );
     }
 
     #[test]

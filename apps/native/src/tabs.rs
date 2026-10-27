@@ -755,17 +755,23 @@ pub fn needs_confirm(tab: &TabEntry) -> bool {
     })
 }
 
-/// The pane that sizes each session's PTY, by session: a pane open in a
+/// The terminal that sizes each session's PTY, by session: a pane open in a
 /// pop-out window of its own (one of `popped_panes`), whichever tab it is
-/// in, else the focused pane when it shows the session, else the first pane
-/// of the active tab that does. Other hidden tabs drive nothing.
+/// in, else the terminal of the session's own pop-out (one of
+/// `popout_sessions`, named by [`crate::popouts::session_slot_id`]), else
+/// the focused pane when it shows the session, else the first pane of the
+/// active tab that does. Other hidden tabs drive nothing.
 pub fn size_drivers(
     bindings: &[PaneBinding],
     active_tab: Option<&str>,
     focused_pane: Option<&str>,
     popped_panes: &[&str],
+    popout_sessions: &[&str],
 ) -> HashMap<String, String> {
     let mut drivers = HashMap::new();
+    let mut drive = |session_id: &str, view: String| {
+        drivers.entry(session_id.to_owned()).or_insert(view);
+    };
     let visible: Vec<&PaneBinding> = bindings
         .iter()
         .filter(|b| Some(b.tab_id.as_str()) == active_tab)
@@ -773,15 +779,21 @@ pub fn size_drivers(
     let popped = bindings
         .iter()
         .filter(|b| popped_panes.contains(&b.pane_id.as_str()));
+    for binding in popped {
+        if let Some(session_id) = &binding.session_id {
+            drive(session_id, binding.pane_id.clone());
+        }
+    }
+    for session_id in popout_sessions {
+        drive(session_id, crate::popouts::session_slot_id(session_id));
+    }
     let focused = visible
         .iter()
         .copied()
         .filter(|b| Some(b.pane_id.as_str()) == focused_pane);
-    for binding in popped.chain(focused).chain(visible.iter().copied()) {
+    for binding in focused.chain(visible.iter().copied()) {
         if let Some(session_id) = &binding.session_id {
-            drivers
-                .entry(session_id.clone())
-                .or_insert_with(|| binding.pane_id.clone());
+            drive(session_id, binding.pane_id.clone());
         }
     }
     drivers
@@ -1906,7 +1918,7 @@ pub(crate) mod tests {
             binding("t2", "f", Some("s3")),
         ];
         let driver = |active: Option<&str>, focused: Option<&str>, session: &str| {
-            size_drivers(&bindings, active, focused, &[])
+            size_drivers(&bindings, active, focused, &[], &[])
                 .get(session)
                 .cloned()
         };
@@ -1924,7 +1936,7 @@ pub(crate) mod tests {
             Some("d"),
             "a focus outside the active tab does not count"
         );
-        assert!(size_drivers(&bindings, None, None, &[]).is_empty());
+        assert!(size_drivers(&bindings, None, None, &[], &[]).is_empty());
     }
 
     #[test]
@@ -1941,7 +1953,7 @@ pub(crate) mod tests {
             binding("t2", "e", None),
             binding("t2", "f", Some("s3")),
         ];
-        let drivers = size_drivers(&bindings, Some("t1"), Some("a"), &["d", "e", "f"]);
+        let drivers = size_drivers(&bindings, Some("t1"), Some("a"), &["d", "e", "f"], &[]);
 
         assert_eq!(
             drivers.get("s1").map(String::as_str),
@@ -1960,11 +1972,46 @@ pub(crate) mod tests {
         );
         assert_eq!(drivers.len(), 3, "an empty popped pane drives nothing");
         assert_eq!(
-            size_drivers(&bindings, Some("t1"), Some("a"), &["gone"])
+            size_drivers(&bindings, Some("t1"), Some("a"), &["gone"], &[])
                 .get("s1")
                 .map(String::as_str),
             Some("a"),
             "a popped pane no binding names changes nothing"
+        );
+    }
+
+    #[test]
+    fn size_drivers_count_a_session_popout() {
+        let binding = |tab: &str, pane: &str, session: Option<&str>| PaneBinding {
+            tab_id: tab.to_owned(),
+            pane_id: pane.to_owned(),
+            session_id: session.map(str::to_owned),
+        };
+        let bindings = [
+            binding("t1", "a", Some("s1")),
+            binding("t1", "b", Some("s2")),
+            binding("t2", "d", Some("s3")),
+        ];
+        let drivers = size_drivers(&bindings, Some("t1"), Some("a"), &[], &["s4", "s1"]);
+
+        assert_eq!(
+            drivers.get("s4").map(String::as_str),
+            Some("popout:s4"),
+            "a session no pane shows is driven by its pop-out's terminal"
+        );
+        assert_eq!(
+            drivers.get("s1").map(String::as_str),
+            Some("popout:s1"),
+            "a session pop-out drives over the active tab's focused pane"
+        );
+        assert_eq!(drivers.get("s2").map(String::as_str), Some("b"));
+        assert_eq!(drivers.get("s3"), None, "a hidden tab still drives nothing");
+        assert_eq!(
+            size_drivers(&bindings, None, None, &[], &["s4"])
+                .get("s4")
+                .map(String::as_str),
+            Some("popout:s4"),
+            "a session pop-out drives with no tab on screen"
         );
     }
 

@@ -1,4 +1,5 @@
-//! A pop-out window's root: the popped pane's toolbar and terminal, drawn
+//! A pop-out window's root: the popped pane's or session's toolbar and
+//! terminal, drawn
 //! from the main window's [`RootView`] over its one daemon connection. It
 //! registers no app shortcuts, so every key goes to the terminal.
 
@@ -8,7 +9,7 @@ use gpui::{
 };
 
 use crate::palette::GROUND;
-use crate::popouts::PopoutKey;
+use crate::popouts::{self, PopoutKey};
 use crate::{MUTED, RootView, UI_TEXT_SIZE, fonts};
 
 /// What a pop-out whose pane has gone shows.
@@ -49,15 +50,14 @@ impl PopoutView {
         self.key = key;
     }
 
-    /// The window was resized: the popped pane's next size claims its
-    /// session.
+    /// The window was resized: its terminal's next size claims its session.
     fn mark_resized(&self, cx: &mut Context<Self>) {
-        let PopoutKey::Pane { pane_id, .. } = &self.key else {
+        let Some(slot_id) = popouts::terminal_slot(&self.key) else {
             return;
         };
         if let Err(err) = self
             .root
-            .update(cx, |root, cx| root.mark_pane_resized(pane_id, cx))
+            .update(cx, |root, cx| root.mark_pane_resized(&slot_id, cx))
         {
             tracing::debug!("pop-out resized after the root view went: {err:#}");
         }
@@ -67,12 +67,12 @@ impl PopoutView {
     /// session counts as shown while the window is active and the terminal
     /// has its keyboard.
     fn report_shown(&self, handle: &FocusHandle, window: &Window, cx: &mut Context<Self>) {
-        let PopoutKey::Pane { pane_id, .. } = &self.key else {
+        let Some(slot_id) = popouts::terminal_slot(&self.key) else {
             return;
         };
         let focused = window.is_window_active() && handle.is_focused(window);
         if let Err(err) = self.root.update(cx, |root, cx| {
-            root.popout_terminal_focus(pane_id, focused, cx);
+            root.popout_terminal_focus(&slot_id, focused, cx);
         }) {
             tracing::debug!("pop-out focus changed after the root view went: {err:#}");
         }

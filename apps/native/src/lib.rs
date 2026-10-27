@@ -73,13 +73,6 @@ mod pane_close;
 mod pane_close_view;
 mod pane_menu;
 mod popout_view;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "pruning pop-outs whose content went is not wired to the session and tab folds yet"
-    )
-)]
 mod popouts;
 mod preset_launch;
 mod preset_prompts;
@@ -1332,21 +1325,32 @@ impl RootView {
     }
 
     /// Opens `key` in a window of its own, or activates the open pop-out
-    /// that already shows it. Only a pane pop-out opens; the other kinds
-    /// open nothing and report themselves as already open.
+    /// that already shows it. A pane or a session pop-out opens; a tab
+    /// pop-out, or a session the daemon does not list or no terminal can
+    /// show, opens nothing and reports itself as already open.
     pub fn open_popout(
         &mut self,
         key: PopoutKey,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> OpenOutcome {
-        if !matches!(key, PopoutKey::Pane { .. }) {
-            tracing::debug!(?key, "pop-out kind not supported yet");
+        let opens = match &key {
+            PopoutKey::Pane { .. } => true,
+            PopoutKey::Session { session_id } => {
+                self.sidebar.session(session_id).is_some_and(can_attach)
+            }
+            PopoutKey::Tab { .. } => false,
+        };
+        if !opens {
+            tracing::debug!(?key, "nothing to show in this pop-out");
             return OpenOutcome::Existing(key);
         }
         let outcome = self.popouts.open(key.clone(), self.tabs.tabs());
         match &outcome {
             OpenOutcome::Opened => {
+                if let PopoutKey::Session { session_id } = &key {
+                    self.open_session_slot(session_id, window, cx);
+                }
                 self.unfocus_popped_pane(&key, window, cx);
                 self.update_pane_roles(cx);
                 self.mark_popout_resized(&key, cx);
@@ -1404,23 +1408,24 @@ impl RootView {
     }
 
     /// The terminal `key`'s pop-out draws: a pane pop-out's pane while some
-    /// tab holds it. The pane is judged by its id, not by the tab the key
-    /// names, so the fold in which a moved pane is in its old tab and its
-    /// new one still finds it.
+    /// tab holds it, or a session pop-out's own terminal. The pane is judged
+    /// by its id, not by the tab the key names, so the fold in which a moved
+    /// pane is in its old tab and its new one still finds it.
     pub(crate) fn popout_terminal(
         &self,
         key: &PopoutKey,
     ) -> Option<gpui::Entity<term_view::TerminalPane>> {
-        let PopoutKey::Pane { pane_id, .. } = key else {
-            return None;
-        };
-        popouts::pane_in_tabs(pane_id, self.tabs.tabs())?;
-        self.panes.get(pane_id).map(|slot| slot.view().clone())
+        if let PopoutKey::Pane { pane_id, .. } = key {
+            popouts::pane_in_tabs(pane_id, self.tabs.tabs())?;
+        }
+        let slot_id = popouts::terminal_slot(key)?;
+        self.panes.get(&slot_id).map(|slot| slot.view().clone())
     }
 
-    /// Pane `pane_id`'s pop-out window became active with its terminal
-    /// focused (`shown`), or stopped being either: a session shown that way
-    /// counts as shown, so its finished turn is seen.
+    /// The pop-out window of terminal `pane_id` (a pane's, or a session
+    /// pop-out's) became active with that terminal focused (`shown`), or
+    /// stopped being either: a session shown that way counts as shown, so
+    /// its finished turn is seen.
     pub(crate) fn popout_terminal_focus(
         &mut self,
         pane_id: &str,
@@ -1438,10 +1443,16 @@ impl RootView {
         cx.notify();
     }
 
-    /// The session a pane pop-out's terminal shows with its window's
-    /// keyboard, while that pane is still popped out.
+    /// The session a pop-out's terminal shows with its window's keyboard,
+    /// while that pane or session is still popped out.
     fn popout_focused_session(&self) -> Option<String> {
         let pane_id = self.popout_focused.as_deref()?;
+        if let Some(session_id) = popouts::slot_session(pane_id) {
+            let key = PopoutKey::Session {
+                session_id: session_id.to_owned(),
+            };
+            return self.popouts.is_open(&key).then(|| session_id.to_owned());
+        }
         self.popouts.popped_key(pane_id)?;
         let session = popouts::pane_in_tabs(pane_id, self.tabs.tabs())?.session?;
         Some(session.to_owned())
@@ -1503,6 +1514,9 @@ impl RootView {
         cx: &mut Context<Self>,
     ) -> Option<WindowHandle<PopoutView>> {
         if self.popouts.close(key) {
+            if let PopoutKey::Session { session_id } = key {
+                self.drop_session_slot(session_id, cx);
+            }
             self.update_pane_roles(cx);
             self.mark_popout_resized(key, cx);
         }
@@ -1546,6 +1560,47 @@ impl RootView {
         }
     }
 
+    /// Whether `window` is session `session_id`'s own pop-out window.
+    pub(crate) fn in_session_popout(&self, session_id: &str, window: &Window) -> bool {
+        let key = PopoutKey::Session {
+            session_id: session_id.to_owned(),
+        };
+        self.popout_windows.get(&key).is_some_and(|popout| {
+            AnyWindowHandle::from(popout.handle).window_id() == window.window_handle().window_id()
+        })
+    }
+
+    /// A restart of `old` pressed in its pop-out arrived as `new`: the
+    /// pop-out, its window and its terminal now show `new`.
+    pub(crate) fn rekey_session_popout(&mut self, old: &str, new: &str, cx: &mut Context<Self>) {
+        let old_key = PopoutKey::Session {
+            session_id: old.to_owned(),
+        };
+        let new_key = PopoutKey::Session {
+            session_id: new.to_owned(),
+        };
+        if !self.popouts.rekey(&old_key, new_key.clone()) {
+            tracing::debug!(%old, "the restarted session's pop-out has closed");
+            return;
+        }
+        if let Some(popout) = self.popout_windows.remove(&old_key) {
+            let key = new_key.clone();
+            let followed = popout.handle.update(cx, |view, _, cx| {
+                view.follow(key);
+                cx.notify();
+            });
+            if let Err(err) = followed {
+                tracing::debug!(%new, "the restarted session's pop-out window has gone: {err:#}");
+            }
+            self.popout_windows.insert(new_key.clone(), popout);
+        }
+        self.rekey_session_slot(old, new, cx);
+        self.update_pane_roles(cx);
+        self.mark_popout_resized(&new_key, cx);
+        self.refresh_popout_titles(cx);
+        cx.notify();
+    }
+
     /// Sets each open pop-out window's title to what its content now reads,
     /// after a rename or a re-bind; a title that did not change is left.
     fn refresh_popout_titles(&mut self, cx: &mut Context<Self>) {
@@ -1565,10 +1620,11 @@ impl RootView {
         }
     }
 
-    /// `key`'s pane moves between windows: its next size claims its session.
+    /// `key`'s terminal moves between windows or opens in one: its next
+    /// size claims its session.
     fn mark_popout_resized(&self, key: &PopoutKey, cx: &mut Context<Self>) {
-        if let PopoutKey::Pane { pane_id, .. } = key {
-            self.mark_pane_resized(pane_id, cx);
+        if let Some(slot_id) = popouts::terminal_slot(key) {
+            self.mark_pane_resized(&slot_id, cx);
         }
     }
 
@@ -1576,6 +1632,9 @@ impl RootView {
     fn close_popouts(&mut self, cx: &mut Context<Self>) {
         for (key, popout) in std::mem::take(&mut self.popout_windows) {
             self.popouts.close(&key);
+            if let PopoutKey::Session { session_id } = &key {
+                self.drop_session_slot(session_id, cx);
+            }
             close_popout_window(&key, popout.handle, cx);
         }
     }

@@ -43,6 +43,8 @@ use crate::{BORDER, DANGER, HOVER_BG, MUTED, RootView, TEXT, UI_TEXT_SIZE, WARNI
 
 /// What the pane header's Pop out does.
 const POP_OUT_TIP: &str = "Open this pane in a window of its own";
+/// What a session pop-out's Close window does.
+const CLOSE_WINDOW_TIP: &str = "Close this window; the session is left as it is";
 
 pub(crate) const MENU_WIDTH: f32 = 240.0;
 /// The share of the window's height a menu may take before its rows scroll,
@@ -1562,13 +1564,14 @@ impl RootView {
                 self.open_in_new_tab(session_id);
             }
             SessionRow::PopOut => {
-                let pane = pane_to_pop(session_id, self.tabs.tabs(), self.tabs.active_id());
-                self.close_session_menu(window, cx);
-                let Some((tab_id, pane_id)) = pane else {
-                    tracing::warn!(session = %session_id, "pop out: no pane shows the session");
-                    return;
+                let key = match pane_to_pop(session_id, self.tabs.tabs(), self.tabs.active_id()) {
+                    Some((tab_id, pane_id)) => PopoutKey::Pane { tab_id, pane_id },
+                    None => PopoutKey::Session {
+                        session_id: session_id.to_owned(),
+                    },
                 };
-                self.open_popout(PopoutKey::Pane { tab_id, pane_id }, window, cx);
+                self.close_session_menu(window, cx);
+                self.open_popout(key, window, cx);
             }
             SessionRow::RevealWorktree => {
                 let path = self
@@ -1653,10 +1656,12 @@ impl RootView {
             Step::EditName => self.start_session_rename(&session, window, cx),
             Step::Duplicate => {
                 let request_id = crate::new_request_id();
-                if let Some(request) =
-                    self.duplicates
-                        .request(session_id, request_id, DuplicateTarget::Restart)
-                {
+                let target = if self.in_session_popout(session_id, window) {
+                    DuplicateTarget::RestartInPopout
+                } else {
+                    DuplicateTarget::Restart
+                };
+                if let Some(request) = self.duplicates.request(session_id, request_id, target) {
                     self.send(request);
                     self.close_session_menu(window, cx);
                 }
@@ -1664,8 +1669,13 @@ impl RootView {
         }
     }
 
+    /// Whether a tab pane or the session's own pop-out shows `session_id`,
+    /// so a stop keeps it listed.
     fn is_shown(&self, session_id: &str) -> bool {
         find_tab_containing_session(self.tabs.tabs(), session_id).is_some()
+            || self.popouts.is_open(&PopoutKey::Session {
+                session_id: session_id.to_owned(),
+            })
     }
 
     /// Swaps the menu's rows for a name editor seeded with the name the
@@ -1733,12 +1743,15 @@ impl RootView {
             }
             PlacedFocus::Pane { tab_id, pane_id } => self.tabs.focus_pane(tab_id, pane_id),
             PlacedFocus::Tab(tab_id) => self.tabs.activate(tab_id),
+            PlacedFocus::Popout { original } => {
+                self.rekey_session_popout(original, &copy.id, cx);
+            }
         }
         for msg in placed.messages {
             self.tabs.note_layout_request(&msg);
             self.send(msg);
         }
-        if placed.focus != PlacedFocus::NewTab {
+        if matches!(placed.focus, PlacedFocus::Pane { .. } | PlacedFocus::Tab(_)) {
             self.after_tabs_change(window, cx);
         }
     }
@@ -2012,7 +2025,8 @@ impl RootView {
         let Some(session) = self.sidebar.session(&menu.session_id) else {
             return Vec::new();
         };
-        let in_pane = self.is_shown(&session.id);
+        // The labels name a tab pane; a session pop-out alone is none.
+        let in_pane = find_tab_containing_session(self.tabs.tabs(), &session.id).is_some();
         menu_entries(session, menu.mode)
             .into_iter()
             .map(|entry| {
@@ -2164,6 +2178,17 @@ impl RootView {
     pub(crate) fn popout_dock_back(pane_id: &str, cx: &mut Context<Self>) -> AnyElement {
         let button = header_text_button(&format!("popout-dock-{pane_id}"), "Dock back", MUTED)
             .tooltip(tooltip(DOCK_BACK_TIP));
+        on_press(button, cx, |this, window, cx| {
+            this.dock_back_from_popout(window, cx);
+        })
+        .into_any_element()
+    }
+
+    /// A session pop-out's Close window, in place of Dock back: the window
+    /// closes and the session is left as it is.
+    pub(crate) fn popout_close_window(slot_id: &str, cx: &mut Context<Self>) -> AnyElement {
+        let button = header_text_button(&format!("popout-close-{slot_id}"), "Close window", MUTED)
+            .tooltip(tooltip(CLOSE_WINDOW_TIP));
         on_press(button, cx, |this, window, cx| {
             this.dock_back_from_popout(window, cx);
         })
@@ -2341,11 +2366,13 @@ impl RootView {
         selectors
     }
 
-    /// The layer over an exited session's terminal in `tab_id`: the exit
-    /// code and what to do with the pane.
+    /// The layer over an exited session's terminal: the exit code and what
+    /// to do with the pane of `tab_id` it draws in, or, for a terminal in no
+    /// tab (a session pop-out's), with the session, with no New session for
+    /// a pane to fill.
     pub(crate) fn exited_overlay(
         &self,
-        tab_id: &str,
+        tab_id: Option<&str>,
         pane_id: &str,
         session_id: Option<&str>,
         cx: &mut Context<Self>,
@@ -2353,19 +2380,22 @@ impl RootView {
         let session = session_id
             .and_then(|id| self.sidebar.session(id))
             .filter(|session| pane_shows_exit(session))?;
+        let in_pane = tab_id.is_some();
         let mut buttons: Vec<AnyElement> = overlay_actions(session)
             .into_iter()
             .map(|action| {
                 let selector = format!("exited-{}-{pane_id}", action.key());
-                let label = self.action_label(session, action, true);
+                let label = self.action_label(session, action, in_pane);
                 self.overlay_action_button(&session.id, action, &selector, label, cx)
                     .into_any_element()
             })
             .collect();
-        buttons.insert(
-            1,
-            self.overlay_new_session(tab_id, pane_id, &session.id, cx),
-        );
+        if let Some(tab_id) = tab_id {
+            buttons.insert(
+                1,
+                self.overlay_new_session(tab_id, pane_id, &session.id, cx),
+            );
+        }
         Some(
             overlay_layer(format!("exited-{pane_id}"))
                 .child(
