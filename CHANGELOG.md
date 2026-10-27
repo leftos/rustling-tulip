@@ -8,6 +8,8 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 - The Needs You panel says what a waiting session asks: its question, the tool it wants to run, or the plan to approve, cut short when it runs long.
 - On a remote host the preset wizard takes typed paths on that host for its prompt file, prompt folder and path variables.
+- Pop a pane, a whole tab, a diff or a session out into its own window; Dock back returns it to the main window.
+- Pop-out windows reopen where you left them the next time the app starts.
 
 ### Fixed
 
