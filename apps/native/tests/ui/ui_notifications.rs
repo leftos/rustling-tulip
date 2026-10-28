@@ -18,7 +18,6 @@ fn attention(id: &str, reason: AttentionReason) -> DaemonMessage {
     DaemonMessage::Attention {
         session_id: id.to_owned(),
         reason,
-        alert_id: None,
     }
 }
 

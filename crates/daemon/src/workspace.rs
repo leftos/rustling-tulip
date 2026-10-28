@@ -421,7 +421,6 @@ mod tests {
                 appearance: AppearanceOverrides::default(),
                 last_agent: None,
                 last_spawn_config: None,
-                spoken_name: None,
             },
             // The case that matters: the branch is already there, because a
             // leftover worktree always has one.

@@ -303,7 +303,6 @@ mod tests {
         model.apply(&DaemonMessage::Attention {
             session_id: id.to_owned(),
             reason: AttentionReason::Error,
-            alert_id: None,
         });
     }
 

@@ -227,7 +227,6 @@ mod tests {
             appearance: protocol::AppearanceOverrides::default(),
             last_agent: None,
             last_spawn_config: None,
-            spoken_name: None,
         }
     }
 

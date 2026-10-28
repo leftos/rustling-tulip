@@ -1102,7 +1102,6 @@ mod tests {
                     appearance: AppearanceOverrides::default(),
                     last_agent: None,
                     last_spawn_config: None,
-                    spoken_name: None,
                 });
             })
             .expect("register repo");
@@ -1166,7 +1165,6 @@ mod tests {
                     appearance: AppearanceOverrides::default(),
                     last_agent: None,
                     last_spawn_config: None,
-                    spoken_name: None,
                 });
             })
             .expect("register repo");

@@ -101,7 +101,6 @@ fn excluded_leaf_shows_the_marker_and_no_badge(cx: &mut TestAppContext) {
         h.send(DaemonMessage::Attention {
             session_id: id.to_owned(),
             reason: AttentionReason::AwaitingInput,
-            alert_id: None,
         });
     }
 
@@ -157,7 +156,6 @@ fn attention_marks_leaf_and_container_and_clears_on_click_or_working(cx: &mut Te
     let flag = DaemonMessage::Attention {
         session_id: "s1".to_owned(),
         reason: AttentionReason::AwaitingInput,
-        alert_id: None,
     };
 
     h.send(flag.clone());
@@ -270,7 +268,6 @@ fn attention_leaf_draws_its_badge_and_asking_glyph(cx: &mut TestAppContext) {
         h.send(DaemonMessage::Attention {
             session_id: id.to_owned(),
             reason: AttentionReason::AwaitingInput,
-            alert_id: None,
         });
     }
     for id in ["s1", "s2"] {
@@ -296,7 +293,6 @@ fn headless_leaf_click_only_clears_attention(cx: &mut TestAppContext) {
     h.send(DaemonMessage::Attention {
         session_id: "hl".to_owned(),
         reason: AttentionReason::AwaitingInput,
-        alert_id: None,
     });
     h.sent();
     assert_eq!(home_of(&mut h, "hl").map(|home| home.2), Some(true));
@@ -1246,7 +1242,6 @@ fn repo_container_draws_its_icon_tag_count_and_attention_badge(cx: &mut TestAppC
     h.send(DaemonMessage::Attention {
         session_id: "s1".to_owned(),
         reason: AttentionReason::AwaitingInput,
-        alert_id: None,
     });
     assert!(
         drawn(&mut h, "container-repo:r1-badge"),

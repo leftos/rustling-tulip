@@ -2244,7 +2244,6 @@ fn an_overlay_in_a_popout_does_not_block_the_main_window(cx: &mut TestAppContext
     h.send(DaemonMessage::Attention {
         session_id: "s2".to_owned(),
         reason: AttentionReason::AwaitingInput,
-        alert_id: None,
     });
 
     assert_eq!(

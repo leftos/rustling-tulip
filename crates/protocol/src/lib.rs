@@ -458,9 +458,6 @@ pub struct RepoEntry {
     /// never secret values.
     #[serde(default)]
     pub last_spawn_config: Option<SpawnConfig>,
-    /// The name spoken alerts say for this container; `None` speaks its name.
-    #[serde(default)]
-    pub spoken_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -489,9 +486,6 @@ pub struct WorkspaceEntry {
     /// references, never secret values.
     #[serde(default)]
     pub last_spawn_config: Option<SpawnConfig>,
-    /// The name spoken alerts say for this container; `None` speaks its name.
-    #[serde(default)]
-    pub spoken_name: Option<String>,
 }
 
 /// Tagged reference to either a repo or a workspace by id. Used by the
@@ -769,21 +763,6 @@ pub enum AlertKind {
     Unknown,
 }
 
-/// What made the daemon summarize a session.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum AlertTrigger {
-    /// The agent's turn ended.
-    Stop,
-    /// The agent shows a permission prompt.
-    Permission,
-    /// The agent asks the user a question.
-    Question,
-    /// Forward-compat fallback: a trigger the current build does not know.
-    #[serde(other)]
-    Unknown,
-}
-
 /// Whether a summary came from a model call or from a fixed template.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -797,18 +776,6 @@ pub enum SummarySource {
     Unknown,
 }
 
-/// The verbatim question or permission text a session waits on, never summarized.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PendingAsk {
-    /// What put the prompt up.
-    pub trigger: AlertTrigger,
-    /// The prompt's own text, as the agent wrote it.
-    pub text: String,
-    /// The choice labels the prompt offers, in the order it shows them.
-    #[serde(default)]
-    pub options: Vec<String>,
-}
-
 /// A session's latest summary.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionSummary {
@@ -820,9 +787,6 @@ pub struct SessionSummary {
     /// The longer text a card shows when expanded; may be empty.
     #[serde(default)]
     pub detail: String,
-    /// The prompt the session waits on, verbatim; `None` when it waits on none.
-    #[serde(default)]
-    pub pending: Option<PendingAsk>,
     /// When the summary was made.
     pub updated_at: DateTime<Utc>,
     /// Whether a model call or a fixed template wrote it.
@@ -3615,21 +3579,12 @@ pub enum DaemonMessage {
     Attention {
         session_id: String,
         reason: AttentionReason,
-        /// Set when a `WaitingAlert` with this id follows for the same wait.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        alert_id: Option<String>,
     },
-    /// A one-shot alert for a waiting session, for clients to speak and toast.
+    /// A one-shot alert for a waiting session, for clients to toast.
     WaitingAlert {
-        alert_id: String,
         session_id: String,
-        trigger: AlertTrigger,
         #[serde(default)]
         kind: Option<AlertKind>,
-        /// The spoken name, else the container's name, resolved by the daemon.
-        prefix: String,
-        /// At most 25 words, for the voice.
-        speech: String,
         /// At most 100 characters, for the toast body.
         notification: String,
         source: SummarySource,
@@ -4878,11 +4833,6 @@ mod tests {
             kind: Some(AlertKind::NeedsAnswer),
             headline: "waits for the schema choice".to_string(),
             detail: "Two migrations are open; the agent asks which one runs first.".to_string(),
-            pending: Some(PendingAsk {
-                trigger: AlertTrigger::Question,
-                text: "Which migration goes first?".to_string(),
-                options: vec!["users".to_string(), "billing".to_string()],
-            }),
             updated_at: "2026-10-27T00:00:00Z".parse().expect("a valid timestamp"),
             source: SummarySource::Model,
         };
@@ -4899,16 +4849,12 @@ mod tests {
         .expect("a bare summary decodes");
         assert_eq!(summary.kind, None);
         assert_eq!(summary.detail, "");
-        assert_eq!(summary.pending, None);
     }
 
     #[test]
-    fn an_unknown_alert_kind_trigger_and_source_decode_as_unknown() {
+    fn an_unknown_alert_kind_and_source_decode_as_unknown() {
         let kind: AlertKind = serde_json::from_str(r#""later""#).expect("an unknown kind decodes");
         assert_eq!(kind, AlertKind::Unknown);
-        let trigger: AlertTrigger =
-            serde_json::from_str(r#""later""#).expect("an unknown trigger decodes");
-        assert_eq!(trigger, AlertTrigger::Unknown);
         let source: SummarySource =
             serde_json::from_str(r#""later""#).expect("an unknown source decodes");
         assert_eq!(source, SummarySource::Unknown);
@@ -4917,12 +4863,8 @@ mod tests {
     #[test]
     fn a_waiting_alert_round_trips() {
         let alert = DaemonMessage::WaitingAlert {
-            alert_id: "alert-1".to_string(),
             session_id: "s1".to_string(),
-            trigger: AlertTrigger::Permission,
             kind: Some(AlertKind::NeedsAnswer),
-            prefix: "rustling-tulip".to_string(),
-            speech: "needs your answer on the release branch".to_string(),
             notification: "Needs your answer".to_string(),
             source: SummarySource::Model,
             request_id: Some("req-1".to_string()),
@@ -4930,12 +4872,8 @@ mod tests {
         let json = serde_json::to_string(&alert).expect("an alert serializes");
         let back: DaemonMessage = serde_json::from_str(&json).expect("an alert decodes");
         let DaemonMessage::WaitingAlert {
-            alert_id,
             session_id,
-            trigger,
             kind,
-            prefix,
-            speech,
             notification,
             source,
             request_id,
@@ -4943,50 +4881,11 @@ mod tests {
         else {
             panic!("decoded as another message: {json}");
         };
-        assert_eq!(alert_id, "alert-1");
         assert_eq!(session_id, "s1");
-        assert_eq!(trigger, AlertTrigger::Permission);
         assert_eq!(kind, Some(AlertKind::NeedsAnswer));
-        assert_eq!(prefix, "rustling-tulip");
-        assert_eq!(speech, "needs your answer on the release branch");
         assert_eq!(notification, "Needs your answer");
         assert_eq!(source, SummarySource::Model);
         assert_eq!(request_id, Some("req-1".to_string()));
-    }
-
-    #[test]
-    fn an_attention_without_alert_id_decodes_and_omits_it() {
-        let bare: DaemonMessage = serde_json::from_str(
-            r#"{"type":"attention","session_id":"s1","reason":"awaiting_input"}"#,
-        )
-        .expect("an attention without alert_id decodes");
-        let DaemonMessage::Attention {
-            session_id,
-            reason,
-            alert_id,
-        } = bare
-        else {
-            panic!("decoded as another message");
-        };
-        assert_eq!(session_id, "s1");
-        assert_eq!(reason, AttentionReason::AwaitingInput);
-        assert_eq!(alert_id, None);
-        let json = serde_json::to_value(DaemonMessage::Attention {
-            session_id: "s1".to_string(),
-            reason: AttentionReason::AwaitingInput,
-            alert_id: None,
-        })
-        .expect("an attention serializes");
-        assert!(json.get("alert_id").is_none(), "no alert_id key: {json}");
-    }
-
-    #[test]
-    fn a_repo_entry_without_spoken_name_decodes() {
-        let repo: RepoEntry = serde_json::from_str(
-            r#"{"id":"r1","name":"repo","path":"C:/repo","default_branch":null}"#,
-        )
-        .expect("a repo entry without spoken_name decodes");
-        assert_eq!(repo.spoken_name, None);
     }
 
     fn sample_tab() -> TabEntry {

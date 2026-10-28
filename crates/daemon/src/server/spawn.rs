@@ -2471,7 +2471,6 @@ mod tests {
                     appearance: AppearanceOverrides::default(),
                     last_agent: None,
                     last_spawn_config: None,
-                    spoken_name: None,
                 });
                 s.workspaces.push(protocol::WorkspaceEntry {
                     id: "w1".to_string(),
@@ -2482,7 +2481,6 @@ mod tests {
                     default_use_worktree: true,
                     appearance: AppearanceOverrides::default(),
                     last_spawn_config: None,
-                    spoken_name: None,
                 });
             })
             .expect("register repo and workspace");

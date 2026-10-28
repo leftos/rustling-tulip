@@ -689,11 +689,9 @@ fn session_event_message(event: SessionEvent, connection: u64) -> DaemonMessage 
                 .map(|origin| origin.request_id),
         },
         SessionEvent::Removed(session_id) => DaemonMessage::SessionRemoved { session_id },
-        SessionEvent::Attention { session_id, reason } => DaemonMessage::Attention {
-            session_id,
-            reason,
-            alert_id: None,
-        },
+        SessionEvent::Attention { session_id, reason } => {
+            DaemonMessage::Attention { session_id, reason }
+        }
         SessionEvent::AgentExited { session_id } => DaemonMessage::AgentExited { session_id },
     }
 }
