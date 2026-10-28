@@ -8,6 +8,7 @@
 //! [`HeadlessEvent`]s.
 
 mod activity;
+mod chat_entries;
 mod hooks;
 mod import;
 pub mod options;
@@ -30,12 +31,12 @@ use agent_api::{
 };
 use options::{ClaudeProvider, PermissionMode};
 use protocol::{
-    AccentToken, AgentCaps, AgentDescriptor, AgentId, AgentTexts, CharRange, ChipRule, Choice,
-    ChoiceStyle, FieldKind, FieldOverride, FieldRule, OptionField, OptionValue, SessionMember,
-    SessionStatus, ShiftEnter, SpawnPlacement, TitleRules,
+    AccentToken, AgentCaps, AgentDescriptor, AgentId, AgentTexts, CharRange, ChatEntry, ChipRule,
+    Choice, ChoiceStyle, FieldKind, FieldOverride, FieldRule, OptionField, OptionValue,
+    SessionMember, SessionStatus, ShiftEnter, SpawnPlacement, TitleRules,
 };
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use tracing::debug;
 
@@ -339,6 +340,23 @@ impl Agent for ClaudePlugin {
 
     fn find_conversations(&self, query: &ConversationQuery<'_>) -> Vec<FoundConversation> {
         transcripts::find_conversations(query)
+    }
+
+    fn transcript_path(
+        &self,
+        folder: &Path,
+        conversation_id: &str,
+        rows: &ResolvedRows,
+    ) -> Option<PathBuf> {
+        transcripts::transcript_path(folder, conversation_id, rows)
+    }
+
+    fn chat_entries(
+        &self,
+        line: &str,
+        known: &dyn Fn(&str) -> Option<ChatEntry>,
+    ) -> Vec<ChatEntry> {
+        chat_entries::chat_entries(line, known)
     }
 
     fn interactive_args(

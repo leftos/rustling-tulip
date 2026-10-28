@@ -90,12 +90,13 @@ The mirror follows the session record's conversation id: `SessionStart` with `cl
 
 The rules, from a read of how Claude Desktop rebuilds a session and from the spike:
 
-- Records are sorted by `timestamp`; attachments are written out of order.
+- The plugin turns one line into entries in file order; attachments are written out of order, so placing entries across records by `timestamp` is the mirror's (CV.7), not the plugin's.
 - `user` records with text are user messages. `attachment` records of type `queued_command` are user messages typed mid-turn; those with `commandMode: "task-notification"` are skipped, since the notification arrives again as its own record.
 - A `user` record with `origin.kind: "task-notification"` is a turn nobody typed: a **system row** "Background command `<summary>` completed" or "Agent `<description>` finished" from its `<status>` and `<summary>`. `<bash-input>` and `<bash-stdout>` records are a `!` command: one system row with the command and its output folded.
 - `<pasted_content>` is unwrapped to the pasted text. Slash-command output (`system` `local_command`) has its SGR escapes stripped and shows as a system row.
 - `assistant` text blocks are answers; `tool_use` blocks are tool cards, and the `tool_result` with the same `tool_use_id` attaches to its card. An AskUserQuestion result's `toolUseResult.answers` becomes a **receipt**; a plan approval becomes a receipt too.
-- A signed, empty `thinking` block is a thinking row at its place; its duration comes from the screen's `thought for Ns` when seen (D-L). `redacted_thinking` and unsigned thinking are dropped.
+- A signed, empty `thinking` block is a thinking row at its place; its duration is the record's own `thinkingDurationMs`, rounded to seconds (D-L). `redacted_thinking` and unsigned thinking are dropped.
+- A task notification's row is its own `<summary>` sentence, shown as written with its first quoted name as code; a monitor event's notification is a row the same way. A `system` `turn_duration` record is the turn's end, with its `durationMs`. An interrupt (`[Request interrupted by user]`, with or without `for tool use`) is its own record and a system row "Interrupted".
 - Compact summaries (`isCompactSummary`), `attribution-snapshot`, `file-history-*`, `mode`, `api-request*` and the other non-message records are dropped; a `compact_boundary` becomes the system row "Conversation compacted".
 - A permission amend (the text block beside a tool_result) is a user message; a deny is the tool card's error result plus the system row "Interrupted".
 - Subagent records live in `<id>/subagents/agent-<id>.jsonl` and are not merged into the chat; an `Agent` tool card shows the subagent's description and status, and opening its stream is RT-30's.
@@ -251,7 +252,7 @@ Each recommendation of the code map behind this design, taken by the orchestrato
 - **D-K The v1 dialog set.** Orchestrator decision (not an owner ruling): cards for permission, AskUserQuestion (single choice, multi-select, Type something, review), plan approval, folder trust and the Heads up notice; AskUserQuestion with previews, Rewind, the detailed transcript, `/model` and `/btw` disable the composer with "Open the terminal to answer this".
 
   Rationale: the cards cover every prompt the spike saw in normal work, and the rest are rare or need a preview pane a phone cannot draw well.
-- **D-L Thinking rows come from the screen.** Orchestrator decision (not an owner ruling): a thinking row sits where the transcript's signed, empty `thinking` block is, and shows the duration the screen's `thought for Ns` gave, or none. Rationale: the transcript holds no thinking text, and the screen holds no position.
+- **D-L Thinking rows come from the transcript.** Orchestrator decision (not an owner ruling): a thinking row sits where the transcript's signed, empty `thinking` block is, and shows the record's `thinkingDurationMs` rounded to seconds, or none when the record lacks it. Rationale: every signed thinking record carries its duration, so the transcript gives both the place and the time and the screen is not needed.
 
 Further decisions made in this redesign (D-M to D-S) sit beside the parts they decide, above.
 

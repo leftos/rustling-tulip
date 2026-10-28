@@ -32,7 +32,7 @@ pub use screen_rules::{
 
 use chrono::{DateTime, Utc};
 use protocol::{AgentDescriptor, FieldKind, OptionField, OptionValue, OptionValues, SessionChip};
-use protocol::{PendingInput, SessionMember, SessionStatus};
+use protocol::{ChatEntry, PendingInput, SessionMember, SessionStatus};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::fmt;
@@ -595,6 +595,30 @@ pub trait Agent: Send + Sync + 'static {
         Vec::new()
     }
 
+    /// The file the agent keeps conversation `conversation_id` in, for a
+    /// session that ran in `folder` with resolved rows `rows`; `None` for an
+    /// agent with no transcript to mirror, which then offers no chat.
+    fn transcript_path(
+        &self,
+        _folder: &Path,
+        _conversation_id: &str,
+        _rows: &ResolvedRows,
+    ) -> Option<PathBuf> {
+        None
+    }
+
+    /// What one complete transcript line adds to the chat, in order. `known`
+    /// returns the entry already held under an id, so a record that completes
+    /// an earlier entry (a tool result) answers with the whole updated entry.
+    /// A line that adds nothing or does not parse yields none.
+    fn chat_entries(
+        &self,
+        _line: &str,
+        _known: &dyn Fn(&str) -> Option<ChatEntry>,
+    ) -> Vec<ChatEntry> {
+        Vec::new()
+    }
+
     /// The argv passed to the CLI for an interactive (PTY-attached) session.
     /// Does not include the executable name itself — that is resolved by
     /// [`AgentPlugin::resolve_program`].
@@ -775,6 +799,18 @@ pub trait AgentPlugin: Send + Sync {
     /// See [`Agent::find_conversations`].
     fn find_conversations(&self, query: &ConversationQuery<'_>) -> Vec<FoundConversation>;
 
+    /// See [`Agent::transcript_path`].
+    fn transcript_path(
+        &self,
+        folder: &Path,
+        conversation_id: &str,
+        rows: &ResolvedRows,
+    ) -> Option<PathBuf>;
+
+    /// See [`Agent::chat_entries`].
+    fn chat_entries(&self, line: &str, known: &dyn Fn(&str) -> Option<ChatEntry>)
+    -> Vec<ChatEntry>;
+
     /// [`Agent::interactive_args`] over `opts` decoded.
     fn interactive_args(
         &self,
@@ -941,6 +977,23 @@ impl<A: Agent> AgentPlugin for A {
 
     fn find_conversations(&self, query: &ConversationQuery<'_>) -> Vec<FoundConversation> {
         Agent::find_conversations(self, query)
+    }
+
+    fn transcript_path(
+        &self,
+        folder: &Path,
+        conversation_id: &str,
+        rows: &ResolvedRows,
+    ) -> Option<PathBuf> {
+        Agent::transcript_path(self, folder, conversation_id, rows)
+    }
+
+    fn chat_entries(
+        &self,
+        line: &str,
+        known: &dyn Fn(&str) -> Option<ChatEntry>,
+    ) -> Vec<ChatEntry> {
+        Agent::chat_entries(self, line, known)
     }
 
     fn interactive_args(
@@ -1372,6 +1425,18 @@ mod tests {
             rows: &rows,
         };
         assert_eq!(plugin.find_conversations(&query), []);
+    }
+
+    #[test]
+    fn chat_methods_default_to_no_transcript_and_no_entries() {
+        let plugin: &dyn AgentPlugin = &Bare;
+        let rows = ResolvedRows::default();
+        assert_eq!(
+            plugin.transcript_path(Path::new(r"D:\proj"), "abc", &rows),
+            None
+        );
+        let line = r#"{"type":"user","uuid":"u1","message":{"content":"hi"}}"#;
+        assert_eq!(plugin.chat_entries(line, &|_| None), []);
     }
 
     #[test]
