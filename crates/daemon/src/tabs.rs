@@ -1053,8 +1053,9 @@ pub enum MovedTab {
     Removed(String),
 }
 
-/// Move a pane within a tab or across tabs. A move within one tab, a swap
-/// included, is a hand arrangement and touches the tab; a move across tabs
+/// Move a pane within a tab or across tabs. A move within one tab that changes
+/// its grid, a swap included, is a hand arrangement and touches the tab; one
+/// that leaves the grid as it was changes nothing and reports no tab. A move across tabs
 /// rebuilds each untouched side over its new pane count, unless it carries
 /// [`PaneMove::touch`], which touches the destination instead. On error `tabs`
 /// may be half-changed, so the caller runs this inside a mutation that rolls
@@ -1070,6 +1071,7 @@ pub fn move_pane(tabs: &mut Vec<TabEntry>, mv: &PaneMove<'_>) -> anyhow::Result<
 fn move_within_tab(tabs: &mut [TabEntry], mv: &PaneMove<'_>) -> anyhow::Result<Vec<MovedTab>> {
     let tab = find_tab_mut(tabs, mv.src_tab_id)?;
     let grid = grid_or_err_mut(tab)?;
+    let before = grid.clone();
     if mv.edge == PaneDropEdge::Replace {
         swap_pane_sessions(grid, mv.src_pane_id, mv.dst_pane_id)?;
     } else {
@@ -1078,6 +1080,9 @@ fn move_within_tab(tabs: &mut [TabEntry], mv: &PaneMove<'_>) -> anyhow::Result<V
             return Err(anyhow!("cannot move the only pane within the same tab"));
         }
         insert_adjacent(grid, mv.dst_pane_id, mv.edge, extracted)?;
+    }
+    if *grid == before {
+        return Ok(Vec::new());
     }
     touch(tab);
     Ok(vec![MovedTab::Updated(tab.clone())])
@@ -2925,6 +2930,57 @@ mod tests {
         .expect("swap within the tab");
         assert_eq!(tabs[0].picked_layout, None, "a move clears the flag");
         assert_eq!(tabs[1].picked_layout, None, "a swap clears the flag");
+    }
+
+    #[test]
+    fn a_move_that_rebuilds_the_same_grid_keeps_the_picked_layout_and_returns_no_events() {
+        let auto = RearrangeLayout::Grid {
+            cols: 0,
+            aspect: None,
+        };
+        let mut tabs = vec![picked_tab("T", &bound(&["a", "b"]), auto)];
+        let before = grid_of(&tabs[0]).clone();
+        let moved = move_pane(
+            &mut tabs,
+            &pane_move(("T", "a"), ("T", "b"), PaneDropEdge::Left),
+        )
+        .expect("move within the tab");
+        assert_eq!(
+            grid_of(&tabs[0]),
+            &before,
+            "the drop rebuilds the same grid"
+        );
+        assert_eq!(tabs[0].picked_layout, Some(auto), "the pick stays");
+        assert_eq!(moved, Vec::new(), "nothing changed, so nothing is reported");
+    }
+
+    #[test]
+    fn a_same_binding_replace_keeps_the_picked_layout_and_returns_no_events() {
+        let both_empty = vec![("a".to_string(), None), ("b".to_string(), None)];
+        let same_session = vec![
+            ("a".to_string(), Some("s-1".to_string())),
+            ("b".to_string(), Some("s-1".to_string())),
+        ];
+        for panes in [both_empty, same_session] {
+            let mut tabs = vec![picked_tab("T", &panes, RearrangeLayout::Horizontal)];
+            let before = grid_of(&tabs[0]).clone();
+            let moved = move_pane(
+                &mut tabs,
+                &pane_move(("T", "a"), ("T", "b"), PaneDropEdge::Replace),
+            )
+            .expect("swap within the tab");
+            assert_eq!(
+                grid_of(&tabs[0]),
+                &before,
+                "{panes:?}: the swap changes nothing"
+            );
+            assert_eq!(
+                tabs[0].picked_layout,
+                Some(RearrangeLayout::Horizontal),
+                "{panes:?}: the pick stays"
+            );
+            assert_eq!(moved, Vec::new(), "{panes:?}: nothing is reported");
+        }
     }
 
     #[test]

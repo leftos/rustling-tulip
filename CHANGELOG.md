@@ -11,6 +11,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 ### Fixed
 
 - The installer stops a running daemon only after it proves it is the real one, so the daemon's token never goes to another program listening on its port.
+- Dropping a pane back where it already was no longer stops the tab arranging itself automatically.
 - An agent that starts through a `.cmd` file refuses to launch, saying why, when a prompt, path or setting holds a character cmd would run or rewrite.
 
 ## v0.4.0-alpha
