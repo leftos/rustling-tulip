@@ -301,6 +301,49 @@ fn settings_takes_the_dialog_frames_sizes(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn settings_panel_keeps_one_size_across_categories(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.keys("ctrl-,");
+    let first = h.bounds("settings-panel").size;
+    for selector in TAB_SELECTORS {
+        h.click_on(selector);
+        let size = h.bounds("settings-panel").size;
+        assert_eq!(
+            size, first,
+            "{selector} resizes the panel: {first:?} became {size:?}"
+        );
+    }
+}
+
+/// The thumb the Settings content's scrollbar shows now, after a frame.
+fn scroll_thumb(h: &mut Harness<'_>) -> Option<rustling_tulip_native::Thumb> {
+    h.bounds("settings-content");
+    let root = h.root.clone();
+    h.cx.update(|_, cx| root.read(cx).settings_scroll_thumb())
+}
+
+#[gpui::test]
+fn the_general_page_shows_a_scrollbar_when_it_overflows_and_the_short_page_shows_none(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    // The window the Settings shots are taken at.
+    h.cx.simulate_resize(gpui::size(px(1000.0), px(640.0)));
+    h.keys("ctrl-,");
+    let viewport = h.bounds("settings-content").size.height / px(1.0);
+    let thumb = scroll_thumb(&mut h).expect("General overflows, so it shows a thumb");
+    assert!(
+        thumb.top == 0.0 && thumb.height >= 24.0 && thumb.height < viewport,
+        "a thumb at the top, shorter than the {viewport} px viewport: {thumb:?}"
+    );
+
+    h.click_on("settings-tab-app-title");
+    assert_eq!(scroll_thumb(&mut h), None, "App title fits, so no thumb");
+}
+
+#[gpui::test]
 fn down_moves_to_next_tab(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);
@@ -432,6 +475,7 @@ fn copy_on_select_setting_saved_and_honoured(cx: &mut TestAppContext) {
     assert_eq!(h.clipboard().as_deref(), Some("hello"), "on by default");
 
     h.keys("ctrl-,");
+    h.scroll_into_view("settings-content", "settings-terminal-copy-on-selection");
     h.click_on("settings-terminal-copy-on-selection");
     assert_eq!(
         saved_ui(&dir)["general"]["copy_on_select"],
@@ -459,6 +503,7 @@ fn the_open_text_externally_row_toggles_and_saves(cx: &mut TestAppContext) {
         h.bounds("settings-general-open-text-externally").origin.x >= px(0.0),
         "the row is drawn"
     );
+    h.scroll_into_view("settings-content", "settings-general-open-text-externally");
     h.click_on("settings-general-open-text-externally");
     assert_eq!(
         saved_ui(&dir)["general"]["open_text_externally"],

@@ -34,6 +34,7 @@ use crate::remote_access::{
     autostart_read_failure_line, cert_line, controls_enabled, parse_port, state_line,
     toggle_message,
 };
+use crate::scrollbar::{Scrollbar, Thumb};
 use crate::section::section;
 use crate::session_menu::{backdrop, dialog_button};
 use crate::sidebar::{LeafDensity, NotifySkip, RepoSort, SessionsUnderRepos, SidebarView};
@@ -62,6 +63,9 @@ const PANEL_MARGIN_Y: f32 = 24.0;
 /// The modal's width: the tab list, the content and its padding, and the
 /// card's 1 px edges.
 const PANEL_WIDTH: f32 = TAB_LIST_WIDTH + CONTENT_WIDTH + 2.0 * CONTENT_PAD_X + 2.0;
+/// The panel's height whatever the category, so switching categories never
+/// resizes it; a taller category scrolls.
+const PANEL_HEIGHT: f32 = 640.0;
 /// The size of a hint.
 const HINT_SIZE: f32 = 12.5;
 /// The corner radius of a text link, and of the title preview's chip.
@@ -871,6 +875,13 @@ impl RootView {
     #[must_use]
     pub fn settings_tab(&self) -> &'static str {
         self.settings_tab.label(self.agents())
+    }
+
+    /// The Settings content's scrollbar thumb as the last frame laid it
+    /// out, or `None` while the shown page fits.
+    #[must_use]
+    pub fn settings_scroll_thumb(&self) -> Option<Thumb> {
+        self.settings_scroll.thumb()
     }
 
     /// The keep-awake choice selected, or `None` while the daemon has not
@@ -2277,6 +2288,7 @@ impl RootView {
         self.open_appearance_editor(Level::App, window, cx);
         if self.settings_open() {
             self.settings_tab = SettingsTab::General;
+            self.settings_scroll = Scrollbar::default();
             self.settings_control = None;
             self.settings_tabs_focus.focus(window);
             self.arm_pairing_tick(window, cx);
@@ -2677,19 +2689,28 @@ impl RootView {
             .child(self.settings_tab_list(window, cx))
             .child(
                 div()
-                    .id("settings-content")
-                    .debug_selector(|| "settings-content".to_owned())
-                    .overflow_y_scroll()
+                    .relative()
                     .flex()
-                    .flex_col()
                     .flex_none()
-                    .w(px(CONTENT_WIDTH + 2.0 * CONTENT_PAD_X))
-                    .px(px(CONTENT_PAD_X))
-                    .py(px(CONTENT_PAD_Y))
-                    .children(self.settings_content(window, cx)),
+                    .child(
+                        div()
+                            .id("settings-content")
+                            .debug_selector(|| "settings-content".to_owned())
+                            .overflow_y_scroll()
+                            .track_scroll(self.settings_scroll.handle())
+                            .flex()
+                            .flex_col()
+                            .flex_none()
+                            .w(px(CONTENT_WIDTH + 2.0 * CONTENT_PAD_X))
+                            .px(px(CONTENT_PAD_X))
+                            .py(px(CONTENT_PAD_Y))
+                            .children(self.settings_content(window, cx)),
+                    )
+                    .child(self.settings_scroll.overlay()),
             );
+        let cap = window.viewport_size().height / px(1.0) - 2.0 * PANEL_MARGIN_Y;
         let panel = dialog_card("settings-panel", PANEL_WIDTH)
-            .max_h(window.viewport_size().height - px(2.0 * PANEL_MARGIN_Y))
+            .h(px(PANEL_HEIGHT.min(cap)))
             .track_focus(&self.appearance_focus)
             .child(dialog_title_bar("Settings", close))
             .child(body)

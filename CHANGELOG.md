@@ -11,6 +11,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Fixed
 
+- The Settings window keeps one size whichever category you pick, and scrolls a long one.
 - The installer stops a running daemon only after it proves it is the real one, so the daemon's token never goes to another program listening on its port.
 - Dropping a pane back where it already was no longer stops the tab arranging itself automatically.
 - A watched VS Code workspace file edited while the daemon was down is applied when it starts.

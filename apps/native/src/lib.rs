@@ -91,6 +91,7 @@ mod repo_remove_view;
 mod run_confirm;
 mod sc_writes;
 mod scrollback_load;
+mod scrollbar;
 mod section;
 mod session_actions;
 mod session_menu;
@@ -250,6 +251,7 @@ pub use crate::popouts::{OpenOutcome, PopoutKey, SavedPopout};
 pub use crate::preset_wizard::{LaunchButton, NextButton};
 pub use crate::quit_view::QuitFn;
 pub use crate::recover_view::RecoverRow;
+pub use crate::scrollbar::Thumb;
 pub use crate::settings_view::LaunchCommandRow;
 pub use crate::shell_marks::{ShellDot, ShellStatus};
 pub use crate::sidebar::{
@@ -805,6 +807,8 @@ pub struct RootView {
     settings_tab: settings_view::SettingsTab,
     /// The Settings tab list's keyboard focus, where Up and Down move.
     settings_tabs_focus: FocusHandle,
+    /// The Settings content's scroll position and scrollbar.
+    settings_scroll: scrollbar::Scrollbar,
     /// The Settings control Tab or a click last moved to; it has the
     /// keyboard while the modal's own focus does.
     settings_control: Option<settings_view::SettingsControl>,
@@ -1276,6 +1280,7 @@ impl RootView {
             appearance_focus: cx.focus_handle(),
             settings_tab: settings_view::SettingsTab::default(),
             settings_tabs_focus: cx.focus_handle(),
+            settings_scroll: scrollbar::Scrollbar::default(),
             settings_control: None,
             settings_ring_control: None,
             keep_awake: None,

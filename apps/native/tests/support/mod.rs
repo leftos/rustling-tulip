@@ -16,8 +16,8 @@ use daemon_client::device_tokens::MemoryTokens;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use gpui::{
     App, Bounds, Entity, InputHandler, KeyDownEvent, Keystroke, Modifiers, MouseButton,
-    MouseDownEvent, MouseUpEvent, Pixels, Point, TestAppContext, VisualTestContext, Window, point,
-    px,
+    MouseDownEvent, MouseUpEvent, Pixels, Point, ScrollDelta, ScrollWheelEvent, TestAppContext,
+    TouchPhase, VisualTestContext, Window, point, px,
 };
 use protocol::{
     ClientMessage, DaemonMessage, GridNode, RepoEntry, SessionSnapshot, SplitDirection, TabEntry,
@@ -1716,6 +1716,35 @@ impl<'a> Harness<'a> {
     pub fn click_on(&mut self, selector: &str) {
         let at = self.center(selector);
         self.click(at, Modifiers::none());
+    }
+
+    /// Scrolls `container` until what `selector` tags lies inside its bounds,
+    /// so a click can reach a row below the fold.
+    pub fn scroll_into_view(&mut self, container: &str, selector: &str) {
+        let at = self.center(container);
+        for _ in 0..50 {
+            let outer = self.bounds(container);
+            let inner = self.bounds(selector);
+            let dy = if inner.bottom() > outer.bottom() {
+                outer.bottom() - inner.bottom()
+            } else if inner.top() < outer.top() {
+                outer.top() - inner.top()
+            } else {
+                return;
+            };
+            self.cx.simulate_event(ScrollWheelEvent {
+                position: at,
+                delta: ScrollDelta::Pixels(point(px(0.0), dy)),
+                modifiers: Modifiers::none(),
+                touch_phase: TouchPhase::Moved,
+            });
+            self.cx.run_until_parked();
+        }
+        let (outer, inner) = (self.bounds(container), self.bounds(selector));
+        assert!(
+            inner.top() >= outer.top() && inner.bottom() <= outer.bottom(),
+            "{selector} does not show in {container} after 50 scrolls: {inner:?} in {outer:?}"
+        );
     }
 
     /// Opens the Shell… folder dialog through the sessions toolbar's ⋯ menu.
