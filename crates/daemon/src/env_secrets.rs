@@ -67,7 +67,7 @@ fn index_lock() -> MutexGuard<'static, ()> {
 /// The most UTF-16 code units Windows Credential Manager takes in one generic
 /// credential's blob: `CRED_MAX_CREDENTIAL_BLOB_SIZE` (2,560) bytes of UTF-16,
 /// which `windows-native-keyring-store` encodes the value as.
-const MAX_VALUE_UNITS: usize = 1280;
+pub(crate) const MAX_VALUE_UNITS: usize = 1280;
 
 /// How long an unreferenced secret is kept before a startup cleanup may delete
 /// it: long enough to cover a spawn sealed by an older daemon instance moments
@@ -363,6 +363,23 @@ fn context() -> anyhow::Result<Context> {
         service: service_for(&config),
         index: config.join(INDEX_FILE),
     })
+}
+
+/// The service every credential of this config dir is filed under, for the
+/// other modules that keep their own entries in the same store.
+///
+/// # Errors
+///
+/// Fails when the config dir cannot be resolved.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "only the summarizer's key store calls it, and nothing outside tests calls that yet"
+    )
+)]
+pub(crate) fn service() -> anyhow::Result<String> {
+    Ok(service_for(&paths::config_dir()?))
 }
 
 /// The service entries are filed under for `config_dir`: the plain name, or its

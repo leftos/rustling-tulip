@@ -32,6 +32,7 @@ A value Credential Manager cannot take (over its credential size limit) refuses 
 `crates/daemon/src/env_secrets.rs`:
 
 - Values live in Windows Credential Manager through `keyring-core` and `windows-native-keyring-store` (default features off, so no `search`). The service is `rustling-tulip`, or `rustling-tulip:<first 8 hex of the SHA-256 of the config dir path>` while `RUSTLING_TULIP_CONFIG_DIR` is set, so an isolated daemon (the e2e tier) never shares entries with the user's own. The user name is `env/<KEY>/<id>`, so an entry can be recognised and deleted in Credential Manager.
+- The Dashboard summarizer's provider keys share the service but have their own fixed user name, `summarizer/<provider id>`, and no index entry, so the unreferenced-secret sweep never touches them (`crates/daemon/src/summarizer/keys.rs`).
 - `<config dir>/env-secrets.json` indexes `{id, key, created_at}` per stored value, never the value, written through a temp file and rename (`secret::write_private`) under one lock covering every read-modify-write. The index is how the daemon knows which ids exist.
 - `seal` reuses an indexed id with the same key and an equal stored value, else stores a new id; one entry per distinct value however many spawns use it. `open` reads a value back as a redacting `user_env::Secret`; `delete` removes the entry and its index line. `Debug` on everything prints ids and keys only.
 
