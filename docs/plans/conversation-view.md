@@ -1,217 +1,340 @@
-# Conversation view (GUI mode)
+# Conversation view: the chat mirror
 
-Show a Claude session as a chat instead of the terminal UI: the user's messages, the agent's answers and reasoning, one card per tool call, and permission requests and questions answered with buttons. A session switches between terminal and conversation view and keeps its conversation across the switch.
+Show a Claude session as a chat beside its terminal: the user's messages, the agent's answers, one card per tool call, quiet rows for turns nobody typed, and the session's prompts answered with buttons. The chat is a **mirror** over the live terminal session: the terminal stays the source of truth, and the desktop terminal and a phone chat of the same session can be open at once.
 
-Index line: [MAIN.md](./MAIN.md), "Ideas needing a design pass". Origin and VelaTerm's prior art: [borrowed-ideas.md](./borrowed-ideas.md), second item. Billing: [gui-mode-billing.md](../spikes/gui-mode-billing.md). The mobile app's MA9 ([mobile-app.md](./mobile-app.md)) is built on this.
+The same entry stream feeds two more surfaces planned here: the **running-work strip** over the composer (RT-107) and the **summary view**, one line per stretch of work, expandable into the chat (RT-111).
 
-## Rulings
+Linear: RT-51 (the mirror, SV.1 and SV.2), RT-107 (SV.3), RT-111 (SV.4), on the feature branch `feat/chat-mirror`. Roadmap: [off-orca.md](./off-orca.md), "Session views". Evidence: [spikes/chat-mirror-tui.md](../spikes/chat-mirror-tui.md) and its screens; mock: [canvases/chat-mirror-tui](./canvases/chat-mirror-tui/index.html).
 
-- **Superseded in part: the chat is a mirror over the live terminal session** (owner ruling on RT-51; [off-orca.md](./off-orca.md), SV.1–SV.3). Entries come from the transcript, prompts from hook `pending_input`, and messages and answers are typed into the PTY, so terminal and chat of one session can be open at once.
+Status engine: [screen-status.md](./screen-status.md). Summarizer: [dashboard.md](./dashboard.md). The phone's chat (RT-109, PW.10 in [mobile-app.md](./mobile-app.md)) is one more client of the same messages.
 
-  The stream peer and view switch below are no longer the plan; this file is redesigned around the mirror before any CV step is briefed, keeping what still applies (the entry model, transcript seeding, prompt cards, the Markdown splitter).
-- A session remembers its last view, kept on the daemon's session; a new Claude session starts in the terminal view (user).
-- GUI mode runs through the user's own logged-in `claude` binary, for personal use only, and the terminal view stays the fallback (billing spike).
-- Claude only. Codex's app-server and Cursor stay terminal-only; the toggle is not offered for them.
+## Owner rulings
+
+**2026-10-11.** "The chat view is a mirror over the live terminal session, not the stream-peer view switch.
+
+The terminal stays the source of truth: entries come from tailing the session's transcript JSONL (the tailer RT-98 builds), prompts come from hook `pending_input` (RT-25), messages are typed into the PTY (bracketed paste, then Enter), and answers are typed as keys (Orca's proven rule: the option's number, never its label; the "Type something" row then the text; multi-select toggles, then Tab to Submit).
+
+The desktop terminal and a phone chat of the same session can be open at once. `docs/plans/conversation-view.md` is redesigned around this before any CV step is briefed; the stream peer stays a later option for headless-style sessions. This wave is a feature branch, `feat/chat-mirror`. Design: `docs/plans/off-orca.md`, SV.1–SV.3."
+
+**2026-10-21** (from the TUI spike and its mock). "Architecture: keep the mirror, add a screen engine. State from a herdr-style rule manifest over a rendered screen (regions, priorities, `not` guards), dialog options from collie-style parsers (194 pane fixtures), history from the transcript, live text from the MessageDisplay hook. Not the stdio stream peer, not a hybrid.
+
+Composer during a terminal dialog: the typed message rides on the answer, "Yes, and tell Claude this" (Tab-amend) or "No, and tell Claude this" (deny, then send it). The chat never types a message into the PTY while a dialog is up; nothing is held by the daemon. Live answers: stream completed lines from MessageDisplay (reordered by `index`), ahead of the terminal.
+
+Turns nobody typed (agent hand-back, finished background shell, `!` command): quiet centred system rows. The Heads up notice is pinned over the composer with its keys until answered."
+
+Earlier owner rulings that still apply:
+
+- A session remembers its last view, and a new Claude session starts in the terminal view. Where the memory is kept is D-H below.
+- The chat is offered for Claude sessions only. The app asks the agent's plugin for the mirror's parts (transcript parser, dialog parsers, answer keys), and only the Claude plugin supplies them.
 
 ## Terms
 
-> **Superseded:** only **Entry** is still built on. The stream peer, the control request/response pair and the view switch are the dropped design — the chat mirrors the live terminal session (RT-51, [off-orca.md](./off-orca.md) SV.1–SV.3), reading the transcript and typing prompts and answers into the same PTY.
+- **Chat entry**: one item of the chat (a user message, an answer, a thinking row, a tool card, a system row, a receipt, a turn end), carried on the wire as `ChatEntry` and upserted by id.
+- **Transcript tailer**: the daemon's reader of a growing JSONL file from a byte offset, which hands each complete new line to its consumer.
+- **Dialog parser**: a pure function of the plugin's that reads the rendered screen's rows and returns the dialog on it (kind, subject, numbered options, flags), in the manner of collie's parsers.
+- **Answer recipe**: the key sequence the plugin gives for one answer to one dialog kind (a digit; Tab, text, Enter; toggles then submit), typed by the daemon and checked against the screen after each group of keys.
+- **Composer state**: what the terminal's input area can take right now, read from the screen: ready (empty box), working (empty box, a turn running), draft (the box holds text), dialog, overlay.
+- **Receipt**: the entry an answered prompt leaves in the chat, its question and the answer given.
+- **Running-work strip**: the row over the composer listing the session's running subagents, background shells and the next wakeup.
+- **Stretch**: a run of chat entries the summary view shows as one line: a turn, or a window of activity.
 
-- **Terminal view**: today's interactive session, `claude` in a ConPTY under `rt-tracer.exe`.
-- **Conversation view**: the same session driven by a **stream peer**, a `claude --print --input-format stream-json --output-format stream-json` child the daemon writes JSON lines to and reads JSON lines from.
-- **Control request / response**: the out-of-band JSON lines on the stream peer's stdio that carry permission prompts, interrupts and setting changes, matched by `request_id`.
-- **Entry**: one item of the chat (a user message, an answer, a tool card, a prompt, a notice), carried on the wire and upserted by id.
-- **View switch**: stopping one kind of child and starting the other on the same conversation with `--resume`.
+## Architecture
 
-## Sources
+### One owner per fact
 
-Documented (Claude Code 2.1.x docs, fetched as Markdown):
+Every fact the chat shows has exactly one source. No fact is taken from a second source as a fallback that could disagree with the first.
 
-- `--input-format` takes `text` or `stream-json` "for print mode"; `--replay-user-messages` re-emits stdin user messages on stdout "for acknowledgment" and needs both stream-json formats; `--include-partial-messages` needs `--print` and stream-json output; `--effort` takes `low`, `medium`, `high`, `xhigh`, `max`, `ultracode`.
+| Fact | Source | Why that one |
+|---|---|---|
+| History: user messages, answers, tool calls and results, receipts, turn ends | the session's transcript `<conversation id>.jsonl`, tailed | the only complete and ordered record; it also holds turns taken in the terminal |
+| Session state, composer state, the open dialog and its numbered options | the screen engine's grid for the session (`crates/daemon/src/screen.rs`), read by the plugin's rules and dialog parsers | dialog options exist only on the screen (spike headline 7), and several prompt ends fire no hook (headline 1) |
+| That a prompt is pending, and its structured text | hook `pending_input` (RT-25) | the cheap first signal; Needs You, toasts and the phone read it; it carries the question text and labels unwrapped |
+| Answer text before the message ends | the MessageDisplay hook, line by line, reordered by `index` | the TUI shows a message only when it is complete; the hook is about 10 s ahead (headline 3) |
+| Thinking duration, Interrupted, the Heads up notice, overlays, mid-turn subagent and shell counts | the screen | the transcript has none of them |
 
-  `--permission-mode` takes `default`, `acceptEdits`, `plan`, `auto`, `dontAsk`, `bypassPermissions`; `--session-id` must be a UUID; `--resume` takes an id, a name or a transcript path; `--fork-session` is what makes a resume take a new id. https://code.claude.com/docs/en/cli-reference
-- `--permission-prompt-tool` names "an MCP tool to handle permission prompts in non-interactive mode"; `--permission-prompts host` (the default, v2.1.259+) "sends them to the Agent SDK host or the `--permission-prompt-tool` tool"; `none` denies them. https://code.claude.com/docs/en/cli-reference, https://code.claude.com/docs/en/headless#turn-off-permission-prompts-in-unattended-runs
-- `--max-turns`: "With `--input-format stream-json`, a message still queued when the limit ends a turn stays queued and starts a new turn", so the CLI queues messages written mid-turn. https://code.claude.com/docs/en/cli-reference
-- In `-p`, `/model`, `/effort`, `/fast` take the value as an argument (v2.1.205+). `system/init` carries a `capabilities` array (v2.1.205+, e.g. `interrupt_receipt_v1`, `interrupt_cancel_queued_v1`); `system/api_retry` reports retries; SIGINT ends a turn, SIGTERM leaves it unfinished and exits 143. https://code.claude.com/docs/en/headless
-- The SDK talks to the CLI over stdio with `control_request` (CLI → host, e.g. a permission check, carrying `request_id` and a `request` object) and `control_response` (host → CLI, echoing `request_id`). The `Query` methods `interrupt()`, `setPermissionMode()`, `setModel()`, `applyFlagSettings({effortLevel})` work "in streaming input mode only".
+**Orchestrator decision (not an owner ruling), D-M: four sources, one owner each.** The 2026-10-11 ruling names hook `pending_input` as the source of prompts, and the 2026-10-21 ruling names collie-style parsers as the source of dialog options. Both hold: `pending_input` says a prompt exists and gives its text for Needs You and the card's wording, and the screen's dialog parser gives the numbered options the keys address and decides whether a dialog is up at all.
 
-  `SDKUserMessage` is `{type: "user", message, parent_tool_use_id, shouldQuery?, …}`; `SDKResultMessage` carries `total_cost_usd`, `usage`, `modelUsage`, `permission_denials`, `queued_turn_count`. https://code.claude.com/docs/en/agent-sdk/typescript
-- A permission callback gets the tool name, its input and `suggestions` (`PermissionUpdate` entries; echoing one with the `localSettings` destination back in `updatedPermissions` is "allow always"); it answers `{behavior: "allow", updatedInput}` or `{behavior: "deny", message}` and "can stay pending indefinitely".
+A card is drawn from the parser's reading; where the hook's `PendingQuestion` text matches the parsed question, the card shows the hook's unwrapped labels and descriptions. A dialog with no hook (folder trust) still gets a card; a `pending_input` with no dialog on the screen gets none.
 
-  `AskUserQuestion` reaches the same callback; the answer is `updatedInput: {questions, answers: {<question text>: <label or labels>}}`, with an optional free-text `response`. 1–4 questions of 2–4 options each; not available in subagents. https://code.claude.com/docs/en/agent-sdk/user-input
-- Subagent messages carry `parent_tool_use_id`; `--forward-subagent-text` adds their text and thinking. https://code.claude.com/docs/en/headless#follow-subagent-messages
+### Where the code lives
 
-Not documented, so CV.0 verifies them: the exact JSON of `control_request` / `control_response` and their subtypes (`can_use_tool`, `interrupt`, `set_permission_mode`, `set_model`, the effort change); how a bare CLI is told a stdio host answers permissions (the SDK is believed to pass `--permission-prompt-tool stdio`); whether `ExitPlanMode` reaches the permission path.
+App code never names an agent (CLAUDE.md, "App code never names an agent"), so everything that knows Claude Code's formats lives in the Claude plugin behind `agent_api`:
 
-It also verifies whether `--resume` of a conversation an interactive TUI started works in `-p` with the id kept; what `--resume` does for an id with no transcript yet; whether a resumed stream peer replays earlier messages; and how a stream peer exits when stdin closes.
+- `crates/agents/claude/src/chat_entries.rs`: a transcript record to chat entries (the rebuild rules below).
+- `crates/agents/claude/src/dialogs.rs`: the dialog parsers, the composer-state reader, the running-work counters, and the answer recipes.
+- `crates/agents/claude/src/hooks.rs`: MessageDisplay added to the hook plan; `crates/agents/api/src/hook_vocabulary.rs` maps it.
+- `crates/agents/api/src/lib.rs`: the trait methods the daemon calls, each defaulting to "unsupported", which is how a plugin without them gets no chat.
 
-## The daemon today
+The daemon owns the plumbing:
 
-- `SessionMode` is `Interactive | Headless | PlainShell` with no `#[serde(other)]` (`crates/protocol/src/lib.rs:388-397`), and `SessionStatus` has none either, so neither can gain a variant without a protocol bump (CLAUDE.md "When to bump"). `protocol-version.json` is 23 with `[23]`.
-- Headless (`crates/daemon/src/headless.rs`) spawns `--print --output-format stream-json --verbose -p <prompt>` with `stdin` null, appends each stdout line to `scrollback.bin`, and hands it to `ClaudeBackend::handle_headless_line` (`agents/claude.rs:117-167`), which maps `result` to `Stopped` (line 162). It is one-shot and outside the tracer, so it dies with the daemon.
-- The tracer's ABI (`crates/tracer-protocol/src/lib.rs`) is byte-level: `Input { data_b64 }`, `Resize`, `Status`, `Stop` down, `Output { data_b64 }`, `Status`, `Exited`, `Error` up, with `Unknown` wrappers on both sides.
-- The native client picks a pane body per session at `apps/native/src/grid_view.rs:892` (headless → `headless_body`); `text_input.rs` already has a multi-line input (Ctrl+Enter submits), `combobox.rs` a dropdown, `syntax.rs` syntect highlighting.
-- Hook-reported status ([hook-status.md](./hook-status.md), HS.2) adds `SessionSnapshot.pending_input: Option<PendingInput>` (`Question`, `Permission`, `PlanApproval`, `Other`, `Unknown`). Subagent streams ([subagent-streams.md](./subagent-streams.md), SS.3) adds a `TranscriptEntry` enum and a transcript-shaped reply/append pair.
+- `crates/daemon/src/transcript_tail.rs`: the generic tailer (path, offset, line callback).
+- `crates/daemon/src/chat_mirror.rs`: per watched session, the tail, the entry map, the current dialog and composer state, the live lines, and the set of loaders.
+- `crates/daemon/src/server/chat.rs`: the chat messages' handlers, with their arms in `dispatch` in `crates/daemon/src/server.rs`.
+- `crates/daemon/src/screen/dialogs.rs`: the glue from the session's `Screen` to the plugin's parsers, and the fixture table test over `crates/daemon/src/screen/fixtures/`.
 
-## Design
+The native client: `apps/native/src/chat.rs` (the pure model, no GPUI), `chat_view.rs` (the pane body), `chat_cards.rs` (prompt cards and the composer), `work_strip.rs` (RT-107) and `summary_view.rs` (RT-111).
 
-> **Superseded:** the stream driver, the peer's argv and tracer pipe mode, prompt handling over the stdio control protocol, settings over control requests, the view switch and its persistence are the dropped design (RT-51). The mirror keeps the entry model, transcript seeding ("Chat history") and the native client's pure model and chat view; the CV steps are re-cut around it.
+**Orchestrator decision (not an owner ruling), D-N: Claude formats behind the plugin seam.** Transcript records, dialog text and key recipes are Claude Code's and change with it, so they sit in the agent crate with its fixtures, and the seam check (`tools/check-agent-names.ps1`) keeps them there. The daemon keeps only what any agent's mirror would need.
 
-### One session, two kinds of child
+### The transcript tailer
 
-The view is a property of the session, not a new mode. `SessionRecord` gains `view: SessionView` (`Terminal`, `Conversation`), and the snapshot keeps `mode: Interactive`.
+The tailer follows one file from a byte offset. It wakes on a file watcher event and on a 1.5 s size poll (a watcher alone misses appends on some file systems), reads only the new bytes, holds a partial last line until its newline arrives, and starts over from 0 when the file shrinks or is replaced.
 
-At any moment the session runs one child: the PTY `claude` under the tracer in the terminal view, the stream peer in the conversation view. Both use the session's `claude_session_id`, worktrees, `--add-dir` list and workspace prelude, so the conversation is the same one Claude Code keeps in `~/.claude/projects/<encoded cwd>/<id>.jsonl`.
+It parks while no client is connected (`Hub.client_count` 0, as `git_watch.rs` does) and catches up on the next connect. A session is tailed only while at least one connection has loaded its chat or summary.
 
-The stream peer's argv comes from a new `AgentBackend::build_conversation_args` (default: unsupported; `ClaudeBackend` implements it). It builds `--print --verbose --input-format stream-json --output-format stream-json --include-partial-messages --replay-user-messages` and the permission-host flag CV.0 settles.
+The mirror follows the session record's conversation id: `SessionStart` with `clear`, `resume` or `compact` updates it (hook-status HS.7), and the mirror then tails the new file. The path comes from the plugin (Claude: `<claude home>/projects/<encoded cwd>/<id>.jsonl`, `crates/agents/claude/src/transcripts.rs`, whose `project_dir` becomes public).
 
-Then come the members' `--add-dir`s, the prelude on `--append-system-prompt`, `--model` / `--effort` / `--permission-mode` from the session's spawn config, then `--resume <claude_session_id>`, or `--session-id <id>` when no transcript exists yet (a terminal session that never got a prompt).
+**Orchestrator decision (not an owner ruling), D-R: the tailer is its own module.** `transcript_tail.rs` knows nothing of chat entries, so RT-98's file-path index and RT-30's subagent watcher read their files through the same tailer (D-C).
 
-No prompt on the command line: every message goes through stdin. It gets no hook settings: the stream reports status itself, as headless does (HS.5).
+### Rebuilding the chat from the transcript
 
-The stream peer runs under the tracer in a new **pipe mode** (open question 1): the tracer is started with an extra `--stdio` argument, gives the child piped stdin/stdout instead of a ConPTY, forwards `Input` bytes to stdin and stdout bytes as `Output`, ignores `Resize`, and keeps its ring as today.
+The rules, from a read of how Claude Desktop rebuilds a session and from the spike:
 
-The frames don't change, so the tracer ABI gains only the launch argument (recorded in `docs/tracer-abi.md`). A daemon restart then reattaches the stream peer like any PTY session, and a turn or a pending permission prompt survives it.
+- Records are sorted by `timestamp`; attachments are written out of order.
+- `user` records with text are user messages. `attachment` records of type `queued_command` are user messages typed mid-turn; those with `commandMode: "task-notification"` are skipped, since the notification arrives again as its own record.
+- A `user` record with `origin.kind: "task-notification"` is a turn nobody typed: a **system row** "Background command `<summary>` completed" or "Agent `<description>` finished" from its `<status>` and `<summary>`. `<bash-input>` and `<bash-stdout>` records are a `!` command: one system row with the command and its output folded.
+- `<pasted_content>` is unwrapped to the pasted text. Slash-command output (`system` `local_command`) has its SGR escapes stripped and shows as a system row.
+- `assistant` text blocks are answers; `tool_use` blocks are tool cards, and the `tool_result` with the same `tool_use_id` attaches to its card. An AskUserQuestion result's `toolUseResult.answers` becomes a **receipt**; a plan approval becomes a receipt too.
+- A signed, empty `thinking` block is a thinking row at its place; its duration comes from the screen's `thought for Ns` when seen (D-L). `redacted_thinking` and unsigned thinking are dropped.
+- Compact summaries (`isCompactSummary`), `attribution-snapshot`, `file-history-*`, `mode`, `api-request*` and the other non-message records are dropped; a `compact_boundary` becomes the system row "Conversation compacted".
+- A permission amend (the text block beside a tool_result) is a user message; a deny is the tool card's error result plus the system row "Interrupted".
+- Subagent records live in `<id>/subagents/agent-<id>.jsonl` and are not merged into the chat; an `Agent` tool card shows the subagent's description and status, and opening its stream is RT-30's.
+- Text is capped per entry: tool inputs 4 KiB, tool results 8 KiB, answers uncapped. A `LoadChat` reply carries the newest 500 entries, with `hidden` counting the older ones.
 
-### The stream driver
+Desktop also reads `~/.claude/sessions/<pid>.json` to know whether a CLI is still running. The mirror does not need it: the daemon owns the PTY, the tracer and the hooks, and knows the session's liveness and conversation id from its own record.
 
-A new `crates/daemon/src/conversation.rs` owns the stream peer's protocol and is generic over `AsyncRead + AsyncWrite`, so its tests run against `tokio::io::duplex` with no process.
+### The screen engine: dialogs and the composer
 
-It splits stdout into lines (a partial first line after a ring replay is dropped), parses each tolerantly, and keeps per session: the entries (upserted by id), the turn state, the pending prompts by `request_id`, the user messages written but not yet echoed back, and the settings `system/init` reported (model, permission mode, capabilities). It writes user messages, control responses and control requests.
+The screen engine (`screen.rs`, `screen/rules.rs`) already reads a session's status from the rendered grid with the plugin's rules, behind hysteresis. The mirror adds dialog parsers and the composer reader over the same grid, called by `chat_mirror.rs` after each debounced read the status watcher makes; there is no second grid.
 
-Status mapping, through the shared transition path so `Attention` fires once on entry to `AwaitingInput`:
+The v1 dialog set (D-K):
 
-| Stream event | Status | Other effect |
-| - | - | - |
-| `system/init` | `Idle` | record model, permission mode, capabilities, the conversation id |
-| user message written to stdin | `Working` (already so mid-turn) | a `User { pending: true }` entry |
-| the CLI's replay of that message (`--replay-user-messages`) | `Working` | the entry's `pending` cleared |
-| `control_request` for a permission or question | `AwaitingInput` | a `Prompt` entry; `pending_input` set |
-| `control_response` sent | `Working` | prompt entry marked answered; `pending_input` cleared |
-| `assistant` / `user` / `stream_event` | unchanged | answer, thinking and tool entries upserted; tool results attach to their card by `tool_use_id` |
-| `system/api_retry`, `permission_denied`, compact boundary | unchanged | a `Notice` entry |
-| `result` | `Idle`, or stays `Working` when its `queued_turn_count` says the CLI starts a queued message next | metrics from `total_cost_usd` / `usage`; a `TurnEnd` entry |
-| child exit (not a view switch) | `Stopped` | as for an interactive session |
+| Dialog | Parsed | Card |
+|---|---|---|
+| Permission | kind (`Bash command`, `Create file`, `Edit file`), subject, content box, numbered options, `Tab to amend` | Allow once, Always allow (when offered), Deny, and the two ride-on answers |
+| AskUserQuestion, single and multi-select | tab bar (questions, which are answered), question, options with descriptions, `Type something`, `Next` | one question at a time with Back, Skip and Next |
+| Review your answers | the answers listed | Submit, Cancel |
+| Plan approval | the plan box, the three options | Approve (auto), Approve (manual edits), Tell Claude what to change |
+| Folder trust | the two options | Trust this folder, Exit |
+| Heads up notice | the notice, its options (`1: Learn more   2: Knew this already   0: Dismiss`, and the expanded set) | pinned over the composer with its keys until answered |
+| AskUserQuestion with previews, Rewind, detailed transcript, `/model`, `/btw`, the slash popup | recognised only | composer disabled with "Open the terminal to answer this" |
 
-Partial-message deltas are coalesced per entry and broadcast at most every 50 ms. Subagent messages (`parent_tool_use_id` set) nest under their `Agent` tool card; `--forward-subagent-text` is not passed, so a card shows the subagent's tool calls, and its full transcript is the subagent-streams view.
+The composer reader returns the composer state: **ready** (prompt box empty, no dialog), **working** (spinner, box empty), **draft** (the box holds text: the user's own draft, a queued message, or a Heads up "Chat in main session" draft), **dialog**, or **overlay**.
 
-### Permission prompts and questions
+### Live answers from MessageDisplay
 
-Through the stdio control protocol (open question 2): the CLI sends a `control_request` for each prompt; the driver turns it into a `Prompt` entry and sets `pending_input` (`Permission { tool_name, summary }`, `Question { questions }`, `PlanApproval { plan }` from HS.2), so the Needs You view, spoken alerts and MA6 see conversation sessions exactly as hook-driven terminal sessions.
+MessageDisplay is added to the hooks the Claude plugin installs. Each call carries one completed line of the answer being written and its `index`; calls arrive out of order. The daemon routes it to `chat_mirror.rs`, which keeps an `Answer { live: true }` entry per message and places each line by `index`, broadcasting at most every 100 ms.
 
-The client answers with `AnswerConversationPrompt`; the driver writes the `control_response`: allow with the unchanged input, allow always with the `localSettings` suggestions echoed in `updatedPermissions`, deny with the user's message, or for a question the `answers` map (and `response` for a free-text reply). An unanswered prompt stays pending with no timeout, across client disconnects and (with pipe mode) daemon restarts.
+When the transcript's `assistant` record for that message arrives, it replaces the live entry by id and the entry's `live` flag clears. A Claude Code without the hook, or a session spawned before it, shows the answer when the transcript gets it (D-J).
 
-### Messages typed mid-turn
+### Typing a message
 
-The CLI queues them (open question 3). `SendConversationMessage` is written to the peer's stdin at once, whether or not a turn is running; the daemon keeps no queue of its own, and a message cannot be edited or withdrawn once sent. The CLI takes a message written mid-turn when it next can (the `--max-turns` note in the CLI reference confirms it queues them; CV.0 records whether it lands between tool calls or only after `result`).
+`ChatSend` types the text into the PTY as one bracketed paste (`ESC [200~ … ESC [201~`) followed by Enter, through `pty.rs` `write_input`. The daemon reads the composer state first and refuses the send with an `Error` naming the reason unless the state is ready or working:
 
-The `User` entry carries `pending: true` from the write until the CLI's replay of it arrives. That marker is kept because the replay is the only sign the CLI has the message: if CV.0 finds the replay comes when the CLI takes the message into a turn, the chat labels a pending message "Queued"; if it comes as soon as the line is read, the marker only covers the write and the chat shows it as sent with no label.
+- **dialog**: the client offers the ride-on answers instead (below); the chat never types a message into the PTY while a dialog is up.
+- **draft**: "The terminal's input box holds text"; the user clears it in the terminal or sends it there.
+- **overlay**: "Open the terminal to close this first."
 
-Stop sends the interrupt; where `system/init` advertises `interrupt_cancel_queued_v1`, the interrupt's receipt lists the messages it dropped, and their entries get a "not sent" notice.
+While a turn runs, the send goes straight to the CLI's own queue (D-I). The chat shows the message dimmed as `pending` until the transcript's `queued_command` attachment or `user` record for it arrives. A paste of 30 lines or more is shown in the terminal as `[Pasted text #1 +N lines]`; the transcript carries it whole and the chat shows it whole.
 
-### Model, effort and permission mode
+**Orchestrator decision (not an owner ruling), D-O: refuse, never queue, in the daemon.** The 2026-10-21 ruling says nothing is held by the daemon. A send the screen cannot take now is refused at once, so the user sees why, and the text stays in the chat's composer to send again.
 
-`SetConversationSettings { model?, effort?, permission_mode? }` becomes a control request on the running peer (set model, set permission mode, the effort change) when CV.0 confirms each one; where a control request is missing, the fallback is the documented `-p` slash command as a user message with `shouldQuery: false` (`/model <x>`, `/effort <x>`), and for the permission mode a restart of the peer with `--resume --permission-mode <x>` between turns.
+### Answering a prompt
 
-Each change is also written into the session's stored spawn config, so a later switch to the terminal view starts `claude` with the same model, effort and mode. `InterruptConversation` sends the interrupt control request (SIGINT is not an option for a `CREATE_NO_WINDOW` child on Windows without a shared console).
+`ChatAnswer` names the prompt it answers (its id, minted per dialog reading) and the answer. The daemon refuses it when the current dialog is not that prompt (answered elsewhere, or changed), then types the plugin's recipe:
 
-### The view switch
+| Answer | Keys |
+|---|---|
+| Permission: Allow once, Always allow, No | the option's digit; no Enter |
+| Permission: Yes, and tell Claude this | Tab, the text, Enter |
+| Permission: No, and tell Claude this | the No option's digit; once the composer state reads ready or working, the text as a normal `ChatSend` |
+| AskUserQuestion, single choice | the option's digit (it moves to the next question) |
+| AskUserQuestion, multi-select | each option's digit toggles it; then submit (open question 1) |
+| AskUserQuestion, Type something | Down until the cursor is on that row, the text, Enter |
+| Back, Skip | Left, Right on the tab bar |
+| Review | `1` submits, `2` cancels |
+| Plan approval | `1` or `2`; `3`, the text, Enter |
+| Folder trust | Down, Enter (digits do nothing) |
+| Heads up | the bare digit |
 
-`SetSessionView { session_id, view, interrupt_running, request_id }`:
+After each group of keys the daemon waits for the next screen reading and checks it moved as the recipe expects (the next question, the dialog gone); a reading that does not match stops the recipe and answers `Error` with the screen's state, and the card shows what the terminal now shows.
 
-1. If a turn is running (`Working` or `AwaitingInput`) and `interrupt_running` is false, the daemon answers `ActionFailed` naming the running turn; the client asks the user ("A turn is running. Stop it and switch?") and resends with `true`.
-2. The daemon stops the current child: a stream peer gets the interrupt then stdin closed, a PTY child the tracer's `Stop`. It waits for the exit (5 s, then kills), with the session marked `Spawning` and the end not written to history.
-3. It starts the other child on the same session id with `--resume <claude_session_id>`, sets `view`, persists it, and sends `SessionUpdated` (the requester's copy carrying `request_id`).
+No recipe ever sends Esc Esc (it opens Rewind on an empty box) or ctrl+c. The daemon keeps no answer queue: a recipe runs to its end or stops.
 
-A switch to the terminal view needs a fresh `LoadScrollback` from the client, since the PTY is new; the old `scrollback.bin` is kept and the new output appends to it after a divider line.
+**Orchestrator decision (not an owner ruling), D-P: recipes are data, and screen-checked.** The keys that work were measured per dialog (spike, "Answering with keys") and differ from the hook's suggestions; keeping them as a table in the plugin, pinned by fixture tests, makes a Claude Code change a failed check and a refused answer rather than a wrong option chosen.
 
-### Chat history
+### Several clients and the terminal at once
 
-On `LoadConversation`, the daemon builds the entries from Claude's own transcript `<id>.jsonl` (open question 4) through the same block mapping the driver uses, then streams live entries on top. The transcript already holds the turns taken in the terminal view, so a switch shows the whole conversation.
+The chat never resizes the PTY: its size is set by the panes that show the terminal (CLAUDE.md, `Resize` claims). A phone chat and the desktop terminal of one session run together; a key typed in the terminal and an answer from the chat meet on the same screen, and whichever lands first moves the dialog, so the other is refused as answered elsewhere.
 
-The reply carries the newest entries up to a cap (500), with `hidden` counting the older ones, as `SubagentTranscript` does. Path resolution reuses `crates/agents/claude/src/transcripts.rs` (`project_dir`, `CLAUDE_CONFIG_DIR`). Entry text is capped per entry (tool inputs 4 KiB, tool results 8 KiB, answers uncapped).
+Every connection that loads a session's chat shares one tail and one entry map; the last `UnloadChat` (or the connection's end) stops the tail.
 
-### Persistence
+**Orchestrator decision (not an owner ruling), D-S: one grid, one tail, refcounted loaders.** The status watcher's grid is the screen the owner sees, so the mirror reads it rather than building another.
 
-- `SessionRecord.view` → `meta.json` (`#[serde(default)]`, so older sidecars read as `Terminal`) → the snapshot's `view`.
-- The history entry (`history.rs`) records `view`, so Recover respawns a conversation-view session as a stream peer with `--resume`.
-- Settings changed in conversation view update the record's spawn config (above). Messages queued mid-turn live in the CLI, so with pipe mode they survive a daemon restart; a `pending` marker whose replay arrived while no daemon ran is cleared by the transcript seeding on the next load.
+### Shell-hosted agents, restarts and ends
 
-### Wire protocol
+- **Agent in shell** (`agent_in_shell`): the same path. While the agent runs, the chat is live; once it has ended (`AgentExited`), the chat keeps the last conversation, read-only, with the composer disabled ("Claude is not running in this shell"), until the next `SessionStart` names a conversation. Detecting that the agent is up again shares RT-438's work.
+- **Daemon restart**: the tracer keeps the session; the reattached session's watcher rebuilds its grid from the replay, and a client's next `LoadChat` re-reads the transcript. A live line held only in memory is lost and the transcript fills it in.
+- **`/clear`**: the conversation id changes (HS.7) and the chat starts over on the new file, with the system row "Conversation cleared".
+- **Billing**: the chat runs no second `claude` process, so [gui-mode-billing.md](../spikes/gui-mode-billing.md) does not apply to it.
 
-Additive only; `supported` stays `[23]`.
+## Wire protocol
 
-- `SessionSnapshot` gains `#[serde(default)] view: SessionView` (`Terminal` default, `Conversation`, `#[serde(other)] Unknown`) and `#[serde(default)] conversation: Option<ConversationState>` (`model`, `effort`, `permission_mode` as reported, `turn_running`). It uses HS.2's `pending_input` for the open prompt, adding a `#[serde(default)] request_id: Option<String>` to its variants when HS.2 has landed first, or defining it here when this lands first.
-- Client → daemon: `SetSessionView`, `LoadConversation { session_id, request_id }`, `UnloadConversation { session_id }`, `SendConversationMessage { session_id, text, request_id }`, `AnswerConversationPrompt { session_id, prompt_id, answer: PromptAnswer }`, `SetConversationSettings`, `InterruptConversation { session_id }`.
-- Daemon → client: `Conversation { session_id, entries, hidden, request_id }` (the reply), then `ConversationAppend { session_id, entries }` to connections that loaded it (an entry whose id is known replaces it). Broadcast state stays on `SessionUpdated`.
-- `ConversationEntry` (tag `kind`, `#[serde(other)] Unknown`): `User { id, text, pending }`, `Answer { id, text, streaming }`, `Thinking { id, text }`, `Tool { id, name, summary, input, result: Option<ToolOutcome>, parent_id }`, `Prompt { id, prompt: PendingInput, suggestions: bool, answered: Option<String> }`, `Notice { id, text }`, `TurnEnd { id, subtype, duration_ms, cost_usd }`.
+Additive only; `protocol-version.json` stays at its current version. Every new tagged enum carries `#[serde(other)] Unknown`.
 
-  `PromptAnswer` (tag `kind`, `Unknown`): `Allow`, `AllowAlways`, `Deny { message }`, `Answers { answers: BTreeMap<String, Vec<String>>, response: Option<String> }`.
-- Protocol tests: a snapshot with `view` and `conversation` round-trips, and a snapshot without them decodes with `Terminal` / `None`.
+Client to daemon:
+
+- `LoadChat { session_id, request_id }` and `UnloadChat { session_id }`.
+- `ChatSend { session_id, text, request_id }`.
+- `ChatAnswer { session_id, prompt_id, answer: ChatAnswerKind, request_id }`, `ChatAnswerKind` (tag `kind`): `Option { number }`, `Toggle { number }`, `Submit`, `TypeSomething { text }`, `AllowWithText { text }`, `DenyWithText { text }`, `Back`, `Skip`, `Unknown`.
+
+Daemon to client:
+
+- `Chat { session_id, entries, hidden, screen: ChatScreen, request_id }`, the reply to `LoadChat`.
+- `ChatAppend { session_id, entries }` to loaders only; an entry whose id is known replaces it.
+- `ChatScreenChanged { session_id, screen }` to loaders only, when the dialog or composer state changes.
+- `ChatScreen { composer: ComposerState, prompt: Option<ChatPrompt> }`. `ComposerState`: `Ready`, `Working`, `Draft`, `Dialog`, `Overlay { name }`, `Unknown`.
+- `ChatPrompt { id, kind: ChatPromptKind, subject, body, options: Vec<ChatOption>, questions: Vec<ChatQuestionTab>, can_amend, always_allow_tip }`, `ChatPromptKind`: `Permission`, `Question`, `Review`, `Plan`, `Trust`, `HeadsUp`, `Unknown`; `ChatOption { number, label, description, selected }`.
+- `ChatEntry` (tag `kind`): `User { id, text, pending }`, `Answer { id, text, live }`, `Thinking { id, secs }`, `Tool { id, name, summary, input, result: Option<ToolOutcome>, parent_id }`, `System { id, text }`, `Receipt { id, question, answer }`, `TurnEnd { id, duration_ms }`, `Unknown`.
+
+Refusals answer `Error` carrying the request's `request_id`. RT-107 adds `ChatWork` and RT-111 the summary messages (below). Protocol tests: each message round-trips, each new enum decodes an unknown tag to `Unknown`.
 
 ## Native client
 
-- **Pure model**, new `apps/native/src/conversation.rs`, no GPUI: entries by id with upsert and the display cap, which cards are expanded, the one-line summaries for tool cards (a path, a command, a pattern), the answer builders for prompts (option toggles, multi-select, the "Other" text), and a small Markdown block splitter (headings, paragraphs, lists, fenced code with its language, inline code and bold) (open question 6).
+- **Model**, `apps/native/src/chat.rs`, no GPUI, depending only on `protocol`: entries by id with upsert and the display cap, card expansion, tool one-liners (a path, a command, a pattern), the answer builders, and the stacking of cards when a session has more than one prompt in a row. It moves into the shared client core when the phone takes it over.
+- **Pane body**, `chat_view.rs`: a scrolling chat that follows the bottom until the user scrolls up; user messages right-aligned; answers as Markdown through `md_blocks.rs` with code through `syntax.rs`; live answers growing line by line; thinking as one muted line (`Thought for 14s`); tool cards with name, summary and a status mark, expanding to input and result; system rows centred and muted; a turn's duration under its last answer.
+- **Cards**, `chat_cards.rs`: one card for the current prompt, with any others stacked behind it as ghosts. Digits answer only from an empty composer and only after a 400 ms grace from the card's appearance; Esc denies, Ctrl+Enter allows once, Ctrl+Shift+Enter always allows.
 
-  It depends only on `protocol`, so the mobile client core can take it over.
-- **View**, new `apps/native/src/conversation_view.rs`, drawn by `grid_view.rs` next to the headless branch when `view == Conversation`: a scrolling chat that follows the bottom until the user scrolls up; user messages right-aligned; answers as Markdown with code blocks through `syntax.rs`; thinking collapsed to one muted line.
+  One "Always allow" label, with a tooltip naming the rule and where it is saved (the dialog's own option text, and the hook suggestion's `destination` when it has one). AskUserQuestion shows one question at a time with Back, Skip and Next. A submitted card stays, busy, until the screen shows the dialog gone, then collapses to its receipt; a card answered in the terminal or on another device closes with "Answered elsewhere".
+- **Composer**: `TextInput::multi_line`, Ctrl+Enter sends, during a turn too. While a dialog is up, Send becomes two choices on the card, "Yes, and tell Claude this" and "No, and tell Claude this", and the text rides on the answer. With the composer state `Draft` or `Overlay` the composer shows why it cannot send. The Heads up notice is pinned over the composer with its keys until answered.
+- **Choosing the view**: each pane shows Terminal or Chat (and Summary, RT-111), chosen in the pane header, the pane menu and a keybinding in `keys.rs`; the choice is the pane's, and the session is unchanged. The last view chosen for a session is kept per session id in `native-ui.json` and is the view the next pane showing it opens in; a new session opens in Terminal. A pop-out pane keeps its view.
 
-  It draws tool cards with the tool name, the summary and a status mark (running, done, error), expanding to input and result; subagent tool calls nested in their `Agent` card; notices as muted lines; the turn's cost and duration under its last answer.
-- **Prompt cards**: permissions show the tool and summary with Allow once, Allow always (when the CLI offered suggestions) and Deny, where Deny opens a one-line reason; questions show each question's header and options as buttons (toggles when multi-select) plus an "Other" field and Submit; plan approval shows the plan as Markdown with Approve and Keep planning. An answered card collapses to its answer.
-- **Composer**: `TextInput::multi_line`, Ctrl+Enter sends, during a turn too; a sent message appears in the chat at once, labelled "Queued" while it is pending when CV.0 shows the replay marks the CLI taking it (see above), and a Stop button interrupts the turn. A toolbar over the chat holds the model, effort and permission-mode dropdowns (`combobox.rs`).
-- **Switching**: a Terminal / Conversation toggle in the pane header for Claude sessions, the same item in the pane menu, and a keybinding in `keys.rs`; on `ActionFailed` for a running turn it shows the confirm and resends. `net.rs` sends `LoadConversation` when a pane starts showing a conversation-view session and after a reconnect, `UnloadConversation` when the last such pane goes, and handles `Conversation` / `ConversationAppend`.
+  A pane that shows Chat sends `LoadChat` when it appears and after a reconnect, and the last such pane for a session sends `UnloadChat`.
 
-## What MA9 reuses
+**Orchestrator decision (not an owner ruling), D-Q: Markdown through the existing viewer model.** `apps/native/src/md_blocks.rs` (pulldown-cmark, already a dependency) is the Markdown viewer's block model; answers render through it rather than a new splitter.
 
-Everything on the daemon and the wire: the stream driver, the view switch, the entries (with the `pending` marker on messages sent mid-turn) and prompt answering, so the phone is one more client of the same messages and a prompt answered on the phone clears on the desktop.
+## Running-work strip (RT-107)
 
-It also takes over the pure `conversation.rs` model (moved into MA1's client core crate when MA9 starts) and draws its own Flutter widgets over it. `pending_input` on the snapshot already lets MA6 answer a conversation-view prompt before MA9 exists, through `AnswerConversationPrompt`.
+Over the composer in the chat and summary views: "2 subagents · 1 background shell (`cargo test`, 3m) · wakeup in 4m". It is the background state (AT.1) made visible, so a quiet chat is never taken for an idle session.
 
-## Steps
+- **At a turn's end**: the `Stop` payload's `background_tasks` (each `{id, type, status, description, command}` for a shell, `{id, type, description, agent_type}` for a subagent) and its one-shot `session_crons` (the wakeup's fire time) are kept on the session record, beyond the `background` flag RT-84 already derives from them (`hook_vocabulary.rs`, [spikes/background-tasks.md](../spikes/background-tasks.md)). A task's age counts from the first `Stop` that listed it.
+- **Mid-turn**: the plugin's counters read the screen: `● Running N agents…`, the agents panel rows under the mode line, and the mode line's `· N shell`. These are counts and labels only; a count read from the screen says so in its tooltip.
+- **Ends**: a task leaves the strip when a later `Stop` no longer lists it, or when its `<task-notification>` record arrives in the transcript; a wakeup leaves when its time passes and a turn starts.
+- **Delivery**: `ChatWork { session_id, subagents, shells, wakeup_at }` to chat and summary loaders only, on load and on each change (D-E).
+- **Taps**: a subagent item opens its stream once RT-30 lands; until then it is not tappable. A shell item shows its full command in a tooltip.
 
-- [ ] **CV.0 Spike: the stream peer.**
+## Summary view (RT-111)
 
-  With a real `claude` on Windows, record in `docs/spikes/conversation-view.md`, each answer quoted from a run, two turns over stdin and what the CLI does with a message written to stdin mid-turn.
+A third view of a session beside terminal and chat: one line per stretch of work, the open question pinned at the top, every line expandable into the chat entries of that stretch, and the running-work strip over its composer. The phone opens sessions here by default.
 
-  For that message, record whether it is taken between tool calls or only after `result`, what `--replay-user-messages` echoes and whether the echo comes at the write or when the message is taken, `queued_turn_count` on the `result`, and which queued messages an interrupt drops under `interrupt_cancel_queued_v1`.
+- **Stretches**: one per turn, split into windows of activity for a long turn (ops-tower's progress lines: the last 5 minutes, 5–15, 15–30). Each stretch keeps the range of chat entry ids it covers, so expanding it shows exactly those entries.
+- **Lines**: written by the summarizer the Dashboard uses ([dashboard.md](./dashboard.md), RT-28's summarizer service, its `headline`), through its queue, cache and spend cap. With no provider key, a failure or the cap reached, each line is a template: the turn's first user line and its duration and tool count (D-G).
+- **The pinned question**: the current `ChatPrompt`, or the summarizer's `needs_answer` text at a stop, answered from the same card as in the chat.
+- **Wire**: `LoadSummary { session_id, request_id }`, `UnloadSummary`, `Summary { session_id, lines, request_id }`, `SummaryAppend { session_id, lines }`, `SummaryLine { id, from_entry, to_entry, started_at, ended_at, text, source }`, reusing RT-444's summary types where they already carry these fields.
 
-  Record the permission-host flag and the exact `control_request` / `control_response` JSON for a Bash prompt, allow-always with suggestions, `AskUserQuestion` and `ExitPlanMode`; the interrupt, set-model, set-permission-mode and effort control requests, and the `/model` / `/effort` text fallback.
+## Decisions
 
-  Record `--resume` of a TUI-started conversation (id kept, earlier messages replayed or not, `system/init.session_id`); `--resume` of an id with no transcript; exit on stdin close; and the billing fields per [gui-mode-billing.md](../spikes/gui-mode-billing.md).
+Each recommendation of the code map behind this design, taken by the orchestrator where no owner ruling decides it.
 
-  Save redacted runs as fixtures under `crates/daemon/tests/fixtures/conversation/`. Proof: the spike note and the fixtures. Depends on nothing; every later step reads it.
-- [ ] **CV.1 Protocol.** `crates/protocol/src/lib.rs`: `SessionView`, `ConversationState`, the two snapshot fields, the seven client and two daemon messages, `ConversationEntry`, `ToolOutcome`, `PromptAnswer`, and `request_id` on `PendingInput` (or `PendingInput` itself if HS.2 has not landed). Proof: round-trip tests, `Unknown` tests for each new tagged enum, and the snapshot cases above. Depends on CV.0.
-- [ ] **CV.2 Stream driver.** New `crates/daemon/src/conversation.rs`, generic over the child's stdio: line splitting, tolerant parsing, entry upserts, the status table, prompt bookkeeping, the `pending` marker cleared by the replay, delta coalescing, and the writers for user messages, control responses and control requests.
+- **D-A Answer keys count as the owner's.** Orchestrator decision (not an owner ruling): keys typed by `ChatAnswer` clear `AwaitingInput` and `pending_input` the way an owner key does, but only once the screen reading shows the dialog gone; until then the status watcher decides. Rationale: the card closes at once on a real answer, and a recipe stopped half-way leaves the prompt pending, which is the truth. Tests cover both paths.
+- **D-B Commits land on the feature branch, one PR at the end.** Orchestrator decision (not an owner ruling): each step's commit lands straight on `feat/chat-mirror`, merged by the orchestrator; one PR to `main` after the live e2e, gated by a code review and a hand test of every prompt kind against a real `claude`. Rationale: the owner put the wave on a feature branch; per-step PRs would add review overhead on a branch nobody else ships from.
+- **D-C One tailer, built here.** Orchestrator decision (not an owner ruling): CV.2 builds the transcript tailer as a generic module, and RT-98's file-path index becomes a consumer of it later; RT-98 moves into this wave only if the owner wants the index shipped now. Rationale: the 2026-10-11 ruling names RT-98's tailer, and there is still one tailer; building it here unblocks the chat without pulling in the index.
+- **D-D The strip reads hooks already installed, and the screen.** Orchestrator decision (not an owner ruling): no `SubagentStart` / `SubagentStop` hooks for the strip; it uses the `Stop` payload's lists and the screen's counters. Rationale: those hooks belong to AT.1 and RT-30; the `Stop` lists already name each task and the wakeup, and the screen covers the turn in between.
+- **D-E The strip travels to loaders only.** Orchestrator decision (not an owner ruling): `ChatWork` is a message to chat and summary loaders, not a `SessionSnapshot` field. Rationale: the snapshot is broadcast to every client and RT-444 is changing it now; the strip is needed only where a chat or summary is open.
+- **D-F One entry type with subagent streams.** Orchestrator decision (not an owner ruling): `ChatEntry` is defined here and RT-30's subagent view (SS.3) uses it in place of its planned `TranscriptEntry`. Rationale: one parser of Claude's message shape, not two drifting apart.
+- **D-G Summary lines without a key are templates.** Orchestrator decision (not an owner ruling): with no provider key the summary view still ships, one template line per stretch from its first user line and its stats; model lines replace them once the summarizer runs. Rationale: RT-111 does not wait on RT-26 and RT-27.
+- **D-H The view is the pane's; the memory is the client's.** Orchestrator decision (not an owner ruling): each pane picks its view, and a session's last view is kept per session id in `native-ui.json` (the phone keeps its own), not on the daemon's session. Rationale: the 2026-10-11 ruling has the terminal and a chat of one session open at once, so a single view on the session cannot describe it; the earlier ruling that a session remembers its last view is kept, on the client.
+- **D-I A mid-turn send goes straight to the CLI.** Orchestrator decision (not an owner ruling): a message sent while a turn runs is typed into the PTY at once and waits in the TUI's own queue (`Press up to edit queued messages`, `ctrl+enter to send now`).
 
-  Proof: unit tests over `tokio::io::duplex` replaying the CV.0 fixtures (a two-turn run, a permission allowed, allowed always and denied, a question answered, a message written mid-turn going to stdin at once and losing `pending` on its replay, a `result` with `queued_turn_count` keeping `Working`, an interrupt whose receipt drops a pending message), plus a malformed line and an unknown event ignored. Depends on CV.1.
-- [ ] **CV.3 Transcript seeding.** `crates/agents/claude/src/transcripts.rs` (`project_dir` made reachable from the daemon) and `conversation.rs`: build entries from `<id>.jsonl` with the driver's block mapping, newest 500 with `hidden`. Proof: unit tests on a temp Claude home: a TUI-written transcript yields user, answer and tool entries with results attached; a missing file yields none. Depends on CV.2.
-- [ ] **CV.4 Tracer pipe mode.** `crates/tracer/src/main.rs` (the `--stdio` argument; piped child instead of ConPTY; `Resize` ignored), `crates/daemon/src/tracer_client.rs` (a spawn option), `docs/tracer-abi.md`. Proof: a tracer test that `Input` bytes reach a child's stdin and its stdout returns as `Output`, and that a reconnect replays the ring; the existing tracer tests unchanged. Depends on CV.0 (open question 1 settled).
-- [ ] **CV.5 Backend argv.** `crates/daemon/src/agents/mod.rs` (`supports_conversation`, `build_conversation_args`), `agents/claude.rs`. Proof: argv unit tests: resumed, fresh with `--session-id`, a workspace with `--add-dir`s and the prelude, model, effort and permission mode, `--dangerously-skip-permissions` winning over the mode; Codex and Cursor unsupported. Depends on CV.0.
-- [ ] **CV.6 Session wiring and the view switch.** `crates/daemon/src/server.rs` (`SetSessionView`, the stop-then-resume flow, spawning the peer through the tracer, reattach at startup), `session.rs` (`view`, conversation state, snapshot fields), `orphan.rs` (`view` in `meta.json`), `history.rs` (`view` in the entry, Recover respawning a peer).
+  Claude Desktop does the opposite: it holds a plain send until `result` and offers "promote" and "steer now". Rationale: the 2026-10-21 ruling says nothing is held by the daemon, and the TUI's queue already gives the user edit and send-now in the terminal.
+- **D-J MessageDisplay live text is in the first cut.** Orchestrator decision (not an owner ruling): live lines land with the mirror core, and the chat still works without them (the transcript alone). Rationale: the 2026-10-21 ruling asks for live answers; a Claude Code without the hook must still render.
+- **D-K The v1 dialog set.** Orchestrator decision (not an owner ruling): cards for permission, AskUserQuestion (single choice, multi-select, Type something, review), plan approval, folder trust and the Heads up notice; AskUserQuestion with previews, Rewind, the detailed transcript, `/model` and `/btw` disable the composer with "Open the terminal to answer this".
 
-  Proof: `server.rs` tests with a scripted peer: a switch with no turn running flips `view` and echoes `request_id`; a running turn without `interrupt_running` answers `ActionFailed`; a switch writes no history end; a sidecar without `view` reads as `Terminal`; Recover of a conversation-view entry builds conversation argv. Depends on CV.2, CV.4, CV.5.
-- [ ] **CV.7 Conversation handlers.** `crates/daemon/src/server.rs`: `LoadConversation` / `UnloadConversation`, `SendConversationMessage` (written straight to the peer, mid-turn too), `AnswerConversationPrompt`, `SetConversationSettings` (control request or fallback, and the spawn config updated), `InterruptConversation`.
+  Rationale: the cards cover every prompt the spike saw in normal work, and the rest are rare or need a preview pane a phone cannot draw well.
+- **D-L Thinking rows come from the screen.** Orchestrator decision (not an owner ruling): a thinking row sits where the transcript's signed, empty `thinking` block is, and shows the duration the screen's `thought for Ns` gave, or none. Rationale: the transcript holds no thinking text, and the screen holds no position.
 
-  Proof: handler tests: the reply caps with `hidden` and echoes `request_id`; a message sent while a turn runs reaches the peer's stdin before the turn's `result`; appends reach only loaders; an answer to an unknown prompt answers `Error`; a settings change lands in the stored spawn config; `Attention` fires once per prompt. Depends on CV.3, CV.6.
-- [ ] **CV.8 Native model.** New `apps/native/src/conversation.rs`: entry store, card expansion, tool summaries, prompt answer builders, the Markdown block splitter. Proof: unit tests for upsert and cap, each prompt kind's `PromptAnswer`, multi-select and "Other", and the splitter on headings, lists, nested fences and inline code. Depends on CV.1.
-- [ ] **CV.9 Native view.** New `apps/native/src/conversation_view.rs`; `grid_view.rs` (the pane branch), `net.rs` (the messages, load on show and reconnect), the pane header toggle, `pane_menu.rs`, `keys.rs`, the confirm.
+Further decisions made in this redesign (D-M to D-S) sit beside the parts they decide, above.
 
-  Proof: a new `apps/native/tests/ui/ui_conversation.rs` against the fake daemon: the toggle sends `SetSessionView` and the confirm resends with `interrupt_running`; a `Conversation` reply renders its entries and an append updates a tool card; Allow always and a question's options send the right `PromptAnswer`; Ctrl+Enter during a turn sends `SendConversationMessage` and shows the message labelled "Queued" until an append clears its `pending`. Depends on CV.7, CV.8.
-- [ ] **CV.10 Live e2e.** `crates/agents/claude/fake/index.mjs`: with `--input-format stream-json`, act as a stream peer: `system/init`, a scripted answer, a tool call that raises a permission `control_request` on a cue word, `result`; honour `--resume`. `apps/native/tests/e2e_live.rs`: switch a session to conversation view, send a message, allow the prompt, see the turn end, switch back to the terminal. Proof: `.\rt.ps1 native-e2e` green. Depends on CV.9.
-- [ ] **CV.11 Docs.** `CLAUDE.md` (the stream peer and tracer pipe mode under the architecture invariants; `view` in the `meta.json` line), `docs/native-client.md`, the glossary entries for "stream peer", "control request" and "view switch" in the docs start page; tick the parity lines in `docs/plans/native-client-parity.md`; delete the borrowed-ideas item; promote the lasting decisions into `docs/architecture.md` and delete this doc. Proof: the diff.
+## Alternatives not taken
+
+- **Claude Desktop's design**: it does not mirror a live TUI. It runs its own pinned CLI over pipes (`--input-format stream-json --output-format stream-json --permission-prompt-tool stdio --replay-user-messages --include-partial-messages`), answers `can_use_tool` control requests, and imports a terminal-started session only after its CLI exits. The owner chose the mirror over it (2026-10-21 ruling); recorded here as context.
+
+## Later option: the stream peer
+
+For headless-style sessions only, a later design may drive a `claude --print --input-format stream-json --output-format stream-json` child (the **stream peer**) the daemon writes JSON lines to, with permission prompts over the stdio control protocol. It is not planned; the notes below keep what was learnt for it.
+
+- Documented flags (Claude Code 2.1.x CLI reference): `--input-format stream-json` is for print mode; `--replay-user-messages` re-emits stdin messages; `--include-partial-messages` streams deltas; with stream-json input a message queued when a turn ends starts a new turn; `--permission-prompts host` sends prompts to the SDK host. https://code.claude.com/docs/en/cli-reference, https://code.claude.com/docs/en/headless
+- The SDK's `control_request` / `control_response` pair carries permission checks by `request_id`; allow-always echoes a `localSettings` suggestion in `updatedPermissions`; AskUserQuestion answers as `updatedInput: {questions, answers}`. https://code.claude.com/docs/en/agent-sdk/typescript, https://code.claude.com/docs/en/agent-sdk/user-input
+- Desktop's wire shapes, read from its build: `can_use_tool` fields, a plain deny sets `interrupt: true` and a deny with feedback does not, `request_user_dialog`, `control_cancel_request`, re-sent `pending_permission_requests`, `interrupt{cancel_queued:true}`, `priority: "next"|"now"`, `cancel_async_message`; SDK-mode AskUserQuestion needs `CLAUDE_CODE_ENABLE_ASK_USER_QUESTION_TOOL=true`.
+- A stream peer would need its own spike (the exact control JSON on Windows), a tracer pipe mode to survive daemon restarts, and its own argv builder in the plugin. None of it is on the chat mirror's path.
 
 ## Open questions
 
-Answered (user): Q1 (a) tracer pipe mode; Q2 (a) the stdio control protocol; Q3 (b) messages typed mid-turn are written straight to the CLI, which queues them, with no daemon-held queue; Q4 (a) Claude's transcript `.jsonl` on load plus the live stream; Q5 (a) one `ConversationEntry` type shared with subagent streams; Q6 (a) the in-house Markdown splitter with syntect; Q7 (a) `--include-partial-messages`, coalesced to one broadcast per 50 ms.
+1. **Submitting a multi-select question.** The 2026-10-11 ruling gives Orca's rule "multi-select toggles, then Tab to Submit". The spike, on Claude Code 2.1.307, saw digits toggle without moving the cursor, Enter on the `Next` row move on, and Tab move the cursor down one row.
 
-1. **Keeping the stream peer across a daemon restart.** (a) Recommended: tracer pipe mode (CV.4); the peer outlives the daemon like a PTY session and the new daemon reattaches. Worst case: a stdout line longer than the ring's drop point is cut on replay, and that entry is missing until the transcript seeding on the next load fills it.
+   (a) Recommended: follow the measured keys (move to `Next`, Enter), checked against the screen, and keep the ruling's intent (toggles, then submit). Worst case: an Orca-era build where Tab submits needs a second recipe row. (b) Tab, as ruled. Worst case: on today's build Tab moves the cursor and the screen check stops the recipe every time.
 
-   (b) The peer dies with the daemon, which restarts it with `--resume` at startup. Worst case: a daemon upgrade kills every running turn and any unanswered prompt, and the turn is left unfinished. (c) The peer dies and the session shows Resume. Worst case: as (b), and the user must restart each session by hand.
-2. **How permission prompts reach the daemon.** (a) Recommended: the stdio control protocol the SDK uses, answered by the driver. Worst case: the wire shape is undocumented and a Claude Code update changes it; CV.0's fixtures and the `Unknown` paths make that a visible failure (prompts denied), not a hang.
+## Steps
 
-   (b) An MCP server shim (a subcommand of `rt-tracer.exe`) named by `--permission-prompt-tool`, calling the daemon. Worst case: an MCP server per session, the 30 s startup wait, and no approval for tools that require user interaction. (c) A blocking `PermissionRequest` hook through HS's shim. Worst case: a hook blocks Claude up to its timeout and cannot carry `AskUserQuestion` answers.
-3. **Messages typed mid-turn.** (a) Recommended: the daemon holds the queue and sends at `result`; queued messages stay editable and cancellable. Worst case: the user cannot steer a long turn without Stop. (b) Write through to the CLI's own queue. Worst case: the message's timing inside the turn is up to Claude Code and it cannot be edited or withdrawn once written.
-4. **Where the chat history comes from.** (a) Recommended: Claude's transcript `<id>.jsonl` on load, live stream on top. Worst case: a Claude Code transcript format change blanks the history before the switch while live turns still render. (b) The daemon's own log of the peer's stream. Worst case: turns taken in the terminal view never appear in the chat. (c) Both, merged by message uuid. Worst case: two parsers and a merge to keep right.
-5. **One entry type with subagent streams.** (a) Recommended: `ConversationEntry` as designed, and SS.3 uses it in place of its `TranscriptEntry` (whichever lands first defines it). Worst case: the subagent view carries fields it never fills. (b) Two types. Worst case: two parsers of the same Claude message shape drifting apart.
-6. **Markdown in answers.** (a) Recommended: the in-house block splitter with syntect for code. Worst case: tables and nested lists render as plain text. (b) `pulldown-cmark` as a new dependency. Worst case: one more dependency and a full renderer to map onto GPUI elements. (c) Plain text in a monospace block. Worst case: answers read like the terminal, which is most of what the view is meant to replace.
-7. **Streaming partial answers.** (a) Recommended: `--include-partial-messages`, coalesced to one broadcast per 50 ms. Worst case: more WS traffic during long answers, most visible over the mobile relay. (b) Whole messages only. Worst case: a long answer appears all at once after tens of seconds of nothing.
+Each step is one brief on `feat/chat-mirror`. Steps that edit `crates/protocol/src/lib.rs`, `crates/daemon/src/server.rs` or `apps/native/src/lib.rs` and `grid_view.rs` never run at once.
+
+### The mirror (RT-51)
+
+- [ ] **CV.1 Add the chat protocol types and messages.** `crates/protocol/src/lib.rs`: `ChatEntry`, `ToolOutcome`, `ChatPrompt`, `ChatPromptKind`, `ChatOption`, `ChatQuestionTab`, `ChatScreen`, `ComposerState`, `ChatAnswerKind`, the four client messages and three daemon messages.
+
+  Arms in `crates/daemon/src/server.rs` `dispatch` (answering `Error` with the `request_id`) and in `apps/native/src/lib.rs` `on_message` (ignored), each only if its match is exhaustive. Proof: round-trip tests and an `Unknown` test per new enum. Depends on nothing.
+- [ ] **CV.2 Add the transcript tailer.** New `crates/daemon/src/transcript_tail.rs`, its `mod` line in `crates/daemon/src/main.rs`: path, offset, watcher plus 1.5 s size poll, partial last line held, restart on shrink or replace, park and catch up. Proof: unit tests on temp files: appended lines arrive once each, a half-written line waits for its newline, a truncated file starts over, a missing file yields nothing until it appears. Depends on nothing.
+- [ ] **CV.3 Turn transcript records into chat entries.** New `crates/agents/claude/src/chat_entries.rs`, `crates/agents/claude/src/lib.rs`, `crates/agents/claude/src/transcripts.rs` (`project_dir` public), `crates/agents/api/src/lib.rs` (the trait methods for the transcript path and one record to entries, defaulting to unsupported), redacted fixture JSONL under `crates/agents/claude/tests/fixtures/transcripts/`.
+
+  Proof: tests per rebuild rule: tool results attach by `tool_use_id`; `queued_command` is a user message and its task-notification form is skipped; a task notification and a `!` command are system rows; compact summaries, `attribution-snapshot`, `redacted_thinking` and unsigned thinking are dropped; `<pasted_content>` unwraps; an AskUserQuestion result is a receipt; caps apply. Depends on CV.1.
+- [ ] **CV.4 Parse permission, plan, trust and Heads up dialogs and the composer state, with their answer recipes.** New `crates/agents/claude/src/dialogs.rs`, `crates/agents/claude/src/lib.rs`, `crates/agents/api/src/lib.rs` (dialog, composer and recipe methods), new `crates/daemon/src/screen/dialogs.rs` (glue and the fixture table test), `crates/daemon/src/screen.rs` (`mod` line), fixtures added to `crates/daemon/src/screen/fixtures/` from the spike's screens.
+
+  Proof: a fixture-to-reading table (kind, options, composer state, overlay) over every fixture, and a recipe table test per answer. Depends on CV.1.
+- [ ] **CV.5 Parse AskUserQuestion dialogs with their answer recipes.** `crates/agents/claude/src/dialogs.rs`, `crates/daemon/src/screen/dialogs.rs`, fixtures for single choice, multi-select, Type something, review, previews and the tab bar from the spike (`v31`–`v43`) and collie's panes. Proof: the table test extended; previews read as an overlay; a wrapped cui card parses as vanilla does. Depends on CV.4.
+- [ ] **CV.6 Carry MessageDisplay lines to the daemon.** `crates/agents/claude/src/hooks.rs` (the event in the hook plan), `crates/agents/api/src/hook_vocabulary.rs` (its report: text and `index`), `crates/daemon/src/hook_status.rs` and `crates/daemon/src/server/hooks.rs` (a per-session channel for live lines, no status effect), a captured payload under `crates/agents/claude/tests/fixtures/hooks/`.
+
+  Proof: first record one real MessageDisplay body into the fixture; mapping tests over it; out-of-order lines keep their `index`. Depends on CV.1.
+- [ ] **CV.7 Serve a session's chat from the transcript and the screen.**
+
+  New `crates/daemon/src/chat_mirror.rs`, new `crates/daemon/src/server/chat.rs`, `crates/daemon/src/server.rs` (dispatch arms), `crates/daemon/src/pty_state.rs` (hand each screen reading to the mirror), `crates/daemon/src/main.rs` (`mod` line): `LoadChat` / `UnloadChat`, the newest 500 with `hidden`, `ChatAppend` and `ChatScreenChanged` to loaders, live lines merged by `index` and replaced by the transcript record, the tail following the conversation id.
+
+  Proof: server tests with a temp `CLAUDE_CONFIG_DIR` and scripted transcript writes: appends reach loaders only; the reply caps and echoes `request_id`; a missing transcript yields none; the last unload stops the tail; a `/clear` switches files; a fixture screen yields its `ChatScreen`. Depends on CV.2, CV.3, CV.4, CV.6.
+- [ ] **CV.8 Type chat messages into the PTY.** `crates/daemon/src/server/chat.rs` (`ChatSend`, gated by the composer state), `crates/daemon/src/inject.rs` (a bracketed paste then Enter helper), `crates/daemon/src/chat_mirror.rs` (the `pending` user entry, cleared by its `queued_command` or `user` record).
+
+  Proof: tests against a recording PTY: a ready box gets the paste and Enter; a working session gets them too and the entry stays pending until its record; dialog, draft and overlay states answer `Error` and type nothing. Depends on CV.7.
+- [ ] **CV.9 Answer prompts by typing their recipes.** `crates/daemon/src/server/chat.rs` (`ChatAnswer`), `crates/daemon/src/chat_mirror.rs` (prompt ids, the screen check after each key group, answered elsewhere), `crates/daemon/src/server/sessions.rs` (the owner-key clear shared with `SendInput`, D-A).
+
+  Proof: tests per dialog fixture: the right bytes per answer; the deny-then-send ride-on waits for the box; a stale `prompt_id` is refused; a screen that does not move stops the recipe; no recipe sends Esc Esc. Depends on CV.5, CV.8.
+- [ ] **CV.10 Build the native chat model.** New `apps/native/src/chat.rs`, its `mod` line in `apps/native/src/lib.rs`: entry store with upsert and cap, card expansion, tool one-liners, answer builders, ghost stacking, the 400 ms digit grace. Proof: unit tests for upsert and cap, each answer kind's `ChatAnswerKind`, multi-select toggles, the grace window measured on an injected clock. Depends on CV.1.
+- [ ] **CV.11 Draw a session's chat in a pane.** New `apps/native/src/chat_view.rs`, `apps/native/src/grid_view.rs` (the pane body and the Terminal / Chat toggle in the pane header), `apps/native/src/lib.rs` (`Chat`, `ChatAppend`, `ChatScreenChanged` folds; `LoadChat` on show and reconnect, `UnloadChat` on the last pane), new `apps/native/tests/ui/ui_chat.rs` and its `mod` line in `apps/native/tests/ui/main.rs`.
+
+  Proof: against the fake daemon, the toggle sends `LoadChat`; the reply renders; an append updates a tool card; a live answer grows; closing the last chat pane sends `UnloadChat`. Depends on CV.7, CV.10.
+- [ ] **CV.12 Answer prompts and send messages from the chat.** New `apps/native/src/chat_cards.rs`, `apps/native/src/chat_view.rs`, `apps/native/src/chat.rs`, `apps/native/tests/ui/ui_chat.rs`: the cards, receipts, "Answered elsewhere", the ride-on choices, the pinned Heads up notice, the composer and its refusals.
+
+  Proof: specs: each card sends the right `ChatAnswer`; digits wait out the grace; the composer during a dialog offers the two ride-on answers; a `Draft` state shows why it cannot send; a busy card stays until the dialog goes. Depends on CV.8, CV.9, CV.11.
+- [ ] **CV.13 Remember each session's view and reach it from the keyboard.** `apps/native/src/pane_menu.rs`, `apps/native/src/keys.rs`, `apps/native/src/sidebar.rs` (the last view per session in `native-ui.json`), `apps/native/src/grid_view.rs`, `apps/native/tests/ui/ui_chat.rs`. Proof: specs: the menu item and the key switch the view; a new pane on that session opens in the remembered view; a new session opens in Terminal; a pop-out keeps its view. Depends on CV.11.
+- [ ] **CV.14 Prove the mirror end to end.** `crates/agents/claude/fake/index.mjs` (writes transcript lines, draws a permission dialog on a cue word, answers digits), `apps/native/tests/e2e_live.rs`, `apps/native/tests/support/live.rs` if the harness needs the transcript home. Proof: `.\rt.ps1 native-e2e` green with a spec that opens a chat, sends a message, allows the prompt from its card and sees the turn end, with the terminal pane open beside it. Depends on CV.12, CV.13.
+- [ ] **CV.15 Document the mirror.** `CLAUDE.md` (the mirror under the architecture invariants, the chat messages' `request_id` echoes, `native-ui.json`'s last view), `docs/native-client.md`, `docs/architecture.md`, `docs/README.md` (glossary), `docs/plans/native-client-parity.md`, `docs/plans/borrowed-ideas.md` (its conversation-view item goes). Proof: the diff and a clean docs lint. Depends on CV.14.
+
+### The running-work strip (RT-107)
+
+- [ ] **CV.16 Keep the Stop payload's background tasks and wakeup.** `crates/agents/api/src/hook_vocabulary.rs` (the task and cron lists, beside the `background` flag), `crates/daemon/src/hook_status.rs`, `crates/daemon/src/session.rs` (the lists and first-seen stamps on the record), `crates/protocol/src/lib.rs` (`ChatWork` and its item types).
+
+  Proof: mapping tests over the background-tasks spike's payloads: a shell with its command, a subagent with its type, a one-shot cron as a wakeup time, a recurring cron ignored; a task first seen keeps its stamp across later stops. Depends on CV.1.
+- [ ] **CV.17 Count running work on the screen and send the strip.** `crates/agents/claude/src/dialogs.rs` (the running-agents, agents-panel and shell-count readers), `crates/agents/api/src/lib.rs`, `crates/daemon/src/chat_mirror.rs` (merging the record's lists with the screen's counts, ends on a later stop or a task notification), `crates/daemon/src/server/chat.rs` (`ChatWork` on load and on change), fixtures (`v71-agents-running`, the agents-panel and background-shell panes).
+
+  Proof: fixture tests for the counts; server tests that `ChatWork` reaches loaders only and drops a finished task. Depends on CV.7, CV.16.
+- [ ] **CV.18 Draw the strip over the composer.** New `apps/native/src/work_strip.rs`, `apps/native/src/chat_view.rs`, `apps/native/src/chat.rs`, `apps/native/src/lib.rs` (the `ChatWork` fold), `apps/native/tests/ui/ui_chat.rs`. Proof: specs: a scripted `ChatWork` shows its counts, a shell's age and the wakeup countdown; an empty one hides the strip; a screen-read count carries its tooltip; a subagent item is not tappable. Depends on CV.11, CV.17.
+
+### The summary view (RT-111)
+
+- [ ] **CV.19 Split the chat into stretches with template lines.** New `crates/daemon/src/summary_lines.rs`, `crates/protocol/src/lib.rs` (`SummaryLine` and the four summary messages, reusing RT-444's types where they fit), `crates/daemon/src/chat_mirror.rs` (entry-id ranges per stretch), `crates/daemon/src/server/chat.rs` and `crates/daemon/src/server.rs` (the handlers and arms), `crates/daemon/src/main.rs` (`mod` line).
+
+  Proof: tests: one line per turn; a long turn splits into windows; each line's range expands to exactly its entries; the reply echoes `request_id`. Depends on CV.7 and RT-444.
+- [ ] **CV.20 Write summary lines with the summarizer.** `crates/daemon/src/summary_lines.rs` and the summarizer's request API in `crates/daemon/src/summarizer/` (called, not changed): a line per stretch from the stretch's text, cached by text, under the spend cap, the template on a failure.
+
+  Proof: tests against the summarizer's mock provider: a stretch gets its model line; an unchanged stretch makes no call; a failure or the cap keeps the template. Depends on CV.19 and the summarizer landing ([dashboard.md](./dashboard.md), RT-28).
+- [ ] **CV.21 Draw the summary view.** New `apps/native/src/summary_view.rs`, `apps/native/src/grid_view.rs` (Summary as the third pane view), `apps/native/src/chat.rs` (expanding a line into its entries), `apps/native/src/lib.rs` (the summary folds), new `apps/native/tests/ui/ui_summary.rs` and its `mod` line in `apps/native/tests/ui/main.rs`.
+
+  Proof: specs: lines render with the pinned question on top; a line expands into its entries; the strip shows; the view is remembered as the others are. Depends on CV.13, CV.18, CV.19.
+- [ ] **CV.22 Document the strip and the summary view, and retire this file.** `CLAUDE.md`, `docs/native-client.md`, `docs/architecture.md`, `docs/README.md`, `docs/plans/off-orca.md` (SV.3 and SV.4); promote this file's lasting decisions into those docs and delete it. Proof: the diff and a clean docs lint. Depends on CV.15, CV.18, CV.21.
