@@ -421,6 +421,8 @@ mod tests {
             questions: Vec::new(),
             can_amend,
             always_allow_tip: None,
+            multi: false,
+            cursor: None,
         }
     }
 

@@ -81,6 +81,13 @@
     },
     {
       "paths": [
+        "crates/daemon/src/screen/dialogs.rs",
+        "crates/daemon/src/screen/fixture_screen.rs"
+      ],
+      "filter": "package(daemon) & test(/^screen::/)"
+    },
+    {
+      "paths": [
         "crates/daemon/src/conversations.rs",
         "crates/daemon/src/conversations/contested.rs",
         "crates/daemon/src/conversations/discovery.rs",
@@ -116,6 +123,12 @@
     {
       "paths": [
         "crates/agents/**"
+      ],
+      "filter": "rdeps(agent-api)"
+    },
+    {
+      "paths": [
+        "crates/agents/*/src/dialogs.rs"
       ],
       "filter": "rdeps(agent-api)"
     },

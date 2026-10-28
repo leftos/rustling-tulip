@@ -580,6 +580,30 @@ mod tests {
     }
 
     #[test]
+    fn a_plugin_without_a_chat_reader_reads_nothing_and_answers_nothing() {
+        let plugin: &dyn crate::AgentPlugin = &TestAgent::default();
+        let rows = vec!["❯".to_string()];
+        assert_eq!(plugin.read_chat_screen(&rows), None);
+        let prompt = protocol::ChatPrompt {
+            id: String::new(),
+            kind: protocol::ChatPromptKind::Permission,
+            subject: "notes.txt".to_string(),
+            body: String::new(),
+            options: Vec::new(),
+            questions: Vec::new(),
+            can_amend: false,
+            always_allow_tip: None,
+            multi: false,
+            cursor: None,
+        };
+        let answer = protocol::ChatAnswerKind::Option { number: 1 };
+        assert_eq!(
+            plugin.answer_recipe(&prompt, &answer),
+            Err(crate::AnswerRefusal::Unsupported)
+        );
+    }
+
+    #[test]
     fn the_default_file_reference_is_the_bare_path() {
         let plugin: &dyn crate::AgentPlugin = &TestAgent::default();
         assert_eq!(plugin.file_reference("prompts/a.md"), "prompts/a.md");

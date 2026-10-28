@@ -38,6 +38,7 @@ pub fn check<A: Agent>(agent: &A) {
         check_shell_resume(agent, &case, &options);
     }
     check_screen_rules(agent);
+    check_chat(agent);
     check_recovery_and_import(agent);
     check_summarizer(agent);
 }
@@ -89,6 +90,15 @@ fn check_summarizer<A: Agent>(agent: &A) {
     let adapted = AgentPlugin::summarizer(agent, &request)
         .unwrap_or_else(|| panic!("the adapter offers no summarizer where the agent does"));
     assert_eq!(adapted.args, spec.args, "the adapter's arguments differ");
+}
+
+/// A plugin that reads chat screens reads a screen of 1000 empty rows
+/// without panicking.
+fn check_chat<A: Agent>(agent: &A) {
+    if agent.read_chat_screen(&[]).is_some() {
+        let rows = vec![String::new(); 1000];
+        let _reading = agent.read_chat_screen(&rows);
+    }
 }
 
 /// A recovery with nothing recorded yields option values, trusted or not,

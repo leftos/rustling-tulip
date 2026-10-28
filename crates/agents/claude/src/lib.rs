@@ -9,6 +9,7 @@
 
 mod activity;
 mod chat_entries;
+mod dialogs;
 mod hooks;
 mod import;
 pub mod options;
@@ -24,16 +25,18 @@ pub use providers::{display_name, provider_for_model};
 pub use transcripts::encode_project_dir;
 
 use agent_api::{
-    ActivityReader, ActivitySource, Agent, AgentError, ConversationPlan, ConversationQuery,
-    EnvPlan, FoundConversation, HeadlessEvent, HookPlan, HookReport, HookShim, ImportedRun,
-    KeyLookup, ReadySignal, RecoveredRun, Refusal, ResolvedRows, ScreenRules, SpawnCheck,
-    SpawnContext, SummarizerRequest, SummarizerSpec, TracerRun, workspace_prelude,
+    ActivityReader, ActivitySource, Agent, AgentError, AnswerRecipe, AnswerRefusal,
+    ConversationPlan, ConversationQuery, EnvPlan, FoundConversation, HeadlessEvent, HookPlan,
+    HookReport, HookShim, ImportedRun, KeyLookup, ReadySignal, RecoveredRun, Refusal,
+    ResolvedRows, ScreenRules, SpawnCheck, SpawnContext, SummarizerRequest, SummarizerSpec,
+    TracerRun, workspace_prelude,
 };
 use options::{ClaudeProvider, PermissionMode};
 use protocol::{
-    AccentToken, AgentCaps, AgentDescriptor, AgentId, AgentTexts, CharRange, ChatEntry, ChipRule,
-    Choice, ChoiceStyle, FieldKind, FieldOverride, FieldRule, OptionField, OptionValue,
-    SessionMember, SessionStatus, ShiftEnter, SpawnPlacement, TitleRules,
+    AccentToken, AgentCaps, AgentDescriptor, AgentId, AgentTexts, CharRange, ChatAnswerKind,
+    ChatEntry, ChatPrompt, ChatScreen, ChipRule, Choice, ChoiceStyle, FieldKind, FieldOverride,
+    FieldRule, OptionField, OptionValue, SessionMember, SessionStatus, ShiftEnter, SpawnPlacement,
+    TitleRules,
 };
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -528,6 +531,20 @@ impl Agent for ClaudePlugin {
     /// Claude reads a file a prompt names with `@` in front of its path.
     fn file_reference(&self, repo_relative: &str) -> String {
         rules::file_reference(repo_relative)
+    }
+
+    /// Claude's input box, dialog or overlay, read off the screen's rows.
+    fn read_chat_screen(&self, rows: &[String]) -> Option<ChatScreen> {
+        Some(dialogs::read(rows))
+    }
+
+    /// The keys Claude's dialogs take for `answer`.
+    fn answer_recipe(
+        &self,
+        prompt: &ChatPrompt,
+        answer: &ChatAnswerKind,
+    ) -> Result<AnswerRecipe, AnswerRefusal> {
+        dialogs::recipe(prompt, answer)
     }
 }
 

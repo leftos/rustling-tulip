@@ -17,6 +17,7 @@
 pub mod activity;
 #[cfg(feature = "test-support")]
 pub mod conformance;
+pub mod dialogs;
 pub mod hook_vocabulary;
 pub mod screen_rules;
 #[cfg(any(test, feature = "test-support"))]
@@ -26,13 +27,15 @@ pub use activity::{
     ActivityReader, ActivitySnapshot, ActivitySource, BackgroundTask, ContextReading, EndedTask,
     MINUTE_COLUMNS, OpenCall, SubagentNode,
 };
+pub use dialogs::{AnswerRecipe, AnswerRefusal, Key, RecipeStep, ScreenExpect};
 pub use screen_rules::{
     LineMatcher, ReadySignal, RuleError, ScreenRegion, ScreenRule, ScreenRules, ScreenVerdict,
 };
 
 use chrono::{DateTime, Utc};
 use protocol::{AgentDescriptor, FieldKind, OptionField, OptionValue, OptionValues, SessionChip};
-use protocol::{ChatEntry, PendingInput, SessionMember, SessionStatus};
+use protocol::{ChatAnswerKind, ChatEntry, ChatPrompt, ChatScreen};
+use protocol::{PendingInput, SessionMember, SessionStatus};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::fmt;
@@ -723,6 +726,28 @@ pub trait Agent: Send + Sync + 'static {
         repo_relative.to_owned()
     }
 
+    /// What the agent's input box and dialog show on a rendered screen whose
+    /// visible rows, top to bottom, are `rows`; `None` for an agent whose
+    /// screen the chat does not mirror. The prompt's id is left empty: the
+    /// daemon mints it.
+    fn read_chat_screen(&self, _rows: &[String]) -> Option<ChatScreen> {
+        None
+    }
+
+    /// The keys that give `answer` to `prompt`, as this agent's screen read
+    /// it.
+    ///
+    /// # Errors
+    ///
+    /// Why the agent has no recipe for this answer to this prompt.
+    fn answer_recipe(
+        &self,
+        _prompt: &ChatPrompt,
+        _answer: &ChatAnswerKind,
+    ) -> Result<AnswerRecipe, AnswerRefusal> {
+        Err(AnswerRefusal::Unsupported)
+    }
+
     /// The fake CLI the live test tier runs for this agent, or `None` for an
     /// agent that ships none.
     #[cfg(feature = "test-support")]
@@ -881,6 +906,20 @@ pub trait AgentPlugin: Send + Sync {
 
     /// See [`Agent::file_reference`].
     fn file_reference(&self, repo_relative: &str) -> String;
+
+    /// See [`Agent::read_chat_screen`].
+    fn read_chat_screen(&self, rows: &[String]) -> Option<ChatScreen>;
+
+    /// See [`Agent::answer_recipe`].
+    ///
+    /// # Errors
+    ///
+    /// Why the agent has no recipe for this answer to this prompt.
+    fn answer_recipe(
+        &self,
+        prompt: &ChatPrompt,
+        answer: &ChatAnswerKind,
+    ) -> Result<AnswerRecipe, AnswerRefusal>;
 
     /// See [`Agent::fake_cli`].
     #[cfg(feature = "test-support")]
@@ -1082,6 +1121,18 @@ impl<A: Agent> AgentPlugin for A {
 
     fn file_reference(&self, repo_relative: &str) -> String {
         Agent::file_reference(self, repo_relative)
+    }
+
+    fn read_chat_screen(&self, rows: &[String]) -> Option<ChatScreen> {
+        Agent::read_chat_screen(self, rows)
+    }
+
+    fn answer_recipe(
+        &self,
+        prompt: &ChatPrompt,
+        answer: &ChatAnswerKind,
+    ) -> Result<AnswerRecipe, AnswerRefusal> {
+        Agent::answer_recipe(self, prompt, answer)
     }
 
     #[cfg(feature = "test-support")]

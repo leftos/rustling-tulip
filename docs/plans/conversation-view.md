@@ -155,7 +155,7 @@ While a turn runs, the send goes straight to the CLI's own queue (D-I). The chat
 | Back, Skip | Left, Right on the tab bar |
 | Review | `1` submits, `2` cancels |
 | Plan approval | `1` or `2`; `3`, the text, Enter |
-| Folder trust | Down, Enter (digits do nothing) |
+| Folder trust | Up or Down from the cursor's row to the chosen row, then Enter (digits do nothing; builds start the cursor on different rows) |
 | Heads up | the bare digit |
 
 After each group of keys the daemon waits for the next screen reading and checks it moved as the recipe expects (the next question, the dialog gone); a reading that does not match stops the recipe and answers `Error` with the screen's state, and the card shows what the terminal now shows.
@@ -288,7 +288,7 @@ Each step is one brief on `feat/chat-mirror`. Steps that edit `crates/protocol/s
 - [ ] **CV.3 Turn transcript records into chat entries.** New `crates/agents/claude/src/chat_entries.rs`, `crates/agents/claude/src/lib.rs`, `crates/agents/claude/src/transcripts.rs` (`project_dir` public), `crates/agents/api/src/lib.rs` (the trait methods for the transcript path and one record to entries, defaulting to unsupported), redacted fixture JSONL under `crates/agents/claude/tests/fixtures/transcripts/`.
 
   Proof: tests per rebuild rule: tool results attach by `tool_use_id`; `queued_command` is a user message and its task-notification form is skipped; a task notification and a `!` command are system rows; compact summaries, `attribution-snapshot`, `redacted_thinking` and unsigned thinking are dropped; `<pasted_content>` unwraps; an AskUserQuestion result is a receipt; caps apply. Depends on CV.1.
-- [ ] **CV.4 Parse permission, plan, trust and Heads up dialogs and the composer state, with their answer recipes.** New `crates/agents/claude/src/dialogs.rs`, `crates/agents/claude/src/lib.rs`, `crates/agents/api/src/lib.rs` (dialog, composer and recipe methods), new `crates/daemon/src/screen/dialogs.rs` (glue and the fixture table test), `crates/daemon/src/screen.rs` (`mod` line), fixtures added to `crates/daemon/src/screen/fixtures/` from the spike's screens.
+- [x] **CV.4 Parse permission, plan, trust and Heads up dialogs and the composer state, with their answer recipes.** New `crates/agents/claude/src/dialogs.rs`, `crates/agents/claude/src/lib.rs`, `crates/agents/api/src/lib.rs` (dialog, composer and recipe methods), new `crates/daemon/src/screen/dialogs.rs` (glue and the fixture table test), `crates/daemon/src/screen.rs` (`mod` line), fixtures added to `crates/daemon/src/screen/fixtures/` from the spike's screens.
 
   Proof: a fixture-to-reading table (kind, options, composer state, overlay) over every fixture, and a recipe table test per answer. Depends on CV.1.
 - [ ] **CV.5 Parse AskUserQuestion dialogs with their answer recipes.** `crates/agents/claude/src/dialogs.rs`, `crates/daemon/src/screen/dialogs.rs`, fixtures for single choice, multi-select, Type something, review, previews and the tab bar from the spike (`v31`–`v43`) and collie's panes. Proof: the table test extended; previews read as an overlay; a wrapped cui card parses as vanilla does. Depends on CV.4.

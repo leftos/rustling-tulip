@@ -2559,7 +2559,7 @@ pub struct ScreenRuleTrace {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ChatEntry {
-    /// A message the user sent; `pending` until the agent's answer starts.
+    /// A message the user sent; `pending` until the transcript's `queued_command` or `user` record for it arrives.
     User {
         id: String,
         text: String,
@@ -2668,6 +2668,12 @@ pub struct ChatPrompt {
     /// the dialog offers one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub always_allow_tip: Option<String>,
+    /// Whether a digit toggles an option rather than choosing it (a multi-select question).
+    #[serde(default)]
+    pub multi: bool,
+    /// The number of the option the cursor is on, when it is on one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<u32>,
 }
 
 /// What kind of prompt a [`ChatPrompt`] is, which picks its card layout.
@@ -2678,7 +2684,7 @@ pub enum ChatPromptKind {
     Permission,
     /// An `AskUserQuestion` prompt.
     Question,
-    /// A plan the agent wants reviewed.
+    /// The "Review your answers" step of an `AskUserQuestion` prompt.
     Review,
     /// A plan awaiting approval.
     Plan,
@@ -2709,6 +2715,9 @@ pub struct ChatQuestionTab {
     pub label: String,
     #[serde(default)]
     pub answered: bool,
+    /// Whether this is the question on screen.
+    #[serde(default)]
+    pub current: bool,
 }
 
 /// How the user answered the prompt card.
@@ -10010,9 +10019,12 @@ mod tests {
                 questions: vec![ChatQuestionTab {
                     label: "Command".to_string(),
                     answered: false,
+                    current: true,
                 }],
                 can_amend: true,
                 always_allow_tip: Some("Saved in .claude/settings.json".to_string()),
+                multi: true,
+                cursor: Some(2),
             }),
         }
     }
@@ -10186,9 +10198,23 @@ mod tests {
             } => {
                 assert_eq!(session_id, "s1");
                 assert_eq!(decoded, screen);
+                let prompt = decoded.prompt.expect("the prompt survives");
+                assert!(prompt.multi);
+                assert_eq!(prompt.cursor, Some(2));
+                assert!(prompt.questions[0].current);
             }
             other => panic!("unexpected variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_chat_prompt_without_multi_cursor_or_current_decodes() {
+        let json = r#"{"id":"p1","kind":"question","subject":"Pick","body":"",
+            "questions":[{"label":"Next fn","answered":true}]}"#;
+        let prompt: ChatPrompt = serde_json::from_str(json).expect("an older prompt decodes");
+        assert!(!prompt.multi);
+        assert_eq!(prompt.cursor, None);
+        assert!(!prompt.questions[0].current);
     }
 
     #[test]

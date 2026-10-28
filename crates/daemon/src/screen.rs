@@ -16,6 +16,9 @@ use alacritty_terminal::term::Config;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::vte::ansi::Processor;
 
+pub mod dialogs;
+#[cfg(test)]
+pub(crate) mod fixture_screen;
 pub mod rules;
 
 /// The character a TUI draws a horizontal rule with.
