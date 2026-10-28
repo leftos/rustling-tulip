@@ -4,9 +4,13 @@ Status: design, no step started. Index line: "Follow DeepSeek dispatches" in `do
 
 ## Problem
 
-The user-level `dispatch` skill (`~/.claude/skills/dispatch`) runs an implementer brief as `claude -p --agent implementer --output-format stream-json --verbose`, launched by `uv run python -m dispatch` in the background. Its stdout goes to `<worktree>/.tmp/dispatch/<stamp>-<backend>/stream.jsonl` (`executor.run_claude`), and nothing else sees it until the run ends and `summary.txt` / `report.md` land. An agentic IDE shows a subagent's progress; it cannot show this one. The user wants to watch a running dispatch in the native client, and to stop one that is going wrong, without the dispatch tool ever needing the daemon.
+The user-level `dispatch` skill (`~/.claude/skills/dispatch`) runs an implementer brief as `claude -p --agent implementer --output-format stream-json --verbose`, launched by `uv run python -m dispatch` in the background. Its stdout goes to `<worktree>/.tmp/dispatch/<stamp>-<backend>/stream.jsonl` (`executor.run_claude`), and nothing else sees it until the run ends and `summary.txt` / `report.md` land.
 
-Settled rulings (from the index line): the tool registers each run with a small live-run file in a folder the daemon watches and removes it when the run ends; a crashed run's entry is dropped once its pid is gone; the tool never depends on the daemon running; the native client shows a live run as a read-only leaf (tag `DS`, the brief's title) in the repo or workspace container its worktree belongs to; a click opens a headless-style view of its stream; the user can watch and Stop it (kill the run's process tree), never message it.
+An agentic IDE shows a subagent's progress; it cannot show this one. The user wants to watch a running dispatch in the native client, and to stop one that is going wrong, without the dispatch tool ever needing the daemon.
+
+Settled rulings (from the index line): the tool registers each run with a small live-run file in a folder the daemon watches and removes it when the run ends; a crashed run's entry is dropped once its pid is gone; the tool never depends on the daemon running.
+
+The native client shows a live run as a read-only leaf (tag `DS`, the brief's title) in the repo or workspace container its worktree belongs to; a click opens a headless-style view of its stream; the user can watch and Stop it (kill the run's process tree), never message it.
 
 ## Design
 
@@ -79,13 +83,19 @@ DF.1 adds a round-trip test per new message and one proving an unknown `Dispatch
 
 - **Watcher.** One `notify_debouncer_full` debouncer on the live-run folder, `RecursiveMode::NonRecursive`, 100 ms (as `git_watch.rs`'s init watcher). A change to a `.json` file triggers a re-read of that file; the removal of a `.json` file removes the run. It also runs a full folder scan at startup and every 30 s, to cover missed events.
 - **Container resolution.** On first sight, the daemon resolves `main_checkout`: if `<worktree>/.git` is a directory, it is the worktree itself; if it is a gitfile, it uses `repo_path_for_worktree` (moved from `worktrees_admin.rs` into `git.rs` as `pub(crate)`). A missing or unreadable worktree leaves it `None`.
-- **Tailer.** One task per run, polling `<run_dir>/stream.jsonl` every 250 ms from its last byte offset. It keeps a trailing partial line until its newline arrives, and resets to 0 if the file shrinks. The first read replays the whole file, which rebuilds a run's state after a daemon restart or late discovery (a stream is a few MB at most). Lines go through the Claude stream-json state machine that `agents/claude.rs::handle_headless_line` uses today, extracted in DF.2 as a pure `StreamState::apply(&mut self, line)` holding status, metrics, the 200-entry `recent_actions` and the `init` session id. Headless sessions and dispatch runs then share one parser.
-- **Liveness.** Every 2 s the daemon refreshes the tracked pids through `sysinfo` (as `orphan::pid_matches` does). A pid counts as the run's while it exists and its process start time falls between 60 s before and 5 s after `started_at`. A run whose pid is gone or fails the guard is removed and its file deleted: the tool crashed or was killed before its `finally`. The tool never deletes other runs' files, since stdlib Python on Windows has no safe liveness check (`os.kill(pid, 0)` calls `TerminateProcess`).
+- **Tailer.** One task per run, polling `<run_dir>/stream.jsonl` every 250 ms from its last byte offset. It keeps a trailing partial line until its newline arrives, and resets to 0 if the file shrinks. The first read replays the whole file, which rebuilds a run's state after a daemon restart or late discovery (a stream is a few MB at most).
+
+  Lines go through the Claude stream-json state machine that `agents/claude.rs::handle_headless_line` uses today, extracted in DF.2 as a pure `StreamState::apply(&mut self, line)` holding status, metrics, the 200-entry `recent_actions` and the `init` session id. Headless sessions and dispatch runs then share one parser.
+- **Liveness.** Every 2 s the daemon refreshes the tracked pids through `sysinfo` (as `orphan::pid_matches` does). A pid counts as the run's while it exists and its process start time falls between 60 s before and 5 s after `started_at`.
+
+  A run whose pid is gone or fails the guard is removed and its file deleted: the tool crashed or was killed before its `finally`. The tool never deletes other runs' files, since stdlib Python on Windows has no safe liveness check (`os.kill(pid, 0)` calls `TerminateProcess`).
 - **Idle exit.** Live runs do not keep the daemon up (`idle_exit.rs` is unchanged). A daemon that exits loses nothing, because the next one rescans.
 
 ### 6. Stop
 
-`StopDispatchRun` → the daemon re-checks the pid guard (failure → `ActionFailed "The run already ended"`), marks the run `Stopping`, writes `<run_id>.stop`, then runs `taskkill /T /F /PID <pid>` with `CREATE_NO_WINDOW` (the same tree kill the tool uses on timeout, `gitops.kill_tree`). Killing `claude`'s tree, not the tool's, lets the Python process see the child exit, see the marker, record the run as stopped (section 8) and remove its own live file. A non-Windows build kills the single pid, as the tool does. A failed `taskkill` → `ActionFailed` naming the exit status, and the run goes back to its previous status.
+`StopDispatchRun` → the daemon re-checks the pid guard (failure → `ActionFailed "The run already ended"`), marks the run `Stopping`, writes `<run_id>.stop`, then runs `taskkill /T /F /PID <pid>` with `CREATE_NO_WINDOW` (the same tree kill the tool uses on timeout, `gitops.kill_tree`).
+
+Killing `claude`'s tree, not the tool's, lets the Python process see the child exit, see the marker, record the run as stopped (section 8) and remove its own live file. A non-Windows build kills the single pid, as the tool does. A failed `taskkill` → `ActionFailed` naming the exit status, and the run goes back to its previous status.
 
 ### 7. Restart, crash and many clients
 
@@ -96,8 +106,12 @@ DF.1 adds a round-trip test per new message and one proving an unknown `Dispatch
 
 ### 8. Native client
 
-- **Model.** `SidebarModel` keeps `dispatch_runs: Vec<DispatchRunSnapshot>`, applying the three daemon messages in `on_daemon_message` (`net.rs`). `build_containers` places each run with `find_container_for_cwd(main_checkout.or(worktree))`: a registered repo's container, or the workspace it belongs to, else a `Dir` container for that path. `Leaf` gains `kind: LeafKind { Session, Dispatch }`. A dispatch leaf's `runtime` is `DS`, its label the run's `title`, and its status dot maps `Starting→Spawning`, `Working→Working`, `Stopping|Ended→Stopped`. Dispatch leaves sort after the container's sessions, newest first, and are not reorderable. In the tabs view they sit in Unbound unless a viewer shows them. Hover: backend, tier, started time, worktree.
-- **View.** A click opens (or focuses) a client-local viewer tab for the run (Q1). Its body is the existing headless body: `HeadlessBody::of` takes a `HeadlessSource` (status label, metrics, recent actions) built from either a `SessionSnapshot` or a `DispatchRunSnapshot`, so the stats bar, the 200-row tail and "Show all" are shared. Its header row shows the title, `DS · <backend> · tier <n>` and a **Stop** button (arm-then-confirm, like the session menu's destructive items). There is no input box, and the leaf's context menu offers only Open, Stop and "Copy run folder".
+- **Model.** `SidebarModel` keeps `dispatch_runs: Vec<DispatchRunSnapshot>`, applying the three daemon messages in `on_daemon_message` (`net.rs`). `build_containers` places each run with `find_container_for_cwd(main_checkout.or(worktree))`: a registered repo's container, or the workspace it belongs to, else a `Dir` container for that path. `Leaf` gains `kind: LeafKind { Session, Dispatch }`.
+
+  A dispatch leaf's `runtime` is `DS`, its label the run's `title`, and its status dot maps `Starting→Spawning`, `Working→Working`, `Stopping|Ended→Stopped`. Dispatch leaves sort after the container's sessions, newest first, and are not reorderable. In the tabs view they sit in Unbound unless a viewer shows them. Hover: backend, tier, started time, worktree.
+- **View.** A click opens (or focuses) a client-local viewer tab for the run (Q1). Its body is the existing headless body: `HeadlessBody::of` takes a `HeadlessSource` (status label, metrics, recent actions) built from either a `SessionSnapshot` or a `DispatchRunSnapshot`, so the stats bar, the 200-row tail and "Show all" are shared.
+
+  Its header row shows the title, `DS · <backend> · tier <n>` and a **Stop** button (arm-then-confirm, like the session menu's destructive items). There is no input box, and the leaf's context menu offers only Open, Stop and "Copy run folder".
 - **When the run goes.** The leaf goes on `DispatchRunRemoved`. An open viewer keeps the run's last snapshot, shows `ended` and the run folder path, and closes only when the user closes it (Q2).
 
 ## Change to the `dispatch` skill (user-level, outside this repo)
@@ -121,8 +135,12 @@ Settled (orchestrator, technical): Q3 (1) Stop kills `claude`'s tree and writes 
 - **Q1. Where the run's view opens.** (1, recommended) A client-local viewer tab that never reaches the daemon: no `TabContent` impact, not persisted (runs are ephemeral). Worst case: the native tab strip gains a second tab source to keep in step.
 
   (2) A pane in a daemon tab whose `session_id` is `dispatch:<run_id>`, getting splits and moves for free. Worst case: `TabContent`/pane handlers see a session id that is not in `Sessions`, and every pane path needs a guard. (3) An overlay drawer over the content area. Worst case: a run can't be watched beside the terminal that launched it.
-- **Q2. What an ended run leaves behind.** (1, recommended) The leaf goes at once, and an open viewer keeps the last state until closed. Worst case: a run that ends while its viewer is closed leaves no trace in RT (the run log and `report.md` still hold it). (2) The daemon keeps ended runs as `Ended` leaves until dismissed or the daemon restarts. Worst case: the folder is no longer the whole state, and the leaf list grows across a long session. (3) The leaf and the viewer both go at once. Worst case: the final report line the user was reading vanishes.
-- **Q3. What Stop kills.** (1, recommended) `claude`'s tree plus the stop marker: the tool logs `stopped` and skips auto-resume. Worst case: the orchestrator's background command returns and it reads `STATUS stopped`, which it has to handle. (2) The tool's tree (`tool_pid`): no marker needed. Worst case: no `status.json` or run-log line, and the orchestrator sees a killed command with no summary. (3) `claude`'s tree without a marker. Worst case: the tool auto-resumes the run the user just stopped.
+- **Q2. What an ended run leaves behind.** (1, recommended) The leaf goes at once, and an open viewer keeps the last state until closed. Worst case: a run that ends while its viewer is closed leaves no trace in RT (the run log and `report.md` still hold it).
+
+  (2) The daemon keeps ended runs as `Ended` leaves until dismissed or the daemon restarts. Worst case: the folder is no longer the whole state, and the leaf list grows across a long session. (3) The leaf and the viewer both go at once. Worst case: the final report line the user was reading vanishes.
+- **Q3. What Stop kills.** (1, recommended) `claude`'s tree plus the stop marker: the tool logs `stopped` and skips auto-resume. Worst case: the orchestrator's background command returns and it reads `STATUS stopped`, which it has to handle.
+
+  (2) The tool's tree (`tool_pid`): no marker needed. Worst case: no `status.json` or run-log line, and the orchestrator sees a killed command with no summary. (3) `claude`'s tree without a marker. Worst case: the tool auto-resumes the run the user just stopped.
 - **Q4. Stop confirmation.** (1, recommended) Arm-then-confirm on the viewer's button and the menu item. Worst case: one extra click. (2) Immediate. Worst case: a stray click kills a tier-2 run mid-edit, leaving the worktree half-changed.
 - **Q5. Codex or other backends.** (1, recommended) Parse only Claude stream-json now, since every dispatch backend runs through `claude -p`, and use `schema` to add a `format` field if that changes. Worst case: a later non-Claude executor shows "No events yet…" until the field lands. (2) Add `format: "claude-stream-json"` to schema 1 now. Worst case: a field nothing reads.
 

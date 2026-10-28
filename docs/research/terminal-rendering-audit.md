@@ -2,9 +2,13 @@
 
 Scope read from `docs/plans/native-client-parity.md` (Terminal item "**(hard)** Rendering parity with xterm 6 + WebGL (Fit, WebFonts, Clipboard addons; DOM fallback on GPU context loss)") and `docs/native-client.md` (## Terminal).
 
-Method: static comparison of the native client at `X:/dev/rustling-tulip.wt/rt169-audit` (branch `rt169-audit`, cut from `main` c0b3bdd) against the retired Tauri client at tag `tauri-last` (commit 62e8990), its `apps/tauri-app/package.json` (`@xterm/xterm` 6.1.0-beta.219, addon-fit 0.12.0-beta.219, addon-web-fonts 0.2.0-beta.133, addon-webgl 0.20.0-beta.218, addon-clipboard 0.3.0-beta.219), and the exact xterm/addon package sources unpacked from npm into `.tmp/xt/`. Native dependency sources checked: `alacritty_terminal` 0.26.0, `vte` 0.15.0, `gpui` 0.2.2.
+Method: static comparison of the native client at `X:/dev/rustling-tulip.wt/rt169-audit` (branch `rt169-audit`, cut from `main` c0b3bdd) against the retired Tauri client at tag `tauri-last` (commit 62e8990), its `apps/tauri-app/package.json` (`@xterm/xterm` 6.1.0-beta.219, addon-fit 0.12.0-beta.219, addon-web-fonts 0.2.0-beta.133, addon-webgl 0.20.0-beta.218, addon-clipboard 0.3.0-beta.219), and the exact xterm/addon package sources unpacked from npm into `.tmp/xt/`.
 
-Runtime evidence: `gate run ... -- pwsh ./rt.ps1 native-shot main` built the client and wrote `.tmp/shots/main.png` (984x601) over the fake daemon; the shot process then exited 1 on `timed out waiting on app_will_quit` after writing its last capture (pre-existing shot-example quit flake, not a rendering failure). The capture was inspected: panes, tabs and terminal text render correctly. Pixel band measurement of the lower terminal pane gives row pitch 17 px at the default font (Geist Mono 13 px), which matches `ceil(ascent + descent) = ceil(16.9)` in `fonts::line_height`. No live daemon or real PTY was started; no tracked file was edited.
+Native dependency sources checked: `alacritty_terminal` 0.26.0, `vte` 0.15.0, `gpui` 0.2.2.
+
+Runtime evidence: `gate run ... -- pwsh ./rt.ps1 native-shot main` built the client and wrote `.tmp/shots/main.png` (984x601) over the fake daemon; the shot process then exited 1 on `timed out waiting on app_will_quit` after writing its last capture (pre-existing shot-example quit flake, not a rendering failure).
+
+The capture was inspected: panes, tabs and terminal text render correctly. Pixel band measurement of the lower terminal pane gives row pitch 17 px at the default font (Geist Mono 13 px), which matches `ceil(ascent + descent) = ceil(16.9)` in `fonts::line_height`. No live daemon or real PTY was started; no tracked file was edited.
 
 Verdict scale: **matches** / **acceptable difference** / **fix needed**. Anything not actually exercised at runtime says so.
 
@@ -44,7 +48,9 @@ Summary: 4 fix-needed rendering differences (ligatures, dropped zero-width glyph
 
 ### N1 — Ligatures are on for three of the four bundled families, and native's per-glyph width forcing misplaces text after a ligature
 - **Repro**: Settings → Appearance → font family `Fira Code` (or JetBrains Mono or Cascadia Code), then `printf 'a -> b\n'` in a shell pane. Also `=>`, `!=`, `...`, `<=`, `|>`.
-- **Native**: `metrics()` builds a plain `gpui::Font` (`term_view.rs:1649-1657`) with `FontFeatures::default()`, and GPUI's DirectWrite path leaves DirectWrite's default `liga`/`clig`/`calt` enabled (`gpui-0.2.2/src/platform/windows/direct_write.rs:1725-1765`, whose comment states these are enabled by default). Verified with the bundled fonts' GSUB tables: Cascadia Code, Fira Code and JetBrains Mono all carry `calt`; Geist Mono does not (default is unaffected). `paint_span` shapes a whole same-style span and then GPUI's `force_width` loop repositions glyph **index** i at `i * cell_width` (`gpui-0.2.2/src/text_system/line_layout.rs:568-575`), not character i. A `->` ligature is one glyph for two characters, so every later glyph in that span is drawn one cell to the left of its true column.
+- **Native**: `metrics()` builds a plain `gpui::Font` (`term_view.rs:1649-1657`) with `FontFeatures::default()`, and GPUI's DirectWrite path leaves DirectWrite's default `liga`/`clig`/`calt` enabled (`gpui-0.2.2/src/platform/windows/direct_write.rs:1725-1765`, whose comment states these are enabled by default). Verified with the bundled fonts' GSUB tables: Cascadia Code, Fira Code and JetBrains Mono all carry `calt`; Geist Mono does not (default is unaffected).
+
+  `paint_span` shapes a whole same-style span and then GPUI's `force_width` loop repositions glyph **index** i at `i * cell_width` (`gpui-0.2.2/src/text_system/line_layout.rs:568-575`), not character i. A `->` ligature is one glyph for two characters, so every later glyph in that span is drawn one cell to the left of its true column.
 - **xterm/Tauri**: xterm has no ligature shaping — its canvas/WebGL renderers draw one glyph per cell and no ligature addon is loaded (`package.json` has no addon-ligatures), so `->` is two separate glyphs and nothing shifts.
 - **Verdict**: **fix needed**. Disable ligatures for terminal shaping (e.g. `FontFeatures` with `liga`/`clig`/`calt` = 0) or shape per cell; the misalignment is inferred statically from the code paths, not captured in a screenshot.
 
@@ -56,7 +62,9 @@ Summary: 4 fix-needed rendering differences (ligatures, dropped zero-width glyph
 
 ### N3 — Glyph fallback: DirectWrite system fallback instead of xterm's CSS family cascade
 - **Repro**: pick a system family that lacks box drawing or Powerline glyphs, then print `┌─┬┐` and Powerline `\ue0b0`.
-- **Native**: `resolve_family` picks exactly one family, or the first of Geist Mono / Cascadia Mono / Consolas / Courier New when the requested family is not installed (`apps/native/src/fonts.rs:25-26,174-192`), and the `Font` carries no fallback list, so a missing glyph goes to DirectWrite's Unicode-range system fallback. Box drawing is present in all four bundled families (cmap-checked); Powerline PUA is present only in Fira Code and JetBrains Mono, so the default Geist Mono and Cascadia Code depend on a system Powerline font in both clients.
+- **Native**: `resolve_family` picks exactly one family, or the first of Geist Mono / Cascadia Mono / Consolas / Courier New when the requested family is not installed (`apps/native/src/fonts.rs:25-26,174-192`), and the `Font` carries no fallback list, so a missing glyph goes to DirectWrite's Unicode-range system fallback.
+
+  Box drawing is present in all four bundled families (cmap-checked); Powerline PUA is present only in Fira Code and JetBrains Mono, so the default Geist Mono and Cascadia Code depend on a system Powerline font in both clients.
 - **xterm/Tauri**: `fontFamily` is `'picked', 'Geist Mono', 'Cascadia Mono', Consolas, 'Courier New', monospace` (`Terminal.tsx:42-53`), so after the picked family the browser tries Cascadia Mono/Consolas specifically before the system fallback.
 - **Verdict**: acceptable difference. Both fall back for CJK/emoji; the intermediate cascade can only matter for glyphs Cascadia/Consolas have and the picked family lacks, and box drawing is covered by every bundled family. Exact fallback pixels are unmeasured.
 
@@ -78,7 +86,9 @@ Summary: 4 fix-needed rendering differences (ligatures, dropped zero-width glyph
 
 ### C1 — Plain Ctrl+V with an image-only clipboard sends nothing instead of ^V (owner check)
 - **Repro**: put an image on the Windows clipboard (Win+Shift+S), focus a shell pane, press Ctrl+V.
-- **Native**: `key_action` maps Ctrl+V/Ctrl+Shift+V to `KeyAction::Paste` unconditionally (`apps/native/src/term_input.rs:80-90`), then `paste()` does `cx.read_from_clipboard().and_then(|item| item.text())` and returns when it is `None` (`term_view.rs:972-975`). GPUI's Windows `ClipboardItem::text()` returns `None` when the item has only image entries (`gpui-0.2.2/src/platform.rs:1553-1565`; the Windows reader maps PNG/JFIF/GIF/SVG formats to images). So no text, no bytes, and the keystroke is consumed — the agent never sees ^V.
+- **Native**: `key_action` maps Ctrl+V/Ctrl+Shift+V to `KeyAction::Paste` unconditionally (`apps/native/src/term_input.rs:80-90`), then `paste()` does `cx.read_from_clipboard().and_then(|item| item.text())` and returns when it is `None` (`term_view.rs:972-975`).
+
+  GPUI's Windows `ClipboardItem::text()` returns `None` when the item has only image entries (`gpui-0.2.2/src/platform.rs:1553-1565`; the Windows reader maps PNG/JFIF/GIF/SVG formats to images). So no text, no bytes, and the keystroke is consumed — the agent never sees ^V.
 - **xterm/Tauri**: Ctrl+V is deliberately passed through to the browser paste event (`Terminal.tsx:944-946`, `term.attachCustomKeyEventHandler` → return false), and with an image-only clipboard the paste handler finds `chosen.length === 0` and injects nothing. Tauri therefore also sends nothing, but the owner's stated acceptance is that native falls back to ^V.
 - **Verdict**: **fix needed**. On a clipboard with no text, send `0x16` (^V) to the child instead of consuming the key.
 
@@ -96,7 +106,9 @@ Summary: 4 fix-needed rendering differences (ligatures, dropped zero-width glyph
 
 ### C4 — OSC 52
 - **Repro**: `printf '\e]52;c;%s\a' "$(printf 'hello' | base64)"`, and `printf '\e]52;c;?\a'`.
-- **Native**: `Osc52::CopyPaste` (`term.rs:466-469`), stores collected and emitted as `PaneEvent::Copied` → `copy_to_clipboard` (GPUI system clipboard + chip) (`term_view.rs:780-790`, `copied.rs:99-104`); reads are answered with an empty clipboard (`term.rs:37-45`, test `osc52_load_is_answered_with_an_empty_clipboard`); stores replayed from scrollback history are discarded (test `osc52_store_in_history_is_discarded`); only the pane that answers queries processes them, so two panes on one session copy once.
+- **Native**: `Osc52::CopyPaste` (`term.rs:466-469`), stores collected and emitted as `PaneEvent::Copied` → `copy_to_clipboard` (GPUI system clipboard + chip) (`term_view.rs:780-790`, `copied.rs:99-104`); reads are answered with an empty clipboard (`term.rs:37-45`, test `osc52_load_is_answered_with_an_empty_clipboard`).
+
+  Stores replayed from scrollback history are discarded (test `osc52_store_in_history_is_discarded`); only the pane that answers queries processes them, so two panes on one session copy once.
 - **xterm/Tauri**: ClipboardAddon + `RtClipboardProvider` write via `navigator.clipboard.writeText` and answer reads with `""`; each pane's own xterm would process a replay, and two panes would each write.
 - **Verdict**: matches for the security-relevant behaviour; the history-store drop and single-pane answer are acceptable (better) differences.
 
@@ -112,7 +124,9 @@ Summary: 4 fix-needed rendering differences (ligatures, dropped zero-width glyph
 
 ### G1 — Native auto-recreates the device; xterm falls back to a DOM renderer, and native has no software fallback
 - **Repro**: force a TDR/device removal (e.g. `dxcap`, a driver reset, or a GPU hang) while the client is open.
-- **Native**: GPUI's Windows platform checks `ID3D11Device::GetDeviceRemovedReason()` each vsync; on loss it waits 350 ms, recreates `DirectXDevices` and the renderer resources (swap chain, pipelines, glyph atlas) with up to 5 attempts 100 ms apart, clears the text/glyph caches, and sends `WM_GPUI_GPU_DEVICE_LOST` so the window redraws (`gpui-0.2.2/src/platform/windows/platform.rs:252-253,1022-1070`, `directx_devices.rs:23-42`, `directx_renderer.rs:209-285`). The terminal grid lives in `alacritty_terminal` on the CPU, so no content is lost. If all 5 attempts fail, GPUI logs `Failed to recover DirectX devices after multiple attempts` and the commented-out `std::process::exit(1)` means the app keeps running with an unrecoverable renderer — there is no DOM or software renderer to fall back to.
+- **Native**: GPUI's Windows platform checks `ID3D11Device::GetDeviceRemovedReason()` each vsync; on loss it waits 350 ms, recreates `DirectXDevices` and the renderer resources (swap chain, pipelines, glyph atlas) with up to 5 attempts 100 ms apart, clears the text/glyph caches, and sends `WM_GPUI_GPU_DEVICE_LOST` so the window redraws (`gpui-0.2.2/src/platform/windows/platform.rs:252-253,1022-1070`, `directx_devices.rs:23-42`, `directx_renderer.rs:209-285`).
+
+  The terminal grid lives in `alacritty_terminal` on the CPU, so no content is lost. If all 5 attempts fail, GPUI logs `Failed to recover DirectX devices after multiple attempts` and the commented-out `std::process::exit(1)` means the app keeps running with an unrecoverable renderer — there is no DOM or software renderer to fall back to.
 - **xterm/Tauri**: `webgl.onContextLoss(() => webgl.dispose())` (`Terminal.tsx:466-470`); disposing the WebGL addon lets xterm activate its DOM renderer, which keeps rendering the same buffer.
 - **Verdict**: acceptable difference for the normal TDR path (automatic device recreation is the native equivalent of the WebGL→DOM fallback); the permanent-failure path has no fallback and is a residual gap. Not simulated at runtime.
 
@@ -122,7 +136,9 @@ Summary: 4 fix-needed rendering differences (ligatures, dropped zero-width glyph
 
 ### E1 — Extended underline styles are parsed but never drawn
 - **Repro**: `printf '\e[4:1mS\e[4:2mD\e[4:3mC\e[4:4mD\e[4:5mS\e[0m\n'`.
-- **Native**: `alacritty_terminal` 0.26 parses `4:2`..`4:5` into `Flags::DOUBLE_UNDERLINE`, `UNDERCURL`, `DOTTED_UNDERLINE`, `DASHED_UNDERLINE` (`term/mod.rs:1903-1922`), but `SPAN_STYLE` only includes `UNDERLINE` (`apps/native/src/term.rs:393-396`) and `text_run` draws only a single 1 px line for `Flags::UNDERLINE` (`term_view.rs:1849-1856`). The other flags are dropped from the span mask entirely, so a run using only e.g. `4:2` is merged with neighbouring unstyled text and shows no underline at all.
+- **Native**: `alacritty_terminal` 0.26 parses `4:2`..`4:5` into `Flags::DOUBLE_UNDERLINE`, `UNDERCURL`, `DOTTED_UNDERLINE`, `DASHED_UNDERLINE` (`term/mod.rs:1903-1922`), but `SPAN_STYLE` only includes `UNDERLINE` (`apps/native/src/term.rs:393-396`) and `text_run` draws only a single 1 px line for `Flags::UNDERLINE` (`term_view.rs:1849-1856`).
+
+  The other flags are dropped from the span mask entirely, so a run using only e.g. `4:2` is merged with neighbouring unstyled text and shows no underline at all.
 - **xterm/Tauri**: xterm 6 parses `4:N` for N 1-5 into `extended.underlineStyle` and its renderers draw single/double/curly/dotted/dashed (`xterm.mjs` `_processUnderline`, DOM classes `xterm-underline-N`).
 - **Verdict**: **fix needed**.
 
@@ -171,7 +187,9 @@ Summary: 4 fix-needed rendering differences (ligatures, dropped zero-width glyph
 
 ### O2 — A Windows mouse-move event whose position is unchanged must not produce hover or motion reports
 - **Repro**: with a program requesting any-motion reporting (`\e[?1003h`), post the same mouse position twice; with a link under the cursor and Ctrl held, post the same position twice.
-- **Native**: motion reports are deduplicated by cell — `report_motion` returns when `last_motion == Some((row, col))` (`term_view.rs:1255-1262`), for both the no-button path (`on_mouse_move`, `1119-1131`) and the drag path (`on_gesture_move`, `1135-1153`). Hover state is `(ctrl held, cell)` and only notifies when that tuple changes (`on_hover_move`, `1157-1170`); same position therefore produces no report and no repaint. Note this deduplicates by cell, so a sub-cell pixel move is also suppressed (stricter than "same position").
+- **Native**: motion reports are deduplicated by cell — `report_motion` returns when `last_motion == Some((row, col))` (`term_view.rs:1255-1262`), for both the no-button path (`on_mouse_move`, `1119-1131`) and the drag path (`on_gesture_move`, `1135-1153`).
+
+  Hover state is `(ctrl held, cell)` and only notifies when that tuple changes (`on_hover_move`, `1157-1170`); same position therefore produces no report and no repaint. Note this deduplicates by cell, so a sub-cell pixel move is also suppressed (stricter than "same position").
 - **xterm/Tauri**: xterm's mouse service computes a cell coordinate and its own dedupe/encoding path; the requirement is native-side.
 - **Verdict**: **matches** by code inspection. Not exercised at runtime: no UI spec posts two identical mouse-move events, and doing so would have required adding a test file, which this audit was not allowed to do.
 

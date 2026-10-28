@@ -1,6 +1,8 @@
 # Needs you and Finished: the only two notifications
 
-The native client used to fire the three OS toasts ported from the Tauri app: "Claude is awaiting input", "Claude session stopped" (the process exited) and "Claude session errored", each with its own toggle in Settings → Notifications. TN.1 to TN.3 replaced them on the desktop: `notify.rs` raises `Needs you` and `Finished`, each with the session's label as its body and its own toggle, under one skip-when setting (`apps/native/src/notify.rs`, `settings_view.rs`). What stays open here is the mobile half (RT-105, RT-143) and the detection RT-74 sharpens.
+The native client used to fire the three OS toasts ported from the Tauri app: "Claude is awaiting input", "Claude session stopped" (the process exited) and "Claude session errored", each with its own toggle in Settings → Notifications.
+
+TN.1 to TN.3 replaced them on the desktop: `notify.rs` raises `Needs you` and `Finished`, each with the session's label as its body and its own toggle, under one skip-when setting (`apps/native/src/notify.rs`, `settings_view.rs`). What stays open here is the mobile half (RT-105, RT-143) and the detection RT-74 sharpens.
 
 ## Rulings (owner)
 
@@ -11,7 +13,9 @@ The native client used to fire the three OS toasts ported from the Tauri app: "C
 - **Finished waits for RT-84.** Needs you, the removal of the three Tauri-era toasts and the desktop suppression setting ship first; Finished is added once RT-84's background state exists, so it never fires early.
 - **No headless sessions.** Headless runs are being removed from the native client (RT-183), so neither notification covers them.
 - **Wording.** Title `Needs you` or `Finished`; body the session's label, as today's toasts use it.
-- **Build now, sharpen the detection beside it.** Needs you ships on today's status transitions, without waiting for hook status (RT-25). The detection gets smarter per agent through RT-74, which copies how herdr and its clients detect state (subagents, keywords) and reuses ops-tower's detection (subagents, dispatch runs, background shells); ops-tower is a prototype of what rustling-tulip absorbs natively and is to be deprecated. When RT-25 makes status hook-driven, the notifications follow with no change of their own.
+- **Build now, sharpen the detection beside it.** Needs you ships on today's status transitions, without waiting for hook status (RT-25).
+
+  The detection gets smarter per agent through RT-74, which copies how herdr and its clients detect state (subagents, keywords) and reuses ops-tower's detection (subagents, dispatch runs, background shells); ops-tower is a prototype of what rustling-tulip absorbs natively and is to be deprecated. When RT-25 makes status hook-driven, the notifications follow with no change of their own.
 - **Desktop suppression is a setting.** A setting chooses when the desktop client skips a notification for a session the owner is already looking at. Choices: skip when the client window is focused and the session's pane is on screen (the default); always notify; skip whenever the client window is focused.
 - **Mobile gets the same two notifications**, with a setting for whether being active on the desktop suppresses them, on by default. What counts as active on the desktop is itself configurable: recent keyboard or mouse input on the host PC (Windows idle time within a threshold), and the desktop client window being focused. By default both must hold.
 

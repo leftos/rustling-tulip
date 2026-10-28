@@ -47,11 +47,17 @@ Every write is a temp file plus rename, retried on Windows sharing violations (w
 
 - Usage: `GET https://api.anthropic.com/api/oauth/usage`, headers `Authorization: Bearer <accessToken>`, `anthropic-beta: oauth-2025-04-20`, 5 s timeout. Parsed: `five_hour{utilization, resets_at}`, `seven_day{…}`, `extra_usage{is_enabled, used_credits, monthly_limit, utilization, currency, resets_at}` (credits ÷ 100), `limits[]{scope.model.display_name, percent, resets_at}`. Headroom is `100 − max(pct)`.
 - Profile: `GET https://api.anthropic.com/api/oauth/profile` → `account.uuid/email`, `organization.uuid`.
-- Refresh: `POST https://platform.claude.com/v1/oauth/token` with `{grant_type:"refresh_token", refresh_token, client_id:"9d1c250a-e61b-44d9-88ed-5944d1962f5e"}`. A token counts as expired 5 minutes before `expiresAt`. Refresh tokens are one-time: spending a superseded one gives `invalid_grant` and kills that login for good. So the active account is refreshed only under Claude Code's lock pair, an inactive one from its backup, each behind a per-slot `.consume-{n}.lock`. Only a 400/401/403 carrying `error:"invalid_grant"` quarantines an account.
+- Refresh: `POST https://platform.claude.com/v1/oauth/token` with `{grant_type:"refresh_token", refresh_token, client_id:"9d1c250a-e61b-44d9-88ed-5944d1962f5e"}`. A token counts as expired 5 minutes before `expiresAt`. Refresh tokens are one-time: spending a superseded one gives `invalid_grant` and kills that login for good.
 
-**Polling budget and cadence** (`poll_policy.py`, `usage_store.py`): about 28–30 requests per trailing hour per identity. Serve TTL and minimum interval 180 s, urgent 60 s, active at most 300 s, candidates 300–600 s, exhausted 600 s; a move of 1 point halves the interval, no move multiplies it by 1.5; 10 % jitter; after a 429 at least 360 s for an hour, backing off ×1.5 to 1800 s. Data up to 300 s old drives decisions. Failure backoff `30·2^(n−1)` capped at 600 s. Claim leases (`CLAIM_TTL_S=90`: lock → claim → fetch unlocked → record) stop two collectors fetching one account.
+  So the active account is refreshed only under Claude Code's lock pair, an inactive one from its backup, each behind a per-slot `.consume-{n}.lock`. Only a 400/401/403 carrying `error:"invalid_grant"` quarantines an account.
 
-**Auto-switch** (`autoswitch.py`): the trigger is the binding window's utilization reaching the threshold (`proactive`), no headroom (`at-limit`), or unknown usage for 3 ticks (`failover`). A candidate must be under the threshold and beat the active account by the hysteresis; a 300 s cooldown applies except to at-limit and failover. When every account is over, rank by soonest recovery (hysteresis 300 s, horizon 4 h). The warm-up gate holds every decision until each non-quarantined account has been polled since start. Each tick polls the active account when due plus the stalest due candidate, and refetches all within 15 points of the threshold. Before activating a target, refresh it if it expires within 10 minutes. Pace (`pace.py`) is display only.
+**Polling budget and cadence** (`poll_policy.py`, `usage_store.py`): about 28–30 requests per trailing hour per identity. Serve TTL and minimum interval 180 s, urgent 60 s, active at most 300 s, candidates 300–600 s, exhausted 600 s; a move of 1 point halves the interval, no move multiplies it by 1.5; 10 % jitter; after a 429 at least 360 s for an hour, backing off ×1.5 to 1800 s. Data up to 300 s old drives decisions.
+
+Failure backoff `30·2^(n−1)` capped at 600 s. Claim leases (`CLAIM_TTL_S=90`: lock → claim → fetch unlocked → record) stop two collectors fetching one account.
+
+**Auto-switch** (`autoswitch.py`): the trigger is the binding window's utilization reaching the threshold (`proactive`), no headroom (`at-limit`), or unknown usage for 3 ticks (`failover`). A candidate must be under the threshold and beat the active account by the hysteresis; a 300 s cooldown applies except to at-limit and failover. When every account is over, rank by soonest recovery (hysteresis 300 s, horizon 4 h).
+
+The warm-up gate holds every decision until each non-quarantined account has been polled since start. Each tick polls the active account when due plus the stalest due candidate, and refetches all within 15 points of the threshold. Before activating a target, refresh it if it expires within 10 minutes. Pace (`pace.py`) is display only.
 
 ## Design
 
@@ -83,7 +89,13 @@ Every write is a temp file plus rename, retried on Windows sharing violations (w
 
 ## Steps
 
-- [ ] **CA.0 Spike: store and CLI contract.** In `docs/spikes/claude-swap-store.md`: (a) the store's schema and whether it carries a version (read `migrations.py`), with a sample of every file from a real store, secrets redacted; (b) that Rust's `std::fs::File::lock` on `.lock` and cswap's `msvcrt.locking` exclude each other, measured with both running; (c) a real usage response and its rate-limit headers; (d) the `claude` CLI's non-interactive login command, and what `claude auth status --json` reports after it, in a scratch `CLAUDE_CONFIG_DIR`; (e) how a recent `cswap auto` shows itself (`autoswitch_state.json` write cadence). Rulings the later steps need go into this file's Design.
+- [ ] **CA.0 Spike: store and CLI contract.**
+
+  In `docs/spikes/claude-swap-store.md`: (a) the store's schema and whether it carries a version (read `migrations.py`), with a sample of every file from a real store, secrets redacted. (b) That Rust's `std::fs::File::lock` on `.lock` and cswap's `msvcrt.locking` exclude each other, measured with both running.
+
+  (c) A real usage response and its rate-limit headers. (d) The `claude` CLI's non-interactive login command, and what `claude auth status --json` reports after it, in a scratch `CLAUDE_CONFIG_DIR`. (e) How a recent `cswap auto` shows itself (`autoswitch_state.json` write cadence).
+
+  Rulings the later steps need go into this file's Design.
 - [ ] **CA.1 Connection origin.** `server.rs` (`AuthKind`, `client_session`), `crates/protocol` (`Welcome.origin`, `#[serde(default)]`). Test: a tailnet connection is refused an admin message that a local one is allowed.
 - [ ] **CA.2 Store.** `accounts/store.rs`, `accounts/claude_locks.rs`. Tests: round-trip cswap's own fixtures (`tests/fixtures/sample_config.json` and files from CA.0) byte-for-byte where cswap would write the same; a held `.lock` or Claude lock directory blocks and a stale one is taken; a sharing violation on rename is retried.
 - [ ] **CA.3 OAuth client.** `accounts/oauth.rs`; the daemon's `Cargo.toml` gains `reqwest`; CLAUDE.md's no-direct-API sentence gains this exception. Tests against a local axum mock: usage parsing (including missing windows and extra usage), refresh with the consume lock, `invalid_grant` quarantines and a plain 401 does not, `Retry-After`.

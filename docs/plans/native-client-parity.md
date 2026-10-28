@@ -59,7 +59,9 @@ Close behind: the paste and key quirks (native clipboard read, Shift+Enter bytes
 
 ## Sessions
 
-- [x] Session context menu: rename inline (blank restores the default), Duplicate ▸ new tab (Shift = prefilled dialog) or an existing tab, Move to ▸, Add to current / new tab, Pop out, Appearance…, Accent ▸ (presets / recent / custom / inherit), Reveal worktree — `SessionContextMenu.tsx`, `MoveToSubmenu.tsx`, `MenuSubmenu.tsx` (native: Appearance… and Accent ▸ landed in P2.10; Duplicate ▸, Move to ▸, Add to current / new tab and Reveal worktree in P4.12b; Shift on Duplicate ▸ in P4.12c; Pop out pops the pane showing the session, the active tab's first, else opens a session pop-out, and is dimmed "Already in a pop-out" for a session an open pop-out shows)
+- [x] Session context menu: rename inline (blank restores the default), Duplicate ▸ new tab (Shift = prefilled dialog) or an existing tab, Move to ▸, Add to current / new tab, Pop out, Appearance…, Accent ▸ (presets / recent / custom / inherit), Reveal worktree — `SessionContextMenu.tsx`, `MoveToSubmenu.tsx`, `MenuSubmenu.tsx`.
+
+  Native: Appearance… and Accent ▸ landed in P2.10; Duplicate ▸, Move to ▸, Add to current / new tab and Reveal worktree in P4.12b; Shift on Duplicate ▸ in P4.12c. Pop out pops the pane showing the session, the active tab's first, else opens a session pop-out, and is dimmed "Already in a pop-out" for a session an open pop-out shows.
 - [x] Actions by state: running → Stop (delete or keep worktree); stopped → Restart / park / remove (± worktree); inactive → Resume / remove (± worktree) — `SessionContextMenu.tsx`
 - [x] Stopping a session with no pane parks it or discards it — `SessionContextMenu.tsx`
 - [x] Pane header: status dot, label, runtime chip, trusted chip, one repo:branch chip per member (path in tooltip), Pop out, two-step Stop or "exit code N" — `SessionPane.tsx` (native: all but Pop out landed in P4.12a, with member chips on a second row; Pop out pops the pane into its own window and leaves a card in the grid)

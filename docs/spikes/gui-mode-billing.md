@@ -19,7 +19,9 @@ One user message (`Reply with just the word ok.`) on `--model haiku`, in an empt
 
 ## Policy
 
-- Anthropic's Legal and compliance page (`code.claude.com/docs/en/legal-and-compliance`, "Authentication and credential use") says OAuth "is designed to support ordinary use of Claude Code". It also says "Developers building products or services that interact with Claude's capabilities, including those using the Agent SDK, should use API key authentication", and that "Anthropic does not permit third-party developers to offer Claude.ai login or to route requests through Free, Pro, or Max plan credentials on behalf of their users." The same page says the Pro and Max limits "assume ordinary, individual usage of Claude Code and the Agent SDK".
+- Anthropic's Legal and compliance page (`code.claude.com/docs/en/legal-and-compliance`, "Authentication and credential use") says OAuth "is designed to support ordinary use of Claude Code".
+
+  It also says "Developers building products or services that interact with Claude's capabilities, including those using the Agent SDK, should use API key authentication", and that "Anthropic does not permit third-party developers to offer Claude.ai login or to route requests through Free, Pro, or Max plan credentials on behalf of their users." The same page says the Pro and Max limits "assume ordinary, individual usage of Claude Code and the Agent SDK".
 - News reports (DevOps.com and VentureBeat; not re-read against an Anthropic primary source) say a change that would have given Agent SDK use its own monthly credit, separate from the plan's limits, was paused on its launch day, 2026-06-15, with no new date.
 
 ## What would change the answer

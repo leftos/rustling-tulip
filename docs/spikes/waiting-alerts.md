@@ -47,7 +47,9 @@ All three kinds were right. The speech still leaks identifiers a voice reads bad
   | `message-done.md` | default | `done_waiting` | 1.84 s | 319 / 333 | $0.00050 |
   | `message-question.md` | default | `needs_answer` | 1.86 s | 307 / 273 | $0.00042 |
 
-  Every reply carried a thinking block, and `low` effort did not shorten it (two of three low runs thought longer than the default runs: noise at one run each). The kinds all matched. DeepSeek obeyed "no code fence", and its speech read better aloud than Haiku's: no plan numbers or function names, and "thirty-seven" spelled out in one run. But the low-effort `needs_answer` speech dropped the three options that the default run and Haiku both kept. Cost is about half of Haiku's per alert at peak and a quarter off-peak; latency is 1.5–3.2 s against Haiku's 1.0–1.4 s.
+  Every reply carried a thinking block, and `low` effort did not shorten it (two of three low runs thought longer than the default runs: noise at one run each). The kinds all matched. DeepSeek obeyed "no code fence", and its speech read better aloud than Haiku's: no plan numbers or function names, and "thirty-seven" spelled out in one run.
+
+  But the low-effort `needs_answer` speech dropped the three options that the default run and Haiku both kept. Cost is about half of Haiku's per alert at peak and a quarter off-peak; latency is 1.5–3.2 s against Haiku's 1.0–1.4 s.
 - `--bare` would trim the CLI's startup, but it reads only `ANTHROPIC_API_KEY`, so it needs a key too.
 
 ## Next

@@ -1,10 +1,16 @@
 # Terminal agent harnesses for the spawn dialog's runtime dropdown
 
-Researched 2026-09-30. Each fact cites its primary source (vendor docs, the repo's source or README at the version named). Anything taken only from a secondary source, or inferred, is marked **unverified**. "Fits the backend" refers to `crates/daemon/src/agents/` as of `de9c1ae`: a backend supplies a program name and env override, interactive argv (cwd, extra dirs, model, permission mode, initial prompt or the prompt injector, resume id), an optional headless argv and line parser, and the session's own conversation id, either chosen up front (Claude `--session-id`), pre-created by a separate run (Cursor `create-chat`), or found on disk after the fact (Codex rollout scan).
+Researched 2026-09-30. Each fact cites its primary source (vendor docs, the repo's source or README at the version named). Anything taken only from a secondary source, or inferred, is marked **unverified**.
+
+"Fits the backend" refers to `crates/daemon/src/agents/` as of `de9c1ae`: a backend supplies a program name and env override, interactive argv (cwd, extra dirs, model, permission mode, initial prompt or the prompt injector, resume id), an optional headless argv and line parser, and the session's own conversation id, either chosen up front (Claude `--session-id`), pre-created by a separate run (Cursor `create-chat`), or found on disk after the fact (Codex rollout scan).
 
 ## Adoption evidence
 
-npm weekly downloads (`api.npmjs.org/downloads/point/last-week/<pkg>`, fetched 2026-09-30), for scale only: `@openai/codex` 25.65M, `@anthropic-ai/claude-code` 14.50M, `@earendil-works/pi-coding-agent` 4.32M (+ 1.25M on the old `@mariozechner/pi-coding-agent`; Pi is also embedded as an SDK, so this overstates CLI users), `opencode-ai` 2.87M, `@github/copilot` 1.47M, `@google/gemini-cli` 450k, `cline` 98k, `@qwen-code/qwen-code` 84k, `@kilocode/cli` 48k, `@ampcode/cli` 40k (+ 23k on `@sourcegraph/amp`), `@moonshot-ai/kimi-code` 38k, `droid` 9.9k, `@charmland/crush` 9.2k. Antigravity CLI and Kiro CLI ship their own installers, not npm, so they have no comparable figure. GitHub stars (2026-09-30): opencode 211k, Gemini CLI 107k, Pi 111k, Cline 70k, Goose 55k, Aider 49k, Crush 28k, Qwen Code 28k.
+npm weekly downloads (`api.npmjs.org/downloads/point/last-week/<pkg>`, fetched 2026-09-30), for scale only: `@openai/codex` 25.65M, `@anthropic-ai/claude-code` 14.50M, `@earendil-works/pi-coding-agent` 4.32M (+ 1.25M on the old `@mariozechner/pi-coding-agent`; Pi is also embedded as an SDK, so this overstates CLI users), `opencode-ai` 2.87M.
+
+The rest are `@github/copilot` 1.47M, `@google/gemini-cli` 450k, `cline` 98k, `@qwen-code/qwen-code` 84k, `@kilocode/cli` 48k, `@ampcode/cli` 40k (+ 23k on `@sourcegraph/amp`), `@moonshot-ai/kimi-code` 38k, `droid` 9.9k, `@charmland/crush` 9.2k.
+
+Antigravity CLI and Kiro CLI ship their own installers, not npm, so they have no comparable figure. GitHub stars (2026-09-30): opencode 211k, Gemini CLI 107k, Pi 111k, Cline 70k, Goose 55k, Aider 49k, Crush 28k, Qwen Code 28k.
 
 ## Support matrix
 
@@ -28,14 +34,22 @@ npm weekly downloads (`api.npmjs.org/downloads/point/last-week/<pkg>`, fetched 2
 
 ## Antigravity CLI (Google)
 
-**Status.** Antigravity is not IDE-only. Google ships the **Antigravity CLI**, a terminal TUI launched as `agy`, alongside the Antigravity 2.0 desktop app; both run "the exact same agent core" and share settings ([CLI overview](https://antigravity.google/docs/cli/overview/)). Repo [google-antigravity/antigravity-cli](https://github.com/google-antigravity/antigravity-cli) holds the README, changelog and examples, not source; latest release `1.2.14`, published 2026-09-30. Licence: none on the repo; use is under the Google Terms of Service, with interaction data collected unless opted out (README "Terms of Service & Data Use").
+**Status.** Antigravity is not IDE-only. Google ships the **Antigravity CLI**, a terminal TUI launched as `agy`, alongside the Antigravity 2.0 desktop app; both run "the exact same agent core" and share settings ([CLI overview](https://antigravity.google/docs/cli/overview/)).
 
-**Relation to Gemini CLI.** The launch post says "the Antigravity CLI took inspiration from core Gemini CLI product and harness components" as part of consolidating "a single agent harness across Google-built developer surfaces", and links a migration guide from Gemini CLI ([blog, 2026-05-19](https://antigravity.google/blog/introducing-google-antigravity-cli)). Gemini CLI is not archived: `google-gemini/gemini-cli` released `v0.62.0` on 2026-09-29. Both share `~/.gemini/` (Antigravity uses `~/.gemini/antigravity-cli/` and `~/.gemini/config/`).
+Repo [google-antigravity/antigravity-cli](https://github.com/google-antigravity/antigravity-cli) holds the README, changelog and examples, not source; latest release `1.2.14`, published 2026-09-30. Licence: none on the repo; use is under the Google Terms of Service, with interaction data collected unless opted out (README "Terms of Service & Data Use").
+
+**Relation to Gemini CLI.** The launch post says "the Antigravity CLI took inspiration from core Gemini CLI product and harness components" as part of consolidating "a single agent harness across Google-built developer surfaces", and links a migration guide from Gemini CLI ([blog, 2026-05-19](https://antigravity.google/blog/introducing-google-antigravity-cli)).
+
+Gemini CLI is not archived: `google-gemini/gemini-cli` released `v0.62.0` on 2026-09-29. Both share `~/.gemini/` (Antigravity uses `~/.gemini/antigravity-cli/` and `~/.gemini/config/`).
 
 1. **Install.** `irm https://antigravity.google/cli/install.ps1 | iex` (PowerShell), a `.cmd` installer, or `curl … install.sh | bash`; "runs natively on macOS, Linux, and Windows" ([install](https://antigravity.google/docs/cli/install/)). Binary `agy`.
 2. **Folder.** Run `agy` in the project folder; first launch asks to trust the workspace ([getting started](https://antigravity.google/docs/cli/getting-started)). Extra folders: `/add-dir <path>` slash command ([reference](https://antigravity.google/docs/cli/reference/)). A `--add-dir` launch flag appears only in secondary cheat sheets: **unverified**.
 3. **Initial prompt.** `--prompt-interactive` exists (changelog: "the `--print` and `--prompt-interactive` conflict"); `-i` short form **unverified**.
-4. **Resume.** `--conversation <id>` resumes by id, `--continue`/`-c` the most recent ([headless](https://antigravity.google/docs/cli/headless/), shown with `-p`; interactive use of `--conversation` **unverified**, though the CLI prints "the exact command needed to resume" on exit, [using](https://antigravity.google/docs/cli/using/)). Id capture: a custom status-line or title script (`settings.json` `"statusLine"`/`"title": {"type":"command",…}`) receives JSON on every state change with `conversation_id`, `transcript_path` (example `~/.gemini/antigravity/brain/<id>/.system_generated/logs/transcript.jsonl`) and `agent_state` ([status line](https://antigravity.google/docs/cli/statusline/), [title](https://antigravity.google/docs/cli-title)). Whether these can be set per launch rather than in the user's `settings.json`: **unverified**.
+4. **Resume.** `--conversation <id>` resumes by id, `--continue`/`-c` the most recent ([headless](https://antigravity.google/docs/cli/headless/), shown with `-p`; interactive use of `--conversation` **unverified**, though the CLI prints "the exact command needed to resume" on exit, [using](https://antigravity.google/docs/cli/using/)).
+
+   Id capture: a custom status-line or title script (`settings.json` `"statusLine"`/`"title": {"type":"command",…}`) receives JSON on every state change with `conversation_id`, `transcript_path` (example `~/.gemini/antigravity/brain/<id>/.system_generated/logs/transcript.jsonl`) and `agent_state` ([status line](https://antigravity.google/docs/cli/statusline/), [title](https://antigravity.google/docs/cli-title)).
+
+   Whether these can be set per launch rather than in the user's `settings.json`: **unverified**.
 5. **Headless.** `agy -p "<prompt>" --output-format json|stream-json`; stream starts with `init` carrying `conversation_id`; `--input-format stream-json` keeps one process for many turns ([headless](https://antigravity.google/docs/cli/headless/)).
 6. **Model / permissions.** `--model <slug>` (`agy models` lists), `--effort`, `--agent`, `--mode=accept-edits|plan` ([modes](https://antigravity.google/docs/cli/modes/)), `--sandbox`, `--dangerously-skip-permissions`.
 7. **Status.** `agent_state` values `idle`, `thinking`, `working`, `tool_use`, `initializing`, plus `tool_confirmation_pending` ([status line](https://antigravity.google/docs/cli/statusline/)). Hooks via `~/.gemini/config/hooks.json` and `<workspace>/.agents/hooks.json` with `PostToolUse`, `Stop`, `PostInvocation` events (changelog).

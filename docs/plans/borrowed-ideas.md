@@ -8,7 +8,13 @@ Features from three open-source agent managers and terminals that rustling-tulip
 
 Each idea taken up has its own subplan, linked from its entry, which holds its open work and steps; this file keeps where each idea came from and the rulings made when it was picked.
 
-- **Conversation view (GUI mode).** Show a Claude session as a chat instead of the terminal UI: the user's messages, the agent's answers and reasoning, one card per tool call, and permission requests and questions answered with buttons. Model, effort and permission mode can change without a restart, and messages typed mid-turn are queued. A session switches between terminal and conversation view, keeping its conversation: the agent restarts with `--resume`, and VelaTerm asks first if a turn is running. VelaTerm drives Claude as a two-way protocol peer with `claude --print --verbose --input-format stream-json --output-format stream-json` (`src-tauri/src/agent/chat/protocol.rs` near line 56, the engine in `chat/engine.rs`), and Codex through its app-server. The user guide is `docs/manuals/conversation-view_*.md`. rustling-tulip's headless mode (`crates/daemon/src/headless.rs`) already parses the stream-json output. What's missing is the two-way input, the permission prompts and the chat UI in the native client. Plan: [conversation-view.md](./conversation-view.md).
+- **Conversation view (GUI mode).** Show a Claude session as a chat instead of the terminal UI: the user's messages, the agent's answers and reasoning, one card per tool call, and permission requests and questions answered with buttons.
+
+  Model, effort and permission mode can change without a restart, and messages typed mid-turn are queued. A session switches between terminal and conversation view, keeping its conversation: the agent restarts with `--resume`, and VelaTerm asks first if a turn is running.
+
+  VelaTerm drives Claude as a two-way protocol peer with `claude --print --verbose --input-format stream-json --output-format stream-json` (`src-tauri/src/agent/chat/protocol.rs` near line 56, the engine in `chat/engine.rs`), and Codex through its app-server.
+
+  The user guide is `docs/manuals/conversation-view_*.md`. rustling-tulip's headless mode (`crates/daemon/src/headless.rs`) already parses the stream-json output. What's missing is the two-way input, the permission prompts and the chat UI in the native client. Plan: [conversation-view.md](./conversation-view.md).
   - Billing: measured in [gui-mode-billing.md](../spikes/gui-mode-billing.md). It runs on the subscription's usage windows today (`apiKeySource: none`, the plan's 5-hour and 7-day windows in `rate_limit_event`). The CLI counts it as SDK-style use, which a paused Anthropic billing change would move to a separate credit. The terms allow it for personal use only, so keep the terminal UI as the fallback.
   - How permission requests reach the client: the stream-json permission-prompt tool, or a hook.
   - How the native client renders a chat: a new view kind next to the terminal and the diff tabs.
@@ -17,7 +23,9 @@ Each idea taken up has its own subplan, linked from its entry, which holds its o
   - Ruling (user, 2026-09-28): a view on the native client's activity rail, beside Sessions and Source control, not a sidebar filter.
 - **Link a worktree to an issue or PR.** When spawning, paste or search a GitHub issue or PR URL; the session and its sidebar row show the link, and the PR's state once it exists. Orca does this for GitHub, GitLab, Linear and Jira (`onorca.dev/docs/model/worktrees`). It sits next to the presets' GitHub-issue-range prompts. Plan: [issue-link.md](./issue-link.md).
   - Ruling (user, 2026-09-28): GitHub only, through `gh`; no provider abstraction.
-- **Agents that drive rustling-tulip.** A small CLI, run inside a session, that talks to the daemon over its WebSocket: spawn a child session (optionally in a new worktree) with a first prompt, send text to another session, and read another session's recent output or transcript. VelaTerm's `vspawn` / `vtell` / `vrefer` / `vsearch` (`src-tauri/src/agent/spawn_cli.rs`, `tell.rs`, `cli_client.rs`) and herdr's socket API do this, and each ships a skill that teaches the agent to use them. Plan: [agent-cli.md](./agent-cli.md).
+- **Agents that drive rustling-tulip.** A small CLI, run inside a session, that talks to the daemon over its WebSocket: spawn a child session (optionally in a new worktree) with a first prompt, send text to another session, and read another session's recent output or transcript.
+
+  VelaTerm's `vspawn` / `vtell` / `vrefer` / `vsearch` (`src-tauri/src/agent/spawn_cli.rs`, `tell.rs`, `cli_client.rs`) and herdr's socket API do this, and each ships a skill that teaches the agent to use them. Plan: [agent-cli.md](./agent-cli.md).
   - How a session authenticates: a per-session token in its environment, never the daemon's full `auth_token`.
   - Which daemon messages the CLI may send.
   - Ruling (user, 2026-09-28): a spawned child sits in its own repo or workspace container like any session, and its leaf carries a `↳ <parent label>` tag; no nesting under the parent leaf.
@@ -41,7 +49,9 @@ Each idea taken up has its own subplan, linked from its entry, which holds its o
 
   > 🤖 Posted by Claude Code on behalf of @leftos.
   >
-  > For what it's worth, here's how multi-repo workspaces work in rustling-tulip, a daemon-plus-client agent manager I've been building. A workspace is a named set of registered repos. Spawning a session into it on branch `X` creates (or reuses) one worktree per member, all under one folder for that branch and workspace: `<worktrees-root>/wt.<branch>/<workspace>/<member offset>`. A member's offset is its path below the folder the members share, so a relative reference between members in source (`../../libs/core`) still resolves between the worktrees. One agent process runs with its cwd in the first member's worktree and `--add-dir <worktree>` for every other member. Members on different drives share no folder, so the relative path between them can't be kept.
+  > For what it's worth, here's how multi-repo workspaces work in rustling-tulip, a daemon-plus-client agent manager I've been building. A workspace is a named set of registered repos. Spawning a session into it on branch `X` creates (or reuses) one worktree per member, all under one folder for that branch and workspace: `<worktrees-root>/wt.<branch>/<workspace>/<member offset>`.
+  >
+  > A member's offset is its path below the folder the members share, so a relative reference between members in source (`../../libs/core`) still resolves between the worktrees. One agent process runs with its cwd in the first member's worktree and `--add-dir <worktree>` for every other member. Members on different drives share no folder, so the relative path between them can't be kept.
   >
   > For example, a workspace `shop` of two repos, spawned on branch `feature/login`:
   >

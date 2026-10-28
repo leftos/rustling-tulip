@@ -5,7 +5,9 @@ CLI: `claude --version` printed `2.1.308 (Claude Code)`; the TUI banner showed `
 ## Method
 
 - Scratch dir `X:\dev\rustling-tulip\.tmp\spike-rt84\`, one fresh `git init` folder per run (`work-<run>\`). Nothing outside it was touched.
-- Logger `hooklog.mjs` (node): appends `{t: epoch ms at process start, label, pid, event, payload: <stdin JSON>}` to `log-<run>.jsonl`. `mksettings.mjs` writes `settings-<run>.json` with one async exec-form hook (`"command": "C:\\Program Files\\nodejs\\node.EXE", "args": [hooklog.mjs, "inject", <log>], "async": true`, no matcher) for `PreToolUse, PostToolUse, PostToolUseFailure, PermissionRequest, Notification, UserPromptSubmit, Stop, StopFailure, SubagentStart, SubagentStop, SessionStart, SessionEnd`.
+- Logger `hooklog.mjs` (node): appends `{t: epoch ms at process start, label, pid, event, payload: <stdin JSON>}` to `log-<run>.jsonl`.
+
+  `mksettings.mjs` writes `settings-<run>.json` with one async exec-form hook (`"command": "C:\\Program Files\\nodejs\\node.EXE", "args": [hooklog.mjs, "inject", <log>], "async": true`, no matcher) for `PreToolUse, PostToolUse, PostToolUseFailure, PermissionRequest, Notification, UserPromptSubmit, Stop, StopFailure, SubagentStart, SubagentStop, SessionStart, SessionEnd`.
 - Every run: `--settings <file> --setting-sources project,local --strict-mcp-config --model haiku`, with every `CLAUDE*`/`ANTHROPIC*` env var stripped from the child.
 - `-p` runs (`run.sh`): `--permission-mode bypassPermissions --output-format stream-json --verbose`, `--max-turns 5-8`; stream output kept in `out-<run>.jsonl`.
 - TUI runs (`tui.py`, pywinpty + pyte via `uv run`): ConPTY 140x45, trust dialog accepted, `--allowedTools Bash Agent`; the TUI came up in `auto` permission mode. Driver notes and screen dumps in `notes-<run>.txt`.
@@ -62,7 +64,9 @@ c2 (`-p`): Agent tool, `run_in_background: true`, `general-purpose`, the agent r
 - The subagent's tool events carry the main thread's **current** `prompt_id`, not the turn that launched it. In t4 the agent's `PostToolUse`/`SubagentStop` carried the `prompt_id` of a later "hi" turn.
 - A foreground Bash inside the subagent did not appear in `background_tasks` (the stream showed it as `task_started … owned_by_subagent: true, is_backgrounded: false, parent_task_id: <agent>`).
 
-TUI (t4) differs in the completion message. Haiku omitted `run_in_background` from the Agent call, yet the TUI backgrounded the agent anyway (`tool_response.isAsync: true, status: "async_launched"`; the screen said "Backgrounded agent"). The agent ended through a `SubagentHandback` tool (`PreToolUse`/`PostToolUse` with `agent_id`), then `SubagentStop` (no `last_assistant_message` field). The CLI then submitted `UserPromptSubmit` with `prompt` = `<agent-message from="adfbf049d1cdc225f">\n[Subagent hand-back] The text below is the final report…</agent-message>`, not a `<task-notification>`. The next `Stop` no longer listed the agent. Whichever wrapper is used, a completion is an auto-submitted `UserPromptSubmit` followed by a `Stop` carrying the updated list.
+TUI (t4) differs in the completion message. Haiku omitted `run_in_background` from the Agent call, yet the TUI backgrounded the agent anyway (`tool_response.isAsync: true, status: "async_launched"`; the screen said "Backgrounded agent"). The agent ended through a `SubagentHandback` tool (`PreToolUse`/`PostToolUse` with `agent_id`), then `SubagentStop` (no `last_assistant_message` field).
+
+The CLI then submitted `UserPromptSubmit` with `prompt` = `<agent-message from="adfbf049d1cdc225f">\n[Subagent hand-back] The text below is the final report…</agent-message>`, not a `<task-notification>`. The next `Stop` no longer listed the agent. Whichever wrapper is used, a completion is an auto-submitted `UserPromptSubmit` followed by a `Stop` carrying the updated list.
 
 ## Case 3: CronCreate and ScheduleWakeup (`-p` works)
 
@@ -87,7 +91,9 @@ Both tools exist in `-p` (deferred; the model loaded them through `ToolSearch`).
 
 ## Case 4: the prompt-suggestion agent
 
-Not seen in 2.1.308. Across six TUI `Stop`s (t4: 3, t5: 3; t5 waited 12 s after each of two `Stop`s), no `SubagentStart` and no `SubagentStop` with `agent_type: ""` fired. The input box showed an empty `❯` after each turn, no suggestion placeholder. In HS.0 (2.1.301) it fired `SubagentStop` 1.5-2 s after every TUI `Stop`. Whether it fires `SubagentStart` could not be answered, because it did not run at all. Whether that is a version change or a server-side flag could not be told from here. Every `SubagentStart`/`SubagentStop` seen in this spike had a non-empty `agent_type` and a matching task in `background_tasks`.
+Not seen in 2.1.308. Across six TUI `Stop`s (t4: 3, t5: 3; t5 waited 12 s after each of two `Stop`s), no `SubagentStart` and no `SubagentStop` with `agent_type: ""` fired. The input box showed an empty `❯` after each turn, no suggestion placeholder. In HS.0 (2.1.301) it fired `SubagentStop` 1.5-2 s after every TUI `Stop`.
+
+Whether it fires `SubagentStart` could not be answered, because it did not run at all. Whether that is a version change or a server-side flag could not be told from here. Every `SubagentStart`/`SubagentStop` seen in this spike had a non-empty `agent_type` and a matching task in `background_tasks`.
 
 ## Case 5: interrupt while background work runs (TUI, t4)
 
