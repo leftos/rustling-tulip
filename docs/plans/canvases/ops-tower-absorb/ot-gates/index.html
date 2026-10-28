@@ -1,0 +1,702 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gates mock</title>
+<style>
+@font-face { font-family: "Geist"; font-weight: 400; src: url("../../../../../apps/native/assets/fonts/Geist/Geist-Regular.ttf"); }
+@font-face { font-family: "Geist"; font-weight: 500; src: url("../../../../../apps/native/assets/fonts/Geist/Geist-Medium.ttf"); }
+@font-face { font-family: "Geist"; font-weight: 600; src: url("../../../../../apps/native/assets/fonts/Geist/Geist-SemiBold.ttf"); }
+@font-face { font-family: "Geist"; font-weight: 700; src: url("../../../../../apps/native/assets/fonts/Geist/Geist-Bold.ttf"); }
+@font-face { font-family: "JBM"; font-weight: 400; src: url("../../../../../apps/native/assets/fonts/JetBrainsMono/JetBrainsMono-Regular.ttf"); }
+@font-face { font-family: "JBM"; font-weight: 700; src: url("../../../../../apps/native/assets/fonts/JetBrainsMono/JetBrainsMono-Bold.ttf"); }
+
+/* Tokens: apps/native/src/palette.rs, as the approved Dashboard mock */
+:root {
+  --ground: #111013; --sunken: #0b0a0d; --surface: #161519; --raised: #1b1a1f; --chip: #232129; --hover: #2c2a33;
+  --line: #2a2830; --line-strong: #3a3742;
+  --text: #ede9e4; --text-2: #a7a2ad; --subtle: #8c8794; --faint: #6e6a77;
+  --accent: #f07a62; --on-accent: #1c100d;
+  --working: #6ca6ff; --asking: #f6bc4e; --on-asking: #2a1b00; --waiting: #4fc89d; --danger: #f26d6d;
+  --lilac: #c9b8ff; --ochre: #d9a15c; --rose: #e7849b; --peri: #8fb3f0;
+  --ask-wash: rgba(246, 188, 78, 0.07); --danger-wash: rgba(242, 109, 109, 0.10); --ochre-wash: rgba(217, 161, 92, 0.09);
+  --mono: "JBM", ui-monospace, monospace;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: #08070a; color: var(--text); font-family: "Geist", system-ui, sans-serif; font-size: 13px; }
+button { font: inherit; color: inherit; }
+
+/* Lane and state switchers, outside the app frame */
+.lanes { display: flex; gap: 6px; align-items: stretch; padding: 10px 16px 6px; width: 1600px; margin: 0 auto; }
+.lanes .ttl { font-weight: 600; color: var(--text-2); align-self: center; margin-right: 8px; white-space: nowrap; }
+.lane-tab { flex: 1; text-align: left; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 7px 10px; cursor: pointer; }
+.lane-tab b { display: block; font-weight: 600; }
+.lane-tab span { color: var(--subtle); font-size: 12px; }
+.lane-tab .worst { display: block; color: var(--faint); font-size: 11.5px; margin-top: 2px; }
+.lane-tab.on { border-color: var(--accent); background: var(--raised); }
+.rec { display: inline-block; margin-left: 6px; font-size: 10.5px; font-weight: 600; color: var(--on-accent) !important; background: var(--accent); padding: 1px 6px; border-radius: 3px; vertical-align: 1px; }
+.states { display: flex; gap: 6px; align-items: center; padding: 0 16px 10px; width: 1600px; margin: 0 auto; }
+.states .ttl { font-weight: 600; color: var(--text-2); margin-right: 8px; width: 120px; }
+.st-tab { background: var(--surface); border: 1px solid var(--line); border-radius: 5px; padding: 4px 12px; cursor: pointer; font-size: 12px; color: var(--text-2); }
+.st-tab.on { border-color: var(--peri); color: var(--text); background: var(--raised); }
+.states .cap { margin-left: 12px; color: var(--subtle); font-size: 12px; flex: 1; }
+
+/* App frame */
+.app { width: 1600px; height: 1000px; margin: 0 auto 24px; display: grid; grid-template-rows: 1fr 24px; background: var(--ground); border: 1px solid var(--line); overflow: hidden; position: relative; }
+.app.la { grid-template-columns: 48px 364px 1fr; }
+.app.lb { grid-template-columns: 48px 268px 1fr; }
+.rail { background: var(--sunken); border-right: 1px solid var(--line); display: flex; flex-direction: column; align-items: center; padding-top: 6px; gap: 6px; }
+.rail .ic { width: 34px; height: 34px; border-radius: 6px; display: grid; place-items: center; color: var(--text-2); position: relative; }
+.rail .ic.on { background: var(--chip); color: var(--text); box-shadow: inset 2px 0 0 var(--accent); }
+.rail .ic .n { position: absolute; top: 2px; right: 1px; font-size: 9px; background: var(--chip); color: var(--text-2); border-radius: 6px; padding: 0 3px; }
+.rail .ic .n.ask { background: var(--asking); color: var(--on-asking); font-weight: 700; }
+.rail .ic .n.acc { background: var(--accent); color: var(--on-accent); font-weight: 700; }
+.rail .sp { flex: 1; }
+.rail svg { width: 18px; height: 18px; stroke: currentColor; fill: none; stroke-width: 1.6; }
+.side { background: var(--surface); border-right: 1px solid var(--line); min-width: 0; min-height: 0; overflow: hidden; display: flex; flex-direction: column; }
+.main { display: grid; grid-template-rows: 38px 1fr; min-width: 0; min-height: 0; }
+.tabbar { background: var(--surface); border-bottom: 1px solid var(--line); display: flex; align-items: stretch; }
+.tabbar .t { display: flex; align-items: center; gap: 7px; padding: 0 14px; border-right: 1px solid var(--line); color: var(--text-2); font-weight: 500; white-space: nowrap; }
+.tabbar .t.on { color: var(--text); background: var(--ground); box-shadow: inset 0 2px 0 var(--accent); }
+.tabbar .t .x { color: var(--faint); margin-left: 6px; }
+.tabbar .t .cnt { font-size: 11px; color: var(--working); }
+.tabbar .t .badge { font-size: 10.5px; font-weight: 700; background: var(--asking); color: var(--on-asking); border-radius: 3px; padding: 0 5px; }
+.tabbar .t .gw { font-size: 10.5px; color: var(--ochre); border: 1px dashed rgba(217,161,92,.6); border-radius: 3px; padding: 0 5px; }
+.tabbar .plus { padding: 0 14px; display: flex; align-items: center; color: var(--subtle); font-size: 16px; }
+.footer { grid-column: 1 / -1; background: var(--sunken); border-top: 1px solid var(--line); display: flex; align-items: center; gap: 14px; padding: 0 10px; font-size: 11.5px; color: var(--text-2); position: relative; }
+.footer .pill { border: 1px solid var(--line-strong); border-radius: 10px; padding: 0 8px; line-height: 17px; white-space: nowrap; }
+.footer .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #3fb96a; margin-right: 5px; }
+.footer .sp { flex: 1; }
+.content { overflow: hidden; min-height: 0; position: relative; }
+
+/* Footer gate strip */
+.gstrip { display: inline-flex; align-items: center; gap: 10px; border: 1px solid var(--line-strong); border-radius: 10px; padding: 0 9px; line-height: 17px; cursor: pointer; white-space: nowrap; }
+.gstrip.on { border-color: var(--peri); background: var(--raised); }
+.gstrip .gl { color: var(--text); font-weight: 600; }
+.gstrip .pl { display: inline-flex; align-items: center; gap: 2px; }
+.gstrip .pl .k { margin-right: 3px; color: var(--subtle); }
+.gstrip .pl i { width: 6px; height: 10px; border-radius: 1.5px; display: inline-block; border: 1px solid var(--line-strong); }
+.gstrip .pl i.b { background: var(--working); border-color: var(--working); }
+.gstrip .pl i.r { background: var(--lilac); border-color: var(--lilac); }
+.gstrip .pl i.h { background: repeating-linear-gradient(135deg, var(--ochre) 0 2px, transparent 2px 4px); border-color: var(--ochre); }
+.gstrip .wq { color: var(--ochre); }
+.gstrip .bad { color: var(--danger); }
+.gstrip .idle { color: var(--faint); }
+
+/* Status glyphs, as the sidebar draws them */
+.g { display: inline-block; flex: none; width: 12px; height: 12px; border-radius: 50%; position: relative; vertical-align: -1px; }
+.g.working { border: 2px solid var(--working); }
+.g.working::after { content: ""; position: absolute; inset: 2px; border-radius: 50%; background: var(--working); }
+.g.asking { border-radius: 3px; background: var(--asking); }
+.g.asking::after { content: "!"; position: absolute; inset: 0; color: var(--on-asking); font-size: 9.5px; font-weight: 700; text-align: center; line-height: 12px; }
+.g.waiting { border: 2px solid var(--waiting); }
+.g.idle { width: 8px; height: 8px; margin: 2px; background: var(--faint); }
+.g.done { width: 12px; height: 12px; }
+.g.done::after { content: "✓"; position: absolute; inset: 0; color: var(--waiting); font-size: 11px; font-weight: 700; line-height: 12px; text-align: center; }
+/* Slot glyphs: busy (in gate), remote busy, held, free, waiting for a slot */
+.g.gate { border-radius: 2px; border: 2px solid var(--working); width: 11px; height: 11px; }
+.g.gate::after { content: ""; position: absolute; left: 2px; right: 2px; top: 2.5px; height: 2px; background: var(--working); }
+.g.rgate { border-radius: 2px; border: 2px solid var(--lilac); width: 11px; height: 11px; }
+.g.rgate::after { content: ""; position: absolute; left: 2px; right: 2px; top: 2.5px; height: 2px; background: var(--lilac); }
+.g.held { border-radius: 2px; border: 2px solid var(--ochre); width: 11px; height: 11px; background: repeating-linear-gradient(135deg, var(--ochre) 0 1.5px, transparent 1.5px 3.5px); }
+.g.free { border-radius: 2px; border: 1.5px solid var(--line-strong); width: 11px; height: 11px; }
+.g.gwait { border-radius: 2px; border: 2px dashed var(--ochre); width: 11px; height: 11px; }
+.g.nos { width: 11px; height: 11px; border-radius: 50%; border: 1.5px dotted var(--subtle); }
+
+/* Shared bits */
+.mono { font-family: var(--mono); font-size: 11.5px; }
+.sub { color: var(--subtle); }
+.t2 { color: var(--text-2); }
+.faint { color: var(--faint); }
+.cut { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.repo { display: inline-flex; align-items: center; gap: 5px; color: var(--text-2); white-space: nowrap; flex: none; }
+.repo i { width: 7px; height: 7px; border-radius: 2px; display: inline-block; }
+.c-ask { color: var(--asking); } .c-work { color: var(--working); } .c-wait { color: var(--waiting); } .c-dan { color: var(--danger); } .c-faint { color: var(--faint); } .c-och { color: var(--ochre); } .c-lil { color: var(--lilac); }
+.h { font-size: 10.5px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--subtle); }
+.btn { background: var(--chip); border: 1px solid var(--line-strong); border-radius: 5px; padding: 3px 9px; font-size: 12px; cursor: pointer; white-space: nowrap; }
+.btn.dan { background: var(--danger); color: #1a0606; border-color: var(--danger); font-weight: 600; }
+.btn.ghost { background: transparent; }
+.step { display: inline-flex; align-items: center; border: 1px solid var(--line-strong); border-radius: 4px; overflow: hidden; font-size: 11.5px; text-transform: none; letter-spacing: 0; }
+.step span { padding: 0 6px; line-height: 17px; color: var(--text-2); }
+.step span.v { color: var(--text); font-weight: 600; border-left: 1px solid var(--line-strong); border-right: 1px solid var(--line-strong); min-width: 20px; text-align: center; }
+.res { display: inline-flex; align-items: center; gap: 4px; font-size: 11.5px; white-space: nowrap; }
+.res.ok { color: var(--waiting); } .res.failed, .res.timed, .res.stalled { color: var(--danger); } .res.running { color: var(--working); }
+.tag { font-size: 10.5px; font-weight: 600; border-radius: 3px; padding: 0 5px; line-height: 15px; white-space: nowrap; }
+.tag.me { color: var(--on-accent); background: var(--accent); }
+.tag.cold { color: var(--peri); border: 1px solid rgba(143,179,240,.4); font-weight: 500; }
+.tag.fell { color: var(--ochre); border: 1px solid rgba(217,161,92,.45); font-weight: 500; }
+.over { color: var(--ochre); }
+
+/* ---------- Lane A: the Gates panel in the sidebar ---------- */
+.gp-head { display: flex; align-items: center; gap: 8px; height: 34px; padding: 0 12px; border-bottom: 1px solid var(--line); flex: none; }
+.gp-head .h { color: var(--text-2); }
+.gp-head .m { color: var(--faint); font-size: 11px; margin-left: auto; }
+.gp-body { overflow: auto; flex: 1; min-height: 0; padding-bottom: 14px; }
+.pool { border-bottom: 1px solid var(--line); padding: 6px 0 6px; }
+.pool:last-child { border-bottom: 0; }
+.ph { display: flex; align-items: center; gap: 7px; padding: 4px 12px 5px; }
+.ph .h { color: var(--text-2); }
+.ph .n { font-size: 11.5px; color: var(--subtle); }
+.ph .n b { color: var(--text); font-weight: 600; }
+.ph .r { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+.ph .note { font-size: 11.5px; color: var(--faint); padding: 0 12px 2px 12px; }
+.sl { display: grid; grid-template-columns: 14px 1fr auto; column-gap: 7px; padding: 4px 12px; align-items: center; cursor: default; position: relative; }
+.sl:hover { background: var(--hover); }
+.sl .l1 { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.sl .ix { font-size: 11px; color: var(--faint); flex: none; width: 48px; white-space: nowrap; }
+.sl .cm { font-family: var(--mono); font-size: 11.5px; color: var(--text); }
+.sl .tm { font-size: 11.5px; color: var(--text-2); text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.sl .l2 { grid-column: 2 / 4; display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 11.5px; color: var(--subtle); padding-left: 54px; }
+.sl .l2 > * { white-space: nowrap; flex: none; }
+.sl .l2 .ss { color: var(--text-2); flex: 0 0 auto; max-width: 160px; overflow: hidden; text-overflow: ellipsis; }
+.sl .l2 .ll { flex: 1 1 0; }
+.sl .l2 .ll { font-family: var(--mono); font-size: 10.5px; color: var(--faint); }
+.sl.free { padding-top: 2px; padding-bottom: 2px; }
+.sl.free .l1 { color: var(--faint); font-size: 11.5px; }
+.sl.sel { background: var(--chip); }
+.sl.me { background: var(--ochre-wash); box-shadow: inset 2px 0 0 var(--ochre); }
+.wq { margin-top: 3px; }
+.wq .wh { padding: 3px 12px 2px; font-size: 10.5px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; color: var(--ochre); }
+.sl.w .ix { color: var(--ochre); font-weight: 600; }
+.rr { display: grid; grid-template-columns: 14px 1fr auto; column-gap: 7px; padding: 4px 12px; align-items: center; }
+.rr .l2 { grid-column: 2 / 4; font-size: 11.5px; color: var(--subtle); display: flex; gap: 6px; align-items: center; min-width: 0; white-space: nowrap; }
+.rr.bad { background: var(--danger-wash); box-shadow: inset 2px 0 0 var(--danger); }
+.rr .ri { font-size: 12px; font-weight: 700; text-align: center; }
+.tail { margin: 2px 12px 6px 33px; background: var(--sunken); border: 1px solid var(--line); border-radius: 4px; padding: 6px 8px; font-family: var(--mono); font-size: 10.5px; line-height: 1.5; color: var(--text-2); white-space: pre-wrap; word-break: break-all; overflow: hidden; }
+.tail .e { color: var(--danger); }
+.tail .acts { font-family: "Geist", sans-serif; display: flex; gap: 6px; margin-top: 6px; white-space: normal; }
+.sec-h { display: flex; align-items: center; gap: 7px; padding: 8px 12px 4px; }
+.sec-h .h { color: var(--text-2); }
+.sec-h .r { margin-left: auto; font-size: 11px; color: var(--faint); }
+.wk7 { display: grid; grid-template-columns: 1fr auto auto; column-gap: 10px; padding: 2px 12px; font-size: 11.5px; align-items: center; }
+.wk7 .cm { font-family: var(--mono); font-size: 11px; color: var(--text-2); }
+.wk7 .v { color: var(--text-2); font-variant-numeric: tabular-nums; text-align: right; }
+
+/* Context menu and confirm (shared) */
+.menu { position: absolute; z-index: 20; background: var(--raised); border: 1px solid var(--line-strong); border-radius: 6px; padding: 4px; min-width: 210px; box-shadow: 0 10px 30px rgba(0,0,0,.5); font-size: 12.5px; }
+.menu div { padding: 5px 10px; border-radius: 4px; display: flex; justify-content: space-between; gap: 16px; color: var(--text); }
+.menu div .k { color: var(--faint); font-size: 11px; }
+.menu div.on { background: var(--chip); }
+.menu div.dan { color: var(--danger); }
+.menu hr { border: 0; border-top: 1px solid var(--line); margin: 4px 2px; }
+.scrim { position: absolute; inset: 0; background: rgba(5,4,7,.55); z-index: 30; display: grid; place-items: center; }
+.dlg { width: 470px; background: var(--raised); border: 1px solid var(--line-strong); border-radius: 8px; padding: 16px 18px 14px; box-shadow: 0 20px 50px rgba(0,0,0,.6); }
+.dlg h2 { margin: 0 0 10px; font-size: 15px; font-weight: 600; }
+.dlg .kv { display: grid; grid-template-columns: 78px 1fr; gap: 5px 10px; font-size: 12.5px; margin-bottom: 12px; }
+.dlg .kv .k { color: var(--subtle); }
+.dlg .warn { background: var(--danger-wash); border: 1px solid rgba(242,109,109,.3); border-radius: 5px; padding: 7px 9px; font-size: 12.5px; color: var(--text); margin-bottom: 14px; line-height: 1.4; }
+.dlg .acts { display: flex; justify-content: flex-end; gap: 8px; }
+
+/* Footer flyout */
+.fly { position: absolute; bottom: 30px; z-index: 25; width: 440px; background: var(--raised); border: 1px solid var(--line-strong); border-radius: 7px; box-shadow: 0 -8px 30px rgba(0,0,0,.5); padding: 4px 0 6px; }
+.fly .fh { display: flex; align-items: center; padding: 6px 12px 4px; gap: 8px; }
+.fly .fh .h { color: var(--text-2); }
+.fly .fh .r { margin-left: auto; font-size: 11.5px; color: var(--peri); }
+.fly .sl .l2 { padding-left: 54px; }
+
+/* Terminal (lane A main area and lane B waiting state) */
+.term { height: 100%; display: flex; flex-direction: column; }
+.term .pt { height: 28px; display: flex; align-items: center; gap: 8px; padding: 0 12px; border-bottom: 1px solid var(--line); background: var(--surface); font-size: 12px; color: var(--text-2); flex: none; }
+.term .pt b { color: var(--text); font-weight: 600; }
+.term pre { margin: 0; padding: 12px 16px; font-family: var(--mono); font-size: 12.5px; line-height: 1.55; color: var(--text); background: var(--ground); flex: 1; white-space: pre-wrap; overflow: hidden; }
+.term pre .d { color: var(--faint); } .term pre .b { color: var(--working); } .term pre .o { color: var(--ochre); } .term pre .gr { color: var(--waiting); } .term pre .m { color: var(--subtle); } .term pre .ac { color: var(--accent); }
+.term .box { margin: 0 16px 14px; border: 1px solid var(--line-strong); border-radius: 5px; padding: 6px 10px; font-family: var(--mono); font-size: 12.5px; color: var(--faint); flex: none; }
+
+/* ---------- Lane B: Sessions panel and the Gates tab ---------- */
+.sp-head { display: flex; align-items: center; height: 34px; padding: 0 12px; border-bottom: 1px solid var(--line); flex: none; }
+.sp-head .h { color: var(--text-2); }
+.sp-body { overflow: auto; flex: 1; padding: 4px 0 10px; }
+.rg { display: flex; align-items: center; gap: 6px; padding: 8px 12px 3px; font-weight: 600; font-size: 12.5px; }
+.rg i { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
+.lf { display: grid; grid-template-columns: 14px 1fr auto; column-gap: 7px; padding: 4px 12px 4px 20px; align-items: center; }
+.lf .nm { min-width: 0; }
+.lf .age { color: var(--subtle); font-size: 11px; }
+.lf .gh { grid-column: 2 / 4; font-size: 11.5px; display: flex; align-items: center; gap: 5px; min-width: 0; color: var(--text-2); }
+.lf .gh .g { transform: scale(.8); }
+.lf.on { background: var(--chip); box-shadow: inset 2px 0 0 var(--accent); }
+.gt { height: 100%; overflow: auto; }
+.hdr { display: flex; align-items: center; gap: 14px; padding: 10px 18px; border-bottom: 1px solid var(--line); background: var(--surface); }
+.hdr h1 { font-size: 15px; font-weight: 600; margin: 0; }
+.hdr .mach { color: var(--subtle); font-size: 12px; }
+.cpill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px; border-radius: 5px; background: var(--chip); font-size: 12px; color: var(--text-2); white-space: nowrap; }
+.cpill b { color: var(--text); font-weight: 600; }
+.cpill.och { background: var(--ochre-wash); color: var(--ochre); } .cpill.och b { color: var(--ochre); }
+.cpill.dan { background: var(--danger-wash); color: var(--danger); } .cpill.dan b { color: var(--danger); }
+.hsp { flex: 1; }
+.seg { display: inline-flex; background: var(--raised); border: 1px solid var(--line); border-radius: 5px; padding: 2px; }
+.seg span { padding: 2px 9px; border-radius: 3px; font-size: 12px; color: var(--text-2); display: inline-flex; align-items: center; gap: 5px; }
+.seg span.on { background: var(--chip); color: var(--text); font-weight: 500; }
+.seg span i { width: 7px; height: 7px; border-radius: 2px; display: inline-block; }
+.gtb { padding: 4px 18px 24px; }
+.pools { display: grid; grid-template-columns: 1.3fr 1fr; gap: 12px; margin-top: 12px; align-items: start; }
+.pc { background: var(--surface); border: 1px solid var(--line); border-radius: 7px; min-width: 0; padding: 4px 0 6px; }
+.pc.wide { grid-column: 1 / -1; }
+.pc .ph { padding: 6px 12px 6px; border-bottom: 1px solid var(--line); margin-bottom: 3px; }
+.pc .sl .l2 { padding-left: 54px; }
+.pc.tall { grid-row: span 3; }
+.tsec { display: flex; align-items: center; gap: 8px; margin: 18px 0 7px; }
+.tsec .h { color: var(--text-2); }
+.tsec .r { margin-left: auto; font-size: 11.5px; color: var(--faint); }
+table.rt { width: 100%; border-collapse: collapse; font-size: 12px; background: var(--surface); border: 1px solid var(--line); border-radius: 7px; overflow: hidden; table-layout: fixed; }
+table.rt th { text-align: left; font-size: 10.5px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; color: var(--subtle); padding: 6px 10px; border-bottom: 1px solid var(--line); background: var(--raised); }
+table.rt td { padding: 5px 10px; border-top: 1px solid var(--line); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text-2); }
+table.rt td.cm { font-family: var(--mono); font-size: 11.5px; color: var(--text); }
+table.rt td.num, table.rt th.num { text-align: right; font-variant-numeric: tabular-nums; }
+table.rt tr.bad td { background: var(--danger-wash); }
+table.rt tr.bad td:first-child { box-shadow: inset 2px 0 0 var(--danger); }
+table.rt td.tailc { white-space: normal; padding: 0 10px 8px 10px; border-top: 0; background: var(--danger-wash); }
+table.rt td.tailc .tail { margin: 0; }
+.empty { padding: 10px 12px; color: var(--faint); font-size: 12px; }
+</style>
+</head>
+<body>
+
+<div class="lanes" id="lanes">
+  <div class="ttl">Gates · RT-464 G3</div>
+  <button class="lane-tab" data-lane="a"><b>A · Footer strip + Gates view on the rail <span class="rec" id="rec-a" hidden>Recommended</span></b><span>Slots live in a sidebar panel beside the terminal you are working in; the footer strip opens it.</span><span class="worst">Worst case: the panel takes the Sessions panel's place, and its 336 px hold no full run history or 7-day table.</span></button>
+  <button class="lane-tab" data-lane="b"><b>B · Footer strip + Gates tab <span class="rec" id="rec-b" hidden>Recommended</span></b><span>Slots, queue, recent runs and 7-day stats in a full-width tab; holds show on each session's leaf.</span><span class="worst">Worst case: one more tab to switch to; with a terminal up, only the strip and its flyout show the queue.</span></button>
+</div>
+<div class="states" id="states">
+  <div class="ttl">State</div>
+  <button class="st-tab" data-state="idle">Idle</button>
+  <button class="st-tab" data-state="busy">Busy, with a queue</button>
+  <button class="st-tab" data-state="wait">A session waits on a slot</button>
+  <button class="st-tab" data-state="fail">A run timed out</button>
+  <span class="cap" id="cap"></span>
+</div>
+
+<div class="app" id="app"></div>
+
+<script>
+const RECOMMENDED = 'a';
+const MACHINE = 'leftos-desk';
+
+const REPOS = {
+  'rustling-tulip': '#f07a62', 'ops-tower': '#c9b8ff', 'yaat': '#d9a15c',
+  'skyline': '#8fb3f0', 'claude-config': '#e7849b', 'gate': '#a7a2ad',
+};
+const NOS = 'not a session';
+
+/* Sample state at 14:32, shaped like gate-state's claims, queue tickets and journal runs. */
+const WEEK = [
+  ['cargo build --workspace --all-targets --profile test-release', 'ops-tower', 41, '4m 22s', '6m 10s', '8m 03s'],
+  ['cargo nextest run --workspace --cargo-profile test-release', 'rustling-tulip', 26, '2m 55s', '3m 40s', '20m 00s'],
+  ['dotnet test Yaat.sln -c Release --no-build', 'yaat', 18, '5m 31s', '6m 48s', '7m 12s'],
+  ['cargo clippy --all-targets -- -D warnings', 'rustling-tulip', 33, '58s', '1m 31s', '2m 05s'],
+  ['uv run --project tools/md-line-split pytest -q', 'claude-config', 12, '47s', '52s', '1m 04s'],
+];
+
+const STATES = {
+  idle: {
+    cap: 'No gate is running. The rail badge is gone and the strip goes quiet; free slots stay drawn so nothing moves when a run starts.',
+    pools: [
+      { kind: 'heavy', count: 4, def: 3, slots: [{}, {}, {}, {}], waiting: [] },
+      { kind: 'light', count: 2, def: 2, slots: [{}, {}], waiting: [] },
+      { kind: 'critical', count: 1, def: 1, slots: [], waiting: [], note: 'No critical run waiting. One takes the whole machine once the runs ahead of it finish.' },
+      { kind: 'remote', host: 'buildbox-01', count: 1, def: 1, slots: [{}], waiting: [] },
+    ],
+    noslot: [],
+    recent: [
+      { res: 'ok', cmd: 'cargo nextest run -p protocol --cargo-profile test-release', repo: 'rustling-tulip', sess: 'Summary wire types', slot: 'heavy 0', q: '12m', wait: '0s', held: '1m 48s' },
+      { res: 'ok', cmd: 'cargo build --workspace --all-targets --profile test-release', repo: 'ops-tower', sess: 'Briefing login retry', slot: 'heavy 1', q: '19m', wait: '0s', held: '4m 02s' },
+      { res: 'ok', cmd: 'cargo clippy --all-targets -- -D warnings', repo: 'rustling-tulip', sess: 'Summary wire types', slot: 'light 0', q: '24m', wait: '0s', held: '1m 02s' },
+      { res: 'ok', cmd: 'gh run watch 18234560112 --exit-status', repo: 'gate', sess: NOS, slot: 'no slot', q: '31m', wait: '0s', held: '2m 51s' },
+      { res: 'ok', cmd: 'dotnet test Yaat.sln -c Release --no-build', repo: 'yaat', sess: 'Ready-to-taxi call-up', slot: 'remote 0', q: '38m', wait: '12s', held: '5m 40s' },
+    ],
+    badge: 0,
+  },
+  busy: {
+    cap: 'Every heavy slot is taken and two runs queue behind them. Badge 6 counts busy and held slots (RT-55 Q6). Right-click on a busy row opens its menu in either lane; Stop gate… asks first (click it).',
+    pools: [
+      { kind: 'heavy', count: 4, def: 3, slots: [
+        { st: 'busy', cmd: 'cargo nextest run -p protocol --cargo-profile test-release', repo: 'rustling-tulip', sess: 'Summary wire types', who: 'implementer', held: '1m', usual: '2m', procs: 9, line: 'PASS [ 0.412s] protocol::summary_roundtrip::pending_ask' },
+        { st: 'busy', cmd: 'cargo nextest run --workspace --cargo-profile test-release', repo: 'ops-tower', sess: 'Briefing login retry', held: '6m', usual: '4m', over: true, procs: 14, line: 'PASS [ 2.104s] ops-tower::briefing_retry::retries_once' },
+        { st: 'busy', cmd: 'dotnet test tests/Yaat.Sim.Tests -c Release --no-build --filter SoloCallup', repo: 'yaat', sess: 'Ready-to-taxi call-up', who: 'debugger', held: '3m', usual: '1m', over: true, procs: 3, line: 'Starting test execution, please wait...' },
+        { st: 'busy', cmd: 'cargo build --workspace --all-targets --profile test-release', repo: 'skyline', sess: NOS, held: '2m', usual: '3m', procs: 7, line: 'Compiling wgpu-core v24.0.1' },
+      ], waiting: [
+        { cmd: 'cargo clippy --all-targets --all-features -- -D warnings', repo: 'rustling-tulip', sess: 'Summary wire types', who: 'bg shell', age: '1m', usual: '1m' },
+        { cmd: 'dotnet build Yaat.sln -c Release', repo: 'yaat', sess: 'Ready-to-taxi call-up', who: 'bg shell', age: '41s', usual: '2m' },
+      ] },
+      { kind: 'light', count: 2, def: 2, slots: [
+        { st: 'busy', cmd: 'uv run --project tools/md-line-split pytest -q', repo: 'claude-config', sess: NOS, held: '38s', usual: '47s', procs: 2, line: '........................................ [ 64%]' },
+        {},
+      ], waiting: [] },
+      { kind: 'critical', count: 1, def: 1, slots: [], waiting: [], note: 'No critical run waiting.' },
+      { kind: 'remote', host: 'buildbox-01', count: 1, def: 1, slots: [
+        { st: 'busy', remote: true, cmd: 'cargo build --release -p gate', repo: 'gate', sess: NOS, held: '2m', usual: '3m', procs: 1, line: 'Compiling gate-state v0.9.2', cold: true },
+      ], waiting: [] },
+    ],
+    noslot: [{ cmd: 'gh run watch 18234567890 --exit-status', repo: 'ops-tower', sess: NOS, held: '3m' }],
+    recent: [
+      { res: 'running', cmd: 'cargo nextest run --workspace --cargo-profile test-release', repo: 'ops-tower', sess: 'Briefing login retry', slot: 'heavy 1', q: '6m', wait: '0s', held: '—' },
+      { res: 'ok', cmd: 'cargo build --release -p gate', repo: 'gate', sess: NOS, slot: 'heavy 1', q: '9m', wait: '0s', held: '2m 51s' },
+      { res: 'ok', cmd: 'dotnet test Yaat.sln -c Release --no-build', repo: 'yaat', sess: 'Ready-to-taxi call-up', slot: 'heavy 2', q: '14m', wait: '12s', held: '5m 40s' },
+      { res: 'ok', cmd: 'cargo clippy --all-targets -- -D warnings', repo: 'rustling-tulip', sess: 'Summary wire types', slot: 'light 0', q: '18m', wait: '0s', held: '1m 02s' },
+      { res: 'ok', cmd: 'uv run --project tools/md-line-split pytest -q', repo: 'claude-config', sess: NOS, slot: 'light 1', q: '22m', wait: '0s', held: '49s' },
+    ],
+    badge: 6, menu: true,
+  },
+  wait: {
+    cap: 'The ops-tower session "Briefing login retry" asked for a heavy slot 2m ago and is 2nd in line. Its tab and leaf say so; the queue row is marked as the tab you are on.',
+    me: 'Briefing login retry',
+    pools: [
+      { kind: 'heavy', count: 4, def: 3, slots: [
+        { st: 'busy', cmd: 'cargo nextest run -p protocol --cargo-profile test-release', repo: 'rustling-tulip', sess: 'Summary wire types', who: 'implementer', held: '3m', usual: '2m', over: true, procs: 9, line: 'PASS [ 1.902s] protocol::wire::hello_round_trip' },
+        { st: 'busy', cmd: 'dotnet test tests/Yaat.Sim.Tests -c Release --no-build --filter SoloCallup', repo: 'yaat', sess: 'Ready-to-taxi call-up', who: 'debugger', held: '4m', usual: '1m', over: true, procs: 3, line: 'Passed SoloCallupTests.CallerIsNotFirstStrip [212 ms]' },
+        { st: 'busy', cmd: 'cargo build --workspace --all-targets --profile test-release', repo: 'skyline', sess: NOS, held: '3m', usual: '3m', procs: 7, line: 'Compiling naga v24.0.0' },
+        { st: 'held', procs: null },
+      ], waiting: [
+        { cmd: 'dotnet build Yaat.sln -c Release', repo: 'yaat', sess: 'Ready-to-taxi call-up', who: 'bg shell', age: '3m', usual: '2m' },
+        { cmd: 'cargo nextest run --workspace --cargo-profile test-release', repo: 'ops-tower', sess: 'Briefing login retry', age: '2m', usual: '4m', me: true },
+      ] },
+      { kind: 'light', count: 2, def: 2, slots: [{}, {}], waiting: [] },
+      { kind: 'critical', count: 1, def: 1, slots: [], waiting: [], note: 'No critical run waiting.' },
+      { kind: 'remote', host: 'buildbox-01', count: 1, def: 1, slots: [
+        { st: 'busy', remote: true, cmd: 'cargo nextest run --workspace --cargo-profile test-release', repo: 'gate', sess: NOS, held: '1m', usual: '3m', procs: 1, line: 'PASS [ 0.088s] gate-state::claims::reads_a_live_claim' },
+      ], waiting: [] },
+    ],
+    noslot: [],
+    recent: [
+      { res: 'ok', cmd: 'cargo clippy --all-targets --all-features -- -D warnings', repo: 'rustling-tulip', sess: 'Summary wire types', slot: 'heavy 3', q: '7m', wait: '1m 12s', held: '1m 31s' },
+      { res: 'ok', cmd: 'cargo build --release -p gate', repo: 'gate', sess: NOS, slot: 'remote 0', q: '9m', wait: '0s', held: '2m 51s' },
+      { res: 'ok', cmd: 'uv run --project tools/md-line-split pytest -q', repo: 'claude-config', sess: NOS, slot: 'light 0', q: '11m', wait: '0s', held: '49s' },
+    ],
+    badge: 5, flyout: true,
+  },
+  fail: {
+    cap: 'A remote test run hit its 20-minute ceiling and was killed (exit 124); a yaat test failed 8m ago. The strip keeps the latest failure for 10 minutes; the row opens its log tail.',
+    pools: [
+      { kind: 'heavy', count: 4, def: 3, slots: [
+        { st: 'busy', cmd: 'cargo nextest run --workspace --cargo-profile test-release', repo: 'ops-tower', sess: 'Briefing login retry', held: '2m', usual: '4m', procs: 14, line: 'Compiling ops-tower v0.9.0' },
+        { st: 'busy', cmd: 'cargo build --workspace --all-targets --profile test-release', repo: 'skyline', sess: NOS, held: '1m', usual: '3m', procs: 7, line: 'Compiling wgpu-hal v24.0.2' },
+        {}, {},
+      ], waiting: [] },
+      { kind: 'light', count: 2, def: 2, slots: [{}, {}], waiting: [] },
+      { kind: 'critical', count: 1, def: 1, slots: [], waiting: [], note: 'No critical run waiting.' },
+      { kind: 'remote', host: 'buildbox-01', count: 1, def: 1, slots: [{}], waiting: [] },
+    ],
+    noslot: [],
+    recent: [
+      { res: 'timed', cmd: 'cargo nextest run --workspace --cargo-profile test-release', repo: 'rustling-tulip', sess: 'Summary wire types', slot: 'remote 0', q: '23m', wait: '0s', held: '20m 00s', exit: 124, ago: '3m',
+        tail: ['        PASS [ 0.412s] daemon::git_watch::ignores_target_dir', '        SLOW [> 60.000s] daemon::server::recovery::auto_resume_waits_for_bind', '        SLOW [>120.000s] daemon::server::recovery::auto_resume_waits_for_bind', '<e>gate: TIMED OUT after 20m00s (--timeout 1200); stopped the job tree (31 processes)</e>', '<e>gate: exit 124</e>'] },
+      { res: 'failed', cmd: 'dotnet test tests/Yaat.Sim.Tests -c Release --no-build --filter SoloCallup', repo: 'yaat', sess: 'Ready-to-taxi call-up', slot: 'heavy 2', q: '12m', wait: '0s', held: '3m 41s', exit: 1, ago: '8m' },
+      { res: 'ok', cmd: 'cargo clippy --all-targets --all-features -- -D warnings', repo: 'rustling-tulip', sess: 'Summary wire types', slot: 'light 0', q: '25m', wait: '0s', held: '1m 31s' },
+      { res: 'ok', cmd: 'dotnet build Yaat.sln -c Release', repo: 'yaat', sess: 'Ready-to-taxi call-up', slot: 'heavy 3', q: '27m', wait: '1m 10s', held: '2m 02s', fell: 'builder busy' },
+      { res: 'ok', cmd: 'uv run --project tools/md-line-split pytest -q', repo: 'claude-config', sess: NOS, slot: 'light 1', q: '31m', wait: '0s', held: '49s' },
+    ],
+    badge: 2, open: 0,
+  },
+};
+
+const esc = (t) => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+const glyph = (g) => `<span class="g ${g}"></span>`;
+const repo = (r) => `<span class="repo"><i style="background:${REPOS[r]}"></i>${r}</span>`;
+const sess = (s, who) => s === NOS ? `<span class="faint">${NOS}</span>` : `<span class="ss">${esc(s)}${who ? ` <span class="faint">· ${who}</span>` : ''}</span>`;
+const RES = { ok: ['✓', 'passed'], failed: ['✕', 'failed'], timed: ['⏱', 'timed out'], stalled: ['⏸', 'stalled'], running: ['◉', 'running'] };
+function resMark(r) {
+  const [i, w] = RES[r.res];
+  const ex = r.exit !== undefined ? ` · exit ${r.exit}` : '';
+  return `<span class="res ${r.res}">${i} ${w}${ex}</span>`;
+}
+const pname = (p) => p.kind === 'remote' ? `Remote · ${p.host}` : p.kind[0].toUpperCase() + p.kind.slice(1);
+const taken = (p) => p.slots.filter((s) => s.st === 'busy' || s.st === 'held').length;
+function poolCount(p) {
+  if (p.kind === 'critical') return `<span class="n">${p.waiting.length ? `<b>${p.waiting.length}</b> waiting` : 'none waiting'}</span>`;
+  const t = taken(p);
+  const w = p.waiting.length ? ` · <span class="c-och">${p.waiting.length} waiting</span>` : '';
+  return `<span class="n"><b>${t}</b> of ${p.count} ${t === 0 ? 'busy' : 'busy'}${w}</span>`;
+}
+const stepper = (p) => p.kind === 'heavy' || p.kind === 'light'
+  ? `<span class="step" title="Slot count, written to slot-counts.json; default for this machine: ${p.def}"><span>−</span><span class="v">${p.count}</span><span>+</span></span>` : '';
+
+/* One slot row: RT-55 Q1 (a), two lines. */
+function slotRow(p, s, i, sel, showWho) {
+  const name = `${p.kind === 'remote' ? 'remote' : p.kind} ${i}`;
+  if (!s.st) return `<div class="sl free">${glyph('free')}<div class="l1"><span class="ix">${name}</span>free</div><span></span></div>`;
+  if (s.st === 'held') return `<div class="sl">${glyph('held')}<div class="l1"><span class="ix">${name}</span><span class="c-och">held</span><span class="faint cut">· by a gate with no claim</span></div><span class="tm faint">—</span></div>`;
+  const tm = `<span class="${s.over ? 'over' : ''}">${s.held}</span><span class="faint"> / ${s.usual}</span>`;
+  return `<div class="sl ${sel ? 'sel' : ''}" title="${esc(s.cmd)}">${glyph(s.remote ? 'rgate' : 'gate')}
+    <div class="l1"><span class="ix">${name}</span><span class="cm cut">${esc(s.cmd)}</span></div><span class="tm">${tm}</span>
+    <div class="l2">${repo(s.repo)}<span>·</span>${sess(s.sess, showWho && s.who)}${s.cold ? '<span class="tag cold">cold</span>' : ''}<span class="ll cut">${esc(s.line)}</span></div></div>`;
+}
+function waitRow(w, n, showWho) {
+  return `<div class="sl w ${w.me ? 'me' : ''}" title="${esc(w.cmd)}">${glyph('gwait')}
+    <div class="l1"><span class="ix">${n === 1 ? '1st' : n === 2 ? '2nd' : n + 'th'}</span><span class="cm cut">${esc(w.cmd)}</span></div><span class="tm"><span class="c-och">${w.age}</span><span class="faint"> / ${w.usual}</span></span>
+    <div class="l2">${repo(w.repo)}<span>·</span>${sess(w.sess, showWho && w.who)}${w.me ? '<span class="tag me">this tab</span>' : ''}</div></div>`;
+}
+function poolBody(p, opts = {}) {
+  const rows = p.slots.map((s, i) => slotRow(p, s, i, opts.sel === i, opts.who)).join('');
+  const wq = p.waiting.length ? `<div class="wq"><div class="wh">Waiting, oldest first</div>${p.waiting.map((w, i) => waitRow(w, i + 1, opts.who)).join('')}</div>` : '';
+  const note = p.note ? `<div class="ph" style="padding-top:0"><span class="note" style="padding:0">${p.note}</span></div>` : '';
+  return rows + wq + note;
+}
+function noslotBody(st) {
+  return st.noslot.map((n) => `<div class="sl">${glyph('nos')}<div class="l1"><span class="ix">no slot</span><span class="cm cut">${esc(n.cmd)}</span></div><span class="tm">${n.held}</span>
+    <div class="l2">${repo(n.repo)}<span>·</span>${sess(n.sess)}<span class="ll cut">waits on remote work</span></div></div>`).join('');
+}
+/* The busy row's right-click menu (RT-55 Q2 (c)); Stop gate… opens the confirm. */
+function rowMenu(left, top) {
+  if (confirmOpen) return '';
+  return `<div class="menu" style="left:${left}px;top:${top}px">
+      <div class="on">Open log<span class="k">Enter</span></div><div>Go to session</div><hr>
+      <div>Copy command</div><div>Copy folder</div><div>Copy log path</div><hr>
+      <div class="dan" data-stop="1" style="cursor:pointer">Stop gate…</div></div>`;
+}
+function tailBox(r) {
+  return `<div class="tail">${r.tail.map((l) => esc(l).replace('&lt;e&gt;', '<span class="e">').replace('&lt;/e&gt;', '</span>')).join('\n')}<div class="acts"><button class="btn">Open log</button><button class="btn ghost">Go to session</button><button class="btn ghost">Copy command</button></div></div>`;
+}
+
+/* ---------- Footer ---------- */
+function strip(st, on) {
+  const sw = (p) => {
+    if (p.kind === 'critical') return '';
+    const cells = [];
+    for (let i = 0; i < p.count; i++) {
+      const s = p.slots[i] || {};
+      cells.push(`<i class="${s.st === 'busy' ? (s.remote ? 'r' : 'b') : s.st === 'held' ? 'h' : ''}"></i>`);
+    }
+    return `<span class="pl"><span class="k">${p.kind}</span>${cells.join('')}</span>`;
+  };
+  const anyBusy = st.pools.some((p) => taken(p)) || st.noslot.length;
+  const waiting = st.pools.reduce((n, p) => n + p.waiting.length, 0);
+  const bad = st.recent.find((r) => r.res === 'timed' || r.res === 'failed');
+  let tailTxt = '';
+  if (bad) tailTxt = `<span class="bad">${RES[bad.res][0]} ${RES[bad.res][1]} · ${bad.repo} · ${bad.ago} ago</span>`;
+  else if (waiting) tailTxt = `<span class="wq">${waiting} waiting</span>`;
+  else if (!anyBusy) tailTxt = '<span class="idle">idle</span>';
+  return `<span class="gstrip ${on ? 'on' : ''}" title="Gates on ${MACHINE}"><span class="gl">Gates</span>${st.pools.map(sw).join('')}${tailTxt}</span>`;
+}
+function footer(st, lane, label) {
+  const on = (lane === 'a') || (lane === 'b' && st.flyout);
+  return `<div class="footer">
+    <span class="pill">Connections</span>
+    <span class="pill"><span class="dot"></span>daemon · 8 sessions · :4242</span>
+    ${strip(st, on)}
+    <span><span class="c-ask">◆</span> 2 need you</span>
+    <span><span class="c-work">◉</span> 3 working</span>
+    <span><span class="c-wait">○</span> 1 waiting</span>
+    <span class="sp"></span>
+    <span>${label}</span>
+    ${lane === 'b' && st.flyout ? flyout(st) : ''}
+  </div>`;
+}
+function flyout(st) {
+  const p = st.pools[0];
+  return `<div class="fly" style="left:262px">
+    <div class="fh"><span class="h">Heavy</span>${poolCount(p)}<span class="r">Open Gates tab ›</span></div>
+    ${p.slots.map((s, i) => slotRow(p, s, i)).join('')}
+    <div class="wq"><div class="wh">Waiting, oldest first</div>${p.waiting.map((w, i) => waitRow(w, i + 1)).join('')}</div>
+  </div>`;
+}
+
+/* ---------- Rail ---------- */
+const IC = {
+  sessions: '<path d="M4 6h12M4 10h12M4 14h12"/>',
+  dash: '<rect x="3" y="3" width="6" height="6" rx="1"/><rect x="11" y="3" width="6" height="4" rx="1"/><rect x="11" y="9" width="6" height="8" rx="1"/><rect x="3" y="11" width="6" height="6" rx="1"/>',
+  needs: '<path d="M3 11l2.5-6h9L17 11v5H3z"/><path d="M3 11h4l1 2h4l1-2h4"/>',
+  scm: '<circle cx="6" cy="5" r="2"/><circle cx="6" cy="15" r="2"/><circle cx="14" cy="8" r="2"/><path d="M6 7v6M14 10c0 3-4 3-8 3"/>',
+  gates: '<rect x="3" y="4" width="14" height="3.2" rx="1"/><rect x="3" y="8.4" width="14" height="3.2" rx="1"/><rect x="3" y="12.8" width="14" height="3.2" rx="1"/><path d="M6 5.6h3M6 10h6"/>',
+  hist: '<circle cx="10" cy="10" r="7"/><path d="M10 6v4l3 2"/>',
+  set: '<path d="M4 6h8M15 6h1M4 14h2M9 14h7"/><circle cx="13.5" cy="6" r="1.6"/><circle cx="7.5" cy="14" r="1.6"/>',
+};
+const ic = (k, on, badge) => `<div class="ic ${on ? 'on' : ''}"><svg viewBox="0 0 20 20">${IC[k]}</svg>${badge || ''}</div>`;
+function rail(lane, st) {
+  const gatesItem = lane === 'a' ? ic('gates', true, st.badge ? `<span class="n acc">${st.badge}</span>` : '') : '';
+  return `<nav class="rail">
+    ${ic('sessions', lane === 'b')}
+    ${ic('dash', false, '<span class="n ask">2</span>')}
+    ${ic('needs', false)}
+    ${ic('scm', false, '<span class="n">5</span>')}
+    ${gatesItem}
+    <div class="sp"></div>${ic('hist', false)}<div style="margin-bottom:6px">${ic('set', false)}</div></nav>`;
+}
+
+/* ---------- Lane A ---------- */
+function laneASide(st) {
+  const pools = st.pools.map((p, pi) => `<div class="pool">
+      <div class="ph"><span class="h">${pname(p)}</span>${poolCount(p)}<span class="r">${stepper(p)}</span></div>
+      ${poolBody(p, { sel: st.menu && pi === 0 ? 1 : undefined })}</div>`).join('');
+  const ns = st.noslot.length ? `<div class="pool"><div class="ph"><span class="h">No slot</span><span class="n"><b>${st.noslot.length}</b> running</span></div>${noslotBody(st)}</div>` : '';
+  const recent = st.recent.map((r, i) => {
+    const [g] = RES[r.res];
+    const bad = r.res === 'timed' || r.res === 'failed';
+    return `<div class="rr ${bad ? 'bad' : ''}"><span class="ri res ${r.res}">${g}</span><span class="mono cut" style="color:var(--text)">${esc(r.cmd)}</span><span class="sub" style="font-size:11.5px">${r.held}</span>
+      <div class="l2">${repo(r.repo)}<span>·</span><span>${r.slot}</span>${bad ? `<span>·</span>${resMark(r)}` : ''}${r.fell ? `<span class="tag fell">fell back</span>` : ''}<span class="faint" style="margin-left:auto">${r.ago || r.q} ago</span></div></div>
+      ${st.open === i && r.tail ? tailBox(r) : ''}`;
+  }).join('');
+  const weekOpen = !st.menu && !st.flyout && st.badge === 0;
+  const week = weekOpen ? WEEK.slice(0, 4).map((w) => `<div class="wk7"><span class="cm cut">${esc(w[0])}</span><span class="v">${w[2]} runs</span><span class="v">p90 ${w[4]}</span></div>`).join('') : '';
+  const menu = st.menu ? rowMenu(330, 132) : '';
+  return `<aside class="side">
+    <div class="gp-head"><span class="h">Gates · ${MACHINE}</span><span class="m">16 cores</span></div>
+    <div class="gp-body">${pools}${ns}
+      <div class="pool"><div class="sec-h"><span class="h">Recent runs</span><span class="r">last 2 h</span></div>${recent}</div>
+      <div class="pool"><div class="sec-h"><span class="h">Last 7 days</span><span class="r">${weekOpen ? 'passed runs' : '▸ collapsed'}</span></div>${week}</div>
+    </div></aside>${menu}`;
+}
+function termTab(which) {
+  if (which === 'wait') {
+    return `<div class="term"><div class="pt">${glyph('gwait')}<b>Briefing login retry</b><span>ops-tower · fix/ops-347-briefing-retry</span><span class="faint" style="margin-left:auto">waiting for a heavy slot · 2nd · 2m</span></div>
+<pre><span class="ac">&gt;</span> /nextup OPS-347
+
+<span class="b">●</span> Added one retry on a login error; the new test failed first and passes now.
+
+<span class="b">●</span> Bash(pwsh -NoProfile -File tools/gate.ps1 run --log .tmp/test.log --timeout 1200 --slot heavy
+       -- cargo nextest run --workspace --cargo-profile test-release)
+  <span class="d">⎿</span>  <span class="o">gate: waiting for a heavy slot (4 of 4 busy, 1 ahead)</span>
+     <span class="m">Running… (2m 04s)</span>
+
+<span class="o">✻</span> <span class="m">Waiting on the gate… (2m 04s · esc to interrupt)</span></pre>
+<div class="box">&gt; </div></div>`;
+  }
+  if (which === 'fail') {
+    return `<div class="term"><div class="pt">${glyph('working')}<b>Summary wire types</b><span>rustling-tulip · feat/rt-444-summary-types</span></div>
+<pre><span class="ac">&gt;</span> /nextup RT-444
+
+<span class="b">●</span> Bash(pwsh -NoProfile -File tools/gate.ps1 run --log .tmp/full.log --timeout 1200 --slot heavy
+       -- cargo nextest run --workspace --cargo-profile test-release)
+  <span class="d">⎿</span>  <span class="m">gate: routed to buildbox-01 (remote 0)</span>
+     <span style="color:var(--danger)">gate: TIMED OUT after 20m00s (--timeout 1200); stopped the job tree (31 processes)</span>
+     <span style="color:var(--danger)">Error: exit 124</span>
+
+<span class="b">●</span> The full suite hung in auto_resume_waits_for_bind. Reading .tmp/full.log for the slow test.
+
+<span class="b">●</span> Read(.tmp/full.log)
+  <span class="d">⎿</span>  <span class="m">Read 412 lines</span>
+
+<span class="b">✻</span> <span class="m">Thinking… (14s · esc to interrupt)</span></pre>
+<div class="box">&gt; </div></div>`;
+  }
+  return `<div class="term"><div class="pt">${glyph('working')}<b>Summary wire types</b><span>rustling-tulip · feat/rt-444-summary-types</span></div>
+<pre><span class="ac">&gt;</span> /nextup RT-444
+
+<span class="b">●</span> Landed the summary types; the implementer is on steps 3–4 of the brief.
+
+<span class="b">●</span> Agent(RT-444 summary types implementer)
+  <span class="d">⎿</span>  Bash(pwsh -NoProfile -File tools/gate.ps1 run --log .tmp/protocol.log --slot heavy
+         -- cargo nextest run -p protocol --cargo-profile test-release)
+     <span class="m">Running… (1m 12s)</span>
+
+<span class="b">✻</span> <span class="m">Waiting on subagent… (6m 41s · esc to interrupt)</span></pre>
+<div class="box">&gt; </div></div>`;
+}
+function tabsA(st) {
+  const waitTab = st.me ? '<span class="gw">heavy · 2nd</span>' : '<span class="cnt">◉ 1/3</span>';
+  return `<div class="tabbar">
+    <div class="t ${st.me ? '' : 'on'}"><span class="cnt">◉ 2/3</span>tulip<span class="x">×</span></div>
+    <div class="t ${st.me ? 'on' : ''}">${waitTab}ops-tower<span class="x">×</span></div>
+    <div class="t"><span class="cnt">◉ 1/2</span>yaat<span class="x">×</span></div>
+    <div class="plus">+</div></div>`;
+}
+function laneA(st) {
+  return `${rail('a', st)}${laneASide(st)}
+    <div class="main">${tabsA(st)}<div class="content">${termTab(st.me ? 'wait' : st.open !== undefined ? 'fail' : 'work')}</div></div>
+    ${footer(st, 'a', st.me ? 'ops-tower · Briefing login retry' : 'tulip · Summary wire types')}`;
+}
+
+/* ---------- Lane B ---------- */
+function holdsFor(st, name) {
+  const out = [];
+  for (const p of st.pools) {
+    p.slots.forEach((s, i) => { if (s.st === 'busy' && s.sess === name) out.push(`${glyph(s.remote ? 'rgate' : 'gate')}<span class="cut">In gate · ${p.kind} ${i} · ${s.held}</span>`); });
+    p.waiting.forEach((w, i) => { if (w.sess === name) out.push(`${glyph('gwait')}<span class="cut c-och">Waiting for ${p.kind} · ${i === 0 ? '1st' : '2nd'} · ${w.age}</span>`); });
+  }
+  for (const r of st.recent) {
+    if (r.sess === name && (r.res === 'timed' || r.res === 'failed')) out.push(`<span class="res ${r.res}" style="width:12px">${RES[r.res][0]}</span><span class="cut c-dan">Gate ${RES[r.res][1]} · ${r.slot} · ${r.ago} ago</span>`);
+  }
+  return out;
+}
+function laneBSide(st) {
+  const SES = [
+    ['rustling-tulip', [['working', 'Summary wire types', '6m'], ['asking', 'Settings modal height', '4m'], ['waiting', 'Sidebar repo sort', '12m']]],
+    ['ops-tower', [['working', 'Briefing login retry', '6m'], ['asking', 'Gate chips in light theme', '1m']]],
+    ['yaat', [['working', 'Ready-to-taxi call-up', '11m'], ['idle', 'METAR parser RMK groups', '41m']]],
+  ];
+  return `<aside class="side"><div class="sp-head"><span class="h">Sessions</span></div><div class="sp-body">
+    ${SES.map(([r, ls]) => `<div class="rg"><i style="background:${REPOS[r]}"></i>${r}</div>${ls.map(([g, n, a]) => {
+      const holds = holdsFor(st, n).map((h) => `<div class="gh">${h}</div>`).join('');
+      return `<div class="lf ${st.me === n ? 'on' : ''}">${glyph(g)}<span class="nm cut">${n}</span><span class="age">${a}</span>${holds}</div>`;
+    }).join('')}`).join('')}
+  </div></aside>`;
+}
+function laneBTab(st) {
+  const waiting = st.pools.reduce((n, p) => n + p.waiting.length, 0);
+  const busy = st.pools.reduce((n, p) => n + taken(p), 0);
+  const bad = st.recent.filter((r) => r.res === 'timed' || r.res === 'failed').length;
+  const hdr = `<div class="hdr"><h1>Gates</h1><span class="mach">${MACHINE} · 16 cores</span>
+    <span class="cpill"><b>${busy}</b> busy</span>
+    ${waiting ? `<span class="cpill och"><b>${waiting}</b> waiting</span>` : ''}
+    ${st.noslot.length ? `<span class="cpill"><b>${st.noslot.length}</b> no slot</span>` : ''}
+    ${bad ? `<span class="cpill dan"><b>${bad}</b> failed · last hour</span>` : ''}
+    <span class="hsp"></span>
+    <span class="seg"><span class="on">All repos</span>${['rustling-tulip', 'ops-tower', 'yaat', 'skyline'].map((r) => `<span><i style="background:${REPOS[r]}"></i>${r}</span>`).join('')}</span></div>`;
+  const card = (p, cls) => `<div class="pc ${cls || ''}"><div class="ph"><span class="h">${pname(p)}</span>${poolCount(p)}<span class="r">${stepper(p) ? `<span class="sub" style="font-size:11.5px">Slots</span>${stepper(p)}<span class="faint" style="font-size:11px">default ${p.def}</span>` : ''}</span></div>${poolBody(p, { who: true, sel: st.menu && p.kind === 'heavy' ? 1 : undefined })}</div>`;
+  const [heavy, light, crit, remote] = st.pools;
+  const ns = st.noslot.length ? `<div class="pc wide"><div class="ph"><span class="h">No slot</span><span class="n"><b>${st.noslot.length}</b> running</span></div>${noslotBody(st)}</div>` : '';
+  const rows = st.recent.map((r, i) => {
+    const bad = r.res === 'timed' || r.res === 'failed';
+    const tr = `<tr class="${bad ? 'bad' : ''}"><td class="cm">${esc(r.cmd)}</td><td>${repo(r.repo)}</td><td>${r.sess === NOS ? `<span class="faint">${NOS}</span>` : esc(r.sess)}</td><td>${r.slot}${r.fell ? ' <span class="tag fell">fell back</span>' : ''}</td><td class="num">${r.q}</td><td class="num">${r.wait}</td><td class="num">${r.held}</td><td>${resMark(r)}</td></tr>`;
+    return tr + (st.open === i && r.tail ? `<tr><td class="tailc" colspan="8">${tailBox(r)}</td></tr>` : '');
+  }).join('');
+  const table = `<table class="rt"><colgroup><col style="width:34%"><col style="width:11%"><col style="width:15%"><col style="width:10%"><col style="width:6%"><col style="width:6%"><col style="width:7%"><col style="width:11%"></colgroup>
+    <tr><th>Command</th><th>Repo</th><th>Session</th><th>Slot</th><th class="num">Queued</th><th class="num">Wait</th><th class="num">Held</th><th>Result</th></tr>${rows}</table>`;
+  const week = `<table class="rt"><colgroup><col style="width:52%"><col style="width:16%"><col style="width:8%"><col style="width:8%"><col style="width:8%"><col style="width:8%"></colgroup>
+    <tr><th>Command</th><th>Repo</th><th class="num">Runs</th><th class="num">p50</th><th class="num">p90</th><th class="num">Max</th></tr>
+    ${WEEK.map((w) => `<tr><td class="cm">${esc(w[0])}</td><td>${repo(w[1])}</td><td class="num">${w[2]}</td><td class="num">${w[3]}</td><td class="num">${w[4]}</td><td class="num">${w[5]}</td></tr>`).join('')}</table>`;
+  return `<div class="gt">${hdr}<div class="gtb">
+    <div class="pools">${card(heavy, 'tall')}${card(light)}${card(remote)}${card(crit)}${ns}</div>
+    <div class="tsec"><span class="h">Recent runs</span><span class="r">last 2 h · newest first</span></div>${table}
+    <div class="tsec"><span class="h">Last 7 days</span><span class="r">passed runs</span></div>${week}
+  </div></div>`;
+}
+function confirmDlg() {
+  return `<div class="scrim"><div class="dlg"><h2>Stop this gate?</h2>
+    <div class="kv"><span class="k">Command</span><span class="mono">cargo nextest run --workspace --cargo-profile test-release</span>
+    <span class="k">Folder</span><span>X:\\dev\\ops-tower</span><span class="k">Session</span><span>Briefing login retry</span><span class="k">Held</span><span>6m · usually 4m · 14 processes</span></div>
+    <div class="warn">Another session may be waiting on this run; it will see the gate end with exit 124.</div>
+    <div class="acts"><button class="btn ghost">Cancel</button><button class="btn dan">Stop gate</button></div></div></div>`;
+}
+function laneB(st) {
+  const onGates = !st.flyout;
+  const tabs = `<div class="tabbar">
+    <div class="t ${onGates ? 'on' : ''}"><svg viewBox="0 0 20 20" width="13" height="13" style="stroke:currentColor;fill:none;stroke-width:1.7">${IC.gates}</svg>Gates${st.badge ? `<span class="cnt" style="color:var(--accent)">${st.badge}</span>` : ''}<span class="x">×</span></div>
+    <div class="t"><span class="cnt">◉ 2/3</span>tulip<span class="x">×</span></div>
+    <div class="t ${onGates ? '' : 'on'}">${st.me ? '<span class="gw">heavy · 2nd</span>' : '<span class="cnt">◉ 1/3</span>'}ops-tower<span class="x">×</span></div>
+    <div class="t"><span class="cnt">◉ 1/2</span>yaat<span class="x">×</span></div>
+    <div class="plus">+</div></div>`;
+  const body = onGates ? laneBTab(st) : termTab('wait');
+  return `${rail('b', st)}${laneBSide(st)}
+    <div class="main">${tabs}<div class="content">${body}</div></div>
+    ${footer(st, 'b', onGates ? 'Gates' : 'ops-tower · Briefing login retry')}
+    ${st.menu ? rowMenu(860, 222) : ''}`;
+}
+
+/* ---------- Wiring ---------- */
+let lane = 'a', state = 'busy', confirmOpen = false;
+function render() {
+  const app = document.getElementById('app');
+  app.className = 'app l' + lane;
+  const st = STATES[state];
+  app.innerHTML = (lane === 'a' ? laneA(st) : laneB(st)) + (st.menu && confirmOpen ? confirmDlg() : '');
+  for (const t of document.querySelectorAll('.lane-tab')) t.classList.toggle('on', t.dataset.lane === lane);
+  for (const t of document.querySelectorAll('.st-tab')) t.classList.toggle('on', t.dataset.state === state);
+  document.getElementById('cap').textContent = st.cap;
+  history.replaceState(null, '', `#${lane}-${state}`);
+}
+document.getElementById('rec-' + RECOMMENDED).hidden = false;
+document.getElementById('lanes').addEventListener('click', (e) => { const t = e.target.closest('.lane-tab'); if (t) { lane = t.dataset.lane; confirmOpen = false; render(); } });
+document.getElementById('states').addEventListener('click', (e) => { const t = e.target.closest('.st-tab'); if (t) { state = t.dataset.state; confirmOpen = false; render(); } });
+document.getElementById('app').addEventListener('click', (e) => {
+  if (e.target.closest('[data-stop]')) { confirmOpen = true; render(); return; }
+  if (confirmOpen && e.target.closest('.dlg .btn')) { confirmOpen = false; render(); }
+});
+{
+  const [l, s] = (location.hash.slice(1) || 'a-busy').split('-');
+  if (l in { a: 1, b: 1 }) lane = l;
+  if (s in STATES) state = s;
+}
+render();
+</script>
+</body>
+</html>

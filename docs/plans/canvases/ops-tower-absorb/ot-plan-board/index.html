@@ -1,0 +1,631 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Plan board mock</title>
+<style>
+@font-face { font-family: "Geist"; font-weight: 400; src: url("../../../../../apps/native/assets/fonts/Geist/Geist-Regular.ttf"); }
+@font-face { font-family: "Geist"; font-weight: 500; src: url("../../../../../apps/native/assets/fonts/Geist/Geist-Medium.ttf"); }
+@font-face { font-family: "Geist"; font-weight: 600; src: url("../../../../../apps/native/assets/fonts/Geist/Geist-SemiBold.ttf"); }
+@font-face { font-family: "Geist"; font-weight: 700; src: url("../../../../../apps/native/assets/fonts/Geist/Geist-Bold.ttf"); }
+@font-face { font-family: "JBM"; font-weight: 400; src: url("../../../../../apps/native/assets/fonts/JetBrainsMono/JetBrainsMono-Regular.ttf"); }
+@font-face { font-family: "JBM"; font-weight: 700; src: url("../../../../../apps/native/assets/fonts/JetBrainsMono/JetBrainsMono-Bold.ttf"); }
+
+/* Tokens: apps/native/src/palette.rs, as the approved Dashboard mock uses them */
+:root {
+  --ground: #111013; --sunken: #0b0a0d; --surface: #161519; --raised: #1b1a1f; --chip: #232129; --hover: #2c2a33;
+  --line: #2a2830; --line-strong: #3a3742;
+  --text: #ede9e4; --text-2: #a7a2ad; --subtle: #8c8794; --faint: #6e6a77;
+  --accent: #f07a62; --on-accent: #1c100d;
+  --working: #6ca6ff; --asking: #f6bc4e; --on-asking: #2a1b00; --waiting: #4fc89d; --danger: #f26d6d;
+  --lilac: #c9b8ff; --ochre: #d9a15c; --rose: #e7849b; --peri: #8fb3f0;
+  --ask-wash: rgba(246, 188, 78, 0.07); --danger-wash: rgba(242, 109, 109, 0.10);
+  --mono: "JBM", ui-monospace, monospace;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: #08070a; color: var(--text); font-family: "Geist", system-ui, sans-serif; font-size: 13px; }
+button { font: inherit; color: inherit; }
+
+/* Lane switcher, outside the app frame */
+.lanes { display: flex; gap: 6px; align-items: stretch; padding: 10px 16px; width: 1600px; margin: 0 auto; }
+.lanes .ttl { font-weight: 600; color: var(--text-2); align-self: center; margin-right: 8px; white-space: nowrap; }
+.lane-tab { flex: 1; text-align: left; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 7px 10px; cursor: pointer; }
+.lane-tab b { display: block; font-weight: 600; }
+.lane-tab span { color: var(--subtle); font-size: 12px; }
+.lane-tab .worst { display: block; color: var(--rose); font-size: 11.5px; margin-top: 2px; }
+.lane-tab.on { border-color: var(--accent); background: var(--raised); }
+.rec { display: inline-block; margin-left: 6px; font-size: 10.5px; font-weight: 600; color: var(--on-accent) !important; background: var(--accent); padding: 1px 6px; border-radius: 3px; vertical-align: 1px; }
+
+/* App frame */
+.app { width: 1600px; height: 1000px; margin: 0 auto 24px; display: grid; grid-template-columns: 48px 1fr; grid-template-rows: 1fr 24px; background: var(--ground); border: 1px solid var(--line); overflow: hidden; }
+.app.withpanel { grid-template-columns: 48px 392px 1fr; }
+.rail { background: var(--sunken); border-right: 1px solid var(--line); display: flex; flex-direction: column; align-items: center; padding-top: 6px; gap: 6px; }
+.rail .ic { width: 34px; height: 34px; border-radius: 6px; display: grid; place-items: center; color: var(--text-2); position: relative; }
+.rail .ic.on { background: var(--chip); color: var(--text); box-shadow: inset 2px 0 0 var(--accent); }
+.rail .ic .n { position: absolute; top: 2px; right: 2px; font-size: 9px; background: var(--chip); color: var(--text-2); border-radius: 6px; padding: 0 3px; }
+.rail .ic .n.ask { background: var(--asking); color: var(--on-asking); font-weight: 700; }
+.rail .ic.new::before { content: ""; position: absolute; inset: -3px; border: 1px dashed rgba(240,122,98,.55); border-radius: 8px; }
+.rail .sp { flex: 1; }
+.rail svg { width: 18px; height: 18px; stroke: currentColor; fill: none; stroke-width: 1.6; }
+.main { display: grid; grid-template-rows: 38px 1fr; min-width: 0; min-height: 0; position: relative; }
+.tabbar { background: var(--surface); border-bottom: 1px solid var(--line); display: flex; align-items: stretch; }
+.tabbar .t { display: flex; align-items: center; gap: 7px; padding: 0 14px; border-right: 1px solid var(--line); color: var(--text-2); font-weight: 500; }
+.tabbar .t.on { color: var(--text); background: var(--ground); box-shadow: inset 0 2px 0 var(--accent); }
+.tabbar .t .x { color: var(--faint); margin-left: 6px; }
+.tabbar .t .cnt { font-size: 11px; color: var(--working); }
+.tabbar .t .badge { font-size: 10.5px; font-weight: 700; background: var(--asking); color: var(--on-asking); border-radius: 3px; padding: 0 5px; }
+.tabbar .t svg { stroke: currentColor; fill: none; stroke-width: 1.7; }
+.tabbar .plus { padding: 0 14px; display: flex; align-items: center; color: var(--subtle); font-size: 16px; }
+.footer { grid-column: 1 / -1; background: var(--sunken); border-top: 1px solid var(--line); display: flex; align-items: center; gap: 14px; padding: 0 10px; font-size: 11.5px; color: var(--text-2); }
+.footer .pill { border: 1px solid var(--line-strong); border-radius: 10px; padding: 0 8px; line-height: 17px; }
+.footer .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #3fb96a; margin-right: 5px; }
+.footer .sp { flex: 1; }
+.content { overflow: hidden; min-height: 0; position: relative; }
+
+/* Status glyphs, as the sidebar draws them */
+.g { display: inline-block; flex: none; width: 12px; height: 12px; border-radius: 50%; position: relative; vertical-align: -1px; }
+.g.working { border: 2px solid var(--working); }
+.g.working::after { content: ""; position: absolute; inset: 2px; border-radius: 50%; background: var(--working); }
+.g.asking { border-radius: 3px; background: var(--asking); }
+.g.asking::after { content: "!"; position: absolute; inset: 0; color: var(--on-asking); font-size: 9.5px; font-weight: 700; text-align: center; line-height: 12px; }
+.g.waiting { border: 2px solid var(--waiting); }
+.g.idle { width: 8px; height: 8px; margin: 2px; background: var(--faint); }
+.g.stopped { border-radius: 2px; width: 10px; height: 10px; margin: 1px; border: 2px solid var(--faint); }
+.g.gate { border-radius: 2px; border: 2px solid var(--working); width: 11px; height: 11px; }
+.g.gate::after { content: ""; position: absolute; left: 2px; right: 2px; top: 2.5px; height: 2px; background: var(--working); }
+.g.sm { transform: scale(0.85); }
+
+/* Shared bits */
+.mono { font-family: var(--mono); font-size: 11.5px; }
+.sub { color: var(--subtle); }
+.t2 { color: var(--text-2); }
+.cut { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.repo { display: inline-flex; align-items: center; gap: 5px; color: var(--text-2); white-space: nowrap; flex: none; }
+.repo i, .rdot { width: 7px; height: 7px; border-radius: 2px; display: inline-block; flex: none; }
+.c-ask { color: var(--asking); } .c-work { color: var(--working); } .c-wait { color: var(--waiting); } .c-dan { color: var(--danger); } .c-faint { color: var(--faint); }
+.iss { font-family: var(--mono); font-size: 11.5px; color: var(--text); font-weight: 700; white-space: nowrap; flex: none; }
+.lst { display: inline-flex; align-items: center; gap: 4px; font-size: 11.5px; color: var(--text-2); white-space: nowrap; flex: none; }
+.lst .si { width: 10px; height: 10px; border-radius: 50%; border: 1.5px solid; display: inline-block; position: relative; flex: none; }
+.lst .si.prog { border-color: var(--peri); background: conic-gradient(var(--peri) 0 50%, transparent 0); }
+.lst .si.rev { border-color: var(--waiting); background: conic-gradient(var(--waiting) 0 75%, transparent 0); }
+.lst .si.done { border-color: var(--lilac); background: var(--lilac); }
+.lst .si.todo { border-color: var(--faint); }
+.lst .si.blk { border-color: var(--danger); }
+.lst .si.blk::after { content: ""; position: absolute; left: 1px; right: 1px; top: 3px; height: 1.5px; background: var(--danger); }
+.prio { display: inline-flex; align-items: flex-end; gap: 1px; height: 10px; vertical-align: -1px; flex: none; }
+.prio i { width: 2.5px; background: var(--faint); display: block; border-radius: 1px; }
+.prio i.on { background: var(--text-2); }
+.prio.urgent { width: 11px; height: 11px; background: var(--danger); border-radius: 2px; color: #1a0606; font-size: 9px; font-weight: 700; justify-content: center; align-items: center; }
+.btn { background: var(--chip); border: 1px solid var(--line-strong); border-radius: 5px; padding: 3px 9px; font-size: 12px; cursor: pointer; white-space: nowrap; }
+.btn.pri { background: var(--asking); color: var(--on-asking); border-color: var(--asking); font-weight: 600; }
+.btn.go { background: var(--accent); color: var(--on-accent); border-color: var(--accent); font-weight: 600; }
+.btn.ghost { background: transparent; }
+.btn.sm { padding: 1px 7px; font-size: 11.5px; }
+.btn[disabled] { color: var(--faint); cursor: default; }
+.h { font-size: 10.5px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--subtle); }
+.lnsync { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--subtle); white-space: nowrap; }
+.lnsync i { width: 6px; height: 6px; border-radius: 50%; background: var(--lilac); display: inline-block; }
+.lnsync.bad i { background: var(--danger); } .lnsync.bad { color: var(--danger); }
+.hsp { flex: 1; }
+.cpill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px; border-radius: 5px; background: var(--chip); font-size: 12px; color: var(--text-2); white-space: nowrap; }
+.cpill b { color: var(--text); font-weight: 600; }
+.cpill.ask { background: rgba(246,188,78,.14); color: var(--asking); } .cpill.ask b { color: var(--asking); }
+.seg { display: inline-flex; background: var(--raised); border: 1px solid var(--line); border-radius: 5px; padding: 2px; }
+.seg span { padding: 2px 9px; border-radius: 3px; font-size: 12px; color: var(--text-2); white-space: nowrap; }
+.seg span.on { background: var(--chip); color: var(--text); font-weight: 500; }
+.rpill { display: inline-flex; align-items: center; gap: 5px; padding: 2px 9px; border-radius: 11px; border: 1px solid var(--line-strong); font-size: 12px; color: var(--text-2); white-space: nowrap; }
+.rpill.on { background: var(--chip); color: var(--text); border-color: var(--text-2); }
+.tog { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-2); white-space: nowrap; }
+.tog i { width: 24px; height: 13px; border-radius: 7px; background: var(--accent); position: relative; display: inline-block; }
+.tog i::after { content: ""; position: absolute; right: 2px; top: 2px; width: 9px; height: 9px; border-radius: 50%; background: var(--on-accent); }
+.tog.off i { background: var(--chip); } .tog.off i::after { right: auto; left: 2px; background: var(--faint); }
+.cm { display: inline-flex; align-items: center; gap: 3px; font-size: 11px; color: var(--subtle); white-space: nowrap; }
+.cm svg { width: 11px; height: 11px; stroke: currentColor; fill: none; stroke-width: 1.6; }
+.waittag { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 600; color: var(--asking); background: rgba(246,188,78,.12); border: 1px solid rgba(246,188,78,.35); border-radius: 3px; padding: 0 5px; line-height: 16px; white-space: nowrap; }
+.stuck { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 600; color: var(--danger); background: var(--danger-wash); border: 1px solid rgba(242,109,109,.35); border-radius: 3px; padding: 0 5px; line-height: 16px; white-space: nowrap; }
+.box { background: var(--surface); border: 1px solid var(--line); border-radius: 7px; padding: 10px 12px; min-width: 0; }
+.box .h { margin-bottom: 8px; display: flex; align-items: center; gap: 8px; }
+.box .h .r { margin-left: auto; text-transform: none; letter-spacing: 0; font-weight: 400; }
+.box.askbox { border-color: rgba(246,188,78,.45); background: var(--ask-wash); }
+.box.askbox .h { color: var(--asking); }
+
+/* ---------- Plan header (lanes B) ---------- */
+.phdr { display: flex; align-items: center; gap: 10px; padding: 9px 18px; border-bottom: 1px solid var(--line); background: var(--surface); }
+.phdr h1 { font-size: 15px; font-weight: 600; margin: 0 6px 0 0; }
+
+/* ---------- Briefing ---------- */
+.brf { border-bottom: 1px solid var(--line); background: var(--ground); }
+.brf .bh { display: flex; align-items: center; gap: 10px; padding: 9px 18px 4px; }
+.brf .bh b { font-weight: 600; font-size: 13.5px; }
+.brf .bsum { padding: 2px 18px 8px; color: var(--text-2); font-size: 12.5px; line-height: 1.45; max-width: 1060px; }
+.brf .bsum b { color: var(--text); font-weight: 500; }
+.bt .br { display: grid; grid-template-columns: 18px 112px 132px minmax(0,1fr) 188px 128px; column-gap: 12px; align-items: center; padding: 5px 18px; border-top: 1px solid var(--line); min-height: 40px; }
+.bt .br:hover { background: var(--surface); }
+.bt .br .rk { color: var(--subtle); font-weight: 600; font-variant-numeric: tabular-nums; text-align: right; }
+.bt .br .two { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.bt .br .ttl { font-weight: 500; }
+.bt .br .why { font-size: 11.5px; color: var(--subtle); }
+.bt .br .act { justify-self: end; display: flex; gap: 6px; }
+.bt .br.dim .ttl, .bt .br.dim .why, .bt .br.dim .rk { opacity: .55; }
+.bt .br.sel { background: var(--raised); box-shadow: inset 2px 0 0 var(--accent); }
+.cur { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; white-space: nowrap; min-width: 0; }
+
+/* ---------- Board (lane B) ---------- */
+.plan { display: grid; grid-template-columns: minmax(0,1fr) 440px; height: 100%; }
+.plan .left { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.board { flex: 1; min-height: 0; display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 10px; padding: 10px 14px 0; }
+.col { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+.col .ch { display: flex; align-items: center; gap: 7px; padding: 6px 4px 7px; border-top: 2px solid var(--faint); }
+.col .ch b { font-weight: 600; }
+.col .ch .n { color: var(--subtle); font-size: 12px; }
+.col.doing .ch { border-top-color: var(--working); }
+.col.blocked .ch { border-top-color: var(--danger); }
+.col.done .ch { border-top-color: var(--lilac); }
+.col .cards { display: flex; flex-direction: column; gap: 6px; overflow: hidden; min-height: 0; padding-bottom: 8px; }
+.wave { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--subtle); padding: 4px 2px 0; min-width: 0; }
+.wave b { color: var(--text-2); font-weight: 500; }
+.more { font-size: 11.5px; color: var(--subtle); padding: 4px 4px; }
+.icard { background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 7px 9px 7px; display: flex; flex-direction: column; gap: 4px; min-width: 0; cursor: pointer; }
+.icard:hover { border-color: var(--line-strong); }
+.icard.sel { border-color: var(--accent); background: var(--raised); }
+.icard.askc { box-shadow: inset 3px 0 0 var(--asking); }
+.icard .r1 { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.icard .tt { font-size: 12.5px; line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.icard .r3 { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--text-2); min-width: 0; }
+.icard.donec .tt { color: var(--text-2); }
+.sess { display: flex; align-items: center; gap: 6px; font-size: 11.5px; min-width: 0; background: var(--raised); border-radius: 4px; padding: 2px 6px; }
+
+/* ---------- Issue detail ---------- */
+.det { padding: 12px 16px 16px; display: flex; flex-direction: column; gap: 9px; }
+.pane { border-left: 1px solid var(--line); background: var(--surface); overflow: hidden; min-height: 0; }
+.pane .det .box { background: var(--ground); }
+.pane .det .box.askbox { background: rgba(246,188,78,.06); }
+.det .dh { display: flex; align-items: center; gap: 8px; }
+.det .dttl { font-size: 15.5px; font-weight: 600; line-height: 1.3; }
+.det .dmeta { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; font-size: 12px; color: var(--text-2); }
+.det .desc { font-size: 12.5px; line-height: 1.5; color: var(--text-2); }
+.det .desc p { margin: 0 0 6px; }
+.det .desc code { font-family: var(--mono); font-size: 11.5px; color: var(--text); background: var(--chip); padding: 0 4px; border-radius: 3px; }
+.det .qtx { font-size: 13px; line-height: 1.45; margin-bottom: 7px; }
+.det .qopts { display: flex; flex-direction: column; gap: 3px; margin-bottom: 9px; font-size: 12px; color: var(--text-2); }
+.det .qopts span::before { content: "○ "; color: var(--faint); }
+.det .row2 { display: flex; gap: 6px; flex-wrap: wrap; }
+.cmt { display: grid; grid-template-columns: 44px 1fr auto; gap: 2px 8px; font-size: 12px; padding: 4px 0; border-top: 1px solid var(--line); }
+.cmt:first-of-type { border-top: 0; }
+.cmt .kind { font-family: var(--mono); font-size: 11px; font-weight: 700; }
+.cmt .kind.block { color: var(--danger); } .cmt .kind.start { color: var(--working); } .cmt .kind.land { color: var(--waiting); } .cmt .kind.note { color: var(--subtle); }
+.cmt .age { color: var(--faint); font-size: 11px; }
+.subi { display: flex; align-items: center; gap: 7px; font-size: 12px; padding: 2px 0; min-width: 0; }
+.launch .fld { display: grid; grid-template-columns: 70px 1fr; gap: 6px 10px; align-items: center; font-size: 12px; margin-bottom: 8px; }
+.launch .fld .k { color: var(--subtle); }
+.sel2 { display: inline-flex; align-items: center; gap: 6px; background: var(--sunken); border: 1px solid var(--line-strong); border-radius: 4px; padding: 2px 8px; font-size: 12px; min-width: 0; white-space: nowrap; overflow: hidden; }
+.sel2::after { content: "▾"; color: var(--faint); margin-left: auto; padding-left: 6px; }
+.sel2.mono { font-family: var(--mono); font-size: 11.5px; }
+.prompt { font-family: var(--mono); font-size: 11.5px; line-height: 1.5; background: var(--sunken); border: 1px solid var(--line-strong); border-radius: 4px; padding: 6px 8px; color: var(--text); white-space: pre-wrap; margin-bottom: 8px; }
+.prompt .cur { width: 7px; height: 13px; background: var(--text-2); display: inline-block; vertical-align: -2px; }
+
+/* ---------- Lane A: rail panel ---------- */
+.panel { background: var(--surface); border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+.panel .ph { display: flex; align-items: center; gap: 8px; padding: 10px 12px 8px; border-bottom: 1px solid var(--line); }
+.panel .ph b { font-size: 13.5px; font-weight: 600; }
+.panel .sec { display: flex; align-items: center; gap: 7px; padding: 10px 12px 5px; }
+.panel .sec .n { color: var(--subtle); font-size: 11px; }
+.panel .sec.ask .h { color: var(--asking); }
+.panel .bsum2 { padding: 0 12px 6px; font-size: 12px; line-height: 1.45; color: var(--text-2); }
+.psug { display: grid; grid-template-columns: 14px minmax(0,1fr) auto; gap: 8px; align-items: center; padding: 4px 12px; min-height: 36px; }
+.psug:hover { background: var(--hover); }
+.psug .rk { color: var(--subtle); font-weight: 600; font-size: 12px; text-align: right; }
+.psug .two { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.psug .l2 { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--subtle); min-width: 0; }
+.psug.dim .two { opacity: .55; }
+.prow { display: grid; grid-template-columns: 14px auto minmax(0,1fr) auto; gap: 7px; align-items: center; padding: 3px 12px; min-height: 26px; cursor: pointer; }
+.prow:hover { background: var(--hover); }
+.prow.sel { background: var(--chip); box-shadow: inset 2px 0 0 var(--accent); }
+.prow.askn { background: var(--ask-wash); }
+.prow.askn.sel { background: var(--chip); }
+.prow .age { color: var(--subtle); font-size: 11px; white-space: nowrap; }
+.prow .ln2 { grid-column: 3 / 5; display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--text-2); min-width: 0; margin-top: -2px; }
+.panel .scroll { overflow: hidden; flex: 1; min-height: 0; }
+.panel .divider { border-top: 1px solid var(--line); margin: 6px 0 0; }
+.flyout { position: absolute; left: 10px; top: 288px; width: 452px; background: var(--raised); border: 1px solid var(--line-strong); border-radius: 8px; box-shadow: 0 14px 40px rgba(0,0,0,.55); z-index: 5; }
+.flyout::before { content: ""; position: absolute; left: -7px; top: 58px; width: 12px; height: 12px; background: var(--raised); border-left: 1px solid var(--line-strong); border-bottom: 1px solid var(--line-strong); transform: rotate(45deg); }
+.flyout .det .box { background: var(--surface); }
+.flyout .det .box.askbox { background: rgba(246,188,78,.06); }
+.term { background: #0d0c0f; height: 100%; padding: 12px 16px; font-family: var(--mono); font-size: 12.5px; line-height: 1.6; color: #cfc9c2; overflow: hidden; }
+.term .dim { color: #6e6a77; } .term .bl { color: var(--working); } .term .gr { color: var(--waiting); } .term .ac { color: var(--accent); } .term .am { color: var(--asking); }
+.term .box2 { border: 1px solid #3a3742; border-radius: 4px; padding: 4px 10px; margin: 6px 0; color: #a7a2ad; }
+
+/* ---------- Lane C: inside the Dashboard ---------- */
+.dash { overflow: hidden; height: 100%; }
+.hdr { display: flex; align-items: center; gap: 14px; padding: 10px 18px 10px; border-bottom: 1px solid var(--line); background: var(--surface); }
+.hdr h1 { font-size: 15px; font-weight: 600; margin: 0; }
+.counts { display: flex; gap: 4px; }
+.figs { display: flex; gap: 16px; font-size: 12px; color: var(--text-2); align-items: center; }
+.figs b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+.brstrip { display: flex; align-items: center; gap: 10px; padding: 6px 18px; border-bottom: 1px solid var(--line); background: var(--raised); font-size: 12px; min-width: 0; }
+.brstrip .chipb { display: inline-flex; align-items: center; gap: 6px; background: var(--surface); border: 1px solid var(--line-strong); border-radius: 5px; padding: 2px 8px; min-width: 0; max-width: 360px; }
+.grp { display: flex; align-items: center; gap: 8px; padding: 10px 18px 4px 14px; }
+.grp .h { color: var(--text-2); }
+.grp.ask .h { color: var(--asking); }
+.grp .n { font-size: 11px; color: var(--subtle); }
+.srow { display: grid; grid-template-columns: 26px 230px 250px minmax(0,1fr) 90px; column-gap: 12px; align-items: center; padding: 0 18px 0 14px; height: 30px; border-top: 1px solid var(--line); font-size: 12.5px; }
+.srow.askrow { background: var(--ask-wash); box-shadow: inset 2px 0 0 var(--asking); }
+.srow .num { text-align: right; color: var(--subtle); font-size: 11.5px; }
+.prepo { margin: 0 18px 10px 14px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); }
+.prepo .rh { display: flex; align-items: center; gap: 8px; padding: 7px 12px; border-bottom: 1px solid var(--line); }
+.prepo .rh b { font-weight: 600; }
+.prepo .cols4 { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); }
+.prepo .cols4 > div { padding: 6px 10px 8px; border-right: 1px solid var(--line); min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.prepo .cols4 > div:last-child { border-right: 0; }
+.prepo .cols4 .ch { display: flex; align-items: center; gap: 6px; margin-bottom: 2px; }
+.mini { display: flex; align-items: center; gap: 6px; font-size: 12px; min-width: 0; padding: 2px 4px; border-radius: 4px; }
+.mini.sel { background: var(--chip); box-shadow: inset 2px 0 0 var(--accent); }
+.mini.askm { background: var(--ask-wash); }
+.cdrawer { margin: -11px 18px 10px 14px; border: 1px solid var(--line-strong); border-top: 0; border-radius: 0 0 7px 7px; background: var(--raised); display: grid; grid-template-columns: 1.1fr 1fr 1fr; }
+.det.cdrawer { display: grid; padding: 0; gap: 0; }
+.cdrawer > div { padding: 10px 14px 12px; border-right: 1px solid var(--line); min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+.cdrawer > div:last-child { border-right: 0; }
+.cdrawer .box { background: var(--surface); }
+
+/* ---------- States strip ---------- */
+.states { width: 1600px; margin: 0 auto 30px; padding: 0 0 6px; }
+.states > .ttl { font-weight: 600; color: var(--text-2); margin: 4px 0 8px; }
+.sgrid { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 10px; }
+.st { background: var(--ground); border: 1px solid var(--line); border-radius: 6px; overflow: hidden; display: flex; flex-direction: column; min-height: 238px; }
+.st .sl { display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: var(--sunken); border-bottom: 1px solid var(--line); font-size: 11.5px; color: var(--text-2); }
+.st .sl b { color: var(--text); font-weight: 600; }
+.st .sb { padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; flex: 1; min-width: 0; }
+.empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; gap: 8px; color: var(--text-2); padding: 8px 16px; }
+.empty .big { color: var(--text); font-weight: 600; font-size: 14px; }
+.empty svg { width: 30px; height: 30px; stroke: var(--faint); fill: none; stroke-width: 1.4; }
+.banner { display: flex; align-items: flex-start; gap: 8px; padding: 7px 9px; border-radius: 5px; font-size: 12px; line-height: 1.4; }
+.banner.bad { background: var(--danger-wash); border: 1px solid rgba(242,109,109,.35); }
+.banner.warn { background: var(--ask-wash); border: 1px solid rgba(246,188,78,.35); }
+.banner .tx { flex: 1; min-width: 0; }
+.banner .tx b { font-weight: 600; }
+.skel { height: 10px; border-radius: 3px; background: linear-gradient(90deg, var(--chip), var(--hover), var(--chip)); }
+.spin { width: 12px; height: 12px; border-radius: 50%; border: 2px solid var(--chip); border-top-color: var(--working); display: inline-block; flex: none; }
+.faded { opacity: .45; }
+.form { display: grid; grid-template-columns: 96px 1fr; gap: 8px 10px; align-items: center; font-size: 12px; }
+.form .k { color: var(--subtle); }
+.sb .bt .br { grid-template-columns: 14px minmax(0,1fr) auto; padding: 5px 0; column-gap: 8px; }
+</style>
+</head>
+<body>
+
+<div class="lanes" id="lanes">
+  <div class="ttl">Plan board and briefing · RT-464</div>
+  <button class="lane-tab" data-lane="a"><b>A · Plan rail panel <span class="rec" id="rec-a" hidden>Recommended</span></b><span>A new rail panel beside the terminals: today's briefing on top, then every repo's issues listed by state; an issue opens as a flyout.</span><span class="worst">Worst case: 392 px is too narrow for columns, so the board is a list, and the flyout covers the terminal.</span></button>
+  <button class="lane-tab" data-lane="b"><b>B · Plan tab <span class="rec" id="rec-b" hidden>Recommended</span></b><span>A tab kind like the Dashboard, opened from the rail or a repo: briefing band, four-column board, issue detail docked on the right.</span><span class="worst">Worst case: one more tab; while you sit in a session the plan is out of sight unless you split it beside the pane.</span></button>
+  <button class="lane-tab" data-lane="c"><b>C · Inside the Dashboard <span class="rec" id="rec-c" hidden>Recommended</span></b><span>A briefing strip under the Dashboard header and a Plan section below the sessions, one block per repo; the issue opens as a drawer.</span><span class="worst">Worst case: the Dashboard doubles in length and the board sits below the fold, behind every session row.</span></button>
+</div>
+
+<div class="app" id="app"></div>
+
+<div class="states" id="states">
+  <div class="ttl">States · the same in every lane</div>
+  <div class="sgrid" id="sgrid"></div>
+</div>
+
+<script>
+const RECOMMENDED = 'b';
+
+const REPOS = { 'rustling-tulip': '#f07a62', 'ops-tower': '#c9b8ff', 'yaat': '#d9a15c', 'skyline': '#8fb3f0' };
+const esc = (t) => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+// Board at 14:32 on Wednesday 28 October. Sessions match the approved Dashboard mock's.
+const ISSUES = [
+  // To do, in plan order, grouped by repo and project
+  { id: 'RT-56', repo: 'rustling-tulip', col: 'todo', st: 'todo', prio: 3, project: 'Wave 13 · Ops views', title: 'Plan board and daily briefing in the client', cm: 7 },
+  { id: 'RT-55', repo: 'rustling-tulip', col: 'todo', st: 'todo', prio: 3, project: 'Wave 13 · Ops views', title: 'Gates view from the gate state', cm: 3 },
+  { id: 'RT-66', repo: 'rustling-tulip', col: 'todo', st: 'todo', prio: 2, project: 'Wave 13 · Ops views', title: 'Take the claude-accounts crate into the daemon', cm: 5 },
+  { id: 'YAAT-316', repo: 'yaat', col: 'todo', st: 'todo', prio: 4, project: 'Taxi', title: 'FOLLOWG follower cuts across the field and can bypass a hold line', cm: 2 },
+  { id: 'YAAT-407', repo: 'yaat', col: 'todo', st: 'todo', prio: 2, project: 'Taxi', title: 'Merge feat/follow-on-graph (#881)', cm: 1 },
+  { id: 'OPS-401', repo: 'ops-tower', col: 'todo', st: 'todo', prio: 3, project: 'Accounts cutover', title: 'Merge feat/own-account-store (#383)', cm: 4 },
+  { id: 'OPS-395', repo: 'ops-tower', col: 'todo', st: 'todo', prio: 2, project: 'Accounts cutover', title: 'Read the account store through DPAPI', cm: 0 },
+  { id: 'SKY-12', repo: 'skyline', col: 'todo', st: 'todo', prio: 2, project: 'Map tiles', title: 'Tile cache evicts the visible tiles first', cm: 1 },
+  // Doing, each with its live session
+  { id: 'RT-444', repo: 'rustling-tulip', col: 'doing', st: 'prog', prio: 3, project: 'Wave 9 · Summaries & Dashboard', title: 'Session summary and waiting-alert wire types', cm: 6,
+    sess: { g: 'working', label: 'Summary wire types', state: 'Working', age: '6m' } },
+  { id: 'RT-443', repo: 'rustling-tulip', col: 'doing', st: 'prog', prio: 2, project: 'Wave 8 · Native polish', title: 'Settings modal clips in short windows', cm: 2,
+    sess: { g: 'asking', label: 'Settings modal height', state: 'Question', age: '4m' } },
+  { id: 'OPS-352', repo: 'ops-tower', col: 'doing', st: 'rev', prio: 2, project: 'Dashboard polish', title: 'Gate chips lose their lane colour in the light theme', cm: 3,
+    sess: { g: 'asking', label: 'Gate chips in light theme', state: 'Permission', age: '1m' } },
+  { id: 'OPS-347', repo: 'ops-tower', col: 'doing', st: 'prog', prio: 3, project: 'Briefing', title: 'Briefing run retries a login error once', cm: 4,
+    sess: { g: 'gate', label: 'Briefing login retry', state: 'In gate', age: '6m' } },
+  { id: 'YAAT-308', repo: 'yaat', col: 'doing', st: 'prog', prio: 4, project: 'Solo mode', title: 'Solo ready-to-taxi call-up fires for the wrong aircraft', cm: 5,
+    sess: { g: 'working', label: 'Ready-to-taxi call-up', state: 'Working', age: '11m' } },
+  { id: 'YAAT-312', repo: 'yaat', col: 'doing', st: 'rev', prio: 2, project: 'Weather', title: 'METAR parser drops RMK groups', cm: 2, note: 'PR #241 · review requested',
+    sess: { g: 'idle', label: 'METAR parser RMK groups', state: 'Idle', age: '41m' } },
+  // Blocked
+  { id: 'RT-135', repo: 'rustling-tulip', col: 'blocked', st: 'blk', prio: 3, project: 'Wave 13 · Ops views', title: 'Daemon reads Linear for the Plan board', cm: 4, you: true, wait: 'Waits on you · 2d' },
+  { id: 'RT-27', repo: 'rustling-tulip', col: 'blocked', st: 'blk', prio: 2, project: 'Wave 9 · Summaries & Dashboard', title: 'Measure a local model for summaries', cm: 3, wait: 'Waits on RT-445' },
+  { id: 'OPS-20', repo: 'ops-tower', col: 'blocked', st: 'blk', prio: 2, project: 'Briefing', title: "Launch through rustling-tulip's spawn", cm: 6, wait: 'Waits on RT-28' },
+  // Done, last 7 days
+  { id: 'RT-451', repo: 'rustling-tulip', col: 'done', st: 'done', prio: 2, project: 'Wave 8 · Native polish', title: 'Sidebar sorts repos by needs-you, activity or hand', cm: 3, landed: '12m', sha: '5b2e9c1' },
+  { id: 'OPS-340', repo: 'ops-tower', col: 'done', st: 'done', prio: 2, project: 'Costs', title: 'Costs tab splits the Claude share per repository', cm: 5, landed: '25m', sha: 'd40e8a1' },
+  { id: 'RT-449', repo: 'rustling-tulip', col: 'done', st: 'done', prio: 2, project: 'Wave 9 · Summaries & Dashboard', title: 'rt.ps1 nests a gate under GATE_BOX_JOB', cm: 1, landed: '41m', sha: 'a9e7c7c' },
+  { id: 'OPS-344', repo: 'ops-tower', col: 'done', st: 'done', prio: 1, project: 'Briefing', title: 'Briefing strip cuts the status to one line', cm: 2, landed: '2h', sha: '3e1f0b9' },
+  { id: 'YAAT-301', repo: 'yaat', col: 'done', st: 'done', prio: 3, project: 'Solo mode', title: 'Hold-short readback accepts the runway alone', cm: 4, landed: '1d', sha: '8c44a21' },
+];
+const COUNTS = { todo: 41, doing: 6, blocked: 3, done: 23 };
+const COLS = [['todo', 'To do'], ['doing', 'Doing'], ['blocked', 'Blocked'], ['done', 'Done · 7 d']];
+const STT = { todo: 'To do', prog: 'In Progress', rev: 'In Review', blk: 'Blocked', done: 'Done' };
+const byId = (id) => ISSUES.find((i) => i.id === id);
+const inCol = (c, repo) => ISSUES.filter((i) => i.col === c && (!repo || i.repo === repo));
+
+const BRIEFING = {
+  date: 'Wednesday 28 October', at: '06:02', model: 'deepseek-v4-flash', cost: '$0.04', dur: '24 s', turns: 2,
+  summary: 'Work is moving in three repos and <b>two sessions wait on you</b>. rustling-tulip is 11 of 18 toward vNext, with the ops views waiting on one ruling about Linear access. ops-tower 0.9 needs the account-store merge. yaat has an urgent taxi-following bug that nobody has started.',
+  sugs: [
+    { rank: 1, repo: 'yaat', issue: 'YAAT-316', title: 'Stop a FOLLOWG follower cutting across the field', why: 'Urgent correctness bug in taxi-following; the follow-on-graph branch (#881) already touches this code.', cur: 'ready' },
+    { rank: 2, repo: 'ops-tower', issue: 'OPS-401', title: 'Merge the own account store', why: 'The accounts cutover and rustling-tulip taking the accounts crate both wait on this merge.', cur: 'ready' },
+    { rank: 3, repo: 'rustling-tulip', issue: 'RT-135', title: 'Settle which Linear key the daemon reads with', why: 'The Plan board and this briefing move into rustling-tulip only once the daemon reads Linear.', cur: 'you' },
+    { rank: 4, repo: 'ops-tower', issue: 'OPS-352', title: 'Merge the gate chip colour fix', why: 'Checks are green and the session is asking to merge PR #118.', cur: 'live' },
+    { rank: 5, repo: 'rustling-tulip', issue: 'RT-451', title: 'Finish the sidebar repo sort', why: 'Specs were green last night; one docs line left.', cur: 'done' },
+  ],
+};
+
+/* ---------- Small pieces ---------- */
+const glyph = (g, cls = '') => `<span class="g ${g} ${cls}"></span>`;
+const rdot = (r) => `<i class="rdot" style="background:${REPOS[r]}" title="${r}"></i>`;
+const repo = (r) => `<span class="repo">${rdot(r)}${r}</span>`;
+function prio(p) {
+  if (p === 4) return '<span class="prio urgent" title="Urgent">!</span>';
+  return `<span class="prio" title="${['', 'Low', 'Medium', 'High'][p]}">${[1, 2, 3].map((i) => `<i class="${i <= p ? 'on' : ''}" style="height:${3 + i * 2.4}px"></i>`).join('')}</span>`;
+}
+const lst = (i, txt = true) => `<span class="lst"><span class="si ${i.st}"></span>${txt ? STT[i.st] : ''}</span>`;
+const cmIcon = '<svg viewBox="0 0 12 12"><path d="M2 2.5h8v5.5H5.5L3 10V8H2z"/></svg>';
+const cm = (n) => `<span class="cm" title="${n} comments">${cmIcon}${n}</span>`;
+const sessCol = (g) => ({ asking: 'c-ask', working: 'c-work', gate: 'c-work', idle: 't2' }[g]);
+const sessLine = (s) => `<span class="sess">${glyph(s.g, 'sm')}<span class="cut">${esc(s.label)}</span><span class="hsp"></span><b class="${sessCol(s.g)}" style="font-weight:600;white-space:nowrap">${s.state} · ${s.age}</b></span>`;
+
+function issueCard(i, sel) {
+  let r3 = '';
+  if (i.col === 'todo') r3 = '';
+  else if (i.sess) r3 = sessLine(i.sess);
+  else if (i.you) r3 = `<div class="r3"><span class="waittag">◆ ${i.wait}</span><span class="hsp"></span>${cm(i.cm)}</div>`;
+  else if (i.wait) r3 = `<div class="r3"><span class="c-dan" style="font-size:11.5px">${i.wait}</span><span class="hsp"></span>${cm(i.cm)}</div>`;
+  else if (i.landed) r3 = `<div class="r3"><span class="mono" style="color:var(--peri);font-size:11px">${i.sha}</span><span class="sub">landed ${i.landed} ago</span><span class="hsp"></span>${cm(i.cm)}</div>`;
+  const todo = i.col === 'todo';
+  return `<div class="icard ${sel ? 'sel' : ''} ${i.you || (i.sess && i.sess.g === 'asking') ? 'askc' : ''} ${i.col === 'done' ? 'donec' : ''}" data-issue="${i.id}">
+    <div class="r1"><span class="iss">${i.id}</span>${prio(i.prio)}${i.col === 'doing' ? lst(i) : ''}<span class="hsp"></span>${todo ? cm(i.cm) : ''}${rdot(i.repo)}</div>
+    <div class="tt">${esc(i.title)}</div>${r3}</div>`;
+}
+
+/* ---------- Issue detail (RT-135) ---------- */
+function detail(mode) {
+  const i = byId('RT-135');
+  const head = `<div class="dh"><span class="iss" style="font-size:12.5px">${i.id}</span>${lst(i)}${prio(i.prio)}<span class="sub" style="font-size:12px">High</span><span class="hsp"></span>
+      <span class="lnsync"><i></i>Linear · 1m ago</span>${mode === 'flyout' ? '<span class="sub" style="margin-left:6px">×</span>' : ''}</div>
+    <div class="dttl">${esc(i.title)}</div>
+    <div class="dmeta">${repo(i.repo)}<span>Wave 13 · Ops views</span><span class="sub">·</span><span>vNext+1</span><span class="sub">·</span><span>parent <span class="iss" style="font-weight:400;color:var(--text-2)">RT-56</span></span></div>`;
+  const ask = `<div class="box askbox"><div class="h">◆ Open question · waiting on you 2d</div>
+      <div class="qtx">Which Linear key should the daemon read with? ops-tower uses a read-only personal key today.</div>
+      <div class="qopts"><span>Reuse the same read-only key</span><span>A new read-only key, sealed in Credential Manager</span><span>A read-write key, so sessions can post start and land comments</span></div>
+      <div class="row2"><button class="btn pri">Answer in a session</button><button class="btn ghost">Open in Linear ↗</button></div></div>`;
+  const desc = `<div class="box"><div class="h">Description <span class="r sub">excerpt</span></div><div class="desc">
+      <p>The daemon polls Linear for the teams in the repo list and serves the board to every client, so the Plan board and the briefing stop depending on ops-tower.</p>
+      <p>It parses the <code>start</code>, <code>land</code> and <code>block</code> status comments into each card's note, and maps each issue to the live session whose branch names it.</p></div>
+      <div class="sub" style="font-size:11.5px">Read all in Linear ↗</div></div>`;
+  const cmts = `<div class="box"><div class="h">Comments <span class="r sub">${i.cm} · newest first</span></div>
+      <div class="cmt"><span class="kind block">block</span><span class="t2">Waits on the owner's ruling on the key</span><span class="age">2d</span></div>
+      <div class="cmt"><span class="kind start">start</span><span class="t2">Explorer mapped ops-tower's Linear poller</span><span class="age">3d</span></div>
+      <div class="cmt"><span class="kind note">note</span><span class="t2">Poll every 60 s; back off on 429</span><span class="age">4d</span></div></div>`;
+  const subs = `<div class="box"><div class="h">Sub-issues <span class="r sub">1 of 3 done</span></div>
+      <div class="subi"><span class="lst"><span class="si done"></span></span><span class="iss">RT-136</span><span class="cut t2">Wire types for board columns and cards</span></div>
+      <div class="subi"><span class="lst"><span class="si todo"></span></span><span class="iss">RT-137</span><span class="cut t2">Parse status comments into card notes</span></div>
+      <div class="subi"><span class="lst"><span class="si todo"></span></span><span class="iss">RT-138</span><span class="cut t2">Link Doing cards to their live session</span></div></div>`;
+  const launch = `<div class="box launch"><div class="h">Start a session</div>
+      <div class="fld"><span class="k">Repo</span><span class="sel2">${rdot('rustling-tulip')} rustling-tulip</span>
+        <span class="k">Where</span><span class="sel2 mono">new worktree · feat/rt-135-linear</span>
+        <span class="k">Agent</span><span class="sel2">Claude · Opus</span></div>
+      <div class="prompt">/nextup RT-135<span class="cur"></span></div>
+      <div class="row2"><button class="btn go">Start session</button><button class="btn ghost">Copy prompt</button><span class="sub" style="font-size:11.5px;align-self:center">Opens in a new tab, linked to RT-135</span></div></div>`;
+  if (mode === 'drawer') {
+    return `<div class="cdrawer det"><div>${head}${ask}</div><div>${desc}${cmts}</div><div>${launch}</div></div>`;
+  }
+  if (mode === 'flyout') return `<div class="det">${head}${ask}${launch}${cmts}</div>`;
+  return `<div class="det">${head}${ask}${launch}${desc}${cmts}${subs}</div>`;
+}
+
+/* ---------- Briefing ---------- */
+function curCell(s) {
+  const i = byId(s.issue);
+  if (s.cur === 'live') return `<span class="cur">${glyph(i.sess.g, 'sm')}<b class="${sessCol(i.sess.g)}" style="font-weight:600">${i.sess.state} · ${i.sess.age}</b><span class="sub cut">in a session</span></span>`;
+  if (s.cur === 'done') return `<span class="cur">${lst(i)}<span class="sub">landed ${i.landed} ago</span></span>`;
+  if (s.cur === 'you') return `<span class="cur">${lst(i)}<span class="waittag">◆ your ruling</span></span>`;
+  return `<span class="cur">${lst(i)}<span class="sub">no session</span></span>`;
+}
+function actCell(s) {
+  if (s.cur === 'live') return '<button class="btn sm">Go to session</button>';
+  if (s.cur === 'done') return '<span class="sub" style="font-size:11.5px">Nothing to do</span>';
+  return '<button class="btn sm ghost">Prompt</button><button class="btn sm go">Start</button>';
+}
+function briefingRows(list) {
+  return `<div class="bt">${list.map((s) => `<div class="br ${s.cur === 'done' ? 'dim' : ''}">
+    <span class="rk">${s.rank}</span>${repo(s.repo)}<span class="il" style="display:inline-flex;gap:6px;align-items:center"><span class="iss">${s.issue}</span>${prio(byId(s.issue).prio)}</span>
+    <div class="two"><span class="ttl cut">${esc(s.title)}</span><span class="why cut">${esc(s.why)}</span></div>${curCell(s)}<div class="act">${actCell(s)}</div></div>`).join('')}</div>`;
+}
+function briefingHead() {
+  return `<span class="h">Briefing</span><b>${BRIEFING.date}</b><span class="sub" style="font-size:12px">written ${BRIEFING.at} · ${BRIEFING.model} through the Claude CLI · ${BRIEFING.cost} · ${BRIEFING.dur}</span>`;
+}
+
+/* ---------- Shell ---------- */
+const ICON = {
+  sessions: '<path d="M4 6h12M4 10h12M4 14h12"/>',
+  dash: '<rect x="3" y="3" width="6" height="6" rx="1"/><rect x="11" y="3" width="6" height="4" rx="1"/><rect x="11" y="9" width="6" height="8" rx="1"/><rect x="3" y="11" width="6" height="6" rx="1"/>',
+  plan: '<rect x="3" y="3.5" width="4" height="13" rx="1"/><rect x="8.5" y="3.5" width="4" height="8" rx="1"/><rect x="14" y="3.5" width="3" height="10.5" rx="1"/>',
+  needs: '<path d="M3 11l2.5-6h9L17 11v5H3z"/><path d="M3 11h4l1 2h4l1-2h4"/>',
+  scm: '<circle cx="6" cy="5" r="2"/><circle cx="6" cy="15" r="2"/><circle cx="14" cy="8" r="2"/><path d="M6 7v6M14 10c0 3-4 3-8 3"/>',
+  recover: '<circle cx="10" cy="10" r="7"/><path d="M10 6v4l3 2"/>',
+  settings: '<path d="M4 6h8M15 6h1M4 14h2M9 14h7"/><circle cx="13.5" cy="6" r="1.6"/><circle cx="7.5" cy="14" r="1.6"/>',
+};
+const svg = (k, w = 18) => `<svg viewBox="0 0 20 20" width="${w}" height="${w}">${ICON[k]}</svg>`;
+function rail(on) {
+  const it = (k, title, badge = '', cls = '') => `<div class="ic ${on === k ? 'on' : ''} ${cls}" title="${title}">${svg(k)}${badge}</div>`;
+  return `<nav class="rail">${it('sessions', 'Sessions')}${it('dash', 'Dashboard', '<span class="n ask">2</span>')}${it('plan', 'Plan', '<span class="n ask">1</span>', 'new')}${it('needs', 'Needs you')}${it('scm', 'Source control', '<span class="n">5</span>')}
+    <div class="sp"></div>${it('recover', 'Recover sessions')}<div class="ic" style="margin-bottom:6px">${svg('settings')}</div></nav>`;
+}
+function tabbar(active) {
+  const t = (k, inner) => `<div class="t ${active === k ? 'on' : ''}">${inner}<span class="x">×</span></div>`;
+  return `<div class="tabbar">${t('dash', `${svg('dash', 13)}Dashboard<span class="badge">2</span>`)}
+    ${active === 'plan' ? t('plan', `${svg('plan', 13)}Plan<span class="badge">1</span>`) : ''}
+    ${t('tulip', '<span class="cnt">◉ 2/3</span>tulip')}${t('ops', '<span class="cnt">◉ 1/3</span>ops-tower')}${t('yaat', '<span class="cnt">◉ 1/2</span>yaat')}<div class="plus">+</div></div>`;
+}
+function footer(where) {
+  return `<div class="footer"><span class="pill">Connections</span><span class="pill"><span class="dot"></span>daemon · 8 sessions · :4242</span>
+    <span><span class="c-ask">◆</span> 2 need you</span><span><span class="c-work">◉</span> 3 working</span><span><span class="c-wait">○</span> 1 waiting</span>
+    <span class="sp"></span><span class="lnsync"><i></i>Linear · 1m ago</span><span>${where}</span></div>`;
+}
+
+/* ---------- Lane A: rail panel ---------- */
+function laneA() {
+  const sug = BRIEFING.sugs.map((s) => {
+    const i = byId(s.issue);
+    const right = s.cur === 'live' ? '<button class="btn sm">Go to</button>' : s.cur === 'done' ? '<span class="sub" style="font-size:11px">Done</span>' : '<button class="btn sm go">Start</button>';
+    return `<div class="psug ${s.cur === 'done' ? 'dim' : ''}"><span class="rk">${s.rank}</span><div class="two"><span class="cut" style="font-weight:500">${esc(s.title)}</span>
+      <span class="l2">${rdot(s.repo)}<span class="iss" style="font-weight:400;color:var(--text-2);font-size:11px">${s.issue}</span>${lst(i)}${s.cur === 'you' ? '<span class="waittag">◆ you</span>' : ''}</span></div>${right}</div>`;
+  }).join('');
+  const prow = (i, sel) => {
+    const lead = i.sess ? glyph(i.sess.g, 'sm') : lst(i, false);
+    const age = i.sess ? `<span class="age ${sessCol(i.sess.g)}">${i.sess.state === 'Working' ? '' : i.sess.state + ' · '}${i.sess.age}</span>` : i.landed ? `<span class="age">${i.landed}</span>` : `<span class="age">${rdot(i.repo)}</span>`;
+    let ln2 = '';
+    if (i.sess) ln2 = `<span class="ln2">${rdot(i.repo)}<span class="cut">${esc(i.sess.label)}</span></span>`;
+    else if (i.wait) ln2 = `<span class="ln2">${rdot(i.repo)}<span class="${i.you ? 'c-ask' : 'c-dan'} cut">${i.wait}</span><span class="hsp"></span>${cm(i.cm)}</span>`;
+    return `<div class="prow ${sel ? 'sel' : ''} ${i.you ? 'askn' : ''}">${lead}<span class="iss">${i.id}</span><span class="cut">${esc(i.title)}</span>${age}${ln2}</div>`;
+  };
+  const sec = (h, n, cls = '', extra = '') => `<div class="sec ${cls}"><span class="h">${h}</span><span class="n">${n}</span><span class="hsp"></span>${extra}</div>`;
+  const panel = `<aside class="panel">
+    <div class="ph"><b>Plan</b><span class="sel2" style="margin-left:4px">All repos</span><span class="hsp"></span><span class="lnsync"><i></i>1m ago</span></div>
+    <div class="scroll">
+      <div class="sec"><span class="h">Briefing</span><span class="n">06:02 · 5 suggestions</span><span class="hsp"></span><button class="btn sm ghost">Run again</button></div>
+      <div class="bsum2">Two sessions wait on you. rustling-tulip is 11 of 18 toward vNext; ops-tower needs the account-store merge; yaat has an urgent taxi bug nobody has started.</div>
+      ${sug}
+      <div class="divider"></div>
+      ${sec('Needs your answer', 1, 'ask')}${prow(byId('RT-135'), true)}
+      ${sec('Doing', COUNTS.doing)}${inCol('doing').map((i) => prow(i)).join('')}
+      ${sec('Blocked', 2)}${inCol('blocked').filter((i) => !i.you).map((i) => prow(i)).join('')}
+      ${sec('Next up', COUNTS.todo, '', '<span class="sub" style="font-size:11px">Show all</span>')}${inCol('todo').slice(0, 3).map((i) => prow(i)).join('')}
+      ${sec('Done · 7 d', COUNTS.done, '', '<span class="sub" style="font-size:11px">Show</span>')}
+    </div></aside>`;
+  const term = `<div class="term">
+    <div class="dim">rustling-tulip · feat/rt-444-summary-types</div>
+    <div><span class="ac">&gt;</span> /nextup RT-444</div>
+    <div><span class="gr">●</span> Read docs/plans/MAIN.md and the RT-444 design file</div>
+    <div><span class="gr">●</span> Landed the summary types; briefed the daemon side</div>
+    <div><span class="bl">●</span> Task(RT-444 summary types implementer)</div>
+    <div class="dim">&nbsp;&nbsp;⎿ Running Bash: pwsh tools/gate.ps1 run --slot heavy -- cargo nextest run -p protocol</div>
+    <div class="dim">&nbsp;&nbsp;⎿ +86 −4 crates/protocol/src/lib.rs</div>
+    <div><span class="bl">●</span> Bash(gate run --log .tmp/clippy.log -- cargo clippy)</div>
+    <div class="dim">&nbsp;&nbsp;⎿ Running in the background</div>
+    <div style="margin-top:8px"><span class="am">✻</span> Waiting on subagent… <span class="dim">(6m · esc to interrupt)</span></div>
+    <div class="box2">&gt; </div>
+    <div class="dim">  ⏵⏵ accept edits on · 46% context</div></div>`;
+  return { cls: 'withpanel', html: rail('plan') + panel + `<div class="main">${tabbar('tulip')}<div class="content">${term}<div class="flyout">${detail('flyout')}</div></div></div>` + footer('tulip') };
+}
+
+/* ---------- Lane B: Plan tab ---------- */
+function laneB() {
+  const hdr = `<div class="phdr"><h1>Plan</h1>
+    <span class="rpill on">All</span>${Object.keys(REPOS).map((r) => `<span class="rpill">${rdot(r)}${r}</span>`).join('')}
+    <span class="hsp"></span><span class="cpill ask">◆ <b>1</b> needs your answer</span><span class="tog">Active only<i></i></span><span class="btn ghost">Backlog 118</span><span class="lnsync"><i></i>Linear · 1m ago</span></div>`;
+  const brf = `<div class="brf"><div class="bh">${briefingHead()}<span class="hsp"></span><button class="btn ghost">Prompt</button><button class="btn">Run again</button><span class="sub" style="font-size:12px">Hide ˄</span></div>
+    <div class="bsum">${BRIEFING.summary}</div>${briefingRows(BRIEFING.sugs)}</div>`;
+  const col = ([c, name]) => {
+    const list = c === 'todo' ? inCol(c).slice(0, 7) : inCol(c);
+    let cards = '';
+    if (c === 'todo') {
+      let last = '';
+      for (const i of list) {
+        const key = i.repo + i.project;
+        if (key !== last) { cards += `<div class="wave">${rdot(i.repo)}<b>${i.repo}</b><span class="cut">· ${esc(i.project)}</span></div>`; last = key; }
+        cards += issueCard(i);
+      }
+    } else cards = list.map((i) => issueCard(i, i.id === 'RT-135')).join('');
+    const more = COUNTS[c] - list.length;
+    if (more > 0) cards += `<div class="more">${more} more · Show all</div>`;
+    return `<div class="col ${c}"><div class="ch"><b>${name}</b><span class="n">${COUNTS[c]}</span></div><div class="cards">${cards}</div></div>`;
+  };
+  const board = `<div class="board">${COLS.map(col).join('')}</div>`;
+  const body = `<div class="plan"><div class="left">${hdr}${brf}${board}</div><div class="pane">${detail('pane')}</div></div>`;
+  return { cls: '', html: rail('plan') + `<div class="main">${tabbar('plan')}<div class="content">${body}</div></div>` + footer('Plan') };
+}
+
+/* ---------- Lane C: inside the Dashboard ---------- */
+function laneC() {
+  const hdr = `<div class="hdr"><h1>Dashboard</h1><div class="counts"><span class="cpill ask">${glyph('asking')}<b>2</b> need you</span><span class="cpill">${glyph('working')}<b>3</b> working</span><span class="cpill">${glyph('idle')}<b>1</b> idle</span><span class="cpill"><b>2</b> done</span></div>
+    <div class="hsp"></div><div class="figs"><span>Today <b>$40.40</b> <span class="sub">API-equiv</span></span><span><b>14</b> commits</span><span><b>5</b> issues Done</span><span class="lnsync"><i></i>Linear · 1m ago</span></div><div class="seg"><span class="on">By status</span><span>By repo</span></div></div>`;
+  const strip = `<div class="brstrip"><span class="h">Briefing</span><span class="sub">06:02</span>${BRIEFING.sugs.slice(0, 3).map((s) => `<span class="chipb"><b style="color:var(--subtle);font-weight:600">${s.rank}</b>${rdot(s.repo)}<span class="iss">${s.issue}</span><span class="cut">${esc(s.title)}</span></span>`).join('')}<span class="sub">+2</span><span class="hsp"></span><button class="btn sm ghost">Open briefing</button><button class="btn sm">Run again</button></div>`;
+  const sess = ISSUES.filter((i) => i.sess);
+  const srow = (i) => `<div class="srow ${i.sess.g === 'asking' ? 'askrow' : ''}">${glyph(i.sess.g)}<span class="cut" style="font-weight:600">${esc(i.sess.label)}</span>
+    <span class="il" style="display:flex;gap:6px;align-items:center;min-width:0"><span class="iss">${i.id}</span>${lst(i)}</span><span class="cut t2">${repo(i.repo)} · ${esc(i.title)}</span><span class="num ${sessCol(i.sess.g)}">${i.sess.state} · ${i.sess.age}</span></div>`;
+  const asks = sess.filter((i) => i.sess.g === 'asking'), rest = sess.filter((i) => i.sess.g !== 'asking');
+  const sessions = `<div class="grp ask"><span class="h">Needs you</span><span class="n">${asks.length}</span></div>${asks.map(srow).join('')}
+    <div class="grp"><span class="h">Working and idle</span><span class="n">${rest.length}</span></div>${rest.map(srow).join('')}
+    <div class="grp"><span class="h">Done</span><span class="n">2</span><span class="sub" style="font-size:11px">Show</span></div>`;
+  const block = (r) => {
+    const cell = (c, name, max) => {
+      const list = inCol(c, r);
+      return `<div><div class="ch"><span class="h">${name}</span><span class="sub" style="font-size:11px">${c === 'todo' ? { 'rustling-tulip': 22, 'ops-tower': 11, yaat: 6, skyline: 2 }[r] : list.length}</span></div>${list.slice(0, max).map((i) => {
+        const tail = i.sess ? `<span class="${sessCol(i.sess.g)}" style="white-space:nowrap;font-size:11.5px">${i.sess.state}</span>` : i.landed ? `<span class="sub" style="font-size:11px">${i.landed}</span>` : '';
+        return `<div class="mini ${i.id === 'RT-135' ? 'sel' : ''} ${i.you ? 'askm' : ''}">${i.sess ? glyph(i.sess.g, 'sm') : lst(i, false)}<span class="iss">${i.id}</span><span class="cut t2">${esc(i.title)}</span><span class="hsp"></span>${tail}</div>`;
+      }).join('') || '<span class="sub" style="font-size:11.5px">—</span>'}</div>`;
+    };
+    return `<div class="prepo"><div class="rh">${rdot(r)}<b>${r}</b><span class="sub" style="font-size:12px">${inCol('doing', r).length} doing · ${inCol('blocked', r).length} blocked</span><span class="hsp"></span><span class="sub" style="font-size:11.5px">Show all</span></div>
+      <div class="cols4">${cell('doing', 'Doing', 3)}${cell('blocked', 'Blocked', 2)}${cell('todo', 'Next up', 2)}${cell('done', 'Done · 7 d', 2)}</div></div>`;
+  };
+  const plan = `<div class="grp" style="padding-top:14px"><span class="h" style="color:var(--text)">Plan</span><span class="n">4 repos</span><span class="hsp"></span><span class="cpill ask">◆ <b>1</b> needs your answer</span></div>
+    ${block('rustling-tulip')}${detail('drawer')}${block('ops-tower')}${block('yaat')}${block('skyline')}`;
+  return { cls: '', html: rail('dash') + `<div class="main">${tabbar('dash')}<div class="content"><div class="dash" id="dashc">${hdr}${strip}${sessions}${plan}</div></div></div>` + footer('Dashboard') };
+}
+
+/* ---------- States ---------- */
+function states() {
+  const st = (label, note, body) => `<div class="st"><div class="sl"><b>${label}</b><span class="sub">${note}</span></div><div class="sb">${body}</div></div>`;
+  const dimCards = ['RT-444', 'OPS-347'].map((id) => issueCard(byId(id))).join('');
+  const sugRow = (s, extra = '') => `<div class="br" style="border-top:1px solid var(--line)"><span class="rk">${s.rank}</span><div class="two"><span class="ttl cut">${esc(s.title)}</span><span class="why cut">${repo(s.repo)} · ${s.issue}</span></div><div class="act">${extra}</div></div>`;
+  const out = [
+    st('Empty', 'no Linear key yet', `<div class="empty">${svg('plan', 30)}<div class="big">Linear isn't connected</div><div style="font-size:12px;line-height:1.45">The Plan board reads the teams in your repo list with a read-only Linear key.</div><button class="btn go">Add a key in Settings</button></div>`),
+    st('Error', 'Linear read failed', `<div class="banner bad"><span class="c-dan">●</span><div class="tx"><b>Couldn't read Linear</b> · 401, the key was revoked.<br><span class="t2">Showing the board from 14:18, 14m ago.</span></div><button class="btn sm">Retry</button></div><div class="faded" style="display:flex;flex-direction:column;gap:6px">${dimCards}</div>`),
+    st('Writing', 'briefing in progress', `<div style="display:flex;align-items:center;gap:8px"><span class="spin"></span><b>Writing today's briefing</b><span class="hsp"></span><span class="sub">18 s</span></div><div class="t2" style="font-size:12px">Reading 4 repos' plans and their git logs since yesterday.</div>
+      <div class="skel" style="width:92%"></div><div class="skel" style="width:78%"></div><div class="skel" style="width:85%"></div><div class="skel" style="width:60%"></div><div class="sub" style="font-size:11.5px">The 06:02 briefing stays until this one is done.</div>`),
+    st('Kept', 'a rerun failed', `<div class="banner warn"><span class="c-ask">◆</span><div class="tx"><b>Run again failed at 09:14</b>: the Claude CLI exited 1, login expired. Kept the 06:02 briefing.</div><button class="btn sm">Run again</button></div>
+      <div class="bt">${sugRow(BRIEFING.sugs[0], '<button class="btn sm go">Start</button>')}${sugRow(BRIEFING.sugs[1], '<button class="btn sm go">Start</button>')}</div>`),
+    st('Not yet', 'nothing written today', `<div class="empty"><div class="big">No briefing yet today</div><div style="font-size:12px;line-height:1.45">The next one runs at 06:00. Yesterday's is still here.</div><div class="row2" style="display:flex;gap:6px"><button class="btn go">Run now</button><button class="btn ghost">Yesterday's</button></div></div>`),
+    st('Needs you', 'starting from a suggestion', `<div style="display:flex;align-items:center;gap:7px"><span class="rk sub" style="font-weight:600">1</span>${rdot('yaat')}<span class="iss">YAAT-316</span><span class="cut" style="font-weight:500">Stop a FOLLOWG follower cutting across the field</span></div>
+      <div class="prompt" style="margin:0;max-height:84px;overflow:hidden">YAAT-316 is To do in X:\\dev\\yaat. Work the FOLLOWG
+follower and the taxi graph it walks; check
+feat/follow-on-graph (#881) first. Write the
+failing test first.</div>
+      <div class="banner warn" style="flex-direction:column;gap:6px"><div class="tx"><b>Start in yaat?</b> <span class="t2">new worktree · <span class="mono">fix/yaat-316-followg-hold</span></span></div><div style="display:flex;gap:6px"><button class="btn sm go">Start</button><button class="btn sm ghost">Edit prompt</button><button class="btn sm ghost">Cancel</button></div></div>`),
+    st('Moving', 'suggestions already under way', `<div class="bt">${sugRow(BRIEFING.sugs[3], `<span class="cur">${glyph('asking', 'sm')}<b class="c-ask">Permission · 1m</b></span><button class="btn sm">Go to session</button>`)}
+      <div class="br dim" style="border-top:1px solid var(--line)"><span class="rk">5</span><div class="two"><span class="ttl cut">${esc(BRIEFING.sugs[4].title)}</span><span class="why cut">${repo('rustling-tulip')} · RT-451</span></div><div class="act"><span class="cur">${lst(byId('RT-451'))}<span class="sub">12m ago</span></span></div></div></div>
+      <div class="sub" style="font-size:11.5px;line-height:1.45">A suggestion follows its issue: a live session swaps Start for Go to session, and a landed one fades.</div>`),
+    st('Settings', 'the Briefing tab in Settings',`<div class="form"><span class="k">Daily run</span><span style="display:flex;gap:8px;align-items:center"><span class="tog">On<i></i></span><span class="sel2 mono">06:00</span></span>
+      <span class="k">Written by</span><span class="sel2">Claude CLI · deepseek-v4-flash</span>
+      <span class="k">Repos</span><span class="t2">The 4 with a Linear team</span>
+      <span class="k">Last 7 days</span><span class="t2">7 runs · $0.27</span>
+      <span class="k">Linear key</span><span class="t2">read-only · <span class="c-wait">connected</span></span></div>`),
+  ];
+  document.getElementById('sgrid').innerHTML = out.join('');
+}
+
+/* ---------- Wiring ---------- */
+const LANES = { a: laneA, b: laneB, c: laneC };
+function show(l) {
+  const { cls, html } = LANES[l]();
+  const app = document.getElementById('app');
+  app.className = 'app ' + cls;
+  app.innerHTML = html;
+  for (const t of document.querySelectorAll('.lane-tab')) t.classList.toggle('on', t.dataset.lane === l);
+  history.replaceState(null, '', '#' + l);
+}
+document.getElementById('rec-' + RECOMMENDED).hidden = false;
+states();
+document.getElementById('lanes').addEventListener('click', (e) => { const t = e.target.closest('.lane-tab'); if (t) show(t.dataset.lane); });
+show((location.hash || '#' + RECOMMENDED).slice(1) || RECOMMENDED);
+</script>
+</body>
+</html>

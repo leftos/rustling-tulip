@@ -1,0 +1,722 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Accounts mock</title>
+<style>
+@font-face { font-family: "Geist"; font-weight: 400; src: url("../../../../../apps/native/assets/fonts/Geist/Geist-Regular.ttf"); }
+@font-face { font-family: "Geist"; font-weight: 500; src: url("../../../../../apps/native/assets/fonts/Geist/Geist-Medium.ttf"); }
+@font-face { font-family: "Geist"; font-weight: 600; src: url("../../../../../apps/native/assets/fonts/Geist/Geist-SemiBold.ttf"); }
+@font-face { font-family: "Geist"; font-weight: 700; src: url("../../../../../apps/native/assets/fonts/Geist/Geist-Bold.ttf"); }
+@font-face { font-family: "JBM"; font-weight: 400; src: url("../../../../../apps/native/assets/fonts/JetBrainsMono/JetBrainsMono-Regular.ttf"); }
+@font-face { font-family: "JBM"; font-weight: 700; src: url("../../../../../apps/native/assets/fonts/JetBrainsMono/JetBrainsMono-Bold.ttf"); }
+
+/* Tokens: apps/native/src/palette.rs, as in the approved Dashboard mock */
+:root {
+  --ground: #111013; --sunken: #0b0a0d; --surface: #161519; --raised: #1b1a1f; --chip: #232129; --hover: #2c2a33;
+  --line: #2a2830; --line-strong: #3a3742;
+  --text: #ede9e4; --text-2: #a7a2ad; --subtle: #8c8794; --faint: #6e6a77;
+  --accent: #f07a62; --on-accent: #1c100d;
+  --working: #6ca6ff; --asking: #f6bc4e; --on-asking: #2a1b00; --waiting: #4fc89d; --danger: #f26d6d;
+  --lilac: #c9b8ff; --ochre: #d9a15c; --rose: #e7849b; --peri: #8fb3f0;
+  --ask-wash: rgba(246, 188, 78, 0.07); --danger-wash: rgba(242, 109, 109, 0.10);
+  --mono: "JBM", ui-monospace, monospace;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: #08070a; color: var(--text); font-family: "Geist", system-ui, sans-serif; font-size: 13px; }
+button { font: inherit; color: inherit; }
+
+/* Lane and state switchers, outside the app frame */
+.lanes, .ctrl { display: flex; gap: 6px; align-items: stretch; padding: 10px 16px 0; width: 1600px; margin: 0 auto; }
+.ctrl { padding: 8px 16px 10px; align-items: center; }
+.lanes .ttl { font-weight: 600; color: var(--text-2); align-self: center; margin-right: 8px; white-space: nowrap; }
+.lane-tab { flex: 1; text-align: left; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 7px 10px; cursor: pointer; }
+.lane-tab b { display: block; font-weight: 600; }
+.lane-tab span { color: var(--subtle); font-size: 12px; }
+.lane-tab .worst { display: block; color: var(--faint); margin-top: 2px; }
+.lane-tab.on { border-color: var(--accent); background: var(--raised); }
+.rec { display: inline-block; margin-left: 6px; font-size: 10.5px; font-weight: 600; color: var(--on-accent) !important; background: var(--accent); padding: 1px 6px; border-radius: 3px; vertical-align: 1px; }
+.ctrl .lb { color: var(--subtle); font-size: 12px; margin: 0 4px 0 10px; }
+.ctrl .lb:first-child { margin-left: 0; }
+.pick { background: var(--surface); border: 1px solid var(--line); border-radius: 5px; padding: 4px 10px; font-size: 12px; cursor: pointer; color: var(--text-2); }
+.pick.on { border-color: var(--accent); color: var(--text); background: var(--raised); }
+
+/* App frame */
+.app { position: relative; width: 1600px; height: 1000px; margin: 0 auto 24px; display: grid; grid-template-columns: 48px 1fr; grid-template-rows: 1fr 24px; background: var(--ground); border: 1px solid var(--line); overflow: hidden; }
+.rail { background: var(--sunken); border-right: 1px solid var(--line); display: flex; flex-direction: column; align-items: center; padding-top: 6px; gap: 6px; }
+.rail .ic { width: 34px; height: 34px; border-radius: 6px; display: grid; place-items: center; color: var(--text-2); position: relative; }
+.rail .ic.on { background: var(--chip); color: var(--text); box-shadow: inset 2px 0 0 var(--accent); }
+.rail .ic .n { position: absolute; top: 2px; right: 2px; font-size: 9px; background: var(--chip); color: var(--text-2); border-radius: 6px; padding: 0 3px; }
+.rail .ic .n.ask { background: var(--asking); color: var(--on-asking); font-weight: 700; }
+.rail .sp { flex: 1; }
+.rail svg { width: 18px; height: 18px; stroke: currentColor; fill: none; stroke-width: 1.6; }
+.main { display: grid; grid-template-rows: 38px 1fr; min-width: 0; min-height: 0; }
+.tabbar { background: var(--surface); border-bottom: 1px solid var(--line); display: flex; align-items: stretch; }
+.tabbar .t { display: flex; align-items: center; gap: 7px; padding: 0 14px; border-right: 1px solid var(--line); color: var(--text-2); font-weight: 500; }
+.tabbar .t.on { color: var(--text); background: var(--ground); box-shadow: inset 0 2px 0 var(--accent); }
+.tabbar .t .x { color: var(--faint); margin-left: 6px; }
+.tabbar .t .cnt { font-size: 11px; color: var(--working); }
+.tabbar .t .badge { font-size: 10.5px; font-weight: 700; background: var(--asking); color: var(--on-asking); border-radius: 3px; padding: 0 5px; }
+.tabbar .plus { padding: 0 14px; display: flex; align-items: center; color: var(--subtle); font-size: 16px; }
+.footer { grid-column: 1 / -1; background: var(--sunken); border-top: 1px solid var(--line); display: flex; align-items: center; gap: 14px; padding: 0 10px; font-size: 11.5px; color: var(--text-2); }
+.footer .pill { border: 1px solid var(--line-strong); border-radius: 10px; padding: 0 8px; line-height: 17px; }
+.footer .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #3fb96a; margin-right: 5px; }
+.footer .sp { flex: 1; }
+.content { overflow: hidden; min-height: 0; position: relative; }
+#overlay { display: contents; }
+
+/* Background: two terminal panes */
+.panes { display: grid; grid-template-columns: 1fr 1fr; height: 100%; }
+.pane { border-right: 1px solid var(--line); display: grid; grid-template-rows: 28px 1fr; min-width: 0; }
+.pane:last-child { border-right: 0; }
+.pane .ph { display: flex; align-items: center; gap: 8px; padding: 0 12px; border-bottom: 1px solid var(--line); background: var(--surface); font-size: 12px; color: var(--text-2); }
+.pane .ph b { color: var(--text); font-weight: 600; }
+.term { font-family: var(--mono); font-size: 12.5px; line-height: 1.55; padding: 10px 14px; color: #d8d3cc; white-space: pre; overflow: hidden; }
+.term .td { color: var(--faint); } .term .tg { color: var(--waiting); } .term .to { color: var(--accent); } .term .tb { color: var(--working); }
+.term .box { display: inline-block; border: 1px solid var(--line-strong); border-radius: 4px; padding: 2px 8px; color: var(--text-2); }
+
+/* Status glyphs */
+.g { display: inline-block; flex: none; width: 12px; height: 12px; border-radius: 50%; position: relative; vertical-align: -1px; }
+.g.working { border: 2px solid var(--working); }
+.g.working::after { content: ""; position: absolute; inset: 2px; border-radius: 50%; background: var(--working); }
+.g.asking { border-radius: 3px; background: var(--asking); }
+.g.asking::after { content: "!"; position: absolute; inset: 0; color: var(--on-asking); font-size: 9.5px; font-weight: 700; text-align: center; line-height: 12px; }
+.g.idle { width: 8px; height: 8px; margin: 2px; background: var(--faint); }
+
+/* Shared bits */
+.mono { font-family: var(--mono); font-size: 11.5px; }
+.sub { color: var(--subtle); }
+.t2 { color: var(--text-2); }
+.cut { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.c-ask { color: var(--asking); } .c-work { color: var(--working); } .c-wait { color: var(--waiting); } .c-dan { color: var(--danger); } .c-faint { color: var(--faint); }
+.h { font-size: 10.5px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--subtle); }
+.btn { background: var(--chip); border: 1px solid var(--line-strong); border-radius: 5px; padding: 3px 9px; font-size: 12px; cursor: pointer; white-space: nowrap; }
+.btn.sm { padding: 1px 8px; font-size: 11.5px; }
+.btn.pri { background: var(--accent); color: var(--on-accent); border-color: var(--accent); font-weight: 600; }
+.btn.ghost { background: transparent; }
+.btn[disabled] { opacity: .45; cursor: default; }
+.lnk { color: var(--peri); cursor: pointer; white-space: nowrap; }
+
+/* Usage bars */
+.ub { position: relative; display: inline-block; height: 6px; background: var(--chip); border-radius: 3px; overflow: visible; vertical-align: 1px; flex: none; }
+.ub > i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px; background: var(--peri); }
+.ub > i.warn { background: var(--asking); }
+.ub > i.hot { background: var(--danger); }
+.ub > i.dim { background: var(--faint); }
+.ub > em { position: absolute; top: -3px; bottom: -3px; width: 2px; margin-left: -1px; background: var(--text); border-radius: 1px; opacity: .8; }
+.pct { font-variant-numeric: tabular-nums; font-weight: 600; width: 36px; text-align: right; flex: none; }
+.pct.warn { color: var(--asking); } .pct.hot { color: var(--danger); }
+.wl { color: var(--subtle); font-size: 11px; width: 18px; flex: none; }
+.rs { color: var(--text-2); font-size: 11.5px; }
+.rs .run { color: var(--asking); font-weight: 600; }
+.rs .run.hot { color: var(--danger); }
+
+/* Badges, switches, checkboxes, inputs */
+.inuse { display: inline-flex; align-items: center; gap: 4px; font-size: 10.5px; font-weight: 700; color: var(--on-accent); background: var(--accent); border-radius: 3px; padding: 0 6px; line-height: 16px; white-space: nowrap; }
+.tag { display: inline-flex; align-items: center; gap: 4px; font-size: 10.5px; font-weight: 600; border-radius: 3px; padding: 0 6px; line-height: 16px; white-space: nowrap; border: 1px solid var(--line-strong); color: var(--text-2); }
+.tag.dan { color: var(--danger); background: var(--danger-wash); border-color: rgba(242,109,109,.35); }
+.tag.ask { color: var(--asking); background: var(--ask-wash); border-color: rgba(246,188,78,.35); }
+.tag.cr { color: var(--asking); border-color: rgba(246,188,78,.45); }
+.sw { display: inline-block; width: 28px; height: 16px; border-radius: 8px; background: var(--chip); border: 1px solid var(--line-strong); position: relative; flex: none; vertical-align: -3px; }
+.sw::after { content: ""; position: absolute; top: 2px; left: 2px; width: 10px; height: 10px; border-radius: 50%; background: var(--subtle); }
+.sw.on { background: var(--accent); border-color: var(--accent); }
+.sw.on::after { left: 14px; background: var(--on-accent); }
+.sw.off-dis { opacity: .4; }
+.cb { display: inline-grid; place-items: center; width: 15px; height: 15px; border: 1px solid var(--line-strong); border-radius: 3px; background: var(--sunken); flex: none; font-size: 11px; font-weight: 700; color: var(--on-accent); vertical-align: -3px; }
+.cb.on { background: var(--accent); border-color: var(--accent); }
+.cb.on::after { content: "✓"; }
+.cb.dis { opacity: .35; }
+.inp { display: inline-flex; align-items: center; gap: 6px; background: var(--sunken); border: 1px solid var(--line-strong); border-radius: 5px; padding: 3px 8px; font-size: 12.5px; min-width: 0; }
+.inp.num { font-family: var(--mono); font-size: 12px; width: 70px; justify-content: space-between; }
+.inp.num .u { color: var(--subtle); }
+.seg { display: inline-flex; background: var(--raised); border: 1px solid var(--line); border-radius: 6px; padding: 2px; }
+.seg span { padding: 3px 11px; border-radius: 4px; font-size: 12.5px; color: var(--text-2); }
+.seg span.on { background: var(--chip); color: var(--text); font-weight: 600; }
+
+/* Footer chip */
+.achip { display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--line-strong); border-radius: 10px; padding: 0 9px 0 7px; line-height: 17px; color: var(--text-2); cursor: pointer; white-space: nowrap; }
+.achip b { color: var(--text); font-weight: 600; }
+.achip .ub { width: 30px; height: 5px; }
+.achip .p { font-variant-numeric: tabular-nums; }
+.achip.open { background: var(--chip); border-color: var(--subtle); }
+.achip.warn { border-color: rgba(246,188,78,.6); }
+.achip.warn .p.hot { color: var(--asking); font-weight: 600; }
+.achip.dry { border-color: rgba(242,109,109,.6); background: var(--danger-wash); }
+.achip.sw-ed { border-color: rgba(240,122,98,.7); }
+.achip .ico { font-size: 11px; }
+.achip .new { font-size: 10px; font-weight: 700; color: var(--on-accent); background: var(--accent); border-radius: 3px; padding: 0 4px; line-height: 13px; }
+.achip .crd { font-size: 10px; font-weight: 700; color: var(--on-asking); background: var(--asking); border-radius: 3px; padding: 0 4px; line-height: 13px; }
+
+/* 7-day rotation bar */
+.wk7 { position: relative; height: 9px; background: var(--chip); border-radius: 2px; }
+.wk7 i { position: absolute; top: 0; bottom: 0; }
+.wk7 i.gap { background: var(--danger); }
+.wk7 i.cred { background: repeating-linear-gradient(135deg, var(--asking) 0 3px, rgba(246,188,78,.25) 3px 6px); }
+.wk7 i.now { width: 2px; top: -3px; bottom: -3px; background: var(--text); }
+.wk7ax { position: relative; height: 14px; font-size: 10.5px; color: var(--faint); }
+.wk7ax span { position: absolute; top: 2px; transform: translateX(-50%); }
+.wk7ax span.first { transform: none; }
+
+/* Fleet line */
+.fleet { display: flex; align-items: baseline; gap: 8px; font-size: 12.5px; }
+.fleet.ok { color: var(--text-2); }
+.fleet.warn b { color: var(--asking); }
+.fleet.dry b { color: var(--danger); }
+.credl { font-size: 12px; color: var(--asking); display: flex; gap: 6px; align-items: baseline; }
+
+/* Lane A: popover */
+.pop { position: absolute; right: 8px; bottom: 30px; width: 540px; background: var(--raised); border: 1px solid var(--line-strong); border-radius: 8px; box-shadow: 0 14px 44px rgba(0,0,0,.6); display: flex; flex-direction: column; z-index: 10; }
+.pop::after { content: ""; position: absolute; right: 120px; bottom: -6px; width: 10px; height: 10px; background: var(--raised); border-right: 1px solid var(--line-strong); border-bottom: 1px solid var(--line-strong); transform: rotate(45deg); }
+.pop .ph { display: flex; align-items: center; gap: 10px; padding: 11px 14px 9px; border-bottom: 1px solid var(--line); }
+.pop .ph .ttl { font-weight: 600; font-size: 14px; }
+.pop .ph .as { margin-left: auto; display: inline-flex; align-items: center; gap: 7px; font-size: 12px; color: var(--text-2); }
+.pop .fl { padding: 9px 14px 6px; display: flex; flex-direction: column; gap: 5px; border-bottom: 1px solid var(--line); }
+.banner { padding: 7px 10px; border-radius: 5px; font-size: 12px; line-height: 1.4; }
+.pop .banner { margin: 9px 14px 0; }
+.banner.swd { background: rgba(240,122,98,.09); border: 1px solid rgba(240,122,98,.35); }
+.banner.swd b { color: var(--accent); }
+.banner.dry { background: var(--danger-wash); border: 1px solid rgba(242,109,109,.35); }
+.banner.dry b { color: var(--danger); }
+.prow { display: grid; grid-template-columns: 1fr 64px; column-gap: 10px; padding: 9px 14px; border-top: 1px solid var(--line); align-items: start; }
+.prow:first-child { border-top: 0; }
+.prow.live { background: rgba(240,122,98,.05); box-shadow: inset 2px 0 0 var(--accent); }
+.prow.dim { opacity: .6; }
+.prow .nm { display: flex; align-items: center; gap: 7px; min-width: 0; margin-bottom: 4px; }
+.prow .nm b { font-weight: 600; }
+.prow .nm .em { color: var(--subtle); font-size: 12px; }
+.prow .wln { display: flex; align-items: center; gap: 8px; height: 19px; min-width: 0; }
+.prow .wln .ub { width: 150px; }
+.prow .act { justify-self: end; padding-top: 1px; }
+.prow .cl { font-size: 11.5px; color: var(--text-2); margin-top: 3px; }
+.prow .one { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-2); min-width: 0; }
+.pop .pf { display: flex; align-items: center; gap: 10px; padding: 8px 14px 10px; border-top: 1px solid var(--line); font-size: 11.5px; color: var(--subtle); }
+.pop .pf .ev { flex: 1; min-width: 0; }
+
+/* Modal frame (Settings, lane B dialog) */
+.scrim { position: absolute; inset: 0; background: rgba(4,3,6,.62); z-index: 5; }
+.modal { position: absolute; z-index: 6; left: 50%; top: 22px; transform: translateX(-50%); width: 1120px; height: 900px; background: var(--surface); border: 1px solid var(--line-strong); border-radius: 10px; box-shadow: 0 20px 60px rgba(0,0,0,.6); display: grid; grid-template-rows: 54px 1fr 58px; overflow: hidden; }
+.modal .mh { display: flex; align-items: center; gap: 12px; padding: 0 20px; border-bottom: 1px solid var(--line); }
+.modal .mh .ttl { font-size: 17px; font-weight: 600; }
+.modal .mh .x { margin-left: auto; color: var(--subtle); font-size: 18px; }
+.modal .mf { display: flex; align-items: center; justify-content: flex-end; gap: 10px; padding: 0 20px; border-top: 1px solid var(--line); }
+.modal .mf .note { margin-right: auto; color: var(--subtle); font-size: 12px; }
+.sbody { display: grid; grid-template-columns: 170px 1fr; min-height: 0; }
+.snav { border-right: 1px solid var(--line); padding: 10px 8px; display: flex; flex-direction: column; gap: 2px; }
+.snav div { padding: 8px 12px; border-radius: 6px; color: var(--text-2); font-weight: 500; }
+.snav div.on { color: var(--text); background: var(--chip); box-shadow: inset 0 0 0 1px var(--accent); }
+.snav div.new::after { content: "new"; font-size: 9.5px; font-weight: 700; color: var(--accent); margin-left: 6px; vertical-align: 1px; }
+.spage { overflow: auto; padding: 16px 22px 24px; min-width: 0; }
+.spage h3 { font-size: 15px; font-weight: 600; margin: 18px 0 8px; display: flex; align-items: center; gap: 10px; }
+.spage h3:first-child { margin-top: 0; }
+.spage h3 .r { margin-left: auto; display: flex; gap: 8px; }
+.help { color: var(--subtle); font-size: 12px; line-height: 1.45; margin: 3px 0 0; }
+.help.w { color: var(--asking); }
+.fld { display: grid; grid-template-columns: 230px 1fr; align-items: center; column-gap: 16px; padding: 7px 0; border-top: 1px solid var(--line); }
+.fld:first-of-type { border-top: 0; }
+.fld .k { font-weight: 500; color: var(--text); }
+.fld .v { display: flex; align-items: center; gap: 10px; min-width: 0; }
+
+/* Settings accounts table */
+.atab { border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
+.atab .tr { display: grid; grid-template-columns: 28px 250px minmax(0,1fr) 92px 112px 150px; column-gap: 12px; align-items: center; padding: 7px 12px; border-top: 1px solid var(--line); min-height: 48px; }
+.atab .tr:first-child { border-top: 0; }
+.atab .th { min-height: 0; padding: 6px 12px; background: var(--raised); }
+.atab .th div { font-size: 10.5px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; color: var(--subtle); }
+.atab .n { color: var(--faint); font-variant-numeric: tabular-nums; }
+.atab .who { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.atab .who .inp { width: 120px; padding: 1px 7px; font-weight: 600; }
+.atab .who .em { font-size: 11.5px; color: var(--subtle); }
+.atab .st { font-size: 12px; color: var(--text-2); display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.atab .cx { display: flex; justify-content: center; }
+.atab .ax { display: flex; gap: 6px; justify-content: flex-end; }
+.atab .tr.live { box-shadow: inset 2px 0 0 var(--accent); background: rgba(240,122,98,.04); }
+.atab .tr.dim .who, .atab .tr.dim .st { opacity: .6; }
+
+/* Add a login */
+.addp { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 6px; }
+.addc { background: var(--raised); border: 1px solid var(--line-strong); border-radius: 8px; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; }
+.addc .at { font-weight: 600; font-size: 13.5px; display: flex; align-items: center; gap: 8px; }
+.addc .who2 { background: var(--sunken); border: 1px solid var(--line); border-radius: 5px; padding: 7px 10px; font-size: 12.5px; display: flex; align-items: center; gap: 8px; }
+.addc .warnb { background: var(--ask-wash); border-left: 2px solid var(--asking); padding: 6px 9px; font-size: 12px; color: var(--text); line-height: 1.4; }
+.addc .run { display: flex; align-items: center; gap: 8px; background: var(--sunken); border: 1px solid var(--line); border-radius: 5px; padding: 7px 10px; font-size: 12.5px; }
+.addc .acts { display: flex; gap: 8px; margin-top: auto; }
+.steps { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--text-2); }
+.steps .s { display: flex; gap: 8px; align-items: baseline; }
+.steps .s .k { width: 16px; color: var(--faint); font-variant-numeric: tabular-nums; flex: none; }
+.steps .s.ok .k { color: var(--waiting); }
+.steps .s.cur { color: var(--text); }
+.steps .s.cur .k { color: var(--asking); }
+
+/* Lane B: dialog */
+.dbody { overflow: auto; min-height: 0; padding: 0 0 16px; }
+.dtop { display: grid; grid-template-columns: 1fr 340px; gap: 18px; padding: 12px 20px 12px; border-bottom: 1px solid var(--line); background: var(--raised); }
+.dtop .eng { display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: var(--text-2); }
+.dtop .eng .r1 { display: flex; align-items: center; gap: 8px; color: var(--text); font-size: 12.5px; }
+.drows .cols, .drows .dr { display: grid; grid-template-columns: 16px 210px minmax(0,1fr) minmax(0,1fr) 150px 200px; column-gap: 14px; align-items: center; padding: 0 20px; }
+.drows .cols { height: 28px; border-bottom: 1px solid var(--line); }
+.drows .cols div { font-size: 10.5px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; color: var(--subtle); }
+.drows .dr { min-height: 62px; border-bottom: 1px solid var(--line); padding-top: 8px; padding-bottom: 8px; }
+.drows .dr.live { background: rgba(240,122,98,.05); box-shadow: inset 2px 0 0 var(--accent); }
+.drows .dr.dim > div:not(.ctl) { opacity: .6; }
+.drows .who { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.drows .who .a { display: flex; align-items: center; gap: 7px; }
+.drows .who .a b { font-weight: 600; font-size: 13.5px; }
+.drows .who .em { font-size: 11.5px; color: var(--subtle); }
+.drows .wb { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.drows .wb .top { display: flex; align-items: center; gap: 8px; }
+.drows .wb .ub { flex: 1; width: auto; }
+.drows .cr { font-size: 12px; color: var(--text-2); display: flex; flex-direction: column; align-items: flex-start; gap: 3px; }
+.toast.low { top: 690px; }
+.drows .cr label { display: inline-flex; align-items: center; gap: 6px; }
+.drows .ctl { display: flex; align-items: center; gap: 8px; justify-content: flex-end; }
+.drows .ctl .rot { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; color: var(--text-2); }
+.drows .ctl .more { color: var(--subtle); font-size: 15px; padding: 0 4px; }
+.rules { margin: 14px 20px 0; border: 1px solid var(--line); border-radius: 7px; }
+.rules .rh { display: flex; align-items: center; gap: 10px; padding: 9px 12px; font-size: 12.5px; }
+.rules .rh .sum { color: var(--text-2); flex: 1; min-width: 0; }
+.evs { margin: 12px 20px 0; }
+.evs .e { display: grid; grid-template-columns: 110px 1fr; gap: 10px; font-size: 12px; padding: 3px 0; }
+.evs .e .w { color: var(--faint); font-variant-numeric: tabular-nums; }
+.evs .e .tx b { font-weight: 600; }
+
+/* Desktop toast */
+.toast { position: absolute; right: 14px; top: 64px; width: 380px; background: #202024; border: 1px solid #3c3c44; border-radius: 8px; box-shadow: 0 10px 34px rgba(0,0,0,.6); padding: 10px 12px; display: grid; grid-template-columns: 26px 1fr; gap: 4px 10px; z-index: 20; font-size: 12.5px; }
+.toast .ic { width: 22px; height: 22px; border-radius: 5px; background: var(--accent); display: grid; place-items: center; color: var(--on-accent); font-weight: 700; font-size: 12px; grid-row: 1 / 4; }
+.toast .ap { color: var(--subtle); font-size: 11px; }
+.toast .tt { font-weight: 600; }
+.toast .tb { color: var(--text-2); line-height: 1.4; }
+.toast .cap { position: absolute; left: 0; top: -17px; font-size: 10.5px; color: var(--faint); }
+</style>
+</head>
+<body>
+
+<div class="lanes" id="lanes">
+  <div class="ttl">Accounts · G5</div>
+  <button class="lane-tab" data-lane="a"><b>A · Chip, popover and Settings → Accounts <span class="rec" id="rec-a" hidden>Recommended</span></b><span>The footer chip opens a small popover to glance and switch; adding, removing, aliases and the auto-switch rules live on a Settings → Accounts page.</span><span class="worst">Worst case: the rules sit two clicks away from the usage they act on.</span></button>
+  <button class="lane-tab" data-lane="b"><b>B · Chip and one Accounts dialog <span class="rec" id="rec-b" hidden>Recommended</span></b><span>The footer chip opens one Accounts dialog holding usage, switching, the rules, the paid fallback and adding a login. No Settings page.</span><span class="worst">Worst case: every glance is a modal over your work, and on a remote client half of it is greyed out.</span></button>
+</div>
+<div class="ctrl" id="ctrl"></div>
+
+<div class="app" id="app">
+  <nav class="rail">
+    <div class="ic on"><svg viewBox="0 0 20 20"><path d="M4 6h12M4 10h12M4 14h12"/></svg></div>
+    <div class="ic"><svg viewBox="0 0 20 20"><rect x="3" y="3" width="6" height="6" rx="1"/><rect x="11" y="3" width="6" height="4" rx="1"/><rect x="11" y="9" width="6" height="8" rx="1"/><rect x="3" y="11" width="6" height="6" rx="1"/></svg><span class="n ask">1</span></div>
+    <div class="ic"><svg viewBox="0 0 20 20"><path d="M3 11l2.5-6h9L17 11v5H3z"/><path d="M3 11h4l1 2h4l1-2h4"/></svg></div>
+    <div class="ic"><svg viewBox="0 0 20 20"><circle cx="6" cy="5" r="2"/><circle cx="6" cy="15" r="2"/><circle cx="14" cy="8" r="2"/><path d="M6 7v6M14 10c0 3-4 3-8 3"/></svg><span class="n">5</span></div>
+    <div class="sp"></div>
+    <div class="ic"><svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="7"/><path d="M10 6v4l3 2"/></svg></div>
+    <div class="ic" style="margin-bottom:6px"><svg viewBox="0 0 20 20"><path d="M4 6h8M15 6h1M4 14h2M9 14h7"/><circle cx="13.5" cy="6" r="1.6"/><circle cx="7.5" cy="14" r="1.6"/></svg></div>
+  </nav>
+  <div class="main">
+    <div class="tabbar" id="tabbar"></div>
+    <div class="content" id="content"></div>
+  </div>
+  <div class="footer" id="footer"></div>
+  <div id="overlay"></div>
+</div>
+
+<script>
+const RECOMMENDED = 'a';
+
+// Five Claude logins. Now is Wed 15:32.
+const ACC = [
+  { n: 1, alias: 'main', email: 'main@example.dev', org: 'Leftos Studio', credits: { left: '37.60', prepaid: '250.00', may: false } },
+  { n: 2, alias: 'ops', email: 'ops@example.dev', org: 'Leftos Studio', credits: { left: '50.00', prepaid: '1,020.03', may: true } },
+  { n: 3, alias: 'lab', email: 'lab@example.org', org: 'Personal', credits: { off: true } },
+  { n: 4, alias: 'spare', email: 'spare@example.net', org: 'Personal', disabled: true, credits: { left: '20.00', prepaid: '75.50', may: false } },
+  { n: 5, alias: 'client', email: 'dev@client-co.com', org: 'Client Co', relogin: true, credits: null },
+];
+
+// Hours from now to each midnight, for the 7-day axis (now = Wed 15:32).
+const FIRST_MIDNIGHT = 8.47;
+const DAYS = ['Thu', 'Fri', 'Sat', 'Sun', 'Mon', 'Tue'];
+
+// Each window: [pct, reset, pace note (live row only), on-pace tick pct].
+const STATES = {
+  comfy: {
+    label: 'Comfortable', live: 1,
+    w: {
+      1: { h5: [34, '17:40', 'lasts to reset', 29], d7: [41, 'Thu 09:00', 'lasts to reset', 38] },
+      2: { h5: [12, '18:05'], d7: [63, 'Sat 11:00'] },
+      3: { h5: [0, null], d7: [22, 'Mon 08:00'] },
+      4: { h5: [3, '18:00'], d7: [9, 'Mon 08:00'] },
+    },
+    read: '12s',
+    fleet: { kind: 'ok', text: 'Rotation lasts the next 7 days', sub: '3 accounts' },
+    gaps: [],
+    engine: 'Switches at 90%', next: 'checked 12s ago',
+    events: [['09:12', 'Switched <b>lab → main</b> · lab reached 90% of its 5-hour limit'], ['Tue 22:40', 'Switched <b>main → lab</b> · main reached 90% of its 5-hour limit'], ['Tue 14:05', 'Added <b>client</b> (dev@client-co.com)']],
+  },
+  near: {
+    label: 'Near a usage limit', live: 1,
+    w: {
+      1: { h5: [86, '16:10', 'runs out in 31m', 72], d7: [58, 'Thu 09:00', 'lasts to reset', 40] },
+      2: { h5: [12, '18:05'], d7: [63, 'Sat 11:00'] },
+      3: { h5: [61, '16:55'], d7: [30, 'Mon 08:00'] },
+      4: { h5: [3, '18:00'], d7: [9, 'Mon 08:00'] },
+    },
+    read: '9s',
+    fleet: { kind: 'warn', text: 'Rotation runs dry today 18:40 (in 3h 08m) for 1h 25m', sub: '3 accounts' },
+    gaps: [[3.13, 4.55]],
+    engine: 'Switches at 90% · next up: ops (5h 12%)', next: 'checked 9s ago',
+    events: [['09:12', 'Switched <b>lab → main</b> · lab reached 90% of its 5-hour limit'], ['Tue 22:40', 'Switched <b>main → lab</b> · main reached 90% of its 5-hour limit']],
+  },
+  switched: {
+    label: 'Switched automatically', live: 2,
+    w: {
+      1: { h5: [91, '16:10'], d7: [59, 'Thu 09:00'] },
+      2: { h5: [15, '18:05', 'lasts to reset', 11], d7: [64, 'Sat 11:00', 'lasts to reset', 61] },
+      3: { h5: [62, '16:55'], d7: [30, 'Mon 08:00'] },
+      4: { h5: [3, '18:00'], d7: [9, 'Mon 08:00'] },
+    },
+    read: '6s',
+    banner: { kind: 'swd', html: '<b>Switched main → ops at 15:31.</b> main reached 90% of its 5-hour limit. Running sessions use ops from their next message.' },
+    fleet: { kind: 'warn', text: 'Rotation runs dry today 19:15 (in 3h 43m) for 50m', sub: '3 accounts' },
+    gaps: [[3.72, 4.55]],
+    engine: 'Switches at 90% · next up: lab (5h 62%)', next: 'checked 6s ago',
+    events: [['15:31', 'Switched <b>main → ops</b> · main reached 90% of its 5-hour limit'], ['09:12', 'Switched <b>lab → main</b> · lab reached 90% of its 5-hour limit'], ['Tue 22:40', 'Switched <b>main → lab</b> · main reached 90% of its 5-hour limit']],
+    toast: { title: 'Switched Claude account to ops', body: 'main reached 90% of its 5-hour limit. Running sessions follow on their next message.' },
+  },
+  dry: {
+    label: 'All accounts dry', live: 2,
+    w: {
+      1: { h5: [100, '16:10'], d7: [61, 'Thu 09:00'] },
+      2: { h5: [100, '18:05', 'used up', 0], d7: [71, 'Sat 11:00', 'lasts to reset', 64] },
+      3: { h5: [100, '16:55'], d7: [36, 'Mon 08:00'] },
+      4: { h5: [3, '18:00'], d7: [9, 'Mon 08:00'] },
+    },
+    read: '7s',
+    fleet: { kind: 'dry', text: 'All accounts used up · blocked now for 38m', sub: 'main is back first, at 16:10' },
+    credits: 'On credits: ops · 46.20 USD left · since 15:12 · off again at 3% back',
+    gaps: [[0, 0.63, 'cred'], [4.3, 5.2], [28.1, 28.9]],
+    engine: 'On credits', next: 'checked 7s ago',
+    events: [['15:12', 'On credits: <b>ops</b> (50.00 USD) · every account used up'], ['14:48', 'Switched <b>lab → ops</b> · lab used up its 5-hour limit'], ['13:05', 'Switched <b>main → lab</b> · main reached 90% of its 5-hour limit']],
+    toast: { title: 'All Claude accounts used up', body: 'main is back at 16:10. Sessions carry on with ops\'s credits until then.' },
+  },
+};
+
+const LANES = {
+  a: { surfaces: [['popover', 'Chip popover'], ['settings', 'Settings → Accounts'], ['add', 'Adding a login']] },
+  b: { surfaces: [['dialog', 'Accounts dialog'], ['add', 'Adding a login']] },
+};
+let lane = 'a', surface = 'popover', state = 'comfy';
+
+const esc = (t) => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+const lvl = (p) => (p >= 90 ? 'hot' : p >= 80 ? 'warn' : '');
+function bar(w, width, dim, noTick) {
+  const [p, , , tick] = w;
+  const tk = tick != null && p < 100 && !noTick ?`<em style="left:${tick}%" title="On pace"></em>` : '';
+  return `<span class="ub" style="width:${width}px"><i class="${dim ? 'dim' : lvl(p)}" style="width:${Math.max(p, 1)}%"></i>${tk}</span>`;
+}
+function resetText(w, live) {
+  const [p, reset, note] = w;
+  if (reset == null) return '<span class="sub">not started</span>';
+  if (p >= 100) return `<span class="run hot">used up</span> · back ${reset}`;
+  const n = live && note ? (note.startsWith('runs out') ? ` · <span class="run ${p >= 90 ? 'hot' : ''}">${note}</span>` : ` · ${note}`) : '';
+  return `resets ${reset}${n}`;
+}
+function wline(label, w, live, width = 150, dim = false) {
+  return `<div class="wln"><span class="wl">${label}</span>${bar(w, width, dim)}<span class="pct ${dim ? '' : lvl(w[0])}">${w[0]}%</span><span class="rs cut">${resetText(w, live)}</span></div>`;
+}
+const st = () => STATES[state];
+
+/* ---------- Background: tabs, panes, footer ---------- */
+function tabbar() {
+  const login = surface === 'add' ? `<div class="t"><span class="g asking" style="transform:scale(.85)"></span>Log in · new account<span class="x">×</span></div>` : '';
+  return `<div class="t on"><span class="cnt">◉ 2/3</span>tulip<span class="x">×</span></div>
+    <div class="t"><span class="cnt">◉ 1/3</span>ops-tower<span class="x">×</span></div>
+    <div class="t"><span class="cnt">◉ 1/2</span>yaat<span class="x">×</span></div>${login}<div class="plus">+</div>`;
+}
+function panes() {
+  return `<div class="panes">
+    <div class="pane"><div class="ph"><span class="g working"></span><b>Summary wire types</b><span class="sub">rustling-tulip · feat/rt-444-summary-types</span></div>
+<div class="term"><span class="to">●</span> Read crates/protocol/src/lib.rs <span class="td">(lines 1180-1260)</span>
+<span class="to">●</span> Update(crates/protocol/src/lib.rs)
+  <span class="td">⎿</span>  Updated with <span class="tg">22 additions</span> and <span class="to">3 removals</span>
+<span class="to">●</span> Bash(pwsh -NoProfile -File tools/gate.ps1 run --slot heavy …)
+  <span class="td">⎿</span>  gate: queued for heavy 1 · 1 ahead
+     gate: running on heavy 1
+     <span class="td">… 214 tests</span>
+<span class="to">●</span> The summary round-trip test passes; adding the
+  PendingAsk serde default next.
+
+<span class="tb">✻ Pondering…</span> <span class="td">(42s · ↓ 1.8k tokens · esc to interrupt)</span>
+
+<span class="box">&gt;                                                         </span>
+<span class="td">  ⏵⏵ accept edits on · 1 background task</span></div></div>
+    <div class="pane"><div class="ph"><span class="g idle"></span><b>Gate chips in light theme</b><span class="sub">ops-tower · fix/ops-352-gate-chip-colour</span></div>
+<div class="term"><span class="to">●</span> PR #118 merged; OPS-352 moved to Done.
+
+<span class="to">●</span> Bash(git log --oneline -3)
+  <span class="td">⎿</span>  7c21e0a fix: keep gate chips' lane colour in the light theme
+     1f3a0bd docs: plan snapshot
+     a2c9e41 test: cover the light-theme chip contrast
+
+<span class="to">●</span> Done. The chips keep their lane colour in
+  both themes; the light-theme shot is in .tmp/shots.
+
+<span class="box">&gt;                                                         </span>
+<span class="td">  ? for shortcuts</span></div></div>
+  </div>`;
+}
+function chip() {
+  const s = st(), a = ACC.find((x) => x.n === s.live), w = s.w[s.live];
+  const open = (lane === 'a' && surface === 'popover') ? 'open' : '';
+  let cls = '', lead = '<span class="g idle" style="background:var(--waiting);width:7px;height:7px;margin:0"></span>', extra = '';
+  if (state === 'near') { cls = 'warn'; extra = ` <span class="c-ask" style="font-weight:600">· 31m</span>`; }
+  if (state === 'switched') { cls = 'sw-ed'; lead = '<span class="ico" style="color:var(--accent)">⇄</span>'; extra = ' <span class="new">switched</span>'; }
+  if (state === 'dry') { cls = 'dry'; lead = '<span class="ico c-dan">⚠</span>'; extra = ' <span class="crd">credits</span>'; }
+  return `<span class="achip ${cls} ${open}" title="Claude account for Anthropic sessions">${lead}<b>${a.alias}</b>
+    <span>5h</span>${bar(w.h5, 34, false, true)}<span class="p ${lvl(w.h5[0])}">${w.h5[0]}%</span>
+    <span>7d</span>${bar(w.d7, 34, false, true)}<span class="p">${w.d7[0]}%</span>${extra}</span>`;
+}
+function footer() {
+  return `<span class="pill">Connections</span>
+    <span class="pill"><span class="dot"></span>daemon · 6 sessions · :4242</span>
+    <span><span class="c-ask">◆</span> 1 need you</span>
+    <span><span class="c-work">◉</span> 3 working</span>
+    <span><span class="c-wait">○</span> 1 waiting</span>
+    <span class="sp"></span><span>Summary wire types · s-tulip</span>${chip()}`;
+}
+
+/* ---------- Shared pieces ---------- */
+function wk7(gaps) {
+  const pos = (h) => `${(h / 168) * 100}%`;
+  const g = gaps.map(([a, b, k]) => `<i class="${k === 'cred' ? 'cred' : 'gap'}" style="left:${pos(a)};width:max(3px, ${pos(b - a)})"></i>`).join('');
+  const ax = [`<span class="first" style="left:0">today</span>`].concat(DAYS.map((d, i) => `<span style="left:${pos(FIRST_MIDNIGHT + 12 + 24 * i)}">${d}</span>`)).join('');
+  return `<div class="wk7">${g}<i class="now" style="left:0"></i></div><div class="wk7ax">${ax}</div>`;
+}
+function fleetLine() {
+  const f = st().fleet;
+  const mark = f.kind === 'ok' ? '<span class="c-wait">●</span>' : f.kind === 'warn' ? '<span class="c-ask">▲</span>' : '<span class="c-dan">⚠</span>';
+  return `<div class="fleet ${f.kind}">${mark}<b>${f.text}</b><span class="sub">· ${f.sub}</span></div>`;
+}
+const credLine = () => (st().credits ? `<div class="credl"><span class="tag cr">$ credits</span><span>${st().credits}</span></div>` : '');
+function statusFor(a) {
+  const s = st(), w = s.w[a.n];
+  if (a.relogin) return { html: '<span class="c-dan">Sign-in refused</span><span class="sub">last read Mon 11:20</span>' };
+  if (a.disabled) return { html: `<span>Out of rotation</span><span class="sub">5h ${w.h5[0]}% · 7d ${w.d7[0]}%</span>` };
+  const live = s.live === a.n;
+  const top = w.h5[0] >= 100 ? `<span class="c-dan">Used up · back ${w.h5[1]}</span>` : `<span class="${lvl(w.h5[0]) === 'hot' ? 'c-dan' : lvl(w.h5[0]) === 'warn' ? 'c-ask' : ''}">5h ${w.h5[0]}% · 7d ${w.d7[0]}%</span>`;
+  const use = live ? (state === 'dry' ? '<span class="c-ask">In use · on credits</span> · ' : 'In use · ') : '';
+  return { html: `${top}<span class="sub">${use}read ${s.read} ago</span>` };
+}
+function creditsText(a, short) {
+  const c = a.credits;
+  if (!c) return '<span class="sub">—</span>';
+  if (c.off) return '<span class="sub">Extra usage off</span>';
+  const onCred = state === 'dry' && a.n === 2;
+  const left = onCred ? '46.20' : c.left;
+  return short ? `${left} USD left` : `${left} USD left · ${c.prepaid} prepaid`;
+}
+
+/* ---------- Lane A: popover ---------- */
+function popRow(a) {
+  const s = st(), live = s.live === a.n, w = s.w[a.n];
+  const name = `<b>${a.alias}</b><span class="em cut">${a.email}</span>`;
+  if (a.relogin) {
+    return `<div class="prow dim"><div><div class="nm">${name}<span class="tag dan">sign-in refused</span></div>
+      <div class="one">Log in again from <span class="lnk">Settings → Accounts</span></div></div><div class="act"></div></div>`;
+  }
+  if (a.disabled) {
+    return `<div class="prow dim"><div><div class="nm">${name}<span class="tag">out of rotation</span></div>
+      <div class="one"><span>5h ${w.h5[0]}%</span><span>7d ${w.d7[0]}%</span><span class="sub">auto-switch skips it</span></div></div>
+      <div class="act"><button class="btn sm">Switch</button></div></div>`;
+  }
+  const onCred = state === 'dry' && live;
+  const cl = onCred ? `<div class="cl"><span class="tag cr">$ on credits</span> 46.20 USD left</div>`
+    : (a.credits && a.credits.may ? `<div class="cl sub">May spend credits · ${a.credits.left} USD left</div>` : '');
+  return `<div class="prow ${live ? 'live' : ''}"><div>
+      <div class="nm">${name}${live ? '<span class="inuse">In use</span>' : ''}</div>
+      ${wline('5h', w.h5, live)}${wline('7d', w.d7, live)}${cl}</div>
+    <div class="act">${live ? '' : '<button class="btn sm">Switch</button>'}</div></div>`;
+}
+function popover() {
+  const s = st();
+  const banner = s.banner ? `<div class="banner ${s.banner.kind}">${s.banner.html}</div>` : '';
+  const last = s.events[0];
+  return `<div class="pop">
+    <div class="ph"><span class="ttl">Claude accounts</span><span class="sub" style="font-size:11.5px">for Anthropic sessions</span>
+      <span class="as">Auto-switch <span class="sw on"></span><span class="inp num" style="width:58px;padding:1px 6px">90<span class="u">%</span></span></span></div>
+    ${banner}
+    <div class="fl">${fleetLine()}${credLine()}${wk7(s.gaps)}</div>
+    <div>${ACC.map(popRow).join('')}</div>
+    <div class="pf"><span class="ev cut">${last[0]} · ${last[1]}</span><span>${s.next}</span><span class="lnk">Manage…</span></div>
+  </div>`;
+}
+
+/* ---------- Lane A: Settings → Accounts ---------- */
+function settingsNav() {
+  return `<div class="snav">${['General', 'Notifications', 'Spawn defaults', 'Worktrees', 'Remote access'].map((t) => `<div>${t}</div>`).join('')}
+    <div class="on new">Accounts</div>${['Appearance', 'App title'].map((t) => `<div>${t}</div>`).join('')}
+    <div class="h" style="padding:14px 12px 4px">Agents</div><div>Claude</div></div>`;
+}
+function acctTable() {
+  const s = st();
+  const rows = ACC.map((a) => {
+    const live = s.live === a.n, stt = statusFor(a);
+    const c = a.credits;
+    const credCell = !c ? '<span class="cb dis"></span>' : c.off ? '<span class="cb dis" title="No prepaid balance, and extra usage is off"></span>' : `<span class="cb ${c.may ? 'on' : ''} ${a.disabled ? 'dis' : ''}"></span>`;
+    const acts = a.relogin ? '<button class="btn sm pri">Log in again</button><button class="btn sm ghost">Remove</button>'
+      : `${live ? '<span class="inuse">In use</span>' : '<button class="btn sm">Switch</button>'}<button class="btn sm ghost">Remove</button>`;
+    return `<div class="tr ${live ? 'live' : ''} ${a.disabled || a.relogin ? 'dim' : ''}">
+      <div class="n">${a.n}</div>
+      <div class="who"><span class="inp">${a.alias}</span><span class="em cut">${a.email} · ${a.org}</span></div>
+      <div class="st">${stt.html}</div>
+      <div class="cx"><span class="sw ${a.disabled || a.relogin ? '' : 'on'} ${a.relogin ? 'off-dis' : ''}"></span></div>
+      <div class="cx" style="flex-direction:column;align-items:center;gap:2px">${credCell}<span class="sub" style="font-size:10.5px">${c && !c.off ? creditsText(a, true) : (c ? 'none' : '')}</span></div>
+      <div class="ax">${acts}</div></div>`;
+  }).join('');
+  return `<div class="atab"><div class="tr th"><div>#</div><div>Account · alias</div><div>Usage</div><div style="text-align:center">In rotation</div><div style="text-align:center">May spend credits</div><div></div></div>${rows}</div>`;
+}
+function rulesFields() {
+  return `<div class="fld"><div class="k">Auto-switch</div><div class="v"><span class="seg"><span>Off</span><span class="on">On</span></span><span class="sub">The daemon switches even with no window open.</span></div></div>
+    <div class="fld"><div class="k">Switch at</div><div class="v"><span class="inp num">90<span class="u">%</span></span><span class="sub">of the fuller of the live account's 5-hour and weekly windows</span></div></div>
+    <div class="fld"><div class="k">Only to an account at least</div><div class="v"><span class="inp num">10<span class="u">pts</span></span><span class="sub">fresher than the live one</span></div></div>
+    <div class="fld"><div class="k">Wait between switches</div><div class="v"><span class="inp num">5<span class="u">min</span></span><span class="sub">not applied when the live account is used up</span></div></div>
+    <div class="fld"><div class="k">Pick the next account by</div><div class="v"><span class="seg"><span class="on">Most headroom</span><span>Soonest weekly reset</span></span></div></div>`;
+}
+function settingsPage(addOpen) {
+  const s = st();
+  const add = addOpen ? addPanel() : '';
+  return `<div class="spage">
+    <h3>Claude accounts <span class="r"><button class="btn ${addOpen ? 'pri' : ''}">＋ Add account</button></span></h3>
+    <p class="help" style="margin:-4px 0 10px">One account is live for the whole PC. Every running Anthropic session picks up a switch on its next message; DeepSeek sessions are not affected.</p>
+    ${add}
+    ${acctTable()}
+    <h3>Auto-switch</h3>
+    ${rulesFields()}
+    <h3>Paid fallback</h3>
+    <div class="fld"><div class="k">When every account is used up</div><div class="v"><span class="cb on"></span><span>Move to an account that may spend credits, largest balance first</span></div></div>
+    <p class="help">Leaves credits as soon as any account has 3% back. Tick <b>May spend credits</b> on each account above; an account with extra usage off can't.</p>
+    <h3>Forecast</h3>
+    <div class="fld"><div class="k">Rate window</div><div class="v"><span class="seg"><span>30m</span><span class="on">1h</span><span>2h</span><span>3h</span></span><span class="sub">How far back the run-out times and the 7-day forecast look.</span></div></div>
+    <h3>Store</h3>
+    <p class="help" style="margin-top:0">Logins are kept in cswap's store, <span class="mono">C:\\Users\\lefto\\.claude-swap-backup</span>, so <span class="mono">cswap list</span> shows the same accounts. Auto-switch engine: this daemon (holds the engine lease; cswap auto is not running).</p>
+  </div>`;
+}
+function settingsModal(addOpen) {
+  return `<div class="scrim"></div><div class="modal">
+    <div class="mh"><span class="ttl">Settings</span><span class="x">✕</span></div>
+    <div class="sbody">${settingsNav()}${settingsPage(addOpen)}</div>
+    <div class="mf"><button class="btn" style="padding:6px 14px">Close</button></div></div>`;
+}
+
+/* ---------- Adding a login (both lanes) ---------- */
+function addPanel() {
+  return `<div class="addp">
+    <div class="addc">
+      <div class="at">Add the current login</div>
+      <div class="help" style="margin:0">Claude Code on this PC is signed in as an account that isn't in the list:</div>
+      <div class="who2"><span class="c-wait">●</span><b>new@example.dev</b><span class="sub">· Leftos Studio</span></div>
+      <div class="warnb">Don't run <span class="mono">/logout</span> first to switch logins: logging out can revoke the account you're leaving. Sign in to the new account over it instead.</div>
+      <div class="acts"><button class="btn pri">Add as account 6</button></div>
+    </div>
+    <div class="addc">
+      <div class="at">Log in a new account <span class="tag ask">waiting for you</span></div>
+      <div class="help" style="margin:0">Runs Claude's login in a scratch folder as a session you can see. When it signs in, the login is added and the folder removed.</div>
+      <div class="steps">
+        <div class="s ok"><span class="k">✓</span>Login session started · 1m ago</div>
+        <div class="s cur"><span class="k">2</span>Sign in in the browser it opened, then paste the code into the session</div>
+        <div class="s"><span class="k">3</span>Added to the list when the session exits signed in</div>
+      </div>
+      <div class="acts"><button class="btn">Go to session</button><button class="btn ghost">Cancel</button></div>
+    </div>
+  </div>`;
+}
+
+/* ---------- Lane B: one dialog ---------- */
+function dRow(a) {
+  const s = st(), live = s.live === a.n, w = s.w[a.n];
+  const who = `<div class="who"><div class="a"><b>${a.alias}</b>${live ? '<span class="inuse">In use</span>' : ''}${a.relogin ? '<span class="tag dan">sign-in refused</span>' : ''}${a.disabled ? '<span class="tag">out of rotation</span>' : ''}</div><span class="em cut">${a.email} · ${a.org}</span></div>`;
+  const dot = live ? '<span class="g idle" style="background:var(--accent)"></span>' : '<span></span>';
+  const c = a.credits;
+  const onCred = state === 'dry' && live;
+  const cred = !c ? '<div class="cr"></div>' : `<div class="cr">${onCred ? '<span class="tag cr">$ on credits</span>' : ''}<span>${creditsText(a, true)}</span>
+     <label><span class="cb ${c.may ? 'on' : ''} ${c.off || a.disabled ? 'dis' : ''}"></span>May spend</label></div>`;
+  const ctl = a.relogin ? '<div class="ctl"><button class="btn sm pri">Log in again</button><span class="more">⋯</span></div>'
+    : `<div class="ctl"><span class="rot"><span class="sw ${a.disabled ? '' : 'on'}"></span>Rotation</span>${live ? '' : '<button class="btn sm">Switch</button>'}<span class="more">⋯</span></div>`;
+  if (a.relogin) {
+    return `<div class="dr dim">${dot}${who}<div class="wb" style="grid-column:3/5"><span class="rs">Last read Mon 11:20 · log in again to read its usage and switch to it</span></div>${cred}${ctl}</div>`;
+  }
+  const wb = (lab, x) => `<div class="wb"><div class="top"><span class="wl">${lab}</span>${bar(x, 0, a.disabled)}<span class="pct ${a.disabled ? '' : lvl(x[0])}">${x[0]}%</span></div><span class="rs cut">${resetText(x, live)}</span></div>`;
+  return `<div class="dr ${live ? 'live' : ''} ${a.disabled ? 'dim' : ''}">${dot}${who}${wb('5h', w.h5)}${wb('7d', w.d7)}${cred}${ctl}</div>`;
+}
+function dialogBody() {
+  const s = st();
+  const banner = s.banner ? `<div class="banner ${s.banner.kind}" style="margin:12px 20px 0">${s.banner.html}</div>` : '';
+  return `<div class="dbody">
+    <div class="dtop">
+      <div style="display:flex;flex-direction:column;gap:6px;min-width:0">${fleetLine()}${credLine()}${wk7(s.gaps)}</div>
+      <div class="eng"><div class="r1">Auto-switch <span class="sw on"></span><span class="sub">${s.engine}</span></div><span>Engine: this daemon · ${s.next}</span></div>
+    </div>
+    ${banner}
+    <div class="drows" style="margin-top:6px">
+      <div class="cols"><div></div><div>Account</div><div>5-hour</div><div>Weekly</div><div>Credits</div><div></div></div>
+      ${ACC.map(dRow).join('')}
+    </div>
+    <div class="rules"><div class="rh"><span class="h">Rules</span><span class="sum cut">Switch at 90% · at least 10 pts fresher · 5 min between switches · most headroom · paid fallback on · rate window 1h</span><span class="lnk">Edit ▾</span></div></div>
+    <div class="evs"><div class="h" style="margin-bottom:5px">Recent</div>${s.events.map(([w, t]) => `<div class="e"><span class="w">${w}</span><span class="tx">${t}</span></div>`).join('')}</div>
+  </div>`;
+}
+function dialogAddBody() {
+  return `<div class="dbody" style="padding:16px 20px">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px"><span class="lnk">← Accounts</span><span class="h">Add an account</span></div>
+    ${addPanel()}
+    <p class="help">Both ways are only on the PC running the daemon; a remote client sees this page greyed out. Logins never cross the network.</p>
+  </div>`;
+}
+function dialog(add) {
+  return `<div class="scrim"></div><div class="modal" style="width:1240px">
+    <div class="mh"><span class="ttl">Claude accounts</span><span class="sub">for Anthropic sessions · one live account for the whole PC</span>
+      <button class="btn" style="margin-left:auto">＋ Add account</button><span class="x" style="margin-left:6px">✕</span></div>
+    ${add ? dialogAddBody() : dialogBody()}
+    <div class="mf"><span class="note">Store: cswap's, C:\\Users\\lefto\\.claude-swap-backup</span><button class="btn" style="padding:6px 14px">Close</button></div></div>`;
+}
+
+/* ---------- Toast ---------- */
+function toast() {
+  const t = st().toast;
+  if (!t || (surface !== 'popover' && surface !== 'dialog')) return '';
+  return `<div class="toast ${lane === 'b' ? 'low' : ''}"><span class="cap">Windows notification</span><span class="ic">rt</span><span class="ap">rustling-tulip · now</span><span class="tt">${t.title}</span><span class="tb">${t.body}</span></div>`;
+}
+
+/* ---------- Wiring ---------- */
+function controls() {
+  const surf = LANES[lane].surfaces.map(([k, l]) => `<button class="pick ${k === surface ? 'on' : ''}" data-surf="${k}">${l}</button>`).join('');
+  const sts = Object.entries(STATES).map(([k, v]) => `<button class="pick ${k === state ? 'on' : ''}" data-state="${k}" ${surface === 'add' ? 'disabled style="opacity:.4"' : ''}>${v.label}</button>`).join('');
+  return `<span class="lb">Surface</span>${surf}<span class="lb" style="margin-left:22px">State</span>${sts}`;
+}
+function render() {
+  for (const t of document.querySelectorAll('.lane-tab')) t.classList.toggle('on', t.dataset.lane === lane);
+  document.getElementById('ctrl').innerHTML = controls();
+  document.getElementById('tabbar').innerHTML = tabbar();
+  document.getElementById('content').innerHTML = panes() + toast();
+  document.getElementById('footer').innerHTML = footer();
+  let ov = '';
+  if (lane === 'a' && surface === 'popover') ov = popover();
+  if (lane === 'a' && surface === 'settings') ov = settingsModal(false);
+  if (lane === 'a' && surface === 'add') ov = settingsModal(true);
+  if (lane === 'b' && surface === 'dialog') ov = dialog(false);
+  if (lane === 'b' && surface === 'add') ov = dialog(true);
+  document.getElementById('overlay').innerHTML = ov;
+  history.replaceState(null, '', `#${lane}/${surface}/${state}`);
+}
+function go(l, s, x) {
+  lane = l; surface = s || LANES[l].surfaces[0][0]; state = x || state;
+  if (surface === 'add') state = 'comfy';
+  render();
+}
+window.go = go;
+document.getElementById('rec-' + RECOMMENDED).hidden = false;
+document.getElementById('lanes').addEventListener('click', (e) => { const t = e.target.closest('.lane-tab'); if (t) go(t.dataset.lane); });
+document.getElementById('ctrl').addEventListener('click', (e) => {
+  const s = e.target.closest('[data-surf]'); if (s) go(lane, s.dataset.surf, state);
+  const x = e.target.closest('[data-state]'); if (x && !x.disabled) go(lane, surface, x.dataset.state);
+});
+const [hl, hs, hx] = (location.hash || '#a').slice(1).split('/');
+go(LANES[hl] ? hl : 'a', hs, STATES[hx] ? hx : 'comfy');
+</script>
+</body>
+</html>

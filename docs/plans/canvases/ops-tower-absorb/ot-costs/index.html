@@ -1,0 +1,520 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Costs mock</title>
+<style>
+@font-face { font-family: "Geist"; font-weight: 400; src: url("../../../../../apps/native/assets/fonts/Geist/Geist-Regular.ttf"); }
+@font-face { font-family: "Geist"; font-weight: 500; src: url("../../../../../apps/native/assets/fonts/Geist/Geist-Medium.ttf"); }
+@font-face { font-family: "Geist"; font-weight: 600; src: url("../../../../../apps/native/assets/fonts/Geist/Geist-SemiBold.ttf"); }
+@font-face { font-family: "Geist"; font-weight: 700; src: url("../../../../../apps/native/assets/fonts/Geist/Geist-Bold.ttf"); }
+@font-face { font-family: "JBM"; font-weight: 400; src: url("../../../../../apps/native/assets/fonts/JetBrainsMono/JetBrainsMono-Regular.ttf"); }
+@font-face { font-family: "JBM"; font-weight: 700; src: url("../../../../../apps/native/assets/fonts/JetBrainsMono/JetBrainsMono-Bold.ttf"); }
+
+/* Tokens: apps/native/src/palette.rs, as the approved Dashboard mock */
+:root {
+  --ground: #111013; --sunken: #0b0a0d; --surface: #161519; --raised: #1b1a1f; --chip: #232129; --hover: #2c2a33;
+  --line: #2a2830; --line-strong: #3a3742;
+  --text: #ede9e4; --text-2: #a7a2ad; --subtle: #8c8794; --faint: #6e6a77;
+  --accent: #f07a62; --on-accent: #1c100d;
+  --working: #6ca6ff; --asking: #f6bc4e; --on-asking: #2a1b00; --waiting: #4fc89d; --danger: #f26d6d;
+  --lilac: #c9b8ff; --ochre: #d9a15c; --rose: #e7849b; --peri: #8fb3f0;
+  --ask-wash: rgba(246, 188, 78, 0.07); --danger-wash: rgba(242, 109, 109, 0.10);
+  --mono: "JBM", ui-monospace, monospace;
+  --claude: #8fb3f0; --deepseek: #d9a15c;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: #08070a; color: var(--text); font-family: "Geist", system-ui, sans-serif; font-size: 13px; }
+button { font: inherit; color: inherit; }
+
+/* Lane and state switchers, outside the app frame */
+.lanes, .states { display: flex; gap: 6px; align-items: stretch; padding: 10px 16px 0; width: 1600px; margin: 0 auto; box-sizing: content-box; }
+.states { padding: 6px 16px 10px; align-items: center; }
+.lanes .ttl, .states .ttl { font-weight: 600; color: var(--text-2); align-self: center; margin-right: 8px; white-space: nowrap; width: 92px; }
+.lane-tab { flex: 1; text-align: left; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 7px 10px; cursor: pointer; }
+.lane-tab b { display: block; font-weight: 600; }
+.lane-tab span { color: var(--subtle); font-size: 12px; display: block; }
+.lane-tab span.worst { color: var(--faint); margin-top: 2px; }
+.lane-tab.on { border-color: var(--accent); background: var(--raised); }
+.rec { display: inline-block !important; margin-left: 6px; font-size: 10.5px !important; font-weight: 600; color: var(--on-accent) !important; background: var(--accent); padding: 1px 6px; border-radius: 3px; vertical-align: 1px; }
+.rec[hidden] { display: none !important; }
+.st-tab { background: var(--surface); border: 1px solid var(--line); border-radius: 5px; padding: 4px 10px; cursor: pointer; font-size: 12px; color: var(--text-2); }
+.st-tab.on { border-color: var(--accent); color: var(--text); background: var(--raised); }
+.states .hint { color: var(--faint); font-size: 12px; margin-left: 10px; }
+
+/* App frame */
+.app { width: 1600px; height: 1000px; margin: 0 auto 24px; display: grid; grid-template-columns: 48px 1fr; grid-template-rows: 1fr 24px; background: var(--ground); border: 1px solid var(--line); overflow: hidden; }
+.rail { background: var(--sunken); border-right: 1px solid var(--line); display: flex; flex-direction: column; align-items: center; padding-top: 6px; gap: 6px; }
+.rail .ic { width: 34px; height: 34px; border-radius: 6px; display: grid; place-items: center; color: var(--text-2); position: relative; }
+.rail .ic.on { background: var(--chip); color: var(--text); box-shadow: inset 2px 0 0 var(--accent); }
+.rail .ic .n { position: absolute; top: 2px; right: 2px; font-size: 9px; background: var(--chip); color: var(--text-2); border-radius: 6px; padding: 0 3px; }
+.rail .ic .n.ask { background: var(--asking); color: var(--on-asking); font-weight: 700; }
+.rail .sp { flex: 1; }
+.rail svg { width: 18px; height: 18px; stroke: currentColor; fill: none; stroke-width: 1.6; }
+.main { display: grid; grid-template-rows: 38px 1fr; min-width: 0; min-height: 0; }
+.tabbar { background: var(--surface); border-bottom: 1px solid var(--line); display: flex; align-items: stretch; }
+.tabbar .t { display: flex; align-items: center; gap: 7px; padding: 0 14px; border-right: 1px solid var(--line); color: var(--text-2); font-weight: 500; cursor: pointer; }
+.tabbar .t.on { color: var(--text); background: var(--ground); box-shadow: inset 0 2px 0 var(--accent); }
+.tabbar .t .x { color: var(--faint); margin-left: 6px; }
+.tabbar .t .cnt { font-size: 11px; color: var(--working); }
+.tabbar .t .badge { font-size: 10.5px; font-weight: 700; background: var(--asking); color: var(--on-asking); border-radius: 3px; padding: 0 5px; }
+.tabbar .t svg { stroke: currentColor; fill: none; stroke-width: 1.7; }
+.tabbar .plus { padding: 0 14px; display: flex; align-items: center; color: var(--subtle); font-size: 16px; }
+.footer { grid-column: 1 / -1; background: var(--sunken); border-top: 1px solid var(--line); display: flex; align-items: center; gap: 14px; padding: 0 10px; font-size: 11.5px; color: var(--text-2); }
+.footer .pill { border: 1px solid var(--line-strong); border-radius: 10px; padding: 0 8px; line-height: 17px; }
+.footer .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #3fb96a; margin-right: 5px; }
+.footer .sp { flex: 1; }
+.content { overflow: hidden; min-height: 0; position: relative; }
+.view { height: 100%; overflow: auto; }
+
+/* Status glyphs, as the sidebar draws them */
+.g { display: inline-block; flex: none; width: 12px; height: 12px; border-radius: 50%; position: relative; vertical-align: -1px; }
+.g.working { border: 2px solid var(--working); }
+.g.working::after { content: ""; position: absolute; inset: 2px; border-radius: 50%; background: var(--working); }
+.g.asking { border-radius: 3px; background: var(--asking); }
+.g.asking::after { content: "!"; position: absolute; inset: 0; color: var(--on-asking); font-size: 9.5px; font-weight: 700; text-align: center; line-height: 12px; }
+.g.waiting { border: 2px solid var(--waiting); }
+.g.idle { width: 8px; height: 8px; margin: 2px; background: var(--faint); }
+.g.stopped { border-radius: 2px; width: 10px; height: 10px; margin: 1px; border: 2px solid var(--faint); }
+.g.done { width: 12px; height: 12px; }
+.g.done::after { content: "✓"; position: absolute; inset: 0; color: var(--waiting); font-size: 11px; font-weight: 700; line-height: 12px; text-align: center; }
+.g.dispatch { border-radius: 2px; width: 11px; height: 11px; border: 2px solid var(--deepseek); transform: rotate(45deg) scale(.8); }
+
+/* Shared bits */
+.mono { font-family: var(--mono); font-size: 11.5px; }
+.sub { color: var(--subtle); }
+.t2 { color: var(--text-2); }
+.cut { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.repo { display: inline-flex; align-items: center; gap: 5px; color: var(--text-2); white-space: nowrap; }
+.repo i { width: 7px; height: 7px; border-radius: 2px; display: inline-block; flex: none; }
+.c-ask { color: var(--asking); } .c-work { color: var(--working); } .c-wait { color: var(--waiting); } .c-dan { color: var(--danger); } .c-faint { color: var(--faint); }
+.iss { font-family: var(--mono); font-size: 11.5px; color: var(--text); font-weight: 700; white-space: nowrap; }
+.h { font-size: 10.5px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--subtle); }
+.btn { background: var(--chip); border: 1px solid var(--line-strong); border-radius: 5px; padding: 3px 9px; font-size: 12px; cursor: pointer; white-space: nowrap; }
+.btn.ghost { background: transparent; }
+.seg { display: inline-flex; background: var(--raised); border: 1px solid var(--line); border-radius: 5px; padding: 2px; }
+.seg span { white-space: nowrap; padding: 2px 9px; border-radius: 3px; font-size: 12px; color: var(--text-2); }
+.seg span.on { background: var(--chip); color: var(--text); font-weight: 500; }
+.hsp { flex: 1; }
+.num { font-variant-numeric: tabular-nums; }
+.sw { display: inline-block; width: 9px; height: 9px; border-radius: 2px; vertical-align: -1px; margin-right: 5px; }
+.sw.cl { background: var(--claude); } .sw.ds { background: var(--deepseek); }
+.link { color: var(--peri); cursor: pointer; white-space: nowrap; }
+
+/* Dashboard header strip (as approved) */
+.hdr { display: flex; align-items: center; gap: 12px; padding: 10px 18px 10px; border-bottom: 1px solid var(--line); background: var(--surface); position: relative; }
+.hdr h1 { font-size: 15px; font-weight: 600; margin: 0; }
+.counts { display: flex; gap: 4px; }
+.cpill { white-space: nowrap; display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px; border-radius: 5px; background: var(--chip); font-size: 12px; color: var(--text-2); }
+.cpill b { color: var(--text); font-weight: 600; }
+.cpill.ask { background: rgba(246,188,78,.14); color: var(--asking); } .cpill.ask b { color: var(--asking); }
+.figs { white-space: nowrap; display: flex; gap: 12px; font-size: 12px; color: var(--text-2); align-items: center; }
+.figs b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+.figs .sep { width: 1px; height: 16px; background: var(--line-strong); }
+.money { position: relative; display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; border-radius: 5px; border: 1px solid var(--line-strong); background: var(--raised); white-space: nowrap; }
+.money.focus { border-color: var(--peri); box-shadow: 0 0 0 3px rgba(143,179,240,.15); }
+.money.warn { border-color: rgba(246,188,78,.55); }
+.money.err { border-color: rgba(242,109,109,.55); }
+.money .lab { color: var(--subtle); }
+.money .chev { color: var(--peri); margin-left: 2px; }
+.rels { display: flex; gap: 10px; font-size: 11.5px; color: var(--text-2); }
+.rel { white-space: nowrap; display: inline-flex; align-items: center; gap: 5px; }
+.rel .rb { width: 44px; height: 4px; background: var(--chip); border-radius: 2px; overflow: hidden; }
+.rel .rb i { display: block; height: 100%; background: var(--lilac); }
+.lnsync { white-space: nowrap; display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--subtle); }
+.lnsync i { width: 6px; height: 6px; border-radius: 50%; background: var(--lilac); display: inline-block; }
+.flyout { position: absolute; top: 28px; left: 0; white-space: normal; z-index: 5; width: 330px; background: var(--raised); border: 1px solid var(--line-strong); border-radius: 7px; box-shadow: 0 10px 28px rgba(0,0,0,.5); padding: 10px 12px; font-size: 12px; }
+.flyout .fr { display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; }
+.flyout .fr .v { text-align: right; font-variant-numeric: tabular-nums; }
+.flyout .note { color: var(--faint); font-size: 11px; margin-top: 8px; line-height: 1.4; }
+
+/* Dashboard rows, abbreviated: the approved lane A's grid, cost column only in focus */
+.dash { padding-bottom: 16px; }
+.dash .cols, .dash .row { display: grid; grid-template-columns: 30px 260px 160px minmax(0,1fr) 110px 96px; column-gap: 12px; align-items: center; padding: 0 18px 0 14px; }
+.dash .cols { height: 26px; border-bottom: 1px solid var(--line); }
+.dash .cols div { font-size: 10.5px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; color: var(--subtle); }
+.dash .grp { display: flex; align-items: center; gap: 8px; padding: 12px 18px 5px 14px; }
+.dash .grp .h { color: var(--text-2); } .dash .grp.ask .h { color: var(--asking); }
+.dash .row { min-height: 42px; border-top: 1px solid var(--line); }
+.dash .row.askrow { background: var(--ask-wash); box-shadow: inset 2px 0 0 var(--asking); }
+.dash .two { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.dash .r { text-align: right; justify-self: end; }
+.dash .note { margin: 14px 18px; color: var(--faint); font-size: 12px; }
+
+/* ---------- Costs tab ---------- */
+.cv { padding: 0 0 22px; }
+.chd { display: flex; align-items: center; gap: 14px; padding: 10px 18px; border-bottom: 1px solid var(--line); background: var(--surface); }
+.chd h1 { font-size: 15px; font-weight: 600; margin: 0; }
+.chd .meta { display: flex; gap: 14px; font-size: 12px; color: var(--text-2); }
+.chd .meta b { color: var(--text); font-weight: 500; }
+.banner { display: flex; align-items: center; gap: 10px; margin: 12px 18px 0; padding: 7px 11px; border-radius: 6px; font-size: 12.5px; }
+.banner.warn { background: var(--ask-wash); border: 1px solid rgba(246,188,78,.35); }
+.banner.warn .k { color: var(--asking); font-weight: 600; }
+.banner.err { background: var(--danger-wash); border: 1px solid rgba(242,109,109,.35); }
+.banner.err .k { color: var(--danger); font-weight: 600; }
+.tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; padding: 12px 18px 0; }
+.tile { background: var(--surface); border: 1px solid var(--line); border-radius: 7px; padding: 10px 12px 10px; min-width: 0; }
+.tile .h { display: flex; justify-content: space-between; }
+.tile .big { font-size: 24px; font-weight: 600; font-variant-numeric: tabular-nums; margin: 4px 0 6px; letter-spacing: -.01em; }
+.tile .big .u { font-size: 12px; font-weight: 400; color: var(--subtle); margin-left: 6px; letter-spacing: 0; }
+.tile .split { display: flex; gap: 14px; font-size: 12px; color: var(--text-2); font-variant-numeric: tabular-nums; }
+.tile .split b { color: var(--text); font-weight: 500; }
+.tile .bar { height: 5px; border-radius: 3px; background: var(--chip); overflow: hidden; margin-top: 8px; display: flex; }
+.tile .bar i { display: block; height: 100%; }
+.tile .foot { font-size: 11.5px; color: var(--subtle); margin-top: 6px; }
+.box { background: var(--surface); border: 1px solid var(--line); border-radius: 7px; min-width: 0; }
+.box > .bh { display: flex; align-items: center; gap: 10px; padding: 9px 12px 6px; }
+.box > .bh .r { margin-left: auto; font-size: 11.5px; color: var(--subtle); display: flex; gap: 12px; align-items: center; }
+.chart { margin: 10px 18px 0; }
+.chart svg { display: block; width: 100%; height: 150px; }
+.grid2 { display: grid; grid-template-columns: 1.55fr 1fr; gap: 10px; margin: 10px 18px 0; }
+.sess { margin: 10px 18px 0; }
+table.tb { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 12.5px; }
+table.tb th { font-size: 10.5px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; color: var(--subtle); text-align: right; padding: 4px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+table.tb th.l, table.tb td.l { text-align: left; }
+table.tb th.grp { text-align: center; color: var(--text-2); border-bottom: 0; padding-bottom: 0; }
+table.tb td { padding: 5px 10px; border-bottom: 1px solid var(--line); text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+table.tb tr:last-child td { border-bottom: 0; }
+table.tb .edge { border-left: 1px solid var(--line); }
+table.tb tfoot td { border-top: 1px solid var(--line-strong); border-bottom: 0; font-weight: 600; }
+table.tb tr.muted td { color: var(--text-2); }
+table.tb tr.today td { background: rgba(143,179,240,.06); }
+table.tb td .api { color: var(--faint); }
+table.tb td.dash0 { color: var(--faint); }
+table.tb .share { display: inline-block; width: 64px; height: 5px; background: var(--chip); border-radius: 3px; overflow: hidden; vertical-align: 1px; margin-left: 8px; }
+table.tb .share i { display: block; height: 100%; float: left; }
+.tag { font-size: 10.5px; color: var(--deepseek); border: 1px solid rgba(217,161,92,.4); border-radius: 3px; padding: 0 4px; margin-left: 6px; }
+.empty { padding: 26px 18px; text-align: center; color: var(--subtle); font-size: 12.5px; line-height: 1.5; }
+.empty b { color: var(--text); font-weight: 500; }
+.chartempty { height: 150px; display: grid; place-items: center; color: var(--faint); font-size: 12.5px; border-top: 1px dashed var(--line); margin: 0 12px; }
+.asof { color: var(--danger); font-size: 11px; margin-left: 6px; }
+</style>
+</head>
+<body>
+
+<div class="lanes" id="lanes">
+  <div class="ttl">Costs · RT-464</div>
+  <button class="lane-tab" data-lane="a"><b>A · Subscription share + Costs tab <span class="rec" id="rec-a" hidden>Recommended</span></b><span>Header total opens a Costs tab: tiles, 30-day bars, per repo, day and session. Claude is ops-tower's subscription share; DeepSeek is API spend.</span><span class="worst">Worst case: an account without a usage reading drops its share, and the share needs the accounts poller (G5) to exist.</span></button>
+  <button class="lane-tab" data-lane="b"><b>B · API prices only + Costs tab <span class="rec" id="rec-b" hidden>Recommended</span></b><span>The same surfaces with each session's statusline cost: Claude at API prices, no subscription share, no accounts dependency.</span><span class="worst">Worst case: a month reads $1,222 on $600 of subscriptions; the figure says how hard you worked, not what you paid.</span></button>
+  <button class="lane-tab" data-lane="c"><b>C · Header total only <span class="rec" id="rec-c" hidden>Recommended</span></b><span>Only the Dashboard's "Today" figure at API prices, with a hover breakdown. No Costs tab, no history.</span><span class="worst">Worst case: "what did yaat cost this month?" has no answer, and ops-tower's ledgers are dropped.</span></button>
+</div>
+<div class="states" id="states">
+  <div class="ttl">State</div>
+  <button class="st-tab" data-st="normal">Normal</button>
+  <button class="st-tab" data-st="empty">First run</button>
+  <button class="st-tab" data-st="partial">Partly counted</button>
+  <button class="st-tab" data-st="error">Read failed</button>
+  <span class="hint" id="tabhint"></span>
+</div>
+
+<div class="app" id="app">
+  <nav class="rail">
+    <div class="ic"><svg viewBox="0 0 20 20"><path d="M4 6h12M4 10h12M4 14h12"/></svg></div>
+    <div class="ic on" title="Dashboard"><svg viewBox="0 0 20 20"><rect x="3" y="3" width="6" height="6" rx="1"/><rect x="11" y="3" width="6" height="4" rx="1"/><rect x="11" y="9" width="6" height="8" rx="1"/><rect x="3" y="11" width="6" height="6" rx="1"/></svg><span class="n ask">2</span></div>
+    <div class="ic"><svg viewBox="0 0 20 20"><path d="M3 11l2.5-6h9L17 11v5H3z"/><path d="M3 11h4l1 2h4l1-2h4"/></svg></div>
+    <div class="ic"><svg viewBox="0 0 20 20"><circle cx="6" cy="5" r="2"/><circle cx="6" cy="15" r="2"/><circle cx="14" cy="8" r="2"/><path d="M6 7v6M14 10c0 3-4 3-8 3"/></svg><span class="n">5</span></div>
+    <div class="sp"></div>
+    <div class="ic"><svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="7"/><path d="M10 6v4l3 2"/></svg></div>
+    <div class="ic" style="margin-bottom:6px"><svg viewBox="0 0 20 20"><path d="M4 6h8M15 6h1M4 14h2M9 14h7"/><circle cx="13.5" cy="6" r="1.6"/><circle cx="7.5" cy="14" r="1.6"/></svg></div>
+  </nav>
+  <div class="main">
+    <div class="tabbar" id="tabbar"></div>
+    <div class="content"><section class="view" id="view"></section></div>
+  </div>
+  <div class="footer">
+    <span class="pill">Connections</span>
+    <span class="pill"><span class="dot"></span>daemon · 8 sessions · :4242</span>
+    <span><span class="c-ask">◆</span> 2 need you</span>
+    <span><span class="c-work">◉</span> 3 working</span>
+    <span><span class="c-work">○</span> 1 background</span>
+    <span><span class="c-wait">○</span> 1 waiting</span>
+    <span class="sp"></span>
+    <span id="foottab">Costs</span>
+  </div>
+</div>
+
+<script>
+const RECOMMENDED = 'a';
+const REPOS = { 'rustling-tulip': '#f07a62', 'yaat': '#d9a15c', 'ops-tower': '#c9b8ff', 'skyline': '#8fb3f0', 'claude-config': '#e7849b' };
+
+// Wed 28 Oct, 14:32. Three Claude Max subscriptions at $200 a month: $600, $19.35 a day in a 31-day month.
+// share = API-equiv cost is never used to price the share; share comes from each account's 7-day window rises.
+const SESS = [
+  { g: 'asking', label: 'Settings modal height', repo: 'rustling-tulip', iss: 'RT-443', model: 'opus', run: '38m', tok: '426k', share: 0.70, api: 2.10, ds: 0 },
+  { g: 'asking', label: 'Gate chips in light theme', repo: 'ops-tower', iss: 'OPS-352', model: 'opus', run: '26m', tok: '277k', share: 0.45, api: 1.40, ds: 0 },
+  { g: 'working', label: 'Summary wire types', repo: 'rustling-tulip', iss: 'RT-444', model: 'opus', run: '1h 12m', tok: '1.28M', share: 2.30, api: 6.80, ds: 0 },
+  { g: 'working', label: 'Ready-to-taxi call-up', repo: 'yaat', iss: 'YAAT-308', model: 'opus', run: '1h 31m', tok: '1.65M', share: 2.45, api: 7.90, ds: 0 },
+  { g: 'working', label: 'Briefing login retry', repo: 'ops-tower', iss: 'OPS-347', model: 'opus', run: '2h 05m', tok: '2.08M', share: 2.70, api: 9.30, ds: 0 },
+  { g: 'idle', label: 'METAR parser RMK groups', repo: 'yaat', iss: 'YAAT-312', model: 'sonnet', run: '3h 10m', tok: '912k', share: 0.95, api: 3.20, ds: 0 },
+  { g: 'waiting', label: 'Sidebar repo sort', repo: 'rustling-tulip', iss: 'RT-451', model: 'opus', run: '1h 48m', tok: '1.22M', share: 1.90, api: 5.60, ds: 0 },
+  { g: 'stopped', label: 'Costs per repository', repo: 'ops-tower', iss: 'OPS-340', model: 'opus', run: '57m', tok: '990k', share: 1.25, api: 4.10, ds: 0 },
+  { g: 'stopped', label: 'Footer counts flyout', repo: 'rustling-tulip', iss: 'RT-438', model: 'opus', run: '1h 04m', tok: '1.05M', share: 1.22, api: 3.60, ds: 0 },
+  { g: 'dispatch', label: 'RT-444 r2 implementer', repo: 'rustling-tulip', iss: 'RT-444', model: 'deepseek-v4', run: '14m', tok: '2.9M', share: 0, api: 0, ds: 0.31, kind: 'dispatch' },
+  { g: 'dispatch', label: 'YAAT-308 test writer', repo: 'yaat', iss: 'YAAT-308', model: 'deepseek-v4', run: '9m', tok: '1.7M', share: 0, api: 0, ds: 0.18, kind: 'dispatch' },
+  { g: 'dispatch', label: 'OPS-347 implementer', repo: 'ops-tower', iss: 'OPS-347', model: 'deepseek-v4', run: '7m', tok: '1.2M', share: 0, api: 0, ds: 0.13, kind: 'dispatch' },
+  { g: 'done', label: 'Daily briefing', repo: null, iss: '', model: 'deepseek-v4', run: '1m 12s', tok: '380k', share: 0, api: 0, ds: 0.04, kind: 'briefing' },
+];
+// Per repo: claude share (A) and API-equiv (B) for today, 7 d, 30 d; DeepSeek today, 7 d, 30 d.
+const REPO_ROWS = [
+  { repo: 'rustling-tulip', share: [6.12, 41.80, 168.40], api: [18.10, 128.40, 521.30], ds: [0.31, 2.10, 7.95] },
+  { repo: 'yaat', share: [3.40, 26.10, 104.20], api: [11.10, 82.10, 322.90], ds: [0.18, 1.42, 4.10] },
+  { repo: 'ops-tower', share: [4.40, 22.70, 71.30], api: [14.80, 70.30, 221.00], ds: [0.13, 0.66, 1.20] },
+  { repo: 'claude-config', share: [0, 4.90, 22.10], api: [0, 15.20, 68.50], ds: [0, 0.20, 0.55] },
+  { repo: 'skyline', share: [0, 3.10, 18.60], api: [0, 9.60, 57.70], ds: [0, 0, 0.40] },
+  { repo: 'Daily briefing', kind: 'briefing', share: null, api: null, ds: [0.04, 0.28, 1.19] },
+  { repo: 'Not matched to a repository', kind: 'unmatched', share: [0.71, 2.60, 9.80], api: [0, 8.10, 30.40], ds: null },
+];
+// Last 7 days, newest first: share, API-equiv, DeepSeek, sessions.
+const DAYS = [
+  ['Today', 'Wed 28', 14.63, 44.00, 0.66, 13], ['', 'Tue 27', 18.20, 56.40, 1.02, 15], ['', 'Mon 26', 16.90, 52.40, 0.48, 11],
+  ['', 'Sun 25', 6.10, 18.90, 0, 3], ['', 'Sat 24', 9.80, 30.40, 0.12, 5], ['', 'Fri 23', 19.40, 60.10, 1.30, 16], ['', 'Thu 22', 16.17, 51.50, 1.08, 12],
+];
+const ALL = { share: 611.20, api: 1894.30, ds: 22.85, since: '12 Sep', dsSince: '30 Aug' };
+
+let lane = 'a', st = 'normal', tab = 'costs';
+const esc = (t) => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+const usd = (v, d = 2) => v === null || v === undefined ? '—' : '$' + v.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
+const sum = (a) => a.reduce((x, y) => x + y, 0);
+const glyph = (g) => `<span class="g ${g}"></span>`;
+const repo = (r) => r ? `<span class="repo"><i style="background:${REPOS[r]}"></i>${r}</span>` : '<span class="sub">—</span>';
+const isA = () => lane === 'a';
+const claudeKey = () => (isA() ? 'share' : 'api');
+const claudeName = () => (isA() ? 'Claude share' : 'Claude at API prices');
+
+// Partly counted: in A one account's share since 11:02 is missing (today x0.83); in B two sessions have no cost yet.
+const MISSING_B = { 'rustling-tulip': 2.10, 'ops-tower': 1.40 };
+function todayAdj(v, repoName) {
+  if (st !== 'partial') return v;
+  if (isA()) return v * 0.83;
+  return repoName === undefined ? v - 3.50 : v - (MISSING_B[repoName] || 0);
+}
+function adj(r, k) {
+  if (!r[k]) return null;
+  const a = [...r[k]];
+  a[0] = todayAdj(a[0], r.repo);
+  return a;
+}
+function totals() {
+  const k = claudeKey();
+  const col = (i) => sum(REPO_ROWS.map((r) => (r[k] ? adj(r, k)[i] : 0)));
+  const dcol = (i) => sum(REPO_ROWS.map((r) => (r.ds ? r.ds[i] : 0)));
+  return { cl: [col(0), col(1), col(2)], ds: [dcol(0), dcol(1), dcol(2)], all: [ALL[k], ALL.ds] };
+}
+
+/* ---------- Tab bar ---------- */
+function tabbar() {
+  const dashIc = '<svg viewBox="0 0 20 20" width="13" height="13"><rect x="3" y="3" width="6" height="6" rx="1"/><rect x="11" y="3" width="6" height="4" rx="1"/><rect x="11" y="9" width="6" height="8" rx="1"/><rect x="3" y="11" width="6" height="6" rx="1"/></svg>';
+  const costIc = '<svg viewBox="0 0 20 20" width="13" height="13"><path d="M4 16V9M8 16V5M12 16v-5M16 16V7"/></svg>';
+  const hasCosts = lane !== 'c';
+  let h = `<div class="t ${tab === 'dash' ? 'on' : ''}" data-tab="dash">${dashIc}Dashboard<span class="badge">2</span><span class="x">×</span></div>`;
+  if (hasCosts) h += `<div class="t ${tab === 'costs' ? 'on' : ''}" data-tab="costs">${costIc}Costs<span class="x">×</span></div>`;
+  h += `<div class="t"><span class="cnt">◉ 2/3</span>tulip<span class="x">×</span></div><div class="t"><span class="cnt">◉ 1/3</span>ops-tower<span class="x">×</span></div><div class="t"><span class="cnt">◉ 1/2</span>yaat<span class="x">×</span></div><div class="plus">+</div>`;
+  return h;
+}
+
+/* ---------- Dashboard header figure, per lane and state ---------- */
+function moneyFig(focus, flyout) {
+  const t = totals();
+  const cls = `money ${focus ? 'focus' : ''} ${st === 'partial' ? 'warn' : ''} ${st === 'error' ? 'err' : ''}`;
+  if (st === 'empty') return `<span class="${cls}"><span class="lab">Today</span><b>—</b><span class="sub">nothing recorded yet</span>${flyout || ''}</span>`;
+  const chev = lane === 'c' ? '' : '<span class="chev">›</span>';
+  const mark = st === 'partial' ? '<span class="c-ask">◆</span>' : st === 'error' ? '<span class="c-dan">⚠</span>' : '';
+  if (isA()) {
+    return `<span class="${cls}">${mark}<span class="lab">Today</span><b>${usd(t.cl[0] + t.ds[0])}</b><span class="sub">${st === 'partial' ? '2 of 3 accounts' : 'share + API'}</span>${chev}${flyout || ''}</span>`;
+  }
+  return `<span class="${cls}">${mark}<span class="lab">Today</span><b>${usd(t.cl[0] + t.ds[0])}</b><span class="sub">at API prices</span>${chev}${flyout || ''}</span>`;
+}
+function dashHeader(focus, flyout) {
+  return `<div class="hdr">
+    <h1>Dashboard</h1>
+    <div class="counts"><span class="cpill ask">${glyph('asking')}<b>2</b> need you</span><span class="cpill">${glyph('working')}<b>3</b> working</span><span class="cpill">${glyph('idle')}<b>1</b> idle</span><span class="cpill">${glyph('done')}<b>2</b> done</span></div>
+    <div class="hsp"></div>
+    <div class="figs">${moneyFig(focus, flyout)}<span><b>8.6M</b> tokens</span><span><b>14</b> commits</span><span><b>5</b> issues Done</span><span class="sep"></span>
+      <span class="rels"><span class="rel">vNext <span class="rb"><i style="width:61%"></i></span>11/18</span><span class="rel">ops 0.9 <span class="rb"><i style="width:67%"></i></span>6/9</span><span class="rel">yaat v0.14 <span class="rb"><i style="width:43%"></i></span>3/7</span></span>
+      <span class="lnsync"><i></i>Linear · 1m ago</span></div>
+    <div class="seg"><span class="on">By status</span><span>By repo</span></div>
+  </div>`;
+}
+function flyoutC() {
+  if (st === 'empty') return `<div class="flyout"><div class="h" style="margin-bottom:6px">Today</div><div class="sub">Nothing recorded yet. Each session's cost counts from its first turn.</div></div>`;
+  const t = totals();
+  const rows = [['Claude, at API prices', t.cl[0]], ['DeepSeek dispatches and briefing', t.ds[0]], ['Yesterday', 57.42]];
+  return `<div class="flyout"><div class="h" style="margin-bottom:6px">Today · since 00:00</div>
+    <div class="fr">${rows.map(([k, v], i) => `<span class="${i === 2 ? 'sub' : 't2'}">${k}</span><span class="v ${i === 2 ? 'sub' : ''}">${usd(v)}</span>`).join('')}</div>
+    ${st === 'partial' ? '<div class="note c-ask">2 sessions report no cost yet; they count from their next turn.</div>' : ''}
+    ${st === 'error' ? '<div class="note c-dan">Could not read the day total; showing 14:05.</div>' : ''}
+    <div class="note">What each session's tokens would cost at API prices, not what the subscriptions charge. Shown on hover; there is no Costs tab.</div></div>`;
+}
+function dashView() {
+  const rows = SESS.filter((s) => !s.kind && s.label !== 'Footer counts flyout');
+  const groups = [['Needs you', ['asking']], ['Working', ['working']], ['Idle', ['idle']], ['Done', ['waiting', 'stopped']]];
+  const stateTxt = { asking: ['c-ask', 'Question'], working: ['c-work', 'Working'], idle: ['t2', 'Idle'], waiting: ['c-wait', 'Finished'], stopped: ['sub', 'Exited 0'] };
+  let h = dashHeader(lane !== 'c', lane === 'c' ? flyoutC() : '') + `<div class="dash"><div class="cols"><div></div><div>Session</div><div>Linear</div><div>Now</div><div class="r">Run</div><div class="r">Cost</div></div>`;
+  for (const [name, gs] of groups) {
+    const list = rows.filter((s) => gs.includes(s.g));
+    h += `<div class="grp ${name === 'Needs you' ? 'ask' : ''}"><span class="h">${name}</span><span class="sub" style="font-size:11px">${list.length}</span></div>`;
+    for (const s of list) {
+      const [c, t0] = stateTxt[s.g];
+      const t = s.iss === 'OPS-352' ? 'Permission' : t0;
+      const cost = isA() ? `<span>${usd(s.share)}</span><span class="sub" style="font-size:11px">${usd(s.api)} API</span>` : `<span>${usd(s.api)}</span><span class="sub" style="font-size:11px">${s.tok}</span>`;
+      h += `<div class="row ${s.g === 'asking' ? 'askrow' : ''}"><div>${glyph(s.g)}</div><div class="two"><span style="font-weight:600" class="cut">${esc(s.label)}</span><span style="font-size:11.5px">${repo(s.repo)}</span></div>
+        <div><span class="iss">${s.iss}</span></div><div><b class="${c}" style="font-weight:600">${t}</b></div><div class="r">${s.run}</div><div class="r two" style="align-items:flex-end">${st === 'empty' ? '<span class="sub">—</span>' : cost}</div></div>`;
+    }
+  }
+  const where = lane === 'c' ? 'Lane C: the figure is the whole feature; hovering it shows the breakdown above.' : 'The highlighted "Today" figure opens the Costs tab. Rows below are the approved Dashboard (RT-28 lane A), abbreviated to the cost column.';
+  return h + `<div class="note">${where}</div></div>`;
+}
+
+/* ---------- Costs tab ---------- */
+function banner() {
+  if (st === 'partial') {
+    return isA()
+      ? `<div class="banner warn"><span class="k">◆ Partly counted</span><span>Claude share from 2 of 3 accounts: <b>work</b> has had no usage reading since 11:02, so its share from then is missing. The other accounts' hours are complete.</span><span class="hsp"></span><button class="btn">Open Accounts</button></div>`
+      : `<div class="banner warn"><span class="k">◆ Partly counted</span><span>2 sessions report no cost yet (Settings modal height, Gate chips in light theme): their statusline has not run since the daemon restarted at 13:58. They count from their next turn.</span></div>`;
+  }
+  if (st === 'error') return `<div class="banner err"><span class="k">⚠ Could not read the costs</span><span class="mono">C:\\Users\\lefto\\.claude\\projects: access is denied (os error 5)</span><span class="sub">Showing the figures from 14:05; retrying every 5 min.</span><span class="hsp"></span><button class="btn">Retry now</button></div>`;
+  return '';
+}
+function costsHeader() {
+  const meta = st === 'empty'
+    ? '<span>Nothing recorded yet</span>'
+    : isA()
+      ? `<span><span class="sw cl"></span>Claude since <b>${ALL.since}</b>, subscription share of <b>3 accounts · $600/mo</b></span><span><span class="sw ds"></span>DeepSeek since <b>${ALL.dsSince}</b>, API</span><span class="sub">History imported from ops-tower</span>`
+      : `<span><span class="sw cl"></span>Claude since <b>${ALL.since}</b>, at API prices (statusline cost)</span><span><span class="sw ds"></span>DeepSeek since <b>${ALL.dsSince}</b>, API</span><span class="sub">Earlier Claude days rebuilt from transcripts</span>`;
+  const upd = st === 'error' ? '<span class="c-dan" style="font-size:12px">Updated 14:05</span>' : '<span class="sub" style="font-size:12px">Updated 14:32</span>';
+  return `<div class="chd"><h1>Costs</h1><div class="meta">${meta}</div><div class="hsp"></div>${upd}<div class="seg"><span class="on">This PC</span><span>All hosts</span></div></div>`;
+}
+function tile(name, cl, ds, foot, pct) {
+  if (st === 'empty') return `<div class="tile"><div class="h"><span>${name}</span></div><div class="big sub">—</div><div class="split"><span><span class="sw cl"></span>—</span><span><span class="sw ds"></span>—</span></div><div class="foot">&nbsp;</div></div>`;
+  const tot = cl + ds;
+  return `<div class="tile"><div class="h"><span>${name}</span>${st === 'error' ? '<span class="asof">as of 14:05</span>' : ''}</div>
+    <div class="big">${usd(tot)}</div>
+    <div class="split"><span><span class="sw cl"></span>${isA() ? 'Claude share' : 'Claude'} <b>${usd(cl)}</b></span><span><span class="sw ds"></span>DeepSeek <b>${usd(ds)}</b></span></div>
+    <div class="bar"><i style="width:${(cl / tot) * 100}%;background:var(--claude)"></i><i style="width:${(ds / tot) * 100}%;background:var(--deepseek)"></i></div>
+    <div class="foot">${foot}</div></div>`;
+}
+function tiles() {
+  const t = totals();
+  const sub = (v, per) => (isA() ? `${Math.round((v / per) * 100)}% of the subscriptions' ${per === 19.35 ? 'day' : per === 135.48 ? 'week' : '30 days'} (${usd(per, 0)})` : '');
+  const fA = [
+    st === 'partial' ? '<span class="c-ask">2 of 3 accounts read since 11:02</span>' : sub(t.cl[0], 19.35),
+    sub(t.cl[1], 135.48), sub(t.cl[2], 580.65), `since ${ALL.since} · ${usd(ALL.share / 47)} a day on average`];
+  const fB = [`13 sessions · 8.6M tokens`, `75 sessions · 49M tokens`, `284 sessions · 191M tokens`, `since ${ALL.since} · ${usd(ALL.api / 47)} a day on average`];
+  const f = isA() ? fA : fB;
+  return `<div class="tiles">${tile('Today', t.cl[0], t.ds[0], f[0])}${tile('7 days', t.cl[1], t.ds[1], f[1])}${tile('30 days', t.cl[2], t.ds[2], f[2])}${tile('All', t.all[0], t.all[1], f[3])}</div>`;
+}
+function series() {
+  // 30 days ending today. The last 7 match the By day table; the 23 before are scaled so the 30 sum to the 30 d tile.
+  const k = isA() ? 2 : 3;
+  const last7 = DAYS.map((d) => [d[k], d[4]]).reverse();
+  const pattern = [17, 19, 8, 6, 18, 20, 16, 17, 15, 5, 9, 19, 21, 18, 16, 19, 7, 4, 17, 18, 20, 15, 17];
+  const t = totals();
+  const restCl = t.cl[2] - sum(last7.map((x) => x[0]));
+  const restDs = t.ds[2] - sum(last7.map((x) => x[1]));
+  const ps = sum(pattern);
+  const early = pattern.map((p, i) => [(p / ps) * restCl, (pattern[(i + 5) % pattern.length] / ps) * restDs]);
+  last7[6][0] = todayAdj(last7[6][0]);
+  return early.concat(last7);
+}
+function chart() {
+  const head = `<div class="bh"><span class="h">Daily spend · last 30 days</span><span class="r"><span><span class="sw cl"></span>${claudeName()}</span><span><span class="sw ds"></span>DeepSeek</span>${isA() ? '<span><span style="display:inline-block;width:14px;border-top:1px dashed var(--asking);vertical-align:3px;margin-right:5px"></span>subscriptions, $19.35 a day</span>' : ''}</span></div>`;
+  if (st === 'empty') return `<div class="box chart">${head}<div class="chartempty">No spend recorded yet</div><div style="height:10px"></div></div>`;
+  const data = series();
+  const W = 1530, H = 150, top = 8, bot = 22, left = 44;
+  const max = isA() ? 30 : 75;
+  const y = (v) => top + (H - top - bot) * (1 - v / max);
+  const bw = (W - left - 8) / data.length;
+  let g = '';
+  const ticks = isA() ? [0, 10, 20, 30] : [0, 25, 50, 75];
+  for (const tv of ticks) g += `<line x1="${left}" x2="${W - 4}" y1="${y(tv)}" y2="${y(tv)}" stroke="#2a2830"/><text x="${left - 8}" y="${y(tv) + 4}" fill="#6e6a77" font-size="10.5" text-anchor="end" font-family="Geist">$${tv}</text>`;
+  const labels = { 0: '29 Sep', 7: '6 Oct', 14: '13 Oct', 21: '20 Oct', 29: 'Today' };
+  data.forEach(([cl, ds], i) => {
+    const x = left + i * bw + 3, w = bw - 6, today = i === data.length - 1;
+    const op = today ? 1 : 0.72;
+    g += `<rect x="${x}" y="${y(cl)}" width="${w}" height="${y(0) - y(cl)}" fill="#8fb3f0" opacity="${op}" rx="1.5"/>`;
+    if (ds > 0) g += `<rect x="${x}" y="${y(cl + ds) - 1}" width="${w}" height="${Math.max(1.5, y(0) - y(ds))}" fill="#d9a15c" opacity="${op}"/>`;
+    if (labels[i] !== undefined) g += `<text x="${x + w / 2}" y="${H - 6}" fill="${today ? '#ede9e4' : '#6e6a77'}" font-size="10.5" text-anchor="middle" font-family="Geist">${labels[i]}</text>`;
+  });
+  if (isA()) g += `<line x1="${left}" x2="${W - 4}" y1="${y(19.35)}" y2="${y(19.35)}" stroke="#f6bc4e" stroke-dasharray="4 4" opacity=".7"/>`;
+  return `<div class="box chart">${head}<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${g}</svg></div>`;
+}
+function repoTable() {
+  const k = claudeKey();
+  const t = totals();
+  const head = `<div class="bh"><span class="h">By repository</span><span class="r">${isA() ? 'Each hour\'s share split by that hour\'s transcript usage' : 'Each session\'s cost, by its repository'}</span></div>`;
+  if (st === 'empty') return `<div class="box">${head}<div class="empty"><b>Nothing recorded yet.</b><br>${isA() ? 'The Claude share starts with the first accounts reading; DeepSeek with the first dispatch or briefing.' : 'Claude costs start with each session\'s first turn; DeepSeek with the first dispatch or briefing.'}<br><br><button class="btn">Import ops-tower's history</button> <span class="sub" style="margin-left:6px">share ledger since 12 Sep · runs since 30 Aug</span></div></div>`;
+  const rows = REPO_ROWS.filter((r) => isA() || r.kind !== 'unmatched' || r.api);
+  const max30 = Math.max(...rows.map((r) => (r[k] ? r[k][2] : 0) + (r.ds ? r.ds[2] : 0)));
+  const cell = (a, i, edge) => `<td class="${edge ? 'edge' : ''} ${!a || a[i] === 0 ? 'dash0' : ''}">${a ? (a[i] === 0 ? '—' : usd(a[i])) : '—'}</td>`;
+  const body = rows.map((r) => {
+    const c30 = r[k] ? r[k][2] : 0, d30 = r.ds ? r.ds[2] : 0;
+    const name = r.kind === 'unmatched' ? (isA() ? 'Not matched to a repository' : 'Not in a repository') : r.kind === 'briefing' ? 'Daily briefing' : r.repo;
+    const clA = adj(r, k);
+    return `<tr class="${r.kind ? 'muted' : ''}"><td class="l">${r.kind ? `<span class="sub">${name}</span>` : repo(r.repo)}</td>${cell(clA, 0, true)}${cell(clA, 1)}${cell(clA, 2)}${cell(r.ds, 0, true)}${cell(r.ds, 1)}${cell(r.ds, 2)}
+      <td class="edge l"><b style="font-weight:500">${usd(c30 + d30)}</b><span class="share"><i style="width:${(c30 / max30) * 100}%;background:var(--claude)"></i><i style="width:${(d30 / max30) * 100}%;background:var(--deepseek)"></i></span></td></tr>`;
+  }).join('');
+  const foot = `<tr><td class="l">All</td><td class="edge">${usd(t.cl[0])}</td><td>${usd(t.cl[1])}</td><td>${usd(t.cl[2])}</td><td class="edge">${usd(t.ds[0])}</td><td>${usd(t.ds[1])}</td><td>${usd(t.ds[2])}</td><td class="edge l">${usd(t.cl[2] + t.ds[2])}</td></tr>`;
+  return `<div class="box">${head}<table class="tb"><colgroup><col style="width:200px"><col><col><col><col><col><col><col style="width:150px"></colgroup>
+    <thead><tr><th></th><th class="grp edge" colspan="3">${claudeName()}</th><th class="grp edge" colspan="3">DeepSeek</th><th class="edge"></th></tr>
+    <tr><th class="l">Repository</th><th class="edge">Today</th><th>7 d</th><th>30 d</th><th class="edge">Today</th><th>7 d</th><th>30 d</th><th class="edge l">30 d both</th></tr></thead>
+    <tbody>${body}</tbody><tfoot>${foot}</tfoot></table></div>`;
+}
+function dayTable() {
+  const k = isA() ? 2 : 3;
+  const head = `<div class="bh"><span class="h">By day</span><span class="r"><span class="link">Show 30 days</span></span></div>`;
+  if (st === 'empty') return `<div class="box">${head}<div class="empty">Days appear here as they are recorded.</div></div>`;
+  const body = DAYS.map((d, i) => {
+    const cl = i === 0 ? todayAdj(d[k]) : d[k];
+    return `<tr class="${i === 0 ? 'today' : ''}"><td class="l">${d[0] ? '<b style="font-weight:600">Today</b> <span class="sub">' + d[1] + '</span>' : d[1]}</td><td>${usd(cl)}</td><td class="${d[4] ? '' : 'dash0'}">${d[4] ? usd(d[4]) : '—'}</td><td><b style="font-weight:500">${usd(cl + d[4])}</b></td><td class="sub">${d[5]}</td></tr>`;
+  }).join('');
+  return `<div class="box">${head}<table class="tb"><colgroup><col style="width:120px"><col><col><col><col style="width:76px"></colgroup>
+    <thead><tr><th class="l">Day</th><th>${isA() ? 'Claude share' : 'Claude'}</th><th>DeepSeek</th><th>Total</th><th>Sessions</th></tr></thead><tbody>${body}</tbody></table></div>`;
+}
+function sessTable() {
+  const head = `<div class="bh"><span class="h">By session · today</span><span class="r">${isA() ? '<span>Claude share: the session\'s part of each hour\'s share, by its transcript usage</span>' : '<span>Claude: the session\'s statusline cost, subagents included</span>'}<div class="seg"><span class="on">Today</span><span>7 d</span><span>30 d</span></div></span></div>`;
+  if (st === 'empty') return `<div class="box sess">${head}<div class="empty">No sessions have cost anything yet today.</div></div>`;
+  const sorted = [...SESS].sort((a, b) => (b[claudeKey()] + b.ds) - (a[claudeKey()] + a.ds));
+  const noCost = (s) => st === 'partial' && !isA() && (s.iss === 'RT-443' || s.iss === 'OPS-352');
+  const body = sorted.map((s) => {
+    const cl = s[claudeKey()];
+    const clCell = s.kind ? '<td class="dash0">—</td>' : noCost(s) ? '<td class="c-ask">not yet</td>' : `<td>${usd(cl)}</td>`;
+    const apiCell = isA() ? (s.kind ? '<td class="dash0">—</td>' : `<td><span class="api">${usd(s.api)}</span></td>`) : '';
+    const tag = s.kind === 'dispatch' ? '<span class="tag">dispatch</span>' : s.kind === 'briefing' ? '<span class="tag">briefing</span>' : '';
+    const total = (noCost(s) ? 0 : cl) + s.ds;
+    return `<tr><td class="l" style="padding-right:0">${glyph(s.g)}</td><td class="l"><span style="font-weight:500">${esc(s.label)}</span>${tag}</td><td class="l">${repo(s.repo)}</td><td class="l"><span class="iss">${s.iss || ''}</span></td>
+      <td class="l t2">${s.model}</td><td>${s.run}</td><td class="t2">${s.tok}</td>${clCell}${apiCell}<td class="${s.ds ? '' : 'dash0'}">${s.ds ? usd(s.ds) : '—'}</td><td><b style="font-weight:500">${noCost(s) ? '<span class="c-ask">—</span>' : usd(total)}</b></td></tr>`;
+  }).join('');
+  const cols = isA()
+    ? '<col style="width:30px"><col style="width:270px"><col style="width:150px"><col style="width:96px"><col style="width:110px"><col><col><col><col><col><col>'
+    : '<col style="width:30px"><col style="width:270px"><col style="width:150px"><col style="width:96px"><col style="width:110px"><col><col><col><col><col>';
+  const th = `<tr><th></th><th class="l">Session</th><th class="l">Repository</th><th class="l">Issue</th><th class="l">Model</th><th>Run</th><th>Tokens</th><th>${isA() ? 'Claude share' : 'Claude'}</th>${isA() ? '<th>API prices</th>' : ''}<th>DeepSeek</th><th>Total</th></tr>`;
+  return `<div class="box sess">${head}<table class="tb"><colgroup>${cols}</colgroup><thead>${th}</thead><tbody>${body}</tbody></table></div>`;
+}
+function costsView() {
+  return `<div class="cv">${costsHeader()}${banner()}${tiles()}${chart()}<div class="grid2">${repoTable()}${dayTable()}</div>${sessTable()}</div>`;
+}
+
+/* ---------- Wiring ---------- */
+function render() {
+  if (lane === 'c' && tab === 'costs') tab = 'dash';
+  document.getElementById('tabbar').innerHTML = tabbar();
+  document.getElementById('view').innerHTML = tab === 'costs' ? costsView() : dashView();
+  document.getElementById('foottab').textContent = tab === 'costs' ? 'Costs' : 'Dashboard';
+  for (const t of document.querySelectorAll('.lane-tab')) t.classList.toggle('on', t.dataset.lane === lane);
+  for (const t of document.querySelectorAll('.st-tab')) t.classList.toggle('on', t.dataset.st === st);
+  document.getElementById('tabhint').textContent = lane === 'c' ? 'Lane C has no Costs tab: the Dashboard header and its hover breakdown are the whole feature.' : 'Click the Dashboard and Costs tabs in the app to switch between the header figure and the Costs view.';
+  history.replaceState(null, '', `#${lane}-${st}-${tab}`);
+}
+document.getElementById('rec-' + RECOMMENDED).hidden = false;
+document.getElementById('lanes').addEventListener('click', (e) => { const t = e.target.closest('.lane-tab'); if (t) { lane = t.dataset.lane; tab = lane === 'c' ? 'dash' : 'costs'; render(); } });
+document.getElementById('states').addEventListener('click', (e) => { const t = e.target.closest('.st-tab'); if (t) { st = t.dataset.st; render(); } });
+document.getElementById('tabbar').addEventListener('click', (e) => { const t = e.target.closest('[data-tab]'); if (t) { tab = t.dataset.tab; render(); } });
+const m = (location.hash || '').slice(1).split('-');
+if (m[0] && 'abc'.includes(m[0])) lane = m[0];
+if (m[1]) st = m[1];
+if (m[2]) tab = m[2];
+render();
+</script>
+</body>
+</html>

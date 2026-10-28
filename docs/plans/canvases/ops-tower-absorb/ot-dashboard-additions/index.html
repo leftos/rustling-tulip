@@ -1,0 +1,932 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dashboard additions</title>
+<style>
+@font-face { font-family: "Geist"; font-weight: 400; src: url("../../../../../apps/native/assets/fonts/Geist/Geist-Regular.ttf"); }
+@font-face { font-family: "Geist"; font-weight: 500; src: url("../../../../../apps/native/assets/fonts/Geist/Geist-Medium.ttf"); }
+@font-face { font-family: "Geist"; font-weight: 600; src: url("../../../../../apps/native/assets/fonts/Geist/Geist-SemiBold.ttf"); }
+@font-face { font-family: "Geist"; font-weight: 700; src: url("../../../../../apps/native/assets/fonts/Geist/Geist-Bold.ttf"); }
+@font-face { font-family: "JBM"; font-weight: 400; src: url("../../../../../apps/native/assets/fonts/JetBrainsMono/JetBrainsMono-Regular.ttf"); }
+@font-face { font-family: "JBM"; font-weight: 700; src: url("../../../../../apps/native/assets/fonts/JetBrainsMono/JetBrainsMono-Bold.ttf"); }
+
+/* Tokens: apps/native/src/palette.rs */
+:root {
+  --ground: #111013; --sunken: #0b0a0d; --surface: #161519; --raised: #1b1a1f; --chip: #232129; --hover: #2c2a33;
+  --line: #2a2830; --line-strong: #3a3742;
+  --text: #ede9e4; --text-2: #a7a2ad; --subtle: #8c8794; --faint: #6e6a77;
+  --accent: #f07a62; --on-accent: #1c100d;
+  --working: #6ca6ff; --asking: #f6bc4e; --on-asking: #2a1b00; --waiting: #4fc89d; --danger: #f26d6d;
+  --lilac: #c9b8ff; --ochre: #d9a15c; --rose: #e7849b; --peri: #8fb3f0;
+  --ask-wash: rgba(246, 188, 78, 0.07); --danger-wash: rgba(242, 109, 109, 0.10);
+  --mono: "JBM", ui-monospace, monospace;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: #08070a; color: var(--text); font-family: "Geist", system-ui, sans-serif; font-size: 13px; }
+button { font: inherit; color: inherit; }
+
+/* Lane switcher, outside the app frame */
+.lanes { display: flex; gap: 6px; align-items: stretch; padding: 10px 16px; width: 1600px; margin: 0 auto; }
+.lanes .ttl { font-weight: 600; color: var(--text-2); align-self: center; margin-right: 8px; white-space: nowrap; }
+.lane-tab { flex: 1; text-align: left; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 7px 10px; cursor: pointer; }
+.lane-tab b { display: block; font-weight: 600; }
+.lane-tab span { color: var(--subtle); font-size: 12px; }
+.lane-tab.on { border-color: var(--accent); background: var(--raised); }
+.rec { display: inline-block; margin-left: 6px; font-size: 10.5px; font-weight: 600; color: var(--on-accent); background: var(--accent); padding: 1px 6px; border-radius: 3px; vertical-align: 1px; }
+
+/* App frame */
+.app { width: 1600px; height: 1000px; margin: 0 auto 24px; display: grid; grid-template-columns: 48px 1fr; grid-template-rows: 1fr 24px; background: var(--ground); border: 1px solid var(--line); overflow: hidden; }
+.rail { background: var(--sunken); border-right: 1px solid var(--line); display: flex; flex-direction: column; align-items: center; padding-top: 6px; gap: 6px; }
+.rail .ic { width: 34px; height: 34px; border-radius: 6px; display: grid; place-items: center; color: var(--text-2); position: relative; }
+.rail .ic.on { background: var(--chip); color: var(--text); box-shadow: inset 2px 0 0 var(--accent); }
+.rail .ic .n { position: absolute; top: 2px; right: 2px; font-size: 9px; background: var(--chip); color: var(--text-2); border-radius: 6px; padding: 0 3px; }
+.rail .ic .n.ask { background: var(--asking); color: var(--on-asking); font-weight: 700; }
+.rail .sp { flex: 1; }
+.rail svg { width: 18px; height: 18px; stroke: currentColor; fill: none; stroke-width: 1.6; }
+.main { display: grid; grid-template-rows: 38px 1fr; min-width: 0; min-height: 0; }
+.tabbar { background: var(--surface); border-bottom: 1px solid var(--line); display: flex; align-items: stretch; }
+.tabbar .t { display: flex; align-items: center; gap: 7px; padding: 0 14px; border-right: 1px solid var(--line); color: var(--text-2); font-weight: 500; }
+.tabbar .t.on { color: var(--text); background: var(--ground); box-shadow: inset 0 2px 0 var(--accent); }
+.tabbar .t .x { color: var(--faint); margin-left: 6px; }
+.tabbar .t .cnt { font-size: 11px; color: var(--working); }
+.tabbar .t .badge { font-size: 10.5px; font-weight: 700; background: var(--asking); color: var(--on-asking); border-radius: 3px; padding: 0 5px; }
+.tabbar .plus { padding: 0 14px; display: flex; align-items: center; color: var(--subtle); font-size: 16px; }
+.footer { grid-column: 1 / -1; background: var(--sunken); border-top: 1px solid var(--line); display: flex; align-items: center; gap: 14px; padding: 0 10px; font-size: 11.5px; color: var(--text-2); }
+.footer .pill { border: 1px solid var(--line-strong); border-radius: 10px; padding: 0 8px; line-height: 17px; }
+.footer .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #3fb96a; margin-right: 5px; }
+.footer .sp { flex: 1; }
+.content { overflow: hidden; min-height: 0; position: relative; }
+.view { display: none; height: 100%; overflow: auto; }
+.view.on { display: block; }
+
+/* Status glyphs, as the sidebar draws them */
+.g { display: inline-block; flex: none; width: 12px; height: 12px; border-radius: 50%; position: relative; vertical-align: -1px; }
+.g.working { border: 2px solid var(--working); }
+.g.working::after { content: ""; position: absolute; inset: 2px; border-radius: 50%; background: var(--working); }
+.g.asking { border-radius: 3px; background: var(--asking); }
+.g.asking::after { content: "!"; position: absolute; inset: 0; color: var(--on-asking); font-size: 9.5px; font-weight: 700; text-align: center; line-height: 12px; }
+.g.waiting { border: 2px solid var(--waiting); }
+.g.idle { width: 8px; height: 8px; margin: 2px; background: var(--faint); }
+.g.stopped { border-radius: 2px; width: 10px; height: 10px; margin: 1px; border: 2px solid var(--faint); }
+.g.done { width: 12px; height: 12px; }
+.g.done::after { content: "✓"; position: absolute; inset: 0; color: var(--waiting); font-size: 11px; font-weight: 700; line-height: 12px; text-align: center; }
+.g.queued { border: 2px dashed var(--faint); }
+.g.gate { border-radius: 2px; border: 2px solid var(--working); width: 11px; height: 11px; }
+.g.gate::after { content: ""; position: absolute; left: 2px; right: 2px; top: 2.5px; height: 2px; background: var(--working); }
+.g.sm { transform: scale(0.85); }
+
+/* Shared bits */
+.mono { font-family: var(--mono); font-size: 11.5px; }
+.sub { color: var(--subtle); }
+.t2 { color: var(--text-2); }
+.cut { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.repo { display: inline-flex; align-items: center; gap: 5px; color: var(--text-2); white-space: nowrap; flex: none; }
+.il { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; flex: none; }
+.repo i { width: 7px; height: 7px; border-radius: 2px; display: inline-block; }
+.c-ask { color: var(--asking); } .c-work { color: var(--working); } .c-wait { color: var(--waiting); } .c-dan { color: var(--danger); } .c-faint { color: var(--faint); }
+.iss { font-family: var(--mono); font-size: 11.5px; color: var(--text); font-weight: 700; white-space: nowrap; flex: none; }
+.lst { display: inline-flex; align-items: center; gap: 4px; font-size: 11.5px; color: var(--text-2); white-space: nowrap; flex: none; }
+.lst .si { width: 10px; height: 10px; border-radius: 50%; border: 1.5px solid; display: inline-block; position: relative; }
+.lst .si.prog { border-color: var(--peri); background: conic-gradient(var(--peri) 0 50%, transparent 0); }
+.lst .si.rev { border-color: var(--waiting); background: conic-gradient(var(--waiting) 0 75%, transparent 0); }
+.lst .si.done { border-color: var(--lilac); background: var(--lilac); }
+.lst .si.todo { border-color: var(--faint); }
+.prio { display: inline-flex; align-items: flex-end; gap: 1px; height: 10px; vertical-align: -1px; }
+.prio i { width: 2.5px; background: var(--faint); display: block; border-radius: 1px; }
+.prio i.on { background: var(--text-2); }
+.prio.urgent { width: 11px; height: 11px; background: var(--danger); border-radius: 2px; color: #1a0606; font-size: 9px; font-weight: 700; justify-content: center; align-items: center; }
+.ctx { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; color: var(--text-2); }
+.ctx .bar { width: 38px; height: 5px; background: var(--chip); border-radius: 3px; overflow: hidden; }
+.ctx .bar i { display: block; height: 100%; background: var(--text-2); }
+.ctx.hot .bar i { background: var(--danger); } .ctx.hot { color: var(--danger); }
+.spark { display: inline-flex; align-items: flex-end; gap: 1.5px; height: 18px; }
+.spark i { width: 5px; background: var(--working); opacity: .75; border-radius: 1px 1px 0 0; }
+.spark.quiet i { background: var(--faint); }
+.stuck { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 600; color: var(--danger); background: var(--danger-wash); border: 1px solid rgba(242,109,109,.35); border-radius: 3px; padding: 0 5px; line-height: 16px; white-space: nowrap; }
+.btn { background: var(--chip); border: 1px solid var(--line-strong); border-radius: 5px; padding: 3px 9px; font-size: 12px; cursor: pointer; white-space: nowrap; }
+.btn.pri { background: var(--asking); color: var(--on-asking); border-color: var(--asking); font-weight: 600; }
+.btn.ghost { background: transparent; }
+.btn .k { font-family: var(--mono); font-size: 10.5px; color: var(--subtle); margin-right: 5px; }
+.btn.pri .k { color: rgba(42,27,0,.7); }
+.win { display: inline-block; width: 46px; flex: none; color: var(--faint); font-size: 11px; font-variant-numeric: tabular-nums; }
+.add { color: var(--waiting); } .del { color: var(--danger); }
+.fst { font-family: var(--mono); font-size: 10.5px; width: 12px; display: inline-block; font-weight: 700; }
+.fst.M { color: var(--ochre); } .fst.A { color: var(--waiting); } .fst.D { color: #e58a8a; }
+.sha { font-family: var(--mono); font-size: 11px; color: var(--peri); }
+.h { font-size: 10.5px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--subtle); }
+.lnsync { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--subtle); }
+.lnsync i { width: 6px; height: 6px; border-radius: 50%; background: var(--lilac); display: inline-block; }
+
+/* Header strip, shared by every lane */
+.hdr { display: flex; align-items: center; gap: 14px; padding: 10px 18px 10px; border-bottom: 1px solid var(--line); background: var(--surface); }
+.hdr h1 { font-size: 15px; font-weight: 600; margin: 0; }
+.counts { display: flex; gap: 4px; }
+.cpill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px; border-radius: 5px; background: var(--chip); font-size: 12px; color: var(--text-2); }
+.cpill b { color: var(--text); font-weight: 600; }
+.cpill.ask { background: rgba(246,188,78,.14); color: var(--asking); } .cpill.ask b { color: var(--asking); }
+.figs { display: flex; gap: 16px; font-size: 12px; color: var(--text-2); }
+.figs b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+.figs .sep { width: 1px; background: var(--line-strong); }
+.seg { display: inline-flex; background: var(--raised); border: 1px solid var(--line); border-radius: 5px; padding: 2px; }
+.seg span { padding: 2px 9px; border-radius: 3px; font-size: 12px; color: var(--text-2); }
+.seg span.on { background: var(--chip); color: var(--text); font-weight: 500; }
+.hsp { flex: 1; }
+.queue { display: flex; align-items: center; gap: 8px; padding: 7px 18px; border-bottom: 1px solid var(--line); background: var(--ask-wash); }
+.qchip { display: inline-flex; align-items: center; gap: 7px; max-width: 560px; background: var(--raised); border: 1px solid rgba(246,188,78,.35); border-radius: 5px; padding: 3px 9px 3px 7px; font-size: 12px; }
+.qchip .age { color: var(--asking); font-weight: 600; font-variant-numeric: tabular-nums; }
+.rels { display: flex; gap: 10px; font-size: 11.5px; color: var(--text-2); }
+.rel { display: inline-flex; align-items: center; gap: 5px; }
+.rel .rb { width: 44px; height: 4px; background: var(--chip); border-radius: 2px; overflow: hidden; }
+.rel .rb i { display: block; height: 100%; background: var(--lilac); }
+
+/* ---------- Lane A: dense rows ---------- */
+.ta { padding: 0 0 20px; }
+.ta .cols, .ta .row, .ta .subrow { display: grid; grid-template-columns: 30px 232px 248px minmax(0,1fr) minmax(0,1fr) 104px 74px 70px 72px 66px; column-gap: 12px; align-items: center; padding: 0 18px 0 14px; }
+.ta .cols { position: sticky; top: 0; z-index: 2; background: var(--ground); border-bottom: 1px solid var(--line); height: 26px; }
+.ta .cols div { font-size: 10.5px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; color: var(--subtle); }
+.ta .num { text-align: right; justify-self: end; }
+.ta .grp { display: flex; align-items: center; gap: 8px; padding: 12px 18px 5px 14px; }
+.ta .grp .h { color: var(--text-2); }
+.ta .grp .n { font-size: 11px; color: var(--subtle); }
+.ta .grp.ask .h { color: var(--asking); }
+.ta .row { min-height: 46px; border-top: 1px solid var(--line); cursor: pointer; padding-top: 5px; padding-bottom: 5px; }
+.ta .row:hover { background: var(--surface); }
+.ta .row.open { background: var(--raised); }
+.ta .row.askrow { background: var(--ask-wash); box-shadow: inset 2px 0 0 var(--asking); }
+.ta .row .two { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.ta .row .l1 { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.ta .lbl { font-weight: 600; }
+.ta .subrow { height: 23px; font-size: 12px; }
+.ta .subrow .tn { grid-column: 2 / 4; display: flex; align-items: center; gap: 6px; padding-left: 12px; min-width: 0; color: var(--text-2); }
+.ta .subrow .tn .br { color: var(--line-strong); font-family: var(--mono); width: 14px; flex: none; }
+.ta .subrow .tn .br2 { margin-left: 18px; }
+.opts { display: flex; gap: 6px; flex-wrap: wrap; }
+.cmd { display: inline-block; background: var(--sunken); border: 1px solid var(--line); border-radius: 4px; padding: 2px 7px; margin: 0 0 7px; }
+.ta .subrow .act { grid-column: 4 / 6; min-width: 0; }
+.ta .subrow .age { grid-column: 9 / 10; justify-self: end; color: var(--subtle); font-size: 11.5px; }
+.ta .subrow .stk { grid-column: 6 / 9; }
+.ta .askb { display: flex; align-items: flex-start; gap: 14px; margin: 0 18px 0 56px; padding: 7px 10px 9px; border-left: 2px solid var(--asking); background: var(--ask-wash); }
+.ta .askb .q { flex: 1; min-width: 0; }
+.ta .askb .q .tx { color: var(--text); margin-bottom: 6px; }
+.ta .askb .opts { display: flex; gap: 6px; flex-wrap: wrap; }
+.ta .askb .cmd { display: inline-block; background: var(--sunken); border: 1px solid var(--line); border-radius: 4px; padding: 2px 7px; margin: 0 0 6px; }
+.drawer { margin: 0 18px 4px 14px; border: 1px solid var(--line-strong); border-top: 0; background: var(--surface); display: grid; grid-template-columns: 1.15fr 1fr 0.9fr; }
+.drawer > div { padding: 10px 14px 12px; border-right: 1px solid var(--line); min-width: 0; }
+.drawer > div:last-child { border-right: 0; }
+.drawer .h { margin-bottom: 7px; display: flex; align-items: center; gap: 8px; }
+.tl { display: flex; flex-direction: column; gap: 4px; }
+.tl .ln { display: flex; gap: 6px; font-size: 12.5px; line-height: 1.35; }
+.tl .ln .tx { color: var(--text); }
+.tl .ln.old .tx { color: var(--text-2); }
+.wk { display: flex; flex-direction: column; gap: 3px; font-size: 12px; }
+.wk .r { display: flex; gap: 7px; align-items: baseline; min-width: 0; }
+.wk .r .cut { flex: 1; }
+.wk .r .age { color: var(--faint); font-size: 11px; flex: none; }
+.figgrid { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 12px; }
+.figgrid .k { color: var(--subtle); }
+.figgrid .v { font-variant-numeric: tabular-nums; }
+
+/* ---------- Additions: lane A gains a 2 h column ---------- */
+.ta .cols, .ta .row, .ta .subrow { grid-template-columns: 30px 208px 214px minmax(0,1fr) minmax(0,1fr) 92px 66px 64px 150px 64px 58px; column-gap: 10px; }
+.ta .subrow .act { grid-column: 4 / 6; }
+.ta .subrow .stk { grid-column: 6 / 9; }
+.ta .subrow .strk { grid-column: 9 / 10; }
+.ta .subrow .age { grid-column: 10 / 11; }
+.ta .subrow.dis { background: rgba(201,184,255,.04); }
+.dtag { font-size: 10px; font-weight: 600; color: var(--lilac); border: 1px solid rgba(201,184,255,.4); border-radius: 3px; padding: 0 4px; line-height: 14px; flex: none; }
+.c-lilac { color: var(--lilac); }
+.trkcell { gap: 3px !important; }
+.cap { font-size: 10.5px; color: var(--subtle); }
+
+/* Activity track: bars per session or dispatch, idle faint, gate holds as ticks */
+.trk2 { position: relative; display: block; height: 14px; width: 100%; }
+.trk2::before { content: ""; position: absolute; left: 0; right: 0; top: 4px; height: 6px; background: var(--chip); border-radius: 2px; }
+.trk2 .tb { position: absolute; top: 4px; height: 6px; }
+.tb.w { background: var(--working); }
+.tb.a { background: var(--asking); }
+.tb.i { background: var(--text-2); opacity: .34; }
+.tb.d { background: var(--waiting); opacity: .55; }
+.trk2 .tk { position: absolute; top: 0; height: 14px; min-width: 2px; border-left: 2px solid var(--lilac); background: rgba(201,184,255,.16); }
+.trk2 .tk.now { background: rgba(201,184,255,.32); }
+.trk2 .gapz { position: absolute; top: 2px; height: 10px; background: repeating-linear-gradient(135deg, var(--subtle) 0 1.5px, transparent 1.5px 5px); opacity: .55; }
+.trk2.thin { height: 10px; }
+.trk2.thin::before { top: 2px; }
+.trk2.thin .tb { top: 2px; }
+.trk2.thin .tk { height: 10px; }
+.trk2.thin .gapz { top: 1px; height: 8px; }
+.legend { display: inline-flex; gap: 10px; font-size: 11px; color: var(--subtle); text-transform: none; letter-spacing: 0; font-weight: 400; }
+.legend span { display: inline-flex; align-items: center; gap: 4px; }
+.lg { display: inline-block; width: 12px; height: 6px; border-radius: 1px; }
+.lg.w { background: var(--working); } .lg.a { background: var(--asking); } .lg.i { background: var(--text-2); opacity: .34; } .lg.d { background: var(--waiting); opacity: .55; }
+.lg.tk { width: 5px; height: 12px; border-left: 2px solid var(--lilac); background: rgba(201,184,255,.2); border-radius: 0; }
+
+/* Attention: queue chips, accounts row, Questions group */
+.gauge, .qm { width: 14px; height: 14px; fill: none; stroke-width: 1.7; flex: none; }
+.gauge { stroke: var(--asking); }
+.qm { stroke: var(--text-2); }
+.qchip.acc .gauge { stroke: var(--asking); }
+.qchip.acc.dry { border-color: rgba(242,109,109,.55); color: var(--danger); }
+.qchip.acc.dry .gauge { stroke: var(--danger); }
+.qchip.qs { border-color: var(--line-strong); }
+.queue.calm { background: var(--surface); }
+.queue.calm .h { color: var(--subtle); }
+.queue.dry { background: linear-gradient(90deg, var(--ask-wash), var(--danger-wash)); }
+.lnsync.err { color: var(--danger); }
+.lnsync.err i { background: var(--danger); }
+.ta .accrow { display: grid; grid-template-columns: 30px 208px minmax(0,1fr) auto; column-gap: 10px; align-items: center; min-height: 46px; padding: 5px 18px 5px 14px; border-top: 1px solid var(--line); background: var(--ask-wash); box-shadow: inset 2px 0 0 var(--asking); }
+.ta .accrow.dry { background: var(--danger-wash); box-shadow: inset 2px 0 0 var(--danger); }
+.ta .accrow.dry .gauge { stroke: var(--danger); }
+.ta .accrow .two { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.ta .accrow .l1 { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.ta .qhd { display: flex; align-items: center; gap: 7px; padding: 10px 18px 5px 22px; border-top: 1px solid var(--line); }
+.ta .qhd .n { font-size: 11px; color: var(--subtle); }
+.ta .qrepo { display: grid; grid-template-columns: 30px 14px 200px 30px minmax(0,1fr) auto; column-gap: 8px; align-items: center; min-height: 30px; padding: 0 18px 0 14px; border-top: 1px solid var(--line); cursor: pointer; font-size: 12.5px; }
+.ta .qrepo:hover { background: var(--surface); }
+.ta .qrepo .chev { color: var(--subtle); font-size: 10px; }
+.qn { display: inline-block; min-width: 20px; text-align: center; font-size: 11px; font-weight: 600; color: var(--asking); background: rgba(246,188,78,.13); border-radius: 8px; padding: 0 6px; line-height: 16px; }
+.ta .qiss { display: grid; grid-template-columns: 74px 14px 230px minmax(0,1fr) 30px auto; column-gap: 10px; align-items: center; min-height: 28px; padding: 0 18px 0 76px; font-size: 12.5px; border-top: 1px dashed var(--line); }
+.stale { opacity: .55; }
+.empty { display: flex; align-items: center; gap: 8px; padding: 9px 18px 9px 22px; color: var(--text-2); border-top: 1px solid var(--line); }
+
+/* ---------- Lane B: by repo lane ---------- */
+.band { display: grid; grid-template-columns: 1.7fr 1fr 0.75fr; border-bottom: 1px solid var(--line); background: var(--ask-wash); }
+.band.calm { background: var(--surface); }
+.bcol { padding: 9px 16px 12px; border-right: 1px solid var(--line); min-width: 0; }
+.bcol:last-child { border-right: 0; }
+.bh { display: flex; align-items: center; gap: 7px; margin-bottom: 7px; }
+.bh .n { font-size: 11px; color: var(--subtle); }
+.bw { padding: 6px 0 8px; border-top: 1px solid var(--line); }
+.bw:first-of-type { border-top: 0; padding-top: 0; }
+.bw .l1 { display: flex; align-items: center; gap: 7px; min-width: 0; margin-bottom: 5px; }
+.bw .lbl { font-weight: 600; }
+.askin { border-left: 2px solid var(--asking); padding: 2px 0 0 10px; }
+.askin .tx { margin-bottom: 6px; }
+.bacc { border: 1px solid rgba(246,188,78,.35); border-radius: 6px; padding: 8px 10px; background: var(--raised); }
+.bacc.dry { border-color: rgba(242,109,109,.5); }
+.bacc.dry .gauge { stroke: var(--danger); }
+.bacc .l1 { display: flex; align-items: center; gap: 7px; }
+.bq { display: flex; align-items: center; gap: 6px; padding: 4px 0; border-top: 1px solid var(--line); font-size: 12.5px; }
+.bq:first-of-type { border-top: 0; }
+.tbb { padding: 6px 18px 24px; }
+.lhd { display: flex; align-items: center; gap: 8px; margin: 8px 0 6px; }
+.lhd .n { font-size: 11px; color: var(--subtle); }
+.lane { border: 1px solid var(--line); border-radius: 6px; margin-bottom: 10px; background: var(--ground); overflow: hidden; }
+.lhead { display: grid; grid-template-columns: 220px minmax(0,1fr) 200px 96px; column-gap: 16px; align-items: center; padding: 8px 12px; background: var(--surface); border-bottom: 1px solid var(--line); }
+.lname { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.lname i { width: 9px; height: 9px; border-radius: 2px; display: inline-block; flex: none; }
+.lname b { font-weight: 600; font-size: 13.5px; }
+.lname .sub { font-size: 11.5px; white-space: nowrap; }
+.ltrk { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.lt { display: grid; grid-template-columns: 74px minmax(0,1fr); column-gap: 8px; align-items: center; font-size: 10.5px; }
+.ax { display: flex; justify-content: space-between; color: var(--faint); font-size: 10px; margin-top: 1px; }
+.lcap { font-size: 11.5px; color: var(--text-2); line-height: 1.4; }
+.lbody { display: grid; grid-template-columns: minmax(0,1fr) 400px; }
+.lsess { min-width: 0; border-right: 1px solid var(--line); }
+.brow, .bsub { display: grid; grid-template-columns: 26px 210px 214px minmax(0,1fr) 66px 66px 56px; column-gap: 10px; align-items: center; padding: 0 12px 0 10px; }
+.brow { min-height: 44px; border-top: 1px solid var(--line); padding-top: 4px; padding-bottom: 4px; }
+.brow:first-child { border-top: 0; }
+.brow.askrow { background: var(--ask-wash); box-shadow: inset 2px 0 0 var(--asking); }
+.brow .two { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.brow .l1 { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.brow .lbl { font-weight: 600; }
+.brow .num, .bsub .num { text-align: right; justify-self: end; }
+.bsub { height: 22px; font-size: 12px; grid-template-columns: 26px 424px minmax(0,1fr) 150px 56px; }
+.bsub .tn { display: flex; align-items: center; gap: 6px; padding-left: 12px; min-width: 0; color: var(--text-2); }
+.bsub .tn .br { color: var(--line-strong); font-family: var(--mono); white-space: pre; flex: none; }
+.lside { padding: 6px 12px 8px; min-width: 0; font-size: 12.5px; }
+.lside .sh { display: flex; align-items: center; gap: 7px; margin: 4px 0 4px; }
+.lside .sh .n { font-size: 11px; color: var(--subtle); }
+.nx { display: grid; grid-template-columns: 74px 12px minmax(0,1fr); column-gap: 8px; align-items: center; min-height: 24px; border-top: 1px solid var(--line); }
+.nx.q { grid-template-columns: 74px minmax(0,1fr) 24px; background: var(--ask-wash); }
+.lside .more { font-size: 11.5px; color: var(--subtle); padding-top: 4px; border-top: 1px solid var(--line); }
+.quiet { border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.qr { display: grid; grid-template-columns: 150px 74px minmax(0,1fr) 70px 70px 90px auto; column-gap: 12px; align-items: center; min-height: 30px; padding: 0 12px; border-top: 1px solid var(--line); font-size: 12.5px; }
+.qr:first-child { border-top: 0; }
+
+/* Fit fixes: header and queue never wrap; state words never break off their chips */
+.hdr h1, .hdr .counts, .hdr .seg, .cpill { flex: none; white-space: nowrap; }
+.hdr .figs { flex: 0 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; }
+.hdr .figs > span { flex: none; }
+.queue { overflow: hidden; }
+.queue .qchip { flex: 0 1 auto; min-width: 0; max-width: 400px; }
+.queue .qchip.acc, .queue .qchip.qs { flex: none; max-width: none; }
+.ta .row .l1 > b, .ta .row .l1 > .sub:not(.cut), .ta .accrow .l1 > * { flex: none; white-space: nowrap; }
+.brow .l1 > b, .brow .l1 > .sub:not(.cut) { flex: none; white-space: nowrap; }
+.hdr { gap: 12px; }
+.hdr .figs { gap: 13px; }
+.ta .qrepo .chev { font-size: 11px; color: var(--text-2); }
+.gapnote { color: var(--faint); font-style: italic; }
+
+/* State tabs */
+.states { padding-top: 0; }
+.st-tab { background: var(--surface); border: 1px solid var(--line); border-radius: 5px; padding: 4px 10px; cursor: pointer; font-size: 12px; color: var(--text-2); }
+.st-tab span { color: var(--subtle); margin-left: 5px; }
+.st-tab.on { border-color: var(--lilac); color: var(--text); background: var(--raised); }
+</style>
+</head>
+<body>
+
+<div class="lanes" id="lanes">
+  <div class="ttl">ops-tower additions · RT-464</div>
+  <button class="lane-tab" data-lane="a"><b>A · By status, with the additions <span class="rec" id="rec-a" hidden>Recommended</span></b><span>The approved rows; Needs you gains the accounts row and Questions on Linear; every row gets a 2 h track. Worst case: a busy repo's sessions sit far apart, one per status group.</span></button>
+  <button class="lane-tab" data-lane="b"><b>B · By repo lane, with Next up <span class="rec" id="rec-b" hidden>Recommended</span></b><span>ops-tower's home: a Need-you band, then one lane per repo with its 2 h track and Next up. Worst case: ten live repos scroll the waits and stuck rows out of sight.</span></button>
+</div>
+<div class="lanes states" id="states">
+  <div class="ttl">State</div>
+  <button class="st-tab" data-state="normal">Normal<span>2 waits · accounts dry Friday · 5 questions</span></button>
+  <button class="st-tab" data-state="quiet">Nothing needs you<span>no waits, accounts fine, no questions</span></button>
+  <button class="st-tab" data-state="trouble">Trouble<span>accounts blocked now · Linear unreachable · daemon restarted 14:05</span></button>
+  <span style="flex:1"></span>
+</div>
+
+<div class="app" id="app">
+  <nav class="rail">
+    <div class="ic"><svg viewBox="0 0 20 20"><path d="M4 6h12M4 10h12M4 14h12"/></svg></div>
+    <div class="ic on" title="Dashboard"><svg viewBox="0 0 20 20"><rect x="3" y="3" width="6" height="6" rx="1"/><rect x="11" y="3" width="6" height="4" rx="1"/><rect x="11" y="9" width="6" height="8" rx="1"/><rect x="3" y="11" width="6" height="6" rx="1"/></svg><span class="n ask" id="rail-badge">2</span></div>
+    <div class="ic"><svg viewBox="0 0 20 20"><path d="M3 11l2.5-6h9L17 11v5H3z"/><path d="M3 11h4l1 2h4l1-2h4"/></svg></div>
+    <div class="ic"><svg viewBox="0 0 20 20"><circle cx="6" cy="5" r="2"/><circle cx="6" cy="15" r="2"/><circle cx="14" cy="8" r="2"/><path d="M6 7v6M14 10c0 3-4 3-8 3"/></svg><span class="n">5</span></div>
+    <div class="sp"></div>
+    <div class="ic"><svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="7"/><path d="M10 6v4l3 2"/></svg></div>
+    <div class="ic" style="margin-bottom:6px"><svg viewBox="0 0 20 20"><path d="M4 6h8M15 6h1M4 14h2M9 14h7"/><circle cx="13.5" cy="6" r="1.6"/><circle cx="7.5" cy="14" r="1.6"/></svg></div>
+  </nav>
+  <div class="main">
+    <div class="tabbar">
+      <div class="t on"><svg viewBox="0 0 20 20" width="13" height="13" style="stroke:currentColor;fill:none;stroke-width:1.7"><rect x="3" y="3" width="6" height="6" rx="1"/><rect x="11" y="3" width="6" height="4" rx="1"/><rect x="11" y="9" width="6" height="8" rx="1"/><rect x="3" y="11" width="6" height="6" rx="1"/></svg>Dashboard<span class="badge" id="tab-badge">2</span><span class="x">×</span></div>
+      <div class="t"><span class="cnt">◉ 2/3</span>tulip<span class="x">×</span></div>
+      <div class="t"><span class="cnt">◉ 1/3</span>ops-tower<span class="x">×</span></div>
+      <div class="t"><span class="cnt">◉ 1/2</span>yaat<span class="x">×</span></div>
+      <div class="plus">+</div>
+    </div>
+    <div class="content">
+      <section class="view" id="view-a"></section>
+      <section class="view" id="view-b"></section>
+    </div>
+  </div>
+  <div class="footer">
+    <span class="pill">Connections</span>
+    <span class="pill"><span class="dot"></span>daemon · 8 sessions · :4242</span>
+    <span><span class="c-ask">◆</span> <span id="foot-needs">2 need you</span></span>
+    <span><span class="c-work">◉</span> 3 working</span>
+    <span><span class="c-work">○</span> 1 background</span>
+    <span><span class="c-wait">○</span> 1 waiting</span>
+    <span class="sp"></span>
+    <span>Dashboard</span>
+  </div>
+</div>
+
+<script>
+const RECOMMENDED = 'a';
+
+const REPOS = {
+  'rustling-tulip': '#f07a62',
+  'ops-tower': '#c9b8ff',
+  'yaat': '#d9a15c',
+  'skyline': '#8fb3f0',
+  'lang-tutor': '#e7849b',
+  'opening-hand': '#4fc89d',
+};
+
+// Plausible live state at 14:32. Ages are relative to then.
+const S = [
+  {
+    id: 's2', repo: 'rustling-tulip', label: 'Settings modal height', branch: 'feat/rt-443-settings-height', wt: 'wt.feat-rt-443-settings-height',
+    group: 'needs', glyph: 'asking', state: 'Question', age: '4m', since: '14:28',
+    pending: { trigger: 'question', text: 'The Settings modal clips its last rows when the window is under 640 px tall. Which fix should I apply?',
+      options: ['Scroll the page body (Recommended)', 'Shrink the nav column', 'Cap the modal at 85% of the window'] },
+    now: 'Asked which fix to apply for the clipped modal',
+    issue: { id: 'RT-443', title: 'Settings modal clips in short windows', state: 'prog', stateText: 'In Progress', prio: 2, project: 'Wave 8 · Native polish', release: 'vNext' },
+    headline: 'Waiting on your pick of three fixes',
+    tl: [['now', 'Asked which of three fixes to apply; recommends scrolling the body'], ['5–15m', 'Measured the clip: 92 px of Spawn defaults lost at 600 px tall'], ['15–30m', 'Took before shots of every Settings tab at 600 and 800 px']],
+    tree: [
+      { k: 'agent', g: 'asking', name: 'claude · opus', task: '/nextup RT-443', act: 'AskUserQuestion · 4m', age: '38m', kids: [
+        { k: 'sub', g: 'done', name: 'RT-443 explorer settings layout', task: 'Explore · mapped settings_view.rs sizing', act: 'finished · 3 files named', age: '9m' },
+      ] },
+    ],
+    work: { commits: [], done: [], files: [['M', 'apps/native/src/settings_view.rs', 6, 2]], note: '4 shots in .tmp/shots' },
+    m: { ctx: 31, tin: '412k', tout: '14k', cost: 2.10, run: '38m', last: '4m', act: [3, 5, 4, 6, 2, 1, 0, 0, 0, 0] },
+  },
+  {
+    id: 's3', repo: 'ops-tower', label: 'Gate chips in light theme', branch: 'fix/ops-352-gate-chip-colour', wt: 'wt.fix-ops-352-gate-chip-colour',
+    group: 'needs', glyph: 'asking', state: 'Permission', age: '1m', since: '14:31', stuck: ['Waiting on permission'],
+    pending: { trigger: 'permission', text: 'Claude needs your permission to use Bash', cmd: 'gh pr merge 118 --squash --delete-branch',
+      options: ['Yes', "Yes, and don't ask again for gh pr merge", 'No, tell Claude what to do'] },
+    now: 'Wants to merge PR #118',
+    issue: { id: 'OPS-352', title: 'Gate chips lose their lane colour in the light theme', state: 'rev', stateText: 'In Review', prio: 2, project: 'Dashboard polish', release: '0.9' },
+    headline: 'Checks green; wants to merge PR #118',
+    tl: [['now', 'Wants to squash-merge PR #118 now that its checks passed'], ['5–15m', 'Fixed the chip contrast in the light theme; CSS review clean'], ['15–30m', 'Reproduced the washed-out chips with a light-theme shot']],
+    tree: [
+      { k: 'agent', g: 'asking', name: 'claude · opus', task: 'OPS-352 gate chips', act: 'Permission · Bash · 1m', age: '26m', kids: [
+        { k: 'sub', g: 'done', name: 'OPS-352 css review', task: 'reviewer · ui/gates.css', act: 'finished · no findings', age: '6m' },
+      ] },
+    ],
+    work: { commits: [['7c21e0a', "fix: keep gate chips' lane colour in the light theme", '9m']], done: [], files: [['M', 'ui/gates.css', 14, 6], ['M', 'ui/app.js', 3, 1]], note: 'PR #118 · checks passed' },
+    m: { ctx: 22, tin: '268k', tout: '9k', cost: 1.40, run: '26m', last: '1m', act: [2, 4, 6, 3, 5, 2, 3, 1, 0, 0] },
+  },
+  {
+    id: 's1', repo: 'rustling-tulip', label: 'Summary wire types', branch: 'feat/rt-444-summary-types', wt: 'wt.feat-rt-444-summary-types',
+    group: 'working', glyph: 'working', state: 'Working', age: '6m', since: '14:26',
+    now: 'Waiting on subagent "RT-444 summary types implementer"',
+    issue: { id: 'RT-444', title: 'Session summary and waiting-alert wire types', state: 'prog', stateText: 'In Progress', prio: 3, project: 'Wave 9 · Summaries & Dashboard', release: 'vNext' },
+    headline: 'Implementer running the protocol tests',
+    tl: [['now', 'Implementer is running the protocol tests after adding PendingAsk'], ['5–15m', 'Review found a missing serde default on SessionSummary.kind; fixed'], ['15–30m', 'Landed the summary types; briefed the follow-up for the daemon side']],
+    tree: [
+      { k: 'agent', g: 'working', name: 'claude · opus', task: '/nextup RT-444', act: 'Waiting on subagent', age: '1h 12m', kids: [
+        { k: 'sub', g: 'working', name: 'RT-444 summary types implementer', task: 'implementer · steps 3–4 of the brief', act: 'Running Bash · 1m: pwsh tools/gate.ps1 run --slot heavy -- cargo nextest run -p protocol', age: '6m', kids: [
+          { k: 'gate', g: 'gate', name: 'In gate · heavy 1', task: 'cargo nextest run -p protocol --cargo-profile test-release', act: '', age: '1m' },
+        ] },
+        { k: 'sub', g: 'done', name: 'RT-444 r1 rust review', task: 'rust-engineer · review of dcf97d78', act: 'finished · 2 findings, both fixed', age: '14m' },
+        { k: 'dispatch', tid: 'd1', g: 'working', name: 'RT-444 docs sweep', task: 'deepseek-v4-flash · docs-writer brief', act: 'Running Edit · docs/architecture.md', age: '9m' },
+        { k: 'shell', g: 'working', name: 'bg shell b3f1', task: 'gate run --log .tmp/clippy.log -- cargo clippy', act: 'Running · 2m', age: '2m' },
+      ] },
+    ],
+    work: { commits: [['dcf97d78', 'feat: add the session summary and waiting-alert wire types', '18m'], ['a9e7c7c8', 'fix: treat GATE_BOX_JOB as already under a gate in rt.ps1', '41m']],
+      done: [['RT-449', 'rt.ps1 nests a gate under GATE_BOX_JOB']],
+      files: [['M', 'crates/protocol/src/lib.rs', 86, 4], ['A', 'crates/protocol/tests/summary_roundtrip.rs', 64, 0], ['M', 'crates/daemon/src/server/session.rs', 12, 2], ['M', 'apps/native/src/lib.rs', 3, 1]] },
+    m: { ctx: 46, tin: '1.24M', tout: '38k', cost: 6.80, run: '1h 12m', last: '8s', act: [4, 6, 3, 8, 5, 2, 7, 9, 6, 5],
+      ctxh: [8, 12, 15, 19, 22, 25, 24, 28, 31, 30, 33, 36, 38, 41, 40, 43, 44, 46] },
+  },
+  {
+    id: 's5', repo: 'yaat', label: 'Ready-to-taxi call-up', branch: 'fix/yaat-308-callup-target', wt: 'wt.fix-yaat-308-callup-target',
+    group: 'working', glyph: 'working', state: 'Working', age: '11m', since: '14:21', stuck: ['3 tool calls failed in a row'],
+    now: 'Waiting on subagent "YAAT-308 debugger repro"',
+    issue: { id: 'YAAT-308', title: 'Solo ready-to-taxi call-up fires for the wrong aircraft', state: 'prog', stateText: 'In Progress', prio: 4, project: 'Solo mode', release: 'v0.14' },
+    headline: 'Debugger re-running the call-up replay',
+    tl: [['now', 'Debugger is re-running the call-up replay; its last 3 builds failed'], ['5–15m', 'Found the call-up picks the first strip in the bay, not the caller'], ['15–30m', "Opened the replay from the reporter's log and reproduced it"]],
+    tree: [
+      { k: 'agent', g: 'working', name: 'claude · opus', task: 'YAAT-308 call-up', act: 'Waiting on subagent', age: '1h 31m', kids: [
+        { k: 'sub', g: 'working', name: 'YAAT-308 debugger repro', task: 'debugger · replay solo-callup-0412', act: 'Running Bash · 3m: dotnet test tests/Yaat.Sim.Tests -c Release --no-build --filter SoloCallup', age: '11m', stuck: '3 failed in a row' },
+        { k: 'shell', g: 'done', name: 'bg shell 9c02', task: 'dotnet build Yaat.sln -c Release', act: 'exited 1 · 12m', age: '12m' },
+      ] },
+    ],
+    work: { commits: [], done: [], files: [['M', 'src/Yaat.Sim/Solo/CallupRouter.cs', 22, 7], ['A', 'tests/Yaat.Sim.Tests/SoloCallupTests.cs', 40, 0]] },
+    m: { ctx: 58, tin: '1.61M', tout: '41k', cost: 7.90, run: '1h 31m', last: '3s', act: [6, 8, 9, 5, 7, 10, 8, 6, 9, 7] },
+  },
+  {
+    id: 's4', repo: 'ops-tower', label: 'Briefing login retry', branch: 'fix/ops-347-briefing-retry', wt: 'wt.fix-ops-347-briefing-retry',
+    group: 'working', glyph: 'working', state: 'In gate', age: '6m', since: '14:26', stuck: ['Context past 80%'],
+    now: 'In gate · heavy 2: cargo nextest run --workspace',
+    issue: { id: 'OPS-347', title: 'Briefing run retries a login error once', state: 'prog', stateText: 'In Progress', prio: 3, project: 'Briefing', release: '0.9' },
+    headline: 'Full suite running after the retry change',
+    tl: [['now', 'Full suite running in the heavy gate after the retry change'], ['5–15m', 'Added one retry on a login error, with a test that failed first'], ['15–30m', 'Traced the failed 06:00 briefing to an expired login']],
+    tree: [
+      { k: 'agent', g: 'working', name: 'claude · opus', task: 'OPS-347 briefing retry', act: 'Running Bash · 6m', age: '2h 05m', kids: [
+        { k: 'gate', g: 'gate', name: 'In gate · heavy 2', task: 'cargo nextest run --workspace --cargo-profile test-release', act: '', age: '6m' },
+        { k: 'shell', g: 'working', name: 'Monitor 41ae', task: 'gate: (passed|FAILED|TIMED OUT|STALLED)', act: 'watching', age: '6m' },
+      ] },
+    ],
+    work: { commits: [], done: [['OPS-344', 'Briefing strip cuts the status to one line']], files: [['M', 'src/briefing/run.rs', 41, 9], ['A', 'tests/briefing_retry.rs', 58, 0]] },
+    m: { ctx: 84, tin: '2.02M', tout: '55k', cost: 9.30, run: '2h 05m', last: '12s', act: [5, 7, 4, 3, 2, 1, 1, 1, 0, 1] },
+  },
+  {
+    id: 's6', repo: 'yaat', label: 'METAR parser RMK groups', branch: 'fix/yaat-312-metar-rmk', wt: 'wt.fix-yaat-312-metar-rmk',
+    group: 'idle', glyph: 'idle', state: 'Idle', age: '41m', since: '13:51',
+    now: 'Idle since its PR opened',
+    issue: { id: 'YAAT-312', title: 'METAR parser drops RMK groups', state: 'rev', stateText: 'In Review', prio: 2, project: 'Weather', release: 'v0.14' },
+    headline: 'PR #241 open; parser keeps RMK groups',
+    tl: [['30m+', 'Opened PR #241 with the RMK fix and six new parser cases']],
+    tree: [{ k: 'agent', g: 'idle', name: 'claude · sonnet', task: 'YAAT-312 METAR RMK', act: 'Idle · 41m', age: '3h 10m' }],
+    work: { commits: [['e91b3c2', 'fix: keep RMK groups when parsing METAR', '44m'], ['4a0d7f1', 'test: cover RMK edge cases', '46m']], done: [], files: [] , note: 'PR #241 · 1 review requested' },
+    m: { ctx: 39, tin: '890k', tout: '22k', cost: 3.20, run: '3h 10m', last: '41m', act: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0] },
+  },
+  {
+    id: 's7', repo: 'rustling-tulip', label: 'Sidebar repo sort', branch: 'feat/rt-451-repo-sort', wt: 'wt.feat-rt-451-repo-sort',
+    group: 'done', glyph: 'waiting', state: 'Finished', age: '12m', since: '14:20', unseen: true,
+    now: 'Turn finished · not looked at yet',
+    issue: { id: 'RT-451', title: 'Sidebar sorts repos by needs-you, activity or hand', state: 'done', stateText: 'Done', prio: 2, project: 'Wave 8 · Native polish', release: 'vNext' },
+    headline: 'Landed repo sort; RT-451 moved to Done',
+    tl: [['5–15m', 'Landed repo sort and moved RT-451 to Done'], ['15–30m', 'Sidebar specs green; native-client.md describes repo_sort']],
+    tree: [{ k: 'agent', g: 'waiting', name: 'claude · opus', task: '/nextup RT-451', act: 'Finished · 12m', age: '1h 48m' }],
+    work: { commits: [['5b2e9c1', 'feat: sort sidebar repos by needs you, activity or hand', '12m'], ['1c7e2b8', 'docs: describe repo_sort in native-client.md', '13m'], ['9ad04f3', 'test: cover repo sort in ui_sidebar', '15m']],
+      done: [['RT-451', 'Sidebar sorts repos by needs-you, activity or hand']], files: [], total: '7 files · +212 −48' },
+    m: { ctx: 62, tin: '1.18M', tout: '36k', cost: 5.60, run: '1h 48m', last: '12m', act: [3, 1, 0, 0, 0, 0, 0, 0, 0, 0] },
+  },
+  {
+    id: 's8', repo: 'ops-tower', label: 'Costs per repository', branch: 'feat/ops-340-costs-per-repo', wt: 'wt.feat-ops-340-costs-per-repo',
+    group: 'done', glyph: 'stopped', state: 'Exited 0', age: '25m', since: '14:07',
+    now: 'Session ended · exit 0',
+    issue: { id: 'OPS-340', title: 'Costs tab splits the Claude share per repository', state: 'done', stateText: 'Done', prio: 2, project: 'Costs', release: '0.9' },
+    headline: 'Merged PR #116; OPS-340 Done',
+    tl: [['15–30m', 'Merged PR #116 and closed OPS-340'], ['30m+', 'Fixed the unmatched-hours row after review']],
+    tree: [{ k: 'agent', g: 'stopped', name: 'claude · opus', task: 'OPS-340 costs per repo', act: 'Ended · 25m', age: '57m' }],
+    work: { commits: [['d40e8a1', 'feat: split the Claude share per repository', '27m'], ['b7713fc', 'fix: put unmatched hours in their own row', '31m']], done: [['OPS-340', 'Costs tab splits the Claude share per repository']], files: [], total: '9 files · +341 −77' },
+    m: { ctx: 51, tin: '960k', tout: '30k', cost: 4.10, run: '57m', last: '25m', act: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0] },
+  },
+];
+
+// Wait ages in seconds, for the longest-wait-first order of the attention items.
+const WAIT_S = { s2: 240, s3: 61 };
+
+// Two-hour activity per session and dispatch, in minutes from 12:32 (0) to now, 14:32 (120).
+// segs: [from, to, kind] with w working, a asking, i idle, d finished; holds: [from, minutes] of each gate hold.
+const T = {
+  s2: { segs: [[82, 108, 'w'], [108, 110, 'a'], [110, 116, 'w'], [116, 120, 'a']], holds: [] },
+  s3: { segs: [[94, 119, 'w'], [119, 120, 'a']], holds: [[104, 3]] },
+  s1: { segs: [[48, 70, 'w'], [70, 73, 'a'], [73, 96, 'w'], [96, 101, 'i'], [101, 120, 'w']], holds: [[62, 4], [88, 5], [119, 1]] },
+  'd1': { segs: [[111, 120, 'w']], holds: [] },
+  s5: { segs: [[29, 50, 'w'], [50, 54, 'a'], [54, 120, 'w']], holds: [[60, 6], [96, 8], [104, 2]] },
+  s4: { segs: [[0, 40, 'w'], [40, 55, 'i'], [55, 120, 'w']], holds: [[30, 7], [114, 6]] },
+  s6: { segs: [[0, 79, 'w'], [79, 120, 'i']], holds: [[70, 5]] },
+  s7: { segs: [[12, 108, 'w'], [108, 120, 'd']], holds: [[90, 7], [101, 5]] },
+  s8: { segs: [[38, 95, 'w']], holds: [[80, 6]] },
+};
+
+// Linear issues in Blocked with a waiting note: the questions only the owner can answer.
+const QUESTIONS = [
+  { repo: 'rustling-tulip', id: 'RT-135', prio: 2, title: 'Daemon Linear client', note: 'Same read-only key as ops-tower, or a key of its own?', age: '2d' },
+  { repo: 'rustling-tulip', id: 'RT-27', prio: 2, title: 'Measure a local summarizer model', note: 'Keep Haiku as the fallback when the local model misses a headline?', age: '5h' },
+  { repo: 'ops-tower', id: 'OPS-387', prio: 3, title: 'Own account store', note: 'Merge feat/own-account-store before RT-66 takes the crate?', age: '3d' },
+  { repo: 'skyline', id: 'SKY-19', prio: 1, title: 'Offline tile bundles', note: 'Ship bundles per region or per zoom band?', age: '6d' },
+  { repo: 'yaat', id: 'YAAT-301', prio: 3, title: 'Solo pushback phraseology', note: 'Use the 7110.65 wording or the VATSIM one?', age: '1d' },
+];
+
+// Each repo's Next up: its To do count and the first issues in board order.
+const NEXT = {
+  'rustling-tulip': { todo: 38, landed: 5, items: [['RT-445', 'Summarizer provider table', 3], ['RT-456', 'Dashboard activity timeline', 2], ['RT-87', 'Attention feed', 2]] },
+  'ops-tower': { todo: 14, landed: 6, items: [['OPS-312', 'Check the 0.2 default pace ratio', 2], ['OPS-428', 'Pin a gate run to its builder', 2], ['OPS-449', 'Tune pace from the usage history', 1]] },
+  'yaat': { todo: 189, landed: 3, items: [['YAAT-482', 'Merge feat/active-runways', 3], ['YAAT-440', 'Group the Push Back To submenu by distance', 2], ['YAAT-494', 'Precompute cache brief B3', 2]] },
+  'skyline': { todo: 12, landed: 3, items: [['SKY-21', 'Tile cache keeps the last three zoom levels', 2]] },
+  'lang-tutor': { todo: 1, landed: 0, items: [['LANG-6', 'Unit-test the per-model reasoning fields', 2]] },
+  'opening-hand': { todo: 44, landed: 0, items: [['DUEL-3', "Build the duel staging: the staging plan's open steps", 2]] },
+};
+
+const ACCOUNTS = {
+  warn: { kind: 'warn', title: 'Accounts run dry Fri 23:22', when: 'in 5d 11h 02m', span: 'for 15h 37m',
+    detail: "At this week's pace · 3 accounts in rotation · live: account 2 · 5h 82% · 7d 47%", chip: 'Accounts dry Fri 23:22 · in 5d 11h' },
+  dry: { kind: 'dry', title: 'All accounts blocked now', when: 'until 19:05', span: 'in 4h 33m',
+    detail: 'Every account is past its 5 h window · new turns fail until one resets · engine paused', chip: 'All accounts blocked · until 19:05' },
+};
+
+const STATES = {
+  normal: { label: 'Normal' },
+  quiet: { label: 'Nothing needs you' },
+  trouble: { label: 'Trouble' },
+};
+
+const S_ALL = S.slice();
+let D = null;
+function data(state) {
+  if (state === 'quiet') {
+    return { S: S_ALL.filter((s) => s.group !== 'needs'), acc: null, q: [], linErr: null, gap: null };
+  }
+  if (state === 'trouble') {
+    return { S: S_ALL, acc: ACCOUNTS.dry, q: QUESTIONS, linErr: 'Linear unreachable · showing the read from 14:18 · retrying in 30 s', gap: 93 };
+  }
+  return { S: S_ALL, acc: ACCOUNTS.warn, q: QUESTIONS, linErr: null, gap: null };
+}
+
+const GROUPS = [['needs', 'Needs you'], ['working', 'Working'], ['idle', 'Idle'], ['done', 'Done']];
+const esc = (t) => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+const by = (g) => D.S.filter((s) => s.group === g);
+const waitsLongestFirst = () => by('needs').toSorted((a, b) => (WAIT_S[b.id] || 0) - (WAIT_S[a.id] || 0));
+
+const glyph = (g, cls = '') => `<span class="g ${g} ${cls}"></span>`;
+const repoSw = (r) => `<i style="background:${REPOS[r]}"></i>`;
+const repo = (r) => `<span class="repo">${repoSw(r)}${r}</span>`;
+function prio(p) {
+  if (p === 4) return '<span class="prio urgent" title="Urgent">!</span>';
+  return `<span class="prio" title="${['', 'Low', 'Medium', 'High'][p]}">${[1, 2, 3].map((i) => `<i class="${i <= p ? 'on' : ''}" style="height:${3 + i * 2.4}px"></i>`).join('')}</span>`;
+}
+const lstate = (i) => `<span class="lst"><span class="si ${i.state}"></span>${i.stateText}</span>`;
+const issueLine = (i) => `<span class="il"><span class="iss">${i.id}</span>${lstate(i)}${prio(i.prio)}</span>`;
+const ctx = (p) => `<span class="ctx ${p > 80 ? 'hot' : ''}"><span class="bar"><i style="width:${p}%"></i></span>${p}%</span>`;
+function spark(a) {
+  const max = Math.max(...a, 1);
+  const quiet = a.every((v) => v === 0);
+  return `<span class="spark ${quiet ? 'quiet' : ''}" title="Tool calls per minute, last 10 min">${a.map((v) => `<i style="height:${Math.max(2, (v / Math.max(max, 6)) * 18)}px"></i>`).join('')}</span>`;
+}
+const stateColor = (s) => ({ asking: 'c-ask', working: 'c-work', waiting: 'c-wait', idle: 't2', stopped: 'sub' }[s.glyph]);
+const stuck = (s) => (s.stuck || []).map((r) => `<span class="stuck" title="${esc(r)}">⚑ ${esc(r)}</span>`).join(' ');
+const money = (v) => `$${v.toFixed(2)}`;
+const GAUGE = '<svg class="gauge" viewBox="0 0 20 20"><path d="M3.5 14a7 7 0 1 1 13 0"/><path d="M10 13l3.5-4.5"/></svg>';
+const QMARK = '<svg class="qm" viewBox="0 0 20 20"><circle cx="10" cy="10" r="7"/><path d="M8 8a2 2 0 1 1 2.6 1.9c-.4.2-.6.5-.6.9V12"/><circle cx="10" cy="14.6" r=".5"/></svg>';
+
+function opts(p) {
+  const keys = p.trigger === 'permission' ? ['1', '2', 'Esc'] : ['1', '2', '3'];
+  return p.options.map((o, i) => `<button class="btn ${i === 0 ? 'pri' : ''}"><span class="k">${keys[i]}</span>${esc(o)}</button>`).join('')
+    + `<button class="btn ghost">Go to pane</button>`;
+}
+function askBody(p) {
+  return `<div class="tx">${p.trigger === 'permission' ? '<b>Permission</b> · ' : '<b>Question</b> · '}${esc(p.text)}</div>`
+    + (p.cmd ? `<div class="mono cmd">$ ${esc(p.cmd)}</div>` : '')
+    + `<div class="opts">${opts(p)}</div>`;
+}
+function timeline(tl, max = 9) {
+  return `<div class="tl">${tl.slice(0, max).map(([w, t], i) => `<div class="ln ${i ? 'old' : ''}"><span class="win">${w}</span><span class="tx">${esc(t)}</span></div>`).join('')}</div>`;
+}
+function work(w, max = 9) {
+  const rows = [];
+  for (const [sha, msg, age] of w.commits) rows.push(`<div class="r"><span class="sha">${sha.slice(0, 7)}</span><span class="cut">${esc(msg)}</span><span class="age">${age}</span></div>`);
+  for (const [id, t] of w.done) rows.push(`<div class="r"><span class="lst"><span class="si done"></span></span><span class="iss">${id}</span><span class="cut t2">→ Done · ${esc(t)}</span></div>`);
+  for (const [st, path, a, d] of w.files) rows.push(`<div class="r"><span class="fst ${st}">${st}</span><span class="cut mono t2">${esc(path)}</span><span class="mono"><span class="add">+${a}</span> <span class="del">−${d}</span></span></div>`);
+  if (w.total) rows.push(`<div class="r sub"><span class="cut">${w.total} landed</span></div>`);
+  if (w.note) rows.push(`<div class="r sub"><span class="cut">${esc(w.note)}</span></div>`);
+  return `<div class="wk">${rows.slice(0, max).join('') || '<div class="sub">Nothing yet</div>'}</div>`;
+}
+function filesSum(w) {
+  if (w.total) return w.total.replace(' files', ' files landed');
+  if (!w.files.length) return '';
+  const a = w.files.reduce((n, f) => n + f[2], 0), d = w.files.reduce((n, f) => n + f[3], 0);
+  return `${w.files.length} changed <span class="add">+${a}</span> <span class="del">−${d}</span>`;
+}
+function flatTree(nodes, depth = 0, out = []) {
+  for (const n of nodes) { out.push({ ...n, depth }); if (n.kids) flatTree(n.kids, depth + 1, out); }
+  return out;
+}
+function treeCounts(s) {
+  const all = flatTree(s.tree).filter((n) => n.depth > 0);
+  const subs = all.filter((n) => n.k === 'sub'), dis = all.filter((n) => n.k === 'dispatch'), sh = all.filter((n) => n.k === 'shell' || n.k === 'gate');
+  const live = (l) => l.filter((n) => n.g === 'working' || n.g === 'gate').length;
+  const bits = [];
+  if (subs.length) bits.push(`${subs.length} sub${live(subs) ? ` <span class="c-work">(${live(subs)} live)</span>` : ''}`);
+  if (dis.length) bits.push(`${dis.length} dispatch`);
+  if (sh.length) bits.push(`${sh.length} bg`);
+  return bits.join(' · ') || '<span class="c-faint">—</span>';
+}
+
+/* ---------- Activity track: two hours, bars per session or dispatch, idle faint, gate holds as ticks ---------- */
+const pct = (m) => `${((m / 120) * 100).toFixed(2)}%`;
+function dur(m) {
+  const r = Math.round(m);
+  return r >= 60 ? `${Math.floor(r / 60)}h ${String(r % 60).padStart(2, '0')}m` : `${r}m`;
+}
+function bars(t) {
+  const from = D.gap || 0;
+  const segs = t.segs.map(([a, b, k]) => [Math.max(a, from), b, k]).filter(([a, b]) => b > a);
+  const holds = t.holds.filter(([a, l]) => a + l > from);
+  return (D.gap ? `<i class="gapz" style="left:0;width:${pct(D.gap)}"></i>` : '')
+    + segs.map(([a, b, k]) => `<i class="tb ${k}" style="left:${pct(a)};width:${pct(b - a)}"></i>`).join('')
+    + holds.map(([a, l]) => `<b class="tk ${a + l >= 120 ? 'now' : ''}" style="left:${pct(a)};width:${pct(l)}"></b>`).join('');
+}
+const track = (t) => `<span class="trk2" title="Last 2 h · ticks are gate holds">${bars(t)}</span>`;
+function busyMinutes(list) {
+  const from = D.gap || 0;
+  const spans = list.flatMap((t) => t.segs.filter((s) => s[2] === 'w').map(([a, b]) => [Math.max(a, from), b])).filter(([a, b]) => b > a).sort((x, y) => x[0] - y[0]);
+  let total = 0, cur = -1;
+  for (const [a, b] of spans) { const s = Math.max(a, cur); if (b > s) { total += b - s; cur = b; } }
+  return total;
+}
+function holdText(list, short) {
+  const from = D.gap || 0;
+  const hs = list.flatMap((t) => t.holds).filter(([a, l]) => a + l > from);
+  if (!hs.length) return '';
+  const end = Math.max(...hs.map(([a, l]) => a + l));
+  if (end >= 120) return `<span class="c-lilac">${short ? 'in gate' : 'gate held now'}</span>`;
+  return `${short ? 'gate' : 'last gate'} ${dur(120 - end)} ago`;
+}
+function caption(list, short) {
+  const busy = busyMinutes(list);
+  const parts = [];
+  if (D.gap) parts.push('since 14:05');
+  if (busy >= 1) parts.push(short || D.gap ? `busy ${dur(busy)}` : `busy ${dur(busy)} of 2h`);
+  const h = holdText(list, short);
+  if (h) parts.push(h);
+  return parts.length ? parts.join(' · ') : 'idle for 2h';
+}
+const tracksOf = (s) => [T[s.id], ...flatTree(s.tree).filter((n) => n.k === 'dispatch').map((n) => T[n.tid])];
+const legend = () => `<span class="legend"><span><i class="lg w"></i>working</span><span><i class="lg a"></i>asking</span><span><i class="lg i"></i>idle</span><span><i class="lg d"></i>finished</span><span><i class="lg tk"></i>gate hold</span></span>`;
+
+/* ---------- Header and attention strip ---------- */
+function header(mode) {
+  const n = (g) => by(g).length;
+  const cost = D.S.reduce((a, s) => a + s.m.cost, 0);
+  return `<div class="hdr">
+    <h1>Dashboard</h1>
+    <div class="counts">
+      <span class="cpill ${n('needs') ? 'ask' : ''}">${glyph('asking')}<b>${n('needs')}</b> need you</span>
+      <span class="cpill">${glyph('working')}<b>${n('working')}</b> working</span>
+      <span class="cpill">${glyph('idle')}<b>${n('idle')}</b> idle</span>
+      <span class="cpill">${glyph('done')}<b>${n('done')}</b> done</span>
+    </div>
+    <div class="hsp"></div>
+    <div class="figs">
+      <span>Today <b>${money(cost)}</b> <span class="sub">API-equiv</span></span>
+      <span><b>8.6M</b> tokens</span>
+      <span><b>14</b> commits</span>
+      <span><b>5</b> issues Done</span>
+      <span class="sep"></span>
+      <span class="rels">
+        <span class="rel">vNext <span class="rb"><i style="width:61%"></i></span>11/18</span>
+        <span class="rel">ops 0.9 <span class="rb"><i style="width:67%"></i></span>6/9</span>
+        <span class="rel">yaat v0.14 <span class="rb"><i style="width:43%"></i></span>3/7</span>
+      </span>
+      ${D.linErr ? '<span class="lnsync err"><i></i>Linear · 14m ago</span>' : '<span class="lnsync"><i></i>Linear · 1m ago</span>'}
+    </div>
+    <div class="seg"><span class="${mode === 'status' ? 'on' : ''}" data-mode="a">By status</span><span class="${mode === 'repo' ? 'on' : ''}" data-mode="b">By repo</span></div>
+  </div>`;
+}
+function qByRepo() {
+  const m = new Map();
+  for (const q of D.q) { if (!m.has(q.repo)) m.set(q.repo, []); m.get(q.repo).push(q); }
+  return [...m].sort((a, b) => b[1].length - a[1].length || (a[0] < b[0] ? -1 : 1));
+}
+function queue() {
+  const waits = waitsLongestFirst();
+  if (!waits.length && !D.acc && !D.q.length) {
+    return `<div class="queue calm"><span class="h">Queue</span><span class="t2" style="font-size:12px">Nothing needs you · the accounts last the week · no open questions on Linear</span></div>`;
+  }
+  const qs = qByRepo();
+  return `<div class="queue ${D.acc && D.acc.kind === 'dry' ? 'dry' : ''}"><span class="h" style="color:var(--asking)">Queue</span>${waits.map((s) =>
+    `<span class="qchip">${glyph('asking')}<span class="iss">${s.issue.id}</span><span class="cut">${esc(s.pending.trigger === 'permission' ? 'Bash: ' + s.pending.cmd : s.pending.text)}</span><span class="age">${s.age}</span></span>`).join('')}
+    ${D.acc ? `<span class="qchip acc ${D.acc.kind}">${GAUGE}<span class="cut">${D.acc.chip}</span></span>` : ''}
+    ${qs.length ? `<span class="qchip qs">${QMARK}<b style="font-weight:600">${D.q.length}</b> questions<span class="sub">on Linear · ${qs.length} repos</span></span>` : ''}
+    <span class="hsp"></span><span class="sub" style="font-size:11.5px;white-space:nowrap">Longest wait first · <span class="mono">Ctrl+J</span> jumps to the next</span></div>`;
+}
+
+/* ---------- Lane A: by status, with the additions ---------- */
+const COLS_A = ['', 'Session', 'Linear', 'Now', 'Summary', 'Agents', 'Context', '10 min', 'Last 2 h', 'Run · last', 'Cost'];
+function rowA(s, g, open) {
+  return `<div class="row ${g === 'needs' ? 'askrow' : ''} ${open ? 'open' : ''}" data-row="${s.id}">
+    <div>${glyph(s.glyph)}</div>
+    <div class="two"><div class="l1"><span class="lbl cut">${esc(s.label)}</span></div><div class="l1" style="font-size:11.5px">${repo(s.repo)}<span class="mono sub cut">${s.branch}</span></div></div>
+    <div class="two"><div class="l1">${issueLine(s.issue)}</div><div class="cut t2" style="font-size:11.5px">${esc(s.issue.title)}</div></div>
+    <div class="two"><div class="l1"><b class="${stateColor(s)}" style="font-weight:600">${s.state}</b><span class="sub">· ${s.age}</span>${stuck(s)}</div><div class="cut t2" style="font-size:12px">${esc(s.now)}</div></div>
+    <div class="two"><div class="cut">${esc(s.tl[0][1])}</div><div class="cut sub" style="font-size:11.5px"><span class="win" style="width:auto;margin-right:5px">${s.tl[1] ? s.tl[1][0] : ''}</span>${s.tl[1] ? esc(s.tl[1][1]) : ''}</div></div>
+    <div style="font-size:12px" class="t2">${treeCounts(s)}</div>
+    <div>${ctx(s.m.ctx)}</div>
+    <div>${spark(s.m.act)}</div>
+    <div class="two trkcell">${track(T[s.id])}<span class="cap cut">${caption([T[s.id]], true)}</span></div>
+    <div class="num two" style="align-items:flex-end"><span>${s.m.run}</span><span class="sub" style="font-size:11.5px">${s.m.last} ago</span></div>
+    <div class="num two" style="align-items:flex-end"><span>${money(s.m.cost)}</span><span class="sub" style="font-size:11.5px">${s.m.tin}</span></div>
+  </div>`;
+}
+function subrowsA(s) {
+  let h = '';
+  for (const n of flatTree(s.tree).filter((x) => x.depth > 0)) {
+    const run = n.act.startsWith('Running');
+    h += `<div class="subrow ${n.k === 'dispatch' ? 'dis' : ''}"><div></div><div class="tn"><span class="br ${n.depth > 1 ? 'br2' : ''}">└</span>${glyph(n.g, 'sm')}<span class="cut" style="${n.k === 'sub' || n.k === 'dispatch' ? 'color:var(--text)' : ''}">${esc(n.name)}</span>${n.k === 'dispatch' ? '<span class="dtag">dispatch</span>' : ''}</div>
+      <div class="act cut ${run ? 'mono t2' : 't2'}" style="${run ? '' : 'font-size:12px'}">${esc(n.act || n.task)}</div>
+      <div class="stk">${n.stuck ? `<span class="stuck">⚑ ${n.stuck}</span>` : ''}</div>
+      <div class="strk">${n.k === 'dispatch' ? track(T[n.tid]) : ''}</div><div class="age">${n.age}</div></div>`;
+  }
+  return h;
+}
+function accRow(a) {
+  return `<div class="accrow ${a.kind}">
+    <div>${GAUGE}</div>
+    <div class="two"><div class="lbl">Accounts</div><div class="sub" style="font-size:11.5px">Fleet verdict</div></div>
+    <div class="two" style="min-width:0"><div class="l1"><b class="${a.kind === 'dry' ? 'c-dan' : 'c-ask'}" style="font-weight:600">${a.title}</b><span class="t2">· ${a.when} · ${a.span}</span></div><div class="cut t2" style="font-size:12px">${a.detail}</div></div>
+    <div class="opts"><button class="btn ${a.kind === 'dry' ? '' : ''}">Open accounts</button>${a.kind === 'dry' ? '<button class="btn ghost">Switch login</button>' : ''}</div>
+  </div>`;
+}
+function questionsA() {
+  const qs = qByRepo();
+  let h = `<div class="qhd">${QMARK}<span class="h">Questions on Linear</span><span class="n">${D.q.length} blocked issues wait on your answer · not counted above</span><span class="hsp"></span>${D.linErr ? `<span class="lnsync err"><i></i>${D.linErr}</span>` : '<span class="lnsync"><i></i>Linear · 1m ago</span>'}</div>`;
+  qs.forEach(([r, list], idx) => {
+    const open = idx === 0;
+    h += `<div class="qrepo ${open ? 'open' : ''} ${D.linErr ? 'stale' : ''}" data-q="${r}"><div></div><span class="chev">${open ? '▾' : '▸'}</span>${repo(r)}<span class="qn">${list.length}</span>
+      <span class="cut t2">${open ? '' : esc(list[0].id + ' · ' + list[0].note)}</span><button class="btn ghost">Open in Plan</button></div>`;
+    if (open) {
+      for (const q of list) {
+        h += `<div class="qiss ${D.linErr ? 'stale' : ''}"><span class="iss">${q.id}</span>${prio(q.prio)}<span class="cut">${esc(q.title)}</span><span class="cut c-ask">${esc(q.note)}</span><span class="sub">${q.age}</span><button class="btn ghost">Answer in Linear ↗</button></div>`;
+      }
+    }
+  });
+  return h;
+}
+function laneA() {
+  let h = header('status') + queue() + `<div class="ta"><div class="cols">${COLS_A.map((c, i) => `<div class="${i >= 9 ? 'num' : ''}">${c}</div>`).join('')}</div>`;
+  for (const [g, name] of GROUPS) {
+    const list = g === 'needs' ? waitsLongestFirst() : by(g);
+    const extra = g === 'needs' && D.acc ? ' + accounts' : '';
+    h += `<div class="grp ${g === 'needs' ? 'ask' : ''}"><span class="h">${name}</span><span class="n">${list.length}${extra}</span>${g === 'needs' && list.length > 1 ? '<span class="n">· longest wait first</span>' : ''}${g === 'working' ? `<span class="hsp"></span>${legend()}` : ''}</div>`;
+    if (g === 'needs' && !list.length && !D.acc) h += `<div class="empty">${glyph('done')}<span>Nothing needs you. The accounts last the week.</span></div>`;
+    for (const s of list) {
+      const open = s.id === 's1';
+      h += rowA(s, g, open);
+      if (s.pending) h += `<div class="askb"><div class="q">${askBody(s.pending)}</div></div>`;
+      if (g === 'working' || open) h += subrowsA(s);
+      if (open) h += drawerA(s);
+    }
+    if (g === 'needs') {
+      if (D.acc) h += accRow(D.acc);
+      if (D.q.length) h += questionsA();
+      else h += `<div class="qhd">${QMARK}<span class="h">Questions on Linear</span><span class="n">none open</span></div>`;
+    }
+  }
+  return h + '</div>';
+}
+function drawerA(s) {
+  return `<div class="drawer">
+    <div><div class="h">Running summary <span class="sub" style="text-transform:none;letter-spacing:0;font-weight:400">· newest first · model, 3m ago</span></div>${timeline(s.tl)}
+      <div class="h" style="margin-top:12px">Prompt</div><div class="mono t2 cut">/nextup RT-444 — land the summary wire types, then the daemon side</div></div>
+    <div><div class="h">Recent work <span class="sub" style="text-transform:none;letter-spacing:0;font-weight:400">· ${filesSum(s.work)}</span></div>${work(s.work)}</div>
+    <div><div class="h">Linear <span class="lnsync" style="text-transform:none;letter-spacing:0;font-weight:400"><i></i>synced</span></div>
+      <div style="margin-bottom:4px">${issueLine(s.issue)}</div><div style="margin-bottom:8px">${esc(s.issue.title)}</div>
+      <div class="figgrid"><span class="k">Project</span><span>${s.issue.project}</span><span class="k">Release</span><span>${s.issue.release} · 11/18 done</span><span class="k">Worktree</span><span class="mono cut t2">${s.wt}</span><span class="k">Tokens</span><span class="v">${s.m.tin} in · ${s.m.tout} out</span><span class="k">Started</span><span class="v">13:20 · ${s.m.run}</span></div>
+      <div style="margin-top:8px;display:flex;gap:6px"><button class="btn">Go to pane</button><button class="btn ghost">Open diff</button><button class="btn ghost">Open RT-444</button></div></div>
+  </div>`;
+}
+
+/* ---------- Lane B: by repo lane, each with its Next up ---------- */
+function bandB() {
+  const waits = waitsLongestFirst();
+  const qs = qByRepo();
+  const w = waits.length
+    ? waits.map((s) => `<div class="bw"><div class="l1">${glyph('asking')}<span class="lbl cut">${esc(s.label)}</span>${repo(s.repo)}<span class="hsp"></span><span class="c-ask" style="font-weight:600">${s.state} · ${s.age}</span></div><div class="askin">${askBody(s.pending)}</div></div>`).join('')
+    : `<div class="empty" style="margin:0;padding:6px 0">${glyph('done')}<span>No agent is waiting.</span></div>`;
+  const a = D.acc
+    ? `<div class="bacc ${D.acc.kind}"><div class="l1">${GAUGE}<b class="${D.acc.kind === 'dry' ? 'c-dan' : 'c-ask'}">${D.acc.title}</b></div><div class="t2" style="margin:3px 0 2px">${D.acc.when} · ${D.acc.span}</div><div class="sub" style="font-size:11.5px;line-height:1.4">${D.acc.detail}</div><div style="margin-top:8px"><button class="btn">Open accounts</button></div></div>`
+    : `<div class="sub" style="font-size:12px">The accounts last the week.</div>`;
+  const q = qs.length
+    ? `${D.linErr ? `<div class="lnsync err" style="margin-bottom:5px"><i></i>Linear · 14m ago</div>` : ''}${qs.map(([r, l]) => `<div class="bq ${D.linErr ? 'stale' : ''}">${repo(r)}<span class="hsp"></span><span class="qn">${l.length}</span></div>`).join('')}`
+    : `<div class="sub" style="font-size:12px">No open questions.</div>`;
+  const calm = !waits.length && !D.acc && !D.q.length;
+  return `<div class="band ${calm ? 'calm' : ''}">
+    <div class="bcol"><div class="bh"><span class="h ${calm ? '' : 'c-ask'}">Need you</span><span class="n">${waits.length}${waits.length > 1 ? ' · longest wait first' : ''}</span></div>${w}</div>
+    <div class="bcol"><div class="bh"><span class="h">Accounts</span></div>${a}</div>
+    <div class="bcol"><div class="bh">${QMARK}<span class="h">Questions</span><span class="n">${D.q.length} · by repo</span></div>${q}</div>
+  </div>`;
+}
+function sessRowB(s) {
+  return `<div class="brow ${s.group === 'needs' ? 'askrow' : ''}">
+    <div>${glyph(s.glyph)}</div>
+    <div class="two"><span class="lbl cut">${esc(s.label)}</span><span class="mono sub cut" style="font-size:11px">${s.branch}</span></div>
+    <div class="two"><div class="l1">${issueLine(s.issue)}</div><div class="cut t2" style="font-size:11.5px">${esc(s.issue.title)}</div></div>
+    <div class="two"><div class="l1"><b class="${stateColor(s)}" style="font-weight:600">${s.state}</b><span class="sub">· ${s.age}</span>${stuck(s)}</div><div class="cut t2" style="font-size:12px">${esc(s.group === 'needs' ? 'Answer in Need you above' : s.now)}</div></div>
+    <div>${ctx(s.m.ctx)}</div>
+    <div class="num two" style="align-items:flex-end"><span>${s.m.run}</span><span class="sub" style="font-size:11.5px">${s.m.last} ago</span></div>
+    <div class="num">${money(s.m.cost)}</div>
+  </div>` + (s.group === 'working' ? flatTree(s.tree).filter((x) => x.depth > 0).map((n) =>
+    `<div class="bsub"><div></div><div class="tn"><span class="br">${n.depth > 1 ? '   └' : '└'}</span>${glyph(n.g, 'sm')}<span class="cut" style="${n.k === 'sub' || n.k === 'dispatch' ? 'color:var(--text)' : ''}">${esc(n.name)}</span>${n.k === 'dispatch' ? '<span class="dtag">dispatch</span>' : ''}</div><div class="cut t2 ${n.act.startsWith('Running') ? 'mono' : ''}">${esc(n.act || n.task)}</div><div>${n.stuck ? `<span class="stuck">⚑ ${n.stuck}</span>` : ''}</div><div class="num sub">${n.age}</div></div>`).join('') : '');
+}
+function laneRepo(r) {
+  const list = D.S.filter((s) => s.repo === r);
+  const live = list.filter((s) => s.group === 'working' || s.group === 'needs').length;
+  const rows = [];
+  for (const s of list) {
+    rows.push([s.issue.id, T[s.id]]);
+    for (const n of flatTree(s.tree).filter((x) => x.k === 'dispatch')) rows.push([n.name, T[n.tid], true]);
+  }
+  const qs = D.q.filter((q) => q.repo === r);
+  const nx = NEXT[r];
+  return `<section class="lane">
+    <div class="lhead">
+      <div class="lname">${repoSw(r)}<b>${r}</b><span class="sub">${live} live · ${list.length} sessions</span></div>
+      <div class="ltrk">${rows.map(([n, t, dis]) => `<div class="lt"><span class="cut ${dis ? 'c-lilac' : 'sub'}">${esc(n)}</span><span class="trk2 thin">${bars(t)}</span></div>`).join('')}
+        <div class="lt"><span></span><span class="ax">${D.gap ? '<span class="gapnote">no record before 14:05 · the daemon restarted</span>' : '<span>12:32</span><span>13:02</span><span>13:32</span>'}<span>14:02</span><span>now</span></span></div></div>
+      <div class="lcap">${caption(rows.map((x) => x[1]), false)}</div>
+      <div style="justify-self:end"><button class="btn ghost">Open plan</button></div>
+    </div>
+    <div class="lbody">
+      <div class="lsess">${list.map(sessRowB).join('')}</div>
+      <div class="lside">
+        ${qs.length ? `<div class="sh">${QMARK}<span class="h c-ask">Questions</span><span class="n">${qs.length}</span></div>${qs.map((q) => `<div class="nx q ${D.linErr ? 'stale' : ''}"><span class="iss">${q.id}</span><span class="cut c-ask">${esc(q.note)}</span><span class="sub">${q.age}</span></div>`).join('')}` : ''}
+        <div class="sh"><span class="h">Next up</span><span class="n">${nx.todo} in To do</span>${D.linErr ? '<span class="lnsync err" style="margin-left:auto"><i></i>14m ago</span>' : ''}</div>
+        ${nx.items.map(([id, t, p]) => `<div class="nx ${D.linErr ? 'stale' : ''}"><span class="iss">${id}</span>${prio(p)}<span class="cut">${esc(t)}</span></div>`).join('')}
+        <div class="more">+${nx.todo - nx.items.length} more · Open plan</div>
+      </div>
+    </div>
+  </section>`;
+}
+function laneB() {
+  const order = Object.keys(REPOS).filter((r) => D.S.some((s) => s.repo === r));
+  const liveRepos = order.filter((r) => D.S.some((s) => s.repo === r && (s.group === 'working' || s.group === 'needs')));
+  const quiet = Object.keys(NEXT).filter((r) => !order.includes(r));
+  let h = header('repo') + bandB() + `<div class="tbb">
+    <div class="lhd"><span class="h">Lanes</span><span class="n">${liveRepos.length} with a live agent</span><span class="hsp"></span>${legend()}<button class="btn">Show all lanes</button></div>`;
+  for (const r of order) h += laneRepo(r);
+  h += `<div class="lhd" style="margin-top:14px"><span class="h">No live agent</span><span class="n">${quiet.length} repos · next in To do</span></div><div class="quiet">${quiet.map((r) => {
+    const nx = NEXT[r]; const [id, t] = nx.items[0]; const nq = D.q.filter((q) => q.repo === r).length;
+    return `<div class="qr">${repo(r)}<span class="iss">${id}</span><span class="cut t2">${esc(t)}</span><span class="sub">${nx.todo} to do</span><span class="sub">${nx.landed} landed</span><span class="${nq ? 'c-ask' : 'c-faint'}">${nq ? nq + ' question' : '—'}</span><button class="btn ghost">Open plan</button></div>`;
+  }).join('')}</div>`;
+  return h + '</div>';
+}
+
+/* ---------- Wiring ---------- */
+let lane = 'a', state = 'normal';
+function render() {
+  D = data(state);
+  document.getElementById('view-a').innerHTML = laneA();
+  document.getElementById('view-b').innerHTML = laneB();
+  const needs = by('needs').length;
+  for (const id of ['rail-badge', 'tab-badge']) { const e = document.getElementById(id); e.textContent = needs; e.hidden = !needs; }
+  document.getElementById('foot-needs').textContent = `${needs} need you`;
+}
+function show(l, st) {
+  lane = l || lane; state = st || state;
+  render();
+  for (const v of document.querySelectorAll('.view')) v.classList.toggle('on', v.id === 'view-' + lane);
+  for (const t of document.querySelectorAll('.lane-tab')) t.classList.toggle('on', t.dataset.lane === lane);
+  for (const t of document.querySelectorAll('.st-tab')) t.classList.toggle('on', t.dataset.state === state);
+  history.replaceState(null, '', `#${lane}-${state}`);
+}
+document.getElementById('rec-' + RECOMMENDED).hidden = false;
+document.getElementById('lanes').addEventListener('click', (e) => { const t = e.target.closest('.lane-tab'); if (t) show(t.dataset.lane); });
+document.getElementById('states').addEventListener('click', (e) => { const t = e.target.closest('.st-tab'); if (t) show(null, t.dataset.state); });
+document.querySelector('.content').addEventListener('click', (e) => { const m = e.target.closest('[data-mode]'); if (m) show(m.dataset.mode); });
+document.getElementById('view-a').addEventListener('click', (e) => {
+  const r = e.target.closest('.row'); if (!r || e.target.closest('button')) return;
+  let after = r; while (after.nextElementSibling && after.nextElementSibling.matches('.askb, .subrow')) after = after.nextElementSibling;
+  if (after.nextElementSibling && after.nextElementSibling.classList.contains('drawer')) { after.nextElementSibling.remove(); r.classList.remove('open'); return; }
+  const s = D.S.find((x) => x.id === r.dataset.row);
+  after.insertAdjacentHTML('afterend', drawerA(s)); r.classList.add('open');
+});
+{
+  const [l, st] = (location.hash.slice(1) || 'a-normal').split('-');
+  show(l === 'b' ? 'b' : 'a', STATES[st] ? st : 'normal');
+}
+</script>
+</body>
+</html>
