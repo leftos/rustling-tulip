@@ -220,6 +220,7 @@ fn error_attention_adds_an_ended_row_that_a_click_removes(cx: &mut TestAppContex
     h.send(DaemonMessage::Attention {
         session_id: "s3".to_owned(),
         reason: AttentionReason::Error,
+        alert_id: None,
     });
     let rows = entries(&mut h);
     let listed: Vec<(&str, bool)> = rows

@@ -406,6 +406,7 @@ mod tests {
             appearance: AppearanceOverrides::default(),
             last_agent: None,
             last_spawn_config: None,
+            spoken_name: None,
         }
     }
 
@@ -444,6 +445,7 @@ mod tests {
                     default_use_worktree: true,
                     appearance: AppearanceOverrides::default(),
                     last_spawn_config: None,
+                    spoken_name: None,
                 });
             })
             .expect("seed state");

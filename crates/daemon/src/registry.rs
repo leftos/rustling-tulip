@@ -105,6 +105,7 @@ pub async fn add_repo(
         appearance: AppearanceOverrides::default(),
         last_agent: None,
         last_spawn_config: None,
+        spoken_name: None,
     };
 
     state.mutate(|s| {
@@ -294,6 +295,7 @@ pub fn upsert_workspace(
         default_use_worktree: prior_default_use_worktree.unwrap_or(true),
         appearance: prior_appearance.unwrap_or_default(),
         last_spawn_config: prior_last_spawn_config,
+        spoken_name: None,
     };
     state.mutate(|s| {
         if let Some(slot) = s.workspaces.iter_mut().find(|w| w.id == id) {

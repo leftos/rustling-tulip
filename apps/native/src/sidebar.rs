@@ -2673,6 +2673,7 @@ pub(crate) mod tests {
         model.apply(&DaemonMessage::Attention {
             session_id: "s1".to_owned(),
             reason: AttentionReason::AwaitingInput,
+            alert_id: None,
         });
         model.set_focused_session(Some("s1"));
         assert!(model.set_active_tab(Some("t1")), "the UI value is set");
@@ -3496,6 +3497,7 @@ pub(crate) mod tests {
         model.apply(&DaemonMessage::Attention {
             session_id: id.to_owned(),
             reason: AttentionReason::AwaitingInput,
+            alert_id: None,
         });
     }
 

@@ -900,6 +900,7 @@ mod tests {
             appearance: protocol::AppearanceOverrides::default(),
             last_agent: None,
             last_spawn_config: Some(config),
+            spoken_name: None,
         }
     }
 

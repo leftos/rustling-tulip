@@ -290,6 +290,7 @@ impl RootView {
             DaemonMessage::Attention {
                 session_id,
                 reason: AttentionReason::AwaitingInput,
+                ..
             } => {
                 let wanted = self.sidebar.ui_state().notifications.awaiting_input;
                 (

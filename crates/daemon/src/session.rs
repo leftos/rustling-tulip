@@ -371,6 +371,7 @@ impl SessionRecord {
             members: self.members.clone(),
             status: self.status,
             status_since: self.status_since,
+            summary: None,
             mode: self.mode,
             started_at: self.started_at,
             exit_code: self.exit_code,

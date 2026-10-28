@@ -404,6 +404,7 @@ pub(super) fn env_ref_repo_hub(tag: &str) -> (Hub, ScratchDir, PathBuf) {
                 appearance: AppearanceOverrides::default(),
                 last_agent: None,
                 last_spawn_config: None,
+                spoken_name: None,
             });
         })
         .expect("register repo");
@@ -608,6 +609,7 @@ pub(super) fn repo_entry(id: &str, name: &str, path: &Path) -> protocol::RepoEnt
         appearance: AppearanceOverrides::default(),
         last_agent: None,
         last_spawn_config: None,
+        spoken_name: None,
     }
 }
 
@@ -621,6 +623,7 @@ pub(super) fn workspace_entry(id: &str, name: &str, members: &[&str]) -> protoco
         default_use_worktree: true,
         appearance: AppearanceOverrides::default(),
         last_spawn_config: None,
+        spoken_name: None,
     }
 }
 

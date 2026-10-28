@@ -2676,6 +2676,7 @@ mod tests {
                 appearance: protocol::AppearanceOverrides::default(),
                 last_agent: None,
                 last_spawn_config: None,
+                spoken_name: None,
             },
             spawn_kind: PresetSpawnKind::Repo {
                 repo_id: "repo-1".to_string(),
