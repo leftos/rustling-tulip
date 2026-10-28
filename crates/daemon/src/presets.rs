@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
-use anyhow::{Context as _, anyhow};
+use anyhow::{Context as _, anyhow, bail};
 use chrono::Utc;
 use protocol::{
     AgentId, AgentSelection, FooterLine, GridNode, InjectorStartup, InjectorStep, InjectorTemplate,
@@ -126,8 +126,80 @@ fn normalize_job_id(job_id: &str) -> String {
     }
 }
 
-fn send_job_update(hub: &Hub, job: PresetLaunchJobSnapshot) {
+/// Store `job` as its job's latest snapshot, then broadcast it. Storing first
+/// means a connection that lags reads a snapshot no older than the one it lost.
+pub(crate) fn send_job_update(hub: &Hub, job: PresetLaunchJobSnapshot) {
+    crate::sync::lock(&hub.preset_job_snapshots).record(job.clone());
     let _ = hub.preset_events.send(PresetEvent::JobUpdated { job });
+}
+
+/// How many finished preset jobs keep their latest snapshot.
+pub(crate) const FINISHED_JOB_SNAPSHOTS: usize = 32;
+
+/// The latest snapshot of each preset job, in job start order: every running
+/// job, and the [`FINISHED_JOB_SNAPSHOTS`] most recently finished ones. A
+/// connection whose preset-event stream lags is resent these.
+#[derive(Debug, Default)]
+pub struct PresetJobSnapshots {
+    jobs: Vec<StoredJob>,
+    finished: u64,
+}
+
+#[derive(Debug)]
+struct StoredJob {
+    snapshot: PresetLaunchJobSnapshot,
+    /// When the job finished, counted in finishes; `None` while it runs.
+    finished_at: Option<u64>,
+}
+
+impl PresetJobSnapshots {
+    /// Keep `job` as its job's latest snapshot, dropping the oldest finished
+    /// snapshots beyond [`FINISHED_JOB_SNAPSHOTS`].
+    pub fn record(&mut self, job: PresetLaunchJobSnapshot) {
+        let finished = matches!(
+            job.status,
+            PresetLaunchJobStatus::Completed
+                | PresetLaunchJobStatus::Cancelled
+                | PresetLaunchJobStatus::Failed
+        );
+        let stored = if let Some(index) = self
+            .jobs
+            .iter()
+            .position(|s| s.snapshot.job_id == job.job_id)
+        {
+            let stored = &mut self.jobs[index];
+            stored.snapshot = job;
+            stored
+        } else {
+            self.jobs.push(StoredJob {
+                snapshot: job,
+                finished_at: None,
+            });
+            let last = self.jobs.len() - 1;
+            &mut self.jobs[last]
+        };
+        if finished && stored.finished_at.is_none() {
+            self.finished += 1;
+            stored.finished_at = Some(self.finished);
+        }
+        self.prune();
+    }
+
+    /// Every stored snapshot, in job start order.
+    pub fn snapshots(&self) -> Vec<PresetLaunchJobSnapshot> {
+        self.jobs.iter().map(|s| s.snapshot.clone()).collect()
+    }
+
+    fn prune(&mut self) {
+        let mut finishes: Vec<u64> = self.jobs.iter().filter_map(|s| s.finished_at).collect();
+        if finishes.len() <= FINISHED_JOB_SNAPSHOTS {
+            return;
+        }
+        finishes.sort_unstable();
+        let oldest_kept = finishes[finishes.len() - FINISHED_JOB_SNAPSHOTS];
+        self.jobs
+            .retain(|s| s.finished_at.is_none_or(|at| at >= oldest_kept));
+    }
 }
 
 /// Resolve a preset's prompt source into raw prompt texts without spawning
@@ -231,6 +303,17 @@ async fn load_repo_presets(repo_path: &Path, repo_id: &str) -> anyhow::Result<Ve
     let mut entries: Vec<PresetEntry> =
         serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", path.display()))?;
     for entry in &mut entries {
+        if let TabGroupingConfig::NewTab {
+            max_panes_per_tab: Some(0),
+            ..
+        } = entry.tab_grouping
+        {
+            bail!(
+                "{}: preset '{}' sets max_panes_per_tab 0; use 1 or more, or leave it out for no cap",
+                path.display(),
+                entry.id
+            );
+        }
         entry.source_repo_id = repo_id.to_string();
     }
     Ok(entries)
@@ -1087,7 +1170,20 @@ async fn run(
         .map_err(|failure| failure.with_total(total))
 }
 
+/// Refuse a pane-cap override of 0. Checked before anything resolves, so no
+/// script variable runs for a launch that cannot happen.
+fn refuse_zero_pane_cap(args: &LaunchArgs) -> Result<(), LaunchFailure> {
+    if args.max_panes_per_tab_override == Some(0) {
+        return Err(LaunchFailure::new(format!(
+            "preset '{}': max_panes_per_tab_override must be 1 or more",
+            args.preset_id
+        )));
+    }
+    Ok(())
+}
+
 async fn build_plan(hub: &Hub, args: &LaunchArgs) -> Result<LaunchPlan, LaunchFailure> {
+    refuse_zero_pane_cap(args)?;
     let presets = list(hub, &args.target)
         .await
         .map_err(|e| LaunchFailure::new(format!("loading presets: {e}")))?;
@@ -2561,6 +2657,154 @@ mod tests {
         assert_eq!(prompts[0].text, format!("@{absolute}/a.md"));
     }
 
+    fn job_snapshot(job_id: &str, status: PresetLaunchJobStatus) -> PresetLaunchJobSnapshot {
+        PresetLaunchJobSnapshot {
+            job_id: job_id.to_string(),
+            preset_id: "preset-1".to_string(),
+            target: PresetTarget::Repo {
+                repo_id: "repo-1".to_string(),
+            },
+            total: 1,
+            launched: 0,
+            created_session_ids: Vec::new(),
+            created_tab_ids: Vec::new(),
+            status,
+            error: None,
+            current_tab_id: None,
+        }
+    }
+
+    #[test]
+    fn finished_job_snapshots_are_pruned_to_the_newest_n() {
+        let mut jobs = PresetJobSnapshots::default();
+        jobs.record(job_snapshot("running", PresetLaunchJobStatus::Spawning));
+        jobs.record(job_snapshot("late", PresetLaunchJobStatus::Resolving));
+        for i in 0..=FINISHED_JOB_SNAPSHOTS {
+            jobs.record(job_snapshot(
+                &format!("finished-{i}"),
+                PresetLaunchJobStatus::Completed,
+            ));
+        }
+        // The job that started second finishes last, so it is the newest
+        // finished one and the oldest two finished jobs are dropped.
+        jobs.record(job_snapshot("late", PresetLaunchJobStatus::Cancelled));
+
+        let snapshots = jobs.snapshots();
+        let ids: Vec<&str> = snapshots.iter().map(|j| j.job_id.as_str()).collect();
+        let mut expected = vec!["running".to_string(), "late".to_string()];
+        expected.extend((2..=FINISHED_JOB_SNAPSHOTS).map(|i| format!("finished-{i}")));
+        assert_eq!(ids, expected, "running jobs stay, in job start order");
+        assert_eq!(
+            snapshots[1].status,
+            PresetLaunchJobStatus::Cancelled,
+            "a job keeps only its latest snapshot"
+        );
+        let finished = snapshots
+            .iter()
+            .filter(|j| j.status != PresetLaunchJobStatus::Spawning)
+            .count();
+        assert_eq!(finished, FINISHED_JOB_SNAPSHOTS);
+    }
+
+    fn new_tab_preset(max_panes_per_tab: Option<u32>) -> PresetEntry {
+        let mut preset = test_launch_plan(1, 0).preset;
+        preset.tab_grouping = TabGroupingConfig::NewTab {
+            layout: TabLayout::AutoGrid,
+            max_panes_per_tab,
+            tab_name_template: None,
+        };
+        preset
+    }
+
+    #[tokio::test]
+    async fn a_preset_with_a_zero_pane_cap_is_refused_on_load() {
+        let scratch = ScratchDir::new();
+        let folder = scratch.path().join(".rustling-tulip");
+        std::fs::create_dir_all(&folder).expect("create the presets folder");
+        let presets = vec![new_tab_preset(Some(0))];
+        let json = serde_json::to_vec(&presets).expect("serialize the presets");
+        std::fs::write(folder.join("presets.json"), json).expect("write presets.json");
+
+        let err = load_repo_presets(scratch.path(), "repo-1")
+            .await
+            .expect_err("a zero pane cap is refused");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("preset 'preset-1'"),
+            "names the preset: {message}"
+        );
+        assert!(
+            message.contains("presets.json"),
+            "names the file: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_zero_pane_cap_override_is_refused_before_any_script_runs() {
+        let (hub, _preset_rx, scratch) = test_hub();
+        let repo_dir = scratch.path().join("repo");
+        let folder = repo_dir.join(".rustling-tulip");
+        std::fs::create_dir_all(&folder).expect("create the presets folder");
+        let marker = scratch.path().join("script-ran");
+        let mut preset = new_tab_preset(None);
+        preset.variables = vec![PresetVariable {
+            name: "marker".to_string(),
+            label: "Marker".to_string(),
+            kind: PresetVariableKind::Script {
+                cmd: "git".to_string(),
+                args: vec![
+                    "init".to_string(),
+                    "--quiet".to_string(),
+                    marker.to_string_lossy().into_owned(),
+                ],
+                extract_pattern: None,
+                timeout_ms: 30_000,
+                skip_if_empty: None,
+            },
+            prompt_at_launch: false,
+            default: None,
+            optional: true,
+        }];
+        let json = serde_json::to_vec(&vec![preset]).expect("serialize the presets");
+        std::fs::write(folder.join("presets.json"), json).expect("write presets.json");
+        let mut repo = test_launch_plan(1, 0).repo;
+        repo.path = repo_dir.to_string_lossy().into_owned();
+        hub.state
+            .mutate(|s| s.repos.push(repo))
+            .expect("register the repo");
+
+        launch(
+            hub.clone(),
+            LaunchArgs {
+                job_id: "job-zero-cap".to_string(),
+                target: PresetTarget::Repo {
+                    repo_id: "repo-1".to_string(),
+                },
+                preset_id: "preset-1".to_string(),
+                source: LaunchPresetSource::Inline {
+                    prompts: vec!["prompt 1".to_string()],
+                },
+                variable_values: Vec::new(),
+                use_worktree_override: None,
+                max_panes_per_tab_override: Some(0),
+                client_id: "test-client".to_string(),
+            },
+        )
+        .await;
+
+        let last = crate::sync::lock(&hub.preset_job_snapshots)
+            .snapshots()
+            .into_iter()
+            .rfind(|job| job.job_id == "job-zero-cap")
+            .expect("the job has a snapshot");
+        assert_eq!(last.status, PresetLaunchJobStatus::Failed);
+        assert_eq!(
+            last.error.as_deref(),
+            Some("preset 'preset-1': max_panes_per_tab_override must be 1 or more")
+        );
+        assert!(!marker.exists(), "no script ran before the refusal");
+    }
+
     fn test_hub() -> (Hub, broadcast::Receiver<PresetEvent>, ScratchDir) {
         let scratch = ScratchDir::new();
         let config = scratch.path().join("config");
@@ -2607,6 +2851,7 @@ mod tests {
             tab_events,
             preset_events,
             preset_cancellations: Arc::new(AsyncMutex::new(HashMap::new())),
+            preset_job_snapshots: Arc::default(),
             state_events,
             client_count: Arc::new(client_count),
             remote_enabled: Arc::new(remote_enabled),

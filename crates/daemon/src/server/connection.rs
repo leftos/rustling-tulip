@@ -194,7 +194,7 @@ pub(super) async fn client_session_until(
         out_tx.clone(),
         client_id.clone(),
     );
-    let preset_event_task = spawn_preset_forwarder(hub.preset_events.subscribe(), out_tx.clone());
+    let preset_event_task = spawn_preset_forwarder(&hub, out_tx.clone());
     let state_event_task = spawn_state_forwarder(
         &hub,
         hub.state_events.subscribe(),
@@ -523,10 +523,15 @@ fn spawn_state_forwarder(
     })
 }
 
+/// Forward preset events to one connection. When its stream lags, the
+/// connection is resent every stored job snapshot, in job start order, before
+/// forwarding resumes, so a lost terminal `JobUpdated` still reaches it.
 fn spawn_preset_forwarder(
-    mut rx: broadcast::Receiver<PresetEvent>,
+    hub: &Hub,
     out_tx: mpsc::UnboundedSender<DaemonMessage>,
 ) -> tokio::task::JoinHandle<()> {
+    let mut rx = hub.preset_events.subscribe();
+    let jobs = Arc::clone(&hub.preset_job_snapshots);
     tokio::spawn(async move {
         loop {
             match rx.recv().await {
@@ -566,7 +571,15 @@ fn spawn_preset_forwarder(
                     });
                 }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
-                    warn!(lagged = n, "client preset event stream lagged");
+                    let snapshots = crate::sync::lock(&jobs).snapshots();
+                    warn!(
+                        lagged = n,
+                        resent = snapshots.len(),
+                        "client preset event stream lagged"
+                    );
+                    for job in snapshots {
+                        let _ = out_tx.send(DaemonMessage::PresetLaunchJobUpdated { job });
+                    }
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
             }
@@ -1002,6 +1015,73 @@ mod tests {
             removed.expect("events after the list still arrive"),
             "after".to_string(),
             "the forwarder keeps draining its new subscription"
+        );
+        forwarder.abort();
+    }
+
+    fn job_snapshot(
+        job_id: &str,
+        status: protocol::PresetLaunchJobStatus,
+    ) -> protocol::PresetLaunchJobSnapshot {
+        protocol::PresetLaunchJobSnapshot {
+            job_id: job_id.to_string(),
+            preset_id: "preset-1".to_string(),
+            target: protocol::PresetTarget::Repo {
+                repo_id: "repo-1".to_string(),
+            },
+            total: 1,
+            launched: 0,
+            created_session_ids: Vec::new(),
+            created_tab_ids: Vec::new(),
+            status,
+            error: None,
+            current_tab_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_lagged_preset_forwarder_resends_the_job_snapshots() {
+        let (hub, _scratch) = test_hub("lagged-preset-forwarder");
+        let (out_tx, mut rx) = mpsc::unbounded_channel();
+        let forwarder = spawn_preset_forwarder(&hub, out_tx);
+
+        let running = job_snapshot("job-running", protocol::PresetLaunchJobStatus::Spawning);
+        let done = job_snapshot("job-done", protocol::PresetLaunchJobStatus::Completed);
+        crate::presets::send_job_update(&hub, running.clone());
+        crate::presets::send_job_update(&hub, done.clone());
+        // The current-thread runtime first polls the forwarder at the await
+        // below, by which time these progress events have pushed both job
+        // snapshots out of the test hub's 16-slot channel.
+        for _ in 0..=crate::server::PRESET_EVENT_CAPACITY {
+            let _ = hub.preset_events.send(PresetEvent::Progress {
+                job_id: "job-running".to_string(),
+                preset_id: "preset-1".to_string(),
+                total: 1,
+                launched: 0,
+                current_tab_id: None,
+                tab_ids: Vec::new(),
+            });
+        }
+
+        let mut resent = Vec::new();
+        for _ in 0..2 {
+            let job = match next_message(&mut rx).await {
+                DaemonMessage::PresetLaunchJobUpdated { job } => Some(job),
+                _ => None,
+            };
+            resent.push(job.expect("the lagged connection gets a job snapshot"));
+        }
+        assert_eq!(
+            resent,
+            vec![running, done],
+            "every stored snapshot is resent, in job start order"
+        );
+        assert!(
+            matches!(
+                next_message(&mut rx).await,
+                DaemonMessage::PresetLaunchProgress { .. }
+            ),
+            "the forwarder keeps forwarding after the resend"
         );
         forwarder.abort();
     }

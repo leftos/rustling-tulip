@@ -15,6 +15,8 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - Dropping a pane back where it already was no longer stops the tab arranging itself automatically.
 - A watched VS Code workspace file edited while the daemon was down is applied when it starts.
 - Looking for VS Code workspaces on a slow or offline folder no longer stalls typing and other actions until the search ends.
+- A preset launch's progress toast no longer sticks at "Launching" when the app falls behind on updates.
+- A preset that sets its panes per tab to 0 is refused with an error naming the preset, instead of opening every session in its own tab.
 - An agent that starts through a `.cmd` file refuses to launch, saying why, when a prompt, path or setting holds a character cmd would run or rewrite.
 
 ## v0.4.0-alpha

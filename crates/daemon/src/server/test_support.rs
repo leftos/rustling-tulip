@@ -132,6 +132,7 @@ pub(super) fn build_test_hub(
         tab_events,
         preset_events,
         preset_cancellations: Arc::new(AsyncMutex::new(HashMap::new())),
+        preset_job_snapshots: Arc::default(),
         state_events,
         client_count: Arc::new(client_count),
         remote_enabled: Arc::new(remote_enabled),

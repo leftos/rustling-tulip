@@ -1911,6 +1911,8 @@ pub enum TabGroupingConfig {
     NewTab {
         layout: TabLayout,
         /// Optional cap. `None` = unlimited (one tab for the whole batch).
+        /// The daemon refuses 0: a preset file setting it fails to load,
+        /// and a launch override of 0 fails the launch.
         #[serde(default)]
         max_panes_per_tab: Option<u32>,
         /// Optional override for the tab's base name. When `None`, daemon

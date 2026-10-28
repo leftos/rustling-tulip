@@ -94,6 +94,10 @@ pub struct Hub {
     /// Cancellation handles for in-flight preset launch jobs. The launch task
     /// inserts a sender on start and removes it on completion/failure/cancel.
     pub preset_cancellations: Arc<AsyncMutex<HashMap<String, tokio::sync::watch::Sender<bool>>>>,
+    /// The latest snapshot of each preset job (running jobs and the newest
+    /// finished ones), written before each `JobUpdated` broadcast and resent
+    /// to a connection whose preset-event stream lags.
+    pub preset_job_snapshots: Arc<std::sync::Mutex<crate::presets::PresetJobSnapshots>>,
     /// Broadcast for repo + workspace registry mutations. Every connected
     /// client subscribes and forwards full `Repos` / `Workspaces` snapshots
     /// to its WS sender. Without this, a registry change made on one client
@@ -394,6 +398,7 @@ pub async fn run(
         tab_events,
         preset_events,
         preset_cancellations: Arc::new(AsyncMutex::new(HashMap::new())),
+        preset_job_snapshots: Arc::default(),
         state_events,
         client_count,
         remote_enabled: Arc::new(tokio::sync::watch::Sender::new(remote.enabled)),
