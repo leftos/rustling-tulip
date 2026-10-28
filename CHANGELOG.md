@@ -4,6 +4,10 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+### Fixed
+
+- The installer stops a running daemon only after it proves it is the real one, so the daemon's token never goes to another program listening on its port.
+
 ## v0.4.0-alpha
 
 ### Added

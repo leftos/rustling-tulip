@@ -358,13 +358,97 @@ pub(crate) async fn kill_pid(pid: u32) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// What [`shutdown_in`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shutdown {
+    /// No `daemon.json`: no daemon to stop.
+    NoDaemon,
+    /// The daemon stopped.
+    Stopped,
+    /// `daemon.json` named a pid that is no longer running; only the stale file
+    /// was removed.
+    Stale,
+    /// Its listener did not prove it holds the token: nothing was sent, nothing
+    /// killed, the file kept.
+    NotProven(Proof),
+}
+
+/// Retire the daemon `config_dir`'s `daemon.json` names, without spawning a
+/// replacement: on Windows its pid is pinned, the listener proves it holds the
+/// token, the bearer `/shutdown` goes out on that proven connection, and a
+/// daemon still running after the wait is force-stopped through the pin.
+///
+/// Every `rt-tracer.exe` is left alive, so the next daemon reattaches the
+/// user's sessions.
+///
+/// # Errors
+///
+/// Fails when `daemon.json` holds something that is not a handshake, or when
+/// this client may not terminate the daemon and it is still running after the
+/// shutdown wait. A missing file, a pid that already exited and a listener that
+/// does not prove itself are not errors: they are returned as
+/// [`Shutdown::NoDaemon`], [`Shutdown::Stale`] and [`Shutdown::NotProven`].
+pub async fn shutdown_in(config_dir: &Path) -> anyhow::Result<Shutdown> {
+    shutdown_in_with(
+        config_dir,
+        supervisor::PROOF_TIMEOUT,
+        supervisor::SHUTDOWN_WAIT_TIMEOUT,
+    )
+    .await
+}
+
+/// [`shutdown_in`] with `proof_budget` for the listener's proof and
+/// `shutdown_wait` for the daemon to stop after the shutdown request.
+///
+/// # Errors
+///
+/// As [`shutdown_in`].
+pub(crate) async fn shutdown_in_with(
+    config_dir: &Path,
+    proof_budget: Duration,
+    shutdown_wait: Duration,
+) -> anyhow::Result<Shutdown> {
+    let handshake = match read_handshake_in(config_dir) {
+        Ok(handshake) => handshake,
+        Err(err) if names_no_file(&err) => return Ok(Shutdown::NoDaemon),
+        Err(err) => return Err(err),
+    };
+    // The pid is opened before the retire so a daemon that already exited is
+    // reported as the stale file it left behind, not as a stopped daemon.
+    #[cfg(windows)]
+    {
+        if matches!(
+            pinned_process::PinnedProcess::open(handshake.pid),
+            Err(pinned_process::OpenFailure::NotRunning)
+        ) {
+            remove_handshake_holding_token(config_dir, &handshake.auth_token).await;
+            return Ok(Shutdown::Stale);
+        }
+    }
+    match supervisor::retire_daemon_in(config_dir, &handshake, proof_budget, shutdown_wait).await {
+        Ok(()) => Ok(Shutdown::Stopped),
+        Err(err) => match err.downcast_ref::<supervisor::NotProven>() {
+            Some(refusal) => Ok(Shutdown::NotProven(refusal.proof)),
+            None => Err(err),
+        },
+    }
+}
+
+/// Whether `err` is a read that found no `daemon.json`: the daemon went away
+/// before the read, so there is nothing to stop.
+fn names_no_file(err: &anyhow::Error) -> bool {
+    err.chain()
+        .filter_map(|cause| cause.downcast_ref::<std::io::Error>())
+        .any(|io| io.kind() == std::io::ErrorKind::NotFound)
+}
+
 #[cfg(test)]
 #[expect(
     clippy::expect_used,
     reason = "tests assert preconditions with expect; failure messages aid debugging"
 )]
 mod tests {
-    use super::client_identity;
+    use super::{Proof, Shutdown, client_identity, handshake_file_in};
     use crate::test_fakes::{
         FakeListener, ScratchDir, block_on, handshake_naming, stand_in, write_daemon_json,
     };
@@ -657,5 +741,58 @@ mod tests {
             fallback.display()
         );
         assert_ne!(fallback, chosen);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn shutdown_in_sends_no_token_to_an_unproven_listener() {
+        let scratch = ScratchDir::new("shutdown-unproven");
+        let fake = FakeListener::healthy();
+        let mut child = stand_in();
+        let file = handshake_naming(child.id(), fake.port, "token", &[0]);
+        write_daemon_json(&scratch.0, &file);
+
+        let stopped = block_on(super::shutdown_in_with(&scratch.0, HANG_GUARD, HANG_GUARD));
+        let alive = alive_then_reaped(&mut child);
+
+        let outcome = stopped.expect("an unproven listener is reported, not failed");
+        assert_eq!(outcome, Shutdown::NotProven(Proof::Unproven));
+        assert!(alive, "the stand-in was killed");
+        assert!(!fake.saw_authorization(), "heads: {:?}", fake.heads());
+        assert!(
+            handshake_file_in(&scratch.0).exists(),
+            "daemon.json was removed"
+        );
+    }
+
+    #[test]
+    fn shutdown_in_without_a_handshake_has_nothing_to_stop() {
+        let scratch = ScratchDir::new("shutdown-no-daemon");
+
+        let stopped = block_on(super::shutdown_in_with(&scratch.0, HANG_GUARD, HANG_GUARD));
+
+        let outcome = stopped.expect("nothing to stop is not a failure");
+        assert_eq!(outcome, Shutdown::NoDaemon);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn shutdown_in_reports_a_gone_pid_as_stale() {
+        let scratch = ScratchDir::new("shutdown-gone-pid");
+        let mut child = stand_in();
+        let pid = child.id();
+        let _ = child.kill();
+        let _ = child.wait();
+        let file = handshake_naming(pid, 40123, "token", &[0]);
+        write_daemon_json(&scratch.0, &file);
+
+        let stopped = block_on(super::shutdown_in_with(&scratch.0, HANG_GUARD, HANG_GUARD));
+
+        let outcome = stopped.expect("a pid that is gone is not a failure");
+        assert_eq!(outcome, Shutdown::Stale);
+        assert!(
+            !handshake_file_in(&scratch.0).exists(),
+            "the stale daemon.json survived"
+        );
     }
 }

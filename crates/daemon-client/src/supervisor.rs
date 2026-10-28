@@ -26,7 +26,7 @@ pub const PROOF_TIMEOUT: Duration = Duration::from_millis(800);
 // when the pipe is busy from a stale daemon connection — two sessions
 // in that state already exceeds 8s.
 const SPAWN_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
-const SHUTDOWN_WAIT_TIMEOUT: Duration = Duration::from_secs(8);
+pub(crate) const SHUTDOWN_WAIT_TIMEOUT: Duration = Duration::from_secs(8);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 enum ExistingDaemon {
@@ -372,7 +372,7 @@ async fn retire_daemon(
 /// retire; when this client may not terminate the daemon and it is still
 /// running after the shutdown request; or when the force-stop fails. A pid
 /// that is no longer running is `Ok`.
-async fn retire_daemon_in(
+pub(crate) async fn retire_daemon_in(
     config_dir: &Path,
     handshake: &DaemonHandshake,
     proof_budget: Duration,
@@ -418,24 +418,22 @@ async fn retire_daemon_in(
 ///
 /// # Errors
 ///
-/// Fails (logging why) when the connection could not be opened or the proof
-/// failed: the daemon classified as proven stopped proving itself.
+/// Fails (logging why) with a [`NotProven`] when the connection could not be
+/// opened or the proof failed: the daemon classified as proven stopped proving
+/// itself.
 async fn connect_then_prove(
     handshake: &DaemonHandshake,
     proof_budget: Duration,
 ) -> anyhow::Result<tokio::net::TcpStream> {
     let port = handshake.port;
-    let stopped_proving = || {
-        anyhow!(
-            "the daemon on 127.0.0.1:{port} stopped proving it holds its token while being \
-             retired; not replacing it"
-        )
-    };
     let stream = match proof::connect(port, proof_budget).await {
         Ok(stream) => stream,
         Err(err) => {
             info!(port, err = %format!("{err:#}"), "nothing listens on the daemon's port");
-            return Err(stopped_proving());
+            return Err(anyhow::Error::new(NotProven {
+                port,
+                proof: Proof::Refused,
+            }));
         }
     };
     let proof = proof::prove(port, &handshake.auth_token, proof_budget).await;
@@ -445,10 +443,33 @@ async fn connect_then_prove(
             ?proof,
             "daemon.json names a listener that did not prove it holds the token; nothing to retire"
         );
-        return Err(stopped_proving());
+        return Err(anyhow::Error::new(NotProven { port, proof }));
     }
     Ok(stream)
 }
+
+/// The refusal a retire hands back when the listener on `port` did not prove
+/// it holds the token `daemon.json` named, carrying what the proof said.
+#[derive(Debug)]
+pub(crate) struct NotProven {
+    /// The port `daemon.json` named.
+    pub(crate) port: u16,
+    /// What the listener answered when asked to prove itself.
+    pub(crate) proof: Proof,
+}
+
+impl std::fmt::Display for NotProven {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the daemon on 127.0.0.1:{} stopped proving it holds its token while being retired; \
+             not replacing it",
+            self.port
+        )
+    }
+}
+
+impl std::error::Error for NotProven {}
 
 /// Sends the bearer `/shutdown` on `stream`; a failure is logged, since the
 /// wait that follows decides whether the daemon stopped.

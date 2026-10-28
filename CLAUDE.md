@@ -94,6 +94,8 @@ Nothing calls `gate.exe` directly. The wrapper hands the call to the installed g
 
 `rustling-tulipd pair` prints a one-time device pairing code from the running daemon (it needs the daemon already running, reads `daemon.json` and takes no instance lock; `crates/daemon/src/cli_pair.rs`); the owner types the code on a device whose pairing request is waiting.
 
+`rustling-tulipd shutdown` stops the running daemon the way the client retires one: it sends `/shutdown` only to a listener that has proven it holds the token, leaves every tracer alive, creates no folders and starts no log (`crates/daemon/src/cli_shutdown.rs`, `daemon_client::shutdown_in`); the installer runs it on install and uninstall. The `/proof` key context and the `/proof` and `/shutdown` routes are therefore a contract with every released daemon.
+
 The native client auto-spawns the daemon on first connect via `daemon_client::ensure_running` (`crates/daemon-client`), passing the protocol versions it speaks. The daemon writes `port` + `auth_token` + `pid` + `supported_versions` to `daemon.json` in the config dir below; clients read that to connect.
 
 A daemon sharing none of the client's versions is retired and replaced. The native client speaks only the current version, and the daemon's `supported` (`protocol-version.json`) lists only the current version too.

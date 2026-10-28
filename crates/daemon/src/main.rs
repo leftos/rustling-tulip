@@ -11,6 +11,7 @@ mod branch_fate;
 mod branch_names;
 mod child_env;
 mod cli_pair;
+mod cli_shutdown;
 mod conversations;
 mod detach;
 mod devices;
@@ -74,21 +75,34 @@ use tracing_subscriber::EnvFilter;
 const INSTANCE_LOCK_WAIT: Duration = Duration::from_secs(5);
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> anyhow::Result<std::process::ExitCode> {
+    // `rustling-tulipd shutdown` retires a running daemon and exits, before
+    // `Dirs::ensure` because that creates the config and session folders, which
+    // an uninstall must not leave behind. Like `pair` it takes no instance
+    // lock, no log rotation and no binary-cache sweep, so it is safe beside the
+    // daemon it retires.
+    if cli_shutdown::requested(std::env::args_os().skip(1)) {
+        cli_pair::attach_parent_console();
+        let code =
+            cli_shutdown::run(&daemon_client::config_dir()?, &mut std::io::stdout().lock()).await?;
+        return Ok(std::process::ExitCode::from(code));
+    }
     let dirs = paths::Dirs::ensure()?;
     // `rustling-tulipd pair` prints a one-time device pairing code from the
     // running daemon's loopback listener and exits: no instance lock, no log
     // rotation and no binary-cache sweep, so it is safe beside a live daemon.
     if cli_pair::requested(std::env::args_os().skip(1)) {
         cli_pair::attach_parent_console();
-        return cli_pair::run(&dirs.handshake_file, &mut std::io::stdout().lock()).await;
+        cli_pair::run(&dirs.handshake_file, &mut std::io::stdout().lock()).await?;
+        return Ok(std::process::ExitCode::SUCCESS);
     }
     // The login `Run` entry runs the installed exe with `--detach`: hand over
     // to a cached copy and exit, without taking the instance lock, the log or
     // the binary-cache sweep from a daemon that may already serve this config
     // dir.
     if detach::requested(std::env::args_os().skip(1)) {
-        return detach::relaunch_from_cache(&dirs);
+        detach::relaunch_from_cache(&dirs)?;
+        return Ok(std::process::ExitCode::SUCCESS);
     }
     // One daemon per config dir. A second launch must exit here, before it
     // rotates the live daemon's log, sweeps its binary cache, reaps the orphan
@@ -99,7 +113,7 @@ async fn main() -> anyhow::Result<()> {
             config_dir = %dirs.config.display(),
             "another rustling-tulipd holds daemon.lock for this config dir; exiting"
         );
-        return Ok(());
+        return Ok(std::process::ExitCode::SUCCESS);
     };
     init_tracing(&dirs);
     info!(config_dir = %dirs.config.display(), "starting rustling-tulipd");
@@ -179,7 +193,8 @@ async fn main() -> anyhow::Result<()> {
 
     let result = server::run(state, dirs, live, dead, resume_ids).await;
     info!(?result, "rustling-tulipd main returning");
-    result
+    result?;
+    Ok(std::process::ExitCode::SUCCESS)
 }
 
 /// Seal the secret literal rows `state.json` and the session sidecars hold.

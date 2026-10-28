@@ -22,7 +22,7 @@ The finish page offers "Run rustling-tulip", which starts the client unelevated.
 
 ## Stopping the daemon
 
-Before it copies files and before the uninstaller deletes them, the script stops a running daemon gracefully: it reads `%APPDATA%\leftos\rustling-tulip\config\daemon.json`, POSTs `http://127.0.0.1:<port>/shutdown` with the handshake's bearer token, then waits up to 5 s for the file to disappear. Every `rt-tracer.exe` supervisor survives, so a reinstall over a client with sessions open leaves those sessions alive — the next daemon reattaches to them. The daemon and tracer run from a content-addressed binary cache, so the installed exes are never locked by a live session.
+After it copies the daemon and tracer and before it copies the client, and before the uninstaller deletes the files, the script stops a running daemon with the shipped daemon's own `rustling-tulipd shutdown`: it reads `daemon.json`, sends `/shutdown` with the bearer token only on a connection to a listener that has proven it holds that token (`GET /proof`), and prints one line (exit 0 stopped, nothing running or a stale file removed; 3 not proven, nothing sent; 1 anything else), which the script only logs. Every `rt-tracer.exe` supervisor survives, so a reinstall over a client with sessions open leaves those sessions alive — the next daemon reattaches to them. The daemon and tracer run from a content-addressed binary cache, so the installed exes are never locked by a live session.
 
 ## What uninstall removes and keeps
 

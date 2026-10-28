@@ -68,59 +68,30 @@ VIAddVersionKey "LegalCopyright" "leftos. MIT License."
 
 !insertmacro MUI_LANGUAGE "English"
 
-; Stops a running daemon gracefully before the binaries are copied or deleted.
-;
-; The daemon and tracer run from the content-addressed binary cache, so the
-; files installed here are not locked by a live session's tracer. The daemon
-; process itself must go so the freshly-installed one can take its port and
-; write daemon.json. POSTing /shutdown leaves every rt-tracer.exe alive, so
-; the next daemon reattaches and the user's sessions resurface unchanged.
-; Failures are swallowed: a missing or unhealthy daemon already meets the
-; goal of "nothing holds the installed files".
-!macro RT_GRACEFUL_SHUTDOWN
+; Stops a running daemon before the client is replaced or the files are
+; deleted, with the shipped daemon's own `shutdown`: it sends the token only
+; to a listener that proves it holds it, and leaves every rt-tracer.exe
+; alive so the next daemon reattaches the user's sessions. The running
+; daemon is a cached copy, so the installed exe is never locked. Its exit
+; code is only logged: a missing or unproven daemon must not fail the setup.
+!macro RT_STOP_DAEMON
   Push $0
-  Push $1
-  Push $R0
-
-  StrCpy $R0 "$APPDATA\leftos\rustling-tulip\config\daemon.json"
-  IfFileExists "$R0" 0 rt_shutdown_done
-
-  ; Pass the daemon.json path via env var so PowerShell sees it as a literal
-  ; string -- avoids quote-in-quote gymnastics inside the -Command payload.
-  System::Call 'kernel32::SetEnvironmentVariable(t "RT_DAEMON_JSON", t "$R0")'
-
-  ; POST to /shutdown with the bearer token. -TimeoutSec 5 so a hung daemon
-  ; doesn't block install indefinitely. Every `$` of the PowerShell payload is
-  ; doubled: NSIS would otherwise read `$h` as one of its own variables, and
-  ; /WX turns that warning into an error. `$$` reaches PowerShell as `$`.
-  nsExec::ExecToLog 'powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $$h = Get-Content -Raw $$env:RT_DAEMON_JSON | ConvertFrom-Json; Invoke-RestMethod -Method Post -TimeoutSec 5 -Uri (\"http://127.0.0.1:$$($$h.port)/shutdown\") -Headers @{ Authorization = \"Bearer $$($$h.auth_token)\" } } catch { }"'
+  IfFileExists "$INSTDIR\${DAEMONEXE}" 0 rt_stop_done
+  nsExec::ExecToLog '"$INSTDIR\${DAEMONEXE}" shutdown'
   Pop $0
-
-  ; Poll for daemon.json removal -- proof the daemon shut down cleanly. Up to
-  ; 5 seconds in 250ms slices; after that proceed regardless, and a still
-  ; running daemon surfaces as a sharing violation the user can resolve.
-  StrCpy $1 0
-rt_poll:
-  IfFileExists "$R0" 0 rt_shutdown_done
-  IntOp $1 $1 + 1
-  IntCmp $1 20 rt_shutdown_done
-  Sleep 250
-  Goto rt_poll
-
-rt_shutdown_done:
-  Pop $R0
-  Pop $1
+  DetailPrint "rustling-tulipd shutdown exited with $0"
+rt_stop_done:
   Pop $0
 !macroend
 
 Section "rustling-tulip" SEC_APP
   SectionIn RO
   SetOutPath "$INSTDIR"
-  !insertmacro RT_GRACEFUL_SHUTDOWN
-
-  File "${BINDIR}\${APPEXE}"
   File "${BINDIR}\${DAEMONEXE}"
   File "${BINDIR}\${TRACEREXE}"
+  !insertmacro RT_STOP_DAEMON
+
+  File "${BINDIR}\${APPEXE}"
   WriteUninstaller "$INSTDIR\uninstall.exe"
 
   CreateShortcut "$SMPROGRAMS\rustling-tulip.lnk" "$INSTDIR\${APPEXE}"
@@ -150,7 +121,7 @@ SectionEnd
 !insertmacro MUI_FUNCTION_DESCRIPTION_END
 
 Section "Uninstall"
-  !insertmacro RT_GRACEFUL_SHUTDOWN
+  !insertmacro RT_STOP_DAEMON
 
   DeleteRegValue HKCU "${RUNKEY}" "${RUNVALUE}"
   DeleteRegKey HKCU "${TOASTCLSIDKEY}"
