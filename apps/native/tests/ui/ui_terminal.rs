@@ -405,6 +405,40 @@ fn utf8_mouse_reports_encode_columns_past_95(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn mode_1016_clicks_report_pixel_coordinates(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, session("s1").build());
+    h.pty("s1", b"\x1b[?1000h\x1b[?1016h");
+
+    let first = h.cell_center("p1", 0, 0);
+    let diagonal = h.cell_center("p1", 1, 1);
+    let width = (diagonal.x - first.x) / px(1.0);
+    let height = (diagonal.y - first.y) / px(1.0);
+    let at = h.cell_center("p1", 2, 3);
+    h.click(at, Modifiers::none());
+
+    let sent = String::from_utf8(h.sent_input("s1")).expect("SGR reports are ASCII");
+    let (x, y) = sent
+        .strip_prefix("\x1b[<0;")
+        .and_then(|rest| rest.split('M').next())
+        .and_then(|coords| coords.split_once(';'))
+        .expect("a press report in SGR syntax");
+    assert_eq!(sent, format!("\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m"));
+    let x = f32::from(x.parse::<u16>().expect("a decimal x"));
+    let y = f32::from(y.parse::<u16>().expect("a decimal y"));
+    // The centre of cell (2, 3) lies 2.5 cells right and 3.5 cells down of
+    // the grid's corner; a cell report would say 3;4.
+    assert!(
+        x > 2.0 * width && x <= 3.0 * width + 1.0,
+        "x {x} for cells {width} wide"
+    );
+    assert!(
+        y > 3.0 * height && y <= 4.0 * height + 1.0,
+        "y {y} for cells {height} high"
+    );
+}
+
+#[gpui::test]
 fn stopped_session_drops_keys_and_pastes(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = attached(cx, &dir, session("s1").build());

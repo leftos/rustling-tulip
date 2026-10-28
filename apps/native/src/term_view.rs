@@ -1177,16 +1177,13 @@ impl TerminalPane {
     fn wheel(&mut self, lines: i32, position: Point<Pixels>, modifiers: Modifiers) {
         let mode = self.term.mode();
         if mouse::reports(mode, modifiers.shift) {
-            let Some(cell) = self.cell_at(position) else {
-                return;
-            };
             let button = if lines > 0 {
                 mouse::Button::WheelUp
             } else {
                 mouse::Button::WheelDown
             };
             for _ in 0..lines.unsigned_abs() {
-                self.report(button, mouse::ReportKind::Press, modifiers, cell, true);
+                self.report(button, mouse::ReportKind::Press, modifiers, position, true);
             }
         } else if mouse::wheel_sends_arrows(mode) {
             self.send_to_child(&mouse::wheel_arrows(lines, self.term.app_cursor()), true);
@@ -1196,23 +1193,34 @@ impl TerminalPane {
     }
 
     fn cell_at(&self, position: Point<Pixels>) -> Option<ViewportCell> {
-        let (origin, cell) = self.layout?;
-        let x = (position.x - origin.x) / px(1.0);
-        let y = (position.y - origin.y) / px(1.0);
+        let (x, y, cell) = self.grid_offset(position)?;
         Some(ViewportCell::at(x, y, cell, self.term.size()))
     }
 
-    /// Sends the encoded report, flagged `automatic` for a report the terminal
-    /// produced on its own — a wheel report or a motion report — rather than
-    /// one the owner clicked.
+    /// `position` in pixels from the grid's top-left corner, with the cell
+    /// size, as last laid out.
+    fn grid_offset(&self, position: Point<Pixels>) -> Option<(f32, f32, CellSize)> {
+        let (origin, cell) = self.layout?;
+        let x = (position.x - origin.x) / px(1.0);
+        let y = (position.y - origin.y) / px(1.0);
+        Some((x, y, cell))
+    }
+
+    /// Sends the report of the pointer at `position`, flagged `automatic`
+    /// for a report the terminal produced on its own — a wheel report or a
+    /// motion report — rather than one the owner clicked.
     fn report(
         &self,
         button: mouse::Button,
         kind: mouse::ReportKind,
         modifiers: Modifiers,
-        cell: ViewportCell,
+        position: Point<Pixels>,
         automatic: bool,
     ) {
+        let Some((x, y, cell)) = self.grid_offset(position) else {
+            return;
+        };
+        let size = self.term.size();
         let report = mouse::Report {
             button,
             kind,
@@ -1221,9 +1229,10 @@ impl TerminalPane {
                 alt: modifiers.alt,
                 ctrl: modifiers.control,
             },
-            cell,
+            cell: ViewportCell::at(x, y, cell, size),
+            pixel: mouse::PixelPos::at(x, y, cell, size),
         };
-        let encoding = mouse::Encoding::of(self.term.mode());
+        let encoding = mouse::Encoding::of(self.term.mode(), self.term.mouse_ext());
         self.send_to_child(&mouse::encode(&report, encoding), automatic);
     }
 
@@ -1274,7 +1283,7 @@ impl TerminalPane {
                     button,
                     mouse::ReportKind::Press,
                     event.modifiers,
-                    cell,
+                    event.position,
                     false,
                 );
             }
@@ -1304,7 +1313,7 @@ impl TerminalPane {
             return;
         }
         if let Some(cell) = self.cell_at(event.position) {
-            self.report_motion(mouse::Button::None, event.modifiers, cell);
+            self.report_motion(mouse::Button::None, event.modifiers, cell, event.position);
         }
     }
 
@@ -1319,7 +1328,7 @@ impl TerminalPane {
             Gesture::Report => {
                 if mouse::reports_motion(self.term.mode(), true) {
                     let button = self.tracker.held().unwrap_or(mouse::Button::None);
-                    self.report_motion(button, event.modifiers, cell);
+                    self.report_motion(button, event.modifiers, cell, event.position);
                 }
             }
             Gesture::Select => {
@@ -1430,13 +1439,19 @@ impl TerminalPane {
         ))
     }
 
-    /// Reports motion, once per cell entered.
-    fn report_motion(&mut self, button: mouse::Button, modifiers: Modifiers, cell: ViewportCell) {
+    /// Reports motion to `position`, once per cell entered.
+    fn report_motion(
+        &mut self,
+        button: mouse::Button,
+        modifiers: Modifiers,
+        cell: ViewportCell,
+        position: Point<Pixels>,
+    ) {
         if self.last_motion == Some((cell.row, cell.col)) {
             return;
         }
         self.last_motion = Some((cell.row, cell.col));
-        self.report(button, mouse::ReportKind::Motion, modifiers, cell, true);
+        self.report(button, mouse::ReportKind::Motion, modifiers, position, true);
     }
 
     /// Ends a reported press, or a selection: a click that selected nothing
@@ -1453,15 +1468,13 @@ impl TerminalPane {
         }
         match gesture {
             Some(Gesture::Report) => {
-                if let Some(cell) = self.cell_at(event.position) {
-                    self.report(
-                        button,
-                        mouse::ReportKind::Release,
-                        event.modifiers,
-                        cell,
-                        false,
-                    );
-                }
+                self.report(
+                    button,
+                    mouse::ReportKind::Release,
+                    event.modifiers,
+                    event.position,
+                    false,
+                );
                 return;
             }
             Some(Gesture::Select) => {}

@@ -4,6 +4,7 @@
 use alacritty_terminal::index::{Column, Point, Side};
 use alacritty_terminal::selection::SelectionType;
 use alacritty_terminal::term::{TermMode, viewport_to_point};
+use alacritty_terminal::vte::{Params, Parser, Perform};
 
 use crate::term::GridSize;
 
@@ -93,19 +94,49 @@ pub struct Mods {
     pub ctrl: bool,
 }
 
+/// A pixel of the grid, 0-based from its top-left corner, in
+/// device-independent pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PixelPos {
+    pub x: usize,
+    pub y: usize,
+}
+
+impl PixelPos {
+    /// The pixel under `(x, y)`, in pixels from the grid's top-left corner,
+    /// rounded down and clamped to the grid.
+    pub fn at(x: f32, y: f32, cell: CellSize, size: GridSize) -> Self {
+        #[expect(clippy::cast_precision_loss, reason = "grid dimensions are small")]
+        let (width, height) = (
+            size.cols as f32 * cell.width,
+            size.rows as f32 * cell.height,
+        );
+        Self {
+            x: whole(x.max(0.0)).min(whole(width).saturating_sub(1)),
+            y: whole(y.max(0.0)).min(whole(height).saturating_sub(1)),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Report {
     pub button: Button,
     pub kind: ReportKind,
     pub mods: Mods,
     pub cell: ViewportCell,
+    /// Where the pointer is, for the pixel encoding (mode 1016).
+    pub pixel: PixelPos,
 }
 
 /// The report format the child asked for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Encoding {
+    /// SGR syntax with pixel coordinates (mode 1016).
+    SgrPixels,
     /// `CSI < b ; x ; y M/m` (mode 1006).
     Sgr,
+    /// `CSI b+32 ; x ; y M`, decimal (mode 1015).
+    Urxvt,
     /// X10 with each coordinate as a UTF-8 character (mode 1005).
     Utf8,
     /// `CSI M` and three raw bytes.
@@ -113,9 +144,16 @@ pub enum Encoding {
 }
 
 impl Encoding {
-    pub fn of(mode: TermMode) -> Self {
-        if mode.contains(TermMode::SGR_MOUSE) {
+    /// The encoding in force. When several are set, the pane's own fixed
+    /// precedence picks one: 1016, then 1006, 1015, 1005, and X10 when none
+    /// is. xterm instead lets the last one set win.
+    pub fn of(mode: TermMode, ext: MouseExt) -> Self {
+        if ext.sgr_pixels {
+            Self::SgrPixels
+        } else if mode.contains(TermMode::SGR_MOUSE) {
             Self::Sgr
+        } else if ext.urxvt {
+            Self::Urxvt
         } else if mode.contains(TermMode::UTF8_MOUSE) {
             Self::Utf8
         } else {
@@ -126,7 +164,6 @@ impl Encoding {
 
 /// Encodes `report` in `encoding`. Coordinates are 1-based.
 pub fn encode(report: &Report, encoding: Encoding) -> Vec<u8> {
-    let sgr = encoding == Encoding::Sgr;
     let mods = report.mods;
     let mod_bits = u8::from(mods.shift) * 4 + u8::from(mods.alt) * 8 + u8::from(mods.ctrl) * 16;
     let motion = if report.kind == ReportKind::Motion {
@@ -136,28 +173,146 @@ pub fn encode(report: &Report, encoding: Encoding) -> Vec<u8> {
     };
     let code = button_code(report.button) + motion + mod_bits;
     let (x, y) = (report.cell.col + 1, report.cell.row + 1);
-    if sgr {
-        let end = if report.kind == ReportKind::Release {
-            'm'
-        } else {
-            'M'
-        };
-        return format!("\x1b[<{code};{x};{y}{end}").into_bytes();
-    }
-    // X10 has no button number on release.
-    let code = if report.kind == ReportKind::Release {
+    // The encodings without a release suffix name no button on release.
+    let unsuffixed = if report.kind == ReportKind::Release {
         button_code(Button::None) + mod_bits
     } else {
         code
     };
-    let mut bytes = vec![0x1b, b'[', b'M', 32 + code];
-    if encoding == Encoding::Utf8 {
-        push_utf8_coord(&mut bytes, x);
-        push_utf8_coord(&mut bytes, y);
-    } else {
-        bytes.extend([x10_coord(x), x10_coord(y)]);
+    match encoding {
+        Encoding::SgrPixels => sgr(code, report.pixel.x + 1, report.pixel.y + 1, report.kind),
+        Encoding::Sgr => sgr(code, x, y, report.kind),
+        Encoding::Urxvt => format!("\x1b[{};{x};{y}M", 32 + u16::from(unsuffixed)).into_bytes(),
+        Encoding::Utf8 => {
+            let mut bytes = vec![0x1b, b'[', b'M', 32 + unsuffixed];
+            push_utf8_coord(&mut bytes, x);
+            push_utf8_coord(&mut bytes, y);
+            bytes
+        }
+        Encoding::X10 => vec![
+            0x1b,
+            b'[',
+            b'M',
+            32 + unsuffixed,
+            x10_coord(x),
+            x10_coord(y),
+        ],
     }
-    bytes
+}
+
+/// `CSI < code ; x ; y`, ended by `m` on release and `M` otherwise.
+fn sgr(code: u8, x: usize, y: usize, kind: ReportKind) -> Vec<u8> {
+    let end = if kind == ReportKind::Release {
+        'm'
+    } else {
+        'M'
+    };
+    format!("\x1b[<{code};{x};{y}{end}").into_bytes()
+}
+
+/// The urxvt mouse mode, `CSI ? 1015 h/l`.
+const URXVT_MODE: u16 = 1015;
+
+/// The SGR-Pixels mouse mode, `CSI ? 1016 h/l`.
+const SGR_PIXELS_MODE: u16 = 1016;
+
+/// The mouse-report encodings the grid does not track, set by the child.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MouseExt {
+    /// Mode 1015.
+    pub urxvt: bool,
+    /// Mode 1016.
+    pub sgr_pixels: bool,
+}
+
+/// The synchronized-update mode, `CSI ? 2026 h/l`.
+const SYNC_UPDATE_MODE: u16 = 2026;
+
+/// The modes in force, and the ones a synchronized update still holds back.
+#[derive(Default)]
+struct Modes {
+    ext: MouseExt,
+    /// The modes as they stand once the open synchronized update ends;
+    /// `None` while none is open.
+    held: Option<MouseExt>,
+}
+
+impl Modes {
+    /// The modes a change lands on: the held ones while an update is open.
+    fn target(&mut self) -> &mut MouseExt {
+        self.held.as_mut().unwrap_or(&mut self.ext)
+    }
+
+    fn end_sync(&mut self) {
+        if let Some(held) = self.held.take() {
+            self.ext = held;
+        }
+    }
+
+    fn set(&mut self, mode: u16, on: bool) {
+        match (mode, on) {
+            (SYNC_UPDATE_MODE, true) => self.held = Some(*self.target()),
+            (SYNC_UPDATE_MODE, false) => self.end_sync(),
+            (URXVT_MODE, _) => self.target().urxvt = on,
+            (SGR_PIXELS_MODE, _) => self.target().sgr_pixels = on,
+            _ => {}
+        }
+    }
+}
+
+impl Perform for Modes {
+    fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], ignore: bool, action: char) {
+        let on = match action {
+            'h' => true,
+            'l' => false,
+            _ => return,
+        };
+        if ignore || intermediates != b"?" {
+            return;
+        }
+        for mode in params.iter().filter_map(|param| param.first().copied()) {
+            self.set(mode, on);
+        }
+    }
+
+    /// `ESC c` resets the terminal, clearing both modes, held back like any
+    /// other change while an update is open.
+    fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
+        if intermediates.is_empty() && byte == b'c' {
+            *self.target() = MouseExt::default();
+        }
+    }
+}
+
+/// A parser of its own that reads the child's output for `CSI ? Pm h/l`
+/// setting or clearing modes 1015 and 1016, which `alacritty_terminal`
+/// ignores. It keeps its place across reads, so a sequence split between
+/// two of them still counts.
+///
+/// Inside a synchronized update (`CSI ? 2026 h`) the grid holds the bytes
+/// back, so a change there waits too: it applies at `CSI ? 2026 l`, or when
+/// the terminal ends the update itself ([`Self::end_sync`]).
+#[derive(Default)]
+pub struct MouseModeScan {
+    parser: Parser,
+    modes: Modes,
+}
+
+impl MouseModeScan {
+    pub fn feed(&mut self, bytes: &[u8]) {
+        self.parser.advance(&mut self.modes, bytes);
+    }
+
+    /// The modes in force, without the changes an open update holds back.
+    pub fn ext(&self) -> MouseExt {
+        self.modes.ext
+    }
+
+    /// The synchronized update ended without its closing sequence (it
+    /// timed out, or replayed history left it open): its changes apply now.
+    pub fn end_sync(&mut self) {
+        self.modes.end_sync();
+    }
 }
 
 /// Mode 1005: the coordinate plus 32 as one UTF-8 character.
@@ -324,8 +479,8 @@ mod tests {
     use alacritty_terminal::term::TermMode;
 
     use super::{
-        Button, CellSize, Encoding, Gesture, Mods, Report, ReportKind, Tracker, ViewportCell,
-        copy_on_select, encode,
+        Button, CellSize, Encoding, Gesture, Mods, MouseExt, MouseModeScan, PixelPos, Report,
+        ReportKind, Tracker, ViewportCell, copy_on_select, encode,
     };
     use crate::term::GridSize;
 
@@ -349,7 +504,29 @@ mod tests {
             kind,
             mods: Mods::default(),
             cell: at,
+            pixel: PixelPos { x: 0, y: 0 },
         }
+    }
+
+    /// A report at cell (0, 0) whose pointer is at pixel (`x`, `y`), 0-based.
+    fn pixel_report(button: Button, kind: ReportKind, x: usize, y: usize) -> Report {
+        Report {
+            pixel: PixelPos { x, y },
+            ..report(button, kind, cell(0, 0))
+        }
+    }
+
+    const NO_EXT: MouseExt = MouseExt {
+        urxvt: false,
+        sgr_pixels: false,
+    };
+
+    fn scanned(chunks: &[&[u8]]) -> MouseExt {
+        let mut scan = MouseModeScan::default();
+        for chunk in chunks {
+            scan.feed(chunk);
+        }
+        scan.ext()
     }
 
     #[test]
@@ -475,9 +652,203 @@ mod tests {
     #[test]
     fn encoding_follows_the_mode() {
         let utf8 = TermMode::MOUSE_REPORT_CLICK | TermMode::UTF8_MOUSE;
-        assert_eq!(Encoding::of(utf8), Encoding::Utf8);
-        assert_eq!(Encoding::of(utf8 | TermMode::SGR_MOUSE), Encoding::Sgr);
-        assert_eq!(Encoding::of(TermMode::MOUSE_REPORT_CLICK), Encoding::X10);
+        assert_eq!(Encoding::of(utf8, NO_EXT), Encoding::Utf8);
+        assert_eq!(
+            Encoding::of(utf8 | TermMode::SGR_MOUSE, NO_EXT),
+            Encoding::Sgr
+        );
+        assert_eq!(
+            Encoding::of(TermMode::MOUSE_REPORT_CLICK, NO_EXT),
+            Encoding::X10
+        );
+    }
+
+    #[test]
+    fn urxvt_press_and_release_are_decimal_csi_m() {
+        let press = report(Button::Left, ReportKind::Press, cell(4, 9));
+        assert_eq!(encode(&press, Encoding::Urxvt), b"\x1b[32;10;5M".to_vec());
+        let release = report(Button::Left, ReportKind::Release, cell(4, 9));
+        assert_eq!(encode(&release, Encoding::Urxvt), b"\x1b[35;10;5M".to_vec());
+    }
+
+    #[test]
+    fn urxvt_drag_and_wheel_add_32_to_their_codes() {
+        let drag = report(Button::Left, ReportKind::Motion, cell(1, 1));
+        assert_eq!(encode(&drag, Encoding::Urxvt), b"\x1b[64;2;2M".to_vec());
+        let up = report(Button::WheelUp, ReportKind::Press, cell(0, 0));
+        assert_eq!(encode(&up, Encoding::Urxvt), b"\x1b[96;1;1M".to_vec());
+        let down = report(Button::WheelDown, ReportKind::Press, cell(0, 0));
+        assert_eq!(encode(&down, Encoding::Urxvt), b"\x1b[97;1;1M".to_vec());
+    }
+
+    #[test]
+    fn urxvt_coordinates_are_not_clamped() {
+        let far = report(Button::Left, ReportKind::Press, cell(300, 250));
+        assert_eq!(encode(&far, Encoding::Urxvt), b"\x1b[32;251;301M".to_vec());
+    }
+
+    #[test]
+    fn sgr_pixel_reports_pixel_coordinates_with_sgr_syntax() {
+        let press = pixel_report(Button::Left, ReportKind::Press, 93, 84);
+        assert_eq!(
+            encode(&press, Encoding::SgrPixels),
+            b"\x1b[<0;94;85M".to_vec()
+        );
+        let release = pixel_report(Button::Left, ReportKind::Release, 93, 84);
+        assert_eq!(
+            encode(&release, Encoding::SgrPixels),
+            b"\x1b[<0;94;85m".to_vec()
+        );
+        let drag = pixel_report(Button::Left, ReportKind::Motion, 1000, 7);
+        assert_eq!(
+            encode(&drag, Encoding::SgrPixels),
+            b"\x1b[<32;1001;8M".to_vec()
+        );
+        let wheel = pixel_report(Button::WheelDown, ReportKind::Press, 0, 0);
+        assert_eq!(
+            encode(&wheel, Encoding::SgrPixels),
+            b"\x1b[<65;1;1M".to_vec()
+        );
+    }
+
+    #[test]
+    fn pixel_position_is_rounded_down_and_clamped_to_the_grid() {
+        assert_eq!(
+            PixelPos::at(36.7, 45.2, CELL, GRID),
+            PixelPos { x: 36, y: 45 }
+        );
+        assert_eq!(
+            PixelPos::at(-5.0, -5.0, CELL, GRID),
+            PixelPos { x: 0, y: 0 }
+        );
+        assert_eq!(
+            PixelPos::at(5000.0, 5000.0, CELL, GRID),
+            PixelPos { x: 799, y: 479 }
+        );
+    }
+
+    #[test]
+    fn mouse_mode_scan_sees_1015_and_1016_set_and_reset() {
+        let urxvt = MouseExt {
+            urxvt: true,
+            ..NO_EXT
+        };
+        let both = MouseExt {
+            urxvt: true,
+            sgr_pixels: true,
+        };
+        let pixels = MouseExt {
+            sgr_pixels: true,
+            ..NO_EXT
+        };
+        assert_eq!(scanned(&[b"\x1b[?1015h"]), urxvt);
+        assert_eq!(scanned(&[b"\x1b[?1015h\x1b[?1016h"]), both);
+        assert_eq!(scanned(&[b"\x1b[?1015h\x1b[?1016hx\x1b[?1015l"]), pixels);
+        assert_eq!(scanned(&[b"\x1b[?1016h", b"\x1b[?1016l"]), NO_EXT);
+    }
+
+    #[test]
+    fn mouse_mode_scan_reads_combined_parameter_lists() {
+        let both = MouseExt {
+            urxvt: true,
+            sgr_pixels: true,
+        };
+        assert!(scanned(&[b"\x1b[?1000;1006;1015h"]).urxvt);
+        assert_eq!(scanned(&[b"\x1b[?1015;1000;1016h"]), both);
+        assert_eq!(
+            scanned(&[b"\x1b[?1015;1016h", b"\x1b[?1000;1016;1015l"]),
+            NO_EXT
+        );
+    }
+
+    #[test]
+    fn mouse_mode_scan_survives_a_split_escape_sequence() {
+        let pixels = MouseExt {
+            sgr_pixels: true,
+            ..NO_EXT
+        };
+        assert_eq!(scanned(&[b"\x1b[?10", b"16h"]), pixels);
+        assert_eq!(scanned(&[b"out\x1b", b"[?1016h"]), pixels);
+        assert!(scanned(&[b"\x1b[?1000;", b"1015", b"h"]).urxvt);
+    }
+
+    #[test]
+    fn mouse_mode_scan_ignores_other_sequences_and_clears_on_reset() {
+        assert_eq!(scanned(&[b"\x1b[1015h\x1b[?1015$p\x1b[?1016p"]), NO_EXT);
+        assert_eq!(scanned(&[b"\x1b[?1015;1016h\x1bc"]), NO_EXT);
+    }
+
+    #[test]
+    fn mouse_mode_scan_holds_changes_inside_a_synchronized_update_until_it_ends() {
+        let pixels = MouseExt {
+            sgr_pixels: true,
+            ..NO_EXT
+        };
+        let mut scan = MouseModeScan::default();
+        scan.feed(b"\x1b[?2026h\x1b[?1016h\x1b[?1006h");
+        assert_eq!(scan.ext(), NO_EXT, "held while the update is open");
+        scan.feed(b"\x1b[?2026l");
+        assert_eq!(scan.ext(), pixels, "applied when it ends");
+
+        scan.feed(b"\x1b[?2026h\x1b[?1016l\x1b[?1015h");
+        assert_eq!(scan.ext(), pixels, "a clear is held back too");
+        scan.feed(b"\x1b[?20");
+        scan.feed(b"26l");
+        let urxvt = MouseExt {
+            urxvt: true,
+            ..NO_EXT
+        };
+        assert_eq!(scan.ext(), urxvt, "a split closing sequence ends it");
+    }
+
+    #[test]
+    fn mouse_mode_scan_applies_held_changes_when_the_update_is_ended_for_it() {
+        let urxvt = MouseExt {
+            urxvt: true,
+            ..NO_EXT
+        };
+        let mut scan = MouseModeScan::default();
+        scan.feed(b"\x1b[?2026h\x1b[?1015h");
+        assert_eq!(scan.ext(), NO_EXT);
+        scan.end_sync();
+        assert_eq!(scan.ext(), urxvt, "the timeout applies them");
+        scan.end_sync();
+        assert_eq!(scan.ext(), urxvt, "ending no update changes nothing");
+
+        scan.feed(b"\x1b[?2026h\x1bc");
+        assert_eq!(scan.ext(), urxvt, "a reset inside the update waits too");
+        scan.feed(b"\x1b[?2026l");
+        assert_eq!(scan.ext(), NO_EXT);
+    }
+
+    #[test]
+    fn setting_1006_after_1015_selects_sgr() {
+        let mode = TermMode::MOUSE_REPORT_CLICK;
+        let ext = scanned(&[b"\x1b[?1015h\x1b[?1006h"]);
+        assert_eq!(Encoding::of(mode | TermMode::SGR_MOUSE, ext), Encoding::Sgr);
+        assert_eq!(Encoding::of(mode, ext), Encoding::Urxvt);
+    }
+
+    #[test]
+    fn encoding_precedence_is_1016_1006_1015_1005_then_x10() {
+        let urxvt = MouseExt {
+            urxvt: true,
+            ..NO_EXT
+        };
+        let all = MouseExt {
+            urxvt: true,
+            sgr_pixels: true,
+        };
+        let utf8 = TermMode::MOUSE_REPORT_CLICK | TermMode::UTF8_MOUSE;
+        let sgr_and_utf8 = utf8 | TermMode::SGR_MOUSE;
+        assert_eq!(Encoding::of(sgr_and_utf8, all), Encoding::SgrPixels);
+        assert_eq!(Encoding::of(sgr_and_utf8, urxvt), Encoding::Sgr);
+        assert_eq!(Encoding::of(utf8, urxvt), Encoding::Urxvt);
+        assert_eq!(Encoding::of(utf8, NO_EXT), Encoding::Utf8);
+        assert_eq!(
+            Encoding::of(TermMode::MOUSE_REPORT_CLICK, NO_EXT),
+            Encoding::X10
+        );
     }
 
     #[test]

@@ -19,6 +19,7 @@ use alacritty_terminal::vte::ansi::{Color, CursorShape, CursorStyle, NamedColor,
 use crate::Clock;
 use crate::copy_text::{self, CopyRow};
 use crate::links::{self, TerminalLink, TerminalRow};
+use crate::mouse::{MouseExt, MouseModeScan};
 use crate::shell_marks::{Record, Records, Scanner, ShellDot, Split};
 use crate::theme::{self, Theme};
 
@@ -93,6 +94,8 @@ pub struct Terminal {
     theme: Theme,
     /// The shell integration marks, for a plain shell's pane only.
     shell: Option<Shell>,
+    /// The mouse-report modes the grid does not track.
+    mouse_modes: MouseModeScan,
 }
 
 /// The bytes a plain shell's output is fed in, the cap enforced after
@@ -491,6 +494,7 @@ impl Terminal {
             listener,
             theme: Theme::default(),
             shell,
+            mouse_modes: MouseModeScan::default(),
         }
     }
 
@@ -513,6 +517,7 @@ impl Terminal {
     /// sequence that moves the rows the marks are anchored to. The marks
     /// are stamped `at`; replayed ones are not.
     fn feed_at(&mut self, bytes: &[u8], at: Option<Instant>) {
+        self.mouse_modes.feed(bytes);
         let Self {
             term,
             parser,
@@ -698,6 +703,7 @@ impl Terminal {
         self.feed_at(bytes, None);
         if self.sync_pending() {
             self.parser.stop_sync(&mut self.term);
+            self.mouse_modes.end_sync();
         }
         self.listener.replies.borrow_mut().truncate(queued);
         self.listener.copies.borrow_mut().truncate(stored);
@@ -726,6 +732,7 @@ impl Terminal {
     /// buffered to the grid.
     pub fn stop_sync(&mut self) {
         self.parser.stop_sync(&mut self.term);
+        self.mouse_modes.end_sync();
     }
 
     /// Resizes the grid. A plain shell's anchors follow their rows: a row
@@ -778,6 +785,12 @@ impl Terminal {
 
     pub fn mode(&self) -> TermMode {
         *self.term.mode()
+    }
+
+    /// The mouse-report modes the child set that [`Self::mode`] cannot
+    /// show: 1015 and 1016.
+    pub fn mouse_ext(&self) -> MouseExt {
+        self.mouse_modes.ext()
     }
 
     /// Lines scrolled back into history; 0 on the live screen.
@@ -1511,6 +1524,22 @@ mod tests {
         term.stop_sync();
         assert_eq!(row_text(&term, 0), "hello");
         assert!(!term.sync_pending());
+    }
+
+    #[test]
+    fn a_mouse_mode_set_inside_a_pending_sync_applies_when_it_is_stopped() {
+        let mut term = fed(b"\x1b[?2026h\x1b[?1016h");
+        assert!(term.sync_pending(), "a sync is pending");
+        assert!(!term.mouse_ext().sgr_pixels, "held with the sync's bytes");
+        term.stop_sync();
+        assert!(term.mouse_ext().sgr_pixels, "applied with them");
+    }
+
+    #[test]
+    fn a_mouse_mode_set_inside_a_sync_history_left_open_applies_at_once() {
+        let mut term = fed(b"");
+        term.feed_history(b"\x1b[?2026h\x1b[?1015h");
+        assert!(term.mouse_ext().urxvt);
     }
 
     #[test]

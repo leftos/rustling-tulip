@@ -4,6 +4,10 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+### Added
+
+- Terminal programs that ask for urxvt or pixel-precise mouse reporting now get clicks, drags and the wheel in the format they asked for.
+
 ### Fixed
 
 - The installer stops a running daemon only after it proves it is the real one, so the daemon's token never goes to another program listening on its port.
