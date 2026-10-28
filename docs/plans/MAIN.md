@@ -10,11 +10,7 @@
 ## Wave 2 — Daily driver: close the port's gaps
 
 - [ ] RT-211 Open the trusted-launch dialog through one helper, with a refusal path · release vNext
-- [ ] RT-235 Check a VS Code or Explorer target still exists before opening it · release vNext
-- [ ] RT-237 Diagnose the VS Code fallback's dispatch order when two opens are queued · release vNext
 - [ ] RT-238 Route a ListPresets failure by request_id · release vNext
-- [ ] RT-256 Name the failing script variable in PresetScriptsError · release vNext
-- [ ] RT-259 Preset wizard: say so when Esc closes it while its scripts still run · release vNext
 
 ## Wave 2b — Hook status
 
@@ -71,22 +67,19 @@
     - [ ] RT-522 Write summary lines with the summarizer (CV.20) · release vNext
     - [ ] RT-523 Draw the summary view (CV.21) · release vNext
     - [ ] RT-524 Document the strip and the summary view, and retire the design file (CV.22) · release vNext
-  - [ ] RT-503 Add the chat protocol types and messages (CV.1) · release vNext
-  - [ ] RT-504 Add the transcript tailer (CV.2) · release vNext
-  - [ ] RT-505 Turn transcript records into chat entries (CV.3) · release vNext
   - [ ] RT-506 Parse permission, plan, trust and Heads up dialogs and the composer state, with their answer recipes (CV.4) · release vNext
   - [ ] RT-507 Parse AskUserQuestion dialogs with their answer recipes (CV.5) · release vNext
   - [ ] RT-508 Carry MessageDisplay lines to the daemon (CV.6) · release vNext
   - [ ] RT-509 Serve a session's chat from the transcript and the screen (CV.7) · release vNext
   - [ ] RT-510 Type chat messages into the PTY (CV.8) · release vNext
   - [ ] RT-511 Answer prompts by typing their recipes (CV.9) · release vNext
-  - [ ] RT-512 Build the native chat model (CV.10) · release vNext
   - [ ] RT-513 Draw a session's chat in a pane (CV.11) · release vNext
   - [ ] RT-514 Answer prompts and send messages from the chat (CV.12) · release vNext
   - [ ] RT-515 Remember each session's view and reach it from the keyboard (CV.13) · release vNext
   - [ ] RT-516 Prove the mirror end to end (CV.14) · release vNext
   - [ ] RT-517 Document the mirror (CV.15) · release vNext
   - [ ] RT-525 Answer the terminal-only dialogs from the chat: previews, Rewind, /model, /btw
+  - [ ] RT-527 Merge feat/chat-mirror to main (#203)
 - [ ] RT-106 PW.12: Phone files: viewer with Share and Save, worktree tree, send photos and files into a session
 - [ ] RT-110 Chat composer: slash commands, @ file mentions, image attach, quick replies
 - [ ] RT-108 PW.9: Phone terminal: xterm.js with collie's key bar
@@ -296,7 +289,6 @@
 - [ ] RT-435 Send the tracer's Exited only after the child's last output
 - [ ] RT-436 Send no Stopped attention for a session discarded before its exit
 - [ ] RT-437 Detect an agent's request to reconnect an MCP server and run the reconnect for the user · release vNext
-- [/] RT-443 Keep the Settings modal one fixed size and scroll its content · release vNext
 - [ ] RT-457 Close a running native client before the installer replaces it
 - [ ] RT-458 Pass a direct-spawned Claude session's initial prompt as its positional prompt, not -p
 - [ ] RT-459 Launch a .cmd agent shim whose path holds a space
@@ -322,3 +314,4 @@
   - [ ] RT-476 Handle prunable and locked worktrees in the worktree list, add and cleanup · release vNext
   - [ ] RT-477 Add screen-rule tooling: a rule trace, a capture-to-fixture command, the footer region and whole-table validation · release vNext
   - [ ] RT-478 Derive the background flag from the screen as well as from hooks · release vNext
+- [ ] RT-526 Show a scrollbar on every scrolling area of the native client
