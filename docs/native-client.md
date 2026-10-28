@@ -89,7 +89,7 @@ This doc records the decisions a change to the client needs to know; what each f
 
   The last stage is Preview: `{n} prompt(s) ready to spawn.` (plus ` → {t} tab(s).` when the preset groups by tab), the prompts as `[n] first line` under `Tab i of m` headers, a `Max panes per tab` field (hidden without tab grouping; blank takes the preset's cap, a preset cap of 0 counts as 1; input that is not a whole number of 1 or more disables Launch with an inline message; read-only while scripts run) and a `Scripts to run` section listing each script command with its variables filled in.
 
-  Launch runs the scripts on the daemon first, then sends `LaunchPreset` with a client-made job id and closes the dialog; a script failure stays on Preview with the error inline, and the button reads `Retry script(s) & launch …`.
+  Launch runs the scripts on the daemon first, then sends `LaunchPreset` with a client-made job id and closes the dialog; a script failure stays on Preview with the error inline and the failing script's row marked in the danger colour, and the button reads `Retry script(s) & launch …`. Esc, Cancel and Back wait while the scripts run; a new `Welcome` and the connection overlay still close the wizard.
 
   Progress outlives the dialog. A job registry in `RootView` tracks only the jobs this window started, so another window's launch raises no toast here.
 

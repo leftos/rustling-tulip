@@ -225,19 +225,25 @@ pub async fn resolve_scripts(
     target: &PresetTarget,
     preset_id: &str,
     partial_values: &[(String, String)],
-) -> anyhow::Result<(Vec<(String, String)>, Vec<ScriptCommandPreview>)> {
-    let presets = list(hub, target).await?;
+) -> Result<(Vec<(String, String)>, Vec<ScriptCommandPreview>), ScriptsFailure> {
+    let presets = list(hub, target)
+        .await
+        .map_err(|e| ScriptsFailure::new(format!("{e:#}")))?;
     let preset = presets
         .into_iter()
         .find(|p| p.id == preset_id)
-        .ok_or_else(|| anyhow!("preset not found: {preset_id}"))?;
-    let repo = find_repo(hub, &preset.source_repo_id)
-        .with_context(|| format!("preset's source repo missing: {}", preset.source_repo_id))?;
+        .ok_or_else(|| ScriptsFailure::new(format!("preset not found: {preset_id}")))?;
+    let repo = find_repo(hub, &preset.source_repo_id).map_err(|e| {
+        ScriptsFailure::new(format!(
+            "preset's source repo missing: {}: {e:#}",
+            preset.source_repo_id
+        ))
+    })?;
     let repo_path = PathBuf::from(&repo.path);
     let mut executed: Vec<ScriptCommandPreview> = Vec::new();
     let resolved = resolve_variables(&preset.variables, partial_values, &repo_path, &mut executed)
         .await
-        .map_err(|f| anyhow!(f.error))?;
+        .map_err(ScriptsFailure::from_launch)?;
     let pairs: Vec<(String, String)> = resolved.into_iter().collect();
     Ok((pairs, executed))
 }
@@ -342,6 +348,9 @@ fn find_repo(hub: &Hub, repo_id: &str) -> anyhow::Result<RepoEntry> {
 #[derive(Debug)]
 struct LaunchFailure {
     error: String,
+    /// The variable whose resolution failed, when the failure came from one;
+    /// `None` for a failure before or outside variable resolution.
+    variable_name: Option<String>,
     total: Option<u32>,
     partial_session_ids: Vec<String>,
     partial_tab_ids: Vec<String>,
@@ -351,10 +360,17 @@ impl LaunchFailure {
     fn new(error: impl Into<String>) -> Self {
         Self {
             error: error.into(),
+            variable_name: None,
             total: None,
             partial_session_ids: Vec::new(),
             partial_tab_ids: Vec::new(),
         }
+    }
+
+    /// Names the variable this failure came from.
+    fn for_variable(mut self, name: &str) -> Self {
+        self.variable_name = Some(name.to_owned());
+        self
     }
 
     fn with_total(mut self, total: u32) -> Self {
@@ -366,6 +382,30 @@ impl LaunchFailure {
         self.partial_session_ids = sessions.to_vec();
         self.partial_tab_ids = tabs.to_vec();
         self
+    }
+}
+
+/// A failed [`resolve_scripts`]: the message the wizard shows, and the
+/// variable it came from when one is named.
+#[derive(Debug)]
+pub(crate) struct ScriptsFailure {
+    pub(crate) error: String,
+    pub(crate) variable_name: Option<String>,
+}
+
+impl ScriptsFailure {
+    fn new(error: impl Into<String>) -> Self {
+        Self {
+            error: error.into(),
+            variable_name: None,
+        }
+    }
+
+    fn from_launch(failure: LaunchFailure) -> Self {
+        Self {
+            error: failure.error,
+            variable_name: failure.variable_name,
+        }
     }
 }
 
@@ -618,14 +658,16 @@ async fn resolve_variables_with_script_observer(
     for var in preset_vars {
         let value =
             resolve_one_variable(var, &supplied, repo_root, &out, executed, on_script_command)
-                .await?;
+                .await
+                .map_err(|f| f.for_variable(&var.name))?;
         // A Toggle's "off" state is a valid empty value, not a missing input.
         let toggle = matches!(var.kind, PresetVariableKind::Toggle { .. });
         if value.is_empty() && !var.optional && !toggle {
             return Err(LaunchFailure::new(format!(
                 "variable '{}' is required but no value was supplied",
                 var.name
-            )));
+            ))
+            .for_variable(&var.name));
         }
         out.insert(var.name.clone(), value);
     }
@@ -2536,6 +2578,29 @@ mod tests {
         .await
         .expect_err("non-matching pattern must fail");
         assert!(err.error.contains("did not match"));
+    }
+
+    #[tokio::test]
+    async fn a_failed_script_names_its_variable() {
+        let vars = vec![PresetVariable {
+            name: "log".to_string(),
+            label: "Log".to_string(),
+            kind: PresetVariableKind::Script {
+                cmd: "rustc".to_string(),
+                args: vec!["--version".to_string()],
+                extract_pattern: Some("ZZZ_NOT_IN_OUTPUT_ZZZ".to_string()),
+                timeout_ms: 10_000,
+                skip_if_empty: None,
+            },
+            prompt_at_launch: false,
+            default: None,
+            optional: true,
+        }];
+        let mut executed: Vec<ScriptCommandPreview> = Vec::new();
+        let err = resolve_variables(&vars, &[], Path::new("."), &mut executed)
+            .await
+            .expect_err("a pattern that matches nothing fails the run");
+        assert_eq!(err.variable_name.as_deref(), Some("log"));
     }
 
     async fn recv_job_update(rx: &mut broadcast::Receiver<PresetEvent>) -> PresetLaunchJobSnapshot {

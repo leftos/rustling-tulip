@@ -365,6 +365,56 @@ fn a_new_welcome_closes_the_wizard(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn escape_waits_while_the_scripts_run(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_repos());
+    preview_issues(&mut h, grouped(scripted(), Some(2)), "7");
+    h.click_on("preset-launch");
+    let id = scripts_request(&mut h);
+
+    h.keys("escape");
+    assert!(
+        h.root(|root, _| root.preset_wizard_open()),
+        "Esc waits while the scripts run"
+    );
+    h.click_on("preset-max-per-tab");
+    h.keys("escape");
+    assert!(
+        h.root(|root, _| root.preset_wizard_open()),
+        "Esc in a text field waits too"
+    );
+
+    h.send(DaemonMessage::PresetScriptsError {
+        id,
+        error: "exit 1".to_owned(),
+        variable_name: None,
+    });
+    assert!(
+        h.root(|root, _| root.preset_wizard_open()),
+        "the failed run leaves it open to retry"
+    );
+    h.keys("escape");
+    assert!(
+        !h.root(|root, _| root.preset_wizard_open()),
+        "Esc closes it once no scripts run"
+    );
+}
+
+#[gpui::test]
+fn a_new_welcome_closes_the_wizard_while_its_scripts_run(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_repos());
+    preview_issues(&mut h, scripted(), "7");
+    h.click_on("preset-launch");
+    scripts_request(&mut h);
+    h.send_welcome(PROTOCOL);
+    assert!(
+        !h.root(|root, _| root.preset_wizard_open()),
+        "a new connection closes it mid-run"
+    );
+}
+
+#[gpui::test]
 fn a_file_variable_is_picked_and_cleared(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &two_repos());
@@ -862,6 +912,46 @@ fn script_error_shows_inline_and_retry_relaunches(cx: &mut TestAppContext) {
     });
     launched_job(&mut h);
     assert!(!h.root(|root, _| root.preset_wizard_open()));
+}
+
+#[gpui::test]
+fn script_error_marks_the_failing_row(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_repos());
+    let entry = preset(
+        json!([{"kind": "github_issues"}]),
+        json!([
+            {"name": "ticket", "label": "Fetch ticket",
+             "kind": {"kind": "script", "cmd": "fetch", "args": ["--id", "7"]}},
+            {"name": "branch", "label": "Fetch branch",
+             "kind": {"kind": "script", "cmd": "git", "args": ["branch", "--show-current"]}}
+        ]),
+    );
+    preview_issues(&mut h, entry, "7");
+    h.click_on("preset-launch");
+    let id = scripts_request(&mut h);
+    assert!(
+        h.bounds("preset-script-row-ticket-failed").origin.x < gpui::px(0.0),
+        "no row is marked before the run fails"
+    );
+
+    h.send(DaemonMessage::PresetScriptsError {
+        id,
+        error: "exit 1".to_owned(),
+        variable_name: Some("ticket".to_owned()),
+    });
+    assert!(
+        h.bounds("preset-script-row-ticket-failed").origin.x >= gpui::px(0.0),
+        "the failing script's row is marked"
+    );
+    assert!(
+        h.bounds("preset-script-row-branch-failed").origin.x < gpui::px(0.0),
+        "the other script's row is not"
+    );
+    assert!(
+        h.bounds("preset-script-row-branch").origin.x >= gpui::px(0.0),
+        "and it is still drawn"
+    );
 }
 
 #[gpui::test]

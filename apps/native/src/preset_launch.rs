@@ -206,6 +206,14 @@ pub fn preview_summary(count: usize, tabs: Option<usize>) -> String {
     }
 }
 
+/// A failed script run: the daemon's message and the variable it names,
+/// when it names one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScriptFailure {
+    pub error: String,
+    pub variable: Option<String>,
+}
+
 /// Where the script variables' run stands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScriptStage {
@@ -216,6 +224,8 @@ pub enum ScriptStage {
     },
     Failed {
         error: String,
+        /// The variable the failure came from, when the daemon names one.
+        variable: Option<String>,
     },
     Done,
 }
@@ -225,7 +235,16 @@ impl ScriptStage {
     #[must_use]
     pub fn failure(&self) -> Option<String> {
         match self {
-            Self::Failed { error } => Some(format!("Script resolution failed: {error}")),
+            Self::Failed { error, .. } => Some(format!("Script resolution failed: {error}")),
+            _ => None,
+        }
+    }
+
+    /// The variable the failed run names, when it names one.
+    #[must_use]
+    pub fn failed_variable(&self) -> Option<&str> {
+        match self {
+            Self::Failed { variable, .. } => variable.as_deref(),
             _ => None,
         }
     }
@@ -992,6 +1011,7 @@ mod tests {
     fn the_launch_button_names_the_scripts_and_the_sessions() {
         let failed = ScriptStage::Failed {
             error: "boom".to_owned(),
+            variable: None,
         };
         let running = ScriptStage::Running {
             id: "r1".to_owned(),

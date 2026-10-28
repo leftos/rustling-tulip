@@ -804,11 +804,11 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
                             executed_commands,
                         });
                     }
-                    Err(err) => {
+                    Err(failure) => {
                         let _ = out_tx.send(DaemonMessage::PresetScriptsError {
                             id,
-                            error: format!("{err:#}"),
-                            variable_name: None,
+                            error: failure.error,
+                            variable_name: failure.variable_name,
                         });
                     }
                 }

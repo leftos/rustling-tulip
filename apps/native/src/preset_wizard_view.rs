@@ -20,8 +20,8 @@ use crate::notice_view::modal_panel;
 use crate::palette::DANGER_BG;
 use crate::preset_launch::{
     JobAction, LAUNCH_CAVEAT, MAX_PER_TAB_LABEL, MAX_PER_TAB_PLACEHOLDER, PREVIEW_EMPTY, Preview,
-    PreviewRow, SCRIPT_UNRESOLVED, SCRIPTS_LEGEND, SCRIPTS_NOTE, ScriptLine, max_per_tab_note,
-    tab_header, touches_launches,
+    PreviewRow, SCRIPT_UNRESOLVED, SCRIPTS_LEGEND, SCRIPTS_NOTE, ScriptFailure, ScriptLine,
+    max_per_tab_note, tab_header, touches_launches,
 };
 use crate::preset_wizard::{
     CLEAR_LABEL, FILE_LABEL, FILE_PLACEHOLDER, FOLDER_LABEL, FOLDER_PLACEHOLDER, INLINE_LABEL,
@@ -211,7 +211,8 @@ impl RootView {
         }
     }
 
-    /// An edit goes to the model; Esc in the field closes the wizard.
+    /// An edit goes to the model; Esc in the field closes the wizard, unless
+    /// its scripts still run.
     fn watch_preset_field(
         input: &Entity<TextInput>,
         field: Field,
@@ -235,7 +236,7 @@ impl RootView {
             input,
             window,
             |this, _, event: &TextInputEvent, window, cx| {
-                if *event == TextInputEvent::Cancel {
+                if *event == TextInputEvent::Cancel && !this.preset_scripts_running() {
                     this.close_preset_wizard(window, cx);
                 }
             },
@@ -243,8 +244,16 @@ impl RootView {
         vec![edits, keys]
     }
 
-    /// A key while the wizard is open: Esc closes it and is the wizard's;
-    /// every other key belongs to the field that has the keyboard.
+    /// Whether the wizard's scripts still run, so Esc, Cancel and Back wait.
+    fn preset_scripts_running(&self) -> bool {
+        self.preset_wizard
+            .as_ref()
+            .is_some_and(|dialog| dialog.wizard.scripts_running())
+    }
+
+    /// A key while the wizard is open: Esc closes it and is the wizard's,
+    /// unless its scripts still run; every other key belongs to the field
+    /// that has the keyboard.
     pub(crate) fn on_preset_wizard_key(
         &mut self,
         keystroke: &Keystroke,
@@ -254,7 +263,9 @@ impl RootView {
         if self.preset_wizard.is_none() || keystroke.key != "escape" {
             return false;
         }
-        self.close_preset_wizard(window, cx);
+        if !self.preset_scripts_running() {
+            self.close_preset_wizard(window, cx);
+        }
         true
     }
 
@@ -347,8 +358,20 @@ impl RootView {
             DaemonMessage::PresetScriptsResolved { id, values, .. } => {
                 self.finish_preset_scripts(id, Ok(values.clone()), window, cx);
             }
-            DaemonMessage::PresetScriptsError { id, error, .. } => {
-                self.finish_preset_scripts(id, Err(error.clone()), window, cx);
+            DaemonMessage::PresetScriptsError {
+                id,
+                error,
+                variable_name,
+            } => {
+                self.finish_preset_scripts(
+                    id,
+                    Err(ScriptFailure {
+                        error: error.clone(),
+                        variable: variable_name.clone(),
+                    }),
+                    window,
+                    cx,
+                );
             }
             _ if touches_launches(msg) => self.on_launch_job_message(msg, window, cx),
             _ => {}
@@ -448,7 +471,7 @@ impl RootView {
     fn finish_preset_scripts(
         &mut self,
         id: &str,
-        result: Result<Vec<(String, String)>, String>,
+        result: Result<Vec<(String, String)>, ScriptFailure>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -789,8 +812,11 @@ fn scripts_section(wizard: &PresetWizard) -> Option<Div> {
         return None;
     }
     let stage = wizard.script_stage();
+    let failed = stage.failed_variable();
     let rows = commands.into_iter().map(|command| {
         let selector = format!("preset-script-row-{}", command.name);
+        let mark = format!("preset-script-row-{}-failed", command.name);
+        let marked = failed == Some(command.name.as_str());
         let line = match &command.line {
             ScriptLine::Ready(line) => Some(div().child(line.clone())),
             ScriptLine::Unresolved => {
@@ -798,11 +824,19 @@ fn scripts_section(wizard: &PresetWizard) -> Option<Div> {
             }
             ScriptLine::Skipped(_) => None,
         };
+        let label = field_label(command.label.clone(), command.line.note());
+        let label = if marked {
+            label
+                .debug_selector(move || mark)
+                .text_color(gpui::rgb(DANGER))
+        } else {
+            label
+        };
         div()
             .debug_selector(move || selector)
             .flex()
             .flex_col()
-            .child(field_label(command.label.clone(), command.line.note()))
+            .child(label)
             .children(line)
     });
     let failure = stage.failure().map(|text| {

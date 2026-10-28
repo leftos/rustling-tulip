@@ -14,8 +14,8 @@ use protocol::{
 
 use crate::FileFilter;
 use crate::preset_launch::{
-    MAX_PER_TAB_INVALID, MaxPerTab, Preview, PreviewRow, ScriptCommand, ScriptStage, default_cap,
-    effective_cap, group_by_tab, groups_by_tab, launch_button_label, preview_summary,
+    MAX_PER_TAB_INVALID, MaxPerTab, Preview, PreviewRow, ScriptCommand, ScriptFailure, ScriptStage,
+    default_cap, effective_cap, group_by_tab, groups_by_tab, launch_button_label, preview_summary,
     script_commands,
 };
 use crate::preset_prompts::{issue_summary, parse_issue_spec, parse_prompts};
@@ -422,7 +422,7 @@ impl PresetWizard {
     pub fn apply_scripts(
         &mut self,
         id: &str,
-        result: Result<Vec<(String, String)>, String>,
+        result: Result<Vec<(String, String)>, ScriptFailure>,
         job_id: String,
     ) -> Option<ClientMessage> {
         if !matches!(&self.scripts, ScriptStage::Running { id: latest } if latest == id) {
@@ -437,8 +437,11 @@ impl PresetWizard {
                 self.scripts = ScriptStage::Done;
                 self.launch_message(job_id, values)
             }
-            Err(error) => {
-                self.scripts = ScriptStage::Failed { error };
+            Err(failure) => {
+                self.scripts = ScriptStage::Failed {
+                    error: failure.error,
+                    variable: failure.variable,
+                };
                 None
             }
         }

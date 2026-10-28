@@ -3935,8 +3935,9 @@ pub enum DaemonMessage {
         executed_commands: Vec<ScriptCommandPreview>,
     },
     /// Failure response to [`ClientMessage::ResolvePresetScripts`].
-    /// `variable_name` (if known) identifies the script variable that
-    /// failed so the dialog can highlight it inline.
+    /// `variable_name` names the variable whose resolution failed (a script
+    /// variable or any other), so the dialog can mark it; it is absent when
+    /// the failure came before any variable was resolved.
     PresetScriptsError {
         id: String,
         error: String,
