@@ -240,6 +240,7 @@ The native client auto-starts the daemon if it isn't already running. Daemon lis
 - **Toast activator**: the COM class (`toast_activation::ACTIVATOR_CLSID`, registered under `HKCU\Software\Classes\CLSID`) Windows starts or calls when a toast button is pressed from Action Center, so the press reaches the native client even when it is closed.
 - **Tracer-log import**: the startup pass that rebuilds history entries from `logs/tracer-<id>.log` files for sessions that ended before history existed; a shell-hosted agent comes back as that agent from its agent note, an unregistered agent or unreadable note as a plain shell.
 - **Tracking issue**: the issue `Merge feat/<name> (#N)`, last in a feature marker's project, that stands for its feature PR until the PR merges.
+- **Trigger**: what asks the summarizer for a line: `stop`, a finished turn, or `working`, a refresh of a working session.
 - **Typed shell form**: the way an interactive agent session starts, the daemon typing `<cd> && <command line>` into the user's shell (agent in shell); with a launch command the program word is typed bare, the plugin's arguments quoted and the extra arguments verbatim.
 - **Unexpected end**: a session whose tracer was lost (killed or crashed) rather than one that exited or was closed; these are pre-ticked for recovery.
 - **Unseen turn**: an agent session whose turn ended while this client wasn't showing it focused; it shows the waiting ring until focused.
@@ -251,4 +252,5 @@ The native client auto-starts the daemon if it isn't already running. Daemon lis
 - **Warm-up gate**: auto-switch making no decision until every usable account has been polled since it started.
 - **Wave**: a release-sized bundle of plan items that share owning files, so one implementer reads those files once and one review covers the bundle; each wave is a Linear project whose content names its files, review and verification.
 - **Worker**: a subagent or rustling-tulip session running one brief in one worktree.
+- **Working refresh**: the summary refresh of a working session while the Dashboard is watched, made from the transcript's last assistant text.
 - **Worktree seeding**: preparing a new worktree before its agent starts by copying the ignored files a repo lists, linking shared folders and running its setup script; a planned idea (RT-71, `docs/plans/borrowed-ideas.md`).

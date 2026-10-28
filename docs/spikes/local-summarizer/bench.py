@@ -1,18 +1,23 @@
 """Run the alert prompt over a sample folder through Haiku, DeepSeek or a local llama-server, one JSON line per call.
 
 Usage:
-  uv run --no-project python -I bench.py haiku <samples dir> <out.jsonl> [--repeat N] [--no-thinking]
+  uv run --no-project python -I bench.py haiku <samples dir> <out.jsonl> [--repeat N] [--no-thinking] [--prompt FILE]
   uv run --no-project python -I bench.py deepseek <samples dir> <out.jsonl> [--repeat N]
   uv run --no-project python -I bench.py local <samples dir> <out.jsonl> --base-url URL [--model NAME] [--repeat N]
       [--schema] [--thinking off|low|on]
   uv run --no-project python -I bench.py local <samples dir> <out.jsonl> --serve <model.gguf> --server <llama-server.exe>
       --ngl N [--ctx 8192] [--port P] [--server-log FILE] [...the options above]
 
+`--prompt` names the template (default: `prompt.md` beside this script, the v2 text); `{{TRIGGER}}` becomes `stop`
+and `{{MESSAGE}}` the sample, in that order, as the daemon builds it.
+
 `haiku` pipes the prompt to the Claude Code CLI headless (`claude -p --model claude-haiku-4-5 --effort low
---output-format json`, the CLI's lowest effort, with user settings, MCP servers and tools off and no session saved),
-never the API directly; the line keeps the CLI's `total_cost_usd`, `duration_api_ms` and usage. `--effort low` alone
-still lets Haiku think (about 1,700 output tokens a call); `--no-thinking` also sets `MAX_THINKING_TOKENS=0`, which
-turns thinking off.
+--output-format json`, the CLI's lowest effort, with user settings, MCP servers, tools and slash commands off and no
+session saved, answering in the daemon's `SUMMARY_SCHEMA` read from `crates/daemon/src/summarizer/reply.rs` through
+`--json-schema`: the daemon's own argv), never the API directly. The reply text is the CLI's `structured_output` as
+JSON when it has one, else its `result`, as the daemon reads it; the line keeps the CLI's `total_cost_usd`,
+`duration_api_ms` and usage. `--effort low` alone still lets Haiku think (about 1,700 output tokens a call);
+`--no-thinking` also sets `MAX_THINKING_TOKENS=0`, which turns thinking off.
 
 `deepseek` posts to DeepSeek's Anthropic-compatible Messages endpoint (`deepseek-flash`, default effort,
 `max_tokens` 1500), the request the design's summarizer makes. The key comes from DEEPSEEK_API_KEY in the process
@@ -31,6 +36,7 @@ Each call line holds the sample id, round, wall seconds, the reply text, llama-s
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -39,7 +45,7 @@ import urllib.request
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-PROMPT = (HERE / "prompt.md").read_text(encoding="utf-8")
+REPLY_RS = HERE.parents[2] / "crates" / "daemon" / "src" / "summarizer" / "reply.rs"
 DEEPSEEK_URL = "https://api.deepseek.com/anthropic/v1/messages"
 DEEPSEEK_MODEL = "deepseek-flash"
 HAIKU_MODEL = "claude-haiku-4-5"
@@ -56,6 +62,14 @@ SCHEMA = {
     "required": ["kind", "headline", "speech", "notification"],
     "additionalProperties": False,
 }
+
+
+def summary_schema() -> str:
+    """Return the daemon's `SUMMARY_SCHEMA` text, read from reply.rs so the bench sends what the daemon sends."""
+    found = re.search(r'SUMMARY_SCHEMA: &str = r#"(.*?)"#;', REPLY_RS.read_text(encoding="utf-8"))
+    if not found:
+        raise SystemExit(f"no SUMMARY_SCHEMA in {REPLY_RS}")
+    return found.group(1)
 
 
 def api_key(var: str) -> str:
@@ -94,7 +108,8 @@ def call_haiku(prompt: str, args: argparse.Namespace) -> tuple[str, dict]:
     """One headless Claude Code call to Haiku at low effort; return the result text and the CLI's cost and timing."""
     argv = [
         "claude", "-p", "--model", HAIKU_MODEL, "--effort", "low", "--output-format", "json", "--no-session-persistence",
-        "--setting-sources", "", "--strict-mcp-config", "--tools", "",
+        "--setting-sources", "", "--strict-mcp-config", "--tools", "", "--disable-slash-commands",
+        "--json-schema", args.json_schema,
     ]  # fmt: skip
     env = {**os.environ, "MAX_THINKING_TOKENS": "0"} if args.no_thinking else None
     result = subprocess.run(argv, input=prompt, capture_output=True, text=True, encoding="utf-8", check=False, cwd=HERE, timeout=180, env=env)
@@ -104,7 +119,10 @@ def call_haiku(prompt: str, args: argparse.Namespace) -> tuple[str, dict]:
     if reply.get("is_error"):
         raise RuntimeError(f"claude reported an error: {str(reply.get('result'))[:300]}")
     keep = ("total_cost_usd", "duration_api_ms", "duration_ms", "usage", "modelUsage")
-    return reply.get("result") or "", {key: reply.get(key) for key in keep}
+    extra = {key: reply.get(key) for key in keep}
+    structured = reply.get("structured_output")
+    extra["structured"] = structured is not None
+    return (json.dumps(structured) if structured is not None else reply.get("result") or ""), extra
 
 
 def call_local(prompt: str, args: argparse.Namespace) -> tuple[str, dict]:
@@ -206,10 +224,11 @@ def run_calls(args: argparse.Namespace, out) -> None:
     """Run every sample `--repeat` times and write one JSON line per call."""
     samples = sorted(args.samples.glob("*.md"))
     key = api_key("DEEPSEEK_API_KEY") if args.provider == "deepseek" else ""
+    template = args.prompt.read_text(encoding="utf-8").replace("{{TRIGGER}}", "stop")
     first = True
     for round_index in range(args.repeat):
         for sample in samples:
-            prompt = PROMPT.replace("{{MESSAGE}}", sample.read_text(encoding="utf-8").strip())
+            prompt = template.replace("{{MESSAGE}}", sample.read_text(encoding="utf-8").strip())
             line: dict = {"sample": sample.stem, "round": round_index, "cold": first}
             start = time.monotonic()
             try:
@@ -230,6 +249,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("samples", type=Path)
     parser.add_argument("out", type=Path)
     parser.add_argument("--repeat", type=int, default=1)
+    parser.add_argument("--prompt", type=Path, default=HERE / "prompt.md", help="the prompt template (default: the v2 prompt.md here)")
     parser.add_argument("--base-url", default="http://127.0.0.1:18427")
     parser.add_argument("--model", default="local")
     parser.add_argument("--schema", action="store_true")
@@ -244,6 +264,7 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if args.serve:
         args.base_url = f"http://127.0.0.1:{args.port}"
+    args.json_schema = summary_schema() if args.provider == "haiku" else ""
     return args
 
 

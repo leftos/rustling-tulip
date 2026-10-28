@@ -2,7 +2,7 @@
 
 2026-10-27. For RT-27. Question: can a local model served over an OpenAI-compatible endpoint replace the cloud provider for the [summarizer service](../plans/dashboard.md) (the spoken alerts' kind and one-line texts, and the Dashboard's `working` refreshes)? The owner set the reference to Claude Haiku at its lowest effort with no thinking, run as a smoke test. A DeepSeek Flash pass (the design's default provider) over a larger sample ran before that ruling and is kept as a second reference.
 
-Files in [local-summarizer/](./local-summarizer/): `prompt.md`, `extract.py` (collects and redacts the samples), `bench.py` (runs a sample folder through Haiku, DeepSeek or a local llama-server, which it starts and stops itself), `score.py` (the tables below). Each script's docstring has its usage; all run as `uv run --no-project python -I <script>`. The samples are transcript text and stay outside the repo.
+Files in [local-summarizer/](./local-summarizer/): `prompt.md` (the v2 prompt), `extract.py` (collects and redacts the samples), `bench.py` (runs a sample folder through Haiku, DeepSeek or a local llama-server, which it starts and stops itself; `--prompt` names another template, such as the daemon's v3 `crates/daemon/src/summarizer/prompt.md`), `score.py` (the tables below). Each script's docstring has its usage; all run as `uv run --no-project python -I <script>`. The samples are transcript text and stay outside the repo.
 
 ## Verdict
 
@@ -137,6 +137,24 @@ No grammar was needed: every local reply parsed as plain JSON. The design's caps
 
 The runs also bear on the providers already in the design. DeepSeek's `max_tokens` 1500 truncated 7.1% of replies here, and 10 of 126 calls ran past the 8 s timeout. Haiku through the Messages API would need thinking off, and the CLI's `--effort low` is not the same thing.
 
+## Prompt v3 against v2, through the daemon's call
+
+Prompt v3 is `crates/daemon/src/summarizer/prompt.md`: v2 with no `speech` field, a `Trigger:` line (`stop` for every sample here), and the rule to spell out or drop plan and issue numbers, function names and file paths in the headline and notification.
+
+- **Call**: `bench.py haiku --repeat 2 --no-thinking`, which now sends the daemon's own argv: `--disable-slash-commands` and `--json-schema` with the daemon's `SUMMARY_SCHEMA` (no `speech`), the reply read from `structured_output`. Both prompts ran through that same call, so the v2 replies here carry no `speech` either.
+- **Samples**: a fresh folder from `extract.py --per-bucket 4 --seed 27` plus the earlier spike's three messages: 19 samples, so not the smoke set's 18 (the transcripts have grown since).
+- **Scoring**: `score.py` now counts a leak over headline and notification, and treats `speech` as optional, so v2 and v3 are scored on one basis. The reference is the v2 run's first round.
+- **Calls and cost**: 76 Haiku calls (38 per prompt), none failed, every reply in `structured_output`. v2 cost $0.1543 (median $0.0039 a call), v3 $0.1439 (median $0.0040), $0.2982 in all. A call costs more than the smoke set's $0.0029 median: `--json-schema` adds to the prompt.
+
+| Run | calls | strict JSON | kind agreement with v2's first round | cap violations | leaks (headline or notification) |
+|---|---|---|---|---|---|
+| v2, both rounds | 38 | 100% (38/38) | 92.1% (35/38) | 8 | 23 |
+| v3, both rounds | 38 | 100% (38/38) | 73.7% (28/38) | 14 | 3 |
+
+The original smoke-set figure, 9 leaks in 18 replies, counted headline and speech under the v2 schema; on this like-for-like basis v2 leaks in 23 of 38 replies and v3 in 3 of 38.
+
+Every cap violation is a notification over 100 characters (no headline ran past 8 words); the daemon's parser cuts those at a word boundary. v3's 10 kind disagreements are all `working_update` in v2's first round read as `done_waiting` by v3, on 5 samples. Warm wall time was p50 4.77 s and 5.12 s, p95 6.94 s and 14.07 s, for v2 and v3.
+
 ## Next
 
-Untried here, each a separate run: Granite with low-effort thinking (more tokens, still well under 3 s on GPU at these rates); prompt v3's rule against identifiers, which would test the leaks; another 7–8B instruct family. Any of them should be judged against a reference set labelled by the owner, since the cloud references disagree with each other on about one sample in five.
+Untried here, each a separate run: Granite with low-effort thinking (more tokens, still well under 3 s on GPU at these rates); prompt v3 with a working trigger, and its shift from `working_update` to `done_waiting` judged against owner labels; another 7–8B instruct family. Any of them should be judged against a reference set labelled by the owner, since the cloud references disagree with each other on about one sample in five.

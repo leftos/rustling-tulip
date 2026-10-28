@@ -7,8 +7,10 @@ agreement. A candidate's calls are scored only for samples the reference file ho
 folder (or several files joined with `+`) is cut down to the reference's sample set.
 For each candidate (every round): calls, errors, strict JSON validity (the reply parses as one JSON object as is),
 tolerant validity (after stripping a code fence and reading the first `{...}`, as the daemon's parser does), kind
-agreement with the reference, field-cap violations (headline over 8 words, speech over 25, notification over 100
-characters), identifier leaks in headline or speech, and warm and cold latency with llama-server's token rates.
+agreement with the reference, field-cap violations (headline over 8 words, speech over 25 when a reply has one,
+notification over 100 characters), identifier leaks in headline or notification, and warm and cold latency with
+llama-server's token rates. A reply needs `kind`, `headline` and `notification`; `speech` (the v2 prompt's) is
+optional, so v2 and v3 replies are scored on one basis.
 `--spike` adds the earlier spike's three messages verbatim; `--disagreements` lists each kind disagreement.
 """
 
@@ -19,7 +21,7 @@ import statistics
 from pathlib import Path
 
 KINDS = {"needs_answer", "working_update", "done_waiting"}
-FIELDS = ("kind", "headline", "speech", "notification")
+FIELDS = ("kind", "headline", "notification")
 LEAK_PATTERNS = {
     "plan or issue number": re.compile(r"\b[A-Z]{1,5}-\d+\b|\bP\d+(\.\d+)+[a-z]?\b|\b[A-Z]{1,4}\d*\.\d+[a-z]?\b"),
     "code identifier": re.compile(r"\b[a-z][a-z0-9]*_[a-z0-9_]+\b|\b[a-z]+[A-Z][A-Za-z0-9]*\b|::|\w\(\)|`"),
@@ -42,8 +44,10 @@ def load(path: Path) -> tuple[list[dict], dict]:
 
 
 def well_formed(value: object) -> dict | None:
-    """Return the object when it has the four string fields and a known kind, else None."""
+    """Return the object when it has the three string fields (and a string speech, if any) and a known kind, else None."""
     if not isinstance(value, dict) or not all(isinstance(value.get(field), str) for field in FIELDS):
+        return None
+    if not isinstance(value.get("speech", ""), str):
         return None
     return value if value["kind"] in KINDS else None
 
@@ -74,7 +78,7 @@ def percentile(values: list[float], fraction: float) -> float:
 
 
 def leaks(alert: dict) -> list[str]:
-    text = f"{alert['headline']} {alert['speech']}"
+    text = f"{alert['headline']} {alert['notification']}"
     return [name for name, pattern in LEAK_PATTERNS.items() if pattern.search(text)]
 
 
@@ -82,7 +86,7 @@ def cap_violations(alert: dict) -> list[str]:
     found = []
     if len(alert["headline"].split()) > 8:
         found.append("headline")
-    if len(alert["speech"].split()) > 25:
+    if len(alert.get("speech", "").split()) > 25:
         found.append("speech")
     if len(alert["notification"]) > 100:
         found.append("notification")
