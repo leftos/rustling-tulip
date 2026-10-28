@@ -1,9 +1,11 @@
 //! Claude Code's chat screen reader and its answer recipes.
 //!
 //! [`read`] reads the visible rows of a session's rendered screen into what
-//! the chat shows: a full-screen overlay first, then a dialog (permission,
-//! plan approval, folder trust), then the input box. A Heads up notice does
-//! not own the keyboard, so it rides along with the input box's own state.
+//! the chat shows: a full-screen overlay first (an `AskUserQuestion` step
+//! with previews among them), then a dialog (permission, plan approval,
+//! folder trust, an `AskUserQuestion` step or its review), then the input
+//! box. A Heads up notice does not own the keyboard, so it rides along with
+//! the input box's own state.
 //! [`recipe`] turns an answer to one of those prompts into the keys that
 //! give it, each group with the reading the daemon waits for after it.
 //!
@@ -12,7 +14,10 @@
 //! carry.
 
 use agent_api::{AnswerRecipe, AnswerRefusal, Key, RecipeStep, ScreenExpect};
-use protocol::{ChatAnswerKind, ChatOption, ChatPrompt, ChatPromptKind, ChatScreen, ComposerState};
+use protocol::{
+    ChatAnswerKind, ChatOption, ChatPrompt, ChatPromptKind, ChatQuestionTab, ChatScreen,
+    ComposerState,
+};
 
 /// The character a horizontal rule is drawn with.
 const RULE_CHAR: char = '─';
@@ -35,13 +40,46 @@ const SPINNER_ROWS: usize = 24;
 /// How many non-empty rows at the bottom are searched for an overlay's keys.
 const OVERLAY_ROWS: usize = 4;
 
-/// The key line each overlay shows, and the name the chat gives it.
-const OVERLAYS: [(&str, &str); 4] = [
+/// The key line each overlay shows, and the name the chat gives it. An
+/// `AskUserQuestion` step whose options carry previews is one: the chat
+/// recognises it but does not answer it.
+const OVERLAYS: [(&str, &str); 5] = [
     ("Showing detailed transcript", "transcript"),
     ("Enter to set as default", "model"),
     ("f to fork · Esc to close", "btw"),
     ("Enter to continue · Esc to cancel", "rewind"),
+    ("· n to add notes ·", "question_preview"),
 ];
+
+/// The mark of a question tab not yet answered.
+const TAB_OPEN: char = '☐';
+
+/// The mark of an answered question tab.
+const TAB_DONE: char = '☒';
+
+/// The mark of the fixed `Submit` tab, which is not a question.
+const TAB_SUBMIT: char = '✔';
+
+/// A multi-select option's box, unticked and ticked.
+const BOX_OFF: &str = "[ ]";
+const BOX_ON: &str = "[✔]";
+
+/// The label of the option a question's own answer is typed into; a
+/// single-choice question draws it with a trailing period.
+const TYPE_SOMETHING: &str = "Type something";
+
+/// The option that ends the turn instead of answering; terminal-only.
+const CHAT_ABOUT_THIS: &str = "Chat about this";
+
+/// The unnumbered row a multi-select question is submitted from.
+const NEXT_ROW: &str = "Next";
+
+/// The start of a question step's footer.
+const QUESTION_FOOTER: &str = "Enter to select";
+
+/// The title row of the review step, and the row above its options.
+const REVIEW_TITLE: &str = "Review your answers";
+const REVIEW_READY: &str = "Ready to submit your answers?";
 
 /// The label start of a permission option that saves an allow rule; the
 /// rule follows it.
@@ -75,7 +113,8 @@ pub(crate) fn read(rows: &[String]) -> ChatScreen {
     let start = after_last_rule(rows);
     let dialog = parse_permission(rows, start)
         .or_else(|| parse_plan(rows, start))
-        .or_else(|| parse_trust(rows, start));
+        .or_else(|| parse_trust(rows, start))
+        .or_else(|| parse_question(rows));
     match dialog {
         Some(Parsed::Prompt(prompt)) => ChatScreen {
             composer: ComposerState::Dialog,
@@ -359,6 +398,201 @@ fn key_pairs(row: &str) -> Option<Vec<ChatOption>> {
     options.filter(|options| options.len() >= 2)
 }
 
+/// An `AskUserQuestion` step: the tab bar, the question row, its options
+/// down to the card's inner rule, then the `Enter to select` footer; or the
+/// review step when `Review your answers` follows the tab bar.
+fn parse_question(rows: &[String]) -> Option<Parsed> {
+    let bar = rows.iter().rposition(|row| is_tab_bar(row))?;
+    let mut tabs = question_tabs(&rows[bar]);
+    let title = find(rows, bar + 1, |row| !row.trim().is_empty());
+    if let Some(title) = title
+        && rows[title].trim() == REVIEW_TITLE
+    {
+        return Some(parse_review(rows, title, tabs));
+    }
+    let Some(footer) = find(rows, bar + 1, |row| {
+        row.trim_start().starts_with(QUESTION_FOOTER)
+    }) else {
+        return Some(Parsed::HalfDrawn);
+    };
+    let Some(title) = title.filter(|&title| title < footer) else {
+        return Some(Parsed::HalfDrawn);
+    };
+    let end = rule_indices(rows)
+        .into_iter()
+        .find(|&index| index > title && index < footer)
+        .unwrap_or(footer);
+    let found = question_options(&rows[title + 1..end]);
+    if found.options.is_empty() {
+        return Some(Parsed::HalfDrawn);
+    }
+    if let Some(tab) = tabs.iter_mut().find(|tab| !tab.answered) {
+        tab.current = true;
+    }
+    Some(Parsed::Prompt(ChatPrompt {
+        questions: tabs,
+        multi: found.multi,
+        cursor: found.cursor,
+        ..prompt(
+            ChatPromptKind::Question,
+            rows[title].trim().to_owned(),
+            String::new(),
+            found.options,
+        )
+    }))
+}
+
+/// Whether `row` is a question card's tab bar: `←  ☐ Next fn  ✔ Submit  →`.
+fn is_tab_bar(row: &str) -> bool {
+    let text = row.trim();
+    text.starts_with('←') && text.ends_with('→') && text.contains([TAB_OPEN, TAB_DONE])
+}
+
+/// The question tabs of a tab bar, each label the text after its mark; the
+/// fixed `Submit` tab is left out.
+fn question_tabs(row: &str) -> Vec<ChatQuestionTab> {
+    let marks: Vec<(usize, char)> = row
+        .char_indices()
+        .filter(|&(_, c)| matches!(c, TAB_OPEN | TAB_DONE | TAB_SUBMIT))
+        .collect();
+    let ends = marks.iter().skip(1).map(|&(at, _)| at);
+    let ends = ends.chain(row.rfind('→'));
+    marks
+        .iter()
+        .zip(ends)
+        .filter(|&(&(_, mark), _)| mark != TAB_SUBMIT)
+        .map(|(&(at, mark), end)| ChatQuestionTab {
+            label: row[at + mark.len_utf8()..end].trim().to_owned(),
+            answered: mark == TAB_DONE,
+            current: false,
+        })
+        .collect()
+}
+
+/// A question step's options, whether they carry boxes, and the option the
+/// cursor is on.
+struct QuestionOptions {
+    options: Vec<ChatOption>,
+    multi: bool,
+    cursor: Option<u32>,
+}
+
+/// The options among a question step's `rows`: each numbered row's label
+/// (its box taken off, `Type something.` without its period), the deeper
+/// indented rows under it joined as its description. `selected` is the
+/// tick on a multi-select question and the cursor otherwise. The `Next`
+/// row and `Chat about this` are not options.
+fn question_options(rows: &[String]) -> QuestionOptions {
+    let mut found = QuestionOptions {
+        options: Vec::new(),
+        multi: false,
+        cursor: None,
+    };
+    let mut indent = 0;
+    for row in rows {
+        if let Some(option) = numbered(row) {
+            indent = option.indent;
+            let (ticked, label) = checkbox(option.label);
+            found.multi |= ticked.is_some();
+            if option.selected {
+                found.cursor = Some(option.number);
+            }
+            let label = match label.strip_suffix('.') {
+                Some(TYPE_SOMETHING) => TYPE_SOMETHING,
+                _ => label,
+            };
+            found.options.push(ChatOption {
+                number: option.number,
+                label: label.to_owned(),
+                description: None,
+                selected: ticked.unwrap_or(option.selected),
+            });
+            continue;
+        }
+        let text = row.trim();
+        let unmarked = text.strip_prefix(CURSOR).unwrap_or(text).trim();
+        if text.is_empty() || unmarked == NEXT_ROW || indent_of(row) <= indent {
+            continue;
+        }
+        if let Some(last) = found.options.last_mut() {
+            let description = last.description.get_or_insert_with(String::new);
+            if !description.is_empty() {
+                description.push(' ');
+            }
+            description.push_str(text);
+        }
+    }
+    found
+        .options
+        .retain(|option| option.label != CHAT_ABOUT_THIS);
+    found
+}
+
+/// `label` without a multi-select box, and whether the box is ticked;
+/// `None` for a label with no box.
+fn checkbox(label: &str) -> (Option<bool>, &str) {
+    if let Some(rest) = label.strip_prefix(BOX_ON) {
+        return (Some(true), rest.trim_start());
+    }
+    if let Some(rest) = label.strip_prefix(BOX_OFF) {
+        return (Some(false), rest.trim_start());
+    }
+    (None, label)
+}
+
+/// The review step: the questions and answers under `Review your answers`,
+/// then `Ready to submit your answers?` and its options, which end at the
+/// first blank row.
+fn parse_review(rows: &[String], title: usize, tabs: Vec<ChatQuestionTab>) -> Parsed {
+    let Some(ready) = find(rows, title + 1, |row| row.trim() == REVIEW_READY) else {
+        return Parsed::HalfDrawn;
+    };
+    let Some(first) = find(rows, ready + 1, |row| numbered(row).is_some()) else {
+        return Parsed::HalfDrawn;
+    };
+    let end = find(rows, first, |row| row.trim().is_empty()).unwrap_or(rows.len());
+    let options = collect_options(&rows[first..end], |_| false);
+    Parsed::Prompt(ChatPrompt {
+        questions: tabs,
+        ..prompt(
+            ChatPromptKind::Review,
+            REVIEW_TITLE.to_owned(),
+            review_body(&rows[title + 1..ready]),
+            options,
+        )
+    })
+}
+
+/// The review's pairs as lines `<question> -> <answer>`: a `●` row starts
+/// a question, a `→` row holds its answer, and any other row continues the
+/// one before it.
+fn review_body(rows: &[String]) -> String {
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    for row in rows {
+        let text = row.trim();
+        if let Some(question) = text.strip_prefix('●') {
+            pairs.push((question.trim().to_owned(), String::new()));
+            continue;
+        }
+        let Some((question, answer)) = pairs.last_mut() else {
+            continue;
+        };
+        if let Some(given) = text.strip_prefix('→') {
+            given.trim().clone_into(answer);
+        } else if !text.is_empty() {
+            let target = if answer.is_empty() { question } else { answer };
+            target.push(' ');
+            target.push_str(text);
+        }
+    }
+    let lines: Vec<String> = pairs
+        .iter()
+        .map(|(question, answer)| format!("{question} -> {answer}"))
+        .collect();
+    let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+    text_block(&lines, 0)
+}
+
 /// The input box's state: the rows between the last two rules. Text after
 /// the prompt (other than the `Try "…"` placeholder), or more than one row,
 /// is a draft; an empty box is working while a spinner shows above it.
@@ -580,11 +814,13 @@ pub(crate) fn recipe(
     answer: &ChatAnswerKind,
 ) -> Result<AnswerRecipe, AnswerRefusal> {
     match prompt.kind {
+        ChatPromptKind::Question => return question_recipe(prompt, answer),
+        ChatPromptKind::Review => return review_recipe(prompt, answer),
         ChatPromptKind::Permission
         | ChatPromptKind::Plan
         | ChatPromptKind::Trust
         | ChatPromptKind::HeadsUp => {}
-        _ => return Err(AnswerRefusal::Unsupported),
+        ChatPromptKind::Unknown => return Err(AnswerRefusal::Unsupported),
     }
     if field_focused(prompt) {
         return match answer {
@@ -678,6 +914,18 @@ fn option_recipe(prompt: &ChatPrompt, number: u32) -> Result<AnswerRecipe, Answe
 /// Moving the trust dialog's cursor from where the reading shows it to
 /// option `number`, then Enter.
 fn trust_recipe(prompt: &ChatPrompt, number: u32) -> Result<AnswerRecipe, AnswerRefusal> {
+    let mut steps: Vec<RecipeStep> = cursor_move(prompt, number)?.into_iter().collect();
+    steps.push(RecipeStep {
+        keys: vec![Key::Enter],
+        expect: ScreenExpect::DialogGone,
+    });
+    Ok(AnswerRecipe { steps })
+}
+
+/// The arrows that move the cursor from the option the reading shows it on
+/// to option `number`, as one step waiting for the cursor there; `None`
+/// when it is already there.
+fn cursor_move(prompt: &ChatPrompt, number: u32) -> Result<Option<RecipeStep>, AnswerRefusal> {
     let position = |wanted: u32| {
         prompt
             .options
@@ -689,19 +937,117 @@ fn trust_recipe(prompt: &ChatPrompt, number: u32) -> Result<AnswerRecipe, Answer
         .cursor
         .and_then(position)
         .ok_or(AnswerRefusal::NotThisDialog)?;
-    let mut steps = Vec::new();
-    if target != cursor {
-        let key = if target > cursor { Key::Down } else { Key::Up };
-        steps.push(RecipeStep {
-            keys: vec![key; target.abs_diff(cursor)],
-            expect: ScreenExpect::OptionSelected(number),
-        });
+    if target == cursor {
+        return Ok(None);
     }
-    steps.push(RecipeStep {
-        keys: vec![Key::Enter],
-        expect: ScreenExpect::DialogGone,
-    });
+    let key = if target > cursor { Key::Down } else { Key::Up };
+    Ok(Some(RecipeStep {
+        keys: vec![key; target.abs_diff(cursor)],
+        expect: ScreenExpect::OptionSelected(number),
+    }))
+}
+
+/// The keys that give `answer` to an `AskUserQuestion` step. A digit picks
+/// a single-choice option (and moves on) or ticks a multi-select one; the
+/// arrows move between questions. While the cursor is on the `Type
+/// something` option every printable key goes into its field, so only
+/// `Submit` and `TypeSomething` are built then.
+fn question_recipe(
+    prompt: &ChatPrompt,
+    answer: &ChatAnswerKind,
+) -> Result<AnswerRecipe, AnswerRefusal> {
+    let field_focused = prompt.cursor.is_some() && prompt.cursor == type_something_option(prompt);
+    let keeps_field = matches!(
+        answer,
+        ChatAnswerKind::Submit | ChatAnswerKind::TypeSomething { .. }
+    );
+    if field_focused && !keeps_field {
+        return Err(AnswerRefusal::NotThisDialog);
+    }
+    match answer {
+        ChatAnswerKind::Option { number } if !prompt.multi => {
+            if type_something_option(prompt) == Some(*number) {
+                return Err(AnswerRefusal::NotThisDialog);
+            }
+            Ok(one_step(
+                vec![digit_for(prompt, *number)?],
+                ScreenExpect::Any,
+            ))
+        }
+        ChatAnswerKind::Toggle { number } if prompt.multi => toggle(prompt, *number),
+        ChatAnswerKind::Submit if prompt.multi => submit_multi(prompt),
+        ChatAnswerKind::TypeSomething { text } => type_something(prompt, text),
+        ChatAnswerKind::Back => Ok(one_step(vec![Key::Left], ScreenExpect::Any)),
+        ChatAnswerKind::Skip => Ok(one_step(vec![Key::Right], ScreenExpect::Any)),
+        _ => Err(AnswerRefusal::NotThisDialog),
+    }
+}
+
+/// The number of a question's `Type something` option: always its last
+/// option, whose label becomes the typed text once there is some.
+fn type_something_option(prompt: &ChatPrompt) -> Option<u32> {
+    prompt.options.last().map(|option| option.number)
+}
+
+/// Ticking or unticking option `number` of a multi-select question.
+fn toggle(prompt: &ChatPrompt, number: u32) -> Result<AnswerRecipe, AnswerRefusal> {
+    let option = prompt
+        .options
+        .iter()
+        .find(|option| option.number == number)
+        .ok_or(AnswerRefusal::UnknownOption(number))?;
+    Ok(one_step(
+        vec![digit_for(prompt, number)?],
+        ScreenExpect::OptionTicked(number, !option.selected),
+    ))
+}
+
+/// Submitting a multi-select question: Down from the cursor's option past
+/// the options below it to the `Next` row, then Enter.
+fn submit_multi(prompt: &ChatPrompt) -> Result<AnswerRecipe, AnswerRefusal> {
+    let cursor = prompt.cursor.ok_or(AnswerRefusal::NotThisDialog)?;
+    let below = prompt
+        .options
+        .iter()
+        .skip_while(|option| option.number != cursor)
+        .skip(1)
+        .count();
+    Ok(AnswerRecipe {
+        steps: vec![
+            RecipeStep {
+                keys: vec![Key::Down; below + 1],
+                expect: ScreenExpect::SameDialog,
+            },
+            RecipeStep {
+                keys: vec![Key::Enter],
+                expect: ScreenExpect::Any,
+            },
+        ],
+    })
+}
+
+/// Answering a question with text: the cursor moved to the `Type something`
+/// option, then the text and Enter.
+fn type_something(prompt: &ChatPrompt, text: &str) -> Result<AnswerRecipe, AnswerRefusal> {
+    let typed = typed_text(text)?;
+    let option = type_something_option(prompt).ok_or(AnswerRefusal::NotThisDialog)?;
+    let mut steps: Vec<RecipeStep> = cursor_move(prompt, option)?.into_iter().collect();
+    steps.push(typed);
     Ok(AnswerRecipe { steps })
+}
+
+/// The review step's options: its digit submits or cancels the answers.
+fn review_recipe(
+    prompt: &ChatPrompt,
+    answer: &ChatAnswerKind,
+) -> Result<AnswerRecipe, AnswerRefusal> {
+    match answer {
+        ChatAnswerKind::Option { number } => Ok(one_step(
+            vec![digit_for(prompt, *number)?],
+            ScreenExpect::DialogGone,
+        )),
+        _ => Err(AnswerRefusal::NotThisDialog),
+    }
 }
 
 /// Allowing with a message: Tab, with the cursor on option 1, turns it into
@@ -772,7 +1118,7 @@ fn plan_feedback(prompt: &ChatPrompt, text: &str) -> Result<AnswerRecipe, Answer
 mod tests {
     use super::{read, recipe};
     use agent_api::{AnswerRefusal, Key, RecipeStep, ScreenExpect};
-    use protocol::{ChatAnswerKind, ChatPromptKind, ChatScreen, ComposerState};
+    use protocol::{ChatAnswerKind, ChatPrompt, ChatPromptKind, ChatScreen, ComposerState};
 
     #[test]
     fn plan_feedback_finds_its_option_by_label() {
@@ -1020,6 +1366,192 @@ mod tests {
     fn a_bare_bang_box_is_ready_and_a_bang_command_is_a_draft() {
         assert_eq!(read(&boxed(&[], &["!"])).composer, ComposerState::Ready);
         assert_eq!(read(&boxed(&[], &["! ls"])).composer, ComposerState::Draft);
+    }
+
+    /// An `AskUserQuestion` step with `options` under a tab bar of two
+    /// questions, neither answered, then the rule, `Chat about this` and the
+    /// footer.
+    fn ask(options: &[&str]) -> Vec<String> {
+        let mut screen = vec![rule()];
+        screen.extend(rows(&[
+            "←  ☐ Next fn  ☐ Tests  ✔ Submit  →",
+            "",
+            "Which tests?",
+            "",
+        ]));
+        screen.extend(rows(options));
+        screen.push(rule());
+        screen.extend(rows(&[
+            "  9. Chat about this",
+            "",
+            "Enter to select · Tab/Arrow keys to navigate · Esc to cancel",
+        ]));
+        screen
+    }
+
+    /// The prompt `screen` shows.
+    fn question(screen: &[String]) -> ChatPrompt {
+        read(screen).prompt.expect("a question prompt")
+    }
+
+    #[test]
+    fn a_description_wrapped_over_two_rows_is_joined() {
+        let screen = read(&ask(&[
+            "❯ 1. sub",
+            "     Subtraction: returns a - b, and",
+            "     raises on overflow",
+            "  2. Type something.",
+        ]));
+        assert_eq!(screen.composer, ComposerState::Dialog);
+        let prompt = screen.prompt.expect("a question prompt");
+        assert_eq!(prompt.kind, ChatPromptKind::Question);
+        assert_eq!(prompt.subject, "Which tests?");
+        assert_eq!(prompt.body, "");
+        assert_eq!(
+            prompt.options[0].description.as_deref(),
+            Some("Subtraction: returns a - b, and raises on overflow")
+        );
+        assert_eq!(prompt.options[1].label, "Type something");
+        assert_eq!(prompt.options[1].description, None);
+    }
+
+    #[test]
+    fn chat_about_this_is_not_an_option() {
+        let screen = read(&ask(&["❯ 1. sub", "  2. div", "  3. Type something."]));
+        assert_eq!(
+            labels(&screen),
+            [
+                (1, "sub".to_owned()),
+                (2, "div".to_owned()),
+                (3, "Type something".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_lone_short_rule_row_is_not_a_rule() {
+        let wide = format!("  {}", rule());
+        let mut screen = vec![wide.clone()];
+        screen.extend(rows(&[
+            "  ──",
+            "  ←  ☐ Next fn  ☒ Tests  ✔ Submit  →",
+            "",
+            "  Which function?",
+            "",
+            "  ❯ 1. sub",
+            "       Subtraction",
+            "    2. Type something.",
+        ]));
+        screen.push(wide);
+        screen.extend(rows(&[
+            "  ──",
+            "    3. Chat about this",
+            "",
+            "  Enter to select · Tab/Arrow keys to navigate · Esc to cancel",
+        ]));
+        let screen = read(&screen);
+        assert_eq!(
+            labels(&screen),
+            [(1, "sub".to_owned()), (2, "Type something".to_owned())]
+        );
+        let prompt = screen.prompt.expect("a question prompt");
+        assert_eq!(prompt.subject, "Which function?");
+        assert_eq!(
+            prompt.options[0].description.as_deref(),
+            Some("Subtraction")
+        );
+        assert_eq!(prompt.cursor, Some(1));
+        let tabs: Vec<(&str, bool, bool)> = prompt
+            .questions
+            .iter()
+            .map(|tab| (tab.label.as_str(), tab.answered, tab.current))
+            .collect();
+        assert_eq!(tabs, [("Next fn", false, true), ("Tests", true, false)]);
+    }
+
+    #[test]
+    fn a_multi_select_with_the_cursor_on_next_has_no_cursor() {
+        let screen = read(&ask(&[
+            "  1. [✔] add",
+            "         Unit tests for add",
+            "  2. [ ] mul",
+            "  3. [✔] fuzz tests",
+            "❯    Next",
+        ]));
+        assert_eq!(
+            labels(&screen),
+            [
+                (1, "add".to_owned()),
+                (2, "mul".to_owned()),
+                (3, "fuzz tests".to_owned()),
+            ]
+        );
+        let prompt = screen.prompt.expect("a question prompt");
+        assert!(prompt.multi);
+        assert_eq!(prompt.cursor, None);
+        let ticked: Vec<bool> = prompt
+            .options
+            .iter()
+            .map(|option| option.selected)
+            .collect();
+        assert_eq!(ticked, [true, false, true]);
+        assert_eq!(
+            prompt.options[0].description.as_deref(),
+            Some("Unit tests for add")
+        );
+    }
+
+    #[test]
+    fn submit_moves_down_from_the_cursor_to_next() {
+        let prompt = question(&ask(&[
+            "  1. [ ] a",
+            "❯ 2. [ ] b",
+            "  3. [ ] c",
+            "  4. [ ] d",
+            "  5. [ ] Type something",
+            "     Next",
+        ]));
+        let steps = recipe(&prompt, &ChatAnswerKind::Submit)
+            .expect("a recipe")
+            .steps;
+        assert_eq!(
+            steps,
+            [
+                RecipeStep {
+                    keys: vec![Key::Down; 4],
+                    expect: ScreenExpect::SameDialog,
+                },
+                RecipeStep {
+                    keys: vec![Key::Enter],
+                    expect: ScreenExpect::Any,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn type_something_with_the_cursor_on_its_row_only_types() {
+        let prompt = question(&ask(&["  1. sub", "  2. div", "❯ 3. Type something."]));
+        let answer = ChatAnswerKind::TypeSomething {
+            text: "x".to_owned(),
+        };
+        let steps = recipe(&prompt, &answer).expect("a recipe").steps;
+        assert_eq!(
+            steps,
+            [RecipeStep {
+                keys: vec![Key::Text("x".to_owned()), Key::Enter],
+                expect: ScreenExpect::Any,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_digit_is_refused_while_the_cursor_is_on_type_something() {
+        let prompt = question(&ask(&["  1. sub", "  2. div", "❯ 3. Type something."]));
+        assert_eq!(
+            recipe(&prompt, &ChatAnswerKind::Option { number: 2 }),
+            Err(AnswerRefusal::NotThisDialog)
+        );
     }
 
     #[test]

@@ -117,6 +117,14 @@ mod tests {
         cursor: Option<u32>,
         can_amend: bool,
         always_allow_tip: Option<&'static str>,
+        /// Whether the options carry boxes.
+        multi: bool,
+        /// The ticked options of a multi-select question.
+        ticked: Vec<u32>,
+        /// The question tabs as `(label, answered, current)`.
+        tabs: Vec<(&'static str, bool, bool)>,
+        /// The body, when the row checks it.
+        body: Option<&'static str>,
     }
 
     /// A screen with no prompt and the input box in `composer`.
@@ -129,6 +137,10 @@ mod tests {
             cursor: None,
             can_amend: false,
             always_allow_tip: None,
+            multi: false,
+            ticked: Vec::new(),
+            tabs: Vec::new(),
+            body: None,
         }
     }
 
@@ -152,8 +164,24 @@ mod tests {
             subject,
             options: options.to_vec(),
             cursor,
-            can_amend: false,
-            always_allow_tip: None,
+            ..no_prompt(ComposerState::Dialog)
+        }
+    }
+
+    /// An `AskUserQuestion` step under `tabs`; on a multi-select step,
+    /// `ticked` lists the ticked options.
+    fn question(
+        subject: &'static str,
+        options: &[(u32, &'static str)],
+        cursor: Option<u32>,
+        ticked: Option<&[u32]>,
+        tabs: &[(&'static str, bool, bool)],
+    ) -> Expected {
+        Expected {
+            multi: ticked.is_some(),
+            ticked: ticked.unwrap_or_default().to_vec(),
+            tabs: tabs.to_vec(),
+            ..dialog(ChatPromptKind::Question, subject, options, cursor)
         }
     }
 
@@ -189,9 +217,76 @@ mod tests {
             && prompt.map_or("", |prompt| prompt.subject.as_str()) == expected.subject
             && options == expected.options
             && prompt.and_then(|prompt| prompt.always_allow_tip.as_deref())
-                == expected.always_allow_tip;
+                == expected.always_allow_tip
+            && prompt.is_some_and(|prompt| prompt.multi) == expected.multi
+            && ticked(prompt) == expected.ticked
+            && tabs(prompt) == expected.tabs
+            && expected
+                .body
+                .is_none_or(|body| prompt.is_some_and(|prompt| prompt.body == body));
         (!same).then(|| format!("wanted {expected:?}, got {screen:?}"))
     }
+
+    /// The ticked options of a multi-select prompt.
+    fn ticked(prompt: Option<&ChatPrompt>) -> Vec<u32> {
+        prompt
+            .filter(|prompt| prompt.multi)
+            .map(|prompt| {
+                prompt
+                    .options
+                    .iter()
+                    .filter(|option| option.selected)
+                    .map(|option| option.number)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// A prompt's question tabs as `(label, answered, current)`.
+    fn tabs(prompt: Option<&ChatPrompt>) -> Vec<(&str, bool, bool)> {
+        prompt
+            .map(|prompt| {
+                prompt
+                    .questions
+                    .iter()
+                    .map(|tab| (tab.label.as_str(), tab.answered, tab.current))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    const Q1_SUBJECT: &str = "Which function should be added to calc.py next?";
+
+    const Q1_OPTIONS: [(u32, &str); 4] =
+        [(1, "sub"), (2, "div"), (3, "pow"), (4, "Type something")];
+
+    const Q1_TABS: [(&str, bool, bool); 3] = [
+        ("Next fn", false, true),
+        ("Tests", false, false),
+        ("Style", false, false),
+    ];
+
+    const Q2_SUBJECT: &str = "Which tests should be written?";
+
+    const Q2_OPTIONS: [(u32, &str); 5] = [
+        (1, "add"),
+        (2, "mul"),
+        (3, "edge cases"),
+        (4, "property tests"),
+        (5, "Type something"),
+    ];
+
+    /// The tabs once the second question has a tick: the plain text has no
+    /// highlight, so the first unanswered tab, Style, reads as current.
+    const Q2_TICKED_TABS: [(&str, bool, bool); 3] = [
+        ("Next fn", true, false),
+        ("Tests", true, false),
+        ("Style", false, true),
+    ];
+
+    const REVIEW_BODY: &str = "Which function should be added to calc.py next? -> div\n\
+        Which tests should be written? -> add, edge cases, fuzz tests\n\
+        Which code style should the functions use? -> Plain";
 
     const FILE_OPTIONS: [(u32, &str); 3] = [
         (1, "Yes"),
@@ -231,8 +326,10 @@ mod tests {
         reason = "one row per capture; the table is the test"
     )]
     fn every_fixture_reads_its_dialog() {
-        use ChatPromptKind::{HeadsUp, Plan, Trust};
+        use ChatPromptKind::{HeadsUp, Plan, Review, Trust};
         use ComposerState::{Draft, Ready, Working};
+        let mut q2_typed = Q2_OPTIONS.to_vec();
+        q2_typed[4] = (5, "fuzz tests");
         let mut amend_open = BASH_OPTIONS.to_vec();
         amend_open[0] = (1, "Yes, and tell Claude what to do next");
         let mut amend_typed = BASH_OPTIONS.to_vec();
@@ -428,6 +525,129 @@ mod tests {
                 include_str!("fixtures/v26-deny.txt"),
                 no_prompt(Ready),
             ),
+            (
+                "v31-ask-q1",
+                include_str!("fixtures/v31-ask-q1.txt"),
+                question(Q1_SUBJECT, &Q1_OPTIONS, Some(1), None, &Q1_TABS),
+            ),
+            (
+                "c31-ask-q1",
+                include_str!("fixtures/c31-ask-q1.txt"),
+                question(Q1_SUBJECT, &Q1_OPTIONS, Some(1), None, &Q1_TABS),
+            ),
+            (
+                "v32-ask-q2",
+                include_str!("fixtures/v32-ask-q2.txt"),
+                question(
+                    Q2_SUBJECT,
+                    &Q2_OPTIONS,
+                    Some(1),
+                    Some(&[]),
+                    &[
+                        ("Next fn", true, false),
+                        ("Tests", false, true),
+                        ("Style", false, false),
+                    ],
+                ),
+            ),
+            (
+                "v33-ask-q2-toggled",
+                include_str!("fixtures/v33-ask-q2-toggled.txt"),
+                question(
+                    Q2_SUBJECT,
+                    &Q2_OPTIONS,
+                    Some(1),
+                    Some(&[1, 3]),
+                    &Q2_TICKED_TABS,
+                ),
+            ),
+            (
+                "v34-ask-other",
+                include_str!("fixtures/v34-ask-other.txt"),
+                question(
+                    Q2_SUBJECT,
+                    &Q2_OPTIONS,
+                    Some(1),
+                    Some(&[1, 3, 5]),
+                    &Q2_TICKED_TABS,
+                ),
+            ),
+            (
+                "v36-ask-other-cursor",
+                include_str!("fixtures/v36-ask-other-cursor.txt"),
+                question(
+                    Q2_SUBJECT,
+                    &Q2_OPTIONS,
+                    Some(5),
+                    Some(&[1, 3, 5]),
+                    &Q2_TICKED_TABS,
+                ),
+            ),
+            (
+                "v37-ask-other-typed2",
+                include_str!("fixtures/v37-ask-other-typed2.txt"),
+                question(
+                    Q2_SUBJECT,
+                    &q2_typed,
+                    Some(5),
+                    Some(&[1, 3, 5]),
+                    &Q2_TICKED_TABS,
+                ),
+            ),
+            (
+                "v38-ask-q3",
+                include_str!("fixtures/v38-ask-q3.txt"),
+                question(
+                    Q2_SUBJECT,
+                    &q2_typed,
+                    None,
+                    Some(&[1, 3, 5]),
+                    &Q2_TICKED_TABS,
+                ),
+            ),
+            (
+                "v39-ask-q3",
+                include_str!("fixtures/v39-ask-q3.txt"),
+                overlay("question_preview"),
+            ),
+            (
+                "v40-ask-q3-down",
+                include_str!("fixtures/v40-ask-q3-down.txt"),
+                overlay("question_preview"),
+            ),
+            (
+                "v41-ask-notes",
+                include_str!("fixtures/v41-ask-notes.txt"),
+                overlay("question_preview"),
+            ),
+            (
+                "v42-ask-review",
+                include_str!("fixtures/v42-ask-review.txt"),
+                Expected {
+                    tabs: vec![
+                        ("Next fn", true, false),
+                        ("Tests", true, false),
+                        ("Style", true, false),
+                    ],
+                    body: Some(REVIEW_BODY),
+                    ..dialog(
+                        Review,
+                        "Review your answers",
+                        &[(1, "Submit answers"), (2, "Cancel")],
+                        Some(1),
+                    )
+                },
+            ),
+            (
+                "v43-ask-submitted",
+                include_str!("fixtures/v43-ask-submitted.txt"),
+                no_prompt(Ready),
+            ),
+            (
+                "c32-ask-chat",
+                include_str!("fixtures/c32-ask-chat.txt"),
+                no_prompt(Working),
+            ),
         ];
         let wrong: Vec<String> = cases
             .iter()
@@ -457,6 +677,10 @@ mod tests {
         ChatAnswerKind::Option { number }
     }
 
+    fn toggle(number: u32) -> ChatAnswerKind {
+        ChatAnswerKind::Toggle { number }
+    }
+
     fn text(value: &str) -> String {
         value.to_owned()
     }
@@ -467,7 +691,14 @@ mod tests {
         reason = "one row per answer; the table is the test"
     )]
     fn recipes_per_answer() {
-        use ScreenExpect::{Any, DialogGone, OptionSelected, SameDialog};
+        use ScreenExpect::{Any, DialogGone, OptionSelected, OptionTicked, SameDialog};
+        let v31 = include_str!("fixtures/v31-ask-q1.txt");
+        let v32 = include_str!("fixtures/v32-ask-q2.txt");
+        let v33 = include_str!("fixtures/v33-ask-q2-toggled.txt");
+        let v36 = include_str!("fixtures/v36-ask-other-cursor.txt");
+        let v37 = include_str!("fixtures/v37-ask-other-typed2.txt");
+        let v38 = include_str!("fixtures/v38-ask-q3.txt");
+        let v42 = include_str!("fixtures/v42-ask-review.txt");
         let c23 = include_str!("fixtures/c23-perm-bash.txt");
         let v21 = include_str!("fixtures/v21-perm-bash.txt");
         let v51 = include_str!("fixtures/v51-plan-dialog.txt");
@@ -614,6 +845,127 @@ mod tests {
                 ChatAnswerKind::TypeSomething { text: text("") },
                 Err(AnswerRefusal::TextEmpty),
             ),
+            (
+                "v31-ask-q1",
+                v31,
+                option(1),
+                Ok(vec![(vec![Key::Digit(1)], Any)]),
+            ),
+            (
+                "v31-ask-q1",
+                v31,
+                option(3),
+                Ok(vec![(vec![Key::Digit(3)], Any)]),
+            ),
+            (
+                "v31-ask-q1",
+                v31,
+                option(5),
+                Err(AnswerRefusal::UnknownOption(5)),
+            ),
+            (
+                "v31-ask-q1",
+                v31,
+                type_x(),
+                Ok(vec![
+                    (vec![Key::Down; 3], OptionSelected(4)),
+                    (vec![Key::Text(text("x")), Key::Enter], Any),
+                ]),
+            ),
+            (
+                "v31-ask-q1",
+                v31,
+                ChatAnswerKind::TypeSomething { text: text("  ") },
+                Err(AnswerRefusal::TextEmpty),
+            ),
+            (
+                "v31-ask-q1",
+                v31,
+                ChatAnswerKind::Back,
+                Ok(vec![(vec![Key::Left], Any)]),
+            ),
+            (
+                "v31-ask-q1",
+                v31,
+                ChatAnswerKind::Skip,
+                Ok(vec![(vec![Key::Right], Any)]),
+            ),
+            ("v31-ask-q1", v31, option(4), refused.clone()),
+            ("v31-ask-q1", v31, toggle(1), refused.clone()),
+            ("v31-ask-q1", v31, ChatAnswerKind::Submit, refused.clone()),
+            (
+                "v32-ask-q2",
+                v32,
+                toggle(1),
+                Ok(vec![(vec![Key::Digit(1)], OptionTicked(1, true))]),
+            ),
+            (
+                "v33-ask-q2-toggled",
+                v33,
+                toggle(3),
+                Ok(vec![(vec![Key::Digit(3)], OptionTicked(3, false))]),
+            ),
+            (
+                "v32-ask-q2",
+                v32,
+                toggle(6),
+                Err(AnswerRefusal::UnknownOption(6)),
+            ),
+            ("v32-ask-q2", v32, option(1), refused.clone()),
+            (
+                "v33-ask-q2-toggled",
+                v33,
+                ChatAnswerKind::Submit,
+                Ok(vec![
+                    (vec![Key::Down; 5], SameDialog),
+                    (vec![Key::Enter], Any),
+                ]),
+            ),
+            (
+                "v36-ask-other-cursor",
+                v36,
+                ChatAnswerKind::Submit,
+                Ok(vec![(vec![Key::Down], SameDialog), (vec![Key::Enter], Any)]),
+            ),
+            ("v37-ask-other-typed2", v37, toggle(1), refused.clone()),
+            ("v36-ask-other-cursor", v36, toggle(2), refused.clone()),
+            (
+                "v36-ask-other-cursor",
+                v36,
+                ChatAnswerKind::Back,
+                refused.clone(),
+            ),
+            ("v38-ask-q3", v38, ChatAnswerKind::Submit, refused.clone()),
+            (
+                "v32-ask-q2",
+                v32,
+                ChatAnswerKind::TypeSomething {
+                    text: text("fuzz tests"),
+                },
+                Ok(vec![
+                    (vec![Key::Down; 4], OptionSelected(5)),
+                    (vec![Key::Text(text("fuzz tests")), Key::Enter], Any),
+                ]),
+            ),
+            (
+                "v36-ask-other-cursor",
+                v36,
+                ChatAnswerKind::TypeSomething {
+                    text: text("fuzz tests"),
+                },
+                typed("fuzz tests"),
+            ),
+            ("v38-ask-q3", v38, type_x(), refused.clone()),
+            ("v42-ask-review", v42, option(1), Ok(vec![digit(1)])),
+            ("v42-ask-review", v42, option(2), Ok(vec![digit(2)])),
+            (
+                "v42-ask-review",
+                v42,
+                option(3),
+                Err(AnswerRefusal::UnknownOption(3)),
+            ),
+            ("v42-ask-review", v42, ChatAnswerKind::Back, refused.clone()),
+            ("v42-ask-review", v42, type_x(), refused.clone()),
         ];
         let agent = agent_registry::default_agent();
         let wrong: Vec<String> = cases
@@ -659,7 +1011,15 @@ mod tests {
                 .prompt
                 .as_ref()
                 .is_some_and(|prompt| prompt.cursor == Some(*number)),
-            ScreenExpect::OptionTicked(..) => false,
+            ScreenExpect::OptionTicked(number, ticked) => {
+                after.prompt.as_ref().is_some_and(|prompt| {
+                    prompt.multi
+                        && prompt
+                            .options
+                            .iter()
+                            .any(|option| option.number == *number && option.selected == *ticked)
+                })
+            }
             ScreenExpect::Any => true,
         }
     }
@@ -691,6 +1051,24 @@ mod tests {
                     text: text("also test div(6, 3) == 2"),
                 },
             ),
+            (
+                "v32-ask-q2 -> v33-ask-q2-toggled (1)",
+                include_str!("fixtures/v32-ask-q2.txt"),
+                include_str!("fixtures/v33-ask-q2-toggled.txt"),
+                toggle(1),
+            ),
+            (
+                "v32-ask-q2 -> v33-ask-q2-toggled (3)",
+                include_str!("fixtures/v32-ask-q2.txt"),
+                include_str!("fixtures/v33-ask-q2-toggled.txt"),
+                toggle(3),
+            ),
+            (
+                "v31-ask-q1 -> v32-ask-q2",
+                include_str!("fixtures/v31-ask-q1.txt"),
+                include_str!("fixtures/v32-ask-q2.txt"),
+                option(1),
+            ),
         ];
         let agent = agent_registry::default_agent();
         for (pair, before, after, answer) in cases {
@@ -706,6 +1084,25 @@ mod tests {
                 "{pair}: {first:?} does not hold"
             );
         }
+    }
+
+    #[test]
+    fn a_wrapped_cui_card_reads_as_vanilla() {
+        let without_descriptions = |text: &str| {
+            let mut screen = read_capture(text);
+            if let Some(prompt) = screen.prompt.as_mut() {
+                for option in &mut prompt.options {
+                    option.description = None;
+                }
+            }
+            screen
+        };
+        let cui = without_descriptions(include_str!("fixtures/c31-ask-q1.txt"));
+        assert!(cui.prompt.is_some(), "c31-ask-q1 reads a question");
+        assert_eq!(
+            cui,
+            without_descriptions(include_str!("fixtures/v31-ask-q1.txt"))
+        );
     }
 
     #[test]
