@@ -4,10 +4,10 @@
 use std::path::PathBuf;
 
 use gpui::{
-    AnyElement, App, ClickEvent, Context, Div, ElementId, Entity, FocusHandle, Focusable as _,
-    FontWeight, Keystroke, MouseButton, MouseDownEvent, Pixels, Point, ScrollWheelEvent,
-    SharedString, Stateful, Subscription, Task, Window, WindowId, anchored, deferred, div,
-    prelude::*, px,
+    AnyElement, App, Bounds, ClickEvent, Context, Div, ElementId, Entity, FocusHandle,
+    Focusable as _, FontWeight, Keystroke, MouseButton, MouseDownEvent, Pixels, Point,
+    ScrollWheelEvent, SharedString, Stateful, Subscription, Task, Window, WindowId, anchored,
+    deferred, div, prelude::*, px,
 };
 use protocol::{
     ClientMessage, DaemonMessage, MemberBranchFate, PresetEntry, PresetTarget, SessionMode,
@@ -27,7 +27,6 @@ use crate::open_view::Then;
 use crate::overlay_owner::Overlay;
 use crate::palette::{CHIP, DIALOG_SHADOW, LINE_STRONG, SCRIM, SURFACE};
 use crate::popouts::{POP_OUT_ALREADY_TIP, PopoutKey, pane_to_pop};
-use crate::remote_mode::Capabilities;
 use crate::session_actions::{
     ABANDONED_ACTIONS, ActionState, DuplicateTarget, HEADLESS_UNSUPPORTED_TIP, MenuEntry, MenuMode,
     MoveTarget, OfferedRow, PendingPrefill, PlacedFocus, SessionAction, SessionRow, Step,
@@ -36,7 +35,7 @@ use crate::session_actions::{
     header_shows_exit_code, menu_entries, move_lines, move_source, orphan_banner_text,
     overlay_actions, pane_shows_exit, plan, rename_message, session_rows, worktree_to_reveal,
 };
-use crate::sidebar::can_attach;
+use crate::sidebar::{Container, ContainerKind, can_attach};
 use crate::spawn_form::{Lock, Prefill, Target};
 use crate::spawn_view::SpawnEntry;
 use crate::tabs::{collect_panes, find_tab_containing_session};
@@ -239,48 +238,316 @@ impl MenuPresets {
     }
 }
 
-/// What a preset row does.
-enum PresetAction {
-    /// Nothing; the tooltip, when there is one, says why.
-    Disabled(Option<String>),
-    /// Opens the wizard for the listed preset at this index.
-    Launch(usize),
+/// What a container menu row does, whether a click or a key fires it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ContainerAction {
+    /// The spawn dialog, held on the repo or workspace, or for a tab
+    /// container on that tab.
+    Spawn,
+    /// Swaps the rows for the Launch last again submenu.
+    LaunchLast,
+    /// The container's appearance editor.
+    Appearance,
+    /// The wizard for the listed preset at this index.
+    Preset(usize),
+    /// The container's folder in the file manager.
+    Explorer,
+    /// The container in VS Code.
+    VsCode,
+    /// The container's folder path on the clipboard.
+    CopyPath,
+    /// Arms the Remove row, or removes the container once armed.
+    Remove,
+    /// Swaps the submenu back for the menu's rows.
+    Back,
+    /// A Launch last again choice.
+    Launch(ContainerLaunch),
 }
 
-/// One preset row of the container menu.
-struct PresetRow {
+/// Whether a container menu row can be pressed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RowState {
+    Enabled,
+    /// Drawn muted; the tooltip says why.
+    Disabled(String),
+    /// Drawn muted with no tooltip: the preset list is still loading.
+    Inert,
+}
+
+/// One row of the container menu: its selector, its text, whether it can be
+/// pressed, and what a click or a key on it does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ContainerRow {
     selector: String,
     label: String,
-    action: PresetAction,
+    state: RowState,
+    action: ContainerAction,
 }
 
-/// The preset rows `presets` draws: one disabled row while loading, failed
-/// or empty, else a row per preset.
-fn preset_rows(presets: &MenuPresets) -> Vec<PresetRow> {
-    let single = |label: &str, tip: Option<String>| {
-        vec![PresetRow {
-            selector: CONTAINER_PRESET_ROW.to_owned(),
+impl ContainerRow {
+    fn new(selector: &str, label: &str, state: RowState, action: ContainerAction) -> Self {
+        Self {
+            selector: selector.to_owned(),
             label: label.to_owned(),
-            action: PresetAction::Disabled(tip),
-        }]
+            state,
+            action,
+        }
+    }
+
+    fn enabled(&self) -> bool {
+        self.state == RowState::Enabled
+    }
+}
+
+/// The preset rows `presets` draws: one muted row while loading, failed or
+/// empty, else a row per preset.
+fn preset_rows(presets: &MenuPresets) -> Vec<ContainerRow> {
+    let single = |label: &str, state: RowState| {
+        vec![ContainerRow::new(
+            CONTAINER_PRESET_ROW,
+            label,
+            state,
+            ContainerAction::Preset(0),
+        )]
     };
     match presets {
-        MenuPresets::Loading => single(PRESET_LOADING_LABEL, None),
-        MenuPresets::Failed(err) => single(PRESET_FAILED_LABEL, Some(err.clone())),
-        MenuPresets::Listed(entries) if entries.is_empty() => {
-            single(PRESET_NONE_LABEL, Some(PRESET_NONE_TIP.to_owned()))
-        }
+        MenuPresets::Loading => single(PRESET_LOADING_LABEL, RowState::Inert),
+        MenuPresets::Failed(err) => single(PRESET_FAILED_LABEL, RowState::Disabled(err.clone())),
+        MenuPresets::Listed(entries) if entries.is_empty() => single(
+            PRESET_NONE_LABEL,
+            RowState::Disabled(PRESET_NONE_TIP.to_owned()),
+        ),
         MenuPresets::Listed(entries) => entries
             .iter()
             .enumerate()
-            .map(|(index, entry)| PresetRow {
+            .map(|(index, entry)| ContainerRow {
                 selector: format!("{CONTAINER_PRESET_ROW}-{index}"),
                 label: format!("Launch preset · {}", entry.name),
-                action: PresetAction::Launch(index),
+                state: RowState::Enabled,
+                action: ContainerAction::Preset(index),
             })
             .collect(),
     }
 }
+
+/// Which kind of container a menu is for, as its rows need it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ContainerShape {
+    /// A tab container: one spawn row when the tab can hold a spawn.
+    Tab { spawnable: bool },
+    /// A repo or workspace, its Remove row reading `remove_label`.
+    Level { remove_label: String },
+}
+
+/// The container's stored launch config, as its Launch last again row
+/// needs it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LaunchFact {
+    /// No stored config: no row.
+    None,
+    /// A headless config, which this client refuses to replay.
+    Headless,
+    /// A config the submenu replays.
+    Ready,
+}
+
+/// What the container menu's rows depend on, read from the client when
+/// they are built.
+struct ContainerFacts<'a> {
+    shape: ContainerShape,
+    launch: LaunchFact,
+    presets: &'a MenuPresets,
+    /// Explorer has a folder to open.
+    has_folder: bool,
+    /// VS Code has a folder or workspace file to open.
+    has_vscode_job: bool,
+    /// Copy path has a path to copy.
+    has_copy_path: bool,
+    /// Why this host opens no local files, when it does not.
+    local_files_refusal: Option<&'static str>,
+}
+
+/// The state of an Explorer or VS Code row: disabled when the container has
+/// nothing to open, or this host opens no local files.
+fn open_row_state(has_target: bool, refusal: Option<&'static str>) -> RowState {
+    match (has_target, refusal) {
+        (false, _) => RowState::Disabled(CONTAINER_NO_FOLDER_TIP.to_owned()),
+        (true, Some(tip)) => RowState::Disabled(tip.to_owned()),
+        (true, None) => RowState::Enabled,
+    }
+}
+
+/// The container menu's rows in the groups its separators divide.
+fn container_row_groups(facts: &ContainerFacts<'_>) -> Vec<Vec<ContainerRow>> {
+    let remove_label = match &facts.shape {
+        ContainerShape::Tab { spawnable: false } => return Vec::new(),
+        ContainerShape::Tab { spawnable: true } => {
+            return vec![vec![ContainerRow::new(
+                CONTAINER_SPAWN_ROW,
+                "Spawn session here",
+                RowState::Enabled,
+                ContainerAction::Spawn,
+            )]];
+        }
+        ContainerShape::Level { remove_label } => remove_label,
+    };
+    let enabled = |selector: &str, label: &str, action| {
+        ContainerRow::new(selector, label, RowState::Enabled, action)
+    };
+    let mut groups = vec![vec![enabled(
+        CONTAINER_SPAWN_ROW,
+        "Spawn session",
+        ContainerAction::Spawn,
+    )]];
+    let launch_state = match facts.launch {
+        LaunchFact::None => None,
+        LaunchFact::Headless => Some(RowState::Disabled(HEADLESS_UNSUPPORTED_TIP.to_owned())),
+        LaunchFact::Ready => Some(RowState::Enabled),
+    };
+    if let Some(state) = launch_state {
+        groups.push(vec![ContainerRow::new(
+            CONTAINER_LAUNCH_LAST_ROW,
+            CONTAINER_LAUNCH_LAST_LABEL,
+            state,
+            ContainerAction::LaunchLast,
+        )]);
+    }
+    let mut middle = vec![enabled(
+        CONTAINER_APPEARANCE_ROW,
+        "Appearance…",
+        ContainerAction::Appearance,
+    )];
+    middle.extend(preset_rows(facts.presets));
+    groups.push(middle);
+    let copy_state = if facts.has_copy_path {
+        RowState::Enabled
+    } else {
+        RowState::Disabled(CONTAINER_NO_FOLDER_TIP.to_owned())
+    };
+    groups.push(vec![
+        ContainerRow::new(
+            CONTAINER_EXPLORER_ROW,
+            "Open in Explorer",
+            open_row_state(facts.has_folder, facts.local_files_refusal),
+            ContainerAction::Explorer,
+        ),
+        ContainerRow::new(
+            CONTAINER_VSCODE_ROW,
+            "Open in VS Code",
+            open_row_state(facts.has_vscode_job, facts.local_files_refusal),
+            ContainerAction::VsCode,
+        ),
+        ContainerRow::new(
+            CONTAINER_COPY_PATH_ROW,
+            "Copy path",
+            copy_state,
+            ContainerAction::CopyPath,
+        ),
+    ]);
+    groups.push(vec![enabled(
+        CONTAINER_REMOVE_ROW,
+        remove_label,
+        ContainerAction::Remove,
+    )]);
+    groups
+}
+
+/// The Launch last again submenu's rows in the groups its separators
+/// divide.
+fn launch_row_groups(lines: Vec<SubmenuLine<ContainerLaunch>>) -> Vec<Vec<ContainerRow>> {
+    let mut groups = vec![Vec::new()];
+    for line in lines {
+        let row = match line {
+            SubmenuLine::Separator => {
+                groups.push(Vec::new());
+                continue;
+            }
+            SubmenuLine::Back { selector } => ContainerRow::new(
+                selector,
+                SUBMENU_BACK,
+                RowState::Enabled,
+                ContainerAction::Back,
+            ),
+            SubmenuLine::Choice {
+                selector,
+                label,
+                choice,
+            } => ContainerRow {
+                selector,
+                label,
+                state: RowState::Enabled,
+                action: ContainerAction::Launch(choice),
+            },
+        };
+        if let Some(group) = groups.last_mut() {
+            group.push(row);
+        }
+    }
+    groups
+}
+
+/// Whether `ks` opens a focused row's context menu: Shift+F10, or the Menu
+/// key alone.
+pub(crate) fn is_menu_key(ks: &Keystroke) -> bool {
+    let m = &ks.modifiers;
+    let other = m.control || m.alt || m.platform || m.function;
+    match ks.key.as_str() {
+        "f10" => m.shift && !other,
+        "menu" => !m.shift && !other,
+        _ => false,
+    }
+}
+
+/// A key that moves a menu's highlight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MenuStep {
+    Up,
+    Down,
+    Home,
+    End,
+}
+
+impl MenuStep {
+    fn of(key: &str) -> Option<Self> {
+        match key {
+            "up" => Some(Self::Up),
+            "down" => Some(Self::Down),
+            "home" => Some(Self::Home),
+            "end" => Some(Self::End),
+            _ => None,
+        }
+    }
+}
+
+/// The selector the highlight moves to from `current` on `step`: through
+/// the enabled rows only, wrapping at the ends. With no highlight, or one on
+/// a row no longer enabled, Down starts at the first enabled row and Up at
+/// the last. `None` when no row is enabled.
+fn step_highlight(rows: &[ContainerRow], current: Option<&str>, step: MenuStep) -> Option<String> {
+    let enabled: Vec<&ContainerRow> = rows.iter().filter(|row| row.enabled()).collect();
+    let count = enabled.len();
+    let last = count.checked_sub(1)?;
+    let at = current.and_then(|selector| enabled.iter().position(|row| row.selector == selector));
+    let next = match (step, at) {
+        (MenuStep::Home, _) | (MenuStep::Down, None) => 0,
+        (MenuStep::End, _) | (MenuStep::Up, None) => last,
+        (MenuStep::Down, Some(at)) => (at + 1) % count,
+        (MenuStep::Up, Some(at)) => (at + last) % count,
+    };
+    enabled.get(next).map(|row| row.selector.clone())
+}
+
+/// The enabled row the highlight `current` names, which Enter and Space
+/// activate.
+fn highlighted_row<'a>(
+    rows: &'a [ContainerRow],
+    current: Option<&str>,
+) -> Option<&'a ContainerRow> {
+    let current = current?;
+    rows.iter()
+        .find(|row| row.enabled() && row.selector == current)
+}
+
 /// The container menu's open rows.
 const CONTAINER_EXPLORER_ROW: &str = "container-menu-explorer";
 const CONTAINER_VSCODE_ROW: &str = "container-menu-vscode";
@@ -314,6 +581,21 @@ pub(crate) enum MenuContainer {
 }
 
 impl MenuContainer {
+    /// The menu a sidebar container row opens: repos, workspaces and tabs
+    /// have one.
+    pub(crate) fn of(container: &Container) -> Option<Self> {
+        let id = container.id.clone();
+        match container.kind {
+            ContainerKind::Repo => Some(Self::Repo(id)),
+            ContainerKind::Workspace => Some(Self::Workspace(id)),
+            ContainerKind::Tab => Some(Self::Tab(id)),
+            ContainerKind::Shell
+            | ContainerKind::Dir
+            | ContainerKind::Detached
+            | ContainerKind::Unbound => None,
+        }
+    }
+
     /// The appearance and remove level the container names, for the two
     /// kinds that have one.
     fn level(&self) -> Option<Level> {
@@ -362,6 +644,11 @@ pub(crate) struct ContainerMenu {
     /// The presets its preset rows show; a tab container's list stays
     /// empty and unshown.
     presets: MenuPresets,
+    /// The selector of the row the keys act on, drawn as if hovered.
+    highlight: Option<String>,
+    /// The sidebar row a key opened the menu from, which Escape focuses
+    /// again; `None` for a right-click.
+    return_to: Option<String>,
 }
 
 impl ContainerMenu {
@@ -765,135 +1052,91 @@ impl RootView {
             .and_then(|container| self.sidebar.last_spawn_config(container))
     }
 
-    /// Whether the container's stored launch config is a headless run, which
-    /// this client refuses to replay.
-    fn container_launch_headless(&self, container: &MenuContainer) -> bool {
-        self.container_launch_config(container)
-            .is_some_and(|config| config.mode == SessionMode::Headless)
+    /// What the open menu's rows depend on now.
+    fn container_facts<'a>(&self, menu: &'a ContainerMenu) -> ContainerFacts<'a> {
+        let container = &menu.container;
+        let shape = match (container, container.level()) {
+            (_, Some(level)) => {
+                let key = crate::repo_remove::container_key(&level);
+                let armed = self.repo_remove.armed() == Some(key.as_str());
+                ContainerShape::Level {
+                    remove_label: crate::repo_remove::row_label(&level, armed),
+                }
+            }
+            (MenuContainer::Tab(id), None) => ContainerShape::Tab {
+                spawnable: self.tab_spawnable(id),
+            },
+            (MenuContainer::Repo(_) | MenuContainer::Workspace(_), None) => {
+                ContainerShape::Tab { spawnable: false }
+            }
+        };
+        let launch = match self.container_launch_config(container) {
+            None => LaunchFact::None,
+            Some(config) if config.mode == SessionMode::Headless => LaunchFact::Headless,
+            Some(_) => LaunchFact::Ready,
+        };
+        ContainerFacts {
+            shape,
+            launch,
+            presets: &menu.presets,
+            has_folder: self.container_folder(container).is_some(),
+            has_vscode_job: self.container_vscode_job(container).is_some(),
+            has_copy_path: self.container_copy_path(container).is_some(),
+            local_files_refusal: self.capabilities().local_files_refusal(),
+        }
+    }
+
+    /// The container menu's rows as shown now, in the groups its separators
+    /// divide; empty while it is closed.
+    fn container_menu_rows(&self) -> Vec<Vec<ContainerRow>> {
+        let Some(menu) = self.container_menu.as_ref() else {
+            return Vec::new();
+        };
+        match menu.submenu {
+            ContainerSubmenu::None => container_row_groups(&self.container_facts(menu)),
+            ContainerSubmenu::LaunchLast => launch_row_groups(self.container_launch_lines()),
+        }
     }
 
     /// The selectors of the container menu's rows as shown now, in the groups
     /// its separators divide; empty while it is closed.
     #[must_use]
     pub fn container_menu_groups(&self) -> Vec<Vec<String>> {
-        let Some(menu) = self.container_menu.as_ref() else {
-            return Vec::new();
-        };
-        match menu.submenu {
-            ContainerSubmenu::None => match &menu.container {
-                MenuContainer::Tab(id) if self.tab_spawnable(id) => {
-                    vec![vec![CONTAINER_SPAWN_ROW.to_owned()]]
-                }
-                MenuContainer::Tab(_) => Vec::new(),
-                MenuContainer::Repo(_) | MenuContainer::Workspace(_) => {
-                    let mut groups = vec![vec![CONTAINER_SPAWN_ROW.to_owned()]];
-                    if self.container_launch_config(&menu.container).is_some() {
-                        groups.push(vec![CONTAINER_LAUNCH_LAST_ROW.to_owned()]);
-                    }
-                    let mut middle = vec![CONTAINER_APPEARANCE_ROW.to_owned()];
-                    middle.extend(
-                        preset_rows(&menu.presets)
-                            .into_iter()
-                            .map(|row| row.selector),
-                    );
-                    groups.push(middle);
-                    groups.push(vec![
-                        CONTAINER_EXPLORER_ROW.to_owned(),
-                        CONTAINER_VSCODE_ROW.to_owned(),
-                        CONTAINER_COPY_PATH_ROW.to_owned(),
-                    ]);
-                    groups.push(vec![CONTAINER_REMOVE_ROW.to_owned()]);
-                    groups
-                }
-            },
-            ContainerSubmenu::LaunchLast => submenu_groups(self.container_launch_lines()),
-        }
+        self.container_menu_rows()
+            .into_iter()
+            .map(|group| group.into_iter().map(|row| row.selector).collect())
+            .collect()
     }
 
     /// The tooltip of the container menu row tagged `selector` when the row
-    /// is disabled.
+    /// is drawn disabled.
     #[must_use]
     pub fn container_menu_disabled_tip(&self, selector: &str) -> Option<String> {
-        let menu = self.container_menu.as_ref()?;
-        if menu.submenu != ContainerSubmenu::None {
-            return None;
-        }
-        if selector.starts_with(CONTAINER_PRESET_ROW) {
-            menu.container.preset_target()?;
-            return preset_rows(&menu.presets)
-                .into_iter()
-                .find(|row| row.selector == selector)
-                .and_then(|row| match row.action {
-                    PresetAction::Disabled(tip) => tip,
-                    PresetAction::Launch(_) => None,
-                });
-        }
-        if selector == CONTAINER_LAUNCH_LAST_ROW {
-            return self
-                .container_launch_headless(&menu.container)
-                .then(|| HEADLESS_UNSUPPORTED_TIP.to_owned());
-        }
-        let tip = match selector {
-            CONTAINER_COPY_PATH_ROW => self
-                .container_folder(&menu.container)
-                .is_none()
-                .then_some(CONTAINER_NO_FOLDER_TIP),
-            CONTAINER_EXPLORER_ROW => open_row_tip(
-                self.container_folder(&menu.container).is_some(),
-                self.capabilities(),
-            ),
-            CONTAINER_VSCODE_ROW => open_row_tip(
-                self.container_vscode_job(&menu.container).is_some(),
-                self.capabilities(),
-            ),
-            _ => None,
-        };
-        tip.map(str::to_owned)
+        self.container_menu_rows()
+            .into_iter()
+            .flatten()
+            .find(|row| row.selector == selector)
+            .and_then(|row| match row.state {
+                RowState::Disabled(tip) => Some(tip),
+                RowState::Enabled | RowState::Inert => None,
+            })
+    }
+
+    /// The selector of the container menu row the keys act on, if any.
+    #[must_use]
+    pub fn container_menu_highlight(&self) -> Option<String> {
+        self.container_menu.as_ref()?.highlight.clone()
     }
 
     /// The labels of the container menu's rows as shown now; empty while it
     /// is closed.
     #[must_use]
     pub fn container_menu_labels(&self) -> Vec<String> {
-        let Some(menu) = self.container_menu.as_ref() else {
-            return Vec::new();
-        };
-        match menu.submenu {
-            ContainerSubmenu::None => match &menu.container {
-                MenuContainer::Tab(id) if self.tab_spawnable(id) => {
-                    vec!["Spawn session here".to_owned()]
-                }
-                MenuContainer::Tab(_) => Vec::new(),
-                MenuContainer::Repo(_) | MenuContainer::Workspace(_) => {
-                    let mut labels = vec!["Spawn session".to_owned()];
-                    if self.container_launch_config(&menu.container).is_some() {
-                        labels.push(CONTAINER_LAUNCH_LAST_LABEL.to_owned());
-                    }
-                    labels.push("Appearance…".to_owned());
-                    labels.extend(preset_rows(&menu.presets).into_iter().map(|row| row.label));
-                    labels.push("Open in Explorer".to_owned());
-                    labels.push("Open in VS Code".to_owned());
-                    labels.push("Copy path".to_owned());
-                    if let Some(level) = menu.container.level() {
-                        let key = crate::repo_remove::container_key(&level);
-                        labels.push(crate::repo_remove::row_label(
-                            &level,
-                            self.repo_remove.armed() == Some(key.as_str()),
-                        ));
-                    }
-                    labels
-                }
-            },
-            ContainerSubmenu::LaunchLast => self
-                .container_launch_lines()
-                .into_iter()
-                .filter_map(|line| match line {
-                    SubmenuLine::Separator => None,
-                    SubmenuLine::Back { .. } => Some(SUBMENU_BACK.to_owned()),
-                    SubmenuLine::Choice { label, .. } => Some(label),
-                })
-                .collect(),
-        }
+        self.container_menu_rows()
+            .into_iter()
+            .flatten()
+            .map(|row| row.label)
+            .collect()
     }
 
     /// The Launch last again submenu: Back, Current tab, New tab, every grid
@@ -949,46 +1192,250 @@ impl RootView {
             return;
         };
         menu.submenu = submenu;
+        let keyed = menu.highlight.is_some();
         // The submenu hides the Remove row, so its arm cannot outlive the
         // swap; Back returns it unarmed.
         self.repo_remove.disarm();
+        if keyed {
+            let rows: Vec<ContainerRow> =
+                self.container_menu_rows().into_iter().flatten().collect();
+            let first = step_highlight(&rows, None, MenuStep::Home);
+            if let Some(menu) = &mut self.container_menu {
+                menu.highlight = first;
+            }
+        }
         self.menu_focus.focus(window);
         cx.notify();
     }
 
-    /// A line of the Launch last again submenu.
-    fn container_launch_line(
-        container: &MenuContainer,
-        line: SubmenuLine<ContainerLaunch>,
+    /// Opens the menu of the focused sidebar row `key` from the keyboard, at
+    /// the row's bottom-left corner, its first enabled row highlighted;
+    /// Escape later hands the keyboard back to the row. A row with no menu
+    /// opens nothing.
+    pub(crate) fn open_container_menu_by_key(
+        &mut self,
+        key: &str,
+        window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
-        match line {
-            SubmenuLine::Back { selector } => menu_item(selector, SUBMENU_BACK, false)
-                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                    this.show_container_submenu(ContainerSubmenu::None, window, cx);
-                }))
-                .into_any_element(),
-            SubmenuLine::Separator => menu_separator().into_any_element(),
-            SubmenuLine::Choice {
-                selector,
-                label,
-                choice,
-            } => {
-                let container = container.clone();
-                match choice {
-                    ContainerLaunch::Placement(placement) => menu_item(&selector, label, false)
-                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                            this.choose_container_launch(&container, placement.clone(), window, cx);
-                        }))
-                        .into_any_element(),
-                    ContainerLaunch::Edit => menu_item(&selector, label, false)
-                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                            this.open_container_launch_edit(&container, window, cx);
-                        }))
-                        .into_any_element(),
+    ) {
+        let Some(container) = self
+            .sidebar_containers()
+            .iter()
+            .find(|container| container.key == key)
+            .and_then(MenuContainer::of)
+        else {
+            return;
+        };
+        let at = match &self.focused_row_bounds {
+            Some((painted, bounds)) if painted == key => bounds.bottom_left(),
+            _ => {
+                tracing::debug!(
+                    row = key,
+                    "no painted bounds for the focused row; menu at the origin"
+                );
+                Point::default()
+            }
+        };
+        self.open_container_menu(container, at, window, cx);
+        let rows: Vec<ContainerRow> = self.container_menu_rows().into_iter().flatten().collect();
+        let first = step_highlight(&rows, None, MenuStep::Home);
+        if let Some(menu) = &mut self.container_menu {
+            menu.highlight = first;
+            menu.return_to = Some(key.to_owned());
+        }
+    }
+
+    /// Records where the focused sidebar row `key` was painted, so a key
+    /// that opens its menu anchors it there.
+    pub(crate) fn note_focused_row_bounds(&mut self, key: &str, bounds: Bounds<Pixels>) {
+        self.focused_row_bounds = Some((key.to_owned(), bounds));
+    }
+
+    /// The keys an open container menu takes: Up, Down, Home and End move
+    /// the highlight through the enabled rows, Enter and Space run the
+    /// highlighted row, Tab does nothing, and Escape on a menu a key opened
+    /// closes it and focuses its row again. `false` for any other key, with
+    /// no container menu open, or while the menu does not hold the keyboard.
+    pub(crate) fn on_container_menu_key(
+        &mut self,
+        ks: &Keystroke,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.menu_focus.is_focused(window) {
+            return false;
+        }
+        let Some(menu) = self.container_menu.as_ref() else {
+            return false;
+        };
+        let current = menu.highlight.clone();
+        let return_to = menu.return_to.clone();
+        let rows: Vec<ContainerRow> = self.container_menu_rows().into_iter().flatten().collect();
+        if let Some(step) = MenuStep::of(&ks.key) {
+            let next = step_highlight(&rows, current.as_deref(), step);
+            if let Some(menu) = &mut self.container_menu {
+                menu.highlight = next;
+            }
+            cx.notify();
+            return true;
+        }
+        match ks.key.as_str() {
+            "enter" | "space" => {
+                if let Some(row) = highlighted_row(&rows, current.as_deref()) {
+                    self.activate_container_row(row, window, cx);
+                }
+                true
+            }
+            "tab" => true,
+            "escape" => {
+                let Some(key) = return_to else {
+                    return false;
+                };
+                self.close_container_menu(window, cx);
+                self.focus_container_row(&key, window, cx);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Runs the action of a container menu row: the one a click or a key
+    /// pressed. A row that is not enabled does nothing.
+    fn activate_container_row(
+        &mut self,
+        row: &ContainerRow,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !row.enabled() {
+            return;
+        }
+        let Some(container) = self
+            .container_menu
+            .as_ref()
+            .map(|menu| menu.container.clone())
+        else {
+            return;
+        };
+        match row.action.clone() {
+            ContainerAction::Spawn => self.container_spawn(&container, window, cx),
+            ContainerAction::LaunchLast => {
+                self.show_container_submenu(ContainerSubmenu::LaunchLast, window, cx);
+            }
+            ContainerAction::Back => {
+                self.show_container_submenu(ContainerSubmenu::None, window, cx);
+            }
+            ContainerAction::Appearance => self.container_appearance(&container, window, cx),
+            ContainerAction::Preset(index) => self.container_preset(&container, index, window, cx),
+            ContainerAction::Explorer => {
+                let job = self.container_folder(&container).map(OpenJob::Folder);
+                self.container_open(job, window, cx);
+            }
+            ContainerAction::VsCode => {
+                let job = self.container_vscode_job(&container);
+                self.container_open(job, window, cx);
+            }
+            ContainerAction::CopyPath => self.container_copy(&container, window, cx),
+            ContainerAction::Remove => {
+                if let Some(level) = container.level() {
+                    self.click_remove_container(&level, window, cx);
                 }
             }
+            ContainerAction::Launch(ContainerLaunch::Placement(placement)) => {
+                self.choose_container_launch(&container, placement, window, cx);
+            }
+            ContainerAction::Launch(ContainerLaunch::Edit) => {
+                self.open_container_launch_edit(&container, window, cx);
+            }
         }
+    }
+
+    /// Closes the container menu and opens the spawn dialog held on the
+    /// repo or workspace, or on the tab for a tab container.
+    fn container_spawn(
+        &mut self,
+        container: &MenuContainer,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (lock, preselect) = match container {
+            MenuContainer::Tab(id) => (Lock::for_tab(id.clone()), self.tab_preselect(id)),
+            MenuContainer::Repo(_) | MenuContainer::Workspace(_) => {
+                let Some(target) = container.target() else {
+                    return;
+                };
+                (Lock::for_target(target), None)
+            }
+        };
+        self.close_container_menu(window, cx);
+        self.open_spawn_dialog(SpawnEntry::Locked { lock, preselect }, window, cx);
+    }
+
+    /// Closes the container menu and opens the container's appearance
+    /// editor.
+    fn container_appearance(
+        &mut self,
+        container: &MenuContainer,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(level) = container.level() else {
+            return;
+        };
+        self.close_container_menu(window, cx);
+        self.open_appearance_editor(level, window, cx);
+    }
+
+    /// Closes the container menu and opens the wizard for the listed preset
+    /// at `index` on the container.
+    fn container_preset(
+        &mut self,
+        container: &MenuContainer,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(target) = container.preset_target() else {
+            return;
+        };
+        let entry = self
+            .container_menu
+            .as_ref()
+            .and_then(|menu| menu.presets.entry(index))
+            .cloned();
+        self.close_container_menu(window, cx);
+        if let Some(entry) = entry {
+            self.open_preset_wizard(entry, target, window, cx);
+        }
+    }
+
+    /// Closes the container menu and hands `job` to the opener.
+    fn container_open(
+        &mut self,
+        job: Option<OpenJob>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(job) = job else {
+            return;
+        };
+        self.close_container_menu(window, cx);
+        self.dispatch_open(job, Then::Nothing, window, cx);
+    }
+
+    /// Closes the container menu and puts the container's path on the
+    /// clipboard.
+    fn container_copy(
+        &mut self,
+        container: &MenuContainer,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(path) = self.container_copy_path(container) else {
+            return;
+        };
+        self.close_container_menu(window, cx);
+        self.copy_to_clipboard(&path, cx);
     }
 
     /// Closes the container menu and replays its container's last launch
@@ -1071,6 +1518,8 @@ impl RootView {
             submenu: ContainerSubmenu::None,
             max_height: window.viewport_size().height * MENU_MAX_SHARE,
             presets,
+            highlight: None,
+            return_to: None,
         });
         if let Some(target) = target {
             self.send(ClientMessage::ListPresets { target });
@@ -1113,46 +1562,6 @@ impl RootView {
         menu.presets = MenuPresets::Failed(message.to_owned());
         cx.notify();
         true
-    }
-
-    /// The open menu's preset rows; a listed preset's row closes the menu
-    /// and opens the wizard for it on the menu's container.
-    fn container_preset_rows(
-        &self,
-        container: &MenuContainer,
-        cx: &mut Context<Self>,
-    ) -> Vec<AnyElement> {
-        let (Some(menu), Some(target)) = (self.container_menu.as_ref(), container.preset_target())
-        else {
-            return Vec::new();
-        };
-        preset_rows(&menu.presets)
-            .into_iter()
-            .map(|row| match row.action {
-                PresetAction::Disabled(Some(tip)) => {
-                    disabled_row(&row.selector, row.label, tip).into_any_element()
-                }
-                PresetAction::Disabled(None) => {
-                    inert_row(&row.selector, row.label).into_any_element()
-                }
-                PresetAction::Launch(index) => {
-                    let target = target.clone();
-                    menu_item(&row.selector, row.label, false)
-                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                            let entry = this
-                                .container_menu
-                                .as_ref()
-                                .and_then(|menu| menu.presets.entry(index))
-                                .cloned();
-                            this.close_container_menu(window, cx);
-                            if let Some(entry) = entry {
-                                this.open_preset_wizard(entry, target.clone(), window, cx);
-                            }
-                        }))
-                        .into_any_element()
-                }
-            })
-            .collect()
     }
 
     /// Closes the container menu and hands the keyboard back to the active
@@ -1201,110 +1610,57 @@ impl RootView {
         }
     }
 
-    /// The Explorer, VS Code and Copy path rows, a disabled one where the
-    /// container has no folder to act on; on a remote host Explorer and VS
-    /// Code are disabled, as they open the folder on this PC.
-    fn container_open_rows(
-        &self,
-        container: &MenuContainer,
-        cx: &mut Context<Self>,
-    ) -> [AnyElement; 3] {
-        let caps = self.capabilities();
-        let refusal = caps.local_files_refusal();
-        let explorer = match (self.container_folder(container), refusal) {
-            (Some(_), Some(tip)) => {
-                disabled_row(CONTAINER_EXPLORER_ROW, "Open in Explorer", tip).into_any_element()
+    /// The open container menu's rows over `frame`, a separator between
+    /// groups.
+    fn container_menu_frame(&self, frame: Stateful<Div>, cx: &mut Context<Self>) -> Stateful<Div> {
+        let highlight = self.container_menu_highlight();
+        let mut frame = frame;
+        for (index, group) in self.container_menu_rows().into_iter().enumerate() {
+            if index > 0 {
+                frame = frame.child(menu_separator());
             }
-            (Some(folder), None) => {
-                let job = OpenJob::Folder(folder);
-                menu_item(CONTAINER_EXPLORER_ROW, "Open in Explorer", false)
-                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                        this.close_container_menu(window, cx);
-                        this.dispatch_open(job.clone(), Then::Nothing, window, cx);
-                    }))
-                    .into_any_element()
+            for row in group {
+                let highlighted = highlight.as_deref() == Some(row.selector.as_str());
+                frame = frame.child(Self::container_row_element(row, highlighted, cx));
             }
-            (None, _) => disabled_row(
-                CONTAINER_EXPLORER_ROW,
-                "Open in Explorer",
-                CONTAINER_NO_FOLDER_TIP,
-            )
-            .into_any_element(),
-        };
-        let vscode = match (self.container_vscode_job(container), refusal) {
-            (Some(_), Some(tip)) => {
-                disabled_row(CONTAINER_VSCODE_ROW, "Open in VS Code", tip).into_any_element()
-            }
-            (Some(job), None) => menu_item(CONTAINER_VSCODE_ROW, "Open in VS Code", false)
-                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                    this.close_container_menu(window, cx);
-                    this.dispatch_open(job.clone(), Then::Nothing, window, cx);
-                }))
-                .into_any_element(),
-            (None, _) => disabled_row(
-                CONTAINER_VSCODE_ROW,
-                "Open in VS Code",
-                CONTAINER_NO_FOLDER_TIP,
-            )
-            .into_any_element(),
-        };
-        let copy = match self.container_copy_path(container) {
-            Some(path) => menu_item(CONTAINER_COPY_PATH_ROW, "Copy path", false)
-                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                    this.close_container_menu(window, cx);
-                    this.copy_to_clipboard(&path, cx);
-                }))
-                .into_any_element(),
-            None => disabled_row(
-                CONTAINER_COPY_PATH_ROW,
-                "Copy path",
-                CONTAINER_NO_FOLDER_TIP,
-            )
-            .into_any_element(),
-        };
-        [explorer, vscode, copy]
+        }
+        frame
     }
 
-    /// The rows `submenu` shows over `frame`.
-    fn container_menu_frame(
-        &self,
-        container: &MenuContainer,
-        submenu: ContainerSubmenu,
-        frame: Stateful<Div>,
+    /// One container menu row as drawn: a click on an enabled one runs its
+    /// action, and a disabled one says why in its tooltip. The highlighted
+    /// row is drawn as if hovered.
+    fn container_row_element(
+        row: ContainerRow,
+        highlighted: bool,
         cx: &mut Context<Self>,
-    ) -> Stateful<Div> {
-        match submenu {
-            ContainerSubmenu::None => match container {
-                MenuContainer::Tab(id) if self.tab_spawnable(id) => {
-                    let preselect = self.tab_preselect(id);
-                    let tab = id.clone();
-                    frame.child(
-                        menu_item(CONTAINER_SPAWN_ROW, "Spawn session here", false).on_click(
-                            cx.listener(move |this, _: &ClickEvent, window, cx| {
-                                this.close_container_menu(window, cx);
-                                this.open_spawn_dialog(
-                                    SpawnEntry::Locked {
-                                        lock: Lock::for_tab(tab.clone()),
-                                        preselect: preselect.clone(),
-                                    },
-                                    window,
-                                    cx,
-                                );
-                            }),
-                        ),
+    ) -> AnyElement {
+        match row.state.clone() {
+            RowState::Disabled(tip) => {
+                disabled_row(&row.selector, row.label, tip).into_any_element()
+            }
+            RowState::Inert => inert_row(&row.selector, row.label).into_any_element(),
+            RowState::Enabled => {
+                // Remove stays open to arm, so its press must not reach the
+                // frame's press-outside.
+                let remove = row.action == ContainerAction::Remove;
+                let item = menu_item(&row.selector, row.label.clone(), remove)
+                    .when(highlighted, |item| item.bg(gpui::rgb(HOVER_BG)));
+                let item = if remove {
+                    item.on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|_, _: &MouseDownEvent, _, cx| cx.stop_propagation()),
                     )
-                }
-                MenuContainer::Tab(_) => frame,
-                MenuContainer::Repo(_) | MenuContainer::Workspace(_) => {
-                    self.container_menu_rows(container, frame, cx)
-                }
-            },
-            ContainerSubmenu::LaunchLast => {
-                let mut frame = frame;
-                for line in self.container_launch_lines() {
-                    frame = frame.child(Self::container_launch_line(container, line, cx));
-                }
-                frame
+                } else {
+                    item
+                };
+                item.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                    this.activate_container_row(&row, window, cx);
+                    if remove {
+                        cx.stop_propagation();
+                    }
+                }))
+                .into_any_element()
             }
         }
     }
@@ -1313,8 +1669,6 @@ impl RootView {
     /// from reaching what lies beneath.
     pub(crate) fn container_menu_layer(&self, cx: &mut Context<Self>) -> Option<[AnyElement; 2]> {
         let menu = self.container_menu.as_ref()?;
-        let container = menu.container.clone();
-        let submenu = menu.submenu;
         let at = menu.at;
         let max_height = menu.max_height;
         let backdrop = div().absolute().top_0().left_0().size_full().occlude();
@@ -1327,104 +1681,12 @@ impl RootView {
                 cx.stop_propagation();
             }),
         );
-        let frame = self.container_menu_frame(&container, submenu, frame, cx);
+        let frame = self.container_menu_frame(frame, cx);
         let panel = anchored().position(at).snap_to_window().child(frame);
         Some([
             backdrop.into_any_element(),
             deferred(panel).with_priority(1).into_any_element(),
         ])
-    }
-
-    /// The rows a repo's or workspace's menu draws over `frame`.
-    fn container_menu_rows(
-        &self,
-        container: &MenuContainer,
-        frame: Stateful<Div>,
-        cx: &mut Context<Self>,
-    ) -> Stateful<Div> {
-        let Some(level) = container.level() else {
-            return frame;
-        };
-        let spawn_container = container.clone();
-        let spawn = menu_item(CONTAINER_SPAWN_ROW, "Spawn session", false).on_click(cx.listener(
-            move |this, _: &ClickEvent, window, cx| {
-                let Some(target) = spawn_container.target() else {
-                    return;
-                };
-                this.close_container_menu(window, cx);
-                this.open_spawn_dialog(
-                    SpawnEntry::Locked {
-                        lock: Lock::for_target(target),
-                        preselect: None,
-                    },
-                    window,
-                    cx,
-                );
-            },
-        ));
-        let appearance_container = container.clone();
-        let appearance = menu_item(CONTAINER_APPEARANCE_ROW, "Appearance…", false).on_click(
-            cx.listener(move |this, _: &ClickEvent, window, cx| {
-                let Some(level) = appearance_container.level() else {
-                    return;
-                };
-                this.close_container_menu(window, cx);
-                this.open_appearance_editor(level, window, cx);
-            }),
-        );
-        let presets = self.container_preset_rows(container, cx);
-        let [explorer, vscode, copy] = self.container_open_rows(container, cx);
-        let key = crate::repo_remove::container_key(&level);
-        let remove_container = container.clone();
-        let remove_row = menu_item(
-            CONTAINER_REMOVE_ROW,
-            crate::repo_remove::row_label(&level, self.repo_remove.armed() == Some(key.as_str())),
-            true,
-        )
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(|_, _: &MouseDownEvent, _, cx| cx.stop_propagation()),
-        )
-        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-            if let Some(level) = remove_container.level() {
-                this.click_remove_container(&level, window, cx);
-            }
-            cx.stop_propagation();
-        }));
-        let mut frame = frame.child(spawn).child(menu_separator());
-        if self.container_launch_headless(container) {
-            frame = frame
-                .child(disabled_row(
-                    CONTAINER_LAUNCH_LAST_ROW,
-                    CONTAINER_LAUNCH_LAST_LABEL,
-                    HEADLESS_UNSUPPORTED_TIP,
-                ))
-                .child(menu_separator());
-        } else if self.container_launch_config(container).is_some() {
-            frame = frame
-                .child(
-                    menu_item(
-                        CONTAINER_LAUNCH_LAST_ROW,
-                        CONTAINER_LAUNCH_LAST_LABEL,
-                        false,
-                    )
-                    .on_click(cx.listener(
-                        |this, _: &ClickEvent, window, cx| {
-                            this.show_container_submenu(ContainerSubmenu::LaunchLast, window, cx);
-                        },
-                    )),
-                )
-                .child(menu_separator());
-        }
-        frame
-            .child(appearance)
-            .children(presets)
-            .child(menu_separator())
-            .child(explorer)
-            .child(vscode)
-            .child(copy)
-            .child(menu_separator())
-            .child(remove_row)
     }
 
     fn set_menu_mode(&mut self, mode: MenuMode, window: &mut Window, cx: &mut Context<Self>) {
@@ -3026,16 +3288,6 @@ pub(crate) fn menu_item(
         .child(label)
 }
 
-/// Why a container's Explorer or VS Code row is disabled: it has no folder
-/// to open, or `caps` opens no local files; `None` when it is offered.
-fn open_row_tip(has_folder: bool, caps: Capabilities) -> Option<&'static str> {
-    if has_folder {
-        caps.local_files_refusal()
-    } else {
-        Some(CONTAINER_NO_FOLDER_TIP)
-    }
-}
-
 /// A menu row that is drawn but cannot be pressed: muted, with `tip` as its
 /// tooltip.
 pub(crate) fn disabled_row(
@@ -3373,5 +3625,246 @@ impl RootView {
         };
         view.update(cx, |pane, cx| pane.rerun_command(command, window, cx));
         self.pane_focused(pane_id, window, cx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const REFUSAL: &str = "This host opens no files on this PC";
+
+    fn repo_facts(presets: &MenuPresets) -> ContainerFacts<'_> {
+        ContainerFacts {
+            shape: ContainerShape::Level {
+                remove_label: "Remove repo".to_owned(),
+            },
+            launch: LaunchFact::Ready,
+            presets,
+            has_folder: true,
+            has_vscode_job: true,
+            has_copy_path: true,
+            local_files_refusal: None,
+        }
+    }
+
+    /// The action the row tagged `selector` must carry.
+    fn action_of(selector: &str) -> Option<ContainerAction> {
+        let action = match selector {
+            CONTAINER_SPAWN_ROW => ContainerAction::Spawn,
+            CONTAINER_LAUNCH_LAST_ROW => ContainerAction::LaunchLast,
+            CONTAINER_APPEARANCE_ROW => ContainerAction::Appearance,
+            CONTAINER_PRESET_ROW => ContainerAction::Preset(0),
+            CONTAINER_EXPLORER_ROW => ContainerAction::Explorer,
+            CONTAINER_VSCODE_ROW => ContainerAction::VsCode,
+            CONTAINER_COPY_PATH_ROW => ContainerAction::CopyPath,
+            CONTAINER_REMOVE_ROW => ContainerAction::Remove,
+            other => {
+                let index = other
+                    .strip_prefix(CONTAINER_PRESET_ROW)?
+                    .strip_prefix('-')?
+                    .parse()
+                    .ok()?;
+                ContainerAction::Preset(index)
+            }
+        };
+        Some(action)
+    }
+
+    fn row<'a>(groups: &'a [Vec<ContainerRow>], selector: &str) -> Option<&'a ContainerRow> {
+        groups.iter().flatten().find(|row| row.selector == selector)
+    }
+
+    fn state(groups: &[Vec<ContainerRow>], selector: &str) -> Option<RowState> {
+        row(groups, selector).map(|row| row.state.clone())
+    }
+
+    #[test]
+    fn every_disabled_row_has_a_tip_and_every_row_its_action() {
+        let presets = [
+            MenuPresets::Loading,
+            MenuPresets::Failed("presets.json: bad".to_owned()),
+            MenuPresets::Listed(Vec::new()),
+        ];
+        let launches = [LaunchFact::None, LaunchFact::Headless, LaunchFact::Ready];
+        let mut rows_seen = 0;
+        for presets in &presets {
+            for launch in launches {
+                for mask in 0..16_u8 {
+                    let facts = ContainerFacts {
+                        launch,
+                        has_folder: mask & 1 != 0,
+                        has_vscode_job: mask & 2 != 0,
+                        has_copy_path: mask & 4 != 0,
+                        local_files_refusal: (mask & 8 != 0).then_some(REFUSAL),
+                        ..repo_facts(presets)
+                    };
+                    for row in container_row_groups(&facts).iter().flatten() {
+                        rows_seen += 1;
+                        if let RowState::Disabled(tip) = &row.state {
+                            assert!(!tip.is_empty(), "{} has an empty tip", row.selector);
+                        }
+                        assert_eq!(
+                            Some(row.action.clone()),
+                            action_of(&row.selector),
+                            "{} fires its own action",
+                            row.selector
+                        );
+                    }
+                }
+            }
+        }
+        assert!(rows_seen > 0, "the builder made rows");
+    }
+
+    #[test]
+    fn a_disabled_row_carries_its_tip_and_an_enabled_row_none() {
+        let loading = MenuPresets::Loading;
+        let workspace = ContainerFacts {
+            has_folder: false,
+            has_copy_path: false,
+            launch: LaunchFact::Headless,
+            ..repo_facts(&loading)
+        };
+        let groups = container_row_groups(&workspace);
+        let no_folder = Some(RowState::Disabled(CONTAINER_NO_FOLDER_TIP.to_owned()));
+        assert_eq!(state(&groups, CONTAINER_EXPLORER_ROW), no_folder);
+        assert_eq!(state(&groups, CONTAINER_COPY_PATH_ROW), no_folder);
+        assert_eq!(
+            state(&groups, CONTAINER_VSCODE_ROW),
+            Some(RowState::Enabled)
+        );
+        assert_eq!(
+            state(&groups, CONTAINER_LAUNCH_LAST_ROW),
+            Some(RowState::Disabled(HEADLESS_UNSUPPORTED_TIP.to_owned()))
+        );
+        assert_eq!(state(&groups, CONTAINER_PRESET_ROW), Some(RowState::Inert));
+
+        let remote = ContainerFacts {
+            local_files_refusal: Some(REFUSAL),
+            ..repo_facts(&loading)
+        };
+        let groups = container_row_groups(&remote);
+        let refused = Some(RowState::Disabled(REFUSAL.to_owned()));
+        assert_eq!(state(&groups, CONTAINER_EXPLORER_ROW), refused);
+        assert_eq!(state(&groups, CONTAINER_VSCODE_ROW), refused);
+        assert_eq!(
+            state(&groups, CONTAINER_COPY_PATH_ROW),
+            Some(RowState::Enabled),
+            "Copy path needs no local opener"
+        );
+    }
+
+    #[test]
+    fn a_tab_container_offers_only_spawn_and_only_on_a_grid_tab() {
+        let presets = MenuPresets::Listed(Vec::new());
+        let grid = ContainerFacts {
+            shape: ContainerShape::Tab { spawnable: true },
+            ..repo_facts(&presets)
+        };
+        assert_eq!(
+            container_row_groups(&grid),
+            [[ContainerRow::new(
+                CONTAINER_SPAWN_ROW,
+                "Spawn session here",
+                RowState::Enabled,
+                ContainerAction::Spawn,
+            )]]
+        );
+        let other = ContainerFacts {
+            shape: ContainerShape::Tab { spawnable: false },
+            ..repo_facts(&presets)
+        };
+        assert_eq!(
+            container_row_groups(&other),
+            Vec::<Vec<ContainerRow>>::new()
+        );
+    }
+
+    /// Rows `a`, a disabled `b`, an inert `c`, `d`, then a disabled `e`.
+    fn nav_rows() -> Vec<ContainerRow> {
+        let row = |selector: &str, state| {
+            ContainerRow::new(selector, selector, state, ContainerAction::Spawn)
+        };
+        vec![
+            row("a", RowState::Enabled),
+            row("b", RowState::Disabled("no".to_owned())),
+            row("c", RowState::Inert),
+            ContainerRow::new("d", "d", RowState::Enabled, ContainerAction::CopyPath),
+            row("e", RowState::Disabled("no".to_owned())),
+        ]
+    }
+
+    #[test]
+    fn down_and_up_skip_disabled_rows_and_wrap_at_the_ends() {
+        let rows = nav_rows();
+        let step = |current, step| step_highlight(&rows, current, step);
+        assert_eq!(step(Some("a"), MenuStep::Down).as_deref(), Some("d"));
+        assert_eq!(step(Some("d"), MenuStep::Down).as_deref(), Some("a"));
+        assert_eq!(step(Some("a"), MenuStep::Up).as_deref(), Some("d"));
+        assert_eq!(step(Some("d"), MenuStep::Up).as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn no_highlight_starts_at_the_first_or_last_enabled_row() {
+        let rows = nav_rows();
+        assert_eq!(
+            step_highlight(&rows, None, MenuStep::Down).as_deref(),
+            Some("a")
+        );
+        assert_eq!(
+            step_highlight(&rows, None, MenuStep::Up).as_deref(),
+            Some("d")
+        );
+        assert_eq!(
+            step_highlight(&rows, Some("b"), MenuStep::Down).as_deref(),
+            Some("a"),
+            "a highlight on a row no longer enabled starts again"
+        );
+    }
+
+    #[test]
+    fn home_and_end_jump_to_the_first_and_last_enabled_rows() {
+        let rows = nav_rows();
+        assert_eq!(
+            step_highlight(&rows, Some("d"), MenuStep::Home).as_deref(),
+            Some("a")
+        );
+        assert_eq!(
+            step_highlight(&rows, Some("a"), MenuStep::End).as_deref(),
+            Some("d"),
+            "the disabled last row is skipped"
+        );
+    }
+
+    #[test]
+    fn a_menu_with_no_enabled_row_has_no_highlight() {
+        let rows: Vec<ContainerRow> = nav_rows()
+            .into_iter()
+            .filter(|row| !row.enabled())
+            .collect();
+        assert_eq!(step_highlight(&rows, None, MenuStep::Down), None);
+        assert_eq!(step_highlight(&[], Some("a"), MenuStep::End), None);
+    }
+
+    #[test]
+    fn shift_f10_and_the_menu_key_open_a_menu_and_plain_f10_does_not() {
+        let opens = |text: &str| Keystroke::parse(text).is_ok_and(|ks| is_menu_key(&ks));
+        assert!(opens("shift-f10"));
+        assert!(opens("menu"));
+        assert!(!opens("f10"));
+        assert!(!opens("ctrl-shift-f10"));
+        assert!(!opens("enter"));
+    }
+
+    #[test]
+    fn activating_the_highlight_returns_its_row_action_and_never_a_disabled_one() {
+        let rows = nav_rows();
+        assert_eq!(
+            highlighted_row(&rows, Some("d")).map(|row| row.action.clone()),
+            Some(ContainerAction::CopyPath)
+        );
+        assert_eq!(highlighted_row(&rows, Some("b")), None);
+        assert_eq!(highlighted_row(&rows, None), None);
     }
 }

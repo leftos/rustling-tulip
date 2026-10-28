@@ -756,6 +756,9 @@ pub struct RootView {
     sidebar_focus: FocusHandle,
     /// The container row the sidebar's keyboard acts on, when any.
     row_focus: Option<String>,
+    /// Where the focused container row was last painted, by its key: a
+    /// key that opens its menu anchors it there.
+    focused_row_bounds: Option<(String, Bounds<Pixels>)>,
     /// The container row the pointer is over, while it is over one.
     hovered_container: Option<String>,
     /// The rail button whose tooltip a press put away.
@@ -1251,6 +1254,7 @@ impl RootView {
             root_focus: cx.focus_handle(),
             sidebar_focus: cx.focus_handle(),
             row_focus: None,
+            focused_row_bounds: None,
             hovered_container: None,
             rail_tip: activity_bar::RailTipSuppression::default(),
             window_hover_override: None,
@@ -2530,6 +2534,7 @@ impl RootView {
         self.close_more_menu(window, cx);
         self.close_sc_picker(window, cx);
         self.close_sc_file_menu(window, cx);
+        self.close_container_menu(window, cx);
         self.sidebar.toggle_sidebar();
         // The fold always gives the panes a new width.
         self.mark_active_panes_resized(cx);
@@ -4096,7 +4101,7 @@ impl RootView {
             }
             return;
         }
-        if self.on_container_row_key(ks, window, cx) {
+        if self.on_container_menu_key(ks, window, cx) || self.on_container_row_key(ks, window, cx) {
             cx.stop_propagation();
             return;
         }
@@ -4123,8 +4128,9 @@ impl RootView {
     }
 
     /// The keys a focused container row takes: Up and Down move the row
-    /// focus, Enter and Space fold the row, and Escape hands the keyboard
-    /// back to the terminal. `false` when the sidebar does not hold the
+    /// focus, Enter and Space fold the row, Shift+F10 and the Menu key open
+    /// its context menu, and Escape hands the keyboard back to the
+    /// terminal. `false` when the sidebar does not hold the
     /// keyboard or no row is focused, so the keys reach the terminal.
     fn on_container_row_key(
         &mut self,
@@ -4156,6 +4162,10 @@ impl RootView {
             "enter" | "space" => {
                 self.toggle_container(&key);
                 cx.notify();
+                true
+            }
+            "f10" | "menu" if crate::session_menu::is_menu_key(ks) => {
+                self.open_container_menu_by_key(&key, window, cx);
                 true
             }
             "escape" => {

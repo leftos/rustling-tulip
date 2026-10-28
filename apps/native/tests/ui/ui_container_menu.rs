@@ -60,6 +60,150 @@ fn open(h: &mut Harness<'_>, selector: &str) {
     );
 }
 
+fn highlight(h: &mut Harness<'_>) -> Option<String> {
+    h.root(|root, _| root.container_menu_highlight())
+}
+
+#[gpui::test]
+fn shift_f10_opens_the_container_menu_and_enter_runs_the_highlighted_row(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_repos());
+    h.set_clipboard("");
+    h.click_on("container-repo:r1");
+    h.keys("shift-f10");
+
+    assert!(
+        h.root(|root, _| root.container_menu_open()),
+        "Shift+F10 on the focused row opens its menu"
+    );
+    let row = h.bounds("container-repo:r1");
+    let menu = h.bounds("container-menu");
+    assert!(
+        (menu.origin.x - row.origin.x).abs() < px(1.0)
+            && (menu.origin.y - (row.origin.y + row.size.height)).abs() < px(1.0),
+        "the menu opens at the row's bottom-left; row {row:?}, menu {menu:?}"
+    );
+    assert_eq!(
+        highlight(&mut h).as_deref(),
+        Some("container-menu-spawn"),
+        "the first enabled row is highlighted"
+    );
+
+    let steps = [
+        ("down", "container-menu-appearance"),
+        ("down", "container-menu-explorer"),
+        ("up", "container-menu-appearance"),
+        ("up", "container-menu-spawn"),
+        ("up", "container-menu-remove"),
+        ("down", "container-menu-spawn"),
+        ("end", "container-menu-remove"),
+        ("home", "container-menu-spawn"),
+        ("tab", "container-menu-spawn"),
+    ];
+    for (key, expected) in steps {
+        h.keys(key);
+        assert_eq!(
+            highlight(&mut h).as_deref(),
+            Some(expected),
+            "after {key}: the loading preset row is skipped and the ends wrap"
+        );
+    }
+
+    h.keys("down down down down");
+    assert_eq!(
+        highlight(&mut h).as_deref(),
+        Some("container-menu-copy-path")
+    );
+    h.keys("enter");
+    assert_eq!(h.clipboard().as_deref(), Some("D:/src/r1"));
+    assert!(
+        !h.root(|root, _| root.container_menu_open()),
+        "the row's action closed the menu"
+    );
+}
+
+#[gpui::test]
+fn escape_closes_the_keyboard_opened_menu_and_refocuses_the_row(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_repos());
+    h.click_on("container-repo:r1");
+    h.keys("menu");
+    assert!(
+        h.root(|root, _| root.container_menu_open()),
+        "the Menu key opens the focused row's menu"
+    );
+
+    h.keys("escape");
+    assert!(!h.root(|root, _| root.container_menu_open()));
+    assert_eq!(
+        h.root(|root, _| root.sidebar_row_focus().map(str::to_owned)),
+        Some("repo:r1".to_owned()),
+        "the row keeps the focus"
+    );
+    h.keys("down");
+    assert_eq!(
+        h.root(|root, _| root.sidebar_row_focus().map(str::to_owned)),
+        Some("repo:r2".to_owned()),
+        "the sidebar holds the keyboard again"
+    );
+}
+
+/// Ctrl+B with the menu open folds the sidebar and closes the menu, so the
+/// next Enter is the terminal's, not the highlighted row's.
+fn assert_ctrl_b_closes_the_menu_and_enter_reaches_the_pane(h: &mut Harness<'_>) {
+    h.sent_input("s1");
+    h.keys("ctrl-b");
+    assert!(
+        !h.root(|root, _| root.container_menu_open()),
+        "the fold closes the menu"
+    );
+    h.keys("enter");
+    assert!(
+        !h.root(|root, _| root.spawn_dialog_open()),
+        "Enter runs no menu row"
+    );
+    assert_eq!(h.sent_input("s1"), b"\r", "the terminal takes Enter");
+}
+
+#[gpui::test]
+fn ctrl_b_with_the_container_menu_open_closes_it_and_keys_reach_the_terminal(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_repos());
+    h.answer_scrollback("s1", b"");
+    h.click_on("container-repo:r1");
+    h.keys("shift-f10");
+    assert!(h.root(|root, _| root.container_menu_open()));
+    assert_ctrl_b_closes_the_menu_and_enter_reaches_the_pane(&mut h);
+}
+
+#[gpui::test]
+fn ctrl_b_with_a_right_clicked_container_menu_closes_it_and_keys_reach_the_terminal(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_repos());
+    h.answer_scrollback("s1", b"");
+    open(&mut h, "container-repo:r1");
+    h.keys("down");
+    assert_ctrl_b_closes_the_menu_and_enter_reaches_the_pane(&mut h);
+}
+
+#[gpui::test]
+fn a_right_click_opens_the_menu_with_no_highlight(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_repos());
+    open(&mut h, "container-repo:r1");
+    assert_eq!(highlight(&mut h), None);
+    h.keys("down");
+    assert_eq!(
+        highlight(&mut h).as_deref(),
+        Some("container-menu-spawn"),
+        "Down highlights the first enabled row"
+    );
+}
+
 #[gpui::test]
 fn container_menu_lists_spawn_preset_explorer_vscode_copy_and_remove(cx: &mut TestAppContext) {
     let dir = TestDir::new();

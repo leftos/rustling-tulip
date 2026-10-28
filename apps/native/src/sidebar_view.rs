@@ -1711,15 +1711,7 @@ fn container_row(
     let click_key = key.clone();
     let click_id = container.id.clone();
     let name = format!("container-{}", container.key);
-    let container_menu = match container.kind {
-        ContainerKind::Repo => Some(MenuContainer::Repo(container.id.clone())),
-        ContainerKind::Workspace => Some(MenuContainer::Workspace(container.id.clone())),
-        ContainerKind::Tab => Some(MenuContainer::Tab(container.id.clone())),
-        ContainerKind::Shell
-        | ContainerKind::Dir
-        | ContainerKind::Detached
-        | ContainerKind::Unbound => None,
-    };
+    let container_menu = MenuContainer::of(container);
     let launchable = matches!(
         container.kind,
         ContainerKind::Repo | ContainerKind::Workspace
@@ -1739,7 +1731,10 @@ fn container_row(
         .pr(px(8.0))
         .cursor_pointer()
         .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
-        .when(focused, |row| row.child(container_focus_ring(container)));
+        .when(focused, |row| {
+            row.child(container_focus_ring(container))
+                .child(focused_row_marker(key.clone(), cx))
+        });
     let row = if summary.is_some() {
         row.items_start().pt(px(5.0))
     } else {
@@ -1787,6 +1782,24 @@ fn container_row(
             this.toggle_container(&click_key);
             cx.notify();
         }))
+}
+
+/// Laid over the focused container row `key`: where it lands is where a key
+/// that opens the row's menu anchors it.
+fn focused_row_marker(key: String, cx: &mut Context<RootView>) -> impl IntoElement {
+    let root = cx.weak_entity();
+    canvas(
+        move |bounds, _, cx| {
+            // Fails only when the view is gone, and the row with it.
+            root.update(cx, |this, _| this.note_focused_row_bounds(&key, bounds))
+                .ok();
+        },
+        |_, (), _, _| {},
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
 }
 
 /// A repo or workspace row's launch-last ▶, at the row's right. It acts on
