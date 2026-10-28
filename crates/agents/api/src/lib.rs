@@ -14,6 +14,7 @@
 //! [`workspace_prelude`] is the workspace note a plugin hands its CLI for a
 //! multi-member session.
 
+pub mod activity;
 #[cfg(feature = "test-support")]
 pub mod conformance;
 pub mod hook_vocabulary;
@@ -21,6 +22,10 @@ pub mod screen_rules;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_agent;
 
+pub use activity::{
+    ActivityReader, ActivitySnapshot, ActivitySource, BackgroundTask, ContextReading,
+    MINUTE_COLUMNS, OpenCall,
+};
 pub use screen_rules::{
     LineMatcher, ReadySignal, ScreenRegion, ScreenRule, ScreenRules, ScreenVerdict,
 };
@@ -607,6 +612,13 @@ pub trait Agent: Send + Sync + 'static {
         &EMPTY_SCREEN_RULES
     }
 
+    /// A reader of the transcript `source` names, which the daemon keeps and
+    /// asks for the session's activity on each Dashboard tick. `None` for an
+    /// agent with no transcript to read.
+    fn activity_reader(&self, _source: &ActivitySource) -> Option<Box<dyn ActivityReader>> {
+        None
+    }
+
     /// How much output the daemon must see and how long it must then stay
     /// quiet before this agent's TUI counts as up, so a prompt can be typed
     /// into it.
@@ -754,6 +766,9 @@ pub trait AgentPlugin: Send + Sync {
 
     /// See [`Agent::screen_rules`].
     fn screen_rules(&self) -> &ScreenRules;
+
+    /// See [`Agent::activity_reader`].
+    fn activity_reader(&self, source: &ActivitySource) -> Option<Box<dyn ActivityReader>>;
 
     /// See [`Agent::ready_signal`].
     fn ready_signal(&self) -> ReadySignal;
@@ -928,6 +943,10 @@ impl<A: Agent> AgentPlugin for A {
 
     fn screen_rules(&self) -> &ScreenRules {
         Agent::screen_rules(self)
+    }
+
+    fn activity_reader(&self, source: &ActivitySource) -> Option<Box<dyn ActivityReader>> {
+        Agent::activity_reader(self, source)
     }
 
     fn ready_signal(&self) -> ReadySignal {
@@ -1682,5 +1701,18 @@ mod tests {
             )
         );
         assert_eq!(workspace_prelude(&two[..1], &files), None);
+    }
+
+    #[test]
+    fn activity_reader_defaults_to_none() {
+        let plugin: &dyn AgentPlugin = &Bare;
+        let source = ActivitySource {
+            folder: PathBuf::from(r"D:\proj"),
+            conversation_id: "abc".to_string(),
+            rows: ResolvedRows::default(),
+            process_started_at: None,
+        };
+
+        assert!(plugin.activity_reader(&source).is_none());
     }
 }

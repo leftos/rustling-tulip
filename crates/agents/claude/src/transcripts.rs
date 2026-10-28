@@ -153,8 +153,21 @@ fn known_conversation(claude_home: &Path, cwd: &str, id: &str) -> Option<FoundCo
     })
 }
 
-fn project_dir(claude_home: &Path, cwd: &str) -> PathBuf {
+/// The folder Claude Code files `cwd`'s transcripts in under `claude_home`.
+pub(crate) fn project_dir(claude_home: &Path, cwd: &str) -> PathBuf {
     claude_home.join("projects").join(encode_project_dir(cwd))
+}
+
+/// The transcript of conversation `id` for a session started in `folder`,
+/// under the Claude home its rows `rows` give it. An `id` that is not a plain
+/// file-name stem (a path separator, `..`) has none, and so does a session
+/// with no Claude home.
+pub(crate) fn transcript_path(folder: &Path, id: &str, rows: &ResolvedRows) -> Option<PathBuf> {
+    if !is_plain_id(id) {
+        return None;
+    }
+    let home = claude_home(rows)?;
+    Some(project_dir(&home, &folder.to_string_lossy()).join(format!("{id}.jsonl")))
 }
 
 fn candidate_from_entry(
@@ -270,11 +283,11 @@ const COMMAND_NOISE_PREFIXES: [&str; 5] = [
 
 /// A transcript line Claude Code marks `"isMeta": true`: context it injected,
 /// not something the user typed.
-fn is_meta(value: &Value) -> bool {
+pub(crate) fn is_meta(value: &Value) -> bool {
     value.get("isMeta").and_then(Value::as_bool) == Some(true)
 }
 
-fn is_command_noise(text: &str) -> bool {
+pub(crate) fn is_command_noise(text: &str) -> bool {
     let text = text.trim_start();
     COMMAND_NOISE_PREFIXES
         .iter()
@@ -319,8 +332,8 @@ fn tidy_title(raw: &str) -> Option<String> {
 )]
 mod tests {
     use super::{
-        candidates, claude_home_from, encode_project_dir, find_in, known_conversation,
-        transcript_exists,
+        candidates, claude_home_from, encode_project_dir, find_in, known_conversation, project_dir,
+        transcript_exists, transcript_path,
     };
     use agent_api::{ConversationQuery, FoundConversation, ResolvedRows};
     use chrono::{DateTime, Duration, TimeZone, Utc};
@@ -688,6 +701,33 @@ mod tests {
         assert!(!transcript_exists(scratch.home(), CWD, "xyz"));
         assert!(!transcript_exists(scratch.home(), CWD, r"..\D--other\xyz"));
         assert!(!transcript_exists(scratch.home(), CWD, ""));
+    }
+
+    #[test]
+    fn project_dir_is_the_encoded_cwd_under_projects() {
+        assert_eq!(
+            project_dir(Path::new("/h"), CWD),
+            Path::new("/h").join("projects").join("D--proj")
+        );
+    }
+
+    #[test]
+    fn transcript_path_uses_the_session_config_dir_row() {
+        let rows = ResolvedRows::new(vec![("CLAUDE_CONFIG_DIR".to_string(), "/cfg".to_string())]);
+
+        assert_eq!(
+            transcript_path(Path::new(CWD), "abc-1", &rows),
+            Some(project_dir(Path::new("/cfg"), CWD).join("abc-1.jsonl"))
+        );
+    }
+
+    #[test]
+    fn transcript_path_rejects_ids_that_are_not_plain() {
+        let rows = ResolvedRows::new(vec![("CLAUDE_CONFIG_DIR".to_string(), "/cfg".to_string())]);
+
+        for id in [r"..\x", "../x", "a/b", ""] {
+            assert_eq!(transcript_path(Path::new(CWD), id, &rows), None, "{id:?}");
+        }
     }
 
     #[test]

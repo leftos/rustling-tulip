@@ -7,10 +7,13 @@
 //! stream-json parser that turns a headless session's output into
 //! [`HeadlessEvent`]s.
 
+mod activity;
 mod hooks;
 mod import;
 pub mod options;
+mod pricing;
 mod providers;
+mod records;
 mod rules;
 mod transcripts;
 
@@ -18,10 +21,10 @@ pub use providers::{display_name, provider_for_model};
 pub use transcripts::encode_project_dir;
 
 use agent_api::{
-    Agent, AgentError, ConversationPlan, ConversationQuery, EnvPlan, FoundConversation,
-    HeadlessEvent, HookPlan, HookReport, HookShim, ImportedRun, KeyLookup, ReadySignal,
-    RecoveredRun, Refusal, ResolvedRows, ScreenRules, SpawnCheck, SpawnContext, TracerRun,
-    workspace_prelude,
+    ActivityReader, ActivitySource, Agent, AgentError, ConversationPlan, ConversationQuery,
+    EnvPlan, FoundConversation, HeadlessEvent, HookPlan, HookReport, HookShim, ImportedRun,
+    KeyLookup, ReadySignal, RecoveredRun, Refusal, ResolvedRows, ScreenRules, SpawnCheck,
+    SpawnContext, TracerRun, workspace_prelude,
 };
 use options::{ClaudeProvider, PermissionMode};
 use protocol::{
@@ -484,6 +487,11 @@ impl Agent for ClaudePlugin {
     /// with.
     fn screen_rules(&self) -> &ScreenRules {
         rules::screen_rules()
+    }
+
+    /// The incremental reader of the session's main transcript.
+    fn activity_reader(&self, source: &ActivitySource) -> Option<Box<dyn ActivityReader>> {
+        activity::reader(source)
     }
 
     /// The banner tuning the daemon's startup heuristic was measured against.
