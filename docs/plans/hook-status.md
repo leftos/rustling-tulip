@@ -6,7 +6,7 @@ Take a session's working / awaiting input / idle status from the agent's own hoo
 
 Claude Code is hooked through a settings file, and an opted-in Codex session through the `-c` tables its spawn passes. Index line: [MAIN.md](./MAIN.md), Wave 2. Background and VelaTerm's prior art were in [borrowed-ideas.md](./borrowed-ideas.md) until that entry was removed on delivery.
 
-Items that build on this one: "Spoken alerts when an agent waits" ([spoken-alerts.md](./spoken-alerts.md)) needs the waiting signal plus the pending `AskUserQuestion` questions and permission prompts on the daemon; the "Needs You" view ([borrowed-ideas.md](./borrowed-ideas.md)) groups sessions by this status; the mobile app's MA6 ([mobile-app.md](./mobile-app.md)) shows live status and answers prompts.
+Items that build on this one: the Dashboard ([dashboard.md](./dashboard.md)) needs the waiting signal plus the pending `AskUserQuestion` questions and permission prompts on the daemon; the "Needs You" view ([borrowed-ideas.md](./borrowed-ideas.md)) groups sessions by this status; the mobile app's MA6 ([mobile-app.md](./mobile-app.md)) shows live status and answers prompts.
 
 ## Problem
 

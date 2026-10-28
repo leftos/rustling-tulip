@@ -1,16 +1,16 @@
 # The "Needs You" view
 
-Design for the "Needs You" item in [MAIN.md](./MAIN.md) (Wave 5). Origin and the user's placement ruling: [borrowed-ideas.md](./borrowed-ideas.md). Status source: [hook-status.md](./hook-status.md) (Wave 2). Summaries: [spoken-alerts.md](./spoken-alerts.md) (Wave 9, including the Dashboard it sits beside).
+Design for the "Needs You" item in [MAIN.md](./MAIN.md) (Wave 5). Origin and the user's placement ruling: [borrowed-ideas.md](./borrowed-ideas.md). Status source: [hook-status.md](./hook-status.md) (Wave 2). Summaries: [dashboard.md](./dashboard.md) (Wave 9, the summarizer and the Dashboard it sits beside).
 
 ## Problem
 
-With many sessions open, the only signs that one is waiting are the leaf's amber highlight and "!" in the Sessions panel (spread across containers, hidden inside folded ones) and a P4.3 toast that disappears. The Dashboard (DB.2) will answer "what is everything doing" in a full tab; nothing answers "who is waiting on me, and for how long" in one glance that stays beside the terminals.
+With many sessions open, the only signs that one is waiting are the leaf's amber highlight and "!" in the Sessions panel (spread across containers, hidden inside folded ones) and a P4.3 toast that disappears. The Dashboard (DB.12) will answer "what is everything doing" in a full tab; nothing answers "who is waiting on me, and for how long" in one glance that stays beside the terminals.
 
 ## Rulings recap
 
 - A view on the native client's activity rail, beside Sessions and Source control, not a sidebar filter (borrowed-ideas.md).
-- Kept beside the Dashboard: the Dashboard groups needs-you sessions among all others, and this view stays as a compact always-visible list (spoken-alerts.md, Q5).
-- Option buttons that answer a question belong to needs-you *cards*, driven by the hook's structured question data, with "Go to pane" as the fallback (spoken-alerts.md, Q6). The compact list carries none: a click goes to the pane (Q3).
+- Kept beside the Dashboard: the Dashboard groups needs-you sessions among all others, and this view stays as a compact always-visible list (dashboard.md, Q5).
+- Option buttons that answer a question belong to the Dashboard's waiting rows, driven by the hook's structured question data, with "Go to pane" as the fallback (dashboard.md, Q6). The compact list carries none: a click goes to the pane (Q3).
 
 ## Design
 
@@ -65,7 +65,7 @@ The label is minute-grained past a minute and second-grained below it. A 1 s rep
 
 ### What it needs from the daemon
 
-One additive field, useful without Waves 6 and 7 and needed by the Dashboard's "Needs you sorted by longest waiting" (DB.2) as well:
+One additive field, useful without Waves 6 and 7 and needed by the Dashboard's "Needs you sorted by longest waiting" (DB.11) as well:
 
 - `SessionSnapshot.status_since: Option<DateTime<Utc>>`, `#[serde(default)]`: when `status` last changed. `SessionRegistry::update_from` (`crates/daemon/src/session.rs`) stamps it whenever the closure changes `status`, and record creation sets it.
 

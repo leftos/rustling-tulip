@@ -26,7 +26,7 @@ TN.1 to TN.3 replaced them on the desktop: `notify.rs` raises `Needs you` and `F
 - RT-74 (steadier screen-based status): the per-agent detection the notifications rely on until hooks, and for agents without hooks.
 - RT-105 (MA7, phone push) and RT-143 (the iPhone PWA re-plan): carry the mobile half and its suppression setting.
 - RT-87 and RT-90 (the Wave 5 attention feed, streams and per-stream sounds): the later generalisation; their Needs you and Done streams start from these two kinds.
-- `docs/plans/spoken-alerts.md:82` already reads the shipped tab: one `Needs you` toggle plus the `Skip notifications when` row.
+- `docs/plans/dashboard.md` ("Toasts") reads the shipped tab: the `Needs you` and `Finished` toggles plus the `Skip notifications when` row.
 
 ## Decisions (orchestrator, from the code)
 
@@ -42,6 +42,6 @@ TN.1 to TN.3 replaced them on the desktop: `notify.rs` raises `Needs you` and `F
 - [x] **TN.1 Needs you only.** Remove the stopped and errored toasts, their toggles, `notify.rs`'s own-stop bookkeeping and their specs; retitle the awaiting-input toast `Needs you`; one Needs you toggle remains in Settings → Notifications.
 - [x] **TN.2 Desktop suppression setting.** The window-focused flag and the active tab's panes decide; the setting's three choices, default "skip when focused and the pane is on screen".
 - [x] **TN.3 Finished**, after RT-84: the live Working → Idle transition with no background work, its toggle, and the same suppression.
-- [x] **TN.4 Docs.** `docs/native-client.md` Notifications, `docs/architecture.md` (the "attention raises an OS notification" line), `docs/plans/spoken-alerts.md` (already reads the shipped tab; refresh it when Finished lands), and the parity line in `docs/plans/native-client-parity.md`.
+- [x] **TN.4 Docs.** `docs/native-client.md` Notifications, `docs/architecture.md` (the "attention raises an OS notification" line), `docs/plans/dashboard.md` (reads the shipped tab), and the parity line in `docs/plans/native-client-parity.md`.
 
 The code map with file lines and named tests: `.tmp/map-rt182.md` at the time of planning; re-explore before the first brief if the code has moved.

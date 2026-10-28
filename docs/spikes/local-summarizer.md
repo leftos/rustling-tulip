@@ -1,6 +1,6 @@
 # Spike: a local model as the summarizer, smoked against Haiku
 
-2026-10-27. For RT-27. Question: can a local model served over an OpenAI-compatible endpoint replace the cloud provider for the [summarizer service](../plans/spoken-alerts.md) (the spoken alerts' kind and one-line texts, and the Dashboard's `working` refreshes)? The owner set the reference to Claude Haiku at its lowest effort with no thinking, run as a smoke test. A DeepSeek Flash pass (the design's default provider) over a larger sample ran before that ruling and is kept as a second reference.
+2026-10-27. For RT-27. Question: can a local model served over an OpenAI-compatible endpoint replace the cloud provider for the [summarizer service](../plans/dashboard.md) (the spoken alerts' kind and one-line texts, and the Dashboard's `working` refreshes)? The owner set the reference to Claude Haiku at its lowest effort with no thinking, run as a smoke test. A DeepSeek Flash pass (the design's default provider) over a larger sample ran before that ruling and is kept as a second reference.
 
 Files in [local-summarizer/](./local-summarizer/): `prompt.md`, `extract.py` (collects and redacts the samples), `bench.py` (runs a sample folder through Haiku, DeepSeek or a local llama-server, which it starts and stops itself), `score.py` (the tables below). Each script's docstring has its usage; all run as `uv run --no-project python -I <script>`. The samples are transcript text and stay outside the repo.
 
