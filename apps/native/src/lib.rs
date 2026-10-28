@@ -23,6 +23,7 @@ pub mod connection_picker;
 mod connection_picker_view;
 mod copied;
 mod copy_text;
+mod dashboard;
 mod dashboard_tab;
 mod device_pairing;
 mod device_pairing_view;
@@ -222,6 +223,7 @@ pub use crate::changes_view::{
     DiscardConfirmView, ScAction, ScBucketRow, ScButton, ScFileRow, ScFolderRow, ScTreeRow,
 };
 pub use crate::connection::Connection;
+pub use crate::dashboard::DashboardEntry;
 pub use crate::diff_tab::{
     BINARY_TEXT, DiffTabBody, DiffTabHeader, EMPTY_TEXT, FINAL_NEWLINE_NOTE, LINE_ENDINGS_NOTE,
     LOADING_TEXT as DIFF_LOADING_TEXT, OPEN_FAILED_TITLE as DIFF_OPEN_FAILED_TITLE, WHITESPACE_TIP,

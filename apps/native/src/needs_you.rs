@@ -6,7 +6,9 @@
 use crate::appearance;
 use crate::sidebar::{Leaf, LeafState, SidebarModel, session_title};
 use chrono::{DateTime, Utc};
-use protocol::{AgentDescriptor, PendingInput, PendingQuestion, SessionSnapshot, SessionStatus};
+use protocol::{
+    AgentDescriptor, AlertKind, PendingInput, PendingQuestion, SessionSnapshot, SessionStatus,
+};
 
 /// Why a session is listed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,6 +79,19 @@ pub(crate) fn rows(model: &SidebarModel) -> Vec<NeedsYouRow> {
 /// top sort lifts a container by this same test.
 pub(crate) fn is_listed(leaf: &Leaf) -> bool {
     reason_of(leaf).is_some()
+}
+
+/// The Answer rule: the session is idle and its summary says it waits for the
+/// user's answer, made at or after the stop it is about. A session with no
+/// status stamp never matches, since its summary cannot be tied to this stop.
+pub(crate) fn is_answer(session: &SessionSnapshot) -> bool {
+    let Some(since) = session.status_since else {
+        return false;
+    };
+    session.status == SessionStatus::Idle
+        && session.summary.as_ref().is_some_and(|summary| {
+            summary.kind == Some(AlertKind::NeedsAnswer) && summary.updated_at >= since
+        })
 }
 
 /// Why the session of `leaf` is listed, or `None` when it is not. A parked or

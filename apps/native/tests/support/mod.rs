@@ -459,6 +459,25 @@ impl SessionBuilder {
         self.set("status_since", json!(at))
     }
 
+    /// With a model-written summary of `kind` (`needs_answer`,
+    /// `working_update`, `done_waiting`) made at `updated_at`.
+    pub fn summary(self, kind: &str, updated_at: DateTime<Utc>) -> Self {
+        self.set(
+            "summary",
+            json!({ "kind": kind, "headline": "", "lines": [], "updated_at": updated_at, "source": "model" }),
+        )
+    }
+
+    /// Idle with its turn's background work still running.
+    pub fn background(self) -> Self {
+        self.set("background", json!(true))
+    }
+
+    /// Marked "Don't count as busy".
+    pub fn busy_excluded(self) -> Self {
+        self.set("busy_excluded", json!(true))
+    }
+
     /// What its agent's hooks last reported it is waiting for.
     pub fn pending_input(self, value: Value) -> Self {
         self.set("pending_input", value)

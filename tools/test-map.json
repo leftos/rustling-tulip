@@ -230,6 +230,12 @@
     },
     {
       "paths": [
+        "apps/native/src/dashboard.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & test(/^dashboard::/)) | (binary_id(rustling-tulip-native::ui) & test(/^ui_dashboard::/))"
+    },
+    {
+      "paths": [
         "apps/native/src/device_pairing.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native) & test(/^device_pairing::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_device_pairing)::/))"
@@ -436,7 +442,7 @@
       "paths": [
         "apps/native/src/needs_you.rs"
       ],
-      "filter": "(binary_id(rustling-tulip-native) & test(/^needs_you::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_needs_you)::/))"
+      "filter": "(binary_id(rustling-tulip-native) & test(/^(needs_you|dashboard)::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_needs_you|ui_dashboard)::/))"
     },
     {
       "paths": [
@@ -905,6 +911,12 @@
     },
     {
       "paths": [
+        "apps/native/tests/ui/ui_dashboard.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & test(/^dashboard::/)) | (binary_id(rustling-tulip-native::ui) & test(/^ui_dashboard::/))"
+    },
+    {
+      "paths": [
         "apps/native/tests/ui/ui_delete_worktree.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native::ui) & test(/^(ui_delete_worktree)::/))"
@@ -1238,6 +1250,12 @@
         "apps/native/tests/ui/ui_popout.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native::ui) & test(/^(ui_popout)::/))"
+    },
+    {
+      "paths": [
+        "apps/native/src/scrollbar.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & test(/^scrollbar::/)) | (binary_id(rustling-tulip-native::ui) & test(/^ui_settings::/))"
     }
   ]
 }

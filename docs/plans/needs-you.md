@@ -26,7 +26,7 @@ A session is listed when any of these holds, checked in this order (the first ma
 
 A row's membership comes from the snapshot, not from the attention set, for Asking and Answer: clicking an Asking row focuses the pane and clears the leaf's "!", but the row stays until the question is answered, since the session still needs you. Ended rows are the one kind a look dismisses.
 
-`done_waiting` stops (a finished turn with nothing asked) and `working_update` are not listed; they are the Dashboard's Done and Working groups.
+`done_waiting` stops (a finished turn with nothing asked) are not listed; they are the Dashboard's Done group. A `working_update` stop (a `Working` status or background work) is not listed either; it is the Dashboard's Working group.
 
 ### A row
 
@@ -108,7 +108,7 @@ NY.1 to NY.3 need neither Wave 2 nor Wave 9 and land now, ahead of Wave 2, as th
 
   Existing `ui_sidebar` and `ui_source_control` specs stay green. Gates: `-p rustling-tulip-native`; hand-test the icon, the badge colour and the row layout at the narrowest sidebar width. Needs NY.2.
 - [x] **NY.4 Hook detail** *(needs HS.2)*. `needs_you.rs`: line 2 from `pending_input` per variant, "+N more" for several questions. `tests/support/mod.rs`: `SessionBuilder::pending_input`. Proof: unit tests per `PendingInput` variant including `Unknown` falling back to the degraded text; one `ui_needs_you.rs` case showing a Question's header and first question.
-- [ ] **NY.5 Summaries** *(needs SA.1)*. `needs_you.rs`: the Answer reason with the `updated_at >= status_since` check; `summary.headline` as line 2 where `pending_input` is absent. Proof: unit tests: an `Idle` session with a fresh `NeedsAnswer` summary is listed, one whose summary predates `status_since` is not, `DoneWaiting` is not, a `Working` session with a `NeedsAnswer` summary is not; one `ui_needs_you.rs` case with a headline.
+- [ ] **NY.5 Summaries** *(needs SA.1)*. `needs_you.rs`: the Answer reason, adopting `needs_you::is_answer` (the `updated_at >= status_since` check, already there for the Dashboard's groups) in `rows`; `summary.headline` as line 2 where `pending_input` is absent. Proof: unit tests: an `Idle` session with a fresh `NeedsAnswer` summary is listed, one whose summary predates `status_since` is not, `DoneWaiting` is not, a `Working` session with a `NeedsAnswer` summary is not; one `ui_needs_you.rs` case with a headline.
 - [ ] **NY.6 Docs.** `docs/native-client.md`'s Needs You section gains line 2's `pending_input` and summary sources and the Answer reason; CLAUDE.md's `native-ui.json` line if the `activity` values are listed; delete borrowed-ideas.md's entry, and this doc, once NY.5 lands. Proof: the diff.
 
 ## Open questions
