@@ -4,8 +4,6 @@
 
 ## Release 2 — Remote mode and the agent seam
 
-- [ ] RT-426 Prove the daemon before the installer sends it /shutdown · release vNext
-- [ ] RT-430 Bind the daemon's loopback listener so no other socket can share its port · release vNext
 - [ ] RT-431 Refuse or escape cmd metacharacters in a .cmd agent shim's direct-spawn arguments · release vNext
 
 ## Wave 1a — Claude sessions on DeepSeek
@@ -76,9 +74,9 @@
 
 ## Wave 8 — Chat mirror and phone session views
 
-- [ ] RT-51 Chat mirror: a Claude session as a chat over its live terminal, with interactive cards
+- [ ] RT-51 Chat mirror: a Claude session as a chat over its live terminal, with interactive cards · release vNext
 - [ ] RT-106 PW.12: Phone files: viewer with Share and Save, worktree tree, send photos and files into a session
-- [ ] RT-107 Running-work strip: subagents, background shells and wakeups over the chat
+- [ ] RT-107 Running-work strip: subagents, background shells and wakeups over the chat · release vNext
 - [ ] RT-110 Chat composer: slash commands, @ file mentions, image attach, quick replies
 - [ ] RT-108 PW.9: Phone terminal: xterm.js with collie's key bar
 - [ ] RT-109 PW.10: Phone chat above the status line over the chat mirror
@@ -87,9 +85,17 @@
 
 ## Wave 9 — Summaries, spoken alerts and the Dashboard
 
-- [ ] RT-27 Measure a local small model as the alerts' summarizer provider · release vNext
-- [ ] RT-26 Speak a summary aloud when an agent waits · release vNext
-- [ ] RT-28 Dashboard view: cards for every live session, fed by the summarizer · release vNext
+- [/] RT-27 Measure a local small model as the alerts' summarizer provider · release vNext
+- [ ] RT-28 Dashboard: every session's agent and subagent tree, recent work, Linear context and summaries · release vNext
+  - [ ] RT-454 Refresh working sessions' summaries while the Dashboard is watched (DB.1) · release vNext
+  - [ ] RT-455 Draw the Dashboard tab's session cards (DB.2) · release vNext
+  - [ ] RT-456 Show each card's changed files and activity timeline (DB.3, DB.4) · release vNext
+  - [ ] RT-445 Add the summarizer's key store and provider client (SA.2, SA.3) · release vNext
+  - [ ] RT-446 Shape the summarizer's prompt and input (SA.4) · release vNext
+  - [ ] RT-447 Add the summarizer's settings, spend ledger and cache (SA.5) · release vNext
+  - [ ] RT-448 Raise a summarized alert when a session waits (SA.6) · release vNext
+  - [ ] RT-453 Document the summarizer and spoken alerts (SA.11) · release vNext
+  - [ ] RT-461 Remove the spoken-alert wire fields the Dashboard does not use · release vNext
 - [ ] RT-111 Summary view: one line per stretch of work, expandable into the chat · release vNext
 - [ ] RT-423 Needs You: Answer rows and line 2 from session summaries (NY.5) · release vNext
 
@@ -182,8 +188,6 @@
 - [ ] RT-348 Update tokio past RUSTSEC-2026-0386 so cargo deny passes
 - [ ] RT-422 Remove wall-clock time assertions from the tests · release vNext
 - [ ] RT-427 Kill hung tests with a nextest terminate-after guard
-- [ ] RT-441 Treat GATE_BOX_JOB as already gated in rt.ps1 · release vNext
-- [ ] RT-442 Find rc.exe for the native build when KitsRoot10 names the wrong folder · release vNext
 
 ## macOS
 
@@ -263,4 +267,9 @@
 - [ ] RT-435 Send the tracer's Exited only after the child's last output
 - [ ] RT-436 Send no Stopped attention for a session discarded before its exit
 - [ ] RT-437 Detect an agent's request to reconnect an MCP server and run the reconnect for the user · release vNext
-- [ ] RT-443 Keep the Settings modal one fixed size and scroll its content · release vNext
+- [/] RT-443 Keep the Settings modal one fixed size and scroll its content · release vNext
+- [ ] RT-457 Close a running native client before the installer replaces it
+- [ ] RT-458 Pass a direct-spawned Claude session's initial prompt as its positional prompt, not -p
+- [ ] RT-459 Launch a .cmd agent shim whose path holds a space
+- [ ] RT-462 Plan auto relayout: reorganize every tab's panes by rules, with a preview to adjust before applying · release vNext
+- [ ] RT-463 Plan auto tab names from the repos and workspaces in each tab · release vNext
