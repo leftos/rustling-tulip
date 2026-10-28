@@ -89,6 +89,19 @@ This design already covers most of them: a scoped verb list instead of raw input
 - **References, not pasted content.** `--file` pastes a file's text into the prompt; for diffs and logs a path the target can read is faster and keeps structure. Workspace sessions need a path the target's worktree can resolve.
 - **No approval on another's behalf.** ThinkTerm lists approving a privileged action for the user as the one capability that stays off. Q7 covers typed input; this rules out any future verb that answers a permission prompt or a request card.
 
+### From herdr
+
+Herdr's agent-facing CLI and socket API (`X:\dev\_ext\herdrdev\herdr`, Apache-2.0) settle several points this design leaves open; the detail and herdr's file:line references are in [herdr-daemon-learnings.md](../research/herdr-daemon-learnings.md), section C.
+
+- **`send --wait` as one request (AC.5).** Separate `send` and `wait` calls race: a `wait` sent before the target's status flips returns at once. Herdr's `agent.prompt` with `wait` validates the target, registers the waiter, writes the prompt and waits, all in one request.
+
+  It refuses a target that is already blocked before writing any bytes. It fails with `agent_prompt_stalled` when the target shows neither Working nor Blocked within 5 s, and it pins the pane's occupant so a session that replaces the target cannot satisfy the wait. The caller's timeout covers the submission too. Whether a send to an `AwaitingInput` target is refused (herdr) or held until Working (Q7's answer) stays Q7's; a held send should at least say so in its reply.
+- **CLI and daemon of different builds (AC.2, AC.7).** The CLI is the session's cached tracer binary, so it can outlive a daemon upgrade in either direction. When a verb comes back 404 or `unsupported_message`, the CLI asks `/agent/v1/self` for the daemon's API version and verbs and fails with `version_mismatch`, naming which side is older. It decodes replies tolerantly, with no `deny_unknown_fields`.
+- **No replay after an ambiguous failure.** `spawn` and `send` are never retried by the CLI after a transport error; the error says the request may have been applied and to run `list` before retrying. The daemon dedupes `spawn` by `request_id`.
+- **`wait --match <text>` and `--regex <re>`.** Matched per line against the target's rendered grid (wrapped rows joined, no escape codes), not the raw bytes. Content already on screen matches at once, and a bad regex is refused before any wait starts.
+- **Errors with a code.** Every refusal carries a stable machine-readable `code` beside its message (`not_found`, `timeout`, `agent_blocked`, `target_ambiguous`, `invalid_regex`, `version_mismatch`, …), and the CLI's exit code and the skill branch on it, not on message text.
+- **Agent ergonomics.** JSON on stdout and the JSON error on stderr. Every reply carries the ids the next call needs. A target resolves by unique name or id, and an ambiguous one is an error listing the candidates. Prompt text after the verb is taken verbatim, so a prompt containing `--wait` is not parsed as a flag. The skill text ships inside the binary (`rt-tracer agent --skill`).
+
 ## Steps
 
 Order: AC.1 → AC.2 → AC.3 → AC.4 → AC.5 and AC.6 → AC.7 → AC.8 → AC.9 → AC.10. AC.4 builds on HS.4's router split and AC.7 on HS.3's HTTP client when those land first; otherwise each makes them. The gates are the nextup profile's (`.claude/skills/rustling-tulip-nextup/SKILL.md`, "Agents and gates").
