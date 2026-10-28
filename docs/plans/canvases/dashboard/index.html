@@ -1,0 +1,738 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dashboard mock</title>
+<style>
+@font-face { font-family: "Geist"; font-weight: 400; src: url("../../../../apps/native/assets/fonts/Geist/Geist-Regular.ttf"); }
+@font-face { font-family: "Geist"; font-weight: 500; src: url("../../../../apps/native/assets/fonts/Geist/Geist-Medium.ttf"); }
+@font-face { font-family: "Geist"; font-weight: 600; src: url("../../../../apps/native/assets/fonts/Geist/Geist-SemiBold.ttf"); }
+@font-face { font-family: "Geist"; font-weight: 700; src: url("../../../../apps/native/assets/fonts/Geist/Geist-Bold.ttf"); }
+@font-face { font-family: "JBM"; font-weight: 400; src: url("../../../../apps/native/assets/fonts/JetBrainsMono/JetBrainsMono-Regular.ttf"); }
+@font-face { font-family: "JBM"; font-weight: 700; src: url("../../../../apps/native/assets/fonts/JetBrainsMono/JetBrainsMono-Bold.ttf"); }
+
+/* Tokens: apps/native/src/palette.rs */
+:root {
+  --ground: #111013; --sunken: #0b0a0d; --surface: #161519; --raised: #1b1a1f; --chip: #232129; --hover: #2c2a33;
+  --line: #2a2830; --line-strong: #3a3742;
+  --text: #ede9e4; --text-2: #a7a2ad; --subtle: #8c8794; --faint: #6e6a77;
+  --accent: #f07a62; --on-accent: #1c100d;
+  --working: #6ca6ff; --asking: #f6bc4e; --on-asking: #2a1b00; --waiting: #4fc89d; --danger: #f26d6d;
+  --lilac: #c9b8ff; --ochre: #d9a15c; --rose: #e7849b; --peri: #8fb3f0;
+  --ask-wash: rgba(246, 188, 78, 0.07); --danger-wash: rgba(242, 109, 109, 0.10);
+  --mono: "JBM", ui-monospace, monospace;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: #08070a; color: var(--text); font-family: "Geist", system-ui, sans-serif; font-size: 13px; }
+button { font: inherit; color: inherit; }
+
+/* Lane switcher, outside the app frame */
+.lanes { display: flex; gap: 6px; align-items: stretch; padding: 10px 16px; width: 1600px; margin: 0 auto; }
+.lanes .ttl { font-weight: 600; color: var(--text-2); align-self: center; margin-right: 8px; white-space: nowrap; }
+.lane-tab { flex: 1; text-align: left; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 7px 10px; cursor: pointer; }
+.lane-tab b { display: block; font-weight: 600; }
+.lane-tab span { color: var(--subtle); font-size: 12px; }
+.lane-tab.on { border-color: var(--accent); background: var(--raised); }
+.rec { display: inline-block; margin-left: 6px; font-size: 10.5px; font-weight: 600; color: var(--on-accent); background: var(--accent); padding: 1px 6px; border-radius: 3px; vertical-align: 1px; }
+
+/* App frame */
+.app { width: 1600px; height: 1000px; margin: 0 auto 24px; display: grid; grid-template-columns: 48px 1fr; grid-template-rows: 1fr 24px; background: var(--ground); border: 1px solid var(--line); overflow: hidden; }
+.rail { background: var(--sunken); border-right: 1px solid var(--line); display: flex; flex-direction: column; align-items: center; padding-top: 6px; gap: 6px; }
+.rail .ic { width: 34px; height: 34px; border-radius: 6px; display: grid; place-items: center; color: var(--text-2); position: relative; }
+.rail .ic.on { background: var(--chip); color: var(--text); box-shadow: inset 2px 0 0 var(--accent); }
+.rail .ic .n { position: absolute; top: 2px; right: 2px; font-size: 9px; background: var(--chip); color: var(--text-2); border-radius: 6px; padding: 0 3px; }
+.rail .ic .n.ask { background: var(--asking); color: var(--on-asking); font-weight: 700; }
+.rail .sp { flex: 1; }
+.rail svg { width: 18px; height: 18px; stroke: currentColor; fill: none; stroke-width: 1.6; }
+.main { display: grid; grid-template-rows: 38px 1fr; min-width: 0; min-height: 0; }
+.tabbar { background: var(--surface); border-bottom: 1px solid var(--line); display: flex; align-items: stretch; }
+.tabbar .t { display: flex; align-items: center; gap: 7px; padding: 0 14px; border-right: 1px solid var(--line); color: var(--text-2); font-weight: 500; }
+.tabbar .t.on { color: var(--text); background: var(--ground); box-shadow: inset 0 2px 0 var(--accent); }
+.tabbar .t .x { color: var(--faint); margin-left: 6px; }
+.tabbar .t .cnt { font-size: 11px; color: var(--working); }
+.tabbar .t .badge { font-size: 10.5px; font-weight: 700; background: var(--asking); color: var(--on-asking); border-radius: 3px; padding: 0 5px; }
+.tabbar .plus { padding: 0 14px; display: flex; align-items: center; color: var(--subtle); font-size: 16px; }
+.footer { grid-column: 1 / -1; background: var(--sunken); border-top: 1px solid var(--line); display: flex; align-items: center; gap: 14px; padding: 0 10px; font-size: 11.5px; color: var(--text-2); }
+.footer .pill { border: 1px solid var(--line-strong); border-radius: 10px; padding: 0 8px; line-height: 17px; }
+.footer .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #3fb96a; margin-right: 5px; }
+.footer .sp { flex: 1; }
+.content { overflow: hidden; min-height: 0; position: relative; }
+.view { display: none; height: 100%; overflow: auto; }
+.view.on { display: block; }
+
+/* Status glyphs, as the sidebar draws them */
+.g { display: inline-block; flex: none; width: 12px; height: 12px; border-radius: 50%; position: relative; vertical-align: -1px; }
+.g.working { border: 2px solid var(--working); }
+.g.working::after { content: ""; position: absolute; inset: 2px; border-radius: 50%; background: var(--working); }
+.g.asking { border-radius: 3px; background: var(--asking); }
+.g.asking::after { content: "!"; position: absolute; inset: 0; color: var(--on-asking); font-size: 9.5px; font-weight: 700; text-align: center; line-height: 12px; }
+.g.waiting { border: 2px solid var(--waiting); }
+.g.idle { width: 8px; height: 8px; margin: 2px; background: var(--faint); }
+.g.stopped { border-radius: 2px; width: 10px; height: 10px; margin: 1px; border: 2px solid var(--faint); }
+.g.done { width: 12px; height: 12px; }
+.g.done::after { content: "✓"; position: absolute; inset: 0; color: var(--waiting); font-size: 11px; font-weight: 700; line-height: 12px; text-align: center; }
+.g.queued { border: 2px dashed var(--faint); }
+.g.gate { border-radius: 2px; border: 2px solid var(--working); width: 11px; height: 11px; }
+.g.gate::after { content: ""; position: absolute; left: 2px; right: 2px; top: 2.5px; height: 2px; background: var(--working); }
+.g.sm { transform: scale(0.85); }
+
+/* Shared bits */
+.mono { font-family: var(--mono); font-size: 11.5px; }
+.sub { color: var(--subtle); }
+.t2 { color: var(--text-2); }
+.cut { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.repo { display: inline-flex; align-items: center; gap: 5px; color: var(--text-2); white-space: nowrap; flex: none; }
+.il { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; flex: none; }
+.repo i { width: 7px; height: 7px; border-radius: 2px; display: inline-block; }
+.c-ask { color: var(--asking); } .c-work { color: var(--working); } .c-wait { color: var(--waiting); } .c-dan { color: var(--danger); } .c-faint { color: var(--faint); }
+.iss { font-family: var(--mono); font-size: 11.5px; color: var(--text); font-weight: 700; white-space: nowrap; flex: none; }
+.lst { display: inline-flex; align-items: center; gap: 4px; font-size: 11.5px; color: var(--text-2); white-space: nowrap; flex: none; }
+.lst .si { width: 10px; height: 10px; border-radius: 50%; border: 1.5px solid; display: inline-block; position: relative; }
+.lst .si.prog { border-color: var(--peri); background: conic-gradient(var(--peri) 0 50%, transparent 0); }
+.lst .si.rev { border-color: var(--waiting); background: conic-gradient(var(--waiting) 0 75%, transparent 0); }
+.lst .si.done { border-color: var(--lilac); background: var(--lilac); }
+.lst .si.todo { border-color: var(--faint); }
+.prio { display: inline-flex; align-items: flex-end; gap: 1px; height: 10px; vertical-align: -1px; }
+.prio i { width: 2.5px; background: var(--faint); display: block; border-radius: 1px; }
+.prio i.on { background: var(--text-2); }
+.prio.urgent { width: 11px; height: 11px; background: var(--danger); border-radius: 2px; color: #1a0606; font-size: 9px; font-weight: 700; justify-content: center; align-items: center; }
+.ctx { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; color: var(--text-2); }
+.ctx .bar { width: 38px; height: 5px; background: var(--chip); border-radius: 3px; overflow: hidden; }
+.ctx .bar i { display: block; height: 100%; background: var(--text-2); }
+.ctx.hot .bar i { background: var(--danger); } .ctx.hot { color: var(--danger); }
+.spark { display: inline-flex; align-items: flex-end; gap: 1.5px; height: 18px; }
+.spark i { width: 5px; background: var(--working); opacity: .75; border-radius: 1px 1px 0 0; }
+.spark.quiet i { background: var(--faint); }
+.stuck { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 600; color: var(--danger); background: var(--danger-wash); border: 1px solid rgba(242,109,109,.35); border-radius: 3px; padding: 0 5px; line-height: 16px; white-space: nowrap; }
+.btn { background: var(--chip); border: 1px solid var(--line-strong); border-radius: 5px; padding: 3px 9px; font-size: 12px; cursor: pointer; white-space: nowrap; }
+.btn.pri { background: var(--asking); color: var(--on-asking); border-color: var(--asking); font-weight: 600; }
+.btn.ghost { background: transparent; }
+.btn .k { font-family: var(--mono); font-size: 10.5px; color: var(--subtle); margin-right: 5px; }
+.btn.pri .k { color: rgba(42,27,0,.7); }
+.win { display: inline-block; width: 46px; flex: none; color: var(--faint); font-size: 11px; font-variant-numeric: tabular-nums; }
+.add { color: var(--waiting); } .del { color: var(--danger); }
+.fst { font-family: var(--mono); font-size: 10.5px; width: 12px; display: inline-block; font-weight: 700; }
+.fst.M { color: var(--ochre); } .fst.A { color: var(--waiting); } .fst.D { color: #e58a8a; }
+.sha { font-family: var(--mono); font-size: 11px; color: var(--peri); }
+.h { font-size: 10.5px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--subtle); }
+.lnsync { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--subtle); }
+.lnsync i { width: 6px; height: 6px; border-radius: 50%; background: var(--lilac); display: inline-block; }
+
+/* Header strip, shared by every lane */
+.hdr { display: flex; align-items: center; gap: 14px; padding: 10px 18px 10px; border-bottom: 1px solid var(--line); background: var(--surface); }
+.hdr h1 { font-size: 15px; font-weight: 600; margin: 0; }
+.counts { display: flex; gap: 4px; }
+.cpill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px; border-radius: 5px; background: var(--chip); font-size: 12px; color: var(--text-2); }
+.cpill b { color: var(--text); font-weight: 600; }
+.cpill.ask { background: rgba(246,188,78,.14); color: var(--asking); } .cpill.ask b { color: var(--asking); }
+.figs { display: flex; gap: 16px; font-size: 12px; color: var(--text-2); }
+.figs b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+.figs .sep { width: 1px; background: var(--line-strong); }
+.seg { display: inline-flex; background: var(--raised); border: 1px solid var(--line); border-radius: 5px; padding: 2px; }
+.seg span { padding: 2px 9px; border-radius: 3px; font-size: 12px; color: var(--text-2); }
+.seg span.on { background: var(--chip); color: var(--text); font-weight: 500; }
+.hsp { flex: 1; }
+.queue { display: flex; align-items: center; gap: 8px; padding: 7px 18px; border-bottom: 1px solid var(--line); background: var(--ask-wash); }
+.qchip { display: inline-flex; align-items: center; gap: 7px; max-width: 560px; background: var(--raised); border: 1px solid rgba(246,188,78,.35); border-radius: 5px; padding: 3px 9px 3px 7px; font-size: 12px; }
+.qchip .age { color: var(--asking); font-weight: 600; font-variant-numeric: tabular-nums; }
+.rels { display: flex; gap: 10px; font-size: 11.5px; color: var(--text-2); }
+.rel { display: inline-flex; align-items: center; gap: 5px; }
+.rel .rb { width: 44px; height: 4px; background: var(--chip); border-radius: 2px; overflow: hidden; }
+.rel .rb i { display: block; height: 100%; background: var(--lilac); }
+
+/* ---------- Lane A: dense rows ---------- */
+.ta { padding: 0 0 20px; }
+.ta .cols, .ta .row, .ta .subrow { display: grid; grid-template-columns: 30px 232px 248px minmax(0,1fr) minmax(0,1fr) 104px 74px 70px 72px 66px; column-gap: 12px; align-items: center; padding: 0 18px 0 14px; }
+.ta .cols { position: sticky; top: 0; z-index: 2; background: var(--ground); border-bottom: 1px solid var(--line); height: 26px; }
+.ta .cols div { font-size: 10.5px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; color: var(--subtle); }
+.ta .num { text-align: right; justify-self: end; }
+.ta .grp { display: flex; align-items: center; gap: 8px; padding: 12px 18px 5px 14px; }
+.ta .grp .h { color: var(--text-2); }
+.ta .grp .n { font-size: 11px; color: var(--subtle); }
+.ta .grp.ask .h { color: var(--asking); }
+.ta .row { min-height: 46px; border-top: 1px solid var(--line); cursor: pointer; padding-top: 5px; padding-bottom: 5px; }
+.ta .row:hover { background: var(--surface); }
+.ta .row.open { background: var(--raised); }
+.ta .row.askrow { background: var(--ask-wash); box-shadow: inset 2px 0 0 var(--asking); }
+.ta .row .two { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.ta .row .l1 { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.ta .lbl { font-weight: 600; }
+.ta .subrow { height: 23px; font-size: 12px; }
+.ta .subrow .tn { grid-column: 2 / 4; display: flex; align-items: center; gap: 6px; padding-left: 12px; min-width: 0; color: var(--text-2); }
+.ta .subrow .tn .br { color: var(--line-strong); font-family: var(--mono); width: 14px; flex: none; }
+.ta .subrow .tn .br2 { margin-left: 18px; }
+.opts { display: flex; gap: 6px; flex-wrap: wrap; }
+.cmd { display: inline-block; background: var(--sunken); border: 1px solid var(--line); border-radius: 4px; padding: 2px 7px; margin: 0 0 7px; }
+.ta .subrow .act { grid-column: 4 / 6; min-width: 0; }
+.ta .subrow .age { grid-column: 9 / 10; justify-self: end; color: var(--subtle); font-size: 11.5px; }
+.ta .subrow .stk { grid-column: 6 / 9; }
+.ta .askb { display: flex; align-items: flex-start; gap: 14px; margin: 0 18px 0 56px; padding: 7px 10px 9px; border-left: 2px solid var(--asking); background: var(--ask-wash); }
+.ta .askb .q { flex: 1; min-width: 0; }
+.ta .askb .q .tx { color: var(--text); margin-bottom: 6px; }
+.ta .askb .opts { display: flex; gap: 6px; flex-wrap: wrap; }
+.ta .askb .cmd { display: inline-block; background: var(--sunken); border: 1px solid var(--line); border-radius: 4px; padding: 2px 7px; margin: 0 0 6px; }
+.drawer { margin: 0 18px 4px 14px; border: 1px solid var(--line-strong); border-top: 0; background: var(--surface); display: grid; grid-template-columns: 1.15fr 1fr 0.9fr; }
+.drawer > div { padding: 10px 14px 12px; border-right: 1px solid var(--line); min-width: 0; }
+.drawer > div:last-child { border-right: 0; }
+.drawer .h { margin-bottom: 7px; display: flex; align-items: center; gap: 8px; }
+.tl { display: flex; flex-direction: column; gap: 4px; }
+.tl .ln { display: flex; gap: 6px; font-size: 12.5px; line-height: 1.35; }
+.tl .ln .tx { color: var(--text); }
+.tl .ln.old .tx { color: var(--text-2); }
+.wk { display: flex; flex-direction: column; gap: 3px; font-size: 12px; }
+.wk .r { display: flex; gap: 7px; align-items: baseline; min-width: 0; }
+.wk .r .cut { flex: 1; }
+.wk .r .age { color: var(--faint); font-size: 11px; flex: none; }
+.figgrid { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 12px; }
+.figgrid .k { color: var(--subtle); }
+.figgrid .v { font-variant-numeric: tabular-nums; }
+
+/* ---------- Lane B: cards ---------- */
+.tb { padding: 4px 18px 24px; }
+.tb .sec { display: flex; align-items: center; gap: 8px; margin: 12px 0 7px; }
+.tb .sec .h { color: var(--text-2); }
+.tb .sec.ask .h { color: var(--asking); }
+.tb .grid { display: grid; gap: 10px; }
+.tb .g2 { grid-template-columns: 1fr 1fr; }
+.tb .g3 { grid-template-columns: 1fr 1fr 1fr; }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 7px; padding: 10px 12px; min-width: 0; display: flex; flex-direction: column; gap: 7px; }
+.card.askc { border-color: rgba(246,188,78,.45); box-shadow: inset 3px 0 0 var(--asking); }
+.card .top { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.card .top .lbl { font-weight: 600; font-size: 13.5px; }
+.card .meta { display: flex; align-items: center; gap: 8px; font-size: 11.5px; min-width: 0; }
+.card .linr { display: flex; align-items: center; gap: 7px; font-size: 12px; background: var(--raised); border-radius: 4px; padding: 4px 7px; min-width: 0; }
+.card .now { font-size: 12px; display: flex; gap: 6px; align-items: center; min-width: 0; }
+.card .ask { background: var(--ask-wash); border: 1px solid rgba(246,188,78,.3); border-radius: 5px; padding: 8px 9px; }
+.card .ask .tx { margin-bottom: 7px; line-height: 1.35; }
+.card .ask .opts { display: flex; gap: 6px; flex-wrap: wrap; }
+.card .tree { font-size: 12px; display: flex; flex-direction: column; gap: 3px; }
+.card .tree .n { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.card .tree .n .br { color: var(--line-strong); font-family: var(--mono); flex: none; }
+.card .tree .n .age { margin-left: auto; color: var(--subtle); font-size: 11px; flex: none; padding-left: 6px; }
+.card .split { display: grid; grid-template-columns: 1.2fr 1fr; gap: 12px; }
+.card .foot { display: flex; align-items: center; gap: 12px; font-size: 11.5px; color: var(--text-2); border-top: 1px solid var(--line); padding-top: 6px; margin-top: auto; }
+.card .foot b { color: var(--text); font-weight: 500; font-variant-numeric: tabular-nums; }
+.card.mini { gap: 5px; }
+.card .more { font-size: 11.5px; color: var(--subtle); }
+
+/* ---------- Lane C: tree + detail ---------- */
+.tc.view.on { display: flex; flex-direction: column; overflow: hidden; }
+.tc .split { display: grid; grid-template-columns: 452px 1fr; flex: 1; min-height: 0; }
+.tc .left { border-right: 1px solid var(--line); overflow: auto; background: var(--surface); padding-bottom: 16px; }
+.tc .right { overflow: auto; min-width: 0; }
+.tc .lsec { padding: 10px 14px 4px; display: flex; align-items: center; gap: 8px; }
+.tc .lsec.ask .h { color: var(--asking); }
+.tc .rh { display: flex; align-items: center; gap: 7px; padding: 9px 14px 4px; font-weight: 600; font-size: 12.5px; }
+.tc .rh .n { color: var(--subtle); font-weight: 400; font-size: 11.5px; margin-left: auto; }
+.node { display: grid; grid-template-columns: 16px 1fr auto; column-gap: 7px; align-items: center; padding: 4px 14px 4px 14px; cursor: pointer; min-width: 0; }
+.node:hover { background: var(--hover); }
+.node.sel { background: var(--chip); box-shadow: inset 2px 0 0 var(--accent); }
+.node.askn { background: var(--ask-wash); }
+.node.askn.sel { background: var(--chip); }
+.node .nm { font-weight: 600; display: flex; gap: 6px; align-items: center; min-width: 0; }
+.node .age { color: var(--subtle); font-size: 11px; font-variant-numeric: tabular-nums; }
+.node .ln2 { grid-column: 2 / 4; font-size: 12px; color: var(--text-2); }
+.node .ln3 { grid-column: 2 / 4; font-size: 11.5px; }
+.cn { display: grid; grid-template-columns: 16px 1fr auto; column-gap: 7px; align-items: center; padding: 1px 14px 1px 30px; font-size: 12px; color: var(--text-2); min-width: 0; }
+.cn .br { color: var(--line-strong); font-family: var(--mono); }
+.cn .age { color: var(--subtle); font-size: 11px; }
+.cn.l2 { padding-left: 46px; }
+.det { padding: 14px 18px 20px; display: flex; flex-direction: column; gap: 12px; }
+.det .dh { display: flex; align-items: flex-start; gap: 10px; }
+.det .dh .ttl { font-size: 17px; font-weight: 600; }
+.det .dh .m { display: flex; gap: 10px; align-items: center; font-size: 12px; margin-top: 3px; }
+.det .acts { margin-left: auto; display: flex; gap: 6px; }
+.box { background: var(--surface); border: 1px solid var(--line); border-radius: 7px; padding: 10px 12px; min-width: 0; }
+.box .h { margin-bottom: 8px; display: flex; align-items: center; gap: 8px; }
+.box .h .r { margin-left: auto; text-transform: none; letter-spacing: 0; font-weight: 400; }
+.det .linbox { display: grid; grid-template-columns: 1fr auto; gap: 4px 14px; align-items: center; }
+.det .linbox .it { font-size: 14px; font-weight: 600; }
+.det .cols2 { display: grid; grid-template-columns: 1.1fr 1fr; gap: 12px; }
+.det .stackc { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.dtree .n { display: grid; grid-template-columns: auto 14px 1fr auto; column-gap: 7px; align-items: start; padding: 4px 0; border-top: 1px solid var(--line); font-size: 12.5px; }
+.dtree .n:first-child { border-top: 0; }
+.dtree .n .br { color: var(--line-strong); font-family: var(--mono); white-space: pre; }
+.dtree .n .g { margin-top: 2px; }
+.dtree .n .w { min-width: 0; }
+.dtree .n .w .a { font-weight: 600; }
+.dtree .n .w .b { color: var(--text-2); font-size: 12px; }
+.dtree .n .w .c { margin-top: 2px; }
+.dtree .n .rt { text-align: right; font-size: 11.5px; color: var(--subtle); white-space: nowrap; }
+.timeline2 { display: grid; grid-template-columns: 70px 1fr; gap: 6px 10px; font-size: 12.5px; line-height: 1.4; }
+.timeline2 .w { color: var(--faint); font-size: 11.5px; padding-top: 1px; }
+.timeline2 .old { color: var(--text-2); }
+.actlane { display: grid; grid-template-columns: 96px 1fr; gap: 5px 10px; align-items: center; font-size: 11.5px; }
+.actlane .trk { height: 10px; background: var(--chip); border-radius: 2px; position: relative; overflow: hidden; }
+.actlane .trk i { position: absolute; top: 0; bottom: 0; }
+.actlane .ax { grid-column: 2; display: flex; justify-content: space-between; color: var(--faint); font-size: 10.5px; }
+.ctxspark { width: 100%; height: 56px; display: block; background: var(--raised); border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<div class="lanes" id="lanes">
+  <div class="ttl">Dashboard · RT-460</div>
+  <button class="lane-tab" data-lane="a"><b>A · Dense rows <span class="rec" id="rec-a" hidden>Recommended</span></b><span>One row per session with its subagents nested under it; asks answered inline; a docked drawer per row.</span></button>
+  <button class="lane-tab" data-lane="b"><b>B · Card grid <span class="rec" id="rec-b" hidden>Recommended</span></b><span>A card per session grouped Needs you / Working / Idle / Done, tree and summary on every card.</span></button>
+  <button class="lane-tab" data-lane="c"><b>C · Tree and detail <span class="rec" id="rec-c" hidden>Recommended</span></b><span>Every agent and subagent as one live tree on the left; the picked session's full story on the right.</span></button>
+</div>
+
+<div class="app" id="app">
+  <nav class="rail">
+    <div class="ic"><svg viewBox="0 0 20 20"><path d="M4 6h12M4 10h12M4 14h12"/></svg></div>
+    <div class="ic on" title="Dashboard"><svg viewBox="0 0 20 20"><rect x="3" y="3" width="6" height="6" rx="1"/><rect x="11" y="3" width="6" height="4" rx="1"/><rect x="11" y="9" width="6" height="8" rx="1"/><rect x="3" y="11" width="6" height="6" rx="1"/></svg><span class="n ask">2</span></div>
+    <div class="ic"><svg viewBox="0 0 20 20"><path d="M3 11l2.5-6h9L17 11v5H3z"/><path d="M3 11h4l1 2h4l1-2h4"/></svg></div>
+    <div class="ic"><svg viewBox="0 0 20 20"><circle cx="6" cy="5" r="2"/><circle cx="6" cy="15" r="2"/><circle cx="14" cy="8" r="2"/><path d="M6 7v6M14 10c0 3-4 3-8 3"/></svg><span class="n">5</span></div>
+    <div class="sp"></div>
+    <div class="ic"><svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="7"/><path d="M10 6v4l3 2"/></svg></div>
+    <div class="ic" style="margin-bottom:6px"><svg viewBox="0 0 20 20"><path d="M4 6h8M15 6h1M4 14h2M9 14h7"/><circle cx="13.5" cy="6" r="1.6"/><circle cx="7.5" cy="14" r="1.6"/></svg></div>
+  </nav>
+  <div class="main">
+    <div class="tabbar">
+      <div class="t on"><svg viewBox="0 0 20 20" width="13" height="13" style="stroke:currentColor;fill:none;stroke-width:1.7"><rect x="3" y="3" width="6" height="6" rx="1"/><rect x="11" y="3" width="6" height="4" rx="1"/><rect x="11" y="9" width="6" height="8" rx="1"/><rect x="3" y="11" width="6" height="6" rx="1"/></svg>Dashboard<span class="badge">2</span><span class="x">×</span></div>
+      <div class="t"><span class="cnt">◉ 2/3</span>tulip<span class="x">×</span></div>
+      <div class="t"><span class="cnt">◉ 1/3</span>ops-tower<span class="x">×</span></div>
+      <div class="t"><span class="cnt">◉ 1/2</span>yaat<span class="x">×</span></div>
+      <div class="plus">+</div>
+    </div>
+    <div class="content">
+      <section class="view" id="view-a"></section>
+      <section class="view" id="view-b"></section>
+      <section class="view tc" id="view-c"></section>
+    </div>
+  </div>
+  <div class="footer">
+    <span class="pill">Connections</span>
+    <span class="pill"><span class="dot"></span>daemon · 8 sessions · :4242</span>
+    <span><span class="c-ask">◆</span> 2 need you</span>
+    <span><span class="c-work">◉</span> 3 working</span>
+    <span><span class="c-work">○</span> 1 background</span>
+    <span><span class="c-wait">○</span> 1 waiting</span>
+    <span class="sp"></span>
+    <span>Dashboard</span>
+  </div>
+</div>
+
+<script>
+const RECOMMENDED = 'a';
+
+const REPOS = {
+  'rustling-tulip': '#f07a62',
+  'ops-tower': '#c9b8ff',
+  'yaat': '#d9a15c',
+};
+
+// Plausible live state at 14:32. Ages are relative to then.
+const S = [
+  {
+    id: 's2', repo: 'rustling-tulip', label: 'Settings modal height', branch: 'feat/rt-443-settings-height', wt: 'wt.feat-rt-443-settings-height',
+    group: 'needs', glyph: 'asking', state: 'Question', age: '4m', since: '14:28',
+    pending: { trigger: 'question', text: 'The Settings modal clips its last rows when the window is under 640 px tall. Which fix should I apply?',
+      options: ['Scroll the page body (Recommended)', 'Shrink the nav column', 'Cap the modal at 85% of the window'] },
+    now: 'Asked which fix to apply for the clipped modal',
+    issue: { id: 'RT-443', title: 'Settings modal clips in short windows', state: 'prog', stateText: 'In Progress', prio: 2, project: 'Wave 8 · Native polish', release: 'vNext' },
+    headline: 'Waiting on your pick of three fixes',
+    tl: [['now', 'Asked which of three fixes to apply; recommends scrolling the body'], ['5–15m', 'Measured the clip: 92 px of Spawn defaults lost at 600 px tall'], ['15–30m', 'Took before shots of every Settings tab at 600 and 800 px']],
+    tree: [
+      { k: 'agent', g: 'asking', name: 'claude · opus', task: '/nextup RT-443', act: 'AskUserQuestion · 4m', age: '38m', kids: [
+        { k: 'sub', g: 'done', name: 'RT-443 explorer settings layout', task: 'Explore · mapped settings_view.rs sizing', act: 'finished · 3 files named', age: '9m' },
+      ] },
+    ],
+    work: { commits: [], done: [], files: [['M', 'apps/native/src/settings_view.rs', 6, 2]], note: '4 shots in .tmp/shots' },
+    m: { ctx: 31, tin: '412k', tout: '14k', cost: 2.10, run: '38m', last: '4m', act: [3, 5, 4, 6, 2, 1, 0, 0, 0, 0] },
+  },
+  {
+    id: 's3', repo: 'ops-tower', label: 'Gate chips in light theme', branch: 'fix/ops-352-gate-chip-colour', wt: 'wt.fix-ops-352-gate-chip-colour',
+    group: 'needs', glyph: 'asking', state: 'Permission', age: '1m', since: '14:31', stuck: ['Waiting on permission'],
+    pending: { trigger: 'permission', text: 'Claude needs your permission to use Bash', cmd: 'gh pr merge 118 --squash --delete-branch',
+      options: ['Yes', "Yes, and don't ask again for gh pr merge", 'No, tell Claude what to do'] },
+    now: 'Wants to merge PR #118',
+    issue: { id: 'OPS-352', title: 'Gate chips lose their lane colour in the light theme', state: 'rev', stateText: 'In Review', prio: 2, project: 'Dashboard polish', release: '0.9' },
+    headline: 'Checks green; wants to merge PR #118',
+    tl: [['now', 'Wants to squash-merge PR #118 now that its checks passed'], ['5–15m', 'Fixed the chip contrast in the light theme; CSS review clean'], ['15–30m', 'Reproduced the washed-out chips with a light-theme shot']],
+    tree: [
+      { k: 'agent', g: 'asking', name: 'claude · opus', task: 'OPS-352 gate chips', act: 'Permission · Bash · 1m', age: '26m', kids: [
+        { k: 'sub', g: 'done', name: 'OPS-352 css review', task: 'reviewer · ui/gates.css', act: 'finished · no findings', age: '6m' },
+      ] },
+    ],
+    work: { commits: [['7c21e0a', "fix: keep gate chips' lane colour in the light theme", '9m']], done: [], files: [['M', 'ui/gates.css', 14, 6], ['M', 'ui/app.js', 3, 1]], note: 'PR #118 · checks passed' },
+    m: { ctx: 22, tin: '268k', tout: '9k', cost: 1.40, run: '26m', last: '1m', act: [2, 4, 6, 3, 5, 2, 3, 1, 0, 0] },
+  },
+  {
+    id: 's1', repo: 'rustling-tulip', label: 'Summary wire types', branch: 'feat/rt-444-summary-types', wt: 'wt.feat-rt-444-summary-types',
+    group: 'working', glyph: 'working', state: 'Working', age: '6m', since: '14:26',
+    now: 'Waiting on subagent "RT-444 summary types implementer"',
+    issue: { id: 'RT-444', title: 'Session summary and waiting-alert wire types', state: 'prog', stateText: 'In Progress', prio: 3, project: 'Wave 9 · Summaries & Dashboard', release: 'vNext' },
+    headline: 'Implementer running the protocol tests',
+    tl: [['now', 'Implementer is running the protocol tests after adding PendingAsk'], ['5–15m', 'Review found a missing serde default on SessionSummary.kind; fixed'], ['15–30m', 'Landed the summary types; briefed the follow-up for the daemon side']],
+    tree: [
+      { k: 'agent', g: 'working', name: 'claude · opus', task: '/nextup RT-444', act: 'Waiting on subagent', age: '1h 12m', kids: [
+        { k: 'sub', g: 'working', name: 'RT-444 summary types implementer', task: 'implementer · steps 3–4 of the brief', act: 'Running Bash · 1m: pwsh tools/gate.ps1 run --slot heavy -- cargo nextest run -p protocol', age: '6m', kids: [
+          { k: 'gate', g: 'gate', name: 'In gate · heavy 1', task: 'cargo nextest run -p protocol --cargo-profile test-release', act: '', age: '1m' },
+        ] },
+        { k: 'sub', g: 'done', name: 'RT-444 r1 rust review', task: 'rust-engineer · review of dcf97d78', act: 'finished · 2 findings, both fixed', age: '14m' },
+        { k: 'shell', g: 'working', name: 'bg shell b3f1', task: 'gate run --log .tmp/clippy.log -- cargo clippy', act: 'Running · 2m', age: '2m' },
+      ] },
+    ],
+    work: { commits: [['dcf97d78', 'feat: add the session summary and waiting-alert wire types', '18m'], ['a9e7c7c8', 'fix: treat GATE_BOX_JOB as already under a gate in rt.ps1', '41m']],
+      done: [['RT-449', 'rt.ps1 nests a gate under GATE_BOX_JOB']],
+      files: [['M', 'crates/protocol/src/lib.rs', 86, 4], ['A', 'crates/protocol/tests/summary_roundtrip.rs', 64, 0], ['M', 'crates/daemon/src/server/session.rs', 12, 2], ['M', 'apps/native/src/lib.rs', 3, 1]] },
+    m: { ctx: 46, tin: '1.24M', tout: '38k', cost: 6.80, run: '1h 12m', last: '8s', act: [4, 6, 3, 8, 5, 2, 7, 9, 6, 5],
+      ctxh: [8, 12, 15, 19, 22, 25, 24, 28, 31, 30, 33, 36, 38, 41, 40, 43, 44, 46] },
+  },
+  {
+    id: 's5', repo: 'yaat', label: 'Ready-to-taxi call-up', branch: 'fix/yaat-308-callup-target', wt: 'wt.fix-yaat-308-callup-target',
+    group: 'working', glyph: 'working', state: 'Working', age: '11m', since: '14:21', stuck: ['3 tool calls failed in a row'],
+    now: 'Waiting on subagent "YAAT-308 debugger repro"',
+    issue: { id: 'YAAT-308', title: 'Solo ready-to-taxi call-up fires for the wrong aircraft', state: 'prog', stateText: 'In Progress', prio: 4, project: 'Solo mode', release: 'v0.14' },
+    headline: 'Debugger re-running the call-up replay',
+    tl: [['now', 'Debugger is re-running the call-up replay; its last 3 builds failed'], ['5–15m', 'Found the call-up picks the first strip in the bay, not the caller'], ['15–30m', "Opened the replay from the reporter's log and reproduced it"]],
+    tree: [
+      { k: 'agent', g: 'working', name: 'claude · opus', task: 'YAAT-308 call-up', act: 'Waiting on subagent', age: '1h 31m', kids: [
+        { k: 'sub', g: 'working', name: 'YAAT-308 debugger repro', task: 'debugger · replay solo-callup-0412', act: 'Running Bash · 3m: dotnet test tests/Yaat.Sim.Tests -c Release --no-build --filter SoloCallup', age: '11m', stuck: '3 failed in a row' },
+        { k: 'shell', g: 'done', name: 'bg shell 9c02', task: 'dotnet build Yaat.sln -c Release', act: 'exited 1 · 12m', age: '12m' },
+      ] },
+    ],
+    work: { commits: [], done: [], files: [['M', 'src/Yaat.Sim/Solo/CallupRouter.cs', 22, 7], ['A', 'tests/Yaat.Sim.Tests/SoloCallupTests.cs', 40, 0]] },
+    m: { ctx: 58, tin: '1.61M', tout: '41k', cost: 7.90, run: '1h 31m', last: '3s', act: [6, 8, 9, 5, 7, 10, 8, 6, 9, 7] },
+  },
+  {
+    id: 's4', repo: 'ops-tower', label: 'Briefing login retry', branch: 'fix/ops-347-briefing-retry', wt: 'wt.fix-ops-347-briefing-retry',
+    group: 'working', glyph: 'working', state: 'In gate', age: '6m', since: '14:26', stuck: ['Context past 80%'],
+    now: 'In gate · heavy 2: cargo nextest run --workspace',
+    issue: { id: 'OPS-347', title: 'Briefing run retries a login error once', state: 'prog', stateText: 'In Progress', prio: 3, project: 'Briefing', release: '0.9' },
+    headline: 'Full suite running after the retry change',
+    tl: [['now', 'Full suite running in the heavy gate after the retry change'], ['5–15m', 'Added one retry on a login error, with a test that failed first'], ['15–30m', 'Traced the failed 06:00 briefing to an expired login']],
+    tree: [
+      { k: 'agent', g: 'working', name: 'claude · opus', task: 'OPS-347 briefing retry', act: 'Running Bash · 6m', age: '2h 05m', kids: [
+        { k: 'gate', g: 'gate', name: 'In gate · heavy 2', task: 'cargo nextest run --workspace --cargo-profile test-release', act: '', age: '6m' },
+        { k: 'shell', g: 'working', name: 'Monitor 41ae', task: 'gate: (passed|FAILED|TIMED OUT|STALLED)', act: 'watching', age: '6m' },
+      ] },
+    ],
+    work: { commits: [], done: [['OPS-344', 'Briefing strip cuts the status to one line']], files: [['M', 'src/briefing/run.rs', 41, 9], ['A', 'tests/briefing_retry.rs', 58, 0]] },
+    m: { ctx: 84, tin: '2.02M', tout: '55k', cost: 9.30, run: '2h 05m', last: '12s', act: [5, 7, 4, 3, 2, 1, 1, 1, 0, 1] },
+  },
+  {
+    id: 's6', repo: 'yaat', label: 'METAR parser RMK groups', branch: 'fix/yaat-312-metar-rmk', wt: 'wt.fix-yaat-312-metar-rmk',
+    group: 'idle', glyph: 'idle', state: 'Idle', age: '41m', since: '13:51',
+    now: 'Idle since its PR opened',
+    issue: { id: 'YAAT-312', title: 'METAR parser drops RMK groups', state: 'rev', stateText: 'In Review', prio: 2, project: 'Weather', release: 'v0.14' },
+    headline: 'PR #241 open; parser keeps RMK groups',
+    tl: [['30m+', 'Opened PR #241 with the RMK fix and six new parser cases']],
+    tree: [{ k: 'agent', g: 'idle', name: 'claude · sonnet', task: 'YAAT-312 METAR RMK', act: 'Idle · 41m', age: '3h 10m' }],
+    work: { commits: [['e91b3c2', 'fix: keep RMK groups when parsing METAR', '44m'], ['4a0d7f1', 'test: cover RMK edge cases', '46m']], done: [], files: [] , note: 'PR #241 · 1 review requested' },
+    m: { ctx: 39, tin: '890k', tout: '22k', cost: 3.20, run: '3h 10m', last: '41m', act: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0] },
+  },
+  {
+    id: 's7', repo: 'rustling-tulip', label: 'Sidebar repo sort', branch: 'feat/rt-451-repo-sort', wt: 'wt.feat-rt-451-repo-sort',
+    group: 'done', glyph: 'waiting', state: 'Finished', age: '12m', since: '14:20', unseen: true,
+    now: 'Turn finished · not looked at yet',
+    issue: { id: 'RT-451', title: 'Sidebar sorts repos by needs-you, activity or hand', state: 'done', stateText: 'Done', prio: 2, project: 'Wave 8 · Native polish', release: 'vNext' },
+    headline: 'Landed repo sort; RT-451 moved to Done',
+    tl: [['5–15m', 'Landed repo sort and moved RT-451 to Done'], ['15–30m', 'Sidebar specs green; native-client.md describes repo_sort']],
+    tree: [{ k: 'agent', g: 'waiting', name: 'claude · opus', task: '/nextup RT-451', act: 'Finished · 12m', age: '1h 48m' }],
+    work: { commits: [['5b2e9c1', 'feat: sort sidebar repos by needs you, activity or hand', '12m'], ['1c7e2b8', 'docs: describe repo_sort in native-client.md', '13m'], ['9ad04f3', 'test: cover repo sort in ui_sidebar', '15m']],
+      done: [['RT-451', 'Sidebar sorts repos by needs-you, activity or hand']], files: [], total: '7 files · +212 −48' },
+    m: { ctx: 62, tin: '1.18M', tout: '36k', cost: 5.60, run: '1h 48m', last: '12m', act: [3, 1, 0, 0, 0, 0, 0, 0, 0, 0] },
+  },
+  {
+    id: 's8', repo: 'ops-tower', label: 'Costs per repository', branch: 'feat/ops-340-costs-per-repo', wt: 'wt.feat-ops-340-costs-per-repo',
+    group: 'done', glyph: 'stopped', state: 'Exited 0', age: '25m', since: '14:07',
+    now: 'Session ended · exit 0',
+    issue: { id: 'OPS-340', title: 'Costs tab splits the Claude share per repository', state: 'done', stateText: 'Done', prio: 2, project: 'Costs', release: '0.9' },
+    headline: 'Merged PR #116; OPS-340 Done',
+    tl: [['15–30m', 'Merged PR #116 and closed OPS-340'], ['30m+', 'Fixed the unmatched-hours row after review']],
+    tree: [{ k: 'agent', g: 'stopped', name: 'claude · opus', task: 'OPS-340 costs per repo', act: 'Ended · 25m', age: '57m' }],
+    work: { commits: [['d40e8a1', 'feat: split the Claude share per repository', '27m'], ['b7713fc', 'fix: put unmatched hours in their own row', '31m']], done: [['OPS-340', 'Costs tab splits the Claude share per repository']], files: [], total: '9 files · +341 −77' },
+    m: { ctx: 51, tin: '960k', tout: '30k', cost: 4.10, run: '57m', last: '25m', act: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0] },
+  },
+];
+
+const GROUPS = [['needs', 'Needs you'], ['working', 'Working'], ['idle', 'Idle'], ['done', 'Done']];
+const esc = (t) => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+const by = (g) => S.filter((s) => s.group === g);
+
+const glyph = (g, cls = '') => `<span class="g ${g} ${cls}"></span>`;
+const repo = (r) => `<span class="repo"><i style="background:${REPOS[r]}"></i>${r}</span>`;
+function prio(p) {
+  if (p === 4) return '<span class="prio urgent" title="Urgent">!</span>';
+  return `<span class="prio" title="${['', 'Low', 'Medium', 'High'][p]}">${[1, 2, 3].map((i) => `<i class="${i <= p ? 'on' : ''}" style="height:${3 + i * 2.4}px"></i>`).join('')}</span>`;
+}
+const lstate = (i) => `<span class="lst"><span class="si ${i.state}"></span>${i.stateText}</span>`;
+const issueLine = (i) => `<span class="il"><span class="iss">${i.id}</span>${lstate(i)}${prio(i.prio)}</span>`;
+const ctx = (p) => `<span class="ctx ${p > 80 ? 'hot' : ''}"><span class="bar"><i style="width:${p}%"></i></span>${p}%</span>`;
+function spark(a) {
+  const max = Math.max(...a, 1);
+  const quiet = a.every((v) => v === 0);
+  return `<span class="spark ${quiet ? 'quiet' : ''}" title="Tool calls per minute, last 10 min">${a.map((v) => `<i style="height:${Math.max(2, (v / Math.max(max, 6)) * 18)}px"></i>`).join('')}</span>`;
+}
+const stateColor = (s) => ({ asking: 'c-ask', working: 'c-work', waiting: 'c-wait', idle: 't2', stopped: 'sub' }[s.glyph]);
+const stuck = (s) => (s.stuck || []).map((r) => `<span class="stuck" title="${esc(r)}">⚑ ${esc(r)}</span>`).join(' ');
+const money = (v) => `$${v.toFixed(2)}`;
+
+function opts(p, big) {
+  const keys = p.trigger === 'permission' ? ['1', '2', 'Esc'] : ['1', '2', '3'];
+  return p.options.map((o, i) => `<button class="btn ${i === 0 ? 'pri' : ''}"><span class="k">${keys[i]}</span>${esc(o)}</button>`).join('')
+    + `<button class="btn ghost">Go to pane</button>`;
+}
+function askBody(p) {
+  return `<div class="tx">${p.trigger === 'permission' ? '<b>Permission</b> · ' : '<b>Question</b> · '}${esc(p.text)}</div>`
+    + (p.cmd ? `<div class="mono cmd">$ ${esc(p.cmd)}</div>` : '')
+    + `<div class="opts">${opts(p)}</div>`;
+}
+function timeline(tl, max = 9) {
+  return `<div class="tl">${tl.slice(0, max).map(([w, t], i) => `<div class="ln ${i ? 'old' : ''}"><span class="win">${w}</span><span class="tx">${esc(t)}</span></div>`).join('')}</div>`;
+}
+function work(w, max = 9) {
+  const rows = [];
+  for (const [sha, msg, age] of w.commits) rows.push(`<div class="r"><span class="sha">${sha.slice(0, 7)}</span><span class="cut">${esc(msg)}</span><span class="age">${age}</span></div>`);
+  for (const [id, t] of w.done) rows.push(`<div class="r"><span class="lst"><span class="si done"></span></span><span class="iss">${id}</span><span class="cut t2">→ Done · ${esc(t)}</span></div>`);
+  for (const [st, path, a, d] of w.files) rows.push(`<div class="r"><span class="fst ${st}">${st}</span><span class="cut mono t2">${esc(path)}</span><span class="mono"><span class="add">+${a}</span> <span class="del">−${d}</span></span></div>`);
+  if (w.total) rows.push(`<div class="r sub"><span class="cut">${w.total} landed</span></div>`);
+  if (w.note) rows.push(`<div class="r sub"><span class="cut">${esc(w.note)}</span></div>`);
+  return `<div class="wk">${rows.slice(0, max).join('') || '<div class="sub">Nothing yet</div>'}</div>`;
+}
+function filesSum(w) {
+  if (w.total) return w.total.replace(' files', ' files landed');
+  if (!w.files.length) return '';
+  const a = w.files.reduce((n, f) => n + f[2], 0), d = w.files.reduce((n, f) => n + f[3], 0);
+  return `${w.files.length} changed <span class="add">+${a}</span> <span class="del">−${d}</span>`;
+}
+function flatTree(nodes, depth = 0, out = []) {
+  for (const n of nodes) { out.push({ ...n, depth }); if (n.kids) flatTree(n.kids, depth + 1, out); }
+  return out;
+}
+function treeCounts(s) {
+  const all = flatTree(s.tree).filter((n) => n.depth > 0);
+  const subs = all.filter((n) => n.k === 'sub'), sh = all.filter((n) => n.k === 'shell' || n.k === 'gate');
+  const live = (l) => l.filter((n) => n.g === 'working' || n.g === 'gate').length;
+  const bits = [];
+  if (subs.length) bits.push(`${subs.length} sub${live(subs) ? ` <span class="c-work">(${live(subs)} live)</span>` : ''}`);
+  if (sh.length) bits.push(`${sh.length} bg`);
+  return bits.join(' · ') || '<span class="c-faint">—</span>';
+}
+
+function header() {
+  const n = (g) => by(g).length;
+  const cost = S.reduce((a, s) => a + s.m.cost, 0);
+  return `<div class="hdr">
+    <h1>Dashboard</h1>
+    <div class="counts">
+      <span class="cpill ask">${glyph('asking')}<b>${n('needs')}</b> need you</span>
+      <span class="cpill">${glyph('working')}<b>${n('working')}</b> working</span>
+      <span class="cpill">${glyph('idle')}<b>${n('idle')}</b> idle</span>
+      <span class="cpill">${glyph('done')}<b>${n('done')}</b> done</span>
+    </div>
+    <div class="hsp"></div>
+    <div class="figs">
+      <span>Today <b>${money(cost)}</b> <span class="sub">API-equiv</span></span>
+      <span><b>8.6M</b> tokens</span>
+      <span><b>14</b> commits</span>
+      <span><b>5</b> issues Done</span>
+      <span class="sep"></span>
+      <span class="rels">
+        <span class="rel">vNext <span class="rb"><i style="width:61%"></i></span>11/18</span>
+        <span class="rel">ops 0.9 <span class="rb"><i style="width:67%"></i></span>6/9</span>
+        <span class="rel">yaat v0.14 <span class="rb"><i style="width:43%"></i></span>3/7</span>
+      </span>
+      <span class="lnsync"><i></i>Linear · 1m ago</span>
+    </div>
+    <div class="seg"><span class="on">By status</span><span>By repo</span></div>
+  </div>`;
+}
+function queue() {
+  return `<div class="queue"><span class="h c-ask" style="color:var(--asking)">Queue</span>${by('needs').map((s) =>
+    `<span class="qchip">${glyph('asking')}<span class="iss">${s.issue.id}</span><span class="cut">${esc(s.pending.trigger === 'permission' ? 'Bash: ' + s.pending.cmd : s.pending.text)}</span><span class="age">${s.age}</span></span>`).join('')}
+    <span class="hsp"></span><span class="sub" style="font-size:11.5px">Oldest first · <span class="mono">Ctrl+J</span> jumps to the next</span></div>`;
+}
+
+/* ---------- Lane A ---------- */
+function laneA() {
+  let h = header() + queue() + `<div class="ta"><div class="cols"><div></div><div>Session</div><div>Linear</div><div>Now</div><div>Summary</div><div>Agents</div><div>Context</div><div>10 min</div><div class="num">Run · last</div><div class="num">Cost</div></div>`;
+  for (const [g, name] of GROUPS) {
+    const list = by(g);
+    h += `<div class="grp ${g === 'needs' ? 'ask' : ''}"><span class="h">${name}</span><span class="n">${list.length}</span></div>`;
+    for (const s of list) {
+      const open = s.id === 's1';
+      h += `<div class="row ${g === 'needs' ? 'askrow' : ''} ${open ? 'open' : ''}" data-row="${s.id}">
+        <div>${glyph(s.glyph)}</div>
+        <div class="two"><div class="l1"><span class="lbl cut">${esc(s.label)}</span></div><div class="l1" style="font-size:11.5px">${repo(s.repo)}<span class="mono sub cut">${s.branch}</span></div></div>
+        <div class="two"><div class="l1">${issueLine(s.issue)}</div><div class="cut t2" style="font-size:11.5px">${esc(s.issue.title)}</div></div>
+        <div class="two"><div class="l1"><b class="${stateColor(s)}" style="font-weight:600">${s.state}</b><span class="sub">· ${s.age}</span>${stuck(s)}</div><div class="cut t2" style="font-size:12px">${esc(s.now)}</div></div>
+        <div class="two"><div class="cut">${esc(s.tl[0][1])}</div><div class="cut sub" style="font-size:11.5px"><span class="win" style="width:auto;margin-right:5px">${s.tl[1] ? s.tl[1][0] : ''}</span>${s.tl[1] ? esc(s.tl[1][1]) : ''}</div></div>
+        <div style="font-size:12px" class="t2">${treeCounts(s)}</div>
+        <div>${ctx(s.m.ctx)}</div>
+        <div>${spark(s.m.act)}</div>
+        <div class="num two" style="align-items:flex-end"><span>${s.m.run}</span><span class="sub" style="font-size:11.5px">${s.m.last} ago</span></div>
+        <div class="num two" style="align-items:flex-end"><span>${money(s.m.cost)}</span><span class="sub" style="font-size:11.5px">${s.m.tin}</span></div>
+      </div>`;
+      if (s.pending) h += `<div class="askb"><div class="q">${askBody(s.pending)}</div></div>`;
+      if (g === 'working' || open) {
+        for (const n of flatTree(s.tree).filter((x) => x.depth > 0)) {
+          h += `<div class="subrow"><div></div><div class="tn"><span class="br ${n.depth > 1 ? 'br2' : ''}">└</span>${glyph(n.g, 'sm')}<span class="cut" style="${n.k === 'sub' ? 'color:var(--text)' : ''}">${esc(n.name)}</span></div>
+          <div class="act cut ${n.act.startsWith('Running') ? 'mono t2' : 't2'}" style="${n.act.startsWith('Running') ? '' : 'font-size:12px'}">${esc(n.act || n.task)}</div>
+          <div class="stk">${n.stuck ? `<span class="stuck">⚑ ${n.stuck}</span>` : ''}</div><div class="age">${n.age}</div></div>`;
+        }
+      }
+      if (open) h += drawerA(s);
+    }
+  }
+  return h + '</div>';
+}
+function drawerA(s) {
+  return `<div class="drawer">
+    <div><div class="h">Running summary <span class="sub" style="text-transform:none;letter-spacing:0;font-weight:400">· newest first · model, 3m ago</span></div>${timeline(s.tl)}
+      <div class="h" style="margin-top:12px">Prompt</div><div class="mono t2 cut">/nextup RT-444 — land the summary wire types, then the daemon side</div></div>
+    <div><div class="h">Recent work <span class="sub" style="text-transform:none;letter-spacing:0;font-weight:400">· ${filesSum(s.work)}</span></div>${work(s.work)}</div>
+    <div><div class="h">Linear <span class="lnsync" style="text-transform:none;letter-spacing:0;font-weight:400"><i></i>synced</span></div>
+      <div style="margin-bottom:4px">${issueLine(s.issue)}</div><div style="margin-bottom:8px">${esc(s.issue.title)}</div>
+      <div class="figgrid"><span class="k">Project</span><span>${s.issue.project}</span><span class="k">Release</span><span>${s.issue.release} · 11/18 done</span><span class="k">Worktree</span><span class="mono cut t2">${s.wt}</span><span class="k">Tokens</span><span class="v">${s.m.tin} in · ${s.m.tout} out</span><span class="k">Started</span><span class="v">13:20 · ${s.m.run}</span></div>
+      <div style="margin-top:8px;display:flex;gap:6px"><button class="btn">Go to pane</button><button class="btn ghost">Open diff</button><button class="btn ghost">Open RT-444</button></div></div>
+  </div>`;
+}
+
+/* ---------- Lane B ---------- */
+function treeB(s, max = 9) {
+  return `<div class="tree">${flatTree(s.tree).slice(0, max).map((n) => `<div class="n" style="padding-left:${n.depth * 14}px">${n.depth ? '<span class="br">└</span>' : ''}${glyph(n.g, 'sm')}
+    <span class="cut ${n.depth ? 't2' : ''}"><span style="${n.k === 'sub' || !n.depth ? 'color:var(--text);font-weight:500' : ''}">${esc(n.name)}</span> <span class="sub">· ${esc(n.act || n.task)}</span></span>
+    ${n.stuck ? `<span class="stuck">⚑ ${n.stuck}</span>` : ''}<span class="age">${n.age}</span></div>`).join('')}</div>`;
+}
+function cardFoot(s) {
+  return `<div class="foot">${ctx(s.m.ctx)}${spark(s.m.act)}<span><b>${s.m.tin}</b> tok</span><span><b>${money(s.m.cost)}</b></span><span>run <b>${s.m.run}</b></span><span class="hsp"></span><span>last <b>${s.m.last}</b> ago</span></div>`;
+}
+function cardTop(s) {
+  return `<div class="top">${glyph(s.glyph)}<span class="lbl cut">${esc(s.label)}</span><span class="hsp"></span>${stuck(s)}<b class="${stateColor(s)}" style="font-weight:600;font-size:12px;white-space:nowrap">${s.state} · ${s.age}</b></div>
+    <div class="meta">${repo(s.repo)}<span class="mono sub cut">${s.branch}</span></div>
+    <div class="linr">${issueLine(s.issue)}<span class="cut t2">${esc(s.issue.title)}</span><span class="hsp"></span><span class="sub" style="white-space:nowrap">${s.issue.release}</span></div>`;
+}
+function laneB() {
+  let h = header() + `<div class="tb">`;
+  h += `<div class="sec ask"><span class="h">Needs you</span><span class="sub">${by('needs').length} · oldest first</span></div><div class="grid g2">`;
+  for (const s of by('needs')) {
+    h += `<div class="card askc">${cardTop(s)}<div class="ask">${askBody(s.pending)}</div>
+      <div class="split"><div><div class="h" style="margin-bottom:4px">Agents</div>${treeB(s)}</div><div><div class="h" style="margin-bottom:4px">Summary</div>${timeline(s.tl, 2)}</div></div>${cardFoot(s)}</div>`;
+  }
+  h += `</div><div class="sec"><span class="h">Working</span><span class="sub">${by('working').length}</span></div><div class="grid g3">`;
+  for (const s of by('working')) {
+    h += `<div class="card">${cardTop(s)}<div class="h" style="margin-bottom:-3px">Agents</div>${treeB(s)}
+      <div class="h" style="margin-bottom:-3px">Summary</div>${timeline(s.tl, 3)}
+      <div class="h" style="margin-bottom:-3px;display:flex;gap:6px">Recent work <span class="sub" style="text-transform:none;letter-spacing:0;font-weight:400">${filesSum(s.work)}</span></div>${work({ ...s.work, files: s.work.files.slice(0, 2), commits: s.work.commits.slice(0, 1) }, 3)}
+      ${cardFoot(s)}</div>`;
+  }
+  h += `</div><div class="grid g3" style="grid-template-columns:1fr 2fr;margin-top:4px">`;
+  h += `<div><div class="sec"><span class="h">Idle</span><span class="sub">${by('idle').length}</span></div>${by('idle').map(miniB).join('')}</div>`;
+  h += `<div><div class="sec"><span class="h">Done</span><span class="sub">${by('done').length}</span></div><div class="grid g2">${by('done').map(miniB).join('')}</div></div></div>`;
+  return h + '</div>';
+}
+function miniB(s) {
+  return `<div class="card mini">${cardTop(s)}<div style="font-size:12.5px">${esc(s.headline)}</div>${work({ ...s.work, files: [] }, 3)}${cardFoot(s)}</div>`;
+}
+
+/* ---------- Lane C ---------- */
+let selC = 's1';
+function laneC() {
+  const left = [];
+  left.push(`<div class="lsec ask"><span class="h">Needs you</span><span class="sub" style="font-size:11px">${by('needs').length}</span></div>`);
+  for (const s of by('needs')) left.push(nodeC(s, true));
+  for (const r of Object.keys(REPOS)) {
+    const list = S.filter((s) => s.repo === r && s.group !== 'needs');
+    const live = S.filter((s) => s.repo === r && (s.group === 'working' || s.group === 'needs')).length;
+    left.push(`<div class="rh"><i style="width:8px;height:8px;border-radius:2px;background:${REPOS[r]};display:inline-block"></i>${r}<span class="n">${live} live · ${S.filter((s) => s.repo === r).length} sessions</span></div>`);
+    for (const s of list) left.push(nodeC(s, false));
+  }
+  return `${header()}<div class="split"><div class="left">${left.join('')}</div><div class="right"><div class="det" id="detC">${detailC(S.find((s) => s.id === selC))}</div></div></div>`;
+}
+function nodeC(s, isAsk) {
+  let h = `<div class="node ${isAsk ? 'askn' : ''} ${s.id === selC ? 'sel' : ''}" data-sel="${s.id}">
+    ${glyph(s.glyph)}<span class="nm"><span class="cut">${esc(s.label)}</span><span class="iss" style="font-weight:400;color:var(--text-2)">${s.issue.id}</span></span><span class="age ${stateColor(s)}">${s.state === 'Working' || s.state === 'In gate' ? '' : s.state + ' · '}${s.age}</span>
+    <span class="ln2 cut">${isAsk ? `${repo(s.repo)} · ` : ''}${esc(s.pending ? (s.pending.cmd ? 'Bash: ' + s.pending.cmd : s.pending.text) : s.headline)}</span>
+    ${s.stuck ? `<span class="ln3">${stuck(s)}</span>` : ''}
+  </div>`;
+  if (!isAsk && (s.group === 'working')) {
+    for (const n of flatTree(s.tree).filter((x) => x.depth > 0)) {
+      h += `<div class="cn ${n.depth > 1 ? 'l2' : ''}"><span class="br">└</span><span class="cut">${glyph(n.g, 'sm')} <span style="${n.k === 'sub' ? 'color:var(--text)' : ''}">${esc(n.name)}</span> <span class="sub">· ${esc(n.act.startsWith('Running') ? n.act.split(':')[0] : (n.act || n.task))}</span></span><span class="age">${n.age}</span></div>`;
+    }
+  }
+  return h;
+}
+function ctxSvg(h) {
+  const H = 56;
+  const pts = h.map((v, i) => `${(i / (h.length - 1)) * 300},${H - (v / 100) * H}`).join(' ');
+  return `<svg class="ctxspark" viewBox="0 0 300 ${H}" preserveAspectRatio="none"><polygon points="0,${H} ${pts} 300,${H}" fill="rgba(108,166,255,.14)"/><line x1="0" x2="300" y1="${H - 0.8 * H}" y2="${H - 0.8 * H}" stroke="#f26d6d" stroke-dasharray="3 3" stroke-width="1" opacity=".6" vector-effect="non-scaling-stroke"/><polyline points="${pts}" fill="none" stroke="#6ca6ff" stroke-width="1.5" vector-effect="non-scaling-stroke"/></svg>`;
+}
+function actLane(s) {
+  const segs = {
+    s1: [[0, 18, 'w'], [18, 22, 'a'], [22, 60, 'w'], [60, 66, 'i'], [66, 100, 'w']],
+    s2: [[38, 80, 'w'], [80, 84, 'a'], [84, 94, 'w'], [94, 100, 'a']],
+    s3: [[70, 97, 'w'], [97, 100, 'a']],
+    s4: [[0, 40, 'w'], [40, 55, 'i'], [55, 100, 'w']],
+    s5: [[10, 30, 'w'], [30, 34, 'a'], [34, 100, 'w']],
+    s6: [[0, 52, 'w'], [52, 100, 'i']],
+    s7: [[20, 82, 'w'], [82, 100, 'd']],
+    s8: [[50, 79, 'w']],
+  };
+  const col = { w: 'var(--working)', a: 'var(--asking)', i: 'var(--faint)', d: 'var(--waiting)' };
+  const row = (id, name) => `<span class="cut t2">${name}</span><span class="trk">${segs[id].map(([a, b, k]) => `<i style="left:${a}%;width:${b - a}%;background:${col[k]};opacity:${id === s.id ? 1 : .55}"></i>`).join('')}</span>`;
+  return `<div class="actlane">${S.map((x) => row(x.id, x.issue.id)).join('')}<span></span><span class="ax"><span>12:32</span><span>13:02</span><span>13:32</span><span>14:02</span><span>now</span></span></div>`;
+}
+function detailC(s) {
+  const t = flatTree(s.tree);
+  const tree = `<div class="dtree">${t.map((n) => `<div class="n"><span class="br">${n.depth ? '   '.repeat(n.depth - 1) + '└─' : ''}</span>${glyph(n.g)}<div class="w"><div class="a">${esc(n.name)} ${n.stuck ? `<span class="stuck">⚑ ${n.stuck}</span>` : ''}</div><div class="b">${esc(n.task)}</div>${n.act ? `<div class="c ${n.act.startsWith('Running') ? 'mono t2' : 'sub'}" style="font-size:${n.act.startsWith('Running') ? '11px' : '12px'}">${esc(n.act)}</div>` : ''}</div><div class="rt">${n.age}</div></div>`).join('')}</div>`;
+  const ask = s.pending ? `<div class="box" style="border-color:rgba(246,188,78,.45);background:var(--ask-wash)"><div class="h" style="color:var(--asking)">${s.pending.trigger === 'permission' ? 'Permission' : 'Question'} · waiting ${s.age}</div>${askBody(s.pending).replace('class="tx"', 'class="tx" style="font-size:13.5px;margin-bottom:8px"')}</div>` : '';
+  return `<div class="dh">${glyph(s.glyph)}<div style="min-width:0"><div class="ttl">${esc(s.label)}</div>
+      <div class="m">${repo(s.repo)}<span class="mono sub">${s.branch}</span><span class="sub">·</span><b class="${stateColor(s)}">${s.state} · ${s.age}</b>${stuck(s)}</div></div>
+      <div class="acts"><button class="btn">Go to pane</button><button class="btn ghost">Open diff</button><button class="btn ghost">Stop</button></div></div>
+    ${ask}
+    <div class="box linbox"><div style="display:flex;gap:8px;align-items:center">${issueLine(s.issue)}<span class="it">${esc(s.issue.title)}</span></div><span class="lnsync"><i></i>Linear · synced 1m ago</span>
+      <div class="sub" style="font-size:12px">${s.issue.project} · release ${s.issue.release} · sub-issues 2/3 done · branch linked</div><span class="sub" style="font-size:12px">Open in Linear ↗</span></div>
+    <div class="cols2">
+      <div class="stackc">
+        <div class="box"><div class="h">Agents <span class="r sub">${treeCounts(s)}</span></div>${tree}</div>
+        <div class="box"><div class="h">Running summary <span class="r sub">newest first · model · 3m ago</span></div><div class="timeline2">${s.tl.map(([w, x], i) => `<span class="w">${w}</span><span class="${i ? 'old' : ''}">${esc(x)}</span>`).join('')}</div></div>
+        <div class="box"><div class="h">Prompt <span class="r sub">first user message</span></div><div class="mono t2">${esc(s.tree[0].task)} — ${esc(s.issue.title)}</div></div>
+      </div>
+      <div class="stackc">
+        <div class="box"><div class="h">Recent work <span class="r sub">${filesSum(s.work)}</span></div>${work(s.work)}</div>
+        <div class="box"><div class="h">Figures</div>
+          <div class="figgrid" style="grid-template-columns:auto 1fr auto 1fr"><span class="k">Context</span><span>${ctx(s.m.ctx)}</span><span class="k">Cost</span><span class="v">${money(s.m.cost)} <span class="sub">API-equiv</span></span>
+            <span class="k">Tokens</span><span class="v">${s.m.tin} in · ${s.m.tout} out</span><span class="k">Runtime</span><span class="v">${s.m.run}</span>
+            <span class="k">Last</span><span class="v">${s.m.last} ago</span><span class="k">10 min</span><span>${spark(s.m.act)}</span></div>
+          ${s.m.ctxh ? `<div class="sub" style="font-size:11px;margin:8px 0 2px">Context, last 2 h <span style="float:right">80% line</span></div>${ctxSvg(s.m.ctxh)}` : ''}
+        </div>
+        <div class="box"><div class="h">Activity · every session, 2 h <span class="r sub"><span class="c-work">■</span> working <span class="c-ask">■</span> asking <span class="c-faint">■</span> idle <span class="c-wait">■</span> finished</span></div>${actLane(s)}</div>
+      </div>
+    </div>`;
+}
+
+/* ---------- Wiring ---------- */
+function render() {
+  document.getElementById('view-a').innerHTML = laneA();
+  document.getElementById('view-b').innerHTML = laneB();
+  document.getElementById('view-c').innerHTML = laneC();
+}
+function show(l) {
+  for (const v of document.querySelectorAll('.view')) v.classList.toggle('on', v.id === 'view-' + l);
+  for (const t of document.querySelectorAll('.lane-tab')) t.classList.toggle('on', t.dataset.lane === l);
+  history.replaceState(null, '', '#' + l);
+}
+document.getElementById('rec-' + RECOMMENDED).hidden = false;
+render();
+document.getElementById('lanes').addEventListener('click', (e) => { const t = e.target.closest('.lane-tab'); if (t) show(t.dataset.lane); });
+document.getElementById('view-c').addEventListener('click', (e) => {
+  const n = e.target.closest('[data-sel]'); if (!n) return;
+  selC = n.dataset.sel; document.getElementById('view-c').innerHTML = laneC();
+});
+document.getElementById('view-a').addEventListener('click', (e) => {
+  const r = e.target.closest('.row'); if (!r || e.target.closest('button')) return;
+  const next = r.nextElementSibling;
+  if (next && next.classList.contains('drawer')) { next.remove(); r.classList.remove('open'); return; }
+  let after = r; while (after.nextElementSibling && after.nextElementSibling.matches('.askb, .subrow')) after = after.nextElementSibling;
+  if (after.nextElementSibling && after.nextElementSibling.classList.contains('drawer')) { after.nextElementSibling.remove(); r.classList.remove('open'); return; }
+  const s = S.find((x) => x.id === r.dataset.row);
+  after.insertAdjacentHTML('afterend', drawerA(s)); r.classList.add('open');
+});
+show((location.hash || '#a').slice(1) || 'a');
+</script>
+</body>
+</html>
