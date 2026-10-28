@@ -485,7 +485,7 @@ pub(super) type WsClient = tokio_tungstenite::WebSocketStream<tokio::net::TcpStr
 /// Serve `app` on a scratch loopback listener and return the bound port. The
 /// serving task lives until the test's runtime ends.
 async fn scratch_listener(app: axum::Router) -> u16 {
-    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+    let listener = super::bind_loopback()
         .await
         .expect("bind a scratch listener");
     let addr = listener.local_addr().expect("the bound address");

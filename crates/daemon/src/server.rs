@@ -311,6 +311,16 @@ fn spawn_attention_forwarder(
     });
 }
 
+/// Binds the daemon's loopback listener on an OS-chosen port of 127.0.0.1.
+/// The socket never sets `SO_REUSEADDR`: on Windows that keeps any other
+/// socket from binding the same address and port, which the client's
+/// connect-then-prove relies on.
+pub(crate) async fn bind_loopback() -> anyhow::Result<tokio::net::TcpListener> {
+    tokio::net::TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+        .await
+        .context("binding loopback listener")
+}
+
 pub async fn run(
     state: Arc<AppState>,
     dirs: Dirs,
@@ -408,10 +418,7 @@ pub async fn run(
     let app = build_loopback_router(hub.clone());
 
     let bind_start = std::time::Instant::now();
-    let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .context("binding loopback listener")?;
+    let listener = bind_loopback().await?;
     let bound = listener.local_addr().context("local addr")?;
     info!(
         port = bound.port(),
@@ -851,5 +858,37 @@ mod child_env_probe {
     /// The last spec's `env` and `env_remove`, clearing the record.
     pub fn take_both() -> Option<Recorded> {
         LAST.with(|last| last.borrow_mut().take())
+    }
+}
+
+#[cfg(test)]
+#[expect(clippy::expect_used, reason = "tests assert preconditions with expect")]
+mod tests {
+    use std::net::{Ipv4Addr, SocketAddr};
+
+    use super::bind_loopback;
+
+    /// A socket that sets `SO_REUSEADDR` still cannot take the daemon's
+    /// loopback port: on Windows the daemon's socket keeps the address
+    /// exclusive, which the client's connect-then-prove relies on.
+    #[tokio::test]
+    async fn loopback_listener_refuses_a_second_reuseaddr_bind_on_its_port() {
+        let listener = bind_loopback()
+            .await
+            .expect("bind the daemon's loopback listener");
+        let port = listener.local_addr().expect("the bound address").port();
+        let socket = tokio::net::TcpSocket::new_v4().expect("create a socket");
+        socket.set_reuseaddr(true).expect("set SO_REUSEADDR");
+        let err = socket
+            .bind(SocketAddr::from((Ipv4Addr::LOCALHOST, port)))
+            .expect_err("a second bind with SO_REUSEADDR must be refused");
+        #[cfg(windows)]
+        assert_eq!(
+            err.raw_os_error(),
+            Some(10013),
+            "the refusal must be WSAEACCES: {err}"
+        );
+        #[cfg(not(windows))]
+        let _ = err.raw_os_error();
     }
 }
