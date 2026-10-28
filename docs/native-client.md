@@ -33,6 +33,8 @@ This doc records the decisions a change to the client needs to know; what each f
 
   Below a separator sit `Open in Explorer`, `Open in VS Code` and `Copy path`; the danger Remove row follows below another separator. Explorer and Copy path act on a repo's folder; a workspace has no single folder, so both are disabled with the tooltip `This container has no folder`, as is VS Code when a workspace yields neither a linked file nor a folder.
 
+  Opening the menu checks off the UI thread that each target still exists; the rows stay enabled while it runs, and a gone target disables its row with `This folder no longer exists`, `This workspace file no longer exists` or `None of this workspace's folders exist` (Copy path is never disabled, and a host that opens no local files runs no check). A workspace whose member folders are partly gone opens only the ones that exist, and an open whose target vanished after the check toasts `Couldn't open` with `{path} no longer exists`.
+
   VS Code opens a repo's folder; a workspace opens its linked `.code-workspace` file when one is set, else its member folders in member order as one multi-root window (`--add` for each after the first), skipping members with no folder. When VS Code is missing, the folder opens in the file manager or the workspace file in its default app, under the `VS Code not found` warning toast.
 
   A repo or workspace whose stored spawn config has launched before draws a two-line 46 px row.

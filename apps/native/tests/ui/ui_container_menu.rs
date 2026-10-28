@@ -742,6 +742,154 @@ fn vscode_missing_falls_back_to_the_file_manager_and_default_app(cx: &mut TestAp
 }
 
 #[gpui::test]
+fn two_vscode_opens_in_one_view_record_their_own_paths(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    // A workspace folds its members' rows into its own, so r1 stays out of
+    // it to keep a row of its own.
+    let fixture = with_workspace(&["r2"], Some("D:/ws/team.code-workspace"));
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.fail_vscode_opens();
+    open(&mut h, "container-repo:r1");
+    h.click_on("container-menu-vscode");
+    open(&mut h, "container-ws:ws1");
+    h.click_on("container-menu-vscode");
+
+    assert_eq!(
+        h.opened(),
+        [
+            Opened::DefaultApp(PathBuf::from("D:/src/r1")),
+            Opened::DefaultApp(PathBuf::from("D:/ws/team.code-workspace")),
+        ],
+        "each fallback opens the path its own row named, in click order"
+    );
+}
+
+#[gpui::test]
+fn vscode_missing_falls_back_to_the_first_member_folder_that_exists(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &with_workspace(&["r1", "r2"], None));
+    h.fail_vscode_opens();
+    open(&mut h, "container-ws:ws1");
+    // Gone after the menu's check, so the job still names it.
+    h.missing_path("D:/src/r1");
+    h.click_on("container-menu-vscode");
+
+    assert_eq!(
+        h.opened(),
+        [Opened::DefaultApp(PathBuf::from("D:/src/r2"))],
+        "the fallback skips the member folder that is gone"
+    );
+}
+
+fn tip(h: &mut Harness<'_>, selector: &str) -> Option<String> {
+    h.root(|root, _| root.container_menu_disabled_tip(selector))
+}
+
+#[gpui::test]
+fn explorer_is_disabled_when_the_repo_folder_is_gone(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_repos());
+    h.missing_path("D:/src/r1");
+    open(&mut h, "container-repo:r1");
+
+    for selector in ["container-menu-explorer", "container-menu-vscode"] {
+        assert_eq!(
+            tip(&mut h, selector).as_deref(),
+            Some("This folder no longer exists"),
+            "{selector} is disabled"
+        );
+    }
+    assert_eq!(
+        tip(&mut h, "container-menu-copy-path"),
+        None,
+        "a stale path can still be copied"
+    );
+    h.click_on("container-menu-explorer");
+    assert_eq!(h.opened(), [], "the disabled Explorer row opens nothing");
+
+    h.keys("escape");
+    open(&mut h, "container-repo:r2");
+    assert_eq!(
+        tip(&mut h, "container-menu-explorer"),
+        None,
+        "a folder that exists opens"
+    );
+}
+
+#[gpui::test]
+fn vscode_is_disabled_when_the_linked_workspace_file_is_gone(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = with_workspace(&["r1", "r2"], Some("D:/ws/team.code-workspace"));
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.missing_path("D:/ws/team.code-workspace");
+    open(&mut h, "container-ws:ws1");
+
+    assert_eq!(
+        tip(&mut h, "container-menu-vscode").as_deref(),
+        Some("This workspace file no longer exists")
+    );
+    h.click_on("container-menu-vscode");
+    assert_eq!(h.opened(), [], "the disabled VS Code row opens nothing");
+}
+
+#[gpui::test]
+fn vscode_opens_only_the_member_folders_that_still_exist(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &with_workspace(&["r1", "r2"], None));
+    h.missing_path("D:/src/r1");
+    open(&mut h, "container-ws:ws1");
+
+    assert_eq!(
+        tip(&mut h, "container-menu-vscode"),
+        None,
+        "a workspace with one member left still opens"
+    );
+    h.click_on("container-menu-vscode");
+    assert_eq!(
+        h.opened(),
+        [Opened::VsCodeFolder(vec![PathBuf::from("D:/src/r2")])],
+        "only the member that exists opens"
+    );
+
+    h.missing_path("D:/src/r2");
+    open(&mut h, "container-ws:ws1");
+    assert_eq!(
+        tip(&mut h, "container-menu-vscode").as_deref(),
+        Some("None of this workspace's folders exist")
+    );
+}
+
+#[gpui::test]
+fn a_target_that_vanishes_after_the_menu_opened_toasts_instead_of_opening(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_repos());
+    open(&mut h, "container-repo:r1");
+    assert_eq!(
+        tip(&mut h, "container-menu-vscode"),
+        None,
+        "the folder was there when the menu opened"
+    );
+    h.missing_path("D:/src/r1");
+    h.click_on("container-menu-vscode");
+
+    assert_eq!(h.opened(), [], "nothing opens a folder that is gone");
+    let errors: Vec<(String, Option<String>)> = h.root(|root, _| {
+        root.toasts()
+            .iter()
+            .filter(|toast| toast.kind == ToastKind::Error)
+            .map(|toast| (toast.title.clone(), toast.detail.clone()))
+            .collect()
+    });
+    assert_eq!(
+        errors,
+        [(
+            "Couldn't open".to_owned(),
+            Some("D:/src/r1 no longer exists".to_owned())
+        )]
+    );
+}
+
+#[gpui::test]
 fn workspace_explorer_and_copy_are_disabled(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut fixture = with_workspace(&["r1", "r2"], None);

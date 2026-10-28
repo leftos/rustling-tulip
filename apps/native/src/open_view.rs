@@ -489,12 +489,34 @@ impl RootView {
                 self.open_in_default_app(path, fallback, window, cx);
             }
             (Err(OpenFailure::VsCodeNotFound), OpenJob::VsCodeFolder(paths)) => {
-                if let Some(path) = paths.first() {
-                    tracing::warn!(path = %path.display(), "VS Code not found; opening the folder in the file manager");
-                    self.open_in_default_app(path.clone(), fallback, window, cx);
-                } else {
+                let Some(first) = paths.first().cloned() else {
                     tracing::warn!("VS Code not found and the job names no folder");
-                }
+                    return;
+                };
+                let opener = Arc::clone(&self.opener);
+                let probe = cx
+                    .background_executor()
+                    .spawn(async move { paths.into_iter().find(|path| opener.path_exists(path)) });
+                cx.spawn_in(window, async move |this, cx| {
+                    let present = probe.await;
+                    // Fails only when the view is gone, leaving nowhere to report.
+                    this.update_in(cx, |root, window, cx| {
+                        if let Some(path) = present {
+                            tracing::warn!(path = %path.display(), "VS Code not found; opening the folder in the file manager");
+                            root.open_in_default_app(path, fallback, window, cx);
+                        } else {
+                            tracing::warn!(path = %first.display(), "VS Code not found and no folder of the job still exists");
+                            root.push_toast(
+                                ToastKind::Error,
+                                COULD_NOT_OPEN,
+                                Some(format!("{} no longer exists", first.display())),
+                                cx,
+                            );
+                        }
+                    })
+                    .ok();
+                })
+                .detach();
             }
             (Err(OpenFailure::VsCodeNotFound), OpenJob::VsCodeWorkspace(path)) => {
                 tracing::warn!(path = %path.display(), "VS Code not found; opening the workspace file in its default app");

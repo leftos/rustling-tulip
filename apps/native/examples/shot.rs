@@ -495,6 +495,12 @@ impl Opener for NoOpener {
     fn existing(&self, _reading: &Path) -> Option<Result<PathBuf, String>> {
         None
     }
+
+    /// The shot's fake paths count as present, so its menus draw their open
+    /// rows enabled.
+    fn path_exists(&self, _path: &Path) -> bool {
+        true
+    }
 }
 
 /// A notifier that shows nothing and reports notifications on.

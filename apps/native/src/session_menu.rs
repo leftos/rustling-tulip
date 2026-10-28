@@ -2,6 +2,8 @@
 //! overlay: rendering and forwarding to [`crate::session_actions`].
 
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, Context, Div, ElementId, Entity, FocusHandle,
@@ -359,8 +361,12 @@ struct ContainerFacts<'a> {
     presets: &'a MenuPresets,
     /// Explorer has a folder to open.
     has_folder: bool,
+    /// Why Explorer's folder no longer opens, once the check found it gone.
+    folder_gone: Option<&'static str>,
     /// VS Code has a folder or workspace file to open.
     has_vscode_job: bool,
+    /// Why VS Code's target no longer opens, once the check found it gone.
+    vscode_gone: Option<&'static str>,
     /// Copy path has a path to copy.
     has_copy_path: bool,
     /// Why this host opens no local files, when it does not.
@@ -368,9 +374,14 @@ struct ContainerFacts<'a> {
 }
 
 /// The state of an Explorer or VS Code row: disabled when the container has
-/// nothing to open, or this host opens no local files.
-fn open_row_state(has_target: bool, refusal: Option<&'static str>) -> RowState {
-    match (has_target, refusal) {
+/// nothing to open, when this host opens no local files, or when its target
+/// no longer exists, the first of these that holds giving the tip.
+fn open_row_state(
+    has_target: bool,
+    gone: Option<&'static str>,
+    refusal: Option<&'static str>,
+) -> RowState {
+    match (has_target, refusal.or(gone)) {
         (false, _) => RowState::Disabled(CONTAINER_NO_FOLDER_TIP.to_owned()),
         (true, Some(tip)) => RowState::Disabled(tip.to_owned()),
         (true, None) => RowState::Enabled,
@@ -428,13 +439,21 @@ fn container_row_groups(facts: &ContainerFacts<'_>) -> Vec<Vec<ContainerRow>> {
         ContainerRow::new(
             CONTAINER_EXPLORER_ROW,
             "Open in Explorer",
-            open_row_state(facts.has_folder, facts.local_files_refusal),
+            open_row_state(
+                facts.has_folder,
+                facts.folder_gone,
+                facts.local_files_refusal,
+            ),
             ContainerAction::Explorer,
         ),
         ContainerRow::new(
             CONTAINER_VSCODE_ROW,
             "Open in VS Code",
-            open_row_state(facts.has_vscode_job, facts.local_files_refusal),
+            open_row_state(
+                facts.has_vscode_job,
+                facts.vscode_gone,
+                facts.local_files_refusal,
+            ),
             ContainerAction::VsCode,
         ),
         ContainerRow::new(
@@ -555,6 +574,31 @@ const CONTAINER_COPY_PATH_ROW: &str = "container-menu-copy-path";
 /// Why an open row is disabled: a workspace has no single folder, and a
 /// workspace whose members have none leaves VS Code nothing to open.
 const CONTAINER_NO_FOLDER_TIP: &str = "This container has no folder";
+/// Why an open row is disabled once the check found its target gone: a
+/// repo's folder, a workspace's linked file, or every member folder.
+const CONTAINER_FOLDER_GONE_TIP: &str = "This folder no longer exists";
+const CONTAINER_WORKSPACE_FILE_GONE_TIP: &str = "This workspace file no longer exists";
+const CONTAINER_MEMBERS_GONE_TIP: &str = "None of this workspace's folders exist";
+
+/// What the check run when a container menu opens found of the folders and
+/// workspace file its open rows target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum MenuTargets {
+    /// The check still runs, or none runs: every target counts as present.
+    Checking,
+    /// The check reported these targets gone.
+    Known { missing: Vec<PathBuf> },
+}
+
+/// Mints the token each container menu open gives its target check.
+static NEXT_TARGET_CHECK: AtomicU64 = AtomicU64::new(0);
+
+/// Whether a target check's report, minted as `reported`, fills a menu that
+/// holds the token `held` and shows `targets`: only its own open's check,
+/// and only while it still waits.
+fn check_applies(targets: &MenuTargets, held: u64, reported: u64) -> bool {
+    held == reported && *targets == MenuTargets::Checking
+}
 
 /// The submenu that replaces the container menu's rows, if any.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -644,6 +688,12 @@ pub(crate) struct ContainerMenu {
     /// The presets its preset rows show; a tab container's list stays
     /// empty and unshown.
     presets: MenuPresets,
+    /// Which of its open rows' targets are gone; the rows stay enabled
+    /// while the check runs.
+    targets: MenuTargets,
+    /// The token of this open's target check; a report carrying another
+    /// open's token is dropped.
+    check: u64,
     /// The selector of the row the keys act on, drawn as if hovered.
     highlight: Option<String>,
     /// The sidebar row a key opened the menu from, which Escape focuses
@@ -1080,7 +1130,9 @@ impl RootView {
             launch,
             presets: &menu.presets,
             has_folder: self.container_folder(container).is_some(),
+            folder_gone: self.container_folder_gone(container),
             has_vscode_job: self.container_vscode_job(container).is_some(),
+            vscode_gone: self.container_vscode_gone(container),
             has_copy_path: self.container_copy_path(container).is_some(),
             local_files_refusal: self.capabilities().local_files_refusal(),
         }
@@ -1518,14 +1570,125 @@ impl RootView {
             submenu: ContainerSubmenu::None,
             max_height: window.viewport_size().height * MENU_MAX_SHARE,
             presets,
+            targets: MenuTargets::Checking,
+            check: NEXT_TARGET_CHECK.fetch_add(1, Ordering::Relaxed),
             highlight: None,
             return_to: None,
         });
         if let Some(target) = target {
             self.send(ClientMessage::ListPresets { target });
         }
+        self.check_container_targets(window, cx);
         self.menu_focus.focus(window);
         cx.notify();
+    }
+
+    /// Checks off the UI thread whether the open menu's Explorer and VS
+    /// Code targets still exist. Nothing is checked on a host that opens no
+    /// local files, whose rows are disabled anyway.
+    fn check_container_targets(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.capabilities().local_files_refusal().is_some() {
+            return;
+        }
+        let Some((container, check)) = self
+            .container_menu
+            .as_ref()
+            .map(|menu| (menu.container.clone(), menu.check))
+        else {
+            return;
+        };
+        let mut paths: Vec<PathBuf> = self.container_folder(&container).into_iter().collect();
+        let vscode_job = self.container_vscode_job(&container);
+        for path in vscode_job.iter().flat_map(OpenJob::target_paths) {
+            if !paths.contains(path) {
+                paths.push(path.clone());
+            }
+        }
+        if paths.is_empty() {
+            return;
+        }
+        let opener = Arc::clone(&self.opener);
+        let probe = cx.background_executor().spawn(async move {
+            paths
+                .into_iter()
+                .filter(|path| !opener.path_exists(path))
+                .collect::<Vec<PathBuf>>()
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let missing = probe.await;
+            // Fails only when the view is gone, and the menu with it.
+            this.update_in(cx, |root, _, cx| {
+                root.on_container_targets(&container, check, missing, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// A target check's report fills the open menu when that menu is the
+    /// open the check ran for and still waits for it; any other is dropped.
+    fn on_container_targets(
+        &mut self,
+        container: &MenuContainer,
+        check: u64,
+        missing: Vec<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        let waiting = self
+            .container_menu
+            .as_mut()
+            .filter(|menu| check_applies(&menu.targets, menu.check, check));
+        let Some(menu) = waiting else {
+            tracing::debug!(?container, "dropping a target check no open menu waits for");
+            return;
+        };
+        if !missing.is_empty() {
+            tracing::info!(
+                ?container,
+                ?missing,
+                "container menu targets no longer exist"
+            );
+        }
+        menu.targets = MenuTargets::Known { missing };
+        cx.notify();
+    }
+
+    /// The open menu's targets its check found gone; none until it reports.
+    fn container_missing(&self) -> &[PathBuf] {
+        match self.container_menu.as_ref().map(|menu| &menu.targets) {
+            Some(MenuTargets::Known { missing }) => missing,
+            Some(MenuTargets::Checking) | None => &[],
+        }
+    }
+
+    /// Why Explorer's folder no longer opens, once the check found it gone.
+    fn container_folder_gone(&self, container: &MenuContainer) -> Option<&'static str> {
+        let folder = self.container_folder(container)?;
+        self.container_missing()
+            .contains(&folder)
+            .then_some(CONTAINER_FOLDER_GONE_TIP)
+    }
+
+    /// Why VS Code's target no longer opens, once the check found it gone: a
+    /// repo's folder, a workspace's linked file, or every member folder.
+    fn container_vscode_gone(&self, container: &MenuContainer) -> Option<&'static str> {
+        let missing = self.container_missing();
+        match container {
+            MenuContainer::Repo(_) => self.container_folder_gone(container),
+            MenuContainer::Workspace(id) => {
+                match workspace_vscode_target(self.sidebar.workspaces(), self.sidebar.repos(), id)?
+                {
+                    VsCodeTarget::WorkspaceFile(path) => missing
+                        .contains(&path)
+                        .then_some(CONTAINER_WORKSPACE_FILE_GONE_TIP),
+                    VsCodeTarget::Folders(paths) => paths
+                        .iter()
+                        .all(|path| missing.contains(path))
+                        .then_some(CONTAINER_MEMBERS_GONE_TIP),
+                }
+            }
+            MenuContainer::Tab(_) => None,
+        }
     }
 
     /// A `Presets` reply fills the open menu's preset rows when it is that
@@ -1593,16 +1756,23 @@ impl RootView {
     }
 
     /// The job Open in VS Code hands the opener: a repo's folder, a
-    /// workspace's linked `.code-workspace` file, or its member folders.
+    /// workspace's linked `.code-workspace` file, or its member folders
+    /// less those the menu's check found gone.
     fn container_vscode_job(&self, container: &MenuContainer) -> Option<OpenJob> {
         match container {
             MenuContainer::Repo(id) => repo_folder(self.sidebar.repos(), id)
                 .map(|folder| OpenJob::VsCodeFolder(vec![folder])),
             MenuContainer::Workspace(id) => {
+                let missing = self.container_missing();
                 workspace_vscode_target(self.sidebar.workspaces(), self.sidebar.repos(), id).map(
                     |target| match target {
                         VsCodeTarget::WorkspaceFile(path) => OpenJob::VsCodeWorkspace(path),
-                        VsCodeTarget::Folders(paths) => OpenJob::VsCodeFolder(paths),
+                        VsCodeTarget::Folders(paths) => OpenJob::VsCodeFolder(
+                            paths
+                                .into_iter()
+                                .filter(|path| !missing.contains(path))
+                                .collect(),
+                        ),
                     },
                 )
             }
@@ -3642,7 +3812,9 @@ mod tests {
             launch: LaunchFact::Ready,
             presets,
             has_folder: true,
+            folder_gone: None,
             has_vscode_job: true,
+            vscode_gone: None,
             has_copy_path: true,
             local_files_refusal: None,
         }
@@ -3677,6 +3849,26 @@ mod tests {
 
     fn state(groups: &[Vec<ContainerRow>], selector: &str) -> Option<RowState> {
         row(groups, selector).map(|row| row.state.clone())
+    }
+
+    #[test]
+    fn a_reopened_menu_ignores_the_previous_opens_check() {
+        let checking = MenuTargets::Checking;
+        assert!(
+            !check_applies(&checking, 2, 1),
+            "the previous open's check fills nothing"
+        );
+        assert!(
+            check_applies(&checking, 2, 2),
+            "the open's own check fills it"
+        );
+        let known = MenuTargets::Known {
+            missing: Vec::new(),
+        };
+        assert!(
+            !check_applies(&known, 2, 2),
+            "a menu that has its report takes no second"
+        );
     }
 
     #[test]

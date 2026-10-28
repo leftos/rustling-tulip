@@ -252,6 +252,9 @@ fn sidebar_part_shown(root: &RootView, selector: &str) -> Option<bool> {
     if let Some(shown) = container_banner_part_shown(root, selector) {
         return Some(shown);
     }
+    if let Some(shown) = container_row_shown(root, selector) {
+        return Some(shown);
+    }
     let containers = || {
         root.sidebar_containers()
             .into_iter()
@@ -277,6 +280,37 @@ fn sidebar_part_shown(root: &RootView, selector: &str) -> Option<bool> {
     } else {
         Some(listed(selector.strip_prefix("leaf-")?))
     }
+}
+
+/// The prefixes a sidebar container's key starts with, and the keys that
+/// are a whole key on their own.
+const CONTAINER_KEY_PREFIXES: &[&str] = &["ws:", "repo:", "standalone:", "cwd:", "tab:"];
+const CONTAINER_BARE_KEYS: &[&str] = &["detached", "unbound"];
+
+/// Whether the sidebar lists the container a `container-<key>` row selector
+/// names, as the last painted frame may still hold the bounds of a row the
+/// sidebar no longer draws. A part of a listed container's row
+/// (`container-<key>-name`) is left to the other checks; `None` for any
+/// selector that names no container key.
+fn container_row_shown(root: &RootView, selector: &str) -> Option<bool> {
+    let rest = selector.strip_prefix("container-")?;
+    let names_a_key = CONTAINER_KEY_PREFIXES
+        .iter()
+        .any(|prefix| rest.starts_with(prefix))
+        || CONTAINER_BARE_KEYS.contains(&rest);
+    if !names_a_key {
+        return None;
+    }
+    let keys: Vec<String> = root
+        .sidebar_containers()
+        .into_iter()
+        .map(|container| container.key)
+        .collect();
+    if keys.iter().any(|key| key == rest) {
+        return Some(true);
+    }
+    let part_of_listed = keys.iter().any(|key| rest.starts_with(&format!("{key}-")));
+    (!part_of_listed).then_some(false)
 }
 
 /// Whether the folder banner of the DIR or SH container a
@@ -787,6 +821,8 @@ pub struct OpenRecorder {
     mapped_hosts: Mutex<Vec<String>>,
     /// Every VS Code job reports VS Code missing while this is set.
     vscode_missing: Mutex<bool>,
+    /// The paths a spec marked gone; every other path exists.
+    missing: Mutex<Vec<PathBuf>>,
 }
 
 impl OpenRecorder {
@@ -882,6 +918,17 @@ impl Opener for OpenRecorder {
                 })
                 .map_err(|err| err.to_string()),
         )
+    }
+
+    /// Every path exists unless a spec marked it gone; the disk is never
+    /// looked at, since the specs name paths no machine has.
+    fn path_exists(&self, path: &Path) -> bool {
+        !self
+            .missing
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .any(|gone| gone == path)
     }
 }
 
@@ -1159,6 +1206,15 @@ impl<'a> Harness<'a> {
             .vscode_missing
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = true;
+    }
+
+    /// Makes `path` gone: the opener reports it missing from now on.
+    pub fn missing_path(&self, path: &str) {
+        self.opener
+            .missing
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(PathBuf::from(path));
     }
 
     /// Everything the opener was asked to open, oldest first, once the view

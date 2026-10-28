@@ -128,6 +128,11 @@ pub trait Opener: Send + Sync {
     /// why an existing reading could not be canonicalized. Only asked about
     /// a reading on a network host once that host passed the allowlist.
     fn existing(&self, reading: &Path) -> Option<Result<PathBuf, String>>;
+
+    /// Whether `path` exists right now. A container menu asks it of the
+    /// folders and workspace file its open rows target, and every folder or
+    /// workspace job asks it before it opens one.
+    fn path_exists(&self, path: &Path) -> bool;
 }
 
 /// Why an open did not happen.
@@ -181,6 +186,10 @@ impl Opener for SystemOpener {
 
     fn existing(&self, reading: &Path) -> Option<Result<PathBuf, String>> {
         existing_on_disk(reading)
+    }
+
+    fn path_exists(&self, path: &Path) -> bool {
+        path.exists()
     }
 }
 
@@ -286,15 +295,44 @@ pub enum JobOutcome {
 }
 
 impl OpenJob {
-    /// Hands the job to `opener`. Blocks, so it runs off the UI thread.
+    /// The folders and workspace file the job opens, which must still exist
+    /// for it to open them; empty for any other job.
+    #[must_use]
+    pub fn target_paths(&self) -> &[PathBuf] {
+        match self {
+            Self::Folder(path) | Self::VsCodeWorkspace(path) => std::slice::from_ref(path),
+            Self::VsCodeFolder(paths) => paths,
+            Self::Url(_) | Self::VsCode { .. } | Self::DefaultApp { .. } | Self::Reveal(_) => &[],
+        }
+    }
+
+    /// Hands the job to `opener`. Blocks, so it runs off the UI thread. A
+    /// folder or workspace file that no longer exists fails the job before
+    /// the opener sees it; a multi-root job drops its missing folders and
+    /// fails only when none is left.
     ///
     /// # Errors
     /// Why the opener did not open it.
     pub fn run(&self, opener: &dyn Opener) -> Result<JobOutcome, OpenFailure> {
+        let gone =
+            |path: &Path| OpenFailure::Failed(format!("{} no longer exists", path.display()));
         match self {
             Self::Url(url) => opener.url(url).map_err(OpenFailure::Failed),
             Self::VsCode { path, line, column } => opener.vscode(path, *line, *column),
-            Self::VsCodeFolder(paths) => opener.vscode_folder(paths),
+            Self::VsCodeFolder(paths) => {
+                let present: Vec<PathBuf> = paths
+                    .iter()
+                    .filter(|path| opener.path_exists(path))
+                    .cloned()
+                    .collect();
+                match paths.first() {
+                    Some(first) if present.is_empty() => Err(gone(first)),
+                    _ => opener.vscode_folder(&present),
+                }
+            }
+            Self::VsCodeWorkspace(path) | Self::Folder(path) if !opener.path_exists(path) => {
+                Err(gone(path))
+            }
             Self::VsCodeWorkspace(path) => opener.vscode_workspace(path),
             Self::DefaultApp {
                 path,
@@ -834,13 +872,14 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Mutex, PoisonError};
 
     use protocol::{RepoEntry, SessionSnapshot, WorkspaceEntry};
     use serde_json::json;
 
     use super::{
-        OpenAction, OpenFailure, Opener, Resolution, VsCodeTarget, base_dirs, copy_path,
-        existing_on_disk, repo_folder, resolve_with, runs_code, simplify_path, unc_host,
+        JobOutcome, OpenAction, OpenFailure, OpenJob, Opener, Resolution, VsCodeTarget, base_dirs,
+        copy_path, existing_on_disk, repo_folder, resolve_with, runs_code, simplify_path, unc_host,
         validate_http_url, workspace_vscode_target,
     };
     use crate::links::TerminalLinkCandidate;
@@ -921,6 +960,10 @@ mod tests {
 
         fn existing(&self, _: &Path) -> Option<Result<PathBuf, String>> {
             None
+        }
+
+        fn path_exists(&self, _: &Path) -> bool {
+            true
         }
     }
 
@@ -1420,5 +1463,144 @@ mod tests {
             simplify_path(&PathBuf::from(r"\\?\Volume{abc}\file.txt")),
             PathBuf::from(r"\\?\Volume{abc}\file.txt")
         );
+    }
+
+    /// An opener on which the `gone` paths do not exist, recording every
+    /// open it is asked for.
+    struct GonePaths {
+        gone: Vec<PathBuf>,
+        asked: Mutex<Vec<String>>,
+    }
+
+    impl GonePaths {
+        fn new(gone: &[&str]) -> Self {
+            Self {
+                gone: gone.iter().map(PathBuf::from).collect(),
+                asked: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn ask(&self, what: String) {
+            self.asked
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(what);
+        }
+
+        fn asked(&self) -> Vec<String> {
+            self.asked
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone()
+        }
+    }
+
+    impl Opener for GonePaths {
+        fn url(&self, url: &str) -> Result<(), String> {
+            self.ask(format!("url {url}"));
+            Ok(())
+        }
+
+        fn vscode(&self, path: &Path, _: u32, _: u32) -> Result<(), OpenFailure> {
+            self.ask(format!("vscode {}", path.display()));
+            Ok(())
+        }
+
+        fn vscode_folder(&self, paths: &[PathBuf]) -> Result<(), OpenFailure> {
+            self.ask(format!("vscode_folder {paths:?}"));
+            Ok(())
+        }
+
+        fn vscode_workspace(&self, path: &Path) -> Result<(), OpenFailure> {
+            self.ask(format!("vscode_workspace {}", path.display()));
+            Ok(())
+        }
+
+        fn default_app(&self, path: &Path) -> Result<(), String> {
+            self.ask(format!("default_app {}", path.display()));
+            Ok(())
+        }
+
+        fn reveal(&self, path: &Path) -> Result<(), String> {
+            self.ask(format!("reveal {}", path.display()));
+            Ok(())
+        }
+
+        fn mapped_unc_hosts(&self) -> Vec<String> {
+            Vec::new()
+        }
+
+        fn is_dangerous_type(&self, _: &str) -> bool {
+            false
+        }
+
+        fn existing(&self, _: &Path) -> Option<Result<PathBuf, String>> {
+            None
+        }
+
+        fn path_exists(&self, path: &Path) -> bool {
+            !self.gone.iter().any(|gone| gone == path)
+        }
+    }
+
+    #[test]
+    fn an_open_job_for_a_missing_path_fails_without_calling_the_opener() {
+        let gone = "D:/src/gone";
+        let jobs = [
+            OpenJob::Folder(PathBuf::from(gone)),
+            OpenJob::VsCodeFolder(vec![PathBuf::from(gone)]),
+            OpenJob::VsCodeWorkspace(PathBuf::from(gone)),
+        ];
+        for job in jobs {
+            let opener = GonePaths::new(&[gone]);
+            assert_eq!(
+                job.run(&opener),
+                Err(OpenFailure::Failed(
+                    "D:/src/gone no longer exists".to_owned()
+                )),
+                "{job:?} fails naming the path"
+            );
+            assert_eq!(
+                opener.asked(),
+                Vec::<String>::new(),
+                "{job:?} opens nothing"
+            );
+        }
+
+        let opener = GonePaths::new(&[gone]);
+        assert_eq!(
+            OpenJob::Folder(PathBuf::from("D:/src/here")).run(&opener),
+            Ok(JobOutcome::Opened),
+            "a folder that exists still opens"
+        );
+        assert_eq!(opener.asked(), ["default_app D:/src/here"]);
+    }
+
+    #[test]
+    fn an_open_job_drops_missing_member_folders_and_opens_the_rest() {
+        let opener = GonePaths::new(&["D:/src/a", "D:/src/c"]);
+        let job = OpenJob::VsCodeFolder(
+            ["D:/src/a", "D:/src/b", "D:/src/c", "D:/src/d"]
+                .map(PathBuf::from)
+                .to_vec(),
+        );
+        assert_eq!(job.run(&opener), Ok(JobOutcome::Opened));
+        assert_eq!(
+            opener.asked(),
+            [format!(
+                "vscode_folder {:?}",
+                [PathBuf::from("D:/src/b"), PathBuf::from("D:/src/d")]
+            )],
+            "only the members that exist open, in their order"
+        );
+
+        let opener = GonePaths::new(&["D:/src/a", "D:/src/b"]);
+        let job = OpenJob::VsCodeFolder(["D:/src/a", "D:/src/b"].map(PathBuf::from).to_vec());
+        assert_eq!(
+            job.run(&opener),
+            Err(OpenFailure::Failed("D:/src/a no longer exists".to_owned())),
+            "with no member left the job fails naming the first"
+        );
+        assert_eq!(opener.asked(), Vec::<String>::new());
     }
 }
