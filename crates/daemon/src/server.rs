@@ -623,12 +623,15 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         | ClientMessage::ListDevices
         | ClientMessage::RevokeDevice { .. }
         | ClientMessage::ForgetDevice { .. }) => pairing::handle(hub, m, ctx),
-        ClientMessage::Hello { .. } | ClientMessage::Attach { session_id: _ } => {
+        ClientMessage::Hello { .. }
+        | ClientMessage::Attach { session_id: _ }
+        | ClientMessage::UnloadChat { .. } => {
             // Hello: already consumed by handshake; ignore subsequent ones.
             // Attach: no-op — PTY forwarders are started by LoadScrollback
             // so the live subscription is atomic with the scrollback
             // snapshot read. Kept in the protocol for back-compat with
-            // older clients that send it.
+            // older clients that send it. UnloadChat: no-op too — the daemon
+            // holds no chat mirror to unload.
         }
         m @ (ClientMessage::ListRepos
         | ClientMessage::AddRepo { .. }
@@ -872,6 +875,16 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         | ClientMessage::SetSummarizerKey { .. }
         | ClientMessage::TestSummary { .. }) => summarizer::handle(hub, m, ctx).await?,
         m @ ClientMessage::AnswerPrompt { .. } => refuse_not_supported_yet(m, out_tx),
+        ClientMessage::LoadChat { request_id, .. }
+        | ClientMessage::ChatSend { request_id, .. }
+        | ClientMessage::ChatAnswer { request_id, .. } => {
+            // The daemon holds no chat mirror, so a chat request is answered
+            // with the reason rather than silently dropped.
+            let _ = out_tx.send(DaemonMessage::Error {
+                message: "chat is not supported by this daemon".to_string(),
+                request_id,
+            });
+        }
     }
     Ok(())
 }

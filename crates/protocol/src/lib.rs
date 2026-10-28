@@ -2551,6 +2551,193 @@ pub struct ScreenRuleTrace {
 }
 
 // ---------------------------------------------------------------------------
+// Chat mirror
+// ---------------------------------------------------------------------------
+
+/// One row of a session's chat: the conversation as the daemon reads it off
+/// the agent's transcript and screen.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ChatEntry {
+    /// A message the user sent; `pending` until the agent's answer starts.
+    User {
+        id: String,
+        text: String,
+        #[serde(default)]
+        pending: bool,
+    },
+    /// One answer the agent wrote; `live` while it is still arriving.
+    Answer {
+        id: String,
+        text: String,
+        #[serde(default)]
+        live: bool,
+    },
+    /// One line for a stretch of the agent's thinking, timed once `secs` is
+    /// known.
+    Thinking {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        secs: Option<u32>,
+    },
+    /// A tool call: its `name`, a one-line `summary`, its `input` and what it
+    /// returned.
+    Tool {
+        id: String,
+        name: String,
+        summary: String,
+        input: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        result: Option<ToolOutcome>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_id: Option<String>,
+    },
+    /// A row the daemon itself wrote, such as a cleared conversation.
+    System { id: String, text: String },
+    /// The card a prompt was answered with, kept as the chat's receipt.
+    Receipt {
+        id: String,
+        question: String,
+        answer: String,
+    },
+    /// The last row of one agent turn, carrying how long the turn took.
+    TurnEnd {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
+    },
+    /// Forward-compat fallback: an entry kind the current build doesn't know,
+    /// which the client leaves out of the chat. The daemon never constructs
+    /// this directly.
+    #[serde(other)]
+    Unknown,
+}
+
+/// What a tool call returned: its text, and whether it ended in an error.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToolOutcome {
+    pub text: String,
+    #[serde(default)]
+    pub is_error: bool,
+}
+
+/// What the agent's input box and dialog look like right now, so the client
+/// can draw the card and say whether the composer may send.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChatScreen {
+    pub composer: ComposerState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<ChatPrompt>,
+}
+
+/// The state of the agent's input box.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ComposerState {
+    /// Empty and accepting text.
+    Ready,
+    /// A turn is running; the box still accepts text.
+    Working,
+    /// Text is typed but not sent.
+    Draft,
+    /// A dialog owns the keyboard.
+    Dialog,
+    /// A full-screen overlay owns the keyboard.
+    Overlay { name: String },
+    /// Forward-compat fallback: a state the current build doesn't know.
+    /// Daemon never constructs this directly.
+    #[serde(other)]
+    Unknown,
+}
+
+/// A prompt the agent is waiting on: the card the client draws over the
+/// composer, and what the user may answer it with.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChatPrompt {
+    pub id: String,
+    pub kind: ChatPromptKind,
+    pub subject: String,
+    pub body: String,
+    #[serde(default)]
+    pub options: Vec<ChatOption>,
+    #[serde(default)]
+    pub questions: Vec<ChatQuestionTab>,
+    #[serde(default)]
+    pub can_amend: bool,
+    /// The rule an "Always allow" answer writes, and where it is saved, when
+    /// the dialog offers one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub always_allow_tip: Option<String>,
+}
+
+/// What kind of prompt a [`ChatPrompt`] is, which picks its card layout.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatPromptKind {
+    /// A tool call the agent needs approved.
+    Permission,
+    /// An `AskUserQuestion` prompt.
+    Question,
+    /// A plan the agent wants reviewed.
+    Review,
+    /// A plan awaiting approval.
+    Plan,
+    /// A trust prompt for a folder the agent has not run in.
+    Trust,
+    /// A heads-up notice the agent raised.
+    HeadsUp,
+    /// Forward-compat fallback: a kind the current build doesn't know.
+    /// Daemon never constructs this directly.
+    #[serde(other)]
+    Unknown,
+}
+
+/// One numbered choice on a prompt card.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChatOption {
+    pub number: u32,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub selected: bool,
+}
+
+/// One tab of a multi-question prompt, and whether it has been answered.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChatQuestionTab {
+    pub label: String,
+    #[serde(default)]
+    pub answered: bool,
+}
+
+/// How the user answered the prompt card.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ChatAnswerKind {
+    /// Pick the numbered option.
+    Option { number: u32 },
+    /// Flip the numbered checkbox.
+    Toggle { number: u32 },
+    /// Answer the question and move on.
+    Submit,
+    /// Answer with text the user typed instead of an option.
+    TypeSomething { text: String },
+    /// Allow, and tell the agent this alongside.
+    AllowWithText { text: String },
+    /// Deny, and tell the agent this alongside.
+    DenyWithText { text: String },
+    /// Go back to the previous question.
+    Back,
+    /// Skip this question.
+    Skip,
+    /// Forward-compat fallback: an answer kind the current build doesn't
+    /// know. Daemon never constructs this directly.
+    #[serde(other)]
+    Unknown,
+}
+
+// ---------------------------------------------------------------------------
 // Client -> Daemon
 // ---------------------------------------------------------------------------
 
@@ -3579,6 +3766,37 @@ pub enum ClientMessage {
         #[serde(default)]
         request_id: Option<String>,
     },
+    /// Load a session's chat for this connection: the whole conversation as
+    /// it stands, answered with [`DaemonMessage::Chat`] carrying this
+    /// `request_id`, then the later rows as [`DaemonMessage::ChatAppend`].
+    LoadChat {
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    /// Stop mirroring a session's chat for this connection. The daemon keeps
+    /// reading it while another connection has it loaded.
+    UnloadChat {
+        session_id: String,
+    },
+    /// Send text to the session's agent from the chat composer, during a turn
+    /// too. A refusal is answered with [`DaemonMessage::Error`] carrying this
+    /// `request_id`.
+    ChatSend {
+        session_id: String,
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    /// Answer the prompt card `prompt_id` shows. A refusal is answered with
+    /// [`DaemonMessage::Error`] carrying this `request_id`.
+    ChatAnswer {
+        session_id: String,
+        prompt_id: String,
+        answer: ChatAnswerKind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
 }
 
 /// One history entry to recover, and how.
@@ -4509,8 +4727,9 @@ pub enum DaemonMessage {
         /// change or git read (`RepoStatus`, `ListStashes`, `ListCommits`,
         /// `GetCommit`, `GetRemoteUrl`), spawn preview (`PreviewSpawn`,
         /// `PreviewWorkspaceSpawn`), branch-name suggestion
-        /// (`SuggestBranchName`) or preset list (`ListPresets`) that failed,
-        /// on the reply to its requester.
+        /// (`SuggestBranchName`), preset list (`ListPresets`) or chat request
+        /// (`LoadChat`, `ChatSend`, `ChatAnswer`) that failed, on the reply to
+        /// its requester.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
         /// The failure's stable machine-readable code, one of
@@ -4596,6 +4815,32 @@ pub enum DaemonMessage {
     /// Every approved device, sent to the owner's local client.
     Devices {
         devices: Vec<DeviceInfo>,
+    },
+    /// The answer to [`ClientMessage::LoadChat`], sent to the requester with
+    /// its `request_id`: the session's chat as it stands. `hidden` counts the
+    /// rows the display cap dropped in front of `entries`; `screen` is the
+    /// composer and dialog as they are now.
+    Chat {
+        session_id: String,
+        #[serde(default)]
+        entries: Vec<ChatEntry>,
+        #[serde(default)]
+        hidden: u32,
+        screen: ChatScreen,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    /// Chat rows that arrived after the load, sent to loaders only. An entry
+    /// whose id is already known replaces it.
+    ChatAppend {
+        session_id: String,
+        #[serde(default)]
+        entries: Vec<ChatEntry>,
+    },
+    /// The dialog or composer state changed, sent to loaders only.
+    ChatScreenChanged {
+        session_id: String,
+        screen: ChatScreen,
     },
 }
 
@@ -9703,5 +9948,381 @@ mod tests {
         let encoded = serde_json::to_value(&bare).expect("encode");
         assert!(encoded.get("options").is_none(), "{encoded}");
         assert!(encoded.get("trusted").is_none(), "{encoded}");
+    }
+
+    fn sample_chat_entries() -> Vec<ChatEntry> {
+        vec![
+            ChatEntry::User {
+                id: "u1".to_string(),
+                text: "run the tests".to_string(),
+                pending: true,
+            },
+            ChatEntry::Answer {
+                id: "a1".to_string(),
+                text: "Running them now.".to_string(),
+                live: true,
+            },
+            ChatEntry::Thinking {
+                id: "t1".to_string(),
+                secs: Some(14),
+            },
+            ChatEntry::Tool {
+                id: "tool1".to_string(),
+                name: "Bash".to_string(),
+                summary: "cargo nextest run".to_string(),
+                input: r#"{"command":"cargo nextest run"}"#.to_string(),
+                result: Some(ToolOutcome {
+                    text: "ok".to_string(),
+                    is_error: false,
+                }),
+                parent_id: Some("a1".to_string()),
+            },
+            ChatEntry::System {
+                id: "sys1".to_string(),
+                text: "Conversation cleared".to_string(),
+            },
+            ChatEntry::Receipt {
+                id: "rec1".to_string(),
+                question: "Allow Bash?".to_string(),
+                answer: "Yes".to_string(),
+            },
+            ChatEntry::TurnEnd {
+                id: "end1".to_string(),
+                duration_ms: Some(1200),
+            },
+        ]
+    }
+
+    fn sample_chat_screen() -> ChatScreen {
+        ChatScreen {
+            composer: ComposerState::Dialog,
+            prompt: Some(ChatPrompt {
+                id: "p1".to_string(),
+                kind: ChatPromptKind::Permission,
+                subject: "Bash".to_string(),
+                body: "cargo nextest run".to_string(),
+                options: vec![ChatOption {
+                    number: 1,
+                    label: "Yes".to_string(),
+                    description: Some("Allow this command".to_string()),
+                    selected: true,
+                }],
+                questions: vec![ChatQuestionTab {
+                    label: "Command".to_string(),
+                    answered: false,
+                }],
+                can_amend: true,
+                always_allow_tip: Some("Saved in .claude/settings.json".to_string()),
+            }),
+        }
+    }
+
+    #[test]
+    fn load_chat_message_round_trips() {
+        let msg = ClientMessage::LoadChat {
+            session_id: "s1".to_string(),
+            request_id: Some("req-chat".to_string()),
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert!(json.contains(r#""type":"load_chat""#));
+        assert!(json.contains(r#""request_id":"req-chat""#));
+        match serde_json::from_str::<ClientMessage>(&json).expect("deserialize") {
+            ClientMessage::LoadChat {
+                session_id,
+                request_id,
+            } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(request_id.as_deref(), Some("req-chat"));
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unload_chat_message_round_trips() {
+        let msg = ClientMessage::UnloadChat {
+            session_id: "s1".to_string(),
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert_eq!(json, r#"{"type":"unload_chat","session_id":"s1"}"#);
+        match serde_json::from_str::<ClientMessage>(&json).expect("deserialize") {
+            ClientMessage::UnloadChat { session_id } => assert_eq!(session_id, "s1"),
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn chat_send_message_round_trips() {
+        let msg = ClientMessage::ChatSend {
+            session_id: "s1".to_string(),
+            text: "and the clippy gate too".to_string(),
+            request_id: Some("req-send".to_string()),
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert!(json.contains(r#""type":"chat_send""#));
+        assert!(json.contains(r#""request_id":"req-send""#));
+        match serde_json::from_str::<ClientMessage>(&json).expect("deserialize") {
+            ClientMessage::ChatSend {
+                session_id,
+                text,
+                request_id,
+            } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(text, "and the clippy gate too");
+                assert_eq!(request_id.as_deref(), Some("req-send"));
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn chat_answer_message_round_trips() {
+        for answer in [
+            ChatAnswerKind::Option { number: 2 },
+            ChatAnswerKind::Toggle { number: 1 },
+            ChatAnswerKind::Submit,
+            ChatAnswerKind::TypeSomething {
+                text: "none of these".to_string(),
+            },
+            ChatAnswerKind::AllowWithText {
+                text: "only this once".to_string(),
+            },
+            ChatAnswerKind::DenyWithText {
+                text: "use the staging dir".to_string(),
+            },
+            ChatAnswerKind::Back,
+            ChatAnswerKind::Skip,
+        ] {
+            let msg = ClientMessage::ChatAnswer {
+                session_id: "s1".to_string(),
+                prompt_id: "p1".to_string(),
+                answer: answer.clone(),
+                request_id: Some("req-answer".to_string()),
+            };
+            let json = serde_json::to_string(&msg).expect("serialize");
+            assert!(json.contains(r#""type":"chat_answer""#));
+            assert!(json.contains(r#""request_id":"req-answer""#));
+            match serde_json::from_str::<ClientMessage>(&json).expect("deserialize") {
+                ClientMessage::ChatAnswer {
+                    session_id,
+                    prompt_id,
+                    answer: decoded,
+                    request_id,
+                } => {
+                    assert_eq!(session_id, "s1");
+                    assert_eq!(prompt_id, "p1");
+                    assert_eq!(decoded, answer, "{json}");
+                    assert_eq!(request_id.as_deref(), Some("req-answer"));
+                }
+                other => panic!("unexpected variant: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn chat_message_round_trips() {
+        let msg = DaemonMessage::Chat {
+            session_id: "s1".to_string(),
+            entries: sample_chat_entries(),
+            hidden: 3,
+            screen: sample_chat_screen(),
+            request_id: Some("req-chat".to_string()),
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert!(json.contains(r#""type":"chat""#));
+        assert!(json.contains(r#""request_id":"req-chat""#));
+        match serde_json::from_str::<DaemonMessage>(&json).expect("deserialize") {
+            DaemonMessage::Chat {
+                session_id,
+                entries,
+                hidden,
+                screen,
+                request_id,
+            } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(entries, sample_chat_entries());
+                assert_eq!(hidden, 3);
+                assert_eq!(screen, sample_chat_screen());
+                assert_eq!(request_id.as_deref(), Some("req-chat"));
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn chat_append_message_round_trips() {
+        let entries = sample_chat_entries();
+        let msg = DaemonMessage::ChatAppend {
+            session_id: "s1".to_string(),
+            entries: entries.clone(),
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert!(json.contains(r#""type":"chat_append""#));
+        match serde_json::from_str::<DaemonMessage>(&json).expect("deserialize") {
+            DaemonMessage::ChatAppend {
+                session_id,
+                entries: decoded,
+            } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(decoded, entries);
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn chat_screen_changed_message_round_trips() {
+        let screen = sample_chat_screen();
+        let msg = DaemonMessage::ChatScreenChanged {
+            session_id: "s1".to_string(),
+            screen: screen.clone(),
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert!(json.contains(r#""type":"chat_screen_changed""#));
+        match serde_json::from_str::<DaemonMessage>(&json).expect("deserialize") {
+            DaemonMessage::ChatScreenChanged {
+                session_id,
+                screen: decoded,
+            } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(decoded, screen);
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn chat_entry_round_trips_every_variant() {
+        for entry in sample_chat_entries() {
+            let json = serde_json::to_string(&entry).expect("serialize");
+            let decoded: ChatEntry = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(decoded, entry, "{json}");
+        }
+        // Unset optionals stay off the wire and decode back to `None`.
+        for entry in [
+            ChatEntry::Thinking {
+                id: "t2".to_string(),
+                secs: None,
+            },
+            ChatEntry::Tool {
+                id: "tool2".to_string(),
+                name: "Read".to_string(),
+                summary: "README.md".to_string(),
+                input: String::new(),
+                result: None,
+                parent_id: None,
+            },
+            ChatEntry::TurnEnd {
+                id: "end2".to_string(),
+                duration_ms: None,
+            },
+        ] {
+            let json = serde_json::to_string(&entry).expect("serialize");
+            let decoded: ChatEntry = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(decoded, entry, "{json}");
+        }
+    }
+
+    #[test]
+    fn chat_entry_unknown_kind_decodes_to_unknown() {
+        let entry: ChatEntry =
+            serde_json::from_str(r#"{"kind":"hologram","id":"x1"}"#).expect("decode");
+        assert_eq!(entry, ChatEntry::Unknown);
+
+        // An unknown row inside a message leaves the message decodable.
+        let json = r#"{"type":"chat_append","session_id":"s1","entries":[
+            {"kind":"hologram","id":"x1"},
+            {"kind":"system","id":"sys2","text":"Conversation cleared"}]}"#;
+        match serde_json::from_str::<DaemonMessage>(json).expect("decode message") {
+            DaemonMessage::ChatAppend {
+                session_id,
+                entries,
+            } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(entries.len(), 2);
+                assert_eq!(entries[0], ChatEntry::Unknown);
+                assert_eq!(
+                    entries[1],
+                    ChatEntry::System {
+                        id: "sys2".to_string(),
+                        text: "Conversation cleared".to_string(),
+                    }
+                );
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn composer_state_unknown_decodes_to_unknown() {
+        let state: ComposerState =
+            serde_json::from_str(r#"{"state":"teleporting"}"#).expect("decode");
+        assert_eq!(state, ComposerState::Unknown);
+        let known: ComposerState = serde_json::from_str(r#"{"state":"working"}"#).expect("decode");
+        assert_eq!(known, ComposerState::Working);
+        let overlay: ComposerState =
+            serde_json::from_str(r#"{"state":"overlay","name":"help"}"#).expect("decode");
+        assert_eq!(
+            overlay,
+            ComposerState::Overlay {
+                name: "help".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn chat_prompt_kind_unknown_decodes_to_unknown() {
+        let kind: ChatPromptKind = serde_json::from_str(r#""telepathy""#).expect("decode");
+        assert_eq!(kind, ChatPromptKind::Unknown);
+        let known: ChatPromptKind = serde_json::from_str(r#""heads_up""#).expect("decode");
+        assert_eq!(known, ChatPromptKind::HeadsUp);
+    }
+
+    #[test]
+    fn chat_answer_kind_unknown_decodes_to_unknown() {
+        let answer: ChatAnswerKind = serde_json::from_str(r#"{"kind":"bribe"}"#).expect("decode");
+        assert_eq!(answer, ChatAnswerKind::Unknown);
+        let known: ChatAnswerKind =
+            serde_json::from_str(r#"{"kind":"option","number":3}"#).expect("decode");
+        assert_eq!(known, ChatAnswerKind::Option { number: 3 });
+    }
+
+    #[test]
+    fn chat_message_decodes_with_defaults() {
+        let json = r#"{"type":"chat","session_id":"s1","screen":{"composer":{"state":"ready"}}}"#;
+        match serde_json::from_str::<DaemonMessage>(json).expect("decode") {
+            DaemonMessage::Chat {
+                session_id,
+                entries,
+                hidden,
+                screen,
+                request_id,
+            } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(entries, Vec::<ChatEntry>::new());
+                assert_eq!(hidden, 0);
+                assert_eq!(screen.composer, ComposerState::Ready);
+                assert_eq!(screen.prompt, None);
+                assert_eq!(request_id, None);
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+
+        // The prompt's vecs and flags default too, so a card is readable with
+        // only its text.
+        let bare_prompt = r#"{"type":"chat","session_id":"s1","screen":{
+            "composer":{"state":"dialog"},
+            "prompt":{"id":"p1","kind":"question","subject":"Which dir?","body":""}}}"#;
+        match serde_json::from_str::<DaemonMessage>(bare_prompt).expect("decode") {
+            DaemonMessage::Chat { screen, .. } => {
+                let prompt = screen.prompt.expect("prompt");
+                assert_eq!(prompt.kind, ChatPromptKind::Question);
+                assert_eq!(prompt.options, Vec::<ChatOption>::new());
+                assert_eq!(prompt.questions, Vec::<ChatQuestionTab>::new());
+                assert!(!prompt.can_amend);
+                assert_eq!(prompt.always_allow_tip, None);
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
     }
 }
