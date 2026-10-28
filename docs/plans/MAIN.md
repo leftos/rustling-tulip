@@ -9,7 +9,6 @@
 
 ## Wave 2 — Daily driver: close the port's gaps
 
-- [ ] RT-211 Open the trusted-launch dialog through one helper, with a refusal path · release vNext
 - [ ] RT-238 Route a ListPresets failure by request_id · release vNext
 
 ## Wave 2b — Hook status
@@ -67,8 +66,6 @@
     - [ ] RT-522 Write summary lines with the summarizer (CV.20) · release vNext
     - [ ] RT-523 Draw the summary view (CV.21) · release vNext
     - [ ] RT-524 Document the strip and the summary view, and retire the design file (CV.22) · release vNext
-  - [ ] RT-506 Parse permission, plan, trust and Heads up dialogs and the composer state, with their answer recipes (CV.4) · release vNext
-  - [ ] RT-507 Parse AskUserQuestion dialogs with their answer recipes (CV.5) · release vNext
   - [ ] RT-508 Carry MessageDisplay lines to the daemon (CV.6) · release vNext
   - [ ] RT-509 Serve a session's chat from the transcript and the screen (CV.7) · release vNext
   - [ ] RT-510 Type chat messages into the PTY (CV.8) · release vNext
@@ -92,7 +89,6 @@
 - [ ] RT-28 Dashboard: every session's agent and subagent tree, recent work, Linear context and summaries · release vNext
   - [ ] RT-454 Refresh working sessions' summaries while the Dashboard is watched (DB.17) · release vNext
   - [ ] RT-496 Show each session's pull request in its drawer (DB.18) · release vNext
-  - [ ] RT-497 Keep a status-change log per session that survives a daemon restart (DB.19) · release vNext
   - [ ] RT-498 Send the two-hour tracks to watching Dashboards (DB.20) · release vNext+1
   - [ ] RT-499 Nest dispatch runs under their session and track them (DB.21) · release vNext+1
   - [ ] RT-455 Draw the By status view's dense session rows (DB.12) · release vNext
@@ -110,9 +106,6 @@
   - [ ] RT-447 Add the summarizer's settings, spend ledger and cache (SA.5) · release vNext
   - [ ] RT-448 Summarize each finished turn into the session's summary ring (SA.6) · release vNext
   - [ ] RT-453 Document the summarizer and the Dashboard (SA.11) · release vNext+1
-  - [ ] RT-461 Remove the speech-only wire fields (DB.1) · release vNext
-  - [ ] RT-482 Add the Dashboard's wire types (DB.2) · release vNext
-  - [ ] RT-483 Read a session's transcript for the Dashboard (DB.3) · release vNext
   - [ ] RT-484 Build each session's subagent tree (DB.4) · release vNext
   - [ ] RT-485 Send session facts to watching Dashboards (DB.5) · release vNext
   - [ ] RT-486 Read each session's recent work from git (DB.6) · release vNext
