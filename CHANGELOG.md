@@ -12,6 +12,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 ### Fixed
 
 - The Settings window keeps one size whichever category you pick, and scrolls a long one.
+- A trusted Launch last again whose dialog cannot open, because another dialog is up, now says why instead of doing nothing.
 - A repo or workspace menu disables Open in Explorer and Open in VS Code when the folder or workspace file is gone, and says so.
 - The installer stops a running daemon only after it proves it is the real one, so the daemon's token never goes to another program listening on its port.
 - Dropping a pane back where it already was no longer stops the tab arranging itself automatically.

@@ -46,6 +46,14 @@ fn warned_trusted(h: &mut Harness<'_>) -> bool {
         .any(|(kind, title)| *kind == ToastKind::Warning && title == TRUSTED_WARNING)
 }
 
+/// The failure notice on screen: its title and detail.
+fn failure_notice(h: &mut Harness<'_>) -> Option<(String, String)> {
+    h.root(|root, _| {
+        root.action_failed()
+            .map(|notice| (notice.title.clone(), notice.detail.clone()))
+    })
+}
+
 /// One press and release pair carrying `count`, as the platform reports the
 /// clicks of a multiple click.
 fn click_with_count(h: &mut Harness<'_>, at: Point<Pixels>, count: usize) {
@@ -694,6 +702,56 @@ fn a_trusted_launch_with_a_dialog_open_shows_no_warning(cx: &mut TestAppContext)
         !h.root(|root, _| root.spawn_dialog_selected())
             .contains(&"spawn-skip-perms".to_owned()),
         "and the open dialog was not replaced by the trusted one"
+    );
+    assert_eq!(
+        failure_notice(&mut h),
+        Some((
+            "Couldn't review the trusted launch".to_owned(),
+            "Couldn't open the spawn dialog: another dialog is open".to_owned()
+        )),
+        "the refused launch says why"
+    );
+}
+
+#[gpui::test]
+fn a_trusted_launch_refused_by_an_open_dialog_says_why(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut stored = config(single_target(false));
+    stored.dangerously_skip_permissions = true;
+    let mut h = harness(cx, &dir, stored);
+
+    h.click_on("sidebar-add-session");
+    assert!(
+        h.root(|root, _| root.spawn_dialog_open()),
+        "the first dialog opened"
+    );
+
+    h.root_update(|root, window, cx| {
+        root.launch_last_row(
+            launch_last::Container::Repo("r1"),
+            launch_last::Placement::CurrentTab,
+            window,
+            cx,
+        );
+    });
+
+    assert!(
+        !h.root(|root, _| root.spawn_dialog_selected())
+            .contains(&"spawn-skip-perms".to_owned()),
+        "the open dialog kept its own configuration"
+    );
+    assert!(
+        !warned_trusted(&mut h),
+        "no warning for a dialog that never opened"
+    );
+    assert_eq!(spawn_count(&h.sent()), 0, "nothing spawned");
+    assert_eq!(
+        failure_notice(&mut h),
+        Some((
+            "Couldn't review the trusted launch".to_owned(),
+            "Couldn't open the spawn dialog: another dialog is open".to_owned()
+        )),
+        "the refused launch says why"
     );
 }
 

@@ -294,6 +294,8 @@ const APPEARANCE_FAILED_TITLE: &str = "Couldn't change the appearance";
 const TRUSTED_LAUNCH_TITLE: &str = "Review trusted launch";
 const TRUSTED_LAUNCH_DETAIL: &str =
     "Launch last uses elevated authority, so the full spawn dialog opens before replay.";
+/// The notice a trusted launch shows when its dialog cannot open.
+const TRUSTED_LAUNCH_FAILED_TITLE: &str = "Couldn't review the trusted launch";
 /// The toast a launch-last branch wait raises when the daemon stays silent.
 const LAUNCH_LAST_TIMEOUT_TITLE: &str = "Couldn't pick a branch name for launch-last";
 const LAUNCH_LAST_TIMEOUT_DETAIL: &str =
@@ -2658,11 +2660,10 @@ impl RootView {
                 config: Some(config),
                 open_in: Some(placement.open_choice()),
             };
-            if self.open_spawn_dialog(
-                SpawnEntry::Duplicate {
-                    lock: Some(Lock::for_target(target)),
-                    prefill: Box::new(prefill),
-                },
+            if self.open_prefilled_dialog(
+                Some(Lock::for_target(target)),
+                prefill,
+                TRUSTED_LAUNCH_FAILED_TITLE,
                 window,
                 cx,
             ) {

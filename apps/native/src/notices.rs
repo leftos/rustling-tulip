@@ -168,6 +168,18 @@ pub struct ActionFailedNotice {
     pub hint: Option<String>,
 }
 
+/// The notice an action shows when the spawn dialog it needs cannot open:
+/// `title` names the action the user asked for, and the detail carries
+/// `reason`, the blocker that kept the dialog shut.
+#[must_use]
+pub fn spawn_refusal(title: &str, reason: &str) -> ActionFailedNotice {
+    ActionFailedNotice {
+        title: title.to_owned(),
+        detail: format!("Couldn't open the spawn dialog: {reason}"),
+        hint: None,
+    }
+}
+
 /// A button of the checkout prompt, in the order it shows them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckoutChoice {
@@ -1087,6 +1099,35 @@ mod tests {
         assert!(notices.close_action_failed());
         assert_eq!(notices.action_failed(), None);
         assert!(!notices.close_action_failed());
+    }
+
+    #[test]
+    fn spawn_refusal_names_the_reason() {
+        let notice = spawn_refusal(
+            "Couldn't review the trusted launch",
+            "another dialog is open",
+        );
+        assert_eq!(
+            notice,
+            ActionFailedNotice {
+                title: "Couldn't review the trusted launch".to_owned(),
+                detail: "Couldn't open the spawn dialog: another dialog is open".to_owned(),
+                hint: None,
+            }
+        );
+        assert_eq!(
+            spawn_refusal(
+                "Couldn't edit the launch",
+                "the repo is no longer registered"
+            ),
+            ActionFailedNotice {
+                title: "Couldn't edit the launch".to_owned(),
+                detail: "Couldn't open the spawn dialog: the repo is no longer registered"
+                    .to_owned(),
+                hint: None,
+            },
+            "the title belongs to the caller and the reason to the refusal"
+        );
     }
 
     #[test]

@@ -20,6 +20,7 @@ use crate::assets::{SIDEBAR_CHEVRON_DOWN_ICON, SIDEBAR_CHEVRON_RIGHT_ICON};
 use crate::buttons::{ButtonKind, ButtonSize, button, field_frame, focus_ring};
 use crate::combobox::{ComboRow, list_placement};
 use crate::notice_view::{MODAL_RADIUS, modal_panel};
+use crate::notices;
 use crate::overlay_owner::Overlay;
 use crate::palette::{
     ACCENT, CHIP, GROUND, HOVER, LINE, LINE_STRONG, ON_ACCENT, RAISED, SPAWN_BADGE_OK, SUBTLE,
@@ -533,6 +534,35 @@ impl RootView {
             return Some("another dialog is open");
         }
         lock.and_then(|lock| lock.unregistered(self.sidebar.repos(), self.sidebar.workspaces()))
+    }
+
+    /// Opens the spawn dialog held on `lock`, prefilled from `prefill`, for
+    /// an action the user reviews in it before anything spawns. When the
+    /// dialog cannot open — another dialog is up, or the locked target left
+    /// the registry — a notice titled `refusal_title` says why. Returns
+    /// whether a dialog opened.
+    pub(crate) fn open_prefilled_dialog(
+        &mut self,
+        lock: Option<Lock>,
+        prefill: Prefill,
+        refusal_title: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if let Some(reason) = self.spawn_dialog_blocker(lock.as_ref(), false) {
+            tracing::warn!("{refusal_title}: no spawn dialog: {reason}");
+            let notice = notices::spawn_refusal(refusal_title, reason);
+            self.on_action_failed(notice, None, window, cx);
+            return false;
+        }
+        self.open_spawn_dialog(
+            SpawnEntry::Duplicate {
+                lock,
+                prefill: Box::new(prefill),
+            },
+            window,
+            cx,
+        )
     }
 
     /// Opens the dialog from `entry`, unless the connection is down or

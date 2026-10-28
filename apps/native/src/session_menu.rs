@@ -23,7 +23,7 @@ use crate::buttons::{ButtonKind, ButtonSize, button, field_frame, focus_ring, ou
 use crate::grid_view::{DOCK_BACK_TIP, NO_REPOS_TIP, PANE_PENDING_TIP, TAB_DOCK_BACK_TIP};
 use crate::launch_last;
 use crate::notice_view::{MODAL_RADIUS, drop_shadow, modal_panel};
-use crate::notices::{ActionFailedNotice, ToastKind};
+use crate::notices::ToastKind;
 use crate::open::{OpenJob, VsCodeTarget, copy_path, repo_folder, workspace_vscode_target};
 use crate::open_view::Then;
 use crate::overlay_owner::Overlay;
@@ -166,6 +166,9 @@ const SUBMENU_BACK: &str = "‹ Back";
 
 /// The title of the notice a Shift-duplicate whose dialog cannot open shows.
 const SHIFT_DUPLICATE_FAILED_TITLE: &str = "Duplicate failed";
+
+/// The title of the notice a launch-last edit whose dialog cannot open shows.
+const LAUNCH_EDIT_FAILED_TITLE: &str = "Couldn't edit the launch";
 
 /// The selectors of a submenu's `lines`, in the groups its separators
 /// divide.
@@ -1530,11 +1533,10 @@ impl RootView {
             config: Some(config),
             open_in: None,
         };
-        self.open_spawn_dialog(
-            SpawnEntry::Duplicate {
-                lock: Some(Lock::for_target(target)),
-                prefill: Box::new(prefill),
-            },
+        self.open_prefilled_dialog(
+            Some(Lock::for_target(target)),
+            prefill,
+            LAUNCH_EDIT_FAILED_TITLE,
             window,
             cx,
         );
@@ -1935,25 +1937,11 @@ impl RootView {
             .and_then(|config| Target::from_spawn(&config.target))
             .or_else(|| pending.source.clone())
             .map(Lock::for_target);
-        if let Some(reason) = self.spawn_dialog_blocker(lock.as_ref(), false) {
-            tracing::warn!(session = %session_id, "shift-duplicate: no spawn dialog: {reason}");
-            let notice = ActionFailedNotice {
-                title: SHIFT_DUPLICATE_FAILED_TITLE.to_owned(),
-                detail: format!("Couldn't open the spawn dialog: {reason}"),
-                hint: None,
-            };
-            self.on_action_failed(notice, None, window, cx);
-            return;
-        }
         let prefill = Prefill {
             config,
             open_in: pending.open_in(),
         };
-        let entry = SpawnEntry::Duplicate {
-            lock,
-            prefill: Box::new(prefill),
-        };
-        self.open_spawn_dialog(entry, window, cx);
+        self.open_prefilled_dialog(lock, prefill, SHIFT_DUPLICATE_FAILED_TITLE, window, cx);
     }
 
     /// Moves a pane showing `session_id` to `target` and closes the menu:
