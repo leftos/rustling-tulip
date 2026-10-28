@@ -6,7 +6,7 @@ use crate::registry::{reorder_containers, set_session_order};
 use chrono::Utc;
 use protocol::{ClientMessage, DaemonMessage, InitLayoutKind, TabContent, TabEntry};
 use tokio::sync::mpsc;
-use tracing::warn;
+use tracing::{info, warn};
 
 /// Handle the tab and layout messages `dispatch` routes here.
 #[expect(
@@ -74,6 +74,23 @@ pub(super) fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow
                 }
             }
         }
+        ClientMessage::OpenDashboardTab { id } => match open_dashboard_tab(hub, client_id) {
+            Ok(outcome) => {
+                if let Some(new_tab) = outcome.created {
+                    hub.emit_tab(client_id, TabEvent::Updated(new_tab));
+                }
+                let _ = out_tx.send(DaemonMessage::DashboardTabOpened {
+                    id,
+                    tab_id: outcome.tab_id,
+                });
+            }
+            Err(err) => {
+                let _ = out_tx.send(DaemonMessage::Error {
+                    message: format!("open dashboard tab failed: {err:#}"),
+                    request_id: Some(id),
+                });
+            }
+        },
         ClientMessage::ListTabs => {
             let tabs = hub.state.client_layout(client_id);
             let _ = out_tx.send(DaemonMessage::Tabs { tabs });
@@ -115,20 +132,29 @@ pub(super) fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow
             });
         }
         ClientMessage::RestoreTab { tab, index } => {
-            let (restored, ordered_ids) =
-                hub.state.try_mutate_client_layout(client_id, |tabs| {
-                    let restored = crate::tabs::restore_tab(tabs, tab, index)?;
-                    let ordered_ids = tabs.iter().map(|t| t.id.clone()).collect();
-                    Ok::<_, anyhow::Error>((restored, ordered_ids))
-                })?;
-            hub.emit_tab(client_id, TabEvent::Updated(restored));
-            hub.emit_tab(client_id, TabEvent::Reordered(ordered_ids));
+            let restored = hub.state.try_mutate_client_layout(client_id, |tabs| {
+                if holds_another_dashboard(tabs, &tab) {
+                    return Ok(None);
+                }
+                let restored = crate::tabs::restore_tab(tabs, tab, index)?;
+                let ordered_ids = tabs.iter().map(|t| t.id.clone()).collect();
+                Ok::<_, anyhow::Error>(Some((restored, ordered_ids)))
+            })?;
+            if let Some((restored, ordered_ids)) = restored {
+                hub.emit_tab(client_id, TabEvent::Updated(restored));
+                hub.emit_tab(client_id, TabEvent::Reordered(ordered_ids));
+            }
         }
         ClientMessage::RestoreTabSnapshot { tab } => {
             let restored = hub.state.try_mutate_client_layout(client_id, |tabs| {
-                crate::tabs::restore_tab_snapshot(tabs, tab)
+                if holds_another_dashboard(tabs, &tab) {
+                    return Ok(None);
+                }
+                crate::tabs::restore_tab_snapshot(tabs, tab).map(Some)
             })?;
-            hub.emit_tab(client_id, TabEvent::Updated(restored));
+            if let Some(restored) = restored {
+                hub.emit_tab(client_id, TabEvent::Updated(restored));
+            }
         }
         ClientMessage::RenameTab { tab_id, name } => {
             let updated = hub.state.mutate_client_layout(client_id, |tabs| {
@@ -517,6 +543,50 @@ fn open_viewer_tab(hub: &Hub, client_id: &str, path: &str) -> anyhow::Result<Ope
     outcome
 }
 
+/// Whether restoring `tab` would give the layout `tabs` a second Dashboard:
+/// `tab` is a Dashboard and another one is listed. Such a restore is
+/// skipped, leaving the listed Dashboard, which an undo on the client
+/// focuses in its place; logged, since a restore has no reply.
+fn holds_another_dashboard(tabs: &[TabEntry], tab: &TabEntry) -> bool {
+    let another = matches!(tab.content, TabContent::Dashboard)
+        && tabs
+            .iter()
+            .any(|t| t.id != tab.id && matches!(t.content, TabContent::Dashboard));
+    if another {
+        info!(tab_id = %tab.id, "not restoring a second Dashboard tab; the listed one stays");
+    }
+    another
+}
+
+/// Find or create the client's one Dashboard tab. Returns the tab id either
+/// way so the client can activate it.
+fn open_dashboard_tab(hub: &Hub, client_id: &str) -> anyhow::Result<OpenTabOutcome> {
+    hub.state.mutate_client_layout(client_id, |tabs| {
+        if let Some(existing) = tabs
+            .iter()
+            .find(|t| matches!(t.content, TabContent::Dashboard))
+        {
+            return OpenTabOutcome {
+                tab_id: existing.id.clone(),
+                created: None,
+            };
+        }
+        let new_tab = TabEntry {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: "Dashboard".to_owned(),
+            content: TabContent::Dashboard,
+            created_at: Utc::now(),
+            picked_layout: None,
+        };
+        let id = new_tab.id.clone();
+        tabs.push(new_tab.clone());
+        OpenTabOutcome {
+            tab_id: id,
+            created: Some(new_tab),
+        }
+    })
+}
+
 /// A viewer tab is named after the file it shows; a path ending in a
 /// separator keeps the whole path as its name.
 fn viewer_tab_name(path: &str) -> String {
@@ -871,6 +941,85 @@ mod tests {
             matches!(&layout[0].content, TabContent::Viewer { path } if path == "C:\\notes\\a.md"),
             "{layout:?}"
         );
+    }
+
+    fn open_dashboard(id: &str) -> ClientMessage {
+        ClientMessage::OpenDashboardTab { id: id.to_string() }
+    }
+
+    #[tokio::test]
+    async fn opening_the_dashboard_twice_focuses_one_tab() {
+        let (hub, _scratch) = test_hub("open-dashboard-twice");
+        let mut events = hub.tab_events.subscribe();
+
+        let first = dispatch_one(&hub, open_dashboard("d1")).await;
+        let (id, tab_id) = match first {
+            DaemonMessage::DashboardTabOpened { id, tab_id } => (id, tab_id),
+            other => unreachable!("the first open answers with its tab id: {other:?}"),
+        };
+        assert_eq!(id, "d1");
+        assert_eq!(
+            take_tab_events(&mut events).len(),
+            1,
+            "the created tab is broadcast once"
+        );
+
+        let second = dispatch_one(&hub, open_dashboard("d2")).await;
+        let (id, focused) = match second {
+            DaemonMessage::DashboardTabOpened { id, tab_id } => (id, tab_id),
+            other => unreachable!("the second open answers with its tab id: {other:?}"),
+        };
+        assert_eq!(id, "d2");
+        assert_eq!(focused, tab_id, "a second open focuses the existing tab");
+        assert!(
+            take_tab_events(&mut events).is_empty(),
+            "focusing broadcasts nothing"
+        );
+
+        let layout = hub.state.client_layout("c1");
+        assert_eq!(layout.len(), 1, "one Dashboard per client: {layout:?}");
+        assert!(
+            matches!(&layout[0].content, TabContent::Dashboard),
+            "{layout:?}"
+        );
+        assert_eq!(layout[0].name, "Dashboard");
+    }
+
+    /// Undo of a closed Dashboard can reach the daemon after an open made a
+    /// new one; the client still has one Dashboard.
+    #[tokio::test]
+    async fn restoring_a_dashboard_when_one_is_open_keeps_one() {
+        let (hub, _scratch) = test_hub("restore-dashboard");
+        let open_tab_id = match dispatch_one(&hub, open_dashboard("d1")).await {
+            DaemonMessage::DashboardTabOpened { tab_id, .. } => tab_id,
+            other => unreachable!("the open answers with its tab id: {other:?}"),
+        };
+        let closed = TabEntry {
+            id: "closed-dashboard".to_owned(),
+            name: "Dashboard".to_owned(),
+            content: TabContent::Dashboard,
+            created_at: Utc::now(),
+            picked_layout: None,
+        };
+        let mut events = hub.tab_events.subscribe();
+
+        for msg in [
+            ClientMessage::RestoreTab {
+                tab: closed.clone(),
+                index: 0,
+            },
+            ClientMessage::RestoreTabSnapshot { tab: closed },
+        ] {
+            let replies = dispatch_all(&hub, msg).await;
+            assert!(replies.is_empty(), "nothing to answer: {replies:?}");
+            assert!(
+                take_tab_events(&mut events).is_empty(),
+                "no second Dashboard is broadcast"
+            );
+            let layout = hub.state.client_layout("c1");
+            assert_eq!(layout.len(), 1, "one Dashboard per client: {layout:?}");
+            assert_eq!(layout[0].id, open_tab_id, "the open one stays");
+        }
     }
 
     #[tokio::test]

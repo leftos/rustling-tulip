@@ -17,6 +17,8 @@ pub(crate) const RECOVER_ICON: &str = "icons/recover.svg";
 pub(crate) const NEEDS_YOU_ICON: &str = "icons/needs-you.svg";
 /// The rail's Settings icon.
 pub(crate) const SETTINGS_ICON: &str = "icons/settings.svg";
+/// The rail's Dashboard button and a Dashboard tab's pill.
+pub(crate) const DASHBOARD_ICON: &str = "icons/dashboard.svg";
 /// A tab pill's close icon.
 pub(crate) const TAB_CLOSE_ICON: &str = "icons/tab-close.svg";
 /// The tab bar's new-tab icon.
@@ -74,7 +76,7 @@ pub(crate) const DIFF_NEXT_ICON: &str = "icons/diff-next.svg";
 pub(crate) const DIFF_LAST_ICON: &str = "icons/diff-last.svg";
 
 /// Every bundled asset, by the path the views ask for it under.
-const ASSETS: [(&str, &[u8]); 32] = [
+const ASSETS: [(&str, &[u8]); 33] = [
     (
         SESSIONS_ICON,
         include_bytes!("../assets/icons/sessions.svg"),
@@ -92,6 +94,10 @@ const ASSETS: [(&str, &[u8]); 32] = [
     (
         SETTINGS_ICON,
         include_bytes!("../assets/icons/settings.svg"),
+    ),
+    (
+        DASHBOARD_ICON,
+        include_bytes!("../assets/icons/dashboard.svg"),
     ),
     (
         TAB_CLOSE_ICON,

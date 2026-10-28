@@ -8,6 +8,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 - Open a repo's, workspace's or tab's menu from the keyboard with Shift+F10 or the Menu key, then pick a row with the arrows and Enter.
 - Terminal programs that ask for urxvt or pixel-precise mouse reporting now get clicks, drags and the wheel in the format they asked for.
+- A Dashboard button on the activity rail opens the Dashboard as a tab, one per window, with a count of sessions waiting on you.
 
 ### Fixed
 

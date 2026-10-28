@@ -27,6 +27,12 @@
   "rows": [
     {
       "paths": [
+        "apps/native/src/dashboard_tab.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & test(/^dashboard_tab::/)) | (binary_id(rustling-tulip-native::ui) & test(/^ui_tabs::/))"
+    },
+    {
+      "paths": [
         "apps/native/src/remote_mode.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native) & test(/^remote_mode::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_remote|ui_remote_access)::/))"

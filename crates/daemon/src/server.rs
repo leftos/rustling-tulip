@@ -643,6 +643,7 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         | ClientMessage::LoadScrollback { .. }) => sessions::handle(hub, m, ctx).await?,
         m @ (ClientMessage::OpenDiffTab { .. }
         | ClientMessage::OpenViewerTab { .. }
+        | ClientMessage::OpenDashboardTab { .. }
         | ClientMessage::ListTabs
         | ClientMessage::CreateTab { .. }
         | ClientMessage::CloseTab { .. }
@@ -819,8 +820,7 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         | ClientMessage::TestSummary { .. }
         | ClientMessage::WatchDashboard { .. }
         | ClientMessage::GetSessionDetail { .. }
-        | ClientMessage::AnswerPrompt { .. }
-        | ClientMessage::OpenDashboardTab { .. }) => refuse_not_supported_yet(m, out_tx),
+        | ClientMessage::AnswerPrompt { .. }) => refuse_not_supported_yet(m, out_tx),
     }
     Ok(())
 }
@@ -837,7 +837,6 @@ fn refuse_not_supported_yet(msg: ClientMessage, out_tx: &mpsc::UnboundedSender<D
         ClientMessage::TestSummary { request_id } => ("TestSummary", request_id),
         ClientMessage::GetSessionDetail { request_id, .. } => ("GetSessionDetail", request_id),
         ClientMessage::AnswerPrompt { request_id, .. } => ("AnswerPrompt", request_id),
-        ClientMessage::OpenDashboardTab { id } => ("OpenDashboardTab", Some(id)),
         ClientMessage::WatchDashboard { .. } => ("WatchDashboard", None),
         _ => {
             warn!("refuse_not_supported_yet: a supported message was routed here");

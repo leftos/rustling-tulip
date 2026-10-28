@@ -171,7 +171,8 @@ pub fn restore_messages(
 
 /// Takes out of `entry` every closed viewer tab whose file a tab among
 /// `live_tab_ids` already shows, since putting it back would show the same
-/// file twice. Returns the ids of the open tabs that stand in for a closed
+/// file twice, and every closed Dashboard tab while a Dashboard tab is live,
+/// since a client has one. Returns the ids of the open tabs that stand in for a closed
 /// tab that was the tab shown, which show instead.
 pub fn take_open_viewers(
     entry: &mut UndoEntry,
@@ -180,7 +181,7 @@ pub fn take_open_viewers(
 ) -> Vec<String> {
     let mut open = Vec::new();
     entry.snapshots.retain(
-        |snapshot| match open_viewer_of(&snapshot.tab, tabs, live_tab_ids) {
+        |snapshot| match open_twin_of(&snapshot.tab, tabs, live_tab_ids) {
             Some(tab_id) => {
                 if snapshot.restore_active {
                     open.push(tab_id.to_owned());
@@ -193,24 +194,24 @@ pub fn take_open_viewers(
     open
 }
 
-/// The live viewer tab that shows the file of `tab`, a viewer tab that is
-/// gone.
-fn open_viewer_of<'a>(
+/// The live tab that stands in for `tab`, a tab that is gone: for a viewer
+/// tab, a viewer tab of the same file; for a Dashboard tab, the Dashboard
+/// tab, of which a client has one.
+fn open_twin_of<'a>(
     tab: &TabEntry,
     tabs: &'a [TabEntry],
     live_tab_ids: &HashSet<String>,
 ) -> Option<&'a str> {
-    let TabContent::Viewer { path } = &tab.content else {
-        return None;
-    };
     if live_tab_ids.contains(&tab.id) {
         return None;
     }
+    let stands_in = |other: &TabEntry| match (&tab.content, &other.content) {
+        (TabContent::Viewer { path }, TabContent::Viewer { path: open }) => open == path,
+        (TabContent::Dashboard, TabContent::Dashboard) => true,
+        _ => false,
+    };
     tabs.iter()
-        .find(|other| {
-            live_tab_ids.contains(&other.id)
-                && matches!(&other.content, TabContent::Viewer { path: open } if open == path)
-        })
+        .find(|other| live_tab_ids.contains(&other.id) && stands_in(other))
         .map(|other| other.id.as_str())
 }
 

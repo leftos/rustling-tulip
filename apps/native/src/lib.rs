@@ -23,6 +23,7 @@ pub mod connection_picker;
 mod connection_picker_view;
 mod copied;
 mod copy_text;
+mod dashboard_tab;
 mod device_pairing;
 mod device_pairing_view;
 mod devices;
@@ -1005,6 +1006,11 @@ pub struct RootView {
     viewer_opens: viewer_tab::ViewerOpens,
     /// The keyboard of the viewer tab shown.
     viewer_focus: FocusHandle,
+    /// The Dashboard opens out, and the tab one waits to activate.
+    dashboard_opens: dashboard_tab::DashboardOpens,
+    /// The last `WatchDashboard` sent on this connection: whether the
+    /// daemon is streaming the Dashboard's facts to this client.
+    dashboard_watch: bool,
     /// The tab active after the last tab change, so a diff or viewer tab
     /// takes the keyboard when it becomes active.
     last_active_tab: Option<String>,
@@ -1362,6 +1368,8 @@ impl RootView {
             viewer_tabs: HashMap::new(),
             viewer_opens: viewer_tab::ViewerOpens::default(),
             viewer_focus: cx.focus_handle(),
+            dashboard_opens: dashboard_tab::DashboardOpens::default(),
+            dashboard_watch: false,
             last_active_tab: None,
             last_focused_session: None,
             pick_folder,
@@ -1472,10 +1480,12 @@ impl RootView {
             PopoutKey::Session { session_id } => {
                 self.sidebar.session(session_id).is_some_and(can_attach)
             }
-            PopoutKey::Tab { tab_id } => self
-                .tabs
-                .tab(tab_id)
-                .is_some_and(|tab| !matches!(tab.content, TabContent::Viewer { .. })),
+            PopoutKey::Tab { tab_id } => self.tabs.tab(tab_id).is_some_and(|tab| {
+                !matches!(
+                    tab.content,
+                    TabContent::Viewer { .. } | TabContent::Dashboard
+                )
+            }),
         };
         if !opens {
             tracing::debug!(?key, "nothing to show in this pop-out");
@@ -2957,13 +2967,15 @@ impl RootView {
     /// closing it focuses the tab's pane), the spawn dialog's Open in
     /// follows the tabs and the active tab is saved. The session the last
     /// terminal tab focused is remembered before a diff tab takes over. A
-    /// diff or viewer tab an open waited for is activated, and a diff or
-    /// viewer tab that becomes active takes the keyboard.
+    /// diff, viewer or Dashboard tab an open waited for is activated, a diff
+    /// or viewer tab that becomes active takes the keyboard, and the
+    /// Dashboard is watched while it is the active tab.
     fn after_tabs_change(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.remember_focused_session();
         self.activate_pending_diff_tab();
         self.reconcile_viewer_tabs(cx);
         self.activate_pending_viewer_tab();
+        self.activate_pending_dashboard_tab();
         self.reconcile_panes(window, cx);
         self.reconcile_diff_tabs(window, cx);
         self.prune_tab_font_sizes();
@@ -2983,6 +2995,7 @@ impl RootView {
             }
             self.reload_active_viewer(cx);
         }
+        self.sync_dashboard_watch();
         // The saved active tab is the local daemon's; a remote host's tab
         // ids are neither remembered nor saved.
         if self.conn.target().is_local() && self.sidebar.set_active_tab(self.tabs.active_id()) {
@@ -3431,9 +3444,9 @@ impl RootView {
         cx.notify();
     }
 
-    /// Folds a message in to the file fetches, the diff and viewer tabs and
-    /// the source-control panel's parts; returns whether nothing else is
-    /// owed it.
+    /// Folds a message in to the file fetches, the diff, viewer and
+    /// Dashboard tabs and the source-control panel's parts; returns whether
+    /// nothing else is owed it.
     fn on_panel_message(
         &mut self,
         msg: &DaemonMessage,
@@ -3443,6 +3456,7 @@ impl RootView {
         self.on_fetch_message(msg, window, cx)
             || self.on_diff_message(msg, window, cx)
             || self.on_viewer_message(msg, window, cx)
+            || self.on_dashboard_message(msg, window, cx)
             || self.on_sc_message(msg, window, cx)
             || self.on_stash_message(msg, window, cx)
             || self.apply_history(msg, cx)
@@ -3821,6 +3835,7 @@ impl RootView {
         self.diff_opens = diff_tab::DiffOpens::default();
         self.viewer_tabs.clear();
         self.viewer_opens = viewer_tab::ViewerOpens::default();
+        self.reset_dashboard_for_target();
         self.session_history = recover::SessionHistory::default();
         self.recover_requests.clear();
         self.recover_batches.clear();

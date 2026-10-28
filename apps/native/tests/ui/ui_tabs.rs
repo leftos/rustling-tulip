@@ -1,5 +1,6 @@
 //! Tab and split-pane specs: new tab, split, close, rename,
-//! divider drags, detach, resize and smart placement.
+//! divider drags, detach, resize and smart placement, and the Dashboard
+//! tab: the rail button, its watch, undo and menu.
 
 #![expect(
     clippy::expect_used,
@@ -1268,5 +1269,233 @@ fn refused_restore_does_not_activate_the_next_new_tab(cx: &mut TestAppContext) {
         h.root(|root, _| root.active_tab_id().map(str::to_owned)),
         Some("t2".to_owned()),
         "a refused restore arms nothing for the next tab to arrive"
+    );
+}
+
+fn dashboard_tab(id: &str) -> TabEntry {
+    serde_json::from_value(json!({
+        "id": id,
+        "name": "Dashboard",
+        "content": { "kind": "dashboard" },
+        "created_at": "2026-01-01T00:00:00Z",
+    }))
+    .expect("dashboard tab fixture")
+}
+
+/// Session `s1` in pane `p1` of tab `t1`, then a Dashboard tab `d1`.
+fn with_dashboard() -> Fixture {
+    let mut fixture = Fixture::single(session("s1").build());
+    fixture.tabs.push(dashboard_tab("d1"));
+    fixture
+}
+
+/// The Dashboard messages the client sent since the last look: each
+/// `OpenDashboardTab` as `open`, each `WatchDashboard` as `on` or `off`.
+fn dashboard_sends(h: &mut Harness) -> Vec<String> {
+    h.sent()
+        .into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::OpenDashboardTab { .. } => Some("open".to_owned()),
+            ClientMessage::WatchDashboard { on } => Some(if on { "on" } else { "off" }.to_owned()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[gpui::test]
+fn rail_dashboard_button_opens_then_focuses_the_tab_and_watches(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
+    h.sent();
+    h.click_on("activity-dashboard");
+    let sent = h.sent();
+    let open_id = match sent.as_slice() {
+        [ClientMessage::OpenDashboardTab { id }] => id.clone(),
+        other => unreachable!("the rail button asks for the tab: {other:?}"),
+    };
+
+    h.send(DaemonMessage::DashboardTabOpened {
+        id: open_id,
+        tab_id: "d1".to_owned(),
+    });
+    assert_eq!(
+        active_tab(&mut h).as_deref(),
+        Some("t1"),
+        "d1 is not listed yet"
+    );
+    assert!(
+        dashboard_sends(&mut h).is_empty(),
+        "nothing shown, nothing watched"
+    );
+    h.send(DaemonMessage::TabUpdated {
+        tab: dashboard_tab("d1"),
+    });
+    assert_eq!(active_tab(&mut h).as_deref(), Some("d1"));
+    assert_eq!(
+        dashboard_sends(&mut h),
+        ["on"],
+        "the shown Dashboard is watched"
+    );
+
+    h.click_on("activity-dashboard");
+    assert!(
+        dashboard_sends(&mut h).is_empty(),
+        "a click on the shown Dashboard asks for nothing"
+    );
+    assert_eq!(active_tab(&mut h).as_deref(), Some("d1"));
+
+    h.click_on("tab-t1");
+    assert_eq!(dashboard_sends(&mut h), ["off"]);
+    h.click_on("activity-dashboard");
+    assert_eq!(
+        dashboard_sends(&mut h),
+        ["on"],
+        "a listed Dashboard is focused without a second open"
+    );
+    assert_eq!(active_tab(&mut h).as_deref(), Some("d1"));
+}
+
+#[gpui::test]
+fn switching_away_from_the_dashboard_tab_unwatches(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &with_dashboard());
+    h.sent();
+    h.click_on("tab-d1");
+    assert_eq!(dashboard_sends(&mut h), ["on"]);
+    h.click_on("tab-t1");
+    assert_eq!(dashboard_sends(&mut h), ["off"], "a tab switch unwatches");
+
+    h.click_on("tab-d1");
+    assert_eq!(dashboard_sends(&mut h), ["on"]);
+    h.click_on("tab-close-d1");
+    h.send(DaemonMessage::TabRemoved {
+        tab_id: "d1".to_owned(),
+    });
+    assert_eq!(active_tab(&mut h).as_deref(), Some("t1"));
+    assert_eq!(
+        dashboard_sends(&mut h),
+        ["off"],
+        "closing the shown Dashboard unwatches"
+    );
+}
+
+#[gpui::test]
+fn welcome_rewatches_an_active_dashboard_tab(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &with_dashboard());
+    h.click_on("tab-d1");
+    assert_eq!(dashboard_sends(&mut h), ["on"]);
+
+    h.send_welcome(1);
+    assert_eq!(
+        dashboard_sends(&mut h),
+        ["on"],
+        "a new connection holds no watch, so the shown Dashboard asks again"
+    );
+    h.send(DaemonMessage::Tabs {
+        tabs: with_dashboard().tabs,
+    });
+    assert!(
+        dashboard_sends(&mut h).is_empty(),
+        "the tab list that follows sends no second watch"
+    );
+}
+
+#[gpui::test]
+fn undo_of_a_closed_dashboard_focuses_the_open_one(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &with_dashboard());
+    h.click_on("tab-d1");
+    h.sent();
+    h.click_on("tab-close-d1");
+    let sent = h.sent();
+    assert!(
+        sent.iter()
+            .any(|msg| matches!(msg, ClientMessage::CloseTab { tab_id } if tab_id == "d1")),
+        "sent {sent:?}"
+    );
+    let id = h
+        .root(|root, _| root.undo_entries().first().map(|entry| entry.id))
+        .expect("an undo entry");
+    h.send(DaemonMessage::TabRemoved {
+        tab_id: "d1".to_owned(),
+    });
+    h.send(DaemonMessage::TabUpdated {
+        tab: dashboard_tab("d2"),
+    });
+    h.sent();
+    assert_eq!(active_tab(&mut h).as_deref(), Some("t1"));
+
+    h.click_on(&format!("undo-action-{id}"));
+    let sent = h.sent();
+    assert!(
+        !sent.iter().any(|msg| matches!(
+            msg,
+            ClientMessage::RestoreTab { .. } | ClientMessage::RestoreTabSnapshot { .. }
+        )),
+        "no second Dashboard: sent {sent:?}"
+    );
+    assert_eq!(
+        active_tab(&mut h).as_deref(),
+        Some("d2"),
+        "the open one shows"
+    );
+}
+
+#[gpui::test]
+fn dashboard_tab_menu_has_no_rename(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &with_dashboard());
+    h.right_click_on("tab-t1");
+    assert!(h.in_model("tab-menu-rename"), "a terminal tab renames");
+    h.keys("escape");
+    h.right_click_on("tab-d1");
+    assert!(h.in_model("tab-menu"));
+    assert!(
+        !h.in_model("tab-menu-rename"),
+        "the Dashboard keeps the name the daemon gave it"
+    );
+}
+
+#[gpui::test]
+fn double_click_on_the_dashboard_pill_does_not_rename(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &with_dashboard());
+    let pill = h.center("tab-d1");
+    h.double_click(pill);
+    assert_eq!(
+        h.root(|root, _| root.renaming_tab().map(str::to_owned)),
+        None,
+        "the Dashboard keeps the name the daemon gave it"
+    );
+    assert_eq!(
+        active_tab(&mut h).as_deref(),
+        Some("d1"),
+        "the double click still shows the tab"
+    );
+}
+
+#[gpui::test]
+fn rail_click_after_closing_the_dashboard_opens_a_new_one(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &with_dashboard());
+    h.click_on("tab-d1");
+    h.sent();
+    h.click_on("tab-close-d1");
+    let sent = h.sent();
+    assert!(
+        sent.iter()
+            .any(|msg| matches!(msg, ClientMessage::CloseTab { tab_id } if tab_id == "d1")),
+        "sent {sent:?}"
+    );
+
+    h.click_on("activity-dashboard");
+    let opens = dashboard_sends(&mut h)
+        .into_iter()
+        .filter(|sent| sent == "open")
+        .count();
+    assert_eq!(
+        opens, 1,
+        "the closing Dashboard is gone already, so the rail asks for a new one"
     );
 }

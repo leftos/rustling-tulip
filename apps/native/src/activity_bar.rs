@@ -1,8 +1,9 @@
 //! The activity rail at the window's left edge: Sessions, Needs You and
 //! Source control, which pick the panel beside it and fold it, the badges
-//! counting the sessions waiting on the user and the uncommitted changes, and
-//! at the bottom the Recover sessions button with its badge and the
-//! Settings button.
+//! counting the sessions waiting on the user and the uncommitted changes,
+//! the Dashboard button, which opens or shows the Dashboard tab, and at the
+//! bottom the Recover sessions button with its badge and the Settings
+//! button.
 
 use gpui::{
     ClickEvent, Context, DispatchPhase, Div, FontWeight, MouseButton, MouseDownEvent,
@@ -10,7 +11,7 @@ use gpui::{
 };
 
 use crate::assets::{
-    NEEDS_YOU_ICON, RECOVER_ICON, SESSIONS_ICON, SETTINGS_ICON, SOURCE_CONTROL_ICON,
+    DASHBOARD_ICON, NEEDS_YOU_ICON, RECOVER_ICON, SESSIONS_ICON, SETTINGS_ICON, SOURCE_CONTROL_ICON,
 };
 use crate::palette::{ACCENT, CHIP, HOVER, SUBTLE, SUNKEN};
 use crate::sidebar::{Activity, SidebarModel};
@@ -61,6 +62,15 @@ fn item_tip(label: &str, badge: usize, noun: &str, active: bool, collapsed: bool
         (false, false) => "show",
     };
     format!("{base} — click to {action} (Ctrl+B)")
+}
+
+/// The Dashboard button's tooltip, naming the sessions waiting on the user.
+fn dashboard_tip(waiting: usize) -> String {
+    if waiting > 0 {
+        format!("Dashboard ({waiting} waiting on you)")
+    } else {
+        "Dashboard".to_owned()
+    }
 }
 
 /// The rail button a press put the tooltip away on: it offers no tooltip
@@ -188,6 +198,7 @@ impl RootView {
             .border_r_1()
             .border_color(gpui::rgb(BORDER))
             .children(items.into_iter().map(|item| self.rail_item(item, cx)))
+            .child(self.rail_dashboard_button(cx))
             .child(Self::rail_spacer(cx))
             .child(self.rail_recover_button(cx))
             .child(self.rail_settings_button(cx))
@@ -206,6 +217,22 @@ impl RootView {
             }));
         let tip = item_tip(item.label, item.badge, item.noun, active, collapsed);
         self.with_rail_tip(button, item.selector, tip, cx)
+    }
+
+    /// The Dashboard button, under the panel items: it opens the Dashboard
+    /// tab or shows the listed one, lit while that tab is the active one,
+    /// with the Needs You badge's count.
+    fn rail_dashboard_button(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        let selector = "activity-dashboard";
+        let count = self.needs_you_count();
+        let button = rail_button(selector, DASHBOARD_ICON, self.dashboard_active())
+            .when_some(badge_text(count), |row, text| {
+                row.child(badge("dashboard-badge", text))
+            })
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                this.open_or_focus_dashboard(window, cx);
+            }));
+        self.with_rail_tip(button, selector, dashboard_tip(count), cx)
     }
 
     /// The Recover sessions button, above Settings, with its badge counting

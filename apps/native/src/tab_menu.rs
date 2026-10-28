@@ -170,10 +170,14 @@ pub(crate) fn rearrange_lines(bound: usize, aspect: f32, grid_open: bool) -> Vec
 }
 
 /// The first lines of `tab`'s menu: Rename (not for a viewer tab, whose
-/// pill shows its file's name), then Pop out.
+/// pill shows its file's name, nor for the Dashboard, which keeps the name
+/// the daemon gave it), then Pop out.
 pub(crate) fn head_lines(tab: &TabEntry, tabs: &[TabEntry], popouts: &Popouts) -> Vec<MenuLine> {
     let mut lines = Vec::new();
-    if !matches!(tab.content, TabContent::Viewer { .. }) {
+    if !matches!(
+        tab.content,
+        TabContent::Viewer { .. } | TabContent::Dashboard
+    ) {
         lines.push(MenuLine::row(
             "tab-menu-rename",
             "Rename tab",

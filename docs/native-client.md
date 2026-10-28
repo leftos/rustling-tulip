@@ -204,13 +204,19 @@ On a remote host the path field stays enabled with the hint "Created on {host} i
 
 A client's tabs and their split trees are daemon-side and keyed by client id (`state.rs` `ClientLayout`), so two clients can show the same sessions in different tabs and layouts. A tab's layout type is a `RearrangeLayout`; `TabEntry.picked_layout` records the type last picked for that tab, and holds only while the user has not arranged the tab's panes by hand since.
 
-A tab's content is a grid, a diff or a viewer. A viewer tab (`TabContent::Viewer { path }`) stores only the path of the file it shows, in the connected daemon's layout for the client id; it has no panes, so `TabEntry::grid()` and `grid_mut()` return `None` and every pane operation refuses it ("not a grid tab").
+A tab's content is a grid, a diff, a viewer or the Dashboard. A viewer tab (`TabContent::Viewer { path }`) stores only the path of the file it shows, in the connected daemon's layout for the client id; it has no panes, so `TabEntry::grid()` and `grid_mut()` return `None` and every pane operation refuses it ("not a grid tab").
 
 `OpenViewerTab { id, path }` opens or focuses by exact string match on the path, as `OpenDiffTab` does: a new path creates the tab, named after the path's basename (splitting `/` and `\`, else the whole path), and broadcasts `TabUpdated`; a path already open only focuses its tab and broadcasts nothing.
 
 The reply is `ViewerTabOpened { id, tab_id }`, and an empty path is refused with an `Error` carrying the open's id. The daemon compares the path as sent, so a client trims and normalises it first.
 
 Viewer tabs survive a `state.json` reload and are copied verbatim when a client clones another client's layout. The path is the client's own local path: on a remote host it puts a local path in the host's `state.json`, which the daemon never reads. The client draws the tab's body as the text viewer (see "Text viewer").
+
+A client has at most one Dashboard tab (`TabContent::Dashboard`, a non-grid tab like a viewer). The activity rail's Dashboard button sends `OpenDashboardTab` only when no Dashboard tab is listed and otherwise activates the listed one; the daemon answers `DashboardTabOpened`, names the tab "Dashboard" and adds it last. `RestoreTab` and `RestoreTabSnapshot` skip a Dashboard while another is listed (logged at info), and Undo of a closed Dashboard while one is open focuses the open one. The tab body stays empty until the Dashboard view is built (`docs/plans/dashboard.md`, DB.12).
+
+The client sends `WatchDashboard { on }` as the Dashboard tab becomes or stops being the active tab, sends on again after a new `Welcome`, and resets its watch state without sending on a target switch. The tab pill shows a dashboard icon and the need-you count, with no busy pill; the rail button carries the Needs You count as its badge and is lit while the Dashboard tab is active.
+
+Dashboard and viewer tabs cannot be renamed (no Rename row in the tab menu, and a double-click on the pill starts nothing), and a Dashboard tab cannot be popped out (a saved pop-out key naming one is not opened).
 
 A pick marks the tab with `RearrangeTab`; an `ExtractToNewTab` that names a layout marks its new tab too (the first-connect chooser's overflow tabs, the Move-panes dialog; the chooser's first tab is rearranged). The remembered type is the one the daemon actually built, so a wire layout it does not know is kept as `Balanced`.
 

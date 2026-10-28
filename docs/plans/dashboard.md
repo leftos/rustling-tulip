@@ -162,7 +162,7 @@ The drawer fetches its detail when it opens and again whenever its session's fac
 
 ### Placement
 
-**Orchestrator decision (not an owner ruling):** the Dashboard is a daemon-stored tab kind, `TabContent::Dashboard`, at most one per client layout, opened or focused by `OpenDashboardTab` as `OpenViewerTab` does for a viewer (`docs/native-client.md`, "Tab layouts"; `crates/daemon/src/server/tabs.rs:485`), so it survives restarts with the rest of the client's tabs.
+**Orchestrator decision (not an owner ruling):** the Dashboard is a daemon-stored tab kind, `TabContent::Dashboard`, at most one per client layout, opened or focused by `OpenDashboardTab` as `OpenViewerTab` does for a viewer (`docs/native-client.md`, "Tab layouts"; `crates/daemon/src/server/tabs.rs`, `open_dashboard_tab` and `open_viewer_tab`), so it survives restarts with the rest of the client's tabs.
 
 A Dashboard button on the activity rail (not an `Activity` panel, `apps/native/src/sidebar.rs:379`) opens or focuses it and carries the needs-you count as a badge, as does the tab itself. The client sends `WatchDashboard { on: true }` while the tab is the active tab of a shown window and `false` when it stops being one.
 
@@ -447,7 +447,7 @@ Ids: **SA** for the summarizer service, **DB** for the Dashboard. Each names its
 
   Proof: placement unit tests over a fake process table and claims (holder under its session, under its subagent by command, a queued ticket's number, no gate state gives no rows). Waits on DB.5 and the daemon's gate reader (RT-55's GD.1 to GD.4, as RT-64 re-cuts them).
 - [ ] DB.9 Keep a day ledger for the header's figures. `crates/daemon/src/dashboard/ledger.rs` (new: `day-ledger.json`, rising figures, 30-day prune), `crates/daemon/src/paths.rs`, `crates/daemon/src/dashboard/mod.rs` (`DayTotals`). Proof: unit tests that a figure only rises, an ended session still counts, a new local date starts empty, and a corrupt file starts empty without being overwritten. Waits on DB.5, DB.6, DB.7.
-- [ ] DB.10 Open the Dashboard as a tab from the rail. `crates/daemon/src/server/tabs.rs` (`OpenDashboardTab`, one per client), `crates/daemon/src/tabs.rs` (the non-grid kind in clone and grid helpers), `apps/native/src/tabs.rs`, `apps/native/src/tab_bar.rs` (the tab's icon and badge), `apps/native/src/activity_bar.rs` (the rail button and badge), `apps/native/src/lib.rs` (routing, `WatchDashboard` on show and hide).
+- [x] DB.10 Open the Dashboard as a tab from the rail. `crates/daemon/src/server/tabs.rs` (`OpenDashboardTab`, one per client), `apps/native/src/dashboard_tab.rs` (the tab's rules), `apps/native/src/tab_bar.rs` (the tab's icon and badge), `apps/native/src/activity_bar.rs` (the rail button and badge), `apps/native/src/lib.rs` (routing, `WatchDashboard` on show and hide).
 
   Proof: a daemon test that a second open focuses the first; a `ui_tabs` spec that the rail button opens and then focuses the tab and sends `WatchDashboard`. Waits on DB.2.
 - [ ] DB.11 Model the Dashboard's groups and order. `apps/native/src/dashboard.rs` (new, plain Rust: listed sessions, the four groups and their order, header counts, the waits from `needs_you::rows`), `apps/native/tests/ui/ui_dashboard.rs` (new), `apps/native/tests/ui/main.rs`. Proof: specs over scripted snapshots for group membership and order (the Answer rule included) and busy-excluded sessions left out of the Working count. Waits on DB.2.

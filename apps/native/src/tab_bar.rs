@@ -11,7 +11,8 @@ use protocol::{
     ClientMessage, MergeLayout, RearrangeLayout, SessionMode, SessionStatus, TabContent, TabEntry,
 };
 
-use crate::assets::{TAB_CLOSE_ICON, TAB_NEW_ICON};
+use crate::activity_bar::badge_text;
+use crate::assets::{DASHBOARD_ICON, TAB_CLOSE_ICON, TAB_NEW_ICON};
 use crate::drag::{self, DragPayload, Side};
 use crate::fonts;
 use crate::overlay_owner::Overlay;
@@ -34,6 +35,8 @@ const BUSY_PILL_TEXT_SIZE: f32 = 10.5;
 /// The size of a pill's close icon and of the new-tab icon.
 const CLOSE_ICON_SIZE: f32 = 12.0;
 const NEW_TAB_ICON_SIZE: f32 = 15.0;
+/// The size of the kind icon before a Dashboard tab's name.
+const TAB_ICON_SIZE: f32 = 13.0;
 /// The alpha of the accent wash on a selected pill, about 14%.
 const SELECTED_WASH_ALPHA: u32 = 0x24;
 
@@ -593,6 +596,11 @@ impl RootView {
         let badge = self
             .tab_badge(&tab.id)
             .map(|(busy, total)| busy_badge(&tab.id, busy, total));
+        let dashboard = matches!(tab.content, TabContent::Dashboard);
+        let icon = dashboard.then(|| dashboard_icon(&tab.id));
+        let need_badge = dashboard
+            .then(|| need_you_badge(&tab.id, self.needs_you_count()))
+            .flatten();
         let rename = self.renaming.as_ref().filter(|r| r.tab_id == tab.id);
         let label = match rename {
             Some(rename) => div().w(px(RENAME_WIDTH)).child(rename.input.clone()),
@@ -663,7 +671,9 @@ impl RootView {
                     .on_drag(DragPayload::Tab(tab.id.clone()), ghost)
             })
             .children(badge)
+            .children(icon)
             .child(label)
+            .children(need_badge)
             .children(popped)
             .child(close_button(&tab.id, armed, cx))
             .children(mark)
@@ -890,7 +900,13 @@ impl RootView {
         } else {
             PillClick::Plain
         };
-        if kind == PillClick::Plain && event.click_count() >= 2 {
+        let renames = self.tabs.tab(tab_id).is_some_and(|tab| {
+            !matches!(
+                tab.content,
+                TabContent::Viewer { .. } | TabContent::Dashboard
+            )
+        });
+        if kind == PillClick::Plain && event.click_count() >= 2 && renames {
             self.start_rename(tab_id, window, cx);
             return;
         }
@@ -1193,6 +1209,42 @@ fn busy_badge(tab_id: &str, busy: usize, total: usize) -> Stateful<Div> {
             ))
         })
         .child(pill.text)
+}
+
+/// The Dashboard icon before a Dashboard tab's name, tagged
+/// `tab-dashboard-icon-<id>`.
+fn dashboard_icon(tab_id: &str) -> Div {
+    let name = format!("tab-dashboard-icon-{tab_id}");
+    div().debug_selector(|| name).flex().flex_none().child(
+        svg()
+            .path(DASHBOARD_ICON)
+            .size(px(TAB_ICON_SIZE))
+            .text_color(gpui::rgb(SUBTLE)),
+    )
+}
+
+/// The pill after a Dashboard tab's name counting the sessions waiting on
+/// the user, tagged `tab-need-badge-<id>`; none at 0.
+fn need_you_badge(tab_id: &str, waiting: usize) -> Option<Stateful<Div>> {
+    let text = badge_text(waiting)?;
+    let name = format!("tab-need-badge-{tab_id}");
+    Some(
+        div()
+            .id(ElementId::Name(SharedString::from(name.clone())))
+            .debug_selector(|| name)
+            .flex()
+            .flex_none()
+            .items_center()
+            .h(px(BUSY_PILL_HEIGHT))
+            .px(px(6.0))
+            .rounded(px(BUSY_PILL_HEIGHT / 2.0))
+            .bg(gpui::rgb(CHIP))
+            .font_family(fonts::DEFAULT_FAMILY)
+            .text_size(px(BUSY_PILL_TEXT_SIZE))
+            .text_color(gpui::rgb(TEXT))
+            .tooltip(tooltip(format!("{waiting} waiting on you")))
+            .child(text),
+    )
 }
 
 /// How opaque a pill stays in its slot while it is dragged.
