@@ -1184,6 +1184,8 @@ impl RootView {
                     .viewer_tab_element(&tab.id, cx)
                     .unwrap_or_else(|| div().into_any_element()),
                 TabContent::Grid { grid } => self.tab_grid(&tab.id, grid, self.layouts.main(), cx),
+                TabContent::Dashboard => div().into_any_element(),
+                TabContent::Unknown => muted_note("This tab needs a newer app.").into_any_element(),
             },
         };
         grid_frame(content, cx)
@@ -1470,7 +1472,7 @@ impl RootView {
             TabContent::Diff { .. } => self
                 .diff_tab_element(tab_id)
                 .unwrap_or_else(|| muted_note(DIFF_LOADING_TEXT).into_any_element()),
-            TabContent::Viewer { .. } => return None,
+            TabContent::Viewer { .. } | TabContent::Dashboard | TabContent::Unknown => return None,
         };
         let name = format!("popout-tab-title-{tab_id}");
         let title = div()

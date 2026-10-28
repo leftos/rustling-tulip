@@ -814,8 +814,43 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
                 }
             });
         }
+        m @ (ClientMessage::SetSummarizerSettings { .. }
+        | ClientMessage::SetSummarizerKey { .. }
+        | ClientMessage::TestSummary { .. }
+        | ClientMessage::WatchDashboard { .. }
+        | ClientMessage::GetSessionDetail { .. }
+        | ClientMessage::AnswerPrompt { .. }
+        | ClientMessage::OpenDashboardTab { .. }) => refuse_not_supported_yet(m, out_tx),
     }
     Ok(())
+}
+
+/// Refuse a Dashboard or summarizer request this daemon does not handle
+/// yet: log the variant's name (never its fields, which may carry a key),
+/// and answer a request that carries an id with an `Error` echoing it.
+fn refuse_not_supported_yet(msg: ClientMessage, out_tx: &mpsc::UnboundedSender<DaemonMessage>) {
+    let (variant, request_id) = match msg {
+        ClientMessage::SetSummarizerSettings { request_id, .. } => {
+            ("SetSummarizerSettings", request_id)
+        }
+        ClientMessage::SetSummarizerKey { request_id, .. } => ("SetSummarizerKey", request_id),
+        ClientMessage::TestSummary { request_id } => ("TestSummary", request_id),
+        ClientMessage::GetSessionDetail { request_id, .. } => ("GetSessionDetail", request_id),
+        ClientMessage::AnswerPrompt { request_id, .. } => ("AnswerPrompt", request_id),
+        ClientMessage::OpenDashboardTab { id } => ("OpenDashboardTab", Some(id)),
+        ClientMessage::WatchDashboard { .. } => ("WatchDashboard", None),
+        _ => {
+            warn!("refuse_not_supported_yet: a supported message was routed here");
+            return;
+        }
+    };
+    warn!(variant, "dispatch: message not supported yet");
+    if let Some(request_id) = request_id {
+        let _ = out_tx.send(DaemonMessage::Error {
+            message: "not supported yet".to_owned(),
+            request_id: Some(request_id),
+        });
+    }
 }
 
 /// Start the tasks that watch the hub for the daemon's lifetime.
@@ -871,7 +906,10 @@ mod child_env_probe {
 mod tests {
     use std::net::{Ipv4Addr, SocketAddr};
 
+    use protocol::{ClientMessage, DaemonMessage, TabContent, TabEntry};
+
     use super::bind_loopback;
+    use super::test_support::{dispatch_one, seed_dashboard_tab, seed_two_pane_layout, test_hub};
 
     /// A socket that sets `SO_REUSEADDR` still cannot take the daemon's
     /// loopback port: on Windows the daemon's socket keeps the address
@@ -895,5 +933,91 @@ mod tests {
         );
         #[cfg(not(windows))]
         let _ = err.raw_os_error();
+    }
+
+    /// A Dashboard request whose handler has not landed is refused on the
+    /// wire with its id, so the requester does not wait on a reply.
+    #[tokio::test]
+    async fn a_dashboard_request_is_refused_as_not_supported_yet() {
+        let (hub, _scratch) = test_hub("dashboard-stub");
+        let reply = dispatch_one(
+            &hub,
+            ClientMessage::GetSessionDetail {
+                session_id: "s1".to_string(),
+                request_id: Some("d1".to_string()),
+            },
+        )
+        .await;
+        assert!(
+            matches!(
+                &reply,
+                DaemonMessage::Error { message, request_id: Some(id) }
+                    if message == "not supported yet" && id == "d1"
+            ),
+            "{reply:?}"
+        );
+    }
+
+    /// A client's Dashboard tab is listed back to it, and a cloned layout
+    /// keeps it under a fresh id.
+    #[tokio::test]
+    async fn a_dashboard_tab_is_listed_and_cloned() {
+        let (hub, _scratch) = test_hub("dashboard-tab");
+        seed_dashboard_tab(&hub, "c1");
+        let reply = dispatch_one(&hub, ClientMessage::ListTabs).await;
+        assert!(
+            matches!(
+                &reply,
+                DaemonMessage::Tabs { tabs }
+                    if tabs.len() == 1
+                        && tabs.first().map(|tab| &tab.content) == Some(&TabContent::Dashboard)
+            ),
+            "{reply:?}"
+        );
+        let tabs = hub.state.client_layout("c1");
+        let cloned = crate::tabs::clone_tabs_fresh_ids(&tabs);
+        assert_eq!(cloned.len(), 1);
+        assert!(
+            cloned
+                .iter()
+                .zip(&tabs)
+                .all(|(clone, tab)| clone.content == TabContent::Dashboard && clone.id != tab.id),
+            "{cloned:?}"
+        );
+    }
+
+    /// A tab this build cannot read is never restored over a real one: undo
+    /// would otherwise store `{"kind":"unknown"}` for every client.
+    #[tokio::test]
+    async fn restoring_an_unknown_tab_is_refused() {
+        let (hub, _scratch) = test_hub("restore-unknown");
+        seed_two_pane_layout(&hub, "c1");
+        let before = hub.state.client_layout("c1");
+        let unknown = TabEntry {
+            content: TabContent::Unknown,
+            ..before.first().expect("the seeded tab").clone()
+        };
+        for msg in [
+            ClientMessage::RestoreTab {
+                tab: unknown.clone(),
+                index: 0,
+            },
+            ClientMessage::RestoreTabSnapshot { tab: unknown },
+        ] {
+            let reply = dispatch_one(&hub, msg).await;
+            assert!(
+                matches!(
+                    &reply,
+                    DaemonMessage::Error { message, request_id: None }
+                        if message == "can't restore a tab this app does not understand"
+                ),
+                "{reply:?}"
+            );
+            let listed = dispatch_one(&hub, ClientMessage::ListTabs).await;
+            assert!(
+                matches!(&listed, DaemonMessage::Tabs { tabs } if *tabs == before),
+                "{listed:?}"
+            );
+        }
     }
 }

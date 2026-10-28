@@ -105,6 +105,15 @@ pub(super) fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow
                 hub.emit_tab(client_id, TabEvent::Removed(tab_id));
             }
         }
+        ClientMessage::RestoreTab { tab, .. } | ClientMessage::RestoreTabSnapshot { tab }
+            if tab.content == TabContent::Unknown =>
+        {
+            warn!(tab_id = %tab.id, "refusing to restore a tab of a kind this build does not know");
+            let _ = out_tx.send(DaemonMessage::Error {
+                message: "can't restore a tab this app does not understand".to_owned(),
+                request_id: None,
+            });
+        }
         ClientMessage::RestoreTab { tab, index } => {
             let (restored, ordered_ids) =
                 hub.state.try_mutate_client_layout(client_id, |tabs| {

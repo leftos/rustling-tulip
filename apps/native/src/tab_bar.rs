@@ -1132,7 +1132,7 @@ fn pill_label(tab: &TabEntry) -> String {
     match &tab.content {
         TabContent::Diff { .. } => format!("Δ {}", tab.name),
         TabContent::Viewer { path } => display_name(path).to_owned(),
-        TabContent::Grid { .. } => tab.name.clone(),
+        TabContent::Grid { .. } | TabContent::Dashboard | TabContent::Unknown => tab.name.clone(),
     }
 }
 

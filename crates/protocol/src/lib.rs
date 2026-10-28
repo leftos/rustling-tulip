@@ -776,6 +776,20 @@ pub enum SummarySource {
     Unknown,
 }
 
+/// One line of a session's summary ring.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SummaryLine {
+    /// At most 100 characters.
+    pub text: String,
+    /// The newest report time the line covers.
+    pub at: DateTime<Utc>,
+    /// Whether a model call or a fixed template wrote the line.
+    pub source: SummarySource,
+    /// A working refresh's line; the next refresh or stop replaces it.
+    #[serde(default)]
+    pub provisional: bool,
+}
+
 /// A session's latest summary.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionSummary {
@@ -784,13 +798,396 @@ pub struct SessionSummary {
     pub kind: Option<AlertKind>,
     /// At most 8 words, for a Dashboard card.
     pub headline: String,
-    /// The longer text a card shows when expanded; may be empty.
+    /// The ring's lines, newest first: at most two on a snapshot, the whole
+    /// ring on [`DaemonMessage::SessionDetail`].
     #[serde(default)]
-    pub detail: String,
+    pub lines: Vec<SummaryLine>,
     /// When the summary was made.
     pub updated_at: DateTime<Utc>,
     /// Whether a model call or a fixed template wrote it.
     pub source: SummarySource,
+}
+
+// ---------------------------------------------------------------------------
+// Dashboard
+// ---------------------------------------------------------------------------
+
+/// The summarizer's settings, set by
+/// [`ClientMessage::SetSummarizerSettings`] and reported on
+/// [`DaemonMessage::SummarizerStatus`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SummarizerSettings {
+    pub enabled: bool,
+    /// A provider id from [`DaemonMessage::SummarizerStatus`]'s `providers`.
+    /// A string, so protocol and app code name no vendor.
+    pub provider: String,
+    /// Where the provider's key comes from.
+    #[serde(default)]
+    pub key_source: SummarizerKeySource,
+    /// The day's spending cap in US dollars; summaries stop once it is reached.
+    pub daily_cap_usd: f64,
+}
+
+/// Where the summarizer reads its provider key from.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SummarizerKeySource {
+    /// The key stored with [`ClientMessage::SetSummarizerKey`].
+    #[default]
+    Stored,
+    /// The named environment variable of the daemon's process.
+    Env { variable: String },
+    /// Forward-compat fallback: a source the current build does not know.
+    #[serde(other)]
+    Unknown,
+}
+
+/// A summarizer provider the daemon offers, for the Settings picker.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SummarizerProvider {
+    /// The id [`SummarizerSettings::provider`] names.
+    pub id: String,
+    /// The picker's label.
+    pub name: String,
+    /// True when the provider needs a key.
+    #[serde(default)]
+    pub needs_key: bool,
+    /// The one line under the choice that says where the text goes.
+    #[serde(default)]
+    pub privacy: String,
+}
+
+/// The state of one provider's key.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SummarizerKey {
+    pub provider: String,
+    pub state: KeyState,
+}
+
+/// Whether a provider's key is usable, and where it came from.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyState {
+    /// No key is stored.
+    Missing,
+    /// A key is stored.
+    Stored,
+    /// The key's environment variable is set.
+    EnvFound,
+    /// The key's environment variable is not set.
+    EnvMissing,
+    /// The provider refused the key.
+    Rejected,
+    /// Forward-compat fallback: a state the current build does not know.
+    #[serde(other)]
+    Unknown,
+}
+
+/// The sample summary [`DaemonMessage::SummaryTest`] carries.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SummaryTestResult {
+    #[serde(default)]
+    pub kind: Option<AlertKind>,
+    pub headline: String,
+    pub notification: String,
+    pub source: SummarySource,
+}
+
+/// What the daemon reads about one session for the Dashboard, sent on
+/// [`DaemonMessage::DashboardFacts`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SessionFacts {
+    pub session_id: String,
+    /// What the session is doing now.
+    pub now: NowLine,
+    /// The agents, shells, monitors and gate holds it runs, as a tree.
+    #[serde(default)]
+    pub agents: Vec<AgentNode>,
+    /// `None` until the first assistant record.
+    #[serde(default)]
+    pub context_percent: Option<u8>,
+    #[serde(default)]
+    pub tokens_in: u64,
+    #[serde(default)]
+    pub tokens_out: u64,
+    #[serde(default)]
+    pub cost_usd: f64,
+    /// Ten one-minute tool-call counts, oldest first; empty when none was
+    /// read yet.
+    #[serde(default)]
+    pub activity: Vec<u16>,
+    #[serde(default)]
+    pub stuck: Vec<StuckReason>,
+    #[serde(default)]
+    pub last_activity_at: Option<DateTime<Utc>>,
+    /// The detected issue identifier.
+    #[serde(default)]
+    pub issue: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+/// The daemon's part of a card's now line. The client words the cases it
+/// alone knows (a pending prompt, an unseen turn, the summary).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NowLine {
+    pub kind: NowKind,
+    /// Worded by the daemon, e.g. `Running Bash · 1m: cargo test`; the age
+    /// is also in `since`, so the client may re-render it.
+    pub text: String,
+    #[serde(default)]
+    pub since: Option<DateTime<Utc>>,
+}
+
+/// Which of the daemon's now-line rules applies.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NowKind {
+    InGate,
+    QueuedForGate,
+    WaitingOnSubagent,
+    RunningTool,
+    WaitingOnBackground,
+    Thinking,
+    /// Forward-compat fallback, and the kind when no daemon rule applies.
+    #[serde(other)]
+    Unknown,
+}
+
+/// Why a session or an agent looks stuck.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum StuckReason {
+    /// The last `count` tool calls failed in a row.
+    ToolFailures { count: u16 },
+    /// The context window is nearly full.
+    ContextHigh,
+    /// Forward-compat fallback: a reason the current build does not know.
+    #[serde(other)]
+    Unknown,
+}
+
+/// One node of a session's agent tree.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentNode {
+    /// A row key stable across updates, e.g. `subagent:{agentId}` or `bg:{id}`.
+    pub key: String,
+    pub kind: AgentKind,
+    pub name: String,
+    /// What it runs now, or its result line.
+    #[serde(default)]
+    pub task: String,
+    /// Ten one-minute tool-call counts, oldest first, for a dispatch run or a
+    /// shell; empty otherwise.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub activity: Vec<u16>,
+    pub state: AgentState,
+    pub started_at: DateTime<Utc>,
+    #[serde(default)]
+    pub stuck: Option<StuckReason>,
+    #[serde(default)]
+    pub children: Vec<AgentNode>,
+}
+
+/// What an [`AgentNode`] is.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentKind {
+    Subagent,
+    Dispatch,
+    Shell,
+    Monitor,
+    Gate,
+    /// Forward-compat fallback: a kind the current build does not know.
+    #[serde(other)]
+    Unknown,
+}
+
+/// Where an [`AgentNode`] is in its run.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentState {
+    Running,
+    Queued,
+    Finished,
+    Failed,
+    /// Forward-compat fallback: a state the current build does not know.
+    #[serde(other)]
+    Unknown,
+}
+
+/// The day's totals for the Dashboard header.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct DayTotals {
+    #[serde(default)]
+    pub cost_usd: f64,
+    #[serde(default)]
+    pub tokens: u64,
+    #[serde(default)]
+    pub commits: u32,
+    #[serde(default)]
+    pub issues_done: u32,
+    /// Each open release's done and total issue counts, for the header bars.
+    #[serde(default)]
+    pub releases: Vec<ReleaseProgress>,
+}
+
+/// One release's progress, e.g. `vNext 11/18`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReleaseProgress {
+    pub name: String,
+    pub done: u32,
+    pub total: u32,
+}
+
+/// A session's recent work, for the detail drawer.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RecentWork {
+    /// Commits since the session started, newest first, at most 20.
+    #[serde(default)]
+    pub commits: Vec<WorkCommit>,
+    #[serde(default)]
+    pub issues_done: Vec<WorkIssue>,
+    /// Uncommitted files, cut at 50.
+    #[serde(default)]
+    pub files: Vec<WorkFile>,
+    /// The uncommitted file count before the cut.
+    #[serde(default)]
+    pub files_total: u32,
+    /// What landed, once the tree is clean and has commits.
+    #[serde(default)]
+    pub landed: Option<WorkTotals>,
+    #[serde(default)]
+    pub pull_request: Option<WorkPullRequest>,
+}
+
+/// One commit in [`RecentWork`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkCommit {
+    pub sha: String,
+    pub short_sha: String,
+    pub subject: String,
+    pub at: DateTime<Utc>,
+}
+
+/// One finished issue in [`RecentWork`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkIssue {
+    pub key: String,
+    pub title: String,
+}
+
+/// One uncommitted file in [`RecentWork`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkFile {
+    pub path: String,
+    /// A git status letter (`M`, `A`, `D`), as [`GitFileChange`] carries.
+    pub status: String,
+    pub added: u32,
+    pub deleted: u32,
+}
+
+/// Line and file totals of what a session landed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkTotals {
+    pub files: u32,
+    pub added: u32,
+    pub deleted: u32,
+}
+
+/// The pull request a session's branch has open or landed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkPullRequest {
+    pub number: u32,
+    pub state: PullRequestState,
+    pub checks: PullRequestChecks,
+}
+
+/// A pull request's state.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PullRequestState {
+    Open,
+    Merged,
+    Closed,
+    /// Forward-compat fallback: a state the current build does not know.
+    #[serde(other)]
+    Unknown,
+}
+
+/// The combined result of a pull request's checks.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PullRequestChecks {
+    Passed,
+    Failed,
+    Pending,
+    /// The pull request has no checks.
+    None,
+    /// Forward-compat fallback: a result the current build does not know.
+    #[serde(other)]
+    Unknown,
+}
+
+/// One stretch of a lane on the Dashboard's activity track.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActivitySegment {
+    /// The repo or workspace name: the lane key.
+    pub repo: String,
+    /// `session-<id>`, `dispatch-<run id>` or a gate hold's key.
+    pub key: String,
+    pub kind: SegmentKind,
+    pub label: String,
+    /// `None` for a hold or a gap.
+    #[serde(default)]
+    pub activity: Option<SegmentActivity>,
+    pub from: DateTime<Utc>,
+    /// `None` while the stretch is still open.
+    #[serde(default)]
+    pub to: Option<DateTime<Utc>>,
+}
+
+/// What an [`ActivitySegment`] covers.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SegmentKind {
+    Session,
+    Dispatch,
+    Hold,
+    Gap,
+    /// Forward-compat fallback: a kind the current build does not know.
+    #[serde(other)]
+    Unknown,
+}
+
+/// What a session or run was doing during an [`ActivitySegment`].
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SegmentActivity {
+    Working,
+    Asking,
+    Idle,
+    /// Forward-compat fallback: an activity the current build does not know.
+    #[serde(other)]
+    Unknown,
+}
+
+/// The answer [`ClientMessage::AnswerPrompt`] gives a waiting session.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PromptChoice {
+    /// The zero-based position in the question's options.
+    Option { index: u16 },
+    /// Allow a permission request once.
+    Allow,
+    /// Allow it and do not ask again.
+    AllowAlways,
+    /// Deny a permission request.
+    Deny,
+    /// Forward-compat fallback: a choice the current build does not know;
+    /// the daemon refuses it.
+    #[serde(other)]
+    Unknown,
 }
 
 /// How a session ended, as recorded in its history entry.
@@ -1438,9 +1835,10 @@ pub enum RearrangeLayout {
     Unknown,
 }
 
-/// What a tab is rendering: one of three kinds. `Grid` holds a pane/split
-/// tree of terminal sessions, `Diff` a read-only file diff, and `Viewer` a
-/// read-only file view. The non-grid kinds hang off this enum without
+/// What a tab is rendering: one of four kinds. `Grid` holds a pane/split
+/// tree of terminal sessions, `Diff` a read-only file diff, `Viewer` a
+/// read-only file view and `Dashboard` the sessions overview. The non-grid
+/// kinds hang off this enum without
 /// reshaping the tab list or invalidating pane-level operations, which
 /// only apply to `Grid` tabs.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1476,6 +1874,12 @@ pub enum TabContent {
     Viewer {
         path: String,
     },
+    /// The Dashboard: an overview of every session, with no fields of its own.
+    Dashboard,
+    /// Forward-compat fallback: a tab kind the current build does not know.
+    /// Its fields are dropped, so it re-serializes as `{"kind":"unknown"}`.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -1500,7 +1904,10 @@ impl TabEntry {
     pub fn grid(&self) -> Option<&GridNode> {
         match &self.content {
             TabContent::Grid { grid } => Some(grid),
-            TabContent::Diff { .. } | TabContent::Viewer { .. } => None,
+            TabContent::Diff { .. }
+            | TabContent::Viewer { .. }
+            | TabContent::Dashboard
+            | TabContent::Unknown => None,
         }
     }
 
@@ -1508,7 +1915,10 @@ impl TabEntry {
     pub fn grid_mut(&mut self) -> Option<&mut GridNode> {
         match &mut self.content {
             TabContent::Grid { grid } => Some(grid),
-            TabContent::Diff { .. } | TabContent::Viewer { .. } => None,
+            TabContent::Diff { .. }
+            | TabContent::Viewer { .. }
+            | TabContent::Dashboard
+            | TabContent::Unknown => None,
         }
     }
 }
@@ -2535,6 +2945,60 @@ pub enum ClientMessage {
         /// `request_id`.
         id: String,
         path: String,
+    },
+    /// Open (or focus, if one already exists) the Dashboard tab. The daemon
+    /// replies with [`DaemonMessage::DashboardTabOpened`].
+    OpenDashboardTab {
+        /// Client-assigned request id, echoed back on
+        /// [`DaemonMessage::DashboardTabOpened`] and on a refusal's
+        /// `request_id`.
+        id: String,
+    },
+    /// Change the summarizer's settings. Success is the
+    /// [`DaemonMessage::SummarizerStatus`] broadcast; a refusal is an `Error`
+    /// carrying the `request_id`.
+    SetSummarizerSettings {
+        settings: SummarizerSettings,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    /// Store a provider's summarizer key, or delete it when `key` is `None`.
+    /// The key redacts itself in `Debug` and is never logged.
+    SetSummarizerKey {
+        provider: String,
+        #[serde(default)]
+        key: Option<Secret>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    /// Summarize a fixed sample with the current settings. The daemon
+    /// answers the requester alone with [`DaemonMessage::SummaryTest`] or an
+    /// `Error`, each carrying the `request_id`.
+    TestSummary {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    /// Start (`on: true`) or stop receiving [`DaemonMessage::DashboardFacts`]
+    /// and [`DaemonMessage::ActivityTracks`].
+    WatchDashboard {
+        on: bool,
+    },
+    /// Ask for one session's summary ring, first prompt and recent work,
+    /// answered with [`DaemonMessage::SessionDetail`].
+    GetSessionDetail {
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    /// Answer a session's pending prompt from the Dashboard. Refused with an
+    /// `Error` carrying the `request_id` when the prompt changed since.
+    AnswerPrompt {
+        session_id: String,
+        /// The snapshot's `status_since` the answer was chosen against.
+        since: DateTime<Utc>,
+        choice: PromptChoice,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
     /// Fetch the OLD and NEW file contents that back a Monaco diff view.
     /// Single round-trip (atomic snapshot) — see
@@ -3588,8 +4052,6 @@ pub enum DaemonMessage {
         /// At most 100 characters, for the toast body.
         notification: String,
         source: SummarySource,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        request_id: Option<String>,
     },
     WorkspaceSpawnPreview {
         workspace_id: String,
@@ -3698,6 +4160,59 @@ pub enum DaemonMessage {
     ViewerTabOpened {
         id: String,
         tab_id: String,
+    },
+    /// Response to [`ClientMessage::OpenDashboardTab`]. Carries the tab id
+    /// (new or pre-existing) so the requesting client can activate it.
+    DashboardTabOpened {
+        id: String,
+        tab_id: String,
+    },
+    /// The summarizer's settings, providers, key states and the day's spend.
+    /// Sent on connect and on every change.
+    SummarizerStatus {
+        settings: SummarizerSettings,
+        providers: Vec<SummarizerProvider>,
+        keys: Vec<SummarizerKey>,
+        spend_today_usd: f64,
+        cap_reached: bool,
+    },
+    /// The answer to [`ClientMessage::TestSummary`], to its requester alone.
+    SummaryTest {
+        result: SummaryTestResult,
+        latency_ms: u64,
+        cost_usd: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    /// Every session's facts and the day's totals, to Dashboard watchers
+    /// only (see [`ClientMessage::WatchDashboard`]).
+    DashboardFacts {
+        facts: Vec<SessionFacts>,
+        totals: DayTotals,
+        /// When the issue cache last synced; `None` before the first sync.
+        #[serde(default)]
+        linear_synced_at: Option<DateTime<Utc>>,
+    },
+    /// The answer to [`ClientMessage::GetSessionDetail`].
+    SessionDetail {
+        session_id: String,
+        /// The whole summary ring, newest first.
+        #[serde(default)]
+        lines: Vec<SummaryLine>,
+        /// The session's first real user prompt, at most 2 KB.
+        #[serde(default)]
+        prompt: Option<String>,
+        #[serde(default)]
+        work: RecentWork,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    /// The activity track's stretches over the last `hours` hours, to
+    /// Dashboard watchers only.
+    ActivityTracks {
+        now: DateTime<Utc>,
+        hours: u32,
+        segments: Vec<ActivitySegment>,
     },
     /// Response to [`ClientMessage::GetFileSnapshot`]. `old` + `new` are
     /// the file contents Monaco's `DiffEditor` needs to render. `language`
@@ -4832,8 +5347,21 @@ mod tests {
         let summary = SessionSummary {
             kind: Some(AlertKind::NeedsAnswer),
             headline: "waits for the schema choice".to_string(),
-            detail: "Two migrations are open; the agent asks which one runs first.".to_string(),
-            updated_at: "2026-10-27T00:00:00Z".parse().expect("a valid timestamp"),
+            lines: vec![
+                SummaryLine {
+                    text: "Asks which of the two migrations runs first".to_string(),
+                    at: "2026-10-27T00:05:00Z".parse().expect("a valid timestamp"),
+                    source: SummarySource::Model,
+                    provisional: true,
+                },
+                SummaryLine {
+                    text: "Wrote two migrations".to_string(),
+                    at: "2026-10-27T00:00:00Z".parse().expect("a valid timestamp"),
+                    source: SummarySource::Template,
+                    provisional: false,
+                },
+            ],
+            updated_at: "2026-10-27T00:05:00Z".parse().expect("a valid timestamp"),
             source: SummarySource::Model,
         };
         let json = serde_json::to_string(&summary).expect("a summary serializes");
@@ -4848,7 +5376,15 @@ mod tests {
         )
         .expect("a bare summary decodes");
         assert_eq!(summary.kind, None);
-        assert_eq!(summary.detail, "");
+        assert_eq!(summary.lines, Vec::<SummaryLine>::new());
+    }
+
+    #[test]
+    fn a_summary_line_takes_its_defaults() {
+        let line: SummaryLine =
+            serde_json::from_str(r#"{"text":"t","at":"2026-10-27T00:00:00Z","source":"model"}"#)
+                .expect("a bare line decodes");
+        assert!(!line.provisional);
     }
 
     #[test]
@@ -4867,7 +5403,6 @@ mod tests {
             kind: Some(AlertKind::NeedsAnswer),
             notification: "Needs your answer".to_string(),
             source: SummarySource::Model,
-            request_id: Some("req-1".to_string()),
         };
         let json = serde_json::to_string(&alert).expect("an alert serializes");
         let back: DaemonMessage = serde_json::from_str(&json).expect("an alert decodes");
@@ -4876,7 +5411,6 @@ mod tests {
             kind,
             notification,
             source,
-            request_id,
         } = back
         else {
             panic!("decoded as another message: {json}");
@@ -4885,7 +5419,625 @@ mod tests {
         assert_eq!(kind, Some(AlertKind::NeedsAnswer));
         assert_eq!(notification, "Needs your answer");
         assert_eq!(source, SummarySource::Model);
-        assert_eq!(request_id, Some("req-1".to_string()));
+    }
+
+    fn dashboard_time(minute: i64) -> DateTime<Utc> {
+        DateTime::from_timestamp(1_790_000_000 + minute * 60, 0).expect("valid timestamp")
+    }
+
+    fn sample_summarizer_settings() -> SummarizerSettings {
+        SummarizerSettings {
+            enabled: true,
+            provider: "cli-small".to_string(),
+            key_source: SummarizerKeySource::Env {
+                variable: "SUMMARY_KEY".to_string(),
+            },
+            daily_cap_usd: 0.5,
+        }
+    }
+
+    #[test]
+    fn summarizer_requests_round_trip() {
+        for request_id in [None, Some("req-1".to_string())] {
+            let set = ClientMessage::SetSummarizerSettings {
+                settings: sample_summarizer_settings(),
+                request_id: request_id.clone(),
+            };
+            let json = serde_json::to_string(&set).expect("serialize");
+            assert!(
+                json.contains(r#""type":"set_summarizer_settings""#),
+                "{json}"
+            );
+            assert!(json.contains(r#""kind":"env""#), "{json}");
+            assert_eq!(json.contains("request_id"), request_id.is_some(), "{json}");
+            let back: ClientMessage = serde_json::from_str(&json).expect("round-trips");
+            let ClientMessage::SetSummarizerSettings {
+                settings,
+                request_id: echoed,
+            } = back
+            else {
+                panic!("decoded as another message: {json}");
+            };
+            assert_eq!(settings, sample_summarizer_settings());
+            assert_eq!(echoed, request_id);
+
+            let test = ClientMessage::TestSummary {
+                request_id: request_id.clone(),
+            };
+            let json = serde_json::to_string(&test).expect("serialize");
+            assert!(json.contains(r#""type":"test_summary""#), "{json}");
+            let back: ClientMessage = serde_json::from_str(&json).expect("round-trips");
+            let ClientMessage::TestSummary { request_id: echoed } = back else {
+                panic!("decoded as another message: {json}");
+            };
+            assert_eq!(echoed, request_id);
+        }
+    }
+
+    #[test]
+    fn summarizer_settings_take_their_defaults() {
+        let settings: SummarizerSettings =
+            serde_json::from_str(r#"{"enabled":false,"provider":"p","daily_cap_usd":1.0}"#)
+                .expect("bare settings decode");
+        assert_eq!(settings.key_source, SummarizerKeySource::Stored);
+    }
+
+    #[test]
+    fn a_summarizer_key_round_trips_and_never_prints() {
+        let set = ClientMessage::SetSummarizerKey {
+            provider: "api-small".to_string(),
+            key: Some(Secret("sk-very-secret".to_string())),
+            request_id: Some("req-2".to_string()),
+        };
+        let debug = format!("{set:?}");
+        assert!(!debug.contains("sk-very-secret"), "{debug}");
+        let json = serde_json::to_string(&set).expect("serialize");
+        assert!(json.contains(r#""type":"set_summarizer_key""#), "{json}");
+        assert!(json.contains(r#""key":"sk-very-secret""#), "{json}");
+        let back: ClientMessage = serde_json::from_str(&json).expect("round-trips");
+        let ClientMessage::SetSummarizerKey {
+            provider,
+            key,
+            request_id,
+        } = back
+        else {
+            panic!("decoded as another message: {json}");
+        };
+        assert_eq!(provider, "api-small");
+        assert_eq!(key, Some(Secret("sk-very-secret".to_string())));
+        assert_eq!(request_id, Some("req-2".to_string()));
+
+        let delete: ClientMessage =
+            serde_json::from_str(r#"{"type":"set_summarizer_key","provider":"api-small"}"#)
+                .expect("a key delete decodes");
+        assert!(matches!(
+            delete,
+            ClientMessage::SetSummarizerKey {
+                key: None,
+                request_id: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn summarizer_status_and_test_reply_round_trip() {
+        let providers = vec![SummarizerProvider {
+            id: "api-small".to_string(),
+            name: "Small model (API)".to_string(),
+            needs_key: true,
+            privacy: "Sends the last turns to the provider.".to_string(),
+        }];
+        let keys = vec![SummarizerKey {
+            provider: "api-small".to_string(),
+            state: KeyState::EnvMissing,
+        }];
+        let status = DaemonMessage::SummarizerStatus {
+            settings: sample_summarizer_settings(),
+            providers: providers.clone(),
+            keys: keys.clone(),
+            spend_today_usd: 0.12,
+            cap_reached: true,
+        };
+        let json = serde_json::to_string(&status).expect("serialize");
+        assert!(json.contains(r#""type":"summarizer_status""#), "{json}");
+        assert!(json.contains(r#""state":"env_missing""#), "{json}");
+        let back: DaemonMessage = serde_json::from_str(&json).expect("round-trips");
+        let DaemonMessage::SummarizerStatus {
+            settings,
+            providers: back_providers,
+            keys: back_keys,
+            spend_today_usd,
+            cap_reached,
+        } = back
+        else {
+            panic!("decoded as another message: {json}");
+        };
+        assert_eq!(settings, sample_summarizer_settings());
+        assert_eq!(back_providers, providers);
+        assert_eq!(back_keys, keys);
+        assert_eq!(spend_today_usd.to_bits(), 0.12_f64.to_bits());
+        assert!(cap_reached);
+
+        let result = SummaryTestResult {
+            kind: Some(AlertKind::WorkingUpdate),
+            headline: "runs the test suite".to_string(),
+            notification: "Running the tests".to_string(),
+            source: SummarySource::Model,
+        };
+        let reply = DaemonMessage::SummaryTest {
+            result: result.clone(),
+            latency_ms: 840,
+            cost_usd: 0.001,
+            request_id: Some("req-3".to_string()),
+        };
+        let json = serde_json::to_string(&reply).expect("serialize");
+        assert!(json.contains(r#""type":"summary_test""#), "{json}");
+        let back: DaemonMessage = serde_json::from_str(&json).expect("round-trips");
+        let DaemonMessage::SummaryTest {
+            result: back_result,
+            latency_ms,
+            cost_usd,
+            request_id,
+        } = back
+        else {
+            panic!("decoded as another message: {json}");
+        };
+        assert_eq!(back_result, result);
+        assert_eq!(latency_ms, 840);
+        assert_eq!(cost_usd.to_bits(), 0.001_f64.to_bits());
+        assert_eq!(request_id, Some("req-3".to_string()));
+    }
+
+    #[test]
+    fn an_unknown_key_state_decodes_as_unknown() {
+        let state: KeyState = serde_json::from_str(r#""later""#).expect("an unknown state decodes");
+        assert_eq!(state, KeyState::Unknown);
+    }
+
+    #[test]
+    fn an_unknown_key_source_decodes_as_unknown() {
+        let source: SummarizerKeySource = serde_json::from_str(r#"{"kind":"later","vault":"v"}"#)
+            .expect("an unknown key source decodes");
+        assert_eq!(source, SummarizerKeySource::Unknown);
+    }
+
+    fn sample_session_facts() -> SessionFacts {
+        let shell = AgentNode {
+            key: "bg:b1".to_string(),
+            kind: AgentKind::Shell,
+            name: "cargo test".to_string(),
+            task: String::new(),
+            activity: Vec::new(),
+            state: AgentState::Finished,
+            started_at: dashboard_time(2),
+            stuck: None,
+            children: Vec::new(),
+        };
+        let dispatch = AgentNode {
+            key: "dispatch:run-7".to_string(),
+            kind: AgentKind::Dispatch,
+            name: "implementer".to_string(),
+            task: "RT-482".to_string(),
+            activity: vec![0, 3, 5],
+            state: AgentState::Running,
+            started_at: dashboard_time(0),
+            stuck: Some(StuckReason::ToolFailures { count: 3 }),
+            children: vec![shell],
+        };
+        SessionFacts {
+            session_id: "s1".to_string(),
+            now: NowLine {
+                kind: NowKind::RunningTool,
+                text: "Running Bash · 1m: cargo test".to_string(),
+                since: Some(dashboard_time(1)),
+            },
+            agents: vec![dispatch],
+            context_percent: Some(81),
+            tokens_in: 120_000,
+            tokens_out: 9_000,
+            cost_usd: 1.25,
+            activity: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            stuck: vec![StuckReason::ContextHigh],
+            last_activity_at: Some(dashboard_time(3)),
+            issue: Some("RT-482".to_string()),
+            model: Some("model-x".to_string()),
+        }
+    }
+
+    #[test]
+    fn dashboard_facts_messages_round_trip() {
+        let watch = ClientMessage::WatchDashboard { on: true };
+        let json = serde_json::to_string(&watch).expect("serialize");
+        assert!(json.contains(r#""type":"watch_dashboard""#), "{json}");
+        let back: ClientMessage = serde_json::from_str(&json).expect("round-trips");
+        assert!(
+            matches!(back, ClientMessage::WatchDashboard { on: true }),
+            "{json}"
+        );
+
+        let totals = DayTotals {
+            cost_usd: 4.5,
+            tokens: 300_000,
+            commits: 7,
+            issues_done: 2,
+            releases: vec![ReleaseProgress {
+                name: "vNext".to_string(),
+                done: 11,
+                total: 18,
+            }],
+        };
+        let message = DaemonMessage::DashboardFacts {
+            facts: vec![sample_session_facts()],
+            totals: totals.clone(),
+            linear_synced_at: Some(dashboard_time(4)),
+        };
+        let json = serde_json::to_string(&message).expect("serialize");
+        assert!(json.contains(r#""type":"dashboard_facts""#), "{json}");
+        assert!(
+            json.contains(r#""kind":"tool_failures","count":3"#),
+            "{json}"
+        );
+        let back: DaemonMessage = serde_json::from_str(&json).expect("round-trips");
+        let DaemonMessage::DashboardFacts {
+            facts,
+            totals: back_totals,
+            linear_synced_at,
+        } = back
+        else {
+            panic!("decoded as another message: {json}");
+        };
+        assert_eq!(facts, vec![sample_session_facts()]);
+        assert_eq!(back_totals, totals);
+        assert_eq!(linear_synced_at, Some(dashboard_time(4)));
+    }
+
+    #[test]
+    fn bare_dashboard_facts_take_their_defaults() {
+        let facts: SessionFacts = serde_json::from_str(
+            r#"{"session_id":"s1","now":{"kind":"thinking","text":"Thinking"}}"#,
+        )
+        .expect("bare facts decode");
+        assert_eq!(facts.now.kind, NowKind::Thinking);
+        assert_eq!(facts.now.since, None);
+        assert_eq!(facts.agents, Vec::<AgentNode>::new());
+        assert_eq!(facts.context_percent, None);
+        assert_eq!(facts.activity, Vec::<u16>::new());
+        assert_eq!(facts.stuck, Vec::<StuckReason>::new());
+        assert_eq!(facts.last_activity_at, None);
+        assert_eq!(facts.issue, None);
+
+        let message: DaemonMessage =
+            serde_json::from_str(r#"{"type":"dashboard_facts","facts":[],"totals":{}}"#)
+                .expect("a bare facts message decodes");
+        let DaemonMessage::DashboardFacts {
+            totals,
+            linear_synced_at,
+            ..
+        } = message
+        else {
+            panic!("decoded as another message");
+        };
+        assert_eq!(totals, DayTotals::default());
+        assert_eq!(linear_synced_at, None);
+
+        let quiet = sample_session_facts().agents[0].children[0].clone();
+        let json = serde_json::to_string(&quiet).expect("serialize");
+        assert!(
+            !json.contains("activity"),
+            "an agent with no counts sends none: {json}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_now_kind_decodes_as_unknown() {
+        let kind: NowKind = serde_json::from_str(r#""later""#).expect("an unknown kind decodes");
+        assert_eq!(kind, NowKind::Unknown);
+    }
+
+    #[test]
+    fn an_unknown_stuck_reason_decodes_as_unknown() {
+        let reason: StuckReason = serde_json::from_str(r#"{"kind":"later","minutes":4}"#)
+            .expect("an unknown reason decodes");
+        assert_eq!(reason, StuckReason::Unknown);
+    }
+
+    #[test]
+    fn an_unknown_agent_kind_decodes_as_unknown() {
+        let kind: AgentKind = serde_json::from_str(r#""later""#).expect("an unknown kind decodes");
+        assert_eq!(kind, AgentKind::Unknown);
+    }
+
+    #[test]
+    fn an_unknown_agent_state_decodes_as_unknown() {
+        let state: AgentState =
+            serde_json::from_str(r#""later""#).expect("an unknown state decodes");
+        assert_eq!(state, AgentState::Unknown);
+    }
+
+    #[test]
+    fn session_detail_messages_round_trip() {
+        let get = ClientMessage::GetSessionDetail {
+            session_id: "s1".to_string(),
+            request_id: Some("req-4".to_string()),
+        };
+        let json = serde_json::to_string(&get).expect("serialize");
+        assert!(json.contains(r#""type":"get_session_detail""#), "{json}");
+        let back: ClientMessage = serde_json::from_str(&json).expect("round-trips");
+        let ClientMessage::GetSessionDetail {
+            session_id,
+            request_id,
+        } = back
+        else {
+            panic!("decoded as another message: {json}");
+        };
+        assert_eq!(session_id, "s1");
+        assert_eq!(request_id, Some("req-4".to_string()));
+
+        let lines = vec![SummaryLine {
+            text: "Fixed the flaky tab test".to_string(),
+            at: dashboard_time(5),
+            source: SummarySource::Model,
+            provisional: false,
+        }];
+        let work = RecentWork {
+            commits: vec![WorkCommit {
+                sha: "a".repeat(40),
+                short_sha: "aaaaaaa".to_string(),
+                subject: "fix: keep the tab".to_string(),
+                at: dashboard_time(5),
+            }],
+            issues_done: vec![WorkIssue {
+                key: "RT-1".to_string(),
+                title: "Keep the tab".to_string(),
+            }],
+            files: vec![WorkFile {
+                path: "src/a.rs".to_string(),
+                status: "M".to_string(),
+                added: 3,
+                deleted: 1,
+            }],
+            files_total: 51,
+            landed: Some(WorkTotals {
+                files: 4,
+                added: 30,
+                deleted: 2,
+            }),
+            pull_request: Some(WorkPullRequest {
+                number: 12,
+                state: PullRequestState::Open,
+                checks: PullRequestChecks::Pending,
+            }),
+        };
+        let detail = DaemonMessage::SessionDetail {
+            session_id: "s1".to_string(),
+            lines: lines.clone(),
+            prompt: Some("Fix the build".to_string()),
+            work: work.clone(),
+            request_id: Some("req-4".to_string()),
+        };
+        let json = serde_json::to_string(&detail).expect("serialize");
+        assert!(json.contains(r#""type":"session_detail""#), "{json}");
+        let back: DaemonMessage = serde_json::from_str(&json).expect("round-trips");
+        let DaemonMessage::SessionDetail {
+            session_id,
+            lines: back_lines,
+            prompt,
+            work: back_work,
+            request_id,
+        } = back
+        else {
+            panic!("decoded as another message: {json}");
+        };
+        assert_eq!(session_id, "s1");
+        assert_eq!(back_lines, lines);
+        assert_eq!(prompt, Some("Fix the build".to_string()));
+        assert_eq!(back_work, work);
+        assert_eq!(request_id, Some("req-4".to_string()));
+
+        let bare: DaemonMessage =
+            serde_json::from_str(r#"{"type":"session_detail","session_id":"s1"}"#)
+                .expect("a bare detail decodes");
+        let DaemonMessage::SessionDetail {
+            lines,
+            prompt,
+            work,
+            request_id,
+            ..
+        } = bare
+        else {
+            panic!("decoded as another message");
+        };
+        assert_eq!(lines, Vec::<SummaryLine>::new());
+        assert_eq!(prompt, None);
+        assert_eq!(work, RecentWork::default());
+        assert_eq!(request_id, None);
+    }
+
+    #[test]
+    fn an_unknown_pull_request_state_decodes_as_unknown() {
+        let state: PullRequestState =
+            serde_json::from_str(r#""later""#).expect("an unknown state decodes");
+        assert_eq!(state, PullRequestState::Unknown);
+    }
+
+    #[test]
+    fn an_unknown_pull_request_checks_decodes_as_unknown() {
+        let checks: PullRequestChecks =
+            serde_json::from_str(r#""later""#).expect("an unknown checks value decodes");
+        assert_eq!(checks, PullRequestChecks::Unknown);
+    }
+
+    #[test]
+    fn activity_tracks_round_trip() {
+        let segments = vec![
+            ActivitySegment {
+                repo: "rustling-tulip".to_string(),
+                key: "session-s1".to_string(),
+                kind: SegmentKind::Session,
+                label: "RT-482".to_string(),
+                activity: Some(SegmentActivity::Working),
+                from: dashboard_time(0),
+                to: Some(dashboard_time(5)),
+            },
+            ActivitySegment {
+                repo: "rustling-tulip".to_string(),
+                key: "hold-1".to_string(),
+                kind: SegmentKind::Hold,
+                label: "gate".to_string(),
+                activity: None,
+                from: dashboard_time(5),
+                to: None,
+            },
+        ];
+        let tracks = DaemonMessage::ActivityTracks {
+            now: dashboard_time(6),
+            hours: 8,
+            segments: segments.clone(),
+        };
+        let json = serde_json::to_string(&tracks).expect("serialize");
+        assert!(json.contains(r#""type":"activity_tracks""#), "{json}");
+        let back: DaemonMessage = serde_json::from_str(&json).expect("round-trips");
+        let DaemonMessage::ActivityTracks {
+            now,
+            hours,
+            segments: back_segments,
+        } = back
+        else {
+            panic!("decoded as another message: {json}");
+        };
+        assert_eq!(now, dashboard_time(6));
+        assert_eq!(hours, 8);
+        assert_eq!(back_segments, segments);
+    }
+
+    #[test]
+    fn an_unknown_segment_kind_and_activity_decode_as_unknown() {
+        let kind: SegmentKind =
+            serde_json::from_str(r#""later""#).expect("an unknown kind decodes");
+        assert_eq!(kind, SegmentKind::Unknown);
+        let activity: SegmentActivity =
+            serde_json::from_str(r#""later""#).expect("an unknown activity decodes");
+        assert_eq!(activity, SegmentActivity::Unknown);
+    }
+
+    #[test]
+    fn answer_prompt_round_trips_every_choice() {
+        let option = serde_json::to_string(&PromptChoice::Option { index: 2 }).expect("serialize");
+        assert_eq!(option, r#"{"kind":"option","index":2}"#);
+        for choice in [
+            PromptChoice::Option { index: 2 },
+            PromptChoice::Allow,
+            PromptChoice::AllowAlways,
+            PromptChoice::Deny,
+        ] {
+            let answer = ClientMessage::AnswerPrompt {
+                session_id: "s1".to_string(),
+                since: dashboard_time(7),
+                choice,
+                request_id: Some("req-5".to_string()),
+            };
+            let json = serde_json::to_string(&answer).expect("serialize");
+            assert!(json.contains(r#""type":"answer_prompt""#), "{json}");
+            let back: ClientMessage = serde_json::from_str(&json).expect("round-trips");
+            let ClientMessage::AnswerPrompt {
+                session_id,
+                since,
+                choice: back_choice,
+                request_id,
+            } = back
+            else {
+                panic!("decoded as another message: {json}");
+            };
+            assert_eq!(session_id, "s1");
+            assert_eq!(since, dashboard_time(7));
+            assert_eq!(back_choice, choice);
+            assert_eq!(request_id, Some("req-5".to_string()));
+        }
+    }
+
+    #[test]
+    fn an_unknown_prompt_choice_decodes_as_unknown() {
+        let choice: PromptChoice = serde_json::from_str(r#"{"kind":"later","text":"x"}"#)
+            .expect("an unknown choice decodes");
+        assert_eq!(choice, PromptChoice::Unknown);
+    }
+
+    #[test]
+    fn a_dashboard_tab_round_trips() {
+        let tab = TabEntry {
+            id: "tab-d".to_string(),
+            name: "Dashboard".to_string(),
+            content: TabContent::Dashboard,
+            created_at: dashboard_time(0),
+            picked_layout: None,
+        };
+        let json = serde_json::to_string(&tab).expect("serialize");
+        assert!(json.contains(r#""content":{"kind":"dashboard"}"#), "{json}");
+        let mut back: TabEntry = serde_json::from_str(&json).expect("round-trips");
+        assert_eq!(back, tab);
+        assert!(back.grid().is_none(), "a dashboard tab has no grid");
+        assert!(back.grid_mut().is_none(), "a dashboard tab has no grid");
+
+        let open = ClientMessage::OpenDashboardTab {
+            id: "open-1".to_string(),
+        };
+        let json = serde_json::to_string(&open).expect("serialize");
+        assert!(json.contains(r#""type":"open_dashboard_tab""#), "{json}");
+        let back: ClientMessage = serde_json::from_str(&json).expect("round-trips");
+        let ClientMessage::OpenDashboardTab { id } = back else {
+            panic!("decoded as another message: {json}");
+        };
+        assert_eq!(id, "open-1");
+
+        let opened = DaemonMessage::DashboardTabOpened {
+            id: "open-1".to_string(),
+            tab_id: "tab-d".to_string(),
+        };
+        let json = serde_json::to_string(&opened).expect("serialize");
+        assert!(json.contains(r#""type":"dashboard_tab_opened""#), "{json}");
+        let back: DaemonMessage = serde_json::from_str(&json).expect("round-trips");
+        let DaemonMessage::DashboardTabOpened { id, tab_id } = back else {
+            panic!("decoded as another message: {json}");
+        };
+        assert_eq!(id, "open-1");
+        assert_eq!(tab_id, "tab-d");
+    }
+
+    #[test]
+    fn an_unknown_tab_content_decodes_as_unknown() {
+        let content: TabContent =
+            serde_json::from_str(r#"{"kind":"later","n":1}"#).expect("an unknown tab kind decodes");
+        assert_eq!(content, TabContent::Unknown);
+    }
+
+    #[test]
+    fn a_tab_list_with_an_unknown_tab_kind_decodes() {
+        let grid = serde_json::to_value(sample_tab()).expect("serialize");
+        let list = serde_json::json!({
+            "type": "tabs",
+            "tabs": [
+                {
+                    "id": "t",
+                    "name": "x",
+                    "content": {"kind": "later", "n": 1},
+                    "created_at": "2026-10-27T00:00:00Z",
+                },
+                grid,
+            ],
+        });
+        let back: DaemonMessage =
+            serde_json::from_value(list).expect("a tab list with an unknown kind decodes");
+        let DaemonMessage::Tabs { tabs } = back else {
+            panic!("decoded as another message");
+        };
+        let [later, grid] = tabs.as_slice() else {
+            panic!("expected two tabs, got {tabs:?}");
+        };
+        assert_eq!(later.id, "t");
+        assert_eq!(later.content, TabContent::Unknown);
+        assert!(later.grid().is_none(), "an unknown tab has no grid");
+        assert_eq!(grid, &sample_tab());
     }
 
     fn sample_tab() -> TabEntry {

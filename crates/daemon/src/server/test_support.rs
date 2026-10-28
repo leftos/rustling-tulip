@@ -457,6 +457,21 @@ pub(super) fn seed_two_pane_layout(hub: &Hub, client_id: &str) {
         .expect("seed the client layout");
 }
 
+/// Seed `client_id` with one Dashboard tab.
+pub(super) fn seed_dashboard_tab(hub: &Hub, client_id: &str) {
+    hub.state
+        .mutate_client_layout(client_id, |tabs| {
+            tabs.push(TabEntry {
+                id: "d1".to_string(),
+                name: "Dashboard".to_string(),
+                content: TabContent::Dashboard,
+                created_at: Utc::now(),
+                picked_layout: None,
+            });
+        })
+        .expect("seed the client layout");
+}
+
 /// A `POST /hook/{session}` request, carrying the token and hook time
 /// headers the shim sends when each is given.
 pub(super) fn hook_request(

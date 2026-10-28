@@ -335,7 +335,10 @@ impl RootView {
             .iter()
             .filter_map(|tab| match &tab.content {
                 TabContent::Viewer { path } => Some((tab.id.clone(), path.clone())),
-                TabContent::Grid { .. } | TabContent::Diff { .. } => None,
+                TabContent::Grid { .. }
+                | TabContent::Diff { .. }
+                | TabContent::Dashboard
+                | TabContent::Unknown => None,
             })
             .collect();
         self.viewer_tabs

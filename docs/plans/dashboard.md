@@ -353,7 +353,9 @@ A typed DeepSeek key is stored in **Windows Credential Manager** through the sto
 
 The app is unreleased, so the changes below are made outright. The need-you band's accounts card and the lanes' Questions and Next up add no Dashboard message: they read what the accounts feature (RT-39) and the Plan tab (RT-56) already send every client.
 
-**Orchestrator decision (not an owner ruling):** removed (DB.1), as nothing without speech reads them: both `spoken_name` fields (`:463`, `:494`); `WaitingAlert`'s `prefix`, `speech`, `alert_id` and `trigger` (`:3621-3636`); `Attention.alert_id` (`:3618`); `AlertTrigger` (`:775`); `SessionSummary.pending` and `PendingAsk` (`:802-810`, `:825`), since the Dashboard reads `pending_input` (`:708`), which carries the structured question.
+**Orchestrator decision (not an owner ruling):** removed (DB.1), as nothing without speech reads them: both `spoken_name` fields; `WaitingAlert`'s `prefix`, `speech`, `alert_id` and `trigger`; `Attention.alert_id`; `AlertTrigger`; `SessionSummary.pending` and `PendingAsk`, since the Dashboard reads `pending_input`, which carries the structured question.
+
+The shapes DB.2 settled where this section leaves them open (`NowLine`, `StuckReason`, `PromptChoice`, `SummaryTestResult`, `RecentWork`, the summarizer settings and key states, ten one-minute counts for `activity`) are the definitions in `crates/protocol/src/lib.rs`, recorded on RT-482. Until each handler lands, the daemon answers a new request carrying an id with `Error { message: "not supported yet" }`.
 
 Added and reshaped (DB.2), each new nested enum with `#[serde(other)] Unknown`:
 
@@ -367,7 +369,7 @@ Added and reshaped (DB.2), each new nested enum with `#[serde(other)] Unknown`:
 - `ClientMessage::GetSessionDetail { session_id, request_id }`; `DaemonMessage::SessionDetail { session_id, lines, prompt, work: RecentWork, request_id }`; the drawer's Linear column reads the client's copy of RT-133's cache, and the header's release counts ride `DayTotals.releases`.
 - `DaemonMessage::ActivityTracks { now, hours, segments: Vec<ActivitySegment> }`, `ActivitySegment { repo, key, kind, label, activity, from, to: Option<DateTime<Utc>> }`, `kind` one of session, dispatch, hold, gap: to watchers only (see "The status-change log and the activity track").
 - `ClientMessage::AnswerPrompt { session_id, since, choice, request_id }`, refused with an `Error` carrying the `request_id` when the prompt changed.
-- `TabContent::Dashboard`, with a new `#[serde(other)] Unknown` on `TabContent` (`:1484`, which has none); `ClientMessage::OpenDashboardTab { id }` answered with `DashboardTabOpened { id, tab_id }`.
+- `TabContent::Dashboard`, with a new `#[serde(other)] Unknown` on `TabContent`; `ClientMessage::OpenDashboardTab { id }` answered with `DashboardTabOpened { id, tab_id }`.
 
 ## Toasts
 
@@ -424,7 +426,7 @@ Ids: **SA** for the summarizer service, **DB** for the Dashboard. Each names its
 
   Proof: a daemon test feeding fake `Stop` events against a fake provider, asserting `SessionUpdated` with the line and one `WaitingAlert`, two quick stops making one call, and the ring surviving a reattach. Waits on SA.4, SA.5.
 - [x] DB.1 Remove the speech-only wire fields. `crates/protocol/src/lib.rs` and the literal sites the compiler names (`crates/daemon/src/presets.rs`, `registry.rs`, `server/git.rs`, `env_secrets.rs`, `branch_names.rs`, `branch_fate.rs`, `server/spawn.rs`, `server/test_support.rs`, `workspace.rs`, `apps/native/src/launch_last.rs`: one-line deletions): the removals under "Protocol". Proof: the workspace builds and the protocol tests pass with the round-trip tests reshaped. Waits on nothing.
-- [ ] DB.2 Add the Dashboard's wire types. `crates/protocol/src/lib.rs`, `apps/native/tests/support/mod.rs` (snapshot and facts builders), `crates/daemon/src/server/test_support.rs`: everything under "Added and reshaped". Proof: a round-trip test per message and type, an `Unknown` test per new nested enum, and a tab list with an unknown tab kind decoding. Waits on DB.1.
+- [x] DB.2 Add the Dashboard's wire types. `crates/protocol/src/lib.rs`, `apps/native/tests/support/mod.rs` (snapshot and facts builders), `crates/daemon/src/server/test_support.rs`: everything under "Added and reshaped". Proof: a round-trip test per message and type, an `Unknown` test per new nested enum, and a tab list with an unknown tab kind decoding. Waits on DB.1.
 - [ ] DB.3 Read a session's transcript for the Dashboard. `crates/agents/api/src/lib.rs` (`Agent::activity_reader`), `crates/agents/api/src/activity.rs` (new: the reader's output types), `crates/agents/claude/src/activity.rs` (new: the incremental main-transcript reader), `crates/agents/claude/src/pricing.rs` (new: list prices and context windows), `crates/agents/claude/src/lib.rs`.
 
   Proof: unit tests over transcript fixtures for open calls, background tasks, usage and cost, minute counts, the failure run (a denial neither counts nor resets), the first prompt, a shrunk file read again. Waits on nothing.

@@ -708,7 +708,10 @@ impl RootView {
                         worktree_path: worktree_path.clone(),
                     },
                 )),
-                TabContent::Grid { .. } | TabContent::Viewer { .. } => None,
+                TabContent::Grid { .. }
+                | TabContent::Viewer { .. }
+                | TabContent::Dashboard
+                | TabContent::Unknown => None,
             })
             .collect();
         self.diff_tabs

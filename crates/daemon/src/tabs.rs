@@ -398,9 +398,12 @@ pub fn clone_tabs_fresh_ids(tabs: &[TabEntry]) -> Vec<TabEntry> {
                 TabContent::Grid { grid } => TabContent::Grid {
                     grid: clone_grid_fresh_pane_ids(grid),
                 },
-                // Diff and viewer tabs have no panes/sessions to re-id —
-                // copy verbatim.
-                other @ (TabContent::Diff { .. } | TabContent::Viewer { .. }) => other.clone(),
+                // The other kinds have no panes/sessions to re-id — copy
+                // verbatim.
+                other @ (TabContent::Diff { .. }
+                | TabContent::Viewer { .. }
+                | TabContent::Dashboard
+                | TabContent::Unknown) => other.clone(),
             };
             TabEntry {
                 id: new_id(),

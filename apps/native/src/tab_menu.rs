@@ -9,6 +9,9 @@ use crate::tabs::TabSelection;
 
 /// Why the tab menu's Pop out is dimmed for a viewer tab.
 pub(crate) const VIEWER_POP_OUT_TIP: &str = "Viewer tabs can't be popped out";
+/// Why the tab menu's Pop out is dimmed for a Dashboard tab or a tab kind
+/// this build does not know.
+pub(crate) const OTHER_POP_OUT_TIP: &str = "This tab can't be popped out";
 /// The tab menu's Pop out row, which reads Focus window once the tab is out.
 const POP_OUT_SELECTOR: &str = "tab-menu-popout";
 
@@ -187,6 +190,7 @@ pub(crate) fn head_lines(tab: &TabEntry, tabs: &[TabEntry], popouts: &Popouts) -
 fn pop_out_lines(tab: &TabEntry, tabs: &[TabEntry], popouts: &Popouts) -> Vec<MenuLine> {
     let refusal = match &tab.content {
         TabContent::Viewer { .. } => VIEWER_POP_OUT_TIP,
+        TabContent::Dashboard | TabContent::Unknown => OTHER_POP_OUT_TIP,
         TabContent::Grid { .. } | TabContent::Diff { .. } => {
             let key = PopoutKey::Tab {
                 tab_id: tab.id.clone(),
@@ -232,6 +236,8 @@ pub(crate) fn merge_lines(
     let unmergeable = selected.iter().find_map(|tab| match tab.content {
         TabContent::Diff { .. } => Some("Diff tabs can't be merged"),
         TabContent::Viewer { .. } => Some("Viewer tabs can't be merged"),
+        TabContent::Dashboard => Some("Dashboard tabs can't be merged"),
+        TabContent::Unknown => Some("This tab can't be merged"),
         TabContent::Grid { .. } => None,
     });
     let row = |selector: &str, label: &str, layout: MergeLayout| {
