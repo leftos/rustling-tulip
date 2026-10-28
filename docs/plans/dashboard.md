@@ -126,6 +126,8 @@ The **now line** says what a session is doing this second, highest rule first (O
 8. Idle otherwise: the newest summary's headline, else `Idle`.
 9. Ended: `Session ended · exit N`, or `Error`.
 
+The daemon words rules 2 to 6 (ages `<1m`, `5m`, `1h05m`) in `crates/daemon/src/dashboard/now.rs`. Rules 1, 7, 8 and 9 reach the client as kind `unknown` with empty text and `since` = `status_since`, and the client words them. Rule 1 for the agent tree (a session that is not running) forces Running and Queued subagent and shell nodes to Finished, worded `finished`.
+
 ### Nested rows
 
 Under a Working row, and in By status under any row whose drawer is open, one row per node of its agent tree below the main agent, indented by depth with a `└` branch: the node's glyph and name (a subagent's description, a dispatch run's title with a `dispatch` tag, `bg shell <id>`, `Monitor <id>`, `In gate · heavy 1`), what it runs now or its task (`Running Bash · 1m: <command>`, `finished · 2 findings, both fixed`, `exited 1 · 12m`), its own stuck flag, and its age.
@@ -225,9 +227,9 @@ It follows ops-tower's reader (`docs/agents-transcripts.md`, "The transcript rec
 
 `crates/daemon/src/dashboard/` keeps a **session facts** record per listed session and sends it only to connections that watch a Dashboard:
 
-- While at least one connection has sent `WatchDashboard { on: true }`, a task ticks every 2 s: for each listed session it asks the plugin's reader for what changed, builds the now line (rules above), the agent tree, context, tokens, cost, activity counts and stuck reasons, and sends `DashboardFacts` with the changed entries to the watchers. `WatchDashboard { on: true }` is answered with every entry.
-- With no watcher the task parks and reads nothing, as the git watcher parks at `Hub.client_count` 0 (`crates/daemon/src/git_watch.rs`).
-- `GetSessionDetail` answers one session's drawer: its summary ring, prompt, recent work (DB.6), Linear detail (DB.7) and token figures.
+- While at least one connection has sent `WatchDashboard { on: true }`, a task ticks every 2 s: for each listed session it asks the plugin's reader for what changed, builds the now line (rules above), the agent tree, context, tokens, cost, activity counts and stuck reasons, and sends `DashboardFacts` with the changed entries to the watchers. `WatchDashboard { on: true }` is answered at once with every entry (an empty list when no session is listed), and afterwards a watcher gets only the changed entries, at most every 2 s. `on: false` or closing the connection ends the watch (`server/connection.rs`).
+- With no watcher the task parks and reads nothing, as the git watcher parks at `Hub.client_count` 0 (`crates/daemon/src/git_watch.rs`). The facts cache is emptied when the last watcher leaves, so the next first watch reads every transcript afresh.
+- `GetSessionDetail` answers one session's drawer: its summary ring, prompt, recent work (DB.6), Linear detail (DB.7) and token figures. It answers from the facts cache with `SessionDetail { lines: [], prompt, work: default, request_id }`, or `Error "unknown session: <id>"` echoing the `request_id`; the fields DB.6 to DB.9, SA.6 and DB.21 fill stay empty until those steps land.
 - Facts are runtime-only; a restarted daemon rebuilds them from the transcripts on its first tick.
 
 ### Linear context
@@ -360,7 +362,7 @@ The app is unreleased, so the changes below are made outright. The need-you band
 
 **Orchestrator decision (not an owner ruling):** removed (DB.1), as nothing without speech reads them: both `spoken_name` fields; `WaitingAlert`'s `prefix`, `speech`, `alert_id` and `trigger`; `Attention.alert_id`; `AlertTrigger`; `SessionSummary.pending` and `PendingAsk`, since the Dashboard reads `pending_input`, which carries the structured question.
 
-The shapes DB.2 settled where this section leaves them open (`NowLine`, `StuckReason`, `PromptChoice`, `SummaryTestResult`, `RecentWork`, the summarizer settings and key states, ten one-minute counts for `activity`) are the definitions in `crates/protocol/src/lib.rs`, recorded on RT-482. Until each handler lands, the daemon answers a new request carrying an id with `Error { message: "not supported yet" }`.
+The shapes DB.2 settled where this section leaves them open (`NowLine`, `StuckReason`, `PromptChoice`, `SummaryTestResult`, `RecentWork`, the summarizer settings and key states, ten one-minute counts for `activity`) are the definitions in `crates/protocol/src/lib.rs`, recorded on RT-482. Until each handler lands, the daemon answers a new request carrying an id with `Error { message: "not supported yet" }`; `WatchDashboard` and `GetSessionDetail` have handlers (`crates/daemon/src/server/dashboard.rs`).
 
 Added and reshaped (DB.2), each new nested enum with `#[serde(other)] Unknown`:
 
@@ -438,7 +440,7 @@ Ids: **SA** for the summarizer service, **DB** for the Dashboard. Each names its
 - [x] DB.4 Build each session's subagent tree. `crates/agents/claude/src/subagents.rs` (new: the folder and sidecar reader, `<task-notification>` parsing, subagent-streams' rules 1 to 5), `crates/agents/claude/src/activity.rs` (join into the tree).
 
   Proof: fixture tests for a running, a finished, a killed and a nested subagent and a background shell ended by its notification. Waits on DB.3. Shared with [subagent-streams.md](./subagent-streams.md)'s SS.1 and SS.2.
-- [ ] DB.5 Send session facts to watching Dashboards. `crates/daemon/src/dashboard/mod.rs` (new: watcher count, 2 s tick, reader cache, facts), `crates/daemon/src/dashboard/now.rs` (new: the now line's rules), `crates/daemon/src/server/dashboard.rs` (new: `WatchDashboard`, `GetSessionDetail`), `crates/daemon/src/server.rs` (`dispatch`), `crates/daemon/src/main.rs` (`mod` line).
+- [x] DB.5 Send session facts to watching Dashboards. `crates/daemon/src/dashboard/mod.rs` (new: watcher count, 2 s tick, reader cache, facts), `crates/daemon/src/dashboard/now.rs` (new: the now line's rules), `crates/daemon/src/server/dashboard.rs` (new: `WatchDashboard`, `GetSessionDetail`), `crates/daemon/src/server.rs` (`dispatch`), `crates/daemon/src/main.rs` (`mod` line), `crates/daemon/src/server/connection.rs` (ends a connection's watch), `crates/daemon/src/server/test_support.rs` and `crates/daemon/src/presets.rs` (the `Hub` literal).
 
   Proof: a server test with a fake reader: facts reach only watchers, only changed entries follow, nothing is read with no watcher, and each now-line rule picks the right text. Waits on DB.2, DB.3, DB.4.
 - [ ] DB.6 Read each session's recent work from git. `crates/daemon/src/git_inspect.rs` (commits since a time, `--numstat`, `--shortstat`), `crates/daemon/src/dashboard/work.rs` (new: per-worktree read, 50-file cut, 5 s cache), `crates/daemon/src/server/dashboard.rs` (the detail's `work`). Proof: git-fixture tests for commits since start, uncommitted line counts, landed totals once clean, and an in-place session. Waits on DB.5.

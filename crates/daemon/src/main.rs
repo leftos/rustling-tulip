@@ -14,6 +14,7 @@ mod child_env;
 mod cli_pair;
 mod cli_shutdown;
 mod conversations;
+mod dashboard;
 mod detach;
 mod devices;
 mod env_secrets;

@@ -183,6 +183,9 @@ pub(super) async fn client_session_until(
     // Subscribe to global session events. After splitting PtyOutput out, this
     // channel only carries low-volume control events.
     let connection = NEXT_CONNECTION.fetch_add(1, Ordering::Relaxed);
+    // Ends any Dashboard watch of this connection on every way out, panic
+    // included; dropped before `out_tx`, since a watcher holds a clone of it.
+    let dashboard_watch = hub.dashboard.watch_guard(connection);
     let event_task = spawn_session_forwarder(Arc::clone(&hub.sessions), out_tx.clone(), connection);
 
     // Subscribe to tab-layout and preset-launch events. Tab events are
@@ -221,6 +224,7 @@ pub(super) async fn client_session_until(
 
     info!("client_session: recv_loop returned; tearing down");
     stop_transfers(&pty_forwarders, &fetches).await;
+    drop(dashboard_watch);
     drop(file_tx);
     drop(out_tx);
     event_task.abort();

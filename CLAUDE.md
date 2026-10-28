@@ -352,7 +352,7 @@ The refresher tracks two flags — `status` and `stash` — and only invokes `gi
 
   The tab-layout requests `CreateTab` / `MergeTabs` / `MovePane` / `ExtractToNewTab` / `SplitPane` / `ClosePane` / `SwapPanes` / `ReorderTabs` take one too; it comes back only on the `Error` that refuses the request (success is a broadcast `TabUpdated` or `TabRemoved`, which carries none), and a refusal without one still gets `Error { request_id: None }`. `ListSessionHistory`, `RecoverSessions` and `ListEnvNames` echo theirs on their `SessionHistory`, `RecoverResult` and `EnvNames` replies.
 
-  `SuggestBranchName` echoes its id on `BranchNameSuggestion`, and on the `Error` that answers a failed suggestion. `SetAgentCommand` and `SetAgentSettings` take one too; it comes back only on the `Error` that refuses the request (success is the `AgentCommands` / `AgentSettings` broadcast, which carries none), and the native Settings modal routes each refusal to the apply it answers.
+  `GetSessionDetail` echoes its id on `SessionDetail`, and on the `Error "unknown session: <id>"` that answers a session the facts cache does not hold. `SuggestBranchName` echoes its id on `BranchNameSuggestion`, and on the `Error` that answers a failed suggestion. `SetAgentCommand` and `SetAgentSettings` take one too; it comes back only on the `Error` that refuses the request (success is the `AgentCommands` / `AgentSettings` broadcast, which carries none), and the native Settings modal routes each refusal to the apply it answers.
 
 ## Style and lints
 

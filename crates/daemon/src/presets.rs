@@ -2904,6 +2904,7 @@ mod tests {
             active: false,
         });
         let devices = crate::devices::DeviceStore::load(&crate::paths::devices_file(&dirs));
+        let dashboard = crate::dashboard::Dashboard::new(Arc::clone(&sessions));
         let hub = Hub {
             state,
             sessions,
@@ -2935,6 +2936,7 @@ mod tests {
             pairing: Arc::new(std::sync::Mutex::new(crate::devices::PairingBook::new())),
             pairing_waiters: Arc::default(),
             live_devices: crate::server::live_devices::LiveDevices::default(),
+            dashboard,
         };
         (hub, preset_rx, scratch)
     }

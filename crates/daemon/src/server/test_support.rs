@@ -120,6 +120,7 @@ pub(super) fn build_test_hub(
         active: false,
     });
     let devices = crate::devices::DeviceStore::load(&crate::paths::devices_file(&dirs));
+    let dashboard = crate::dashboard::Dashboard::new(Arc::clone(&sessions));
     let hub = Hub {
         state,
         sessions,
@@ -151,6 +152,7 @@ pub(super) fn build_test_hub(
         pairing: Arc::new(std::sync::Mutex::new(crate::devices::PairingBook::new())),
         pairing_waiters: super::pairing::PairingWaiters::default(),
         live_devices: super::live_devices::LiveDevices::default(),
+        dashboard,
     };
     (hub, scratch, attention_rx)
 }

@@ -7,6 +7,7 @@ mod remote;
 pub(crate) use self::remote::RemoteSlot;
 
 mod connection;
+mod dashboard;
 mod handshake;
 pub(crate) use self::handshake::TAILNET_HANDSHAKE_TIMEOUT;
 
@@ -163,6 +164,9 @@ pub struct Hub {
     /// forget cuts them at once. Locked before [`Hub::devices`] when both
     /// are held.
     pub live_devices: live_devices::LiveDevices,
+    /// The Dashboard's facts service: its watchers, its reader cache and the
+    /// facts it last sent each watcher.
+    pub dashboard: crate::dashboard::Dashboard,
 }
 
 impl Hub {
@@ -387,6 +391,7 @@ pub async fn run(
     // task. Same liveness predicate as the idle-exit watcher below.
     let (keep_awake_tx, keep_awake_status_rx) = start_keep_awake(&state, &sessions, &state_events);
 
+    let dashboard = crate::dashboard::Dashboard::new(Arc::clone(&sessions));
     let hub = Hub {
         state,
         sessions,
@@ -418,6 +423,7 @@ pub async fn run(
         pairing: Arc::new(std::sync::Mutex::new(crate::devices::PairingBook::new())),
         pairing_waiters: pairing::PairingWaiters::default(),
         live_devices: live_devices::LiveDevices::default(),
+        dashboard,
     };
     start_hub_tasks(&hub, client_count_rx);
 
@@ -816,11 +822,12 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
                 }
             });
         }
+        m @ (ClientMessage::WatchDashboard { .. } | ClientMessage::GetSessionDetail { .. }) => {
+            dashboard::handle(hub, m, ctx).await;
+        }
         m @ (ClientMessage::SetSummarizerSettings { .. }
         | ClientMessage::SetSummarizerKey { .. }
         | ClientMessage::TestSummary { .. }
-        | ClientMessage::WatchDashboard { .. }
-        | ClientMessage::GetSessionDetail { .. }
         | ClientMessage::AnswerPrompt { .. }) => refuse_not_supported_yet(m, out_tx),
     }
     Ok(())
@@ -836,9 +843,7 @@ fn refuse_not_supported_yet(msg: ClientMessage, out_tx: &mpsc::UnboundedSender<D
         }
         ClientMessage::SetSummarizerKey { request_id, .. } => ("SetSummarizerKey", request_id),
         ClientMessage::TestSummary { request_id } => ("TestSummary", request_id),
-        ClientMessage::GetSessionDetail { request_id, .. } => ("GetSessionDetail", request_id),
         ClientMessage::AnswerPrompt { request_id, .. } => ("AnswerPrompt", request_id),
-        ClientMessage::WatchDashboard { .. } => ("WatchDashboard", None),
         _ => {
             warn!("refuse_not_supported_yet: a supported message was routed here");
             return;
@@ -856,6 +861,8 @@ fn refuse_not_supported_yet(msg: ClientMessage, out_tx: &mpsc::UnboundedSender<D
 /// Start the tasks that watch the hub for the daemon's lifetime.
 fn start_hub_tasks(hub: &Hub, client_count_rx: tokio::sync::watch::Receiver<usize>) {
     start_history_broadcaster(hub);
+    // The Dashboard's 2 s facts tick; it parks while no connection watches.
+    hub.dashboard.spawn_ticker();
     // Idle self-exit: once the last client disconnects and no session has a
     // live child for a full grace period, flip the shutdown watch so a
     // resident daemon doesn't pin a stale executable across app updates.
@@ -935,15 +942,14 @@ mod tests {
         let _ = err.raw_os_error();
     }
 
-    /// A Dashboard request whose handler has not landed is refused on the
+    /// A summarizer request whose handler has not landed is refused on the
     /// wire with its id, so the requester does not wait on a reply.
     #[tokio::test]
-    async fn a_dashboard_request_is_refused_as_not_supported_yet() {
-        let (hub, _scratch) = test_hub("dashboard-stub");
+    async fn a_summarizer_request_is_refused_as_not_supported_yet() {
+        let (hub, _scratch) = test_hub("summarizer-stub");
         let reply = dispatch_one(
             &hub,
-            ClientMessage::GetSessionDetail {
-                session_id: "s1".to_string(),
+            ClientMessage::TestSummary {
                 request_id: Some("d1".to_string()),
             },
         )
