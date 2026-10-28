@@ -1202,6 +1202,36 @@
         "apps/native/tests/smoke_window.rs"
       ],
       "filter": "binary_id(rustling-tulip-native::smoke_window)"
+    },
+    {
+      "paths": [
+        "apps/native/src/overlay_owner.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & test(/^overlay_owner::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_popout)::/))"
+    },
+    {
+      "paths": [
+        "apps/native/src/popout_view.rs"
+      ],
+      "filter": "binary_id(rustling-tulip-native::ui) & test(/^(ui_popout)::/)"
+    },
+    {
+      "paths": [
+        "apps/native/src/popouts.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & test(/^popouts::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_popout)::/))"
+    },
+    {
+      "paths": [
+        "apps/native/src/window_layouts.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & test(/^window_layouts::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_popout)::/))"
+    },
+    {
+      "paths": [
+        "apps/native/tests/ui/ui_popout.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native::ui) & test(/^(ui_popout)::/))"
     }
   ]
 }
