@@ -373,6 +373,67 @@ impl fmt::Debug for EnvPlan {
     }
 }
 
+/// What [`Agent::summarizer`] is asked: the JSON Schema the reply must follow
+/// and a reader of the daemon's environment.
+#[derive(Clone, Copy)]
+pub struct SummarizerRequest<'a> {
+    /// The JSON Schema of the reply object, as JSON text.
+    pub schema: &'a str,
+    /// The daemon's value of an environment variable, `None` when unset.
+    pub read_env: &'a dyn Fn(&str) -> Option<String>,
+}
+
+/// Shows the schema only: the reader answers secrets.
+impl fmt::Debug for SummarizerRequest<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SummarizerRequest")
+            .field("schema", &self.schema)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A summarizer call through an agent's CLI: the daemon runs the agent's own
+/// program with `args`, the prompt on stdin and `env` as its whole
+/// environment, in an empty folder, and reads its stdout with
+/// `parse_output`.
+#[derive(Clone)]
+pub struct SummarizerSpec {
+    /// The arguments after the program.
+    pub args: Vec<String>,
+    /// The child's whole environment, each name once.
+    pub env: Vec<(String, String)>,
+    /// The provider picker's name for this summarizer.
+    pub label: String,
+    /// The provider picker's line on where summaries go.
+    pub privacy: String,
+    /// The reply's text and cost from the program's stdout, or why the call
+    /// failed.
+    pub parse_output: fn(&str) -> Result<SummaryOutput, String>,
+}
+
+/// Shows the variable names only: `env` holds credentials.
+impl fmt::Debug for SummarizerSpec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let env_keys: Vec<&str> = self.env.iter().map(|(k, _)| k.as_str()).collect();
+        f.debug_struct("SummarizerSpec")
+            .field("args", &self.args)
+            .field("env_keys", &env_keys)
+            .field("label", &self.label)
+            .field("privacy", &self.privacy)
+            .finish_non_exhaustive()
+    }
+}
+
+/// What a summarizer call answered: the reply's text, which the daemon reads
+/// the summary from, and what the call cost.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SummaryOutput {
+    /// The reply object as text, possibly fenced or after prose.
+    pub text: String,
+    /// US dollars; 0 when the program reported none.
+    pub cost_usd: f64,
+}
+
 /// What [`Agent::recovery_options`] is asked: the options a session recorded
 /// when it ran, if the app has them, and whether it ran trusted.
 #[derive(Debug, Clone, Copy)]
@@ -619,6 +680,12 @@ pub trait Agent: Send + Sync + 'static {
         None
     }
 
+    /// The call that summarizes a session through this agent's CLI, its reply
+    /// following `request`'s schema. `None` for an agent that offers none.
+    fn summarizer(&self, _request: &SummarizerRequest<'_>) -> Option<SummarizerSpec> {
+        None
+    }
+
     /// How much output the daemon must see and how long it must then stay
     /// quiet before this agent's TUI counts as up, so a prompt can be typed
     /// into it.
@@ -769,6 +836,9 @@ pub trait AgentPlugin: Send + Sync {
 
     /// See [`Agent::activity_reader`].
     fn activity_reader(&self, source: &ActivitySource) -> Option<Box<dyn ActivityReader>>;
+
+    /// See [`Agent::summarizer`].
+    fn summarizer(&self, request: &SummarizerRequest<'_>) -> Option<SummarizerSpec>;
 
     /// See [`Agent::ready_signal`].
     fn ready_signal(&self) -> ReadySignal;
@@ -947,6 +1017,10 @@ impl<A: Agent> AgentPlugin for A {
 
     fn activity_reader(&self, source: &ActivitySource) -> Option<Box<dyn ActivityReader>> {
         Agent::activity_reader(self, source)
+    }
+
+    fn summarizer(&self, request: &SummarizerRequest<'_>) -> Option<SummarizerSpec> {
+        Agent::summarizer(self, request)
     }
 
     fn ready_signal(&self) -> ReadySignal {
@@ -1714,5 +1788,17 @@ mod tests {
         };
 
         assert!(plugin.activity_reader(&source).is_none());
+    }
+
+    #[test]
+    fn summarizer_defaults_to_none() {
+        let plugin: &dyn AgentPlugin = &Bare;
+        let read_env = |_: &str| Some("set".to_owned());
+        let request = SummarizerRequest {
+            schema: r#"{"type":"object"}"#,
+            read_env: &read_env,
+        };
+
+        assert!(plugin.summarizer(&request).is_none());
     }
 }

@@ -23,6 +23,7 @@ pub(crate) use self::recovery::RecoveryClaims;
 mod sessions;
 
 mod spawn;
+pub(crate) use self::spawn::resolve_agent_program;
 #[expect(
     unused_imports,
     reason = "doc comments in history.rs name these at their crate::server path"

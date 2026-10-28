@@ -6,12 +6,13 @@ mod worktree;
 #[cfg(test)]
 pub(super) use self::hook_settings::hook_settings_path;
 pub(super) use self::hook_settings::{announce_replayed_prompt, remove_hook_settings};
+pub(crate) use self::shell::resolve_agent_program;
 pub(super) use self::worktree::target_uses_worktree;
 
 use self::hook_settings::{HookSettings, write_hook_files, write_hook_settings};
 use self::shell::{
     AgentLaunch, Launch, ShellProgram, TypedCommand, choose_agent_command, plan_launch,
-    resolve_agent_program, resolve_shell_program,
+    resolve_shell_program,
 };
 use self::worktree::{
     SinglePlan, classify_worktree_error, log_fork_point, materialize_single_worktree,

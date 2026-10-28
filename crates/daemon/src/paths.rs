@@ -174,6 +174,19 @@ mod dir_tests {
             override_dir
         );
     }
+
+    #[test]
+    fn summarizer_dir_is_data_local_summarizer_and_is_created() {
+        let data_local =
+            std::env::temp_dir().join(format!("rt-summarizer-data-local-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data_local);
+        let dir = ensure_summarizer_dir_in(&data_local).expect("create the summarizer dir");
+        assert_eq!(dir, data_local.join("summarizer"));
+        assert!(dir.is_dir(), "{}", dir.display());
+        let again = ensure_summarizer_dir_in(&data_local).expect("an existing dir resolves");
+        assert_eq!(again, dir);
+        let _ = std::fs::remove_dir_all(&data_local);
+    }
 }
 
 #[cfg(all(test, windows))]
@@ -310,6 +323,38 @@ fn tailnet_dir_from(
         Some(dir) if !dir.is_empty() => Ok(PathBuf::from(dir)),
         _ => Ok(data_local()?.join("tailnet")),
     }
+}
+
+/// The summarizer's working folder, `<data_local>/summarizer`
+/// (`%LOCALAPPDATA%\leftos\rustling-tulip\data\summarizer\` on Windows),
+/// created if missing. An agent's summarizer program runs in it, so no
+/// project's settings or instruction files apply to a summary.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "nothing outside tests calls the summarizer until the server's summarizer handlers are wired"
+    )
+)]
+pub(crate) fn resolve_summarizer_dir() -> anyhow::Result<PathBuf> {
+    let pd = ProjectDirs::from("dev", "leftos", "rustling-tulip")
+        .ok_or_else(|| anyhow!("could not resolve the summarizer directory"))?;
+    ensure_summarizer_dir_in(pd.data_local_dir())
+}
+
+/// `summarizer` under `data_local`, created if missing.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "nothing outside tests calls the summarizer until the server's summarizer handlers are wired"
+    )
+)]
+fn ensure_summarizer_dir_in(data_local: &Path) -> anyhow::Result<PathBuf> {
+    let dir = data_local.join("summarizer");
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("creating the summarizer dir {}", dir.display()))?;
+    Ok(dir)
 }
 
 /// Resolve the config directory, honoring `RUSTLING_TULIP_CONFIG_DIR` when

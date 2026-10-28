@@ -208,6 +208,8 @@ It is not under the config dir, so the private key never roams (`crates/daemon/s
 
 Files the native client fetches from a remote host live in a fourth machine-local root beside those, `daemon_client::remote_files_dir()` (overridable with `RUSTLING_TULIP_REMOTE_FILES_DIR`), `%LOCALAPPDATA%\leftos\rustling-tulip\data\remote-files\` on Windows: `<host MagicDNS name, lower-cased>/<repo-name>/<rel-path>`, with Windows-unsafe names sanitised.
 
+The Dashboard summarizer runs the agent's CLI in a fifth machine-local root beside those, `ProjectDirs::data_local_dir().join("summarizer")` (no override variable), `%LOCALAPPDATA%\leftos\rustling-tulip\data\summarizer\` on Windows: nothing lives there but the CLI's working folder, which is kept empty and never emptied by the daemon. It is created on first use (`crates/daemon/src/paths.rs` `resolve_summarizer_dir`, `crates/daemon/src/summarizer/cli.rs`).
+
 A fetch writes a hidden `.fetch-<launch stamp>-<n>.part` beside the target and renames it over the target when the file is done; a failed or cancelled fetch deletes its part. Nothing under it is ever pruned (`apps/native/src/file_fetch.rs`).
 
 A fetched `.html` or `.htm` page that opens when done brings the relative media it names with it, saved at the same `<host>/<repo-name>/<rel-path>` place (never outside the repo root) and each fetched again if already on disk (`apps/native/src/html_media.rs`, `docs/native-client.md` "Fetched files").

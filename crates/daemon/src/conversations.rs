@@ -6,7 +6,7 @@
 pub(crate) mod contested;
 pub(crate) mod discovery;
 #[cfg(windows)]
-mod job;
+pub(crate) mod job;
 pub(crate) mod pre_create;
 
 use std::path::Path;

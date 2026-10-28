@@ -2,8 +2,8 @@
 //! and its typed options cannot drift apart.
 
 use crate::{
-    Agent, AgentPlugin, LineMatcher, RecoveredRun, ScreenRegion, ScreenVerdict, decode_options,
-    validate,
+    Agent, AgentPlugin, LineMatcher, RecoveredRun, ScreenRegion, ScreenVerdict, SummarizerRequest,
+    decode_options, validate,
 };
 use protocol::{AgentDescriptor, FieldKind, OptionValue, OptionValues};
 
@@ -42,6 +42,56 @@ pub fn check<A: Agent>(agent: &A) {
     }
     check_screen_rules(agent);
     check_recovery_and_import(agent);
+    check_summarizer(agent);
+}
+
+/// A summarizer, when the agent offers one, carries the schema it was asked
+/// for, names each environment variable once, and has a picker label and a
+/// privacy line; the adapter answers the agent's own spec.
+#[expect(
+    clippy::panic,
+    reason = "a conformance failure must fail the calling test"
+)]
+fn check_summarizer<A: Agent>(agent: &A) {
+    const SCHEMA: &str = r#"{"type":"object","title":"conformance-schema"}"#;
+    let read_env = |name: &str| Some(format!("conformance-{name}"));
+    let request = SummarizerRequest {
+        schema: SCHEMA,
+        read_env: &read_env,
+    };
+    let Some(spec) = Agent::summarizer(agent, &request) else {
+        assert!(
+            AgentPlugin::summarizer(agent, &request).is_none(),
+            "the adapter offers a summarizer the agent does not"
+        );
+        return;
+    };
+    assert!(
+        spec.args.iter().any(|arg| arg.contains(SCHEMA)),
+        "the summarizer's arguments {:?} do not carry the schema",
+        spec.args
+    );
+    let mut names: Vec<String> = Vec::new();
+    for (name, _) in &spec.env {
+        assert!(
+            !name.is_empty(),
+            "the summarizer's environment has an empty name"
+        );
+        let folded = name.to_ascii_uppercase();
+        assert!(
+            !names.contains(&folded),
+            "the summarizer's environment names {name:?} twice"
+        );
+        names.push(folded);
+    }
+    assert!(!spec.label.is_empty(), "the summarizer has no label");
+    assert!(
+        !spec.privacy.is_empty(),
+        "the summarizer has no privacy line"
+    );
+    let adapted = AgentPlugin::summarizer(agent, &request)
+        .unwrap_or_else(|| panic!("the adapter offers no summarizer where the agent does"));
+    assert_eq!(adapted.args, spec.args, "the adapter's arguments differ");
 }
 
 /// A recovery with nothing recorded yields option values, trusted or not,

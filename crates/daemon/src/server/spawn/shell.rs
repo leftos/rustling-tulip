@@ -44,7 +44,7 @@ use std::path::{Path, PathBuf};
 /// string is returned as-is and we let the tracer surface whatever
 /// error `CreateProcess` produces — that's more useful diagnostics
 /// than guessing.
-pub(super) fn resolve_agent_program(name: &str) -> (String, Vec<String>) {
+pub(crate) fn resolve_agent_program(name: &str) -> (String, Vec<String>) {
     let Ok(path) = which::which(name) else {
         return (name.to_string(), Vec::new());
     };

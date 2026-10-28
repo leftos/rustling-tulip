@@ -11,6 +11,11 @@ pub(crate) const HEADLINE_MAX_WORDS: usize = 8;
 /// The most characters a notification keeps.
 pub(crate) const NOTIFICATION_MAX_CHARS: usize = 100;
 
+/// The JSON Schema of the reply object, which a CLI summarizer is asked to
+/// answer in: the three fields [`parse`] reads, each a string, `kind` one of
+/// the three it accepts.
+pub(crate) const SUMMARY_SCHEMA: &str = r#"{"type":"object","properties":{"kind":{"type":"string","enum":["needs_answer","working_update","done_waiting"]},"headline":{"type":"string"},"notification":{"type":"string"}},"required":["kind","headline","notification"],"additionalProperties":false}"#;
+
 /// One summary, read and capped.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Summary {
@@ -130,6 +135,32 @@ mod tests {
         ] {
             let text = format!(r#"{{"kind": "{wire}", "headline": "h", "notification": "n"}}"#);
             assert_eq!(parse(&text).expect("a known kind parses").kind, kind);
+        }
+    }
+
+    #[test]
+    fn the_schema_requires_the_three_strings_and_lists_each_kind_parse_accepts() {
+        let schema: serde_json::Value =
+            serde_json::from_str(SUMMARY_SCHEMA).expect("the schema is JSON");
+        assert_eq!(schema["type"], "object");
+        assert_eq!(
+            schema["required"],
+            serde_json::json!(["kind", "headline", "notification"])
+        );
+        for field in ["kind", "headline", "notification"] {
+            assert_eq!(schema["properties"][field]["type"], "string", "{field}");
+        }
+        let kinds = schema["properties"]["kind"]["enum"]
+            .as_array()
+            .expect("kind lists its values");
+        assert_eq!(kinds.len(), 3);
+        for kind in kinds {
+            let kind = kind.as_str().expect("a kind is a string");
+            let text = format!(r#"{{"kind": "{kind}", "headline": "h", "notification": "n"}}"#);
+            assert!(
+                parse(&text).is_ok(),
+                "the schema's kind {kind} does not parse"
+            );
         }
     }
 

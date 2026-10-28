@@ -16,6 +16,7 @@ mod providers;
 mod records;
 mod rules;
 mod subagents;
+mod summarize;
 mod transcripts;
 
 pub use providers::{display_name, provider_for_model};
@@ -25,7 +26,7 @@ use agent_api::{
     ActivityReader, ActivitySource, Agent, AgentError, ConversationPlan, ConversationQuery,
     EnvPlan, FoundConversation, HeadlessEvent, HookPlan, HookReport, HookShim, ImportedRun,
     KeyLookup, ReadySignal, RecoveredRun, Refusal, ResolvedRows, ScreenRules, SpawnCheck,
-    SpawnContext, TracerRun, workspace_prelude,
+    SpawnContext, SummarizerRequest, SummarizerSpec, TracerRun, workspace_prelude,
 };
 use options::{ClaudeProvider, PermissionMode};
 use protocol::{
@@ -493,6 +494,12 @@ impl Agent for ClaudePlugin {
     /// The incremental reader of the session's main transcript.
     fn activity_reader(&self, source: &ActivitySource) -> Option<Box<dyn ActivityReader>> {
         activity::reader(source)
+    }
+
+    /// Haiku through the CLI on the user's own login, with an allow-listed
+    /// environment.
+    fn summarizer(&self, request: &SummarizerRequest<'_>) -> Option<SummarizerSpec> {
+        Some(summarize::spec(request))
     }
 
     /// The banner tuning the daemon's startup heuristic was measured against.
