@@ -1,5 +1,6 @@
 //! In-memory session registry: spawned agent and shell processes plus their state.
 
+use crate::activity_log;
 use crate::conversations::discovery::Discovery;
 use crate::headless::HeadlessHandle;
 use crate::history;
@@ -770,19 +771,33 @@ impl SessionRegistry {
         let Some(arc) = self.get(id) else {
             return false;
         };
-        let (snap, entered_error) = {
+        let (snap, entered_error, status_change) = {
             let mut guard = lock(&arc);
             let was_error = guard.status == SessionStatus::Error;
             let was_status = guard.status;
             if !f(&mut guard) {
                 return true;
             }
+            let mut status_change = None;
             if guard.status != was_status {
-                guard.status_since = Some(Utc::now());
+                let at = Utc::now();
+                guard.status_since = Some(at);
+                status_change = Some((at, guard.status));
             }
             let entered_error = !was_error && guard.status == SessionStatus::Error;
-            (guard.snapshot(), entered_error)
+            (guard.snapshot(), entered_error, status_change)
         };
+        // Record the change in the status-change log, outside the record lock
+        // and never failing the update: the Dashboard's activity track reads
+        // it long after the session, and the daemon, is gone.
+        if let (Some(dirs), Some((at, status))) = (self.dirs.as_ref(), status_change) {
+            activity_log::append(
+                &dirs.activity_dir(),
+                &activity_log::session_key(id),
+                at,
+                status,
+            );
+        }
         // Mirror the record into its sidecar so an abandoned session can show
         // "what was this doing right before the daemon died?" and a live-tracer
         // reattach can restore a session that was still waiting for input. The
@@ -837,11 +852,26 @@ impl PendingInsert<'_> {
     /// [`Self::publish`], its broadcast carrying `origin`, which the record
     /// keeps as its spawn origin.
     pub fn publish_from(self, origin: Option<UpdateOrigin>) {
-        let snap = {
+        let (snap, log_id, log_at, log_status) = {
             let mut rec = lock(&self.arc);
             rec.spawn_origin.clone_from(&origin);
-            rec.snapshot()
+            let log_id = rec.id.clone();
+            let log_at = rec.status_since.unwrap_or_else(Utc::now);
+            let log_status = rec.status;
+            (rec.snapshot(), log_id, log_at, log_status)
         };
+        // Every insert — a spawn, an orphan, a reattached or an abandoned
+        // session — reaches clients through here, so this is where the
+        // status-change log learns the status it starts in. Written outside
+        // the record lock, and never failing the insert.
+        if let Some(dirs) = self.registry.dirs.as_ref() {
+            activity_log::append(
+                &dirs.activity_dir(),
+                &activity_log::session_key(&log_id),
+                log_at,
+                log_status,
+            );
+        }
         let _ = self
             .registry
             .events
@@ -1597,6 +1627,40 @@ mod tests {
         assert!(
             since.is_some_and(|t| t > before),
             "a status change stamps a fresh time: {since:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn appends_follow_status_changes() {
+        use crate::history::test_support::{record, scratch_dirs};
+        let dirs = scratch_dirs("activity-appends");
+        let registry = SessionRegistry::new(dirs.clone());
+        registry.insert(record("s1", SessionMode::Headless));
+        let key = activity_log::session_key("s1");
+        let inserted = registry.snapshots()[0]
+            .status_since
+            .expect("an insert stamps a status time");
+
+        registry.update("s1", |rec| rec.status = SessionStatus::Working);
+        let working_at = registry.snapshots()[0]
+            .status_since
+            .expect("a status change stamps a fresh time");
+        registry.update("s1", |rec| rec.status = SessionStatus::Idle);
+        let idle_at = registry.snapshots()[0]
+            .status_since
+            .expect("a status change stamps a fresh time");
+        registry.update("s1", |rec| rec.status = SessionStatus::Idle);
+
+        assert_eq!(
+            activity_log::read_lines(&dirs.activity_dir(), &key),
+            vec![
+                (inserted, SessionStatus::Idle),
+                (working_at, SessionStatus::Working),
+                (idle_at, SessionStatus::Idle),
+            ],
+            "one line per status change, stamped as the record was, and none \
+             for an update that leaves the status alone"
         );
         let _ = std::fs::remove_dir_all(&dirs.config);
     }

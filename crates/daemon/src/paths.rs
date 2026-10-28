@@ -261,6 +261,14 @@ impl Dirs {
         self.config.join("contested")
     }
 
+    /// Status-change log: `<config>/activity/<key>.jsonl`, one file per
+    /// session and the daemon's own `daemon.json` beside them (see
+    /// [`crate::activity_log`]). Created on first write.
+    #[must_use]
+    pub fn activity_dir(&self) -> PathBuf {
+        self.config.join("activity")
+    }
+
     /// The tailnet listener's certificate dir (see [`resolve_tailnet_dir`]),
     /// created if missing.
     pub fn ensure_tailnet_dir() -> anyhow::Result<PathBuf> {

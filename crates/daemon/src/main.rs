@@ -6,6 +6,7 @@
 // the console so a failing test still prints.
 #![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
 
+mod activity_log;
 mod binary_cache;
 mod branch_fate;
 mod branch_names;
@@ -191,10 +192,47 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     // is a value nothing can open again, so sweep it from the store and index.
     sweep_unreferenced_secrets(&dirs, &state, chrono::Utc::now());
 
+    // The status-change log survives the sessions it records, so the
+    // Dashboard's two-hour activity track is whole when one opens. Prune it
+    // and record this start (the stretch since the previous daemon's last
+    // alive stamp becomes a gap) before any session is inserted, then keep the
+    // alive stamp fresh for as long as this daemon runs.
+    let now = chrono::Utc::now();
+    activity_log::prune(
+        &dirs.activity_dir(),
+        now,
+        activity_log::sidecar_is_live(&dirs.sessions_dir),
+    );
+    let _ = activity_log::record_start(&dirs.activity_dir(), now);
+    tokio::spawn(stamp_alive_periodically(
+        dirs.activity_dir(),
+        dirs.sessions_dir.clone(),
+    ));
+
     let result = server::run(state, dirs, live, dead, resume_ids).await;
     info!(?result, "rustling-tulipd main returning");
     result?;
     Ok(std::process::ExitCode::SUCCESS)
+}
+
+/// Refresh the activity log's alive stamp and prune it every
+/// [`activity_log::ALIVE_EVERY`], for the daemon's life: the gap after an
+/// unrecorded death is measured from the last stamp.
+async fn stamp_alive_periodically(activity_dir: PathBuf, sessions_dir: PathBuf) {
+    let mut tick = tokio::time::interval(activity_log::ALIVE_EVERY);
+    // The first tick is due at once; `record_start` already stamped.
+    tick.tick().await;
+    loop {
+        tick.tick().await;
+        let dir = activity_dir.clone();
+        let sessions = sessions_dir.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            let now = chrono::Utc::now();
+            activity_log::stamp_alive(&dir, now);
+            activity_log::prune(&dir, now, activity_log::sidecar_is_live(&sessions));
+        })
+        .await;
+    }
 }
 
 /// Seal the secret literal rows `state.json` and the session sidecars hold.
