@@ -1,12 +1,14 @@
 //! The Claude plugin's transcript activity reader: it follows one
 //! conversation's main transcript, parsing only the lines appended since the
-//! last read, and reports what the session is doing for the Dashboard.
+//! last read, and reports what the session is doing for the Dashboard, with
+//! the subagent tree [`crate::subagents`] reads beside it.
 //!
 //! A first read of a file longer than [`TAIL_BYTES`] starts at the first
 //! whole line of its last [`TAIL_BYTES`], and the first prompt is then looked
 //! for in the file's first [`HEAD_BYTES`]. A line still being written (no
-//! `\n` yet) is left for the next read. A file that shrank or was replaced is
-//! read again from scratch.
+//! `\n` yet) is left for the next read. A file whose length and creation time
+//! are unchanged is not read; one that shrank or was replaced is read again
+//! from scratch.
 
 use std::collections::{HashMap, VecDeque};
 use std::fs::{self, File};
@@ -15,15 +17,17 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use agent_api::{
-    ActivityReader, ActivitySnapshot, ActivitySource, BackgroundTask, ContextReading,
+    ActivityReader, ActivitySnapshot, ActivitySource, BackgroundTask, ContextReading, EndedTask,
     MINUTE_COLUMNS, OpenCall,
 };
 use chrono::{DateTime, Utc};
+use protocol::AgentState;
 use serde_json::Value;
 use tracing::debug;
 
 use crate::pricing::{self, Usage};
-use crate::records::{self, NOTIFICATION_TAG};
+use crate::records::{self, LaunchedTask, NOTIFICATION_TAG, TaskNotification};
+use crate::subagents::SubagentReader;
 use crate::transcripts;
 
 /// How much of a file's end its first read takes.
@@ -67,13 +71,14 @@ pub(crate) fn reader(source: &ActivitySource) -> Option<Box<dyn ActivityReader>>
     )))
 }
 
-/// One transcript's reader: where it is and what it has read so far.
-struct TranscriptReader {
-    path: PathBuf,
+/// One conversation's reader: its main transcript, what it has read so far
+/// and its subagents.
+pub(crate) struct TranscriptReader {
+    main: Transcript,
     process_started_at: Option<DateTime<Utc>>,
-    state: State,
     /// Whether the file's absence has been logged since it was last read.
     missing_logged: bool,
+    subagents: SubagentReader,
 }
 
 impl ActivityReader for TranscriptReader {
@@ -81,49 +86,103 @@ impl ActivityReader for TranscriptReader {
         if let Err(error) = self.refresh() {
             self.log_unreadable(&error);
         }
-        self.state.snapshot(now, self.process_started_at)
+        let mut snapshot = self.main.state.snapshot(now, self.process_started_at);
+        let tree = self
+            .subagents
+            .read(&self.main.state, now, self.process_started_at);
+        snapshot.subagents = tree.nodes;
+        snapshot.tokens_in = snapshot.tokens_in.saturating_add(tree.tokens_in);
+        snapshot.tokens_out = snapshot.tokens_out.saturating_add(tree.tokens_out);
+        snapshot.cost_usd += tree.cost_usd;
+        snapshot
     }
 }
 
 impl TranscriptReader {
-    fn new(path: PathBuf, process_started_at: Option<DateTime<Utc>>) -> Self {
+    pub(crate) fn new(path: PathBuf, process_started_at: Option<DateTime<Utc>>) -> Self {
         Self {
-            path,
+            subagents: SubagentReader::new(transcripts::subagents_dir(&path)),
+            main: Transcript::new(path),
             process_started_at,
-            state: State::default(),
             missing_logged: false,
         }
     }
 
-    /// Reads what the file gained, starting over when it shrank or was
-    /// replaced since the last read.
     fn refresh(&mut self) -> io::Result<()> {
-        let meta = fs::metadata(&self.path)?;
-        let identity = (meta.len(), meta.created().ok());
-        if self.state.read_once
-            && (identity.0 < self.state.identity.0 || identity.1 != self.state.identity.1)
-        {
-            self.state = State::default();
-        }
+        self.main.refresh()?;
         self.missing_logged = false;
-        self.state.read_new(&self.path, identity)
+        Ok(())
     }
 
     /// Logs a transcript that cannot be read: a missing one once until it
     /// appears, any other failure each time.
     fn log_unreadable(&mut self, error: &io::Error) {
+        let path = self.main.path();
         if error.kind() != io::ErrorKind::NotFound {
-            debug!(path = %self.path.display(), %error, "activity: the transcript could not be read");
+            debug!(path = %path.display(), %error, "activity: the transcript could not be read");
         } else if !self.missing_logged {
-            debug!(path = %self.path.display(), "activity: no transcript yet");
+            debug!(path = %path.display(), "activity: no transcript yet");
             self.missing_logged = true;
         }
     }
 }
 
+/// One transcript file and what has been read of it.
+pub(crate) struct Transcript {
+    path: PathBuf,
+    pub(crate) state: State,
+}
+
+impl Transcript {
+    pub(crate) fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            state: State::default(),
+        }
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Reads what the file gained, starting over when it shrank or was
+    /// replaced since the last read and reading nothing when its length and
+    /// creation time are unchanged. Returns the file's metadata.
+    pub(crate) fn refresh(&mut self) -> io::Result<fs::Metadata> {
+        let meta = fs::metadata(&self.path)?;
+        let identity = (meta.len(), meta.created().ok());
+        if self.state.read_once {
+            if identity == self.state.identity {
+                return Ok(meta);
+            }
+            if identity.0 < self.state.identity.0 || identity.1 != self.state.identity.1 {
+                self.state = State::default();
+            }
+        }
+        self.state.read_new(&self.path, identity)?;
+        Ok(meta)
+    }
+}
+
+/// The newest task notification a transcript holds for one task.
+#[derive(Clone, Debug)]
+pub(crate) struct Notice {
+    /// Its status word.
+    pub(crate) status: Option<String>,
+    /// When the record holding it was written.
+    pub(crate) at: Option<DateTime<Utc>>,
+}
+
+/// What a subagent tool call asked for.
+#[derive(Clone, Debug)]
+pub(crate) struct AgentCall {
+    pub(crate) description: Option<String>,
+    pub(crate) agent_type: Option<String>,
+}
+
 /// What a reader has gathered from the lines it read.
 #[derive(Default)]
-struct State {
+pub(crate) struct State {
     /// The byte just past the last whole line read.
     offset: u64,
     read_once: bool,
@@ -134,21 +193,34 @@ struct State {
     open: HashMap<String, OpenCall>,
     /// The recent tool-call ids already counted.
     counted_calls: VecDeque<String>,
-    agent_call_ids: Vec<String>,
+    pub(crate) agent_call_ids: Vec<String>,
+    /// What each subagent tool call asked for, by call id.
+    pub(crate) agent_calls: HashMap<String, AgentCall>,
+    /// The id of the call that launched each background subagent, by agent
+    /// id.
+    pub(crate) agent_launches: HashMap<String, Option<String>>,
     background: Vec<BackgroundTask>,
+    /// The background shells a notification ended, in that order.
+    ended: Vec<EndedTask>,
+    /// The newest notification for each task id.
+    pub(crate) notices: HashMap<String, Notice>,
     /// When each call of the last ten minutes started.
     calls: Vec<DateTime<Utc>>,
     /// The largest usage seen of each recent message id.
     usage_seen: VecDeque<(String, Usage)>,
-    tokens_in: u64,
-    tokens_out: u64,
-    cost_usd: f64,
+    pub(crate) tokens_in: u64,
+    pub(crate) tokens_out: u64,
+    pub(crate) cost_usd: f64,
     /// The newest main-thread reply's model and context tokens.
     context: Option<(String, u64)>,
-    failure_run: u32,
-    first_prompt: Option<String>,
-    last_record_at: Option<DateTime<Utc>>,
-    last_assistant_text: Option<String>,
+    pub(crate) failure_run: u32,
+    pub(crate) first_prompt: Option<String>,
+    pub(crate) first_record_at: Option<DateTime<Utc>>,
+    pub(crate) last_record_at: Option<DateTime<Utc>>,
+    pub(crate) last_assistant_text: Option<String>,
+    /// Whether the newest record other than an attachment is a reply that
+    /// ended a run: `end_turn` with no tool call.
+    pub(crate) run_ended: bool,
 }
 
 impl State {
@@ -189,23 +261,45 @@ impl State {
     /// Adds one record; `notifies` says whether its line holds a task
     /// notification.
     fn merge(&mut self, record: &Value, notifies: bool) {
-        if let Some(at) = timestamp(record) {
+        let at = timestamp(record);
+        if let Some(at) = at {
             self.last_record_at = Some(self.last_record_at.map_or(at, |last| last.max(at)));
+            self.first_record_at = Some(self.first_record_at.map_or(at, |first| first.min(at)));
         }
+        self.track_run_end(record);
         match record["type"].as_str() {
             Some("assistant") => self.merge_assistant(record),
-            Some("user") => self.merge_user(record, notifies),
+            Some("user") => self.merge_user(record, notifies, at),
             Some("attachment") if notifies && record["attachment"]["type"] == "queued_command" => {
                 if let Some(text) = record["attachment"]["prompt"].as_str() {
-                    self.finish_tasks(text);
+                    self.finish_tasks(text, at);
                 }
             }
-            Some("queue-operation") if notifies => {
+            Some("queue-operation") if notifies && record["operation"] == "enqueue" => {
                 if let Some(text) = record["content"].as_str() {
-                    self.finish_tasks(text);
+                    self.finish_tasks(text, at);
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Notes whether `record` ends a run: an assistant reply with
+    /// `end_turn` and no tool call does, an attachment changes nothing, and
+    /// any other record starts the run again.
+    fn track_run_end(&mut self, record: &Value) {
+        match record["type"].as_str() {
+            Some("attachment") => {}
+            Some("assistant") => {
+                let message = &record["message"];
+                let calls_a_tool = message["content"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|block| block["type"] == "tool_use");
+                self.run_ended = message["stop_reason"] == "end_turn" && !calls_a_tool;
+            }
+            _ => self.run_ended = false,
         }
     }
 
@@ -242,6 +336,13 @@ impl State {
             let name = block["name"].as_str().unwrap_or_default().to_owned();
             if name == AGENT_TOOL {
                 self.agent_call_ids.push(id.to_owned());
+                let input = &block["input"];
+                let text = |field: &str| input[field].as_str().map(str::to_owned);
+                let call = AgentCall {
+                    description: text("description"),
+                    agent_type: text("subagent_type"),
+                };
+                self.agent_calls.insert(id.to_owned(), call);
             }
             self.calls.push(started);
             let command = block["input"]["command"].as_str().map(str::to_owned);
@@ -308,8 +409,8 @@ impl State {
     /// Adds a `user` record: the first prompt, when the reads began at the
     /// file's start and none was found yet; the results it holds; the
     /// background task it launches; and, when `notifies`, the tasks its text
-    /// names as finished.
-    fn merge_user(&mut self, record: &Value, notifies: bool) {
+    /// names as finished. `at` is the record's time.
+    fn merge_user(&mut self, record: &Value, notifies: bool, at: Option<DateTime<Utc>>) {
         if self.prompt_from_lines && self.first_prompt.is_none() {
             self.first_prompt = prompt_of(record);
         }
@@ -318,22 +419,43 @@ impl State {
         let blocks = content.as_array().into_iter().flatten();
         for block in blocks.filter(|block| block["type"] == "tool_result") {
             if let Some(id) = block["tool_use_id"].as_str() {
-                self.open.remove(id);
-                launching_call.get_or_insert(id);
+                let call = self.open.remove(id);
+                launching_call.get_or_insert((id, call));
             }
             self.count_result(block);
         }
-        if let Some(task) = records::launched_task(&record["toolUseResult"])
-            && !self.background.iter().any(|running| running.id == task)
-        {
-            self.background.push(BackgroundTask {
-                id: task.to_owned(),
-                tool_use_id: launching_call.map(str::to_owned),
-            });
+        if let Some(task) = records::launched_task(&record["toolUseResult"]) {
+            self.launch(task, launching_call, at);
         }
         if notifies && let Some(text) = content.as_str() {
-            self.finish_tasks(text);
+            self.finish_tasks(text, at);
         }
+    }
+
+    /// Adds a background task the result recorded at `at` launched, with the
+    /// id and open call of the tool call it answers; a background subagent
+    /// also keeps its launching call's id.
+    fn launch(
+        &mut self,
+        task: LaunchedTask<'_>,
+        call: Option<(&str, Option<OpenCall>)>,
+        at: Option<DateTime<Utc>>,
+    ) {
+        let (tool_use_id, open) =
+            call.map_or((None, None), |(id, open)| (Some(id.to_owned()), open));
+        if task.is_agent {
+            self.agent_launches
+                .insert(task.id.to_owned(), tool_use_id.clone());
+        }
+        if self.background.iter().any(|running| running.id == task.id) {
+            return;
+        }
+        self.background.push(BackgroundTask {
+            id: task.id.to_owned(),
+            tool_use_id,
+            started: open.as_ref().map(|call| call.started).or(at),
+            command: open.and_then(|call| call.command),
+        });
     }
 
     /// Counts one `tool_result` towards the run of failures: a failed result
@@ -350,20 +472,69 @@ impl State {
         }
     }
 
-    /// Drops each background task a `<task-id>` of `text` names.
-    fn finish_tasks(&mut self, text: &str) {
-        let finished: Vec<&str> = records::task_ids_in(text).collect();
-        self.background
-            .retain(|task| !finished.contains(&task.id.as_str()));
+    /// Takes each task notification of `text`, recorded at `at`: it becomes
+    /// its task's newest notice, and the running background task it names
+    /// ends, a shell moving to the ended list.
+    fn finish_tasks(&mut self, text: &str, at: Option<DateTime<Utc>>) {
+        for notification in records::task_notifications(text) {
+            self.note(&notification, at);
+            let Some(index) = self
+                .background
+                .iter()
+                .position(|task| task.id == notification.task_id)
+            else {
+                continue;
+            };
+            let mut task = self.background.remove(index);
+            if self.agent_launches.contains_key(&task.id) {
+                continue;
+            }
+            if task.tool_use_id.is_none() {
+                task.tool_use_id = notification.tool_use_id.map(str::to_owned);
+            }
+            self.ended.push(EndedTask {
+                task,
+                state: ended_state(notification.status).unwrap_or(AgentState::Unknown),
+                status: notification.status.map(str::to_owned),
+                summary: notification.summary.map(str::to_owned),
+                ended_at: at,
+            });
+        }
     }
 
-    /// The state as of `now`, dropping the call times ten minutes or more
-    /// before it; a call stamped after `now` counts in the last column.
-    fn snapshot(
-        &mut self,
-        now: DateTime<Utc>,
-        process_started_at: Option<DateTime<Utc>>,
-    ) -> ActivitySnapshot {
+    /// Keeps `notification` as its task's notice unless a newer one is kept.
+    fn note(&mut self, notification: &TaskNotification<'_>, at: Option<DateTime<Utc>>) {
+        let newer = self
+            .notices
+            .get(notification.task_id)
+            .is_none_or(|kept| kept.at <= at);
+        if newer {
+            let notice = Notice {
+                status: notification.status.map(str::to_owned),
+                at,
+            };
+            self.notices.insert(notification.task_id.to_owned(), notice);
+        }
+    }
+
+    /// Whether the reads began past the file's start, so launches older than
+    /// the first read's tail are unknown.
+    pub(crate) fn began_mid_file(&self) -> bool {
+        self.read_once && !self.prompt_from_lines
+    }
+
+    /// The newest tool call with no result yet.
+    pub(crate) fn newest_open_call(&self) -> Option<OpenCall> {
+        self.open
+            .values()
+            .max_by(|left, right| (left.started, &left.id).cmp(&(right.started, &right.id)))
+            .cloned()
+    }
+
+    /// Tool calls started in each of the ten minutes up to `now`, oldest
+    /// first, dropping the call times ten minutes or more before it; a call
+    /// stamped after `now` counts in the last column.
+    pub(crate) fn minute_counts(&mut self, now: DateTime<Utc>) -> [u16; MINUTE_COLUMNS] {
         let window = i64::try_from(MINUTE_COLUMNS)
             .unwrap_or(i64::MAX)
             .saturating_mul(MINUTE_MS);
@@ -379,6 +550,16 @@ impl State {
                 *count = count.saturating_add(1);
             }
         }
+        minute_counts
+    }
+
+    /// The state as of `now`, with the main transcript's figures only.
+    fn snapshot(
+        &mut self,
+        now: DateTime<Utc>,
+        process_started_at: Option<DateTime<Utc>>,
+    ) -> ActivitySnapshot {
+        let minute_counts = self.minute_counts(now);
         let mut open_calls: Vec<OpenCall> = self
             .open
             .values()
@@ -390,6 +571,8 @@ impl State {
             open_calls,
             agent_call_ids: self.agent_call_ids.clone(),
             background: self.background.clone(),
+            ended_background: self.ended.clone(),
+            subagents: Vec::new(),
             context: self.context.as_ref().map(|(model, tokens)| ContextReading {
                 model: model.clone(),
                 tokens: *tokens,
@@ -406,6 +589,17 @@ impl State {
             last_record_at: self.last_record_at,
             last_assistant_text: self.last_assistant_text.clone(),
         }
+    }
+}
+
+/// The state a task notification's `status` ends its task in: `Finished`
+/// for `completed`; `Failed` for `failed`, `killed` and `stopped`; `None`
+/// for any other status, which names no known end.
+pub(crate) fn ended_state(status: Option<&str>) -> Option<AgentState> {
+    match status? {
+        "completed" => Some(AgentState::Finished),
+        "failed" | "killed" | "stopped" => Some(AgentState::Failed),
+        _ => None,
     }
 }
 
@@ -541,15 +735,20 @@ fn next_line_start(file: &mut File, position: u64) -> io::Result<u64> {
     clippy::expect_used,
     reason = "a test that cannot write its scratch transcript must fail loudly"
 )]
-mod tests {
+pub(crate) mod tests {
     use super::TranscriptReader;
-    use agent_api::{ActivityReader, ActivitySnapshot, BackgroundTask, OpenCall};
+    use agent_api::{ActivityReader, ActivitySnapshot, BackgroundTask, EndedTask, OpenCall};
     use chrono::{DateTime, Utc};
+    use protocol::AgentState;
     use std::fs::{self, OpenOptions};
     use std::io::Write as _;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use uuid::Uuid;
 
+    const SHELLS: &str = include_str!("../tests/fixtures/subagents/shells.jsonl");
+    const SUBAGENT_MAIN: &str = include_str!("../tests/fixtures/subagents/main.jsonl");
+    const RUNNING: &str = include_str!("../tests/fixtures/subagents/running.jsonl");
+    const RUNNING_META: &str = include_str!("../tests/fixtures/subagents/running.meta.json");
     const CALLS: &str = include_str!("../tests/fixtures/activity/calls.jsonl");
     const BACKGROUND: &str = include_str!("../tests/fixtures/activity/background.jsonl");
     const USAGE: &str = include_str!("../tests/fixtures/activity/usage.jsonl");
@@ -559,13 +758,14 @@ mod tests {
     /// `transcripts.rs`'s `is_command_noise` drops.
     const PROMPT: &str = include_str!("../tests/fixtures/activity/prompt.jsonl");
 
-    /// A scratch transcript under the OS temp root; drop removes it.
-    struct Scratch {
+    /// A scratch transcript under the OS temp root, with its subagents folder
+    /// beside it as Claude Code lays it out; drop removes it.
+    pub(crate) struct Scratch {
         dir: PathBuf,
     }
 
     impl Scratch {
-        fn new(label: &str) -> Self {
+        pub(crate) fn new(label: &str) -> Self {
             let dir = std::env::temp_dir()
                 .join(format!("rt-activity-{label}-{}", Uuid::new_v4().simple()));
             fs::create_dir_all(&dir).expect("create scratch dir");
@@ -576,22 +776,41 @@ mod tests {
             self.dir.join("transcript.jsonl")
         }
 
-        fn write(&self, body: &str) {
+        pub(crate) fn write(&self, body: &str) {
             fs::write(self.path(), body).expect("write transcript");
         }
 
-        fn append(&self, body: &str) {
-            OpenOptions::new()
-                .append(true)
-                .open(self.path())
-                .expect("open transcript")
-                .write_all(body.as_bytes())
-                .expect("append to transcript");
+        pub(crate) fn append(&self, body: &str) {
+            append_to(&self.path(), body);
         }
 
-        fn reader(&self, process_started_at: Option<DateTime<Utc>>) -> TranscriptReader {
+        /// Writes `name` in the subagents folder, creating the folder.
+        pub(crate) fn put(&self, name: &str, body: &str) {
+            let folder = self.dir.join("transcript").join("subagents");
+            fs::create_dir_all(&folder).expect("create subagents folder");
+            fs::write(folder.join(name), body).expect("write subagent file");
+        }
+
+        /// Appends to `name` in the subagents folder.
+        pub(crate) fn add(&self, name: &str, body: &str) {
+            append_to(
+                &self.dir.join("transcript").join("subagents").join(name),
+                body,
+            );
+        }
+
+        pub(crate) fn reader(&self, process_started_at: Option<DateTime<Utc>>) -> TranscriptReader {
             TranscriptReader::new(self.path(), process_started_at)
         }
+    }
+
+    fn append_to(path: &Path, body: &str) {
+        OpenOptions::new()
+            .append(true)
+            .open(path)
+            .expect("open file to append")
+            .write_all(body.as_bytes())
+            .expect("append to file");
     }
 
     impl Drop for Scratch {
@@ -602,12 +821,12 @@ mod tests {
         }
     }
 
-    fn at(text: &str) -> DateTime<Utc> {
+    pub(crate) fn at(text: &str) -> DateTime<Utc> {
         text.parse().expect("a test time")
     }
 
     /// Lines `from..to` of a fixture, each ending in `\n`.
-    fn lines(fixture: &str, from: usize, to: usize) -> String {
+    pub(crate) fn lines(fixture: &str, from: usize, to: usize) -> String {
         fixture
             .lines()
             .skip(from)
@@ -661,14 +880,13 @@ mod tests {
         scratch.write(&lines(BACKGROUND, 0, 4));
         let mut reader = scratch.reader(None);
         let now = at("2026-09-27T10:01:00Z");
-        let shell = BackgroundTask {
-            id: "b1".to_owned(),
-            tool_use_id: Some("toolu_10".to_owned()),
-        };
-        let agent = BackgroundTask {
-            id: "a1".to_owned(),
-            tool_use_id: Some("toolu_11".to_owned()),
-        };
+        let shell = task(
+            "b1",
+            "toolu_10",
+            "2026-09-27T10:00:00Z",
+            Some("cargo build"),
+        );
+        let agent = task("a1", "toolu_11", "2026-09-27T10:00:02Z", None);
 
         assert_eq!(reader.read(now).background, [shell, agent.clone()]);
 
@@ -677,6 +895,144 @@ mod tests {
 
         scratch.append(&lines(BACKGROUND, 5, 6));
         assert_eq!(reader.read(now).background, []);
+    }
+
+    fn task(id: &str, call: &str, started: &str, command: Option<&str>) -> BackgroundTask {
+        BackgroundTask {
+            id: id.to_owned(),
+            tool_use_id: Some(call.to_owned()),
+            started: Some(at(started)),
+            command: command.map(str::to_owned),
+        }
+    }
+
+    fn ended(
+        task: BackgroundTask,
+        state: AgentState,
+        status: &str,
+        summary: &str,
+        ended_at: &str,
+    ) -> EndedTask {
+        EndedTask {
+            task,
+            state,
+            status: Some(status.to_owned()),
+            summary: Some(summary.to_owned()),
+            ended_at: Some(at(ended_at)),
+        }
+    }
+
+    fn shell_tasks() -> [BackgroundTask; 4] {
+        [
+            task(
+                "b50",
+                "toolu_50",
+                "2026-09-27T10:00:00Z",
+                Some("cargo build"),
+            ),
+            task("b51", "toolu_51", "2026-09-27T10:00:02Z", Some("npm test")),
+            task("b52", "toolu_52", "2026-09-27T10:00:04Z", Some("sleep 600")),
+            task("a53", "toolu_53", "2026-09-27T10:00:06Z", None),
+        ]
+    }
+
+    #[test]
+    fn a_running_background_shell_is_a_running_shell_node() {
+        let snapshot = read_whole(
+            "shells-running",
+            &lines(SHELLS, 0, 8),
+            "2026-09-27T10:00:30Z",
+        );
+
+        assert_eq!(snapshot.background, shell_tasks());
+        assert_eq!(snapshot.ended_background, []);
+    }
+
+    #[test]
+    fn a_background_shell_ended_by_its_notification_is_a_finished_shell_node() {
+        let snapshot = read_whole("shells-ended", SHELLS, "2026-09-27T10:05:00Z");
+
+        let [build, test, sleep, _agent] = shell_tasks();
+        assert_eq!(snapshot.background, []);
+        assert_eq!(
+            snapshot.ended_background,
+            [
+                ended(
+                    build,
+                    AgentState::Finished,
+                    "completed",
+                    "Background command \"cargo build\" completed (exit code 0)",
+                    "2026-09-27T10:01:00Z"
+                ),
+                ended(
+                    test,
+                    AgentState::Failed,
+                    "failed",
+                    "Background command \"npm test\" failed with exit code 1",
+                    "2026-09-27T10:02:00Z"
+                ),
+                ended(
+                    sleep,
+                    AgentState::Failed,
+                    "killed",
+                    "Background command \"sleep 600\" was stopped",
+                    "2026-09-27T10:03:00Z"
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_background_task_whose_id_is_a_subagent_id_is_not_an_ended_shell() {
+        let scratch = Scratch::new("shell-agent");
+        scratch.write(SHELLS);
+        scratch.put("agent-a53.jsonl", RUNNING);
+        scratch.put(
+            "agent-a53.meta.json",
+            &RUNNING_META.replace("toolu_20", "toolu_53"),
+        );
+
+        let snapshot = scratch.reader(None).read(at("2026-09-27T10:05:00Z"));
+
+        let subagents: Vec<&str> = snapshot
+            .subagents
+            .iter()
+            .map(|node| node.agent_id.as_str())
+            .collect();
+        let ended: Vec<&str> = snapshot
+            .ended_background
+            .iter()
+            .map(|ended| ended.task.id.as_str())
+            .collect();
+        assert_eq!(subagents, ["a53"]);
+        assert_eq!(ended, ["b50", "b51", "b52"]);
+    }
+
+    #[test]
+    fn a_subagents_tokens_and_cost_add_to_the_session_total() {
+        let scratch = Scratch::new("subagent-cost");
+        scratch.write(SUBAGENT_MAIN);
+        let now = at("2026-09-27T10:01:00Z");
+        let alone = scratch.reader(None).read(now);
+
+        scratch.put("agent-a20.jsonl", RUNNING);
+        scratch.put("agent-a20.meta.json", RUNNING_META);
+        let with = scratch.reader(None).read(now);
+
+        assert_eq!(with.subagents.len(), 1);
+        assert_eq!(with.tokens_in, alone.tokens_in + 1_000);
+        assert_eq!(with.tokens_out, alone.tokens_out + 100);
+        let subagent_cost = (1_000.0 * 4.0 + 100.0 * 20.0) / 1_000_000.0;
+        assert!(
+            (with.cost_usd - alone.cost_usd - subagent_cost).abs() < 1e-12,
+            "cost {} != {} + {subagent_cost}",
+            with.cost_usd,
+            alone.cost_usd
+        );
+        assert_eq!(
+            with.context, alone.context,
+            "a subagent's reply is no context reading"
+        );
     }
 
     #[test]

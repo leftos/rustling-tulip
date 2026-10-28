@@ -170,6 +170,13 @@ pub(crate) fn transcript_path(folder: &Path, id: &str, rows: &ResolvedRows) -> O
     Some(project_dir(&home, &folder.to_string_lossy()).join(format!("{id}.jsonl")))
 }
 
+/// The folder Claude Code writes the subagents of the conversation whose
+/// main transcript is `transcript` in: `<id>/subagents/` beside `<id>.jsonl`.
+pub(crate) fn subagents_dir(transcript: &Path) -> PathBuf {
+    let stem = transcript.file_stem().unwrap_or_default();
+    transcript.with_file_name(stem).join("subagents")
+}
+
 fn candidate_from_entry(
     entry: &DirEntry,
     cwd: &str,

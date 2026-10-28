@@ -1,0 +1,2 @@
+{"type":"user","isSidechain":true,"agentId":"a20","timestamp":"2026-09-27T10:00:01.000Z","message":{"role":"user","content":"Map the crate\nStart at lib.rs"}}
+{"type":"assistant","isSidechain":true,"agentId":"a20","timestamp":"2026-09-27T10:00:10.000Z","message":{"id":"msg_s1","role":"assistant","model":"claude-opus-5-5","content":[{"type":"tool_use","id":"toolu_s1","name":"Bash","input":{"command":"cargo test"}}],"stop_reason":"tool_use","usage":{"input_tokens":1000,"output_tokens":100}}}

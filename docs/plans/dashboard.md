@@ -176,19 +176,19 @@ What each field needs, and whether the tree has it today (paths at `main` b4b55b
 | Glyph, state word, age | `status` (`:596`), `status_since` (`:599`), `pending_input` (`:708`), `background` (`:713`), the client's `Leaf.unseen` (`apps/native/src/sidebar.rs:196`) | have | |
 | Linear key, state, priority, title | issue detection plus the daemon's Linear client and cache, designed in [linear-links.md](./linear-links.md) (RT-133, LL.1 to LL.3) | none: no Linear client in the tree (`rg -il linear crates apps` finds only test strings, a `Linear` split layout and the word "linear" in comments) | RT-133, then DB.7 |
 | Now line, rule 1 | `pending_input`, worded by `needs_you.rs:101` | have | |
-| Now line, rules 2 to 6 | open tool calls, running subagents and background tasks from the transcript; gate claims from the daemon's gate reader, designed in [gate-dashboard.md](./gate-dashboard.md) (RT-55, re-cut by RT-64 around the `gate-state` crate) | none: no gate reader yet; the daemon reads no transcript tail (`crates/agents/claude/src/transcripts.rs` only scans heads for titles, `:230`), and the `Stop` hook's `background_tasks` is read only as one flag (`crates/agents/api/src/hook_vocabulary.rs:49-86`) | DB.3, DB.4, DB.8 |
+| Now line, rules 2 to 6 | open tool calls, running subagents and background tasks from the transcript; gate claims from the daemon's gate reader, designed in [gate-dashboard.md](./gate-dashboard.md) (RT-55, re-cut by RT-64 around the `gate-state` crate) | transcript side have: the activity reader's `open_calls`, `subagents` and `background` (`ActivitySnapshot`, `crates/agents/api/src/activity.rs`); no gate reader yet, and the `Stop` hook's `background_tasks` is read only as one flag (`crates/agents/api/src/hook_vocabulary.rs`) | DB.3, DB.4, DB.8 |
 | Summary lines | the summarizer over each turn's last message: `SessionRecord.last_assistant_message` (`crates/daemon/src/session.rs:228`, set at `crates/daemon/src/hook_status.rs:505`, 8 KiB cap); `SessionSnapshot.summary` (`lib.rs:602`) exists and is never filled | the input and the field exist; no summarizer | SA.2 to SA.6, DB.17 |
-| Agents count, nested rows | subagent folders and background-task records in the transcript | none | DB.3, DB.4, DB.8 |
-| Context | the newest assistant record's `message.usage` over the model's context window | none for interactive sessions | DB.3 |
-| 10 min | `tool_use` blocks' timestamps in the transcript | none | DB.3 |
+| Agents count, nested rows | subagent folders and background-task records in the transcript | have: the activity reader's `subagents` tree (`crates/agents/claude/src/subagents.rs`), `background` and `ended_background`; DB.5 maps them to `AgentNode` | DB.3, DB.4, DB.8 |
+| Context | the newest assistant record's `message.usage` over the model's context window | have: the activity reader's `context` and `model` | DB.3 |
+| 10 min | `tool_use` blocks' timestamps in the transcript | have: the activity reader's `minute_counts` | DB.3 |
 | Run | `started_at` (`lib.rs:604`) | have | |
-| Last activity | the newest transcript record's time; `metrics.last_activity_at` (`lib.rs:575`) is set only by `push_recent_action` (`session.rs:906`) | partial | DB.3 |
-| Cost, tokens | `message.usage` of every assistant record (subagents' included) priced at list rates; `SessionMetrics` (`lib.rs:571`) is filled only for headless runs (`crates/agents/claude/src/lib.rs:526`) | headless only | DB.3 |
+| Last activity | the newest transcript record's time | have: the activity reader's `last_record_at` (`SessionMetrics.last_activity_at` is still set only by `push_recent_action`) | DB.3 |
+| Cost, tokens | `message.usage` of every assistant record (subagents' included) priced at list rates | have: the activity reader's `tokens_in`, `tokens_out` and `cost_usd`, the listed subagents included (`SessionMetrics` is still filled only for headless runs) | DB.3, DB.4 |
 | Stuck: waiting on permission | `pending_input` is `Permission` | have | |
-| Stuck: tool failures, context high | failed `tool_result` runs and the context figure from the transcript | none | DB.3 |
+| Stuck: tool failures, context high | failed `tool_result` runs and the context figure from the transcript | have: the activity reader's `failure_run` and `context` | DB.3 |
 | Inline answer | `PendingInput::Question` with its options and `multi_select` (`lib.rs:723-755`), `PendingInput::Permission { tool_name, summary }` (`:725`); `ClientMessage::SendInput` (`:2309`) types raw bytes only | prompt data have; no checked answer | DB.13 |
 | Summary ring | the summarizer's lines, kept per session | none | SA.6 |
-| Prompt | the transcript's first real user record (the head scan's `user_text`, `transcripts.rs:286`, is private); `last_prompt` (`lib.rs:627`) holds only a spawn prompt | partial | DB.3 |
+| Prompt | the transcript's first real user record | have: the activity reader's `first_prompt` | DB.3 |
 | Recent work | `git_inspect::repo_status` (`crates/daemon/src/git_inspect.rs:164`) and `list_commits` (`:37`, by branch and page); no commits-since-start, `--numstat` or landed totals | partial | DB.6 |
 | PR line | `gh pr list --head <branch>` in the worktree | none | DB.18 |
 | Linear detail, releases, sync age | the daemon's Linear cache (RT-133), plus a release-progress query | none | RT-133, then DB.7 |
@@ -207,7 +207,10 @@ It follows ops-tower's reader (`docs/agents-transcripts.md`, "The transcript rec
 
 - open tool calls (a `tool_use` block with no `tool_result` yet), ignoring calls stamped before the session's current process started;
 - running background tasks (`toolUseResult.backgroundTaskId`, a background `Agent` launch's `agentId`) until a `<task-notification>` names them;
-- the subagent tree (DB.4), from `<project>/<conversation id>/subagents/agent-*.jsonl` and their `.meta.json` sidecars, with [subagent-streams.md](./subagent-streams.md)'s running and finished rules 1 to 5; its SS.1 and SS.2 readers are this reader, built once;
+- the subagent tree (DB.4), from `<project>/<conversation id>/subagents/agent-*.jsonl` and their `.meta.json` subagent sidecars, with [subagent-streams.md](./subagent-streams.md)'s running and finished rules 1 to 5; its SS.1 and SS.2 readers are this reader, built once (`crates/agents/claude/src/subagents.rs`; rule 1, that a session which is not running has no running subagents, is applied by the Dashboard's facts service, DB.5);
+  - a subagent sidecar joins the main transcript's agent call by `toolUseId` (any `toolUseId` once the main transcript was read from its tail); one with no `toolUseId` joins through its background launch (a forked skill), else it is listed only while rule 5 says it runs and its file is newer than the process start;
+  - nested subagents hang under their launcher by `parentAgentId`; killed, stopped and `stoppedByUser` map to `Failed`, completed to `Finished`;
+  - only a `queue-operation` with `operation == "enqueue"` counts as a task notification, and `records::task_notifications` ends a task only on a whole `<task-notification>` element;
 - the newest assistant record's `usage` (input, cache creation and cache read tokens) and `model`, giving the context percentage over the plugin's context-window table;
 - tokens and cost: every assistant record of the session and its subagents, a streamed message counted once at its largest usage, priced by the plugin's list-price table; the Dashboard labels the sum `API-equiv`, since a subscription is not billed per token (OPS-69);
 - ten one-minute counts of `tool_use` blocks ending now;
@@ -430,7 +433,7 @@ Ids: **SA** for the summarizer service, **DB** for the Dashboard. Each names its
 - [x] DB.3 Read a session's transcript for the Dashboard. `crates/agents/api/src/lib.rs` (`Agent::activity_reader`), `crates/agents/api/src/activity.rs` (new: the reader's output types), `crates/agents/claude/src/activity.rs` (new: the incremental main-transcript reader), `crates/agents/claude/src/pricing.rs` (new: list prices and context windows), `crates/agents/claude/src/lib.rs`.
 
   Proof: unit tests over transcript fixtures for open calls, background tasks, usage and cost, minute counts, the failure run (a denial neither counts nor resets), the first prompt, a shrunk file read again. Waits on nothing.
-- [ ] DB.4 Build each session's subagent tree. `crates/agents/claude/src/subagents.rs` (new: the folder and sidecar reader, `<task-notification>` parsing, subagent-streams' rules 1 to 5), `crates/agents/claude/src/activity.rs` (join into the tree), `crates/agents/claude/src/transcripts.rs` (`project_dir` shared).
+- [x] DB.4 Build each session's subagent tree. `crates/agents/claude/src/subagents.rs` (new: the folder and sidecar reader, `<task-notification>` parsing, subagent-streams' rules 1 to 5), `crates/agents/claude/src/activity.rs` (join into the tree).
 
   Proof: fixture tests for a running, a finished, a killed and a nested subagent and a background shell ended by its notification. Waits on DB.3. Shared with [subagent-streams.md](./subagent-streams.md)'s SS.1 and SS.2.
 - [ ] DB.5 Send session facts to watching Dashboards. `crates/daemon/src/dashboard/mod.rs` (new: watcher count, 2 s tick, reader cache, facts), `crates/daemon/src/dashboard/now.rs` (new: the now line's rules), `crates/daemon/src/server/dashboard.rs` (new: `WatchDashboard`, `GetSessionDetail`), `crates/daemon/src/server.rs` (`dispatch`), `crates/daemon/src/main.rs` (`mod` line).

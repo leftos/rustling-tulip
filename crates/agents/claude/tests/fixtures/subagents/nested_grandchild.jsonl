@@ -1,0 +1,2 @@
+{"type":"user","isSidechain":true,"agentId":"a40","timestamp":"2026-09-27T10:00:21.000Z","message":{"role":"user","content":"Read one file"}}
+{"type":"assistant","isSidechain":true,"agentId":"a40","timestamp":"2026-09-27T10:00:30.000Z","message":{"id":"msg_n3","role":"assistant","model":"fake-model","content":[{"type":"text","text":"It is short."}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}}

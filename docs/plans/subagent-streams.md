@@ -7,7 +7,7 @@ Design for the `docs/plans/MAIN.md` item (Wave 10) "View subagent streams as cli
 - **Subagent**: a child agent a Claude session starts with the `Agent` tool (formerly `Task`). It runs inside the parent `claude` process; it has no PTY or process of its own.
 - **Launcher**: the transcript that started a subagent: the session's main transcript for a first-layer subagent, or another subagent's transcript for a nested one.
 - **Run**: one stretch of a subagent's work from start (or resume) to its final reply. A subagent resumed with `SendMessage` has several runs under one id.
-- **Sidecar**: the `agent-<id>.meta.json` file Claude Code writes beside a subagent transcript.
+- **Subagent sidecar**: the `agent-<id>.meta.json` file Claude Code writes beside a subagent transcript.
 
 ## Findings
 
@@ -61,8 +61,8 @@ A killed or failed run never writes that final reply, so only the launcher's not
 - **Conversation id**: every interactive Claude spawn gets `--session-id <uuid>`, or `--resume <id>` which keeps the id (`crates/daemon/src/server.rs:3617-3623`, `crates/daemon/src/agents/claude.rs:60-72`).
 
   It is on `SessionRecord.claude_session_id` (`crates/daemon/src/session.rs:170-173`) and `SessionSnapshot.claude_session_id` (`crates/protocol/src/lib.rs:519-523`); `None` for shells, headless runs and other agents. With `members[0].worktree_path` as cwd, the main transcript path is fully known.
-- **Transcript paths**: `crates/agents/claude/src/transcripts.rs` resolves the Claude home (honouring `CLAUDE_CONFIG_DIR`, `claude_home`), encodes the project folder (`encode_project_dir`) and builds `project_dir` (private today). It scans heads for titles for the recover dialog; it does not tail.
-- **No live transcript tailer**: `rg` over `crates/daemon/src` finds no code tailing `<session-id>.jsonl` for tokens or cost, although `CLAUDE.md` says it is "tailed independently". Metrics come only from the headless stream-json parser (`agents/claude.rs:117-167`), which already turns `assistant` blocks into `tool: <name>` / `assistant: <snippet>` entries. This feature brings the first tailer.
+- **Transcript paths**: `crates/agents/claude/src/transcripts.rs` resolves the Claude home (honouring `CLAUDE_CONFIG_DIR`, `claude_home`), encodes the project folder (`encode_project_dir`) and builds `project_dir` (`pub(crate)`, shared with the activity and subagent readers). It scans heads for titles for the recover dialog; the incremental readers are `activity.rs` and `subagents.rs` beside it.
+- **The transcript readers**: `crates/agents/claude/src/activity.rs` is the incremental reader of `<session-id>.jsonl` (tokens, cost, open calls, background tasks), and `crates/agents/claude/src/subagents.rs` reads the subagent folder, joins it to the main transcript's agent calls and builds the tree (the Dashboard's DB.3 and DB.4, [dashboard.md](./dashboard.md) "The transcript activity reader"). The headless stream-json parser (`agents/claude.rs:117-167`) turns `assistant` blocks into `tool: <name>` / `assistant: <snippet>` entries.
 - **Watcher pattern**: `crates/daemon/src/git_watch.rs` parks its refresher while `Hub.client_count` is 0 and catches up on reconnect; the subagent watcher follows it.
 - **Native headless view**: `apps/native/src/headless_view.rs` draws a stats bar over a numbered, capped log with a show-all button (`HeadlessBody`, lines 28-70), fed from `SessionSnapshot.recent_actions`. A transcript view can reuse its layout with its own entries.
 - **Panes and tabs**: `GridNode::Pane { pane_id, session_id }` (`crates/protocol/src/lib.rs:1124-1132`); `ReplacePaneSession` / `SplitPane` bind a session to a pane (lines 2446-2486). `TabContent` (lines 1218-1244) has no `#[serde(other)] Unknown`, so a new tab kind would break an older client's tab lists; a new pane field with `#[serde(default)]` does not. `protocol-version.json` is 23 with `[23]` supported.
@@ -72,7 +72,7 @@ A killed or failed run never writes that final reply, so only the launcher's not
 
 ### Daemon: discovery and state
 
-A new `crates/daemon/src/subagents.rs` owns everything that reads subagent files. For each live Claude session with a `claude_session_id`, one watcher task looks at `<project dir>/<session-id>/subagents/`, the folder's absence meaning "none yet".
+`crates/agents/claude/src/subagents.rs` (the Claude plugin, built by the Dashboard's DB.4) owns everything that reads subagent files. For each live Claude session with a `claude_session_id`, one watcher task looks at `<project dir>/<session-id>/subagents/`, the folder's absence meaning "none yet".
 
 Every second while a client is connected (parked at `client_count` 0, one catch-up scan on reconnect, as `git_watch` does) it lists the folder and, for each `agent-<id>.jsonl` whose length changed, reads only the new bytes from the last offset. It also tails the launcher transcripts for `<task-notification>` lines, filtering by substring before any JSON parse, since the main transcript runs to megabytes.
 
@@ -125,10 +125,10 @@ Answered (user): Q3 (a) full reply text plus one line per tool call and result; 
 
 ## Checklist
 
-- [ ] **SS.1 Subagent folder reader.** New `crates/daemon/src/subagents.rs` (pure, no IO beyond reading a given folder): parse sidecars and transcript tails from an offset into `SubagentRecord` with rules 3-5; make `project_dir` in `crates/agents/claude/src/transcripts.rs` reachable from the daemon.
+- [ ] **SS.1 Subagent folder reader.** The reader it needs exists in `crates/agents/claude/src/subagents.rs` (the Claude plugin, built by the Dashboard's DB.4); rule 1 is applied by the Dashboard's facts service (DB.5), so this step wires the reader into the watcher rather than writing a daemon module. Parse sidecars and transcript tails from an offset into `SubagentRecord` with rules 3-5.
 
   Proving tests in the module on temp folders: a sidecar alone is running; an `end_turn` text reply plus trailing attachments is finished; growth after that is running again; `stoppedByUser` is finished; `parentAgentId` is kept; a transcript with no sidecar takes its description from the first prompt; garbage lines are skipped.
-- [ ] **SS.2 Launcher notifications.** In `subagents.rs`, parse `<task-notification>` text from `queue-operation` and `user` lines into (agent id, status, timestamp), substring-filtered before JSON parse; rule 3 uses it. Tests: each status value, a shell-task notification (non-agent id) ignored, a notification older than the transcript's last line ignored, a nested launcher's transcript as the source.
+- [ ] **SS.2 Launcher notifications.** The reader it needs exists (`records::task_notifications` and `crates/agents/claude/src/subagents.rs`, which count only `enqueue` queue operations). Parse `<task-notification>` text from `queue-operation` and `user` lines into (agent id, status, timestamp), substring-filtered before JSON parse; rule 3 uses it. Tests: each status value, a shell-task notification (non-agent id) ignored, a notification older than the transcript's last line ignored, a nested launcher's transcript as the source.
 - [ ] **SS.3 Protocol types.** `crates/protocol/src/lib.rs`: `SubagentInfo`, `SessionSnapshot.subagents`, `WatchSubagent` / `UnwatchSubagent`, `SubagentTranscript` / `SubagentTranscriptAppend`, `TranscriptEntry` with `Unknown`, `subagent_id` on `GridNode::Pane`, `SplitPane`, `ReplacePaneSession`. Tests: round-trips; an unknown `TranscriptEntry` kind decodes to `Unknown`; a snapshot and a pane without the new fields decode.
 - [ ] **SS.4 Watcher task.** `crates/daemon/src/subagents.rs` + `server.rs`: one task per live Claude session, one-second scan, parked at `client_count` 0, rules 1-2 from the session record, `SessionUpdated` on each start or finish, stopped when the session is removed. Test in `server.rs` tests with `CLAUDE_CONFIG_DIR` pointed at a temp home: writing a sidecar and transcript yields a snapshot with the subagent; writing its `end_turn` reply drops it; stopping the session drops all.
 - [ ] **SS.5 Transcript watch.** `server.rs` handlers for `WatchSubagent` / `UnwatchSubagent`; entry building (`TranscriptEntry` from `assistant` / `user` lines, capped text, `Nested` for `Agent` calls) in `subagents.rs`. Tests: the reply echoes `request_id` and caps with `hidden`; appends reach only watchers; an unknown agent id answers `Error` with the `request_id`.

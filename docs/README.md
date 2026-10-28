@@ -217,6 +217,7 @@ The native client auto-starts the daemon if it isn't already running. Daemon lis
 - **`status_since`**: the daemon's stamp of a session's last status change, on its snapshot and kept across a reattach; Needs You measures waits from it.
 - **Sticky toast**: a toast with no timeout that stays until its × is clicked or something replaces it; a running preset job's toast and a failed launch's toast are sticky.
 - **Stop (keyboard)**: a control Tab and Shift-Tab land on in a native dialog; see `docs/native-client.md` ("Keyboard reachability").
+- **Subagent tree**: each session's subagents and background shells, read from the transcripts by the Claude plugin (`crates/agents/claude/src/subagents.rs`, `agent_api::SubagentNode`) for the Dashboard; see `docs/plans/dashboard.md` ("The transcript activity reader").
 - **Subplan**: a `docs/plans/*.md` design file holding the design and rulings for open items, linked from their issues and deleted once nothing open links it and its durable text is promoted into `docs/`.
 - **Summarizer**: the planned daemon service (`crates/daemon/src/summarizer/`) that turns a session's turn-end reports into a kind, a headline and a one-line summary, through Claude Haiku on the CLI or DeepSeek; see `docs/plans/dashboard.md`.
 - **Summary ring**: a session's last summary lines (at most 12, or 2 hours), newest first, kept in `sessions/<id>/summary.json`; the Dashboard's drawer shows it.

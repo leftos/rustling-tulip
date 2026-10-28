@@ -8,6 +8,7 @@
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
+use protocol::AgentState;
 
 use crate::ResolvedRows;
 
@@ -43,8 +44,8 @@ pub trait ActivityReader: Send {
 /// Everything a transcript says about a session, as of one read: the whole
 /// current state, never a change since the last read.
 ///
-/// Tokens and cost cover the session's main transcript only, not its
-/// subagents'.
+/// Tokens and cost cover the session's main transcript and the subagents in
+/// [`ActivitySnapshot::subagents`].
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ActivitySnapshot {
     /// The tool calls with no result yet, oldest first, leaving out those
@@ -55,6 +56,13 @@ pub struct ActivitySnapshot {
     pub agent_call_ids: Vec<String>,
     /// The background tasks still running, in launch order.
     pub background: Vec<BackgroundTask>,
+    /// The background shells a task notification ended, in the order the
+    /// notifications came; a task the agent launched as a subagent is never
+    /// one.
+    pub ended_background: Vec<EndedTask>,
+    /// The subagents the conversation launched, running or finished: the
+    /// first layer, each holding the ones it launched.
+    pub subagents: Vec<SubagentNode>,
     /// How full the context of the newest main-thread reply is.
     pub context: Option<ContextReading>,
     /// The model of the newest main-thread reply.
@@ -101,6 +109,63 @@ pub struct BackgroundTask {
     pub id: String,
     /// The id of the tool call that launched it, when the transcript names it.
     pub tool_use_id: Option<String>,
+    /// When the call that launched it started, else when its launch was
+    /// recorded.
+    pub started: Option<DateTime<Utc>>,
+    /// The command line it runs, for a tool that takes one.
+    pub command: Option<String>,
+}
+
+/// A background task a task notification ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EndedTask {
+    /// The task as it was launched.
+    pub task: BackgroundTask,
+    /// `Finished` for a `completed` status, `Failed` for `failed`, `killed`
+    /// or `stopped`, `Unknown` for any other.
+    pub state: AgentState,
+    /// The notification's own status word.
+    pub status: Option<String>,
+    /// The notification's summary line.
+    pub summary: Option<String>,
+    /// When the notification was recorded.
+    pub ended_at: Option<DateTime<Utc>>,
+}
+
+/// One subagent of the conversation and the ones it launched.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SubagentNode {
+    /// The subagent's id, which names its transcript file.
+    pub agent_id: String,
+    /// The id of the subagent that launched it; `None` for one the main
+    /// agent launched.
+    pub parent_agent_id: Option<String>,
+    /// Its agent type (`Explore`, `general-purpose`, …).
+    pub agent_type: Option<String>,
+    /// What it was asked to do: its launch's description, else its first
+    /// prompt's first line.
+    pub description: Option<String>,
+    /// The time of the first record read from its transcript.
+    pub started_at: Option<DateTime<Utc>>,
+    /// When it ended; `None` while it runs.
+    pub finished_at: Option<DateTime<Utc>>,
+    /// `Running`, `Finished`, or `Failed` for a run that was killed, stopped
+    /// or failed.
+    pub state: AgentState,
+    /// What ended it, as recorded: a task notification's status word or
+    /// `stoppedByUser`; `None` while it runs or when it ended on its own
+    /// final reply.
+    pub end_status: Option<String>,
+    /// Its newest tool call with no result yet.
+    pub open_call: Option<OpenCall>,
+    /// The last text it wrote in its newest reply that has any.
+    pub last_text: Option<String>,
+    /// How many of its tool results in a row failed.
+    pub failure_run: u32,
+    /// Its tool calls started in each of the last ten minutes, oldest first.
+    pub activity: [u16; MINUTE_COLUMNS],
+    /// The subagents it launched, oldest first.
+    pub children: Vec<SubagentNode>,
 }
 
 /// How full a reply's context window was.

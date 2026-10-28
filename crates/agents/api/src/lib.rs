@@ -23,8 +23,8 @@ pub mod screen_rules;
 pub mod test_agent;
 
 pub use activity::{
-    ActivityReader, ActivitySnapshot, ActivitySource, BackgroundTask, ContextReading,
-    MINUTE_COLUMNS, OpenCall,
+    ActivityReader, ActivitySnapshot, ActivitySource, BackgroundTask, ContextReading, EndedTask,
+    MINUTE_COLUMNS, OpenCall, SubagentNode,
 };
 pub use screen_rules::{
     LineMatcher, ReadySignal, ScreenRegion, ScreenRule, ScreenRules, ScreenVerdict,
