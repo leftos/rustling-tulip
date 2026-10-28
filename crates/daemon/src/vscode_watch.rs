@@ -9,7 +9,9 @@
 //! repos, a folder that matches no repo is registered with
 //! [`crate::registry::add_repo`], and the workspace is upserted with the
 //! file's folder order as its member order. A folder removed from the file
-//! drops out of the members; its repo stays registered.
+//! drops out of the members; its repo stays registered. Each file armed at
+//! daemon start is also synced once, so an edit made while no daemon watched
+//! is applied; a re-arm later does not re-parse.
 //!
 //! The watched set is reconciled on every [`StateEvent::Workspaces`]
 //! broadcast: a workspace that starts watching is armed, and one that stops
@@ -50,7 +52,7 @@ pub fn start(state: &Arc<AppState>, state_events: &broadcast::Sender<StateEvent>
     // next workspace broadcast tries to arm it again.
     let (drop_tx, mut drop_rx) = mpsc::unbounded_channel::<String>();
     let mut handles = HashMap::<String, WatchHandle>::new();
-    sync_watches(state, state_events, &drop_tx, &mut handles);
+    sync_watches(state, state_events, &drop_tx, &mut handles, true);
     let state = Arc::clone(state);
     let events = state_events.clone();
     tokio::spawn(async move {
@@ -59,12 +61,12 @@ pub fn start(state: &Arc<AppState>, state_events: &broadcast::Sender<StateEvent>
             tokio::select! {
                 maybe = rx.recv() => match maybe {
                     Ok(StateEvent::Workspaces(_)) => {
-                        sync_watches(&state, &events, &drop_tx, &mut handles);
+                        sync_watches(&state, &events, &drop_tx, &mut handles, false);
                     }
                     Ok(_) => {}
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         warn!(lagged = n, "vscode_watch: state event stream lagged");
-                        sync_watches(&state, &events, &drop_tx, &mut handles);
+                        sync_watches(&state, &events, &drop_tx, &mut handles, false);
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 },
@@ -98,11 +100,15 @@ fn wanted_files(state: &AppState) -> HashMap<String, PathBuf> {
 
 /// Reconcile the armed watchers with the registry: arm a file that is newly
 /// watched, and drop a watcher whose file no workspace watches any more.
+/// `sync_at_arm` makes each newly armed file sync once before its first
+/// change event: only the arming `start` does, so an edit made while no
+/// daemon watched is applied, and a later re-arm does not re-parse.
 fn sync_watches(
     state: &Arc<AppState>,
     state_events: &broadcast::Sender<StateEvent>,
     drop_tx: &mpsc::UnboundedSender<String>,
     handles: &mut HashMap<String, WatchHandle>,
+    sync_at_arm: bool,
 ) {
     let wanted = wanted_files(state);
     handles.retain(|key, _| {
@@ -116,21 +122,24 @@ fn sync_watches(
         if handles.contains_key(&key) {
             continue;
         }
-        if let Some(handle) = arm(&key, &file, state, state_events, drop_tx) {
+        if let Some(handle) = arm(&key, &file, state, state_events, drop_tx, sync_at_arm) {
             handles.insert(key, handle);
         }
     }
 }
 
 /// Watch `file`'s parent directory non-recursively and re-sync the
-/// workspaces linked to it whenever the file changes. `None` when the parent
-/// directory does not exist or the watcher cannot be created.
+/// workspaces linked to it whenever the file changes, and once before the
+/// first change when `sync_first` is set. The first sync runs in the file's
+/// own task, so it is serialized with that file's change events. `None` when
+/// the parent directory does not exist or the watcher cannot be created.
 fn arm(
     key: &str,
     file: &Path,
     state: &Arc<AppState>,
     state_events: &broadcast::Sender<StateEvent>,
     drop_tx: &mpsc::UnboundedSender<String>,
+    sync_first: bool,
 ) -> Option<WatchHandle> {
     let dir = file.parent()?;
     if !dir.is_dir() {
@@ -192,6 +201,9 @@ fn arm(
     let key = key.to_owned();
     let path = file.to_path_buf();
     tokio::spawn(async move {
+        if sync_first {
+            sync_file(&state, &events, &key, &path).await;
+        }
         while rx.recv().await.is_some() {
             while rx.try_recv().is_ok() {}
             sync_file(&state, &events, &key, &path).await;
@@ -581,6 +593,55 @@ mod tests {
         assert!(synced.watch_vscode_workspace, "the watch flag is kept");
     }
 
+    #[tokio::test]
+    async fn a_file_edited_before_start_is_synced_at_start() {
+        let scratch = Scratch::new();
+        let state =
+            Arc::new(AppState::load_or_default(&dirs(scratch.path())).expect("load a fresh state"));
+        let first = folder_dir(&scratch, "first");
+        folder_dir(&scratch, "second");
+        let file = scratch.path().join("team.code-workspace");
+        let first_repo = registry::add_repo(&state, &first.to_string_lossy(), None)
+            .await
+            .expect("register the first repo");
+        let workspace = registry::upsert_workspace(
+            &state,
+            None,
+            "team",
+            vec![first_repo.id.clone()],
+            Some(file.to_string_lossy().into_owned()),
+            Some(true),
+        )
+        .expect("register the workspace");
+        // Edited while no daemon watched it, and never written again.
+        std::fs::write(&file, workspace_file(&["first", "second"])).expect("write the file");
+
+        let (events, _) = broadcast::channel(32);
+        let mut rx = events.subscribe();
+        start(&state, &events);
+
+        // A hang guard, never a bound a passing run comes near.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let event = tokio::time::timeout_at(deadline, rx.recv())
+                .await
+                .expect("hung: start never synced the file edited before it");
+            match event {
+                Ok(StateEvent::Workspaces(workspaces)) => {
+                    let synced = workspaces
+                        .iter()
+                        .find(|entry| entry.id == workspace.id)
+                        .expect("the workspace is still registered");
+                    if synced.member_repo_ids.len() == 2 {
+                        break;
+                    }
+                }
+                Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Closed) => panic!("state events closed"),
+            }
+        }
+    }
+
     fn folder_dir(scratch: &Scratch, name: &str) -> PathBuf {
         let path = scratch.path().join(name);
         std::fs::create_dir_all(&path).expect("create folder");
@@ -683,10 +744,10 @@ mod tests {
         let (drop_tx, _drop_rx) = mpsc::unbounded_channel();
         let mut handles = HashMap::new();
 
-        sync_watches(&state, &events, &drop_tx, &mut handles);
+        sync_watches(&state, &events, &drop_tx, &mut handles, false);
         assert_eq!(handles.len(), 1, "a watched file is armed");
         handles.remove(&key);
-        sync_watches(&state, &events, &drop_tx, &mut handles);
+        sync_watches(&state, &events, &drop_tx, &mut handles, false);
         assert_eq!(
             handles.len(),
             1,
@@ -696,17 +757,17 @@ mod tests {
         state
             .mutate(|s| s.workspaces[0].watch_vscode_workspace = false)
             .expect("clear the watch flag");
-        sync_watches(&state, &events, &drop_tx, &mut handles);
+        sync_watches(&state, &events, &drop_tx, &mut handles, false);
         assert!(handles.is_empty(), "clearing the flag stops watching");
 
         state
             .mutate(|s| s.workspaces[0].watch_vscode_workspace = true)
             .expect("restore the watch flag");
-        sync_watches(&state, &events, &drop_tx, &mut handles);
+        sync_watches(&state, &events, &drop_tx, &mut handles, false);
         assert_eq!(handles.len(), 1, "and setting it arms again");
 
         registry::remove_workspace(&state, &workspace.id).expect("remove the workspace");
-        sync_watches(&state, &events, &drop_tx, &mut handles);
+        sync_watches(&state, &events, &drop_tx, &mut handles, false);
         assert!(handles.is_empty(), "removing the workspace stops watching");
     }
 }

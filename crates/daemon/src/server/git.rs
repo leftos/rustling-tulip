@@ -953,8 +953,116 @@ pub(super) async fn retry_worktree_cleanup(
 )]
 mod tests {
     use super::*;
-    use crate::server::test_support::{ScratchDir, dispatch_one, drain, git_init, test_hub};
-    use protocol::AppearanceOverrides;
+    use crate::server::test_support::{
+        ScratchDir, dispatch_one, drain, git_init, repo_entry, test_hub,
+    };
+    use protocol::{AppearanceOverrides, SuggestTarget};
+
+    fn repo_target(repo_id: &str) -> SuggestTarget {
+        SuggestTarget::Repo {
+            repo_id: repo_id.to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_branch_name_suggestion_echoes_its_request_id() {
+        let (hub, scratch) = test_hub("suggest-rid");
+        let repo = scratch.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("create repo dir");
+        git_init(&repo);
+        hub.state
+            .mutate(|s| s.repos.push(repo_entry("r1", "r1", &repo)))
+            .expect("register repo");
+        let msg = dispatch_one(
+            &hub,
+            ClientMessage::SuggestBranchName {
+                target: repo_target("r1"),
+                request_id: Some("q1".to_string()),
+            },
+        )
+        .await;
+        assert!(
+            matches!(
+                &msg,
+                DaemonMessage::BranchNameSuggestion { target, name, request_id: Some(id) }
+                    if id == "q1" && *target == repo_target("r1") && !name.is_empty()
+            ),
+            "{msg:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_branch_name_suggestion_answers_error_with_its_request_id() {
+        let (hub, _scratch) = test_hub("suggest-fail-rid");
+        let msg = dispatch_one(
+            &hub,
+            ClientMessage::SuggestBranchName {
+                target: repo_target("no-such"),
+                request_id: Some("q2".to_string()),
+            },
+        )
+        .await;
+        assert!(
+            !matches!(&msg, DaemonMessage::BranchNameSuggestion { .. }),
+            "a failed suggestion sends no name: {msg:?}"
+        );
+        assert!(
+            matches!(
+                &msg,
+                DaemonMessage::Error { message, request_id: Some(id) }
+                    if id == "q2" && message.contains("unknown repo")
+            ),
+            "{msg:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_branch_name_suggestion_without_a_request_id_answers_with_none() {
+        let (hub, scratch) = test_hub("suggest-no-rid");
+        let repo = scratch.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("create repo dir");
+        git_init(&repo);
+        hub.state
+            .mutate(|s| s.repos.push(repo_entry("r1", "r1", &repo)))
+            .expect("register repo");
+        let ok = dispatch_one(
+            &hub,
+            ClientMessage::SuggestBranchName {
+                target: repo_target("r1"),
+                request_id: None,
+            },
+        )
+        .await;
+        assert!(
+            matches!(
+                &ok,
+                DaemonMessage::BranchNameSuggestion {
+                    request_id: None,
+                    ..
+                }
+            ),
+            "{ok:?}"
+        );
+        let failed = dispatch_one(
+            &hub,
+            ClientMessage::SuggestBranchName {
+                target: repo_target("no-such"),
+                request_id: None,
+            },
+        )
+        .await;
+        assert!(
+            matches!(
+                &failed,
+                DaemonMessage::Error {
+                    request_id: None,
+                    ..
+                }
+            ),
+            "{failed:?}"
+        );
+    }
+
     #[tokio::test]
     async fn a_failed_repo_status_read_echoes_its_request_id() {
         let (hub, _scratch) = test_hub("status-rid");

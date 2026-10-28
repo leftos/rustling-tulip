@@ -105,8 +105,11 @@ pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> 
             let _ = out_tx.send(DaemonMessage::VscodeWorkspaceParsed { suggestion });
         }
         ClientMessage::ScanVscodeWorkspaces { path } => {
-            let suggestions = scan_vscode_workspaces_in_path(hub, &path);
-            let _ = out_tx.send(DaemonMessage::VscodeWorkspacesScanned { path, suggestions });
+            // The folder may be a slow or dead network share, so the scan
+            // runs off this connection's dispatch task and answers when done.
+            spawn_scan(out_tx, known_repos(hub), path, |dir, known| {
+                scan_vscode_workspace_files(known, dir, false)
+            });
         }
         ClientMessage::SetRepoWorktreeDefault { repo_id, value } => {
             set_repo_worktree_default(&hub.state, &repo_id, value)?;
@@ -380,28 +383,64 @@ pub(super) async fn env_names() -> Vec<protocol::EnvName> {
 }
 
 fn scan_vscode_workspaces(hub: &Hub, repo_path: &str) -> Vec<VscodeWorkspaceSuggestion> {
-    scan_vscode_workspace_files(hub, repo_path, true)
+    scan_vscode_workspace_files(&known_repos(hub), repo_path, true)
 }
 
-fn scan_vscode_workspaces_in_path(hub: &Hub, path: &str) -> Vec<VscodeWorkspaceSuggestion> {
-    scan_vscode_workspace_files(hub, path, false)
-}
-
-fn scan_vscode_workspace_files(
-    hub: &Hub,
-    dir_path: &str,
-    require_multiple_folders: bool,
-) -> Vec<VscodeWorkspaceSuggestion> {
-    let known: Vec<(String, String)> = hub.state.with_persisted(|s| {
+/// Every registered repo's id and path, the snapshot a scan matches folders
+/// against.
+fn known_repos(hub: &Hub) -> Vec<(String, String)> {
+    hub.state.with_persisted(|s| {
         s.repos
             .iter()
             .map(|r| (r.id.clone(), r.path.clone()))
             .collect()
+    })
+}
+
+/// Run `scan` over `path` on the blocking pool, from a task of its own, and
+/// send its `VscodeWorkspacesScanned` to the requester's `out_tx` when it
+/// finishes. Returns at once, so the connection's dispatch task is never
+/// held by the folder's file system; `known` is the registry snapshot taken
+/// before the scan. A scan that fails to finish is logged and answered with
+/// no suggestions, so the requester's wait still ends. The task holds only a
+/// weak sender, so a scan stuck on a dead share never keeps a closed
+/// connection open; its reply is dropped when the connection is gone.
+fn spawn_scan(
+    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
+    known: Vec<(String, String)>,
+    path: String,
+    scan: impl FnOnce(&str, &[(String, String)]) -> Vec<VscodeWorkspaceSuggestion> + Send + 'static,
+) {
+    let out_tx = out_tx.downgrade();
+    tokio::spawn(async move {
+        let dir = path.clone();
+        let suggestions = tokio::task::spawn_blocking(move || scan(&dir, &known))
+            .await
+            .unwrap_or_else(|err| {
+                warn!(
+                    ?err,
+                    %path,
+                    "the code-workspace scan did not finish; answering with no suggestions"
+                );
+                Vec::new()
+            });
+        let Some(out_tx) = out_tx.upgrade() else {
+            debug!(%path, "the code-workspace scan finished after its connection closed; reply dropped");
+            return;
+        };
+        let _ = out_tx.send(DaemonMessage::VscodeWorkspacesScanned { path, suggestions });
     });
+}
+
+fn scan_vscode_workspace_files(
+    known: &[(String, String)],
+    dir_path: &str,
+    require_multiple_folders: bool,
+) -> Vec<VscodeWorkspaceSuggestion> {
     let dir = std::path::Path::new(dir_path);
     vscode::find_workspace_files(dir)
         .into_iter()
-        .filter_map(|file| match vscode::parse_workspace_file(&file, &known) {
+        .filter_map(|file| match vscode::parse_workspace_file(&file, known) {
             Ok(s) if !require_multiple_folders || s.folders.len() > 1 => Some(s),
             Ok(_) => None,
             Err(err) => {
@@ -455,6 +494,152 @@ mod tests {
         dispatch_err, dispatch_one, repo_entry, test_hub, workspace_entry,
     };
     use std::path::Path;
+    use std::time::Duration;
+
+    /// The hang guard every wait in these tests runs under, never a bound a
+    /// passing run comes near: a regression fails as "hung" instead of
+    /// hanging the run.
+    const HANG_GUARD: Duration = Duration::from_secs(30);
+
+    /// The scan reply on `out_rx`, waited for: the scan runs off the
+    /// dispatch task, so it lands after `handle` returns.
+    async fn scan_reply(
+        out_rx: &mut mpsc::UnboundedReceiver<DaemonMessage>,
+    ) -> (String, Vec<VscodeWorkspaceSuggestion>) {
+        let reply = tokio::time::timeout(HANG_GUARD, out_rx.recv())
+            .await
+            .expect("hung: the scan never replied")
+            .expect("the reply channel is open");
+        match reply {
+            DaemonMessage::VscodeWorkspacesScanned { path, suggestions } => (path, suggestions),
+            other => unreachable!("expected VscodeWorkspacesScanned, got {other:?}"),
+        }
+    }
+
+    fn named_suggestion(path: &str, known: &[(String, String)]) -> VscodeWorkspaceSuggestion {
+        VscodeWorkspaceSuggestion {
+            source_path: format!("{path}/team.code-workspace"),
+            suggested_name: format!("{} known", known.len()),
+            folders: Vec::new(),
+        }
+    }
+
+    /// Start a scan of `C:/work` whose `scan` blocks until the returned
+    /// gate sends. `spawn_scan` is called from a blocking thread, so one that
+    /// ran the scan inline fails the hang guard instead of blocking the test.
+    async fn spawn_gated_scan(
+        out_tx: mpsc::UnboundedSender<DaemonMessage>,
+        known: Vec<(String, String)>,
+    ) -> std::sync::mpsc::Sender<()> {
+        let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
+        let start = tokio::task::spawn_blocking(move || {
+            spawn_scan(&out_tx, known, "C:/work".to_string(), move |path, known| {
+                gate_rx
+                    .recv_timeout(HANG_GUARD)
+                    .expect("hung: the test never opened the gate");
+                vec![named_suggestion(path, known)]
+            });
+        });
+        tokio::time::timeout(HANG_GUARD, start)
+            .await
+            .expect("hung: spawn_scan held its caller until the scan finished")
+            .expect("spawn_scan returns");
+        gate_tx
+    }
+
+    #[tokio::test]
+    async fn a_gated_scan_replies_once_it_finishes() {
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        let known = vec![("r1".to_string(), "C:/r1".to_string())];
+        let gate_tx = spawn_gated_scan(out_tx.clone(), known.clone()).await;
+        assert!(
+            out_rx.try_recv().is_err(),
+            "no reply before the scan finishes"
+        );
+
+        gate_tx.send(()).expect("open the gate");
+        let (path, suggestions) = scan_reply(&mut out_rx).await;
+        assert_eq!(path, "C:/work", "the reply names the scanned folder");
+        assert_eq!(suggestions, [named_suggestion("C:/work", &known)]);
+    }
+
+    #[tokio::test]
+    async fn a_gated_scan_does_not_keep_the_connection_open() {
+        // The connection's send pump ends when its queue has no sender
+        // left; a scan still in progress must not be one.
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        let gate_tx = spawn_gated_scan(out_tx, Vec::new()).await;
+
+        let end = tokio::time::timeout(HANG_GUARD, out_rx.recv())
+            .await
+            .expect("hung: the gated scan kept the connection's queue open");
+        assert!(end.is_none(), "the queue ended, but it got {end:?}");
+        gate_tx.send(()).expect("let the scan finish");
+    }
+
+    /// Runs on the current-thread runtime `#[tokio::test]` gives: a spawned
+    /// scan task cannot run before `handle` returns and the test awaits, so
+    /// an arm that scans inline (or awaits the scan) has replied by then and
+    /// fails the first assertion.
+    #[tokio::test]
+    async fn a_scan_does_not_hold_the_caller() {
+        use crate::server::connection::{AuthKind, ConnCtx, FetchRegistry, PtyForwarders};
+        use std::collections::HashMap;
+        use tokio::sync::Mutex as AsyncMutex;
+
+        let (hub, scratch) = test_hub("vscode-scan");
+        let folder = scratch.path().join("work");
+        std::fs::create_dir_all(folder.join("a")).expect("create a member folder");
+        std::fs::write(
+            folder.join("team.code-workspace"),
+            r#"{ "folders": [{ "path": "a" }] }"#,
+        )
+        .expect("write the workspace file");
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        let (file_tx, _file_rx) = mpsc::channel(1);
+        let pty_forwarders: PtyForwarders = Arc::new(AsyncMutex::new(HashMap::new()));
+        let fetches: FetchRegistry = Arc::new(AsyncMutex::new(HashMap::new()));
+        let local = AuthKind::Local;
+        let ctx = ConnCtx {
+            out_tx: &out_tx,
+            file_tx: &file_tx,
+            pty_forwarders: &pty_forwarders,
+            fetches: &fetches,
+            client_id: "c1",
+            client_name: None,
+            connection: 1,
+            auth: &local,
+        };
+        let path = folder.to_string_lossy().into_owned();
+
+        tokio::time::timeout(
+            HANG_GUARD,
+            handle(
+                &hub,
+                ClientMessage::ScanVscodeWorkspaces { path: path.clone() },
+                &ctx,
+            ),
+        )
+        .await
+        .expect("hung: the scan request held its handler")
+        .expect("the scan request is accepted");
+        assert!(
+            out_rx.try_recv().is_err(),
+            "the handler returned before the scan replied"
+        );
+
+        let (replied_path, suggestions) = scan_reply(&mut out_rx).await;
+        assert_eq!(replied_path, path);
+        assert_eq!(suggestions.len(), 1, "{suggestions:?}");
+        let found = suggestions.first().expect("one suggestion");
+        assert!(
+            found.source_path.ends_with("team.code-workspace"),
+            "{}",
+            found.source_path
+        );
+        assert_eq!(found.folders.len(), 1, "{found:?}");
+    }
+
     #[tokio::test]
     async fn accepting_a_vscode_suggestion_stores_whether_it_watches() {
         let (hub, _scratch) = test_hub("vscode-watch-flag");

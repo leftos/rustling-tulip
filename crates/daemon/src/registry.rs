@@ -108,11 +108,17 @@ pub async fn add_repo(
         spoken_name: None,
     };
 
-    state.mutate(|s| {
+    // Looked up again under the write's lock: a concurrent add of the same
+    // folder may have registered it while this one awaited git.
+    let registered = state.mutate(|s| {
+        if let Some(found) = s.repos.iter().find(|r| paths_eq(&r.path, &entry.path)) {
+            return found.clone();
+        }
         s.repos.push(entry.clone());
         append_to_container_order(s, ContainerRef::Repo(entry.id.clone()));
+        entry
     })?;
-    Ok(entry)
+    Ok(registered)
 }
 
 pub fn set_repo_worktree_default(
@@ -489,5 +495,26 @@ mod tests {
 
         assert!(changed.is_empty(), "nothing changed");
         assert_eq!(order_of(&state, "r1"), Some(ids(&["a", "b"])));
+    }
+
+    #[tokio::test]
+    async fn two_concurrent_adds_of_one_folder_register_it_once() {
+        let dirs = scratch_dirs("concurrent-add");
+        let folder = dirs.config.join("shared");
+        std::fs::create_dir_all(&folder).expect("create the folder");
+        let state = AppState::load_or_default(&dirs).expect("load state");
+        let path = folder.to_string_lossy().into_owned();
+
+        // Both calls pass the first lookup before either registers: each
+        // awaits git between the lookup and the push.
+        let (first, second) =
+            tokio::join!(add_repo(&state, &path, None), add_repo(&state, &path, None));
+        let first = first.expect("the first add succeeds");
+        let second = second.expect("the second add succeeds");
+
+        let repos = state.with_persisted(|s| s.repos.clone());
+        assert_eq!(repos.len(), 1, "one folder, one entry: {repos:?}");
+        assert_eq!(first.id, second.id, "both callers get the one entry");
+        assert_eq!(repos.first().map(|repo| &repo.id), Some(&first.id));
     }
 }
