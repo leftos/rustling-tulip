@@ -16,6 +16,7 @@ mod branch_fate;
 pub mod builtin_themes;
 mod buttons;
 mod changes_view;
+pub mod chat;
 mod cleanup_failed;
 mod cleanup_failed_view;
 mod combobox;

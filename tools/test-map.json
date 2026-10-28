@@ -182,6 +182,12 @@
     },
     {
       "paths": [
+        "apps/native/src/chat.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & test(/^chat::/))"
+    },
+    {
+      "paths": [
         "apps/native/src/cleanup_failed.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native) & test(/^cleanup_failed::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_remote|ui_worktree_cleanup)::/))"
