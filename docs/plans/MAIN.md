@@ -115,20 +115,13 @@
   - [ ] RT-500 Draw the need-you band (DB.23) · release vNext+1
   - [ ] RT-501 Draw the repo lanes, the default view (DB.24) · release vNext+1
   - [ ] RT-502 Switch between By repo and By status, remembered per client (DB.25) · release vNext+1
-  - [ ] RT-445 Add the summarizer's key store and DeepSeek client (SA.2, SA.3b) · release vNext
-  - [ ] RT-481 Run the Claude plugin's summarizer through the CLI (SA.3) · release vNext
-  - [ ] RT-446 Shape the summarizer's prompt and input (SA.4) · release vNext
   - [ ] RT-447 Add the summarizer's settings, spend ledger and cache (SA.5) · release vNext
   - [ ] RT-448 Summarize each finished turn into the session's summary ring (SA.6) · release vNext
   - [ ] RT-453 Document the summarizer and the Dashboard (SA.11) · release vNext+1
-  - [ ] RT-484 Build each session's subagent tree (DB.4) · release vNext
-  - [ ] RT-485 Send session facts to watching Dashboards (DB.5) · release vNext
   - [ ] RT-486 Read each session's recent work from git (DB.6) · release vNext
   - [ ] RT-487 Show each session's Linear issue (DB.7) · release vNext+1
   - [ ] RT-488 Show gate holds and queue places under the session that runs them (DB.8) · release vNext+1
   - [ ] RT-489 Keep a day ledger for the header's figures (DB.9) · release vNext+1
-  - [ ] RT-490 Open the Dashboard as a tab from the rail (DB.10) · release vNext
-  - [ ] RT-491 Model the Dashboard's groups and order (DB.11) · release vNext
 - [ ] RT-423 Needs You: Answer rows and line 2 from session summaries (NY.5) · release vNext
 
 ## Wave 10 — Subagent streams
@@ -245,7 +238,7 @@
 ## Ideas needing a design pass
 
 - [ ] RT-52 Link a worktree to a GitHub issue or PR at spawn
-- [ ] RT-191 Plan a built-in browser that agents can navigate
+- [ ] RT-191 Plan a built-in browser that agents can navigate · release vNext+1
 - [ ] RT-53 Agent CLI: let an agent in one session drive other sessions
 - [ ] RT-131 Design a plugin layer on the agent CLI, then move one event-driven feature onto it
 - [ ] RT-54 Agent skill pack: fan work out to worktrees, then review and merge
