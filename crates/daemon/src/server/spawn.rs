@@ -1139,6 +1139,7 @@ async fn spawn_interactive_session(
                 Some(shell),
                 AgentLaunch {
                     argv: &argv,
+                    program: &program,
                     typed: TypedCommand {
                         program_word: command.typed_verbatim.then_some(raw_program.as_str()),
                         extra: &command.extra_text,
@@ -1160,7 +1161,22 @@ async fn spawn_interactive_session(
                 &members,
                 initial_prompt.as_deref(),
             )?;
-            let final_args = command.direct_args(prepend_args, args);
+            let final_args = match command.direct_args(
+                &program,
+                prepend_args,
+                args,
+                initial_prompt.as_deref(),
+            ) {
+                Ok(final_args) => final_args,
+                Err(refusal) => {
+                    // A refused spawn leaves no hook files behind, as a failed
+                    // tracer spawn does.
+                    if let Some(settings) = hook_settings {
+                        settings.discard(&session_id);
+                    }
+                    return Err(spawn_plan::SpawnFailure::from(refusal).into());
+                }
+            };
             info!(
                 agent = agent.0.as_str(),
                 raw = %raw_program,

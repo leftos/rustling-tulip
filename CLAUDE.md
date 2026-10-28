@@ -302,6 +302,8 @@ The initial prompt or a preset's script is typed into Claude's TUI only after Cl
 
 A shell outside pwsh, powershell, cmd, sh, bash, zsh, dash and ksh (and WSL bash), a cmd line carrying `%` or `!`, and legacy PowerShell's argument passing host no agent: Claude is then the PTY child, as it is for a plugin without `shell_resume`.
 
+So does an agent that runs through cmd.exe (a `.cmd` or `.bat` shim, or cmd.exe itself) typed into pwsh, powershell or a POSIX shell when an argument holds `%`, `!`, `"`, `^`, `&`, `|`, `<`, `>`, CR or LF; the direct spawn then refuses any such argument with a `Couldn't start session` failure naming the character and the argument, before the tracer starts (`direct_args` in `server/spawn/shell.rs`).
+
 `daemon.log` says which fallback ran ("the agent's command line cannot be typed into this shell; spawning the agent directly", "the agent cannot be typed into this shell; spawning the agent directly", "no shell to host the agent; spawning the agent directly").
 
 A hosted launch logs "spawn_interactive_session: the agent is typed into the shell".

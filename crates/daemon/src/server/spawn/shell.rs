@@ -1,6 +1,7 @@
 //! Program resolution for spawns: the agent CLI (through npm shims on Windows, and the user's launch command) and the user's shell, with its prompt-integration scripts and init files.
 
 use crate::paths::Dirs;
+use crate::spawn_plan::SpawnFailure;
 use crate::state::AgentCommand;
 use agent_api::AgentPlugin;
 use anyhow::Context as _;
@@ -287,14 +288,22 @@ fn runs_through_wsl(program: &str) -> bool {
 /// resolved agent program is `cmd.exe` or a batch file). `agent` is `None`
 /// for a program word typed verbatim, which is not a path to inspect.
 fn legacy_argument_passing(shell_program: &str, agent: Option<&str>) -> bool {
-    let agent = agent.unwrap_or_default();
-    let ext = Path::new(agent)
+    program_stem(shell_program) == "powershell" || agent.is_some_and(runs_through_cmd)
+}
+
+/// Whether Windows runs `program` through cmd: `cmd.exe` itself, or a batch
+/// file.
+fn runs_through_cmd(program: &str) -> bool {
+    program_stem(program) == "cmd" || is_batch_file(program)
+}
+
+/// Whether `program` names a `.cmd` or `.bat` file.
+fn is_batch_file(program: &str) -> bool {
+    let ext = Path::new(program)
         .extension()
         .and_then(|ext| ext.to_str())
         .map(str::to_ascii_lowercase);
-    program_stem(shell_program) == "powershell"
-        || program_stem(agent) == "cmd"
-        || matches!(ext.as_deref(), Some("cmd" | "bat"))
+    matches!(ext.as_deref(), Some("cmd" | "bat"))
 }
 
 /// An argument a legacy parser mangles: empty, holding a double quote, or
@@ -409,6 +418,120 @@ fn cmd_refuses(arg: &str) -> bool {
     arg.contains(['"', '\n', '\r', '%', '!'])
 }
 
+/// The characters cmd.exe acts on in an argument it runs a batch file with:
+/// `%` and `!` expand, `"` ends the quoting, `^` escapes, `&`, `|`, `<` and
+/// `>` run or redirect, and a line break ends the command. Parentheses pass,
+/// so a folder under `Program Files (x86)` does.
+const CMD_SHIM_REFUSED: [char; 10] = ['%', '!', '"', '^', '&', '|', '<', '>', '\r', '\n'];
+
+/// The first character of `arg` cmd.exe would act on when it runs a batch
+/// file with it (see [`CMD_SHIM_REFUSED`]); `None` for an argument it passes
+/// as it is.
+fn cmd_shim_refuses(arg: &str) -> Option<char> {
+    arg.chars().find(|ch| CMD_SHIM_REFUSED.contains(ch))
+}
+
+/// A direct spawn refused because cmd.exe runs the agent and would act on a
+/// character of one of its arguments, which a quoted argv cannot escape.
+#[derive(Debug)]
+pub(super) struct CmdShimRefusal {
+    /// The file name of the batch file cmd.exe runs, else of the program.
+    shim: String,
+    /// The first refused character found.
+    character: char,
+    /// What the refused argument is, as the refusal names it.
+    argument: &'static str,
+    /// The plugin's program override variable, which the hint names.
+    program_env_var: &'static str,
+}
+
+impl From<CmdShimRefusal> for SpawnFailure {
+    fn from(refusal: CmdShimRefusal) -> Self {
+        let shown = match refusal.character {
+            '\r' => "CR".to_owned(),
+            '\n' => "LF".to_owned(),
+            ch => ch.to_string(),
+        };
+        Self {
+            title: "Couldn't start session".to_owned(),
+            detail: format!(
+                "`{}` runs through cmd.exe, which would run or rewrite the `{shown}` in {}.",
+                refusal.shim, refusal.argument
+            ),
+            hint: Some(format!(
+                "Remove % ! \" ^ & | < >, or point the launch command or {} at the agent's .exe.",
+                refusal.program_env_var
+            )),
+        }
+    }
+}
+
+/// How a refusal names the program and the resolver's leading arguments,
+/// which carry the batch file's path.
+const AGENT_PATH: &str = "the agent's path";
+
+/// The first argument of a direct spawn that cmd.exe would act on, as its
+/// refused character and its name: `program`, `prepend` and `extra` by where
+/// they come from, a plugin argument by the prompt it equals or the flag
+/// before it.
+fn refused_cmd_shim_arg(
+    program: &str,
+    prepend: &[String],
+    plugin_args: &[String],
+    extra: &[String],
+    initial_prompt: Option<&str>,
+) -> Option<(char, &'static str)> {
+    let leading = std::iter::once(program)
+        .chain(prepend.iter().map(String::as_str))
+        .map(|arg| (arg, AGENT_PATH));
+    let own = plugin_args.iter().enumerate().map(|(at, arg)| {
+        let previous = at
+            .checked_sub(1)
+            .and_then(|before| plugin_args.get(before))
+            .map(String::as_str);
+        (arg.as_str(), plugin_arg_name(arg, previous, initial_prompt))
+    });
+    let extras = extra
+        .iter()
+        .map(|arg| (arg.as_str(), "a launch-command argument"));
+    leading
+        .chain(own)
+        .chain(extras)
+        .find_map(|(arg, name)| cmd_shim_refuses(arg).map(|ch| (ch, name)))
+}
+
+/// How a refusal names the plugin argument `arg`, which follows `previous`.
+fn plugin_arg_name(
+    arg: &str,
+    previous: Option<&str>,
+    initial_prompt: Option<&str>,
+) -> &'static str {
+    if initial_prompt == Some(arg) {
+        return "the initial prompt";
+    }
+    match previous {
+        Some("--model") => "the model",
+        Some("--add-dir") => "the --add-dir path",
+        Some("--settings") => "the --settings path",
+        _ => "an argument",
+    }
+}
+
+/// The batch file `program` runs with `prepend`: the first `.cmd` or `.bat`
+/// among them, else `program`.
+fn cmd_shim_path<'a>(program: &'a str, prepend: &'a [String]) -> &'a str {
+    std::iter::once(program)
+        .chain(prepend.iter().map(String::as_str))
+        .find(|candidate| is_batch_file(candidate))
+        .unwrap_or(program)
+}
+
+/// The file name of `path`. Either separator ends a folder, since the path is
+/// a Windows one wherever the daemon reads it.
+fn file_name_of(path: &str) -> &str {
+    path.rsplit(['\\', '/']).next().unwrap_or(path)
+}
+
 /// A cmd argument: double-quoted when empty or holding a space or a shell
 /// metacharacter, its trailing backslashes doubled so the closing quote stays
 /// a quote; `None` for one cmd cannot carry (see [`cmd_refuses`]).
@@ -446,6 +569,9 @@ pub(super) struct ShellLaunch {
 /// and a preset's script, which carries the prompt itself.
 pub(super) struct AgentLaunch<'a> {
     pub(super) argv: &'a [String],
+    /// The program the agent runs, resolved, whether or not the line types it
+    /// (a program word typed verbatim resolves to it too).
+    pub(super) program: &'a str,
     pub(super) typed: TypedCommand<'a>,
     pub(super) cwd: &'a str,
     pub(super) initial_prompt: Option<&'a str>,
@@ -478,20 +604,54 @@ pub(super) struct AgentCommandChoice {
     pub(super) extra_args: Vec<String>,
     /// The extra arguments as stored, trimmed, for the typed shell form.
     pub(super) extra_text: String,
+    /// The plugin's program override variable, which a refusal's hint names.
+    pub(super) program_env_var: &'static str,
 }
 
 impl AgentCommandChoice {
-    /// The direct spawn's arguments: the resolver's leading `prepend`, the
-    /// plugin's own `plugin_args`, then the extra arguments.
+    /// The direct spawn's arguments for the resolved `program`: the
+    /// resolver's leading `prepend`, the plugin's own `plugin_args` (which
+    /// carry `initial_prompt`), then the extra arguments.
+    ///
+    /// # Errors
+    ///
+    /// `program` runs through cmd.exe and an argument holds a character cmd
+    /// would act on (see [`cmd_shim_refuses`]).
     pub(super) fn direct_args(
         &self,
+        program: &str,
         prepend: Vec<String>,
         plugin_args: Vec<String>,
-    ) -> Vec<String> {
+        initial_prompt: Option<&str>,
+    ) -> Result<Vec<String>, CmdShimRefusal> {
+        if runs_through_cmd(program)
+            && let Some((character, argument)) = refused_cmd_shim_arg(
+                program,
+                &prepend,
+                &plugin_args,
+                &self.extra_args,
+                initial_prompt,
+            )
+        {
+            // A refused character in the path itself shows the whole path, so
+            // the user sees the folder that holds it.
+            let shim = cmd_shim_path(program, &prepend);
+            let shown = if argument == AGENT_PATH {
+                shim
+            } else {
+                file_name_of(shim)
+            };
+            return Err(CmdShimRefusal {
+                shim: shown.to_owned(),
+                character,
+                argument,
+                program_env_var: self.program_env_var,
+            });
+        }
         let mut args = prepend;
         args.extend(plugin_args);
         args.extend(self.extra_args.iter().cloned());
-        args
+        Ok(args)
     }
 }
 
@@ -528,6 +688,7 @@ pub(super) fn choose_agent_command(
         typed_verbatim,
         extra_args,
         extra_text: setting.args.trim().to_owned(),
+        program_env_var: plugin.program_env_var(),
     })
 }
 
@@ -556,9 +717,16 @@ pub(super) fn plan_launch(
     };
     let legacy_refused = legacy_argument_passing(&shell.program, resolved_program)
         && agent.argv.iter().any(|arg| mangled_by_legacy_parsing(arg));
+    // A shell other than cmd hands the arguments to cmd.exe as they are, and
+    // cmd would act on its metacharacters; the direct spawn refuses them.
+    // `agent.program` is checked, not argv's first word, so a program word
+    // typed verbatim that resolves to a batch file counts too.
+    let cmd_refused = family != ShellFamily::Cmd
+        && runs_through_cmd(agent.program)
+        && agent.argv.iter().any(|arg| cmd_shim_refuses(arg).is_some());
     let line = typed_command(family, agent.argv, agent.typed)
         .and_then(|command| launch_line(family, agent.cwd, &command))
-        .filter(|_| !legacy_refused);
+        .filter(|_| !legacy_refused && !cmd_refused);
     let Some(line) = line else {
         tracing::warn!(
             shell = %shell.label,
@@ -862,8 +1030,8 @@ const ZSH_INIT_SCRIPT: &str = include_str!("../../../shell-init/zsh-init.zshrc")
 )]
 mod launch_tests {
     use super::{
-        AgentLaunch, Launch, ShellFamily, ShellProgram, TypedCommand, plan_launch,
-        quote_command_line,
+        AgentLaunch, Launch, ShellFamily, ShellProgram, TypedCommand, cmd_shim_refuses,
+        plan_launch, quote_command_line,
     };
     use base64::Engine as _;
     use protocol::{InjectorStartup, InjectorStep, PromptInjector};
@@ -886,6 +1054,7 @@ mod launch_tests {
     fn agent<'a>(argv: &'a [String], prompt: Option<&'a str>) -> AgentLaunch<'a> {
         AgentLaunch {
             argv,
+            program: argv.first().map_or("", String::as_str),
             typed: TypedCommand::default(),
             cwd: CWD,
             initial_prompt: prompt,
@@ -1139,6 +1308,79 @@ mod launch_tests {
     }
 
     #[test]
+    fn cmd_shim_refuses_its_metacharacters_but_not_parentheses() {
+        for ch in ['%', '!', '"', '^', '&', '|', '<', '>', '\r', '\n'] {
+            let arg = format!("fix a {ch} b");
+            assert_eq!(cmd_shim_refuses(&arg), Some(ch), "cmd.exe acts on {ch:?}");
+        }
+        for arg in ["(", ")", "fix the bug", r"C:\Program Files (x86)\x", ""] {
+            assert_eq!(cmd_shim_refuses(arg), None, "cmd.exe passes {arg:?}");
+        }
+        assert_eq!(
+            cmd_shim_refuses("a|b&c"),
+            Some('|'),
+            "the first refused character is the one named"
+        );
+    }
+
+    #[test]
+    fn a_cmd_run_agent_typed_into_powershell_falls_back_on_a_cmd_metacharacter() {
+        for program in [
+            &["cmd.exe", "/d", "/c", r"C:\bin\claude.cmd"][..],
+            &[r"C:\bin\claude.cmd"],
+        ] {
+            let mut argv = strings(program);
+            argv.extend(strings(&["--model", "a&b"]));
+            assert!(
+                typed_line(shell("pwsh.exe", "pwsh"), &argv).is_none(),
+                "cmd.exe running {program:?} would run what follows the &"
+            );
+            assert!(
+                typed_line(shell("/bin/bash", "bash"), &argv).is_none(),
+                "bash hands {program:?} the & for cmd.exe to run"
+            );
+        }
+        let exe = strings(&[r"C:\bin\claude.exe", "--model", "a&b"]);
+        assert!(
+            typed_line(shell("pwsh.exe", "pwsh"), &exe).is_some(),
+            "an .exe agent takes the & as it is"
+        );
+    }
+
+    #[test]
+    fn a_verbatim_word_resolving_to_a_cmd_shim_falls_back_on_a_cmd_metacharacter() {
+        let plugin_args = strings(&["--add-dir", r"C:\dev\R&D"]);
+        let typed = TypedCommand {
+            program_word: Some("mytool"),
+            extra: "",
+        };
+        let through_cmd = AgentLaunch {
+            program: r"C:\tools\mytool.cmd",
+            typed,
+            ..agent(&plugin_args, None)
+        };
+        assert!(
+            matches!(
+                plan_launch(true, Some(shell("pwsh.exe", "pwsh")), through_cmd),
+                Launch::Direct
+            ),
+            "pwsh hands the & to the cmd.exe that runs mytool.cmd"
+        );
+        let exe = AgentLaunch {
+            program: r"C:\tools\mytool.exe",
+            typed,
+            ..agent(&plugin_args, None)
+        };
+        assert!(
+            matches!(
+                plan_launch(true, Some(shell("pwsh.exe", "pwsh")), exe),
+                Launch::InShell(_)
+            ),
+            "a word resolving to an .exe takes the & as it is"
+        );
+    }
+
+    #[test]
     fn posix_quotes_with_single_quotes() {
         let argv = strings(&["/usr/bin/claude", "--model", "it's", "$HOME"]);
         assert_eq!(
@@ -1211,6 +1453,7 @@ mod launch_tests {
         );
         let launch = AgentLaunch {
             argv: &argv,
+            program: r"C:\bin\claude.exe",
             typed: TypedCommand::default(),
             cwd: r"C:\50% off",
             initial_prompt: None,
@@ -1306,6 +1549,7 @@ mod launch_tests {
             Some(shell("bash", "bash")),
             AgentLaunch {
                 argv: &argv,
+                program: r"C:\bin\claude.exe",
                 typed: TypedCommand::default(),
                 cwd: CWD,
                 initial_prompt: Some("fix the bug"),
@@ -1360,6 +1604,7 @@ mod launch_tests {
 )]
 mod launch_command_tests {
     use super::choose_agent_command;
+    use crate::spawn_plan::SpawnFailure;
     use crate::state::AgentCommand;
 
     fn command(program: &str, args: &str) -> AgentCommand {
@@ -1435,13 +1680,96 @@ mod launch_command_tests {
             agent_registry::plugin(&agent_registry::default_agent()).expect("Claude is registered");
         let chosen = choose_agent_command(plugin, &command("", r#"--debug "a b" 'c d'"#), &no_env)
             .expect("the command splits");
-        let argv = chosen.direct_args(
-            vec!["/d".to_owned(), "/c".to_owned()],
-            vec!["--model".to_owned(), "opus".to_owned()],
-        );
+        let argv = chosen
+            .direct_args(
+                "cmd.exe",
+                vec!["/d".to_owned(), "/c".to_owned()],
+                vec!["--model".to_owned(), "opus".to_owned()],
+                None,
+            )
+            .expect("no argument holds a cmd metacharacter");
         assert_eq!(
             argv,
             ["/d", "/c", "--model", "opus", "--debug", "a b", "c d"]
+        );
+    }
+
+    #[test]
+    fn a_cmd_shim_direct_spawn_refuses_an_ampersand_prompt() {
+        let plugin =
+            agent_registry::plugin(&agent_registry::default_agent()).expect("Claude is registered");
+        let chosen =
+            choose_agent_command(plugin, &command("", ""), &no_env).expect("the command splits");
+        let prompt = "fix a & b";
+        let shim = vec![
+            "/d".to_owned(),
+            "/c".to_owned(),
+            r"C:\npm\claude.cmd".to_owned(),
+        ];
+        let plugin_args = vec!["--model".to_owned(), "opus".to_owned(), prompt.to_owned()];
+        let refusal = chosen
+            .direct_args("cmd.exe", shim, plugin_args.clone(), Some(prompt))
+            .expect_err("cmd.exe would run what follows the &");
+        let failure = SpawnFailure::from(refusal);
+        assert_eq!(failure.title, "Couldn't start session");
+        assert_eq!(
+            failure.detail,
+            "`claude.cmd` runs through cmd.exe, which would run or rewrite the `&` in the initial prompt."
+        );
+        assert_eq!(
+            failure.hint.as_deref(),
+            Some(
+                "Remove % ! \" ^ & | < >, or point the launch command or RUSTLING_TULIP_CLAUDE at the agent's .exe."
+            )
+        );
+        assert!(
+            chosen
+                .direct_args(r"C:\bin\claude.exe", Vec::new(), plugin_args, Some(prompt))
+                .is_ok(),
+            "an .exe agent takes the & as it is"
+        );
+
+        let extras = choose_agent_command(plugin, &command("", "--name a|b"), &no_env)
+            .expect("the command splits");
+        let refusal = extras
+            .direct_args(r"C:\npm\claude.cmd", Vec::new(), Vec::new(), None)
+            .expect_err("cmd.exe would pipe the extra argument");
+        assert_eq!(
+            SpawnFailure::from(refusal).detail,
+            "`claude.cmd` runs through cmd.exe, which would run or rewrite the `|` in a launch-command argument."
+        );
+    }
+
+    #[test]
+    fn a_cmd_shim_path_holding_an_ampersand_is_named_in_full() {
+        let plugin =
+            agent_registry::plugin(&agent_registry::default_agent()).expect("Claude is registered");
+        let chosen =
+            choose_agent_command(plugin, &command("", ""), &no_env).expect("the command splits");
+        let shim = r"C:\Users\R&D\AppData\Roaming\custom\claude.cmd";
+        let prepend = vec!["/d".to_owned(), "/c".to_owned(), shim.to_owned()];
+        let refusal = chosen
+            .direct_args(
+                "cmd.exe",
+                prepend,
+                vec!["--model".to_owned(), "opus".to_owned()],
+                None,
+            )
+            .expect_err("cmd.exe would run what follows the & in the shim's folder");
+        assert_eq!(
+            SpawnFailure::from(refusal).detail,
+            format!(
+                "`{shim}` runs through cmd.exe, which would run or rewrite the `&` in the agent's path."
+            )
+        );
+        let refusal = chosen
+            .direct_args(shim, Vec::new(), Vec::new(), None)
+            .expect_err("a batch file the spawn runs itself is checked too");
+        assert_eq!(
+            SpawnFailure::from(refusal).detail,
+            format!(
+                "`{shim}` runs through cmd.exe, which would run or rewrite the `&` in the agent's path."
+            )
         );
     }
 
