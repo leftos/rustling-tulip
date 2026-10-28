@@ -60,6 +60,7 @@ mod tailnet_listener;
 mod termstate;
 mod tracer_client;
 mod tracer_log;
+mod transcript_tail;
 mod user_env;
 mod vscode;
 mod vscode_watch;
