@@ -19,6 +19,7 @@ use protocol::{GitFileChange, RecentWork, SessionMember, WorkCommit, WorkFile, W
 use tokio::time::Instant;
 use tracing::warn;
 
+use crate::dashboard::pr;
 use crate::git_inspect;
 use crate::sync::lock;
 
@@ -110,6 +111,7 @@ struct KeptFile {
 /// `members`' recent work as the one flat [`RecentWork`] the drawer shows.
 pub(crate) async fn recent_work(
     cache: &WorkCache,
+    prs: &pr::PrCache,
     members: &[SessionMember],
     started_at: DateTime<Utc>,
 ) -> RecentWork {
@@ -123,6 +125,7 @@ pub(crate) async fn recent_work(
         files: kept_files(members, kept).await,
         files_total,
         landed: landed(&reads),
+        pull_request: pr::pull_request(prs, members).await,
         ..RecentWork::default()
     }
 }
@@ -405,6 +408,12 @@ mod tests {
         }
     }
 
+    /// A pull-request cache that runs no `gh`: no fixture repository is a
+    /// GitHub one, and no test spawns the real CLI.
+    fn no_pull_requests() -> pr::PrCache {
+        pr::PrCache::with_program(pr::NO_PROGRAM)
+    }
+
     /// A start far enough back that every fixture commit is since it.
     fn long_ago() -> DateTime<Utc> {
         "2020-01-01T00:00:00Z".parse().expect("a valid time")
@@ -412,7 +421,13 @@ mod tests {
 
     /// `path`'s work for a single-member session started at `started_at`.
     async fn work_of(path: &Path, started_at: DateTime<Utc>) -> RecentWork {
-        recent_work(&WorkCache::default(), &[member(path, "repo")], started_at).await
+        recent_work(
+            &WorkCache::default(),
+            &no_pull_requests(),
+            &[member(path, "repo")],
+            started_at,
+        )
+        .await
     }
 
     fn paths(files: &[WorkFile]) -> Vec<&str> {
@@ -567,6 +582,7 @@ mod tests {
 
         let work = recent_work(
             &WorkCache::default(),
+            &no_pull_requests(),
             &[member(alpha, "alpha"), member(beta, "beta")],
             long_ago(),
         )
@@ -594,6 +610,7 @@ mod tests {
 
         let work = recent_work(
             &WorkCache::default(),
+            &no_pull_requests(),
             &[member(repo, "repo"), member(broken, "broken")],
             long_ago(),
         )
@@ -657,16 +674,17 @@ mod tests {
         let repo = dir.path();
         commit_file_at(repo, "a.txt", b"one\n", "2026-10-01T10:00:00+00:00").await;
         let cache = WorkCache::default();
+        let prs = no_pull_requests();
         let members = [member(repo, "repo")];
-        let first = recent_work(&cache, &members, long_ago()).await;
+        let first = recent_work(&cache, &prs, &members, long_ago()).await;
         assert_eq!(subjects(&first.commits), vec!["add a.txt"]);
 
         commit_file_at(repo, "b.txt", b"two\n", "2026-10-02T10:00:00+00:00").await;
-        let cached = recent_work(&cache, &members, long_ago()).await;
+        let cached = recent_work(&cache, &prs, &members, long_ago()).await;
         assert_eq!(cached, first, "a read inside five seconds is reused");
 
         expire(&cache);
-        let fresh = recent_work(&cache, &members, long_ago()).await;
+        let fresh = recent_work(&cache, &prs, &members, long_ago()).await;
         assert_eq!(
             subjects(&fresh.commits),
             vec!["add b.txt", "add a.txt"],

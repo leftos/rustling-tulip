@@ -139,7 +139,8 @@ mod tests {
     fn scripted_hub(tag: &str) -> (Hub, ScratchDir, Script) {
         let (mut hub, scratch) = test_hub(tag);
         let script = Script::default();
-        hub.dashboard = Dashboard::with_reader_factory(Arc::clone(&hub.sessions), script.factory());
+        hub.dashboard = Dashboard::with_reader_factory(Arc::clone(&hub.sessions), script.factory())
+            .with_pr_program(crate::dashboard::pr::NO_PROGRAM);
         (hub, scratch, script)
     }
 

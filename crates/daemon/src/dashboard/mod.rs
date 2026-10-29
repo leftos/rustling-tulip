@@ -10,6 +10,7 @@
 //! first message holds every listed session's facts.
 
 pub(crate) mod now;
+pub(crate) mod pr;
 pub(crate) mod work;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -65,6 +66,8 @@ struct Inner {
     pass: tokio::sync::Mutex<()>,
     /// Each worktree's recent-work read, reused for [`work::TTL`].
     work: work::WorkCache,
+    /// Each branch's pull-request read, reused for [`pr::TTL`].
+    pr: pr::PrCache,
 }
 
 #[derive(Default)]
@@ -147,8 +150,23 @@ impl Dashboard {
                 watcher_count: watch::Sender::new(0),
                 pass: tokio::sync::Mutex::new(()),
                 work: work::WorkCache::default(),
+                pr: pr::PrCache::default(),
             }),
         }
+    }
+
+    /// The service with its pull-request reads running `program` instead of
+    /// `gh`: a test's stand-in, so no test spawns the real CLI.
+    #[cfg(test)]
+    #[expect(
+        clippy::expect_used,
+        reason = "a freshly built service has no other holder"
+    )]
+    pub(crate) fn with_pr_program(mut self, program: &str) -> Self {
+        Arc::get_mut(&mut self.inner)
+            .expect("a Dashboard no one else holds retargets its pull-request reads")
+            .pr = pr::PrCache::with_program(program);
+        self
     }
 
     /// Make `connection` a watcher sending on `out_tx`, and send it every
@@ -208,13 +226,13 @@ impl Dashboard {
     }
 
     /// The recent work of a session's `members`, each worktree's read reused
-    /// for [`work::TTL`].
+    /// for [`work::TTL`] and each branch's pull request for [`pr::TTL`].
     pub(crate) async fn recent_work(
         &self,
         members: &[SessionMember],
         started_at: DateTime<Utc>,
     ) -> RecentWork {
-        work::recent_work(&self.inner.work, members, started_at).await
+        work::recent_work(&self.inner.work, &self.inner.pr, members, started_at).await
     }
 
     /// One tick: read every listed session's transcript as of `now` and send

@@ -2904,7 +2904,8 @@ mod tests {
             active: false,
         });
         let devices = crate::devices::DeviceStore::load(&crate::paths::devices_file(&dirs));
-        let dashboard = crate::dashboard::Dashboard::new(Arc::clone(&sessions));
+        let dashboard = crate::dashboard::Dashboard::new(Arc::clone(&sessions))
+            .with_pr_program(crate::dashboard::pr::NO_PROGRAM);
         let summarizer = crate::server::test_support::test_summarizer(
             &state,
             &dirs,
