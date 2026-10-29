@@ -144,6 +144,7 @@ Both sides resolve the config dir via the `directories` crate as `ProjectDirs::f
 - `state.json` — persisted repos + workspaces + tabs, plus daemon-side host settings that must apply with no window open (see `crates/daemon/src/state.rs`).
 
   They are `worktrees_root_override`, `keep_awake_mode`: `"off"`, `"when_busy"` (the default) or `"always"`, `agent_commands`: `{"<agent serde name>": {"program", "args"}}` for the Settings launch command, only agents that set one, a blank pair removing the entry, `agent_settings`: `{"<agent id>": {<option>: <value>}}`, each agent's validated Settings page values.
+- `state.json.corrupt-<UTC stamp>` — a `state.json` that failed to parse, moved aside (or its bytes written beside it) before the daemon starts on defaults; the 3 newest are kept, and the secret sweep counts the `${secret:<id>}` references a text scan finds in each, so no sealed value they name is deleted (`crates/daemon/src/state.rs` `keep_corrupt_state`, `crates/daemon/src/main.rs`).
 - `daemon.json` — handshake (port + auth_token + pid + supported_versions); written on daemon start, removed on graceful shutdown.
 - `sessions/<id>/meta.json` + `scrollback.bin` — orphan-recovery sidecar and PTY scrollback ring. `hook-settings.json` sits beside them for an interactive Claude spawn (passed as `--settings`) and for a recovered shell with a hook agent and a conversation id; a graceful stop deletes it with the sidecar.
 

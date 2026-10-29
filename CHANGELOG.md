@@ -23,6 +23,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - When a preset's script fails, the wizard marks the script that failed, and Esc no longer closes the wizard while its scripts are still running.
 - A preset that sets its panes per tab to 0 is refused with an error naming the preset, instead of opening every session in its own tab.
 - An agent that starts through a `.cmd` file refuses to launch, saying why, when a prompt, path or setting holds a character cmd would run or rewrite.
+- A settings file that fails to load is kept beside a fresh one instead of being overwritten, and its saved secrets are not swept away.
 
 ## v0.4.0-alpha
 

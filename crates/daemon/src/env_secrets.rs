@@ -235,6 +235,28 @@ pub(crate) fn referenced_ids(rows: &[(String, String)], into: &mut HashSet<Strin
     }
 }
 
+/// Every `${secret:<id>}` id `text` names, for text that is not one row's value
+/// — a kept copy of an unparsable `state.json`. The grammar is the protocol's
+/// own reference parser, so a scan never accepts an id the store would not.
+pub(crate) fn secret_references_in_text(text: &str) -> Vec<String> {
+    const OPEN: &str = "${secret:";
+    let mut ids = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find(OPEN) {
+        let candidate = &rest[start..];
+        let Some(end) = candidate.find('}') else {
+            break;
+        };
+        if let Some(protocol::env_rows::Reference::Secret(id)) =
+            protocol::env_rows::reference(&candidate[..=end])
+        {
+            ids.push(id);
+        }
+        rest = &candidate[end + 1..];
+    }
+    ids
+}
+
 /// The refusals a secret value must pass before it can be stored: it fits the
 /// store's size limit, and the store is installed (see [`init`]). Shared by
 /// [`seal`] and [`check_sealable`], so a row is refused for the same reasons
@@ -1300,6 +1322,53 @@ mod tests {
             0
         );
         assert!(open(&sidecar_id).is_some() && open(&state_id).is_some());
+    }
+
+    #[test]
+    fn a_secret_named_only_in_a_kept_corrupt_copy_survives_the_sweep() {
+        let (_lock, _config_dir) = scratch("collect-corrupt-copy");
+        let dirs = fixture_dirs(&fixture_root("collect-corrupt-copy"));
+        // A start that quarantined an unparsable state.json leaves no
+        // state.json behind, only the copy beside it.
+        let state = crate::state::AppState::load_or_default(&dirs).expect("load state");
+        assert!(!dirs.state_file.exists(), "no state.json is left");
+        let id = seal("EXAMPLE_API_KEY", VALUE_SENTINEL).expect("seals");
+        let copy = dirs.config.join("state.json.corrupt-20260101T000000Z");
+        std::fs::write(
+            &copy,
+            format!(
+                "{{\"repos\":[{{\"last_spawn_config\":{{\"extra_env\":[[\"EXAMPLE_API_KEY\",\"{}\"}}",
+                secret_ref(&id)
+            ),
+        )
+        .expect("write a broken state.json copy");
+
+        let referenced = crate::referenced_secret_ids(&dirs, &state).expect("the copy reads");
+        assert!(referenced.contains(&id), "{referenced:?}");
+        assert_eq!(
+            collect_unreferenced(&referenced, Utc::now() + TimeDelta::hours(2)),
+            0,
+            "the copy's reference keeps the value"
+        );
+        assert!(open(&id).is_some(), "the value survives the sweep");
+    }
+
+    #[test]
+    fn the_text_scan_finds_a_reference_in_broken_json() {
+        let good = "0123456789abcdef0123456789abcdef";
+        let reference = secret_ref(good);
+        let text = format!(
+            "{{\"rows\":[[\"A\",\"{reference}\"],[\"B\",\"${{secret:abc}}\"],[\"C\",\"${{env:P}}\"]]"
+        );
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&text).is_err(),
+            "the sample is broken JSON: {text}"
+        );
+        assert_eq!(
+            secret_references_in_text(&text),
+            vec![good.to_owned()],
+            "only the well-formed reference counts"
+        );
     }
 
     #[test]

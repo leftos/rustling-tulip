@@ -9,6 +9,7 @@
 use crate::env_secrets::{self, SealOutcome};
 use crate::paths::{Dirs, simplify_path};
 use anyhow::Context as _;
+use chrono::{DateTime, Utc};
 use protocol::{
     AgentId, ContainerRef, KeepAwakeMode, OptionValues, RepoEntry, SummarizerSettings, TabEntry,
     WorkspaceEntry,
@@ -132,7 +133,21 @@ impl AppState {
             match serde_json::from_slice::<PersistedState>(&bytes) {
                 Ok(state) => (state, false),
                 Err(err) => {
-                    tracing::warn!(?err, "state.json corrupt, starting fresh");
+                    // The bytes are the only record of every repo, workspace
+                    // and host setting this file held. Keep them beside the
+                    // file the next save writes, rather than overwriting them.
+                    match keep_corrupt_state(&dirs.state_file, &bytes, Utc::now()) {
+                        Ok(kept) => tracing::warn!(
+                            ?err,
+                            kept = %kept.display(),
+                            "state.json corrupt; kept its bytes and starting fresh"
+                        ),
+                        Err(keep_err) => tracing::error!(
+                            ?err,
+                            error = ?keep_err,
+                            "state.json corrupt and could not be kept; starting fresh"
+                        ),
+                    }
                     (PersistedState::default(), true)
                 }
             }
@@ -433,6 +448,121 @@ impl AppState {
     }
 }
 
+/// The prefix a quarantined copy of an unparsable `state.json` carries, followed
+/// by the UTC stamp that tells the copies apart.
+const CORRUPT_STATE_PREFIX: &str = "state.json.corrupt-";
+
+/// How many quarantined copies of `state.json` are kept; the older ones go.
+const KEPT_CORRUPT_STATES: usize = 3;
+
+/// `at` stamped the way a quarantined copy's name carries it.
+fn corrupt_stamp(at: DateTime<Utc>) -> String {
+    at.format("%Y%m%dT%H%M%SZ").to_string()
+}
+
+/// Move the unparsable `state_file` aside as `state.json.corrupt-<stamp>` in its
+/// folder, then drop every such copy but the newest few, so a start that fell
+/// back to defaults never destroys what was there.
+///
+/// The move is a rename; when it fails (the file is held open, or the two names
+/// sit on different volumes) `bytes` — the content the caller already read — is
+/// written to the same name instead, through the owner-only write `persist`
+/// uses. The copy just made is never pruned, whatever its name sorts as. `at` is
+/// a parameter so a test pins the stamp; no clock is read here.
+fn keep_corrupt_state(
+    state_file: &Path,
+    bytes: &[u8],
+    at: DateTime<Utc>,
+) -> anyhow::Result<PathBuf> {
+    let folder = state_file
+        .parent()
+        .context("the state file has no folder")?;
+    let target = free_corrupt_path(folder, at);
+    if let Err(rename_err) = std::fs::rename(state_file, &target) {
+        tracing::warn!(
+            ?rename_err,
+            path = %state_file.display(),
+            "could not move the corrupt state.json aside; writing its bytes beside it"
+        );
+        crate::secret::write_private(&target, bytes)
+            .with_context(|| format!("writing {}", target.display()))?;
+    }
+    prune_corrupt_states(folder, &target);
+    Ok(target)
+}
+
+/// The first free `state.json.corrupt-<stamp>` path in `folder`: the stamp from
+/// `at`, then `-2`, `-3`, … while a copy of that name is already there.
+fn free_corrupt_path(folder: &Path, at: DateTime<Utc>) -> PathBuf {
+    let stamp = corrupt_stamp(at);
+    let first = folder.join(format!("{CORRUPT_STATE_PREFIX}{stamp}"));
+    if !first.exists() {
+        return first;
+    }
+    let mut n = 2_u32;
+    loop {
+        let candidate = folder.join(format!("{CORRUPT_STATE_PREFIX}{stamp}-{n}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
+/// Whether `path` is a quarantined copy of an unparsable `state.json`.
+pub(crate) fn is_corrupt_copy(path: &Path) -> bool {
+    path.is_file()
+        && path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with(CORRUPT_STATE_PREFIX))
+}
+
+/// Delete every quarantined copy in `folder` but the newest
+/// [`KEPT_CORRUPT_STATES`], judged by name (the stamp sorts), never touching
+/// `kept` — the copy this start just made — whatever its name sorts as. Pruning
+/// is housekeeping: a copy that will not go stays in place with a warning, and a
+/// listing failure never fails the start that called it.
+fn prune_corrupt_states(folder: &Path, kept: &Path) {
+    let entries = match std::fs::read_dir(folder) {
+        Ok(entries) => entries,
+        Err(err) => {
+            tracing::warn!(
+                ?err,
+                path = %folder.display(),
+                "could not list the corrupt state.json copies"
+            );
+            return;
+        }
+    };
+    let mut copies = Vec::new();
+    for entry in entries {
+        match entry {
+            Ok(entry) => {
+                let path = entry.path();
+                if is_corrupt_copy(&path) {
+                    copies.push(path);
+                }
+            }
+            Err(err) => tracing::warn!(?err, "could not read a config folder entry"),
+        }
+    }
+    copies.sort();
+    let excess = copies.len().saturating_sub(KEPT_CORRUPT_STATES);
+    for path in copies.into_iter().take(excess) {
+        if path == kept {
+            continue;
+        }
+        if let Err(err) = std::fs::remove_file(&path) {
+            tracing::warn!(
+                ?err,
+                path = %path.display(),
+                "could not prune an old corrupt state.json copy"
+            );
+        }
+    }
+}
+
 /// Serialize `state` and swap it in as `state.json` via a temporary file, so a
 /// reader never observes a partially-written file. Written owner-only, like
 /// the other files a spawn config reaches (`secret::write_private`).
@@ -538,6 +668,21 @@ mod tests {
             binaries_dir: root.join("binaries"),
             bin_templates: None,
         }
+    }
+
+    /// Every quarantined `state.json` copy in `folder`, sorted by name.
+    fn corrupt_copies(folder: &Path) -> Vec<PathBuf> {
+        let mut copies: Vec<PathBuf> = std::fs::read_dir(folder)
+            .expect("list the config folder")
+            .map(|entry| entry.expect("read a folder entry").path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("state.json.corrupt-"))
+            })
+            .collect();
+        copies.sort();
+        copies
     }
 
     #[test]
@@ -922,6 +1067,154 @@ mod tests {
             after_bytes, before_bytes,
             "state.json on disk is byte-for-byte unchanged"
         );
+
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn a_corrupt_state_file_is_kept_beside_a_fresh_one() {
+        let dirs = scratch_dirs("corrupt-kept");
+        let bad = b"{ this is not json".to_vec();
+        std::fs::write(&dirs.state_file, &bad).expect("seed a corrupt state.json");
+
+        let state = AppState::load_or_default(&dirs).expect("load state");
+        assert!(state.state_file_corrupt(), "the flag stays true");
+        assert!(
+            state.with_persisted(|persisted| persisted.repos.is_empty()),
+            "the process runs on a fresh default"
+        );
+        let copies = corrupt_copies(&dirs.config);
+        assert_eq!(copies.len(), 1, "exactly one copy: {copies:?}");
+        assert_eq!(
+            std::fs::read(&copies[0]).expect("read the copy"),
+            bad,
+            "the copy holds the original bytes"
+        );
+
+        state
+            .set_keep_awake_mode(KeepAwakeMode::Always)
+            .expect("persist the fresh defaults");
+        let saved: PersistedState =
+            serde_json::from_slice(&std::fs::read(&dirs.state_file).expect("read state.json"))
+                .expect("the fresh state.json parses");
+        assert!(
+            saved.repos.is_empty() && saved.workspaces.is_empty(),
+            "state.json holds the fresh defaults"
+        );
+        assert_eq!(saved.keep_awake_mode, KeepAwakeMode::Always);
+        assert_eq!(
+            std::fs::read(&copies[0]).expect("read the copy again"),
+            bad,
+            "the save leaves the copy untouched"
+        );
+
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn only_the_three_newest_corrupt_copies_are_kept() {
+        let dirs = scratch_dirs("corrupt-prune");
+        let now = chrono::Utc::now();
+        // `older[0]` is the newest of the four seeded copies.
+        let older: Vec<PathBuf> = (1..=4)
+            .map(|days| {
+                let stamp = (now - chrono::Duration::days(days))
+                    .format("%Y%m%dT%H%M%SZ")
+                    .to_string();
+                let path = dirs.config.join(format!("state.json.corrupt-{stamp}"));
+                std::fs::write(&path, b"an older copy").expect("seed an older copy");
+                path
+            })
+            .collect();
+        std::fs::write(&dirs.state_file, b"not json either").expect("seed a corrupt state.json");
+
+        AppState::load_or_default(&dirs).expect("load state");
+
+        let copies = corrupt_copies(&dirs.config);
+        assert_eq!(copies.len(), 3, "three copies are kept: {copies:?}");
+        assert!(
+            older[0].exists() && older[1].exists(),
+            "the two next-newest seeded copies stay"
+        );
+        assert!(
+            !older[2].exists() && !older[3].exists(),
+            "the two oldest copies go"
+        );
+        assert!(
+            copies
+                .iter()
+                .any(|copy| std::fs::read(copy).expect("read a copy") == b"not json either"),
+            "the copy just made is among the kept ones"
+        );
+
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn the_new_copy_survives_pruning_even_when_older_copies_sort_after_it() {
+        let dirs = scratch_dirs("corrupt-keep-new");
+        // Three copies whose names sort after the stamp used below, so the
+        // three newest by name are those, not the copy about to be made.
+        let later: Vec<PathBuf> = ["20990101T000000Z", "20990102T000000Z", "20990103T000000Z"]
+            .into_iter()
+            .map(|stamp| {
+                let path = dirs.config.join(format!("state.json.corrupt-{stamp}"));
+                std::fs::write(&path, b"a later copy").expect("seed a later copy");
+                path
+            })
+            .collect();
+        let at = chrono::NaiveDate::from_ymd_opt(2026, 10, 29)
+            .expect("valid date")
+            .and_hms_opt(15, 30, 0)
+            .expect("valid time")
+            .and_utc();
+        let bad = b"the bytes that must be kept".to_vec();
+        std::fs::write(&dirs.state_file, &bad).expect("seed a corrupt state.json");
+
+        let kept = keep_corrupt_state(&dirs.state_file, &bad, at).expect("keep the corrupt file");
+
+        assert_eq!(
+            std::fs::read(&kept).expect("the copy just made is still there"),
+            bad,
+            "the copy just made keeps its bytes: {}",
+            kept.display()
+        );
+        assert!(
+            later.iter().all(|path| path.exists()),
+            "the three newer names are still there"
+        );
+
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn a_name_clash_gets_a_numbered_suffix() {
+        let dirs = scratch_dirs("corrupt-clash");
+        let at = chrono::NaiveDate::from_ymd_opt(2026, 10, 29)
+            .expect("valid date")
+            .and_hms_opt(15, 30, 0)
+            .expect("valid time")
+            .and_utc();
+        let taken = dirs.config.join("state.json.corrupt-20261029T153000Z");
+        std::fs::write(&taken, b"an earlier copy").expect("seed the taken name");
+        let bad = b"still not json".to_vec();
+        std::fs::write(&dirs.state_file, &bad).expect("seed a corrupt state.json");
+
+        let kept = keep_corrupt_state(&dirs.state_file, &bad, at).expect("keep the corrupt file");
+
+        assert_eq!(
+            kept.file_name().and_then(|name| name.to_str()),
+            Some("state.json.corrupt-20261029T153000Z-2"),
+            "the clash takes -2: {}",
+            kept.display()
+        );
+        assert_eq!(std::fs::read(&kept).expect("read the kept copy"), bad);
+        assert_eq!(
+            std::fs::read(&taken).expect("read the earlier copy"),
+            b"an earlier copy".to_vec(),
+            "the earlier copy is untouched"
+        );
+        assert!(!dirs.state_file.exists(), "the bad file moved aside");
 
         let _ = std::fs::remove_dir_all(&dirs.config);
     }

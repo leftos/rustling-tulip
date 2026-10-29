@@ -266,14 +266,17 @@ struct ReferenceGap {
 }
 
 /// Every id the files a startup pass walks still reference through
-/// `${secret:<id>}`: `state.json`'s `last_spawn_config`s, every session sidecar
-/// and every history entry. Built after the history prune, so an id a pruned
-/// entry alone named no longer counts as referenced.
+/// `${secret:<id>}`: `state.json`'s `last_spawn_config`s, every kept
+/// `state.json.corrupt-*` copy (scanned as text, since such a file is broken
+/// JSON), every session sidecar and every history entry. Built after the
+/// history prune, so an id a pruned entry alone named no longer counts as
+/// referenced.
 ///
 /// # Errors
 ///
 /// The first source the walk could not read — a `state.json` that failed to
-/// parse, a session sidecar, a history entry, or a folder holding them.
+/// parse, a kept corrupt copy, a session sidecar, a history entry, or a folder
+/// holding them.
 fn referenced_secret_ids(
     dirs: &paths::Dirs,
     state: &state::AppState,
@@ -285,6 +288,7 @@ fn referenced_secret_ids(
         });
     }
     let mut ids = HashSet::new();
+    scan_corrupt_copies(dirs, &mut ids)?;
     state.with_persisted(|persisted| {
         for config in persisted
             .repos
@@ -318,6 +322,43 @@ fn referenced_secret_ids(
         env_secrets::referenced_ids(&config.extra_env, &mut ids);
     }
     Ok(ids)
+}
+
+/// Add every `${secret:<id>}` a kept `state.json` copy names to `into`. A copy
+/// beside `state.json` holds the bytes of a file that would not parse, so it is
+/// scanned as raw text; a copy that cannot be read is a gap, since only it may
+/// name a stored value the sweep would otherwise delete.
+fn scan_corrupt_copies(dirs: &paths::Dirs, into: &mut HashSet<String>) -> Result<(), ReferenceGap> {
+    let Some(folder) = dirs.state_file.parent() else {
+        return Ok(());
+    };
+    let entries = match std::fs::read_dir(folder) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => {
+            return Err(ReferenceGap {
+                source: "state.json corrupt copy",
+                path: folder.display().to_string(),
+            });
+        }
+    };
+    for entry in entries {
+        let path = entry.map(|entry| entry.path()).map_err(|_| ReferenceGap {
+            source: "state.json corrupt copy",
+            path: folder.display().to_string(),
+        })?;
+        if !state::is_corrupt_copy(&path) {
+            continue;
+        }
+        let bytes = std::fs::read(&path).map_err(|_| ReferenceGap {
+            source: "state.json corrupt copy",
+            path: path.display().to_string(),
+        })?;
+        for id in env_secrets::secret_references_in_text(&String::from_utf8_lossy(&bytes)) {
+            into.insert(id);
+        }
+    }
+    Ok(())
 }
 
 /// Delete the saved secrets nothing stored references and older than the grace
