@@ -187,6 +187,25 @@ mod dir_tests {
         assert_eq!(again, dir);
         let _ = std::fs::remove_dir_all(&data_local);
     }
+
+    #[test]
+    fn summarizer_spend_file_is_in_the_config_dir() {
+        let root = PathBuf::from(r"C:\scratch\config");
+        let dirs = Dirs {
+            config: root.clone(),
+            state_file: root.join("state.json"),
+            handshake_file: root.join("daemon.json"),
+            remote_config_file: root.join("remote.json"),
+            sessions_dir: root.join("sessions"),
+            worktrees_dir: root.join("worktrees"),
+            binaries_dir: root.join("binaries"),
+            bin_templates: None,
+        };
+        assert_eq!(
+            summarizer_spend_file(&dirs),
+            root.join("summarizer-spend.json")
+        );
+    }
 }
 
 #[cfg(all(test, windows))]
@@ -300,6 +319,13 @@ pub fn devices_file(dirs: &Dirs) -> PathBuf {
     dirs.config.join("devices.json")
 }
 
+/// The summarizer's spend ledger: `<config>/summarizer-spend.json`, the
+/// current local day's billed spend (see [`crate::summarizer::ledger`]).
+#[must_use]
+pub fn summarizer_spend_file(dirs: &Dirs) -> PathBuf {
+    dirs.config.join("summarizer-spend.json")
+}
+
 /// Resolve the tailnet listener's certificate dir, honoring
 /// `RUSTLING_TULIP_TAILNET_DIR` when set (used by e2e isolation). Falls back
 /// to `<data_local>/leftos/rustling-tulip/data/tailnet/`: the private key
@@ -329,13 +355,6 @@ fn tailnet_dir_from(
 /// (`%LOCALAPPDATA%\leftos\rustling-tulip\data\summarizer\` on Windows),
 /// created if missing. An agent's summarizer program runs in it, so no
 /// project's settings or instruction files apply to a summary.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "nothing outside tests calls the summarizer until the server's summarizer handlers are wired"
-    )
-)]
 pub(crate) fn resolve_summarizer_dir() -> anyhow::Result<PathBuf> {
     let pd = ProjectDirs::from("dev", "leftos", "rustling-tulip")
         .ok_or_else(|| anyhow!("could not resolve the summarizer directory"))?;
@@ -343,13 +362,6 @@ pub(crate) fn resolve_summarizer_dir() -> anyhow::Result<PathBuf> {
 }
 
 /// `summarizer` under `data_local`, created if missing.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "nothing outside tests calls the summarizer until the server's summarizer handlers are wired"
-    )
-)]
 fn ensure_summarizer_dir_in(data_local: &Path) -> anyhow::Result<PathBuf> {
     let dir = data_local.join("summarizer");
     std::fs::create_dir_all(&dir)

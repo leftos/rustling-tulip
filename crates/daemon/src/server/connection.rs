@@ -515,11 +515,29 @@ fn spawn_state_forwarder(
                         let _ = out_tx.send(DaemonMessage::PendingDevices { requests });
                     }
                 }
+                Ok(StateEvent::SummarizerStatus {
+                    settings,
+                    providers,
+                    keys,
+                    spend_today_usd,
+                    cap_reached,
+                }) => {
+                    let _ = out_tx.send(DaemonMessage::SummarizerStatus {
+                        settings,
+                        providers,
+                        keys,
+                        spend_today_usd,
+                        cap_reached,
+                    });
+                }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
                     warn!(lagged = n, "client state event stream lagged");
                     // The report is sent once and no later event repeats it,
                     // so a stream that lagged past it asks for it again here.
                     send_resume_report(&hub, &out_tx, &client_id);
+                    // A lost summarizer status is not repeated until the
+                    // next change, so the current one is sent again too.
+                    hub.summarizer.send_status(&out_tx);
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
             }
@@ -1088,6 +1106,30 @@ mod tests {
             "the forwarder keeps forwarding after the resend"
         );
         forwarder.abort();
+    }
+
+    #[tokio::test]
+    async fn a_lagged_state_stream_resends_the_summarizer_status() {
+        let (hub, _scratch) = test_hub("lagged-summarizer-status");
+        let (out_tx, mut rx) = mpsc::unbounded_channel();
+        let forwarder = spawn_state_forwarder(
+            &hub,
+            hub.state_events.subscribe(),
+            out_tx,
+            "c1".to_owned(),
+            true,
+        );
+
+        for _ in 0..=crate::server::STATE_EVENT_CAPACITY {
+            let _ = hub.state_events.send(StateEvent::Repos(Vec::new()));
+        }
+
+        let first = next_message(&mut rx).await;
+        forwarder.abort();
+        assert!(
+            matches!(first, DaemonMessage::SummarizerStatus { .. }),
+            "the lagged stream hears the current summarizer status first, got {first:?}"
+        );
     }
 
     #[tokio::test]

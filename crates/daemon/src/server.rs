@@ -19,6 +19,7 @@ pub(crate) mod live_devices;
 mod pairing;
 mod recovery;
 mod settings;
+mod summarizer;
 pub(crate) use self::recovery::RecoveryClaims;
 
 mod sessions;
@@ -63,7 +64,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex as AsyncMutex, broadcast, mpsc};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 #[derive(Clone)]
 pub struct Hub {
@@ -167,6 +168,9 @@ pub struct Hub {
     /// The Dashboard's facts service: its watchers, its reader cache and the
     /// facts it last sent each watcher.
     pub dashboard: crate::dashboard::Dashboard,
+    /// The Dashboard summarizer: its settings, key states, queue, cache and
+    /// the day's spend.
+    pub summarizer: Arc<crate::summarizer::service::Summarizer>,
 }
 
 impl Hub {
@@ -264,6 +268,17 @@ pub enum StateEvent {
     /// Mirrors [`protocol::DaemonMessage::PendingDevices`]; only loopback
     /// connections forward it.
     PendingDevices(Vec<protocol::PendingDevice>),
+    /// Broadcast on every summarizer change: its settings, a key set,
+    /// deleted or refused, and each billed call. Mirrors
+    /// [`protocol::DaemonMessage::SummarizerStatus`]; it carries key states,
+    /// never a key.
+    SummarizerStatus {
+        settings: protocol::SummarizerSettings,
+        providers: Vec<protocol::SummarizerProvider>,
+        keys: Vec<protocol::SummarizerKey>,
+        spend_today_usd: f64,
+        cap_reached: bool,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -392,6 +407,12 @@ pub async fn run(
     let (keep_awake_tx, keep_awake_status_rx) = start_keep_awake(&state, &sessions, &state_events);
 
     let dashboard = crate::dashboard::Dashboard::new(Arc::clone(&sessions));
+    let summarizer = Arc::new(start_summarizer(
+        &state,
+        &dirs,
+        &client_count,
+        &state_events,
+    ));
     let hub = Hub {
         state,
         sessions,
@@ -424,6 +445,7 @@ pub async fn run(
         pairing_waiters: pairing::PairingWaiters::default(),
         live_devices: live_devices::LiveDevices::default(),
         dashboard,
+        summarizer,
     };
     start_hub_tasks(&hub, client_count_rx);
 
@@ -827,29 +849,24 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         }
         m @ (ClientMessage::SetSummarizerSettings { .. }
         | ClientMessage::SetSummarizerKey { .. }
-        | ClientMessage::TestSummary { .. }
-        | ClientMessage::AnswerPrompt { .. }) => refuse_not_supported_yet(m, out_tx),
+        | ClientMessage::TestSummary { .. }) => summarizer::handle(hub, m, ctx).await?,
+        m @ ClientMessage::AnswerPrompt { .. } => refuse_not_supported_yet(m, out_tx),
     }
     Ok(())
 }
 
-/// Refuse a Dashboard or summarizer request this daemon does not handle
-/// yet: log the variant's name (never its fields, which may carry a key),
-/// and answer a request that carries an id with an `Error` echoing it.
+/// Refuse a Dashboard request this daemon does not handle yet: log the
+/// variant's name (never its fields), and answer a request that carries an
+/// id with an `Error` echoing it.
 fn refuse_not_supported_yet(msg: ClientMessage, out_tx: &mpsc::UnboundedSender<DaemonMessage>) {
-    let (variant, request_id) = match msg {
-        ClientMessage::SetSummarizerSettings { request_id, .. } => {
-            ("SetSummarizerSettings", request_id)
-        }
-        ClientMessage::SetSummarizerKey { request_id, .. } => ("SetSummarizerKey", request_id),
-        ClientMessage::TestSummary { request_id } => ("TestSummary", request_id),
-        ClientMessage::AnswerPrompt { request_id, .. } => ("AnswerPrompt", request_id),
-        _ => {
-            warn!("refuse_not_supported_yet: a supported message was routed here");
-            return;
-        }
+    let ClientMessage::AnswerPrompt { request_id, .. } = msg else {
+        warn!("refuse_not_supported_yet: a supported message was routed here");
+        return;
     };
-    warn!(variant, "dispatch: message not supported yet");
+    warn!(
+        variant = "AnswerPrompt",
+        "dispatch: message not supported yet"
+    );
     if let Some(request_id) = request_id {
         let _ = out_tx.send(DaemonMessage::Error {
             message: "not supported yet".to_owned(),
@@ -858,9 +875,43 @@ fn refuse_not_supported_yet(msg: ClientMessage, out_tx: &mpsc::UnboundedSender<D
     }
 }
 
+/// The summarizer over the real providers. A failed start never stops the
+/// daemon: it is logged, and the summarizer runs on templates alone.
+fn start_summarizer(
+    state: &Arc<AppState>,
+    dirs: &Dirs,
+    client_count: &Arc<tokio::sync::watch::Sender<usize>>,
+    state_events: &broadcast::Sender<StateEvent>,
+) -> crate::summarizer::service::Summarizer {
+    use crate::summarizer::service::{Caller, LiveCaller, Summarizer, SummarizerParts};
+    let rejections = Arc::new(crate::summarizer::keys::Rejections::default());
+    let caller: Option<Arc<dyn Caller>> = match LiveCaller::start(Arc::clone(&rejections)) {
+        Ok(caller) => Some(Arc::new(caller)),
+        Err(err) => {
+            error!(
+                error = %format!("{err:#}"),
+                "summarizer: could not start; every summary is a template until the daemon restarts"
+            );
+            None
+        }
+    };
+    Summarizer::new(SummarizerParts {
+        state: Arc::clone(state),
+        spend_file: crate::paths::summarizer_spend_file(dirs),
+        caller,
+        rejections,
+        client_count: client_count.subscribe(),
+        events: state_events.clone(),
+    })
+}
+
 /// Start the tasks that watch the hub for the daemon's lifetime.
 fn start_hub_tasks(hub: &Hub, client_count_rx: tokio::sync::watch::Receiver<usize>) {
     start_history_broadcaster(hub);
+    // The key store blocks, so the summarizer's key states are first read
+    // here rather than at construction.
+    let summarizer = Arc::clone(&hub.summarizer);
+    tokio::spawn(async move { summarizer.startup_key_check().await });
     // The Dashboard's 2 s facts tick; it parks while no connection watches.
     hub.dashboard.spawn_ticker();
     // Idle self-exit: once the last client disconnects and no session has a
@@ -942,14 +993,17 @@ mod tests {
         let _ = err.raw_os_error();
     }
 
-    /// A summarizer request whose handler has not landed is refused on the
+    /// A Dashboard request whose handler has not landed is refused on the
     /// wire with its id, so the requester does not wait on a reply.
     #[tokio::test]
-    async fn a_summarizer_request_is_refused_as_not_supported_yet() {
-        let (hub, _scratch) = test_hub("summarizer-stub");
+    async fn a_dashboard_request_is_refused_as_not_supported_yet() {
+        let (hub, _scratch) = test_hub("answer-prompt-stub");
         let reply = dispatch_one(
             &hub,
-            ClientMessage::TestSummary {
+            ClientMessage::AnswerPrompt {
+                session_id: "s1".to_string(),
+                since: chrono::Utc::now(),
+                choice: protocol::PromptChoice::Allow,
                 request_id: Some("d1".to_string()),
             },
         )

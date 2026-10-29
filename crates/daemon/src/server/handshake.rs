@@ -299,6 +299,7 @@ pub(super) fn push_initial_state(
             std::env::var(name).ok()
         }),
     });
+    hub.summarizer.send_status(out_tx);
     // Held across the send: every RemoteStatus broadcast is published under
     // the watch's write lock, so none can reach the state forwarder between
     // this read and the send, and the client never ends on an older status.

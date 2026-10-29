@@ -10,7 +10,8 @@ use crate::env_secrets::{self, SealOutcome};
 use crate::paths::{Dirs, simplify_path};
 use anyhow::Context as _;
 use protocol::{
-    AgentId, ContainerRef, KeepAwakeMode, OptionValues, RepoEntry, TabEntry, WorkspaceEntry,
+    AgentId, ContainerRef, KeepAwakeMode, OptionValues, RepoEntry, SummarizerSettings, TabEntry,
+    WorkspaceEntry,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -87,6 +88,11 @@ pub struct PersistedState {
     /// spawn dialog from them; a spawn never reads them.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub agent_settings: BTreeMap<AgentId, OptionValues>,
+    /// Host setting: the Dashboard summarizer's settings, absent until they
+    /// are first saved; [`AppState::summarizer_settings`] builds the defaults
+    /// meanwhile. It holds a key's source, never a key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summarizer: Option<SummarizerSettings>,
 }
 
 /// One agent's stored launch command, both fields as the user typed them.
@@ -304,6 +310,20 @@ impl AppState {
     pub fn set_agent_settings(&self, agent: &AgentId, options: OptionValues) -> anyhow::Result<()> {
         self.mutate(|s| {
             s.agent_settings.insert(agent.clone(), options);
+        })
+    }
+
+    /// The summarizer's settings: the saved ones, else the defaults
+    /// (`summarizer::policy::default_settings`).
+    pub fn summarizer_settings(&self) -> SummarizerSettings {
+        self.with_persisted(|s| s.summarizer.clone())
+            .unwrap_or_else(crate::summarizer::policy::default_settings)
+    }
+
+    /// Persist the summarizer's settings, already validated.
+    pub fn set_summarizer_settings(&self, settings: SummarizerSettings) -> anyhow::Result<()> {
+        self.mutate(|s| {
+            s.summarizer = Some(settings);
         })
     }
 
@@ -699,6 +719,86 @@ mod tests {
             stored["agent_settings"],
             serde_json::json!({ "claude": { "provider": "deepseek" } }),
             "stored keyed by agent id"
+        );
+
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn summarizer_settings_default_and_round_trip() {
+        let dirs = scratch_dirs("summarizersettings");
+        let state = AppState::load_or_default(&dirs).expect("load state");
+        let default = state.summarizer_settings();
+        assert_eq!(
+            default,
+            protocol::SummarizerSettings {
+                enabled: true,
+                provider: agent_registry::default_agent().0,
+                key_source: protocol::SummarizerKeySource::Stored,
+                daily_cap_usd: 1.0,
+            },
+            "the registered CLI summarizer, on, with a $1.00 cap"
+        );
+        state
+            .set_keep_awake_mode(KeepAwakeMode::Always)
+            .expect("persist something else");
+        let text = std::fs::read_to_string(&dirs.state_file).expect("read state.json");
+        assert!(
+            !text.contains("\"summarizer\""),
+            "unsaved settings are omitted from state.json"
+        );
+
+        let chosen = protocol::SummarizerSettings {
+            enabled: false,
+            provider: "deepseek".to_owned(),
+            key_source: protocol::SummarizerKeySource::Env {
+                variable: "DEEPSEEK_API_KEY".to_owned(),
+            },
+            daily_cap_usd: 2.5,
+        };
+        state
+            .set_summarizer_settings(chosen.clone())
+            .expect("persist the settings");
+        let reloaded = AppState::load_or_default(&dirs).expect("reload state");
+        assert_eq!(
+            reloaded.summarizer_settings(),
+            chosen,
+            "the settings survive a reload"
+        );
+
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn no_key_text_reaches_state_json() {
+        let dirs = scratch_dirs("summarizernokey");
+        let state = AppState::load_or_default(&dirs).expect("load state");
+        state
+            .set_summarizer_settings(protocol::SummarizerSettings {
+                enabled: true,
+                provider: "deepseek".to_owned(),
+                key_source: protocol::SummarizerKeySource::Env {
+                    variable: "DEEPSEEK_API_KEY".to_owned(),
+                },
+                daily_cap_usd: 1.0,
+            })
+            .expect("persist the settings");
+        let text = std::fs::read_to_string(&dirs.state_file).expect("read state.json");
+        let stored: serde_json::Value = serde_json::from_str(&text).expect("parse state.json");
+        let block = stored["summarizer"]
+            .as_object()
+            .expect("the summarizer block is stored");
+        let mut fields: Vec<&str> = block.keys().map(String::as_str).collect();
+        fields.sort_unstable();
+        assert_eq!(
+            fields,
+            ["daily_cap_usd", "enabled", "key_source", "provider"],
+            "the block has no field that could hold a key"
+        );
+        assert_eq!(
+            stored["summarizer"]["key_source"],
+            serde_json::json!({ "kind": "env", "variable": "DEEPSEEK_API_KEY" }),
+            "an env source names the variable, never its value"
         );
 
         let _ = std::fs::remove_dir_all(&dirs.config);

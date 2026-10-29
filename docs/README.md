@@ -216,6 +216,8 @@ The native client auto-starts the daemon if it isn't already running. Daemon lis
 - **Session facts**: the per-session record the daemon sends only to connections watching a Dashboard (`DashboardFacts`): now line, agent tree, context, tokens, cost, activity counts, stuck reasons and issue.
 - **Session history**: the daemon's record of ended sessions, one `history/<id>.json` per session under the config dir, kept 7 days; see `docs/architecture.md` (Session history and recovery) and `docs/native-client.md` (Session recovery).
 - **Shared client core**: the planned Rust crate holding the tailnet connect and host profiles, used by both the native client's remote mode and the mobile app.
+- **Spend cap**: the summarizer's daily cap in dollars (default $1.00): Working refreshes stop at half of it and Stop summaries become templates at the full cap, which is soft, so a call already running finishes; `docs/plans/dashboard.md` ("Privacy, cache, cap and fallbacks").
+- **Spend ledger**: the summarizer's per-day spend record, `summarizer-spend.json` in the config dir (`{"date", "spent_usd"}` for the current local day); see "Where things live on disk" in `CLAUDE.md`.
 - **Spike**: throwaway code that proves an approach works, kept outside the main build (`spikes/`) and deleted once its code is ported.
 - **Status glyph**: the shape-and-colour mark for a session's status in the native client (working arc, asking diamond, waiting ring, idle dot); see `docs/native-client.md`.
 - **Status-change log**: the planned `activity/<key>.jsonl` files in the config dir, one line per status change of a session or dispatch run, kept 2 hours and across daemon restarts, which the activity track draws from; see `docs/plans/dashboard.md`.
@@ -224,7 +226,7 @@ The native client auto-starts the daemon if it isn't already running. Daemon lis
 - **Stop (keyboard)**: a control Tab and Shift-Tab land on in a native dialog; see `docs/native-client.md` ("Keyboard reachability").
 - **Subagent tree**: each session's subagents and background shells, read from the transcripts by the Claude plugin (`crates/agents/claude/src/subagents.rs`, `agent_api::SubagentNode`) for the Dashboard; see `docs/plans/dashboard.md` ("The transcript activity reader").
 - **Subplan**: a `docs/plans/*.md` design file holding the design and rulings for open items, linked from their issues and deleted once nothing open links it and its durable text is promoted into `docs/`.
-- **Summarizer**: the planned daemon service (`crates/daemon/src/summarizer/`) that turns a session's turn-end reports into a kind, a headline and a one-line summary, through Claude Haiku on the CLI or DeepSeek; see `docs/plans/dashboard.md`.
+- **Summarizer**: the daemon service (`crates/daemon/src/summarizer/`) that turns a session's turn-end reports into a kind, a headline and a one-line summary, through Claude Haiku on the CLI or DeepSeek. Its settings, per-session queue, cache and spend ledger are in place; summaries of finished turns arrive with SA.6. See `docs/plans/dashboard.md`.
 - **Summarizer folder**: the empty machine-local folder (`<data_local>/summarizer`) the summarizer's CLI call runs in; see "Where things live on disk" in `CLAUDE.md`.
 - **Summary ring**: a session's last summary lines (at most 12, or 2 hours), newest first, kept in `sessions/<id>/summary.json`; the Dashboard's drawer shows it.
 - **Summary view**: the planned third view of a session beside terminal and chat, one summarizer line per stretch of work (RT-111).

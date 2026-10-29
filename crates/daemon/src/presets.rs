@@ -2905,6 +2905,13 @@ mod tests {
         });
         let devices = crate::devices::DeviceStore::load(&crate::paths::devices_file(&dirs));
         let dashboard = crate::dashboard::Dashboard::new(Arc::clone(&sessions));
+        let summarizer = crate::server::test_support::test_summarizer(
+            &state,
+            &dirs,
+            &client_count,
+            &state_events,
+            Arc::new(crate::summarizer::service::test_support::FakeCaller::default()),
+        );
         let hub = Hub {
             state,
             sessions,
@@ -2937,6 +2944,7 @@ mod tests {
             pairing_waiters: Arc::default(),
             live_devices: crate::server::live_devices::LiveDevices::default(),
             dashboard,
+            summarizer,
         };
         (hub, preset_rx, scratch)
     }

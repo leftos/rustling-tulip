@@ -121,6 +121,13 @@ pub(super) fn build_test_hub(
     });
     let devices = crate::devices::DeviceStore::load(&crate::paths::devices_file(&dirs));
     let dashboard = crate::dashboard::Dashboard::new(Arc::clone(&sessions));
+    let summarizer = test_summarizer(
+        &state,
+        &dirs,
+        &client_count,
+        &state_events,
+        Arc::new(crate::summarizer::service::test_support::FakeCaller::default()),
+    );
     let hub = Hub {
         state,
         sessions,
@@ -153,8 +160,30 @@ pub(super) fn build_test_hub(
         pairing_waiters: super::pairing::PairingWaiters::default(),
         live_devices: super::live_devices::LiveDevices::default(),
         dashboard,
+        summarizer,
     };
     (hub, scratch, attention_rx)
+}
+
+/// A summarizer over the hub's state and config dir whose provider calls
+/// `caller` answers.
+pub(crate) fn test_summarizer(
+    state: &Arc<AppState>,
+    dirs: &Dirs,
+    client_count: &tokio::sync::watch::Sender<usize>,
+    state_events: &broadcast::Sender<super::StateEvent>,
+    caller: Arc<dyn crate::summarizer::service::Caller>,
+) -> Arc<crate::summarizer::service::Summarizer> {
+    Arc::new(crate::summarizer::service::Summarizer::new(
+        crate::summarizer::service::SummarizerParts {
+            state: Arc::clone(state),
+            spend_file: crate::paths::summarizer_spend_file(dirs),
+            caller: Some(caller),
+            rejections: Arc::default(),
+            client_count: client_count.subscribe(),
+            events: state_events.clone(),
+        },
+    ))
 }
 
 /// Dispatch `msg` against `hub` and return the single message it put on

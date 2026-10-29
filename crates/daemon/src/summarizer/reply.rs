@@ -81,7 +81,7 @@ fn cut_words(text: &str, max: usize) -> String {
 
 /// `text` trimmed and cut to at most `max` characters, at the last word
 /// boundary that fits; a single word longer than `max` is cut at `max`.
-fn cut_chars(text: &str, max: usize) -> String {
+pub(crate) fn cut_chars(text: &str, max: usize) -> String {
     let text = text.trim();
     let Some((end, next)) = text.char_indices().nth(max) else {
         return text.to_owned();

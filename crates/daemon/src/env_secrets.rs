@@ -371,13 +371,6 @@ fn context() -> anyhow::Result<Context> {
 /// # Errors
 ///
 /// Fails when the config dir cannot be resolved.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "only the summarizer's key store calls it, and nothing outside tests calls that yet"
-    )
-)]
 pub(crate) fn service() -> anyhow::Result<String> {
     Ok(service_for(&paths::config_dir()?))
 }

@@ -164,12 +164,17 @@ impl CliRunner {
         folder: &Path,
         prompt: &str,
     ) -> Result<CliReply, CliError> {
-        let read_env = |name: &str| std::env::var(name).ok();
-        let request = SummarizerRequest {
-            schema: SUMMARY_SCHEMA,
-            read_env: &read_env,
-        };
-        let spec = plugin.summarizer(&request).ok_or(CliError::NoSummarizer)?;
+        // The request borrows a reader that is not `Sync`, so it is dropped
+        // before the first await and the call's future stays `Send`.
+        let spec = {
+            let read_env = |name: &str| std::env::var(name).ok();
+            let request = SummarizerRequest {
+                schema: SUMMARY_SCHEMA,
+                read_env: &read_env,
+            };
+            plugin.summarizer(&request)
+        }
+        .ok_or(CliError::NoSummarizer)?;
         let (program, lead_args) = resolve_agent_program(&plugin.resolve_program());
         let call = CliCall {
             program,

@@ -48,13 +48,6 @@ mod session;
 mod spawn_detached;
 mod spawn_plan;
 mod state;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "nothing outside tests calls the summarizer until the server's summarizer handlers are wired"
-    )
-)]
 mod summarizer;
 mod sync;
 mod tabs;
