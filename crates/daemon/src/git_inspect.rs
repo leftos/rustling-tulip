@@ -2,10 +2,16 @@
 
 use crate::file_fetch;
 use anyhow::{Context as _, anyhow};
-use protocol::{GitCommit, GitCommitDetail, GitFileChange, GitRemoteUrl, SnapshotUnavailable};
+use chrono::{DateTime, Utc};
+use protocol::{
+    GitCommit, GitCommitDetail, GitFileChange, GitRemoteUrl, SnapshotUnavailable, WorkCommit,
+    WorkTotals,
+};
+use std::collections::HashMap;
 use std::io;
 use std::path::Path;
 use std::process::Stdio;
+use std::time::Duration;
 use tokio::process::Command;
 
 #[cfg(windows)]
@@ -30,6 +36,58 @@ async fn run_git(repo: &Path, args: &[&str]) -> anyhow::Result<String> {
         return Err(anyhow!("git {args:?} failed: {stderr}"));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// How long one Dashboard read may take before git is killed: a locked
+/// index or a huge tree must not hold the drawer.
+const READ_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// git in its read-only Dashboard mode: it takes no optional lock (so a read
+/// never fights the agent's own git over the index), prints paths as they
+/// are, and is killed once [`READ_TIMEOUT`] passes. Answers whether git
+/// succeeded, with its stdout and stderr.
+async fn run_git_read_raw(repo: &Path, args: &[&str]) -> anyhow::Result<(bool, String, String)> {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C")
+        .arg(repo)
+        .args(["--no-optional-locks", "-c", "core.quotepath=false"])
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    let output = tokio::time::timeout(READ_TIMEOUT, cmd.output())
+        .await
+        .with_context(|| {
+            format!(
+                "git {args:?} did not finish within {}s",
+                READ_TIMEOUT.as_secs()
+            )
+        })?
+        .with_context(|| format!("spawning git {args:?}"))?;
+    Ok((
+        output.status.success(),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    ))
+}
+
+/// [`run_git_read_raw`] whose non-zero exit is an error carrying git's stderr.
+async fn run_git_read(repo: &Path, args: &[&str]) -> anyhow::Result<String> {
+    let (success, stdout, stderr) = run_git_read_raw(repo, args).await?;
+    if !success {
+        return Err(anyhow!("git {args:?} failed: {stderr}"));
+    }
+    Ok(stdout)
+}
+
+/// [`run_git_read_raw`] whose non-zero exit is `None`: for a read whose
+/// "nothing there" is a normal answer (an unborn `HEAD`).
+async fn run_git_read_quiet(repo: &Path, args: &[&str]) -> anyhow::Result<Option<String>> {
+    let (success, stdout, _) = run_git_read_raw(repo, args).await?;
+    Ok(success.then_some(stdout))
 }
 
 const COMMIT_FORMAT: &str = "%H%x1f%h%x1f%an%x1f%ae%x1f%aI%x1f%s";
@@ -216,6 +274,196 @@ fn parse_porcelain_z(raw: &str) -> (Vec<GitFileChange>, Vec<GitFileChange>) {
         }
     }
     (index, worktree)
+}
+
+/// The worktree's status as the Dashboard's work read wants it, through
+/// [`run_git_read`] so its locks and timeout apply, with every untracked file
+/// listed by name rather than by its folder.
+pub async fn worktree_status(
+    repo: &Path,
+) -> anyhow::Result<(Vec<GitFileChange>, Vec<GitFileChange>)> {
+    let stdout = run_git_read(
+        repo,
+        &["status", "--porcelain=1", "-z", "--untracked-files=all"],
+    )
+    .await?;
+    Ok(parse_porcelain_z(&stdout))
+}
+
+/// How many commits one read shows.
+const WORK_COMMITS: usize = 20;
+
+/// A Dashboard commit: full sha, short sha, commit time, subject.
+const WORK_COMMIT_FORMAT: &str = "%H%x1f%h%x1f%cI%x1f%s";
+
+/// The empty tree: the left side of a diff whose oldest commit is a root.
+/// git resolves it in any repository, with the object stored or not.
+const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+/// One file's line counts.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LineCounts {
+    pub added: u32,
+    pub deleted: u32,
+}
+
+/// `repo`'s commits on `HEAD` whose commit time is at or after `since`,
+/// newest first, at most [`WORK_COMMITS`]. A repository with no commit yet
+/// has none.
+pub async fn commits_since(repo: &Path, since: DateTime<Utc>) -> anyhow::Result<Vec<WorkCommit>> {
+    if run_git_read_quiet(repo, &["rev-parse", "--verify", "--quiet", "HEAD"])
+        .await?
+        .is_none()
+    {
+        return Ok(Vec::new());
+    }
+    let since = since_arg(since);
+    let limit = format!("-n{WORK_COMMITS}");
+    let format_arg = format!("--format={WORK_COMMIT_FORMAT}");
+    let stdout = run_git_read(
+        repo,
+        &[
+            "log",
+            "HEAD",
+            since.as_str(),
+            limit.as_str(),
+            format_arg.as_str(),
+        ],
+    )
+    .await?;
+    Ok(stdout.lines().filter_map(parse_work_commit_line).collect())
+}
+
+/// The oldest commit on `HEAD` at or after `since`, or `None` when there is
+/// none — nor any commit at all.
+pub async fn oldest_commit_since(
+    repo: &Path,
+    since: DateTime<Utc>,
+) -> anyhow::Result<Option<String>> {
+    let since = since_arg(since);
+    let stdout =
+        run_git_read_quiet(repo, &["rev-list", "--reverse", since.as_str(), "HEAD"]).await?;
+    Ok(stdout.and_then(|text| first_line(&text)))
+}
+
+fn first_line(text: &str) -> Option<String> {
+    text.lines()
+        .next()
+        .map(|line| line.trim().to_owned())
+        .filter(|line| !line.is_empty())
+}
+
+/// `since` as git's `--since` argument.
+fn since_arg(since: DateTime<Utc>) -> String {
+    format!("--since={}", since.to_rfc3339())
+}
+
+fn parse_work_commit_line(line: &str) -> Option<WorkCommit> {
+    let mut parts = line.splitn(4, '\u{1f}');
+    let sha = parts.next()?.to_owned();
+    let short_sha = parts.next()?.to_owned();
+    let at = DateTime::parse_from_rfc3339(parts.next()?)
+        .ok()?
+        .with_timezone(&Utc);
+    let subject = parts.next()?.to_owned();
+    Some(WorkCommit {
+        sha,
+        short_sha,
+        subject,
+        at,
+    })
+}
+
+/// The uncommitted line counts of `repo`'s tracked files against `HEAD`, by
+/// path; empty when `HEAD` has no commit to compare with. Paths come back raw
+/// (the `-z` form), so they match the status read's paths byte for byte.
+pub async fn numstat_against_head(repo: &Path) -> anyhow::Result<HashMap<String, LineCounts>> {
+    let stdout = run_git_read_quiet(
+        repo,
+        &[
+            "diff",
+            "--numstat",
+            "-z",
+            "--no-renames",
+            "--no-ext-diff",
+            "--no-textconv",
+            "HEAD",
+        ],
+    )
+    .await?;
+    Ok(stdout.as_deref().map(parse_numstat).unwrap_or_default())
+}
+
+/// The `-z` form: one NUL-terminated `added<TAB>deleted<TAB>path` record per
+/// file, its path never quoted or escaped.
+fn parse_numstat(raw: &str) -> HashMap<String, LineCounts> {
+    raw.split('\0').filter_map(parse_numstat_line).collect()
+}
+
+fn parse_numstat_line(record: &str) -> Option<(String, LineCounts)> {
+    let mut parts = record.splitn(3, '\t');
+    let added = numstat_count(parts.next()?);
+    let deleted = numstat_count(parts.next()?);
+    let path = parts.next()?.to_owned();
+    Some((path, LineCounts { added, deleted }))
+}
+
+/// One numstat count: `-` marks a binary file, whose lines are not counted.
+fn numstat_count(text: &str) -> u32 {
+    text.parse().unwrap_or(0)
+}
+
+/// What the work from `oldest` on added: `git diff <oldest>^ HEAD`, diffed
+/// from the empty tree when `oldest` is a root commit.
+pub async fn totals_since(repo: &Path, oldest: &str) -> anyhow::Result<WorkTotals> {
+    let parent = format!("{oldest}^");
+    let from =
+        match run_git_read_quiet(repo, &["rev-parse", "--verify", "--quiet", parent.as_str()])
+            .await?
+        {
+            Some(_) => parent,
+            None => EMPTY_TREE.to_owned(),
+        };
+    let stdout = run_git_read(
+        repo,
+        &[
+            "diff",
+            "--shortstat",
+            "--no-ext-diff",
+            "--no-textconv",
+            from.as_str(),
+            "HEAD",
+        ],
+    )
+    .await?;
+    Ok(parse_shortstat(&stdout))
+}
+
+/// ` 7 files changed, 212 insertions(+), 48 deletions(-)`: a clause git
+/// leaves out counts 0, and empty output is all zeros.
+fn parse_shortstat(raw: &str) -> WorkTotals {
+    let mut totals = WorkTotals {
+        files: 0,
+        added: 0,
+        deleted: 0,
+    };
+    for clause in raw.split(',') {
+        let Some(number) = clause
+            .split_whitespace()
+            .next()
+            .and_then(|text| text.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if clause.contains("file") {
+            totals.files = number;
+        } else if clause.contains("insertion") {
+            totals.added = number;
+        } else if clause.contains("deletion") {
+            totals.deleted = number;
+        }
+    }
+    totals
 }
 
 /// Cap on one side of a snapshot. A side larger than this is reported as
@@ -505,11 +753,101 @@ fn parse_forge(raw: &str) -> (Option<String>, String) {
 #[cfg(test)]
 #[expect(
     clippy::expect_used,
+    reason = "test fixtures assert their own preconditions"
+)]
+pub(crate) mod test_support {
+    //! Real-git fixtures: a scratch repo with an identity, and commits whose
+    //! dates the caller sets.
+
+    use std::path::Path;
+    use std::process::Stdio;
+
+    use tokio::process::Command;
+
+    use crate::file_fetch::test_support::TestDir;
+
+    #[cfg(windows)]
+    use super::CREATE_NO_WINDOW;
+
+    /// A throwaway git repo with an identity configured, so `git commit`
+    /// works whatever the machine's global git config says.
+    pub(crate) async fn init_repo(tag: &str) -> TestDir {
+        let dir = TestDir::new(tag);
+        let root = dir.path();
+        git(root, &["init"]).await;
+        git(root, &["config", "user.email", "t@example.com"]).await;
+        git(root, &["config", "user.name", "Test"]).await;
+        // A global commit.gpgsign=true without a usable key would block commits.
+        git(root, &["config", "commit.gpgsign", "false"]).await;
+        dir
+    }
+
+    /// Write `body` and commit it, so a later write is an uncommitted edit.
+    pub(crate) async fn commit_file(repo: &Path, name: &str, body: &[u8]) {
+        std::fs::write(repo.join(name), body).expect("write file");
+        git(repo, &["add", "--", name]).await;
+        let message = format!("add {name}");
+        git(repo, &["commit", "-m", &message]).await;
+    }
+
+    /// Write `body` and commit it with both dates set to `date` (RFC 3339),
+    /// so a since-window needs no sleep.
+    pub(crate) async fn commit_file_at(repo: &Path, name: &str, body: &[u8], date: &str) {
+        std::fs::write(repo.join(name), body).expect("write file");
+        git(repo, &["add", "--", name]).await;
+        let message = format!("add {name}");
+        git_env(
+            repo,
+            &["commit", "-m", &message],
+            &[("GIT_COMMITTER_DATE", date), ("GIT_AUTHOR_DATE", date)],
+        )
+        .await;
+    }
+
+    /// The full SHA of the current commit.
+    pub(crate) async fn head_sha(repo: &Path) -> String {
+        git(repo, &["rev-parse", "HEAD"]).await.trim().to_owned()
+    }
+
+    /// Run `git` in `repo`, failing the test when it fails; its stdout.
+    pub(crate) async fn git(repo: &Path, args: &[&str]) -> String {
+        git_env(repo, args, &[]).await
+    }
+
+    /// Run `git` in `repo` with `env` set, failing the test when it fails.
+    pub(crate) async fn git_env(repo: &Path, args: &[&str], env: &[(&str, &str)]) -> String {
+        let mut cmd = Command::new("git");
+        cmd.arg("-C")
+            .arg(repo)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        for (key, value) in env {
+            cmd.env(key, value);
+        }
+        #[cfg(windows)]
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        let out = cmd.output().await.expect("spawn git");
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
     reason = "tests assert preconditions with expect; panic messages aid debugging"
 )]
 mod tests {
+    use super::test_support::{commit_file, commit_file_at, head_sha, init_repo};
     use super::*;
     use crate::file_fetch::test_support::TestDir;
+    use chrono::TimeZone as _;
 
     #[test]
     fn parse_splits_staged_and_worktree_buckets() {
@@ -577,44 +915,6 @@ mod tests {
         assert_eq!(modified.path, "src/x.rs");
         assert_eq!(modified.status, "M");
         assert_eq!(modified.from_path, None);
-    }
-
-    /// A throwaway git repo with an identity configured, so `git commit`
-    /// works whatever the machine's global git config says.
-    async fn init_repo(tag: &str) -> TestDir {
-        let dir = TestDir::new(tag);
-        let root = dir.path();
-        run_git(root, &["init"]).await.expect("git init");
-        run_git(root, &["config", "user.email", "t@example.com"])
-            .await
-            .expect("config email");
-        run_git(root, &["config", "user.name", "Test"])
-            .await
-            .expect("config name");
-        // A global commit.gpgsign=true without a usable key would block commits.
-        run_git(root, &["config", "commit.gpgsign", "false"])
-            .await
-            .expect("config gpgsign");
-        dir
-    }
-
-    /// Write `body` and commit it, so a later write is an uncommitted edit.
-    async fn commit_file(repo: &Path, name: &str, body: &[u8]) {
-        std::fs::write(repo.join(name), body).expect("write file");
-        run_git(repo, &["add", "--", name]).await.expect("git add");
-        let message = format!("add {name}");
-        run_git(repo, &["commit", "-m", &message])
-            .await
-            .expect("git commit");
-    }
-
-    /// The full SHA of the current commit.
-    async fn head_sha(repo: &Path) -> String {
-        run_git(repo, &["rev-parse", "HEAD"])
-            .await
-            .expect("rev-parse HEAD")
-            .trim()
-            .to_string()
     }
 
     /// A PNG header plus IHDR bytes: NUL bytes, so git calls it binary.
@@ -809,5 +1109,210 @@ mod tests {
             .expect("missing file snapshots as empty");
         assert_eq!(missing.unavailable, None);
         assert!(missing.old.is_empty() && missing.new.is_empty());
+    }
+
+    #[test]
+    fn numstat_parses_counts_binary_and_paths() {
+        // The `-z` form: NUL-terminated records, a path raw — a quote or a
+        // tab in it stays as it is.
+        let raw = concat!(
+            "12\t3\tsrc/a.rs\0",
+            "-\t-\tlogo.png\0",
+            "0\t7\tdocs/b.md\0",
+            "1\t0\twe\"ird\tname.txt\0",
+        );
+        let counts = parse_numstat(raw);
+        assert_eq!(
+            counts["src/a.rs"],
+            LineCounts {
+                added: 12,
+                deleted: 3
+            }
+        );
+        assert_eq!(counts["logo.png"], LineCounts::default());
+        assert_eq!(
+            counts["docs/b.md"],
+            LineCounts {
+                added: 0,
+                deleted: 7
+            }
+        );
+        assert_eq!(
+            counts["we\"ird\tname.txt"],
+            LineCounts {
+                added: 1,
+                deleted: 0
+            },
+            "a path with a quote and a tab is not quoted or escaped"
+        );
+        assert_eq!(counts.len(), 4);
+    }
+
+    #[test]
+    fn shortstat_parses_files_insertions_deletions() {
+        let both = parse_shortstat(" 7 files changed, 212 insertions(+), 48 deletions(-)\n");
+        assert_eq!(
+            both,
+            WorkTotals {
+                files: 7,
+                added: 212,
+                deleted: 48
+            }
+        );
+        let one_file = parse_shortstat(" 1 file changed, 4 insertions(+), 1 deletion(-)\n");
+        assert_eq!(
+            one_file,
+            WorkTotals {
+                files: 1,
+                added: 4,
+                deleted: 1
+            }
+        );
+        let only_added = parse_shortstat(" 2 files changed, 9 insertions(+)\n");
+        assert_eq!(
+            only_added,
+            WorkTotals {
+                files: 2,
+                added: 9,
+                deleted: 0
+            }
+        );
+        let only_deleted = parse_shortstat(" 1 file changed, 4 deletions(-)\n");
+        assert_eq!(
+            only_deleted,
+            WorkTotals {
+                files: 1,
+                added: 0,
+                deleted: 4
+            }
+        );
+        assert_eq!(
+            parse_shortstat(""),
+            WorkTotals {
+                files: 0,
+                added: 0,
+                deleted: 0
+            }
+        );
+    }
+
+    #[test]
+    fn since_log_line_parses_commit_time() {
+        let commit =
+            parse_work_commit_line("abc1234\x1fabc\x1f2026-10-28T15:04:05+02:00\x1ffix it")
+                .expect("a log line parses");
+        assert_eq!(commit.sha, "abc1234");
+        assert_eq!(commit.short_sha, "abc");
+        assert_eq!(commit.subject, "fix it");
+        assert_eq!(
+            commit.at,
+            Utc.with_ymd_and_hms(2026, 10, 28, 13, 4, 5)
+                .single()
+                .expect("a valid time")
+        );
+
+        // A subject carrying the separator stays whole.
+        let split = parse_work_commit_line("s\x1fs\x1f2026-10-28T15:04:05Z\x1fa\x1fb")
+            .expect("a log line with a separator in its subject parses");
+        assert_eq!(split.subject, "a\u{1f}b");
+
+        assert!(parse_work_commit_line("no separators").is_none());
+    }
+
+    #[tokio::test]
+    async fn commits_since_returns_only_commits_after_the_time_newest_first() {
+        let dir = init_repo("commits-since").await;
+        let repo = dir.path();
+        commit_file_at(repo, "old.txt", b"old\n", "2026-10-01T10:00:00+00:00").await;
+        commit_file_at(repo, "yes.txt", b"yes\n", "2026-10-03T10:00:00+00:00").await;
+        commit_file_at(repo, "newest.txt", b"newest\n", "2026-10-04T10:00:00+00:00").await;
+        let since = "2026-10-02T00:00:00Z"
+            .parse::<DateTime<Utc>>()
+            .expect("a valid time");
+
+        let commits = commits_since(repo, since).await.expect("commits since");
+        let subjects: Vec<&str> = commits
+            .iter()
+            .map(|commit| commit.subject.as_str())
+            .collect();
+        assert_eq!(subjects, vec!["add newest.txt", "add yes.txt"]);
+        assert_eq!(
+            commits[0].at,
+            Utc.with_ymd_and_hms(2026, 10, 4, 10, 0, 0)
+                .single()
+                .expect("a valid time")
+        );
+        assert_eq!(commits[1].sha, head_sha_parent(repo).await);
+        assert_eq!(commits[0].short_sha.len(), 7);
+    }
+
+    /// The second-newest commit's full sha, so a read's sha can be checked.
+    async fn head_sha_parent(repo: &Path) -> String {
+        super::test_support::git(repo, &["rev-parse", "HEAD^"])
+            .await
+            .trim()
+            .to_owned()
+    }
+
+    #[tokio::test]
+    async fn commits_since_caps_at_twenty() {
+        let dir = init_repo("commits-cap").await;
+        let repo = dir.path();
+        for minute in 0..21 {
+            let date = format!("2026-10-01T10:{minute:02}:00+00:00");
+            let body = format!("line {minute}\n");
+            commit_file_at(repo, "f.txt", body.as_bytes(), &date).await;
+        }
+        let since = "2026-10-01T09:00:00Z"
+            .parse::<DateTime<Utc>>()
+            .expect("a valid time");
+
+        let commits = commits_since(repo, since).await.expect("commits since");
+        assert_eq!(commits.len(), 20);
+        assert_eq!(
+            commits[0].at,
+            Utc.with_ymd_and_hms(2026, 10, 1, 10, 20, 0)
+                .single()
+                .expect("a valid time"),
+            "the newest is kept"
+        );
+        assert_eq!(
+            commits[19].at,
+            Utc.with_ymd_and_hms(2026, 10, 1, 10, 1, 0)
+                .single()
+                .expect("a valid time"),
+            "the oldest is the one cut"
+        );
+    }
+
+    #[tokio::test]
+    async fn shortstat_over_oldest_parent_counts_landed_totals() {
+        let dir = init_repo("shortstat").await;
+        let repo = dir.path();
+        commit_file(repo, "a.txt", b"one\ntwo\n").await;
+        let root = head_sha(repo).await;
+        commit_file(repo, "b.txt", b"three\n").await;
+        let second = head_sha(repo).await;
+
+        let last = totals_since(repo, &second).await.expect("totals");
+        assert_eq!(
+            last,
+            WorkTotals {
+                files: 1,
+                added: 1,
+                deleted: 0
+            }
+        );
+
+        // A root commit as the oldest diffs from the empty tree.
+        let all = totals_since(repo, &root).await.expect("root totals");
+        assert_eq!(
+            all,
+            WorkTotals {
+                files: 2,
+                added: 3,
+                deleted: 0
+            }
+        );
     }
 }

@@ -10,6 +10,7 @@
 //! first message holds every listed session's facts.
 
 pub(crate) mod now;
+pub(crate) mod work;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
@@ -21,8 +22,8 @@ use agent_api::{
 };
 use chrono::{DateTime, Utc};
 use protocol::{
-    AgentId, AgentKind, AgentNode, AgentState, DaemonMessage, DayTotals, SessionFacts,
-    SessionStatus, StuckReason,
+    AgentId, AgentKind, AgentNode, AgentState, DaemonMessage, DayTotals, RecentWork, SessionFacts,
+    SessionMember, SessionStatus, StuckReason,
 };
 use tokio::sync::{mpsc, watch};
 use tracing::warn;
@@ -62,6 +63,8 @@ struct Inner {
     /// Held across a whole read pass and its sends, so a tick and a new
     /// watcher's first pass never read at once or interleave their sends.
     pass: tokio::sync::Mutex<()>,
+    /// Each worktree's recent-work read, reused for [`work::TTL`].
+    work: work::WorkCache,
 }
 
 #[derive(Default)]
@@ -143,6 +146,7 @@ impl Dashboard {
                 state: Mutex::new(State::default()),
                 watcher_count: watch::Sender::new(0),
                 pass: tokio::sync::Mutex::new(()),
+                work: work::WorkCache::default(),
             }),
         }
     }
@@ -201,6 +205,16 @@ impl Dashboard {
             .get(session_id)
             .and_then(|entry| entry.snapshot.as_ref())
             .and_then(|snapshot| snapshot.first_prompt.clone())
+    }
+
+    /// The recent work of a session's `members`, each worktree's read reused
+    /// for [`work::TTL`].
+    pub(crate) async fn recent_work(
+        &self,
+        members: &[SessionMember],
+        started_at: DateTime<Utc>,
+    ) -> RecentWork {
+        work::recent_work(&self.inner.work, members, started_at).await
     }
 
     /// One tick: read every listed session's transcript as of `now` and send

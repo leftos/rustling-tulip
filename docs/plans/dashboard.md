@@ -151,7 +151,7 @@ Buttons are offered for a single question with single choice and for a permissio
 In By status, a click on a row toggles a drawer docked under it (`.drawer`), three columns:
 
 1. **Running summary**, newest first, with its source and age (`model, 3m ago`): the session's **summary ring**, each line after its window label (`now`, `5–15m`, `15–30m`, `30m+`). Under it, **Prompt**: the session's first prompt on one line.
-2. **Recent work**, headed by the changed-file count and lines (`4 changed +165 −7`, or `7 files · +212 −48 landed` once the worktree is clean): the commits made since the session started (short sha, subject, age), the issues it moved to Done (`→ Done · <title>`), the uncommitted files (`M`/`A`/`D`, path, `+a −d`), and a pull-request line when the branch has one (`PR #118 · checks passed`). `Nothing yet` when empty.
+2. **Recent work**, headed by the changed-file count and lines (the client sums the lines of the files it receives, at most 50, with `files_total` the full count; `4 changed +165 −7`, or `7 files · +212 −48 landed` once the worktree is clean): the commits made since the session started (short sha, subject, age), the issues it moved to Done (`→ Done · <title>`), the uncommitted files (`M`/`A`/`D`, path, `+a −d`), and a pull-request line when the branch has one (`PR #118 · checks passed`). `Nothing yet` when empty.
 3. **Linear**, with its sync state: the issue line and title; Project, Release (with its done count), Worktree, Tokens (in and out) and Started; then `Go to pane`, `Open diff` (a diff tab of the worktree) and `Open <key>` (the issue's Linear URL in the browser).
 
 The drawer fetches its detail when it opens and again whenever its session's facts or summary change, at most every 5 s; it is never part of the row stream (OPS-67). A drawer whose session ends keeps what it last showed, marked ended.
@@ -191,7 +191,7 @@ What each field needs, and whether the tree has it today (paths at `main` b4b55b
 | Inline answer | `PendingInput::Question` with its options and `multi_select` (`lib.rs:723-755`), `PendingInput::Permission { tool_name, summary }` (`:725`); `ClientMessage::SendInput` (`:2309`) types raw bytes only | prompt data have; no checked answer | DB.13 |
 | Summary ring | the summarizer's lines, kept per session | none | SA.6 |
 | Prompt | the transcript's first real user record | have: the activity reader's `first_prompt` | DB.3 |
-| Recent work | `git_inspect::repo_status` (`crates/daemon/src/git_inspect.rs:164`) and `list_commits` (`:37`, by branch and page); no commits-since-start, `--numstat` or landed totals | partial | DB.6 |
+| Recent work | `git_inspect::commits_since`, `worktree_status`, numstat and shortstat reads, run through `run_git_read` (`crates/daemon/src/git_inspect.rs`), assembled per worktree in `crates/daemon/src/dashboard/work.rs` | have | DB.6 |
 | PR line | `gh pr list --head <branch>` in the worktree | none | DB.18 |
 | Linear detail, releases, sync age | the daemon's Linear cache (RT-133), plus a release-progress query | none | RT-133, then DB.7 |
 | Header figures | a day ledger of cost, tokens, commits and issues Done, kept past each session's end | none | DB.9 |
@@ -229,7 +229,7 @@ It follows ops-tower's reader (`docs/agents-transcripts.md`, "The transcript rec
 
 - While at least one connection has sent `WatchDashboard { on: true }`, a task ticks every 2 s: for each listed session it asks the plugin's reader for what changed, builds the now line (rules above), the agent tree, context, tokens, cost, activity counts and stuck reasons, and sends `DashboardFacts` with the changed entries to the watchers. `WatchDashboard { on: true }` is answered at once with every entry (an empty list when no session is listed), and afterwards a watcher gets only the changed entries, at most every 2 s. `on: false` or closing the connection ends the watch (`server/connection.rs`).
 - With no watcher the task parks and reads nothing, as the git watcher parks at `Hub.client_count` 0 (`crates/daemon/src/git_watch.rs`). The facts cache is emptied when the last watcher leaves, so the next first watch reads every transcript afresh.
-- `GetSessionDetail` answers one session's drawer: its summary ring, prompt, recent work (DB.6), Linear detail (DB.7) and token figures. It answers from the facts cache with `SessionDetail { lines: [], prompt, work: default, request_id }`, or `Error "unknown session: <id>"` echoing the `request_id`; the fields DB.6 to DB.9, SA.6 and DB.21 fill stay empty until those steps land.
+- `GetSessionDetail` answers one session's drawer: its summary ring, prompt, recent work (DB.6), Linear detail (DB.7) and token figures. It answers from the facts cache with `SessionDetail { lines: [], prompt, work, request_id }`, or `Error "unknown session: <id>"` echoing the `request_id`; `work` is read from git (DB.6, "Recent work" below), and the fields DB.7 to DB.9, SA.6 and DB.21 fill stay empty until those steps land.
 - Facts are runtime-only; a restarted daemon rebuilds them from the transcripts on its first tick.
 
 ### Linear context
@@ -249,11 +249,11 @@ The Dashboard reads Linear through the daemon's one Linear client and issue cach
 Read per worktree of the session (`members[].worktree_path`) when its drawer asks:
 
 - commits on `HEAD` since `started_at` (at most 20), with sha, subject and commit time;
-- the uncommitted files from `git_inspect::repo_status` (`git_inspect.rs:164`) with `git diff --numstat HEAD` for their lines;
-- once the worktree is clean and has commits, the landed totals from `git diff --shortstat <oldest commit>^ HEAD`;
+- the uncommitted files from `git_inspect::worktree_status` with `git diff --numstat -z --no-renames HEAD` for their lines (an untracked file's lines are counted from disk);
+- once every member worktree is clean, at least one has commits and no read failed, the landed totals from `git diff --shortstat <oldest commit since the start>^ HEAD`;
 - the issues Done (above) and the PR line (DB.18).
 
-Each read runs with the git watcher's safe flags, is cut at 50 files, and is cached 5 s per worktree.
+Each read runs with `--no-optional-locks` and `-c core.quotepath=false`, with `--no-ext-diff --no-textconv` on its diffs, and is killed after 10 s; it is cut at 50 files and cached 5 s per worktree. The landed totals start at the oldest commit since the start, diffing from the empty tree when that commit is a root.
 
 ### Gates
 
@@ -443,7 +443,7 @@ Ids: **SA** for the summarizer service, **DB** for the Dashboard. Each names its
 - [x] DB.5 Send session facts to watching Dashboards. `crates/daemon/src/dashboard/mod.rs` (new: watcher count, 2 s tick, reader cache, facts), `crates/daemon/src/dashboard/now.rs` (new: the now line's rules), `crates/daemon/src/server/dashboard.rs` (new: `WatchDashboard`, `GetSessionDetail`), `crates/daemon/src/server.rs` (`dispatch`), `crates/daemon/src/main.rs` (`mod` line), `crates/daemon/src/server/connection.rs` (ends a connection's watch), `crates/daemon/src/server/test_support.rs` and `crates/daemon/src/presets.rs` (the `Hub` literal).
 
   Proof: a server test with a fake reader: facts reach only watchers, only changed entries follow, nothing is read with no watcher, and each now-line rule picks the right text. Waits on DB.2, DB.3, DB.4.
-- [ ] DB.6 Read each session's recent work from git. `crates/daemon/src/git_inspect.rs` (commits since a time, `--numstat`, `--shortstat`), `crates/daemon/src/dashboard/work.rs` (new: per-worktree read, 50-file cut, 5 s cache), `crates/daemon/src/server/dashboard.rs` (the detail's `work`). Proof: git-fixture tests for commits since start, uncommitted line counts, landed totals once clean, and an in-place session. Waits on DB.5.
+- [x] DB.6 Read each session's recent work from git. `crates/daemon/src/git_inspect.rs` (commits since a time, `--numstat`, `--shortstat`), `crates/daemon/src/dashboard/work.rs` (new: per-worktree read, 50-file cut, 5 s cache), `crates/daemon/src/server/dashboard.rs` (the detail's `work`). Proof: git-fixture tests for commits since start, uncommitted line counts, landed totals once clean, and an in-place session. Waits on DB.5.
 - [ ] DB.7 Show each session's Linear issue. `crates/daemon/src/dashboard/linear.rs` (new: detection from the branch and first prompt, the issues Done rule, the sync age), `crates/daemon/src/linear.rs` (RT-133's client: the detected identifiers join its refresh set; release done and total counts in its batched query), `crates/daemon/src/dashboard/mod.rs` (the identifier on facts, `DayTotals.releases`).
 
   Proof: detection unit tests (a branch, a prompt, a non-team key like `UTF-8` ignored, the branch winning over the prompt); a fake-transport test that a detected identifier is fetched and refreshed and that release counts parse. Waits on RT-133's LL.1 to LL.3, DB.5.

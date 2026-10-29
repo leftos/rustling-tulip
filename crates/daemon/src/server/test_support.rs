@@ -421,6 +421,19 @@ pub(super) async fn next_message(rx: &mut mpsc::UnboundedReceiver<DaemonMessage>
         .expect("the channel is open")
 }
 
+/// The next message on `rx`, failing as hung when none arrives within `guard`
+/// — for a reply whose own work may take longer than [`next_message`]'s
+/// guard.
+pub(super) async fn next_message_within(
+    rx: &mut mpsc::UnboundedReceiver<DaemonMessage>,
+    guard: Duration,
+) -> DaemonMessage {
+    tokio::time::timeout(guard, rx.recv())
+        .await
+        .expect("the reply hung: nothing arrived within its guard")
+        .expect("the channel is open")
+}
+
 /// The session id and `request_id` of the one message on `rx`, which
 /// must be a `SessionUpdated`; then checks nothing follows.
 pub(super) async fn only_update(

@@ -2,7 +2,8 @@
 //! session's detail.
 use super::Hub;
 use super::connection::ConnCtx;
-use protocol::{ClientMessage, DaemonMessage, RecentWork};
+use crate::sync::lock;
+use protocol::{ClientMessage, DaemonMessage};
 use tracing::warn;
 
 /// Handle the Dashboard messages `dispatch` routes here.
@@ -18,27 +19,45 @@ pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) {
             session_id,
             request_id,
         } => {
-            let reply = session_detail(hub, session_id, request_id);
-            let _ = ctx.out_tx.send(reply);
+            // The reads behind the detail shell out to git: they run in a
+            // task of their own, so a slow repository never holds this
+            // connection's later messages.
+            let hub = hub.clone();
+            let out_tx = ctx.out_tx.clone();
+            tokio::spawn(async move {
+                let reply = session_detail(&hub, session_id, request_id).await;
+                let _ = out_tx.send(reply);
+            });
         }
         _ => warn!("dashboard::handle: a message that is not the Dashboard's was routed here"),
     }
 }
 
-/// One session's drawer detail: its first prompt as last read. An unknown
-/// session is refused with the request's id.
-fn session_detail(hub: &Hub, session_id: String, request_id: Option<String>) -> DaemonMessage {
-    if hub.sessions.get(&session_id).is_none() {
+/// One session's drawer detail: its first prompt as last read, and what its
+/// worktrees did since it started. An unknown session is refused with the
+/// request's id.
+async fn session_detail(
+    hub: &Hub,
+    session_id: String,
+    request_id: Option<String>,
+) -> DaemonMessage {
+    let Some(record) = hub.sessions.get(&session_id) else {
         return DaemonMessage::Error {
             message: format!("unknown session: {session_id}"),
             request_id,
         };
-    }
+    };
+    let (members, started_at) = {
+        let record = lock(&record);
+        (record.members.clone(), record.started_at)
+    };
+    let prompt = hub.dashboard.prompt(&session_id);
+    let work = hub.dashboard.recent_work(&members, started_at).await;
     DaemonMessage::SessionDetail {
-        prompt: hub.dashboard.prompt(&session_id),
+        prompt,
         session_id,
         lines: Vec::new(),
-        work: RecentWork::default(),
+        work,
         request_id,
     }
 }
@@ -52,7 +71,9 @@ mod tests {
 
     use agent_api::ActivitySnapshot;
     use chrono::Utc;
-    use protocol::{ClientMessage, DaemonMessage, RecentWork, SessionFacts, SessionMember};
+    use protocol::{
+        ClientMessage, DaemonMessage, RecentWork, SessionFacts, SessionMember, WorkTotals,
+    };
     use tokio::sync::{Mutex as AsyncMutex, mpsc};
 
     use crate::dashboard::test_support::Script;
@@ -61,7 +82,8 @@ mod tests {
     use crate::server::connection::{AuthKind, ConnCtx, FetchRegistry, PtyForwarders};
     use crate::server::dispatch;
     use crate::server::test_support::{
-        ScratchDir, drain, hello, idle_record, loopback_ws_client, test_hub, ws_next, ws_send,
+        ScratchDir, drain, git_init, git_ok, hello, idle_record, loopback_ws_client,
+        next_message_within, test_hub, ws_next, ws_send,
     };
 
     /// One test connection: its id and the queue its messages land on.
@@ -121,16 +143,27 @@ mod tests {
         (hub, scratch, script)
     }
 
+    /// A path that is not a repository: the session's detail carries no
+    /// work for it.
+    const NOT_A_REPO: &str = "C:/work/repo";
+
     /// Add listed session `id` on conversation `conversation`, its reading
-    /// carrying `tokens_in`.
-    fn add_session(hub: &Hub, script: &Script, id: &str, conversation: &str, tokens_in: u64) {
+    /// carrying `tokens_in`, its one member's worktree at `worktree`.
+    fn add_session(
+        hub: &Hub,
+        script: &Script,
+        id: &str,
+        conversation: &str,
+        tokens_in: u64,
+        worktree: &str,
+    ) {
         let mut record = idle_record(id);
         record.conversation_id = Some(conversation.to_owned());
         record.members = vec![SessionMember {
             repo_id: "r1".to_owned(),
             repo_name: "repo".to_owned(),
             branch: "main".to_owned(),
-            worktree_path: "C:/work/repo".to_owned(),
+            worktree_path: worktree.to_owned(),
         }];
         hub.sessions.insert(record);
         script.set(conversation, tokens(tokens_in));
@@ -149,8 +182,8 @@ mod tests {
     #[tokio::test]
     async fn a_new_watcher_gets_every_sessions_facts_at_once() {
         let (hub, _scratch, script) = scripted_hub("dash-at-once");
-        add_session(&hub, &script, "s1", "conv1", 11);
-        add_session(&hub, &script, "s2", "conv2", 22);
+        add_session(&hub, &script, "s1", "conv1", 11, NOT_A_REPO);
+        add_session(&hub, &script, "s2", "conv2", 22, NOT_A_REPO);
         let mut c1 = conn(1);
         send(&hub, &c1, ON).await;
         let messages = facts_messages(&mut c1);
@@ -176,7 +209,7 @@ mod tests {
     #[tokio::test]
     async fn facts_reach_only_watchers() {
         let (hub, _scratch, script) = scripted_hub("dash-only-watchers");
-        add_session(&hub, &script, "s1", "conv1", 1);
+        add_session(&hub, &script, "s1", "conv1", 1, NOT_A_REPO);
         let mut watcher = conn(1);
         let mut other = conn(2);
         send(&hub, &watcher, ON).await;
@@ -195,8 +228,8 @@ mod tests {
     #[tokio::test]
     async fn only_changed_entries_follow() {
         let (hub, _scratch, script) = scripted_hub("dash-changed");
-        add_session(&hub, &script, "s1", "conv1", 1);
-        add_session(&hub, &script, "s2", "conv2", 2);
+        add_session(&hub, &script, "s1", "conv1", 1, NOT_A_REPO);
+        add_session(&hub, &script, "s2", "conv2", 2, NOT_A_REPO);
         let mut c1 = conn(1);
         send(&hub, &c1, ON).await;
         let _ = facts_messages(&mut c1);
@@ -215,7 +248,7 @@ mod tests {
     #[tokio::test]
     async fn a_second_watcher_gets_the_whole_set_and_the_first_only_changes() {
         let (hub, _scratch, script) = scripted_hub("dash-second");
-        add_session(&hub, &script, "s1", "conv1", 1);
+        add_session(&hub, &script, "s1", "conv1", 1, NOT_A_REPO);
         let mut c1 = conn(1);
         let mut c2 = conn(2);
         send(&hub, &c1, ON).await;
@@ -236,8 +269,8 @@ mod tests {
     #[tokio::test]
     async fn a_removed_session_leaves_the_facts() {
         let (hub, _scratch, script) = scripted_hub("dash-removed");
-        add_session(&hub, &script, "s1", "conv1", 1);
-        add_session(&hub, &script, "s2", "conv2", 2);
+        add_session(&hub, &script, "s1", "conv1", 1, NOT_A_REPO);
+        add_session(&hub, &script, "s2", "conv2", 2, NOT_A_REPO);
         let c1 = conn(1);
         send(&hub, &c1, ON).await;
         hub.sessions.remove("s1");
@@ -252,7 +285,7 @@ mod tests {
     #[tokio::test]
     async fn the_cache_empties_when_the_last_watcher_leaves() {
         let (hub, _scratch, script) = scripted_hub("dash-cache-empties");
-        add_session(&hub, &script, "s1", "conv1", 1);
+        add_session(&hub, &script, "s1", "conv1", 1, NOT_A_REPO);
         script.set(
             "conv1",
             ActivitySnapshot {
@@ -291,7 +324,7 @@ mod tests {
     #[tokio::test]
     async fn a_new_conversation_id_builds_a_fresh_reader() {
         let (hub, _scratch, script) = scripted_hub("dash-new-conv");
-        add_session(&hub, &script, "s1", "conv1", 1);
+        add_session(&hub, &script, "s1", "conv1", 1, NOT_A_REPO);
         let mut c1 = conn(1);
         send(&hub, &c1, ON).await;
         hub.dashboard.tick(Utc::now()).await;
@@ -309,7 +342,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn nothing_is_read_with_no_watcher() {
         let (hub, _scratch, script) = scripted_hub("dash-no-watcher");
-        add_session(&hub, &script, "s1", "conv1", 1);
+        add_session(&hub, &script, "s1", "conv1", 1, NOT_A_REPO);
         let ticker = hub.dashboard.spawn_ticker();
         tokio::time::sleep(TICK * 10).await;
         hub.dashboard.tick(Utc::now()).await;
@@ -329,7 +362,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn unwatching_stops_the_tick() {
         let (hub, _scratch, script) = scripted_hub("dash-unwatch");
-        add_session(&hub, &script, "s1", "conv1", 1);
+        add_session(&hub, &script, "s1", "conv1", 1, NOT_A_REPO);
         let ticker = hub.dashboard.spawn_ticker();
         let c1 = conn(1);
         send(&hub, &c1, ON).await;
@@ -369,10 +402,26 @@ mod tests {
         .expect("the dashboard is alive");
     }
 
+    /// Ask for `session_id`'s detail and return the reply its task sends,
+    /// waiting at most `guard`.
+    async fn ask_detail(
+        hub: &Hub,
+        conn: &mut Conn,
+        session_id: &str,
+        guard: Duration,
+    ) -> DaemonMessage {
+        let ask = ClientMessage::GetSessionDetail {
+            session_id: session_id.to_owned(),
+            request_id: Some("d1".to_owned()),
+        };
+        send(hub, conn, ask).await;
+        next_message_within(&mut conn.rx, guard).await
+    }
+
     #[tokio::test]
     async fn get_session_detail_answers_with_the_known_fields() {
         let (hub, _scratch, script) = scripted_hub("dash-detail");
-        add_session(&hub, &script, "s1", "conv1", 1);
+        add_session(&hub, &script, "s1", "conv1", 1, NOT_A_REPO);
         script.set(
             "conv1",
             ActivitySnapshot {
@@ -383,30 +432,72 @@ mod tests {
         let mut c1 = conn(1);
         send(&hub, &c1, ON).await;
         let _ = drain(&mut c1.rx);
-        let ask = |session_id: &str| ClientMessage::GetSessionDetail {
-            session_id: session_id.to_owned(),
-            request_id: Some("d1".to_owned()),
-        };
-        send(&hub, &c1, ask("s1")).await;
-        let reply = drain(&mut c1.rx);
+
+        let reply = ask_detail(&hub, &mut c1, "s1", Duration::from_secs(5)).await;
         assert!(
             matches!(
-                reply.as_slice(),
-                [DaemonMessage::SessionDetail { session_id, lines, prompt: Some(prompt), work, request_id: Some(id) }]
+                reply,
+                DaemonMessage::SessionDetail { ref session_id, ref lines, prompt: Some(ref prompt), ref work, request_id: Some(ref id) }
                     if session_id == "s1" && lines.is_empty() && prompt == "fix the login bug"
                         && *work == RecentWork::default() && id == "d1"
             ),
             "{reply:?}"
         );
-        send(&hub, &c1, ask("nope")).await;
-        let reply = drain(&mut c1.rx);
+
+        let reply = ask_detail(&hub, &mut c1, "nope", Duration::from_secs(5)).await;
         assert!(
             matches!(
-                reply.as_slice(),
-                [DaemonMessage::Error { message, request_id: Some(id) }]
+                reply,
+                DaemonMessage::Error { ref message, request_id: Some(ref id) }
                     if message == "unknown session: nope" && id == "d1"
             ),
             "{reply:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_session_detail_carries_the_sessions_recent_work() {
+        let (hub, scratch, script) = scripted_hub("dash-detail-work");
+        let repo = scratch.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("create repo dir");
+        git_init(&repo);
+        git_ok(&repo, &["commit", "--allow-empty", "-m", "seed"]);
+        add_session(
+            &hub,
+            &script,
+            "s1",
+            "conv1",
+            1,
+            repo.to_string_lossy().as_ref(),
+        );
+        // The session started before both commits, so both are its work.
+        hub.sessions.update("s1", |record| {
+            record.started_at = Utc::now() - chrono::Duration::hours(1);
+        });
+        std::fs::write(repo.join("work.txt"), "one\n").expect("write work file");
+        git_ok(&repo, &["add", "--", "work.txt"]);
+        git_ok(&repo, &["commit", "-m", "the first turn"]);
+
+        let mut c1 = conn(1);
+        // The read shells out to git under its own 10 s timeout: this wait is
+        // a hang guard beyond that, not a deadline of its own.
+        let reply = ask_detail(&hub, &mut c1, "s1", Duration::from_secs(60)).await;
+        let work = match reply {
+            DaemonMessage::SessionDetail { work, .. } => Some(work),
+            _ => None,
+        }
+        .expect("a detail reply");
+        let subjects: Vec<&str> = work.commits.iter().map(|c| c.subject.as_str()).collect();
+        assert_eq!(subjects, vec!["the first turn", "seed"]);
+        assert_eq!(work.files_total, 0, "the tree is clean");
+        assert_eq!(
+            work.landed,
+            Some(WorkTotals {
+                files: 1,
+                added: 1,
+                deleted: 0
+            }),
+            "the empty seed commit is the oldest commit since the start"
         );
     }
 }
