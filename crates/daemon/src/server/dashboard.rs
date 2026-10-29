@@ -47,16 +47,21 @@ async fn session_detail(
             request_id,
         };
     };
-    let (members, started_at) = {
+    let (members, started_at, lines) = {
         let record = lock(&record);
-        (record.members.clone(), record.started_at)
+        let lines = record
+            .summary
+            .as_ref()
+            .map(|summary| summary.lines.clone())
+            .unwrap_or_default();
+        (record.members.clone(), record.started_at, lines)
     };
     let prompt = hub.dashboard.prompt(&session_id);
     let work = hub.dashboard.recent_work(&members, started_at).await;
     DaemonMessage::SessionDetail {
         prompt,
         session_id,
-        lines: Vec::new(),
+        lines,
         work,
         request_id,
     }

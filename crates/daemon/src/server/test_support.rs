@@ -129,6 +129,8 @@ pub(super) fn build_test_hub(
         &state_events,
         Arc::new(crate::summarizer::service::test_support::FakeCaller::default()),
     );
+    let turns =
+        crate::summarizer::turns::Turns::new(Arc::clone(&sessions), Arc::clone(&summarizer));
     let hub = Hub {
         state,
         sessions,
@@ -162,8 +164,37 @@ pub(super) fn build_test_hub(
         live_devices: super::live_devices::LiveDevices::default(),
         dashboard,
         summarizer,
+        turns,
     };
     (hub, scratch, attention_rx)
+}
+
+/// A hub whose provider is a fake billing `cost_usd` per call, with one
+/// client connected.
+pub(crate) fn billing_hub(
+    tag: &str,
+    cost_usd: f64,
+) -> (
+    Hub,
+    ScratchDir,
+    Arc<crate::summarizer::service::test_support::FakeCaller>,
+) {
+    let (mut hub, scratch) = test_hub(tag);
+    let fake = Arc::new(crate::summarizer::service::test_support::FakeCaller::billing(cost_usd));
+    let (client_count, _) = tokio::sync::watch::channel(1usize);
+    hub.client_count = Arc::new(client_count);
+    hub.summarizer = test_summarizer(
+        &hub.state,
+        &hub.dirs,
+        &hub.client_count,
+        &hub.state_events,
+        fake.clone(),
+    );
+    hub.turns = crate::summarizer::turns::Turns::new(
+        Arc::clone(&hub.sessions),
+        Arc::clone(&hub.summarizer),
+    );
+    (hub, scratch, fake)
 }
 
 /// A summarizer over the hub's state and config dir whose provider calls
@@ -306,6 +337,7 @@ pub(super) fn idle_record(id: &str) -> SessionRecord {
         hook_driven: false,
         background: false,
         last_assistant_message: None,
+        summary: None,
         busy_excluded: false,
         agent_in_shell: false,
         shell_label: None,

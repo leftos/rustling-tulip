@@ -279,6 +279,7 @@ mod tests {
             hook_driven: false,
             background: false,
             last_assistant_message: None,
+            summary: None,
             busy_excluded: false,
             agent_in_shell: false,
             shell_label: None,

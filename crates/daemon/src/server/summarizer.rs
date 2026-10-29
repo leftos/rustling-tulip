@@ -109,8 +109,8 @@ mod tests {
     use crate::server::connection::{AuthKind, ConnCtx, FetchRegistry, PtyForwarders};
     use crate::server::handshake::push_initial_state;
     use crate::server::test_support::{
-        ScratchDir, drain, hello, loopback_ws_client, next_message, test_hub, test_peer,
-        test_summarizer, ws_next, ws_send,
+        billing_hub, drain, hello, loopback_ws_client, next_message, test_hub, test_peer, ws_next,
+        ws_send,
     };
     use crate::server::{Hub, StateEvent, dispatch};
     use crate::summarizer::keys::Rejections;
@@ -164,23 +164,6 @@ mod tests {
 
     async fn send(hub: &Hub, conn: &Conn, msg: ClientMessage) {
         send_as(hub, conn, &AuthKind::Local, msg).await;
-    }
-
-    /// A hub whose provider is a fake billing `cost_usd` per call, with one
-    /// client connected.
-    fn billing_hub(tag: &str, cost_usd: f64) -> (Hub, ScratchDir, Arc<FakeCaller>) {
-        let (mut hub, scratch) = test_hub(tag);
-        let fake = Arc::new(FakeCaller::billing(cost_usd));
-        let (client_count, _) = tokio::sync::watch::channel(1usize);
-        hub.client_count = Arc::new(client_count);
-        hub.summarizer = test_summarizer(
-            &hub.state,
-            &hub.dirs,
-            &hub.client_count,
-            &hub.state_events,
-            fake.clone(),
-        );
-        (hub, scratch, fake)
     }
 
     fn request(trigger: Trigger, text: &str) -> Request {

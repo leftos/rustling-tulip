@@ -226,7 +226,7 @@ The native client auto-starts the daemon if it isn't already running. Daemon lis
 - **Stop (keyboard)**: a control Tab and Shift-Tab land on in a native dialog; see `docs/native-client.md` ("Keyboard reachability").
 - **Subagent tree**: each session's subagents and background shells, read from the transcripts by the Claude plugin (`crates/agents/claude/src/subagents.rs`, `agent_api::SubagentNode`) for the Dashboard; see `docs/plans/dashboard.md` ("The transcript activity reader").
 - **Subplan**: a `docs/plans/*.md` design file holding the design and rulings for open items, linked from their issues and deleted once nothing open links it and its durable text is promoted into `docs/`.
-- **Summarizer**: the daemon service (`crates/daemon/src/summarizer/`) that turns a session's turn-end reports into a kind, a headline and a one-line summary, through Claude Haiku on the CLI or DeepSeek. Its settings, per-session queue, cache and spend ledger are in place; summaries of finished turns arrive with SA.6. See `docs/plans/dashboard.md`.
+- **Summarizer**: the daemon service (`crates/daemon/src/summarizer/`) that turns a session's turn-end reports into a kind, a headline and a one-line summary, through Claude Haiku on the CLI or DeepSeek. Its settings, per-session queue, cache and spend ledger are in place, and finished-turn summaries run into each session's summary ring. See `docs/plans/dashboard.md`.
 - **Summarizer folder**: the empty machine-local folder (`<data_local>/summarizer`) the summarizer's CLI call runs in; see "Where things live on disk" in `CLAUDE.md`.
 - **Summary ring**: a session's last summary lines (at most 12, or 2 hours), newest first, kept in `sessions/<id>/summary.json`; the Dashboard's drawer shows it.
 - **Summary view**: the planned third view of a session beside terminal and chat, one summarizer line per stretch of work (RT-111).
@@ -235,6 +235,7 @@ The native client auto-starts the daemon if it isn't already running. Daemon lis
 - **Tailnet**: the user's Tailscale network; the daemon's tailnet listener serves TLS on the host's tailnet addresses (on the port `remote.json` configures, default 8787) with a `tailscale cert` certificate, and `crates/tailnet` wraps the `tailscale` CLI; see `docs/plans/remote-access.md`.
 - **Target**: what the native client's connection dials: `Local` (the loopback daemon, ensured and reached with the `daemon.json` token) or `Tailnet(host)` (a MagicDNS name and port over TLS with the device token); `apps/native/src/target.rs`, `docs/native-client.md`.
 - **tauri branch**: the branch holding the earlier, retired Tauri desktop app, cut from the `tauri-last` tag and kept as history. Nothing is fixed or built there, and daemon fixes are not cherry-picked to it.
+- **Template line**: the free fallback summary line: no kind, the headline `Turn finished`, and the first non-blank line of the report.
 - **Terminal title**: the title a session's program sets with an OSC sequence (`SessionSnapshot.terminal_title`); the client names a session by it after stripping the agent's title glyph, falling back to the session label.
 - **Test map**: `tools/test-map.json`, which maps source paths to the nextest filterset that tests them (`rows`), and lists the `central` files that run the full suite and the paths to `ignore`; `.\rt.ps1 test -Validate` checks it.
 - **Test mode**: whether each landed change runs the full suite (`stable`) or only the fast checks and its reached tests (`unstable`, this repo's mode until the stable milestone, Wave 3's cutover); the full suite still runs before a push and before the release step.
@@ -247,6 +248,7 @@ The native client auto-starts the daemon if it isn't already running. Daemon lis
 - **Typed shell form**: the way an interactive agent session starts, the daemon typing `<cd> && <command line>` into the user's shell (agent in shell); with a launch command the program word is typed bare, the plugin's arguments quoted and the extra arguments verbatim.
 - **Unexpected end**: a session whose tracer was lost (killed or crashed) rather than one that exited or was closed; these are pre-ticked for recovery.
 - **Unseen turn**: an agent session whose turn ended while this client wasn't showing it focused; it shows the waiting ring until focused.
+- **Unsummarized reports**: a session's pending `Stop` messages (at most 12, each capped at 8 KiB), waiting for the summarizer's next call.
 - **Untouched (picked) layout**: a tab whose layout type was last chosen by a pick (Rearrange or the first-connect chooser) and has not been hand-resized (a divider drag) or hand-arranged since; the daemon rebuilds that type as panes come and go, and the per-client flag is `TabEntry.picked_layout`; see `docs/native-client.md` ("Tab layouts").
 
   A pick of the automatic grid also remembers the pane area's aspect and follows it when the window is resized (that re-fit keeps the tab's empty panes, where a fixed pick just keeps its count).

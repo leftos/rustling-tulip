@@ -148,6 +148,8 @@ Both sides resolve the config dir via the `directories` crate as `ProjectDirs::f
 - `daemon.json` — handshake (port + auth_token + pid + supported_versions); written on daemon start, removed on graceful shutdown.
 - `sessions/<id>/meta.json` + `scrollback.bin` — orphan-recovery sidecar and PTY scrollback ring. `hook-settings.json` sits beside them for an interactive Claude spawn (passed as `--settings`) and for a recovered shell with a hook agent and a conversation id; a graceful stop deletes it with the sidecar.
 
+  `summary.json` sits beside `meta.json` too: the session's summary ring as a protocol `SessionSummary` whose `lines` is the whole ring (at most 12 lines, none older than 2 hours, newest first). It is written atomically right after each ring update and only while `meta.json` exists (it never creates the folder), restored by the orphan, reattached and abandoned inserts (a missing, corrupt or emptied ring restores no summary), and deleted with the sidecar (`crates/daemon/src/summarizer/turns.rs`, `crates/daemon/src/session.rs`).
+
   The sidecar's `program_name` follows the record (the shell's label once an agent typed into its shell has ended, the agent again on its next `SessionStart`), and `agent_in_shell` and `shell_label` mark a session whose PTY child is the user's shell, so a reattach runs the shell's status watcher (absent means the agent is the child).
 
   A recovered shell's `hook_agent` (the plugin that maps its hook events; absent means none, and the hook route then maps nothing for the session), `hook_options` (the recovered selection's options, an empty object by default) and `hook_trusted` (whether the recovered run was trusted, false by default) are stored there too, written once at spawn, and restored by the orphan, reattached and abandoned inserts; the shell's hook events are mapped with them, not with its own spawn config.
@@ -240,6 +242,7 @@ Before every breaking bump, verify that `daemon_client::ensure_running` retires 
 - `daemon.json` — handshake (port, token, pid, supported protocol versions)
 - `sessions/<id>/meta.json` — orphan-recovery sidecar; written at spawn, deleted on graceful stop
 - `sessions/<id>/hook-settings.json` — the hooks document an interactive Claude spawn passes as `--settings` (a recovered shell's `shell_resume` command names its path); written at spawn, deleted on a graceful stop
+- `sessions/<id>/summary.json` — the session's summary ring (a protocol `SessionSummary`); written atomically after each ring update while `meta.json` exists, deleted with the sidecar
 - `sessions/<id>/scrollback.bin` — 2 MB ring (trims to 1.5 MB on overflow), replayed via `LoadScrollback` on attach
 - `sessions/<id>/scrollback.truncated` — flag file iff the ring overflowed
 

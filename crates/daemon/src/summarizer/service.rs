@@ -453,13 +453,6 @@ impl Summarizer {
     /// makes no call (summaries off, no offered provider, the cap, a missing
     /// key, or a failed start) gets the template line; a failed call gets it
     /// too, its billed cost still counted.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the turn pipeline that submits each finished turn calls it"
-        )
-    )]
     pub(crate) async fn submit(&self, request: Request) -> Outcome {
         let Some(_turn) = self.queue.admit(&request.session_id).await else {
             return Outcome::Replaced;
@@ -641,13 +634,6 @@ impl Summarizer {
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "only submit, which the turn pipeline calls, uses it"
-    )
-)]
 fn template_outcome(input: &str) -> Outcome {
     Outcome::Line {
         line: policy::template(input),
@@ -711,11 +697,14 @@ mod tests {
     }
 }
 
-/// A fake provider for tests: it counts its calls and answers one summary at
-/// a fixed cost.
+/// A fake provider for tests: it counts its calls, records each prompt, and
+/// answers one summary at a fixed cost.
 #[cfg(test)]
 pub(crate) mod test_support {
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    use tokio::sync::Notify;
 
     use protocol::AlertKind;
 
@@ -730,21 +719,38 @@ pub(crate) mod test_support {
     #[derive(Debug, Default)]
     pub(crate) struct FakeCaller {
         calls: AtomicUsize,
+        prompts: Mutex<Vec<String>>,
         cost_usd: f64,
+        /// When set, each call waits for a notification before answering.
+        gate: Option<Arc<Notify>>,
     }
 
     impl FakeCaller {
+        /// A fake whose every call waits until `gate` is notified, billing
+        /// nothing.
+        pub(crate) fn gated(gate: Arc<Notify>) -> Self {
+            Self {
+                gate: Some(gate),
+                ..Self::default()
+            }
+        }
+
         /// A fake that bills `cost_usd` per call.
         pub(crate) fn billing(cost_usd: f64) -> Self {
             Self {
-                calls: AtomicUsize::new(0),
                 cost_usd,
+                ..Self::default()
             }
         }
 
         /// How many calls it answered.
         pub(crate) fn calls(&self) -> usize {
             self.calls.load(Ordering::SeqCst)
+        }
+
+        /// The prompt of every call it answered, in call order.
+        pub(crate) fn prompts(&self) -> Vec<String> {
+            crate::sync::lock(&self.prompts).clone()
         }
     }
 
@@ -753,11 +759,16 @@ pub(crate) mod test_support {
             &'a self,
             _provider: &'a Provider,
             _key: Option<&'a Secret>,
-            _prompt: &'a str,
+            prompt: &'a str,
         ) -> CallFuture<'a> {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            crate::sync::lock(&self.prompts).push(prompt.to_owned());
             let cost_usd = self.cost_usd;
+            let gate = self.gate.clone();
             Box::pin(async move {
+                if let Some(gate) = gate {
+                    gate.notified().await;
+                }
                 Ok(Called {
                     summary: Summary {
                         kind: AlertKind::DoneWaiting,

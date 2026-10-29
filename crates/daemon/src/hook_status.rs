@@ -104,6 +104,9 @@ pub fn apply_signal(hub: &Hub, session_id: &str, event_time: Option<u128>, repor
     if applied.agent_exited {
         hub.sessions.announce_agent_exited(session_id);
     }
+    if let Some(message) = applied.turn_report.as_deref() {
+        hub.turns.on_stop(session_id, message);
+    }
 }
 
 /// What applying one hook event to a record did.
@@ -116,6 +119,19 @@ pub(crate) struct Applied {
     /// The agent inside the session's shell ended, and its end is to be
     /// announced (see [`SessionRecord::end_agent_in_shell`]).
     pub(crate) agent_exited: bool,
+    /// The trimmed last message of a main-agent `Stop` in an interactive
+    /// session, for the turn pipeline to summarize.
+    pub(crate) turn_report: Option<String>,
+}
+
+/// The message a main-agent `Stop` ended an interactive session's turn
+/// with, trimmed; `None` for any other event or an empty message.
+fn turn_report(record: &SessionRecord, report: &HookReport) -> Option<String> {
+    if report.subagent || record.mode != protocol::SessionMode::Interactive {
+        return None;
+    }
+    let message = report.last_message.as_deref()?.trim();
+    (!message.is_empty()).then(|| message.to_owned())
 }
 
 /// Apply one mapped event to `record`: the ordering check, the stamp and the
@@ -165,6 +181,7 @@ pub(crate) fn apply_to_record(
             entered_awaiting: false,
             mismatch: apply_details(record, report),
             agent_exited,
+            turn_report: turn_report(record, report),
         };
     }
     // A subagent works on while the main agent is idle, so its events never
@@ -186,6 +203,7 @@ pub(crate) fn apply_to_record(
         entered_awaiting,
         mismatch: apply_details(record, report),
         agent_exited,
+        turn_report: turn_report(record, report),
     }
 }
 
@@ -472,7 +490,10 @@ pub(crate) fn apply_details(
     if let Some(id) = report.conversation_id.as_deref() {
         update_conversation_id(record, id);
     }
-    if let Some(message) = report.last_message.as_deref() {
+    // A subagent's turn end is not the main agent's.
+    if !report.subagent
+        && let Some(message) = report.last_message.as_deref()
+    {
         store_last_message(record, message);
     }
     // Only the main agent's turn end says whether work runs on; the status is

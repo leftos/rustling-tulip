@@ -171,6 +171,9 @@ pub struct Hub {
     /// The Dashboard summarizer: its settings, key states, queue, cache and
     /// the day's spend.
     pub summarizer: Arc<crate::summarizer::service::Summarizer>,
+    /// The turn pipeline: each session's unsummarized reports, summarized
+    /// through [`Self::summarizer`] into the session's summary ring.
+    pub(crate) turns: Arc<crate::summarizer::turns::Turns>,
 }
 
 impl Hub {
@@ -407,12 +410,9 @@ pub async fn run(
     let (keep_awake_tx, keep_awake_status_rx) = start_keep_awake(&state, &sessions, &state_events);
 
     let dashboard = crate::dashboard::Dashboard::new(Arc::clone(&sessions));
-    let summarizer = Arc::new(start_summarizer(
-        &state,
-        &dirs,
-        &client_count,
-        &state_events,
-    ));
+    let summarizer = start_summarizer(&state, &dirs, &client_count, &state_events);
+    let turns =
+        crate::summarizer::turns::Turns::new(Arc::clone(&sessions), Arc::clone(&summarizer));
     let hub = Hub {
         state,
         sessions,
@@ -446,6 +446,7 @@ pub async fn run(
         live_devices: live_devices::LiveDevices::default(),
         dashboard,
         summarizer,
+        turns,
     };
     start_hub_tasks(&hub, client_count_rx);
 
@@ -882,7 +883,7 @@ fn start_summarizer(
     dirs: &Dirs,
     client_count: &Arc<tokio::sync::watch::Sender<usize>>,
     state_events: &broadcast::Sender<StateEvent>,
-) -> crate::summarizer::service::Summarizer {
+) -> Arc<crate::summarizer::service::Summarizer> {
     use crate::summarizer::service::{Caller, LiveCaller, Summarizer, SummarizerParts};
     let rejections = Arc::new(crate::summarizer::keys::Rejections::default());
     let caller: Option<Arc<dyn Caller>> = match LiveCaller::start(Arc::clone(&rejections)) {
@@ -895,14 +896,14 @@ fn start_summarizer(
             None
         }
     };
-    Summarizer::new(SummarizerParts {
+    Arc::new(Summarizer::new(SummarizerParts {
         state: Arc::clone(state),
         spend_file: crate::paths::summarizer_spend_file(dirs),
         caller,
         rejections,
         client_count: client_count.subscribe(),
         events: state_events.clone(),
-    })
+    }))
 }
 
 /// Start the tasks that watch the hub for the daemon's lifetime.

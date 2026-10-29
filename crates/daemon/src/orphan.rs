@@ -401,6 +401,62 @@ pub fn delete_meta(dirs: &Dirs, session_id: &str) -> anyhow::Result<()> {
     }
 }
 
+/// Write `summary` as the session's `summary.json`, atomically, only while its
+/// `meta.json` sidecar exists: the session dir is never made here, so a late
+/// summary cannot bring back the dir of a session that ended.
+pub fn write_summary(
+    dirs: &Dirs,
+    session_id: &str,
+    summary: &protocol::SessionSummary,
+) -> anyhow::Result<()> {
+    if !meta_path(dirs, session_id).exists() {
+        return Ok(());
+    }
+    let bytes = serde_json::to_vec_pretty(summary).context("serializing the session summary")?;
+    write_atomic(
+        &crate::paths::session_summary_file(dirs, session_id),
+        &bytes,
+    )
+    .context("writing the session summary")
+}
+
+pub fn try_write_summary(dirs: &Dirs, session_id: &str, summary: &protocol::SessionSummary) {
+    if let Err(err) = write_summary(dirs, session_id, summary) {
+        warn!(error = %format!("{err:#}"), %session_id, "failed to write the session summary");
+    }
+}
+
+/// The session's saved summary. A missing file is `None`; an unreadable or
+/// undecodable one is `None` with a warning, so the session still restores.
+pub fn load_summary(dirs: &Dirs, session_id: &str) -> Option<protocol::SessionSummary> {
+    let path = crate::paths::session_summary_file(dirs, session_id);
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(err) => {
+            warn!(%err, path = %path.display(), "could not read the session summary; its ring starts empty");
+            return None;
+        }
+    };
+    match serde_json::from_slice(&bytes) {
+        Ok(summary) => Some(summary),
+        Err(err) => {
+            warn!(%err, path = %path.display(), "the session summary does not decode; its ring starts empty");
+            None
+        }
+    }
+}
+
+/// Remove the session's `summary.json`; a missing file is not an error.
+pub fn delete_summary(dirs: &Dirs, session_id: &str) -> anyhow::Result<()> {
+    let path = crate::paths::session_summary_file(dirs, session_id);
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err).with_context(|| format!("removing {}", path.display())),
+    }
+}
+
 /// Remove the entire `<sessions_dir>/<id>/` directory. Use when stopping a
 /// session for good (cleanup) so scrollback doesn't leak across recreations.
 pub fn delete_session_dir(dirs: &Dirs, session_id: &str) -> anyhow::Result<()> {

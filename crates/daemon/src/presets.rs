@@ -2913,6 +2913,8 @@ mod tests {
             &state_events,
             Arc::new(crate::summarizer::service::test_support::FakeCaller::default()),
         );
+        let turns =
+            crate::summarizer::turns::Turns::new(Arc::clone(&sessions), Arc::clone(&summarizer));
         let hub = Hub {
             state,
             sessions,
@@ -2945,6 +2947,7 @@ mod tests {
             pairing_waiters: Arc::default(),
             live_devices: crate::server::live_devices::LiveDevices::default(),
             dashboard,
+            turns,
             summarizer,
         };
         (hub, preset_rx, scratch)

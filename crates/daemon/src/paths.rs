@@ -326,6 +326,13 @@ pub fn summarizer_spend_file(dirs: &Dirs) -> PathBuf {
     dirs.config.join("summarizer-spend.json")
 }
 
+/// A session's summary ring and latest summary:
+/// `<sessions>/<id>/summary.json`, beside its `meta.json` sidecar.
+#[must_use]
+pub fn session_summary_file(dirs: &Dirs, session_id: &str) -> PathBuf {
+    dirs.sessions_dir.join(session_id).join("summary.json")
+}
+
 /// Resolve the tailnet listener's certificate dir, honoring
 /// `RUSTLING_TULIP_TAILNET_DIR` when set (used by e2e isolation). Falls back
 /// to `<data_local>/leftos/rustling-tulip/data/tailnet/`: the private key

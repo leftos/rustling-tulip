@@ -37,6 +37,34 @@ const RECENT_ACTIONS_TAIL_ENTRIES: usize = 10;
 const RECENT_ACTIONS_TAIL_BYTE_CAP: usize = 1024;
 pub(crate) const EVENT_BROADCAST_CAPACITY: usize = 256;
 
+/// Most lines a session's summary ring keeps.
+pub(crate) const SUMMARY_RING_MAX_LINES: usize = 12;
+
+/// Oldest line a session's summary ring keeps.
+pub(crate) const SUMMARY_RING_MAX_AGE: chrono::TimeDelta = chrono::TimeDelta::hours(2);
+
+/// Lines the snapshot's summary carries.
+const SNAPSHOT_SUMMARY_LINES: usize = 2;
+
+/// Drop the ring's lines older than [`SUMMARY_RING_MAX_AGE`] at `now`, then
+/// keep the newest [`SUMMARY_RING_MAX_LINES`]; `lines` is newest first.
+pub(crate) fn prune_summary_ring(lines: &mut Vec<protocol::SummaryLine>, now: DateTime<Utc>) {
+    let oldest = now - SUMMARY_RING_MAX_AGE;
+    lines.retain(|line| line.at >= oldest);
+    lines.truncate(SUMMARY_RING_MAX_LINES);
+}
+
+/// `summary` as restored: its ring pruned at `now`, `None` when no line is
+/// left.
+fn restored_summary(
+    summary: Option<protocol::SessionSummary>,
+    now: DateTime<Utc>,
+) -> Option<protocol::SessionSummary> {
+    let mut summary = summary?;
+    prune_summary_ring(&mut summary.lines, now);
+    (!summary.lines.is_empty()).then_some(summary)
+}
+
 /// The connection whose request made a session update, and the request's
 /// id. Its own connection's forwarder echoes the id; no other client sees it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,6 +88,14 @@ pub enum SessionEvent {
     /// [`SessionRecord::end_agent_in_shell`].
     AgentExited {
         session_id: String,
+    },
+    /// A finished turn was summarized into the session's ring; sent after the
+    /// `Updated` that carries the line.
+    WaitingAlert {
+        session_id: String,
+        kind: Option<protocol::AlertKind>,
+        notification: String,
+        source: protocol::SummarySource,
     },
 }
 
@@ -227,6 +263,14 @@ pub struct SessionRecord {
     /// a `Stop` reports one; a `Stop` with no message keeps the previous one.
     /// Runtime-only: neither mirrored into the sidecar nor sent on the wire.
     pub last_assistant_message: Option<String>,
+    /// The session's latest summary, its `lines` the whole summary ring,
+    /// newest first. Each push and each restore prunes it to at most
+    /// [`SUMMARY_RING_MAX_LINES`] lines, none older than
+    /// [`SUMMARY_RING_MAX_AGE`]; between them a line stays however old it
+    /// grows, so a quiet session keeps its Summary column. Written to
+    /// `summary.json` beside the sidecar and restored with it; the snapshot
+    /// carries the newest two lines.
+    pub summary: Option<protocol::SessionSummary>,
     /// True while the session is `Idle` but the main agent's last `Stop`
     /// reported background work still running; copied into
     /// [`SessionSnapshot::background`]. Set by that `Stop`, cleared by any
@@ -372,7 +416,18 @@ impl SessionRecord {
             members: self.members.clone(),
             status: self.status,
             status_since: self.status_since,
-            summary: None,
+            summary: self
+                .summary
+                .as_ref()
+                .map(|summary| protocol::SessionSummary {
+                    lines: summary
+                        .lines
+                        .iter()
+                        .take(SNAPSHOT_SUMMARY_LINES)
+                        .cloned()
+                        .collect(),
+                    ..summary.clone()
+                }),
             mode: self.mode,
             started_at: self.started_at,
             exit_code: self.exit_code,
@@ -397,6 +452,36 @@ impl SessionRecord {
             pending_input: self.pending_input.clone(),
             background: self.background,
         }
+    }
+
+    /// Put `line` at the front of the summary ring, replacing a provisional
+    /// line there, prune the ring at `now`, and make `kind`, `headline` and
+    /// the line's source the latest summary, made at `now`.
+    pub(crate) fn push_summary_line(
+        &mut self,
+        kind: Option<protocol::AlertKind>,
+        headline: String,
+        line: protocol::SummaryLine,
+        now: DateTime<Utc>,
+    ) {
+        let mut lines = self
+            .summary
+            .take()
+            .map(|summary| summary.lines)
+            .unwrap_or_default();
+        if lines.first().is_some_and(|first| first.provisional) {
+            lines.remove(0);
+        }
+        let source = line.source;
+        lines.insert(0, line);
+        prune_summary_ring(&mut lines, now);
+        self.summary = Some(protocol::SessionSummary {
+            kind,
+            headline,
+            lines,
+            updated_at: now,
+            source,
+        });
     }
 
     /// The chips the agent's descriptor shows for the options this session
@@ -689,13 +774,42 @@ impl SessionRegistry {
             return;
         };
         if self.get(id).is_none() {
-            orphan::try_delete_meta(dirs, id);
+            Self::delete_sidecar_files(dirs, id);
             return;
         }
         let gate = self.sidecar_gate(id);
         let mut gate = lock(&gate);
         gate.deleted = true;
+        Self::delete_sidecar_files(dirs, id);
+    }
+
+    /// Remove the session's `meta.json` and `summary.json`.
+    fn delete_sidecar_files(dirs: &Dirs, id: &str) {
         orphan::try_delete_meta(dirs, id);
+        if let Err(err) = orphan::delete_summary(dirs, id) {
+            warn!(error = %format!("{err:#}"), session_id = %id, "failed to delete the session summary");
+        }
+    }
+
+    /// Write the session's summary to its `summary.json`, inside its sidecar
+    /// gate: skipped once the record is gone or its sidecar was deleted, and
+    /// while no `meta.json` exists (see [`orphan::write_summary`]).
+    pub fn sync_summary(&self, id: &str) {
+        let Some(dirs) = self.dirs.as_ref() else {
+            return;
+        };
+        self.with_sidecar_gate(id, |arc| {
+            let summary = lock(arc).summary.clone();
+            if let Some(summary) = summary {
+                orphan::try_write_summary(dirs, id, &summary);
+            }
+        });
+    }
+
+    /// The summary `id` saved beside its sidecar, pruned for a restore.
+    fn restore_summary(&self, id: &str) -> Option<protocol::SessionSummary> {
+        let dirs = self.dirs.as_ref()?;
+        restored_summary(orphan::load_summary(dirs, id), Utc::now())
     }
 
     /// `id`'s sidecar gate, so a test can hold it and stand in for a write
@@ -763,21 +877,40 @@ impl SessionRegistry {
         self.update_from_if_changed(id, None, f)
     }
 
+    /// [`Self::update`], where `f` also answers an event to send right after
+    /// the update's `SessionUpdated`, decided under the same record lock.
+    /// Returns whether the registry holds `id`.
+    pub fn update_then<F>(&self, id: &str, f: F) -> bool
+    where
+        F: FnOnce(&mut SessionRecord) -> Option<SessionEvent>,
+    {
+        self.update_inner(id, None, |record| Some(f(record)))
+    }
+
     /// The shared body of [`Self::update_from`] and [`Self::update_if_changed`].
     fn update_from_if_changed<F>(&self, id: &str, origin: Option<UpdateOrigin>, f: F) -> bool
     where
         F: FnOnce(&mut SessionRecord) -> bool,
     {
+        self.update_inner(id, origin, |record| f(record).then_some(None))
+    }
+
+    /// The body of every update: `f` answers `None` when it changed nothing,
+    /// else the event, if any, to send after the `SessionUpdated`.
+    fn update_inner<F>(&self, id: &str, origin: Option<UpdateOrigin>, f: F) -> bool
+    where
+        F: FnOnce(&mut SessionRecord) -> Option<Option<SessionEvent>>,
+    {
         let Some(arc) = self.get(id) else {
             return false;
         };
-        let (snap, entered_error, status_change) = {
+        let (snap, entered_error, status_change, follow_up) = {
             let mut guard = lock(&arc);
             let was_error = guard.status == SessionStatus::Error;
             let was_status = guard.status;
-            if !f(&mut guard) {
+            let Some(follow_up) = f(&mut guard) else {
                 return true;
-            }
+            };
             let mut status_change = None;
             if guard.status != was_status {
                 let at = Utc::now();
@@ -785,7 +918,7 @@ impl SessionRegistry {
                 status_change = Some((at, guard.status));
             }
             let entered_error = !was_error && guard.status == SessionStatus::Error;
-            (guard.snapshot(), entered_error, status_change)
+            (guard.snapshot(), entered_error, status_change, follow_up)
         };
         // Record the change in the status-change log, outside the record lock
         // and never failing the update: the Dashboard's activity track reads
@@ -808,6 +941,9 @@ impl SessionRegistry {
         let _ = self
             .events
             .send(SessionEvent::Updated(Box::new(snap), origin));
+        if let Some(event) = follow_up {
+            let _ = self.events.send(event);
+        }
         if entered_error {
             self.fan_out_attention(id.to_owned(), protocol::AttentionReason::Error);
         }
@@ -1207,6 +1343,7 @@ impl SessionRegistry {
             hook_driven: false,
             background: false,
             last_assistant_message: None,
+            summary: self.restore_summary(&meta.session_id),
             busy_excluded: meta.busy_excluded,
             agent_in_shell: meta.agent_in_shell,
             shell_label: meta.shell_label.clone(),
@@ -1289,6 +1426,7 @@ impl SessionRegistry {
             hook_driven: false,
             background: false,
             last_assistant_message: None,
+            summary: self.restore_summary(&meta.session_id),
             busy_excluded: meta.busy_excluded,
             agent_in_shell: meta.agent_in_shell,
             shell_label: meta.shell_label.clone(),
@@ -1348,6 +1486,7 @@ impl SessionRegistry {
             hook_driven: false,
             background: false,
             last_assistant_message: None,
+            summary: self.restore_summary(&meta.session_id),
             busy_excluded: meta.busy_excluded,
             agent_in_shell: meta.agent_in_shell,
             shell_label: meta.shell_label.clone(),
@@ -1431,6 +1570,7 @@ mod tests {
             hook_driven: false,
             background: false,
             last_assistant_message: None,
+            summary: None,
             busy_excluded: false,
             agent_in_shell: false,
             shell_label: None,
@@ -2291,6 +2431,170 @@ mod tests {
         let (pty, _exit_tx) = fake_pty();
         reattached.insert_reattached(&meta, pty).publish();
         assert_eq!(hook_options_of(&reattached), expected, "reattached insert");
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    /// A model's ring line `text`, covering reports up to `at`.
+    fn ring_line(text: &str, at: DateTime<Utc>) -> protocol::SummaryLine {
+        protocol::SummaryLine {
+            text: text.to_owned(),
+            at,
+            source: protocol::SummarySource::Model,
+            provisional: false,
+        }
+    }
+
+    /// A saved summary whose ring holds two recent lines, newest first.
+    fn saved_summary() -> protocol::SessionSummary {
+        let now = Utc::now();
+        protocol::SessionSummary {
+            kind: Some(protocol::AlertKind::NeedsAnswer),
+            headline: "Asks which branch".to_owned(),
+            lines: vec![
+                ring_line("newer", now - chrono::TimeDelta::minutes(1)),
+                ring_line("older", now - chrono::TimeDelta::minutes(5)),
+            ],
+            updated_at: now,
+            source: protocol::SummarySource::Model,
+        }
+    }
+
+    /// Dirs holding `standalone_meta`'s sidecar and `summary` as its
+    /// `summary.json`.
+    fn dirs_with_summary(tag: &str, summary: &protocol::SessionSummary) -> Dirs {
+        let dirs = crate::history::test_support::scratch_dirs(tag);
+        crate::orphan::write_meta(&dirs, &standalone_meta()).expect("write meta");
+        crate::orphan::write_summary(&dirs, "s1", summary).expect("write summary");
+        dirs
+    }
+
+    fn summary_of(registry: &SessionRegistry) -> Option<protocol::SessionSummary> {
+        let arc = registry.get("s1").expect("the inserted session");
+        lock(&arc).summary.clone()
+    }
+
+    #[test]
+    fn the_ring_keeps_twelve_lines_and_two_hours_newest_first() {
+        let mut rec = record("s1");
+        let now = Utc::now();
+        rec.push_summary_line(None, "old".to_owned(), ring_line("stale", now), now);
+        let later = now + chrono::TimeDelta::hours(3);
+        for n in 0..14 {
+            let at = later + chrono::TimeDelta::seconds(n);
+            rec.push_summary_line(None, format!("h{n}"), ring_line(&format!("l{n}"), at), at);
+        }
+        let summary = rec.summary.expect("a summary");
+        let texts: Vec<&str> = summary
+            .lines
+            .iter()
+            .map(|line| line.text.as_str())
+            .collect();
+        let expected: Vec<String> = (2..14).rev().map(|n| format!("l{n}")).collect();
+        assert_eq!(
+            texts, expected,
+            "the newest twelve, newest first, none stale"
+        );
+        assert_eq!(summary.headline, "h13");
+    }
+
+    #[test]
+    fn the_snapshot_carries_the_newest_two_lines() {
+        let mut rec = record("s1");
+        let now = Utc::now();
+        for (n, text) in ["a", "b", "c"].iter().enumerate() {
+            let at = now + chrono::TimeDelta::seconds(i64::try_from(n).expect("small"));
+            rec.push_summary_line(None, "h".to_owned(), ring_line(text, at), at);
+        }
+        let snapshot = rec.snapshot().summary.expect("a summary");
+        let texts: Vec<&str> = snapshot
+            .lines
+            .iter()
+            .map(|line| line.text.as_str())
+            .collect();
+        assert_eq!(texts, ["c", "b"]);
+        assert_eq!(rec.summary.expect("the ring").lines.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn the_ring_survives_a_reattach() {
+        let saved = saved_summary();
+        let dirs = dirs_with_summary("ring-reattach", &saved);
+        let registry = SessionRegistry::new(dirs.clone());
+        let (pty, _exit_tx) = crate::history::test_support::fake_pty();
+        registry
+            .insert_reattached(&standalone_meta(), pty)
+            .publish();
+        assert_eq!(summary_of(&registry), Some(saved));
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn the_ring_is_restored_for_an_orphan() {
+        let saved = saved_summary();
+        let dirs = dirs_with_summary("ring-orphan", &saved);
+        let registry = SessionRegistry::new(dirs.clone());
+        registry.insert_orphan(&standalone_meta());
+        assert_eq!(summary_of(&registry), Some(saved));
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn the_ring_is_restored_for_an_abandoned_session() {
+        let mut saved = saved_summary();
+        saved
+            .lines
+            .push(ring_line("stale", Utc::now() - chrono::TimeDelta::hours(3)));
+        let dirs = dirs_with_summary("ring-abandoned", &saved);
+        let registry = SessionRegistry::new(dirs.clone());
+        registry.insert_abandoned(&standalone_meta());
+        saved.lines.pop();
+        assert_eq!(summary_of(&registry), Some(saved), "pruned on restore");
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn a_corrupt_summary_file_restores_an_empty_ring() {
+        let dirs = dirs_with_summary("ring-corrupt", &saved_summary());
+        std::fs::write(
+            crate::paths::session_summary_file(&dirs, "s1"),
+            b"{not json",
+        )
+        .expect("corrupt the summary");
+        let registry = SessionRegistry::new(dirs.clone());
+        registry.insert_orphan(&standalone_meta());
+        assert!(
+            registry.get("s1").is_some(),
+            "the session is still restored"
+        );
+        assert_eq!(summary_of(&registry), None);
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn delete_sidecar_removes_the_summary_file() {
+        let dirs = dirs_with_summary("ring-delete", &saved_summary());
+        let file = crate::paths::session_summary_file(&dirs, "s1");
+        let registry = SessionRegistry::new(dirs.clone());
+        registry.insert_orphan(&standalone_meta());
+        registry.delete_sidecar("s1");
+        assert!(!file.exists(), "the summary goes with the sidecar");
+        registry.sync_summary("s1");
+        assert!(!file.exists(), "no write brings it back");
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn no_summary_file_is_written_without_meta_json() {
+        let dirs = crate::history::test_support::scratch_dirs("ring-no-meta");
+        let registry = SessionRegistry::new(dirs.clone());
+        let mut rec = record("s1");
+        rec.summary = Some(saved_summary());
+        registry.insert(rec);
+        registry.sync_summary("s1");
+        assert!(
+            !dirs.sessions_dir.join("s1").exists(),
+            "no session dir is made for the summary"
+        );
         let _ = std::fs::remove_dir_all(&dirs.config);
     }
 
