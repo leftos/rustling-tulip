@@ -49,7 +49,7 @@ The Dashboard mock's sample data (`const S`) is a plausible 14:32 with eight ses
 
 ### Header strip
 
-One band at the top of both views: the title, count pills (`N need you` in the asking colour, then working, idle, done), the day's figures (`Today $X API-equiv`, tokens, commits, issues Done), one progress bar per Linear release the listed sessions' issues belong to (`vNext 11/18`), the Linear sync age (`Linear · 1m ago`, in the danger colour with its age when Linear is unreachable) and the `By repo | By status` toggle.
+One band at the top of both views: the title, count pills (`N need you` in the asking colour, then working, idle, done), the day's figures (`Today $X API-equiv`, tokens, commits, issues Done), one progress bar per Linear release the listed sessions' issues belong to (`vNext 11/18`), the Linear sync age (`Linear · 1m ago`, in the danger colour with its age when Linear is unreachable) and the `By repo | By status` toggle. The toggle is not drawn until By repo exists (DB.25); the figures, release bars and sync age stay hidden while the day's totals are zero and the Linear sync time is unset.
 
 ### The needs-you count
 
@@ -102,7 +102,7 @@ A sticky column header, then one group heading per group (`Needs you 2`), then o
 | Agents | `1 sub (1 live) · 1 dispatch · 2 bg`, or `—` | |
 | Context | a bar and the percentage, drawn hot past 80% | |
 | 10 min | ten one-minute bars of tool calls, oldest first; a quiet session draws them faint | |
-| Last 2 h | the session's activity track | its short caption |
+| Last 2 h (arrives with DB.22, not DB.12) | the session's activity track | its short caption |
 | Run · last | the runtime since the session started | time since its last activity |
 | Cost | the session's cost in dollars | its input tokens |
 
@@ -124,7 +124,9 @@ The **now line** says what a session is doing this second, highest rule first (O
 6. Working otherwise: `Thinking`.
 7. Idle with an unseen turn: `Turn finished · not looked at yet`.
 8. Idle otherwise: the newest summary's headline, else `Idle`.
-9. Ended: `Session ended · exit N`, or `Error`.
+9. Ended: `Session ended · exit N`, or `Session ended` when there is no exit code.
+
+A `Spawning` session reads `Starting`. A row in the Needs you group by the Answer rule (status `Idle`) reads `Idle` and its summary headline, even when its turn has not been looked at.
 
 The daemon words rules 2 to 6 (ages `<1m`, `5m`, `1h05m`) in `crates/daemon/src/dashboard/now.rs`. Rules 1, 7, 8 and 9 reach the client as kind `unknown` with empty text and `since` = `status_since`, and the client words them. Rule 1 for the agent tree (a session that is not running) forces Running and Queued subagent and shell nodes to Finished, worded `finished`.
 
@@ -460,7 +462,7 @@ Ids: **SA** for the summarizer service, **DB** for the Dashboard. Each names its
 
   Proof: a daemon test that a second open focuses the first; a `ui_tabs` spec that the rail button opens and then focuses the tab and sends `WatchDashboard`. Waits on DB.2.
 - [x] DB.11 Model the Dashboard's groups and order. `apps/native/src/dashboard.rs` (new, plain Rust: listed sessions, the four groups and their order, header counts, the waits as the Needs you group's rows), `apps/native/src/needs_you.rs` (`is_answer`), `apps/native/tests/support/mod.rs` (session setters), `apps/native/tests/ui/ui_dashboard.rs` (new), `apps/native/tests/ui/main.rs`. Proof: specs over scripted snapshots for group membership and order (the Answer rule included) and busy-excluded sessions left out of the Working count. Waits on DB.2.
-- [ ] DB.12 Draw the By status view's dense session rows. `apps/native/src/dashboard_view.rs` (new: header strip, queue strip, column header, group headings, two-line rows, context bar, activity bars, nested rows), `apps/native/src/lib.rs` (mounted in the tab body), `apps/native/src/palette.rs` (asking wash, hot context), `apps/native/tests/ui/ui_dashboard.rs`, `apps/native/examples/shot.rs` (a `dashboard` view).
+- [x] DB.12 Draw the By status view's dense session rows. `apps/native/src/dashboard_view.rs` (new: header strip, queue strip, column header, group headings, two-line rows, context bar, activity bars, nested rows), `apps/native/src/lib.rs` (mounted in the tab body), `apps/native/src/palette.rs` (asking wash, hot context), `apps/native/tests/ui/ui_dashboard.rs`, `apps/native/examples/shot.rs` (a `dashboard` view).
 
   Proof: specs over scripted snapshots and facts that each column shows its field and nested rows show under working rows; a `native-shot dashboard` before and after. Waits on DB.10, DB.11.
 - [ ] DB.13 Answer questions and permissions from the Dashboard. `crates/agents/api/src/lib.rs` (`Agent::answer_keys`), `crates/agents/claude/src/answers.rs` (new: the keys per choice), `crates/daemon/src/server/dashboard.rs` (`AnswerPrompt`: the same-prompt and screen checks, then the keys), `apps/native/src/dashboard_view.rs` (the ask block and buttons), `apps/native/tests/ui/ui_dashboard.rs`.

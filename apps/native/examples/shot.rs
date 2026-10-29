@@ -47,6 +47,9 @@ use serde_json::{Value, json};
 
 /// The window's size in logical pixels, the client's own.
 const WINDOW_SIZE: (u16, u16) = (1000, 640);
+/// The `dashboard` shot's window: wide enough for every column of the By
+/// status view.
+const DASHBOARD_WINDOW_SIZE: (u16, u16) = (1800, 900);
 /// How long the window gets to draw the fixture before the view is driven.
 const LOAD_WAIT: Duration = Duration::from_millis(1500);
 /// How long the view gets to answer the input that reaches it.
@@ -62,6 +65,10 @@ const FAKE_PID: u32 = 1;
 /// The rail's buttons stack from its top with no gap, each
 /// [`RAIL_ITEM_HEIGHT`] tall.
 const SOURCE_CONTROL_ITEM: f32 = 2.0;
+/// The Dashboard button's place on the rail, after the three panel items.
+const DASHBOARD_ITEM: f32 = 3.0;
+/// The Dashboard tab the `dashboard` shot's open makes.
+const DASHBOARD_TAB: &str = "t-dashboard";
 
 const TULIP: &str = "rustling-tulip";
 const YAAT: &str = "yaat";
@@ -118,10 +125,11 @@ enum View {
     Spawn,
     Viewer,
     ViewerMd,
+    Dashboard,
 }
 
 impl View {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 10] = [
         Self::Main,
         Self::MainCompact,
         Self::SourceControl,
@@ -131,6 +139,7 @@ impl View {
         Self::Spawn,
         Self::Viewer,
         Self::ViewerMd,
+        Self::Dashboard,
     ];
 
     fn name(self) -> &'static str {
@@ -144,6 +153,16 @@ impl View {
             Self::Spawn => "spawn",
             Self::Viewer => "viewer",
             Self::ViewerMd => "viewer-md",
+            Self::Dashboard => "dashboard",
+        }
+    }
+
+    /// The window's size for this view.
+    fn window_size(self) -> (u16, u16) {
+        if self == Self::Dashboard {
+            DASHBOARD_WINDOW_SIZE
+        } else {
+            WINDOW_SIZE
         }
     }
 
@@ -173,6 +192,14 @@ impl View {
                     && root
                         .viewer_tab(VIEWER_TAB)
                         .is_some_and(|tab| tab.load() == ViewerLoad::Loaded)
+            }
+            Self::Dashboard => {
+                root.active_tab_id() == Some(DASHBOARD_TAB)
+                    && root
+                        .dashboard_view_rows()
+                        .iter()
+                        .flat_map(|(_, rows)| rows)
+                        .any(|row| row.context != "—")
             }
         }
     }
@@ -226,7 +253,8 @@ impl Shot {
             | View::Diff
             | View::Settings
             | View::SettingsClaude
-            | View::Spawn => None,
+            | View::Spawn
+            | View::Dashboard => None,
         };
         if let Some(text) = sample_text {
             let sample = self.viewer_sample();
@@ -278,7 +306,11 @@ fn start(shot: Shot, slot: Rc<RefCell<Option<Result<()>>>>, cx: &mut App) -> Res
     let (event_tx, event_rx) = unbounded();
     let now = Utc::now();
     let fixture = Fixture::build(shot.view, now)?;
-    let handle = open_window(deps(cmd_tx, event_rx, &shot.ui_dir), cx)?;
+    let handle = open_window(
+        deps(cmd_tx, event_rx, &shot.ui_dir),
+        shot.view.window_size(),
+        cx,
+    )?;
     let address = handle.update(cx, |_, window, _| win32::window_address(window))??;
     let failure = Arc::new(Mutex::new(None));
     let daemon = FakeDaemon {
@@ -333,8 +365,12 @@ fn deps(
 }
 
 /// Opens the root view in a cloaked window that is never activated.
-fn open_window(deps: RootDeps, cx: &mut App) -> Result<WindowHandle<RootView>> {
-    let (width, height) = WINDOW_SIZE;
+fn open_window(
+    deps: RootDeps,
+    window_size: (u16, u16),
+    cx: &mut App,
+) -> Result<WindowHandle<RootView>> {
+    let (width, height) = window_size;
     let bounds = Bounds::centered(None, size(px(width.into()), px(height.into())), cx);
     cx.open_window(
         WindowOptions {
@@ -346,7 +382,7 @@ fn open_window(deps: RootDeps, cx: &mut App) -> Result<WindowHandle<RootView>> {
             ..Default::default()
         },
         move |window, cx| {
-            show_cloaked(window, WINDOW_SIZE);
+            show_cloaked(window, window_size);
             cx.new(|cx| RootView::with_transport(deps, window, cx))
         },
     )
@@ -428,6 +464,15 @@ fn drive(
             Ok(())
         }
         View::Spawn => press("ctrl-shift-n", window, cx),
+        View::Dashboard => {
+            let y = (DASHBOARD_ITEM + 0.5) * RAIL_ITEM_HEIGHT;
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "the rail's middle lies within a few hundred logical pixels"
+            )]
+            let at = ((RAIL_WIDTH / 2.0).round() as i32, y.round() as i32);
+            win32::click(address, at)
+        }
         View::Viewer => {
             let root = window
                 .root::<RootView>()
@@ -561,7 +606,11 @@ impl Fixture {
             ],
         }))
         .context("the fixture's workspaces")?;
-        let sessions = session_rows()
+        let mut rows = session_rows();
+        if view == View::Dashboard {
+            dashboard_rows(&mut rows);
+        }
+        let sessions = rows
             .into_iter()
             .map(|row| row.snapshot(now))
             .collect::<Result<Vec<_>>>()?;
@@ -581,6 +630,9 @@ impl Fixture {
             }));
         }
         check_reply_shapes(now)?;
+        if view == View::Dashboard {
+            dashboard_facts(now)?;
+        }
         Ok(Self {
             repos,
             workspaces,
@@ -918,6 +970,8 @@ impl FakeDaemon {
             ClientMessage::GetFileSnapshot { .. } => file_snapshot(msg)?,
             ClientMessage::ListBranches { repo_id } => parse_message(branches(repo_id))?,
             ClientMessage::OpenViewerTab { id, path } => return viewer_opened(id, path),
+            ClientMessage::OpenDashboardTab { id } => return dashboard_opened(id),
+            ClientMessage::WatchDashboard { on: true } => dashboard_facts(self.now)?,
             ClientMessage::SuggestBranchName { target, request_id } => {
                 DaemonMessage::BranchNameSuggestion {
                     target: target.clone(),
@@ -1074,6 +1128,145 @@ fn viewer_opened(id: &str, path: &str) -> Result<Vec<DaemonMessage>> {
             tab_id: VIEWER_TAB.to_owned(),
         },
     ])
+}
+
+/// The daemon's answer to the `dashboard` shot's `OpenDashboardTab` `id`:
+/// the new tab, then the open's reply naming it.
+fn dashboard_opened(id: &str) -> Result<Vec<DaemonMessage>> {
+    let tab = serde_json::from_value(json!({
+        "id": DASHBOARD_TAB,
+        "name": "Dashboard",
+        "content": { "kind": "dashboard" },
+        "created_at": "2026-01-01T00:00:00Z",
+    }))
+    .context("the Dashboard tab fixture")?;
+    Ok(vec![
+        DaemonMessage::TabUpdated { tab },
+        DaemonMessage::DashboardTabOpened {
+            id: id.to_owned(),
+            tab_id: DASHBOARD_TAB.to_owned(),
+        },
+    ])
+}
+
+/// The `dashboard` shot's sessions: the asking one holds a question, and
+/// an exited run joins the unseen review in Done.
+fn dashboard_rows(rows: &mut Vec<Row>) {
+    for row in rows.iter_mut().filter(|row| row.id == "s-recover") {
+        row.extra["pending_input"] = json!({
+            "kind": "question",
+            "questions": [{
+                "question": "Bind Ctrl+R to Recover, or keep it free for the terminal?",
+                "header": "Keys",
+                "options": [],
+                "multi_select": false,
+            }],
+        });
+    }
+    rows.push(Row {
+        id: "s-costs",
+        label: "Costs per repository",
+        status: "stopped",
+        members: json!([member(YAAT, "feat/costs-per-repo", YAAT_PATH)]),
+        minutes: 25,
+        extra: json!({ "exit_code": 0 }),
+    });
+}
+
+/// The facts the `dashboard` shot's watch is sent, as of `now`: the
+/// working session runs a subagent with a finished child, a shell and a
+/// dispatch run, and its context reads hot.
+fn dashboard_facts(now: DateTime<Utc>) -> Result<DaemonMessage> {
+    let ago = |minutes: i64| now - chrono::Duration::minutes(minutes);
+    parse_message(json!({
+        "type": "dashboard_facts",
+        "facts": [
+            {
+                "session_id": "s-petal",
+                "now": { "kind": "running_tool", "text": "Running Bash · 1m: cargo nextest run -p native" },
+                "agents": [
+                    {
+                        "key": "subagent:a1", "kind": "subagent", "name": "Check the footer pill spacing",
+                        "task": "Running Grep · footer.rs", "state": "running", "started_at": ago(4),
+                        "children": [{
+                            "key": "subagent:a2", "kind": "subagent", "name": "Read the palette",
+                            "task": "finished · 3 tokens to reuse", "state": "finished", "started_at": ago(3),
+                        }],
+                    },
+                    {
+                        "key": "bg:b1", "kind": "shell", "name": "bg shell b1",
+                        "task": "Running cargo watch -x check", "state": "running", "started_at": ago(12),
+                    },
+                    {
+                        "key": "dispatch:d1", "kind": "dispatch", "name": "dispatch · RT-455 part B",
+                        "task": "Writing the UI specs", "state": "running", "started_at": ago(9),
+                        "stuck": { "kind": "tool_failures", "count": 3 },
+                    },
+                ],
+                "context_percent": 86,
+                "tokens_in": 3_100_000,
+                "cost_usd": 2.46,
+                "activity": [2, 4, 6, 3, 8, 12, 9, 5, 7, 10],
+                "stuck": [{ "kind": "context_high" }],
+                "last_activity_at": ago(0),
+                "issue": "RT-455",
+            },
+            {
+                "session_id": "s-recover",
+                "now": { "kind": "unknown", "text": "" },
+                "context_percent": 41,
+                "tokens_in": 842_000,
+                "cost_usd": 0.46,
+                "activity": [3, 2, 1, 0, 0, 0, 0, 0, 0, 0],
+                "last_activity_at": ago(6),
+                "issue": "RT-444",
+            },
+            {
+                "session_id": "s-metar",
+                "now": { "kind": "waiting_on_background", "text": "Waiting on a background task" },
+                "agents": [{
+                    "key": "bg:m1", "kind": "monitor", "name": "bg monitor m1",
+                    "task": "Watching the METAR feed", "state": "running", "started_at": ago(25),
+                }],
+                "context_percent": 23,
+                "tokens_in": 210_000,
+                "cost_usd": 0.12,
+                "activity": [0, 0, 1, 0, 0, 0, 0, 1, 0, 0],
+                "last_activity_at": ago(25),
+            },
+            {
+                "session_id": "s-review",
+                "now": { "kind": "unknown", "text": "" },
+                "context_percent": 64,
+                "tokens_in": 1_400_000,
+                "cost_usd": 1.08,
+                "activity": [5, 6, 2, 0, 0, 0, 0, 0, 0, 0],
+                "last_activity_at": ago(1),
+            },
+            {
+                "session_id": "s-proto",
+                "now": { "kind": "unknown", "text": "" },
+                "context_percent": 18,
+                "tokens_in": 96_000,
+                "cost_usd": 0.004,
+                "activity": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                "last_activity_at": ago(48),
+            },
+            {
+                "session_id": "s-costs",
+                "now": { "kind": "unknown", "text": "" },
+                "context_percent": 51,
+                "tokens_in": 960_000,
+                "cost_usd": 4.1,
+                "activity": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                "last_activity_at": ago(25),
+                "issue": "OPS-340",
+            },
+        ],
+        "totals": {},
+        "linear_synced_at": null,
+    }))
+    .context("the Dashboard facts")
 }
 
 /// The screen a session's scrollback replays.

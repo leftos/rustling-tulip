@@ -578,8 +578,98 @@ impl SessionBuilder {
         self.set("current_cwd", json!(cwd))
     }
 
+    /// When the session started.
+    pub fn started_at(self, at: DateTime<Utc>) -> Self {
+        self.set("started_at", json!(at))
+    }
+
+    /// With a model-written summary headed `headline` whose lines are
+    /// `lines` as `(text, at)`, newest first.
+    pub fn summary_lines(self, headline: &str, lines: &[(&str, DateTime<Utc>)]) -> Self {
+        let lines: Vec<Value> = lines
+            .iter()
+            .map(|(text, at)| json!({ "text": text, "at": at, "source": "model" }))
+            .collect();
+        let updated_at = lines
+            .first()
+            .map_or_else(|| json!(Utc::now()), |line| line["at"].clone());
+        self.set(
+            "summary",
+            json!({ "kind": null, "headline": headline, "lines": lines, "updated_at": updated_at, "source": "model" }),
+        )
+    }
+
     pub fn build(self) -> SessionSnapshot {
         serde_json::from_value(self.0).expect("session fixture")
+    }
+}
+
+/// A Dashboard facts fixture: nothing known yet but the session id, and a
+/// now line no daemon rule worded.
+pub struct FactsBuilder(Value);
+
+pub fn facts(session_id: &str) -> FactsBuilder {
+    FactsBuilder(json!({ "session_id": session_id, "now": { "kind": "unknown", "text": "" } }))
+}
+
+impl FactsBuilder {
+    fn set(mut self, key: &str, value: Value) -> Self {
+        self.0[key] = value;
+        self
+    }
+
+    /// The daemon's now line, e.g. `("running_tool", "Running Bash · 1m: cargo test")`.
+    pub fn now(self, kind: &str, text: &str) -> Self {
+        self.set("now", json!({ "kind": kind, "text": text }))
+    }
+
+    pub fn context(self, percent: u8) -> Self {
+        self.set("context_percent", json!(percent))
+    }
+
+    pub fn cost(self, usd: f64) -> Self {
+        self.set("cost_usd", json!(usd))
+    }
+
+    pub fn tokens_in(self, tokens: u64) -> Self {
+        self.set("tokens_in", json!(tokens))
+    }
+
+    /// Ten one-minute tool-call counts, oldest first.
+    pub fn activity(self, counts: &[u16]) -> Self {
+        self.set("activity", json!(counts))
+    }
+
+    /// The stuck reasons, as the wire spells them.
+    pub fn stuck(self, reasons: Value) -> Self {
+        self.set("stuck", reasons)
+    }
+
+    /// The agent tree below the main agent, as the wire spells it.
+    pub fn agents(self, tree: Value) -> Self {
+        self.set("agents", tree)
+    }
+
+    pub fn last_activity(self, at: DateTime<Utc>) -> Self {
+        self.set("last_activity_at", json!(at))
+    }
+
+    pub fn issue(self, key: &str) -> Self {
+        self.set("issue", json!(key))
+    }
+
+    pub fn build(self) -> protocol::SessionFacts {
+        serde_json::from_value(self.0).expect("facts fixture")
+    }
+}
+
+/// A `DashboardFacts` message carrying `facts`, with the day's totals not
+/// known yet.
+pub fn facts_message(facts: Vec<protocol::SessionFacts>) -> DaemonMessage {
+    DaemonMessage::DashboardFacts {
+        facts,
+        totals: protocol::DayTotals::default(),
+        linear_synced_at: None,
     }
 }
 

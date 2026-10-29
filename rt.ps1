@@ -58,7 +58,7 @@
       native-shot
                  Write a PNG of the native client's window showing one view
                  (`main`, `main-compact`, `source-control`, `diff`, `settings`,
-                 `settings-claude`, `spawn`, `viewer` or `viewer-md`; default `main`) over a fake daemon with fixed
+                 `settings-claude`, `spawn`, `viewer`, `viewer-md` or `dashboard`; default `main`) over a fake daemon with fixed
                  content, via
                  `cargo run --example shot`. No daemon starts; the window
                  stays cloaked and never takes focus. Writes
@@ -1077,7 +1077,7 @@ Commands:
   native-shot [<view>] [<out.png>] [-Out <path>]
              Write a PNG of the native client's window showing <view>
              (main, main-compact, source-control, diff, settings, settings-claude, spawn, viewer,
-             viewer-md;
+             viewer-md, dashboard;
              default main)
              over a fake daemon with fixed content, then print its path.
              <out.png> is the PNG to write; -Out says the same thing.

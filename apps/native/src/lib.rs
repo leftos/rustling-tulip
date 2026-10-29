@@ -24,7 +24,10 @@ mod connection_picker_view;
 mod copied;
 mod copy_text;
 mod dashboard;
+mod dashboard_facts;
+mod dashboard_rows;
 mod dashboard_tab;
+mod dashboard_view;
 mod device_pairing;
 mod device_pairing_view;
 mod devices;
@@ -224,6 +227,9 @@ pub use crate::changes_view::{
 };
 pub use crate::connection::Connection;
 pub use crate::dashboard::DashboardEntry;
+pub use crate::dashboard_rows::{
+    Columns as DashboardColumns, HeaderFigures, NestedRow, QueueChip, ReleaseFigure, RowCells,
+};
 pub use crate::diff_tab::{
     BINARY_TEXT, DiffTabBody, DiffTabHeader, EMPTY_TEXT, FINAL_NEWLINE_NOTE, LINE_ENDINGS_NOTE,
     LOADING_TEXT as DIFF_LOADING_TEXT, OPEN_FAILED_TITLE as DIFF_OPEN_FAILED_TITLE, WHITESPACE_TIP,
@@ -1013,6 +1019,15 @@ pub struct RootView {
     /// The last `WatchDashboard` sent on this connection: whether the
     /// daemon is streaming the Dashboard's facts to this client.
     dashboard_watch: bool,
+    /// The Dashboard's facts, as the daemon last streamed them.
+    dashboard_facts: dashboard_facts::FactsStore,
+    /// The Dashboard body's scroll, which a queue chip moves to its row.
+    dashboard_scroll: gpui::ScrollHandle,
+    /// Repaints the Dashboard while its tab is active, so the ages count.
+    dashboard_timer: Option<Task<()>>,
+    /// The Dashboard view's width as last laid out; `None` before the first
+    /// layout.
+    dashboard_width: Option<f32>,
     /// The tab active after the last tab change, so a diff or viewer tab
     /// takes the keyboard when it becomes active.
     last_active_tab: Option<String>,
@@ -1372,6 +1387,10 @@ impl RootView {
             viewer_focus: cx.focus_handle(),
             dashboard_opens: dashboard_tab::DashboardOpens::default(),
             dashboard_watch: false,
+            dashboard_facts: dashboard_facts::FactsStore::default(),
+            dashboard_scroll: gpui::ScrollHandle::new(),
+            dashboard_timer: None,
+            dashboard_width: None,
             last_active_tab: None,
             last_focused_session: None,
             pick_folder,
@@ -2998,6 +3017,7 @@ impl RootView {
             self.reload_active_viewer(cx);
         }
         self.sync_dashboard_watch();
+        self.sync_dashboard_repaint(cx);
         // The saved active tab is the local daemon's; a remote host's tab
         // ids are neither remembered nor saved.
         if self.conn.target().is_local() && self.sidebar.set_active_tab(self.tabs.active_id()) {

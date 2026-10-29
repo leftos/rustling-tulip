@@ -113,7 +113,11 @@ fn reason_of(leaf: &Leaf) -> Option<Reason> {
 }
 
 /// Line two for a listed session; `agents` says how its terminal title reads.
-fn detail_of(reason: Reason, session: &SessionSnapshot, agents: &[AgentDescriptor]) -> String {
+pub(crate) fn detail_of(
+    reason: Reason,
+    session: &SessionSnapshot,
+    agents: &[AgentDescriptor],
+) -> String {
     match reason {
         Reason::Asking => session
             .pending_input

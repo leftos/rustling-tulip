@@ -130,6 +130,17 @@ pub(crate) const INPUT_CURSOR: u32 = ACCENT;
 /// `0xRRGGBBAA`.
 pub(crate) const INPUT_SELECTION: u32 = (ACCENT << 8) | 0x4d;
 
+/// A Dashboard row waiting on the user: [`ASKING`] at 7% alpha, as
+/// `0xRRGGBBAA`.
+pub(crate) const ASK_WASH: u32 = (ASKING << 8) | 0x12;
+/// A Dashboard queue chip's border: [`ASKING`] at 35% alpha, as
+/// `0xRRGGBBAA`.
+pub(crate) const ASK_BORDER: u32 = (ASKING << 8) | 0x59;
+/// A Dashboard stuck flag's fill: [`DANGER`] at 10% alpha, as `0xRRGGBBAA`.
+pub(crate) const DANGER_WASH: u32 = (DANGER << 8) | 0x1a;
+/// A Dashboard context figure past 80%, which is [`DANGER`], as `0xRRGGBB`.
+pub(crate) const CONTEXT_HOT: u32 = DANGER;
+
 /// The fill behind an armed destructive control, as `0xRRGGBB`.
 pub(crate) const DANGER_BG: u32 = 0x003a_1c1f;
 
@@ -258,6 +269,29 @@ mod tests {
         assert_eq!(INPUT_SELECTION >> 8, ACCENT);
         let alpha = f64::from(INPUT_SELECTION & 0xff) / 255.0;
         assert!((alpha - 0.30).abs() < 0.5 / 255.0, "alpha is {alpha:.4}");
+    }
+
+    /// The Dashboard's washes are their hues at the mock's alphas: the
+    /// asking wash at 7%, the chip border at 35%, the stuck flag at 10%, and
+    /// the hot context is the danger colour itself.
+    #[test]
+    fn dashboard_washes_are_their_hues_at_their_alphas() {
+        for (name, token, hue, share) in [
+            ("ASK_WASH", ASK_WASH, ASKING, 0.07),
+            ("ASK_BORDER", ASK_BORDER, ASKING, 0.35),
+            ("DANGER_WASH", DANGER_WASH, DANGER, 0.10),
+        ] {
+            assert_eq!(token >> 8, hue, "{name}'s channels");
+            let alpha = f64::from(token & 0xff) / 255.0;
+            assert!(
+                (alpha - share).abs() < 1.0 / 255.0,
+                "{name}'s alpha is {alpha:.4}"
+            );
+        }
+        assert_eq!(ASK_WASH, 0xf6bc_4e12);
+        assert_eq!(ASK_BORDER, 0xf6bc_4e59);
+        assert_eq!(DANGER_WASH, 0xf26d_6d1a);
+        assert_eq!(CONTEXT_HOT, DANGER);
     }
 
     /// The floors every token pair the client draws must keep: ordinary text

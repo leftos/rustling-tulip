@@ -1184,7 +1184,7 @@ impl RootView {
                     .viewer_tab_element(&tab.id, cx)
                     .unwrap_or_else(|| div().into_any_element()),
                 TabContent::Grid { grid } => self.tab_grid(&tab.id, grid, self.layouts.main(), cx),
-                TabContent::Dashboard => div().into_any_element(),
+                TabContent::Dashboard => self.dashboard_tab_element(cx),
                 TabContent::Unknown => muted_note("This tab needs a newer app.").into_any_element(),
             },
         };
