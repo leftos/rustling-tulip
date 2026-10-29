@@ -110,6 +110,52 @@ All replace the input box and the status and mode lines; the task list (when the
 
 Hooks and the transcript are identical; the screen differs in the user message (no `❯`, own background), the answer (box, no `●`), tool rows (icons, description first, chips), the spinner (phase suffix), the turn-end line (rule, no clock) and the question card (2-column indent, wrapped rules). Every dialog's text and keys are Claude Code's own in both. A detector that keys on dialog footers and the input box works for both; one that keys on `●` answers or `❯` user rows does not.
 
+## The agent in view (CV.23)
+
+What Claude Code's terminal shows while a subagent's transcript is in view, and how to leave and come back, for CV.24 of [conversation-view.md](../plans/conversation-view.md). The screens are fixtures `v160`–`v172` in `crates/daemon/src/screen/fixtures/`.
+
+### Setup
+
+- Claude Code 2.1.312, Opus 5.5, vanilla `claude` with the user's settings (default mode `auto`), in herdr panes of 152 × 72.
+- Two or three background general-purpose subagents kept busy by a foreground `python -c "import time; time.sleep(580)"` (the user's hooks refuse a plain `sleep`).
+- The built-in Heads up raised no notice on four labs (b, c, e, g) in these sessions; on lab c the main agent named the hazard itself.
+- The Heads up rows were measured with a spike mod instead: a band above the prompt with the built-in's three keys, raised by a slash command after a delay, whose `2: Chat in main session` makes the built-in's own call, `$.prompt.fill({ text: "…\n", mode: "replace" })`. The built-in is a plugin on the same mod API, so the band and the fill behave as the built-in's do; its look does not match.
+
+### What the screen shows
+
+- **Main view with agents running** (`v160`): the agents panel under the mode line, `● main` first, then one row per agent, `◯ general-purpose  <description or current activity>  <time> · ↓ <tokens>`; an agent started by another agent is drawn under it as `└ ◯`. The filled dot marks the view in force. While the box is empty the mode line ends `← N agents`.
+- **A subagent in view** (`v161`, `v162`): the transcript above the box is the subagent's own, starting with its prompt as a `❯` row; the rule over the box carries the agent's description at its right end (`─ Agent B python wait ─`); the empty box reads `Message @general-purpose…` (the agent's type); the panel's filled dot moves to the agent's row. These three are the reader's evidence; the description alone is not unique.
+- **Focus**: a `❯` at the start of a panel row is the panel's selection and stays after the keys leave the panel. Only the hint line says who has the keys: `↑/↓ to select …` or `Enter to view · x to stop …` for the panel, the mode line (`⏵⏵ auto mode on …`) for the box.
+- **AskUserQuestion with a subagent in view** (`v167`): the dialog draws in the subagent's view, under the subagent's transcript, in place of the box, with the rule naming the agent still the last row. Down moves the dialog's cursor (`v172`); the panel cannot be reached while the dialog holds the keys.
+- **Heads up with a subagent in view** (`v169`): the band above the prompt draws in the subagent's view, and a band's hook sees the agent as the view in force.
+
+### Keys
+
+| Move | Keys | Notes |
+|---|---|---|
+| Subagent's view → main | Down until the hint line reads `↑/↓ to select`, Enter, Up | Down lands on `main` first. Down took two presses after a stash, a submit or a history recall (the first only drops `← N agents`), and one press with a one- or two-row draft (`v164`, `v170`), so each Down is checked against the hint line; at most three were needed. Enter shows main with the panel still holding the keys; Up from the `main` row gives them to the box. |
+| Main → a subagent's view | Down until `↑/↓ to select`, Down once per row to the agent's row, Enter, then Up until the mode line shows | The panel keeps the keys after Enter, on the agent's row; Up walks the rows and leaves the panel from `main`. Rows change as agents start, finish and nest (an interrupted, finished agent's row was cleared), so the row is found by the agent's description, never by count. |
+| Never | Esc, Left, Enter on an empty box, extra Up | Esc on an empty box in a subagent's view interrupts the subagent's running tool (`Interrupted · What should Claude do instead?`, `v163`) and stays in the view. Left opens `Background this session?` with `Background anyway (tasks will be stopped)` selected (`v168`; its Esc cancels it). Enter on an empty box opened the Background tasks list (`Esc to close`). Up in the box recalls the view's own prompt history (`─── History 1/1 ───` in the rule; a subagent's history is its prompt), and the next Down or Enter then acts on the recalled text. |
+
+### Drafts
+
+- **One box for every view.** A draft typed with a subagent in view was still in the box after switching to main (`v164` → `v165`), and the `Chat in main session` draft filled in a subagent's view came along the same way (`v170` → `v171`). Claude Code keeps no draft per view: Enter sends the box to whichever view is up.
+- **The misroute, seen**: text left in the box with Agent B in view, followed by an Enter, reached Agent B as a queued message (`· 1 queued` on its row), and Agent B answered it. A prompt typed for the main agent while Agent B was in view started work in Agent B (it launched an agent of its own).
+- **Chat in main session from a subagent's view** fills the box there (`v170`): with no switch, its Enter goes to the subagent. The fill took the box at once (`isFilled`); the built-in reads the box first and leaves a box holding text alone (`$.prompt.read()` before the fill, in its code).
+- **Stash**: ctrl+s (`chat:stash`) on a box holding text stashes it (`› stashed` over the rule's right end; the box empties); on an empty box it puts the stash back. Round trip measured: stash with Agent B in view, switch to main (its box empty, `v160`), back to Agent B, ctrl+s: `draft two for B` came back. A `[Pasted text #1 +34 lines] tail words` draft (`v166`) came back as the same placeholder (the stash keeps `pastedContents`, in the binary); its 35 lines were not re-sent to check them.
+- **Clearing**: ctrl+u deletes one line per press with the cursor at the end, so a draft of n rows takes n presses; ctrl+l (`chat:clearInput` in the binary) left the box as it was here; Esc Esc is ruled out above (Rewind on an empty box, an interrupt in a subagent's view).
+
+### Answers
+
+- An AskUserQuestion answered with a digit while a subagent was in view reached the main agent's tool (`Pick a colour → Red`, then the main agent's `Red`), and the view stayed on the subagent.
+
+### Not measured
+
+- The built-in Heads up itself in a subagent's view, and its expanded body: no notice came (above); the look-alike stands in for the band and the fill.
+- An image in the box through a stash: pasting one needs an image on the user's clipboard, which the spike did not overwrite.
+- A stash made when the stash already holds one (whether the second replaces the first).
+- `Chat about this` from a dialog answered in a subagent's view, and where the text typed after it goes; by the one-box rule above it goes to the view in force.
+
 ## Defects found
 
 - `crates/daemon/src/pty_state.rs:540-556` (`matches_prompt`) reads the last 2 KB of raw output: `has_numbered && has_chevron` is true for any "1." + "2." + "❯", and Claude's idle input box always draws `❯`, a numbered answer has "1." and "2.", and the startup banner `v2.1.307` holds both.

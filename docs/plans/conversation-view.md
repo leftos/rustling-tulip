@@ -26,6 +26,8 @@ Turns nobody typed (agent hand-back, finished background shell, `!` command): qu
 
 Same day, on a side agent's note that the switch could carry a half-typed message for the subagent to the main agent: "back up the existing input, do the thing, then restore it". Chosen from the options put to the owner: the saved text goes back to the subagent, in its own view, once the prompt is answered.
 
+Same day, after the CV.23 spike, chosen from the options put to the owner: AskUserQuestion leaves the auto-switch (its answer already reaches the main agent, and the view cannot switch while the dialog is up), so only a Heads up notice triggers it; a draft whose subagent has finished by then goes back into the main conversation's box, with a toast saying it was meant for that agent.
+
 Earlier owner rulings that still apply:
 
 - A session remembers its last view, and a new Claude session starts in the terminal view. Where the memory is kept is D-H below.
@@ -124,13 +126,21 @@ The v1 dialog set (D-K):
 | Heads up notice | the notice, its options (`1: Learn more   2: Knew this already   0: Dismiss`, and the expanded set) | pinned over the composer with its keys until answered |
 | AskUserQuestion with previews, Rewind, detailed transcript, `/model`, `/btw`, the slash popup | recognised only | composer disabled with "Open the terminal to answer this" |
 
-**The agent in view.** Claude Code's terminal can show one subagent's transcript in place of the main conversation (opened from the tasks list, `← N agents`), and while it does, the prompt's next Enter goes to that subagent. The plugin reads from the screen whether an agent's transcript is in view, and gives the keys that return to the main conversation as a recipe.
+**The agent in view.** Claude Code's terminal can show one subagent's transcript in place of the main conversation (opened from the agents panel under the mode line), and while it does, the prompt's next Enter goes to that subagent. There is one input box for every view: a draft rides along on a switch (spike, "The agent in view (CV.23)").
 
-Per the 2026-10-29 ruling, the status watcher types that recipe for every Claude session, chat open or not, as soon as a reading shows an agent in view together with a Heads up notice or an AskUserQuestion dialog, once per prompt. `ChatSend` and `ChatAnswer` type it first whenever an agent is in view, and go on only once a reading shows the main conversation; a reading that still shows the agent stops them with an `Error`.
+The plugin reads from the screen whether an agent's transcript is in view (the rule over the box ends with the agent's description, the empty box reads `Message @<agent type>…`, the panel's filled dot is on the agent's row) and which of the panel or the box holds the keys (the hint line alone tells).
 
-A draft in the subagent's box is never carried across. Before the switch the watcher saves the draft and clears the box; once the prompt is answered (the reading shows it gone), it returns the terminal to that subagent's view and puts the draft back.
+It gives two recipes, each a key at a time with a screen check after every key: **return to main** (Down until the hint reads `↑/↓ to select`, at most three, then Enter on `main`, then Up until the box has the keys) and **reopen an agent** (Down to the panel, Down to the row whose description matches, Enter, then Up). Neither ever sends Esc (it interrupts the subagent's running tool), Left (it opens "Background this session?"), Enter on an empty box (it opens the Background tasks list) or an Up past the box (it recalls the view's prompt history).
 
-The save uses whatever CV.23 measures as whole: Claude Code's own per-view draft or its prompt stash where they keep the text intact, else the text read from the screen. A draft the screen cannot give back whole (a `[Pasted text #N]` placeholder, an image) is not saved: the watcher leaves the view alone and the prompt waits in the subagent's view.
+Per the 2026-10-29 rulings, the status watcher types **return to main** for every Claude session, chat open or not, as soon as a reading shows an agent in view with a Heads up notice up, once per notice, so the notice's Chat in main session draft fills the main conversation's box. An AskUserQuestion triggers nothing: its answer reaches the main agent from either view.
+
+`ChatSend` and `ChatAnswer` type **return to main** first whenever an agent is in view, and go on only once a reading shows the main conversation; a reading that still shows the agent stops them with an `Error`.
+
+A draft in the subagent's box is never carried across. Before the switch the watcher saves it with `ctrl+s` (Claude Code's prompt stash, which empties the box and keeps a pasted-text placeholder whole); once the notice is gone, it reopens that subagent's view and presses `ctrl+s` on the empty box to put the draft back.
+
+When the subagent's row is gone by then (it finished), the draft goes back into the main conversation's box instead, and the daemon sends the loaders and the session's clients a notice the client shows as a toast: the draft was meant for that agent, which has finished.
+
+A box holding the notice's own Chat in main session draft (key 2 pressed before the switch) is carried across unsaved, since that draft is for the main conversation.
 
 The composer reader returns the composer state: **ready** (prompt box empty, no dialog), **working** (spinner, box empty), **draft** (the box holds text: the user's own draft, a queued message, or a Heads up "Chat in main session" draft), **dialog**, or **overlay**.
 
@@ -304,16 +314,20 @@ Each step is one brief on `feat/chat-mirror`. Steps that edit `crates/protocol/s
 
   Proof: a fixture-to-reading table (kind, options, composer state, overlay) over every fixture, and a recipe table test per answer. Depends on CV.1.
 - [x] **CV.5 Parse AskUserQuestion dialogs with their answer recipes.** `crates/agents/claude/src/dialogs.rs`, `crates/daemon/src/screen/dialogs.rs`, fixtures for single choice, multi-select, Type something, review, previews and the tab bar from the spike (`v31`–`v43`) and collie's panes. Proof: the table test extended; previews read as an overlay; a wrapped cui card parses as vanilla does. Depends on CV.4.
-- [ ] **CV.23 Capture the terminal with a subagent's transcript in view.** Spike against a real `claude` (no code): open a running subagent from the tasks list, capture the screen as fixtures under `crates/daemon/src/screen/fixtures/` (idle, with a Heads up notice up, with an AskUserQuestion dialog up, with a Chat in main session draft), and with a draft typed to the subagent. Measure the keys that return to the main conversation from each, and the keys that reopen that same subagent's view.
+- [x] **CV.23 Capture the terminal with a subagent's transcript in view.** Spike against a real `claude` (no code): open a running subagent from the tasks list, capture the screen as fixtures under `crates/daemon/src/screen/fixtures/` (idle, with a Heads up notice up, with an AskUserQuestion dialog up, with a Chat in main session draft), and with a draft typed to the subagent. Measure the keys that return to the main conversation from each, and the keys that reopen that same subagent's view.
 
   Measure the draft too: whether each view keeps its own draft across a switch, whether the prompt stash keeps a pasted-text placeholder and an image whole, and how to clear the box and type a saved draft back without sending it.
 
   Proof: the fixtures, and a note in `docs/spikes/chat-mirror-tui.md` with the measured keys, the draft findings and what each screen shows. Depends on nothing.
-- [ ] **CV.24 Return the terminal to the main conversation for a prompt.** `crates/agents/claude/src/dialogs.rs` (the agent-in-view reader and the return recipe), `crates/agents/api/src/lib.rs` (their trait methods, defaulting to unsupported), `crates/daemon/src/screen/dialogs.rs` (the fixture table extended), `crates/daemon/src/pty_state.rs` (the watcher types the recipe once per prompt while an agent is in view with a Heads up or AskUserQuestion up, saving and clearing a draft first, and returning to the subagent with the draft once the prompt is answered).
+- [ ] **CV.24 Return the terminal to the main conversation for a Heads up.** First measure what CV.23 left open, against a real `claude`, adding fixtures: the built-in Heads up in a subagent's view (CV.23 saw only a copy of its band), a second `ctrl+s` while a draft is already stashed, an image through `ctrl+s`, and AskUserQuestion's Chat about this from a subagent's view. A finding that breaks the design above goes to the owner before any code.
 
-  Proof: fixture tests: each CV.23 screen reads agent-in-view, the main-view fixtures read not; watcher tests against a recording PTY: the recipe is typed once for a Heads up and once for an AskUserQuestion with an agent in view, never with the main conversation in view, and not again for the same prompt.
+  Then `crates/agents/claude/src/dialogs.rs` (the agent-in-view and key-holder reader, the two recipes as key-and-check steps), `crates/agents/api/src/lib.rs` (their trait methods, defaulting to unsupported), `crates/daemon/src/screen/dialogs.rs` (the fixture table over v160–v172 and the new fixtures), `crates/daemon/src/pty_state.rs` (the watcher's switch, stash and restore).
 
-  With a draft: it is saved and cleared before the switch, the main box stays empty, and after the answer the subagent's view is reopened and the draft typed back unsent; a draft holding a pasted-text placeholder leaves the view alone. Depends on CV.5, CV.23.
+  Also `crates/protocol/src/lib.rs` (an additive daemon message for the draft-returned-to-main notice, with its `#[serde(other)]`-safe decode test), `crates/daemon/src/server.rs` and `apps/native/src/lib.rs` (sending it, and the client's toast).
+
+  Proof: fixture tests: v162–v172 read agent-in-view or not as captured, and the key holder as the hint shows; recipe tests: each step's key waits for its check, Down repeats at most three times, and no recipe holds Esc, Left, Enter on an empty box or an extra Up.
+
+  Watcher tests against a recording PTY: a Heads up with an agent in view types **return to main** once per notice, never with main in view, and never for an AskUserQuestion; a draft is stashed before the switch and restored with `ctrl+s` in the reopened view after the notice goes; a finished agent's draft is restored in the main box and the notice is sent; a Chat in main session draft is carried unstashed. Depends on CV.5, CV.23.
 - [ ] **CV.6 Carry MessageDisplay lines to the daemon.** `crates/agents/claude/src/hooks.rs` (the event in the hook plan), `crates/agents/api/src/hook_vocabulary.rs` (its report: text and `index`), `crates/daemon/src/hook_status.rs` and `crates/daemon/src/server/hooks.rs` (a per-session channel for live lines, no status effect), a captured payload under `crates/agents/claude/tests/fixtures/hooks/`.
 
   Proof: first record one real MessageDisplay body into the fixture; mapping tests over it; out-of-order lines keep their `index`. Depends on CV.1.
@@ -324,7 +338,7 @@ Each step is one brief on `feat/chat-mirror`. Steps that edit `crates/protocol/s
   Proof: server tests with a temp `CLAUDE_CONFIG_DIR` and scripted transcript writes: appends reach loaders only; the reply caps and echoes `request_id`; a missing transcript yields none; the last unload stops the tail; a `/clear` switches files; a fixture screen yields its `ChatScreen`. Depends on CV.2, CV.3, CV.4, CV.6.
 - [ ] **CV.8 Type chat messages into the PTY.** `crates/daemon/src/server/chat.rs` (`ChatSend`, gated by the composer state), `crates/daemon/src/inject.rs` (a bracketed paste then Enter helper), `crates/daemon/src/chat_mirror.rs` (the `pending` user entry, cleared by its `queued_command` or `user` record).
 
-  Proof: tests against a recording PTY: a ready box gets the paste and Enter; a working session gets them too and the entry stays pending until its record; dialog, draft and overlay states answer `Error` and type nothing; with an agent in view the return recipe is typed first, and a reading that still shows the agent answers `Error` without the paste. Depends on CV.7, CV.24.
+  Proof: tests against a recording PTY: a ready box gets the paste and Enter; a working session gets them too and the entry stays pending until its record; dialog, draft and overlay states answer `Error` and type nothing; with an agent in view the return recipe is typed first, and a reading that still shows the agent answers `Error` without the paste; the Enter waits for a reading that shows the paste in the box (CV.23 saw an Enter sent too soon left unsent). Depends on CV.7, CV.24.
 - [ ] **CV.9 Answer prompts by typing their recipes.** `crates/daemon/src/server/chat.rs` (`ChatAnswer`), `crates/daemon/src/chat_mirror.rs` (prompt ids, the screen check after each key group, answered elsewhere), `crates/daemon/src/server/sessions.rs` (the owner-key clear shared with `SendInput`, D-A).
 
   Proof: tests per dialog fixture: the right bytes per answer; the deny-then-send ride-on waits for the box; a stale `prompt_id` is refused; a screen that does not move stops the recipe; no recipe sends Esc Esc; with an agent in view the return recipe runs before the answer's keys. Depends on CV.5, CV.8, CV.24.
