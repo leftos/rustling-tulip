@@ -1,17 +1,24 @@
 //! OS notifications for the daemon's attention events: a session awaiting
-//! input raises Needs you and one whose turn ended raises Finished, each
-//! with the session's label as its body; the toast sender, and Windows' own
-//! setting for this app's toasts. An exited or errored session raises none.
-//! How a press reaches the client is [`crate::toast_activation`].
+//! input raises Needs you, whose body names the session and the prompt it
+//! waits on, and one whose turn ended raises Finished, held for the session's
+//! `WaitingAlert` while the summarizer can still write one and worded from
+//! it, else titled plainly with the session's label as its body; the toast
+//! sender, and Windows' own setting for this app's toasts. An exited or
+//! errored session raises none. How a press reaches the client is
+//! [`crate::toast_activation`].
 
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use gpui::Context;
 use protocol::{
-    AgentDescriptor, AttentionReason, DaemonMessage, SessionMode, SessionSnapshot, SessionStatus,
+    AgentDescriptor, AlertKind, AttentionReason, DaemonMessage, KeyState, SessionMode,
+    SessionSnapshot, SessionStatus, SummarizerKey, SummarizerSettings,
 };
 
 use crate::RootView;
+use crate::needs_you::{self, Reason};
 use crate::pairing::{PairingAction, PairingToast};
 use crate::sidebar::{NotifySkip, display_label};
 #[cfg(windows)]
@@ -207,6 +214,17 @@ pub(crate) struct Notifications {
     /// Windows' toast setting as last read when the Notifications tab
     /// opened; `None` while a read is out.
     pub(crate) state: Option<NotifyState>,
+    /// The summarizer's status as last reported; `None` before one arrives
+    /// and after every reconnect, so a newly chosen host never inherits
+    /// "on".
+    summaries: Option<Summaries>,
+    /// Finished toasts waiting for their session's alert, by session id.
+    held: HashMap<String, Held>,
+    /// Each session's latest alert, kept for a Finished toast the alert came
+    /// too early to word, by session id.
+    alerts: HashMap<String, Alert>,
+    /// The generation the next hold is given.
+    next_hold: u64,
 }
 
 impl Notifications {
@@ -214,7 +232,17 @@ impl Notifications {
         Self {
             notifier,
             state: None,
+            summaries: None,
+            held: HashMap::new(),
+            alerts: HashMap::new(),
+            next_hold: 0,
         }
+    }
+
+    /// Whether a Finished toast from now waits for its session's alert:
+    /// only while the summarizer reports it can still write one.
+    fn holds(&self) -> bool {
+        self.summaries.is_some_and(Summaries::active)
     }
 }
 
@@ -223,6 +251,90 @@ pub(crate) const NEEDS_YOU_TITLE: &str = "Needs you";
 
 /// The title of the notification a session raises when its turn ends.
 pub(crate) const FINISHED_TITLE: &str = "Finished";
+
+/// How long a Finished toast waits for its session's `WaitingAlert` before
+/// it falls back to the plain wording.
+pub(crate) const FINISHED_HOLD: Duration = Duration::from_secs(12);
+
+/// The title an alert's `kind` words for a toast about `label`, or `None`
+/// when the kind words none: a template alert falls back to
+/// [`FINISHED_TITLE`] and the label alone.
+fn alert_title(kind: Option<AlertKind>, label: &str) -> Option<String> {
+    match kind {
+        Some(AlertKind::NeedsAnswer) => Some(format!("{label} needs your answer")),
+        Some(AlertKind::DoneWaiting) => Some(format!("{label} finished")),
+        Some(AlertKind::WorkingUpdate) => Some(format!("{label} posted an update")),
+        Some(AlertKind::Unknown) | None => None,
+    }
+}
+
+/// A Finished toast waiting for its session's alert.
+struct Held {
+    /// The session's label: the fallback toast's body, and the name a worded
+    /// title starts with.
+    label: String,
+    /// Which hold this is, so the timer of one that was dropped raises
+    /// nothing once its session is held again.
+    generation: u64,
+}
+
+/// The last alert a session raised, as a Finished toast words itself from it.
+struct Alert {
+    /// What the summary says the session needs; `None` when a template wrote
+    /// it and could not tell.
+    kind: Option<AlertKind>,
+    /// At most 100 characters: the worded toast's body.
+    notification: String,
+}
+
+/// The summarizer's last reported state, as far as a held Finished toast
+/// cares: only a summary that can still come is worth waiting for.
+#[derive(Debug, Clone, Copy)]
+struct Summaries {
+    /// Whether the owner has summaries on.
+    enabled: bool,
+    /// Whether the day's spending cap has been reached.
+    cap_reached: bool,
+    /// Whether the selected provider's key is one a call can use.
+    key_usable: bool,
+}
+
+impl Summaries {
+    /// The state `settings`, `keys` and `cap_reached` report.
+    fn of(settings: &SummarizerSettings, keys: &[SummarizerKey], cap_reached: bool) -> Self {
+        let key_usable = keys
+            .iter()
+            .find(|key| key.provider == settings.provider)
+            .is_none_or(|key| {
+                !matches!(
+                    key.state,
+                    KeyState::Missing | KeyState::EnvMissing | KeyState::Rejected
+                )
+            });
+        Self {
+            enabled: settings.enabled,
+            cap_reached,
+            key_usable,
+        }
+    }
+
+    /// Whether a summary can still come: summaries on, under the cap, with a
+    /// key the provider accepts.
+    fn active(self) -> bool {
+        self.enabled && !self.cap_reached && self.key_usable
+    }
+}
+
+/// One toast ready to raise, unless its toggle is off or the skip setting
+/// says the owner is looking at the session already.
+struct Toast<'a> {
+    /// The session it reports.
+    session_id: &'a str,
+    title: &'a str,
+    body: &'a str,
+    /// Whether the setting's toggle for this kind of toast is on.
+    wanted: bool,
+}
 
 /// Whether a notification for a session is skipped under `skip_when`:
 /// `focused` is whether the client window has the keyboard, `on_screen`
@@ -251,6 +363,17 @@ pub(crate) fn body(session: Option<&SessionSnapshot>, agents: &[AgentDescriptor]
         .map_or_else(|| PRODUCT_NAME.to_owned(), |(label, _)| label)
 }
 
+/// The body a session awaiting input raises: its label, then what it waits
+/// for as the Needs You list words it, so the toast never loses which
+/// session it is about.
+fn needs_you_body(session: Option<&SessionSnapshot>, agents: &[AgentDescriptor]) -> String {
+    let line = session.map_or_else(
+        || needs_you::WAITING_FOR_INPUT.to_owned(),
+        |session| needs_you::detail_of(Reason::Asking, session, agents),
+    );
+    format!("{}: {line}", body(session, agents))
+}
+
 /// Whether `after` ends a turn the session was running: it is idle with no
 /// background work left, an agent rather than a plain shell, and the copy the
 /// client still held was working, or idle waiting on background work the
@@ -270,22 +393,85 @@ pub(crate) fn finished(before: Option<&SessionSnapshot>, after: &SessionSnapshot
 }
 
 impl RootView {
-    /// Folds `msg` into the notifications: a session awaiting input raises
-    /// Needs you while its toggle is on, and one `finished` marks as having
-    /// ended its turn raises Finished while that toggle is on, unless the
-    /// skip setting says the owner is looking at it already. `window_focused`
-    /// is whether this client window has the keyboard.
+    /// Folds `msg` into the notifications: the summarizer's status decides
+    /// whether a Finished toast waits; a session awaiting input raises Needs
+    /// you, and one `finished` marks as having ended its turn raises
+    /// Finished, held for the session's alert while summaries can still come;
+    /// an alert words the toast held for its session, or is kept for a toast
+    /// still to come. `window_focused` is whether this client window has the
+    /// keyboard.
     pub(crate) fn notify_on(
-        &self,
+        &mut self,
         msg: &DaemonMessage,
         finished: bool,
         window_focused: bool,
         cx: &mut Context<Self>,
     ) {
-        let (session_id, session, title, wanted) = match msg {
+        match msg {
+            DaemonMessage::SummarizerStatus {
+                settings,
+                keys,
+                cap_reached,
+                ..
+            } => {
+                self.notifications.summaries = Some(Summaries::of(settings, keys, *cap_reached));
+                return;
+            }
+            // A toast held for the old connection has no alert coming, and
+            // another host's summarizer says nothing about this one's.
+            DaemonMessage::Welcome { .. } => {
+                self.notifications.summaries = None;
+                self.notifications.held.clear();
+                self.notifications.alerts.clear();
+                return;
+            }
+            DaemonMessage::SessionRemoved { session_id } => {
+                self.notifications.held.remove(session_id);
+                self.notifications.alerts.remove(session_id);
+                return;
+            }
+            // A relist that has a session working, waiting, exited or gone
+            // leaves its held toast with no alert to word it, and a session
+            // at work has an alert of its own coming.
+            DaemonMessage::Sessions { sessions } => {
+                let idle = |id: &str| {
+                    sessions
+                        .iter()
+                        .any(|session| session.id == id && session.status == SessionStatus::Idle)
+                };
+                self.notifications.held.retain(|id, _| idle(id));
+                self.notifications.alerts.retain(|id, _| idle(id));
+            }
+            DaemonMessage::SessionUpdated { session, .. } => {
+                if session.status != SessionStatus::Idle {
+                    self.notifications.held.remove(&session.id);
+                }
+                if session.status == SessionStatus::Working {
+                    self.notifications.alerts.remove(&session.id);
+                }
+            }
+            _ => {}
+        }
+        match msg {
             DaemonMessage::SessionUpdated { session, .. } if finished => {
-                let wanted = self.sidebar.ui_state().notifications.finished;
-                (session.id.as_str(), Some(session), FINISHED_TITLE, wanted)
+                let label = body(Some(session), &self.agents);
+                if !self.waits_for_alert(session) {
+                    let wanted = self.sidebar.ui_state().notifications.finished;
+                    self.raise_toast(
+                        &Toast {
+                            session_id: &session.id,
+                            title: FINISHED_TITLE,
+                            body: &label,
+                            wanted,
+                        },
+                        window_focused,
+                        cx,
+                    );
+                } else if let Some(alert) = self.notifications.alerts.remove(&session.id) {
+                    self.raise_alert(&session.id, &label, &alert, window_focused, cx);
+                } else {
+                    self.hold_finished(session.id.clone(), label, cx);
+                }
             }
             DaemonMessage::Attention {
                 session_id,
@@ -293,32 +479,159 @@ impl RootView {
                 ..
             } => {
                 let wanted = self.sidebar.ui_state().notifications.awaiting_input;
-                (
-                    session_id.as_str(),
-                    self.sidebar.session(session_id),
-                    NEEDS_YOU_TITLE,
-                    wanted,
-                )
+                let body = needs_you_body(self.sidebar.session(session_id), &self.agents);
+                self.raise_toast(
+                    &Toast {
+                        session_id,
+                        title: NEEDS_YOU_TITLE,
+                        body: &body,
+                        wanted,
+                    },
+                    window_focused,
+                    cx,
+                );
             }
-            _ => return,
-        };
-        if !wanted {
+            DaemonMessage::WaitingAlert {
+                session_id,
+                kind,
+                notification,
+                ..
+            } => {
+                let alert = Alert {
+                    kind: *kind,
+                    notification: notification.clone(),
+                };
+                self.release_hold(session_id, &alert, window_focused, cx);
+                // A Stop leaves its session Idle with background work still
+                // running, so the alert for that turn can beat its end.
+                self.notifications.alerts.insert(session_id.clone(), alert);
+            }
+            _ => {}
+        }
+    }
+
+    /// Whether a Finished toast about `session` waits for its alert: the
+    /// summarizer can still write one, and writes about this session at all
+    /// — an interactive run of a registered agent.
+    fn waits_for_alert(&self, session: &SessionSnapshot) -> bool {
+        self.notifications.holds()
+            && session.mode != SessionMode::Headless
+            && session.agent.is_some()
+    }
+
+    /// Raises `toast` unless its toggle is off or the skip setting says the
+    /// owner is looking at the session already.
+    fn raise_toast(&self, toast: &Toast<'_>, window_focused: bool, cx: &mut Context<Self>) {
+        if !toast.wanted {
             return;
         }
         let skip_when = self.sidebar.ui_state().notifications.skip_when;
         // A session a pop-out shows with its active window's keyboard is on
         // screen in a focused window of this client.
-        let in_popout = self.popout_focused_session().as_deref() == Some(session_id);
+        let in_popout = self.popout_focused_session().as_deref() == Some(toast.session_id);
         if skips(skip_when, window_focused || in_popout, || {
-            in_popout || self.session_on_screen(session_id)
+            in_popout || self.session_on_screen(toast.session_id)
         }) {
             return;
         }
-        let body = body(session, &self.agents);
+        let title = toast.title.to_owned();
+        let body = toast.body.to_owned();
         let notifier = Arc::clone(&self.notifications.notifier);
         cx.background_executor()
-            .spawn(async move { notifier.notify(title, &body) })
+            .spawn(async move { notifier.notify(&title, &body) })
             .detach();
+    }
+
+    /// Holds a Finished toast about `label` for `session_id`'s alert for
+    /// [`FINISHED_HOLD`], raising the plain one if none comes.
+    fn hold_finished(&mut self, session_id: String, label: String, cx: &mut Context<Self>) {
+        self.notifications.next_hold += 1;
+        let generation = self.notifications.next_hold;
+        self.notifications
+            .held
+            .insert(session_id.clone(), Held { label, generation });
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(FINISHED_HOLD).await;
+            // Fails only when the view is gone, and the hold with it.
+            this.update(cx, |this, cx| {
+                this.hold_expired(&session_id, generation, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The hold's time is up with no alert having worded it: the plain toast
+    /// is raised, under the toggle and skip rule as they stand now.
+    fn hold_expired(&mut self, session_id: &str, generation: u64, cx: &mut Context<Self>) {
+        if self
+            .notifications
+            .held
+            .get(session_id)
+            .is_none_or(|held| held.generation != generation)
+        {
+            return;
+        }
+        let Some(held) = self.notifications.held.remove(session_id) else {
+            return;
+        };
+        let focused = cx
+            .active_window()
+            .is_some_and(|window| window.window_id() == self.layouts.main());
+        let wanted = self.sidebar.ui_state().notifications.finished;
+        self.raise_toast(
+            &Toast {
+                session_id,
+                title: FINISHED_TITLE,
+                body: &held.label,
+                wanted,
+            },
+            focused,
+            cx,
+        );
+    }
+
+    /// Ends the toast held for `session_id` with its alert's wording. An
+    /// alert with no held toast behind it raises nothing.
+    fn release_hold(
+        &mut self,
+        session_id: &str,
+        alert: &Alert,
+        window_focused: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(held) = self.notifications.held.remove(session_id) else {
+            return;
+        };
+        self.raise_alert(session_id, &held.label, alert, window_focused, cx);
+    }
+
+    /// Raises the Finished toast about `session_id` that `alert` words, or
+    /// the plain one when the alert's kind words none (a template), under the
+    /// toggle and skip rule as they stand now.
+    fn raise_alert(
+        &self,
+        session_id: &str,
+        label: &str,
+        alert: &Alert,
+        window_focused: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let (title, body) = alert_title(alert.kind, label).map_or_else(
+            || (FINISHED_TITLE.to_owned(), label.to_owned()),
+            |title| (title, alert.notification.clone()),
+        );
+        let wanted = self.sidebar.ui_state().notifications.finished;
+        self.raise_toast(
+            &Toast {
+                session_id,
+                title: &title,
+                body: &body,
+                wanted,
+            },
+            window_focused,
+            cx,
+        );
     }
 }
 
@@ -382,6 +695,32 @@ mod tests {
             body(Some(&bare), &[]),
             "rustling-tulip",
             "named only by its id"
+        );
+    }
+
+    #[test]
+    fn alert_title_per_kind() {
+        assert_eq!(
+            alert_title(Some(AlertKind::NeedsAnswer), "review").as_deref(),
+            Some("review needs your answer")
+        );
+        assert_eq!(
+            alert_title(Some(AlertKind::DoneWaiting), "review").as_deref(),
+            Some("review finished")
+        );
+        assert_eq!(
+            alert_title(Some(AlertKind::WorkingUpdate), "review").as_deref(),
+            Some("review posted an update")
+        );
+    }
+
+    #[test]
+    fn alert_title_for_none_and_unknown_falls_back() {
+        assert_eq!(alert_title(None, "review"), None, "a template alert");
+        assert_eq!(
+            alert_title(Some(AlertKind::Unknown), "review"),
+            None,
+            "a kind this build does not know"
         );
     }
 

@@ -132,12 +132,15 @@ pub(crate) fn detail_of(
     }
 }
 
+/// What a session waiting with nothing reported reads.
+pub(crate) const WAITING_FOR_INPUT: &str = "Waiting for input";
+
 /// Line two when no hook has said what the session wants: the waiting text,
 /// with the terminal title when it names something (see [`session_title`]).
 fn waiting_line(session: &SessionSnapshot, agents: &[AgentDescriptor]) -> String {
     session_title(session, agents).map_or_else(
-        || "Waiting for input".to_owned(),
-        |title| format!("Waiting for input · {title}"),
+        || WAITING_FOR_INPUT.to_owned(),
+        |title| format!("{WAITING_FOR_INPUT} · {title}"),
     )
 }
 

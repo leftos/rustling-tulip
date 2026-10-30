@@ -20,8 +20,8 @@ use gpui::{
     TouchPhase, VisualTestContext, Window, point, px,
 };
 use protocol::{
-    ClientMessage, DaemonMessage, GridNode, RepoEntry, SessionSnapshot, SplitDirection, TabEntry,
-    WorkspaceEntry,
+    ClientMessage, DaemonMessage, GridNode, KeyState, RepoEntry, SessionSnapshot, SplitDirection,
+    SummarizerKey, SummarizerKeySource, SummarizerSettings, TabEntry, WorkspaceEntry,
 };
 use rustling_tulip_native::{
     Activity, Clock, Connection, ContainerKind, FileFilter, FilePicker, FolderPicker,
@@ -446,6 +446,11 @@ impl SessionBuilder {
         self.set("agent", json!(agent))
     }
 
+    /// Without an agent, so no summary of it can be written.
+    pub fn no_agent(self) -> Self {
+        self.set("agent", Value::Null)
+    }
+
     pub fn headless(self) -> Self {
         self.set("mode", json!("headless"))
     }
@@ -670,6 +675,62 @@ pub fn facts_message(facts: Vec<protocol::SessionFacts>) -> DaemonMessage {
         facts,
         totals: protocol::DayTotals::default(),
         linear_synced_at: None,
+    }
+}
+
+/// A `SummarizerStatus` fixture: summaries on, provider `p1` with a stored
+/// key, nothing spent and the cap not reached.
+pub fn summarizer_status() -> SummarizerStatusBuilder {
+    SummarizerStatusBuilder {
+        enabled: true,
+        key: KeyState::Stored,
+        cap_reached: false,
+    }
+}
+
+/// The [`DaemonMessage::SummarizerStatus`] a spec words.
+pub struct SummarizerStatusBuilder {
+    enabled: bool,
+    key: KeyState,
+    cap_reached: bool,
+}
+
+impl SummarizerStatusBuilder {
+    /// With summaries turned on or off.
+    pub fn enabled(mut self, on: bool) -> Self {
+        self.enabled = on;
+        self
+    }
+
+    /// With provider `p1`'s key in `state`.
+    pub fn key(mut self, state: KeyState) -> Self {
+        self.key = state;
+        self
+    }
+
+    /// With the day's spending cap reached or not.
+    pub fn cap_reached(mut self, reached: bool) -> Self {
+        self.cap_reached = reached;
+        self
+    }
+
+    pub fn build(self) -> DaemonMessage {
+        let provider = "p1".to_owned();
+        DaemonMessage::SummarizerStatus {
+            settings: SummarizerSettings {
+                enabled: self.enabled,
+                provider: provider.clone(),
+                key_source: SummarizerKeySource::Stored,
+                daily_cap_usd: 1.0,
+            },
+            providers: Vec::new(),
+            keys: vec![SummarizerKey {
+                provider,
+                state: self.key,
+            }],
+            spend_today_usd: 0.0,
+            cap_reached: self.cap_reached,
+        }
     }
 }
 

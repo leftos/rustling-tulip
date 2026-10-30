@@ -10,9 +10,12 @@
 use crate::support;
 
 use gpui::{TestAppContext, px};
-use protocol::{AttentionReason, DaemonMessage, SessionSnapshot, TabEntry};
+use protocol::{
+    AlertKind, AttentionReason, DaemonMessage, KeyState, SessionSnapshot, SummarySource, TabEntry,
+};
 use rustling_tulip_native::NotifyState;
-use support::{Fixture, Harness, Opened, TestDir, pane, repo, session, tab};
+use std::time::Duration;
+use support::{Fixture, Harness, Opened, TestDir, pane, repo, session, summarizer_status, tab};
 
 fn attention(id: &str, reason: AttentionReason) -> DaemonMessage {
     DaemonMessage::Attention {
@@ -26,6 +29,35 @@ fn updated(session: SessionSnapshot) -> DaemonMessage {
         session,
         request_id: None,
     }
+}
+
+/// The `WaitingAlert` worded by `kind` that ends `id`'s held Finished toast.
+fn alert(id: &str, kind: AlertKind, notification: &str) -> DaemonMessage {
+    DaemonMessage::WaitingAlert {
+        session_id: id.to_owned(),
+        kind: Some(kind),
+        notification: notification.to_owned(),
+        source: SummarySource::Model,
+    }
+}
+
+/// The template `WaitingAlert` about `id`, which carries no kind to word a
+/// title.
+fn template_alert(id: &str, notification: &str) -> DaemonMessage {
+    DaemonMessage::WaitingAlert {
+        session_id: id.to_owned(),
+        kind: None,
+        notification: notification.to_owned(),
+        source: SummarySource::Template,
+    }
+}
+
+/// Delivers `id`'s turn: `label` working, then idle, so the turn ends.
+fn turn(h: &mut Harness<'_>, id: &str, label: &str) {
+    h.send(updated(
+        session(id).user_label(label).status("working").build(),
+    ));
+    h.send(updated(session(id).user_label(label).build()));
 }
 
 fn shown(title: &str, body: &str) -> (String, String) {
@@ -50,7 +82,10 @@ fn awaiting_input_attention_notifies_needs_you_with_label(cx: &mut TestAppContex
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);
     h.send(attention("s1", AttentionReason::AwaitingInput));
-    assert_eq!(h.notified(), [shown("Needs you", "fix login")]);
+    assert_eq!(
+        h.notified(),
+        [shown("Needs you", "fix login: Waiting for input")]
+    );
 }
 
 #[gpui::test]
@@ -64,7 +99,7 @@ fn an_excluded_session_still_notifies_needs_you(cx: &mut TestAppContext) {
     h.send(attention("s1", AttentionReason::AwaitingInput));
     assert_eq!(
         h.notified(),
-        [shown("Needs you", "dev server")],
+        [shown("Needs you", "dev server: Waiting for input")],
         "\"Don't count as busy\" leaves OS notifications alone"
     );
 }
@@ -149,7 +184,7 @@ fn finished_toggle_off_silences_it(cx: &mut TestAppContext) {
     h.send(attention("s2", AttentionReason::AwaitingInput));
     assert_eq!(
         h.notified(),
-        [shown("Needs you", "review")],
+        [shown("Needs you", "review: Waiting for input")],
         "Needs you still fires"
     );
 }
@@ -326,7 +361,7 @@ fn settings_open_over_the_pane_still_notifies(cx: &mut TestAppContext) {
     h.send(attention("s1", AttentionReason::AwaitingInput));
     assert_eq!(
         h.notified(),
-        [shown("Needs you", "fix login")],
+        [shown("Needs you", "fix login: Waiting for input")],
         "the Settings modal hides s1's pane"
     );
 }
@@ -337,7 +372,10 @@ fn focused_window_other_tab_still_notifies(cx: &mut TestAppContext) {
     let mut h = two_tabs(cx, &dir);
     focus_window(&mut h);
     h.send(attention("s2", AttentionReason::AwaitingInput));
-    assert_eq!(h.notified(), [shown("Needs you", "review")]);
+    assert_eq!(
+        h.notified(),
+        [shown("Needs you", "review: Waiting for input")]
+    );
 }
 
 #[gpui::test]
@@ -349,7 +387,10 @@ fn unfocused_window_notifies(cx: &mut TestAppContext) {
         "the test window starts inactive"
     );
     h.send(attention("s1", AttentionReason::AwaitingInput));
-    assert_eq!(h.notified(), [shown("Needs you", "fix login")]);
+    assert_eq!(
+        h.notified(),
+        [shown("Needs you", "fix login: Waiting for input")]
+    );
 }
 
 #[gpui::test]
@@ -369,7 +410,10 @@ fn never_choice_notifies_when_focused_and_visible(cx: &mut TestAppContext) {
     let mut h = two_tabs(cx, &dir);
     focus_window(&mut h);
     h.send(attention("s1", AttentionReason::AwaitingInput));
-    assert_eq!(h.notified(), [shown("Needs you", "fix login")]);
+    assert_eq!(
+        h.notified(),
+        [shown("Needs you", "fix login: Waiting for input")]
+    );
 }
 
 #[gpui::test]
@@ -399,7 +443,7 @@ fn diff_tab_active_counts_as_not_on_screen(cx: &mut TestAppContext) {
     h.send(attention("s1", AttentionReason::AwaitingInput));
     assert_eq!(
         h.notified(),
-        [shown("Needs you", "fix login")],
+        [shown("Needs you", "fix login: Waiting for input")],
         "a diff tab shows no session"
     );
 }
@@ -453,8 +497,405 @@ fn unlabelled_session_body_is_product_name(cx: &mut TestAppContext) {
     assert_eq!(
         h.notified(),
         [
-            shown("Needs you", "rustling-tulip"),
-            shown("Needs you", "rustling-tulip"),
+            shown("Needs you", "rustling-tulip: Waiting for input"),
+            shown("Needs you", "rustling-tulip: Waiting for input"),
         ]
+    );
+}
+
+#[gpui::test]
+fn finished_waits_for_its_alert_and_takes_its_title_and_body(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.send(summarizer_status().build());
+    turn(&mut h, "s2", "review");
+    assert!(
+        h.notified().is_empty(),
+        "the toast waits for the turn's alert"
+    );
+    h.send(alert(
+        "s2",
+        AlertKind::DoneWaiting,
+        "tests pass, ready for review",
+    ));
+    assert_eq!(
+        h.notified(),
+        [shown("review finished", "tests pass, ready for review")]
+    );
+}
+
+#[gpui::test]
+fn finished_title_follows_the_alert_kind(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.send(summarizer_status().build());
+    for (kind, title) in [
+        (AlertKind::NeedsAnswer, "review needs your answer"),
+        (AlertKind::DoneWaiting, "review finished"),
+        (AlertKind::WorkingUpdate, "review posted an update"),
+    ] {
+        turn(&mut h, "s2", "review");
+        h.send(alert("s2", kind, "the turn's news"));
+        assert_eq!(
+            h.notified().last(),
+            Some(&shown(title, "the turn's news")),
+            "the kind words the title"
+        );
+    }
+}
+
+#[gpui::test]
+fn finished_falls_back_after_the_hold(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.send(summarizer_status().build());
+    turn(&mut h, "s2", "review");
+    h.advance(Duration::from_secs(11));
+    assert!(
+        h.notified().is_empty(),
+        "eleven seconds in, the alert may still come"
+    );
+    h.advance(Duration::from_secs(1));
+    assert_eq!(h.notified(), [shown("Finished", "review")]);
+}
+
+#[gpui::test]
+fn a_late_alert_after_the_fallback_raises_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.send(summarizer_status().build());
+    turn(&mut h, "s2", "review");
+    h.advance(Duration::from_secs(12));
+    assert_eq!(h.notified(), [shown("Finished", "review")]);
+    h.send(alert("s2", AlertKind::DoneWaiting, "tests pass"));
+    assert_eq!(
+        h.notified(),
+        [shown("Finished", "review")],
+        "the fallback already went, and no second toast follows"
+    );
+}
+
+#[gpui::test]
+fn finished_without_summaries_raises_at_once(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    turn(&mut h, "s2", "review");
+    assert_eq!(
+        h.notified(),
+        [shown("Finished", "review")],
+        "no status has arrived, so nothing is held"
+    );
+
+    h.send(summarizer_status().enabled(false).build());
+    turn(&mut h, "s2", "review");
+    assert_eq!(
+        h.notified().last(),
+        Some(&shown("Finished", "review")),
+        "summaries are off"
+    );
+
+    h.send(summarizer_status().cap_reached(true).build());
+    turn(&mut h, "s2", "review");
+    assert_eq!(
+        h.notified().last(),
+        Some(&shown("Finished", "review")),
+        "the day's cap is reached"
+    );
+
+    h.send(summarizer_status().key(KeyState::Rejected).build());
+    turn(&mut h, "s2", "review");
+    assert_eq!(
+        h.notified().last(),
+        Some(&shown("Finished", "review")),
+        "the provider refused the key, so no summary can come"
+    );
+}
+
+#[gpui::test]
+fn finished_with_a_template_alert_uses_the_fallback(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.send(summarizer_status().build());
+    turn(&mut h, "s2", "review");
+    h.send(template_alert("s2", "Turn finished: edited two files"));
+    assert_eq!(
+        h.notified(),
+        [shown("Finished", "review")],
+        "a template alert words no title, so the plain toast is raised"
+    );
+}
+
+#[gpui::test]
+fn an_alert_for_another_session_leaves_the_hold(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.send(summarizer_status().build());
+    turn(&mut h, "s2", "review");
+    h.send(alert("s1", AlertKind::DoneWaiting, "s1's news"));
+    assert!(h.notified().is_empty(), "s1 holds no toast");
+    h.send(alert("s2", AlertKind::DoneWaiting, "s2's news"));
+    assert_eq!(h.notified(), [shown("review finished", "s2's news")]);
+}
+
+#[gpui::test]
+fn a_held_finished_toast_honours_the_toggle_and_skip_rule(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    save_notifications(&dir, &serde_json::json!({ "finished": false }));
+    {
+        let mut h = opened(cx, &dir);
+        h.send(summarizer_status().build());
+        turn(&mut h, "s2", "review");
+        h.advance(Duration::from_secs(12));
+        assert!(
+            h.notified().is_empty(),
+            "the toggle is off when the fallback goes"
+        );
+        h.send(alert("s2", AlertKind::DoneWaiting, "news"));
+        assert!(h.notified().is_empty(), "and off when an alert words it");
+    }
+
+    save_notifications(&dir, &serde_json::json!({}));
+    {
+        let mut h = two_tabs(cx, &dir);
+        focus_window(&mut h);
+        h.send(summarizer_status().build());
+        turn(&mut h, "s1", "fix login");
+        h.send(alert("s1", AlertKind::DoneWaiting, "news"));
+        assert!(
+            h.notified().is_empty(),
+            "the owner is looking at that session"
+        );
+        turn(&mut h, "s1", "fix login");
+        h.advance(Duration::from_secs(12));
+        assert!(
+            h.notified().is_empty(),
+            "the skip rule holds the fallback back too"
+        );
+    }
+}
+
+#[gpui::test]
+fn a_session_that_works_again_drops_its_held_toast(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.send(summarizer_status().build());
+    turn(&mut h, "s2", "review");
+    h.send(updated(
+        session("s2").user_label("review").status("working").build(),
+    ));
+    h.advance(Duration::from_secs(12));
+    assert!(
+        h.notified().is_empty(),
+        "the turn went on, so the hold went with it"
+    );
+    h.send(alert("s2", AlertKind::DoneWaiting, "news"));
+    assert!(
+        h.notified().is_empty(),
+        "the alert has no toast left to word"
+    );
+}
+
+#[gpui::test]
+fn a_reconnect_drops_held_toasts_and_the_status(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.send(summarizer_status().build());
+    turn(&mut h, "s2", "review");
+    h.send_welcome(support::PROTOCOL);
+    h.sent();
+    h.advance(Duration::from_secs(12));
+    assert!(
+        h.notified().is_empty(),
+        "the held toast went with the old connection"
+    );
+    turn(&mut h, "s2", "review");
+    assert_eq!(
+        h.notified(),
+        [shown("Finished", "review")],
+        "the new connection's status says nothing yet, so the toast is raised at once"
+    );
+}
+
+#[gpui::test]
+fn needs_you_body_is_the_label_and_prompt_line(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = Fixture::single(session("s1").user_label("fix login").build());
+    for pending in [
+        (
+            "s2",
+            "review",
+            serde_json::json!({ "kind": "permission", "tool_name": "Bash", "summary": "cargo test" }),
+        ),
+        (
+            "s3",
+            "docs",
+            serde_json::json!({ "kind": "question", "questions": [{ "header": "Scope", "question": "Which repo?" }] }),
+        ),
+        (
+            "s4",
+            "plan",
+            serde_json::json!({ "kind": "plan_approval", "plan": "1. Edit the file\n2. Run the tests" }),
+        ),
+    ] {
+        fixture.sessions.push(
+            session(pending.0)
+                .user_label(pending.1)
+                .pending_input(pending.2.clone())
+                .status("awaiting_input")
+                .build(),
+        );
+    }
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.answer_scrollback("s1", b"");
+    h.sent();
+    for (id, line) in [
+        ("s2", "review: Allow Bash: cargo test"),
+        ("s3", "docs: Scope: Which repo?"),
+        ("s4", "plan: Approve plan: 1. Edit the file"),
+    ] {
+        h.send(attention(id, AttentionReason::AwaitingInput));
+        assert_eq!(
+            h.notified().last(),
+            Some(&shown("Needs you", line)),
+            "the prompt line follows the label"
+        );
+    }
+}
+
+#[gpui::test]
+fn needs_you_without_a_prompt_says_waiting_for_input(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.send(attention("s2", AttentionReason::AwaitingInput));
+    assert_eq!(
+        h.notified(),
+        [shown("Needs you", "review: Waiting for input")],
+        "no hook has said what it waits for"
+    );
+}
+
+#[gpui::test]
+fn a_headless_or_agentless_finished_toast_is_not_held(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.send(summarizer_status().build());
+
+    h.send(updated(
+        session("s2")
+            .user_label("review")
+            .headless()
+            .status("working")
+            .build(),
+    ));
+    h.send(updated(
+        session("s2").user_label("review").headless().build(),
+    ));
+    assert_eq!(
+        h.notified(),
+        [shown("Finished", "review")],
+        "no model writes a summary of a headless turn"
+    );
+
+    h.send(updated(
+        session("s2")
+            .user_label("review")
+            .no_agent()
+            .status("working")
+            .build(),
+    ));
+    h.send(updated(
+        session("s2").user_label("review").no_agent().build(),
+    ));
+    assert_eq!(
+        h.notified(),
+        [shown("Finished", "review"), shown("Finished", "review")],
+        "a session with no agent is summarized by nobody"
+    );
+}
+
+#[gpui::test]
+fn an_alert_before_background_work_clears_words_the_later_finished_toast(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.send(summarizer_status().build());
+    h.send(updated(
+        session("s2").user_label("review").status("working").build(),
+    ));
+    h.send(updated(
+        session("s2").user_label("review").background().build(),
+    ));
+    h.send(alert("s2", AlertKind::DoneWaiting, "tests pass, ready"));
+    assert!(
+        h.notified().is_empty(),
+        "the turn is not over while its background work runs"
+    );
+    h.send(updated(session("s2").user_label("review").build()));
+    assert_eq!(
+        h.notified(),
+        [shown("review finished", "tests pass, ready")],
+        "the alert that came early words the toast at once"
+    );
+}
+
+#[gpui::test]
+fn a_sessions_resync_drops_holds_for_sessions_that_moved_on(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.send(summarizer_status().build());
+    turn(&mut h, "s1", "fix login");
+    h.send(updated(
+        session("s2").user_label("review").status("working").build(),
+    ));
+    h.send(updated(
+        session("s2").user_label("review").background().build(),
+    ));
+    h.send(alert("s2", AlertKind::DoneWaiting, "s2's news"));
+    h.send(DaemonMessage::Sessions {
+        sessions: vec![
+            session("s1")
+                .user_label("fix login")
+                .status("working")
+                .build(),
+            session("s2").user_label("review").status("working").build(),
+        ],
+    });
+    h.advance(Duration::from_secs(12));
+    assert!(
+        h.notified().is_empty(),
+        "s1 left Idle and s2 works again, so neither a hold nor a kept alert survives"
+    );
+    h.send(alert("s1", AlertKind::DoneWaiting, "s1's news"));
+    assert!(
+        h.notified().is_empty(),
+        "the dropped hold has nothing left to word"
+    );
+    h.send(updated(session("s2").user_label("review").build()));
+    h.advance(Duration::from_secs(12));
+    assert_eq!(
+        h.notified(),
+        [shown("Finished", "review")],
+        "the resync dropped s2's kept alert, so the plain fallback stands"
+    );
+}
+
+#[gpui::test]
+fn needs_you_ignores_the_waiting_alert(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.send(summarizer_status().build());
+    h.send(attention("s2", AttentionReason::AwaitingInput));
+    assert_eq!(
+        h.notified(),
+        [shown("Needs you", "review: Waiting for input")]
+    );
+    h.send(alert(
+        "s2",
+        AlertKind::NeedsAnswer,
+        "the agent asks which repo",
+    ));
+    assert_eq!(
+        h.notified(),
+        [shown("Needs you", "review: Waiting for input")],
+        "an alert words no Needs you toast"
     );
 }
