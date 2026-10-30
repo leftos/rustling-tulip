@@ -10,8 +10,13 @@ serial-live = { max-threads = 1 }
 [profile.default]
 fail-fast = false
 retries = 0
-slow-timeout = { period = "60s" }
+# A hang guard, not a speed bound: a test still running after 5 periods
+# (300 s, about 20x the slowest passing test) is killed and fails as TIMEOUT.
+slow-timeout = { period = "60s", terminate-after = 5 }
 
 [[profile.default.overrides]]
 filter = "binary_id(rustling-tulip-native::e2e_live) | binary_id(rustling-tulip-native::e2e_recover) | binary_id(rustling-tulip-native::e2e_remote) | binary_id(rustling-tulip-native::e2e_ssh) | binary_id(rustling-tulip-native::smoke_window)"
 test-group = "serial-live"
+# Their own waits run up to 300 s (a cold daemon start, the recover hang
+# guard), so their guard sits above that: 6 periods of 120 s.
+slow-timeout = { period = "120s", terminate-after = 6 }
