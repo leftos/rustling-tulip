@@ -7,7 +7,6 @@
 //! the rest is agent-agnostic.
 
 use crate::paths::Dirs;
-use crate::scrollback;
 use crate::session::{SessionRecord, SessionRegistry, push_recent_action};
 use agent_api::HeadlessEvent;
 use anyhow::{Context as _, anyhow};
@@ -125,10 +124,12 @@ pub fn spawn(
 
     // stdout: parse the agent's headless output line by line. Also persist
     // each line to the scrollback file so the headless event log can be
-    // replayed on reattach.
+    // replayed on reattach, under the session's scrollback gate so a discard
+    // cannot recreate its dir.
     let registry_for_stdout = Arc::clone(registry);
     let session_for_stdout = session_id.clone();
     let dirs_for_stdout = dirs;
+    let gate = registry.scrollback_gate(&session_id);
     tokio::spawn(async move {
         let mut reader = BufReader::new(stdout).lines();
         loop {
@@ -139,7 +140,14 @@ pub fn spawn(
                     }
                     let mut chunk = line.clone().into_bytes();
                     chunk.push(b'\n');
-                    scrollback::append(&dirs_for_stdout, &session_for_stdout, &chunk);
+                    let over_cap = gate
+                        .write(&dirs_for_stdout, &session_for_stdout, |writer| {
+                            writer.write(&chunk)
+                        })
+                        .unwrap_or(false);
+                    if over_cap {
+                        gate.trim().await;
+                    }
                     let events = plugin.parse_headless_line(&line);
                     if !events.is_empty() {
                         registry_for_stdout.update(&session_for_stdout, |rec| {
@@ -156,6 +164,7 @@ pub fn spawn(
                 }
             }
         }
+        gate.close_writer();
     });
 
     // stderr: collect into recent_actions.

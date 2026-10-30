@@ -8,7 +8,7 @@ use crate::orphan::{self, OrphanMeta};
 use crate::paths::Dirs;
 use crate::pty::{LifecycleItem, PtyExit, PtyHandle};
 use crate::screen::SharedScreen;
-use crate::scrollback;
+use crate::scrollback::{self, ScrollbackWriter};
 use crate::sync::{lock, read, write};
 use crate::termstate::{self, BracketedPasteTracker};
 use chrono::{DateTime, Utc};
@@ -611,28 +611,87 @@ pub struct SessionRegistry {
 /// Answers whether a session's stop line is on its way.
 pub(crate) type StopLineDue = Box<dyn Fn(&str) -> bool + Send + Sync>;
 
-/// A session's scrollback gate: the lifecycle task appends scrollback and
-/// saves the terminal state under it, and deleting the session's dir closes
-/// it for good. Session ids are never reused, so it never reopens.
+/// A session's scrollback gate: it holds the session's open
+/// [`ScrollbackWriter`], the lifecycle task (or the headless stdout task)
+/// appends scrollback and saves the terminal state under it, and deleting the
+/// session's dir closes the writer and the gate for good. Session ids are
+/// never reused, so it never reopens.
 #[derive(Clone, Debug, Default)]
 pub struct ScrollbackGate {
-    deleted: Arc<Mutex<bool>>,
+    state: Arc<Mutex<GateState>>,
+}
+
+#[derive(Debug, Default)]
+struct GateState {
+    deleted: bool,
+    writer: Option<ScrollbackWriter>,
 }
 
 impl ScrollbackGate {
-    /// Runs `write` under the gate unless the session's dir was deleted.
-    fn write(&self, write: impl FnOnce()) {
-        let deleted = lock(&self.deleted);
-        if !*deleted {
-            write();
+    /// Runs `write` with the session's writer under the gate unless the
+    /// session's dir was deleted; the writer is made for `dirs` and
+    /// `session_id` on first use. `None` when the gate is closed.
+    pub(crate) fn write<R>(
+        &self,
+        dirs: &Dirs,
+        session_id: &str,
+        write: impl FnOnce(&mut ScrollbackWriter) -> R,
+    ) -> Option<R> {
+        let mut state = lock(&self.state);
+        if state.deleted {
+            return None;
+        }
+        let writer = state
+            .writer
+            .get_or_insert_with(|| ScrollbackWriter::new(dirs, session_id));
+        Some(write(writer))
+    }
+
+    /// Trims the writer's file on the blocking pool, under the gate, and
+    /// waits for it: a delete waits for a trim in flight, and a trim after a
+    /// delete is skipped.
+    pub(crate) async fn trim(&self) {
+        let gate = self.clone();
+        if let Err(err) =
+            tokio::task::spawn_blocking(move || gate.with_writer(ScrollbackWriter::trim)).await
+        {
+            warn!(?err, "scrollback trim task failed");
         }
     }
 
-    /// Closes the gate and runs `delete` under it, so no write is part-way
-    /// through while the dir goes and none follows.
+    /// Runs `with` on the open writer, if any, unless the gate is closed.
+    fn with_writer(&self, with: impl FnOnce(&mut ScrollbackWriter)) {
+        let mut state = lock(&self.state);
+        if state.deleted {
+            return;
+        }
+        if let Some(writer) = state.writer.as_mut() {
+            with(writer);
+        }
+    }
+
+    /// Flushes the writer, so a read of the file sees every chunk written.
+    fn flush(&self) {
+        self.with_writer(ScrollbackWriter::flush);
+    }
+
+    /// Closes the writer's file; a later write reopens it.
+    pub(crate) fn close_writer(&self) {
+        lock(&self.state).writer = None;
+    }
+
+    /// Whether the gate holds a writer, whose file is then open.
+    #[cfg(test)]
+    fn has_open_writer(&self) -> bool {
+        lock(&self.state).writer.is_some()
+    }
+
+    /// Closes the gate and the writer's file, then runs `delete` under it, so
+    /// no write is part-way through while the dir goes and none follows.
     fn delete(&self, delete: impl FnOnce()) {
-        let mut deleted = lock(&self.deleted);
-        *deleted = true;
+        let mut state = lock(&self.state);
+        state.deleted = true;
+        state.writer = None;
         delete();
     }
 }
@@ -674,7 +733,7 @@ impl SessionRegistry {
 
     /// `id`'s scrollback gate, made with its record; one is made here for a
     /// record inserted before this was asked.
-    fn scrollback_gate(&self, id: &str) -> ScrollbackGate {
+    pub(crate) fn scrollback_gate(&self, id: &str) -> ScrollbackGate {
         lock(&self.scrollback_gates)
             .entry(id.to_owned())
             .or_default()
@@ -1265,13 +1324,18 @@ pub fn attach_lifecycle(
             tokio::select! {
                 msg = output.recv() => {
                     match msg {
-                        Some(LifecycleItem::Chunk(bytes)) => deliver_chunk(
-                            &bytes,
-                            &mut clients,
-                            dirs.as_ref().map(|d| (d, &gate)),
-                            &session_id,
-                            &mut bp_tracker,
-                        ),
+                        Some(LifecycleItem::Chunk(bytes)) => {
+                            let over_cap = deliver_chunk(
+                                &bytes,
+                                &mut clients,
+                                dirs.as_ref().map(|d| (d, &gate)),
+                                &session_id,
+                                &mut bp_tracker,
+                            );
+                            if over_cap {
+                                gate.trim().await;
+                            }
+                        }
                         Some(LifecycleItem::Exited(exit)) => break exit,
                         // The reader is gone without reporting an exit.
                         None => break PtyExit::TracerLost,
@@ -1280,6 +1344,7 @@ pub fn attach_lifecycle(
                 req = snap_rx.recv(), if snap_open => {
                     match req {
                         Some(reply) => {
+                            gate.flush();
                             let (data, truncated) = build_replay_snapshot(
                                 dirs.as_ref(),
                                 &session_id,
@@ -1310,6 +1375,7 @@ pub fn attach_lifecycle(
         // which holds every chunk by now.
         drop(clients);
         drop(snap_rx);
+        gate.close_writer();
         handle_exit(&registry, &session_id, exit, dirs.as_ref());
     });
 
@@ -1322,22 +1388,27 @@ pub fn attach_lifecycle(
 /// bracketed-paste state is saved if the chunk changed it, both under the
 /// session's scrollback gate, which skips them once the session's dir is
 /// deleted. Clients whose `live` receiver is gone are dropped from `clients`.
+/// Returns whether the scrollback file passed its cap, when the caller awaits
+/// [`ScrollbackGate::trim`] before the next chunk.
 fn deliver_chunk(
     bytes: &[u8],
     clients: &mut Vec<mpsc::UnboundedSender<Vec<u8>>>,
     persist: Option<(&Dirs, &ScrollbackGate)>,
     session_id: &str,
     bp_tracker: &mut BracketedPasteTracker,
-) {
+) -> bool {
     clients.retain(|tx| tx.send(bytes.to_vec()).is_ok());
-    if let Some((d, gate)) = persist {
-        gate.write(|| {
-            scrollback::append(d, session_id, bytes);
-            if bp_tracker.observe(bytes) {
-                termstate::save(d, session_id, bp_tracker.enabled());
-            }
-        });
-    }
+    let Some((d, gate)) = persist else {
+        return false;
+    };
+    gate.write(d, session_id, |writer| {
+        let over_cap = writer.write(bytes);
+        if bp_tracker.observe(bytes) {
+            termstate::save(d, session_id, bp_tracker.enabled());
+        }
+        over_cap
+    })
+    .unwrap_or(false)
 }
 
 /// The session's exit, handled by its lifecycle task once every chunk before
@@ -1787,7 +1858,7 @@ mod tests {
     #[test]
     fn replay_snapshot_prefixes_bracketed_paste_when_enabled() {
         let dirs = scratch_dirs("replay-on");
-        crate::scrollback::append(&dirs, "s1", b"history bytes");
+        ScrollbackWriter::new(&dirs, "s1").write(b"history bytes");
         let (data, truncated) = build_replay_snapshot(Some(&dirs), "s1", true);
         assert!(!truncated);
         assert!(
@@ -1801,7 +1872,7 @@ mod tests {
     #[test]
     fn replay_snapshot_is_unprefixed_when_disabled() {
         let dirs = scratch_dirs("replay-off");
-        crate::scrollback::append(&dirs, "s1", b"history bytes");
+        ScrollbackWriter::new(&dirs, "s1").write(b"history bytes");
         let (data, _) = build_replay_snapshot(Some(&dirs), "s1", false);
         assert_eq!(data, b"history bytes");
         let _ = std::fs::remove_dir_all(&dirs.config);
@@ -3263,7 +3334,7 @@ mod tests {
     /// `attach_lifecycle` the way a spawn is.
     struct FedSession {
         dirs: Dirs,
-        _registry: Arc<SessionRegistry>,
+        registry: Arc<SessionRegistry>,
         _pty: Arc<PtyHandle>,
         output: Arc<PtyProducer>,
         snap_tx: ScrollbackSnapshotReq,
@@ -3286,11 +3357,105 @@ mod tests {
         let snap_tx = attach_lifecycle(&registry, "s".to_owned(), &pty, Some(dirs.clone()));
         FedSession {
             dirs,
-            _registry: registry,
+            registry,
             _pty: pty,
             output: Arc::new(producer),
             snap_tx,
         }
+    }
+
+    /// Receives from `live` until it has handed over `want` bytes; `None`
+    /// when it closes or stays silent for 60 s (hung).
+    async fn receive_bytes(
+        live: &mut mpsc::UnboundedReceiver<Vec<u8>>,
+        want: usize,
+    ) -> Option<Vec<u8>> {
+        let mut got = Vec::new();
+        while got.len() < want {
+            let chunk = tokio::time::timeout(std::time::Duration::from_secs(60), live.recv())
+                .await
+                .ok()
+                .flatten()?;
+            got.extend_from_slice(&chunk);
+        }
+        Some(got)
+    }
+
+    /// Output past the cap trims the file through the lifecycle path, and a
+    /// snapshot taken after it holds exactly the file's bytes, starting at a
+    /// line.
+    #[tokio::test]
+    async fn snapshot_after_a_trim_is_exact_and_starts_at_a_line() {
+        const SENT: usize = 2_200;
+        let session = fed_session("snapshot-after-trim");
+        let mut attached = take_snapshot(&session.snap_tx)
+            .await
+            .expect("a first snapshot")
+            .live;
+        let mut expected = Vec::new();
+        for seq in 0..SENT {
+            // 998-byte lines, so a raw trim offset lands mid-line.
+            let chunk = format!("{seq:06} {}\n", "x".repeat(990)).into_bytes();
+            expected.extend_from_slice(&chunk);
+            session.output.send(chunk).await;
+        }
+        // The attached client has every chunk, so the lifecycle task has
+        // persisted them all; the snapshot below waits on any trim in flight.
+        let received = receive_bytes(&mut attached, expected.len()).await;
+        let snapshot = take_snapshot(&session.snap_tx)
+            .await
+            .expect("a snapshot after the trim");
+        let (file, _) = scrollback::load(&session.dirs, "s");
+        let _ = std::fs::remove_dir_all(&session.dirs.config);
+
+        assert_eq!(
+            received.as_deref(),
+            Some(expected.as_slice()),
+            "the client got every chunk"
+        );
+        assert!(snapshot.truncated, "the ring was trimmed");
+        assert!(
+            snapshot.data == file,
+            "the snapshot equals the file's bytes"
+        );
+        assert!(
+            expected.ends_with(&snapshot.data),
+            "the snapshot is the newest output"
+        );
+        let cut = expected.len() - snapshot.data.len();
+        assert!(cut > 0, "the trim dropped bytes");
+        assert_eq!(expected[cut - 1], b'\n', "the snapshot starts at a line");
+    }
+
+    /// Deleting the session's dir after output was written drops the gate's
+    /// writer, closing its open file, and the dir goes.
+    #[tokio::test]
+    async fn discard_closes_the_scrollback_handle() {
+        let session = fed_session("discard-closes-handle");
+        let mut attached = take_snapshot(&session.snap_tx)
+            .await
+            .expect("a first snapshot")
+            .live;
+        session.output.send(b"some output\n".to_vec()).await;
+        // Delivered to the client in the same step that writes it.
+        assert!(
+            receive_bytes(&mut attached, 12).await.is_some(),
+            "the chunk reached the client"
+        );
+        let session_dir = session.dirs.sessions_dir.join("s");
+        let written = session_dir.join("scrollback.bin").exists();
+        let gate = session.registry.scrollback_gate("s");
+        let open_before = gate.has_open_writer();
+
+        session.registry.delete_session_dir("s");
+
+        let open_after = gate.has_open_writer();
+        let dir_left = session_dir.exists();
+        let _ = std::fs::remove_dir_all(&session.dirs.config);
+        assert!(written, "the output was written");
+        assert!(open_before, "the writer held the file open");
+        assert!(!open_after, "the discard closed the writer's file");
+        assert!(!dir_left, "the discard deleted the session's dir");
     }
 
     /// Asks the lifecycle task for a snapshot, waiting at most 60 s.

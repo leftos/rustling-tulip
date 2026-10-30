@@ -7,6 +7,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 ### Fixed
 
 - Repos that store refs in git's reftable format now refresh their status and stash list after a commit, branch switch or stash.
+- A long-running session's history now starts at a line when reopened, instead of mid colour code with stray characters at the top of the pane.
 
 ## v0.5.1-alpha
 

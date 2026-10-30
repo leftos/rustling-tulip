@@ -257,7 +257,7 @@ Before every breaking bump, verify that `daemon_client::ensure_running` retires 
 - `sessions/<id>/meta.json` — orphan-recovery sidecar; written at spawn, deleted on graceful stop
 - `sessions/<id>/hook-settings.json` — the hooks document an interactive Claude spawn passes as `--settings` (a recovered shell's `shell_resume` command names its path); written at spawn, deleted on a graceful stop
 - `sessions/<id>/summary.json` — the session's summary ring (a protocol `SessionSummary`); written atomically after each ring update while `meta.json` exists, deleted with the sidecar
-- `sessions/<id>/scrollback.bin` — 2 MB ring (trims to 1.5 MB on overflow), replayed via `LoadScrollback` on attach
+- `sessions/<id>/scrollback.bin` — 2 MB ring (trims to about 1.5 MB on overflow, cut at the next line start within 4 KiB, off the async workers), held open by the session's scrollback gate while it runs and replayed via `LoadScrollback` on attach
 - `sessions/<id>/scrollback.truncated` — flag file iff the ring overflowed
 
 Sessions are deliberately **not** in `state.json` — they're rebuilt from sidecars on startup so the daemon can survive restarts without a single fragile state blob.
