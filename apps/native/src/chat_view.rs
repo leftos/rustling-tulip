@@ -11,8 +11,9 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
+use chrono::{DateTime, TimeDelta, Utc};
 use gpui::{
-    AnyElement, App, ClickEvent, Context, Div, ElementId, ScrollHandle, SharedString, Window,
+    AnyElement, App, ClickEvent, Context, Div, ElementId, ScrollHandle, SharedString, Task, Window,
     WindowId, div, prelude::*, px, relative,
 };
 use protocol::error_codes::UNSUPPORTED_MESSAGE;
@@ -20,12 +21,13 @@ use protocol::{
     ChatEntry, ClientMessage, DaemonMessage, SessionMode, SessionSnapshot, ToolOutcome,
 };
 
-use crate::chat::{self, ChatLoads, ChatLog, PaneView, PaneViews, PromptStack};
+use crate::chat::{self, ChatLoads, ChatLog, PaneView, PaneViews, PromptStack, RunningWork, Strip};
 use crate::fonts::DEFAULT_FAMILY;
 use crate::palette::{CHIP, DANGER, FAINT, LINE_STRONG, SUBTLE, TEXT_2, WAITING, WORKING};
 use crate::scrollbar::Scrollbar;
 use crate::sidebar::LOCAL_HOST_KEY;
 use crate::viewer_md_view::{LinkRoute, MdDoc, Painter, prepare, render_row};
+use crate::work_strip::strip_row;
 use crate::{MUTED, RootView, TEXT, UI_TEXT_SIZE, new_request_id};
 
 /// What a pane whose chat the daemon refused says above its terminal.
@@ -43,7 +45,7 @@ const TOGGLE_TO_TERMINAL_TIP: &str = "Show this session's terminal";
 
 /// The room between rows, and around the column.
 const ROW_GAP: f32 = 8.0;
-const BODY_PAD_X: f32 = 14.0;
+pub(crate) const BODY_PAD_X: f32 = 14.0;
 const BODY_PAD_Y: f32 = 12.0;
 /// A user message's bubble: its corners, padding and widest share of the
 /// column.
@@ -59,7 +61,7 @@ const CARD_PAD_X: f32 = 8.0;
 const CARD_PAD_Y: f32 = 5.0;
 const CARD_TEXT_SIZE: f32 = 12.0;
 /// The size of a muted row's text, and of the live answer's tag.
-const SMALL_TEXT_SIZE: f32 = 12.0;
+pub(crate) const SMALL_TEXT_SIZE: f32 = 12.0;
 const TAG_TEXT_SIZE: f32 = 11.0;
 /// The room right of a live answer's border, and its cursor block.
 const LIVE_PAD: f32 = 8.0;
@@ -84,13 +86,16 @@ pub(crate) struct SessionChat {
     request: Option<String>,
     /// By answer id, the text length it was parsed at and the document.
     docs: HashMap<String, (usize, Arc<MdDoc>)>,
+    /// The work running beside the chat, for its strip; a `Chat` reply
+    /// leaves it as it is.
+    work: RunningWork,
 }
 
 impl SessionChat {
     /// Applies one chat message: a `Chat` that answers this chat's load or
     /// that the daemon sent unasked (a reset that keeps open cards open), an
-    /// append, or a screen change. A reply to an older load changes nothing.
-    /// Returns whether it applied.
+    /// append, a screen change, or the running work. A reply to an older
+    /// load changes nothing. Returns whether it applied.
     fn apply(&mut self, msg: DaemonMessage, now: Instant) -> bool {
         match msg {
             DaemonMessage::Chat {
@@ -118,6 +123,12 @@ impl SessionChat {
                 self.refresh_docs();
             }
             DaemonMessage::ChatScreenChanged { screen, .. } => self.stack.on_screen(&screen, now),
+            DaemonMessage::ChatWork {
+                subagents,
+                shells,
+                wakeup_at,
+                ..
+            } => self.work.set(subagents, shells, wakeup_at),
             _ => return false,
         }
         true
@@ -143,17 +154,71 @@ impl SessionChat {
 
 /// The chat side of the panes: what each pane shows, the chats this
 /// connection has loaded, each loaded session's chat, each chat pane's
-/// scroll, and the note a refused chat leaves on its pane.
-#[derive(Default)]
+/// scroll, the note a refused chat leaves on its pane, and the wall clock
+/// the running-work strips read.
 pub(crate) struct ChatPanes {
     views: PaneViews,
     loads: ChatLoads,
     sessions: HashMap<String, SessionChat>,
     scrolls: HashMap<String, Scrollbar>,
     notes: HashMap<String, String>,
+    wall: WallClock,
+    /// Repaints the running-work strips while one shows, so their ages and
+    /// countdowns keep counting.
+    work_strip_timer: Option<Task<()>>,
+    /// How many times that timer has repainted.
+    work_strip_repaints: usize,
+}
+
+/// The wall time and the view's clock reading taken together, so the wall
+/// time moves only as the view's clock does: a spec's clock moves both.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct WallClock {
+    wall: DateTime<Utc>,
+    instant: Instant,
+}
+
+impl WallClock {
+    /// The wall time now, paired with `instant`, the view's clock now.
+    pub(crate) fn starting_at(instant: Instant) -> Self {
+        Self {
+            wall: Utc::now(),
+            instant,
+        }
+    }
+
+    /// The wall time when the view's clock reads `instant`.
+    fn at(self, instant: Instant) -> DateTime<Utc> {
+        let elapsed = instant.saturating_duration_since(self.instant);
+        // Only a clock moved past chrono's range (about 292 million years)
+        // fails here; the base is the answer then.
+        TimeDelta::from_std(elapsed)
+            .ok()
+            .and_then(|elapsed| self.wall.checked_add_signed(elapsed))
+            .unwrap_or(self.wall)
+    }
 }
 
 impl ChatPanes {
+    /// No pane on its chat and nothing loaded, the strips reading `wall`.
+    pub(crate) fn new(wall: WallClock) -> Self {
+        Self {
+            views: PaneViews::default(),
+            loads: ChatLoads::default(),
+            sessions: HashMap::new(),
+            scrolls: HashMap::new(),
+            notes: HashMap::new(),
+            wall,
+            work_strip_timer: None,
+            work_strip_repaints: 0,
+        }
+    }
+
+    /// The wall clock the strips read, for a fresh set of chat panes.
+    pub(crate) fn wall_clock(&self) -> WallClock {
+        self.wall
+    }
+
     /// Whether pane `pane_id` was switched to its chat.
     pub(crate) fn is_chat(&self, pane_id: &str) -> bool {
         self.views.is_chat(pane_id)
@@ -183,6 +248,12 @@ impl ChatPanes {
     pub(crate) fn reset_connection(&mut self) {
         self.loads.clear();
         self.sessions.clear();
+        self.work_strip_timer = None;
+    }
+
+    /// Whether some loaded chat shows a running-work strip.
+    fn shows_work(&self) -> bool {
+        self.sessions.values().any(|chat| !chat.work.is_empty())
     }
 }
 
@@ -240,6 +311,63 @@ impl RootView {
             .unwrap_or_default()
     }
 
+    /// Session `session_id`'s running-work strip as drawn now; none while
+    /// nothing runs or no pane shows its chat.
+    #[must_use]
+    pub fn chat_strip(&self, session_id: &str) -> Option<Strip> {
+        self.chat
+            .sessions
+            .get(session_id)?
+            .work
+            .strip(self.wall_now())
+    }
+
+    /// How many times the running-work strips' timer has repainted them.
+    #[must_use]
+    pub fn chat_work_repaints(&self) -> usize {
+        self.chat.work_strip_repaints
+    }
+
+    /// The wall time the running-work strips read: the time the view
+    /// started, moved on as far as its clock has since.
+    #[must_use]
+    pub fn wall_now(&self) -> DateTime<Utc> {
+        self.chat.wall.at((self.now)())
+    }
+
+    /// Starts the strips' repaint timer while some chat pane shows a strip,
+    /// and drops it when none does. It fires when the soonest strip next
+    /// changes how it reads (see [`RunningWork::next_repaint`]).
+    pub(crate) fn arm_work_strip_repaint(&mut self, cx: &mut Context<Self>) {
+        let now = self.wall_now();
+        let Some(delay) = self
+            .chat
+            .sessions
+            .values()
+            .filter_map(|chat| chat.work.next_repaint(now))
+            .min()
+        else {
+            self.chat.work_strip_timer = None;
+            return;
+        };
+        self.chat.work_strip_timer = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            // Fails only when the view is gone, and the strips with it.
+            this.update(cx, Self::repaint_work_strips).ok();
+        }));
+    }
+
+    /// The timer fired: repaint the strips and go again while one shows.
+    fn repaint_work_strips(&mut self, cx: &mut Context<Self>) {
+        if !self.chat.shows_work() {
+            self.chat.work_strip_timer = None;
+            return;
+        }
+        self.chat.work_strip_repaints += 1;
+        cx.notify();
+        self.arm_work_strip_repaint(cx);
+    }
+
     /// Switches pane `pane_id` between its terminal and its chat. The chat
     /// takes no keys, so a terminal that had the keyboard of the window
     /// drawing it, the main one or a pop-out, lets go of it; switching back
@@ -250,6 +378,7 @@ impl RootView {
         let shown = self.chat.views.toggle(pane_id);
         self.remember_pane_view(pane_id, shown);
         self.sync_chat_loads();
+        self.arm_work_strip_repaint(cx);
         self.update_pane_roles(cx);
         match shown {
             PaneView::Chat => self.release_pane_keyboard(pane_id, window, cx),
@@ -414,28 +543,34 @@ impl RootView {
         match msg {
             DaemonMessage::Chat { .. }
             | DaemonMessage::ChatAppend { .. }
-            | DaemonMessage::ChatScreenChanged { .. } => self.on_chat_message(msg, cx),
+            | DaemonMessage::ChatScreenChanged { .. }
+            | DaemonMessage::ChatWork { .. } => self.on_chat_message(msg, cx),
             other => self.fold_agents(other, cx),
         }
     }
 
-    /// A `Chat`, `ChatAppend` or `ChatScreenChanged`: it updates the chat
-    /// of a session a chat pane shows; one for any other session, or a
-    /// reply to an older load, is dropped.
+    /// A `Chat`, `ChatAppend`, `ChatScreenChanged` or `ChatWork`: it
+    /// updates the chat of a session a chat pane shows; one for any other
+    /// session, or a reply to an older load, is dropped.
     pub(crate) fn on_chat_message(&mut self, msg: DaemonMessage, cx: &mut Context<Self>) {
         let now = (self.now)();
         let session_id = match &msg {
             DaemonMessage::Chat { session_id, .. }
             | DaemonMessage::ChatAppend { session_id, .. }
-            | DaemonMessage::ChatScreenChanged { session_id, .. } => session_id.clone(),
+            | DaemonMessage::ChatScreenChanged { session_id, .. }
+            | DaemonMessage::ChatWork { session_id, .. } => session_id.clone(),
             _ => return,
         };
+        let work = matches!(msg, DaemonMessage::ChatWork { .. });
         let applied = self
             .chat
             .sessions
             .get_mut(&session_id)
             .is_some_and(|chat| chat.apply(msg, now));
         if applied {
+            if work {
+                self.arm_work_strip_repaint(cx);
+            }
             cx.notify();
         } else {
             tracing::debug!(%session_id, "chat message for a chat no pane shows, or for an older load: dropped");
@@ -496,6 +631,7 @@ impl RootView {
             self.chat.notes.insert(pane_id, note.clone());
         }
         self.sync_chat_loads();
+        self.arm_work_strip_repaint(cx);
         self.update_pane_roles(cx);
         cx.notify();
         true
@@ -549,15 +685,11 @@ impl RootView {
 
     /// Session `session_id`'s chat as pane `pane_id` draws it: a muted line
     /// while it loads or has no rows, else its rows in a column that follows
-    /// the bottom until scrolled up.
+    /// the bottom until scrolled up; under either, the running-work strip
+    /// while work runs.
     fn chat_body(&self, pane_id: &str, session_id: &str, cx: &mut Context<Self>) -> AnyElement {
         let name = format!("pane-chat-{pane_id}");
         let chat = self.chat.sessions.get(session_id);
-        let Some(chat) = chat.filter(|chat| !chat.log.is_empty() || chat.log.hidden() > 0) else {
-            let loading = chat.is_none_or(|chat| chat.request.is_some());
-            let note = if loading { LOADING_NOTE } else { EMPTY_NOTE };
-            return chat_note(note).debug_selector(|| name).into_any_element();
-        };
         let font = &self.sidebar.ui_state().terminal_font;
         let family = font.family.as_deref();
         let look = RowLook {
@@ -567,47 +699,75 @@ impl RootView {
             mono_family: family,
             mono_size: font.size,
         };
-        let mut rows: Vec<AnyElement> = Vec::with_capacity(chat.log.len() + 1);
-        if chat.log.hidden() > 0 {
-            rows.push(hidden_row(chat.log.hidden()));
-        }
-        rows.extend(
-            chat.log
-                .entries()
-                .map(|entry| chat_row(&look, chat, entry, cx)),
-        );
-        let column = div()
-            .id(ElementId::Name(SharedString::from(format!(
-                "chat-scroll-{pane_id}"
-            ))))
-            .size_full()
-            .overflow_y_scroll()
-            .px(px(BODY_PAD_X))
-            .py(px(BODY_PAD_Y))
-            .flex()
-            .flex_col()
-            .gap(px(ROW_GAP))
-            .text_size(px(UI_TEXT_SIZE))
-            .text_color(gpui::rgb(TEXT))
-            .children(rows);
-        let scroll = self.chat.scrolls.get(pane_id);
-        let column = match scroll {
-            Some(scroll) => {
-                follow_bottom(scroll.handle());
-                column.track_scroll(scroll.handle())
-            }
-            None => column,
+        let strip = chat.and_then(|chat| chat.work.strip(self.wall_now()));
+        let rows = chat.filter(|chat| !chat.log.is_empty() || chat.log.hidden() > 0);
+        let main = if let Some(chat) = rows {
+            chat_column(&look, chat, self.chat.scrolls.get(pane_id), cx)
+        } else {
+            let loading = chat.is_none_or(|chat| chat.request.is_some());
+            let note = if loading { LOADING_NOTE } else { EMPTY_NOTE };
+            chat_note(note).into_any_element()
         };
         div()
             .debug_selector(|| name)
-            .relative()
+            .flex()
+            .flex_col()
             .flex_1()
             .min_h(px(0.0))
             .size_full()
-            .child(column)
-            .children(scroll.map(Scrollbar::overlay))
+            .child(main)
+            .children(strip.map(|strip| strip_row(&strip, &look.mono)))
             .into_any_element()
     }
+}
+
+/// A loaded chat's rows in a column that follows the bottom until scrolled
+/// up, with its scrollbar.
+fn chat_column(
+    look: &RowLook<'_>,
+    chat: &SessionChat,
+    scroll: Option<&Scrollbar>,
+    cx: &mut Context<RootView>,
+) -> AnyElement {
+    let mut rows: Vec<AnyElement> = Vec::with_capacity(chat.log.len() + 1);
+    if chat.log.hidden() > 0 {
+        rows.push(hidden_row(chat.log.hidden()));
+    }
+    rows.extend(
+        chat.log
+            .entries()
+            .map(|entry| chat_row(look, chat, entry, cx)),
+    );
+    let column = div()
+        .id(ElementId::Name(SharedString::from(format!(
+            "chat-scroll-{}",
+            look.pane_id
+        ))))
+        .size_full()
+        .overflow_y_scroll()
+        .px(px(BODY_PAD_X))
+        .py(px(BODY_PAD_Y))
+        .flex()
+        .flex_col()
+        .gap(px(ROW_GAP))
+        .text_size(px(UI_TEXT_SIZE))
+        .text_color(gpui::rgb(TEXT))
+        .children(rows);
+    let column = match scroll {
+        Some(scroll) => {
+            follow_bottom(scroll.handle());
+            column.track_scroll(scroll.handle())
+        }
+        None => column,
+    };
+    div()
+        .relative()
+        .flex_1()
+        .min_h(px(0.0))
+        .w_full()
+        .child(column)
+        .children(scroll.map(Scrollbar::overlay))
+        .into_any_element()
 }
 
 /// Keeps a chat at its bottom while it was there at its last layout, so new

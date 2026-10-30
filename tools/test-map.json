@@ -202,6 +202,7 @@
     {
       "paths": [
         "apps/native/src/chat_view.rs",
+        "apps/native/src/work_strip.rs",
         "apps/native/tests/ui/ui_chat.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native::ui) & test(/^ui_chat::/))"

@@ -5,14 +5,16 @@
 //! offers no chat snaps back to its terminal with a note. The pane menu and
 //! Ctrl+Shift+M switch the view too; each session's last view is saved in
 //! `native-ui.json` and a new pane on it opens there, a new session on its
-//! terminal, and a pop-out keeps its view.
+//! terminal, and a pop-out keeps its view. The running-work strip under the
+//! chat shows the daemon's `ChatWork`, counts down and takes no click.
 
 use crate::support;
 
+use chrono::{DateTime, TimeDelta, Utc};
 use gpui::{TestAppContext, px};
 use protocol::{
     ChatEntry, ChatScreen, ClientMessage, ComposerState, DaemonMessage, GridNode, SplitDirection,
-    ToolOutcome,
+    ToolOutcome, WorkShell, WorkSubagent,
 };
 use rustling_tulip_native::{OpenOutcome, PopoutKey};
 use support::{Fixture, Harness, TestDir, pane, repo, session, tab};
@@ -631,5 +633,164 @@ fn switching_a_popped_pane_to_its_chat_releases_its_terminals_keys(cx: &mut Test
     assert!(
         !focused_in_popout(&mut h),
         "the pop-out's keyboard left the hidden terminal"
+    );
+}
+
+/// A `ChatWork` for `s1`.
+fn work(
+    subagents: Vec<WorkSubagent>,
+    shells: Vec<WorkShell>,
+    wakeup_at: Option<DateTime<Utc>>,
+) -> DaemonMessage {
+    DaemonMessage::ChatWork {
+        session_id: "s1".to_owned(),
+        subagents,
+        shells,
+        wakeup_at,
+    }
+}
+
+fn sleeper(now: DateTime<Utc>, id: &str, description: &str) -> WorkSubagent {
+    WorkSubagent {
+        id: id.to_owned(),
+        description: description.to_owned(),
+        agent_type: Some("general-purpose".to_owned()),
+        since: Some(now - TimeDelta::minutes(2)),
+        from_screen: false,
+    }
+}
+
+/// Sends two subagents, a shell started 3 minutes ago and a wakeup 4
+/// minutes off, stamped from the view's wall clock.
+fn send_full_work(h: &mut Harness<'_>) {
+    let now = h.root(|root, _| root.wall_now());
+    let shell = WorkShell {
+        id: "b1".to_owned(),
+        description: "Run the footer specs".to_owned(),
+        command: Some("cargo nextest run footer".to_owned()),
+        since: Some(now - TimeDelta::minutes(3)),
+        from_screen: false,
+    };
+    h.send(work(
+        vec![
+            sleeper(now, "a1", "Sleeper A"),
+            sleeper(now, "a2", "Sleeper B"),
+        ],
+        vec![shell],
+        Some(now + TimeDelta::minutes(4)),
+    ));
+}
+
+fn strip_text(h: &mut Harness<'_>) -> Option<String> {
+    h.root(|root, _| root.chat_strip("s1").map(|strip| strip.text))
+}
+
+fn work_repaints(h: &mut Harness<'_>) -> usize {
+    h.root(|root, _| root.chat_work_repaints())
+}
+
+#[gpui::test]
+fn the_strip_shows_running_work(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, id) = opened(cx, &dir);
+    h.send(reply(Some(&id), vec![user("u1")]));
+    send_full_work(&mut h);
+    assert_eq!(
+        strip_text(&mut h).as_deref(),
+        Some(
+            "2 subagents \u{b7} 1 background shell (cargo nextest run footer, 3m) \u{b7} wakeup in 4m"
+        )
+    );
+    assert!(drawn_now(&mut h, "work-strip"), "the strip is drawn");
+    assert!(painted(&mut h, "chat-row-p1-u1"), "under the rows");
+}
+
+#[gpui::test]
+fn an_empty_strip_hides(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, id) = opened(cx, &dir);
+    h.send(reply(Some(&id), vec![user("u1")]));
+    send_full_work(&mut h);
+    // `painted`, not `drawn_now`: a narrowed frame's bounds would outlive
+    // the strip and read as a strip still drawn.
+    assert!(painted(&mut h, "work-strip"));
+    h.send(work(vec![], vec![], None));
+    assert_eq!(strip_text(&mut h), None);
+    assert!(!drawn_now(&mut h, "work-strip"), "nothing runs, no strip");
+}
+
+#[gpui::test]
+fn the_countdown_ticks(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, id) = opened(cx, &dir);
+    h.send(reply(Some(&id), vec![user("u1")]));
+    send_full_work(&mut h);
+    let before = work_repaints(&mut h);
+    h.advance(std::time::Duration::from_secs(60));
+    let text = strip_text(&mut h).unwrap_or_default();
+    assert!(text.ends_with("wakeup in 3m"), "a minute on: {text}");
+    assert!(
+        work_repaints(&mut h) > before,
+        "the strip's timer repainted it"
+    );
+}
+
+#[gpui::test]
+fn a_screen_read_count_has_its_tooltip(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, id) = opened(cx, &dir);
+    h.send(reply(Some(&id), vec![user("u1")]));
+    let counted = WorkShell {
+        id: String::new(),
+        description: String::new(),
+        command: None,
+        since: None,
+        from_screen: true,
+    };
+    h.send(work(vec![], vec![counted], None));
+    let strip = h
+        .root(|root, _| root.chat_strip("s1"))
+        .expect("a counted shell shows the strip");
+    assert_eq!(strip.text, "1 background shell");
+    let tips: Vec<Option<String>> = strip.items.into_iter().map(|item| item.tooltip).collect();
+    assert_eq!(
+        tips,
+        [Some(
+            "Counted from the screen; no details reported yet".to_owned()
+        )]
+    );
+    assert!(painted(&mut h, "work-item-0"), "its segment is drawn");
+}
+
+#[gpui::test]
+fn a_subagent_item_is_not_tappable(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, id) = opened(cx, &dir);
+    h.send(reply(Some(&id), vec![user("u1")]));
+    send_full_work(&mut h);
+    let strip = h.root(|root, _| root.chat_strip("s1"));
+    assert!(
+        strip.is_some_and(|strip| strip.items.iter().all(|item| !item.tappable)),
+        "no item takes a click"
+    );
+    h.sent();
+    h.click_on("work-item-0");
+    let sent = h.sent();
+    assert!(
+        sent.is_empty(),
+        "a click on a subagent sends nothing: {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn the_strip_shows_while_the_chat_is_empty(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, id) = opened(cx, &dir);
+    h.send(reply(Some(&id), vec![]));
+    send_full_work(&mut h);
+    assert!(strip_text(&mut h).is_some());
+    assert!(
+        drawn_now(&mut h, "work-strip"),
+        "the strip is drawn under the empty note"
     );
 }

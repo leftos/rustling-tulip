@@ -261,7 +261,7 @@ A fetched `.html` or `.htm` page that opens when done brings the relative media 
 
 **Single source of truth for the wire protocol.** All daemon/client messages live in `crates/protocol/src/lib.rs` as tagged enums (`#[serde(tag = "type", rename_all = "snake_case")]`).
 
-When adding a message, update both directions (`ClientMessage` + `DaemonMessage` if it's a request/response) and the matching handler arm in the domain module's `handle` under `crates/daemon/src/server/` plus its variant in `dispatch`'s or-pattern in `crates/daemon/src/server.rs` and the native client's handling (`RootView`'s message folds, `on_message` in `apps/native/src/lib.rs`; `net.rs` only forwards). Changes stay additive where they can (see "When to bump" below).
+When adding a message, update both directions (`ClientMessage` + `DaemonMessage` if it's a request/response) and the matching handler arm in the domain module's `handle` under `crates/daemon/src/server/` plus its variant in `dispatch`'s or-pattern in `crates/daemon/src/server.rs` and the native client's handling (`RootView`'s message folds, `on_message` in `apps/native/src/lib.rs`, and chat messages fold in `apps/native/src/chat_view.rs` (`fold_chat_or_agents`); `net.rs` only forwards). Changes stay additive where they can (see "When to bump" below).
 
 **App code never names an agent.** The daemon, protocol, native client and tracer ask the registry and the plugin's descriptor; agent-specific behaviour lives in `crates/agents/<agent>/`. `tools/check-agent-names.ps1` (a prek hook and the first step of `.\rt.ps1 clippy`) fails on `claude`, `anthropic` or `deepseek` elsewhere, apart from test code and the hits listed in `tools/agent-names-allow.txt`.
 

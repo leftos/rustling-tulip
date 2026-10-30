@@ -42,7 +42,7 @@ use gpui::{
 };
 use protocol::{
     AgentCommandEntry, ChatEntry, ChatScreen, ClientMessage, ComposerState, DaemonMessage,
-    GridNode, SessionSnapshot, SplitDirection, ToolOutcome,
+    GridNode, SessionSnapshot, SplitDirection, ToolOutcome, WorkShell, WorkSubagent,
 };
 use rustling_tulip_native::connection_picker::{PeerSource, SshTestCancel, SshTester};
 use rustling_tulip_native::fonts;
@@ -1240,7 +1240,12 @@ impl FakeDaemon {
             ClientMessage::LoadChat {
                 session_id,
                 request_id,
-            } => chat_reply(session_id, request_id.clone()),
+            } => {
+                return Ok(vec![
+                    chat_reply(session_id, request_id.clone()),
+                    chat_work(self.now, session_id),
+                ]);
+            }
             ClientMessage::GetFileSnapshot { .. } => file_snapshot(msg)?,
             ClientMessage::ListBranches { repo_id } => parse_message(branches(repo_id))?,
             ClientMessage::OpenViewerTab { id, path } => return viewer_opened(id, path),
@@ -1333,6 +1338,30 @@ fn chat_reply(session_id: &str, request_id: Option<String>) -> DaemonMessage {
             prompt: None,
         },
         request_id,
+    }
+}
+
+/// The `chat` shot's running work as of `now`: two subagents, the footer
+/// specs' shell and a wakeup 4 minutes off.
+fn chat_work(now: DateTime<Utc>, session_id: &str) -> DaemonMessage {
+    let sleeper = |id: &str, description: &str| WorkSubagent {
+        id: id.to_owned(),
+        description: description.to_owned(),
+        agent_type: Some("general-purpose".to_owned()),
+        since: Some(now - chrono::Duration::minutes(2)),
+        from_screen: false,
+    };
+    DaemonMessage::ChatWork {
+        session_id: session_id.to_owned(),
+        subagents: vec![sleeper("a1", "Sleeper A"), sleeper("a2", "Sleeper B")],
+        shells: vec![WorkShell {
+            id: "b1".to_owned(),
+            description: "Run the footer specs".to_owned(),
+            command: Some("cargo nextest run footer".to_owned()),
+            since: Some(now - chrono::Duration::minutes(3)),
+            from_screen: false,
+        }],
+        wakeup_at: Some(now + chrono::Duration::minutes(4)),
     }
 }
 

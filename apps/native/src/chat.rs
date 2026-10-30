@@ -1,16 +1,20 @@
 //! The chat model: a session's conversation rows by id with the display cap,
 //! tool-card expansion, the one-line tool summary, the answer builders, the
 //! prompt card stack with its digit grace, which panes show a chat, which
-//! sessions' chats this connection has loaded, and when the chat follows its
-//! bottom.
+//! sessions' chats this connection has loaded, when the chat follows its
+//! bottom, and the running-work strip's text.
 //!
 //! It is pure data: it takes the clock as a parameter and depends on
-//! `protocol` alone, so it can move into a shared client core unchanged.
+//! `protocol` and the wait wording alone.
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
-use protocol::{ChatAnswerKind, ChatEntry, ChatPrompt, ChatPromptKind, ChatScreen, ClientMessage};
+use chrono::{DateTime, TimeDelta, Utc};
+use protocol::{
+    ChatAnswerKind, ChatEntry, ChatPrompt, ChatPromptKind, ChatScreen, ClientMessage, WorkShell,
+    WorkSubagent,
+};
 
 /// How many rows the client keeps: a load reply carries the newest this
 /// many, and the rows past it drop off the top with the count kept hidden.
@@ -549,6 +553,262 @@ pub fn answer_message(
         answer,
         request_id,
     }
+}
+
+/// The longest command or description a lone shell shows on the strip,
+/// before its closing ellipsis.
+const STRIP_COMMAND_CAP: usize = 24;
+
+/// How often the strip repaints while an age or countdown it shows reads in
+/// seconds, and at the longest once every one reads in minutes.
+const STRIP_FAST_REPAINT: Duration = Duration::from_secs(1);
+const STRIP_SLOW_REPAINT: Duration = Duration::from_secs(30);
+
+/// What separates the strip's parts.
+pub const STRIP_SEPARATOR: &str = " \u{b7} ";
+
+/// The tooltip of an item only the screen's count shows.
+pub const SCREEN_READ_TIP: &str = "Counted from the screen; no details reported yet";
+
+/// The work still running beside a session's chat, as the daemon's last
+/// `ChatWork` reported it: its subagents, its background shells and its
+/// earliest pending wakeup.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RunningWork {
+    subagents: Vec<WorkSubagent>,
+    shells: Vec<WorkShell>,
+    wakeup_at: Option<DateTime<Utc>>,
+}
+
+/// The running-work strip at one moment: its text, the parts that text
+/// joins, and one item per subagent, shell and wakeup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Strip {
+    /// The parts joined with [`STRIP_SEPARATOR`].
+    pub text: String,
+    pub parts: Vec<String>,
+    pub items: Vec<StripItem>,
+}
+
+/// What a strip item stands for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StripKind {
+    Subagent,
+    Shell,
+    Wakeup,
+}
+
+/// One subagent, shell or wakeup on the strip.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StripItem {
+    pub kind: StripKind,
+    /// Its short name: a subagent's description or type, a shell's command
+    /// or description as the strip cuts it, the wakeup's part.
+    pub label: String,
+    pub tooltip: Option<String>,
+    /// Whether a click on it does anything; nothing does yet.
+    pub tappable: bool,
+    /// The index of the part of [`Strip::parts`] it is counted in.
+    pub part: usize,
+}
+
+impl RunningWork {
+    /// Takes the work a `ChatWork` reported, replacing what was known.
+    pub fn set(
+        &mut self,
+        subagents: Vec<WorkSubagent>,
+        shells: Vec<WorkShell>,
+        wakeup_at: Option<DateTime<Utc>>,
+    ) {
+        self.subagents = subagents;
+        self.shells = shells;
+        self.wakeup_at = wakeup_at;
+    }
+
+    /// Whether nothing runs and no wakeup is pending: the strip is hidden.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.subagents.is_empty() && self.shells.is_empty() && self.wakeup_at.is_none()
+    }
+
+    /// The strip as of `now`, or `None` when nothing runs.
+    #[must_use]
+    pub fn strip(&self, now: DateTime<Utc>) -> Option<Strip> {
+        let mut parts = Vec::new();
+        let mut items = Vec::new();
+        if !self.subagents.is_empty() {
+            let part = parts.len();
+            parts.push(counted(self.subagents.len(), "subagent"));
+            items.extend(
+                self.subagents
+                    .iter()
+                    .map(|agent| subagent_item(agent, part)),
+            );
+        }
+        if !self.shells.is_empty() {
+            let part = parts.len();
+            parts.push(self.shells_text(now));
+            items.extend(self.shells.iter().map(|shell| shell_item(shell, part)));
+        }
+        if let Some(at) = self.wakeup_at {
+            let text = wakeup_text(now, at);
+            items.push(StripItem {
+                kind: StripKind::Wakeup,
+                label: text.clone(),
+                tooltip: None,
+                tappable: false,
+                part: parts.len(),
+            });
+            parts.push(text);
+        }
+        if parts.is_empty() {
+            return None;
+        }
+        Some(Strip {
+            text: parts.join(STRIP_SEPARATOR),
+            parts,
+            items,
+        })
+    }
+
+    /// How long after `now` the strip next needs a repaint, or `None` when
+    /// it is hidden: a second while an age or countdown it shows reads in
+    /// seconds, else 30 seconds or the moment the soonest wakeup's
+    /// countdown starts reading in seconds, whichever comes first.
+    #[must_use]
+    pub fn next_repaint(&self, now: DateTime<Utc>) -> Option<Duration> {
+        if self.is_empty() {
+            return None;
+        }
+        if self.counts_seconds(now) {
+            return Some(STRIP_FAST_REPAINT);
+        }
+        let until_seconds = self
+            .wakeup_at
+            .filter(|at| *at > now)
+            .and_then(|at| (at - now - TimeDelta::seconds(60)).to_std().ok())
+            .map(|lead| lead.max(STRIP_FAST_REPAINT));
+        Some(until_seconds.map_or(STRIP_SLOW_REPAINT, |lead| lead.min(STRIP_SLOW_REPAINT)))
+    }
+
+    /// Whether some age or countdown the strip shows as of `now` reads in
+    /// seconds.
+    #[must_use]
+    pub fn counts_seconds(&self, now: DateTime<Utc>) -> bool {
+        let young_shell = self
+            .oldest_shell()
+            .is_some_and(|since| (now - since).num_seconds() < 60);
+        let near_wakeup = self
+            .wakeup_at
+            .is_some_and(|at| at > now && countdown_seconds(now, at) < 60);
+        young_shell || near_wakeup
+    }
+
+    /// "1 background shell (cmd, 3m)", "1 background shell" for one only
+    /// the screen counts, or "N background shells (oldest 3m)".
+    fn shells_text(&self, now: DateTime<Utc>) -> String {
+        if let [shell] = self.shells.as_slice() {
+            let Some(since) = shell.since else {
+                return "1 background shell".to_owned();
+            };
+            let age = crate::needs_you::waited(now, since);
+            return match shell_name(shell) {
+                Some(name) => format!("1 background shell ({}, {age})", cut(name)),
+                None => format!("1 background shell ({age})"),
+            };
+        }
+        let count = counted(self.shells.len(), "background shell");
+        match self.oldest_shell() {
+            Some(since) => format!("{count} (oldest {})", crate::needs_you::waited(now, since)),
+            None => count,
+        }
+    }
+
+    /// When the longest-running reported shell started.
+    fn oldest_shell(&self) -> Option<DateTime<Utc>> {
+        self.shells.iter().filter_map(|shell| shell.since).min()
+    }
+}
+
+/// "1 subagent", "2 subagents".
+fn counted(count: usize, noun: &str) -> String {
+    if count == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{count} {noun}s")
+    }
+}
+
+/// `text` cut to [`STRIP_COMMAND_CAP`] characters, with an ellipsis when
+/// it was longer.
+fn cut(text: &str) -> String {
+    if text.chars().count() <= STRIP_COMMAND_CAP {
+        return text.to_owned();
+    }
+    let mut short: String = text.chars().take(STRIP_COMMAND_CAP).collect();
+    short.push('\u{2026}');
+    short
+}
+
+/// A shell's command, else its description; `None` when it has neither.
+fn shell_name(shell: &WorkShell) -> Option<&str> {
+    shell
+        .command
+        .as_deref()
+        .filter(|command| !command.is_empty())
+        .or_else(|| Some(shell.description.as_str()).filter(|text| !text.is_empty()))
+}
+
+fn shell_item(shell: &WorkShell, part: usize) -> StripItem {
+    let name = shell_name(shell);
+    let tooltip = if shell.from_screen {
+        Some(SCREEN_READ_TIP.to_owned())
+    } else {
+        name.map(str::to_owned)
+    };
+    StripItem {
+        kind: StripKind::Shell,
+        label: name.map_or_else(|| "background shell".to_owned(), cut),
+        tooltip,
+        tappable: false,
+        part,
+    }
+}
+
+fn subagent_item(agent: &WorkSubagent, part: usize) -> StripItem {
+    let kind = agent.agent_type.as_deref().filter(|kind| !kind.is_empty());
+    let description = Some(agent.description.as_str()).filter(|text| !text.is_empty());
+    let tooltip = if agent.from_screen {
+        Some(SCREEN_READ_TIP.to_owned())
+    } else {
+        match (kind, description) {
+            (Some(kind), Some(description)) => Some(format!("{kind}: {description}")),
+            (kind, description) => description.or(kind).map(str::to_owned),
+        }
+    };
+    StripItem {
+        kind: StripKind::Subagent,
+        label: description.or(kind).unwrap_or("subagent").to_owned(),
+        tooltip,
+        tappable: false,
+        part,
+    }
+}
+
+/// The whole seconds until `at`, rounded up so a wakeup 3m 59.5s off
+/// still reads "4m".
+fn countdown_seconds(now: DateTime<Utc>, at: DateTime<Utc>) -> i64 {
+    let millis = (at - now).num_milliseconds().max(0);
+    (millis + 999) / 1000
+}
+
+/// "wakeup in 4m" while `at` is ahead of `now`, else "wakeup due".
+fn wakeup_text(now: DateTime<Utc>, at: DateTime<Utc>) -> String {
+    if at <= now {
+        return "wakeup due".to_owned();
+    }
+    let later = now + TimeDelta::seconds(countdown_seconds(now, at));
+    format!("wakeup in {}", crate::needs_you::waited(later, now))
 }
 
 #[cfg(test)]
@@ -1380,5 +1640,340 @@ mod tests {
             ),
             "a request without an id stays without one"
         );
+    }
+}
+
+#[cfg(test)]
+mod strip_tests {
+    use chrono::{DateTime, TimeDelta, TimeZone, Utc};
+    use protocol::{WorkShell, WorkSubagent};
+
+    use super::{RunningWork, SCREEN_READ_TIP, Strip, StripKind};
+
+    fn now() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 10, 30, 12, 0, 0)
+            .single()
+            .unwrap_or_default()
+    }
+
+    fn minutes(n: i64) -> TimeDelta {
+        TimeDelta::minutes(n)
+    }
+
+    fn shell(command: Option<&str>, description: &str, age: Option<TimeDelta>) -> WorkShell {
+        WorkShell {
+            id: "b1".to_owned(),
+            description: description.to_owned(),
+            command: command.map(str::to_owned),
+            since: age.map(|age| now() - age),
+            from_screen: false,
+        }
+    }
+
+    fn screen_shell() -> WorkShell {
+        WorkShell {
+            id: String::new(),
+            description: String::new(),
+            command: None,
+            since: None,
+            from_screen: true,
+        }
+    }
+
+    fn subagent(description: &str, agent_type: Option<&str>) -> WorkSubagent {
+        WorkSubagent {
+            id: "a1".to_owned(),
+            description: description.to_owned(),
+            agent_type: agent_type.map(str::to_owned),
+            since: Some(now() - minutes(2)),
+            from_screen: false,
+        }
+    }
+
+    fn strip(
+        subagents: Vec<WorkSubagent>,
+        shells: Vec<WorkShell>,
+        wakeup_at: Option<DateTime<Utc>>,
+    ) -> Option<Strip> {
+        let mut work = RunningWork::default();
+        work.set(subagents, shells, wakeup_at);
+        work.strip(now())
+    }
+
+    fn text(
+        subagents: Vec<WorkSubagent>,
+        shells: Vec<WorkShell>,
+        wakeup_at: Option<DateTime<Utc>>,
+    ) -> Option<String> {
+        strip(subagents, shells, wakeup_at).map(|strip| strip.text)
+    }
+
+    #[test]
+    fn one_shell_reads_its_command_and_age() {
+        let shells = vec![shell(Some("cargo test"), "Run the tests", Some(minutes(3)))];
+        assert_eq!(
+            text(vec![], shells, None).as_deref(),
+            Some("1 background shell (cargo test, 3m)")
+        );
+    }
+
+    #[test]
+    fn a_long_command_is_cut_to_24_characters() {
+        let command = "cargo nextest run --workspace --cargo-profile test-release";
+        let shells = vec![shell(Some(command), "", Some(minutes(3)))];
+        assert_eq!(
+            text(vec![], shells, None).as_deref(),
+            Some("1 background shell (cargo nextest run --work\u{2026}, 3m)")
+        );
+        let exact = vec![shell(
+            Some("cargo nextest run footer"),
+            "",
+            Some(minutes(3)),
+        )];
+        assert_eq!(
+            text(vec![], exact, None).as_deref(),
+            Some("1 background shell (cargo nextest run footer, 3m)"),
+            "24 characters stay whole"
+        );
+    }
+
+    #[test]
+    fn a_shell_without_a_command_reads_its_description() {
+        for command in [None, Some("")] {
+            let shells = vec![shell(command, "Watch the build", Some(minutes(1)))];
+            assert_eq!(
+                text(vec![], shells, None).as_deref(),
+                Some("1 background shell (Watch the build, 1m)")
+            );
+        }
+        let nameless = vec![shell(None, "", Some(TimeDelta::seconds(45)))];
+        assert_eq!(
+            text(vec![], nameless, None).as_deref(),
+            Some("1 background shell (45s)")
+        );
+    }
+
+    #[test]
+    fn a_screen_read_shell_reads_only_its_count() {
+        assert_eq!(
+            text(vec![], vec![screen_shell()], None).as_deref(),
+            Some("1 background shell")
+        );
+    }
+
+    #[test]
+    fn several_shells_read_the_oldest_age() {
+        let shells = vec![
+            shell(Some("a"), "", Some(minutes(3))),
+            shell(Some("b"), "", Some(minutes(65))),
+            screen_shell(),
+        ];
+        assert_eq!(
+            text(vec![], shells, None).as_deref(),
+            Some("3 background shells (oldest 1h 5m)")
+        );
+        assert_eq!(
+            text(vec![], vec![screen_shell(), screen_shell()], None).as_deref(),
+            Some("2 background shells"),
+            "no reported start, no oldest age"
+        );
+    }
+
+    #[test]
+    fn subagents_count_in_the_singular_and_the_plural() {
+        assert_eq!(
+            text(vec![subagent("Sleeper A", None)], vec![], None).as_deref(),
+            Some("1 subagent")
+        );
+        let two = vec![subagent("Sleeper A", None), subagent("Sleeper B", None)];
+        assert_eq!(text(two, vec![], None).as_deref(), Some("2 subagents"));
+    }
+
+    #[test]
+    fn a_wakeup_ahead_counts_down() {
+        assert_eq!(
+            text(vec![], vec![], Some(now() + minutes(4))).as_deref(),
+            Some("wakeup in 4m"),
+            "exactly 4 minutes ahead"
+        );
+        let almost = now() + minutes(4) - TimeDelta::milliseconds(500);
+        assert_eq!(
+            text(vec![], vec![], Some(almost)).as_deref(),
+            Some("wakeup in 4m"),
+            "the countdown rounds up to the second"
+        );
+        assert_eq!(
+            text(vec![], vec![], Some(now() + minutes(65))).as_deref(),
+            Some("wakeup in 1h 5m")
+        );
+        assert_eq!(
+            text(vec![], vec![], Some(now() + TimeDelta::seconds(59))).as_deref(),
+            Some("wakeup in 59s")
+        );
+    }
+
+    #[test]
+    fn a_passed_wakeup_is_due() {
+        for at in [now(), now() - minutes(2)] {
+            assert_eq!(
+                text(vec![], vec![], Some(at)).as_deref(),
+                Some("wakeup due")
+            );
+        }
+    }
+
+    #[test]
+    fn nothing_running_gives_no_strip() {
+        assert_eq!(strip(vec![], vec![], None), None);
+        assert!(RunningWork::default().is_empty());
+    }
+
+    #[test]
+    fn the_parts_join_in_order_and_each_item_names_its_part() {
+        let shot = strip(
+            vec![subagent("Sleeper A", None), subagent("Sleeper B", None)],
+            vec![shell(
+                Some("cargo nextest run footer"),
+                "",
+                Some(minutes(3)),
+            )],
+            Some(now() + minutes(4)),
+        );
+        assert_eq!(
+            shot.as_ref().map(|shot| shot.text.as_str()),
+            Some(
+                "2 subagents \u{b7} 1 background shell (cargo nextest run footer, 3m) \u{b7} wakeup in 4m"
+            )
+        );
+        assert_eq!(shot.as_ref().map(|shot| shot.parts.len()), Some(3));
+        let parts: Vec<(StripKind, usize)> = shot
+            .iter()
+            .flat_map(|shot| &shot.items)
+            .map(|item| (item.kind, item.part))
+            .collect();
+        assert_eq!(
+            parts,
+            [
+                (StripKind::Subagent, 0),
+                (StripKind::Subagent, 0),
+                (StripKind::Shell, 1),
+                (StripKind::Wakeup, 2)
+            ]
+        );
+    }
+
+    #[test]
+    fn every_tooltip_rule() {
+        let screen_agent = WorkSubagent {
+            from_screen: true,
+            since: None,
+            ..subagent("", None)
+        };
+        let shot = strip(
+            vec![
+                subagent("Sleeper A", Some("general-purpose")),
+                subagent("Sleeper B", None),
+                screen_agent,
+            ],
+            vec![
+                shell(
+                    Some("cargo nextest run --workspace --cargo-profile test-release"),
+                    "Run all",
+                    Some(minutes(3)),
+                ),
+                shell(None, "Watch the build", Some(minutes(1))),
+                screen_shell(),
+            ],
+            None,
+        );
+        let tips: Vec<Option<String>> = shot
+            .map(|strip| strip.items.into_iter().map(|item| item.tooltip).collect())
+            .unwrap_or_default();
+        let tip = |text: &str| Some(text.to_owned());
+        assert_eq!(
+            tips,
+            [
+                tip("general-purpose: Sleeper A"),
+                tip("Sleeper B"),
+                tip(SCREEN_READ_TIP),
+                tip("cargo nextest run --workspace --cargo-profile test-release"),
+                tip("Watch the build"),
+                tip(SCREEN_READ_TIP),
+            ]
+        );
+    }
+
+    #[test]
+    fn no_item_is_tappable() {
+        let shot = strip(
+            vec![subagent("Sleeper A", Some("general-purpose"))],
+            vec![
+                shell(Some("cargo test"), "", Some(minutes(3))),
+                screen_shell(),
+            ],
+            Some(now() + minutes(4)),
+        );
+        let items = shot.map(|strip| strip.items).unwrap_or_default();
+        assert_eq!(items.len(), 4);
+        assert!(items.iter().all(|item| !item.tappable));
+    }
+
+    fn next_repaint(
+        shells: Vec<WorkShell>,
+        wakeup_at: Option<DateTime<Utc>>,
+    ) -> Option<std::time::Duration> {
+        let mut work = RunningWork::default();
+        work.set(vec![], shells, wakeup_at);
+        work.next_repaint(now())
+    }
+
+    #[test]
+    fn a_wakeup_75_seconds_off_repaints_when_it_reads_in_seconds() {
+        assert_eq!(
+            next_repaint(vec![], Some(now() + TimeDelta::seconds(75))),
+            Some(std::time::Duration::from_secs(15))
+        );
+    }
+
+    #[test]
+    fn an_age_under_a_minute_repaints_each_second() {
+        let young = vec![shell(Some("a"), "", Some(TimeDelta::seconds(40)))];
+        assert_eq!(
+            next_repaint(young, None),
+            Some(std::time::Duration::from_secs(1))
+        );
+    }
+
+    #[test]
+    fn nothing_timed_repaints_every_30_seconds() {
+        assert_eq!(
+            next_repaint(vec![screen_shell()], None),
+            Some(std::time::Duration::from_secs(30))
+        );
+        assert_eq!(
+            next_repaint(vec![], Some(now() + minutes(10))),
+            Some(std::time::Duration::from_secs(30)),
+            "a wakeup far off waits the 30 s"
+        );
+    }
+
+    #[test]
+    fn an_empty_strip_needs_no_repaint() {
+        assert_eq!(next_repaint(vec![], None), None);
+    }
+
+    #[test]
+    fn ages_and_countdowns_under_a_minute_count_seconds() {
+        let mut work = RunningWork::default();
+        work.set(vec![], vec![shell(Some("a"), "", Some(minutes(3)))], None);
+        assert!(!work.counts_seconds(now()));
+        work.set(vec![], vec![], Some(now() + TimeDelta::seconds(30)));
+        assert!(work.counts_seconds(now()));
+        work.set(
+            vec![],
+            vec![shell(Some("a"), "", Some(TimeDelta::seconds(10)))],
+            None,
+        );
+        assert!(work.counts_seconds(now()));
     }
 }

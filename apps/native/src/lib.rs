@@ -147,6 +147,7 @@ mod vscode_suggestion_view;
 mod window_layouts;
 mod window_state;
 mod window_title;
+mod work_strip;
 mod workspace_creator;
 mod workspace_creator_view;
 mod worktrees_manager;
@@ -1280,6 +1281,7 @@ impl RootView {
             .map(|dir| dir.join(theme_store::THEMES_DIR));
         let theme = theme_store::resolve_selection(themes_dir.as_deref(), ui.theme.as_deref());
         ui_theme::set_theme(theme, cx);
+        let chat = chat_view::ChatPanes::new(chat_view::WallClock::starting_at(now()));
         let mut view = Self {
             tx,
             now,
@@ -1292,7 +1294,7 @@ impl RootView {
                 sidebar
             },
             panes: HashMap::new(),
-            chat: chat_view::ChatPanes::default(),
+            chat,
             retries: RetryGate::default(),
             layouts: WindowLayouts::new(window.window_handle().window_id()),
             overlays: OverlayOwners::new(window.window_handle().window_id()),
@@ -3955,7 +3957,7 @@ impl RootView {
         };
         self.tabs.clear_for_switch(restored_active);
         self.panes.clear();
-        self.chat = chat_view::ChatPanes::default();
+        self.chat = chat_view::ChatPanes::new(self.chat.wall_clock());
         self.sessions_loaded = false;
         self.seen_sessions.clear();
         self.last_focused_session = None;

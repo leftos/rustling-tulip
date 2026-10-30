@@ -9,6 +9,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - A UI text size setting in Settings › Appearance makes the interface's text 2 px smaller to 4 px larger, applied at once.
 - `rustling-tulipd screen <session id>` prints how the app read a session's screen, rule by rule, with the screen itself, and `--fixture <path>` saves it.
 - A Claude session's pane can show its conversation as a chat, with answers appearing as they are written, through the pane's Chat button, its menu or Ctrl+Shift+M; each session remembers which view it was last shown in.
+- A chat pane shows what is still running under the chat: its subagents, background shells and the next wakeup, with their ages.
 - When Claude asks for you while a subagent's view is open in the terminal, the session switches back to the main conversation, setting any draft aside and restoring it afterwards.
 
 ### Fixed
