@@ -33,6 +33,8 @@ enum ExistingDaemon {
     Compatible(DaemonHandshake),
     Incompatible(DaemonHandshake),
     StaleBinary(DaemonHandshake),
+    OlderBuild(DaemonHandshake),
+    NewerBuild(DaemonHandshake),
     Missing,
 }
 
@@ -43,6 +45,8 @@ enum ExistingKind {
     Compatible,
     Incompatible,
     StaleBinary,
+    OlderBuild,
+    NewerBuild,
     Missing,
 }
 
@@ -52,6 +56,7 @@ enum Action {
     Reuse,
     RetireThenSpawn,
     Spawn,
+    Refuse,
 }
 
 impl ExistingDaemon {
@@ -60,25 +65,99 @@ impl ExistingDaemon {
             Self::Compatible(_) => ExistingKind::Compatible,
             Self::Incompatible(_) => ExistingKind::Incompatible,
             Self::StaleBinary(_) => ExistingKind::StaleBinary,
+            Self::OlderBuild(_) => ExistingKind::OlderBuild,
+            Self::NewerBuild(_) => ExistingKind::NewerBuild,
             Self::Missing => ExistingKind::Missing,
         }
     }
 
     fn handshake(&self) -> Option<&DaemonHandshake> {
         match self {
-            Self::Compatible(h) | Self::Incompatible(h) | Self::StaleBinary(h) => Some(h),
+            Self::Compatible(h)
+            | Self::Incompatible(h)
+            | Self::StaleBinary(h)
+            | Self::OlderBuild(h)
+            | Self::NewerBuild(h) => Some(h),
             Self::Missing => None,
         }
     }
 }
 
-/// A healthy daemon whose protocol the client speaks is reused whatever build
-/// it came from; only a protocol-incompatible one is retired.
+/// A healthy daemon of this client's build whose protocol the client speaks
+/// is reused whatever executable it runs. A protocol-incompatible daemon and a
+/// daemon of an older build are retired; a daemon of a newer build is never
+/// touched, and the client refuses to go on.
 fn action_for(existing: ExistingKind) -> Action {
     match existing {
         ExistingKind::Compatible | ExistingKind::StaleBinary => Action::Reuse,
-        ExistingKind::Incompatible => Action::RetireThenSpawn,
+        ExistingKind::Incompatible | ExistingKind::OlderBuild => Action::RetireThenSpawn,
+        ExistingKind::NewerBuild => Action::Refuse,
         ExistingKind::Missing => Action::Spawn,
+    }
+}
+
+/// How a daemon's build version orders against the client's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BuildOrder {
+    Older,
+    Same,
+    Newer,
+}
+
+/// Orders `daemon_build` (a handshake's `build_version`) against
+/// `client_build` by semver; a missing or unparsable version counts as older.
+fn build_order(daemon_build: &str, client_build: &semver::Version) -> BuildOrder {
+    let Ok(daemon_build) = semver::Version::parse(daemon_build) else {
+        return BuildOrder::Older;
+    };
+    match daemon_build.cmp(client_build) {
+        std::cmp::Ordering::Less => BuildOrder::Older,
+        std::cmp::Ordering::Equal => BuildOrder::Same,
+        std::cmp::Ordering::Greater => BuildOrder::Newer,
+    }
+}
+
+/// The refusal [`ensure_running`] hands back when the running daemon is a
+/// newer build than the client: such a daemon is never retired, and the
+/// client is the one to update.
+#[derive(Debug)]
+pub struct DaemonIsNewer {
+    /// The running daemon's build version.
+    pub daemon: String,
+    /// This client's build version.
+    pub client: String,
+}
+
+impl std::fmt::Display for DaemonIsNewer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "daemon is newer ({}) than this client ({}); update the client",
+            self.daemon, self.client
+        )
+    }
+}
+
+impl std::error::Error for DaemonIsNewer {}
+
+/// A [`DaemonIsNewer`] error when `existing` is a newer build than
+/// `client_build`, else `Ok`.
+fn refuse_newer(existing: &ExistingDaemon, client_build: &semver::Version) -> anyhow::Result<()> {
+    match existing {
+        ExistingDaemon::NewerBuild(handshake) => Err(anyhow::Error::new(DaemonIsNewer {
+            daemon: handshake.build_version.clone(),
+            client: client_build.to_string(),
+        })),
+        _ => Ok(()),
+    }
+}
+
+/// Why a daemon of `kind` is retired, for the retire log line.
+fn retire_reason(kind: ExistingKind) -> &'static str {
+    if kind == ExistingKind::OlderBuild {
+        "older build"
+    } else {
+        "protocol mismatch"
     }
 }
 
@@ -127,20 +206,33 @@ fn spawn_lock() -> &'static Mutex<()> {
 ///
 /// `client_versions` lists the protocol versions the calling client speaks; a
 /// running daemon is protocol-compatible when it speaks at least one of them.
-/// Any proven daemon with a compatible protocol is reused, whatever build it
-/// came from, and no local daemon binary is located unless one has to be
-/// spawned. A protocol-incompatible daemon is retired (graceful `/shutdown`,
-/// then a force kill through a handle pinned before its proof) and a fresh one
-/// is spawned from the binary cache.
+/// `client_build` is the calling client's own build version (its
+/// `CARGO_PKG_VERSION`), ordered by semver against the daemon's
+/// `build_version`.
+///
+/// A proven daemon of the client's build with a compatible protocol is reused,
+/// whatever executable it runs, and no local daemon binary is located unless
+/// one has to be spawned. A protocol-incompatible daemon, and a daemon of an
+/// older build (a missing or unparsable `build_version` counts as older), is
+/// retired (graceful `/shutdown`, then a force kill through a handle pinned
+/// before its proof) and a fresh one is spawned from the binary cache. A
+/// daemon of a newer build is never retired, whatever its protocol.
 /// Concurrent callers serialize on a process-wide lock so only one of them
 /// spawns.
 ///
 /// # Errors
 ///
-/// Fails when the daemon binary is needed but cannot be located or cached, a
-/// stale daemon cannot be stopped, the spawn fails, or the new daemon does not
-/// report a healthy handshake within the spawn timeout.
-pub async fn ensure_running(client_versions: &[u32]) -> anyhow::Result<DaemonHandshake> {
+/// Fails with a [`DaemonIsNewer`] when the running daemon is a newer build
+/// than this client. Fails when `client_build` is not a semver version, the
+/// daemon binary is needed but cannot be located or cached, a stale daemon
+/// cannot be stopped, the spawn fails, or the new daemon does not report a
+/// healthy handshake within the spawn timeout.
+pub async fn ensure_running(
+    client_versions: &[u32],
+    client_build: &str,
+) -> anyhow::Result<DaemonHandshake> {
+    let client_build = semver::Version::parse(client_build)
+        .with_context(|| format!("this client's version {client_build:?} is not semver"))?;
     // Best-effort: the running executable is compared against the path the
     // cache would hold only to log a reuse across builds; a binary is located
     // for real only to spawn.
@@ -148,7 +240,7 @@ pub async fn ensure_running(client_versions: &[u32]) -> anyhow::Result<DaemonHan
     let cached = expected.as_deref();
 
     // Fast path: a healthy daemon that is reused.
-    let existing = classify_existing_daemon(cached, client_versions).await;
+    let existing = classify_existing_daemon(cached, client_versions, &client_build).await;
     if let Some(handshake) = reused_handshake(&existing, "reusing running daemon") {
         return Ok(handshake);
     }
@@ -158,19 +250,20 @@ pub async fn ensure_running(client_versions: &[u32]) -> anyhow::Result<DaemonHan
     // the handshake -- the caller ahead of us may have spawned the daemon
     // already.
     let _guard = spawn_lock().lock().await;
-    let existing = classify_existing_daemon(cached, client_versions).await;
+    let existing = classify_existing_daemon(cached, client_versions, &client_build).await;
     if let Some(handshake) =
         reused_handshake(&existing, "reusing daemon spawned by concurrent caller")
     {
         return Ok(handshake);
     }
+    refuse_newer(&existing, &client_build)?;
     // Resolve before retiring, so a missing binary never leaves the user with
     // no daemon at all.
     let current = resolve_current_daemon_binary()?;
     if action_for(existing.kind()) == Action::RetireThenSpawn
         && let Some(handshake) = existing.handshake()
     {
-        retire_daemon(handshake, "protocol mismatch", client_versions).await?;
+        retire_daemon(handshake, retire_reason(existing.kind()), client_versions).await?;
     }
     spawn_current_daemon(&current, client_versions).await
 }
@@ -224,11 +317,15 @@ async fn spawn_current_daemon(
 async fn classify_existing_daemon(
     current_daemon: Option<&Path>,
     client_versions: &[u32],
+    client_build: &semver::Version,
 ) -> ExistingDaemon {
     match crate::config_dir() {
         Ok(config_dir) => {
-            classify_existing_daemon_in(&config_dir, current_daemon, client_versions, PROOF_TIMEOUT)
-                .await
+            let client = Client {
+                versions: client_versions,
+                build: client_build,
+            };
+            classify_existing_daemon_in(&config_dir, current_daemon, client, PROOF_TIMEOUT).await
         }
         Err(err) => {
             debug!("no config dir, so no daemon to classify: {err:#}");
@@ -243,24 +340,58 @@ async fn classify_existing_daemon(
 async fn classify_existing_daemon_in(
     config_dir: &Path,
     current_daemon: Option<&Path>,
-    client_versions: &[u32],
+    client: Client<'_>,
     proof_budget: Duration,
 ) -> ExistingDaemon {
     match load_existing_if_alive(config_dir, proof_budget).await {
-        Some(handshake) => classify_proven(handshake, current_daemon, client_versions),
+        Some(handshake) => classify_proven(handshake, current_daemon, client),
         None => ExistingDaemon::Missing,
     }
 }
 
-/// Classify a proven daemon. With no `current_daemon` to compare against, a
-/// daemon whose protocol is compatible with `client_versions` counts as
-/// compatible whatever executable it runs. A daemon from a different build is
-/// still reused, so the difference is reported at debug.
+/// What the calling client is: the protocol versions it speaks and its own
+/// build version.
+#[derive(Clone, Copy)]
+struct Client<'a> {
+    versions: &'a [u32],
+    build: &'a semver::Version,
+}
+
+/// Classify a proven daemon. A daemon of a newer or an older build than the
+/// client is classified by that alone, whatever its protocol. Otherwise, with
+/// no `current_daemon` to compare against, a daemon whose protocol is
+/// compatible with the client's counts as compatible whatever executable it
+/// runs; a daemon running another executable is still reused, so the
+/// difference is reported at debug.
 fn classify_proven(
     handshake: DaemonHandshake,
     current_daemon: Option<&Path>,
-    client_versions: &[u32],
+    client: Client<'_>,
 ) -> ExistingDaemon {
+    let client_versions = client.versions;
+    match build_order(&handshake.build_version, client.build) {
+        BuildOrder::Newer => {
+            warn!(
+                daemon_build = %handshake.build_version,
+                client_build = %client.build,
+                pid = handshake.pid,
+                port = handshake.port,
+                "running daemon is a newer build than this client; leaving it running"
+            );
+            return ExistingDaemon::NewerBuild(handshake);
+        }
+        BuildOrder::Older => {
+            info!(
+                daemon_build = %handshake.build_version,
+                client_build = %client.build,
+                pid = handshake.pid,
+                port = handshake.port,
+                "running daemon is an older build than this client"
+            );
+            return ExistingDaemon::OlderBuild(handshake);
+        }
+        BuildOrder::Same => {}
+    }
     if protocol_kind(&handshake, client_versions) != ExistingKind::Compatible {
         warn!(
             daemon_protocol = handshake.protocol_version,
@@ -349,6 +480,7 @@ async fn retire_daemon(
         pid = handshake.pid,
         port = handshake.port,
         protocol_version = handshake.protocol_version,
+        daemon_build = %handshake.build_version,
         daemon_supported = ?handshake.supported(),
         client_supported = ?client_versions,
         reason,
@@ -1082,9 +1214,9 @@ async fn wait_for_handshake_in(
 )]
 mod tests {
     use super::{
-        Action, ExistingKind, action_for, classify_existing_daemon_in, daemon_exe_matches_expected,
-        dev_workspace_root, is_daemon_image, path_is_under, protocol_compatible, protocol_kind,
-        wait_for_handshake_in,
+        Action, Client, ExistingKind, action_for, classify_existing_daemon_in, classify_proven,
+        daemon_exe_matches_expected, dev_workspace_root, is_daemon_image, path_is_under,
+        protocol_compatible, protocol_kind, refuse_newer, wait_for_handshake_in,
     };
     #[cfg(windows)]
     use super::{spawn_daemon, spawn_daemon_with};
@@ -1128,6 +1260,33 @@ mod tests {
     const SUPPORTED: &[u32] = protocol::SUPPORTED_PROTOCOL_VERSIONS;
     /// Only a hang guard: no test asserts how long anything took.
     const HANG_GUARD: Duration = Duration::from_secs(10);
+    /// The client's build version: this crate's, which is the workspace's.
+    const CLIENT_BUILD: &str = env!("CARGO_PKG_VERSION");
+
+    /// The calling client: speaking [`SUPPORTED`], built as [`CLIENT_BUILD`].
+    fn client() -> Client<'static> {
+        static BUILD: std::sync::OnceLock<semver::Version> = std::sync::OnceLock::new();
+        Client {
+            versions: SUPPORTED,
+            build: BUILD.get_or_init(|| {
+                semver::Version::parse(CLIENT_BUILD).expect("the crate version is semver")
+            }),
+        }
+    }
+
+    /// A handshake of `build` speaking `supported_versions`.
+    fn of_build(build: &str, supported_versions: &[u32]) -> DaemonHandshake {
+        DaemonHandshake {
+            build_version: build.to_owned(),
+            ..handshake(supported_versions[0], supported_versions)
+        }
+    }
+
+    /// What `ensure_running` does about a proven `daemon`, judged by [`client`].
+    fn action_on(daemon: DaemonHandshake) -> (ExistingKind, Action) {
+        let kind = classify_proven(daemon, None, client()).kind();
+        (kind, action_for(kind))
+    }
 
     fn handshake(protocol_version: u32, supported_versions: &[u32]) -> DaemonHandshake {
         DaemonHandshake {
@@ -1136,6 +1295,7 @@ mod tests {
             auth_token: "token".to_owned(),
             pid: 7,
             supported_versions: supported_versions.to_vec(),
+            build_version: CLIENT_BUILD.to_owned(),
         }
     }
 
@@ -1212,6 +1372,72 @@ mod tests {
     }
 
     #[test]
+    fn a_compatible_daemon_of_an_older_build_is_retired() {
+        for older in ["0.0.1", "0.0.1-alpha"] {
+            assert_eq!(
+                action_on(of_build(older, SUPPORTED)),
+                (ExistingKind::OlderBuild, Action::RetireThenSpawn),
+                "daemon build {older}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_daemon_of_a_newer_build_is_never_retired() {
+        for supported in [SUPPORTED, &[0]] {
+            let daemon = of_build("999.0.0", supported);
+            assert_eq!(
+                action_on(daemon.clone()),
+                (ExistingKind::NewerBuild, Action::Refuse),
+                "daemon speaking {supported:?}"
+            );
+            let refusal = refuse_newer(&classify_proven(daemon, None, client()), client().build)
+                .expect_err("a newer daemon is refused");
+            assert_eq!(
+                refusal.to_string(),
+                format!(
+                    "daemon is newer (999.0.0) than this client ({CLIENT_BUILD}); update the client"
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn a_daemon_of_the_same_build_is_reused() {
+        assert_eq!(
+            action_on(of_build(CLIENT_BUILD, SUPPORTED)),
+            (ExistingKind::Compatible, Action::Reuse)
+        );
+        assert_eq!(
+            action_on(of_build(CLIENT_BUILD, &[0])),
+            (ExistingKind::Incompatible, Action::RetireThenSpawn),
+            "a same-build daemon of another protocol is retired as before"
+        );
+    }
+
+    #[test]
+    fn a_handshake_without_build_version_counts_as_older() {
+        let without: DaemonHandshake = serde_json::from_value(serde_json::json!({
+            "protocol_version": SUPPORTED[0],
+            "port": 40123,
+            "auth_token": "token",
+            "pid": 7,
+            "supported_versions": SUPPORTED,
+        }))
+        .expect("a handshake without build_version decodes");
+        assert_eq!(without.build_version, "");
+        assert_eq!(
+            action_on(without),
+            (ExistingKind::OlderBuild, Action::RetireThenSpawn)
+        );
+        assert_eq!(
+            action_on(of_build("not-a-version", SUPPORTED)),
+            (ExistingKind::OlderBuild, Action::RetireThenSpawn),
+            "an unparsable build counts as older"
+        );
+    }
+
+    #[test]
     fn a_listener_answering_health_without_a_proof_is_not_a_daemon() {
         let scratch = ScratchDir::new("classify-health");
         let fake = FakeListener::healthy();
@@ -1219,7 +1445,10 @@ mod tests {
         write_daemon_json(&scratch.0, &file);
 
         let existing = block_on(classify_existing_daemon_in(
-            &scratch.0, None, SUPPORTED, HANG_GUARD,
+            &scratch.0,
+            None,
+            client(),
+            HANG_GUARD,
         ));
 
         assert_eq!(existing.kind(), ExistingKind::Missing);
@@ -1234,7 +1463,10 @@ mod tests {
         let compatible = handshake_naming(4242, fake.port, "good-token", SUPPORTED);
         write_daemon_json(&scratch.0, &compatible);
         let existing = block_on(classify_existing_daemon_in(
-            &scratch.0, None, SUPPORTED, HANG_GUARD,
+            &scratch.0,
+            None,
+            client(),
+            HANG_GUARD,
         ));
         assert_eq!(existing.kind(), ExistingKind::Compatible);
         assert_eq!(
@@ -1246,7 +1478,10 @@ mod tests {
         let incompatible = handshake_naming(4242, fake.port, "good-token", &[0]);
         write_daemon_json(&scratch.0, &incompatible);
         let existing = block_on(classify_existing_daemon_in(
-            &scratch.0, None, SUPPORTED, HANG_GUARD,
+            &scratch.0,
+            None,
+            client(),
+            HANG_GUARD,
         ));
         assert_eq!(existing.kind(), ExistingKind::Incompatible);
     }

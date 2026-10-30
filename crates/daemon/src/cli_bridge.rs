@@ -50,7 +50,10 @@ pub fn requested(args: impl IntoIterator<Item = OsString>) -> bool {
 pub async fn run() -> anyhow::Result<()> {
     stop_inheriting_stdio();
     run_with(
-        async || daemon_client::ensure_running(SUPPORTED_PROTOCOL_VERSIONS).await,
+        async || {
+            daemon_client::ensure_running(SUPPORTED_PROTOCOL_VERSIONS, env!("CARGO_PKG_VERSION"))
+                .await
+        },
         stdin_reader(),
         tokio::io::stdout(),
         Budgets {
@@ -357,6 +360,7 @@ mod tests {
             auth_token: TOKEN.to_owned(),
             pid: 1,
             supported_versions: SUPPORTED_PROTOCOL_VERSIONS.to_vec(),
+            build_version: String::new(),
         }
     }
 

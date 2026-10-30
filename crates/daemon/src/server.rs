@@ -525,6 +525,7 @@ fn write_handshake(dirs: &Dirs, port: u16, auth_token: &str) -> anyhow::Result<(
         auth_token: auth_token.to_string(),
         pid,
         supported_versions: SUPPORTED_PROTOCOL_VERSIONS.to_vec(),
+        build_version: env!("CARGO_PKG_VERSION").to_owned(),
     };
     let bytes = serde_json::to_vec_pretty(&payload).context("serializing handshake")?;
     // Each write gets its own temp name, so two daemons that briefly co-exist

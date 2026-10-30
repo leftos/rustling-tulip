@@ -734,6 +734,7 @@ fn shutdown_drains_the_daemon_then_quits(cx: &mut TestAppContext) {
                     auth_token: "spec-token".to_owned(),
                     pid: 0,
                     supported_versions: vec![23],
+                    build_version: String::new(),
                 })
             })
         }),

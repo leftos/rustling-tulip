@@ -23,7 +23,7 @@ mod test_fakes;
 mod wmi_launch;
 
 pub use proof::{Proof, ProvenConnectError, connect_proven};
-pub use supervisor::{PROOF_TIMEOUT, SPAWN_WAIT_TIMEOUT, ensure_running};
+pub use supervisor::{DaemonIsNewer, PROOF_TIMEOUT, SPAWN_WAIT_TIMEOUT, ensure_running};
 
 use anyhow::{Context as _, anyhow, bail};
 use protocol::DaemonHandshake;
@@ -72,6 +72,19 @@ pub fn remote_files_dir() -> anyhow::Result<PathBuf> {
     let pd = directories::ProjectDirs::from("dev", "leftos", "rustling-tulip")
         .ok_or_else(|| anyhow!("could not resolve the local data directory"))?;
     Ok(pd.data_local_dir().join("remote-files"))
+}
+
+/// Resolve the folder the native client's updater downloads releases into:
+/// `ProjectDirs::from("dev", "leftos", "rustling-tulip").data_local_dir()`
+/// joined with `updates`, machine-local like [`remote_files_dir`].
+///
+/// # Errors
+///
+/// Fails when no home directory can be resolved for the current user.
+pub fn updates_dir() -> anyhow::Result<PathBuf> {
+    let pd = directories::ProjectDirs::from("dev", "leftos", "rustling-tulip")
+        .ok_or_else(|| anyhow!("could not resolve the local data directory"))?;
+    Ok(pd.data_local_dir().join("updates"))
 }
 
 /// Path the daemon writes its handshake (`daemon.json`) to.

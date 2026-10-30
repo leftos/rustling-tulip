@@ -327,7 +327,10 @@ fn not_proven_reason(port: u16, proof: Proof) -> String {
 }
 
 fn ensure_daemon() -> EnsureFuture {
-    Box::pin(daemon_client::ensure_running(NATIVE_PROTOCOL_VERSIONS))
+    Box::pin(daemon_client::ensure_running(
+        NATIVE_PROTOCOL_VERSIONS,
+        env!("CARGO_PKG_VERSION"),
+    ))
 }
 
 /// The network thread's body: build the runtime and run the loop on it until
@@ -1320,6 +1323,7 @@ mod tests {
                 auth_token: "test-token".to_owned(),
                 pid: 0,
                 supported_versions: vec![23],
+                build_version: String::new(),
             })
         })
     }
@@ -1570,6 +1574,7 @@ mod tests {
                         auth_token: "test-token".to_owned(),
                         pid: 0,
                         supported_versions: vec![23],
+                        build_version: String::new(),
                     })
                 })
             }),

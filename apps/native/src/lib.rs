@@ -129,6 +129,7 @@ mod theme;
 pub mod toast_activation;
 mod undo;
 mod undo_view;
+pub mod update;
 mod viewer_find;
 mod viewer_md_view;
 mod viewer_tab;

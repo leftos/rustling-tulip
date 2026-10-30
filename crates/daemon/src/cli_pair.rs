@@ -349,6 +349,7 @@ mod tests {
             auth_token: auth_token.to_owned(),
             pid: 1,
             supported_versions: SUPPORTED_PROTOCOL_VERSIONS.to_vec(),
+            build_version: String::new(),
         };
         let path = dir.join("daemon.json");
         std::fs::write(

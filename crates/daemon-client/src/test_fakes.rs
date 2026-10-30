@@ -248,6 +248,7 @@ pub(crate) fn handshake_naming(
         auth_token: token.to_owned(),
         pid,
         supported_versions: versions.to_vec(),
+        build_version: env!("CARGO_PKG_VERSION").to_owned(),
     }
 }
 
