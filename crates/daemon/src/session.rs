@@ -1,6 +1,7 @@
 //! In-memory session registry: spawned agent and shell processes plus their state.
 
 use crate::activity_log;
+use crate::background_work::BackgroundWork;
 use crate::conversations::discovery::Discovery;
 use crate::headless::HeadlessHandle;
 use crate::history;
@@ -301,6 +302,12 @@ pub struct SessionRecord {
     /// that set a terminal status directly. Runtime-only: a reattached or
     /// rebuilt record starts with it false.
     pub background: bool,
+    /// The background tasks and one-shot wakeups the main agent's last `Stop`
+    /// reported still running, with the time each was first seen. Each such
+    /// `Stop` replaces the lists; nothing else writes them. Runtime-only:
+    /// never mirrored into the sidecar, so a reattached or rebuilt record
+    /// starts empty and the next `Stop` fills it again.
+    pub work: BackgroundWork,
     /// True when the session's PTY child is the user's shell and its agent
     /// was typed into it at spawn: the record stays an interactive agent
     /// session while its status runs on the shell's watcher. Mirrored into
@@ -1657,6 +1664,7 @@ impl SessionRegistry {
             shell_label: meta.shell_label.clone(),
             agent_exit_announced: false,
             applied_size: None,
+            work: crate::background_work::BackgroundWork::default(),
             hook_agent: meta.hook_agent.clone(),
             hook_options: meta.hook_options.clone(),
             hook_trusted: meta.hook_trusted,
@@ -1741,6 +1749,7 @@ impl SessionRegistry {
             shell_label: meta.shell_label.clone(),
             agent_exit_announced: false,
             applied_size: None,
+            work: crate::background_work::BackgroundWork::default(),
             hook_agent: meta.hook_agent.clone(),
             hook_options: meta.hook_options.clone(),
             hook_trusted: meta.hook_trusted,
@@ -1802,6 +1811,7 @@ impl SessionRegistry {
             shell_label: meta.shell_label.clone(),
             agent_exit_announced: false,
             applied_size: None,
+            work: crate::background_work::BackgroundWork::default(),
             hook_agent: meta.hook_agent.clone(),
             hook_options: meta.hook_options.clone(),
             hook_trusted: meta.hook_trusted,
@@ -1891,6 +1901,7 @@ mod tests {
             shell_label: None,
             agent_exit_announced: false,
             applied_size: None,
+            work: crate::background_work::BackgroundWork::default(),
             hook_agent: None,
             hook_options: protocol::OptionValues::new(),
             hook_trusted: false,

@@ -14,6 +14,7 @@
 use crate::server::Hub;
 use crate::session::{PendingInsert, SessionRecord, push_recent_action};
 use agent_api::{AgentPlugin, HookReport, LiveLine, PendingUpdate};
+use chrono::{DateTime, Local};
 use protocol::{AgentId, SessionStatus};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -262,7 +263,7 @@ pub(crate) fn apply_to_record(
     if leaves_pending_alone(record, report) {
         return Applied {
             entered_awaiting: false,
-            mismatch: apply_details(record, report),
+            mismatch: apply_details(record, report, event_time),
             agent_exited,
             turn_report: turn_report(record, report),
         };
@@ -284,7 +285,7 @@ pub(crate) fn apply_to_record(
     }
     Applied {
         entered_awaiting,
-        mismatch: apply_details(record, report),
+        mismatch: apply_details(record, report, event_time),
         agent_exited,
         turn_report: turn_report(record, report),
     }
@@ -571,9 +572,14 @@ fn prune_expired(sessions: &mut HashMap<String, Vec<PendingHook>>, now: Instant)
 
 /// Write the report's fields beyond its status and pending input, answering
 /// the permission mismatch it carries.
+///
+/// `event_time` (the same nanoseconds-since-the-epoch the caller ordered the
+/// event by) stamps a task the stop reports for the first time and fixes a
+/// wakeup's fire time, so a replayed event keeps the moment it happened.
 pub(crate) fn apply_details(
     record: &mut SessionRecord,
     report: &HookReport,
+    event_time: u128,
 ) -> Option<(String, String)> {
     if let Some(id) = report.conversation_id.as_deref() {
         update_conversation_id(record, id);
@@ -588,6 +594,21 @@ pub(crate) fn apply_details(
     // already `Idle` here, in the same update.
     if let Some(background) = report.background {
         record.background = background;
+    }
+    // The work the same turn end listed, with the lists it reported.
+    if let Some(work) = &report.stop_work {
+        match i64::try_from(event_time)
+            .ok()
+            .map(DateTime::from_timestamp_nanos)
+        {
+            Some(at) => record.work.apply_stop(work, &at.with_timezone(&Local)),
+            None => {
+                debug!(
+                    event_time,
+                    "the event time does not fit a nanosecond timestamp; the stop's work was not recorded"
+                );
+            }
+        }
     }
     if let Some(line) = &report.failure {
         push_recent_action(record, line.clone());
@@ -998,6 +1019,48 @@ mod tests {
             }),
         );
         assert!(!unset.background, "a subagent's Stop does not set it");
+    }
+
+    #[test]
+    fn a_main_stop_keeps_its_tasks_on_the_record() {
+        let mut record = turn_record();
+        let tasks = json!([{
+            "id": "b1",
+            "type": "shell",
+            "status": "running",
+            "description": "sleep",
+            "command": "sleep 20; echo done-sleeping",
+        }]);
+        apply_body(&mut record, 2, &main_stop(&tasks, &json!([])));
+        assert_eq!(record.work.tasks.len(), 1, "the stop's running task");
+        assert_eq!(record.work.tasks[0].id, "b1");
+        assert_eq!(
+            record.work.tasks[0].since,
+            chrono::DateTime::from_timestamp_nanos(2),
+            "a task is stamped with the event's own time"
+        );
+
+        apply_body(&mut record, 3, &main_stop(&tasks, &json!([])));
+        assert_eq!(
+            record.work.tasks[0].since,
+            chrono::DateTime::from_timestamp_nanos(2),
+            "a later stop that still lists the task keeps its first stamp"
+        );
+
+        let held = record.work.clone();
+        apply_body(
+            &mut record,
+            4,
+            &json!({
+                "hook_event_name": "Stop",
+                "agent_id": "a1",
+                "background_tasks": [{"id": "a9", "type": "subagent", "status": "running"}],
+            }),
+        );
+        assert_eq!(
+            record.work, held,
+            "a subagent's stop leaves the main agent's work alone"
+        );
     }
 
     #[test]

@@ -1789,6 +1789,7 @@ pub(crate) mod test_support {
             shell_label: None,
             agent_exit_announced: false,
             applied_size: None,
+            work: crate::background_work::BackgroundWork::default(),
             hook_agent: None,
             hook_options: protocol::OptionValues::new(),
             hook_trusted: false,
@@ -1910,7 +1911,7 @@ mod tests {
             .expect("Claude is registered")
             .map_hook_event(&body, None, false)
             .expect("a start is mapped");
-        crate::hook_status::apply_details(&mut rec, &report);
+        crate::hook_status::apply_details(&mut rec, &report, 1_700_000_000_000_000_000);
         assert_eq!(
             rec.conversation_id.as_deref(),
             Some("new-conv"),

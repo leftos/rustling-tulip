@@ -153,8 +153,15 @@ pub struct HookReport {
     /// A subagent fired the event, not the main agent.
     pub subagent: bool,
     /// Whether work runs on beside an idle turn, when the main agent's turn
-    /// end says so.
+    /// end says so: the payload's own rule (any running background task or
+    /// any one-shot cron), so true even for an element [`Self::stop_work`]
+    /// drops as one it cannot describe.
     pub background: Option<bool>,
+    /// The work the main agent's turn end reports still running beside the
+    /// idle turn, `Some` exactly when [`Self::background`] is `Some`. The
+    /// lists ride along so the daemon can keep them on its record, stamping
+    /// and timing each one; an agent that reports none sends an empty one.
+    pub stop_work: Option<hook_vocabulary::StopWork>,
     /// An idle the agent reports while it may still be waiting on a prompt,
     /// which leaves a pending prompt alone.
     pub weak_idle: bool,

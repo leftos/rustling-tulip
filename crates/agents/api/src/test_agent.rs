@@ -222,6 +222,7 @@ impl Agent for TestAgent {
             agent_started: false,
             subagent: false,
             background: None,
+            stop_work: None,
             weak_idle: false,
         })
     }

@@ -286,6 +286,7 @@ mod tests {
             shell_label: None,
             agent_exit_announced: false,
             applied_size: None,
+            work: crate::background_work::BackgroundWork::default(),
             hook_agent: None,
             hook_options: protocol::OptionValues::new(),
             hook_trusted: false,

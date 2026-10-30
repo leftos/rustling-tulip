@@ -25,6 +25,66 @@ const MAX_QUESTIONS: usize = 8;
 /// Option labels kept per question.
 const MAX_OPTIONS: usize = 8;
 
+/// The work a main agent's turn end reports still running beside its idle
+/// turn.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StopWork {
+    /// The background tasks still running, in the payload's order.
+    pub tasks: Vec<StopTask>,
+    /// The one-shot wakeups still pending, in the payload's order. A
+    /// recurring cron is not a wakeup: it does not fire once and stop.
+    pub wakeups: Vec<StopWakeup>,
+}
+
+/// One background task a `Stop` lists as running.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StopTask {
+    /// The task's own id: a background shell's `backgroundTaskId`, or a
+    /// background subagent's `agent_id`. It is what the same task carries
+    /// across the stops that list it.
+    pub id: String,
+    /// What kind of task it is.
+    pub kind: StopTaskKind,
+    /// The task's description, or empty when the payload carries none.
+    pub description: String,
+}
+
+/// The kind of work a background task is, as its `type` field names it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StopTaskKind {
+    /// A shell command running in the background, with the command when the
+    /// payload carries one.
+    Shell {
+        /// The command line the task runs, when the payload carries it.
+        command: Option<String>,
+    },
+    /// A background subagent, with its agent type when the payload carries
+    /// one.
+    Subagent {
+        /// The subagent's `agent_type` (`general-purpose`, `Explore`, …),
+        /// when the payload carries it.
+        agent_type: Option<String>,
+    },
+    /// Any other kind, named as its `type` field names it, or empty when the
+    /// payload names none.
+    Other {
+        /// The payload's `type`, or empty when it has none.
+        kind: String,
+    },
+}
+
+/// A one-shot wakeup the agent scheduled; an element of the payload's
+/// `session_crons`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StopWakeup {
+    /// The cron's own id.
+    pub id: String,
+    /// The cron schedule as the payload gives it: five fields, of which the
+    /// fire minute and hour are pinned (`"21 12 * * *"`). The fire time
+    /// itself is not on the wire and is computed where the wakeup is used.
+    pub schedule: String,
+}
+
 /// The payload fields a mapped event carries beside its status and pending
 /// input.
 #[derive(Debug, Clone, PartialEq)]
@@ -46,11 +106,18 @@ pub struct HookDetails {
     /// non-empty `agent_id`. (`agent_type` alone also marks a main agent run
     /// with `--agent`, so it is not the marker.)
     pub subagent: bool,
-    /// Whether the payload reports background work: a `background_tasks`
-    /// element with `"status": "running"`, or a `session_crons` element with
-    /// `"recurring": false` (a pending one-shot wakeup). Missing keys,
-    /// non-arrays and malformed elements count as none.
-    pub background_work: bool,
+    /// The work the payload reports running beside an idle turn: its
+    /// `background_tasks` elements with `"status": "running"`, and its
+    /// `session_crons` elements with `"recurring": false` (pending one-shot
+    /// wakeups). Missing keys, non-arrays and malformed elements count as
+    /// none.
+    pub background_work: StopWork,
+    /// Whether the payload reports background work at all, by the flag's own
+    /// rule: any `background_tasks` element with `"status": "running"`, or
+    /// any `session_crons` element with `"recurring": false`, whatever other
+    /// fields it carries. [`Self::background_work`] keeps only the elements
+    /// it can describe, so the two disagree on a malformed one.
+    pub reports_background: bool,
 }
 
 /// Read the extra fields out of one hook payload.
@@ -70,12 +137,16 @@ pub fn details(body: &Value) -> HookDetails {
             .or_else(|| text("message")),
         reason: text("reason"),
         subagent: text("agent_id").is_some_and(|id| !id.is_empty()),
-        background_work: reports_background_work(body),
+        background_work: background_work(body),
+        reports_background: reports_background_work(body),
     }
 }
 
-/// Whether `body` lists a running background task or a pending one-shot
-/// cron. A recurring cron alone is not background work.
+/// Whether `body` reports background work at all: any `background_tasks`
+/// element with `"status": "running"`, or any `session_crons` element with
+/// `"recurring": false`, whatever other fields it carries. This is the rule
+/// the flag has always used, so an element [`background_work`] drops as one
+/// it cannot describe still counts here.
 fn reports_background_work(body: &Value) -> bool {
     let array = |key: &str| body.get(key).and_then(Value::as_array);
     let running_task = array("background_tasks").is_some_and(|tasks| {
@@ -89,6 +160,59 @@ fn reports_background_work(body: &Value) -> bool {
             .any(|cron| cron.get("recurring").and_then(Value::as_bool) == Some(false))
     });
     running_task || one_shot_cron
+}
+
+/// The work `body` lists beside an idle turn: its running background tasks
+/// and its pending one-shot cron wakeups, each kept only when it carries
+/// what the record needs (a task's id, a wakeup's id and schedule). A
+/// recurring cron alone is not work, since it keeps firing rather than
+/// ending.
+fn background_work(body: &Value) -> StopWork {
+    let array = |key: &str| body.get(key).and_then(Value::as_array);
+    let tasks = array("background_tasks")
+        .map(|tasks| tasks.iter().filter_map(stop_task).collect())
+        .unwrap_or_default();
+    let wakeups = array("session_crons")
+        .map(|crons| crons.iter().filter_map(stop_wakeup).collect())
+        .unwrap_or_default();
+    StopWork { tasks, wakeups }
+}
+
+/// One `background_tasks` element, when it is a running task carrying an id.
+fn stop_task(task: &Value) -> Option<StopTask> {
+    if task.get("status").and_then(Value::as_str) != Some("running") {
+        return None;
+    }
+    let field = |key: &str| task.get(key).and_then(Value::as_str).map(str::to_owned);
+    let kind = match field("type").as_deref() {
+        Some("shell") => StopTaskKind::Shell {
+            command: field("command"),
+        },
+        Some("subagent") => StopTaskKind::Subagent {
+            agent_type: field("agent_type"),
+        },
+        other => StopTaskKind::Other {
+            kind: other.unwrap_or_default().to_owned(),
+        },
+    };
+    Some(StopTask {
+        id: field("id")?,
+        kind,
+        description: field("description").unwrap_or_default(),
+    })
+}
+
+/// One `session_crons` element, when it is a one-shot carrying an id and a
+/// schedule.
+fn stop_wakeup(cron: &Value) -> Option<StopWakeup> {
+    if cron.get("recurring").and_then(Value::as_bool) != Some(false) {
+        return None;
+    }
+    let field = |key: &str| cron.get(key).and_then(Value::as_str).map(str::to_owned);
+    Some(StopWakeup {
+        id: field("id")?,
+        schedule: field("schedule")?,
+    })
 }
 
 /// Map one hook payload onto what it says about its session.
@@ -145,6 +269,13 @@ fn report(signal: Signal, details: &HookDetails) -> HookReport {
             None => "stop failed".to_owned(),
         }
     });
+    // Only the main agent's turn end reports the work beside it: a
+    // subagent's snapshot is taken before its own task record updates. The
+    // flag keeps the raw rule over the payload, so an element the lists drop
+    // still reports background work.
+    let is_stop = event == "Stop" && !details.subagent;
+    let background = is_stop.then_some(details.reports_background);
+    let stop_work = is_stop.then(|| details.background_work.clone());
     HookReport {
         weak_idle: event == "Notification" && signal.status == Some(SessionStatus::Idle),
         status: signal.status,
@@ -162,7 +293,8 @@ fn report(signal: Signal, details: &HookDetails) -> HookReport {
         agent_ended: event == "SessionEnd" && details.reason.as_deref() != Some("clear"),
         agent_started: event == "SessionStart",
         subagent: details.subagent,
-        background: (event == "Stop" && !details.subagent).then_some(details.background_work),
+        background,
+        stop_work,
     }
 }
 
@@ -950,7 +1082,15 @@ mod tests {
                 failure_detail: Some("overloaded".to_owned()),
                 reason: Some("overloaded".to_owned()),
                 subagent: false,
-                background_work: true,
+                background_work: StopWork {
+                    tasks: vec![StopTask {
+                        id: "b1".to_owned(),
+                        kind: StopTaskKind::Shell { command: None },
+                        description: String::new(),
+                    }],
+                    wakeups: Vec::new(),
+                },
+                reports_background: true,
             }
         );
     }
@@ -968,7 +1108,8 @@ mod tests {
                 failure_detail: None,
                 reason: None,
                 subagent: false,
-                background_work: false,
+                background_work: StopWork::default(),
+                reports_background: false,
             }
         );
         // A wrong-typed field reads as absent, and `message` stands in for a
@@ -984,7 +1125,11 @@ mod tests {
         assert_eq!(read.event, "");
         assert_eq!(read.session_id, None);
         assert_eq!(read.failure_detail.as_deref(), Some("boom"));
-        assert!(!read.background_work, "non-arrays are no background work");
+        assert_eq!(
+            read.background_work,
+            StopWork::default(),
+            "non-arrays are no background work"
+        );
     }
 
     #[test]
@@ -1185,5 +1330,135 @@ mod tests {
         let prefix = json_prefix(&exact, DETAIL_MAX_CHARS);
         assert_eq!(prefix, exact.to_string());
         assert!(!prefix.ends_with('…'), "{prefix}");
+    }
+
+    /// The `Stop` the spike captured: a running shell and a running
+    /// background subagent beside a finished shell, and a pending one-shot
+    /// wakeup beside a recurring cron.
+    fn stop_with_work() -> Value {
+        json!({
+            "hook_event_name": "Stop",
+            "last_assistant_message": "started",
+            "background_tasks": [
+                {
+                    "id": "btzw7sew7",
+                    "type": "shell",
+                    "status": "running",
+                    "description": "sleep",
+                    "command": "sleep 20; echo done-sleeping",
+                },
+                {
+                    "id": "a2bfb811c49c06f72",
+                    "type": "subagent",
+                    "status": "running",
+                    "description": "sleep helper",
+                    "agent_type": "general-purpose",
+                },
+                {
+                    "id": "x1",
+                    "type": "shell",
+                    "status": "completed",
+                    "description": "done",
+                    "command": "true",
+                },
+            ],
+            "session_crons": [
+                {
+                    "id": "d62c3318",
+                    "schedule": "21 12 * * *",
+                    "recurring": false,
+                    "prompt": "p",
+                },
+                {
+                    "id": "cc6750c9",
+                    "schedule": "* * * * *",
+                    "recurring": true,
+                    "prompt": "p",
+                },
+            ],
+        })
+    }
+
+    #[test]
+    fn stop_keeps_running_tasks_and_one_shot_crons() {
+        let report = signal(&stop_with_work());
+        assert_eq!(
+            report.stop_work,
+            Some(StopWork {
+                tasks: vec![
+                    StopTask {
+                        id: "btzw7sew7".to_owned(),
+                        kind: StopTaskKind::Shell {
+                            command: Some("sleep 20; echo done-sleeping".to_owned()),
+                        },
+                        description: "sleep".to_owned(),
+                    },
+                    StopTask {
+                        id: "a2bfb811c49c06f72".to_owned(),
+                        kind: StopTaskKind::Subagent {
+                            agent_type: Some("general-purpose".to_owned()),
+                        },
+                        description: "sleep helper".to_owned(),
+                    },
+                ],
+                wakeups: vec![StopWakeup {
+                    id: "d62c3318".to_owned(),
+                    schedule: "21 12 * * *".to_owned(),
+                }],
+            }),
+            "the running tasks and the one-shot cron, in payload order"
+        );
+        assert_eq!(
+            report.background,
+            Some(true),
+            "the lists are what the flag reports"
+        );
+    }
+
+    #[test]
+    fn subagent_stop_carries_no_stop_work() {
+        let mut body = stop_with_work();
+        body["agent_id"] = json!("a2bfb811c49c06f72");
+        let report = signal(&body);
+        assert_eq!(
+            report.stop_work, None,
+            "a subagent's stop says nothing about the work beside it"
+        );
+        assert_eq!(report.background, None);
+    }
+
+    #[test]
+    fn stop_with_no_lists_has_empty_work() {
+        let report = signal(&json!({"hook_event_name": "Stop"}));
+        assert_eq!(report.stop_work, Some(StopWork::default()));
+        assert_eq!(
+            report.background,
+            Some(false),
+            "no lists, no background work"
+        );
+    }
+
+    #[test]
+    fn a_running_task_without_an_id_still_reports_background() {
+        // The flag keeps its raw rule: a running task or a one-shot cron
+        // counts whatever other fields the element carries. Only the lists
+        // drop the malformed ones.
+        let bodies = [
+            json!({
+                "hook_event_name": "Stop",
+                "background_tasks": [{"type": "shell", "status": "running"}],
+                "session_crons": [],
+            }),
+            json!({
+                "hook_event_name": "Stop",
+                "background_tasks": [],
+                "session_crons": [{"recurring": false}],
+            }),
+        ];
+        for body in bodies {
+            let report = signal(&body);
+            assert_eq!(report.background, Some(true), "{body}");
+            assert_eq!(report.stop_work, Some(StopWork::default()), "{body}");
+        }
     }
 }
