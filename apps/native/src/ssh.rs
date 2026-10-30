@@ -12,7 +12,8 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
-use futures::{Sink, Stream, StreamExt as _};
+use futures::{Sink, SinkExt as _, Stream, StreamExt as _};
+use protocol::{ClientMessage, DaemonMessage};
 use tokio::io::{
     AsyncBufReadExt as _, AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, BufReader,
 };
@@ -20,6 +21,7 @@ use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::{self, Message};
 use tracing::warn;
 
+use crate::net::NATIVE_PROTOCOL_VERSIONS;
 use crate::target::SshHost;
 
 /// The variable naming the `ssh` binary to run; empty counts as unset.
@@ -129,6 +131,107 @@ pub fn open(host: &SshHost) -> Result<LineSocket> {
     let mut socket = LineSocket::new(stdout, stdin, stderr);
     socket.child = Some(child);
     Ok(socket)
+}
+
+/// How long Test connection waits for the host's `Welcome`, on top of
+/// `ssh`'s own 10 s connect timeout.
+pub const TEST_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Test connection: start `ssh` to `host` as [`open`] does, send a `Hello`
+/// with an empty token and no client identity, and wait for the host's
+/// answer. The child is killed when this returns, and once `cancel`
+/// resolves.
+///
+/// # Errors
+///
+/// The text the picker shows: why `ssh` did not start, an `AuthFailed`
+/// reason, `ssh`'s stderr when the stream ended (verbatim), or that no
+/// answer came within [`TEST_TIMEOUT`].
+pub async fn test_connection(
+    host: &SshHost,
+    cancel: impl Future<Output = ()>,
+) -> Result<(), String> {
+    let socket = open(host).map_err(|err| format!("{err:#}"))?;
+    test_over(socket, TEST_TIMEOUT, cancel).await
+}
+
+/// [`test_connection`] over an open `socket`, which is dropped on return.
+async fn test_over(
+    mut socket: LineSocket,
+    timeout: Duration,
+    cancel: impl Future<Output = ()>,
+) -> Result<(), String> {
+    let stderr = socket.stderr_tail();
+    tokio::select! {
+        answer = tokio::time::timeout(timeout, await_welcome(&mut socket)) => {
+            answer.unwrap_or_else(|_| Err(no_answer(timeout, &stderr.text())))
+        }
+        () = cancel => Err("The test was cancelled.".to_owned()),
+    }
+}
+
+/// The `Hello` Test connection sends: the client's versions, an empty token
+/// (the bridge on the host fills it in) and no client identity, so a test
+/// registers nothing on the host.
+fn test_hello() -> ClientMessage {
+    ClientMessage::Hello {
+        protocol_version: protocol::PROTOCOL_VERSION,
+        protocol_versions: NATIVE_PROTOCOL_VERSIONS.to_vec(),
+        auth_token: String::new(),
+        client_id: None,
+        client_name: None,
+    }
+}
+
+/// Sends the test's `Hello` and reads until the host answers it.
+async fn await_welcome(socket: &mut LineSocket) -> Result<(), String> {
+    let hello = serde_json::to_string(&test_hello())
+        .map_err(|err| format!("encoding the test's Hello: {err}"))?;
+    let mut failure = socket
+        .send(Message::Text(hello.into()))
+        .await
+        .err()
+        .map(|err| err.to_string());
+    loop {
+        match socket.next().await {
+            Some(Ok(Message::Text(text))) => match serde_json::from_str::<DaemonMessage>(&text) {
+                Ok(DaemonMessage::Welcome { .. }) => return Ok(()),
+                Ok(DaemonMessage::AuthFailed { reason }) => return Err(reason),
+                Ok(_) => {}
+                Err(err) => warn!("Test connection: a line from the host is not a message: {err}"),
+            },
+            Some(Ok(_)) => {}
+            Some(Err(err)) => {
+                failure = Some(err.to_string());
+                break;
+            }
+            None => break,
+        }
+    }
+    Err(ended_without_answer(
+        &socket.stderr_tail().text(),
+        failure.as_deref(),
+    ))
+}
+
+/// Why a test ended with no answer: `ssh`'s stderr as it wrote it, else
+/// that it ended, with the read or write error when there was one.
+fn ended_without_answer(stderr: &str, failure: Option<&str>) -> String {
+    match (stderr.is_empty(), failure) {
+        (false, _) => stderr.to_owned(),
+        (true, Some(failure)) => format!("ssh ended without an answer: {failure}"),
+        (true, None) => "ssh ended without an answer.".to_owned(),
+    }
+}
+
+/// The text of a test that ran past `timeout`, with `ssh`'s stderr so far.
+fn no_answer(timeout: Duration, stderr: &str) -> String {
+    let text = format!("No answer from the host in {} s.", timeout.as_secs());
+    if stderr.is_empty() {
+        text
+    } else {
+        format!("{text}\n{stderr}")
+    }
 }
 
 /// The last [`STDERR_TAIL`] bytes a child wrote to stderr.
@@ -342,10 +445,13 @@ mod tests {
     use std::time::Duration;
 
     use futures::{SinkExt as _, StreamExt as _};
-    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    use protocol::ClientMessage;
+    use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _};
     use tokio_tungstenite::tungstenite::Message;
 
-    use super::{LineSocket, MAX_LINE, locate_with};
+    use super::{
+        LineSocket, MAX_LINE, NATIVE_PROTOCOL_VERSIONS, TEST_TIMEOUT, locate_with, test_over,
+    };
 
     /// How long a test waits on the socket before calling it hung.
     const BACKSTOP: Duration = Duration::from_secs(30);
@@ -431,6 +537,143 @@ mod tests {
         );
         drop(socket);
         writer.await.expect("the writer ends");
+    }
+
+    /// A socket over in-memory pipes whose stderr stays open: the host's
+    /// stdout writer, its stdin reader, its stderr writer, and the socket.
+    fn piped_with_stderr() -> (
+        tokio::io::DuplexStream,
+        tokio::io::DuplexStream,
+        tokio::io::DuplexStream,
+        LineSocket,
+    ) {
+        let (host_out, client_in) = tokio::io::duplex(1 << 16);
+        let (client_out, host_in) = tokio::io::duplex(1 << 16);
+        let (host_err, client_err) = tokio::io::duplex(1 << 16);
+        (
+            host_out,
+            host_in,
+            host_err,
+            LineSocket::new(client_in, client_out, client_err),
+        )
+    }
+
+    /// The first line the client wrote to the host's stdin, as a message.
+    async fn first_client_line(host_in: &mut tokio::io::DuplexStream) -> ClientMessage {
+        let mut reader = tokio::io::BufReader::new(host_in);
+        let mut line = String::new();
+        tokio::time::timeout(BACKSTOP, reader.read_line(&mut line))
+            .await
+            .expect("the Hello never arrived")
+            .expect("read the Hello");
+        serde_json::from_str(&line).expect("the Hello is a client message")
+    }
+
+    async fn test(socket: LineSocket) -> Result<(), String> {
+        tokio::time::timeout(
+            BACKSTOP,
+            test_over(socket, TEST_TIMEOUT, futures::future::pending()),
+        )
+        .await
+        .expect("the test hung")
+    }
+
+    #[tokio::test]
+    async fn test_connection_sends_an_anonymous_hello_and_takes_the_welcome() {
+        let (mut host_out, mut host_in, socket) = piped();
+        let host = async {
+            let hello = first_client_line(&mut host_in).await;
+            host_out
+                .write_all(b"{\"type\":\"repos\",\"repos\":[]}\n{\"type\":\"welcome\",\"protocol_version\":25,\"supported_versions\":[25],\"features\":[]}\n")
+                .await
+                .expect("write the answer");
+            hello
+        };
+        let (outcome, hello) = tokio::join!(test(socket), host);
+        assert_eq!(outcome, Ok(()));
+        let ClientMessage::Hello {
+            protocol_versions,
+            auth_token,
+            client_id,
+            client_name,
+            ..
+        } = hello
+        else {
+            unreachable!("the first line is a Hello, got {hello:?}");
+        };
+        assert_eq!(auth_token, "", "the bridge on the host fills the token");
+        assert_eq!(client_id, None, "a test registers no client on the host");
+        assert_eq!(client_name, None);
+        assert_eq!(protocol_versions, NATIVE_PROTOCOL_VERSIONS.to_vec());
+    }
+
+    #[tokio::test]
+    async fn test_connection_returns_the_auth_failed_reason() {
+        let (mut host_out, _host_in, socket) = piped();
+        host_out
+            .write_all(b"{\"type\":\"auth_failed\",\"reason\":\"no shared protocol version\"}\n")
+            .await
+            .expect("write the refusal");
+        assert_eq!(
+            test(socket).await,
+            Err("no shared protocol version".to_owned())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_connection_returns_the_stderr_tail_verbatim_when_ssh_ends() {
+        let (host_out, _host_in, mut host_err, socket) = piped_with_stderr();
+        host_err
+            .write_all(b"me@devbox: Permission denied (publickey).\r\n")
+            .await
+            .expect("write stderr");
+        drop(host_err);
+        drop(host_out);
+        assert_eq!(
+            test(socket).await,
+            Err("me@devbox: Permission denied (publickey).".to_owned())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_connection_says_ssh_ended_when_stderr_is_empty() {
+        let (host_out, _host_in, socket) = piped();
+        drop(host_out);
+        assert_eq!(
+            test(socket).await,
+            Err("ssh ended without an answer.".to_owned())
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_connection_times_out_with_the_stderr_so_far() {
+        let (_host_out, _host_in, mut host_err, socket) = piped_with_stderr();
+        host_err
+            .write_all(b"debug1: Connecting to devbox\n")
+            .await
+            .expect("write stderr");
+        let outcome = test_over(socket, TEST_TIMEOUT, futures::future::pending()).await;
+        assert_eq!(
+            outcome,
+            Err("No answer from the host in 20 s.\ndebug1: Connecting to devbox".to_owned())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_connection_stops_at_cancel_and_closes_the_child() {
+        let (_host_out, mut host_in, socket) = piped();
+        let outcome = tokio::time::timeout(
+            BACKSTOP,
+            test_over(socket, TEST_TIMEOUT, futures::future::ready(())),
+        )
+        .await
+        .expect("the cancelled test hung");
+        assert_eq!(outcome, Err("The test was cancelled.".to_owned()));
+        let mut rest = Vec::new();
+        tokio::time::timeout(BACKSTOP, host_in.read_to_end(&mut rest))
+            .await
+            .expect("the child's stdin stayed open after the cancel")
+            .expect("read the child's stdin");
     }
 
     /// The binary [`locate_with`] finds with `vars` set and `files` present.

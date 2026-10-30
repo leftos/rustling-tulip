@@ -170,9 +170,15 @@ This doc records the decisions a change to the client needs to know; what each f
 
   The current target's row is tagged `Current`; picking it sends nothing, and any other pick sends `SwitchTarget`, closes the picker and saves `native-ui.json`: `last_target`, and the picked or typed host into `saved_hosts` with the port it was dialled on (a known host's saved port is updated).
 
-  `Add a host` has Name and Port (prefilled 8787) fields, and a refusal shows under them and sends nothing. A saved host with no stored device token is tagged `Not paired` (tokens are read once, when the picker opens; an unreadable store warns "reading the host's device token for the picker: …").
+  `Add a host` has Name and Port (prefilled 8787) fields, and a refusal shows under them and sends nothing. A saved tailnet host with no stored device token is tagged `Not paired`; a saved SSH host is tagged `SSH` and never `Not paired` (tokens are read once, when the picker opens; an unreadable store warns "reading the host's device token for the picker: …").
 
-  Forget rewrites `saved_hosts` and deletes the host's device token (a failure warns "deleting the forgotten host's device token: …" and toasts "Couldn't forget this host's device token"); forgetting the current host switches to This PC.
+  Forget rewrites `saved_hosts`; for a tailnet host it also deletes the host's device token (a failure warns "deleting the forgotten host's device token: …" and toasts "Couldn't forget this host's device token"), and for an SSH host it deletes no token and drops the `ssh:<name>` session count. Forgetting the current host switches to This PC and clears `last_target`. An SSH host and a tailnet host of one name are listed and forgotten separately.
+
+  `Add SSH host…` (beside `Add a host`) opens the form "Add an SSH host" with Host (placeholder `devbox or user@host`, an alias from the SSH config or `user@host`) and Remote command (placeholder `rustling-tulipd bridge`) fields and the buttons `Test connection`, `Add` and `Back`. Refusals show under the fields and send nothing: "Type an SSH host: an alias from your SSH config, or user@host.", "An SSH host cannot start with a dash.", "An SSH host cannot contain spaces or control characters."
+
+  `Test connection` runs ssh as a connection would, sends a `Hello` with an empty token and no client id or name (so it keys no tab layout), and shows "Testing the connection…", then `Connected: <short name>`, ssh's stderr verbatim, the daemon's `AuthFailed` reason, "ssh ended without an answer." (or "…: <error>"), or "No answer from the host in 20 s." with the stderr so far. The 20 s guard sits on top of ssh's own 10 s connect timeout, and the button reads `Cancel` while the test runs, killing the ssh child. Enter in an SSH field runs the test; editing a field cancels a running test and clears its result; the first Esc leaves the form and the next closes the picker.
+
+  `Add` needs no passing test: it saves `{"kind":"ssh","name":…,"remote_command":…}` with no port, replacing any record of that name whole, and switches to it. Switching to an SSH host never asks for pairing.
 
   The model: the rows are This PC, then the saved hosts in saved order, then the owner's peers from `tailscale status` that are online, untagged and not shared in (peers pass the DNS-name check and dial port 8787; a peer that is also saved is listed once, with the saved port).
 
@@ -180,8 +186,7 @@ This doc records the decisions a change to the client needs to know; what each f
 
   **Boot target**: `native-ui.json` keeps `saved_hosts` and `last_target` (absent or null for this PC), each entry with a `kind` (`"tailnet"` when missing, or `"ssh"`): `{name, port}` for a tailnet host, `{kind, name, remote_command}` with no port for an SSH host. The client reads them before it starts the net thread and boots on `last_target` when a saved host has its kind and name, dialled as it was saved, and never runs `ensure_running` for it; a saved host that cannot be reached is still the boot target.
 
-  The per-host session count for an SSH host is keyed `ssh:<host string>`. The picker cannot add an SSH host yet, so one is reachable only by editing `native-ui.json`; Forget and the other rows already treat it like a tailnet host.
-
+  The per-host session count for an SSH host is keyed `ssh:<host string>`.
   A `last_target` that is not a saved host boots on this PC and logs at info `the last target is not a saved host; starting on this PC`. A hand-edited `saved_hosts` entry that fails the DNS-name check or has a port outside 1 to 65535 is dropped on load with a warn, its name normalised otherwise, and a `last_target` that is not a host record loads as this PC.
 
   While the target is a remote host, `native-ui.json`'s `active_tab_id` is not updated, and per-tab font sizes and folds and the source-control pins and collapse state are not pruned, so the Local values stay in memory and on disk; a font size, fold or pin set by hand on a remote host still saves. Switching back to Local shows the saved active tab again.

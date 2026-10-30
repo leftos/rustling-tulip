@@ -1,12 +1,15 @@
-//! The Connections picker on screen: This PC, the saved hosts and the
-//! owner's online tailnet peers, a Forget button per saved host, and the
-//! Add a host fields. Its rows and rules live in [`crate::connection_picker`];
-//! a pick goes to the network thread as [`NetCommand::SwitchTarget`], and
-//! the reset for the new target runs when its state comes back.
+//! The Connections picker on screen: This PC, the saved tailnet and SSH
+//! hosts (an SSH one tagged "SSH") and the owner's online tailnet peers, a
+//! Forget button per saved host, and the Add a host fields, which Add SSH
+//! host… swaps for the SSH form (Host, Remote command, Test connection, Add,
+//! Back). Its rows and rules live in [`crate::connection_picker`]; a pick
+//! goes to the network thread as [`NetCommand::SwitchTarget`], and the reset
+//! for the new target runs when its state comes back.
 
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use futures::channel::oneshot;
 use gpui::{
     AnyElement, App, ClickEvent, Context, Div, Entity, Focusable as _, FontWeight, Keystroke,
     Subscription, Task, Window, div, prelude::*, px,
@@ -14,18 +17,21 @@ use gpui::{
 
 use crate::RootView;
 use crate::connection_picker::{
-    ConnectionPicker, PeerSource, Row, RowKind, SavedHost, typed_target,
+    ConnectionPicker, HostKind, PeerSource, Row, RowKind, SavedHost, SshTest, SshTester,
+    TypedHostError, pairs_on_switch, typed_ssh_target, typed_target,
 };
 use crate::net::NetCommand;
 use crate::notice_view::modal_panel;
 use crate::notices::ToastKind;
 use crate::palette::{BORDER, DANGER, DANGER_BG, MUTED, TEXT};
 use crate::session_menu::{backdrop, dialog_button};
-use crate::target::{DEFAULT_TAILNET_PORT, Target};
+use crate::ssh::DEFAULT_REMOTE_COMMAND;
+use crate::target::{DEFAULT_TAILNET_PORT, SshHost, Target};
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
 
 const TITLE: &str = "Connections";
 const NAME_PLACEHOLDER: &str = "box.tail1234.ts.net";
+const SSH_HOST_PLACEHOLDER: &str = "devbox or user@host";
 const SCANNING: &str = "Looking for your devices…";
 
 /// A control of the picker, in the order Tab walks them.
@@ -38,27 +44,44 @@ enum PickerControl {
     Name,
     Port,
     Connect,
+    /// Opens the Add SSH host form.
+    AddSsh,
+    SshHost,
+    SshCommand,
+    /// Test connection, "Cancel" while a test runs.
+    SshTest,
+    SshAdd,
+    SshBack,
     Close,
 }
 
 impl PickerControl {
-    /// The control's debug selector; a row's carries its label.
+    /// The control's debug selector; a row's carries its key
+    /// ([`Row::key`]), so an SSH and a tailnet host of one name differ.
     fn selector(self, rows: &[Row]) -> String {
-        let label = |index: usize| rows.get(index).map_or("", |row| row.label.as_str());
+        let key = |index: usize| rows.get(index).map_or_else(String::new, Row::key);
         match self {
-            Self::Row(index) => format!("connections-row-{}", label(index)),
-            Self::Forget(index) => format!("connections-forget-{}", label(index)),
+            Self::Row(index) => format!("connections-row-{}", key(index)),
+            Self::Forget(index) => format!("connections-forget-{}", key(index)),
             Self::Name => "connections-name".to_owned(),
             Self::Port => "connections-port".to_owned(),
             Self::Connect => "connections-connect".to_owned(),
+            Self::AddSsh => "connections-add-ssh".to_owned(),
+            Self::SshHost => "connections-ssh-form-host".to_owned(),
+            Self::SshCommand => "connections-ssh-form-command".to_owned(),
+            Self::SshTest => "connections-ssh-form-test".to_owned(),
+            Self::SshAdd => "connections-ssh-form-add".to_owned(),
+            Self::SshBack => "connections-ssh-form-back".to_owned(),
             Self::Close => "connections-close".to_owned(),
         }
     }
 }
 
 /// Every control of a picker showing `rows`, in Tab order: each row then
-/// its Forget button, the two fields, Connect and Close.
-fn control_ring(rows: &[Row]) -> Vec<PickerControl> {
+/// its Forget button, then the Add a host fields, Connect and Add SSH
+/// host…, or, while the SSH form shows, its two fields, Test connection,
+/// Add and Back; Close last.
+fn control_ring(rows: &[Row], adding_ssh: bool) -> Vec<PickerControl> {
     let mut ring = Vec::new();
     for (index, row) in rows.iter().enumerate() {
         ring.push(PickerControl::Row(index));
@@ -66,28 +89,79 @@ fn control_ring(rows: &[Row]) -> Vec<PickerControl> {
             ring.push(PickerControl::Forget(index));
         }
     }
-    ring.extend([
-        PickerControl::Name,
-        PickerControl::Port,
-        PickerControl::Connect,
-        PickerControl::Close,
-    ]);
+    if adding_ssh {
+        ring.extend([
+            PickerControl::SshHost,
+            PickerControl::SshCommand,
+            PickerControl::SshTest,
+            PickerControl::SshAdd,
+            PickerControl::SshBack,
+        ]);
+    } else {
+        ring.extend([
+            PickerControl::Name,
+            PickerControl::Port,
+            PickerControl::Connect,
+            PickerControl::AddSsh,
+        ]);
+    }
+    ring.push(PickerControl::Close);
     ring
 }
 
-/// The open picker: its model, the Add a host fields, the focus, the typed
-/// host's refusal, the saved hosts this PC holds no device token for and the
-/// Tailscale scan in flight.
+/// The open picker: its model, the Add a host fields or the Add SSH host
+/// form, the focus, the typed host's refusal, the saved tailnet hosts this
+/// PC holds no device token for and the Tailscale scan in flight.
 pub(crate) struct ConnectionPickerDialog {
     picker: ConnectionPicker,
-    /// The saved hosts with no device token, read once as the picker opened.
+    /// The saved tailnet hosts with no device token, read once as the
+    /// picker opened.
     not_paired: HashSet<String>,
     name_input: Entity<TextInput>,
     port_input: Entity<TextInput>,
+    /// The Add SSH host form, in place of the Add a host fields.
+    ssh: Option<SshForm>,
     focus: PickerControl,
     error: Option<String>,
     _scan: Task<()>,
     _subscriptions: Vec<Subscription>,
+}
+
+impl ConnectionPickerDialog {
+    /// Whether `row` is tagged "Not paired": a saved tailnet host with no
+    /// device token.
+    fn not_paired(&self, row: &Row) -> bool {
+        row.kind == RowKind::Saved
+            && matches!(row.target, Target::Tailnet(_))
+            && self.not_paired.contains(&row.label)
+    }
+}
+
+/// The Add SSH host form: its fields and what Test connection last did.
+struct SshForm {
+    host_input: Entity<TextInput>,
+    command_input: Entity<TextInput>,
+    test: SshTest,
+    /// The test in flight; dropping it tells the test to kill its `ssh`.
+    running: Option<RunningTest>,
+    _subscriptions: Vec<Subscription>,
+}
+
+/// A Test connection in flight: the signal that cancels it (dropping the
+/// sender cancels it too) and the task waiting for its answer.
+struct RunningTest {
+    cancel: oneshot::Sender<()>,
+    task: Task<()>,
+}
+
+impl RunningTest {
+    /// Tells the test to stop, killing its `ssh`, and drops its answer.
+    fn cancel(self) {
+        if self.cancel.send(()).is_err() {
+            tracing::debug!("the SSH test had already ended when it was cancelled");
+        }
+        drop(self.task);
+    }
 }
 
 impl RootView {
@@ -125,16 +199,17 @@ impl RootView {
             .picker
             .rows()
             .into_iter()
-            .filter(|row| row.kind == RowKind::Saved && dialog.not_paired.contains(&row.label))
+            .filter(|row| dialog.not_paired(row))
             .map(|row| row.label)
             .collect()
     }
 
-    /// The saved hosts this PC holds no device token for. A host whose
-    /// token cannot be read is left untagged.
+    /// The saved tailnet hosts this PC holds no device token for. A host
+    /// whose token cannot be read is left untagged; an SSH host has none.
     fn hosts_not_paired(&self, saved: &[SavedHost]) -> HashSet<String> {
         saved
             .iter()
+            .filter(|host| host.kind == HostKind::Tailnet)
             .filter(|host| match self.tokens.get(&host.name) {
                 Ok(token) => token.is_none(),
                 Err(err) => {
@@ -177,6 +252,40 @@ impl RootView {
         self.peer_source = source;
     }
 
+    /// Replaces the `ssh` Test connection runs.
+    pub fn set_ssh_tester(&mut self, tester: Arc<dyn SshTester + Send + Sync>) {
+        self.ssh_tester = tester;
+    }
+
+    /// Whether the picker shows the Add SSH host form.
+    #[must_use]
+    pub fn connection_picker_adding_ssh(&self) -> bool {
+        self.connection_picker
+            .as_ref()
+            .is_some_and(|dialog| dialog.ssh.is_some())
+    }
+
+    /// The Add SSH host form's Test connection line.
+    #[must_use]
+    pub fn connection_picker_ssh_result(&self) -> Option<String> {
+        self.connection_picker.as_ref()?.ssh.as_ref()?.test.text()
+    }
+
+    /// The labels of the rows that are SSH hosts, in row order.
+    #[must_use]
+    pub fn connection_picker_ssh_rows(&self) -> Vec<String> {
+        let Some(dialog) = &self.connection_picker else {
+            return Vec::new();
+        };
+        dialog
+            .picker
+            .rows()
+            .into_iter()
+            .filter(Row::is_ssh)
+            .map(|row| row.label)
+            .collect()
+    }
+
     /// Connections: opens the picker over the saved hosts, focused on the
     /// current target's row, and starts one Tailscale scan.
     pub fn open_connection_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -208,6 +317,7 @@ impl RootView {
             not_paired,
             name_input,
             port_input,
+            ssh: None,
             focus: PickerControl::Row(current),
             error: None,
             _scan: scan,
@@ -246,25 +356,32 @@ impl RootView {
         })
     }
 
-    /// Enter connects the typed host, Esc closes, an edit clears the
-    /// refusal, and a click in the field moves the focus there.
+    /// Enter connects the typed host (in the SSH form, runs Test
+    /// connection), Esc steps back, an edit clears the refusal (and an SSH
+    /// field's test result, cancelling a test in flight), and a click in
+    /// the field moves the focus there.
     fn watch_picker_field(
         input: &Entity<TextInput>,
         control: PickerControl,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<Subscription> {
+        let ssh_field = matches!(control, PickerControl::SshHost | PickerControl::SshCommand);
         let keys = cx.subscribe_in(
             input,
             window,
-            |this, _, event: &TextInputEvent, window, cx| match event {
+            move |this, _, event: &TextInputEvent, window, cx| match event {
+                TextInputEvent::Submit if ssh_field => this.submit_ssh_field(window, cx),
                 TextInputEvent::Submit => this.connect_typed_host(window, cx),
-                TextInputEvent::Cancel => this.close_connection_picker(window, cx),
+                TextInputEvent::Cancel => this.connection_picker_escape(window, cx),
             },
         );
-        let edits = cx.subscribe_in(input, window, |this, _, _: &TextChanged, _, cx| {
+        let edits = cx.subscribe_in(input, window, move |this, _, _: &TextChanged, _, cx| {
             if let Some(dialog) = &mut this.connection_picker {
                 dialog.error = None;
+            }
+            if ssh_field {
+                this.reset_ssh_test();
             }
             cx.notify();
         });
@@ -291,7 +408,7 @@ impl RootView {
         let focused = self.connection_picker.as_ref()?.focus;
         Some(match keystroke.key.as_str() {
             "escape" => {
-                self.close_connection_picker(window, cx);
+                self.connection_picker_escape(window, cx);
                 true
             }
             "tab" => {
@@ -313,7 +430,7 @@ impl RootView {
         let Some(dialog) = &mut self.connection_picker else {
             return;
         };
-        let ring = control_ring(&dialog.picker.rows());
+        let ring = control_ring(&dialog.picker.rows(), dialog.ssh.is_some());
         let at = ring
             .iter()
             .position(|control| *control == dialog.focus)
@@ -342,10 +459,181 @@ impl RootView {
             PickerControl::Row(index) => self.pick_connection_row(index, window, cx),
             PickerControl::Forget(index) => self.forget_connection_row(index, window, cx),
             PickerControl::Connect => self.connect_typed_host(window, cx),
+            PickerControl::AddSsh => self.open_ssh_form(window, cx),
+            PickerControl::SshTest => self.press_ssh_test(window, cx),
+            PickerControl::SshAdd => self.add_ssh_host(window, cx),
+            PickerControl::SshBack => self.leave_ssh_form(window, cx),
             PickerControl::Close => self.close_connection_picker(window, cx),
-            PickerControl::Name | PickerControl::Port => {
+            PickerControl::Name
+            | PickerControl::Port
+            | PickerControl::SshHost
+            | PickerControl::SshCommand => {
                 self.apply_connection_picker_focus(window, cx);
             }
+        }
+    }
+
+    /// Esc: the SSH form steps back to the list; else the picker closes.
+    fn connection_picker_escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.connection_picker_adding_ssh() {
+            self.leave_ssh_form(window, cx);
+        } else {
+            self.close_connection_picker(window, cx);
+        }
+    }
+
+    /// Add SSH host…: the SSH form in place of the Add a host fields, its
+    /// Host field focused.
+    fn open_ssh_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.connection_picker.is_none() {
+            return;
+        }
+        let host_input = cx.new(|cx| TextInput::new(String::new(), SSH_HOST_PLACEHOLDER, cx));
+        let command_input = cx.new(|cx| TextInput::new(String::new(), DEFAULT_REMOTE_COMMAND, cx));
+        let mut subscriptions =
+            Self::watch_picker_field(&host_input, PickerControl::SshHost, window, cx);
+        subscriptions.extend(Self::watch_picker_field(
+            &command_input,
+            PickerControl::SshCommand,
+            window,
+            cx,
+        ));
+        if let Some(dialog) = &mut self.connection_picker {
+            dialog.ssh = Some(SshForm {
+                host_input,
+                command_input,
+                test: SshTest::Idle,
+                running: None,
+                _subscriptions: subscriptions,
+            });
+            dialog.error = None;
+            dialog.focus = PickerControl::SshHost;
+        }
+        self.apply_connection_picker_focus(window, cx);
+    }
+
+    /// Back: the list again, a test in flight cancelled and the typed host
+    /// dropped.
+    fn leave_ssh_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(dialog) = &mut self.connection_picker else {
+            return;
+        };
+        if let Some(run) = dialog.ssh.take().and_then(|form| form.running) {
+            run.cancel();
+        }
+        dialog.error = None;
+        dialog.focus = PickerControl::AddSsh;
+        self.apply_connection_picker_focus(window, cx);
+    }
+
+    fn ssh_form_mut(&mut self) -> Option<&mut SshForm> {
+        self.connection_picker.as_mut()?.ssh.as_mut()
+    }
+
+    /// The SSH form's host and remote command as a target, or why the
+    /// host is refused; `None` while the form is closed.
+    fn typed_ssh(&self, cx: &Context<Self>) -> Option<Result<Target, TypedHostError>> {
+        let form = self.connection_picker.as_ref()?.ssh.as_ref()?;
+        Some(typed_ssh_target(
+            form.host_input.read(cx).text(),
+            form.command_input.read(cx).text(),
+        ))
+    }
+
+    /// Shows `refusal` under the fields.
+    fn refuse_typed_host(&mut self, refusal: TypedHostError, cx: &mut Context<Self>) {
+        if let Some(dialog) = &mut self.connection_picker {
+            dialog.error = Some(refusal.to_string());
+        }
+        cx.notify();
+    }
+
+    /// Enter in an SSH field: Test connection, unless one is running.
+    fn submit_ssh_field(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let testing = self
+            .ssh_form_mut()
+            .is_some_and(|form| form.test == SshTest::Testing);
+        if !testing {
+            self.start_ssh_test(window, cx);
+        }
+    }
+
+    /// Test connection, or Cancel while a test runs.
+    fn press_ssh_test(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let testing = self
+            .ssh_form_mut()
+            .is_some_and(|form| form.test == SshTest::Testing);
+        if testing {
+            self.reset_ssh_test();
+            cx.notify();
+        } else {
+            self.start_ssh_test(window, cx);
+        }
+    }
+
+    /// Cancels a test in flight and clears the last result.
+    fn reset_ssh_test(&mut self) {
+        let Some(form) = self.ssh_form_mut() else {
+            return;
+        };
+        if let Some(run) = form.running.take() {
+            run.cancel();
+        }
+        form.test = SshTest::Idle;
+    }
+
+    /// Runs Test connection on the typed host through the picker's
+    /// [`SshTester`]; a refused host shows why and runs nothing.
+    fn start_ssh_test(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let target = match self.typed_ssh(cx) {
+            None => return,
+            Some(Err(refusal)) => return self.refuse_typed_host(refusal, cx),
+            Some(Ok(target)) => target,
+        };
+        let Some(host) = target.ssh_host().cloned() else {
+            return;
+        };
+        let (cancel, cancelled) = oneshot::channel();
+        let answer = self.ssh_tester.test(host.clone(), cancelled);
+        let task = cx.spawn_in(window, async move |this, cx| {
+            let outcome = answer.await;
+            // Fails only when the view is gone, leaving nowhere to show it.
+            this.update_in(cx, |root, _, cx| root.finish_ssh_test(&host, outcome, cx))
+                .ok();
+        });
+        if let Some(form) = self.ssh_form_mut() {
+            if let Some(run) = form.running.replace(RunningTest { cancel, task }) {
+                run.cancel();
+            }
+            form.test = SshTest::Testing;
+        }
+        cx.notify();
+    }
+
+    /// A test's answer reaches the form that is still waiting for it.
+    fn finish_ssh_test(
+        &mut self,
+        host: &SshHost,
+        outcome: Result<(), String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(form) = self.ssh_form_mut() else {
+            return;
+        };
+        let Some(run) = form.running.take() else {
+            return;
+        };
+        run.task.detach();
+        form.test = SshTest::finished(host, outcome);
+        cx.notify();
+    }
+
+    /// Add: saves the typed SSH host and switches to it, tested or not.
+    fn add_ssh_host(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.typed_ssh(cx) {
+            None => {}
+            Some(Err(refusal)) => self.refuse_typed_host(refusal, cx),
+            Some(Ok(target)) => self.switch_to_target(target, window, cx),
         }
     }
 
@@ -378,9 +666,10 @@ impl RootView {
     }
 
     /// Closes the picker and, unless `target` is the current one, sends the
-    /// switch and saves it as the boot target, a tailnet host also among the
-    /// saved hosts. The current host, while it does not know this PC, opens
-    /// the pairing dialog instead.
+    /// switch and saves it as the boot target, a remote host also among the
+    /// saved hosts; only a tailnet host waits for a "not approved" to open
+    /// the pairing dialog. The current host, while it does not know this
+    /// PC, opens the pairing dialog instead.
     fn switch_to_target(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
         let current = target == *self.conn.target();
         let pair_current = current && self.device_pairing_offered();
@@ -390,7 +679,7 @@ impl RootView {
                 dialog.picker.remember(host.clone());
                 self.sidebar.set_saved_hosts(dialog.picker.saved().to_vec());
             }
-            if host.is_some() {
+            if pairs_on_switch(&target) {
                 self.pair_on_not_approved();
             }
             self.sidebar.set_last_target(host);
@@ -403,9 +692,9 @@ impl RootView {
         }
     }
 
-    /// Forget on the saved host at row `index`, its device token deleted
-    /// with it; forgetting the current host switches to this PC. The picker
-    /// stays open.
+    /// Forget on the saved host at row `index`, its session count and a
+    /// tailnet host's device token deleted with it; forgetting the current
+    /// host switches to this PC. The picker stays open.
     fn forget_connection_row(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         let current = self.conn.target().clone();
         let Some(dialog) = &mut self.connection_picker else {
@@ -414,8 +703,10 @@ impl RootView {
         let Some(row) = dialog.picker.rows().into_iter().nth(index) else {
             return;
         };
-        let was_current = dialog.picker.forget(&row.label, &current);
-        self.sidebar.forget_host_session_count(&row.label);
+        let was_current = dialog.picker.forget(&row.target, &current);
+        if let Some(key) = row.target.session_count_key() {
+            self.sidebar.forget_host_session_count(&key);
+        }
         let rows = dialog.picker.rows().len();
         dialog.focus = PickerControl::Row(index.min(rows.saturating_sub(1)));
         self.sidebar.set_saved_hosts(dialog.picker.saved().to_vec());
@@ -424,7 +715,9 @@ impl RootView {
             self.command(NetCommand::SwitchTarget(Target::Local));
         }
         self.save_ui();
-        self.forget_device_token(&row.label, cx);
+        if let Target::Tailnet(host) = &row.target {
+            self.forget_device_token(host.name(), cx);
+        }
         self.apply_connection_picker_focus(window, cx);
     }
 
@@ -447,19 +740,31 @@ impl RootView {
         let Some(dialog) = &self.connection_picker else {
             return;
         };
-        match dialog.focus {
-            PickerControl::Name => dialog.name_input.read(cx).focus_handle(cx).focus(window),
-            PickerControl::Port => dialog.port_input.read(cx).focus_handle(cx).focus(window),
-            _ => self.connection_picker_focus.focus(window),
+        let ssh = dialog.ssh.as_ref();
+        let input = match dialog.focus {
+            PickerControl::Name => Some(&dialog.name_input),
+            PickerControl::Port => Some(&dialog.port_input),
+            PickerControl::SshHost => ssh.map(|form| &form.host_input),
+            PickerControl::SshCommand => ssh.map(|form| &form.command_input),
+            _ => None,
+        };
+        match input {
+            Some(input) => input.read(cx).focus_handle(cx).focus(window),
+            None => self.connection_picker_focus.focus(window),
         }
         cx.notify();
     }
 
-    /// Whether the Name or Port field holds the keyboard.
+    /// Whether one of the picker's text fields holds the keyboard.
     fn connection_field_focused(&self, window: &Window, cx: &Context<Self>) -> bool {
         self.connection_picker.as_ref().is_some_and(|dialog| {
-            [&dialog.name_input, &dialog.port_input]
+            let ssh = dialog
+                .ssh
                 .iter()
+                .flat_map(|form| [&form.host_input, &form.command_input]);
+            [&dialog.name_input, &dialog.port_input]
+                .into_iter()
+                .chain(ssh)
                 .any(|input| input.read(cx).focus_handle(cx).is_focused(window))
         })
     }
@@ -478,8 +783,8 @@ impl RootView {
             .children(rows.iter().enumerate().map(|(index, row)| {
                 let tags = RowTags {
                     current: row.target == *current,
-                    not_paired: row.kind == RowKind::Saved
-                        && dialog.not_paired.contains(&row.label),
+                    not_paired: dialog.not_paired(row),
+                    ssh: row.is_ssh(),
                 };
                 row_line(index, row, tags, focus, &rows, cx)
             }));
@@ -491,13 +796,17 @@ impl RootView {
                 .child(text)
         });
         let close = picker_button(PickerControl::Close, "Close", focus, &rows, cx);
+        let lower = match &dialog.ssh {
+            Some(form) => ssh_form(dialog, form, focus, &rows, cx),
+            None => add_host(dialog, focus, &rows, cx),
+        };
         let panel = modal_panel("connections-panel")
             .debug_selector(|| "connections-panel".to_owned())
             .track_focus(&self.connection_picker_focus)
             .child(div().font_weight(FontWeight::SEMIBOLD).child(TITLE))
             .child(list)
             .children(scan)
-            .child(add_host(dialog, focus, &rows, cx))
+            .child(lower)
             .child(div().flex().justify_end().child(close));
         Some(backdrop("connections-picker", panel))
     }
@@ -528,13 +837,16 @@ fn picker_button(
 struct RowTags {
     /// The row is the current target.
     current: bool,
-    /// A saved host this PC holds no device token for.
+    /// A saved tailnet host this PC holds no device token for.
     not_paired: bool,
+    /// An SSH host.
+    ssh: bool,
 }
 
-/// One row: its button, a muted "Not paired" tag on a saved host this PC
-/// holds no device token for, a muted "Current" tag on the current target,
-/// and a saved host's Forget button.
+/// One row: its button, a muted "SSH" tag on an SSH host, a muted "Not
+/// paired" tag on a saved tailnet host this PC holds no device token for, a
+/// muted "Current" tag on the current target, and a saved host's Forget
+/// button.
 fn row_line(
     index: usize,
     row: &Row,
@@ -545,11 +857,20 @@ fn row_line(
 ) -> Div {
     let pick = picker_button(PickerControl::Row(index), &row.label, focus, rows, cx).flex_1();
     let not_paired_selector = format!("connections-not-paired-{}", row.label);
+    let ssh_selector = format!("connections-ssh-tag-{}", row.label);
     div()
         .flex()
         .items_center()
         .gap(px(6.0))
         .child(pick)
+        .when(tags.ssh, |line| {
+            line.child(
+                div()
+                    .debug_selector(|| ssh_selector)
+                    .text_color(gpui::rgb(MUTED))
+                    .child("SSH"),
+            )
+        })
         .when(tags.not_paired, |line| {
             line.child(
                 div()
@@ -572,8 +893,97 @@ fn row_line(
         })
 }
 
+/// The Add SSH host form: the Host and Remote command fields, a host's
+/// refusal, Test connection's line, and Test connection (Cancel while it
+/// runs), Add and Back.
+fn ssh_form(
+    dialog: &ConnectionPickerDialog,
+    form: &SshForm,
+    focus: PickerControl,
+    rows: &[Row],
+    cx: &mut Context<RootView>,
+) -> Div {
+    let result = form.test.text().map(|text| {
+        let line = div().debug_selector(|| "connections-ssh-form-result".to_owned());
+        match form.test {
+            SshTest::Failed(_) => error_box(line, text),
+            SshTest::Passed(_) => line.text_color(gpui::rgb(TEXT)).child(text),
+            SshTest::Idle | SshTest::Testing => line.text_color(gpui::rgb(MUTED)).child(text),
+        }
+    });
+    let buttons = div()
+        .flex()
+        .justify_end()
+        .gap(px(6.0))
+        .child(picker_button(
+            PickerControl::SshTest,
+            form.test.button_label(),
+            focus,
+            rows,
+            cx,
+        ))
+        .child(picker_button(PickerControl::SshAdd, "Add", focus, rows, cx))
+        .child(picker_button(
+            PickerControl::SshBack,
+            "Back",
+            focus,
+            rows,
+            cx,
+        ));
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(4.0))
+        .child(div().text_color(gpui::rgb(MUTED)).child("Add an SSH host"))
+        .child(labelled_field(
+            "Host",
+            &form.host_input,
+            PickerControl::SshHost,
+            focus,
+        ))
+        .child(labelled_field(
+            "Remote command",
+            &form.command_input,
+            PickerControl::SshCommand,
+            focus,
+        ))
+        .children(dialog.error.clone().map(|error| {
+            error_box(
+                div().debug_selector(|| "connections-error".to_owned()),
+                error,
+            )
+        }))
+        .children(result)
+        .child(buttons)
+}
+
+/// A field of the SSH form with its muted label before it.
+fn labelled_field(
+    label: &'static str,
+    input: &Entity<TextInput>,
+    control: PickerControl,
+    focus: PickerControl,
+) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .child(div().w(px(120.0)).text_color(gpui::rgb(MUTED)).child(label))
+        .child(field_box(input, control, focus).flex_1())
+}
+
+/// `line` styled as the picker's error box, showing `text`.
+fn error_box(line: Div, text: String) -> Div {
+    line.px(px(6.0))
+        .py(px(3.0))
+        .rounded(px(4.0))
+        .bg(gpui::rgb(DANGER_BG))
+        .text_color(gpui::rgb(DANGER))
+        .child(text)
+}
+
 /// Add a host: the Name and Port fields, Connect, and the refusal under
-/// them.
+/// them, with Add SSH host… beside the title.
 fn add_host(
     dialog: &ConnectionPickerDialog,
     focus: PickerControl,
@@ -593,21 +1003,29 @@ fn add_host(
             rows,
             cx,
         ));
+    let title = div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .child(div().text_color(gpui::rgb(MUTED)).child("Add a host"))
+        .child(picker_button(
+            PickerControl::AddSsh,
+            "Add SSH host…",
+            focus,
+            rows,
+            cx,
+        ));
     div()
         .flex()
         .flex_col()
         .gap(px(4.0))
-        .child(div().text_color(gpui::rgb(MUTED)).child("Add a host"))
+        .child(title)
         .child(fields)
         .children(dialog.error.clone().map(|error| {
-            div()
-                .debug_selector(|| "connections-error".to_owned())
-                .px(px(6.0))
-                .py(px(3.0))
-                .rounded(px(4.0))
-                .bg(gpui::rgb(DANGER_BG))
-                .text_color(gpui::rgb(DANGER))
-                .child(error)
+            error_box(
+                div().debug_selector(|| "connections-error".to_owned()),
+                error,
+            )
         }))
 }
 

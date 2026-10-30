@@ -116,6 +116,8 @@ These need Windows OpenSSH Server running on the host and key login from the dev
 - [ ] Right after that, on the host: `Get-Process rustling-tulipd`. **Expect:** the daemon the bridge started is still running once the SSH session has ended, and so do any sessions it hosts.
 - [ ] Run setup again and pick another folder. **Expect:** the old folder is gone from the user PATH and the new one is on it.
 - [ ] Uninstall. **Expect:** the install folder is gone from the user PATH and every other entry is as it was.
+- [ ] From the native client on the device, open Connections, press Add SSH host…, type the host and press Test connection. **Expect:** `Connected: <short name>`; then press Add. **Expect:** the client switches to the host with no pairing prompt, and the row carries an `SSH` tag and never `Not paired`.
+- [ ] In the same form, test a host whose key the device's ssh does not offer or the host does not authorize. **Expect:** ssh's own `Permission denied (publickey).` text under the form, and no row added until you press Add.
 
 ## iPhone and PWA
 

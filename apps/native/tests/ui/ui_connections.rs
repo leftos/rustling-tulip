@@ -12,14 +12,17 @@
 
 use crate::support;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
+use daemon_client::device_tokens::DeviceTokenStore as _;
+use futures::FutureExt as _;
+use futures::future::BoxFuture;
 use gpui::{TestAppContext, px};
 use protocol::{DaemonMessage, WorktreeCleanupFailure};
-use rustling_tulip_native::connection_picker::PeerSource;
-use rustling_tulip_native::target::Target;
-use rustling_tulip_native::{NetCommand, RootView};
+use rustling_tulip_native::connection_picker::{PeerSource, SshTestCancel, SshTester};
+use rustling_tulip_native::target::{SshHost, Target};
+use rustling_tulip_native::{Connection, NetCommand, RootView};
 use serde_json::{Value, json};
 use support::{Fixture, Harness, TestDir};
 use tailnet::{PeerStatus, Status, TailnetError};
@@ -497,4 +500,387 @@ fn a_notice_under_the_picker_does_not_take_its_keys(cx: &mut TestAppContext) {
         "Space in the Name field does not press the hidden dialog's Ignore"
     );
     assert!(is_open(&mut h));
+}
+
+const SSH_HOST: &str = "devbox";
+const DENIED: &str = "me@devbox: Permission denied (publickey).";
+
+/// A Test connection that answers every test with `answer`, or, with none,
+/// never answers and keeps each test's cancel signal to look at.
+#[derive(Default)]
+struct FakeSsh {
+    answer: Option<Result<(), String>>,
+    tested: Mutex<Vec<String>>,
+    cancels: Mutex<Vec<SshTestCancel>>,
+}
+
+impl FakeSsh {
+    fn answering(answer: Result<(), String>) -> Arc<Self> {
+        Arc::new(Self {
+            answer: Some(answer),
+            ..Self::default()
+        })
+    }
+
+    /// The host strings tested so far.
+    fn tested(&self) -> Vec<String> {
+        self.tested
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Whether every test still waiting was told to stop (and one was).
+    fn cancelled(&self) -> bool {
+        let mut cancels = self.cancels.lock().unwrap_or_else(PoisonError::into_inner);
+        !cancels.is_empty()
+            && cancels
+                .iter_mut()
+                .all(|cancel| !matches!(cancel.try_recv(), Ok(None)))
+    }
+}
+
+impl SshTester for FakeSsh {
+    fn test(&self, host: SshHost, cancel: SshTestCancel) -> BoxFuture<'static, Result<(), String>> {
+        self.tested
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(host.name().to_owned());
+        if let Some(answer) = &self.answer {
+            return futures::future::ready(answer.clone()).boxed();
+        }
+        self.cancels
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(cancel);
+        futures::future::pending().boxed()
+    }
+}
+
+fn ssh(name: &str) -> Target {
+    Target::parse_ssh(name, None).expect("an SSH host string")
+}
+
+/// Opens the picker with `tester` as its Test connection and no tailnet
+/// peers, then the Add SSH host form.
+fn open_ssh_form(h: &mut Harness<'_>, tester: Arc<FakeSsh>) {
+    h.root_update(move |root, _, _| root.set_ssh_tester(tester));
+    open_picker(h, tailnet_with(&[]));
+    h.commands();
+    h.click_on("connections-add-ssh");
+    assert!(h.root(|root, _| root.connection_picker_adding_ssh()));
+    assert_eq!(
+        focus(h).as_deref(),
+        Some("connections-ssh-form-host"),
+        "the form opens on its Host field"
+    );
+}
+
+fn ssh_result(h: &mut Harness<'_>) -> Option<String> {
+    h.root(|root, _| root.connection_picker_ssh_result())
+}
+
+fn picker_error(h: &mut Harness<'_>) -> Option<String> {
+    h.root(|root, _| root.connection_picker_error())
+}
+
+#[gpui::test]
+fn picker_lists_a_saved_ssh_host_with_an_ssh_tag(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &json!({ "saved_hosts": [
+            { "name": HOST, "port": 8787 },
+            { "kind": "ssh", "name": "me@devbox" },
+        ] }),
+    );
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+
+    open_picker(&mut h, tailnet_with(&[]));
+
+    assert_eq!(
+        rows(&mut h),
+        owned_rows(&[("This PC", true), (HOST, false), ("me@devbox", false)])
+    );
+    assert_eq!(
+        h.root(|root, _| root.connection_picker_ssh_rows()),
+        ["me@devbox"]
+    );
+    assert_eq!(
+        h.root(|root, _| root.connection_picker_not_paired()),
+        [HOST],
+        "an SSH host has no device token and is never tagged Not paired"
+    );
+    assert!(h.bounds("connections-ssh-tag-me@devbox").size.width > px(0.0));
+    assert!(h.bounds("connections-row-ssh:me@devbox").size.width > px(0.0));
+}
+
+#[gpui::test]
+fn add_ssh_host_refuses_a_bad_host_with_its_text_and_sends_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    let tester = FakeSsh::answering(Ok(()));
+    open_ssh_form(&mut h, Arc::clone(&tester));
+
+    h.click_on("connections-ssh-form-test");
+    assert_eq!(
+        picker_error(&mut h).as_deref(),
+        Some("Type an SSH host: an alias from your SSH config, or user@host.")
+    );
+
+    h.click_on("connections-ssh-form-host");
+    type_text(&mut h, "-x");
+    assert_eq!(picker_error(&mut h), None, "an edit clears the refusal");
+    h.click_on("connections-ssh-form-add");
+    assert_eq!(
+        picker_error(&mut h).as_deref(),
+        Some("An SSH host cannot start with a dash.")
+    );
+
+    assert_eq!(tester.tested(), [] as [String; 0]);
+    assert_eq!(switches(&mut h), [] as [Target; 0]);
+    assert!(is_open(&mut h));
+}
+
+#[gpui::test]
+fn enter_runs_test_connection_and_shows_connected_saving_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    let tester = FakeSsh::answering(Ok(()));
+    open_ssh_form(&mut h, Arc::clone(&tester));
+
+    type_text(&mut h, "me@devbox");
+    h.keys("enter");
+
+    assert_eq!(ssh_result(&mut h).as_deref(), Some("Connected: devbox"));
+    assert_eq!(tester.tested(), ["me@devbox"]);
+    assert_eq!(switches(&mut h), [] as [Target; 0]);
+    assert!(
+        h.root(|root, _| root.connection_picker_adding_ssh()),
+        "the form stays open"
+    );
+    assert!(
+        !dir.path().join("native-ui.json").exists()
+            || saved_ui(&dir)["saved_hosts"]
+                .as_array()
+                .is_none_or(Vec::is_empty),
+        "a test saves nothing"
+    );
+}
+
+#[gpui::test]
+fn test_connection_failure_shows_ssh_stderr_verbatim(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    let tester = FakeSsh::answering(Err(DENIED.to_owned()));
+    open_ssh_form(&mut h, Arc::clone(&tester));
+
+    type_text(&mut h, SSH_HOST);
+    h.click_on("connections-ssh-form-test");
+
+    assert_eq!(ssh_result(&mut h).as_deref(), Some(DENIED));
+    assert_eq!(switches(&mut h), [] as [Target; 0]);
+}
+
+#[gpui::test]
+fn cancel_stops_a_running_test_connection(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    let tester = Arc::new(FakeSsh::default());
+    open_ssh_form(&mut h, Arc::clone(&tester));
+    type_text(&mut h, SSH_HOST);
+
+    h.click_on("connections-ssh-form-test");
+    assert_eq!(
+        ssh_result(&mut h).as_deref(),
+        Some("Testing the connection…")
+    );
+    assert!(!tester.cancelled());
+
+    h.click_on("connections-ssh-form-test");
+
+    assert!(tester.cancelled(), "Cancel tells the test to kill its ssh");
+    assert_eq!(ssh_result(&mut h), None);
+    assert!(h.root(|root, _| root.connection_picker_adding_ssh()));
+}
+
+#[gpui::test]
+fn adding_an_ssh_host_without_a_test_saves_it_and_switches(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    let tester = FakeSsh::answering(Ok(()));
+    open_ssh_form(&mut h, Arc::clone(&tester));
+
+    type_text(&mut h, SSH_HOST);
+    h.keys("tab");
+    assert_eq!(
+        focus(&mut h).as_deref(),
+        Some("connections-ssh-form-command")
+    );
+    type_text(&mut h, "rtd.cmd");
+    h.click_on("connections-ssh-form-add");
+
+    assert_eq!(
+        switches(&mut h),
+        [Target::parse_ssh(SSH_HOST, Some("rtd.cmd")).expect("an SSH host")]
+    );
+    assert!(!is_open(&mut h), "Add closes the picker");
+    assert_eq!(tester.tested(), [] as [String; 0], "Add runs no test");
+    let saved = json!({ "kind": "ssh", "name": SSH_HOST, "remote_command": "rtd.cmd" });
+    let ui = saved_ui(&dir);
+    assert_eq!(ui["saved_hosts"], json!([saved.clone()]), "no port");
+    assert_eq!(ui["last_target"], saved);
+}
+
+#[gpui::test]
+fn switching_to_an_ssh_host_never_arms_pairing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &json!({ "saved_hosts": [{ "kind": "ssh", "name": SSH_HOST }] }),
+    );
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    open_picker(&mut h, tailnet_with(&[]));
+    h.commands();
+
+    h.click_on(&format!("connections-row-ssh:{SSH_HOST}"));
+    assert_eq!(switches(&mut h), [ssh(SSH_HOST)]);
+
+    let tailnet = Target::tailnet(HOST, Some(8787));
+    let mut dialling = Connection::for_target(tailnet.clone());
+    dialling.on_connecting();
+    h.set_connection(dialling);
+    let mut refused = Connection::for_target(tailnet);
+    refused.on_connecting();
+    refused.on_socket_open(8787);
+    refused.on_not_approved("device not approved".to_owned(), false);
+    h.set_connection(refused);
+    assert!(
+        !h.root(|root, _| root.device_pairing_open()),
+        "a later \"not approved\" the owner did not ask for opens no pairing dialog"
+    );
+}
+
+#[gpui::test]
+fn forget_an_ssh_host_keeps_device_tokens_and_drops_its_count(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &json!({
+            "saved_hosts": [{ "kind": "ssh", "name": SSH_HOST }],
+            "host_session_counts": { "ssh:devbox": 2 },
+        }),
+    );
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    h.tokens().set(SSH_HOST, "t1").expect("seed a token");
+    open_picker(&mut h, tailnet_with(&[]));
+    h.commands();
+
+    h.click_on(&format!("connections-forget-ssh:{SSH_HOST}"));
+
+    assert_eq!(rows(&mut h), owned_rows(&[("This PC", true)]));
+    let ui = saved_ui(&dir);
+    assert_eq!(ui["saved_hosts"], json!([]));
+    assert!(
+        ui["host_session_counts"]["ssh:devbox"].is_null(),
+        "{}",
+        ui["host_session_counts"]
+    );
+    assert_eq!(
+        h.tokens().get(SSH_HOST).expect("read the token").as_deref(),
+        Some("t1"),
+        "an SSH host has no device token to delete"
+    );
+    assert_eq!(switches(&mut h), [] as [Target; 0]);
+}
+
+#[gpui::test]
+fn forget_a_tailnet_host_deletes_its_device_token(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &json!({ "saved_hosts": [{ "name": HOST, "port": 8787 }] }),
+    );
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    h.tokens().set(HOST, "t1").expect("seed a token");
+    open_picker(&mut h, tailnet_with(&[]));
+
+    h.click_on(&format!("connections-forget-{HOST}"));
+
+    assert_eq!(h.tokens().get(HOST).expect("read the token"), None);
+}
+
+#[gpui::test]
+fn forget_the_current_ssh_host_returns_to_this_pc(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &json!({
+            "saved_hosts": [{ "kind": "ssh", "name": SSH_HOST }],
+            "last_target": { "kind": "ssh", "name": SSH_HOST },
+        }),
+    );
+    let mut h = Harness::on_target(cx, &dir, ssh(SSH_HOST), &Fixture::default());
+    open_picker(&mut h, tailnet_with(&[]));
+    assert_eq!(
+        rows(&mut h),
+        owned_rows(&[("This PC", false), (SSH_HOST, true)])
+    );
+    h.commands();
+
+    h.click_on(&format!("connections-forget-ssh:{SSH_HOST}"));
+
+    assert_eq!(switches(&mut h), [Target::Local]);
+    let ui = saved_ui(&dir);
+    assert_eq!(ui["saved_hosts"], json!([]));
+    assert!(ui["last_target"].is_null(), "{}", ui["last_target"]);
+}
+
+#[gpui::test]
+fn an_ssh_and_a_tailnet_host_of_one_name_are_listed_and_forgotten_alone(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &json!({ "saved_hosts": [
+            { "name": HOST, "port": 8787 },
+            { "kind": "ssh", "name": HOST },
+        ] }),
+    );
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    h.tokens().set(HOST, "t1").expect("seed a token");
+    open_picker(&mut h, tailnet_with(&[HOST]));
+    assert_eq!(
+        rows(&mut h),
+        owned_rows(&[("This PC", true), (HOST, false), (HOST, false)])
+    );
+    assert_eq!(h.root(|root, _| root.connection_picker_ssh_rows()), [HOST]);
+
+    h.click_on(&format!("connections-forget-ssh:{HOST}"));
+    assert_eq!(
+        saved_ui(&dir)["saved_hosts"],
+        json!([{ "name": HOST, "port": 8787 }])
+    );
+    assert_eq!(
+        h.tokens().get(HOST).expect("read the token").as_deref(),
+        Some("t1"),
+        "the tailnet host keeps its token"
+    );
+
+    h.click_on(&format!("connections-forget-{HOST}"));
+    assert_eq!(saved_ui(&dir)["saved_hosts"], json!([]));
+    assert_eq!(h.tokens().get(HOST).expect("read the token"), None);
+}
+
+#[gpui::test]
+fn escape_leaves_the_ssh_form_then_closes_the_picker(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    open_ssh_form(&mut h, Arc::new(FakeSsh::default()));
+
+    h.keys("escape");
+    assert!(is_open(&mut h), "the first Esc leaves the form");
+    assert!(!h.root(|root, _| root.connection_picker_adding_ssh()));
+
+    h.keys("escape");
+    assert!(!is_open(&mut h), "the next closes the picker");
 }

@@ -172,7 +172,7 @@ use crate::appearance::AppearanceChange;
 use crate::appearance_view::AppearanceEditor;
 use crate::changes_view::ChangesUi;
 use crate::connection::{DotKind, Footer};
-use crate::connection_picker::{PeerSource, SystemPeers};
+use crate::connection_picker::{PeerSource, SshTester, SystemPeers, SystemSsh};
 use crate::connection_picker_view::ConnectionPickerDialog;
 use crate::copied::Copied;
 use crate::drag::DragPayload;
@@ -949,6 +949,8 @@ pub struct RootView {
     connection_picker_focus: FocusHandle,
     /// The Tailscale the Connections picker scans for peers.
     peer_source: Arc<dyn PeerSource + Send + Sync>,
+    /// Where the Connections picker's Test connection runs `ssh`.
+    ssh_tester: Arc<dyn SshTester + Send + Sync>,
     /// The Add repo prompt on a remote host, while open.
     host_path_prompt: Option<HostPathDialog>,
     /// The Add repo prompt's keyboard focus when its path field has it not.
@@ -1355,6 +1357,7 @@ impl RootView {
             connection_picker: None,
             connection_picker_focus: cx.focus_handle(),
             peer_source: Arc::new(SystemPeers),
+            ssh_tester: Arc::new(SystemSsh),
             host_path_prompt: None,
             host_path_focus: cx.focus_handle(),
             shell_generation: 0,

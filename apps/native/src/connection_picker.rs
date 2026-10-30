@@ -1,13 +1,18 @@
-//! The host picker's model: the rows it offers (this PC, the saved hosts and
-//! the owner's online tailnet peers), the typed-host check, forgetting a
+//! The host picker's model: the rows it offers (this PC, the saved tailnet
+//! and SSH hosts and the owner's online tailnet peers), the typed-host
+//! checks, the Add SSH host form's Test connection states, forgetting a
 //! saved host, and the target the client boots onto. Plain Rust: the view
-//! draws these rows and the Tailscale scan reaches it through [`PeerSource`].
+//! draws these rows, the Tailscale scan reaches it through [`PeerSource`]
+//! and Test connection through [`SshTester`].
 
+use futures::FutureExt as _;
+use futures::channel::oneshot;
+use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use tailnet::{PeerStatus, Status, TailnetError};
 
 use crate::sidebar::UiState;
-use crate::target::{DEFAULT_TAILNET_PORT, HostNameError, SshHostError, Target};
+use crate::target::{DEFAULT_TAILNET_PORT, HostNameError, SshHost, SshHostError, Target};
 
 /// The label of the row that connects to this PC's own daemon.
 const THIS_PC: &str = "This PC";
@@ -117,15 +122,6 @@ impl SavedHost {
     }
 }
 
-/// `name` in the normal form saved hosts are kept in; a name that fails the
-/// DNS-name check is returned as it is, and so matches no saved host.
-fn normalised_name(name: &str) -> String {
-    Target::parse_tailnet(name, None)
-        .ok()
-        .and_then(|target| target.tailnet_host().map(|host| host.name().to_owned()))
-        .unwrap_or_else(|| name.to_owned())
-}
-
 /// Where the picker's peer list comes from: `tailscale status --json` in
 /// the product, a fake in tests.
 pub trait PeerSource: Send + Sync {
@@ -164,6 +160,123 @@ impl PeerSource for SystemPeers {
     }
 }
 
+/// Resolves when a running Test connection is cancelled: its sender sent,
+/// or dropped with the form that held it.
+pub type SshTestCancel = oneshot::Receiver<()>;
+
+/// Where Test connection runs: `ssh` to the host once in the product, a
+/// fake in tests.
+pub trait SshTester: Send + Sync {
+    /// Runs the host's remote command once and resolves to `Ok` when its
+    /// daemon answers `Welcome`, else to the text that says why not. The
+    /// child is killed once `cancel` resolves.
+    fn test(&self, host: SshHost, cancel: SshTestCancel) -> BoxFuture<'static, Result<(), String>>;
+}
+
+/// The system's `ssh`: [`crate::ssh::test_connection`], run on a one-shot
+/// thread with its own current-thread tokio runtime, so neither the UI's
+/// executor nor the network thread waits on it.
+pub struct SystemSsh;
+
+impl SshTester for SystemSsh {
+    fn test(&self, host: SshHost, cancel: SshTestCancel) -> BoxFuture<'static, Result<(), String>> {
+        let (answer_tx, answer_rx) = oneshot::channel();
+        let started = std::thread::Builder::new()
+            .name("ssh-test".to_owned())
+            .spawn(move || {
+                let outcome = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(runtime) => {
+                        runtime.block_on(crate::ssh::test_connection(&host, cancel.map(|_| ())))
+                    }
+                    Err(err) => Err(format!("starting a runtime for the SSH test: {err}")),
+                };
+                if answer_tx.send(outcome).is_err() {
+                    tracing::debug!("the SSH test ended after the picker stopped waiting");
+                }
+            });
+        match started {
+            Ok(_) => async move {
+                answer_rx.await.unwrap_or_else(|_| {
+                    Err("the SSH test thread ended without an answer".to_owned())
+                })
+            }
+            .boxed(),
+            Err(err) => {
+                futures::future::ready(Err(format!("starting the SSH test thread: {err}"))).boxed()
+            }
+        }
+    }
+}
+
+/// What the Add SSH host form's Test connection last did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum SshTest {
+    /// Not run since the form opened or a field changed.
+    #[default]
+    Idle,
+    /// Running: the button reads "Cancel".
+    Testing,
+    /// The host's daemon answered; this is the host's short name.
+    Passed(String),
+    /// It did not; this is why, `ssh`'s own text unchanged.
+    Failed(String),
+}
+
+/// The line Test connection shows while it runs.
+pub const SSH_TESTING: &str = "Testing the connection…";
+
+impl SshTest {
+    /// The state a finished test of `host` leaves.
+    #[must_use]
+    pub fn finished(host: &SshHost, outcome: Result<(), String>) -> Self {
+        match outcome {
+            Ok(()) => Self::Passed(host.short_name().to_owned()),
+            Err(text) => Self::Failed(text),
+        }
+    }
+
+    /// The Test connection button's label: "Cancel" while it runs.
+    #[must_use]
+    pub fn button_label(&self) -> &'static str {
+        if *self == Self::Testing {
+            "Cancel"
+        } else {
+            "Test connection"
+        }
+    }
+
+    /// The line under the form; `None` before a test.
+    #[must_use]
+    pub fn text(&self) -> Option<String> {
+        match self {
+            Self::Idle => None,
+            Self::Testing => Some(SSH_TESTING.to_owned()),
+            Self::Passed(short) => Some(format!("Connected: {short}")),
+            Self::Failed(text) => Some(text.clone()),
+        }
+    }
+}
+
+/// The SSH host the user typed into the Add SSH host form: the host string
+/// exactly as typed, and the remote command, a blank one being none.
+///
+/// # Errors
+///
+/// [`TypedHostError::SshName`] when [`Target::parse_ssh`] refuses the host.
+pub fn typed_ssh_target(host: &str, remote_command: &str) -> Result<Target, TypedHostError> {
+    Target::parse_ssh(host, Some(remote_command)).map_err(TypedHostError::SshName)
+}
+
+/// Whether a switch to `target` waits for a "not approved" to open the
+/// pairing dialog: only a tailnet host pairs.
+#[must_use]
+pub fn pairs_on_switch(target: &Target) -> bool {
+    matches!(target, Target::Tailnet(_))
+}
+
 /// Which kind of choice a row is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowKind {
@@ -179,10 +292,31 @@ pub enum RowKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Row {
     pub kind: RowKind,
-    /// "This PC", else the host's full `MagicDNS` name.
+    /// "This PC", else a tailnet host's full `MagicDNS` name or an SSH
+    /// host's string.
     pub label: String,
-    /// What picking the row connects to.
+    /// What picking the row connects to: its host's kind and name.
     pub target: Target,
+}
+
+impl Row {
+    /// Whether the row is an SSH host.
+    #[must_use]
+    pub fn is_ssh(&self) -> bool {
+        matches!(self.target, Target::Ssh(_))
+    }
+
+    /// The row's key in its selectors: an SSH host's string after `ssh:`,
+    /// so it never shares one with a tailnet host of that name; else its
+    /// label.
+    #[must_use]
+    pub fn key(&self) -> String {
+        if self.is_ssh() {
+            format!("ssh:{}", self.label)
+        } else {
+            self.label.clone()
+        }
+    }
 }
 
 /// Why a typed host was refused: its `Display` is the message the picker
@@ -303,8 +437,9 @@ impl ConnectionPicker {
     }
 
     /// This PC, then the saved hosts in saved order, then the scanned peers
-    /// not already saved, by name. A peer dials [`DEFAULT_TAILNET_PORT`]; a
-    /// saved host of the same name is listed once, with its own port.
+    /// not already saved as tailnet hosts, by name. A peer dials
+    /// [`DEFAULT_TAILNET_PORT`]; a saved tailnet host of the same name is
+    /// listed once, with its own port.
     #[must_use]
     pub fn rows(&self) -> Vec<Row> {
         let mut rows = vec![Row {
@@ -324,7 +459,12 @@ impl ConnectionPicker {
             rows.extend(
                 peers
                     .iter()
-                    .filter(|name| !self.saved.iter().any(|host| &host.name == *name))
+                    .filter(|name| {
+                        !self
+                            .saved
+                            .iter()
+                            .any(|host| host.kind == HostKind::Tailnet && &host.name == *name)
+                    })
                     .map(|name| Row {
                         kind: RowKind::Peer,
                         label: name.clone(),
@@ -341,27 +481,29 @@ impl ConnectionPicker {
         self.scan == Scan::Pending
     }
 
-    /// Saves `host` after the others; a host of its name already saved
-    /// takes its port, in its place.
+    /// Saves `host` after the others; a saved host of its kind and name is
+    /// replaced by it, in its place, so a new port or remote command is
+    /// kept. A host of the other kind and the same name is left alone.
     pub fn remember(&mut self, host: SavedHost) {
-        match self.saved.iter_mut().find(|saved| saved.name == host.name) {
-            Some(saved) => saved.port = host.port,
+        match self
+            .saved
+            .iter_mut()
+            .find(|saved| saved.kind == host.kind && saved.name == host.name)
+        {
+            Some(saved) => *saved = host,
             None => self.saved.push(host),
         }
     }
 
-    /// Forgets the saved host `name`. Returns whether it was `current`, so
-    /// the caller switches to this PC.
-    pub fn forget(&mut self, name: &str, current: &Target) -> bool {
-        let name = normalised_name(name);
-        let name = name.as_str();
+    /// Forgets the saved host `target` dials. Returns whether it was
+    /// `current`, so the caller switches to this PC.
+    /// A tailnet name matches in its normal form, an SSH string as typed; a
+    /// host of the other kind and the same name is left alone.
+    pub fn forget(&mut self, target: &Target, current: &Target) -> bool {
         let before = self.saved.len();
-        self.saved.retain(|host| host.name != name);
+        self.saved.retain(|host| !host.is_for(target));
         let removed = self.saved.len() != before;
-        removed
-            && current
-                .tailnet_host()
-                .is_some_and(|host| host.name() == name)
+        removed && SavedHost::from_target(target).is_some_and(|host| host.is_for(current))
     }
 }
 
@@ -398,10 +540,14 @@ fn is_owner_device(peer: &PeerStatus, me: &PeerStatus) -> bool {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "tests assert preconditions with expect; failure messages aid debugging"
+)]
 mod tests {
     use super::{
-        ConnectionPicker, HostKind, PeerSource, Row, RowKind, SavedHost, resolve_boot_target,
-        typed_target,
+        ConnectionPicker, HostKind, PeerSource, Row, RowKind, SSH_TESTING, SavedHost, SshTest,
+        pairs_on_switch, resolve_boot_target, typed_ssh_target, typed_target,
     };
     use crate::sidebar::UiState;
     use crate::target::Target;
@@ -639,7 +785,10 @@ mod tests {
             saved("b.tail1234.ts.net", 9443),
         ]);
         assert!(
-            !picker.forget("a.tail1234.ts.net", &Target::Local),
+            !picker.forget(
+                &Target::tailnet("a.tail1234.ts.net", Some(8787)),
+                &Target::Local
+            ),
             "a host that is not the current target"
         );
         assert_eq!(picker.saved(), [saved("b.tail1234.ts.net", 9443)]);
@@ -649,14 +798,17 @@ mod tests {
         );
 
         assert!(
-            !picker.forget("c.tail1234.ts.net", &Target::Local),
+            !picker.forget(
+                &Target::tailnet("c.tail1234.ts.net", Some(8787)),
+                &Target::Local
+            ),
             "an unknown host"
         );
         assert_eq!(picker.saved(), [saved("b.tail1234.ts.net", 9443)]);
 
         let current = Target::tailnet("b.tail1234.ts.net", Some(9443));
         assert!(
-            picker.forget("b.tail1234.ts.net", &current),
+            picker.forget(&current, &current),
             "the current host was forgotten"
         );
         assert_eq!(picker.saved(), [] as [SavedHost; 0]);
@@ -667,7 +819,10 @@ mod tests {
         let mut picker = ConnectionPicker::new(vec![saved("box.tail1234.ts.net", 9443)]);
         let current = Target::tailnet("box.tail1234.ts.net", Some(9443));
         assert!(
-            picker.forget("Box.Tail1234.ts.net.", &current),
+            picker.forget(
+                &Target::tailnet("Box.Tail1234.ts.net.", Some(9443)),
+                &current
+            ),
             "the current host was forgotten under another spelling of its name"
         );
         assert_eq!(picker.saved(), [] as [SavedHost; 0]);
@@ -800,5 +955,160 @@ mod tests {
 
         picker.apply_scan(Ok(status(Vec::new())));
         assert_eq!(picker.scan_error(), None, "a scan that works clears it");
+    }
+
+    const BOX: &str = "box.tail1234.ts.net";
+
+    fn ssh_saved(name: &str, remote_command: Option<&str>) -> SavedHost {
+        SavedHost {
+            kind: HostKind::Ssh,
+            name: name.to_owned(),
+            port: 0,
+            remote_command: remote_command.map(str::to_owned),
+        }
+    }
+
+    fn ssh(name: &str) -> Target {
+        Target::parse_ssh(name, None).expect("an SSH host string")
+    }
+
+    fn ssh_row(name: &str) -> Row {
+        Row {
+            kind: RowKind::Saved,
+            label: name.to_owned(),
+            target: ssh(name),
+        }
+    }
+
+    #[test]
+    fn rows_list_a_saved_ssh_host_in_saved_order_keyed_apart() {
+        let picker = ConnectionPicker::new(vec![
+            ssh_saved("me@devbox", None),
+            saved("a.tail1234.ts.net", 8787),
+        ]);
+        let rows = picker.rows();
+        assert_eq!(
+            rows,
+            [
+                this_pc(),
+                ssh_row("me@devbox"),
+                row(RowKind::Saved, "a.tail1234.ts.net", 8787),
+            ]
+        );
+        assert_eq!(
+            rows.iter().map(Row::key).collect::<Vec<_>>(),
+            ["This PC", "ssh:me@devbox", "a.tail1234.ts.net"]
+        );
+    }
+
+    #[test]
+    fn an_ssh_host_does_not_hide_a_tailnet_peer_of_the_same_name() {
+        let mut picker = ConnectionPicker::new(vec![ssh_saved(BOX, None)]);
+        picker.apply_scan(Ok(status(vec![peer(BOX)])));
+        assert_eq!(
+            picker.rows(),
+            [this_pc(), ssh_row(BOX), row(RowKind::Peer, BOX, 8787)]
+        );
+    }
+
+    #[test]
+    fn remember_replaces_the_record_of_the_same_kind_and_name() {
+        let mut picker = ConnectionPicker::new(vec![ssh_saved("devbox", Some("old.cmd"))]);
+        picker.remember(ssh_saved("devbox", Some("new.cmd")));
+        assert_eq!(
+            picker.saved(),
+            [ssh_saved("devbox", Some("new.cmd"))],
+            "a changed remote command is kept"
+        );
+        picker.remember(ssh_saved("devbox", None));
+        assert_eq!(picker.saved(), [ssh_saved("devbox", None)]);
+    }
+
+    #[test]
+    fn remember_keeps_an_ssh_and_a_tailnet_host_of_one_name_apart() {
+        let mut picker = ConnectionPicker::new(vec![saved(BOX, 8787)]);
+        picker.remember(ssh_saved(BOX, None));
+        assert_eq!(picker.saved(), [saved(BOX, 8787), ssh_saved(BOX, None)]);
+        picker.remember(saved(BOX, 9443));
+        assert_eq!(
+            picker.saved(),
+            [saved(BOX, 9443), ssh_saved(BOX, None)],
+            "the tailnet record takes the port; the SSH one is untouched"
+        );
+    }
+
+    #[test]
+    fn forget_an_ssh_host_matches_its_string_as_typed_and_reports_the_current_one() {
+        let mut picker = ConnectionPicker::new(vec![
+            ssh_saved("Me@DevBox", None),
+            ssh_saved("me@devbox", None),
+        ]);
+        assert!(
+            picker.forget(&ssh("Me@DevBox"), &ssh("Me@DevBox")),
+            "the current SSH host was forgotten"
+        );
+        assert_eq!(picker.saved(), [ssh_saved("me@devbox", None)]);
+        assert!(!picker.forget(&ssh("me@devbox"), &Target::Local));
+        assert_eq!(picker.saved(), [] as [SavedHost; 0]);
+    }
+
+    #[test]
+    fn forget_leaves_the_other_kind_of_one_name() {
+        let tailnet = Target::tailnet(BOX, Some(8787));
+        let mut picker = ConnectionPicker::new(vec![saved(BOX, 8787), ssh_saved(BOX, None)]);
+        assert!(
+            !picker.forget(&ssh(BOX), &tailnet),
+            "the tailnet host is current, not the SSH one"
+        );
+        assert_eq!(picker.saved(), [saved(BOX, 8787)]);
+
+        let mut picker = ConnectionPicker::new(vec![saved(BOX, 8787), ssh_saved(BOX, None)]);
+        assert!(!picker.forget(&tailnet, &ssh(BOX)));
+        assert_eq!(picker.saved(), [ssh_saved(BOX, None)]);
+    }
+
+    #[test]
+    fn only_a_switch_to_a_tailnet_host_arms_pairing() {
+        assert!(pairs_on_switch(&Target::tailnet(BOX, Some(8787))));
+        assert!(!pairs_on_switch(&ssh("devbox")));
+        assert!(!pairs_on_switch(&Target::Local));
+    }
+
+    #[test]
+    fn ssh_test_states_say_what_the_form_shows() {
+        let target = ssh("me@devbox:2222");
+        let host = target.ssh_host().expect("an SSH target");
+        assert_eq!(SshTest::Idle.text(), None);
+        assert_eq!(SshTest::Idle.button_label(), "Test connection");
+        assert_eq!(SshTest::Testing.text().as_deref(), Some(SSH_TESTING));
+        assert_eq!(SshTest::Testing.button_label(), "Cancel");
+        let passed = SshTest::finished(host, Ok(()));
+        assert_eq!(passed, SshTest::Passed("devbox".to_owned()));
+        assert_eq!(passed.text().as_deref(), Some("Connected: devbox"));
+        assert_eq!(passed.button_label(), "Test connection");
+        let failed = SshTest::finished(host, Err("Permission denied (publickey).".to_owned()));
+        assert_eq!(
+            failed.text().as_deref(),
+            Some("Permission denied (publickey)."),
+            "ssh's text unchanged"
+        );
+    }
+
+    #[test]
+    fn typed_ssh_target_keeps_the_host_as_typed_and_a_blank_command_as_none() {
+        assert_eq!(typed_ssh_target("Me@Box", "  "), Ok(ssh("Me@Box")));
+        assert_eq!(
+            typed_ssh_target("devbox", "rtd.cmd").ok(),
+            Target::parse_ssh("devbox", Some("rtd.cmd")).ok()
+        );
+        let refusal = |host: &str| typed_ssh_target(host, "").map_err(|err| err.to_string());
+        assert_eq!(
+            refusal(""),
+            Err("Type an SSH host: an alias from your SSH config, or user@host.".to_owned())
+        );
+        assert_eq!(
+            refusal("-oProxyCommand=x"),
+            Err("An SSH host cannot start with a dash.".to_owned())
+        );
     }
 }

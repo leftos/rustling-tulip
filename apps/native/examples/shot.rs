@@ -10,7 +10,10 @@
 //! (the same window with the sidebar's leaves one line each),
 //! `source-control`, `diff`, `settings`, `spawn`, `viewer` (a viewer tab
 //! over a small Rust file, scrolled to a line) and `viewer-md` (a viewer tab
-//! over a Markdown file, rendered). The PNG goes to
+//! over a Markdown file, rendered), `dashboard`, `connections` (the host
+//! picker with a saved tailnet host and a saved SSH host) and
+//! `connections-ssh` (its Add SSH host form, filled in, after a passing Test
+//! connection). The PNG goes to
 //! `.tmp/shots/<view>.png` under the repo root unless `<out.png>` is given;
 //! the window's layout file is kept beside it in `.ui/` and cleared on every
 //! run.
@@ -25,8 +28,10 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use chrono::{DateTime, Utc};
+use daemon_client::device_tokens::{DeviceTokenStore as _, MemoryTokens};
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use futures::channel::oneshot;
+use futures::future::BoxFuture;
 use futures::{FutureExt as _, StreamExt as _};
 use gpui::{
     App, AppContext as _, Application, AsyncApp, Bounds, Keystroke, Window, WindowBounds,
@@ -35,8 +40,10 @@ use gpui::{
 use protocol::{
     AgentCommandEntry, ClientMessage, DaemonMessage, GridNode, SessionSnapshot, SplitDirection,
 };
+use rustling_tulip_native::connection_picker::{PeerSource, SshTestCancel, SshTester};
 use rustling_tulip_native::fonts;
 use rustling_tulip_native::offscreen::show_cloaked;
+use rustling_tulip_native::target::SshHost;
 use rustling_tulip_native::{
     Activity, Assets, Clock, Connection, FileFilter, FilePicker, FolderPicker, HandshakeInfo,
     NATIVE_PROTOCOL_VERSIONS, NetCommand, NetEvent, Notifier, NotifyState, OpenFailure, Opener,
@@ -44,6 +51,7 @@ use rustling_tulip_native::{
     remote_access::Autostart,
 };
 use serde_json::{Value, json};
+use tailnet::{PeerStatus, Status, TailnetError};
 
 /// The window's size in logical pixels, the client's own.
 const WINDOW_SIZE: (u16, u16) = (1000, 640);
@@ -126,10 +134,12 @@ enum View {
     Viewer,
     ViewerMd,
     Dashboard,
+    Connections,
+    ConnectionsSsh,
 }
 
 impl View {
-    const ALL: [Self; 10] = [
+    const ALL: [Self; 12] = [
         Self::Main,
         Self::MainCompact,
         Self::SourceControl,
@@ -140,6 +150,8 @@ impl View {
         Self::Viewer,
         Self::ViewerMd,
         Self::Dashboard,
+        Self::Connections,
+        Self::ConnectionsSsh,
     ];
 
     fn name(self) -> &'static str {
@@ -154,7 +166,16 @@ impl View {
             Self::Viewer => "viewer",
             Self::ViewerMd => "viewer-md",
             Self::Dashboard => "dashboard",
+            Self::Connections => "connections",
+            Self::ConnectionsSsh => "connections-ssh",
         }
+    }
+
+    /// How many rounds of input reach the view, each given [`DRIVE_WAIT`]
+    /// to draw before the next: the SSH form opens from the picker, and its
+    /// Host field takes typing only once drawn.
+    fn steps(self) -> usize {
+        if self == Self::ConnectionsSsh { 3 } else { 1 }
     }
 
     /// The window's size for this view.
@@ -200,6 +221,13 @@ impl View {
                         .iter()
                         .flat_map(|(_, rows)| rows)
                         .any(|row| row.context != "—")
+            }
+            Self::Connections => {
+                root.connection_picker_open() && root.connection_picker_scan_text().is_none()
+            }
+            Self::ConnectionsSsh => {
+                root.connection_picker_ssh_result().as_deref()
+                    == Some(&*format!("Connected: {SHOT_SSH_SHORT}"))
             }
         }
     }
@@ -254,17 +282,21 @@ impl Shot {
             | View::Settings
             | View::SettingsClaude
             | View::Spawn
-            | View::Dashboard => None,
+            | View::Dashboard
+            | View::Connections
+            | View::ConnectionsSsh => None,
         };
         if let Some(text) = sample_text {
             let sample = self.viewer_sample();
             return std::fs::write(&sample, text)
                 .with_context(|| format!("writing {}", sample.display()));
         }
-        if self.view != View::MainCompact {
-            return Ok(());
-        }
-        let layout = serde_json::to_vec_pretty(&compact_ui_state())
+        let state = match self.view {
+            View::MainCompact => compact_ui_state(),
+            View::Connections | View::ConnectionsSsh => connections_ui_state(),
+            _ => return Ok(()),
+        };
+        let layout = serde_json::to_vec_pretty(&state)
             .with_context(|| format!("serializing the layout for {}", saved.display()))?;
         std::fs::write(&saved, layout).with_context(|| format!("writing {}", saved.display()))
     }
@@ -286,6 +318,89 @@ impl Shot {
 /// defaults everywhere else, which is what a missing file loads as.
 fn compact_ui_state() -> Value {
     json!({ "general": { "leaf_density": "compact" } })
+}
+
+/// The tailnet host the `connections` shots have saved and paired.
+const SHOT_TAILNET_HOST: &str = "box.tail1234.ts.net";
+/// The SSH host the `connections` shots have saved.
+const SHOT_SSH_SAVED: &str = "me@buildbox";
+/// The SSH host the `connections-ssh` shot types, and its short name.
+const SHOT_SSH_TYPED: &str = "me@devbox";
+const SHOT_SSH_SHORT: &str = "devbox";
+
+/// The layout the `connections` shots start from: a saved tailnet host
+/// and a saved SSH host.
+fn connections_ui_state() -> Value {
+    json!({ "saved_hosts": [
+        { "name": SHOT_TAILNET_HOST, "port": 8787 },
+        { "kind": "ssh", "name": SHOT_SSH_SAVED },
+    ] })
+}
+
+/// The owner's tailnet as the `connections` shots see it: this PC and one
+/// online laptop.
+struct ShotPeers;
+
+impl PeerSource for ShotPeers {
+    fn status(&self) -> Result<Status, TailnetError> {
+        let node = |name: &str| PeerStatus {
+            dns_name: format!("{name}."),
+            user_id: 1,
+            online: true,
+            ..PeerStatus::default()
+        };
+        Ok(Status {
+            self_node: Some(node("this-pc.tail1234.ts.net")),
+            peer: [("nodekey:0".to_owned(), node("laptop.tail1234.ts.net"))]
+                .into_iter()
+                .collect(),
+        })
+    }
+}
+
+/// A Test connection that every host passes, so the shot runs no `ssh`.
+struct ShotSsh;
+
+impl SshTester for ShotSsh {
+    fn test(
+        &self,
+        _host: SshHost,
+        _cancel: SshTestCancel,
+    ) -> BoxFuture<'static, Result<(), String>> {
+        futures::future::ready(Ok(())).boxed()
+    }
+}
+
+/// Opens the Connections picker over the shot's Tailscale and `ssh`.
+fn open_picker(window: &mut Window, cx: &mut App) -> Result<()> {
+    let root = window
+        .root::<RootView>()
+        .flatten()
+        .context("the window has no root view")?;
+    root.update(cx, |root, cx| {
+        root.set_peer_source(Arc::new(ShotPeers));
+        root.set_ssh_tester(Arc::new(ShotSsh));
+        root.open_connection_picker(window, cx);
+    });
+    Ok(())
+}
+
+/// Step `step` of the `connections-ssh` shot: open the picker; Shift+Tab
+/// twice from This PC's row (past Close) to Add SSH host… and press it; type
+/// the host and press Enter, which runs Test connection.
+fn drive_connections_ssh(step: usize, window: &mut Window, cx: &mut App) -> Result<()> {
+    match step {
+        0 => open_picker(window, cx),
+        1 => ["shift-tab", "shift-tab", "enter"]
+            .into_iter()
+            .try_for_each(|key| press(key, window, cx)),
+        _ => {
+            for c in SHOT_SSH_TYPED.chars() {
+                press(&c.to_string(), window, cx)?;
+            }
+            press("enter", window, cx)
+        }
+    }
 }
 
 /// `.tmp/shots` under the repo root.
@@ -360,8 +475,18 @@ fn deps(
         pick_folder,
         pick_file,
         autostart: Arc::new(NoAutostart),
-        tokens: Arc::new(daemon_client::device_tokens::MemoryTokens::default()),
+        tokens: paired_tokens(),
     }
+}
+
+/// Device tokens holding one for the `connections` shots' saved tailnet
+/// host, so its row reads as paired.
+fn paired_tokens() -> Arc<MemoryTokens> {
+    let tokens = MemoryTokens::default();
+    if let Err(err) = tokens.set(SHOT_TAILNET_HOST, "shot-token") {
+        tracing::warn!("seeding the shot's device token: {err:#}");
+    }
+    Arc::new(tokens)
 }
 
 /// Opens the root view in a cloaked window that is never activated.
@@ -401,10 +526,12 @@ async fn drive_and_capture(
     let view = shot.view;
     let sample = shot.viewer_sample();
     cx.background_executor().timer(LOAD_WAIT).await;
-    cx.update_window(handle.into(), |_, window, cx| {
-        drive(view, address, &sample, window, cx)
-    })??;
-    cx.background_executor().timer(DRIVE_WAIT).await;
+    for step in 0..view.steps() {
+        cx.update_window(handle.into(), |_, window, cx| {
+            drive(view, step, address, &sample, window, cx)
+        })??;
+        cx.background_executor().timer(DRIVE_WAIT).await;
+    }
     let reached = handle.update(cx, |root, _, _| view.reached(root))?;
     if !reached {
         bail!("the input for the {} view did not open it", view.name());
@@ -433,9 +560,10 @@ async fn drive_and_capture(
 /// Sends the input that opens `view`: a keystroke dispatched in the window,
 /// or, where no key opens it, a click posted to the window at `address`;
 /// the `viewer` view opens a viewer tab of `sample` at a line, as a link
-/// does.
+/// does. `step` counts the rounds of [`View::steps`].
 fn drive(
     view: View,
+    step: usize,
     address: usize,
     sample: &Path,
     window: &mut Window,
@@ -491,6 +619,8 @@ fn drive(
             root.update(cx, |root, _| root.open_viewer(&path, None));
             Ok(())
         }
+        View::Connections => open_picker(window, cx),
+        View::ConnectionsSsh => drive_connections_ssh(step, window, cx),
     }
 }
 
