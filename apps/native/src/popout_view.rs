@@ -213,8 +213,9 @@ impl Render for PopoutView {
                     tracing::debug!("a pop-out press after the root view went: {err:#}");
                 }
             })
-            // Only the keys of an overlay this window draws; the app's
-            // shortcuts stay with the main window.
+            // Only the keys of an overlay this window draws and the
+            // Terminal / Chat key; the app's other shortcuts stay with the
+            // main window.
             .capture_key_down(move |event: &KeyDownEvent, window, cx| {
                 if let Err(err) =
                     on_key.update(cx, |root, cx| root.on_popout_key(event, window, cx))
@@ -314,8 +315,9 @@ impl RootView {
     }
 
     /// A key in a pop-out window: the pane-close dialog it draws takes
-    /// every key, and Esc closes a menu it draws. Anything else goes on to
-    /// its terminal.
+    /// every key, Esc closes a menu it draws, and Ctrl+Shift+M switches its
+    /// pane between terminal and chat. Anything else goes on to its
+    /// terminal.
     pub(crate) fn on_popout_key(
         &mut self,
         event: &KeyDownEvent,
@@ -336,6 +338,11 @@ impl RootView {
             && self.overlays.shows(Overlay::ShellMenu, here)
         {
             self.close_shell_menu(window, cx);
+            true
+        } else if crate::keys::is_pane_view_key(ks) {
+            // Swallowed even with nothing to switch: Ctrl+M is Enter to
+            // the terminal.
+            self.toggle_window_pane_view(here, window, cx);
             true
         } else {
             false

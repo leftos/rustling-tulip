@@ -771,6 +771,15 @@ impl RootView {
         self.menu.as_ref().map(|menu| menu.session_id.as_str())
     }
 
+    /// The pane whose header opened the session menu, while it shows its
+    /// actions with no submenu open.
+    pub(crate) fn session_menu_pane(&self) -> Option<&str> {
+        self.actions_menu()
+            .filter(|menu| menu.submenu == Submenu::None)
+            .and_then(|menu| menu.pane.as_ref())
+            .map(|(_, pane_id)| pane_id.as_str())
+    }
+
     /// A pane showing the session whose header Stop waits for its confirm.
     #[must_use]
     pub fn armed_stop_pane(&self) -> Option<&str> {
@@ -857,6 +866,10 @@ impl RootView {
             .offered_rows()
             .into_iter()
             .map(|offered| offered.row.selector().to_owned())
+            .chain(
+                self.pane_view_menu_label()
+                    .map(|_| crate::pane_menu::PANE_VIEW_ROW.to_owned()),
+            )
             .collect();
         [self.menu_rows(), offered, self.appearance_group_rows()]
             .into_iter()
@@ -2327,6 +2340,7 @@ impl RootView {
                 .into_iter()
                 .map(|offered| Self::offered_row(session_id, offered, cx)),
         );
+        rows.extend(self.pane_view_menu_row(cx));
         rows
     }
 

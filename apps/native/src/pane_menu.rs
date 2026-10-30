@@ -1,6 +1,7 @@
 //! The pane actions' state and the empty pane's menu: Move to ▸ (a new tab,
 //! or another grid tab at its balanced drop target) and Close pane. Also the
-//! header's move-to-a-new-tab button and the keys of the pane dialogs.
+//! session pane menu's Show chat / Show terminal row, the header's
+//! move-to-a-new-tab button and the keys of the pane dialogs.
 
 use gpui::{
     AnyElement, ClickEvent, Context, Div, FocusHandle, Keystroke, MouseDownEvent, Pixels, Point,
@@ -17,6 +18,19 @@ use crate::tabs::{collect_panes, pick_balanced_drop_target};
 use crate::ui_theme::theme;
 use crate::undo;
 use crate::{RootView, tooltip};
+
+/// The selector of the session pane menu's row that switches the pane
+/// between its terminal and its chat.
+pub(crate) const PANE_VIEW_ROW: &str = "session-menu-pane-view";
+
+/// The label of the Terminal / Chat row: the view a click switches to.
+fn pane_view_label(chat_shown: bool) -> &'static str {
+    if chat_shown {
+        "Show terminal"
+    } else {
+        "Show chat"
+    }
+}
 
 /// The pane dialogs and the empty pane's menu, while open, and the focus
 /// each takes.
@@ -83,6 +97,36 @@ impl MenuRow {
 }
 
 impl RootView {
+    /// The label of the open session menu's Terminal / Chat row; `None`
+    /// when the menu did not open from a pane header or that pane's session
+    /// offers no chat, the same rule as the header's toggle.
+    #[must_use]
+    pub fn pane_view_menu_label(&self) -> Option<&'static str> {
+        self.pane_view_menu_pane()
+            .map(|pane_id| pane_view_label(self.pane_shows_chat(pane_id)))
+    }
+
+    /// The pane whose header opened the session menu, while it offers the
+    /// Terminal / Chat row.
+    fn pane_view_menu_pane(&self) -> Option<&str> {
+        self.session_menu_pane()
+            .filter(|pane_id| self.pane_offers_chat(pane_id))
+    }
+
+    /// The session menu's Terminal / Chat row, while it offers one: a click
+    /// closes the menu and switches the pane, as its header toggle does.
+    pub(crate) fn pane_view_menu_row(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let pane_id = self.pane_view_menu_pane()?.to_owned();
+        let label = pane_view_label(self.pane_shows_chat(&pane_id));
+        let row = menu_item(PANE_VIEW_ROW, label, false).on_click(cx.listener(
+            move |this, _: &ClickEvent, window, cx| {
+                this.close_session_menu(window, cx);
+                this.toggle_pane_view(&pane_id, window, cx);
+            },
+        ));
+        Some(row.into_any_element())
+    }
+
     /// The empty pane whose menu is open.
     #[must_use]
     pub fn empty_pane_menu(&self) -> Option<&str> {

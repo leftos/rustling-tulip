@@ -1,6 +1,7 @@
 //! A session's chat drawn in a pane: its rows in a scrolling column that
 //! follows the bottom until the owner scrolls up, the Terminal / Chat
-//! toggle's work, the `LoadChat` / `UnloadChat` bookkeeping, and the folds
+//! toggle's work (from the header, the pane menu or Ctrl+Shift+M) with each
+//! session's remembered view, the `LoadChat` / `UnloadChat` bookkeeping, and the folds
 //! of the daemon's chat messages. The rows' model, which panes show a chat
 //! and which chats are loaded live in [`crate::chat`].
 
@@ -11,8 +12,8 @@ use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
 use gpui::{
-    AnyElement, App, ClickEvent, Context, Div, ElementId, ScrollHandle, SharedString, Window, div,
-    prelude::*, px, relative,
+    AnyElement, App, ClickEvent, Context, Div, ElementId, ScrollHandle, SharedString, Window,
+    WindowId, div, prelude::*, px, relative,
 };
 use protocol::error_codes::UNSUPPORTED_MESSAGE;
 use protocol::{
@@ -23,6 +24,7 @@ use crate::chat::{self, ChatLoads, ChatLog, PaneView, PaneViews, PromptStack};
 use crate::fonts::DEFAULT_FAMILY;
 use crate::palette::{CHIP, DANGER, FAINT, LINE_STRONG, SUBTLE, TEXT_2, WAITING, WORKING};
 use crate::scrollbar::Scrollbar;
+use crate::sidebar::LOCAL_HOST_KEY;
 use crate::viewer_md_view::{LinkRoute, MdDoc, Painter, prepare, render_row};
 use crate::{MUTED, RootView, TEXT, UI_TEXT_SIZE, new_request_id};
 
@@ -242,9 +244,11 @@ impl RootView {
     /// takes no keys, so a terminal that had the keyboard of the window
     /// drawing it, the main one or a pop-out, lets go of it; switching back
     /// gives the terminal the keyboard again.
+    /// The view chosen becomes its session's remembered one, saved at once.
     pub fn toggle_pane_view(&mut self, pane_id: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.chat.notes.remove(pane_id);
         let shown = self.chat.views.toggle(pane_id);
+        self.remember_pane_view(pane_id, shown);
         self.sync_chat_loads();
         self.update_pane_roles(cx);
         match shown {
@@ -252,6 +256,76 @@ impl RootView {
             PaneView::Terminal => self.focus_pane_where_drawn(pane_id, window, cx),
         }
         cx.notify();
+    }
+
+    /// Ctrl+Shift+M in the main window: switches the active tab's focused
+    /// pane between its terminal and its chat, when its session offers one.
+    pub(crate) fn toggle_focused_pane_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(pane_id) = self.focused_pane() else {
+            return;
+        };
+        if self.pane_offers_chat(&pane_id) {
+            self.toggle_pane_view(&pane_id, window, cx);
+        }
+    }
+
+    /// Ctrl+Shift+M in pop-out window `here`: switches the pane it draws (a
+    /// popped tab's focused pane) when its session offers a chat.
+    pub(crate) fn toggle_window_pane_view(
+        &mut self,
+        here: WindowId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pane_id) = self.window_pane(here) else {
+            return;
+        };
+        if self.pane_offers_chat(&pane_id) {
+            self.toggle_pane_view(&pane_id, window, cx);
+        }
+    }
+
+    /// The key `session_views` files the connected host's sessions under:
+    /// [`LOCAL_HOST_KEY`] for this PC, else the host's session-count key.
+    pub(crate) fn view_host(&self) -> String {
+        self.conn
+            .target()
+            .session_count_key()
+            .unwrap_or_else(|| LOCAL_HOST_KEY.to_owned())
+    }
+
+    /// Whether the session pane `pane_id` shows offers its chat, which is
+    /// when the pane offers the Terminal / Chat switch.
+    pub(crate) fn pane_offers_chat(&self, pane_id: &str) -> bool {
+        self.panes
+            .get(pane_id)
+            .and_then(|slot| slot.session())
+            .and_then(|id| self.sidebar.session(id))
+            .is_some_and(offers_chat)
+    }
+
+    /// Keeps `view` as the last view of the session pane `pane_id` shows,
+    /// and saves the layout when that changed it.
+    fn remember_pane_view(&mut self, pane_id: &str, view: PaneView) {
+        let host = self.view_host();
+        let Some(session_id) = self.panes.get(pane_id).and_then(|slot| slot.session()) else {
+            return;
+        };
+        if self.sidebar.remember_session_view(&host, session_id, view) {
+            self.save_ui();
+        }
+    }
+
+    /// Pane `pane_id` newly shows session `session_id`, or nothing: it opens
+    /// in the view that session was last switched to, with no scroll or
+    /// note of what it showed before.
+    pub(crate) fn open_pane_view(&mut self, pane_id: &str, session_id: Option<&str>) {
+        let host = self.view_host();
+        let view = session_id.map_or(PaneView::Terminal, |id| {
+            self.sidebar.session_view(&host, id)
+        });
+        self.chat.forget_pane(pane_id);
+        self.chat.views.set(pane_id, view);
     }
 
     /// Takes the keyboard from pane `pane_id`'s terminal in the window that
@@ -395,6 +469,13 @@ impl RootView {
         };
         let note = if code == Some(UNSUPPORTED_MESSAGE) {
             tracing::info!(%session_id, "the daemon offers no chat for this session; its chat panes show the terminal");
+            let host = self.view_host();
+            if self
+                .sidebar
+                .remember_session_view(&host, &session_id, PaneView::Terminal)
+            {
+                self.save_ui();
+            }
             UNSUPPORTED_NOTE.to_owned()
         } else {
             tracing::warn!(%session_id, ?code, message, "the daemon could not load this session's chat; its chat panes show the terminal");

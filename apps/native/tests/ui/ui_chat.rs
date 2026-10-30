@@ -2,7 +2,10 @@
 //! from the daemon and draws it in place of the terminal; the daemon's
 //! appends, live answers and unasked resets update it; the last chat pane
 //! going unloads it; a reconnect loads it again; and a session whose agent
-//! offers no chat snaps back to its terminal with a note.
+//! offers no chat snaps back to its terminal with a note. The pane menu and
+//! Ctrl+Shift+M switch the view too; each session's last view is saved in
+//! `native-ui.json` and a new pane on it opens there, a new session on its
+//! terminal, and a pop-out keeps its view.
 
 use crate::support;
 
@@ -433,6 +436,185 @@ fn a_popped_out_chat_pane_gives_its_hidden_terminal_no_keys(cx: &mut TestAppCont
         h.root(|root, _| root.spawn_dialog_open()),
         "Ctrl+N outside the terminals opens the spawn dialog"
     );
+}
+
+/// The pane menu's Terminal / Chat row.
+const MENU_ROW: &str = "session-menu-pane-view";
+
+/// The label of `p1`'s menu row after a right-click on its header.
+fn menu_label(h: &mut Harness<'_>) -> Option<String> {
+    h.right_click_on("pane-header-p1");
+    h.root(|root, _| root.pane_view_menu_label().map(str::to_owned))
+}
+
+/// `native-ui.json` in the spec's ui dir, as it stands on disk.
+fn saved_views(dir: &TestDir) -> serde_json::Value {
+    let text = std::fs::read_to_string(dir.path().join("native-ui.json")).expect("a saved layout");
+    let file: serde_json::Value = serde_json::from_str(&text).expect("native-ui.json is JSON");
+    file["session_views"].clone()
+}
+
+/// A split of `p1` showing `s1` beside `p2` showing `second`.
+fn split_with(second: &str) -> GridNode {
+    GridNode::Split {
+        direction: SplitDirection::Horizontal,
+        ratio: 0.5,
+        first: Box::new(pane("p1", Some("s1"))),
+        second: Box::new(pane("p2", Some(second))),
+    }
+}
+
+#[gpui::test]
+fn the_pane_menu_switches_the_view(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir);
+    assert_eq!(menu_label(&mut h).as_deref(), Some("Show chat"));
+    h.click_on(MENU_ROW);
+    assert!(load_request(&h.sent()).is_some(), "the row sends LoadChat");
+    assert!(shows_chat(&mut h));
+    assert!(
+        h.root(|root, _| root.session_menu().is_none()),
+        "the menu closes"
+    );
+    assert_eq!(menu_label(&mut h).as_deref(), Some("Show terminal"));
+    h.click_on(MENU_ROW);
+    assert_eq!(unloads(&h.sent()), 1, "the row sends UnloadChat");
+    assert!(!shows_chat(&mut h));
+}
+
+#[gpui::test]
+fn the_pane_menu_offers_no_view_for_a_plain_shell(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(
+        cx,
+        &dir,
+        &Fixture::single(session("s1").shell("D:/src").build()),
+    );
+    h.answer_scrollback("s1", b"");
+    assert_eq!(menu_label(&mut h), None);
+}
+
+#[gpui::test]
+fn the_key_switches_the_focused_pane(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir);
+    h.keys("ctrl-shift-m");
+    assert!(load_request(&h.sent()).is_some(), "the key sends LoadChat");
+    assert!(shows_chat(&mut h));
+    h.keys("ctrl-shift-m");
+    assert_eq!(unloads(&h.sent()), 1, "the key sends UnloadChat");
+    assert!(!shows_chat(&mut h));
+    assert!(h.sent_input("s1").is_empty(), "the terminal never saw it");
+}
+
+#[gpui::test]
+fn a_new_pane_on_the_session_opens_in_its_remembered_view(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir);
+    h.click_on(TOGGLE);
+    h.sent();
+    h.send(DaemonMessage::Tabs {
+        tabs: vec![tab("t1", &split_with("s1"))],
+    });
+    assert!(
+        h.root(|root, _| root.pane_shows_chat("p2")),
+        "p2 opens on the chat"
+    );
+    h.click_on(TOGGLE);
+    h.send(DaemonMessage::Tabs {
+        tabs: vec![tab("t1", &pane("p1", Some("s1")))],
+    });
+    h.send(DaemonMessage::Tabs {
+        tabs: vec![tab("t1", &split_with("s1"))],
+    });
+    assert!(
+        !h.root(|root, _| root.pane_shows_chat("p2")),
+        "the last view chosen was the terminal"
+    );
+}
+
+#[gpui::test]
+fn a_new_session_opens_on_its_terminal(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir);
+    h.click_on(TOGGLE);
+    h.sent();
+    h.send(DaemonMessage::Sessions {
+        sessions: vec![session("s1").build(), session("s2").build()],
+    });
+    h.send(DaemonMessage::Tabs {
+        tabs: vec![tab("t1", &split_with("s2"))],
+    });
+    assert!(shows_chat(&mut h), "p1 keeps its chat");
+    assert!(!h.root(|root, _| root.pane_shows_chat("p2")));
+    let sent = h.sent();
+    assert!(
+        !sent.iter().any(|msg| matches!(
+            msg,
+            ClientMessage::LoadChat { session_id, .. } if session_id == "s2"
+        )),
+        "nothing asks for the new session's chat: {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn a_popped_out_pane_keeps_its_view(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached_in_a_repo(cx, &dir);
+    h.click_on(TOGGLE);
+    h.sent();
+    pop_out_p1(&mut h);
+    assert!(shows_chat(&mut h), "the popped pane still shows its chat");
+    let sent = h.sent();
+    assert_eq!(unloads(&sent), 0, "nothing unloads: {sent:?}");
+    assert_eq!(load_request(&sent), None, "nor loads again");
+}
+
+#[gpui::test]
+fn the_remembered_view_is_saved_with_only_live_sessions(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    std::fs::write(
+        dir.path().join("native-ui.json"),
+        r#"{ "session_views": {
+            "local": { "s1": "chat", "gone": "chat" },
+            "ssh:dev": { "gone": "chat" }
+        } }"#,
+    )
+    .expect("seed native-ui.json");
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
+    assert!(
+        shows_chat(&mut h),
+        "a restarted client opens s1 on its chat"
+    );
+    assert!(load_request(&h.sent()).is_some(), "and asks for it");
+    let other_host = serde_json::json!({ "gone": "chat" });
+    h.click_on(TOGGLE);
+    assert_eq!(
+        saved_views(&dir),
+        serde_json::json!({ "ssh:dev": other_host }),
+        "this PC's ended session goes, another host's stays"
+    );
+    h.click_on(TOGGLE);
+    assert_eq!(
+        saved_views(&dir),
+        serde_json::json!({ "local": { "s1": "chat" }, "ssh:dev": other_host })
+    );
+}
+
+#[gpui::test]
+fn the_key_in_a_pop_out_switches_its_pane_and_never_reaches_the_terminal(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached_in_a_repo(cx, &dir);
+    pop_out_p1(&mut h);
+    assert!(
+        focused_in_popout(&mut h),
+        "the popped terminal has the keys"
+    );
+    h.popout_window().simulate_keystrokes("ctrl-shift-m");
+    h.cx.run_until_parked();
+    assert!(shows_chat(&mut h), "the popped pane shows its chat");
+    assert!(load_request(&h.sent()).is_some(), "the key sends LoadChat");
+    assert!(h.sent_input("s1").is_empty(), "the terminal never saw it");
 }
 
 #[gpui::test]

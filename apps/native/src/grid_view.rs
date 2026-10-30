@@ -281,17 +281,19 @@ impl RootView {
             slot.tab_id = binding.tab_id;
             let unbound_from = slot.unbound_from.take();
             if slot.session != binding.session_id {
-                // A pane that shows another session now starts on its
-                // terminal; one a new connection unbound keeps its view
-                // when it is bound to the same session again.
+                // A pane that newly shows a session opens in that session's
+                // remembered view; one a new connection unbound keeps its
+                // view when it is bound to the same session again.
                 let before = slot.session.as_ref().or(unbound_from.as_ref());
-                if before.is_some_and(|old| binding.session_id.as_ref() != Some(old)) {
-                    self.chat.forget_pane(&binding.pane_id);
-                }
+                let rebound = before.is_some() && before == binding.session_id.as_ref();
                 slot.view.update(cx, |pane, _| pane.release());
                 slot.attached = false;
                 slot.session = binding.session_id;
                 shown.extend(slot.session.clone());
+                if !rebound {
+                    let session_id = slot.session.clone();
+                    self.open_pane_view(&binding.pane_id, session_id.as_deref());
+                }
             }
         }
         shown
@@ -804,12 +806,15 @@ impl RootView {
         let mut slot = self.new_slot(&slot_id, window, cx);
         slot.session = Some(session_id.to_owned());
         self.panes.insert(slot_id.clone(), slot);
+        self.open_pane_view(&slot_id, Some(session_id));
         self.apply_fonts_where(
             |slot| slot.session.as_deref() == Some(session_id),
             false,
             cx,
         );
         self.sync_session(session_id, cx);
+        self.sync_chat_loads();
+        self.update_pane_roles(cx);
     }
 
     /// Moves session `old`'s pop-out terminal to its restart `new`: the same
@@ -857,6 +862,23 @@ impl RootView {
                 session_id: session_id.to_owned(),
             });
         }
+    }
+
+    /// The pane pop-out window `here` draws: its popped pane or session, or
+    /// for a popped tab the tab's focused pane, else its first by id.
+    pub(crate) fn window_pane(&self, here: WindowId) -> Option<String> {
+        let mut drawn: Vec<(&String, &PaneSlot)> = self
+            .panes
+            .iter()
+            .filter(|(pane_id, _)| self.slot_window(pane_id) == Some(here))
+            .collect();
+        drawn.sort_by(|a, b| a.0.cmp(b.0));
+        let focused = drawn.iter().find(|(pane_id, slot)| {
+            self.tabs.focused_pane(&slot.tab_id).as_deref() == Some(pane_id.as_str())
+        });
+        focused
+            .or(drawn.first())
+            .map(|(pane_id, _)| (*pane_id).clone())
     }
 
     /// The terminals showing `session_id`, or every terminal.

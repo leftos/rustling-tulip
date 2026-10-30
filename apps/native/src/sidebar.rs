@@ -15,6 +15,7 @@ use std::sync::LazyLock;
 
 use crate::agent_options::{AgentOptions, descriptor_for};
 use crate::appearance::{self, AppColors, AppLevel, Resolved, ThemeBase};
+use crate::chat::PaneView;
 use crate::connection_picker::SavedHost;
 use crate::fonts::{self, FontSettings};
 use crate::launch_last;
@@ -495,6 +496,152 @@ pub struct UiState {
     /// connect whose first list differs offers the import.
     #[serde(default)]
     pub host_session_counts: BTreeMap<String, u32>,
+    /// The view each session was last switched to, by host and session id;
+    /// a new pane showing the session opens in it.
+    #[serde(default)]
+    pub session_views: SessionViews,
+}
+
+/// What a session's entry under `session_views` holds when its last view
+/// was its chat.
+const CHAT_VIEW: &str = "chat";
+
+/// The host key `session_views` files this PC's daemon under; a remote host
+/// uses [`crate::target::Target::session_count_key`].
+pub const LOCAL_HOST_KEY: &str = "local";
+
+/// The view each session was last switched to, saved under `session_views`
+/// as `{"<host key>": {"<session id>": "chat"}}`, so each host's sessions
+/// are kept apart. Only a chat is written: a session not named shows its
+/// terminal, and a host with none is not written.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionViews {
+    hosts: BTreeMap<String, BTreeSet<String>>,
+}
+
+impl SessionViews {
+    /// The view session `session_id` of host `host` was last switched to.
+    #[must_use]
+    pub fn get(&self, host: &str, session_id: &str) -> PaneView {
+        if self
+            .hosts
+            .get(host)
+            .is_some_and(|chat| chat.contains(session_id))
+        {
+            PaneView::Chat
+        } else {
+            PaneView::Terminal
+        }
+    }
+
+    /// Remembers `view` as session `session_id`'s of host `host`; returns
+    /// whether that changed what is remembered.
+    pub fn remember(&mut self, host: &str, session_id: &str, view: PaneView) -> bool {
+        match view {
+            PaneView::Chat => self
+                .hosts
+                .entry(host.to_owned())
+                .or_default()
+                .insert(session_id.to_owned()),
+            PaneView::Terminal => {
+                let Some(chat) = self.hosts.get_mut(host) else {
+                    return false;
+                };
+                let removed = chat.remove(session_id);
+                if chat.is_empty() {
+                    self.hosts.remove(host);
+                }
+                removed
+            }
+        }
+    }
+
+    /// Forgets every session of host `host` that `keep` refuses, leaving
+    /// the other hosts alone; returns whether one went.
+    pub fn retain(&mut self, host: &str, mut keep: impl FnMut(&str) -> bool) -> bool {
+        let Some(chat) = self.hosts.get_mut(host) else {
+            return false;
+        };
+        let before = chat.len();
+        chat.retain(|session_id| keep(session_id));
+        let changed = chat.len() != before;
+        if chat.is_empty() {
+            self.hosts.remove(host);
+        }
+        changed
+    }
+}
+
+/// One host's chat sessions as written: `{"<session id>": "chat"}`.
+struct HostViews<'a>(&'a BTreeSet<String>);
+
+impl Serialize for HostViews<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_map(self.0.iter().map(|session_id| (session_id, CHAT_VIEW)))
+    }
+}
+
+impl Serialize for SessionViews {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_map(
+            self.hosts
+                .iter()
+                .map(|(host, chat)| (host, HostViews(chat))),
+        )
+    }
+}
+
+/// Reads `session_views`, never failing the file: a value that is not a map
+/// remembers nothing, a host whose value is not a map is dropped, and an
+/// entry whose view is not `"chat"` is dropped, each with a warning.
+impl<'de> Deserialize<'de> for SessionViews {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let entries = match serde_json::Value::deserialize(deserializer)? {
+            serde_json::Value::Null => return Ok(Self::default()),
+            serde_json::Value::Object(entries) => entries,
+            other => {
+                tracing::warn!(
+                    "saved session views are {}, not a map; every session opens on its terminal",
+                    json_type(&other)
+                );
+                return Ok(Self::default());
+            }
+        };
+        let hosts = entries
+            .into_iter()
+            .filter_map(|(host, views)| {
+                let chat = decode_host_views(&host, views)?;
+                (!chat.is_empty()).then_some((host, chat))
+            })
+            .collect();
+        Ok(Self { hosts })
+    }
+}
+
+/// The chat sessions saved for host `host`; `None`, with a warning, when
+/// its value is not a map.
+fn decode_host_views(host: &str, views: serde_json::Value) -> Option<BTreeSet<String>> {
+    let serde_json::Value::Object(entries) = views else {
+        tracing::warn!(
+            "saved session views of host {host} are {}, not a map; dropped",
+            json_type(&views)
+        );
+        return None;
+    };
+    Some(
+        entries
+            .into_iter()
+            .filter_map(|(session_id, view)| {
+                if view.as_str() == Some(CHAT_VIEW) {
+                    return Some(session_id);
+                }
+                tracing::warn!(
+                    "saved view {view} of session {session_id} on host {host} is not a chat; dropped"
+                );
+                None
+            })
+            .collect(),
+    )
 }
 
 /// Reads `ui_text_size`, never failing the file: a whole number clamps to
@@ -810,6 +957,7 @@ impl Default for UiState {
             last_target: None,
             saved_hosts: Vec::new(),
             host_session_counts: BTreeMap::new(),
+            session_views: SessionViews::default(),
         }
     }
 }
@@ -1408,6 +1556,28 @@ impl SidebarModel {
         }
         self.ui.window = Some(state);
         true
+    }
+
+    /// The view session `session_id` of host `host` was last switched to.
+    #[must_use]
+    pub fn session_view(&self, host: &str, session_id: &str) -> PaneView {
+        self.ui.session_views.get(host, session_id)
+    }
+
+    /// Remembers `view` as session `session_id`'s last on host `host`;
+    /// returns whether that changed what is saved.
+    pub fn remember_session_view(&mut self, host: &str, session_id: &str, view: PaneView) -> bool {
+        self.ui.session_views.remember(host, session_id, view)
+    }
+
+    /// Forgets the view of every session of host `host`, the one whose
+    /// list this is, that the list no longer holds; another host's views
+    /// stay. Returns whether one went.
+    pub fn drop_ended_session_views(&mut self, host: &str) -> bool {
+        let live: HashSet<String> = self.sessions.iter().map(|s| s.id.clone()).collect();
+        self.ui
+            .session_views
+            .retain(host, |session_id| live.contains(session_id))
     }
 
     /// Hands over the saved pop-outs, leaving none saved.
@@ -4093,6 +4263,9 @@ pub(crate) mod tests {
             last_target: None,
             saved_hosts: Vec::new(),
             host_session_counts: BTreeMap::new(),
+            session_views: SessionViews {
+                hosts: BTreeMap::from([("local".to_owned(), BTreeSet::from(["s1".to_owned()]))]),
+            },
         };
         save_ui_state(&dir.0, &state).expect("first save");
         save_ui_state(&dir.0, &state).expect("save over the existing file");
@@ -4141,6 +4314,113 @@ pub(crate) mod tests {
             file["popouts"][1],
             json!({ "key": { "kind": "pane", "tab_id": "t1", "pane_id": "p1" }, "window": null })
         );
+    }
+
+    #[test]
+    fn session_views_without_the_key_or_with_a_malformed_one_load_empty() {
+        let older: UiState = serde_json::from_value(json!({ "sidebar_collapsed": true }))
+            .expect("a file from before views were remembered");
+        assert_eq!(older.session_views, SessionViews::default());
+        let dir = TestDir::new("bad-session-views");
+        for views in [json!(null), json!(5), json!("s1"), json!(["s1"])] {
+            let file = json!({ "sidebar_collapsed": true, "session_views": views });
+            std::fs::write(dir.0.join(UI_FILE), file.to_string()).expect("write");
+            let loaded = load_ui_state(&dir.0);
+            assert!(
+                loaded.sidebar_collapsed,
+                "{views}: the rest of the file loads"
+            );
+            assert_eq!(
+                loaded.session_views,
+                SessionViews::default(),
+                "{views}: no view is remembered"
+            );
+        }
+    }
+
+    #[test]
+    fn session_views_keep_only_chat_entries_of_well_formed_hosts() {
+        let loaded: UiState = serde_json::from_value(json!({
+            "session_views": {
+                "local": { "s1": "chat", "s2": "terminal", "s3": "summary", "s4": 7 },
+                "box.tail.ts.net": { "s9": "chat" },
+                "ssh:dev": "chat",
+                "ssh:old": ["s1"],
+            },
+        }))
+        .expect("a layout");
+        let views = &loaded.session_views;
+        assert_eq!(views.get("local", "s1"), PaneView::Chat);
+        for other in ["s2", "s3", "s4", "s5", "s9"] {
+            assert_eq!(views.get("local", other), PaneView::Terminal, "{other}");
+        }
+        assert_eq!(views.get("box.tail.ts.net", "s9"), PaneView::Chat);
+        assert_eq!(views.get("box.tail.ts.net", "s1"), PaneView::Terminal);
+        assert_eq!(
+            serde_json::to_value(views).expect("serialize"),
+            json!({ "box.tail.ts.net": { "s9": "chat" }, "local": { "s1": "chat" } })
+        );
+    }
+
+    #[test]
+    fn a_remembered_view_round_trips_through_the_file() {
+        let dir = TestDir::new("session-views");
+        let mut model = model_with(vec![session("s1"), session("s2")]);
+        assert!(model.remember_session_view("local", "s1", PaneView::Chat));
+        assert!(
+            !model.remember_session_view("local", "s1", PaneView::Chat),
+            "no change"
+        );
+        assert!(model.remember_session_view("local", "s2", PaneView::Chat));
+        assert!(model.remember_session_view("local", "s2", PaneView::Terminal));
+        save_ui_state(&dir.0, model.ui_state()).expect("save");
+        let loaded = load_ui_state(&dir.0);
+        assert_eq!(loaded.session_views.get("local", "s1"), PaneView::Chat);
+        assert_eq!(loaded.session_views.get("local", "s2"), PaneView::Terminal);
+    }
+
+    #[test]
+    fn dropping_ended_sessions_forgets_only_the_current_hosts() {
+        let mut model = model_with(vec![session("s1")]);
+        model.remember_session_view("local", "s1", PaneView::Chat);
+        model.remember_session_view("local", "gone", PaneView::Chat);
+        model.remember_session_view("ssh:dev", "gone", PaneView::Chat);
+        assert!(model.drop_ended_session_views("local"));
+        assert!(
+            !model.drop_ended_session_views("local"),
+            "nothing more to drop"
+        );
+        assert_eq!(model.session_view("local", "s1"), PaneView::Chat);
+        assert_eq!(model.session_view("local", "gone"), PaneView::Terminal);
+        assert_eq!(
+            model.session_view("ssh:dev", "gone"),
+            PaneView::Chat,
+            "another host's sessions are not judged by this host's list"
+        );
+        assert_eq!(
+            serde_json::to_value(&model.ui_state().session_views).expect("serialize"),
+            json!({ "local": { "s1": "chat" }, "ssh:dev": { "gone": "chat" } })
+        );
+    }
+
+    #[test]
+    fn a_hosts_views_survive_a_switch_to_another_host_and_a_save_there() {
+        let dir = TestDir::new("session-views-hosts");
+        let mut model = model_with(vec![session("a1")]);
+        model.remember_session_view("local", "a1", PaneView::Chat);
+        model.apply(&DaemonMessage::Sessions {
+            sessions: vec![session("b1")],
+        });
+        model.remember_session_view("ssh:dev", "b1", PaneView::Chat);
+        model.drop_ended_session_views("ssh:dev");
+        save_ui_state(&dir.0, model.ui_state()).expect("save on host B");
+        let mut back = SidebarModel::new(load_ui_state(&dir.0));
+        back.apply(&DaemonMessage::Sessions {
+            sessions: vec![session("a1")],
+        });
+        back.drop_ended_session_views("local");
+        assert_eq!(back.session_view("local", "a1"), PaneView::Chat);
+        assert_eq!(back.session_view("ssh:dev", "b1"), PaneView::Chat);
     }
 
     #[test]

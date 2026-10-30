@@ -223,6 +223,8 @@ Both sides resolve the config dir via the `directories` crate as `ProjectDirs::f
 
   Each entry has a `kind`, `"tailnet"` when missing: a tailnet entry is `{name, port}` (written without `kind`; one that fails the DNS-name check is dropped on load), an SSH entry is `{"kind": "ssh", "name": "<host string>", "remote_command": "<optional>"}` with no port. An unknown kind, or an SSH host string that fails its check, is dropped on load. The picker's SSH add form (`Add and connect`) writes an SSH entry (with no port), re-adding a name replaces the whole record, and Forget removes it.
 
+  Its `session_views` map holds each session's remembered chat view per host: `{"<host key>": {"<session id>": "chat"}}`, the host key `"local"` for this PC, else the key `host_session_counts` uses; only chat entries are written, a host with none is left out, and a save prunes only the connected host's ended sessions, once its session list has arrived (a missing or malformed value loads as empty, with a warning for a wrong type).
+
   Its `unc_hosts` list (network hosts terminal links may open) is edited by hand; the client re-reads it on each click and never writes it. The native client's bundled OFL fonts live in `apps/native/assets/fonts/` (sources and versions in its README), and the large-file hook exempts them. The attribution for the built-in themes' source colour schemes is `apps/native/assets/themes/NOTICE.md`.
 
 When debugging spawn/connect/shutdown issues, both `daemon.log` and the client's log (`native.log`) together tell the full story — neither alone is enough.

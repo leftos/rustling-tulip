@@ -2546,6 +2546,11 @@ impl RootView {
         let Some(dir) = &self.ui_dir else {
             return;
         };
+        // Before the session list arrives every session looks ended.
+        if self.sessions_loaded {
+            let host = self.view_host();
+            self.sidebar.drop_ended_session_views(&host);
+        }
         match save_ui_state(dir, self.sidebar.ui_state()) {
             Ok(()) => self.sidebar.popouts_written(),
             Err(err) => tracing::warn!("saving the sidebar layout: {err:#}"),
@@ -4337,6 +4342,8 @@ impl RootView {
             self.toggle_sidebar(window, cx);
         } else if ctrl_only && ks.key == "," {
             self.open_settings(window, cx);
+        } else if keys::is_pane_view_key(ks) {
+            self.toggle_focused_pane_view(window, cx);
         } else if self.is_spawn_shortcut(ks, window, cx) {
             self.open_spawn_dialog(crate::spawn_view::SpawnEntry::Toolbar, window, cx);
         } else {

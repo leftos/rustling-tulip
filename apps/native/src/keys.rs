@@ -1,6 +1,15 @@
-//! Keystroke → bytes the PTY expects (xterm conventions).
+//! Keystroke → bytes the PTY expects (xterm conventions), and the app key
+//! that switches the focused pane between its terminal and its chat.
 
 use gpui::Keystroke;
+
+/// Whether `ks` is Ctrl+Shift+M, which switches the focused pane between
+/// its terminal and its chat. It is taken before the terminal sees it, so
+/// it never reaches the PTY as the Enter that Ctrl+M sends.
+pub fn is_pane_view_key(ks: &Keystroke) -> bool {
+    let m = ks.modifiers;
+    m.control && m.shift && !m.alt && !m.platform && ks.key.eq_ignore_ascii_case("m")
+}
 
 /// Keys that send a fixed sequence regardless of terminal mode.
 const FIXED_KEYS: &[(&str, &[u8])] = &[
