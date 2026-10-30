@@ -286,5 +286,5 @@ Where to start for common changes, in the order a change usually flows through t
 
 - Sub-agent / Task-tool interception or isolation (viewing a subagent's transcript read-only is planned).
 - Auto-discovery of repos: the registry is manual.
-- Attach from outside the tailnet by internet exposure, SSH tunnelling or a relay. The tailnet listener is the one way in from another machine ([plans/remote-access.md](./plans/remote-access.md)).
+- Attach from outside the tailnet by internet exposure or a relay. The tailnet listener is the one way in from another machine today ([plans/remote-access.md](./plans/remote-access.md)); clients over OpenSSH are planned (RT-530, [plans/ssh-remote.md](./plans/ssh-remote.md)).
 - Cloud sync of the registry or sessions.
