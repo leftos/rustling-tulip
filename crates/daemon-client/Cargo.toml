@@ -46,3 +46,13 @@ windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_System_Threading",
 ] }
+
+[target.'cfg(windows)'.dev-dependencies]
+# Job objects for the supervisor tests that prove a spawned daemon breaks away
+# from its caller's job; `CreateJobObjectW` needs `Win32_Security`.
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
