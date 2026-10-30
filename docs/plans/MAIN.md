@@ -9,12 +9,7 @@
 
 ## Wave 2 — Daily driver: close the port's gaps
 
-- [ ] RT-465 Daemon robustness and ideas from the herdr read · release vNext
-  - [ ] RT-470 Add error codes and a status sequence number to the wire · release vNext
-  - [ ] RT-478 Derive the background flag from the screen as well as from hooks · release vNext
-  - [ ] RT-545 Pass the WMI daemon launch's environment as Unicode · release vNext
 - [ ] RT-526 Show a scrollbar on every scrolling area of the native client
-- [ ] RT-238 Route a ListPresets failure by request_id · release vNext
 - [ ] RT-544 Take the bind and cert files off the tailnet listener's paused-clock schedule tests
 
 ## Wave 2b — Hook status
@@ -55,7 +50,7 @@
 - [ ] RT-100 Open an unchanged fetched file from the local cache
 - [ ] RT-101 Paste an image or drop a file into a remote session
 - [ ] RT-102 Resume a remote connection without replaying scrollback
-- [ ] RT-536 Host SSH remote sessions on Linux and macOS machines · release vNext
+- [ ] RT-536 Host SSH remote sessions on Linux and macOS machines · release vNext+1
 - [ ] RT-539 Start a daemon for an SSH login through an S4U task so it can use Credential Manager
 - [ ] RT-540 Make a one-shot ssh bridge call return after it starts the host's daemon
 
@@ -75,17 +70,16 @@
     - [ ] RT-522 Write summary lines with the summarizer (CV.20) · release vNext
     - [ ] RT-523 Draw the summary view (CV.21) · release vNext
     - [ ] RT-524 Document the strip and the summary view, and retire the design file (CV.22) · release vNext
-  - [ ] RT-508 Carry MessageDisplay lines to the daemon (CV.6) · release vNext
-  - [ ] RT-509 Serve a session's chat from the transcript and the screen (CV.7) · release vNext
   - [ ] RT-510 Type chat messages into the PTY (CV.8) · release vNext
   - [ ] RT-511 Answer prompts by typing their recipes (CV.9) · release vNext
-  - [ ] RT-513 Draw a session's chat in a pane (CV.11) · release vNext
   - [ ] RT-514 Answer prompts and send messages from the chat (CV.12) · release vNext
-  - [ ] RT-515 Remember each session's view and reach it from the keyboard (CV.13) · release vNext
   - [ ] RT-516 Prove the mirror end to end (CV.14) · release vNext
   - [ ] RT-517 Document the mirror (CV.15) · release vNext
   - [ ] RT-525 Answer the terminal-only dialogs from the chat: previews, Rewind, /model, /btw
   - [ ] RT-527 Merge feat/chat-mirror to main (#203)
+  - [ ] RT-549 Check an older Claude Code still runs the status hooks beside MessageDisplay
+  - [ ] RT-552 Return the terminal to the main conversation for a Heads up (CV.24) · release vNext
+  - [ ] RT-555 Let Ctrl+Shift+M switch a popped-out chat pane back to its terminal
 - [ ] RT-106 PW.12: Phone files: viewer with Share and Save, worktree tree, send photos and files into a session
 - [ ] RT-110 Chat composer: slash commands, @ file mentions, image attach, quick replies
 - [ ] RT-108 PW.9: Phone terminal: xterm.js with collie's key bar
@@ -198,7 +192,6 @@
   - [ ] RT-330 RT-324 S6: Live no-focus check, DRIVING_CONVENTIONS and task index for driving
 - [ ] RT-346 Make rt.ps1 test -Validate fast: it ran 652 s through the gate
 - [ ] RT-348 Update tokio past RUSTSEC-2026-0386 so cargo deny passes
-- [ ] RT-422 Remove wall-clock time assertions from the tests · release vNext
 
 ## macOS
 
@@ -286,3 +279,8 @@
 - [ ] RT-464 Absorb all of ops-tower's functionality so ops-tower can be retired · release vNext+1
   - [ ] RT-479 Add a Costs tab with ops-tower's subscription-share model · release vNext+1
   - [ ] RT-480 Retire ops-tower once its views ship in rustling-tulip · release vNext+1
+- [ ] RT-546 Keep the screen's ownership of the background flag across stamp-only hook events
+- [ ] RT-547 Clear the background flag when an agent typed into the shell ends
+- [ ] RT-548 Read running-subagent rows past an hour in the background rule
+- [ ] RT-550 Keep an armed Remove row when a preset list fails
+- [ ] RT-554 Make the UI specs' absence checks able to fail
