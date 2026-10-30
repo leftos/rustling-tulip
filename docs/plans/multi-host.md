@@ -21,15 +21,15 @@ Orchestrator decisions:
 - Notifications, Needs You and the Dashboard span every host; their rows carry a host chip when more than one host is configured.
 - Recover lists history from every host, grouped by host.
 - Pairing is per host: a remote host that is not approved shows `Pair` on its sidebar header and Connections row, never a window overlay.
-- The host key is a stable string, `tailnet:<name>` or `ssh:<host string>` (lower-cased), and `None` on the wire for This PC; a tailnet port change does not orphan that host's panes.
+- The host key is `Target::host_key()` (today's `session_count_key`, renamed): a tailnet host's lower-cased MagicDNS name or `ssh:<host string>`, and `None` on the wire for This PC; one formatter serves `host_session_counts`, `HostKey` and the wire `host`, and a tailnet port change does not orphan that host's panes.
 - The look of the host headers and chips is decided from the existing palette and shown as a `native-shot` at landing (the ship-fast working mode; no mock round).
 
 ## Shape
 
 ### Protocol and daemon (additive, no version bump)
 
-- `GridNode::Pane` gains `host: Option<String>` (`#[serde(default)]`, `None` = this daemon). Every tab request that names a session (`CreateTab`, `SplitPane`, `MovePane`, `ExtractToNewTab`, the leaf drop) carries `host` too; `TabContent::Diff` gains `host`.
-- The daemon's tab code (`crates/daemon/src/tabs.rs`, `server/tabs.rs`) accepts a foreign `{host, session_id}` without checking it against its registry; a local session removal (`close_session_panes`) touches only `host: None` panes.
+- `GridNode::Pane` gains `host: Option<String>` (`#[serde(default)]`, `None` = this daemon). The tab requests that name a session (`CreateTab`, `SplitPane`, `ReplacePaneSession`, the leaf drop's message) and `OpenDiffTab` carry `host` too; `TabContent::Diff` gains `host`. `MovePane`, `SwapPanes`, `ExtractToNewTab` and `MergeTabs` name panes by id, and each pane keeps its own host.
+- The daemon never checks a pane's session against its registry, so foreign panes need no exemption there; a foreign diff tab skips `open_diff_tab`'s repo check. The daemon's pane helpers carry `host` through every rebuild, and a local session removal (`close_session_panes`), the startup prune and the rebind touch only `host: None` panes.
 - New `ClientMessage::ForgetHostSessions { host, session_ids, all }`: applies to foreign panes what a local session removal does; `all` drops every pane of that host.
 - `Welcome.daemon_id`: a UUID persisted in the config dir, created on first start; feature string `daemon_id`.
 
