@@ -21,6 +21,7 @@ use crate::recover::{
     other_toggle_label,
 };
 use crate::session_menu::{backdrop, dialog_button, dialog_look};
+use crate::target::HostKey;
 use crate::ui_theme::{UiTheme, theme};
 use crate::{RootView, new_request_id, spawns};
 
@@ -226,9 +227,12 @@ impl RootView {
         self.recover_requests.clear();
         self.recover_batches.clear();
         self.drop_recover(window, cx);
-        self.send(protocol::ClientMessage::ListSessionHistory {
-            request_id: Some(new_request_id()),
-        });
+        self.send_to(
+            &HostKey::Local,
+            protocol::ClientMessage::ListSessionHistory {
+                request_id: Some(new_request_id()),
+            },
+        );
     }
 
     /// A lost connection: the dialog closes.
@@ -333,7 +337,7 @@ impl RootView {
             "recover dialog: placing the recovered sessions"
         );
         for msg in messages {
-            self.send(msg);
+            self.send_to(&HostKey::Local, msg);
         }
     }
 
@@ -358,7 +362,7 @@ impl RootView {
             _ => HashSet::new(),
         };
         self.recover_requests.insert(request_id, abandoned);
-        self.send(msg);
+        self.send_to(&HostKey::Local, msg);
         self.arm_recover_timeout(RECOVER_TIMEOUT, cx);
         cx.notify();
     }

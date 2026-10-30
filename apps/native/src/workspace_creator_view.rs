@@ -14,6 +14,7 @@ use crate::notice_view::modal_panel;
 use crate::repo_add::host_workspace_file;
 use crate::session_menu::{backdrop, dialog_button, dialog_look};
 use crate::spawn_view::checkbox_row;
+use crate::target::HostKey;
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
 use crate::ui_theme::{UiTheme, theme};
 use crate::workspace_creator::{
@@ -57,7 +58,7 @@ impl RootView {
             || self.changes.discard.is_some()
             || self.stash.drop.is_some()
             || self.notices.has_modal()
-            || self.conn.overlay().is_some();
+            || self.conn().overlay().is_some();
         if blocked {
             return;
         }
@@ -67,7 +68,7 @@ impl RootView {
         let mut subscriptions = Self::watch_workspace_name(&name_input, window, cx);
         // No remembered folder is offered: this PC's folders mean nothing
         // on the host.
-        let file_field = self.conn.target().short_name().map(|host| {
+        let file_field = self.conn().target().short_name().map(|host| {
             let placeholder = file_field_placeholder(host);
             let input = cx.new(|cx| TextInput::new(String::new(), placeholder, cx));
             FileField {
@@ -178,7 +179,11 @@ impl RootView {
         match host_workspace_file(&text) {
             Ok(path) => {
                 dialog.creator.begin_parse(path.clone());
-                self.send(ClientMessage::ParseVscodeWorkspace { path });
+                // The host comes from the dialog's chosen host.
+                self.send_to(
+                    &HostKey::Local,
+                    ClientMessage::ParseVscodeWorkspace { path },
+                );
             }
             Err(problem) => {
                 let message = problem.message(&field.host);
@@ -343,7 +348,11 @@ impl RootView {
             };
             dialog.creator.begin_parse(path.clone());
         }
-        self.send(ClientMessage::ParseVscodeWorkspace { path });
+        // The host comes from the dialog's chosen host.
+        self.send_to(
+            &HostKey::Local,
+            ClientMessage::ParseVscodeWorkspace { path },
+        );
         cx.notify();
     }
 
@@ -360,7 +369,8 @@ impl RootView {
             dialog.creator.begin_create();
             message
         };
-        self.send(message);
+        // The host comes from the dialog's chosen host.
+        self.send_to(&HostKey::Local, message);
         // A submit from the name field takes the keyboard off the field, so
         // the open creator still answers Esc while it waits.
         self.workspace_creator_focus.focus(window);
@@ -472,7 +482,7 @@ impl RootView {
             .children(CreatorMode::ALL.map(|mode| workspace_tab(mode, creator.mode(), cx)));
         let body = match creator.mode() {
             CreatorMode::FromRepos => {
-                let note = no_repos_note(self.conn.target().short_name());
+                let note = no_repos_note(self.conn().target().short_name());
                 repos_body(dialog, self.sidebar.repos(), focus, note, cx).into_any_element()
             }
             CreatorMode::FromVscode => vscode_body(dialog, focus, cx).into_any_element(),

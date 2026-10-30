@@ -17,6 +17,7 @@ use crate::notices::{
 use crate::preset_launch::job_id_of;
 use crate::session_menu::{backdrop, dialog_button, dialog_look};
 use crate::spawns::OpenIn;
+use crate::target::HostKey;
 use crate::ui_theme::{UiTheme, theme};
 use crate::{FOOTER_HEIGHT, RootView, UI_TEXT_SIZE};
 
@@ -48,7 +49,7 @@ impl RootView {
         let request_id = crate::new_request_id();
         let detail = spawning_detail(&request);
         let msg = self.spawns.start(request, request_id.clone(), open_in);
-        self.send(msg);
+        self.send_to(&self.host_of_request(&msg), msg);
         self.push_spawning_toast(detail, &request_id, cx);
         request_id
     }
@@ -290,7 +291,7 @@ impl RootView {
             self.end_spawn(&request_id, cx);
         }
         if let Some(msg) = msg {
-            self.send(msg);
+            self.send_to(&self.host_of_request(&msg), msg);
         }
     }
 
@@ -408,7 +409,7 @@ impl RootView {
         self.confirm.disarm();
         for msg in placed.messages {
             self.tabs.note_layout_request(&msg);
-            self.send(msg);
+            self.send_to(&HostKey::Local, msg);
         }
         self.settle_checkout(request_id, window, cx);
         if placed.relayout {
@@ -497,7 +498,7 @@ impl RootView {
             (Some(request_id), strategy @ Some(_)) => {
                 if let Some(msg) = self.spawns.resend(&request_id, strategy) {
                     let detail = spawn_detail_of(&msg);
-                    self.send(msg);
+                    self.send_to(&self.host_of_request(&msg), msg);
                     self.push_spawning_toast(detail, &request_id, cx);
                 }
             }

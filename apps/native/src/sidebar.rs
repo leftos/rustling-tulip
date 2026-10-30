@@ -497,7 +497,7 @@ pub struct UiState {
     #[serde(default, deserialize_with = "valid_saved_hosts")]
     pub saved_hosts: Vec<SavedHost>,
     /// The session count each remote host last had, by
-    /// [`crate::target::Target::session_count_key`]: a tailnet host's
+    /// [`crate::target::Target::host_key`]: a tailnet host's
     /// lower-cased `MagicDNS` name, or `ssh:` and an SSH host's string. A
     /// connect whose first list differs offers the import.
     #[serde(default)]

@@ -22,6 +22,7 @@ use crate::session_menu::{MENU_MAX_SHARE, menu_frame, menu_item, menu_separator,
 use crate::status_glyph::{GlyphSize, glyph, glyph_view};
 use crate::tab_menu::{MenuLine, TabAction, head_lines, merge_lines, rearrange_lines};
 use crate::tabs::{PillClick, TabBadge, bound_pane_count, collect_panes, tab_session_counts};
+use crate::target::HostKey;
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::ui_theme::{UiTheme, theme};
 use crate::undo;
@@ -387,10 +388,13 @@ impl RootView {
                 self.show_grid_menu(action == TabAction::OpenGrid, window, cx);
             }
             TabAction::Rearrange(layout) => {
-                self.send(ClientMessage::RearrangeTab {
-                    tab_id: tab_id.to_owned(),
-                    layout,
-                });
+                self.send_to(
+                    &HostKey::Local,
+                    ClientMessage::RearrangeTab {
+                        tab_id: tab_id.to_owned(),
+                        layout,
+                    },
+                );
                 self.close_tab_menu(window, cx);
             }
             TabAction::MovePanes => {
@@ -443,7 +447,7 @@ impl RootView {
             .collect();
         for other in others {
             self.tabs.mark_closing(&other);
-            self.send(ClientMessage::CloseTab { tab_id: other });
+            self.send_to(&HostKey::Local, ClientMessage::CloseTab { tab_id: other });
         }
         self.close_tab_menu(window, cx);
     }
@@ -454,12 +458,15 @@ impl RootView {
         let tab_ids = self.selected_tabs();
         let request_id = crate::new_request_id();
         self.tabs.arm_create(&request_id);
-        self.send(ClientMessage::MergeTabs {
-            tab_ids,
-            name: None,
-            layout,
-            request_id: Some(request_id),
-        });
+        self.send_to(
+            &HostKey::Local,
+            ClientMessage::MergeTabs {
+                tab_ids,
+                name: None,
+                layout,
+                request_id: Some(request_id),
+            },
+        );
         self.tabs.selection.clear();
         self.close_tab_menu(window, cx);
     }
@@ -894,10 +901,13 @@ impl RootView {
             );
             return;
         }
-        self.send(ClientMessage::ReorderTabs {
-            ordered_ids,
-            request_id: Some(request_id),
-        });
+        self.send_to(
+            &HostKey::Local,
+            ClientMessage::ReorderTabs {
+                ordered_ids,
+                request_id: Some(request_id),
+            },
+        );
     }
 
     /// A click on `tab_id`'s pill. Ctrl toggles the tab in the selection
@@ -1033,25 +1043,31 @@ impl RootView {
         if collect_panes(grid).len() < 2 {
             return false;
         }
-        self.send(ClientMessage::RearrangeTab {
-            tab_id: tab.id.clone(),
-            layout: RearrangeLayout::Grid {
-                cols: 0,
-                aspect: Some(self.pane_area_aspect()),
+        self.send_to(
+            &HostKey::Local,
+            ClientMessage::RearrangeTab {
+                tab_id: tab.id.clone(),
+                layout: RearrangeLayout::Grid {
+                    cols: 0,
+                    aspect: Some(self.pane_area_aspect()),
+                },
             },
-        });
+        );
         true
     }
 
     fn new_tab(&mut self) {
         let request_id = crate::new_request_id();
         self.tabs.arm_create(&request_id);
-        self.send(ClientMessage::CreateTab {
-            name: None,
-            initial_session_id: None,
-            host: None,
-            request_id: Some(request_id),
-        });
+        self.send_to(
+            &HostKey::Local,
+            ClientMessage::CreateTab {
+                name: None,
+                initial_session_id: None,
+                host: None,
+                request_id: Some(request_id),
+            },
+        );
     }
 
     /// A close click: closes the tab, or arms the close when the tab holds
@@ -1066,7 +1082,7 @@ impl RootView {
                 self.record_undo(undo::closed_tab_message(&tab.name), vec![snapshot], cx);
             }
             self.tabs.mark_closing(&tab.id);
-            self.send(ClientMessage::CloseTab { tab_id: tab.id });
+            self.send_to(&HostKey::Local, ClientMessage::CloseTab { tab_id: tab.id });
         }
         close
     }
@@ -1112,10 +1128,13 @@ impl RootView {
             .tab(&rename.tab_id)
             .is_some_and(|tab| tab.name != name);
         if end != RenameEnd::Cancel && changed && !name.is_empty() {
-            self.send(ClientMessage::RenameTab {
-                tab_id: rename.tab_id,
-                name,
-            });
+            self.send_to(
+                &HostKey::Local,
+                ClientMessage::RenameTab {
+                    tab_id: rename.tab_id,
+                    name,
+                },
+            );
         }
         if end != RenameEnd::Blur {
             self.focus_active_pane(window, cx);

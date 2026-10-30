@@ -32,6 +32,7 @@ use crate::preset_wizard::{
 use crate::repo_remove::{is_live, stop_message};
 use crate::session_menu::{backdrop, dialog_button, dialog_look};
 use crate::spawn_view::checkbox_row;
+use crate::target::HostKey;
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
 use crate::ui_theme::{UiTheme, theme};
 use crate::{RootView, tooltip};
@@ -113,7 +114,7 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.conn.overlay().is_some() {
+        if self.conn().overlay().is_some() {
             return;
         }
         let repo_path = self
@@ -124,7 +125,7 @@ impl RootView {
             .map(|repo| repo.path.clone());
         let mut wizard = PresetWizard::new(entry, target, repo_path.as_deref());
         let host = (!self.capabilities().opens_local_files())
-            .then(|| self.conn.target().short_name().map(str::to_owned))
+            .then(|| self.conn().target().short_name().map(str::to_owned))
             .flatten();
         wizard.set_host(host.clone());
         let inline_input = cx
@@ -293,7 +294,7 @@ impl RootView {
         };
         cx.notify();
         if let Some(msg) = request {
-            self.send(msg);
+            self.send_to(&self.host_of_request(&msg), msg);
         }
     }
 
@@ -307,7 +308,7 @@ impl RootView {
         dialog.lock_max_per_tab(cx);
         cx.notify();
         match step {
-            Some(LaunchStep::Scripts(msg)) => self.send(msg),
+            Some(LaunchStep::Scripts(msg)) => self.send_to(&self.host_of_request(&msg), msg),
             Some(LaunchStep::Launch(msg)) => self.send_preset_launch(msg, window, cx),
             None => {}
         }
@@ -333,7 +334,7 @@ impl RootView {
             wizard.shows_max_per_tab(),
             wizard.launch_cap(),
         );
-        self.send(msg);
+        self.send_to(&self.host_of_request(&msg), msg);
         self.push_toast_spec(spec, cx);
         self.close_preset_wizard(window, cx);
     }
@@ -442,7 +443,10 @@ impl RootView {
         let listed = |id: &str| sidebar.session(id).map(is_live);
         match self.preset_launches.press(key, action, &listed) {
             Some(JobAction::Cancel(job_id)) => {
-                self.send(ClientMessage::CancelPresetLaunch { job_id });
+                self.send_to(
+                    &HostKey::Local,
+                    ClientMessage::CancelPresetLaunch { job_id },
+                );
             }
             Some(JobAction::Select) => {
                 self.launched_highlight.select(key, &self.preset_launches);
@@ -450,10 +454,16 @@ impl RootView {
             }
             Some(JobAction::StopAll { cancel, sessions }) => {
                 if let Some(job_id) = cancel {
-                    self.send(ClientMessage::CancelPresetLaunch { job_id });
+                    self.send_to(
+                        &HostKey::Local,
+                        ClientMessage::CancelPresetLaunch { job_id },
+                    );
                 }
                 for session_id in sessions {
-                    self.send(stop_message(&session_id));
+                    self.send_to(
+                        &self.host_of_session(&session_id),
+                        stop_message(&session_id),
+                    );
                 }
             }
             None => {}

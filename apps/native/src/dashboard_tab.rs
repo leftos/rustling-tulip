@@ -13,6 +13,7 @@ use crate::RootView;
 use crate::dashboard::{self, GroupKind};
 use crate::diff_tab::PENDING_ACTIVATE_TTL;
 use crate::notices::ToastKind;
+use crate::target::HostKey;
 
 /// The toast an `OpenDashboardTab` the daemon refused raises.
 const OPEN_FAILED_TITLE: &str = "Couldn't open the Dashboard";
@@ -109,7 +110,7 @@ impl RootView {
             return;
         }
         let id = self.dashboard_opens.open_id();
-        self.send(ClientMessage::OpenDashboardTab { id });
+        self.send_to(&HostKey::Local, ClientMessage::OpenDashboardTab { id });
         cx.notify();
     }
 
@@ -206,7 +207,7 @@ impl RootView {
                 // what is held is stale; the next watch is sent every fact.
                 self.dashboard_facts.clear();
             }
-            self.send(ClientMessage::WatchDashboard { on });
+            self.send_to(&HostKey::Local, ClientMessage::WatchDashboard { on });
         }
     }
 

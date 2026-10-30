@@ -15,6 +15,7 @@ use crate::session_menu::{backdrop, dialog_button, dialog_look};
 use crate::settings_view::SettingsControl;
 use crate::spawn_form::Lock;
 use crate::spawn_view::{SpawnEntry, now_unix};
+use crate::target::HostKey;
 use crate::ui_theme::{UiTheme, theme};
 use crate::worktrees_manager::{
     Action, Confirm, ConfirmButton, Control, EMPTY, SCANNING, TITLE, WorktreesManager,
@@ -147,7 +148,7 @@ impl RootView {
         }
         let (manager, msg) = WorktreesManager::open();
         tracing::info!("worktrees manager: scanning the worktrees root");
-        self.send(msg);
+        self.send_to(&HostKey::Local, msg);
         self.worktrees_manager = Some(manager);
         self.worktrees_focus.focus(window);
         cx.notify();
@@ -189,7 +190,7 @@ impl RootView {
                     .filter(|manager| !manager.pending())
                 {
                     manager.request_scan();
-                    self.send(ClientMessage::InspectWorktreesRoot);
+                    self.send_to(&HostKey::Local, ClientMessage::InspectWorktreesRoot);
                     cx.notify();
                 }
             }
@@ -291,7 +292,7 @@ impl RootView {
             Action::Send(messages) => {
                 tracing::info!(requests = messages.len(), "worktrees manager: sending");
                 for msg in messages {
-                    self.send(msg);
+                    self.send_to(&HostKey::Local, msg);
                 }
             }
             Action::Close => return self.close_worktrees_manager(window, cx),

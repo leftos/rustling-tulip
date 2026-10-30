@@ -1,7 +1,7 @@
 //! A fake daemon for the native client's UI specs: the root view on a test
 //! window, fed daemon messages, read back through the commands it sends.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -27,7 +27,7 @@ use rustling_tulip_native::{
     Activity, Clock, Connection, ContainerKind, FileFilter, FilePicker, FolderPicker,
     HandshakeInfo, NetCommand, NetDeps, NetEvent, Notifier, NotifyState, OpenFailure,
     OpenLocalFuture, Opener, PairingAction, PairingActionSink, PairingToast, QuitFn, RootDeps,
-    RootView, SavePicker, ScPanel, bind_keys,
+    RootView, SavePicker, ScPanel, Transport, bind_keys,
     remote_access::Autostart,
     spawn_net,
     target::{TailnetHost, Target},
@@ -905,6 +905,8 @@ pub struct Harness<'a> {
     pub root: Entity<RootView>,
     events: UnboundedSender<NetEvent>,
     commands: UnboundedReceiver<NetCommand>,
+    /// Every target the window opened a connection to, in order.
+    opened: Rc<RefCell<Vec<Target>>>,
     clock: TestClock,
     answered: HashSet<String>,
     outbox: Outbox,
@@ -1407,6 +1409,39 @@ pub fn quit_recorder(quits: &Rc<Cell<usize>>) -> QuitFn {
     Box::new(move |_| quits.set(quits.get() + 1))
 }
 
+/// The fake-daemon ends of a connection the window opened after its first:
+/// the target it was opened for, the sender its events go on and the
+/// receiver its commands arrive on.
+type ExtraHost = (
+    Target,
+    UnboundedSender<NetEvent>,
+    UnboundedReceiver<NetCommand>,
+);
+
+/// A transport that hands out `first` on its first call and a fresh pair on
+/// any later one, keeping that pair's other ends in its `extra_hosts`, and
+/// records every target it is asked for in `opened`.
+pub fn fake_transport(
+    first: (UnboundedSender<NetCommand>, UnboundedReceiver<NetEvent>),
+    opened: &Rc<RefCell<Vec<Target>>>,
+) -> Transport {
+    let first = RefCell::new(Some(first));
+    let opened = Rc::clone(opened);
+    let extra_hosts: RefCell<Vec<ExtraHost>> = RefCell::new(Vec::new());
+    Rc::new(move |target: &Target| {
+        opened.borrow_mut().push(target.clone());
+        if let Some(pair) = first.borrow_mut().take() {
+            return pair;
+        }
+        let (tx, commands) = unbounded();
+        let (events, rx) = unbounded();
+        extra_hosts
+            .borrow_mut()
+            .push((target.clone(), events, commands));
+        (tx, rx)
+    })
+}
+
 impl<'a> Harness<'a> {
     /// Opens the window with its layout in `dir` and connects it.
     pub fn open(cx: &'a mut TestAppContext, dir: &TestDir) -> Self {
@@ -1468,9 +1503,9 @@ impl<'a> Harness<'a> {
         let picker = Rc::new(PickRecorder::default());
         let autostart = Arc::new(AutostartRecorder::default());
         let tokens = Arc::new(MemoryTokens::default());
+        let opened = Rc::new(RefCell::new(Vec::new()));
         let deps = RootDeps {
-            tx,
-            events: rx,
+            open_host: fake_transport((tx, rx), &opened),
             ui_dir: Some(dir.path().to_path_buf()),
             paths: Err("specs have no config dir".to_owned()),
             wanted: wanted.map(str::to_owned),
@@ -1492,6 +1527,7 @@ impl<'a> Harness<'a> {
             root,
             events,
             commands,
+            opened,
             clock,
             answered: HashSet::new(),
             outbox: Outbox::default(),
@@ -1530,9 +1566,9 @@ impl<'a> Harness<'a> {
         let picker = Rc::new(PickRecorder::default());
         let autostart = Arc::new(AutostartRecorder::default());
         let tokens = Arc::new(MemoryTokens::default());
+        let opened = Rc::new(RefCell::new(Vec::new()));
         let deps = RootDeps {
-            tx,
-            events: rx,
+            open_host: fake_transport((tx, rx), &opened),
             ui_dir: Some(dir.path().to_path_buf()),
             paths: Err("specs have no config dir".to_owned()),
             wanted: None,
@@ -1554,6 +1590,7 @@ impl<'a> Harness<'a> {
             root,
             events: unbounded().0,
             commands: unbounded().1,
+            opened,
             clock,
             answered: HashSet::new(),
             outbox: Outbox::default(),
@@ -1568,6 +1605,11 @@ impl<'a> Harness<'a> {
         harness.count_the_window_hovered();
         harness.pin_contrast();
         harness
+    }
+
+    /// Every target the window opened a connection to, in order.
+    pub fn opened_targets(&self) -> Vec<Target> {
+        self.opened.borrow().clone()
     }
 
     /// The device tokens the client holds per tailnet host.

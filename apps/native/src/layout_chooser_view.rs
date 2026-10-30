@@ -18,6 +18,7 @@ use crate::notice_view::modal_panel;
 use crate::session_menu::{backdrop, dialog_button, dialog_look};
 use crate::spawn_view::close_button;
 use crate::tabs::collect_panes;
+use crate::target::HostKey;
 use crate::ui_theme::{UiTheme, theme};
 
 const TITLE: &str = "Set up this window";
@@ -132,7 +133,7 @@ impl RootView {
         };
         if let Some((kind, arrangement)) = chooser.press(control, aspect) {
             tracing::info!(?kind, ?arrangement, "layout chooser: chosen");
-            self.send(ClientMessage::InitLayout { kind });
+            self.send_to(&HostKey::Local, ClientMessage::InitLayout { kind });
             self.pending_arrangement = arrangement;
             self.close_layout_chooser(window, cx);
         }
@@ -163,7 +164,7 @@ impl RootView {
             .map(|pane| pane.id.to_owned())
             .collect();
         for msg in arrangement_messages(&tab.id, &pane_ids, arrangement) {
-            self.send(msg);
+            self.send_to(&HostKey::Local, msg);
         }
     }
 
@@ -286,7 +287,7 @@ impl RootView {
 
     /// The connected remote host's session-count key; `None` on this PC.
     fn host_count_key(&self) -> Option<String> {
-        self.conn.target().session_count_key()
+        self.conn().target().host_key()
     }
 
     /// Records `count` under `host`, the connected host's session-count
@@ -294,7 +295,7 @@ impl RootView {
     /// nothing; returns whether the recorded count changed, so the caller
     /// saves.
     fn record_host_session_count(&mut self, host: &str, count: usize) -> bool {
-        let target = self.conn.target();
+        let target = self.conn().target();
         let saved = self
             .sidebar
             .ui_state()
@@ -397,7 +398,7 @@ impl RootView {
             }
             Some(ImportOutcome::Send((kind, arrangement))) => {
                 tracing::info!(?kind, ?arrangement, "import: chosen");
-                self.send(ClientMessage::InitLayout { kind });
+                self.send_to(&HostKey::Local, ClientMessage::InitLayout { kind });
                 self.pending_arrangement = arrangement;
                 self.close_import_modal(window, cx);
             }

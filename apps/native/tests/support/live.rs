@@ -1150,9 +1150,9 @@ impl<'a> Harness<'a> {
         let picker = std::rc::Rc::new(PickRecorder::default());
         let autostart = Arc::new(super::AutostartRecorder::default());
         let updater = Arc::new(super::UpdaterRecorder::default());
+        let opened = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let deps = RootDeps {
-            tx: tx.clone(),
-            events: view_events,
+            open_host: super::fake_transport((tx.clone(), view_events), &opened),
             ui_dir: Some(daemon.dir().join("ui")),
             paths: Err("live specs have no log paths".to_owned()),
             wanted: None,
@@ -1174,6 +1174,7 @@ impl<'a> Harness<'a> {
             root,
             events: unbounded().0,
             commands: unbounded().1,
+            opened,
             clock,
             answered: HashSet::new(),
             outbox: Outbox::default(),

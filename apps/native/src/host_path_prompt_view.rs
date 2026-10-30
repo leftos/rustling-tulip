@@ -12,6 +12,7 @@ use crate::RootView;
 use crate::host_path_prompt::{HostPathPrompt, PromptControl};
 use crate::notice_view::modal_panel;
 use crate::session_menu::{backdrop, dialog_button, dialog_look};
+use crate::target::HostKey;
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
 use crate::ui_theme::{UiTheme, theme};
 
@@ -83,7 +84,7 @@ impl RootView {
         if self.host_path_prompt.is_some() {
             return;
         }
-        let Some(host) = self.conn.target().short_name().map(str::to_owned) else {
+        let Some(host) = self.conn().target().short_name().map(str::to_owned) else {
             tracing::warn!("the Add repo prompt opens only on a remote host");
             return;
         };
@@ -158,7 +159,7 @@ impl RootView {
         match add {
             Some(add) => {
                 tracing::info!("adding repo {} on the host as {}", add.path, add.name);
-                self.send(add.message());
+                self.send_to(&HostKey::Local, add.message());
                 self.close_host_path_prompt(window, cx);
             }
             None => self.apply_host_path_focus(window, cx),
