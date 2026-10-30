@@ -114,7 +114,7 @@ impl RootView {
     }
 
     fn exit_counts(&self) -> Counts {
-        Counts::of(self.sidebar.sessions())
+        Counts::of(self.sidebar.local_sessions())
     }
 
     /// The main window asked to close. With nothing the daemon could stop,
@@ -295,7 +295,7 @@ impl RootView {
         let Some(exit) = &mut self.exit else {
             return;
         };
-        if let Some(walk) = Walk::start(self.sidebar.sessions()) {
+        if let Some(walk) = Walk::start(self.sidebar.local_sessions()) {
             tracing::info!(
                 sessions = walk.progress().1,
                 "exit dialog: asking branch fates"
@@ -303,7 +303,7 @@ impl RootView {
             exit.model.start_walk(walk);
             self.open_walk_confirm(window, cx);
         } else {
-            let live = self.sidebar.sessions();
+            let live = self.sidebar.local_sessions();
             let messages = removal_messages(&covered(live), &HashMap::new(), live);
             self.begin_shutdown(ExitButton::StopRemove, false, messages, cx);
         }
@@ -328,7 +328,7 @@ impl RootView {
     /// Every answer is in: the stops and discards for the sessions the walk
     /// started with, then the shutdown.
     fn finish_exit_walk(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let live = self.sidebar.sessions();
+        let live = self.sidebar.local_sessions();
         let Some(messages) = self
             .exit
             .as_ref()

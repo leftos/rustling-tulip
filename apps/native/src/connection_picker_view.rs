@@ -321,7 +321,7 @@ impl RootView {
             },
             has_token: !dialog.not_paired.contains(&row.label),
             sessions_last_time,
-            live_sessions: current.then(|| self.sidebar.sessions().len()),
+            live_sessions: current.then(|| self.sidebar.local_sessions().len()),
         }
     }
 

@@ -282,7 +282,7 @@ impl crate::RootView {
     /// them; empty while disconnected.
     #[must_use]
     pub fn agents(&self) -> &[AgentDescriptor] {
-        &self.agents
+        self.sidebar.agents(&crate::target::HostKey::Local)
     }
 
     /// Each agent's Settings page values as this connection last heard
@@ -292,17 +292,21 @@ impl crate::RootView {
         &self.agent_settings
     }
 
-    /// Keeps the daemon's agents or their Settings values: each message
-    /// replaces what the last one of its kind said, and a Settings broadcast
-    /// answers the agent page's pending change. Any other message is one
-    /// the root view does not fold, and is dropped.
-    pub(crate) fn on_agents(&mut self, msg: protocol::DaemonMessage) {
+    /// Keeps `host`'s agents, or This PC's agents' Settings values: each
+    /// message replaces what the last one of its kind from that host said,
+    /// and a Settings broadcast answers the agent page's pending change.
+    /// Any other message, or a remote host's Settings values, is one the
+    /// root view does not fold, and is dropped.
+    pub(crate) fn on_agents(
+        &mut self,
+        host: &crate::target::HostKey,
+        msg: protocol::DaemonMessage,
+    ) {
         match msg {
-            protocol::DaemonMessage::Agents { agents } => {
-                self.sidebar.set_agents(agents.clone());
-                self.agents = agents;
-            }
-            protocol::DaemonMessage::AgentSettings { settings } => {
+            protocol::DaemonMessage::Agents { agents } => self.sidebar.set_agents(host, agents),
+            protocol::DaemonMessage::AgentSettings { settings }
+                if *host == crate::target::HostKey::Local =>
+            {
                 for agent in settings.keys() {
                     self.agent_settings_pending.remove(agent);
                 }
@@ -313,11 +317,13 @@ impl crate::RootView {
         }
     }
 
-    /// Forgets the daemon's agents, their Settings values and every
-    /// pending Settings change, as a disconnect does.
-    pub(crate) fn forget_agents(&mut self) {
-        self.agents.clear();
-        self.sidebar.set_agents(Vec::new());
+    /// Forgets `host`'s agents and, for This PC, their Settings values and
+    /// every pending Settings change, as a disconnect does.
+    pub(crate) fn forget_agents(&mut self, host: &crate::target::HostKey) {
+        self.sidebar.set_agents(host, Vec::new());
+        if *host != crate::target::HostKey::Local {
+            return;
+        }
         self.agent_settings.clear();
         self.agent_settings_received = false;
         self.agent_settings_pending.clear();

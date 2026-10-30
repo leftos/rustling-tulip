@@ -94,8 +94,8 @@ impl StatusCounts {
 /// session marked "Don't count as busy" is never working or background, but
 /// still needs you when it asks.
 #[must_use]
-pub fn status_counts(
-    sessions: &[SessionSnapshot],
+pub fn status_counts<'a>(
+    sessions: impl IntoIterator<Item = &'a SessionSnapshot>,
     is_unseen: impl Fn(&str) -> bool,
 ) -> StatusCounts {
     let mut counts = StatusCounts::default();

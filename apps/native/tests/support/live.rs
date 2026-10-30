@@ -1184,6 +1184,7 @@ impl<'a> Harness<'a> {
             autostart,
             tokens,
             updater,
+            extra_hosts: super::ExtraHosts::default(),
         };
         (
             harness,

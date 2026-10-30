@@ -457,7 +457,10 @@ impl RootView {
         }
         match msg {
             DaemonMessage::SessionUpdated { session, .. } if finished => {
-                let label = body(Some(session), &self.agents);
+                let label = body(
+                    Some(session),
+                    self.sidebar.agents(&crate::target::HostKey::Local),
+                );
                 if !self.waits_for_alert(session) {
                     let wanted = self.sidebar.ui_state().notifications.finished;
                     self.raise_toast(
@@ -482,7 +485,10 @@ impl RootView {
                 ..
             } => {
                 let wanted = self.sidebar.ui_state().notifications.awaiting_input;
-                let body = needs_you_body(self.sidebar.session(session_id), &self.agents);
+                let body = needs_you_body(
+                    self.sidebar.session(session_id),
+                    self.sidebar.agents(&crate::target::HostKey::Local),
+                );
                 self.raise_toast(
                     &Toast {
                         session_id,

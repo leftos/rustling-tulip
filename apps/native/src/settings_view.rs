@@ -788,7 +788,7 @@ impl RootView {
     /// applies.
     fn follow_agent_list(&mut self) {
         self.keep_offered_tab();
-        let agents = self.agents.clone();
+        let agents = self.sidebar.agents(&crate::target::HostKey::Local).to_vec();
         self.agent_tabs.keep_listed(&agents);
     }
 
@@ -804,10 +804,18 @@ impl RootView {
     /// Folds the daemon's agents or their Settings values, as
     /// [`RootView::on_agents`] does, and the agent pages follow them; any
     /// other message is dropped.
-    pub(crate) fn fold_agents(&mut self, msg: DaemonMessage, cx: &mut Context<Self>) {
+    pub(crate) fn fold_agents(
+        &mut self,
+        host: &crate::target::HostKey,
+        msg: DaemonMessage,
+        cx: &mut Context<Self>,
+    ) {
         let listed = matches!(msg, DaemonMessage::Agents { .. });
         let pages_follow = listed || matches!(msg, DaemonMessage::AgentSettings { .. });
-        self.on_agents(msg);
+        self.on_agents(host, msg);
+        if *host != crate::target::HostKey::Local {
+            return;
+        }
         if listed {
             self.follow_agent_list();
         }
@@ -2655,7 +2663,7 @@ impl RootView {
     /// counts as the App title settings shape them.
     fn wanted_window_title(&self) -> String {
         let tab = self.tabs.active_tab();
-        let counts = tab.and_then(|tab| tab_session_counts(tab, self.sidebar.sessions()));
+        let counts = tab.and_then(|tab| tab_session_counts(tab, self.sidebar.local_sessions()));
         compute_title(
             counts,
             tab.map(|tab| tab.name.as_str()),

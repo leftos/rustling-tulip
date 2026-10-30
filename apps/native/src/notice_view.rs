@@ -398,7 +398,7 @@ impl RootView {
             return;
         };
         self.clear_spawning_toast(request_id, cx);
-        let sessions = self.sidebar.sessions();
+        let sessions = self.sidebar.local_sessions();
         let Some(placed) = self
             .spawns
             .place(request_id, session, &mut self.tabs, sessions)

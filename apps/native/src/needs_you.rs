@@ -61,7 +61,7 @@ pub(crate) fn rows(model: &SidebarModel) -> Vec<NeedsYouRow> {
                 label: leaf.label.clone(),
                 reason,
                 since: session.status_since,
-                detail: detail_of(reason, session, model.agents()),
+                detail: detail_of(reason, session, model.session_agents(&session.id)),
             };
             match reason {
                 Reason::Asking => asking.push(row),
@@ -313,18 +313,27 @@ mod tests {
 
     fn list(sessions: Vec<SessionSnapshot>) -> SidebarModel {
         let mut model = SidebarModel::default();
-        model.apply(&DaemonMessage::Repos {
-            repos: vec![repo()],
-        });
-        model.apply(&DaemonMessage::Sessions { sessions });
+        model.apply(
+            &crate::target::HostKey::Local,
+            &DaemonMessage::Repos {
+                repos: vec![repo()],
+            },
+        );
+        model.apply(
+            &crate::target::HostKey::Local,
+            &DaemonMessage::Sessions { sessions },
+        );
         model
     }
 
     fn attend(model: &mut SidebarModel, id: &str) {
-        model.apply(&DaemonMessage::Attention {
-            session_id: id.to_owned(),
-            reason: AttentionReason::Error,
-        });
+        model.apply(
+            &crate::target::HostKey::Local,
+            &DaemonMessage::Attention {
+                session_id: id.to_owned(),
+                reason: AttentionReason::Error,
+            },
+        );
     }
 
     fn ids(listed: &[NeedsYouRow]) -> Vec<&str> {
@@ -503,7 +512,10 @@ mod tests {
         let mut idle = asking("s2");
         idle.terminal_title = Some("✳ Claude Code".to_owned());
         let mut model = list(vec![working, idle]);
-        model.set_agents(agent_registry::descriptors());
+        model.set_agents(
+            &crate::target::HostKey::Local,
+            agent_registry::descriptors(),
+        );
         let listed = rows(&model);
         assert_eq!(
             listed[0].detail,

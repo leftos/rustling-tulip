@@ -1595,23 +1595,32 @@ mod tests {
         use crate::sidebar::tests::{in_repo, repo, shell, workspace};
         use protocol::{DaemonMessage, SessionKind};
         let mut model = crate::sidebar::SidebarModel::default();
-        model.apply(&DaemonMessage::Repos {
-            repos: vec![repo("r1", "D:\\r1"), repo("r2", "D:\\r2")],
-        });
-        model.apply(&DaemonMessage::Workspaces {
-            workspaces: vec![workspace("w1", &[])],
-        });
-        model.apply(&DaemonMessage::Sessions {
-            sessions: vec![
-                in_repo("a", "r1"),
-                in_repo("b", "r1"),
-                in_repo("c", "r1"),
-                in_repo("d", "r2"),
-                shell("sh", Some("C:\\elsewhere"), SessionKind::Standalone),
-                shell("dir", Some("C:\\other\\proj"), SessionKind::Single),
-                in_repo("x", "gone"),
-            ],
-        });
+        model.apply(
+            &crate::target::HostKey::Local,
+            &DaemonMessage::Repos {
+                repos: vec![repo("r1", "D:\\r1"), repo("r2", "D:\\r2")],
+            },
+        );
+        model.apply(
+            &crate::target::HostKey::Local,
+            &DaemonMessage::Workspaces {
+                workspaces: vec![workspace("w1", &[])],
+            },
+        );
+        model.apply(
+            &crate::target::HostKey::Local,
+            &DaemonMessage::Sessions {
+                sessions: vec![
+                    in_repo("a", "r1"),
+                    in_repo("b", "r1"),
+                    in_repo("c", "r1"),
+                    in_repo("d", "r2"),
+                    shell("sh", Some("C:\\elsewhere"), SessionKind::Standalone),
+                    shell("dir", Some("C:\\other\\proj"), SessionKind::Single),
+                    in_repo("x", "gone"),
+                ],
+            },
+        );
         model.containers()
     }
 
@@ -1621,9 +1630,12 @@ mod tests {
         use crate::sidebar::tests::session;
         use protocol::DaemonMessage;
         let mut model = crate::sidebar::SidebarModel::default();
-        model.apply(&DaemonMessage::Sessions {
-            sessions: vec![session("a"), session("b"), session("c"), session("u")],
-        });
+        model.apply(
+            &crate::target::HostKey::Local,
+            &DaemonMessage::Sessions {
+                sessions: vec![session("a"), session("b"), session("c"), session("u")],
+            },
+        );
         model.tab_containers(&[
             tab(
                 "t1",

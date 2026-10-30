@@ -715,6 +715,9 @@ pub struct RootView {
     /// state machine as its network thread last reported it, and the
     /// daemon's handshake.
     hosts: Hosts,
+    /// Opens a host's connection: the boot target's at construction, and
+    /// each host [`Self::connect_host`] adds after.
+    open_host: Transport,
     /// The terminals' clock.
     now: Clock,
     /// Repos, workspaces and every session the daemon knows, plus the
@@ -862,8 +865,6 @@ pub struct RootView {
     remote_access_tab: Option<settings_view::RemoteAccessTab>,
     /// Each agent's launch command as this connection last heard it.
     agent_commands: Option<HashMap<protocol::AgentId, protocol::AgentCommandEntry>>,
-    /// The daemon's agents, in its order, as this connection last heard them.
-    agents: Vec<protocol::AgentDescriptor>,
     /// Each agent's Settings page values as this connection last heard them.
     agent_settings: std::collections::BTreeMap<protocol::AgentId, protocol::OptionValues>,
     /// Whether this connection has heard the agents' Settings values.
@@ -902,9 +903,10 @@ pub struct RootView {
     /// last press left off and one change does not undo another still on
     /// its way.
     pending_appearance: appearance::InFlightAppearance,
-    /// The sessions this connection has had a snapshot of. A status the
-    /// sidebar kept from before a reconnect says nothing about an exit.
-    seen_sessions: HashSet<String>,
+    /// The sessions each host's connection has had a snapshot of. A
+    /// status the sidebar kept from before a reconnect says nothing about
+    /// an exit.
+    seen_sessions: HashMap<HostKey, HashSet<String>>,
     /// When the pending layout save is due, if one is.
     ui_save_deadline: Option<Instant>,
     /// Wakes the view when the layout save is due.
@@ -1295,6 +1297,7 @@ impl RootView {
         let chat = chat_view::ChatPanes::new(chat_view::WallClock::starting_at(now()));
         let mut view = Self {
             hosts: Hosts::new(HostConn::new(tx, boot_target)),
+            open_host,
             now,
             tabs: TabsModel::new(ui.active_tab_id.clone()),
             sidebar: {
@@ -1357,7 +1360,6 @@ impl RootView {
             remote_status: None,
             remote_access_tab: None,
             agent_commands: None,
-            agents: Vec::new(),
             agent_settings: std::collections::BTreeMap::new(),
             agent_settings_received: false,
             agent_settings_pending: std::collections::BTreeMap::new(),
@@ -1372,7 +1374,7 @@ impl RootView {
             tab_menu_focus: cx.focus_handle(),
             pane_ui: pane_menu::PaneUi::new(cx.focus_handle(), cx.focus_handle()),
             pending_appearance: appearance::InFlightAppearance::default(),
-            seen_sessions: HashSet::new(),
+            seen_sessions: HashMap::new(),
             ui_save_deadline: None,
             ui_save_timer: None,
             auto_grid_timer: None,
@@ -1647,8 +1649,8 @@ impl RootView {
         let title = popouts::title(
             &key,
             self.tabs.tabs(),
-            self.sidebar.sessions(),
-            &self.agents,
+            self.sidebar.local_sessions(),
+            self.sidebar.agents(&crate::target::HostKey::Local),
         );
         let focus = self.popout_focus(&key, cx);
         let opening = PopoutOpening {
@@ -1942,7 +1944,11 @@ impl RootView {
     /// Sets each open pop-out window's title to what its content now reads,
     /// after a rename or a re-bind; a title that did not change is left.
     fn refresh_popout_titles(&mut self, cx: &mut Context<Self>) {
-        let (tabs, sessions, agents) = (self.tabs.tabs(), self.sidebar.sessions(), &self.agents);
+        let (tabs, sessions, agents) = (
+            self.tabs.tabs(),
+            self.sidebar.local_sessions(),
+            self.sidebar.agents(&crate::target::HostKey::Local),
+        );
         for (key, popout) in &mut self.popout_windows {
             let title = popouts::title(key, tabs, sessions, agents);
             if title == popout.title {
@@ -2956,7 +2962,7 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let placement = self.tabs.place(session, self.sidebar.sessions());
+        let placement = self.tabs.place(session, self.sidebar.local_sessions());
         let request_id = match &placement {
             Placement::NewTab => {
                 let request_id = new_request_id();
@@ -3386,11 +3392,12 @@ impl RootView {
     /// session is gone. Answers whether the message folded a tab list.
     fn fold_tabs_and_drop_stale_menus(
         &mut self,
+        host: &HostKey,
         msg: &DaemonMessage,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let folded = self.fold_tabs(msg, window, cx);
+        let folded = *host == HostKey::Local && self.fold_tabs(msg, window, cx);
         self.drop_stale_container_menu(window, cx);
         if folded {
             self.pane_drop = None;
@@ -3510,28 +3517,37 @@ impl RootView {
                 // Everything the old target's daemon sent goes before the
                 // new target's state does, so the notices the rest of this
                 // arm raises survive it.
-                if conn.target() != self.conn().target() {
-                    self.reset_for_target(conn.target(), window, cx);
+                let moved = self
+                    .conn_of(host)
+                    .is_some_and(|old| old.target() != conn.target());
+                if moved {
+                    self.clear_host_slice(host, conn.target(), window, cx);
                 }
+                // A remote host's disconnect clears nothing: its slice stays
+                // as it last stood. Its agents go with the connection.
                 if !conn.is_open() {
+                    self.forget_agents(host);
+                }
+                if !conn.is_open() && *host == HostKey::Local {
                     self.set_keep_awake(None);
                     self.forget_agent_commands();
-                    self.forget_agents();
                     self.agent_tabs.forget_applies();
                     self.launch_last.clear();
                 }
                 // The handshake is the old target's daemon's.
-                if conn.target() != self.conn().target() {
+                if moved {
                     self.clear_handshake(host);
                 }
                 // A fetch streams over the connection it was asked on, and
                 // the remote access status is that connection's daemon's.
-                if !conn.is_open() || conn.target() != self.conn().target() {
+                if (!conn.is_open() || moved) && *host == HostKey::Local {
                     self.end_fetches_on_disconnect(window, cx);
                     self.set_remote_status(None, cx);
                 }
                 self.set_conn(host, conn);
-                self.follow_settings_target();
+                if *host == HostKey::Local {
+                    self.follow_settings_target();
+                }
             }
             NetEvent::Handshake(info) => self.set_handshake(host, info),
             NetEvent::Message(msg) => {
@@ -3603,11 +3619,11 @@ impl RootView {
     /// You list re-arms the panel's repaint, so its cycle follows the
     /// youngest wait rather than the list as it stood when the timer was
     /// armed.
-    fn fold_sidebar(&mut self, msg: &DaemonMessage, cx: &mut Context<Self>) {
+    fn fold_sidebar(&mut self, host: &HostKey, msg: &DaemonMessage, cx: &mut Context<Self>) {
         let before = moves_needs_you(msg).then(|| self.needs_you_list());
         let focused = self.shown_session();
         self.sidebar.set_focused_session(focused.as_deref());
-        self.sidebar.apply(msg);
+        self.sidebar.apply(host, msg);
         // A session focused in a pop-out is shown too: a turn ending there
         // is seen.
         if let Some(session) = self.popout_focused_session() {
@@ -3663,8 +3679,8 @@ impl RootView {
     ) {
         // The sidebar takes the message before the panes do, so what a
         // snapshot changed is read from the old one.
-        let (moved, exit_discard, finished) = self.before_fold(&msg);
-        self.fold_sidebar(&msg, cx);
+        let (moved, exit_discard, finished) = self.before_fold(host, &msg);
+        self.fold_sidebar(host, &msg, cx);
         self.on_import_message(&msg, window, cx);
         if let Some(discard) = exit_discard {
             self.send_to(host, discard);
@@ -3682,29 +3698,33 @@ impl RootView {
         if self.on_vscode_message(&msg, window, cx) {
             return;
         }
-        if let DaemonMessage::Tabs { tabs } = &msg {
+        // Tabs are This PC's layout: a remote host's tab messages fold nowhere.
+        if let DaemonMessage::Tabs { tabs } = &msg
+            && *host == HostKey::Local
+        {
             self.on_tab_list(tabs, window, cx);
         }
-        if self.fold_tabs_and_drop_stale_menus(&msg, window, cx) {
+        if self.fold_tabs_and_drop_stale_menus(host, &msg, window, cx) {
             return;
         }
         if self.on_notice_message(&msg, cx) {
             return;
         }
-        self.dispatch_message(msg, moved, window, cx);
+        self.dispatch_message(host, msg, moved, window, cx);
     }
 
     /// Hands a daemon message the folds before it did not take to its
     /// handler; `moved` is whether a session update moved the session.
     fn dispatch_message(
         &mut self,
+        host: &HostKey,
         msg: DaemonMessage,
         moved: Option<bool>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         match msg {
-            DaemonMessage::Welcome { .. } => self.on_welcome(window, cx),
+            DaemonMessage::Welcome { .. } => self.on_welcome(host, window, cx),
             DaemonMessage::Error {
                 message,
                 request_id: id,
@@ -3734,7 +3754,7 @@ impl RootView {
                 active_session_count,
                 clonable,
             } => self.open_layout_chooser(has_legacy, active_session_count, clonable, window, cx),
-            DaemonMessage::Sessions { sessions } => self.on_sessions(&sessions, window, cx),
+            DaemonMessage::Sessions { sessions } => self.on_sessions(host, &sessions, window, cx),
             DaemonMessage::Scrollback {
                 session_id,
                 data_b64,
@@ -3770,19 +3790,21 @@ impl RootView {
                 members,
             } => self.on_discard_preview(&session_id, &members, cx),
             DaemonMessage::ShutdownAck {} => self.on_shutdown_ack(cx),
-            DaemonMessage::Repos { repos } => self.on_repos(&repos, cx),
+            DaemonMessage::Repos { repos } => self.on_repos(host, &repos, cx),
             DaemonMessage::Workspaces { workspaces } => self.on_workspaces(&workspaces, window, cx),
             msg @ DaemonMessage::KeepAwakeStatus { .. } => self.on_keep_awake_status(&msg),
             msg @ DaemonMessage::RemoteStatus { .. } => self.on_remote_status(msg, cx),
             msg @ DaemonMessage::AgentCommands { .. } => self.on_agent_commands(msg, cx),
-            other => self.fold_chat_or_agents(other, cx),
+            other => self.fold_chat_or_agents(host, other, cx),
         }
     }
 
     /// A fresh repo list from the daemon: the source-control panel drops the
     /// repos that are gone, and the sidebar's containers re-render.
-    fn on_repos(&mut self, repos: &[RepoEntry], cx: &mut Context<Self>) {
-        self.prune_source_control(repos);
+    fn on_repos(&mut self, host: &HostKey, repos: &[RepoEntry], cx: &mut Context<Self>) {
+        if *host == HostKey::Local {
+            self.prune_source_control(repos);
+        }
         self.on_containers_changed(cx);
     }
 
@@ -3813,7 +3835,9 @@ impl RootView {
         let label = session
             .agent
             .as_ref()
-            .and_then(|id| crate::agent_options::descriptor_for(&self.agents, id))
+            .and_then(|id| {
+                crate::agent_options::descriptor_for(self.sidebar.session_agents(session_id), id)
+            })
             .map(|descriptor| descriptor.label.clone());
         self.push_toast_spec(
             notices::agent_exited_toast(session_id, label.as_deref()),
@@ -3972,8 +3996,11 @@ impl RootView {
     /// A new connection: fresh panes, nothing in flight, every dialog, menu
     /// and notice of the old one closed, and the session history asked for
     /// afresh.
-    fn on_welcome(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.reset_for_new_daemon(window, cx);
+    fn on_welcome(&mut self, host: &HostKey, window: &mut Window, cx: &mut Context<Self>) {
+        self.reset_host(host, window, cx);
+        if *host != HostKey::Local {
+            return;
+        }
         self.reset_recover(window, cx);
         self.reset_devices(window, cx);
         self.ask_pending_devices();
@@ -3986,13 +4013,23 @@ impl RootView {
     /// click, no drag goes on, and the exit dialog opened for it closes.
     /// Sends nothing to either daemon and saves nothing; the new daemon's
     /// lists fill the view again, and back on this PC its saved tab shows.
-    fn reset_for_target(
+    fn clear_host_slice(
         &mut self,
+        host: &HostKey,
         target: &target::Target,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         tracing::info!("connection target changed: clearing the old daemon's state");
+        if *host != HostKey::Local {
+            self.reset_host(host, window, cx);
+            self.sidebar.clear_host(host);
+            self.seen_sessions.remove(host);
+            self.drop_stale_session_ui(window, cx);
+            self.prune_container_row_focus();
+            cx.notify();
+            return;
+        }
         if self.popout_restore == PopoutRestore::Waiting {
             tracing::info!(
                 "left the boot target before the saved pop-outs reopened; \
@@ -4004,8 +4041,8 @@ impl RootView {
         self.pane_ui.move_panes = None;
         self.pane_ui.menu = None;
         self.drag = None;
-        self.reset_for_new_daemon(window, cx);
-        self.sidebar.clear_daemon_state();
+        self.reset_host(host, window, cx);
+        self.sidebar.clear_host(host);
         let restored_active = if target.is_local() {
             self.sidebar.ui_state().active_tab_id.clone()
         } else {
@@ -4015,7 +4052,7 @@ impl RootView {
         self.panes.clear();
         self.chat = chat_view::ChatPanes::new(self.chat.wall_clock());
         self.sessions_loaded = false;
-        self.seen_sessions.clear();
+        self.seen_sessions.remove(host);
         self.last_focused_session = None;
         self.last_active_tab = None;
         self.retries = RetryGate::default();
@@ -4048,13 +4085,18 @@ impl RootView {
         cx.notify();
     }
 
-    /// The part of a new connection's reset that sends nothing: fresh
-    /// panes, nothing in flight, and every dialog, menu and notice of the
-    /// old connection closed.
-    fn reset_for_new_daemon(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// The part of a new connection's reset that sends nothing. This PC's:
+    /// fresh panes, nothing in flight, and every dialog, menu and notice of
+    /// the old connection closed. A remote host's: its agents go, and only
+    /// what showed one of its sessions closes; the window's dialogs stay.
+    fn reset_host(&mut self, host: &HostKey, window: &mut Window, cx: &mut Context<Self>) {
+        self.forget_agents(host);
+        if *host != HostKey::Local {
+            self.drop_stale_session_ui(window, cx);
+            return;
+        }
         self.set_keep_awake(None);
         self.forget_agent_commands();
-        self.forget_agents();
         self.agent_tabs = settings_view::AgentTabs::default();
         self.set_remote_status(None, cx);
         self.reset_panes(cx);
@@ -4103,19 +4145,25 @@ impl RootView {
     /// whether a session snapshot moved its appearance, the discard its exit
     /// calls for, and whether it ended the session's turn. A relist or a
     /// reconnect never ends one.
-    fn before_fold(&mut self, msg: &DaemonMessage) -> (Option<bool>, Option<ClientMessage>, bool) {
+    fn before_fold(
+        &mut self,
+        host: &HostKey,
+        msg: &DaemonMessage,
+    ) -> (Option<bool>, Option<ClientMessage>, bool) {
         match msg {
-            DaemonMessage::Welcome { .. } => self.seen_sessions.clear(),
+            DaemonMessage::Welcome { .. } => {
+                self.seen_sessions.remove(host);
+            }
             DaemonMessage::SessionRemoved { session_id } => {
-                self.seen_sessions.remove(session_id);
+                self.seen_by(host).remove(session_id);
             }
             DaemonMessage::Sessions { sessions } => {
-                self.seen_sessions = sessions.iter().map(|s| s.id.clone()).collect();
+                *self.seen_by(host) = sessions.iter().map(|s| s.id.clone()).collect();
             }
             DaemonMessage::SessionUpdated { session, .. } => {
-                let discard = self.exit_discard(session);
+                let discard = self.exit_discard(host, session);
                 let finished = crate::notify::finished(self.sidebar.session(&session.id), session);
-                self.seen_sessions.insert(session.id.clone());
+                self.seen_by(host).insert(session.id.clone());
                 return (Some(self.appearance_moved(session)), discard, finished);
             }
             _ => {}
@@ -4126,11 +4174,11 @@ impl RootView {
     /// The discard of a session with no worktree of its own that `session`
     /// shows just exited by itself, read against the status the sidebar
     /// holds from this connection: there is nothing left to keep.
-    fn exit_discard(&self, session: &SessionSnapshot) -> Option<ClientMessage> {
+    fn exit_discard(&self, host: &HostKey, session: &SessionSnapshot) -> Option<ClientMessage> {
         let prev = self
             .sidebar
             .session(&session.id)
-            .filter(|_| self.seen_sessions.contains(&session.id))
+            .filter(|_| self.has_seen(host, &session.id))
             .map(|before| before.status);
         (self_exited(prev, session) && !session.has_per_session_worktree).then(|| {
             ClientMessage::DiscardSession {
@@ -4138,6 +4186,23 @@ impl RootView {
                 cleanup: Vec::new(),
             }
         })
+    }
+
+    /// The sessions `host`'s connection has had a snapshot of, to update.
+    fn seen_by(&mut self, host: &HostKey) -> &mut HashSet<String> {
+        self.seen_sessions.entry(host.clone()).or_default()
+    }
+
+    /// Whether `host`'s connection has had a snapshot of session `id`.
+    fn has_seen(&self, host: &HostKey, id: &str) -> bool {
+        self.seen_sessions
+            .get(host)
+            .is_some_and(|seen| seen.contains(id))
+    }
+
+    /// How many sessions `host`'s connection has had a snapshot of.
+    pub(crate) fn seen_count(&self, host: &HostKey) -> usize {
+        self.seen_sessions.get(host).map_or(0, HashSet::len)
     }
 
     /// A session's snapshot: every pane showing it refreshes, the size it
@@ -4152,7 +4217,9 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         for view in self.pane_views(Some(&session.id)) {
-            view.update(cx, |pane, _| pane.update_session(session, &self.agents));
+            view.update(cx, |pane, _| {
+                pane.update_session(session, self.sidebar.session_agents(&session.id));
+            });
         }
         let own_change = request_id
             .is_some_and(|request_id| self.pending_appearance.answered(&session.id, request_id));
@@ -4172,13 +4239,19 @@ impl RootView {
     /// resolves to, and the session named on the command line is focused.
     fn on_sessions(
         &mut self,
+        host: &HostKey,
         sessions: &[SessionSnapshot],
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.sessions_loaded = true;
+        // The layout home's list gates the wanted session and the pop-outs.
+        if *host == HostKey::Local {
+            self.sessions_loaded = true;
+        }
         for view in self.pane_views(None) {
-            view.update(cx, |pane, _| pane.refresh_sessions(sessions, &self.agents));
+            view.update(cx, |pane, _| {
+                pane.refresh_sessions(sessions, self.sidebar.agents(host));
+            });
         }
         self.attach_waiting_panes(cx);
         self.apply_pane_fonts(false, cx);
@@ -4609,7 +4682,12 @@ impl RootView {
     fn session_label(&self, id: &str) -> String {
         self.sidebar.session(id).map_or_else(
             || id.to_owned(),
-            |session| crate::sidebar::display_label(session, &self.agents),
+            |session| {
+                crate::sidebar::display_label(
+                    session,
+                    self.sidebar.agents(&crate::target::HostKey::Local),
+                )
+            },
         )
     }
 }
@@ -4686,7 +4764,7 @@ impl Render for RootView {
         if !cx.has_active_drag() {
             self.clear_drag_state();
         }
-        let footer = self.conn().footer(self.sidebar.sessions().len());
+        let footer = self.conn().footer(self.sidebar.local_sessions().len());
         let flyout = self
             .flyout_open
             .then(|| [flyout_backdrop(cx).into_any_element(), self.flyout(cx)]);
@@ -4828,7 +4906,7 @@ impl RootView {
                 this.open_connection_picker(window, cx);
             }));
         let text = footer.pill();
-        let counts = status_counts(self.sidebar.sessions(), |id| self.sidebar.is_unseen(id));
+        let counts = status_counts(self.sidebar.all_sessions(), |id| self.sidebar.is_unseen(id));
         let pill = div()
             .id("daemon-pill")
             .debug_selector(|| "daemon-pill".to_owned())
@@ -4889,7 +4967,11 @@ impl RootView {
     fn flyout(&self, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         let manages_daemon = self.capabilities().manages_daemon();
-        let rows = flyout_rows(self.conn(), self.handshake(), self.sidebar.sessions().len());
+        let rows = flyout_rows(
+            self.conn(),
+            self.handshake(),
+            self.sidebar.local_sessions().len(),
+        );
         let labels: Vec<&'static str> = rows.iter().map(|(label, _)| *label).collect();
         let details = div()
             .debug_selector(move || format!("flyout-details={}", labels.join("|")))

@@ -45,7 +45,7 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         let key = container_key(level);
-        let sessions = live_owned_sessions(level, self.sidebar.sessions(), &self.sidebar);
+        let sessions = live_owned_sessions(level, self.sidebar.local_sessions(), &self.sidebar);
         if sessions.is_empty() {
             if self.repo_remove.armed() == Some(key.as_str()) {
                 self.repo_remove.disarm();

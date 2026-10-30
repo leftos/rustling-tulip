@@ -603,7 +603,7 @@ impl RootView {
             focused: focused.as_deref().and_then(|id| self.sidebar.session(id)),
             tabs: TabChoices::from_tabs(self.tabs.tabs(), self.tabs.active_id()),
             spawn_defaults: self.sidebar.ui_state().spawn,
-            agents: &self.agents,
+            agents: self.sidebar.agents(&crate::target::HostKey::Local),
             agent_settings: &self.agent_settings,
             lock,
         };

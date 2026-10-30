@@ -483,8 +483,9 @@ impl RootView {
             .values_mut()
             .filter(|slot| slot.session.as_deref() == Some(session_id))
         {
-            slot.view
-                .update(cx, |pane, cx| pane.attach(&session, &self.agents, cx));
+            slot.view.update(cx, |pane, cx| {
+                pane.attach(&session, self.sidebar.session_agents(session_id), cx);
+            });
             slot.attached = true;
             attached = true;
         }
@@ -1498,7 +1499,9 @@ impl RootView {
             .and_then(|id| self.sidebar.session(id))
             .map_or_else(
                 || drag::EMPTY_PANE_LABEL.to_owned(),
-                |session| display_label(session, &self.agents),
+                |session| {
+                    display_label(session, self.sidebar.agents(&crate::target::HostKey::Local))
+                },
             );
         let focus_key = key.clone();
         let focus = BorderedButton {
@@ -1648,7 +1651,11 @@ impl RootView {
             .debug_selector(|| name);
             return popout_column(toolbar, note.into_any_element());
         };
-        let parts = header_parts(session, self.sidebar.is_unseen(session_id), &self.agents);
+        let parts = header_parts(
+            session,
+            self.sidebar.is_unseen(session_id),
+            self.sidebar.agents(&crate::target::HostKey::Local),
+        );
         let title = header_title(&slot_id, Some(&parts), cx);
         let mut controls = self.header_stop(&slot_id, Some(session_id), StopPlace::Popout, cx);
         controls.push(Self::popout_close_window(&slot_id, cx));
@@ -1779,7 +1786,11 @@ impl RootView {
         let parts = session_id
             .and_then(|id| self.sidebar.session(id))
             .map(|session| {
-                header_parts(session, self.sidebar.is_unseen(&session.id), &self.agents)
+                header_parts(
+                    session,
+                    self.sidebar.is_unseen(&session.id),
+                    self.sidebar.agents(&crate::target::HostKey::Local),
+                )
             });
         let menu_ids = (tab_id.to_owned(), pane_id.to_owned());
         let menu_session = session_id.map(str::to_owned);
@@ -1954,7 +1965,7 @@ impl RootView {
             };
             let (edge, drop) = drag::leaf_drop(
                 &self.tabs,
-                self.sidebar.sessions(),
+                self.sidebar.local_sessions(),
                 session_id,
                 &target,
                 request_id,
@@ -2088,8 +2099,13 @@ impl RootView {
     /// session; `None` for an empty pane.
     #[must_use]
     pub fn pane_header_parts(&self, pane_id: &str) -> Option<PaneHeaderParts> {
-        self.active_pane_session(pane_id)
-            .map(|session| header_parts(session, self.sidebar.is_unseen(&session.id), &self.agents))
+        self.active_pane_session(pane_id).map(|session| {
+            header_parts(
+                session,
+                self.sidebar.is_unseen(&session.id),
+                self.sidebar.agents(&crate::target::HostKey::Local),
+            )
+        })
     }
 
     /// What the toolbar of pane `pane_id`'s pop-out shows of its session,
@@ -2098,8 +2114,13 @@ impl RootView {
     #[must_use]
     pub fn popout_header_parts(&self, pane_id: &str) -> Option<PaneHeaderParts> {
         self.popouts.popped_key(pane_id)?;
-        self.popped_pane_session(pane_id)
-            .map(|session| header_parts(session, self.sidebar.is_unseen(&session.id), &self.agents))
+        self.popped_pane_session(pane_id).map(|session| {
+            header_parts(
+                session,
+                self.sidebar.is_unseen(&session.id),
+                self.sidebar.agents(&crate::target::HostKey::Local),
+            )
+        })
     }
 
     /// The pop-out toolbar's "in {tab name}": the tab pane `pane_id` is

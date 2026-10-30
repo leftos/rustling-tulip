@@ -924,6 +924,8 @@ pub struct Harness<'a> {
     tokens: Arc<MemoryTokens>,
     /// The updater the client checks, installs and reads back through.
     updater: Arc<UpdaterRecorder>,
+    /// The fake-daemon ends of every host the window opened after This PC.
+    extra_hosts: ExtraHosts,
 }
 
 /// A folder picker that answers with the folder a spec set, as the test
@@ -1384,24 +1386,38 @@ pub fn quit_recorder(quits: &Rc<Cell<usize>>) -> QuitFn {
 }
 
 /// The fake-daemon ends of a connection the window opened after its first:
-/// the target it was opened for, the sender its events go on and the
-/// receiver its commands arrive on.
-type ExtraHost = (
-    Target,
-    UnboundedSender<NetEvent>,
-    UnboundedReceiver<NetCommand>,
-);
+/// the target it was opened for, the sender its events go on, the receiver
+/// its commands arrive on, and what the client sent on it not yet read.
+pub struct ExtraHost {
+    target: Target,
+    events: UnboundedSender<NetEvent>,
+    commands: UnboundedReceiver<NetCommand>,
+    unread: Vec<ClientMessage>,
+    other_commands: Vec<NetCommand>,
+}
+
+/// The connections a window opened after its first, in order.
+pub type ExtraHosts = Rc<RefCell<Vec<ExtraHost>>>;
 
 /// A transport that hands out `first` on its first call and a fresh pair on
-/// any later one, keeping that pair's other ends in its `extra_hosts`, and
-/// records every target it is asked for in `opened`.
+/// any later one, and records every target it is asked for in `opened`.
 pub fn fake_transport(
     first: (UnboundedSender<NetCommand>, UnboundedReceiver<NetEvent>),
     opened: &Rc<RefCell<Vec<Target>>>,
 ) -> Transport {
+    fake_transport_sharing(first, opened, &ExtraHosts::default())
+}
+
+/// [`fake_transport`], keeping each later pair's fake-daemon ends in
+/// `extra_hosts`, where [`Harness::host`] reaches them.
+pub fn fake_transport_sharing(
+    first: (UnboundedSender<NetCommand>, UnboundedReceiver<NetEvent>),
+    opened: &Rc<RefCell<Vec<Target>>>,
+    extra_hosts: &ExtraHosts,
+) -> Transport {
     let first = RefCell::new(Some(first));
     let opened = Rc::clone(opened);
-    let extra_hosts: RefCell<Vec<ExtraHost>> = RefCell::new(Vec::new());
+    let extra_hosts = Rc::clone(extra_hosts);
     Rc::new(move |target: &Target| {
         opened.borrow_mut().push(target.clone());
         if let Some(pair) = first.borrow_mut().take() {
@@ -1409,11 +1425,92 @@ pub fn fake_transport(
         }
         let (tx, commands) = unbounded();
         let (events, rx) = unbounded();
-        extra_hosts
-            .borrow_mut()
-            .push((target.clone(), events, commands));
+        extra_hosts.borrow_mut().push(ExtraHost {
+            target: target.clone(),
+            events,
+            commands,
+            unread: Vec::new(),
+            other_commands: Vec::new(),
+        });
         (tx, rx)
     })
+}
+
+/// A host the window holds beside This PC's, as a spec drives its fake
+/// daemon: what [`Harness::send`] and [`Harness::sent`] are for This PC.
+pub struct HostHandle<'h, 'a> {
+    harness: &'h mut Harness<'a>,
+    target: Target,
+}
+
+impl HostHandle<'_, '_> {
+    /// Runs `act` on this host's fake-daemon ends.
+    fn wire<R>(&mut self, act: impl FnOnce(&mut ExtraHost) -> R) -> R {
+        let mut hosts = self.harness.extra_hosts.borrow_mut();
+        let host = hosts
+            .iter_mut()
+            .find(|host| host.target == self.target)
+            .expect("the window opened a connection to the host's target");
+        act(host)
+    }
+
+    /// Delivers `event` on this host's connection and lets the view settle.
+    pub fn event(&mut self, event: NetEvent) {
+        self.wire(|host| host.events.unbounded_send(event))
+            .expect("the root view listens");
+        self.harness.cx.run_until_parked();
+    }
+
+    /// Delivers `msg` from this host's daemon and lets the view settle.
+    pub fn send(&mut self, msg: DaemonMessage) {
+        self.event(NetEvent::Message(Box::new(msg)));
+    }
+
+    /// Reports this host's connection open and welcomed, then what its
+    /// daemon sends first: `Welcome`, its agents and their Settings values.
+    /// A tailnet host reports no handshake.
+    pub fn connect(&mut self) {
+        let target = self.target.clone();
+        self.event(NetEvent::State(connected_to(
+            target,
+            8787,
+            daemon_features(),
+        )));
+        self.send(welcome(PROTOCOL));
+        self.send(DaemonMessage::Agents {
+            agents: agent_registry::descriptors(),
+        });
+        self.send(DaemonMessage::AgentSettings {
+            settings: BTreeMap::new(),
+        });
+        self.sent();
+    }
+
+    /// Every message the client sent on this host's connection since the
+    /// last call.
+    pub fn sent(&mut self) -> Vec<ClientMessage> {
+        self.drain();
+        self.wire(|host| std::mem::take(&mut host.unread))
+    }
+
+    /// Every command other than a message the client sent on this host's
+    /// connection since the last call.
+    pub fn commands(&mut self) -> Vec<NetCommand> {
+        self.drain();
+        self.wire(|host| std::mem::take(&mut host.other_commands))
+    }
+
+    fn drain(&mut self) {
+        self.harness.cx.run_until_parked();
+        self.wire(|host| {
+            while let Ok(command) = host.commands.try_recv() {
+                match command {
+                    NetCommand::Send(msg) => host.unread.push(*msg),
+                    other => host.other_commands.push(other),
+                }
+            }
+        });
+    }
 }
 
 impl<'a> Harness<'a> {
@@ -1478,8 +1575,9 @@ impl<'a> Harness<'a> {
         let autostart = Arc::new(AutostartRecorder::default());
         let tokens = Arc::new(MemoryTokens::default());
         let opened = Rc::new(RefCell::new(Vec::new()));
+        let extra_hosts = ExtraHosts::default();
         let deps = RootDeps {
-            open_host: fake_transport((tx, rx), &opened),
+            open_host: fake_transport_sharing((tx, rx), &opened, &extra_hosts),
             ui_dir: Some(dir.path().to_path_buf()),
             paths: Err("specs have no config dir".to_owned()),
             wanted: wanted.map(str::to_owned),
@@ -1511,6 +1609,7 @@ impl<'a> Harness<'a> {
             autostart,
             tokens,
             updater,
+            extra_hosts,
         };
         harness.count_the_window_hovered();
         harness.connect();
@@ -1540,8 +1639,9 @@ impl<'a> Harness<'a> {
         let autostart = Arc::new(AutostartRecorder::default());
         let tokens = Arc::new(MemoryTokens::default());
         let opened = Rc::new(RefCell::new(Vec::new()));
+        let extra_hosts = ExtraHosts::default();
         let deps = RootDeps {
-            open_host: fake_transport((tx, rx), &opened),
+            open_host: fake_transport_sharing((tx, rx), &opened, &extra_hosts),
             ui_dir: Some(dir.path().to_path_buf()),
             paths: Err("specs have no config dir".to_owned()),
             wanted: None,
@@ -1573,6 +1673,7 @@ impl<'a> Harness<'a> {
             autostart,
             tokens,
             updater,
+            extra_hosts,
         };
         harness.count_the_window_hovered();
         harness.pin_contrast();
@@ -2181,6 +2282,24 @@ impl<'a> Harness<'a> {
     }
 
     /// Runs `change` on the root view, then lets the view settle.
+    /// The host at `target`, beside This PC: the window connects to it
+    /// through [`RootView::connect_host`] the first time a spec asks.
+    pub fn host(&mut self, target: &Target) -> HostHandle<'_, 'a> {
+        let known = self
+            .extra_hosts
+            .borrow()
+            .iter()
+            .any(|host| host.target == *target);
+        if !known {
+            let opening = target.clone();
+            self.root_update(|root, window, cx| root.connect_host(opening, window, cx));
+        }
+        HostHandle {
+            harness: self,
+            target: target.clone(),
+        }
+    }
+
     pub fn root_update<R>(
         &mut self,
         change: impl FnOnce(&mut RootView, &mut Window, &mut gpui::Context<RootView>) -> R,

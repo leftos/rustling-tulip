@@ -154,7 +154,8 @@ impl RootView {
     #[must_use]
     pub fn tab_badge(&self, tab_id: &str) -> Option<TabBadge> {
         let tab = self.tabs.tab(tab_id)?;
-        tab_session_counts(tab, self.sidebar.sessions())?.badge(self.sidebar.ui_state().title.count)
+        tab_session_counts(tab, self.sidebar.local_sessions())?
+            .badge(self.sidebar.ui_state().title.count)
     }
 
     /// Every line of `menu`: the Grid submenu alone while it is open, else
@@ -874,7 +875,7 @@ impl RootView {
             DragPayload::Leaf { session_id, .. } => {
                 let drop = drag::leaf_pill_drop(
                     &self.tabs,
-                    self.sidebar.sessions(),
+                    self.sidebar.local_sessions(),
                     session_id,
                     tab_id,
                     Some(crate::new_request_id()),

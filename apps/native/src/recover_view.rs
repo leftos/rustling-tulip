@@ -179,7 +179,7 @@ impl RootView {
                 .iter()
                 .map(|r| (r.id.clone(), r.name.clone()))
                 .collect(),
-            agents: self.agents.clone(),
+            agents: self.sidebar.agents(&crate::target::HostKey::Local).to_vec(),
         }
     }
 
@@ -330,7 +330,7 @@ impl RootView {
         if recovered.is_empty() {
             return;
         }
-        let messages = spawns::place_several(recovered, &self.tabs, self.sidebar.sessions());
+        let messages = spawns::place_several(recovered, &self.tabs, self.sidebar.local_sessions());
         tracing::info!(
             sessions = recovered.len(),
             requests = messages.len(),

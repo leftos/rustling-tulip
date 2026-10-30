@@ -272,7 +272,7 @@ impl RootView {
             DaemonMessage::SessionUpdated { .. } | DaemonMessage::SessionRemoved { .. } => {
                 if !self.awaiting_initial_sessions
                     && let Some(host) = self.host_count_key()
-                    && self.record_host_session_count(&host, self.seen_sessions.len())
+                    && self.record_host_session_count(&host, self.seen_count(&HostKey::Local))
                 {
                     self.schedule_ui_save(cx);
                 }

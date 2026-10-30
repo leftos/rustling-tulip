@@ -281,7 +281,7 @@ pub(crate) fn live_owned_sessions(
         .filter(|session| is_live(session) && owned_by(level, session, model))
         .map(|session| RepoRemoveSession {
             id: session.id.clone(),
-            label: crate::sidebar::display_label(session, model.agents()),
+            label: crate::sidebar::display_label(session, model.session_agents(&session.id)),
             agent: session
                 .agent
                 .as_ref()
@@ -317,15 +317,21 @@ mod tests {
     /// the registry it has to read.
     fn model(repos: &[&str], workspaces: &[(&str, &[&str])]) -> SidebarModel {
         let mut model = SidebarModel::default();
-        model.apply(&DaemonMessage::Repos {
-            repos: repos.iter().map(|id| repo(id)).collect(),
-        });
-        model.apply(&DaemonMessage::Workspaces {
-            workspaces: workspaces
-                .iter()
-                .map(|(id, members)| workspace(id, members))
-                .collect(),
-        });
+        model.apply(
+            &crate::target::HostKey::Local,
+            &DaemonMessage::Repos {
+                repos: repos.iter().map(|id| repo(id)).collect(),
+            },
+        );
+        model.apply(
+            &crate::target::HostKey::Local,
+            &DaemonMessage::Workspaces {
+                workspaces: workspaces
+                    .iter()
+                    .map(|(id, members)| workspace(id, members))
+                    .collect(),
+            },
+        );
         model
     }
 
