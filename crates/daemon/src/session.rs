@@ -1068,6 +1068,34 @@ impl SessionRegistry {
         self.update_from_if_changed(id, None, f)
     }
 
+    /// The owner answered session `id`'s pending prompt: a hook-driven record
+    /// leaves `AwaitingInput` at once, with no settle window, and drops its
+    /// pending input. The test and the clear share one registry update, so a
+    /// hook event cannot slip between them; a session without hooks is left
+    /// alone.
+    pub fn clear_answered_prompt(&self, id: &str) {
+        self.clear_answered_prompt_if(id, |_| true);
+    }
+
+    /// [`Self::clear_answered_prompt`], only while `still` holds for the
+    /// record, tested under the same lock.
+    pub fn clear_answered_prompt_if<F>(&self, id: &str, still: F)
+    where
+        F: FnOnce(&SessionRecord) -> bool,
+    {
+        self.update_if_changed(id, |rec| {
+            let waiting = rec.status == SessionStatus::AwaitingInput || rec.pending_input.is_some();
+            if !rec.hook_driven || !waiting || !still(rec) {
+                return false;
+            }
+            if rec.status == SessionStatus::AwaitingInput {
+                rec.status = SessionStatus::Idle;
+            }
+            rec.pending_input = None;
+            true
+        });
+    }
+
     /// [`Self::update`], where `f` also answers an event to send right after
     /// the update's `SessionUpdated`, decided under the same record lock.
     /// Returns whether the registry holds `id`.

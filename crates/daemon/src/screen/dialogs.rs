@@ -12,9 +12,10 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 use agent_api::{
-    AnswerRecipe, AnswerRefusal, ScreenWork, ViewGoal, ViewReading, ViewRefusal, ViewStep,
+    AnswerRecipe, AnswerRefusal, ScreenExpect, ScreenWork, ViewGoal, ViewReading, ViewRefusal,
+    ViewStep,
 };
-use protocol::{AgentId, ChatAnswerKind, ChatPrompt, ChatScreen};
+use protocol::{AgentId, ChatAnswerKind, ChatPrompt, ChatScreen, ComposerState};
 
 use super::Screen;
 
@@ -33,10 +34,6 @@ pub fn read(agent: &AgentId, screen: &Screen) -> Option<ChatScreen> {
     plugin.read_chat_screen(&screen.rows())
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "no session watcher reads the chat screen yet")
-)]
 /// The keys that give `answer` to `prompt`, as `agent`'s plugin types them.
 ///
 /// # Errors
@@ -120,6 +117,56 @@ pub fn prompt_identity(prompt: &ChatPrompt) -> u64 {
         tab.label.hash(&mut hasher);
     }
     hasher.finish()
+}
+
+/// Whether `now` is the reading `expect` waits for, the step having been
+/// typed on `before`. With no chat reading of the screen now, only
+/// [`ScreenExpect::Any`] holds.
+#[must_use]
+pub fn expect_holds(
+    expect: &ScreenExpect,
+    before: Option<&ChatScreen>,
+    now: Option<&ChatScreen>,
+) -> bool {
+    let identity = |screen: Option<&ChatScreen>| {
+        screen
+            .and_then(|screen| screen.prompt.as_ref())
+            .map(prompt_identity)
+    };
+    let Some(after) = now else {
+        return *expect == ScreenExpect::Any;
+    };
+    match expect {
+        ScreenExpect::DialogGone => {
+            after.prompt.is_none() && after.composer != ComposerState::Dialog
+        }
+        ScreenExpect::SameDialog => identity(before).is_some() && identity(before) == identity(now),
+        ScreenExpect::NextPrompt(kind) => {
+            after
+                .prompt
+                .as_ref()
+                .is_some_and(|prompt| &prompt.kind == kind)
+                && identity(before) != identity(now)
+        }
+        ScreenExpect::ComposerReady => {
+            matches!(
+                after.composer,
+                ComposerState::Ready | ComposerState::Working
+            )
+        }
+        ScreenExpect::OptionSelected(number) => after
+            .prompt
+            .as_ref()
+            .is_some_and(|prompt| prompt.cursor == Some(*number)),
+        ScreenExpect::OptionTicked(number, ticked) => after.prompt.as_ref().is_some_and(|prompt| {
+            prompt.multi
+                && prompt
+                    .options
+                    .iter()
+                    .any(|option| option.number == *number && option.selected == *ticked)
+        }),
+        ScreenExpect::Any => true,
+    }
 }
 
 #[cfg(test)]
@@ -1604,42 +1651,7 @@ mod tests {
     /// Whether `after` is the reading `expect` waits for, the step having
     /// been typed on `before`.
     fn holds(expect: &ScreenExpect, before: &ChatScreen, after: &ChatScreen) -> bool {
-        let identity = |screen: &ChatScreen| screen.prompt.as_ref().map(prompt_identity);
-        match expect {
-            ScreenExpect::DialogGone => {
-                after.prompt.is_none() && after.composer != ComposerState::Dialog
-            }
-            ScreenExpect::SameDialog => {
-                identity(before).is_some() && identity(before) == identity(after)
-            }
-            ScreenExpect::NextPrompt(kind) => {
-                after
-                    .prompt
-                    .as_ref()
-                    .is_some_and(|prompt| &prompt.kind == kind)
-                    && identity(before) != identity(after)
-            }
-            ScreenExpect::ComposerReady => {
-                matches!(
-                    after.composer,
-                    ComposerState::Ready | ComposerState::Working
-                )
-            }
-            ScreenExpect::OptionSelected(number) => after
-                .prompt
-                .as_ref()
-                .is_some_and(|prompt| prompt.cursor == Some(*number)),
-            ScreenExpect::OptionTicked(number, ticked) => {
-                after.prompt.as_ref().is_some_and(|prompt| {
-                    prompt.multi
-                        && prompt
-                            .options
-                            .iter()
-                            .any(|option| option.number == *number && option.selected == *ticked)
-                })
-            }
-            ScreenExpect::Any => true,
-        }
+        expect_holds(expect, Some(before), Some(after))
     }
 
     #[test]

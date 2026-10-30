@@ -609,13 +609,13 @@ const SEND_CEILING: Duration = Duration::from_secs(30);
 const PASTE_START: &[u8] = b"\x1b[200~";
 const PASTE_END: &[u8] = b"\x1b[201~";
 
-const NO_RESPONSE: &str = "the terminal did not respond";
+pub(crate) const NO_RESPONSE: &str = "the terminal did not respond";
 const LEFT_IN_BOX: &str = "the message was left in the box";
 const DRAFT: &str = "a draft is in the terminal's box";
 const DIALOG: &str = "a dialog is open in the terminal";
 const NOT_AT_PROMPT: &str = "the terminal is not at its prompt";
 const NO_RETURN: &str = "the terminal could not return to the main conversation";
-const OWNER_TYPED: &str = "someone typed in the terminal";
+pub(crate) const OWNER_TYPED: &str = "someone typed in the terminal";
 const NOT_SHOWN: &str = "the message did not appear in the box; it may be left there";
 const AGENT_ENDED: &str = "the agent is not running in this session";
 
@@ -663,7 +663,7 @@ pub struct TypeRefusal {
 }
 
 impl TypeRefusal {
-    fn refused(message: impl Into<String>) -> Self {
+    pub(crate) fn refused(message: impl Into<String>) -> Self {
         Self {
             code: CHAT_REFUSED,
             message: message.into(),
@@ -671,7 +671,7 @@ impl TypeRefusal {
     }
 
     /// A refusal after the paste, which stays in the terminal's box.
-    fn left_in_box(reason: &str) -> Self {
+    pub(crate) fn left_in_box(reason: &str) -> Self {
         Self::refused(format!("{reason}; {LEFT_IN_BOX}"))
     }
 
@@ -702,24 +702,12 @@ impl TypeRefusal {
 /// does not take the message, or changed under the send, or did not answer
 /// within [`SEND_CEILING`] ([`CHAT_REFUSED`]).
 pub async fn type_message(target: &TypeTarget, text: &str) -> Result<(), TypeRefusal> {
-    let lane = target.pty.typing();
-    // Another message is refused at once, never queued behind the one typed.
-    if let Some(holder @ (Holder::ChatSend | Holder::ChatAnswer)) = lane.holder() {
-        return Err(TypeRefusal::busy(Some(holder)));
-    }
-    let turn = lane
-        .take(Holder::ChatSend, SEND_LANE_WAIT)
-        .await
-        .map_err(TypeRefusal::busy)?;
-    let mut reader = ScreenReader::new(
-        Arc::clone(&target.pty),
-        Arc::clone(&target.screen),
-        target.agent.clone(),
-    );
+    let turn = take_lane(target, Holder::ChatSend).await?;
+    let mut reader = screen_reader(target);
     let mut pasted = false;
     let typed = timeout(
         SEND_CEILING,
-        send(target, &turn, &mut reader, text, &mut pasted),
+        type_message_under(target, &turn, &mut reader, text, &mut pasted),
     )
     .await;
     match typed {
@@ -733,8 +721,42 @@ pub async fn type_message(target: &TypeTarget, text: &str) -> Result<(), TypeRef
     Ok(())
 }
 
-/// The send's steps up to its Enter; sets `pasted` once the paste is typed.
-async fn send(
+/// `target`'s typing lane for `who`, a chat writer: refused at once while a
+/// send or an answer holds it, else once its holder has kept it for
+/// [`SEND_LANE_WAIT`].
+///
+/// # Errors
+///
+/// Another writer holds the lane ([`BUSY`]).
+pub(crate) async fn take_lane(target: &TypeTarget, who: Holder) -> Result<TypingTurn, TypeRefusal> {
+    let lane = target.pty.typing();
+    // Another message is refused at once, never queued behind the one typed.
+    if let Some(holder @ (Holder::ChatSend | Holder::ChatAnswer)) = lane.holder() {
+        return Err(TypeRefusal::busy(Some(holder)));
+    }
+    lane.take(who, SEND_LANE_WAIT)
+        .await
+        .map_err(TypeRefusal::busy)
+}
+
+/// A reader of `target`'s screen, for a writer that types into it.
+pub(crate) fn screen_reader(target: &TypeTarget) -> ScreenReader {
+    ScreenReader::new(
+        Arc::clone(&target.pty),
+        Arc::clone(&target.screen),
+        target.agent.clone(),
+    )
+}
+
+/// [`type_message`]'s steps up to its Enter, under a `turn` of the lane its
+/// caller already holds, read through `reader`; sets `pasted` once the paste
+/// is typed. Gives no ceiling and reads nothing after the Enter: those are
+/// the caller's.
+///
+/// # Errors
+///
+/// As [`type_message`], but for the lane and the ceiling.
+pub async fn type_message_under(
     target: &TypeTarget,
     turn: &TypingTurn,
     reader: &mut ScreenReader,
@@ -847,7 +869,7 @@ fn gate_in_main(target: &TypeTarget, reading: &Reading) -> Result<(), TypeRefusa
 /// Drive the terminal from an agent's view, read as `reading`, back to the
 /// main conversation, one key per settled reading; the reading that shows
 /// main.
-async fn return_to_main(
+pub(crate) async fn return_to_main(
     target: &TypeTarget,
     turn: &TypingTurn,
     reader: &mut ScreenReader,

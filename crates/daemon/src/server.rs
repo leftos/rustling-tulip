@@ -642,7 +642,8 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         | ClientMessage::UnloadChat { .. }
         | ClientMessage::LoadSummary { .. }
         | ClientMessage::UnloadSummary { .. }
-        | ClientMessage::ChatSend { .. }) => {
+        | ClientMessage::ChatSend { .. }
+        | ClientMessage::ChatAnswer { .. }) => {
             chat::handle(hub, m, ctx);
         }
         m @ (ClientMessage::ListRepos
@@ -887,15 +888,6 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         | ClientMessage::SetSummarizerKey { .. }
         | ClientMessage::TestSummary { .. }) => summarizer::handle(hub, m, ctx).await?,
         m @ ClientMessage::AnswerPrompt { .. } => refuse_not_supported_yet(m, out_tx),
-        ClientMessage::ChatAnswer { request_id, .. } => {
-            // Answering a prompt from the chat is not built, so an answer is
-            // refused with the reason rather than silently dropped.
-            let _ = out_tx.send(DaemonMessage::Error {
-                message: "sending from the chat is not supported yet".to_string(),
-                code: Some(protocol::error_codes::UNSUPPORTED_MESSAGE.to_owned()),
-                request_id,
-            });
-        }
     }
     Ok(())
 }

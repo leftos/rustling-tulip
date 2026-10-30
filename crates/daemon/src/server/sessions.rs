@@ -17,7 +17,7 @@ use anyhow::{Context as _, anyhow};
 use base64::Engine as _;
 use protocol::{
     AppearanceOverrides, BranchCleanup, ClientMessage, DaemonMessage, MemberBranchFate, SessionEnd,
-    SessionMember, SessionStatus, SpawnRequest, SpawnTarget,
+    SessionMember, SpawnRequest, SpawnTarget,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -153,29 +153,14 @@ pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> 
                     let guard = crate::sync::lock(&rec);
                     (guard.pty.clone(), guard.input_notifier.clone())
                 };
-                // The owner's key answers a pending hook prompt: leave
-                // `AwaitingInput` at once, with no settle window. The test and
-                // the clear share one registry update, so a hook event cannot
-                // slip between them; a session without hooks is untouched,
-                // and the bytes are forwarded outside the record lock.
+                // The owner's key answers a pending hook prompt; the bytes are
+                // forwarded outside the record lock.
                 //
                 // Bytes the terminal sent on its own (replies to the child's
                 // queries, wheel reports) are not the owner answering, so they
                 // leave the prompt and its pending input alone.
                 if !automatic {
-                    hub.sessions.update_if_changed(&session_id, |rec| {
-                        if !rec.hook_driven
-                            || (rec.status != SessionStatus::AwaitingInput
-                                && rec.pending_input.is_none())
-                        {
-                            return false;
-                        }
-                        if rec.status == SessionStatus::AwaitingInput {
-                            rec.status = SessionStatus::Idle;
-                        }
-                        rec.pending_input = None;
-                        true
-                    });
+                    hub.sessions.clear_answered_prompt(&session_id);
                 }
                 if let Some(pty) = pty {
                     if let Some(tx) = notifier {
@@ -1397,6 +1382,7 @@ mod tests {
         wait_until,
     };
     use chrono::Utc;
+    use protocol::SessionStatus;
     use protocol::{SessionKind, SessionMode};
     use std::collections::HashMap;
     use tokio::sync::Mutex as AsyncMutex;

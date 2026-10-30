@@ -12,6 +12,7 @@ mod background_work;
 mod binary_cache;
 mod branch_fate;
 mod branch_names;
+mod chat_answer;
 mod chat_mirror;
 mod chat_work;
 mod child_env;

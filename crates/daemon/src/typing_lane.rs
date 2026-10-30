@@ -28,7 +28,6 @@ pub enum Holder {
     /// A chat message being typed.
     ChatSend,
     /// A chat answer to a dialog being typed.
-    #[expect(dead_code, reason = "a chat answer takes it in CV.9")]
     ChatAnswer,
 }
 
@@ -92,7 +91,10 @@ impl TypingLane {
     /// When any holder last typed through the lane.
     #[cfg_attr(
         not(test),
-        expect(dead_code, reason = "a chat send takes it in CV.8's second part")
+        expect(
+            dead_code,
+            reason = "only the lane's tests read it; every writer stamps it"
+        )
     )]
     pub fn last_key(&self) -> Option<Instant> {
         *crate::sync::lock(&self.last_key)
@@ -118,7 +120,10 @@ impl TypingTurn {
     /// The lane's owner epoch when the turn began.
     #[cfg_attr(
         not(test),
-        expect(dead_code, reason = "a chat send takes it in CV.8's second part")
+        expect(
+            dead_code,
+            reason = "only the lane's tests read it; writers ask owner_typed_since"
+        )
     )]
     pub fn epoch_at_start(&self) -> u64 {
         self.epoch

@@ -340,6 +340,18 @@ impl ChatMirror {
         Some(id)
     }
 
+    /// The id and identity ([`dialogs::prompt_identity`]) of the prompt
+    /// `session_id`'s chat shows; `None` when no prompt is up, or when no
+    /// connection loads the chat, so no prompt has an id.
+    #[must_use]
+    pub fn current_prompt(&self, session_id: &str) -> Option<(String, u64)> {
+        let sessions = lock(&self.inner.sessions);
+        let screen = &sessions.get(session_id)?.screen;
+        screen
+            .identity
+            .map(|identity| (screen.prompt_id.clone(), identity))
+    }
+
     /// `connection` no longer loads `session_id`'s chat; the last loader
     /// leaving drops the session's mirror and stops its tail.
     pub fn unload(&self, session_id: &str, connection: u64) {

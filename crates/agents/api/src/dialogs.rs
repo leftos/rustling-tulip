@@ -101,6 +101,9 @@ pub enum AnswerRefusal {
     NotThisDialog,
     /// The answer's text is empty.
     TextEmpty,
+    /// The answer's text holds a control character, a newline or a tab
+    /// included: a recipe types its text as keys, so one would act as a key.
+    ControlCharacter,
     /// The option's number takes more than one key.
     TooManyOptions,
 }

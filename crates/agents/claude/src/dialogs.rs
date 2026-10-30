@@ -898,13 +898,24 @@ fn field_focused(prompt: &ChatPrompt) -> bool {
 
 /// The step that types `text` into a focused field and sends it.
 fn typed_text(text: &str) -> Result<RecipeStep, AnswerRefusal> {
-    if text.trim().is_empty() {
-        return Err(AnswerRefusal::TextEmpty);
-    }
+    check_field_text(text)?;
     Ok(RecipeStep {
         keys: vec![Key::Text(text.to_owned()), Key::Enter],
         expect: ScreenExpect::Any,
     })
+}
+
+/// Whether `text` may be typed into a field as keys: not empty, and with no
+/// control character, a newline or a tab included, since each would act as
+/// a key.
+fn check_field_text(text: &str) -> Result<(), AnswerRefusal> {
+    if text.trim().is_empty() {
+        return Err(AnswerRefusal::TextEmpty);
+    }
+    if text.chars().any(char::is_control) {
+        return Err(AnswerRefusal::ControlCharacter);
+    }
+    Ok(())
 }
 
 /// A recipe of one step.
@@ -1084,9 +1095,7 @@ fn allow_with_text(prompt: &ChatPrompt, text: &str) -> Result<AnswerRecipe, Answ
     if prompt.kind != ChatPromptKind::Permission || !prompt.can_amend || prompt.cursor != Some(1) {
         return Err(AnswerRefusal::NotThisDialog);
     }
-    if text.trim().is_empty() {
-        return Err(AnswerRefusal::TextEmpty);
-    }
+    check_field_text(text)?;
     Ok(AnswerRecipe {
         steps: vec![
             RecipeStep {
@@ -1492,6 +1501,85 @@ mod tests {
             text: "x".to_owned(),
         };
         assert_eq!(recipe(&prompt, &answer), Err(AnswerRefusal::NotThisDialog));
+    }
+
+    /// The answers that type `text` into a field: a question's Type
+    /// something, a plan's feedback and a permission's allow-with-text, each
+    /// with a prompt it fits.
+    fn text_answers(text: &str) -> Vec<(&'static str, ChatPrompt, ChatAnswerKind)> {
+        let mut plan = rows(&[
+            "   Ready to code?",
+            "",
+            "   Here is Claude's plan:",
+            "  ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌",
+            "   Add div to calc.py",
+            "  ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌",
+        ]);
+        plan.push(format!("  {}", "─".repeat(90)));
+        plan.extend(rows(&[
+            "   Claude has written up a plan and is ready to execute. Would you like to proceed?",
+            "",
+            "   ❯ 1. Yes, and use auto mode",
+            "     2. Yes, manually approve edits",
+            "     3. Tell Claude what to change",
+            "        shift+tab to approve with this feedback",
+            "",
+            "   ctrl+g to edit in Notepad · ~\\.claude\\plans\\plan.md",
+        ]));
+        let plan = read(&plan).prompt.expect("a plan prompt");
+        let allow = read(&permission(
+            &[" ❯ 1. Yes", "   2. No"],
+            Some(" Esc to cancel · Tab to amend"),
+        ))
+        .prompt
+        .expect("a permission prompt");
+        let type_something = question(&ask(&["❯ 1. sub", "  2. div", "  3. Type something."]));
+        let text = text.to_owned();
+        vec![
+            (
+                "type something",
+                type_something,
+                ChatAnswerKind::TypeSomething { text: text.clone() },
+            ),
+            (
+                "plan feedback",
+                plan,
+                ChatAnswerKind::TypeSomething { text: text.clone() },
+            ),
+            (
+                "allow with text",
+                allow,
+                ChatAnswerKind::AllowWithText { text },
+            ),
+        ]
+    }
+
+    #[test]
+    fn typed_text_with_a_control_character_is_refused() {
+        for text in ["a\x1b[Bb", "a\rb", "a\nb", "a\tb", "a\x7fb", "a\u{9b}b"] {
+            for (name, prompt, answer) in text_answers(text) {
+                assert_eq!(
+                    recipe(&prompt, &answer),
+                    Err(AnswerRefusal::ControlCharacter),
+                    "{name}: {text:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn plain_and_unicode_typed_text_is_typed() {
+        for text in ["use 6*8 instead", "café ✓ — ok"] {
+            for (name, prompt, answer) in text_answers(text) {
+                let typed = recipe(&prompt, &answer)
+                    .map(|recipe| recipe.steps.last().map(|step| step.keys.clone()));
+                assert_eq!(
+                    typed,
+                    Ok(Some(vec![Key::Text(text.to_owned()), Key::Enter])),
+                    "{name}: {text:?}"
+                );
+            }
+        }
     }
 
     /// The rows of a screen 40 columns wide.

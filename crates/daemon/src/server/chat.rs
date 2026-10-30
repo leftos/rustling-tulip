@@ -3,17 +3,19 @@
 //! `LoadSummary` and `UnloadSummary` do the same for the session's summary
 //! lines (see [`crate::chat_mirror`]). `ChatSend` types a message into the
 //! session's terminal on a task of its own ([`crate::inject::type_message`]),
-//! answering only a refusal.
+//! and `ChatAnswer` types the keys that answer its prompt the same way
+//! ([`crate::chat_answer::answer`]); both answer only a refusal.
 
 use std::sync::Arc;
 
 use super::Hub;
 use super::connection::ConnCtx;
+use crate::chat_answer;
 use crate::chat_mirror::LoadError;
 use crate::inject::{TypeTarget, check_typed_text, type_message};
 use crate::sync::lock;
 use protocol::error_codes::{INVALID_REQUEST, NO_SCREEN, NOT_FOUND};
-use protocol::{ClientMessage, DaemonMessage};
+use protocol::{ChatAnswerKind, ClientMessage, DaemonMessage};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
@@ -56,8 +58,43 @@ pub(super) fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) {
             text,
             request_id,
         } => send(hub, ctx, &session_id, &text, request_id),
+        ClientMessage::ChatAnswer {
+            session_id,
+            prompt_id,
+            answer: kind,
+            request_id,
+        } => answer(hub, ctx, &session_id, prompt_id, kind, request_id),
         other => warn!(?other, "chat::handle: routed a message it does not own"),
     }
+}
+
+/// Answer the prompt `prompt_id` on `session_id`'s screen with `kind` on a
+/// task of its own, after the checks that need no waiting; a refusal, now or
+/// from the task, is answered with an `Error` carrying `request_id`.
+fn answer(
+    hub: &Hub,
+    ctx: &ConnCtx<'_>,
+    session_id: &str,
+    prompt_id: String,
+    kind: ChatAnswerKind,
+    request_id: Option<String>,
+) {
+    let target = match send_target(hub, session_id) {
+        Ok(target) => target,
+        Err((code, message)) => return refuse(ctx.out_tx, code, message, request_id),
+    };
+    let out_tx = ctx.out_tx.clone();
+    tokio::spawn(async move {
+        if let Err(refusal) = chat_answer::answer(&target, &prompt_id, &kind).await {
+            debug!(
+                session_id = %target.session_id,
+                code = refusal.code,
+                message = %refusal.message,
+                "chat answer refused"
+            );
+            refuse(&out_tx, refusal.code, refusal.message, request_id);
+        }
+    });
 }
 
 /// Type `text` into `session_id`'s terminal on a task of its own, after the
@@ -1676,8 +1713,8 @@ mod tests {
         use crate::screen::{Screen, SharedScreen};
         use crate::sync::lock;
         use crate::typing_lane::Holder;
-        use protocol::error_codes::{BUSY, CHAT_REFUSED, UNSUPPORTED_MESSAGE};
-        use protocol::{ChatAnswerKind, PendingInput};
+        use protocol::PendingInput;
+        use protocol::error_codes::{BUSY, CHAT_REFUSED};
 
         /// Main with the agents panel and a Heads up, the box empty and
         /// holding the keys.
@@ -2352,28 +2389,775 @@ mod tests {
             assert_eq!(shown, ["u-1"], "no pending entry was kept for a later load");
         }
 
-        #[tokio::test]
-        async fn chat_answer_is_still_refused() {
-            let fx = Fixture::new("send-answer", None);
-            let (a_tx, mut a_rx) = mpsc::unbounded_channel();
-            let msg = ClientMessage::ChatAnswer {
-                session_id: "s1".to_owned(),
-                prompt_id: "p1".to_owned(),
-                answer: ChatAnswerKind::Submit,
-                request_id: Some("r-answer".to_owned()),
-            };
-            dispatch_on(&fx.hub, msg, 1, &a_tx).await;
-            match next_message(&mut a_rx).await {
-                DaemonMessage::Error {
-                    message,
-                    code,
-                    request_id,
-                } => {
-                    assert_eq!(message, "sending from the chat is not supported yet");
-                    assert_eq!(code.as_deref(), Some(UNSUPPORTED_MESSAGE));
-                    assert_eq!(request_id.as_deref(), Some("r-answer"));
+        /// Chat answers typed into a recording PTY while the test plays the
+        /// TUI, as the sends are.
+        mod answer {
+            use super::*;
+            use crate::screen::dialogs::{read, recipe_for};
+            use protocol::error_codes::{INVALID_REQUEST, NO_SCREEN};
+            use protocol::{ChatAnswerKind, SessionStatus};
+
+            const V01: &str = include_str!("../screen/fixtures/v01-start.txt");
+            const V21: &str = include_str!("../screen/fixtures/v21-perm-bash.txt");
+            const V22: &str = include_str!("../screen/fixtures/v22-perm-bash.txt");
+            const V23: &str = include_str!("../screen/fixtures/v23-amend-open.txt");
+            const V32: &str = include_str!("../screen/fixtures/v32-ask-q2.txt");
+            const V33: &str = include_str!("../screen/fixtures/v33-ask-q2-toggled.txt");
+            const V38: &str = include_str!("../screen/fixtures/v38-ask-q3.txt");
+            const V51: &str = include_str!("../screen/fixtures/v51-plan-dialog.txt");
+            const V52: &str = include_str!("../screen/fixtures/v52-plan-feedback-open.txt");
+            const V152: &str = include_str!("../screen/fixtures/v152-heads-up-collapsed.txt");
+            const V192: &str =
+                include_str!("../screen/fixtures/v192-agent-view-ask-with-chat-about-this.txt");
+
+            const TAB: &[u8] = b"\t";
+
+            /// `capture` with `from` replaced by `to` once, which it must hold.
+            fn edited(capture: &str, from: &str, to: &str) -> String {
+                assert!(capture.contains(from), "the capture shows {from:?}");
+                capture.replacen(from, to, 1)
+            }
+
+            /// Load `s1`'s chat on connection 1: the id the mirror gave the
+            /// prompt on screen, and the loader's inbox.
+            async fn loaded(fx: &Fixture) -> (String, Inbox) {
+                let (a_tx, mut a_rx) = mpsc::unbounded_channel();
+                fx.load(1, &a_tx, "ra").await;
+                let (_, _, screen, _) = next_chat(&mut a_rx).await;
+                let prompt = screen.prompt.expect("the screen shows a prompt");
+                (prompt.id, a_rx)
+            }
+
+            async fn answer(fx: &Fixture, out_tx: &Outbox, prompt_id: &str, kind: ChatAnswerKind) {
+                let msg = ClientMessage::ChatAnswer {
+                    session_id: "s1".to_owned(),
+                    prompt_id: prompt_id.to_owned(),
+                    answer: kind,
+                    request_id: Some("r-answer".to_owned()),
+                };
+                dispatch_on(&fx.hub, msg, 9, out_tx).await;
+            }
+
+            /// Load the chat on a terminal showing `first` and answer its
+            /// prompt with `kind`.
+            async fn answer_on(tag: &str, first: &str, kind: ChatAnswerKind) -> Answering {
+                let (fx, term) = Fixture::with_terminal(tag, None, first);
+                let (prompt_id, loader) = loaded(&fx).await;
+                let (s_tx, s_rx) = mpsc::unbounded_channel();
+                answer(&fx, &s_tx, &prompt_id, kind).await;
+                Answering {
+                    fx,
+                    term,
+                    prompt_id,
+                    loader,
+                    s_tx,
+                    s_rx,
                 }
-                other => panic!("expected an Error, got {other:?}"),
+            }
+
+            /// An answer under way: the session, its terminal, the chat's
+            /// loader and the answer's own inbox.
+            struct Answering {
+                fx: Fixture,
+                term: Terminal,
+                prompt_id: String,
+                loader: Inbox,
+                s_tx: Outbox,
+                s_rx: Inbox,
+            }
+
+            impl Answering {
+                /// The next write is `bytes`.
+                async fn typed(&mut self, bytes: &[u8], what: &str) {
+                    assert_eq!(self.term.typed().await, bytes, "{what}");
+                }
+
+                /// The answer still holds the lane and types nothing more
+                /// until the screen moves.
+                fn waits(&mut self, what: &str) {
+                    assert_eq!(
+                        self.term.pty.typing().holder(),
+                        Some(Holder::ChatAnswer),
+                        "{what}: the answer holds the lane"
+                    );
+                    assert!(
+                        self.term.typed_now().is_empty(),
+                        "{what}: no key before the screen moves"
+                    );
+                }
+
+                /// The answer ends and gives the lane back, unrefused.
+                async fn answered(&mut self) {
+                    self.term.lane_free().await;
+                    assert!(
+                        drain(&mut self.s_rx).is_empty(),
+                        "the answer was not refused"
+                    );
+                }
+
+                async fn refusal(&mut self) -> (String, String) {
+                    answer_refusal(next_message_within(&mut self.s_rx, HANG).await)
+                }
+            }
+
+            /// The code and message of `msg`, which must be the answer's
+            /// `Error`.
+            fn answer_refusal(msg: DaemonMessage) -> (String, String) {
+                match msg {
+                    DaemonMessage::Error {
+                        message,
+                        code,
+                        request_id,
+                    } => {
+                        assert_eq!(request_id.as_deref(), Some("r-answer"));
+                        (code.unwrap_or_default(), message)
+                    }
+                    other => panic!("expected an Error, got {other:?}"),
+                }
+            }
+
+            fn option(number: u32) -> ChatAnswerKind {
+                ChatAnswerKind::Option { number }
+            }
+
+            #[tokio::test]
+            async fn permission_allow_and_deny_type_their_digit() {
+                for (number, digit) in [(1, b"1"), (4, b"4")] {
+                    let mut a =
+                        answer_on(&format!("answer-perm-{number}"), PERMISSION, option(number))
+                            .await;
+                    a.typed(digit, "the option's digit, no Enter").await;
+                    a.waits("the digit");
+                    a.term.show(C32).await;
+                    a.answered().await;
+                }
+            }
+
+            #[tokio::test]
+            async fn a_single_choice_question_types_its_digit() {
+                let mut a = answer_on("answer-single", QUESTION, option(2)).await;
+                a.typed(b"2", "the option's digit").await;
+                a.waits("the digit");
+                a.term.show(C32).await;
+                a.answered().await;
+            }
+
+            #[tokio::test]
+            async fn type_something_moves_to_its_row_then_types() {
+                let text = || ChatAnswerKind::TypeSomething {
+                    text: "fuzz tests".to_owned(),
+                };
+                let mut a = answer_on("answer-type-something", QUESTION, text()).await;
+                for n in 1..=3 {
+                    a.typed(DOWN, &format!("Down {n}")).await;
+                }
+                a.waits("the Downs");
+                let on_row = edited(
+                    &edited(QUESTION, "  ❯ 1. sub", "    1. sub"),
+                    "    4. Type something.",
+                    "  ❯ 4. Type something.",
+                );
+                a.term.show(&on_row).await;
+                a.typed(b"fuzz tests", "the text, as typed").await;
+                a.typed(ENTER, "then Enter").await;
+                a.waits("the Enter");
+                a.term.show(C32).await;
+                a.answered().await;
+            }
+
+            #[tokio::test]
+            async fn a_multi_select_toggles_then_submits() {
+                let mut a =
+                    answer_on("answer-multi", V33, ChatAnswerKind::Toggle { number: 3 }).await;
+                a.typed(b"3", "the option's digit").await;
+                a.waits("the toggle");
+                let unticked = edited(V33, "  3. [✔] edge cases", "  3. [ ] edge cases");
+                a.term.show(&unticked).await;
+                a.answered().await;
+
+                // A tick is not a new prompt: the id stays.
+                answer(&a.fx, &a.s_tx, &a.prompt_id, ChatAnswerKind::Submit).await;
+                for n in 1..=5 {
+                    a.typed(DOWN, &format!("Down {n}")).await;
+                }
+                a.waits("the Downs to Next");
+                a.term
+                    .show(&edited(&unticked, "❯ 1. [✔] add", "  1. [✔] add"))
+                    .await;
+                a.typed(ENTER, "Enter on Next").await;
+                a.waits("the Enter");
+                a.term.show(V38).await;
+                a.answered().await;
+            }
+
+            #[tokio::test]
+            async fn a_plan_is_approved_with_its_digit() {
+                let mut a = answer_on("answer-plan", V51, option(1)).await;
+                a.typed(b"1", "the option's digit").await;
+                a.waits("the digit");
+                a.term.show(C32).await;
+                a.answered().await;
+            }
+
+            #[tokio::test]
+            async fn plan_feedback_opens_its_field_then_types() {
+                let kind = ChatAnswerKind::TypeSomething {
+                    text: "also test div".to_owned(),
+                };
+                let mut a = answer_on("answer-plan-feedback", V51, kind).await;
+                a.typed(b"3", "the feedback option's digit").await;
+                a.waits("the digit");
+                a.term.show(V52).await;
+                a.typed(b"also test div", "the text").await;
+                a.typed(ENTER, "then Enter").await;
+                a.waits("the Enter");
+                a.term.show(C32).await;
+                a.answered().await;
+            }
+
+            #[tokio::test]
+            async fn trust_moves_its_cursor_then_enters() {
+                let mut a = answer_on("answer-trust", V01, option(2)).await;
+                a.typed(DOWN, "Down to the second row").await;
+                a.waits("the Down");
+                let on_yes = edited(
+                    &edited(V01, " ❯ No, exit", "   No, exit"),
+                    "   Yes, I trust this folder",
+                    " ❯ Yes, I trust this folder",
+                );
+                a.term.show(&on_yes).await;
+                a.typed(ENTER, "then Enter").await;
+                a.waits("the Enter");
+                a.term.show(C32).await;
+                a.answered().await;
+            }
+
+            #[tokio::test]
+            async fn a_heads_up_types_its_bare_digit() {
+                let mut a = answer_on("answer-heads-up", V152, option(2)).await;
+                a.typed(b"2", "the bare digit").await;
+                a.waits("the digit");
+                a.term.show(C32).await;
+                a.answered().await;
+            }
+
+            #[tokio::test]
+            async fn allow_with_text_tabs_then_types_with_no_pending_entry() {
+                let kind = ChatAnswerKind::AllowWithText {
+                    text: "but print 6*8 instead".to_owned(),
+                };
+                // v23 is v22's Bash dialog with its amend field open.
+                let mut a = answer_on("answer-allow-text", V22, kind).await;
+                a.typed(TAB, "Tab opens the amend field").await;
+                a.waits("the Tab");
+                a.term.show(V23).await;
+                a.typed(b"but print 6*8 instead", "the text").await;
+                a.typed(ENTER, "then Enter").await;
+                a.waits("the Enter");
+                a.term.show(C32).await;
+                a.answered().await;
+                assert!(
+                    pending_added(&mut a.loader).is_empty(),
+                    "the amend adds no pending entry"
+                );
+            }
+
+            #[tokio::test]
+            async fn deny_then_send_waits_for_the_box() {
+                let deny = || ChatAnswerKind::DenyWithText {
+                    text: "use 6*8".to_owned(),
+                };
+                let mut a = answer_on("answer-deny-send", PERMISSION, deny()).await;
+                a.typed(b"4", "the No option's digit").await;
+                a.waits("the denial");
+                a.term.show(C32).await;
+                a.typed(&paste("use 6*8"), "the message, once the box is back")
+                    .await;
+                a.term.show(&with_box(C32, "use 6*8")).await;
+                a.typed(ENTER, "then Enter").await;
+                let added = pending_added(&mut a.loader);
+                assert!(
+                    matches!(added.as_slice(), [(id, text)]
+                        if id.starts_with("pending:") && text == "use 6*8"),
+                    "the message is a pending entry, as a send's is: {added:?}"
+                );
+                a.term.show(C32).await;
+                a.answered().await;
+
+                let mut a = answer_on("answer-deny-no-box", PERMISSION, deny()).await;
+                a.typed(b"4", "the No option's digit").await;
+                a.term.show(V140).await;
+                assert_eq!(
+                    a.refusal().await,
+                    refused(CHAT_REFUSED, DENIED_NOT_SENT),
+                    "the dialog went, but the box never came back"
+                );
+                assert!(a.term.typed_now().is_empty(), "no paste");
+            }
+
+            const DENIED_NOT_SENT: &str = "the denial was typed, but the message was not sent";
+            const NOT_TAKEN: &str = "the terminal did not take the answer";
+            const PROMPT_GONE: &str = "the prompt is no longer up";
+
+            fn deny_with(text: &str) -> ChatAnswerKind {
+                ChatAnswerKind::DenyWithText {
+                    text: text.to_owned(),
+                }
+            }
+
+            #[tokio::test]
+            async fn a_denial_the_screen_never_shows_was_not_taken() {
+                let mut a = answer_on("answer-deny-unseen", PERMISSION, deny_with("x")).await;
+                a.typed(b"4", "the No option's digit").await;
+                assert_eq!(a.refusal().await, refused(CHAT_REFUSED, NOT_TAKEN));
+                assert!(a.term.typed_now().is_empty(), "no paste");
+            }
+
+            #[tokio::test]
+            async fn a_denial_followed_by_another_dialog_is_not_sent() {
+                let mut a = answer_on("answer-deny-next", PERMISSION, deny_with("x")).await;
+                a.typed(b"4", "the No option's digit").await;
+                a.term.show(V21).await;
+                assert_eq!(a.refusal().await, refused(CHAT_REFUSED, DENIED_NOT_SENT));
+                assert!(a.term.typed_now().is_empty(), "no paste");
+            }
+
+            /// On a clock paused once the chat has loaded, so the ceiling
+            /// expires, by the order of the timers alone, while the answer
+            /// waits for the box after the dialog went.
+            #[tokio::test]
+            async fn a_ceiling_after_the_denial_says_it_was_typed() {
+                let (fx, mut term) =
+                    Fixture::with_terminal("answer-deny-ceiling", None, PERMISSION);
+                let (prompt_id, _loader) = loaded(&fx).await;
+                let target =
+                    crate::server::chat::send_target(&fx.hub, "s1").expect("s1 has a terminal");
+                tokio::time::pause();
+                let answering = tokio::spawn(async move {
+                    crate::chat_answer::answer_within(
+                        &target,
+                        &prompt_id,
+                        &deny_with("x"),
+                        crate::view_drive::KEY_WAIT / 2,
+                    )
+                    .await
+                });
+                assert_eq!(term.typed().await, b"4", "the No option's digit");
+                term.show(V140).await;
+                let answered = answering.await.expect("the answer ran");
+                assert_eq!(
+                    answered.map_err(|refusal| (refusal.code.to_owned(), refusal.message)),
+                    Err(refused(CHAT_REFUSED, DENIED_NOT_SENT))
+                );
+                assert!(term.typed_now().is_empty(), "no paste");
+            }
+
+            #[tokio::test]
+            async fn a_tab_that_only_repaints_stops_the_amend() {
+                let kind = ChatAnswerKind::AllowWithText {
+                    text: "but print 6*8 instead".to_owned(),
+                };
+                let mut a = answer_on("answer-allow-repaint", V22, kind).await;
+                a.typed(TAB, "Tab opens the amend field").await;
+                a.term.show(V22).await;
+                assert_eq!(a.refusal().await, refused(CHAT_REFUSED, NOT_TAKEN));
+                assert!(a.term.typed_now().is_empty(), "the text is never typed");
+            }
+
+            #[tokio::test]
+            async fn a_feedback_digit_that_changes_nothing_stops_the_feedback() {
+                let kind = ChatAnswerKind::TypeSomething {
+                    text: "also test div".to_owned(),
+                };
+                let mut a = answer_on("answer-plan-repaint", V51, kind).await;
+                a.typed(b"3", "the feedback option's digit").await;
+                a.term.show(V51).await;
+                assert_eq!(a.refusal().await, refused(CHAT_REFUSED, NOT_TAKEN));
+                assert!(a.term.typed_now().is_empty(), "the text is never typed");
+            }
+
+            #[tokio::test]
+            async fn a_return_to_another_prompt_types_no_answer() {
+                let mut a = answer_on("answer-return-other", V174, option(2)).await;
+                a.typed(DOWN, "Down to the panel").await;
+                a.term.show(&v174_panel_on_main()).await;
+                a.typed(ENTER, "Enter on main").await;
+                a.term.show(V175).await;
+                a.typed(UP, "Up to the box").await;
+                // A dialog in main fails the return itself; a Heads up whose
+                // options differ is a prompt the return reaches.
+                a.term
+                    .show(&edited(V176, "2: Knew this already", "2: Seen it"))
+                    .await;
+                assert_eq!(a.refusal().await, refused(CHAT_REFUSED, PROMPT_GONE));
+                assert!(a.term.typed_now().is_empty(), "no digit");
+            }
+
+            #[tokio::test]
+            async fn bad_text_in_an_agents_view_is_refused_before_any_key() {
+                let kind = ChatAnswerKind::TypeSomething {
+                    text: "a\x1b[Bb".to_owned(),
+                };
+                let mut a = answer_on("answer-agent-bad-text", V174, kind).await;
+                assert_eq!(
+                    a.refusal().await,
+                    refused(INVALID_REQUEST, "the message holds a control character")
+                );
+                assert!(a.term.typed_now().is_empty(), "nothing is typed");
+            }
+
+            #[tokio::test]
+            async fn a_permission_answer_followed_by_the_next_dialog_clears_it() {
+                let mut a = answer_pending("answer-next-dialog", &bash_prompt("python -c")).await;
+                // v21 is the next dialog: the file's creation, after c23's Bash.
+                a.term.show(V21).await;
+                a.answered().await;
+                assert_eq!(
+                    waiting(&a.fx),
+                    (SessionStatus::Idle, None),
+                    "the next dialog shows the answered one gone"
+                );
+            }
+
+            #[tokio::test]
+            async fn a_heads_up_answer_leaves_mains_pending_prompt() {
+                let pending = bash_prompt("python -c");
+                let (fx, term) = Fixture::with_terminal("answer-heads-up-pending", None, V152);
+                fx.hub.sessions.update("s1", |record| {
+                    record.hook_driven = true;
+                    record.status = SessionStatus::AwaitingInput;
+                    record.pending_input = Some(pending.clone());
+                });
+                let (prompt_id, loader) = loaded(&fx).await;
+                let (s_tx, s_rx) = mpsc::unbounded_channel();
+                answer(&fx, &s_tx, &prompt_id, option(2)).await;
+                let mut a = Answering {
+                    fx,
+                    term,
+                    prompt_id,
+                    loader,
+                    s_tx,
+                    s_rx,
+                };
+                a.typed(b"2", "the bare digit").await;
+                a.term.show(C32).await;
+                a.answered().await;
+                assert_eq!(
+                    waiting(&a.fx),
+                    (SessionStatus::AwaitingInput, Some(pending)),
+                    "a Heads up is not the prompt main waits on"
+                );
+            }
+
+            #[tokio::test]
+            async fn a_hook_arriving_mid_answer_is_cleared() {
+                let (fx, term) = Fixture::with_terminal("answer-late-hook", None, PERMISSION);
+                fx.hub
+                    .sessions
+                    .update("s1", |record| record.hook_driven = true);
+                let (prompt_id, loader) = loaded(&fx).await;
+                let (s_tx, s_rx) = mpsc::unbounded_channel();
+                answer(&fx, &s_tx, &prompt_id, option(1)).await;
+                let mut a = Answering {
+                    fx,
+                    term,
+                    prompt_id,
+                    loader,
+                    s_tx,
+                    s_rx,
+                };
+                a.typed(b"1", "the digit").await;
+                a.waits("the digit");
+                a.fx.hub.sessions.update("s1", |record| {
+                    record.status = SessionStatus::AwaitingInput;
+                    record.pending_input = Some(bash_prompt("python -c"));
+                });
+                a.term.show(C32).await;
+                a.answered().await;
+                assert_eq!(
+                    waiting(&a.fx),
+                    (SessionStatus::Idle, None),
+                    "the hook was for the dialog the answer took"
+                );
+            }
+
+            #[tokio::test]
+            async fn an_unreadable_screen_after_the_last_key_is_refused() {
+                let mut a = answer_on("answer-unreadable", V152, option(2)).await;
+                a.typed(b"2", "the bare digit").await;
+                a.term.show("  Thinking it over\n  still going").await;
+                assert_eq!(a.refusal().await, refused(CHAT_REFUSED, NOT_TAKEN));
+            }
+
+            #[tokio::test]
+            async fn a_denial_with_a_message_is_refused_in_an_agents_view() {
+                let mut a = answer_on("answer-agent-deny", V192, deny_with("x")).await;
+                assert_eq!(
+                    a.refusal().await,
+                    refused(
+                        CHAT_REFUSED,
+                        "a denial with a message works only in the main conversation"
+                    )
+                );
+                assert!(a.term.typed_now().is_empty(), "nothing is typed");
+            }
+
+            #[tokio::test]
+            async fn a_stale_prompt_id_is_refused() {
+                let gone = refused(CHAT_REFUSED, "the prompt is no longer up");
+                let (fx, mut term) = Fixture::with_terminal("answer-stale-id", None, PERMISSION);
+                let (prompt_id, _loader) = loaded(&fx).await;
+                let (s_tx, mut s_rx) = mpsc::unbounded_channel();
+                answer(&fx, &s_tx, &format!("{prompt_id}-old"), option(1)).await;
+                assert_eq!(
+                    answer_refusal(next_message_within(&mut s_rx, HANG).await),
+                    gone,
+                    "another prompt's id"
+                );
+                term.draw(V51);
+                answer(&fx, &s_tx, &prompt_id, option(1)).await;
+                assert_eq!(
+                    answer_refusal(next_message_within(&mut s_rx, HANG).await),
+                    gone,
+                    "the grid shows another dialog than the mirror's"
+                );
+                assert!(term.typed_now().is_empty(), "nothing is typed");
+
+                let (fx, mut term) = Fixture::with_terminal("answer-unloaded", None, PERMISSION);
+                answer(&fx, &s_tx, &prompt_id, option(1)).await;
+                assert_eq!(
+                    answer_refusal(next_message_within(&mut s_rx, HANG).await),
+                    gone,
+                    "a chat nobody loads has no prompt ids"
+                );
+                assert!(term.typed_now().is_empty(), "nothing is typed");
+            }
+
+            #[tokio::test]
+            async fn a_screen_that_does_not_move_stops_the_recipe() {
+                let kind = ChatAnswerKind::AllowWithText {
+                    text: "x".to_owned(),
+                };
+                let mut a = answer_on("answer-still", V22, kind).await;
+                a.typed(TAB, "the first group").await;
+                assert_eq!(
+                    a.refusal().await,
+                    refused(CHAT_REFUSED, "the terminal did not take the answer")
+                );
+                assert!(a.term.typed_now().is_empty(), "no second group");
+            }
+
+            #[test]
+            fn no_recipe_sends_esc() {
+                let agent = agent_registry::default_agent();
+                let captures = [
+                    PERMISSION, V21, V23, QUESTION, V32, V33, V51, V52, V01, V152, V174, V192,
+                ];
+                let text = || "x".to_owned();
+                let mut kinds = vec![
+                    ChatAnswerKind::Submit,
+                    ChatAnswerKind::Back,
+                    ChatAnswerKind::Skip,
+                    ChatAnswerKind::TypeSomething { text: text() },
+                    ChatAnswerKind::AllowWithText { text: text() },
+                    ChatAnswerKind::DenyWithText { text: text() },
+                ];
+                for number in 0..=6 {
+                    kinds.push(option(number));
+                    kinds.push(ChatAnswerKind::Toggle { number });
+                }
+                let mut built = 0;
+                for capture in captures {
+                    let prompt = read(&agent, &screen_from(capture))
+                        .and_then(|screen| screen.prompt)
+                        .expect("the capture shows a prompt");
+                    for kind in &kinds {
+                        let Ok(recipe) = recipe_for(&agent, &prompt, kind) else {
+                            continue;
+                        };
+                        built += 1;
+                        for step in &recipe.steps {
+                            let bytes: Vec<u8> = step
+                                .keys
+                                .iter()
+                                .flat_map(agent_api::Key::to_bytes)
+                                .collect();
+                            for key in &step.keys {
+                                assert_ne!(key.to_bytes(), b"\x1b", "{kind:?}: a lone Esc");
+                            }
+                            assert!(
+                                !bytes.windows(2).any(|pair| pair == b"\x1b\x1b"),
+                                "{kind:?}: Esc Esc in {bytes:?}"
+                            );
+                            assert!(!bytes.contains(&0x03), "{kind:?}: ctrl+c in {bytes:?}");
+                        }
+                    }
+                }
+                assert!(built > 20, "the table builds recipes: {built}");
+            }
+
+            #[tokio::test]
+            async fn a_heads_up_in_an_agents_view_returns_first() {
+                let mut a = answer_on("answer-agent-view", V174, option(2)).await;
+                a.typed(DOWN, "Down to the panel").await;
+                a.term.show(&v174_panel_on_main()).await;
+                a.typed(ENTER, "Enter on main").await;
+                a.term.show(V175).await;
+                a.typed(UP, "Up to the box").await;
+                a.term.show(V176).await;
+                a.typed(b"2", "the digit, once main is in view").await;
+                a.waits("the digit");
+                a.term.show(C32).await;
+                a.answered().await;
+            }
+
+            #[tokio::test]
+            async fn a_dialog_in_an_agents_view_is_answered_in_place() {
+                let mut a = answer_on("answer-agent-dialog", V192, option(1)).await;
+                a.typed(b"1", "the digit, with no return first").await;
+                a.waits("the digit");
+                a.term.show(C32).await;
+                a.answered().await;
+            }
+
+            #[tokio::test]
+            async fn a_held_lane_refuses_busy() {
+                let (fx, mut term) = Fixture::with_terminal("answer-busy", None, PERMISSION);
+                let (prompt_id, _loader) = loaded(&fx).await;
+                let _held = term
+                    .pty
+                    .typing()
+                    .try_take(Holder::ChatSend)
+                    .expect("a free lane");
+                let (s_tx, mut s_rx) = mpsc::unbounded_channel();
+                answer(&fx, &s_tx, &prompt_id, option(1)).await;
+                assert_eq!(
+                    answer_refusal(next_message_within(&mut s_rx, HANG).await),
+                    refused(BUSY, "another message is being typed")
+                );
+                assert!(term.typed_now().is_empty(), "nothing is typed");
+            }
+
+            #[tokio::test]
+            async fn an_owner_key_mid_answer_stops_it() {
+                let kind = ChatAnswerKind::AllowWithText {
+                    text: "x".to_owned(),
+                };
+                let mut a = answer_on("answer-owner-key", V22, kind).await;
+                a.typed(TAB, "the first group").await;
+                a.term.pty.typing().owner_typed();
+                a.term.show(V23).await;
+                assert_eq!(
+                    a.refusal().await,
+                    refused(CHAT_REFUSED, "someone typed in the terminal")
+                );
+                assert!(a.term.typed_now().is_empty(), "no second group");
+            }
+
+            fn bash_prompt(summary: &str) -> PendingInput {
+                PendingInput::Permission {
+                    tool_name: "Bash".to_owned(),
+                    summary: summary.to_owned(),
+                }
+            }
+
+            /// The status and pending input of `s1`'s record.
+            fn waiting(fx: &Fixture) -> (SessionStatus, Option<PendingInput>) {
+                let record = fx.hub.sessions.get("s1").expect("s1 is registered");
+                let record = lock(&record);
+                (record.status, record.pending_input.clone())
+            }
+
+            /// Answer the permission dialog of a hook-driven `s1` whose
+            /// record holds `pending`, up to its digit.
+            async fn answer_pending(tag: &str, pending: &PendingInput) -> Answering {
+                let (fx, term) = Fixture::with_terminal(tag, None, PERMISSION);
+                fx.hub.sessions.update("s1", |record| {
+                    record.hook_driven = true;
+                    record.status = SessionStatus::AwaitingInput;
+                    record.pending_input = Some(pending.clone());
+                });
+                let (prompt_id, loader) = loaded(&fx).await;
+                let (s_tx, s_rx) = mpsc::unbounded_channel();
+                answer(&fx, &s_tx, &prompt_id, option(1)).await;
+                let mut a = Answering {
+                    fx,
+                    term,
+                    prompt_id,
+                    loader,
+                    s_tx,
+                    s_rx,
+                };
+                a.typed(b"1", "the digit").await;
+                a.waits("the digit");
+                a
+            }
+
+            #[tokio::test]
+            async fn the_answer_clears_the_pending_prompt() {
+                let pending = bash_prompt("python -c");
+                let mut a = answer_pending("answer-clears", &pending).await;
+                assert_eq!(
+                    waiting(&a.fx),
+                    (SessionStatus::AwaitingInput, Some(pending)),
+                    "nothing is cleared while the dialog is up"
+                );
+                a.term.show(C32).await;
+                a.answered().await;
+                assert_eq!(
+                    waiting(&a.fx),
+                    (SessionStatus::Idle, None),
+                    "the dialog's going clears the prompt"
+                );
+                assert_eq!(
+                    a.term.pty.typing().owner_epoch(),
+                    0,
+                    "an answer is no owner key"
+                );
+            }
+
+            #[tokio::test]
+            async fn a_different_pending_prompt_is_left() {
+                let mut a = answer_pending("answer-leaves", &bash_prompt("python -c")).await;
+                let next = bash_prompt("rm notes.txt");
+                a.fx.hub.sessions.update("s1", |record| {
+                    record.pending_input = Some(next.clone());
+                });
+                a.term.show(C32).await;
+                a.answered().await;
+                assert_eq!(
+                    waiting(&a.fx),
+                    (SessionStatus::AwaitingInput, Some(next)),
+                    "a prompt raised under the answer is not the one it answered"
+                );
+            }
+
+            #[tokio::test]
+            async fn chat_answer_is_handled() {
+                let fx = Fixture::new("answer-no-terminal", None);
+                let (a_tx, mut a_rx) = mpsc::unbounded_channel();
+                answer(&fx, &a_tx, "p1", ChatAnswerKind::Submit).await;
+                assert_eq!(
+                    answer_refusal(next_message(&mut a_rx).await),
+                    refused(NO_SCREEN, "the session has no terminal")
+                );
+                let (fx, _term) = Fixture::with_terminal("answer-bad-text", None, QUESTION);
+                let (prompt_id, _loader) = loaded(&fx).await;
+                let cases = [
+                    ("a\x1b[Bb", "the message holds a control character"),
+                    ("a\nb", "the answer holds a control character"),
+                ];
+                for (text, why) in cases {
+                    let kind = ChatAnswerKind::TypeSomething {
+                        text: text.to_owned(),
+                    };
+                    answer(&fx, &a_tx, &prompt_id, kind).await;
+                    assert_eq!(
+                        answer_refusal(next_message_within(&mut a_rx, HANG).await),
+                        refused(INVALID_REQUEST, why),
+                        "{text:?}"
+                    );
+                }
             }
         }
     }
