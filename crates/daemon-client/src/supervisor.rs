@@ -844,19 +844,43 @@ fn hash_prefix(bytes: &[u8]) -> String {
 fn spawn_daemon(bin: &std::path::Path, template_dir: &std::path::Path) -> anyhow::Result<()> {
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     const DETACHED_PROCESS: u32 = 0x0000_0008;
+    /// Start the daemon outside the caller's job. An SSH session runs its
+    /// command in a job that kills every process in it when the session
+    /// closes, and the daemon must outlive whoever started it.
+    const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+    /// What `CreateProcess` returns when the caller's job forbids breakaway.
+    const ERROR_ACCESS_DENIED: i32 = 5;
 
-    let mut cmd = Command::new(bin);
-    cmd.env("RUSTLING_TULIP_BIN_TEMPLATES", template_dir);
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS);
-    cmd.spawn()
+    let flags = CREATE_NO_WINDOW | DETACHED_PROCESS;
+    let spawned =
+        match spawn_daemon_with_flags(bin, template_dir, flags | CREATE_BREAKAWAY_FROM_JOB) {
+            Err(err) if err.raw_os_error() == Some(ERROR_ACCESS_DENIED) => {
+                info!("the caller's job forbids breakaway; the daemon will end with that job");
+                spawn_daemon_with_flags(bin, template_dir, flags)
+            }
+            other => other,
+        };
+    spawned
         .map(|child| {
             // We intentionally don't await the child — the daemon outlives us.
             drop(child);
         })
         .context("failed to spawn daemon")
+}
+
+#[cfg(windows)]
+fn spawn_daemon_with_flags(
+    bin: &std::path::Path,
+    template_dir: &std::path::Path,
+    creation_flags: u32,
+) -> std::io::Result<tokio::process::Child> {
+    let mut cmd = Command::new(bin);
+    cmd.env("RUSTLING_TULIP_BIN_TEMPLATES", template_dir);
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(creation_flags);
+    cmd.spawn()
 }
 
 #[cfg(not(windows))]
@@ -981,6 +1005,8 @@ async fn wait_for_handshake_in(
     reason = "tests assert preconditions with expect; failure messages aid debugging"
 )]
 mod tests {
+    #[cfg(windows)]
+    use super::spawn_daemon;
     use super::{
         Action, ExistingKind, action_for, classify_existing_daemon_in, daemon_exe_matches_expected,
         dev_workspace_root, is_daemon_image, path_is_under, protocol_compatible, protocol_kind,
@@ -993,6 +1019,20 @@ mod tests {
     use protocol::DaemonHandshake;
     use std::path::Path;
     use std::time::Duration;
+    #[cfg(windows)]
+    use windows::Win32::Foundation::HANDLE;
+    #[cfg(windows)]
+    use windows::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT,
+        JOB_OBJECT_LIMIT_BREAKAWAY_OK, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
+        JOBOBJECT_BASIC_LIMIT_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JobObjectBasicAccountingInformation, JobObjectExtendedLimitInformation,
+        QueryInformationJobObject, SetInformationJobObject,
+    };
+    #[cfg(windows)]
+    use windows::Win32::System::Threading::GetCurrentProcess;
+    #[cfg(windows)]
+    use windows::core::PCWSTR;
 
     const SUPPORTED: &[u32] = protocol::SUPPORTED_PROTOCOL_VERSIONS;
     /// Only a hang guard: no test asserts how long anything took.
@@ -1155,6 +1195,99 @@ mod tests {
             .expect("the wait accepts the proven file");
         assert_eq!(found.port, daemon.port);
         assert_eq!(found.auth_token, "good-token");
+    }
+
+    /// Join the test process to a fresh job with `flags` and return the job.
+    ///
+    /// A process stays in a job for good, so each test that calls this needs a
+    /// test process of its own: nextest runs every test in its own process
+    /// (under `cargo test` they would share one, and the counts would mix).
+    /// The test process may already sit in a job (the terminal's, the gate's);
+    /// jobs nest on Windows 8 and later, so joining another one still works.
+    #[cfg(windows)]
+    fn join_new_job(flags: JOB_OBJECT_LIMIT) -> HANDLE {
+        // SAFETY: no security attributes and no name; the handle lives as long as the test process.
+        let job = unsafe { CreateJobObjectW(None, PCWSTR::null()) }.expect("create a job object");
+        // The breakaway flags are extended limits, which the basic class refuses.
+        let limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
+            BasicLimitInformation: JOBOBJECT_BASIC_LIMIT_INFORMATION {
+                LimitFlags: flags,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let len = u32::try_from(size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>())
+            .expect("the limit struct's size fits in u32");
+        // SAFETY: `limits` is a live JOBOBJECT_EXTENDED_LIMIT_INFORMATION and `len` is its size.
+        unsafe {
+            SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                (&raw const limits).cast(),
+                len,
+            )
+        }
+        .expect("set the job's limit flags");
+        // SAFETY: `job` is a live job handle and GetCurrentProcess returns a pseudo handle.
+        unsafe { AssignProcessToJobObject(job, GetCurrentProcess()) }.expect(
+            "join the test process to a new job; jobs nest only on Windows 8 and later, \
+             so this test cannot prove anything without one",
+        );
+        job
+    }
+
+    /// How many processes have ever been in `job`, the exited ones included.
+    #[cfg(windows)]
+    fn processes_ever_in(job: HANDLE) -> u32 {
+        let mut info = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
+        let len = u32::try_from(size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>())
+            .expect("the accounting struct's size fits in u32");
+        // SAFETY: `info` is a live JOBOBJECT_BASIC_ACCOUNTING_INFORMATION and `len` is its size.
+        unsafe {
+            QueryInformationJobObject(
+                Some(job),
+                JobObjectBasicAccountingInformation,
+                (&raw mut info).cast(),
+                len,
+                None,
+            )
+        }
+        .expect("read the job's accounting");
+        info.TotalProcesses
+    }
+
+    /// `cmd.exe` stands in for the daemon: with a null stdin it reads EOF and exits.
+    #[cfg(windows)]
+    fn spawn_stand_in_daemon() -> anyhow::Result<()> {
+        block_on(async { spawn_daemon(Path::new("cmd.exe"), Path::new("unused-templates")) })
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn spawned_daemon_leaves_a_job_that_allows_breakaway() {
+        let job = join_new_job(JOB_OBJECT_LIMIT_BREAKAWAY_OK);
+
+        spawn_stand_in_daemon().expect("spawn the stand-in daemon");
+
+        assert_eq!(
+            processes_ever_in(job),
+            1,
+            "the daemon joined the caller's job instead of breaking away"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn spawned_daemon_still_starts_in_a_job_that_forbids_breakaway() {
+        let job = join_new_job(JOB_OBJECT_LIMIT(0));
+
+        spawn_stand_in_daemon().expect("spawn the stand-in daemon without breakaway");
+
+        assert_eq!(
+            processes_ever_in(job),
+            2,
+            "the daemon should have started inside the caller's job"
+        );
     }
 
     #[cfg(windows)]
